@@ -36,7 +36,8 @@
       "@ethosagent/tools-mcp": ["./extensions/tools-mcp/src"],
       "@ethosagent/tui": ["./apps/tui/src"],
       "@ethosagent/batch-runner": ["./extensions/batch-runner/src"],
-      "@ethosagent/platform-email": ["./extensions/platform-email/src"]
+      "@ethosagent/platform-email": ["./extensions/platform-email/src"],
+      "@ethosagent/eval-harness": ["./extensions/eval-harness/src"]
     }
   },
   "include": [

@@ -7,6 +7,7 @@ import type {
   Message,
   MessageContent,
   PersonalityRegistry,
+  PromptContext,
   SessionStore,
   StoredMessage,
   ToolRegistry,
@@ -31,7 +32,9 @@ export type AgentEvent =
   | { type: 'tool_end'; toolCallId: string; toolName: string; ok: boolean; durationMs: number }
   | { type: 'usage'; inputTokens: number; outputTokens: number; estimatedCostUsd: number }
   | { type: 'error'; error: string; code: string }
-  | { type: 'done'; text: string; turnCount: number };
+  | { type: 'done'; text: string; turnCount: number }
+  // Emitted once after context injectors run; carries any metadata they wrote to PromptContext.meta.
+  | { type: 'context_meta'; data: Record<string, unknown> };
 
 // ---------------------------------------------------------------------------
 // Config
@@ -165,7 +168,7 @@ export class AgentLoop {
     });
 
     // Step 6: Build system prompt from injectors
-    const promptCtx = {
+    const promptCtx: PromptContext = {
       sessionId,
       sessionKey,
       platform: this.platform,
@@ -201,6 +204,11 @@ export class AgentLoop {
           systemParts.push(result.content);
         }
       }
+    }
+
+    // Emit injector metadata (e.g. skill_files_used) so eval harness can capture it.
+    if (promptCtx.meta && Object.keys(promptCtx.meta).length > 0) {
+      yield { type: 'context_meta', data: promptCtx.meta };
     }
 
     // Memory injected last, as context about the user

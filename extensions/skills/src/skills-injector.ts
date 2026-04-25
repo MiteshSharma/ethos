@@ -1,6 +1,6 @@
 import { readdir, readFile, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import type {
   ContextInjector,
   InjectionResult,
@@ -35,13 +35,20 @@ export class SkillsInjector implements ContextInjector {
     const skillDirs = [...(personality.skillsDirs ?? []), this.globalSkillsDir];
 
     const sections: string[] = [];
+    const fileNames: string[] = [];
 
     for (const dir of skillDirs) {
-      const skills = await this.loadSkillsFromDir(dir);
-      sections.push(...skills);
+      const loaded = await this.loadSkillsFromDir(dir);
+      for (const { content, fileName } of loaded) {
+        sections.push(content);
+        fileNames.push(fileName);
+      }
     }
 
     if (sections.length === 0) return null;
+
+    ctx.meta ??= {};
+    ctx.meta.skillFilesUsed = fileNames;
 
     return {
       content: `## Skills\n\n${sections.join('\n\n---\n\n')}`,
@@ -49,7 +56,9 @@ export class SkillsInjector implements ContextInjector {
     };
   }
 
-  private async loadSkillsFromDir(dir: string): Promise<string[]> {
+  private async loadSkillsFromDir(
+    dir: string,
+  ): Promise<Array<{ content: string; fileName: string }>> {
     let entries: string[];
     try {
       entries = await readdir(dir);
@@ -62,11 +71,11 @@ export class SkillsInjector implements ContextInjector {
       .sort()
       .map((e) => join(dir, e));
 
-    const skills: string[] = [];
+    const skills: Array<{ content: string; fileName: string }> = [];
 
     for (const filePath of mdFiles) {
       const content = await this.readCached(filePath);
-      if (content) skills.push(sanitize(content.trim()));
+      if (content) skills.push({ content: sanitize(content.trim()), fileName: basename(filePath) });
     }
 
     return skills;

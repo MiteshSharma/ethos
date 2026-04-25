@@ -10,6 +10,8 @@ export interface PromptContext {
   isDm: boolean;
   turnNumber: number;
   personalityId?: string;
+  // Mutable side-channel: injectors write metadata here; AgentLoop emits it as context_meta event.
+  meta?: Record<string, unknown>;
 }
 
 export interface InjectionResult {

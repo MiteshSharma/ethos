@@ -34,6 +34,10 @@ export interface AtroposRecord {
   tool_results?: AtroposToolResult[];
   usage?: AtroposUsage | null;
   error?: string;
+  // Eval harness fields (Phase 22) — only present on scored assistant records.
+  score?: number;
+  scorer?: string;
+  skill_files_used?: string[];
 }
 
 export interface CheckpointState {

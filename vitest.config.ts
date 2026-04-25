@@ -10,6 +10,8 @@ const srcAliases = {
   '@ethosagent/plugin-sdk/tool-helpers': resolve('./packages/plugin-sdk/src/tool-helpers.ts'),
   '@ethosagent/plugin-sdk/testing': resolve('./packages/plugin-sdk/src/testing.ts'),
   '@ethosagent/plugin-contract': resolve('./packages/plugin-contract/src'),
+  '@ethosagent/batch-runner': resolve('./extensions/batch-runner/src'),
+  '@ethosagent/eval-harness': resolve('./extensions/eval-harness/src'),
 };
 
 export default defineConfig({

@@ -150,43 +150,6 @@ importers:
         version: 18.3.28
 
   apps/vscode-extension:
-    dependencies:
-      '@ethosagent/core':
-        specifier: workspace:*
-        version: link:../../packages/core
-      '@ethosagent/llm-anthropic':
-        specifier: workspace:*
-        version: link:../../extensions/llm-anthropic
-      '@ethosagent/llm-openai-compat':
-        specifier: workspace:*
-        version: link:../../extensions/llm-openai-compat
-      '@ethosagent/memory-markdown':
-        specifier: workspace:*
-        version: link:../../extensions/memory-markdown
-      '@ethosagent/personalities':
-        specifier: workspace:*
-        version: link:../../extensions/personalities
-      '@ethosagent/session-sqlite':
-        specifier: workspace:*
-        version: link:../../extensions/session-sqlite
-      '@ethosagent/skills':
-        specifier: workspace:*
-        version: link:../../extensions/skills
-      '@ethosagent/tools-file':
-        specifier: workspace:*
-        version: link:../../extensions/tools-file
-      '@ethosagent/tools-memory':
-        specifier: workspace:*
-        version: link:../../extensions/tools-memory
-      '@ethosagent/tools-terminal':
-        specifier: workspace:*
-        version: link:../../extensions/tools-terminal
-      '@ethosagent/tools-web':
-        specifier: workspace:*
-        version: link:../../extensions/tools-web
-      '@ethosagent/types':
-        specifier: workspace:*
-        version: link:../../packages/types
     devDependencies:
       '@types/vscode':
         specifier: ^1.74.0
@@ -258,6 +221,18 @@ importers:
       croner:
         specifier: ^9.0.0
         version: 9.1.0
+
+  extensions/eval-harness:
+    dependencies:
+      '@ethosagent/batch-runner':
+        specifier: workspace:*
+        version: link:../batch-runner
+      '@ethosagent/core':
+        specifier: workspace:*
+        version: link:../../packages/core
+      '@ethosagent/types':
+        specifier: workspace:*
+        version: link:../../packages/types
 
   extensions/gateway:
     dependencies:

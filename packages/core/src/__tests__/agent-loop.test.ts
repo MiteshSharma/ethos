@@ -122,19 +122,24 @@ describe('AgentLoop', () => {
       maxContextTokens: 200_000,
       supportsCaching: false,
       supportsThinking: false,
-      async *complete(
-        _messages: Message[],
-        tools: unknown[],
-      ): AsyncIterable<CompletionChunk> {
+      async *complete(_messages: Message[], tools: unknown[]): AsyncIterable<CompletionChunk> {
         capturedTools.push(tools);
         yield { type: 'text_delta', text: 'done' };
         yield {
           type: 'usage',
-          usage: { inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheCreationTokens: 0, estimatedCostUsd: 0 },
+          usage: {
+            inputTokens: 1,
+            outputTokens: 1,
+            cacheReadTokens: 0,
+            cacheCreationTokens: 0,
+            estimatedCostUsd: 0,
+          },
         };
         yield { type: 'done', finishReason: 'end_turn' };
       },
-      async countTokens() { return 1; },
+      async countTokens() {
+        return 1;
+      },
     };
 
     const { DefaultToolRegistry } = await import('../tool-registry');
