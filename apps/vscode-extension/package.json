@@ -1,0 +1,77 @@
+{
+  "name": "ethos-vscode",
+  "displayName": "Ethos",
+  "description": "AI agent sidebar — file editing, web search, terminal, and memory right inside VS Code",
+  "version": "0.1.0",
+  "private": true,
+  "engines": {
+    "vscode": "^1.74.0"
+  },
+  "categories": [
+    "Other",
+    "AI"
+  ],
+  "activationEvents": [
+    "onView:ethos.chat"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "ethos",
+          "title": "Ethos",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "ethos": [
+        {
+          "type": "webview",
+          "id": "ethos.chat",
+          "name": "Ethos"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "ethos.newSession",
+        "title": "Ethos: New Session",
+        "icon": "$(add)"
+      },
+      {
+        "command": "ethos.abort",
+        "title": "Ethos: Abort Current Turn",
+        "icon": "$(debug-stop)"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "ethos.newSession",
+          "when": "view == ethos.chat",
+          "group": "navigation"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Ethos",
+      "properties": {
+        "ethos.cliPath": {
+          "type": "string",
+          "default": "ethos",
+          "description": "Path to the ethos CLI binary. Defaults to 'ethos' (resolved via PATH)."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "tsup src/extension.ts --format cjs --external vscode --external better-sqlite3 --external playwright --no-dts --outDir dist",
+    "watch": "tsup src/extension.ts --format cjs --external vscode --external better-sqlite3 --external playwright --no-dts --outDir dist --watch"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@types/vscode": "^1.74.0"
+  }
+}

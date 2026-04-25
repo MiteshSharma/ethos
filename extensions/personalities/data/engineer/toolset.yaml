@@ -1,0 +1,10 @@
+- terminal
+- read_file
+- write_file
+- patch_file
+- search_files
+- web_search
+- web_extract
+- execute_code
+- run_tests
+- lint

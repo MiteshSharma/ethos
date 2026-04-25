@@ -1,0 +1,22 @@
+{
+  "name": "ethos-plugin-safety-adapter",
+  "version": "1.0.0",
+  "description": "Example: hook-based plugin — blocks dangerous terminal commands and appends a safety section to the system prompt",
+  "type": "module",
+  "main": "./src/index.ts",
+  "ethos": {
+    "type": "plugin",
+    "pluginApi": "1.0.0"
+  },
+  "scripts": {
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@ethosagent/plugin-sdk": "workspace:*",
+    "@ethosagent/types": "workspace:*"
+  },
+  "devDependencies": {
+    "@ethosagent/core": "workspace:*",
+    "vitest": "^4.1.5"
+  }
+}

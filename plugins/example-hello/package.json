@@ -1,0 +1,23 @@
+{
+  "name": "ethos-plugin-hello",
+  "version": "1.0.0",
+  "description": "Example Ethos plugin — greeting tool, session hook, and custom personality",
+  "type": "module",
+  "main": "./src/index.ts",
+  "ethos": {
+    "type": "plugin",
+    "pluginApi": "1.0.0"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@ethosagent/plugin-sdk": "workspace:*",
+    "@ethosagent/types": "workspace:*"
+  },
+  "devDependencies": {
+    "@ethosagent/core": "workspace:*",
+    "vitest": "^4.1.5"
+  }
+}

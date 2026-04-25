@@ -1,0 +1,22 @@
+{
+  "name": "ethos-plugin-strategist",
+  "version": "1.0.0",
+  "description": "Example: personality plugin — adds a 'strategist' personality with custom ETHOS.md-style identity, toolset, and skills injector",
+  "type": "module",
+  "main": "./src/index.ts",
+  "ethos": {
+    "type": "plugin",
+    "pluginApi": "1.0.0"
+  },
+  "scripts": {
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@ethosagent/plugin-sdk": "workspace:*",
+    "@ethosagent/types": "workspace:*"
+  },
+  "devDependencies": {
+    "@ethosagent/core": "workspace:*",
+    "vitest": "^4.1.5"
+  }
+}

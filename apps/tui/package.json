@@ -1,0 +1,18 @@
+{
+  "name": "@ethosagent/tui",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@ethosagent/core": "workspace:*",
+    "@ethosagent/memory-markdown": "workspace:*",
+    "ink": "^5.0.0",
+    "react": "^18.3.0"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.0"
+  }
+}

@@ -1,0 +1,36 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "types": ["node", "vscode"],
+    "noEmit": true,
+    "paths": {
+      "@ethosagent/types": ["../../packages/types/src"],
+      "@ethosagent/core": ["../../packages/core/src"],
+      "@ethosagent/llm-anthropic": ["../../extensions/llm-anthropic/src"],
+      "@ethosagent/llm-openai-compat": ["../../extensions/llm-openai-compat/src"],
+      "@ethosagent/memory-markdown": ["../../extensions/memory-markdown/src"],
+      "@ethosagent/personalities": ["../../extensions/personalities/src"],
+      "@ethosagent/session-sqlite": ["../../extensions/session-sqlite/src"],
+      "@ethosagent/skills": ["../../extensions/skills/src"],
+      "@ethosagent/tools-file": ["../../extensions/tools-file/src"],
+      "@ethosagent/tools-terminal": ["../../extensions/tools-terminal/src"],
+      "@ethosagent/tools-web": ["../../extensions/tools-web/src"],
+      "@ethosagent/tools-memory": ["../../extensions/tools-memory/src"]
+    }
+  },
+  "include": [
+    "src/**/*",
+    "../../packages/*/src/**/*",
+    "../../extensions/llm-anthropic/src/**/*",
+    "../../extensions/llm-openai-compat/src/**/*",
+    "../../extensions/memory-markdown/src/**/*",
+    "../../extensions/personalities/src/**/*",
+    "../../extensions/session-sqlite/src/**/*",
+    "../../extensions/skills/src/**/*",
+    "../../extensions/tools-file/src/**/*",
+    "../../extensions/tools-terminal/src/**/*",
+    "../../extensions/tools-web/src/**/*",
+    "../../extensions/tools-memory/src/**/*"
+  ],
+  "exclude": ["node_modules", "dist"]
+}

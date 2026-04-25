@@ -1,0 +1,56 @@
+:root {
+  --ifm-color-primary: #7c3aed;
+  --ifm-color-primary-dark: #6d28d9;
+  --ifm-color-primary-darker: #5b21b6;
+  --ifm-color-primary-darkest: #4c1d95;
+  --ifm-color-primary-light: #8b5cf6;
+  --ifm-color-primary-lighter: #a78bfa;
+  --ifm-color-primary-lightest: #c4b5fd;
+  --ifm-code-font-size: 90%;
+  --ifm-navbar-height: 3.5rem;
+  --ifm-font-family-monospace: "JetBrains Mono", "Fira Code", ui-monospace, monospace;
+  --docusaurus-highlighted-code-line-bg: rgba(124, 58, 237, 0.12);
+}
+
+[data-theme="dark"] {
+  --ifm-color-primary: #a78bfa;
+  --ifm-background-color: #0f1117;
+  --ifm-navbar-background-color: #0f1117;
+  --ifm-sidebar-background: #0f1117;
+  --ifm-background-surface-color: #161b22;
+  --ifm-toc-border-color: #21262d;
+  --ifm-color-emphasis-300: #30363d;
+  --docusaurus-highlighted-code-line-bg: rgba(167, 139, 250, 0.1);
+}
+
+/* Navbar: monospace wordmark */
+.navbar__title {
+  font-family: var(--ifm-font-family-monospace);
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+/* Admonition border colors */
+.alert--info {
+  --ifm-alert-border-color: #7c3aed;
+}
+.alert--tip {
+  --ifm-alert-border-color: #059669;
+}
+.alert--warning {
+  --ifm-alert-border-color: #d97706;
+}
+.alert--danger {
+  --ifm-alert-border-color: #dc2626;
+}
+
+/* Responsive: comparison tables */
+.markdown table {
+  display: block;
+  overflow-x: auto;
+}
+
+/* API reference: long signatures */
+.theme-api-reference code {
+  word-break: break-word;
+}

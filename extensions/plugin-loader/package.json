@@ -1,0 +1,21 @@
+{
+  "name": "@ethosagent/plugin-loader",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "import": "./src/index.ts",
+      "types": "./src/index.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsup src/index.ts --format esm --dts"
+  },
+  "dependencies": {
+    "@ethosagent/core": "workspace:*",
+    "@ethosagent/plugin-contract": "workspace:*",
+    "@ethosagent/plugin-sdk": "workspace:*",
+    "@ethosagent/types": "workspace:*"
+  }
+}

@@ -1,0 +1,27 @@
+{
+  "name": "@ethosagent/plugin-contract",
+  "version": "0.1.0",
+  "private": false,
+  "type": "module",
+  "description": "Plugin contract validation for the Ethos plugin marketplace",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ethosdev/ethos"
+  },
+  "license": "MIT",
+  "files": [
+    "dist/"
+  ],
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsup src/index.ts --format esm --dts --sourcemap"
+  },
+  "dependencies": {
+    "@ethosagent/types": "workspace:*"
+  }
+}

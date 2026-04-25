@@ -1,0 +1,36 @@
+{
+  "name": "@ethosagent/plugin-sdk",
+  "version": "0.1.0",
+  "private": false,
+  "type": "module",
+  "description": "Plugin author toolkit for building Ethos plugins — tools, hooks, injectors, and testing utilities",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ethosdev/ethos"
+  },
+  "license": "MIT",
+  "files": [
+    "dist/"
+  ],
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    },
+    "./tool-helpers": {
+      "import": "./dist/tool-helpers.js",
+      "types": "./dist/tool-helpers.d.ts"
+    },
+    "./testing": {
+      "import": "./dist/testing.js",
+      "types": "./dist/testing.d.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsup src/index.ts src/tool-helpers.ts src/testing.ts --format esm --dts --sourcemap"
+  },
+  "dependencies": {
+    "@ethosagent/core": "workspace:*",
+    "@ethosagent/types": "workspace:*"
+  }
+}

@@ -1,0 +1,49 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "types": ["node"],
+    "jsx": "react-jsx",
+    "paths": {
+      "@ethosagent/types": ["./packages/types/src"],
+      "@ethosagent/core": ["./packages/core/src"],
+      "@ethosagent/llm-anthropic": ["./extensions/llm-anthropic/src"],
+      "@ethosagent/llm-openai-compat": ["./extensions/llm-openai-compat/src"],
+      "@ethosagent/memory-markdown": ["./extensions/memory-markdown/src"],
+      "@ethosagent/personalities": ["./extensions/personalities/src"],
+      "@ethosagent/session-sqlite": ["./extensions/session-sqlite/src"],
+      "@ethosagent/acp-server": ["./extensions/acp-server/src"],
+      "@ethosagent/cron": ["./extensions/cron/src"],
+      "@ethosagent/tools-cron": ["./extensions/tools-cron/src"],
+      "@ethosagent/gateway": ["./extensions/gateway/src"],
+      "@ethosagent/platform-discord": ["./extensions/platform-discord/src"],
+      "@ethosagent/platform-slack": ["./extensions/platform-slack/src"],
+      "@ethosagent/platform-telegram": ["./extensions/platform-telegram/src"],
+      "@ethosagent/skills": ["./extensions/skills/src"],
+      "@ethosagent/tools-file": ["./extensions/tools-file/src"],
+      "@ethosagent/tools-terminal": ["./extensions/tools-terminal/src"],
+      "@ethosagent/tools-web": ["./extensions/tools-web/src"],
+      "@ethosagent/tools-delegation": ["./extensions/tools-delegation/src"],
+      "@ethosagent/tools-memory": ["./extensions/tools-memory/src"],
+      "@ethosagent/plugin-sdk": ["./packages/plugin-sdk/src"],
+      "@ethosagent/plugin-sdk/tool-helpers": ["./packages/plugin-sdk/src/tool-helpers"],
+      "@ethosagent/plugin-sdk/testing": ["./packages/plugin-sdk/src/testing"],
+      "@ethosagent/plugin-contract": ["./packages/plugin-contract/src"],
+      "@ethosagent/plugin-loader": ["./extensions/plugin-loader/src"],
+      "@ethosagent/memory-sdk": ["./packages/memory-sdk/src"],
+      "@ethosagent/sandbox-docker": ["./extensions/sandbox-docker/src"],
+      "@ethosagent/tools-browser": ["./extensions/tools-browser/src"],
+      "@ethosagent/tools-code": ["./extensions/tools-code/src"],
+      "@ethosagent/tools-mcp": ["./extensions/tools-mcp/src"],
+      "@ethosagent/tui": ["./apps/tui/src"],
+      "@ethosagent/batch-runner": ["./extensions/batch-runner/src"],
+      "@ethosagent/platform-email": ["./extensions/platform-email/src"]
+    }
+  },
+  "include": [
+    "packages/*/src/**/*",
+    "extensions/*/src/**/*",
+    "apps/*/src/**/*",
+    "vitest.config.ts"
+  ],
+  "exclude": ["node_modules", "**/dist/**", "apps/vscode-extension/**"]
+}

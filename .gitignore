@@ -1,0 +1,17 @@
+node_modules
+dist
+.env
+.env.local
+.env.*.local
+!.env.example
+*.log
+.DS_Store
+coverage
+.turbo
+packages/*/dist
+extensions/*/dist
+apps/*/dist
+*.db
+*.db-shm
+*.db-wal
+plan/

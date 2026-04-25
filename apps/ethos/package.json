@@ -1,0 +1,41 @@
+{
+  "name": "@ethosagent/cli",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "ethos": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsup src/index.ts --format esm --banner.js '#!/usr/bin/env node' --out-dir dist"
+  },
+  "dependencies": {
+    "@ethosagent/acp-server": "workspace:*",
+    "@ethosagent/batch-runner": "workspace:*",
+    "@ethosagent/platform-email": "workspace:*",
+    "@ethosagent/tui": "workspace:*",
+    "@ethosagent/core": "workspace:*",
+    "@ethosagent/cron": "workspace:*",
+    "@ethosagent/gateway": "workspace:*",
+    "@ethosagent/llm-anthropic": "workspace:*",
+    "@ethosagent/llm-openai-compat": "workspace:*",
+    "@ethosagent/memory-markdown": "workspace:*",
+    "@ethosagent/personalities": "workspace:*",
+    "@ethosagent/platform-discord": "workspace:*",
+    "@ethosagent/platform-slack": "workspace:*",
+    "@ethosagent/platform-telegram": "workspace:*",
+    "@ethosagent/sandbox-docker": "workspace:*",
+    "@ethosagent/session-sqlite": "workspace:*",
+    "@ethosagent/skills": "workspace:*",
+    "@ethosagent/tools-browser": "workspace:*",
+    "@ethosagent/tools-code": "workspace:*",
+    "@ethosagent/tools-mcp": "workspace:*",
+    "@ethosagent/tools-delegation": "workspace:*",
+    "@ethosagent/tools-file": "workspace:*",
+    "@ethosagent/tools-memory": "workspace:*",
+    "@ethosagent/tools-terminal": "workspace:*",
+    "@ethosagent/tools-web": "workspace:*",
+    "@ethosagent/types": "workspace:*",
+    "@modelcontextprotocol/sdk": "^1.29.0"
+  }
+}
