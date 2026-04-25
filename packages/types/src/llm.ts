@@ -33,6 +33,7 @@ export interface CompletionOptions {
   cacheSystemPrompt?: boolean;
   abortSignal?: AbortSignal;
   stopSequences?: string[];
+  modelOverride?: string;
 }
 
 export interface LLMProvider {

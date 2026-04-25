@@ -73,16 +73,44 @@ Sessions persist across restarts. The session key is scoped to your working dire
 
 ## Configuration
 
-`~/.ethos/config.yaml`:
+`~/.ethos/config.yaml` — edit directly or run `make dev` to use the setup wizard.
 
 ```yaml
-provider: anthropic
-model: claude-opus-4-7
-apiKey: sk-ant-...
-personality: researcher
+# ── Required ──────────────────────────────────────────────────────────────────
+provider: anthropic          # anthropic | openrouter | ollama | gemini | <any name>
+model: claude-opus-4-7       # model ID for your provider
+apiKey: sk-ant-...           # API key
+personality: researcher      # active personality (see Built-in personalities below)
+
+# ── Provider endpoint (required for non-Anthropic providers) ──────────────────
+baseUrl: https://openrouter.ai/api/v1   # omit for Anthropic
+
+# ── Per-personality model overrides ──────────────────────────────────────────
+# Resolution order: modelRouting[personality] → model (base)
+modelRouting.researcher: anthropic/claude-opus-4-7
+modelRouting.engineer: moonshotai/kimi-k2.6
+
+# ── Telegram gateway ──────────────────────────────────────────────────────────
+telegramToken: 123456:ABC-...
+
+# ── Discord gateway ───────────────────────────────────────────────────────────
+discordToken: ...
+
+# ── Slack gateway ─────────────────────────────────────────────────────────────
+slackBotToken: xoxb-...
+slackAppToken: xapp-...
+slackSigningSecret: ...
+
+# ── Email gateway ─────────────────────────────────────────────────────────────
+emailImapHost: imap.gmail.com
+emailImapPort: 993
+emailUser: you@example.com
+emailPassword: ...
+emailSmtpHost: smtp.gmail.com
+emailSmtpPort: 587
 ```
 
-Supported providers: `anthropic`, `openai-compat` (OpenRouter, Ollama, Gemini, any OpenAI-compatible endpoint).
+Supported providers: `anthropic`, or any OpenAI-compatible endpoint (OpenRouter, Ollama, Gemini) — set `baseUrl` to the endpoint and use that provider's model ID format.
 
 ---
 
@@ -129,7 +157,7 @@ ethos/
 ├── apps/
 │   └── ethos/              # @ethosagent/cli  — the ethos command
 │
-└── plan/                   # Architecture notes and 20-phase roadmap
+└── plan/                   # Architecture notes and roadmap
 ```
 
 **Tooling:** pnpm workspaces · TypeScript 6 · tsx (dev) · tsup (prod) · vitest · Biome · Node 24

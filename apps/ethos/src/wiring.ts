@@ -94,6 +94,7 @@ export async function createAgentLoop(config: EthosConfig): Promise<AgentLoop> {
     personalities,
     injectors,
     hooks,
+    modelRouting: config.modelRouting,
     options: {
       platform: 'cli',
       workingDir: process.cwd(),

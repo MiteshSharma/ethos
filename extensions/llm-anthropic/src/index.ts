@@ -176,9 +176,10 @@ export class AnthropicProvider implements LLMProvider {
       input_schema: t.parameters as Anthropic.Tool['input_schema'],
     }));
 
+    const effectiveModel = options.modelOverride ?? this.model;
     // biome-ignore lint/suspicious/noExplicitAny: extended thinking params not yet in SDK types
     const params: any = {
-      model: this.model,
+      model: effectiveModel,
       max_tokens: options.maxTokens ?? 8096,
       messages: anthropicMessages,
       ...(systemBlocks ? { system: systemBlocks } : {}),
@@ -186,7 +187,7 @@ export class AnthropicProvider implements LLMProvider {
       ...(options.stopSequences ? { stop_sequences: options.stopSequences } : {}),
     };
 
-    if (this.supportsThinking && options.thinkingBudget && options.thinkingBudget > 0) {
+    if (isThinkingModel(effectiveModel) && options.thinkingBudget && options.thinkingBudget > 0) {
       params.thinking = { type: 'enabled', budget_tokens: options.thinkingBudget };
     }
 
@@ -262,7 +263,7 @@ export class AnthropicProvider implements LLMProvider {
                 cacheReadTokens,
                 cacheCreationTokens,
                 estimatedCostUsd: estimateCost(
-                  this.model,
+                  effectiveModel,
                   inputTokens,
                   outputTokens,
                   cacheReadTokens,

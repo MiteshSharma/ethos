@@ -25,6 +25,9 @@ help:
 	@echo "  gateway-setup         - Configure Telegram bot token"
 	@echo "  gateway               - Start the Telegram gateway in foreground (dev)"
 	@echo "  cron                  - Manage cron jobs (list|create|pause|resume|delete|run)"
+	@echo "  personality           - Manage personalities (list | set <id>)"
+	@echo "  memory                - View or clear memory (show | clear)"
+	@echo "  keys                  - Manage API key rotation pool (list | add <key> | remove <n>)"
 	@echo "  start-gateway-daemon  - Start gateway as a PM2 daemon (auto-restarts on crash)"
 	@echo "  stop-gateway-daemon   - Stop the PM2 daemon (keeps it registered for reboot)"
 	@echo "  delete-gateway-daemon - Remove from PM2 completely (no auto-restart ever)"
@@ -113,6 +116,15 @@ gateway:
 
 cron:
 	@$(NVM_EXEC) pnpm exec tsx apps/ethos/src/index.ts cron $(ARGS)
+
+personality:
+	@$(NVM_EXEC) pnpm exec tsx apps/ethos/src/index.ts personality $(ARGS)
+
+memory:
+	@$(NVM_EXEC) pnpm exec tsx apps/ethos/src/index.ts memory $(ARGS)
+
+keys:
+	@$(NVM_EXEC) pnpm exec tsx apps/ethos/src/index.ts keys $(ARGS)
 
 # ---------- gateway daemon (PM2) ----------
 
@@ -287,7 +299,7 @@ clean:
 	@echo "Clean complete."
 
 .PHONY: help setup setup-nvm setup-node setup-pnpm setup-gstack prepare \
-        dev tui gateway-setup gateway cron \
+        dev tui gateway-setup gateway cron personality memory keys \
         start-gateway-daemon stop-gateway-daemon delete-gateway-daemon status-gateway-daemon \
         docs docs-build \
         test typecheck lint format check \

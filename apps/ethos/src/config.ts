@@ -32,6 +32,8 @@ export interface EthosConfig {
   apiKey: string;
   personality: string;
   baseUrl?: string;
+  // Per-personality model overrides: maps personality ID → model ID string
+  modelRouting?: Record<string, string>;
   // Platform tokens
   telegramToken?: string;
   discordToken?: string;
@@ -69,6 +71,11 @@ export async function writeConfig(config: EthosConfig): Promise<void> {
     `personality: ${config.personality}`,
   ];
   if (config.baseUrl) lines.push(`baseUrl: ${config.baseUrl}`);
+  if (config.modelRouting) {
+    for (const [id, model] of Object.entries(config.modelRouting)) {
+      lines.push(`modelRouting.${id}: ${model}`);
+    }
+  }
   if (config.telegramToken) lines.push(`telegramToken: ${config.telegramToken}`);
   if (config.discordToken) lines.push(`discordToken: ${config.discordToken}`);
   if (config.slackBotToken) lines.push(`slackBotToken: ${config.slackBotToken}`);
@@ -79,7 +86,14 @@ export async function writeConfig(config: EthosConfig): Promise<void> {
 
 function parseConfigYaml(src: string): EthosConfig {
   const kv: Record<string, string> = {};
+  const modelRouting: Record<string, string> = {};
   for (const line of src.split('\n')) {
+    // modelRouting.<personality>: <model>
+    const mr = line.match(/^modelRouting\.(\S+):\s*(.+)$/);
+    if (mr) {
+      modelRouting[mr[1].trim()] = mr[2].trim().replace(/^["']|["']$/g, '');
+      continue;
+    }
     const m = line.match(/^(\w+):\s*(.+)$/);
     if (m) kv[m[1].trim()] = m[2].trim().replace(/^["']|["']$/g, '');
   }
@@ -89,6 +103,7 @@ function parseConfigYaml(src: string): EthosConfig {
     apiKey: kv.apiKey ?? '',
     personality: kv.personality ?? 'researcher',
     baseUrl: kv.baseUrl,
+    modelRouting: Object.keys(modelRouting).length > 0 ? modelRouting : undefined,
     telegramToken: kv.telegramToken,
     discordToken: kv.discordToken,
     slackBotToken: kv.slackBotToken,

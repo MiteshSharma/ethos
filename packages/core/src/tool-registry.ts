@@ -29,8 +29,13 @@ export class DefaultToolRegistry implements ToolRegistry {
     return this.getAvailable().filter((t) => t.toolset === toolset);
   }
 
-  toDefinitions() {
-    return this.getAvailable().map((t) => ({
+  toDefinitions(allowedTools?: string[]) {
+    const available = this.getAvailable();
+    const filtered =
+      allowedTools && allowedTools.length > 0
+        ? available.filter((t) => allowedTools.includes(t.name))
+        : available;
+    return filtered.map((t) => ({
       name: t.name,
       description: t.description,
       parameters: t.schema,
@@ -39,14 +44,28 @@ export class DefaultToolRegistry implements ToolRegistry {
 
   // Runs all tool calls in parallel. Results are returned in input order.
   // Budget is split evenly across parallel calls; each result is post-trimmed to budget.
+  // allowedTools enforces toolset at execution time (belt-and-suspenders after toDefinitions filtering).
   async executeParallel(
     calls: Array<{ toolCallId: string; name: string; args: unknown }>,
     ctx: ToolContext,
+    allowedTools?: string[],
   ): Promise<Array<{ toolCallId: string; name: string; result: ToolResult }>> {
     const perCallBudget = Math.floor(ctx.resultBudgetChars / Math.max(calls.length, 1));
 
     const results = await Promise.allSettled(
       calls.map(async (call) => {
+        if (allowedTools && allowedTools.length > 0 && !allowedTools.includes(call.name)) {
+          return {
+            toolCallId: call.toolCallId,
+            name: call.name,
+            result: {
+              ok: false,
+              error: `Tool ${call.name} is not permitted for this personality`,
+              code: 'not_available',
+            } as ToolResult,
+          };
+        }
+
         const tool = this.tools.get(call.name);
         if (!tool) {
           return {

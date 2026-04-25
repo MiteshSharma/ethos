@@ -45,6 +45,8 @@ export interface AgentLoopConfig {
   session?: SessionStore;
   hooks?: HookRegistry;
   injectors?: ContextInjector[];
+  // Maps personality ID → model ID. Resolution: modelRouting[id] → personality.model → llm.model
+  modelRouting?: Record<string, string>;
   options?: {
     maxIterations?: number;
     historyLimit?: number;
@@ -77,6 +79,7 @@ export class AgentLoop {
   private readonly platform: string;
   private readonly workingDir: string;
   private readonly resultBudgetChars: number;
+  private readonly modelRouting: Record<string, string>;
 
   constructor(config: AgentLoopConfig) {
     this.llm = config.llm;
@@ -91,6 +94,7 @@ export class AgentLoop {
     this.platform = config.options?.platform ?? 'cli';
     this.workingDir = config.options?.workingDir ?? process.cwd();
     this.resultBudgetChars = config.options?.resultBudgetChars ?? 80_000;
+    this.modelRouting = config.modelRouting ?? {};
   }
 
   async *run(text: string, opts: RunOptions = {}): AsyncGenerator<AgentEvent> {
@@ -122,6 +126,15 @@ export class AgentLoop {
     const personality =
       (opts.personalityId ? this.personalities.get(opts.personalityId) : null) ??
       this.personalities.getDefault();
+
+    // Resolve effective model: explicit per-personality routing > LLM base model.
+    // personality.model is intentionally skipped — those IDs are Anthropic-specific
+    // and break non-Anthropic providers (OpenRouter, Gemini, Ollama, etc.).
+    // Configure overrides via modelRouting in ~/.ethos/config.yaml instead.
+    const effectiveModel = this.modelRouting[personality.id] ?? this.llm.model;
+    const modelOverride = effectiveModel !== this.llm.model ? effectiveModel : undefined;
+    // Allowed tool names for this personality (undefined = no restriction)
+    const allowedTools = personality.toolset?.length ? personality.toolset : undefined;
 
     // Step 2: Fire session_start hooks
     await this.hooks.fireVoid('session_start', {
@@ -240,10 +253,11 @@ export class AgentLoop {
       let chunkText = '';
 
       try {
-        const stream = this.llm.complete(llmMessages, this.tools.toDefinitions(), {
+        const stream = this.llm.complete(llmMessages, this.tools.toDefinitions(allowedTools), {
           system: systemPrompt,
           cacheSystemPrompt: true,
           abortSignal,
+          ...(modelOverride ? { modelOverride } : {}),
         });
 
         for await (const chunk of stream) {
@@ -369,7 +383,9 @@ export class AgentLoop {
 
       const startedAt = Date.now();
       const execResults =
-        execInputs.length > 0 ? await this.tools.executeParallel(execInputs, toolCtxBase) : [];
+        execInputs.length > 0
+          ? await this.tools.executeParallel(execInputs, toolCtxBase, allowedTools)
+          : [];
       const execResultMap = new Map(execResults.map((r) => [r.toolCallId, r]));
 
       // Persist results + emit tool_end + build tool_result content blocks (original order)

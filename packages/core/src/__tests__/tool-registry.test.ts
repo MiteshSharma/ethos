@@ -70,4 +70,57 @@ describe('DefaultToolRegistry', () => {
     expect(r.ok).toBe(false);
     expect(r.code).toBe('not_available');
   });
+
+  it('toDefinitions: returns all tools when no allowedTools provided', () => {
+    const reg = new DefaultToolRegistry();
+    reg.register(echoTool);
+    reg.register(failTool);
+    expect(reg.toDefinitions()).toHaveLength(2);
+  });
+
+  it('toDefinitions: filters by allowedTools when provided', () => {
+    const reg = new DefaultToolRegistry();
+    reg.register(echoTool);
+    reg.register(failTool);
+    const defs = reg.toDefinitions(['echo']);
+    expect(defs).toHaveLength(1);
+    expect(defs[0]?.name).toBe('echo');
+  });
+
+  it('toDefinitions: returns empty when allowedTools has no matches', () => {
+    const reg = new DefaultToolRegistry();
+    reg.register(echoTool);
+    expect(reg.toDefinitions(['nonexistent'])).toHaveLength(0);
+  });
+
+  it('executeParallel: blocked tool returns not_available when not in allowedTools', async () => {
+    const reg = new DefaultToolRegistry();
+    reg.register(echoTool);
+    reg.register(failTool);
+    const results = await reg.executeParallel(
+      [
+        { toolCallId: 'c1', name: 'echo', args: { text: 'hi' } },
+        { toolCallId: 'c2', name: 'fail', args: {} },
+      ],
+      makeCtx(),
+      ['echo'],
+    );
+    expect(results[0]?.result.ok).toBe(true);
+    const r = results[1]?.result as Extract<ToolResult, { ok: false }>;
+    expect(r.ok).toBe(false);
+    expect(r.code).toBe('not_available');
+    expect(r.error).toMatch(/not permitted/);
+  });
+
+  it('executeParallel: no restriction when allowedTools is undefined', async () => {
+    const reg = new DefaultToolRegistry();
+    reg.register(echoTool);
+    reg.register(failTool);
+    const results = await reg.executeParallel(
+      [{ toolCallId: 'c1', name: 'echo', args: { text: 'ok' } }],
+      makeCtx(),
+      undefined,
+    );
+    expect(results[0]?.result.ok).toBe(true);
+  });
 });

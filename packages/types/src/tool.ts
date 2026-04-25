@@ -42,6 +42,7 @@ export interface ToolRegistry {
   executeParallel(
     calls: Array<{ toolCallId: string; name: string; args: unknown }>,
     ctx: ToolContext,
+    allowedTools?: string[],
   ): Promise<Array<{ toolCallId: string; name: string; result: ToolResult }>>;
-  toDefinitions(): import('./llm').ToolDefinitionLite[];
+  toDefinitions(allowedTools?: string[]): import('./llm').ToolDefinitionLite[];
 }

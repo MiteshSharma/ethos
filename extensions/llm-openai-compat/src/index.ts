@@ -208,8 +208,9 @@ export class OpenAICompatProvider implements LLMProvider {
       },
     }));
 
+    const effectiveModel = options.modelOverride ?? this.model;
     const params: OpenAI.Chat.ChatCompletionCreateParamsStreaming = {
-      model: this.model,
+      model: effectiveModel,
       messages: oaiMessages,
       stream: true,
       stream_options: { include_usage: true },
@@ -239,7 +240,7 @@ export class OpenAICompatProvider implements LLMProvider {
             cacheReadTokens: 0,
             cacheCreationTokens: 0,
             estimatedCostUsd: estimateCostOpenAI(
-              this.model,
+              effectiveModel,
               chunk.usage.prompt_tokens,
               chunk.usage.completion_tokens,
             ),
