@@ -64,6 +64,7 @@ const sidebars: SidebarsConfig = {
       collapsed: true,
       items: [
         'guides/deploy-telegram-agent',
+        'guides/run-as-daemon',
         'guides/build-research-agent',
         'guides/publish-a-plugin',
         'guides/migrate-from-openclaw',

@@ -22,7 +22,10 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 
 readonly REQUIRED_NODE_MAJOR=24
-readonly NVM_VERSION="v0.40.1"
+# Renamed from NVM_VERSION — that name collides with an internal variable
+# inside nvm.sh, which declares it `local`. With our `readonly`, sourcing
+# nvm.sh fails with "readonly variable" errors mid-install.
+readonly NVM_INSTALLER_VERSION="v0.40.1"
 readonly PACKAGE="@ethosagent/cli"
 
 # ---------------------------------------------------------------------------
@@ -150,11 +153,11 @@ if [ "$needs_node_install" = "1" ]; then
   export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
 
   if [ ! -s "$NVM_DIR/nvm.sh" ]; then
-    note "Installing nvm $NVM_VERSION..."
-    if ! curl -fsSL "https://raw.githubusercontent.com/nvm-sh/nvm/$NVM_VERSION/install.sh" | bash >/dev/null 2>&1; then
+    note "Installing nvm $NVM_INSTALLER_VERSION..."
+    if ! curl -fsSL "https://raw.githubusercontent.com/nvm-sh/nvm/$NVM_INSTALLER_VERSION/install.sh" | bash >/dev/null 2>&1; then
       die "Failed to install nvm. Check your network or install Node 24+ manually: https://nodejs.org/"
     fi
-    ok "Installed nvm $NVM_VERSION"
+    ok "Installed nvm $NVM_INSTALLER_VERSION"
   fi
 
   # shellcheck disable=SC1091
