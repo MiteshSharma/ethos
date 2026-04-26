@@ -103,6 +103,7 @@
    Stagger via custom prop --i. Single easing token. */
 .heroWord {
   display: inline-block;
+  margin-right: 0.25em;
   opacity: 0;
   transform: translateY(4px);
   animation: ethosWordIn 240ms var(--ifm-transition-timing-default) forwards;

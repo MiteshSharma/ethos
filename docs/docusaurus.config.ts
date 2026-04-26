@@ -11,7 +11,7 @@ const config: Config = {
     v4: true,
   },
 
-  url: 'https://ethosagent.dev',
+  url: 'https://ethosagent.ai',
   baseUrl: '/',
 
   organizationName: 'ethosagent',

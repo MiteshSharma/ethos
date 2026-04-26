@@ -55,7 +55,6 @@ function Hero() {
               style={{ ['--i' as never]: i } as CSSProperties}
             >
               {word}
-              {i < taglineWords.length - 1 ? ' ' : ''}
             </span>
           ))}
         </h1>
