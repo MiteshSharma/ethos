@@ -1,8 +1,8 @@
 import { basename } from 'node:path';
+import type { AgentBridge } from '@ethosagent/agent-bridge';
 import type { Session } from '@ethosagent/types';
 import { Box, Text, useApp, useInput } from 'ink';
 import { useEffect, useMemo, useRef, useState } from 'react';
-import type { AgentBridge } from '../agent-bridge';
 import { SKINS, type SkinConfig, SkinContext } from '../skin';
 import { AccordionSection, type DetailsMode } from './AccordionSection';
 import { type ChatMessage, ChatPane } from './ChatPane';

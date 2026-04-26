@@ -6,11 +6,20 @@ import { SkillsInjector } from './skills-injector';
 export { FileContextInjector } from './file-context-injector';
 export { MemoryGuidanceInjector } from './memory-guidance-injector';
 export { sanitize } from './prompt-injection-guard';
-export { SkillsInjector } from './skills-injector';
+export {
+  applySubstitutions,
+  type OpenClawMeta,
+  type ParsedFrontmatter,
+  parseSkillFrontmatter,
+  shouldInject,
+} from './skill-compat';
+export { SkillsInjector, type SkillsInjectorOptions } from './skills-injector';
 
 export interface InjectorConfig {
   /** Override the global skills directory (defaults to ~/.ethos/skills/) */
   globalSkillsDir?: string;
+  /** Notified when a skill is skipped because of OpenClaw `requires`/`os` rules. */
+  onSkillSkip?: (skillId: string, reason: string) => void;
 }
 
 /**
@@ -19,7 +28,10 @@ export interface InjectorConfig {
  */
 export function createInjectors(personalities: PersonalityRegistry, config: InjectorConfig = {}) {
   return [
-    new SkillsInjector(personalities, config.globalSkillsDir),
+    new SkillsInjector(personalities, {
+      globalSkillsDir: config.globalSkillsDir,
+      onSkip: config.onSkillSkip,
+    }),
     new FileContextInjector(),
     new MemoryGuidanceInjector(),
   ];

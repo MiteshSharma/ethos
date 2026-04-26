@@ -66,10 +66,14 @@ function cosine(a: Float32Array, b: Float32Array): number {
 // ---------------------------------------------------------------------------
 
 function chunkText(text: string): string[] {
+  // Drop empty/whitespace-only paragraphs but keep short ones — a 12-char
+  // user fact ("First fact.") is still a memory worth storing. The
+  // CHUNK_MIN_CHARS threshold is for the long-paragraph sub-chunking
+  // logic below (don't split an oversized paragraph into tiny fragments).
   const paragraphs = text
     .split(/\n\s*\n/)
     .map((p) => p.trim())
-    .filter((p) => p.length >= CHUNK_MIN_CHARS);
+    .filter((p) => p.length > 0);
 
   const chunks: string[] = [];
   for (const para of paragraphs) {

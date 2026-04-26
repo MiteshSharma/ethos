@@ -1,7 +1,21 @@
+// AgentBridge — adapt AgentLoop's async-generator stream into an EventEmitter
+// surface every UI surface (TUI, web, VS Code) can subscribe to identically.
+//
+// Per Phase 26 eng-review:
+//   • finding 1.3 — concurrent sends are queued (FIFO, cap 10), not silently
+//     dropped. Emits `queued` when held; `error: BUSY` when cap hit.
+
 import { EventEmitter } from 'node:events';
 import type { AgentLoop, RunOptions } from '@ethosagent/core';
 
 export type BridgeOpts = Omit<RunOptions, 'abortSignal'>;
+
+export interface BridgeOptions {
+  /** Max concurrent-send queue depth before new sends are rejected with BUSY. */
+  queueCap?: number;
+  /** Text buffer flush cadence in ms (default 16, ~60fps). */
+  flushIntervalMs?: number;
+}
 
 interface BridgeEventMap {
   text_delta: [text: string];
@@ -13,6 +27,12 @@ interface BridgeEventMap {
   error: [error: string, code: string];
   done: [text: string, turnCount: number];
   idle: [];
+  queued: [input: string, queueDepth: number];
+}
+
+interface QueuedSend {
+  input: string;
+  opts: BridgeOpts;
 }
 
 export class AgentBridge extends EventEmitter<BridgeEventMap> {
@@ -20,18 +40,62 @@ export class AgentBridge extends EventEmitter<BridgeEventMap> {
   private controller: AbortController | null = null;
   private textBuffer = '';
   private flushTimer: ReturnType<typeof setTimeout> | null = null;
+  private queue: QueuedSend[] = [];
+  private readonly queueCap: number;
+  private readonly flushIntervalMs: number;
 
-  constructor(loop: AgentLoop) {
+  constructor(loop: AgentLoop, options: BridgeOptions = {}) {
     super();
     this.loop = loop;
+    this.queueCap = options.queueCap ?? 10;
+    this.flushIntervalMs = options.flushIntervalMs ?? 16;
   }
 
   get isRunning(): boolean {
     return this.controller !== null;
   }
 
+  get queueDepth(): number {
+    return this.queue.length;
+  }
+
+  /**
+   * Send an input. If a turn is already running, the input is queued (FIFO)
+   * and processed when the current turn ends. If the queue is at capacity,
+   * an `error: BUSY` event fires and the input is dropped.
+   *
+   * Returns when the *initial* turn finishes — queued turns continue
+   * asynchronously and surface state via `queued` / `idle` events.
+   */
   async send(input: string, opts: BridgeOpts): Promise<void> {
-    if (this.controller) return;
+    if (this.controller) {
+      if (this.queue.length >= this.queueCap) {
+        this.emit('error', `Queue full (cap ${this.queueCap}) — drop input`, 'BUSY');
+        return;
+      }
+      this.queue.push({ input, opts });
+      this.emit('queued', input, this.queue.length);
+      return;
+    }
+    await this.runTurn(input, opts);
+  }
+
+  abortTurn(): void {
+    this.controller?.abort();
+  }
+
+  /** Drop any pending queued sends. Does not affect the in-flight turn. */
+  clearQueue(): number {
+    const dropped = this.queue.length;
+    this.queue = [];
+    return dropped;
+  }
+
+  // -------------------------------------------------------------------------
+  // Internals
+  // -------------------------------------------------------------------------
+
+  private async runTurn(input: string, opts: BridgeOpts): Promise<void> {
     this.controller = new AbortController();
     try {
       for await (const event of this.loop.run(input, {
@@ -76,17 +140,18 @@ export class AgentBridge extends EventEmitter<BridgeEventMap> {
       this.flushText();
       this.controller = null;
       this.emit('idle');
+      // Drain the queue head — async, doesn't block the original send promise.
+      const next = this.queue.shift();
+      if (next) {
+        void this.runTurn(next.input, next.opts);
+      }
     }
-  }
-
-  abortTurn(): void {
-    this.controller?.abort();
   }
 
   private bufferText(text: string): void {
     this.textBuffer += text;
     if (!this.flushTimer) {
-      this.flushTimer = setTimeout(() => this.flushText(), 16);
+      this.flushTimer = setTimeout(() => this.flushText(), this.flushIntervalMs);
     }
   }
 

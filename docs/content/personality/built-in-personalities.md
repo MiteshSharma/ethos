@@ -8,13 +8,15 @@ sidebar_position: 2
 
 Five personalities ship out of the box. Each has a first-person identity (`ETHOS.md`), a curated toolset, and a memory scope.
 
-| Personality | Identity | Toolset | Memory scope |
-|---|---|---|---|
-| `researcher` | Methodical, citation-focused, uncertainty-aware | web + file + memory | global |
-| `engineer` | Terse, code-first, direct | terminal + file + web + code | global |
-| `reviewer` | Critical, structured, evidence-based | file only | per-personality |
-| `coach` | Warm, questioning, growth-focused | web + memory | global |
-| `operator` | Cautious, confirms before acting, dry-run first | terminal + file + code | per-personality |
+| Personality | Identity | Tools | Model | Memory scope |
+|---|---|---|---|---|
+| `researcher` | methodical · cites sources · flags uncertainty | 8 (web + file + memory) | `claude-opus-4-7` | `global` |
+| `engineer` | terse · code-first · runs commands to verify | 10 (terminal + file + web + code) | `claude-sonnet-4-6` | `global` |
+| `reviewer` | critical · evidence-based · always explains why | 3 (file + session search) | `claude-sonnet-4-6` | `per-personality` |
+| `coach` | warm but direct · question-led · helps you think | 5 (web + memory + session) | `claude-opus-4-7` | `global` |
+| `operator` | cautious · confirms before destructive · documents everything | 7 (terminal + file + code) | `claude-sonnet-4-6` | `per-personality` |
+
+> Tool counts are the actual tool names declared in `extensions/personalities/data/<id>/toolset.yaml`. Categories shown for shape; see each section below for the full list. Models are the personality's intended fit (Phase 21 multi-model routing) — override per-personality via `~/.ethos/config.yaml` `modelRouting`.
 
 Switch with `/personality <id>` in chat or `ethos personality set <id>` from the shell.
 

@@ -1,0 +1,207 @@
+/* ── InstallCard · DESIGN.md applied ──────────────────────────────────
+   Terminal-style card. Tabs ARE the personalities — the value prop
+   is the axis of the UI. Reuses --accent inline-style pattern from
+   PersonalityShowcase rows so every personality shows in its own color.
+   Motion: opacity-only state changes at 180ms (single easing token).
+   ─────────────────────────────────────────────────────────────────── */
+
+.card {
+  position: relative;
+  max-width: 760px;
+  margin: 0 auto;
+  background: var(--ethos-bg-elevated);
+  border: 1px solid var(--ethos-border-subtle);
+  border-radius: 14px;
+  overflow: hidden;
+  text-align: left;
+}
+
+/* ── Header (mac dots + personality tabs) ──────────────────────────── */
+
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--ethos-border-subtle);
+  background: var(--ethos-bg-overlay);
+}
+
+.dots {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.dots span {
+  width: 10px;
+  height: 10px;
+  border-radius: 9999px;
+  background: var(--ethos-border-strong);
+  display: block;
+}
+
+.tabs {
+  display: flex;
+  gap: 4px;
+}
+
+.tab {
+  font-family: var(--ifm-font-family-monospace);
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--ethos-text-secondary);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  padding: 4px 10px;
+  cursor: pointer;
+  transition:
+    background var(--ifm-transition-fast) var(--ifm-transition-timing-default),
+    color var(--ifm-transition-fast) var(--ifm-transition-timing-default),
+    border-color var(--ifm-transition-fast) var(--ifm-transition-timing-default);
+}
+
+.tab:hover {
+  color: var(--ethos-text-primary);
+}
+
+.tab:focus-visible {
+  outline: 2px solid var(--accent, var(--ifm-color-primary));
+  outline-offset: 2px;
+}
+
+.tabActive {
+  background: var(--ethos-bg-base);
+  color: var(--ethos-text-primary);
+  border-color: var(--ethos-border-subtle);
+}
+
+.tabActive::before {
+  content: "";
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 9999px;
+  background: var(--accent);
+  margin-right: 8px;
+  vertical-align: middle;
+  margin-top: -2px;
+}
+
+/* ── Body (the prompt) ─────────────────────────────────────────────── */
+
+.body {
+  margin: 0;
+  padding: 24px 28px 56px;
+  font-family: var(--ifm-font-family-monospace);
+  font-size: 13px;
+  line-height: 1.8;
+  color: var(--ethos-text-primary);
+  background: var(--ethos-bg-elevated);
+  white-space: pre;
+  overflow-x: auto;
+  /* Body content swaps when a tab changes — fade through opacity, 180ms */
+  animation: ethosTabFade 180ms var(--ifm-transition-timing-default);
+}
+
+.comment {
+  color: var(--ethos-text-tertiary);
+  font-style: italic;
+}
+
+.prompt {
+  color: var(--ifm-color-primary);
+  font-weight: 500;
+}
+
+.accentText {
+  color: var(--accent);
+  font-weight: 500;
+}
+
+.you {
+  color: var(--accent);
+  font-weight: 500;
+}
+
+.userMsg {
+  color: var(--ethos-text-secondary);
+}
+
+/* ── Copy button ──────────────────────────────────────────────────── */
+
+.copyBtn {
+  position: absolute;
+  bottom: 16px;
+  right: 16px;
+  font-family: var(--ifm-font-family-monospace);
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--ethos-text-secondary);
+  background: var(--ethos-bg-overlay);
+  border: 1px solid var(--ethos-border-subtle);
+  border-radius: 4px;
+  padding: 4px 12px;
+  cursor: pointer;
+  transition:
+    background var(--ifm-transition-fast) var(--ifm-transition-timing-default),
+    color var(--ifm-transition-fast) var(--ifm-transition-timing-default),
+    border-color var(--ifm-transition-fast) var(--ifm-transition-timing-default);
+}
+
+.copyBtn:hover {
+  background: var(--ethos-bg-base);
+  color: var(--ethos-text-primary);
+  border-color: var(--ethos-border-strong);
+}
+
+.copyBtn:focus-visible {
+  outline: 2px solid var(--ifm-color-primary);
+  outline-offset: 2px;
+}
+
+/* ── Motion ────────────────────────────────────────────────────────── */
+
+@keyframes ethosTabFade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .body {
+    animation: none;
+  }
+  .tab {
+    transition: none;
+  }
+  .copyBtn {
+    transition: none;
+  }
+}
+
+/* ── Responsive ───────────────────────────────────────────────────── */
+
+@media (max-width: 640px) {
+  .header {
+    padding: 10px 12px;
+    gap: 8px;
+  }
+  .dots {
+    display: none; /* save space — dots are decoration */
+  }
+  .tabs {
+    flex: 1;
+    justify-content: flex-end;
+    flex-wrap: wrap;
+  }
+  .body {
+    padding: 20px 20px 56px;
+    font-size: 12px;
+  }
+}

@@ -150,6 +150,88 @@ describe('SkillsInjector', () => {
     const result = await injector.inject(makeCtx(testDir));
     expect(result?.position).toBe('append');
   });
+
+  it('loads SKILL.md from a slug subdirectory (OpenClaw layout)', async () => {
+    const slugDir = join(testDir, 'my-skill');
+    await mkdir(slugDir, { recursive: true });
+    await writeFile(join(slugDir, 'SKILL.md'), '# OpenClaw skill\n\nDoes a thing.');
+
+    const injector = new SkillsInjector(makePersonalityRegistry([testDir]), testDir);
+    const result = await injector.inject(makeCtx(testDir));
+    expect(result?.content).toContain('OpenClaw skill');
+  });
+
+  it('loads SKILL.md from a scoped slug (steipete/slack/SKILL.md)', async () => {
+    const slugDir = join(testDir, 'steipete', 'slack');
+    await mkdir(slugDir, { recursive: true });
+    await writeFile(join(slugDir, 'SKILL.md'), '# Slack skill\n\nPosts to Slack.');
+
+    const injector = new SkillsInjector(makePersonalityRegistry([testDir]), testDir);
+    const result = await injector.inject(makeCtx(testDir));
+    expect(result?.content).toContain('Slack skill');
+  });
+
+  it('skips a skill when its required env var is missing and calls onSkip', async () => {
+    const slugDir = join(testDir, 'needs-env');
+    await mkdir(slugDir, { recursive: true });
+    await writeFile(
+      join(slugDir, 'SKILL.md'),
+      [
+        '---',
+        'name: needs-env',
+        'metadata:',
+        '  openclaw:',
+        '    requires:',
+        '      env: [DEFINITELY_UNSET_FOR_TEST]',
+        '---',
+        'Body.',
+      ].join('\n'),
+    );
+
+    const skipped: Array<{ id: string; reason: string }> = [];
+    const injector = new SkillsInjector(makePersonalityRegistry([testDir]), {
+      globalSkillsDir: testDir,
+      onSkip: (id, reason) => skipped.push({ id, reason }),
+    });
+    const result = await injector.inject(makeCtx(testDir));
+    expect(result).toBeNull();
+    expect(skipped).toHaveLength(1);
+    expect(skipped[0]?.id).toBe('needs-env');
+    expect(skipped[0]?.reason).toContain('DEFINITELY_UNSET_FOR_TEST');
+  });
+
+  it('strips frontmatter and applies substitutions to the body', async () => {
+    const slugDir = join(testDir, 'sub');
+    await mkdir(slugDir, { recursive: true });
+    await writeFile(
+      join(slugDir, 'SKILL.md'),
+      [
+        '---',
+        'name: sub',
+        '---',
+        'Skill dir = ${ETHOS_SKILL_DIR}',
+        'Session = ${ETHOS_SESSION_ID}',
+      ].join('\n'),
+    );
+
+    const injector = new SkillsInjector(makePersonalityRegistry([testDir]), testDir);
+    const ctx = { ...makeCtx(testDir), sessionId: 'sess-xyz' };
+    const result = await injector.inject(ctx);
+    expect(result?.content).toContain(`Skill dir = ${slugDir}`);
+    expect(result?.content).toContain('Session = sess-xyz');
+    expect(result?.content).not.toContain('---\nname: sub');
+  });
+
+  it('records a scoped slug as the skill id (scope/slug)', async () => {
+    const slugDir = join(testDir, 'steipete', 'slack');
+    await mkdir(slugDir, { recursive: true });
+    await writeFile(join(slugDir, 'SKILL.md'), '# Slack');
+
+    const injector = new SkillsInjector(makePersonalityRegistry([testDir]), testDir);
+    const ctx: ReturnType<typeof makeCtx> & { meta?: Record<string, unknown> } = makeCtx(testDir);
+    await injector.inject(ctx);
+    expect(ctx.meta?.skillFilesUsed).toEqual(['steipete/slack']);
+  });
 });
 
 // ---------------------------------------------------------------------------

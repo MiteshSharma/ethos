@@ -1,6 +1,7 @@
 {
   "name": "ethos-plugin-strategist",
   "version": "1.0.0",
+  "private": true,
   "description": "Example: personality plugin — adds a 'strategist' personality with custom ETHOS.md-style identity, toolset, and skills injector",
   "type": "module",
   "main": "./src/index.ts",

@@ -91,7 +91,9 @@ export async function createAgentLoop(config: EthosConfig): Promise<AgentLoop> {
   await mcpManager.connect();
   for (const tool of mcpManager.getTools()) tools.register(tool);
 
-  const injectors = createInjectors(personalities);
+  const injectors = createInjectors(personalities, {
+    onSkillSkip: (skillId, reason) => logger.warn(`skill ${skillId} skipped: ${reason}`),
+  });
 
   const hooks = new DefaultHookRegistry();
   hooks.registerModifying('before_tool_call', createTerminalGuardHook());

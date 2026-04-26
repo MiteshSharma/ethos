@@ -1,253 +1,444 @@
-/* ── Hero ────────────────────────────────────────── */
+/* ── Landing page · DESIGN.md applied ─────────────────────────────────
+   Anti-slop rules (see DESIGN.md):
+   - No 3-column card grid (was the original layout — removed)
+   - No purple gradients (was previously --ifm-color-primary #7c3aed — removed)
+   - Hero + showcase top sections are CENTER-aligned by explicit user override
+     of the prior "no centered everything" rule (see commit history); other
+     sections (fast-paths, arch, teaser) remain left-aligned per the system.
+   - Typography does the work, not decoration
+   - Cards earn existence — fast-paths and feature rows are NOT cards
+   ─────────────────────────────────────────────────────────────────── */
+
+/* ── Hero — centered, accent stripe leads ─────────────────────────── */
 
 .hero {
-  background: #0f1117;
-  padding: 6rem 1.5rem 5rem;
-  text-align: center;
+  background: var(--ethos-bg-base);
+  padding: 96px 32px 64px;
+  border-bottom: 1px solid var(--ethos-border-subtle);
 }
 
 .heroInner {
   max-width: 760px;
   margin: 0 auto;
+  text-align: center;
+}
+
+/* Announcement pill — terminal-adjacent, points at the personality value prop */
+.announcePill {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 14px 4px 4px;
+  border-radius: 9999px;
+  background: var(--ethos-bg-overlay);
+  border: 1px solid var(--ethos-border-subtle);
+  font-family: var(--ifm-font-family-monospace);
+  font-size: 12px;
+  color: var(--ethos-text-secondary) !important;
+  text-decoration: none !important;
+  margin-bottom: 32px;
+  transition:
+    background var(--ifm-transition-fast) var(--ifm-transition-timing-default),
+    border-color var(--ifm-transition-fast) var(--ifm-transition-timing-default);
+}
+.announcePill:hover {
+  background: var(--ethos-bg-elevated);
+  border-color: var(--ethos-border-strong);
+}
+
+.announceBadge {
+  background: var(--ifm-color-primary);
+  color: #ffffff;
+  padding: 3px 10px;
+  border-radius: 9999px;
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+}
+
+.announceText {
+  color: var(--ethos-text-primary);
+}
+
+.announceArrow {
+  color: var(--ifm-color-primary);
+  font-weight: 500;
+}
+
+.heroStripe {
+  height: 4px;
+  width: 80px;
+  background: var(--ifm-color-primary);
+  margin: 0 auto 32px;
 }
 
 .heroEyebrow {
   font-family: var(--ifm-font-family-monospace);
-  font-size: 1rem;
-  font-weight: 700;
-  color: var(--ifm-color-primary);
-  letter-spacing: 0.04em;
-  margin-bottom: 1.25rem;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--ethos-text-tertiary);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  margin-bottom: 16px;
 }
 
 .heroTitle {
-  font-size: 3.25rem;
-  font-weight: 800;
-  line-height: 1.15;
-  color: #ffffff;
-  margin-bottom: 1.25rem;
+  font-size: 48px;
+  font-weight: 600;
+  line-height: 1.1;
+  color: var(--ethos-text-primary);
+  margin-bottom: 16px;
   letter-spacing: -0.02em;
 }
 
 .heroSubtitle {
-  font-size: 1.15rem;
-  line-height: 1.65;
-  color: #94a3b8;
-  max-width: 560px;
-  margin: 0 auto 2.25rem;
+  font-size: 18px;
+  line-height: 1.5;
+  color: var(--ethos-text-secondary);
+  max-width: 600px;
+  margin: 0 auto 32px;
+}
+
+/* Word-stagger entrance — opacity + transform only, never width.
+   Stagger via custom prop --i. Single easing token. */
+.heroWord {
+  display: inline-block;
+  opacity: 0;
+  transform: translateY(4px);
+  animation: ethosWordIn 240ms var(--ifm-transition-timing-default) forwards;
+  animation-delay: calc(var(--i, 0) * 40ms);
+}
+.heroWord:last-child {
+  margin-right: 0;
+}
+@keyframes ethosWordIn {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .heroWord {
+    animation: none;
+    opacity: 1;
+    transform: none;
+  }
 }
 
 .heroActions {
   display: flex;
-  gap: 1rem;
+  gap: 12px;
+  align-items: center;
   justify-content: center;
   flex-wrap: wrap;
-  margin-bottom: 2rem;
+  margin-bottom: 24px;
 }
 
 .btnPrimary {
   background: var(--ifm-color-primary);
   color: #ffffff !important;
-  padding: 0.7rem 1.5rem;
-  border-radius: 6px;
-  font-weight: 600;
-  font-size: 1rem;
+  padding: 10px 18px;
+  border-radius: 4px;
+  font-weight: 500;
+  font-size: 14px;
   text-decoration: none !important;
-  transition: background 0.15s;
+  border: 1px solid var(--ifm-color-primary);
+  transition:
+    opacity 80ms cubic-bezier(0.16, 1, 0.3, 1),
+    background 80ms cubic-bezier(0.16, 1, 0.3, 1);
 }
-
 .btnPrimary:hover {
-  background: var(--ifm-color-primary-dark);
+  opacity: 0.92;
 }
 
 .btnGhost {
-  color: #e2e8f0 !important;
-  padding: 0.7rem 1.5rem;
-  border-radius: 6px;
-  font-weight: 600;
-  font-size: 1rem;
-  border: 1px solid #334155;
+  color: var(--ethos-text-primary) !important;
+  padding: 10px 18px;
+  border-radius: 4px;
+  font-weight: 500;
+  font-size: 14px;
+  border: 1px solid var(--ethos-border-strong);
   text-decoration: none !important;
-  transition: border-color 0.15s;
+  background: transparent;
+  transition:
+    background 80ms cubic-bezier(0.16, 1, 0.3, 1),
+    border-color 80ms cubic-bezier(0.16, 1, 0.3, 1);
 }
-
 .btnGhost:hover {
-  border-color: #64748b;
+  background: var(--ethos-bg-overlay);
+  border-color: var(--ethos-text-secondary);
 }
 
 .heroMeta {
-  font-size: 0.82rem;
-  color: #64748b;
+  font-family: var(--ifm-font-family-monospace);
+  font-size: 11px;
+  color: var(--ethos-text-tertiary);
   margin: 0;
 }
 
-/* ── Fast paths ───────────��──────────────────────── */
+/* ── QuickStart — install + invoke a personality, side by side ─────── */
 
-.fastPaths {
-  background: var(--ifm-background-color);
-  padding: 4rem 0;
-  border-bottom: 1px solid var(--ifm-color-emphasis-200);
+.quickStart {
+  background: var(--ethos-bg-base);
+  padding: 56px 32px 72px;
+  border-bottom: 1px solid var(--ethos-border-subtle);
 }
 
-.cardGrid {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 1.25rem;
-}
-
-@media (max-width: 996px) {
-  .cardGrid {
-    grid-template-columns: 1fr;
-  }
-}
-
-.card {
-  display: flex;
-  flex-direction: column;
-  gap: 0.5rem;
-  padding: 1.5rem;
-  border: 1px solid var(--ifm-color-emphasis-200);
-  border-radius: 8px;
-  text-decoration: none !important;
-  color: inherit !important;
-  transition:
-    box-shadow 0.15s,
-    border-color 0.15s;
-}
-
-.card:hover {
-  box-shadow: 0 4px 16px rgba(124, 58, 237, 0.12);
-  border-color: var(--ifm-color-primary-lighter);
-}
-
-.cardTitle {
-  font-size: 1.15rem;
-  font-weight: 700;
-  margin: 0;
-}
-
-.cardDesc {
-  font-size: 0.92rem;
-  color: var(--ifm-color-emphasis-700);
-  margin: 0;
-  line-height: 1.55;
-  flex: 1;
-}
-
-.cardCta {
-  font-size: 0.9rem;
-  font-weight: 600;
-  color: var(--ifm-color-primary);
-}
-
-/* ── Architecture diagram ────────────────────────── */
-
-.arch {
-  background: var(--ifm-background-color);
-  padding: 5rem 0;
-  text-align: center;
-  border-top: 1px solid var(--ifm-color-emphasis-200);
-}
-
-.sectionTitle {
-  font-size: 2rem;
-  font-weight: 700;
-  margin-bottom: 0.75rem;
-}
-
-.sectionSubtitle {
-  color: var(--ifm-color-emphasis-700);
-  max-width: 560px;
-  margin: 0 auto 2.5rem;
-  font-size: 1.05rem;
-  line-height: 1.6;
-}
-
-.archPlaceholder {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 1rem;
-  padding: 3rem 2rem;
-  border: 1px dashed var(--ifm-color-emphasis-300);
-  border-radius: 8px;
-  max-width: 720px;
+.quickStartInner {
+  max-width: 760px;
   margin: 0 auto;
 }
 
-.archPlaceholderText {
-  color: var(--ifm-color-emphasis-500);
-  font-size: 0.9rem;
-  margin: 0;
+.sectionHeading {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-bottom: 24px;
+}
+
+.sectionHeading .sectionLabel {
+  margin-bottom: 0;
+}
+
+.sectionChevron {
+  font-family: var(--ifm-font-family-monospace);
+  color: var(--ifm-color-primary);
+  font-size: 14px;
+  line-height: 1;
+}
+
+.quickStartNote {
+  font-size: 13px;
+  color: var(--ethos-text-tertiary);
+  line-height: 1.6;
+  margin: 16px 0 0;
+  text-align: center;
+}
+
+/* ── Fast paths — stacked rows, NOT card grid ──────────────────────── */
+
+.fastPaths {
+  background: var(--ethos-bg-base);
+  padding: 48px 0;
+  border-bottom: 1px solid var(--ethos-border-subtle);
+}
+
+.sectionLabel {
+  font-family: var(--ifm-font-family-monospace);
+  font-size: 11px;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--ethos-text-tertiary);
+  margin-bottom: 24px;
+}
+
+.pathRows {
+  display: grid;
+  gap: 0;
+  border-top: 1px solid var(--ethos-border-subtle);
+}
+
+.pathRow {
+  display: grid;
+  grid-template-columns: 56px 200px 1fr 140px;
+  gap: 24px;
+  align-items: center;
+  padding: 24px 16px;
+  border-bottom: 1px solid var(--ethos-border-subtle);
+  text-decoration: none !important;
+  color: inherit !important;
+  transition: background 80ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+.pathRow:hover {
+  background: var(--ethos-bg-overlay);
+}
+
+.pathRow .pathNumber {
+  font-family: var(--ifm-font-family-monospace);
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--ethos-text-tertiary);
+  letter-spacing: 0.06em;
+}
+
+.pathRow .pathLabel {
+  font-size: 18px;
+  font-weight: 500;
+  color: var(--ethos-text-primary);
+  letter-spacing: -0.005em;
+}
+
+.pathRow .pathDescription {
+  font-size: 14px;
+  color: var(--ethos-text-secondary);
+  line-height: 1.5;
+}
+
+.pathRow .pathCta {
+  font-family: var(--ifm-font-family-monospace);
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--ifm-color-primary);
+  text-align: right;
+}
+
+/* ── Architecture section ──────────────────────────────────────────── */
+
+.arch {
+  background: var(--ethos-bg-base);
+  padding: 64px 0;
+  border-bottom: 1px solid var(--ethos-border-subtle);
+}
+
+.sectionTitle {
+  font-size: 24px;
+  font-weight: 600;
+  margin: 0 0 8px;
+  color: var(--ethos-text-primary);
+  letter-spacing: -0.005em;
+}
+
+.sectionSubtitle {
+  color: var(--ethos-text-secondary);
+  max-width: 640px;
+  margin: 0 0 32px;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.archDiagram {
+  background: var(--ethos-bg-elevated);
+  border: 1px solid var(--ethos-border-subtle);
+  border-radius: 8px;
+  padding: 32px;
+  margin-bottom: 16px;
+  font-family: var(--ifm-font-family-monospace);
+  font-size: 13px;
+  line-height: 1.7;
+  color: var(--ethos-text-secondary);
+  white-space: pre;
+  overflow-x: auto;
+}
+
+.archDiagram .accent {
+  color: var(--ifm-color-primary);
 }
 
 .archLink {
-  font-size: 0.95rem;
-  font-weight: 600;
+  font-family: var(--ifm-font-family-monospace);
+  font-size: 12px;
+  font-weight: 500;
   color: var(--ifm-color-primary);
   text-decoration: none;
 }
-
 .archLink:hover {
   text-decoration: underline;
 }
 
-/* ── Why not teaser ──────────────────────────────── */
+/* ── Why-not teaser — utilitarian strip, no purple ─────────────────── */
 
 .teaser {
-  background: var(--ifm-color-primary-darkest);
-  padding: 2rem 0;
-}
-
-[data-theme="light"] .teaser {
-  background: #4c1d95;
+  background: var(--ethos-bg-elevated);
+  padding: 24px 0;
+  border-bottom: 1px solid var(--ethos-border-subtle);
 }
 
 .teaserInner {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 1rem;
+  gap: 16px;
   flex-wrap: wrap;
 }
 
 .teaserText {
-  color: #e9d5ff;
-  font-size: 1rem;
-  font-weight: 500;
+  color: var(--ethos-text-secondary);
+  font-size: 14px;
   margin: 0;
 }
 
+.teaserText strong {
+  color: var(--ethos-text-primary);
+  font-weight: 500;
+}
+
 .teaserLink {
-  color: #ffffff !important;
-  font-weight: 700;
-  font-size: 0.95rem;
+  font-family: var(--ifm-font-family-monospace);
+  color: var(--ifm-color-primary) !important;
+  font-weight: 500;
+  font-size: 12px;
   text-decoration: none !important;
   white-space: nowrap;
 }
-
 .teaserLink:hover {
   text-decoration: underline !important;
 }
 
-/* ── Responsive ─────────────────────────────────── */
+/* ── Responsive ────────────────────────────────────────────────────── */
 
-@media (max-width: 768px) {
+@media (max-width: 996px) {
+  .heroInner {
+    padding: 0 24px;
+  }
+  .pathRow {
+    grid-template-columns: 56px 1fr 100px;
+  }
+  .pathRow .pathDescription {
+    grid-column: 2 / -1;
+    grid-row: 2;
+    margin-top: 4px;
+  }
+  .pathRow .pathLabel {
+    grid-column: 2;
+    grid-row: 1;
+  }
+  .pathRow .pathCta {
+    grid-row: 1;
+  }
+}
+
+@media (max-width: 640px) {
+  .hero {
+    padding: 64px 24px 48px;
+  }
   .heroTitle {
-    font-size: 2.25rem;
+    font-size: 32px;
   }
-
   .heroSubtitle {
-    font-size: 1rem;
+    font-size: 16px;
   }
-
   .heroActions {
     flex-direction: column;
-    align-items: center;
+    align-items: stretch;
   }
-
+  .btnPrimary,
+  .btnGhost {
+    text-align: center;
+  }
+  .pathRow {
+    grid-template-columns: 1fr;
+    padding: 20px 16px;
+  }
+  .pathRow .pathNumber {
+    grid-row: 1;
+  }
+  .pathRow .pathLabel {
+    grid-row: 2;
+  }
+  .pathRow .pathDescription {
+    grid-row: 3;
+  }
+  .pathRow .pathCta {
+    grid-row: 4;
+    text-align: left;
+  }
   .teaserInner {
     flex-direction: column;
-    text-align: center;
+    align-items: flex-start;
   }
 }

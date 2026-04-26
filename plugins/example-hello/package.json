@@ -1,6 +1,7 @@
 {
   "name": "ethos-plugin-hello",
   "version": "1.0.0",
+  "private": true,
   "description": "Example Ethos plugin — greeting tool, session hook, and custom personality",
   "type": "module",
   "main": "./src/index.ts",

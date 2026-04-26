@@ -1,43 +1,58 @@
 {
   "name": "@ethosagent/cli",
-  "version": "0.0.0",
-  "private": true,
+  "version": "0.1.0",
+  "description": "Ethos — TypeScript AI agent framework where personality is architecture. Curated toolsets, first-person identities, scoped memory.",
+  "keywords": [
+    "agent",
+    "ai",
+    "llm",
+    "claude",
+    "openai",
+    "personality",
+    "framework",
+    "cli",
+    "anthropic"
+  ],
+  "homepage": "https://ethosagent.ai",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ethosagent/ethos.git",
+    "directory": "apps/ethos"
+  },
+  "bugs": "https://github.com/ethosagent/ethos/issues",
+  "license": "MIT",
+  "author": "Ethos contributors",
   "type": "module",
   "bin": {
     "ethos": "./dist/index.js"
   },
+  "files": ["dist", "README.md", "LICENSE"],
+  "engines": {
+    "node": ">=24"
+  },
   "scripts": {
-    "build": "tsup src/index.ts --format esm --banner.js '#!/usr/bin/env node' --out-dir dist"
+    "build": "tsup"
   },
   "dependencies": {
-    "@ethosagent/agent-mesh": "workspace:*",
-    "@ethosagent/acp-server": "workspace:*",
-    "@ethosagent/batch-runner": "workspace:*",
-    "@ethosagent/platform-email": "workspace:*",
-    "@ethosagent/tui": "workspace:*",
     "@ethosagent/core": "workspace:*",
-    "@ethosagent/cron": "workspace:*",
-    "@ethosagent/gateway": "workspace:*",
-    "@ethosagent/llm-anthropic": "workspace:*",
-    "@ethosagent/llm-openai-compat": "workspace:*",
-    "@ethosagent/memory-markdown": "workspace:*",
-    "@ethosagent/personalities": "workspace:*",
-    "@ethosagent/platform-discord": "workspace:*",
-    "@ethosagent/platform-slack": "workspace:*",
-    "@ethosagent/platform-telegram": "workspace:*",
-    "@ethosagent/sandbox-docker": "workspace:*",
-    "@ethosagent/session-sqlite": "workspace:*",
-    "@ethosagent/skill-evolver": "workspace:*",
-    "@ethosagent/skills": "workspace:*",
-    "@ethosagent/tools-browser": "workspace:*",
-    "@ethosagent/tools-code": "workspace:*",
-    "@ethosagent/tools-mcp": "workspace:*",
-    "@ethosagent/tools-delegation": "workspace:*",
-    "@ethosagent/tools-file": "workspace:*",
-    "@ethosagent/tools-memory": "workspace:*",
-    "@ethosagent/tools-terminal": "workspace:*",
-    "@ethosagent/tools-web": "workspace:*",
     "@ethosagent/types": "workspace:*",
-    "@modelcontextprotocol/sdk": "^1.29.0"
+    "@anthropic-ai/sdk": "^0.39.0",
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "@slack/bolt": "^3.21.0",
+    "better-sqlite3": "^12.9.0",
+    "croner": "^9.0.0",
+    "discord.js": "^14.16.0",
+    "grammy": "^1.26.0",
+    "imapflow": "^1.0.170",
+    "ink": "^5.0.0",
+    "mailparser": "^3.7.2",
+    "nodemailer": "^6.10.1",
+    "openai": "^4.87.0",
+    "react": "^18.3.0",
+    "ws": "^8.20.0"
+  },
+  "optionalDependencies": {
+    "@xenova/transformers": "^2.17.2",
+    "playwright": "^1.48.0"
   }
 }

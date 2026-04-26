@@ -1,12 +1,12 @@
 import { basename } from 'node:path';
+import { AgentBridge } from '@ethosagent/agent-bridge';
 import type { AgentLoop } from '@ethosagent/core';
 import { render } from 'ink';
 import { createElement } from 'react';
-import { AgentBridge } from './agent-bridge';
 import { App } from './components/App';
 
-export type { BridgeOpts } from './agent-bridge';
-export { AgentBridge } from './agent-bridge';
+export type { BridgeOpts } from '@ethosagent/agent-bridge';
+export { AgentBridge } from '@ethosagent/agent-bridge';
 
 export interface TUIOptions {
   model: string;

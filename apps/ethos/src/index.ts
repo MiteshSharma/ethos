@@ -1,7 +1,10 @@
-#!/usr/bin/env node
+// Shebang `#!/usr/bin/env node` is added by tsup via banner config at build time.
+// Don't put it here — tsx in dev mode doesn't need it and source-level shebangs
+// in TypeScript trip on tsup's bundler.
 import { runAcp } from './commands/acp';
 import { runBatch } from './commands/batch';
 import { runChat } from './commands/chat';
+import { runClaw } from './commands/claw';
 import { runCronCommand } from './commands/cron';
 import { runEval } from './commands/eval';
 import { runEvolve } from './commands/evolve';
@@ -10,6 +13,7 @@ import { runKeys } from './commands/keys';
 import { runPlugin } from './commands/plugin';
 import { runServe } from './commands/serve';
 import { runSetup } from './commands/setup';
+import { runSkills } from './commands/skills';
 import { readConfig } from './config';
 
 const args = process.argv.slice(2);
@@ -231,15 +235,25 @@ switch (command) {
     break;
   }
 
+  case 'skills': {
+    await runSkills(args.slice(1));
+    break;
+  }
+
   case 'keys': {
     await runKeys(args.slice(1));
+    break;
+  }
+
+  case 'claw': {
+    await runClaw(args.slice(1));
     break;
   }
 
   default:
     console.log(`Unknown command: ${command}`);
     console.log(
-      'Usage: ethos [setup | chat | serve | gateway | cron | personality | memory | acp | batch | eval | evolve | plugin | keys]',
+      'Usage: ethos [setup | chat | serve | gateway | cron | personality | memory | acp | batch | eval | evolve | plugin | skills | keys | claw]',
     );
     process.exit(1);
 }

@@ -1,56 +1,305 @@
+/* ── Ethos design system tokens (see DESIGN.md) ───────────────────────
+   Docs site is a public/marketing-shape surface. Brand accent is researcher
+   blue #4A9EFF (matches DESIGN.md email-digest rule — single brand color
+   when not on personality-tagged content). Per-personality accents only
+   appear in the personality showcase component.
+   ─────────────────────────────────────────────────────────────────── */
+
+@import url("https://fonts.bunny.net/css?family=geist:400,500,600|geist-mono:400");
+
 :root {
-  --ifm-color-primary: #7c3aed;
-  --ifm-color-primary-dark: #6d28d9;
-  --ifm-color-primary-darker: #5b21b6;
-  --ifm-color-primary-darkest: #4c1d95;
-  --ifm-color-primary-light: #8b5cf6;
-  --ifm-color-primary-lighter: #a78bfa;
-  --ifm-color-primary-lightest: #c4b5fd;
+  /* DESIGN.md typography */
+  --ifm-font-family-base: "Geist", system-ui, -apple-system, sans-serif;
+  --ifm-font-family-monospace: "Geist Mono", ui-monospace, monospace;
+  --ifm-heading-font-family: "Geist", system-ui, sans-serif;
+  --ifm-heading-font-weight: 600;
+  --ifm-font-weight-bold: 600;
+  --ifm-font-weight-semibold: 500;
+
+  /* DESIGN.md brand accent for docs (researcher blue) */
+  --ifm-color-primary: #4a9eff;
+  --ifm-color-primary-dark: #2c8eff;
+  --ifm-color-primary-darker: #1583ff;
+  --ifm-color-primary-darkest: #0067e0;
+  --ifm-color-primary-light: #68aeff;
+  --ifm-color-primary-lighter: #77b6ff;
+  --ifm-color-primary-lightest: #a3cdff;
+
+  /* DESIGN.md tokens (light mode — paper-warm) */
+  --ethos-bg-base: #fafaf7;
+  --ethos-bg-elevated: #ffffff;
+  --ethos-bg-overlay: #f0f0ec;
+  --ethos-border-subtle: #e8e8e4;
+  --ethos-border-strong: #d0d0cc;
+  --ethos-text-primary: #1a1a1a;
+  --ethos-text-secondary: #6b6b6a;
+  --ethos-text-tertiary: #94948f;
+
+  /* Per-personality accents (researcher / engineer / reviewer / coach / operator) */
+  --ethos-accent-researcher: #4a9eff;
+  --ethos-accent-engineer: #4ade80;
+  --ethos-accent-reviewer: #f59e0b;
+  --ethos-accent-coach: #e879f9;
+  --ethos-accent-operator: #94a3b8;
+
+  /* Map Docusaurus surface tokens to DESIGN.md */
+  --ifm-background-color: var(--ethos-bg-base);
+  --ifm-background-surface-color: var(--ethos-bg-elevated);
+  --ifm-color-emphasis-100: var(--ethos-bg-overlay);
+  --ifm-color-emphasis-200: var(--ethos-border-subtle);
+  --ifm-color-emphasis-300: var(--ethos-border-strong);
+  --ifm-color-emphasis-700: var(--ethos-text-secondary);
+  --ifm-color-emphasis-600: var(--ethos-text-secondary);
+  --ifm-toc-border-color: var(--ethos-border-subtle);
+
+  /* Type sizing per DESIGN.md scale */
+  --ifm-font-size-base: 14px;
+  --ifm-line-height-base: 1.5;
+  --ifm-h1-font-size: 2rem;
+  --ifm-h2-font-size: 1.5rem;
+  --ifm-h3-font-size: 1.25rem;
+  --ifm-h4-font-size: 1rem;
   --ifm-code-font-size: 90%;
+
+  /* Border radius per DESIGN.md (sm:4 md:8 lg:14 full:9999) */
+  --ifm-button-border-radius: 4px;
+  --ifm-card-border-radius: 8px;
+  --ifm-alert-border-radius: 8px;
+  --ifm-code-border-radius: 4px;
+
+  /* Motion per DESIGN.md (80/180/240, single easing) */
+  --ifm-transition-fast: 80ms;
+  --ifm-transition-slow: 240ms;
+  --ifm-transition-timing-default: cubic-bezier(0.16, 1, 0.3, 1);
+
   --ifm-navbar-height: 3.5rem;
-  --ifm-font-family-monospace: "JetBrains Mono", "Fira Code", ui-monospace, monospace;
-  --docusaurus-highlighted-code-line-bg: rgba(124, 58, 237, 0.12);
+  --docusaurus-highlighted-code-line-bg: rgba(74, 158, 255, 0.1);
 }
 
 [data-theme="dark"] {
-  --ifm-color-primary: #a78bfa;
-  --ifm-background-color: #0f1117;
-  --ifm-navbar-background-color: #0f1117;
-  --ifm-sidebar-background: #0f1117;
-  --ifm-background-surface-color: #161b22;
-  --ifm-toc-border-color: #21262d;
-  --ifm-color-emphasis-300: #30363d;
-  --docusaurus-highlighted-code-line-bg: rgba(167, 139, 250, 0.1);
+  /* DESIGN.md tokens (dark mode — paper-warm, the primary mode) */
+  --ethos-bg-base: #0f0f0f;
+  --ethos-bg-elevated: #1a1a1a;
+  --ethos-bg-overlay: #2a2a2a;
+  --ethos-border-subtle: #2a2a2a;
+  --ethos-border-strong: #3a3a3a;
+  --ethos-text-primary: #e8e8e6;
+  --ethos-text-secondary: #9a9a98;
+  --ethos-text-tertiary: #6b6b6a;
+
+  --ifm-color-primary: #4a9eff;
+  --ifm-background-color: var(--ethos-bg-base);
+  --ifm-navbar-background-color: var(--ethos-bg-base);
+  --ifm-background-surface-color: var(--ethos-bg-elevated);
+  --ifm-toc-border-color: var(--ethos-border-subtle);
+  --ifm-color-emphasis-100: var(--ethos-bg-overlay);
+  --ifm-color-emphasis-200: var(--ethos-border-subtle);
+  --ifm-color-emphasis-300: var(--ethos-border-strong);
+  --docusaurus-highlighted-code-line-bg: rgba(74, 158, 255, 0.12);
 }
 
-/* Navbar: monospace wordmark */
+/* Body baseline */
+body {
+  font-family: var(--ifm-font-family-base);
+  color: var(--ethos-text-primary);
+  background: var(--ethos-bg-base);
+}
+
+/* Navbar — utilitarian wordmark */
+.navbar {
+  border-bottom: 1px solid var(--ethos-border-subtle);
+  box-shadow: none;
+}
 .navbar__title {
-  font-family: var(--ifm-font-family-monospace);
-  font-weight: 700;
-  letter-spacing: -0.02em;
+  font-family: var(--ifm-font-family-base);
+  font-weight: 600;
+  letter-spacing: -0.005em;
+  font-size: 14px;
+}
+.navbar__brand {
+  margin-right: 1.5rem;
+}
+.navbar__link {
+  font-size: 13px;
+  font-weight: 500;
 }
 
-/* Admonition border colors */
+/* Sidebar — section labels in tertiary, items dense */
+.menu {
+  font-size: 13px;
+  padding: 12px;
+}
+.menu__list-item-collapsible,
+.menu__link {
+  border-radius: 4px;
+  padding: 6px 10px;
+  transition: background var(--ifm-transition-fast) var(--ifm-transition-timing-default);
+}
+.menu__link:hover {
+  background: var(--ethos-bg-overlay);
+}
+.menu__link--active {
+  font-weight: 500;
+  color: var(--ethos-text-primary);
+  background: var(--ethos-bg-overlay);
+  border-left: 2px solid var(--ifm-color-primary);
+  padding-left: 8px;
+  border-radius: 0 4px 4px 0;
+}
+
+/* Headings — Geist 600, tighter tracking */
+h1,
+h2,
+h3,
+h4 {
+  font-family: var(--ifm-heading-font-family);
+  letter-spacing: -0.005em;
+}
+h1 {
+  letter-spacing: -0.01em;
+}
+
+/* Code — Geist Mono, tabular nums for any inline numerics */
+code,
+pre,
+.token {
+  font-family: var(--ifm-font-family-monospace);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Inline code — subtle bg, no border */
+.markdown :not(pre) > code {
+  background: var(--ethos-bg-overlay);
+  border: 1px solid var(--ethos-border-subtle);
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 0.85em;
+  color: var(--ethos-text-primary);
+}
+
+/* Code blocks — match DESIGN.md surface tokens */
+.theme-code-block,
+.prism-code {
+  background: var(--ethos-bg-elevated) !important;
+  border: 1px solid var(--ethos-border-subtle);
+  border-radius: 8px;
+  font-size: 13px;
+}
+
+/* Admonitions — semantic colors per DESIGN.md, not personality colors */
+.alert {
+  border-radius: 8px;
+  border-left-width: 3px;
+}
 .alert--info {
-  --ifm-alert-border-color: #7c3aed;
+  --ifm-alert-border-color: #4a9eff;
 }
 .alert--tip {
-  --ifm-alert-border-color: #059669;
+  --ifm-alert-border-color: #4ade80;
 }
 .alert--warning {
-  --ifm-alert-border-color: #d97706;
+  --ifm-alert-border-color: #f59e0b;
 }
 .alert--danger {
-  --ifm-alert-border-color: #dc2626;
+  --ifm-alert-border-color: #f87171;
 }
 
-/* Responsive: comparison tables */
+/* Buttons in markdown content / hero — sm radius, accent fill */
+.button {
+  border-radius: 4px;
+  font-weight: 500;
+  transition:
+    background var(--ifm-transition-fast) var(--ifm-transition-timing-default),
+    opacity var(--ifm-transition-fast) var(--ifm-transition-timing-default);
+}
+.button--primary {
+  background: var(--ifm-color-primary);
+  border-color: var(--ifm-color-primary);
+}
+.button--primary:hover {
+  opacity: 0.92;
+  background: var(--ifm-color-primary);
+}
+
+/* Links — accent color, dotted underline (matches DESIGN.md agent-text style) */
+.markdown a:not(.button) {
+  color: var(--ifm-color-primary);
+  text-decoration: none;
+  border-bottom: 1px dotted currentColor;
+}
+.markdown a:not(.button):hover {
+  border-bottom-style: solid;
+}
+.markdown a:visited:not(.button) {
+  color: #a78bfa; /* visited links visibly different per DESIGN.md a11y */
+}
+
+/* Tables — responsive, monospace data cells, no card-grid feel */
 .markdown table {
   display: block;
   overflow-x: auto;
+  border-collapse: collapse;
+  border: 1px solid var(--ethos-border-subtle);
+  border-radius: 8px;
+}
+.markdown table thead {
+  background: var(--ethos-bg-overlay);
+}
+.markdown table th {
+  font-weight: 500;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--ethos-text-tertiary);
 }
 
-/* API reference: long signatures */
+/* Reduced motion — DESIGN.md mandates instant */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+  }
+}
+
+/* API reference: long signatures stay readable */
 .theme-api-reference code {
   word-break: break-word;
+}
+
+/* Pagination + footer — utilitarian */
+.pagination-nav__link {
+  border-radius: 8px;
+  border: 1px solid var(--ethos-border-subtle);
+  transition: border-color var(--ifm-transition-fast) var(--ifm-transition-timing-default);
+}
+.pagination-nav__link:hover {
+  border-color: var(--ifm-color-primary);
+}
+
+.footer {
+  background: var(--ethos-bg-base);
+  border-top: 1px solid var(--ethos-border-subtle);
+  padding: 32px 0;
+  font-size: 13px;
+}
+.footer__title {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--ethos-text-tertiary);
+  font-weight: 500;
+}
+.footer__link-item {
+  color: var(--ethos-text-secondary);
+}
+.footer__link-item:hover {
+  color: var(--ifm-color-primary);
+}
+.footer__copyright {
+  font-family: var(--ifm-font-family-monospace);
+  font-size: 11px;
+  color: var(--ethos-text-tertiary);
+  margin-top: 16px;
 }

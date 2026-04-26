@@ -320,6 +320,18 @@ Node 24's `--experimental-strip-types` requires explicit file extensions in impo
 
 ---
 
+## Design system
+
+Always read [DESIGN.md](./DESIGN.md) before making any visual or UI decision.
+All font choices, colors, spacing, motion, and aesthetic direction are defined there.
+Do not deviate without explicit user approval.
+
+Phase 26 web UI references DESIGN.md tokens via Antd `ConfigProvider` (see `apps/web/src/lib/theme.ts` once 26.1 lands). Other surfaces (TUI, VS Code extension, email digests, CLI) consume the same tokens — see DESIGN.md "Cross-surface token mapping" for the per-surface render rules.
+
+When reviewing or writing code that touches UI, flag any deviations from DESIGN.md (slop blacklist, font choices, color hex values, motion durations, "cards earn existence" rule).
+
+---
+
 ## gstack
 
-Available skills: `/review`, `/plan-eng-review`, `/plan-ceo-review`, `/browse`, `/investigate`, `/careful`, `/ship`, `/qa`, `/retro`.
+Available skills: `/review`, `/plan-eng-review`, `/plan-ceo-review`, `/plan-design-review`, `/design-consultation`, `/browse`, `/investigate`, `/careful`, `/ship`, `/qa`, `/retro`.

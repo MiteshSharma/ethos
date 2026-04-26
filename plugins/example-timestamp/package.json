@@ -1,6 +1,7 @@
 {
   "name": "ethos-plugin-timestamp",
   "version": "1.0.0",
+  "private": true,
   "description": "Example: tool-only plugin — returns current time in any timezone",
   "type": "module",
   "main": "./src/index.ts",

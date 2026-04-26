@@ -1,6 +1,7 @@
 {
   "name": "ethos-plugin-safety-adapter",
   "version": "1.0.0",
+  "private": true,
   "description": "Example: hook-based plugin — blocks dangerous terminal commands and appends a safety section to the system prompt",
   "type": "module",
   "main": "./src/index.ts",

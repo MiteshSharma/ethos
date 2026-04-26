@@ -1,6 +1,7 @@
 {
   "name": "ethos-plugin-memory-logger",
   "version": "1.0.0",
+  "private": true,
   "description": "Example: memory-style plugin — logs every agent_done event to a local file",
   "type": "module",
   "main": "./src/index.ts",
