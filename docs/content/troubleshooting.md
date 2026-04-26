@@ -9,27 +9,28 @@ Common issues and how to fix them.
 
 ## CLI won't start
 
-**Error: `Cannot find module '@ethosagent/core'`**
+**Error: `command not found: ethos`**
 
-Path aliases aren't resolving. This happens if you run `node` directly instead of `tsx`:
+The CLI isn't on your `PATH`. If you installed via `npm install -g`, open a new terminal — your shell may not have picked up the new binary yet. If you used `nvm`, ensure you're on Node 24:
 
 ```bash
-# Wrong
-node apps/ethos/src/index.ts
+nvm use 24
+ethos --version
+```
 
-# Correct
-pnpm dev
-# or
-npx tsx apps/ethos/src/index.ts
+If it's still missing, reinstall:
+
+```bash
+npm install -g @ethosagent/cli
 ```
 
 **Error: `config.yaml not found`**
 
-The setup wizard didn't complete. Delete `~/.ethos/` and run `pnpm dev` again to trigger setup:
+The setup wizard didn't complete. Delete `~/.ethos/` and re-run setup:
 
 ```bash
 rm -rf ~/.ethos
-pnpm dev
+ethos setup
 ```
 
 ## API errors
@@ -40,7 +41,7 @@ Your API key is missing or wrong.
 
 ```bash
 export ANTHROPIC_API_KEY="sk-ant-..."
-pnpm dev
+ethos chat
 ```
 
 Verify the key works:
@@ -76,7 +77,7 @@ If the DB is corrupted, back it up and delete it:
 ```bash
 cp ~/.ethos/sessions.db ~/.ethos/sessions.db.bak
 rm ~/.ethos/sessions.db
-pnpm dev   # creates a fresh DB
+ethos chat   # creates a fresh DB
 ```
 
 **Agent forgets context mid-conversation**
@@ -131,6 +132,8 @@ touch ~/.ethos/personalities/myid/config.yaml
 ```
 
 ## TypeScript errors
+
+> The rest of this page covers issues you'll only hit when working from a source checkout (contributing, building plugins, or running from the monorepo). If you installed via `npm install -g @ethosagent/cli`, you can stop here.
 
 **`Type 'X' is not assignable to type 'Y'`**
 

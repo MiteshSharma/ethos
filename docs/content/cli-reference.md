@@ -514,7 +514,7 @@ Check npm for a newer published `@ethosagent/cli` and install it. Detects whethe
 ethos upgrade
 ```
 
-No flags. Calls `npm install -g @ethosagent/cli@latest` if a newer version exists. If you installed from a git clone (`pnpm dev`), it tells you to `git pull` instead.
+No flags. Calls `npm install -g @ethosagent/cli@latest` if a newer version exists. If you installed from a git clone, it tells you to `git pull` instead.
 
 **Examples:**
 

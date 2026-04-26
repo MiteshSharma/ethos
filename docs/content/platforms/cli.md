@@ -10,9 +10,7 @@ The CLI is the default Ethos platform — an interactive terminal chat that pers
 ## Starting the CLI
 
 ```bash
-pnpm dev
-# or
-ethos
+ethos chat
 ```
 
 The CLI auto-runs setup on first launch if `~/.ethos/config.yaml` is missing.

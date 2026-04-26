@@ -31,7 +31,7 @@ const SCRIPTS: PersonalityScript[] = [
   },
 ];
 
-const INSTALL_CMD = 'pnpm add -g @ethosagent/cli';
+const INSTALL_CMD = 'npm install -g @ethosagent/cli';
 
 export default function InstallCard(): ReactNode {
   const [active, setActive] = useState<PersonalityId>('researcher');

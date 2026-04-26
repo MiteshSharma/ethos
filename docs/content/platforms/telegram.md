@@ -9,9 +9,7 @@ The Telegram adapter runs your Ethos agent as a Telegram bot. It supports long-p
 
 ## Installation
 
-```bash
-pnpm add @ethosagent/telegram
-```
+The Telegram adapter ships with the Ethos CLI. If you've already installed `@ethosagent/cli`, you don't need to install anything else — just enable it in your config.
 
 ## Configuration
 

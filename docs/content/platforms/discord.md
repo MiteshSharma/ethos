@@ -9,9 +9,7 @@ The Discord adapter runs your Ethos agent as a Discord bot using the Discord.js 
 
 ## Installation
 
-```bash
-pnpm add @ethosagent/discord
-```
+The Discord adapter ships with the Ethos CLI. If you've already installed `@ethosagent/cli`, you don't need to install anything else — just enable it in your config.
 
 ## Setup
 

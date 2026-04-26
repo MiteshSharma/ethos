@@ -45,7 +45,7 @@ function Hero() {
           </span>
         </Link>
         <div className={styles.heroStripe} aria-hidden="true" />
-        <p className={styles.heroEyebrow}>ethos · personality is architecture</p>
+        <p className={styles.heroEyebrow}>ethos</p>
         <h1 className={styles.heroTitle}>
           {taglineWords.map((word, i) => (
             <span
@@ -59,8 +59,8 @@ function Hero() {
           ))}
         </h1>
         <p className={styles.heroSubtitle}>
-          Each personality is a structural component, not a prompt. A curated toolset. A
-          first-person identity. A memory scope. Specialists ship by default.
+          You wouldn't ask your therapist to file your taxes. So why does your AI? Ethos gives you
+          focused specialists. Switch instantly. Build your own.
         </p>
         <div className={styles.heroActions}>
           <Link className={styles.btnPrimary} to="/docs/getting-started/quickstart">
@@ -123,7 +123,7 @@ function ArchDiagram() {
     <section className={styles.arch}>
       <div className="container">
         <div className={styles.sectionLabel}>how it works</div>
-        <h2 className={styles.sectionTitle}>AgentLoop is a 9-step generator.</h2>
+        <h2 className={styles.sectionTitle}>AgentLoop is a 12-step generator.</h2>
         <p className={styles.sectionSubtitle}>
           Every component is an interface, injected at construction. Personality decides which tools
           enter step 9 and which model handles step 8.
@@ -229,16 +229,16 @@ function WhyNotTeaser() {
 export default function Home(): ReactNode {
   return (
     <Layout
-      title="The agent framework where personality is architecture"
-      description="TypeScript AI agent framework where personality is architecture. Curated toolsets, first-person identities, scoped memory. Specialists, not a generic agent."
+      title="The right AI for the job at hand"
+      description="Five focused AI specialists — researcher, engineer, reviewer, coach, operator. Each has its own tools, memory, and voice. Switch instantly, or build your own."
     >
       <Hero />
       <QuickStart />
       <PersonalityShowcase />
+      <WhyNotTeaser />
+      <FastPaths />
       <ArchDiagram />
       <Compat />
-      <FastPaths />
-      <WhyNotTeaser />
     </Layout>
   );
 }

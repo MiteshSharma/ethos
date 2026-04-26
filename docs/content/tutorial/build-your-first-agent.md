@@ -13,7 +13,7 @@ Prerequisite: completed [Quickstart](../getting-started/quickstart) — `~/.etho
 ## Start a session
 
 ```bash
-make dev
+ethos chat
 ```
 
 Ethos opens an interactive chat session. You'll see:
@@ -75,7 +75,7 @@ This creates a new session. History from the previous session is preserved in SQ
 
 ## Observe session persistence
 
-Exit with `Ctrl+C`, then run `make dev` again. Send:
+Exit with `Ctrl+D`, then run `ethos chat` again. Send:
 
 ```
 > What was the last thing we discussed?

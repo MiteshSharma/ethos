@@ -68,7 +68,7 @@ tools:
 ## 2. Verify the personality loads
 
 ```bash
-pnpm dev
+ethos chat
 /personality researcher
 # Should show: Switched to researcher personality
 ```
@@ -98,7 +98,7 @@ tools:
 ## 4. Run your first research session
 
 ```bash
-pnpm dev
+ethos chat
 /personality researcher
 ```
 

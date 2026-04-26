@@ -9,7 +9,7 @@ This guide walks you through running an Ethos agent as a Telegram bot — from c
 
 ## Prerequisites
 
-- Ethos CLI installed and working (`pnpm dev` runs the chat)
+- Ethos CLI installed and working (`ethos chat` runs locally)
 - A server or VPS (Ubuntu 22.04+, 512MB RAM minimum)
 - Node 24 on the server
 
@@ -19,17 +19,9 @@ This guide walks you through running an Ethos agent as a Telegram bot — from c
 2. Send `/newbot` and follow the prompts
 3. Copy the **bot token** — you'll need it in step 3
 
-## 2. Install the Telegram extension
+## 2. Enable the Telegram adapter
 
-```bash
-pnpm add @ethosagent/telegram
-```
-
-Or if you're using the monorepo:
-
-```bash
-pnpm --filter @ethosagent/cli add @ethosagent/telegram
-```
+The Telegram adapter ships with `@ethosagent/cli` — no extra package install needed. You enable it by adding `telegram` to your config in step 3.
 
 ## 3. Configure `~/.ethos/config.yaml`
 
@@ -49,7 +41,7 @@ telegram:
 ## 4. Test locally
 
 ```bash
-pnpm dev --adapter telegram
+ethos --adapter telegram
 ```
 
 Open Telegram, find your bot, and send `/start`. You should see a response.
@@ -66,13 +58,22 @@ Or set it per-session with `/personality researcher` in the chat.
 
 ## 6. Deploy to a VPS
 
-### Install dependencies
+### Install Ethos on the server
+
+The fastest path is the same one-liner you used locally — it installs Node 24 (via nvm) and the CLI:
 
 ```bash
 # On the server
+curl -fsSL https://ethosagent.ai/install.sh | bash
+npm install -g pm2
+```
+
+If you'd rather install Node manually:
+
+```bash
 curl -fsSL https://deb.nodesource.com/setup_24.x | sudo -E bash -
 sudo apt-get install -y nodejs
-npm install -g pnpm pm2
+npm install -g @ethosagent/cli pm2
 ```
 
 ### Copy your config
@@ -86,13 +87,7 @@ Set your API keys as environment variables in `~/.ethos/config.yaml` or as syste
 ### Start with PM2
 
 ```bash
-# Clone the repo on the server
-git clone https://github.com/MiteshSharma/ethos.git
-cd ethos
-pnpm install
-
-# Start the Telegram adapter
-pm2 start "pnpm dev --adapter telegram" --name ethos-telegram
+pm2 start "ethos --adapter telegram" --name ethos-telegram
 pm2 save
 pm2 startup
 ```

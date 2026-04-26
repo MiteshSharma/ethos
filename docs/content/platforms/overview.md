@@ -65,8 +65,8 @@ adapters:
 Or pass at runtime:
 
 ```bash
-pnpm dev --adapter telegram
-pnpm dev --adapter discord
+ethos --adapter telegram
+ethos --adapter discord
 ```
 
 ## Multi-adapter deployment

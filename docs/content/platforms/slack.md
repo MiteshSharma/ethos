@@ -9,9 +9,7 @@ The Slack adapter connects your Ethos agent to a Slack workspace using the Bolt 
 
 ## Installation
 
-```bash
-pnpm add @ethosagent/slack
-```
+The Slack adapter ships with the Ethos CLI. If you've already installed `@ethosagent/cli`, you don't need to install anything else — just enable it in your config.
 
 ## Setup
 

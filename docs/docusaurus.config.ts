@@ -4,7 +4,7 @@ import { themes as prismThemes } from 'prism-react-renderer';
 
 const config: Config = {
   title: 'Ethos',
-  tagline: 'The agent framework where personality is architecture.',
+  tagline: 'The right AI for the job at hand.',
   favicon: 'img/favicon.svg',
 
   future: {
@@ -60,7 +60,7 @@ const config: Config = {
       {
         name: 'description',
         content:
-          'TypeScript AI agent framework where personality is architecture. Swap personalities to change tool access, memory scope, and model routing in one command.',
+          'Five focused AI specialists — researcher, engineer, reviewer, coach, operator. Each has its own tools, memory, and voice. Switch instantly, or build your own. TypeScript framework, Claude and OpenAI compatible.',
       },
     ],
     colorMode: {

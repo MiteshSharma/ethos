@@ -1,12 +1,12 @@
 ---
 title: Architecture Overview
-description: How AgentLoop works — a 13-step AsyncGenerator turn cycle with fully injectable components.
+description: How AgentLoop works — a 12-step AsyncGenerator turn cycle with fully injectable components.
 sidebar_position: 2
 ---
 
 # Architecture Overview
 
-The core abstraction in Ethos is **`AgentLoop`** — a 13-step `AsyncGenerator<AgentEvent>` that takes a user message and streams typed events back to the caller.
+The core abstraction in Ethos is **`AgentLoop`** — a 12-step `AsyncGenerator<AgentEvent>` that takes a user message and streams typed events back to the caller.
 
 Every component (`LLMProvider`, `SessionStore`, `MemoryProvider`, `PersonalityRegistry`, `ToolRegistry`, `HookRegistry`) is an interface defined in `@ethosagent/types` and injected at construction time. Core never imports concrete implementations.
 

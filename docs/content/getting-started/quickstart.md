@@ -102,6 +102,16 @@ The wizard asks for:
 - **API key** — stored only in `~/.ethos/config.yaml` on your machine
 - **Default personality** — choose from the five built-ins or press Enter for `researcher`
 
+### Don't have an API key yet?
+
+Grab one from your provider — both have free tiers for evaluation:
+
+| Provider | Get a key | Notes |
+|---|---|---|
+| Anthropic | [console.anthropic.com](https://console.anthropic.com/settings/keys) | Best fit for the default `claude-*` models |
+| OpenRouter | [openrouter.ai/keys](https://openrouter.ai/keys) | One key for Claude, GPT, Gemini, Llama, and more — pick `openai-compat` as the provider |
+| OpenAI | [platform.openai.com](https://platform.openai.com/api-keys) | Use `openai-compat` as the provider |
+
 When the wizard finishes:
 
 ```bash
