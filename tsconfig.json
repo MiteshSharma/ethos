@@ -11,6 +11,7 @@
       "@ethosagent/memory-markdown": ["./extensions/memory-markdown/src"],
       "@ethosagent/personalities": ["./extensions/personalities/src"],
       "@ethosagent/session-sqlite": ["./extensions/session-sqlite/src"],
+      "@ethosagent/agent-mesh": ["./extensions/agent-mesh/src"],
       "@ethosagent/acp-server": ["./extensions/acp-server/src"],
       "@ethosagent/cron": ["./extensions/cron/src"],
       "@ethosagent/tools-cron": ["./extensions/tools-cron/src"],

@@ -136,6 +136,13 @@ async function buildConfig(dir: string, id: string): Promise<PersonalityConfig |
 
   const cfg = configSrc ? parseConfigYaml(configSrc) : {};
 
+  const capabilities = cfg.capabilities
+    ? cfg.capabilities
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean)
+    : undefined;
+
   const config: PersonalityConfig = {
     id,
     name: cfg.name ?? titleCase(id),
@@ -144,6 +151,7 @@ async function buildConfig(dir: string, id: string): Promise<PersonalityConfig |
     provider: cfg.provider,
     platform: cfg.platform,
     memoryScope: (cfg.memoryScope as PersonalityConfig['memoryScope']) ?? 'global',
+    ...(capabilities?.length ? { capabilities } : {}),
     ...(ethosExists ? { ethosFile: join(dir, 'ETHOS.md') } : {}),
     ...(skillsExists ? { skillsDirs: [join(dir, 'skills')] } : {}),
     ...(toolsetSrc ? { toolset: parseToolsetYaml(toolsetSrc) } : {}),

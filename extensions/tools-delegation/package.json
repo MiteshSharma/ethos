@@ -13,6 +13,7 @@
     "build": "tsup src/index.ts --format esm --dts"
   },
   "dependencies": {
+    "@ethosagent/agent-mesh": "workspace:*",
     "@ethosagent/types": "workspace:*"
   }
 }

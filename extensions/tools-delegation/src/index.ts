@@ -1,3 +1,4 @@
+import { AgentMesh, defaultRegistryPath } from '@ethosagent/agent-mesh';
 import type { AgentLoop } from '@ethosagent/core';
 import type { Tool, ToolContext, ToolResult } from '@ethosagent/types';
 
@@ -262,9 +263,173 @@ export function createMixtureOfAgentsTool(loop: AgentLoop): Tool {
 }
 
 // ---------------------------------------------------------------------------
+// Mesh routing — HTTP JSON-RPC calls to registered peer agents
+// ---------------------------------------------------------------------------
+
+async function callMeshAgent(
+  host: string,
+  port: number,
+  prompt: string,
+  signal?: AbortSignal,
+): Promise<string> {
+  const base = `http://${host}:${port}/rpc`;
+
+  // Create a fresh session on the remote agent
+  const sessionRes = await fetch(base, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'new_session', params: {} }),
+    signal,
+  });
+  const sessionData = (await sessionRes.json()) as { result?: { sessionKey?: string } };
+  const sessionKey = sessionData.result?.sessionKey ?? `acp:${Date.now()}`;
+
+  // Send the prompt and wait for the full result
+  const promptRes = await fetch(base, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      jsonrpc: '2.0',
+      id: 2,
+      method: 'prompt',
+      params: { sessionKey, text: prompt },
+    }),
+    signal,
+  });
+  const promptData = (await promptRes.json()) as {
+    result?: { text?: string };
+    error?: { message?: string };
+  };
+  if (promptData.error) throw new Error(promptData.error.message ?? 'Remote agent error');
+  return promptData.result?.text ?? '';
+}
+
+export function createRouteToAgentTool(registryPath = defaultRegistryPath()): Tool {
+  return {
+    name: 'route_to_agent',
+    description:
+      'Route a task to the best available mesh agent advertising a given capability. ' +
+      'The mesh registry is read from ~/.ethos/mesh-registry.json. ' +
+      'Agents register via `ethos serve`. ' +
+      "Returns the remote agent's full response. " +
+      'Does not fall back to local execution if no matching agent is found.',
+    toolset: 'delegation',
+    maxResultChars: 20_000,
+    schema: {
+      type: 'object',
+      properties: {
+        capability: {
+          type: 'string',
+          description: 'Capability label to match (e.g. "code", "review", "research")',
+        },
+        prompt: {
+          type: 'string',
+          description: 'Task prompt for the remote agent',
+        },
+      },
+      required: ['capability', 'prompt'],
+    },
+    async execute(args, ctx): Promise<ToolResult> {
+      const { capability, prompt } = args as { capability: string; prompt: string };
+      if (!capability) return { ok: false, error: 'capability is required', code: 'input_invalid' };
+      if (!prompt) return { ok: false, error: 'prompt is required', code: 'input_invalid' };
+
+      const mesh = new AgentMesh(registryPath);
+      const agent = mesh.route(capability);
+      if (!agent) {
+        return {
+          ok: false,
+          error: `no agent available for capability: ${capability}`,
+          code: 'execution_failed',
+        };
+      }
+
+      try {
+        const text = await callMeshAgent(agent.host, agent.port, prompt, ctx.abortSignal);
+        return { ok: true, value: `[${agent.agentId}]\n\n${text}` };
+      } catch (err) {
+        return {
+          ok: false,
+          error: `Agent ${agent.agentId} failed: ${err instanceof Error ? err.message : String(err)}`,
+          code: 'execution_failed',
+        };
+      }
+    },
+  };
+}
+
+export function createBroadcastToAgentsTool(registryPath = defaultRegistryPath()): Tool {
+  return {
+    name: 'broadcast_to_agents',
+    description:
+      'Send a prompt to all live agents in the mesh and return their combined responses. ' +
+      'Useful for getting multiple perspectives or running parallel reviews.',
+    toolset: 'delegation',
+    maxResultChars: 60_000,
+    schema: {
+      type: 'object',
+      properties: {
+        prompt: {
+          type: 'string',
+          description: 'Prompt to send to every live mesh agent',
+        },
+      },
+      required: ['prompt'],
+    },
+    async execute(args, ctx): Promise<ToolResult> {
+      const { prompt } = args as { prompt: string };
+      if (!prompt) return { ok: false, error: 'prompt is required', code: 'input_invalid' };
+
+      const mesh = new AgentMesh(registryPath);
+      const agents = mesh.list();
+      if (agents.length === 0) {
+        return { ok: false, error: 'no live agents in mesh', code: 'execution_failed' };
+      }
+
+      const results = await Promise.allSettled(
+        agents.map(async (agent) => {
+          const text = await callMeshAgent(agent.host, agent.port, prompt, ctx.abortSignal);
+          return { agentId: agent.agentId, text };
+        }),
+      );
+
+      const outputs: string[] = [];
+      const errors: string[] = [];
+      for (const r of results) {
+        if (r.status === 'fulfilled') {
+          outputs.push(`## ${r.value.agentId}\n\n${r.value.text}`);
+        } else {
+          errors.push(String(r.reason));
+        }
+      }
+
+      if (outputs.length === 0) {
+        return {
+          ok: false,
+          error: `All agents failed:\n${errors.join('\n')}`,
+          code: 'execution_failed',
+        };
+      }
+
+      const combined = outputs.join('\n\n---\n\n');
+      const suffix =
+        errors.length > 0
+          ? `\n\n---\n\n*${errors.length} agent(s) failed: ${errors.join('; ')}*`
+          : '';
+      return { ok: true, value: combined + suffix };
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Factory
 // ---------------------------------------------------------------------------
 
-export function createDelegationTools(loop: AgentLoop): Tool[] {
-  return [createDelegateTaskTool(loop), createMixtureOfAgentsTool(loop)];
+export function createDelegationTools(loop: AgentLoop, registryPath?: string): Tool[] {
+  return [
+    createDelegateTaskTool(loop),
+    createMixtureOfAgentsTool(loop),
+    createRouteToAgentTool(registryPath),
+    createBroadcastToAgentsTool(registryPath),
+  ];
 }

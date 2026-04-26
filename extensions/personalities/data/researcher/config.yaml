@@ -2,3 +2,4 @@ name: Researcher
 description: Methodical research agent that prioritises primary sources, flags uncertainty, and shows its reasoning.
 model: claude-opus-4-7
 memoryScope: global
+capabilities: research, web

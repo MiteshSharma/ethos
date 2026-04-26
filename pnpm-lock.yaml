@@ -8,6 +8,9 @@ importers:
 
   .:
     dependencies:
+      '@types/ws':
+        specifier: ^8.18.1
+        version: 8.18.1
       better-sqlite3:
         specifier: ^11.10.0
         version: 11.10.0
@@ -17,6 +20,9 @@ importers:
       playwright:
         specifier: ^1.59.1
         version: 1.59.1
+      ws:
+        specifier: ^8.20.0
+        version: 8.20.0
       zod:
         specifier: ^4.3.6
         version: 4.3.6
@@ -51,6 +57,9 @@ importers:
       '@ethosagent/acp-server':
         specifier: workspace:*
         version: link:../../extensions/acp-server
+      '@ethosagent/agent-mesh':
+        specifier: workspace:*
+        version: link:../../extensions/agent-mesh
       '@ethosagent/batch-runner':
         specifier: workspace:*
         version: link:../../extensions/batch-runner
@@ -138,6 +147,12 @@ importers:
       '@ethosagent/memory-markdown':
         specifier: workspace:*
         version: link:../../extensions/memory-markdown
+      '@ethosagent/session-sqlite':
+        specifier: workspace:*
+        version: link:../../extensions/session-sqlite
+      '@ethosagent/types':
+        specifier: workspace:*
+        version: link:../../packages/types
       ink:
         specifier: ^5.0.0
         version: 5.2.1(@types/react@18.3.28)(react@18.3.1)
@@ -199,6 +214,18 @@ importers:
         version: 6.0.3
 
   extensions/acp-server:
+    dependencies:
+      '@ethosagent/agent-mesh':
+        specifier: workspace:*
+        version: link:../agent-mesh
+      '@ethosagent/types':
+        specifier: workspace:*
+        version: link:../../packages/types
+      ws:
+        specifier: ^8.20.0
+        version: 8.20.0
+
+  extensions/agent-mesh:
     dependencies:
       '@ethosagent/types':
         specifier: workspace:*
@@ -404,6 +431,9 @@ importers:
 
   extensions/tools-delegation:
     dependencies:
+      '@ethosagent/agent-mesh':
+        specifier: workspace:*
+        version: link:../agent-mesh
       '@ethosagent/types':
         specifier: workspace:*
         version: link:../../packages/types

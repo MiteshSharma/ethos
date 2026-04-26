@@ -10,6 +10,7 @@
     "build": "tsup src/index.ts --format esm --banner.js '#!/usr/bin/env node' --out-dir dist"
   },
   "dependencies": {
+    "@ethosagent/agent-mesh": "workspace:*",
     "@ethosagent/acp-server": "workspace:*",
     "@ethosagent/batch-runner": "workspace:*",
     "@ethosagent/platform-email": "workspace:*",

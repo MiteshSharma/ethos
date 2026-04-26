@@ -1,5 +1,5 @@
 {
-  "name": "@ethosagent/acp-server",
+  "name": "@ethosagent/agent-mesh",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -13,8 +13,6 @@
     "build": "tsup src/index.ts --format esm --dts"
   },
   "dependencies": {
-    "@ethosagent/agent-mesh": "workspace:*",
-    "@ethosagent/types": "workspace:*",
-    "ws": "^8.20.0"
+    "@ethosagent/types": "workspace:*"
   }
 }

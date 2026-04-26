@@ -7,6 +7,7 @@ import { runEval } from './commands/eval';
 import { runGatewaySetup, runGatewayStart } from './commands/gateway';
 import { runKeys } from './commands/keys';
 import { runPlugin } from './commands/plugin';
+import { runServe } from './commands/serve';
 import { runSetup } from './commands/setup';
 import { readConfig } from './config';
 
@@ -184,6 +185,16 @@ switch (command) {
     break;
   }
 
+  case 'serve': {
+    const config = await readConfig();
+    if (!config) {
+      console.error('Run ethos setup first.');
+      process.exit(1);
+    }
+    await runServe(args.slice(1), config);
+    break;
+  }
+
   case 'batch': {
     const config = await readConfig();
     if (!config) {
@@ -217,7 +228,7 @@ switch (command) {
   default:
     console.log(`Unknown command: ${command}`);
     console.log(
-      'Usage: ethos [setup | chat | gateway | cron | personality | memory | acp | batch | eval | plugin | keys]',
+      'Usage: ethos [setup | chat | serve | gateway | cron | personality | memory | acp | batch | eval | plugin | keys]',
     );
     process.exit(1);
 }

@@ -1,4 +1,7 @@
 import { Box, Text } from 'ink';
+import { useSkin } from '../skin';
+
+export type AgentStatus = 'idle' | 'thinking' | 'running' | 'interrupted';
 
 interface StatusBarProps {
   model: string;
@@ -6,7 +9,27 @@ interface StatusBarProps {
   inputTokens: number;
   outputTokens: number;
   costUsd: number;
-  running: boolean;
+  status: AgentStatus;
+  currentTool?: string;
+}
+
+function StatusIndicator({ status, currentTool }: { status: AgentStatus; currentTool?: string }) {
+  switch (status) {
+    case 'thinking':
+      return <Text color="yellow"> thinking…</Text>;
+    case 'running':
+      return (
+        <Text color="cyan">
+          {' running'}
+          {currentTool ? `: ${currentTool}` : ''}
+          {'…'}
+        </Text>
+      );
+    case 'interrupted':
+      return <Text color="red"> interrupted</Text>;
+    default:
+      return null;
+  }
 }
 
 export function StatusBar({
@@ -15,17 +38,21 @@ export function StatusBar({
   inputTokens,
   outputTokens,
   costUsd,
-  running,
+  status,
+  currentTool,
 }: StatusBarProps) {
+  const skin = useSkin();
   return (
     <Box marginBottom={1}>
-      <Text bold>ethos</Text>
-      <Text dimColor>
+      <Text bold color={skin.bannerColor}>
+        ethos
+      </Text>
+      <Text color={skin.modelColor}>
         {' '}
         {model} · {personality}
       </Text>
-      {running && <Text color="yellow"> ●</Text>}
-      <Text dimColor>
+      <StatusIndicator status={status} currentTool={currentTool} />
+      <Text color={skin.modelColor}>
         {'  '}
         {inputTokens.toLocaleString()} in · {outputTokens.toLocaleString()} out $
         {costUsd.toFixed(5)}

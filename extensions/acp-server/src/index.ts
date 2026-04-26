@@ -1,7 +1,14 @@
 import { randomUUID } from 'node:crypto';
+import {
+  createServer as createHttpServer,
+  type IncomingMessage,
+  type ServerResponse,
+} from 'node:http';
 import { createInterface } from 'node:readline';
 import type { Readable, Writable } from 'node:stream';
+import type { AgentMesh, MeshEntry } from '@ethosagent/agent-mesh';
 import type { SessionStore } from '@ethosagent/types';
+import { type WebSocket, WebSocketServer } from 'ws';
 
 // ---------------------------------------------------------------------------
 // Local types — avoids depending on @ethosagent/core
@@ -33,13 +40,17 @@ interface Request {
 }
 
 // ---------------------------------------------------------------------------
-// AcpServer — JSON-RPC over NDJSON stdio
+// AcpServer — JSON-RPC 2.0 transport over stdio, HTTP, and WebSocket
 //
-// Protocol:
+// Stdio protocol (existing):
 //   Request:      {"jsonrpc":"2.0","id":1,"method":"...","params":{...}}\n
 //   Notification: {"jsonrpc":"2.0","method":"$/stream","params":{"requestId":1,"event":{...}}}\n
 //   Response:     {"jsonrpc":"2.0","id":1,"result":{...}}\n
 //   Error:        {"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"..."}}\n
+//
+// HTTP transport (Phase 24):
+//   POST /rpc — synchronous JSON-RPC (prompt runs to completion, no streaming)
+//   GET  /ws  — WebSocket with same streaming protocol as stdio
 // ---------------------------------------------------------------------------
 
 export class AcpServer {
@@ -47,9 +58,9 @@ export class AcpServer {
   private readonly session: SessionStore;
   private readonly input: Readable;
   private readonly output: Writable;
-  // tracks AbortControllers for in-flight prompt requests
+  private readonly mesh: AgentMesh | undefined;
   private readonly abortControllers = new Map<Id, AbortController>();
-  // tracks which sessionKeys have an active prompt to prevent concurrent access
+  // tracks which sessionKeys have an active prompt
   private readonly busySessions = new Set<string>();
 
   constructor(config: {
@@ -57,12 +68,22 @@ export class AcpServer {
     session: SessionStore;
     input?: Readable;
     output?: Writable;
+    mesh?: AgentMesh;
   }) {
     this.runner = config.runner;
     this.session = config.session;
     this.input = config.input ?? process.stdin;
     this.output = config.output ?? process.stdout;
+    this.mesh = config.mesh;
   }
+
+  get activeSessionCount(): number {
+    return this.busySessions.size;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Stdio transport (original)
+  // ---------------------------------------------------------------------------
 
   start(): void {
     const rl = createInterface({ input: this.input, terminal: false });
@@ -77,107 +98,288 @@ export class AcpServer {
         return;
       }
       if (req.id !== undefined) {
-        void this.dispatch(req).catch(() => {});
+        void this.dispatch(req, (msg) => this.send(msg)).catch(() => {});
       }
     });
   }
 
-  private async dispatch(req: Request): Promise<void> {
+  // ---------------------------------------------------------------------------
+  // HTTP + WebSocket transport (Phase 24)
+  // ---------------------------------------------------------------------------
+
+  startHttp(port: number): ReturnType<typeof createHttpServer> {
+    const httpServer = createHttpServer((req, res) => {
+      void this.handleHttpRequest(req, res).catch((err) => {
+        if (!res.headersSent) {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: String(err) }));
+        }
+      });
+    });
+
+    const wss = new WebSocketServer({ server: httpServer, path: '/ws' });
+    wss.on('connection', (ws) => this.handleWsConnection(ws));
+
+    httpServer.listen(port);
+    return httpServer;
+  }
+
+  private async handleHttpRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    if (req.method === 'GET' && req.url === '/health') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, activeSessions: this.busySessions.size }));
+      return;
+    }
+
+    if (req.method !== 'POST' || req.url !== '/rpc') {
+      res.writeHead(404);
+      res.end();
+      return;
+    }
+
+    const body = await readBody(req);
+    let rpcReq: Request;
+    try {
+      rpcReq = JSON.parse(body) as Request;
+    } catch {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(
+        JSON.stringify({
+          jsonrpc: '2.0',
+          id: null,
+          error: { code: -32700, message: 'Parse error' },
+        }),
+      );
+      return;
+    }
+
+    // For HTTP, run blocking (no intermediate streaming)
+    const response = await this.handleHttpRpc(rpcReq);
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(response));
+  }
+
+  private async handleHttpRpc(req: Request): Promise<object> {
     const id = req.id ?? null;
     try {
       switch (req.method) {
         case 'initialize':
-          this.handleInitialize(id);
-          break;
-        case 'new_session':
-          this.handleNewSession(id, req.params as { personalityId?: string } | undefined);
-          break;
-        case 'prompt':
-          await this.handlePrompt(
+          return {
+            jsonrpc: '2.0',
             id,
-            req.params as { sessionKey: string; text: string; personalityId?: string },
-          );
-          break;
-        case 'cancel':
-          this.handleCancel(id, req.params as { requestId: Id });
-          break;
-        case 'fork_session':
-          await this.handleForkSession(id, req.params as { sessionKey: string });
-          break;
-        case 'resume_session':
-          await this.handleResumeSession(id, req.params as { sessionKey: string });
-          break;
+            result: {
+              protocolVersion: '1.0',
+              serverName: 'ethos',
+              capabilities: { streaming: true },
+            },
+          };
+
+        case 'new_session':
+          return {
+            jsonrpc: '2.0',
+            id,
+            result: {
+              sessionKey: `acp:${randomUUID()}`,
+              personalityId:
+                (req.params as { personalityId?: string } | undefined)?.personalityId ?? null,
+            },
+          };
+
+        case 'prompt': {
+          const p = req.params as { sessionKey: string; text: string; personalityId?: string };
+          if (this.busySessions.has(p.sessionKey)) {
+            return {
+              jsonrpc: '2.0',
+              id,
+              error: { code: -32000, message: `Session ${p.sessionKey} has a prompt in progress` },
+            };
+          }
+          this.busySessions.add(p.sessionKey);
+          try {
+            const { text, turnCount } = await this.runBlocking(
+              p.text,
+              p.sessionKey,
+              p.personalityId,
+            );
+            return { jsonrpc: '2.0', id, result: { text, turnCount } };
+          } finally {
+            this.busySessions.delete(p.sessionKey);
+          }
+        }
+
+        case 'mesh.register': {
+          const p = req.params as Omit<MeshEntry, 'registeredAt' | 'lastHeartbeatAt'>;
+          if (!this.mesh)
+            return { jsonrpc: '2.0', id, error: { code: -32000, message: 'Mesh not configured' } };
+          this.mesh.register(p);
+          return { jsonrpc: '2.0', id, result: { ok: true } };
+        }
+
+        case 'mesh.status':
+          return { jsonrpc: '2.0', id, result: { agents: this.mesh?.list() ?? [] } };
+
         default:
-          this.sendError(id, -32601, `Method not found: ${req.method}`);
+          return {
+            jsonrpc: '2.0',
+            id,
+            error: { code: -32601, message: `Method not found: ${req.method}` },
+          };
       }
     } catch (err) {
-      this.sendError(id, -32000, err instanceof Error ? err.message : String(err));
+      return {
+        jsonrpc: '2.0',
+        id,
+        error: { code: -32000, message: err instanceof Error ? err.message : String(err) },
+      };
     }
   }
 
-  private handleInitialize(id: Id): void {
-    this.sendResult(id, {
-      protocolVersion: '1.0',
-      serverName: 'ethos',
-      capabilities: { streaming: true },
+  private handleWsConnection(ws: WebSocket): void {
+    const send = (msg: object) => {
+      if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(msg));
+    };
+    const abortControllers = new Map<Id, AbortController>();
+
+    ws.on('message', (data) => {
+      let req: Request;
+      try {
+        req = JSON.parse(data.toString()) as Request;
+      } catch {
+        send({ jsonrpc: '2.0', id: null, error: { code: -32700, message: 'Parse error' } });
+        return;
+      }
+      if (req.id !== undefined) {
+        void this.dispatch(req, send, abortControllers).catch(() => {});
+      }
+    });
+
+    ws.on('close', () => {
+      for (const ac of abortControllers.values()) ac.abort();
     });
   }
 
-  private handleNewSession(id: Id, params?: { personalityId?: string }): void {
-    this.sendResult(id, {
-      sessionKey: `acp:${randomUUID()}`,
-      personalityId: params?.personalityId ?? null,
-    });
-  }
+  // ---------------------------------------------------------------------------
+  // Core dispatch — used by both stdio and WebSocket transports
+  // ---------------------------------------------------------------------------
 
-  private async handlePrompt(
-    id: Id,
-    params: { sessionKey: string; text: string; personalityId?: string },
+  private async dispatch(
+    req: Request,
+    send: (msg: object) => void,
+    abortControllers?: Map<Id, AbortController>,
   ): Promise<void> {
-    const { sessionKey, text, personalityId } = params;
+    const id = req.id ?? null;
+    const controllers = abortControllers ?? this.abortControllers;
 
-    if (this.busySessions.has(sessionKey)) {
-      this.sendError(id, -32000, `Session ${sessionKey} has a prompt in progress`);
-      return;
-    }
-
-    const ac = new AbortController();
-    this.abortControllers.set(id, ac);
-    this.busySessions.add(sessionKey);
+    const sendResult = (result: unknown) => send({ jsonrpc: '2.0', id, result });
+    const sendError = (code: number, message: string) =>
+      send({ jsonrpc: '2.0', id, error: { code, message } });
+    const sendStream = (event: AgentEvent) =>
+      send({ jsonrpc: '2.0', method: '$/stream', params: { requestId: id, event } });
 
     try {
-      let fullText = '';
-      let turnCount = 0;
+      switch (req.method) {
+        case 'initialize':
+          sendResult({
+            protocolVersion: '1.0',
+            serverName: 'ethos',
+            capabilities: { streaming: true },
+          });
+          break;
 
-      for await (const event of this.runner.run(text, {
-        sessionKey,
-        personalityId,
-        abortSignal: ac.signal,
-      })) {
-        if (event.type === 'done') {
-          turnCount = event.turnCount as number;
-        } else {
-          if (event.type === 'text_delta') fullText += event.text as string;
-          this.sendStream(id, event);
+        case 'new_session':
+          sendResult({
+            sessionKey: `acp:${randomUUID()}`,
+            personalityId:
+              (req.params as { personalityId?: string } | undefined)?.personalityId ?? null,
+          });
+          break;
+
+        case 'prompt': {
+          const p = req.params as { sessionKey: string; text: string; personalityId?: string };
+          if (this.busySessions.has(p.sessionKey)) {
+            sendError(-32000, `Session ${p.sessionKey} has a prompt in progress`);
+            return;
+          }
+          const ac = new AbortController();
+          controllers.set(id, ac);
+          this.busySessions.add(p.sessionKey);
+          try {
+            let fullText = '';
+            let turnCount = 0;
+            for await (const event of this.runner.run(p.text, {
+              sessionKey: p.sessionKey,
+              personalityId: p.personalityId,
+              abortSignal: ac.signal,
+            })) {
+              if (event.type === 'done') {
+                turnCount = event.turnCount as number;
+              } else {
+                if (event.type === 'text_delta') fullText += event.text as string;
+                sendStream(event);
+              }
+            }
+            sendResult({ text: fullText, turnCount });
+          } finally {
+            controllers.delete(id);
+            this.busySessions.delete(p.sessionKey);
+          }
+          break;
         }
-      }
 
-      this.sendResult(id, { text: fullText, turnCount });
-    } finally {
-      this.abortControllers.delete(id);
-      this.busySessions.delete(sessionKey);
+        case 'cancel': {
+          const p = req.params as { requestId: Id };
+          controllers.get(p.requestId)?.abort();
+          sendResult({ ok: true });
+          break;
+        }
+
+        case 'fork_session':
+          await this.handleForkSession(id, req.params as { sessionKey: string }, send);
+          break;
+
+        case 'resume_session':
+          await this.handleResumeSession(id, req.params as { sessionKey: string }, send);
+          break;
+
+        case 'mesh.register': {
+          const p = req.params as Omit<MeshEntry, 'registeredAt' | 'lastHeartbeatAt'>;
+          if (!this.mesh) {
+            sendError(-32000, 'Mesh not configured');
+            return;
+          }
+          this.mesh.register(p);
+          sendResult({ ok: true });
+          break;
+        }
+
+        case 'mesh.status':
+          sendResult({ agents: this.mesh?.list() ?? [] });
+          break;
+
+        default:
+          sendError(-32601, `Method not found: ${req.method}`);
+      }
+    } catch (err) {
+      sendError(-32000, err instanceof Error ? err.message : String(err));
     }
   }
 
-  private handleCancel(id: Id, params: { requestId: Id }): void {
-    this.abortControllers.get(params.requestId)?.abort();
-    this.sendResult(id, { ok: true });
-  }
+  // ---------------------------------------------------------------------------
+  // Session helpers
+  // ---------------------------------------------------------------------------
 
-  private async handleForkSession(id: Id, params: { sessionKey: string }): Promise<void> {
+  private async handleForkSession(
+    id: Id,
+    params: { sessionKey: string },
+    send: (msg: object) => void,
+  ): Promise<void> {
+    const sendResult = (r: unknown) => send({ jsonrpc: '2.0', id, result: r });
+    const sendError = (code: number, msg: string) =>
+      send({ jsonrpc: '2.0', id, error: { code, message: msg } });
+
     const source = await this.session.getSessionByKey(params.sessionKey);
     if (!source) {
-      this.sendError(id, -32000, `Session not found: ${params.sessionKey}`);
+      sendError(-32000, `Session not found: ${params.sessionKey}`);
       return;
     }
 
@@ -213,32 +415,62 @@ export class AcpServer {
       });
     }
 
-    this.sendResult(id, { sessionKey: newKey });
+    sendResult({ sessionKey: newKey });
   }
 
-  private async handleResumeSession(id: Id, params: { sessionKey: string }): Promise<void> {
+  private async handleResumeSession(
+    id: Id,
+    params: { sessionKey: string },
+    send: (msg: object) => void,
+  ): Promise<void> {
+    const sendResult = (r: unknown) => send({ jsonrpc: '2.0', id, result: r });
     const s = await this.session.getSessionByKey(params.sessionKey);
     if (!s) {
-      this.sendResult(id, { exists: false, messageCount: 0 });
+      sendResult({ exists: false, messageCount: 0 });
       return;
     }
     const messages = await this.session.getMessages(s.id, { limit: 10_000 });
-    this.sendResult(id, { exists: true, messageCount: messages.length });
+    sendResult({ exists: true, messageCount: messages.length });
+  }
+
+  // ---------------------------------------------------------------------------
+  // Shared helpers
+  // ---------------------------------------------------------------------------
+
+  private async runBlocking(
+    text: string,
+    sessionKey: string,
+    personalityId?: string,
+  ): Promise<{ text: string; turnCount: number }> {
+    let fullText = '';
+    let turnCount = 0;
+    for await (const event of this.runner.run(text, { sessionKey, personalityId })) {
+      if (event.type === 'text_delta') fullText += event.text as string;
+      if (event.type === 'done') turnCount = event.turnCount as number;
+      if (event.type === 'error') throw new Error(event.error as string);
+    }
+    return { text: fullText.trim(), turnCount };
   }
 
   private send(msg: object): void {
     this.output.write(`${JSON.stringify(msg)}\n`);
   }
 
-  private sendResult(id: Id, result: unknown): void {
-    this.send({ jsonrpc: '2.0', id, result });
-  }
-
+  // Keep legacy private helpers for stdio compat (still called by start() via dispatch)
   private sendError(id: Id, code: number, message: string): void {
     this.send({ jsonrpc: '2.0', id, error: { code, message } });
   }
+}
 
-  private sendStream(requestId: Id, event: AgentEvent): void {
-    this.send({ jsonrpc: '2.0', method: '$/stream', params: { requestId, event } });
-  }
+// ---------------------------------------------------------------------------
+// HTTP helpers
+// ---------------------------------------------------------------------------
+
+function readBody(req: IncomingMessage): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    req.on('data', (chunk: Buffer) => chunks.push(chunk));
+    req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
+    req.on('error', reject);
+  });
 }

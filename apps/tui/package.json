@@ -9,6 +9,8 @@
   "dependencies": {
     "@ethosagent/core": "workspace:*",
     "@ethosagent/memory-markdown": "workspace:*",
+    "@ethosagent/session-sqlite": "workspace:*",
+    "@ethosagent/types": "workspace:*",
     "ink": "^5.0.0",
     "react": "^18.3.0"
   },

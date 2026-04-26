@@ -5,6 +5,7 @@ export interface PersonalityConfig {
   ethosFile?: string;
   skillsDirs?: string[];
   toolset?: string[];
+  capabilities?: string[];
   model?: string;
   provider?: string;
   platform?: string;
