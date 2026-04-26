@@ -7,123 +7,98 @@
 [![Node 24+](https://img.shields.io/badge/node-%3E%3D24-brightgreen.svg)](https://nodejs.org)
 [![TypeScript](https://img.shields.io/badge/TypeScript-strict-blue.svg)](https://www.typescriptlang.org/)
 
-**The agent framework where personality is architecture.**
+**Run an AI agent in your terminal, on Telegram, on Slack, or as a scheduled job. Switch personalities to swap tone, tools, and memory in one command.**
 
-Ethos is a TypeScript framework for building AI agents where a *personality* — an `ETHOS.md` identity file, a skills directory, a toolset, and a config — is a structural component, not a system prompt string. Swap personalities to change tone, tool access, memory scope, and model routing in one command.
+Ethos is a TypeScript framework where a *personality* — an `ETHOS.md` identity, a skills directory, an allowed toolset, and a config — is a structural component, not a system prompt string. Same prompt, different personality, different behavior. Every component (LLM provider, session store, memory, tools, hooks, channel adapters) is an interface in `@ethosagent/types` and injected at construction time, so contributors can replace any layer without touching core.
 
----
-
-## What's built
-
-The CLI is working end-to-end against a real LLM.
-
-| Package | What it does |
-|---|---|
-| `@ethosagent/types` | Zero-dep interface contracts — every component implements these |
-| `@ethosagent/core` | `AgentLoop`, `ToolRegistry`, `HookRegistry`, `PluginRegistry`, in-memory defaults |
-| `@ethosagent/llm-anthropic` | `AnthropicProvider` with prompt caching, extended thinking, `AuthRotatingProvider` |
-| `@ethosagent/llm-openai-compat` | `OpenAICompatProvider` for OpenRouter / Ollama / Gemini (with schema normalization) |
-| `@ethosagent/session-sqlite` | WAL-mode SQLite session store with FTS5 full-text search |
-| `@ethosagent/memory-markdown` | Reads `~/.ethos/MEMORY.md` + `USER.md` on prefetch, applies updates on sync |
-| `@ethosagent/personalities` | Loads built-in + user personalities from disk with mtime hot-reload |
-| `@ethosagent/cli` | `ethos setup`, `ethos chat`, `ethos personality`, `ethos memory` commands |
-
-**51 tests passing. Zero TypeScript errors.**
-
----
-
-## Getting started
-
-**Prerequisites:** [nvm](https://github.com/nvm-sh/nvm)
+📖 [Docs](https://ethosagent.ai) · [Roadmap](./plan/PLAN.md) · [Project guidelines](./CLAUDE.md)
 
 ```bash
-# One-time machine setup (nvm, Node 24, pnpm)
-make setup
+# Install (recommended)
+curl -fsSL https://ethosagent.ai/install.sh | bash
 
-# Install workspace dependencies
-make prepare
+# Or via npm — Node 24+
+npm i -g @ethosagent/cli && ethos setup
 
-# First run — launches setup wizard, then opens chat
-make dev
+# Or from source (contributors)
+git clone https://github.com/MiteshSharma/ethos && cd ethos && make setup
 ```
 
-### First-run wizard
+---
 
-`ethos setup` asks for your LLM provider, model, API key, and default personality, then writes `~/.ethos/config.yaml` and scaffolds the directory:
+## What you can do with it
 
+**Ask a research question, get a cited answer.**
+
+```text
+$ ethos chat
+You: what changed in Postgres 17's logical replication?
+researcher: Postgres 17 added two improvements to logical replication: …
+            [1] postgresql.org/docs/17/logical-replication-row-filters
+            [2] aws.amazon.com/blogs/database/...
 ```
-~/.ethos/
-├── config.yaml       ← provider, model, api key, personality
-├── MEMORY.md         ← rolling context (what's been happening)
-├── USER.md           ← who you are (role, preferences, expertise)
-├── sessions.db       ← SQLite session history (WAL + FTS5)
-└── personalities/    ← drop custom personalities here
+
+**Switch personality and watch the same prompt behave differently.**
+
+```text
+You: clean up the build artifacts in this folder
+
+operator:  I'll list what I'd remove first. Found 47 files in `dist/` and 12 in
+           `coverage/`. Run `rm -rf dist/ coverage/` to delete them — confirm? (y/N)
+
+engineer:  ⏵ terminal rm -rf dist/ coverage/
+           → done.
 ```
 
-### Chat
+**Schedule it — let it work while you sleep.**
 
 ```bash
-make dev        # start interactive chat
-
-# Inside the chat:
-/personality list       # list available personalities
-/personality engineer   # switch to engineer
-/memory                 # show current memory
-/usage                  # token and cost stats
-/new                    # start a fresh session
-/help                   # all commands
+$ ethos cron create "every weekday at 9am" \
+    --personality researcher \
+    --task "summarize my unread Slack DMs and email me the digest"
 ```
 
-Sessions persist across restarts. The session key is scoped to your working directory, so different projects get separate conversation histories.
+Same agent, three modes: terminal, daemonless cron, plus opt-in channels (Telegram, Slack, Discord, WhatsApp, Email).
 
 ---
 
-## Configuration
+## Try it locally (≈ 2 minutes)
 
-`~/.ethos/config.yaml` — edit directly or run `make dev` to use the setup wizard.
+You'll need Node 24+ (the installer takes care of it) and an Anthropic, OpenRouter, Ollama, or Gemini API key.
 
-```yaml
-# ── Required ──────────────────────────────────────────────────────────────────
-provider: anthropic          # anthropic | openrouter | ollama | gemini | <any name>
-model: claude-opus-4-7       # model ID for your provider
-apiKey: sk-ant-...           # API key
-personality: researcher      # active personality (see Built-in personalities below)
+```bash
+# 1. Install
+curl -fsSL https://ethosagent.ai/install.sh | bash
 
-# ── Provider endpoint (required for non-Anthropic providers) ──────────────────
-baseUrl: https://openrouter.ai/api/v1   # omit for Anthropic
+# 2. Configure
+ethos setup
+#   provider: anthropic
+#   model:    claude-opus-4-7
+#   api key:  sk-ant-...
+#   personality: researcher
 
-# ── Per-personality model overrides ──────────────────────────────────────────
-# Resolution order: modelRouting[personality] → model (base)
-modelRouting.researcher: anthropic/claude-opus-4-7
-modelRouting.engineer: moonshotai/kimi-k2.6
-
-# ── Telegram gateway ──────────────────────────────────────────────────────────
-telegramToken: 123456:ABC-...
-
-# ── Discord gateway ───────────────────────────────────────────────────────────
-discordToken: ...
-
-# ── Slack gateway ─────────────────────────────────────────────────────────────
-slackBotToken: xoxb-...
-slackAppToken: xapp-...
-slackSigningSecret: ...
-
-# ── Email gateway ─────────────────────────────────────────────────────────────
-emailImapHost: imap.gmail.com
-emailImapPort: 993
-emailUser: you@example.com
-emailPassword: ...
-emailSmtpHost: smtp.gmail.com
-emailSmtpPort: 587
+# 3. Run
+ethos chat
 ```
 
-Supported providers: `anthropic`, or any OpenAI-compatible endpoint (OpenRouter, Ollama, Gemini) — set `baseUrl` to the endpoint and use that provider's model ID format.
+Inside chat:
+
+```text
+/personality list       list available personalities
+/personality engineer   switch personality (changes tools, tone, model)
+/memory                 show what the agent remembers about you
+/usage                  show tokens spent and estimated cost
+/new                    start a fresh session
+/help                   all commands
+```
+
+Sessions persist across restarts. The session key is scoped to your working directory (`cli:<cwd-basename>`), so different projects get separate conversation histories.
 
 ---
 
-## Built-in personalities
+## Personalities — the central abstraction
 
-Five personalities ship out of the box. Each has an `ETHOS.md` identity, a curated toolset, and a memory scope.
+Five personalities ship out of the box. Each has its own `ETHOS.md`, allowed toolset, and memory scope.
 
 | Personality | Identity | Toolset | Memory |
 |---|---|---|---|
@@ -133,76 +108,147 @@ Five personalities ship out of the box. Each has an `ETHOS.md` identity, a curat
 | `coach` | Warm, questioning, growth-focused | web + memory | global |
 | `operator` | Cautious, confirms before acting, dry-run first | terminal + file + code (no web) | per-personality |
 
-Switch with `/personality <id>` in chat or `ethos personality set <id>` from the shell.
-
 Add your own by dropping a directory into `~/.ethos/personalities/<id>/`:
 
-```
+```text
 ~/.ethos/personalities/strategist/
-├── ETHOS.md        ← who the agent is
+├── ETHOS.md        ← who the agent is (first-person identity)
 ├── config.yaml     ← name, model, memoryScope
 └── toolset.yaml    ← list of allowed tools
 ```
 
+The personality directory is mtime-cached and hot-reloads on edit. The personality schema is intentionally small and frozen — see [Design doctrine](#design-doctrine) before proposing additions.
+
 ---
 
-## Coming from OpenClaw? Bring your existing setup
+## Surfaces
 
-Ethos is OpenClaw-compatible. Migrate in one command, and reach the entire [clawhub](https://www.npmjs.com/package/clawhub) skill catalog without forks or shims.
+The CLI is the supported install. Channels and integrations are opt-in — if you only want `ethos chat`, you never need a daemon running.
 
-**Migrate an existing OpenClaw install**
+| Surface | Setup | Use it for |
+|---|---|---|
+| **Telegram** | add `telegramToken`, run `ethos gateway start` | Chat with the agent from your phone |
+| **Discord** | add `discordToken`, run `ethos gateway start` | Personal or team bot |
+| **Slack** | add `slackBotToken` + `slackAppToken`, run `ethos gateway start` | Workspace-wide agent |
+| **WhatsApp** | run `ethos gateway start` and scan QR | Same agent, in WhatsApp |
+| **Email** | add IMAP/SMTP creds | Reply by email; scheduled inbox digests |
+| **Cron** | `ethos cron create "<schedule>" --task "..."` | Scheduled jobs that share memory and skills |
+| **VS Code (ACP)** | install the Ethos extension | Sidebar chat with full agent inside the editor |
+| **MCP** | add a server to `~/.ethos/config.yaml` | Auto-register any MCP server's tools |
+| **Skills (clawhub)** | `ethos skills install <slug>` | Community skill catalog runs unmodified |
+
+---
+
+## Configuration
+
+`~/.ethos/config.yaml` — `ethos setup` writes a working version on first run; edit directly to add channels.
+
+```yaml
+provider: anthropic              # anthropic | openrouter | ollama | gemini
+model:    claude-opus-4-7
+apiKey:   sk-ant-...
+personality: researcher
+
+# Optional — different model per personality
+modelRouting:
+  researcher: anthropic/claude-opus-4-7
+  engineer:   moonshotai/kimi-k2.6
+
+# Optional — opt into channels
+telegramToken: 123456:ABC-...
+slackBotToken: xoxb-...
+```
+
+Full reference: [docs/configuration](https://ethosagent.ai/configuration).
+
+---
+
+## Migrating from OpenClaw
+
+<details>
+<summary>One-command migration from <code>~/.openclaw/</code> to <code>~/.ethos/</code></summary>
 
 ```bash
-ethos claw migrate --dry-run     # preview the plan
-ethos claw migrate               # apply (idempotent — safe to re-run)
+ethos claw migrate --dry-run   # preview the plan
+ethos claw migrate             # apply (idempotent)
 ```
 
-Memory, skills, platform tokens, and API keys copy in place from `~/.openclaw/` into `~/.ethos/`. Your `SOUL.md` becomes a migrated personality; built-in matches resolve automatically. Use `--preset user-data` to skip personality migration, `--overwrite` to clobber existing files, `-y` to skip the confirmation prompt.
-
-**Install any clawhub skill**
+Memory, skills, platform tokens, and API keys copy in place. Your `SOUL.md` becomes a migrated personality; existing OpenClaw skills run unmodified through the compat layer.
 
 ```bash
-ethos skills install steipete/slack         # any clawhub slug
-ethos skills install github:owner/repo      # any GitHub source
-ethos skills list                            # show installed
-ethos skills update                          # update all
-ethos skills remove <slug>                   # remove one
+ethos skills install steipete/slack    # any clawhub slug works
+ethos skills install github:owner/repo # any GitHub source
 ```
 
-Skills install into `~/.ethos/skills/` and the OpenClaw-compat layer parses `SKILL.md` frontmatter, environment substitutions, and OS gates — so the full clawhub catalog runs unmodified inside your personality's toolset. Uses a globally-installed `clawhub` if present, otherwise falls back to `npx clawhub@latest`.
+Flags: `--preset user-data` (skip personality), `--overwrite`, `-y` (skip confirmation).
+
+</details>
 
 ---
 
-## Monorepo structure
+## Embed ethos in your own app
 
-```
-ethos/
-├── packages/
-│   ├── types/              # @ethosagent/types    — zero-dep interface contracts
-│   └── core/               # @ethosagent/core     — AgentLoop + registries
-│
-├── extensions/
-│   ├── llm-anthropic/      # @ethosagent/llm-anthropic
-│   ├── llm-openai-compat/  # @ethosagent/llm-openai-compat
-│   ├── session-sqlite/     # @ethosagent/session-sqlite
-│   ├── memory-markdown/    # @ethosagent/memory-markdown
-│   └── personalities/      # @ethosagent/personalities  (+ 5 built-in personality bundles)
-│
-├── apps/
-│   └── ethos/              # @ethosagent/cli  — the ethos command
-│
-└── plan/                   # Architecture notes and roadmap
+`@ethosagent/core` and `@ethosagent/types` are published separately so you can use the `AgentLoop` directly without the CLI.
+
+```bash
+npm install @ethosagent/core @ethosagent/types @ethosagent/llm-anthropic @ethosagent/session-sqlite
 ```
 
-**Tooling:** pnpm workspaces · TypeScript 6 · tsx (dev) · tsup (prod) · vitest · Biome · Node 24
+```typescript
+import { AgentLoop } from '@ethosagent/core';
+import { AnthropicProvider } from '@ethosagent/llm-anthropic';
+import { SQLiteSessionStore } from '@ethosagent/session-sqlite';
+
+const loop = new AgentLoop({
+  llm: new AnthropicProvider({ apiKey: process.env.ANTHROPIC_API_KEY! }),
+  sessionStore: new SQLiteSessionStore('./sessions.db'),
+  // memoryProvider, personalityRegistry, toolRegistry — see docs
+});
+
+for await (const event of loop.run({ sessionKey: 'my-app:123', text: 'hello' })) {
+  if (event.type === 'text_delta') process.stdout.write(event.text);
+}
+```
+
+Plugin authors should depend on `@ethosagent/types` + `@ethosagent/plugin-sdk` only — those are the stable contract surface (see [Design doctrine](#design-doctrine)).
 
 ---
+
+# Contributing
+
+The rest of this README is for people who want to work on ethos. Read [CLAUDE.md](./CLAUDE.md) too — it's the long-form companion that captures the gotchas and conventions discovered during development.
+
+## Set up for development
+
+```bash
+git clone https://github.com/MiteshSharma/ethos
+cd ethos
+
+make setup       # installs nvm, Node 24, pnpm, gstack
+make prepare     # pnpm install across workspaces
+make check       # typecheck + lint + test (run this before every PR)
+make dev         # start the agent locally
+```
+
+Path aliases in `tsconfig.json` point all `@ethosagent/*` imports to `./src/` directly — no build step in dev. `tsx` handles extensionless TypeScript imports; `tsup` bundles for production.
+
+| Command | What it does |
+|---|---|
+| `make setup` | First-time machine setup (nvm, Node 24, pnpm) |
+| `make prepare` | Install all workspace dependencies |
+| `make dev` | Run the CLI from source with `tsx` |
+| `make check` | Full CI pass — typecheck + lint + vitest |
+| `make test` | `vitest run` |
+| `make typecheck` | `tsc --noEmit` across workspaces |
+| `make lint` | `biome check .` |
+| `make format` | `biome check --write .` |
+| `make clean` | Remove `node_modules` and `dist` |
 
 ## Architecture
 
 The core abstraction is **`AgentLoop`** — a 13-step `AsyncGenerator<AgentEvent>` that takes a user message and streams typed events back. Every component is an interface defined in `@ethosagent/types` and injected at construction time.
 
-```
+```text
 ~/.ethos/config.yaml
         │
         ▼
@@ -230,26 +276,98 @@ The core abstraction is **`AgentLoop`** — a 13-step `AsyncGenerator<AgentEvent
     └── agent_done hooks
 ```
 
-Extension points: `LLMProvider`, `SessionStore`, `MemoryProvider`, `ToolRegistry`, `HookRegistry`, `PlatformAdapter`, `ContextInjector`, `PersonalityRegistry`.
+**Extension points** (any of these can be replaced without touching core):
 
----
+`LLMProvider` · `SessionStore` · `MemoryProvider` · `ToolRegistry` · `HookRegistry` · `PlatformAdapter` · `ContextInjector` · `PersonalityRegistry`
 
-## Development
+## Monorepo layout
 
-| Command | Description |
-|---|---|
-| `make setup` | Install nvm, Node 24, pnpm, and gstack |
-| `make prepare` | Install all workspace dependencies |
-| `make dev` | Start ethos in interactive chat mode |
-| `make test` | Run the test suite |
-| `make typecheck` | Type-check the full workspace |
-| `make lint` | Run Biome linter |
-| `make format` | Auto-format with Biome |
-| `make check` | typecheck + lint + test (full CI pass) |
-| `make clean` | Remove `node_modules` and `dist` output |
+```text
+ethos/
+├── packages/
+│   ├── types/                  @ethosagent/types               zero-dep interface contracts
+│   ├── core/                   @ethosagent/core                AgentLoop + registries + defaults
+│   ├── plugin-sdk/             @ethosagent/plugin-sdk          tool/memory/adapter helpers + testing utils
+│   └── plugin-contract/        @ethosagent/plugin-contract     marketplace validation schema
+│
+├── extensions/
+│   ├── llm-anthropic/          AnthropicProvider, prompt caching, AuthRotatingProvider
+│   ├── llm-openai-compat/      OpenAICompatProvider for OpenRouter / Ollama / Gemini
+│   ├── session-sqlite/         WAL + FTS5 session store
+│   ├── memory-markdown/        MEMORY.md / USER.md provider
+│   ├── memory-vector/          SQLite vector memory
+│   ├── personalities/          5 built-in personalities + FilePersonalityRegistry
+│   ├── skills/                 SkillsInjector + clawhub compat layer
+│   ├── gateway/                Lane-based concurrency + dedup cache
+│   ├── platform-{telegram,discord,slack,whatsapp,email}/
+│   ├── tools-{file,terminal,web,memory,browser,code,cron,delegation,mcp}/
+│   ├── acp-server/             JSON-RPC over stdio + HTTP/WS
+│   ├── agent-mesh/             ACP-native peer mesh
+│   ├── batch-runner/           Atropos JSONL batch runs
+│   ├── eval-harness/           Scored eval runner
+│   ├── skill-evolver/          Self-generating skills
+│   └── claw-migrate/           OpenClaw → Ethos migration
+│
+├── apps/
+│   ├── ethos/                  @ethosagent/cli                 the binary
+    ├── tui/                    Terminal UI
+    └── vscode-extension/       VS Code sidebar
 
----
+```
+
+**Tooling:** pnpm workspaces · TypeScript 6 (strict) · tsx (dev) · tsup (prod) · vitest 4 · Biome 2 · Node 24
+
+## How to extend ethos
+
+| Adding a... | Where it goes | Reference |
+|---|---|---|
+| **LLM provider** | new `extensions/llm-<name>/` implementing `LLMProvider` | [CLAUDE.md → Adding a new LLM provider](./CLAUDE.md#adding-a-new-llm-provider) |
+| **Tool** | implement `Tool<TArgs>`; group by `toolset`; declare `maxResultChars` | [CLAUDE.md → Adding a new tool](./CLAUDE.md#adding-a-new-tool) |
+| **Personality** | drop a directory in `~/.ethos/personalities/<id>/` or `extensions/personalities/data/` | [CLAUDE.md → Adding a personality](./CLAUDE.md#adding-a-personality) |
+| **Channel adapter** | new `extensions/platform-<name>/` implementing `PlatformAdapter` | study `platform-telegram` and `platform-discord` |
+| **Plugin (npm)** | depend on `@ethosagent/plugin-sdk`; ship `index.ts` exporting your factory |  |
+| **Hook** | call `hookRegistry.register{Void,Modifying,Claiming}(eventName, handler)` — pick the model that fits | [CLAUDE.md → Hook registry](./CLAUDE.md#hook-registry) |
+
+## Testing & quality gates
+
+`make check` is the gate. It runs:
+
+- **`tsc --noEmit`** across all workspaces. Strict mode is on. `noNonNullAssertion` is enforced — no `array[n]!` or `map.get(key)!`.
+- **`biome check .`** — single quotes, 2-space indent, 100-char line width. Auto-fix with `make format`.
+- **`vitest run`** — unit + integration tests. Add a test for every contract change. Integration tests against SQLite must hit a real database, not mocks.
+
+A few non-obvious testing rules captured the hard way (full list in [CLAUDE.md → Learnings](./CLAUDE.md#learnings-from-building-this-codebase)):
+
+- SQLite `STRICT` tables enforce column types — pass properly typed values to `.run()`.
+- Same-timestamp inserts need `rowid` tie-breaking; `getMessages` returns the *newest* N, not the oldest.
+- Every `tool_use` block in an Anthropic message needs a matching `tool_result` in the next user message — including for hook-rejected tools.
+- OpenAI tool-call streaming is index-keyed, not ID-keyed — build a `Map<number, …>` keyed by index.
+
+## Design doctrine
+
+Read these *before* opening a non-trivial PR. They're the rules that decide whether changes get merged.
+
+1. **Simplicity first.** Minimum code that solves the problem. No abstractions for single-use code. No "configurability" that wasn't requested. If you write 200 lines and it could be 50, rewrite it.
+2. **Surgical changes.** Touch only what the task requires. Don't refactor adjacent code, comments, or formatting. Match existing style even if you'd do it differently.
+3. **Interface contracts first.** All extension points live in `@ethosagent/types`. Core never imports concrete implementations. `@ethosagent/types` has zero runtime deps — keep it that way.
+4. **Personality schema is frozen.** Adding a top-level field to `PersonalityConfig` requires a CHANGELOG entry justifying why it isn't a skill, a tool, or a memory section.
+5. **Plugin contract version gate.** Any field rename, removal, or required-field addition in `@ethosagent/plugin-contract` is a major bump. Loaders reject incompatible majors.
+6. **No daemon dependence.** No top-level feature requires the gateway to be running. Cron, skills, memory, evals, delegation must work CLI-first.
+7. **Tool progress is internal by default.** `tool_progress` events default to `audience: 'internal'` — UI surfaces ignore them. User-visible progress is opt-in per event.
+8. **Subagent task lives in the first user message.** Never the system prompt. Never both.
+
+The full long-form list is in [CLAUDE.md](./CLAUDE.md) — including SQLite gotchas, Anthropic SDK quirks, OpenAI streaming patterns, and why we use `tsx` instead of `--experimental-strip-types`.
+
+## Contribution workflow
+
+1. Open an issue first for non-trivial changes — alignment is cheaper than rework.
+2. Branch from `main`, keep changes surgical, run `make check` before pushing.
+3. Add tests for every contract change; the test should fail without your change.
+4. Reference the related work or section in CLAUDE.md in your PR description.
+5. PRs touching `PersonalityConfig`, `@ethosagent/plugin-contract`, or `@ethosagent/types` need explicit review against the design doctrine above.
+
+A `CONTRIBUTING.md` with the long-form version of the workflow is on the way. Until then, this section + [CLAUDE.md](./CLAUDE.md) is the source of truth.
 
 ## License
 
-MIT
+[MIT](./LICENSE)
