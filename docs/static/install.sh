@@ -13,7 +13,7 @@
 #   3. Runs `npm install -g @ethosagent/cli@<version>`
 #   4. Optionally runs `ethos setup` immediately after install
 #
-# Source: https://github.com/ethosagent/ethos/blob/main/docs/static/install.sh
+# Source: https://github.com/MiteshSharma/ethos/blob/main/docs/static/install.sh
 
 set -euo pipefail
 

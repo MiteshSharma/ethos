@@ -1,5 +1,12 @@
 # Ethos
 
+[![CI](https://github.com/MiteshSharma/ethos/actions/workflows/ci.yml/badge.svg)](https://github.com/MiteshSharma/ethos/actions/workflows/ci.yml)
+[![npm version](https://img.shields.io/npm/v/@ethosagent/cli.svg)](https://www.npmjs.com/package/@ethosagent/cli)
+[![npm downloads](https://img.shields.io/npm/dm/@ethosagent/cli.svg)](https://www.npmjs.com/package/@ethosagent/cli)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Node 24+](https://img.shields.io/badge/node-%3E%3D24-brightgreen.svg)](https://nodejs.org)
+[![TypeScript](https://img.shields.io/badge/TypeScript-strict-blue.svg)](https://www.typescriptlang.org/)
+
 **The agent framework where personality is architecture.**
 
 Ethos is a TypeScript framework for building AI agents where a *personality* — an `ETHOS.md` identity file, a skills directory, a toolset, and a config — is a structural component, not a system prompt string. Swap personalities to change tone, tool access, memory scope, and model routing in one command.

@@ -66,7 +66,7 @@ function Hero() {
           <Link className={styles.btnPrimary} to="/docs/getting-started/quickstart">
             Get started
           </Link>
-          <Link className={styles.btnGhost} href="https://github.com/ethosagent/ethos">
+          <Link className={styles.btnGhost} href="https://github.com/MiteshSharma/ethos">
             View on GitHub
           </Link>
         </div>

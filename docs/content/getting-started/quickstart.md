@@ -68,7 +68,7 @@ If you don't have Node 24, the simplest path is the one-liner — it sets up nvm
 For contributors and source readers:
 
 ```bash
-git clone https://github.com/ethosagent/ethos.git
+git clone https://github.com/MiteshSharma/ethos.git
 cd ethos
 pnpm install
 pnpm dev          # tsx apps/ethos/src/index.ts

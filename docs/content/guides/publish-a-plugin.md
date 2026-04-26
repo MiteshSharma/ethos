@@ -191,4 +191,4 @@ Once published, your plugin will be discoverable via:
 npm search ethos-plugin
 ```
 
-Consider submitting it to the [Ethos plugin registry](https://github.com/ethosagent/ethos/discussions) by opening a discussion.
+Consider submitting it to the [Ethos plugin registry](https://github.com/MiteshSharma/ethos/discussions) by opening a discussion.

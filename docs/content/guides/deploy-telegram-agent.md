@@ -87,7 +87,7 @@ Set your API keys as environment variables in `~/.ethos/config.yaml` or as syste
 
 ```bash
 # Clone the repo on the server
-git clone https://github.com/ethosagent/ethos.git
+git clone https://github.com/MiteshSharma/ethos.git
 cd ethos
 pnpm install
 

@@ -36,7 +36,7 @@ const config: Config = {
         docs: {
           path: 'content',
           sidebarPath: './sidebars.ts',
-          editUrl: 'https://github.com/ethosagent/ethos/tree/main/docs/',
+          editUrl: 'https://github.com/MiteshSharma/ethos/tree/main/docs/',
         },
         blog: false,
         theme: {
@@ -95,7 +95,7 @@ const config: Config = {
           position: 'left',
         },
         {
-          href: 'https://github.com/ethosagent/ethos',
+          href: 'https://github.com/MiteshSharma/ethos',
           label: 'GitHub',
           position: 'right',
         },
@@ -116,9 +116,9 @@ const config: Config = {
         {
           title: 'Community',
           items: [
-            { label: 'GitHub', href: 'https://github.com/ethosagent/ethos' },
-            { label: 'Issues', href: 'https://github.com/ethosagent/ethos/issues' },
-            { label: 'Releases', href: 'https://github.com/ethosagent/ethos/releases' },
+            { label: 'GitHub', href: 'https://github.com/MiteshSharma/ethos' },
+            { label: 'Issues', href: 'https://github.com/MiteshSharma/ethos/issues' },
+            { label: 'Releases', href: 'https://github.com/MiteshSharma/ethos/releases' },
           ],
         },
       ],

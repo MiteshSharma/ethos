@@ -189,8 +189,8 @@ pnpm install --force
 
 ## Getting help
 
-- **GitHub Issues**: [github.com/ethosagent/ethos/issues](https://github.com/ethosagent/ethos/issues)
-- **Discussions**: [github.com/ethosagent/ethos/discussions](https://github.com/ethosagent/ethos/discussions)
+- **GitHub Issues**: [github.com/MiteshSharma/ethos/issues](https://github.com/MiteshSharma/ethos/issues)
+- **Discussions**: [github.com/MiteshSharma/ethos/discussions](https://github.com/MiteshSharma/ethos/discussions)
 
 When filing a bug, include:
 - Node version (`node --version`)
