@@ -1,6 +1,6 @@
 {
   "name": "@ethosagent/plugin-contract",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": false,
   "type": "module",
   "description": "Plugin contract validation for the Ethos plugin marketplace",

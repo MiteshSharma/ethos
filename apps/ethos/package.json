@@ -1,6 +1,6 @@
 {
   "name": "@ethosagent/cli",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Ethos — TypeScript AI agent framework where personality is architecture. Curated toolsets, first-person identities, scoped memory.",
   "keywords": [
     "agent",
@@ -26,7 +26,11 @@
   "bin": {
     "ethos": "./dist/index.js"
   },
-  "files": ["dist", "README.md", "LICENSE"],
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
   "engines": {
     "node": ">=24"
   },
