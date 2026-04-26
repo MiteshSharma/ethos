@@ -161,6 +161,53 @@ function ArchDiagram() {
   );
 }
 
+function Compat() {
+  return (
+    <section className={styles.compat}>
+      <div className="container">
+        <div className={styles.sectionLabel}>ecosystem</div>
+        <h2 className={styles.sectionTitle}>Bring your existing setup.</h2>
+        <p className={styles.sectionSubtitle}>
+          OpenClaw users migrate in one command. Any clawhub skill installs into Ethos directly —
+          the entire catalog becomes your toolset, no forks, no shims.
+        </p>
+        <div className={styles.compatRows}>
+          <div className={styles.compatRow}>
+            <div className={styles.compatHeading}>
+              <span className={styles.compatBadge}>migrate</span>
+              <span className={styles.compatTitle}>from openclaw</span>
+            </div>
+            <pre className={styles.compatCommand}>
+              {`$ ethos claw migrate --dry-run
+# preview the plan, then re-run without --dry-run`}
+            </pre>
+            <p className={styles.compatNote}>
+              Memory, skills, platform tokens, and API keys copy in place. Your <code>SOUL.md</code>{' '}
+              becomes a migrated personality; built-in matches resolve automatically. Idempotent —
+              safe to re-run.
+            </p>
+          </div>
+          <div className={styles.compatRow}>
+            <div className={styles.compatHeading}>
+              <span className={styles.compatBadge}>install</span>
+              <span className={styles.compatTitle}>any clawhub skill</span>
+            </div>
+            <pre className={styles.compatCommand}>
+              {`$ ethos skills install steipete/slack
+# any slug clawhub serves, just works`}
+            </pre>
+            <p className={styles.compatNote}>
+              The OpenClaw-compat layer parses <code>SKILL.md</code> frontmatter, environment
+              substitutions, and OS gates — so the full clawhub catalog runs unmodified inside your
+              personality's toolset.
+            </p>
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+}
+
 function WhyNotTeaser() {
   return (
     <section className={styles.teaser}>
@@ -189,6 +236,7 @@ export default function Home(): ReactNode {
       <QuickStart />
       <PersonalityShowcase />
       <ArchDiagram />
+      <Compat />
       <FastPaths />
       <WhyNotTeaser />
     </Layout>

@@ -146,6 +146,33 @@ Add your own by dropping a directory into `~/.ethos/personalities/<id>/`:
 
 ---
 
+## Coming from OpenClaw? Bring your existing setup
+
+Ethos is OpenClaw-compatible. Migrate in one command, and reach the entire [clawhub](https://www.npmjs.com/package/clawhub) skill catalog without forks or shims.
+
+**Migrate an existing OpenClaw install**
+
+```bash
+ethos claw migrate --dry-run     # preview the plan
+ethos claw migrate               # apply (idempotent — safe to re-run)
+```
+
+Memory, skills, platform tokens, and API keys copy in place from `~/.openclaw/` into `~/.ethos/`. Your `SOUL.md` becomes a migrated personality; built-in matches resolve automatically. Use `--preset user-data` to skip personality migration, `--overwrite` to clobber existing files, `-y` to skip the confirmation prompt.
+
+**Install any clawhub skill**
+
+```bash
+ethos skills install steipete/slack         # any clawhub slug
+ethos skills install github:owner/repo      # any GitHub source
+ethos skills list                            # show installed
+ethos skills update                          # update all
+ethos skills remove <slug>                   # remove one
+```
+
+Skills install into `~/.ethos/skills/` and the OpenClaw-compat layer parses `SKILL.md` frontmatter, environment substitutions, and OS gates — so the full clawhub catalog runs unmodified inside your personality's toolset. Uses a globally-installed `clawhub` if present, otherwise falls back to `npx clawhub@latest`.
+
+---
+
 ## Monorepo structure
 
 ```

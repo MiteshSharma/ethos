@@ -66,6 +66,7 @@ const sidebars: SidebarsConfig = {
         'guides/deploy-telegram-agent',
         'guides/build-research-agent',
         'guides/publish-a-plugin',
+        'guides/migrate-from-openclaw',
       ],
     },
     {
