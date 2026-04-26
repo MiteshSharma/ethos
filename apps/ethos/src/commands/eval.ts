@@ -1,8 +1,10 @@
 import { readFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import { parseTasksJsonl } from '@ethosagent/batch-runner';
 import { EvalRunner, parseExpectedJsonl } from '@ethosagent/eval-harness';
-import type { EthosConfig } from '../config';
-import { createAgentLoop } from '../wiring';
+import { loadEvolveConfig, SkillEvolver } from '@ethosagent/skill-evolver';
+import { type EthosConfig, ethosDir } from '../config';
+import { createAgentLoop, createLLM } from '../wiring';
 
 const c = {
   reset: '\x1b[0m',
@@ -25,12 +27,16 @@ function parseArgs(args: string[]): {
   outputPath: string;
   scorer: Scorer;
   concurrency: number;
+  evolve: boolean;
+  autoApprove: boolean;
 } {
   let inputPath = '';
   let expectedPath = '';
   let outputPath = '';
   let scorer: Scorer = 'contains';
   let concurrency = 3;
+  let evolve = false;
+  let autoApprove = false;
 
   for (let i = 0; i < args.length; i++) {
     const arg = args[i] ?? '';
@@ -48,6 +54,10 @@ function parseArgs(args: string[]): {
       if (!Number.isInteger(n) || n < 1)
         throw new Error('--concurrency must be a positive integer');
       concurrency = n;
+    } else if (arg === '--evolve') {
+      evolve = true;
+    } else if (arg === '--auto-approve') {
+      autoApprove = true;
     } else if (!arg.startsWith('-')) {
       inputPath = arg;
     }
@@ -55,14 +65,14 @@ function parseArgs(args: string[]): {
 
   if (!inputPath)
     throw new Error(
-      'Usage: ethos eval run <tasks.jsonl> --expected <expected.jsonl> [--scorer exact|contains|regex|llm] [--concurrency N] [--output out.jsonl]',
+      'Usage: ethos eval run <tasks.jsonl> --expected <expected.jsonl> [--scorer exact|contains|regex|llm] [--concurrency N] [--output out.jsonl] [--evolve [--auto-approve]]',
     );
   if (!expectedPath) throw new Error('--expected <expected.jsonl> is required');
 
   const base = inputPath.replace(/\.jsonl$/, '');
   if (!outputPath) outputPath = `${base}.eval.jsonl`;
 
-  return { inputPath, expectedPath, outputPath, scorer, concurrency };
+  return { inputPath, expectedPath, outputPath, scorer, concurrency, evolve, autoApprove };
 }
 
 export async function runEval(subArgs: string[], config: EthosConfig): Promise<void> {
@@ -77,6 +87,8 @@ export async function runEval(subArgs: string[], config: EthosConfig): Promise<v
     console.log('  --scorer, -s     Scorer: exact | contains | regex | llm  (default: contains)');
     console.log('  --concurrency -c Concurrent tasks (default: 3)');
     console.log('  --output, -o     Output path (default: <input>.eval.jsonl)');
+    console.log('  --evolve         After scoring, run skill evolver on the output');
+    console.log('  --auto-approve   With --evolve, promote pending skills automatically');
     return;
   }
 
@@ -88,7 +100,7 @@ export async function runEval(subArgs: string[], config: EthosConfig): Promise<v
     process.exit(1);
   }
 
-  const { inputPath, expectedPath, outputPath, scorer, concurrency } = opts;
+  const { inputPath, expectedPath, outputPath, scorer, concurrency, evolve, autoApprove } = opts;
 
   let taskSrc: string;
   try {
@@ -164,5 +176,47 @@ export async function runEval(subArgs: string[], config: EthosConfig): Promise<v
   console.log(`\n${c.bold}${passMark}${failMark}${avgMark}  ${c.dim}${elapsed}s${c.reset}`);
   console.log(`${c.dim}output → ${outputPath}${c.reset}`);
 
+  if (evolve) await runEvolveAfter(config, outputPath, autoApprove);
+
   if (stats.failed > 0) process.exit(1);
+}
+
+async function runEvolveAfter(
+  config: EthosConfig,
+  evalOutputPath: string,
+  autoApprove: boolean,
+): Promise<void> {
+  const dir = ethosDir();
+  const skillsDir = join(dir, 'skills');
+  const pendingDir = join(skillsDir, 'pending');
+  const evolveConfig = await loadEvolveConfig(join(dir, 'evolve-config.json'));
+  const llm = await createLLM(config);
+
+  console.log(`\n${c.bold}evolving skills${c.reset}  ${c.dim}model: ${llm.model}${c.reset}`);
+
+  const evolver = new SkillEvolver({
+    evalOutputPath,
+    skillsDir,
+    pendingDir,
+    config: evolveConfig,
+    llm,
+  });
+  const result = await evolver.evolve();
+
+  console.log(
+    `  rewrites: ${result.rewritesWritten.length}  new: ${result.newSkillsWritten.length}  skipped: ${result.skipped.length}`,
+  );
+  for (const f of result.rewritesWritten) console.log(`  ${c.green}rewrite${c.reset} ${f}`);
+  for (const f of result.newSkillsWritten) console.log(`  ${c.green}new${c.reset}     ${f}`);
+  for (const s of result.skipped)
+    console.log(`  ${c.yellow}skip${c.reset}    ${s.kind} ${s.target} — ${s.reason}`);
+
+  if (autoApprove) {
+    const { rename } = await import('node:fs/promises');
+    const all = [...result.rewritesWritten, ...result.newSkillsWritten];
+    for (const f of all) await rename(join(pendingDir, f), join(skillsDir, f));
+    if (all.length > 0) console.log(`  ${c.green}auto-approved${c.reset} ${all.length} file(s)`);
+  } else if (result.rewritesWritten.length + result.newSkillsWritten.length > 0) {
+    console.log(`  ${c.dim}review with: ethos evolve --list-pending${c.reset}`);
+  }
 }

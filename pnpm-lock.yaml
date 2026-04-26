@@ -102,6 +102,9 @@ importers:
       '@ethosagent/session-sqlite':
         specifier: workspace:*
         version: link:../../extensions/session-sqlite
+      '@ethosagent/skill-evolver':
+        specifier: workspace:*
+        version: link:../../extensions/skill-evolver
       '@ethosagent/skills':
         specifier: workspace:*
         version: link:../../extensions/skills
@@ -392,6 +395,15 @@ importers:
       '@types/better-sqlite3':
         specifier: ^7.6.12
         version: 7.6.13
+
+  extensions/skill-evolver:
+    dependencies:
+      '@ethosagent/batch-runner':
+        specifier: workspace:*
+        version: link:../batch-runner
+      '@ethosagent/types':
+        specifier: workspace:*
+        version: link:../../packages/types
 
   extensions/skills:
     dependencies:

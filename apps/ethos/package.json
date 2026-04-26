@@ -27,6 +27,7 @@
     "@ethosagent/platform-telegram": "workspace:*",
     "@ethosagent/sandbox-docker": "workspace:*",
     "@ethosagent/session-sqlite": "workspace:*",
+    "@ethosagent/skill-evolver": "workspace:*",
     "@ethosagent/skills": "workspace:*",
     "@ethosagent/tools-browser": "workspace:*",
     "@ethosagent/tools-code": "workspace:*",

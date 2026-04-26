@@ -39,7 +39,8 @@
       "@ethosagent/batch-runner": ["./extensions/batch-runner/src"],
       "@ethosagent/platform-email": ["./extensions/platform-email/src"],
       "@ethosagent/eval-harness": ["./extensions/eval-harness/src"],
-      "@ethosagent/memory-vector": ["./extensions/memory-vector/src"]
+      "@ethosagent/memory-vector": ["./extensions/memory-vector/src"],
+      "@ethosagent/skill-evolver": ["./extensions/skill-evolver/src"]
     }
   },
   "include": [

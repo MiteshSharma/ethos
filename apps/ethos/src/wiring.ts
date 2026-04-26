@@ -16,34 +16,40 @@ import { loadMcpConfig, McpManager } from '@ethosagent/tools-mcp';
 import { createMemoryTools } from '@ethosagent/tools-memory';
 import { createTerminalGuardHook, createTerminalTools } from '@ethosagent/tools-terminal';
 import { createWebTools } from '@ethosagent/tools-web';
+import type { LLMProvider } from '@ethosagent/types';
 import { type EthosConfig, ethosDir, readKeys } from './config';
 import { logger } from './logger';
+
+export async function createLLM(config: EthosConfig): Promise<LLMProvider> {
+  const rotationKeys = config.provider === 'anthropic' ? await readKeys() : [];
+  if (config.provider === 'anthropic') {
+    if (rotationKeys.length > 0) {
+      return new AuthRotatingProvider(
+        [
+          { id: 'primary', apiKey: config.apiKey, priority: 100 },
+          ...rotationKeys.map((k, i) => ({
+            id: k.label ?? `key-${i + 1}`,
+            apiKey: k.apiKey,
+            priority: k.priority,
+          })),
+        ],
+        config.model,
+      );
+    }
+    return new AnthropicProvider({ apiKey: config.apiKey, model: config.model });
+  }
+  return new OpenAICompatProvider({
+    name: config.provider,
+    model: config.model,
+    apiKey: config.apiKey,
+    baseUrl: config.baseUrl ?? 'https://openrouter.ai/api/v1',
+  });
+}
 
 export async function createAgentLoop(config: EthosConfig): Promise<AgentLoop> {
   const dir = ethosDir();
 
-  const rotationKeys = config.provider === 'anthropic' ? await readKeys() : [];
-  const llm =
-    config.provider === 'anthropic'
-      ? rotationKeys.length > 0
-        ? new AuthRotatingProvider(
-            [
-              { id: 'primary', apiKey: config.apiKey, priority: 100 },
-              ...rotationKeys.map((k, i) => ({
-                id: k.label ?? `key-${i + 1}`,
-                apiKey: k.apiKey,
-                priority: k.priority,
-              })),
-            ],
-            config.model,
-          )
-        : new AnthropicProvider({ apiKey: config.apiKey, model: config.model })
-      : new OpenAICompatProvider({
-          name: config.provider,
-          model: config.model,
-          apiKey: config.apiKey,
-          baseUrl: config.baseUrl ?? 'https://openrouter.ai/api/v1',
-        });
+  const llm = await createLLM(config);
 
   const session = new SQLiteSessionStore(join(dir, 'sessions.db'));
   const memory =
