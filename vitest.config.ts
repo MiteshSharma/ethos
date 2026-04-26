@@ -12,6 +12,7 @@ const srcAliases = {
   '@ethosagent/plugin-contract': resolve('./packages/plugin-contract/src'),
   '@ethosagent/batch-runner': resolve('./extensions/batch-runner/src'),
   '@ethosagent/eval-harness': resolve('./extensions/eval-harness/src'),
+  '@ethosagent/memory-vector': resolve('./extensions/memory-vector/src'),
 };
 
 export default defineConfig({

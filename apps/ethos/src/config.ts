@@ -31,6 +31,8 @@ export interface EthosConfig {
   model: string;
   apiKey: string;
   personality: string;
+  /** Memory backend: 'markdown' (default) or 'vector' (semantic retrieval) */
+  memory?: 'markdown' | 'vector';
   baseUrl?: string;
   // Per-personality model overrides: maps personality ID → model ID string
   modelRouting?: Record<string, string>;
@@ -70,6 +72,7 @@ export async function writeConfig(config: EthosConfig): Promise<void> {
     `apiKey: ${config.apiKey}`,
     `personality: ${config.personality}`,
   ];
+  if (config.memory) lines.push(`memory: ${config.memory}`);
   if (config.baseUrl) lines.push(`baseUrl: ${config.baseUrl}`);
   if (config.modelRouting) {
     for (const [id, model] of Object.entries(config.modelRouting)) {
@@ -102,6 +105,7 @@ function parseConfigYaml(src: string): EthosConfig {
     model: kv.model ?? 'claude-opus-4-7',
     apiKey: kv.apiKey ?? '',
     personality: kv.personality ?? 'researcher',
+    memory: kv.memory === 'vector' ? 'vector' : kv.memory === 'markdown' ? 'markdown' : undefined,
     baseUrl: kv.baseUrl,
     modelRouting: Object.keys(modelRouting).length > 0 ? modelRouting : undefined,
     telegramToken: kv.telegramToken,

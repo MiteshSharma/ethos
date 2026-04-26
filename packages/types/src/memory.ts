@@ -11,6 +11,8 @@ export interface MemoryLoadContext {
   platform: string;
   workingDir?: string;
   personalityId?: string;
+  /** Current user message — used by VectorMemoryProvider for semantic retrieval */
+  query?: string;
 }
 
 export type MemoryStore = 'memory' | 'user';

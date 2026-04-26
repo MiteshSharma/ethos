@@ -165,6 +165,7 @@ export class AgentLoop {
       platform: this.platform,
       workingDir: this.workingDir,
       personalityId: personality.id,
+      query: text,
     });
 
     // Step 6: Build system prompt from injectors

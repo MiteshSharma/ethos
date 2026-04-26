@@ -3,6 +3,7 @@ import { AgentLoop, DefaultHookRegistry, DefaultToolRegistry } from '@ethosagent
 import { AnthropicProvider, AuthRotatingProvider } from '@ethosagent/llm-anthropic';
 import { OpenAICompatProvider } from '@ethosagent/llm-openai-compat';
 import { MarkdownFileMemoryProvider } from '@ethosagent/memory-markdown';
+import { VectorMemoryProvider } from '@ethosagent/memory-vector';
 import { createPersonalityRegistry } from '@ethosagent/personalities';
 import { DockerSandbox } from '@ethosagent/sandbox-docker';
 import { SQLiteSessionStore } from '@ethosagent/session-sqlite';
@@ -45,7 +46,10 @@ export async function createAgentLoop(config: EthosConfig): Promise<AgentLoop> {
         });
 
   const session = new SQLiteSessionStore(join(dir, 'sessions.db'));
-  const memory = new MarkdownFileMemoryProvider({ dir });
+  const memory =
+    config.memory === 'vector'
+      ? new VectorMemoryProvider({ dir })
+      : new MarkdownFileMemoryProvider({ dir });
   const personalities = await createPersonalityRegistry();
 
   await personalities.loadFromDirectory(join(dir, 'personalities'));
