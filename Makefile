@@ -44,8 +44,11 @@ help:
 	@echo "  format             - biome format --write"
 	@echo "  check              - typecheck + lint + test (full CI suite locally)"
 	@echo ""
-	@echo "Publishing"
-	@echo "  build-sdk          - Build all publishable packages to dist/"
+	@echo "Publishing (all five public packages: cli, types, core, plugin-sdk, plugin-contract)"
+	@echo "  release            - Bump patch + build + publish + commit + tag + push (one-command release)"
+	@echo "  release-minor      - Same as release but bumps the minor version"
+	@echo "  release-major      - Same as release but bumps the major version"
+	@echo "  build-publishable  - Build all five public packages to dist/"
 	@echo "  publish            - Build + publish packages whose local version > npm version"
 	@echo "  publish-dry        - Show what would be published without publishing"
 	@echo "  version-patch      - Bump patch version (0.1.0 → 0.1.1) on all publishable packages"
@@ -219,23 +222,28 @@ check: typecheck lint test
 
 # ---------- publishing ----------
 
-# Packages exported to npm so external plugin authors can build without monorepo access.
-# Publish order matters: types → core → plugin-contract → plugin-sdk
-PUBLISHABLE := packages/types packages/core packages/plugin-contract packages/plugin-sdk
+# The five public packages on npm. Publish order matters by dependency:
+# types → core → plugin-contract → plugin-sdk → cli
+# (deps before dependents — pnpm publish enforces this implicitly via
+# workspace:* rewrites but the ordered iteration also makes the output readable.)
+PUBLISHABLE := packages/types packages/core packages/plugin-contract packages/plugin-sdk apps/ethos
 
-build-sdk:
-	@echo "Building publishable packages..."
-	@$(NVM_EXEC) pnpm -r --filter='./packages/types' \
-	                    --filter='./packages/core' \
-	                    --filter='./packages/plugin-contract' \
-	                    --filter='./packages/plugin-sdk' \
-	                    run build
+# Repeated filter list reused by build-publishable + version-* targets.
+PUBLISHABLE_FILTERS := --filter='./packages/types' \
+                      --filter='./packages/core' \
+                      --filter='./packages/plugin-contract' \
+                      --filter='./packages/plugin-sdk' \
+                      --filter='./apps/ethos'
+
+build-publishable:
+	@echo "Building all five public packages..."
+	@$(NVM_EXEC) pnpm -r $(PUBLISHABLE_FILTERS) run build
 	@echo "Build complete."
 
 # Publish packages whose local version differs from the version on npm.
 # Workspace deps (workspace:*) are automatically replaced with real versions by pnpm publish.
 # Requires: npm login (or NPM_TOKEN env var for CI)
-publish: build-sdk
+publish: build-publishable
 	@echo "Checking and publishing packages..."
 	@for dir in $(PUBLISHABLE); do \
 		name=$$($(NVM_EXEC) node -p "require('./$$dir/package.json').name"); \
@@ -251,7 +259,7 @@ publish: build-sdk
 	@echo "Done."
 
 # Dry run — shows what would be published without actually publishing.
-publish-dry: build-sdk
+publish-dry: build-publishable
 	@echo "Dry run — packages that would be published:"
 	@for dir in $(PUBLISHABLE); do \
 		name=$$($(NVM_EXEC) node -p "require('./$$dir/package.json').name"); \
@@ -264,31 +272,72 @@ publish-dry: build-sdk
 		fi; \
 	done
 
-# Version bump targets — updates package.json version in all publishable packages.
-# Run one of these, then commit, then make publish.
+# Version bump targets — update package.json version in all publishable packages.
+# Lockstep: all five packages bump to the same version. Run one of these, then
+# commit, then make publish. Or use `make release` to do everything in one shot.
 version-patch:
-	@$(NVM_EXEC) pnpm -r --filter='./packages/types' \
-	                    --filter='./packages/core' \
-	                    --filter='./packages/plugin-contract' \
-	                    --filter='./packages/plugin-sdk' \
-	                    exec npm version patch --no-git-tag-version
-	@echo "Patch versions bumped. Review changes, commit, then run: make publish"
+	@$(NVM_EXEC) pnpm -r $(PUBLISHABLE_FILTERS) exec npm version patch --no-git-tag-version
+	@echo "Patch versions bumped. Review with 'git diff', commit, then run: make publish"
 
 version-minor:
-	@$(NVM_EXEC) pnpm -r --filter='./packages/types' \
-	                    --filter='./packages/core' \
-	                    --filter='./packages/plugin-contract' \
-	                    --filter='./packages/plugin-sdk' \
-	                    exec npm version minor --no-git-tag-version
-	@echo "Minor versions bumped. Review changes, commit, then run: make publish"
+	@$(NVM_EXEC) pnpm -r $(PUBLISHABLE_FILTERS) exec npm version minor --no-git-tag-version
+	@echo "Minor versions bumped. Review with 'git diff', commit, then run: make publish"
 
 version-major:
-	@$(NVM_EXEC) pnpm -r --filter='./packages/types' \
-	                    --filter='./packages/core' \
-	                    --filter='./packages/plugin-contract' \
-	                    --filter='./packages/plugin-sdk' \
-	                    exec npm version major --no-git-tag-version
-	@echo "Major versions bumped. Review changes, commit, then run: make publish"
+	@$(NVM_EXEC) pnpm -r $(PUBLISHABLE_FILTERS) exec npm version major --no-git-tag-version
+	@echo "Major versions bumped. Review with 'git diff', commit, then run: make publish"
+
+# ---------- one-command release ----------
+#
+# Bump patch (or minor / major), build, publish, commit, tag, push.
+# Confirmation gate before any side effects beyond the version bump.
+#
+# BUMP comes from $@ (release / release-minor / release-major). Sub-make is
+# what gives us "the var differs per target" without per-target variable hacks.
+release:
+	@$(MAKE) _release-impl BUMP=patch
+
+release-minor:
+	@$(MAKE) _release-impl BUMP=minor
+
+release-major:
+	@$(MAKE) _release-impl BUMP=major
+
+_release-impl:
+	@if [ -z "$(BUMP)" ]; then echo "Internal: BUMP not set"; exit 2; fi
+	@if ! git diff --quiet || ! git diff --cached --quiet; then \
+		echo "✗ Working tree is dirty. Commit or stash before releasing."; \
+		git status --short; \
+		exit 1; \
+	fi
+	@echo "Bumping $(BUMP) version on all five public packages..."
+	@$(MAKE) version-$(BUMP) >/dev/null
+	@version=$$($(NVM_EXEC) node -p "require('./apps/ethos/package.json').version"); \
+	echo ""; \
+	echo "Version bumped to: v$$version"; \
+	echo ""; \
+	echo "Diff:"; \
+	git diff --stat; \
+	echo ""; \
+	printf "Continue with build + publish + tag + push? [y/N] "; \
+	read answer; \
+	if [ "$$answer" != "y" ] && [ "$$answer" != "Y" ]; then \
+		echo "Aborted. Run 'git checkout .' to revert version bumps."; \
+		exit 1; \
+	fi
+	@$(MAKE) build-publishable
+	@$(MAKE) publish
+	@version=$$($(NVM_EXEC) node -p "require('./apps/ethos/package.json').version"); \
+	echo ""; \
+	echo "Committing release: v$$version"; \
+	git add . && \
+	git commit -m "release: v$$version" && \
+	git tag "v$$version" && \
+	echo "" && \
+	echo "Pushing main + tag v$$version..." && \
+	git push --follow-tags && \
+	echo "" && \
+	echo "✓ Released v$$version. Verify: npm view @ethosagent/cli version"
 
 # ---------- housekeeping ----------
 
@@ -303,5 +352,6 @@ clean:
         start-gateway-daemon stop-gateway-daemon delete-gateway-daemon status-gateway-daemon \
         docs docs-build \
         test typecheck lint format check \
-        build-sdk publish publish-dry version-patch version-minor version-major \
+        build-publishable publish publish-dry version-patch version-minor version-major \
+        release release-minor release-major _release-impl \
         clean

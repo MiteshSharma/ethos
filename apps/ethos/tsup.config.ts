@@ -1,4 +1,12 @@
+import { readFileSync } from 'node:fs';
 import { defineConfig } from 'tsup';
+
+// Inject the package version at build time so `ethos --version` reports the
+// real number without needing to read package.json at runtime (which would
+// require shipping package.json + a runtime path resolution dance).
+const pkg = JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf-8')) as {
+  version: string;
+};
 
 // Bundle internal @ethosagent/* workspace deps INTO the cli (so users don't need
 // every extension as a separate npm install). Two exceptions are kept external:
@@ -21,6 +29,11 @@ export default defineConfig({
   // #!/usr/bin/env node makes dist/index.js directly executable.
   banner: {
     js: '#!/usr/bin/env node',
+  },
+  // Bake the version into the bundle so `ethos --version` works without
+  // shipping package.json or doing runtime path resolution.
+  define: {
+    __ETHOS_VERSION__: JSON.stringify(pkg.version),
   },
   // Externalize every bare module except internal @ethosagent/* workspace deps.
   external: [

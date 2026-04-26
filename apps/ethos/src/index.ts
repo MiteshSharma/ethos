@@ -14,12 +14,33 @@ import { runPlugin } from './commands/plugin';
 import { runServe } from './commands/serve';
 import { runSetup } from './commands/setup';
 import { runSkills } from './commands/skills';
+import { runUpgrade } from './commands/upgrade';
 import { readConfig } from './config';
+
+// Compile-time injected by tsup via define (or read from env at runtime in dev).
+declare const __ETHOS_VERSION__: string;
+const ETHOS_VERSION =
+  typeof __ETHOS_VERSION__ === 'string' ? __ETHOS_VERSION__ : (process.env.ETHOS_VERSION ?? 'dev');
+
+const USAGE =
+  'Usage: ethos [setup | chat | serve | gateway | cron | personality | memory | acp | batch | eval | evolve | plugin | skills | keys | claw | upgrade] [--version | --help]';
 
 const args = process.argv.slice(2);
 const command = args[0] ?? '';
 
 switch (command) {
+  case '--version':
+  case '-v': {
+    console.log(`@ethosagent/cli ${ETHOS_VERSION}`);
+    break;
+  }
+
+  case '--help':
+  case '-h': {
+    console.log(USAGE);
+    break;
+  }
+
   case 'setup': {
     await runSetup();
     break;
@@ -250,10 +271,13 @@ switch (command) {
     break;
   }
 
+  case 'upgrade': {
+    await runUpgrade();
+    break;
+  }
+
   default:
     console.log(`Unknown command: ${command}`);
-    console.log(
-      'Usage: ethos [setup | chat | serve | gateway | cron | personality | memory | acp | batch | eval | evolve | plugin | skills | keys | claw]',
-    );
+    console.log(USAGE);
     process.exit(1);
 }
