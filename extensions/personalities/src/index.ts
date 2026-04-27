@@ -97,10 +97,14 @@ export class FilePersonalityRegistry implements PersonalityRegistry {
   // -------------------------------------------------------------------------
 
   private async loadOne(dir: string, id: string): Promise<void> {
-    const configPath = join(dir, 'config.yaml');
-
-    // mtime guard — skip if nothing changed
-    const mtime = await statMtime(configPath);
+    // mtime guard — invalidate when any of the three personality files change.
+    // Watching only config.yaml would miss hot-reloads of ETHOS.md and toolset.yaml,
+    // which are edited far more often than config.yaml.
+    const mtime = await maxMtime([
+      join(dir, 'config.yaml'),
+      join(dir, 'ETHOS.md'),
+      join(dir, 'toolset.yaml'),
+    ]);
     if (mtime !== null && this.mtimeCache.get(dir) === mtime) return;
     if (mtime !== null) this.mtimeCache.set(dir, mtime);
 
@@ -189,6 +193,15 @@ async function statMtime(path: string): Promise<number | null> {
   } catch {
     return null;
   }
+}
+
+async function maxMtime(paths: string[]): Promise<number | null> {
+  const mtimes = await Promise.all(paths.map(statMtime));
+  let max: number | null = null;
+  for (const m of mtimes) {
+    if (m !== null && (max === null || m > max)) max = m;
+  }
+  return max;
 }
 
 function titleCase(s: string): string {

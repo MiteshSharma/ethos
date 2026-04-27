@@ -29,6 +29,39 @@ export function chunkText(text: string, maxLength = 2000): string[] {
   return chunks;
 }
 
+/**
+ * Re-flow `newChunks` over `existingIds`. Edits the first N chunks in place,
+ * appends extras, and deletes trailing existing chunks no longer needed.
+ * Delete failures are swallowed (best-effort) — they shouldn't block an edit.
+ * Returns the new ordered chunk ids.
+ */
+export async function reflowChunks(
+  newChunks: string[],
+  existingIds: string[],
+  ops: {
+    edit: (id: string, text: string) => Promise<string>;
+    append: (text: string) => Promise<string>;
+    deleteId: (id: string) => Promise<void>;
+  },
+): Promise<string[]> {
+  const updated: string[] = [];
+  for (let i = 0; i < newChunks.length; i++) {
+    if (i < existingIds.length) {
+      updated.push(await ops.edit(existingIds[i], newChunks[i]));
+    } else {
+      updated.push(await ops.append(newChunks[i]));
+    }
+  }
+  for (let i = newChunks.length; i < existingIds.length; i++) {
+    try {
+      await ops.deleteId(existingIds[i]);
+    } catch {
+      // best-effort delete
+    }
+  }
+  return updated;
+}
+
 // ---------------------------------------------------------------------------
 // DiscordAdapter
 // ---------------------------------------------------------------------------
@@ -55,6 +88,14 @@ export class DiscordAdapter implements PlatformAdapter {
   private readonly token: string;
   private readonly mentionOnly: boolean;
   private messageHandler?: (message: InboundMessage) => void;
+  /**
+   * Chunk-id ledger so `editMessage` can re-flow multi-chunk responses.
+   * Keyed by the primary (first) chunk id, value = ordered list of all
+   * chunk ids in the response. Bounded to `chunkMapMaxEntries` with FIFO
+   * eviction so long-running bots don't grow unbounded.
+   */
+  private readonly chunkMap = new Map<string, string[]>();
+  private readonly chunkMapMaxEntries = 1024;
 
   constructor(config: DiscordAdapterConfig) {
     this.token = config.token;
@@ -131,15 +172,16 @@ export class DiscordAdapter implements PlatformAdapter {
       }
 
       const chunks = chunkText(message.text, this.maxMessageLength);
-      let lastId: string | undefined;
+      const ids: string[] = [];
 
       for (const chunk of chunks) {
         // biome-ignore lint/suspicious/noExplicitAny: discord.js channel union excludes PartialGroupDM
         const sent = await (channel as any).send({ content: chunk });
-        lastId = String(sent.id);
+        ids.push(String(sent.id));
       }
 
-      return { ok: true, messageId: lastId };
+      this.rememberChunkIds(ids);
+      return { ok: true, messageId: ids[0] };
     } catch (err) {
       return { ok: false, error: err instanceof Error ? err.message : String(err) };
     }
@@ -160,14 +202,51 @@ export class DiscordAdapter implements PlatformAdapter {
   async editMessage(chatId: string, messageId: string, text: string): Promise<DeliveryResult> {
     try {
       const channel = await this.client.channels.fetch(chatId);
-      if (!channel || !('messages' in channel)) return { ok: false, error: 'Channel not found' };
-      // biome-ignore lint/suspicious/noExplicitAny: discord.js channel union
-      const msg = await (channel as any).messages.fetch(messageId);
-      const edited = await msg.edit(text.slice(0, this.maxMessageLength));
-      return { ok: true, messageId: String(edited.id) };
+      if (!channel || !('messages' in channel) || !('send' in channel)) {
+        return { ok: false, error: 'Channel not found' };
+      }
+
+      const newChunks = chunkText(text, this.maxMessageLength);
+      const existingIds = this.chunkMap.get(messageId) ?? [messageId];
+
+      const updatedIds = await reflowChunks(newChunks, existingIds, {
+        edit: async (id, chunk) => {
+          // biome-ignore lint/suspicious/noExplicitAny: discord.js channel union
+          const msg = await (channel as any).messages.fetch(id);
+          const edited = await msg.edit(chunk);
+          return String(edited.id);
+        },
+        append: async (chunk) => {
+          // biome-ignore lint/suspicious/noExplicitAny: discord.js channel union
+          const sent = await (channel as any).send({ content: chunk });
+          return String(sent.id);
+        },
+        deleteId: async (id) => {
+          // biome-ignore lint/suspicious/noExplicitAny: discord.js channel union
+          const msg = await (channel as any).messages.fetch(id);
+          await msg.delete();
+        },
+      });
+
+      // Re-key the map under the (possibly new) first id, drop the old key
+      // when it changed, so future edits still resolve.
+      this.chunkMap.delete(messageId);
+      this.rememberChunkIds(updatedIds);
+      return { ok: true, messageId: updatedIds[0] };
     } catch (err) {
       return { ok: false, error: err instanceof Error ? err.message : String(err) };
     }
+  }
+
+  private rememberChunkIds(ids: string[]): void {
+    if (ids.length === 0) return;
+    const primary = ids[0];
+    while (this.chunkMap.size >= this.chunkMapMaxEntries && !this.chunkMap.has(primary)) {
+      const oldestKey = this.chunkMap.keys().next().value;
+      if (oldestKey === undefined) break;
+      this.chunkMap.delete(oldestKey);
+    }
+    this.chunkMap.set(primary, ids);
   }
 
   async health(): Promise<{ ok: boolean; latencyMs?: number }> {

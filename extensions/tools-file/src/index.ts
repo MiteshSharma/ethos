@@ -230,10 +230,18 @@ export const patchFileTool: Tool = {
       };
     }
 
-    if (!content.includes(old_text)) {
+    const occurrences = countOccurrences(content, old_text);
+    if (occurrences === 0) {
       return {
         ok: false,
         error: `old_text not found in ${abs}. Use read_file to verify the exact content.`,
+        code: 'execution_failed',
+      };
+    }
+    if (occurrences > 1) {
+      return {
+        ok: false,
+        error: `old_text matches ${occurrences} locations in ${abs}. Add surrounding context to make the match unique, or call patch_file once per location.`,
         code: 'execution_failed',
       };
     }
@@ -243,6 +251,11 @@ export const patchFileTool: Tool = {
     return { ok: true, value: `Patched ${abs}` };
   },
 };
+
+function countOccurrences(haystack: string, needle: string): number {
+  if (needle === '') return 0;
+  return haystack.split(needle).length - 1;
+}
 
 // ---------------------------------------------------------------------------
 // search_files

@@ -29,6 +29,38 @@ export function chunkText(text: string, maxLength = 3000): string[] {
   return chunks;
 }
 
+/**
+ * Re-flow `newChunks` over `existingIds`. Edits the first N chunks in place,
+ * appends extras, and deletes trailing existing chunks no longer needed.
+ * Delete failures are swallowed (best-effort).
+ */
+export async function reflowChunks(
+  newChunks: string[],
+  existingIds: string[],
+  ops: {
+    edit: (id: string, text: string) => Promise<string>;
+    append: (text: string) => Promise<string>;
+    deleteId: (id: string) => Promise<void>;
+  },
+): Promise<string[]> {
+  const updated: string[] = [];
+  for (let i = 0; i < newChunks.length; i++) {
+    if (i < existingIds.length) {
+      updated.push(await ops.edit(existingIds[i], newChunks[i]));
+    } else {
+      updated.push(await ops.append(newChunks[i]));
+    }
+  }
+  for (let i = newChunks.length; i < existingIds.length; i++) {
+    try {
+      await ops.deleteId(existingIds[i]);
+    } catch {
+      // best-effort delete
+    }
+  }
+  return updated;
+}
+
 // ---------------------------------------------------------------------------
 // SlackAdapter
 // ---------------------------------------------------------------------------
@@ -54,6 +86,9 @@ export class SlackAdapter implements PlatformAdapter {
   private readonly app: App;
   private readonly client: App['client'];
   private messageHandler?: (message: InboundMessage) => void;
+  /** Chunk-id ledger so editMessage can re-flow multi-chunk responses. */
+  private readonly chunkMap = new Map<string, string[]>();
+  private readonly chunkMapMaxEntries = 1024;
 
   constructor(config: SlackAdapterConfig) {
     this.app = new App({
@@ -134,7 +169,7 @@ export class SlackAdapter implements PlatformAdapter {
   async send(chatId: string, message: OutboundMessage): Promise<DeliveryResult> {
     try {
       const chunks = chunkText(message.text, this.maxMessageLength);
-      let lastTs: string | undefined;
+      const ids: string[] = [];
 
       for (const chunk of chunks) {
         const result = await this.client.chat.postMessage({
@@ -144,10 +179,12 @@ export class SlackAdapter implements PlatformAdapter {
           ...(message.replyToId ? { thread_ts: message.replyToId } : {}),
           mrkdwn: true,
         });
-        lastTs = result.ts as string | undefined;
+        const ts = result.ts as string | undefined;
+        if (ts) ids.push(ts);
       }
 
-      return { ok: true, messageId: lastTs };
+      this.rememberChunkIds(ids);
+      return { ok: true, messageId: ids[0] };
     } catch (err) {
       return { ok: false, error: err instanceof Error ? err.message : String(err) };
     }
@@ -155,15 +192,44 @@ export class SlackAdapter implements PlatformAdapter {
 
   async editMessage(chatId: string, messageId: string, text: string): Promise<DeliveryResult> {
     try {
-      await this.client.chat.update({
-        channel: chatId,
-        ts: messageId,
-        text: text.slice(0, this.maxMessageLength),
+      const newChunks = chunkText(text, this.maxMessageLength);
+      const existingIds = this.chunkMap.get(messageId) ?? [messageId];
+
+      const updatedIds = await reflowChunks(newChunks, existingIds, {
+        edit: async (ts, chunk) => {
+          await this.client.chat.update({ channel: chatId, ts, text: chunk });
+          return ts;
+        },
+        append: async (chunk) => {
+          const result = await this.client.chat.postMessage({
+            channel: chatId,
+            text: chunk,
+            mrkdwn: true,
+          });
+          return (result.ts as string | undefined) ?? '';
+        },
+        deleteId: async (ts) => {
+          await this.client.chat.delete({ channel: chatId, ts });
+        },
       });
-      return { ok: true, messageId };
+
+      this.chunkMap.delete(messageId);
+      this.rememberChunkIds(updatedIds);
+      return { ok: true, messageId: updatedIds[0] };
     } catch (err) {
       return { ok: false, error: err instanceof Error ? err.message : String(err) };
     }
+  }
+
+  private rememberChunkIds(ids: string[]): void {
+    if (ids.length === 0) return;
+    const primary = ids[0];
+    while (this.chunkMap.size >= this.chunkMapMaxEntries && !this.chunkMap.has(primary)) {
+      const oldestKey = this.chunkMap.keys().next().value;
+      if (oldestKey === undefined) break;
+      this.chunkMap.delete(oldestKey);
+    }
+    this.chunkMap.set(primary, ids);
   }
 
   async health(): Promise<{ ok: boolean; latencyMs?: number }> {

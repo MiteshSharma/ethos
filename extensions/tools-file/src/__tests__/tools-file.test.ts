@@ -125,6 +125,27 @@ describe('patch_file', () => {
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.code).toBe('execution_failed');
   });
+
+  it('returns error when old_text matches more than once', async () => {
+    const path = join(testDir, 'ambiguous.ts');
+    await writeFile(path, 'const x = 1;\nconst x = 1;\n');
+    const result = await patchFileTool.execute(
+      { path, old_text: 'const x = 1;', new_text: 'const x = 2;' },
+      makeCtx(testDir),
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.code).toBe('execution_failed');
+      expect(result.error).toMatch(/2 locations/);
+    }
+
+    // File must be left untouched when patch is ambiguous
+    const after = await readFileTool.execute({ path }, makeCtx(testDir));
+    if (after.ok) {
+      expect(after.value).toContain('const x = 1;\nconst x = 1;');
+      expect(after.value).not.toContain('const x = 2;');
+    }
+  });
 });
 
 describe('search_files', () => {

@@ -39,6 +39,38 @@ export function chunkText(text: string, maxLength = 4096): string[] {
   return chunks;
 }
 
+/**
+ * Re-flow `newChunks` over `existingIds`. Edits the first N chunks in place,
+ * appends extras, and deletes trailing existing chunks no longer needed.
+ * Delete failures are swallowed (best-effort).
+ */
+export async function reflowChunks(
+  newChunks: string[],
+  existingIds: string[],
+  ops: {
+    edit: (id: string, text: string) => Promise<string>;
+    append: (text: string) => Promise<string>;
+    deleteId: (id: string) => Promise<void>;
+  },
+): Promise<string[]> {
+  const updated: string[] = [];
+  for (let i = 0; i < newChunks.length; i++) {
+    if (i < existingIds.length) {
+      updated.push(await ops.edit(existingIds[i], newChunks[i]));
+    } else {
+      updated.push(await ops.append(newChunks[i]));
+    }
+  }
+  for (let i = newChunks.length; i < existingIds.length; i++) {
+    try {
+      await ops.deleteId(existingIds[i]);
+    } catch {
+      // best-effort delete
+    }
+  }
+  return updated;
+}
+
 // ---------------------------------------------------------------------------
 // TelegramAdapter
 // ---------------------------------------------------------------------------
@@ -61,6 +93,9 @@ export class TelegramAdapter implements PlatformAdapter {
   private readonly bot: Bot;
   private readonly dropPendingUpdates: boolean;
   private messageHandler?: (message: InboundMessage) => void;
+  /** Chunk-id ledger so editMessage can re-flow multi-chunk responses. */
+  private readonly chunkMap = new Map<string, string[]>();
+  private readonly chunkMapMaxEntries = 1024;
 
   constructor(config: TelegramAdapterConfig) {
     this.bot = new Bot(config.token);
@@ -111,7 +146,7 @@ export class TelegramAdapter implements PlatformAdapter {
 
   async send(chatId: string, message: OutboundMessage): Promise<DeliveryResult> {
     const chunks = chunkText(message.text, this.maxMessageLength);
-    let lastMessageId: string | undefined;
+    const ids: string[] = [];
 
     for (const chunk of chunks) {
       try {
@@ -121,12 +156,12 @@ export class TelegramAdapter implements PlatformAdapter {
             ? { message_id: Number(message.replyToId) }
             : undefined,
         });
-        lastMessageId = String(sent.message_id);
+        ids.push(String(sent.message_id));
       } catch (err) {
         // Markdown parse errors — retry as plain text
         if (String(err).includes('parse')) {
           const sent = await this.bot.api.sendMessage(Number(chatId), chunk).catch(() => null);
-          if (sent) lastMessageId = String(sent.message_id);
+          if (sent) ids.push(String(sent.message_id));
         } else {
           return {
             ok: false,
@@ -136,7 +171,8 @@ export class TelegramAdapter implements PlatformAdapter {
       }
     }
 
-    return { ok: true, messageId: lastMessageId };
+    this.rememberChunkIds(ids);
+    return { ok: true, messageId: ids[0] };
   }
 
   async sendTyping(chatId: string): Promise<void> {
@@ -145,13 +181,44 @@ export class TelegramAdapter implements PlatformAdapter {
 
   async editMessage(chatId: string, messageId: string, text: string): Promise<DeliveryResult> {
     try {
-      await this.bot.api.editMessageText(Number(chatId), Number(messageId), text, {
-        parse_mode: 'Markdown',
+      const newChunks = chunkText(text, this.maxMessageLength);
+      const existingIds = this.chunkMap.get(messageId) ?? [messageId];
+
+      const updatedIds = await reflowChunks(newChunks, existingIds, {
+        edit: async (id, chunk) => {
+          await this.bot.api.editMessageText(Number(chatId), Number(id), chunk, {
+            parse_mode: 'Markdown',
+          });
+          return id;
+        },
+        append: async (chunk) => {
+          const sent = await this.bot.api.sendMessage(Number(chatId), chunk, {
+            parse_mode: 'Markdown',
+          });
+          return String(sent.message_id);
+        },
+        deleteId: async (id) => {
+          await this.bot.api.deleteMessage(Number(chatId), Number(id));
+        },
       });
-      return { ok: true, messageId };
+
+      this.chunkMap.delete(messageId);
+      this.rememberChunkIds(updatedIds);
+      return { ok: true, messageId: updatedIds[0] };
     } catch (err) {
       return { ok: false, error: err instanceof Error ? err.message : String(err) };
     }
+  }
+
+  private rememberChunkIds(ids: string[]): void {
+    if (ids.length === 0) return;
+    const primary = ids[0];
+    while (this.chunkMap.size >= this.chunkMapMaxEntries && !this.chunkMap.has(primary)) {
+      const oldestKey = this.chunkMap.keys().next().value;
+      if (oldestKey === undefined) break;
+      this.chunkMap.delete(oldestKey);
+    }
+    this.chunkMap.set(primary, ids);
   }
 
   async health(): Promise<{ ok: boolean; latencyMs?: number }> {

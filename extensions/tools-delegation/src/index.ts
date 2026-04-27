@@ -38,9 +38,7 @@ async function runSubAgent(
     sessionKey: opts.sessionKey,
     personalityId: opts.personalityId,
     abortSignal: opts.abortSignal,
-    // Pass depth in the agentId slot so child tools can read it
-    // (RunOptions doesn't expose agentId directly — we rely on the
-    //  toolContext.agentId set by the registry which reads from ctx)
+    agentId: childAgentId(opts.depth),
   })) {
     if (event.type === 'text_delta') output += event.text;
     if (event.type === 'error') throw new Error(event.error);

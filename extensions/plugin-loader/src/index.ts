@@ -87,11 +87,15 @@ export class PluginLoader {
 
   /**
    * Scan node_modules for packages with `ethos.type = "plugin"` in package.json.
-   * Only checks packages named `ethos-plugin-*` to keep this O(n) tractable.
-   * Scans both the project's node_modules and ~/.ethos/plugins/node_modules.
+   * Only checks packages named `ethos-plugin-*` or scoped under `@ethos-plugins/*`
+   * to keep this O(n) tractable. When `dir` is provided, only that directory is
+   * scanned; otherwise the project's node_modules and `~/.ethos/plugins/node_modules`
+   * are scanned in order.
    */
-  async loadFromNodeModules(): Promise<void> {
-    const dirs = [resolve('node_modules'), join(homedir(), '.ethos', 'plugins', 'node_modules')];
+  async loadFromNodeModules(dir?: string): Promise<void> {
+    const dirs = dir
+      ? [dir]
+      : [resolve('node_modules'), join(homedir(), '.ethos', 'plugins', 'node_modules')];
     for (const nmDir of dirs) {
       await this.scanNodeModulesDir(nmDir);
     }
@@ -105,9 +109,26 @@ export class PluginLoader {
       return;
     }
 
-    const candidates = entries.filter(
-      (e) => e.startsWith('ethos-plugin-') || e.startsWith('@ethos-plugins/'),
-    );
+    // readdir returns scope dirs (e.g. `@ethos-plugins`) without their packages,
+    // so scoped names need a second readdir to surface `@ethos-plugins/foo`.
+    const candidates: string[] = [];
+    for (const entry of entries) {
+      if (entry.startsWith('ethos-plugin-')) {
+        candidates.push(entry);
+        continue;
+      }
+      if (entry === '@ethos-plugins') {
+        let scopedEntries: string[];
+        try {
+          scopedEntries = await readdir(join(nmDir, entry));
+        } catch {
+          continue;
+        }
+        for (const sub of scopedEntries) {
+          candidates.push(`${entry}/${sub}`);
+        }
+      }
+    }
 
     for (const name of candidates) {
       const pkgPath = join(nmDir, name, 'package.json');

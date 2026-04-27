@@ -104,6 +104,52 @@ describe('delegate_task', () => {
     expect(sessionKeys[0]).toContain('cli:abc');
     expect(sessionKeys[0]).toContain('my-task');
   });
+
+  it('threads spawn depth into child loops via agentId', async () => {
+    const seenAgentIds: Array<string | undefined> = [];
+    const loop = {
+      run: async function* (
+        _prompt: string,
+        opts: { agentId?: string },
+      ): AsyncGenerator<AgentEvent> {
+        seenAgentIds.push(opts.agentId);
+        yield { type: 'text_delta', text: 'ok' };
+        yield { type: 'done', text: 'ok', turnCount: 1 };
+      },
+    } as unknown as import('@ethosagent/core').AgentLoop;
+
+    const tool = createDelegateTaskTool(loop);
+
+    // Parent at depth 0 spawns a child → child loop should run at depth:1
+    await tool.execute({ prompt: 'task' }, makeCtx({ agentId: 'depth:0' }));
+    expect(seenAgentIds[0]).toBe('depth:1');
+
+    // Parent at depth 1 spawns a child → child loop should run at depth:2
+    await tool.execute({ prompt: 'task' }, makeCtx({ agentId: 'depth:1' }));
+    expect(seenAgentIds[1]).toBe('depth:2');
+  });
+
+  it('mixture_of_agents threads depth into every spawned child', async () => {
+    const seenAgentIds: Array<string | undefined> = [];
+    const loop = {
+      run: async function* (
+        _prompt: string,
+        opts: { agentId?: string },
+      ): AsyncGenerator<AgentEvent> {
+        seenAgentIds.push(opts.agentId);
+        yield { type: 'text_delta', text: 'ok' };
+        yield { type: 'done', text: 'ok', turnCount: 1 };
+      },
+    } as unknown as import('@ethosagent/core').AgentLoop;
+
+    const tool = createMixtureOfAgentsTool(loop);
+    await tool.execute(
+      { agents: [{ prompt: 'a' }, { prompt: 'b' }] },
+      makeCtx({ agentId: 'depth:1' }),
+    );
+
+    expect(seenAgentIds).toEqual(['depth:2', 'depth:2']);
+  });
 });
 
 // ---------------------------------------------------------------------------

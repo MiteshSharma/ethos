@@ -124,6 +124,50 @@ describe('FilePersonalityRegistry', () => {
       await registry.loadFromDirectory(testDir);
       expect(registry.get('cached')?.name).toBe('Mutated');
     });
+
+    it('mtime cache invalidates when ETHOS.md changes', async () => {
+      const personalityDir = join(testDir, 'ethosedit');
+      await mkdir(personalityDir);
+      await writeFile(join(personalityDir, 'config.yaml'), 'name: Real\n');
+      await writeFile(join(personalityDir, 'ETHOS.md'), 'first version');
+
+      const registry = new FilePersonalityRegistry();
+      await registry.loadFromDirectory(testDir);
+      expect(registry.get('ethosedit')?.name).toBe('Real');
+
+      // Sentinel value to detect a reload (any reload overwrites it back to "Real")
+      registry.define({ id: 'ethosedit', name: 'Sentinel' });
+
+      // Touch ETHOS.md with a future mtime so cache key changes regardless
+      // of filesystem mtime resolution on this OS.
+      const future = new Date(Date.now() + 10_000);
+      const { utimes } = await import('node:fs/promises');
+      await utimes(join(personalityDir, 'ETHOS.md'), future, future);
+
+      await registry.loadFromDirectory(testDir);
+      expect(registry.get('ethosedit')?.name).toBe('Real');
+    });
+
+    it('mtime cache invalidates when toolset.yaml changes', async () => {
+      const personalityDir = join(testDir, 'toolsetedit');
+      await mkdir(personalityDir);
+      await writeFile(join(personalityDir, 'config.yaml'), 'name: Tooled\n');
+      await writeFile(join(personalityDir, 'ETHOS.md'), 'identity');
+      await writeFile(join(personalityDir, 'toolset.yaml'), '- read_file\n');
+
+      const registry = new FilePersonalityRegistry();
+      await registry.loadFromDirectory(testDir);
+      expect(registry.get('toolsetedit')?.toolset).toEqual(['read_file']);
+
+      // Replace toolset.yaml and bump its mtime to force cache invalidation
+      await writeFile(join(personalityDir, 'toolset.yaml'), '- read_file\n- write_file\n');
+      const future = new Date(Date.now() + 10_000);
+      const { utimes } = await import('node:fs/promises');
+      await utimes(join(personalityDir, 'toolset.yaml'), future, future);
+
+      await registry.loadFromDirectory(testDir);
+      expect(registry.get('toolsetedit')?.toolset).toEqual(['read_file', 'write_file']);
+    });
   });
 
   describe('define / get / list / setDefault', () => {

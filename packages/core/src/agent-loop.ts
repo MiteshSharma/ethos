@@ -82,6 +82,12 @@ export interface RunOptions {
   sessionKey?: string;
   personalityId?: string;
   abortSignal?: AbortSignal;
+  /**
+   * Identifier surfaced to tools as `ToolContext.agentId`. Delegation tools
+   * use this to thread spawn depth (`depth:N`) into child loops so
+   * `MAX_SPAWN_DEPTH` can be enforced across recursive sub-agent calls.
+   */
+  agentId?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -431,6 +437,7 @@ export class AgentLoop {
         sessionKey,
         platform: this.platform,
         workingDir: this.workingDir,
+        agentId: opts.agentId,
         personalityId: personality.id,
         memoryScope: personality.memoryScope,
         currentTurn: turnCount,

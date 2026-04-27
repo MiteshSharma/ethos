@@ -137,4 +137,55 @@ export async function deactivate() {}
     await loader.unloadAll();
     expect(loader.list()).toHaveLength(0);
   });
+
+  it('loadFromNodeModules discovers scoped @ethos-plugins/* packages', async () => {
+    const registries = makeRegistries();
+    const loader = new PluginLoader(registries);
+
+    // Lay out a fake node_modules with both a flat ethos-plugin-* and a scoped one.
+    const flatDir = join(testDir, 'ethos-plugin-flat');
+    await mkdir(flatDir, { recursive: true });
+    await writeFile(
+      join(flatDir, 'package.json'),
+      JSON.stringify({ name: 'ethos-plugin-flat', main: 'index.ts', ethos: { type: 'plugin' } }),
+    );
+    await writeFile(
+      join(flatDir, 'index.ts'),
+      `export async function activate(api) {
+        api.registerTool({
+          name: 'flat_tool',
+          description: '',
+          schema: { type: 'object', properties: {} },
+          async execute() { return { ok: true, value: 'flat' }; },
+        });
+      }`,
+    );
+
+    const scopedDir = join(testDir, '@ethos-plugins', 'scoped');
+    await mkdir(scopedDir, { recursive: true });
+    await writeFile(
+      join(scopedDir, 'package.json'),
+      JSON.stringify({
+        name: '@ethos-plugins/scoped',
+        main: 'index.ts',
+        ethos: { type: 'plugin' },
+      }),
+    );
+    await writeFile(
+      join(scopedDir, 'index.ts'),
+      `export async function activate(api) {
+        api.registerTool({
+          name: 'scoped_tool',
+          description: '',
+          schema: { type: 'object', properties: {} },
+          async execute() { return { ok: true, value: 'scoped' }; },
+        });
+      }`,
+    );
+
+    await loader.loadFromNodeModules(testDir);
+
+    expect(registries.tools.get('flat_tool')).toBeDefined();
+    expect(registries.tools.get('scoped_tool')).toBeDefined();
+  });
 });
