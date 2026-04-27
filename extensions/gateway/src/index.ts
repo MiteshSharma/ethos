@@ -1,5 +1,8 @@
 import type { AgentLoop } from '@ethosagent/core';
 import type { InboundMessage, PlatformAdapter } from '@ethosagent/types';
+import { MessageDedupCache } from './dedup';
+
+export { MessageDedupCache } from './dedup';
 
 // ---------------------------------------------------------------------------
 // SessionLane — serialises concurrent messages for the same chat
@@ -77,6 +80,21 @@ export interface GatewayConfig {
    * (no key, no dedup possible — see plan/IMPROVEMENT.md P2-2).
    */
   dedupWindow?: number;
+  /**
+   * TTL for the outbound-message dedup cache (`MessageDedupCache`). Same
+   * `(sessionId, content)` within this window is suppressed before reaching
+   * the adapter. Defaults to 30s. Set to 0 to disable. The
+   * `ETHOS_DEDUP_LEGACY=1` env var is a separate, hard-off switch — see
+   * `dedup.ts` and plan/phases/30-robustness.md § 30.4.
+   */
+  outboundDedupTtlMs?: number;
+  /**
+   * Maximum number of distinct chats kept in memory. The least-recently-used
+   * idle chat is evicted (its lane, session key, personality override, and
+   * usage stats are forgotten) once this cap is exceeded. Active in-flight
+   * lanes are never evicted. Defaults to 4096.
+   */
+  maxChats?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -112,13 +130,19 @@ export class Gateway {
   /** Bounded LRU of recently-seen inbound-message keys. */
   private readonly seenMessages = new Set<string>();
   private readonly dedupWindow: number;
+  /** Outbound-message dedup cache. Suppresses `(sessionId, content)` within TTL. */
+  private readonly outboundDedup: MessageDedupCache;
   /** Active turns by laneKey — used by graceful shutdown to notify users. */
   private readonly activeTurns = new Map<string, { adapter: PlatformAdapter; chatId: string }>();
+  private readonly maxChats: number;
 
   constructor(config: GatewayConfig) {
     this.loop = config.loop;
     this.defaultPersonality = config.defaultPersonality;
     this.dedupWindow = config.dedupWindow ?? 1024;
+    this.maxChats = config.maxChats ?? 4096;
+    // ttlMs <= 0 disables dedup inside the cache itself (shouldSend always returns true).
+    this.outboundDedup = new MessageDedupCache({ ttlMs: config.outboundDedupTtlMs ?? 30_000 });
   }
 
   /**
@@ -166,6 +190,8 @@ export class Gateway {
 
     if (cmdType === 'new') {
       lane.abort();
+      const previousSession = this.sessionKeys.get(laneKey) ?? laneKey;
+      this.outboundDedup.clearSession(previousSession);
       const fresh = `${laneKey}:${Date.now()}`;
       this.sessionKeys.set(laneKey, fresh);
       this.usageStore.delete(laneKey);
@@ -212,6 +238,8 @@ export class Gateway {
       }
 
       // Switch personality — also start a fresh session so the new identity takes effect immediately
+      const previousSession = this.sessionKeys.get(laneKey) ?? laneKey;
+      this.outboundDedup.clearSession(previousSession);
       this.personalityIds.set(laneKey, arg);
       const fresh = `${laneKey}:${Date.now()}`;
       this.sessionKeys.set(laneKey, fresh);
@@ -248,6 +276,7 @@ export class Gateway {
 
       try {
         let responseText = '';
+        let errored: { error: string; code: string } | null = null;
 
         for await (const event of this.loop.run(text, {
           sessionKey,
@@ -266,13 +295,34 @@ export class Gateway {
             u.costUsd += event.estimatedCostUsd;
             this.usageStore.set(laneKey, u);
           }
-          if (event.type === 'error' || event.type === 'done') break;
+          if (event.type === 'error') {
+            errored = { error: event.error, code: event.code };
+            break;
+          }
+          if (event.type === 'done') break;
         }
 
-        if (responseText && !signal.aborted) {
-          await adapter
-            .send(message.chatId, { text: responseText, parseMode: 'markdown' })
-            .catch(() => {});
+        if (signal.aborted) {
+          // /stop or shutdown — caller already notified the user.
+        } else if (errored) {
+          // Surface error explicitly so users don't mistake a partial answer
+          // for a complete one. Aborts (code === 'aborted') are silent above.
+          const note =
+            responseText.trim().length > 0
+              ? `${responseText}\n\n⚠ Response interrupted: ${errored.error}`
+              : `⚠ Error: ${errored.error}`;
+          if (this.outboundDedup.shouldSend(sessionKey, note)) {
+            await adapter.send(message.chatId, { text: note }).catch(() => {});
+          }
+        } else if (responseText) {
+          // Outbound dedup — suppress same (sessionId, content) within TTL.
+          // Adapters that previously rolled their own dedup go through this
+          // cache instead. See plan/phases/30-robustness.md § 30.4.
+          if (this.outboundDedup.shouldSend(sessionKey, responseText)) {
+            await adapter
+              .send(message.chatId, { text: responseText, parseMode: 'markdown' })
+              .catch(() => {});
+          }
         }
       } finally {
         clearInterval(typingTimer);
@@ -308,11 +358,39 @@ export class Gateway {
   // ---------------------------------------------------------------------------
 
   private getOrCreateLane(key: string): SessionLane {
-    let lane = this.lanes.get(key);
-    if (!lane) {
-      lane = new SessionLane();
-      this.lanes.set(key, lane);
+    const existing = this.lanes.get(key);
+    if (existing) {
+      // LRU touch: re-insert to push to the tail so eviction skips it.
+      this.lanes.delete(key);
+      this.lanes.set(key, existing);
+      return existing;
     }
+    const lane = new SessionLane();
+    this.lanes.set(key, lane);
+    this.evictIdleChats();
     return lane;
+  }
+
+  /**
+   * Bound per-chat state at `maxChats`. Walks `lanes` in LRU order (oldest
+   * first) and evicts the first idle chat — one whose lane queue is empty
+   * and that has no in-flight turn. Active chats are skipped, so a flood of
+   * new chats can't drop a user mid-response.
+   */
+  private evictIdleChats(): void {
+    while (this.lanes.size > this.maxChats) {
+      let evictedKey: string | null = null;
+      for (const [key, lane] of this.lanes) {
+        if (lane.length === 0 && !this.activeTurns.has(key)) {
+          evictedKey = key;
+          break;
+        }
+      }
+      if (evictedKey === null) return; // every chat is busy — leave the cap alone
+      this.lanes.delete(evictedKey);
+      this.sessionKeys.delete(evictedKey);
+      this.personalityIds.delete(evictedKey);
+      this.usageStore.delete(evictedKey);
+    }
   }
 }

@@ -200,16 +200,23 @@ export class CronScheduler {
         continue;
       }
 
-      // run-once: execute the job (even if overdue)
+      // run-once: claim the job by advancing nextRunAt BEFORE executing.
+      // If the patch fails (lock contention, disk error), we skip this tick
+      // — better than double-firing because the schedule never advanced.
+      const upcoming = nextRunAfter(job.schedule, now);
+      try {
+        await this.patchJob(job.id, {
+          lastRunAt: now.toISOString(),
+          nextRunAt: upcoming?.toISOString(),
+        });
+      } catch (err) {
+        console.error(`[cron] Could not claim job "${job.id}", skipping tick:`, err);
+        continue;
+      }
+
       await this.executeJob(job).catch((err) => {
         console.error(`[cron] Job "${job.id}" failed:`, err);
       });
-
-      const upcoming = nextRunAfter(job.schedule, now);
-      await this.patchJob(job.id, {
-        lastRunAt: now.toISOString(),
-        nextRunAt: upcoming?.toISOString(),
-      }).catch(() => {});
     }
   }
 

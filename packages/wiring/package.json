@@ -1,0 +1,36 @@
+{
+  "name": "@ethosagent/wiring",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "import": "./src/index.ts",
+      "types": "./src/index.ts",
+      "production": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsup src/index.ts --format esm --dts"
+  },
+  "dependencies": {
+    "@ethosagent/core": "workspace:*",
+    "@ethosagent/llm-anthropic": "workspace:*",
+    "@ethosagent/llm-openai-compat": "workspace:*",
+    "@ethosagent/memory-markdown": "workspace:*",
+    "@ethosagent/memory-vector": "workspace:*",
+    "@ethosagent/personalities": "workspace:*",
+    "@ethosagent/sandbox-docker": "workspace:*",
+    "@ethosagent/session-sqlite": "workspace:*",
+    "@ethosagent/skills": "workspace:*",
+    "@ethosagent/tools-browser": "workspace:*",
+    "@ethosagent/tools-code": "workspace:*",
+    "@ethosagent/tools-delegation": "workspace:*",
+    "@ethosagent/tools-file": "workspace:*",
+    "@ethosagent/tools-mcp": "workspace:*",
+    "@ethosagent/tools-memory": "workspace:*",
+    "@ethosagent/tools-terminal": "workspace:*",
+    "@ethosagent/tools-web": "workspace:*",
+    "@ethosagent/types": "workspace:*"
+  }
+}

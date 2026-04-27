@@ -1,6 +1,6 @@
 import type { AgentEvent } from '@ethosagent/core';
 import type { InboundMessage, PlatformAdapter } from '@ethosagent/types';
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import { Gateway, SessionLane } from '../index';
 
 // ---------------------------------------------------------------------------
@@ -399,6 +399,84 @@ describe('Gateway', () => {
       await gateway.shutdown();
 
       expect(sent.length).toBe(sentCountBefore);
+    });
+  });
+
+  // Outbound dedup — see plan/phases/30-robustness.md § 30.4.
+  // The gateway is the single dedup path for outbound messages. Adapters do
+  // not roll their own.
+
+  describe('outbound dedup', () => {
+    it('suppresses sending the same final twice within ttl on the same session', async () => {
+      const loop = makeLoop('PONG');
+      const gateway = new Gateway({ loop, outboundDedupTtlMs: 60_000 });
+      const { adapter, sent } = makeAdapter();
+
+      await gateway.handleMessage({ ...makeMessage('a', 'chat1'), messageId: 'm-1' }, adapter);
+      await gateway.handleMessage({ ...makeMessage('b', 'chat1'), messageId: 'm-2' }, adapter);
+
+      // The agent answer "PONG" is identical for both turns; the second send
+      // is suppressed by the outbound dedup cache.
+      const pongCount = sent.filter((s) => s === 'PONG').length;
+      expect(pongCount).toBe(1);
+    });
+
+    it('does not suppress identical finals across different sessions', async () => {
+      const loop = makeLoop('PONG');
+      const gateway = new Gateway({ loop, outboundDedupTtlMs: 60_000 });
+      const { adapter, sent } = makeAdapter();
+
+      await gateway.handleMessage({ ...makeMessage('a', 'chatA'), messageId: 'a-1' }, adapter);
+      await gateway.handleMessage({ ...makeMessage('b', 'chatB'), messageId: 'b-1' }, adapter);
+
+      const pongCount = sent.filter((s) => s === 'PONG').length;
+      expect(pongCount).toBe(2);
+    });
+
+    it('/new clears dedup state for the previous session, allowing the same response again', async () => {
+      const loop = makeLoop('PONG');
+      const gateway = new Gateway({ loop, outboundDedupTtlMs: 60_000 });
+      const { adapter, sent } = makeAdapter();
+
+      await gateway.handleMessage({ ...makeMessage('a', 'chat1'), messageId: 'm-1' }, adapter);
+      await gateway.handleMessage({ ...makeMessage('/new', 'chat1'), messageId: 'm-2' }, adapter);
+      // After /new the lane has a fresh session key; fresh keys also bypass
+      // dedup naturally, but we want to be sure clearSession ran.
+      await gateway.handleMessage({ ...makeMessage('b', 'chat1'), messageId: 'm-3' }, adapter);
+
+      const pongCount = sent.filter((s) => s === 'PONG').length;
+      expect(pongCount).toBe(2);
+    });
+
+    it('outboundDedupTtlMs=0 disables dedup', async () => {
+      const loop = makeLoop('PONG');
+      const gateway = new Gateway({ loop, outboundDedupTtlMs: 0 });
+      const { adapter, sent } = makeAdapter();
+
+      await gateway.handleMessage({ ...makeMessage('a', 'chat1'), messageId: 'm-1' }, adapter);
+      await gateway.handleMessage({ ...makeMessage('b', 'chat1'), messageId: 'm-2' }, adapter);
+
+      const pongCount = sent.filter((s) => s === 'PONG').length;
+      expect(pongCount).toBe(2);
+    });
+
+    it('ETHOS_DEDUP_LEGACY=1 disables dedup (rollback escape hatch)', async () => {
+      const original = process.env.ETHOS_DEDUP_LEGACY;
+      process.env.ETHOS_DEDUP_LEGACY = '1';
+      try {
+        const loop = makeLoop('PONG');
+        const gateway = new Gateway({ loop, outboundDedupTtlMs: 60_000 });
+        const { adapter, sent } = makeAdapter();
+
+        await gateway.handleMessage({ ...makeMessage('a', 'chat1'), messageId: 'm-1' }, adapter);
+        await gateway.handleMessage({ ...makeMessage('b', 'chat1'), messageId: 'm-2' }, adapter);
+
+        const pongCount = sent.filter((s) => s === 'PONG').length;
+        expect(pongCount).toBe(2);
+      } finally {
+        if (original === undefined) delete process.env.ETHOS_DEDUP_LEGACY;
+        else process.env.ETHOS_DEDUP_LEGACY = original;
+      }
     });
   });
 

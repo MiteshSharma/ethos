@@ -109,6 +109,11 @@ export async function runGatewayStart(config: EthosConfig): Promise<void> {
   }
 
   console.log(`${c.bold}ethos gateway${c.reset}  ${c.dim}starting...${c.reset}`);
+  // First-run notice: gateway is opt-in for always-on channels. CLI is the
+  // supported install. See plan/phases/30-robustness.md § 30.5.
+  console.log(
+    `${c.dim}Runs in the foreground. For always-on production, see https://ethosagent.ai/docs/guides/run-as-daemon (launchd / systemd / pm2). For interactive use, run ${c.reset}${c.bold}ethos chat${c.reset}${c.dim}.${c.reset}`,
+  );
 
   // Build the shared agent loop
   const loop = await createAgentLoop(config);

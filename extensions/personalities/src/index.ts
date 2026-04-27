@@ -30,7 +30,7 @@ function parseToolsetYaml(src: string): string[] {
 
 export class FilePersonalityRegistry implements PersonalityRegistry {
   private readonly personalities = new Map<string, PersonalityConfig>();
-  private readonly mtimeCache = new Map<string, number>(); // dir → config.yaml mtime
+  private readonly fingerprintCache = new Map<string, string>(); // dir → fingerprint of config.yaml + ETHOS.md + toolset.yaml
   private defaultId = 'researcher';
 
   // -------------------------------------------------------------------------
@@ -97,16 +97,17 @@ export class FilePersonalityRegistry implements PersonalityRegistry {
   // -------------------------------------------------------------------------
 
   private async loadOne(dir: string, id: string): Promise<void> {
-    // mtime guard — invalidate when any of the three personality files change.
-    // Watching only config.yaml would miss hot-reloads of ETHOS.md and toolset.yaml,
-    // which are edited far more often than config.yaml.
-    const mtime = await maxMtime([
+    // Fingerprint guard — invalidate when any of the three personality files change.
+    // Combines mtime + size per file so a delete-and-recreate within the same
+    // mtime tick (which can happen on filesystems with coarse mtime resolution)
+    // still invalidates the cache.
+    const fingerprint = await fileFingerprint([
       join(dir, 'config.yaml'),
       join(dir, 'ETHOS.md'),
       join(dir, 'toolset.yaml'),
     ]);
-    if (mtime !== null && this.mtimeCache.get(dir) === mtime) return;
-    if (mtime !== null) this.mtimeCache.set(dir, mtime);
+    if (this.fingerprintCache.get(dir) === fingerprint) return;
+    this.fingerprintCache.set(dir, fingerprint);
 
     const config = await buildConfig(dir, id);
     if (config) this.define(config);
@@ -187,21 +188,18 @@ async function exists(path: string): Promise<boolean> {
   }
 }
 
-async function statMtime(path: string): Promise<number | null> {
+async function statFingerprint(path: string): Promise<string> {
   try {
-    return (await stat(path)).mtimeMs;
+    const s = await stat(path);
+    return `${s.mtimeMs}:${s.size}`;
   } catch {
-    return null;
+    return 'missing';
   }
 }
 
-async function maxMtime(paths: string[]): Promise<number | null> {
-  const mtimes = await Promise.all(paths.map(statMtime));
-  let max: number | null = null;
-  for (const m of mtimes) {
-    if (m !== null && (max === null || m > max)) max = m;
-  }
-  return max;
+async function fileFingerprint(paths: string[]): Promise<string> {
+  const parts = await Promise.all(paths.map(statFingerprint));
+  return parts.join('|');
 }
 
 function titleCase(s: string): string {

@@ -161,6 +161,28 @@ chat, channel adapters) renders only events with `audience: 'user'`.
 
 ---
 
+## Channel adapter contract
+
+Every outbound channel message — including streaming finals and edits — flows
+through a single dedup path in the gateway: `MessageDedupCache` keyed by
+`(sessionId, sha256(content))` with a 30s TTL. Adapters call `adapter.send()`;
+the gateway gates the call with `cache.shouldSend(sessionId, content)` and
+silently drops duplicates.
+
+- **Adapters do NOT roll their own dedup.** A new adapter does not need an
+  idempotency layer. If you find adapter-local dedup logic, it's a bug.
+- **Configuration:** `GatewayConfig.outboundDedupTtlMs` (default `30_000`).
+  Set to `0` to disable, or set the env var `ETHOS_DEDUP_LEGACY=1` for the
+  hard-off rollback hatch (one-release escape valve; remove in next minor).
+- **Session boundaries:** `/new` and `/personality` clear the previous
+  session's dedup keys so the same response text can be sent again under
+  the fresh session key.
+
+See `extensions/gateway/src/dedup.ts` and the tests in
+`extensions/gateway/src/__tests__/dedup.test.ts`.
+
+---
+
 ## Adding a new LLM provider
 
 1. Create `extensions/llm-<name>/src/index.ts` — implement `LLMProvider` from `@ethosagent/types`

@@ -253,21 +253,22 @@ export class SQLiteSessionStore implements SessionStore {
 
     // rowid breaks timestamp ties (insertion order). Must be explicit in SELECT to be visible
     // in the outer query.
-    const rows = limit
-      ? this.db
-          .prepare(
-            `SELECT * FROM (
-               SELECT *, rowid AS _row FROM messages WHERE session_id = ?
-               ORDER BY timestamp DESC, rowid DESC LIMIT ? OFFSET ?
-             ) ORDER BY timestamp ASC, _row ASC`,
-          )
-          .all(sessionId, limit, offset)
-      : this.db
-          .prepare(
-            `SELECT *, rowid AS _row FROM messages WHERE session_id = ?
-             ORDER BY timestamp ASC, rowid ASC`,
-          )
-          .all(sessionId);
+    const rows =
+      limit !== undefined
+        ? this.db
+            .prepare(
+              `SELECT * FROM (
+                 SELECT *, rowid AS _row FROM messages WHERE session_id = ?
+                 ORDER BY timestamp DESC, rowid DESC LIMIT ? OFFSET ?
+               ) ORDER BY timestamp ASC, _row ASC`,
+            )
+            .all(sessionId, limit, offset)
+        : this.db
+            .prepare(
+              `SELECT *, rowid AS _row FROM messages WHERE session_id = ?
+               ORDER BY timestamp ASC, rowid ASC LIMIT -1 OFFSET ?`,
+            )
+            .all(sessionId, offset);
 
     return (rows as MessageRow[]).map(rowToMessage);
   }

@@ -40,6 +40,7 @@
   "dependencies": {
     "@ethosagent/core": "workspace:*",
     "@ethosagent/types": "workspace:*",
+    "@ethosagent/wiring": "workspace:*",
     "@anthropic-ai/sdk": "^0.39.0",
     "@modelcontextprotocol/sdk": "^1.0.0",
     "better-sqlite3": "^12.9.0",

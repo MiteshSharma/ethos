@@ -332,10 +332,20 @@ export class AuthRotatingProvider implements LLMProvider {
 
     for (let attempt = 0; attempt < this.providers.length; attempt++) {
       const provider = this.providers[this.current];
+      let yieldedAny = false;
       try {
-        yield* provider.complete(messages, tools, options);
+        if (!provider) throw new Error('AuthRotatingProvider: missing provider slot');
+        for await (const chunk of provider.complete(messages, tools, options)) {
+          yieldedAny = true;
+          yield chunk;
+        }
         return;
       } catch (err) {
+        // Once the consumer has seen any chunk, failing over to a different
+        // provider would emit a fresh stream from the start and corrupt the
+        // assistant turn. Propagate the error instead.
+        if (yieldedAny) throw err;
+
         const reason = classifyError(err);
         if (reason === 'auth' || reason === 'rate_limit' || reason === 'overloaded') {
           const next = (this.current + 1) % this.providers.length;

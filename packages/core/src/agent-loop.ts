@@ -612,18 +612,9 @@ export class AgentLoop {
       llmMessages.push({ role: 'user', content: toolResultContent });
     }
 
-    // Step 10: Sync memory
-    await this.memory.sync(
-      {
-        sessionId,
-        sessionKey,
-        platform: this.platform,
-        workingDir: this.workingDir,
-        personalityId: personality.id,
-        memoryScope: personality.memoryScope,
-      },
-      [],
-    );
+    // Step 10: Memory writes flow through the `memory_save` tool during the
+    // turn (see extensions/tools-memory). The agent-loop itself produces no
+    // updates, so there's nothing to sync here.
 
     // Step 11: Update usage
     await this.session.updateUsage(sessionId, { apiCallCount: turnCount });
