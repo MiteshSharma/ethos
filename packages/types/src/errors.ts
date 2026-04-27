@@ -50,6 +50,9 @@ export type EthosErrorCode =
   | 'SKILL_INSTALL_FAILED'
   // Plugins (Phase 30.6 surface)
   | 'PLUGIN_CONTRACT_INCOMPATIBLE'
+  // Web API (Phase 26)
+  | 'UNAUTHORIZED'
+  | 'SESSION_NOT_FOUND'
   // Catch-all
   | 'INTERNAL';
 

@@ -4,69 +4,102 @@ import { AcpServer } from '@ethosagent/acp-server';
 import { AgentMesh } from '@ethosagent/agent-mesh';
 import { createPersonalityRegistry } from '@ethosagent/personalities';
 import { SQLiteSessionStore } from '@ethosagent/session-sqlite';
+import { createWebApi, WebTokenRepository } from '@ethosagent/web-api';
 import { type EthosConfig, ethosDir } from '../config';
 import { createAgentLoop } from '../wiring';
+import { hasFlag, parseFlagValue, parsePort } from './serve-helpers';
+import { listenWithFallback } from './serve-listen';
+
+// `ethos serve` boots:
+//   • Always: ACP server on `--port` (default 3001) + mesh registration
+//   • With `--web-experimental`: web UI HTTP+SSE on `--web-port` (default 3000)
+//
+// Web is opt-in to keep current users' boots unchanged. Flag rename when
+// 26.x leaves experimental — for now it matches plan/phases/26-web-ui.md.
+//
+// Both servers share one `SQLiteSessionStore` so chat from web and from ACP
+// land in the same database. SIGINT / SIGTERM cleans up both before exiting.
+
+const ACP_PORT_DEFAULT = 3001;
+const WEB_PORT_DEFAULT = 3000;
+const WEB_PORT_FALLBACK_ATTEMPTS = 5;
 
 export async function runServe(args: string[], config: EthosConfig): Promise<void> {
-  const portArg = args.find((a) => a.startsWith('--port=') || a.startsWith('--port'));
-  let port = 3001;
-  if (portArg) {
-    const val = portArg.includes('=') ? portArg.split('=')[1] : args[args.indexOf(portArg) + 1];
-    const parsed = Number(val);
-    if (!Number.isNaN(parsed)) port = parsed;
-  }
+  const acpPort = parsePort(parseFlagValue(args, ['--port']), ACP_PORT_DEFAULT);
+  const webEnabled = hasFlag(args, ['--web-experimental']);
+  const webPort = parsePort(parseFlagValue(args, ['--web-port']), WEB_PORT_DEFAULT);
 
-  const personalityArg = args.find(
-    (a) => a.startsWith('--personality=') || a.startsWith('--personality'),
-  );
-  if (personalityArg) {
-    const val = personalityArg.includes('=')
-      ? personalityArg.split('=')[1]
-      : args[args.indexOf(personalityArg) + 1];
-    if (val) config = { ...config, personality: val };
-  }
+  const personalityOverride = parseFlagValue(args, ['--personality']);
+  if (personalityOverride) config = { ...config, personality: personalityOverride };
 
   const dir = ethosDir();
   const loop = await createAgentLoop(config);
   const session = new SQLiteSessionStore(join(dir, 'sessions.db'));
   const mesh = new AgentMesh();
 
-  const server = new AcpServer({ runner: loop, session, mesh });
-  server.startHttp(port);
+  // ACP server (existing behavior — kept first so any breakage is obvious).
+  const acpServer = new AcpServer({ runner: loop, session, mesh });
+  acpServer.startHttp(acpPort);
 
-  // Load personality registry to get capabilities for this agent
   const personalities = await createPersonalityRegistry();
   await personalities.loadFromDirectory(join(dir, 'personalities'));
   const personalityConfig = personalities.get(config.personality ?? 'researcher');
   const capabilities = personalityConfig?.capabilities ?? [];
 
   const agentId = `${config.personality ?? 'default'}:${process.pid}:${randomUUID().slice(0, 8)}`;
-
   mesh.register({
     agentId,
     capabilities,
     model: config.model,
     pid: process.pid,
     host: 'localhost',
-    port,
+    port: acpPort,
     activeSessions: 0,
   });
+  const stopHeartbeat = mesh.startHeartbeat(agentId, () => acpServer.activeSessionCount);
 
-  const stopHeartbeat = mesh.startHeartbeat(agentId, () => server.activeSessionCount);
-
-  const cleanup = () => {
-    mesh.unregister(agentId);
-    stopHeartbeat();
-    process.exit(0);
-  };
-  process.on('SIGTERM', cleanup);
-  process.on('SIGINT', cleanup);
-
-  console.log(`ethos ACP server listening on http://localhost:${port}`);
+  console.log(`ethos ACP server listening on http://localhost:${acpPort}`);
   console.log(`  agent:        ${agentId}`);
   console.log(`  personality:  ${config.personality ?? 'default'}`);
   console.log(`  capabilities: ${capabilities.length > 0 ? capabilities.join(', ') : '(none)'}`);
-  console.log(`  WebSocket:    ws://localhost:${port}/ws`);
+  console.log(`  WebSocket:    ws://localhost:${acpPort}/ws`);
+
+  // Web API (Phase 26). Additive — only mounts when --web-experimental is set.
+  let webShutdown: (() => Promise<void>) | null = null;
+  if (webEnabled) {
+    const webApp = createWebApi({
+      dataDir: dir,
+      sessionStore: session,
+      agentLoop: loop,
+      // The same registry the agent loop loaded above is reused so mtime
+      // hot-reloads of personality files reach both surfaces in one tick.
+      personalities,
+      chatDefaults: {
+        model: config.model,
+        provider: config.provider,
+      },
+    });
+    const tokens = new WebTokenRepository({ dataDir: dir });
+    const token = await tokens.getOrCreate();
+    const { server, port } = await listenWithFallback(webApp, webPort, WEB_PORT_FALLBACK_ATTEMPTS);
+    console.log('');
+    console.log(`ethos web UI listening on http://localhost:${port}`);
+    console.log(`  open: http://localhost:${port}/auth/exchange?t=${token}`);
+    console.log('  (token rotates on first use; cookie remains the steady-state credential)');
+    webShutdown = () =>
+      new Promise<void>((resolve) => {
+        server.close(() => resolve());
+      });
+  }
+
+  const cleanup = async () => {
+    stopHeartbeat();
+    mesh.unregister(agentId);
+    if (webShutdown) await webShutdown();
+    process.exit(0);
+  };
+  process.on('SIGTERM', () => void cleanup());
+  process.on('SIGINT', () => void cleanup());
 
   await new Promise(() => {});
 }

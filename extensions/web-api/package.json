@@ -1,0 +1,27 @@
+{
+  "name": "@ethosagent/web-api",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "import": "./src/index.ts",
+      "types": "./src/index.ts",
+      "production": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsup src/index.ts --format esm --dts"
+  },
+  "dependencies": {
+    "@ethosagent/agent-bridge": "workspace:*",
+    "@ethosagent/personalities": "workspace:*",
+    "@ethosagent/session-sqlite": "workspace:*",
+    "@ethosagent/types": "workspace:*",
+    "@ethosagent/web-contracts": "workspace:*",
+    "@hono/node-server": "^2.0.0",
+    "@orpc/openapi": "^1.14.0",
+    "@orpc/server": "^1.14.0",
+    "hono": "^4.12.15"
+  }
+}

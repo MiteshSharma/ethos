@@ -44,7 +44,8 @@
       "@ethosagent/claw-migrate": ["./extensions/claw-migrate/src"],
       "@ethosagent/agent-bridge": ["./packages/agent-bridge/src"],
       "@ethosagent/wiring": ["./packages/wiring/src"],
-      "@ethosagent/web-contracts": ["./packages/web-contracts/src"]
+      "@ethosagent/web-contracts": ["./packages/web-contracts/src"],
+      "@ethosagent/web-api": ["./extensions/web-api/src"]
     }
   },
   "include": [
