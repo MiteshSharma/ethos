@@ -73,7 +73,12 @@ memoryScope: global
 | `name` | string | yes | Display name shown in the UI |
 | `description` | string | no | One-line summary shown in `/personality list` |
 | `model` | string | no | Overrides the global model from `~/.ethos/config.yaml` |
+| `provider` | string | no | Overrides the global LLM provider for this personality (e.g. `anthropic`, `openrouter`, `ollama`) |
+| `platform` | string | no | Restricts this personality to a single channel adapter (e.g. `cli`, `telegram`, `slack`, `discord`) |
+| `capabilities` | string (comma-separated) | no | Capability labels advertised to the agent mesh — used by `route_to_agent` to pick this agent for matching tasks |
 | `memoryScope` | `global` \| `per-personality` | no | Defaults to `global` |
+| `streamingTimeoutMs` | number | no | Per-personality streaming watchdog — abort the LLM stream if no chunk arrives within this many milliseconds. Defaults to the agent loop's 120000ms |
+| `toolset` | string[] | no | Allowed tool names — declared in the separate `toolset.yaml` file (see below) |
 
 ---
 

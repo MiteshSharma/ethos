@@ -42,6 +42,25 @@ rename, field removal, required-field addition) requires:
 1. Bumping `PLUGIN_CONTRACT_MAJOR` in `packages/plugin-contract/src/version.ts`.
 2. Adding a migration entry to `packages/plugin-contract/MIGRATIONS.md`.
 
+### Config surface doc-sync
+
+Every user-facing field on `EthosConfig` (`apps/ethos/src/config.ts`) and
+`PersonalityConfig` (`packages/types/src/personality.ts`) must be documented
+in the corresponding doc page — `docs/content/cli-reference.md` for
+`EthosConfig`, anything under `docs/content/personality/` for
+`PersonalityConfig`. The CI gate
+(`apps/ethos/src/__tests__/config-doc-sync.test.ts`) parses both schemas and
+fails on missing or under-described fields. Bare substring match doesn't
+count: the field must appear either as a markdown table row with a
+populated description column, OR in a YAML/code block with a same-line
+comment, section header within 3 lines, or descriptive sentence within 5
+lines.
+
+Internal/derived fields (populated by the loader, not user-set — `id`,
+`ethosFile`, `skillsDirs`, `metadata` on `PersonalityConfig`) are tagged
+`@internal` in source and skipped by the test. If you add a new field that
+genuinely shouldn't surface in docs, add `@internal` in the same PR.
+
 
 ## Style
 

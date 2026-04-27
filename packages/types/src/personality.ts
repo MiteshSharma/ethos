@@ -18,10 +18,13 @@
 //   - label or response templates
 //   - per-channel UI affordances
 export interface PersonalityConfig {
+  /** @internal Personality directory name; populated by the loader, not user-set. */
   id: string;
   name: string;
   description?: string;
+  /** @internal Absolute path to ETHOS.md; populated by the loader. */
   ethosFile?: string;
+  /** @internal Absolute paths to skills directories; populated by the loader. */
   skillsDirs?: string[];
   toolset?: string[];
   capabilities?: string[];
@@ -39,6 +42,7 @@ export interface PersonalityConfig {
    * See plan/IMPROVEMENT.md P1-2 / OpenClaw #68596.
    */
   streamingTimeoutMs?: number;
+  /** @internal Free-form passthrough for adapter-specific metadata. */
   metadata?: Record<string, unknown>;
 }
 

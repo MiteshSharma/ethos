@@ -196,7 +196,16 @@ export class AgentLoop {
       personalityId: personality.id,
     });
 
-    // Step 3: Persist the user message
+    // Step 3: Persist the user message.
+    //
+    // Subagent task contract: the delegated task always lives in the child's
+    // first user message (this `text`). It is NEVER copied into the system
+    // prompt, NEVER injected via memory, and NEVER duplicated across both.
+    // The regression test in
+    // `extensions/tools-delegation/src/__tests__/task-contract.test.ts`
+    // captures every `LLMProvider.complete()` request and asserts the marker
+    // never appears in `opts.system` and appears exactly once across all
+    // user-role messages.
     await this.session.appendMessage({
       sessionId,
       role: 'user',
