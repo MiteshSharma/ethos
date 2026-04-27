@@ -1,5 +1,6 @@
 import { readFile } from 'node:fs/promises';
 import { BatchRunner, parseTasksJsonl } from '@ethosagent/batch-runner';
+import { EthosError } from '@ethosagent/types';
 import type { EthosConfig } from '../config';
 import { createAgentLoop } from '../wiring';
 
@@ -28,7 +29,11 @@ function parseArgs(args: string[]): {
     if (arg === '--concurrency' || arg === '-c') {
       const n = Number(args[++i]);
       if (!Number.isInteger(n) || n < 1)
-        throw new Error('--concurrency must be a positive integer');
+        throw new EthosError({
+          code: 'INVALID_INPUT',
+          cause: '--concurrency must be a positive integer',
+          action: 'Pass a positive integer, e.g. --concurrency 4.',
+        });
       concurrency = n;
     } else if (arg === '--output' || arg === '-o') {
       outputPath = args[++i] ?? '';
@@ -40,9 +45,12 @@ function parseArgs(args: string[]): {
   }
 
   if (!inputPath)
-    throw new Error(
-      'Usage: ethos batch <tasks.jsonl> [--concurrency N] [--output out.jsonl] [--checkpoint cp.json]',
-    );
+    throw new EthosError({
+      code: 'INVALID_INPUT',
+      cause: 'ethos batch requires a tasks file',
+      action:
+        'Usage: ethos batch <tasks.jsonl> [--concurrency N] [--output out.jsonl] [--checkpoint cp.json]',
+    });
 
   const base = inputPath.replace(/\.jsonl$/, '');
   if (!outputPath) outputPath = `${base}.output.jsonl`;

@@ -190,6 +190,45 @@ Then reinstall:
 pnpm install --force
 ```
 
+## Error reference
+
+User-facing errors are rendered as a code, a one-line cause, and a suggested action:
+
+```
+✗ INVALID_INPUT: --concurrency must be a positive integer
+  → Pass a positive integer, e.g. --concurrency 4.
+```
+
+If you see a code below, the action printed by the CLI is your first move. The table is the canonical list — every code that ships in `@ethosagent/types` `EthosErrorCode` appears here.
+
+| Code | Cause | Action |
+|---|---|---|
+| `CONFIG_MISSING` | `~/.ethos/config.yaml` is absent or unreadable. | Run `ethos setup`. |
+| `CONFIG_INVALID` | The config file parsed but is missing required fields (provider, model, apiKey). | Re-run `ethos setup`, or edit the file by hand and re-run the command. |
+| `PERSONALITY_NOT_FOUND` | The configured personality ID does not match any built-in or `~/.ethos/personalities/<id>/` directory. | Run `ethos personality list` and pick a valid ID. |
+| `PROVIDER_AUTH_FAILED` | The LLM provider rejected the API key. | Re-export `ANTHROPIC_API_KEY`/`OPENAI_API_KEY`, or re-run `ethos setup` and paste a fresh key. |
+| `LLM_ERROR` | The LLM provider returned a non-recoverable error mid-stream. | Re-run the request. If it repeats, capture the cause and file a bug. |
+| `STREAM_TIMEOUT` | The LLM streamed nothing for longer than the configured watchdog window. | Try again. Tune `streamingTimeoutMs` in the personality config if your network is slow. |
+| `INVALID_INPUT` | A required CLI flag is missing or out of range. | Read the printed `Usage:` line and re-run with a valid flag. |
+| `FILE_NOT_FOUND` | A path passed to a CLI flag does not exist. | Verify the path and re-run. |
+| `BATCH_INVALID_LINE` | A line in the batch tasks JSONL file is missing required fields. | Open the file, fix the offending line (number printed in the cause), and re-run `ethos batch`. |
+| `EVAL_INVALID_LINE` | A line in the eval expected JSONL file is malformed. | Open the file, fix the offending line, and re-run `ethos eval run`. |
+| `TOOL_REJECTED` | A `before_tool_call` hook blocked the tool. | The hook's reason appears in the cause. Adjust the hook config or the tool call. |
+| `TOOL_EXECUTION_FAILED` | A tool ran and returned `{ ok: false }`. | The tool's error message appears in the cause. Treat as the tool's own diagnostic. |
+| `SUBAGENT_TASK_DUPLICATED` | A delegated task ended up duplicated across the child agent's prompt. | Bug — file an issue with the parent personality and the prompt that triggered it. |
+| `JOB_NOT_FOUND` | The cron job ID passed to `ethos cron remove`/`run`/`disable` does not exist. | Run `ethos cron list` and copy the exact ID. |
+| `JOB_DUPLICATE` | A new cron job uses an ID that's already taken. | Pick a different ID or remove the existing job first. |
+| `JOB_LOCK_FAILED` | Another cron-mutating command is currently holding the lock. | Wait a moment and re-run. If it repeats, check for a stuck `ethos cron` process. |
+| `CRON_INVALID` | The cron expression failed validation. | Use a valid 5-field cron expression (see `https://crontab.guru`). |
+| `MCP_TRANSPORT_INVALID` | An MCP server config is missing `command` (stdio) or `url` (sse). | Edit the MCP server entry in `~/.ethos/config.yaml`. |
+| `REGISTRY_FETCH_FAILED` | `ethos upgrade` could not reach `registry.npmjs.org`. | Check your network. Install manually: `npm install -g @ethosagent/cli@latest`. |
+| `NETWORK_ERROR` | A network call inside the CLI failed for a reason other than registry-specific. | Re-run. Check your connection. |
+| `SKILL_INSTALL_FAILED` | `ethos skills install` did not complete. The temp directory is rolled back. | Re-run the install. If the source URL is wrong, fix the slug. |
+| `PLUGIN_CONTRACT_INCOMPATIBLE` | A plugin declares a `pluginContractMajor` that's not supported by this CLI. | Upgrade the plugin (or the CLI), per `packages/plugin-contract/MIGRATIONS.md`. |
+| `INTERNAL` | An unexpected error escaped to the surface. | Re-run. If it repeats, file an issue with the printed `details`. |
+
+For the recent errors hitting *your* install specifically, run `ethos doctor --recent-errors` (Phase 30.10).
+
 ## Getting help
 
 - **GitHub Issues**: [github.com/MiteshSharma/ethos/issues](https://github.com/MiteshSharma/ethos/issues)
@@ -201,3 +240,4 @@ When filing a bug, include:
 - OS and version
 - Relevant error message and stack trace
 - Steps to reproduce
+- The recent slice of `~/.ethos/logs/errors.jsonl` (Phase 30.10), or the lines matching the error code shown.

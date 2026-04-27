@@ -175,6 +175,27 @@ make version-patch && git commit -am "release: v0.x.y" && make publish && git ta
 npm view @ethosagent/cli version
 ```
 
+## Plugin contract bump checklist (Phase 30.6)
+
+Before `make release`, if **anything in `packages/plugin-contract/` changed**,
+walk this list:
+
+1. Did the change rename a field, remove a field, or add a required field?
+   - **No** (additive only) → no major bump needed. Skip the rest.
+   - **Yes** → continue.
+2. Bump `PLUGIN_CONTRACT_MAJOR` in `packages/plugin-contract/src/version.ts`.
+3. Add a new entry to `packages/plugin-contract/MIGRATIONS.md` describing
+   what changed, why, and the patch shape plugin authors need.
+4. Add a one-paragraph migration note to `CHANGELOG.md` under
+   `[Unreleased] / Changed`, linking to `MIGRATIONS.md`.
+5. Confirm the plugin-loader test for the rejection path still fails on a
+   plugin declaring the *previous* major (enforces the no-overlap policy).
+
+If you're unsure whether your change is breaking, default to a major bump
+and document the migration as "no-op for compliant plugins."
+
+---
+
 ## CI auto-publish (future)
 
 When release cadence picks up, `make release` gets replaced with a GitHub Actions workflow that:

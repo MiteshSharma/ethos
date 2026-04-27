@@ -7,6 +7,21 @@ export interface ToolProgressEvent {
   toolName: string;
   message: string;
   percent?: number;
+  /**
+   * Phase 30.2 — audience boundary.
+   *
+   * `'internal'` (default when absent): consumed by the framework only —
+   * logs, telemetry, dev-mode TUI. Channel adapters (telegram, discord,
+   * slack, whatsapp, email) and `apps/ethos/src/commands/chat.ts` MUST NOT
+   * surface it to the user.
+   *
+   * `'user'`: explicit opt-in by the tool author — surfaced in the user-
+   * visible stream. Use sparingly: long-running operations where silent
+   * latency would be confusing (`read_file` reading >1MB, multi-step
+   * `bash` commands). Per-event opt-in; the framework never opts in for
+   * the tool.
+   */
+  audience?: 'internal' | 'user';
 }
 
 export interface ToolContext {

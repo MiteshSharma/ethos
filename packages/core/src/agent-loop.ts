@@ -28,8 +28,26 @@ export type AgentEvent =
   | { type: 'text_delta'; text: string }
   | { type: 'thinking_delta'; thinking: string }
   | { type: 'tool_start'; toolCallId: string; toolName: string; args: unknown }
-  | { type: 'tool_progress'; toolName: string; message: string; percent?: number }
-  | { type: 'tool_end'; toolCallId: string; toolName: string; ok: boolean; durationMs: number }
+  // Phase 30.2 — `audience` gates whether channel adapters / chat.ts surface
+  // this event to the user. Default is `'internal'`; tools opt in to `'user'`
+  // per event. Framework-emitted budget warnings are `'user'` (see step 7).
+  | {
+      type: 'tool_progress';
+      toolName: string;
+      message: string;
+      percent?: number;
+      audience: 'internal' | 'user';
+    }
+  | {
+      type: 'tool_end';
+      toolCallId: string;
+      toolName: string;
+      ok: boolean;
+      durationMs: number;
+      // Phase 30.2 — same boundary applies to tool_end success rendering.
+      // Failures (`ok: false`) ignore the field and always render.
+      audience?: 'internal' | 'user';
+    }
   | { type: 'usage'; inputTokens: number; outputTokens: number; estimatedCostUsd: number }
   | { type: 'error'; error: string; code: string }
   | { type: 'done'; text: string; turnCount: number }
@@ -291,6 +309,7 @@ export class AgentLoop {
           type: 'tool_progress',
           toolName: '_budget',
           message: `Stopped: hit ${this.maxToolCallsPerTurn}-tool-call budget for this turn`,
+          audience: 'user',
         };
         break;
       }
@@ -302,6 +321,7 @@ export class AgentLoop {
           type: 'tool_progress',
           toolName: overusedTool[0],
           message: `Stopped: ${overusedTool[0]} called ${overusedTool[1]} times in one turn (likely loop)`,
+          audience: 'user',
         };
         break;
       }
@@ -432,6 +452,17 @@ export class AgentLoop {
       }
 
       // Step 9: Pre-flight hooks → execute non-rejected tools → collect all results
+
+      // Phase 30.2 — tools call ctx.emit() during execution; AsyncGenerator can't
+      // yield from a sync callback, so we buffer per-batch then drain after
+      // executeParallel resolves. Order is preserved (insertion = call order).
+      const progressBuffer: Array<{
+        toolName: string;
+        message: string;
+        percent?: number;
+        audience: 'internal' | 'user';
+      }> = [];
+
       const toolCtxBase = {
         sessionId,
         sessionKey,
@@ -443,13 +474,19 @@ export class AgentLoop {
         currentTurn: turnCount,
         messageCount: allMessages.length + turnCount,
         abortSignal,
-        emit: (_event: {
+        emit: (event: {
           type: 'progress';
           toolName: string;
           message: string;
           percent?: number;
+          audience?: 'internal' | 'user';
         }) => {
-          // Progress emission wired in Phase 6 (terminal streaming)
+          progressBuffer.push({
+            toolName: event.toolName,
+            message: event.message,
+            ...(event.percent !== undefined && { percent: event.percent }),
+            audience: event.audience ?? 'internal',
+          });
         },
         resultBudgetChars: this.resultBudgetChars,
       };
@@ -504,6 +541,14 @@ export class AgentLoop {
           ? await this.tools.executeParallel(execInputs, toolCtxBase, allowedTools)
           : [];
       const execResultMap = new Map(execResults.map((r) => [r.toolCallId, r]));
+
+      // Drain any progress events tools emitted during execution. Order is
+      // call-order (across the parallel batch) — close enough for users; the
+      // exact interleaving doesn't matter when ctx.emit is best-effort.
+      for (const ev of progressBuffer) {
+        yield { type: 'tool_progress', ...ev };
+      }
+      progressBuffer.length = 0;
 
       // Persist results + emit tool_end + build tool_result content blocks (original order)
       const toolResultContent: MessageContent[] = [];

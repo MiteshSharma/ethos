@@ -188,4 +188,118 @@ export async function deactivate() {}
     expect(registries.tools.get('flat_tool')).toBeDefined();
     expect(registries.tools.get('scoped_tool')).toBeDefined();
   });
+
+  // --- Phase 30.6 — plugin contract version gate ---------------------------
+
+  describe('Phase 30.6: contract major gate', () => {
+    it('rejects a directory plugin declaring an incompatible pluginContractMajor', async () => {
+      const registries = makeRegistries();
+      const loader = new PluginLoader(registries);
+
+      const pluginDir = join(testDir, 'old-major');
+      await mkdir(pluginDir, { recursive: true });
+      await writeFile(
+        join(pluginDir, 'package.json'),
+        JSON.stringify({
+          name: 'old-major',
+          version: '1.0.0',
+          ethos: { type: 'plugin', pluginContractMajor: 999 },
+        }),
+      );
+      await writeFile(
+        join(pluginDir, 'index.ts'),
+        `export async function activate(api) {
+          api.registerTool({
+            name: 'should_not_register',
+            description: '',
+            schema: { type: 'object', properties: {} },
+            async execute() { return { ok: true, value: 'no' }; },
+          });
+        }`,
+      );
+
+      const warns: string[] = [];
+      const origWarn = console.warn;
+      console.warn = (...args) => warns.push(args.join(' '));
+      try {
+        await loader.loadFromDirectory(testDir);
+      } finally {
+        console.warn = origWarn;
+      }
+
+      expect(loader.isLoaded('old-major')).toBe(false);
+      expect(registries.tools.get('should_not_register')).toBeUndefined();
+      // Rejection message names plugin, declared major, current major, and links to MIGRATIONS.md
+      const msg = warns.find((w) => w.includes('old-major'));
+      expect(msg).toBeDefined();
+      expect(msg).toMatch(/pluginContractMajor=999/);
+      expect(msg).toMatch(/MIGRATIONS\.md/);
+    });
+
+    it('rejects an npm-discovered plugin declaring an incompatible major', async () => {
+      const registries = makeRegistries();
+      const loader = new PluginLoader(registries);
+
+      const pluginDir = join(testDir, 'ethos-plugin-bad');
+      await mkdir(pluginDir, { recursive: true });
+      await writeFile(
+        join(pluginDir, 'package.json'),
+        JSON.stringify({
+          name: 'ethos-plugin-bad',
+          main: 'index.ts',
+          ethos: { type: 'plugin', pluginContractMajor: 42 },
+        }),
+      );
+      await writeFile(
+        join(pluginDir, 'index.ts'),
+        `export async function activate(api) {
+          api.registerTool({
+            name: 'bad_tool',
+            description: '',
+            schema: { type: 'object', properties: {} },
+            async execute() { return { ok: true, value: 'no' }; },
+          });
+        }`,
+      );
+
+      const warns: string[] = [];
+      const origWarn = console.warn;
+      console.warn = (...args) => warns.push(args.join(' '));
+      try {
+        await loader.loadFromNodeModules(testDir);
+      } finally {
+        console.warn = origWarn;
+      }
+
+      expect(registries.tools.get('bad_tool')).toBeUndefined();
+      expect(warns.find((w) => /ethos-plugin-bad.*pluginContractMajor=42/.test(w))).toBeDefined();
+    });
+
+    it('allows a plugin without pluginContractMajor (backward compat)', async () => {
+      const registries = makeRegistries();
+      const loader = new PluginLoader(registries);
+
+      const pluginDir = join(testDir, 'no-major');
+      await mkdir(pluginDir, { recursive: true });
+      await writeFile(
+        join(pluginDir, 'package.json'),
+        JSON.stringify({ name: 'no-major', version: '1.0.0', ethos: { type: 'plugin' } }),
+      );
+      await writeFile(
+        join(pluginDir, 'index.ts'),
+        `export async function activate(api) {
+          api.registerTool({
+            name: 'compat_tool',
+            description: '',
+            schema: { type: 'object', properties: {} },
+            async execute() { return { ok: true, value: 'ok' }; },
+          });
+        }`,
+      );
+
+      await loader.loadFromDirectory(testDir);
+      expect(loader.isLoaded('no-major')).toBe(true);
+      expect(registries.tools.get('compat_tool')).toBeDefined();
+    });
+  });
 });

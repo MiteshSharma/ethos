@@ -2,6 +2,9 @@
 // Plugin contract — validation for published plugin packages
 // ---------------------------------------------------------------------------
 
+export type { ContractCompatResult } from './version';
+export { checkPluginContractMajor, PLUGIN_CONTRACT_MAJOR } from './version';
+
 export interface EthosPluginPackageJson {
   name: string;
   version: string;
@@ -10,7 +13,13 @@ export interface EthosPluginPackageJson {
   exports?: Record<string, unknown>;
   ethos?: {
     type?: 'plugin';
+    /** Legacy semver-style field. Soft check via `normalizeExternalPluginCompatibility`. */
     pluginApi?: string;
+    /**
+     * Phase 30.6 — declared plugin contract major version (integer). The
+     * loader hard-rejects mismatches against `PLUGIN_CONTRACT_MAJOR`.
+     */
+    pluginContractMajor?: number;
     id?: string;
   };
 }

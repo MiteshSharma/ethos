@@ -145,6 +145,20 @@ Three execution models — pick based on what the hook does:
 
 All three return `() => void` cleanup functions from `register*()`.
 
+### Tool-progress audience boundary (Phase 30.2)
+
+Tools call `ctx.emit({ type: 'progress', toolName, message, audience? })` to
+surface progress. The `audience` field is the gate:
+
+- **Default (`'internal'`)** — consumed by the framework only (logs, telemetry, dev TUI). Channel adapters (telegram, discord, slack, whatsapp, email) and `apps/ethos/src/commands/chat.ts` MUST NOT surface it.
+- **`'user'`** — explicit per-event opt-in by the tool author. Used for
+  long-running operations where silent latency would be confusing
+  (`read_file` reading >1MB, multi-step `bash`). The framework never opts
+  in for the tool.
+
+The same gate applies to the `tool_progress` AgentEvent. Surface code (CLI
+chat, channel adapters) renders only events with `audience: 'user'`.
+
 ---
 
 ## Adding a new LLM provider
@@ -185,6 +199,22 @@ Drop a directory in `~/.ethos/personalities/<id>/`:
 `config.yaml` is simple `key: value` (no nested YAML). Parsed by `parseConfigYaml()` in `extensions/personalities/src/index.ts`.
 
 `FilePersonalityRegistry.loadFromDirectory()` is mtime-cached — it re-reads a personality only when `config.yaml` changes on disk. Call it on every turn for hot-reload; it's cheap when nothing changed.
+
+### What does NOT belong on `PersonalityConfig` (Phase 30.8)
+
+The schema is frozen. The following categories are NOT personality concerns
+— they belong in skills or per-channel adapter config:
+
+- voice modes / TTS settings
+- emotion / mood / sentiment tags
+- label or response templates
+- per-channel UI affordances
+
+Adding a top-level field to `PersonalityConfig` requires the
+`personality-schema-change` label, two-maintainer approval, and bumping
+`.personality-field-count` in the same commit. The mechanical CI gate
+(`packages/types/src/__tests__/personality-field-count.test.ts`) fails if
+the count drifts. See [CONTRIBUTING.md](./CONTRIBUTING.md) for the full rule.
 
 ---
 

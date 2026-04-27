@@ -159,6 +159,16 @@ function renderEvent(
       break;
     }
 
+    case 'tool_progress': {
+      // Phase 30.2 — only surface tool progress the tool explicitly tagged
+      // for the user. Internal/default progress stays in logs/telemetry.
+      // Framework-emitted budget warnings always tag `audience: 'user'`.
+      if (event.audience !== 'user') break;
+      if (hasText) out('\n');
+      out(`${c.dim}  · ${event.toolName}: ${event.message}${c.reset}\n`);
+      break;
+    }
+
     case 'tool_end': {
       const ms = Date.now() - (toolTimers.get(event.toolCallId) ?? Date.now());
       toolTimers.delete(event.toolCallId);

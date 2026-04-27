@@ -5,6 +5,7 @@
 // Per Phase 29.5.
 
 import { spawn } from 'node:child_process';
+import { EthosError } from '@ethosagent/types';
 
 const c = {
   reset: '\x1b[0m',
@@ -124,11 +125,19 @@ async function fetchLatestVersion(): Promise<string> {
     signal: AbortSignal.timeout(10_000),
   });
   if (!res.ok) {
-    throw new Error(`registry returned ${res.status} ${res.statusText}`);
+    throw new EthosError({
+      code: 'REGISTRY_FETCH_FAILED',
+      cause: `registry returned ${res.status} ${res.statusText}`,
+      action: `Check your network and try again, or install manually: npm install -g ${PACKAGE}@latest`,
+    });
   }
   const body = (await res.json()) as RegistryResponse;
   if (!body.version || typeof body.version !== 'string') {
-    throw new Error(`registry response missing 'version' field`);
+    throw new EthosError({
+      code: 'REGISTRY_FETCH_FAILED',
+      cause: "registry response missing 'version' field",
+      action: `Try again later, or install manually: npm install -g ${PACKAGE}@latest`,
+    });
   }
   return body.version;
 }

@@ -1,6 +1,7 @@
 // @ethosagent/types — zero-dep interface contract layer
 // All packages import from here. No runtime code.
 
+export * from './errors';
 export * from './hooks';
 export * from './injector';
 export * from './llm';

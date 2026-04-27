@@ -1,7 +1,7 @@
 import { readdir, readFile, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { isEthosPlugin } from '@ethosagent/plugin-contract';
+import { checkPluginContractMajor, isEthosPlugin } from '@ethosagent/plugin-contract';
 import type { EthosPlugin, PluginRegistries } from '@ethosagent/plugin-sdk';
 import { PluginApiImpl } from '@ethosagent/plugin-sdk';
 
@@ -69,6 +69,15 @@ export class PluginLoader {
   async loadFromPluginDir(dir: string, pluginId?: string): Promise<void> {
     const id = pluginId ?? dir.split('/').pop() ?? 'unknown';
 
+    // Phase 30.6 — gate on declared plugin contract major *before* importing.
+    // We don't want a stale plugin's top-level code to run if its contract
+    // declaration is incompatible.
+    const reject = await checkContractMajorFromDir(dir, id);
+    if (reject) {
+      console.warn(`[plugin-loader] ${reject}`);
+      return;
+    }
+
     // Resolve entry point
     const entry = await resolveEntry(dir);
     if (!entry) return;
@@ -135,6 +144,15 @@ export class PluginLoader {
       try {
         const raw = JSON.parse(await readFile(pkgPath, 'utf-8'));
         if (!isEthosPlugin(raw)) continue;
+
+        // Phase 30.6 — reject incompatible contract major before import.
+        const declared = (raw as { ethos?: { pluginContractMajor?: number } }).ethos
+          ?.pluginContractMajor;
+        const compat = checkPluginContractMajor(declared, undefined, name);
+        if (!compat.ok) {
+          console.warn(`[plugin-loader] ${compat.reason}`);
+          continue;
+        }
 
         const entry = resolveNpmEntry(raw, join(nmDir, name));
         if (!entry) continue;
@@ -227,6 +245,26 @@ function isPluginModule(mod: unknown): mod is EthosPlugin {
     'activate' in mod &&
     typeof (mod as Record<string, unknown>).activate === 'function'
   );
+}
+
+/**
+ * Phase 30.6 — read the plugin's package.json (if present) and return a
+ * rejection message string when the declared `ethos.pluginContractMajor` is
+ * incompatible with the current contract. Returns `null` to allow the load.
+ *
+ * Plugins without a package.json or without the field are allowed (older
+ * plugins predating the field; in-development plugins).
+ */
+async function checkContractMajorFromDir(dir: string, id: string): Promise<string | null> {
+  let raw: { ethos?: { pluginContractMajor?: number } };
+  try {
+    raw = JSON.parse(await readFile(join(dir, 'package.json'), 'utf-8'));
+  } catch {
+    return null; // no package.json — allow (loader-only plugin)
+  }
+  const declared = raw.ethos?.pluginContractMajor;
+  const result = checkPluginContractMajor(declared, undefined, id);
+  return result.ok ? null : (result.reason ?? `Plugin "${id}" rejected`);
 }
 
 async function resolveEntry(dir: string): Promise<string | null> {

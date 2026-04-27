@@ -428,5 +428,103 @@ describe('AgentLoop', () => {
       const done = events.find((e) => e.type === 'done') as Extract<AgentEvent, { type: 'done' }>;
       expect(done.text).toContain('all done');
     });
+
+    it('budget tripping emits tool_progress with audience: user', async () => {
+      let llmCallCount = 0;
+      const llm: LLMProvider = {
+        ...makeLoopingToolLLM('repeat_me', () => llmCallCount),
+        async *complete(): AsyncIterable<CompletionChunk> {
+          llmCallCount++;
+          yield { type: 'tool_use_start', toolCallId: `c${llmCallCount}`, toolName: 'repeat_me' };
+          yield { type: 'tool_use_end', toolCallId: `c${llmCallCount}`, inputJson: '{}' };
+          yield { type: 'done', finishReason: 'tool_use' };
+        },
+        async countTokens() {
+          return 1;
+        },
+      };
+      const tools = await buildRegistry('repeat_me');
+      const loop = new AgentLoop({
+        llm,
+        tools,
+        options: { maxToolCallsPerTurn: 100, maxIdenticalToolCalls: 2 },
+      });
+      const events = await collect(loop.run('hi'));
+      const progress = events.find((e) => e.type === 'tool_progress') as
+        | Extract<AgentEvent, { type: 'tool_progress' }>
+        | undefined;
+      expect(progress).toBeDefined();
+      expect(progress?.audience).toBe('user');
+    });
+  });
+
+  describe('Phase 30.2: tool-emitted progress audience', () => {
+    it('forwards ctx.emit() events as tool_progress, defaulting audience to internal', async () => {
+      const { DefaultToolRegistry } = await import('../tool-registry');
+      const tools = new DefaultToolRegistry();
+      tools.register({
+        name: 'emitter',
+        description: 'emits a progress event with no audience tag',
+        schema: { type: 'object' },
+        execute: async (_args, ctx) => {
+          ctx.emit({ type: 'progress', toolName: 'emitter', message: 'silent' });
+          return { ok: true, value: 'done' };
+        },
+      });
+      tools.register({
+        name: 'emitter_user',
+        description: 'emits a progress event tagged audience: user',
+        schema: { type: 'object' },
+        execute: async (_args, ctx) => {
+          ctx.emit({
+            type: 'progress',
+            toolName: 'emitter_user',
+            message: 'reading 1MB',
+            audience: 'user',
+          });
+          return { ok: true, value: 'done' };
+        },
+      });
+
+      // LLM emits two distinct tool_use blocks across two iterations, then ends.
+      let call = 0;
+      const llm: LLMProvider = {
+        name: 'mock',
+        model: 'mock-model',
+        maxContextTokens: 200_000,
+        supportsCaching: false,
+        supportsThinking: false,
+        async *complete(): AsyncIterable<CompletionChunk> {
+          call++;
+          if (call === 1) {
+            yield { type: 'tool_use_start', toolCallId: 'a', toolName: 'emitter' };
+            yield { type: 'tool_use_end', toolCallId: 'a', inputJson: '{}' };
+            yield { type: 'done', finishReason: 'tool_use' };
+          } else if (call === 2) {
+            yield { type: 'tool_use_start', toolCallId: 'b', toolName: 'emitter_user' };
+            yield { type: 'tool_use_end', toolCallId: 'b', inputJson: '{}' };
+            yield { type: 'done', finishReason: 'tool_use' };
+          } else {
+            yield { type: 'text_delta', text: 'fin' };
+            yield { type: 'done', finishReason: 'end_turn' };
+          }
+        },
+        async countTokens() {
+          return 1;
+        },
+      };
+
+      const loop = new AgentLoop({ llm, tools });
+      const events = await collect(loop.run('hi'));
+      const progresses = events.filter((e) => e.type === 'tool_progress') as Array<
+        Extract<AgentEvent, { type: 'tool_progress' }>
+      >;
+      // Untagged emit defaults to internal; tagged emit preserves 'user'.
+      expect(progresses).toHaveLength(2);
+      const silent = progresses.find((p) => p.toolName === 'emitter');
+      const visible = progresses.find((p) => p.toolName === 'emitter_user');
+      expect(silent?.audience).toBe('internal');
+      expect(visible?.audience).toBe('user');
+    });
   });
 });

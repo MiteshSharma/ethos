@@ -16,6 +16,7 @@ import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { type EthosConfig, ethosDir, readConfig } from '../config';
+import { errorLogExists, errorLogPath, readRecentErrors } from '../error-log';
 
 const c = {
   reset: '\x1b[0m',
@@ -117,7 +118,14 @@ function printRow(r: RowResult): void {
   console.log(`  ${tag}  ${label} ${module}${note}`);
 }
 
-export async function runDoctor(): Promise<void> {
+export async function runDoctor(args: string[] = []): Promise<void> {
+  // Phase 30.10 — `ethos doctor --recent-errors` prints a grouped summary of
+  // the last 50 errors from ~/.ethos/logs/errors.jsonl. Skips the SDK checks.
+  if (args.includes('--recent-errors')) {
+    runRecentErrorsReport();
+    return;
+  }
+
   console.log('');
   console.log(`${c.bold}ethos doctor${c.reset}  ${c.dim}runtime health check${c.reset}`);
   console.log('');
@@ -220,4 +228,55 @@ export async function runDoctor(): Promise<void> {
     process.exit(1);
   }
   console.log(`${c.green}✓ Healthy.${c.reset}`);
+}
+
+// ---------------------------------------------------------------------------
+// --recent-errors: grouped summary of ~/.ethos/logs/errors.jsonl
+// ---------------------------------------------------------------------------
+
+function runRecentErrorsReport(): void {
+  console.log('');
+  console.log(`${c.bold}ethos doctor${c.reset}  ${c.dim}recent errors${c.reset}`);
+  console.log('');
+
+  if (!errorLogExists()) {
+    console.log(`  ${c.dim}No error log yet (${errorLogPath()}).${c.reset}`);
+    console.log(`  ${c.dim}This is a healthy state — nothing has failed.${c.reset}`);
+    console.log('');
+    return;
+  }
+
+  const recent = readRecentErrors(50);
+  if (recent.length === 0) {
+    console.log(`  ${c.dim}Log file is present but empty: ${errorLogPath()}${c.reset}`);
+    console.log('');
+    return;
+  }
+
+  // Group by code, count, keep newest occurrence per code for the timestamp.
+  const byCode = new Map<string, { count: number; latest: string; sample: string }>();
+  for (const e of recent) {
+    const existing = byCode.get(e.code);
+    if (existing) {
+      existing.count += 1;
+      // recent[] is newest-first; keep the first timestamp seen.
+    } else {
+      byCode.set(e.code, { count: 1, latest: e.ts, sample: e.cause });
+    }
+  }
+
+  const rows = [...byCode.entries()].sort((a, b) => b[1].count - a[1].count);
+
+  console.log(`  ${c.dim}From ${errorLogPath()} (last ${recent.length} entries)${c.reset}`);
+  console.log('');
+  console.log(`  ${c.bold}${'Count'.padStart(5)}  ${'Code'.padEnd(28)}  Most-recent at${c.reset}`);
+  for (const [code, info] of rows) {
+    const count = String(info.count).padStart(5);
+    const codeCol = code.padEnd(28);
+    console.log(`  ${count}  ${c.cyan}${codeCol}${c.reset}  ${c.dim}${info.latest}${c.reset}`);
+    console.log(`         ${c.dim}↳ ${info.sample}${c.reset}`);
+  }
+  console.log('');
+  console.log(`  ${c.dim}File a bug? Attach the relevant lines from ${errorLogPath()}.${c.reset}`);
+  console.log('');
 }

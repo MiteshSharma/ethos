@@ -1,3 +1,22 @@
+// Phase 30.8 — this schema is FROZEN.
+//
+// Adding a top-level field to `PersonalityConfig` requires:
+//   1. A CHANGELOG entry justifying why it isn't a skill, a tool, or a memory section.
+//   2. The `personality-schema-change` label on the PR.
+//   3. Two-maintainer approval (enforced via branch protection).
+//   4. Bumping the count in `.personality-field-count` at the repo root.
+//
+// The mechanical CI gate lives in
+// `packages/types/src/__tests__/personality-field-count.test.ts`. It parses
+// this interface at test time and fails if the count drifts from
+// `.personality-field-count`. Culture sets the rule; CI enforces it.
+//
+// Common rejections — these belong in skills or per-channel adapter config,
+// NOT here:
+//   - voice modes / TTS settings
+//   - emotion / mood / sentiment tags
+//   - label or response templates
+//   - per-channel UI affordances
 export interface PersonalityConfig {
   id: string;
   name: string;

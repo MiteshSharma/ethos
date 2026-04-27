@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { parseTasksJsonl } from '@ethosagent/batch-runner';
 import { EvalRunner, parseExpectedJsonl } from '@ethosagent/eval-harness';
 import { loadEvolveConfig, SkillEvolver } from '@ethosagent/skill-evolver';
+import { EthosError } from '@ethosagent/types';
 import { type EthosConfig, ethosDir } from '../config';
 import { createAgentLoop, createLLM } from '../wiring';
 
@@ -45,14 +46,22 @@ function parseArgs(args: string[]): {
     } else if (arg === '--scorer' || arg === '-s') {
       const val = args[++i] ?? '';
       if (!isScorer(val))
-        throw new Error(`--scorer must be one of: exact, contains, regex, llm (got: ${val})`);
+        throw new EthosError({
+          code: 'INVALID_INPUT',
+          cause: `--scorer must be one of: exact, contains, regex, llm (got: ${val})`,
+          action: 'Pass one of the four supported scorers.',
+        });
       scorer = val;
     } else if (arg === '--output' || arg === '-o') {
       outputPath = args[++i] ?? '';
     } else if (arg === '--concurrency' || arg === '-c') {
       const n = Number(args[++i]);
       if (!Number.isInteger(n) || n < 1)
-        throw new Error('--concurrency must be a positive integer');
+        throw new EthosError({
+          code: 'INVALID_INPUT',
+          cause: '--concurrency must be a positive integer',
+          action: 'Pass a positive integer, e.g. --concurrency 4.',
+        });
       concurrency = n;
     } else if (arg === '--evolve') {
       evolve = true;
@@ -64,10 +73,18 @@ function parseArgs(args: string[]): {
   }
 
   if (!inputPath)
-    throw new Error(
-      'Usage: ethos eval run <tasks.jsonl> --expected <expected.jsonl> [--scorer exact|contains|regex|llm] [--concurrency N] [--output out.jsonl] [--evolve [--auto-approve]]',
-    );
-  if (!expectedPath) throw new Error('--expected <expected.jsonl> is required');
+    throw new EthosError({
+      code: 'INVALID_INPUT',
+      cause: 'ethos eval run requires a tasks file',
+      action:
+        'Usage: ethos eval run <tasks.jsonl> --expected <expected.jsonl> [--scorer exact|contains|regex|llm] [--concurrency N] [--output out.jsonl] [--evolve [--auto-approve]]',
+    });
+  if (!expectedPath)
+    throw new EthosError({
+      code: 'INVALID_INPUT',
+      cause: '--expected <expected.jsonl> is required',
+      action: 'Pass --expected pointing at a JSONL file with expected outputs.',
+    });
 
   const base = inputPath.replace(/\.jsonl$/, '');
   if (!outputPath) outputPath = `${base}.eval.jsonl`;
