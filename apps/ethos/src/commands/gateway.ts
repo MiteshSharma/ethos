@@ -1,13 +1,28 @@
 import { createInterface } from 'node:readline';
 import { CronScheduler } from '@ethosagent/cron';
 import { Gateway } from '@ethosagent/gateway';
-import { DiscordAdapter } from '@ethosagent/platform-discord';
-import { EmailAdapter } from '@ethosagent/platform-email';
-import { SlackAdapter } from '@ethosagent/platform-slack';
-import { TelegramAdapter } from '@ethosagent/platform-telegram';
+// Platform adapters are loaded LAZILY in runGatewayStart() — see plan/IMPROVEMENT.md P0-3.
+// Their underlying SDKs (grammy, discord.js, @slack/bolt, imapflow…) are
+// optionalDependencies of @ethosagent/cli. A failed install for any one of
+// them must not crash the CLI for users who don't run that platform.
 import type { PlatformAdapter } from '@ethosagent/types';
 import { type EthosConfig, readConfig, writeConfig } from '../config';
 import { createAgentLoop } from '../wiring';
+
+// Best-effort dynamic import. Returns null and logs a clear warning if the
+// module can't be loaded — typically because its underlying SDK isn't
+// installed. Callers downgrade gracefully.
+async function loadAdapterModule<T>(modulePath: string, label: string): Promise<T | null> {
+  try {
+    return (await import(modulePath)) as T;
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+    console.warn(
+      `${c.yellow}⚠ ${label} adapter unavailable${c.reset} ${c.dim}(${reason})${c.reset}`,
+    );
+    return null;
+  }
+}
 
 const c = {
   reset: '\x1b[0m',
@@ -101,38 +116,75 @@ export async function runGatewayStart(config: EthosConfig): Promise<void> {
   // Build gateway
   const gateway = new Gateway({ loop, defaultPersonality: config.personality });
 
-  // Build and register all configured adapters
+  // Build and register all configured adapters. Each loads lazily so a missing
+  // SDK in node_modules only takes down its own platform, not the gateway.
   const adapters: PlatformAdapter[] = [];
 
   if (config.telegramToken) {
-    const tg = new TelegramAdapter({ token: config.telegramToken, dropPendingUpdates: true });
-    adapters.push(tg);
+    const mod = await loadAdapterModule<typeof import('@ethosagent/platform-telegram')>(
+      '@ethosagent/platform-telegram',
+      'Telegram',
+    );
+    if (mod) {
+      adapters.push(
+        new mod.TelegramAdapter({
+          token: config.telegramToken,
+          dropPendingUpdates: true,
+        }),
+      );
+    }
   }
 
   if (config.discordToken) {
-    const dc = new DiscordAdapter({ token: config.discordToken });
-    adapters.push(dc);
+    const mod = await loadAdapterModule<typeof import('@ethosagent/platform-discord')>(
+      '@ethosagent/platform-discord',
+      'Discord',
+    );
+    if (mod) {
+      adapters.push(new mod.DiscordAdapter({ token: config.discordToken }));
+    }
   }
 
   if (config.slackBotToken && config.slackAppToken && config.slackSigningSecret) {
-    const sl = new SlackAdapter({
-      botToken: config.slackBotToken,
-      appToken: config.slackAppToken,
-      signingSecret: config.slackSigningSecret,
-    });
-    adapters.push(sl);
+    const mod = await loadAdapterModule<typeof import('@ethosagent/platform-slack')>(
+      '@ethosagent/platform-slack',
+      'Slack',
+    );
+    if (mod) {
+      adapters.push(
+        new mod.SlackAdapter({
+          botToken: config.slackBotToken,
+          appToken: config.slackAppToken,
+          signingSecret: config.slackSigningSecret,
+        }),
+      );
+    }
   }
 
   if (hasEmailConfig) {
-    const em = new EmailAdapter({
-      imapHost: config.emailImapHost!,
-      imapPort: config.emailImapPort ?? 993,
-      user: config.emailUser!,
-      password: config.emailPassword!,
-      smtpHost: config.emailSmtpHost!,
-      smtpPort: config.emailSmtpPort ?? 587,
-    });
-    adapters.push(em);
+    const mod = await loadAdapterModule<typeof import('@ethosagent/platform-email')>(
+      '@ethosagent/platform-email',
+      'Email',
+    );
+    if (mod) {
+      adapters.push(
+        new mod.EmailAdapter({
+          imapHost: config.emailImapHost!,
+          imapPort: config.emailImapPort ?? 993,
+          user: config.emailUser!,
+          password: config.emailPassword!,
+          smtpHost: config.emailSmtpHost!,
+          smtpPort: config.emailSmtpPort ?? 587,
+        }),
+      );
+    }
+  }
+
+  if (adapters.length === 0) {
+    console.log(
+      `${c.red}No adapters could be started. Either no platform is configured, or every configured platform's SDK failed to load.${c.reset}`,
+    );
+    process.exit(1);
   }
 
   // Wire all adapters → gateway
@@ -177,11 +229,16 @@ export async function runGatewayStart(config: EthosConfig): Promise<void> {
 
   console.log(`${c.dim}Listening for messages. Press Ctrl+C to stop.${c.reset}\n`);
 
-  // Graceful shutdown on SIGINT / SIGTERM
+  // Graceful shutdown on SIGINT / SIGTERM. Tell every in-flight chat that the
+  // gateway was interrupted so they don't sit waiting on a response that
+  // never comes. See plan/IMPROVEMENT.md P1-1.
   const shutdown = async () => {
     console.log(`\n${c.dim}Shutting down...${c.reset}`);
     scheduler.stop();
-    await gateway.shutdown();
+    await gateway.shutdown({
+      notify:
+        '⚠ Ethos was interrupted while answering. Please resend your last message — your session history is preserved.',
+    });
     await Promise.allSettled(adapters.map((a) => a.stop()));
     process.exit(0);
   };

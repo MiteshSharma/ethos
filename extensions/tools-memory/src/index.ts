@@ -29,6 +29,8 @@ export function createMemoryReadTool(memory: MemoryProvider): Tool {
         sessionKey: ctx.sessionKey,
         platform: ctx.platform,
         workingDir: ctx.workingDir,
+        personalityId: ctx.personalityId,
+        memoryScope: ctx.memoryScope,
       });
 
       if (!result) {
@@ -111,6 +113,8 @@ export function createMemoryWriteTool(memory: MemoryProvider): Tool {
         sessionKey: ctx.sessionKey,
         platform: ctx.platform,
         workingDir: ctx.workingDir,
+        personalityId: ctx.personalityId,
+        memoryScope: ctx.memoryScope,
       };
 
       await memory.sync(syncCtx, [

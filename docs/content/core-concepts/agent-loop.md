@@ -1,6 +1,6 @@
 ---
 title: AgentLoop
-description: The 13-step AsyncGenerator turn cycle that powers every Ethos agent.
+description: The 12-step AsyncGenerator turn cycle that powers every Ethos agent.
 sidebar_position: 1
 ---
 

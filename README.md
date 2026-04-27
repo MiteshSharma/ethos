@@ -11,7 +11,7 @@
 
 Ethos is a TypeScript framework where a *personality* — an `ETHOS.md` identity, a skills directory, an allowed toolset, and a config — is a structural component, not a system prompt string. Same prompt, different personality, different behavior. Every component (LLM provider, session store, memory, tools, hooks, channel adapters) is an interface in `@ethosagent/types` and injected at construction time, so contributors can replace any layer without touching core.
 
-📖 [Docs](https://ethosagent.ai) · [Roadmap](./plan/PLAN.md) · [Project guidelines](./CLAUDE.md)
+📖 [Docs](https://ethosagent.ai) · [Project guidelines](./CLAUDE.md)
 
 ```bash
 # Install (recommended)
@@ -246,7 +246,7 @@ Path aliases in `tsconfig.json` point all `@ethosagent/*` imports to `./src/` di
 
 ## Architecture
 
-The core abstraction is **`AgentLoop`** — a 13-step `AsyncGenerator<AgentEvent>` that takes a user message and streams typed events back. Every component is an interface defined in `@ethosagent/types` and injected at construction time.
+The core abstraction is **`AgentLoop`** — a 12-step `AsyncGenerator<AgentEvent>` that takes a user message and streams typed events back. Every component is an interface defined in `@ethosagent/types` and injected at construction time.
 
 ```text
 ~/.ethos/config.yaml

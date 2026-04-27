@@ -22,7 +22,7 @@ export default defineConfig({
       'packages/*/src/**/*.test.ts',
       'extensions/*/src/**/*.test.ts',
       'apps/*/src/**/*.test.ts',
-      'plugins/*/src/**/*.test.ts',
+      'examples/plugins/*/src/**/*.test.ts',
     ],
   },
 });

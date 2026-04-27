@@ -26,13 +26,28 @@ export class MarkdownFileMemoryProvider implements MemoryProvider {
     this.maxChars = config.maxChars ?? MAX_CHARS;
   }
 
-  async prefetch(_ctx: MemoryLoadContext): Promise<MemoryContext | null> {
+  /**
+   * Resolve the directory MEMORY.md/USER.md live in for this turn.
+   * - 'global' (or unset) → the shared root
+   * - 'per-personality' with a valid id → `<root>/personalities/<id>/`
+   * USER.md always lives in the shared root — it describes the human, not the agent.
+   */
+  private resolveMemoryDir(ctx: MemoryLoadContext): string {
+    if (ctx.memoryScope !== 'per-personality') return this.dir;
+    const id = ctx.personalityId;
+    if (!id || !isSafePersonalityId(id)) return this.dir;
+    return join(this.dir, 'personalities', id);
+  }
+
+  async prefetch(ctx: MemoryLoadContext): Promise<MemoryContext | null> {
     const parts: string[] = [];
 
+    // USER.md is always shared — it's about the person, not the personality
     const userContent = await readSafe(join(this.dir, 'USER.md'));
     if (userContent) parts.push(`## About You\n\n${userContent.trim()}`);
 
-    const memoryContent = await readSafe(join(this.dir, 'MEMORY.md'));
+    const memoryDir = this.resolveMemoryDir(ctx);
+    const memoryContent = await readSafe(join(memoryDir, 'MEMORY.md'));
     if (memoryContent) parts.push(`## Memory\n\n${memoryContent.trim()}`);
 
     if (parts.length === 0) return null;
@@ -47,10 +62,12 @@ export class MarkdownFileMemoryProvider implements MemoryProvider {
     return { content, source: 'markdown', truncated };
   }
 
-  async sync(_ctx: MemoryLoadContext, updates: MemoryUpdate[]): Promise<void> {
+  async sync(ctx: MemoryLoadContext, updates: MemoryUpdate[]): Promise<void> {
     if (updates.length === 0) return;
 
-    await mkdir(this.dir, { recursive: true });
+    const memoryDir = this.resolveMemoryDir(ctx);
+    await mkdir(memoryDir, { recursive: true });
+    if (memoryDir !== this.dir) await mkdir(this.dir, { recursive: true });
 
     const byStore = new Map<'memory' | 'user', MemoryUpdate[]>();
     for (const u of updates) {
@@ -62,8 +79,14 @@ export class MarkdownFileMemoryProvider implements MemoryProvider {
     const tasks: Promise<void>[] = [];
     const memoryUpdates = byStore.get('memory');
     const userUpdates = byStore.get('user');
-    if (memoryUpdates) tasks.push(this.applyUpdates(join(this.dir, 'MEMORY.md'), memoryUpdates));
-    if (userUpdates) tasks.push(this.applyUpdates(join(this.dir, 'USER.md'), userUpdates));
+    if (memoryUpdates) {
+      // 'memory' store routes by personality scope
+      tasks.push(this.applyUpdates(join(memoryDir, 'MEMORY.md'), memoryUpdates));
+    }
+    if (userUpdates) {
+      // 'user' store always shared — about the human
+      tasks.push(this.applyUpdates(join(this.dir, 'USER.md'), userUpdates));
+    }
 
     await Promise.all(tasks);
   }
@@ -106,4 +129,12 @@ async function readSafe(filePath: string): Promise<string | null> {
   } catch {
     return null;
   }
+}
+
+// Reject ids with path separators, parent traversal, leading dots, or anything
+// outside [a-zA-Z0-9_-]. Belt-and-suspenders — the personality loader uses
+// directory names which are already constrained, but this is a security
+// boundary we don't want to depend on a caller upholding.
+function isSafePersonalityId(id: string): boolean {
+  return /^[a-zA-Z0-9_-]+$/.test(id);
 }

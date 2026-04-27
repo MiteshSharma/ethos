@@ -15,6 +15,10 @@ export interface ToolContext {
   platform: string;
   workingDir: string;
   agentId?: string;
+  /** Active personality for this turn. Tools that touch memory must thread this through. */
+  personalityId?: string;
+  /** Resolved memory scope for the active personality (filled by AgentLoop). */
+  memoryScope?: 'global' | 'per-personality';
   currentTurn: number;
   messageCount: number;
   abortSignal: AbortSignal;

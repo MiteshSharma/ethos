@@ -6,6 +6,7 @@ import { runBatch } from './commands/batch';
 import { runChat } from './commands/chat';
 import { runClaw } from './commands/claw';
 import { runCronCommand } from './commands/cron';
+import { runDoctor } from './commands/doctor';
 import { runEval } from './commands/eval';
 import { runEvolve } from './commands/evolve';
 import { runGatewaySetup, runGatewayStart } from './commands/gateway';
@@ -23,7 +24,7 @@ const ETHOS_VERSION =
   typeof __ETHOS_VERSION__ === 'string' ? __ETHOS_VERSION__ : (process.env.ETHOS_VERSION ?? 'dev');
 
 const USAGE =
-  'Usage: ethos [setup | chat | serve | gateway | cron | personality | memory | acp | batch | eval | evolve | plugin | skills | keys | claw | upgrade] [--version | --help]';
+  'Usage: ethos [setup | chat | serve | gateway | cron | personality | memory | acp | batch | eval | evolve | plugin | skills | keys | claw | doctor | upgrade] [--version | --help]';
 
 const args = process.argv.slice(2);
 const command = args[0] ?? '';
@@ -268,6 +269,11 @@ switch (command) {
 
   case 'claw': {
     await runClaw(args.slice(1));
+    break;
+  }
+
+  case 'doctor': {
+    await runDoctor();
     break;
   }
 

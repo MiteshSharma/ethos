@@ -1,0 +1,9 @@
+# A tutor needs to look things up and remember what each learner has covered.
+# Deliberately no terminal/file-write — the tutor doesn't *do* the work for you.
+tools:
+  - web_search
+  - web_extract
+  - read_file
+  - memory_read
+  - memory_write
+  - session_search

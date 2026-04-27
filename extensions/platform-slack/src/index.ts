@@ -83,6 +83,7 @@ export class SlackAdapter implements PlatformAdapter {
       const channelType = 'channel_type' in msg ? String(msg.channel_type) : 'unknown';
       const isDm = channelType === 'im';
 
+      const ts = 'ts' in msg ? String(msg.ts) : undefined;
       this.messageHandler({
         platform: 'slack',
         chatId: String(msg.channel),
@@ -90,7 +91,8 @@ export class SlackAdapter implements PlatformAdapter {
         text,
         isDm,
         isGroupMention: false,
-        replyToId: 'ts' in msg ? String(msg.ts) : undefined,
+        replyToId: ts,
+        messageId: ts,
         raw: msg,
       });
     });
@@ -109,6 +111,7 @@ export class SlackAdapter implements PlatformAdapter {
         isDm: false,
         isGroupMention: true,
         replyToId: event.ts,
+        messageId: event.ts,
         raw: event,
       });
     });

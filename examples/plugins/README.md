@@ -1,4 +1,20 @@
-# Ethos Plugin Development Guide
+# Plugin examples
+
+Worked plugin packages you can copy, modify, or learn from. Each subdirectory is a self-contained npm-publishable plugin demonstrating one extension surface.
+
+| Example | What it shows |
+|---|---|
+| [`hello/`](./hello/) | Smallest possible plugin — registers one tool |
+| [`timestamp/`](./timestamp/) | Self-contained tool with optional config and `isAvailable` gate |
+| [`memory-logger/`](./memory-logger/) | A void hook that logs every memory write |
+| [`personality/`](./personality/) | Shipping a personality as an npm package (not a directory drop-in) |
+| [`safety-adapter/`](./safety-adapter/) | A `before_tool_call` modifying hook that blocks risky args |
+
+For a top-down walkthrough of building your first tool, see [docs/tutorial/write-your-first-tool](https://ethosagent.ai/docs/tutorial/write-your-first-tool).
+
+---
+
+## What is a plugin?
 
 A plugin is a TypeScript module that registers tools, hooks, injectors, and personalities into a running Ethos agent — without modifying the core codebase.
 
@@ -340,7 +356,7 @@ npm publish
 npm publish --access public
 ```
 
-**3. Install (manual until `ethos plugin install` lands in Phase 19):**
+**3. Install:**
 
 ```bash
 pnpm add ethos-plugin-my-plugin

@@ -69,6 +69,14 @@ export interface GatewayConfig {
   defaultPersonality?: string;
   /** Maximum concurrent active sessions. Excess sessions are queued per-lane. */
   maxConcurrentSessions?: number;
+  /**
+   * Size of the inbound-message dedup window. The Gateway remembers the most
+   * recent N `(platform, chatId, messageId)` triples and silently drops
+   * duplicates. Defaults to 1024. Set to 0 to disable dedup.
+   * Adapters that don't populate `InboundMessage.messageId` are unaffected
+   * (no key, no dedup possible — see plan/IMPROVEMENT.md P2-2).
+   */
+  dedupWindow?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -101,10 +109,35 @@ export class Gateway {
     string,
     { inputTokens: number; outputTokens: number; costUsd: number }
   >();
+  /** Bounded LRU of recently-seen inbound-message keys. */
+  private readonly seenMessages = new Set<string>();
+  private readonly dedupWindow: number;
+  /** Active turns by laneKey — used by graceful shutdown to notify users. */
+  private readonly activeTurns = new Map<string, { adapter: PlatformAdapter; chatId: string }>();
 
   constructor(config: GatewayConfig) {
     this.loop = config.loop;
     this.defaultPersonality = config.defaultPersonality;
+    this.dedupWindow = config.dedupWindow ?? 1024;
+  }
+
+  /**
+   * Returns true if this message is a duplicate of one seen in the dedup
+   * window (and records the key for future drops). Returns false for
+   * never-before-seen keys, or when the message has no `messageId` (we can't
+   * dedup what isn't keyed).
+   */
+  private isDuplicate(message: InboundMessage): boolean {
+    if (this.dedupWindow <= 0 || !message.messageId) return false;
+    const key = `${message.platform}:${message.chatId}:${message.messageId}`;
+    if (this.seenMessages.has(key)) return true;
+    this.seenMessages.add(key);
+    // Bound the set — drop the oldest entry once we exceed the window.
+    if (this.seenMessages.size > this.dedupWindow) {
+      const first = this.seenMessages.values().next().value;
+      if (first !== undefined) this.seenMessages.delete(first);
+    }
+    return false;
   }
 
   // ---------------------------------------------------------------------------
@@ -112,6 +145,10 @@ export class Gateway {
   // ---------------------------------------------------------------------------
 
   async handleMessage(message: InboundMessage, adapter: PlatformAdapter): Promise<void> {
+    // Drop duplicates BEFORE any work — billing-relevant. See OpenClaw #71761
+    // (channel messages injected twice → 2× cost).
+    if (this.isDuplicate(message)) return;
+
     const laneKey = `${message.platform}:${message.chatId}`;
     const lane = this.getOrCreateLane(laneKey);
     const text = message.text?.trim() ?? '';
@@ -200,6 +237,9 @@ export class Gateway {
       const sessionKey = this.sessionKeys.get(laneKey) ?? laneKey;
       const personalityId = this.personalityIds.get(laneKey) ?? this.defaultPersonality;
 
+      // Track this turn so graceful shutdown can notify the user (P1-1).
+      this.activeTurns.set(laneKey, { adapter, chatId: message.chatId });
+
       // Typing indicator — renew every 4 s (Telegram shows it for ~5 s)
       await adapter.sendTyping?.(message.chatId).catch(() => {});
       const typingTimer = setInterval(() => {
@@ -236,17 +276,31 @@ export class Gateway {
         }
       } finally {
         clearInterval(typingTimer);
+        this.activeTurns.delete(laneKey);
       }
     });
   }
 
-  /** Stop all active session lanes gracefully. */
-  async shutdown(): Promise<void> {
+  /**
+   * Stop all active session lanes gracefully. If `notify` is set, send that
+   * text to every chat with an in-flight turn before aborting — so users
+   * never see silent failure on shutdown / upgrade. See IMPROVEMENT.md P1-1
+   * and OpenClaw #71178 (mid-turn update drops every Telegram message).
+   */
+  async shutdown(opts: { notify?: string } = {}): Promise<void> {
+    if (opts.notify) {
+      const sends: Promise<unknown>[] = [];
+      for (const ctx of this.activeTurns.values()) {
+        sends.push(ctx.adapter.send(ctx.chatId, { text: opts.notify }).catch(() => {}));
+      }
+      await Promise.allSettled(sends);
+    }
     for (const lane of this.lanes.values()) {
       lane.abort();
     }
     this.lanes.clear();
     this.sessionKeys.clear();
+    this.activeTurns.clear();
   }
 
   // ---------------------------------------------------------------------------

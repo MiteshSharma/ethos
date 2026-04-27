@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import type { CompletionChunk, CompletionOptions, LLMProvider, Message } from '@ethosagent/types';
 import { describe, expect, it, vi } from 'vitest';
 import type { AgentEvent } from '../agent-loop';
@@ -171,5 +173,260 @@ describe('AgentLoop', () => {
 
     expect(capturedTools[0]).toHaveLength(1);
     expect((capturedTools[0] as Array<{ name: string }>)[0]?.name).toBe('allowed_tool');
+  });
+
+  // Tool-call budget — see plan/IMPROVEMENT.md P1-3 and OpenClaw #67744 (275
+  // identical messages in 10 minutes before context overflow). The loop must
+  // bail BEFORE the next LLM call once a budget is exceeded.
+
+  describe('tool-call budget guards', () => {
+    function makeLoopingToolLLM(toolName: string, getCallCount: () => number): LLMProvider {
+      return {
+        name: 'mock',
+        model: 'mock-model',
+        maxContextTokens: 200_000,
+        supportsCaching: false,
+        supportsThinking: false,
+        async *complete(): AsyncIterable<CompletionChunk> {
+          const id = `call-${getCallCount()}`;
+          yield { type: 'text_delta', text: 'looping...' };
+          yield { type: 'tool_use_start', toolCallId: id, toolName };
+          yield { type: 'tool_use_delta', toolCallId: id, partialJson: '{}' };
+          yield { type: 'tool_use_end', toolCallId: id, inputJson: '{}' };
+          yield {
+            type: 'usage',
+            usage: {
+              inputTokens: 1,
+              outputTokens: 1,
+              cacheReadTokens: 0,
+              cacheCreationTokens: 0,
+              estimatedCostUsd: 0,
+            },
+          };
+          yield { type: 'done', finishReason: 'tool_use' };
+        },
+        async countTokens() {
+          return 1;
+        },
+      };
+    }
+
+    async function buildRegistry(toolName: string) {
+      const { DefaultToolRegistry } = await import('../tool-registry');
+      const tools = new DefaultToolRegistry();
+      tools.register({
+        name: toolName,
+        description: 'looping tool',
+        schema: { type: 'object' },
+        execute: async () => ({ ok: true, value: 'ran' }),
+      });
+      return tools;
+    }
+
+    it('breaks before exceeding maxToolCallsPerTurn', async () => {
+      let llmCallCount = 0;
+      const llm: LLMProvider = {
+        ...makeLoopingToolLLM('repeat_me', () => llmCallCount),
+        async *complete(): AsyncIterable<CompletionChunk> {
+          llmCallCount++;
+          // Each iteration emits a DIFFERENT tool name to dodge the identical-call cap,
+          // so we test the total budget specifically. Use llmCallCount to vary.
+          const id = `call-${llmCallCount}`;
+          const tname = `tool_${llmCallCount}`;
+          yield { type: 'tool_use_start', toolCallId: id, toolName: tname };
+          yield { type: 'tool_use_delta', toolCallId: id, partialJson: '{}' };
+          yield { type: 'tool_use_end', toolCallId: id, inputJson: '{}' };
+          yield { type: 'done', finishReason: 'tool_use' };
+        },
+        async countTokens() {
+          return 1;
+        },
+      };
+      // Register a generic catch-all by registering several
+      const { DefaultToolRegistry } = await import('../tool-registry');
+      const tools = new DefaultToolRegistry();
+      for (let i = 1; i <= 10; i++) {
+        tools.register({
+          name: `tool_${i}`,
+          description: `t${i}`,
+          schema: { type: 'object' },
+          execute: async () => ({ ok: true, value: 'ran' }),
+        });
+      }
+
+      const loop = new AgentLoop({
+        llm,
+        tools,
+        options: { maxToolCallsPerTurn: 3, maxIdenticalToolCalls: 100 },
+      });
+      const events = await collect(loop.run('hi'));
+
+      const progress = events.find((e) => e.type === 'tool_progress') as
+        | Extract<AgentEvent, { type: 'tool_progress' }>
+        | undefined;
+      expect(progress?.message).toMatch(/tool-call budget/);
+      expect(llmCallCount).toBeLessThanOrEqual(4);
+      expect(events.find((e) => e.type === 'done')).toBeDefined();
+    });
+
+    it('breaks before exceeding maxIdenticalToolCalls', async () => {
+      let llmCallCount = 0;
+      const tools = await buildRegistry('repeat_me');
+      const llm = makeLoopingToolLLM('repeat_me', () => {
+        llmCallCount++;
+        return llmCallCount;
+      });
+
+      const loop = new AgentLoop({
+        llm,
+        tools,
+        options: { maxToolCallsPerTurn: 100, maxIdenticalToolCalls: 3 },
+      });
+      const events = await collect(loop.run('hi'));
+
+      const progress = events.find((e) => e.type === 'tool_progress') as
+        | Extract<AgentEvent, { type: 'tool_progress' }>
+        | undefined;
+      expect(progress?.toolName).toBe('repeat_me');
+      expect(progress?.message).toMatch(/repeat_me called \d+ times/);
+      expect(llmCallCount).toBeLessThanOrEqual(4);
+      expect(events.find((e) => e.type === 'done')).toBeDefined();
+    });
+
+    it('streaming watchdog fires when no chunk arrives within timeout', async () => {
+      // A provider that hangs forever — never yields. Watchdog must trip.
+      const hangingLlm: LLMProvider = {
+        name: 'hanging',
+        model: 'mock-model',
+        maxContextTokens: 200_000,
+        supportsCaching: false,
+        supportsThinking: false,
+        async *complete(
+          _messages: Message[],
+          _tools: unknown,
+          opts: CompletionOptions,
+        ): AsyncIterable<CompletionChunk> {
+          // Wait until aborted — or 30s, whichever comes first (test safety)
+          await new Promise<void>((resolve) => {
+            const timer = setTimeout(resolve, 30_000);
+            opts.abortSignal?.addEventListener('abort', () => {
+              clearTimeout(timer);
+              resolve();
+            });
+          });
+          // If we got here without abort, yield nothing — closes the stream.
+        },
+        async countTokens() {
+          return 1;
+        },
+      };
+
+      const loop = new AgentLoop({
+        llm: hangingLlm,
+        options: { streamingTimeoutMs: 50 },
+      });
+      const events = await collect(loop.run('hi'));
+      const err = events.find((e) => e.type === 'error') as
+        | Extract<AgentEvent, { type: 'error' }>
+        | undefined;
+      expect(err?.code).toBe('streaming_timeout');
+      expect(err?.error).toMatch(/stalled/);
+    });
+
+    it('streaming watchdog respects per-personality streamingTimeoutMs override', async () => {
+      // Personality says 30ms, AgentLoop default is 120000ms — personality wins.
+      const hangingLlm: LLMProvider = {
+        name: 'hanging',
+        model: 'mock-model',
+        maxContextTokens: 200_000,
+        supportsCaching: false,
+        supportsThinking: false,
+        async *complete(
+          _messages: Message[],
+          _tools: unknown,
+          opts: CompletionOptions,
+        ): AsyncIterable<CompletionChunk> {
+          await new Promise<void>((resolve) => {
+            const timer = setTimeout(resolve, 30_000);
+            opts.abortSignal?.addEventListener('abort', () => {
+              clearTimeout(timer);
+              resolve();
+            });
+          });
+        },
+        async countTokens() {
+          return 1;
+        },
+      };
+
+      const { DefaultPersonalityRegistry } = await import('../defaults/noop-personality');
+      const personalities = new DefaultPersonalityRegistry();
+      vi.spyOn(personalities, 'getDefault').mockReturnValue({
+        id: 'fast',
+        name: 'Fast',
+        streamingTimeoutMs: 30,
+      });
+
+      const start = Date.now();
+      const loop = new AgentLoop({ llm: hangingLlm, personalities });
+      const events = await collect(loop.run('hi'));
+      const elapsed = Date.now() - start;
+
+      const err = events.find((e) => e.type === 'error') as
+        | Extract<AgentEvent, { type: 'error' }>
+        | undefined;
+      expect(err?.code).toBe('streaming_timeout');
+      // Should fire near the personality's 30ms threshold, not the loop default
+      expect(elapsed).toBeLessThan(2000);
+    });
+
+    // Provider boundary contract — see plan/IMPROVEMENT.md P0-2.
+    // AgentLoop must never import a provider SDK. If it does, every model
+    // upgrade pulls in a leak (Anthropic thinking shape, OpenAI tool index
+    // keying, etc.). The boundary lives in the LLMProvider interface; this
+    // test ensures we do not erode it.
+    it('AgentLoop source does not import any concrete LLM SDK', () => {
+      const src = readFileSync(join(__dirname, '..', 'agent-loop.ts'), 'utf-8');
+      expect(src).not.toMatch(/from ['"]@anthropic-ai\/sdk['"]/);
+      expect(src).not.toMatch(/from ['"]openai['"]/);
+      expect(src).not.toMatch(/from ['"]@ethosagent\/llm-/);
+    });
+
+    it('does not break when tool calls stay under both budgets', async () => {
+      // LLM that calls a tool once then ends with text
+      let stage = 0;
+      const llm: LLMProvider = {
+        name: 'mock',
+        model: 'mock-model',
+        maxContextTokens: 200_000,
+        supportsCaching: false,
+        supportsThinking: false,
+        async *complete(): AsyncIterable<CompletionChunk> {
+          stage++;
+          if (stage === 1) {
+            yield { type: 'tool_use_start', toolCallId: 'c1', toolName: 'once' };
+            yield { type: 'tool_use_delta', toolCallId: 'c1', partialJson: '{}' };
+            yield { type: 'tool_use_end', toolCallId: 'c1', inputJson: '{}' };
+            yield { type: 'done', finishReason: 'tool_use' };
+          } else {
+            yield { type: 'text_delta', text: 'all done' };
+            yield { type: 'done', finishReason: 'end_turn' };
+          }
+        },
+        async countTokens() {
+          return 1;
+        },
+      };
+      const tools = await buildRegistry('once');
+      const loop = new AgentLoop({
+        llm,
+        tools,
+        options: { maxToolCallsPerTurn: 20, maxIdenticalToolCalls: 5 },
+      });
+      const events = await collect(loop.run('hi'));
+      expect(events.find((e) => e.type === 'tool_progress')).toBeUndefined();
+      const done = events.find((e) => e.type === 'done') as Extract<AgentEvent, { type: 'done' }>;
+      expect(done.text).toContain('all done');
+    });
   });
 });

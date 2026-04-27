@@ -7,7 +7,7 @@ Use this skill when helping a user create, edit, or debug an Ethos personality.
 A personality is a structural component (not just a system prompt string) that simultaneously shapes:
 
 - **Identity / voice** — `ETHOS.md` (first-person), injected at priority 110.
-- **Tool access** — `toolset.yaml` declares which tools the personality is allowed to call (Phase 21 enforces this at the registry).
+- **Tool access** — `toolset.yaml` declares which tools the personality is allowed to call. The registry enforces this at execution time — calls outside the allowlist return a `tool_result` with `is_error: true`.
 - **Skills** — optional `skills/` directory of `*.md` files injected into the system prompt by `SkillsInjector` (priority 100).
 - **Routing & runtime** — `config.yaml` sets the model, provider, platform, memory scope, and mesh-advertised capabilities.
 
@@ -30,13 +30,13 @@ At least one of `config.yaml` or `ETHOS.md` must exist for the directory to regi
 ## Installation locations
 
 ```
-~/.ethos/personalities/<id>/     global (any project)
-.ethos/personalities/<id>/        project-local
-extensions/personalities/data/   built-in (monorepo only)
-plugins/example-personality/     packaged via plugin (api.registerPersonality)
+~/.ethos/personalities/<id>/         global (any project)
+.ethos/personalities/<id>/            project-local
+extensions/personalities/data/       built-in (monorepo only)
+examples/plugins/personality/        packaged via plugin (api.registerPersonality)
 ```
 
-For a packaged personality (npm or local plugin), use `api.registerPersonality({...})` plus an injector at priority 110 with `shouldInject: ctx => ctx.personalityId === '<id>'` — see `plugins/example-personality/src/index.ts`.
+For a packaged personality (npm or local plugin), use `api.registerPersonality({...})` plus an injector at priority 110 with `shouldInject: ctx => ctx.personalityId === '<id>'` — see `examples/plugins/personality/src/index.ts`.
 
 ## `config.yaml` schema (flat key: value, no nesting)
 
@@ -69,9 +69,9 @@ Common built-in tools to choose from:
 | Web | `web_search`, `web_extract`, `web_crawl` |
 | Memory | `memory_read`, `memory_write`, `session_search` |
 
-If `toolset.yaml` is omitted, the personality currently gets all tools (Phase 21 will lock this down). Always declare the minimum needed — toolsets are enforced at the registry level once Phase 21 lands.
+If `toolset.yaml` is omitted, the personality gets all registered tools. Always declare the minimum needed — toolsets are enforced at the registry level, so a tighter list is real isolation, not a hint.
 
-`capabilities` ≠ `toolset`. Capabilities are labels advertised to the mesh router (Phase 24); toolset is the hard allowlist of tool names the personality may call.
+`capabilities` ≠ `toolset`. Capabilities are labels advertised to the mesh router; toolset is the hard allowlist of tool names the personality may call.
 
 ## `ETHOS.md` writing rules
 
@@ -128,5 +128,4 @@ Discovery: top-level `*.md`, plus `<dir>/<slug>/SKILL.md`, plus `<dir>/<scope>/<
 - `extensions/personalities/data/<built-in>/` — five reference personalities
 - `packages/types/src/personality.ts` — `PersonalityConfig` interface
 - `extensions/skills/src/skills-injector.ts` — how `skillsDirs` and `~/.ethos/skills/` are merged and injected
-- `plugins/example-personality/src/index.ts` — packaging a personality as a plugin
-- `plan/PLAN.md` Phase 4 (loader), Phase 7 (skills + injectors), Phase 21 (toolset enforcement + model routing)
+- `examples/plugins/personality/src/index.ts` — packaging a personality as a plugin

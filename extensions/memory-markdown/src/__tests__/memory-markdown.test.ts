@@ -119,4 +119,128 @@ describe('MarkdownFileMemoryProvider', () => {
       expect(content).toContain('Keep this too.');
     });
   });
+
+  // Memory scope isolation — see plan/IMPROVEMENT.md P2-1.
+  // The "memory scope per personality" promise on the landing page depends on
+  // these tests. If any of them break, a personality marked `per-personality`
+  // is leaking into the global pool.
+
+  describe('memoryScope: per-personality', () => {
+    const reviewerCtx = {
+      ...ctx,
+      personalityId: 'reviewer',
+      memoryScope: 'per-personality' as const,
+    };
+    const operatorCtx = {
+      ...ctx,
+      personalityId: 'operator',
+      memoryScope: 'per-personality' as const,
+    };
+    const coachCtx = {
+      ...ctx,
+      personalityId: 'coach',
+      memoryScope: 'global' as const,
+    };
+
+    it('writes per-personality MEMORY.md to the personality subdirectory', async () => {
+      await provider.sync(reviewerCtx, [
+        { store: 'memory', action: 'add', content: 'Reviewer-only fact.' },
+      ]);
+      const personalityFile = await readFile(
+        join(testDir, 'personalities', 'reviewer', 'MEMORY.md'),
+        'utf-8',
+      );
+      expect(personalityFile).toContain('Reviewer-only fact.');
+    });
+
+    it('per-personality writes never appear in the shared MEMORY.md', async () => {
+      await provider.sync(reviewerCtx, [
+        { store: 'memory', action: 'add', content: 'Reviewer-only fact.' },
+      ]);
+      // Shared MEMORY.md should not exist or should not contain the reviewer fact
+      const sharedExists = await readFile(join(testDir, 'MEMORY.md'), 'utf-8').catch(() => null);
+      if (sharedExists !== null) {
+        expect(sharedExists).not.toContain('Reviewer-only fact.');
+      }
+    });
+
+    it('two per-personality scopes do not cross-contaminate', async () => {
+      await provider.sync(reviewerCtx, [
+        { store: 'memory', action: 'add', content: 'Reviewer fact.' },
+      ]);
+      await provider.sync(operatorCtx, [
+        { store: 'memory', action: 'add', content: 'Operator fact.' },
+      ]);
+
+      const reviewerFile = await readFile(
+        join(testDir, 'personalities', 'reviewer', 'MEMORY.md'),
+        'utf-8',
+      );
+      const operatorFile = await readFile(
+        join(testDir, 'personalities', 'operator', 'MEMORY.md'),
+        'utf-8',
+      );
+
+      expect(reviewerFile).toContain('Reviewer fact.');
+      expect(reviewerFile).not.toContain('Operator fact.');
+      expect(operatorFile).toContain('Operator fact.');
+      expect(operatorFile).not.toContain('Reviewer fact.');
+    });
+
+    it('global personality writes still go to the shared MEMORY.md', async () => {
+      await provider.sync(coachCtx, [
+        { store: 'memory', action: 'add', content: 'Coach observation.' },
+      ]);
+      const shared = await readFile(join(testDir, 'MEMORY.md'), 'utf-8');
+      expect(shared).toContain('Coach observation.');
+    });
+
+    it('per-personality prefetch reads only that personality plus shared USER.md', async () => {
+      // Seed: reviewer's per-personality memory + a global memory + a shared user file
+      await provider.sync(reviewerCtx, [
+        { store: 'memory', action: 'add', content: 'Reviewer-only fact.' },
+      ]);
+      await provider.sync(coachCtx, [
+        { store: 'memory', action: 'add', content: 'Global coach fact.' },
+      ]);
+      await writeFile(join(testDir, 'USER.md'), 'I prefer TypeScript.');
+
+      const result = await provider.prefetch(reviewerCtx);
+      expect(result?.content).toContain('Reviewer-only fact.');
+      expect(result?.content).not.toContain('Global coach fact.');
+      expect(result?.content).toContain('I prefer TypeScript.');
+    });
+
+    it('USER.md is shared even for per-personality scope (it describes the human)', async () => {
+      await provider.sync(reviewerCtx, [
+        { store: 'user', action: 'add', content: 'Senior engineer.' },
+      ]);
+      // Should land in shared USER.md, not in the personality subdirectory
+      const sharedUser = await readFile(join(testDir, 'USER.md'), 'utf-8');
+      expect(sharedUser).toContain('Senior engineer.');
+      const isolatedUser = await readFile(
+        join(testDir, 'personalities', 'reviewer', 'USER.md'),
+        'utf-8',
+      ).catch(() => null);
+      expect(isolatedUser).toBeNull();
+    });
+
+    it('rejects unsafe personality ids by falling back to the shared root (no path traversal)', async () => {
+      const evilCtx = {
+        ...ctx,
+        personalityId: '../etc/passwd',
+        memoryScope: 'per-personality' as const,
+      };
+      await provider.sync(evilCtx, [{ store: 'memory', action: 'add', content: 'Evil fact.' }]);
+      // Must NOT have created files outside testDir
+      const escaped = await readFile(
+        join(testDir, '..', 'etc', 'passwd', 'MEMORY.md'),
+        'utf-8',
+      ).catch(() => null);
+      expect(escaped).toBeNull();
+      // Falls back to shared (safer than silently dropping the write)
+      const shared = await readFile(join(testDir, 'MEMORY.md'), 'utf-8');
+      expect(shared).toContain('Evil fact.');
+    });
+  });
 });

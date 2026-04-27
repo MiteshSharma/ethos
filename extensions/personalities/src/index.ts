@@ -143,6 +143,11 @@ async function buildConfig(dir: string, id: string): Promise<PersonalityConfig |
         .filter(Boolean)
     : undefined;
 
+  const streamingTimeoutMs =
+    cfg.streamingTimeoutMs && /^\d+$/.test(cfg.streamingTimeoutMs)
+      ? Number.parseInt(cfg.streamingTimeoutMs, 10)
+      : undefined;
+
   const config: PersonalityConfig = {
     id,
     name: cfg.name ?? titleCase(id),
@@ -155,6 +160,7 @@ async function buildConfig(dir: string, id: string): Promise<PersonalityConfig |
     ...(ethosExists ? { ethosFile: join(dir, 'ETHOS.md') } : {}),
     ...(skillsExists ? { skillsDirs: [join(dir, 'skills')] } : {}),
     ...(toolsetSrc ? { toolset: parseToolsetYaml(toolsetSrc) } : {}),
+    ...(streamingTimeoutMs !== undefined ? { streamingTimeoutMs } : {}),
   };
 
   return config;

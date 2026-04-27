@@ -2,5 +2,5 @@ packages:
   - "packages/*"
   - "extensions/*"
   - "apps/*"
-  - "plugins/*"
+  - "examples/plugins/*"
   - "docs"

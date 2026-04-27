@@ -16,7 +16,7 @@ Five personalities ship out of the box. Each has a first-person identity (`ETHOS
 | `coach` | warm but direct · question-led · helps you think | 5 (web + memory + session) | `claude-opus-4-7` | `global` |
 | `operator` | cautious · confirms before destructive · documents everything | 7 (terminal + file + code) | `claude-sonnet-4-6` | `per-personality` |
 
-> Tool counts are the actual tool names declared in `extensions/personalities/data/<id>/toolset.yaml`. Categories shown for shape; see each section below for the full list. Models are the personality's intended fit (Phase 21 multi-model routing) — override per-personality via `~/.ethos/config.yaml` `modelRouting`.
+> Tool counts are the actual tool names declared in `extensions/personalities/data/<id>/toolset.yaml`. Categories shown for shape; see each section below for the full list. Models are the personality's intended fit — override per-personality via `~/.ethos/config.yaml` `modelRouting`.
 
 Switch with `/personality <id>` in chat or `ethos personality set <id>` from the shell.
 

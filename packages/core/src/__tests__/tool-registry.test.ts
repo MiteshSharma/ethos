@@ -1,5 +1,5 @@
 import type { Tool, ToolContext, ToolResult } from '@ethosagent/types';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { DefaultToolRegistry } from '../tool-registry';
 
 const makeCtx = (): ToolContext => ({
@@ -122,5 +122,94 @@ describe('DefaultToolRegistry', () => {
       undefined,
     );
     expect(results[0]?.result.ok).toBe(true);
+  });
+
+  // Toolset isolation contract — these tests exist so a future PR that loosens
+  // the filter check at tool-registry.ts:57 fails CI. See plan/IMPROVEMENT.md P0-1.
+
+  it('executeParallel: blocked tools never have execute() invoked (side effect)', async () => {
+    const echoExec = vi.fn(async (): Promise<ToolResult> => ({ ok: true, value: 'ran' }));
+    const failExec = vi.fn(
+      async (): Promise<ToolResult> => ({
+        ok: false,
+        error: 'should not run',
+        code: 'execution_failed',
+      }),
+    );
+    const reg = new DefaultToolRegistry();
+    reg.register({ ...echoTool, execute: echoExec });
+    reg.register({ ...failTool, execute: failExec });
+
+    await reg.executeParallel(
+      [
+        { toolCallId: 'c1', name: 'echo', args: { text: 'ok' } },
+        { toolCallId: 'c2', name: 'fail', args: {} },
+      ],
+      makeCtx(),
+      ['echo'],
+    );
+
+    expect(echoExec).toHaveBeenCalledTimes(1);
+    expect(failExec).not.toHaveBeenCalled();
+  });
+
+  it('executeParallel: rejected tool result honors Anthropic tool_result contract', async () => {
+    // Every tool_use block in an assistant message needs a matching tool_result block
+    // when sent back to Anthropic. Rejected tools must surface ok: false with a non-empty
+    // error string so the LLM history stays valid.
+    const reg = new DefaultToolRegistry();
+    reg.register(echoTool);
+    const results = await reg.executeParallel(
+      [{ toolCallId: 'c1', name: 'echo', args: { text: 'hi' } }],
+      makeCtx(),
+      ['other_tool'],
+    );
+    const r = results[0]?.result as Extract<ToolResult, { ok: false }>;
+    expect(r.ok).toBe(false);
+    expect(r.code).toBe('not_available');
+    expect(r.error).toBeTruthy();
+    expect(r.error.length).toBeGreaterThan(0);
+  });
+
+  it('executeParallel: property — across random allowlists, blocked tools never execute', async () => {
+    const allToolNames = ['alpha', 'beta', 'gamma', 'delta', 'epsilon'];
+    const reg = new DefaultToolRegistry();
+    const counters = new Map<string, ReturnType<typeof vi.fn>>();
+    for (const name of allToolNames) {
+      const exec = vi.fn(async (): Promise<ToolResult> => ({ ok: true, value: name }));
+      counters.set(name, exec);
+      reg.register({
+        name,
+        description: `tool ${name}`,
+        schema: { type: 'object' },
+        execute: exec,
+      });
+    }
+
+    for (let scenario = 0; scenario < 100; scenario++) {
+      for (const exec of counters.values()) exec.mockClear();
+
+      const allowed = allToolNames.filter(() => Math.random() < 0.5);
+      const calls = Array.from({ length: 1 + Math.floor(Math.random() * 5) }, (_, i) => {
+        const pick = allToolNames[Math.floor(Math.random() * allToolNames.length)] ?? 'alpha';
+        return { toolCallId: `c${i}`, name: pick, args: {} };
+      });
+
+      await reg.executeParallel(calls, makeCtx(), allowed.length > 0 ? allowed : undefined);
+
+      for (const name of allToolNames) {
+        const expectedCalls =
+          allowed.length === 0
+            ? calls.filter((c) => c.name === name).length
+            : allowed.includes(name)
+              ? calls.filter((c) => c.name === name).length
+              : 0;
+        const exec = counters.get(name);
+        expect(exec).toBeDefined();
+        if (exec) {
+          expect(exec.mock.calls.length).toBe(expectedCalls);
+        }
+      }
+    }
   });
 });

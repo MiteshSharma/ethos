@@ -106,8 +106,8 @@ node_modules/ethos-plugin-*/   npm (auto-discovered)
 
 ## Where to look for help
 
-- `plugins/README.md` — full guide with all registration patterns
-- `plugins/example-hello/` — complete working example with unit + integration tests
+- `examples/plugins/README.md` — full guide with all registration patterns
+- `examples/plugins/hello/` — complete working example with unit + integration tests
 - `packages/plugin-sdk/src/index.ts` — EthosPluginApi interface definition
 - `packages/plugin-sdk/src/tool-helpers.ts` — ok(), err(), defineTool()
 - `packages/plugin-sdk/src/testing.ts` — mockLLM(), mockTool(), createTestRuntime()

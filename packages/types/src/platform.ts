@@ -16,6 +16,13 @@ export interface InboundMessage {
   replyToId?: string;
   isDm: boolean;
   isGroupMention: boolean;
+  /**
+   * Platform-native message ID. When set, Gateway dedupes duplicate inbounds
+   * sharing the same `(platform, chatId, messageId)` triple — protecting
+   * against polling reconnects, double-delivery, and webhook retries.
+   * See plan/IMPROVEMENT.md P2-2 / OpenClaw #71761.
+   */
+  messageId?: string;
   raw: unknown;
 }
 

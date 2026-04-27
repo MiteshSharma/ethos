@@ -101,6 +101,7 @@ export class DiscordAdapter implements PlatformAdapter {
         isDm,
         isGroupMention: isMention && !isDm,
         replyToId: message.id,
+        messageId: message.id,
         raw: message,
       };
 

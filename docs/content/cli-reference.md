@@ -25,7 +25,7 @@ Comprehensive reference for the `ethos` command-line interface — every subcomm
 | `ethos gateway start` | Run all configured platform bots — long-running |
 | `ethos cron list` | List scheduled jobs |
 | `ethos cron create --name … --schedule "…" --prompt "…"` | Create a cron job |
-| `ethos serve` | Web UI + API on `:3000` *(Phase 26)* — long-running |
+| `ethos serve` | Web UI + API on `:3000` *(in development)* — long-running |
 | `ethos acp` | Agent Control Protocol mesh server — long-running |
 | `ethos batch <tasks.jsonl>` | Run tasks in parallel from a JSONL file |
 | `ethos eval run <tasks.jsonl> --expected <expected.jsonl>` | Score agent output against expected answers |
@@ -240,7 +240,7 @@ ethos cron delete abc123
 
 ### `serve`
 
-Start the Ethos web UI + API on a local port. **Phase 26** — currently in development. **Long-running.**
+Start the Ethos web UI + API on a local port. **In development — not yet stable.** **Long-running.**
 
 ```
 ethos serve [--port <n>] [--bind <addr>]
@@ -251,7 +251,7 @@ ethos serve [--port <n>] [--bind <addr>]
 | `--port` | `3000` | HTTP port |
 | `--bind` | `127.0.0.1` | Bind address. `--bind 0.0.0.0` exposes to LAN (still token-protected). |
 
-On first run, prints a `http://localhost:3000?t=<token>` URL with a one-time token; that token rotates into an httpOnly cookie on first browser visit. See [Phase 26 plan](https://github.com/MiteshSharma/ethos/blob/main/plan/phases/26-web-ui.md) for full architecture.
+On first run, prints a `http://localhost:3000?t=<token>` URL with a one-time token; that token rotates into an httpOnly cookie on first browser visit.
 
 **Examples:**
 
@@ -265,13 +265,13 @@ ethos serve --bind 0.0.0.0             # LAN-accessible (still token-required)
 
 ### `acp`
 
-Run the **Agent Control Protocol** server. ACP is a JSON-RPC stdin/stdout protocol used to compose multiple Ethos agents into a mesh (Phase 24). **Long-running.**
+Run the **Agent Control Protocol** server. ACP is a JSON-RPC stdin/stdout protocol used to compose multiple Ethos agents into a mesh. **Long-running.**
 
 ```
 ethos acp
 ```
 
-No flags. Reads JSON-RPC requests from stdin, writes responses to stdout. Typically invoked by a parent orchestrator, not a human. See [Phase 24 plan](https://github.com/MiteshSharma/ethos/blob/main/plan/phases/24-mesh.md) for the protocol spec.
+No flags. Reads JSON-RPC requests from stdin, writes responses to stdout. Typically invoked by a parent orchestrator, not a human.
 
 ---
 
@@ -345,7 +345,7 @@ ethos eval run tasks.jsonl --expected expected.jsonl --evolve --auto-approve
 
 ### `evolve`
 
-Generate new skill files from session traces, then queue them for review. The "learning pillar" of Ethos (Phase 25).
+Generate new skill files from session traces, then queue them for review. The "learning pillar" of Ethos.
 
 ```
 ethos evolve --eval-output <file.eval.jsonl> [--auto-approve]
@@ -479,7 +479,7 @@ ethos keys remove 2
 
 ### `claw`
 
-Migrate from [OpenClaw](https://github.com/steipete/openclaw) (`~/.claw/`) into Ethos (`~/.ethos/`). Idempotent — safe to re-run. (Phase 28)
+Migrate from [OpenClaw](https://github.com/steipete/openclaw) (`~/.claw/`) into Ethos (`~/.ethos/`). Idempotent — safe to re-run.
 
 ```
 ethos claw migrate [--dry-run] [--preset <name>] [--overwrite] [--yes]
@@ -659,8 +659,8 @@ Read at startup; override values in `config.yaml`.
 ├── skills-pending/         ← evolved skills awaiting review (`ethos evolve`)
 ├── plugins/                ← manual plugin manifests
 ├── logs/                   ← daemon logs
-├── allowlist.json          ← tool-call approval grants (Phase 26)
-├── web-token               ← web UI auth token (Phase 26, chmod 600)
+├── allowlist.json          ← tool-call approval grants (web UI)
+├── web-token               ← web UI auth token (chmod 600)
 └── whatsapp-auth/          ← WhatsApp gateway auth state
 ```
 

@@ -56,6 +56,25 @@ export interface AgentLoopConfig {
     platform?: string;
     workingDir?: string;
     resultBudgetChars?: number;
+    /**
+     * Hard cap on total tool calls per user turn (across all LLM iterations).
+     * Defaults to 20. Trips a `tool_progress` warning and exits cleanly.
+     * See plan/IMPROVEMENT.md P1-3.
+     */
+    maxToolCallsPerTurn?: number;
+    /**
+     * Hard cap on the number of times the same tool name can be invoked in a
+     * single turn. Catches the "infinite loop on a single tool" failure mode
+     * (e.g. tts loop reported as OpenClaw #67744). Defaults to 5.
+     */
+    maxIdenticalToolCalls?: number;
+    /**
+     * Default streaming watchdog in milliseconds. If no chunk arrives from the
+     * LLM within this window, the agent aborts the stream and emits an error.
+     * Reset on every chunk. Personalities can override via
+     * `personality.streamingTimeoutMs`. Defaults to 120000 (2 minutes).
+     */
+    streamingTimeoutMs?: number;
   };
 }
 
@@ -82,6 +101,9 @@ export class AgentLoop {
   private readonly platform: string;
   private readonly workingDir: string;
   private readonly resultBudgetChars: number;
+  private readonly maxToolCallsPerTurn: number;
+  private readonly maxIdenticalToolCalls: number;
+  private readonly streamingTimeoutMs: number;
   private readonly modelRouting: Record<string, string>;
 
   constructor(config: AgentLoopConfig) {
@@ -97,6 +119,9 @@ export class AgentLoop {
     this.platform = config.options?.platform ?? 'cli';
     this.workingDir = config.options?.workingDir ?? process.cwd();
     this.resultBudgetChars = config.options?.resultBudgetChars ?? 80_000;
+    this.maxToolCallsPerTurn = config.options?.maxToolCallsPerTurn ?? 20;
+    this.maxIdenticalToolCalls = config.options?.maxIdenticalToolCalls ?? 5;
+    this.streamingTimeoutMs = config.options?.streamingTimeoutMs ?? 120_000;
     this.modelRouting = config.modelRouting ?? {};
   }
 
@@ -165,6 +190,7 @@ export class AgentLoop {
       platform: this.platform,
       workingDir: this.workingDir,
       personalityId: personality.id,
+      memoryScope: personality.memoryScope,
       query: text,
     });
 
@@ -239,10 +265,39 @@ export class AgentLoop {
     let fullText = '';
     let turnCount = 0;
 
+    // Tool-call budget tracking — prevents runaway loops (see IMPROVEMENT.md P1-3).
+    // Counted across all iterations within a single user turn.
+    let totalToolCalls = 0;
+    const toolNameCounts = new Map<string, number>();
+
     for (let iteration = 0; iteration < this.maxIterations; iteration++) {
       if (abortSignal.aborted) {
         yield { type: 'error', error: 'Aborted', code: 'aborted' };
         return;
+      }
+
+      // Budget guard: bail before the next LLM call if we've already exceeded
+      // either the total tool-call budget or the per-tool repeat budget. The
+      // previous iteration's tool_result is in llmMessages, so the LLM history
+      // stays valid; we just refuse to call again.
+      if (totalToolCalls >= this.maxToolCallsPerTurn) {
+        yield {
+          type: 'tool_progress',
+          toolName: '_budget',
+          message: `Stopped: hit ${this.maxToolCallsPerTurn}-tool-call budget for this turn`,
+        };
+        break;
+      }
+      const overusedTool = [...toolNameCounts.entries()].find(
+        ([, count]) => count >= this.maxIdenticalToolCalls,
+      );
+      if (overusedTool) {
+        yield {
+          type: 'tool_progress',
+          toolName: overusedTool[0],
+          message: `Stopped: ${overusedTool[0]} called ${overusedTool[1]} times in one turn (likely loop)`,
+        };
+        break;
       }
 
       // Fire before_llm_call
@@ -261,22 +316,60 @@ export class AgentLoop {
       }> = [];
       let chunkText = '';
 
+      // Streaming watchdog: cancel the stream if no chunk arrives within the
+      // per-personality window. Reset every chunk so slow-but-progressing
+      // reasoning is unaffected. See IMPROVEMENT.md P1-2 / OpenClaw #68596.
+      const watchdogMs = personality.streamingTimeoutMs ?? this.streamingTimeoutMs;
+      const watchdogController = new AbortController();
+      const combinedSignal = AbortSignal.any([abortSignal, watchdogController.signal]);
+      let watchdogTimer: ReturnType<typeof setTimeout> | undefined;
+      const armWatchdog = () => {
+        if (watchdogTimer) clearTimeout(watchdogTimer);
+        watchdogTimer = setTimeout(() => watchdogController.abort(), watchdogMs);
+      };
+      const disarmWatchdog = () => {
+        if (watchdogTimer) clearTimeout(watchdogTimer);
+        watchdogTimer = undefined;
+      };
+
       try {
+        armWatchdog();
         const stream = this.llm.complete(llmMessages, this.tools.toDefinitions(allowedTools), {
           system: systemPrompt,
           cacheSystemPrompt: true,
-          abortSignal,
+          abortSignal: combinedSignal,
           ...(modelOverride ? { modelOverride } : {}),
         });
 
         for await (const chunk of stream) {
           if (abortSignal.aborted) break;
+          if (watchdogController.signal.aborted) break;
+          armWatchdog();
           yield* this.handleChunk(chunk, pendingToolCalls, (t) => {
             chunkText += t;
             fullText += t;
           });
         }
+        disarmWatchdog();
+
+        if (watchdogController.signal.aborted && !abortSignal.aborted) {
+          yield {
+            type: 'error',
+            error: `LLM stream stalled — no chunk for ${watchdogMs}ms`,
+            code: 'streaming_timeout',
+          };
+          return;
+        }
       } catch (err) {
+        disarmWatchdog();
+        if (watchdogController.signal.aborted && !abortSignal.aborted) {
+          yield {
+            type: 'error',
+            error: `LLM stream stalled — no chunk for ${watchdogMs}ms`,
+            code: 'streaming_timeout',
+          };
+          return;
+        }
         const msg = err instanceof Error ? err.message : String(err);
         yield { type: 'error', error: msg, code: 'llm_error' };
         return;
@@ -286,6 +379,12 @@ export class AgentLoop {
 
       // Determine which tool calls completed parsing
       const completedToolCalls = pendingToolCalls.filter((tc) => tc.args !== undefined);
+
+      // Update budget counters — these gate the NEXT iteration's LLM call.
+      totalToolCalls += completedToolCalls.length;
+      for (const tc of completedToolCalls) {
+        toolNameCounts.set(tc.toolName, (toolNameCounts.get(tc.toolName) ?? 0) + 1);
+      }
 
       // Persist assistant message — include tool_use references so history is LLM-replayable
       await this.session.appendMessage({
@@ -332,6 +431,8 @@ export class AgentLoop {
         sessionKey,
         platform: this.platform,
         workingDir: this.workingDir,
+        personalityId: personality.id,
+        memoryScope: personality.memoryScope,
         currentTurn: turnCount,
         messageCount: allMessages.length + turnCount,
         abortSignal,
@@ -452,7 +553,14 @@ export class AgentLoop {
 
     // Step 10: Sync memory
     await this.memory.sync(
-      { sessionId, sessionKey, platform: this.platform, workingDir: this.workingDir },
+      {
+        sessionId,
+        sessionKey,
+        platform: this.platform,
+        workingDir: this.workingDir,
+        personalityId: personality.id,
+        memoryScope: personality.memoryScope,
+      },
       [],
     );
 

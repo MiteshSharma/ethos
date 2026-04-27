@@ -46,7 +46,7 @@ Define success criteria. Loop until verified.
 
 ## What this is
 
-Ethos is a TypeScript agent framework where **personality is architecture**. A personality (`ETHOS.md` + `skills/` + `toolset.yaml` + `config.yaml`) is a structural component — not a system prompt string — that shapes tool access, memory filtering, model routing, and communication style simultaneously.
+Ethos is a TypeScript agent framework where **personality is architecture**. A personality (`ETHOS.md` + `toolset.yaml` + `config.yaml`) is a structural component — not a system prompt string — that shapes tool access, memory filtering, model routing, and communication style simultaneously.
 
 The CLI (`ethos`) gives you an interactive agent that persists sessions across restarts, loads built-in or custom personalities, and streams LLM responses with tool events.
 
@@ -84,7 +84,7 @@ extensions/
 apps/
   ethos/            @ethosagent/cli       CLI entry point
 
-plan/               Architecture notes, 20-phase roadmap
+plan/               Architecture notes, 29-phase roadmap (see PLAN.md), plus IMPROVEMENT.md tracking corrections
 ```
 
 Path aliases in `tsconfig.json` point all `@ethosagent/*` imports to `./src/` source directly — no build step required in dev.
@@ -105,7 +105,7 @@ Path aliases in `tsconfig.json` point all `@ethosagent/*` imports to `./src/` so
 | File | What it does |
 |---|---|
 | `packages/types/src/index.ts` | Barrel — every interface in the system lives here |
-| `packages/core/src/agent-loop.ts` | The 13-step `AsyncGenerator<AgentEvent>` turn cycle |
+| `packages/core/src/agent-loop.ts` | The 12-step `AsyncGenerator<AgentEvent>` turn cycle |
 | `packages/core/src/tool-registry.ts` | `executeParallel()` with per-call budget splitting |
 | `packages/core/src/hook-registry.ts` | Void / Modifying / Claiming hook execution models |
 | `apps/ethos/src/wiring.ts` | Assembles `AgentLoop` from `~/.ethos/config.yaml` |
@@ -160,13 +160,14 @@ All three return `() => void` cleanup functions from `register*()`.
 
 ## Adding a new tool
 
-Tools aren't registered as a package yet (Phase 6). When Phase 6 lands:
+Tools live in `extensions/tools-*` packages and register with `DefaultToolRegistry` at wiring time. To add one:
 
 1. Implement `Tool<TArgs>` from `@ethosagent/types`
 2. `execute(args, ctx)` must return `Promise<ToolResult>` — `{ ok: true, value: string }` or `{ ok: false, error, code }`
 3. Set `toolset` to group the tool (e.g. `'file'`, `'web'`, `'terminal'`)
 4. Set `maxResultChars` to limit output — `executeParallel` trims and appends `[truncated]` if exceeded
 5. Declare `isAvailable?()` if the tool requires env vars or external services
+6. Wire it in `apps/ethos/src/wiring.ts` so it's registered on startup
 
 ---
 
@@ -219,13 +220,14 @@ Tools can declare a lower `maxResultChars` (e.g. `read_file` with pagination). T
 
 ## Key conventions
 
-- **No `console.log` in library code** — only in CLI (`apps/ethos/src/`). Pino logging planned for Phase 20.
+- **No `console.log` in library code** — only in CLI (`apps/ethos/src/`). Some `console.warn/error` lingers in `extensions/cron`, `extensions/plugin-loader`, and `extensions/tools-mcp`; do not add new ones.
 - **All imports are extensionless** — `import './foo'` not `import './foo.ts'` or `import './foo.js'`. This is the one hard rule; tsx handles it.
 - **Workspace `package.json` exports point to `./src/index.ts`** — so Node 24 can run them directly in dev without a build step.
 - **`biome check --write .`** auto-fixes import order, formatting, and safe lint issues. Run it before committing.
 - **`STRICT` SQLite tables** — both `sessions` and `messages` use `STRICT` mode. All column types must match exactly.
 - **`better-sqlite3` is synchronous** — all `SessionStore` methods wrap it in `async` but never actually await I/O. Keep query logic tight; no async operations inside the synchronous `db.prepare().run()` calls.
-- **Personality toolset is advisory** — `DefaultToolRegistry` doesn't filter by toolset yet. Phase 7 (skills + context injectors) will enforce toolset constraints.
+- **Personality toolset is enforced** — `DefaultToolRegistry.toDefinitions(allowedTools)` filters what the LLM sees, and `executeParallel` rejects calls outside the allowlist (`tool-registry.ts:57`). `AgentLoop` reads `personality.toolset` and passes it through (`agent-loop.ts:140,265,396`). Disallowed tools get a `tool_result` with `is_error: true` to keep the Anthropic message contract intact.
+- **Update [CHANGELOG.md](./CHANGELOG.md) whenever you ship a user-visible change** — add a bullet under `[Unreleased]` in the matching section (Added / Changed / Fixed / Removed / Security / Deprecated). Cross-reference plan IDs (e.g. `IMPROVEMENT.md P0-1`) and OpenClaw issue numbers when relevant — that's how future readers, human or LLM, will trace the *why*. The file follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
@@ -326,7 +328,7 @@ Always read [DESIGN.md](./DESIGN.md) before making any visual or UI decision.
 All font choices, colors, spacing, motion, and aesthetic direction are defined there.
 Do not deviate without explicit user approval.
 
-Phase 26 web UI references DESIGN.md tokens via Antd `ConfigProvider` (see `apps/web/src/lib/theme.ts` once 26.1 lands). Other surfaces (TUI, VS Code extension, email digests, CLI) consume the same tokens — see DESIGN.md "Cross-surface token mapping" for the per-surface render rules.
+The web UI (in development) references DESIGN.md tokens via Antd `ConfigProvider`. Other surfaces (TUI, VS Code extension, email digests, CLI) consume the same tokens — see DESIGN.md "Cross-surface token mapping" for the per-surface render rules.
 
 When reviewing or writing code that touches UI, flag any deviations from DESIGN.md (slop blacklist, font choices, color hex values, motion durations, "cards earn existence" rule).
 

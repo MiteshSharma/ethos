@@ -86,6 +86,7 @@ export class TelegramAdapter implements PlatformAdapter {
         text,
         isDm: ctx.chat.type === 'private',
         isGroupMention: ctx.message.text?.includes(`@${ctx.me.username}`) ?? false,
+        messageId: String(ctx.message.message_id),
         raw: ctx,
       };
 

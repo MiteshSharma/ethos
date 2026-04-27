@@ -11,6 +11,13 @@ export interface MemoryLoadContext {
   platform: string;
   workingDir?: string;
   personalityId?: string;
+  /**
+   * Resolved memory scope for the active personality. Providers that support
+   * scoping (e.g. MarkdownFileMemoryProvider) route 'per-personality' writes
+   * into a personality-isolated path; 'global' (or undefined) writes to the
+   * shared root. AgentLoop fills this from the resolved personality.
+   */
+  memoryScope?: 'global' | 'per-personality';
   /** Current user message — used by VectorMemoryProvider for semantic retrieval */
   query?: string;
 }

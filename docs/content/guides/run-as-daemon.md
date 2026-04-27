@@ -31,7 +31,7 @@ This guide focuses on `ethos gateway start` — the multi-platform message gatew
 |---|---|---|
 | `ethos gateway start` | Telegram / Slack / Discord / WhatsApp / Email bots | ✅ |
 | `ethos cron` | Scheduled jobs worker | ✅ |
-| `ethos serve` *(Phase 26)* | Web UI + API on `:3000` | ✅ |
+| `ethos serve` *(in development)* | Web UI + API on `:3000` | ✅ |
 | `ethos acp` | Agent Control Protocol (mesh) server | ✅ |
 | `ethos chat`, `setup`, `batch`, `eval`, `plugin`, `skills`, `keys`, `claw`, `upgrade`, `personality`, `memory`, `evolve` | One-shot or REPL | ❌ |
 
@@ -255,7 +255,7 @@ You can run several long-running ethos commands side by side:
 
 ```bash
 pm2 start ethos --name ethos-gateway -- gateway start
-pm2 start ethos --name ethos-cron    -- cron worker     # Phase 10 worker mode
+pm2 start ethos --name ethos-cron    -- cron worker     # cron worker mode
 pm2 start ethos --name ethos-serve   -- serve --port 3000
 pm2 save
 ```
@@ -318,7 +318,7 @@ Where logs land depends on which service manager you used:
 | pm2 | `~/.pm2/logs/ethos-gateway-out.log` + `-error.log`. View with `pm2 logs` |
 | tmux/screen | Whatever's in your scrollback — not persisted |
 
-Ethos itself writes structured logs to `~/.ethos/logs/` in addition to stdout/stderr (Phase 20). Inspect with:
+Ethos itself writes structured logs to `~/.ethos/logs/` in addition to stdout/stderr. Inspect with:
 
 ```bash
 ls ~/.ethos/logs/
