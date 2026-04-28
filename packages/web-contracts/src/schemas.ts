@@ -258,6 +258,26 @@ export const MeshAgentSchema = z.object({
 export type MeshAgent = z.infer<typeof MeshAgentSchema>;
 
 // ---------------------------------------------------------------------------
+// Personality skills — v1
+//
+// Per-personality skills/*.md files (under
+// ~/.ethos/personalities/<id>/skills/). Same shape as the global
+// SkillSchema but scoped to one personality. Surfaces under the
+// Personalities tab's editor.
+// ---------------------------------------------------------------------------
+
+export const PersonalitySkillSchema = z.object({
+  /** Filename minus `.md`. */
+  id: z.string(),
+  name: z.string(),
+  description: z.string().nullable(),
+  body: z.string(),
+  /** ISO-8601 mtime. */
+  modifiedAt: z.string(),
+});
+export type PersonalitySkill = z.infer<typeof PersonalitySkillSchema>;
+
+// ---------------------------------------------------------------------------
 // Communications — v1
 //
 // Per-platform connection state. The web tab edits four platforms by

@@ -23,7 +23,12 @@ describe('PersonalitiesService', () => {
   function makeService(opts: { personalities: import('@ethosagent/types').PersonalityConfig[] }) {
     const registry = makeStubPersonalityRegistry(opts.personalities);
     const repo = new PersonalityRepository({ registry, userPersonalitiesDir: dir });
-    return new PersonalitiesService({ personalities: repo });
+    // Per-personality skills isn't exercised in this service-level test
+    // (those have their own repository tests). The cast is enough to
+    // satisfy the service constructor.
+    const personalitySkills =
+      {} as import('../../repositories/personality-skills.repository').PersonalitySkillsRepository;
+    return new PersonalitiesService({ personalities: repo, personalitySkills });
   }
 
   it('list maps PersonalityConfig → wire shape and includes defaultId', () => {

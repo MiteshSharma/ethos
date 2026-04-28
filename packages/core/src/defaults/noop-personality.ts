@@ -38,4 +38,8 @@ export class DefaultPersonalityRegistry implements PersonalityRegistry {
   async loadFromDirectory(_dir: string): Promise<void> {
     // Implemented in extensions/personalities
   }
+
+  remove(id: string): void {
+    this.personalities.delete(id);
+  }
 }

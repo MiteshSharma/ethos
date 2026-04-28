@@ -53,4 +53,12 @@ export interface PersonalityRegistry {
   getDefault(): PersonalityConfig;
   setDefault(id: string): void;
   loadFromDirectory(dir: string): Promise<void>;
+  /**
+   * Remove a personality from the in-memory registry. Used by surfaces
+   * that delete the on-disk directory (e.g. the web Personalities tab) —
+   * `loadFromDirectory` only adds; a separate primitive is needed to
+   * forget. Callers must also clear any associated FS state; this method
+   * only mutates the registry's own map. No-op if the id is unknown.
+   */
+  remove(id: string): void;
 }

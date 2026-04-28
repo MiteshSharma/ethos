@@ -30,6 +30,7 @@ const makePersonalityRegistry = (skillsDirs: string[] = []) => ({
   getDefault: () => ({ id: 'researcher', name: 'Researcher', skillsDirs }),
   setDefault: () => {},
   loadFromDirectory: async () => {},
+  remove: () => {},
 });
 
 let testDir: string;

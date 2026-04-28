@@ -15,6 +15,7 @@ import {
   OnboardingStepSchema,
   PendingSkillSchema,
   PersonalitySchema,
+  PersonalitySkillSchema,
   PlatformIdSchema,
   PlatformStatusSchema,
   PluginInfoSchema,
@@ -89,9 +90,94 @@ const PersonalityGetOutput = z.object({
   ethosMd: z.string(),
 });
 
+const PersonalityIdRegex = /^[a-z0-9_-]+$/;
+
+const PersonalityCreateInput = z.object({
+  /** Lowercase id; becomes the directory name. */
+  id: z.string().min(1).regex(PersonalityIdRegex),
+  name: z.string().min(1),
+  description: z.string().optional(),
+  model: z.string().optional(),
+  toolset: z.array(z.string()),
+  /** Markdown body of ETHOS.md. May be empty. */
+  ethosMd: z.string(),
+  memoryScope: z.enum(['global', 'per-personality']).optional(),
+});
+const PersonalityCreateOutput = z.object({ personality: PersonalitySchema });
+
+const PersonalityUpdateInput = z.object({
+  id: z.string().min(1),
+  /** Patch — only present fields are written. */
+  name: z.string().optional(),
+  description: z.string().optional(),
+  model: z.string().optional(),
+  toolset: z.array(z.string()).optional(),
+  ethosMd: z.string().optional(),
+  memoryScope: z.enum(['global', 'per-personality']).optional(),
+});
+const PersonalityUpdateOutput = z.object({ personality: PersonalitySchema });
+
+const PersonalityDeleteInput = z.object({ id: z.string().min(1) });
+const PersonalityOkOutput = z.object({ ok: z.literal(true) });
+
+const PersonalityDuplicateInput = z.object({
+  id: z.string().min(1),
+  newId: z.string().min(1).regex(PersonalityIdRegex),
+});
+const PersonalityDuplicateOutput = z.object({ personality: PersonalitySchema });
+
+// Per-personality skills (gate 19).
+const PersonalitySkillsListInput = z.object({ personalityId: z.string().min(1) });
+const PersonalitySkillsListOutput = z.object({ skills: z.array(PersonalitySkillSchema) });
+
+const PersonalitySkillsGetInput = z.object({
+  personalityId: z.string().min(1),
+  skillId: z.string().min(1),
+});
+const PersonalitySkillsGetOutput = z.object({ skill: PersonalitySkillSchema });
+
+const PersonalitySkillsCreateInput = z.object({
+  personalityId: z.string().min(1),
+  skillId: z
+    .string()
+    .min(1)
+    .regex(/^[a-zA-Z0-9_-]+$/),
+  body: z.string(),
+});
+const PersonalitySkillsCreateOutput = z.object({ skill: PersonalitySkillSchema });
+
+const PersonalitySkillsUpdateInput = z.object({
+  personalityId: z.string().min(1),
+  skillId: z.string().min(1),
+  body: z.string(),
+});
+const PersonalitySkillsUpdateOutput = z.object({ skill: PersonalitySkillSchema });
+
+const PersonalitySkillsDeleteInput = z.object({
+  personalityId: z.string().min(1),
+  skillId: z.string().min(1),
+});
+
+const PersonalitySkillsImportInput = z.object({
+  personalityId: z.string().min(1),
+  /** Global skill ids to copy from ~/.ethos/skills/<id>.md into the personality's skills/. */
+  skillIds: z.array(z.string().min(1)),
+});
+const PersonalitySkillsImportOutput = z.object({ imported: z.array(PersonalitySkillSchema) });
+
 const personalities = {
   list: oc.output(PersonalityListOutput),
   get: oc.input(PersonalityGetInput).output(PersonalityGetOutput),
+  create: oc.input(PersonalityCreateInput).output(PersonalityCreateOutput),
+  update: oc.input(PersonalityUpdateInput).output(PersonalityUpdateOutput),
+  delete: oc.input(PersonalityDeleteInput).output(PersonalityOkOutput),
+  duplicate: oc.input(PersonalityDuplicateInput).output(PersonalityDuplicateOutput),
+  skillsList: oc.input(PersonalitySkillsListInput).output(PersonalitySkillsListOutput),
+  skillsGet: oc.input(PersonalitySkillsGetInput).output(PersonalitySkillsGetOutput),
+  skillsCreate: oc.input(PersonalitySkillsCreateInput).output(PersonalitySkillsCreateOutput),
+  skillsUpdate: oc.input(PersonalitySkillsUpdateInput).output(PersonalitySkillsUpdateOutput),
+  skillsDelete: oc.input(PersonalitySkillsDeleteInput).output(PersonalityOkOutput),
+  skillsImportGlobal: oc.input(PersonalitySkillsImportInput).output(PersonalitySkillsImportOutput),
 };
 
 // ---------------------------------------------------------------------------

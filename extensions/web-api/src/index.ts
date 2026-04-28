@@ -13,6 +13,7 @@ import { McpRepository } from './repositories/mcp.repository';
 import { MemoryRepository } from './repositories/memory.repository';
 import { MeshRepository } from './repositories/mesh.repository';
 import { PersonalityRepository } from './repositories/personality.repository';
+import { PersonalitySkillsRepository } from './repositories/personality-skills.repository';
 import { PlatformsRepository } from './repositories/platforms.repository';
 import { PluginsRepository } from './repositories/plugins.repository';
 import { SessionsRepository } from './repositories/sessions.repository';
@@ -119,10 +120,17 @@ export function createWebApi(opts: CreateWebApiOptions): CreateWebApiResult {
   const pluginsRepo = new PluginsRepository({ dataDir: opts.dataDir });
   const mcpRepo = new McpRepository({ dataDir: opts.dataDir });
   const platformsRepo = new PlatformsRepository({ config: configRepo });
+  const personalitySkillsRepo = new PersonalitySkillsRepository({
+    personalities: personalitiesRepo,
+    globalSkills: skillsRepo,
+  });
 
   // --- Services (business logic) ---
   const sessionsService = new SessionsService({ sessions: sessionsRepo });
-  const personalitiesService = new PersonalitiesService({ personalities: personalitiesRepo });
+  const personalitiesService = new PersonalitiesService({
+    personalities: personalitiesRepo,
+    personalitySkills: personalitySkillsRepo,
+  });
   const configService = new ConfigService({ config: configRepo });
   const onboardingService = new OnboardingService({
     config: configRepo,

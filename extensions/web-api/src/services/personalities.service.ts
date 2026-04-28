@@ -1,18 +1,25 @@
 import { EthosError } from '@ethosagent/types';
-import type { Personality } from '@ethosagent/web-contracts';
+import type { Personality, PersonalitySkill } from '@ethosagent/web-contracts';
 import type {
+  CreatePersonalityInput,
   DescribedPersonality,
   PersonalityRepository,
+  UpdatePersonalityPatch,
 } from '../repositories/personality.repository';
+import type { PersonalitySkillsRepository } from '../repositories/personality-skills.repository';
 
-// Read-only personalities surface for v0. Returns the wire-shape `Personality`
-// (server-internal `ethosFile`/`skillsDirs` paths stripped — those would
-// leak server filesystem layout to the browser).
+// Personalities service. Composes two repositories:
+//   • PersonalityRepository — directory-level CRUD (config.yaml,
+//     toolset.yaml, ETHOS.md) and registry refresh.
+//   • PersonalitySkillsRepository — per-personality skills/ subdir.
 //
-// Create / edit / per-personality skills land in 26.4b (Phase 26 v1 stage).
+// The skills sub-surface lives here (not in SkillsService) because it
+// shares the personality-id boundary check — refusing to operate on a
+// missing or built-in personality is a personality-domain concern.
 
 export interface PersonalitiesServiceOptions {
   personalities: PersonalityRepository;
+  personalitySkills: PersonalitySkillsRepository;
 }
 
 export class PersonalitiesService {
@@ -27,15 +34,77 @@ export class PersonalitiesService {
 
   async get(id: string): Promise<{ personality: Personality; ethosMd: string }> {
     const described = this.opts.personalities.get(id);
-    if (!described) {
-      throw new EthosError({
-        code: 'PERSONALITY_NOT_FOUND',
-        cause: `Personality "${id}" not found`,
-        action: 'Call `personalities.list` to see available IDs.',
-      });
-    }
+    if (!described) throw notFound(id);
     const ethosMd = await this.opts.personalities.readEthosMd(id);
     return { personality: toWire(described), ethosMd };
+  }
+
+  async create(input: CreatePersonalityInput): Promise<{ personality: Personality }> {
+    const created = await this.opts.personalities.create(input);
+    return { personality: toWire(created) };
+  }
+
+  async update(id: string, patch: UpdatePersonalityPatch): Promise<{ personality: Personality }> {
+    const updated = await this.opts.personalities.update(id, patch);
+    return { personality: toWire(updated) };
+  }
+
+  async delete(id: string): Promise<void> {
+    await this.opts.personalities.delete(id);
+  }
+
+  async duplicate(id: string, newId: string): Promise<{ personality: Personality }> {
+    const created = await this.opts.personalities.duplicate(id, newId);
+    return { personality: toWire(created) };
+  }
+
+  // ---------------------------------------------------------------------------
+  // Per-personality skills (gate 19)
+  // ---------------------------------------------------------------------------
+
+  async skillsList(personalityId: string): Promise<{ skills: PersonalitySkill[] }> {
+    return { skills: await this.opts.personalitySkills.list(personalityId) };
+  }
+
+  async skillsGet(personalityId: string, skillId: string): Promise<{ skill: PersonalitySkill }> {
+    const skill = await this.opts.personalitySkills.get(personalityId, skillId);
+    if (!skill) {
+      throw new EthosError({
+        code: 'SKILL_NOT_FOUND',
+        cause: `Skill "${skillId}" not found for personality "${personalityId}".`,
+        action: 'Use personalities.skillsList to see installed skills.',
+      });
+    }
+    return { skill };
+  }
+
+  async skillsCreate(
+    personalityId: string,
+    skillId: string,
+    body: string,
+  ): Promise<{ skill: PersonalitySkill }> {
+    return { skill: await this.opts.personalitySkills.create(personalityId, skillId, body) };
+  }
+
+  async skillsUpdate(
+    personalityId: string,
+    skillId: string,
+    body: string,
+  ): Promise<{ skill: PersonalitySkill }> {
+    return { skill: await this.opts.personalitySkills.update(personalityId, skillId, body) };
+  }
+
+  async skillsDelete(personalityId: string, skillId: string): Promise<void> {
+    await this.opts.personalitySkills.delete(personalityId, skillId);
+  }
+
+  async skillsImportGlobal(
+    personalityId: string,
+    skillIds: string[],
+  ): Promise<{ imported: PersonalitySkill[] }> {
+    return {
+      imported: await this.opts.personalitySkills.importFromGlobal(personalityId, skillIds),
+    };
   }
 }
 
@@ -53,4 +122,12 @@ function toWire(d: DescribedPersonality): Personality {
     streamingTimeoutMs: c.streamingTimeoutMs ?? null,
     builtin: d.builtin,
   };
+}
+
+function notFound(id: string): EthosError {
+  return new EthosError({
+    code: 'PERSONALITY_NOT_FOUND',
+    cause: `Personality "${id}" not found`,
+    action: 'Call `personalities.list` to see available IDs.',
+  });
 }

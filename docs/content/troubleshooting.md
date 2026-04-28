@@ -226,6 +226,8 @@ If you see a code below, the action printed by the CLI is your first move. The t
 | `SKILL_INSTALL_FAILED` | `ethos skills install` did not complete. The temp directory is rolled back. | Re-run the install. If the source URL is wrong, fix the slug. |
 | `SKILL_NOT_FOUND` | The skill ID passed to a web Skills tab action is not in `~/.ethos/skills/`. | Refresh the Skills tab; the underlying file may have been deleted out-of-band. |
 | `SKILL_EXISTS` | A new skill name collides with an existing file in `~/.ethos/skills/`. | Pick a different id, or open the existing skill from the Library panel to edit it. |
+| `PERSONALITY_EXISTS` | The id passed to `personalities.create` or `personalities.duplicate` is already in use. | Pick a different id; existing personalities are visible in `personalities.list`. |
+| `PERSONALITY_READ_ONLY` | The id refers to a built-in personality, which cannot be edited or deleted directly. | Use `personalities.duplicate` to clone the built-in into `~/.ethos/personalities/<new-id>/`, then edit the copy. |
 | `PLUGIN_CONTRACT_INCOMPATIBLE` | A plugin declares a `pluginContractMajor` that's not supported by this CLI. | Upgrade the plugin (or the CLI), per `packages/plugin-contract/MIGRATIONS.md`. |
 | `INTERNAL` | An unexpected error escaped to the surface. | Re-run. If it repeats, file an issue with the printed `details`. |
 

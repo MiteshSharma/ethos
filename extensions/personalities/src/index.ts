@@ -64,6 +64,19 @@ export class FilePersonalityRegistry implements PersonalityRegistry {
     this.defaultId = id;
   }
 
+  remove(id: string): void {
+    this.personalities.delete(id);
+    // Also drop fingerprint entries for that id's directory so a
+    // subsequent re-create with the same id rebuilds cleanly. We
+    // don't know the dir from the id alone, so iterate.
+    for (const [dir] of this.fingerprintCache) {
+      if (dir.endsWith(`/${id}`)) {
+        this.fingerprintCache.delete(dir);
+        break;
+      }
+    }
+  }
+
   async loadFromDirectory(dir: string): Promise<void> {
     let entries: string[];
     try {

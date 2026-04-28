@@ -55,6 +55,8 @@ export type EthosErrorCode =
   // Web API (Phase 26)
   | 'UNAUTHORIZED'
   | 'SESSION_NOT_FOUND'
+  | 'PERSONALITY_EXISTS'
+  | 'PERSONALITY_READ_ONLY'
   // Catch-all
   | 'INTERNAL';
 

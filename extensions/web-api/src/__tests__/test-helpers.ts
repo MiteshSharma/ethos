@@ -61,5 +61,8 @@ export function makeStubPersonalityRegistry(
       defaultId = id;
     },
     async loadFromDirectory() {},
+    remove(id) {
+      map.delete(id);
+    },
   };
 }
