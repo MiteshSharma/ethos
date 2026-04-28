@@ -4,11 +4,15 @@ import {
   ApprovalScopeSchema,
   CronJobSchema,
   CronRunSchema,
+  EvolveConfigSchema,
+  EvolverRunSchema,
   MissedRunPolicySchema,
   OnboardingStepSchema,
+  PendingSkillSchema,
   PersonalitySchema,
   ProviderIdSchema,
   SessionSchema,
+  SkillSchema,
   StoredMessageSchema,
 } from './schemas';
 
@@ -267,6 +271,79 @@ const cron = {
 };
 
 // ---------------------------------------------------------------------------
+// Skills (v0.5 — the learning pillar)
+//
+// Library panel CRUD over `~/.ethos/skills/*.md`. Per-personality skill
+// directories arrive in v1 as part of the Personalities tab — for now the
+// surface is the global library only.
+// ---------------------------------------------------------------------------
+
+const SkillListOutput = z.object({
+  skills: z.array(SkillSchema),
+  /** Approval queue size — surfaced as a sidebar badge so the user can
+   *  see pending candidates without opening the Evolver panel. */
+  pendingCount: z.number().int().nonnegative(),
+});
+
+const SkillGetInput = z.object({ id: z.string().min(1) });
+const SkillGetOutput = z.object({ skill: SkillSchema });
+
+const SkillCreateInput = z.object({
+  /** Plain filename (no path, no `.md`). Letters, digits, dash, underscore. */
+  id: z
+    .string()
+    .min(1)
+    .regex(/^[a-zA-Z0-9_-]+$/),
+  /** Markdown body. May start with a YAML frontmatter block. */
+  body: z.string(),
+});
+const SkillCreateOutput = z.object({ skill: SkillSchema });
+
+const SkillUpdateInput = z.object({
+  id: z.string().min(1),
+  body: z.string(),
+});
+const SkillUpdateOutput = z.object({ skill: SkillSchema });
+
+const SkillDeleteInput = z.object({ id: z.string().min(1) });
+const SkillOkOutput = z.object({ ok: z.literal(true) });
+
+const skills = {
+  list: oc.output(SkillListOutput),
+  get: oc.input(SkillGetInput).output(SkillGetOutput),
+  create: oc.input(SkillCreateInput).output(SkillCreateOutput),
+  update: oc.input(SkillUpdateInput).output(SkillUpdateOutput),
+  delete: oc.input(SkillDeleteInput).output(SkillOkOutput),
+};
+
+// ---------------------------------------------------------------------------
+// Evolver (v0.5 — companion to Skills)
+//
+// Three operations: configure thresholds, manage the pending approval
+// queue produced by `SkillEvolver.evolve()`, and read the run history log.
+// The actual evolve loop runs out-of-band (CLI / cron); this namespace
+// only exposes its inputs and outputs to the web tab.
+// ---------------------------------------------------------------------------
+
+const EvolverConfigGetOutput = z.object({ config: EvolveConfigSchema });
+const EvolverConfigUpdateInput = EvolveConfigSchema;
+const EvolverConfigUpdateOutput = z.object({ config: EvolveConfigSchema });
+
+const EvolverPendingListOutput = z.object({ pending: z.array(PendingSkillSchema) });
+const EvolverPendingActionInput = z.object({ id: z.string().min(1) });
+const EvolverHistoryInput = z.object({ limit: z.number().int().min(1).max(100).optional() });
+const EvolverHistoryOutput = z.object({ runs: z.array(EvolverRunSchema) });
+
+const evolver = {
+  configGet: oc.output(EvolverConfigGetOutput),
+  configUpdate: oc.input(EvolverConfigUpdateInput).output(EvolverConfigUpdateOutput),
+  pendingList: oc.output(EvolverPendingListOutput),
+  pendingApprove: oc.input(EvolverPendingActionInput).output(SkillOkOutput),
+  pendingReject: oc.input(EvolverPendingActionInput).output(SkillOkOutput),
+  history: oc.input(EvolverHistoryInput).output(EvolverHistoryOutput),
+};
+
+// ---------------------------------------------------------------------------
 // Root contract — every namespace mounted under one symbol
 // ---------------------------------------------------------------------------
 
@@ -278,6 +355,8 @@ export const contract = {
   onboarding,
   config,
   cron,
+  skills,
+  evolver,
 };
 
 export type Contract = typeof contract;

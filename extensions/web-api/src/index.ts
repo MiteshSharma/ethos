@@ -8,8 +8,10 @@ import type { Hono } from 'hono';
 import { AllowlistRepository } from './repositories/allowlist.repository';
 import { ConfigRepository } from './repositories/config.repository';
 import { CronRepository } from './repositories/cron.repository';
+import { EvolverRepository } from './repositories/evolver.repository';
 import { PersonalityRepository } from './repositories/personality.repository';
 import { SessionsRepository } from './repositories/sessions.repository';
+import { SkillsRepository } from './repositories/skills.repository';
 import { WebTokenRepository } from './repositories/web-token.repository';
 import { createRoutes } from './routes';
 import { createWebApprovalHook, type DangerPredicate } from './services/approval-hook';
@@ -17,9 +19,11 @@ import { ApprovalsService } from './services/approvals.service';
 import { type ChatDefaults, ChatService } from './services/chat.service';
 import { ConfigService } from './services/config.service';
 import { CronService } from './services/cron.service';
+import { EvolverService } from './services/evolver.service';
 import { OnboardingService } from './services/onboarding.service';
 import { PersonalitiesService } from './services/personalities.service';
 import { SessionsService } from './services/sessions.service';
+import { SkillsService } from './services/skills.service';
 
 // Public entry for `@ethosagent/web-api`. Boot code (`apps/ethos/src/commands/
 // serve.ts`) builds the dependencies it has lying around — a `SessionStore`,
@@ -80,6 +84,8 @@ export function createWebApi(opts: CreateWebApiOptions): Hono {
   const configRepo = new ConfigRepository({ dataDir: opts.dataDir });
   const allowlistRepo = new AllowlistRepository({ dataDir: opts.dataDir });
   const cronRepo = new CronRepository({ cronDir: join(opts.dataDir, 'cron') });
+  const skillsRepo = new SkillsRepository({ dataDir: opts.dataDir });
+  const evolverRepo = new EvolverRepository({ dataDir: opts.dataDir });
 
   // --- Services (business logic) ---
   const sessionsService = new SessionsService({ sessions: sessionsRepo });
@@ -97,6 +103,8 @@ export function createWebApi(opts: CreateWebApiOptions): Hono {
     scheduler: opts.cronScheduler ?? createPassiveScheduler(),
     repo: cronRepo,
   });
+  const skillsService = new SkillsService({ repo: skillsRepo });
+  const evolverService = new EvolverService({ evolver: evolverRepo, skills: skillsRepo });
 
   // One buffer per process — keyed internally by sessionId. Bridges are
   // owned by ChatService. The reap callback lets the bridge map drain
@@ -154,6 +162,8 @@ export function createWebApi(opts: CreateWebApiOptions): Hono {
       onboarding: onboardingService,
       approvals: approvalsService,
       cron: cronService,
+      skills: skillsService,
+      evolver: evolverService,
     },
     ...(opts.allowedOrigins ? { allowedOrigins: opts.allowedOrigins } : {}),
     ...(opts.secureCookie !== undefined ? { secureCookie: opts.secureCookie } : {}),

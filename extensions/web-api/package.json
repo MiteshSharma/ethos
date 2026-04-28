@@ -18,6 +18,8 @@
     "@ethosagent/cron": "workspace:*",
     "@ethosagent/personalities": "workspace:*",
     "@ethosagent/session-sqlite": "workspace:*",
+    "@ethosagent/skill-evolver": "workspace:*",
+    "@ethosagent/skills": "workspace:*",
     "@ethosagent/types": "workspace:*",
     "@ethosagent/web-contracts": "workspace:*",
     "@hono/node-server": "^2.0.0",

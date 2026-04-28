@@ -26,6 +26,8 @@ const STATUS_BY_CODE: Partial<Record<EthosErrorCode, number>> = {
   PERSONALITY_NOT_FOUND: 404,
   FILE_NOT_FOUND: 404,
   JOB_NOT_FOUND: 404,
+  SKILL_NOT_FOUND: 404,
+  SKILL_EXISTS: 409,
   PROVIDER_AUTH_FAILED: 502,
   LLM_ERROR: 502,
   STREAM_TIMEOUT: 504,
@@ -48,7 +50,10 @@ export function statusFor(code: EthosErrorCode): number {
  */
 export function errorHandler(err: Error, c: Context): Response {
   if (isEthosError(err)) {
-    return c.json(toEnvelope(err), statusFor(err.code) as 401 | 404 | 400 | 500 | 502 | 504);
+    return c.json(
+      toEnvelope(err),
+      statusFor(err.code) as 400 | 401 | 403 | 404 | 409 | 500 | 502 | 504,
+    );
   }
   // Anything else is a bug (uncaught raw Error). Coerce to INTERNAL so the
   // client sees the standard envelope shape; the original message lands in

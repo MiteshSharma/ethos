@@ -48,6 +48,8 @@ export type EthosErrorCode =
   | 'NETWORK_ERROR'
   // Skills (Phase 30.3 surface)
   | 'SKILL_INSTALL_FAILED'
+  | 'SKILL_NOT_FOUND'
+  | 'SKILL_EXISTS'
   // Plugins (Phase 30.6 surface)
   | 'PLUGIN_CONTRACT_INCOMPATIBLE'
   // Web API (Phase 26)

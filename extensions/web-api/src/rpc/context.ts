@@ -4,9 +4,11 @@ import type { ApprovalsService } from '../services/approvals.service';
 import type { ChatService } from '../services/chat.service';
 import type { ConfigService } from '../services/config.service';
 import type { CronService } from '../services/cron.service';
+import type { EvolverService } from '../services/evolver.service';
 import type { OnboardingService } from '../services/onboarding.service';
 import type { PersonalitiesService } from '../services/personalities.service';
 import type { SessionsService } from '../services/sessions.service';
+import type { SkillsService } from '../services/skills.service';
 
 // Shared context type for every oRPC handler in the web-api. Each namespace
 // file imports `os` from here (not from `@orpc/server` directly) so TypeScript
@@ -24,6 +26,8 @@ export interface RpcContext {
   onboarding: OnboardingService;
   approvals: ApprovalsService;
   cron: CronService;
+  skills: SkillsService;
+  evolver: EvolverService;
 }
 
 export const os = implement(contract).$context<RpcContext>();

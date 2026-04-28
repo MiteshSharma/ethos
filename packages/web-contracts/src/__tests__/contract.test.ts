@@ -171,9 +171,11 @@ describe('contract router', () => {
       'chat',
       'config',
       'cron',
+      'evolver',
       'onboarding',
       'personalities',
       'sessions',
+      'skills',
       'tools',
     ]);
   });

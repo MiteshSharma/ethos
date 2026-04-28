@@ -9,6 +9,7 @@ import { Cron } from './pages/Cron';
 import { Onboarding } from './pages/Onboarding';
 import { Sessions } from './pages/Sessions';
 import { SigningIn } from './pages/SigningIn';
+import { Skills } from './pages/Skills';
 import { rpc } from './rpc';
 
 // Top-level route map. v0 ships only Talk-group routes (Chat + Sessions)
@@ -54,6 +55,7 @@ export function App() {
           <Route path="/chat" element={<Chat />} />
           <Route path="/sessions" element={<Sessions />} />
           <Route path="/cron" element={<Cron />} />
+          <Route path="/skills" element={<Skills />} />
           <Route path="/onboarding" element={<Onboarding />} />
           <Route path="/signing-in" element={<SigningIn />} />
           <Route path="*" element={<Navigate to="/chat" replace />} />

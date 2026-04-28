@@ -613,6 +613,12 @@ importers:
       '@ethosagent/session-sqlite':
         specifier: workspace:*
         version: link:../session-sqlite
+      '@ethosagent/skill-evolver':
+        specifier: workspace:*
+        version: link:../skill-evolver
+      '@ethosagent/skills':
+        specifier: workspace:*
+        version: link:../skills
       '@ethosagent/types':
         specifier: workspace:*
         version: link:../../packages/types
