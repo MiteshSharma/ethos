@@ -21,9 +21,7 @@ describe('PersonalitiesService', () => {
     await rm(dir, { recursive: true, force: true });
   });
 
-  function makeService(opts: {
-    personalities: import('@ethosagent/types').PersonalityConfig[];
-  }) {
+  function makeService(opts: { personalities: import('@ethosagent/types').PersonalityConfig[] }) {
     const registry = makeStubPersonalityRegistry(opts.personalities);
     const repo = new PersonalityRepository({ registry, userPersonalitiesDir: dir });
     return new PersonalitiesService({ personalities: repo });

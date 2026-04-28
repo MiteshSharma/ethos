@@ -56,14 +56,7 @@ export class ConfigRepository {
       return null;
     }
 
-    const known = new Set([
-      'provider',
-      'model',
-      'apiKey',
-      'personality',
-      'memory',
-      'baseUrl',
-    ]);
+    const known = new Set(['provider', 'model', 'apiKey', 'personality', 'memory', 'baseUrl']);
     const config: RawConfig = { modelRouting: {}, passthrough: {} };
 
     for (const line of src.split('\n')) {

@@ -1,6 +1,9 @@
 import { EthosError } from '@ethosagent/types';
 import type { Personality } from '@ethosagent/web-contracts';
-import type { PersonalityRepository, DescribedPersonality } from '../repositories/personality.repository';
+import type {
+  DescribedPersonality,
+  PersonalityRepository,
+} from '../repositories/personality.repository';
 
 // Read-only personalities surface for v0. Returns the wire-shape `Personality`
 // (server-internal `ethosFile`/`skillsDirs` paths stripped — those would

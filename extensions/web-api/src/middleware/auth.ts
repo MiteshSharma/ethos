@@ -1,6 +1,6 @@
 import { EthosError } from '@ethosagent/types';
-import { getCookie } from 'hono/cookie';
 import type { MiddlewareHandler } from 'hono';
+import { getCookie } from 'hono/cookie';
 import type { WebTokenRepository } from '../repositories/web-token.repository';
 
 // Cookie auth. Single-user posture (CEO finding 3.1): the URL-exchange flow

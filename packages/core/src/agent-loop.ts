@@ -118,7 +118,11 @@ export class AgentLoop {
   private readonly personalities: PersonalityRegistry;
   private readonly memory: MemoryProvider;
   private readonly session: SessionStore;
-  private readonly hooks: HookRegistry;
+  /** Public so surfaces (web, ACP) can register late-binding hooks they own
+   *  without re-running the whole wiring factory. The CLI/TUI register hooks
+   *  before construction; web registers an approval hook after createAgentLoop
+   *  returns. */
+  readonly hooks: HookRegistry;
   private readonly injectors: ContextInjector[];
   private readonly maxIterations: number;
   private readonly historyLimit: number;
@@ -508,6 +512,7 @@ export class AgentLoop {
       for (const tc of completedToolCalls) {
         const beforeResult = await this.hooks.fireModifying('before_tool_call', {
           sessionId,
+          toolCallId: tc.toolCallId,
           toolName: tc.toolName,
           args: tc.args,
         });

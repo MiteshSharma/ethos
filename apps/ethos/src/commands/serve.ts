@@ -5,6 +5,7 @@ import { AgentMesh } from '@ethosagent/agent-mesh';
 import { createPersonalityRegistry } from '@ethosagent/personalities';
 import { SQLiteSessionStore } from '@ethosagent/session-sqlite';
 import { createWebApi, WebTokenRepository } from '@ethosagent/web-api';
+import { createDangerPredicate } from '@ethosagent/wiring';
 import { type EthosConfig, ethosDir } from '../config';
 import { createAgentLoop } from '../wiring';
 import { hasFlag, parseFlagValue, parsePort } from './serve-helpers';
@@ -33,7 +34,13 @@ export async function runServe(args: string[], config: EthosConfig): Promise<voi
   if (personalityOverride) config = { ...config, personality: personalityOverride };
 
   const dir = ethosDir();
-  const loop = await createAgentLoop(config);
+  // The web surface owns the `before_tool_call` approval flow, so when
+  // --web-experimental is on the loop is built without the synchronous
+  // terminal guard and the web-api re-registers a hook against the same
+  // registry. ACP shares this loop too — for now both surfaces inherit the
+  // web posture when web is enabled (interactive approval over hard block).
+  const loopProfile = webEnabled ? 'web' : 'cli';
+  const loop = await createAgentLoop(config, { profile: loopProfile });
   const session = new SQLiteSessionStore(join(dir, 'sessions.db'));
   const mesh = new AgentMesh();
 
@@ -78,6 +85,9 @@ export async function runServe(args: string[], config: EthosConfig): Promise<voi
         model: config.model,
         provider: config.provider,
       },
+      // Same `checkCommand` rules the CLI guard uses; surfacing them via
+      // the approval modal instead of a hard block.
+      dangerPredicate: createDangerPredicate(),
     });
     const tokens = new WebTokenRepository({ dataDir: dir });
     const token = await tokens.getOrCreate();

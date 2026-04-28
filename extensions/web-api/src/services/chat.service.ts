@@ -149,6 +149,16 @@ export class ChatService {
     };
   }
 
+  /**
+   * Push an out-of-band SSE event into a session — used by the approvals
+   * pipeline (`tool.approval_required`, `approval.resolved`) and any future
+   * push events that aren't tied to a specific bridge turn. Goes through the
+   * same buffer + emitter pipeline as bridge events so SSE replay covers it.
+   */
+  broadcast(sessionId: string, event: SseEvent): void {
+    this.append(sessionId, event);
+  }
+
   /** Drop bridge + buffer for a session — called by tests / future /new flow. */
   forget(sessionId: string): void {
     const bridge = this.bridges.get(sessionId);

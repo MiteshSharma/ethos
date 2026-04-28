@@ -2,9 +2,9 @@ import { Hono } from 'hono';
 import { authMiddleware } from '../middleware/auth';
 import { csrfMiddleware } from '../middleware/csrf';
 import { errorHandler } from '../middleware/error-envelope';
+import type { WebTokenRepository } from '../repositories/web-token.repository';
 import type { ChatService } from '../services/chat.service';
 import type { SessionsService } from '../services/sessions.service';
-import type { WebTokenRepository } from '../repositories/web-token.repository';
 import { authRoutes } from './auth';
 import { openapiRoutes } from './openapi';
 import { rpcRoutes } from './rpc';
@@ -31,6 +31,7 @@ export interface ServiceContainer {
   personalities: import('../services/personalities.service').PersonalitiesService;
   config: import('../services/config.service').ConfigService;
   onboarding: import('../services/onboarding.service').OnboardingService;
+  approvals: import('../services/approvals.service').ApprovalsService;
 }
 
 export function createRoutes(opts: CreateRoutesOptions): Hono {

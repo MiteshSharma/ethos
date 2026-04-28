@@ -1,4 +1,4 @@
-import type { AgentEvent, AgentLoop } from '@ethosagent/core';
+import { type AgentEvent, type AgentLoop, DefaultHookRegistry } from '@ethosagent/core';
 import type { PersonalityConfig, PersonalityRegistry } from '@ethosagent/types';
 
 // Test helpers shared by route + service tests. Building a real `AgentLoop`
@@ -17,6 +17,9 @@ export interface StubLoopOptions {
 export function makeStubAgentLoop(options: StubLoopOptions = {}): AgentLoop {
   const events = options.events ?? [{ type: 'done', text: '', turnCount: 1 }];
   const stub = {
+    // Real registry so createWebApi can register the web approval hook against
+    // the stub without a special-case branch.
+    hooks: new DefaultHookRegistry(),
     async *run(input: string, opts: unknown): AsyncGenerator<AgentEvent> {
       options.onRun?.(input, opts);
       for (const event of events) yield event;

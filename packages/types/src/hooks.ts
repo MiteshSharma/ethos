@@ -40,6 +40,10 @@ export interface AfterLLMCallPayload {
 
 export interface BeforeToolCallPayload {
   sessionId: string;
+  /** Stable id for the tool_use block this hook is gating. Hooks that need to
+   *  surface external state (e.g. an approval modal) key off this id so they
+   *  can correlate the response back to the right call. */
+  toolCallId: string;
   toolName: string;
   args: unknown;
 }

@@ -125,10 +125,7 @@ interface ParsedSseFrame {
   event: { type: string; [k: string]: unknown };
 }
 
-async function readSseUntilDone(
-  response: Response,
-  timeoutMs: number,
-): Promise<ParsedSseFrame[]> {
+async function readSseUntilDone(response: Response, timeoutMs: number): Promise<ParsedSseFrame[]> {
   if (!response.body) throw new Error('SSE response has no body');
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
@@ -168,7 +165,7 @@ async function readSseUntilDone(
 
 function parseFrame(frame: string): ParsedSseFrame | null {
   let id = 0;
-  let dataLines: string[] = [];
+  const dataLines: string[] = [];
   for (const line of frame.split('\n')) {
     if (line.startsWith('id:')) id = Number(line.slice(3).trim()) || 0;
     else if (line.startsWith('data:')) dataLines.push(line.slice(5).trimStart());

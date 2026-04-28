@@ -3,6 +3,7 @@ import type { LLMProvider } from '@ethosagent/types';
 import {
   createAgentLoop as packageCreateAgentLoop,
   createLLM as packageCreateLLM,
+  type WiringProfile,
 } from '@ethosagent/wiring';
 import { type EthosConfig, ethosDir, readKeys } from './config';
 import { logger } from './logger';
@@ -21,11 +22,14 @@ export async function createLLM(config: EthosConfig): Promise<LLMProvider> {
   return packageCreateLLM(await withRotation(config));
 }
 
-export async function createAgentLoop(config: EthosConfig): Promise<AgentLoop> {
+export async function createAgentLoop(
+  config: EthosConfig,
+  opts: { profile?: WiringProfile } = {},
+): Promise<AgentLoop> {
   return packageCreateAgentLoop(await withRotation(config), {
     dataDir: ethosDir(),
     workingDir: process.cwd(),
-    profile: 'cli',
+    profile: opts.profile ?? 'cli',
     logger,
   });
 }

@@ -112,7 +112,10 @@ export class OnboardingService {
         case 'anthropic':
           return await this.anthropicModels(input.apiKey, controller.signal);
         case 'ollama':
-          return await this.ollamaModels(input.baseUrl ?? 'http://localhost:11434', controller.signal);
+          return await this.ollamaModels(
+            input.baseUrl ?? 'http://localhost:11434',
+            controller.signal,
+          );
         case 'openrouter':
           return await this.openAiCompatibleModels(
             input.baseUrl ?? 'https://openrouter.ai/api/v1',

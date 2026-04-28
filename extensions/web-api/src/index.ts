@@ -3,12 +3,15 @@ import type { AgentLoop } from '@ethosagent/core';
 import type { PersonalityRegistry, SessionStore } from '@ethosagent/types';
 import type { SseEvent } from '@ethosagent/web-contracts';
 import type { Hono } from 'hono';
+import { AllowlistRepository } from './repositories/allowlist.repository';
 import { ConfigRepository } from './repositories/config.repository';
 import { PersonalityRepository } from './repositories/personality.repository';
 import { SessionsRepository } from './repositories/sessions.repository';
 import { WebTokenRepository } from './repositories/web-token.repository';
 import { createRoutes } from './routes';
-import { ChatService, type ChatDefaults } from './services/chat.service';
+import { createWebApprovalHook, type DangerPredicate } from './services/approval-hook';
+import { ApprovalsService } from './services/approvals.service';
+import { type ChatDefaults, ChatService } from './services/chat.service';
 import { ConfigService } from './services/config.service';
 import { OnboardingService } from './services/onboarding.service';
 import { PersonalitiesService } from './services/personalities.service';
@@ -40,6 +43,13 @@ export interface CreateWebApiOptions {
   allowedOrigins?: string[];
   /** Set `secure` on the auth cookie. Off by default; flip on for non-loopback bind. */
   secureCookie?: boolean;
+  /**
+   * Decides which tool calls require an explicit user approval. When
+   * unset, no approvals are demanded — every tool call passes through
+   * (recommended only for tests). Boot code typically passes
+   * `createDangerPredicate()` from `@ethosagent/wiring`.
+   */
+  dangerPredicate?: DangerPredicate;
 }
 
 export function createWebApi(opts: CreateWebApiOptions): Hono {
@@ -51,6 +61,7 @@ export function createWebApi(opts: CreateWebApiOptions): Hono {
     userPersonalitiesDir: opts.dataDir,
   });
   const configRepo = new ConfigRepository({ dataDir: opts.dataDir });
+  const allowlistRepo = new AllowlistRepository({ dataDir: opts.dataDir });
 
   // --- Services (business logic) ---
   const sessionsService = new SessionsService({ sessions: sessionsRepo });
@@ -60,6 +71,7 @@ export function createWebApi(opts: CreateWebApiOptions): Hono {
     config: configRepo,
     personalities: personalitiesRepo,
   });
+  const approvalsService = new ApprovalsService({ allowlist: allowlistRepo });
 
   // One buffer per process — keyed internally by sessionId. Bridges are
   // owned by ChatService.
@@ -71,6 +83,36 @@ export function createWebApi(opts: CreateWebApiOptions): Hono {
     defaults: opts.chatDefaults,
   });
 
+  // Bridge approvals → SSE. The hook fires when the agent reaches a
+  // dangerous tool call; the resolved event lets every tab on the same
+  // session auto-dismiss the modal once any one of them decides.
+  approvalsService.onPending((sessionId, request) => {
+    chatService.broadcast(sessionId, { type: 'tool.approval_required', request });
+  });
+  approvalsService.onResolved((sessionId, approvalId, decision, decidedBy) => {
+    chatService.broadcast(sessionId, {
+      type: 'approval.resolved',
+      approvalId,
+      decision,
+      decidedBy,
+    });
+  });
+
+  // Register the web `before_tool_call` hook on the loop. CLI/TUI/ACP
+  // profiles get the synchronous terminal guard from `@ethosagent/wiring`;
+  // the web profile skips that registration so this hook is the sole
+  // gatekeeper for dangerous calls. Without a predicate (e.g. tests) every
+  // tool call passes through unattended.
+  if (opts.dangerPredicate) {
+    opts.agentLoop.hooks.registerModifying(
+      'before_tool_call',
+      createWebApprovalHook({
+        approvals: approvalsService,
+        isDangerous: opts.dangerPredicate,
+      }),
+    );
+  }
+
   return createRoutes({
     tokens,
     services: {
@@ -79,6 +121,7 @@ export function createWebApi(opts: CreateWebApiOptions): Hono {
       personalities: personalitiesService,
       config: configService,
       onboarding: onboardingService,
+      approvals: approvalsService,
     },
     ...(opts.allowedOrigins ? { allowedOrigins: opts.allowedOrigins } : {}),
     ...(opts.secureCookie !== undefined ? { secureCookie: opts.secureCookie } : {}),
@@ -87,4 +130,5 @@ export function createWebApi(opts: CreateWebApiOptions): Hono {
 
 // Re-exports so boot code can read tokens / inspect contract surfaces directly.
 export { WebTokenRepository } from './repositories/web-token.repository';
-export { ChatService, type ChatDefaults } from './services/chat.service';
+export type { DangerPredicate, DangerReason } from './services/approval-hook';
+export { type ChatDefaults, ChatService } from './services/chat.service';

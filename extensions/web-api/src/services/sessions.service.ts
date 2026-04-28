@@ -1,5 +1,8 @@
 import { EthosError } from '@ethosagent/types';
-import type { Session as WireSession, StoredMessage as WireStoredMessage } from '@ethosagent/web-contracts';
+import type {
+  Session as WireSession,
+  StoredMessage as WireStoredMessage,
+} from '@ethosagent/web-contracts';
 import type { SessionsRepository } from '../repositories/sessions.repository';
 
 // Business logic for the `sessions` namespace. Wraps `SessionsRepository`,

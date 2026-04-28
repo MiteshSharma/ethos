@@ -14,9 +14,13 @@ import { createDelegationTools } from '@ethosagent/tools-delegation';
 import { createFileTools } from '@ethosagent/tools-file';
 import { loadMcpConfig, McpManager } from '@ethosagent/tools-mcp';
 import { createMemoryTools } from '@ethosagent/tools-memory';
-import { createTerminalGuardHook, createTerminalTools } from '@ethosagent/tools-terminal';
+import {
+  checkCommand,
+  createTerminalGuardHook,
+  createTerminalTools,
+} from '@ethosagent/tools-terminal';
 import { createWebTools } from '@ethosagent/tools-web';
-import type { LLMProvider } from '@ethosagent/types';
+import type { BeforeToolCallPayload, LLMProvider } from '@ethosagent/types';
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -154,7 +158,13 @@ export async function createAgentLoop(
   });
 
   const hooks = new DefaultHookRegistry();
-  hooks.registerModifying('before_tool_call', createTerminalGuardHook());
+  // CLI/TUI/ACP get the synchronous block-and-explain guard. Web replaces it
+  // with an interactive approval flow registered after createAgentLoop returns
+  // (see @ethosagent/web-api). Both call sites share `checkCommand` via
+  // `createDangerPredicate` below.
+  if (profile !== 'web') {
+    hooks.registerModifying('before_tool_call', createTerminalGuardHook());
+  }
 
   const loop = new AgentLoop({
     llm,
@@ -176,4 +186,38 @@ export async function createAgentLoop(
   for (const tool of createDelegationTools(loop)) tools.register(tool);
 
   return loop;
+}
+
+// ---------------------------------------------------------------------------
+// Danger predicate (shared between CLI guard + web approval flow)
+// ---------------------------------------------------------------------------
+
+/** Result returned by a danger predicate. `null` = no approval needed. */
+export type DangerReason = string | null;
+export type DangerPredicate = (payload: BeforeToolCallPayload) => DangerReason;
+
+/**
+ * Default danger predicate. Returns the human-readable reason when a tool
+ * call should require explicit user approval (web profile) or be blocked
+ * outright (CLI/TUI fallback path). Today only the `terminal` tool is
+ * checked, but `alwaysAsk` lets surfaces opt additional tools into the
+ * always-prompt set without baking the list in here.
+ */
+export function createDangerPredicate(
+  opts: { alwaysAsk?: ReadonlyArray<string> } = {},
+): DangerPredicate {
+  const alwaysAsk = new Set(opts.alwaysAsk ?? []);
+  return (payload) => {
+    if (alwaysAsk.has(payload.toolName)) {
+      return `${payload.toolName} requires explicit approval`;
+    }
+    if (payload.toolName === 'terminal') {
+      const args = payload.args as { command?: string } | null | undefined;
+      if (args?.command) {
+        const result = checkCommand(args.command);
+        if (result.dangerous) return result.reason;
+      }
+    }
+    return null;
+  };
 }

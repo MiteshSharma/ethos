@@ -113,6 +113,7 @@ describe('createTerminalGuardHook', () => {
   it('returns null for non-terminal tools', async () => {
     const result = await hook({
       sessionId: 's1',
+      toolCallId: 'tc_1',
       toolName: 'web_search',
       args: { query: 'hello' },
     });
@@ -122,6 +123,7 @@ describe('createTerminalGuardHook', () => {
   it('returns null for safe terminal commands', async () => {
     const result = await hook({
       sessionId: 's1',
+      toolCallId: 'tc_1',
       toolName: 'terminal',
       args: { command: 'ls -la' },
     });
@@ -131,6 +133,7 @@ describe('createTerminalGuardHook', () => {
   it('returns error for dangerous terminal command', async () => {
     const result = await hook({
       sessionId: 's1',
+      toolCallId: 'tc_1',
       toolName: 'terminal',
       args: { command: 'rm -rf /' },
     });
@@ -140,7 +143,12 @@ describe('createTerminalGuardHook', () => {
   });
 
   it('returns null when command arg is missing', async () => {
-    const result = await hook({ sessionId: 's1', toolName: 'terminal', args: {} });
+    const result = await hook({
+      sessionId: 's1',
+      toolCallId: 'tc_1',
+      toolName: 'terminal',
+      args: {},
+    });
     expect(result).toBeNull();
   });
 });

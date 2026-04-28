@@ -32,7 +32,12 @@ export function authRoutes(opts: AuthRoutesOptions) {
     const token = c.req.query('t');
     if (!token) {
       return c.json(
-        { ok: false, code: 'UNAUTHORIZED', error: 'Missing token query', action: 'Use the URL printed by `ethos serve`.' },
+        {
+          ok: false,
+          code: 'UNAUTHORIZED',
+          error: 'Missing token query',
+          action: 'Use the URL printed by `ethos serve`.',
+        },
         401,
       );
     }
@@ -40,7 +45,12 @@ export function authRoutes(opts: AuthRoutesOptions) {
     const valid = await opts.tokens.matches(token);
     if (!valid) {
       return c.json(
-        { ok: false, code: 'UNAUTHORIZED', error: 'Invalid or rotated token', action: 'Re-run `ethos serve` to print a fresh URL.' },
+        {
+          ok: false,
+          code: 'UNAUTHORIZED',
+          error: 'Invalid or rotated token',
+          action: 'Re-run `ethos serve` to print a fresh URL.',
+        },
         401,
       );
     }

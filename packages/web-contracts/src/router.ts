@@ -115,12 +115,17 @@ const chat = {
 
 const ToolApproveInput = z.object({
   approvalId: z.string(),
+  /** Tab identity. Other tabs viewing this session see `decidedBy: clientId`
+   *  on the `approval.resolved` SSE event so the modal auto-dismisses with
+   *  "approved by another window." */
+  clientId: z.string().min(1),
   scope: ApprovalScopeSchema,
 });
 const ToolApproveOutput = z.object({ ok: z.literal(true) });
 
 const ToolDenyInput = z.object({
   approvalId: z.string(),
+  clientId: z.string().min(1),
   reason: z.string().optional(),
 });
 const ToolDenyOutput = z.object({ ok: z.literal(true) });

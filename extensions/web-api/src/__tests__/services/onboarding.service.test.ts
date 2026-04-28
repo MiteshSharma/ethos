@@ -22,10 +22,12 @@ describe('OnboardingService', () => {
     await rm(dir, { recursive: true, force: true });
   });
 
-  function makeService(extras: {
-    fetchFn?: typeof fetch;
-    personalities?: import('@ethosagent/types').PersonalityConfig[];
-  } = {}) {
+  function makeService(
+    extras: {
+      fetchFn?: typeof fetch;
+      personalities?: import('@ethosagent/types').PersonalityConfig[];
+    } = {},
+  ) {
     const config = new ConfigRepository({ dataDir: dir });
     const registry = makeStubPersonalityRegistry(
       extras.personalities ?? [{ id: 'researcher', name: 'Researcher' }],
@@ -91,9 +93,12 @@ describe('OnboardingService', () => {
   describe('validateProvider', () => {
     it('returns model list on a 200 response', async () => {
       const fetchFn = (async () =>
-        new Response(JSON.stringify({ data: [{ id: 'claude-opus-4-7' }, { id: 'claude-haiku-4' }] }), {
-          status: 200,
-        })) as unknown as typeof fetch;
+        new Response(
+          JSON.stringify({ data: [{ id: 'claude-opus-4-7' }, { id: 'claude-haiku-4' }] }),
+          {
+            status: 200,
+          },
+        )) as unknown as typeof fetch;
       const service = makeService({ fetchFn });
 
       const result = await service.validateProvider({
@@ -106,7 +111,8 @@ describe('OnboardingService', () => {
     });
 
     it('returns error on non-2xx response', async () => {
-      const fetchFn = (async () => new Response('unauthorized', { status: 401 })) as unknown as typeof fetch;
+      const fetchFn = (async () =>
+        new Response('unauthorized', { status: 401 })) as unknown as typeof fetch;
       const service = makeService({ fetchFn });
       const result = await service.validateProvider({
         provider: 'anthropic',

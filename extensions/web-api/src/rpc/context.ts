@@ -1,5 +1,6 @@
 import { contract } from '@ethosagent/web-contracts';
 import { implement } from '@orpc/server';
+import type { ApprovalsService } from '../services/approvals.service';
 import type { ChatService } from '../services/chat.service';
 import type { ConfigService } from '../services/config.service';
 import type { OnboardingService } from '../services/onboarding.service';
@@ -20,6 +21,7 @@ export interface RpcContext {
   personalities: PersonalitiesService;
   config: ConfigService;
   onboarding: OnboardingService;
+  approvals: ApprovalsService;
 }
 
 export const os = implement(contract).$context<RpcContext>();
