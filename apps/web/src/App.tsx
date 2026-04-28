@@ -2,6 +2,7 @@ import { useQuery } from '@tanstack/react-query';
 import { useCallback, useEffect, useState } from 'react';
 import { Navigate, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
 import { CommandPalette } from './components/CommandPalette';
+import { MobileTabBar } from './components/MobileTabBar';
 import { RightDrawer } from './components/RightDrawer';
 import { Sidebar } from './components/Sidebar';
 import { TopBar } from './components/TopBar';
@@ -28,15 +29,40 @@ import { rpc } from './rpc';
 // — landing alongside this commit). Lab / System groups arrive in v1.
 
 const DRAWER_BREAKPOINT = 1280; // px — plan IA: drawer "default visible ≥1280px"
+const COMPACT_BREAKPOINT = 1280; // px — sidebar auto-collapses below this
+
+function initialCollapsed(): boolean {
+  return typeof window !== 'undefined' && window.innerWidth < COMPACT_BREAKPOINT;
+}
 
 export function App() {
-  const [collapsed, setCollapsed] = useState(false);
+  const [collapsed, setCollapsed] = useState(initialCollapsed);
   const [drawerOpen, setDrawerOpen] = useState(() =>
     typeof window === 'undefined' ? false : window.innerWidth >= DRAWER_BREAKPOINT,
   );
   const [paletteOpen, setPaletteOpen] = useState(false);
   useOnboardingRedirect();
   usePushEventToasts();
+
+  // Auto-collapse sidebar / hide drawer when crossing the compact
+  // breakpoint. We don't *force* state on every resize tick — just
+  // when crossing — so a user who manually expanded mid-session
+  // keeps their preference until the next breakpoint flip.
+  useEffect(() => {
+    let lastNarrow = initialCollapsed();
+    const onResize = () => {
+      if (typeof window === 'undefined') return;
+      const narrow = window.innerWidth < COMPACT_BREAKPOINT;
+      if (narrow !== lastNarrow) {
+        lastNarrow = narrow;
+        setCollapsed(narrow);
+        if (narrow) setDrawerOpen(false);
+        else setDrawerOpen(true);
+      }
+    };
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, []);
 
   const toggleDrawer = useCallback(() => setDrawerOpen((v) => !v), []);
 
@@ -98,6 +124,7 @@ export function App() {
         onClose={() => setPaletteOpen(false)}
         onToggleDrawer={toggleDrawer}
       />
+      <MobileTabBar />
     </div>
   );
 }

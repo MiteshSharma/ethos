@@ -1524,3 +1524,104 @@ body,
   gap: 8px;
   margin-top: 12px;
 }
+
+/* Mobile bottom tab bar (<768px). Hidden on desktop. */
+
+.mobile-tabbar {
+  display: none;
+}
+
+.mobile-more-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.mobile-more-link {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 14px 4px;
+  background: transparent;
+  border: none;
+  border-bottom: 1px solid var(--ethos-border);
+  color: var(--ethos-text);
+  font-size: 15px;
+  cursor: pointer;
+}
+
+.mobile-more-link:hover {
+  background: rgba(255, 255, 255, 0.04);
+}
+
+@media (max-width: 767.98px) {
+  /* Single-pane layout: hide the desktop sidebar entirely; chat /
+     active tab takes the full viewport above the tab bar. */
+  .app-shell {
+    grid-template-columns: 1fr;
+    grid-template-rows: var(--topbar-height) 1fr 60px;
+    grid-template-areas:
+      "topbar"
+      "main"
+      "tabbar";
+  }
+  .sidebar {
+    display: none;
+  }
+  /* TopBar's drawer toggle is meaningless when the drawer is overlaid;
+     keep the brand + status visible but compress padding. */
+  .topbar {
+    padding: 0 12px;
+  }
+  /* Main content gets a bottom-padding so floating composer / row
+     actions aren't covered by the tab bar. */
+  .app-main {
+    padding: 16px;
+    padding-bottom: 16px;
+  }
+  /* Tab bar pinned to the bottom row of the grid. */
+  .mobile-tabbar {
+    grid-area: tabbar;
+    display: flex;
+    align-items: stretch;
+    background: var(--ethos-bg-elevated);
+    border-top: 1px solid var(--ethos-border);
+  }
+  .mobile-tabbar-item {
+    flex: 1 1 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 2px;
+    padding: 6px 4px;
+    background: transparent;
+    border: none;
+    color: var(--ethos-text-dim);
+    font-size: 10px;
+    text-decoration: none;
+    cursor: pointer;
+    min-height: 44px; /* touch target ≥44px per a11y baseline */
+  }
+  .mobile-tabbar-item.active {
+    color: #7fb6ff;
+  }
+  .mobile-tabbar-icon {
+    font-size: 18px;
+    line-height: 1;
+  }
+  .mobile-tabbar-label {
+    font-size: 10px;
+    letter-spacing: 0.02em;
+  }
+  /* Drawer overlay on mobile takes nearly the full viewport. */
+  .right-drawer {
+    width: 100vw;
+    max-width: 100vw;
+    box-shadow: none;
+  }
+  /* Chat composer + tables get a touch more breathing room on phones. */
+  .chat-tab {
+    padding-bottom: 16px;
+  }
+}
