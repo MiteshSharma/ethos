@@ -10,7 +10,8 @@ import type { EvolverRun } from '@ethosagent/web-contracts';
 // evolver and is invoked out-of-band by the CLI / a future cron worker;
 // this repository only exposes its inputs and outputs to the web tab.
 //
-//   ~/.ethos/evolver.json           — current EvolveConfig
+//   ~/.ethos/evolve-config.json     — current EvolveConfig (shared with
+//                                     the `ethos evolve` CLI command)
 //   ~/.ethos/evolver-history.jsonl  — append-only run log
 
 export interface EvolverRepositoryOptions {
@@ -33,7 +34,7 @@ export class EvolverRepository {
 
   constructor(opts: EvolverRepositoryOptions) {
     this.dataDir = opts.dataDir;
-    this.configPath = join(opts.dataDir, 'evolver.json');
+    this.configPath = join(opts.dataDir, 'evolve-config.json');
     this.historyPath = join(opts.dataDir, 'evolver-history.jsonl');
   }
 

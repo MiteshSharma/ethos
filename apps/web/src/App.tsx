@@ -5,6 +5,7 @@ import { CommandPalette } from './components/CommandPalette';
 import { RightDrawer } from './components/RightDrawer';
 import { Sidebar } from './components/Sidebar';
 import { TopBar } from './components/TopBar';
+import { usePushEventToasts } from './hooks/usePushEventToasts';
 import { Chat } from './pages/Chat';
 import { Cron } from './pages/Cron';
 import { Mesh } from './pages/Mesh';
@@ -28,6 +29,7 @@ export function App() {
   );
   const [paletteOpen, setPaletteOpen] = useState(false);
   useOnboardingRedirect();
+  usePushEventToasts();
 
   const toggleDrawer = useCallback(() => setDrawerOpen((v) => !v), []);
 

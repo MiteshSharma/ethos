@@ -1,4 +1,4 @@
-import { mkdir, readdir, rename, rm, stat } from 'node:fs/promises';
+import { appendFile, mkdir, readdir, rename, rm, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { loadEvolveConfig, SkillEvolver } from '@ethosagent/skill-evolver';
 import { type EthosConfig, ethosDir } from '../config';
@@ -123,7 +123,28 @@ async function runAnalyze(
     llm,
   });
 
+  const ranAt = new Date().toISOString();
   const result = await evolver.evolve();
+
+  // Append a record to ~/.ethos/evolver-history.jsonl so the web Skills
+  // tab's "Run history" panel surfaces it. Schema mirrors the EvolverRun
+  // wire shape consumed by EvolverRepository.listHistory.
+  const historyPath = join(ethosDir(), 'evolver-history.jsonl');
+  const record = {
+    ranAt,
+    evalOutputPath: evalOutput,
+    rewritesProposed: result.rewritesWritten.length,
+    newSkillsProposed: result.newSkillsWritten.length,
+    skipped: result.skipped,
+  };
+  try {
+    await appendFile(historyPath, `${JSON.stringify(record)}\n`, 'utf-8');
+  } catch (err) {
+    // History is observability — don't fail the evolve run if the log
+    // can't be written. Surface a soft warning so the user can fix it.
+    const message = err instanceof Error ? err.message : String(err);
+    console.warn(`${c.yellow}Could not append to evolver history:${c.reset} ${message}`);
+  }
 
   console.log('');
   console.log(`${c.dim}skills analyzed:${c.reset} ${result.plan.skillStats.length}`);
