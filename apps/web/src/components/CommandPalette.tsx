@@ -88,9 +88,9 @@ export function CommandPalette({ open, onClose, onToggleDrawer }: CommandPalette
       page('Mesh', '/mesh', ['swarm', 'agents', 'route']),
       page('Settings', '/settings', ['config', 'provider', 'model', 'key']),
       page('Memory', '/memory', ['notes', 'context', 'user', 'remember']),
+      page('Plugins', '/plugins', ['mcp', 'install', 'tools']),
       pageDisabled('Personalities', '/personalities', 'v1'),
       pageDisabled('Communications', '/communications', 'v1'),
-      pageDisabled('Plugins', '/plugins', 'v1'),
     ].map((p) => ({ ...p, run: closeAfter(p.run) }));
 
     const sessions: CommandItem[] = (sessionsQuery.data?.sessions ?? []).map((s) => ({

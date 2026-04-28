@@ -6,6 +6,7 @@ import {
   CronRunSchema,
   EvolveConfigSchema,
   EvolverRunSchema,
+  McpServerInfoSchema,
   MemoryFileSchema,
   MemoryStoreSchema,
   MeshAgentSchema,
@@ -14,6 +15,7 @@ import {
   OnboardingStepSchema,
   PendingSkillSchema,
   PersonalitySchema,
+  PluginInfoSchema,
   ProviderIdSchema,
   SessionSchema,
   SkillSchema,
@@ -348,6 +350,23 @@ const evolver = {
 };
 
 // ---------------------------------------------------------------------------
+// Plugins + MCP (v1 — read-only inventory)
+//
+// Returns the union of installed plugins (discovered in user / project
+// / npm dirs) and configured MCP servers. CRUD is out of scope for v1
+// — the CLI (`ethos plugin install / add-mcp`) remains the editor.
+// ---------------------------------------------------------------------------
+
+const PluginsListOutput = z.object({
+  plugins: z.array(PluginInfoSchema),
+  mcpServers: z.array(McpServerInfoSchema),
+});
+
+const plugins = {
+  list: oc.output(PluginsListOutput),
+};
+
+// ---------------------------------------------------------------------------
 // Memory (v1)
 //
 // Two markdown files MarkdownFileMemoryProvider reads at agent-loop
@@ -411,6 +430,7 @@ export const contract = {
   evolver,
   mesh,
   memory,
+  plugins,
 };
 
 export type Contract = typeof contract;

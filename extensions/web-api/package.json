@@ -18,6 +18,7 @@
     "@ethosagent/agent-mesh": "workspace:*",
     "@ethosagent/cron": "workspace:*",
     "@ethosagent/personalities": "workspace:*",
+    "@ethosagent/plugin-contract": "workspace:*",
     "@ethosagent/session-sqlite": "workspace:*",
     "@ethosagent/skill-evolver": "workspace:*",
     "@ethosagent/skills": "workspace:*",

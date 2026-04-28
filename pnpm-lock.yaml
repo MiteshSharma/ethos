@@ -613,6 +613,9 @@ importers:
       '@ethosagent/personalities':
         specifier: workspace:*
         version: link:../personalities
+      '@ethosagent/plugin-contract':
+        specifier: workspace:*
+        version: link:../../packages/plugin-contract
       '@ethosagent/session-sqlite':
         specifier: workspace:*
         version: link:../session-sqlite

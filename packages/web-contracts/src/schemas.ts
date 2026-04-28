@@ -258,6 +258,45 @@ export const MeshAgentSchema = z.object({
 export type MeshAgent = z.infer<typeof MeshAgentSchema>;
 
 // ---------------------------------------------------------------------------
+// Plugins + MCP — v1
+//
+// Read-only inventory of what's discoverable on disk. Full install /
+// remove flows live in `ethos plugin` CLI for now; the web tab
+// surfaces what's loaded so users can see the contract surface their
+// agents currently have. MCP server CRUD is similar — `~/.ethos/mcp.json`
+// is the editable shape (CLI: `ethos plugin add-mcp`).
+// ---------------------------------------------------------------------------
+
+export const PluginSourceSchema = z.enum(['user', 'project', 'npm']);
+export type PluginSource = z.infer<typeof PluginSourceSchema>;
+
+export const PluginInfoSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  version: z.string(),
+  description: z.string().nullable(),
+  /** Where the plugin was discovered. `user` → ~/.ethos/plugins, `project` → .ethos/plugins, `npm` → resolved from node_modules. */
+  source: PluginSourceSchema,
+  /** Server-side absolute path to the plugin directory (for diagnostics). */
+  path: z.string(),
+  /** Declared plugin contract major version, or null when the manifest doesn't pin one. */
+  pluginContractMajor: z.number().int().nullable(),
+});
+export type PluginInfo = z.infer<typeof PluginInfoSchema>;
+
+export const McpTransportSchema = z.enum(['stdio', 'sse']);
+
+export const McpServerInfoSchema = z.object({
+  name: z.string(),
+  transport: McpTransportSchema,
+  /** Stdio: the command. */
+  command: z.string().nullable(),
+  /** SSE: the endpoint. */
+  url: z.string().nullable(),
+});
+export type McpServerInfo = z.infer<typeof McpServerInfoSchema>;
+
+// ---------------------------------------------------------------------------
 // Memory — v1
 //
 // The web tab edits the two markdown files MarkdownFileMemoryProvider

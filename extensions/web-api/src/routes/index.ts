@@ -43,6 +43,7 @@ export interface ServiceContainer {
   evolver: import('../services/evolver.service').EvolverService;
   mesh: import('../services/mesh.service').MeshService;
   memory: import('../services/memory.service').MemoryService;
+  plugins: import('../services/plugins.service').PluginsService;
 }
 
 export function createRoutes(opts: CreateRoutesOptions): Hono {

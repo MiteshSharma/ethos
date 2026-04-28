@@ -11,6 +11,7 @@ import { Cron } from './pages/Cron';
 import { Memory } from './pages/Memory';
 import { Mesh } from './pages/Mesh';
 import { Onboarding } from './pages/Onboarding';
+import { Plugins } from './pages/Plugins';
 import { Sessions } from './pages/Sessions';
 import { Settings } from './pages/Settings';
 import { SigningIn } from './pages/SigningIn';
@@ -77,6 +78,7 @@ export function App() {
           <Route path="/mesh" element={<Mesh />} />
           <Route path="/settings" element={<Settings />} />
           <Route path="/memory" element={<Memory />} />
+          <Route path="/plugins" element={<Plugins />} />
           <Route path="/onboarding" element={<Onboarding />} />
           <Route path="/signing-in" element={<SigningIn />} />
           <Route path="*" element={<Navigate to="/chat" replace />} />

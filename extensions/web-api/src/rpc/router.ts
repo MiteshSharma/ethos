@@ -6,6 +6,7 @@ import { memoryRouter } from './memory';
 import { meshRouter } from './mesh';
 import { onboardingRouter } from './onboarding';
 import { personalitiesRouter } from './personalities';
+import { pluginsRouter } from './plugins';
 import { sessionsRouter } from './sessions';
 import { skillsRouter } from './skills';
 import { toolsRouter } from './tools';
@@ -27,6 +28,7 @@ import { toolsRouter } from './tools';
 //   • evolver       — config + approval queue + run history (v0.5)
 //   • mesh          — list live mesh agents + route test (v0.5)
 //   • memory        — read/write MEMORY.md + USER.md (v1)
+//   • plugins       — list installed plugins + configured MCP servers (v1)
 
 export const apiRouter = {
   sessions: sessionsRouter,
@@ -40,6 +42,7 @@ export const apiRouter = {
   evolver: evolverRouter,
   mesh: meshRouter,
   memory: memoryRouter,
+  plugins: pluginsRouter,
 };
 
 export type ApiRouter = typeof apiRouter;

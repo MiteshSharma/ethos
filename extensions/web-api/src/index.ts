@@ -9,9 +9,11 @@ import { AllowlistRepository } from './repositories/allowlist.repository';
 import { ConfigRepository } from './repositories/config.repository';
 import { CronRepository } from './repositories/cron.repository';
 import { EvolverRepository } from './repositories/evolver.repository';
+import { McpRepository } from './repositories/mcp.repository';
 import { MemoryRepository } from './repositories/memory.repository';
 import { MeshRepository } from './repositories/mesh.repository';
 import { PersonalityRepository } from './repositories/personality.repository';
+import { PluginsRepository } from './repositories/plugins.repository';
 import { SessionsRepository } from './repositories/sessions.repository';
 import { SkillsRepository } from './repositories/skills.repository';
 import { WebTokenRepository } from './repositories/web-token.repository';
@@ -26,6 +28,7 @@ import { MemoryService } from './services/memory.service';
 import { MeshService } from './services/mesh.service';
 import { OnboardingService } from './services/onboarding.service';
 import { PersonalitiesService } from './services/personalities.service';
+import { PluginsService } from './services/plugins.service';
 import { SessionsService } from './services/sessions.service';
 import { SkillsService } from './services/skills.service';
 
@@ -108,6 +111,11 @@ export function createWebApi(opts: CreateWebApiOptions): CreateWebApiResult {
   // just read it.
   const meshRepo = new MeshRepository({ registryPath: join(opts.dataDir, 'mesh-registry.json') });
   const memoryRepo = new MemoryRepository({ dataDir: opts.dataDir });
+  // Project-level plugins (`<cwd>/.ethos/plugins/`) are out of scope
+  // for v1; user-level only is the standard install path. Threading
+  // `workingDir` from boot would be the next step when we add it.
+  const pluginsRepo = new PluginsRepository({ dataDir: opts.dataDir });
+  const mcpRepo = new McpRepository({ dataDir: opts.dataDir });
 
   // --- Services (business logic) ---
   const sessionsService = new SessionsService({ sessions: sessionsRepo });
@@ -129,6 +137,7 @@ export function createWebApi(opts: CreateWebApiOptions): CreateWebApiResult {
   const evolverService = new EvolverService({ evolver: evolverRepo, skills: skillsRepo });
   const meshService = new MeshService({ repo: meshRepo });
   const memoryService = new MemoryService({ repo: memoryRepo });
+  const pluginsService = new PluginsService({ plugins: pluginsRepo, mcp: mcpRepo });
 
   // One buffer per process — keyed internally by sessionId. Bridges are
   // owned by ChatService. The reap callback lets the bridge map drain
@@ -190,6 +199,7 @@ export function createWebApi(opts: CreateWebApiOptions): CreateWebApiResult {
       evolver: evolverService,
       mesh: meshService,
       memory: memoryService,
+      plugins: pluginsService,
     },
     ...(opts.allowedOrigins ? { allowedOrigins: opts.allowedOrigins } : {}),
     ...(opts.secureCookie !== undefined ? { secureCookie: opts.secureCookie } : {}),

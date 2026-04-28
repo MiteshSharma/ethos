@@ -9,6 +9,7 @@ import type { MemoryService } from '../services/memory.service';
 import type { MeshService } from '../services/mesh.service';
 import type { OnboardingService } from '../services/onboarding.service';
 import type { PersonalitiesService } from '../services/personalities.service';
+import type { PluginsService } from '../services/plugins.service';
 import type { SessionsService } from '../services/sessions.service';
 import type { SkillsService } from '../services/skills.service';
 
@@ -32,6 +33,7 @@ export interface RpcContext {
   evolver: EvolverService;
   mesh: MeshService;
   memory: MemoryService;
+  plugins: PluginsService;
 }
 
 export const os = implement(contract).$context<RpcContext>();
