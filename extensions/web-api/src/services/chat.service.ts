@@ -166,6 +166,21 @@ export class ChatService {
     this.append(sessionId, event);
   }
 
+  /**
+   * Fan-out push events that aren't tied to any specific session
+   * (`cron.fired`, `mesh.changed`, `evolve.skill_pending`). Writes the
+   * event into every currently-buffered session so whichever tab the
+   * user has open hears it. Single-user app posture: the mesh of "open
+   * sessions" maps roughly 1:1 to "tabs the user has touched lately,"
+   * and the buffer's reap window (5min) keeps stale entries from
+   * fanning to.
+   */
+  broadcastAll(event: SseEvent): void {
+    for (const sessionId of this.opts.buffer.activeSessions()) {
+      this.append(sessionId, event);
+    }
+  }
+
   /** Drop bridge + buffer for a session — called by tests / future /new flow. */
   forget(sessionId: string): void {
     const bridge = this.bridges.get(sessionId);

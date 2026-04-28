@@ -18,7 +18,7 @@ import { makeStubAgentLoop, makeStubPersonalityRegistry } from '../test-helpers'
 describe('tools.approve / tools.deny — full inversion loop', () => {
   let dir: string;
   let store: SQLiteSessionStore;
-  let app: ReturnType<typeof createWebApi>;
+  let app: ReturnType<typeof createWebApi>['app'];
   let cookieHeader: string;
   let loop: AgentLoop;
 
@@ -36,7 +36,7 @@ describe('tools.approve / tools.deny — full inversion loop', () => {
       // need to fold real `checkCommand` rules into the test.
       dangerPredicate: (p) =>
         p.toolName === 'terminal' ? 'every terminal call requires approval (test rule)' : null,
-    });
+    }).app;
 
     // Auth handshake → cookie used for every subsequent request.
     const tokens = new WebTokenRepository({ dataDir: dir });
@@ -136,7 +136,7 @@ function rpcHeaders(cookieHeader: string): Record<string, string> {
  * attach a reader before yielding back to the test body.
  */
 async function waitForPendingApproval(
-  app: ReturnType<typeof createWebApi>,
+  app: ReturnType<typeof createWebApi>['app'],
   cookieHeader: string,
   sessionId: string,
   timeoutMs = 1000,

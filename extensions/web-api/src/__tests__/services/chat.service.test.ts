@@ -142,6 +142,37 @@ describe('ChatService', () => {
     unA();
     unB();
   });
+
+  it('broadcastAll fans out to every active session', async () => {
+    const service = makeService();
+    const a = await service.send({ clientId: 'tab-1', text: 'hi a' });
+    const b = await service.send({ clientId: 'tab-2', text: 'hi b' });
+
+    const seenA: SseEvent[] = [];
+    const seenB: SseEvent[] = [];
+    const unA = service.subscribe(a.sessionId, 0, (e) => seenA.push(e.event));
+    const unB = service.subscribe(b.sessionId, 0, (e) => seenB.push(e.event));
+
+    // Drain the bridge events first.
+    await waitForEvent(seenA, (es) => es.some((x) => x.type === 'done'));
+    await waitForEvent(seenB, (es) => es.some((x) => x.type === 'done'));
+
+    service.broadcastAll({
+      type: 'cron.fired',
+      jobId: 'morning',
+      ranAt: '2026-04-28T10:00:00Z',
+      outputPath: null,
+    });
+
+    await waitForEvent(seenA, (es) => es.some((x) => x.type === 'cron.fired'));
+    await waitForEvent(seenB, (es) => es.some((x) => x.type === 'cron.fired'));
+
+    expect(seenA.some((x) => x.type === 'cron.fired')).toBe(true);
+    expect(seenB.some((x) => x.type === 'cron.fired')).toBe(true);
+
+    unA();
+    unB();
+  });
 });
 
 async function waitFor(predicate: () => boolean, timeoutMs = 1000): Promise<void> {

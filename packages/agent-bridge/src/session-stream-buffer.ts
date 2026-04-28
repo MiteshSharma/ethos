@@ -119,6 +119,16 @@ export class SessionStreamBuffer<E = unknown> {
     this.heads.delete(sessionId);
   }
 
+  /**
+   * Snapshot of session ids the buffer currently holds. Used by the
+   * web-api's `ChatService.broadcastAll` to fan out push events
+   * (cron.fired, mesh.changed, evolve.skill_pending) to every live SSE
+   * subscriber without needing a separate global channel.
+   */
+  activeSessions(): string[] {
+    return Array.from(this.buffers.keys());
+  }
+
   /** Stop all timers and clear all buffers (for clean test teardown). */
   destroy(): void {
     for (const t of this.reapTimers.values()) clearTimeout(t);

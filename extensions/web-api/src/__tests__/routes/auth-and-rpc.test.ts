@@ -14,7 +14,7 @@ import { makeStubAgentLoop, makeStubPersonalityRegistry } from '../test-helpers'
 describe('createWebApi — auth + rpc happy path', () => {
   let dir: string;
   let store: SQLiteSessionStore;
-  let app: ReturnType<typeof createWebApi>;
+  let app: ReturnType<typeof createWebApi>['app'];
   let token: string;
 
   beforeEach(async () => {
@@ -26,7 +26,7 @@ describe('createWebApi — auth + rpc happy path', () => {
       agentLoop: makeStubAgentLoop(),
       personalities: makeStubPersonalityRegistry(),
       chatDefaults: { model: 'claude-test', provider: 'anthropic' },
-    });
+    }).app;
     // Pre-create a token so we can run the exchange without waiting for it
     // to be lazily generated on first miss.
     const tokens = new WebTokenRepository({ dataDir: dir });

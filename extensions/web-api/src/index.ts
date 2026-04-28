@@ -75,7 +75,20 @@ export interface CreateWebApiOptions {
   cronScheduler?: CronScheduler;
 }
 
-export function createWebApi(opts: CreateWebApiOptions): Hono {
+export interface CreateWebApiResult {
+  /** Hono app the boot script `serve()`s. */
+  app: Hono;
+  /**
+   * The chat service the API constructed internally. Surface code that
+   * needs to push out-of-band SSE events (e.g. the cron worker
+   * broadcasting `cron.fired`) reaches in via `chatService.broadcastAll`.
+   * Mutating session state here would skip the layered architecture —
+   * keep the use to push-event fan-out only.
+   */
+  chatService: ChatService;
+}
+
+export function createWebApi(opts: CreateWebApiOptions): CreateWebApiResult {
   // --- Repositories (data access only) ---
   const tokens = new WebTokenRepository({ dataDir: opts.dataDir });
   const sessionsRepo = new SessionsRepository(opts.sessionStore);
@@ -159,7 +172,7 @@ export function createWebApi(opts: CreateWebApiOptions): Hono {
     );
   }
 
-  return createRoutes({
+  const app = createRoutes({
     tokens,
     services: {
       sessions: sessionsService,
@@ -177,6 +190,8 @@ export function createWebApi(opts: CreateWebApiOptions): Hono {
     ...(opts.secureCookie !== undefined ? { secureCookie: opts.secureCookie } : {}),
     ...(opts.webDist ? { webDist: opts.webDist } : {}),
   });
+
+  return { app, chatService };
 }
 
 /**

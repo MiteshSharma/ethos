@@ -19,7 +19,7 @@ import { makeStubAgentLoop, makeStubPersonalityRegistry } from '../test-helpers'
 describe('createWebApi — OpenAPI surface', () => {
   let dir: string;
   let store: SQLiteSessionStore;
-  let app: ReturnType<typeof createWebApi>;
+  let app: ReturnType<typeof createWebApi>['app'];
   let cookie: string;
 
   beforeEach(async () => {
@@ -31,7 +31,7 @@ describe('createWebApi — OpenAPI surface', () => {
       agentLoop: makeStubAgentLoop(),
       personalities: makeStubPersonalityRegistry(),
       chatDefaults: { model: 'claude-test', provider: 'anthropic' },
-    });
+    }).app;
 
     // Cookie-auth setup — same dance as the auth-and-rpc test
     const tokens = new WebTokenRepository({ dataDir: dir });

@@ -6,7 +6,7 @@ import { AgentMesh } from '@ethosagent/agent-mesh';
 import { CronScheduler } from '@ethosagent/cron';
 import { createPersonalityRegistry } from '@ethosagent/personalities';
 import { SQLiteSessionStore } from '@ethosagent/session-sqlite';
-import { createWebApi, WebTokenRepository } from '@ethosagent/web-api';
+import { type ChatService, createWebApi, WebTokenRepository } from '@ethosagent/web-api';
 import { createDangerPredicate } from '@ethosagent/wiring';
 import { type EthosConfig, ethosDir } from '../config';
 import { createAgentLoop } from '../wiring';
@@ -79,6 +79,14 @@ export async function runServe(args: string[], config: EthosConfig): Promise<voi
   if (webEnabled) {
     const webDist = locateWebDist(parseFlagValue(args, ['--web-dist']));
 
+    // Bound after createWebApi so the runJob closure below can call
+    // chatService.broadcastAll once a cron job finishes. Declared up
+    // here because cronScheduler is constructed before createWebApi
+    // (it's an option of createWebApi). The closure is null-safe so
+    // any pre-web run before the chatService binds simply skips the
+    // broadcast — there's no surface to render it for yet.
+    let chatService: ChatService | null = null;
+
     // Cron tab needs an actually-running scheduler so jobs created via
     // the web tick on time. Mirrors the gateway's runJob — accumulate
     // text_delta from the same agent loop, write the rest to the
@@ -86,6 +94,7 @@ export async function runServe(args: string[], config: EthosConfig): Promise<voi
     cronScheduler = new CronScheduler({
       runJob: async (job) => {
         const sessionKey = `cron:${job.id}:${new Date().toISOString()}`;
+        const ranAt = new Date().toISOString();
         let output = '';
         for await (const event of loop.run(job.prompt, {
           sessionKey,
@@ -93,12 +102,25 @@ export async function runServe(args: string[], config: EthosConfig): Promise<voi
         })) {
           if (event.type === 'text_delta') output += event.text;
         }
-        return { jobId: job.id, ranAt: new Date().toISOString(), output, sessionKey };
+        // Fire the SSE push event to every active web session so the
+        // right drawer's notification panel surfaces it. Web tab
+        // doesn't render outputPath directly — `null` here matches the
+        // CronFired schema's contract (output lands on disk via the
+        // scheduler; the UI deep-links to /cron to find it).
+        if (chatService) {
+          chatService.broadcastAll({
+            type: 'cron.fired',
+            jobId: job.id,
+            ranAt,
+            outputPath: null,
+          });
+        }
+        return { jobId: job.id, ranAt, output, sessionKey };
       },
     });
     cronScheduler.start();
 
-    const webApp = createWebApi({
+    const created = createWebApi({
       dataDir: dir,
       sessionStore: session,
       agentLoop: loop,
@@ -115,6 +137,8 @@ export async function runServe(args: string[], config: EthosConfig): Promise<voi
       cronScheduler,
       ...(webDist ? { webDist } : {}),
     });
+    chatService = created.chatService;
+    const webApp = created.app;
     const tokens = new WebTokenRepository({ dataDir: dir });
     const token = await tokens.getOrCreate();
     const { server, port } = await listenWithFallback(webApp, webPort, WEB_PORT_FALLBACK_ATTEMPTS);

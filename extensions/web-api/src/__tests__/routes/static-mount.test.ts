@@ -42,7 +42,7 @@ describe('createWebApi — static SPA mount', () => {
       personalities: makeStubPersonalityRegistry(),
       chatDefaults: { model: 'm', provider: 'p' },
       ...(webDist ? { webDist } : {}),
-    });
+    }).app;
   }
 
   it('serves index.html at / when webDist is set', async () => {

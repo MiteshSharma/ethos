@@ -14,7 +14,7 @@ import { makeStubAgentLoop, makeStubPersonalityRegistry } from '../test-helpers'
 describe('SSE — chat.send → /sse/sessions/:id', () => {
   let dir: string;
   let store: SQLiteSessionStore;
-  let app: ReturnType<typeof createWebApi>;
+  let app: ReturnType<typeof createWebApi>['app'];
   let cookie: string;
 
   beforeEach(async () => {
@@ -34,7 +34,7 @@ describe('SSE — chat.send → /sse/sessions/:id', () => {
       }),
       personalities: makeStubPersonalityRegistry(),
       chatDefaults: { model: 'claude-test', provider: 'anthropic' },
-    });
+    }).app;
 
     const tokens = new WebTokenRepository({ dataDir: dir });
     const token = await tokens.getOrCreate();
