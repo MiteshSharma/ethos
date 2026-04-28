@@ -6,6 +6,8 @@ import {
   CronRunSchema,
   EvolveConfigSchema,
   EvolverRunSchema,
+  MemoryFileSchema,
+  MemoryStoreSchema,
   MeshAgentSchema,
   MeshRouteResultSchema,
   MissedRunPolicySchema,
@@ -346,6 +348,32 @@ const evolver = {
 };
 
 // ---------------------------------------------------------------------------
+// Memory (v1)
+//
+// Two markdown files MarkdownFileMemoryProvider reads at agent-loop
+// prefetch: MEMORY.md (rolling project context) and USER.md (who you
+// are — persistent across sessions). The web tab is the editor for
+// both. Vector-mode chunk CRUD lands later.
+// ---------------------------------------------------------------------------
+
+const MemoryListOutput = z.object({ files: z.array(MemoryFileSchema) });
+
+const MemoryGetInput = z.object({ store: MemoryStoreSchema });
+const MemoryGetOutput = z.object({ file: MemoryFileSchema });
+
+const MemoryWriteInput = z.object({
+  store: MemoryStoreSchema,
+  content: z.string(),
+});
+const MemoryWriteOutput = z.object({ file: MemoryFileSchema });
+
+const memory = {
+  list: oc.output(MemoryListOutput),
+  get: oc.input(MemoryGetInput).output(MemoryGetOutput),
+  write: oc.input(MemoryWriteInput).output(MemoryWriteOutput),
+};
+
+// ---------------------------------------------------------------------------
 // Mesh (v0.5 — the swarm pillar)
 //
 // Read-only view of the agent-mesh registry (file-backed at
@@ -382,6 +410,7 @@ export const contract = {
   skills,
   evolver,
   mesh,
+  memory,
 };
 
 export type Contract = typeof contract;

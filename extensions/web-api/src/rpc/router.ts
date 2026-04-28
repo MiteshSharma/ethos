@@ -2,6 +2,7 @@ import { chatRouter } from './chat';
 import { configRouter } from './config';
 import { cronRouter } from './cron';
 import { evolverRouter } from './evolver';
+import { memoryRouter } from './memory';
 import { meshRouter } from './mesh';
 import { onboardingRouter } from './onboarding';
 import { personalitiesRouter } from './personalities';
@@ -25,6 +26,7 @@ import { toolsRouter } from './tools';
 //   • skills        — library CRUD over ~/.ethos/skills/*.md (v0.5)
 //   • evolver       — config + approval queue + run history (v0.5)
 //   • mesh          — list live mesh agents + route test (v0.5)
+//   • memory        — read/write MEMORY.md + USER.md (v1)
 
 export const apiRouter = {
   sessions: sessionsRouter,
@@ -37,6 +39,7 @@ export const apiRouter = {
   skills: skillsRouter,
   evolver: evolverRouter,
   mesh: meshRouter,
+  memory: memoryRouter,
 };
 
 export type ApiRouter = typeof apiRouter;

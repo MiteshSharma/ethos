@@ -8,6 +8,7 @@ import { TopBar } from './components/TopBar';
 import { usePushEventToasts } from './hooks/usePushEventToasts';
 import { Chat } from './pages/Chat';
 import { Cron } from './pages/Cron';
+import { Memory } from './pages/Memory';
 import { Mesh } from './pages/Mesh';
 import { Onboarding } from './pages/Onboarding';
 import { Sessions } from './pages/Sessions';
@@ -75,6 +76,7 @@ export function App() {
           <Route path="/skills" element={<Skills />} />
           <Route path="/mesh" element={<Mesh />} />
           <Route path="/settings" element={<Settings />} />
+          <Route path="/memory" element={<Memory />} />
           <Route path="/onboarding" element={<Onboarding />} />
           <Route path="/signing-in" element={<SigningIn />} />
           <Route path="*" element={<Navigate to="/chat" replace />} />

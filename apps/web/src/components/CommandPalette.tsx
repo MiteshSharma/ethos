@@ -87,8 +87,8 @@ export function CommandPalette({ open, onClose, onToggleDrawer }: CommandPalette
       page('Skills', '/skills', ['library', 'evolver']),
       page('Mesh', '/mesh', ['swarm', 'agents', 'route']),
       page('Settings', '/settings', ['config', 'provider', 'model', 'key']),
+      page('Memory', '/memory', ['notes', 'context', 'user', 'remember']),
       pageDisabled('Personalities', '/personalities', 'v1'),
-      pageDisabled('Memory', '/memory', 'v1'),
       pageDisabled('Communications', '/communications', 'v1'),
       pageDisabled('Plugins', '/plugins', 'v1'),
     ].map((p) => ({ ...p, run: closeAfter(p.run) }));

@@ -257,6 +257,29 @@ export const MeshAgentSchema = z.object({
 });
 export type MeshAgent = z.infer<typeof MeshAgentSchema>;
 
+// ---------------------------------------------------------------------------
+// Memory — v1
+//
+// The web tab edits the two markdown files MarkdownFileMemoryProvider
+// reads (MEMORY.md and USER.md, scoped to the active personality if
+// memoryScope is 'per-personality'). Vector-mode CRUD lands later —
+// the contract is markdown-shaped for now.
+// ---------------------------------------------------------------------------
+
+export const MemoryStoreSchema = z.enum(['memory', 'user']);
+export type MemoryStoreId = z.infer<typeof MemoryStoreSchema>;
+
+export const MemoryFileSchema = z.object({
+  store: MemoryStoreSchema,
+  /** Markdown body. Empty string when the file doesn't exist on disk. */
+  content: z.string(),
+  /** Server-side absolute path. Used for diagnostic display only. */
+  path: z.string(),
+  /** ISO-8601 mtime, or null when the file doesn't exist. */
+  modifiedAt: z.string().nullable(),
+});
+export type MemoryFile = z.infer<typeof MemoryFileSchema>;
+
 export const MeshRouteResultSchema = z.object({
   ok: z.boolean(),
   /** Agent the mesh selected for the synthetic task, or null when no peer

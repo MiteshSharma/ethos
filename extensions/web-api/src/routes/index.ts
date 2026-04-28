@@ -42,6 +42,7 @@ export interface ServiceContainer {
   skills: import('../services/skills.service').SkillsService;
   evolver: import('../services/evolver.service').EvolverService;
   mesh: import('../services/mesh.service').MeshService;
+  memory: import('../services/memory.service').MemoryService;
 }
 
 export function createRoutes(opts: CreateRoutesOptions): Hono {

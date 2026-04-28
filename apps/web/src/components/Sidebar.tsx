@@ -31,7 +31,7 @@ const NAV_GROUPS: NavGroup[] = [
     items: [
       { key: '/personalities', label: 'Personalities', disabled: true, hint: 'v1' },
       { key: '/skills', label: 'Skills' },
-      { key: '/memory', label: 'Memory', disabled: true, hint: 'v1' },
+      { key: '/memory', label: 'Memory' },
     ],
   },
   {
