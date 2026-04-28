@@ -15,6 +15,12 @@ jobs:
     name: typecheck · lint · test
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    env:
+      # Opt the runner-side Node into 24 for actions (checkout/setup-node/pnpm-action-setup
+      # ship Node 20, which deprecates June 2026). Suppresses the deprecation warning
+      # and forward-proofs the workflow. See:
+      # https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
     steps:
       - uses: actions/checkout@v4

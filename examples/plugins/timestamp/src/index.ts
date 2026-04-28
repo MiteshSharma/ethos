@@ -43,8 +43,6 @@ export const timestampTool = defineTool<{ timezone?: string; format?: 'iso' | 'u
           });
           return ok(formatted);
         }
-
-        case 'iso':
         default: {
           // toLocaleString with a specific timezone, then reformat as ISO-like string
           const parts = new Intl.DateTimeFormat('en-CA', {

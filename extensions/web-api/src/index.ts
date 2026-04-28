@@ -50,6 +50,12 @@ export interface CreateWebApiOptions {
    * `createDangerPredicate()` from `@ethosagent/wiring`.
    */
   dangerPredicate?: DangerPredicate;
+  /**
+   * Absolute path to the built `apps/web/dist` SPA. When set, the same
+   * Hono app serves the client at `/*`. Omit in dev — Vite handles
+   * static + HMR at :5173 and proxies API calls back here.
+   */
+  webDist?: string;
 }
 
 export function createWebApi(opts: CreateWebApiOptions): Hono {
@@ -125,6 +131,7 @@ export function createWebApi(opts: CreateWebApiOptions): Hono {
     },
     ...(opts.allowedOrigins ? { allowedOrigins: opts.allowedOrigins } : {}),
     ...(opts.secureCookie !== undefined ? { secureCookie: opts.secureCookie } : {}),
+    ...(opts.webDist ? { webDist: opts.webDist } : {}),
   });
 }
 

@@ -71,11 +71,11 @@ export async function runCronCommand(
     case 'create': {
       // ethos cron create --name "..." --schedule "..." --prompt "..." [--personality X] [--deliver Y]
       const params = parseFlags(args);
-      const name = params['name'] ?? params['n'];
-      const schedule = params['schedule'] ?? params['s'];
-      const prompt = params['prompt'] ?? params['p'];
-      const personality = params['personality'];
-      const deliver = params['deliver'];
+      const name = params.name ?? params.n;
+      const schedule = params.schedule ?? params.s;
+      const prompt = params.prompt ?? params.p;
+      const personality = params.personality;
+      const deliver = params.deliver;
 
       if (!name || !schedule || !prompt) {
         console.log(

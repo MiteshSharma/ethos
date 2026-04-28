@@ -180,7 +180,7 @@ pre,
 /* Code blocks — match DESIGN.md surface tokens */
 .theme-code-block,
 .prism-code {
-  background: var(--ethos-bg-elevated) !important;
+  background: var(--ethos-bg-elevated);
   border: 1px solid var(--ethos-border-subtle);
   border-radius: 8px;
   font-size: 13px;
@@ -258,8 +258,8 @@ pre,
   *,
   *::before,
   *::after {
-    transition-duration: 0.01ms !important;
-    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms;
+    animation-duration: 0.01ms;
   }
 }
 

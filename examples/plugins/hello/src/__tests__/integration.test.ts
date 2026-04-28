@@ -150,7 +150,7 @@ describe('hello plugin — integration', () => {
       resultBudgetChars: 80_000,
     };
 
-    const result = await tool!.execute({ name: 'World', language: 'en' }, ctx);
+    const result = await tool?.execute({ name: 'World', language: 'en' }, ctx);
     expect(result.ok).toBe(true);
     if (result.ok) expect(result.value).toBe('Hello, World! 👋');
   });

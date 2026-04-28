@@ -88,7 +88,7 @@ describe('strategist personality plugin', () => {
   it('identity injector has higher priority than skills injector', () => {
     const identity = registries.injectors.find((i) => i.id === 'strategist-identity');
     const skills = registries.injectors.find((i) => i.id === 'strategist-skills');
-    expect(identity!.priority).toBeGreaterThan(skills!.priority);
+    expect(identity?.priority).toBeGreaterThan(skills?.priority);
   });
 
   it('identity injector fires for strategist personality', async () => {

@@ -9,6 +9,7 @@ import { authRoutes } from './auth';
 import { openapiRoutes } from './openapi';
 import { rpcRoutes } from './rpc';
 import { sseRoutes } from './sse';
+import { staticRoutes } from './static';
 
 // Single place where all sub-routers attach to a Hono app, with the auth +
 // CSRF + error-envelope wiring. `createWebApi` calls this and returns the
@@ -23,6 +24,11 @@ export interface CreateRoutesOptions {
   allowedOrigins?: string[];
   /** Set the `secure` flag on the auth cookie. Off by default for localhost. */
   secureCookie?: boolean;
+  /** Absolute path to the built `apps/web/dist`. When set, the SPA is
+   *  served at `/*` with a fallback to `index.html` for client-side
+   *  routes. Omit during dev — Vite's :5173 dev server proxies API calls
+   *  to this Hono app instead. */
+  webDist?: string;
 }
 
 export interface ServiceContainer {
@@ -63,6 +69,14 @@ export function createRoutes(opts: CreateRoutesOptions): Hono {
   app.route('/rpc', rpcRoutes({ services: opts.services }));
   app.route('/sse', sseRoutes({ chat: opts.services.chat }));
   app.route('/openapi', openapiRoutes({ services: opts.services }));
+
+  // Static SPA mount (must be LAST — it owns `/*` so any unmatched path
+  // falls through to index.html). Skipped when `webDist` isn't supplied;
+  // dev users hit Vite at :5173 instead and the API runs without a
+  // mounted client.
+  if (opts.webDist) {
+    app.route('/', staticRoutes({ dist: opts.webDist }));
+  }
 
   return app;
 }

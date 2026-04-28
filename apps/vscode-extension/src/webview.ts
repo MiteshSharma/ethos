@@ -1,7 +1,7 @@
 import * as crypto from 'node:crypto';
 import type * as vscode from 'vscode';
 
-export function getWebviewContent(webview: vscode.Webview, _extensionUri: vscode.Uri): string {
+export function getWebviewContent(_webview: vscode.Webview, _extensionUri: vscode.Uri): string {
   const nonce = crypto.randomBytes(16).toString('hex');
   const csp = [
     `default-src 'none'`,

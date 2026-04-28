@@ -55,7 +55,7 @@
 }
 
 .leadKicker {
-  color: var(--ethos-text-primary) !important;
+  color: var(--ethos-text-primary);
   font-weight: 500;
 }
 

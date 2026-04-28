@@ -22,8 +22,8 @@ async function readEthosConfig(): Promise<{ model: string; personality: string }
       if (m) kv[m[1].trim()] = m[2].trim().replace(/^["']|["']$/g, '');
     }
     return {
-      model: kv['model'] ?? 'claude-opus-4-7',
-      personality: kv['personality'] ?? 'researcher',
+      model: kv.model ?? 'claude-opus-4-7',
+      personality: kv.personality ?? 'researcher',
     };
   } catch {
     return null;

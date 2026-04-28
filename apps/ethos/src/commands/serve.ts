@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
-import { join } from 'node:path';
+import { existsSync } from 'node:fs';
+import { join, resolve as pathResolve } from 'node:path';
 import { AcpServer } from '@ethosagent/acp-server';
 import { AgentMesh } from '@ethosagent/agent-mesh';
 import { createPersonalityRegistry } from '@ethosagent/personalities';
@@ -74,6 +75,7 @@ export async function runServe(args: string[], config: EthosConfig): Promise<voi
   // Web API (Phase 26). Additive — only mounts when --web-experimental is set.
   let webShutdown: (() => Promise<void>) | null = null;
   if (webEnabled) {
+    const webDist = locateWebDist(parseFlagValue(args, ['--web-dist']));
     const webApp = createWebApi({
       dataDir: dir,
       sessionStore: session,
@@ -88,6 +90,7 @@ export async function runServe(args: string[], config: EthosConfig): Promise<voi
       // Same `checkCommand` rules the CLI guard uses; surfacing them via
       // the approval modal instead of a hard block.
       dangerPredicate: createDangerPredicate(),
+      ...(webDist ? { webDist } : {}),
     });
     const tokens = new WebTokenRepository({ dataDir: dir });
     const token = await tokens.getOrCreate();
@@ -96,6 +99,12 @@ export async function runServe(args: string[], config: EthosConfig): Promise<voi
     console.log(`ethos web UI listening on http://localhost:${port}`);
     console.log(`  open: http://localhost:${port}/auth/exchange?t=${token}`);
     console.log('  (token rotates on first use; cookie remains the steady-state credential)');
+    if (webDist) {
+      console.log(`  serving SPA from: ${webDist}`);
+    } else {
+      console.log('  no SPA build found — run `pnpm --filter @ethosagent/web dev` for HMR,');
+      console.log('  or `pnpm --filter @ethosagent/web build` to bundle into this server.');
+    }
     webShutdown = () =>
       new Promise<void>((resolve) => {
         server.close(() => resolve());
@@ -112,4 +121,31 @@ export async function runServe(args: string[], config: EthosConfig): Promise<voi
   process.on('SIGINT', () => void cleanup());
 
   await new Promise(() => {});
+}
+
+/**
+ * Resolve the absolute path to the built SPA. Search order:
+ *   1. `--web-dist <path>` flag (explicit, wins).
+ *   2. Sibling to the bundled CLI: `<cliDist>/web/index.html` (the
+ *      pre-publish hook that bundles the web app drops it here, per
+ *      CEO finding 9.1).
+ *   3. Monorepo dev path: `apps/web/dist/index.html` resolved up from
+ *      `import.meta.dirname`.
+ * Returns null when no candidate exists; the server skips the static
+ * mount and prints a hint pointing devs at `pnpm dev:web`.
+ */
+function locateWebDist(explicit: string | undefined): string | null {
+  if (explicit) {
+    const abs = pathResolve(explicit);
+    return existsSync(join(abs, 'index.html')) ? abs : null;
+  }
+  const candidates = [
+    pathResolve(import.meta.dirname, '..', 'web'),
+    pathResolve(import.meta.dirname, '..', '..', '..', '..', 'apps', 'web', 'dist'),
+    pathResolve(import.meta.dirname, '..', '..', '..', 'apps', 'web', 'dist'),
+  ];
+  for (const candidate of candidates) {
+    if (existsSync(join(candidate, 'index.html'))) return candidate;
+  }
+  return null;
 }

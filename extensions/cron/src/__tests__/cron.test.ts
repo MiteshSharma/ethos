@@ -1,7 +1,7 @@
 import { mkdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { CronJob, CronRunResult } from '../index';
 import { CronScheduler, isValidCronExpression, nextRun, nextRunAfter } from '../index';
 
@@ -58,7 +58,7 @@ describe('nextRun', () => {
   it('returns a future date for a valid expression', () => {
     const result = nextRun('0 8 * * *');
     expect(result).toBeInstanceOf(Date);
-    expect(result!.getTime()).toBeGreaterThan(Date.now());
+    expect(result?.getTime()).toBeGreaterThan(Date.now());
   });
 
   it('returns null for invalid expression', () => {
@@ -71,7 +71,7 @@ describe('nextRunAfter', () => {
     const anchor = new Date('2026-01-01T09:00:00Z'); // 9am UTC
     const result = nextRunAfter('0 8 * * *', anchor); // daily at 8am
     expect(result).toBeInstanceOf(Date);
-    expect(result!.getTime()).toBeGreaterThan(anchor.getTime());
+    expect(result?.getTime()).toBeGreaterThan(anchor.getTime());
   });
 });
 
@@ -226,7 +226,8 @@ describe('CronScheduler tick', () => {
 
     // Next run should be updated to a future time
     const updated = await scheduler.getJob(job.id);
-    expect(new Date(updated!.nextRunAt!).getTime()).toBeGreaterThan(Date.now());
+    if (!updated?.nextRunAt) throw new Error('expected updated.nextRunAt to be set');
+    expect(new Date(updated.nextRunAt).getTime()).toBeGreaterThan(Date.now());
   });
 
   it('run-once policy runs overdue job', async () => {

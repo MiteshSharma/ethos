@@ -1,0 +1,319 @@
+/* Minimal frame styles. Visual identity (per-personality accents, motion,
+   typography) lands in 26.W2 once DESIGN.md exists. Here we only define
+   what's needed to position the shell — Antd's defaults handle component
+   chrome. */
+
+:root {
+  --ethos-bg: #0f0f0f;
+  --ethos-bg-elevated: #1a1a1a;
+  --ethos-border: #2a2a2a;
+  --ethos-text: rgba(255, 255, 255, 0.9);
+  --ethos-text-dim: rgba(255, 255, 255, 0.55);
+
+  --sidebar-width: 220px;
+  --sidebar-collapsed-width: 56px;
+  --topbar-height: 48px;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  background: var(--ethos-bg);
+  color: var(--ethos-text);
+  font-family: "Geist", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+.app-shell {
+  display: grid;
+  grid-template-columns: var(--sidebar-width) 1fr;
+  grid-template-rows: var(--topbar-height) 1fr;
+  grid-template-areas:
+    "sidebar topbar"
+    "sidebar main";
+  height: 100vh;
+}
+
+.app-shell.collapsed {
+  grid-template-columns: var(--sidebar-collapsed-width) 1fr;
+}
+
+.topbar {
+  grid-area: topbar;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 16px;
+  border-bottom: 1px solid var(--ethos-border);
+  background: var(--ethos-bg-elevated);
+}
+
+.topbar-brand {
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  color: var(--ethos-text);
+}
+
+.topbar-status {
+  font-size: 12px;
+  color: var(--ethos-text-dim);
+}
+
+.sidebar {
+  grid-area: sidebar;
+  border-right: 1px solid var(--ethos-border);
+  background: var(--ethos-bg-elevated);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.sidebar-header {
+  display: flex;
+  align-items: center;
+  height: var(--topbar-height);
+  padding: 0 16px;
+  border-bottom: 1px solid var(--ethos-border);
+  cursor: pointer;
+  user-select: none;
+}
+
+.sidebar-header-title {
+  font-weight: 600;
+  margin-left: 8px;
+}
+
+.sidebar-nav {
+  display: flex;
+  flex-direction: column;
+  padding: 12px 8px;
+  gap: 2px;
+}
+
+.sidebar-nav-section {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--ethos-text-dim);
+  padding: 12px 8px 4px;
+}
+
+.sidebar-nav-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border-radius: 6px;
+  color: var(--ethos-text);
+  text-decoration: none;
+  font-size: 13px;
+  transition: background-color 80ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.sidebar-nav-item:hover {
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.sidebar-nav-item.active {
+  background: rgba(74, 158, 255, 0.12);
+  color: #7fb6ff;
+}
+
+.app-shell.collapsed .sidebar-nav-label,
+.app-shell.collapsed .sidebar-nav-section,
+.app-shell.collapsed .sidebar-header-title {
+  display: none;
+}
+
+.app-main {
+  grid-area: main;
+  overflow: auto;
+  padding: 24px;
+}
+
+.empty-pane {
+  color: var(--ethos-text-dim);
+  font-size: 14px;
+}
+
+/* The chat tab fills its main pane and stacks: personality bar on top,
+   message list scrolls in the middle, composer sticks to the bottom. The
+   `.app-main` padding is removed for chat so the personality bar can run
+   edge-to-edge — the rest of the app keeps the standard 24px gutter. */
+
+.app-main:has(.chat-tab) {
+  padding: 0;
+  overflow: hidden;
+}
+
+.chat-tab {
+  display: grid;
+  grid-template-rows: auto 1fr auto;
+  height: 100%;
+  background: var(--ethos-bg);
+}
+
+.personality-bar {
+  display: flex;
+  flex-direction: column;
+  border-bottom: 1px solid var(--ethos-border);
+  background: var(--ethos-bg-elevated);
+}
+
+.personality-bar-stripe {
+  height: 3px;
+  width: 100%;
+  flex-shrink: 0;
+}
+
+.personality-bar-content {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 16px;
+}
+
+.personality-bar-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+}
+
+.personality-bar-name {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--ethos-text);
+  letter-spacing: -0.005em;
+}
+
+.personality-bar-model {
+  font-family: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  color: var(--ethos-text-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+.personality-bar-actions {
+  /* Reserved for the personality switcher in 26.W2d. Keeps the layout
+     stable so adding the dropdown later doesn't reflow other elements. */
+  width: 32px;
+  flex-shrink: 0;
+}
+
+.message-list {
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 24px 0;
+}
+
+.message-list-empty {
+  display: grid;
+  place-items: center;
+  height: 100%;
+  color: var(--ethos-text-dim);
+  font-size: 14px;
+  padding: 24px;
+}
+
+.message-row {
+  display: flex;
+  padding: 0 24px;
+  max-width: 800px;
+  width: 100%;
+  margin: 0 auto;
+}
+
+.message-row-user {
+  justify-content: flex-end;
+}
+
+.message-row-assistant {
+  justify-content: flex-start;
+}
+
+.message-user {
+  background: var(--ethos-bg-overlay, #2a2a2a);
+  color: var(--ethos-text);
+  border-radius: 4px;
+  padding: 10px 14px;
+  max-width: 75%;
+  font-size: 14px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+
+.message-assistant {
+  color: var(--ethos-text);
+  font-size: 14px;
+  line-height: 1.55;
+  max-width: 100%;
+}
+
+/* The streaming cursor is a single character-width block that pulses
+   while text is in flight. Pure opacity animation — no layout, no
+   transform that triggers reflow on the parent paragraph. */
+
+.streaming-cursor {
+  display: inline-block;
+  width: 8px;
+  height: 1em;
+  background: currentColor;
+  margin-left: 2px;
+  vertical-align: text-bottom;
+  animation: streaming-cursor-blink 0.9s step-end infinite;
+}
+
+@keyframes streaming-cursor-blink {
+  0%,
+  50% {
+    opacity: 1;
+  }
+  51%,
+  100% {
+    opacity: 0;
+  }
+}
+
+.composer {
+  display: flex;
+  gap: 8px;
+  padding: 12px 24px 16px;
+  border-top: 1px solid var(--ethos-border);
+  background: var(--ethos-bg);
+  align-items: flex-end;
+  max-width: 800px;
+  width: 100%;
+  margin: 0 auto;
+  box-sizing: border-box;
+}
+
+.composer .ant-input {
+  /* The textarea autosizes; cap its width so super-long lines wrap
+     before stretching the whole composer. */
+  flex: 1;
+}
+
+.chat-error {
+  margin: 0 24px 8px;
+  padding: 10px 14px;
+  border-radius: 4px;
+  border: 1px solid #f87171;
+  background: rgba(248, 113, 113, 0.08);
+  color: #f87171;
+  font-size: 13px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .streaming-cursor {
+    animation: none;
+    opacity: 0.6;
+  }
+}

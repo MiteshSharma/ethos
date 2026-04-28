@@ -145,8 +145,9 @@ async function readSseUntilDone(response: Response, timeoutMs: number): Promise<
       if (value) buf += decoder.decode(value, { stream: true });
 
       // Frame separator is a blank line. Parse complete frames.
-      let split: number;
-      while ((split = buf.indexOf('\n\n')) !== -1) {
+      while (true) {
+        const split = buf.indexOf('\n\n');
+        if (split === -1) break;
         const frame = buf.slice(0, split);
         buf = buf.slice(split + 2);
         const parsed = parseFrame(frame);

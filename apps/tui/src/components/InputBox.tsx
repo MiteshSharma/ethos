@@ -76,7 +76,7 @@ export function InputBox({
 
       // Shift+Enter inserts a newline at cursor
       if (key.return && key.shift) {
-        replace(value.slice(0, safeCursor) + '\n' + value.slice(safeCursor), safeCursor + 1);
+        replace(`${value.slice(0, safeCursor)}\n${value.slice(safeCursor)}`, safeCursor + 1);
         return;
       }
 

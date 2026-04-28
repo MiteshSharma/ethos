@@ -35,7 +35,7 @@ export class ConfigService {
 
   async get(): Promise<ConfigGetResult> {
     const raw = await this.opts.config.read();
-    if (!raw || !raw.provider) {
+    if (!raw?.provider) {
       throw new EthosError({
         code: 'CONFIG_MISSING',
         cause: 'Config not found at ~/.ethos/config.yaml',

@@ -25,7 +25,7 @@ afterEach(async () => {
 function makeLoop(responsesByTaskId: Record<string, string>): AgentLoop {
   let callIndex = 0;
   return {
-    run: async function* (prompt: string, opts: { sessionKey?: string }) {
+    run: async function* (_prompt: string, opts: { sessionKey?: string }) {
       const taskId = opts.sessionKey?.replace('eval:', '') ?? String(callIndex++);
       const text = responsesByTaskId[taskId] ?? '';
       const events: AgentEvent[] = [

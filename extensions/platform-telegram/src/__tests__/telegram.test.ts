@@ -33,7 +33,7 @@ describe('chunkText', () => {
   });
 
   it('preserves all content across chunks', () => {
-    const text = 'A'.repeat(100) + '\n' + 'B'.repeat(100) + '\n' + 'C'.repeat(100);
+    const text = `${'A'.repeat(100)}\n${'B'.repeat(100)}\n${'C'.repeat(100)}`;
     const chunks = chunkText(text, 150);
     expect(chunks.join('')).toBe(text);
   });

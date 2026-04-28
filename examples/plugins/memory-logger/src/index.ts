@@ -32,13 +32,12 @@ export async function logSessionEntry(payload: {
   turnCount: number;
 }): Promise<void> {
   const path = logFilePath();
-  const line =
-    JSON.stringify({
-      ts: new Date().toISOString(),
-      sessionId: payload.sessionId,
-      turns: payload.turnCount,
-      chars: payload.text.length,
-    }) + '\n';
+  const line = `${JSON.stringify({
+    ts: new Date().toISOString(),
+    sessionId: payload.sessionId,
+    turns: payload.turnCount,
+    chars: payload.text.length,
+  })}\n`;
 
   try {
     await mkdir(dirname(path), { recursive: true });

@@ -8,10 +8,12 @@
   },
   "scripts": {
     "build": "pnpm -r --filter='./packages/*' --filter='./extensions/*' --filter='./apps/*' run build",
+    "build:web": "pnpm --filter @ethosagent/web build",
     "dev": "tsx apps/ethos/src/index.ts",
+    "dev:web": "pnpm --filter @ethosagent/web dev",
     "test": "vitest run",
     "test:watch": "vitest",
-    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json && pnpm --filter @ethosagent/web typecheck",
     "lint": "biome check .",
     "lint:fix": "biome check --write .",
     "format": "biome format --write .",
@@ -48,6 +50,10 @@
       "ignoreMissing": [
         "zod"
       ]
+    },
+    "overrides": {
+      "@types/react": "^18.3.0",
+      "@types/react-dom": "^18.3.0"
     }
   }
 }
