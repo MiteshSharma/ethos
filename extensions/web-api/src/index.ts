@@ -9,6 +9,7 @@ import { AllowlistRepository } from './repositories/allowlist.repository';
 import { ConfigRepository } from './repositories/config.repository';
 import { CronRepository } from './repositories/cron.repository';
 import { EvolverRepository } from './repositories/evolver.repository';
+import { MeshRepository } from './repositories/mesh.repository';
 import { PersonalityRepository } from './repositories/personality.repository';
 import { SessionsRepository } from './repositories/sessions.repository';
 import { SkillsRepository } from './repositories/skills.repository';
@@ -20,6 +21,7 @@ import { type ChatDefaults, ChatService } from './services/chat.service';
 import { ConfigService } from './services/config.service';
 import { CronService } from './services/cron.service';
 import { EvolverService } from './services/evolver.service';
+import { MeshService } from './services/mesh.service';
 import { OnboardingService } from './services/onboarding.service';
 import { PersonalitiesService } from './services/personalities.service';
 import { SessionsService } from './services/sessions.service';
@@ -86,6 +88,10 @@ export function createWebApi(opts: CreateWebApiOptions): Hono {
   const cronRepo = new CronRepository({ cronDir: join(opts.dataDir, 'cron') });
   const skillsRepo = new SkillsRepository({ dataDir: opts.dataDir });
   const evolverRepo = new EvolverRepository({ dataDir: opts.dataDir });
+  // The mesh registry lives at `<dataDir>/mesh-registry.json`. ACP servers
+  // (potentially in other processes) write heartbeats to this file; we
+  // just read it.
+  const meshRepo = new MeshRepository({ registryPath: join(opts.dataDir, 'mesh-registry.json') });
 
   // --- Services (business logic) ---
   const sessionsService = new SessionsService({ sessions: sessionsRepo });
@@ -105,6 +111,7 @@ export function createWebApi(opts: CreateWebApiOptions): Hono {
   });
   const skillsService = new SkillsService({ repo: skillsRepo });
   const evolverService = new EvolverService({ evolver: evolverRepo, skills: skillsRepo });
+  const meshService = new MeshService({ repo: meshRepo });
 
   // One buffer per process — keyed internally by sessionId. Bridges are
   // owned by ChatService. The reap callback lets the bridge map drain
@@ -164,6 +171,7 @@ export function createWebApi(opts: CreateWebApiOptions): Hono {
       cron: cronService,
       skills: skillsService,
       evolver: evolverService,
+      mesh: meshService,
     },
     ...(opts.allowedOrigins ? { allowedOrigins: opts.allowedOrigins } : {}),
     ...(opts.secureCookie !== undefined ? { secureCookie: opts.secureCookie } : {}),

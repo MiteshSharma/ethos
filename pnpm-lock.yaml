@@ -604,6 +604,9 @@ importers:
       '@ethosagent/agent-bridge':
         specifier: workspace:*
         version: link:../../packages/agent-bridge
+      '@ethosagent/agent-mesh':
+        specifier: workspace:*
+        version: link:../agent-mesh
       '@ethosagent/cron':
         specifier: workspace:*
         version: link:../cron

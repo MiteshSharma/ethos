@@ -41,6 +41,7 @@ export interface ServiceContainer {
   cron: import('../services/cron.service').CronService;
   skills: import('../services/skills.service').SkillsService;
   evolver: import('../services/evolver.service').EvolverService;
+  mesh: import('../services/mesh.service').MeshService;
 }
 
 export function createRoutes(opts: CreateRoutesOptions): Hono {

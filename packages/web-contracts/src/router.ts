@@ -6,6 +6,8 @@ import {
   CronRunSchema,
   EvolveConfigSchema,
   EvolverRunSchema,
+  MeshAgentSchema,
+  MeshRouteResultSchema,
   MissedRunPolicySchema,
   OnboardingStepSchema,
   PendingSkillSchema,
@@ -344,6 +346,28 @@ const evolver = {
 };
 
 // ---------------------------------------------------------------------------
+// Mesh (v0.5 — the swarm pillar)
+//
+// Read-only view of the agent-mesh registry (file-backed at
+// ~/.ethos/mesh-registry.json). `routeTest` runs the mesh's own least-
+// busy router against a capability so the user can verify discovery
+// without dispatching real work.
+// ---------------------------------------------------------------------------
+
+const MeshListOutput = z.object({ agents: z.array(MeshAgentSchema) });
+
+const MeshRouteTestInput = z.object({
+  /** Capability the synthetic task should route to (e.g. `code`, `web`). */
+  capability: z.string().min(1),
+});
+const MeshRouteTestOutput = MeshRouteResultSchema;
+
+const mesh = {
+  list: oc.output(MeshListOutput),
+  routeTest: oc.input(MeshRouteTestInput).output(MeshRouteTestOutput),
+};
+
+// ---------------------------------------------------------------------------
 // Root contract — every namespace mounted under one symbol
 // ---------------------------------------------------------------------------
 
@@ -357,6 +381,7 @@ export const contract = {
   cron,
   skills,
   evolver,
+  mesh,
 };
 
 export type Contract = typeof contract;

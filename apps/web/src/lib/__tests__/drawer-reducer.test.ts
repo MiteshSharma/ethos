@@ -105,7 +105,12 @@ describe('drawer-reducer', () => {
     it('appends cron.fired with deep-link to /cron', () => {
       const next = applyEvent(
         initial,
-        { type: 'cron.fired', jobId: 'morning-brief', ranAt: '2026-04-28T10:00:00Z', outputPath: null },
+        {
+          type: 'cron.fired',
+          jobId: 'morning-brief',
+          ranAt: '2026-04-28T10:00:00Z',
+          outputPath: null,
+        },
         NOW,
       );
       expect(next.notifications).toHaveLength(1);
@@ -119,7 +124,10 @@ describe('drawer-reducer', () => {
     it('appends mesh.changed with deep-link to /mesh', () => {
       const next = applyEvent(
         initial,
-        { type: 'mesh.changed', agents: [{ agentId: 'a', capabilities: ['x'], activeSessions: 0 }] },
+        {
+          type: 'mesh.changed',
+          agents: [{ agentId: 'a', capabilities: ['x'], activeSessions: 0 }],
+        },
         NOW,
       );
       expect(next.notifications[0]).toMatchObject({ kind: 'mesh.changed', deepLink: '/mesh' });
@@ -128,7 +136,12 @@ describe('drawer-reducer', () => {
     it('appends evolve.skill_pending with deep-link to /skills', () => {
       const next = applyEvent(
         initial,
-        { type: 'evolve.skill_pending', skillId: 'tighten-prose', personalityId: 'reviewer', proposedAt: '2026-04-28T10:00:00Z' },
+        {
+          type: 'evolve.skill_pending',
+          skillId: 'tighten-prose',
+          personalityId: 'reviewer',
+          proposedAt: '2026-04-28T10:00:00Z',
+        },
         NOW,
       );
       expect(next.notifications[0]).toMatchObject({

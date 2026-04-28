@@ -5,6 +5,7 @@ import type { ChatService } from '../services/chat.service';
 import type { ConfigService } from '../services/config.service';
 import type { CronService } from '../services/cron.service';
 import type { EvolverService } from '../services/evolver.service';
+import type { MeshService } from '../services/mesh.service';
 import type { OnboardingService } from '../services/onboarding.service';
 import type { PersonalitiesService } from '../services/personalities.service';
 import type { SessionsService } from '../services/sessions.service';
@@ -28,6 +29,7 @@ export interface RpcContext {
   cron: CronService;
   skills: SkillsService;
   evolver: EvolverService;
+  mesh: MeshService;
 }
 
 export const os = implement(contract).$context<RpcContext>();

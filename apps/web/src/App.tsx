@@ -6,6 +6,7 @@ import { Sidebar } from './components/Sidebar';
 import { TopBar } from './components/TopBar';
 import { Chat } from './pages/Chat';
 import { Cron } from './pages/Cron';
+import { Mesh } from './pages/Mesh';
 import { Onboarding } from './pages/Onboarding';
 import { Sessions } from './pages/Sessions';
 import { SigningIn } from './pages/SigningIn';
@@ -56,6 +57,7 @@ export function App() {
           <Route path="/sessions" element={<Sessions />} />
           <Route path="/cron" element={<Cron />} />
           <Route path="/skills" element={<Skills />} />
+          <Route path="/mesh" element={<Mesh />} />
           <Route path="/onboarding" element={<Onboarding />} />
           <Route path="/signing-in" element={<SigningIn />} />
           <Route path="*" element={<Navigate to="/chat" replace />} />

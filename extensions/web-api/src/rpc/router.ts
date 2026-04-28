@@ -2,6 +2,7 @@ import { chatRouter } from './chat';
 import { configRouter } from './config';
 import { cronRouter } from './cron';
 import { evolverRouter } from './evolver';
+import { meshRouter } from './mesh';
 import { onboardingRouter } from './onboarding';
 import { personalitiesRouter } from './personalities';
 import { sessionsRouter } from './sessions';
@@ -23,6 +24,7 @@ import { toolsRouter } from './tools';
 //   • cron          — proactive pillar (v0.5)
 //   • skills        — library CRUD over ~/.ethos/skills/*.md (v0.5)
 //   • evolver       — config + approval queue + run history (v0.5)
+//   • mesh          — list live mesh agents + route test (v0.5)
 
 export const apiRouter = {
   sessions: sessionsRouter,
@@ -34,6 +36,7 @@ export const apiRouter = {
   cron: cronRouter,
   skills: skillsRouter,
   evolver: evolverRouter,
+  mesh: meshRouter,
 };
 
 export type ApiRouter = typeof apiRouter;

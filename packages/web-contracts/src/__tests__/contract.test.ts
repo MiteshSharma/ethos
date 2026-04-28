@@ -172,6 +172,7 @@ describe('contract router', () => {
       'config',
       'cron',
       'evolver',
+      'mesh',
       'onboarding',
       'personalities',
       'sessions',
