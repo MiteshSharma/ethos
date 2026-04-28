@@ -10,8 +10,14 @@
 //
 // Per-origin (browser scopes localStorage by origin) — different ports /
 // hosts get separate ids, which matches how the auth cookie is scoped.
+//
+// Mutations dispatch `ethos:active-session-changed` so in-tab consumers
+// (right drawer, command palette) can react without polling. The
+// browser's native `storage` event fires only cross-tab, so the custom
+// event covers the same-tab case.
 
 const STORAGE_KEY = 'ethos.lastSessionId';
+const CHANGE_EVENT = 'ethos:active-session-changed';
 
 export function getLastSessionId(): string | null {
   if (typeof window === 'undefined') return null;
@@ -20,10 +26,15 @@ export function getLastSessionId(): string | null {
 
 export function setLastSessionId(sessionId: string): void {
   if (typeof window === 'undefined') return;
+  const prev = window.localStorage.getItem(STORAGE_KEY);
+  if (prev === sessionId) return;
   window.localStorage.setItem(STORAGE_KEY, sessionId);
+  window.dispatchEvent(new CustomEvent(CHANGE_EVENT));
 }
 
 export function clearLastSessionId(): void {
   if (typeof window === 'undefined') return;
+  if (window.localStorage.getItem(STORAGE_KEY) === null) return;
   window.localStorage.removeItem(STORAGE_KEY);
+  window.dispatchEvent(new CustomEvent(CHANGE_EVENT));
 }

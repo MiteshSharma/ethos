@@ -13,6 +13,7 @@
   --sidebar-width: 220px;
   --sidebar-collapsed-width: 56px;
   --topbar-height: 48px;
+  --drawer-width: 280px;
 }
 
 html,
@@ -43,6 +44,22 @@ body,
   grid-template-columns: var(--sidebar-collapsed-width) 1fr;
 }
 
+/* Drawer mode at desktop width: third grid column reserved for the
+   activity drawer. Below 1280px the drawer overlays the main area
+   instead of taking grid space (see media query at end of file) — this
+   keeps chat readable on tablet without forcing a sidebar collapse. */
+@media (min-width: 1280px) {
+  .app-shell.drawer-open {
+    grid-template-columns: var(--sidebar-width) 1fr var(--drawer-width);
+    grid-template-areas:
+      "sidebar topbar drawer"
+      "sidebar main drawer";
+  }
+  .app-shell.drawer-open.collapsed {
+    grid-template-columns: var(--sidebar-collapsed-width) 1fr var(--drawer-width);
+  }
+}
+
 .topbar {
   grid-area: topbar;
   display: flex;
@@ -59,9 +76,48 @@ body,
   color: var(--ethos-text);
 }
 
+.topbar-right {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
 .topbar-status {
   font-size: 12px;
   color: var(--ethos-text-dim);
+}
+
+.topbar-drawer-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  color: var(--ethos-text-dim);
+  cursor: pointer;
+  transition:
+    color 80ms cubic-bezier(0.16, 1, 0.3, 1),
+    background-color 80ms cubic-bezier(0.16, 1, 0.3, 1),
+    border-color 80ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.topbar-drawer-toggle:hover {
+  color: var(--ethos-text);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.topbar-drawer-toggle.active {
+  color: var(--ethos-text);
+  border-color: var(--ethos-border);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.topbar-drawer-toggle:focus-visible {
+  outline: 2px solid #4a9eff;
+  outline-offset: 2px;
 }
 
 .sidebar {
@@ -1101,5 +1157,227 @@ body,
   .tool-chip-spinner {
     animation: none;
     border-top-color: var(--ethos-text-dim);
+  }
+}
+
+/* Right activity drawer — see components/RightDrawer.tsx. Three sections
+   stacked vertically: tool stream, notifications, usage. Lives in the
+   third grid column at desktop, overlay below 1280px. */
+
+.right-drawer {
+  grid-area: drawer;
+  border-left: 1px solid var(--ethos-border);
+  background: var(--ethos-bg-elevated);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.right-drawer-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: var(--topbar-height);
+  padding: 0 16px;
+  border-bottom: 1px solid var(--ethos-border);
+}
+
+.right-drawer-title {
+  font-weight: 600;
+  font-size: 13px;
+  color: var(--ethos-text);
+}
+
+.right-drawer-close {
+  width: 24px;
+  height: 24px;
+  border: none;
+  background: transparent;
+  color: var(--ethos-text-dim);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  border-radius: 4px;
+}
+
+.right-drawer-close:hover {
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--ethos-text);
+}
+
+.right-drawer-section {
+  padding: 16px;
+  border-bottom: 1px solid var(--ethos-border);
+  overflow-y: auto;
+}
+
+.right-drawer-section:last-child {
+  border-bottom: none;
+}
+
+.right-drawer-section-title {
+  margin: 0 0 8px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--ethos-text-dim);
+}
+
+.right-drawer-empty {
+  font-size: 12px;
+  color: var(--ethos-text-dim);
+  line-height: 1.5;
+}
+
+.right-drawer-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.tool-stream-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--ethos-text);
+}
+
+.tool-stream-dot {
+  flex-shrink: 0;
+  width: 14px;
+  text-align: center;
+  font-size: 10px;
+  line-height: 1;
+}
+
+.tool-stream-dot--running {
+  color: #4a9eff;
+  animation: tool-stream-pulse 1.2s ease-in-out infinite;
+}
+
+.tool-stream-dot--ok {
+  color: #5fbf68;
+}
+
+.tool-stream-dot--error {
+  color: #d65454;
+}
+
+.tool-stream-name {
+  font-family: "Geist Mono", ui-monospace, monospace;
+  font-size: 11.5px;
+  flex-grow: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tool-stream-duration {
+  font-size: 11px;
+  color: var(--ethos-text-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+@keyframes tool-stream-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.4;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tool-stream-dot--running {
+    animation: none;
+    opacity: 0.8;
+  }
+}
+
+.notification-row {
+  margin: 0;
+}
+
+.notification-button {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  width: 100%;
+  text-align: left;
+  padding: 8px 10px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  color: var(--ethos-text);
+  cursor: pointer;
+  transition:
+    background-color 80ms cubic-bezier(0.16, 1, 0.3, 1),
+    border-color 80ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.notification-button:hover {
+  background: rgba(255, 255, 255, 0.04);
+  border-color: var(--ethos-border);
+}
+
+.notification-button:focus-visible {
+  outline: 2px solid #4a9eff;
+  outline-offset: 2px;
+}
+
+.notification-summary {
+  font-size: 12.5px;
+  line-height: 1.4;
+}
+
+.notification-time {
+  font-size: 11px;
+  color: var(--ethos-text-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+.usage-block {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.usage-row {
+  display: flex;
+  justify-content: space-between;
+  font-size: 12px;
+}
+
+.usage-row dt {
+  margin: 0;
+  color: var(--ethos-text-dim);
+}
+
+.usage-row dd {
+  margin: 0;
+  color: var(--ethos-text);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Below 1280px: drawer is an overlay, not a grid column. Slides in from
+   the right; main content stays put. */
+@media (max-width: 1279.98px) {
+  .right-drawer {
+    position: fixed;
+    top: var(--topbar-height);
+    right: 0;
+    bottom: 0;
+    width: var(--drawer-width);
+    max-width: 90vw;
+    z-index: 20;
+    box-shadow: -8px 0 24px rgba(0, 0, 0, 0.35);
   }
 }
