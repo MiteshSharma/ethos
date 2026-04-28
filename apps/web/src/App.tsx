@@ -11,6 +11,7 @@ import { Cron } from './pages/Cron';
 import { Mesh } from './pages/Mesh';
 import { Onboarding } from './pages/Onboarding';
 import { Sessions } from './pages/Sessions';
+import { Settings } from './pages/Settings';
 import { SigningIn } from './pages/SigningIn';
 import { Skills } from './pages/Skills';
 import { rpc } from './rpc';
@@ -73,6 +74,7 @@ export function App() {
           <Route path="/cron" element={<Cron />} />
           <Route path="/skills" element={<Skills />} />
           <Route path="/mesh" element={<Mesh />} />
+          <Route path="/settings" element={<Settings />} />
           <Route path="/onboarding" element={<Onboarding />} />
           <Route path="/signing-in" element={<SigningIn />} />
           <Route path="*" element={<Navigate to="/chat" replace />} />

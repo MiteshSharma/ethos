@@ -46,7 +46,7 @@ const NAV_GROUPS: NavGroup[] = [
     title: 'System',
     items: [
       { key: '/plugins', label: 'Plugins', disabled: true, hint: 'v1' },
-      { key: '/settings', label: 'Settings', disabled: true, hint: 'v1' },
+      { key: '/settings', label: 'Settings' },
     ],
   },
 ];

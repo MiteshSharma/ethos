@@ -86,11 +86,11 @@ export function CommandPalette({ open, onClose, onToggleDrawer }: CommandPalette
       page('Cron', '/cron', ['schedule', 'job']),
       page('Skills', '/skills', ['library', 'evolver']),
       page('Mesh', '/mesh', ['swarm', 'agents', 'route']),
+      page('Settings', '/settings', ['config', 'provider', 'model', 'key']),
       pageDisabled('Personalities', '/personalities', 'v1'),
       pageDisabled('Memory', '/memory', 'v1'),
       pageDisabled('Communications', '/communications', 'v1'),
       pageDisabled('Plugins', '/plugins', 'v1'),
-      pageDisabled('Settings', '/settings', 'v1'),
     ].map((p) => ({ ...p, run: closeAfter(p.run) }));
 
     const sessions: CommandItem[] = (sessionsQuery.data?.sessions ?? []).map((s) => ({
