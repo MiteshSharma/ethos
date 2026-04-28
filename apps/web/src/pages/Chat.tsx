@@ -68,6 +68,22 @@ export function Chat() {
     if (sessionParam) setLastSessionId(sessionParam);
   }, [sessionParam]);
 
+  // Consume `?personality=<id>` deep-links from the command palette.
+  // Sets the per-session override and strips the param so Back doesn't
+  // re-trigger the switch. The override state owns this flow — we
+  // intentionally don't fork the session here because the user picked
+  // the personality from the palette before sending anything; if they
+  // *had* an active conversation, the bar's switcher is the right path
+  // (it forks). Treat the deep-link as a "configure-then-chat" intent.
+  const personalityParam = searchParams.get('personality');
+  useEffect(() => {
+    if (!personalityParam) return;
+    setOverride(personalityParam);
+    const next = new URLSearchParams(searchParams);
+    next.delete('personality');
+    setSearchParams(next, { replace: true });
+  }, [personalityParam, searchParams, setSearchParams, setOverride]);
+
   // Render the head of the queue. Multiple back-to-back approvals are
   // rare in practice (the agent loop awaits each tool sequentially), but
   // the queue model means we don't have to special-case "second approval

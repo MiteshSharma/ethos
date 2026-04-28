@@ -1,6 +1,7 @@
 import { useQuery } from '@tanstack/react-query';
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { Navigate, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
+import { CommandPalette } from './components/CommandPalette';
 import { RightDrawer } from './components/RightDrawer';
 import { Sidebar } from './components/Sidebar';
 import { TopBar } from './components/TopBar';
@@ -25,22 +26,34 @@ export function App() {
   const [drawerOpen, setDrawerOpen] = useState(() =>
     typeof window === 'undefined' ? false : window.innerWidth >= DRAWER_BREAKPOINT,
   );
+  const [paletteOpen, setPaletteOpen] = useState(false);
   useOnboardingRedirect();
 
-  // Global keyboard shortcut for the drawer: ⌘. / Ctrl-. — same chord
-  // VS Code uses for the inline action menu. Ignored when typing in an
-  // input/textarea/contenteditable so chat composers stay responsive.
+  const toggleDrawer = useCallback(() => setDrawerOpen((v) => !v), []);
+
+  // Global keyboard shortcuts:
+  //   ⌘K / Ctrl-K — open the command palette (passes through even from
+  //                 inside inputs so users can pivot mid-typing).
+  //   ⌘. / Ctrl-. — toggle the activity drawer. Ignored while typing
+  //                 in a composer so chat input stays responsive.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (!(e.metaKey || e.ctrlKey) || e.key !== '.') return;
-      const target = e.target as HTMLElement | null;
-      if (target?.closest('input, textarea, [contenteditable="true"]')) return;
-      e.preventDefault();
-      setDrawerOpen((v) => !v);
+      const mod = e.metaKey || e.ctrlKey;
+      if (mod && e.key === 'k') {
+        e.preventDefault();
+        setPaletteOpen((v) => !v);
+        return;
+      }
+      if (mod && e.key === '.') {
+        const target = e.target as HTMLElement | null;
+        if (target?.closest('input, textarea, [contenteditable="true"]')) return;
+        e.preventDefault();
+        toggleDrawer();
+      }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, []);
+  }, [toggleDrawer]);
 
   const shellClass = ['app-shell', collapsed ? 'collapsed' : '', drawerOpen ? 'drawer-open' : '']
     .filter(Boolean)
@@ -64,6 +77,11 @@ export function App() {
         </Routes>
       </main>
       <RightDrawer open={drawerOpen} onClose={() => setDrawerOpen(false)} />
+      <CommandPalette
+        open={paletteOpen}
+        onClose={() => setPaletteOpen(false)}
+        onToggleDrawer={toggleDrawer}
+      />
     </div>
   );
 }
