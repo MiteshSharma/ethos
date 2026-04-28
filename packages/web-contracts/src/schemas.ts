@@ -258,6 +258,29 @@ export const MeshAgentSchema = z.object({
 export type MeshAgent = z.infer<typeof MeshAgentSchema>;
 
 // ---------------------------------------------------------------------------
+// Communications — v1
+//
+// Per-platform connection state. The web tab edits four platforms by
+// writing the same flat keys the gateway already reads from
+// ~/.ethos/config.yaml (telegramToken, slackBotToken, …). Sensitive
+// values never cross the wire on read; only `configured: boolean` is
+// emitted. The setup form posts plaintext on update, then the read
+// flips to configured = true.
+// ---------------------------------------------------------------------------
+
+export const PlatformIdSchema = z.enum(['telegram', 'discord', 'slack', 'email']);
+export type PlatformId = z.infer<typeof PlatformIdSchema>;
+
+export const PlatformStatusSchema = z.object({
+  id: PlatformIdSchema,
+  /** True when every required secret field has a non-empty value. */
+  configured: z.boolean(),
+  /** Per-field configured-ness so the form can show partial state. */
+  fields: z.record(z.string(), z.boolean()),
+});
+export type PlatformStatus = z.infer<typeof PlatformStatusSchema>;
+
+// ---------------------------------------------------------------------------
 // Plugins + MCP — v1
 //
 // Read-only inventory of what's discoverable on disk. Full install /

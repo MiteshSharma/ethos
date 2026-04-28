@@ -176,6 +176,7 @@ describe('contract router', () => {
       'mesh',
       'onboarding',
       'personalities',
+      'platforms',
       'plugins',
       'sessions',
       'skills',

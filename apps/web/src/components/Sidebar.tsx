@@ -38,7 +38,7 @@ const NAV_GROUPS: NavGroup[] = [
     title: 'Ops',
     items: [
       { key: '/cron', label: 'Cron' },
-      { key: '/communications', label: 'Communications', disabled: true, hint: 'v1' },
+      { key: '/communications', label: 'Communications' },
       { key: '/mesh', label: 'Mesh' },
     ],
   },

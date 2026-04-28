@@ -7,6 +7,7 @@ import { Sidebar } from './components/Sidebar';
 import { TopBar } from './components/TopBar';
 import { usePushEventToasts } from './hooks/usePushEventToasts';
 import { Chat } from './pages/Chat';
+import { Communications } from './pages/Communications';
 import { Cron } from './pages/Cron';
 import { Memory } from './pages/Memory';
 import { Mesh } from './pages/Mesh';
@@ -79,6 +80,7 @@ export function App() {
           <Route path="/settings" element={<Settings />} />
           <Route path="/memory" element={<Memory />} />
           <Route path="/plugins" element={<Plugins />} />
+          <Route path="/communications" element={<Communications />} />
           <Route path="/onboarding" element={<Onboarding />} />
           <Route path="/signing-in" element={<SigningIn />} />
           <Route path="*" element={<Navigate to="/chat" replace />} />

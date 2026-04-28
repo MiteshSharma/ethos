@@ -107,6 +107,10 @@ export class ConfigRepository {
    * place, writes back preserving order-of-keys for known fields and the
    * raw passthrough block beneath. New file (no prior config) is created
    * with just the provided keys.
+   *
+   * NOTE: `passthrough` merges on top of current — this method can only
+   * ADD or OVERWRITE keys, never delete. Use `deletePassthroughKeys` for
+   * deletion (e.g. clearing a platform's tokens).
    */
   async update(patch: Partial<RawConfig>): Promise<RawConfig> {
     const current: RawConfig = (await this.read()) ?? { modelRouting: {}, passthrough: {} };
@@ -118,6 +122,19 @@ export class ConfigRepository {
     };
     await this.write(next);
     return next;
+  }
+
+  /**
+   * Drop the named keys from the passthrough block and write the file
+   * back. Used by the Communications tab's "Clear" action when a user
+   * wants to disconnect a platform — the merge in `update` can't
+   * delete keys, so this is the dedicated path.
+   */
+  async deletePassthroughKeys(keys: string[]): Promise<RawConfig> {
+    const current: RawConfig = (await this.read()) ?? { modelRouting: {}, passthrough: {} };
+    for (const key of keys) delete current.passthrough[key];
+    await this.write(current);
+    return current;
   }
 
   private async write(config: RawConfig): Promise<void> {

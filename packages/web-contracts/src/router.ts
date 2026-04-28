@@ -15,6 +15,8 @@ import {
   OnboardingStepSchema,
   PendingSkillSchema,
   PersonalitySchema,
+  PlatformIdSchema,
+  PlatformStatusSchema,
   PluginInfoSchema,
   ProviderIdSchema,
   SessionSchema,
@@ -350,6 +352,36 @@ const evolver = {
 };
 
 // ---------------------------------------------------------------------------
+// Communications (v1)
+//
+// Per-platform connection state + setup form. Read returns only
+// configured-ness flags; secrets never cross the wire. Update accepts
+// per-field plaintext; empty / omitted fields preserve the existing
+// value (so users can rotate one secret without re-entering all).
+// ---------------------------------------------------------------------------
+
+const PlatformsListOutput = z.object({ platforms: z.array(PlatformStatusSchema) });
+
+const PlatformsSetInput = z.object({
+  id: PlatformIdSchema,
+  /** Per-field plaintext. Field names match the schema each platform
+   *  declares — e.g. telegram = { token }, slack = { botToken,
+   *  appToken, signingSecret }. Empty / missing keys preserve the
+   *  current value. */
+  fields: z.record(z.string(), z.string()),
+});
+const PlatformsSetOutput = z.object({ platform: PlatformStatusSchema });
+
+const PlatformsClearInput = z.object({ id: PlatformIdSchema });
+const PlatformsClearOutput = z.object({ platform: PlatformStatusSchema });
+
+const platforms = {
+  list: oc.output(PlatformsListOutput),
+  set: oc.input(PlatformsSetInput).output(PlatformsSetOutput),
+  clear: oc.input(PlatformsClearInput).output(PlatformsClearOutput),
+};
+
+// ---------------------------------------------------------------------------
 // Plugins + MCP (v1 — read-only inventory)
 //
 // Returns the union of installed plugins (discovered in user / project
@@ -431,6 +463,7 @@ export const contract = {
   mesh,
   memory,
   plugins,
+  platforms,
 };
 
 export type Contract = typeof contract;

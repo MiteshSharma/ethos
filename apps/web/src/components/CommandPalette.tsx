@@ -89,8 +89,8 @@ export function CommandPalette({ open, onClose, onToggleDrawer }: CommandPalette
       page('Settings', '/settings', ['config', 'provider', 'model', 'key']),
       page('Memory', '/memory', ['notes', 'context', 'user', 'remember']),
       page('Plugins', '/plugins', ['mcp', 'install', 'tools']),
+      page('Communications', '/communications', ['telegram', 'slack', 'discord', 'email', 'comms']),
       pageDisabled('Personalities', '/personalities', 'v1'),
-      pageDisabled('Communications', '/communications', 'v1'),
     ].map((p) => ({ ...p, run: closeAfter(p.run) }));
 
     const sessions: CommandItem[] = (sessionsQuery.data?.sessions ?? []).map((s) => ({
