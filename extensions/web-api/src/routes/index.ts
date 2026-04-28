@@ -45,6 +45,7 @@ export interface ServiceContainer {
   memory: import('../services/memory.service').MemoryService;
   plugins: import('../services/plugins.service').PluginsService;
   platforms: import('../services/platforms.service').PlatformsService;
+  lab: import('../services/lab.service').LabService;
 }
 
 export function createRoutes(opts: CreateRoutesOptions): Hono {

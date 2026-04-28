@@ -5,6 +5,7 @@ import type { ChatService } from '../services/chat.service';
 import type { ConfigService } from '../services/config.service';
 import type { CronService } from '../services/cron.service';
 import type { EvolverService } from '../services/evolver.service';
+import type { LabService } from '../services/lab.service';
 import type { MemoryService } from '../services/memory.service';
 import type { MeshService } from '../services/mesh.service';
 import type { OnboardingService } from '../services/onboarding.service';
@@ -36,6 +37,7 @@ export interface RpcContext {
   memory: MemoryService;
   plugins: PluginsService;
   platforms: PlatformsService;
+  lab: LabService;
 }
 
 export const os = implement(contract).$context<RpcContext>();

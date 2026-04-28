@@ -43,6 +43,13 @@ const NAV_GROUPS: NavGroup[] = [
     ],
   },
   {
+    title: 'Lab',
+    items: [
+      { key: '/batch', label: 'Batch' },
+      { key: '/eval', label: 'Eval' },
+    ],
+  },
+  {
     title: 'System',
     items: [
       { key: '/plugins', label: 'Plugins' },

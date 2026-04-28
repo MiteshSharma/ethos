@@ -1,6 +1,8 @@
+import { batchRouter } from './batch';
 import { chatRouter } from './chat';
 import { configRouter } from './config';
 import { cronRouter } from './cron';
+import { evalRouter } from './eval';
 import { evolverRouter } from './evolver';
 import { memoryRouter } from './memory';
 import { meshRouter } from './mesh';
@@ -31,6 +33,8 @@ import { toolsRouter } from './tools';
 //   • memory        — read/write MEMORY.md + USER.md (v1)
 //   • plugins       — list installed plugins + configured MCP servers (v1)
 //   • platforms     — Telegram/Slack/Discord/Email connection state + setup (v1)
+//   • batch         — Lab: BatchRunner submissions + progress (v1)
+//   • eval          — Lab: EvalRunner submissions + scoring (v1)
 
 export const apiRouter = {
   sessions: sessionsRouter,
@@ -46,6 +50,8 @@ export const apiRouter = {
   memory: memoryRouter,
   plugins: pluginsRouter,
   platforms: platformsRouter,
+  batch: batchRouter,
+  eval: evalRouter,
 };
 
 export type ApiRouter = typeof apiRouter;

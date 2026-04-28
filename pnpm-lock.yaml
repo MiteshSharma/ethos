@@ -607,9 +607,15 @@ importers:
       '@ethosagent/agent-mesh':
         specifier: workspace:*
         version: link:../agent-mesh
+      '@ethosagent/batch-runner':
+        specifier: workspace:*
+        version: link:../batch-runner
       '@ethosagent/cron':
         specifier: workspace:*
         version: link:../cron
+      '@ethosagent/eval-harness':
+        specifier: workspace:*
+        version: link:../eval-harness
       '@ethosagent/personalities':
         specifier: workspace:*
         version: link:../personalities

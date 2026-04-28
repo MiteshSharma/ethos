@@ -91,6 +91,8 @@ export function CommandPalette({ open, onClose, onToggleDrawer }: CommandPalette
       page('Plugins', '/plugins', ['mcp', 'install', 'tools']),
       page('Communications', '/communications', ['telegram', 'slack', 'discord', 'email', 'comms']),
       page('Personalities', '/personalities', ['agent', 'identity', 'wizard', 'duplicate']),
+      page('Batch', '/batch', ['lab', 'jsonl', 'tasks', 'bulk']),
+      page('Eval', '/eval', ['lab', 'score', 'expected', 'judge']),
     ].map((p) => ({ ...p, run: closeAfter(p.run) }));
 
     const sessions: CommandItem[] = (sessionsQuery.data?.sessions ?? []).map((s) => ({

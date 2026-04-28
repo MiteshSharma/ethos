@@ -6,9 +6,11 @@ import { RightDrawer } from './components/RightDrawer';
 import { Sidebar } from './components/Sidebar';
 import { TopBar } from './components/TopBar';
 import { usePushEventToasts } from './hooks/usePushEventToasts';
+import { Batch } from './pages/Batch';
 import { Chat } from './pages/Chat';
 import { Communications } from './pages/Communications';
 import { Cron } from './pages/Cron';
+import { Eval } from './pages/Eval';
 import { Memory } from './pages/Memory';
 import { Mesh } from './pages/Mesh';
 import { Onboarding } from './pages/Onboarding';
@@ -83,6 +85,8 @@ export function App() {
           <Route path="/plugins" element={<Plugins />} />
           <Route path="/communications" element={<Communications />} />
           <Route path="/personalities" element={<Personalities />} />
+          <Route path="/batch" element={<Batch />} />
+          <Route path="/eval" element={<Eval />} />
           <Route path="/onboarding" element={<Onboarding />} />
           <Route path="/signing-in" element={<SigningIn />} />
           <Route path="*" element={<Navigate to="/chat" replace />} />

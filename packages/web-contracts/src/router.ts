@@ -2,8 +2,11 @@ import { oc } from '@orpc/contract';
 import { z } from 'zod';
 import {
   ApprovalScopeSchema,
+  BatchRunInfoSchema,
   CronJobSchema,
   CronRunSchema,
+  EvalRunInfoSchema,
+  EvalScorerSchema,
   EvolveConfigSchema,
   EvolverRunSchema,
   McpServerInfoSchema,
@@ -533,6 +536,74 @@ const mesh = {
 };
 
 // ---------------------------------------------------------------------------
+// Lab — Batch (v1)
+//
+// Submits the runner with a tasks JSONL string + concurrency, returns
+// a run id. The frontend polls `batch.list` / `batch.get` for live
+// progress. `batch.output` returns the on-disk Atropos JSONL as a
+// string for download. Cancel deferred — re-running with the same id
+// resumes via the runner's checkpoint mechanism.
+// ---------------------------------------------------------------------------
+
+const BatchListOutput = z.object({ runs: z.array(BatchRunInfoSchema) });
+
+const BatchStartInput = z.object({
+  /** Newline-delimited JSON; each line `{ id, prompt, personalityId? }`. */
+  tasksJsonl: z.string().min(1),
+  /** Default 4. Max 16 to keep a single-user local app polite. */
+  concurrency: z.number().int().min(1).max(16).optional(),
+  /** Personality id used for tasks that don't pin one. */
+  defaultPersonalityId: z.string().optional(),
+});
+const BatchStartOutput = z.object({ run: BatchRunInfoSchema });
+
+const BatchGetInput = z.object({ id: z.string() });
+const BatchGetOutput = z.object({ run: BatchRunInfoSchema });
+
+const BatchOutputInput = z.object({ id: z.string() });
+const BatchOutputOutput = z.object({ content: z.string() });
+
+const batch = {
+  list: oc.output(BatchListOutput),
+  start: oc.input(BatchStartInput).output(BatchStartOutput),
+  get: oc.input(BatchGetInput).output(BatchGetOutput),
+  output: oc.input(BatchOutputInput).output(BatchOutputOutput),
+};
+
+// ---------------------------------------------------------------------------
+// Lab — Eval (v1)
+//
+// Like batch, but with an expected JSONL + a scorer (defaults to
+// `contains`). The runner's per-task scores land in the output file;
+// `eval.get` surfaces the aggregate stats so the UI can render
+// pass/fail counts + average score without parsing the JSONL.
+// ---------------------------------------------------------------------------
+
+const EvalListOutput = z.object({ runs: z.array(EvalRunInfoSchema) });
+
+const EvalStartInput = z.object({
+  tasksJsonl: z.string().min(1),
+  /** Newline-delimited JSON: `{ id, expected, match? }`. */
+  expectedJsonl: z.string().min(1),
+  scorer: EvalScorerSchema.optional(),
+  concurrency: z.number().int().min(1).max(16).optional(),
+});
+const EvalStartOutput = z.object({ run: EvalRunInfoSchema });
+
+const EvalGetInput = z.object({ id: z.string() });
+const EvalGetOutput = z.object({ run: EvalRunInfoSchema });
+
+const EvalOutputInput = z.object({ id: z.string() });
+const EvalOutputOutput = z.object({ content: z.string() });
+
+const evalNs = {
+  list: oc.output(EvalListOutput),
+  start: oc.input(EvalStartInput).output(EvalStartOutput),
+  get: oc.input(EvalGetInput).output(EvalGetOutput),
+  output: oc.input(EvalOutputInput).output(EvalOutputOutput),
+};
+
+// ---------------------------------------------------------------------------
 // Root contract — every namespace mounted under one symbol
 // ---------------------------------------------------------------------------
 
@@ -550,6 +621,8 @@ export const contract = {
   memory,
   plugins,
   platforms,
+  batch,
+  eval: evalNs,
 };
 
 export type Contract = typeof contract;

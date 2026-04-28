@@ -26,6 +26,7 @@ import { type ChatDefaults, ChatService } from './services/chat.service';
 import { ConfigService } from './services/config.service';
 import { CronService } from './services/cron.service';
 import { EvolverService } from './services/evolver.service';
+import { LabService } from './services/lab.service';
 import { MemoryService } from './services/memory.service';
 import { MeshService } from './services/mesh.service';
 import { OnboardingService } from './services/onboarding.service';
@@ -150,6 +151,7 @@ export function createWebApi(opts: CreateWebApiOptions): CreateWebApiResult {
   const memoryService = new MemoryService({ repo: memoryRepo });
   const pluginsService = new PluginsService({ plugins: pluginsRepo, mcp: mcpRepo });
   const platformsService = new PlatformsService({ repo: platformsRepo });
+  const labService = new LabService({ dataDir: opts.dataDir, loop: opts.agentLoop });
 
   // One buffer per process — keyed internally by sessionId. Bridges are
   // owned by ChatService. The reap callback lets the bridge map drain
@@ -213,6 +215,7 @@ export function createWebApi(opts: CreateWebApiOptions): CreateWebApiResult {
       memory: memoryService,
       plugins: pluginsService,
       platforms: platformsService,
+      lab: labService,
     },
     ...(opts.allowedOrigins ? { allowedOrigins: opts.allowedOrigins } : {}),
     ...(opts.secureCookie !== undefined ? { secureCookie: opts.secureCookie } : {}),

@@ -168,9 +168,11 @@ describe('SSE event union', () => {
 describe('contract router', () => {
   it('exposes the v0 + v0.5 + v1 namespaces', () => {
     expect(Object.keys(contract).sort()).toEqual([
+      'batch',
       'chat',
       'config',
       'cron',
+      'eval',
       'evolver',
       'memory',
       'mesh',
