@@ -124,3 +124,49 @@ export type OnboardingStep = z.infer<typeof OnboardingStepSchema>;
 
 export const ProviderIdSchema = z.enum(['anthropic', 'openrouter', 'openai-compat', 'ollama']);
 export type ProviderId = z.infer<typeof ProviderIdSchema>;
+
+// ---------------------------------------------------------------------------
+// Cron — proactive pillar of v0.5
+//
+// Mirrors the `CronJob` shape from `@ethosagent/cron`. Wire-side uses
+// nullable instead of optional for fields that may legitimately be unset
+// on disk, so the client doesn't have to guess between "missing" and
+// "explicitly null".
+// ---------------------------------------------------------------------------
+
+export const JobStatusSchema = z.enum(['active', 'paused']);
+export type JobStatus = z.infer<typeof JobStatusSchema>;
+
+export const MissedRunPolicySchema = z.enum(['run-once', 'skip']);
+export type MissedRunPolicy = z.infer<typeof MissedRunPolicySchema>;
+
+export const CronJobSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  /** 5-field cron expression e.g. `0 8 * * 1-5`. */
+  schedule: z.string(),
+  prompt: z.string(),
+  personality: z.string().nullable(),
+  /** Delivery target — `cli` / `telegram` / etc. Null means "store output to disk only". */
+  deliver: z.string().nullable(),
+  status: JobStatusSchema,
+  missedRunPolicy: MissedRunPolicySchema,
+  /** ISO-8601 of last run, or null if never run. */
+  lastRunAt: z.string().nullable(),
+  /** ISO-8601 of next scheduled run, or null when paused / unscheduled. */
+  nextRunAt: z.string().nullable(),
+  createdAt: z.string(),
+});
+export type CronJob = z.infer<typeof CronJobSchema>;
+
+export const CronRunSchema = z.object({
+  /** ISO-8601 timestamp parsed from the output filename. */
+  ranAt: z.string(),
+  /** Server-side absolute path to the output file. The client treats it
+   *  as opaque and uses it to fetch full output via cron.history. */
+  outputPath: z.string(),
+  /** Full output body — present when the run is the head of `cron.history`
+   *  and inline-fetched. Listed runs leave it absent for compactness. */
+  output: z.string().nullable(),
+});
+export type CronRun = z.infer<typeof CronRunSchema>;

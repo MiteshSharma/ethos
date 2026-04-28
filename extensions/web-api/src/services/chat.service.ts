@@ -41,6 +41,13 @@ export interface ChatServiceOptions {
   defaults: ChatDefaults;
   /** Surface label recorded on new sessions. Default: 'web'. */
   platform?: string;
+  /**
+   * Called when `forget(sessionId)` runs — surface code wires this to
+   * `ApprovalsService.cancelForSession` so any awaiting `before_tool_call`
+   * hook unblocks instead of leaving the agent loop hanging on a Promise
+   * that will never resolve.
+   */
+  onForget?: (sessionId: string) => void;
 }
 
 export interface ChatSendInput {
@@ -168,6 +175,10 @@ export class ChatService {
       this.bridges.delete(sessionId);
     }
     this.opts.buffer.clear(sessionId);
+    // If approvals are wired, drop any pending requests for this session
+    // so the awaiting hook unblocks (`{ decision: 'deny', reason: 'session
+    // ended' }`) instead of leaving the agent loop hanging forever.
+    this.opts.onForget?.(sessionId);
   }
 
   // ---------------------------------------------------------------------------
@@ -220,8 +231,15 @@ export class ChatService {
         audience: 'user',
       }),
     );
-    bridge.on('tool_end', (toolCallId, toolName, ok, durationMs) =>
-      this.append(sessionId, { type: 'tool_end', toolCallId, toolName, ok, durationMs }),
+    bridge.on('tool_end', (toolCallId, toolName, ok, durationMs, result) =>
+      this.append(sessionId, {
+        type: 'tool_end',
+        toolCallId,
+        toolName,
+        ok,
+        durationMs,
+        ...(result !== undefined ? { result } : {}),
+      }),
     );
     bridge.on('usage', (inputTokens, outputTokens, estimatedCostUsd) =>
       this.append(sessionId, {

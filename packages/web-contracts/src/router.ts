@@ -2,6 +2,9 @@ import { oc } from '@orpc/contract';
 import { z } from 'zod';
 import {
   ApprovalScopeSchema,
+  CronJobSchema,
+  CronRunSchema,
+  MissedRunPolicySchema,
   OnboardingStepSchema,
   PersonalitySchema,
   ProviderIdSchema,
@@ -212,6 +215,58 @@ const config = {
 };
 
 // ---------------------------------------------------------------------------
+// Cron (v0.5 — the proactive pillar)
+//
+// Web tab manages jobs.json on disk and reads run-output files from
+// `<dataDir>/cron/output/<jobId>/<timestamp>.md`. The actual ticker
+// lives in `serve.ts` when --web-experimental is enabled.
+// ---------------------------------------------------------------------------
+
+const CronListOutput = z.object({ jobs: z.array(CronJobSchema) });
+
+const CronGetInput = z.object({ id: z.string().min(1) });
+const CronGetOutput = z.object({ job: CronJobSchema });
+
+const CronCreateInput = z.object({
+  name: z.string().min(1),
+  schedule: z.string().min(1),
+  prompt: z.string().min(1),
+  personality: z.string().optional(),
+  deliver: z.string().optional(),
+  missedRunPolicy: MissedRunPolicySchema.optional(),
+});
+const CronCreateOutput = z.object({ job: CronJobSchema });
+
+const CronIdOnlyInput = z.object({ id: z.string().min(1) });
+const CronOkOutput = z.object({ ok: z.literal(true) });
+
+const CronRunNowInput = z.object({ id: z.string().min(1) });
+const CronRunNowOutput = z.object({
+  ok: z.literal(true),
+  /** Full output body from this synchronous run. */
+  output: z.string(),
+  ranAt: z.string(),
+});
+
+const CronHistoryInput = z.object({
+  id: z.string().min(1),
+  /** Page size; max 100 to keep payloads bounded. Default 20. */
+  limit: z.number().int().min(1).max(100).optional(),
+});
+const CronHistoryOutput = z.object({ runs: z.array(CronRunSchema) });
+
+const cron = {
+  list: oc.output(CronListOutput),
+  get: oc.input(CronGetInput).output(CronGetOutput),
+  create: oc.input(CronCreateInput).output(CronCreateOutput),
+  delete: oc.input(CronIdOnlyInput).output(CronOkOutput),
+  pause: oc.input(CronIdOnlyInput).output(CronOkOutput),
+  resume: oc.input(CronIdOnlyInput).output(CronOkOutput),
+  runNow: oc.input(CronRunNowInput).output(CronRunNowOutput),
+  history: oc.input(CronHistoryInput).output(CronHistoryOutput),
+};
+
+// ---------------------------------------------------------------------------
 // Root contract — every namespace mounted under one symbol
 // ---------------------------------------------------------------------------
 
@@ -222,6 +277,7 @@ export const contract = {
   tools,
   onboarding,
   config,
+  cron,
 };
 
 export type Contract = typeof contract;

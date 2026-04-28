@@ -141,6 +141,367 @@ body,
   font-size: 14px;
 }
 
+/* Onboarding flow — DESIGN.md spec: 520px max-width, centered, one
+   composition per step (one headline + supporting + input or CTA). No
+   wizard chrome, no Antd Steps primitive. */
+
+.onboarding {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 24px;
+  max-width: 520px;
+  margin: 48px auto;
+  padding: 0 24px;
+}
+
+.onboarding-progress {
+  display: flex;
+  gap: 8px;
+}
+
+.onboarding-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 9999px;
+  background: var(--ethos-border);
+  transition: background-color 180ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.onboarding-dot.active {
+  background: var(--ethos-text);
+}
+
+.onboarding-step {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  width: 100%;
+}
+
+.onboarding-headline {
+  font-size: 24px;
+  font-weight: 600;
+  color: var(--ethos-text);
+  margin: 0;
+  letter-spacing: -0.005em;
+}
+
+.onboarding-supporting {
+  font-size: 14px;
+  color: var(--ethos-text-dim);
+  margin: 0;
+  line-height: 1.55;
+}
+
+.onboarding-trust {
+  font-size: 13px;
+  color: var(--ethos-text-dim);
+  margin: 4px 0 0;
+  line-height: 1.55;
+  padding: 12px 14px;
+  background: rgba(74, 158, 255, 0.06);
+  border-left: 2px solid #4a9eff;
+  border-radius: 0 4px 4px 0;
+}
+
+.onboarding-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 8px;
+}
+
+/* Provider step — radios for picker, then key + (optional) baseUrl. */
+
+.onboarding-providers {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.onboarding-provider {
+  display: grid;
+  grid-template-columns: 16px 1fr;
+  align-items: start;
+  gap: 4px 10px;
+  padding: 10px 12px;
+  border-radius: 4px;
+  border: 1px solid var(--ethos-border);
+  cursor: pointer;
+  transition:
+    background-color 80ms cubic-bezier(0.16, 1, 0.3, 1),
+    border-color 80ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.onboarding-provider:hover {
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.onboarding-provider.active {
+  border-color: #4a9eff;
+  background: rgba(74, 158, 255, 0.06);
+}
+
+.onboarding-provider input[type="radio"] {
+  margin-top: 3px;
+  accent-color: #4a9eff;
+}
+
+.onboarding-provider-label {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--ethos-text);
+}
+
+.onboarding-provider-hint {
+  grid-column: 2;
+  font-size: 12px;
+  color: var(--ethos-text-dim);
+  line-height: 1.5;
+}
+
+.onboarding-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.onboarding-field-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-weight: 500;
+  color: var(--ethos-text-dim);
+}
+
+.onboarding-error {
+  padding: 8px 10px;
+  border-radius: 4px;
+  border: 1px solid #f87171;
+  background: rgba(248, 113, 113, 0.08);
+  color: #f87171;
+  font-size: 12px;
+}
+
+/* Personality step — DESIGN.md says stacked rows, NOT card grid. The
+   button itself is the row; the active-state border carries the accent. */
+
+.onboarding-personalities {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.onboarding-personality {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+  padding: 14px;
+  border-radius: 8px;
+  border: 1px solid var(--ethos-border);
+  background: var(--ethos-bg-elevated);
+  text-align: left;
+  cursor: pointer;
+  color: var(--ethos-text);
+  transition:
+    border-color 180ms cubic-bezier(0.16, 1, 0.3, 1),
+    transform 180ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.onboarding-personality:hover {
+  border-color: var(--ethos-border-strong, #3a3a3a);
+}
+
+.onboarding-personality.active {
+  border-width: 2px;
+  padding: 13px;
+}
+
+.onboarding-personality-text {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  flex: 1;
+}
+
+.onboarding-personality-name {
+  font-size: 15px;
+  font-weight: 500;
+  color: var(--ethos-text);
+}
+
+.onboarding-personality-description {
+  font-size: 13px;
+  color: var(--ethos-text-dim);
+  line-height: 1.4;
+}
+
+.onboarding-personality-sample {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 6px;
+  padding: 8px 10px;
+  background: rgba(0, 0, 0, 0.2);
+  border-radius: 4px;
+}
+
+.onboarding-personality-sample-user {
+  font-size: 12px;
+  color: var(--ethos-text-dim);
+  font-style: italic;
+}
+
+.onboarding-personality-sample-user::before {
+  content: "> ";
+  opacity: 0.5;
+}
+
+.onboarding-personality-sample-reply {
+  font-size: 12px;
+  color: var(--ethos-text);
+  line-height: 1.5;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .onboarding-personality,
+  .onboarding-dot,
+  .onboarding-provider {
+    transition: none;
+  }
+}
+
+/* Cron tab — list + create + run history. Same dense-table pattern as
+   sessions; row expand reveals the head of history. */
+
+.cron-tab {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.cron-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.cron-status-paused {
+  color: var(--ethos-text-dim);
+  font-weight: 400;
+  font-size: 12px;
+  margin-left: 6px;
+}
+
+.cron-muted {
+  color: var(--ethos-text-dim);
+  font-size: 12px;
+}
+
+.cron-history {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 4px 0;
+}
+
+.cron-history-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.cron-history-when {
+  color: var(--ethos-text-dim);
+  font-size: 11px;
+}
+
+.cron-history-output {
+  margin: 0;
+  padding: 10px 12px;
+  background: rgba(0, 0, 0, 0.25);
+  border-radius: 4px;
+  font-family: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--ethos-text);
+  max-height: 300px;
+  overflow: auto;
+  white-space: pre-wrap;
+}
+
+/* Sessions tab — search + dense table + load-more. The "Cards earn
+   existence" rule (DESIGN.md) says no card grid; sessions are dense rows
+   in a table primitive, mono columns for IDs / model / tokens / cost /
+   timestamps so numeric data is column-aligned. */
+
+.sessions-tab {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.sessions-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.sessions-count {
+  font-family: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--ethos-text-dim);
+}
+
+.sessions-mono {
+  font-family: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.sessions-num {
+  text-align: right;
+  display: inline-block;
+  width: 100%;
+}
+
+.sessions-row-actions {
+  display: inline-flex;
+}
+
+.sessions-row-trigger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 4px;
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--ethos-text-dim);
+  cursor: pointer;
+  transition: background-color 80ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.sessions-row-trigger:hover {
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--ethos-text);
+}
+
+.sessions-row-trigger:focus-visible {
+  outline: 2px solid var(--accent, #4a9eff);
+  outline-offset: 1px;
+}
+
+.sessions-loadmore {
+  display: flex;
+  justify-content: center;
+  padding: 16px 0;
+}
+
 /* The chat tab fills its main pane and stacks: personality bar on top,
    message list scrolls in the middle, composer sticks to the bottom. The
    `.app-main` padding is removed for chat so the personality bar can run
@@ -200,10 +561,54 @@ body,
 }
 
 .personality-bar-actions {
-  /* Reserved for the personality switcher in 26.W2d. Keeps the layout
-     stable so adding the dropdown later doesn't reflow other elements. */
-  width: 32px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
   flex-shrink: 0;
+}
+
+.personality-switcher-trigger,
+.personality-bar-new {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 4px;
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--ethos-text-dim);
+  cursor: pointer;
+  transition: background-color 80ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.personality-switcher-trigger:hover,
+.personality-bar-new:hover {
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--ethos-text);
+}
+
+.personality-switcher-trigger:focus-visible,
+.personality-bar-new:focus-visible {
+  outline: 2px solid var(--accent, #4a9eff);
+  outline-offset: 1px;
+}
+
+.personality-menu-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 160px;
+}
+
+.personality-menu-name {
+  flex: 1;
+  font-size: 13px;
+}
+
+.personality-menu-active {
+  color: var(--ethos-text-dim);
+  font-size: 12px;
 }
 
 .message-list {
@@ -255,6 +660,55 @@ body,
   font-size: 14px;
   line-height: 1.55;
   max-width: 100%;
+}
+
+/* "Agent is thinking" placeholder — three dots that pulse in sequence
+   while the user waits for the first text_delta. Sits in the same row
+   shape as a real assistant bubble so the layout doesn't shift when the
+   real response replaces it. */
+
+.message-thinking {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 8px 0;
+  opacity: 0.7;
+}
+
+.thinking-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 9999px;
+  background: var(--ethos-text-dim);
+  animation: thinking-bounce 1.2s ease-in-out infinite;
+}
+
+.thinking-dot:nth-child(2) {
+  animation-delay: 0.2s;
+}
+
+.thinking-dot:nth-child(3) {
+  animation-delay: 0.4s;
+}
+
+@keyframes thinking-bounce {
+  0%,
+  60%,
+  100% {
+    opacity: 0.3;
+    transform: translateY(0);
+  }
+  30% {
+    opacity: 1;
+    transform: translateY(-3px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .thinking-dot {
+    animation: none;
+    opacity: 0.6;
+  }
 }
 
 /* The streaming cursor is a single character-width block that pulses
@@ -311,9 +765,341 @@ body,
   font-size: 13px;
 }
 
+/* Approval modal — anchored under the personality bar, NOT centered.
+   DESIGN.md: "the agent itself is asking permission, so the modal slides
+   down from where the agent's face lives". Slide-down 180ms, accent
+   ring around the panel echoes the per-personality color. */
+
+.chat-tab {
+  position: relative; /* approval-modal anchors to this */
+}
+
+.approval-modal {
+  position: absolute;
+  top: calc(48px + 3px); /* personality-bar height (~48px) + accent stripe */
+  right: 16px;
+  z-index: 10;
+  width: min(420px, calc(100vw - 32px));
+  background: var(--ethos-bg-elevated);
+  border: 1px solid var(--ethos-border);
+  border-top: 2px solid var(--accent, #4a9eff);
+  border-radius: 8px;
+  box-shadow: 0 12px 32px -8px rgba(0, 0, 0, 0.7);
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  animation: approval-slide-down 180ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@keyframes approval-slide-down {
+  from {
+    opacity: 0;
+    transform: translateY(-8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.approval-modal-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+}
+
+.approval-modal-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 9999px;
+  background: rgba(245, 158, 11, 0.15);
+  color: #f59e0b;
+  font-size: 13px;
+  font-weight: 600;
+  flex-shrink: 0;
+}
+
+.approval-modal-title {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--ethos-text);
+  margin: 0;
+}
+
+.approval-modal-title code {
+  font-family: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 13px;
+  background: rgba(255, 255, 255, 0.06);
+  padding: 1px 6px;
+  border-radius: 4px;
+}
+
+.approval-modal-reason {
+  margin: 0;
+  font-size: 13px;
+  color: var(--ethos-text-dim);
+  line-height: 1.5;
+}
+
+.approval-modal-args {
+  margin: 0;
+  padding: 10px 12px;
+  background: rgba(0, 0, 0, 0.25);
+  border-radius: 4px;
+  font-family: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--ethos-text);
+  max-height: 180px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.approval-modal-scope {
+  border: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.approval-modal-scope-legend {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--ethos-text-dim);
+  font-weight: 500;
+  padding: 0;
+  margin-bottom: 4px;
+}
+
+.approval-modal-scope-option {
+  display: grid;
+  grid-template-columns: 16px 1fr;
+  align-items: start;
+  gap: 4px 8px;
+  padding: 6px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: background-color 80ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.approval-modal-scope-option:hover {
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.approval-modal-scope-option input[type="radio"] {
+  margin-top: 3px;
+  accent-color: var(--accent, #4a9eff);
+}
+
+.approval-modal-scope-label {
+  font-size: 13px;
+  color: var(--ethos-text);
+  font-weight: 500;
+}
+
+.approval-modal-scope-hint {
+  grid-column: 2;
+  font-size: 12px;
+  color: var(--ethos-text-dim);
+  line-height: 1.4;
+}
+
+.approval-modal-error {
+  padding: 8px 10px;
+  border-radius: 4px;
+  border: 1px solid #f87171;
+  background: rgba(248, 113, 113, 0.08);
+  color: #f87171;
+  font-size: 12px;
+}
+
+.approval-modal-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  margin-top: 4px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .approval-modal {
+    animation: none;
+  }
+}
+
+/* Pending-approval chip variant — distinct from running, ok, failed.
+   Uses the warning amber from the semantic palette since it signals
+   "waiting on you" rather than "running" or "done". */
+
+.tool-chip-pending-approval .tool-chip-status {
+  color: #f59e0b;
+}
+
+.tool-chip-pending-approval {
+  border-color: rgba(245, 158, 11, 0.4);
+  background: rgba(245, 158, 11, 0.06);
+}
+
+/* Tool chips: inline pills that sit between text spans inside an
+   assistant turn. NOT a card. sm border-radius (4px), mono font for
+   the tool name + args, status icon + color. The chip itself is a
+   <button> so keyboard users can expand it via Enter / Space. */
+
+.tool-chip-wrapper {
+  display: block;
+  margin: 6px 0;
+}
+
+.tool-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 8px;
+  border-radius: 4px;
+  border: 1px solid var(--ethos-border);
+  background: var(--ethos-bg-elevated);
+  color: var(--ethos-text);
+  font-family: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+  max-width: 100%;
+  text-align: left;
+  transition: background-color 80ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.tool-chip:hover {
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.tool-chip:focus-visible {
+  outline: 2px solid var(--accent, #4a9eff);
+  outline-offset: 1px;
+}
+
+.tool-chip-status {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+  font-size: 11px;
+}
+
+.tool-chip-running .tool-chip-status {
+  color: var(--ethos-text-dim);
+}
+
+.tool-chip-ok .tool-chip-status {
+  color: #4ade80;
+}
+
+.tool-chip-failed .tool-chip-status {
+  color: #f87171;
+}
+
+.tool-chip-name {
+  color: var(--ethos-text);
+  font-weight: 500;
+}
+
+.tool-chip-args {
+  color: var(--ethos-text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex: 1;
+  min-width: 0;
+}
+
+.tool-chip-duration {
+  color: var(--ethos-text-dim);
+  font-size: 11px;
+  margin-left: 4px;
+}
+
+/* Spinner for the running state. Pure rotation, no layout impact. */
+
+.tool-chip-spinner {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border: 1.5px solid var(--ethos-text-dim);
+  border-top-color: transparent;
+  border-radius: 9999px;
+  animation: tool-chip-spin 700ms linear infinite;
+}
+
+@keyframes tool-chip-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.tool-chip-detail {
+  margin-top: 6px;
+  margin-left: 18px;
+  padding: 10px 12px;
+  border-left: 2px solid var(--ethos-border);
+  background: rgba(255, 255, 255, 0.02);
+  border-radius: 0 4px 4px 0;
+  font-family: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.tool-chip-section {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.tool-chip-section-label {
+  font-family: "Geist", system-ui, sans-serif;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--ethos-text-dim);
+  font-weight: 500;
+}
+
+.tool-chip-section pre {
+  margin: 0;
+  padding: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--ethos-text);
+  font-size: 12px;
+  line-height: 1.5;
+  max-height: 320px;
+  overflow: auto;
+}
+
+/* Trailing cursor for turns ending on a tool block — sits as its own
+   marker so the user can see the agent is still alive between tool
+   completion and the next text chunk. */
+.streaming-cursor-trailing {
+  margin-left: 4px;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .streaming-cursor {
     animation: none;
     opacity: 0.6;
+  }
+  .tool-chip-spinner {
+    animation: none;
+    border-top-color: var(--ethos-text-dim);
   }
 }

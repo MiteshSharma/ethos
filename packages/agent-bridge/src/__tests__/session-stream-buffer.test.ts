@@ -55,6 +55,49 @@ describe('SessionStreamBuffer', () => {
     expect(buf.head('s1')).toBe(0);
   });
 
+  it('fires onReap when the timer expires (owner cleanup hook)', () => {
+    vi.useFakeTimers();
+    const buf = new SessionStreamBuffer<string>({ reapMs: 1000 });
+    const reaped: string[] = [];
+    buf.onReap = (id) => reaped.push(id);
+
+    buf.append('s1', 'a');
+    buf.disconnect('s1');
+    expect(reaped).toEqual([]);
+
+    vi.advanceTimersByTime(1100);
+    expect(reaped).toEqual(['s1']);
+  });
+
+  it('does not fire onReap if touch cancels the timer', () => {
+    vi.useFakeTimers();
+    const buf = new SessionStreamBuffer<string>({ reapMs: 1000 });
+    const reaped: string[] = [];
+    buf.onReap = (id) => reaped.push(id);
+
+    buf.append('s1', 'a');
+    buf.disconnect('s1');
+    vi.advanceTimersByTime(500);
+    buf.touch('s1');
+    vi.advanceTimersByTime(2000);
+
+    expect(reaped).toEqual([]);
+  });
+
+  it('isolates onReap callback errors from the buffer', () => {
+    vi.useFakeTimers();
+    const buf = new SessionStreamBuffer<string>({ reapMs: 1000 });
+    buf.onReap = () => {
+      throw new Error('owner had a bad day');
+    };
+
+    buf.append('s1', 'a');
+    buf.disconnect('s1');
+    expect(() => vi.advanceTimersByTime(1100)).not.toThrow();
+    // Buffer's own teardown still happened.
+    expect(buf.head('s1')).toBe(0);
+  });
+
   it('touch cancels a pending reap', () => {
     vi.useFakeTimers();
     const buf = new SessionStreamBuffer<string>({ reapMs: 1000 });

@@ -1,27 +1,22 @@
 import { useEffect, useRef } from 'react';
-import type { ChatMessage } from '../../lib/chat-reducer';
-import { MessageBubble, StreamingBubble } from './MessageBubble';
+import type { AssistantTurn, ChatMessage } from '../../lib/chat-reducer';
+import { AssistantBubble, UserBubble } from './MessageBubble';
 
 // Scrollable history. Auto-scrolls to the bottom as content arrives —
 // but only when the user was already pinned to the bottom, so reading
 // older messages doesn't get yanked back down by every text_delta.
-//
-// Empty state for a fresh chat: a single line that doubles as a
-// magic-moment hint without being marketing copy.
 
 export interface MessageListProps {
   messages: ChatMessage[];
-  streamingText: string | null;
+  /** In-flight assistant turn rendered at the tail of the list. */
+  currentTurn: AssistantTurn | null;
   emptyHint?: string;
 }
 
-export function MessageList({ messages, streamingText, emptyHint }: MessageListProps) {
+export function MessageList({ messages, currentTurn, emptyHint }: MessageListProps) {
   const listRef = useRef<HTMLDivElement>(null);
   const pinnedToBottomRef = useRef(true);
 
-  // Track whether the user is currently at the bottom of the scroll
-  // viewport. If they've scrolled up to read history, don't auto-scroll
-  // when new chunks arrive — reading is more important than animation.
   const onScroll = () => {
     const el = listRef.current;
     if (!el) return;
@@ -29,15 +24,18 @@ export function MessageList({ messages, streamingText, emptyHint }: MessageListP
     pinnedToBottomRef.current = fromBottom < 32;
   };
 
+  // Re-run on every visible change. The `currentTurn` reference is the
+  // signal — its blocks update on every text_delta / tool_start /
+  // tool_end. messages.length flips on done.
   // biome-ignore lint/correctness/useExhaustiveDependencies: deps trigger the effect intentionally — re-run on every new chunk so the scroll catches up
   useEffect(() => {
     if (!pinnedToBottomRef.current) return;
     const el = listRef.current;
     if (!el) return;
     el.scrollTop = el.scrollHeight;
-  }, [messages.length, streamingText]);
+  }, [messages.length, currentTurn]);
 
-  if (messages.length === 0 && !streamingText) {
+  if (messages.length === 0 && !currentTurn) {
     return (
       <div className="message-list-empty">
         <span>{emptyHint ?? 'Start the conversation. Tools, files, and skills come along.'}</span>
@@ -45,12 +43,37 @@ export function MessageList({ messages, streamingText, emptyHint }: MessageListP
     );
   }
 
+  // Derived "thinking" state: the user just sent a message, no SSE event
+  // has arrived yet (currentTurn null), and there's no error. Shows a
+  // pulsing placeholder bubble so the user sees the agent is alive even
+  // before the first text_delta lands. The first event clears it (because
+  // currentTurn becomes non-null and the live streaming bubble takes over).
+  const lastMessage = messages[messages.length - 1];
+  const isThinking = lastMessage?.role === 'user' && !currentTurn;
+
   return (
     <div ref={listRef} className="message-list" onScroll={onScroll}>
-      {messages.map((m) => (
-        <MessageBubble key={m.id} message={m} />
-      ))}
-      {streamingText !== null ? <StreamingBubble text={streamingText} /> : null}
+      {messages.map((m) =>
+        m.role === 'user' ? (
+          <UserBubble key={m.id} message={m} />
+        ) : (
+          <AssistantBubble key={m.id} turn={m} />
+        ),
+      )}
+      {currentTurn ? <AssistantBubble turn={currentTurn} streaming /> : null}
+      {isThinking ? <ThinkingBubble /> : null}
+    </div>
+  );
+}
+
+function ThinkingBubble() {
+  return (
+    <div className="message-row message-row-assistant">
+      <div className="message-assistant message-thinking" aria-label="Agent is thinking">
+        <span className="thinking-dot" />
+        <span className="thinking-dot" />
+        <span className="thinking-dot" />
+      </div>
     </div>
   );
 }

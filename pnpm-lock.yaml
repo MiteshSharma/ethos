@@ -64,6 +64,9 @@ importers:
       '@ethosagent/core':
         specifier: workspace:*
         version: link:../../packages/core
+      '@ethosagent/cron':
+        specifier: workspace:*
+        version: link:../../extensions/cron
       '@ethosagent/types':
         specifier: workspace:*
         version: link:../../packages/types
@@ -601,6 +604,9 @@ importers:
       '@ethosagent/agent-bridge':
         specifier: workspace:*
         version: link:../../packages/agent-bridge
+      '@ethosagent/cron':
+        specifier: workspace:*
+        version: link:../cron
       '@ethosagent/personalities':
         specifier: workspace:*
         version: link:../personalities

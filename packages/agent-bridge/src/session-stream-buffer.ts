@@ -26,6 +26,13 @@ export class SessionStreamBuffer<E = unknown> {
   private buffers = new Map<string, BufferedEvent<E>[]>();
   private heads = new Map<string, number>();
   private reapTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  /**
+   * Called when a session's reap timer fires — i.e. nothing has touched
+   * the buffer for `reapMs` after `disconnect()`. Owners (e.g. ChatService)
+   * use this to clean up sibling state (the per-session `AgentBridge`).
+   * Set after construction; the buffer doesn't need it for its own work.
+   */
+  onReap?: (sessionId: string) => void;
 
   constructor(options: SessionStreamBufferOptions = {}) {
     this.capacity = options.capacity ?? 1000;
@@ -92,6 +99,14 @@ export class SessionStreamBuffer<E = unknown> {
       this.buffers.delete(sessionId);
       this.heads.delete(sessionId);
       this.reapTimers.delete(sessionId);
+      // Fire AFTER our internal cleanup so owners observing the reap see
+      // the buffer already empty for this id. Failures in the callback
+      // are isolated — the buffer's own teardown is already done.
+      try {
+        this.onReap?.(sessionId);
+      } catch {
+        // Owner-side bug shouldn't kill the buffer.
+      }
     }, this.reapMs);
     if (typeof t.unref === 'function') t.unref();
     this.reapTimers.set(sessionId, t);

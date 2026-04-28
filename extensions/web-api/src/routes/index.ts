@@ -38,6 +38,7 @@ export interface ServiceContainer {
   config: import('../services/config.service').ConfigService;
   onboarding: import('../services/onboarding.service').OnboardingService;
   approvals: import('../services/approvals.service').ApprovalsService;
+  cron: import('../services/cron.service').CronService;
 }
 
 export function createRoutes(opts: CreateRoutesOptions): Hono {

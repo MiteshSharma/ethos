@@ -1,10 +1,13 @@
+import { join } from 'node:path';
 import { SessionStreamBuffer } from '@ethosagent/agent-bridge';
 import type { AgentLoop } from '@ethosagent/core';
+import type { CronScheduler } from '@ethosagent/cron';
 import type { PersonalityRegistry, SessionStore } from '@ethosagent/types';
 import type { SseEvent } from '@ethosagent/web-contracts';
 import type { Hono } from 'hono';
 import { AllowlistRepository } from './repositories/allowlist.repository';
 import { ConfigRepository } from './repositories/config.repository';
+import { CronRepository } from './repositories/cron.repository';
 import { PersonalityRepository } from './repositories/personality.repository';
 import { SessionsRepository } from './repositories/sessions.repository';
 import { WebTokenRepository } from './repositories/web-token.repository';
@@ -13,6 +16,7 @@ import { createWebApprovalHook, type DangerPredicate } from './services/approval
 import { ApprovalsService } from './services/approvals.service';
 import { type ChatDefaults, ChatService } from './services/chat.service';
 import { ConfigService } from './services/config.service';
+import { CronService } from './services/cron.service';
 import { OnboardingService } from './services/onboarding.service';
 import { PersonalitiesService } from './services/personalities.service';
 import { SessionsService } from './services/sessions.service';
@@ -56,6 +60,13 @@ export interface CreateWebApiOptions {
    * static + HMR at :5173 and proxies API calls back here.
    */
   webDist?: string;
+  /**
+   * CronScheduler instance for the cron tab. Boot code constructs and
+   * `start()`s it; the web-api just calls list/create/run/etc. on the
+   * shared instance. Omit when cron isn't part of this deployment —
+   * `cron.list` returns an empty array gracefully.
+   */
+  cronScheduler?: CronScheduler;
 }
 
 export function createWebApi(opts: CreateWebApiOptions): Hono {
@@ -68,6 +79,7 @@ export function createWebApi(opts: CreateWebApiOptions): Hono {
   });
   const configRepo = new ConfigRepository({ dataDir: opts.dataDir });
   const allowlistRepo = new AllowlistRepository({ dataDir: opts.dataDir });
+  const cronRepo = new CronRepository({ cronDir: join(opts.dataDir, 'cron') });
 
   // --- Services (business logic) ---
   const sessionsService = new SessionsService({ sessions: sessionsRepo });
@@ -78,16 +90,29 @@ export function createWebApi(opts: CreateWebApiOptions): Hono {
     personalities: personalitiesRepo,
   });
   const approvalsService = new ApprovalsService({ allowlist: allowlistRepo });
+  // Cron service degrades gracefully when no scheduler is provided —
+  // tests and ACP-only deployments don't need it. Mutations throw a
+  // clear error in that mode; reads return empty.
+  const cronService = new CronService({
+    scheduler: opts.cronScheduler ?? createPassiveScheduler(),
+    repo: cronRepo,
+  });
 
   // One buffer per process — keyed internally by sessionId. Bridges are
-  // owned by ChatService.
+  // owned by ChatService. The reap callback lets the bridge map drain
+  // alongside the SSE buffer so a long-running server doesn't accumulate
+  // an AgentBridge per session forever (memory leak otherwise).
   const buffer = new SessionStreamBuffer<SseEvent>();
   const chatService = new ChatService({
     loop: opts.agentLoop,
     sessions: sessionsRepo,
     buffer,
     defaults: opts.chatDefaults,
+    onForget: (sessionId) => approvalsService.cancelForSession(sessionId),
   });
+  buffer.onReap = (sessionId) => {
+    chatService.forget(sessionId);
+  };
 
   // Bridge approvals → SSE. The hook fires when the agent reaches a
   // dangerous tool call; the resolved event lets every tab on the same
@@ -128,11 +153,42 @@ export function createWebApi(opts: CreateWebApiOptions): Hono {
       config: configService,
       onboarding: onboardingService,
       approvals: approvalsService,
+      cron: cronService,
     },
     ...(opts.allowedOrigins ? { allowedOrigins: opts.allowedOrigins } : {}),
     ...(opts.secureCookie !== undefined ? { secureCookie: opts.secureCookie } : {}),
     ...(opts.webDist ? { webDist: opts.webDist } : {}),
   });
+}
+
+/**
+ * Stand-in for the CronScheduler when no real one is wired (e.g. tests,
+ * ACP-only deployments). File-backed reads still work via the
+ * scheduler's own `listJobs`/`getJob`; writes/runs throw a clear error
+ * so the surface can render an actionable message.
+ */
+function createPassiveScheduler(): CronScheduler {
+  return {
+    listJobs: async () => [],
+    getJob: async () => null,
+    createJob: async () => {
+      throw new Error('Cron scheduler not configured for this server.');
+    },
+    deleteJob: async () => {
+      throw new Error('Cron scheduler not configured for this server.');
+    },
+    pauseJob: async () => {
+      throw new Error('Cron scheduler not configured for this server.');
+    },
+    resumeJob: async () => {
+      throw new Error('Cron scheduler not configured for this server.');
+    },
+    runJobNow: async () => {
+      throw new Error('Cron scheduler not configured for this server.');
+    },
+    start: () => {},
+    stop: () => {},
+  } as unknown as CronScheduler;
 }
 
 // Re-exports so boot code can read tokens / inspect contract surfaces directly.

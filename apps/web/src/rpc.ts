@@ -17,7 +17,11 @@ import type { ContractRouterClient } from '@orpc/contract';
 // dev server proxies `/rpc` to :3000 — see `vite.config.ts` — so
 // same-origin holds in dev too.
 
-const apiBase = import.meta.env.VITE_API_URL ?? '';
+// `RPCLink` calls `new URL(url)` internally, which requires an absolute URL.
+// In dev (Vite), same-origin = `http://localhost:5173`; the proxy forwards
+// `/rpc` → `:3000`. In prod (single-port), same-origin = `:3000` directly.
+const apiBase =
+  import.meta.env.VITE_API_URL ?? (typeof window !== 'undefined' ? window.location.origin : '');
 
 const link = new RPCLink({
   url: `${apiBase}/rpc`,

@@ -41,6 +41,18 @@ export interface UseChatResult {
    *  before the user types anything. */
   currentSessionId: string | null;
   sendMessage: (text: string) => Promise<void>;
+  /**
+   * Switch the in-flight session to a new id (e.g. after a fork). Wipes
+   * local state synchronously so old messages don't linger while the
+   * new session's history fetches.
+   */
+  switchSession: (sessionId: string) => void;
+  /**
+   * Drop the current session entirely — wipes reducer state and clears
+   * `currentSessionId`. The next `sendMessage` will create a fresh
+   * session on the server. Used by the "New session" affordance.
+   */
+  resetSession: () => void;
 }
 
 type Reducer = (state: ChatState, op: ReducerOp) => ChatState;
@@ -153,5 +165,16 @@ export function useChat(opts: UseChatOptions): UseChatResult {
     [currentSessionId, personalityId, onSessionCreated],
   );
 
-  return { state, currentSessionId, sendMessage };
+  const switchSession = useCallback((sessionId: string) => {
+    dispatch({ kind: 'action', action: { type: 'reset' } });
+    setCurrentSessionId(sessionId);
+  }, []);
+
+  const resetSession = useCallback(() => {
+    dispatch({ kind: 'action', action: { type: 'reset' } });
+    setCurrentSessionId(null);
+    historyLoadedFor.current = null;
+  }, []);
+
+  return { state, currentSessionId, sendMessage, switchSession, resetSession };
 }

@@ -22,6 +22,9 @@ help:
 	@echo "Development"
 	@echo "  dev                - Start ethos in interactive chat mode (TUI when TTY)"
 	@echo "  tui                - Alias for dev (explicit TUI entry point)"
+	@echo "  web-dev               - Web UI dev: Vite HMR :5173 + ethos serve :3000 (recommended for active development)"
+	@echo "  web-build             - Build the SPA to apps/web/dist"
+	@echo "  web                   - Build SPA + run ethos serve with mounted static (single port :3000)"
 	@echo "  gateway-setup         - Configure Telegram bot token"
 	@echo "  gateway               - Start the Telegram gateway in foreground (dev)"
 	@echo "  cron                  - Manage cron jobs (list|create|pause|resume|delete|run)"
@@ -110,6 +113,58 @@ dev:
 	@$(NVM_EXEC) pnpm dev
 
 tui: dev
+
+# ---------- web UI ----------
+#
+# Two run modes:
+#  • web-dev — active development. Vite at :5173 (HMR + source maps), ethos
+#    serve at :3000. Vite proxies /rpc, /sse, /auth to :3000 so the browser
+#    sees same-origin and the auth cookie stays scoped. Open the printed
+#    `/auth/exchange?t=...` URL on :3000 once to set the cookie, then use
+#    http://localhost:5173/ for the actual UI.
+#  • web — production-like single port. Builds the SPA, mounts it via Hono
+#    in `ethos serve`. Browser hits :3000 only. Use this to test what
+#    real users will experience.
+#
+# WEB_PORT and ACP_PORT are overridable via env if 3000/3001 are taken.
+
+WEB_PORT ?= 3000
+ACP_PORT ?= 3001
+VITE_PORT ?= 5173
+
+web-build:
+	@$(NVM_EXEC) pnpm build:web
+
+# Parallel: kill both child processes when Make exits (Ctrl-C, error, etc).
+# `trap 'kill 0' EXIT` sends SIGTERM to every process in the same group so
+# neither orphan survives.
+#
+# Auth handshake nuance: Chrome partitions cookies between localhost ports
+# in some configurations, so the auth-exchange URL MUST be opened on :$(VITE_PORT)
+# (Vite proxies it to :$(WEB_PORT)). The token itself comes from `ethos serve`'s
+# banner — copy the `?t=<token>` value, paste it after `localhost:$(VITE_PORT)/auth/exchange`.
+web-dev:
+	@echo "Starting web dev stack..."
+	@echo "  Vite (HMR):   http://localhost:$(VITE_PORT)/"
+	@echo "  ethos serve:  http://localhost:$(WEB_PORT)/  (token printed in startup banner below)"
+	@echo "  ACP server:   http://localhost:$(ACP_PORT)/"
+	@echo ""
+	@echo "AUTH:  Visit http://localhost:$(VITE_PORT)/auth/exchange?t=<TOKEN>"
+	@echo "       (NOT :$(WEB_PORT) — Chrome scopes cookies per port. Use :$(VITE_PORT) so"
+	@echo "        the cookie is stored for the SPA's origin.)"
+	@echo "       Copy <TOKEN> from the 'open: http://localhost:$(WEB_PORT)/...' line below."
+	@echo ""
+	@$(NVM_EXEC) bash -c '\
+		trap "kill 0" EXIT INT TERM; \
+		pnpm exec tsx apps/ethos/src/index.ts serve --web-experimental --port $(ACP_PORT) --web-port $(WEB_PORT) & \
+		pnpm --filter @ethosagent/web dev -- --port $(VITE_PORT) --strictPort & \
+		wait \
+	'
+
+# Production-like — build first so the static handler has dist to serve.
+web: web-build
+	@echo "Web UI bundled — starting ethos serve at http://localhost:$(WEB_PORT)/"
+	@$(NVM_EXEC) pnpm exec tsx apps/ethos/src/index.ts serve --web-experimental --port $(ACP_PORT) --web-port $(WEB_PORT)
 
 gateway-setup:
 	@$(NVM_EXEC) pnpm exec tsx apps/ethos/src/index.ts gateway setup
@@ -348,7 +403,7 @@ clean:
 	@echo "Clean complete."
 
 .PHONY: help setup setup-nvm setup-node setup-pnpm setup-gstack prepare \
-        dev tui gateway-setup gateway cron personality memory keys \
+        dev tui web web-dev web-build gateway-setup gateway cron personality memory keys \
         start-gateway-daemon stop-gateway-daemon delete-gateway-daemon status-gateway-daemon \
         docs docs-build \
         test typecheck lint format check \

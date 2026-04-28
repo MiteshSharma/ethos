@@ -3,6 +3,7 @@ import { existsSync } from 'node:fs';
 import { join, resolve as pathResolve } from 'node:path';
 import { AcpServer } from '@ethosagent/acp-server';
 import { AgentMesh } from '@ethosagent/agent-mesh';
+import { CronScheduler } from '@ethosagent/cron';
 import { createPersonalityRegistry } from '@ethosagent/personalities';
 import { SQLiteSessionStore } from '@ethosagent/session-sqlite';
 import { createWebApi, WebTokenRepository } from '@ethosagent/web-api';
@@ -74,8 +75,29 @@ export async function runServe(args: string[], config: EthosConfig): Promise<voi
 
   // Web API (Phase 26). Additive — only mounts when --web-experimental is set.
   let webShutdown: (() => Promise<void>) | null = null;
+  let cronScheduler: CronScheduler | null = null;
   if (webEnabled) {
     const webDist = locateWebDist(parseFlagValue(args, ['--web-dist']));
+
+    // Cron tab needs an actually-running scheduler so jobs created via
+    // the web tick on time. Mirrors the gateway's runJob — accumulate
+    // text_delta from the same agent loop, write the rest to the
+    // canonical output dir under ~/.ethos/cron/output/.
+    cronScheduler = new CronScheduler({
+      runJob: async (job) => {
+        const sessionKey = `cron:${job.id}:${new Date().toISOString()}`;
+        let output = '';
+        for await (const event of loop.run(job.prompt, {
+          sessionKey,
+          ...(job.personality ? { personalityId: job.personality } : {}),
+        })) {
+          if (event.type === 'text_delta') output += event.text;
+        }
+        return { jobId: job.id, ranAt: new Date().toISOString(), output, sessionKey };
+      },
+    });
+    cronScheduler.start();
+
     const webApp = createWebApi({
       dataDir: dir,
       sessionStore: session,
@@ -90,6 +112,7 @@ export async function runServe(args: string[], config: EthosConfig): Promise<voi
       // Same `checkCommand` rules the CLI guard uses; surfacing them via
       // the approval modal instead of a hard block.
       dangerPredicate: createDangerPredicate(),
+      cronScheduler,
       ...(webDist ? { webDist } : {}),
     });
     const tokens = new WebTokenRepository({ dataDir: dir });
@@ -114,6 +137,7 @@ export async function runServe(args: string[], config: EthosConfig): Promise<voi
   const cleanup = async () => {
     stopHeartbeat();
     mesh.unregister(agentId);
+    if (cronScheduler) cronScheduler.stop();
     if (webShutdown) await webShutdown();
     process.exit(0);
   };

@@ -38,10 +38,17 @@ export function sseRoutes(opts: SseRoutesOptions) {
       unsubscribe = opts.chat.subscribe(sessionId, sinceSeq, async (buffered) => {
         // Stream is closed once `onAbort` fires; writes after that no-op safely
         // because `streamSSE` guards them.
+        //
+        // No `event:` field on purpose. Setting it to a non-default name makes
+        // the browser's `EventSource.onmessage` skip the frame — only matching
+        // `addEventListener('<type>', ...)` would catch it. The client parses
+        // the type out of the JSON `data` payload (every event has a
+        // discriminator `type` field), so an explicit `event:` line is redundant
+        // AND breaks the default handler. Curl users still see the type via
+        // `data:` content.
         await stream.writeSSE({
           id: String(buffered.seq),
           data: JSON.stringify(buffered.event),
-          event: buffered.event.type,
         });
       });
 

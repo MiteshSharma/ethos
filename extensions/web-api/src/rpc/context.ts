@@ -3,6 +3,7 @@ import { implement } from '@orpc/server';
 import type { ApprovalsService } from '../services/approvals.service';
 import type { ChatService } from '../services/chat.service';
 import type { ConfigService } from '../services/config.service';
+import type { CronService } from '../services/cron.service';
 import type { OnboardingService } from '../services/onboarding.service';
 import type { PersonalitiesService } from '../services/personalities.service';
 import type { SessionsService } from '../services/sessions.service';
@@ -22,6 +23,7 @@ export interface RpcContext {
   config: ConfigService;
   onboarding: OnboardingService;
   approvals: ApprovalsService;
+  cron: CronService;
 }
 
 export const os = implement(contract).$context<RpcContext>();

@@ -1,5 +1,6 @@
 import { chatRouter } from './chat';
 import { configRouter } from './config';
+import { cronRouter } from './cron';
 import { onboardingRouter } from './onboarding';
 import { personalitiesRouter } from './personalities';
 import { sessionsRouter } from './sessions';
@@ -25,6 +26,7 @@ export const apiRouter = {
   config: configRouter,
   onboarding: onboardingRouter,
   tools: toolsRouter,
+  cron: cronRouter,
 };
 
 export type ApiRouter = typeof apiRouter;

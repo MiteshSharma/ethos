@@ -39,6 +39,7 @@
   },
   "dependencies": {
     "@ethosagent/core": "workspace:*",
+    "@ethosagent/cron": "workspace:*",
     "@ethosagent/types": "workspace:*",
     "@ethosagent/wiring": "workspace:*",
     "@ethosagent/web-api": "workspace:*",

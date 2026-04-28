@@ -22,7 +22,13 @@ interface BridgeEventMap {
   thinking_delta: [thinking: string];
   tool_start: [toolCallId: string, toolName: string, args: unknown];
   tool_progress: [toolName: string, message: string, percent: number | undefined];
-  tool_end: [toolCallId: string, toolName: string, ok: boolean, durationMs: number];
+  tool_end: [
+    toolCallId: string,
+    toolName: string,
+    ok: boolean,
+    durationMs: number,
+    result: string | undefined,
+  ];
   usage: [inputTokens: number, outputTokens: number, estimatedCostUsd: number];
   error: [error: string, code: string];
   done: [text: string, turnCount: number];
@@ -120,7 +126,14 @@ export class AgentBridge extends EventEmitter<BridgeEventMap> {
             this.emit('tool_progress', event.toolName, event.message, event.percent);
             break;
           case 'tool_end':
-            this.emit('tool_end', event.toolCallId, event.toolName, event.ok, event.durationMs);
+            this.emit(
+              'tool_end',
+              event.toolCallId,
+              event.toolName,
+              event.ok,
+              event.durationMs,
+              event.result,
+            );
             break;
           case 'usage':
             this.emit('usage', event.inputTokens, event.outputTokens, event.estimatedCostUsd);

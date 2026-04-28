@@ -15,6 +15,7 @@
   },
   "dependencies": {
     "@ethosagent/agent-bridge": "workspace:*",
+    "@ethosagent/cron": "workspace:*",
     "@ethosagent/personalities": "workspace:*",
     "@ethosagent/session-sqlite": "workspace:*",
     "@ethosagent/types": "workspace:*",

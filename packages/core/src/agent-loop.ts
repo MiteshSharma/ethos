@@ -47,6 +47,14 @@ export type AgentEvent =
       // Phase 30.2 — same boundary applies to tool_end success rendering.
       // Failures (`ok: false`) ignore the field and always render.
       audience?: 'internal' | 'user';
+      /**
+       * Tool output body — the success value when `ok`, or the error
+       * message when `ok: false`. Optional so consumers that only care
+       * about the status (CLI ASCII chips, telemetry) can ignore it.
+       * The web chip surfaces this on expand-on-click without a
+       * follow-up history fetch.
+       */
+      result?: string;
     }
   | { type: 'usage'; inputTokens: number; outputTokens: number; estimatedCostUsd: number }
   | { type: 'error'; error: string; code: string }
@@ -524,6 +532,7 @@ export class AgentLoop {
             toolName: tc.toolName,
             ok: false,
             durationMs: 0,
+            result: beforeResult.error,
           };
           prepped.push({
             toolCallId: tc.toolCallId,
@@ -587,6 +596,7 @@ export class AgentLoop {
             toolName: p.name,
             ok: result.ok,
             durationMs,
+            result: result.ok ? result.value : result.error,
           };
           await this.hooks.fireVoid('after_tool_call', {
             sessionId,

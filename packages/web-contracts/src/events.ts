@@ -50,6 +50,9 @@ export const ToolEndEventSchema = z.object({
   ok: z.boolean(),
   durationMs: z.number().nonnegative(),
   audience: z.enum(['internal', 'user']).optional(),
+  /** Tool output body — success value or error message. The web chip
+   *  surfaces it on click-to-expand without a follow-up history fetch. */
+  result: z.string().optional(),
 });
 
 export const UsageEventSchema = z.object({
