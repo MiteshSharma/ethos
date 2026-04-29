@@ -102,6 +102,7 @@ describe('shouldInject', () => {
 
 describe('applySubstitutions', () => {
   it('replaces ETHOS_SKILL_DIR and ETHOS_SESSION_ID', () => {
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: OpenClaw substitution placeholders, replaced at runtime by applySubstitutions — must NOT be a JS template literal
     const input = 'Run ${ETHOS_SKILL_DIR}/script.sh in session ${ETHOS_SESSION_ID}.';
     expect(applySubstitutions(input, '/skills/foo', 'sess-123')).toBe(
       'Run /skills/foo/script.sh in session sess-123.',
@@ -109,6 +110,7 @@ describe('applySubstitutions', () => {
   });
 
   it('leaves unrelated template-like strings alone', () => {
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: intentional ${OTHER_VAR} literal — this test asserts non-recognized vars pass through unchanged
     const input = 'No subs ${OTHER_VAR} here.';
     expect(applySubstitutions(input, '/x', 'y')).toBe(input);
   });

@@ -252,9 +252,11 @@ function RowActions({ id, onOpen, onFork, onDelete, deleting }: RowActionsProps)
 
   return (
     <div
+      role="toolbar"
+      aria-label={`Actions for ${id}`}
       className="sessions-row-actions"
       onClick={(e) => e.stopPropagation()}
-      aria-label={`Actions for ${id}`}
+      onKeyDown={(e) => e.stopPropagation()}
     >
       <Dropdown
         menu={{

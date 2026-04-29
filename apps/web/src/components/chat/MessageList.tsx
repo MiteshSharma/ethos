@@ -69,7 +69,11 @@ export function MessageList({ messages, currentTurn, emptyHint }: MessageListPro
 function ThinkingBubble() {
   return (
     <div className="message-row message-row-assistant">
-      <div className="message-assistant message-thinking" aria-label="Agent is thinking">
+      <div
+        role="status"
+        className="message-assistant message-thinking"
+        aria-label="Agent is thinking"
+      >
         <span className="thinking-dot" />
         <span className="thinking-dot" />
         <span className="thinking-dot" />

@@ -167,21 +167,26 @@ export async function runGatewayStart(config: EthosConfig): Promise<void> {
   }
 
   if (hasEmailConfig) {
-    const mod = await loadAdapterModule<typeof import('@ethosagent/platform-email')>(
-      '@ethosagent/platform-email',
-      'Email',
-    );
-    if (mod) {
-      adapters.push(
-        new mod.EmailAdapter({
-          imapHost: config.emailImapHost!,
-          imapPort: config.emailImapPort ?? 993,
-          user: config.emailUser!,
-          password: config.emailPassword!,
-          smtpHost: config.emailSmtpHost!,
-          smtpPort: config.emailSmtpPort ?? 587,
-        }),
+    // Re-narrow for the type checker. hasEmailConfig already proves all four
+    // are truthy (see line 97-98); the inner check is unreachable at runtime.
+    const { emailImapHost, emailUser, emailPassword, emailSmtpHost } = config;
+    if (emailImapHost && emailUser && emailPassword && emailSmtpHost) {
+      const mod = await loadAdapterModule<typeof import('@ethosagent/platform-email')>(
+        '@ethosagent/platform-email',
+        'Email',
       );
+      if (mod) {
+        adapters.push(
+          new mod.EmailAdapter({
+            imapHost: emailImapHost,
+            imapPort: config.emailImapPort ?? 993,
+            user: emailUser,
+            password: emailPassword,
+            smtpHost: emailSmtpHost,
+            smtpPort: config.emailSmtpPort ?? 587,
+          }),
+        );
+      }
     }
   }
 

@@ -265,8 +265,9 @@ export class CronScheduler {
   private async patchJob(id: string, patch: Partial<CronJob>): Promise<void> {
     await this.withJobsLock(async (jobs) => {
       const idx = jobs.findIndex((j) => j.id === id);
-      if (idx < 0) throw new Error(`Job not found: ${id}`);
-      jobs[idx] = { ...jobs[idx]!, ...patch };
+      const existing = idx >= 0 ? jobs[idx] : undefined;
+      if (!existing) throw new Error(`Job not found: ${id}`);
+      jobs[idx] = { ...existing, ...patch };
       return jobs;
     });
   }

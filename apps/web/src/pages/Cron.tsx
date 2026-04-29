@@ -213,7 +213,13 @@ function RowActions({ job }: { job: CronJob }) {
   ];
 
   return (
-    <div className="sessions-row-actions" onClick={(e) => e.stopPropagation()}>
+    <div
+      role="toolbar"
+      aria-label="Job actions"
+      className="sessions-row-actions"
+      onClick={(e) => e.stopPropagation()}
+      onKeyDown={(e) => e.stopPropagation()}
+    >
       <Dropdown
         menu={{
           items,

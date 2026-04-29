@@ -210,7 +210,9 @@ describe('SkillsInjector', () => {
         '---',
         'name: sub',
         '---',
+        // biome-ignore lint/suspicious/noTemplateCurlyInString: OpenClaw substitution placeholders, not JS template literals — replaced at runtime by applySubstitutions
         'Skill dir = ${ETHOS_SKILL_DIR}',
+        // biome-ignore lint/suspicious/noTemplateCurlyInString: OpenClaw substitution placeholder, replaced at runtime
         'Session = ${ETHOS_SESSION_ID}',
       ].join('\n'),
     );
