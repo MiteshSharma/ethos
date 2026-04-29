@@ -4,7 +4,11 @@ import type {
   OutboundMessage,
   PlatformAdapter,
 } from '@ethosagent/types';
-import { App, type MessageEvent } from '@slack/bolt';
+import boltPkg from '@slack/bolt';
+import type { MessageEvent } from '@slack/bolt';
+
+const { App } = boltPkg;
+type App = InstanceType<typeof App>;
 
 // ---------------------------------------------------------------------------
 // Text chunking — Slack 4000 char limit per block

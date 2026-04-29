@@ -1,6 +1,6 @@
 {
   "name": "@ethosagent/core",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "private": false,
   "type": "module",
   "description": "Core agent loop, tool registry, and hook registry for the Ethos agent framework",
@@ -19,10 +19,12 @@
     }
   },
   "scripts": {
-    "build": "tsup src/index.ts --format esm --dts --sourcemap"
+    "build": "tsup"
   },
   "dependencies": {
-    "@ethosagent/storage-fs": "workspace:*",
     "@ethosagent/types": "workspace:*"
+  },
+  "devDependencies": {
+    "@ethosagent/storage-fs": "workspace:*"
   }
 }
