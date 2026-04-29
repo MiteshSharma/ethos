@@ -6,6 +6,48 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **Personality isolation — Phase 1.1 + 2.1 (MCP + plugin gating).**
+  Personalities now declare default-deny access lists for MCP servers and plugins
+  via two new `PersonalityConfig` fields (`mcp_servers`, `plugins`). Without an
+  explicit allowlist, a personality has no access to any MCP tool or plugin hook,
+  tool, or injector — closing the cross-personality plugin leak gap.
+  ([personality_isolation.md](./plan/personality_isolation.md))
+
+  Key changes:
+
+  - **`PersonalityConfig`** (Phase 1.1 / 2.1) — two new optional fields:
+    `mcp_servers?: string[]` and `plugins?: string[]`. Both are default-deny:
+    absent or empty means no access. `.personality-field-count` bumped 14→16.
+
+  - **`ToolRegistry.toDefinitions` / `executeParallel`** — new `filterOpts:
+    ToolFilterOpts` parameter adds a second gating layer beyond the name-based
+    `allowedTools` list. `allowedMcpServers` blocks `mcp__<server>__*` tools
+    whose server isn't listed; `allowedPlugins` blocks tools registered by
+    unlisted plugins.
+
+  - **`HookRegistry.fireVoid` / `fireModifying` / `fireClaiming`** — new
+    `allowedPlugins?: string[]` parameter. Built-in handlers (no `pluginId`)
+    always fire. Plugin handlers only fire when their plugin id appears in the
+    list. `undefined` = no filter (gateway hooks that predate personality context).
+
+  - **`PluginApiImpl`** — `registerInjector()` now records injector→pluginId
+    provenance in a shared `injectorPluginIds: Map<ContextInjector, string>` so
+    `AgentLoop` can gate context injectors per personality.
+
+  - **`AgentLoop`** — builds `allowedPlugins` and `allowedMcpServers` once per
+    turn from the active personality, then threads them through all 7 hook
+    fire sites, both tool registry calls, and the injector iteration loop.
+
+  - **Test coverage** — 27-path commitment fulfilled: tool registry (5 paths +
+    executeParallel gating), hook registry (8 paths × 3 fire types + REGRESSION
+    fail-open), PluginApiImpl injectorPluginIds tracking (2 paths), AgentLoop
+    integration (1 path: hook fires for personality A, not B).
+
+  - **Documentation** — `docs/content/personality/create-your-own.md` updated
+    with `mcp_servers` and `plugins` field descriptions.
+
 ### Changed
 
 - **Storage abstraction (internal refactor — no user-visible behaviour change).**

@@ -171,6 +171,81 @@ describe('DefaultToolRegistry', () => {
     expect(r.error.length).toBeGreaterThan(0);
   });
 
+  // ---------------------------------------------------------------------------
+  // filterOpts gating — Phase 2.1 personality isolation
+  // ---------------------------------------------------------------------------
+
+  describe('filterOpts gating', () => {
+    const makePluginTool = (name: string, pluginId?: string) => ({
+      name,
+      description: `tool ${name}`,
+      schema: { type: 'object' },
+      execute: async (): Promise<{ ok: true; value: string }> => ({ ok: true, value: name }),
+      pluginId,
+    });
+
+    it('toDefinitions: allowedPlugins=[] blocks plugin tools, keeps built-ins', () => {
+      const reg = new DefaultToolRegistry();
+      reg.register({ name: 'builtin', description: 'b', schema: {}, execute: async () => ({ ok: true, value: '' }) });
+      reg.register({ name: 'plugin_tool', description: 'p', schema: {}, execute: async () => ({ ok: true, value: '' }) }, { pluginId: 'p1' });
+
+      const defs = reg.toDefinitions(undefined, { allowedPlugins: [] });
+      expect(defs.map((d) => d.name)).toEqual(['builtin']);
+    });
+
+    it('toDefinitions: allowedPlugins=[p1] allows p1 tools', () => {
+      const reg = new DefaultToolRegistry();
+      reg.register({ name: 'builtin', description: 'b', schema: {}, execute: async () => ({ ok: true, value: '' }) });
+      reg.register({ name: 'p1_tool', description: 'p', schema: {}, execute: async () => ({ ok: true, value: '' }) }, { pluginId: 'p1' });
+      reg.register({ name: 'p2_tool', description: 'q', schema: {}, execute: async () => ({ ok: true, value: '' }) }, { pluginId: 'p2' });
+
+      const defs = reg.toDefinitions(undefined, { allowedPlugins: ['p1'] });
+      const names = defs.map((d) => d.name);
+      expect(names).toContain('builtin');
+      expect(names).toContain('p1_tool');
+      expect(names).not.toContain('p2_tool');
+    });
+
+    it('toDefinitions: allowedMcpServers=[] blocks MCP tools', () => {
+      const reg = new DefaultToolRegistry();
+      reg.register({ name: 'builtin', description: 'b', schema: {}, execute: async () => ({ ok: true, value: '' }) });
+      reg.register({ name: 'mcp__weather__get', description: 'm', schema: {}, execute: async () => ({ ok: true, value: '' }) });
+
+      const defs = reg.toDefinitions(undefined, { allowedMcpServers: [] });
+      expect(defs.map((d) => d.name)).toEqual(['builtin']);
+    });
+
+    it('toDefinitions: allowedMcpServers=[weather] allows that MCP server', () => {
+      const reg = new DefaultToolRegistry();
+      reg.register({ name: 'mcp__weather__get', description: 'w', schema: {}, execute: async () => ({ ok: true, value: '' }) });
+      reg.register({ name: 'mcp__calendar__list', description: 'c', schema: {}, execute: async () => ({ ok: true, value: '' }) });
+
+      const defs = reg.toDefinitions(undefined, { allowedMcpServers: ['weather'] });
+      expect(defs.map((d) => d.name)).toEqual(['mcp__weather__get']);
+    });
+
+    it('executeParallel: filterOpts blocks plugin tool at execution time', async () => {
+      const reg = new DefaultToolRegistry();
+      reg.register({ name: 'builtin', description: 'b', schema: {}, execute: async () => ({ ok: true, value: 'ok' }) });
+      reg.register({ name: 'p1_tool', description: 'p', schema: {}, execute: async () => ({ ok: true, value: 'plugin ran' }) }, { pluginId: 'p1' });
+
+      const results = await reg.executeParallel(
+        [
+          { toolCallId: 'c1', name: 'builtin', args: {} },
+          { toolCallId: 'c2', name: 'p1_tool', args: {} },
+        ],
+        makeCtx(),
+        undefined,
+        { allowedPlugins: [] },
+      );
+
+      expect(results[0]?.result.ok).toBe(true);
+      const r = results[1]?.result as Extract<ToolResult, { ok: false }>;
+      expect(r.ok).toBe(false);
+      expect(r.code).toBe('not_available');
+    });
+  });
+
   it('executeParallel: property — across random allowlists, blocked tools never execute', async () => {
     const allToolNames = ['alpha', 'beta', 'gamma', 'delta', 'epsilon'];
     const reg = new DefaultToolRegistry();

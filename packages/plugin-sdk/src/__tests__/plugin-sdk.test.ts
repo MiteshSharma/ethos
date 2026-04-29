@@ -14,6 +14,7 @@ function makeRegistries() {
     tools: new DefaultToolRegistry(),
     hooks: new DefaultHookRegistry(),
     injectors,
+    injectorPluginIds: new Map<import('@ethosagent/types').ContextInjector, string>(),
     personalities: new DefaultPersonalityRegistry(),
   };
 }
@@ -155,6 +156,35 @@ describe('PluginApiImpl.registerInjector', () => {
     api.registerInjector(injector);
     api.cleanup();
     expect(registries.injectors).not.toContain(injector);
+  });
+
+  it('registerInjector records provenance in injectorPluginIds', () => {
+    const registries = makeRegistries();
+    const api = new PluginApiImpl('my-plugin', registries);
+
+    const injector: import('@ethosagent/types').ContextInjector = {
+      id: 'test',
+      priority: 50,
+      async inject() { return null; },
+    };
+
+    api.registerInjector(injector);
+    expect(registries.injectorPluginIds.get(injector)).toBe('my-plugin');
+  });
+
+  it('cleanup removes injector from injectorPluginIds', () => {
+    const registries = makeRegistries();
+    const api = new PluginApiImpl('my-plugin', registries);
+
+    const injector: import('@ethosagent/types').ContextInjector = {
+      id: 'test',
+      priority: 50,
+      async inject() { return null; },
+    };
+
+    api.registerInjector(injector);
+    api.cleanup();
+    expect(registries.injectorPluginIds.has(injector)).toBe(false);
   });
 });
 

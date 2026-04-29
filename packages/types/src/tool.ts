@@ -61,8 +61,24 @@ export interface Tool<TArgs = unknown> {
   isAvailable?: () => boolean;
 }
 
+/** Options for filtering tools beyond the `allowedTools` name list. */
+export interface ToolFilterOpts {
+  /**
+   * MCP server allowlist. Tools named `mcp__<server>__*` are excluded
+   * unless their server name is in this list. undefined = no MCP filter.
+   */
+  allowedMcpServers?: string[];
+  /**
+   * Plugin allowlist. Tools registered by a plugin are excluded unless
+   * their pluginId is in this list. undefined = allow all plugin tools.
+   * [] = only built-in (non-plugin) tools.
+   */
+  allowedPlugins?: string[];
+}
+
 export interface ToolRegistry {
-  register(tool: Tool): void;
+  /** `opts.pluginId` tags the tool for per-personality plugin gating. */
+  register(tool: Tool, opts?: { pluginId?: string }): void;
   registerAll(tools: Tool[]): void;
   unregister(name: string): void;
   get(name: string): Tool | undefined;
@@ -72,6 +88,7 @@ export interface ToolRegistry {
     calls: Array<{ toolCallId: string; name: string; args: unknown }>,
     ctx: ToolContext,
     allowedTools?: string[],
+    filterOpts?: ToolFilterOpts,
   ): Promise<Array<{ toolCallId: string; name: string; result: ToolResult }>>;
-  toDefinitions(allowedTools?: string[]): import('./llm').ToolDefinitionLite[];
+  toDefinitions(allowedTools?: string[], filterOpts?: ToolFilterOpts): import('./llm').ToolDefinitionLite[];
 }

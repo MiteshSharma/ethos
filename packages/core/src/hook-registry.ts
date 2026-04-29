@@ -8,6 +8,13 @@ interface RegisteredHandler {
   failurePolicy: 'fail-open' | 'fail-closed';
 }
 
+/** Returns true when a handler should fire given the allowedPlugins filter. */
+function isAllowed(h: RegisteredHandler, allowedPlugins: string[] | undefined): boolean {
+  if (allowedPlugins === undefined) return true; // no filter — fire all
+  if (!h.pluginId) return true; // built-in handler — always fires
+  return allowedPlugins.includes(h.pluginId);
+}
+
 export class DefaultHookRegistry implements HookRegistry {
   private readonly voidHandlers = new Map<string, RegisteredHandler[]>();
   private readonly modifyingHandlers = new Map<string, RegisteredHandler[]>();
@@ -63,8 +70,15 @@ export class DefaultHookRegistry implements HookRegistry {
 
   // Void hooks: all handlers run in parallel via Promise.allSettled.
   // Failures are logged but never propagate (fail-open by default).
-  async fireVoid<K extends keyof VoidHooks>(name: K, payload: VoidHooks[K]): Promise<void> {
-    const handlers = this.voidHandlers.get(name) ?? [];
+  // allowedPlugins gates plugin-registered handlers; built-in handlers always fire.
+  async fireVoid<K extends keyof VoidHooks>(
+    name: K,
+    payload: VoidHooks[K],
+    allowedPlugins?: string[],
+  ): Promise<void> {
+    const handlers = (this.voidHandlers.get(name) ?? []).filter((h) =>
+      isAllowed(h, allowedPlugins),
+    );
     await Promise.allSettled(handlers.map((h) => h.handler(payload)));
   }
 
@@ -72,8 +86,11 @@ export class DefaultHookRegistry implements HookRegistry {
   async fireModifying<K extends keyof ModifyingHooks>(
     name: K,
     payload: ModifyingHooks[K][0],
+    allowedPlugins?: string[],
   ): Promise<ModifyingHooks[K][1]> {
-    const handlers = this.modifyingHandlers.get(name) ?? [];
+    const handlers = (this.modifyingHandlers.get(name) ?? []).filter((h) =>
+      isAllowed(h, allowedPlugins),
+    );
     const merged: Record<string, unknown> = {};
     for (const h of handlers) {
       try {
@@ -96,8 +113,11 @@ export class DefaultHookRegistry implements HookRegistry {
   async fireClaiming<K extends keyof ClaimingHooks>(
     name: K,
     payload: ClaimingHooks[K][0],
+    allowedPlugins?: string[],
   ): Promise<ClaimingHooks[K][1]> {
-    const handlers = this.claimingHandlers.get(name) ?? [];
+    const handlers = (this.claimingHandlers.get(name) ?? []).filter((h) =>
+      isAllowed(h, allowedPlugins),
+    );
     for (const h of handlers) {
       try {
         const result = (await h.handler(payload)) as ClaimingHooks[K][1];

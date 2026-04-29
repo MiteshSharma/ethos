@@ -15,6 +15,7 @@ import type {
   SessionStore,
   Storage,
   StoredMessage,
+  ToolFilterOpts,
   ToolRegistry,
   ToolResult,
 } from '@ethosagent/types';
@@ -79,6 +80,12 @@ export interface AgentLoopConfig {
   session?: SessionStore;
   hooks?: HookRegistry;
   injectors?: ContextInjector[];
+  /**
+   * Maps each plugin-registered injector to its plugin id so AgentLoop can
+   * gate injectors by personality. Built-in injectors are absent (always fire).
+   * Populated by PluginApiImpl.registerInjector(); passed through from wiring.
+   */
+  injectorPluginIds?: Map<ContextInjector, string>;
   /**
    * Base Storage instance handed to tools via `ToolContext.storage` after
    * being decorated with a ScopedStorage that enforces the active
@@ -151,6 +158,7 @@ export class AgentLoop {
    *  returns. */
   readonly hooks: HookRegistry;
   private readonly injectors: ContextInjector[];
+  private readonly injectorPluginIds: Map<ContextInjector, string>;
   private readonly maxIterations: number;
   private readonly historyLimit: number;
   private readonly platform: string;
@@ -171,6 +179,7 @@ export class AgentLoop {
     this.session = config.session ?? new InMemorySessionStore();
     this.hooks = config.hooks ?? new DefaultHookRegistry();
     this.injectors = (config.injectors ?? []).sort((a, b) => b.priority - a.priority);
+    this.injectorPluginIds = config.injectorPluginIds ?? new Map();
     this.maxIterations = config.options?.maxIterations ?? 50;
     this.historyLimit = config.options?.historyLimit ?? 200;
     this.platform = config.options?.platform ?? 'cli';
@@ -222,14 +231,24 @@ export class AgentLoop {
     const modelOverride = effectiveModel !== this.llm.model ? effectiveModel : undefined;
     // Allowed tool names for this personality (undefined = no restriction)
     const allowedTools = personality.toolset?.length ? personality.toolset : undefined;
+    // Per-personality plugin + MCP gate (default-deny: missing field = no access)
+    const allowedPlugins = personality.plugins ?? [];
+    const filterOpts: ToolFilterOpts = {
+      allowedMcpServers: personality.mcp_servers,
+      allowedPlugins,
+    };
 
     // Step 2: Fire session_start hooks
-    await this.hooks.fireVoid('session_start', {
-      sessionId,
-      sessionKey,
-      platform: this.platform,
-      personalityId: personality.id,
-    });
+    await this.hooks.fireVoid(
+      'session_start',
+      {
+        sessionId,
+        sessionKey,
+        platform: this.platform,
+        personalityId: personality.id,
+      },
+      allowedPlugins,
+    );
 
     // Step 3: Persist the user message.
     //
@@ -287,6 +306,9 @@ export class AgentLoop {
 
     // Context injectors sorted by priority (already sorted in constructor)
     for (const injector of this.injectors) {
+      // Plugin-registered injectors only fire when the plugin is permitted.
+      const injPluginId = this.injectorPluginIds.get(injector);
+      if (injPluginId !== undefined && !allowedPlugins.includes(injPluginId)) continue;
       if (injector.shouldInject && !injector.shouldInject(promptCtx)) continue;
       const result = await injector.inject(promptCtx);
       if (result) {
@@ -309,11 +331,15 @@ export class AgentLoop {
     }
 
     // Step 7: Before-prompt-build modifying hooks (plugins can prepend/append/override)
-    const buildResult = await this.hooks.fireModifying('before_prompt_build', {
-      sessionId,
-      personalityId: personality.id,
-      history,
-    });
+    const buildResult = await this.hooks.fireModifying(
+      'before_prompt_build',
+      {
+        sessionId,
+        personalityId: personality.id,
+        history,
+      },
+      allowedPlugins,
+    );
 
     if (buildResult.overrideSystem) {
       systemParts.length = 0;
@@ -368,11 +394,15 @@ export class AgentLoop {
       }
 
       // Fire before_llm_call
-      await this.hooks.fireVoid('before_llm_call', {
-        sessionId,
-        model: this.llm.model,
-        turnNumber: turnCount,
-      });
+      await this.hooks.fireVoid(
+        'before_llm_call',
+        {
+          sessionId,
+          model: this.llm.model,
+          turnNumber: turnCount,
+        },
+        allowedPlugins,
+      );
 
       // Stream LLM response
       const pendingToolCalls: Array<{
@@ -401,7 +431,7 @@ export class AgentLoop {
 
       try {
         armWatchdog();
-        const stream = this.llm.complete(llmMessages, this.tools.toDefinitions(allowedTools), {
+        const stream = this.llm.complete(llmMessages, this.tools.toDefinitions(allowedTools, filterOpts), {
           system: systemPrompt,
           cacheSystemPrompt: true,
           abortSignal: combinedSignal,
@@ -468,11 +498,15 @@ export class AgentLoop {
       });
 
       // Fire after_llm_call
-      await this.hooks.fireVoid('after_llm_call', {
-        sessionId,
-        text: chunkText,
-        usage: { inputTokens: 0, outputTokens: 0 },
-      });
+      await this.hooks.fireVoid(
+        'after_llm_call',
+        {
+          sessionId,
+          text: chunkText,
+          usage: { inputTokens: 0, outputTokens: 0 },
+        },
+        allowedPlugins,
+      );
 
       // Push assistant message with proper content blocks for next iteration
       if (completedToolCalls.length > 0) {
@@ -541,12 +575,16 @@ export class AgentLoop {
       const prepped: Prepped[] = [];
 
       for (const tc of completedToolCalls) {
-        const beforeResult = await this.hooks.fireModifying('before_tool_call', {
-          sessionId,
-          toolCallId: tc.toolCallId,
-          toolName: tc.toolName,
-          args: tc.args,
-        });
+        const beforeResult = await this.hooks.fireModifying(
+          'before_tool_call',
+          {
+            sessionId,
+            toolCallId: tc.toolCallId,
+            toolName: tc.toolName,
+            args: tc.args,
+          },
+          allowedPlugins,
+        );
 
         if (beforeResult.error) {
           yield {
@@ -584,7 +622,7 @@ export class AgentLoop {
       const startedAt = Date.now();
       const execResults =
         execInputs.length > 0
-          ? await this.tools.executeParallel(execInputs, toolCtxBase, allowedTools)
+          ? await this.tools.executeParallel(execInputs, toolCtxBase, allowedTools, filterOpts)
           : [];
       const execResultMap = new Map(execResults.map((r) => [r.toolCallId, r]));
 
@@ -621,12 +659,16 @@ export class AgentLoop {
             durationMs,
             result: result.ok ? result.value : result.error,
           };
-          await this.hooks.fireVoid('after_tool_call', {
-            sessionId,
-            toolName: p.name,
-            result,
-            durationMs,
-          });
+          await this.hooks.fireVoid(
+            'after_tool_call',
+            {
+              sessionId,
+              toolName: p.name,
+              result,
+              durationMs,
+            },
+            allowedPlugins,
+          );
         }
 
         // Persist every result (rejected or not) so history matches what LLM sees
@@ -658,7 +700,7 @@ export class AgentLoop {
     await this.session.updateUsage(sessionId, { apiCallCount: turnCount });
 
     // Step 12: Fire agent_done
-    await this.hooks.fireVoid('agent_done', { sessionId, text: fullText, turnCount });
+    await this.hooks.fireVoid('agent_done', { sessionId, text: fullText, turnCount }, allowedPlugins);
 
     yield { type: 'done', text: fullText, turnCount };
   }

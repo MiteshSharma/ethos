@@ -61,6 +61,18 @@ export interface PersonalityConfig {
    * a leaf type).
    */
   fs_reach?: { read?: string[]; write?: string[] };
+  /**
+   * MCP servers this personality can reach. Server configs stay global in
+   * ~/.ethos/mcp.json; this is a per-role allowlist keyed by server name.
+   * Missing/empty = no MCP access for this personality (explicit opt-in).
+   */
+  mcp_servers?: string[];
+  /**
+   * Plugins attached to this personality. Default-deny: a plugin not listed
+   * here is dormant for this personality — its tools, hooks, and injectors
+   * do not fire. Missing/empty = no plugins active. Explicit opt-in only.
+   */
+  plugins?: string[];
   /** @internal Free-form passthrough for adapter-specific metadata. */
   metadata?: Record<string, unknown>;
 }

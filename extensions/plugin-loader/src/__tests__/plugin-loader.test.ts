@@ -16,6 +16,7 @@ function makeRegistries() {
     tools: new DefaultToolRegistry(),
     hooks: new DefaultHookRegistry(),
     injectors,
+    injectorPluginIds: new Map<ContextInjector, string>(),
     personalities: new DefaultPersonalityRegistry(),
   };
 }

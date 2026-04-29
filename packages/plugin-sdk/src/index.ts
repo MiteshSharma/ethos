@@ -55,7 +55,12 @@ export interface EthosPluginApi {
 export interface PluginRegistries {
   tools: ToolRegistry;
   hooks: HookRegistry;
+  /** Flat injector list shared with AgentLoop. Plugin-registered entries are
+   *  also tracked in `injectorPluginIds` so AgentLoop can gate by personality. */
   injectors: ContextInjector[];
+  /** Maps each plugin-registered injector to its plugin id.
+   *  Built-in injectors are absent from this map (they always fire). */
+  injectorPluginIds: Map<ContextInjector, string>;
   personalities: PersonalityRegistry;
 }
 
@@ -77,7 +82,8 @@ export class PluginApiImpl implements EthosPluginApi {
   }
 
   registerTool(tool: Tool): void {
-    this.registries.tools.register(tool);
+    // Tag the tool with this plugin's id so AgentLoop can gate it per personality.
+    this.registries.tools.register(tool, { pluginId: this.pluginId });
     this.registeredTools.push(tool.name);
   }
 
@@ -97,6 +103,7 @@ export class PluginApiImpl implements EthosPluginApi {
 
   registerInjector(injector: ContextInjector): void {
     this.registries.injectors.push(injector);
+    this.registries.injectorPluginIds.set(injector, this.pluginId);
     this.registeredInjectors.push(injector);
   }
 
@@ -115,10 +122,11 @@ export class PluginApiImpl implements EthosPluginApi {
       this.registries.tools.unregister(name);
     }
 
-    // Injectors — remove from the shared mutable array
+    // Injectors — remove from the shared mutable array + provenance map
     for (const inj of this.registeredInjectors) {
       const idx = this.registries.injectors.indexOf(inj);
       if (idx >= 0) this.registries.injectors.splice(idx, 1);
+      this.registries.injectorPluginIds.delete(inj);
     }
 
     // Personalities — no unregister method; they stay (harmless)

@@ -186,16 +186,28 @@ export interface HookRegistry {
     opts?: { pluginId?: string },
   ): () => void;
 
-  fireVoid<K extends keyof VoidHooks>(name: K, payload: VoidHooks[K]): Promise<void>;
+  /**
+   * `allowedPlugins` gates which plugin-registered handlers fire:
+   *   undefined  → all handlers fire (no personality context / gateway hooks)
+   *   []         → only built-in handlers (no pluginId) fire
+   *   ['p', …]   → built-in handlers + handlers whose pluginId is in the list
+   */
+  fireVoid<K extends keyof VoidHooks>(
+    name: K,
+    payload: VoidHooks[K],
+    allowedPlugins?: string[],
+  ): Promise<void>;
 
   fireModifying<K extends keyof ModifyingHooks>(
     name: K,
     payload: ModifyingHooks[K][0],
+    allowedPlugins?: string[],
   ): Promise<ModifyingHooks[K][1]>;
 
   fireClaiming<K extends keyof ClaimingHooks>(
     name: K,
     payload: ClaimingHooks[K][0],
+    allowedPlugins?: string[],
   ): Promise<ClaimingHooks[K][1]>;
 
   unregisterPlugin(pluginId: string): void;

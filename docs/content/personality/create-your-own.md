@@ -40,6 +40,8 @@ model: claude-opus-4-7
 memoryScope: global
 fs_reach.read: ${ETHOS_HOME}/personalities/${self}/, ${ETHOS_HOME}/skills/, ${CWD}
 fs_reach.write: ${ETHOS_HOME}/personalities/${self}/, ${CWD}
+mcp_servers:  # allowed MCP server names (default-deny; omit or leave empty = no MCP access)
+plugins:      # allowed plugin ids (default-deny; omit or leave empty = no plugin access)
 ```
 
 The `fs_reach` keys scope filesystem access for the read_file / write_file tools to a per-personality allowlist of absolute path prefixes — closing the cross-personality leak gap.
@@ -50,6 +52,8 @@ The `fs_reach` keys scope filesystem access for the read_file / write_file tools
 - `model` — LLM model to use for this personality
 - `memoryScope` — `global` or `per-personality`
 - `fs_reach.read` / `fs_reach.write` — comma-separated absolute path prefixes the `read_file` / `write_file` tools may touch. Substitutions: `${ETHOS_HOME}` → `~/.ethos`, `${self}` → this personality's id, `${CWD}` → working dir. Unset → defaults to own personality dir + `~/.ethos/skills/` (read) and own dir + cwd (write).
+- `mcp_servers` — space-separated list of MCP server names this personality may use. Default-deny: omit or leave empty to disable all MCP tools for this personality.
+- `plugins` — space-separated list of plugin ids this personality may activate. Default-deny: omit or leave empty to disable all plugins for this personality.
 
 ## Step 4 — Define the toolset
 

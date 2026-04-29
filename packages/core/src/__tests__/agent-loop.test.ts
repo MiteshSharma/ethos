@@ -765,4 +765,52 @@ describe('AgentLoop', () => {
       expect(sawStorage).toBe(false);
     });
   });
+
+  // ---------------------------------------------------------------------------
+  // Personality isolation — Phase 2.1
+  // A hook registered by plugin p1 fires for personality A (which lists p1)
+  // but NOT for personality B (which does not list p1).
+  // ---------------------------------------------------------------------------
+
+  it('plugin hook fires for personality with access, not for personality without', async () => {
+    const { DefaultHookRegistry } = await import('../hook-registry');
+    const { DefaultPersonalityRegistry } = await import('../defaults/noop-personality');
+    const { DefaultToolRegistry } = await import('../tool-registry');
+
+    let hookFireCount = 0;
+    const hooks = new DefaultHookRegistry();
+
+    // Simulates a plugin hook registered by plugin 'p1'
+    hooks.registerVoid(
+      'agent_done',
+      async () => { hookFireCount++; },
+      { pluginId: 'p1' },
+    );
+
+    // Personality A has access to plugin p1; personality B does not.
+    const personalityA = { id: 'personality-a', name: 'A', plugins: ['p1'] };
+    const personalityB = { id: 'personality-b', name: 'B', plugins: [] };
+
+    const personalities = new DefaultPersonalityRegistry();
+    vi.spyOn(personalities, 'get').mockImplementation((id) => {
+      if (id === 'personality-a') return personalityA;
+      if (id === 'personality-b') return personalityB;
+      return null;
+    });
+
+    const loop = new AgentLoop({
+      llm: makeMockLLM(['ok']),
+      hooks,
+      tools: new DefaultToolRegistry(),
+      personalities,
+    });
+
+    // Run as personality A — plugin hook should fire once
+    await collect(loop.run('hello', { personalityId: 'personality-a', sessionKey: 'session-a' }));
+    expect(hookFireCount).toBe(1);
+
+    // Run as personality B — plugin hook must NOT fire (count stays at 1)
+    await collect(loop.run('hello', { personalityId: 'personality-b', sessionKey: 'session-b' }));
+    expect(hookFireCount).toBe(1);
+  });
 });
