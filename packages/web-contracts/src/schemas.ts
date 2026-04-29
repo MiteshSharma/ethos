@@ -80,6 +80,10 @@ export const PersonalitySchema = z.object({
   capabilities: z.array(z.string()).nullable(),
   memoryScope: MemoryScopeSchema.nullable(),
   streamingTimeoutMs: z.number().int().positive().nullable(),
+  /** Allowed MCP server names. null = not configured (no access). */
+  mcp_servers: z.array(z.string()).nullable(),
+  /** Attached plugin ids. null = not configured (default-deny). */
+  plugins: z.array(z.string()).nullable(),
   /** True when the personality lives in the package's built-in data directory
    *  (read-only). User-created personalities under `~/.ethos/personalities/`
    *  are mutable. */

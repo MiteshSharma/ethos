@@ -22,8 +22,12 @@ export const personalitiesRouter = {
   ),
 
   update: os.personalities.update.handler(({ input, context }) => {
-    const { id, ...patch } = input;
-    return context.personalities.update(id, patch);
+    const { id, mcp_servers, plugins, ...rest } = input;
+    return context.personalities.update(id, {
+      ...rest,
+      ...(mcp_servers !== undefined ? { mcp_servers } : {}),
+      ...(plugins !== undefined ? { plugins } : {}),
+    });
   }),
 
   delete: os.personalities.delete.handler(async ({ input, context }) => {

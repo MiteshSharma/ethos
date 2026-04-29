@@ -1,8 +1,10 @@
 import type { Personality, PersonalitySkill } from '@ethosagent/web-contracts';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
+  Alert,
   App as AntApp,
   Button,
+  Checkbox,
   Empty,
   Form,
   Input,
@@ -11,6 +13,7 @@ import {
   Select,
   Spin,
   Steps,
+  Switch,
   Table,
   Tabs,
   Tag,
@@ -566,6 +569,26 @@ function EditModal({ id, onClose }: { id: string; onClose: () => void }) {
               key: 'skills',
               label: 'Skills',
               children: <PersonalitySkillsPanel personalityId={id} />,
+            },
+            {
+              key: 'mcp',
+              label: 'MCP',
+              children: (
+                <McpServersPanel
+                  id={id}
+                  initialMcpServers={data.personality.mcp_servers ?? []}
+                />
+              ),
+            },
+            {
+              key: 'plugins',
+              label: 'Plugins',
+              children: (
+                <PluginsAttachPanel
+                  id={id}
+                  initialPlugins={data.personality.plugins ?? []}
+                />
+              ),
             },
           ]}
         />
@@ -1155,5 +1178,235 @@ function DuplicateModal({
         </Form.Item>
       </Form>
     </Modal>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// MCP servers panel — checkbox list of all configured MCP servers.
+// Saves via personalities.update({ mcp_servers: [...] }).
+// ---------------------------------------------------------------------------
+
+function McpServersPanel({
+  id,
+  initialMcpServers,
+}: {
+  id: string;
+  initialMcpServers: string[];
+}) {
+  const qc = useQueryClient();
+  const { notification } = AntApp.useApp();
+  const [attached, setAttached] = useState<Set<string>>(new Set(initialMcpServers));
+  const [dirty, setDirty] = useState(false);
+
+  const pluginsQuery = useQuery({
+    queryKey: ['plugins', 'list'],
+    queryFn: () => rpc.plugins.list(),
+  });
+
+  const mut = useMutation({
+    mutationFn: () => rpc.personalities.update({ id, mcp_servers: [...attached] }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['personalities', 'get', id] });
+      qc.invalidateQueries({ queryKey: ['personalities', 'list'] });
+      setDirty(false);
+      notification.success({ message: 'MCP servers saved', placement: 'topRight' });
+    },
+    onError: (err) =>
+      notification.error({ message: 'Save failed', description: (err as Error).message }),
+  });
+
+  const servers = pluginsQuery.data?.mcpServers ?? [];
+
+  if (pluginsQuery.isLoading) {
+    return (
+      <div style={{ display: 'grid', placeItems: 'center', height: 120 }}>
+        <Spin />
+      </div>
+    );
+  }
+
+  if (servers.length === 0) {
+    return (
+      <Empty
+        image={Empty.PRESENTED_IMAGE_SIMPLE}
+        description={
+          <span>
+            No MCP servers configured. Edit{' '}
+            <Typography.Text code>~/.ethos/mcp.json</Typography.Text>.
+          </span>
+        }
+      />
+    );
+  }
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+      <Typography.Text type="secondary" style={{ fontSize: 13 }}>
+        Check each MCP server this personality can reach. Unchecked servers are invisible to this
+        role.
+      </Typography.Text>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+        {servers.map((s) => (
+          <Checkbox
+            key={s.name}
+            checked={attached.has(s.name)}
+            onChange={(e) => {
+              const next = new Set(attached);
+              if (e.target.checked) next.add(s.name);
+              else next.delete(s.name);
+              setAttached(next);
+              setDirty(true);
+            }}
+            aria-label={`Enable MCP server ${s.name} for ${id}`}
+          >
+            <span style={{ fontWeight: 500 }}>{s.name}</span>{' '}
+            <Tag bordered={false} style={{ fontSize: 11 }}>
+              {s.transport}
+            </Tag>
+            {s.command ? (
+              <Typography.Text
+                type="secondary"
+                style={{ fontFamily: 'Geist Mono, monospace', fontSize: 11 }}
+              >
+                {s.command}
+              </Typography.Text>
+            ) : s.url ? (
+              <Typography.Text
+                type="secondary"
+                style={{ fontFamily: 'Geist Mono, monospace', fontSize: 11 }}
+              >
+                {s.url}
+              </Typography.Text>
+            ) : null}
+          </Checkbox>
+        ))}
+      </div>
+      <Button
+        type="primary"
+        disabled={!dirty}
+        loading={mut.isPending}
+        onClick={() => mut.mutate()}
+        style={{ alignSelf: 'flex-start' }}
+      >
+        Save
+      </Button>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Plugins attach panel — toggle per plugin, optimistic updates.
+// Saves via personalities.update({ plugins: [...] }).
+// ---------------------------------------------------------------------------
+
+function PluginsAttachPanel({
+  id,
+  initialPlugins,
+}: {
+  id: string;
+  initialPlugins: string[];
+}) {
+  const qc = useQueryClient();
+  const { notification } = AntApp.useApp();
+  const [attached, setAttached] = useState<Set<string>>(new Set(initialPlugins));
+
+  const pluginsQuery = useQuery({
+    queryKey: ['plugins', 'list'],
+    queryFn: () => rpc.plugins.list(),
+  });
+
+  const mut = useMutation({
+    mutationFn: (next: string[]) => rpc.personalities.update({ id, plugins: next }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['personalities', 'get', id] });
+      qc.invalidateQueries({ queryKey: ['personalities', 'list'] });
+    },
+    onError: (err, _vars, ctx) => {
+      if (ctx) setAttached((ctx as { prev: Set<string> }).prev);
+      notification.error({ message: 'Save failed', description: (err as Error).message });
+    },
+  });
+
+  const plugins = pluginsQuery.data?.plugins ?? [];
+
+  if (pluginsQuery.isLoading) {
+    return (
+      <div style={{ display: 'grid', placeItems: 'center', height: 120 }}>
+        <Spin />
+      </div>
+    );
+  }
+
+  if (plugins.length === 0) {
+    return (
+      <Empty
+        image={Empty.PRESENTED_IMAGE_SIMPLE}
+        description={
+          <span>
+            No plugins installed.{' '}
+            <Typography.Text code>ethos plugin install &lt;path&gt;</Typography.Text>
+          </span>
+        }
+      />
+    );
+  }
+
+  function toggle(pluginId: string, on: boolean) {
+    const prev = new Set(attached);
+    const next = new Set(attached);
+    if (on) next.add(pluginId);
+    else next.delete(pluginId);
+    setAttached(next);
+    mut.mutate([...next], { context: { prev } });
+  }
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+      {attached.size === 0 ? (
+        <Alert
+          type="info"
+          showIcon
+          message="0 plugins attached"
+          description="Toggle a plugin below to enable it for this personality."
+          style={{ marginBottom: 4 }}
+        />
+      ) : null}
+      {plugins.map((p) => (
+        <div key={p.id} style={{ display: 'flex', alignItems: 'flex-start', gap: 10 }}>
+          <Switch
+            size="small"
+            checked={attached.has(p.id)}
+            loading={mut.isPending}
+            onChange={(on) => toggle(p.id, on)}
+            aria-label={`Attach ${p.name} to ${id}`}
+            style={{ marginTop: 2, flexShrink: 0 }}
+          />
+          <div>
+            <div style={{ fontWeight: 500 }}>{p.name}</div>
+            <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
+              <Typography.Text
+                style={{ fontFamily: 'Geist Mono, monospace', fontSize: 12 }}
+                type="secondary"
+              >
+                {p.id}
+              </Typography.Text>
+              <Tag bordered={false} style={{ fontSize: 11 }}>
+                {p.source}
+              </Tag>
+              {p.pluginContractMajor !== null ? (
+                <Typography.Text type="secondary" style={{ fontSize: 11 }}>
+                  v{p.pluginContractMajor}
+                </Typography.Text>
+              ) : null}
+            </div>
+            {p.description ? (
+              <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                {p.description}
+              </Typography.Text>
+            ) : null}
+          </div>
+        </div>
+      ))}
+    </div>
   );
 }

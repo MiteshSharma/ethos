@@ -117,6 +117,8 @@ const PersonalityUpdateInput = z.object({
   toolset: z.array(z.string()).optional(),
   ethosMd: z.string().optional(),
   memoryScope: z.enum(['global', 'per-personality']).optional(),
+  mcp_servers: z.array(z.string()).optional(),
+  plugins: z.array(z.string()).optional(),
 });
 const PersonalityUpdateOutput = z.object({ personality: PersonalitySchema });
 

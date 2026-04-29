@@ -34,10 +34,16 @@ const PRESET_SCHEDULES: Array<{ value: string; label: string }> = [
 
 export function Cron() {
   const [createOpen, setCreateOpen] = useState(false);
+  const [filterPersonality, setFilterPersonality] = useState<string | null>(null);
 
   const { data, isLoading, error } = useQuery({
     queryKey: ['cron', 'list'],
     queryFn: () => rpc.cron.list(),
+  });
+
+  const personalitiesQuery = useQuery({
+    queryKey: ['personalities', 'list'],
+    queryFn: () => rpc.personalities.list(),
   });
 
   if (isLoading) {
@@ -56,17 +62,36 @@ export function Cron() {
     );
   }
 
-  const jobs = data?.jobs ?? [];
+  const allJobs = data?.jobs ?? [];
+  const jobs = filterPersonality
+    ? allJobs.filter((j) => j.personality === filterPersonality)
+    : allJobs;
 
   return (
     <div className="cron-tab">
       <header className="cron-toolbar">
         <span className="sessions-count">
           {jobs.length} {jobs.length === 1 ? 'job' : 'jobs'}
+          {filterPersonality ? ` · ${filterPersonality}` : ''}
         </span>
-        <Button type="primary" onClick={() => setCreateOpen(true)}>
-          New job
-        </Button>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+          <Select
+            allowClear
+            placeholder="All personalities"
+            size="small"
+            style={{ width: 180 }}
+            value={filterPersonality}
+            onChange={(v) => setFilterPersonality(v ?? null)}
+            loading={personalitiesQuery.isLoading}
+            options={(personalitiesQuery.data?.personalities ?? []).map((p) => ({
+              value: p.id,
+              label: p.name,
+            }))}
+          />
+          <Button type="primary" onClick={() => setCreateOpen(true)}>
+            New job
+          </Button>
+        </div>
       </header>
 
       <Table<CronJob>

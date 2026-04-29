@@ -144,6 +144,8 @@ function toWire(d: DescribedPersonality): Personality {
     capabilities: c.capabilities ?? null,
     memoryScope: c.memoryScope ?? null,
     streamingTimeoutMs: c.streamingTimeoutMs ?? null,
+    mcp_servers: c.mcp_servers ?? null,
+    plugins: c.plugins ?? null,
     builtin: d.builtin,
   };
 }
