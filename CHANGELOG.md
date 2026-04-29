@@ -101,6 +101,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   - Personality filter Select in the toolbar. Client-side filter; clears
     back to "All personalities" via `allowClear`.
 
+- **Personality isolation — Phase 3.2 + 4.3 (cron migration + cross-plan test).**
+
+  Phase 3.2 (cron OpenClaw migration):
+  - `ClawMigrator` now detects `cron/jobs.json` in the OpenClaw source directory
+    (`detected.cron` field added to `MigrationPlan`).
+  - New `'cron-migrate'` CopyKind: reads the source `jobs.json`, backfills
+    `personality` on every job that doesn't already declare one using the
+    resolved plan personality (the same value written to `config.yaml`), and
+    writes the patched array to `~/.ethos/cron/jobs.json`. Jobs that already
+    have a personality field are preserved unchanged.
+  - 5 tests: detect / no-detect / backfill from config / fallback when config
+    has no personality / skip when dest exists / dry-run no-write.
+
+  Phase 4.3 (cross-plan integration test — locks MCP gating contract):
+  - Two new tests in `packages/core/src/__tests__/tool-registry.test.ts`:
+    1. `toDefinitions` with `allowedMcpServers: []` makes MCP tools invisible —
+       a skill that requires `mcp__linear__get_issue` is inert for a personality
+       with an empty MCP allowlist. Catches drift between this plan's MCP filter
+       and `extension_plan.md`'s skill filter.
+    2. `executeParallel` blocks MCP tool calls at execution time even when the
+       LLM calls the tool by name — belt-and-suspenders against the same drift.
+
 ### Changed
 
 - **Storage abstraction (internal refactor — no user-visible behaviour change).**
