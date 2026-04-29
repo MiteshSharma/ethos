@@ -73,6 +73,13 @@ export interface PersonalityConfig {
    * do not fire. Missing/empty = no plugins active. Explicit opt-in only.
    */
   plugins?: string[];
+  /**
+   * Filter rules for skills from the universal scanner's global pool.
+   * Per-personality skills/ folder is always loaded unfiltered.
+   * When absent, defaults to `capability` mode (skills whose required_tools
+   * are a subset of this personality's effective tool reach are included).
+   */
+  skills?: import('./skill').SkillIngestConfig;
   /** @internal Free-form passthrough for adapter-specific metadata. */
   metadata?: Record<string, unknown>;
 }

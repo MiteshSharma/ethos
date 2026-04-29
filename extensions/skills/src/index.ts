@@ -4,6 +4,7 @@ import { MemoryGuidanceInjector } from './memory-guidance-injector';
 import { SkillsInjector } from './skills-injector';
 
 export { FileContextInjector } from './file-context-injector';
+export { type FilterResult, filterSkill, warnMissingAllowList } from './ingest-filter';
 export { MemoryGuidanceInjector } from './memory-guidance-injector';
 export { sanitize } from './prompt-injection-guard';
 export {
@@ -21,6 +22,11 @@ export {
   SkillsLibrary,
   type SkillsLibraryOptions,
 } from './skills-library';
+export {
+  type ScanSource,
+  UniversalScanner,
+  type UniversalScannerOptions,
+} from './universal-scanner';
 
 export interface InjectorConfig {
   /** Override the global skills directory (defaults to ~/.ethos/skills/) */

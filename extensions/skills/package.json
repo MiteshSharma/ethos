@@ -15,6 +15,7 @@
   },
   "dependencies": {
     "@ethosagent/storage-fs": "workspace:*",
-    "@ethosagent/types": "workspace:*"
+    "@ethosagent/types": "workspace:*",
+    "gray-matter": "^4.0.3"
   }
 }

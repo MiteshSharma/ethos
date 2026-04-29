@@ -1,4 +1,5 @@
 import type {
+  PersonalityConfig,
   Tool,
   ToolContext,
   ToolFilterOpts,
@@ -94,6 +95,44 @@ export class DefaultToolRegistry implements ToolRegistry {
       description: e.tool.description,
       parameters: e.tool.schema,
     }));
+  }
+
+  /**
+   * Computes the effective tool reach for a personality:
+   *   personality.toolset (built-in tools)
+   *   ∪ tools from MCP servers in personality.mcp_servers
+   *   ∪ tools from plugins in personality.plugins
+   *
+   * Used by IngestFilter to check skill.required_tools ⊆ effective_reach.
+   */
+  toolNamesForPersonality(personality: PersonalityConfig): Set<string> {
+    const reach = new Set<string>();
+
+    for (const [name, entry] of this.tools) {
+      const isMcp = name.startsWith('mcp__');
+      const isPlugin = entry.pluginId !== undefined;
+
+      if (!isMcp && !isPlugin) {
+        // Built-in tool — include if in personality.toolset (or if toolset is unrestricted)
+        const toolset = personality.toolset;
+        if (!toolset || toolset.length === 0 || toolset.includes(name)) {
+          reach.add(name);
+        }
+      } else if (isMcp) {
+        const server = mcpServerName(name);
+        const allowed = personality.mcp_servers;
+        if (server && allowed && allowed.includes(server)) {
+          reach.add(name);
+        }
+      } else if (isPlugin) {
+        const allowed = personality.plugins;
+        if (entry.pluginId && allowed && allowed.includes(entry.pluginId)) {
+          reach.add(name);
+        }
+      }
+    }
+
+    return reach;
   }
 
   // Runs all tool calls in parallel. Results are returned in input order.

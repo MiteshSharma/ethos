@@ -453,4 +453,89 @@ describe('Phase 4.3 — cross-plan: MCP server gate catches skill+MCP mismatch',
     expect(r.ok).toBe(false);
     expect(r.code).toBe('not_available');
   });
+
+  describe('toolNamesForPersonality', () => {
+    it('includes built-in tools listed in personality.toolset', () => {
+      const reg = new DefaultToolRegistry();
+      reg.register({
+        name: 'read_file',
+        description: '',
+        schema: {},
+        execute: async () => ({ ok: true, value: '' }),
+      });
+      reg.register({
+        name: 'run_shell',
+        description: '',
+        schema: {},
+        execute: async () => ({ ok: true, value: '' }),
+      });
+
+      const names = reg.toolNamesForPersonality({ id: 'r', name: 'R', toolset: ['read_file'] });
+      expect(names.has('read_file')).toBe(true);
+      expect(names.has('run_shell')).toBe(false);
+    });
+
+    it('includes all built-in tools when toolset is empty/absent', () => {
+      const reg = new DefaultToolRegistry();
+      reg.register({
+        name: 'read_file',
+        description: '',
+        schema: {},
+        execute: async () => ({ ok: true, value: '' }),
+      });
+      reg.register({
+        name: 'run_shell',
+        description: '',
+        schema: {},
+        execute: async () => ({ ok: true, value: '' }),
+      });
+
+      const names = reg.toolNamesForPersonality({ id: 'r', name: 'R' });
+      expect(names.has('read_file')).toBe(true);
+      expect(names.has('run_shell')).toBe(true);
+    });
+
+    it('includes MCP tools whose server is in personality.mcp_servers', () => {
+      const reg = new DefaultToolRegistry();
+      reg.register({
+        name: 'mcp__linear__get_issue',
+        description: '',
+        schema: {},
+        execute: async () => ({ ok: true, value: '' }),
+      });
+
+      const withLinear = reg.toolNamesForPersonality({
+        id: 'r',
+        name: 'R',
+        mcp_servers: ['linear'],
+      });
+      expect(withLinear.has('mcp__linear__get_issue')).toBe(true);
+
+      const noMcp = reg.toolNamesForPersonality({ id: 'r', name: 'R', mcp_servers: [] });
+      expect(noMcp.has('mcp__linear__get_issue')).toBe(false);
+    });
+
+    it('includes plugin tools whose plugin is in personality.plugins', () => {
+      const reg = new DefaultToolRegistry();
+      reg.register(
+        {
+          name: 'my_plugin_action',
+          description: '',
+          schema: {},
+          execute: async () => ({ ok: true, value: '' }),
+        },
+        { pluginId: 'my-plugin' },
+      );
+
+      const withPlugin = reg.toolNamesForPersonality({
+        id: 'r',
+        name: 'R',
+        plugins: ['my-plugin'],
+      });
+      expect(withPlugin.has('my_plugin_action')).toBe(true);
+
+      const noPlugin = reg.toolNamesForPersonality({ id: 'r', name: 'R', plugins: [] });
+      expect(noPlugin.has('my_plugin_action')).toBe(false);
+    });
+  });
 });

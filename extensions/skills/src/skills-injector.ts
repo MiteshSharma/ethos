@@ -4,12 +4,16 @@ import { FsStorage } from '@ethosagent/storage-fs';
 import type {
   ContextInjector,
   InjectionResult,
+  PersonalityConfig,
   PersonalityRegistry,
   PromptContext,
+  Skill,
   Storage,
 } from '@ethosagent/types';
+import { filterSkill, warnMissingAllowList } from './ingest-filter';
 import { sanitize } from './prompt-injection-guard';
 import { applySubstitutions, parseSkillFrontmatter, shouldInject } from './skill-compat';
+import { UniversalScanner } from './universal-scanner';
 
 interface CacheEntry {
   mtime: number;
@@ -22,6 +26,12 @@ export interface SkillsInjectorOptions {
   onSkip?: (skillId: string, reason: string) => void;
   /** Storage backend. Defaults to FsStorage. */
   storage?: Storage;
+  /**
+   * Tool names reachable by a personality.
+   * When provided, capability-mode filtering is applied to global-pool skills.
+   * Pass `registry.toolNamesForPersonality(personality)` from wiring.
+   */
+  toolNamesForPersonality?: (personality: PersonalityConfig) => Set<string>;
 }
 
 export class SkillsInjector implements ContextInjector {
@@ -32,7 +42,9 @@ export class SkillsInjector implements ContextInjector {
   private readonly globalSkillsDir: string;
   private readonly onSkip?: (skillId: string, reason: string) => void;
   private readonly storage: Storage;
+  private readonly toolNamesForPersonality?: (p: PersonalityConfig) => Set<string>;
   private readonly cache = new Map<string, CacheEntry>();
+  private readonly scanner: UniversalScanner;
 
   constructor(personalities: PersonalityRegistry, optionsOrDir?: string | SkillsInjectorOptions) {
     this.personalities = personalities;
@@ -41,6 +53,8 @@ export class SkillsInjector implements ContextInjector {
     this.globalSkillsDir = opts.globalSkillsDir ?? join(homedir(), '.ethos', 'skills');
     this.onSkip = opts.onSkip;
     this.storage = opts.storage ?? new FsStorage();
+    this.toolNamesForPersonality = opts.toolNamesForPersonality;
+    this.scanner = new UniversalScanner({ storage: this.storage });
   }
 
   async inject(ctx: PromptContext): Promise<InjectionResult | null> {
@@ -48,17 +62,65 @@ export class SkillsInjector implements ContextInjector {
       ? (this.personalities.get(ctx.personalityId) ?? this.personalities.getDefault())
       : this.personalities.getDefault();
 
-    const skillDirs = [...new Set([...(personality.skillsDirs ?? []), this.globalSkillsDir])];
-
     const sections: string[] = [];
     const fileNames: string[] = [];
 
-    for (const dir of skillDirs) {
+    // 1. Per-personality skills/ dirs — always loaded unfiltered (hand-curated library)
+    const perPersonalityDirs = personality.skillsDirs ?? [];
+    for (const dir of perPersonalityDirs) {
       const loaded = await this.loadSkillsFromDir(dir, ctx);
       for (const { content, fileName } of loaded) {
         sections.push(content);
         fileNames.push(fileName);
       }
+    }
+
+    // 2. Global pool from universal scanner — filtered per personality
+    const globalPool = await this.scanner.scan();
+
+    // Warn about missing allow-list references
+    const allow = personality.skills?.global_ingest?.allow ?? [];
+    if (allow.length > 0) {
+      warnMissingAllowList(personality.id, allow, globalPool, (msg) =>
+        process.stdout.write(msg + '\n'),
+      );
+    }
+
+    const toolNames = this.toolNamesForPersonality
+      ? this.toolNamesForPersonality(personality)
+      : new Set<string>();
+
+    for (const [, skill] of globalPool) {
+      // Skip skills already loaded from per-personality dirs (avoid duplicates by file path)
+      if (perPersonalityDirs.some((d) => skill.filePath.startsWith(d))) continue;
+
+      const result = filterSkill(skill, personality, toolNames, (msg) =>
+        process.stdout.write(msg + '\n'),
+      );
+      if (!result.include) {
+        this.onSkip?.(skill.qualifiedName, result.reason);
+        continue;
+      }
+
+      // Still apply OpenClaw shouldInject rules (env, bins, os) for openclaw dialect
+      if (skill.dialect === 'openclaw') {
+        const parsed = parseSkillFrontmatter(
+          skill.body.length > 0
+            ? `---\n${JSON.stringify(skill.rawFrontmatter)}\n---\n${skill.body}`
+            : skill.body,
+        );
+        if (parsed) {
+          const verdict = shouldInject(parsed.openclaw, {});
+          if (!verdict.inject) {
+            this.onSkip?.(skill.qualifiedName, verdict.reason ?? 'openclaw filter');
+            continue;
+          }
+        }
+      }
+
+      const substituted = applySubstitutions(skill.body, dirname(skill.filePath), ctx.sessionId);
+      sections.push(sanitize(substituted.trim()));
+      fileNames.push(skill.qualifiedName);
     }
 
     if (sections.length === 0) return null;
@@ -104,13 +166,6 @@ export class SkillsInjector implements ContextInjector {
     return skills;
   }
 
-  /**
-   * Skill discovery rules:
-   *   - Top-level `*.md` files in the dir (legacy Ethos format).
-   *   - `<dir>/<slug>/SKILL.md` (OpenClaw / ClawHub layout).
-   *   - `<dir>/<scope>/<slug>/SKILL.md` (e.g. `steipete/slack/SKILL.md`).
-   * Files are returned in stable alphabetical order so injection order is deterministic.
-   */
   private async discoverSkillFiles(dir: string): Promise<string[]> {
     const found: string[] = [];
 
@@ -121,13 +176,11 @@ export class SkillsInjector implements ContextInjector {
       if (entry.isDir) {
         if (entry.name === 'pending' || entry.name.startsWith('.')) continue;
         const subPath = join(dir, entry.name);
-        // Direct SKILL.md
         const skillMd = join(subPath, 'SKILL.md');
         if (await this.fileExists(skillMd)) {
           found.push(skillMd);
           continue;
         }
-        // Scoped: <dir>/<scope>/<slug>/SKILL.md
         const inner = await this.storage.listEntries(subPath);
         for (const child of [...inner].sort((a, b) => a.name.localeCompare(b.name))) {
           if (!child.isDir) continue;
@@ -163,9 +216,6 @@ export class SkillsInjector implements ContextInjector {
   }
 
   private async fileExists(path: string): Promise<boolean> {
-    // Need to distinguish file from directory — listEntries on the parent
-    // would work but is expensive. mtime returning a number means "exists",
-    // and SKILL.md candidates aren't directories in any sane layout.
     const t = await this.storage.mtime(path);
     return t !== null;
   }

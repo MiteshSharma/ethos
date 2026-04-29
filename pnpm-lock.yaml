@@ -572,6 +572,9 @@ importers:
       '@ethosagent/types':
         specifier: workspace:*
         version: link:../../packages/types
+      gray-matter:
+        specifier: ^4.0.3
+        version: 4.0.3
 
   extensions/tools-browser:
     dependencies:
