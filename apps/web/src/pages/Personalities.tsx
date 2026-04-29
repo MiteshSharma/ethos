@@ -1317,12 +1317,13 @@ function PluginsAttachPanel({
 
   const mut = useMutation({
     mutationFn: (next: string[]) => rpc.personalities.update({ id, plugins: next }),
+    onMutate: () => ({ prev: new Set(attached) }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['personalities', 'get', id] });
       qc.invalidateQueries({ queryKey: ['personalities', 'list'] });
     },
     onError: (err, _vars, ctx) => {
-      if (ctx) setAttached((ctx as { prev: Set<string> }).prev);
+      if (ctx) setAttached(ctx.prev);
       notification.error({ message: 'Save failed', description: (err as Error).message });
     },
   });
@@ -1352,12 +1353,11 @@ function PluginsAttachPanel({
   }
 
   function toggle(pluginId: string, on: boolean) {
-    const prev = new Set(attached);
     const next = new Set(attached);
     if (on) next.add(pluginId);
     else next.delete(pluginId);
     setAttached(next);
-    mut.mutate([...next], { context: { prev } });
+    mut.mutate([...next]);
   }
 
   return (

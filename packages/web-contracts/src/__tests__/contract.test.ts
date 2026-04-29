@@ -77,6 +77,8 @@ describe('entity schemas', () => {
       capabilities: null,
       memoryScope: null,
       streamingTimeoutMs: null,
+      mcp_servers: null,
+      plugins: null,
       builtin: true,
     };
     const parsed = PersonalitySchema.parse(p);

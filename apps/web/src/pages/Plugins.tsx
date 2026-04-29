@@ -299,7 +299,6 @@ function AttachCell({
       checked={isOn}
       disabled={mut.isPending}
       onChange={(e) => toggle(e.target.checked)}
-      role="gridcell"
       aria-label={`Attach ${plugin.name} to ${personality.name}`}
     />
   );
