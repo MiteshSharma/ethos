@@ -1,6 +1,6 @@
-import { readdir, readFile, stat } from 'node:fs/promises';
 import { join } from 'node:path';
-import type { PersonalityConfig, PersonalityRegistry } from '@ethosagent/types';
+import { FsStorage } from '@ethosagent/storage-fs';
+import type { PersonalityConfig, PersonalityRegistry, Storage } from '@ethosagent/types';
 
 // ---------------------------------------------------------------------------
 // YAML parsers — no external dependency, handles the subset we need
@@ -30,8 +30,14 @@ function parseToolsetYaml(src: string): string[] {
 
 export class FilePersonalityRegistry implements PersonalityRegistry {
   private readonly personalities = new Map<string, PersonalityConfig>();
-  private readonly fingerprintCache = new Map<string, string>(); // dir → fingerprint of config.yaml + ETHOS.md + toolset.yaml
+  // dir → fingerprint of config.yaml + ETHOS.md + toolset.yaml mtimes
+  private readonly fingerprintCache = new Map<string, string>();
   private defaultId = 'researcher';
+  private readonly storage: Storage;
+
+  constructor(storage: Storage = new FsStorage()) {
+    this.storage = storage;
+  }
 
   // -------------------------------------------------------------------------
   // Interface methods
@@ -78,12 +84,8 @@ export class FilePersonalityRegistry implements PersonalityRegistry {
   }
 
   async loadFromDirectory(dir: string): Promise<void> {
-    let entries: string[];
-    try {
-      entries = await readdir(dir);
-    } catch {
-      return; // directory doesn't exist yet — fine
-    }
+    const entries = await this.storage.list(dir);
+    if (entries.length === 0) return;
 
     await Promise.all(
       entries.map(async (entry) => {
@@ -111,10 +113,10 @@ export class FilePersonalityRegistry implements PersonalityRegistry {
 
   private async loadOne(dir: string, id: string): Promise<void> {
     // Fingerprint guard — invalidate when any of the three personality files change.
-    // Combines mtime + size per file so a delete-and-recreate within the same
-    // mtime tick (which can happen on filesystems with coarse mtime resolution)
-    // still invalidates the cache.
-    const fingerprint = await fileFingerprint([
+    // mtime alone is enough: filesystems we run on (APFS / ext4 / NTFS) all
+    // expose sub-millisecond mtime, so two writes within the same tick
+    // is vanishingly unlikely for personality files (humans editing config).
+    const fingerprint = await this.fileFingerprint([
       join(dir, 'config.yaml'),
       join(dir, 'ETHOS.md'),
       join(dir, 'toolset.yaml'),
@@ -122,8 +124,61 @@ export class FilePersonalityRegistry implements PersonalityRegistry {
     if (this.fingerprintCache.get(dir) === fingerprint) return;
     this.fingerprintCache.set(dir, fingerprint);
 
-    const config = await buildConfig(dir, id);
+    const config = await this.buildConfig(dir, id);
     if (config) this.define(config);
+  }
+
+  private async buildConfig(dir: string, id: string): Promise<PersonalityConfig | null> {
+    // Must have at least config.yaml or ETHOS.md to be considered a personality
+    const [configSrc, toolsetSrc, ethosExists, skillsExists] = await Promise.all([
+      this.storage.read(join(dir, 'config.yaml')),
+      this.storage.read(join(dir, 'toolset.yaml')),
+      this.storage.exists(join(dir, 'ETHOS.md')),
+      this.storage.exists(join(dir, 'skills')),
+    ]);
+
+    if (!configSrc && !ethosExists) return null;
+
+    const cfg = configSrc ? parseConfigYaml(configSrc) : {};
+
+    const capabilities = cfg.capabilities
+      ? cfg.capabilities
+          .split(',')
+          .map((s) => s.trim())
+          .filter(Boolean)
+      : undefined;
+
+    const streamingTimeoutMs =
+      cfg.streamingTimeoutMs && /^\d+$/.test(cfg.streamingTimeoutMs)
+        ? Number.parseInt(cfg.streamingTimeoutMs, 10)
+        : undefined;
+
+    const config: PersonalityConfig = {
+      id,
+      name: cfg.name ?? titleCase(id),
+      description: cfg.description,
+      model: cfg.model,
+      provider: cfg.provider,
+      platform: cfg.platform,
+      memoryScope: (cfg.memoryScope as PersonalityConfig['memoryScope']) ?? 'global',
+      ...(capabilities?.length ? { capabilities } : {}),
+      ...(ethosExists ? { ethosFile: join(dir, 'ETHOS.md') } : {}),
+      ...(skillsExists ? { skillsDirs: [join(dir, 'skills')] } : {}),
+      ...(toolsetSrc ? { toolset: parseToolsetYaml(toolsetSrc) } : {}),
+      ...(streamingTimeoutMs !== undefined ? { streamingTimeoutMs } : {}),
+    };
+
+    return config;
+  }
+
+  private async fileFingerprint(paths: string[]): Promise<string> {
+    const parts = await Promise.all(
+      paths.map(async (p) => {
+        const t = await this.storage.mtime(p);
+        return t === null ? 'missing' : String(t);
+      }),
+    );
+    return parts.join('|');
   }
 }
 
@@ -131,8 +186,10 @@ export class FilePersonalityRegistry implements PersonalityRegistry {
 // Factory
 // ---------------------------------------------------------------------------
 
-export async function createPersonalityRegistry(): Promise<FilePersonalityRegistry> {
-  const registry = new FilePersonalityRegistry();
+export async function createPersonalityRegistry(
+  storage?: Storage,
+): Promise<FilePersonalityRegistry> {
+  const registry = new FilePersonalityRegistry(storage);
   await registry.loadBuiltins();
   return registry;
 }
@@ -140,80 +197,6 @@ export async function createPersonalityRegistry(): Promise<FilePersonalityRegist
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-async function buildConfig(dir: string, id: string): Promise<PersonalityConfig | null> {
-  // Must have at least config.yaml or ETHOS.md to be considered a personality
-  const [configSrc, toolsetSrc, ethosExists, skillsExists] = await Promise.all([
-    readSafe(join(dir, 'config.yaml')),
-    readSafe(join(dir, 'toolset.yaml')),
-    exists(join(dir, 'ETHOS.md')),
-    exists(join(dir, 'skills')),
-  ]);
-
-  if (!configSrc && !ethosExists) return null;
-
-  const cfg = configSrc ? parseConfigYaml(configSrc) : {};
-
-  const capabilities = cfg.capabilities
-    ? cfg.capabilities
-        .split(',')
-        .map((s) => s.trim())
-        .filter(Boolean)
-    : undefined;
-
-  const streamingTimeoutMs =
-    cfg.streamingTimeoutMs && /^\d+$/.test(cfg.streamingTimeoutMs)
-      ? Number.parseInt(cfg.streamingTimeoutMs, 10)
-      : undefined;
-
-  const config: PersonalityConfig = {
-    id,
-    name: cfg.name ?? titleCase(id),
-    description: cfg.description,
-    model: cfg.model,
-    provider: cfg.provider,
-    platform: cfg.platform,
-    memoryScope: (cfg.memoryScope as PersonalityConfig['memoryScope']) ?? 'global',
-    ...(capabilities?.length ? { capabilities } : {}),
-    ...(ethosExists ? { ethosFile: join(dir, 'ETHOS.md') } : {}),
-    ...(skillsExists ? { skillsDirs: [join(dir, 'skills')] } : {}),
-    ...(toolsetSrc ? { toolset: parseToolsetYaml(toolsetSrc) } : {}),
-    ...(streamingTimeoutMs !== undefined ? { streamingTimeoutMs } : {}),
-  };
-
-  return config;
-}
-
-async function readSafe(path: string): Promise<string | null> {
-  try {
-    return await readFile(path, 'utf-8');
-  } catch {
-    return null;
-  }
-}
-
-async function exists(path: string): Promise<boolean> {
-  try {
-    await stat(path);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-async function statFingerprint(path: string): Promise<string> {
-  try {
-    const s = await stat(path);
-    return `${s.mtimeMs}:${s.size}`;
-  } catch {
-    return 'missing';
-  }
-}
-
-async function fileFingerprint(paths: string[]): Promise<string> {
-  const parts = await Promise.all(paths.map(statFingerprint));
-  return parts.join('|');
-}
 
 function titleCase(s: string): string {
   return s.charAt(0).toUpperCase() + s.slice(1);

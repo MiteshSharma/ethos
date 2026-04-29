@@ -16,6 +16,7 @@
     "@ethosagent/core": "workspace:*",
     "@ethosagent/plugin-contract": "workspace:*",
     "@ethosagent/plugin-sdk": "workspace:*",
+    "@ethosagent/storage-fs": "workspace:*",
     "@ethosagent/types": "workspace:*"
   }
 }

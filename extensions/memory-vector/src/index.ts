@@ -1,12 +1,13 @@
-import { readFile, rename, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { FsStorage } from '@ethosagent/storage-fs';
 import type {
   MemoryContext,
   MemoryLoadContext,
   MemoryProvider,
   MemoryStore,
   MemoryUpdate,
+  Storage,
 } from '@ethosagent/types';
 import Database from 'better-sqlite3';
 
@@ -111,6 +112,12 @@ export interface VectorMemoryConfig {
    * Must return a normalized Float32Array of length 384.
    */
   embedFn?: (text: string) => Promise<Float32Array>;
+  /**
+   * Storage backend for the markdown side (MEMORY.md / USER.md migration,
+   * exportAll output). The SQLite side stays raw — better-sqlite3 opens
+   * memory.db directly per the storage-abstraction plan's SQLite carve-out.
+   */
+  storage?: Storage;
 }
 
 interface ChunkRow {
@@ -137,6 +144,7 @@ export class VectorMemoryProvider implements MemoryProvider {
   private readonly dir: string;
   private readonly topK: number;
   private readonly embedFn: ((text: string) => Promise<Float32Array>) | undefined;
+  private readonly storage: Storage;
   // LRU cache: query string → MemoryContext (Map preserves insertion order)
   private readonly cache = new Map<string, MemoryContext>();
 
@@ -144,6 +152,7 @@ export class VectorMemoryProvider implements MemoryProvider {
     this.dir = config.dir ?? join(homedir(), '.ethos');
     this.topK = config.topK ?? TOP_K;
     this.embedFn = config.embedFn;
+    this.storage = config.storage ?? new FsStorage();
     this.db = new Database(join(this.dir, 'memory.db'));
     this.db.pragma('journal_mode = WAL');
     this.migrate();
@@ -292,7 +301,7 @@ export class VectorMemoryProvider implements MemoryProvider {
       lines.push('');
     }
 
-    await writeFile(outputPath, lines.join('\n'), 'utf-8');
+    await this.storage.write(outputPath, lines.join('\n'));
     return rows.length;
   }
 
@@ -323,20 +332,20 @@ export class VectorMemoryProvider implements MemoryProvider {
     const memPath = join(this.dir, 'MEMORY.md');
     const userPath = join(this.dir, 'USER.md');
 
-    const memContent = await readSafe(memPath);
+    const memContent = await this.storage.read(memPath);
     if (memContent) {
       memoryChunks = await this.insertChunks('memory', memContent);
       if (memoryChunks > 0) {
-        await rename(memPath, `${memPath}.bak`);
+        await this.storage.rename(memPath, `${memPath}.bak`);
         didMigrate = true;
       }
     }
 
-    const userContent = await readSafe(userPath);
+    const userContent = await this.storage.read(userPath);
     if (userContent) {
       userChunks = await this.insertChunks('user', userContent);
       if (userChunks > 0) {
-        await rename(userPath, `${userPath}.bak`);
+        await this.storage.rename(userPath, `${userPath}.bak`);
         didMigrate = true;
       }
     }
@@ -377,17 +386,5 @@ export class VectorMemoryProvider implements MemoryProvider {
     }
 
     return chunks.length;
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-async function readSafe(filePath: string): Promise<string | null> {
-  try {
-    return await readFile(filePath, 'utf-8');
-  } catch {
-    return null;
   }
 }

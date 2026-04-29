@@ -1,6 +1,6 @@
-import { readFile, stat } from 'node:fs/promises';
 import { join } from 'node:path';
-import type { ContextInjector, InjectionResult, PromptContext } from '@ethosagent/types';
+import { FsStorage } from '@ethosagent/storage-fs';
+import type { ContextInjector, InjectionResult, PromptContext, Storage } from '@ethosagent/types';
 import { sanitize } from './prompt-injection-guard';
 
 // Files checked in order — first match wins
@@ -11,11 +11,21 @@ interface CacheEntry {
   content: string;
 }
 
+export interface FileContextInjectorOptions {
+  /** Storage backend. Defaults to FsStorage. */
+  storage?: Storage;
+}
+
 export class FileContextInjector implements ContextInjector {
   readonly id = 'file-context';
   readonly priority = 90;
 
   private readonly cache = new Map<string, CacheEntry>();
+  private readonly storage: Storage;
+
+  constructor(opts: FileContextInjectorOptions = {}) {
+    this.storage = opts.storage ?? new FsStorage();
+  }
 
   async inject(ctx: PromptContext): Promise<InjectionResult | null> {
     const cwd = ctx.workingDir;
@@ -39,16 +49,14 @@ export class FileContextInjector implements ContextInjector {
   }
 
   private async readCached(filePath: string): Promise<string | null> {
-    try {
-      const { mtimeMs } = await stat(filePath);
-      const cached = this.cache.get(filePath);
-      if (cached && cached.mtime === mtimeMs) return cached.content;
+    const mtimeMs = await this.storage.mtime(filePath);
+    if (mtimeMs === null) return null;
+    const cached = this.cache.get(filePath);
+    if (cached && cached.mtime === mtimeMs) return cached.content;
 
-      const content = await readFile(filePath, 'utf-8');
-      this.cache.set(filePath, { mtime: mtimeMs, content });
-      return content;
-    } catch {
-      return null;
-    }
+    const content = await this.storage.read(filePath);
+    if (content === null) return null;
+    this.cache.set(filePath, { mtime: mtimeMs, content });
+    return content;
   }
 }

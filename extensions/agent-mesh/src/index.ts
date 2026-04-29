@@ -1,6 +1,7 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { FsStorage } from '@ethosagent/storage-fs';
+import type { Storage } from '@ethosagent/types';
 
 export interface MeshEntry {
   agentId: string;
@@ -21,22 +22,31 @@ export function defaultRegistryPath(): string {
   return join(homedir(), '.ethos', 'mesh-registry.json');
 }
 
+export interface AgentMeshOptions {
+  /** Storage backend. Defaults to FsStorage. */
+  storage?: Storage;
+}
+
 export class AgentMesh {
   private readonly path: string;
+  private readonly storage: Storage;
 
-  constructor(registryPath = defaultRegistryPath()) {
+  constructor(registryPath: string = defaultRegistryPath(), opts: AgentMeshOptions = {}) {
     this.path = registryPath;
+    this.storage = opts.storage ?? new FsStorage();
   }
 
-  private read(): MeshEntry[] {
+  private async read(): Promise<MeshEntry[]> {
+    const src = await this.storage.read(this.path);
+    if (!src) return [];
     try {
-      return JSON.parse(readFileSync(this.path, 'utf8')) as MeshEntry[];
+      return JSON.parse(src) as MeshEntry[];
     } catch {
       return [];
     }
   }
 
-  private write(entries: MeshEntry[]): void {
+  private async write(entries: MeshEntry[]): Promise<void> {
     const now = Date.now();
     const live = entries.filter((e) => now - e.lastHeartbeatAt < STALE_MS);
     // trim to hard cap — keep newest registered
@@ -44,13 +54,12 @@ export class AgentMesh {
       live.length > MAX_ENTRIES
         ? live.sort((a, b) => b.registeredAt - a.registeredAt).slice(0, MAX_ENTRIES)
         : live;
-    const dir = dirname(this.path);
-    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-    writeFileSync(this.path, JSON.stringify(capped, null, 2));
+    await this.storage.mkdir(dirname(this.path));
+    await this.storage.write(this.path, JSON.stringify(capped, null, 2));
   }
 
-  register(entry: Omit<MeshEntry, 'registeredAt' | 'lastHeartbeatAt'>): void {
-    const entries = this.read();
+  async register(entry: Omit<MeshEntry, 'registeredAt' | 'lastHeartbeatAt'>): Promise<void> {
+    const entries = await this.read();
     const now = Date.now();
     const idx = entries.findIndex((e) => e.agentId === entry.agentId);
     if (idx >= 0) {
@@ -63,27 +72,29 @@ export class AgentMesh {
     } else {
       entries.push({ ...entry, registeredAt: now, lastHeartbeatAt: now });
     }
-    this.write(entries);
+    await this.write(entries);
   }
 
-  heartbeat(agentId: string, activeSessions: number): void {
-    const entries = this.read();
+  async heartbeat(agentId: string, activeSessions: number): Promise<void> {
+    const entries = await this.read();
     const idx = entries.findIndex((e) => e.agentId === agentId);
     if (idx >= 0) {
       entries[idx] = { ...entries[idx], lastHeartbeatAt: Date.now(), activeSessions };
-      this.write(entries);
+      await this.write(entries);
     }
   }
 
-  unregister(agentId: string): void {
-    this.write(this.read().filter((e) => e.agentId !== agentId));
+  async unregister(agentId: string): Promise<void> {
+    const entries = await this.read();
+    await this.write(entries.filter((e) => e.agentId !== agentId));
   }
 
   // Returns least-busy live agent advertising the given capability.
   // Tie-break: lowest registeredAt (first registered wins).
-  route(capability: string): MeshEntry | null {
+  async route(capability: string): Promise<MeshEntry | null> {
     const now = Date.now();
-    const candidates = this.read()
+    const entries = await this.read();
+    const candidates = entries
       .filter((e) => now - e.lastHeartbeatAt < STALE_MS)
       .filter((e) => e.capabilities.includes(capability));
 
@@ -98,15 +109,18 @@ export class AgentMesh {
     );
   }
 
-  list(): MeshEntry[] {
+  async list(): Promise<MeshEntry[]> {
     const now = Date.now();
-    return this.read().filter((e) => now - e.lastHeartbeatAt < STALE_MS);
+    const entries = await this.read();
+    return entries.filter((e) => now - e.lastHeartbeatAt < STALE_MS);
   }
 
-  // Starts a 10-second heartbeat. Returns a cleanup function.
+  // Starts a 10-second heartbeat. Returns a cleanup function. The async
+  // heartbeat call is fire-and-forget — failures are swallowed; the next
+  // tick retries.
   startHeartbeat(agentId: string, getActiveSessions: () => number): () => void {
     const id = setInterval(() => {
-      this.heartbeat(agentId, getActiveSessions());
+      void this.heartbeat(agentId, getActiveSessions()).catch(() => {});
     }, 10_000);
     return () => clearInterval(id);
   }

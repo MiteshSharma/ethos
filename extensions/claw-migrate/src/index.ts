@@ -4,12 +4,14 @@
 // Execute applies each op file-by-file with skip-or-overwrite semantics.
 // No content merge — one file wins. See plan/PLAN.md Phase 28.
 //
-// Zero new runtime deps. Pure node:fs/promises + node:path.
+// Reads/writes route through @ethosagent/storage-fs. Raw `copyFile` is kept
+// for binary-safe tree copies — Storage doesn't model byte streams.
 
-import type { Dirent } from 'node:fs';
-import { copyFile, mkdir, readdir, readFile, stat, writeFile } from 'node:fs/promises';
+import { copyFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { dirname, join, relative } from 'node:path';
+import { basename, dirname, join, relative } from 'node:path';
+import { FsStorage } from '@ethosagent/storage-fs';
+import type { Storage } from '@ethosagent/types';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -78,6 +80,8 @@ export interface MigrateOptions {
   preset?: 'all' | 'user-data';
   overwrite?: boolean;
   dryRun?: boolean;
+  /** Storage backend for plan inspection + write ops. Defaults to FsStorage. */
+  storage?: Storage;
 }
 
 // ---------------------------------------------------------------------------
@@ -107,6 +111,7 @@ export class ClawMigrator {
   readonly preset: 'all' | 'user-data';
   readonly overwrite: boolean;
   readonly dryRun: boolean;
+  private readonly storage: Storage;
 
   constructor(opts: MigrateOptions = {}) {
     this.source = opts.source ?? join(homedir(), '.openclaw');
@@ -115,16 +120,12 @@ export class ClawMigrator {
     this.preset = opts.preset ?? 'all';
     this.overwrite = opts.overwrite ?? false;
     this.dryRun = opts.dryRun ?? false;
+    this.storage = opts.storage ?? new FsStorage();
   }
 
   /** True iff the OpenClaw source directory contains config.yaml. */
   async sourceExists(): Promise<boolean> {
-    try {
-      const s = await stat(join(this.source, 'config.yaml'));
-      return s.isFile();
-    } catch {
-      return false;
-    }
+    return this.storage.exists(join(this.source, 'config.yaml'));
   }
 
   /**
@@ -133,13 +134,13 @@ export class ClawMigrator {
    */
   async plan(): Promise<MigrationPlan> {
     const detected = {
-      config: await isFile(join(this.source, 'config.yaml')),
-      memory: await isFile(join(this.source, 'MEMORY.md')),
-      user: await isFile(join(this.source, 'USER.md')),
-      soul: await isFile(join(this.source, 'SOUL.md')),
-      skills: await isDir(join(this.source, 'skills')),
-      keys: await isFile(join(this.source, 'keys.json')),
-      agents: await isFile(join(this.source, 'AGENTS.md')),
+      config: await this.storage.exists(join(this.source, 'config.yaml')),
+      memory: await this.storage.exists(join(this.source, 'MEMORY.md')),
+      user: await this.storage.exists(join(this.source, 'USER.md')),
+      soul: await this.storage.exists(join(this.source, 'SOUL.md')),
+      skills: await this.storage.exists(join(this.source, 'skills')),
+      keys: await this.storage.exists(join(this.source, 'keys.json')),
+      agents: await this.storage.exists(join(this.source, 'AGENTS.md')),
     };
 
     // Resolve personality up front so execute() can write a coherent config
@@ -147,7 +148,7 @@ export class ClawMigrator {
     let personalityRequested: string | null = null;
     let personalityResolved = 'researcher';
     if (detected.config) {
-      const raw = await safeReadFile(join(this.source, 'config.yaml'));
+      const raw = (await this.storage.read(join(this.source, 'config.yaml'))) ?? '';
       const kv = parseFlatYaml(raw);
       personalityRequested = kv.personality ?? null;
       if (personalityRequested && BUILTIN_PERSONALITIES.has(personalityRequested)) {
@@ -227,11 +228,13 @@ export class ClawMigrator {
 
     // Summary counts for the user-facing dry-run line.
     const memories = (detected.memory ? 1 : 0) + (detected.user ? 1 : 0);
-    const skills = detected.skills ? await countSkills(join(this.source, 'skills')) : 0;
+    const skills = detected.skills
+      ? await countSkills(this.storage, join(this.source, 'skills'))
+      : 0;
     let platformTokens = 0;
     let apiKeys = 0;
     if (detected.config) {
-      const raw = await safeReadFile(join(this.source, 'config.yaml'));
+      const raw = (await this.storage.read(join(this.source, 'config.yaml'))) ?? '';
       const kv = parseFlatYaml(raw);
       for (const key of PLATFORM_TOKEN_KEYS) {
         if (kv[key]) platformTokens += 1;
@@ -239,7 +242,7 @@ export class ClawMigrator {
       if (includeApiKeys && kv.apiKey) apiKeys += 1;
     }
     if (detected.keys && includeApiKeys) {
-      const raw = await safeReadFile(join(this.source, 'keys.json'));
+      const raw = (await this.storage.read(join(this.source, 'keys.json'))) ?? '';
       try {
         const parsed = JSON.parse(raw);
         if (Array.isArray(parsed)) apiKeys += parsed.length;
@@ -306,30 +309,31 @@ export class ClawMigrator {
   }
 
   private async applyFile(op: CopyOp): Promise<ItemResult> {
-    if ((await isFile(op.dest)) && !this.overwrite) {
+    if ((await isFileLike(this.storage, op.dest)) && !this.overwrite) {
       return { label: op.label, status: 'skipped', reason: 'already exists' };
     }
     if (this.dryRun) return { label: op.label, status: 'copied' };
-    await mkdir(dirname(op.dest), { recursive: true });
+    await this.storage.mkdir(dirname(op.dest));
+    // Raw copyFile preserves bytes — Storage doesn't model byte streams.
     await copyFile(op.source, op.dest);
     return { label: op.label, status: 'copied' };
   }
 
   private async applyTree(op: CopyOp): Promise<ItemResult> {
-    if ((await isDir(op.dest)) && !this.overwrite) {
+    if ((await isDirLike(this.storage, op.dest)) && !this.overwrite) {
       return { label: op.label, status: 'skipped', reason: 'already exists' };
     }
     if (this.dryRun) return { label: op.label, status: 'copied' };
-    await copyTree(op.source, op.dest);
+    await copyTree(this.storage, op.source, op.dest);
     return { label: op.label, status: 'copied' };
   }
 
   private async applyConfigMerge(op: CopyOp, plan: MigrationPlan): Promise<ItemResult> {
-    if ((await isFile(op.dest)) && !this.overwrite) {
+    if ((await isFileLike(this.storage, op.dest)) && !this.overwrite) {
       return { label: op.label, status: 'skipped', reason: 'already exists' };
     }
 
-    const raw = await readFile(op.source, 'utf-8');
+    const raw = (await this.storage.read(op.source)) ?? '';
     const kv = parseFlatYaml(raw);
 
     // Build the translated Ethos config.yaml as ordered key:value lines.
@@ -344,8 +348,8 @@ export class ClawMigrator {
     }
 
     if (this.dryRun) return { label: op.label, status: 'copied' };
-    await mkdir(dirname(op.dest), { recursive: true });
-    await writeFile(op.dest, `${lines.join('\n')}\n`, 'utf-8');
+    await this.storage.mkdir(dirname(op.dest));
+    await this.storage.write(op.dest, `${lines.join('\n')}\n`);
     return { label: op.label, status: 'copied' };
   }
 
@@ -353,11 +357,11 @@ export class ClawMigrator {
     // The personality dir contains three files; consider the personality
     // "already exists" if the directory exists with an ETHOS.md inside.
     const ethosFile = join(op.dest, 'ETHOS.md');
-    if ((await isFile(ethosFile)) && !this.overwrite) {
+    if ((await isFileLike(this.storage, ethosFile)) && !this.overwrite) {
       return { label: op.label, status: 'skipped', reason: 'already exists' };
     }
 
-    const soul = await readFile(op.source, 'utf-8');
+    const soul = (await this.storage.read(op.source)) ?? '';
     const configYaml = [
       'name: Migrated',
       'description: Imported from OpenClaw SOUL.md by ethos claw migrate.',
@@ -368,10 +372,10 @@ export class ClawMigrator {
     const toolsetYaml = '# No toolset specified — inherits the LLM provider default.\n';
 
     if (this.dryRun) return { label: op.label, status: 'copied' };
-    await mkdir(op.dest, { recursive: true });
-    await writeFile(ethosFile, soul, 'utf-8');
-    await writeFile(join(op.dest, 'config.yaml'), `${configYaml}\n`, 'utf-8');
-    await writeFile(join(op.dest, 'toolset.yaml'), toolsetYaml, 'utf-8');
+    await this.storage.mkdir(op.dest);
+    await this.storage.write(ethosFile, soul);
+    await this.storage.write(join(op.dest, 'config.yaml'), `${configYaml}\n`);
+    await this.storage.write(join(op.dest, 'toolset.yaml'), toolsetYaml);
     return { label: op.label, status: 'copied' };
   }
 }
@@ -380,39 +384,27 @@ export class ClawMigrator {
 // Helpers
 // ---------------------------------------------------------------------------
 
-async function isFile(path: string): Promise<boolean> {
-  try {
-    return (await stat(path)).isFile();
-  } catch {
-    return false;
-  }
+async function isFileLike(storage: Storage, path: string): Promise<boolean> {
+  // Storage.exists() can't distinguish file from directory, so check the
+  // parent listing. Cheap for a one-shot migration; not for hot loops.
+  const entries = await storage.listEntries(dirname(path));
+  return entries.some((e) => e.name === basename(path) && !e.isDir);
 }
 
-async function isDir(path: string): Promise<boolean> {
-  try {
-    return (await stat(path)).isDirectory();
-  } catch {
-    return false;
-  }
+async function isDirLike(storage: Storage, path: string): Promise<boolean> {
+  const entries = await storage.listEntries(dirname(path));
+  return entries.some((e) => e.name === basename(path) && e.isDir);
 }
 
-async function safeReadFile(path: string): Promise<string> {
-  try {
-    return await readFile(path, 'utf-8');
-  } catch {
-    return '';
-  }
-}
-
-async function copyTree(source: string, dest: string): Promise<void> {
-  await mkdir(dest, { recursive: true });
-  const entries = await readdir(source, { withFileTypes: true });
+async function copyTree(storage: Storage, source: string, dest: string): Promise<void> {
+  await storage.mkdir(dest);
+  const entries = await storage.listEntries(source);
   for (const entry of entries) {
     const sp = join(source, entry.name);
     const dp = join(dest, entry.name);
-    if (entry.isDirectory()) {
-      await copyTree(sp, dp);
-    } else if (entry.isFile()) {
+    if (entry.isDir) {
+      await copyTree(storage, sp, dp);
+    } else {
       await copyFile(sp, dp);
     }
     // Symlinks and other types are deliberately ignored — skill bundles
@@ -420,32 +412,23 @@ async function copyTree(source: string, dest: string): Promise<void> {
   }
 }
 
-async function countSkills(skillsDir: string): Promise<number> {
+async function countSkills(storage: Storage, skillsDir: string): Promise<number> {
   // A "skill" is any direct child directory containing a SKILL.md, plus the
   // scoped form <scope>/<slug>/SKILL.md (steipete/slack pattern).
   let count = 0;
-  let entries: Dirent[];
-  try {
-    entries = await readdir(skillsDir, { withFileTypes: true });
-  } catch {
-    return 0;
-  }
+  const entries = await storage.listEntries(skillsDir);
   for (const entry of entries) {
-    if (!entry.isDirectory()) continue;
+    if (!entry.isDir) continue;
     const top = join(skillsDir, entry.name);
-    if (await isFile(join(top, 'SKILL.md'))) {
+    if (await storage.exists(join(top, 'SKILL.md'))) {
       count += 1;
       continue;
     }
-    try {
-      const inner = await readdir(top, { withFileTypes: true });
-      for (const child of inner) {
-        if (child.isDirectory() && (await isFile(join(top, child.name, 'SKILL.md')))) {
-          count += 1;
-        }
+    const inner = await storage.listEntries(top);
+    for (const child of inner) {
+      if (child.isDir && (await storage.exists(join(top, child.name, 'SKILL.md')))) {
+        count += 1;
       }
-    } catch {
-      // unreadable scope dir — skip silently
     }
   }
   return count;

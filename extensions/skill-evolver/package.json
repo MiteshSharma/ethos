@@ -14,6 +14,7 @@
   },
   "dependencies": {
     "@ethosagent/batch-runner": "workspace:*",
+    "@ethosagent/storage-fs": "workspace:*",
     "@ethosagent/types": "workspace:*"
   }
 }

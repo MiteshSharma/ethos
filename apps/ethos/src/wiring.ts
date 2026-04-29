@@ -1,5 +1,6 @@
 import type { AgentLoop } from '@ethosagent/core';
-import type { LLMProvider } from '@ethosagent/types';
+import { FsStorage } from '@ethosagent/storage-fs';
+import type { LLMProvider, Storage } from '@ethosagent/types';
 import {
   createAgentLoop as packageCreateAgentLoop,
   createLLM as packageCreateLLM,
@@ -13,8 +14,20 @@ import { logger } from './logger';
 // The actual loop assembly (LLM + tools + hooks + session/memory/personalities)
 // lives in the package so TUI / web / ACP surfaces can share it.
 
+let storageSingleton: Storage | undefined;
+
+/**
+ * The CLI's process-wide Storage instance. FsStorage is stateless so multiple
+ * instances would be safe, but a singleton keeps the dependency-injection
+ * graph readable: any code path that needs ~/.ethos/ access calls this.
+ */
+export function getStorage(): Storage {
+  if (!storageSingleton) storageSingleton = new FsStorage();
+  return storageSingleton;
+}
+
 async function withRotation(config: EthosConfig) {
-  const rotationKeys = config.provider === 'anthropic' ? await readKeys() : [];
+  const rotationKeys = config.provider === 'anthropic' ? await readKeys(getStorage()) : [];
   return { ...config, rotationKeys };
 }
 

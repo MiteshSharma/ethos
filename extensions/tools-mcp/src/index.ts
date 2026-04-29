@@ -1,7 +1,7 @@
-import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import type { Tool, ToolResult } from '@ethosagent/types';
+import { FsStorage } from '@ethosagent/storage-fs';
+import type { Storage, Tool, ToolResult } from '@ethosagent/types';
 import { Client } from '@modelcontextprotocol/sdk/client';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 
@@ -247,10 +247,13 @@ export class McpManager {
 // Config loader
 // ---------------------------------------------------------------------------
 
-export async function loadMcpConfig(): Promise<McpServerConfig[]> {
+export async function loadMcpConfig(
+  storage: Storage = new FsStorage(),
+): Promise<McpServerConfig[]> {
+  const path = join(homedir(), '.ethos', 'mcp.json');
+  const raw = await storage.read(path);
+  if (!raw) return [];
   try {
-    const path = join(homedir(), '.ethos', 'mcp.json');
-    const raw = await readFile(path, 'utf8');
     return JSON.parse(raw) as McpServerConfig[];
   } catch {
     return [];

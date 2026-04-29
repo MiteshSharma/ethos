@@ -7,7 +7,7 @@ import { Gateway } from '@ethosagent/gateway';
 // them must not crash the CLI for users who don't run that platform.
 import type { PlatformAdapter } from '@ethosagent/types';
 import { type EthosConfig, readConfig, writeConfig } from '../config';
-import { createAgentLoop } from '../wiring';
+import { createAgentLoop, getStorage } from '../wiring';
 
 // Best-effort dynamic import. Returns null and logs a clear warning if the
 // module can't be loaded — typically because its underlying SDK isn't
@@ -76,13 +76,14 @@ export async function runGatewaySetup(): Promise<void> {
     );
   }
 
-  const config = await readConfig();
+  const storage = getStorage();
+  const config = await readConfig(storage);
   if (!config) {
     console.log(`${c.red}No ethos config found. Run ethos setup first.${c.reset}`);
     return;
   }
 
-  await writeConfig({ ...config, telegramToken: token });
+  await writeConfig(storage, { ...config, telegramToken: token });
   console.log(`${c.green}✓ Token saved to ~/.ethos/config.yaml${c.reset}`);
   console.log(
     `\n${c.dim}Run ${c.reset}${c.bold}ethos gateway start${c.reset}${c.dim} to start the bot.${c.reset}\n`,

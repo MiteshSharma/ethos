@@ -333,7 +333,7 @@ export function createRouteToAgentTool(registryPath = defaultRegistryPath()): To
       if (!prompt) return { ok: false, error: 'prompt is required', code: 'input_invalid' };
 
       const mesh = new AgentMesh(registryPath);
-      const agent = mesh.route(capability);
+      const agent = await mesh.route(capability);
       if (!agent) {
         return {
           ok: false,
@@ -379,7 +379,7 @@ export function createBroadcastToAgentsTool(registryPath = defaultRegistryPath()
       if (!prompt) return { ok: false, error: 'prompt is required', code: 'input_invalid' };
 
       const mesh = new AgentMesh(registryPath);
-      const agents = mesh.list();
+      const agents = await mesh.list();
       if (agents.length === 0) {
         return { ok: false, error: 'no live agents in mesh', code: 'execution_failed' };
       }

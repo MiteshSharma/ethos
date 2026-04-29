@@ -67,6 +67,9 @@ importers:
       '@ethosagent/cron':
         specifier: workspace:*
         version: link:../../extensions/cron
+      '@ethosagent/storage-fs':
+        specifier: workspace:*
+        version: link:../../packages/storage-fs
       '@ethosagent/types':
         specifier: workspace:*
         version: link:../../packages/types
@@ -334,6 +337,9 @@ importers:
 
   extensions/agent-mesh:
     dependencies:
+      '@ethosagent/storage-fs':
+        specifier: workspace:*
+        version: link:../../packages/storage-fs
       '@ethosagent/types':
         specifier: workspace:*
         version: link:../../packages/types
@@ -343,18 +349,27 @@ importers:
       '@ethosagent/core':
         specifier: workspace:*
         version: link:../../packages/core
+      '@ethosagent/storage-fs':
+        specifier: workspace:*
+        version: link:../../packages/storage-fs
       '@ethosagent/types':
         specifier: workspace:*
         version: link:../../packages/types
 
   extensions/claw-migrate:
     dependencies:
+      '@ethosagent/storage-fs':
+        specifier: workspace:*
+        version: link:../../packages/storage-fs
       '@ethosagent/types':
         specifier: workspace:*
         version: link:../../packages/types
 
   extensions/cron:
     dependencies:
+      '@ethosagent/storage-fs':
+        specifier: workspace:*
+        version: link:../../packages/storage-fs
       '@ethosagent/types':
         specifier: workspace:*
         version: link:../../packages/types
@@ -370,6 +385,9 @@ importers:
       '@ethosagent/core':
         specifier: workspace:*
         version: link:../../packages/core
+      '@ethosagent/storage-fs':
+        specifier: workspace:*
+        version: link:../../packages/storage-fs
       '@ethosagent/types':
         specifier: workspace:*
         version: link:../../packages/types
@@ -400,12 +418,18 @@ importers:
 
   extensions/memory-markdown:
     dependencies:
+      '@ethosagent/storage-fs':
+        specifier: workspace:*
+        version: link:../../packages/storage-fs
       '@ethosagent/types':
         specifier: workspace:*
         version: link:../../packages/types
 
   extensions/memory-vector:
     dependencies:
+      '@ethosagent/storage-fs':
+        specifier: workspace:*
+        version: link:../../packages/storage-fs
       '@ethosagent/types':
         specifier: workspace:*
         version: link:../../packages/types
@@ -422,6 +446,9 @@ importers:
 
   extensions/personalities:
     dependencies:
+      '@ethosagent/storage-fs':
+        specifier: workspace:*
+        version: link:../../packages/storage-fs
       '@ethosagent/types':
         specifier: workspace:*
         version: link:../../packages/types
@@ -483,6 +510,9 @@ importers:
       '@ethosagent/plugin-sdk':
         specifier: workspace:*
         version: link:../../packages/plugin-sdk
+      '@ethosagent/storage-fs':
+        specifier: workspace:*
+        version: link:../../packages/storage-fs
       '@ethosagent/types':
         specifier: workspace:*
         version: link:../../packages/types
@@ -511,12 +541,18 @@ importers:
       '@ethosagent/batch-runner':
         specifier: workspace:*
         version: link:../batch-runner
+      '@ethosagent/storage-fs':
+        specifier: workspace:*
+        version: link:../../packages/storage-fs
       '@ethosagent/types':
         specifier: workspace:*
         version: link:../../packages/types
 
   extensions/skills:
     dependencies:
+      '@ethosagent/storage-fs':
+        specifier: workspace:*
+        version: link:../../packages/storage-fs
       '@ethosagent/types':
         specifier: workspace:*
         version: link:../../packages/types
@@ -568,6 +604,9 @@ importers:
 
   extensions/tools-mcp:
     dependencies:
+      '@ethosagent/storage-fs':
+        specifier: workspace:*
+        version: link:../../packages/storage-fs
       '@ethosagent/types':
         specifier: workspace:*
         version: link:../../packages/types
@@ -676,6 +715,12 @@ importers:
       '@ethosagent/core':
         specifier: workspace:*
         version: link:../core
+      '@ethosagent/types':
+        specifier: workspace:*
+        version: link:../types
+
+  packages/storage-fs:
+    dependencies:
       '@ethosagent/types':
         specifier: workspace:*
         version: link:../types

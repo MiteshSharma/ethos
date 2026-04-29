@@ -12,11 +12,11 @@
 // Configured-but-missing channels exit non-zero so this command can be used
 // in CI / health checks. Everything else is informational.
 
-import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { type EthosConfig, ethosDir, readConfig } from '../config';
 import { errorLogExists, errorLogPath, readRecentErrors } from '../error-log';
+import { getStorage } from '../wiring';
 
 const c = {
   reset: '\x1b[0m',
@@ -145,7 +145,8 @@ export async function runDoctor(args: string[] = []): Promise<void> {
   // -------------------------------------------------------------------------
 
   console.log(`${c.bold}Config${c.reset}`);
-  const config = await readConfig();
+  const storage = getStorage();
+  const config = await readConfig(storage);
   const cfgPath = join(ethosDir(), 'config.yaml');
   if (!config) {
     console.log(`  ${c.yellow}⚠${c.reset}  No config at ${c.dim}${cfgPath}${c.reset}`);
@@ -166,7 +167,7 @@ export async function runDoctor(args: string[] = []): Promise<void> {
 
   console.log(`${c.bold}Personality data${c.reset}`);
   const userPersonalitiesDir = join(homedir(), '.ethos', 'personalities');
-  if (existsSync(userPersonalitiesDir)) {
+  if (await storage.exists(userPersonalitiesDir)) {
     console.log(
       `  ${c.green}✓${c.reset}  Custom personalities dir: ${c.dim}${userPersonalitiesDir}${c.reset}`,
     );

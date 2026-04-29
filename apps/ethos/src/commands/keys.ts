@@ -1,4 +1,5 @@
 import { readKeys, writeKeys } from '../config';
+import { getStorage } from '../wiring';
 
 const c = {
   reset: '\x1b[0m',
@@ -16,10 +17,11 @@ function maskKey(key: string): string {
 
 export async function runKeys(args: string[]): Promise<void> {
   const sub = args[0] ?? 'list';
+  const storage = getStorage();
 
   switch (sub) {
     case 'list': {
-      const keys = await readKeys();
+      const keys = await readKeys(storage);
       if (keys.length === 0) {
         console.log(`\n${c.dim}No rotation keys configured.${c.reset}`);
         console.log(`${c.dim}Add one with: ${c.reset}ethos keys add <api-key>\n`);
@@ -50,9 +52,9 @@ export async function runKeys(args: string[]): Promise<void> {
       const prioIdx = args.indexOf('--priority');
       const priority = prioIdx >= 0 ? Number(args[prioIdx + 1]) : 50;
 
-      const keys = await readKeys();
+      const keys = await readKeys(storage);
       keys.push({ apiKey, priority, ...(label ? { label } : {}) });
-      await writeKeys(keys);
+      await writeKeys(storage, keys);
       console.log(
         `${c.green}✓ Key added${c.reset}  ${maskKey(apiKey)}  ${c.dim}priority ${priority}${c.reset}`,
       );
@@ -65,13 +67,13 @@ export async function runKeys(args: string[]): Promise<void> {
         console.log('Usage: ethos keys remove <index>  (use ethos keys list to see indices)');
         process.exit(1);
       }
-      const keys = await readKeys();
+      const keys = await readKeys(storage);
       if (idx > keys.length) {
         console.log(`${c.red}No key at index ${idx}.${c.reset}`);
         process.exit(1);
       }
       const removed = keys.splice(idx - 1, 1)[0];
-      await writeKeys(keys);
+      await writeKeys(storage, keys);
       console.log(`${c.green}✓ Removed${c.reset}  ${maskKey(removed?.apiKey ?? '')}`);
       break;
     }

@@ -22,77 +22,78 @@ function entry(overrides: Partial<Parameters<AgentMesh['register']>[0]> = {}) {
 }
 
 describe('AgentMesh', () => {
-  it('registers and lists an entry', () => {
+  it('registers and lists an entry', async () => {
     const mesh = makeMesh();
-    mesh.register(entry());
-    const list = mesh.list();
+    await mesh.register(entry());
+    const list = await mesh.list();
     expect(list).toHaveLength(1);
     expect(list[0].agentId).toBe('agent-1');
     expect(list[0].capabilities).toEqual(['code']);
   });
 
-  it('unregisters removes entry', () => {
+  it('unregisters removes entry', async () => {
     const mesh = makeMesh();
-    mesh.register(entry());
-    mesh.unregister('agent-1');
-    expect(mesh.list()).toHaveLength(0);
+    await mesh.register(entry());
+    await mesh.unregister('agent-1');
+    expect(await mesh.list()).toHaveLength(0);
   });
 
-  it('re-registration preserves original registeredAt', () => {
+  it('re-registration preserves original registeredAt', async () => {
     const mesh = makeMesh();
-    mesh.register(entry());
-    const first = mesh.list()[0].registeredAt;
-    mesh.register(entry({ activeSessions: 1 }));
-    const second = mesh.list()[0].registeredAt;
+    await mesh.register(entry());
+    const first = (await mesh.list())[0].registeredAt;
+    await mesh.register(entry({ activeSessions: 1 }));
+    const second = (await mesh.list())[0].registeredAt;
     expect(second).toBe(first);
   });
 
-  it('route returns least-busy agent with capability', () => {
+  it('route returns least-busy agent with capability', async () => {
     const mesh = makeMesh();
-    mesh.register(entry({ agentId: 'busy', activeSessions: 3, port: 3001 }));
-    mesh.register(entry({ agentId: 'idle', activeSessions: 0, port: 3002 }));
-    const result = mesh.route('code');
+    await mesh.register(entry({ agentId: 'busy', activeSessions: 3, port: 3001 }));
+    await mesh.register(entry({ agentId: 'idle', activeSessions: 0, port: 3002 }));
+    const result = await mesh.route('code');
     expect(result?.agentId).toBe('idle');
   });
 
   it('route tie-breaks by registeredAt (first registered wins)', async () => {
     const mesh = makeMesh();
-    mesh.register(entry({ agentId: 'first', port: 3001 }));
+    await mesh.register(entry({ agentId: 'first', port: 3001 }));
     // ensure different timestamps
     await new Promise((r) => setTimeout(r, 5));
-    mesh.register(entry({ agentId: 'second', port: 3002 }));
-    const result = mesh.route('code');
+    await mesh.register(entry({ agentId: 'second', port: 3002 }));
+    const result = await mesh.route('code');
     expect(result?.agentId).toBe('first');
   });
 
-  it('route returns null when no agents have capability', () => {
+  it('route returns null when no agents have capability', async () => {
     const mesh = makeMesh();
-    mesh.register(entry({ capabilities: ['review'] }));
-    expect(mesh.route('code')).toBeNull();
+    await mesh.register(entry({ capabilities: ['review'] }));
+    expect(await mesh.route('code')).toBeNull();
   });
 
-  it('route returns null for empty registry', () => {
+  it('route returns null for empty registry', async () => {
     const mesh = makeMesh();
-    expect(mesh.route('code')).toBeNull();
+    expect(await mesh.route('code')).toBeNull();
   });
 
-  it('heartbeat updates activeSessions', () => {
+  it('heartbeat updates activeSessions', async () => {
     const mesh = makeMesh();
-    mesh.register(entry());
-    mesh.heartbeat('agent-1', 5);
-    expect(mesh.list()[0].activeSessions).toBe(5);
+    await mesh.register(entry());
+    await mesh.heartbeat('agent-1', 5);
+    expect((await mesh.list())[0].activeSessions).toBe(5);
   });
 
-  it('stale entries are excluded from list and route', () => {
+  it('stale entries are excluded from list and route', async () => {
     const mesh = makeMesh();
-    mesh.register(entry());
+    await mesh.register(entry());
     // Manually make the entry stale by backdating lastHeartbeatAt
     const path = (mesh as unknown as { path: string }).path;
-    const data = JSON.parse(require('node:fs').readFileSync(path, 'utf8'));
+    const { readFile, writeFile } = await import('node:fs/promises');
+    const data = JSON.parse(await readFile(path, 'utf8'));
     data[0].lastHeartbeatAt = Date.now() - 31_000;
-    require('node:fs').writeFileSync(path, JSON.stringify(data));
+    await writeFile(path, JSON.stringify(data));
 
-    expect(mesh.list()).toHaveLength(0);
-    expect(mesh.route('code')).toBeNull();
+    expect(await mesh.list()).toHaveLength(0);
+    expect(await mesh.route('code')).toBeNull();
   });
 });

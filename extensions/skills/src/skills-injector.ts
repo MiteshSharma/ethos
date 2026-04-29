@@ -1,11 +1,12 @@
-import { readdir, readFile, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
+import { FsStorage } from '@ethosagent/storage-fs';
 import type {
   ContextInjector,
   InjectionResult,
   PersonalityRegistry,
   PromptContext,
+  Storage,
 } from '@ethosagent/types';
 import { sanitize } from './prompt-injection-guard';
 import { applySubstitutions, parseSkillFrontmatter, shouldInject } from './skill-compat';
@@ -19,6 +20,8 @@ export interface SkillsInjectorOptions {
   globalSkillsDir?: string;
   /** Called when a skill is skipped because of OpenClaw `requires`/`os` rules. */
   onSkip?: (skillId: string, reason: string) => void;
+  /** Storage backend. Defaults to FsStorage. */
+  storage?: Storage;
 }
 
 export class SkillsInjector implements ContextInjector {
@@ -28,6 +31,7 @@ export class SkillsInjector implements ContextInjector {
   private readonly personalities: PersonalityRegistry;
   private readonly globalSkillsDir: string;
   private readonly onSkip?: (skillId: string, reason: string) => void;
+  private readonly storage: Storage;
   private readonly cache = new Map<string, CacheEntry>();
 
   constructor(personalities: PersonalityRegistry, optionsOrDir?: string | SkillsInjectorOptions) {
@@ -36,6 +40,7 @@ export class SkillsInjector implements ContextInjector {
       typeof optionsOrDir === 'string' ? { globalSkillsDir: optionsOrDir } : (optionsOrDir ?? {});
     this.globalSkillsDir = opts.globalSkillsDir ?? join(homedir(), '.ethos', 'skills');
     this.onSkip = opts.onSkip;
+    this.storage = opts.storage ?? new FsStorage();
   }
 
   async inject(ctx: PromptContext): Promise<InjectionResult | null> {
@@ -109,34 +114,25 @@ export class SkillsInjector implements ContextInjector {
   private async discoverSkillFiles(dir: string): Promise<string[]> {
     const found: string[] = [];
 
-    let entries: Array<{ name: string; isDir: boolean }>;
-    try {
-      const raw = await readdir(dir, { withFileTypes: true });
-      entries = raw.map((e) => ({ name: e.name, isDir: e.isDirectory() }));
-    } catch {
-      return [];
-    }
+    const entries = await this.storage.listEntries(dir);
+    if (entries.length === 0) return [];
 
-    for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
+    for (const entry of [...entries].sort((a, b) => a.name.localeCompare(b.name))) {
       if (entry.isDir) {
         if (entry.name === 'pending' || entry.name.startsWith('.')) continue;
         const subPath = join(dir, entry.name);
         // Direct SKILL.md
         const skillMd = join(subPath, 'SKILL.md');
-        if (await fileExists(skillMd)) {
+        if (await this.fileExists(skillMd)) {
           found.push(skillMd);
           continue;
         }
         // Scoped: <dir>/<scope>/<slug>/SKILL.md
-        try {
-          const inner = await readdir(subPath, { withFileTypes: true });
-          for (const child of inner.sort((a, b) => a.name.localeCompare(b.name))) {
-            if (!child.isDirectory()) continue;
-            const nested = join(subPath, child.name, 'SKILL.md');
-            if (await fileExists(nested)) found.push(nested);
-          }
-        } catch {
-          // ignore unreadable subdirs
+        const inner = await this.storage.listEntries(subPath);
+        for (const child of [...inner].sort((a, b) => a.name.localeCompare(b.name))) {
+          if (!child.isDir) continue;
+          const nested = join(subPath, child.name, 'SKILL.md');
+          if (await this.fileExists(nested)) found.push(nested);
         }
       } else if (entry.name.endsWith('.md')) {
         found.push(join(dir, entry.name));
@@ -155,25 +151,22 @@ export class SkillsInjector implements ContextInjector {
   }
 
   private async readCached(filePath: string): Promise<string | null> {
-    try {
-      const { mtimeMs } = await stat(filePath);
-      const cached = this.cache.get(filePath);
-      if (cached && cached.mtime === mtimeMs) return cached.content;
+    const mtimeMs = await this.storage.mtime(filePath);
+    if (mtimeMs === null) return null;
+    const cached = this.cache.get(filePath);
+    if (cached && cached.mtime === mtimeMs) return cached.content;
 
-      const content = await readFile(filePath, 'utf-8');
-      this.cache.set(filePath, { mtime: mtimeMs, content });
-      return content;
-    } catch {
-      return null;
-    }
+    const content = await this.storage.read(filePath);
+    if (content === null) return null;
+    this.cache.set(filePath, { mtime: mtimeMs, content });
+    return content;
   }
-}
 
-async function fileExists(path: string): Promise<boolean> {
-  try {
-    const s = await stat(path);
-    return s.isFile();
-  } catch {
-    return false;
+  private async fileExists(path: string): Promise<boolean> {
+    // Need to distinguish file from directory — listEntries on the parent
+    // would work but is expensive. mtime returning a number means "exists",
+    // and SKILL.md candidates aren't directories in any sane layout.
+    const t = await this.storage.mtime(path);
+    return t !== null;
   }
 }

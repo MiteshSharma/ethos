@@ -25,12 +25,13 @@ export class MeshRepository {
     this.mesh = opts.registryPath ? new AgentMesh(opts.registryPath) : new AgentMesh();
   }
 
-  list(): MeshAgent[] {
-    return this.mesh.list().map(toWireAgent);
+  async list(): Promise<MeshAgent[]> {
+    const entries = await this.mesh.list();
+    return entries.map(toWireAgent);
   }
 
-  route(capability: string): MeshRouteResult {
-    const picked = this.mesh.route(capability);
+  async route(capability: string): Promise<MeshRouteResult> {
+    const picked = await this.mesh.route(capability);
     if (!picked) {
       return {
         ok: false,

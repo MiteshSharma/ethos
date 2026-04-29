@@ -1,6 +1,6 @@
-import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import type { LLMProvider, Message } from '@ethosagent/types';
+import { FsStorage } from '@ethosagent/storage-fs';
+import type { LLMProvider, Message, Storage } from '@ethosagent/types';
 import { analyzeEvalOutput, parseEvalJsonl } from './analyze';
 import {
   parseNewSkillResponse,
@@ -16,6 +16,8 @@ export interface EvolveOptions {
   pendingDir: string;
   config: EvolveConfig;
   llm: LLMProvider;
+  /** Storage backend. Defaults to FsStorage. */
+  storage?: Storage;
 }
 
 export interface EvolveResult {
@@ -30,12 +32,14 @@ export class SkillEvolver {
 
   async evolve(): Promise<EvolveResult> {
     const { evalOutputPath, skillsDir, pendingDir, config, llm } = this.options;
+    const storage = this.options.storage ?? new FsStorage();
 
-    const src = await readFile(evalOutputPath, 'utf-8');
+    const src = await storage.read(evalOutputPath);
+    if (!src) throw new Error(`eval output not found: ${evalOutputPath}`);
     const records = parseEvalJsonl(src);
-    const plan = await analyzeEvalOutput(records, skillsDir, config);
+    const plan = await analyzeEvalOutput(records, skillsDir, config, storage);
 
-    await mkdir(pendingDir, { recursive: true });
+    await storage.mkdir(pendingDir);
 
     const rewritesWritten: string[] = [];
     const newSkillsWritten: string[] = [];
@@ -50,7 +54,7 @@ export class SkillEvolver {
         continue;
       }
       const outName = candidate.fileName;
-      await writeFile(join(pendingDir, outName), `${parsed.content}\n`, 'utf-8');
+      await storage.write(join(pendingDir, outName), `${parsed.content}\n`);
       rewritesWritten.push(outName);
     }
 
@@ -62,8 +66,8 @@ export class SkillEvolver {
         skipped.push({ kind: 'new', target: 'pattern-bundle', reason: parsed.reason });
         continue;
       }
-      const safeName = await pickAvailableName(parsed.fileName, pendingDir, skillsDir);
-      await writeFile(join(pendingDir, safeName), `${parsed.content}\n`, 'utf-8');
+      const safeName = await pickAvailableName(parsed.fileName, pendingDir, skillsDir, storage);
+      await storage.write(join(pendingDir, safeName), `${parsed.content}\n`);
       newSkillsWritten.push(safeName);
     }
 
@@ -86,15 +90,12 @@ async function pickAvailableName(
   proposed: string,
   pendingDir: string,
   skillsDir: string,
+  storage: Storage,
 ): Promise<string> {
   const taken = new Set<string>();
   for (const dir of [pendingDir, skillsDir]) {
-    try {
-      for (const entry of await readdir(dir)) {
-        if (entry.endsWith('.md')) taken.add(entry);
-      }
-    } catch {
-      /* dir missing — fine */
+    for (const entry of await storage.list(dir)) {
+      if (entry.endsWith('.md')) taken.add(entry);
     }
   }
   if (!taken.has(proposed)) return proposed;

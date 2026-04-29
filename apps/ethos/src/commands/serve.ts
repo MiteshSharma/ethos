@@ -56,7 +56,7 @@ export async function runServe(args: string[], config: EthosConfig): Promise<voi
   const capabilities = personalityConfig?.capabilities ?? [];
 
   const agentId = `${config.personality ?? 'default'}:${process.pid}:${randomUUID().slice(0, 8)}`;
-  mesh.register({
+  await mesh.register({
     agentId,
     capabilities,
     model: config.model,
@@ -160,7 +160,7 @@ export async function runServe(args: string[], config: EthosConfig): Promise<voi
 
   const cleanup = async () => {
     stopHeartbeat();
-    mesh.unregister(agentId);
+    await mesh.unregister(agentId);
     if (cronScheduler) cronScheduler.stop();
     if (webShutdown) await webShutdown();
     process.exit(0);

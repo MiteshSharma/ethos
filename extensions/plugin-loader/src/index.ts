@@ -1,21 +1,29 @@
-import { readdir, readFile, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { checkPluginContractMajor, isEthosPlugin } from '@ethosagent/plugin-contract';
 import type { EthosPlugin, PluginRegistries } from '@ethosagent/plugin-sdk';
 import { PluginApiImpl } from '@ethosagent/plugin-sdk';
+import { FsStorage } from '@ethosagent/storage-fs';
+import type { Storage } from '@ethosagent/types';
 
 // ---------------------------------------------------------------------------
 // PluginLoader
 // ---------------------------------------------------------------------------
 
+export interface PluginLoaderOptions {
+  /** Storage backend. Defaults to FsStorage. */
+  storage?: Storage;
+}
+
 export class PluginLoader {
   private readonly registries: PluginRegistries;
+  private readonly storage: Storage;
   private readonly apis = new Map<string, PluginApiImpl>();
   private readonly plugins = new Map<string, EthosPlugin>();
 
-  constructor(registries: PluginRegistries) {
+  constructor(registries: PluginRegistries, opts: PluginLoaderOptions = {}) {
     this.registries = registries;
+    this.storage = opts.storage ?? new FsStorage();
   }
 
   // ---------------------------------------------------------------------------
@@ -42,19 +50,12 @@ export class PluginLoader {
    * Silently skips directories that don't look like plugins.
    */
   async loadFromDirectory(dir: string): Promise<void> {
-    let entries: string[];
-    try {
-      entries = await readdir(dir);
-    } catch {
-      return; // directory doesn't exist — fine
-    }
-
+    const entries = await this.storage.listEntries(dir);
     for (const entry of entries) {
-      const pluginDir = join(dir, entry);
+      if (!entry.isDir) continue;
+      const pluginDir = join(dir, entry.name);
       try {
-        const s = await stat(pluginDir);
-        if (!s.isDirectory()) continue;
-        await this.loadFromPluginDir(pluginDir, entry);
+        await this.loadFromPluginDir(pluginDir, entry.name);
       } catch {
         // skip broken plugins
       }
@@ -72,17 +73,19 @@ export class PluginLoader {
     // Phase 30.6 — gate on declared plugin contract major *before* importing.
     // We don't want a stale plugin's top-level code to run if its contract
     // declaration is incompatible.
-    const reject = await checkContractMajorFromDir(dir, id);
+    const reject = await checkContractMajorFromDir(this.storage, dir, id);
     if (reject) {
       console.warn(`[plugin-loader] ${reject}`);
       return;
     }
 
     // Resolve entry point
-    const entry = await resolveEntry(dir);
+    const entry = await resolveEntry(this.storage, dir);
     if (!entry) return;
 
-    // Dynamic import the plugin module
+    // Dynamic import the plugin module — stays raw `import()`. Per
+    // plan/storage_abstraction.md, dynamic import is a process operation,
+    // not a fs read; Storage doesn't model it.
     let mod: unknown;
     try {
       mod = await import(entry);
@@ -111,15 +114,11 @@ export class PluginLoader {
   }
 
   private async scanNodeModulesDir(nmDir: string): Promise<void> {
-    let entries: string[];
-    try {
-      entries = await readdir(nmDir);
-    } catch {
-      return;
-    }
+    const entries = await this.storage.list(nmDir);
+    if (entries.length === 0) return;
 
-    // readdir returns scope dirs (e.g. `@ethos-plugins`) without their packages,
-    // so scoped names need a second readdir to surface `@ethos-plugins/foo`.
+    // listEntries returns scope dirs (e.g. `@ethos-plugins`) without their packages,
+    // so scoped names need a second list to surface `@ethos-plugins/foo`.
     const candidates: string[] = [];
     for (const entry of entries) {
       if (entry.startsWith('ethos-plugin-')) {
@@ -127,12 +126,7 @@ export class PluginLoader {
         continue;
       }
       if (entry === '@ethos-plugins') {
-        let scopedEntries: string[];
-        try {
-          scopedEntries = await readdir(join(nmDir, entry));
-        } catch {
-          continue;
-        }
+        const scopedEntries = await this.storage.list(join(nmDir, entry));
         for (const sub of scopedEntries) {
           candidates.push(`${entry}/${sub}`);
         }
@@ -142,7 +136,9 @@ export class PluginLoader {
     for (const name of candidates) {
       const pkgPath = join(nmDir, name, 'package.json');
       try {
-        const raw = JSON.parse(await readFile(pkgPath, 'utf-8'));
+        const src = await this.storage.read(pkgPath);
+        if (!src) continue;
+        const raw = JSON.parse(src);
         if (!isEthosPlugin(raw)) continue;
 
         // Phase 30.6 — reject incompatible contract major before import.
@@ -255,43 +251,42 @@ function isPluginModule(mod: unknown): mod is EthosPlugin {
  * Plugins without a package.json or without the field are allowed (older
  * plugins predating the field; in-development plugins).
  */
-async function checkContractMajorFromDir(dir: string, id: string): Promise<string | null> {
+async function checkContractMajorFromDir(
+  storage: Storage,
+  dir: string,
+  id: string,
+): Promise<string | null> {
+  const src = await storage.read(join(dir, 'package.json'));
+  if (!src) return null; // no package.json — allow (loader-only plugin)
   let raw: { ethos?: { pluginContractMajor?: number } };
   try {
-    raw = JSON.parse(await readFile(join(dir, 'package.json'), 'utf-8'));
+    raw = JSON.parse(src);
   } catch {
-    return null; // no package.json — allow (loader-only plugin)
+    return null;
   }
   const declared = raw.ethos?.pluginContractMajor;
   const result = checkPluginContractMajor(declared, undefined, id);
   return result.ok ? null : (result.reason ?? `Plugin "${id}" rejected`);
 }
 
-async function resolveEntry(dir: string): Promise<string | null> {
+async function resolveEntry(storage: Storage, dir: string): Promise<string | null> {
   for (const name of ['index.ts', 'index.js', 'src/index.ts', 'src/index.js']) {
     const candidate = join(dir, name);
-    try {
-      await stat(candidate);
-      return candidate;
-    } catch {
-      // try next
-    }
+    if (await storage.exists(candidate)) return candidate;
   }
 
   // Check package.json main/exports
+  const src = await storage.read(join(dir, 'package.json'));
+  if (!src) return null;
   try {
-    const raw = JSON.parse(await readFile(join(dir, 'package.json'), 'utf-8')) as Record<
-      string,
-      unknown
-    >;
+    const raw = JSON.parse(src) as Record<string, unknown>;
     const main = raw.main as string | undefined;
     if (main) {
       const candidate = join(dir, main);
-      await stat(candidate);
-      return candidate;
+      if (await storage.exists(candidate)) return candidate;
     }
   } catch {
-    // no package.json or main
+    // no parseable package.json
   }
 
   return null;

@@ -19,8 +19,8 @@ describe('MeshRepository', () => {
     await rm(dir, { recursive: true, force: true });
   });
 
-  it('list() returns empty when the registry file is missing', () => {
-    expect(repo.list()).toEqual([]);
+  it('list() returns empty when the registry file is missing', async () => {
+    expect(await repo.list()).toEqual([]);
   });
 
   it('list() drops stale agents (heartbeat >30s old)', async () => {
@@ -54,14 +54,14 @@ describe('MeshRepository', () => {
       ]),
     );
 
-    const live = repo.list();
+    const live = await repo.list();
     expect(live).toHaveLength(1);
     expect(live[0]?.agentId).toBe('fresh-agent');
     expect(live[0]?.lastSeenAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
   });
 
-  it('route() returns ok=false with a reason when no peer matches', () => {
-    const result = repo.route('quantum-coffee');
+  it('route() returns ok=false with a reason when no peer matches', async () => {
+    const result = await repo.route('quantum-coffee');
     expect(result.ok).toBe(false);
     expect(result.routedTo).toBeNull();
     expect(result.reason).toContain('quantum-coffee');
@@ -97,7 +97,7 @@ describe('MeshRepository', () => {
       ]),
     );
 
-    const result = repo.route('code');
+    const result = await repo.route('code');
     expect(result.ok).toBe(true);
     expect(result.routedTo).toBe('idle');
   });
