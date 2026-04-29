@@ -1,6 +1,6 @@
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import type { Storage } from '@ethosagent/types';
 
 // ---------------------------------------------------------------------------
 // Key rotation pool
@@ -12,18 +12,22 @@ export interface KeyProfile {
   label?: string;
 }
 
-export async function readKeys(): Promise<KeyProfile[]> {
+export async function readKeys(storage: Storage): Promise<KeyProfile[]> {
+  const src = await storage.read(join(ethosDir(), 'keys.json'));
+  if (!src) return [];
   try {
-    const src = await readFile(join(ethosDir(), 'keys.json'), 'utf-8');
     return JSON.parse(src) as KeyProfile[];
   } catch {
     return [];
   }
 }
 
-export async function writeKeys(keys: KeyProfile[]): Promise<void> {
-  await mkdir(ethosDir(), { recursive: true });
-  await writeFile(join(ethosDir(), 'keys.json'), `${JSON.stringify(keys, null, 2)}\n`, 'utf-8');
+export async function writeKeys(storage: Storage, keys: KeyProfile[]): Promise<void> {
+  await storage.mkdir(ethosDir());
+  // 0o600 — keys file contains rotation API keys; restrict to owner.
+  await storage.write(join(ethosDir(), 'keys.json'), `${JSON.stringify(keys, null, 2)}\n`, {
+    mode: 0o600,
+  });
 }
 
 export interface EthosConfig {
@@ -55,17 +59,14 @@ export function ethosDir(): string {
   return join(homedir(), '.ethos');
 }
 
-export async function readConfig(): Promise<EthosConfig | null> {
-  try {
-    const src = await readFile(join(ethosDir(), 'config.yaml'), 'utf-8');
-    return parseConfigYaml(src);
-  } catch {
-    return null;
-  }
+export async function readConfig(storage: Storage): Promise<EthosConfig | null> {
+  const src = await storage.read(join(ethosDir(), 'config.yaml'));
+  if (!src) return null;
+  return parseConfigYaml(src);
 }
 
-export async function writeConfig(config: EthosConfig): Promise<void> {
-  await mkdir(ethosDir(), { recursive: true });
+export async function writeConfig(storage: Storage, config: EthosConfig): Promise<void> {
+  await storage.mkdir(ethosDir());
   const lines = [
     `provider: ${config.provider}`,
     `model: ${config.model}`,
@@ -84,7 +85,7 @@ export async function writeConfig(config: EthosConfig): Promise<void> {
   if (config.slackBotToken) lines.push(`slackBotToken: ${config.slackBotToken}`);
   if (config.slackAppToken) lines.push(`slackAppToken: ${config.slackAppToken}`);
   if (config.slackSigningSecret) lines.push(`slackSigningSecret: ${config.slackSigningSecret}`);
-  await writeFile(join(ethosDir(), 'config.yaml'), `${lines.join('\n')}\n`, 'utf-8');
+  await storage.write(join(ethosDir(), 'config.yaml'), `${lines.join('\n')}\n`);
 }
 
 function parseConfigYaml(src: string): EthosConfig {

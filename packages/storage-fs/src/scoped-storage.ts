@@ -72,6 +72,11 @@ export class ScopedStorage implements Storage {
     return this.inner.write(path, content, opts);
   }
 
+  async append(path: string, content: string): Promise<void> {
+    this.check(path, 'write');
+    return this.inner.append(path, content);
+  }
+
   async writeAtomic(path: string, content: string, opts?: StorageWriteOptions): Promise<void> {
     this.check(path, 'write');
     return this.inner.writeAtomic(path, content, opts);

@@ -19,6 +19,7 @@ import { runSkills } from './commands/skills';
 import { runUpgrade } from './commands/upgrade';
 import { readConfig } from './config';
 import { appendErrorLog } from './error-log';
+import { getStorage } from './wiring';
 
 // Compile-time injected by tsup via define (or read from env at runtime in dev).
 declare const __ETHOS_VERSION__: string;
@@ -52,7 +53,7 @@ try {
 
     case 'chat':
     case '': {
-      const config = await readConfig();
+      const config = await readConfig(getStorage());
       if (!config) {
         console.log('No config found. Running setup first...\n');
         const fresh = await runSetup();
@@ -76,12 +77,12 @@ try {
         console.log();
       } else if (sub === 'set' && args[2]) {
         const { writeConfig, readConfig: rc } = await import('./config');
-        const cfg = await rc();
+        const cfg = await rc(getStorage());
         if (!cfg) {
           console.error('Run ethos setup first.');
           process.exit(1);
         }
-        await writeConfig({ ...cfg, personality: args[2] });
+        await writeConfig(getStorage(), { ...cfg, personality: args[2] });
         console.log(`Personality set to: ${args[2]}`);
       } else {
         console.log('Usage: ethos personality [list | set <id>]');
@@ -91,7 +92,7 @@ try {
 
     case 'memory': {
       const sub = args[1] ?? 'show';
-      const config = await readConfig();
+      const config = await readConfig(getStorage());
 
       if (config?.memory === 'vector') {
         const { VectorMemoryProvider } = await import('@ethosagent/memory-vector');
@@ -183,7 +184,7 @@ try {
       if (sub === 'setup') {
         await runGatewaySetup();
       } else if (sub === 'start') {
-        const config = await readConfig();
+        const config = await readConfig(getStorage());
         if (!config) {
           console.error('Run ethos setup first.');
           process.exit(1);
@@ -196,7 +197,7 @@ try {
     }
 
     case 'cron': {
-      const config = await readConfig();
+      const config = await readConfig(getStorage());
       if (!config) {
         console.error('Run ethos setup first.');
         process.exit(1);
@@ -206,7 +207,7 @@ try {
     }
 
     case 'acp': {
-      const config = await readConfig();
+      const config = await readConfig(getStorage());
       if (!config) {
         console.error('Run ethos setup first.');
         process.exit(1);
@@ -216,7 +217,7 @@ try {
     }
 
     case 'serve': {
-      const config = await readConfig();
+      const config = await readConfig(getStorage());
       if (!config) {
         console.error('Run ethos setup first.');
         process.exit(1);
@@ -226,7 +227,7 @@ try {
     }
 
     case 'batch': {
-      const config = await readConfig();
+      const config = await readConfig(getStorage());
       if (!config) {
         console.error('Run ethos setup first.');
         process.exit(1);
@@ -236,7 +237,7 @@ try {
     }
 
     case 'eval': {
-      const config = await readConfig();
+      const config = await readConfig(getStorage());
       if (!config) {
         console.error('Run ethos setup first.');
         process.exit(1);
@@ -246,7 +247,7 @@ try {
     }
 
     case 'evolve': {
-      const config = await readConfig();
+      const config = await readConfig(getStorage());
       if (!config) {
         console.error('Run ethos setup first.');
         process.exit(1);

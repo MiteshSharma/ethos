@@ -1,7 +1,8 @@
-import { appendFile, writeFile } from 'node:fs/promises';
 import type { AtroposRecord, AtroposUsage, BatchTask } from '@ethosagent/batch-runner';
 import { ATROPOS_SCHEMA_VERSION } from '@ethosagent/batch-runner';
 import type { AgentLoop } from '@ethosagent/core';
+import { FsStorage } from '@ethosagent/storage-fs';
+import type { Storage } from '@ethosagent/types';
 import {
   containsScorer,
   exactMatchScorer,
@@ -14,16 +15,18 @@ import type { EvalExpected, EvalRunOptions, EvalStats } from './types';
 class Writer {
   private chain: Promise<void> = Promise.resolve();
 
-  constructor(private readonly path: string) {}
+  constructor(
+    private readonly path: string,
+    private readonly storage: Storage,
+  ) {}
 
-  init(truncate: boolean): Promise<void> {
-    if (truncate) return writeFile(this.path, '', 'utf-8');
-    return Promise.resolve();
+  async init(truncate: boolean): Promise<void> {
+    if (truncate) await this.storage.write(this.path, '');
   }
 
   append(record: AtroposRecord): Promise<void> {
     this.chain = this.chain.then(() =>
-      appendFile(this.path, `${JSON.stringify(record)}\n`, 'utf-8'),
+      this.storage.append(this.path, `${JSON.stringify(record)}\n`),
     );
     return this.chain;
   }
@@ -63,7 +66,8 @@ export class EvalRunner {
     expectedMap: Map<string, EvalExpected>,
     onProgress?: (done: number, total: number) => void,
   ): Promise<EvalStats> {
-    const writer = new Writer(this.options.outputPath);
+    const storage = this.options.storage ?? new FsStorage();
+    const writer = new Writer(this.options.outputPath, storage);
     await writer.init(true);
 
     const sem = new Semaphore(this.options.concurrency);

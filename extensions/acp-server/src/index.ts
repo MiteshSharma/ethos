@@ -211,12 +211,16 @@ export class AcpServer {
           const p = req.params as Omit<MeshEntry, 'registeredAt' | 'lastHeartbeatAt'>;
           if (!this.mesh)
             return { jsonrpc: '2.0', id, error: { code: -32000, message: 'Mesh not configured' } };
-          this.mesh.register(p);
+          await this.mesh.register(p);
           return { jsonrpc: '2.0', id, result: { ok: true } };
         }
 
         case 'mesh.status':
-          return { jsonrpc: '2.0', id, result: { agents: this.mesh?.list() ?? [] } };
+          return {
+            jsonrpc: '2.0',
+            id,
+            result: { agents: this.mesh ? await this.mesh.list() : [] },
+          };
 
         default:
           return {
@@ -347,13 +351,13 @@ export class AcpServer {
             sendError(-32000, 'Mesh not configured');
             return;
           }
-          this.mesh.register(p);
+          await this.mesh.register(p);
           sendResult({ ok: true });
           break;
         }
 
         case 'mesh.status':
-          sendResult({ agents: this.mesh?.list() ?? [] });
+          sendResult({ agents: this.mesh ? await this.mesh.list() : [] });
           break;
 
         default:

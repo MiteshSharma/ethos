@@ -1,11 +1,12 @@
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { FsStorage } from '@ethosagent/storage-fs';
 import type {
   MemoryContext,
   MemoryLoadContext,
   MemoryProvider,
   MemoryUpdate,
+  Storage,
 } from '@ethosagent/types';
 
 const MAX_CHARS = 20_000;
@@ -15,15 +16,19 @@ export interface MarkdownMemoryConfig {
   dir?: string;
   /** Maximum characters returned by prefetch before truncation. Defaults to 20000 */
   maxChars?: number;
+  /** Storage backend. Defaults to FsStorage. Inject InMemoryStorage in tests. */
+  storage?: Storage;
 }
 
 export class MarkdownFileMemoryProvider implements MemoryProvider {
   private readonly dir: string;
   private readonly maxChars: number;
+  private readonly storage: Storage;
 
   constructor(config: MarkdownMemoryConfig = {}) {
     this.dir = config.dir ?? join(homedir(), '.ethos');
     this.maxChars = config.maxChars ?? MAX_CHARS;
+    this.storage = config.storage ?? new FsStorage();
   }
 
   /**
@@ -43,11 +48,11 @@ export class MarkdownFileMemoryProvider implements MemoryProvider {
     const parts: string[] = [];
 
     // USER.md is always shared — it's about the person, not the personality
-    const userContent = await readSafe(join(this.dir, 'USER.md'));
+    const userContent = await this.storage.read(join(this.dir, 'USER.md'));
     if (userContent) parts.push(`## About You\n\n${userContent.trim()}`);
 
     const memoryDir = this.resolveMemoryDir(ctx);
-    const memoryContent = await readSafe(join(memoryDir, 'MEMORY.md'));
+    const memoryContent = await this.storage.read(join(memoryDir, 'MEMORY.md'));
     if (memoryContent) parts.push(`## Memory\n\n${memoryContent.trim()}`);
 
     if (parts.length === 0) return null;
@@ -66,8 +71,8 @@ export class MarkdownFileMemoryProvider implements MemoryProvider {
     if (updates.length === 0) return;
 
     const memoryDir = this.resolveMemoryDir(ctx);
-    await mkdir(memoryDir, { recursive: true });
-    if (memoryDir !== this.dir) await mkdir(this.dir, { recursive: true });
+    await this.storage.mkdir(memoryDir);
+    if (memoryDir !== this.dir) await this.storage.mkdir(this.dir);
 
     const byStore = new Map<'memory' | 'user', MemoryUpdate[]>();
     for (const u of updates) {
@@ -92,7 +97,7 @@ export class MarkdownFileMemoryProvider implements MemoryProvider {
   }
 
   private async applyUpdates(filePath: string, updates: MemoryUpdate[]): Promise<void> {
-    let content = (await readSafe(filePath)) ?? '';
+    let content = (await this.storage.read(filePath)) ?? '';
 
     for (const update of updates) {
       switch (update.action) {
@@ -119,15 +124,7 @@ export class MarkdownFileMemoryProvider implements MemoryProvider {
       }
     }
 
-    await writeFile(filePath, content, 'utf-8');
-  }
-}
-
-async function readSafe(filePath: string): Promise<string | null> {
-  try {
-    return await readFile(filePath, 'utf-8');
-  } catch {
-    return null;
+    await this.storage.write(filePath, content);
   }
 }
 

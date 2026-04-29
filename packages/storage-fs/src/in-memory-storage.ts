@@ -142,6 +142,30 @@ export class InMemoryStorage implements Storage {
     await this.write(path, content, opts);
   }
 
+  async append(path: string, content: string): Promise<void> {
+    const existing = this.nodes.get(path);
+    if (existing && existing.type === 'dir') {
+      const err = new Error(`EISDIR: illegal operation on a directory, append '${path}'`);
+      (err as NodeJS.ErrnoException).code = 'EISDIR';
+      throw err;
+    }
+    if (!existing) {
+      // appendFile creates the file if missing — match that semantics.
+      this.requireParentDir(path);
+      this.nodes.set(path, {
+        type: 'file',
+        content,
+        mtimeMs: this.nextMtime(),
+      });
+      return;
+    }
+    this.nodes.set(path, {
+      ...existing,
+      content: existing.content + content,
+      mtimeMs: this.nextMtime(),
+    });
+  }
+
   async mkdir(dir: string): Promise<void> {
     if (this.isRootLike(dir)) return;
     const existing = this.nodes.get(dir);

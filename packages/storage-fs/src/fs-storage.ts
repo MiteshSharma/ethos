@@ -1,4 +1,13 @@
-import { mkdir, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
+import {
+  appendFile,
+  mkdir,
+  readdir,
+  readFile,
+  rename,
+  rm,
+  stat,
+  writeFile,
+} from 'node:fs/promises';
 import type {
   Storage,
   StorageDirEntry,
@@ -61,6 +70,10 @@ export class FsStorage implements Storage {
       return;
     }
     await writeFile(path, content, 'utf-8');
+  }
+
+  async append(path: string, content: string): Promise<void> {
+    await appendFile(path, content, 'utf-8');
   }
 
   async writeAtomic(path: string, content: string, opts?: StorageWriteOptions): Promise<void> {

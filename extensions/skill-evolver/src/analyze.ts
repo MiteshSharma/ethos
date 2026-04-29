@@ -1,5 +1,6 @@
-import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { FsStorage } from '@ethosagent/storage-fs';
+import type { Storage } from '@ethosagent/types';
 import type {
   EvalRecord,
   EvolutionPlan,
@@ -9,6 +10,8 @@ import type {
   SkillStats,
   TaskSummary,
 } from './types';
+
+const defaultStorage = new FsStorage();
 
 export const DEFAULT_EVOLVE_CONFIG: EvolveConfig = {
   rewriteThreshold: 0.6,
@@ -62,13 +65,12 @@ function isEvalRecord(obj: unknown): obj is EvalRecord {
   );
 }
 
-export async function loadEvolveConfig(path: string): Promise<EvolveConfig> {
-  let raw: string;
-  try {
-    raw = await readFile(path, 'utf-8');
-  } catch {
-    return DEFAULT_EVOLVE_CONFIG;
-  }
+export async function loadEvolveConfig(
+  path: string,
+  storage: Storage = defaultStorage,
+): Promise<EvolveConfig> {
+  const raw = await storage.read(path);
+  if (!raw) return DEFAULT_EVOLVE_CONFIG;
   const parsed = JSON.parse(raw) as Partial<EvolveConfig>;
   return {
     rewriteThreshold: parsed.rewriteThreshold ?? DEFAULT_EVOLVE_CONFIG.rewriteThreshold,
@@ -147,6 +149,7 @@ export async function analyzeEvalOutput(
   records: EvalRecord[],
   skillsDir: string,
   config: EvolveConfig,
+  storage: Storage = defaultStorage,
 ): Promise<EvolutionPlan> {
   const tasks = summarizeTasks(records);
   const skillStats = computeSkillStats(tasks);
@@ -156,7 +159,7 @@ export async function analyzeEvalOutput(
     if (stats.runs < config.minRunsBeforeEvolve) continue;
     if (stats.avgScore >= config.rewriteThreshold) continue;
 
-    const currentContent = await readSkillFile(skillsDir, stats.fileName);
+    const currentContent = await storage.read(join(skillsDir, stats.fileName));
     if (currentContent === null) continue;
 
     const lowScoring = tasks
@@ -184,10 +187,3 @@ export async function analyzeEvalOutput(
   return { skillStats, rewriteCandidates, newSkillCandidates };
 }
 
-async function readSkillFile(dir: string, fileName: string): Promise<string | null> {
-  try {
-    return await readFile(join(dir, fileName), 'utf-8');
-  } catch {
-    return null;
-  }
-}

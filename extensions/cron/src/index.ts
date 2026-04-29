@@ -1,6 +1,8 @@
-import { mkdir, open, readFile, unlink, writeFile } from 'node:fs/promises';
+import { open, unlink } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { FsStorage } from '@ethosagent/storage-fs';
+import type { Storage } from '@ethosagent/types';
 import { Cron } from 'croner';
 
 // ---------------------------------------------------------------------------
@@ -40,10 +42,14 @@ export interface CronSchedulerConfig {
   cronDir?: string;
   /** Tick interval in ms. Default 60_000 (1 min). */
   tickIntervalMs?: number;
+  /** Storage backend. Defaults to FsStorage. */
+  storage?: Storage;
 }
 
 // ---------------------------------------------------------------------------
-// File helpers with advisory file locking
+// File lock — uses raw `node:fs/promises` because exclusive create (`wx`)
+// is a multi-process synchronization primitive that does not fit the data
+// layer; same carve-out as SQLite/error-log per plan/storage_abstraction.md.
 // ---------------------------------------------------------------------------
 
 async function withLock<T>(lockPath: string, fn: () => Promise<T>): Promise<T> {
@@ -80,6 +86,7 @@ export class CronScheduler {
   private readonly outputDir: string;
   private readonly runJob: (job: CronJob) => Promise<CronRunResult>;
   private readonly tickIntervalMs: number;
+  private readonly storage: Storage;
   private timer: ReturnType<typeof setInterval> | null = null;
 
   constructor(config: CronSchedulerConfig) {
@@ -89,6 +96,7 @@ export class CronScheduler {
     this.outputDir = join(this.cronDir, 'output');
     this.runJob = config.runJob;
     this.tickIntervalMs = config.tickIntervalMs ?? 60_000;
+    this.storage = config.storage ?? new FsStorage();
   }
 
   // ---------------------------------------------------------------------------
@@ -178,13 +186,7 @@ export class CronScheduler {
 
   private async tick(): Promise<void> {
     const now = new Date();
-    let jobs: CronJob[];
-
-    try {
-      jobs = await this.readJobs();
-    } catch {
-      return; // jobs.json doesn't exist yet
-    }
+    const jobs = await this.readJobs();
 
     for (const job of jobs) {
       if (job.status !== 'active' || !job.nextRunAt) continue;
@@ -230,8 +232,8 @@ export class CronScheduler {
     // Persist output to ~/.ethos/cron/output/<id>/<timestamp>.md
     const ts = result.ranAt.replace(/[:.]/g, '-').replace('Z', 'Z');
     const outPath = join(this.outputDir, job.id, `${ts}.md`);
-    await mkdir(dirname(outPath), { recursive: true });
-    await writeFile(outPath, `# ${job.name}\n\n${result.output}\n`, 'utf-8');
+    await this.storage.mkdir(dirname(outPath));
+    await this.storage.write(outPath, `# ${job.name}\n\n${result.output}\n`);
 
     return result;
   }
@@ -241,8 +243,9 @@ export class CronScheduler {
   // ---------------------------------------------------------------------------
 
   private async readJobs(): Promise<CronJob[]> {
+    const raw = await this.storage.read(this.jobsPath);
+    if (!raw) return [];
     try {
-      const raw = await readFile(this.jobsPath, 'utf-8');
       return JSON.parse(raw) as CronJob[];
     } catch {
       return [];
@@ -250,11 +253,14 @@ export class CronScheduler {
   }
 
   private async writeJobs(jobs: CronJob[]): Promise<void> {
-    await mkdir(this.cronDir, { recursive: true });
-    await writeFile(this.jobsPath, JSON.stringify(jobs, null, 2), 'utf-8');
+    await this.storage.mkdir(this.cronDir);
+    await this.storage.write(this.jobsPath, JSON.stringify(jobs, null, 2));
   }
 
   private async withJobsLock(fn: (jobs: CronJob[]) => Promise<CronJob[]>): Promise<void> {
+    // The lock file lives next to jobs.json; the directory must exist
+    // before the lock can be acquired the first time.
+    await this.storage.mkdir(this.cronDir);
     await withLock(this.lockPath, async () => {
       const jobs = await this.readJobs();
       const updated = await fn(jobs);

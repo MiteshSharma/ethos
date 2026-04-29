@@ -1,19 +1,28 @@
-import { readFile, rename, writeFile } from 'node:fs/promises';
+import { FsStorage } from '@ethosagent/storage-fs';
+import type { Storage } from '@ethosagent/types';
 import type { CheckpointState } from './types';
 
-export async function readCheckpoint(path: string): Promise<CheckpointState> {
+const defaultStorage = new FsStorage();
+
+export async function readCheckpoint(
+  path: string,
+  storage: Storage = defaultStorage,
+): Promise<CheckpointState> {
+  const src = await storage.read(path);
+  if (!src) return { version: 1, completedTaskIds: [], failedTaskIds: [] };
   try {
-    const src = await readFile(path, 'utf-8');
     return JSON.parse(src) as CheckpointState;
   } catch {
     return { version: 1, completedTaskIds: [], failedTaskIds: [] };
   }
 }
 
-// Atomic write: write to .tmp then rename so a mid-write SIGTERM
+// Atomic write: storage.writeAtomic uses tmp+rename so a mid-write SIGTERM
 // leaves either the old checkpoint or the new one intact — never a partial file.
-export async function writeCheckpoint(path: string, state: CheckpointState): Promise<void> {
-  const tmp = `${path}.tmp`;
-  await writeFile(tmp, JSON.stringify(state, null, 2), 'utf-8');
-  await rename(tmp, path);
+export async function writeCheckpoint(
+  path: string,
+  state: CheckpointState,
+  storage: Storage = defaultStorage,
+): Promise<void> {
+  await storage.writeAtomic(path, JSON.stringify(state, null, 2));
 }

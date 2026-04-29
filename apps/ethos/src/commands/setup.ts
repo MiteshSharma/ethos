@@ -1,7 +1,7 @@
-import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { type EthosConfig, ethosDir, readConfig, writeConfig } from '../config';
+import { getStorage } from '../wiring';
 
 const c = {
   reset: '\x1b[0m',
@@ -19,7 +19,8 @@ function ask(rl: ReturnType<typeof createInterface>, question: string): Promise<
 export async function runSetup(): Promise<EthosConfig | null> {
   const rl = createInterface({ input: process.stdin, output: process.stdout });
 
-  const existing = await readConfig();
+  const storage = getStorage();
+  const existing = await readConfig(storage);
   if (existing) {
     const ans = await ask(
       rl,
@@ -69,17 +70,16 @@ export async function runSetup(): Promise<EthosConfig | null> {
   rl.close();
 
   const config: EthosConfig = { provider, model, apiKey, personality, baseUrl };
-  await writeConfig(config);
+  await writeConfig(storage, config);
 
   // Scaffold ~/.ethos/ directory structure
   const dir = ethosDir();
-  await mkdir(join(dir, 'personalities'), { recursive: true });
+  await storage.mkdir(join(dir, 'personalities'));
 
   for (const filename of ['MEMORY.md', 'USER.md']) {
-    try {
-      await writeFile(join(dir, filename), '', { flag: 'wx', encoding: 'utf-8' });
-    } catch {
-      // File already exists — leave it untouched
+    const path = join(dir, filename);
+    if (!(await storage.exists(path))) {
+      await storage.write(path, '');
     }
   }
 

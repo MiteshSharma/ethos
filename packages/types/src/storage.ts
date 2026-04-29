@@ -63,6 +63,13 @@ export interface Storage {
   write(path: string, content: string, opts?: StorageWriteOptions): Promise<void>;
 
   /**
+   * Append utf-8 text. Creates the file if missing. Distinct from
+   * `write` because batch / log writers (JSONL outputs, audit logs) need
+   * O(1) append, not O(n) read-modify-write.
+   */
+  append(path: string, content: string): Promise<void>;
+
+  /**
    * Atomic write: write to <path>.tmp.<pid>, then rename to <path>.
    * Used for files where partial writes corrupt state (config, keys, audit).
    * `mode` is applied to the temp file before rename, so the final file

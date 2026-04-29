@@ -15,11 +15,11 @@ export interface MeshServiceOptions {
 export class MeshService {
   constructor(private readonly opts: MeshServiceOptions) {}
 
-  list(): { agents: MeshAgent[] } {
-    return { agents: this.opts.repo.list() };
+  async list(): Promise<{ agents: MeshAgent[] }> {
+    return { agents: await this.opts.repo.list() };
   }
 
-  routeTest(capability: string): MeshRouteResult {
+  async routeTest(capability: string): Promise<MeshRouteResult> {
     return this.opts.repo.route(capability);
   }
 }

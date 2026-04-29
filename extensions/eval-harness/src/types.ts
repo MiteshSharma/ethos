@@ -1,4 +1,4 @@
-import type { LLMProvider } from '@ethosagent/types';
+import type { LLMProvider, Storage } from '@ethosagent/types';
 
 export interface EvalExpected {
   id: string;
@@ -11,6 +11,8 @@ export interface EvalRunOptions {
   outputPath: string;
   defaultScorer: 'exact' | 'contains' | 'regex' | 'llm';
   llmProvider?: LLMProvider;
+  /** Storage backend. Defaults to FsStorage. */
+  storage?: Storage;
 }
 
 export interface EvalStats {

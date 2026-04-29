@@ -167,6 +167,19 @@ describe.each(backends)('Storage conformance — $name', ({ setup }) => {
     expect(await storage.read(path)).toBe('new');
   });
 
+  it('append creates a new file', async () => {
+    const path = join(root, 'log.jsonl');
+    await storage.append(path, 'line1\n');
+    expect(await storage.read(path)).toBe('line1\n');
+  });
+
+  it('append concatenates to existing file', async () => {
+    const path = join(root, 'log.jsonl');
+    await storage.append(path, 'line1\n');
+    await storage.append(path, 'line2\n');
+    expect(await storage.read(path)).toBe('line1\nline2\n');
+  });
+
   it('writeAtomic leaves no .tmp file behind on success', async () => {
     const path = join(root, 'atomic3.txt');
     await storage.writeAtomic(path, 'done');
