@@ -1,5 +1,6 @@
 import { type AgentEvent, type AgentLoop, DefaultHookRegistry } from '@ethosagent/core';
-import type { PersonalityConfig, PersonalityRegistry } from '@ethosagent/types';
+import { FilePersonalityRegistry } from '@ethosagent/personalities';
+import type { PersonalityConfig } from '@ethosagent/types';
 
 // Test helpers shared by route + service tests. Building a real `AgentLoop`
 // requires LLM creds + tools + memory + personalities — overkill for tests
@@ -38,31 +39,21 @@ export function makeStubAgentLoop(options: StubLoopOptions = {}): AgentLoop {
 // Tests that DO care provide an array of `PersonalityConfig` shapes to seed.
 // ---------------------------------------------------------------------------
 
+/**
+ * Build a real FilePersonalityRegistry pre-populated with the given
+ * personality configs. Optionally bind a `userPersonalitiesDir` so CRUD
+ * methods (`create`/`update`/`deletePersonality`/`duplicate`) work.
+ *
+ * Tests that don't care about CRUD pass `personalities` only; tests that
+ * exercise CRUD pass `userPersonalitiesDir` so the registry can write to
+ * disk.
+ */
 export function makeStubPersonalityRegistry(
   personalities: PersonalityConfig[] = [],
-): PersonalityRegistry {
-  const map = new Map<string, PersonalityConfig>(personalities.map((p) => [p.id, p]));
-  let defaultId = personalities[0]?.id ?? 'researcher';
-  return {
-    define(config) {
-      map.set(config.id, config);
-    },
-    get(id) {
-      return map.get(id);
-    },
-    list() {
-      return [...map.values()];
-    },
-    getDefault() {
-      return map.get(defaultId) ?? { id: defaultId, name: defaultId };
-    },
-    setDefault(id) {
-      if (!map.has(id)) throw new Error(`Unknown personality: ${id}`);
-      defaultId = id;
-    },
-    async loadFromDirectory() {},
-    remove(id) {
-      map.delete(id);
-    },
-  };
+  userPersonalitiesDir?: string,
+): FilePersonalityRegistry {
+  const registry = new FilePersonalityRegistry(undefined, userPersonalitiesDir);
+  for (const p of personalities) registry.define(p);
+  if (personalities[0]) registry.setDefault(personalities[0].id);
+  return registry;
 }

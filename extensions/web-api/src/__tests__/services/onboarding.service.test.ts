@@ -3,7 +3,6 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { ConfigRepository } from '../../repositories/config.repository';
-import { PersonalityRepository } from '../../repositories/personality.repository';
 import { OnboardingService } from '../../services/onboarding.service';
 import { makeStubPersonalityRegistry } from '../test-helpers';
 
@@ -29,13 +28,10 @@ describe('OnboardingService', () => {
     } = {},
   ) {
     const config = new ConfigRepository({ dataDir: dir });
-    const registry = makeStubPersonalityRegistry(
+    const personalities = makeStubPersonalityRegistry(
       extras.personalities ?? [{ id: 'researcher', name: 'Researcher' }],
+      dir,
     );
-    const personalities = new PersonalityRepository({
-      registry,
-      userPersonalitiesDir: dir,
-    });
     return new OnboardingService({
       config,
       personalities,

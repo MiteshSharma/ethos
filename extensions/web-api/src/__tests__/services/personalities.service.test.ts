@@ -2,7 +2,6 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { PersonalityRepository } from '../../repositories/personality.repository';
 import { PersonalitiesService } from '../../services/personalities.service';
 import { makeStubPersonalityRegistry } from '../test-helpers';
 
@@ -21,14 +20,13 @@ describe('PersonalitiesService', () => {
   });
 
   function makeService(opts: { personalities: import('@ethosagent/types').PersonalityConfig[] }) {
-    const registry = makeStubPersonalityRegistry(opts.personalities);
-    const repo = new PersonalityRepository({ registry, userPersonalitiesDir: dir });
+    const registry = makeStubPersonalityRegistry(opts.personalities, dir);
     // Per-personality skills isn't exercised in this service-level test
     // (those have their own repository tests). The cast is enough to
     // satisfy the service constructor.
     const personalitySkills =
       {} as import('../../repositories/personality-skills.repository').PersonalitySkillsRepository;
-    return new PersonalitiesService({ personalities: repo, personalitySkills });
+    return new PersonalitiesService({ personalities: registry, personalitySkills });
   }
 
   it('list maps PersonalityConfig → wire shape and includes defaultId', () => {

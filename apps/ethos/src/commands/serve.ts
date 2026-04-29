@@ -50,7 +50,7 @@ export async function runServe(args: string[], config: EthosConfig): Promise<voi
   const acpServer = new AcpServer({ runner: loop, session, mesh });
   acpServer.startHttp(acpPort);
 
-  const personalities = await createPersonalityRegistry();
+  const personalities = await createPersonalityRegistry({ userPersonalitiesDir: dir });
   await personalities.loadFromDirectory(join(dir, 'personalities'));
   const personalityConfig = personalities.get(config.personality ?? 'researcher');
   const capabilities = personalityConfig?.capabilities ?? [];

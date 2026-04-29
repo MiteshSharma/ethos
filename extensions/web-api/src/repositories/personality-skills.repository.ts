@@ -1,9 +1,9 @@
 import { mkdir, readdir, readFile, stat, unlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import type { FilePersonalityRegistry } from '@ethosagent/personalities';
 import { parseSkillFrontmatter } from '@ethosagent/skills';
 import { EthosError } from '@ethosagent/types';
 import type { PersonalitySkill } from '@ethosagent/web-contracts';
-import type { PersonalityRepository } from './personality.repository';
 import type { SkillsRepository } from './skills.repository';
 
 // File-backed CRUD for per-personality skills under
@@ -17,7 +17,7 @@ import type { SkillsRepository } from './skills.repository';
 // the new files via mtime cache on the next chat turn.
 
 export interface PersonalitySkillsRepositoryOptions {
-  personalities: PersonalityRepository;
+  personalities: FilePersonalityRegistry;
   globalSkills: SkillsRepository;
 }
 
@@ -123,7 +123,7 @@ export class PersonalitySkillsRepository {
   // ---------------------------------------------------------------------------
 
   private async requireSkillsDir(personalityId: string): Promise<string> {
-    const personality = this.opts.personalities.get(personalityId);
+    const personality = this.opts.personalities.describe(personalityId);
     if (!personality) {
       throw new EthosError({
         code: 'PERSONALITY_NOT_FOUND',

@@ -4,14 +4,14 @@ import { AgentMesh } from '@ethosagent/agent-mesh';
 import type { AgentLoop } from '@ethosagent/core';
 import type { CronScheduler } from '@ethosagent/cron';
 import { MarkdownFileMemoryProvider } from '@ethosagent/memory-markdown';
+import type { FilePersonalityRegistry } from '@ethosagent/personalities';
 import { FsStorage } from '@ethosagent/storage-fs';
-import type { PersonalityRegistry, SessionStore, Storage } from '@ethosagent/types';
+import type { SessionStore, Storage } from '@ethosagent/types';
 import type { SseEvent } from '@ethosagent/web-contracts';
 import type { Hono } from 'hono';
 import { AllowlistRepository } from './repositories/allowlist.repository';
 import { ConfigRepository } from './repositories/config.repository';
 import { EvolverRepository } from './repositories/evolver.repository';
-import { PersonalityRepository } from './repositories/personality.repository';
 import { PersonalitySkillsRepository } from './repositories/personality-skills.repository';
 import { PlatformsRepository } from './repositories/platforms.repository';
 import { PluginsRepository } from './repositories/plugins.repository';
@@ -51,9 +51,11 @@ export interface CreateWebApiOptions {
    *  hooks, providers etc. (typically via `@ethosagent/wiring`). */
   agentLoop: AgentLoop;
   /** Personality registry — shared with the loop so hot-reloads (mtime cache)
-   *  reach both surfaces. Boot code typically constructs one and passes it
-   *  here AND to `createAgentLoop`'s caller. */
-  personalities: PersonalityRegistry;
+   *  reach both surfaces. Must be a `FilePersonalityRegistry` so the web-api's
+   *  Personalities tab can drive its CRUD methods (create / update / delete /
+   *  duplicate). Construct via `createPersonalityRegistry({ userPersonalitiesDir })`
+   *  to enable the writable user directory. */
+  personalities: FilePersonalityRegistry;
   /** Provider/model defaults stamped on web-created session rows. */
   chatDefaults: ChatDefaults;
   /** Origins to accept for cross-origin (CSRF) state-changing requests.
@@ -105,10 +107,6 @@ export function createWebApi(opts: CreateWebApiOptions): CreateWebApiResult {
   // --- Repositories (data access only) ---
   const tokens = new WebTokenRepository({ dataDir: opts.dataDir });
   const sessionsRepo = new SessionsRepository(opts.sessionStore);
-  const personalitiesRepo = new PersonalityRepository({
-    registry: opts.personalities,
-    userPersonalitiesDir: opts.dataDir,
-  });
   const configRepo = new ConfigRepository({ dataDir: opts.dataDir });
   const allowlistRepo = new AllowlistRepository({ dataDir: opts.dataDir });
   const skillsRepo = new SkillsRepository({ dataDir: opts.dataDir });
@@ -126,20 +124,20 @@ export function createWebApi(opts: CreateWebApiOptions): CreateWebApiResult {
   const platformsRepo = new PlatformsRepository({ config: configRepo });
   const storage: Storage = opts.storage ?? new FsStorage();
   const personalitySkillsRepo = new PersonalitySkillsRepository({
-    personalities: personalitiesRepo,
+    personalities: opts.personalities,
     globalSkills: skillsRepo,
   });
 
   // --- Services (business logic) ---
   const sessionsService = new SessionsService({ sessions: sessionsRepo });
   const personalitiesService = new PersonalitiesService({
-    personalities: personalitiesRepo,
+    personalities: opts.personalities,
     personalitySkills: personalitySkillsRepo,
   });
   const configService = new ConfigService({ config: configRepo });
   const onboardingService = new OnboardingService({
     config: configRepo,
-    personalities: personalitiesRepo,
+    personalities: opts.personalities,
   });
   const approvalsService = new ApprovalsService({ allowlist: allowlistRepo });
   // Cron service degrades gracefully when no scheduler is provided —

@@ -1,7 +1,7 @@
+import type { FilePersonalityRegistry } from '@ethosagent/personalities';
 import { EthosError } from '@ethosagent/types';
 import type { OnboardingStep, ProviderId } from '@ethosagent/web-contracts';
 import type { ConfigRepository } from '../repositories/config.repository';
-import type { PersonalityRepository } from '../repositories/personality.repository';
 
 // Onboarding orchestration. Three RPCs:
 //
@@ -46,7 +46,7 @@ export interface CompleteInput {
 
 export interface OnboardingServiceOptions {
   config: ConfigRepository;
-  personalities: PersonalityRepository;
+  personalities: FilePersonalityRegistry;
   /** Inject for tests. Defaults to global `fetch`. */
   fetchFn?: typeof fetch;
 }

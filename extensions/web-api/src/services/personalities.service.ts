@@ -1,24 +1,23 @@
-import { EthosError } from '@ethosagent/types';
-import type { Personality, PersonalitySkill } from '@ethosagent/web-contracts';
 import type {
   CreatePersonalityInput,
   DescribedPersonality,
-  PersonalityRepository,
+  FilePersonalityRegistry,
   UpdatePersonalityPatch,
-} from '../repositories/personality.repository';
+} from '@ethosagent/personalities';
+import { EthosError } from '@ethosagent/types';
+import type { Personality, PersonalitySkill } from '@ethosagent/web-contracts';
 import type { PersonalitySkillsRepository } from '../repositories/personality-skills.repository';
 
-// Personalities service. Composes two repositories:
-//   • PersonalityRepository — directory-level CRUD (config.yaml,
-//     toolset.yaml, ETHOS.md) and registry refresh.
-//   • PersonalitySkillsRepository — per-personality skills/ subdir.
+// Personalities service. Calls into FilePersonalityRegistry directly for
+// the directory-level CRUD (create/update/delete/duplicate). The registry
+// owns the mtime cache + on-disk format, so the service is a thin
+// wire-shape mapper.
 //
-// The skills sub-surface lives here (not in SkillsService) because it
-// shares the personality-id boundary check — refusing to operate on a
-// missing or built-in personality is a personality-domain concern.
+// The skills sub-surface still leans on PersonalitySkillsRepository for
+// now — that lands in the next batch.
 
 export interface PersonalitiesServiceOptions {
-  personalities: PersonalityRepository;
+  personalities: FilePersonalityRegistry;
   personalitySkills: PersonalitySkillsRepository;
 }
 
@@ -27,13 +26,13 @@ export class PersonalitiesService {
 
   list(): { personalities: Personality[]; defaultId: string } {
     return {
-      personalities: this.opts.personalities.list().map(toWire),
-      defaultId: this.opts.personalities.defaultId(),
+      personalities: this.opts.personalities.describeAll().map(toWire),
+      defaultId: this.opts.personalities.getDefault().id,
     };
   }
 
   async get(id: string): Promise<{ personality: Personality; ethosMd: string }> {
-    const described = this.opts.personalities.get(id);
+    const described = this.opts.personalities.describe(id);
     if (!described) throw notFound(id);
     const ethosMd = await this.opts.personalities.readEthosMd(id);
     return { personality: toWire(described), ethosMd };
@@ -50,7 +49,7 @@ export class PersonalitiesService {
   }
 
   async delete(id: string): Promise<void> {
-    await this.opts.personalities.delete(id);
+    await this.opts.personalities.deletePersonality(id);
   }
 
   async duplicate(id: string, newId: string): Promise<{ personality: Personality }> {
@@ -59,7 +58,7 @@ export class PersonalitiesService {
   }
 
   // ---------------------------------------------------------------------------
-  // Per-personality skills (gate 19)
+  // Per-personality skills (gate 19) — TODO: collapse the repo
   // ---------------------------------------------------------------------------
 
   async skillsList(personalityId: string): Promise<{ skills: PersonalitySkill[] }> {

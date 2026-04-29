@@ -1,6 +1,6 @@
 import { join } from 'node:path';
 import { FsStorage } from '@ethosagent/storage-fs';
-import type { PersonalityConfig, PersonalityRegistry, Storage } from '@ethosagent/types';
+import { EthosError, type PersonalityConfig, type PersonalityRegistry, type Storage } from '@ethosagent/types';
 
 // ---------------------------------------------------------------------------
 // YAML parsers — no external dependency, handles the subset we need
@@ -28,15 +28,46 @@ function parseToolsetYaml(src: string): string[] {
 // FilePersonalityRegistry
 // ---------------------------------------------------------------------------
 
+export interface DescribedPersonality {
+  config: PersonalityConfig;
+  /** True if the personality is loaded from the package's bundled data dir
+   *  (read-only); false if it lives under the user's writable
+   *  `<userPersonalitiesDir>/<id>/`. */
+  builtin: boolean;
+}
+
+export interface CreatePersonalityInput {
+  id: string;
+  name: string;
+  description?: string;
+  model?: string;
+  toolset: string[];
+  ethosMd: string;
+  memoryScope?: 'global' | 'per-personality';
+}
+
+export interface UpdatePersonalityPatch {
+  name?: string;
+  description?: string;
+  model?: string;
+  toolset?: string[];
+  ethosMd?: string;
+  memoryScope?: 'global' | 'per-personality';
+}
+
 export class FilePersonalityRegistry implements PersonalityRegistry {
   private readonly personalities = new Map<string, PersonalityConfig>();
   // dir → fingerprint of config.yaml + ETHOS.md + toolset.yaml mtimes
   private readonly fingerprintCache = new Map<string, string>();
   private defaultId = 'researcher';
   private readonly storage: Storage;
+  /** Directory holding user-created personalities (mutable). When unset,
+   *  CRUD methods (create/update/delete/duplicate) are unavailable. */
+  private readonly userDir: string | undefined;
 
-  constructor(storage: Storage = new FsStorage()) {
+  constructor(storage: Storage = new FsStorage(), userPersonalitiesDir?: string) {
     this.storage = storage;
+    this.userDir = userPersonalitiesDir ? join(userPersonalitiesDir, 'personalities') : undefined;
   }
 
   // -------------------------------------------------------------------------
@@ -93,6 +124,226 @@ export class FilePersonalityRegistry implements PersonalityRegistry {
         await this.loadOne(personalityDir, entry);
       }),
     );
+  }
+
+  // -------------------------------------------------------------------------
+  // CRUD — only available when `userPersonalitiesDir` was passed to the
+  // constructor. Built-ins live in the package's bundled `data/` dir and
+  // cannot be modified directly; clone via `duplicate` then edit the copy.
+  // -------------------------------------------------------------------------
+
+  /** Absolute path of the user-personality directory, even if it doesn't
+   *  exist yet. Throws when no user dir was configured. */
+  userPathFor(id: string): string {
+    if (!this.userDir) {
+      throw new Error(
+        'FilePersonalityRegistry: userPathFor() requires a userPersonalitiesDir at construction time.',
+      );
+    }
+    return join(this.userDir, id);
+  }
+
+  describe(id: string): DescribedPersonality | null {
+    const config = this.personalities.get(id);
+    return config ? this.toDescribed(config) : null;
+  }
+
+  describeAll(): DescribedPersonality[] {
+    return [...this.personalities.values()].map((c) => this.toDescribed(c));
+  }
+
+  /**
+   * Read the ETHOS.md body for a personality. Returns `''` if the
+   * personality has no `ethosFile` (config-only personalities) or if the
+   * file isn't readable.
+   */
+  async readEthosMd(id: string): Promise<string> {
+    const config = this.personalities.get(id);
+    if (!config?.ethosFile) return '';
+    return (await this.storage.read(config.ethosFile)) ?? '';
+  }
+
+  async create(input: CreatePersonalityInput): Promise<DescribedPersonality> {
+    if (this.personalities.get(input.id)) {
+      throw new EthosError({
+        code: 'PERSONALITY_EXISTS',
+        cause: `Personality "${input.id}" already exists.`,
+        action: 'Pick a different id, or open the existing one to edit it.',
+      });
+    }
+    const dir = this.userPathFor(input.id);
+    await this.storage.mkdir(dir);
+    await this.storage.write(join(dir, 'config.yaml'), renderConfigYaml(input));
+    await this.storage.write(join(dir, 'toolset.yaml'), renderToolsetYaml(input.toolset));
+    await this.storage.write(join(dir, 'ETHOS.md'), input.ethosMd);
+    await this.refreshUserDir();
+    const created = this.describe(input.id);
+    if (!created) {
+      throw new EthosError({
+        code: 'INTERNAL',
+        cause: `Created personality "${input.id}" but registry refresh did not pick it up.`,
+        action: 'Restart the server to recover.',
+      });
+    }
+    return created;
+  }
+
+  async update(id: string, patch: UpdatePersonalityPatch): Promise<DescribedPersonality> {
+    const existing = this.requireMutable(id);
+    const dir = this.dirOf(existing);
+    if (
+      patch.name !== undefined ||
+      patch.description !== undefined ||
+      patch.model !== undefined ||
+      patch.memoryScope !== undefined
+    ) {
+      const config = existing.config;
+      const merged: CreatePersonalityInput = {
+        id: config.id,
+        name: patch.name ?? config.name,
+        description: patch.description ?? config.description,
+        model: patch.model ?? config.model,
+        toolset: patch.toolset ?? config.toolset ?? [],
+        ethosMd: '',
+        memoryScope: patch.memoryScope ?? config.memoryScope,
+      };
+      await this.storage.write(join(dir, 'config.yaml'), renderConfigYaml(merged));
+    }
+    if (patch.toolset !== undefined) {
+      await this.storage.write(join(dir, 'toolset.yaml'), renderToolsetYaml(patch.toolset));
+    }
+    if (patch.ethosMd !== undefined) {
+      await this.storage.write(join(dir, 'ETHOS.md'), patch.ethosMd);
+    }
+    await this.refreshUserDir();
+    const refreshed = this.describe(id);
+    if (!refreshed) {
+      throw new EthosError({
+        code: 'INTERNAL',
+        cause: `Updated personality "${id}" but registry refresh did not pick it up.`,
+        action: 'Restart the server to recover.',
+      });
+    }
+    return refreshed;
+  }
+
+  async deletePersonality(id: string): Promise<void> {
+    const existing = this.requireMutable(id);
+    const dir = this.dirOf(existing);
+    await this.storage.remove(dir, { recursive: true });
+    this.remove(id);
+  }
+
+  /**
+   * Copy a built-in (or any other) personality directory into the user
+   * dir under a new id. The duplicate's `name:` line is rewritten to
+   * "<original> (copy)" so the editor opens with a distinct identity
+   * ready to be edited.
+   */
+  async duplicate(id: string, newId: string): Promise<DescribedPersonality> {
+    if (this.personalities.get(newId)) {
+      throw new EthosError({
+        code: 'PERSONALITY_EXISTS',
+        cause: `Personality "${newId}" already exists.`,
+        action: 'Pick a different id for the duplicate.',
+      });
+    }
+    const src = this.personalities.get(id);
+    if (!src) {
+      throw new EthosError({
+        code: 'PERSONALITY_NOT_FOUND',
+        cause: `Personality "${id}" not found.`,
+        action: 'Use list() to see available ids.',
+      });
+    }
+    const sourceDir = src.ethosFile
+      ? src.ethosFile.replace(/\/ETHOS\.md$/, '')
+      : src.skillsDirs?.[0]?.replace(/\/skills$/, '');
+    if (!sourceDir) {
+      throw new EthosError({
+        code: 'INTERNAL',
+        cause: `Personality "${id}" has no resolvable source directory to copy.`,
+        action: 'Edit the source manually, or pick a different built-in.',
+      });
+    }
+    const destDir = this.userPathFor(newId);
+    if (!this.userDir) throw new Error('userDir undefined after userPathFor() call');
+    await this.storage.mkdir(this.userDir);
+    await copyTree(this.storage, sourceDir, destDir);
+    await this.bumpDuplicateName(destDir, newId, src.name);
+    await this.refreshUserDir();
+    const created = this.describe(newId);
+    if (!created) {
+      throw new EthosError({
+        code: 'INTERNAL',
+        cause: `Duplicated "${id}" → "${newId}" but registry refresh did not pick it up.`,
+        action: 'Restart the server to recover.',
+      });
+    }
+    return created;
+  }
+
+  // -------------------------------------------------------------------------
+  // CRUD internals
+  // -------------------------------------------------------------------------
+
+  private requireMutable(id: string): DescribedPersonality {
+    const existing = this.describe(id);
+    if (!existing) {
+      throw new EthosError({
+        code: 'PERSONALITY_NOT_FOUND',
+        cause: `Personality "${id}" not found.`,
+        action: 'Use list() to see available ids.',
+      });
+    }
+    if (existing.builtin) {
+      throw new EthosError({
+        code: 'PERSONALITY_READ_ONLY',
+        cause: `Personality "${id}" is built-in and cannot be modified directly.`,
+        action: 'Duplicate it via duplicate(), then edit the copy.',
+      });
+    }
+    return existing;
+  }
+
+  private toDescribed(config: PersonalityConfig): DescribedPersonality {
+    const ethosFile = config.ethosFile;
+    const userPrefix = this.userDir ? `${this.userDir}/` : null;
+    const builtin = userPrefix && ethosFile ? !ethosFile.startsWith(userPrefix) : true;
+    return { config, builtin };
+  }
+
+  private dirOf(p: DescribedPersonality): string {
+    const ethosFile = p.config.ethosFile;
+    if (ethosFile) return ethosFile.replace(/\/ETHOS\.md$/, '');
+    return this.userPathFor(p.config.id);
+  }
+
+  private async refreshUserDir(): Promise<void> {
+    if (!this.userDir) return;
+    await this.loadFromDirectory(this.userDir);
+  }
+
+  private async bumpDuplicateName(
+    dir: string,
+    newId: string,
+    sourceName: string | undefined,
+  ): Promise<void> {
+    const path = join(dir, 'config.yaml');
+    const raw = await this.storage.read(path);
+    if (raw === null) return;
+    const newName = sourceName ? `${sourceName} (copy)` : newId;
+    const lines = raw.split('\n');
+    let nameSet = false;
+    for (let i = 0; i < lines.length; i++) {
+      if (/^name:\s*/.test(lines[i] ?? '')) {
+        lines[i] = `name: ${newName}`;
+        nameSet = true;
+        break;
+      }
+    }
+    if (!nameSet) lines.unshift(`name: ${newName}`);
+    await this.storage.write(path, lines.join('\n'));
   }
 
   // -------------------------------------------------------------------------
@@ -187,11 +438,30 @@ export class FilePersonalityRegistry implements PersonalityRegistry {
 // ---------------------------------------------------------------------------
 
 export async function createPersonalityRegistry(
-  storage?: Storage,
+  storageOrOpts?: Storage | { storage?: Storage; userPersonalitiesDir?: string },
 ): Promise<FilePersonalityRegistry> {
-  const registry = new FilePersonalityRegistry(storage);
+  // Backwards-compatible: original signature took a single Storage argument.
+  // New callers can pass { storage, userPersonalitiesDir } to enable CRUD.
+  let storage: Storage | undefined;
+  let userDir: string | undefined;
+  if (storageOrOpts && isStorageLike(storageOrOpts)) {
+    storage = storageOrOpts;
+  } else if (storageOrOpts) {
+    storage = storageOrOpts.storage;
+    userDir = storageOrOpts.userPersonalitiesDir;
+  }
+  const registry = new FilePersonalityRegistry(storage, userDir);
   await registry.loadBuiltins();
   return registry;
+}
+
+function isStorageLike(v: unknown): v is Storage {
+  return (
+    !!v &&
+    typeof v === 'object' &&
+    typeof (v as { read?: unknown }).read === 'function' &&
+    typeof (v as { write?: unknown }).write === 'function'
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -200,4 +470,32 @@ export async function createPersonalityRegistry(
 
 function titleCase(s: string): string {
   return s.charAt(0).toUpperCase() + s.slice(1);
+}
+
+function renderConfigYaml(input: CreatePersonalityInput): string {
+  const lines: string[] = [`name: ${input.name}`];
+  if (input.description) lines.push(`description: ${input.description}`);
+  if (input.model) lines.push(`model: ${input.model}`);
+  if (input.memoryScope) lines.push(`memoryScope: ${input.memoryScope}`);
+  return `${lines.join('\n')}\n`;
+}
+
+function renderToolsetYaml(toolset: string[]): string {
+  if (toolset.length === 0) return '# No tools enabled — agent runs without external action.\n';
+  return `${toolset.map((t) => `- ${t}`).join('\n')}\n`;
+}
+
+async function copyTree(storage: Storage, source: string, dest: string): Promise<void> {
+  await storage.mkdir(dest);
+  const entries = await storage.listEntries(source);
+  for (const entry of entries) {
+    const sp = join(source, entry.name);
+    const dp = join(dest, entry.name);
+    if (entry.isDir) {
+      await copyTree(storage, sp, dp);
+    } else {
+      const content = await storage.read(sp);
+      if (content !== null) await storage.write(dp, content);
+    }
+  }
 }

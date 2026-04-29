@@ -3,24 +3,21 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { FilePersonalityRegistry } from '@ethosagent/personalities';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { PersonalityRepository } from '../../repositories/personality.repository';
 import { PersonalitySkillsRepository } from '../../repositories/personality-skills.repository';
 import { SkillsRepository } from '../../repositories/skills.repository';
 
 describe('PersonalitySkillsRepository', () => {
   let dir: string;
   let registry: FilePersonalityRegistry;
-  let personalities: PersonalityRepository;
   let globalSkills: SkillsRepository;
   let repo: PersonalitySkillsRepository;
 
   beforeEach(async () => {
     dir = await mkdtemp(join(tmpdir(), 'ethos-pskills-'));
-    registry = new FilePersonalityRegistry();
-    personalities = new PersonalityRepository({ registry, userPersonalitiesDir: dir });
+    registry = new FilePersonalityRegistry(undefined, dir);
     globalSkills = new SkillsRepository({ dataDir: dir });
-    repo = new PersonalitySkillsRepository({ personalities, globalSkills });
-    await personalities.create({ id: 'p', name: 'P', toolset: [], ethosMd: '' });
+    repo = new PersonalitySkillsRepository({ personalities: registry, globalSkills });
+    await registry.create({ id: 'p', name: 'P', toolset: [], ethosMd: '' });
   });
 
   afterEach(async () => {
@@ -60,7 +57,7 @@ describe('PersonalitySkillsRepository', () => {
     const imported = await repo.importFromGlobal('p', ['shared']);
     expect(imported).toHaveLength(1);
     const onDisk = await readFile(
-      join(personalities.userPathFor('p'), 'skills', 'shared.md'),
+      join(registry.userPathFor('p'), 'skills', 'shared.md'),
       'utf-8',
     );
     expect(onDisk).toContain('name: Shared skill');
