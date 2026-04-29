@@ -680,6 +680,12 @@ importers:
         specifier: workspace:*
         version: link:../types
 
+  packages/storage-fs:
+    dependencies:
+      '@ethosagent/types':
+        specifier: workspace:*
+        version: link:../types
+
   packages/types: {}
 
   packages/web-contracts:

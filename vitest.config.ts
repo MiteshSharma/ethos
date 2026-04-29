@@ -5,6 +5,7 @@ import { defineConfig } from 'vitest/config';
 // tests need to resolve them to source so no build step is required.
 const srcAliases = {
   '@ethosagent/types': resolve('./packages/types/src'),
+  '@ethosagent/storage-fs': resolve('./packages/storage-fs/src'),
   '@ethosagent/core': resolve('./packages/core/src'),
   '@ethosagent/plugin-sdk': resolve('./packages/plugin-sdk/src'),
   '@ethosagent/plugin-sdk/tool-helpers': resolve('./packages/plugin-sdk/src/tool-helpers.ts'),

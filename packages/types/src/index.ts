@@ -10,4 +10,5 @@ export * from './personality';
 export * from './platform';
 export * from './plugin';
 export * from './session';
+export * from './storage';
 export * from './tool';

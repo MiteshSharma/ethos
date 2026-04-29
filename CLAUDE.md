@@ -183,6 +183,40 @@ See `extensions/gateway/src/dedup.ts` and the tests in
 
 ---
 
+## Storage abstraction
+
+All filesystem reads and writes under `~/.ethos/` go through the `Storage`
+interface from `@ethosagent/types`. New code must NOT import from
+`node:fs/promises` (or `node:fs`) for `~/.ethos/` access — wire a `Storage`
+in via the constructor.
+
+| Implementation | Where it lives | When to use |
+|---|---|---|
+| `FsStorage` | `@ethosagent/storage-fs` | Production wiring (CLI, web-api, gateway) |
+| `InMemoryStorage` | `@ethosagent/storage-fs` | Tests — populate fixtures via `write()`, no tmpdir scaffolding |
+| `ScopedStorage` | `@ethosagent/storage-fs` | Decorator — enforces a per-personality read/write path allowlist |
+
+Allowed exceptions (these stay raw `node:fs`):
+
+- `extensions/session-sqlite/`, `extensions/memory-vector/` — SQLite via `better-sqlite3` opens raw paths and manages WAL/SHM natively
+- `apps/ethos/src/error-log.ts` — sync crash logger; must flush before process exit
+- `apps/ethos/tsup.config.ts` and other build-time tooling
+- `extensions/skills/src/skill-compat.ts` `statSync` — walks `$PATH`, not `~/.ethos/`
+
+**Error contract:** `read`/`exists`/`mtime` return `null` for missing paths
+(common case, not exceptional). Everything else throws. `ScopedStorage` throws
+`BoundaryError` (also exported from `@ethosagent/types`) when a path is
+outside the allowlist; surfaces translate it into a user-facing tool error.
+
+**Atomicity:** use `writeAtomic` for any file where a partial write would
+corrupt state (config, keys, audit logs). It's a separate method, not an
+option, to prevent the "did the writer remember?" footgun.
+
+See `plan/storage_abstraction.md` for the full migration plan (4 phases) and
+the `Storage` interface spec.
+
+---
+
 ## Adding a new LLM provider
 
 1. Create `extensions/llm-<name>/src/index.ts` — implement `LLMProvider` from `@ethosagent/types`
