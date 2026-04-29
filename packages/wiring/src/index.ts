@@ -150,9 +150,26 @@ export async function createAgentLoop(
     for (const tool of createBrowserTools()) tools.register(tool);
   }
 
-  const mcpManager = new McpManager(await loadMcpConfig());
+  const mcpConfig = await loadMcpConfig();
+  const mcpManager = new McpManager(mcpConfig);
   await mcpManager.connect();
   for (const tool of mcpManager.getTools()) tools.register(tool);
+
+  // Risk #2: warn at boot when MCP servers are globally configured but the active
+  // personality has no mcp_servers allowlist — the tools will be registered but
+  // the personality filter will hide them on every turn.
+  if (mcpConfig.length > 0) {
+    const activePerson = personalities.getDefault();
+    const attached = activePerson.mcp_servers ?? [];
+    if (attached.length === 0) {
+      const names = mcpConfig.map((s) => s.name).join(', ');
+      log.warn(
+        `MCP: 0 of ${mcpConfig.length} server(s) attached to "${activePerson.id}". ` +
+          `Run 'ethos personality mcp ${activePerson.id} --attach <name>' to enable. ` +
+          `Configured: ${names}`,
+      );
+    }
+  }
 
   const injectors = createInjectors(personalities, {
     onSkillSkip: (skillId, reason) => log.warn(`skill ${skillId} skipped: ${reason}`),

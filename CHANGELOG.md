@@ -101,6 +101,33 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   - Personality filter Select in the toolbar. Client-side filter; clears
     back to "All personalities" via `allowClear`.
 
+- **Personality isolation — Risk #2 + Risk #3 (MCP boot warning + cron-personality drift guard).**
+
+  Risk #2 (MCP boot warning):
+  - `packages/wiring/src/index.ts` — after `McpManager.connect()`, compares the
+    active personality's `mcp_servers` allowlist against the globally configured
+    MCP servers. When configured servers exist but none are attached, emits a
+    `log.warn()` hint: `"MCP: 0 of N server(s) attached to "<id>". Run 'ethos
+    personality mcp <id> --attach <name>' to enable."` Avoids silent confusion
+    where MCP tools are registered but hidden by the personality filter.
+
+  Risk #3 (cron-personality drift guard) — three sites:
+  - **Trigger-time** (`apps/ethos/src/commands/cron.ts` `makeScheduler.runJob`):
+    if a job's `personality` field is set, lazily loads the personality registry
+    (cached across ticks) and throws `EthosError({ code:
+    'CRON_PERSONALITY_MISSING' })` when the id is not found. The scheduler logs
+    the structured error on its next tick rather than silently using the default.
+  - **Create-time** (`apps/ethos/src/commands/cron.ts` `cron create`): if
+    `--personality <id>` is passed, validates the id against the registry before
+    creating the job. Unknown id prints a red error and exits early — prevents
+    bad references from being persisted.
+  - **Delete-time** (`extensions/web-api/src/rpc/personalities.ts` delete
+    handler): before deleting the personality, lists cron jobs and emits a
+    `console.warn` for any that still reference the deleted id. Deletion
+    proceeds — dependent jobs will fail gracefully via the trigger-time guard.
+  - **`CRON_PERSONALITY_MISSING`** added to `EthosErrorCode` union in
+    `packages/types/src/errors.ts`.
+
 - **Personality isolation — Phase 3.2 + 4.3 (cron migration + cross-plan test).**
 
   Phase 3.2 (cron OpenClaw migration):

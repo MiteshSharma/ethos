@@ -31,6 +31,18 @@ export const personalitiesRouter = {
   }),
 
   delete: os.personalities.delete.handler(async ({ input, context }) => {
+    // Risk #3: warn server-side if cron jobs still reference this personality.
+    // They will fail gracefully at trigger time with CRON_PERSONALITY_MISSING.
+    const { jobs } = await context.cron.list();
+    const dependent = (jobs as Array<{ personality: string | null; name: string }>).filter(
+      (j) => j.personality === input.id,
+    );
+    if (dependent.length > 0) {
+      const names = dependent.map((j) => j.name).join(', ');
+      console.warn(
+        `[personalities] Deleting "${input.id}" but ${dependent.length} cron job(s) still reference it: ${names}`,
+      );
+    }
     await context.personalities.delete(input.id);
     return { ok: true as const };
   }),

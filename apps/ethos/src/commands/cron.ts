@@ -1,5 +1,8 @@
+import { join } from 'node:path';
 import { CronScheduler, isValidCronExpression, nextRun } from '@ethosagent/cron';
-import type { EthosConfig } from '../config';
+import { createPersonalityRegistry } from '@ethosagent/personalities';
+import { EthosError } from '@ethosagent/types';
+import { ethosDir, type EthosConfig } from '../config';
 import { createAgentLoop } from '../wiring';
 
 const c = {
@@ -14,9 +17,23 @@ const c = {
 
 function makeScheduler(config: EthosConfig): { scheduler: CronScheduler; cleanup: () => void } {
   let loop: Awaited<ReturnType<typeof createAgentLoop>> | null = null;
+  let personalities: Awaited<ReturnType<typeof createPersonalityRegistry>> | null = null;
 
   const scheduler = new CronScheduler({
     runJob: async (job) => {
+      if (job.personality) {
+        if (!personalities) {
+          personalities = await createPersonalityRegistry();
+          await personalities.loadFromDirectory(join(ethosDir(), 'personalities'));
+        }
+        if (!personalities.get(job.personality)) {
+          throw new EthosError({
+            code: 'CRON_PERSONALITY_MISSING',
+            cause: `Personality "${job.personality}" not found for cron job "${job.id}"`,
+            action: `Run 'ethos cron list' to find affected jobs, then update or delete them`,
+          });
+        }
+      }
       if (!loop) loop = await createAgentLoop(config);
       const sessionKey = `cron:${job.id}:${new Date().toISOString()}`;
       let output = '';
@@ -127,6 +144,16 @@ export async function runCronCommand(
         console.log(`${c.red}Invalid cron expression: "${schedule}"${c.reset}`);
         console.log(`${c.dim}Example: "0 8 * * 1-5" (weekdays at 8am)${c.reset}`);
         return;
+      }
+
+      if (personality) {
+        const reg = await createPersonalityRegistry();
+        await reg.loadFromDirectory(join(ethosDir(), 'personalities'));
+        if (!reg.get(personality)) {
+          console.log(`${c.red}Personality "${personality}" not found${c.reset}`);
+          console.log(`${c.dim}Run 'ethos personality list' to see available personalities${c.reset}`);
+          return;
+        }
       }
 
       const { scheduler, cleanup } = makeScheduler(config);

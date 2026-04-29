@@ -41,6 +41,7 @@ export type EthosErrorCode =
   | 'JOB_DUPLICATE'
   | 'JOB_LOCK_FAILED'
   | 'CRON_INVALID'
+  | 'CRON_PERSONALITY_MISSING'
   // MCP
   | 'MCP_TRANSPORT_INVALID'
   // Network / registry
