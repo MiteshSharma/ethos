@@ -1,23 +1,20 @@
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { InMemoryStorage } from '@ethosagent/storage-fs';
+import { beforeEach, describe, expect, it } from 'vitest';
 import { ConfigRepository } from '../../repositories/config.repository';
 import { PlatformsRepository } from '../../repositories/platforms.repository';
 
+const DATA = '/data';
+
 describe('PlatformsRepository', () => {
-  let dir: string;
+  let storage: InMemoryStorage;
   let configRepo: ConfigRepository;
   let repo: PlatformsRepository;
 
-  beforeEach(async () => {
-    dir = await mkdtemp(join(tmpdir(), 'ethos-platforms-'));
-    configRepo = new ConfigRepository({ dataDir: dir });
+  beforeEach(() => {
+    storage = new InMemoryStorage();
+    configRepo = new ConfigRepository({ dataDir: DATA, storage });
     repo = new PlatformsRepository({ config: configRepo });
-  });
-
-  afterEach(async () => {
-    await rm(dir, { recursive: true, force: true });
   });
 
   it('listStatus reports unconfigured for every platform when config is empty', async () => {
@@ -38,7 +35,7 @@ describe('PlatformsRepository', () => {
     expect(status.configured).toBe(true);
     expect(status.fields).toEqual({ botToken: true, appToken: true, signingSecret: true });
 
-    const yaml = await readFile(join(dir, 'config.yaml'), 'utf-8');
+    const yaml = await storage.read(join(DATA, 'config.yaml'));
     expect(yaml).toContain('slackBotToken: old-bot');
     expect(yaml).toContain('slackAppToken: old-app');
     expect(yaml).toContain('slackSigningSecret: shh');
@@ -69,7 +66,7 @@ describe('PlatformsRepository', () => {
     });
     await repo.clear('slack');
 
-    const yaml = await readFile(join(dir, 'config.yaml'), 'utf-8');
+    const yaml = await storage.read(join(DATA, 'config.yaml'));
     expect(yaml).not.toContain('slackBotToken');
     expect(yaml).not.toContain('slackAppToken');
     expect(yaml).not.toContain('slackSigningSecret');
@@ -83,7 +80,7 @@ describe('PlatformsRepository', () => {
   it('set ignores empty / missing fields', async () => {
     await configRepo.update({ passthrough: { telegramToken: 'existing' } });
     await repo.set('telegram', { token: '' });
-    const yaml = await readFile(join(dir, 'config.yaml'), 'utf-8');
+    const yaml = await storage.read(join(DATA, 'config.yaml'));
     expect(yaml).toContain('telegramToken: existing');
   });
 });

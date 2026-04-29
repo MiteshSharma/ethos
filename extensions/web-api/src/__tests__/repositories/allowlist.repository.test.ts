@@ -1,20 +1,17 @@
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { InMemoryStorage } from '@ethosagent/storage-fs';
+import { beforeEach, describe, expect, it } from 'vitest';
 import { AllowlistRepository } from '../../repositories/allowlist.repository';
 
+const DATA = '/data';
+
 describe('AllowlistRepository', () => {
-  let dir: string;
+  let storage: InMemoryStorage;
   let repo: AllowlistRepository;
 
-  beforeEach(async () => {
-    dir = await mkdtemp(join(tmpdir(), 'ethos-allowlist-'));
-    repo = new AllowlistRepository({ dataDir: dir });
-  });
-
-  afterEach(async () => {
-    await rm(dir, { recursive: true, force: true });
+  beforeEach(() => {
+    storage = new InMemoryStorage();
+    repo = new AllowlistRepository({ dataDir: DATA, storage });
   });
 
   it('list() returns empty when the file does not exist', async () => {
@@ -64,9 +61,8 @@ describe('AllowlistRepository', () => {
   it('writes are atomic — the destination only contains valid JSON', async () => {
     await repo.add({ toolName: 'a', scope: 'any-args', args: null });
     await repo.add({ toolName: 'b', scope: 'any-args', args: null });
-    const path = join(dir, 'allowlist.json');
-    const raw = await readFile(path, 'utf-8');
-    const parsed = JSON.parse(raw) as { entries: Array<{ toolName: string }> };
+    const raw = await storage.read(join(DATA, 'allowlist.json'));
+    const parsed = JSON.parse(raw ?? '') as { entries: Array<{ toolName: string }> };
     expect(parsed.entries.map((e) => e.toolName)).toEqual(['a', 'b']);
   });
 

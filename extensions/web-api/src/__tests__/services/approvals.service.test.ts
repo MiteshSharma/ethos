@@ -1,9 +1,7 @@
-import { mkdtemp, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { InMemoryStorage } from '@ethosagent/storage-fs';
 import { isEthosError } from '@ethosagent/types';
 import type { ApprovalRequest } from '@ethosagent/web-contracts';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 import { AllowlistRepository } from '../../repositories/allowlist.repository';
 import { type ApprovalDecision, ApprovalsService } from '../../services/approvals.service';
 
@@ -11,19 +9,16 @@ import { type ApprovalDecision, ApprovalsService } from '../../services/approval
 // Promise that only resolves when an unrelated HTTP handler later flips a
 // flag. These tests drive that contract.
 
+const DATA = '/data';
+
 describe('ApprovalsService', () => {
-  let dir: string;
   let allowlist: AllowlistRepository;
   let approvals: ApprovalsService;
 
-  beforeEach(async () => {
-    dir = await mkdtemp(join(tmpdir(), 'ethos-approvals-'));
-    allowlist = new AllowlistRepository({ dataDir: dir });
+  beforeEach(() => {
+    const storage = new InMemoryStorage();
+    allowlist = new AllowlistRepository({ dataDir: DATA, storage });
     approvals = new ApprovalsService({ allowlist });
-  });
-
-  afterEach(async () => {
-    await rm(dir, { recursive: true, force: true });
   });
 
   /**
@@ -225,29 +220,14 @@ describe('ApprovalsService', () => {
     });
 
     void approvals
-      .requestApproval({
-        sessionId: 'sess_1',
-        toolCallId: 'tc_1',
-        toolName: 'terminal',
-        args: {},
-      })
+      .requestApproval({ sessionId: 'sess_1', toolCallId: 'tc_1', toolName: 'terminal', args: {} })
       .then((d) => decisions.push(d));
     void approvals
-      .requestApproval({
-        sessionId: 'sess_1',
-        toolCallId: 'tc_2',
-        toolName: 'terminal',
-        args: {},
-      })
+      .requestApproval({ sessionId: 'sess_1', toolCallId: 'tc_2', toolName: 'terminal', args: {} })
       .then((d) => decisions.push(d));
     // Different session — should NOT be cancelled.
     void approvals
-      .requestApproval({
-        sessionId: 'sess_2',
-        toolCallId: 'tc_3',
-        toolName: 'terminal',
-        args: {},
-      })
+      .requestApproval({ sessionId: 'sess_2', toolCallId: 'tc_3', toolName: 'terminal', args: {} })
       .then((d) => decisions.push(d));
 
     // Wait for all three to register before cancelling.

@@ -1,8 +1,6 @@
-import { mkdtemp, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { InMemoryStorage } from '@ethosagent/storage-fs';
 import type { BeforeToolCallPayload } from '@ethosagent/types';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 import { AllowlistRepository } from '../../repositories/allowlist.repository';
 import { createWebApprovalHook, type DangerPredicate } from '../../services/approval-hook';
 import { ApprovalsService } from '../../services/approvals.service';
@@ -13,17 +11,14 @@ import { ApprovalsService } from '../../services/approvals.service';
 //    the approval resolves.
 // 3. Dangerous call + deny → hook returns { error } with the deny reason.
 
+const DATA = '/data';
+
 describe('createWebApprovalHook', () => {
-  let dir: string;
   let approvals: ApprovalsService;
 
-  beforeEach(async () => {
-    dir = await mkdtemp(join(tmpdir(), 'ethos-approval-hook-'));
-    approvals = new ApprovalsService({ allowlist: new AllowlistRepository({ dataDir: dir }) });
-  });
-
-  afterEach(async () => {
-    await rm(dir, { recursive: true, force: true });
+  beforeEach(() => {
+    const storage = new InMemoryStorage();
+    approvals = new ApprovalsService({ allowlist: new AllowlistRepository({ dataDir: DATA, storage }) });
   });
 
   function payload(over: Partial<BeforeToolCallPayload> = {}): BeforeToolCallPayload {
@@ -101,7 +96,8 @@ describe('createWebApprovalHook', () => {
 
   it('an allowlist hit auto-allows without surfacing pending', async () => {
     // Pre-record an exact-args allowlist entry; matching calls bypass.
-    const allowlist = new AllowlistRepository({ dataDir: dir });
+    const storage = new InMemoryStorage();
+    const allowlist = new AllowlistRepository({ dataDir: DATA, storage });
     await allowlist.add({
       toolName: 'terminal',
       scope: 'exact-args',

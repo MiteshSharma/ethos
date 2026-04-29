@@ -1,25 +1,22 @@
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { FilePersonalityRegistry } from '@ethosagent/personalities';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { InMemoryStorage } from '@ethosagent/storage-fs';
+import { beforeEach, describe, expect, it } from 'vitest';
 
 // Personality CRUD now lives directly on FilePersonalityRegistry. This
 // test is the old PersonalityRepository regression suite (kept intact)
 // pointed at the registry's create/update/deletePersonality/duplicate
 // methods so the on-disk round-trip + mtime cache still hold.
 
+const DATA = '/data';
+
 describe('FilePersonalityRegistry — CRUD mutations', () => {
-  let dir: string;
+  let storage: InMemoryStorage;
   let registry: FilePersonalityRegistry;
 
-  beforeEach(async () => {
-    dir = await mkdtemp(join(tmpdir(), 'ethos-personality-'));
-    registry = new FilePersonalityRegistry(undefined, dir);
-  });
-
-  afterEach(async () => {
-    await rm(dir, { recursive: true, force: true });
+  beforeEach(() => {
+    storage = new InMemoryStorage();
+    registry = new FilePersonalityRegistry(storage, DATA);
   });
 
   describe('create', () => {
@@ -38,16 +35,10 @@ describe('FilePersonalityRegistry — CRUD mutations', () => {
       expect(created.config.toolset).toEqual(['web_search', 'memory_read']);
       expect(created.builtin).toBe(false);
 
-      const personalityDir = join(dir, 'personalities', 'strategist');
-      expect(await readFile(join(personalityDir, 'config.yaml'), 'utf-8')).toContain(
-        'name: Strategist',
-      );
-      expect(await readFile(join(personalityDir, 'toolset.yaml'), 'utf-8')).toContain(
-        '- web_search',
-      );
-      expect(await readFile(join(personalityDir, 'ETHOS.md'), 'utf-8')).toBe(
-        '# I am a strategist\n',
-      );
+      const personalityDir = join(DATA, 'personalities', 'strategist');
+      expect(await storage.read(join(personalityDir, 'config.yaml'))).toContain('name: Strategist');
+      expect(await storage.read(join(personalityDir, 'toolset.yaml'))).toContain('- web_search');
+      expect(await storage.read(join(personalityDir, 'ETHOS.md'))).toBe('# I am a strategist\n');
     });
 
     it('rejects duplicate ids with PERSONALITY_EXISTS', async () => {
@@ -68,7 +59,7 @@ describe('FilePersonalityRegistry — CRUD mutations', () => {
     it('updates config.yaml when name/description/model change', async () => {
       await registry.create({ id: 'p', name: 'Old', toolset: [], ethosMd: '' });
       await registry.update('p', { name: 'New', description: 'now updated' });
-      const yaml = await readFile(join(dir, 'personalities', 'p', 'config.yaml'), 'utf-8');
+      const yaml = await storage.read(join(DATA, 'personalities', 'p', 'config.yaml'));
       expect(yaml).toContain('name: New');
       expect(yaml).toContain('description: now updated');
     });
@@ -76,7 +67,7 @@ describe('FilePersonalityRegistry — CRUD mutations', () => {
     it('refreshes toolset.yaml when patch.toolset is present', async () => {
       await registry.create({ id: 'p', name: 'P', toolset: ['a'], ethosMd: '' });
       await registry.update('p', { toolset: ['x', 'y'] });
-      const yaml = await readFile(join(dir, 'personalities', 'p', 'toolset.yaml'), 'utf-8');
+      const yaml = await storage.read(join(DATA, 'personalities', 'p', 'toolset.yaml'));
       expect(yaml).toContain('- x');
       expect(yaml).toContain('- y');
       expect(yaml).not.toContain('- a');
@@ -105,9 +96,7 @@ describe('FilePersonalityRegistry — CRUD mutations', () => {
       await registry.create({ id: 'gone', name: 'Gone', toolset: [], ethosMd: '' });
       await registry.deletePersonality('gone');
       expect(registry.describe('gone')).toBeNull();
-      await expect(stat(join(dir, 'personalities', 'gone'))).rejects.toMatchObject({
-        code: 'ENOENT',
-      });
+      expect(await storage.exists(join(DATA, 'personalities', 'gone'))).toBe(false);
     });
 
     it('rejects builtins', async () => {
@@ -124,15 +113,15 @@ describe('FilePersonalityRegistry — CRUD mutations', () => {
 
   describe('duplicate', () => {
     it('copies a built-in into ~/.ethos/personalities/ with the new id and a renamed display name', async () => {
-      const builtinDir = join(dir, 'fake-builtins');
-      const sourceDir = join(builtinDir, 'engineer');
-      await mkdir(sourceDir, { recursive: true });
-      await writeFile(
+      const builtinDir = '/builtins';
+      const sourceDir = '/builtins/engineer';
+      await storage.mkdir(sourceDir);
+      await storage.write(
         join(sourceDir, 'config.yaml'),
         'name: Engineer\ndescription: terse + correct\n',
       );
-      await writeFile(join(sourceDir, 'toolset.yaml'), '- terminal\n- read_file\n');
-      await writeFile(join(sourceDir, 'ETHOS.md'), '# Engineer body\n');
+      await storage.write(join(sourceDir, 'toolset.yaml'), '- terminal\n- read_file\n');
+      await storage.write(join(sourceDir, 'ETHOS.md'), '# Engineer body\n');
       await registry.loadFromDirectory(builtinDir);
 
       const dup = await registry.duplicate('engineer', 'engineer-copy');
@@ -140,9 +129,9 @@ describe('FilePersonalityRegistry — CRUD mutations', () => {
       expect(dup.config.name).toBe('Engineer (copy)');
       expect(dup.builtin).toBe(false);
 
-      const copyDir = join(dir, 'personalities', 'engineer-copy');
-      expect(await readFile(join(copyDir, 'ETHOS.md'), 'utf-8')).toBe('# Engineer body\n');
-      const yaml = await readFile(join(copyDir, 'config.yaml'), 'utf-8');
+      const copyDir = join(DATA, 'personalities', 'engineer-copy');
+      expect(await storage.read(join(copyDir, 'ETHOS.md'))).toBe('# Engineer body\n');
+      const yaml = await storage.read(join(copyDir, 'config.yaml'));
       expect(yaml).toContain('name: Engineer (copy)');
       expect(yaml).toContain('description: terse + correct');
     });

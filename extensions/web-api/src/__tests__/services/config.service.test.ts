@@ -1,8 +1,7 @@
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { InMemoryStorage } from '@ethosagent/storage-fs';
 import { isEthosError } from '@ethosagent/types';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 import { ConfigRepository } from '../../repositories/config.repository';
 import { ConfigService, redactKey } from '../../services/config.service';
 
@@ -25,19 +24,18 @@ describe('redactKey', () => {
   });
 });
 
+const DATA = '/data';
+
 describe('ConfigService', () => {
-  let dir: string;
+  let storage: InMemoryStorage;
   let repo: ConfigRepository;
   let service: ConfigService;
 
   beforeEach(async () => {
-    dir = await mkdtemp(join(tmpdir(), 'ethos-config-svc-'));
-    repo = new ConfigRepository({ dataDir: dir });
+    storage = new InMemoryStorage();
+    await storage.mkdir(DATA);
+    repo = new ConfigRepository({ dataDir: DATA, storage });
     service = new ConfigService({ config: repo });
-  });
-
-  afterEach(async () => {
-    await rm(dir, { recursive: true, force: true });
   });
 
   it('get throws CONFIG_MISSING when no file exists', async () => {
@@ -51,8 +49,8 @@ describe('ConfigService', () => {
   });
 
   it('get returns redacted apiKey preview, never the raw key', async () => {
-    await writeFile(
-      join(dir, 'config.yaml'),
+    await storage.write(
+      join(DATA, 'config.yaml'),
       [
         'provider: anthropic',
         'model: claude-opus-4-7',
@@ -70,8 +68,8 @@ describe('ConfigService', () => {
   });
 
   it('update preserves passthrough keys (CLI-only fields)', async () => {
-    await writeFile(
-      join(dir, 'config.yaml'),
+    await storage.write(
+      join(DATA, 'config.yaml'),
       [
         'provider: anthropic',
         'model: claude-opus-4-7',
@@ -84,7 +82,7 @@ describe('ConfigService', () => {
 
     await service.update({ personality: 'engineer' });
 
-    const written = await readFile(join(dir, 'config.yaml'), 'utf-8');
+    const written = await storage.read(join(DATA, 'config.yaml'));
     expect(written).toContain('personality: engineer');
     expect(written).toContain('telegramToken: tg-1234567890');
     expect(written).toContain('slackBotToken: xoxb-abc');
@@ -93,24 +91,24 @@ describe('ConfigService', () => {
   });
 
   it('update with empty apiKey is a no-op (does not erase the existing key)', async () => {
-    await writeFile(
-      join(dir, 'config.yaml'),
+    await storage.write(
+      join(DATA, 'config.yaml'),
       ['provider: anthropic', 'model: m', 'apiKey: sk-keep-this', 'personality: researcher'].join(
         '\n',
       ),
     );
     await service.update({ apiKey: '' });
-    const written = await readFile(join(dir, 'config.yaml'), 'utf-8');
+    const written = await storage.read(join(DATA, 'config.yaml'));
     expect(written).toContain('apiKey: sk-keep-this');
   });
 
   it('update can replace the apiKey when a non-empty value is supplied', async () => {
-    await writeFile(
-      join(dir, 'config.yaml'),
+    await storage.write(
+      join(DATA, 'config.yaml'),
       ['provider: anthropic', 'model: m', 'apiKey: sk-old', 'personality: researcher'].join('\n'),
     );
     await service.update({ apiKey: 'sk-new-key-12345' });
-    const written = await readFile(join(dir, 'config.yaml'), 'utf-8');
+    const written = await storage.read(join(DATA, 'config.yaml'));
     expect(written).toContain('apiKey: sk-new-key-12345');
     expect(written).not.toContain('sk-old');
   });

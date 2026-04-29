@@ -1,31 +1,20 @@
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { FilePersonalityRegistry } from '@ethosagent/personalities';
 import { SkillsLibrary } from '@ethosagent/skills';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { InMemoryStorage } from '@ethosagent/storage-fs';
+import { describe, expect, it } from 'vitest';
 import { PersonalitiesService } from '../../services/personalities.service';
 import { makeStubPersonalityRegistry } from '../test-helpers';
 
-// Service tests cover both the repository (via real ETHOS.md reads from a
-// tmp dir) and the wire-shape mapping.
+// Service tests cover both the repository (via real ETHOS.md reads from
+// InMemoryStorage) and the wire-shape mapping.
+
+const DATA = '/data';
 
 describe('PersonalitiesService', () => {
-  let dir: string;
-
-  beforeEach(async () => {
-    dir = await mkdtemp(join(tmpdir(), 'ethos-personalities-'));
-  });
-
-  afterEach(async () => {
-    await rm(dir, { recursive: true, force: true });
-  });
-
   function makeService(opts: { personalities: import('@ethosagent/types').PersonalityConfig[] }) {
-    const registry = makeStubPersonalityRegistry(opts.personalities, dir);
-    // Per-personality skills isn't exercised in this service-level test
-    // (those have their own SkillsLibrary tests). A real SkillsLibrary is
-    // safe to inject — its constructor only resolves paths.
-    const library = new SkillsLibrary({ dataDir: dir });
+    const registry = makeStubPersonalityRegistry(opts.personalities, DATA);
+    const library = new SkillsLibrary({ dataDir: DATA });
     return new PersonalitiesService({ personalities: registry, library });
   }
 
@@ -56,7 +45,7 @@ describe('PersonalitiesService', () => {
   });
 
   it('marks user personalities as builtin: false based on ethosFile path', () => {
-    const userEthosFile = join(dir, 'personalities', 'custom', 'ETHOS.md');
+    const userEthosFile = join(DATA, 'personalities', 'custom', 'ETHOS.md');
     const service = makeService({
       personalities: [
         { id: 'custom', name: 'Custom', ethosFile: userEthosFile },
@@ -71,19 +60,21 @@ describe('PersonalitiesService', () => {
   });
 
   it('get returns personality + reads ETHOS.md body from disk', async () => {
-    const personalityDir = join(dir, 'personalities', 'researcher');
-    await mkdir(personalityDir, { recursive: true });
-    const ethosPath = join(personalityDir, 'ETHOS.md');
-    await writeFile(ethosPath, '# Researcher\n\nI am a careful researcher.\n');
+    const storage = new InMemoryStorage();
+    const ethosPath = join(DATA, 'personalities', 'researcher', 'ETHOS.md');
+    await storage.mkdir(join(DATA, 'personalities', 'researcher'));
+    await storage.write(ethosPath, '# Researcher\n\nI am a careful researcher.\n');
 
-    const service = makeService({
-      personalities: [{ id: 'researcher', name: 'Researcher', ethosFile: ethosPath }],
-    });
+    const registry = new FilePersonalityRegistry(storage, DATA);
+    registry.define({ id: 'researcher', name: 'Researcher', ethosFile: ethosPath });
+    registry.setDefault('researcher');
+    const library = new SkillsLibrary({ dataDir: DATA, storage });
+    const service = new PersonalitiesService({ personalities: registry, library });
 
     const result = await service.get('researcher');
     expect(result.personality.id).toBe('researcher');
     expect(result.ethosMd).toContain('I am a careful researcher.');
-    // User-dir → builtin: false
+    // ethosFile under DATA/personalities/ → user-owned → builtin: false
     expect(result.personality.builtin).toBe(false);
   });
 
@@ -98,7 +89,7 @@ describe('PersonalitiesService', () => {
         {
           id: 'researcher',
           name: 'Researcher',
-          ethosFile: join(dir, 'personalities', 'researcher', 'ETHOS.md'),
+          ethosFile: join(DATA, 'personalities', 'researcher', 'ETHOS.md'),
         },
       ],
     });

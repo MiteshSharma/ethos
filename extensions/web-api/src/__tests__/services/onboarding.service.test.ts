@@ -1,24 +1,22 @@
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { InMemoryStorage } from '@ethosagent/storage-fs';
+import { beforeEach, describe, expect, it } from 'vitest';
 import { ConfigRepository } from '../../repositories/config.repository';
 import { OnboardingService } from '../../services/onboarding.service';
 import { makeStubPersonalityRegistry } from '../test-helpers';
 
-// Service tests use a real ConfigRepository against a tmp dir so the state
-// derivation matches what production sees on disk. `validateProvider` injects
-// a stub `fetch` to avoid hitting real LLM endpoints from tests.
+// Service tests use a real ConfigRepository backed by InMemoryStorage so the
+// state derivation matches what production sees. `validateProvider` injects a
+// stub `fetch` to avoid hitting real LLM endpoints from tests.
+
+const DATA = '/data';
 
 describe('OnboardingService', () => {
-  let dir: string;
+  let storage: InMemoryStorage;
 
   beforeEach(async () => {
-    dir = await mkdtemp(join(tmpdir(), 'ethos-onboarding-'));
-  });
-
-  afterEach(async () => {
-    await rm(dir, { recursive: true, force: true });
+    storage = new InMemoryStorage();
+    await storage.mkdir(DATA);
   });
 
   function makeService(
@@ -27,10 +25,10 @@ describe('OnboardingService', () => {
       personalities?: import('@ethosagent/types').PersonalityConfig[];
     } = {},
   ) {
-    const config = new ConfigRepository({ dataDir: dir });
+    const config = new ConfigRepository({ dataDir: DATA, storage });
     const personalities = makeStubPersonalityRegistry(
       extras.personalities ?? [{ id: 'researcher', name: 'Researcher' }],
-      dir,
+      DATA,
     );
     return new OnboardingService({
       config,
@@ -49,7 +47,7 @@ describe('OnboardingService', () => {
     });
 
     it('returns provider when config exists but apiKey is missing', async () => {
-      await writeFile(join(dir, 'config.yaml'), 'provider: anthropic\n');
+      await storage.write(join(DATA, 'config.yaml'), 'provider: anthropic\n');
       const service = makeService();
       const state = await service.state();
       expect(state.step).toBe('provider');
@@ -57,8 +55,8 @@ describe('OnboardingService', () => {
     });
 
     it('returns personality when provider+key set but no personality picked yet', async () => {
-      await writeFile(
-        join(dir, 'config.yaml'),
+      await storage.write(
+        join(DATA, 'config.yaml'),
         ['provider: anthropic', 'apiKey: sk-something'].join('\n'),
       );
       const service = makeService();
@@ -69,8 +67,8 @@ describe('OnboardingService', () => {
     });
 
     it('returns done when everything is configured', async () => {
-      await writeFile(
-        join(dir, 'config.yaml'),
+      await storage.write(
+        join(DATA, 'config.yaml'),
         [
           'provider: anthropic',
           'apiKey: sk-key',
@@ -169,7 +167,7 @@ describe('OnboardingService', () => {
         apiKey: 'sk-test',
         personalityId: 'researcher',
       });
-      const repo = new ConfigRepository({ dataDir: dir });
+      const repo = new ConfigRepository({ dataDir: DATA, storage });
       const raw = await repo.read();
       expect(raw?.provider).toBe('anthropic');
       expect(raw?.model).toBe('claude-opus-4-7');
