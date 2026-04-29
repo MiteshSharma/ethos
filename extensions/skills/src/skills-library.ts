@@ -187,10 +187,7 @@ export class SkillsLibrary {
     personalityId: string,
     skillId: string,
   ): Promise<PersonalitySkillRecord | null> {
-    return this.readPersonalitySkill(
-      this.personalitySkillsDir(personalityId),
-      `${skillId}.md`,
-    );
+    return this.readPersonalitySkill(this.personalitySkillsDir(personalityId), `${skillId}.md`);
   }
 
   async createPersonalitySkill(

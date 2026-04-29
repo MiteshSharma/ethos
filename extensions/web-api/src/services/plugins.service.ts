@@ -1,5 +1,5 @@
 import { type InstalledPluginManifest, scanInstalledPlugins } from '@ethosagent/plugin-loader';
-import { type McpServerConfig, loadMcpConfig } from '@ethosagent/tools-mcp';
+import { loadMcpConfig, type McpServerConfig } from '@ethosagent/tools-mcp';
 import type { Storage } from '@ethosagent/types';
 import type { McpServerInfo, PluginInfo } from '@ethosagent/web-contracts';
 

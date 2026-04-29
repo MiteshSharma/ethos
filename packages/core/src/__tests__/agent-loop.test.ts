@@ -783,7 +783,9 @@ describe('AgentLoop', () => {
     // Simulates a plugin hook registered by plugin 'p1'
     hooks.registerVoid(
       'agent_done',
-      async () => { hookFireCount++; },
+      async () => {
+        hookFireCount++;
+      },
       { pluginId: 'p1' },
     );
 

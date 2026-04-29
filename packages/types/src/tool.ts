@@ -90,5 +90,8 @@ export interface ToolRegistry {
     allowedTools?: string[],
     filterOpts?: ToolFilterOpts,
   ): Promise<Array<{ toolCallId: string; name: string; result: ToolResult }>>;
-  toDefinitions(allowedTools?: string[], filterOpts?: ToolFilterOpts): import('./llm').ToolDefinitionLite[];
+  toDefinitions(
+    allowedTools?: string[],
+    filterOpts?: ToolFilterOpts,
+  ): import('./llm').ToolDefinitionLite[];
 }

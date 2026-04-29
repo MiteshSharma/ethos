@@ -431,12 +431,16 @@ export class AgentLoop {
 
       try {
         armWatchdog();
-        const stream = this.llm.complete(llmMessages, this.tools.toDefinitions(allowedTools, filterOpts), {
-          system: systemPrompt,
-          cacheSystemPrompt: true,
-          abortSignal: combinedSignal,
-          ...(modelOverride ? { modelOverride } : {}),
-        });
+        const stream = this.llm.complete(
+          llmMessages,
+          this.tools.toDefinitions(allowedTools, filterOpts),
+          {
+            system: systemPrompt,
+            cacheSystemPrompt: true,
+            abortSignal: combinedSignal,
+            ...(modelOverride ? { modelOverride } : {}),
+          },
+        );
 
         for await (const chunk of stream) {
           if (abortSignal.aborted) break;
@@ -700,7 +704,11 @@ export class AgentLoop {
     await this.session.updateUsage(sessionId, { apiCallCount: turnCount });
 
     // Step 12: Fire agent_done
-    await this.hooks.fireVoid('agent_done', { sessionId, text: fullText, turnCount }, allowedPlugins);
+    await this.hooks.fireVoid(
+      'agent_done',
+      { sessionId, text: fullText, turnCount },
+      allowedPlugins,
+    );
 
     yield { type: 'done', text: fullText, turnCount };
   }

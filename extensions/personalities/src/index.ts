@@ -1,6 +1,11 @@
 import { join } from 'node:path';
 import { FsStorage } from '@ethosagent/storage-fs';
-import { EthosError, type PersonalityConfig, type PersonalityRegistry, type Storage } from '@ethosagent/types';
+import {
+  EthosError,
+  type PersonalityConfig,
+  type PersonalityRegistry,
+  type Storage,
+} from '@ethosagent/types';
 
 // ---------------------------------------------------------------------------
 // YAML parsers — no external dependency, handles the subset we need
@@ -427,9 +432,7 @@ export class FilePersonalityRegistry implements PersonalityRegistry {
         : undefined;
 
     // mcp_servers and plugins are space-separated lists in config.yaml.
-    const mcpServers = cfg.mcp_servers
-      ? cfg.mcp_servers.split(/\s+/).filter(Boolean)
-      : undefined;
+    const mcpServers = cfg.mcp_servers ? cfg.mcp_servers.split(/\s+/).filter(Boolean) : undefined;
     const plugins = cfg.plugins ? cfg.plugins.split(/\s+/).filter(Boolean) : undefined;
 
     const config: PersonalityConfig = {
@@ -519,8 +522,7 @@ function renderConfigYaml(
   if (input.description) lines.push(`description: ${input.description}`);
   if (input.model) lines.push(`model: ${input.model}`);
   if (input.memoryScope) lines.push(`memoryScope: ${input.memoryScope}`);
-  if (input.mcp_servers !== undefined)
-    lines.push(`mcp_servers: ${input.mcp_servers.join(' ')}`);
+  if (input.mcp_servers !== undefined) lines.push(`mcp_servers: ${input.mcp_servers.join(' ')}`);
   if (input.plugins !== undefined) lines.push(`plugins: ${input.plugins.join(' ')}`);
   return `${lines.join('\n')}\n`;
 }

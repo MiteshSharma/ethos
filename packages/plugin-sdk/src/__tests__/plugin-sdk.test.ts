@@ -165,7 +165,9 @@ describe('PluginApiImpl.registerInjector', () => {
     const injector: import('@ethosagent/types').ContextInjector = {
       id: 'test',
       priority: 50,
-      async inject() { return null; },
+      async inject() {
+        return null;
+      },
     };
 
     api.registerInjector(injector);
@@ -179,7 +181,9 @@ describe('PluginApiImpl.registerInjector', () => {
     const injector: import('@ethosagent/types').ContextInjector = {
       id: 'test',
       priority: 50,
-      async inject() { return null; },
+      async inject() {
+        return null;
+      },
     };
 
     api.registerInjector(injector);

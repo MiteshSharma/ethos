@@ -1,16 +1,15 @@
 import { join } from 'node:path';
 import { AgentLoop, DefaultHookRegistry, DefaultToolRegistry } from '@ethosagent/core';
-import { FsStorage } from '@ethosagent/storage-fs';
 import { AnthropicProvider, AuthRotatingProvider } from '@ethosagent/llm-anthropic';
 import { OpenAICompatProvider } from '@ethosagent/llm-openai-compat';
 import { MarkdownFileMemoryProvider } from '@ethosagent/memory-markdown';
 import { VectorMemoryProvider } from '@ethosagent/memory-vector';
 import { createPersonalityRegistry } from '@ethosagent/personalities';
 import { PluginLoader } from '@ethosagent/plugin-loader';
-import type { ContextInjector } from '@ethosagent/types';
 import { DockerSandbox } from '@ethosagent/sandbox-docker';
 import { SQLiteSessionStore } from '@ethosagent/session-sqlite';
 import { createInjectors } from '@ethosagent/skills';
+import { FsStorage } from '@ethosagent/storage-fs';
 import { createBrowserTools } from '@ethosagent/tools-browser';
 import { createCodeTools } from '@ethosagent/tools-code';
 import { createDelegationTools } from '@ethosagent/tools-delegation';
@@ -23,7 +22,7 @@ import {
   createTerminalTools,
 } from '@ethosagent/tools-terminal';
 import { createWebTools } from '@ethosagent/tools-web';
-import type { BeforeToolCallPayload, LLMProvider } from '@ethosagent/types';
+import type { BeforeToolCallPayload, ContextInjector, LLMProvider } from '@ethosagent/types';
 
 // ---------------------------------------------------------------------------
 // Public types

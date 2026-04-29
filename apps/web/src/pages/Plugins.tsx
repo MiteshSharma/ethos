@@ -28,7 +28,11 @@ import { rpc } from '../rpc';
 // optimistically per-personality per-plugin. Rollback on error.
 
 export function Plugins() {
-  const { data: pluginsData, isLoading: pluginsLoading, error: pluginsError } = useQuery({
+  const {
+    data: pluginsData,
+    isLoading: pluginsLoading,
+    error: pluginsError,
+  } = useQuery({
     queryKey: ['plugins', 'list'],
     queryFn: () => rpc.plugins.list(),
   });
@@ -108,8 +112,8 @@ function PluginsMatrix({
         description={
           <span>
             No plugins installed.{' '}
-            <Typography.Text code>ethos plugin install &lt;path&gt;</Typography.Text> drops one
-            into ~/.ethos/plugins/.
+            <Typography.Text code>ethos plugin install &lt;path&gt;</Typography.Text> drops one into
+            ~/.ethos/plugins/.
           </span>
         }
       />
@@ -156,38 +160,35 @@ function PluginsTable({
     key: pers.id,
     width: 120,
     align: 'center' as const,
-    render: (_: unknown, plugin: PluginInfo) => (
-      <AttachCell plugin={plugin} personality={pers} />
-    ),
+    render: (_: unknown, plugin: PluginInfo) => <AttachCell plugin={plugin} personality={pers} />,
   }));
 
   return (
-    <div role="grid" aria-label="Plugin attachment matrix">
-      <Table<PluginInfo>
-        rowKey="id"
-        dataSource={plugins}
-        pagination={false}
-        size="small"
-        columns={[
-          {
-            title: 'Plugin',
-            key: 'plugin',
-            render: (_, p) => (
-              <div>
-                <div style={{ fontWeight: 500 }}>{p.name}</div>
-                <Typography.Text
-                  style={{ fontFamily: 'Geist Mono, monospace', fontSize: 12 }}
-                  type="secondary"
-                >
-                  {p.id}
-                </Typography.Text>
-              </div>
-            ),
-          },
-          ...personalityCols,
-        ]}
-      />
-    </div>
+    <Table<PluginInfo>
+      aria-label="Plugin attachment matrix"
+      rowKey="id"
+      dataSource={plugins}
+      pagination={false}
+      size="small"
+      columns={[
+        {
+          title: 'Plugin',
+          key: 'plugin',
+          render: (_, p) => (
+            <div>
+              <div style={{ fontWeight: 500 }}>{p.name}</div>
+              <Typography.Text
+                style={{ fontFamily: 'Geist Mono, monospace', fontSize: 12 }}
+                type="secondary"
+              >
+                {p.id}
+              </Typography.Text>
+            </div>
+          ),
+        },
+        ...personalityCols,
+      ]}
+    />
   );
 }
 
@@ -221,10 +222,7 @@ function PluginsAccordion({
         children: (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
             {personalities.map((pers) => (
-              <div
-                key={pers.id}
-                style={{ display: 'flex', alignItems: 'center', gap: 10 }}
-              >
+              <div key={pers.id} style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
                 <AttachCell plugin={plugin} personality={pers} />
                 <span>{pers.name}</span>
               </div>
@@ -253,26 +251,24 @@ function AttachCell({
   const isOn = current.includes(plugin.id);
 
   const mut = useMutation({
-    mutationFn: (next: string[]) =>
-      rpc.personalities.update({ id: personality.id, plugins: next }),
+    mutationFn: (next: string[]) => rpc.personalities.update({ id: personality.id, plugins: next }),
     onMutate: async (next) => {
       await qc.cancelQueries({ queryKey: ['personalities', 'list'] });
-      const prev = qc.getQueryData<{ personalities: import('@ethosagent/web-contracts').Personality[] }>([
-        'personalities',
-        'list',
-      ]);
-      qc.setQueryData<{ personalities: import('@ethosagent/web-contracts').Personality[]; defaultId: string }>(
-        ['personalities', 'list'],
-        (old) => {
-          if (!old) return old;
-          return {
-            ...old,
-            personalities: old.personalities.map((p) =>
-              p.id === personality.id ? { ...p, plugins: next } : p,
-            ),
-          };
-        },
-      );
+      const prev = qc.getQueryData<{
+        personalities: import('@ethosagent/web-contracts').Personality[];
+      }>(['personalities', 'list']);
+      qc.setQueryData<{
+        personalities: import('@ethosagent/web-contracts').Personality[];
+        defaultId: string;
+      }>(['personalities', 'list'], (old) => {
+        if (!old) return old;
+        return {
+          ...old,
+          personalities: old.personalities.map((p) =>
+            p.id === personality.id ? { ...p, plugins: next } : p,
+          ),
+        };
+      });
       return { prev };
     },
     onError: (_err, _vars, ctx) => {
@@ -288,9 +284,7 @@ function AttachCell({
   });
 
   function toggle(on: boolean) {
-    const next = on
-      ? [...current, plugin.id]
-      : current.filter((id) => id !== plugin.id);
+    const next = on ? [...current, plugin.id] : current.filter((id) => id !== plugin.id);
     mut.mutate(next);
   }
 

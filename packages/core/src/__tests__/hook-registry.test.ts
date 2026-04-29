@@ -138,7 +138,13 @@ describe('DefaultHookRegistry', () => {
       const reg = new DefaultHookRegistry();
       const afterSpy = vi.fn();
 
-      reg.registerVoid('agent_done', async () => { throw new Error('plugin boom'); }, { pluginId: 'p1' });
+      reg.registerVoid(
+        'agent_done',
+        async () => {
+          throw new Error('plugin boom');
+        },
+        { pluginId: 'p1' },
+      );
       reg.registerVoid('agent_done', async () => afterSpy());
 
       await expect(reg.fireVoid('agent_done', payload, ['p1'])).resolves.toBeUndefined();
@@ -149,9 +155,15 @@ describe('DefaultHookRegistry', () => {
       const reg = new DefaultHookRegistry();
 
       reg.registerModifying('before_prompt_build', async () => ({ prependSystem: 'builtin' }));
-      reg.registerModifying('before_prompt_build', async () => ({ appendSystem: 'plugin' }), { pluginId: 'p1' });
+      reg.registerModifying('before_prompt_build', async () => ({ appendSystem: 'plugin' }), {
+        pluginId: 'p1',
+      });
 
-      const result = await reg.fireModifying('before_prompt_build', { sessionId: 's1', history: [] }, []);
+      const result = await reg.fireModifying(
+        'before_prompt_build',
+        { sessionId: 's1', history: [] },
+        [],
+      );
       expect(result.prependSystem).toBe('builtin');
       expect(result.appendSystem).toBeUndefined();
     });
@@ -160,10 +172,18 @@ describe('DefaultHookRegistry', () => {
       const reg = new DefaultHookRegistry();
 
       reg.registerModifying('before_prompt_build', async () => ({ prependSystem: 'builtin' }));
-      reg.registerModifying('before_prompt_build', async () => ({ appendSystem: 'plugin' }), { pluginId: 'p1' });
-      reg.registerModifying('before_prompt_build', async () => ({ appendSystem: 'other' }), { pluginId: 'p2' });
+      reg.registerModifying('before_prompt_build', async () => ({ appendSystem: 'plugin' }), {
+        pluginId: 'p1',
+      });
+      reg.registerModifying('before_prompt_build', async () => ({ appendSystem: 'other' }), {
+        pluginId: 'p2',
+      });
 
-      const result = await reg.fireModifying('before_prompt_build', { sessionId: 's1', history: [] }, ['p1']);
+      const result = await reg.fireModifying(
+        'before_prompt_build',
+        { sessionId: 's1', history: [] },
+        ['p1'],
+      );
       expect(result.prependSystem).toBe('builtin');
       expect(result.appendSystem).toBe('plugin'); // p1 wins; p2 blocked
     });
@@ -173,9 +193,23 @@ describe('DefaultHookRegistry', () => {
       const pluginSpy = vi.fn();
 
       reg.registerClaiming('inbound_claim', async () => ({ handled: false }));
-      reg.registerClaiming('inbound_claim', async () => { pluginSpy(); return { handled: true }; }, { pluginId: 'p1' });
+      reg.registerClaiming(
+        'inbound_claim',
+        async () => {
+          pluginSpy();
+          return { handled: true };
+        },
+        { pluginId: 'p1' },
+      );
 
-      const msg = { platform: 'cli', chatId: 'c1', text: 'x', isDm: true, isGroupMention: false, raw: null };
+      const msg = {
+        platform: 'cli',
+        chatId: 'c1',
+        text: 'x',
+        isDm: true,
+        isGroupMention: false,
+        raw: null,
+      };
       const result = await reg.fireClaiming('inbound_claim', { message: msg }, []);
       expect(result.handled).toBe(false);
       expect(pluginSpy).not.toHaveBeenCalled();
@@ -187,7 +221,14 @@ describe('DefaultHookRegistry', () => {
       reg.registerClaiming('inbound_claim', async () => ({ handled: false }));
       reg.registerClaiming('inbound_claim', async () => ({ handled: true }), { pluginId: 'p1' });
 
-      const msg = { platform: 'cli', chatId: 'c1', text: 'x', isDm: true, isGroupMention: false, raw: null };
+      const msg = {
+        platform: 'cli',
+        chatId: 'c1',
+        text: 'x',
+        isDm: true,
+        isGroupMention: false,
+        raw: null,
+      };
       const result = await reg.fireClaiming('inbound_claim', { message: msg }, ['p1']);
       expect(result.handled).toBe(true);
     });

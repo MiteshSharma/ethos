@@ -574,20 +574,14 @@ function EditModal({ id, onClose }: { id: string; onClose: () => void }) {
               key: 'mcp',
               label: 'MCP',
               children: (
-                <McpServersPanel
-                  id={id}
-                  initialMcpServers={data.personality.mcp_servers ?? []}
-                />
+                <McpServersPanel id={id} initialMcpServers={data.personality.mcp_servers ?? []} />
               ),
             },
             {
               key: 'plugins',
               label: 'Plugins',
               children: (
-                <PluginsAttachPanel
-                  id={id}
-                  initialPlugins={data.personality.plugins ?? []}
-                />
+                <PluginsAttachPanel id={id} initialPlugins={data.personality.plugins ?? []} />
               ),
             },
           ]}
@@ -1186,13 +1180,7 @@ function DuplicateModal({
 // Saves via personalities.update({ mcp_servers: [...] }).
 // ---------------------------------------------------------------------------
 
-function McpServersPanel({
-  id,
-  initialMcpServers,
-}: {
-  id: string;
-  initialMcpServers: string[];
-}) {
+function McpServersPanel({ id, initialMcpServers }: { id: string; initialMcpServers: string[] }) {
   const qc = useQueryClient();
   const { notification } = AntApp.useApp();
   const [attached, setAttached] = useState<Set<string>>(new Set(initialMcpServers));
@@ -1299,13 +1287,7 @@ function McpServersPanel({
 // Saves via personalities.update({ plugins: [...] }).
 // ---------------------------------------------------------------------------
 
-function PluginsAttachPanel({
-  id,
-  initialPlugins,
-}: {
-  id: string;
-  initialPlugins: string[];
-}) {
+function PluginsAttachPanel({ id, initialPlugins }: { id: string; initialPlugins: string[] }) {
   const qc = useQueryClient();
   const { notification } = AntApp.useApp();
   const [attached, setAttached] = useState<Set<string>>(new Set(initialPlugins));

@@ -41,6 +41,7 @@ Define success criteria. Loop until verified.
 - "Add validation" → write tests for invalid inputs, then make them pass.
 - "Fix the bug" → write a test that reproduces it, then make it pass.
 - Always run `pnpm check` (typecheck + lint + test) before declaring done.
+- **Always run `pnpm lint` before pushing.** CI fails on lint errors; catching them locally is one command. If lint reports fixable issues, run `pnpm lint:fix` and re-check before `git push`. Don't push code that hasn't been linted.
 
 ---
 

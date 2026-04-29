@@ -10,9 +10,9 @@
  * per-personality session keys without CI catching it.
  */
 
+import { AgentLoop, InMemorySessionStore } from '@ethosagent/core';
 import type { CompletionChunk, LLMProvider, Message } from '@ethosagent/types';
 import { describe, expect, it } from 'vitest';
-import { AgentLoop, InMemorySessionStore } from '@ethosagent/core';
 
 function makeMockLLM(): LLMProvider {
   return {
@@ -25,16 +25,26 @@ function makeMockLLM(): LLMProvider {
       yield { type: 'text_delta', text: 'ok' };
       yield {
         type: 'usage',
-        usage: { inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheCreationTokens: 0, estimatedCostUsd: 0 },
+        usage: {
+          inputTokens: 1,
+          outputTokens: 1,
+          cacheReadTokens: 0,
+          cacheCreationTokens: 0,
+          estimatedCostUsd: 0,
+        },
       };
       yield { type: 'done', finishReason: 'end_turn' };
     },
-    async countTokens() { return 1; },
+    async countTokens() {
+      return 1;
+    },
   };
 }
 
 async function drain(gen: AsyncGenerator<unknown>): Promise<void> {
-  for await (const _ of gen) { /* consume */ }
+  for await (const _ of gen) {
+    /* consume */
+  }
 }
 
 describe('session continuity across personality switches', () => {
@@ -51,16 +61,20 @@ describe('session continuity across personality switches', () => {
     const sessionKey = 'cli:session-continuity-test';
 
     // Turn 1 — send as personality A
-    await drain(loop.run('message from personality A', {
-      sessionKey,
-      personalityId: 'researcher',
-    }));
+    await drain(
+      loop.run('message from personality A', {
+        sessionKey,
+        personalityId: 'researcher',
+      }),
+    );
 
     // Turn 2 — switch to personality B, same sessionKey
-    await drain(loop.run('message from personality B', {
-      sessionKey,
-      personalityId: 'engineer',
-    }));
+    await drain(
+      loop.run('message from personality B', {
+        sessionKey,
+        personalityId: 'engineer',
+      }),
+    );
 
     // Both turns must live in the same session
     const sess = await session.getSessionByKey(sessionKey);

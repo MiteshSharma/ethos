@@ -4,8 +4,8 @@ import type {
   OutboundMessage,
   PlatformAdapter,
 } from '@ethosagent/types';
-import boltPkg from '@slack/bolt';
 import type { MessageEvent } from '@slack/bolt';
+import boltPkg from '@slack/bolt';
 
 const { App } = boltPkg;
 type App = InstanceType<typeof App>;

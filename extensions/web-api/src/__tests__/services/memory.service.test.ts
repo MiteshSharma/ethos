@@ -30,9 +30,7 @@ describe('MemoryService', () => {
     const result = await service.write('memory', '# project context\n\nfirst note');
     expect(result.file.content).toBe('# project context\n\nfirst note');
     expect(result.file.modifiedAt).not.toBeNull();
-    expect(await readFile(join(dir, 'MEMORY.md'), 'utf-8')).toBe(
-      '# project context\n\nfirst note',
-    );
+    expect(await readFile(join(dir, 'MEMORY.md'), 'utf-8')).toBe('# project context\n\nfirst note');
   });
 
   it('write to user store uses USER.md', async () => {

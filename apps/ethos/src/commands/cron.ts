@@ -2,7 +2,7 @@ import { join } from 'node:path';
 import { CronScheduler, isValidCronExpression, nextRun } from '@ethosagent/cron';
 import { createPersonalityRegistry } from '@ethosagent/personalities';
 import { EthosError } from '@ethosagent/types';
-import { ethosDir, type EthosConfig } from '../config';
+import { type EthosConfig, ethosDir } from '../config';
 import { createAgentLoop } from '../wiring';
 
 const c = {
@@ -83,7 +83,9 @@ export async function runCronCommand(
           console.log(`    Schedule    : ${j.schedule}`);
           console.log(`    Personality : ${pers}`);
           console.log(`    Next run    : ${next}`);
-          console.log(`    Prompt      : ${j.prompt.slice(0, 80)}${j.prompt.length > 80 ? '…' : ''}`);
+          console.log(
+            `    Prompt      : ${j.prompt.slice(0, 80)}${j.prompt.length > 80 ? '…' : ''}`,
+          );
           console.log();
         }
       } finally {
@@ -106,16 +108,18 @@ export async function runCronCommand(
           return;
         }
         const status =
-          j.status === 'paused'
-            ? `${c.yellow}⏸ paused${c.reset}`
-            : `${c.green}▶ active${c.reset}`;
+          j.status === 'paused' ? `${c.yellow}⏸ paused${c.reset}` : `${c.green}▶ active${c.reset}`;
         const pers = j.personality ?? config.personality ?? 'default';
         console.log(`\n${c.bold}${j.name}${c.reset} ${c.dim}(${j.id})${c.reset}`);
         console.log(`  Status      : ${status}`);
         console.log(`  Personality : ${c.cyan}${pers}${c.reset}`);
         console.log(`  Schedule    : ${j.schedule}`);
-        console.log(`  Next run    : ${j.nextRunAt ? new Date(j.nextRunAt).toLocaleString() : 'not scheduled'}`);
-        console.log(`  Last run    : ${j.lastRunAt ? new Date(j.lastRunAt).toLocaleString() : 'never'}`);
+        console.log(
+          `  Next run    : ${j.nextRunAt ? new Date(j.nextRunAt).toLocaleString() : 'not scheduled'}`,
+        );
+        console.log(
+          `  Last run    : ${j.lastRunAt ? new Date(j.lastRunAt).toLocaleString() : 'never'}`,
+        );
         console.log(`  Prompt      : ${j.prompt}`);
         console.log();
       } finally {
@@ -151,7 +155,9 @@ export async function runCronCommand(
         await reg.loadFromDirectory(join(ethosDir(), 'personalities'));
         if (!reg.get(personality)) {
           console.log(`${c.red}Personality "${personality}" not found${c.reset}`);
-          console.log(`${c.dim}Run 'ethos personality list' to see available personalities${c.reset}`);
+          console.log(
+            `${c.dim}Run 'ethos personality list' to see available personalities${c.reset}`,
+          );
           return;
         }
       }
@@ -249,7 +255,9 @@ export async function runCronCommand(
     }
 
     default:
-      console.log('Usage: ethos cron [list [--personality <id>] | show <id> | create | pause | resume | delete | run]');
+      console.log(
+        'Usage: ethos cron [list [--personality <id>] | show <id> | create | pause | resume | delete | run]',
+      );
   }
 }
 

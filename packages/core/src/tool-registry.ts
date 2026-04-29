@@ -1,4 +1,10 @@
-import type { Tool, ToolContext, ToolFilterOpts, ToolRegistry, ToolResult } from '@ethosagent/types';
+import type {
+  Tool,
+  ToolContext,
+  ToolFilterOpts,
+  ToolRegistry,
+  ToolResult,
+} from '@ethosagent/types';
 
 interface ToolEntry {
   tool: Tool;
@@ -72,8 +78,7 @@ export class DefaultToolRegistry implements ToolRegistry {
       // plugin tools are gated separately via passesFilter() — their names are
       // dynamic, so requiring users to enumerate them in toolset.yaml is
       // unworkable. (mcp_servers / plugins allowlists are the gates for those.)
-      const isMcpOrPluginTool =
-        e.tool.name.startsWith('mcp__') || e.pluginId !== undefined;
+      const isMcpOrPluginTool = e.tool.name.startsWith('mcp__') || e.pluginId !== undefined;
       if (
         !isMcpOrPluginTool &&
         allowedTools &&
@@ -119,8 +124,7 @@ export class DefaultToolRegistry implements ToolRegistry {
 
         // Toolset (allowedTools) only gates built-in tools — see toDefinitions
         // for the rationale. MCP and plugin tools are gated by passesFilter().
-        const isMcpOrPluginTool =
-          call.name.startsWith('mcp__') || entry.pluginId !== undefined;
+        const isMcpOrPluginTool = call.name.startsWith('mcp__') || entry.pluginId !== undefined;
         if (
           !isMcpOrPluginTool &&
           allowedTools &&

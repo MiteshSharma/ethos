@@ -66,7 +66,7 @@ describe('tools-file — fs_reach boundary enforcement', () => {
     if (result.ok) expect(result.value).toContain('mine');
   });
 
-  it('researcher CANNOT read engineer\'s MEMORY.md', async () => {
+  it("researcher CANNOT read engineer's MEMORY.md", async () => {
     const ctx = makeCtx({ workingDir: cwd, storage: researcherStorage() });
     const result = await readFileTool.execute(
       { path: join(dataDir, 'personalities', 'engineer', 'MEMORY.md') },
@@ -93,7 +93,7 @@ describe('tools-file — fs_reach boundary enforcement', () => {
     expect(result.ok).toBe(true);
   });
 
-  it('researcher CANNOT write into engineer\'s personality dir', async () => {
+  it("researcher CANNOT write into engineer's personality dir", async () => {
     const ctx = makeCtx({ workingDir: cwd, storage: researcherStorage() });
     const target = join(dataDir, 'personalities', 'engineer', 'sneak.md');
     const result = await writeFileTool.execute({ path: target, content: 'evil' }, ctx);

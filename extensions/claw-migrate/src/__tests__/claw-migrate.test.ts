@@ -284,8 +284,25 @@ describe('ClawMigrator cron migration (Phase 3.2)', () => {
     // config.yaml has personality: engineer (a built-in → resolves to 'engineer')
     await seedMinimalOpenclaw(source);
     const jobs = [
-      { id: 'j1', name: 'daily', schedule: '0 9 * * *', prompt: 'Summarize.', status: 'active', missedRunPolicy: 'skip', createdAt: '2026-01-01T00:00:00.000Z' },
-      { id: 'j2', name: 'weekly', schedule: '0 8 * * 1', prompt: 'Report.', personality: 'researcher', status: 'active', missedRunPolicy: 'skip', createdAt: '2026-01-02T00:00:00.000Z' },
+      {
+        id: 'j1',
+        name: 'daily',
+        schedule: '0 9 * * *',
+        prompt: 'Summarize.',
+        status: 'active',
+        missedRunPolicy: 'skip',
+        createdAt: '2026-01-01T00:00:00.000Z',
+      },
+      {
+        id: 'j2',
+        name: 'weekly',
+        schedule: '0 8 * * 1',
+        prompt: 'Report.',
+        personality: 'researcher',
+        status: 'active',
+        missedRunPolicy: 'skip',
+        createdAt: '2026-01-02T00:00:00.000Z',
+      },
     ];
     await mkdir(join(source, 'cron'), { recursive: true });
     await writeFile(join(source, 'cron', 'jobs.json'), JSON.stringify(jobs));
@@ -309,7 +326,15 @@ describe('ClawMigrator cron migration (Phase 3.2)', () => {
     await mkdir(source, { recursive: true });
     await writeFile(join(source, 'config.yaml'), 'provider: anthropic\nmodel: claude-opus-4-7\n');
     const jobs = [
-      { id: 'j1', name: 'task', schedule: '0 9 * * *', prompt: 'Do it.', status: 'active', missedRunPolicy: 'skip', createdAt: '2026-01-01T00:00:00.000Z' },
+      {
+        id: 'j1',
+        name: 'task',
+        schedule: '0 9 * * *',
+        prompt: 'Do it.',
+        status: 'active',
+        missedRunPolicy: 'skip',
+        createdAt: '2026-01-01T00:00:00.000Z',
+      },
     ];
     await mkdir(join(source, 'cron'), { recursive: true });
     await writeFile(join(source, 'cron', 'jobs.json'), JSON.stringify(jobs));
@@ -326,7 +351,17 @@ describe('ClawMigrator cron migration (Phase 3.2)', () => {
   it('skips cron migration when dest already exists and overwrite is false', async () => {
     const { source, target, workspace } = await makeSandbox();
     await seedMinimalOpenclaw(source);
-    const jobs = [{ id: 'j1', name: 'daily', schedule: '0 9 * * *', prompt: 'X.', status: 'active', missedRunPolicy: 'skip', createdAt: '2026-01-01T00:00:00.000Z' }];
+    const jobs = [
+      {
+        id: 'j1',
+        name: 'daily',
+        schedule: '0 9 * * *',
+        prompt: 'X.',
+        status: 'active',
+        missedRunPolicy: 'skip',
+        createdAt: '2026-01-01T00:00:00.000Z',
+      },
+    ];
     await mkdir(join(source, 'cron'), { recursive: true });
     await writeFile(join(source, 'cron', 'jobs.json'), JSON.stringify(jobs));
 
@@ -348,7 +383,17 @@ describe('ClawMigrator cron migration (Phase 3.2)', () => {
   it('dry run reports copied but writes nothing', async () => {
     const { source, target, workspace } = await makeSandbox();
     await seedMinimalOpenclaw(source);
-    const jobs = [{ id: 'j1', name: 'daily', schedule: '0 9 * * *', prompt: 'X.', status: 'active', missedRunPolicy: 'skip', createdAt: '2026-01-01T00:00:00.000Z' }];
+    const jobs = [
+      {
+        id: 'j1',
+        name: 'daily',
+        schedule: '0 9 * * *',
+        prompt: 'X.',
+        status: 'active',
+        missedRunPolicy: 'skip',
+        createdAt: '2026-01-01T00:00:00.000Z',
+      },
+    ];
     await mkdir(join(source, 'cron'), { recursive: true });
     await writeFile(join(source, 'cron', 'jobs.json'), JSON.stringify(jobs));
 

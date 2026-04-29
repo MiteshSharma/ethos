@@ -18,7 +18,9 @@ describe('createWebApprovalHook', () => {
 
   beforeEach(() => {
     const storage = new InMemoryStorage();
-    approvals = new ApprovalsService({ allowlist: new AllowlistRepository({ dataDir: DATA, storage }) });
+    approvals = new ApprovalsService({
+      allowlist: new AllowlistRepository({ dataDir: DATA, storage }),
+    });
   });
 
   function payload(over: Partial<BeforeToolCallPayload> = {}): BeforeToolCallPayload {

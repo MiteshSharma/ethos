@@ -186,8 +186,21 @@ describe('DefaultToolRegistry', () => {
 
     it('toDefinitions: allowedPlugins=[] blocks plugin tools, keeps built-ins', () => {
       const reg = new DefaultToolRegistry();
-      reg.register({ name: 'builtin', description: 'b', schema: {}, execute: async () => ({ ok: true, value: '' }) });
-      reg.register({ name: 'plugin_tool', description: 'p', schema: {}, execute: async () => ({ ok: true, value: '' }) }, { pluginId: 'p1' });
+      reg.register({
+        name: 'builtin',
+        description: 'b',
+        schema: {},
+        execute: async () => ({ ok: true, value: '' }),
+      });
+      reg.register(
+        {
+          name: 'plugin_tool',
+          description: 'p',
+          schema: {},
+          execute: async () => ({ ok: true, value: '' }),
+        },
+        { pluginId: 'p1' },
+      );
 
       const defs = reg.toDefinitions(undefined, { allowedPlugins: [] });
       expect(defs.map((d) => d.name)).toEqual(['builtin']);
@@ -195,9 +208,30 @@ describe('DefaultToolRegistry', () => {
 
     it('toDefinitions: allowedPlugins=[p1] allows p1 tools', () => {
       const reg = new DefaultToolRegistry();
-      reg.register({ name: 'builtin', description: 'b', schema: {}, execute: async () => ({ ok: true, value: '' }) });
-      reg.register({ name: 'p1_tool', description: 'p', schema: {}, execute: async () => ({ ok: true, value: '' }) }, { pluginId: 'p1' });
-      reg.register({ name: 'p2_tool', description: 'q', schema: {}, execute: async () => ({ ok: true, value: '' }) }, { pluginId: 'p2' });
+      reg.register({
+        name: 'builtin',
+        description: 'b',
+        schema: {},
+        execute: async () => ({ ok: true, value: '' }),
+      });
+      reg.register(
+        {
+          name: 'p1_tool',
+          description: 'p',
+          schema: {},
+          execute: async () => ({ ok: true, value: '' }),
+        },
+        { pluginId: 'p1' },
+      );
+      reg.register(
+        {
+          name: 'p2_tool',
+          description: 'q',
+          schema: {},
+          execute: async () => ({ ok: true, value: '' }),
+        },
+        { pluginId: 'p2' },
+      );
 
       const defs = reg.toDefinitions(undefined, { allowedPlugins: ['p1'] });
       const names = defs.map((d) => d.name);
@@ -208,8 +242,18 @@ describe('DefaultToolRegistry', () => {
 
     it('toDefinitions: allowedMcpServers=[] blocks MCP tools', () => {
       const reg = new DefaultToolRegistry();
-      reg.register({ name: 'builtin', description: 'b', schema: {}, execute: async () => ({ ok: true, value: '' }) });
-      reg.register({ name: 'mcp__weather__get', description: 'm', schema: {}, execute: async () => ({ ok: true, value: '' }) });
+      reg.register({
+        name: 'builtin',
+        description: 'b',
+        schema: {},
+        execute: async () => ({ ok: true, value: '' }),
+      });
+      reg.register({
+        name: 'mcp__weather__get',
+        description: 'm',
+        schema: {},
+        execute: async () => ({ ok: true, value: '' }),
+      });
 
       const defs = reg.toDefinitions(undefined, { allowedMcpServers: [] });
       expect(defs.map((d) => d.name)).toEqual(['builtin']);
@@ -217,8 +261,18 @@ describe('DefaultToolRegistry', () => {
 
     it('toDefinitions: allowedMcpServers=[weather] allows that MCP server', () => {
       const reg = new DefaultToolRegistry();
-      reg.register({ name: 'mcp__weather__get', description: 'w', schema: {}, execute: async () => ({ ok: true, value: '' }) });
-      reg.register({ name: 'mcp__calendar__list', description: 'c', schema: {}, execute: async () => ({ ok: true, value: '' }) });
+      reg.register({
+        name: 'mcp__weather__get',
+        description: 'w',
+        schema: {},
+        execute: async () => ({ ok: true, value: '' }),
+      });
+      reg.register({
+        name: 'mcp__calendar__list',
+        description: 'c',
+        schema: {},
+        execute: async () => ({ ok: true, value: '' }),
+      });
 
       const defs = reg.toDefinitions(undefined, { allowedMcpServers: ['weather'] });
       expect(defs.map((d) => d.name)).toEqual(['mcp__weather__get']);
@@ -231,9 +285,24 @@ describe('DefaultToolRegistry', () => {
     // present in toolset.yaml. The LLM should not even see them.
     it('toDefinitions: toolset set + allowedMcpServers=[] hides MCP tools from the LLM', () => {
       const reg = new DefaultToolRegistry();
-      reg.register({ name: 'terminal', description: 't', schema: {}, execute: async () => ({ ok: true, value: '' }) });
-      reg.register({ name: 'read_file', description: 'r', schema: {}, execute: async () => ({ ok: true, value: '' }) });
-      reg.register({ name: 'mcp__filesystem__list_directory', description: 'm', schema: {}, execute: async () => ({ ok: true, value: '' }) });
+      reg.register({
+        name: 'terminal',
+        description: 't',
+        schema: {},
+        execute: async () => ({ ok: true, value: '' }),
+      });
+      reg.register({
+        name: 'read_file',
+        description: 'r',
+        schema: {},
+        execute: async () => ({ ok: true, value: '' }),
+      });
+      reg.register({
+        name: 'mcp__filesystem__list_directory',
+        description: 'm',
+        schema: {},
+        execute: async () => ({ ok: true, value: '' }),
+      });
 
       const defs = reg.toDefinitions(['terminal', 'read_file'], { allowedMcpServers: [] });
       expect(defs.map((d) => d.name).sort()).toEqual(['read_file', 'terminal']);
@@ -242,8 +311,21 @@ describe('DefaultToolRegistry', () => {
 
     it('executeParallel: filterOpts blocks plugin tool at execution time', async () => {
       const reg = new DefaultToolRegistry();
-      reg.register({ name: 'builtin', description: 'b', schema: {}, execute: async () => ({ ok: true, value: 'ok' }) });
-      reg.register({ name: 'p1_tool', description: 'p', schema: {}, execute: async () => ({ ok: true, value: 'plugin ran' }) }, { pluginId: 'p1' });
+      reg.register({
+        name: 'builtin',
+        description: 'b',
+        schema: {},
+        execute: async () => ({ ok: true, value: 'ok' }),
+      });
+      reg.register(
+        {
+          name: 'p1_tool',
+          description: 'p',
+          schema: {},
+          execute: async () => ({ ok: true, value: 'plugin ran' }),
+        },
+        { pluginId: 'p1' },
+      );
 
       const results = await reg.executeParallel(
         [
@@ -320,10 +402,20 @@ describe('Phase 4.3 — cross-plan: MCP server gate catches skill+MCP mismatch',
     const reg = new DefaultToolRegistry();
 
     // Built-in tool — always visible regardless of MCP filter.
-    reg.register({ name: 'read_file', description: 'Read a file', schema: {}, execute: async () => ({ ok: true, value: '' }) });
+    reg.register({
+      name: 'read_file',
+      description: 'Read a file',
+      schema: {},
+      execute: async () => ({ ok: true, value: '' }),
+    });
 
     // MCP tool from 'linear' server — would power a skill that reads Linear issues.
-    reg.register({ name: 'mcp__linear__get_issue', description: 'Get Linear issue', schema: {}, execute: async () => ({ ok: true, value: '' }) });
+    reg.register({
+      name: 'mcp__linear__get_issue',
+      description: 'Get Linear issue',
+      schema: {},
+      execute: async () => ({ ok: true, value: '' }),
+    });
 
     // Personality A has linear in its mcp_servers — sees both tools.
     const defsWithLinear = reg.toDefinitions(undefined, { allowedMcpServers: ['linear'] });
@@ -340,7 +432,12 @@ describe('Phase 4.3 — cross-plan: MCP server gate catches skill+MCP mismatch',
   it('MCP tool is blocked at execution time even when called by name — belt-and-suspenders', async () => {
     const reg = new DefaultToolRegistry();
     const executed = vi.fn(async (): Promise<ToolResult> => ({ ok: true, value: 'ran' }));
-    reg.register({ name: 'mcp__linear__get_issue', description: 'Get Linear issue', schema: {}, execute: executed });
+    reg.register({
+      name: 'mcp__linear__get_issue',
+      description: 'Get Linear issue',
+      schema: {},
+      execute: executed,
+    });
 
     // Attempt to call the MCP tool while the filter blocks the server.
     const results = await reg.executeParallel(

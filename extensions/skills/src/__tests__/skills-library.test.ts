@@ -25,7 +25,10 @@ describe('SkillsLibrary', () => {
         join(DATA, 'skills', 'zebra.md'),
         '---\nname: Zebra skill\ndescription: about zebras\n---\n\nbody',
       );
-      await storage.write(join(DATA, 'skills', 'alpha.md'), '---\nname: Alpha skill\n---\n\nalpha body');
+      await storage.write(
+        join(DATA, 'skills', 'alpha.md'),
+        '---\nname: Alpha skill\n---\n\nalpha body',
+      );
 
       const skills = await lib.listSkills();
       expect(skills.map((s) => s.name)).toEqual(['Alpha skill', 'Zebra skill']);
@@ -155,18 +158,18 @@ describe('SkillsLibrary', () => {
     it('writes under personalities/<id>/skills/', async () => {
       const skill = await lib.createPersonalitySkill('p', 'note', '---\nname: A note\n---\n\nbody');
       expect(skill.name).toBe('A note');
-      expect(
-        await storage.read(join(DATA, 'personalities', 'p', 'skills', 'note.md')),
-      ).toContain('name: A note');
+      expect(await storage.read(join(DATA, 'personalities', 'p', 'skills', 'note.md'))).toContain(
+        'name: A note',
+      );
     });
 
     it('importGlobalIntoPersonality copies global into per-personality dir byte-for-byte', async () => {
       await lib.createSkill('shared', '---\nname: Shared\n---\n\nbody');
       const imported = await lib.importGlobalIntoPersonality('p', ['shared']);
       expect(imported).toHaveLength(1);
-      expect(
-        await storage.read(join(DATA, 'personalities', 'p', 'skills', 'shared.md')),
-      ).toContain('name: Shared');
+      expect(await storage.read(join(DATA, 'personalities', 'p', 'skills', 'shared.md'))).toContain(
+        'name: Shared',
+      );
     });
 
     it('importGlobalIntoPersonality throws when source missing', async () => {
