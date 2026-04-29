@@ -55,6 +55,8 @@ export interface UpdatePersonalityPatch {
   toolset?: string[];
   ethosMd?: string;
   memoryScope?: 'global' | 'per-personality';
+  mcp_servers?: string[];
+  plugins?: string[];
 }
 
 export class FilePersonalityRegistry implements PersonalityRegistry {
@@ -197,10 +199,12 @@ export class FilePersonalityRegistry implements PersonalityRegistry {
       patch.name !== undefined ||
       patch.description !== undefined ||
       patch.model !== undefined ||
-      patch.memoryScope !== undefined
+      patch.memoryScope !== undefined ||
+      patch.mcp_servers !== undefined ||
+      patch.plugins !== undefined
     ) {
       const config = existing.config;
-      const merged: CreatePersonalityInput = {
+      const merged = {
         id: config.id,
         name: patch.name ?? config.name,
         description: patch.description ?? config.description,
@@ -208,6 +212,8 @@ export class FilePersonalityRegistry implements PersonalityRegistry {
         toolset: patch.toolset ?? config.toolset ?? [],
         ethosMd: '',
         memoryScope: patch.memoryScope ?? config.memoryScope,
+        mcp_servers: patch.mcp_servers ?? config.mcp_servers,
+        plugins: patch.plugins ?? config.plugins,
       };
       await this.storage.write(join(dir, 'config.yaml'), renderConfigYaml(merged));
     }
@@ -420,6 +426,12 @@ export class FilePersonalityRegistry implements PersonalityRegistry {
           }
         : undefined;
 
+    // mcp_servers and plugins are space-separated lists in config.yaml.
+    const mcpServers = cfg.mcp_servers
+      ? cfg.mcp_servers.split(/\s+/).filter(Boolean)
+      : undefined;
+    const plugins = cfg.plugins ? cfg.plugins.split(/\s+/).filter(Boolean) : undefined;
+
     const config: PersonalityConfig = {
       id,
       name: cfg.name ?? titleCase(id),
@@ -434,6 +446,8 @@ export class FilePersonalityRegistry implements PersonalityRegistry {
       ...(toolsetSrc ? { toolset: parseToolsetYaml(toolsetSrc) } : {}),
       ...(streamingTimeoutMs !== undefined ? { streamingTimeoutMs } : {}),
       ...(fsReach ? { fs_reach: fsReach } : {}),
+      ...(mcpServers !== undefined ? { mcp_servers: mcpServers } : {}),
+      ...(plugins !== undefined ? { plugins } : {}),
     };
 
     return config;
@@ -498,11 +512,16 @@ function parseCsv(value: string | undefined): string[] | undefined {
   return items.length > 0 ? items : undefined;
 }
 
-function renderConfigYaml(input: CreatePersonalityInput): string {
+function renderConfigYaml(
+  input: CreatePersonalityInput & { mcp_servers?: string[]; plugins?: string[] },
+): string {
   const lines: string[] = [`name: ${input.name}`];
   if (input.description) lines.push(`description: ${input.description}`);
   if (input.model) lines.push(`model: ${input.model}`);
   if (input.memoryScope) lines.push(`memoryScope: ${input.memoryScope}`);
+  if (input.mcp_servers !== undefined)
+    lines.push(`mcp_servers: ${input.mcp_servers.join(' ')}`);
+  if (input.plugins !== undefined) lines.push(`plugins: ${input.plugins.join(' ')}`);
   return `${lines.join('\n')}\n`;
 }
 

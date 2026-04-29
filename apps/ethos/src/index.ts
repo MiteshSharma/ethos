@@ -84,9 +84,20 @@ try {
         }
         await writeConfig(getStorage(), { ...cfg, personality: args[2] });
         console.log(`Personality set to: ${args[2]}`);
+      } else if (sub === 'mcp') {
+        await runPersonalityMcp(args.slice(2));
+      } else if (sub === 'plugins') {
+        await runPersonalityPlugins(args.slice(2));
       } else {
-        console.log('Usage: ethos personality [list | set <id>]');
+        console.log(
+          'Usage: ethos personality [list | set <id> | mcp <id> [--attach <name> | --detach <name>] | plugins <id> [--attach <plugin-id> | --detach <plugin-id>]]',
+        );
       }
+      break;
+    }
+
+    case 'plugins': {
+      await runPluginsStatus();
       break;
     }
 
@@ -299,4 +310,173 @@ try {
   // Phase 30.10 — append to ~/.ethos/logs/errors.jsonl for local diagnostics.
   appendErrorLog(e, { command });
   process.exit(1);
+}
+
+// ---------------------------------------------------------------------------
+// ethos personality mcp <id> [--attach <name> | --detach <name>]
+// ---------------------------------------------------------------------------
+
+async function runPersonalityMcp(argv: string[]): Promise<void> {
+  const id = argv[0];
+  if (!id) {
+    console.log('Usage: ethos personality mcp <id> [--attach <name> | --detach <name>]');
+    return;
+  }
+  const flags = parseCliFlags(argv.slice(1));
+  const { createPersonalityRegistry } = await import('@ethosagent/personalities');
+  const { loadMcpConfig } = await import('@ethosagent/tools-mcp');
+  const { ethosDir } = await import('./config');
+  const storage = getStorage();
+  const reg = await createPersonalityRegistry({ storage, userPersonalitiesDir: ethosDir() });
+  await reg.loadFromDirectory(ethosDir());
+
+  const personality = reg.get(id);
+  if (!personality) {
+    console.error(`Unknown personality: ${id}`);
+    process.exit(1);
+  }
+
+  const allServers = await loadMcpConfig(storage);
+  const attached = new Set(personality.mcp_servers ?? []);
+
+  if (flags.attach) {
+    attached.add(flags.attach);
+    await reg.update(id, { mcp_servers: [...attached] });
+    console.log(`✓ Attached MCP server "${flags.attach}" to ${id}`);
+    return;
+  }
+  if (flags.detach) {
+    attached.delete(flags.detach);
+    await reg.update(id, { mcp_servers: [...attached] });
+    console.log(`✓ Detached MCP server "${flags.detach}" from ${id}`);
+    return;
+  }
+
+  console.log(`\nMCP servers for ${id}:\n`);
+  if (allServers.length === 0) {
+    console.log('  No MCP servers configured in ~/.ethos/mcp.json');
+  } else {
+    for (const s of allServers) {
+      const mark = attached.has(s.name) ? '✓' : ' ';
+      console.log(`  [${mark}] ${s.name}`);
+    }
+  }
+  console.log();
+}
+
+// ---------------------------------------------------------------------------
+// ethos personality plugins <id> [--attach <plugin-id> | --detach <plugin-id>]
+// ---------------------------------------------------------------------------
+
+async function runPersonalityPlugins(argv: string[]): Promise<void> {
+  const id = argv[0];
+  if (!id) {
+    console.log(
+      'Usage: ethos personality plugins <id> [--attach <plugin-id> | --detach <plugin-id>]',
+    );
+    return;
+  }
+  const flags = parseCliFlags(argv.slice(1));
+  const { createPersonalityRegistry } = await import('@ethosagent/personalities');
+  const { scanInstalledPlugins } = await import('@ethosagent/plugin-loader');
+  const { ethosDir } = await import('./config');
+  const storage = getStorage();
+  const reg = await createPersonalityRegistry({ storage, userPersonalitiesDir: ethosDir() });
+  await reg.loadFromDirectory(ethosDir());
+
+  const personality = reg.get(id);
+  if (!personality) {
+    console.error(`Unknown personality: ${id}`);
+    process.exit(1);
+  }
+
+  const allPlugins = await scanInstalledPlugins({ userDir: ethosDir(), storage });
+  const attached = new Set(personality.plugins ?? []);
+
+  if (flags.attach) {
+    attached.add(flags.attach);
+    await reg.update(id, { plugins: [...attached] });
+    console.log(`✓ Attached plugin "${flags.attach}" to ${id}`);
+    return;
+  }
+  if (flags.detach) {
+    attached.delete(flags.detach);
+    await reg.update(id, { plugins: [...attached] });
+    console.log(`✓ Detached plugin "${flags.detach}" from ${id}`);
+    return;
+  }
+
+  console.log(`\nPlugins for ${id}:\n`);
+  if (allPlugins.length === 0) {
+    console.log('  No plugins installed. Run: ethos plugin install <path>');
+  } else {
+    for (const p of allPlugins) {
+      const mark = attached.has(p.id) ? '✓' : ' ';
+      console.log(`  [${mark}] ${p.id.padEnd(24)} ${p.description ?? ''}`);
+    }
+  }
+  console.log();
+}
+
+// ---------------------------------------------------------------------------
+// ethos plugins status — global plugin × personality matrix
+// ---------------------------------------------------------------------------
+
+async function runPluginsStatus(): Promise<void> {
+  const { createPersonalityRegistry } = await import('@ethosagent/personalities');
+  const { scanInstalledPlugins } = await import('@ethosagent/plugin-loader');
+  const { ethosDir } = await import('./config');
+  const storage = getStorage();
+  const reg = await createPersonalityRegistry({ storage, userPersonalitiesDir: ethosDir() });
+  await reg.loadFromDirectory(ethosDir());
+
+  const allPlugins = await scanInstalledPlugins({ userDir: ethosDir(), storage });
+  const allPersonalities = reg.list();
+
+  if (allPlugins.length === 0) {
+    console.log('\nNo plugins installed. Run: ethos plugin install <path>\n');
+    return;
+  }
+
+  console.log('\nPlugin attachment status:\n');
+  const colWidth = 20;
+  const header = 'Plugin'.padEnd(colWidth) + allPersonalities.map((p) => p.id.padEnd(12)).join('');
+  console.log(`  ${header}`);
+  console.log(`  ${'-'.repeat(header.length)}`);
+
+  for (const plugin of allPlugins) {
+    let row = plugin.id.padEnd(colWidth);
+    for (const personality of allPersonalities) {
+      const attached = (personality.plugins ?? []).includes(plugin.id);
+      row += (attached ? '✓' : '·').padEnd(12);
+    }
+    console.log(`  ${row}`);
+  }
+  console.log();
+
+  const unattached = allPlugins.filter((p) =>
+    allPersonalities.every((pers) => !(pers.plugins ?? []).includes(p.id)),
+  );
+  if (unattached.length > 0) {
+    console.log(
+      `  ⚠  ${unattached.length} plugin(s) installed but not attached to any personality — they're inert until attached.`,
+    );
+    console.log();
+  }
+}
+
+function parseCliFlags(argv: string[]): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    if (arg?.startsWith('--')) {
+      const key = arg.slice(2);
+      const val = argv[i + 1];
+      if (val && !val.startsWith('--')) {
+        out[key] = val;
+        i++;
+      }
+    }
+  }
+  return out;
 }

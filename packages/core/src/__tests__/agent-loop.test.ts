@@ -795,7 +795,7 @@ describe('AgentLoop', () => {
     vi.spyOn(personalities, 'get').mockImplementation((id) => {
       if (id === 'personality-a') return personalityA;
       if (id === 'personality-b') return personalityB;
-      return null;
+      return undefined;
     });
 
     const loop = new AgentLoop({

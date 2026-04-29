@@ -42,9 +42,14 @@ export async function runCronCommand(
 ): Promise<void> {
   switch (sub) {
     case 'list': {
+      const params = parseFlags(args);
+      const filterPersonality = params.personality;
       const { scheduler, cleanup } = makeScheduler(config);
       try {
-        const jobs = await scheduler.listJobs();
+        let jobs = await scheduler.listJobs();
+        if (filterPersonality) {
+          jobs = jobs.filter((j) => (j.personality ?? config.personality) === filterPersonality);
+        }
         if (jobs.length === 0) {
           console.log(`${c.dim}No cron jobs. Create one with: ethos cron create${c.reset}`);
           return;
@@ -56,12 +61,46 @@ export async function runCronCommand(
               ? `${c.yellow}⏸ paused${c.reset}`
               : `${c.green}▶ active${c.reset}`;
           const next = j.nextRunAt ? new Date(j.nextRunAt).toLocaleString() : 'not scheduled';
+          const pers = j.personality ?? config.personality ?? 'default';
           console.log(`  ${c.bold}${j.name}${c.reset} ${c.dim}(${j.id})${c.reset} — ${status}`);
-          console.log(`    Schedule : ${j.schedule}`);
-          console.log(`    Next run : ${next}`);
-          console.log(`    Prompt   : ${j.prompt.slice(0, 80)}${j.prompt.length > 80 ? '…' : ''}`);
+          console.log(`    Schedule    : ${j.schedule}`);
+          console.log(`    Personality : ${pers}`);
+          console.log(`    Next run    : ${next}`);
+          console.log(`    Prompt      : ${j.prompt.slice(0, 80)}${j.prompt.length > 80 ? '…' : ''}`);
           console.log();
         }
+      } finally {
+        cleanup();
+      }
+      break;
+    }
+
+    case 'show': {
+      const id = args[0];
+      if (!id) {
+        console.log('Usage: ethos cron show <id>');
+        return;
+      }
+      const { scheduler, cleanup } = makeScheduler(config);
+      try {
+        const j = await scheduler.getJob(id);
+        if (!j) {
+          console.log(`${c.red}Job not found: ${id}${c.reset}`);
+          return;
+        }
+        const status =
+          j.status === 'paused'
+            ? `${c.yellow}⏸ paused${c.reset}`
+            : `${c.green}▶ active${c.reset}`;
+        const pers = j.personality ?? config.personality ?? 'default';
+        console.log(`\n${c.bold}${j.name}${c.reset} ${c.dim}(${j.id})${c.reset}`);
+        console.log(`  Status      : ${status}`);
+        console.log(`  Personality : ${c.cyan}${pers}${c.reset}`);
+        console.log(`  Schedule    : ${j.schedule}`);
+        console.log(`  Next run    : ${j.nextRunAt ? new Date(j.nextRunAt).toLocaleString() : 'not scheduled'}`);
+        console.log(`  Last run    : ${j.lastRunAt ? new Date(j.lastRunAt).toLocaleString() : 'never'}`);
+        console.log(`  Prompt      : ${j.prompt}`);
+        console.log();
       } finally {
         cleanup();
       }
@@ -183,7 +222,7 @@ export async function runCronCommand(
     }
 
     default:
-      console.log('Usage: ethos cron [list | create | pause | resume | delete | run]');
+      console.log('Usage: ethos cron [list [--personality <id>] | show <id> | create | pause | resume | delete | run]');
   }
 }
 

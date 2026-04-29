@@ -118,6 +118,30 @@ Memory scope controls what the agent remembers and when.
 
 `/personality <id>` takes effect immediately — the next message you send uses the new identity, tools, and memory scope. No restart required.
 
+### The conversation thread stays continuous
+
+Switching personality does **not** fork your session. The same conversation history is visible to both personalities. This is intentional: you are one human swapping hats, not two different users. A researcher can gather context, then an engineer can act on it — all in one thread.
+
+If you want a clean slate, use `/new` to start a fresh session before switching personalities.
+
+---
+
+## Isolation rules — what's per-personality, what's shared
+
+| Per-personality (isolated) | Shared (person-level) |
+|---|---|
+| ETHOS.md identity | API keys + platform bot tokens |
+| Tool access (`toolset.yaml`) | Web auth token |
+| MCP server allowlist (`mcp_servers`) | USER.md (who you are) |
+| Plugin allowlist (`plugins`) | |
+| Memory scope (`memoryScope`) | |
+| Model routing | |
+| Cron jobs (each job declares its personality) | |
+
+**`mcp_servers`** — default-deny. A globally configured MCP server is invisible to a personality unless it lists the server name. Prevents an agent with Linear access from being available to a personality that should be research-only.
+
+**`plugins`** — default-deny. An installed plugin is inert until at least one personality lists it in `plugins`. Plugins register hooks and context injectors with a wide blast radius; explicit opt-in per role is the safety default.
+
 ---
 
 ## Hot-reload
