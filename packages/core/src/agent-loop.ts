@@ -1,3 +1,6 @@
+import { homedir } from 'node:os';
+import { join } from 'node:path';
+import { ScopedStorage } from '@ethosagent/storage-fs';
 import type {
   CompletionChunk,
   ContextInjector,
@@ -15,10 +18,6 @@ import type {
   ToolRegistry,
   ToolResult,
 } from '@ethosagent/types';
-
-import { homedir } from 'node:os';
-import { join } from 'node:path';
-import { ScopedStorage } from '@ethosagent/storage-fs';
 
 import { InMemorySessionStore } from './defaults/in-memory-session';
 import { NoopMemoryProvider } from './defaults/noop-memory';
@@ -278,15 +277,12 @@ export class AgentLoop {
 
     const systemParts: string[] = [];
 
-    // ETHOS.md / personality identity
-    if (personality.ethosFile) {
-      try {
-        const fs = await import('node:fs/promises');
-        const identity = await fs.readFile(personality.ethosFile, 'utf-8');
-        systemParts.push(identity.trim());
-      } catch {
-        // ethosFile not readable — skip
-      }
+    // ETHOS.md / personality identity — routes through Storage so ScopedStorage
+    // and InMemoryStorage fixtures work correctly. Only runs when storage is
+    // wired (production always provides it; tests without a real ethosFile skip).
+    if (personality.ethosFile && this.storage) {
+      const identity = await this.storage.read(personality.ethosFile);
+      if (identity) systemParts.push(identity.trim());
     }
 
     // Context injectors sorted by priority (already sorted in constructor)
