@@ -48,6 +48,59 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   - **Documentation** — `docs/content/personality/create-your-own.md` updated
     with `mcp_servers` and `plugins` field descriptions.
 
+- **Personality isolation — Phases 1.2 + 2.2 + 3.3 + 4 (CLI surfaces + session continuity).**
+
+  CLI surfaces:
+  - `ethos personality mcp <id>` lists all configured MCP servers with attachment
+    status (✓ = attached). `--attach <name>` / `--detach <name>` update
+    `mcp_servers` in `config.yaml` and confirm via registry.update().
+  - `ethos personality plugins <id>` shows the global plugin pool with per-plugin
+    attachment status. `--attach <plugin-id>` / `--detach <plugin-id>` shortcuts.
+  - `ethos plugins` (new top-level command) renders a full plugin × personality
+    matrix table. Warns when ≥1 plugin is installed but not attached anywhere.
+  - `ethos cron list --personality <id>` filters the job list by personality.
+  - `ethos cron show <id>` (new subcommand) displays full job detail including
+    which personality runs it.
+
+  `extensions/personalities/src/index.ts`:
+  - `loadPersonalityFromDir` parses `mcp_servers` and `plugins` from
+    `config.yaml` as space-separated lists.
+  - `renderConfigYaml` serialises both fields back to `config.yaml`.
+  - `update()` merges `mcp_servers` and `plugins` in the patch apply path.
+
+  Session continuity (Phase 4):
+  - Two tests in `apps/ethos/src/__tests__/session-continuity.test.ts` lock
+    Decision D1: switching `personalityId` on the same `sessionKey` reuses the
+    same session — no fork, no new session row.
+  - `docs/content/personality/what-is-a-personality.md` — new
+    "The conversation thread stays continuous" section and isolation rules table.
+
+- **Personality isolation — Phases 1.3 + 2.3 + 3.4 (Web UI surfaces).**
+
+  Schema:
+  - `PersonalitySchema` (web-contracts) gains `mcp_servers` and `plugins`
+    (nullable arrays — null means not configured).
+  - `PersonalityUpdateInput` accepts `mcp_servers` and `plugins` patches.
+  - `personalities.service.ts` `toWire()` exposes both fields.
+
+  Per-personality detail modal (new tabs in `apps/web/src/pages/Personalities.tsx`):
+  - **MCP tab** — Checkbox list of all configured MCP servers; toggling a
+    checkbox and clicking Save calls `personalities.update({ mcp_servers })`.
+  - **Plugins tab** — Switch per installed plugin (optimistic toggle +
+    auto-rollback on error). Alert when zero plugins are attached.
+
+  Global Plugins page (`apps/web/src/pages/Plugins.tsx`) revamped:
+  - **Matrix tab** — Antd Table, rows = plugins, cols = personalities. Each
+    cell is an Antd Checkbox (optimistic, auto-rollback). "Installed but not
+    attached" Alert (`--warning` / `#F59E0B`) when ≥1 plugin has zero
+    attachments. Below 900px: pivots to per-plugin Collapse accordion.
+  - **MCP Servers tab** — gains "Attached to" column showing which
+    personalities have each server in their `mcp_servers` allowlist.
+
+  Cron page (`apps/web/src/pages/Cron.tsx`):
+  - Personality filter Select in the toolbar. Client-side filter; clears
+    back to "All personalities" via `allowClear`.
+
 ### Changed
 
 - **Storage abstraction (internal refactor — no user-visible behaviour change).**
