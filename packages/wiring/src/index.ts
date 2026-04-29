@@ -6,6 +6,8 @@ import { OpenAICompatProvider } from '@ethosagent/llm-openai-compat';
 import { MarkdownFileMemoryProvider } from '@ethosagent/memory-markdown';
 import { VectorMemoryProvider } from '@ethosagent/memory-vector';
 import { createPersonalityRegistry } from '@ethosagent/personalities';
+import { PluginLoader } from '@ethosagent/plugin-loader';
+import type { ContextInjector } from '@ethosagent/types';
 import { DockerSandbox } from '@ethosagent/sandbox-docker';
 import { SQLiteSessionStore } from '@ethosagent/session-sqlite';
 import { createInjectors } from '@ethosagent/skills';
@@ -184,6 +186,16 @@ export async function createAgentLoop(
     hooks.registerModifying('before_tool_call', createTerminalGuardHook());
   }
 
+  // Discover and activate installed plugins. Plugins register tools/hooks/
+  // injectors into the same registries the AgentLoop uses; the personality
+  // gate (allowedPlugins) decides which actually fire per turn.
+  const injectorPluginIds = new Map<ContextInjector, string>();
+  const pluginLoader = new PluginLoader(
+    { tools, hooks, injectors, injectorPluginIds, personalities },
+    { storage: new FsStorage() },
+  );
+  await pluginLoader.loadAll();
+
   const loop = new AgentLoop({
     llm,
     tools,
@@ -191,6 +203,7 @@ export async function createAgentLoop(
     memory,
     personalities,
     injectors,
+    injectorPluginIds,
     hooks,
     storage: new FsStorage(),
     dataDir,

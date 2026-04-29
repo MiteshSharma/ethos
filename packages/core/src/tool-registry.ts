@@ -68,7 +68,18 @@ export class DefaultToolRegistry implements ToolRegistry {
     );
 
     const filtered = entries.filter((e) => {
-      if (allowedTools && allowedTools.length > 0 && !allowedTools.includes(e.tool.name))
+      // Toolset (allowedTools) gates BUILT-IN tools by exact name match. MCP and
+      // plugin tools are gated separately via passesFilter() — their names are
+      // dynamic, so requiring users to enumerate them in toolset.yaml is
+      // unworkable. (mcp_servers / plugins allowlists are the gates for those.)
+      const isMcpOrPluginTool =
+        e.tool.name.startsWith('mcp__') || e.pluginId !== undefined;
+      if (
+        !isMcpOrPluginTool &&
+        allowedTools &&
+        allowedTools.length > 0 &&
+        !allowedTools.includes(e.tool.name)
+      )
         return false;
       return passesFilter(e, filterOpts);
     });
@@ -93,19 +104,6 @@ export class DefaultToolRegistry implements ToolRegistry {
 
     const results = await Promise.allSettled(
       calls.map(async (call) => {
-        // Name-based allowlist check
-        if (allowedTools && allowedTools.length > 0 && !allowedTools.includes(call.name)) {
-          return {
-            toolCallId: call.toolCallId,
-            name: call.name,
-            result: {
-              ok: false,
-              error: `Tool ${call.name} is not permitted for this personality`,
-              code: 'not_available',
-            } as ToolResult,
-          };
-        }
-
         const entry = this.tools.get(call.name);
         if (!entry) {
           return {
@@ -114,6 +112,27 @@ export class DefaultToolRegistry implements ToolRegistry {
             result: {
               ok: false,
               error: `Unknown tool: ${call.name}`,
+              code: 'not_available',
+            } as ToolResult,
+          };
+        }
+
+        // Toolset (allowedTools) only gates built-in tools — see toDefinitions
+        // for the rationale. MCP and plugin tools are gated by passesFilter().
+        const isMcpOrPluginTool =
+          call.name.startsWith('mcp__') || entry.pluginId !== undefined;
+        if (
+          !isMcpOrPluginTool &&
+          allowedTools &&
+          allowedTools.length > 0 &&
+          !allowedTools.includes(call.name)
+        ) {
+          return {
+            toolCallId: call.toolCallId,
+            name: call.name,
+            result: {
+              ok: false,
+              error: `Tool ${call.name} is not permitted for this personality`,
               code: 'not_available',
             } as ToolResult,
           };

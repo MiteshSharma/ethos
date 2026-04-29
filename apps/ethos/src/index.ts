@@ -1,6 +1,7 @@
 // Shebang `#!/usr/bin/env node` is added by tsup via banner config at build time.
 // Don't put it here — tsx in dev mode doesn't need it and source-level shebangs
 // in TypeScript trip on tsup's bundler.
+import { join } from 'node:path';
 import { formatError, toEthosError } from '@ethosagent/types';
 import { runAcp } from './commands/acp';
 import { runBatch } from './commands/batch';
@@ -88,9 +89,11 @@ try {
         await runPersonalityMcp(args.slice(2));
       } else if (sub === 'plugins') {
         await runPersonalityPlugins(args.slice(2));
+      } else if (sub === 'duplicate') {
+        await runPersonalityDuplicate(args.slice(2));
       } else {
         console.log(
-          'Usage: ethos personality [list | set <id> | mcp <id> [--attach <name> | --detach <name>] | plugins <id> [--attach <plugin-id> | --detach <plugin-id>]]',
+          'Usage: ethos personality [list | set <id> | duplicate <src> <dst> | mcp <id> [--attach <name> | --detach <name>] | plugins <id> [--attach <plugin-id> | --detach <plugin-id>]]',
         );
       }
       break;
@@ -328,7 +331,7 @@ async function runPersonalityMcp(argv: string[]): Promise<void> {
   const { ethosDir } = await import('./config');
   const storage = getStorage();
   const reg = await createPersonalityRegistry({ storage, userPersonalitiesDir: ethosDir() });
-  await reg.loadFromDirectory(ethosDir());
+  await reg.loadFromDirectory(join(ethosDir(), 'personalities'));
 
   const personality = reg.get(id);
   if (!personality) {
@@ -382,7 +385,7 @@ async function runPersonalityPlugins(argv: string[]): Promise<void> {
   const { ethosDir } = await import('./config');
   const storage = getStorage();
   const reg = await createPersonalityRegistry({ storage, userPersonalitiesDir: ethosDir() });
-  await reg.loadFromDirectory(ethosDir());
+  await reg.loadFromDirectory(join(ethosDir(), 'personalities'));
 
   const personality = reg.get(id);
   if (!personality) {
@@ -419,6 +422,28 @@ async function runPersonalityPlugins(argv: string[]): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
+// ethos personality duplicate <src> <dst>
+// ---------------------------------------------------------------------------
+
+async function runPersonalityDuplicate(argv: string[]): Promise<void> {
+  const src = argv[0];
+  const dst = argv[1];
+  if (!src || !dst) {
+    console.log('Usage: ethos personality duplicate <src-id> <dst-id>');
+    return;
+  }
+  const { createPersonalityRegistry } = await import('@ethosagent/personalities');
+  const { ethosDir } = await import('./config');
+  const storage = getStorage();
+  const reg = await createPersonalityRegistry({ storage, userPersonalitiesDir: ethosDir() });
+  await reg.loadFromDirectory(join(ethosDir(), 'personalities'));
+
+  const created = await reg.duplicate(src, dst);
+  const newId = created.config.id;
+  console.log(`✓ Duplicated "${src}" → "${newId}" at ~/.ethos/personalities/${newId}`);
+}
+
+// ---------------------------------------------------------------------------
 // ethos plugins status — global plugin × personality matrix
 // ---------------------------------------------------------------------------
 
@@ -428,7 +453,7 @@ async function runPluginsStatus(): Promise<void> {
   const { ethosDir } = await import('./config');
   const storage = getStorage();
   const reg = await createPersonalityRegistry({ storage, userPersonalitiesDir: ethosDir() });
-  await reg.loadFromDirectory(ethosDir());
+  await reg.loadFromDirectory(join(ethosDir(), 'personalities'));
 
   const allPlugins = await scanInstalledPlugins({ userDir: ethosDir(), storage });
   const allPersonalities = reg.list();

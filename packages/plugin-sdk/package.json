@@ -1,6 +1,6 @@
 {
   "name": "@ethosagent/plugin-sdk",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "private": false,
   "type": "module",
   "description": "Plugin author toolkit for building Ethos plugins — tools, hooks, injectors, and testing utilities",

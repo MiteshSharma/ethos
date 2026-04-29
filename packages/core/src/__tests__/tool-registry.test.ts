@@ -224,6 +224,22 @@ describe('DefaultToolRegistry', () => {
       expect(defs.map((d) => d.name)).toEqual(['mcp__weather__get']);
     });
 
+    // Mirrors the engineer scenario: a personality with a fixed toolset.yaml
+    // (so allowedTools is non-empty) but no mcp_servers field. The default-deny
+    // fix in agent-loop.ts normalises missing mcp_servers to [], so MCP tools
+    // must NOT appear in toDefinitions even though their names also aren't
+    // present in toolset.yaml. The LLM should not even see them.
+    it('toDefinitions: toolset set + allowedMcpServers=[] hides MCP tools from the LLM', () => {
+      const reg = new DefaultToolRegistry();
+      reg.register({ name: 'terminal', description: 't', schema: {}, execute: async () => ({ ok: true, value: '' }) });
+      reg.register({ name: 'read_file', description: 'r', schema: {}, execute: async () => ({ ok: true, value: '' }) });
+      reg.register({ name: 'mcp__filesystem__list_directory', description: 'm', schema: {}, execute: async () => ({ ok: true, value: '' }) });
+
+      const defs = reg.toDefinitions(['terminal', 'read_file'], { allowedMcpServers: [] });
+      expect(defs.map((d) => d.name).sort()).toEqual(['read_file', 'terminal']);
+      expect(defs.map((d) => d.name)).not.toContain('mcp__filesystem__list_directory');
+    });
+
     it('executeParallel: filterOpts blocks plugin tool at execution time', async () => {
       const reg = new DefaultToolRegistry();
       reg.register({ name: 'builtin', description: 'b', schema: {}, execute: async () => ({ ok: true, value: 'ok' }) });

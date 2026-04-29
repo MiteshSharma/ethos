@@ -234,7 +234,7 @@ export class AgentLoop {
     // Per-personality plugin + MCP gate (default-deny: missing field = no access)
     const allowedPlugins = personality.plugins ?? [];
     const filterOpts: ToolFilterOpts = {
-      allowedMcpServers: personality.mcp_servers,
+      allowedMcpServers: personality.mcp_servers ?? [],
       allowedPlugins,
     };
 

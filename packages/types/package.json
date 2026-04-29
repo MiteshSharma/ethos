@@ -1,6 +1,6 @@
 {
   "name": "@ethosagent/types",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "private": false,
   "type": "module",
   "description": "Zero-dependency interface contracts for the Ethos agent framework",

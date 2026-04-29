@@ -1,6 +1,6 @@
 {
   "name": "@ethosagent/core",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "private": false,
   "type": "module",
   "description": "Core agent loop, tool registry, and hook registry for the Ethos agent framework",

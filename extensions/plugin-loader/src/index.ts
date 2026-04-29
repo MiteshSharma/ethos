@@ -287,20 +287,65 @@ async function scanManifestsIn(
   const out: InstalledPluginManifest[] = [];
   for (const entry of entries) {
     if (!entry.isDir) continue;
+    // npm-installed plugins live under node_modules/<pkg>/ — `ethos plugin
+    // install` runs `npm install --prefix <dir>`, so manual drops and
+    // npm installs both need to surface here.
+    if (entry.name === 'node_modules') {
+      out.push(...(await scanNodeModules(storage, join(dir, 'node_modules'), source)));
+      continue;
+    }
     const pluginDir = join(dir, entry.name);
     const manifest = await readManifest(storage, pluginDir);
     if (!manifest) continue;
-    out.push({
-      id: manifest.ethos?.id ?? manifest.name,
-      name: manifest.name,
-      version: manifest.version,
-      description: manifest.description ?? null,
-      source,
-      path: pluginDir,
-      pluginContractMajor: manifest.ethos?.pluginContractMajor ?? null,
-    });
+    out.push(toInstalledPluginManifest(manifest, source, pluginDir));
   }
   return out;
+}
+
+async function scanNodeModules(
+  storage: Storage,
+  nmDir: string,
+  source: 'user' | 'project',
+): Promise<InstalledPluginManifest[]> {
+  const entries = await storage.listEntries(nmDir);
+  const out: InstalledPluginManifest[] = [];
+  for (const entry of entries) {
+    if (!entry.isDir) continue;
+    if (entry.name.startsWith('.')) continue; // skip .package-lock.json etc.
+    if (entry.name.startsWith('@')) {
+      // scoped: walk one level deeper (@scope/<pkg>/)
+      const scoped = await storage.listEntries(join(nmDir, entry.name));
+      for (const s of scoped) {
+        if (!s.isDir) continue;
+        const pluginDir = join(nmDir, entry.name, s.name);
+        const manifest = await readManifest(storage, pluginDir);
+        if (!manifest) continue;
+        out.push(toInstalledPluginManifest(manifest, source, pluginDir));
+      }
+      continue;
+    }
+    const pluginDir = join(nmDir, entry.name);
+    const manifest = await readManifest(storage, pluginDir);
+    if (!manifest) continue;
+    out.push(toInstalledPluginManifest(manifest, source, pluginDir));
+  }
+  return out;
+}
+
+function toInstalledPluginManifest(
+  manifest: EthosPluginPackageJson,
+  source: 'user' | 'project',
+  pluginDir: string,
+): InstalledPluginManifest {
+  return {
+    id: manifest.ethos?.id ?? manifest.name,
+    name: manifest.name,
+    version: manifest.version,
+    description: manifest.description ?? null,
+    source,
+    path: pluginDir,
+    pluginContractMajor: manifest.ethos?.pluginContractMajor ?? null,
+  };
 }
 
 async function readManifest(
