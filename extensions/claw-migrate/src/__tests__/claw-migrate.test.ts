@@ -77,6 +77,7 @@ describe('ClawMigrator.plan', () => {
       skills: true,
       keys: true,
       agents: true,
+      cron: false,
     });
 
     // Order matters per the spec: config → keys → memories → skills → soul → agents.
@@ -244,5 +245,120 @@ describe('ClawMigrator.execute', () => {
     expect(result.copied).toBeGreaterThan(0); // memory/user/config still copied
     const failedItem = result.items.find((i) => i.status === 'failed');
     expect(failedItem?.label).toContain('keys.json');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 3.2 — cron/jobs.json migration with personality backfill
+// ---------------------------------------------------------------------------
+
+describe('ClawMigrator cron migration (Phase 3.2)', () => {
+  it('detects cron/jobs.json and emits a cron-migrate op', async () => {
+    const { source, target, workspace } = await makeSandbox();
+    await seedMinimalOpenclaw(source);
+    await mkdir(join(source, 'cron'), { recursive: true });
+    await writeFile(join(source, 'cron', 'jobs.json'), JSON.stringify([]));
+
+    const m = new ClawMigrator({ source, target, workspace });
+    const plan = await m.plan();
+
+    expect(plan.detected.cron).toBe(true);
+    const cronOp = plan.ops.find((op) => op.kind === 'cron-migrate');
+    expect(cronOp).toBeDefined();
+    expect(cronOp?.label).toContain('jobs.json');
+  });
+
+  it('does not emit a cron-migrate op when cron/jobs.json is absent', async () => {
+    const { source, target, workspace } = await makeSandbox();
+    await seedMinimalOpenclaw(source);
+
+    const m = new ClawMigrator({ source, target, workspace });
+    const plan = await m.plan();
+
+    expect(plan.detected.cron).toBe(false);
+    expect(plan.ops.find((op) => op.kind === 'cron-migrate')).toBeUndefined();
+  });
+
+  it('backfills personality from resolved OpenClaw config on jobs that lack it', async () => {
+    const { source, target, workspace } = await makeSandbox();
+    // config.yaml has personality: engineer (a built-in → resolves to 'engineer')
+    await seedMinimalOpenclaw(source);
+    const jobs = [
+      { id: 'j1', name: 'daily', schedule: '0 9 * * *', prompt: 'Summarize.', status: 'active', missedRunPolicy: 'skip', createdAt: '2026-01-01T00:00:00.000Z' },
+      { id: 'j2', name: 'weekly', schedule: '0 8 * * 1', prompt: 'Report.', personality: 'researcher', status: 'active', missedRunPolicy: 'skip', createdAt: '2026-01-02T00:00:00.000Z' },
+    ];
+    await mkdir(join(source, 'cron'), { recursive: true });
+    await writeFile(join(source, 'cron', 'jobs.json'), JSON.stringify(jobs));
+
+    const m = new ClawMigrator({ source, target, workspace });
+    const plan = await m.plan();
+    await m.execute(plan);
+
+    const raw = await readFile(join(target, 'cron', 'jobs.json'), 'utf-8');
+    const migrated = JSON.parse(raw) as Array<{ id: string; personality: string }>;
+
+    // j1 had no personality → backfilled from the resolved plan personality
+    expect(migrated.find((j) => j.id === 'j1')?.personality).toBe('engineer');
+    // j2 already had personality: researcher → preserved unchanged
+    expect(migrated.find((j) => j.id === 'j2')?.personality).toBe('researcher');
+  });
+
+  it('falls back to resolved personality when OpenClaw config has no personality field', async () => {
+    const { source, target, workspace } = await makeSandbox();
+    // Config without personality field → plan resolves to 'researcher' (default)
+    await mkdir(source, { recursive: true });
+    await writeFile(join(source, 'config.yaml'), 'provider: anthropic\nmodel: claude-opus-4-7\n');
+    const jobs = [
+      { id: 'j1', name: 'task', schedule: '0 9 * * *', prompt: 'Do it.', status: 'active', missedRunPolicy: 'skip', createdAt: '2026-01-01T00:00:00.000Z' },
+    ];
+    await mkdir(join(source, 'cron'), { recursive: true });
+    await writeFile(join(source, 'cron', 'jobs.json'), JSON.stringify(jobs));
+
+    const m = new ClawMigrator({ source, target, workspace });
+    const plan = await m.plan();
+    await m.execute(plan);
+
+    const raw = await readFile(join(target, 'cron', 'jobs.json'), 'utf-8');
+    const migrated = JSON.parse(raw) as Array<{ personality: string }>;
+    expect(migrated[0]?.personality).toBe('researcher');
+  });
+
+  it('skips cron migration when dest already exists and overwrite is false', async () => {
+    const { source, target, workspace } = await makeSandbox();
+    await seedMinimalOpenclaw(source);
+    const jobs = [{ id: 'j1', name: 'daily', schedule: '0 9 * * *', prompt: 'X.', status: 'active', missedRunPolicy: 'skip', createdAt: '2026-01-01T00:00:00.000Z' }];
+    await mkdir(join(source, 'cron'), { recursive: true });
+    await writeFile(join(source, 'cron', 'jobs.json'), JSON.stringify(jobs));
+
+    // Pre-create target cron/jobs.json with existing data
+    await mkdir(join(target, 'cron'), { recursive: true });
+    await writeFile(join(target, 'cron', 'jobs.json'), '[]');
+
+    const m = new ClawMigrator({ source, target, workspace, overwrite: false });
+    const plan = await m.plan();
+    const result = await m.execute(plan);
+
+    const skipped = result.items.find((i) => i.label.includes('jobs.json'));
+    expect(skipped?.status).toBe('skipped');
+    // Target still has the original content (not overwritten)
+    const raw = await readFile(join(target, 'cron', 'jobs.json'), 'utf-8');
+    expect(JSON.parse(raw)).toEqual([]);
+  });
+
+  it('dry run reports copied but writes nothing', async () => {
+    const { source, target, workspace } = await makeSandbox();
+    await seedMinimalOpenclaw(source);
+    const jobs = [{ id: 'j1', name: 'daily', schedule: '0 9 * * *', prompt: 'X.', status: 'active', missedRunPolicy: 'skip', createdAt: '2026-01-01T00:00:00.000Z' }];
+    await mkdir(join(source, 'cron'), { recursive: true });
+    await writeFile(join(source, 'cron', 'jobs.json'), JSON.stringify(jobs));
+
+    const m = new ClawMigrator({ source, target, workspace, dryRun: true });
+    const plan = await m.plan();
+    const result = await m.execute(plan);
+
+    const cronItem = result.items.find((i) => i.label.includes('jobs.json'));
+    expect(cronItem?.status).toBe('copied');
+    // Nothing was actually written
+    expect(await exists(join(target, 'cron', 'jobs.json'))).toBe(false);
   });
 });

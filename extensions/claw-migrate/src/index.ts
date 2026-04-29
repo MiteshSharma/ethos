@@ -21,7 +21,8 @@ export type CopyKind =
   | 'file' // verbatim copy
   | 'tree' // recursive copy of a directory
   | 'soul-as-personality' // SOUL.md → personalities/migrated/{ETHOS.md,config.yaml,toolset.yaml}
-  | 'config-merge'; // OpenClaw config.yaml → translated Ethos config.yaml
+  | 'config-merge' // OpenClaw config.yaml → translated Ethos config.yaml
+  | 'cron-migrate'; // cron/jobs.json → backfilled with resolved personality
 
 export interface CopyOp {
   kind: CopyKind;
@@ -43,6 +44,7 @@ export interface MigrationPlan {
     skills: boolean;
     keys: boolean;
     agents: boolean;
+    cron: boolean;
   };
   // Counts for the dry-run summary line
   summary: {
@@ -141,6 +143,7 @@ export class ClawMigrator {
       skills: await this.storage.exists(join(this.source, 'skills')),
       keys: await this.storage.exists(join(this.source, 'keys.json')),
       agents: await this.storage.exists(join(this.source, 'AGENTS.md')),
+      cron: await this.storage.exists(join(this.source, 'cron', 'jobs.json')),
     };
 
     // Resolve personality up front so execute() can write a coherent config
@@ -225,6 +228,14 @@ export class ClawMigrator {
         label: `AGENTS.md → ${relative(process.cwd(), join(this.workspace, 'AGENTS.md')) || 'AGENTS.md'}`,
       });
     }
+    if (detected.cron) {
+      ops.push({
+        kind: 'cron-migrate',
+        source: join(this.source, 'cron', 'jobs.json'),
+        dest: join(this.target, 'cron', 'jobs.json'),
+        label: 'cron/jobs.json (personality backfilled)',
+      });
+    }
 
     // Summary counts for the user-facing dry-run line.
     const memories = (detected.memory ? 1 : 0) + (detected.user ? 1 : 0);
@@ -302,6 +313,8 @@ export class ClawMigrator {
           return await this.applyConfigMerge(op, plan);
         case 'soul-as-personality':
           return await this.applySoul(op, plan);
+        case 'cron-migrate':
+          return await this.applyCronMigrate(op, plan);
       }
     } catch (err) {
       return { label: op.label, status: 'failed', reason: errMsg(err) };
@@ -376,6 +389,32 @@ export class ClawMigrator {
     await this.storage.write(ethosFile, soul);
     await this.storage.write(join(op.dest, 'config.yaml'), `${configYaml}\n`);
     await this.storage.write(join(op.dest, 'toolset.yaml'), toolsetYaml);
+    return { label: op.label, status: 'copied' };
+  }
+
+  private async applyCronMigrate(op: CopyOp, plan: MigrationPlan): Promise<ItemResult> {
+    if ((await isFileLike(this.storage, op.dest)) && !this.overwrite) {
+      return { label: op.label, status: 'skipped', reason: 'already exists' };
+    }
+
+    const raw = (await this.storage.read(op.source)) ?? '[]';
+    let jobs: Array<Record<string, unknown>>;
+    try {
+      jobs = JSON.parse(raw) as Array<Record<string, unknown>>;
+      if (!Array.isArray(jobs)) jobs = [];
+    } catch {
+      return { label: op.label, status: 'failed', reason: 'cron/jobs.json is not valid JSON' };
+    }
+
+    // Backfill personality on every job that doesn't already declare one.
+    const backfilled = jobs.map((job) => ({
+      ...job,
+      personality: job.personality ?? plan.personality.resolved,
+    }));
+
+    if (this.dryRun) return { label: op.label, status: 'copied' };
+    await this.storage.mkdir(dirname(op.dest));
+    await this.storage.write(op.dest, `${JSON.stringify(backfilled, null, 2)}\n`);
     return { label: op.label, status: 'copied' };
   }
 }

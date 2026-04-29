@@ -288,3 +288,56 @@ describe('DefaultToolRegistry', () => {
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// Phase 4.3 — cross-plan integration: MCP filter catches skill+MCP mismatch
+//
+// A skill that declares `required_tools` from an MCP server should be inert
+// if the active personality does not list that server in `mcp_servers`. This
+// test exercises the MCP filter directly at the ToolRegistry layer — the
+// same gate that AgentLoop threads through on every turn — to catch drift
+// between this plan's MCP gating and extension_plan.md's skill filter.
+// ---------------------------------------------------------------------------
+
+describe('Phase 4.3 — cross-plan: MCP server gate catches skill+MCP mismatch', () => {
+  it('MCP tool is absent from toDefinitions when server is not in personality mcp_servers', () => {
+    const reg = new DefaultToolRegistry();
+
+    // Built-in tool — always visible regardless of MCP filter.
+    reg.register({ name: 'read_file', description: 'Read a file', schema: {}, execute: async () => ({ ok: true, value: '' }) });
+
+    // MCP tool from 'linear' server — would power a skill that reads Linear issues.
+    reg.register({ name: 'mcp__linear__get_issue', description: 'Get Linear issue', schema: {}, execute: async () => ({ ok: true, value: '' }) });
+
+    // Personality A has linear in its mcp_servers — sees both tools.
+    const defsWithLinear = reg.toDefinitions(undefined, { allowedMcpServers: ['linear'] });
+    expect(defsWithLinear.map((d) => d.name)).toContain('mcp__linear__get_issue');
+    expect(defsWithLinear.map((d) => d.name)).toContain('read_file');
+
+    // Personality B has no mcp_servers — only built-in tools visible.
+    // A skill that requires mcp__linear__get_issue is therefore inert for B.
+    const defsNoMcp = reg.toDefinitions(undefined, { allowedMcpServers: [] });
+    expect(defsNoMcp.map((d) => d.name)).not.toContain('mcp__linear__get_issue');
+    expect(defsNoMcp.map((d) => d.name)).toContain('read_file');
+  });
+
+  it('MCP tool is blocked at execution time even when called by name — belt-and-suspenders', async () => {
+    const reg = new DefaultToolRegistry();
+    const executed = vi.fn(async (): Promise<ToolResult> => ({ ok: true, value: 'ran' }));
+    reg.register({ name: 'mcp__linear__get_issue', description: 'Get Linear issue', schema: {}, execute: executed });
+
+    // Attempt to call the MCP tool while the filter blocks the server.
+    const results = await reg.executeParallel(
+      [{ toolCallId: 'c1', name: 'mcp__linear__get_issue', args: {} }],
+      makeCtx(),
+      undefined,
+      { allowedMcpServers: [] },
+    );
+
+    // Tool was NOT executed; error result surfaced to the LLM as is_error.
+    expect(executed).not.toHaveBeenCalled();
+    const r = results[0]?.result as Extract<ToolResult, { ok: false }>;
+    expect(r.ok).toBe(false);
+    expect(r.code).toBe('not_available');
+  });
+});
