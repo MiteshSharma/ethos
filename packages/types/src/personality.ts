@@ -42,6 +42,25 @@ export interface PersonalityConfig {
    * See plan/IMPROVEMENT.md P1-2 / OpenClaw #68596.
    */
   streamingTimeoutMs?: number;
+  /**
+   * Per-personality filesystem reach. When set, the read_file / write_file
+   * tools route through a ScopedStorage that rejects paths outside these
+   * absolute-prefix lists. Closes the personality_isolation Tier 1 #1 gap
+   * — a researcher's read_file cannot peek at engineer's MEMORY.md.
+   *
+   * Substitutions resolved by AgentLoop at construction time:
+   *   ${ETHOS_HOME} → ~/.ethos
+   *   ${self}       → this personality's id
+   *   ${CWD}        → AgentLoop.workingDir
+   *
+   * When unset, AgentLoop falls back to a default scope:
+   *   read:  [~/.ethos/personalities/<self>/, ~/.ethos/skills/, ${CWD}]
+   *   write: [~/.ethos/personalities/<self>/, ${CWD}]
+   *
+   * Counts as ONE field for the schema-freeze gate (the nested shape is
+   * a leaf type).
+   */
+  fs_reach?: { read?: string[]; write?: string[] };
   /** @internal Free-form passthrough for adapter-specific metadata. */
   metadata?: Record<string, unknown>;
 }

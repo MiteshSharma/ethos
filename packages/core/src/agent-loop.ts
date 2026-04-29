@@ -6,13 +6,19 @@ import type {
   MemoryProvider,
   Message,
   MessageContent,
+  PersonalityConfig,
   PersonalityRegistry,
   PromptContext,
   SessionStore,
+  Storage,
   StoredMessage,
   ToolRegistry,
   ToolResult,
 } from '@ethosagent/types';
+
+import { homedir } from 'node:os';
+import { join } from 'node:path';
+import { ScopedStorage } from '@ethosagent/storage-fs';
 
 import { InMemorySessionStore } from './defaults/in-memory-session';
 import { NoopMemoryProvider } from './defaults/noop-memory';
@@ -74,6 +80,20 @@ export interface AgentLoopConfig {
   session?: SessionStore;
   hooks?: HookRegistry;
   injectors?: ContextInjector[];
+  /**
+   * Base Storage instance handed to tools via `ToolContext.storage` after
+   * being decorated with a ScopedStorage that enforces the active
+   * personality's `fs_reach` allowlist. When unset, ToolContext.storage is
+   * left undefined and tools fall back to unrestricted node:fs (legacy
+   * behavior — existing CLI/TUI tests don't need a storage instance).
+   */
+  storage?: Storage;
+  /**
+   * Absolute path to ~/.ethos/ used for `${ETHOS_HOME}` substitution in
+   * `fs_reach` paths. Defaults to `${HOME}/.ethos`. Required only when
+   * `storage` is set.
+   */
+  dataDir?: string;
   // Maps personality ID → model ID. Resolution: modelRouting[id] → personality.model → llm.model
   modelRouting?: Record<string, string>;
   options?: {
@@ -141,6 +161,8 @@ export class AgentLoop {
   private readonly maxIdenticalToolCalls: number;
   private readonly streamingTimeoutMs: number;
   private readonly modelRouting: Record<string, string>;
+  private readonly storage?: Storage;
+  private readonly dataDir?: string;
 
   constructor(config: AgentLoopConfig) {
     this.llm = config.llm;
@@ -159,6 +181,8 @@ export class AgentLoop {
     this.maxIdenticalToolCalls = config.options?.maxIdenticalToolCalls ?? 5;
     this.streamingTimeoutMs = config.options?.streamingTimeoutMs ?? 120_000;
     this.modelRouting = config.modelRouting ?? {};
+    if (config.storage) this.storage = config.storage;
+    if (config.dataDir) this.dataDir = config.dataDir;
   }
 
   async *run(text: string, opts: RunOptions = {}): AsyncGenerator<AgentEvent> {
@@ -484,6 +508,8 @@ export class AgentLoop {
         audience: 'internal' | 'user';
       }> = [];
 
+      const scopedStorage = this.buildScopedStorage(personality);
+
       const toolCtxBase = {
         sessionId,
         sessionKey,
@@ -510,6 +536,7 @@ export class AgentLoop {
           });
         },
         resultBudgetChars: this.resultBudgetChars,
+        ...(scopedStorage ? { storage: scopedStorage } : {}),
       };
 
       // Run before_tool_call hooks; build exec list with effective args
@@ -742,4 +769,47 @@ export class AgentLoop {
 
     return messages;
   }
+
+  // ---------------------------------------------------------------------------
+  // Per-turn ScopedStorage construction (Phase 4 — fs_reach enforcement).
+  //
+  // When the AgentLoop was wired with `storage` + `dataDir`, build a
+  // ScopedStorage decorated with the active personality's `fs_reach`
+  // allowlist for this turn. Substitutions (${ETHOS_HOME} / ${self} /
+  // ${CWD}) are resolved here so the underlying storage-fs class stays
+  // pristine. When `fs_reach` is unset, fall back to a sensible default:
+  //   read:  [<ethosHome>/personalities/<self>/, <ethosHome>/skills/, <cwd>]
+  //   write: [<ethosHome>/personalities/<self>/, <cwd>]
+  // ---------------------------------------------------------------------------
+
+  private buildScopedStorage(personality: PersonalityConfig): Storage | undefined {
+    if (!this.storage) return undefined;
+
+    const ethosHome = this.dataDir ?? join(homedir(), '.ethos');
+    const cwd = this.workingDir;
+    const self = personality.id;
+    const ownDir = `${join(ethosHome, 'personalities', self)}/`;
+
+    const fsReach = personality.fs_reach;
+    const readPrefixes =
+      fsReach?.read && fsReach.read.length > 0
+        ? fsReach.read.map((p) => substitute(p, { ethosHome, self, cwd }))
+        : [ownDir, `${join(ethosHome, 'skills')}/`, cwd];
+    const writePrefixes =
+      fsReach?.write && fsReach.write.length > 0
+        ? fsReach.write.map((p) => substitute(p, { ethosHome, self, cwd }))
+        : [ownDir, cwd];
+
+    return new ScopedStorage(this.storage, { read: readPrefixes, write: writePrefixes });
+  }
+}
+
+function substitute(
+  template: string,
+  vars: { ethosHome: string; self: string; cwd: string },
+): string {
+  return template
+    .replace(/\$\{ETHOS_HOME\}/g, vars.ethosHome)
+    .replace(/\$\{self\}/g, vars.self)
+    .replace(/\$\{CWD\}/g, vars.cwd);
 }

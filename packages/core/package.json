@@ -22,6 +22,7 @@
     "build": "tsup src/index.ts --format esm --dts --sourcemap"
   },
   "dependencies": {
+    "@ethosagent/storage-fs": "workspace:*",
     "@ethosagent/types": "workspace:*"
   }
 }

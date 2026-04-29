@@ -527,4 +527,242 @@ describe('AgentLoop', () => {
       expect(visible?.audience).toBe('user');
     });
   });
+
+  // -------------------------------------------------------------------------
+  // Phase 4 — fs_reach boundary enforcement at the loop level.
+  //
+  // When AgentLoop is wired with `storage` + `dataDir`, every tool call
+  // receives a `ctx.storage` decorated with the active personality's
+  // fs_reach allowlist. A tool that calls `ctx.storage.read(out-of-scope)`
+  // gets a BoundaryError that the tool can translate into ToolResult.
+  // -------------------------------------------------------------------------
+
+  describe('fs_reach scoped storage', () => {
+    it('builds a ScopedStorage from personality.fs_reach and surfaces it via ctx.storage', async () => {
+      const { DefaultToolRegistry } = await import('../tool-registry');
+      const { DefaultPersonalityRegistry } = await import('../defaults/noop-personality');
+      const { InMemoryStorage } = await import('@ethosagent/storage-fs');
+      const { BoundaryError } = await import('@ethosagent/types');
+
+      const storage = new InMemoryStorage();
+      await storage.mkdir('/ethos/personalities/researcher');
+      await storage.mkdir('/ethos/personalities/engineer');
+      await storage.write('/ethos/personalities/researcher/MEMORY.md', 'mine');
+      await storage.write('/ethos/personalities/engineer/MEMORY.md', 'theirs');
+
+      const captured: Array<{ kind: 'allowed' | 'blocked'; path: string }> = [];
+
+      const tools = new DefaultToolRegistry();
+      tools.register({
+        name: 'probe',
+        description: 'probe storage scope',
+        schema: { type: 'object' },
+        async execute(args, ctx) {
+          if (!ctx.storage) return { ok: true, value: 'no-storage' };
+          const path = (args as { path: string }).path;
+          try {
+            const content = await ctx.storage.read(path);
+            captured.push({ kind: 'allowed', path });
+            return { ok: true, value: content ?? '' };
+          } catch (err) {
+            if (err instanceof BoundaryError) {
+              captured.push({ kind: 'blocked', path });
+              return { ok: false, error: 'blocked', code: 'execution_failed' };
+            }
+            throw err;
+          }
+        },
+      });
+
+      const personalities = new DefaultPersonalityRegistry();
+      vi.spyOn(personalities, 'getDefault').mockReturnValue({
+        id: 'researcher',
+        name: 'Researcher',
+        fs_reach: { read: ['/ethos/personalities/researcher/'], write: [] },
+      });
+
+      let probeRound = 0;
+      const llm: LLMProvider = {
+        name: 'mock',
+        model: 'mock',
+        maxContextTokens: 200_000,
+        supportsCaching: false,
+        supportsThinking: false,
+        async *complete(): AsyncIterable<CompletionChunk> {
+          probeRound += 1;
+          if (probeRound === 1) {
+            yield {
+              type: 'tool_use_start',
+              toolCallId: 'a',
+              toolName: 'probe',
+            };
+            yield {
+              type: 'tool_use_end',
+              toolCallId: 'a',
+              inputJson: JSON.stringify({ path: '/ethos/personalities/researcher/MEMORY.md' }),
+            };
+            yield { type: 'done', finishReason: 'tool_use' };
+          } else if (probeRound === 2) {
+            yield {
+              type: 'tool_use_start',
+              toolCallId: 'b',
+              toolName: 'probe',
+            };
+            yield {
+              type: 'tool_use_end',
+              toolCallId: 'b',
+              inputJson: JSON.stringify({ path: '/ethos/personalities/engineer/MEMORY.md' }),
+            };
+            yield { type: 'done', finishReason: 'tool_use' };
+          } else {
+            yield { type: 'text_delta', text: 'fin' };
+            yield { type: 'done', finishReason: 'end_turn' };
+          }
+        },
+        async countTokens() {
+          return 1;
+        },
+      };
+
+      const loop = new AgentLoop({ llm, tools, personalities, storage, dataDir: '/ethos' });
+      await collect(loop.run('hi'));
+
+      expect(captured).toEqual([
+        { kind: 'allowed', path: '/ethos/personalities/researcher/MEMORY.md' },
+        { kind: 'blocked', path: '/ethos/personalities/engineer/MEMORY.md' },
+      ]);
+    });
+
+    it('falls back to a sensible default scope when personality.fs_reach is unset', async () => {
+      const { DefaultToolRegistry } = await import('../tool-registry');
+      const { DefaultPersonalityRegistry } = await import('../defaults/noop-personality');
+      const { InMemoryStorage } = await import('@ethosagent/storage-fs');
+      const { BoundaryError } = await import('@ethosagent/types');
+
+      const storage = new InMemoryStorage();
+      await storage.mkdir('/ethos/personalities/researcher');
+      await storage.mkdir('/ethos/personalities/engineer');
+      await storage.mkdir('/ethos/skills');
+      await storage.write('/ethos/personalities/engineer/MEMORY.md', 'theirs');
+      await storage.write('/ethos/skills/shared.md', 'global');
+
+      const calls: Array<{ ok: boolean; path: string }> = [];
+
+      const tools = new DefaultToolRegistry();
+      tools.register({
+        name: 'probe',
+        description: 'probe',
+        schema: { type: 'object' },
+        async execute(args, ctx) {
+          if (!ctx.storage) return { ok: true, value: 'no-storage' };
+          const path = (args as { path: string }).path;
+          try {
+            const content = await ctx.storage.read(path);
+            calls.push({ ok: true, path });
+            return { ok: true, value: content ?? '' };
+          } catch (err) {
+            if (err instanceof BoundaryError) {
+              calls.push({ ok: false, path });
+              return { ok: false, error: 'blocked', code: 'execution_failed' };
+            }
+            throw err;
+          }
+        },
+      });
+
+      const personalities = new DefaultPersonalityRegistry();
+      vi.spyOn(personalities, 'getDefault').mockReturnValue({
+        id: 'researcher',
+        name: 'Researcher',
+        // No fs_reach — exercise the default scope.
+      });
+
+      let round = 0;
+      const llm: LLMProvider = {
+        name: 'mock',
+        model: 'mock',
+        maxContextTokens: 200_000,
+        supportsCaching: false,
+        supportsThinking: false,
+        async *complete(): AsyncIterable<CompletionChunk> {
+          round += 1;
+          if (round === 1) {
+            // Global skills — allowed by default
+            yield { type: 'tool_use_start', toolCallId: 'a', toolName: 'probe' };
+            yield {
+              type: 'tool_use_end',
+              toolCallId: 'a',
+              inputJson: JSON.stringify({ path: '/ethos/skills/shared.md' }),
+            };
+            yield { type: 'done', finishReason: 'tool_use' };
+          } else if (round === 2) {
+            // Cross-personality — blocked by default
+            yield { type: 'tool_use_start', toolCallId: 'b', toolName: 'probe' };
+            yield {
+              type: 'tool_use_end',
+              toolCallId: 'b',
+              inputJson: JSON.stringify({ path: '/ethos/personalities/engineer/MEMORY.md' }),
+            };
+            yield { type: 'done', finishReason: 'tool_use' };
+          } else {
+            yield { type: 'text_delta', text: 'fin' };
+            yield { type: 'done', finishReason: 'end_turn' };
+          }
+        },
+        async countTokens() {
+          return 1;
+        },
+      };
+
+      const loop = new AgentLoop({ llm, tools, personalities, storage, dataDir: '/ethos' });
+      await collect(loop.run('hi'));
+
+      expect(calls).toEqual([
+        { ok: true, path: '/ethos/skills/shared.md' },
+        { ok: false, path: '/ethos/personalities/engineer/MEMORY.md' },
+      ]);
+    });
+
+    it('leaves ctx.storage undefined when AgentLoop is wired without storage', async () => {
+      const { DefaultToolRegistry } = await import('../tool-registry');
+      let sawStorage: boolean | null = null;
+
+      const tools = new DefaultToolRegistry();
+      tools.register({
+        name: 'probe',
+        description: 'probe',
+        schema: { type: 'object' },
+        async execute(_args, ctx) {
+          sawStorage = ctx.storage !== undefined;
+          return { ok: true, value: '' };
+        },
+      });
+
+      let round = 0;
+      const llm: LLMProvider = {
+        name: 'mock',
+        model: 'mock',
+        maxContextTokens: 200_000,
+        supportsCaching: false,
+        supportsThinking: false,
+        async *complete(): AsyncIterable<CompletionChunk> {
+          round += 1;
+          if (round === 1) {
+            yield { type: 'tool_use_start', toolCallId: 'a', toolName: 'probe' };
+            yield { type: 'tool_use_end', toolCallId: 'a', inputJson: '{}' };
+            yield { type: 'done', finishReason: 'tool_use' };
+          } else {
+            yield { type: 'done', finishReason: 'end_turn' };
+          }
+        },
+        async countTokens() {
+          return 1;
+        },
+      };
+
+      const loop = new AgentLoop({ llm, tools });
+      await collect(loop.run('hi'));
+      expect(sawStorage).toBe(false);
+    });
+  });
 });

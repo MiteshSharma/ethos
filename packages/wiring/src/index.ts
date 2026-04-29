@@ -1,5 +1,6 @@
 import { join } from 'node:path';
 import { AgentLoop, DefaultHookRegistry, DefaultToolRegistry } from '@ethosagent/core';
+import { FsStorage } from '@ethosagent/storage-fs';
 import { AnthropicProvider, AuthRotatingProvider } from '@ethosagent/llm-anthropic';
 import { OpenAICompatProvider } from '@ethosagent/llm-openai-compat';
 import { MarkdownFileMemoryProvider } from '@ethosagent/memory-markdown';
@@ -174,6 +175,8 @@ export async function createAgentLoop(
     personalities,
     injectors,
     hooks,
+    storage: new FsStorage(),
+    dataDir,
     modelRouting: config.modelRouting,
     options: {
       platform: profile,

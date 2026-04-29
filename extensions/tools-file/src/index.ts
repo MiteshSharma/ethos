@@ -1,7 +1,13 @@
-import { readdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { extname, isAbsolute, join, resolve } from 'node:path';
-import type { Tool, ToolResult } from '@ethosagent/types';
+import { dirname, extname, isAbsolute, join, resolve } from 'node:path';
+import { FsStorage } from '@ethosagent/storage-fs';
+import {
+  BoundaryError,
+  type Storage,
+  type Tool,
+  type ToolContext,
+  type ToolResult,
+} from '@ethosagent/types';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -19,6 +25,29 @@ function expandPath(p: string, cwd: string): string {
 function isWriteBlocked(abs: string): boolean {
   if (BLOCKED_WRITE_PATHS.includes(abs)) return true;
   return BLOCKED_WRITE_PREFIXES.some((prefix) => abs.startsWith(prefix));
+}
+
+/**
+ * Resolve the Storage to use for this call. AgentLoop hands ScopedStorage
+ * via ctx.storage when fs_reach is configured; legacy callers (CLI tests,
+ * tools instantiated outside the loop) fall back to an unrestricted
+ * FsStorage so existing behaviour is preserved.
+ */
+let fallbackStorage: FsStorage | undefined;
+function storageOf(ctx: ToolContext): Storage {
+  if (ctx.storage) return ctx.storage;
+  if (!fallbackStorage) fallbackStorage = new FsStorage();
+  return fallbackStorage;
+}
+
+/** Translate a BoundaryError into a tool-shaped failure so the LLM gets
+ *  an actionable message instead of an unhandled rejection. */
+function boundaryFailure(err: BoundaryError): ToolResult {
+  return {
+    ok: false,
+    error: `Filesystem boundary: ${err.kind} of "${err.path}" is outside this personality's fs_reach allowlist.`,
+    code: 'execution_failed',
+  };
 }
 
 const TEXT_EXTENSIONS = new Set([
@@ -105,14 +134,24 @@ export const readFileTool: Tool = {
     if (!path) return { ok: false, error: 'path is required', code: 'input_invalid' };
 
     const abs = expandPath(path, ctx.workingDir);
+    const storage = storageOf(ctx);
 
-    let content: string;
+    let content: string | null;
     try {
-      content = await readFile(abs, 'utf-8');
+      content = await storage.read(abs);
     } catch (err) {
+      if (err instanceof BoundaryError) return boundaryFailure(err);
       return {
         ok: false,
         error: `Cannot read ${abs}: ${err instanceof Error ? err.message : String(err)}`,
+        code: 'execution_failed',
+      };
+    }
+
+    if (content === null) {
+      return {
+        ok: false,
+        error: `Cannot read ${abs}: file not found`,
         code: 'execution_failed',
       };
     }
@@ -160,6 +199,7 @@ export const writeFileTool: Tool = {
       return { ok: false, error: 'content is required', code: 'input_invalid' };
 
     const abs = expandPath(path, ctx.workingDir);
+    const storage = storageOf(ctx);
 
     if (isWriteBlocked(abs)) {
       return {
@@ -170,12 +210,11 @@ export const writeFileTool: Tool = {
     }
 
     try {
-      const { mkdir } = await import('node:fs/promises');
-      const { dirname } = await import('node:path');
-      await mkdir(dirname(abs), { recursive: true });
-      await writeFile(abs, content, 'utf-8');
+      await storage.mkdir(dirname(abs));
+      await storage.write(abs, content);
       return { ok: true, value: `Written ${content.length} bytes to ${abs}` };
     } catch (err) {
+      if (err instanceof BoundaryError) return boundaryFailure(err);
       return {
         ok: false,
         error: `Cannot write ${abs}: ${err instanceof Error ? err.message : String(err)}`,
@@ -214,18 +253,28 @@ export const patchFileTool: Tool = {
     if (!old_text) return { ok: false, error: 'old_text is required', code: 'input_invalid' };
 
     const abs = expandPath(path, ctx.workingDir);
+    const storage = storageOf(ctx);
 
     if (isWriteBlocked(abs)) {
       return { ok: false, error: `Writing to ${abs} is blocked.`, code: 'execution_failed' };
     }
 
-    let content: string;
+    let content: string | null;
     try {
-      content = await readFile(abs, 'utf-8');
+      content = await storage.read(abs);
     } catch (err) {
+      if (err instanceof BoundaryError) return boundaryFailure(err);
       return {
         ok: false,
         error: `Cannot read ${abs}: ${err instanceof Error ? err.message : String(err)}`,
+        code: 'execution_failed',
+      };
+    }
+
+    if (content === null) {
+      return {
+        ok: false,
+        error: `Cannot read ${abs}: file not found`,
         code: 'execution_failed',
       };
     }
@@ -247,7 +296,12 @@ export const patchFileTool: Tool = {
     }
 
     const patched = content.replace(old_text, new_text);
-    await writeFile(abs, patched, 'utf-8');
+    try {
+      await storage.write(abs, patched);
+    } catch (err) {
+      if (err instanceof BoundaryError) return boundaryFailure(err);
+      throw err;
+    }
     return { ok: true, value: `Patched ${abs}` };
   },
 };
@@ -268,6 +322,7 @@ interface SearchMatch {
 }
 
 async function walkAndSearch(
+  storage: Storage,
   dir: string,
   pattern: string,
   glob: string | undefined,
@@ -277,10 +332,11 @@ async function walkAndSearch(
 ): Promise<void> {
   if (depth > 6 || matches.length >= maxMatches) return;
 
-  let entries: import('node:fs').Dirent<string>[];
+  let entries: Array<{ name: string; isDir: boolean }>;
   try {
-    entries = await readdir(dir, { withFileTypes: true, encoding: 'utf-8' });
-  } catch {
+    entries = await storage.listEntries(dir);
+  } catch (err) {
+    if (err instanceof BoundaryError) return; // out of allowlist — skip silently
     return;
   }
 
@@ -291,26 +347,28 @@ async function walkAndSearch(
 
     const fullPath = join(dir, entry.name);
 
-    if (entry.isDirectory()) {
-      await walkAndSearch(fullPath, pattern, glob, matches, maxMatches, depth + 1);
-    } else if (entry.isFile()) {
-      if (glob && !matchGlob(entry.name, glob)) continue;
-      if (!isTextFile(fullPath)) continue;
+    if (entry.isDir) {
+      await walkAndSearch(storage, fullPath, pattern, glob, matches, maxMatches, depth + 1);
+      continue;
+    }
 
-      let text: string;
-      try {
-        const s = await stat(fullPath);
-        if (s.size > 2 * 1024 * 1024) continue; // skip files > 2MB
-        text = await readFile(fullPath, 'utf-8');
-      } catch {
-        continue;
-      }
+    if (glob && !matchGlob(entry.name, glob)) continue;
+    if (!isTextFile(fullPath)) continue;
 
-      const lines = text.split('\n');
-      for (let i = 0; i < lines.length && matches.length < maxMatches; i++) {
-        if (lines[i].includes(pattern)) {
-          matches.push({ file: fullPath, line: i + 1, content: lines[i].trim() });
-        }
+    let text: string | null;
+    try {
+      text = await storage.read(fullPath);
+    } catch {
+      continue;
+    }
+    if (text === null) continue;
+    if (text.length > 2 * 1024 * 1024) continue; // skip files > 2MB
+
+    const lines = text.split('\n');
+    for (let i = 0; i < lines.length && matches.length < maxMatches; i++) {
+      const line = lines[i];
+      if (line && line.includes(pattern)) {
+        matches.push({ file: fullPath, line: i + 1, content: line.trim() });
       }
     }
   }
@@ -354,8 +412,14 @@ export const searchFilesTool: Tool = {
     const searchDir = path ? expandPath(path, ctx.workingDir) : ctx.workingDir;
     const maxMatches = Math.min(max_results ?? 50, 200);
     const matches: SearchMatch[] = [];
+    const storage = storageOf(ctx);
 
-    await walkAndSearch(searchDir, pattern, glob, matches, maxMatches, 0);
+    try {
+      await walkAndSearch(storage, searchDir, pattern, glob, matches, maxMatches, 0);
+    } catch (err) {
+      if (err instanceof BoundaryError) return boundaryFailure(err);
+      throw err;
+    }
 
     if (matches.length === 0) {
       return { ok: true, value: `No matches found for "${pattern}"` };

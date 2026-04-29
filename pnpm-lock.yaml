@@ -598,6 +598,9 @@ importers:
 
   extensions/tools-file:
     dependencies:
+      '@ethosagent/storage-fs':
+        specifier: workspace:*
+        version: link:../../packages/storage-fs
       '@ethosagent/types':
         specifier: workspace:*
         version: link:../../packages/types
@@ -712,6 +715,9 @@ importers:
 
   packages/core:
     dependencies:
+      '@ethosagent/storage-fs':
+        specifier: workspace:*
+        version: link:../storage-fs
       '@ethosagent/types':
         specifier: workspace:*
         version: link:../types
@@ -777,6 +783,9 @@ importers:
       '@ethosagent/skills':
         specifier: workspace:*
         version: link:../../extensions/skills
+      '@ethosagent/storage-fs':
+        specifier: workspace:*
+        version: link:../storage-fs
       '@ethosagent/tools-browser':
         specifier: workspace:*
         version: link:../../extensions/tools-browser

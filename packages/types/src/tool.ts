@@ -39,6 +39,16 @@ export interface ToolContext {
   abortSignal: AbortSignal;
   emit: (event: ToolProgressEvent) => void;
   resultBudgetChars: number;
+  /**
+   * Per-turn Storage decorated by ScopedStorage with the active personality's
+   * fs_reach allowlist. Tools that touch the filesystem (read_file,
+   * write_file, patch_file, search_files) must route reads/writes through
+   * this rather than `node:fs/promises` directly so the personality boundary
+   * is enforced. Optional because not every consumer wires it (CLI/tests
+   * may pass a tool execution context without storage); tools fall back to
+   * unrestricted fs in that case.
+   */
+  storage?: import('./storage').Storage;
 }
 
 export interface Tool<TArgs = unknown> {

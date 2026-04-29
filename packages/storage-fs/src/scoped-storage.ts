@@ -109,7 +109,12 @@ function normalizePrefix(prefix: string): string {
 function isPathAllowed(path: string, prefixes: readonly string[]): boolean {
   for (const prefix of prefixes) {
     if (path === prefix) return true;
-    const withSlash = prefix.endsWith('/') ? prefix : `${prefix}/`;
+    const withoutSlash = prefix.endsWith('/') ? prefix.slice(0, -1) : prefix;
+    // Allow the directory itself (without trailing slash) — needed so
+    // `mkdir(<personality-dir>)` and `list(<personality-dir>)` succeed
+    // when the configured prefix has a trailing slash.
+    if (path === withoutSlash) return true;
+    const withSlash = `${withoutSlash}/`;
     if (path.startsWith(withSlash)) return true;
   }
   return false;

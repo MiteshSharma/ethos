@@ -22,6 +22,7 @@
     "@ethosagent/personalities": "workspace:*",
     "@ethosagent/sandbox-docker": "workspace:*",
     "@ethosagent/session-sqlite": "workspace:*",
+    "@ethosagent/storage-fs": "workspace:*",
     "@ethosagent/skills": "workspace:*",
     "@ethosagent/tools-browser": "workspace:*",
     "@ethosagent/tools-code": "workspace:*",

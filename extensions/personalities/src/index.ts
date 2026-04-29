@@ -9,7 +9,9 @@ import { EthosError, type PersonalityConfig, type PersonalityRegistry, type Stor
 function parseConfigYaml(src: string): Record<string, string> {
   const out: Record<string, string> = {};
   for (const line of src.split('\n')) {
-    const m = line.match(/^(\w+):\s*(.+)$/);
+    // Allow dotted keys (e.g. `fs_reach.read`) so nested config can land
+    // in the flat parser without escaping.
+    const m = line.match(/^([\w.]+):\s*(.+)$/);
     if (m) out[m[1].trim()] = m[2].trim().replace(/^["']|["']$/g, '');
   }
   return out;
@@ -404,6 +406,20 @@ export class FilePersonalityRegistry implements PersonalityRegistry {
         ? Number.parseInt(cfg.streamingTimeoutMs, 10)
         : undefined;
 
+    // fs_reach.read / fs_reach.write are comma-separated path lists.
+    // Substitutions (${ETHOS_HOME}, ${self}, ${CWD}) are resolved by
+    // the AgentLoop at turn construction time — the registry only
+    // surfaces the raw strings.
+    const fsReachRead = parseCsv(cfg['fs_reach.read']);
+    const fsReachWrite = parseCsv(cfg['fs_reach.write']);
+    const fsReach: PersonalityConfig['fs_reach'] | undefined =
+      fsReachRead || fsReachWrite
+        ? {
+            ...(fsReachRead ? { read: fsReachRead } : {}),
+            ...(fsReachWrite ? { write: fsReachWrite } : {}),
+          }
+        : undefined;
+
     const config: PersonalityConfig = {
       id,
       name: cfg.name ?? titleCase(id),
@@ -417,6 +433,7 @@ export class FilePersonalityRegistry implements PersonalityRegistry {
       ...(skillsExists ? { skillsDirs: [join(dir, 'skills')] } : {}),
       ...(toolsetSrc ? { toolset: parseToolsetYaml(toolsetSrc) } : {}),
       ...(streamingTimeoutMs !== undefined ? { streamingTimeoutMs } : {}),
+      ...(fsReach ? { fs_reach: fsReach } : {}),
     };
 
     return config;
@@ -470,6 +487,15 @@ function isStorageLike(v: unknown): v is Storage {
 
 function titleCase(s: string): string {
   return s.charAt(0).toUpperCase() + s.slice(1);
+}
+
+function parseCsv(value: string | undefined): string[] | undefined {
+  if (!value) return undefined;
+  const items = value
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+  return items.length > 0 ? items : undefined;
 }
 
 function renderConfigYaml(input: CreatePersonalityInput): string {
