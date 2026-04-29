@@ -2,7 +2,6 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { InMemoryStorage } from '@ethosagent/storage-fs';
 import { beforeEach, describe, expect, it } from 'vitest';
-import { PluginsRepository } from '../../repositories/plugins.repository';
 import { PluginsService } from '../../services/plugins.service';
 
 // Targeted at the MCP-config sanitisation + sort the service performs
@@ -19,10 +18,11 @@ describe('PluginsService — MCP server listing', () => {
   beforeEach(async () => {
     storage = new InMemoryStorage();
     await storage.mkdir(join(homedir(), '.ethos'));
-    // PluginsRepository still does fs scan of plugins dir; populate empty.
+    // scanInstalledPlugins points at a non-existent plugins root so it
+    // returns []; only the MCP config side is exercised in this file.
     service = new PluginsService({
-      plugins: new PluginsRepository({ dataDir: '/nonexistent-plugins-root' }),
       storage,
+      dataDir: '/nonexistent-plugins-root',
     });
   });
 

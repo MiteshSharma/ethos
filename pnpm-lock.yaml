@@ -664,6 +664,9 @@ importers:
       '@ethosagent/plugin-contract':
         specifier: workspace:*
         version: link:../../packages/plugin-contract
+      '@ethosagent/plugin-loader':
+        specifier: workspace:*
+        version: link:../plugin-loader
       '@ethosagent/session-sqlite':
         specifier: workspace:*
         version: link:../session-sqlite

@@ -1,10 +1,28 @@
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { checkPluginContractMajor, isEthosPlugin } from '@ethosagent/plugin-contract';
+import {
+  checkPluginContractMajor,
+  type EthosPluginPackageJson,
+  isEthosPlugin,
+} from '@ethosagent/plugin-contract';
 import type { EthosPlugin, PluginRegistries } from '@ethosagent/plugin-sdk';
 import { PluginApiImpl } from '@ethosagent/plugin-sdk';
 import { FsStorage } from '@ethosagent/storage-fs';
 import type { Storage } from '@ethosagent/types';
+
+export interface InstalledPluginManifest {
+  /** The plugin's id — `ethos.id` if declared, else `name`. */
+  id: string;
+  name: string;
+  version: string;
+  description: string | null;
+  /** Where the plugin was discovered. */
+  source: 'user' | 'project' | 'npm';
+  /** Absolute path to the plugin's directory. */
+  path: string;
+  /** The contract major declared in the manifest, if any. */
+  pluginContractMajor: number | null;
+}
 
 // ---------------------------------------------------------------------------
 // PluginLoader
@@ -200,6 +218,7 @@ export class PluginLoader {
     return this.plugins.has(pluginId);
   }
 
+
   // ---------------------------------------------------------------------------
   // Internal
   // ---------------------------------------------------------------------------
@@ -233,6 +252,75 @@ export class PluginLoader {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/**
+ * Read installed plugin manifests without activating them. Surfaces
+ * what the web Plugins tab shows: name + version + path, no live
+ * registry side effects. Discovery order matches `loadAll`:
+ * user → project → (npm scan, deferred for now).
+ *
+ * Returns sorted by name for deterministic UI rendering.
+ */
+export async function scanInstalledPlugins(opts: {
+  userDir: string;
+  workingDir?: string;
+  storage?: Storage;
+}): Promise<InstalledPluginManifest[]> {
+  const storage = opts.storage ?? new FsStorage();
+  const out: InstalledPluginManifest[] = [];
+  out.push(...(await scanManifestsIn(storage, join(opts.userDir, 'plugins'), 'user')));
+  if (opts.workingDir) {
+    out.push(
+      ...(await scanManifestsIn(storage, join(opts.workingDir, '.ethos', 'plugins'), 'project')),
+    );
+  }
+  out.sort((a, b) => a.name.localeCompare(b.name));
+  return out;
+}
+
+async function scanManifestsIn(
+  storage: Storage,
+  dir: string,
+  source: 'user' | 'project',
+): Promise<InstalledPluginManifest[]> {
+  const entries = await storage.listEntries(dir);
+  const out: InstalledPluginManifest[] = [];
+  for (const entry of entries) {
+    if (!entry.isDir) continue;
+    const pluginDir = join(dir, entry.name);
+    const manifest = await readManifest(storage, pluginDir);
+    if (!manifest) continue;
+    out.push({
+      id: manifest.ethos?.id ?? manifest.name,
+      name: manifest.name,
+      version: manifest.version,
+      description: manifest.description ?? null,
+      source,
+      path: pluginDir,
+      pluginContractMajor: manifest.ethos?.pluginContractMajor ?? null,
+    });
+  }
+  return out;
+}
+
+async function readManifest(
+  storage: Storage,
+  pluginDir: string,
+): Promise<EthosPluginPackageJson | null> {
+  const raw = await storage.read(join(pluginDir, 'package.json'));
+  if (raw === null) return null;
+  let parsed: EthosPluginPackageJson;
+  try {
+    parsed = JSON.parse(raw) as EthosPluginPackageJson;
+  } catch {
+    return null;
+  }
+  // Honour the same gate the loader uses — only surface manifests
+  // explicitly declaring themselves Ethos plugins. Otherwise random
+  // npm packages on the path would show up as plugins.
+  if (parsed.ethos?.type !== 'plugin') return null;
+  return parsed;
+}
 
 function isPluginModule(mod: unknown): mod is EthosPlugin {
   return (

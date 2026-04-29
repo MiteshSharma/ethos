@@ -1,15 +1,13 @@
+import type { SkillRecord, SkillsLibrary } from '@ethosagent/skills';
 import { EthosError } from '@ethosagent/types';
 import type { Skill } from '@ethosagent/web-contracts';
-import type { SkillsRepository } from '../repositories/skills.repository';
 
-// Skills library service. Composes a single repository — the file
-// operations on `~/.ethos/skills/` and its `.pending/` sibling. The
-// approval queue is *read* through this service (so the Library panel
-// can show the pending count) but mutations on it live in EvolverService
-// (`pendingApprove` / `pendingReject`) per the plan's namespace split.
+// Skills library service. Calls into @ethosagent/skills' SkillsLibrary
+// directly — wire-shape mapping happens here. The pending-queue mutations
+// (approve/reject) live on EvolverService per the plan's namespace split.
 
 export interface SkillsServiceOptions {
-  repo: SkillsRepository;
+  library: SkillsLibrary;
 }
 
 export class SkillsService {
@@ -17,31 +15,42 @@ export class SkillsService {
 
   async list(): Promise<{ skills: Skill[]; pendingCount: number }> {
     const [skills, pending] = await Promise.all([
-      this.opts.repo.listSkills(),
-      this.opts.repo.listPending(),
+      this.opts.library.listSkills(),
+      this.opts.library.listPending(),
     ]);
-    return { skills, pendingCount: pending.length };
+    return { skills: skills.map(toWire), pendingCount: pending.length };
   }
 
   async get(id: string): Promise<{ skill: Skill }> {
-    const skill = await this.opts.repo.getSkill(id);
+    const skill = await this.opts.library.getSkill(id);
     if (!skill) throw notFound(id);
-    return { skill };
+    return { skill: toWire(skill) };
   }
 
   async create(input: { id: string; body: string }): Promise<{ skill: Skill }> {
-    const skill = await this.opts.repo.createSkill(input.id, input.body);
-    return { skill };
+    const skill = await this.opts.library.createSkill(input.id, input.body);
+    return { skill: toWire(skill) };
   }
 
   async update(input: { id: string; body: string }): Promise<{ skill: Skill }> {
-    const skill = await this.opts.repo.updateSkill(input.id, input.body);
-    return { skill };
+    const skill = await this.opts.library.updateSkill(input.id, input.body);
+    return { skill: toWire(skill) };
   }
 
   async delete(id: string): Promise<void> {
-    await this.opts.repo.deleteSkill(id);
+    await this.opts.library.deleteSkill(id);
   }
+}
+
+function toWire(record: SkillRecord): Skill {
+  return {
+    id: record.id,
+    name: record.name,
+    description: record.description,
+    frontmatter: record.frontmatter,
+    body: record.body,
+    modifiedAt: record.modifiedAt,
+  };
 }
 
 function notFound(id: string): EthosError {

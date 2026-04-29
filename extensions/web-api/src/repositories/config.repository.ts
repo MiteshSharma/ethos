@@ -1,5 +1,6 @@
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { FsStorage } from '@ethosagent/storage-fs';
+import type { Storage } from '@ethosagent/types';
 
 // Read/write `~/.ethos/config.yaml` from the web side. The file is shared
 // with the CLI (`apps/ethos/src/config.ts`), so any web-driven update must
@@ -7,14 +8,15 @@ import { join } from 'node:path';
 // email*, etc.) — otherwise switching personalities or rotating an API key
 // from the web would silently delete the user's gateway tokens.
 //
-// The format is the same flat `key: value` shape the CLI parser expects,
-// plus `modelRouting.<id>: <model>` for per-personality overrides. We don't
-// pull in a YAML library — the CLI already proved the regex parser is
-// enough for this surface, and zero deps keeps install size small.
+// Stays as a web-api-internal repository (vs collapsing into the CLI's
+// config.ts) because the passthrough-preserving parser is web-specific —
+// the CLI's reader knows every key by name and would drop unknowns.
 
 export interface ConfigRepositoryOptions {
   /** Where `~/.ethos` lives. config.yaml is `<dataDir>/config.yaml`. */
   dataDir: string;
+  /** Storage backend. Defaults to FsStorage. */
+  storage?: Storage;
 }
 
 /** Parsed shape — only the fields the web surface reads. Unknown keys are
@@ -33,28 +35,21 @@ export interface RawConfig {
 }
 
 export class ConfigRepository {
+  private readonly storage: Storage;
   private readonly path: string;
 
   constructor(opts: ConfigRepositoryOptions) {
+    this.storage = opts.storage ?? new FsStorage();
     this.path = join(opts.dataDir, 'config.yaml');
   }
 
   async exists(): Promise<boolean> {
-    try {
-      await readFile(this.path, 'utf-8');
-      return true;
-    } catch {
-      return false;
-    }
+    return this.storage.exists(this.path);
   }
 
   async read(): Promise<RawConfig | null> {
-    let src: string;
-    try {
-      src = await readFile(this.path, 'utf-8');
-    } catch {
-      return null;
-    }
+    const src = await this.storage.read(this.path);
+    if (src === null) return null;
 
     const known = new Set(['provider', 'model', 'apiKey', 'personality', 'memory', 'baseUrl']);
     const config: RawConfig = { modelRouting: {}, passthrough: {} };
@@ -138,7 +133,7 @@ export class ConfigRepository {
   }
 
   private async write(config: RawConfig): Promise<void> {
-    await mkdir(dataDirOf(this.path), { recursive: true });
+    await this.storage.mkdir(dirname(this.path));
 
     const lines: string[] = [];
     if (config.provider) lines.push(`provider: ${config.provider}`);
@@ -155,16 +150,10 @@ export class ConfigRepository {
     for (const key of Object.keys(config.passthrough).sort()) {
       lines.push(`${key}: ${config.passthrough[key]}`);
     }
-    await writeFile(this.path, `${lines.join('\n')}\n`, 'utf-8');
+    await this.storage.write(this.path, `${lines.join('\n')}\n`);
   }
 }
 
 function stripQuotes(s: string): string {
   return s.replace(/^["']|["']$/g, '');
-}
-
-function dataDirOf(filePath: string): string {
-  // The path always ends in `/config.yaml`; chop it to get `~/.ethos`.
-  const idx = filePath.lastIndexOf('/');
-  return idx > 0 ? filePath.slice(0, idx) : '.';
 }

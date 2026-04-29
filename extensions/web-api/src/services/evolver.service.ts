@@ -1,22 +1,20 @@
 import type { EvolveConfig } from '@ethosagent/skill-evolver';
+import type { PendingSkillRecord, SkillsLibrary } from '@ethosagent/skills';
 import type { EvolverRun, PendingSkill } from '@ethosagent/web-contracts';
 import type { EvolverRepository } from '../repositories/evolver.repository';
-import type { SkillsRepository } from '../repositories/skills.repository';
 
-// Evolver-tab service. Composes two repositories:
+// Evolver-tab service. Composes:
 //
-//   • EvolverRepository  — the EvolveConfig file + run-history log
-//   • SkillsRepository   — the .pending directory (the approval queue)
+//   • EvolverRepository (web-only) — EvolveConfig file + run-history log
+//   • SkillsLibrary    — the .pending directory (the approval queue)
 //
 // The actual SkillEvolver.evolve() is invoked by the CLI today
 // (`ethos skills evolve`); this service only owns the data the web tab
-// needs to surface. Evolver-loop wiring on the cron worker is the v0.5
-// follow-up commit that produces the cron.fired / evolve.skill_pending
-// SSE events the right drawer is already prepared to render.
+// needs to surface.
 
 export interface EvolverServiceOptions {
   evolver: EvolverRepository;
-  skills: SkillsRepository;
+  library: SkillsLibrary;
 }
 
 export class EvolverService {
@@ -31,18 +29,29 @@ export class EvolverService {
   }
 
   async listPending(): Promise<{ pending: PendingSkill[] }> {
-    return { pending: await this.opts.skills.listPending() };
+    const pending = await this.opts.library.listPending();
+    return { pending: pending.map(toWirePending) };
   }
 
   async approvePending(id: string): Promise<void> {
-    await this.opts.skills.approvePending(id);
+    await this.opts.library.approvePending(id);
   }
 
   async rejectPending(id: string): Promise<void> {
-    await this.opts.skills.rejectPending(id);
+    await this.opts.library.rejectPending(id);
   }
 
   async listHistory(limit: number = 20): Promise<{ runs: EvolverRun[] }> {
     return { runs: await this.opts.evolver.listHistory(limit) };
   }
+}
+
+function toWirePending(record: PendingSkillRecord): PendingSkill {
+  return {
+    id: record.id,
+    name: record.name,
+    description: record.description,
+    body: record.body,
+    proposedAt: record.proposedAt,
+  };
 }

@@ -5,6 +5,7 @@ import type { AgentLoop } from '@ethosagent/core';
 import type { CronScheduler } from '@ethosagent/cron';
 import { MarkdownFileMemoryProvider } from '@ethosagent/memory-markdown';
 import type { FilePersonalityRegistry } from '@ethosagent/personalities';
+import { SkillsLibrary } from '@ethosagent/skills';
 import { FsStorage } from '@ethosagent/storage-fs';
 import type { SessionStore, Storage } from '@ethosagent/types';
 import type { SseEvent } from '@ethosagent/web-contracts';
@@ -12,11 +13,8 @@ import type { Hono } from 'hono';
 import { AllowlistRepository } from './repositories/allowlist.repository';
 import { ConfigRepository } from './repositories/config.repository';
 import { EvolverRepository } from './repositories/evolver.repository';
-import { PersonalitySkillsRepository } from './repositories/personality-skills.repository';
 import { PlatformsRepository } from './repositories/platforms.repository';
-import { PluginsRepository } from './repositories/plugins.repository';
 import { SessionsRepository } from './repositories/sessions.repository';
-import { SkillsRepository } from './repositories/skills.repository';
 import { WebTokenRepository } from './repositories/web-token.repository';
 import { createRoutes } from './routes';
 import { createWebApprovalHook, type DangerPredicate } from './services/approval-hook';
@@ -109,7 +107,7 @@ export function createWebApi(opts: CreateWebApiOptions): CreateWebApiResult {
   const sessionsRepo = new SessionsRepository(opts.sessionStore);
   const configRepo = new ConfigRepository({ dataDir: opts.dataDir });
   const allowlistRepo = new AllowlistRepository({ dataDir: opts.dataDir });
-  const skillsRepo = new SkillsRepository({ dataDir: opts.dataDir });
+  const skillsLibrary = new SkillsLibrary({ dataDir: opts.dataDir });
   const evolverRepo = new EvolverRepository({ dataDir: opts.dataDir });
   // The mesh registry lives at `<dataDir>/mesh-registry.json`. ACP servers
   // (potentially in other processes) write heartbeats to this file; we
@@ -117,22 +115,14 @@ export function createWebApi(opts: CreateWebApiOptions): CreateWebApiResult {
   // mapping lives in the service.
   const mesh = new AgentMesh(join(opts.dataDir, 'mesh-registry.json'));
   const memoryProvider = new MarkdownFileMemoryProvider({ dir: opts.dataDir });
-  // Project-level plugins (`<cwd>/.ethos/plugins/`) are out of scope
-  // for v1; user-level only is the standard install path. Threading
-  // `workingDir` from boot would be the next step when we add it.
-  const pluginsRepo = new PluginsRepository({ dataDir: opts.dataDir });
   const platformsRepo = new PlatformsRepository({ config: configRepo });
   const storage: Storage = opts.storage ?? new FsStorage();
-  const personalitySkillsRepo = new PersonalitySkillsRepository({
-    personalities: opts.personalities,
-    globalSkills: skillsRepo,
-  });
 
   // --- Services (business logic) ---
   const sessionsService = new SessionsService({ sessions: sessionsRepo });
   const personalitiesService = new PersonalitiesService({
     personalities: opts.personalities,
-    personalitySkills: personalitySkillsRepo,
+    library: skillsLibrary,
   });
   const configService = new ConfigService({ config: configRepo });
   const onboardingService = new OnboardingService({
@@ -146,11 +136,14 @@ export function createWebApi(opts: CreateWebApiOptions): CreateWebApiResult {
   const cronService = new CronService({
     scheduler: opts.cronScheduler ?? createPassiveScheduler(),
   });
-  const skillsService = new SkillsService({ repo: skillsRepo });
-  const evolverService = new EvolverService({ evolver: evolverRepo, skills: skillsRepo });
+  const skillsService = new SkillsService({ library: skillsLibrary });
+  const evolverService = new EvolverService({ evolver: evolverRepo, library: skillsLibrary });
   const meshService = new MeshService({ mesh });
   const memoryService = new MemoryService({ memory: memoryProvider });
-  const pluginsService = new PluginsService({ plugins: pluginsRepo, storage });
+  // Project-level plugins (`<cwd>/.ethos/plugins/`) are out of scope
+  // for v1; user-level only is the standard install path. Threading
+  // `workingDir` from boot would be the next step when we add it.
+  const pluginsService = new PluginsService({ storage, dataDir: opts.dataDir });
   const platformsService = new PlatformsService({ repo: platformsRepo });
   const labService = new LabService({ dataDir: opts.dataDir, loop: opts.agentLoop });
 

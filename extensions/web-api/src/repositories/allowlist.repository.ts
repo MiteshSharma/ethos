@@ -1,5 +1,6 @@
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
+import { FsStorage } from '@ethosagent/storage-fs';
+import type { Storage } from '@ethosagent/types';
 
 // `<dataDir>/allowlist.json` — persistent record of "always allow" decisions
 // the user made through the web approval modal. Keeps the modal from firing
@@ -12,8 +13,8 @@ import { dirname, join } from 'node:path';
 // `once` is intentionally NOT persisted — it grants a single invocation and
 // dies with the in-memory pending approval.
 //
-// Writes are atomic (tmp + rename) so a crash mid-write leaves the previous
-// file intact (CEO finding 2.1, "Concurrent write to allowlist.json").
+// Writes go through Storage.writeAtomic so a crash mid-write leaves the
+// previous file intact (CEO finding 2.1, "Concurrent write to allowlist.json").
 
 export type AllowlistScope = 'exact-args' | 'any-args';
 
@@ -34,13 +35,17 @@ interface FileShape {
 export interface AllowlistRepositoryOptions {
   /** Where `~/.ethos` lives. The file is `<dataDir>/allowlist.json`. */
   dataDir: string;
+  /** Storage backend. Defaults to FsStorage. */
+  storage?: Storage;
 }
 
 export class AllowlistRepository {
+  private readonly storage: Storage;
   private readonly path: string;
   private writeChain: Promise<void> = Promise.resolve();
 
   constructor(opts: AllowlistRepositoryOptions) {
+    this.storage = opts.storage ?? new FsStorage();
     this.path = join(opts.dataDir, 'allowlist.json');
   }
 
@@ -57,7 +62,7 @@ export class AllowlistRepository {
     this.writeChain = this.writeChain.then(async () => {
       const file = await this.readSafe();
       file.entries.push({ ...entry, createdAt: new Date().toISOString() });
-      await this.writeAtomic(file);
+      await this.persist(file);
     });
     await this.writeChain;
   }
@@ -75,8 +80,9 @@ export class AllowlistRepository {
   }
 
   private async readSafe(): Promise<FileShape> {
+    const raw = await this.storage.read(this.path);
+    if (!raw) return { entries: [] };
     try {
-      const raw = await readFile(this.path, 'utf-8');
       const parsed = JSON.parse(raw) as Partial<FileShape>;
       return { entries: Array.isArray(parsed.entries) ? parsed.entries : [] };
     } catch {
@@ -84,11 +90,9 @@ export class AllowlistRepository {
     }
   }
 
-  private async writeAtomic(file: FileShape): Promise<void> {
-    await mkdir(dirname(this.path), { recursive: true });
-    const tmp = `${this.path}.tmp`;
-    await writeFile(tmp, `${JSON.stringify(file, null, 2)}\n`, 'utf-8');
-    await rename(tmp, this.path);
+  private async persist(file: FileShape): Promise<void> {
+    await this.storage.mkdir(dirname(this.path));
+    await this.storage.writeAtomic(this.path, `${JSON.stringify(file, null, 2)}\n`);
   }
 }
 

@@ -1,10 +1,14 @@
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import type { EvolveConfig } from '@ethosagent/skill-evolver';
-import { DEFAULT_EVOLVE_CONFIG, loadEvolveConfig } from '@ethosagent/skill-evolver';
+import {
+  DEFAULT_EVOLVE_CONFIG,
+  type EvolveConfig,
+  loadEvolveConfig,
+} from '@ethosagent/skill-evolver';
+import { FsStorage } from '@ethosagent/storage-fs';
+import type { Storage } from '@ethosagent/types';
 import type { EvolverRun } from '@ethosagent/web-contracts';
 
-// File-backed repository for the SkillEvolver's surrounding metadata —
+// Web-internal repository for the SkillEvolver's surrounding metadata —
 // the threshold config and the append-only run log. The evolver itself
 // (analyse + LLM call + writes-to-pending) lives in @ethosagent/skill-
 // evolver and is invoked out-of-band by the CLI / a future cron worker;
@@ -17,6 +21,8 @@ import type { EvolverRun } from '@ethosagent/web-contracts';
 export interface EvolverRepositoryOptions {
   /** Root data dir — `~/.ethos/`. */
   dataDir: string;
+  /** Storage backend. Defaults to FsStorage. */
+  storage?: Storage;
 }
 
 interface RunRecord {
@@ -28,22 +34,24 @@ interface RunRecord {
 }
 
 export class EvolverRepository {
+  private readonly storage: Storage;
   private readonly configPath: string;
   private readonly historyPath: string;
   private readonly dataDir: string;
 
   constructor(opts: EvolverRepositoryOptions) {
+    this.storage = opts.storage ?? new FsStorage();
     this.dataDir = opts.dataDir;
     this.configPath = join(opts.dataDir, 'evolve-config.json');
     this.historyPath = join(opts.dataDir, 'evolver-history.jsonl');
   }
 
   async getConfig(): Promise<EvolveConfig> {
-    return loadEvolveConfig(this.configPath);
+    return loadEvolveConfig(this.configPath, this.storage);
   }
 
   async setConfig(config: EvolveConfig): Promise<EvolveConfig> {
-    await mkdir(this.dataDir, { recursive: true });
+    await this.storage.mkdir(this.dataDir);
     const merged: EvolveConfig = {
       rewriteThreshold: clamp(
         config.rewriteThreshold,
@@ -60,17 +68,13 @@ export class EvolverRepository {
       minRunsBeforeEvolve: Math.max(0, Math.floor(config.minRunsBeforeEvolve)),
       minPatternCount: Math.max(0, Math.floor(config.minPatternCount)),
     };
-    await writeFile(this.configPath, `${JSON.stringify(merged, null, 2)}\n`, 'utf-8');
+    await this.storage.write(this.configPath, `${JSON.stringify(merged, null, 2)}\n`);
     return merged;
   }
 
   async listHistory(limit: number): Promise<EvolverRun[]> {
-    let raw: string;
-    try {
-      raw = await readFile(this.historyPath, 'utf-8');
-    } catch {
-      return [];
-    }
+    const raw = await this.storage.read(this.historyPath);
+    if (!raw) return [];
     const records: EvolverRun[] = [];
     for (const line of raw.split('\n')) {
       const trimmed = line.trim();

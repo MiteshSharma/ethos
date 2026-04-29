@@ -1,32 +1,52 @@
+import { type InstalledPluginManifest, scanInstalledPlugins } from '@ethosagent/plugin-loader';
 import { type McpServerConfig, loadMcpConfig } from '@ethosagent/tools-mcp';
 import type { Storage } from '@ethosagent/types';
 import type { McpServerInfo, PluginInfo } from '@ethosagent/web-contracts';
-import type { PluginsRepository } from '../repositories/plugins.repository';
 
-// Plugins service — composes the plugin scan (~/.ethos/plugins/<id>/) and
-// the MCP config (~/.ethos/mcp.json). Calls into @ethosagent/tools-mcp's
-// `loadMcpConfig` directly; sanitisation + sort happen here so the
-// extension stays free of web-contract types.
+// Plugins service — composes the plugin manifest scan
+// (~/.ethos/plugins/<id>/) and the MCP config (~/.ethos/mcp.json).
+// Calls into @ethosagent/plugin-loader's `scanInstalledPlugins` and
+// @ethosagent/tools-mcp's `loadMcpConfig`; sanitisation + sort happen
+// here so the extensions stay free of web-contract types.
 
 export interface PluginsServiceOptions {
-  plugins: PluginsRepository;
   storage: Storage;
+  /** Root data dir — `~/.ethos/`. */
+  dataDir: string;
+  /** Working dir for the optional project-level scan. */
+  workingDir?: string;
 }
 
 export class PluginsService {
   constructor(private readonly opts: PluginsServiceOptions) {}
 
   async list(): Promise<{ plugins: PluginInfo[]; mcpServers: McpServerInfo[] }> {
-    const [plugins, mcpRaw] = await Promise.all([
-      this.opts.plugins.listPlugins(),
+    const [manifests, mcpRaw] = await Promise.all([
+      scanInstalledPlugins({
+        userDir: this.opts.dataDir,
+        storage: this.opts.storage,
+        ...(this.opts.workingDir ? { workingDir: this.opts.workingDir } : {}),
+      }),
       loadMcpConfig(this.opts.storage),
     ]);
     const mcpServers = mcpRaw
       .filter(isValidMcpServer)
       .map(toWireMcpServer)
       .sort((a, b) => a.name.localeCompare(b.name));
-    return { plugins, mcpServers };
+    return { plugins: manifests.map(toWirePlugin), mcpServers };
   }
+}
+
+function toWirePlugin(m: InstalledPluginManifest): PluginInfo {
+  return {
+    id: m.id,
+    name: m.name,
+    version: m.version,
+    description: m.description,
+    source: m.source,
+    path: m.path,
+    pluginContractMajor: m.pluginContractMajor,
+  };
 }
 
 function isValidMcpServer(entry: McpServerConfig): boolean {

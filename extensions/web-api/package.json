@@ -22,6 +22,7 @@
     "@ethosagent/memory-markdown": "workspace:*",
     "@ethosagent/personalities": "workspace:*",
     "@ethosagent/plugin-contract": "workspace:*",
+    "@ethosagent/plugin-loader": "workspace:*",
     "@ethosagent/session-sqlite": "workspace:*",
     "@ethosagent/skill-evolver": "workspace:*",
     "@ethosagent/skills": "workspace:*",

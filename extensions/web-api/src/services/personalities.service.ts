@@ -4,21 +4,18 @@ import type {
   FilePersonalityRegistry,
   UpdatePersonalityPatch,
 } from '@ethosagent/personalities';
+import type { PersonalitySkillRecord, SkillsLibrary } from '@ethosagent/skills';
 import { EthosError } from '@ethosagent/types';
 import type { Personality, PersonalitySkill } from '@ethosagent/web-contracts';
-import type { PersonalitySkillsRepository } from '../repositories/personality-skills.repository';
 
-// Personalities service. Calls into FilePersonalityRegistry directly for
-// the directory-level CRUD (create/update/delete/duplicate). The registry
-// owns the mtime cache + on-disk format, so the service is a thin
-// wire-shape mapper.
-//
-// The skills sub-surface still leans on PersonalitySkillsRepository for
-// now — that lands in the next batch.
+// Personalities service. Calls into FilePersonalityRegistry for the
+// directory-level CRUD (create/update/delete/duplicate) and into
+// SkillsLibrary for the per-personality skills/ subdir. Both extensions
+// own their own Storage layer; the service is a thin wire-shape mapper.
 
 export interface PersonalitiesServiceOptions {
   personalities: FilePersonalityRegistry;
-  personalitySkills: PersonalitySkillsRepository;
+  library: SkillsLibrary;
 }
 
 export class PersonalitiesService {
@@ -58,15 +55,18 @@ export class PersonalitiesService {
   }
 
   // ---------------------------------------------------------------------------
-  // Per-personality skills (gate 19) — TODO: collapse the repo
+  // Per-personality skills (gate 19)
   // ---------------------------------------------------------------------------
 
   async skillsList(personalityId: string): Promise<{ skills: PersonalitySkill[] }> {
-    return { skills: await this.opts.personalitySkills.list(personalityId) };
+    this.requirePersonality(personalityId);
+    const records = await this.opts.library.listPersonalitySkills(personalityId);
+    return { skills: records.map(toWirePersonalitySkill) };
   }
 
   async skillsGet(personalityId: string, skillId: string): Promise<{ skill: PersonalitySkill }> {
-    const skill = await this.opts.personalitySkills.get(personalityId, skillId);
+    this.requirePersonality(personalityId);
+    const skill = await this.opts.library.getPersonalitySkill(personalityId, skillId);
     if (!skill) {
       throw new EthosError({
         code: 'SKILL_NOT_FOUND',
@@ -74,7 +74,7 @@ export class PersonalitiesService {
         action: 'Use personalities.skillsList to see installed skills.',
       });
     }
-    return { skill };
+    return { skill: toWirePersonalitySkill(skill) };
   }
 
   async skillsCreate(
@@ -82,7 +82,9 @@ export class PersonalitiesService {
     skillId: string,
     body: string,
   ): Promise<{ skill: PersonalitySkill }> {
-    return { skill: await this.opts.personalitySkills.create(personalityId, skillId, body) };
+    this.requirePersonality(personalityId);
+    const skill = await this.opts.library.createPersonalitySkill(personalityId, skillId, body);
+    return { skill: toWirePersonalitySkill(skill) };
   }
 
   async skillsUpdate(
@@ -90,21 +92,44 @@ export class PersonalitiesService {
     skillId: string,
     body: string,
   ): Promise<{ skill: PersonalitySkill }> {
-    return { skill: await this.opts.personalitySkills.update(personalityId, skillId, body) };
+    this.requirePersonality(personalityId);
+    const skill = await this.opts.library.updatePersonalitySkill(personalityId, skillId, body);
+    return { skill: toWirePersonalitySkill(skill) };
   }
 
   async skillsDelete(personalityId: string, skillId: string): Promise<void> {
-    await this.opts.personalitySkills.delete(personalityId, skillId);
+    this.requirePersonality(personalityId);
+    await this.opts.library.deletePersonalitySkill(personalityId, skillId);
   }
 
   async skillsImportGlobal(
     personalityId: string,
     skillIds: string[],
   ): Promise<{ imported: PersonalitySkill[] }> {
-    return {
-      imported: await this.opts.personalitySkills.importFromGlobal(personalityId, skillIds),
-    };
+    this.requirePersonality(personalityId);
+    const records = await this.opts.library.importGlobalIntoPersonality(personalityId, skillIds);
+    return { imported: records.map(toWirePersonalitySkill) };
   }
+
+  private requirePersonality(id: string): void {
+    if (!this.opts.personalities.describe(id)) {
+      throw new EthosError({
+        code: 'PERSONALITY_NOT_FOUND',
+        cause: `Personality "${id}" not found.`,
+        action: 'Use personalities.list to see available ids.',
+      });
+    }
+  }
+}
+
+function toWirePersonalitySkill(record: PersonalitySkillRecord): PersonalitySkill {
+  return {
+    id: record.id,
+    name: record.name,
+    description: record.description,
+    body: record.body,
+    modifiedAt: record.modifiedAt,
+  };
 }
 
 function toWire(d: DescribedPersonality): Personality {

@@ -2,15 +2,15 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { SkillsRepository } from '../../repositories/skills.repository';
+import { SkillsLibrary } from '../skills-library';
 
-describe('SkillsRepository', () => {
+describe('SkillsLibrary', () => {
   let dir: string;
-  let repo: SkillsRepository;
+  let lib: SkillsLibrary;
 
   beforeEach(async () => {
     dir = await mkdtemp(join(tmpdir(), 'ethos-skills-'));
-    repo = new SkillsRepository({ dataDir: dir });
+    lib = new SkillsLibrary({ dataDir: dir });
   });
 
   afterEach(async () => {
@@ -19,7 +19,7 @@ describe('SkillsRepository', () => {
 
   describe('listSkills', () => {
     it('returns empty when no skills directory exists yet', async () => {
-      expect(await repo.listSkills()).toEqual([]);
+      expect(await lib.listSkills()).toEqual([]);
     });
 
     it('parses frontmatter and returns sorted by name', async () => {
@@ -30,7 +30,7 @@ describe('SkillsRepository', () => {
       );
       await writeFile(join(dir, 'skills', 'alpha.md'), '---\nname: Alpha skill\n---\n\nalpha body');
 
-      const skills = await repo.listSkills();
+      const skills = await lib.listSkills();
       expect(skills.map((s) => s.name)).toEqual(['Alpha skill', 'Zebra skill']);
       expect(skills[0]?.body.trim()).toBe('alpha body');
       expect(skills[1]?.description).toBe('about zebras');
@@ -39,14 +39,14 @@ describe('SkillsRepository', () => {
     it('falls back to id when frontmatter has no name', async () => {
       await mkdir(join(dir, 'skills'), { recursive: true });
       await writeFile(join(dir, 'skills', 'plain.md'), 'just body, no frontmatter');
-      const skills = await repo.listSkills();
+      const skills = await lib.listSkills();
       expect(skills[0]).toMatchObject({ id: 'plain', name: 'plain', description: null });
     });
   });
 
   describe('createSkill', () => {
     it('writes the file and returns the parsed skill', async () => {
-      const created = await repo.createSkill('hello', '---\nname: Hi\n---\n\nbody');
+      const created = await lib.createSkill('hello', '---\nname: Hi\n---\n\nbody');
       expect(created.id).toBe('hello');
       expect(created.name).toBe('Hi');
       const onDisk = await readFile(join(dir, 'skills', 'hello.md'), 'utf-8');
@@ -54,21 +54,21 @@ describe('SkillsRepository', () => {
     });
 
     it('throws SKILL_EXISTS when the file already exists', async () => {
-      await repo.createSkill('dup', 'x');
-      await expect(repo.createSkill('dup', 'y')).rejects.toMatchObject({ code: 'SKILL_EXISTS' });
+      await lib.createSkill('dup', 'x');
+      await expect(lib.createSkill('dup', 'y')).rejects.toMatchObject({ code: 'SKILL_EXISTS' });
     });
   });
 
   describe('updateSkill', () => {
     it('overwrites existing content', async () => {
-      await repo.createSkill('s', 'first');
-      const updated = await repo.updateSkill('s', '---\nname: Renamed\n---\n\nsecond');
+      await lib.createSkill('s', 'first');
+      const updated = await lib.updateSkill('s', '---\nname: Renamed\n---\n\nsecond');
       expect(updated.name).toBe('Renamed');
       expect(updated.body.trim()).toBe('second');
     });
 
     it('throws SKILL_NOT_FOUND for missing skills', async () => {
-      await expect(repo.updateSkill('missing', 'x')).rejects.toMatchObject({
+      await expect(lib.updateSkill('missing', 'x')).rejects.toMatchObject({
         code: 'SKILL_NOT_FOUND',
       });
     });
@@ -76,13 +76,13 @@ describe('SkillsRepository', () => {
 
   describe('deleteSkill', () => {
     it('removes the file from disk', async () => {
-      await repo.createSkill('gone', 'x');
-      await repo.deleteSkill('gone');
-      expect(await repo.getSkill('gone')).toBeNull();
+      await lib.createSkill('gone', 'x');
+      await lib.deleteSkill('gone');
+      expect(await lib.getSkill('gone')).toBeNull();
     });
 
     it('throws SKILL_NOT_FOUND for missing skills', async () => {
-      await expect(repo.deleteSkill('missing')).rejects.toMatchObject({
+      await expect(lib.deleteSkill('missing')).rejects.toMatchObject({
         code: 'SKILL_NOT_FOUND',
       });
     });
@@ -96,26 +96,26 @@ describe('SkillsRepository', () => {
         '---\nname: Candidate\n---\n\nthe body',
       );
 
-      await repo.approvePending('cand');
+      await lib.approvePending('cand');
 
-      const live = await repo.getSkill('cand');
+      const live = await lib.getSkill('cand');
       expect(live?.name).toBe('Candidate');
-      expect(await repo.pendingExists('cand')).toBe(false);
+      expect(await lib.pendingExists('cand')).toBe(false);
     });
 
     it('overwrites a live skill of the same id (rewrite case)', async () => {
-      await repo.createSkill('rewrite-me', 'old body');
+      await lib.createSkill('rewrite-me', 'old body');
       await mkdir(join(dir, 'skills', '.pending'), { recursive: true });
       await writeFile(join(dir, 'skills', '.pending', 'rewrite-me.md'), 'new body');
 
-      await repo.approvePending('rewrite-me');
+      await lib.approvePending('rewrite-me');
 
-      const live = await repo.getSkill('rewrite-me');
+      const live = await lib.getSkill('rewrite-me');
       expect(live?.body).toBe('new body');
     });
 
     it('throws SKILL_NOT_FOUND when the candidate is missing', async () => {
-      await expect(repo.approvePending('ghost')).rejects.toMatchObject({
+      await expect(lib.approvePending('ghost')).rejects.toMatchObject({
         code: 'SKILL_NOT_FOUND',
       });
     });
@@ -125,12 +125,12 @@ describe('SkillsRepository', () => {
     it('deletes the candidate file', async () => {
       await mkdir(join(dir, 'skills', '.pending'), { recursive: true });
       await writeFile(join(dir, 'skills', '.pending', 'reject-me.md'), 'x');
-      await repo.rejectPending('reject-me');
-      expect(await repo.pendingExists('reject-me')).toBe(false);
+      await lib.rejectPending('reject-me');
+      expect(await lib.pendingExists('reject-me')).toBe(false);
     });
 
     it('throws SKILL_NOT_FOUND when the candidate is missing', async () => {
-      await expect(repo.rejectPending('ghost')).rejects.toMatchObject({
+      await expect(lib.rejectPending('ghost')).rejects.toMatchObject({
         code: 'SKILL_NOT_FOUND',
       });
     });
@@ -143,8 +143,37 @@ describe('SkillsRepository', () => {
       await new Promise((r) => setTimeout(r, 10));
       await writeFile(join(dir, 'skills', '.pending', 'second.md'), '---\nname: Second\n---\n\nb');
 
-      const pending = await repo.listPending();
+      const pending = await lib.listPending();
       expect(pending.map((p) => p.id)).toEqual(['second', 'first']);
+    });
+  });
+
+  describe('per-personality skills', () => {
+    it('writes under personalities/<id>/skills/', async () => {
+      const skill = await lib.createPersonalitySkill('p', 'note', '---\nname: A note\n---\n\nbody');
+      expect(skill.name).toBe('A note');
+      const onDisk = await readFile(
+        join(dir, 'personalities', 'p', 'skills', 'note.md'),
+        'utf-8',
+      );
+      expect(onDisk).toContain('name: A note');
+    });
+
+    it('importGlobalIntoPersonality copies global into per-personality dir byte-for-byte', async () => {
+      await lib.createSkill('shared', '---\nname: Shared\n---\n\nbody');
+      const imported = await lib.importGlobalIntoPersonality('p', ['shared']);
+      expect(imported).toHaveLength(1);
+      const onDisk = await readFile(
+        join(dir, 'personalities', 'p', 'skills', 'shared.md'),
+        'utf-8',
+      );
+      expect(onDisk).toContain('name: Shared');
+    });
+
+    it('importGlobalIntoPersonality throws when source missing', async () => {
+      await expect(lib.importGlobalIntoPersonality('p', ['ghost'])).rejects.toMatchObject({
+        code: 'SKILL_NOT_FOUND',
+      });
     });
   });
 });

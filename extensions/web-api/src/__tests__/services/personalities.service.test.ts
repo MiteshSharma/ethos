@@ -1,6 +1,7 @@
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { SkillsLibrary } from '@ethosagent/skills';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { PersonalitiesService } from '../../services/personalities.service';
 import { makeStubPersonalityRegistry } from '../test-helpers';
@@ -22,11 +23,10 @@ describe('PersonalitiesService', () => {
   function makeService(opts: { personalities: import('@ethosagent/types').PersonalityConfig[] }) {
     const registry = makeStubPersonalityRegistry(opts.personalities, dir);
     // Per-personality skills isn't exercised in this service-level test
-    // (those have their own repository tests). The cast is enough to
-    // satisfy the service constructor.
-    const personalitySkills =
-      {} as import('../../repositories/personality-skills.repository').PersonalitySkillsRepository;
-    return new PersonalitiesService({ personalities: registry, personalitySkills });
+    // (those have their own SkillsLibrary tests). A real SkillsLibrary is
+    // safe to inject — its constructor only resolves paths.
+    const library = new SkillsLibrary({ dataDir: dir });
+    return new PersonalitiesService({ personalities: registry, library });
   }
 
   it('list maps PersonalityConfig → wire shape and includes defaultId', () => {

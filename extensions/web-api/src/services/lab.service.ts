@@ -1,10 +1,10 @@
 import { randomUUID } from 'node:crypto';
-import { mkdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { BatchRunner, parseTasksJsonl } from '@ethosagent/batch-runner';
 import type { AgentLoop } from '@ethosagent/core';
 import { EvalRunner } from '@ethosagent/eval-harness';
-import { EthosError } from '@ethosagent/types';
+import { FsStorage } from '@ethosagent/storage-fs';
+import { EthosError, type Storage } from '@ethosagent/types';
 import type { BatchRunInfo, EvalRunInfo, EvalScorer } from '@ethosagent/web-contracts';
 
 // Lab service — owns the lifecycle of background batch + eval runs.
@@ -37,13 +37,18 @@ interface EvalRunState extends EvalRunInfo {}
 export interface LabServiceOptions {
   dataDir: string;
   loop: AgentLoop;
+  /** Storage backend. Defaults to FsStorage. */
+  storage?: Storage;
 }
 
 export class LabService {
   private readonly batchRuns = new Map<string, BatchRunState>();
   private readonly evalRuns = new Map<string, EvalRunState>();
+  private readonly storage: Storage;
 
-  constructor(private readonly opts: LabServiceOptions) {}
+  constructor(private readonly opts: LabServiceOptions) {
+    this.storage = opts.storage ?? new FsStorage();
+  }
 
   // ---------------------------------------------------------------------------
   // Batch
@@ -85,14 +90,13 @@ export class LabService {
     const runId = freshId();
     const dir = join(this.opts.dataDir, 'batch');
     const tasksDir = join(dir, 'tasks');
-    await mkdir(tasksDir, { recursive: true });
+    await this.storage.mkdir(tasksDir);
     const tasksPath = join(tasksDir, `${runId}.jsonl`);
     const outputPath = join(dir, `${runId}.jsonl`);
     const checkpointPath = join(dir, `${runId}.checkpoint.json`);
 
     // Persist the input tasks file for re-runs / debugging.
-    const fs = await import('node:fs/promises');
-    await fs.writeFile(tasksPath, input.tasksJsonl, 'utf-8');
+    await this.storage.write(tasksPath, input.tasksJsonl);
 
     const startedAt = new Date().toISOString();
     const initial: BatchRunState = {
@@ -135,14 +139,9 @@ export class LabService {
   async batchOutput(id: string): Promise<{ content: string }> {
     const run = this.batchRuns.get(id);
     if (!run) throw notFound('batch', id);
-    try {
-      const content = await readFile(run.outputPath, 'utf-8');
-      return { content };
-    } catch {
-      // Run may not have written anything yet — return empty so the UI
-      // can still render its download button without a hard error.
-      return { content: '' };
-    }
+    // Run may not have written anything yet — return empty so the UI
+    // can still render its download button without a hard error.
+    return { content: (await this.storage.read(run.outputPath)) ?? '' };
   }
 
   // ---------------------------------------------------------------------------
@@ -198,14 +197,13 @@ export class LabService {
     const dir = join(this.opts.dataDir, 'eval');
     const tasksDir = join(dir, 'tasks');
     const expectedDir = join(dir, 'expected');
-    await mkdir(tasksDir, { recursive: true });
-    await mkdir(expectedDir, { recursive: true });
+    await this.storage.mkdir(tasksDir);
+    await this.storage.mkdir(expectedDir);
     const tasksPath = join(tasksDir, `${runId}.jsonl`);
     const expectedPath = join(expectedDir, `${runId}.jsonl`);
     const outputPath = join(dir, `${runId}.jsonl`);
-    const fs = await import('node:fs/promises');
-    await fs.writeFile(tasksPath, input.tasksJsonl, 'utf-8');
-    await fs.writeFile(expectedPath, input.expectedJsonl, 'utf-8');
+    await this.storage.write(tasksPath, input.tasksJsonl);
+    await this.storage.write(expectedPath, input.expectedJsonl);
 
     const startedAt = new Date().toISOString();
     const scorer: EvalScorer = input.scorer ?? 'contains';
@@ -247,12 +245,7 @@ export class LabService {
   async evalOutput(id: string): Promise<{ content: string }> {
     const run = this.evalRuns.get(id);
     if (!run) throw notFound('eval', id);
-    try {
-      const content = await readFile(run.outputPath, 'utf-8');
-      return { content };
-    } catch {
-      return { content: '' };
-    }
+    return { content: (await this.storage.read(run.outputPath)) ?? '' };
   }
 
   // ---------------------------------------------------------------------------

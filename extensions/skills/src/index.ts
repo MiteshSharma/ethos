@@ -14,6 +14,13 @@ export {
   shouldInject,
 } from './skill-compat';
 export { SkillsInjector, type SkillsInjectorOptions } from './skills-injector';
+export {
+  type PendingSkillRecord,
+  type PersonalitySkillRecord,
+  type SkillRecord,
+  SkillsLibrary,
+  type SkillsLibraryOptions,
+} from './skills-library';
 
 export interface InjectorConfig {
   /** Override the global skills directory (defaults to ~/.ethos/skills/) */
