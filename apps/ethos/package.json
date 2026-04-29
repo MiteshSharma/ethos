@@ -1,6 +1,6 @@
 {
   "name": "@ethosagent/cli",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "description": "Ethos — TypeScript AI agent framework where personality is architecture. Curated toolsets, first-person identities, scoped memory.",
   "keywords": [
     "agent",
@@ -28,6 +28,8 @@
   },
   "files": [
     "dist",
+    "data",
+    "web",
     "README.md",
     "LICENSE"
   ],
@@ -35,6 +37,9 @@
     "node": ">=24"
   },
   "scripts": {
+    "copy-data": "rm -rf data && cp -R ../../extensions/personalities/data data",
+    "copy-web": "pnpm --filter @ethosagent/web build && rm -rf web && cp -R ../web/dist web && find web -name '*.map' -delete",
+    "prebuild": "pnpm copy-data && pnpm copy-web",
     "build": "tsup"
   },
   "dependencies": {

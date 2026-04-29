@@ -61,45 +61,64 @@ importers:
       '@ethosagent/core':
         specifier: workspace:*
         version: link:../../packages/core
-      '@ethosagent/cron':
-        specifier: workspace:*
-        version: link:../../extensions/cron
-      '@ethosagent/storage-fs':
-        specifier: workspace:*
-        version: link:../../packages/storage-fs
       '@ethosagent/types':
         specifier: workspace:*
         version: link:../../packages/types
-      '@ethosagent/web-api':
-        specifier: workspace:*
-        version: link:../../extensions/web-api
-      '@ethosagent/wiring':
-        specifier: workspace:*
-        version: link:../../packages/wiring
       '@hono/node-server':
         specifier: ^2.0.0
         version: 2.0.0(hono@4.12.15)
       '@modelcontextprotocol/sdk':
         specifier: ^1.0.0
         version: 1.29.0(zod@4.3.6)
+      '@orpc/contract':
+        specifier: ^1.14.0
+        version: 1.14.0
+      '@orpc/openapi':
+        specifier: ^1.14.0
+        version: 1.14.0(ws@8.20.0)
+      '@orpc/server':
+        specifier: ^1.14.0
+        version: 1.14.0(ws@8.20.0)
       better-sqlite3:
         specifier: ^12.9.0
         version: 12.9.0
       croner:
         specifier: ^9.0.0
         version: 9.1.0
+      hono:
+        specifier: ^4.12.15
+        version: 4.12.15
       ink:
         specifier: ^5.0.0
         version: 5.2.1(@types/react@18.3.28)(react@18.3.1)
       openai:
         specifier: ^4.87.0
         version: 4.104.0(ws@8.20.0)(zod@4.3.6)
+      pino:
+        specifier: ^10.3.1
+        version: 10.3.1
       react:
         specifier: ^18.3.0
         version: 18.3.1
       ws:
         specifier: ^8.20.0
         version: 8.20.0
+      zod:
+        specifier: ^4.3.6
+        version: 4.3.6
+    devDependencies:
+      '@ethosagent/cron':
+        specifier: workspace:*
+        version: link:../../extensions/cron
+      '@ethosagent/storage-fs':
+        specifier: workspace:*
+        version: link:../../packages/storage-fs
+      '@ethosagent/web-api':
+        specifier: workspace:*
+        version: link:../../extensions/web-api
+      '@ethosagent/wiring':
+        specifier: workspace:*
+        version: link:../../packages/wiring
     optionalDependencies:
       '@slack/bolt':
         specifier: ^3.21.0
@@ -712,12 +731,13 @@ importers:
 
   packages/core:
     dependencies:
-      '@ethosagent/storage-fs':
-        specifier: workspace:*
-        version: link:../storage-fs
       '@ethosagent/types':
         specifier: workspace:*
         version: link:../types
+    devDependencies:
+      '@ethosagent/storage-fs':
+        specifier: workspace:*
+        version: link:../storage-fs
 
   packages/plugin-contract:
     dependencies:

@@ -12,6 +12,8 @@ coverage
 packages/*/dist
 extensions/*/dist
 apps/*/dist
+apps/ethos/data
+apps/ethos/web
 *.db
 *.db-shm
 *.db-wal
