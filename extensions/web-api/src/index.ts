@@ -1,17 +1,16 @@
 import { join } from 'node:path';
 import { SessionStreamBuffer } from '@ethosagent/agent-bridge';
+import { AgentMesh } from '@ethosagent/agent-mesh';
 import type { AgentLoop } from '@ethosagent/core';
 import type { CronScheduler } from '@ethosagent/cron';
-import type { PersonalityRegistry, SessionStore } from '@ethosagent/types';
+import { MarkdownFileMemoryProvider } from '@ethosagent/memory-markdown';
+import { FsStorage } from '@ethosagent/storage-fs';
+import type { PersonalityRegistry, SessionStore, Storage } from '@ethosagent/types';
 import type { SseEvent } from '@ethosagent/web-contracts';
 import type { Hono } from 'hono';
 import { AllowlistRepository } from './repositories/allowlist.repository';
 import { ConfigRepository } from './repositories/config.repository';
-import { CronRepository } from './repositories/cron.repository';
 import { EvolverRepository } from './repositories/evolver.repository';
-import { McpRepository } from './repositories/mcp.repository';
-import { MemoryRepository } from './repositories/memory.repository';
-import { MeshRepository } from './repositories/mesh.repository';
 import { PersonalityRepository } from './repositories/personality.repository';
 import { PersonalitySkillsRepository } from './repositories/personality-skills.repository';
 import { PlatformsRepository } from './repositories/platforms.repository';
@@ -82,6 +81,11 @@ export interface CreateWebApiOptions {
    * `cron.list` returns an empty array gracefully.
    */
   cronScheduler?: CronScheduler;
+  /**
+   * Storage backend used by services that read ~/.ethos/ directly
+   * (currently the MCP-config side of plugins.list). Defaults to FsStorage.
+   */
+  storage?: Storage;
 }
 
 export interface CreateWebApiResult {
@@ -107,20 +111,20 @@ export function createWebApi(opts: CreateWebApiOptions): CreateWebApiResult {
   });
   const configRepo = new ConfigRepository({ dataDir: opts.dataDir });
   const allowlistRepo = new AllowlistRepository({ dataDir: opts.dataDir });
-  const cronRepo = new CronRepository({ cronDir: join(opts.dataDir, 'cron') });
   const skillsRepo = new SkillsRepository({ dataDir: opts.dataDir });
   const evolverRepo = new EvolverRepository({ dataDir: opts.dataDir });
   // The mesh registry lives at `<dataDir>/mesh-registry.json`. ACP servers
   // (potentially in other processes) write heartbeats to this file; we
-  // just read it.
-  const meshRepo = new MeshRepository({ registryPath: join(opts.dataDir, 'mesh-registry.json') });
-  const memoryRepo = new MemoryRepository({ dataDir: opts.dataDir });
+  // just read it via @ethosagent/agent-mesh directly — the wire-format
+  // mapping lives in the service.
+  const mesh = new AgentMesh(join(opts.dataDir, 'mesh-registry.json'));
+  const memoryProvider = new MarkdownFileMemoryProvider({ dir: opts.dataDir });
   // Project-level plugins (`<cwd>/.ethos/plugins/`) are out of scope
   // for v1; user-level only is the standard install path. Threading
   // `workingDir` from boot would be the next step when we add it.
   const pluginsRepo = new PluginsRepository({ dataDir: opts.dataDir });
-  const mcpRepo = new McpRepository({ dataDir: opts.dataDir });
   const platformsRepo = new PlatformsRepository({ config: configRepo });
+  const storage: Storage = opts.storage ?? new FsStorage();
   const personalitySkillsRepo = new PersonalitySkillsRepository({
     personalities: personalitiesRepo,
     globalSkills: skillsRepo,
@@ -143,13 +147,12 @@ export function createWebApi(opts: CreateWebApiOptions): CreateWebApiResult {
   // clear error in that mode; reads return empty.
   const cronService = new CronService({
     scheduler: opts.cronScheduler ?? createPassiveScheduler(),
-    repo: cronRepo,
   });
   const skillsService = new SkillsService({ repo: skillsRepo });
   const evolverService = new EvolverService({ evolver: evolverRepo, skills: skillsRepo });
-  const meshService = new MeshService({ repo: meshRepo });
-  const memoryService = new MemoryService({ repo: memoryRepo });
-  const pluginsService = new PluginsService({ plugins: pluginsRepo, mcp: mcpRepo });
+  const meshService = new MeshService({ mesh });
+  const memoryService = new MemoryService({ memory: memoryProvider });
+  const pluginsService = new PluginsService({ plugins: pluginsRepo, storage });
   const platformsService = new PlatformsService({ repo: platformsRepo });
   const labService = new LabService({ dataDir: opts.dataDir, loop: opts.agentLoop });
 
@@ -232,24 +235,19 @@ export function createWebApi(opts: CreateWebApiOptions): CreateWebApiResult {
  * so the surface can render an actionable message.
  */
 function createPassiveScheduler(): CronScheduler {
+  const notConfigured = () => {
+    throw new Error('Cron scheduler not configured for this server.');
+  };
   return {
     listJobs: async () => [],
     getJob: async () => null,
-    createJob: async () => {
-      throw new Error('Cron scheduler not configured for this server.');
-    },
-    deleteJob: async () => {
-      throw new Error('Cron scheduler not configured for this server.');
-    },
-    pauseJob: async () => {
-      throw new Error('Cron scheduler not configured for this server.');
-    },
-    resumeJob: async () => {
-      throw new Error('Cron scheduler not configured for this server.');
-    },
-    runJobNow: async () => {
-      throw new Error('Cron scheduler not configured for this server.');
-    },
+    createJob: async () => notConfigured(),
+    deleteJob: async () => notConfigured(),
+    pauseJob: async () => notConfigured(),
+    resumeJob: async () => notConfigured(),
+    runJobNow: async () => notConfigured(),
+    listRuns: async () => [],
+    readRunOutput: async () => notConfigured(),
     start: () => {},
     stop: () => {},
   } as unknown as CronScheduler;

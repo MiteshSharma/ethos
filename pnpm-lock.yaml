@@ -655,6 +655,9 @@ importers:
       '@ethosagent/eval-harness':
         specifier: workspace:*
         version: link:../eval-harness
+      '@ethosagent/memory-markdown':
+        specifier: workspace:*
+        version: link:../memory-markdown
       '@ethosagent/personalities':
         specifier: workspace:*
         version: link:../personalities
@@ -670,6 +673,12 @@ importers:
       '@ethosagent/skills':
         specifier: workspace:*
         version: link:../skills
+      '@ethosagent/storage-fs':
+        specifier: workspace:*
+        version: link:../../packages/storage-fs
+      '@ethosagent/tools-mcp':
+        specifier: workspace:*
+        version: link:../tools-mcp
       '@ethosagent/types':
         specifier: workspace:*
         version: link:../../packages/types

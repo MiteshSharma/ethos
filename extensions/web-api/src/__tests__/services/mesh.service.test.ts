@@ -1,18 +1,19 @@
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { AgentMesh } from '@ethosagent/agent-mesh';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { MeshRepository } from '../../repositories/mesh.repository';
+import { MeshService } from '../../services/mesh.service';
 
-describe('MeshRepository', () => {
+describe('MeshService', () => {
   let dir: string;
   let registryPath: string;
-  let repo: MeshRepository;
+  let service: MeshService;
 
   beforeEach(async () => {
     dir = await mkdtemp(join(tmpdir(), 'ethos-mesh-'));
     registryPath = join(dir, 'mesh-registry.json');
-    repo = new MeshRepository({ registryPath });
+    service = new MeshService({ mesh: new AgentMesh(registryPath) });
   });
 
   afterEach(async () => {
@@ -20,7 +21,7 @@ describe('MeshRepository', () => {
   });
 
   it('list() returns empty when the registry file is missing', async () => {
-    expect(await repo.list()).toEqual([]);
+    expect((await service.list()).agents).toEqual([]);
   });
 
   it('list() drops stale agents (heartbeat >30s old)', async () => {
@@ -54,20 +55,20 @@ describe('MeshRepository', () => {
       ]),
     );
 
-    const live = await repo.list();
-    expect(live).toHaveLength(1);
-    expect(live[0]?.agentId).toBe('fresh-agent');
-    expect(live[0]?.lastSeenAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+    const { agents } = await service.list();
+    expect(agents).toHaveLength(1);
+    expect(agents[0]?.agentId).toBe('fresh-agent');
+    expect(agents[0]?.lastSeenAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
   });
 
-  it('route() returns ok=false with a reason when no peer matches', async () => {
-    const result = await repo.route('quantum-coffee');
+  it('routeTest() returns ok=false with a reason when no peer matches', async () => {
+    const result = await service.routeTest('quantum-coffee');
     expect(result.ok).toBe(false);
     expect(result.routedTo).toBeNull();
     expect(result.reason).toContain('quantum-coffee');
   });
 
-  it('route() picks the least-busy peer for a capability', async () => {
+  it('routeTest() picks the least-busy peer for a capability', async () => {
     const now = Date.now();
     await writeFile(
       registryPath,
@@ -97,7 +98,7 @@ describe('MeshRepository', () => {
       ]),
     );
 
-    const result = await repo.route('code');
+    const result = await service.routeTest('code');
     expect(result.ok).toBe(true);
     expect(result.routedTo).toBe('idle');
   });

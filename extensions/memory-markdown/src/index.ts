@@ -67,6 +67,40 @@ export class MarkdownFileMemoryProvider implements MemoryProvider {
     return { content, source: 'markdown', truncated };
   }
 
+  /**
+   * Direct read of a single global file (`MEMORY.md` or `USER.md`) for
+   * the web-api Memory tab. Returns content, the absolute path, and the
+   * file's modification time as ISO-8601 (or null if the file doesn't
+   * exist yet — the editor hydrates with an empty body in that case).
+   */
+  async readGlobalFile(
+    store: 'memory' | 'user',
+  ): Promise<{ content: string; path: string; modifiedAt: string | null }> {
+    const path = this.globalPath(store);
+    const content = (await this.storage.read(path)) ?? '';
+    const mtime = await this.storage.mtime(path);
+    return {
+      content,
+      path,
+      modifiedAt: mtime !== null ? new Date(mtime).toISOString() : null,
+    };
+  }
+
+  /** Direct write of a single global file (`MEMORY.md` or `USER.md`). */
+  async writeGlobalFile(
+    store: 'memory' | 'user',
+    content: string,
+  ): Promise<{ content: string; path: string; modifiedAt: string | null }> {
+    await this.storage.mkdir(this.dir);
+    const path = this.globalPath(store);
+    await this.storage.write(path, content);
+    return this.readGlobalFile(store);
+  }
+
+  private globalPath(store: 'memory' | 'user'): string {
+    return join(this.dir, store === 'memory' ? 'MEMORY.md' : 'USER.md');
+  }
+
   async sync(ctx: MemoryLoadContext, updates: MemoryUpdate[]): Promise<void> {
     if (updates.length === 0) return;
 

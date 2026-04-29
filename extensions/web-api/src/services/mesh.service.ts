@@ -1,25 +1,41 @@
+import type { AgentMesh, MeshEntry } from '@ethosagent/agent-mesh';
 import type { MeshAgent, MeshRouteResult } from '@ethosagent/web-contracts';
-import type { MeshRepository } from '../repositories/mesh.repository';
 
-// Mesh service. Two reads — `list` and `routeTest` — so this is one of
-// the smallest services in the web-api. Business logic that *would*
-// belong here (capability inference, mesh-wide health rollups,
-// cross-process coordination) hasn't materialised yet; if it does, it
-// lands in this file rather than leaking into the route or the
-// repository.
+// Mesh service. Two reads — `list` and `routeTest`. Calls into
+// @ethosagent/agent-mesh directly (no repository wrapper) since the
+// only translation needed is shaping a `MeshEntry` into the wire-format
+// `MeshAgent` / `MeshRouteResult`.
 
 export interface MeshServiceOptions {
-  repo: MeshRepository;
+  mesh: AgentMesh;
 }
 
 export class MeshService {
   constructor(private readonly opts: MeshServiceOptions) {}
 
   async list(): Promise<{ agents: MeshAgent[] }> {
-    return { agents: await this.opts.repo.list() };
+    const entries = await this.opts.mesh.list();
+    return { agents: entries.map(toWireAgent) };
   }
 
   async routeTest(capability: string): Promise<MeshRouteResult> {
-    return this.opts.repo.route(capability);
+    const picked = await this.opts.mesh.route(capability);
+    if (!picked) {
+      return {
+        ok: false,
+        routedTo: null,
+        reason: `No live mesh agent advertises capability "${capability}".`,
+      };
+    }
+    return { ok: true, routedTo: picked.agentId, reason: null };
   }
+}
+
+function toWireAgent(entry: MeshEntry): MeshAgent {
+  return {
+    agentId: entry.agentId,
+    capabilities: entry.capabilities,
+    activeSessions: entry.activeSessions,
+    lastSeenAt: new Date(entry.lastHeartbeatAt).toISOString(),
+  };
 }

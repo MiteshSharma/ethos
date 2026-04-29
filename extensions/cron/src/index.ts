@@ -35,6 +35,13 @@ export interface CronRunResult {
   sessionKey: string;
 }
 
+export interface CronRunInfo {
+  /** ISO-8601 timestamp parsed from the run output filename. */
+  ranAt: string;
+  /** Absolute path to the persisted markdown output. */
+  outputPath: string;
+}
+
 export interface CronSchedulerConfig {
   /** Called when a job fires. Returns the text output and session key. */
   runJob: (job: CronJob) => Promise<CronRunResult>;
@@ -181,6 +188,37 @@ export class CronScheduler {
   }
 
   // ---------------------------------------------------------------------------
+  // Run history — read-only access to <cronDir>/output/<jobId>/<ts>.md
+  // ---------------------------------------------------------------------------
+
+  /**
+   * List run-output files for `jobId`, newest first. Returns at most
+   * `limit` entries (default 20). Each `CronRunInfo` has the run's
+   * timestamp + the absolute output path; bodies are read on demand
+   * via `readRunOutput` so a long history doesn't load megabytes of
+   * markdown.
+   */
+  async listRuns(jobId: string, limit = 20): Promise<CronRunInfo[]> {
+    const dir = join(this.outputDir, jobId);
+    const names = await this.storage.list(dir);
+    return names
+      .filter((n) => n.endsWith('.md'))
+      .map((name) => ({
+        ranAt: filenameToIso(name),
+        outputPath: join(dir, name),
+      }))
+      .sort((a, b) => (a.ranAt < b.ranAt ? 1 : -1))
+      .slice(0, limit);
+  }
+
+  /** Read the full output body for a single run. */
+  async readRunOutput(outputPath: string): Promise<string> {
+    const out = await this.storage.read(outputPath);
+    if (out === null) throw new Error(`Run output not found: ${outputPath}`);
+    return out;
+  }
+
+  // ---------------------------------------------------------------------------
   // Tick — called every minute
   // ---------------------------------------------------------------------------
 
@@ -314,6 +352,19 @@ export function nextRunAfter(schedule: string, after: Date): Date | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * Reverse the timestamp encoding used by `executeJob` when persisting
+ * output (`<ISO>.md` with `:` and `.` replaced by `-`). Returns the raw
+ * stem if the filename doesn't match the expected pattern.
+ */
+function filenameToIso(filename: string): string {
+  const stem = filename.replace(/\.md$/, '');
+  const m = stem.match(/^(\d{4}-\d{2}-\d{2})T(\d{2})-(\d{2})-(\d{2})-(\d{3})(Z?)$/);
+  if (!m) return stem;
+  const [, date, hh, mm, ss, ms, z] = m;
+  return `${date}T${hh}:${mm}:${ss}.${ms}${z ?? ''}`;
 }
 
 function slugify(name: string): string {

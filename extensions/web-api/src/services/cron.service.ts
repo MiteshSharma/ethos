@@ -1,11 +1,10 @@
 import type { CronScheduler, CronJob as ExtCronJob } from '@ethosagent/cron';
 import { EthosError } from '@ethosagent/types';
 import type { CronJob, CronRun } from '@ethosagent/web-contracts';
-import type { CronRepository } from '../repositories/cron.repository';
 
-// Cron orchestration. Wraps the CronScheduler (job CRUD + tick loop) and
-// the file-backed CronRepository (run history). Pure business logic —
-// no Hono context, no oRPC; service tests mock both.
+// Cron orchestration. Wraps the CronScheduler — job CRUD + tick loop +
+// run-history reads (`listRuns`/`readRunOutput`) — into the wire shape
+// the web tab consumes. Pure business logic — no Hono context, no oRPC.
 
 export interface CronCreateInput {
   name: string;
@@ -23,7 +22,6 @@ export interface CronRunNowOutput {
 
 export interface CronServiceOptions {
   scheduler: CronScheduler;
-  repo: CronRepository;
 }
 
 export class CronService {
@@ -99,17 +97,21 @@ export class CronService {
   }
 
   async history(id: string, limit?: number): Promise<{ runs: CronRun[] }> {
-    const runs = await this.opts.repo.listRuns(id, limit);
-    if (runs.length === 0) {
-      return { runs: [] };
-    }
+    const infos = await this.opts.scheduler.listRuns(id, limit);
+    if (infos.length === 0) return { runs: [] };
+
+    const runs: CronRun[] = infos.map((info) => ({
+      ranAt: info.ranAt,
+      outputPath: info.outputPath,
+      output: null,
+    }));
+
     // Hydrate the head run's body so the UI can show the most recent
     // output without a second round-trip; the rest stay metadata-only.
     const head = runs[0];
     if (head) {
       try {
-        const output = await this.opts.repo.loadOutput(head.outputPath);
-        runs[0] = { ...head, output };
+        head.output = await this.opts.scheduler.readRunOutput(head.outputPath);
       } catch {
         // file vanished between listing and read — leave the metadata.
       }
