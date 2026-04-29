@@ -17,6 +17,11 @@ export interface ScanSource {
 export interface UniversalScannerOptions {
   /** Extra source directories beyond the built-in defaults. */
   extraSources?: ScanSource[];
+  /**
+   * Override ALL sources (skips defaultSources). Use in tests to avoid
+   * scanning real ~/.ethos/skills/, ~/.claude/skills/, etc.
+   */
+  sources?: ScanSource[];
   storage?: Storage;
 }
 
@@ -52,7 +57,9 @@ export class UniversalScanner {
 
   constructor(opts: UniversalScannerOptions = {}) {
     this.storage = opts.storage ?? new FsStorage();
-    this.sources = [...defaultSources(), ...(opts.extraSources ?? [])];
+    this.sources = opts.sources
+      ? opts.sources
+      : [...defaultSources(), ...(opts.extraSources ?? [])];
   }
 
   /**
