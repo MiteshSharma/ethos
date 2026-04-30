@@ -121,6 +121,52 @@ The personality directory is mtime-cached and hot-reloads on edit. The personali
 
 ---
 
+## Safety & isolation — what each personality can actually reach
+
+Other agent frameworks treat "personality" as a system prompt. In Ethos, **each personality is its own least-privilege bubble**. Switching personality changes what's reachable, not just how the agent talks.
+
+| Boundary | Mechanism | Default |
+|---|---|---|
+| **Filesystem** | `fs_reach.read` / `fs_reach.write` — absolute path-prefix allowlists. `read_file` / `write_file` route through `ScopedStorage` and reject paths outside the list. | A personality can only read/write its own dir + skills + cwd. Reaching another personality's `MEMORY.md` returns a boundary error. |
+| **MCP servers** | `mcp_servers` allowlist on `config.yaml`. MCP tools are filtered per-personality — server names not in the list are invisible. | Default-deny. A globally configured MCP server is invisible until you `ethos personality mcp <id> --attach <name>`. |
+| **Plugins** | `plugins` allowlist. Installed plugins are inert until at least one personality lists them. | Default-deny. `ethos personality plugins <id> --attach <plugin-id>` to activate. |
+| **Skills** | Universal scanner discovers from every ecosystem; per-personality filter (capability mode default) keeps only skills whose `required_tools` are a subset of this personality's toolset. | A deploy skill that needs `terminal` is automatically rejected by personalities that don't have `terminal`. No manual scoping. |
+| **Tool access** | `toolset.yaml` exact-match allowlist. | Empty list = no tools. |
+
+The threat model: **a benign LLM occasionally led astray, not a hostile attacker with shell access.** This is defense-in-depth — clean structural rejection by personality, enforced at the framework layer, not advisory.
+
+---
+
+## Skills — bring your existing library, scoped per role
+
+The universal skill scanner discovers skills from your existing ecosystem libraries — **no porting required**:
+
+```text
+~/.ethos/skills/         → loaded as-is (your Ethos-native skills)
+~/.claude/skills/        → discovered, agentskills.io dialect
+~/.openclaw/skills/      → discovered, OpenClaw dialect
+~/.opencode/skills/      → discovered
+~/.hermes/skills/        → discovered, Hermes dialect
+.ethos/skills/           → project-local skills (per-cwd)
+```
+
+The global pool is then **filtered per personality**. By default, a skill flows to a personality only if its `required_tools` match the personality's `toolset` — meaning a deploy skill never reaches your researcher, even though both can see the same global library.
+
+You can override the filter mode in `config.yaml`:
+
+```yaml
+skills:
+  global_ingest:
+    mode: capability   # default — required_tools must subset personality.toolset
+    # mode: explicit   # default-deny: only names in `allow:` flow in
+    # mode: tags       # match by skill tags
+    # mode: none       # disable global ingest; only per-personality skills/ folder
+```
+
+**Strategic claim:** every skill from every framework, but each role only sees what's appropriate to it. No other framework gives you universal compat AND structural per-personality scoping. ([Plan: extension_plan.md](./plan/extension_plan.md))
+
+---
+
 ## Surfaces
 
 The CLI is the supported install. Channels and integrations are opt-in — if you only want `ethos chat`, you never need a daemon running.
@@ -134,8 +180,8 @@ The CLI is the supported install. Channels and integrations are opt-in — if yo
 | **Email** | add IMAP/SMTP creds | Reply by email; scheduled inbox digests |
 | **Cron** | `ethos cron create "<schedule>" --task "..."` | Scheduled jobs that share memory and skills |
 | **VS Code (ACP)** | install the Ethos extension | Sidebar chat with full agent inside the editor |
-| **MCP** | add a server to `~/.ethos/config.yaml` | Auto-register any MCP server's tools |
-| **Skills (clawhub)** | `ethos skills install <slug>` | Community skill catalog runs unmodified |
+| **MCP** | add a server to `~/.ethos/mcp.json` + `ethos personality mcp <id> --attach <name>` | Auto-register any MCP server's tools, scoped per personality |
+| **Skills** | `ethos skills install <slug>` for [clawhub](https://clawhub.ai); otherwise auto-discovered | Community catalogs (clawhub, agentskills.io standard) plus auto-scan of `~/.claude/skills/`, `~/.openclaw/skills/`, `~/.opencode/skills/`, `~/.hermes/skills/` |
 
 ---
 

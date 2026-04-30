@@ -36,6 +36,12 @@ const sidebars: SidebarsConfig = {
     },
     {
       type: 'category',
+      label: 'Skills',
+      collapsed: false,
+      items: ['skills/overview', 'skills/per-personality-filter'],
+    },
+    {
+      type: 'category',
       label: 'Core Concepts',
       collapsed: false,
       items: [

@@ -13,6 +13,9 @@ Ethos makes different tradeoffs than other agent frameworks. Here's an honest co
 | Feature | Ethos | LangChain | CrewAI | AutoGen |
 |---|:---:|:---:|:---:|:---:|
 | Personality as structure (not a prompt string) | ✅ | ❌ | ❌ | ❌ |
+| Bring your existing skill library — Claude Code, OpenClaw, OpenCode, Hermes (no porting) | ✅ | ❌ | ❌ | ❌ |
+| Per-personality file boundary (`fs_reach`) | ✅ | ❌ | ❌ | ❌ |
+| Per-personality MCP / plugin allowlists (default-deny) | ✅ | ❌ | ❌ | ❌ |
 | Swap LLM provider without code changes | ✅ | ~ | ~ | ~ |
 | TypeScript-first interface contracts | ✅ | ❌ | ❌ | ❌ |
 | Multi-platform shared sessions | ✅ | ❌ | ❌ | ❌ |
@@ -68,7 +71,21 @@ Python frameworks pass dicts and strings. TypeScript catches mistakes at compile
 
 LangChain has swap-ability in theory; in practice, changing the underlying LLM requires touching provider-specific abstractions throughout. In Ethos, `LLMProvider` is one interface with one method.
 
-### 4. Multi-platform, shared sessions
+### 4. Your existing skill library already runs — scoped to the right specialist
+
+Most agent frameworks expect you to rebuild your skill library to try them. Ethos discovers what you already have:
+
+- `~/.claude/skills/` — Claude Code skills (agentskills.io standard)
+- `~/.openclaw/skills/` — OpenClaw skills (incl. the [clawhub](https://clawhub.ai) catalogue)
+- `~/.opencode/skills/` — OpenCode
+- `~/.hermes/skills/` — Hermes
+- `~/.ethos/skills/` — your Ethos-native skills
+
+A multi-dialect parser handles each ecosystem's `SKILL.md` format. The discovered pool is then **filtered per personality**: by default, a skill flows to a personality only if its `required_tools` are reachable by that personality's toolset. So your `researcher` sees only research-relevant skills, your `engineer` sees code-relevant ones — same global library, different visibility per role.
+
+This is the strategic claim you don't get elsewhere. Other frameworks: universal compat OR structural personalities. Ethos: both.
+
+### 5. Multi-platform, shared sessions
 
 The same agent — same personality, same memory, same session history — runs across CLI, Telegram, Discord, and Slack. A user can start a conversation on Telegram and continue it on CLI. The session key determines continuity, not the platform.
 

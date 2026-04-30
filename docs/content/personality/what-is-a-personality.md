@@ -132,15 +132,21 @@ If you want a clean slate, use `/new` to start a fresh session before switching 
 |---|---|
 | ETHOS.md identity | API keys + platform bot tokens |
 | Tool access (`toolset.yaml`) | Web auth token |
-| MCP server allowlist (`mcp_servers`) | USER.md (who you are) |
+| Filesystem reach (`fs_reach.read` / `fs_reach.write`) | USER.md (who you are) |
+| MCP server allowlist (`mcp_servers`) | |
 | Plugin allowlist (`plugins`) | |
+| Skill ingest filter (`skills.global_ingest`) | |
 | Memory scope (`memoryScope`) | |
 | Model routing | |
 | Cron jobs (each job declares its personality) | |
 
+**`fs_reach`** — per-personality filesystem boundary. The `read_file` / `write_file` tools route through a `ScopedStorage` decorator that rejects any path outside the personality's `read` / `write` allowlist. By default, a personality can only touch its own dir + `~/.ethos/skills/` + the cwd; other personalities' `MEMORY.md` files are unreachable. See [Create your own personality → fs_reach](./create-your-own) for the exact substitutions and defaults.
+
 **`mcp_servers`** — default-deny. A globally configured MCP server is invisible to a personality unless it lists the server name. Prevents an agent with Linear access from being available to a personality that should be research-only.
 
 **`plugins`** — default-deny. An installed plugin is inert until at least one personality lists it in `plugins`. Plugins register hooks and context injectors with a wide blast radius; explicit opt-in per role is the safety default.
+
+**`skills.global_ingest`** — controls which skills from the global pool reach this personality. Default `capability` mode: a skill loads only if its `required_tools` are reachable by this personality's toolset. Other modes: `tags`, `explicit`, `none`. See [Per-personality filter](../skills/per-personality-filter).
 
 ---
 
