@@ -11,6 +11,7 @@ export { AgentBridge } from '@ethosagent/agent-bridge';
 export interface TUIOptions {
   model: string;
   personality: string;
+  verbose?: boolean;
 }
 
 export async function runTUI(loop: AgentLoop, opts: TUIOptions): Promise<void> {
@@ -23,6 +24,7 @@ export async function runTUI(loop: AgentLoop, opts: TUIOptions): Promise<void> {
       model: opts.model,
       initialPersonality: opts.personality,
       initialSessionKey: sessionKey,
+      initialVerbose: opts.verbose ?? false,
     }),
   );
 

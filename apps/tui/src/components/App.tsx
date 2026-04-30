@@ -15,11 +15,56 @@ import { type DelegationRecord, SubagentsPane } from './SubagentsPane';
 import { ThinkingPane } from './ThinkingPane';
 import { type ActiveTool, type CompletedTool, ToolSpinner } from './ToolSpinner';
 
+// ---------------------------------------------------------------------------
+// Verbose timing helpers (inline — avoids cross-app imports)
+// ---------------------------------------------------------------------------
+
+interface TurnTiming {
+  turnStart: number;
+  turnEnd: number;
+  firstTextDeltaAt: number | null;
+  toolDurations: number[];
+  turnUsage: { inputTokens: number; outputTokens: number; estimatedCostUsd: number } | null;
+}
+
+function fmtSecs(ms: number): string {
+  return `${(ms / 1000).toFixed(1)}s`;
+}
+
+function fmtTokens(n: number): string {
+  return n >= 1000 ? `${(n / 1000).toFixed(1)}k` : `${n}`;
+}
+
+function formatVerboseSummary(t: TurnTiming): string {
+  const total = t.turnEnd - t.turnStart;
+  const toolsTotal = t.toolDurations.reduce((a, b) => a + b, 0);
+  const llm = Math.max(0, total - toolsTotal);
+  const ttft = t.firstTextDeltaAt !== null ? t.firstTextDeltaAt - t.turnStart : null;
+  const parts: string[] = [];
+  parts.push(`llm ${fmtSecs(llm)}${ttft !== null ? ` (TTFT ${fmtSecs(ttft)})` : ''}`);
+  if (t.toolDurations.length > 0) {
+    const n = t.toolDurations.length;
+    parts.push(`tools ${fmtSecs(toolsTotal)} (${n} call${n === 1 ? '' : 's'})`);
+  }
+  parts.push(`total ${fmtSecs(total)}`);
+  if (t.turnUsage) {
+    parts.push(`${fmtTokens(t.turnUsage.inputTokens)} in`);
+    parts.push(`${fmtTokens(t.turnUsage.outputTokens)} out`);
+    if (t.turnUsage.estimatedCostUsd > 0) {
+      parts.push(`$${t.turnUsage.estimatedCostUsd.toFixed(3)}`);
+    }
+  }
+  return `↳ ${parts.join(' · ')}`;
+}
+
+// ---------------------------------------------------------------------------
+
 interface AppProps {
   bridge: AgentBridge;
   model: string;
   initialPersonality: string;
   initialSessionKey: string;
+  initialVerbose?: boolean;
 }
 
 interface DetailsState {
@@ -44,7 +89,13 @@ function resolveMode(section: DetailsMode | null, global: DetailsMode): DetailsM
 
 type Modal = 'sessions' | 'models' | null;
 
-export function App({ bridge, model, initialPersonality, initialSessionKey }: AppProps) {
+export function App({
+  bridge,
+  model,
+  initialPersonality,
+  initialSessionKey,
+  initialVerbose = false,
+}: AppProps) {
   const { exit } = useApp();
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [streamingText, setStreamingText] = useState('');
@@ -64,6 +115,17 @@ export function App({ bridge, model, initialPersonality, initialSessionKey }: Ap
   const [skin, setSkin] = useState<SkinConfig>(SKINS.default);
   const [modal, setModal] = useState<Modal>(null);
   const [completionIndex, setCompletionIndex] = useState(0);
+
+  // Verbose mode — session-scoped toggle
+  const verboseRef = useRef(initialVerbose);
+  const [verboseDisplay, setVerboseDisplay] = useState(initialVerbose);
+
+  // Per-turn timing (refs so bridge event closures always see current values)
+  const turnStartRef = useRef<number | null>(null);
+  const firstTextDeltaAtRef = useRef<number | null>(null);
+  const turnToolDurationsRef = useRef<number[]>([]);
+  const turnUsageRef = useRef<TurnTiming['turnUsage']>(null);
+  const [turnElapsed, setTurnElapsed] = useState(0);
 
   const idRef = useRef(0);
   const nextId = () => String(++idRef.current);
@@ -102,16 +164,48 @@ export function App({ bridge, model, initialPersonality, initialSessionKey }: Ap
     { isActive: modal === null },
   );
 
+  // Live elapsed timer — ticks every second while agent is thinking
+  // biome-ignore lint/correctness/useExhaustiveDependencies: turnStartRef is a stable ref
+  useEffect(() => {
+    if (!running) {
+      setTurnElapsed(0);
+      return;
+    }
+    const interval = setInterval(() => {
+      if (turnStartRef.current !== null) {
+        setTurnElapsed(Math.floor((Date.now() - turnStartRef.current) / 1000));
+      }
+    }, 1000);
+    return () => clearInterval(interval);
+  }, [running]);
+
   // Subscribe to bridge events
   // biome-ignore lint/correctness/useExhaustiveDependencies: nextId only closes over a stable ref
   useEffect(() => {
-    const onTextDelta = (text: string) => setStreamingText((prev) => prev + text);
+    const onTextDelta = (text: string) => {
+      if (firstTextDeltaAtRef.current === null) firstTextDeltaAtRef.current = Date.now();
+      setStreamingText((prev) => prev + text);
+    };
 
     const onThinkingDelta = (thinking: string) => setThinkingText((prev) => prev + thinking);
 
     const onDone = (text: string) => {
+      const newMessages: ChatMessage[] = [];
       if (text.trim()) {
-        setMessages((prev) => [...prev, { id: nextId(), role: 'assistant', text }]);
+        newMessages.push({ id: nextId(), role: 'assistant', text });
+      }
+      if (verboseRef.current && turnStartRef.current !== null) {
+        const summary = formatVerboseSummary({
+          turnStart: turnStartRef.current,
+          turnEnd: Date.now(),
+          firstTextDeltaAt: firstTextDeltaAtRef.current,
+          toolDurations: turnToolDurationsRef.current,
+          turnUsage: turnUsageRef.current,
+        });
+        newMessages.push({ id: nextId(), role: 'assistant', text: summary });
+      }
+      if (newMessages.length > 0) {
+        setMessages((prev) => [...prev, ...newMessages]);
       }
       setStreamingText('');
       setThinkingText('');
@@ -131,6 +225,7 @@ export function App({ bridge, model, initialPersonality, initialSessionKey }: Ap
     const onToolEnd = (toolCallId: string, toolName: string, ok: boolean, durationMs: number) => {
       setActiveTools((prev) => prev.filter((t) => t.toolCallId !== toolCallId));
       setCompletedTools((prev) => [...prev, { id: toolCallId, toolName, ok, durationMs }]);
+      turnToolDurationsRef.current.push(durationMs);
     };
 
     const onUsage = (inputTokens: number, outputTokens: number, estimatedCostUsd: number) => {
@@ -139,6 +234,7 @@ export function App({ bridge, model, initialPersonality, initialSessionKey }: Ap
         outputTokens: prev.outputTokens + outputTokens,
         costUsd: prev.costUsd + estimatedCostUsd,
       }));
+      turnUsageRef.current = { inputTokens, outputTokens, estimatedCostUsd };
     };
 
     const onError = (error: string, code: string) => {
@@ -197,6 +293,12 @@ export function App({ bridge, model, initialPersonality, initialSessionKey }: Ap
     setCompletedTools([]);
     setRunning(true);
 
+    // Reset per-turn timing
+    turnStartRef.current = Date.now();
+    firstTextDeltaAtRef.current = null;
+    turnToolDurationsRef.current = [];
+    turnUsageRef.current = null;
+
     bridge.send(value, { sessionKey, personalityId: personality });
   };
 
@@ -219,6 +321,7 @@ export function App({ bridge, model, initialPersonality, initialSessionKey }: Ap
               '/sessions                     open session picker\n' +
               '/memory                       show ~/.ethos/MEMORY.md\n' +
               '/usage                        token + cost stats\n' +
+              `/verbose                      toggle per-turn timing (now: ${verboseDisplay ? 'on' : 'off'})\n` +
               '/details [hidden|collapsed|expanded] [section]\n' +
               '/skin [list|<name>]           switch UI theme\n' +
               '/exit                         quit',
@@ -291,6 +394,13 @@ export function App({ bridge, model, initialPersonality, initialSessionKey }: Ap
           },
         ]);
         break;
+
+      case 'verbose': {
+        verboseRef.current = !verboseRef.current;
+        setVerboseDisplay(verboseRef.current);
+        setStatusMsg(`verbose: ${verboseRef.current ? 'on' : 'off'}`);
+        break;
+      }
 
       case 'details':
         handleDetailsCommand(args);
@@ -417,6 +527,7 @@ export function App({ bridge, model, initialPersonality, initialSessionKey }: Ap
           costUsd={usage.costUsd}
           status={agentStatus}
           currentTool={currentTool}
+          elapsedSecs={agentStatus === 'thinking' ? turnElapsed : undefined}
         />
 
         <ChatPane messages={messages} streamingText={streamingText} />

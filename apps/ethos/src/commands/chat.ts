@@ -40,7 +40,11 @@ export async function runChat(config: EthosConfig): Promise<void> {
 
   if (process.stdout.isTTY && process.stdin.isTTY) {
     const { runTUI } = await import('@ethosagent/tui');
-    await runTUI(loop, { model: config.model, personality: config.personality });
+    await runTUI(loop, {
+      model: config.model,
+      personality: config.personality,
+      verbose: config.verbose ?? false,
+    });
     return;
   }
 

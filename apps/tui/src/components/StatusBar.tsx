@@ -11,12 +11,27 @@ interface StatusBarProps {
   costUsd: number;
   status: AgentStatus;
   currentTool?: string;
+  /** Live elapsed seconds — shown only while thinking (always-on timer). */
+  elapsedSecs?: number;
 }
 
-function StatusIndicator({ status, currentTool }: { status: AgentStatus; currentTool?: string }) {
+function StatusIndicator({
+  status,
+  currentTool,
+  elapsedSecs,
+}: {
+  status: AgentStatus;
+  currentTool?: string;
+  elapsedSecs?: number;
+}) {
   switch (status) {
     case 'thinking':
-      return <Text color="yellow"> thinking…</Text>;
+      return (
+        <Text color="yellow">
+          {' thinking'}
+          {elapsedSecs !== undefined && elapsedSecs > 0 ? ` ${elapsedSecs}s` : '…'}
+        </Text>
+      );
     case 'running':
       return (
         <Text color="cyan">
@@ -40,6 +55,7 @@ export function StatusBar({
   costUsd,
   status,
   currentTool,
+  elapsedSecs,
 }: StatusBarProps) {
   const skin = useSkin();
   return (
@@ -51,7 +67,7 @@ export function StatusBar({
         {' '}
         {model} · {personality}
       </Text>
-      <StatusIndicator status={status} currentTool={currentTool} />
+      <StatusIndicator status={status} currentTool={currentTool} elapsedSecs={elapsedSecs} />
       <Text color={skin.modelColor}>
         {'  '}
         {inputTokens.toLocaleString()} in · {outputTokens.toLocaleString()} out $
