@@ -3,7 +3,7 @@ import { createInterface } from 'node:readline';
 import type { AgentEvent, AgentLoop } from '@ethosagent/core';
 import type { EthosConfig } from '../config';
 import { createAgentLoop } from '../wiring';
-import { type TurnTiming, formatVerboseSummary } from './verbose-timing';
+import { formatVerboseSummary, type TurnTiming } from './verbose-timing';
 
 // ---------------------------------------------------------------------------
 // ANSI helpers

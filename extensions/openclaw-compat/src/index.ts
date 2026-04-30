@@ -2,10 +2,13 @@ export {
   createOpenClawApiShim,
   extractOpenClawRegister,
   isOpenClawPackageJson,
-  OpenClawPluginApiShim,
   type OpenClawCompatCallbacks,
+  OpenClawPluginApiShim,
 } from './api';
-
+export {
+  translateChannelPlugin,
+  unwrapChannelRegistration,
+} from './channel-translator';
 export {
   translateBeforePromptBuildHook,
   translateCorpusSupplement,
@@ -13,11 +16,6 @@ export {
   translateMemoryRuntime,
   translatePromptSectionBuilder,
 } from './memory-translator';
-
-export {
-  translateChannelPlugin,
-  unwrapChannelRegistration,
-} from './channel-translator';
 
 export type {
   ChannelCapabilities,

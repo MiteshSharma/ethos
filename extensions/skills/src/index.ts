@@ -6,6 +6,7 @@ import { SkillsInjector } from './skills-injector';
 import { UniversalScanner } from './universal-scanner';
 
 export { FileContextInjector } from './file-context-injector';
+export { GetSkillTool } from './get-skill-tool';
 export { type FilterResult, filterSkill, warnMissingAllowList } from './ingest-filter';
 export { MemoryGuidanceInjector } from './memory-guidance-injector';
 export { sanitize } from './prompt-injection-guard';
@@ -16,7 +17,6 @@ export {
   parseSkillFrontmatter,
   shouldInject,
 } from './skill-compat';
-export { GetSkillTool } from './get-skill-tool';
 export { SkillsInjector, type SkillsInjectorOptions } from './skills-injector';
 export {
   type PendingSkillRecord,

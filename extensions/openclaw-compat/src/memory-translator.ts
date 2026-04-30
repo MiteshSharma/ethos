@@ -1,4 +1,11 @@
-import type { ContextInjector, InjectionResult, MemoryContext, MemoryLoadContext, MemoryProvider, PromptContext } from '@ethosagent/types';
+import type {
+  ContextInjector,
+  InjectionResult,
+  MemoryContext,
+  MemoryLoadContext,
+  MemoryProvider,
+  PromptContext,
+} from '@ethosagent/types';
 import type {
   MemoryCorpusSupplement,
   MemoryPluginCapability,
@@ -60,7 +67,7 @@ export function translateMemoryRuntime(runtime: MemoryPluginRuntime): MemoryProv
   return {
     async prefetch(ctx: MemoryLoadContext): Promise<MemoryContext | null> {
       const cfg = buildMinimalConfig(ctx);
-      let manager;
+      let manager: Awaited<ReturnType<MemoryPluginRuntime['getMemorySearchManager']>>['manager'];
       try {
         const result = await runtime.getMemorySearchManager({ cfg, agentId: ctx.sessionId });
         if (!result.manager) return null;

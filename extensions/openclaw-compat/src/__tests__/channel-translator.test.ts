@@ -38,7 +38,9 @@ describe('translateChannelPlugin static fields', () => {
   });
 
   it('maps canEditMessage from capabilities.edit', () => {
-    const adapter = translateChannelPlugin(makeChannel({ capabilities: { chatTypes: ['dm'], edit: true } }));
+    const adapter = translateChannelPlugin(
+      makeChannel({ capabilities: { chatTypes: ['dm'], edit: true } }),
+    );
     expect(adapter.canEditMessage).toBe(true);
   });
 
@@ -48,12 +50,16 @@ describe('translateChannelPlugin static fields', () => {
   });
 
   it('maps canReact from capabilities.reactions', () => {
-    const adapter = translateChannelPlugin(makeChannel({ capabilities: { chatTypes: ['dm'], reactions: true } }));
+    const adapter = translateChannelPlugin(
+      makeChannel({ capabilities: { chatTypes: ['dm'], reactions: true } }),
+    );
     expect(adapter.canReact).toBe(true);
   });
 
   it('maps canSendFiles from capabilities.media', () => {
-    const adapter = translateChannelPlugin(makeChannel({ capabilities: { chatTypes: ['dm'], media: true } }));
+    const adapter = translateChannelPlugin(
+      makeChannel({ capabilities: { chatTypes: ['dm'], media: true } }),
+    );
     expect(adapter.canSendFiles).toBe(true);
   });
 
@@ -80,9 +86,7 @@ describe('translateChannelPlugin start()', () => {
 
   it('calls runStartupMaintenance when present', async () => {
     const runStartupMaintenance = vi.fn().mockResolvedValue(undefined);
-    const adapter = translateChannelPlugin(
-      makeChannel({ lifecycle: { runStartupMaintenance } }),
-    );
+    const adapter = translateChannelPlugin(makeChannel({ lifecycle: { runStartupMaintenance } }));
     await adapter.start();
     expect(runStartupMaintenance).toHaveBeenCalledOnce();
     expect(runStartupMaintenance.mock.calls[0][0]).toMatchObject({
@@ -123,7 +127,12 @@ describe('translateChannelPlugin send()', () => {
     expect(result.messageId).toBe('msg-42');
     expect(send).toHaveBeenCalledWith({
       chatId: 'chat-1',
-      message: { text: 'hello world', attachments: undefined, replyToId: undefined, parseMode: 'markdown' },
+      message: {
+        text: 'hello world',
+        attachments: undefined,
+        replyToId: undefined,
+        parseMode: 'markdown',
+      },
     });
   });
 
@@ -152,16 +161,22 @@ describe('translateChannelPlugin onMessage()', () => {
   });
 
   it('registers handler and maps inbound event to InboundMessage', () => {
-    type GatewayEvent = Parameters<NonNullable<import('../types').ChannelGatewayAdapter['onMessage']>>[0] extends (e: infer E) => unknown ? E : never;
+    type GatewayEvent = Parameters<
+      NonNullable<import('../types').ChannelGatewayAdapter['onMessage']>
+    >[0] extends (e: infer E) => unknown
+      ? E
+      : never;
     let registeredHandler: ((event: GatewayEvent) => void) | undefined;
     const gateway: import('../types').ChannelGatewayAdapter = {
-      onMessage: (h) => { registeredHandler = h; },
+      onMessage: (h) => {
+        registeredHandler = h;
+      },
     };
     const adapter = translateChannelPlugin(makeChannel({ gateway }));
     const receivedMessages: import('@ethosagent/types').InboundMessage[] = [];
     adapter.onMessage((msg) => receivedMessages.push(msg));
 
-    registeredHandler!({
+    registeredHandler?.({
       chatId: 'room-1',
       userId: 'u-1',
       username: 'Alice',
@@ -185,10 +200,16 @@ describe('translateChannelPlugin onMessage()', () => {
   });
 
   it('derives isDm from capabilities when not explicit in event', () => {
-    type GatewayEvent = Parameters<NonNullable<import('../types').ChannelGatewayAdapter['onMessage']>>[0] extends (e: infer E) => unknown ? E : never;
+    type GatewayEvent = Parameters<
+      NonNullable<import('../types').ChannelGatewayAdapter['onMessage']>
+    >[0] extends (e: infer E) => unknown
+      ? E
+      : never;
     let registeredHandler: ((event: GatewayEvent) => void) | undefined;
     const gateway: import('../types').ChannelGatewayAdapter = {
-      onMessage: (h) => { registeredHandler = h; },
+      onMessage: (h) => {
+        registeredHandler = h;
+      },
     };
     const channel = makeChannel({
       gateway,
@@ -199,7 +220,7 @@ describe('translateChannelPlugin onMessage()', () => {
     adapter.onMessage((m) => msgs.push(m));
 
     // No isDm in event — isGroupMention is absent so isDm should derive true
-    registeredHandler!({ chatId: 'c', text: 'hi', raw: null });
+    registeredHandler?.({ chatId: 'c', text: 'hi', raw: null });
     expect(msgs[0].isDm).toBe(true);
   });
 });

@@ -1,5 +1,6 @@
-import type { ContextInjector, MemoryProvider, PlatformAdapter } from '@ethosagent/types';
 import type { EthosPluginApi } from '@ethosagent/plugin-sdk';
+import type { MemoryProvider, PlatformAdapter } from '@ethosagent/types';
+import { translateChannelPlugin, unwrapChannelRegistration } from './channel-translator';
 import {
   translateBeforePromptBuildHook,
   translateCorpusSupplement,
@@ -7,7 +8,6 @@ import {
   translateMemoryRuntime,
   translatePromptSectionBuilder,
 } from './memory-translator';
-import { translateChannelPlugin, unwrapChannelRegistration } from './channel-translator';
 import type {
   ChannelPlugin,
   MemoryCorpusSupplement,
@@ -155,11 +155,7 @@ export class OpenClawPluginApiShim {
   }
 
   registerMemoryPromptSection(builder: MemoryPromptSectionBuilder): void {
-    const injector = translatePromptSectionBuilder(
-      this.id,
-      builder,
-      this.injectorIdx++,
-    );
+    const injector = translatePromptSectionBuilder(this.id, builder, this.injectorIdx++);
     this.ethosApi.registerInjector(injector);
   }
 
@@ -272,7 +268,9 @@ export class OpenClawPluginApiShim {
           try {
             const result = await handler(payload, {});
             if (result && typeof result === 'object') {
-              return result as Partial<import('@ethosagent/types').ModifyingHooks[keyof import('@ethosagent/types').ModifyingHooks][1]>;
+              return result as Partial<
+                import('@ethosagent/types').ModifyingHooks[keyof import('@ethosagent/types').ModifyingHooks][1]
+              >;
             }
             return null;
           } catch {

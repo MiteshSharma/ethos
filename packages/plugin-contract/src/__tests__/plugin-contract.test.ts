@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import {
+  checkPluginContractMajor,
   isEthosPlugin,
   normalizeExternalPluginCompatibility,
+  PLUGIN_CONTRACT_MAJOR,
   validatePluginPackageJson,
 } from '../index';
 
@@ -68,6 +70,49 @@ describe('isEthosPlugin', () => {
   it('returns false for non-objects', () => {
     expect(isEthosPlugin(null)).toBe(false);
     expect(isEthosPlugin('string')).toBe(false);
+  });
+});
+
+describe('checkPluginContractMajor', () => {
+  it('returns ok when declared major matches current', () => {
+    const result = checkPluginContractMajor(PLUGIN_CONTRACT_MAJOR);
+    expect(result.ok).toBe(true);
+    expect(result.reason).toBeUndefined();
+  });
+
+  it('returns ok when declared is undefined (older plugin without declaration)', () => {
+    const result = checkPluginContractMajor(undefined);
+    expect(result.ok).toBe(true);
+  });
+
+  it('rejects when declared major differs from current', () => {
+    const result = checkPluginContractMajor(999, PLUGIN_CONTRACT_MAJOR, 'ethos-plugin-future');
+    expect(result.ok).toBe(false);
+    expect(result.reason).toBeDefined();
+    expect(result.reason).toMatch(/ethos-plugin-future/);
+    expect(result.reason).toMatch(/pluginContractMajor=999/);
+    expect(result.reason).toMatch(/MIGRATIONS\.md/);
+  });
+
+  it('rejects a non-integer declared major', () => {
+    const result = checkPluginContractMajor(-1, PLUGIN_CONTRACT_MAJOR, 'bad-plugin');
+    expect(result.ok).toBe(false);
+    expect(result.reason).toMatch(/bad-plugin/);
+    expect(result.reason).toMatch(/MIGRATIONS\.md/);
+  });
+
+  it('uses PLUGIN_CONTRACT_MAJOR as default current', () => {
+    // Explicit current=PLUGIN_CONTRACT_MAJOR should behave the same as omitting it
+    const a = checkPluginContractMajor(PLUGIN_CONTRACT_MAJOR, PLUGIN_CONTRACT_MAJOR);
+    const b = checkPluginContractMajor(PLUGIN_CONTRACT_MAJOR);
+    expect(a.ok).toBe(b.ok);
+  });
+
+  it('error message includes both declared and current major', () => {
+    const result = checkPluginContractMajor(2, 1, 'my-plugin');
+    expect(result.ok).toBe(false);
+    expect(result.reason).toMatch(/major=1/);
+    expect(result.reason).toMatch(/pluginContractMajor=2/);
   });
 });
 

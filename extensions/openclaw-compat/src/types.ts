@@ -61,7 +61,10 @@ export type MemoryPromptSectionBuilder = (params: {
 
 /** Unknown — U1 from plan/openclaw_api_surface.md. Duck-typed at call sites. */
 export type RegisteredMemorySearchManager = {
-  search?(params: { query: string; maxResults?: number }): Promise<Array<{ content: string; id?: string; score?: number }>>;
+  search?(params: {
+    query: string;
+    maxResults?: number;
+  }): Promise<Array<{ content: string; id?: string; score?: number }>>;
   close?(): Promise<void>;
 };
 
@@ -85,8 +88,15 @@ export type MemoryPluginPublicArtifactsProvider = {
 };
 
 export type MemoryCorpusSupplement = {
-  search(params: { query: string; maxResults?: number }): Promise<Array<{ id: string; content: string; score?: number }>>;
-  get(params: { lookup: string; fromLine?: number; lineCount?: number }): Promise<{ content: string; totalLines?: number } | null>;
+  search(params: {
+    query: string;
+    maxResults?: number;
+  }): Promise<Array<{ id: string; content: string; score?: number }>>;
+  get(params: {
+    lookup: string;
+    fromLine?: number;
+    lineCount?: number;
+  }): Promise<{ content: string; totalLines?: number } | null>;
 };
 
 export type MemoryPluginCapability = {
@@ -128,7 +138,11 @@ export type ChannelCapabilities = {
 };
 
 export type ChannelLifecycleAdapter = {
-  onAccountConfigChanged?(params: { prevCfg: OpenClawConfig; nextCfg: OpenClawConfig; accountId: string }): Promise<void> | void;
+  onAccountConfigChanged?(params: {
+    prevCfg: OpenClawConfig;
+    nextCfg: OpenClawConfig;
+    accountId: string;
+  }): Promise<void> | void;
   onAccountRemoved?(params: { prevCfg: OpenClawConfig; accountId: string }): Promise<void> | void;
   runStartupMaintenance?(params: {
     cfg: OpenClawConfig;
@@ -155,17 +169,19 @@ export type ChannelOutboundAdapter = {
  * Best-effort shape inferred from real plugins.
  */
 export type ChannelGatewayAdapter = {
-  onMessage?(handler: (event: {
-    chatId: string;
-    userId?: string;
-    username?: string;
-    text: string;
-    isDm?: boolean;
-    isGroupMention?: boolean;
-    messageId?: string;
-    attachments?: unknown[];
-    raw?: unknown;
-  }) => void | Promise<void>): void;
+  onMessage?(
+    handler: (event: {
+      chatId: string;
+      userId?: string;
+      username?: string;
+      text: string;
+      isDm?: boolean;
+      isGroupMention?: boolean;
+      messageId?: string;
+      attachments?: unknown[];
+      raw?: unknown;
+    }) => void | Promise<void>,
+  ): void;
 };
 
 export type ChannelPlugin = {
@@ -237,6 +253,14 @@ export interface OpenClawPluginApiShape {
   registerMemoryFlushPlan(resolver: MemoryFlushPlanResolver): void;
   registerChannel(reg: OpenClawPluginChannelRegistration | ChannelPlugin): void;
   registerTool(tool: unknown): void;
-  on(hookName: OpenClawHookName, handler: (...args: unknown[]) => unknown, opts?: { priority?: number; timeoutMs?: number }): void;
-  registerHook(events: string | string[], handler: (...args: unknown[]) => unknown, opts?: { priority?: number }): void;
+  on(
+    hookName: OpenClawHookName,
+    handler: (...args: unknown[]) => unknown,
+    opts?: { priority?: number; timeoutMs?: number },
+  ): void;
+  registerHook(
+    events: string | string[],
+    handler: (...args: unknown[]) => unknown,
+    opts?: { priority?: number },
+  ): void;
 }

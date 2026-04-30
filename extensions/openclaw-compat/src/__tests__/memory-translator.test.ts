@@ -1,3 +1,4 @@
+import type { MemoryLoadContext, PromptContext } from '@ethosagent/types';
 import { describe, expect, it, vi } from 'vitest';
 import {
   translateBeforePromptBuildHook,
@@ -6,7 +7,6 @@ import {
   translateMemoryRuntime,
   translatePromptSectionBuilder,
 } from '../memory-translator';
-import type { MemoryLoadContext, PromptContext } from '@ethosagent/types';
 import type { MemoryPluginCapability, MemoryPluginRuntime } from '../types';
 
 const baseLoadCtx: MemoryLoadContext = {
@@ -42,9 +42,9 @@ describe('translateMemoryCapability', () => {
     const provider = translateMemoryCapability(cap);
     const result = await provider.prefetch(baseLoadCtx);
     expect(result).not.toBeNull();
-    expect(result!.content).toBe('memory line 1\nmemory line 2');
-    expect(result!.source).toBe('custom');
-    expect(result!.truncated).toBe(false);
+    expect(result?.content).toBe('memory line 1\nmemory line 2');
+    expect(result?.source).toBe('custom');
+    expect(result?.truncated).toBe(false);
   });
 
   it('returns null when promptBuilder returns empty array', async () => {
@@ -70,7 +70,7 @@ describe('translateMemoryCapability', () => {
     const ctx = { ...baseLoadCtx, query: 'what do I know?' };
     const result = await provider.prefetch(ctx);
     expect(result).not.toBeNull();
-    expect(result!.content).toContain('result from runtime');
+    expect(result?.content).toContain('result from runtime');
   });
 
   it('sync() resolves without throwing', async () => {
@@ -86,7 +86,9 @@ describe('translateMemoryCapability', () => {
 describe('translateMemoryRuntime', () => {
   it('returns null when manager is null', async () => {
     const runtime: MemoryPluginRuntime = {
-      async getMemorySearchManager() { return { manager: null }; },
+      async getMemorySearchManager() {
+        return { manager: null };
+      },
     };
     const provider = translateMemoryRuntime(runtime);
     expect(await provider.prefetch(baseLoadCtx)).toBeNull();
@@ -95,7 +97,13 @@ describe('translateMemoryRuntime', () => {
   it('returns null when no query in context', async () => {
     const runtime: MemoryPluginRuntime = {
       async getMemorySearchManager() {
-        return { manager: { async search() { return []; } } };
+        return {
+          manager: {
+            async search() {
+              return [];
+            },
+          },
+        };
       },
     };
     const provider = translateMemoryRuntime(runtime);
@@ -105,7 +113,9 @@ describe('translateMemoryRuntime', () => {
 
   it('returns null when manager has no search method', async () => {
     const runtime: MemoryPluginRuntime = {
-      async getMemorySearchManager() { return { manager: {} }; },
+      async getMemorySearchManager() {
+        return { manager: {} };
+      },
     };
     const provider = translateMemoryRuntime(runtime);
     const ctx = { ...baseLoadCtx, query: 'hello' };
@@ -114,7 +124,9 @@ describe('translateMemoryRuntime', () => {
 
   it('returns null when getMemorySearchManager throws', async () => {
     const runtime: MemoryPluginRuntime = {
-      async getMemorySearchManager() { throw new Error('connection failed'); },
+      async getMemorySearchManager() {
+        throw new Error('connection failed');
+      },
     };
     const provider = translateMemoryRuntime(runtime);
     const ctx = { ...baseLoadCtx, query: 'hello' };
@@ -140,15 +152,21 @@ describe('translateMemoryRuntime', () => {
     const ctx = { ...baseLoadCtx, query: 'who am I?' };
     const result = await provider.prefetch(ctx);
     expect(result).not.toBeNull();
-    expect(result!.content).toContain('result A for: who am I?');
-    expect(result!.content).toContain('result B');
-    expect(result!.source).toBe('custom');
+    expect(result?.content).toContain('result A for: who am I?');
+    expect(result?.content).toContain('result B');
+    expect(result?.source).toBe('custom');
   });
 
   it('returns null when search returns empty array', async () => {
     const runtime: MemoryPluginRuntime = {
       async getMemorySearchManager() {
-        return { manager: { async search() { return []; } } };
+        return {
+          manager: {
+            async search() {
+              return [];
+            },
+          },
+        };
       },
     };
     const provider = translateMemoryRuntime(runtime);
@@ -182,8 +200,8 @@ describe('translatePromptSectionBuilder', () => {
     const injector = translatePromptSectionBuilder('p', () => ['A', 'B'], 0);
     const result = await injector.inject(basePromptCtx);
     expect(result).not.toBeNull();
-    expect(result!.content).toBe('A\nB');
-    expect(result!.position).toBe('prepend');
+    expect(result?.content).toBe('A\nB');
+    expect(result?.position).toBe('prepend');
   });
 });
 
@@ -194,8 +212,12 @@ describe('translatePromptSectionBuilder', () => {
 describe('translateCorpusSupplement', () => {
   it('returns null when no query in context', async () => {
     const supplement = {
-      async search() { return []; },
-      async get() { return null; },
+      async search() {
+        return [];
+      },
+      async get() {
+        return null;
+      },
     };
     const injector = translateCorpusSupplement('p', supplement, 0);
     expect(await injector.inject(basePromptCtx)).toBeNull();
@@ -206,13 +228,15 @@ describe('translateCorpusSupplement', () => {
       async search({ query }: { query: string }) {
         return [{ id: '1', content: `found: ${query}`, score: 1 }];
       },
-      async get() { return null; },
+      async get() {
+        return null;
+      },
     };
     const injector = translateCorpusSupplement('p', supplement, 0);
     const ctx = { ...basePromptCtx, query: 'test search' } as PromptContext & { query: string };
     const result = await injector.inject(ctx);
     expect(result).not.toBeNull();
-    expect(result!.content).toContain('found: test search');
+    expect(result?.content).toContain('found: test search');
   });
 });
 
@@ -237,15 +261,15 @@ describe('translateBeforePromptBuildHook', () => {
     const injector = translateBeforePromptBuildHook('p', handler, 0);
     const result = await injector.inject(basePromptCtx);
     expect(result).not.toBeNull();
-    expect(result!.content).toBe('recalled memory');
-    expect(result!.position).toBe('prepend');
+    expect(result?.content).toBe('recalled memory');
+    expect(result?.position).toBe('prepend');
   });
 
   it('returns append result when handler returns appendContext', async () => {
     const handler = vi.fn().mockResolvedValue({ appendContext: 'appended' });
     const injector = translateBeforePromptBuildHook('p', handler, 0);
     const result = await injector.inject(basePromptCtx);
-    expect(result!.position).toBe('append');
+    expect(result?.position).toBe('append');
   });
 
   it('returns null when handler throws', async () => {

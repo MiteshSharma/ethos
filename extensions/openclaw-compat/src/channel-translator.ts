@@ -1,4 +1,9 @@
-import type { DeliveryResult, InboundMessage, OutboundMessage, PlatformAdapter } from '@ethosagent/types';
+import type {
+  DeliveryResult,
+  InboundMessage,
+  OutboundMessage,
+  PlatformAdapter,
+} from '@ethosagent/types';
 import type { ChannelPlugin, OpenClawPluginChannelRegistration } from './types';
 
 /**
@@ -47,7 +52,9 @@ export function translateChannelPlugin(plugin: ChannelPlugin): PlatformAdapter {
 
     async send(chatId: string, message: OutboundMessage): Promise<DeliveryResult> {
       if (!plugin.outbound?.send) {
-        console.warn(`[openclaw-compat] Channel "${plugin.id}" has no outbound.send — message dropped`);
+        console.warn(
+          `[openclaw-compat] Channel "${plugin.id}" has no outbound.send — message dropped`,
+        );
         return { ok: false, error: 'no outbound adapter' };
       }
       try {
@@ -69,7 +76,9 @@ export function translateChannelPlugin(plugin: ChannelPlugin): PlatformAdapter {
 
     onMessage(handler: (message: InboundMessage) => void): void {
       if (!plugin.gateway?.onMessage) {
-        console.warn(`[openclaw-compat] Channel "${plugin.id}" has no gateway.onMessage — inbound messages won't arrive`);
+        console.warn(
+          `[openclaw-compat] Channel "${plugin.id}" has no gateway.onMessage — inbound messages won't arrive`,
+        );
         return;
       }
       // U3: ChannelGatewayAdapter.onMessage event shape inferred from real plugins
@@ -124,7 +133,11 @@ function mapAttachments(
     const a = item as Record<string, unknown>;
     return [
       {
-        type: (typeof a.type === 'string' ? a.type : 'file') as 'image' | 'file' | 'audio' | 'video',
+        type: (typeof a.type === 'string' ? a.type : 'file') as
+          | 'image'
+          | 'file'
+          | 'audio'
+          | 'video',
         url: typeof a.url === 'string' ? a.url : undefined,
         mimeType: typeof a.mimeType === 'string' ? a.mimeType : 'application/octet-stream',
         filename: typeof a.filename === 'string' ? a.filename : undefined,

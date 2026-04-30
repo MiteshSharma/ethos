@@ -1,18 +1,18 @@
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import {
+  createOpenClawApiShim,
+  extractOpenClawRegister,
+  isOpenClawPackageJson,
+  type OpenClawCompatCallbacks,
+} from '@ethosagent/openclaw-compat';
+import {
   checkPluginContractMajor,
   type EthosPluginPackageJson,
   isEthosPlugin,
 } from '@ethosagent/plugin-contract';
 import type { EthosPlugin, PluginRegistries } from '@ethosagent/plugin-sdk';
 import { PluginApiImpl } from '@ethosagent/plugin-sdk';
-import {
-  createOpenClawApiShim,
-  extractOpenClawRegister,
-  isOpenClawPackageJson,
-  type OpenClawCompatCallbacks,
-} from '@ethosagent/openclaw-compat';
 import { FsStorage } from '@ethosagent/storage-fs';
 import type { MemoryProvider, PlatformAdapter, Storage } from '@ethosagent/types';
 
@@ -397,12 +397,13 @@ function toInstalledPluginManifest(
   source: 'user' | 'project',
   pluginDir: string,
 ): InstalledPluginManifest {
-  const dialect: 'ethos' | 'openclaw' =
-    manifest.ethos?.type === 'plugin' ? 'ethos' : 'openclaw';
+  const dialect: 'ethos' | 'openclaw' = manifest.ethos?.type === 'plugin' ? 'ethos' : 'openclaw';
   const id =
     dialect === 'ethos'
       ? (manifest.ethos?.id ?? manifest.name)
-      : ((manifest.openclaw?.channel as Record<string, unknown> | undefined)?.id as string | undefined) ?? manifest.name;
+      : (((manifest.openclaw?.channel as Record<string, unknown> | undefined)?.id as
+          | string
+          | undefined) ?? manifest.name);
   return {
     id,
     name: manifest.name,
