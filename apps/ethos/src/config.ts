@@ -53,6 +53,8 @@ export interface EthosConfig {
   emailPassword?: string;
   emailSmtpHost?: string;
   emailSmtpPort?: number;
+  /** Show per-turn timing summary after every response. */
+  verbose?: boolean;
 }
 
 export function ethosDir(): string {
@@ -85,6 +87,7 @@ export async function writeConfig(storage: Storage, config: EthosConfig): Promis
   if (config.slackBotToken) lines.push(`slackBotToken: ${config.slackBotToken}`);
   if (config.slackAppToken) lines.push(`slackAppToken: ${config.slackAppToken}`);
   if (config.slackSigningSecret) lines.push(`slackSigningSecret: ${config.slackSigningSecret}`);
+  if (config.verbose) lines.push('verbose: true');
   await storage.write(join(ethosDir(), 'config.yaml'), `${lines.join('\n')}\n`);
 }
 
@@ -120,5 +123,6 @@ function parseConfigYaml(src: string): EthosConfig {
     emailPassword: kv.emailPassword,
     emailSmtpHost: kv.emailSmtpHost,
     emailSmtpPort: kv.emailSmtpPort ? Number(kv.emailSmtpPort) : undefined,
+    verbose: kv.verbose === 'true' ? true : undefined,
   };
 }

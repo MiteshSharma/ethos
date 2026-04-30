@@ -190,6 +190,35 @@ Then reinstall:
 pnpm install --force
 ```
 
+## How do I tell if a slow response is the LLM or Ethos?
+
+A waiting spinner with no output is silent by design — `ethos` doesn't know whether the LLM will respond in 1 second or 10. Two built-in signals help:
+
+**Always-on:** the spinner shows a live elapsed counter (`thinking 4s`, `thinking 5s`, …). If it counts up and nothing streams, the LLM hasn't sent a first token yet. Once text starts arriving, the counter clears.
+
+**Verbose mode (opt-in):** after every response, a one-line summary breaks down where the time went:
+
+```
+↳ llm 4.1s (TTFT 0.8s) · tools 0.6s (2 calls) · total 4.8s · 2.1k in · 380 out · $0.012
+```
+
+- **TTFT** — time from your submit to the first token. Long TTFT = cold LLM start or slow provider.
+- **llm** — total wall-clock LLM time minus tool roundtrips.
+- **tools** — combined wall-clock duration of all tool calls.
+
+Enable verbose mode with any of:
+
+```bash
+ethos chat --verbose                     # one session
+```
+```yaml
+# ~/.ethos/config.yaml
+verbose: true                            # persistent default
+```
+```
+/verbose                                 # toggle mid-session (doesn't write to config)
+```
+
 ## Error reference
 
 User-facing errors are rendered as a code, a one-line cause, and a suggested action:

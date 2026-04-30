@@ -54,13 +54,15 @@ try {
 
     case 'chat':
     case '': {
+      const chatArgs = args.slice(command === 'chat' ? 1 : 0);
+      const verboseFlag = chatArgs.includes('--verbose');
       const config = await readConfig(getStorage());
       if (!config) {
         console.log('No config found. Running setup first...\n');
         const fresh = await runSetup();
-        if (fresh) await runChat(fresh);
+        if (fresh) await runChat(verboseFlag ? { ...fresh, verbose: true } : fresh);
       } else {
-        await runChat(config);
+        await runChat(verboseFlag ? { ...config, verbose: true } : config);
       }
       break;
     }

@@ -82,11 +82,16 @@ Interactive REPL with streaming output and slash commands. Sessions persist acro
 ```
 ethos chat
 ethos                       # same — chat is the default
+ethos chat --verbose        # show per-turn timing summary after every response
 ```
 
 When invoked without an existing config, runs `setup` first.
 
 Session key defaults to `cli:<basename of cwd>`, so different working directories get separate conversation histories. See [slash commands](#slash-commands-inside-chat) for in-chat actions.
+
+| Flag | Default | Description |
+|---|---|---|
+| `--verbose` | off | Print a timing summary after every turn: LLM time, TTFT, tool wall-clock, total, tokens, cost. Can also be set persistently via `verbose: true` in `~/.ethos/config.yaml` or toggled mid-session with `/verbose`. |
 
 ---
 
@@ -559,6 +564,7 @@ Type these inside `ethos chat`. They run synchronously and don't count as a turn
 | Command | Description |
 |---|---|
 | `/help` | Show available slash commands |
+| `/verbose` | Toggle per-turn timing summary on or off (session-only; use `verbose: true` in config to make it sticky) |
 | `Ctrl+C` | Interrupt the current response |
 | `Ctrl+D` | Exit the CLI |
 
@@ -615,6 +621,9 @@ emailSmtpPort: 587
 # ── Plugins to load at startup ──────────────────────────────────────────────
 plugins:
   - "@myorg/ethos-plugin-weather"
+
+# ── Verbose mode ─────────────────────────────────────────────────────────────
+verbose: true                        # print per-turn timing summary (llm · tools · total · tokens · cost)
 ```
 
 The companion `~/.ethos/keys.json` (managed via `ethos keys`) holds the API-key rotation pool. Don't edit it by hand.

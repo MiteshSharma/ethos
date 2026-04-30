@@ -3,6 +3,7 @@ import { createInterface } from 'node:readline';
 import type { AgentEvent, AgentLoop } from '@ethosagent/core';
 import type { EthosConfig } from '../config';
 import { createAgentLoop } from '../wiring';
+import { type TurnTiming, formatVerboseSummary } from './verbose-timing';
 
 // ---------------------------------------------------------------------------
 // ANSI helpers
@@ -55,6 +56,10 @@ export async function runChat(config: EthosConfig): Promise<void> {
     usage: { inputTokens: 0, outputTokens: 0, costUsd: 0 },
   };
 
+  // Session-scoped verbose flag. --verbose flag or config sets initial value;
+  // /verbose toggles within the session without writing to disk.
+  const verbose = { active: config.verbose ?? false };
+
   let abort: AbortController | null = null;
 
   // First Ctrl+C aborts the running turn. If nothing is running, it exits.
@@ -87,13 +92,35 @@ export async function runChat(config: EthosConfig): Promise<void> {
     if (!input) continue;
 
     if (input.startsWith('/')) {
-      await handleSlashCommand(input, state, loop, rl, config);
+      await handleSlashCommand(input, state, verbose, loop, rl, config);
       continue;
     }
 
     // Agent turn
     abort = new AbortController();
-    out(`\n${c.bold}ethos${c.reset} > `);
+
+    // Live elapsed spinner — always on
+    let elapsedSecs = 0;
+    let spinnerCleared = false;
+    out(`\n${c.bold}ethos${c.reset} ${c.dim}thinking 0s${c.reset}`);
+    const spinnerInterval = setInterval(() => {
+      elapsedSecs++;
+      if (!spinnerCleared) {
+        out(`\r${c.bold}ethos${c.reset} ${c.dim}thinking ${elapsedSecs}s${c.reset}`);
+      }
+    }, 1000);
+
+    function clearSpinner(): void {
+      if (spinnerCleared) return;
+      spinnerCleared = true;
+      clearInterval(spinnerInterval);
+    }
+
+    // Per-turn timing state
+    const turnStart = Date.now();
+    let firstTextDeltaAt: number | null = null;
+    const toolDurations: number[] = [];
+    let turnUsage: TurnTiming['turnUsage'] = null;
 
     const toolTimers = new Map<string, number>();
     let hasText = false;
@@ -104,14 +131,54 @@ export async function runChat(config: EthosConfig): Promise<void> {
         personalityId: state.personalityId,
         abortSignal: abort.signal,
       })) {
+        // Timing bookkeeping + spinner transitions
+        if (event.type === 'text_delta' && firstTextDeltaAt === null) {
+          firstTextDeltaAt = Date.now();
+          clearSpinner();
+          out(`\r${c.bold}ethos${c.reset} > `);
+        }
+        if (event.type === 'tool_start' && !spinnerCleared) {
+          clearSpinner();
+          out('\n'); // move past spinner line before tool chip
+        }
+        if (event.type === 'tool_end') {
+          toolDurations.push(event.durationMs);
+        }
+        if (event.type === 'usage') {
+          turnUsage = {
+            inputTokens: event.inputTokens,
+            outputTokens: event.outputTokens,
+            estimatedCostUsd: event.estimatedCostUsd,
+          };
+        }
+        if (event.type === 'error') {
+          clearSpinner();
+        }
+
         renderEvent(event, toolTimers, state.usage, hasText);
         if (event.type === 'text_delta') hasText = true;
+
+        if (event.type === 'done') {
+          clearSpinner();
+          if (verbose.active) {
+            const summary = formatVerboseSummary({
+              turnStart,
+              turnEnd: Date.now(),
+              firstTextDeltaAt,
+              toolDurations,
+              turnUsage,
+            });
+            out(`\n${c.dim}${summary}${c.reset}`);
+          }
+        }
       }
     } catch (err) {
+      clearSpinner();
       if (!abort?.signal.aborted) {
         out(`\n${c.red}Error: ${err instanceof Error ? err.message : String(err)}${c.reset}`);
       }
     } finally {
+      clearInterval(spinnerInterval); // safety net
       abort = null;
       out('\n\n');
     }
@@ -189,7 +256,7 @@ function renderEvent(
       break;
 
     case 'done':
-      // Nothing to render — the REPL loop handles the newlines
+      // Nothing to render — verbose summary handled in the turn loop
       break;
   }
 }
@@ -201,6 +268,7 @@ function renderEvent(
 async function handleSlashCommand(
   raw: string,
   state: ChatState,
+  verbose: { active: boolean },
   _loop: AgentLoop,
   rl: ReturnType<typeof createInterface>,
   _config: EthosConfig,
@@ -220,6 +288,7 @@ async function handleSlashCommand(
           `  /model <name>         switch model for this session\n` +
           `  /memory               show ~/.ethos/MEMORY.md and USER.md\n` +
           `  /usage                show token and cost stats\n` +
+          `  /verbose              toggle per-turn timing summary (on/off)\n` +
           `  /exit                 quit\n` +
           `${c.reset}\n`,
       );
@@ -284,6 +353,12 @@ async function handleSlashCommand(
           `${c.reset}`,
       );
       break;
+
+    case 'verbose': {
+      verbose.active = !verbose.active;
+      out(`${c.dim}verbose: ${verbose.active ? 'on' : 'off'}${c.reset}\n`);
+      break;
+    }
 
     case 'exit':
     case 'quit':

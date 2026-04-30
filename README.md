@@ -88,6 +88,7 @@ Inside chat:
 /personality engineer   switch personality (changes tools, tone, model)
 /memory                 show what the agent remembers about you
 /usage                  show tokens spent and estimated cost
+/verbose                show per-turn timing — where did those 5 seconds go?
 /new                    start a fresh session
 /help                   all commands
 ```
