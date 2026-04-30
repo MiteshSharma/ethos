@@ -37,9 +37,11 @@ interface CacheEntry {
  * because they can contain hundreds of files not intended for ethos.
  */
 function defaultSources(): ScanSource[] {
+  const home = homedir();
   const cwd = process.cwd();
   return [
-    { label: 'ethos', dir: join(homedir(), '.ethos', 'skills') },
+    { label: 'ethos', dir: join(home, '.ethos', 'skills') },
+    { label: 'claude-code', dir: join(home, '.claude', 'skills') },
     { label: 'claude-code-project', dir: join(cwd, '.claude', 'skills') },
     { label: 'opencode-project', dir: join(cwd, '.opencode', 'skills') },
   ];
