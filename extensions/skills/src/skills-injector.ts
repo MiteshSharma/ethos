@@ -32,6 +32,12 @@ export interface SkillsInjectorOptions {
    * Pass `registry.toolNamesForPersonality(personality)` from wiring.
    */
   toolNamesForPersonality?: (personality: PersonalityConfig) => Set<string>;
+  /**
+   * Hard cap on total injected skill content in characters (≈ chars/4 tokens).
+   * Skills are added in source-priority order; injection stops when the cap is
+   * reached. Defaults to 40 000 chars (~10 000 tokens). Set to 0 to disable.
+   */
+  maxInjectionChars?: number;
 }
 
 export class SkillsInjector implements ContextInjector {
@@ -43,6 +49,7 @@ export class SkillsInjector implements ContextInjector {
   private readonly onSkip?: (skillId: string, reason: string) => void;
   private readonly storage: Storage;
   private readonly toolNamesForPersonality?: (p: PersonalityConfig) => Set<string>;
+  private readonly maxInjectionChars: number;
   private readonly cache = new Map<string, CacheEntry>();
   private readonly scanner: UniversalScanner;
 
@@ -54,6 +61,7 @@ export class SkillsInjector implements ContextInjector {
     this.onSkip = opts.onSkip;
     this.storage = opts.storage ?? new FsStorage();
     this.toolNamesForPersonality = opts.toolNamesForPersonality;
+    this.maxInjectionChars = opts.maxInjectionChars ?? 40_000;
     this.scanner = new UniversalScanner({ storage: this.storage });
   }
 
@@ -64,14 +72,23 @@ export class SkillsInjector implements ContextInjector {
 
     const sections: string[] = [];
     const fileNames: string[] = [];
+    let totalChars = 0;
+    const budget = this.maxInjectionChars;
+
+    function addSection(content: string, name: string): boolean {
+      if (budget > 0 && totalChars + content.length > budget) return false;
+      sections.push(content);
+      fileNames.push(name);
+      totalChars += content.length;
+      return true;
+    }
 
     // 1. Per-personality skills/ dirs — always loaded unfiltered (hand-curated library)
     const perPersonalityDirs = personality.skillsDirs ?? [];
     for (const dir of perPersonalityDirs) {
       const loaded = await this.loadSkillsFromDir(dir, ctx);
       for (const { content, fileName } of loaded) {
-        sections.push(content);
-        fileNames.push(fileName);
+        addSection(content, fileName);
       }
     }
 
@@ -90,6 +107,7 @@ export class SkillsInjector implements ContextInjector {
       ? this.toolNamesForPersonality(personality)
       : new Set<string>();
 
+    let budgetExceeded = false;
     for (const [, skill] of globalPool) {
       // Skip skills already loaded from per-personality dirs (avoid duplicates by file path)
       if (perPersonalityDirs.some((d) => skill.filePath.startsWith(d))) continue;
@@ -119,8 +137,18 @@ export class SkillsInjector implements ContextInjector {
       }
 
       const substituted = applySubstitutions(skill.body, dirname(skill.filePath), ctx.sessionId);
-      sections.push(sanitize(substituted.trim()));
-      fileNames.push(skill.qualifiedName);
+      const content = sanitize(substituted.trim());
+      if (!addSection(content, skill.qualifiedName)) {
+        budgetExceeded = true;
+        this.onSkip?.(skill.qualifiedName, 'injection budget exceeded');
+      }
+    }
+
+    if (budgetExceeded) {
+      process.stdout.write(
+        `[skills] injection budget (${budget} chars) reached — some global-pool skills were skipped. ` +
+          `Use skills.global_ingest.mode: explicit to pin specific skills.\n`,
+      );
     }
 
     if (sections.length === 0) return null;

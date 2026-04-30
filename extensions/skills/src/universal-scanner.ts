@@ -30,17 +30,28 @@ interface CacheEntry {
   skill: Skill;
 }
 
-/** Default skill discovery sources in priority order. */
+/**
+ * Default skill discovery sources.
+ * Only ethos-managed directories are on by default. External tool home-dirs
+ * (~/.claude/skills, ~/.openclaw/skills, etc.) are opt-in via extraSources
+ * because they can contain hundreds of files not intended for ethos.
+ */
 function defaultSources(): ScanSource[] {
-  const home = homedir();
   const cwd = process.cwd();
   return [
-    { label: 'ethos', dir: join(home, '.ethos', 'skills') },
-    { label: 'claude-code', dir: join(home, '.claude', 'skills') },
+    { label: 'ethos', dir: join(homedir(), '.ethos', 'skills') },
     { label: 'claude-code-project', dir: join(cwd, '.claude', 'skills') },
+    { label: 'opencode-project', dir: join(cwd, '.opencode', 'skills') },
+  ];
+}
+
+/** Pre-built source descriptors for external tools — add to extraSources to opt in. */
+export function externalSources(): ScanSource[] {
+  const home = homedir();
+  return [
+    { label: 'claude-code', dir: join(home, '.claude', 'skills') },
     { label: 'openclaw', dir: join(home, '.openclaw', 'skills') },
     { label: 'opencode', dir: join(home, '.config', 'opencode', 'skills') },
-    { label: 'opencode-project', dir: join(cwd, '.opencode', 'skills') },
     { label: 'hermes', dir: join(home, '.hermes', 'skills') },
   ];
 }

@@ -23,6 +23,7 @@ export {
   type SkillsLibraryOptions,
 } from './skills-library';
 export {
+  externalSources,
   type ScanSource,
   UniversalScanner,
   type UniversalScannerOptions,
