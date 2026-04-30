@@ -13,7 +13,17 @@ export interface IngestConfig {
   };
 }
 
-export interface SkillIngestConfig extends IngestConfig {}
+export interface SkillIngestConfig extends IngestConfig {
+  /**
+   * Controls how global-pool skills are injected into the system prompt.
+   *
+   * - `'index'` (default): inject a compact table of name + description.
+   *   The LLM calls `get_skill(name)` to load the full body on demand.
+   * - `'full'`: inject every matching skill's full body (original behavior).
+   *   Suitable only for small collections (< ~20 skills).
+   */
+  injection_mode?: 'full' | 'index';
+}
 
 /** A skill parsed from any source directory. */
 export interface Skill {

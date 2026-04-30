@@ -172,9 +172,10 @@ export async function createAgentLoop(
     }
   }
 
-  const injectors = createInjectors(personalities, {
+  const { injectors, tools: skillTools } = createInjectors(personalities, {
     onSkillSkip: (skillId, reason) => log.warn(`skill ${skillId} skipped: ${reason}`),
   });
+  for (const tool of skillTools) tools.register(tool);
 
   const hooks = new DefaultHookRegistry();
   // CLI/TUI/ACP get the synchronous block-and-explain guard. Web replaces it

@@ -82,6 +82,7 @@ export class DefaultToolRegistry implements ToolRegistry {
       const isMcpOrPluginTool = e.tool.name.startsWith('mcp__') || e.pluginId !== undefined;
       if (
         !isMcpOrPluginTool &&
+        !e.tool.alwaysInclude &&
         allowedTools &&
         allowedTools.length > 0 &&
         !allowedTools.includes(e.tool.name)

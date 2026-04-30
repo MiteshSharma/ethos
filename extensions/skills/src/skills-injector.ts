@@ -34,10 +34,15 @@ export interface SkillsInjectorOptions {
   toolNamesForPersonality?: (personality: PersonalityConfig) => Set<string>;
   /**
    * Hard cap on total injected skill content in characters (≈ chars/4 tokens).
-   * Skills are added in source-priority order; injection stops when the cap is
-   * reached. Defaults to 40 000 chars (~10 000 tokens). Set to 0 to disable.
+   * Only applies in full injection_mode. Defaults to 40 000 chars (~10 000 tokens).
+   * Set to 0 to disable.
    */
   maxInjectionChars?: number;
+  /**
+   * Pre-built scanner to share with GetSkillTool. When provided, the injector
+   * uses this instance instead of creating its own, so both share one mtime cache.
+   */
+  scanner?: import('./universal-scanner').UniversalScanner;
 }
 
 export class SkillsInjector implements ContextInjector {
@@ -62,7 +67,7 @@ export class SkillsInjector implements ContextInjector {
     this.storage = opts.storage ?? new FsStorage();
     this.toolNamesForPersonality = opts.toolNamesForPersonality;
     this.maxInjectionChars = opts.maxInjectionChars ?? 40_000;
-    this.scanner = new UniversalScanner({ storage: this.storage });
+    this.scanner = opts.scanner ?? new UniversalScanner({ storage: this.storage });
   }
 
   async inject(ctx: PromptContext): Promise<InjectionResult | null> {
@@ -107,9 +112,13 @@ export class SkillsInjector implements ContextInjector {
       ? this.toolNamesForPersonality(personality)
       : new Set<string>();
 
-    let budgetExceeded = false;
+    // Determine injection mode for global-pool skills.
+    // 'index' (default) injects a compact table; 'full' injects complete bodies.
+    const injectionMode: 'full' | 'index' = personality.skills?.injection_mode ?? 'index';
+
+    // Collect skills that pass all filters
+    const eligibleGlobal: import('@ethosagent/types').Skill[] = [];
     for (const [, skill] of globalPool) {
-      // Skip skills already loaded from per-personality dirs (avoid duplicates by file path)
       if (perPersonalityDirs.some((d) => skill.filePath.startsWith(d))) continue;
 
       const result = filterSkill(skill, personality, toolNames, (msg) =>
@@ -120,7 +129,6 @@ export class SkillsInjector implements ContextInjector {
         continue;
       }
 
-      // Still apply OpenClaw shouldInject rules (env, bins, os) for openclaw dialect
       if (skill.dialect === 'openclaw') {
         const parsed = parseSkillFrontmatter(
           skill.body.length > 0
@@ -136,19 +144,44 @@ export class SkillsInjector implements ContextInjector {
         }
       }
 
-      const substituted = applySubstitutions(skill.body, dirname(skill.filePath), ctx.sessionId);
-      const content = sanitize(substituted.trim());
-      if (!addSection(content, skill.qualifiedName)) {
-        budgetExceeded = true;
-        this.onSkip?.(skill.qualifiedName, 'injection budget exceeded');
-      }
+      eligibleGlobal.push(skill);
     }
 
-    if (budgetExceeded) {
-      process.stdout.write(
-        `[skills] injection budget (${budget} chars) reached — some global-pool skills were skipped. ` +
-          `Use skills.global_ingest.mode: explicit to pin specific skills.\n`,
-      );
+    if (injectionMode === 'index') {
+      // Phase 1: compact index table — the LLM calls get_skill() for full bodies
+      if (eligibleGlobal.length > 0) {
+        const rows = eligibleGlobal
+          .map((s) => {
+            const desc = (s.rawFrontmatter.description as string | undefined) ?? '—';
+            return `| \`${s.qualifiedName}\` | ${desc} |`;
+          })
+          .join('\n');
+        const indexBlock =
+          `## Available Skills\n\n` +
+          `Call \`get_skill(name)\` to load full instructions before using any skill.\n\n` +
+          `| Skill | Description |\n` +
+          `|---|---|\n` +
+          rows;
+        sections.push(indexBlock);
+        fileNames.push('__skill_index__');
+      }
+    } else {
+      // Phase 1 (full mode): inject complete bodies, respecting budget
+      let budgetExceeded = false;
+      for (const skill of eligibleGlobal) {
+        const substituted = applySubstitutions(skill.body, dirname(skill.filePath), ctx.sessionId);
+        const content = sanitize(substituted.trim());
+        if (!addSection(content, skill.qualifiedName)) {
+          budgetExceeded = true;
+          this.onSkip?.(skill.qualifiedName, 'injection budget exceeded');
+        }
+      }
+      if (budgetExceeded) {
+        process.stdout.write(
+          `[skills] injection budget (${budget} chars) reached — some global-pool skills were skipped. ` +
+            `Switch to injection_mode: index or use skills.global_ingest.mode: explicit to pin specific skills.\n`,
+        );
+      }
     }
 
     if (sections.length === 0) return null;

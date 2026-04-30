@@ -59,6 +59,12 @@ export interface Tool<TArgs = unknown> {
   maxResultChars?: number;
   execute: (args: TArgs, ctx: ToolContext) => Promise<ToolResult>;
   isAvailable?: () => boolean;
+  /**
+   * When true, this tool is always included in the LLM's tool list regardless
+   * of the personality's toolset restriction. Use only for framework-internal
+   * tools that must always be reachable (e.g. `get_skill`).
+   */
+  alwaysInclude?: boolean;
 }
 
 /** Options for filtering tools beyond the `allowedTools` name list. */
