@@ -6,6 +6,7 @@ import { FileContextInjector } from '../file-context-injector';
 import { MemoryGuidanceInjector } from '../memory-guidance-injector';
 import { sanitize } from '../prompt-injection-guard';
 import { SkillsInjector } from '../skills-injector';
+import { UniversalScanner } from '../universal-scanner';
 
 // ---------------------------------------------------------------------------
 // Shared fixtures
@@ -32,6 +33,11 @@ const makePersonalityRegistry = (skillsDirs: string[] = []) => ({
   loadFromDirectory: async () => {},
   remove: () => {},
 });
+
+// Hermetic scanner — empty global pool. Without this, the default scanner
+// picks up real skills from `~/.claude/skills/` etc. on the dev's machine
+// and leaks them into per-personality-dir tests.
+const hermeticScanner = () => new UniversalScanner({ sources: [] });
 
 let testDir: string;
 
@@ -87,7 +93,10 @@ describe('sanitize', () => {
 
 describe('SkillsInjector', () => {
   it('returns null when no skill files exist', async () => {
-    const injector = new SkillsInjector(makePersonalityRegistry([testDir]), testDir);
+    const injector = new SkillsInjector(makePersonalityRegistry([testDir]), {
+      globalSkillsDir: testDir,
+      scanner: hermeticScanner(),
+    });
     const result = await injector.inject(makeCtx(testDir));
     expect(result).toBeNull();
   });
@@ -193,6 +202,7 @@ describe('SkillsInjector', () => {
     const injector = new SkillsInjector(makePersonalityRegistry([testDir]), {
       globalSkillsDir: testDir,
       onSkip: (id, reason) => skipped.push({ id, reason }),
+      scanner: hermeticScanner(),
     });
     const result = await injector.inject(makeCtx(testDir));
     expect(result).toBeNull();
@@ -230,7 +240,10 @@ describe('SkillsInjector', () => {
     await mkdir(slugDir, { recursive: true });
     await writeFile(join(slugDir, 'SKILL.md'), '# Slack');
 
-    const injector = new SkillsInjector(makePersonalityRegistry([testDir]), testDir);
+    const injector = new SkillsInjector(makePersonalityRegistry([testDir]), {
+      globalSkillsDir: testDir,
+      scanner: hermeticScanner(),
+    });
     const ctx: ReturnType<typeof makeCtx> & { meta?: Record<string, unknown> } = makeCtx(testDir);
     await injector.inject(ctx);
     expect(ctx.meta?.skillFilesUsed).toEqual(['steipete/slack']);

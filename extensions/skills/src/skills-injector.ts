@@ -187,7 +187,7 @@ export class SkillsInjector implements ContextInjector {
     if (sections.length === 0) return null;
 
     ctx.meta ??= {};
-    ctx.meta.skillFilesUsed = fileNames;
+    ctx.meta.skillFilesUsed = fileNames.filter((n) => n !== '__skill_index__');
 
     return {
       content: `## Skills\n\n${sections.join('\n\n---\n\n')}`,
