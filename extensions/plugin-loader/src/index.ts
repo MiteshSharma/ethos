@@ -7,8 +7,14 @@ import {
 } from '@ethosagent/plugin-contract';
 import type { EthosPlugin, PluginRegistries } from '@ethosagent/plugin-sdk';
 import { PluginApiImpl } from '@ethosagent/plugin-sdk';
+import {
+  createOpenClawApiShim,
+  extractOpenClawRegister,
+  isOpenClawPackageJson,
+  type OpenClawCompatCallbacks,
+} from '@ethosagent/openclaw-compat';
 import { FsStorage } from '@ethosagent/storage-fs';
-import type { Storage } from '@ethosagent/types';
+import type { MemoryProvider, PlatformAdapter, Storage } from '@ethosagent/types';
 
 export interface InstalledPluginManifest {
   /** The plugin's id — `ethos.id` if declared, else `name`. */
@@ -22,6 +28,8 @@ export interface InstalledPluginManifest {
   path: string;
   /** The contract major declared in the manifest, if any. */
   pluginContractMajor: number | null;
+  /** Plugin dialect — ethos-native or openclaw compat shim. */
+  dialect: 'ethos' | 'openclaw';
 }
 
 // ---------------------------------------------------------------------------
@@ -31,6 +39,16 @@ export interface InstalledPluginManifest {
 export interface PluginLoaderOptions {
   /** Storage backend. Defaults to FsStorage. */
   storage?: Storage;
+  /**
+   * Called when an OpenClaw memory plugin registers a MemoryProvider.
+   * The wiring layer uses this to slot the provider into the memory pipeline.
+   */
+  onMemoryProviderRegistered?: (pluginId: string, provider: MemoryProvider) => void;
+  /**
+   * Called when an OpenClaw channel plugin registers a PlatformAdapter.
+   * The wiring layer uses this to register the adapter with the Gateway.
+   */
+  onPlatformAdapterRegistered?: (pluginId: string, adapter: PlatformAdapter) => void;
 }
 
 export class PluginLoader {
@@ -38,10 +56,15 @@ export class PluginLoader {
   private readonly storage: Storage;
   private readonly apis = new Map<string, PluginApiImpl>();
   private readonly plugins = new Map<string, EthosPlugin>();
+  private readonly compatCallbacks: OpenClawCompatCallbacks;
 
   constructor(registries: PluginRegistries, opts: PluginLoaderOptions = {}) {
     this.registries = registries;
     this.storage = opts.storage ?? new FsStorage();
+    this.compatCallbacks = {
+      onMemoryProvider: opts.onMemoryProviderRegistered,
+      onPlatformAdapter: opts.onPlatformAdapterRegistered,
+    };
   }
 
   // ---------------------------------------------------------------------------
@@ -157,15 +180,19 @@ export class PluginLoader {
         const src = await this.storage.read(pkgPath);
         if (!src) continue;
         const raw = JSON.parse(src);
-        if (!isEthosPlugin(raw)) continue;
+        const isEthos = isEthosPlugin(raw);
+        const isOpenClaw = isOpenClawPackageJson(raw);
+        if (!isEthos && !isOpenClaw) continue;
 
-        // Phase 30.6 — reject incompatible contract major before import.
-        const declared = (raw as { ethos?: { pluginContractMajor?: number } }).ethos
-          ?.pluginContractMajor;
-        const compat = checkPluginContractMajor(declared, undefined, name);
-        if (!compat.ok) {
-          console.warn(`[plugin-loader] ${compat.reason}`);
-          continue;
+        if (isEthos) {
+          // Phase 30.6 — reject incompatible contract major before import.
+          const declared = (raw as { ethos?: { pluginContractMajor?: number } }).ethos
+            ?.pluginContractMajor;
+          const compat = checkPluginContractMajor(declared, undefined, name);
+          if (!compat.ok) {
+            console.warn(`[plugin-loader] ${compat.reason}`);
+            continue;
+          }
         }
 
         const entry = resolveNpmEntry(raw, join(nmDir, name));
@@ -223,8 +250,16 @@ export class PluginLoader {
   // ---------------------------------------------------------------------------
 
   private async activatePlugin(id: string, mod: unknown): Promise<void> {
+    // Try OpenClaw dialect first — register(api) export pattern
+    const openclawRegister = extractOpenClawRegister(mod);
+    if (openclawRegister && !isPluginModule(mod)) {
+      await this.activateOpenClawPlugin(id, openclawRegister);
+      return;
+    }
+
+    // Ethos-native dialect — activate(api) export pattern
     if (!isPluginModule(mod)) {
-      console.warn(`[plugin-loader] "${id}" has no activate() export — skipping`);
+      console.warn(`[plugin-loader] "${id}" has no activate() or register() export — skipping`);
       return;
     }
 
@@ -245,6 +280,28 @@ export class PluginLoader {
 
     this.apis.set(id, api);
     this.plugins.set(id, mod);
+  }
+
+  private async activateOpenClawPlugin(
+    id: string,
+    registerFn: (...args: unknown[]) => unknown,
+  ): Promise<void> {
+    const ethosApi = new PluginApiImpl(id, this.registries);
+    const shim = createOpenClawApiShim(id, ethosApi, this.compatCallbacks);
+
+    try {
+      await registerFn(shim);
+    } catch (err) {
+      console.warn(`[plugin-loader] OpenClaw plugin "${id}" register() threw: ${String(err)}`);
+      ethosApi.cleanup();
+      return;
+    }
+
+    this.apis.set(id, ethosApi);
+    // Track in plugins map with a synthetic EthosPlugin so list()/isLoaded() work
+    this.plugins.set(id, {
+      activate: async () => {},
+    });
   }
 }
 
@@ -331,38 +388,47 @@ async function scanNodeModules(
   return out;
 }
 
+interface PluginRawManifest extends EthosPluginPackageJson {
+  openclaw?: Record<string, unknown>;
+}
+
 function toInstalledPluginManifest(
-  manifest: EthosPluginPackageJson,
+  manifest: PluginRawManifest,
   source: 'user' | 'project',
   pluginDir: string,
 ): InstalledPluginManifest {
+  const dialect: 'ethos' | 'openclaw' =
+    manifest.ethos?.type === 'plugin' ? 'ethos' : 'openclaw';
+  const id =
+    dialect === 'ethos'
+      ? (manifest.ethos?.id ?? manifest.name)
+      : ((manifest.openclaw?.channel as Record<string, unknown> | undefined)?.id as string | undefined) ?? manifest.name;
   return {
-    id: manifest.ethos?.id ?? manifest.name,
+    id,
     name: manifest.name,
     version: manifest.version,
     description: manifest.description ?? null,
     source,
     path: pluginDir,
     pluginContractMajor: manifest.ethos?.pluginContractMajor ?? null,
+    dialect,
   };
 }
 
 async function readManifest(
   storage: Storage,
   pluginDir: string,
-): Promise<EthosPluginPackageJson | null> {
+): Promise<PluginRawManifest | null> {
   const raw = await storage.read(join(pluginDir, 'package.json'));
   if (raw === null) return null;
-  let parsed: EthosPluginPackageJson;
+  let parsed: PluginRawManifest;
   try {
-    parsed = JSON.parse(raw) as EthosPluginPackageJson;
+    parsed = JSON.parse(raw) as PluginRawManifest;
   } catch {
     return null;
   }
-  // Honour the same gate the loader uses — only surface manifests
-  // explicitly declaring themselves Ethos plugins. Otherwise random
-  // npm packages on the path would show up as plugins.
-  if (parsed.ethos?.type !== 'plugin') return null;
+  // Accept Ethos plugins (ethos.type = 'plugin') or OpenClaw plugins (openclaw block present)
+  if (parsed.ethos?.type !== 'plugin' && !isOpenClawPackageJson(parsed)) return null;
   return parsed;
 }
 

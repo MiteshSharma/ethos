@@ -460,6 +460,15 @@ importers:
         specifier: ^7.6.12
         version: 7.6.13
 
+  extensions/openclaw-compat:
+    dependencies:
+      '@ethosagent/plugin-sdk':
+        specifier: workspace:*
+        version: link:../../packages/plugin-sdk
+      '@ethosagent/types':
+        specifier: workspace:*
+        version: link:../../packages/types
+
   extensions/personalities:
     dependencies:
       '@ethosagent/storage-fs':
@@ -520,6 +529,9 @@ importers:
       '@ethosagent/core':
         specifier: workspace:*
         version: link:../../packages/core
+      '@ethosagent/openclaw-compat':
+        specifier: workspace:*
+        version: link:../openclaw-compat
       '@ethosagent/plugin-contract':
         specifier: workspace:*
         version: link:../../packages/plugin-contract

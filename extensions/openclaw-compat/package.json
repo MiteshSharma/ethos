@@ -1,5 +1,5 @@
 {
-  "name": "@ethosagent/plugin-loader",
+  "name": "@ethosagent/openclaw-compat",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -13,11 +13,7 @@
     "build": "tsup src/index.ts --format esm --dts"
   },
   "dependencies": {
-    "@ethosagent/core": "workspace:*",
-    "@ethosagent/openclaw-compat": "workspace:*",
-    "@ethosagent/plugin-contract": "workspace:*",
     "@ethosagent/plugin-sdk": "workspace:*",
-    "@ethosagent/storage-fs": "workspace:*",
     "@ethosagent/types": "workspace:*"
   }
 }

@@ -20,6 +20,7 @@
       "@ethosagent/platform-discord": ["./extensions/platform-discord/src"],
       "@ethosagent/platform-slack": ["./extensions/platform-slack/src"],
       "@ethosagent/platform-telegram": ["./extensions/platform-telegram/src"],
+      "@ethosagent/openclaw-compat": ["./extensions/openclaw-compat/src"],
       "@ethosagent/skills": ["./extensions/skills/src"],
       "@ethosagent/tools-file": ["./extensions/tools-file/src"],
       "@ethosagent/tools-terminal": ["./extensions/tools-terminal/src"],
