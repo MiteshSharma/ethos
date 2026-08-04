@@ -41,10 +41,10 @@ const HARD_PLACEHOLDER =
  * Item 7 — oversized tool output is spilled to a file and the inline result
  * keeps only head + tail plus a notice carrying the spill PATH (see
  * `extensions/tools-terminal/src/spill.ts`). The file survives for 24h, so
- * hard-clearing the whole result would throw away a still-valid pointer to
- * output the agent can otherwise read back. Match on the notice's stable
- * "full output written to <path>" phrase — no import, this stays a string
- * contract — and carry the path through the clear.
+ * aging away the whole result would throw away a still-valid pointer to output
+ * the agent can otherwise read back. Match on the notice's stable "full output
+ * written to <path>" phrase — no import, this stays a string contract — and
+ * carry the path through both aging levels.
  */
 const SPILL_PATH_RE = /full output written to (.+?) — use read_file/;
 
@@ -53,12 +53,23 @@ export function extractSpillPath(content: string): string | null {
   return SPILL_PATH_RE.exec(content)?.[1] ?? null;
 }
 
+/**
+ * Re-attach the spill pointer when an aging rewrite dropped it. Both levels go
+ * through here: hard-clear drops the whole result, and soft-trim drops the
+ * middle — where the notice sits, since `spill.ts` places it at 60% of the
+ * inline budget. Appending is skipped when the rewrite already carries a
+ * pointer (notice landed in the kept head or tail), so a result can never end
+ * up with two.
+ */
+function preserveSpillPath(original: string, rewritten: string): string {
+  const path = extractSpillPath(original);
+  if (path === null || extractSpillPath(rewritten) !== null) return rewritten;
+  return `${rewritten}\n[full output written to ${path} — use read_file to retrieve it]`;
+}
+
 /** Hard-clear replacement for one tool result, preserving any spill path. */
 function hardClear(content: string): string {
-  const path = extractSpillPath(content);
-  return path
-    ? `${HARD_PLACEHOLDER}\n[full output written to ${path} — use read_file to retrieve it]`
-    : HARD_PLACEHOLDER;
+  return preserveSpillPath(content, HARD_PLACEHOLDER);
 }
 
 export const DEFAULT_AGING_STATE: AgingState = { level: 'none', soft: [], hard: [] };
@@ -78,7 +89,8 @@ export function levelForRatio(ratio: number): AgingLevel {
 
 /**
  * Soft-trim: keep the head and the tail, drop the middle. Short results are
- * returned unchanged so trimming never grows a string.
+ * returned unchanged so trimming never grows a string. A spill notice that fell
+ * in the dropped middle is re-attached as a one-line pointer.
  */
 export function softTrimContent(content: string, keepChars = SOFT_TRIM_KEEP_CHARS): string {
   const marker = (removed: number) => `\n\n…[${removed.toLocaleString()} chars trimmed]…\n\n`;
@@ -87,7 +99,7 @@ export function softTrimContent(content: string, keepChars = SOFT_TRIM_KEEP_CHAR
   const head = content.slice(0, keepChars);
   const tail = content.slice(-keepChars);
   const removed = content.length - keepChars * 2;
-  return `${head}${marker(removed)}${tail}`;
+  return preserveSpillPath(content, `${head}${marker(removed)}${tail}`);
 }
 
 /**

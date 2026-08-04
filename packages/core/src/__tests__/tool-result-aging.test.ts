@@ -1,8 +1,8 @@
 // Phase 1a tool-result aging — first coverage. The behaviour under test is the
 // assembled-view rewrite: WHEN the aged set is recomputed (only at a threshold
-// crossing, so the prompt cache survives between them), and WHAT a hard-clear
-// leaves behind — specifically the Item 7 fix that a hard-cleared result keeps
-// its spill-file path, which outlives the clear by the spill TTL.
+// crossing, so the prompt cache survives between them), and WHAT aging leaves
+// behind — specifically the Item 7 fix that a soft-trimmed or hard-cleared
+// result keeps its spill-file path, which outlives aging by the spill TTL.
 
 import type { Message } from '@ethosagent/types';
 import { describe, expect, it } from 'vitest';
@@ -115,6 +115,69 @@ describe('Item 7 — hard-clear preserves a spill-file path', () => {
 
   it('extractSpillPath returns null when there is no notice', () => {
     expect(extractSpillPath('ordinary tool output')).toBeNull();
+  });
+});
+
+describe('Item 7 — soft-trim preserves a spill-file path', () => {
+  const SPILL = '/work/.ethos/terminal-spill/cli_x-1712-ab12cd.log';
+  /** The notice sits at ~60% of the inline budget, i.e. inside the dropped middle. */
+  const middleSpill = (path: string) =>
+    `${'a'.repeat(5_000)}${spillNotice(path)}${'b'.repeat(5_000)}`;
+
+  /** The t0 tool_result content after aging the view at `ratio`. */
+  function agedContent(messages: Message[], ratio: number, prev = DEFAULT_AGING_STATE): Message[] {
+    const { state } = advanceAgingState(prev, messages, ratio);
+    return applyAgingToView(messages, state).messages;
+  }
+
+  function resultOf(messages: Message[], id: string): string {
+    const block = messages
+      .flatMap((m) => (Array.isArray(m.content) ? m.content : []))
+      .find((b) => b.type === 'tool_result' && b.tool_use_id === id);
+    if (block?.type !== 'tool_result') throw new Error(`tool_result ${id} missing`);
+    return block.content;
+  }
+
+  it('keeps the path when the notice falls in the dropped middle', () => {
+    const messages = conversation(4, (i) => (i === 0 ? middleSpill(SPILL) : `plain-${i}`));
+    const content = resultOf(agedContent(messages, 0.35), 't0');
+    // The notice itself was dropped with the middle …
+    expect(content).toContain('chars trimmed');
+    expect(content).not.toContain('see the rest');
+    // … but the pointer survives.
+    expect(extractSpillPath(content)).toBe(SPILL);
+  });
+
+  it('leaves a result with no spill notice byte-identical to a bare head+tail trim', () => {
+    const body = `${'a'.repeat(5_000)}${'b'.repeat(5_000)}`;
+    const trimmed = softTrimContent(body);
+    const removed = body.length - 1_500 * 2;
+    expect(trimmed).toBe(
+      `${body.slice(0, 1_500)}\n\n…[${removed.toLocaleString()} chars trimmed]…\n\n${body.slice(-1_500)}`,
+    );
+  });
+
+  it('does not duplicate the pointer when the notice survives in the kept head', () => {
+    const body = `${spillNotice(SPILL)}${'a'.repeat(10_000)}`;
+    const trimmed = softTrimContent(body);
+    expect(trimmed.split('full output written to')).toHaveLength(2);
+    expect(extractSpillPath(trimmed)).toBe(SPILL);
+  });
+
+  it('ends with exactly one pointer after soft-trim then hard-clear', () => {
+    const messages = conversation(4, (i) => (i === 0 ? middleSpill(SPILL) : `plain-${i}`));
+    const { state: soft } = advanceAgingState(DEFAULT_AGING_STATE, messages, 0.35);
+    const softened = applyAgingToView(messages, soft).messages;
+    const cleared = resultOf(agedContent(softened, 0.9, soft), 't0');
+    expect(cleared).toContain('cleared to reclaim context');
+    expect(cleared.split('full output written to')).toHaveLength(2);
+    expect(extractSpillPath(cleared)).toBe(SPILL);
+  });
+
+  it('handles a spill path containing spaces', () => {
+    const spaced = '/Users/a b/My Project/.ethos/terminal-spill/s-1.log';
+    const messages = conversation(4, (i) => (i === 0 ? middleSpill(spaced) : `plain-${i}`));
+    expect(resultOf(agedContent(messages, 0.35), 't0')).toContain(spaced);
   });
 });
 

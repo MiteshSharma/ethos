@@ -24,8 +24,8 @@ import type { Storage, ToolContext } from '@ethosagent/types';
  *
  * The notice wording below is a string contract: `tool-result-aging.ts` in
  * `@ethosagent/core` matches "full output written to <path> — use read_file"
- * so a hard-cleared tool result still points at the spill file (which outlives
- * the clear by up to the TTL). Update both in the same commit.
+ * so a soft-trimmed or hard-cleared tool result still points at the spill file
+ * (which outlives aging by up to the TTL). Update both in the same commit.
  */
 
 /** Spill directory, relative to the agent working directory. */
