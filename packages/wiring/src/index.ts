@@ -989,6 +989,7 @@ export {
   type DangerPredicate,
   type DangerReason,
   type SmartApprovalCallback,
+  type SmartVerdict,
 } from './danger-predicate';
 
 export type { ModelSource, ModelTarget, ResolveModelInput } from './model-resolver';

@@ -34,7 +34,7 @@ describe('createWebApprovalHook', () => {
   }
 
   it('passes safe calls through with no approvals work', async () => {
-    const isDangerous: DangerPredicate = () => null;
+    const isDangerous: DangerPredicate = async () => null;
     const hook = createWebApprovalHook({ approvals, isDangerous });
 
     const result = await hook(payload());
@@ -43,7 +43,7 @@ describe('createWebApprovalHook', () => {
   });
 
   it('dangerous + approve resolves the hook with null (= allow)', async () => {
-    const isDangerous: DangerPredicate = () => 'destructive command';
+    const isDangerous: DangerPredicate = async () => 'destructive command';
     const hook = createWebApprovalHook({ approvals, isDangerous });
 
     let approvalId = '';
@@ -61,7 +61,7 @@ describe('createWebApprovalHook', () => {
   });
 
   it('dangerous + deny resolves the hook with { error } carrying the reason', async () => {
-    const isDangerous: DangerPredicate = () => 'destructive command';
+    const isDangerous: DangerPredicate = async () => 'destructive command';
     const hook = createWebApprovalHook({ approvals, isDangerous });
 
     let approvalId = '';
@@ -78,7 +78,7 @@ describe('createWebApprovalHook', () => {
   });
 
   it('passes the danger reason through to the SSE pending payload', async () => {
-    const isDangerous: DangerPredicate = (p) =>
+    const isDangerous: DangerPredicate = async (p) =>
       p.toolName === 'terminal' ? 'recursive force-delete of root' : null;
     const hook = createWebApprovalHook({ approvals, isDangerous });
 
@@ -107,7 +107,7 @@ describe('createWebApprovalHook', () => {
     });
     approvals = new ApprovalsService({ allowlist });
 
-    const isDangerous: DangerPredicate = () => 'force-delete';
+    const isDangerous: DangerPredicate = async () => 'force-delete';
     const hook = createWebApprovalHook({ approvals, isDangerous });
 
     let pending = false;

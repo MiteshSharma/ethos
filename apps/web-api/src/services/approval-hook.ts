@@ -12,7 +12,7 @@ import type { ApprovalsService } from './approvals.service';
 // the default rules (terminal `checkCommand` + always-ask list).
 
 export type DangerReason = string | null;
-export type DangerPredicate = (payload: BeforeToolCallPayload) => DangerReason;
+export type DangerPredicate = (payload: BeforeToolCallPayload) => Promise<DangerReason>;
 
 export interface CreateApprovalHookOptions {
   approvals: ApprovalsService;
@@ -21,7 +21,7 @@ export interface CreateApprovalHookOptions {
 
 export function createWebApprovalHook(opts: CreateApprovalHookOptions) {
   return async (payload: BeforeToolCallPayload): Promise<Partial<BeforeToolCallResult> | null> => {
-    const reason = opts.isDangerous(payload);
+    const reason = await opts.isDangerous(payload);
     if (reason === null) return null;
 
     const decision = await opts.approvals.requestApproval({

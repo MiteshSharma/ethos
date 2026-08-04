@@ -40,7 +40,7 @@ describe('tools.approve / tools.deny — full inversion loop', () => {
       chatDefaults: { model: 'claude-test', provider: 'anthropic' },
       // Predicate that flags every terminal call as dangerous so we don't
       // need to fold real `checkCommand` rules into the test.
-      dangerPredicate: (p) =>
+      dangerPredicate: async (p) =>
         p.toolName === 'terminal' ? 'every terminal call requires approval (test rule)' : null,
     }).app;
 

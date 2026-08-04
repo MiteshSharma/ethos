@@ -9,19 +9,35 @@ import type { BeforeToolCallPayload, PersonalityConfig } from '@ethosagent/types
 
 /** Result returned by a danger predicate. `null` = no approval needed. */
 export type DangerReason = string | null;
-export type DangerPredicate = (payload: BeforeToolCallPayload) => DangerReason;
+export type DangerPredicate = (payload: BeforeToolCallPayload) => Promise<DangerReason>;
+
+/**
+ * Verdict returned by a smart-approval reviewer.
+ *
+ *   `approve` — low residual risk; the call proceeds with no prompt.
+ *   `deny`    — the call must not run; the reason surfaces to the agent.
+ *   `ask`     — undecided; falls through to the normal approval flow.
+ *
+ * `ask` is the fail-closed default: any error, timeout, or unparseable
+ * reviewer response maps to `ask`, never to `approve`.
+ */
+export interface SmartVerdict {
+  decision: 'approve' | 'deny' | 'ask';
+  reason: string;
+}
 
 /**
  * Ch.4b — auxiliary classifier hook. When `approvalMode: smart` is set,
- * the danger predicate consults this callback (typically a Haiku call)
- * for a `dangerous` classification: low residual risk → auto-approve,
- * high residual risk → leave the dangerous flag in place so the
- * approval modal still fires. Synchronous return is a v1 simplification
- * — production smart mode would be async, but the danger-predicate
- * callsites are sync. Treat `auto-approve` as the only fast-path; any
- * uncertainty falls through to the approval flow.
+ * the danger predicate consults this callback (typically a cheap-model
+ * call) for a `dangerous` classification: low residual risk →
+ * auto-approve, high residual risk → leave the dangerous flag in place
+ * so the approval modal still fires. `approve` is the only fast-path;
+ * any uncertainty falls through to the approval flow.
  */
-export type SmartApprovalCallback = (payload: BeforeToolCallPayload, reason: string) => boolean;
+export type SmartApprovalCallback = (
+  payload: BeforeToolCallPayload,
+  reason: string,
+) => Promise<SmartVerdict>;
 
 export interface CreateDangerPredicateOptions {
   alwaysAsk?: ReadonlyArray<string>;
@@ -43,13 +59,15 @@ export interface CreateDangerPredicateOptions {
    * (Codex flagged the prior cross-module-only invariant as security-
    * rot shaped).
    *
-   * **Today, NO production caller passes this flag.** The only
-   * production user of the predicate is the web-profile approval
-   * modal (`apps/ethos/src/commands/serve.ts` → `createDangerPredicate()`),
-   * which intentionally omits the flag — web has channel ingress, so
-   * `off` mode would be rejected by the registry anyway, and the
-   * predicate refuses to honor it as a second-line check. CLI / TUI
-   * use the synchronous `createTerminalGuardHook` (hard-block, no
+   * **Today, NO production caller passes this flag.** There are three
+   * production construction sites — `apps/ethos/src/commands/serve.ts:893`
+   * and `apps/desktop/src/main/serve.ts:134` (both feeding the web-profile
+   * approval modal) and `apps/ethos/src/commands/gateway.ts:1440` (feeding
+   * the Slack approval card) — and all three intentionally omit the flag:
+   * web and Slack both have channel ingress, so `off` mode would be
+   * rejected by the registry anyway, and the predicate refuses to honor it
+   * as a second-line check. CLI / TUI use the synchronous
+   * `createTerminalGuardHook` (hard-block, no
    * approval flow). The cron / batch runners would be the natural
    * future caller — when they grow an approval flow, they would
    * construct the predicate with `allowAutoApproveDangerousTools: true`
@@ -75,10 +93,10 @@ export interface CreateDangerPredicateOptions {
  *        manual (default) → return the reason (drives the modal).
  *        off              → return null (auto-approve — hardline still
  *                           hard-blocks separately).
- *        smart            → consult `smartApprove` callback. true =
- *                           auto-approve, false = surface the reason.
- *                           Without the callback wired, smart degrades
- *                           to manual.
+ *        smart            → consult `smartApprove` callback. `approve`
+ *                           auto-approves; anything else surfaces the
+ *                           reason. Without the callback wired, smart
+ *                           degrades to manual.
  *
  * The plan reserves `off` for trusted local automation (cron, batch);
  * the load-time check in personality registry rejects `off` + channel
@@ -87,7 +105,7 @@ export interface CreateDangerPredicateOptions {
  */
 export function createDangerPredicate(opts: CreateDangerPredicateOptions = {}): DangerPredicate {
   const alwaysAsk = new Set(opts.alwaysAsk ?? []);
-  return (payload) => {
+  return async (payload) => {
     // Hardline command first — non-overridable in every mode.
     let hardlineReason: string | null = null;
     if (payload.toolName === 'terminal') {
@@ -111,8 +129,8 @@ export function createDangerPredicate(opts: CreateDangerPredicateOptions = {}): 
     const mode = opts.getPersonality?.(payload)?.safety?.approvalMode ?? 'manual';
     if (mode === 'off' && opts.allowAutoApproveDangerousTools === true) return null;
     if (mode === 'smart' && opts.smartApprove) {
-      const approved = opts.smartApprove(payload, dangerReason);
-      return approved ? null : dangerReason;
+      const verdict = await opts.smartApprove(payload, dangerReason);
+      return verdict.decision === 'approve' ? null : dangerReason;
     }
     return dangerReason;
   };

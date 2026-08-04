@@ -228,7 +228,7 @@ describe('createSlackApprovalHook', () => {
     const requestSpy = vi.spyOn(coordinator, 'requestApproval');
     const hook = createSlackApprovalHook({
       coordinator,
-      isDangerous: () => null,
+      isDangerous: async () => null,
       resolveApprovalTarget: () => ({ requesterUserId: 'U1' }),
     });
 
@@ -247,7 +247,7 @@ describe('createSlackApprovalHook', () => {
     const requestSpy = vi.spyOn(coordinator, 'requestApproval');
     const hook = createSlackApprovalHook({
       coordinator,
-      isDangerous: () => 'recursive force-delete',
+      isDangerous: async () => 'recursive force-delete',
       resolveApprovalTarget: () => undefined,
     });
 
@@ -262,7 +262,7 @@ describe('createSlackApprovalHook', () => {
     coordinator.onPending((p) => pending.push(p));
     const hook = createSlackApprovalHook({
       coordinator,
-      isDangerous: () => 'recursive force-delete',
+      isDangerous: async () => 'recursive force-delete',
       resolveApprovalTarget: () => ({ requesterUserId: 'U1' }),
     });
 
@@ -280,7 +280,7 @@ describe('createSlackApprovalHook', () => {
     coordinator.onPending((p) => pending.push(p));
     const hook = createSlackApprovalHook({
       coordinator,
-      isDangerous: () => 'recursive force-delete',
+      isDangerous: async () => 'recursive force-delete',
       resolveApprovalTarget: () => ({ requesterUserId: 'U1' }),
     });
 

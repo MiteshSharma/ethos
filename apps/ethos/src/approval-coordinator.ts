@@ -202,7 +202,7 @@ export class ApprovalCoordinator {
 
 /** Result returned by a danger predicate. `null` = no approval needed. */
 export type DangerReason = string | null;
-export type DangerPredicate = (payload: BeforeToolCallPayload) => DangerReason;
+export type DangerPredicate = (payload: BeforeToolCallPayload) => Promise<DangerReason>;
 
 /** Where a turn's Slack approval prompt would go. `requesterUserId` binds
  *  the approval to the user who triggered the turn. */
@@ -245,7 +245,7 @@ export interface CreateSlackApprovalHookOptions {
  */
 export function createSlackApprovalHook(opts: CreateSlackApprovalHookOptions) {
   return async (payload: BeforeToolCallPayload): Promise<Partial<BeforeToolCallResult> | null> => {
-    const reason = opts.isDangerous(payload);
+    const reason = await opts.isDangerous(payload);
     if (reason === null) return null;
 
     // No Slack approval surface for this turn (a non-Slack channel sharing
