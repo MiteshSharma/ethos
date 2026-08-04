@@ -39,7 +39,65 @@ export type SmartApprovalCallback = (
   reason: string,
 ) => Promise<SmartVerdict>;
 
+/**
+ * Tools flagged for review **under `approvalMode: 'smart'` only**.
+ *
+ * Why smart-only: a personality that opts into `smart` is explicitly asking for
+ * an LLM to judge its consequential calls. Before this list existed the only
+ * non-hardline danger source was a caller-supplied `alwaysAsk`, which no
+ * production caller passes — so `dangerReason` was always `null` under `smart`
+ * and the reviewer was structurally unreachable. Confining the list to `smart`
+ * keeps `manual` and `off` byte-identical to their previous behaviour: their
+ * flag set stays exactly `opts.alwaysAsk` (empty unless a caller passes one).
+ *
+ * **Composition: union, not override.** Under `smart` the effective flag set is
+ * `alwaysAsk ∪ SMART_MODE_CONSEQUENTIAL_TOOLS`; under `manual` / `off` it is
+ * `alwaysAsk` alone. An explicit `alwaysAsk` therefore always takes effect, in
+ * every mode — this list can only add to it, never replace or subtract from it.
+ * That matches the module's law that modes only make things stricter.
+ *
+ * **Scope: mutating-or-executing only.** Read-only tools (`read_file`,
+ * `search_files`, `list_*`, `web_search`, the `browser_*` readers) are
+ * deliberately absent: flagging a lookup would cost an LLM round-trip per read
+ * for no safety benefit. `run_code` is also absent — it executes inside an
+ * isolated container with no network, no `fs_reach`, and a memory cap, so the
+ * sandbox is already the containment. `process_stop` / `process_list` /
+ * `process_logs` observe or wind down work this list already gated at spawn.
+ *
+ * **Cost.** `createSmartApprover` caches verdicts on
+ * `sha256(toolName + canonicalized args)`, so a repeated identical call is
+ * served from cache and never re-reviewed. Worst case under `smart` is
+ * therefore one reviewer call per *distinct* consequential call — a typical
+ * turn that writes two files and runs one command costs three, and a retry loop
+ * re-issuing the same command costs zero more.
+ *
+ * Not a frozen contract: it is a default. Callers that want a different set
+ * pass `alwaysAsk`, and a personality that wants a specific call refused
+ * outright uses `safety.denyRules`, which is evaluated before this.
+ */
+export const SMART_MODE_CONSEQUENTIAL_TOOLS: ReadonlyArray<string> = [
+  // Shell execution on the host or execution backend — the widest-reach tool in
+  // the registry, and the only path to file deletion or move (no dedicated tool
+  // exists for either). The hardline check still short-circuits ahead of the
+  // reviewer for the commands it refuses outright.
+  'terminal',
+  // Creates or overwrites a file; an overwrite discards the prior content with
+  // no tool-layer undo.
+  'write_file',
+  // In-place edit of existing file content — same irreversibility as
+  // `write_file`, at finer granularity.
+  'patch_file',
+  // Spawns a background process that outlives the turn, so nothing later in the
+  // turn can be relied on to clean it up.
+  'process_start',
+];
+
 export interface CreateDangerPredicateOptions {
+  /**
+   * Tools that always require approval, in every mode. Unioned with
+   * {@link SMART_MODE_CONSEQUENTIAL_TOOLS} when the resolved personality is on
+   * `approvalMode: 'smart'`; used alone under `manual` and `off`.
+   */
   alwaysAsk?: ReadonlyArray<string>;
   /** Resolves the active personality config for a given session. The
    *  predicate uses it to read `safety.approvalMode`. Optional — when
@@ -122,7 +180,9 @@ function matchDenyRule(
  *                          terminalGuardHook hard-blocks separately so
  *                          this is belt + suspenders).
  *   2. Deny rule match   → return reason, regardless of mode.
- *   3. Always-ask / non-hardline danger → consult approvalMode:
+ *   3. Flagged tool / non-hardline danger → consult approvalMode. The flag set
+ *      is `alwaysAsk` under manual and off, and
+ *      `alwaysAsk ∪ SMART_MODE_CONSEQUENTIAL_TOOLS` under smart:
  *        manual (default) → return the reason (drives the modal).
  *        off              → return null (auto-approve — hardline still
  *                           hard-blocks separately).
@@ -139,6 +199,8 @@ function matchDenyRule(
  */
 export function createDangerPredicate(opts: CreateDangerPredicateOptions = {}): DangerPredicate {
   const alwaysAsk = new Set(opts.alwaysAsk ?? []);
+  // Built once; `smart` is the only mode that sees it (see the const's docs).
+  const smartAlwaysAsk = new Set([...alwaysAsk, ...SMART_MODE_CONSEQUENTIAL_TOOLS]);
   return async (payload) => {
     // Hardline command first — non-overridable in every mode.
     let hardlineReason: string | null = null;
@@ -157,16 +219,19 @@ export function createDangerPredicate(opts: CreateDangerPredicateOptions = {}): 
     const denyRule = matchDenyRule(safety?.denyRules, payload);
     if (denyRule) return `denied by personality deny rule: ${denyRule}`;
 
-    // Non-hardline danger — alwaysAsk is the only such source today.
+    // Non-hardline danger. The mode is resolved first because it selects the
+    // flag set: `smart` adds the built-in consequential-tool list on top of
+    // `alwaysAsk`, `manual` / `off` see `alwaysAsk` alone.
     // Future: per-tool risk classifiers (sql_execute, kubectl, etc.)
     // would also produce non-hardline reasons that route through here.
+    const mode = safety?.approvalMode ?? 'manual';
+    const flagged = mode === 'smart' ? smartAlwaysAsk : alwaysAsk;
     let dangerReason: string | null = null;
-    if (alwaysAsk.has(payload.toolName)) {
+    if (flagged.has(payload.toolName)) {
       dangerReason = `${payload.toolName} requires explicit approval`;
     }
     if (!dangerReason) return null;
 
-    const mode = safety?.approvalMode ?? 'manual';
     if (mode === 'off' && opts.allowAutoApproveDangerousTools === true) return null;
     if (mode === 'smart' && opts.smartApprove) {
       const verdict = await opts.smartApprove(payload, dangerReason);

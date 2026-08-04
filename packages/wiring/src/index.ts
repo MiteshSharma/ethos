@@ -994,6 +994,7 @@ export {
   createDangerPredicate,
   type DangerPredicate,
   type DangerReason,
+  SMART_MODE_CONSEQUENTIAL_TOOLS,
   type SmartApprovalCallback,
   type SmartVerdict,
 } from './danger-predicate';

@@ -72,10 +72,11 @@ export interface CreateApprovalDangerPredicateOptions {
   /** Model the smart reviewer runs on (the primary model today). */
   model: string;
   /**
-   * Tools that always require approval. No production caller sets this yet —
-   * without it the only danger source is the terminal hardline check, which
-   * short-circuits before the mode dispatch. Threaded through so a caller can
-   * flag tools without reaching around this module.
+   * Extra tools that always require approval, in every mode. No production
+   * caller sets this yet; it is threaded through so a caller can flag tools
+   * without reaching around this module. Under `approvalMode: 'smart'` the
+   * predicate unions it with `SMART_MODE_CONSEQUENTIAL_TOOLS` — under `manual`
+   * and `off` this is the only non-hardline danger source.
    */
   alwaysAsk?: ReadonlyArray<string>;
 }

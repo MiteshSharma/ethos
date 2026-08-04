@@ -260,6 +260,131 @@ describe('createApprovalDangerPredicate — smart mode', () => {
   });
 });
 
+describe('createApprovalDangerPredicate — built-in consequential flag set', () => {
+  /** Wire a predicate for `personalityId` and report provider construction. */
+  function smartPredicate(safety: PersonalityConfig['safety'], verdictJson: string) {
+    const hooks = new DefaultHookRegistry();
+    const { provider, calls } = verdictProvider(verdictJson);
+    let constructed = 0;
+    const isDangerous = createApprovalDangerPredicate({
+      hooks: [hooks],
+      personalities: registryWith(person('p', safety)),
+      getProvider: createLazyProvider(async () => {
+        constructed++;
+        return provider;
+      }),
+      model: 'reviewer-model',
+    });
+    const started = hooks.fireVoid('session_start', {
+      sessionId: 'sess-1',
+      sessionKey: 'k',
+      platform: 'web',
+      personalityId: 'p',
+    });
+    return { isDangerous, started, calls, constructed: () => constructed };
+  }
+
+  it('does not construct the provider for a read-only tool under smart', async () => {
+    const seam = smartPredicate({ approvalMode: 'smart' }, '{"decision":"deny","reason":"no"}');
+    await seam.started;
+
+    expect(await seam.isDangerous(payload('read_file', { path: 'notes.md' }))).toBeNull();
+    expect(await seam.isDangerous(payload('search_files', { query: 'todo' }))).toBeNull();
+    expect(seam.constructed()).toBe(0);
+    expect(seam.calls()).toBe(0);
+    expect(vi.mocked(createSmartApprover)).not.toHaveBeenCalled();
+  });
+
+  it('leaves a manual personality’s flag set untouched', async () => {
+    const seam = smartPredicate({ approvalMode: 'manual' }, '{"decision":"deny","reason":"no"}');
+    await seam.started;
+
+    // A write that never prompted before still does not prompt.
+    expect(await seam.isDangerous(payload('write_file', { path: 'notes.md' }))).toBeNull();
+    expect(await seam.isDangerous(payload('terminal', { command: 'echo hi' }))).toBeNull();
+    expect(seam.constructed()).toBe(0);
+    expect(vi.mocked(createSmartApprover)).not.toHaveBeenCalled();
+  });
+
+  it('serves a repeated identical flagged call from the verdict cache', async () => {
+    const seam = smartPredicate(
+      { approvalMode: 'smart' },
+      '{"decision":"deny","reason":"publishes an artifact"}',
+    );
+    await seam.started;
+
+    const args = { command: 'npm run build' };
+    const first = await seam.isDangerous(payload('terminal', args));
+    const second = await seam.isDangerous(payload('terminal', { ...args }));
+
+    expect(first).toBe('denied by reviewer: publishes an artifact');
+    expect(second).toBe(first);
+    // Two identical calls, one reviewer round-trip.
+    expect(seam.calls()).toBe(1);
+
+    // A different command is a different key, so it does pay for a review.
+    await seam.isDangerous(payload('terminal', { command: 'npm run lint' }));
+    expect(seam.calls()).toBe(2);
+  });
+});
+
+describe('smart mode through a real agent turn', () => {
+  it('routes a consequential call to the reviewer and relays the denial', async () => {
+    const hooks = new DefaultHookRegistry();
+    const personalities = registryWith(person('reviewed', { approvalMode: 'smart' }));
+    const { provider, calls } = verdictProvider(
+      '{"decision":"deny","reason":"rewrites tracked source"}',
+    );
+    const isDangerous = createApprovalDangerPredicate({
+      hooks: [hooks],
+      personalities,
+      getProvider: createLazyProvider(async () => provider),
+      model: 'reviewer-model',
+    });
+    hooks.registerModifying('before_tool_call', async (p) => {
+      const reason = await isDangerous(p);
+      return reason === null ? null : { error: reason };
+    });
+
+    let executed = 0;
+    const tools = new DefaultToolRegistry();
+    tools.register({
+      name: 'write_file',
+      description: 'write a file',
+      schema: { type: 'object' },
+      capabilities: {},
+      execute: async () => {
+        executed++;
+        return { ok: true, value: 'written' };
+      },
+    });
+
+    const loop = new AgentLoop({
+      llm: toolCallingLLM('write_file', { path: 'src/index.ts', content: 'boom' }),
+      tools,
+      hooks,
+      personalities,
+      safety: createTestSafety(),
+    });
+
+    const events: AgentEvent[] = [];
+    for await (const event of loop.run('rewrite it', {
+      sessionKey: 'smart-mode',
+      personalityId: 'reviewed',
+    })) {
+      events.push(event);
+    }
+
+    const toolEnd = events.find((e) => e.type === 'tool_end');
+    expect(toolEnd).toMatchObject({ ok: false });
+    expect(toolEnd && 'error' in toolEnd ? toolEnd.error : '').toContain(
+      'denied by reviewer: rewrites tracked source',
+    );
+    expect(executed).toBe(0);
+    expect(calls()).toBe(1);
+  });
+});
+
 describe('deny rules through a real agent turn', () => {
   it('blocks the tool call and relays the rule to the model', async () => {
     const hooks = new DefaultHookRegistry();

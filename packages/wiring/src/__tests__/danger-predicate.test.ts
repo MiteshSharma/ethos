@@ -1,6 +1,6 @@
 import type { BeforeToolCallPayload, PersonalityConfig } from '@ethosagent/types';
 import { describe, expect, it } from 'vitest';
-import { createDangerPredicate } from '../danger-predicate';
+import { createDangerPredicate, SMART_MODE_CONSEQUENTIAL_TOOLS } from '../danger-predicate';
 
 function payload(toolName: string, args: unknown = {}): BeforeToolCallPayload {
   return { sessionId: 's', toolCallId: 'tc', toolName, args };
@@ -158,6 +158,105 @@ describe('createDangerPredicate — Ch.4b approvalMode', () => {
     it('ignores an empty rule list and empty rule strings', async () => {
       const pred = createDangerPredicate({ getPersonality: () => person('manual', ['']) });
       expect(await pred(payload('terminal', { command: 'echo hi' }))).toBeNull();
+    });
+  });
+
+  // The built-in flag list is what makes `smart` reachable at all: no
+  // production caller passes `alwaysAsk`, so without it `dangerReason` was
+  // always null under smart and the reviewer never ran.
+  describe('SMART_MODE_CONSEQUENTIAL_TOOLS', () => {
+    /** Calls that must never be flagged — one reviewer round-trip per lookup. */
+    const READ_ONLY = ['read_file', 'search_files', 'web_search', 'list_available_tools'];
+
+    it('never lists a read-only tool', () => {
+      for (const tool of READ_ONLY) expect(SMART_MODE_CONSEQUENTIAL_TOOLS).not.toContain(tool);
+    });
+
+    it.each([
+      ...SMART_MODE_CONSEQUENTIAL_TOOLS,
+    ])('smart routes %s to the reviewer', async (tool) => {
+      let reviewed: string | undefined;
+      const pred = createDangerPredicate({
+        getPersonality: () => person('smart'),
+        smartApprove: async (p) => {
+          reviewed = p.toolName;
+          return { decision: 'approve', reason: 'routine' };
+        },
+      });
+      expect(await pred(payload(tool, { command: 'echo hi', path: 'notes.md' }))).toBeNull();
+      expect(reviewed).toBe(tool);
+    });
+
+    it.each([
+      ...SMART_MODE_CONSEQUENTIAL_TOOLS,
+    ])('manual leaves %s unflagged — the default path is unchanged', async (tool) => {
+      const pred = createDangerPredicate({ getPersonality: () => person('manual') });
+      expect(await pred(payload(tool, { command: 'echo hi', path: 'notes.md' }))).toBeNull();
+    });
+
+    it.each([...SMART_MODE_CONSEQUENTIAL_TOOLS])('off leaves %s unflagged', async (tool) => {
+      const pred = createDangerPredicate({ getPersonality: () => person('off') });
+      expect(await pred(payload(tool, { command: 'echo hi', path: 'notes.md' }))).toBeNull();
+    });
+
+    it('no personality resolved (legacy default) leaves the list unflagged', async () => {
+      const pred = createDangerPredicate();
+      for (const tool of SMART_MODE_CONSEQUENTIAL_TOOLS) {
+        expect(await pred(payload(tool, { command: 'echo hi' }))).toBeNull();
+      }
+    });
+
+    it.each(READ_ONLY)('smart does NOT route %s to the reviewer', async (tool) => {
+      let reviewed = false;
+      const pred = createDangerPredicate({
+        getPersonality: () => person('smart'),
+        smartApprove: async () => {
+          reviewed = true;
+          return { decision: 'ask', reason: 'unreachable' };
+        },
+      });
+      expect(await pred(payload(tool, { path: 'notes.md' }))).toBeNull();
+      expect(reviewed).toBe(false);
+    });
+
+    it('hardline still bypasses the reviewer even though terminal is on the list', async () => {
+      let reviewed = false;
+      const pred = createDangerPredicate({
+        getPersonality: () => person('smart'),
+        smartApprove: async () => {
+          reviewed = true;
+          return { decision: 'approve', reason: 'unreachable' };
+        },
+      });
+      expect(await pred(payload('terminal', { command: 'rm -rf /' }))).toMatch(
+        /recursive force-delete/,
+      );
+      expect(reviewed).toBe(false);
+    });
+
+    it('unions with an explicit alwaysAsk under smart rather than replacing it', async () => {
+      const reviewed: string[] = [];
+      const pred = createDangerPredicate({
+        alwaysAsk: ['email_send'],
+        getPersonality: () => person('smart'),
+        smartApprove: async (p) => {
+          reviewed.push(p.toolName);
+          return { decision: 'approve', reason: 'routine' };
+        },
+      });
+      expect(await pred(payload('email_send', { to: 'a@b' }))).toBeNull();
+      expect(await pred(payload('write_file', { path: 'notes.md' }))).toBeNull();
+      expect(reviewed).toEqual(['email_send', 'write_file']);
+    });
+
+    it('an explicit alwaysAsk still takes effect under manual and off', async () => {
+      for (const mode of ['manual', 'off'] as const) {
+        const pred = createDangerPredicate({
+          alwaysAsk: ['email_send'],
+          getPersonality: () => person(mode),
+        });
+        expect(await pred(payload('email_send', { to: 'a@b' }))).toMatch(/explicit approval/);
+      }
     });
   });
 
