@@ -351,12 +351,12 @@ export class AgentLoop {
     this.hooks = config.hooks ?? new DefaultHookRegistry();
     this.injectors = (config.injectors ?? []).sort((a, b) => b.priority - a.priority);
     this.injectorPluginIds = config.injectorPluginIds ?? new Map();
-    this.maxIterations = config.options?.maxIterations ?? 50;
+    this.maxIterations = config.options?.maxIterations ?? 500;
     this.historyLimit = config.options?.historyLimit ?? 200;
     this.platform = config.options?.platform ?? 'cli';
     this.workingDir = config.options?.workingDir ?? process.cwd();
     this.resultBudgetChars = config.options?.resultBudgetChars ?? 80_000;
-    this.maxToolCallsPerTurn = config.options?.maxToolCallsPerTurn ?? 100;
+    this.maxToolCallsPerTurn = config.options?.maxToolCallsPerTurn ?? 1000;
     this.maxIdenticalToolCalls = config.options?.maxIdenticalToolCalls ?? 25;
     this.maxConsecutiveIdenticalCalls = config.options?.maxConsecutiveIdenticalCalls ?? 5;
     this.streamingTimeoutMs = config.options?.streamingTimeoutMs ?? 600_000;
@@ -627,9 +627,8 @@ export class AgentLoop {
       }
 
       // Budget guard: bail before the next LLM call if we've already exceeded
-      // either the total tool-call budget or the per-tool repeat budget. The
-      // previous iteration's tool_result is in llmMessages, so the LLM history
-      // stays valid; we just refuse to call again.
+      // the tool-call budget, the per-tool repeat budget, or the session cost
+      // cap. Prior tool_results are in llmMessages, so the history stays valid.
       const budgetResult = checkTurnBudgets(
         totalToolCalls,
         effectiveMaxToolCalls,
@@ -637,6 +636,7 @@ export class AgentLoop {
         effectiveMaxIdentical,
         identicalStreak,
         this.maxConsecutiveIdenticalCalls,
+        { spentUsd: this.sessionCosts.get(sessionKey) ?? 0, capUsd: personality.budgetCapUsd },
       );
       if (budgetResult.exceeded) {
         const { rule, toolName, count, message } = budgetResult;

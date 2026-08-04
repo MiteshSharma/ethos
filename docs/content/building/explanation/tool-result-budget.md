@@ -91,7 +91,7 @@ A turn can have multiple LLM iterations — the model calls a tool, sees the res
 
 If the model calls three tools in iteration 1 (80k split three ways), then two tools in iteration 2 (80k split two ways), the turn consumed 80k + 80k = 160k characters of tool output across two iterations. The cap is per-batch, not per-turn.
 
-The reasoning: a multi-iteration turn is the model deliberately deciding to ask another question after seeing a result. Each iteration's `executeParallel` is a fresh budget because each iteration represents new information demand. The total per-turn cost is bounded by `maxToolCallsPerTurn` (default 100) and `maxIdenticalToolCalls` (default 25), which exist for the same reason — runaway tool loops.
+The reasoning: a multi-iteration turn is the model deliberately deciding to ask another question after seeing a result. Each iteration's `executeParallel` is a fresh budget because each iteration represents new information demand. The total per-turn cost is bounded by `maxToolCallsPerTurn` (default 1000) and `maxIdenticalToolCalls` (default 25), which exist for the same reason — runaway tool loops.
 
 ### `executeParallel` does the work that callers used to coordinate
 
@@ -119,13 +119,13 @@ See [Why does tool progress have an audience field?](audience-boundary.md) for t
 
 ### Budget interacts with the per-turn tool-call cap
 
-Two separate caps work together. `resultBudgetChars` bounds the *size* of tool output; `maxToolCallsPerTurn` (default 100) bounds the *count* across all LLM iterations in one user turn. A turn that calls 100 tools is the upper bound of iteration, not "100 tools per iteration".
+Two separate caps work together. `resultBudgetChars` bounds the *size* of tool output; `maxToolCallsPerTurn` (default 1000) bounds the *count* across all LLM iterations in one user turn. A turn that calls 1000 tools is the upper bound of iteration, not "1000 tools per iteration".
 
 The reasons for both caps:
 
 - A turn with a single 80k tool output and one iteration is fine; total tool output is 80k.
-- A turn with 100 sequential single-tool iterations is fine; each gets a fresh 80k budget; total is 8MB across the turn.
-- A turn with 101 sequential single-tool iterations trips `maxToolCallsPerTurn`. The framework exits cleanly with a user-visible `tool_progress` warning. This is the "runaway tool loop" failure mode: a model that keeps reading slightly different files and never converges. The cap catches it.
+- A turn with 1000 sequential single-tool iterations is fine; each gets a fresh 80k budget; total is 80MB across the turn.
+- A turn with 1001 sequential single-tool iterations trips `maxToolCallsPerTurn`. The framework exits cleanly with a user-visible `tool_progress` warning. This is the "runaway tool loop" failure mode: a model that keeps reading slightly different files and never converges. The cap catches it.
 
 The two caps are also independent of `maxIdenticalToolCalls` (default 25) — the same tool name invoked more than 25 times in one turn trips a separate guard. The CLAUDE.md note frames this as the "tts loop reported as OpenClaw #67744" failure mode: a tool that the model keeps re-invoking because each call looks slightly different. The identical-tool cap catches it before the per-turn cap does.
 

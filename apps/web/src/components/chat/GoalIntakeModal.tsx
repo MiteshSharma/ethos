@@ -42,7 +42,7 @@ export function GoalIntakeModal({
   const [boundaries, setBoundaries] = useState('');
   const [costLimit, setCostLimit] = useState(5);
   const [trials, setTrials] = useState(3);
-  const [maxToolCallsPerTurn, setMaxToolCallsPerTurn] = useState(100);
+  const [maxToolCallsPerTurn, setMaxToolCallsPerTurn] = useState(1000);
   const [maxIdenticalToolCalls, setMaxIdenticalToolCalls] = useState(25);
   const [maxRecoveryAttempts, setMaxRecoveryAttempts] = useState(2);
   const [allowDangerousToolCalls, setAllowDangerousToolCalls] = useState(false);

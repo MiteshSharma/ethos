@@ -120,10 +120,10 @@ Fires when the loop stops the turn early for safety, alongside a user-facing `to
 
 | `kind` | Emitted when | `rule` values |
 |---|---|---|
-| `'budget'` | A per-turn tool budget tripped before the next LLM call. | `tool-budget` — total calls hit `maxToolCallsPerTurn`; `identical-name` — one tool name hit `maxIdenticalToolCalls`; `identical-streak` — consecutive identical name+args calls hit the streak cap. |
+| `'budget'` | A per-turn tool budget or the session cost cap tripped before the next LLM call. | `tool-budget` — total calls hit `maxToolCallsPerTurn`; `identical-name` — one tool name hit `maxIdenticalToolCalls`; `identical-streak` — consecutive identical name+args calls hit the streak cap; `cost-cap` — accumulated session spend reached the personality's `budgetCapUsd`. |
 | `'watcher'` | The safety watcher paused the turn (a non-terminate decision). | The watcher rule id (e.g. `compounding-error`). |
 
-`toolName` and `count` are set for budget halts (`toolName` is `_budget` for the total-calls rule). Watcher *terminations* are not halts — they remain terminal [`error`](#error) events with a `watcher_<rule>` code.
+`toolName` and `count` are set for budget halts (`toolName` is `_budget` for the total-calls and `cost-cap` rules; `cost-cap` carries no `count`). Watcher *terminations* are not halts — they remain terminal [`error`](#error) events with a `watcher_<rule>` code.
 
 ### error {#error}
 

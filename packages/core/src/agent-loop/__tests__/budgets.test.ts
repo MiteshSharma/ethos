@@ -126,3 +126,36 @@ describe('checkTurnBudgets — consecutive-identical-call guard', () => {
     });
   });
 });
+
+describe('cost cap', () => {
+  const cost = (spentUsd: number, capUsd?: number) =>
+    checkTurnBudgets(0, 100, new Map(), 25, null, 5, { spentUsd, capUsd });
+
+  it('does not trip when no cap is configured, however much was spent', () => {
+    expect(cost(999)).toEqual({ exceeded: false });
+    expect(cost(999, undefined)).toEqual({ exceeded: false });
+  });
+
+  it('does not trip while spend is below the cap', () => {
+    expect(cost(0.049, 0.05)).toEqual({ exceeded: false });
+  });
+
+  it('trips when spend meets or exceeds the cap', () => {
+    expect(cost(0.06, 0.05)).toEqual({
+      exceeded: true,
+      rule: 'cost-cap',
+      toolName: '_budget',
+      message: 'Stopped: hit $0.05 budget cap for this session ($0.0600 spent)',
+    });
+    expect(cost(0.05, 0.05).exceeded).toBe(true);
+  });
+
+  it('trips a zero cap immediately', () => {
+    expect(cost(0, 0).exceeded).toBe(true);
+  });
+
+  it('reports cost ahead of the tool-call budget when both are blown', () => {
+    const r = checkTurnBudgets(100, 100, new Map(), 25, null, 5, { spentUsd: 1, capUsd: 0.5 });
+    expect(r.exceeded && r.rule).toBe('cost-cap');
+  });
+});

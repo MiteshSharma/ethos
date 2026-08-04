@@ -32,7 +32,25 @@ export function updateIdenticalStreak(
 
 /** Which budget guard tripped. Carried on the exceeded result (and the `halt`
  *  AgentEvent) so consumers never parse the human-readable message. */
-export type BudgetRule = 'tool-budget' | 'identical-name' | 'identical-streak';
+export type BudgetRule = 'tool-budget' | 'identical-name' | 'identical-streak' | 'cost-cap';
+
+/**
+ * Accumulated session spend, checked against the personality's `budgetCapUsd`.
+ *
+ * `turn-setup` refuses a turn whose spend already exceeded the cap, but that
+ * runs once, before the iteration loop opens — it only ever sees spend from
+ * *previous* turns. Spend accrues inside the loop: `stream-step` adds LLM
+ * usage and `tool-processing` adds tool-reported `cost_usd`, both writing to
+ * the same `sessionCosts` map. So `spentUsd` must be read live on every
+ * iteration, never snapshotted at turn start, or one long turn can burn all
+ * `maxIterations` past the cap.
+ *
+ * `capUsd` undefined = no cap configured; the check is skipped entirely.
+ */
+export interface CostBudget {
+  spentUsd: number;
+  capUsd?: number;
+}
 
 export function checkTurnBudgets(
   totalToolCalls: number,
@@ -41,9 +59,22 @@ export function checkTurnBudgets(
   maxIdenticalToolCalls: number,
   identicalStreak: IdenticalStreak | null,
   maxConsecutiveIdenticalCalls: number,
+  cost?: CostBudget,
 ):
   | { exceeded: false }
-  | { exceeded: true; rule: BudgetRule; toolName: string; count: number; message: string } {
+  | { exceeded: true; rule: BudgetRule; toolName: string; count?: number; message: string } {
+  // Cost first: money spent is a harder constraint than loop pathology, and
+  // `turn-setup`'s pre-turn refusal only ever sees spend from previous turns.
+  if (cost?.capUsd != null && cost.spentUsd >= cost.capUsd) {
+    return {
+      exceeded: true,
+      rule: 'cost-cap',
+      toolName: '_budget',
+      message:
+        `Stopped: hit $${cost.capUsd.toFixed(2)} budget cap for this session ` +
+        `($${cost.spentUsd.toFixed(4)} spent)`,
+    };
+  }
   if (totalToolCalls >= maxToolCallsPerTurn) {
     return {
       exceeded: true,
