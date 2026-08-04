@@ -43,6 +43,16 @@ export interface DeliveryObligation {
   platform: string;
   chatId: string;
   sessionId: string;
+  /**
+   * The thread the reply belonged to, or `undefined` for the root chat.
+   *
+   * Not decoration: Ethos's own lane key is
+   * `${platform}:${botKey}:${chatId}[:${threadId}]`, so a chat and a thread
+   * inside it are different conversations. Redelivering without it puts a
+   * resurrected answer in the root channel — right audience, wrong place, and
+   * stripped of the context that made it legible.
+   */
+  threadId?: string;
   /** sha256 hex of `content` — safe to log; the plaintext is not. */
   contentHash: string;
   content: string;
@@ -55,6 +65,8 @@ export interface RecordDeliveryInput {
   platform: string;
   chatId: string;
   sessionId: string;
+  /** Empty string is normalized to "no thread" — it carries no routing signal. */
+  threadId?: string;
   content: string;
 }
 
@@ -94,12 +106,30 @@ const SCHEMA = `
     content_hash TEXT NOT NULL,
     content      TEXT NOT NULL,
     created_at   INTEGER NOT NULL,
-    status       TEXT NOT NULL DEFAULT 'pending'
+    status       TEXT NOT NULL DEFAULT 'pending',
+    -- v2. Declared LAST so a freshly-created table and a v1 table upgraded by
+    -- ALTER TABLE ADD COLUMN end up with identical column order. Nullable:
+    -- most replies have no thread, and NULL is the honest encoding of that.
+    thread_id    TEXT
   ) STRICT;
 
   CREATE INDEX IF NOT EXISTS delivery_status_bot ON delivery_obligations(status, bot_key);
   CREATE INDEX IF NOT EXISTS delivery_status_created ON delivery_obligations(status, created_at);
 `;
+
+/**
+ * v1 → v2: carry the thread a reply belonged to.
+ *
+ * `ADD COLUMN` rather than a table rebuild — it preserves every existing row
+ * (they get `NULL`, i.e. "root chat", which is the only truthful answer for a
+ * row recorded before the column existed) and keeps the table STRICT, since
+ * `ALTER TABLE ADD COLUMN` does not touch the table's STRICT-ness.
+ */
+const MIGRATIONS = {
+  2: (db: Database.Database): void => {
+    db.exec('ALTER TABLE delivery_obligations ADD COLUMN thread_id TEXT');
+  },
+};
 
 interface ObligationRow {
   id: string;
@@ -111,6 +141,7 @@ interface ObligationRow {
   content: string;
   created_at: number;
   status: string;
+  thread_id: string | null;
 }
 
 function rowToObligation(r: ObligationRow): DeliveryObligation {
@@ -120,6 +151,7 @@ function rowToObligation(r: ObligationRow): DeliveryObligation {
     platform: r.platform,
     chatId: r.chat_id,
     sessionId: r.session_id,
+    threadId: r.thread_id ?? undefined,
     contentHash: r.content_hash,
     content: r.content,
     createdAt: r.created_at,
@@ -154,8 +186,9 @@ export class SQLiteDeliveryLedger implements DeliveryLedger {
 
     migrate(this.db, {
       name: 'delivery-ledger',
-      targetVersion: 1,
+      targetVersion: 2,
       baseline: SCHEMA,
+      migrations: MIGRATIONS,
     });
   }
 
@@ -165,8 +198,9 @@ export class SQLiteDeliveryLedger implements DeliveryLedger {
     this.db
       .prepare(
         `INSERT INTO delivery_obligations
-         (id, bot_key, platform, chat_id, session_id, content_hash, content, created_at, status)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending')`,
+         (id, bot_key, platform, chat_id, session_id, content_hash, content, created_at, status,
+          thread_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)`,
       )
       .run(
         id,
@@ -177,6 +211,9 @@ export class SQLiteDeliveryLedger implements DeliveryLedger {
         hash,
         input.content,
         Date.now(),
+        // Normalized at the durable boundary so the sweep never has to decide
+        // whether '' means a thread. NULL is the single encoding of "no thread".
+        input.threadId ? input.threadId : null,
       );
     return id;
   }

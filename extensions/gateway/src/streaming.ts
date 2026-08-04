@@ -203,9 +203,14 @@ export class DraftStreamer {
       // Obligation covers the terminal edit ONLY. Intermediate draft flushes
       // are deliberately untracked: each is superseded by this edit, so
       // redelivering one after a crash would ship a half-written reply.
+      // The edit itself targets an existing draft message and so needs no
+      // threadId — but a REDELIVERY is a fresh `send()` (the draft message id
+      // does not survive a restart), and that send does. Take it from the same
+      // field the initial draft send used.
       const obligationId = await beginDelivery(this.delivery, {
         chatId: this.chatId,
         sessionId: this.sessionKey,
+        threadId: this.threadId,
         content: finalText,
       });
       let attempts = 0;

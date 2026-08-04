@@ -2315,6 +2315,10 @@ export class Gateway {
     const obligationId = await beginDelivery(binding, {
       chatId: target.chatId,
       sessionId: target.sessionKey,
+      // Every caller already puts the thread on the OutboundMessage, so the
+      // ledger reads it from the same place the platform call does — there is
+      // no second source that could drift.
+      threadId: message.threadId,
       content: message.text,
     });
     const result = await target.adapter.send(target.chatId, message).catch(
@@ -2391,15 +2395,18 @@ export class Gateway {
           failed++;
           continue;
         }
-        // NOTE: the row carries no threadId, so a redelivered reply lands in
-        // the root chat rather than its original thread. Same channel, same
-        // audience — a placement loss, not a disclosure one.
-        const result = await adapter.send(row.chatId, { text: row.content }).catch(
-          (err: unknown): DeliveryResult => ({
-            ok: false,
-            error: err instanceof Error ? err.message : String(err),
-          }),
-        );
+        // The row carries its thread, so a redelivered reply returns to the
+        // sub-conversation it belonged to instead of the root chat. `threadId`
+        // is `undefined` for an unthreaded row — never '' or the string 'null',
+        // which some adapters would forward to the platform verbatim.
+        const result = await adapter
+          .send(row.chatId, { text: row.content, threadId: row.threadId })
+          .catch(
+            (err: unknown): DeliveryResult => ({
+              ok: false,
+              error: err instanceof Error ? err.message : String(err),
+            }),
+          );
         if (result?.ok === true) {
           await ledger.markDelivered(row.id);
           this.outboundDedup.record(row.sessionId, row.content);

@@ -33,7 +33,7 @@ function errMsg(err: unknown): string {
  */
 export async function beginDelivery(
   binding: DeliveryBinding | undefined,
-  input: { chatId: string; sessionId: string; content: string },
+  input: { chatId: string; sessionId: string; threadId?: string | undefined; content: string },
 ): Promise<string | null> {
   if (!binding || !input.content) return null;
   try {
@@ -42,6 +42,10 @@ export async function beginDelivery(
       platform: binding.platform,
       chatId: input.chatId,
       sessionId: input.sessionId,
+      // A thread is part of WHERE the reply belongs, not decoration: the lane
+      // key already encodes it. Dropping it here would redeliver into the root
+      // chat, out of the context that made the answer legible.
+      threadId: input.threadId,
       content: input.content,
     });
   } catch (err) {

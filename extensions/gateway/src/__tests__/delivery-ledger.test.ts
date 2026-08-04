@@ -332,6 +332,157 @@ describe('Gateway — redelivery vs. the outbound dedup cache', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Thread restoration
+//
+// The lane key is `${platform}:${botKey}:${chatId}[:${threadId}]` — a chat and
+// a thread inside it are different conversations. A redelivery that drops the
+// thread lands the resurrected answer in the root channel: right audience,
+// wrong place, and stripped of the context that made it legible. On Slack and
+// Telegram-with-topics that is what a user actually sees.
+// ---------------------------------------------------------------------------
+
+describe('Gateway — redelivery returns to the original thread', () => {
+  it('a threaded non-streaming reply redelivers into that thread', async () => {
+    const store = ledger();
+    const failing = stubAdapter({ ok: false });
+    const gw = gatewayWith(loopYielding(plainTurn), store);
+
+    await gw.handleMessage(msg({ threadId: 'thread-7' }), failing);
+    const pending = await store.listPending(['bot-a']);
+    expect(pending).toHaveLength(1);
+    expect(pending[0]?.threadId).toBe('thread-7');
+
+    const healthy = stubAdapter();
+    const rebooted = gatewayWith(loopYielding(plainTurn), store, {
+      adapters: new Map([['telegram', healthy]]),
+    });
+    expect(await rebooted.sweepPendingDeliveries()).toEqual({ redelivered: 1, failed: 0 });
+    expect(healthy.sent).toHaveLength(1);
+    expect(healthy.sent[0]?.message.text).toBe('the answer');
+    expect(healthy.sent[0]?.message.threadId).toBe('thread-7');
+  });
+
+  it('an unthreaded reply redelivers to the root chat with threadId undefined', async () => {
+    const store = ledger();
+    const failing = stubAdapter({ ok: false });
+    const gw = gatewayWith(loopYielding(plainTurn), store);
+
+    await gw.handleMessage(msg(), failing);
+    const healthy = stubAdapter();
+    const rebooted = gatewayWith(loopYielding(plainTurn), store, {
+      adapters: new Map([['telegram', healthy]]),
+    });
+    await rebooted.sweepPendingDeliveries();
+
+    // Undefined — not '' and not the string 'null', either of which an adapter
+    // would forward to the platform verbatim.
+    expect(healthy.sent[0]?.message.threadId).toBeUndefined();
+    expect(healthy.sent[0]?.message.threadId).not.toBe('null');
+    expect(healthy.sent[0]?.message.threadId).not.toBe('');
+  });
+
+  it('an empty-string inbound threadId is not resurrected as a thread', async () => {
+    const store = ledger();
+    const failing = stubAdapter({ ok: false });
+    const gw = gatewayWith(loopYielding(plainTurn), store);
+
+    await gw.handleMessage(msg({ threadId: '' }), failing);
+    expect((await store.listPending(['bot-a']))[0]?.threadId).toBeUndefined();
+  });
+
+  it('a threaded errored / interrupted notice redelivers into that thread', async () => {
+    const store = ledger();
+    const gw = gatewayWith(
+      loopYielding([
+        { type: 'text_delta', text: 'partial' },
+        { type: 'error', error: 'model exploded', code: 'provider_error' },
+      ]),
+      store,
+    );
+    await gw.handleMessage(msg({ threadId: 'thread-9' }), stubAdapter({ ok: false }));
+
+    const healthy = stubAdapter();
+    const rebooted = gatewayWith(loopYielding(plainTurn), store, {
+      adapters: new Map([['telegram', healthy]]),
+    });
+    await rebooted.sweepPendingDeliveries();
+    expect(healthy.sent[0]?.message.text).toContain('Response interrupted');
+    expect(healthy.sent[0]?.message.threadId).toBe('thread-9');
+  });
+
+  it('a threaded hook-claimed reply redelivers into that thread', async () => {
+    const store = ledger();
+    const loop = loopYielding(plainTurn);
+    loop.hooks.registerClaiming('gateway_message', async () => ({
+      handled: true,
+      reply: 'claimed answer',
+    }));
+    const gw = gatewayWith(loop, store);
+    await gw.handleMessage(
+      msg({ text: '/ping', threadId: 'thread-3' }),
+      stubAdapter({ ok: false }),
+    );
+
+    const healthy = stubAdapter();
+    const rebooted = gatewayWith(loopYielding(plainTurn), store, {
+      adapters: new Map([['telegram', healthy]]),
+    });
+    await rebooted.sweepPendingDeliveries();
+    expect(healthy.sent[0]?.message.text).toBe('claimed answer');
+    expect(healthy.sent[0]?.message.threadId).toBe('thread-3');
+  });
+
+  it('a threaded streaming terminal edit redelivers into that thread as a fresh send', async () => {
+    const store = ledger();
+    const gw = gatewayWith(
+      loopYielding([
+        { type: 'text_delta', text: 'Hello ' },
+        { type: 'text_delta', text: 'world' },
+        { type: 'done', text: 'Hello world', turnCount: 1 },
+      ]),
+      store,
+      { streamingEditIntervalMs: 600_000 },
+    );
+    // The draft send lands in the thread; the TERMINAL edit fails, so its
+    // obligation survives — and must carry the thread the draft went to.
+    await gw.handleMessage(msg({ threadId: 'thread-5' }), editAdapter({ editOk: false }));
+
+    const pending = await store.listPending(['bot-a']);
+    expect(pending).toHaveLength(1);
+    expect(pending[0]?.threadId).toBe('thread-5');
+
+    // The draft message id does not survive a restart, so redelivery is a
+    // fresh send() — which is exactly why it needs the thread.
+    const healthy = stubAdapter();
+    const rebooted = gatewayWith(loopYielding(plainTurn), store, {
+      adapters: new Map([['telegram', healthy]]),
+    });
+    await rebooted.sweepPendingDeliveries();
+    expect(healthy.sent[0]?.message.text).toBe('Hello world');
+    expect(healthy.sent[0]?.message.threadId).toBe('thread-5');
+  });
+
+  it('a row written by v1 code (no thread) still redelivers, to the root chat', async () => {
+    const store = ledger();
+    await store.record({
+      botKey: 'bot-a',
+      platform: 'telegram',
+      chatId: 'chat-1',
+      sessionId: 'telegram:bot-a:chat-1',
+      content: 'pre-migration reply',
+    });
+    const adapter = stubAdapter();
+    const gw = gatewayWith(loopYielding(plainTurn), store, {
+      adapters: new Map([['telegram', adapter]]),
+    });
+
+    expect(await gw.sweepPendingDeliveries()).toEqual({ redelivered: 1, failed: 0 });
+    expect(adapter.sent[0]?.message.text).toBe('pre-migration reply');
+    expect(adapter.sent[0]?.message.threadId).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Ownership
 // ---------------------------------------------------------------------------
 
