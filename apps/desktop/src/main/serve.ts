@@ -8,7 +8,9 @@ import { createWebApi } from '@ethosagent/web-api';
 import type { WiringConfig } from '@ethosagent/wiring';
 import {
   createAgentLoop,
-  createDangerPredicate,
+  createApprovalDangerPredicate,
+  createLazyProvider,
+  createLLM,
   createMemoryProvider,
   createSessionStore,
   IdentityMap,
@@ -131,7 +133,16 @@ export async function startServer(port: number): Promise<number> {
     personalities,
     refreshPersonalities,
     chatDefaults: { model, provider },
-    dangerPredicate: createDangerPredicate(),
+    // Threaded with the turn's personality (learned from the loop's
+    // `session_start`) so `denyRules` and `approvalMode` are enforced, plus a
+    // lazy provider handle for `approvalMode: 'smart'` — nothing is
+    // constructed unless a flagged call actually reaches the reviewer.
+    dangerPredicate: createApprovalDangerPredicate({
+      hooks: [loop.hooks],
+      personalities,
+      getProvider: createLazyProvider(() => createLLM(wiringConfig)),
+      model,
+    }),
     ...(onMemoryCaptured ? { onMemoryCaptured } : {}),
     toolRegistry,
     // F1 — the desktop runs the in-process backend with Docker disabled, so the

@@ -984,6 +984,11 @@ export {
 // ---------------------------------------------------------------------------
 
 export {
+  type CreateApprovalDangerPredicateOptions,
+  createApprovalDangerPredicate,
+  createLazyProvider,
+} from './approval-seams';
+export {
   type CreateDangerPredicateOptions,
   canonicalizeArgs,
   createDangerPredicate,

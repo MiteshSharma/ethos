@@ -49,7 +49,8 @@ import {
 } from '@ethosagent/web-api';
 import {
   buildA2aPeeringService,
-  createDangerPredicate,
+  createApprovalDangerPredicate,
+  createLazyProvider,
   createMemoryProvider,
   createSessionStore,
   IdentityMap,
@@ -889,8 +890,17 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
       provider: config.provider,
     },
     // Same `checkCommand` rules the CLI guard uses; surfacing them via
-    // the approval modal instead of a hard block.
-    dangerPredicate: createDangerPredicate(),
+    // the approval modal instead of a hard block. Threaded with the turn's
+    // personality (learned from the loop's `session_start`) so `denyRules`
+    // and `approvalMode` are enforced, plus a lazy provider handle for
+    // `approvalMode: 'smart'` — nothing is constructed unless a flagged call
+    // actually reaches the reviewer.
+    dangerPredicate: createApprovalDangerPredicate({
+      hooks: [loop.hooks],
+      personalities,
+      getProvider: createLazyProvider(() => createLLM(config)),
+      model: config.model,
+    }),
     ...(skillsCatalogDir ? { catalogDir: skillsCatalogDir } : {}),
     ...(cronScheduler ? { cronScheduler } : {}),
     ...(toolRegistry ? { toolRegistry } : {}),

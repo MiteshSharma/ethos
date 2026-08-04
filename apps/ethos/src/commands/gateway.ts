@@ -42,8 +42,10 @@ import {
   type GatewayMessagePayload,
   type GatewayMessageResult,
   type InboundMessage,
+  type LLMProvider,
   type MemoryContext,
   type NotificationRouter,
+  type PersonalityRegistry,
   type PlatformAdapter,
   resolveModelDisplay,
   type ToolRegistry,
@@ -54,7 +56,8 @@ import {
   type WatcherWakeEvent,
 } from '@ethosagent/watchers';
 import {
-  createDangerPredicate,
+  createApprovalDangerPredicate,
+  createLazyProvider,
   createMemoryProvider,
   IdentityMap,
   type MessagingSendFn,
@@ -69,6 +72,7 @@ import { createWebhookServer, type PrefilterRunner } from '../webhook-server';
 import {
   buildSystemTaskHandlers,
   createAgentLoop,
+  createLLM,
   createTeamAgentLoop,
   getEthosObservability,
   getFunnelTracker,
@@ -922,7 +926,11 @@ export async function runGatewayStart(opts: GatewayStartOptions = {}): Promise<v
   // hook on every bot loop that suspends a dangerous tool call until the
   // user clicks Allow / Deny on an approval card (Slack or Telegram).
   // No-op for deployments without an approval-capable adapter.
-  wireApprovalFlow(gateway, bots, adapters);
+  wireApprovalFlow(gateway, bots, adapters, {
+    personalities: seamPersonalities,
+    getProvider: createLazyProvider(() => createLLM(config)),
+    model: config.model,
+  });
 
   // Start the cron scheduler that was hoisted above (so agent-callable
   // cron tools register against the same instance the firing engine
@@ -1432,12 +1440,21 @@ function wireApprovalFlow(
   gateway: Gateway,
   bots: GatewayBotConfig[],
   adapters: PlatformAdapter[],
+  seams: {
+    /** The gateway's hot-reloaded read registry — the same one `/personality`
+     *  validates against, so a switched personality's approval policy applies
+     *  on its next turn. */
+    personalities: PersonalityRegistry;
+    /** Lazy provider handle for `approvalMode: 'smart'`. */
+    getProvider: () => Promise<LLMProvider>;
+    /** Model the smart reviewer runs on. */
+    model: string;
+  },
 ): void {
   const approvalAdapters = adapters.filter(isApprovalCapable);
   if (approvalAdapters.length === 0) return;
 
   const coordinator = new ApprovalCoordinator();
-  const isDangerous = createDangerPredicate();
 
   // Where a posted card lives, keyed by `approvalId`. Populated once
   // `postApprovalCard` succeeds; consumed by the `onResolved` handler so the
@@ -1472,8 +1489,19 @@ function wireApprovalFlow(
   // Register the approval hook only on loops whose bot has an
   // approval-capable adapter.
   const approvalBotKeys = new Set(approvalAdapters.map((a) => a.botKey));
-  for (const bot of bots) {
-    if (!approvalBotKeys.has(bot.botKey)) continue;
+  const approvalBots = bots.filter((bot) => approvalBotKeys.has(bot.botKey));
+  // One predicate for all approval bots. It learns each turn's personality
+  // from the owning loop's `session_start`, so `denyRules` and `approvalMode`
+  // follow whatever personality the lane is actually running — including a
+  // `/personality` switch. The reviewer and its provider stay unconstructed
+  // unless a flagged call reaches `approvalMode: 'smart'`.
+  const isDangerous = createApprovalDangerPredicate({
+    hooks: approvalBots.map((bot) => bot.loop.hooks),
+    personalities: seams.personalities,
+    getProvider: seams.getProvider,
+    model: seams.model,
+  });
+  for (const bot of approvalBots) {
     bot.loop.hooks.registerModifying(
       'before_tool_call',
       createSlackApprovalHook({ coordinator, isDangerous, resolveApprovalTarget }),
