@@ -21,6 +21,11 @@ import type { Storage, ToolContext } from '@ethosagent/types';
  * the write is refused (BoundaryError) or no storage is wired, the caller
  * gets head + tail with no path and no file is created: a path the agent
  * cannot read back is worse than no path at all.
+ *
+ * The notice wording below is a string contract: `tool-result-aging.ts` in
+ * `@ethosagent/core` matches "full output written to <path> — use read_file"
+ * so a hard-cleared tool result still points at the spill file (which outlives
+ * the clear by up to the TTL). Update both in the same commit.
  */
 
 /** Spill directory, relative to the agent working directory. */

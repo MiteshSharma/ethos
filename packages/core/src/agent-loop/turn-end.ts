@@ -7,7 +7,7 @@ import type {
   ToolFilterOpts,
 } from '@ethosagent/types';
 import { handleChunk } from './chunk-handler';
-import { evaluateGate, gateThreshold } from './compaction';
+import { effectiveGate, evaluateGate, gateThreshold } from './compaction';
 import { dedupHistory, toLLMMessages } from './history';
 import {
   COMPACTION_TAIL_KEEP,
@@ -235,9 +235,13 @@ export async function* maybeConsolidateAtTurnEnd(
     ctx.systemPrompt,
   );
 
-  const compactGate = gateThreshold(
+  // Item 7 — the absolute ceiling applies here too, not only at the pre-LLM
+  // gate. The flush gate stays purely fractional: it is a soft consolidation
+  // threshold, and compaction already takes precedence when both trip.
+  const compactGate = effectiveGate(
     gateEval,
     deps.compaction?.pressure ?? DEFAULT_COMPACT_PRESSURE,
+    deps.compaction?.maxContextTokens,
   );
   const flushGate = gateThreshold(
     gateEval,
@@ -279,6 +283,9 @@ async function* compactAtTurnEnd(
       history: replay,
       engineName,
       tailKeep: COMPACTION_TAIL_KEEP,
+      ...(deps.compaction?.minTailUserMessages !== undefined
+        ? { minTailUserMessages: deps.compaction.minTailUserMessages }
+        : {}),
       summaryTargetTokens: MANUAL_SUMMARY_TARGET_TOKENS,
     },
   );

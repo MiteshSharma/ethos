@@ -113,9 +113,13 @@ export interface WiringConfig {
    * §5 — global context-compaction gate thresholds (fractions in (0,1]). A
    * per-model catalog `profile.compaction` overrides these; both absent → the
    * hardcoded 0.8/0.7 defaults. Threaded into the loop → compaction gate.
+   *
+   * Item 7 — `maxContextTokens` is an absolute token ceiling applied to BOTH
+   * gates (global only, no per-model layer); `minTailUserMessages` is the
+   * number of user messages every compaction keeps verbatim (default 3).
    */
-  // biome-ignore format: Phase 3 adds turn-end auto-compact + overflow-retry flags; Phase 4 adds smallWindow.
-  compaction?: { pressure?: number; target?: number; gateDelta?: number; autoCompact?: boolean; retryOnOverflow?: boolean; smallWindow?: 'auto' | 'on' | 'off' };
+  // biome-ignore format: Phase 3 adds turn-end auto-compact + overflow-retry flags; Phase 4 adds smallWindow; Item 7 adds the ceiling + user tail.
+  compaction?: { pressure?: number; target?: number; gateDelta?: number; autoCompact?: boolean; retryOnOverflow?: boolean; smallWindow?: 'auto' | 'on' | 'off'; maxContextTokens?: number; minTailUserMessages?: number };
   /**
    * Phase 3 — silent memory-flush turn config (opt-in). `enabled` gates the
    * whole feature; the rest tune the soft threshold, timebox + token cap,

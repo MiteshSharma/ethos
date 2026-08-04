@@ -739,3 +739,63 @@ describe('Phase 3 — isContextOverflowError', () => {
     ).toBe(true);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Item 7 — the absolute ceiling applies at the TURN-END gate too
+// ---------------------------------------------------------------------------
+
+describe('Item 7 — absolute ceiling at the turn-end gate', () => {
+  /** A turn whose real input tokens land at `inputTokens`, on a 200k model. */
+  function loopWith(
+    session: InMemorySessionStore,
+    compaction: { maxContextTokens?: number } | undefined,
+    inputTokens: number,
+  ) {
+    const llm = makeLLM(() => ({
+      chunks: [
+        { type: 'text_delta', text: 'ok' },
+        usageChunk(inputTokens),
+        { type: 'done', finishReason: 'end_turn' },
+      ],
+    }));
+    return new AgentLoop({
+      llm,
+      session,
+      safety: createTestSafety(),
+      ...(compaction ? { compaction } : {}),
+    });
+  }
+
+  it('compacts at 25% pressure when the ceiling is below current usage', async () => {
+    const session = new InMemorySessionStore();
+    const s = await seedShortSession(session, 'cli:ceiling', 8);
+    // 50k tokens against a 200k window is ~25% — the fractional gate (~157k)
+    // does not fire. The 40k ceiling does.
+    const loop = loopWith(session, { maxContextTokens: 40_000 }, 50_000);
+    const events = await collect(loop.run('next', { sessionKey: 'cli:ceiling' }));
+    expect(events.some((e) => e.type === 'tool_progress' && e.toolName === '_compaction')).toBe(
+      true,
+    );
+    expect(await session.listCompressions(s.id)).toHaveLength(1);
+  });
+
+  it('leaves the identical turn alone with no ceiling configured', async () => {
+    const session = new InMemorySessionStore();
+    const s = await seedShortSession(session, 'cli:no-ceiling', 8);
+    const loop = loopWith(session, undefined, 50_000);
+    const events = await collect(loop.run('next', { sessionKey: 'cli:no-ceiling' }));
+    expect(events.some((e) => e.type === 'tool_progress' && e.toolName === '_compaction')).toBe(
+      false,
+    );
+    expect(await session.listCompressions(s.id)).toHaveLength(0);
+  });
+
+  it('does not double-compact when the ceiling sits above the fractional gate', async () => {
+    const session = new InMemorySessionStore();
+    const s = await seedShortSession(session, 'cli:high-ceiling', 8);
+    // Ceiling 400k > the ~157k fractional gate; 50k usage trips neither.
+    const loop = loopWith(session, { maxContextTokens: 400_000 }, 50_000);
+    await collect(loop.run('next', { sessionKey: 'cli:high-ceiling' }));
+    expect(await session.listCompressions(s.id)).toHaveLength(0);
+  });
+});

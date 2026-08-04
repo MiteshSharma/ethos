@@ -6,8 +6,10 @@
 // to lose the original task description (drop-oldest is wrong); a coach doing
 // short reflection turns is fine with drop-oldest.
 //
-// Three concrete implementations ship in @ethosagent/core. Plugin authors can
-// register custom engines via `EthosPluginApi.registerContextEngine`.
+// Four concrete implementations ship in @ethosagent/core — `drop_oldest`,
+// `semantic_summary`, `reference_preserving`, and `tiered_summary` (see
+// `context-engines/registry.ts`). Plugin authors can register custom engines
+// via `EthosPluginApi.registerContextEngine`.
 
 import type { Message } from './llm';
 import type { PersonalityConfig } from './personality';
@@ -126,9 +128,13 @@ export interface ContextEngine {
   readonly name: string;
   compact(opts: ContextEngineCompactInput): Promise<ContextEngineCompactOutput>;
   /**
-   * Optional engine-owned trigger. When present, the framework calls this
-   * before the default 80% pressure gate. An engine can choose to act
-   * earlier (never later — the framework's gate is the floor).
+   * Optional engine-owned trigger, intended to let an engine act EARLIER than
+   * the framework's pressure gate (never later — that gate is the floor).
+   *
+   * NOT WIRED: the framework does not call this today. `maybeCompact` decides
+   * purely on the pressure gate, so an engine that declares `shouldCompact`
+   * gets no extra trigger. Declared, conformance-tested, and reserved — do not
+   * design behaviour around it until a framework call site exists.
    */
   shouldCompact?(input: ContextEngineCompactInput): boolean;
 }

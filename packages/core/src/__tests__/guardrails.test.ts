@@ -22,7 +22,13 @@ describe('Orchestrator guardrails', () => {
     // constructor/deps threading. All substantive logic lives in
     // agent-loop/overflow.ts and agent-loop/turn-end.ts; only the wiring +
     // dispatch remain here.
-    expect(lineCount).toBeLessThanOrEqual(840);
+    // Bumped 840 → 841: Item 7's guaranteed user-message tail is configured
+    // globally (`compaction.minTailUserMessages`), and `/compact` is the one
+    // compaction path whose deps are assembled here — so the knob costs exactly
+    // one property line in the `compactSession` call (the new compaction fields
+    // themselves went onto the existing one-line `compaction?:` config shape).
+    // The logic lives in agent-loop/manual-compact.ts.
+    expect(lineCount).toBeLessThanOrEqual(841);
   });
 
   it('no stage file exceeds 700 lines', () => {

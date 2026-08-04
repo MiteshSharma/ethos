@@ -62,6 +62,11 @@ export interface LoopDeps {
     autoCompact?: boolean;
     retryOnOverflow?: boolean;
     defaultEngine?: string;
+    /** Item 7 — absolute context-token ceiling; compaction fires above it even
+     *  when the fractional gate has not been reached. Absent → fractional only. */
+    maxContextTokens?: number;
+    /** Item 7 — minimum USER messages kept verbatim in the tail. Absent → 3. */
+    minTailUserMessages?: number;
   };
   /** Phase 3 — silent memory-flush turn config. `enabled` gates the whole
    *  feature (default off); the rest tune the soft threshold, hard timebox +

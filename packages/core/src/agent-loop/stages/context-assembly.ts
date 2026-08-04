@@ -516,7 +516,12 @@ export async function* assembleContext(
   // compaction survives into later turns (and the cooldown ships the compacted
   // view, not raw history). The boundary keeps the newest stored messages of the
   // replay history verbatim; older messages are represented by the summary.
-  const autoBoundary = computeKeptTailBoundary(replayHistory, COMPACTION_TAIL_KEEP);
+  // Item 7 — the boundary also guarantees N verbatim USER messages in the tail.
+  const autoBoundary = computeKeptTailBoundary(
+    replayHistory,
+    COMPACTION_TAIL_KEEP,
+    deps.compaction?.minTailUserMessages,
+  );
   const compacted = await maybeCompact(
     {
       llm: deps.llm,
@@ -536,6 +541,9 @@ export async function* assembleContext(
         ? { charsPerToken: deps.compaction.charsPerToken }
         : {}),
       ...(deps.compaction?.gateDelta !== undefined ? { gateDelta: deps.compaction.gateDelta } : {}),
+      ...(deps.compaction?.maxContextTokens !== undefined
+        ? { maxContextTokens: deps.compaction.maxContextTokens }
+        : {}),
       ...(deps.compaction?.defaultEngine !== undefined
         ? { defaultEngine: deps.compaction.defaultEngine }
         : {}),

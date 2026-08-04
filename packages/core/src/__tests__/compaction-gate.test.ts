@@ -445,3 +445,141 @@ describe('T3 — large (Anthropic 200k) window behavior unchanged', () => {
     expect(engine.compactCalled).toBe(true);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Item 7 — absolute compaction ceiling (`compaction.maxContextTokens`)
+// ---------------------------------------------------------------------------
+
+describe('Item 7 — absolute-token compaction ceiling', () => {
+  it('fires on a 1M-window session that the fractional gate alone would let grow', async () => {
+    const engine = createSpyEngine();
+    // 1M window, no output reserve → fractional gate = 0.8 * 1M = 800k tokens.
+    // ~1.6M chars → 400k char/4 tokens = 40% pressure: the fractional gate does
+    // NOT fire. The 300k ceiling does.
+    const result = await maybeCompact(
+      {
+        // biome-ignore lint/suspicious/noExplicitAny: standard test mock
+        llm: { maxContextTokens: 1_000_000 } as any,
+        contextEngines: registryWith(engine),
+        session: sessionMock,
+        reservedOutputTokens: 0,
+        maxContextTokens: 300_000,
+      },
+      messagesOfSize(1_600_000),
+      '',
+      personality,
+      meta,
+    );
+    expect(engine.compactCalled).toBe(true);
+    expect(result.messages.length).toBe(2);
+  });
+
+  it('leaves the same session alone when no ceiling is configured', async () => {
+    const engine = createSpyEngine();
+    await maybeCompact(
+      {
+        // biome-ignore lint/suspicious/noExplicitAny: standard test mock
+        llm: { maxContextTokens: 1_000_000 } as any,
+        contextEngines: registryWith(engine),
+        session: sessionMock,
+        reservedOutputTokens: 0,
+      },
+      messagesOfSize(1_600_000),
+      '',
+      personality,
+      meta,
+    );
+    expect(engine.compactCalled).toBe(false);
+  });
+
+  it('does not double-compact a small-window model whose fractional gate is lower', async () => {
+    const engine = createSpyEngine();
+    // 200k window → fractional gate 160k tokens. A 400k ceiling is far above it,
+    // so the ceiling must not lower (or raise) anything: 120k tokens of history
+    // is under the fractional gate and must stay uncompacted.
+    await maybeCompact(
+      {
+        // biome-ignore lint/suspicious/noExplicitAny: standard test mock
+        llm: { maxContextTokens: 200_000 } as any,
+        contextEngines: registryWith(engine),
+        session: sessionMock,
+        reservedOutputTokens: 0,
+        maxContextTokens: 400_000,
+      },
+      messagesOfSize(480_000),
+      '',
+      personality,
+      meta,
+    );
+    expect(engine.compactCalled).toBe(false);
+  });
+
+  it('keeps the fractional gate when it is the LOWER of the two', async () => {
+    const engine = createSpyEngine();
+    // 200k window → fractional gate 160k. Ceiling 400k. 175k tokens of history
+    // exceeds the fractional gate but not the ceiling → still compacts.
+    await maybeCompact(
+      {
+        // biome-ignore lint/suspicious/noExplicitAny: standard test mock
+        llm: { maxContextTokens: 200_000 } as any,
+        contextEngines: registryWith(engine),
+        session: sessionMock,
+        reservedOutputTokens: 0,
+        maxContextTokens: 400_000,
+      },
+      messagesOfSize(700_000),
+      '',
+      personality,
+      meta,
+    );
+    expect(engine.compactCalled).toBe(true);
+  });
+
+  it('caps the shrink target at the ceiling so the next turn does not re-trip', async () => {
+    let seenTarget = -1;
+    const engine = {
+      name: 'target_spy',
+      async compact(opts: ContextEngineCompactInput) {
+        seenTarget = opts.targetTokens;
+        return { messages: opts.messages.slice(-1), notes: 'x' };
+      },
+    };
+    const registry = new DefaultContextEngineRegistry();
+    registry.register(engine);
+    await maybeCompact(
+      {
+        // biome-ignore lint/suspicious/noExplicitAny: standard test mock
+        llm: { maxContextTokens: 1_000_000 } as any,
+        contextEngines: registry,
+        session: sessionMock,
+        reservedOutputTokens: 0,
+        maxContextTokens: 300_000,
+      },
+      messagesOfSize(1_600_000),
+      '',
+      { ...personality, context_engine: 'target_spy' },
+      meta,
+    );
+    // 0.7 * 300k, not 0.7 * 1M.
+    expect(seenTarget).toBe(210_000);
+  });
+
+  it('ignores a non-positive ceiling', async () => {
+    const engine = createSpyEngine();
+    await maybeCompact(
+      {
+        // biome-ignore lint/suspicious/noExplicitAny: standard test mock
+        llm: { maxContextTokens: 1_000_000 } as any,
+        contextEngines: registryWith(engine),
+        session: sessionMock,
+        reservedOutputTokens: 0,
+        maxContextTokens: 0,
+      },
+      messagesOfSize(1_600_000),
+      '',
+      personality,
+      meta,
+    );
+    expect(engine.compactCalled).toBe(false);
+  });
+});

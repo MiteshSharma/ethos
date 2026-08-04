@@ -78,7 +78,9 @@ describe('watermark helpers', () => {
       row({ id: '4', role: 'tool_result' }),
     ];
     // tailKeep 2 → index 3 is a tool_result → walk back to its assistant (2).
-    const { index, keptFromMessageId } = computeKeptTailBoundary(history, 2);
+    // Item 7: the user-tail guarantee is switched off (0) so the pair invariant
+    // is asserted in isolation; the two composed are covered further down.
+    const { index, keptFromMessageId } = computeKeptTailBoundary(history, 2, 0);
     expect(index).toBe(2);
     expect(keptFromMessageId).toBe('2');
   });
@@ -92,7 +94,8 @@ describe('watermark helpers', () => {
     ];
     // tailKeep 1 → index 3 (tool_result) → walk back past index 2 (tool_result)
     // to the owning assistant at index 1. Exercises the multi-step walk-back.
-    const { index, keptFromMessageId } = computeKeptTailBoundary(history, 1);
+    // Item 7: user-tail guarantee off (0) — see the note above.
+    const { index, keptFromMessageId } = computeKeptTailBoundary(history, 1, 0);
     expect(index).toBe(1);
     expect(keptFromMessageId).toBe('1');
   });
@@ -363,5 +366,224 @@ describe('/compact watermark end-to-end', () => {
       expect(sent).toContain('SUM');
       expect(sent).not.toContain('RAW-0"');
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Item 7 — guaranteed N-user-message tail. Lands in `computeKeptTailBoundary`,
+// which is the ONLY thing all three compaction paths share (pre-LLM pressure
+// gate, turn-end auto-compaction, `/compact`), so all three are asserted.
+// ---------------------------------------------------------------------------
+
+/**
+ * 20 rows: an alternating user/assistant prefix (users at 0,2,4,6,8,10) followed
+ * by a tool-heavy tail (indices 12-19) that contains ZERO user messages — the
+ * exact shape where a 6-message tail keeps no record of what was asked.
+ */
+function toolHeavyHistory(): StoredMessage[] {
+  const rows: StoredMessage[] = [];
+  for (let i = 0; i < 12; i++) {
+    rows.push(
+      row({
+        id: `m${i}`,
+        role: i % 2 === 0 ? 'user' : 'assistant',
+        content: i % 2 === 0 ? `U-${i / 2}` : `A-${(i - 1) / 2}`,
+      }),
+    );
+  }
+  const tail: Array<StoredMessage['role']> = [
+    'assistant',
+    'tool_result',
+    'assistant',
+    'tool_result',
+    'assistant',
+    'tool_result',
+    'assistant',
+    'assistant',
+  ];
+  tail.forEach((role, i) => {
+    rows.push(row({ id: `m${12 + i}`, role, content: `T-${i}` }));
+  });
+  return rows;
+}
+
+describe('Item 7 — computeKeptTailBoundary guarantees N user messages', () => {
+  it('widens a tool-heavy tail that would otherwise contain zero user messages', () => {
+    const history = toolHeavyHistory();
+    // tailKeep 6 alone → index 14, which holds no user message at all.
+    expect(computeKeptTailBoundary(history, 6, 0).index).toBe(14);
+    const { index, keptFromMessageId } = computeKeptTailBoundary(history, 6, 3);
+    // Walks back to the 3rd-newest user message (index 6 = "U-3").
+    expect(index).toBe(6);
+    expect(keptFromMessageId).toBe('m6');
+    const kept = history.slice(index);
+    expect(kept.filter((m) => m.role === 'user').map((m) => m.content)).toEqual([
+      'U-3',
+      'U-4',
+      'U-5',
+    ]);
+  });
+
+  it('defaults to 3 user messages when no override is passed', () => {
+    expect(computeKeptTailBoundary(toolHeavyHistory(), 6).index).toBe(6);
+  });
+
+  it('leaves the boundary alone when the tail already holds N user messages', () => {
+    const history = Array.from({ length: 20 }, (_, i) =>
+      row({ id: `m${i}`, role: i % 2 === 0 ? 'user' : 'assistant' }),
+    );
+    // Newest 6 rows (14-19) already contain 3 user messages → no widening.
+    expect(computeKeptTailBoundary(history, 6, 3).index).toBe(14);
+  });
+
+  it('stops at the start of history when fewer than N user messages exist', () => {
+    const history = [
+      row({ id: '0', role: 'user' }),
+      row({ id: '1', role: 'assistant' }),
+      row({ id: '2', role: 'assistant' }),
+      row({ id: '3', role: 'assistant' }),
+    ];
+    const { index, keptFromMessageId } = computeKeptTailBoundary(history, 1, 3);
+    expect(index).toBe(0);
+    expect(keptFromMessageId).toBe('0');
+  });
+
+  it('still never starts the tail on a tool_result (invariant composes)', () => {
+    const history = [
+      row({ id: '0', role: 'user' }),
+      row({ id: '1', role: 'user' }),
+      row({ id: '2', role: 'assistant' }), // tool_use owner
+      row({ id: '3', role: 'tool_result' }),
+      row({ id: '4', role: 'tool_result' }),
+      row({ id: '5', role: 'user' }),
+      row({ id: '6', role: 'user' }),
+      row({ id: '7', role: 'assistant' }), // tool_use owner
+      row({ id: '8', role: 'tool_result' }),
+    ];
+    // tailKeep 5 → index 4 (a tool_result) and the tail already holds 2 users;
+    // widening to 3 lands on the user at 1... but the FINAL walk-back over
+    // tool_results must still leave the boundary off a tool_result.
+    for (const n of [0, 1, 2, 3, 4]) {
+      const { index } = computeKeptTailBoundary(history, 5, n);
+      expect(history[index]?.role).not.toBe('tool_result');
+    }
+    // And the widened boundary really does carry 3 user messages forward.
+    const { index } = computeKeptTailBoundary(history, 5, 3);
+    expect(history.slice(index).filter((m) => m.role === 'user')).toHaveLength(3);
+  });
+});
+
+describe('Item 7 — the user tail survives on all three compaction paths', () => {
+  const NEWEST_USERS = ['U-3', 'U-4', 'U-5'];
+  const DROPPED_USERS = ['U-0', 'U-1', 'U-2'];
+
+  async function seedToolHeavySession(session: InMemorySessionStore, key: string) {
+    const s = await session.createSession({
+      key,
+      platform: 'cli',
+      model: 'm',
+      provider: 'p',
+      usage: {
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        cacheCreationTokens: 0,
+        estimatedCostUsd: 0,
+        apiCallCount: 0,
+        compactionCount: 0,
+      },
+    });
+    for (const m of toolHeavyHistory()) {
+      await session.appendMessage({ sessionId: s.id, role: m.role, content: m.content });
+    }
+    return s;
+  }
+
+  /** The stored ids of the newest three user messages, in order. */
+  async function newestUserIds(session: InMemorySessionStore, sessionId: string) {
+    const stored = await session.getMessages(sessionId);
+    return stored.filter((m) => NEWEST_USERS.includes(m.content)).map((m) => m.id);
+  }
+
+  it('path 3 — /compact keeps the newest 3 user messages verbatim', async () => {
+    const session = new InMemorySessionStore();
+    const s = await seedToolHeavySession(session, 'cli:tail-manual');
+    const captured: Message[][] = [];
+    const loop = makeLoop(session, captured, async () => 'SUM');
+
+    const res = await loop.compact('cli:tail-manual');
+    expect(res.ok).toBe(true);
+    expect(res.droppedCount).toBe(6);
+    const wm = selectActiveWatermark(await session.listCompressions(s.id));
+    expect(wm?.keptFromMessageId).toBe((await newestUserIds(session, s.id))[0]);
+
+    await drain(loop.run('next question', { sessionKey: 'cli:tail-manual' }));
+    const sent = JSON.stringify(captured[0]);
+    for (const u of NEWEST_USERS) expect(sent).toContain(u);
+    for (const u of DROPPED_USERS) expect(sent).not.toContain(u);
+  });
+
+  it('path 2 — turn-end auto-compaction keeps the newest 3 user messages verbatim', async () => {
+    const session = new InMemorySessionStore();
+    const s = await seedToolHeavySession(session, 'cli:tail-turnend');
+    const captured: Message[][] = [];
+    const loop = new AgentLoop({
+      llm: capturingLLM(captured),
+      session,
+      safety: createTestSafety(),
+      llmHandle: { summarize: async () => 'SUM' },
+      // An absolute ceiling of 1 token forces the turn-end gate open without
+      // fabricating a 160k-token history.
+      compaction: { maxContextTokens: 1 },
+    });
+
+    await drain(loop.run('next question', { sessionKey: 'cli:tail-turnend' }));
+    const wm = selectActiveWatermark(await session.listCompressions(s.id));
+    // The turn-end path compacts the replay history INCLUDING this turn's own
+    // user message, so the newest three users shift — assert on content.
+    expect(wm?.keptFromMessageId).toBeTruthy();
+    const stored = await session.getMessages(s.id);
+    const boundaryIdx = stored.findIndex((m) => m.id === wm?.keptFromMessageId);
+    expect(boundaryIdx).toBeGreaterThan(0);
+    expect(
+      stored.slice(boundaryIdx).filter((m) => m.role === 'user').length,
+    ).toBeGreaterThanOrEqual(3);
+    expect(stored.slice(0, boundaryIdx).map((m) => m.content)).toContain('U-0');
+  });
+
+  it('path 1 — the pre-LLM pressure gate persists a boundary with 3 user messages', async () => {
+    const session = new InMemorySessionStore();
+    const s = await seedToolHeavySession(session, 'cli:tail-pregate');
+    const captured: Message[][] = [];
+    const personalities = new DefaultPersonalityRegistry();
+    vi.spyOn(personalities, 'getDefault').mockReturnValue({
+      id: 'lean',
+      name: 'Lean',
+      toolset: [],
+      context_engine: 'semantic_summary',
+    });
+    const loop = new AgentLoop({
+      llm: capturingLLM(captured),
+      session,
+      personalities,
+      safety: createTestSafety(),
+      llmHandle: { summarize: async () => 'PRE-GATE-SUM' },
+      // Ceiling of 1 token → the PRE-LLM gate fires during this turn's assembly.
+      compaction: { maxContextTokens: 1, autoCompact: false },
+    });
+
+    await drain(loop.run('pre-gate question', { sessionKey: 'cli:tail-pregate' }));
+    // This turn's own user message is part of the replay history, so the three
+    // guaranteed users are U-4, U-5 and "pre-gate question" — the boundary lands
+    // on U-4 (the second of the three seeded newest users).
+    const wm = selectActiveWatermark(await session.listCompressions(s.id));
+    expect(wm?.keptFromMessageId).toBe((await newestUserIds(session, s.id))[1]);
+
+    // The NEXT turn replays from that boundary: those users verbatim, nothing
+    // older.
+    await drain(loop.run('follow-up', { sessionKey: 'cli:tail-pregate' }));
+    const sent = JSON.stringify(captured[1]);
+    for (const u of ['U-4', 'U-5', 'pre-gate question']) expect(sent).toContain(u);
+    for (const u of [...DROPPED_USERS, 'U-3']) expect(sent).not.toContain(u);
   });
 });

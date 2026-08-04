@@ -560,9 +560,19 @@ export interface EthosConfig {
    * (default) applies the window (≤32k) + static-ratio (>40%) triggers; `on`
    * forces small-window mode; `off` disables it. Flat-key config shape:
    *   compaction.smallWindow: on
+   *
+   * Item 7 — `maxContextTokens` is an ABSOLUTE ceiling in tokens (integer > 0):
+   * compaction fires above it even when the fractional gate has not been
+   * reached, so a million-token window need not grow to 800k first. It applies
+   * to both the pre-LLM gate and the turn-end trigger.
+   * `minTailUserMessages` (integer ≥ 0, default 3) is the number of USER
+   * messages every compaction keeps verbatim in the tail — `tailKeep` counts
+   * rows of any role, and a tool-heavy tail can hold none. Flat-key shape:
+   *   compaction.maxContextTokens: 400000
+   *   compaction.minTailUserMessages: 3
    */
   // biome-ignore format: keep the option shape on one line for readability.
-  compaction?: { pressure?: number; target?: number; gateDelta?: number; autoCompact?: boolean; retryOnOverflow?: boolean; smallWindow?: 'auto' | 'on' | 'off' };
+  compaction?: { pressure?: number; target?: number; gateDelta?: number; autoCompact?: boolean; retryOnOverflow?: boolean; smallWindow?: 'auto' | 'on' | 'off'; maxContextTokens?: number; minTailUserMessages?: number };
   /**
    * Fallback provider chain. When 2+ entries are present, `createLLM` wraps
    * them in a `ChainedProvider` with automatic cooldown-based failover.
@@ -1023,6 +1033,12 @@ export async function writeConfig(storage: Storage, config: EthosConfig): Promis
     }
     if (config.compaction.smallWindow !== undefined) {
       lines.push(`compaction.smallWindow: ${config.compaction.smallWindow}`);
+    }
+    if (config.compaction.maxContextTokens !== undefined) {
+      lines.push(`compaction.maxContextTokens: ${config.compaction.maxContextTokens}`);
+    }
+    if (config.compaction.minTailUserMessages !== undefined) {
+      lines.push(`compaction.minTailUserMessages: ${config.compaction.minTailUserMessages}`);
     }
   }
   if (config.memoryConsolidation) {
@@ -1663,7 +1679,7 @@ function parseConfigYaml(src: string): EthosConfig {
     }
     // §5 / Phase 3 — compaction.<field>: <value>  (global gate + turn-end flags).
     const cmp = line.match(
-      /^compaction\.(pressure|target|gateDelta|autoCompact|retryOnOverflow|smallWindow):\s*(.+)$/,
+      /^compaction\.(pressure|target|gateDelta|autoCompact|retryOnOverflow|smallWindow|maxContextTokens|minTailUserMessages):\s*(.+)$/,
     );
     if (cmp) {
       compactionKv[cmp[1]] = cmp[2].trim().replace(/^["']|["']$/g, '');
@@ -2965,6 +2981,18 @@ function buildCompaction(kv: Record<string, string>): EthosConfig['compaction'] 
   // Phase 4 — small-window-mode override (auto | on | off).
   if (kv.smallWindow === 'auto' || kv.smallWindow === 'on' || kv.smallWindow === 'off') {
     result.smallWindow = kv.smallWindow;
+  }
+  // Item 7 — absolute ceiling (positive integer tokens) + guaranteed user tail
+  // (non-negative integer). Out-of-range values are dropped, as above.
+  const rawCeiling = kv.maxContextTokens;
+  if (rawCeiling !== undefined) {
+    const c = Number(rawCeiling);
+    if (Number.isFinite(c) && c > 0) result.maxContextTokens = Math.floor(c);
+  }
+  const rawTail = kv.minTailUserMessages;
+  if (rawTail !== undefined) {
+    const t = Number(rawTail);
+    if (Number.isFinite(t) && t >= 0) result.minTailUserMessages = Math.floor(t);
   }
   return Object.keys(result).length > 0 ? result : undefined;
 }

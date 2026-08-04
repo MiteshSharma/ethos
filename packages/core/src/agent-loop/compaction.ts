@@ -50,6 +50,17 @@ export interface CompactionDeps {
    */
   target?: number;
   /**
+   * Item 7 — absolute compaction ceiling, in whole-context tokens. Compaction
+   * fires when usage exceeds EITHER the fractional pressure gate OR this value,
+   * whichever is LOWER — so a million-token window does not have to reach 800k
+   * before the history is compressed. It also caps the shrink budget (the
+   * target becomes `targetFraction` of the ceiling), otherwise the compaction
+   * would aim above the ceiling and re-trip the gate as soon as the cooldown
+   * expires. Resolved upstream from the global `compaction.maxContextTokens`
+   * config; absent or non-positive → fractional gates only, unchanged.
+   */
+  maxContextTokens?: number;
+  /**
    * §5 — per-model gate estimator divisor (chars per token). When set, the gate
    * computes usage as `chars / charsPerToken` INSTEAD of char/4 and does NOT
    * apply the small-window safety factor (this is the accurate per-model value —
@@ -155,6 +166,19 @@ export function gateThreshold(g: GateEval, fraction: number): number {
   return g.staticTokens + Math.floor(g.messagesWindow * fraction);
 }
 
+/**
+ * Item 7 — the gate the framework actually compares against: the fractional
+ * threshold, lowered by the absolute ceiling when one is configured. Shared by
+ * the pre-LLM gate and the turn-end trigger so both honour the ceiling.
+ * `undefined`/non-positive `maxContextTokens` → the fractional threshold.
+ */
+export function effectiveGate(g: GateEval, fraction: number, maxContextTokens?: number): number {
+  const fractional = gateThreshold(g, fraction);
+  return maxContextTokens !== undefined && maxContextTokens > 0
+    ? Math.min(fractional, maxContextTokens)
+    : fractional;
+}
+
 // T3 — gate-hardening constants (generic, no per-model config).
 /**
  * Output-token headroom reserved when the caller doesn't specify a completion
@@ -211,8 +235,13 @@ export async function maybeCompact(
   // factor, charsPerToken, actuals-first floor all live there).
   const g = evaluateGate(deps, messages, systemPrompt);
   const { current, window, messagesWindow } = g;
-  const target = Math.floor(messagesWindow * targetFraction);
-  const pressureGate = gateThreshold(g, pressureFraction);
+  // Item 7 — the absolute ceiling lowers both the gate and the shrink budget.
+  const ceiling =
+    deps.maxContextTokens !== undefined && deps.maxContextTokens > 0
+      ? deps.maxContextTokens
+      : undefined;
+  const target = Math.floor(Math.min(messagesWindow, ceiling ?? messagesWindow) * targetFraction);
+  const pressureGate = effectiveGate(g, pressureFraction, ceiling);
 
   // Phase 3 — `force` skips both the pressure gate and the cooldown (used by the
   // overflow→compact-and-retry path, where the provider already rejected the

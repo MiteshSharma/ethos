@@ -20,6 +20,13 @@ import { dedupHistory, toLLMMessages } from './history';
 
 /** Newest stored messages kept verbatim after a compaction (auto + manual). */
 export const COMPACTION_TAIL_KEEP = 6;
+/**
+ * Item 7 — newest USER messages the verbatim tail must contain. `tailKeep`
+ * counts messages of any role, and a tool-heavy turn can fill all six with
+ * assistant/tool_result rows — leaving the model with no verbatim record of
+ * what it was actually asked. Overridable via `compaction.minTailUserMessages`.
+ */
+export const DEFAULT_MIN_TAIL_USER_MESSAGES = 3;
 /** Token budget for a `/compact` summary — mirrors the semantic-summary default. */
 export const MANUAL_SUMMARY_TARGET_TOKENS = 800;
 
@@ -50,13 +57,32 @@ export function selectActiveWatermark(compressions: CompressionEvent[]): Compres
  * stored messages. The boundary never starts on a `tool_result` (that would
  * orphan it from the tool_use in the summarized prefix), so it walks back to the
  * assistant message that owns the pending tool results.
+ *
+ * Item 7 — the tail must additionally contain at least `minUserMessages` user
+ * messages: `tailKeep` counts rows of any role, so a tool-heavy tail can hold
+ * zero user turns. The boundary is walked further back until enough user
+ * messages are inside it (or history runs out). Both walks only ever move the
+ * boundary EARLIER, so widening for user messages can never re-split a
+ * tool_use/tool_result pair — and the tool_result walk-back runs last, so the
+ * pair invariant holds for the final boundary either way.
  */
 export function computeKeptTailBoundary(
   history: StoredMessage[],
   tailKeep: number,
+  minUserMessages: number = DEFAULT_MIN_TAIL_USER_MESSAGES,
 ): { index: number; keptFromMessageId: string | undefined } {
   if (history.length === 0) return { index: 0, keptFromMessageId: undefined };
   let index = Math.max(0, history.length - Math.max(1, tailKeep));
+  if (minUserMessages > 0) {
+    let userCount = 0;
+    for (let i = index; i < history.length; i++) {
+      if (history[i]?.role === 'user') userCount++;
+    }
+    while (index > 0 && userCount < minUserMessages) {
+      index--;
+      if (history[index]?.role === 'user') userCount++;
+    }
+  }
   while (index > 0 && history[index]?.role === 'tool_result') index--;
   return { index, keptFromMessageId: history[index]?.id };
 }
@@ -116,6 +142,8 @@ export interface ManualCompactionArgs {
   instructions?: string;
   systemPrompt?: string;
   tailKeep: number;
+  /** Item 7 — minimum USER messages inside the kept tail. Absent → default 3. */
+  minTailUserMessages?: number;
   summaryTargetTokens: number;
 }
 
@@ -141,7 +169,11 @@ export async function runManualCompaction(
   args: ManualCompactionArgs,
 ): Promise<ManualCompactionResult> {
   const summariesEnabled = deps.summarizer !== undefined;
-  const { index, keptFromMessageId } = computeKeptTailBoundary(args.history, args.tailKeep);
+  const { index, keptFromMessageId } = computeKeptTailBoundary(
+    args.history,
+    args.tailKeep,
+    args.minTailUserMessages,
+  );
   if (index <= 0 || !keptFromMessageId) {
     return {
       ok: false,
@@ -236,6 +268,8 @@ export interface CompactSessionDeps {
   historyLimit: number;
   summarizer?: SummarizerFn;
   observability?: AgentLoopObservability;
+  /** Item 7 — `compaction.minTailUserMessages`. Absent → default 3. */
+  minTailUserMessages?: number;
 }
 
 export async function compactSession(
@@ -283,6 +317,9 @@ export async function compactSession(
       engineName,
       ...(opts.instructions ? { instructions: opts.instructions } : {}),
       tailKeep: COMPACTION_TAIL_KEEP,
+      ...(deps.minTailUserMessages !== undefined
+        ? { minTailUserMessages: deps.minTailUserMessages }
+        : {}),
       summaryTargetTokens: MANUAL_SUMMARY_TARGET_TOKENS,
     },
   );

@@ -44,6 +44,22 @@ describe('compaction: global gate thresholds config parsing', () => {
     expect(cfg?.compaction).toBeUndefined();
   });
 
+  it('parses the Item 7 absolute ceiling and user-tail keys', async () => {
+    const cfg = await load(
+      [...base, 'compaction.maxContextTokens: 400000', 'compaction.minTailUserMessages: 5'].join(
+        '\n',
+      ),
+    );
+    expect(cfg?.compaction).toEqual({ maxContextTokens: 400_000, minTailUserMessages: 5 });
+  });
+
+  it('drops a non-positive ceiling but keeps a zero user tail (0 = disabled)', async () => {
+    const cfg = await load(
+      [...base, 'compaction.maxContextTokens: 0', 'compaction.minTailUserMessages: 0'].join('\n'),
+    );
+    expect(cfg?.compaction).toEqual({ minTailUserMessages: 0 });
+  });
+
   it('round-trips through writeConfig', async () => {
     const storage = new InMemoryStorage();
     await storage.mkdir(ethosDir());
@@ -52,7 +68,12 @@ describe('compaction: global gate thresholds config parsing', () => {
       model: 'llama3.2',
       apiKey: 'sk',
       personality: 'researcher',
-      compaction: { pressure: 0.85, target: 0.6 },
+      compaction: {
+        pressure: 0.85,
+        target: 0.6,
+        maxContextTokens: 400_000,
+        minTailUserMessages: 4,
+      },
     };
     await writeConfig(storage, original);
     const roundTripped = await readRawConfig(storage);

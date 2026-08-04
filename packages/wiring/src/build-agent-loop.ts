@@ -444,11 +444,18 @@ export async function buildAgentLoop(
   const defaultEngine = resolveDefaultContextEngine(llm.maxContextTokens, summarizerWired);
   const autoCompact = config.compaction?.autoCompact;
   const retryOnOverflow = config.compaction?.retryOnOverflow;
+  // Item 7 — global-only knobs (no per-model layer, since that would mean a
+  // `packages/types` change): the absolute context-token ceiling that lowers
+  // BOTH gates, and the guaranteed verbatim user tail.
+  const maxContextTokens = config.compaction?.maxContextTokens;
+  const minTailUserMessages = config.compaction?.minTailUserMessages;
   const compaction = {
     ...(compactionGate ?? {}),
     ...(gateDelta !== undefined ? { gateDelta } : {}),
     ...(autoCompact !== undefined ? { autoCompact } : {}),
     ...(retryOnOverflow !== undefined ? { retryOnOverflow } : {}),
+    ...(maxContextTokens !== undefined ? { maxContextTokens } : {}),
+    ...(minTailUserMessages !== undefined ? { minTailUserMessages } : {}),
     defaultEngine,
   };
   const memoryConsolidation = config.memoryConsolidation;

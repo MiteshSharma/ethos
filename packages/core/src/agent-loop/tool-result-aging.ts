@@ -37,6 +37,30 @@ export const SOFT_TRIM_KEEP_CHARS = 1_500;
 const HARD_PLACEHOLDER =
   '[tool result cleared to reclaim context — re-run the tool if you need it again]';
 
+/**
+ * Item 7 — oversized tool output is spilled to a file and the inline result
+ * keeps only head + tail plus a notice carrying the spill PATH (see
+ * `extensions/tools-terminal/src/spill.ts`). The file survives for 24h, so
+ * hard-clearing the whole result would throw away a still-valid pointer to
+ * output the agent can otherwise read back. Match on the notice's stable
+ * "full output written to <path>" phrase — no import, this stays a string
+ * contract — and carry the path through the clear.
+ */
+const SPILL_PATH_RE = /full output written to (.+?) — use read_file/;
+
+/** The spill-file path inside a tool result, when it carries one. */
+export function extractSpillPath(content: string): string | null {
+  return SPILL_PATH_RE.exec(content)?.[1] ?? null;
+}
+
+/** Hard-clear replacement for one tool result, preserving any spill path. */
+function hardClear(content: string): string {
+  const path = extractSpillPath(content);
+  return path
+    ? `${HARD_PLACEHOLDER}\n[full output written to ${path} — use read_file to retrieve it]`
+    : HARD_PLACEHOLDER;
+}
+
 export const DEFAULT_AGING_STATE: AgingState = { level: 'none', soft: [], hard: [] };
 
 const LEVEL_RANK: Record<AgingLevel, number> = { none: 0, soft: 1, hard: 2 };
@@ -141,7 +165,7 @@ export function applyAgingToView(
       if (b.type !== 'tool_result') return b;
       if (hardSet.has(b.tool_use_id)) {
         touched = true;
-        return { ...b, content: HARD_PLACEHOLDER };
+        return { ...b, content: hardClear(b.content) };
       }
       if (softSet.has(b.tool_use_id)) {
         const trimmed = softTrimContent(b.content);
