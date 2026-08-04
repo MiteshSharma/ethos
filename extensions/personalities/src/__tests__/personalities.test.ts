@@ -432,6 +432,85 @@ describe('FilePersonalityRegistry', () => {
     });
   });
 
+  // Ch.4b — safety.denyRules parsing. The danger predicate has always enforced
+  // the field; before this the loader dropped it, so a denyRules block in
+  // config.yaml gated nothing.
+  describe('Ch.4b safety.denyRules parsing', () => {
+    async function writePersonality(id: string, configYaml: string): Promise<void> {
+      const personalityDir = join(testDir, id);
+      await mkdir(personalityDir, { recursive: true });
+      await writeFile(join(personalityDir, 'config.yaml'), configYaml);
+      await writeFile(join(personalityDir, 'SOUL.md'), `# ${id}`);
+    }
+
+    it('parses a denyRules list from config.yaml, preserving order', async () => {
+      await writePersonality(
+        'guarded',
+        [
+          'name: Guarded',
+          'safety:',
+          '  approvalMode: smart',
+          '  denyRules:',
+          '    - git push --force',
+          '    - rm -rf ./dist',
+          '',
+        ].join('\n'),
+      );
+
+      const registry = new FilePersonalityRegistry(new FsStorage());
+      await registry.loadFromDirectory(testDir);
+      expect(registry.get('guarded')?.safety).toEqual({
+        approvalMode: 'smart',
+        denyRules: ['git push --force', 'rm -rf ./dist'],
+      });
+    });
+
+    it('leaves denyRules absent when config.yaml declares none', async () => {
+      await writePersonality('plain', 'name: Plain\nsafety:\n  approvalMode: manual\n');
+
+      const registry = new FilePersonalityRegistry(new FsStorage());
+      await registry.loadFromDirectory(testDir);
+      const safety = registry.get('plain')?.safety;
+      expect(safety).toEqual({ approvalMode: 'manual' });
+      expect(safety && 'denyRules' in safety).toBe(false);
+    });
+
+    it('rejects a scalar denyRules', async () => {
+      await writePersonality('bad-scalar', 'name: Bad\nsafety:\n  denyRules: git push --force\n');
+
+      const registry = new FilePersonalityRegistry(new FsStorage());
+      await expect(registry.loadFromDirectory(testDir)).rejects.toThrow(/Invalid denyRules/);
+    });
+
+    it('rejects a denyRules block that is a nested object rather than a list', async () => {
+      await writePersonality(
+        'bad-object',
+        ['name: Bad', 'safety:', '  denyRules:', '    rule: git push --force', ''].join('\n'),
+      );
+
+      const registry = new FilePersonalityRegistry(new FsStorage());
+      await expect(registry.loadFromDirectory(testDir)).rejects.toThrow(/Invalid denyRules/);
+    });
+
+    // `matchDenyRule` skips zero-length rules and matches whitespace against
+    // every subject (`${toolName} ${args}` always contains a space), so both
+    // shapes are config mistakes — one gates nothing, the other gates all.
+    it.each([
+      ['empty', '    - ""'],
+      ['whitespace-only', '    - " "'],
+    ])('rejects a %s deny rule', async (_label, item) => {
+      await writePersonality(
+        'bad-entry',
+        ['name: Bad', 'safety:', '  denyRules:', item, ''].join('\n'),
+      );
+
+      const registry = new FilePersonalityRegistry(new FsStorage());
+      await expect(registry.loadFromDirectory(testDir)).rejects.toThrow(
+        /Invalid denyRules entry: empty rule/,
+      );
+    });
+  });
+
   describe('model tier config', () => {
     it('parses dotted model keys into ModelTierConfig', async () => {
       const personalityDir = join(testDir, 'tiered');

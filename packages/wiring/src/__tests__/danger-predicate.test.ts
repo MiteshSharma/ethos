@@ -1,5 +1,10 @@
+import { mkdir, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { FilePersonalityRegistry } from '@ethosagent/personalities';
+import { FsStorage } from '@ethosagent/storage-fs';
 import type { BeforeToolCallPayload, PersonalityConfig } from '@ethosagent/types';
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createDangerPredicate, SMART_MODE_CONSEQUENTIAL_TOOLS } from '../danger-predicate';
 
 function payload(toolName: string, args: unknown = {}): BeforeToolCallPayload {
@@ -311,5 +316,53 @@ describe('createDangerPredicate — Ch.4b approvalMode', () => {
       });
       expect(await pred(payload('email_send', { to: 'a@b' }))).toMatch(/explicit approval/);
     });
+  });
+});
+
+// The loop every test above leaves open: they hand the predicate a
+// hand-built PersonalityConfig, so they pass whether or not the personality
+// loader can actually read `safety.denyRules` out of config.yaml. It could
+// not — the field was parsed nowhere and dropped silently, making the whole
+// feature unreachable from user config. This test drives the real path:
+// config.yaml on disk → FilePersonalityRegistry → predicate.
+describe('deny rules declared in config.yaml (disk → registry → predicate)', () => {
+  let dir: string;
+
+  beforeEach(async () => {
+    dir = join(tmpdir(), `ethos-deny-rules-e2e-${Date.now()}`);
+    await mkdir(join(dir, 'guarded'), { recursive: true });
+    await writeFile(
+      join(dir, 'guarded', 'config.yaml'),
+      [
+        'name: Guarded',
+        'safety:',
+        '  approvalMode: off',
+        '  denyRules:',
+        '    - git push --force',
+        '',
+      ].join('\n'),
+    );
+    await writeFile(join(dir, 'guarded', 'SOUL.md'), '# Guarded');
+  });
+
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it('denies a matching call under the loosest possible mode', async () => {
+    const registry = new FilePersonalityRegistry(new FsStorage());
+    await registry.loadFromDirectory(dir);
+    const config = registry.get('guarded');
+    expect(config?.safety?.approvalMode).toBe('off');
+
+    const pred = createDangerPredicate({
+      getPersonality: () => config,
+      allowAutoApproveDangerousTools: true,
+    });
+
+    expect(await pred(payload('terminal', { command: 'git push --force origin main' }))).toBe(
+      'denied by personality deny rule: git push --force',
+    );
+    expect(await pred(payload('terminal', { command: 'git push origin main' }))).toBeNull();
   });
 });

@@ -1773,6 +1773,38 @@ function buildSafetyConfig(raw: Record<string, unknown>): PersonalitySafetyConfi
     result.approvalMode = mode;
   }
 
+  // Ch.4b — denyRules parsing. Same posture as approvalMode above: a malformed
+  // value throws at load rather than being dropped, because a safety field that
+  // silently accepts garbage reads as protection while gating nothing.
+  //
+  // Empty and whitespace-only entries are rejected because of how
+  // `matchDenyRule` (packages/wiring/src/danger-predicate.ts) matches: a rule is
+  // a substring of `${toolName} ${canonical-json-args}`, guarded by
+  // `rule.length > 0`. So `""` can never match (a silent no-op rule) and `" "`
+  // matches every call (the subject always contains a space). Both are config
+  // mistakes worth catching at load.
+  if (raw.denyRules !== undefined) {
+    const rules = raw.denyRules;
+    if (!Array.isArray(rules)) {
+      throw new Error(
+        `Invalid denyRules: ${JSON.stringify(rules)}. Expected a list of match strings`,
+      );
+    }
+    const denyRules: string[] = [];
+    for (const rule of rules) {
+      if (typeof rule !== 'string') {
+        throw new Error(
+          `Invalid denyRules entry: ${JSON.stringify(rule)}. Every entry must be a string`,
+        );
+      }
+      if (rule.trim() === '') {
+        throw new Error('Invalid denyRules entry: empty rule. Every entry must be non-empty');
+      }
+      denyRules.push(rule);
+    }
+    result.denyRules = denyRules;
+  }
+
   const asp = raw.allowed_skill_permissions as Record<string, unknown> | undefined;
   if (asp) {
     const out: NonNullable<PersonalitySafetyConfig['allowed_skill_permissions']> = {};

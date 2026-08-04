@@ -74,9 +74,26 @@ Four things worth knowing before you rely on it:
 
 `safety.denyRules` is a list of case-sensitive substrings matched against `<tool-name> <canonical-json-args>`, so the rule `git push --force` matches a `terminal` call whose `command` contains that text. A match surfaces the reason `denied by personality deny rule: git push --force`.
 
-Deny rules are the floor. They are matched **before** the approval-mode dispatch, so a rule binds in every mode — including `approvalMode: off` with auto-approve enabled. This inverts the usual precedence intuition: modes can only make a call stricter, never looser. A matched call still reaches the approval prompt on surfaces that have one — a rule refuses the *machine*, not the human at the modal — and when the human denies, the agent receives both halves: `denied by user — denied by personality deny rule: git push --force`.
+Write the list under the same `safety` block:
 
-**Not loadable from `config.yaml` yet.** The personality loader parses `safety.approvalMode` but not `safety.denyRules` — see `buildSafetyConfig` in [extensions/personalities/src/index.ts](https://github.com/ethosagent/ethos/blob/main/extensions/personalities/src/index.ts). A `denyRules:` list in a personality's `config.yaml` is silently dropped at load, matches nothing, and gates nothing. The field is enforced by the danger predicate and covered by tests; the config path to it is missing. Do not treat a `denyRules` block as protection today.
+```yaml
+safety:
+  approvalMode: smart
+  denyRules:
+    - git push --force
+    - rm -rf ./dist
+```
+
+Malformed lists throw at load rather than loading half-parsed — a safety field that silently accepts garbage reads as protection while gating nothing:
+
+```
+Invalid denyRules: "git push --force". Expected a list of match strings
+Invalid denyRules entry: empty rule. Every entry must be non-empty
+```
+
+Empty and whitespace-only entries are refused for the same reason from opposite ends: `""` can never match, and `" "` matches every call, because the match subject always contains a space between the tool name and its arguments.
+
+Deny rules are the floor. They are matched **before** the approval-mode dispatch, so a rule binds in every mode — including `approvalMode: off` with auto-approve enabled. This inverts the usual precedence intuition: modes can only make a call stricter, never looser. A matched call still reaches the approval prompt on surfaces that have one — a rule refuses the *machine*, not the human at the modal — and when the human denies, the agent receives both halves: `denied by user — denied by personality deny rule: git push --force`.
 
 ## 3. Reload the personality
 
@@ -160,7 +177,6 @@ Neither adapter implements `ApprovalCapableAdapter` yet. A `dangerous` call from
 | `dangerous` calls in CLI fire without prompting | The CLI does not render approval modals. Only the hardline `blocked` floor blocks; the rest auto-fire. | Run via `ethos serve` for the interactive flow, or switch the surface to Slack / Telegram. |
 | Slack / Telegram card never appears for a `dangerous` call | The adapter is wired but the personality is not bound to that bot, or the `dangerous` classification did not fire. | Confirm the bot binding in `~/.ethos/config.yaml`. Under `manual` and `off` the band fires only for terminal hardlines and for tools the deployment marks `alwaysAsk`; switch to `approvalMode: smart` to add the four consequential tools. |
 | `smart` mode prompts for everything anyway | The reviewer is failing closed — provider error, a round-trip over 15s, or a response that wasn't the expected JSON. Every one resolves to `ask`. | Check that the `model` and provider credentials in `~/.ethos/config.yaml` work; the reviewer runs on the primary model, so a broken primary breaks the reviewer. |
-| `safety.denyRules` in `config.yaml` gates nothing | The personality loader does not parse `denyRules` yet — only `approvalMode`. The list is dropped at load. | No workaround today. Use `approvalMode: manual` for the tools you want gated. |
 
 ## Caveats
 
