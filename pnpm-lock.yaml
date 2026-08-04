@@ -256,6 +256,9 @@ importers:
       '@ethosagent/cron':
         specifier: workspace:*
         version: link:../../extensions/cron
+      '@ethosagent/delivery-ledger':
+        specifier: workspace:*
+        version: link:../../extensions/delivery-ledger
       '@ethosagent/digest':
         specifier: workspace:*
         version: link:../../extensions/digest
@@ -866,6 +869,12 @@ importers:
         specifier: workspace:*
         version: link:../../packages/core
 
+  extensions/delivery-ledger:
+    dependencies:
+      '@ethosagent/sqlite':
+        specifier: workspace:*
+        version: link:../../packages/sqlite
+
   extensions/digest:
     dependencies:
       '@ethosagent/types':
@@ -942,6 +951,9 @@ importers:
       '@ethosagent/core':
         specifier: workspace:*
         version: link:../../packages/core
+      '@ethosagent/delivery-ledger':
+        specifier: workspace:*
+        version: link:../delivery-ledger
       '@ethosagent/job-runner':
         specifier: workspace:*
         version: link:../job-runner

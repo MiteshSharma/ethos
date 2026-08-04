@@ -31,6 +31,7 @@
       "@ethosagent/goal-runner": ["./extensions/goal-runner/src"],
       "@ethosagent/job-store": ["./extensions/job-store/src"],
       "@ethosagent/job-runner": ["./extensions/job-runner/src"],
+      "@ethosagent/delivery-ledger": ["./extensions/delivery-ledger/src"],
       "@ethosagent/kanban-store": ["./extensions/kanban-store/src"],
       "@ethosagent/dashboard": ["./extensions/dashboard/src"],
       "@ethosagent/tools-kanban": ["./extensions/tools-kanban/src"],

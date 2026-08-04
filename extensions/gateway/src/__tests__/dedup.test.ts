@@ -157,7 +157,7 @@ describe('MessageDedupCache — onDrop observability (P5.4)', () => {
   });
 });
 
-describe('MessageDedupCache — record() (W3.1 streaming-final registration)', () => {
+describe('MessageDedupCache — record() (W3.1 streaming-final + item 9 redelivery)', () => {
   const originalEnv = process.env.ETHOS_DEDUP_LEGACY;
   afterEach(() => {
     if (originalEnv === undefined) delete process.env.ETHOS_DEDUP_LEGACY;
@@ -195,6 +195,25 @@ describe('MessageDedupCache — record() (W3.1 streaming-final registration)', (
     const legacy = new MessageDedupCache({ ttlMs: 60_000 });
     legacy.record('s1', 'final');
     expect(legacy.shouldSend('s1', 'final')).toBe(true); // legacy disables dedup
+  });
+
+  it('a warm entry never blocks a redelivery, but the redelivery re-arms it (item 9)', () => {
+    // The delivery-ledger sweep deliberately does NOT consult shouldSend: an
+    // obligation is pending precisely because the user never received it, and
+    // a cache warmed by the failed attempt must not swallow the retry. It
+    // calls record() afterwards instead, so the NEXT duplicate is suppressed.
+    const cache = new MessageDedupCache({ ttlMs: 60_000 });
+    const session = 'telegram:bot-a:chat-1';
+
+    // The original (failed) send warmed the cache on its way out.
+    expect(cache.shouldSend(session, 'the answer')).toBe(true);
+
+    // Redelivery bypasses the cache entirely — nothing here can return false —
+    // and re-arms it on the way out.
+    cache.record(session, 'the answer');
+
+    // A genuine duplicate after the redelivery is still suppressed.
+    expect(cache.shouldSend(session, 'the answer')).toBe(false);
   });
 
   it('a recorded entry is honored by clearSession', () => {

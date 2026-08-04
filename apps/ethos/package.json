@@ -89,6 +89,7 @@
     "@ethosagent/agent-mesh": "workspace:*",
     "@ethosagent/config": "workspace:*",
     "@ethosagent/cron": "workspace:*",
+    "@ethosagent/delivery-ledger": "workspace:*",
     "@ethosagent/digest": "workspace:*",
     "@ethosagent/execution-local": "workspace:*",
     "@ethosagent/gateway": "workspace:*",

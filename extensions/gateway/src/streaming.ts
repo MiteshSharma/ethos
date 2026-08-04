@@ -1,5 +1,6 @@
 import type { DeliveryResult, OutboundMessage } from '@ethosagent/types';
 import type { MessageDedupCache } from './dedup';
+import { beginDelivery, confirmDelivery, type DeliveryBinding } from './delivery';
 
 // ---------------------------------------------------------------------------
 // Streaming draft edits (W3.1)
@@ -91,6 +92,16 @@ export interface DraftStreamerOptions {
   threadId: string | undefined;
   sessionKey: string;
   dedup: MessageDedupCache;
+  /**
+   * Durable delivery-obligation ledger binding (item 9). Threaded in here
+   * rather than reported back through `finalize()`'s return value because the
+   * obligation must be written BEFORE the platform call, and only this class
+   * knows when that call happens — a return value arrives after the fact and
+   * cannot protect the crash window the ledger exists to close. `finalize()`
+   * returning `void` is also a documented contract (callers gate on
+   * `hasDelivered`); inverting it would ripple for no gain.
+   */
+  delivery?: DeliveryBinding;
   /** Minimum ms between successive edits (the first send is never throttled). */
   minEditIntervalMs?: number;
   /** Injectable clock for deterministic tests. Defaults to `Date.now`. */
@@ -116,6 +127,7 @@ export class DraftStreamer {
   private readonly threadId: string | undefined;
   private readonly sessionKey: string;
   private readonly dedup: MessageDedupCache;
+  private readonly delivery: DeliveryBinding | undefined;
   private readonly minEditIntervalMs: number;
   private readonly now: () => number;
   private readonly sleep: (ms: number) => Promise<void>;
@@ -136,6 +148,7 @@ export class DraftStreamer {
     this.threadId = opts.threadId;
     this.sessionKey = opts.sessionKey;
     this.dedup = opts.dedup;
+    this.delivery = opts.delivery;
     this.minEditIntervalMs = opts.minEditIntervalMs ?? 2500;
     this.now = opts.now ?? Date.now;
     this.sleep = opts.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
@@ -175,6 +188,10 @@ export class DraftStreamer {
    * leaves the cache un-stamped so a later non-streaming `send()` of the same
    * content is NOT silently suppressed. Callers gate their own delivery on
    * `hasDelivered`, so this returns nothing.
+   *
+   * When a delivery ledger is bound, a durable obligation wraps the TERMINAL
+   * edit — the same "record before, confirm only on success" shape the
+   * non-streaming reply paths use.
    */
   async finalize(finalText: string): Promise<void> {
     await this.chain;
@@ -183,6 +200,14 @@ export class DraftStreamer {
     // body (an earlier send/edit landed it) — that counts as delivered.
     let finalRendered = finalText === this.lastRenderedBody;
     if (finalText && finalText !== this.lastRenderedBody && this.adapter.editMessage) {
+      // Obligation covers the terminal edit ONLY. Intermediate draft flushes
+      // are deliberately untracked: each is superseded by this edit, so
+      // redelivering one after a crash would ship a half-written reply.
+      const obligationId = await beginDelivery(this.delivery, {
+        chatId: this.chatId,
+        sessionId: this.sessionKey,
+        content: finalText,
+      });
       let attempts = 0;
       // Try the final edit; honor a single flood-wait so the true final lands.
       while (attempts < 2) {
@@ -198,6 +223,10 @@ export class DraftStreamer {
         if (attempts >= 2) break;
         await this.sleep(retry * 1000);
       }
+      // Confirm ONLY when the edit actually landed. A failed final edit leaves
+      // the obligation `pending`, so the next boot sweep redelivers it — as a
+      // fresh `send()`, since the draft message id does not survive a restart.
+      if (finalRendered) await confirmDelivery(this.delivery, obligationId);
     }
     // Register the final content so a later duplicate send() is suppressed —
     // but only when the user actually saw it. Stamping the cache on a failed

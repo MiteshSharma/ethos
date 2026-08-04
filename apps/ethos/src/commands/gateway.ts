@@ -17,6 +17,7 @@ import {
 } from '@ethosagent/config';
 import { type AgentLoop, deriveBotKey as deriveBotKeyFromSeed } from '@ethosagent/core';
 import { CronScheduler, runScriptFile } from '@ethosagent/cron';
+import { SQLiteDeliveryLedger } from '@ethosagent/delivery-ledger';
 import { LocalExecutionBackend } from '@ethosagent/execution-local';
 import { createCapturingAdapter, Gateway, type GatewayBotConfig } from '@ethosagent/gateway';
 import { registerGoalNotifications } from '@ethosagent/goal-runner';
@@ -92,6 +93,10 @@ import { isPidAlive } from './team-runtime';
 
 const HEARTBEAT_INTERVAL_MS = 10_000;
 const HEALTH_TIMEOUT_MS = 5_000;
+/** How long a CONFIRMED delivery obligation is kept before it is pruned. The
+ *  rows hold message bodies, so an unbounded ledger is a privacy and disk
+ *  problem. Hard-coded on purpose — no config knob until someone needs one. */
+const DELIVERY_LEDGER_RETENTION_MS = 7 * 86_400_000;
 
 export interface GatewayHeartbeat {
   pid: number;
@@ -710,6 +715,11 @@ export async function runGatewayStart(opts: GatewayStartOptions = {}): Promise<v
     initPairingDb(pairingDb);
   }
 
+  // Durable delivery-obligation ledger (item 9). One SQLite file alongside the
+  // rest of the ethos state; umask default, same posture as jobs.db /
+  // sessions.db, which hold the same class of content.
+  const deliveryLedger = new SQLiteDeliveryLedger(join(ethosDir(), 'delivery-ledger.db'));
+
   // Build adapter registry for send_message cross-platform routing.
   // Derive platform key from adapter.id prefix (e.g. 'telegram:bot-1' → 'telegram',
   // 'email' → 'email'). This is a stable identifier, unlike displayName which is UI text.
@@ -777,6 +787,7 @@ export async function runGatewayStart(opts: GatewayStartOptions = {}): Promise<v
           loop: systemLoop,
           defaultPersonality: config.personality,
           adapters: adapterMap,
+          deliveryLedger,
           resolveUserId,
           pluginLoader,
           pluginAdapters: pluginLoader.getPlatformAdapters(),
@@ -800,6 +811,7 @@ export async function runGatewayStart(opts: GatewayStartOptions = {}): Promise<v
           bots,
           attachmentCache,
           adapters: adapterMap,
+          deliveryLedger,
           resolveUserId,
           pluginLoader,
           pluginAdapters: pluginLoader.getPlatformAdapters(),
@@ -981,6 +993,35 @@ export async function runGatewayStart(opts: GatewayStartOptions = {}): Promise<v
   // Start all adapters
   await Promise.all(adapters.map((a) => a.start()));
 
+  // Durable delivery sweep (item 9). Deliberately AFTER adapter.start(): a
+  // sweep against cold adapters would send into nothing while still burning
+  // the obligations. Only rows whose botKey this process owns are touched, and
+  // the ledger's atomic claim keeps a peer process (gateway vs. serve) from
+  // redelivering the same row — an aged `pending` row is not proof of a crash.
+  void gateway
+    .sweepPendingDeliveries()
+    .then(({ redelivered, failed }) => {
+      if (redelivered > 0 || failed > 0) {
+        console.log(
+          `${c.dim}Delivery ledger: redelivered ${redelivered} pending reply(s), ${failed} deferred${c.reset}`,
+        );
+      }
+    })
+    .catch((err) => {
+      new ConsoleLogger().warn(`delivery ledger boot sweep failed: ${String(err)}`);
+    });
+
+  // Retention GC — delivered rows carry message bodies, so they are not kept
+  // forever. Prune once at boot, then hourly. Pending rows are never pruned.
+  const pruneDeliveryLedger = () => {
+    void deliveryLedger.pruneDelivered(Date.now() - DELIVERY_LEDGER_RETENTION_MS).catch((err) => {
+      new ConsoleLogger().warn(`delivery ledger retention prune failed: ${String(err)}`);
+    });
+  };
+  pruneDeliveryLedger();
+  const deliveryPruneTimer = setInterval(pruneDeliveryLedger, 3_600_000);
+  deliveryPruneTimer.unref?.();
+
   // Plugins finished loading inside createAgentLoop above; now that the
   // adapters are constructed and started, push plugin slash commands to each
   // platform's command menu (Telegram setMyCommands, Slack, Discord).
@@ -1103,6 +1144,7 @@ export async function runGatewayStart(opts: GatewayStartOptions = {}): Promise<v
     webhookServer?.close();
     clearInterval(pruneTimer);
     clearInterval(heartbeatTimer);
+    clearInterval(deliveryPruneTimer);
     scheduler.stop();
     await storage.remove(gatewayHealthPath()).catch(() => {});
     await gateway.shutdown({
@@ -1110,6 +1152,7 @@ export async function runGatewayStart(opts: GatewayStartOptions = {}): Promise<v
         '⚠ Ethos was interrupted while answering. Please resend your last message — your session history is preserved.',
     });
     await Promise.allSettled(adapters.map((a) => a.stop()));
+    deliveryLedger.close();
     stopTeamSupervisors(bots, config.teams ?? {}, supervisorDeps);
     process.exit(0);
   };

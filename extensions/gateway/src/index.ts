@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { AgentLoop } from '@ethosagent/core';
 import { deriveBotKey, stripAnsiEscapes } from '@ethosagent/core';
+import type { DeliveryLedger } from '@ethosagent/delivery-ledger';
 import type { ChannelFilterConfig } from '@ethosagent/safety-channel';
 import {
   checkMessage,
@@ -19,8 +20,10 @@ import type {
   BackgroundJob,
   ChannelContext,
   ClarifyResponse,
+  DeliveryResult,
   InboundMessage,
   Logger,
+  OutboundMessage,
   PlatformAdapter,
   PlatformAdapterFactory,
   SteerSink,
@@ -30,6 +33,7 @@ import type {
   TtsProviderRegistry,
 } from '@ethosagent/types';
 import { MessageDedupCache } from './dedup';
+import { beginDelivery, confirmDelivery, type DeliveryBinding } from './delivery';
 import {
   attachmentsFromStructured,
   OUTBOUND_MEDIA_MAX_BYTES,
@@ -48,6 +52,7 @@ import {
 
 export { SessionLane } from '@ethosagent/session-lane';
 export { MessageDedupCache } from './dedup';
+export { beginDelivery, confirmDelivery, type DeliveryBinding } from './delivery';
 export { DreamExecutor } from './dream-executor';
 export {
   attachmentsFromStructured,
@@ -117,7 +122,7 @@ export interface GatewayObservability {
  * Continuity with pre-encoding session keys is only guaranteed for
  * segments that are themselves URL-safe: platform identifiers
  * (`telegram` / `slack` / ...), the hex-derived default botKey
- * (`deriveBotKey` in `apps/ethos/src/config.ts`), numeric Slack
+ * (`deriveBotKey` in `packages/core/src/bot-key.ts`), numeric Slack
  * `thread_ts`, and the chat IDs the supported platforms emit. An
  * operator who configures a custom `id:` value containing reserved
  * characters will see their existing SQLite session key change shape
@@ -300,6 +305,20 @@ export interface GatewayConfig {
    * `dedup.ts` and plan/phases/30-robustness.md § 30.4.
    */
   outboundDedupTtlMs?: number;
+  /**
+   * Durable delivery-obligation ledger (item 9). When present, the covered
+   * outbound reply paths record a `pending` obligation BEFORE the platform
+   * call and mark it `delivered` only once the adapter CONFIRMS
+   * (`DeliveryResult.ok === true`). `sweepPendingDeliveries()` then redelivers
+   * anything left `pending` by a crash.
+   *
+   * Orthogonal to `outboundDedupTtlMs`: the dedup cache stops DOUBLE sends,
+   * the ledger stops LOST sends. Absent → today's behavior, no durability.
+   *
+   * Deliberately NOT a personality concern — no personality may opt out of
+   * having its replies delivered.
+   */
+  deliveryLedger?: DeliveryLedger;
   /**
    * Maximum number of distinct chats kept in memory. The least-recently-used
    * idle chat is evicted (its lane, session key, personality override, and
@@ -545,6 +564,8 @@ export class Gateway {
   private readonly dedupWindow: number;
   /** Outbound-message dedup cache. Suppresses `(sessionId, content)` within TTL. */
   private readonly outboundDedup: MessageDedupCache;
+  /** Durable delivery-obligation ledger (item 9). Absent → no durability. */
+  private readonly deliveryLedger: DeliveryLedger | undefined;
   /** Streaming draft edits enabled for DMs / group chats (W3.1). */
   private readonly streamingDm: boolean;
   private readonly streamingGroup: boolean;
@@ -747,6 +768,7 @@ export class Gateway {
         });
       },
     });
+    this.deliveryLedger = config.deliveryLedger;
     // Streaming draft edits: DMs on, groups off, unless config overrides.
     this.streamingDm = config.streamingEdits?.dm ?? true;
     this.streamingGroup = config.streamingEdits?.group ?? false;
@@ -1656,10 +1678,19 @@ export class Gateway {
         const reply = claim.reply;
         if (typeof reply === 'string' && reply.length > 0) {
           // Same outbound path as normal turn replies: session-keyed dedup
-          // gate, then the adapter.
+          // gate, then the ledger-wrapped adapter send.
           const claimSessionKey = this.sessionKeys.get(laneKey) ?? laneKey;
           if (this.outboundDedup.shouldSend(claimSessionKey, reply)) {
-            await adapter.send(message.chatId, { text: reply, threadId }).catch(() => {});
+            await this.sendTracked(
+              {
+                adapter,
+                botKey: bot.botKey,
+                platform: message.platform,
+                chatId: message.chatId,
+                sessionKey: claimSessionKey,
+              },
+              { text: reply, threadId },
+            );
           }
         }
         return;
@@ -1860,6 +1891,9 @@ export class Gateway {
           : undefined;
 
       // W3.1 — live draft-edit streamer, gated by chat class + adapter caps.
+      // The ledger binding rides along so the streamer's TERMINAL edit gets the
+      // same durable obligation the non-streaming paths get.
+      const streamDelivery = this.deliveryBinding(bot.botKey, message.platform);
       const streamer = this.shouldStream(message, adapter)
         ? new DraftStreamer({
             adapter,
@@ -1867,6 +1901,7 @@ export class Gateway {
             threadId,
             sessionKey,
             dedup: this.outboundDedup,
+            ...(streamDelivery ? { delivery: streamDelivery } : {}),
             minEditIntervalMs: this.streamingEditIntervalMs,
             onFloodDisable: () => {
               this.streamingDisabledChats.add(`${message.platform}:${message.chatId}`);
@@ -1944,7 +1979,16 @@ export class Gateway {
           // a second message that duplicates the streamed text.
           await streamer.finalize(sanitizedNote);
         } else if (this.outboundDedup.shouldSend(sessionKey, sanitizedNote)) {
-          await adapter.send(message.chatId, { text: sanitizedNote, threadId }).catch(() => {});
+          await this.sendTracked(
+            {
+              adapter,
+              botKey: bot.botKey,
+              platform: message.platform,
+              chatId: message.chatId,
+              sessionKey,
+            },
+            { text: sanitizedNote, threadId },
+          );
         }
       } else if (responseText) {
         const sanitized = stripAnsiEscapes(responseText);
@@ -1956,14 +2000,20 @@ export class Gateway {
           await streamer.finalize(sanitized);
           delivered = true;
         } else if (this.outboundDedup.shouldSend(sessionKey, sanitized)) {
-          await adapter
-            .send(message.chatId, {
-              text: sanitized,
-              parseMode: 'markdown',
-              threadId,
-            })
-            .catch(() => {});
-          delivered = true;
+          // `delivered` is now the adapter's own verdict, not "we called
+          // send()". An unconfirmed reply leaves a pending obligation AND
+          // skips the voice pipeline — synthesising audio for a message the
+          // user never received is pure waste.
+          delivered = await this.sendTracked(
+            {
+              adapter,
+              botKey: bot.botKey,
+              platform: message.platform,
+              chatId: message.chatId,
+              sessionKey,
+            },
+            { text: sanitized, parseMode: 'markdown', threadId },
+          );
         }
 
         if (delivered) {
@@ -2113,6 +2163,13 @@ export class Gateway {
       // Mark delivered + already-dequeued BEFORE the async send so a concurrent
       // flush never re-sends this notice.
       this.deliveredWakes.add(job.id);
+      // DELIBERATELY not ledger-wrapped (item 9). The wake notice is item 10's
+      // restore-and-deliver territory: that item reworks how a background
+      // completion survives a restart end-to-end, and wrapping it here would
+      // mean building the durability twice and unpicking it once. The slash-
+      // command acks and the voice sendVoice/sendAudio calls are out of scope
+      // for the same reason they were never in it — they are transient UI, not
+      // the turn the user paid tokens for.
       if (this.outboundDedup.shouldSend(laneKey, text)) {
         void adapter.send(chatId, { text, threadId }).catch(() => {});
       }
@@ -2208,6 +2265,170 @@ export class Gateway {
     for (const adapter of this.adapterRegistry.values()) {
       await adapter.registerCommands?.(cmds).catch(() => {});
     }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Durable delivery obligations (item 9)
+  // ---------------------------------------------------------------------------
+
+  /** The ledger binding for one bot, or `undefined` when no ledger is wired. */
+  private deliveryBinding(botKey: string, platform: string): DeliveryBinding | undefined {
+    const ledger = this.deliveryLedger;
+    if (!ledger) return undefined;
+    return {
+      ledger,
+      botKey,
+      platform,
+      onLedgerError: (stage, error) => {
+        this.observability?.recordSafetyBlock({
+          code: 'gateway.delivery_ledger_error',
+          cause: `delivery ledger ${stage} failed`,
+          details: { stage, botKey, platform, error },
+        });
+      },
+    };
+  }
+
+  /**
+   * Send a reply with a durable obligation wrapped around it.
+   *
+   * `DeliveryResult.ok === true` is the ONLY definition of confirmed. Every
+   * shipped adapter catches platform failures and returns `{ ok: false }`
+   * rather than throwing, so "the promise resolved" would mark exactly the
+   * failures this ledger exists to catch as delivered. A rejected promise is
+   * folded into the same `{ ok: false }` shape so a throwing adapter still
+   * leaves the obligation `pending` — and, as before, never breaks the turn.
+   *
+   * Returns whether the platform confirmed.
+   */
+  private async sendTracked(
+    target: {
+      adapter: PlatformAdapter;
+      botKey: string;
+      platform: string;
+      chatId: string;
+      sessionKey: string;
+    },
+    message: OutboundMessage,
+  ): Promise<boolean> {
+    const binding = this.deliveryBinding(target.botKey, target.platform);
+    const obligationId = await beginDelivery(binding, {
+      chatId: target.chatId,
+      sessionId: target.sessionKey,
+      content: message.text,
+    });
+    const result = await target.adapter.send(target.chatId, message).catch(
+      (err: unknown): DeliveryResult => ({
+        ok: false,
+        error: err instanceof Error ? err.message : String(err),
+      }),
+    );
+    if (result?.ok === true) {
+      await confirmDelivery(binding, obligationId);
+      return true;
+    }
+    // Leave the row `pending` — the next boot sweep redelivers it. Surface the
+    // failure too: before this, a failed send was completely invisible.
+    this.observability?.recordSafetyBlock({
+      code: 'gateway.delivery_unconfirmed',
+      cause: 'adapter did not confirm delivery',
+      details: {
+        platform: target.platform,
+        botKey: target.botKey,
+        chatId: target.chatId,
+        error: result?.error,
+        durable: obligationId !== null,
+      },
+    });
+    return false;
+  }
+
+  /**
+   * Redeliver every `pending` obligation this process OWNS.
+   *
+   * Ownership is `botKey ∈ this.bots` — a deployment sharing a ledger file
+   * never touches another deployment's rows. Two processes that DO share a
+   * botKey are separated by the ledger's atomic claim, so each obligation is
+   * redelivered exactly once. Note the corollary: age alone never authorizes
+   * a redelivery, because an old `pending` row may belong to a live peer that
+   * is mid-send. The claim is what makes the sweep safe, not a threshold.
+   *
+   * Redelivery calls `adapter.send()` DIRECTLY, bypassing `shouldSend()` — a
+   * warm dedup cache must not swallow a message the user never received — then
+   * calls `record()` so a *subsequent* duplicate is still suppressed. That is
+   * exactly what `record()` exists for; no new dedup API is needed.
+   *
+   * Must run AFTER `adapter.start()`: a sweep against a cold adapter is a
+   * silent no-op that also burns the obligation.
+   */
+  async sweepPendingDeliveries(): Promise<{ redelivered: number; failed: number }> {
+    const ledger = this.deliveryLedger;
+    if (!ledger) return { redelivered: 0, failed: 0 };
+
+    let pending: Awaited<ReturnType<DeliveryLedger['listPending']>>;
+    try {
+      pending = await ledger.listPending([...this.bots.keys()]);
+    } catch (err) {
+      this.observability?.recordSafetyBlock({
+        code: 'gateway.delivery_sweep_failed',
+        cause: err instanceof Error ? err.message : String(err),
+      });
+      return { redelivered: 0, failed: 0 };
+    }
+
+    let redelivered = 0;
+    let failed = 0;
+    for (const row of pending) {
+      let claimed = false;
+      try {
+        claimed = await ledger.claim(row.id);
+        if (!claimed) continue; // a peer process won the claim
+        const adapter = this.adapterRegistry.get(row.platform);
+        if (!adapter) {
+          // This process owns the bot but not an adapter for its platform.
+          // Hand the row back rather than burning it.
+          await ledger.release(row.id);
+          failed++;
+          continue;
+        }
+        // NOTE: the row carries no threadId, so a redelivered reply lands in
+        // the root chat rather than its original thread. Same channel, same
+        // audience — a placement loss, not a disclosure one.
+        const result = await adapter.send(row.chatId, { text: row.content }).catch(
+          (err: unknown): DeliveryResult => ({
+            ok: false,
+            error: err instanceof Error ? err.message : String(err),
+          }),
+        );
+        if (result?.ok === true) {
+          await ledger.markDelivered(row.id);
+          this.outboundDedup.record(row.sessionId, row.content);
+          redelivered++;
+          this.observability?.recordSafetyBlock({
+            code: 'gateway.delivery_redelivered',
+            details: {
+              platform: row.platform,
+              botKey: row.botKey,
+              chatId: row.chatId,
+              contentHash: row.contentHash,
+              createdAt: row.createdAt,
+            },
+          });
+        } else {
+          await ledger.release(row.id);
+          failed++;
+        }
+      } catch (err) {
+        if (claimed) await ledger.release(row.id).catch(() => {});
+        failed++;
+        this.observability?.recordSafetyBlock({
+          code: 'gateway.delivery_redelivery_failed',
+          cause: err instanceof Error ? err.message : String(err),
+          details: { platform: row.platform, botKey: row.botKey },
+        });
+      }
+    }
+    return { redelivered, failed };
   }
 
   // ---------------------------------------------------------------------------
