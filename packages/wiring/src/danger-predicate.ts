@@ -83,20 +83,54 @@ export interface CreateDangerPredicateOptions {
 }
 
 /**
+ * Stable stringification of tool args — sorted keys, so `{a:1,b:2}` and
+ * `{b:2,a:1}` produce the same text. Shared with `createSmartApprover`, whose
+ * verdict cache keys off the same canonical form.
+ */
+export function canonicalizeArgs(value: unknown): string {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value) ?? 'null';
+  if (Array.isArray(value)) return `[${value.map(canonicalizeArgs).join(',')}]`;
+  const entries = Object.entries(value as Record<string, unknown>).sort(([a], [b]) =>
+    a < b ? -1 : a > b ? 1 : 0,
+  );
+  return `{${entries.map(([k, v]) => `${JSON.stringify(k)}:${canonicalizeArgs(v)}`).join(',')}}`;
+}
+
+/** First deny rule matching this call, or null. Case-sensitive substring. */
+function matchDenyRule(
+  rules: ReadonlyArray<string> | undefined,
+  payload: BeforeToolCallPayload,
+): string | null {
+  if (!rules?.length) return null;
+  const subject = `${payload.toolName} ${canonicalizeArgs(payload.args)}`;
+  return rules.find((rule) => rule.length > 0 && subject.includes(rule)) ?? null;
+}
+
+/**
  * Default danger predicate.
+ *
+ * **The law: deny rules are the floor; modes can only make things stricter,
+ * never looser.** `safety.denyRules` is matched BEFORE the approval-mode
+ * dispatch, so a matching rule surfaces its reason even under
+ * `approvalMode: 'off'` with `allowAutoApproveDangerousTools: true`. No mode
+ * can auto-approve past a deny rule. (What this seam can express is
+ * "reason vs. null" — a denied call still reaches the surface's approval flow
+ * rather than hard-failing, which is the same shape a hardline command gets.)
  *
  * Resolution order:
  *   1. Hardline command  → return reason (Ch.4a — non-overridable; the
  *                          terminalGuardHook hard-blocks separately so
  *                          this is belt + suspenders).
- *   2. Always-ask / non-hardline danger → consult approvalMode:
+ *   2. Deny rule match   → return reason, regardless of mode.
+ *   3. Always-ask / non-hardline danger → consult approvalMode:
  *        manual (default) → return the reason (drives the modal).
  *        off              → return null (auto-approve — hardline still
  *                           hard-blocks separately).
  *        smart            → consult `smartApprove` callback. `approve`
- *                           auto-approves; anything else surfaces the
- *                           reason. Without the callback wired, smart
- *                           degrades to manual.
+ *                           auto-approves; `deny` surfaces the reviewer's
+ *                           specific reason; `ask` surfaces the generic
+ *                           danger reason. Without the callback wired,
+ *                           smart degrades to manual.
  *
  * The plan reserves `off` for trusted local automation (cron, batch);
  * the load-time check in personality registry rejects `off` + channel
@@ -117,6 +151,12 @@ export function createDangerPredicate(opts: CreateDangerPredicateOptions = {}): 
     }
     if (hardlineReason) return hardlineReason;
 
+    const safety = opts.getPersonality?.(payload)?.safety;
+
+    // Deny rules — the floor, evaluated before the mode dispatch.
+    const denyRule = matchDenyRule(safety?.denyRules, payload);
+    if (denyRule) return `denied by personality deny rule: ${denyRule}`;
+
     // Non-hardline danger — alwaysAsk is the only such source today.
     // Future: per-tool risk classifiers (sql_execute, kubectl, etc.)
     // would also produce non-hardline reasons that route through here.
@@ -126,11 +166,15 @@ export function createDangerPredicate(opts: CreateDangerPredicateOptions = {}): 
     }
     if (!dangerReason) return null;
 
-    const mode = opts.getPersonality?.(payload)?.safety?.approvalMode ?? 'manual';
+    const mode = safety?.approvalMode ?? 'manual';
     if (mode === 'off' && opts.allowAutoApproveDangerousTools === true) return null;
     if (mode === 'smart' && opts.smartApprove) {
       const verdict = await opts.smartApprove(payload, dangerReason);
-      return verdict.decision === 'approve' ? null : dangerReason;
+      if (verdict.decision === 'approve') return null;
+      // A reviewer `deny` carries a concrete, actionable reason — surface it
+      // so the agent can course-correct. `ask` is undecided, so it keeps the
+      // generic danger reason and routes to the normal approval flow.
+      return verdict.decision === 'deny' ? `denied by reviewer: ${verdict.reason}` : dangerReason;
     }
     return dangerReason;
   };

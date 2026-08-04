@@ -107,7 +107,9 @@ describe('tools.approve / tools.deny — full inversion loop', () => {
     expect(deny.status).toBe(200);
 
     const result: Partial<BeforeToolCallResult> = await hookFire;
-    expect(result.error).toBe('too risky');
+    // The user's reason AND the specific danger reason — the agent needs the
+    // latter to course-correct instead of retrying blindly.
+    expect(result.error).toBe('too risky — every terminal call requires approval (test rule)');
   });
 
   it('approving an unknown approvalId returns INVALID_INPUT', async () => {

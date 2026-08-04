@@ -6,11 +6,21 @@ function payload(toolName: string, args: unknown = {}): BeforeToolCallPayload {
   return { sessionId: 's', toolCallId: 'tc', toolName, args };
 }
 
-function person(approvalMode?: 'manual' | 'smart' | 'off'): PersonalityConfig {
+function person(
+  approvalMode?: 'manual' | 'smart' | 'off',
+  denyRules?: string[],
+): PersonalityConfig {
   return {
     id: 'p',
     name: 'P',
-    ...(approvalMode ? { safety: { approvalMode } } : {}),
+    ...(approvalMode || denyRules
+      ? {
+          safety: {
+            ...(approvalMode ? { approvalMode } : {}),
+            ...(denyRules ? { denyRules } : {}),
+          },
+        }
+      : {}),
   };
 }
 
@@ -101,6 +111,65 @@ describe('createDangerPredicate — Ch.4b approvalMode', () => {
         getPersonality: () => person('smart'),
       });
       expect(await pred(payload('email_send', { to: 'a@b' }))).toMatch(/explicit approval/);
+    });
+  });
+
+  // The law: deny rules are the floor. Modes can only make things stricter,
+  // never looser — so a rule binds even under the loosest possible config.
+  describe('deny rules (safety.denyRules)', () => {
+    it('denies under approvalMode off WITH allowAutoApproveDangerousTools', async () => {
+      const pred = createDangerPredicate({
+        getPersonality: () => person('off', ['git push --force']),
+        allowAutoApproveDangerousTools: true,
+      });
+      const r = await pred(payload('terminal', { command: 'git push --force origin main' }));
+      expect(r).toMatch(/denied by personality deny rule: git push --force/);
+    });
+
+    it('denies even when smart mode would auto-approve (rule beats reviewer)', async () => {
+      let reviewed = false;
+      const pred = createDangerPredicate({
+        alwaysAsk: ['terminal'],
+        getPersonality: () => person('smart', ['git push --force']),
+        smartApprove: async () => {
+          reviewed = true;
+          return { decision: 'approve', reason: 'looks fine' };
+        },
+      });
+      expect(await pred(payload('terminal', { command: 'git push --force' }))).toMatch(/deny rule/);
+      expect(reviewed).toBe(false);
+    });
+
+    it('matches on the tool name too, not only on args', async () => {
+      const pred = createDangerPredicate({
+        getPersonality: () => person('off', ['email_send']),
+        allowAutoApproveDangerousTools: true,
+      });
+      expect(await pred(payload('email_send', { to: 'a@b' }))).toMatch(/deny rule/);
+    });
+
+    it('leaves unmatched calls alone', async () => {
+      const pred = createDangerPredicate({
+        getPersonality: () => person('manual', ['git push --force']),
+      });
+      expect(await pred(payload('terminal', { command: 'git push' }))).toBeNull();
+    });
+
+    it('ignores an empty rule list and empty rule strings', async () => {
+      const pred = createDangerPredicate({ getPersonality: () => person('manual', ['']) });
+      expect(await pred(payload('terminal', { command: 'echo hi' }))).toBeNull();
+    });
+  });
+
+  describe('smart verdicts', () => {
+    it('a reviewer deny surfaces the reviewer’s specific reason', async () => {
+      const pred = createDangerPredicate({
+        alwaysAsk: ['email_send'],
+        getPersonality: () => person('smart'),
+        smartApprove: async () => ({ decision: 'deny', reason: 'mails 400 external addresses' }),
+      });
+      const r = await pred(payload('email_send', { to: 'a@b' }));
+      expect(r).toMatch(/denied by reviewer: mails 400 external addresses/);
     });
   });
 

@@ -60,7 +60,7 @@ describe('createWebApprovalHook', () => {
     expect(await hookPromise).toBeNull();
   });
 
-  it('dangerous + deny resolves the hook with { error } carrying the reason', async () => {
+  it('dangerous + deny resolves the hook with { error } carrying both reasons', async () => {
     const isDangerous: DangerPredicate = async () => 'destructive command';
     const hook = createWebApprovalHook({ approvals, isDangerous });
 
@@ -74,7 +74,9 @@ describe('createWebApprovalHook', () => {
     await approvals.deny(approvalId, 'no thanks', 'tab-A');
 
     const result = await hookPromise;
-    expect(result).toEqual({ error: 'no thanks' });
+    // The decision reason AND the specific danger reason — a generic
+    // 'denied by user' tells the agent nothing it can course-correct on.
+    expect(result).toEqual({ error: 'no thanks — destructive command' });
   });
 
   it('passes the danger reason through to the SSE pending payload', async () => {

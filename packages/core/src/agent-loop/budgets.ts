@@ -32,7 +32,40 @@ export function updateIdenticalStreak(
 
 /** Which budget guard tripped. Carried on the exceeded result (and the `halt`
  *  AgentEvent) so consumers never parse the human-readable message. */
-export type BudgetRule = 'tool-budget' | 'identical-name' | 'identical-streak' | 'cost-cap';
+export type BudgetRule =
+  | 'tool-budget'
+  | 'identical-name'
+  | 'identical-streak'
+  | 'cost-cap'
+  | 'denial_circuit_breaker';
+
+/**
+ * Consecutive approval denials that stop the turn. Hard-coded on purpose — an
+ * agent that has had three tool calls denied in a row is not going to guess its
+ * way to an approved one, and a config knob for it is speculation until someone
+ * asks for a different number.
+ */
+export const MAX_CONSECUTIVE_DENIALS = 3;
+
+/**
+ * Fold one tool batch into the consecutive-approval-denial streak.
+ *
+ * Only `before_tool_call` hook denials count — the approval flow's rejections.
+ * MCP-policy blocks, MCP `reject_args`, injection downgrades, and watcher halts
+ * all collapse into the same `rejected` field inside the tool-processing stage,
+ * so the stage tags the approval case separately and reports only that count.
+ *
+ * Any tool that actually executed breaks the streak: the batch's own denials
+ * are still the most recent run, so the streak restarts at that count rather
+ * than resetting to zero.
+ */
+export function updateDenialStreak(
+  prev: number,
+  batch: { hookDenials: number; successCount: number },
+): number {
+  if (batch.hookDenials === 0) return 0;
+  return batch.successCount > 0 ? batch.hookDenials : prev + batch.hookDenials;
+}
 
 /**
  * Accumulated session spend, checked against the personality's `budgetCapUsd`.
@@ -60,9 +93,19 @@ export function checkTurnBudgets(
   identicalStreak: IdenticalStreak | null,
   maxConsecutiveIdenticalCalls: number,
   cost?: CostBudget,
+  consecutiveDenials = 0,
 ):
   | { exceeded: false }
   | { exceeded: true; rule: BudgetRule; toolName: string; count?: number; message: string } {
+  if (consecutiveDenials >= MAX_CONSECUTIVE_DENIALS) {
+    return {
+      exceeded: true,
+      rule: 'denial_circuit_breaker',
+      toolName: '_approval',
+      count: consecutiveDenials,
+      message: `Stopped: ${consecutiveDenials} tool calls denied in a row — retrying will not help`,
+    };
+  }
   // Cost first: money spent is a harder constraint than loop pathology, and
   // `turn-setup`'s pre-turn refusal only ever sees spend from previous turns.
   if (cost?.capUsd != null && cost.spentUsd >= cost.capUsd) {

@@ -34,7 +34,7 @@ import { emitToolRejection, missingRequiredFields } from './tool-rejection';
 // ---------------------------------------------------------------------------
 
 export type ProcessToolsResult =
-  | { kind: 'continue'; successCount: number }
+  | { kind: 'continue'; successCount: number; hookDenials: number }
   | { kind: 'return-direct'; text: string; turnCount: number };
 
 export interface ToolProcessingDeps {
@@ -200,6 +200,8 @@ export async function* processTools(
   // Rejected tools get tool_end ok:false + an error tool_result sent back to LLM
   type Prepped = { toolCallId: string; name: string; args: unknown; rejected?: string };
   const prepped: Prepped[] = [];
+  // `before_tool_call` rejections only — see `updateDenialStreak` in budgets.ts.
+  let hookDenials = 0;
   const spanIds = new Map<string, string>();
 
   const observe = ctx.watcherTap.observe;
@@ -277,6 +279,7 @@ export async function* processTools(
     );
 
     if (beforeResult.error) {
+      hookDenials++;
       deps.observability?.recordSafetyBlock({
         traceId: ctx.traceId,
         code: 'tool_blocked',
@@ -717,5 +720,5 @@ export async function* processTools(
   // Feed all tool results back to LLM as a single user message with content blocks
   ctx.llmMessages.push({ role: 'user', content: toolResultContent });
 
-  return { kind: 'continue', successCount: localSuccessfulToolCalls };
+  return { kind: 'continue', successCount: localSuccessfulToolCalls, hookDenials };
 }

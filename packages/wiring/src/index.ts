@@ -985,17 +985,16 @@ export {
 
 export {
   type CreateDangerPredicateOptions,
+  canonicalizeArgs,
   createDangerPredicate,
   type DangerPredicate,
   type DangerReason,
   type SmartApprovalCallback,
   type SmartVerdict,
 } from './danger-predicate';
-
 export type { ModelSource, ModelTarget, ResolveModelInput } from './model-resolver';
 // Re-export the resolver so callers don't need a separate import.
 export { resolveModelTarget } from './model-resolver';
-
 // Shared live provider-credential probe (W2.2 / W2.4) with W1.2 liveness
 // classification — used by the readline fallback, TUI AuthStep, and --from-env.
 export {
@@ -1004,6 +1003,7 @@ export {
   type ProbeProviderOutcome,
   probeProvider,
 } from './probe-provider';
+export { type CreateSmartApproverOptions, createSmartApprover } from './smart-approver';
 
 // ---------------------------------------------------------------------------
 // Ethos observability adapter

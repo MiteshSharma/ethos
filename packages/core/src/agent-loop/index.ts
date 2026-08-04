@@ -1,5 +1,10 @@
 export type { IdenticalStreak } from './budgets';
-export { checkTurnBudgets, updateIdenticalStreak } from './budgets';
+export {
+  checkTurnBudgets,
+  MAX_CONSECUTIVE_DENIALS,
+  updateDenialStreak,
+  updateIdenticalStreak,
+} from './budgets';
 export { handleChunk } from './chunk-handler';
 export { maybeCompact } from './compaction';
 export { extractFilePath } from './extract-file-path';

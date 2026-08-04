@@ -16,7 +16,7 @@ import type {
   ToolRegistry,
 } from '@ethosagent/types';
 import type { IdenticalStreak } from './agent-loop/budgets';
-import { checkTurnBudgets, updateIdenticalStreak } from './agent-loop/budgets';
+import { checkTurnBudgets, updateDenialStreak, updateIdenticalStreak } from './agent-loop/budgets';
 import { compactSession, type ManualCompactionResult } from './agent-loop/manual-compact';
 import { applyOverflowRetry } from './agent-loop/overflow';
 import { applySamplingDefaults, type ModelSamplingDefaults } from './agent-loop/sampling';
@@ -544,9 +544,9 @@ export class AgentLoop {
     let totalToolCalls = 0;
     let successfulToolCalls = 0;
     const toolNameCounts = new Map<string, number>();
-    // Consecutive-identical-call streak — true loop detection (same tool name
-    // AND identical args, uninterrupted by any different call).
+    // Pathology detectors, not throughput limits — see agent-loop/budgets.ts.
     let identicalStreak: IdenticalStreak | null = null;
+    let denialStreak = 0;
 
     // Dry-run tracking — accumulates across all iterations of a turn.
     const dryRunState = {
@@ -626,9 +626,8 @@ export class AgentLoop {
         break;
       }
 
-      // Budget guard: bail before the next LLM call if we've already exceeded
-      // the tool-call budget, the per-tool repeat budget, or the session cost
-      // cap. Prior tool_results are in llmMessages, so the history stays valid.
+      // Budget guard — tool-call / per-tool repeat / session cost / denial streak.
+      // Prior tool_results are in llmMessages, so breaking keeps the history valid.
       const budgetResult = checkTurnBudgets(
         totalToolCalls,
         effectiveMaxToolCalls,
@@ -637,6 +636,7 @@ export class AgentLoop {
         identicalStreak,
         this.maxConsecutiveIdenticalCalls,
         { spentUsd: this.sessionCosts.get(sessionKey) ?? 0, capUsd: personality.budgetCapUsd },
+        denialStreak,
       );
       if (budgetResult.exceeded) {
         const { rule, toolName, count, message } = budgetResult;
@@ -781,6 +781,7 @@ export class AgentLoop {
       }
 
       successfulToolCalls += toolResult.successCount;
+      denialStreak = updateDenialStreak(denialStreak, toolResult);
     }
 
     // Steps 10–12: finalize turn (usage, hooks, trace, done event)

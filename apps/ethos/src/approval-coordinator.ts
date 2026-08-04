@@ -264,6 +264,9 @@ export function createSlackApprovalHook(opts: CreateSlackApprovalHookOptions) {
     });
 
     if (decision.decision === 'allow') return null;
-    return { error: decision.reason };
+    // Relay the SPECIFIC danger reason alongside the decision. `decision.reason`
+    // alone is generic ('denied by user', 'approval timed out'), which tells the
+    // agent nothing it can act on; the computed reason names what was dangerous.
+    return { error: `${decision.reason} — ${reason}` };
   };
 }

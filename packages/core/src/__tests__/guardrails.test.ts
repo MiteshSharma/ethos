@@ -34,7 +34,11 @@ describe('Orchestrator guardrails', () => {
       const lineCount = content.split('\n').length;
       // Bumped 720 → 722: background sub-agents threaded rootSessionKey through
       // tool-processing.ts's ToolContext construction, pushing it to 722.
-      if (lineCount > 722) {
+      // Bumped 722 → 725: the denial circuit breaker needs approval denials
+      // tagged apart from the other `Prepped.rejected` sources (MCP policy,
+      // reject_args, injection downgrade, watcher halt) — a counter, an
+      // increment in the `before_tool_call` branch, and a one-line comment.
+      if (lineCount > 725) {
         violations.push(`${file}: ${lineCount} lines`);
       }
     }

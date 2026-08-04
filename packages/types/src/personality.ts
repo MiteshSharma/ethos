@@ -38,6 +38,19 @@ export interface PersonalitySafetyConfig {
    */
   approvalMode?: 'manual' | 'smart' | 'off';
   /**
+   * User-defined deny rules — the floor beneath `approvalMode`.
+   *
+   * Each entry is a case-sensitive substring matched against
+   * `` `${toolName} ${canonical-json-args}` ``, so a rule like
+   * `git push --force` matches a `terminal` call whose `command` argument
+   * contains that text. A match denies the call outright.
+   *
+   * **The law:** deny rules are evaluated BEFORE the approval-mode dispatch.
+   * Modes can only make things stricter, never looser — a deny rule binds even
+   * under `approvalMode: 'off'` with the auto-approve capability flag set.
+   */
+  denyRules?: string[];
+  /**
    * Ch.7 — Per-personality network reach. Layered with the always-deny
    * cloud-metadata + private-network floor (non-overridable) and the
    * scheme allowlist (http/https only). Empty/absent = open public

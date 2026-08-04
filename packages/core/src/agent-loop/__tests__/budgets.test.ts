@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { checkTurnBudgets, type IdenticalStreak, updateIdenticalStreak } from '../budgets';
+import {
+  checkTurnBudgets,
+  type IdenticalStreak,
+  MAX_CONSECUTIVE_DENIALS,
+  updateDenialStreak,
+  updateIdenticalStreak,
+} from '../budgets';
 
 function foldCalls(calls: Array<{ toolName: string; args: unknown }>): IdenticalStreak | null {
   let streak: IdenticalStreak | null = null;
@@ -157,5 +163,52 @@ describe('cost cap', () => {
   it('reports cost ahead of the tool-call budget when both are blown', () => {
     const r = checkTurnBudgets(100, 100, new Map(), 25, null, 5, { spentUsd: 1, capUsd: 0.5 });
     expect(r.exceeded && r.rule).toBe('cost-cap');
+  });
+});
+
+describe('updateDenialStreak', () => {
+  it('resets to zero when a batch had no approval denials', () => {
+    expect(updateDenialStreak(2, { hookDenials: 0, successCount: 1 })).toBe(0);
+    expect(updateDenialStreak(2, { hookDenials: 0, successCount: 0 })).toBe(0);
+  });
+
+  it('accumulates across batches where nothing executed', () => {
+    let streak = 0;
+    streak = updateDenialStreak(streak, { hookDenials: 1, successCount: 0 });
+    streak = updateDenialStreak(streak, { hookDenials: 1, successCount: 0 });
+    expect(streak).toBe(2);
+  });
+
+  it('restarts at the batch count when a tool actually executed', () => {
+    // A successful execution breaks the run; this batch's own denials are
+    // still the most recent consecutive ones.
+    expect(updateDenialStreak(5, { hookDenials: 1, successCount: 3 })).toBe(1);
+  });
+
+  it('counts parallel denials in a single batch', () => {
+    expect(updateDenialStreak(0, { hookDenials: 3, successCount: 0 })).toBe(3);
+  });
+});
+
+describe('denial circuit breaker', () => {
+  const denials = (n: number) => checkTurnBudgets(0, 100, new Map(), 25, null, 5, undefined, n);
+
+  it('does not trip below the threshold', () => {
+    expect(denials(0)).toEqual({ exceeded: false });
+    expect(denials(MAX_CONSECUTIVE_DENIALS - 1)).toEqual({ exceeded: false });
+  });
+
+  it('trips at the threshold with the denial_circuit_breaker rule', () => {
+    expect(denials(MAX_CONSECUTIVE_DENIALS)).toEqual({
+      exceeded: true,
+      rule: 'denial_circuit_breaker',
+      toolName: '_approval',
+      count: 3,
+      message: 'Stopped: 3 tool calls denied in a row — retrying will not help',
+    });
+  });
+
+  it('defaults to no denials when the argument is omitted', () => {
+    expect(checkTurnBudgets(0, 100, new Map(), 25, null, 5)).toEqual({ exceeded: false });
   });
 });

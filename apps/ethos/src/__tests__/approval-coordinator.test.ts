@@ -290,6 +290,8 @@ describe('createSlackApprovalHook', () => {
 
     const result = await hookPromise;
     expect(result).not.toBeNull();
-    expect(result?.error).toBeTruthy();
+    // Generic decision reason + the specific danger reason, so the agent can
+    // course-correct instead of retrying blindly.
+    expect(result?.error).toBe('denied by user — recursive force-delete');
   });
 });
