@@ -24,6 +24,7 @@ export const BUNDLED_SKILL_IDS = [
   'github/github-issues',
   'github/github-repo-management',
   'research/arxiv',
+  'research/grounded-citations',
   'research/research-paper-writing',
   'autonomous-ai-agents/claude-code',
   'autonomous-ai-agents/codex',

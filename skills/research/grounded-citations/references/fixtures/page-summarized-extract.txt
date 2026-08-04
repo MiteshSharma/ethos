@@ -1,0 +1,13 @@
+[https://example.org/reports/grid-2031]
+
+Summary: the page is a regional grid reliability report for 2031.
+
+Key points:
+- Demand peaked in August at just over 41 gigawatts.
+- The interconnect handled the peak without shedding any load, and
+  reserves stayed above ten percent throughout.
+- There were a handful of short curtailment events on the western spur.
+- Figures come from settlement meters rather than real-time telemetry,
+  and are revised before they are final.
+- The study window contained almost no storage, so the conclusions do
+  not carry over to a storage-heavy grid.

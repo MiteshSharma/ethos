@@ -1,0 +1,28 @@
+[https://example.org/reports/grid-2031]
+
+# Regional Grid Reliability Report 2031
+
+## Summary
+
+Peak regional demand reached 41.2 gigawatts on 14 August 2031.
+
+## Findings
+
+The interconnect absorbed the surge without load shedding, and the
+reserve margin never fell below eleven percent.
+
+Operators logged three curtailment events, all on the western spur,
+none lasting more than nine minutes.
+
+## Method
+
+Figures are drawn from the settlement meter archive, not from the
+real-time telemetry feed. Settlement figures are revised twice before
+they are final, so the values here may differ from the numbers
+published in the operator's daily bulletin.
+
+## Limitations
+
+No storage assets larger than 20 megawatt-hours were in service during
+the study window, so the findings do not generalise to a grid with
+substantial storage.
