@@ -445,4 +445,106 @@ describe('BackgroundExecutor', () => {
 
     await exec.shutdown();
   });
+
+  // -------------------------------------------------------------------------
+  // Live transcript (item 10) — the child's narrative is durable WHILE it runs
+  // -------------------------------------------------------------------------
+
+  it("persists the child's text incrementally — a running job's stream grows between reads", async () => {
+    const store = new SQLiteJobStore(':memory:');
+    let openGate1!: () => void;
+    let openGate2!: () => void;
+    const gate1 = new Promise<void>((r) => {
+      openGate1 = r;
+    });
+    const gate2 = new Promise<void>((r) => {
+      openGate2 = r;
+    });
+    const chunk = 'x'.repeat(2_500);
+    const run = vi.fn(() =>
+      (async function* () {
+        yield { type: 'text_delta', text: chunk };
+        await gate1;
+        yield { type: 'text_delta', text: chunk };
+        await gate2;
+        yield { type: 'done', text: '', turnCount: 1 };
+      })(),
+    );
+    const exec = new BackgroundExecutor({
+      store,
+      loop: { run } as unknown as AgentLoop,
+      owner: OWNER,
+      config: cfg(),
+    });
+    const job = await store.create(createInput());
+
+    exec.start();
+    exec.nudge();
+
+    const textEvents = async () =>
+      (await store.getEvents(job.id)).filter((e) => e.eventType === 'text');
+
+    // Read #1, mid-run: the opening text is ALREADY durable. Before this change
+    // it lived only in a local accumulator and died with the process.
+    await vi.waitFor(async () => expect((await textEvents()).length).toBe(1), { timeout: 2000 });
+    expect((await store.get(job.id))?.status).toBe('running');
+    // Chunked, not one row per delta: a 2500-char delta lands as one full chunk
+    // plus a 500-char remainder still buffered.
+    expect(String((await textEvents())[0]?.payload.text)).toHaveLength(2_000);
+
+    // Read #2, still mid-run: the stream has grown.
+    openGate1();
+    await vi.waitFor(async () => expect((await textEvents()).length).toBe(2), { timeout: 2000 });
+    expect((await store.get(job.id))?.status).toBe('running');
+
+    // The tail is flushed before the terminal transition — nothing is dropped.
+    openGate2();
+    await vi.waitFor(async () => expect((await store.get(job.id))?.status).toBe('done'), {
+      timeout: 2000,
+    });
+    const persisted = (await textEvents()).map((e) => String(e.payload.text)).join('');
+    expect(persisted).toBe(chunk + chunk);
+
+    await exec.shutdown();
+  });
+
+  it('records a tool_end event after each tool_headline, carrying ok/duration/error', async () => {
+    const store = new SQLiteJobStore(':memory:');
+    const { loop } = makeStaticLoop([
+      { type: 'tool_start', toolCallId: 't1', toolName: 'read_file', args: { path: 'a.txt' } },
+      {
+        type: 'tool_end',
+        toolCallId: 't1',
+        toolName: 'read_file',
+        ok: false,
+        durationMs: 12,
+        error: 'boom',
+      },
+      { type: 'text_delta', text: 'wrapped up' },
+      { type: 'done', text: 'wrapped up', turnCount: 1 },
+    ]);
+    const exec = new BackgroundExecutor({ store, loop, owner: OWNER, config: cfg() });
+    const job = await store.create(createInput());
+
+    exec.start();
+    exec.nudge();
+    await vi.waitFor(async () => expect((await store.get(job.id))?.status).toBe('done'), {
+      timeout: 2000,
+    });
+
+    const events = await store.getEvents(job.id);
+    const headlineIdx = events.findIndex((e) => e.eventType === 'tool_headline');
+    const endIdx = events.findIndex((e) => e.eventType === 'tool_end');
+    expect(headlineIdx).toBeGreaterThanOrEqual(0);
+    // The call's outcome reads after the call, not before it.
+    expect(endIdx).toBeGreaterThan(headlineIdx);
+    expect(events[endIdx]?.payload).toMatchObject({
+      toolName: 'read_file',
+      ok: false,
+      durationMs: 12,
+      error: 'boom',
+    });
+
+    await exec.shutdown();
+  });
 });

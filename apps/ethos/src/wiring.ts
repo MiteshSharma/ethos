@@ -228,6 +228,17 @@ export async function createAgentLoop(
      * autocomplete and /help.
      */
     slashRegistry?: import('@ethosagent/wiring').WiringSlashRegistry;
+    /**
+     * The bot this loop answers as, stamped on background jobs it spawns so a
+     * completion stays routable back to its lane across a restart. Gateway
+     * only — one loop per bot; CLI/serve loops have no bot identity.
+     */
+    originBotKey?: string;
+    /**
+     * Resolve which thread a live turn belongs to, for the same reason.
+     * Gateway only — it is the one component that knows the mapping.
+     */
+    resolveOriginThreadId?: (sessionKey: string) => string | undefined;
   } = {},
 ): Promise<CreateAgentLoopResult> {
   const rotated = await withRotation(config);
@@ -270,6 +281,8 @@ export async function createAgentLoop(
     ...(opts.cronScheduler ? { cronScheduler: opts.cronScheduler } : {}),
     ...(opts.watcherManager ? { watcherManager: opts.watcherManager } : {}),
     ...(opts.slashRegistry ? { slashRegistry: opts.slashRegistry } : {}),
+    ...(opts.originBotKey ? { originBotKey: opts.originBotKey } : {}),
+    ...(opts.resolveOriginThreadId ? { resolveOriginThreadId: opts.resolveOriginThreadId } : {}),
   });
 
   return result;

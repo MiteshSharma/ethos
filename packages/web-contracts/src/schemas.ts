@@ -1208,6 +1208,8 @@ export const BackgroundJobEventTypeSchema = z.enum([
   'spend',
   'cancel_requested',
   'tool_headline',
+  'tool_end',
+  'text',
   'done',
   'failed',
   'aborted',

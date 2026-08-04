@@ -122,6 +122,27 @@ class FakeJobStore implements JobStore {
   async pruneTerminal(): Promise<number> {
     return 0;
   }
+  async listUndelivered(originBotKeys: string[]): Promise<BackgroundJob[]> {
+    return [...this.jobs.values()].filter(
+      (j) =>
+        (j.status === 'done' || j.status === 'failed') &&
+        j.deliveredAt === undefined &&
+        j.originBotKey !== undefined &&
+        originBotKeys.includes(j.originBotKey) &&
+        j.originPlatform !== undefined &&
+        j.originChatId !== undefined,
+    );
+  }
+  async claimDelivery(id: string): Promise<boolean> {
+    const job = this.jobs.get(id);
+    if (!job || job.deliveredAt !== undefined) return false;
+    job.deliveredAt = Date.now();
+    return true;
+  }
+  async releaseDelivery(id: string): Promise<void> {
+    const job = this.jobs.get(id);
+    if (job) job.deliveredAt = undefined;
+  }
   async appendEvent(
     jobId: string,
     eventType: BackgroundJobEventType,
@@ -293,9 +314,12 @@ describe('delegate_task background path', () => {
     if (!res.ok) expect(res.code).toBe('execution_failed');
   });
 
-  it('populates origin lane fields from ctx.origin', async () => {
+  it('populates ALL FOUR origin lane fields, so the job is routable by ownership', async () => {
     const store = new FakeJobStore();
-    const { deps } = makeDeps(store);
+    const { deps } = makeDeps(store, {
+      originBotKey: 'bot-1',
+      resolveOriginThreadId: (sessionKey) => (sessionKey === 'cli:test' ? 'thread-7' : undefined),
+    });
     const tool = createDelegateTaskTool(loop, deps);
 
     const withOrigin = await tool.execute(
@@ -306,12 +330,24 @@ describe('delegate_task background path', () => {
     const withOriginJob = store.jobs.get(JSON.parse(withOrigin.value).jobId);
     expect(withOriginJob?.originPlatform).toBe('telegram');
     expect(withOriginJob?.originChatId).toBe('chat-9');
+    // botKey is what the gateway's ownership filter reads. Without it the job's
+    // completion could never be announced — it would be nobody's to deliver.
+    expect(withOriginJob?.originBotKey).toBe('bot-1');
+    expect(withOriginJob?.originThreadId).toBe('thread-7');
+    // ...and that is exactly the predicate the restore sweep queries on.
+    expect(await store.listUndelivered(['bot-1'])).toHaveLength(0); // still queued
+    if (withOriginJob) withOriginJob.status = 'done';
+    expect(await store.listUndelivered(['bot-1'])).toHaveLength(1);
+    expect(await store.listUndelivered(['bot-other'])).toHaveLength(0);
 
     const noOrigin = await tool.execute({ prompt: 'p', background: true }, makeCtx());
     if (!noOrigin.ok) throw new Error('expected ok');
     const noOriginJob = store.jobs.get(JSON.parse(noOrigin.value).jobId);
     expect(noOriginJob?.originPlatform).toBeUndefined();
     expect(noOriginJob?.originChatId).toBeUndefined();
+    // No channel origin → no lane at all, not a half-populated one.
+    expect(noOriginJob?.originBotKey).toBeUndefined();
+    expect(noOriginJob?.originThreadId).toBeUndefined();
   });
 
   it('resolves the cost cap: null=uncapped, number=value, omitted=default', async () => {
@@ -570,6 +606,32 @@ describe('task_logs', () => {
       expect(lines).toHaveLength(2);
       expect(lines[0]).toContain('ran read_file — a.txt');
       expect(lines[1]).toContain('spend $0.12');
+    }
+  });
+
+  it('renders the new tool_end and text events, one event per line', async () => {
+    const store = new FakeJobStore();
+    const { deps } = makeDeps(store);
+    store.seed({ id: 'l2', rootSessionKey: 'cli:test', status: 'running' });
+    await store.appendEvent('l2', 'tool_headline', { toolName: 'bash', arg: 'ls' });
+    await store.appendEvent('l2', 'tool_end', {
+      toolName: 'bash',
+      ok: false,
+      durationMs: 40,
+      error: 'exit 1',
+    });
+    // A chunk with newlines must still render as ONE line — task_logs is a tail.
+    await store.appendEvent('l2', 'text', { text: 'first line\n\nsecond   line' });
+    await store.appendEvent('l2', 'text', { truncated: true });
+
+    const res = await createTaskLogsTool(deps).execute({ id: 'l2', tail: 4 }, makeCtx());
+    expect(res.ok).toBe(true);
+    if (res.ok) {
+      const lines = res.value.split('\n');
+      expect(lines).toHaveLength(4);
+      expect(lines[1]).toContain('bash failed: exit 1 in 40ms');
+      expect(lines[2]).toContain('output: first line second line');
+      expect(lines[3]).toContain('output truncated');
     }
   });
 });

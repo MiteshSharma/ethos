@@ -54,6 +54,20 @@ export interface BackgroundExecutorDeps {
 
 const DEFAULT_POLL_MS = 3_000;
 
+// --- Child-text persistence bounds -----------------------------------------
+// The child's text is persisted WHILE it runs so a crash mid-job does not lose
+// everything it wrote. Three constants bound that, and each answers a different
+// failure mode — do not collapse them into one:
+//   CHARS  — one row per token would be write amplification of ~2000x. Buffer
+//            until a chunk is worth a row.
+//   MS     — a slow, chatty child would otherwise sit under the char threshold
+//            for minutes with nothing durable. Time-bounds the loss window.
+//   ROWS   — the only unbounded axis left is a child that writes forever. Past
+//            the cap the stream stops growing and says so, once.
+const TEXT_CHUNK_CHARS = 2_000;
+const TEXT_FLUSH_MS = 5_000;
+const TEXT_MAX_EVENTS = 100;
+
 function errMsg(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
@@ -349,6 +363,8 @@ export class BackgroundExecutor {
       let errorText: string | undefined;
       let costBreached = false;
 
+      const text = this.createTextSink(job.id);
+
       for await (const ev of this.loop.run(childPrompt, {
         sessionKey: job.childSessionKey,
         ...(job.personalityId ? { personalityId: job.personalityId } : {}),
@@ -360,13 +376,29 @@ export class BackgroundExecutor {
 
         if (ev.type === 'text_delta') {
           output += ev.text;
+          await text.push(ev.text);
         } else if (ev.type === 'thinking_delta') {
           // Ignore — thinking is not persisted to the job's output.
         } else if (ev.type === 'tool_start') {
+          // Flush first so the stream's order matches the run's order: the text
+          // that led to a tool call reads before the call, not after it.
+          await text.flush();
           try {
             await this.store.appendEvent(job.id, 'tool_headline', {
               toolName: ev.toolName,
               arg: shortArgDigest(ev.args),
+            });
+          } catch (err) {
+            this.log?.(`appendEvent failed for ${job.id}: ${errMsg(err)}`);
+          }
+        } else if (ev.type === 'tool_end') {
+          try {
+            await this.store.appendEvent(job.id, 'tool_end', {
+              toolName: ev.toolName,
+              ok: ev.ok,
+              durationMs: ev.durationMs,
+              // `error` is set only when ok is false (AgentEvent contract).
+              ...(ev.error !== undefined ? { error: shortArgDigest(ev.error) } : {}),
             });
           } catch (err) {
             this.log?.(`appendEvent failed for ${job.id}: ${errMsg(err)}`);
@@ -394,6 +426,10 @@ export class BackgroundExecutor {
         clearInterval(heartbeatTimer);
         heartbeatTimer = undefined;
       }
+
+      // Whatever the terminal state, the tail of the child's text belongs in the
+      // stream before the terminal event.
+      await text.flush();
 
       // Terminal transition, in priority order.
       if (costBreached) {
@@ -426,6 +462,61 @@ export class BackgroundExecutor {
         this.log?.(`finish failed for ${job.id}: ${errMsg(finishErr)}`);
       }
     }
+  }
+
+  /**
+   * Buffered writer for the child's text output. `push` accumulates and writes
+   * a `text` event once a chunk is worth a row (size) or the loss window is
+   * long enough (time); `flush` drains whatever is left. Both swallow store
+   * errors — losing an audit row must never fail the job it describes.
+   */
+  private createTextSink(jobId: string): {
+    push(t: string): Promise<void>;
+    flush(): Promise<void>;
+  } {
+    let buffer = '';
+    let lastFlush = Date.now();
+    let written = 0;
+    let capNoted = false;
+
+    const write = async (chunk: string, payload: Record<string, unknown> = {}): Promise<void> => {
+      try {
+        await this.store.appendEvent(jobId, 'text', { text: chunk, ...payload });
+      } catch (err) {
+        this.log?.(`appendEvent(text) failed for ${jobId}: ${errMsg(err)}`);
+      }
+    };
+
+    const drain = async (all: boolean): Promise<void> => {
+      while (buffer.length > 0 && (all || buffer.length >= TEXT_CHUNK_CHARS)) {
+        if (written >= TEXT_MAX_EVENTS) {
+          buffer = '';
+          if (!capNoted) {
+            capNoted = true;
+            written++;
+            await write('', { truncated: true });
+          }
+          return;
+        }
+        const chunk = buffer.slice(0, TEXT_CHUNK_CHARS);
+        buffer = buffer.slice(chunk.length);
+        written++;
+        await write(chunk);
+      }
+      lastFlush = Date.now();
+    };
+
+    return {
+      async push(t: string): Promise<void> {
+        buffer += t;
+        // A stale buffer drains ENTIRELY (`all`) — a size-only drain would leave
+        // the sub-chunk remainder in memory and reset the clock, so the
+        // time-bound would never actually bound anything.
+        const stale = Date.now() - lastFlush >= TEXT_FLUSH_MS;
+        if (buffer.length >= TEXT_CHUNK_CHARS || stale) await drain(stale);
+      },
+      flush: () => drain(true),
+    };
   }
 
   // -------------------------------------------------------------------------

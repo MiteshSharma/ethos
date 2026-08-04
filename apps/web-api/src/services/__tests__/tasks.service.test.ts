@@ -59,6 +59,13 @@ class FakeJobStore implements JobStore {
   async pruneTerminal(): Promise<number> {
     return 0;
   }
+  async listUndelivered(): Promise<BackgroundJob[]> {
+    return [];
+  }
+  async claimDelivery(): Promise<boolean> {
+    return true;
+  }
+  async releaseDelivery(): Promise<void> {}
   async appendEvent(): Promise<void> {}
   async getEvents(jobId: string): Promise<BackgroundJobEvent[]> {
     return this.events.get(jobId) ?? [];

@@ -46,6 +46,14 @@ export interface BackgroundJob {
   createdAt: number;
   startedAt?: number;
   finishedAt?: number;
+  /**
+   * Epoch ms at which this job's completion notice was CLAIMED for delivery to
+   * its origin lane — not proof the platform confirmed it. The claim is the
+   * exactly-once gate (atomic, cross-process); once claimed, the outbound
+   * delivery ledger owns retry. Absent means "terminal but never announced",
+   * which is exactly what the restart sweep looks for.
+   */
+  deliveredAt?: number;
   // --- Phase B lane-resolution fields, added now so Phase B is not a migration.
   // Populated only when the spawn happens under a gateway lane; nullable/optional.
   originPlatform?: string;
@@ -71,6 +79,14 @@ export type BackgroundJobEventType =
   | 'spend'
   | 'cancel_requested'
   | 'tool_headline'
+  /** One child tool call finished — duration, ok/error. Pairs with `tool_headline`. */
+  | 'tool_end'
+  /**
+   * A CHUNK of the child's own text output, persisted while the job runs so a
+   * crash mid-job does not lose everything the child wrote. Chunked (never one
+   * row per delta) — see the executor's text-flush policy.
+   */
+  | 'text'
   | 'done'
   | 'failed'
   | 'aborted'
@@ -139,6 +155,23 @@ export interface JobStore {
   expireQueued(ttlMs: number): Promise<BackgroundJob[]>;
   /** Running rows that track a remote job (remoteJobId set) — for the mesh proxy reconciler. */
   listRunningRemote(): Promise<BackgroundJob[]>;
+  /**
+   * Announceable jobs (`done`/`failed`) that carry a full origin lane, are owned
+   * by one of `originBotKeys`, and have never been claimed for delivery. Oldest
+   * first — the restart sweep replays completions in the order they finished.
+   *
+   * Ownership is a filter, not a suggestion: a deployment sharing a jobs.db must
+   * never announce another deployment's completions.
+   */
+  listUndelivered(originBotKeys: string[]): Promise<BackgroundJob[]>;
+  /**
+   * Atomically claim this job's completion for delivery: sets `deliveredAt` only
+   * if it was unset. Returns whether THIS caller won. Two processes racing at
+   * boot therefore announce a completion exactly once.
+   */
+  claimDelivery(id: string): Promise<boolean>;
+  /** Hand a claim back (`deliveredAt` → unset) when the send could not be made durable. */
+  releaseDelivery(id: string): Promise<void>;
   /** Delete terminal rows whose finishedAt (or createdAt when unfinished) is < cutoffMs, plus their job_events. Returns the count deleted. Retention GC. */
   pruneTerminal(cutoffMs: number): Promise<number>;
   /** Append an audit event. Returns nothing. */

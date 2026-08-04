@@ -591,6 +591,8 @@ export async function buildAgentLoop(
       maxJobsPerRoot: bg.maxJobsPerRoot,
       maxJobsPerPersonality: bg.maxJobsPerPersonality,
       staleMs: bg.staleMs,
+      ...(opts.originBotKey ? { originBotKey: opts.originBotKey } : {}),
+      ...(opts.resolveOriginThreadId ? { resolveOriginThreadId: opts.resolveOriginThreadId } : {}),
     };
 
     // Mesh proxy reconciler — polls peers for background jobs spawned via

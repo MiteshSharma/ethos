@@ -149,6 +149,13 @@ function buildLaneKey(...segments: string[]): string {
  */
 const BACKGROUND_MAX_JOBS_PER_ROOT = 3;
 
+/**
+ * Cap on the in-process announced-jobs Set. Only wide enough to cover a
+ * duplicate `onComplete` for a job still in flight; the durable
+ * `jobs.delivered_at` claim is what actually enforces exactly-once.
+ */
+const DELIVERED_WAKES_MAX = 4_096;
+
 /** Reply sent when a lane is rejected under saturation (typed busy result). */
 const SYSTEM_BUSY_MESSAGE =
   '⚠ The system is busy right now — too many requests in progress. Please try again in a moment.';
@@ -675,7 +682,10 @@ export class Gateway {
   private readonly pluginLoader: GatewayConfig['pluginLoader'];
   private readonly notificationRouter: GatewayConfig['notificationRouter'];
   /** Completion notices waiting for their lane to go idle. laneKey -> items. */
-  private readonly pendingWakes = new Map<string, Array<{ job: BackgroundJob; botKey: string }>>();
+  private readonly pendingWakes = new Map<
+    string,
+    Array<{ job: BackgroundJob; bot: GatewayBotConfig }>
+  >();
   /** job.id of every wake already delivered (or claimed for delivery) — exactly-once. */
   private readonly deliveredWakes = new Set<string>();
   /** Unsubscribe callbacks for each bot executor's `onComplete` subscription. */
@@ -1500,7 +1510,7 @@ export class Gateway {
       const personalityId =
         bot.binding.type === 'team' ? undefined : this.activePersonalityFor(laneKey, bot);
       const short = randomUUID().slice(0, 8);
-      await jobStore.create({
+      const job = await jobStore.create({
         owner: executor.owner,
         parentSessionKey: root,
         rootSessionKey: root,
@@ -1514,8 +1524,14 @@ export class Gateway {
         ...(threadId ? { originThreadId: threadId } : {}),
       });
       executor.nudge();
+      // The id is the whole point of the ack: without it the user has nothing to
+      // correlate the launch to — not the completion notice (which prints the
+      // same short id), not `task_logs`. The full id is what task_* tools take.
       await adapter
-        .send(message.chatId, { text: '⏳ Background task started', threadId })
+        .send(message.chatId, {
+          text: `⏳ Background task started — job ${job.id}`,
+          threadId,
+        })
         .catch(() => {});
       return;
     }
@@ -2118,7 +2134,7 @@ export class Gateway {
       ? buildLaneKey(platform, bot.botKey, chatId, threadId)
       : buildLaneKey(platform, bot.botKey, chatId);
     const list = this.pendingWakes.get(laneKey) ?? [];
-    list.push({ job, botKey: bot.botKey });
+    list.push({ job, bot });
     this.pendingWakes.set(laneKey, list);
     void this.flushWakes(laneKey);
   }
@@ -2126,10 +2142,10 @@ export class Gateway {
   /**
    * Deliver every queued completion notice for `laneKey`, unless a turn is
    * running on that lane (then it's retried on turn-end and by the periodic
-   * sweep). Exactly-once is enforced by marking `deliveredWakes` and dequeuing
-   * BEFORE the async send, so a concurrent flush (turn-end vs sweep) cannot
-   * double-send. Best-effort adapter resolution: an unresolved platform drops
-   * the item with an observability record rather than throwing.
+   * sweep). Dequeuing is synchronous, so a concurrent flush (turn-end vs sweep)
+   * sees an empty queue; the per-job claim below is what makes exactly-once hold
+   * across PROCESSES too. Best-effort adapter resolution: an unresolved platform
+   * drops the item with an observability record rather than throwing.
    */
   private async flushWakes(laneKey: string): Promise<void> {
     if (this.activeSinks.has(laneKey)) return; // a turn is running — defer
@@ -2143,7 +2159,7 @@ export class Gateway {
     const batch = list.splice(0, list.length);
     if (list.length === 0) this.pendingWakes.delete(laneKey);
     for (const item of batch) {
-      const { job } = item;
+      const { job, bot } = item;
       if (this.deliveredWakes.has(job.id)) continue;
       const platform = job.originPlatform;
       const chatId = job.originChatId;
@@ -2151,29 +2167,90 @@ export class Gateway {
       const adapter = this.adapterRegistry.get(platform);
       if (!adapter) {
         // No adapter for this platform in this process — drop, don't retry.
-        this.deliveredWakes.add(job.id);
+        this.markWakeDelivered(job.id);
         this.observability?.recordSafetyBlock({
           code: 'background.wake_undeliverable',
-          details: { jobId: job.id, platform, chatId, botKey: item.botKey },
+          details: { jobId: job.id, platform, chatId, botKey: bot.botKey },
         });
         continue;
       }
-      const threadId = job.originThreadId;
-      const text = this.buildWakeNotice(job);
-      // Mark delivered + already-dequeued BEFORE the async send so a concurrent
-      // flush never re-sends this notice.
-      this.deliveredWakes.add(job.id);
-      // DELIBERATELY not ledger-wrapped (item 9). The wake notice is item 10's
-      // restore-and-deliver territory: that item reworks how a background
-      // completion survives a restart end-to-end, and wrapping it here would
-      // mean building the durability twice and unpicking it once. The slash-
-      // command acks and the voice sendVoice/sendAudio calls are out of scope
-      // for the same reason they were never in it — they are transient UI, not
-      // the turn the user paid tokens for.
-      if (this.outboundDedup.shouldSend(laneKey, text)) {
-        void adapter.send(chatId, { text, threadId }).catch(() => {});
-      }
+      // Mark BEFORE the first await: a second `onComplete` for this job that
+      // arrives while the claim is in flight must not open a second delivery.
+      // Marking a job whose claim we then LOSE is still correct — losing means
+      // a peer process is announcing it, so this process is done with it either
+      // way.
+      this.markWakeDelivered(job.id);
+      if (!(await this.claimWake(bot, job))) continue; // a peer process won it
+      await this.deliverCompletion(bot, job, adapter, laneKey);
     }
+  }
+
+  /**
+   * Win the right to announce this job's completion, exactly once.
+   *
+   * The `jobs.delivered_at` claim is the authority — it is atomic and it
+   * survives a restart, which the in-memory `deliveredWakes` Set does not.
+   * A store error deliberately fails OPEN (returns true): a completion the user
+   * is waiting on must not be swallowed by an audit-column write, and the worst
+   * case is one duplicate notice, which the outbound dedup cache usually eats.
+   */
+  private async claimWake(bot: GatewayBotConfig, job: BackgroundJob): Promise<boolean> {
+    if (!bot.jobStore) return true; // no durable store wired — Set-only, as before
+    try {
+      return await bot.jobStore.claimDelivery(job.id);
+    } catch (err) {
+      this.observability?.recordSafetyBlock({
+        code: 'background.delivery_claim_failed',
+        cause: err instanceof Error ? err.message : String(err),
+        details: { jobId: job.id, botKey: bot.botKey },
+      });
+      return true;
+    }
+  }
+
+  /**
+   * Remember an announced job in-process. Bounded: the durable claim is the real
+   * exactly-once gate, so this Set only needs to cover the window between an
+   * `onComplete` firing twice — it must never grow for the life of the process
+   * (it used to, and was lost on restart, which is the worst of both).
+   */
+  private markWakeDelivered(jobId: string): void {
+    this.deliveredWakes.add(jobId);
+    while (this.deliveredWakes.size > DELIVERED_WAKES_MAX) {
+      const oldest = this.deliveredWakes.values().next().value;
+      if (oldest === undefined) break;
+      this.deliveredWakes.delete(oldest);
+    }
+  }
+
+  /**
+   * Send one completion notice through the durable outbound path (item 9's
+   * ledger), so a notice the platform never confirmed is redelivered by
+   * `sweepPendingDeliveries()` rather than silently lost. Returns whether the
+   * platform confirmed. A dedup hit counts as delivered — the identical text
+   * already reached this lane.
+   */
+  private async deliverCompletion(
+    bot: GatewayBotConfig,
+    job: BackgroundJob,
+    adapter: PlatformAdapter,
+    laneKey: string,
+  ): Promise<boolean> {
+    const platform = job.originPlatform;
+    const chatId = job.originChatId;
+    if (!platform || !chatId) return false;
+    const text = this.buildWakeNotice(job);
+    if (!this.outboundDedup.shouldSend(laneKey, text)) return true;
+    return this.sendTracked(
+      {
+        adapter,
+        botKey: bot.botKey,
+        platform,
+        chatId,
+        sessionKey: this.sessionKeys.get(laneKey) ?? laneKey,
+      },
+      { text, threadId: job.originThreadId },
+    );
   }
 
   /**
@@ -2436,6 +2513,97 @@ export class Gateway {
       }
     }
     return { redelivered, failed };
+  }
+
+  // ---------------------------------------------------------------------------
+  // Restart-durable background completions (item 10)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Announce every background job that finished while nobody was listening.
+   *
+   * The gap item 9's ledger structurally cannot close: a process that died
+   * before announcing a completion never called `record()`, so no pending
+   * obligation exists and the ledger has nothing to redeliver. The job row's
+   * own `delivered_at` is the missing bit of state — NULL on a terminal row
+   * means "finished, never announced", which is precisely this sweep's input.
+   *
+   * Ownership matches the ledger's rule (`botKey ∈ this.bots`): the query is
+   * scoped per bot, so a deployment sharing a `jobs.db` never announces another
+   * deployment's completions. The claim is atomic, so two processes booting at
+   * once announce each completion exactly once. Delivery itself goes through
+   * `sendTracked`, which is how a restored completion inherits the ledger's
+   * durability and thread-correct redelivery.
+   *
+   * Must run AFTER `adapter.start()`, for the same reason the ledger sweep must.
+   */
+  async sweepUndeliveredJobs(): Promise<{ delivered: number; failed: number }> {
+    let delivered = 0;
+    let failed = 0;
+    for (const bot of this.bots.values()) {
+      const store = bot.jobStore;
+      if (!store) continue;
+      let rows: BackgroundJob[];
+      try {
+        rows = await store.listUndelivered([bot.botKey]);
+      } catch (err) {
+        this.observability?.recordSafetyBlock({
+          code: 'background.restore_sweep_failed',
+          cause: err instanceof Error ? err.message : String(err),
+          details: { botKey: bot.botKey },
+        });
+        continue;
+      }
+      for (const job of rows) {
+        const platform = job.originPlatform;
+        const chatId = job.originChatId;
+        if (!platform || !chatId) continue;
+        const adapter = this.adapterRegistry.get(platform);
+        if (!adapter) {
+          // This process owns the bot but not an adapter for its platform. Hand
+          // the row back untouched rather than burning its one claim.
+          failed++;
+          continue;
+        }
+        const laneKey = job.originThreadId
+          ? buildLaneKey(platform, bot.botKey, chatId, job.originThreadId)
+          : buildLaneKey(platform, bot.botKey, chatId);
+        try {
+          if (!(await store.claimDelivery(job.id))) continue; // a peer won it
+          this.markWakeDelivered(job.id);
+          const ok = await this.deliverCompletion(bot, job, adapter, laneKey);
+          if (ok) {
+            delivered++;
+            continue;
+          }
+          failed++;
+          // With a ledger wired, `sendTracked` left a `pending` obligation and
+          // the ledger sweep owns the retry — keep the claim so the completion
+          // is not announced twice. Without one there is no retry anywhere, so
+          // release the claim and let the next boot try again.
+          if (!this.deliveryLedger) await store.releaseDelivery(job.id);
+        } catch (err) {
+          failed++;
+          this.observability?.recordSafetyBlock({
+            code: 'background.restore_delivery_failed',
+            cause: err instanceof Error ? err.message : String(err),
+            details: { jobId: job.id, botKey: bot.botKey, platform },
+          });
+        }
+      }
+    }
+    return { delivered, failed };
+  }
+
+  /**
+   * The thread a live turn on `sessionKey` originated in. The gateway is the one
+   * component that knows this mapping (`ToolContext` carries no thread), so it
+   * is exposed for wiring to hand to the background tools — a `delegate_task`
+   * job stamps it as `origin_thread_id` and its completion returns to the
+   * sub-conversation that asked for it. `undefined` once the turn ends.
+   */
+  originThreadIdFor(sessionKey: string): string | undefined {
+    return this.sessionRouting.get(sessionKey)?.threadId;
   }
 
   // ---------------------------------------------------------------------------

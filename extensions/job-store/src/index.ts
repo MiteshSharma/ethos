@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
-import Database from '@ethosagent/sqlite';
+import Database, { migrate } from '@ethosagent/sqlite';
 import type {
   BackgroundJob,
   BackgroundJobEvent,
@@ -36,6 +36,7 @@ const SCHEMA = `
     created_at         INTEGER NOT NULL,
     started_at         INTEGER,
     finished_at        INTEGER,
+    delivered_at       INTEGER,
     origin_platform    TEXT,
     origin_bot_key     TEXT,
     origin_chat_id     TEXT,
@@ -58,6 +59,42 @@ const SCHEMA = `
   CREATE INDEX IF NOT EXISTS jobs_owner_status ON jobs(owner, status);
   CREATE INDEX IF NOT EXISTS jobs_status_created ON jobs(status, created_at);
 `;
+
+/**
+ * The restore sweep's index. NOT in the baseline: `migrate` execs the baseline
+ * BEFORE the migration chain, so on an older database `delivered_at` does not
+ * exist yet and the CREATE INDEX would fail. It goes after the chain instead,
+ * where the column is guaranteed to be there.
+ */
+const DELIVERY_INDEX =
+  'CREATE INDEX IF NOT EXISTS jobs_undelivered ON jobs(origin_bot_key, status, delivered_at)';
+
+const JOB_STORE_SCHEMA_VERSION = 3;
+
+/**
+ * Forward-only DDL steps. Each brings a `(N-1)` database to `N`; the baseline
+ * above already describes v3, so a FRESH database never runs one. The
+ * `table_info` guards keep each ALTER idempotent even if a database was
+ * hand-repaired to the newer shape without its `user_version` being bumped.
+ */
+const JOB_STORE_MIGRATIONS: Record<number, (db: Database.Database) => void> = {
+  2: (db) => {
+    addColumnIfMissing(db, 'remote_peer', 'TEXT');
+    addColumnIfMissing(db, 'remote_job_id', 'TEXT');
+  },
+  // v2 -> v3: the delivery claim. `ALTER TABLE ... ADD COLUMN` keeps the table
+  // STRICT (STRICT is a table property, not a column one) and leaves every
+  // existing row intact with `delivered_at` NULL — i.e. "never announced",
+  // which is the honest state for a job that finished before this code existed.
+  3: (db) => addColumnIfMissing(db, 'delivered_at', 'INTEGER'),
+};
+
+function addColumnIfMissing(db: Database.Database, column: string, type: string): void {
+  const cols = db.pragma('table_info(jobs)') as Array<{ name: string }>;
+  if (!cols.some((c) => c.name === column)) {
+    db.exec(`ALTER TABLE jobs ADD COLUMN ${column} ${type}`);
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Row types
@@ -83,6 +120,7 @@ interface JobRow {
   created_at: number;
   started_at: number | null;
   finished_at: number | null;
+  delivered_at: number | null;
   origin_platform: string | null;
   origin_bot_key: string | null;
   origin_chat_id: string | null;
@@ -125,6 +163,7 @@ function rowToJob(r: JobRow): BackgroundJob {
     createdAt: r.created_at,
     startedAt: r.started_at ?? undefined,
     finishedAt: r.finished_at ?? undefined,
+    deliveredAt: r.delivered_at ?? undefined,
     originPlatform: r.origin_platform ?? undefined,
     originBotKey: r.origin_bot_key ?? undefined,
     originChatId: r.origin_chat_id ?? undefined,
@@ -171,36 +210,15 @@ export class SQLiteJobStore implements JobStore {
     // SQLITE_BUSY.
     this.db.pragma('busy_timeout = 5000');
 
-    // Version check FIRST — refuse to open a DB whose schema is newer than this
-    // code, to avoid a downgrade corrupting rows written by a future version.
-    const versionRows = this.db.pragma('user_version') as Array<{ user_version: number }>;
-    const currentVersion = versionRows[0]?.user_version ?? 0;
-    if (currentVersion > 2) {
-      throw new Error(
-        `job-store: database user_version=${currentVersion} is newer than code (2); refusing to open to avoid downgrade`,
-      );
-    }
-
-    // SCHEMA describes the current (v2) shape. A fresh DB gets it directly via
-    // CREATE TABLE IF NOT EXISTS.
-    this.db.exec(SCHEMA);
-
-    // v1 → v2: add remote_peer / remote_job_id to pre-existing STRICT jobs
-    // tables. The table_info check makes each ALTER idempotent (fresh DBs
-    // already have the columns from CREATE TABLE).
-    if (currentVersion < 2) {
-      const cols = this.db.pragma('table_info(jobs)') as Array<{ name: string }>;
-      if (!cols.some((c) => c.name === 'remote_peer')) {
-        this.db.exec('ALTER TABLE jobs ADD COLUMN remote_peer TEXT');
-      }
-      if (!cols.some((c) => c.name === 'remote_job_id')) {
-        this.db.exec('ALTER TABLE jobs ADD COLUMN remote_job_id TEXT');
-      }
-    }
-
-    if (currentVersion < 2) {
-      this.db.pragma('user_version = 2');
-    }
+    // Downgrade guard, idempotent baseline, and the stepwise chain all live in
+    // the shared harness — the same one session-sqlite / delivery-ledger use.
+    migrate(this.db, {
+      name: 'job-store',
+      targetVersion: JOB_STORE_SCHEMA_VERSION,
+      baseline: SCHEMA,
+      migrations: JOB_STORE_MIGRATIONS,
+    });
+    this.db.exec(DELIVERY_INDEX);
   }
 
   async create(input: CreateBackgroundJobInput): Promise<BackgroundJob> {
@@ -431,6 +449,38 @@ export class SQLiteJobStore implements JobStore {
       )
       .all() as JobRow[];
     return rows.map(rowToJob);
+  }
+
+  async listUndelivered(originBotKeys: string[]): Promise<BackgroundJob[]> {
+    if (originBotKeys.length === 0) return [];
+    // Only `done`/`failed` are announceable — `aborted` is user-requested and
+    // stays silent, and `stale`/`expired` have no result worth waking anyone
+    // for. Narrowing here (rather than at the caller) is also what keeps this
+    // query's result set bounded: an un-announceable row is never scanned again.
+    const placeholders = originBotKeys.map(() => '?').join(',');
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM jobs
+         WHERE status IN ('done','failed')
+           AND delivered_at IS NULL
+           AND origin_bot_key IN (${placeholders})
+           AND origin_platform IS NOT NULL
+           AND origin_chat_id IS NOT NULL
+         ORDER BY COALESCE(finished_at, created_at) ASC, rowid ASC`,
+      )
+      .all(...originBotKeys) as JobRow[];
+    return rows.map(rowToJob);
+  }
+
+  async claimDelivery(id: string): Promise<boolean> {
+    const result = this.db
+      .prepare('UPDATE jobs SET delivered_at = ? WHERE id = ? AND delivered_at IS NULL')
+      .run(Date.now(), id);
+    return result.changes === 1;
+  }
+
+  async releaseDelivery(id: string): Promise<void> {
+    this.db.prepare('UPDATE jobs SET delivered_at = NULL WHERE id = ?').run(id);
   }
 
   async pruneTerminal(cutoffMs: number): Promise<number> {

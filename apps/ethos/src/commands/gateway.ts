@@ -446,13 +446,22 @@ export async function runGatewayStart(opts: GatewayStartOptions = {}): Promise<v
   // `createAgentLoop`; team bots use `createTeamAgentLoop`. Each loop
   // receives the shared `scheduler` so its `cron` tool lands in the
   // same scheduler store as everything else.
+  // Late-bound on purpose: the loops are built here, but the Gateway is
+  // constructed further down. Assigned right after construction, and read by
+  // two things — the approval-route hooks, and the thread resolver below. A
+  // background job spawned by `delegate_task` stamps the turn's thread so its
+  // completion (possibly only delivered after a restart) returns to the
+  // sub-conversation that asked for it.
+  let gatewayRef: Gateway | null = null;
   const {
     bots,
     messagingSetters: botMessagingSetters,
     notificationRouters: botNotificationRouters,
     toolRegistries: botToolRegistries,
     refreshers: botPersonalityRefreshers,
-  } = await buildGatewayBots(config, scheduler, watcherManager);
+  } = await buildGatewayBots(config, scheduler, watcherManager, (sessionKey) =>
+    gatewayRef?.originThreadIdFor(sessionKey),
+  );
 
   // Phase 3: for each team-bound bot, ensure the supervisor is running.
   const supervisorDeps: TeamSupervisorDeps = {
@@ -621,7 +630,6 @@ export async function runGatewayStart(opts: GatewayStartOptions = {}): Promise<v
     },
   });
 
-  let gatewayRef: Gateway | null = null;
   const telegramClarifySurfaces = await buildTelegramClarifySurfaces(
     bots,
     adapters,
@@ -1011,6 +1019,23 @@ export async function runGatewayStart(opts: GatewayStartOptions = {}): Promise<v
       new ConsoleLogger().warn(`delivery ledger boot sweep failed: ${String(err)}`);
     });
 
+  // Restore-and-deliver (item 10). A background job that finished while this
+  // process was down was written `done`/`failed` and then sat unread — the
+  // delivery ledger cannot help, because nothing was ever recorded for it.
+  // Runs after adapter.start() for the same reason the ledger sweep does.
+  void gateway
+    .sweepUndeliveredJobs()
+    .then(({ delivered, failed }) => {
+      if (delivered > 0 || failed > 0) {
+        console.log(
+          `${c.dim}Background jobs: announced ${delivered} completion(s) missed while offline, ${failed} deferred${c.reset}`,
+        );
+      }
+    })
+    .catch((err) => {
+      new ConsoleLogger().warn(`background completion boot sweep failed: ${String(err)}`);
+    });
+
   // Retention GC — delivered rows carry message bodies, so they are not kept
   // forever. Prune once at boot, then hourly. Pending rows are never pruned.
   const pruneDeliveryLedger = () => {
@@ -1236,10 +1261,12 @@ async function buildGatewayBots(
   config: EthosConfig,
   scheduler: CronScheduler,
   watcherManager: WatcherManager,
+  resolveOriginThreadId: (sessionKey: string) => string | undefined,
 ): Promise<BuildGatewayBotsResult> {
   // Every personality loop gets the same scheduler + watcher manager so
-  // agent-callable cron/watcher tools land in the shared stores.
-  const loopOpts = { cronScheduler: scheduler, watcherManager };
+  // agent-callable cron/watcher tools land in the shared stores. The thread
+  // resolver rides along so background jobs record their full origin lane.
+  const loopOpts = { cronScheduler: scheduler, watcherManager, resolveOriginThreadId };
   const out: GatewayBotConfig[] = [];
   const setters: Array<(fn: MessagingSendFn) => void> = [];
   const routers: NotificationRouter[] = [];
@@ -1259,7 +1286,10 @@ async function buildGatewayBots(
       // Per-bot personality loop. Threads the shared scheduler so
       // `create_cron_job` etc. lands in the same store as the
       // system-loop's jobs.
-      const result = await createAgentLoop({ ...config, personality: bot.bind.name }, loopOpts);
+      const result = await createAgentLoop(
+        { ...config, personality: bot.bind.name },
+        { ...loopOpts, originBotKey: botKey },
+      );
       loop = result.loop;
       jobStore = result.jobStore;
       backgroundExecutor = result.backgroundExecutor;
@@ -1299,7 +1329,10 @@ async function buildGatewayBots(
       routers.push(team.notificationRouter);
       registries.push(team.toolRegistry);
     } else {
-      const result = await createAgentLoop({ ...config, personality: bind.name }, loopOpts);
+      const result = await createAgentLoop(
+        { ...config, personality: bind.name },
+        { ...loopOpts, originBotKey: botKey },
+      );
       loop = result.loop;
       jobStore = result.jobStore;
       backgroundExecutor = result.backgroundExecutor;
@@ -1321,9 +1354,13 @@ async function buildGatewayBots(
   // so POST /webhook/<hookId> drives the same gateway/session machinery as a
   // channel bot. botKey matches what the webhook server stamps on inbounds.
   for (const [hookId, hook] of Object.entries(config.webhooks ?? {})) {
-    const result = await createAgentLoop({ ...config, personality: hook.personalityId }, loopOpts);
+    const botKey = `webhook:${hookId}`;
+    const result = await createAgentLoop(
+      { ...config, personality: hook.personalityId },
+      { ...loopOpts, originBotKey: botKey },
+    );
     out.push({
-      botKey: `webhook:${hookId}`,
+      botKey,
       loop: result.loop,
       binding: { type: 'personality', name: hook.personalityId },
       ...(result.jobStore ? { jobStore: result.jobStore } : {}),
@@ -1339,9 +1376,10 @@ async function buildGatewayBots(
   // resolves to a loop instead of dropping at the unknown-botKey gate. The
   // botKey MUST match what `buildAdapters` passes the DiscordAdapter.
   if (config.discordToken) {
-    const result = await createAgentLoop(config, loopOpts);
+    const botKey = discordBotKey(config.discordToken);
+    const result = await createAgentLoop(config, { ...loopOpts, originBotKey: botKey });
     out.push({
-      botKey: discordBotKey(config.discordToken),
+      botKey,
       loop: result.loop,
       binding: { type: 'personality', name: config.personality },
       ...(result.jobStore ? { jobStore: result.jobStore } : {}),
@@ -1354,9 +1392,10 @@ async function buildGatewayBots(
   }
   // Legacy scalar Email — same treatment as Discord.
   if (config.emailImapHost && config.emailUser && config.emailPassword && config.emailSmtpHost) {
-    const result = await createAgentLoop(config, loopOpts);
+    const botKey = emailBotKey(config.emailUser, config.emailImapHost);
+    const result = await createAgentLoop(config, { ...loopOpts, originBotKey: botKey });
     out.push({
-      botKey: emailBotKey(config.emailUser, config.emailImapHost),
+      botKey,
       loop: result.loop,
       binding: { type: 'personality', name: config.personality },
       ...(result.jobStore ? { jobStore: result.jobStore } : {}),

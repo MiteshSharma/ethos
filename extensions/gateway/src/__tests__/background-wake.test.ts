@@ -1,6 +1,13 @@
 import type { AgentLoop } from '@ethosagent/core';
-import type { BackgroundExecutor } from '@ethosagent/job-runner';
-import type { BackgroundJob, InboundMessage, PlatformAdapter } from '@ethosagent/types';
+import { BackgroundExecutor } from '@ethosagent/job-runner';
+import type {
+  BackgroundJob,
+  BackgroundJobEventType,
+  CreateBackgroundJobInput,
+  InboundMessage,
+  JobStore,
+  PlatformAdapter,
+} from '@ethosagent/types';
 import { describe, expect, it, vi } from 'vitest';
 import { Gateway } from '../index';
 
@@ -75,6 +82,114 @@ function makeJob(overrides: Partial<BackgroundJob> = {}): BackgroundJob {
 }
 
 /**
+ * Minimal in-memory `JobStore` — only the surface the gateway itself touches
+ * (`create` for `/background`, `countActiveByRoot` for its cap, and the item-10
+ * delivery claim). Deliberately NOT `@ethosagent/job-store`: the gateway does
+ * not depend on a concrete store, and a test import would invent that edge.
+ * SQL-level claim atomicity is proven in that package's own suite.
+ */
+class FakeJobStore implements JobStore {
+  jobs = new Map<string, BackgroundJob>();
+  private seq = 0;
+
+  seed(job: Partial<BackgroundJob> & { id: string }): BackgroundJob {
+    const full: BackgroundJob = {
+      owner: 'proc-1',
+      parentSessionKey: 'parent',
+      rootSessionKey: 'root',
+      childSessionKey: 'child',
+      depth: 1,
+      status: 'done',
+      prompt: 'p',
+      spendUsd: 0,
+      createdAt: Date.now(),
+      ...job,
+    };
+    this.jobs.set(full.id, full);
+    return full;
+  }
+  async create(input: CreateBackgroundJobInput): Promise<BackgroundJob> {
+    return this.seed({ id: `job-${++this.seq}`, status: 'queued', ...input });
+  }
+  async get(id: string): Promise<BackgroundJob | null> {
+    return this.jobs.get(id) ?? null;
+  }
+  async claimNextQueued(): Promise<BackgroundJob | null> {
+    return null;
+  }
+  async heartbeat(): Promise<void> {}
+  async updateSpend(): Promise<void> {}
+  async requestCancel(): Promise<void> {}
+  async finish(
+    id: string,
+    terminal: 'done' | 'failed' | 'aborted',
+    fields: { summary?: string; error?: string },
+  ): Promise<void> {
+    const job = this.jobs.get(id);
+    if (!job) return;
+    job.status = terminal;
+    job.summary = fields.summary;
+    job.error = fields.error;
+    job.finishedAt = Date.now();
+  }
+  async listByRoot(): Promise<BackgroundJob[]> {
+    return [];
+  }
+  async countActiveByRoot(): Promise<number> {
+    return 0;
+  }
+  async countActiveByPersonality(): Promise<number> {
+    return 0;
+  }
+  async reclaimStale(): Promise<BackgroundJob[]> {
+    return [];
+  }
+  async expireQueued(): Promise<BackgroundJob[]> {
+    return [];
+  }
+  async listRunningRemote(): Promise<BackgroundJob[]> {
+    return [];
+  }
+  async pruneTerminal(): Promise<number> {
+    return 0;
+  }
+  async listUndelivered(originBotKeys: string[]): Promise<BackgroundJob[]> {
+    return [...this.jobs.values()].filter(
+      (j) =>
+        (j.status === 'done' || j.status === 'failed') &&
+        j.deliveredAt === undefined &&
+        j.originBotKey !== undefined &&
+        originBotKeys.includes(j.originBotKey) &&
+        j.originPlatform !== undefined &&
+        j.originChatId !== undefined,
+    );
+  }
+  async claimDelivery(id: string): Promise<boolean> {
+    const job = this.jobs.get(id);
+    if (!job || job.deliveredAt !== undefined) return false;
+    job.deliveredAt = Date.now();
+    return true;
+  }
+  async releaseDelivery(id: string): Promise<void> {
+    const job = this.jobs.get(id);
+    if (job) job.deliveredAt = undefined;
+  }
+  /** Recorded so a test can assert what the child wrote to the STORE (allowed)
+   *  versus what reached an adapter (not allowed). */
+  appended: Array<{ type: BackgroundJobEventType; payload: Record<string, unknown> }> = [];
+  async appendEvent(
+    _jobId: string,
+    eventType: BackgroundJobEventType,
+    payload: Record<string, unknown>,
+  ): Promise<void> {
+    this.appended.push({ type: eventType, payload });
+  }
+  async getEvents(): Promise<never[]> {
+    return [];
+  }
+}
+
+/**
  * A fake `BackgroundExecutor` exposing only what the gateway subscribes to:
  * `onComplete(handler)`. The captured handler is invoked by `fire(job)` to
  * simulate a terminal transition, and `owner` is present for the /background
@@ -84,6 +199,7 @@ function fakeExecutor() {
   const handlers: Array<(job: BackgroundJob) => void> = [];
   const exec = {
     owner: 'proc-1',
+    nudge: vi.fn(),
     onComplete: vi.fn((h: (job: BackgroundJob) => void) => {
       handlers.push(h);
       return () => {
@@ -356,6 +472,267 @@ describe('Gateway — background wake stays silent for aborted jobs', () => {
     await new Promise((r) => setTimeout(r, 20));
 
     expect(noticeSends(adapter)).toHaveLength(0);
+
+    void gw;
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Item 10 — the ack is correlatable
+// ---------------------------------------------------------------------------
+
+describe('Gateway — /background acknowledgement', () => {
+  it('returns the job id, so the launch can be correlated to task_logs', async () => {
+    const g = gatedLoop();
+    const { executor } = fakeExecutor();
+    const adapter = stubAdapter();
+    const store = new FakeJobStore();
+    const gw = new Gateway({
+      bots: [
+        {
+          botKey: 'b1',
+          loop: g.loop,
+          binding: { type: 'personality', name: 'default' },
+          backgroundExecutor: executor,
+          jobStore: store,
+        },
+      ],
+      adapters: new Map([['test', adapter]]),
+      clarifySweepIntervalMs: 0,
+    });
+
+    await gw.handleMessage(makeMessage({ text: '/background crawl the docs' }), adapter);
+
+    const created = [...store.jobs.values()];
+    expect(created).toHaveLength(1);
+    const jobId = created[0]?.id ?? '';
+    const ack = sentTexts(adapter).find((t) => t.startsWith('⏳ Background task started'));
+    expect(ack).toBeDefined();
+    // The bare "started" string left the user with nothing to poll.
+    expect(ack).toContain(jobId);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Item 10(b) — restore-and-deliver across a restart
+// ---------------------------------------------------------------------------
+
+describe('Gateway — restart-durable background completions', () => {
+  function bootGateway(
+    bots: Array<{ botKey: string; store: FakeJobStore }>,
+    adapter: PlatformAdapter,
+  ): Gateway {
+    return new Gateway({
+      bots: bots.map(({ botKey, store }) => ({
+        botKey,
+        loop: gatedLoop().loop,
+        binding: { type: 'personality' as const, name: 'default' },
+        jobStore: store,
+      })),
+      adapters: new Map([['test', adapter]]),
+      clarifySweepIntervalMs: 0,
+    });
+  }
+
+  it('delivers a job that finished while the process was down — exactly once', async () => {
+    const store = new FakeJobStore();
+    // The row a dead gateway leaves behind: terminal, with a summary, never
+    // announced. No delivery-ledger row exists for it — nothing ever recorded
+    // one — which is precisely why the ledger alone cannot rescue it.
+    store.seed({
+      id: 'offline-1',
+      status: 'done',
+      summary: 'finished while you were away',
+      originPlatform: 'test',
+      originBotKey: 'b1',
+      originChatId: 'chat-1',
+    });
+
+    const adapter = stubAdapter();
+    const gw = bootGateway([{ botKey: 'b1', store }], adapter);
+
+    const first = await gw.sweepUndeliveredJobs();
+    expect(first).toEqual({ delivered: 1, failed: 0 });
+    await waitUntil(() => noticeSends(adapter).length === 1);
+    expect(noticeSends(adapter)[0]).toContain('finished while you were away');
+    expect(store.jobs.get('offline-1')?.deliveredAt).toBeGreaterThan(0);
+
+    // A second boot (or a peer process) must not announce it again.
+    const second = await gw.sweepUndeliveredJobs();
+    expect(second).toEqual({ delivered: 0, failed: 0 });
+    expect(noticeSends(adapter)).toHaveLength(1);
+  });
+
+  it('never redelivers a job whose completion was already announced', async () => {
+    const store = new FakeJobStore();
+    store.seed({
+      id: 'already-1',
+      status: 'done',
+      summary: 'you already saw this',
+      deliveredAt: Date.now() - 5_000,
+      originPlatform: 'test',
+      originBotKey: 'b1',
+      originChatId: 'chat-1',
+    });
+
+    const adapter = stubAdapter();
+    const gw = bootGateway([{ botKey: 'b1', store }], adapter);
+
+    expect(await gw.sweepUndeliveredJobs()).toEqual({ delivered: 0, failed: 0 });
+    expect(noticeSends(adapter)).toHaveLength(0);
+  });
+
+  it('does not announce a completion owned by a bot this process does not run', async () => {
+    // One shared jobs.db, three bots' rows — this process runs only A and B.
+    const storeA = new FakeJobStore();
+    const storeB = new FakeJobStore();
+    for (const store of [storeA, storeB]) {
+      store.seed({
+        id: `owned-${store === storeA ? 'a' : 'b'}`,
+        status: 'done',
+        summary: 'ours',
+        originPlatform: 'test',
+        originBotKey: store === storeA ? 'botA' : 'botB',
+        originChatId: 'chat-1',
+      });
+      store.seed({
+        id: `foreign-${store === storeA ? 'a' : 'b'}`,
+        status: 'done',
+        summary: 'BOT-C-SECRET',
+        originPlatform: 'test',
+        originBotKey: 'botC',
+        originChatId: 'chat-1',
+      });
+    }
+
+    const adapter = stubAdapter();
+    const gw = bootGateway(
+      [
+        { botKey: 'botA', store: storeA },
+        { botKey: 'botB', store: storeB },
+      ],
+      adapter,
+    );
+
+    expect(await gw.sweepUndeliveredJobs()).toEqual({ delivered: 2, failed: 0 });
+    const bodies = noticeSends(adapter);
+    expect(bodies).toHaveLength(2);
+    expect(bodies.some((b) => b.includes('BOT-C-SECRET'))).toBe(false);
+    // Bot C's rows are untouched — not delivered, and not burned either.
+    expect(storeA.jobs.get('foreign-a')?.deliveredAt).toBeUndefined();
+    expect(storeB.jobs.get('foreign-b')?.deliveredAt).toBeUndefined();
+  });
+
+  it('releases the claim when the send failed and no ledger owns the retry', async () => {
+    const store = new FakeJobStore();
+    store.seed({
+      id: 'unsent-1',
+      status: 'done',
+      summary: 'never landed',
+      originPlatform: 'test',
+      originBotKey: 'b1',
+      originChatId: 'chat-1',
+    });
+
+    const adapter = stubAdapter({
+      send: vi.fn().mockResolvedValue({ ok: false, error: 'platform down' }),
+    });
+    const gw = bootGateway([{ botKey: 'b1', store }], adapter);
+
+    expect(await gw.sweepUndeliveredJobs()).toEqual({ delivered: 0, failed: 1 });
+    // Nothing else would ever retry it, so the claim is handed back.
+    expect(store.jobs.get('unsent-1')?.deliveredAt).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Item 10 — audience boundary, guarding the NEW child-event wire
+// ---------------------------------------------------------------------------
+
+describe('Gateway — a child job’s progress never reaches a channel adapter', () => {
+  it('records the child narrative in the store only; the channel sees the completion', async () => {
+    const store = new FakeJobStore();
+    const job = store.seed({
+      id: 'child-1',
+      status: 'queued',
+      originPlatform: 'test',
+      originBotKey: 'b1',
+      originChatId: 'chat-1',
+    });
+    let claimed = false;
+    store.claimNextQueued = async () => {
+      if (claimed) return null;
+      claimed = true;
+      job.status = 'running';
+      return job;
+    };
+
+    // The child emits BOTH audiences. Neither may be pushed to a channel: the
+    // user opted into `audience:'user'` progress for the turn they are watching,
+    // not for a detached job's inner monologue.
+    const childLoop = {
+      run: vi.fn(async function* () {
+        yield {
+          type: 'tool_progress' as const,
+          toolName: 'bash',
+          message: 'CHILD-INTERNAL-STEP',
+          audience: 'internal' as const,
+        };
+        yield {
+          type: 'tool_progress' as const,
+          toolName: 'bash',
+          message: 'CHILD-USER-STEP',
+          audience: 'user' as const,
+        };
+        yield { type: 'text_delta' as const, text: 'CHILD-RAW-TEXT' };
+        yield { type: 'done' as const, text: 'CHILD-RAW-TEXT', turnCount: 1 };
+      }),
+      hooks: { registerVoid: vi.fn().mockReturnValue(() => {}) },
+    } as unknown as AgentLoop;
+
+    const executor = new BackgroundExecutor({
+      store,
+      loop: childLoop,
+      owner: 'proc-1',
+      config: {
+        maxConcurrentJobs: 1,
+        staleMs: 90_000,
+        heartbeatMs: 1_000,
+        queuedTtlMs: 900_000,
+        maxRootBackgroundUsd: null,
+        pollMs: 5,
+      },
+    });
+
+    const adapter = stubAdapter();
+    const gw = new Gateway({
+      bots: [
+        {
+          botKey: 'b1',
+          loop: gatedLoop().loop,
+          binding: { type: 'personality', name: 'default' },
+          backgroundExecutor: executor,
+          jobStore: store,
+        },
+      ],
+      adapters: new Map([['test', adapter]]),
+      clarifySweepIntervalMs: 0,
+    });
+
+    executor.start();
+    await waitUntil(() => noticeSends(adapter).length === 1, 3000);
+    await executor.shutdown();
+
+    const everythingSent = sentTexts(adapter).join('\n');
+    expect(everythingSent).not.toContain('CHILD-INTERNAL-STEP');
+    // Even the tool author's explicit `audience:'user'` opt-in is scoped to the
+    // turn the user is watching — a detached child has no such turn.
+    expect(everythingSent).not.toContain('CHILD-USER-STEP');
+    // The only thing that crosses to the channel is the completion.
+    expect(noticeSends(adapter)).toHaveLength(1);
+    expect(noticeSends(adapter)[0]).toContain('CHILD-RAW-TEXT');
+    // ...while the store DID get the child's text. A store is not a channel.
+    expect(store.appended.some((e) => e.type === 'text')).toBe(true);
 
     void gw;
   });

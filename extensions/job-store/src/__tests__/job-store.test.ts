@@ -366,7 +366,7 @@ describe('SQLiteJobStore', () => {
     // Bump user_version beyond the code's supported version out-of-band.
     const Database = (await import('@ethosagent/sqlite')).default;
     const raw = new Database(path);
-    raw.pragma('user_version = 3');
+    raw.pragma('user_version = 4');
     raw.close();
 
     expect(() => new SQLiteJobStore(path)).toThrow(/newer than code/);
@@ -444,7 +444,61 @@ describe('SQLiteJobStore', () => {
     store.close();
   });
 
-  it('migrates a v1 database (adds remote columns) when opened by v2 code', async () => {
+  // -------------------------------------------------------------------------
+  // Delivery claim (item 10) — "which finished jobs were never announced?"
+  // -------------------------------------------------------------------------
+
+  it('listUndelivered returns only announceable, addressed, owned, unclaimed rows', async () => {
+    const store = new SQLiteJobStore(':memory:');
+    const finishAs = async (
+      input: Partial<CreateBackgroundJobInput>,
+      terminal: 'done' | 'failed' | 'aborted',
+    ): Promise<string> => {
+      const job = await store.create(baseInput(input));
+      await store.claimNextQueued('proc-A');
+      await store.finish(job.id, terminal, { summary: 's' });
+      return job.id;
+    };
+
+    const done = await finishAs({}, 'done');
+    const failed = await finishAs({}, 'failed');
+    // Not announceable: the user asked for it to stop.
+    await finishAs({}, 'aborted');
+    // Not addressable: no origin lane at all (a CLI-spawned job).
+    await finishAs({ originPlatform: undefined, originChatId: undefined }, 'done');
+    // Not ours.
+    await finishAs({ originBotKey: 'bot-OTHER' }, 'done');
+    // Not terminal.
+    await store.create(baseInput());
+
+    const rows = await store.listUndelivered(['bot-1']);
+    expect(rows.map((r) => r.id).sort()).toEqual([done, failed].sort());
+    // Ownership is a hard filter, not a ranking.
+    expect(await store.listUndelivered(['bot-OTHER'])).toHaveLength(1);
+    expect(await store.listUndelivered([])).toHaveLength(0);
+    store.close();
+  });
+
+  it('claimDelivery is won exactly once, and a released claim is reclaimable', async () => {
+    const store = new SQLiteJobStore(':memory:');
+    const job = await store.create(baseInput());
+    await store.claimNextQueued('proc-A');
+    await store.finish(job.id, 'done', { summary: 'ok' });
+
+    expect(await store.claimDelivery(job.id)).toBe(true);
+    // Second caller (a peer process at boot) loses.
+    expect(await store.claimDelivery(job.id)).toBe(false);
+    expect((await store.get(job.id))?.deliveredAt).toBeGreaterThan(0);
+    // A claimed row is no longer offered to the sweep.
+    expect(await store.listUndelivered(['bot-1'])).toHaveLength(0);
+
+    await store.releaseDelivery(job.id);
+    expect((await store.get(job.id))?.deliveredAt).toBeUndefined();
+    expect(await store.claimDelivery(job.id)).toBe(true);
+    store.close();
+  });
+
+  it('migrates a v1 database (remote columns + delivered_at) to v3, preserving rows', async () => {
     const path = join(tmpdir(), `jobstore-${randomUUID()}.db`);
     tmpFiles.push(path);
     // Build a v1 jobs table out-of-band: the full v1 shape minus the remote
@@ -489,8 +543,32 @@ describe('SQLiteJobStore', () => {
     raw.pragma('user_version = 1');
     raw.close();
 
-    // Opening with current code migrates to v2.
+    // A row written by the OLD code, before either migration existed. It must
+    // survive both ALTERs intact — a migration that drops user data is worse
+    // than one that never ran.
+    const rawSeed = new Database(path);
+    rawSeed
+      .prepare(
+        `INSERT INTO jobs (id, owner, parent_session_key, root_session_key, child_session_key,
+           depth, status, prompt, spend_usd, cancel_requested, created_at, finished_at,
+           origin_platform, origin_bot_key, origin_chat_id, summary)
+         VALUES ('legacy-1','proc-A','cli:root','cli:root','cli:root:child',1,'done','old job',
+                 0.25,0,1000,2000,'telegram','bot-1','chat-9','legacy summary')`,
+      )
+      .run();
+    rawSeed.close();
+
+    // Opening with current code migrates v1 -> v3.
     const store = new SQLiteJobStore(path);
+    const legacy = await store.get('legacy-1');
+    expect(legacy?.summary).toBe('legacy summary');
+    expect(legacy?.spendUsd).toBe(0.25);
+    expect(legacy?.originBotKey).toBe('bot-1');
+    // A pre-existing terminal row has never been announced — which is exactly
+    // what the restore sweep must find.
+    expect(legacy?.deliveredAt).toBeUndefined();
+    expect(await store.listUndelivered(['bot-1'])).toHaveLength(1);
+
     const created = await store.create(
       baseInput({ remotePeer: 'host:9000', remoteJobId: 'peer-1' }),
     );
@@ -498,11 +576,15 @@ describe('SQLiteJobStore', () => {
     expect(created.remoteJobId).toBe('peer-1');
     store.close();
 
-    // user_version bumped to 2.
     const raw2 = new Database(path);
     const version = (raw2.pragma('user_version') as Array<{ user_version: number }>)[0]
       ?.user_version;
+    // The table is still STRICT after ALTER TABLE ... ADD COLUMN — an INTEGER
+    // column rejects a TEXT value rather than coercing it.
+    expect(() =>
+      raw2.prepare(`UPDATE jobs SET delivered_at = 'not-a-number' WHERE id = 'legacy-1'`).run(),
+    ).toThrow();
     raw2.close();
-    expect(version).toBe(2);
+    expect(version).toBe(3);
   });
 });

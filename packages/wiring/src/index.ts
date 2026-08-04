@@ -405,6 +405,21 @@ export interface CreateAgentLoopOptions {
    *  background executor by default (a job spawned in a dying process is a lie).
    *  Long-lived surfaces (chat, gateway, web) omit it. */
   oneShot?: boolean;
+  /**
+   * The bot identity this loop answers as, stamped on every background job it
+   * spawns (`origin_bot_key`). The gateway builds one loop per bot and passes
+   * the same key it routes that bot's inbound messages by — that column is what
+   * makes a completion routable back to its lane after a restart. Surfaces with
+   * no bot identity (CLI, web) omit it.
+   */
+  originBotKey?: string;
+  /**
+   * Resolve the thread a live turn on `sessionKey` originated in, for stamping
+   * `origin_thread_id` on background jobs. Supplied by the gateway (the only
+   * component that knows the mapping); omitted elsewhere, in which case a
+   * completion is delivered to the channel root.
+   */
+  resolveOriginThreadId?: (sessionKey: string) => string | undefined;
 }
 
 // ---------------------------------------------------------------------------

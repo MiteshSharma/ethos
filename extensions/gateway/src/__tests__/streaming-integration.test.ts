@@ -219,6 +219,38 @@ describe('gateway tool-progress surfacing (W3.3, audience boundary)', () => {
     const allBodies = [...adapter.sends.map((s) => s.text), ...adapter.edits.map((e) => e.text)];
     expect(allBodies.some((b) => b.includes('SECRET-INTERNAL-STEP'))).toBe(false);
   });
+
+  // Item 10 regression guard. Delegation forwards no child events to any
+  // adapter today, so this is not a fix for a leak — it is a tripwire for the
+  // wire item 10 creates (the child's narrative now lands in `job_events`). If
+  // anyone ever routes a child event through this chokepoint, the internal half
+  // must still be filtered. Both audiences run in ONE turn on purpose: a test
+  // that only proves internal is dropped would also pass if the gate were a
+  // blanket block, which would silently kill the tool author's explicit opt-in.
+  it('filters by audience rather than blocking progress wholesale', async () => {
+    const loop = loopYielding([
+      { type: 'text_delta', text: 'step' },
+      {
+        type: 'tool_progress',
+        toolName: 'bash',
+        message: 'INTERNAL-ONLY-CHATTER',
+        audience: 'internal',
+      },
+      { type: 'tool_progress', toolName: 'bash', message: 'USER-FACING-STEP', audience: 'user' },
+      { type: 'done', text: 'step', turnCount: 1 },
+    ]);
+    const gw = gatewayWith(loop);
+    const adapter = editAdapter();
+
+    await gw.handleMessage(msg(), adapter);
+
+    const everything = [
+      ...adapter.sends.map((s) => s.text),
+      ...adapter.edits.map((e) => e.text),
+    ].join('\n');
+    expect(everything).not.toContain('INTERNAL-ONLY-CHATTER');
+    expect(everything).toContain('USER-FACING-STEP');
+  });
 });
 
 describe('gateway outbound media (W3.2 sendTo convention)', () => {

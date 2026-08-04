@@ -155,6 +155,13 @@ function makeJobStore(): FakeJobStore {
     async pruneTerminal() {
       return 0;
     },
+    async listUndelivered() {
+      return [];
+    },
+    async claimDelivery() {
+      return true;
+    },
+    async releaseDelivery() {},
   };
 }
 

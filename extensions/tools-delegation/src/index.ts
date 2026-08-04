@@ -156,6 +156,21 @@ export interface BackgroundToolDeps {
   maxJobsPerRoot: number; // spawn-time concurrency cap
   maxJobsPerPersonality: number;
   staleMs: number; // for heartbeat-freshness reporting in task_status/logs
+  /**
+   * The bot this loop answers as. STATIC — the gateway builds one AgentLoop per
+   * bot, so the key is a property of the loop, not of the turn. Without it a
+   * `delegate_task` job carries a NULL `origin_bot_key` and is invisible to the
+   * gateway's `botKey ∈ this.bots` ownership filter, i.e. its completion can
+   * never be announced. Absent for surfaces with no bot identity (CLI, web).
+   */
+  originBotKey?: string;
+  /**
+   * Resolve the thread a live turn originated in. Per-TURN (unlike `originBotKey`),
+   * so it is a lookup rather than a value: `ToolContext` carries no thread and
+   * the gateway is the one component that knows `sessionKey → thread`. Absent
+   * outside the gateway; a job then delivers to the channel root.
+   */
+  resolveOriginThreadId?: (sessionKey: string) => string | undefined;
 }
 
 const LABEL_RE = /^[a-z0-9-]{1,32}$/;
@@ -241,6 +256,22 @@ function formatEvent(e: BackgroundJobEvent): string {
       return 'started running';
     case 'tool_headline':
       return `ran ${String(p.toolName ?? '')}${p.arg ? ` — ${String(p.arg)}` : ''}`;
+    case 'tool_end': {
+      const verdict = p.ok === false ? `failed${p.error ? `: ${String(p.error)}` : ''}` : 'ok';
+      const ms = typeof p.durationMs === 'number' ? ` in ${p.durationMs}ms` : '';
+      return `${String(p.toolName ?? '')} ${verdict}${ms}`;
+    }
+    case 'text': {
+      if (p.truncated === true) return 'output truncated — the rest is not recorded';
+      // One event renders as one LINE, so the chunk is collapsed and capped
+      // here. The full text stays in the store; this tool is a tail, not a
+      // transcript reader.
+      const collapsed = String(p.text ?? '')
+        .replace(/\s+/g, ' ')
+        .trim();
+      const shown = collapsed.length > 300 ? `${collapsed.slice(0, 297)}...` : collapsed;
+      return `output: ${shown}`;
+    }
     case 'spend':
       return `spend $${String(p.spendUsd ?? p.usd ?? '')}`;
     case 'cancel_requested':
@@ -395,13 +426,17 @@ export function createDelegateTaskTool(loop: AgentLoop, background?: BackgroundT
         // independent random suffix — the two are decoupled, which is fine.
         const childSessionKey = `${ctx.sessionKey}:job:${jobLabel}:${randomBytes(4).toString('hex')}`;
 
-        // Resolve the origin lane from ctx.origin ("<platform>:<chatId>") so the
-        // gateway's wake path can deliver the completion notice to the
-        // originating chat. originBotKey is supplied by the gateway's per-bot
-        // wake handler; originThreadId is not available on ToolContext, so
-        // delegate_task-spawned jobs deliver to the channel root — an accepted
-        // Phase-B limitation.
+        // Resolve the origin lane so the gateway can deliver this job's
+        // completion — including after a restart, where the only surviving
+        // record of "where does this belong" is these four columns.
+        // Platform + chat come from ctx.origin ("<platform>:<chatId>"); botKey
+        // is a static property of this loop; the thread is a per-turn lookup
+        // the gateway answers (ToolContext carries no thread).
         const { platform: originPlatform, chatId: originChatId } = splitFirstColon(ctx.origin);
+        const originBotKey = originPlatform ? background.originBotKey : undefined;
+        const originThreadId = originPlatform
+          ? background.resolveOriginThreadId?.(ctx.sessionKey)
+          : undefined;
         const job = await background.store.create({
           owner: background.owner,
           parentSessionKey: ctx.sessionKey,
@@ -413,7 +448,9 @@ export function createDelegateTaskTool(loop: AgentLoop, background?: BackgroundT
           prompt,
           ...(maxCostUsd !== undefined ? { maxCostUsd } : {}),
           ...(originPlatform ? { originPlatform } : {}),
+          ...(originBotKey ? { originBotKey } : {}),
           ...(originChatId ? { originChatId } : {}),
+          ...(originThreadId ? { originThreadId } : {}),
         });
 
         background.nudge();
