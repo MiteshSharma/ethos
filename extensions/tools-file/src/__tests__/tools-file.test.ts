@@ -1,9 +1,9 @@
-import { mkdir, rm, writeFile } from 'node:fs/promises';
+import { mkdir, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ScopedFsImpl } from '@ethosagent/core';
 import { FsStorage } from '@ethosagent/storage-fs';
-import type { ToolContext } from '@ethosagent/types';
+import type { ScopedFs, ToolContext } from '@ethosagent/types';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   createFileTools,
@@ -107,6 +107,32 @@ describe('write_file', () => {
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.code).toBe('input_invalid');
   });
+
+  it('fails when the write is silently dropped (read-back verification)', async () => {
+    const allowed = new Set([testDir]);
+    const real = new ScopedFsImpl(new FsStorage(), allowed, allowed);
+    // A ScopedFs whose write is a no-op — the storage-layer failure class
+    // (partial write, boundary rewrite, encoding) that is otherwise silent.
+    const droppingFs: ScopedFs = {
+      read: (p) => real.read(p),
+      readBytes: (p) => real.readBytes(p),
+      write: async () => {},
+      exists: (p) => real.exists(p),
+      list: (p) => real.list(p),
+      listEntries: (p) => real.listEntries(p),
+      mtime: (p) => real.mtime(p),
+      mkdir: (p) => real.mkdir(p),
+    };
+    const ctx = { ...makeCtx(testDir), scopedFs: droppingFs };
+    const path = join(testDir, 'dropped.ts');
+
+    const result = await writeFileTool.execute({ path, content: 'export const x = 1;' }, ctx);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.code).toBe('execution_failed');
+      expect(result.error).toMatch(/Write verification failed/);
+    }
+  });
 });
 
 describe('patch_file', () => {
@@ -153,6 +179,75 @@ describe('patch_file', () => {
       expect(after.value).not.toContain('const x = 2;');
     }
   });
+
+  it('reports already-applied as ok and leaves the file untouched', async () => {
+    const path = join(testDir, 'applied.ts');
+    await writeFile(path, 'const y = 42;\n');
+    const before = await stat(path);
+
+    const result = await patchFileTool.execute(
+      { path, old_text: 'const y = 2;', new_text: 'const y = 42;' },
+      makeCtx(testDir),
+    );
+
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.value).toMatch(/already applied/);
+    const after = await stat(path);
+    expect(after.mtimeMs).toBe(before.mtimeMs);
+  });
+
+  it('does NOT report already-applied when old_text is also present (wrong-file guard)', async () => {
+    const path = join(testDir, 'wrongfile.ts');
+    // Both old_text and new_text are present — this is a real, ambiguous edit,
+    // not a no-op. Reporting "already applied" here would hide a wrong-file patch.
+    await writeFile(path, 'const y = 2;\nconst y = 42;\n');
+
+    const result = await patchFileTool.execute(
+      { path, old_text: 'const y = 2;', new_text: 'const y = 42;' },
+      makeCtx(testDir),
+    );
+
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.value).not.toMatch(/already applied/);
+  });
+
+  it('diagnoses a tab-vs-spaces miss as a whitespace difference', async () => {
+    const path = join(testDir, 'ws.ts');
+    await writeFile(path, 'function f() {\n\tconst x = 1;\n}\n');
+
+    const result = await patchFileTool.execute(
+      { path, old_text: '    const x = 1;', new_text: '    const x = 2;' },
+      makeCtx(testDir),
+    );
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.code).toBe('execution_failed');
+      expect(result.error).toContain('whitespace');
+      // expected (old_text, four spaces) and actual (file, one tab), visualized
+      expect(result.error).toContain('····const·x·=·1;¶');
+      expect(result.error).toContain('→const·x·=·1;¶');
+    }
+  });
+
+  it('lists the line number of every occurrence when the match is ambiguous', async () => {
+    const path = join(testDir, 'three.ts');
+    await writeFile(path, 'const x = 1;\nconst x = 1;\nconst x = 1;\n');
+
+    const result = await patchFileTool.execute(
+      { path, old_text: 'const x = 1;', new_text: 'const x = 2;' },
+      makeCtx(testDir),
+    );
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error).toMatch(/3 locations/);
+      expect(result.error).toMatch(/lines 1, 2, 3/);
+      expect(result.error).toContain('line 1: const x = 1;');
+      expect(result.error).toContain('line 2: const x = 1;');
+      expect(result.error).toContain('line 3: const x = 1;');
+    }
+  });
 });
 
 describe('search_files', () => {
@@ -197,5 +292,37 @@ describe('search_files', () => {
     const result = await searchFilesTool.execute({}, makeCtx(testDir));
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.code).toBe('input_invalid');
+  });
+
+  it('falls back to a case-insensitive probe and says so', async () => {
+    await writeFile(join(testDir, 'case.ts'), 'const foobar = 1;\n');
+
+    const result = await searchFilesTool.execute(
+      { pattern: 'FooBar', path: testDir },
+      makeCtx(testDir),
+    );
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.value).toContain('case.ts');
+      expect(result.value).toContain('const foobar = 1;');
+      expect(result.value).toContain('the exact pattern did not match');
+      expect(result.value).toContain('case-insensitive');
+    }
+  });
+
+  it('falls back to a whitespace-collapsed probe', async () => {
+    await writeFile(join(testDir, 'spacing.ts'), 'const    gap = 1;\n');
+
+    const result = await searchFilesTool.execute(
+      { pattern: 'const gap = 1;', path: testDir },
+      makeCtx(testDir),
+    );
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.value).toContain('spacing.ts');
+      expect(result.value).toContain('whitespace-collapsed');
+    }
   });
 });

@@ -1,6 +1,17 @@
+import { mkdir, readFile, rm, stat, utimes, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { ScopedProcessImpl } from '@ethosagent/core';
-import type { ExecChunk, ExecOpts, ExecutionBackend, PersonalityConfig } from '@ethosagent/types';
-import { describe, expect, it, vi } from 'vitest';
+import { FsStorage, ScopedStorage } from '@ethosagent/storage-fs';
+import type {
+  ExecChunk,
+  ExecOpts,
+  ExecutionBackend,
+  PersonalityConfig,
+  Storage,
+  ToolContext,
+} from '@ethosagent/types';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createTerminalTools, terminalTool } from '../index';
 
 const ctx = {
@@ -146,6 +157,132 @@ describe('terminal routing', () => {
       expect(result.error).toMatch(/constitution forbids running un-sandboxed/);
     }
     expect(spawn).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Truncation spill
+// ---------------------------------------------------------------------------
+
+/** ~128k chars, line-tagged so head and tail are individually identifiable. */
+const BIG_OUTPUT = Array.from(
+  { length: 4000 },
+  (_, i) => `line-${String(i).padStart(5, '0')}-${'x'.repeat(20)}`,
+).join('\n');
+
+const SPILL_BUDGET = 2000;
+
+function spillPathIn(text: string): string | undefined {
+  return /(\S+terminal-spill\/\S+\.log)/.exec(text)?.[1];
+}
+
+describe('terminal truncation spill', () => {
+  let workDir: string;
+  let spillDir: string;
+
+  beforeEach(async () => {
+    workDir = join(
+      tmpdir(),
+      `ethos-spill-test-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+    );
+    await mkdir(workDir, { recursive: true });
+    spillDir = join(workDir, '.ethos', 'terminal-spill');
+  });
+
+  afterEach(async () => {
+    await rm(workDir, { recursive: true, force: true });
+  });
+
+  const spillCtx = (storage: Storage | undefined, stdout = BIG_OUTPUT, exitCode = 0): ToolContext =>
+    ({
+      ...ctx,
+      workingDir: workDir,
+      resultBudgetChars: SPILL_BUDGET,
+      storage,
+      scopedProcess: {
+        spawn: vi.fn().mockResolvedValue({ exitCode, stdout, stderr: '' }),
+      },
+    }) as unknown as ToolContext;
+
+  it('spills oversized output and returns head + tail plus the spill path', async () => {
+    const result = await terminalTool.execute({ command: 'noisy' }, spillCtx(new FsStorage()));
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.length).toBeLessThanOrEqual(SPILL_BUDGET);
+    expect(result.value).toContain('line-00000-');
+    expect(result.value).toContain('line-03999-');
+
+    const path = spillPathIn(result.value);
+    expect(path).toBeDefined();
+    if (!path) return;
+    expect(await readFile(path, 'utf8')).toBe(BIG_OUTPUT);
+  });
+
+  it('spills the non-zero-exit path too (output otherwise floods context untrimmed)', async () => {
+    const result = await terminalTool.execute(
+      { command: 'noisy && exit 1' },
+      spillCtx(new FsStorage(), BIG_OUTPUT, 1),
+    );
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error).toContain('code 1');
+    expect(result.error.length).toBeLessThanOrEqual(SPILL_BUDGET);
+    expect(result.error).toContain('line-00000-');
+    expect(result.error).toContain('line-03999-');
+
+    const path = spillPathIn(result.error);
+    expect(path).toBeDefined();
+    if (!path) return;
+    expect(await readFile(path, 'utf8')).toBe(BIG_OUTPUT);
+  });
+
+  it('degrades to head + tail with no path when the spill write is out of reach', async () => {
+    // A write allowlist that excludes the working directory — the ScopedStorage
+    // throws BoundaryError, so no file may be created and no path may be shown.
+    const outOfReach = new ScopedStorage(new FsStorage(), {
+      read: [join(tmpdir(), 'ethos-spill-elsewhere')],
+      write: [join(tmpdir(), 'ethos-spill-elsewhere')],
+    });
+
+    const result = await terminalTool.execute({ command: 'noisy' }, spillCtx(outOfReach));
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.length).toBeLessThanOrEqual(SPILL_BUDGET);
+    expect(result.value).toContain('line-00000-');
+    expect(result.value).toContain('line-03999-');
+    expect(result.value).not.toContain('terminal-spill');
+    expect(result.value).toContain('could not be written to a spill file');
+
+    await expect(stat(spillDir)).rejects.toThrow();
+  });
+
+  it('returns output unchanged when it fits the budget', async () => {
+    const result = await terminalTool.execute(
+      { command: 'tiny' },
+      spillCtx(new FsStorage(), 'tiny'),
+    );
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.value).toBe('tiny');
+    await expect(stat(spillDir)).rejects.toThrow();
+  });
+
+  it('prunes spill files older than 24h on write, keeping recent ones', async () => {
+    await mkdir(spillDir, { recursive: true });
+    const stale = join(spillDir, 'stale.log');
+    const fresh = join(spillDir, 'fresh.log');
+    await writeFile(stale, 'old');
+    await writeFile(fresh, 'new');
+    const longAgo = new Date(Date.now() - 48 * 60 * 60 * 1000);
+    await utimes(stale, longAgo, longAgo);
+
+    const result = await terminalTool.execute({ command: 'noisy' }, spillCtx(new FsStorage()));
+    expect(result.ok).toBe(true);
+
+    await expect(stat(stale)).rejects.toThrow();
+    expect(await readFile(fresh, 'utf8')).toBe('new');
   });
 });
 

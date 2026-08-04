@@ -5,6 +5,7 @@ import type {
   Tool,
   ToolResult,
 } from '@ethosagent/types';
+import { ERROR_WRAPPER_RESERVE, spillOversizedOutput } from './spill';
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 const MAX_TIMEOUT_MS = 600_000; // 10 minutes
@@ -101,13 +102,15 @@ function makeTerminalTool(
           // exit code (older backend that never emits an exit chunk) is treated
           // as success to preserve prior behavior.
           if (exitCode !== null && exitCode !== 0) {
+            const body = await spillOversizedOutput(out, ctx, ERROR_WRAPPER_RESERVE);
             return {
               ok: false,
-              error: `Command exited with error (code ${exitCode}):\n${out || '(no output)'}`,
+              error: `Command exited with error (code ${exitCode}):\n${body || '(no output)'}`,
               code: 'execution_failed',
             };
           }
-          return { ok: true, value: out || '(command completed with no output)' };
+          const value = await spillOversizedOutput(out, ctx);
+          return { ok: true, value: value || '(command completed with no output)' };
         } catch (err) {
           return {
             ok: false,
@@ -151,16 +154,18 @@ function makeTerminalTool(
         const out = [stdout, stderr].filter(Boolean).join('\n').trim();
 
         if (exitCode !== 0) {
+          const body = await spillOversizedOutput(out, ctx, ERROR_WRAPPER_RESERVE);
           return {
             ok: false,
-            error: `Command exited with error (code ${exitCode}):\n${out || '(no output)'}`,
+            error: `Command exited with error (code ${exitCode}):\n${body || '(no output)'}`,
             code: 'execution_failed',
           };
         }
 
+        const value = await spillOversizedOutput(out, ctx);
         return {
           ok: true,
-          value: out || '(command completed with no output)',
+          value: value || '(command completed with no output)',
         };
       } catch (err) {
         return {

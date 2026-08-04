@@ -349,6 +349,25 @@ export const writeFileTool: Tool = {
 
       await fs.mkdir(dirname(abs));
       await fs.write(abs, content);
+
+      // Self-recovery — read the bytes back and compare. Catches the silent
+      // failure classes (partial write, boundary rewrite, encoding) that
+      // otherwise surface much later as a confusing "my edit vanished".
+      let readBack: string | null;
+      try {
+        readBack = await fs.read(abs);
+      } catch {
+        readBack = null;
+      }
+      if (readBack !== content) {
+        const got = readBack === null ? 'nothing (file missing)' : `${readBack.length} bytes`;
+        return {
+          ok: false,
+          error: `Write verification failed for ${abs}: wrote ${content.length} bytes, read back ${got}. The file on disk does not match what was written.`,
+          code: 'execution_failed',
+        };
+      }
+
       // FW-28 — update the recorded mtime after a successful write so subsequent
       // writes in the same session don't false-positive against the pre-write record.
       if (ctx.readMtimes) {
@@ -435,6 +454,17 @@ export const patchFileTool: Tool = {
 
       const occurrences = countOccurrences(content, old_text);
       if (occurrences === 0) {
+        // Already-applied no-op. BOTH conditions are required: old_text absent
+        // (implied by occurrences === 0) AND new_text present. Checking only
+        // for new_text would silently succeed when the agent patched the wrong
+        // file and that file happens to contain the replacement text.
+        if (new_text && content.includes(new_text)) {
+          return { ok: true, value: `No change: the patch is already applied at ${abs}.` };
+        }
+
+        const whitespace = diagnoseWhitespaceMismatch(content, old_text, abs);
+        if (whitespace) return { ok: false, error: whitespace, code: 'execution_failed' };
+
         return {
           ok: false,
           error: `old_text not found in ${abs}. Use read_file to verify the exact content.`,
@@ -444,7 +474,7 @@ export const patchFileTool: Tool = {
       if (occurrences > 1) {
         return {
           ok: false,
-          error: `old_text matches ${occurrences} locations in ${abs}. Add surrounding context to make the match unique, or call patch_file once per location.`,
+          error: describeAmbiguousMatches(content, old_text, abs, occurrences),
           code: 'execution_failed',
         };
       }
@@ -475,6 +505,147 @@ function countOccurrences(haystack: string, needle: string): number {
 }
 
 // ---------------------------------------------------------------------------
+// patch_file self-recovery diagnostics
+// ---------------------------------------------------------------------------
+
+const WHITESPACE_LEGEND = '· = space, → = tab, ¶ = line end';
+
+/** Lines around the mismatch that get rendered. Keep the error short enough
+ *  that the model actually reads it — an unread diagnosis is not a recovery. */
+const DIAGNOSIS_CONTEXT_LINES = 2;
+
+/** Collapse runs of spaces/tabs and drop trailing whitespace, so `\t` and
+ *  four spaces compare equal. */
+function normalizeWhitespace(line: string): string {
+  return line.replace(/[ \t]+$/, '').replace(/[ \t]+/g, ' ');
+}
+
+function visualizeWhitespace(line: string): string {
+  return `${line.replace(/ /g, '·').replace(/\t/g, '→')}¶`;
+}
+
+/**
+ * On a genuine zero match, retry the comparison whitespace-normalized. When
+ * that matches, the failure is a whitespace difference — invisible in the
+ * default message — so render expected vs. actual with whitespace visualized.
+ * Returns null when the miss is not whitespace-related.
+ */
+function diagnoseWhitespaceMismatch(content: string, oldText: string, abs: string): string | null {
+  const contentLines = content.split('\n');
+  const oldLines = oldText.split('\n');
+  const normContent = contentLines.map(normalizeWhitespace);
+  const normOld = oldLines.map(normalizeWhitespace);
+
+  let start = -1;
+  for (let i = 0; i + normOld.length <= normContent.length; i++) {
+    let allMatch = true;
+    for (let j = 0; j < normOld.length; j++) {
+      if (normContent[i + j] !== normOld[j]) {
+        allMatch = false;
+        break;
+      }
+    }
+    if (allMatch) {
+      start = i;
+      break;
+    }
+  }
+
+  if (start === -1) {
+    // Not line-aligned (old_text starts mid-line). Fall back to a whole-text
+    // normalized probe so a mid-line whitespace difference is still named.
+    if (!normContent.join('\n').includes(normOld.join('\n'))) return null;
+    const expected = oldLines
+      .slice(0, DIAGNOSIS_CONTEXT_LINES * 2 + 1)
+      .map((l) => `  ${visualizeWhitespace(l)}`)
+      .join('\n');
+    return [
+      `old_text not found in ${abs}, but it matches once whitespace is normalized —`,
+      `the difference is whitespace only (${WHITESPACE_LEGEND}).`,
+      '',
+      'expected (old_text):',
+      expected,
+      '',
+      'Re-read the file and copy the exact spacing and indentation.',
+    ].join('\n');
+  }
+
+  let mismatch = 0;
+  for (let j = 0; j < oldLines.length; j++) {
+    if (contentLines[start + j] !== oldLines[j]) {
+      mismatch = j;
+      break;
+    }
+  }
+  const from = Math.max(0, mismatch - DIAGNOSIS_CONTEXT_LINES);
+  const to = Math.min(oldLines.length - 1, mismatch + DIAGNOSIS_CONTEXT_LINES);
+
+  const expected: string[] = [];
+  const actual: string[] = [];
+  for (let j = from; j <= to; j++) {
+    expected.push(`  ${visualizeWhitespace(oldLines[j] ?? '')}`);
+    actual.push(`  ${visualizeWhitespace(contentLines[start + j] ?? '')}`);
+  }
+
+  return [
+    `old_text not found in ${abs}, but line ${start + mismatch + 1} matches once whitespace is`,
+    `normalized — the difference is whitespace only (${WHITESPACE_LEGEND}).`,
+    '',
+    'expected (old_text):',
+    expected.join('\n'),
+    '',
+    `actual (${abs} lines ${start + from + 1}–${start + to + 1}):`,
+    actual.join('\n'),
+    '',
+    'Re-read the file and copy the exact spacing and indentation.',
+  ].join('\n');
+}
+
+/** Max occurrences enumerated in an ambiguous-match error. */
+const MAX_LISTED_OCCURRENCES = 10;
+
+/** Line number + one-line preview for every non-overlapping occurrence. */
+function occurrenceSites(
+  content: string,
+  needle: string,
+): Array<{ line: number; preview: string }> {
+  const sites: Array<{ line: number; preview: string }> = [];
+  let idx = content.indexOf(needle);
+  while (idx !== -1) {
+    const line = content.slice(0, idx).split('\n').length;
+    const lineStart = content.lastIndexOf('\n', idx - 1) + 1;
+    const nl = content.indexOf('\n', idx);
+    const lineEnd = nl === -1 ? content.length : nl;
+    sites.push({ line, preview: content.slice(lineStart, lineEnd).trim().slice(0, 120) });
+    idx = content.indexOf(needle, idx + needle.length);
+  }
+  return sites;
+}
+
+/**
+ * Ambiguous match: report *where* each occurrence is, not just how many there
+ * are, so the agent can pick disambiguating context without re-reading the file.
+ */
+function describeAmbiguousMatches(
+  content: string,
+  oldText: string,
+  abs: string,
+  occurrences: number,
+): string {
+  const sites = occurrenceSites(content, oldText);
+  const shown = sites.slice(0, MAX_LISTED_OCCURRENCES);
+  const lineList = shown.map((s) => s.line).join(', ');
+  const previews = shown.map((s) => `  line ${s.line}: ${s.preview}`).join('\n');
+  const more = sites.length > shown.length ? `\n  … and ${sites.length - shown.length} more` : '';
+  return [
+    `old_text matches ${occurrences} locations in ${abs} (lines ${lineList}). Add surrounding`,
+    'context to make the match unique, or call patch_file once per location.',
+    '',
+    `${previews}${more}`,
+  ].join('\n');
+}
+
+// ---------------------------------------------------------------------------
 // search_files
 // ---------------------------------------------------------------------------
 
@@ -487,7 +658,7 @@ interface SearchMatch {
 async function walkAndSearch(
   fs: ScopedFs,
   dir: string,
-  pattern: string,
+  match: (line: string) => boolean,
   glob: string | undefined,
   matches: SearchMatch[],
   maxMatches: number,
@@ -512,7 +683,7 @@ async function walkAndSearch(
     const fullPath = join(dir, entry.name);
 
     if (entry.isDir) {
-      await walkAndSearch(fs, fullPath, pattern, glob, matches, maxMatches, depth + 1);
+      await walkAndSearch(fs, fullPath, match, glob, matches, maxMatches, depth + 1);
       continue;
     }
 
@@ -530,11 +701,25 @@ async function walkAndSearch(
     const lines = text.split('\n');
     for (let i = 0; i < lines.length && matches.length < maxMatches; i++) {
       const line = lines[i];
-      if (line?.includes(pattern)) {
+      if (line !== undefined && match(line)) {
         matches.push({ file: fullPath, line: i + 1, content: line.trim() });
       }
     }
   }
+}
+
+/** Collapse runs of spaces/tabs so an indentation-only difference still hits. */
+function collapseWhitespace(s: string): string {
+  return s.replace(/[ \t]+/g, ' ').trim();
+}
+
+function renderMatches(matches: SearchMatch[], pattern: string, probeNote?: string): string {
+  const lines = matches.map((m) => `${m.file}:${m.line}: ${m.content}`);
+  const header = `${matches.length} match${matches.length === 1 ? '' : 'es'} for "${pattern}":\n\n`;
+  const note = probeNote
+    ? `Note: the exact pattern did not match — these are ${probeNote} matches.\n\n`
+    : '';
+  return header + note + lines.join('\n');
 }
 
 export const searchFilesTool: Tool = {
@@ -583,19 +768,48 @@ export const searchFilesTool: Tool = {
     if (!('mtime' in fs)) return fs;
 
     try {
-      await walkAndSearch(fs, searchDir, pattern, glob, matches, maxMatches, 0);
+      await walkAndSearch(
+        fs,
+        searchDir,
+        (line) => line.includes(pattern),
+        glob,
+        matches,
+        maxMatches,
+        0,
+      );
     } catch (err) {
       if (isReachError(err)) return reachFailure('read', searchDir);
       throw err;
     }
 
     if (matches.length === 0) {
+      // Self-recovery — a zero result is ambiguous between "not there" and
+      // "wrong casing / spacing". Probe both before reporting absence. The
+      // probe is unconditional and its result is labelled honestly.
+      const lowered = pattern.toLowerCase();
+      const collapsed = collapseWhitespace(pattern);
+      const probes: Array<{ note: string; match: (line: string) => boolean }> = [
+        { note: 'case-insensitive', match: (line) => line.toLowerCase().includes(lowered) },
+        {
+          note: 'whitespace-collapsed',
+          match: (line) => collapseWhitespace(line).includes(collapsed),
+        },
+      ];
+
+      for (const probe of probes) {
+        const near: SearchMatch[] = [];
+        try {
+          await walkAndSearch(fs, searchDir, probe.match, glob, near, maxMatches, 0);
+        } catch {
+          continue;
+        }
+        if (near.length > 0) return { ok: true, value: renderMatches(near, pattern, probe.note) };
+      }
+
       return { ok: true, value: `No matches found for "${pattern}"` };
     }
 
-    const lines = matches.map((m) => `${m.file}:${m.line}: ${m.content}`);
-    const header = `${matches.length} match${matches.length === 1 ? '' : 'es'} for "${pattern}":\n\n`;
-    return { ok: true, value: header + lines.join('\n') };
+    return { ok: true, value: renderMatches(matches, pattern) };
   },
 };
 
