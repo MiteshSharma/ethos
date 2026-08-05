@@ -28,7 +28,12 @@ describe('Orchestrator guardrails', () => {
     // one property line in the `compactSession` call (the new compaction fields
     // themselves went onto the existing one-line `compaction?:` config shape).
     // The logic lives in agent-loop/manual-compact.ts.
-    expect(lineCount).toBeLessThanOrEqual(841);
+    // Bumped 841 → 846: Lane 3(b)'s `options.smallWindow` flag (declared
+    // small-window toolset narrowing, D20) — option decl + one-line doc,
+    // field, constructor default, deps threading (5 irreducible lines,
+    // compressed to one-line shapes). The narrowing logic itself lives in
+    // agent-loop/stages/turn-setup.ts + agent-loop/small-window-toolset.ts.
+    expect(lineCount).toBeLessThanOrEqual(846);
   });
 
   it('no stage file exceeds 700 lines', () => {

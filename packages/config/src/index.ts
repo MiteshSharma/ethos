@@ -547,6 +547,14 @@ export interface EthosConfig {
    *   maxRetries: 0
    */
   maxRetries?: number;
+  /**
+   * Lane 3(a) — total serialized tool-payload guard threshold, in chars.
+   * Absent → the wiring default (128 KiB). Exceeding it fails startup on a
+   * local dialect and warns on hosted ones, naming the offending tools.
+   * Flat-key shape:
+   *   toolPayloadLimitChars: 131072
+   */
+  toolPayloadLimitChars?: number;
   // Per-personality model overrides: maps personality ID → model ID string
   modelRouting?: Record<string, string>;
   /**
@@ -1029,6 +1037,8 @@ export async function writeConfig(storage: Storage, config: EthosConfig): Promis
   if (config.requestTimeoutMs !== undefined)
     lines.push(`requestTimeoutMs: ${config.requestTimeoutMs}`);
   if (config.maxRetries !== undefined) lines.push(`maxRetries: ${config.maxRetries}`);
+  if (config.toolPayloadLimitChars !== undefined)
+    lines.push(`toolPayloadLimitChars: ${config.toolPayloadLimitChars}`);
   if (config.modelRouting) {
     for (const [id, model] of Object.entries(config.modelRouting)) {
       lines.push(`modelRouting.${id}: ${model}`);
@@ -2074,6 +2084,13 @@ function parseConfigYaml(src: string): EthosConfig {
       if (kv.maxRetries === undefined) return undefined;
       const n = Number(kv.maxRetries);
       return Number.isInteger(n) && n >= 0 ? n : undefined;
+    })(),
+    // Lane 3(a) — a payload limit is a positive integer char count; anything
+    // else is dropped so a typo cannot disable (or zero) the guard.
+    toolPayloadLimitChars: (() => {
+      if (kv.toolPayloadLimitChars === undefined) return undefined;
+      const n = Number(kv.toolPayloadLimitChars);
+      return Number.isFinite(n) && n > 0 ? Math.floor(n) : undefined;
     })(),
     modelRouting: Object.keys(modelRouting).length > 0 ? modelRouting : undefined,
     toolSettings: Object.keys(toolSettings).length > 0 ? toolSettings : undefined,

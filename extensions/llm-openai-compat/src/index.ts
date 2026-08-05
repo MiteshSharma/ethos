@@ -12,6 +12,8 @@ import OpenAI from 'openai';
 import { streamTextToolCalls } from './text-tool-call-transport';
 import { buildChatCompletionsParamsAsync, streamChatCompletions } from './transport';
 
+export type { SanitizedToolSchema } from './schema-sanitize';
+export { GRAMMAR_MAX_LENGTH_CLAMP, sanitizeToolSchemaForGrammar } from './schema-sanitize';
 export { streamTextToolCalls } from './text-tool-call-transport';
 export type { ChatCompletionsStreamParams } from './transport';
 export {
@@ -55,6 +57,17 @@ export interface OpenAICompatProviderConfig {
   /** Lane 4a(d) — retry count handed to the OpenAI SDK client. Absent → the
    *  SDK's own default (2 retries). */
   maxRetries?: number;
+  /** Lane 3(a) — tool-schema sanitizing for llamacpp-class grammar compilers
+   *  (llama.cpp server, Ollama, LM Studio — GBNF). Wiring sets this from Lane
+   *  0's `detectLocalRuntime`; the OpenClaw equivalent is
+   *  `compat.toolSchemaProfile: "llamacpp"`. Absent → schemas pass through
+   *  UNTOUCHED (hosted OpenAI-compat dialects are never sanitized). */
+  toolSchemaProfile?: 'llamacpp';
+  /** Lane 3(a) — diagnostics sink for sanitizer transformations (the Lane 0
+   *  logger.warn path, threaded by the factory). Each unique change is
+   *  reported ONCE per provider instance — tool payloads repeat on every
+   *  request, and a per-request repeat would be log spam. */
+  onDiagnostic?: (message: string) => void;
 }
 
 /**
@@ -307,6 +320,13 @@ export class OpenAICompatProvider implements LLMProvider {
   private readonly structuredOutputDialect: 'openai' | 'ollama' | 'vllm';
   /** Lane 2a — tool-definition ordering at the serialization boundary. */
   private readonly toolOrder: ToolOrder;
+  /** Lane 3(a) — llamacpp-class schema sanitizing; undefined → passthrough.
+   *  Public for wiring tests. */
+  readonly toolSchemaProfile?: 'llamacpp';
+  /** Lane 3(a) — sanitizer diagnostics sink. */
+  private readonly onDiagnostic?: (message: string) => void;
+  /** Lane 3(a) — change lines already reported (once per instance). */
+  private readonly reportedSchemaChanges = new Set<string>();
 
   constructor(config: OpenAICompatProviderConfig) {
     this.name = config.name;
@@ -319,6 +339,8 @@ export class OpenAICompatProvider implements LLMProvider {
     this.structuredOutput = config.structuredOutput;
     this.structuredOutputDialect = detectStructuredOutputDialect(config.name, config.baseUrl);
     this.toolOrder = config.toolOrder ?? 'stable';
+    if (config.toolSchemaProfile !== undefined) this.toolSchemaProfile = config.toolSchemaProfile;
+    if (config.onDiagnostic !== undefined) this.onDiagnostic = config.onDiagnostic;
 
     // Phase 1d — local-model context floor. Ollama silently truncates at its
     // default `num_ctx` (2–4k) and vLLM can be launched with a small
@@ -381,6 +403,19 @@ export class OpenAICompatProvider implements LLMProvider {
         countTokens: (msgs) => this.countTokens(msgs),
         structuredOutputDialect: this.structuredOutputDialect,
         toolOrder: this.toolOrder,
+        // Lane 3(a) — llamacpp-class grammar sanitizing, dialect-gated.
+        // Each transformation is logged ONCE per provider instance via the
+        // Lane 0 diagnostics path (never silent, never per-request spam).
+        ...(this.toolSchemaProfile !== undefined
+          ? {
+              toolSchemaProfile: this.toolSchemaProfile,
+              onSchemaChange: (message: string) => {
+                if (this.reportedSchemaChanges.has(message)) return;
+                this.reportedSchemaChanges.add(message);
+                this.onDiagnostic?.(`tool-schema sanitizer (${this.name}): ${message}`);
+              },
+            }
+          : {}),
       },
     );
 
@@ -508,6 +543,11 @@ export const openaiCompatFactory: LLMProviderFactory = async ({
     // → the OpenAI SDK defaults (10-minute timeout, 2 retries) stay in force.
     ...(typeof cfg.requestTimeoutMs === 'number' ? { requestTimeoutMs: cfg.requestTimeoutMs } : {}),
     ...(typeof cfg.maxRetries === 'number' ? { maxRetries: cfg.maxRetries } : {}),
+    // Lane 3(a) — llamacpp-class schema-sanitizer gate, set by wiring from
+    // Lane 0's detectLocalRuntime. Absent → schemas pass through untouched.
+    // Sanitizer transformations surface on the same logger path Lane 0 uses.
+    ...(cfg.toolSchemaProfile === 'llamacpp' ? { toolSchemaProfile: 'llamacpp' as const } : {}),
+    onDiagnostic: (message: string) => logger.warn(message),
   });
 };
 

@@ -16,6 +16,9 @@ export { DEFAULT_OUTPUT_RESERVE_TOKENS } from './agent-loop/compaction';
 // serializer here would prove nothing (Hermes #4555 failure class).
 export { dedupHistory, toLLMMessages } from './agent-loop/history';
 export { reconstructFromWatermark, selectActiveWatermark } from './agent-loop/manual-compact';
+// Lane 3(b) — declared small-window toolset parsing, shared with wiring's
+// startup narrowing diagnostic so both read the declaration identically.
+export { parseSmallWindowToolset } from './agent-loop/small-window-toolset';
 export { buildAttachmentAnnotation } from './attachment-annotation';
 export { deriveBotKey } from './bot-key';
 export type { CapabilityBackends, CapabilityScopeIds } from './capability-resolver';

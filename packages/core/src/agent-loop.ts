@@ -208,6 +208,8 @@ export interface AgentLoopConfig {
      * `personality.streamingTimeoutMs`. Defaults to 600000 (10 minutes).
      */
     streamingTimeoutMs?: number;
+    /** Lane 3(b)/D20 — small-window mode (wiring-resolved); enables the turn personality's declared `small_window_toolset` narrowing. */
+    smallWindow?: boolean;
   };
 }
 
@@ -302,6 +304,7 @@ export class AgentLoop {
   private readonly maxIdenticalToolCalls: number;
   private readonly maxConsecutiveIdenticalCalls: number;
   private readonly streamingTimeoutMs: number;
+  private readonly smallWindow: boolean;
   private readonly modelRouting: Record<string, string>;
   private readonly modelSampling?: AgentLoopConfig['modelSampling'];
   private readonly compaction?: AgentLoopConfig['compaction'];
@@ -360,6 +363,7 @@ export class AgentLoop {
     this.maxIdenticalToolCalls = config.options?.maxIdenticalToolCalls ?? 25;
     this.maxConsecutiveIdenticalCalls = config.options?.maxConsecutiveIdenticalCalls ?? 5;
     this.streamingTimeoutMs = config.options?.streamingTimeoutMs ?? 600_000;
+    this.smallWindow = config.options?.smallWindow ?? false;
     this.modelRouting = config.modelRouting ?? {};
     this.modelSampling = config.modelSampling;
     if (config.compaction) this.compaction = config.compaction;
@@ -461,6 +465,7 @@ export class AgentLoop {
       maxIdenticalToolCalls: this.maxIdenticalToolCalls,
       maxConsecutiveIdenticalCalls: this.maxConsecutiveIdenticalCalls,
       streamingTimeoutMs: this.streamingTimeoutMs,
+      smallWindow: this.smallWindow,
       modelRouting: this.modelRouting,
       compaction: this.compaction,
       memoryConsolidation: this.memoryConsolidation,

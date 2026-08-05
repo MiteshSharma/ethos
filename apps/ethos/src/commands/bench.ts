@@ -1,5 +1,5 @@
 import type { PersonalityConfig, ToolRegistry } from '@ethosagent/types';
-import { measureStaticFloor } from '@ethosagent/wiring';
+import { evaluateToolSchemaBudget, measureStaticFloor } from '@ethosagent/wiring';
 
 // `ethos bench context` — context-economy Phase 0 (plan/phases/gap-context-economy.md §4).
 // Quantifies the per-turn context tax: a static per-personality table (SOUL.md
@@ -270,6 +270,7 @@ export async function runBench(args: string[]): Promise<void> {
   let toolRegistry: ToolRegistry | undefined;
   let loop: import('@ethosagent/core').AgentLoop | undefined;
   let activePersonalityId = '';
+  let contextWindow: number | undefined;
   if (config) {
     const { createAgentLoop } = await import('../wiring');
     // Lane 0 (D16) — bench context probes the served window LIVE and rewrites
@@ -278,6 +279,7 @@ export async function runBench(args: string[]): Promise<void> {
     toolRegistry = result.toolRegistry;
     loop = result.loop;
     activePersonalityId = result.activePersonality.id;
+    contextWindow = result.contextWindow;
   } else {
     console.log(
       `${c.yellow}No ~/.ethos/config.yaml — measuring built-in personalities without a wired ` +
@@ -310,6 +312,21 @@ export async function runBench(args: string[]): Promise<void> {
       `  ${row.id.padEnd(24)}${String(row.soulChars).padStart(9)}${String(row.toolCount).padStart(7)}` +
         `${String(row.toolSchemaChars).padStart(11)}${String(row.estStaticTokens).padStart(9)}`,
     );
+  }
+
+  // Lane 3(b) — the schema-budget gate, wired into the bench (no second
+  // measurement path): the same `evaluateToolSchemaBudget` wiring runs at
+  // startup, dividing the SAME toDefinitions payload by the SAME served
+  // window. A personality flagged here is the one warned about at startup.
+  if (toolRegistry && contextWindow !== undefined) {
+    for (const personality of reg.list()) {
+      const verdict = evaluateToolSchemaBudget({
+        personalityId: personality.id,
+        windowTokens: contextWindow,
+        toolDefinitions: toolRegistry.toDefinitions(personality.toolset),
+      });
+      if (verdict.message) console.log(`  ${c.yellow}⚠ ${verdict.message}${c.reset}`);
+    }
   }
 
   // Live scenarios — only with --live and a configured provider.

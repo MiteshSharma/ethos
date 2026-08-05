@@ -1,7 +1,12 @@
 import { randomBytes } from 'node:crypto';
 import { join } from 'node:path';
 import { backgroundDefaults } from '@ethosagent/config';
-import { AgentLoop, EagerPrefetchPolicy, SimpleCompletionImpl } from '@ethosagent/core';
+import {
+  AgentLoop,
+  EagerPrefetchPolicy,
+  parseSmallWindowToolset,
+  SimpleCompletionImpl,
+} from '@ethosagent/core';
 import { registerBuiltinExtractors } from '@ethosagent/document-extractors';
 import { GoalRunner } from '@ethosagent/goal-runner';
 import { BackgroundExecutor } from '@ethosagent/job-runner';
@@ -39,6 +44,7 @@ import type {
   WiringProfile,
 } from './index';
 import type { LoadPluginsResult } from './load-plugins';
+import { detectLocalRuntime } from './local-models';
 import { createUndecoratedBackend } from './memory-backend';
 import {
   lookupProfile,
@@ -50,6 +56,8 @@ import {
 } from './model-catalog';
 import {
   evaluateContextFit,
+  evaluateToolPayloadGuard,
+  evaluateToolSchemaBudget,
   measureStaticFloor,
   RESULT_BUDGET_CEILING_CHARS,
   resolveResultBudget,
@@ -530,6 +538,60 @@ export async function buildAgentLoop(
   });
   if (contextFit.message) log.warn(contextFit.message);
 
+  // Lane 3(b) — declared small-window toolset narrowing (D20). The narrowing
+  // itself is enforced in the loop's turn setup (per-turn personality, gating
+  // BOTH toDefinitions and executeParallel); here wiring makes it VISIBLE —
+  // a startup diagnostic naming the personality and the surviving tools — and
+  // measures the guard/budget below against the EFFECTIVE (narrowed) payload.
+  const declaredSmallSet = parseSmallWindowToolset(
+    activePerson.context_engine_options?.small_window_toolset,
+  );
+  const narrowedToolset =
+    smallWindow && declaredSmallSet
+      ? activePerson.toolset
+        ? activePerson.toolset.filter((t) => declaredSmallSet.includes(t))
+        : declaredSmallSet
+      : undefined;
+  if (narrowedToolset) {
+    log.info(
+      `small-window mode narrows personality \`${activePerson.id}\` to its declared ` +
+        `small_window_toolset — surviving tools: ${narrowedToolset.join(', ') || '(none)'}`,
+    );
+  }
+  const effectiveToolDefinitions = narrowedToolset
+    ? tools.toDefinitions(narrowedToolset)
+    : toolDefinitions;
+
+  // Lane 3(a) — total serialized tool-payload guard. On a local dialect an
+  // over-limit payload FAILS startup (llamacpp-class runtimes lose tool
+  // calling entirely — the failure this prevents); hosted dialects WARN. In
+  // neither case is the problem deferred to the first tool call.
+  const payloadGuard = evaluateToolPayloadGuard({
+    toolDefinitions: effectiveToolDefinitions,
+    localDialect: detectLocalRuntime(config.provider, config.baseUrl ?? '') !== undefined,
+    ...(config.toolPayloadLimitChars !== undefined
+      ? { limitChars: config.toolPayloadLimitChars }
+      : {}),
+  });
+  if (payloadGuard.message) {
+    if (payloadGuard.severity === 'fail') throw new Error(payloadGuard.message);
+    log.warn(payloadGuard.message);
+  }
+
+  // Lane 3(b) — per-personality tool-schema budget warning. Same chars/4
+  // numbers `measureStaticFloor` / `ethos bench context` report (D8); default
+  // threshold reuses SMALL_WINDOW_STATIC_RATIO (0.4). A personality that
+  // declared a small-window toolset is measured on its narrowed payload; one
+  // that declared nothing keeps its full toolset and gets this warning.
+  const budgetRatio = activePerson.context_engine_options?.tool_schema_budget_ratio;
+  const schemaBudget = evaluateToolSchemaBudget({
+    personalityId: activePerson.id,
+    windowTokens: llm.maxContextTokens,
+    toolDefinitions: effectiveToolDefinitions,
+    ...(typeof budgetRatio === 'number' && budgetRatio > 0 ? { ratio: budgetRatio } : {}),
+  });
+  if (schemaBudget.message) log.warn(schemaBudget.message);
+
   // Lane 1(c)+(e) — scale the per-turn tool-result budget DOWN with the served
   // window; never UP (the flat 80k default is the ceiling, #111762). An
   // explicit per-personality `context_engine_options.resultBudgetChars` may
@@ -601,6 +663,9 @@ export async function buildAgentLoop(
       // Lane 1(c) — only passed when scaling engaged; at the ceiling the loop
       // default (80k) applies and the config is byte-identical to today.
       ...(resultBudgetChars < RESULT_BUDGET_CEILING_CHARS ? { resultBudgetChars } : {}),
+      // Lane 3(b) — only passed when small-window mode is active, so hosted
+      // frontier-window loop options stay byte-identical to today.
+      ...(smallWindow ? { smallWindow } : {}),
     },
   });
 
@@ -887,6 +952,10 @@ export async function buildAgentLoop(
   return {
     loop,
     toolRegistry: tools,
+    // Lane 3(b) — the served window of the primary provider, exposed so
+    // `ethos bench context` divides by the SAME denominator the schema-budget
+    // warning uses (no second measurement path).
+    contextWindow: llm.maxContextTokens,
     mcpManager,
     setMessagingSend: (fn) => {
       ref.fn = fn;

@@ -8,6 +8,7 @@ import type {
 import { orderToolDefinitions } from '@ethosagent/types';
 import type OpenAI from 'openai';
 import { estimateCostOpenAI, normalizeGeminiSchema, toOpenAIMessages } from './index';
+import { sanitizeToolSchemaForGrammar } from './schema-sanitize';
 
 // ---------------------------------------------------------------------------
 // Shared Chat Completions streaming transport
@@ -72,6 +73,12 @@ export function buildChatCompletionsParams(
     countTokens?: (msgs: Message[]) => Promise<number>;
     structuredOutputDialect?: StructuredOutputDialect;
     toolOrder?: ToolOrder;
+    /** Lane 3(a) — llamacpp-class grammar sanitizing at this boundary (D7).
+     *  Absent → schemas pass through untouched (hosted dialects, Anthropic). */
+    toolSchemaProfile?: 'llamacpp';
+    /** Lane 3(a) — receives one line per sanitizer transformation, naming the
+     *  tool and the change. A drop is never silent. */
+    onSchemaChange?: (message: string) => void;
   },
 ): ChatCompletionsStreamParams {
   const oaiMessages = toOpenAIMessages(messages, options.system);
@@ -83,14 +90,27 @@ export function buildChatCompletionsParams(
   // is a caching device, NOT a priority signal.
   const orderedTools = orderToolDefinitions(tools, opts?.toolOrder ?? 'stable');
 
-  const oaiTools: OpenAI.Chat.ChatCompletionTool[] = orderedTools.map((t) => ({
-    type: 'function',
-    function: {
-      name: t.name,
-      description: t.description,
-      parameters: opts?.gemini ? normalizeGeminiSchema(t.parameters) : t.parameters,
-    },
-  }));
+  const oaiTools: OpenAI.Chat.ChatCompletionTool[] = orderedTools.map((t) => {
+    let parameters = t.parameters;
+    if (opts?.gemini) {
+      parameters = normalizeGeminiSchema(parameters);
+    } else if (opts?.toolSchemaProfile === 'llamacpp') {
+      // Lane 3(a) — sanitize for the GBNF grammar compiler. Gated on the
+      // llamacpp-class local dialect only; every transformation is surfaced
+      // via onSchemaChange (logged by the provider, never silent).
+      const sanitized = sanitizeToolSchemaForGrammar(t.name, parameters);
+      for (const change of sanitized.changes) opts?.onSchemaChange?.(change);
+      parameters = sanitized.schema;
+    }
+    return {
+      type: 'function' as const,
+      function: {
+        name: t.name,
+        description: t.description,
+        parameters,
+      },
+    };
+  });
 
   const effectiveModel = options.modelOverride ?? model;
   const oaiParams: OpenAI.Chat.ChatCompletionCreateParamsStreaming = {
@@ -125,6 +145,8 @@ export async function buildChatCompletionsParamsAsync(
     countTokens?: (msgs: Message[]) => Promise<number>;
     structuredOutputDialect?: StructuredOutputDialect;
     toolOrder?: ToolOrder;
+    toolSchemaProfile?: 'llamacpp';
+    onSchemaChange?: (message: string) => void;
   },
 ): Promise<ChatCompletionsStreamParams> {
   const result = buildChatCompletionsParams(messages, tools, options, model, opts);

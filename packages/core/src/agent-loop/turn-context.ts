@@ -46,6 +46,9 @@ export interface LoopDeps {
   maxIdenticalToolCalls: number;
   maxConsecutiveIdenticalCalls: number;
   streamingTimeoutMs: number;
+  /** Lane 3(b) — small-window mode (resolved once by wiring); gates declared
+   *  `context_engine_options.small_window_toolset` narrowing in turn setup. */
+  smallWindow: boolean;
   modelRouting: Record<string, string>;
   /** §5 — resolved compaction gate config (pressure/target fractions +
    *  per-model charsPerToken). Undefined → gate uses its 0.8/0.7 + char/4

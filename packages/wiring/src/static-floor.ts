@@ -8,6 +8,7 @@
 // per-component breakdown out, no I/O.
 
 import { DEFAULT_OUTPUT_RESERVE_TOKENS } from '@ethosagent/core';
+import { SMALL_WINDOW_STATIC_RATIO } from './model-catalog';
 
 /** The chars/4 heuristic every consumer of this module shares. */
 const CHARS_PER_TOKEN = 4;
@@ -158,4 +159,132 @@ export function resolveResultBudget(opts: {
     compactibleTokens * CHARS_PER_TOKEN * RESULT_BUDGET_COMPACTIBLE_SHARE,
   );
   return Math.min(base, Math.max(RESULT_BUDGET_FLOOR_CHARS, windowDerivedCap));
+}
+
+// ---------------------------------------------------------------------------
+// Lane 3(a) — total tool-payload guard
+// ---------------------------------------------------------------------------
+
+/** Minimal structural view of a tool definition — what the guard and the
+ *  budget need. `ToolRegistry.toDefinitions()` output satisfies it. */
+export interface MeasurableToolDefinition {
+  name: string;
+}
+
+/**
+ * Default total-payload guard threshold: 128 KiB of serialized tool-schema
+ * JSON (~32k tokens at chars/4). Rationale: 32k tokens is the entire budget of
+ * a small-window local deployment (`SMALL_WINDOW_MAX_TOKENS`) — a tool payload
+ * past this cannot leave room for a single message even before llama.cpp's
+ * grammar/template expansion, and llamacpp-class runtimes degrade or drop tool
+ * calling entirely well before it. It is also >4x the serialized size of a
+ * heavy first-party Ethos toolset, so no sane configuration trips it — only
+ * runaway MCP-borne schema payloads do. Override with `toolPayloadLimitChars`
+ * in ~/.ethos/config.yaml.
+ */
+export const TOOL_PAYLOAD_GUARD_DEFAULT_CHARS = 131_072;
+
+/** Serialized per-tool schema sizes, largest first. */
+export function measureToolSchemaSizes(
+  toolDefinitions: readonly MeasurableToolDefinition[],
+): Array<{ name: string; chars: number }> {
+  return toolDefinitions
+    .map((d) => ({ name: d.name, chars: JSON.stringify(d).length }))
+    .sort((a, b) => b.chars - a.chars);
+}
+
+export interface ToolPayloadGuardVerdict {
+  totalChars: number;
+  limitChars: number;
+  /**
+   * Set when the payload exceeds the limit. `'fail'` on a local dialect —
+   * startup must refuse, because past the limit llamacpp-class runtimes lose
+   * tool calling entirely (the failure this guard prevents); `'warn'` on
+   * hosted dialects. In neither case is the problem deferred to the first
+   * tool call.
+   */
+  severity?: 'fail' | 'warn';
+  /** Set with `severity` — names the offending tools in both cases. */
+  message?: string;
+}
+
+/** Evaluate the Lane 3(a) total serialized tool-payload guard. Pure. */
+export function evaluateToolPayloadGuard(opts: {
+  toolDefinitions: readonly MeasurableToolDefinition[];
+  limitChars?: number;
+  /** True when the provider endpoint is a detected local runtime. */
+  localDialect: boolean;
+}): ToolPayloadGuardVerdict {
+  const limitChars = opts.limitChars ?? TOOL_PAYLOAD_GUARD_DEFAULT_CHARS;
+  const totalChars = JSON.stringify(opts.toolDefinitions).length;
+  if (totalChars <= limitChars) return { totalChars, limitChars };
+
+  const n = (v: number) => v.toLocaleString('en-US');
+  const offenders = measureToolSchemaSizes(opts.toolDefinitions)
+    .slice(0, 3)
+    .map((t) => `${t.name} (${n(t.chars)} chars)`)
+    .join(', ');
+  return {
+    totalChars,
+    limitChars,
+    severity: opts.localDialect ? 'fail' : 'warn',
+    message:
+      `serialized tool payload is ${n(totalChars)} chars, over the ${n(limitChars)}-char ` +
+      `guard — llamacpp-class runtimes lose tool calling entirely past this. ` +
+      `Largest tool schemas: ${offenders}. Trim the personality's toolset (or its MCP ` +
+      `servers' schemas), or raise toolPayloadLimitChars in ~/.ethos/config.yaml.`,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Lane 3(b) — per-personality tool-schema budget warning
+// ---------------------------------------------------------------------------
+
+export interface ToolSchemaBudgetVerdict {
+  /** `toolSchemaTokens / windowTokens` — tokens via the same chars/4 estimate
+   *  `measureStaticFloor` uses (D8: one arithmetic, no second path). */
+  share: number;
+  toolSchemaChars: number;
+  toolSchemaTokens: number;
+  /** The three largest tool schemas, largest first. */
+  largest: Array<{ name: string; chars: number; tokens: number }>;
+  /** Set when the share exceeds the ratio — names the personality, the share,
+   *  and the three largest tool schemas. */
+  message?: string;
+}
+
+/**
+ * Evaluate whether a personality's serialized tool schemas exceed a share of
+ * the served window. The default ratio reuses `SMALL_WINDOW_STATIC_RATIO`
+ * (0.4) — an existing, reviewed constant — and the token arithmetic is the
+ * same chars/4 estimate `measureStaticFloor` and `ethos bench context` report,
+ * so the warning threshold and the bench measurement can never disagree.
+ */
+export function evaluateToolSchemaBudget(opts: {
+  personalityId: string;
+  windowTokens: number;
+  toolDefinitions: readonly MeasurableToolDefinition[];
+  ratio?: number;
+}): ToolSchemaBudgetVerdict {
+  const ratio = opts.ratio ?? SMALL_WINDOW_STATIC_RATIO;
+  const toolSchemaChars = JSON.stringify(opts.toolDefinitions).length;
+  const toolSchemaTokens = Math.ceil(toolSchemaChars / CHARS_PER_TOKEN);
+  const largest = measureToolSchemaSizes(opts.toolDefinitions)
+    .slice(0, 3)
+    .map((t) => ({ ...t, tokens: Math.ceil(t.chars / CHARS_PER_TOKEN) }));
+  const share = opts.windowTokens > 0 ? toolSchemaTokens / opts.windowTokens : 0;
+  const base = { share, toolSchemaChars, toolSchemaTokens, largest };
+  if (opts.windowTokens <= 0 || share <= ratio) return base;
+
+  const n = (v: number) => v.toLocaleString('en-US');
+  const pct = (v: number) => `${Math.round(v * 100)}%`;
+  const top = largest.map((t) => `${t.name} (~${n(t.tokens)} tokens)`).join(', ');
+  return {
+    ...base,
+    message:
+      `personality \`${opts.personalityId}\`: tool schemas cost ~${n(toolSchemaTokens)} tokens — ` +
+      `${pct(share)} of the ${n(opts.windowTokens)}-token served window (threshold ${pct(ratio)}). ` +
+      `Largest: ${top}. Trim toolset.yaml, or declare ` +
+      `context_engine_options.small_window_toolset to narrow it in small-window mode.`,
+  };
 }

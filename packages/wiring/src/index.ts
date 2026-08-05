@@ -136,6 +136,13 @@ export interface WiringConfig {
   /** Lane 4a(d) — retry count for OpenAI-compat clients. Absent → the OpenAI
    *  SDK default (2 retries). */
   maxRetries?: number;
+  /**
+   * Lane 3(a) — total serialized tool-payload guard threshold, in chars.
+   * Absent → `TOOL_PAYLOAD_GUARD_DEFAULT_CHARS` (static-floor.ts). Exceeding
+   * it FAILS startup on a local dialect (losing tool calling entirely is the
+   * failure prevented) and WARNS on hosted ones.
+   */
+  toolPayloadLimitChars?: number;
   /** Maps personality ID → model ID for per-personality model overrides. */
   modelRouting?: Record<string, string>;
   /**
@@ -488,7 +495,11 @@ export { resolveKanbanDbPath } from './kanban-path';
 export {
   type ContextFitVerdict,
   evaluateContextFit,
+  evaluateToolPayloadGuard,
+  evaluateToolSchemaBudget,
+  type MeasurableToolDefinition,
   measureStaticFloor,
+  measureToolSchemaSizes,
   outputReserveTokens,
   RESULT_BUDGET_CEILING_CHARS,
   RESULT_BUDGET_FLOOR_CHARS,
@@ -496,6 +507,9 @@ export {
   type StaticFloorComponent,
   type StaticFloorInputs,
   type StaticFloorMeasurement,
+  TOOL_PAYLOAD_GUARD_DEFAULT_CHARS,
+  type ToolPayloadGuardVerdict,
+  type ToolSchemaBudgetVerdict,
 } from './static-floor';
 
 // Hard ceiling on a single summarizer call. The summarizer runs on the turn's
@@ -762,6 +776,13 @@ async function createLLMFromRegistry(
           ? { requestTimeoutMs: config.requestTimeoutMs }
           : {}),
         ...(config.maxRetries !== undefined ? { maxRetries: config.maxRetries } : {}),
+        // Lane 3(a) — llamacpp-class runtimes (llama.cpp server, Ollama,
+        // LM Studio — all GBNF grammar compilers) get the schema sanitizer at
+        // the provider boundary (D7). vLLM is local but not llamacpp-class
+        // (no GBNF lowering of tool schemas); hosted dialects never sanitize.
+        ...(runtime === 'llamacpp' || runtime === 'ollama' || runtime === 'lmstudio'
+          ? { toolSchemaProfile: 'llamacpp' }
+          : {}),
       },
       secrets: config.secretsResolver ?? secrets,
       logger: log,
@@ -841,6 +862,10 @@ export { applySkillPassthrough, deriveSkillPassthrough } from './skill-passthrou
 export interface CreateAgentLoopResult {
   loop: AgentLoop;
   toolRegistry: ToolRegistry;
+  /** Lane 3(b) — the served context window (tokens) of the primary provider.
+   *  `ethos bench context` uses it as the schema-budget denominator so the
+   *  bench table and the startup warning read the same numbers (D8). */
+  contextWindow: number;
   /** The McpManager instance from tool composition. Pass to createWebApi so
    *  re-auth via the web UI hits the live manager and updates the tool registry. */
   mcpManager: McpManager;
