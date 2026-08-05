@@ -62,6 +62,7 @@ import {
   RESULT_BUDGET_CEILING_CHARS,
   resolveResultBudget,
 } from './static-floor';
+import { evaluateTierMismatch } from './tier-diagnostics';
 import type { WiringContext } from './types';
 
 export interface BuildAgentLoopDeps {
@@ -537,6 +538,16 @@ export async function buildAgentLoop(
     floor: staticFloor,
   });
   if (contextFit.message) log.warn(contextFit.message);
+
+  // Lane 5(i) — tier-mismatch startup diagnostic. Any loaded personality can
+  // take a turn on this loop, and each one's tier map faces the same
+  // provider-match guard against the same active LLM, so every loaded
+  // personality is checked — not just the active one. The guard in
+  // resolveModelWithTier stays; this only makes the silent drop visible.
+  for (const p of personalities.list()) {
+    const tierWarning = evaluateTierMismatch(p, llm.name);
+    if (tierWarning) log.warn(tierWarning);
+  }
 
   // Lane 3(b) — declared small-window toolset narrowing (D20). The narrowing
   // itself is enforced in the loop's turn setup (per-turn personality, gating

@@ -19,6 +19,10 @@ export { reconstructFromWatermark, selectActiveWatermark } from './agent-loop/ma
 // Lane 3(b) — declared small-window toolset parsing, shared with wiring's
 // startup narrowing diagnostic so both read the declaration identically.
 export { parseSmallWindowToolset } from './agent-loop/small-window-toolset';
+// Lane 5(i) — the tier resolution (with its provider-match guard), exported so
+// wiring's tier-mismatch startup diagnostic is tested against EXACTLY the
+// guard the loop runs, not a drifting re-statement of it.
+export { resolveModelWithTier } from './agent-loop/turn-context';
 export { buildAttachmentAnnotation } from './attachment-annotation';
 export { deriveBotKey } from './bot-key';
 export type { CapabilityBackends, CapabilityScopeIds } from './capability-resolver';

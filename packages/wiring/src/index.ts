@@ -533,14 +533,22 @@ const SUMMARIZER_TIMEOUT_MS = 30_000;
 // ~one Haiku-tier call rather than a full main-model re-prompt. Fails open: a
 // throw here is caught by the engine's caller (`maybeCompact`), which ships
 // the un-compacted history and records a degradation event.
-function buildCompressionSummarizer(
+// Lane 5(ii) — the summarizer's provider gets the SAME window/profile
+// threading as the main provider (D15 precedence: config > cached probe >
+// catalog > default). Without it the provider inherits the 128k default —
+// the §0 mis-sizing — so the summarizer's own compaction arithmetic lies on
+// local setups. Exported for tests (asserted at the factory seam).
+export function buildCompressionSummarizer(
   registry: import('@ethosagent/types').LLMProviderRegistry,
   config: WiringConfig,
   observability: EthosObservability | undefined,
   log: Logger,
+  windowProbe?: WindowProbeContext,
 ): SummarizerFn {
   const aux = config.auxiliaryCompression;
   const providerName = aux?.provider ?? config.provider;
+  const model = aux?.model ?? config.model;
+  const baseUrl = aux?.baseUrl ?? config.baseUrl;
   let cachedProvider: LLMProvider | undefined;
 
   const getProvider = async (): Promise<LLMProvider> => {
@@ -558,13 +566,62 @@ function buildCompressionSummarizer(
       delete: async () => {},
       list: async () => [],
     };
+    // Lane 0 precedence, cache-first: the summarizer is not a diagnostic
+    // command, so the probe never forces a live refresh here — a warm cache
+    // resolves with no network call.
+    const isPrimary = providerName === config.provider && model === config.model;
+    const runtime = detectLocalRuntime(providerName, baseUrl ?? '');
+    let probe: WindowProbeResult | undefined;
+    if (runtime !== undefined && baseUrl !== undefined && windowProbe !== undefined) {
+      probe = await probeServedWindowCached({
+        runtime,
+        baseUrl,
+        model,
+        storage: windowProbe.storage,
+        cachePath: windowProbeCachePath(windowProbe.dataDir),
+        ...(windowProbe.fetchImpl !== undefined ? { fetchImpl: windowProbe.fetchImpl } : {}),
+      });
+    }
+    const resolvedWindow = resolveContextWindow({
+      provider: providerName,
+      model,
+      ...(isPrimary && config.contextWindow !== undefined
+        ? { configWindow: config.contextWindow }
+        : {}),
+      ...(probe !== undefined ? { probe } : {}),
+      ...(() => {
+        const catalogWindow =
+          lookupContextWindow(providerName, model) ?? PROVIDER_WINDOW_DEFAULTS[providerName];
+        return catalogWindow !== undefined ? { catalogWindow } : {};
+      })(),
+      localRuntime: runtime !== undefined,
+    });
+    for (const diagnostic of resolvedWindow.diagnostics) {
+      log.warn(`compression summarizer: ${diagnostic}`);
+    }
+    const profile = mergeModelProfile(
+      lookupProfile(providerName, model),
+      config.models?.[`${providerName}/${model}`],
+    );
     cachedProvider = await factory({
       config: {
         provider: providerName,
-        model: aux?.model ?? config.model,
+        model,
         apiKey: aux?.apiKey ?? config.apiKey,
-        ...((aux?.baseUrl ?? config.baseUrl) ? { baseUrl: aux?.baseUrl ?? config.baseUrl } : {}),
+        ...(baseUrl ? { baseUrl } : {}),
         ...(config.apiVersion ? { apiVersion: config.apiVersion } : {}),
+        ...(resolvedWindow.contextWindow !== undefined
+          ? { maxContextTokens: resolvedWindow.contextWindow }
+          : {}),
+        ...(profile?.toolCallFormat !== undefined
+          ? { toolCallFormat: profile.toolCallFormat }
+          : {}),
+        ...(profile?.maxOutputTokens !== undefined
+          ? { maxOutputTokens: profile.maxOutputTokens }
+          : {}),
+        ...(profile?.structuredOutput !== undefined
+          ? { structuredOutput: profile.structuredOutput }
+          : {}),
       },
       secrets: config.secretsResolver ?? NOOP,
       logger: log,
@@ -979,7 +1036,12 @@ export async function createAgentLoop(
     skillPool,
     buildCompressionSummarizer: () =>
       config.auxiliaryCompression?.model
-        ? buildCompressionSummarizer(infra.llmProviders, config, opts.observability, log)
+        ? buildCompressionSummarizer(infra.llmProviders, config, opts.observability, log, {
+            // Lane 5(ii) — cache-first window resolution for the summarizer's
+            // provider; never a forced live probe (not a diagnostic command).
+            storage: wiringCtx.storage,
+            dataDir: wiringCtx.dataDir,
+          })
         : undefined,
     ...(opts.slashRegistry ? { slashRegistry: opts.slashRegistry } : {}),
     ...(opts.cliSubcommandRegistry ? { cliSubcommandRegistry: opts.cliSubcommandRegistry } : {}),
