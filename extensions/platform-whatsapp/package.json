@@ -7,12 +7,17 @@
     ".": {
       "import": "./src/index.ts",
       "types": "./src/index.ts"
+    },
+    "./clarify-surface": {
+      "import": "./src/clarify-surface.ts",
+      "types": "./src/clarify-surface.ts"
     }
   },
   "scripts": {
     "build": "tsup src/index.ts --format esm --dts"
   },
   "dependencies": {
+    "@ethosagent/core": "workspace:*",
     "@ethosagent/types": "workspace:*",
     "@whiskeysockets/baileys": "7.0.0-rc13",
     "qrcode-terminal": "^0.12.0"

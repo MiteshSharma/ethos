@@ -3,7 +3,11 @@ import { isEthosError } from '@ethosagent/types';
 import type { ApprovalRequest } from '@ethosagent/web-contracts';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { AllowlistRepository } from '../../repositories/allowlist.repository';
-import { type ApprovalDecision, ApprovalsService } from '../../services/approvals.service';
+import {
+  type ApprovalDecision,
+  type ApprovalObservability,
+  ApprovalsService,
+} from '../../services/approvals.service';
 
 // The hard test case is the event-loop inversion: a coroutine awaits a
 // Promise that only resolves when an unrelated HTTP handler later flips a
@@ -239,6 +243,150 @@ describe('ApprovalsService', () => {
     expect(decisions.every((d) => d.decision === 'deny')).toBe(true);
     // The sess_2 approval is still hanging — pending count proves it.
     expect(approvals.pendingCount()).toBe(1);
+  });
+});
+
+describe('ApprovalsService — safety audit trail', () => {
+  type AuditRow = Parameters<ApprovalObservability['recordSafetyApproval']>[0];
+
+  let allowlist: AllowlistRepository;
+  let approvals: ApprovalsService;
+  let rows: AuditRow[];
+
+  beforeEach(() => {
+    const storage = new InMemoryStorage();
+    allowlist = new AllowlistRepository({ dataDir: DATA, storage });
+    rows = [];
+    approvals = new ApprovalsService({
+      allowlist,
+      observability: { recordSafetyApproval: (o) => rows.push(o) },
+    });
+  });
+
+  function nextPending(): Promise<ApprovalRequest> {
+    return new Promise<ApprovalRequest>((resolve) => {
+      const off = approvals.onPending((_, req) => {
+        off();
+        resolve(req);
+      });
+    });
+  }
+
+  it('records an approval decision', async () => {
+    const pending = nextPending();
+    const decision = approvals.requestApproval({
+      sessionId: 'sess_1',
+      toolCallId: 'tc_1',
+      toolName: 'terminal',
+      args: { command: 'rm -rf /tmp/x' },
+      reason: 'force-delete',
+    });
+    const { approvalId } = await pending;
+    await approvals.approve(approvalId, 'once', 'tab-A');
+    await decision;
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0].decision).toBe('approved');
+    expect(rows[0].code).toBe('approval.allow');
+    expect(rows[0].cause).toContain('force-delete');
+    expect(rows[0].details).toMatchObject({
+      approvalId,
+      sessionId: 'sess_1',
+      toolName: 'terminal',
+      decidedBy: 'tab-A',
+      scope: 'once',
+    });
+  });
+
+  it('records a denial with warn severity', async () => {
+    const pending = nextPending();
+    const decision = approvals.requestApproval({
+      sessionId: 'sess_1',
+      toolCallId: 'tc_1',
+      toolName: 'terminal',
+      args: {},
+    });
+    const { approvalId } = await pending;
+    await approvals.deny(approvalId, 'too risky', 'tab-A');
+    await decision;
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0].decision).toBe('denied');
+    expect(rows[0].code).toBe('approval.deny');
+    expect(rows[0].severity).toBe('warn');
+    expect(rows[0].cause).toContain('too risky');
+  });
+
+  it('records an allowlist auto-allow — no human decided, so the trail must say so', async () => {
+    const args = { command: 'systemctl restart nginx' };
+    const pending = nextPending();
+    const first = approvals.requestApproval({
+      sessionId: 'sess_1',
+      toolCallId: 'tc_1',
+      toolName: 'terminal',
+      args,
+    });
+    const { approvalId } = await pending;
+    await approvals.approve(approvalId, 'exact-args', 'tab-A');
+    await first;
+
+    await approvals.requestApproval({
+      sessionId: 'sess_1',
+      toolCallId: 'tc_2',
+      toolName: 'terminal',
+      args,
+    });
+
+    expect(rows).toHaveLength(2);
+    expect(rows[1].decision).toBe('auto');
+    expect(rows[1].code).toBe('approval.auto_allow');
+    expect(rows[1].details).toMatchObject({ toolCallId: 'tc_2', decidedBy: 'allowlist' });
+  });
+
+  it('records the session-cancel denial', async () => {
+    const pending = nextPending();
+    const decision = approvals.requestApproval({
+      sessionId: 'sess_1',
+      toolCallId: 'tc_1',
+      toolName: 'terminal',
+      args: {},
+    });
+    await pending;
+    approvals.cancelForSession('sess_1', 'tab closed');
+    await decision;
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0].decision).toBe('denied');
+    expect(rows[0].cause).toContain('tab closed');
+    expect(rows[0].details).toMatchObject({ decidedBy: 'system' });
+  });
+
+  it('a throwing observability sink does not break the approval flow', async () => {
+    const throwing = new ApprovalsService({
+      allowlist,
+      observability: {
+        recordSafetyApproval: () => {
+          throw new Error('observability.db is locked');
+        },
+      },
+    });
+    const pending = new Promise<ApprovalRequest>((resolve) => {
+      const off = throwing.onPending((_, req) => {
+        off();
+        resolve(req);
+      });
+    });
+    const decision = throwing.requestApproval({
+      sessionId: 'sess_1',
+      toolCallId: 'tc_1',
+      toolName: 'terminal',
+      args: {},
+    });
+    const { approvalId } = await pending;
+
+    await expect(throwing.approve(approvalId, 'once', 'tab-A')).resolves.toBeUndefined();
+    expect(await decision).toEqual({ decision: 'allow' });
+    expect(throwing.pendingCount()).toBe(0);
   });
 });
 

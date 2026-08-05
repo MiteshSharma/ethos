@@ -2,9 +2,18 @@ import type { BeforeToolCallPayload } from '@ethosagent/types';
 import { describe, expect, it, vi } from 'vitest';
 import {
   ApprovalCoordinator,
+  type ApprovalObservability,
   createSlackApprovalHook,
   type PendingApproval,
 } from '../approval-coordinator';
+
+type AuditRow = Parameters<ApprovalObservability['recordSafetyApproval']>[0];
+
+/** Collecting audit sink — stands in for wiring's EthosObservability. */
+function recordingSink(): { rows: AuditRow[]; observability: ApprovalObservability } {
+  const rows: AuditRow[] = [];
+  return { rows, observability: { recordSafetyApproval: (o) => rows.push(o) } };
+}
 
 function toolCall(overrides: Partial<BeforeToolCallPayload> = {}): BeforeToolCallPayload {
   return {
@@ -219,6 +228,110 @@ describe('ApprovalCoordinator', () => {
     // sid-2 is untouched and still resolvable.
     await coordinator.approve(pending[1].approvalId, 'U1');
     expect((await d2).decision).toBe('allow');
+  });
+});
+
+describe('ApprovalCoordinator — safety audit trail', () => {
+  it('records an approval decision under audit.approval', async () => {
+    const { rows, observability } = recordingSink();
+    const coordinator = new ApprovalCoordinator({ observability });
+    const pending: PendingApproval[] = [];
+    coordinator.onPending((p) => pending.push(p));
+
+    const decision = coordinator.requestApproval({
+      sessionId: 'sid-1',
+      toolCallId: 'tc-1',
+      toolName: 'terminal',
+      args: { command: 'rm -rf /' },
+      reason: 'recursive force-delete',
+    });
+    await coordinator.approve(pending[0].approvalId, 'U7');
+    await decision;
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0].decision).toBe('approved');
+    expect(rows[0].code).toBe('approval.allow');
+    expect(rows[0].cause).toContain('recursive force-delete');
+    expect(rows[0].details).toMatchObject({
+      approvalId: pending[0].approvalId,
+      sessionId: 'sid-1',
+      toolCallId: 'tc-1',
+      toolName: 'terminal',
+      decidedBy: 'U7',
+    });
+  });
+
+  it('records a denial with warn severity', async () => {
+    const { rows, observability } = recordingSink();
+    const coordinator = new ApprovalCoordinator({ observability });
+    const pending: PendingApproval[] = [];
+    coordinator.onPending((p) => pending.push(p));
+
+    const decision = coordinator.requestApproval({
+      sessionId: 'sid-1',
+      toolCallId: 'tc-1',
+      toolName: 'terminal',
+      args: {},
+      reason: 'recursive force-delete',
+    });
+    await coordinator.deny(pending[0].approvalId, 'U7');
+    await decision;
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0].decision).toBe('denied');
+    expect(rows[0].code).toBe('approval.deny');
+    expect(rows[0].severity).toBe('warn');
+    expect(rows[0].cause).toContain('denied by user');
+  });
+
+  it('records the timeout auto-deny — the trail must not hide unattended denials', async () => {
+    vi.useFakeTimers();
+    try {
+      const { rows, observability } = recordingSink();
+      const coordinator = new ApprovalCoordinator({ timeoutMs: 1000, observability });
+      const decision = coordinator.requestApproval({
+        sessionId: 'sid-1',
+        toolCallId: 'tc-1',
+        toolName: 'terminal',
+        args: {},
+        reason: null,
+      });
+
+      await vi.advanceTimersByTimeAsync(1000);
+      await decision;
+
+      expect(rows).toHaveLength(1);
+      expect(rows[0].decision).toBe('denied');
+      expect(rows[0].cause).toContain('approval timed out');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('a throwing observability sink does not break the approval flow', async () => {
+    const observability: ApprovalObservability = {
+      recordSafetyApproval: () => {
+        throw new Error('observability.db is locked');
+      },
+    };
+    const coordinator = new ApprovalCoordinator({ observability });
+    const pending: PendingApproval[] = [];
+    const resolved: string[] = [];
+    coordinator.onPending((p) => pending.push(p));
+    coordinator.onResolved((_id, d) => resolved.push(d));
+
+    const decision = coordinator.requestApproval({
+      sessionId: 'sid-1',
+      toolCallId: 'tc-1',
+      toolName: 'terminal',
+      args: {},
+      reason: null,
+    });
+    await expect(coordinator.approve(pending[0].approvalId, 'U1')).resolves.toBeUndefined();
+
+    expect(await decision).toEqual({ decision: 'allow' });
+    expect(resolved).toEqual(['allow']);
+    expect(coordinator.pendingCount()).toBe(0);
   });
 });
 

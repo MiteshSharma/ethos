@@ -263,6 +263,31 @@ describe('DreamExecutor', () => {
       expect(() => new Date(state.windowStart).toISOString()).not.toThrow();
     });
 
+    it('maxPerDay caps dreams inside the rolling window and resumes after it rolls', async () => {
+      build(makeConfig({ maxPerDay: 2 }));
+
+      // Two dreams inside a single 24h window — both allowed.
+      for (let i = 0; i < 2; i++) {
+        executor.recordUserTurn(personalityId);
+        vi.setSystemTime(Date.now() + 61 * 60_000);
+        await internals(executor).tick();
+      }
+      expect(loop.runCalls).toHaveLength(2);
+
+      // Third idle crossing inside the same window — capped.
+      executor.recordUserTurn(personalityId);
+      vi.setSystemTime(Date.now() + 61 * 60_000);
+      await internals(executor).tick();
+      expect(loop.runCalls).toHaveLength(2);
+
+      // Window rolls past 24h — the cap resets and dreaming resumes.
+      vi.setSystemTime(Date.now() + 25 * 60 * 60_000);
+      await internals(executor).tick();
+      expect(loop.runCalls).toHaveLength(3);
+      const state = JSON.parse((await storage.read(statePath)) ?? '');
+      expect(state.runsToday).toBe(1);
+    });
+
     it('second dream increments runsToday', async () => {
       build();
       executor.recordUserTurn(personalityId);
@@ -303,6 +328,17 @@ describe('DreamExecutor', () => {
       const sessionKey = opts.sessionKey as string;
       expect(sessionKey).toMatch(new RegExp(`^dream:${personalityId}:`));
     });
+
+    it('requests the `dreaming` model tier for the dream turn', async () => {
+      build();
+      executor.recordUserTurn(personalityId);
+
+      vi.setSystemTime(Date.now() + 61 * 60_000);
+      await internals(executor).tick();
+
+      const opts = loop.runCalls[0].opts as Record<string, unknown>;
+      expect(opts.tierOverride).toBe('dreaming');
+    });
   });
 
   // -----------------------------------------------------------------------
@@ -317,6 +353,23 @@ describe('DreamExecutor', () => {
 
       executor.stop();
       expect(internals(executor).timer).toBeUndefined();
+    });
+
+    it('the started interval drives dreams; stop() ends them', async () => {
+      build();
+      executor.recordUserTurn(personalityId);
+      executor.start();
+
+      // Interval ticks every 5 min; the 60-min idle threshold is crossed here.
+      await vi.advanceTimersByTimeAsync(61 * 60_000);
+      expect(loop.runCalls).toHaveLength(1);
+
+      executor.stop();
+      executor.recordUserTurn(personalityId);
+      await vi.advanceTimersByTimeAsync(120 * 60_000);
+
+      // Timer is gone — no further ticks, no further dreams.
+      expect(loop.runCalls).toHaveLength(1);
     });
 
     it('start() is idempotent — calling twice does not create a second timer', () => {

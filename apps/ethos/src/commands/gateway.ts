@@ -18,7 +18,12 @@ import {
 import { type AgentLoop, deriveBotKey as deriveBotKeyFromSeed } from '@ethosagent/core';
 import { CronScheduler, runScriptFile } from '@ethosagent/cron';
 import { LocalExecutionBackend } from '@ethosagent/execution-local';
-import { createCapturingAdapter, Gateway, type GatewayBotConfig } from '@ethosagent/gateway';
+import {
+  createCapturingAdapter,
+  DreamExecutor,
+  Gateway,
+  type GatewayBotConfig,
+} from '@ethosagent/gateway';
 import { registerGoalNotifications } from '@ethosagent/goal-runner';
 import { ConsoleLogger } from '@ethosagent/logger';
 import {
@@ -59,7 +64,11 @@ import {
   IdentityMap,
   type MessagingSendFn,
 } from '@ethosagent/wiring';
-import { ApprovalCoordinator, createSlackApprovalHook } from '../approval-coordinator';
+import {
+  ApprovalCoordinator,
+  type ApprovalObservability,
+  createSlackApprovalHook,
+} from '../approval-coordinator';
 import { createHealthServer } from '../health-server';
 import { formatQuickCommandOutput, runQuickCommand } from '../lib/quick-command-runner';
 import { emitReady } from '../logger';
@@ -168,6 +177,9 @@ async function loadAdapterModule<T>(modulePath: string, label: string): Promise<
         break;
       case '@ethosagent/platform-whatsapp':
         mod = await import('@ethosagent/platform-whatsapp');
+        break;
+      case '@ethosagent/platform-whatsapp/clarify-surface':
+        mod = await import('@ethosagent/platform-whatsapp/clarify-surface');
         break;
       default:
         throw new EthosError({
@@ -538,6 +550,32 @@ export async function runGatewayStart(opts: GatewayStartOptions = {}): Promise<v
     },
   };
 
+  // Idle-triggered background maintenance ("dreaming"). Opt-in per personality:
+  // a personality with no `dreaming` block — or `enable: false` — is skipped on
+  // every tick, so there is no LLM turn and no cost. The executor owns the whole
+  // policy (idle threshold, rolling daily cap, cancel-on-user-activity); this
+  // wiring only supplies its three collaborators and drives start/stop.
+  //
+  // Dreams run on `systemLoop`, the same not-bot-bound loop cron fires through:
+  // the turn resolves its personality (and therefore its memory scope) from the
+  // `personalityId` passed per run, and its output is maintenance, never a
+  // channel reply. Config is read through `seamPersonalities`, which
+  // `personalityDirectory.refresh()` reloads before every turn — so switching
+  // `dreaming.enable` on disk takes effect without a gateway restart.
+  const dreamExecutor = new DreamExecutor(
+    getStorage(),
+    () => systemLoop ?? undefined,
+    (personalityId) => seamPersonalities.get(personalityId),
+  );
+  const onUserTurn = ({ personalityId }: { personalityId: string }): void => {
+    try {
+      dreamExecutor.recordUserTurn(personalityId);
+    } catch {
+      // Unsafe personality id — skip the activity stamp. Dreaming is
+      // best-effort background maintenance and must never break a live turn.
+    }
+  };
+
   // A2A Stage 1d: register the outbound `a2a_send` tool on every gateway loop's
   // tool registry (per-bot loops + the system loop), so an A2A call can
   // originate from a channel turn — not just from `ethos serve`. The gateway is
@@ -652,10 +690,24 @@ export async function runGatewayStart(opts: GatewayStartOptions = {}): Promise<v
       ...(route.requesterUserId !== undefined ? { requesterUserId: route.requesterUserId } : {}),
     };
   });
+  // WhatsApp clarify surfaces — text-only (Baileys cannot send buttons or
+  // lists), so like Telegram they resolve through `correlateMessage`.
+  const whatsAppClarifySurfaces = await buildWhatsAppClarifySurfaces(
+    bots,
+    adapters,
+    (sessionId) => {
+      const route = gatewayRef?.resolveApprovalRoute(sessionId);
+      if (!route) return undefined;
+      return route.requesterUserId !== undefined
+        ? { chatId: route.chatId, requesterUserId: route.requesterUserId }
+        : { chatId: route.chatId };
+    },
+  );
+  const correlatingClarifySurfaces = [...telegramClarifySurfaces, ...whatsAppClarifySurfaces];
   const clarifyMessageCorrelator =
-    telegramClarifySurfaces.length > 0
+    correlatingClarifySurfaces.length > 0
       ? async (msg: InboundMessage): Promise<ClarifyResponse | null> => {
-          for (const surface of telegramClarifySurfaces) {
+          for (const surface of correlatingClarifySurfaces) {
             const r = await surface.correlateMessage(msg);
             if (r) return r;
           }
@@ -787,6 +839,7 @@ export async function runGatewayStart(opts: GatewayStartOptions = {}): Promise<v
           voiceSecretsResolver: voiceConfig.secretsResolver,
           personalityDirectory,
           onTurnComplete,
+          onUserTurn,
           streamingEdits,
           ...(config.channelToolsets ? { channelToolsets: config.channelToolsets } : {}),
           ...(config.channelFilter ? { channelFilter: config.channelFilter } : {}),
@@ -810,6 +863,7 @@ export async function runGatewayStart(opts: GatewayStartOptions = {}): Promise<v
           voiceSecretsResolver: voiceConfig.secretsResolver,
           personalityDirectory,
           onTurnComplete,
+          onUserTurn,
           streamingEdits,
           ...(config.channelToolsets ? { channelToolsets: config.channelToolsets } : {}),
           ...(clarifyMessageCorrelator ? { clarifyMessageCorrelator } : {}),
@@ -930,6 +984,10 @@ export async function runGatewayStart(opts: GatewayStartOptions = {}): Promise<v
   // `runJob` closure can safely run.
   scheduler.start();
   console.log(`${c.dim}Cron scheduler running (checks every 60s)${c.reset}`);
+
+  // Idle checks for dreaming. The interval is unref'd, so it never holds the
+  // process open; personalities that don't opt in cost one map lookup a tick.
+  dreamExecutor.start();
 
   // Load watchers.json and seed the backing `source:'system'` tick jobs.
   // Idempotent — existing jobs are re-registered so interval edits apply.
@@ -1096,6 +1154,7 @@ export async function runGatewayStart(opts: GatewayStartOptions = {}): Promise<v
     clearInterval(pruneTimer);
     clearInterval(heartbeatTimer);
     scheduler.stop();
+    dreamExecutor.stop();
     await storage.remove(gatewayHealthPath()).catch(() => {});
     await gateway.shutdown({
       notify:
@@ -1436,7 +1495,13 @@ function wireApprovalFlow(
   const approvalAdapters = adapters.filter(isApprovalCapable);
   if (approvalAdapters.length === 0) return;
 
-  const coordinator = new ApprovalCoordinator();
+  // Every settled approval lands in the safety audit trail (`ethos audit
+  // decisions`). Resolved lazily so a boot that never touches observability
+  // doesn't open the DB; the coordinator swallows any failure here.
+  const observability: ApprovalObservability = {
+    recordSafetyApproval: (opts) => getEthosObservability().recordSafetyApproval(opts),
+  };
+  const coordinator = new ApprovalCoordinator({ observability });
   const isDangerous = createDangerPredicate();
 
   // Where a posted card lives, keyed by `approvalId`. Populated once
@@ -2131,6 +2196,58 @@ async function buildDiscordClarifySurfaces(
     surfaces.push(
       new mod.DiscordClarifySurface({
         adapter: discordAdapter,
+        bridge,
+        store: bridge.store,
+        getSessionRouting,
+      }),
+    );
+  }
+  return surfaces;
+}
+
+/**
+ * Build one `WhatsAppClarifySurface` per (WhatsApp adapter, WhatsApp bot)
+ * pair. Loaded lazily — when the surface module isn't installed (or no
+ * WhatsApp adapter is configured), returns `[]` and WhatsApp runs without
+ * clarify support.
+ *
+ * WhatsApp has no interactive-component transport (Baileys 7 can neither
+ * send buttons/lists nor decode their responses), so the surface presents a
+ * numbered prompt and, like Telegram, resolves it through the gateway's
+ * `clarifyMessageCorrelator`.
+ */
+async function buildWhatsAppClarifySurfaces(
+  bots: GatewayBotConfig[],
+  adapters: PlatformAdapter[],
+  getSessionRouting: (
+    sessionId: string,
+  ) => { chatId: string; requesterUserId?: string } | undefined,
+): Promise<{ correlateMessage: (m: InboundMessage) => Promise<ClarifyResponse | null> }[]> {
+  const whatsAppAdapters = adapters.filter((a) => a.id.startsWith('whatsapp:'));
+  if (whatsAppAdapters.length === 0) return [];
+
+  const mod = await loadAdapterModule<
+    typeof import('@ethosagent/platform-whatsapp/clarify-surface')
+  >('@ethosagent/platform-whatsapp/clarify-surface', 'WhatsApp clarify surface');
+  if (!mod) return [];
+
+  const surfaces: {
+    correlateMessage: (m: InboundMessage) => Promise<ClarifyResponse | null>;
+  }[] = [];
+  for (const adapter of whatsAppAdapters) {
+    // `adapter.id` is `whatsapp:<botKey>` — strip the prefix to find the
+    // matching bot's clarifyBridge.
+    const botKey = adapter.id.slice('whatsapp:'.length);
+    const bot = bots.find((b) => b.botKey === botKey);
+    const bridge = bot?.loop.clarifyBridge;
+    if (!bridge) continue;
+    // The WhatsAppAdapter satisfies WhatsAppClarifyAdapter structurally.
+    const waAdapter = adapter as unknown as ConstructorParameters<
+      typeof mod.WhatsAppClarifySurface
+    >[0]['adapter'];
+    surfaces.push(
+      new mod.WhatsAppClarifySurface({
+        adapter: waAdapter,
         bridge,
         store: bridge.store,
         getSessionRouting,

@@ -35,7 +35,7 @@ I ask one question at a time, conversationally. I never dump a questionnaire. Be
 
 **Behavior.** `budgetCapUsd` caps per-session spend (next turn refused with `BUDGET_EXCEEDED` when crossed). `streamingTimeoutMs` per-personality watchdog — longer for thinking-mode personalities, tighter for fast-turnaround. `context_engine` + `context_engine_options` swap the compaction strategy (`drop_oldest` built-in; `semantic_summary` available). `context_layering.mode` controls workspace context-file discovery (`static` default, `progressive`, `off`). `skill_evolution.enabled` auto-triggers skill analysis after turns that cross `min_tool_calls`.
 
-**Egress / export.** `outbound_policy.approve_before_send` gates channel egress through a pending queue (optionally with an `approver_personality`). `mcp_export.enabled` serves this personality as an MCP server with scoped tool/memory/session visibility.
+**Egress / export.** `outbound_policy` is declared but inert — it round-trips through config and gates nothing today, so I never let someone believe `approve_before_send: true` is holding their messages back. `mcp_export.enabled` serves this personality as an MCP server with scoped tool/memory/session visibility.
 
 If the user wants voice modes, emotion tags, response templates, or per-channel UI affordances, that belongs in a skill or channel adapter config — NOT in PersonalityConfig. The schema is frozen and CI enforces it.
 

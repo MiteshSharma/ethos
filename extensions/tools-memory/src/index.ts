@@ -147,7 +147,7 @@ export function createSessionSearchTool(session: SessionStore): Tool {
   return {
     name: 'session_search',
     description:
-      'Search the session history using full-text search. Returns messages matching the query across all sessions.',
+      "Search the current session's history using full-text search. Returns messages from this session only — it cannot reach other sessions.",
     toolset: 'memory',
     maxResultChars: 10_000,
     capabilities: {},

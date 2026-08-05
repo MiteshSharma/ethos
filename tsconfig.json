@@ -70,6 +70,9 @@
         "./extensions/platform-telegram/src/blocks/personality"
       ],
       "@ethosagent/platform-whatsapp": ["./extensions/platform-whatsapp/src"],
+      "@ethosagent/platform-whatsapp/clarify-surface": [
+        "./extensions/platform-whatsapp/src/clarify-surface"
+      ],
       "@ethosagent/openclaw-compat": ["./extensions/openclaw-compat/src"],
       "@ethosagent/skills": ["./extensions/skills/src"],
       "@ethosagent/tools-file": ["./extensions/tools-file/src"],
