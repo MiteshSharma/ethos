@@ -89,6 +89,7 @@ function isValidProfile(obj: unknown): boolean {
   )
     return false;
   if (p.structuredOutput !== undefined && typeof p.structuredOutput !== 'boolean') return false;
+  if (p.parseThinkTags !== undefined && typeof p.parseThinkTags !== 'boolean') return false;
   // §5 — compaction thresholds are fractions in (0,1]; charsPerToken is a
   // positive divisor. Malformed values reject the whole profile; absent is fine.
   if (p.compaction !== undefined) {

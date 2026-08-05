@@ -622,6 +622,9 @@ export function buildCompressionSummarizer(
         ...(profile?.structuredOutput !== undefined
           ? { structuredOutput: profile.structuredOutput }
           : {}),
+        ...(profile?.parseThinkTags !== undefined
+          ? { parseThinkTags: profile.parseThinkTags }
+          : {}),
         // FIX 8 — this path already surfaced any unknown-window diagnostic
         // (prefixed 'compression summarizer:' above); the factory must not
         // log a near-identical second copy.
@@ -837,6 +840,11 @@ async function createLLMFromRegistry(
         // consumers gate on. Absent → capability stays unset (unchanged).
         ...(profile?.structuredOutput !== undefined
           ? { structuredOutput: profile.structuredOutput }
+          : {}),
+        // FIX 5 — <think>-tag parsing opt-in for hosted reasoning models.
+        // Absent → the provider derives it from its local classification.
+        ...(profile?.parseThinkTags !== undefined
+          ? { parseThinkTags: profile.parseThinkTags }
           : {}),
         // Lane 2a — tool-ordering escape hatch (global, applies to every
         // resolved provider). Absent → the provider's 'stable' default.

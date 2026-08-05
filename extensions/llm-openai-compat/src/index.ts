@@ -101,9 +101,15 @@ function detectStructuredOutputDialect(
   name: string,
   baseUrl: string,
 ): 'openai' | 'ollama' | 'vllm' {
-  const n = name.toLowerCase();
-  if (n === 'ollama' || baseUrl.includes(':11434')) return 'ollama';
-  if (n === 'vllm') return 'vllm';
+  // Post-review FIX 2 — consult the hardened local-runtime classification
+  // instead of a raw port check: a known hosted alias (openrouter/groq/…)
+  // proxied on :11434 must NEVER get the ollama dialect. Generic names on
+  // local ports and the 'ollama'/'vllm' aliases classify as before; the
+  // lmstudio/llamacpp classifications fall through to the 'openai'
+  // response-format dialect (unchanged).
+  const runtime = classifyLocalRuntime(name, baseUrl);
+  if (runtime === 'ollama') return 'ollama';
+  if (runtime === 'vllm') return 'vllm';
   return 'openai';
 }
 

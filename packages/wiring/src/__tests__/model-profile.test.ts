@@ -82,6 +82,15 @@ describe('mergeModelProfile', () => {
     });
   });
 
+  it('merges parseThinkTags, override winning (FIX 5)', () => {
+    expect(mergeModelProfile({ parseThinkTags: false }, { parseThinkTags: true })).toEqual({
+      parseThinkTags: true,
+    });
+    expect(mergeModelProfile({ parseThinkTags: true }, undefined)).toEqual({
+      parseThinkTags: true,
+    });
+  });
+
   it('merges compaction per-field + charsPerToken, override winning (§5)', () => {
     // Partial override keeps the base's other compaction field.
     expect(
@@ -235,5 +244,32 @@ describe('§7 profile fields reach the provider config', () => {
     });
     expect(provider).toBeInstanceOf(OpenAICompatProvider);
     expect(provider.capabilities?.structuredOutput).toBeUndefined();
+  });
+
+  it('FIX 5 — a parseThinkTags: true profile opts a hosted provider into <think>-tag parsing', async () => {
+    const provider = await createLLM({
+      provider: 'openrouter',
+      model: 'some/reasoning-model',
+      apiKey: 'k',
+      models: {
+        'openrouter/some/reasoning-model': { parseThinkTags: true },
+      },
+    });
+    expect(provider).toBeInstanceOf(OpenAICompatProvider);
+    if (provider instanceof OpenAICompatProvider) {
+      expect(provider.parseThinkTags).toBe(true);
+    }
+  });
+
+  it('FIX 5 — no profile → hosted default stays OFF (derived from classification)', async () => {
+    const provider = await createLLM({
+      provider: 'openrouter',
+      model: 'some/model',
+      apiKey: 'k',
+    });
+    expect(provider).toBeInstanceOf(OpenAICompatProvider);
+    if (provider instanceof OpenAICompatProvider) {
+      expect(provider.parseThinkTags).toBe(false);
+    }
   });
 });

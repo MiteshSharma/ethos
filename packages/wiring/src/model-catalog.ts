@@ -451,6 +451,8 @@ export function mergeModelProfile(
   if (maxOutputTokens !== undefined) merged.maxOutputTokens = maxOutputTokens;
   const structuredOutput = override?.structuredOutput ?? base?.structuredOutput;
   if (structuredOutput !== undefined) merged.structuredOutput = structuredOutput;
+  const parseThinkTags = override?.parseThinkTags ?? base?.parseThinkTags;
+  if (parseThinkTags !== undefined) merged.parseThinkTags = parseThinkTags;
   // §5 — merge compaction per-field (override wins per key) so a partial
   // override (e.g. only `pressure`) keeps the base `target`.
   const compaction = { ...base?.compaction, ...override?.compaction };

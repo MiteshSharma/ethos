@@ -47,6 +47,11 @@ export interface ModelProfile {
     memorySnapshotCap?: number;
     suppressMemoryGuidance?: boolean;
   };
+  /** Post-review FIX 5 — explicit `<think>…</think>` TAG-parsing override for
+   *  the openai-compat provider. Absent → the provider derives it from the
+   *  hardened local-runtime classification (local → parse, hosted → pass
+   *  through verbatim). Set `true` to opt a hosted reasoning model in. */
+  parseThinkTags?: boolean;
 }
 
 export interface ModelEntry {

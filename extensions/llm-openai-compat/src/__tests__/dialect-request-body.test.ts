@@ -8,8 +8,14 @@
 //     applySamplingDefaults in packages/core) reach the body as top_k/min_p
 //     for the ollama and vllm dialects; hosted dialects never see them.
 
-import type { CompletionOptions, ToolDefinitionLite } from '@ethosagent/types';
+import type {
+  CompletionChunk,
+  CompletionOptions,
+  Message,
+  ToolDefinitionLite,
+} from '@ethosagent/types';
 import { describe, expect, it } from 'vitest';
+import { OpenAICompatProvider } from '../index';
 import { buildChatCompletionsParams } from '../transport';
 
 const TOOLS: ToolDefinitionLite[] = [
@@ -123,5 +129,119 @@ describe('topK/minP wiring (Lane 4b(e))', () => {
     const body = JSON.stringify(params.oaiParams);
     expect(body).not.toContain('top_k');
     expect(body).not.toContain('min_p');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// FIX 2 (residual) — dialect DETECTION goes through the hardened classifier,
+// not a raw port check. Asserted on the wire bytes via the fetch seam.
+// ---------------------------------------------------------------------------
+
+const OPENAI_SSE = [
+  `data: ${JSON.stringify({
+    id: 'c',
+    object: 'chat.completion.chunk',
+    created: 0,
+    model: 'm',
+    choices: [{ index: 0, delta: { role: 'assistant', content: 'ok' }, finish_reason: null }],
+  })}`,
+  '',
+  `data: ${JSON.stringify({
+    id: 'c',
+    object: 'chat.completion.chunk',
+    created: 0,
+    model: 'm',
+    choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
+  })}`,
+  '',
+  'data: [DONE]',
+  '',
+  '',
+].join('\n');
+
+function captureFetch(bodies: string[]): typeof globalThis.fetch {
+  return (async (_input: unknown, init?: { body?: unknown }) => {
+    bodies.push(String(init?.body ?? ''));
+    return new Response(OPENAI_SSE, {
+      status: 200,
+      headers: { 'content-type': 'text/event-stream' },
+    });
+  }) as typeof globalThis.fetch;
+}
+
+async function drain(iter: AsyncIterable<CompletionChunk>): Promise<void> {
+  for await (const _chunk of iter) {
+    // drain
+  }
+}
+
+const USER: Message[] = [{ role: 'user', content: 'hi' }];
+
+const SCHEMA: Record<string, unknown> = {
+  type: 'object',
+  properties: { meets: { type: 'boolean' } },
+  required: ['meets'],
+  additionalProperties: false,
+};
+
+/** responseFormat (dialect-mapped) + topK/minP (local-gated) in one bag. */
+const DIALECT_OPTS: CompletionOptions = {
+  providerOptions: {
+    'openai-compat': { responseFormat: { name: 'verdict', schema: SCHEMA }, topK: 40, minP: 0.05 },
+  },
+};
+
+describe('dialect detection consults the hardened runtime classifier (FIX 2 residual)', () => {
+  it('a hosted alias (openrouter) proxied on :11434 gets the openai dialect — no format/top_k/min_p', async () => {
+    const bodies: string[] = [];
+    const provider = new OpenAICompatProvider({
+      name: 'openrouter',
+      model: 'some/model',
+      apiKey: 'k',
+      baseUrl: 'http://corp-proxy:11434/v1',
+      fetchImpl: captureFetch(bodies),
+    });
+    await drain(provider.complete(USER, [], DIALECT_OPTS));
+    expect(bodies).toHaveLength(1);
+    const body = bodies[0] ?? '';
+    // openai dialect: response_format json_schema, never Ollama's top-level format.
+    expect(body).toContain('"response_format"');
+    expect(body).not.toContain('"format"');
+    // hosted → local sampling extras never fire, regardless of port.
+    expect(body).not.toContain('top_k');
+    expect(body).not.toContain('min_p');
+  });
+
+  it("the 'ollama' alias keeps the ollama dialect: top-level format + top_k/min_p (unchanged)", async () => {
+    const bodies: string[] = [];
+    const provider = new OpenAICompatProvider({
+      name: 'ollama',
+      model: 'llama3.2',
+      apiKey: 'k',
+      baseUrl: 'http://localhost:11434/v1',
+      fetchImpl: captureFetch(bodies),
+    });
+    await drain(provider.complete(USER, [], DIALECT_OPTS));
+    expect(bodies).toHaveLength(1);
+    const body = bodies[0] ?? '';
+    expect(body).toContain('"format"');
+    expect(body).not.toContain('"response_format"');
+    expect(body).toContain('"top_k":40');
+    expect(body).toContain('"min_p":0.05');
+  });
+
+  it('a generic (unrecognized) name on :11434 still resolves to the ollama dialect', async () => {
+    const bodies: string[] = [];
+    const provider = new OpenAICompatProvider({
+      name: 'openai-compat',
+      model: 'llama3.2',
+      apiKey: 'k',
+      baseUrl: 'http://localhost:11434/v1',
+      fetchImpl: captureFetch(bodies),
+    });
+    await drain(provider.complete(USER, [], DIALECT_OPTS));
+    const body = bodies[0] ?? '';
+    expect(body).toContain('"format"');
+    expect(body).not.toContain('"response_format"');
   });
 });
