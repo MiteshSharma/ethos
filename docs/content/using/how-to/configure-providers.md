@@ -1,16 +1,16 @@
 ---
 title: "Configure an LLM provider"
-description: "Set up Anthropic, OpenAI, OpenRouter, or Ollama as the provider for Ethos. Includes verify and troubleshoot."
+description: "Set up Anthropic, OpenAI, Codex, OpenRouter, Azure, or a local Ollama/vLLM endpoint as the Ethos provider. Includes verify and troubleshoot."
 kind: how-to
 audience: user
 slug: configure-providers
 time: "5 min"
-updated: 2026-05-22
+updated: 2026-08-06
 ---
 
 ## Task
 
-Point Ethos at one of the four supported LLM providers — Anthropic, OpenAI, OpenRouter, or Ollama — and verify the next chat turn routes through it.
+Point Ethos at one of the supported LLM providers — Anthropic, OpenAI, OpenAI Codex, OpenRouter, Azure OpenAI, or a local Ollama or vLLM endpoint — and verify the next chat turn routes through it.
 
 ## Result
 
@@ -34,9 +34,9 @@ ethos setup
 
 The wizard writes `~/.ethos/config.yaml` and prompts for:
 
-- **Provider** — one of `anthropic`, `openai`, `openrouter`, `ollama`.
-- **Model** — the model id for that provider (see the table below).
-- **API key** — stored locally in `~/.ethos/config.yaml`. Skip for `ollama`.
+- **Provider** — one of `anthropic`, `openai`, `codex`, `openrouter`, `azure`, `ollama`, `vllm`.
+- **Model** — the model id for that provider (see the table below). For `azure`, this is the deployment name. For `ollama` and `vllm`, the wizard fetches the served model list from the endpoint's `GET /v1/models` and lets you pick.
+- **API key** — stored locally in `~/.ethos/config.yaml`. The local providers (`ollama`, `vllm`) skip this prompt.
 - **Default [personality](../../getting-started/glossary.md#personality)** — pick one of the built-ins.
 
 To re-run only the provider step on an existing config:
@@ -57,7 +57,7 @@ apiKey: sk-ant-XXXXXXXXXXXX
 personality: researcher
 ```
 
-For OpenAI-compatible providers (`openai`, `openrouter`, `ollama`), add `baseUrl` if you want a non-default endpoint:
+For OpenAI-compatible providers (`openai`, `openrouter`, `ollama`, `vllm`), add `baseUrl` if you want a non-default endpoint:
 
 ```yaml
 provider: openrouter
@@ -67,18 +67,32 @@ baseUrl: https://openrouter.ai/api/v1
 personality: researcher
 ```
 
+For `azure`, `baseUrl` is your resource endpoint, `model` is the deployment name, and `apiVersion` is required:
+
+```yaml
+provider: azure
+model: <your-deployment-name>
+apiKey: XXXXXXXXXXXX
+baseUrl: https://<your-resource>.openai.azure.com
+apiVersion: 2024-10-21
+personality: researcher
+```
+
 ### Provider matrix
 
 | `provider` | Default base URL | Where to get a key | Notes |
 |---|---|---|---|
 | `anthropic` | n/a (SDK default) | [console.anthropic.com](https://console.anthropic.com) | Best fit for `claude-*` models; supports key rotation via `ethos keys`. |
 | `openai` | `https://api.openai.com/v1` | [platform.openai.com](https://platform.openai.com/api-keys) | Use for `gpt-4o`, `o1`, etc. |
+| `codex` | n/a — device auth | [openai.com](https://openai.com) (ChatGPT account) | Experimental; authenticates via device code, no API key. See [Use a ChatGPT subscription for coding work](use-chatgpt-subscription-via-codex). |
 | `openrouter` | `https://openrouter.ai/api/v1` | [openrouter.ai/keys](https://openrouter.ai/keys) | One key for Claude, GPT, Gemini, Llama, and 200+ more. |
-| `ollama` | `http://localhost:11434/v1` | n/a — local | Leave `apiKey:` set to any non-empty placeholder; the server ignores it. |
+| `azure` | `https://<your-resource>.openai.azure.com` | [portal.azure.com](https://portal.azure.com) | `model:` is the deployment name; `apiVersion:` required (default `2024-10-21`). |
+| `ollama` | `http://localhost:11434/v1` | n/a — local | No API key; the wizard offers the served model list. |
+| `vllm` | `http://localhost:8000/v1` | n/a — local | No API key; the wizard offers the served model list. |
 
 Provider strings are validated against [`packages/wiring/src/provider-catalog.ts`](https://github.com/MiteshSharma/ethos/blob/main/packages/wiring/src/provider-catalog.ts). Anything else is rejected by `ethos doctor`.
 
-### Ollama specifics
+### Local endpoints (Ollama and vLLM)
 
 Pull and run the model before pointing Ethos at it:
 
@@ -96,6 +110,10 @@ apiKey: ollama
 baseUrl: http://localhost:11434/v1
 personality: researcher
 ```
+
+For vLLM, the same shape with `provider: vllm` and `baseUrl: http://localhost:8000/v1`.
+
+A local server needs serving flags before it works well for agent turns — context length, prefix caching, tool-call parsing. Set them per [Configure local model serving](configure-local-serving), then score the model with [Qualify a local model](qualify-a-local-model).
 
 ### Optional — a fallback chain
 
@@ -138,7 +156,7 @@ A streamed `ok` and a non-zero `usage` line means the provider, key, and model r
 
 ## Troubleshoot
 
-**`Unknown provider 'foo'. Did you mean 'anthropic'?`** — `ethos doctor` rejects provider strings outside the catalog. Set `provider:` to one of `anthropic`, `openai`, `openrouter`, `ollama`.
+**`Unknown provider 'foo'. Did you mean 'anthropic'?`** — `ethos doctor` rejects provider strings outside the catalog. Set `provider:` to one of `anthropic`, `openai`, `codex`, `openrouter`, `azure`, `ollama`, `vllm`.
 
 **`401 Unauthorized` from the provider.** — The key is wrong, expired, or missing the right scope. Regenerate at the provider console and re-run `ethos setup auth`.
 
