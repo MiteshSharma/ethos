@@ -27,7 +27,7 @@ import { handleUntrustedResult } from '../result-defense';
 import { buildScopedStorage } from '../scoped-storage';
 import type { WatcherTap } from '../turn-context';
 import type { CompletedToolCall, UsageSink } from './stream-step';
-import { emitToolRejection, missingRequiredFields } from './tool-rejection';
+import { emitToolRejection, validateRepairedArgs } from './tool-rejection';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -222,21 +222,21 @@ export async function* processTools(
       continue;
     }
 
-    // §4 (remainder) — the streamed arguments were REPAIRED (chunk-handler's
-    // mechanical pass succeeded), so validate the repaired object against the
-    // tool's `required` fields — a dropped key must not run. Clean parses skip.
+    // §4 (remainder) + Lane 4a delta — the streamed arguments were REPAIRED,
+    // so validate them against the tool's schema: stage-2 type coercion, then
+    // the required-fields presence/type check w/ per-field feedback. Clean parses skip.
     if (tc.repair?.outcome === 'repaired') {
       const tool = deps.tools.get(tc.toolName);
       if (tool) {
-        const missing = missingRequiredFields(tool.schema, tc.args);
-        if (missing.length > 0) {
-          const reason = `repaired tool arguments are missing required field(s): ${missing.join(', ')}`;
-          yield* emitToolRejection(observe, tc.toolCallId, tc.toolName, reason);
+        const validated = validateRepairedArgs(tool.schema, tc.args);
+        tc.args = validated.args;
+        if (validated.reason !== undefined) {
+          yield* emitToolRejection(observe, tc.toolCallId, tc.toolName, validated.reason);
           prepped.push({
             toolCallId: tc.toolCallId,
             name: tc.toolName,
             args: tc.args ?? {},
-            rejected: reason,
+            rejected: validated.reason,
           });
           continue;
         }

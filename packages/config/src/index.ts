@@ -531,6 +531,22 @@ export interface EthosConfig {
    *   toolOrder: insertion
    */
   toolOrder?: 'insertion' | 'stable';
+  /**
+   * Lane 4a(d) — per-request deadline for the OpenAI-compat client, in
+   * milliseconds. Absent → the OpenAI SDK default (10 minutes) stays in
+   * force. The default is deliberately LONG: a cold local model load
+   * (Ollama paging weights into RAM/VRAM on the first turn) legitimately
+   * takes minutes, and a short default would break every fresh server
+   * start. Set this only when you know your serving latency. Flat-key shape:
+   *   requestTimeoutMs: 120000
+   */
+  requestTimeoutMs?: number;
+  /**
+   * Lane 4a(d) — retry count for the OpenAI-compat client. Absent → the
+   * OpenAI SDK default (2 retries). Flat-key shape:
+   *   maxRetries: 0
+   */
+  maxRetries?: number;
   // Per-personality model overrides: maps personality ID → model ID string
   modelRouting?: Record<string, string>;
   /**
@@ -1010,6 +1026,9 @@ export async function writeConfig(storage: Storage, config: EthosConfig): Promis
   if (config.apiVersion) lines.push(`apiVersion: ${config.apiVersion}`);
   if (config.contextWindow !== undefined) lines.push(`contextWindow: ${config.contextWindow}`);
   if (config.toolOrder !== undefined) lines.push(`toolOrder: ${config.toolOrder}`);
+  if (config.requestTimeoutMs !== undefined)
+    lines.push(`requestTimeoutMs: ${config.requestTimeoutMs}`);
+  if (config.maxRetries !== undefined) lines.push(`maxRetries: ${config.maxRetries}`);
   if (config.modelRouting) {
     for (const [id, model] of Object.entries(config.modelRouting)) {
       lines.push(`modelRouting.${id}: ${model}`);
@@ -2043,6 +2062,19 @@ function parseConfigYaml(src: string): EthosConfig {
     // dropped so a typo cannot silently change the wire format.
     toolOrder:
       kv.toolOrder === 'insertion' ? 'insertion' : kv.toolOrder === 'stable' ? 'stable' : undefined,
+    // Lane 4a(d) — a deadline is a positive integer millisecond count; a retry
+    // count is a non-negative integer. Anything else is dropped so a typo
+    // cannot silently change the client's request behavior.
+    requestTimeoutMs: (() => {
+      if (kv.requestTimeoutMs === undefined) return undefined;
+      const n = Number(kv.requestTimeoutMs);
+      return Number.isFinite(n) && n > 0 ? Math.floor(n) : undefined;
+    })(),
+    maxRetries: (() => {
+      if (kv.maxRetries === undefined) return undefined;
+      const n = Number(kv.maxRetries);
+      return Number.isInteger(n) && n >= 0 ? n : undefined;
+    })(),
     modelRouting: Object.keys(modelRouting).length > 0 ? modelRouting : undefined,
     toolSettings: Object.keys(toolSettings).length > 0 ? toolSettings : undefined,
     models,

@@ -164,6 +164,13 @@ export async function* streamChatCompletions(
   // Track streaming tool calls by index (OpenAI streams them as deltas)
   const pendingTools = new Map<number, { id: string; name: string; args: string }>();
 
+  // Lane 4a(c) — empty/silent-completion guard state. Local runtimes (Ollama,
+  // llama.cpp, LM Studio, …) can end the SSE stream with no `finish_reason` at
+  // all — abort, OOM, or a malformed final chunk. Without a guard the generator
+  // returns having yielded NOTHING, not even `done`, and the failure is silent.
+  let sawFinishReason = false;
+  let sawOutput = false;
+
   for await (const chunk of stream) {
     const choice = chunk.choices[0];
 
@@ -193,11 +200,13 @@ export async function* streamChatCompletions(
     const delta = choice.delta;
 
     if (delta.content) {
+      sawOutput = true;
       yield { type: 'text_delta', text: delta.content };
     }
 
     // Stream tool call deltas
     for (const tc of delta.tool_calls ?? []) {
+      sawOutput = true;
       const idx = tc.index;
 
       if (!pendingTools.has(idx)) {
@@ -225,6 +234,7 @@ export async function* streamChatCompletions(
       choice.finish_reason === 'stop' ||
       choice.finish_reason === 'length'
     ) {
+      sawFinishReason = true;
       for (const [, tc] of pendingTools) {
         yield { type: 'tool_use_end', toolCallId: tc.id, inputJson: tc.args };
       }
@@ -236,5 +246,28 @@ export async function* streamChatCompletions(
 
       yield { type: 'done', finishReason };
     }
+  }
+
+  // Lane 4a(c) — the stream ended without ever carrying a `finish_reason`.
+  // Unconditional across every dialect (universal bugfix per plan §2):
+  //   - Nothing was streamed at all → name the failure. CompletionChunk has no
+  //     error variant; the provider contract is to THROW, and AgentLoop's
+  //     stream step surfaces it as an `error` AgentEvent (code `llm_error`).
+  //   - Content or tool calls WERE streamed → the output is real, only the
+  //     terminal chunk was lost. End the turn cleanly so the text isn't thrown
+  //     away: flush any pending tool calls and synthesize `done`.
+  if (!sawFinishReason) {
+    if (!sawOutput) {
+      throw new Error(
+        `model ${params.effectiveModel} returned no output — the stream ended without a ` +
+          'finish_reason (the runtime may have aborted, hit OOM, or dropped the final chunk)',
+      );
+    }
+    const hadPendingTools = pendingTools.size > 0;
+    for (const [, tc] of pendingTools) {
+      yield { type: 'tool_use_end', toolCallId: tc.id, inputJson: tc.args };
+    }
+    pendingTools.clear();
+    yield { type: 'done', finishReason: hadPendingTools ? 'tool_use' : 'end_turn' };
   }
 }

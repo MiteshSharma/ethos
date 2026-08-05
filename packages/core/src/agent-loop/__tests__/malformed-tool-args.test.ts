@@ -53,6 +53,22 @@ function makeSpyToolWithRequired(name: string, required: string[], execute: Tool
   };
 }
 
+// Lane 4a — tool with typed top-level properties for the coercion tests.
+function makeTypedTool(
+  name: string,
+  properties: Record<string, unknown>,
+  required: string[],
+  execute: Tool['execute'],
+): Tool {
+  return {
+    name,
+    description: `${name} tool`,
+    schema: { type: 'object', properties, required },
+    capabilities: {},
+    execute,
+  };
+}
+
 function makeFakeObservability(): AgentLoopObservability & {
   repairs: Array<{ toolName: string; outcome: 'repaired' | 'failed' }>;
 } {
@@ -233,6 +249,34 @@ describe('malformed tool arguments (§4 silent-{} bugfix)', () => {
     expect(obs.repairs).toEqual([{ toolName: 'do_thing', outcome: 'repaired' }]);
   });
 
+  it('names the missing field WITH its expected type when the schema declares one (Lane 4a stage-3 delta)', async () => {
+    const execute = vi.fn(async (): Promise<ToolResult> => ({ ok: true, value: 'ran' }));
+    const tools = new DefaultToolRegistry();
+    tools.register(
+      makeTypedTool(
+        'write_file',
+        { path: { type: 'string' }, content: { type: 'string' } },
+        ['path', 'content'],
+        execute,
+      ),
+    );
+
+    const loop = new AgentLoop({
+      // Repairs to { path: '/tmp/x' } — missing required `content`.
+      llm: makeToolThenDoneLLM('write_file', "{'path': '/tmp/x',}"),
+      tools,
+      safety: createTestSafety(),
+    });
+    const events = await collect(loop.run('go'));
+
+    expect(execute).not.toHaveBeenCalled();
+    const toolEnd = events.find(
+      (e): e is Extract<AgentEvent, { type: 'tool_end' }> =>
+        e.type === 'tool_end' && e.toolName === 'write_file',
+    );
+    expect(toolEnd?.error).toContain('missing required field(s): content (expected string)');
+  });
+
   it('runs a zero-argument tool with {} when the argument stream is empty', async () => {
     let seenArgs: unknown = 'unset';
     const execute = vi.fn(async (args: unknown): Promise<ToolResult> => {
@@ -255,5 +299,90 @@ describe('malformed tool arguments (§4 silent-{} bugfix)', () => {
     expect(seenArgs).toEqual({});
     // Empty stream is legitimate, not a repair.
     expect(obs.repairs).toEqual([]);
+  });
+});
+
+describe('repaired-args type coercion (Lane 4a stage-2 delta)', () => {
+  async function runRepairedCall(
+    inputJson: string,
+    properties: Record<string, unknown>,
+    required: string[],
+  ) {
+    let seenArgs: unknown;
+    const execute = vi.fn(async (args: unknown): Promise<ToolResult> => {
+      seenArgs = args;
+      return { ok: true, value: 'ran' };
+    });
+    const tools = new DefaultToolRegistry();
+    tools.register(makeTypedTool('typed_tool', properties, required, execute));
+    const loop = new AgentLoop({
+      llm: makeToolThenDoneLLM('typed_tool', inputJson),
+      tools,
+      safety: createTestSafety(),
+    });
+    const events = await collect(loop.run('go'));
+    return { execute, seenArgs: () => seenArgs, events };
+  }
+
+  function toolEndOf(events: AgentEvent[]) {
+    return events.find(
+      (e): e is Extract<AgentEvent, { type: 'tool_end' }> =>
+        e.type === 'tool_end' && e.toolName === 'typed_tool',
+    );
+  }
+
+  it('coerces string "5" to a number field', async () => {
+    // Unquoted key + single quotes force the repair path.
+    const { execute, seenArgs } = await runRepairedCall(
+      "{count: '5'}",
+      { count: { type: 'number' } },
+      ['count'],
+    );
+    expect(execute).toHaveBeenCalledTimes(1);
+    expect(seenArgs()).toEqual({ count: 5 });
+  });
+
+  it('coerces string "true" to a boolean field', async () => {
+    const { execute, seenArgs } = await runRepairedCall(
+      "{enabled: 'true'}",
+      { enabled: { type: 'boolean' } },
+      ['enabled'],
+    );
+    expect(execute).toHaveBeenCalledTimes(1);
+    expect(seenArgs()).toEqual({ enabled: true });
+  });
+
+  it('wraps a single value into an array-of field', async () => {
+    const { execute, seenArgs } = await runRepairedCall(
+      "{paths: '/tmp/x',}",
+      { paths: { type: 'array', items: { type: 'string' } } },
+      ['paths'],
+    );
+    expect(execute).toHaveBeenCalledTimes(1);
+    expect(seenArgs()).toEqual({ paths: ['/tmp/x'] });
+  });
+
+  it('rejects a NON-coercible mismatch with a per-field message naming field, expected, and got', async () => {
+    const { execute, events } = await runRepairedCall(
+      "{count: 'lots'}",
+      { count: { type: 'number' } },
+      ['count'],
+    );
+    expect(execute).not.toHaveBeenCalled();
+    const toolEnd = toolEndOf(events);
+    expect(toolEnd?.ok).toBe(false);
+    expect(toolEnd?.error).toContain('wrong-typed field(s): count (expected number, got string)');
+  });
+
+  it('a wrong-typed OPTIONAL field does not reject the call (behavior-preserving scope)', async () => {
+    const { execute, seenArgs } = await runRepairedCall(
+      "{path: '/tmp/x', mode: 7}",
+      { path: { type: 'string' }, mode: { type: 'string' } },
+      ['path'],
+    );
+    // `mode` mismatches (number for string) but is optional — the tool still
+    // runs, exactly as it did before the Lane 4a delta.
+    expect(execute).toHaveBeenCalledTimes(1);
+    expect(seenArgs()).toEqual({ path: '/tmp/x', mode: 7 });
   });
 });

@@ -46,6 +46,15 @@ export interface OpenAICompatProviderConfig {
    *  golden request-body harness to capture exact wire bytes. Absent → the
    *  SDK's default fetch. */
   fetchImpl?: typeof globalThis.fetch;
+  /** Lane 4a(d) — per-request deadline in milliseconds, handed to the OpenAI
+   *  SDK client. Absent → the SDK's own default (10 minutes). The default
+   *  stays deliberately LONG: a cold local model load (Ollama pulling weights
+   *  into RAM/VRAM) legitimately takes minutes, and a short default would
+   *  break the first turn on every fresh server start. */
+  requestTimeoutMs?: number;
+  /** Lane 4a(d) — retry count handed to the OpenAI SDK client. Absent → the
+   *  SDK's own default (2 retries). */
+  maxRetries?: number;
 }
 
 /**
@@ -332,9 +341,15 @@ export class OpenAICompatProvider implements LLMProvider {
       ? `${config.baseUrl.replace(/\/$/, '')}/openai/deployments/${config.model}`
       : config.baseUrl;
 
+    // Lane 4a(d) — timeout/retries are set ONLY when configured. With neither
+    // key present the constructed client inherits the SDK defaults unchanged
+    // (10-minute timeout, 2 retries) — asserted by client-timeout.test.ts —
+    // so an unconfigured hosted provider sees no latency or retry change.
     this.client = new OpenAI({
       apiKey: config.apiKey,
       baseURL,
+      ...(config.requestTimeoutMs !== undefined ? { timeout: config.requestTimeoutMs } : {}),
+      ...(config.maxRetries !== undefined ? { maxRetries: config.maxRetries } : {}),
       ...(config.fetchImpl ? { fetch: config.fetchImpl } : {}),
       ...(this.azure
         ? {
@@ -489,6 +504,10 @@ export const openaiCompatFactory: LLMProviderFactory = async ({
     ...(cfg.toolOrder === 'insertion' || cfg.toolOrder === 'stable'
       ? { toolOrder: cfg.toolOrder }
       : {}),
+    // Lane 4a(d) — request deadline + retry count threaded from config. Absent
+    // → the OpenAI SDK defaults (10-minute timeout, 2 retries) stay in force.
+    ...(typeof cfg.requestTimeoutMs === 'number' ? { requestTimeoutMs: cfg.requestTimeoutMs } : {}),
+    ...(typeof cfg.maxRetries === 'number' ? { maxRetries: cfg.maxRetries } : {}),
   });
 };
 

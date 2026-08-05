@@ -127,6 +127,15 @@ export interface WiringConfig {
    * rollback lever; removal tracked in plan/uncompleted-tasks.md (D13).
    */
   toolOrder?: 'insertion' | 'stable';
+  /**
+   * Lane 4a(d) — per-request deadline (ms) for OpenAI-compat clients. Absent
+   * → the OpenAI SDK default (10 minutes) stays in force; the default is
+   * deliberately long because a cold local model load takes minutes.
+   */
+  requestTimeoutMs?: number;
+  /** Lane 4a(d) — retry count for OpenAI-compat clients. Absent → the OpenAI
+   *  SDK default (2 retries). */
+  maxRetries?: number;
   /** Maps personality ID → model ID for per-personality model overrides. */
   modelRouting?: Record<string, string>;
   /**
@@ -732,6 +741,12 @@ async function createLLMFromRegistry(
         // Lane 2a — tool-ordering escape hatch (global, applies to every
         // resolved provider). Absent → the provider's 'stable' default.
         ...(config.toolOrder !== undefined ? { toolOrder: config.toolOrder } : {}),
+        // Lane 4a(d) — request deadline + retry count (global, applies to
+        // every resolved provider). Absent → the SDK defaults stay in force.
+        ...(config.requestTimeoutMs !== undefined
+          ? { requestTimeoutMs: config.requestTimeoutMs }
+          : {}),
+        ...(config.maxRetries !== undefined ? { maxRetries: config.maxRetries } : {}),
       },
       secrets: config.secretsResolver ?? secrets,
       logger: log,
