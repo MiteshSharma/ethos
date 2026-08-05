@@ -9,7 +9,9 @@ import type {
   MessageContent,
   ProviderCapabilities,
   ToolDefinitionLite,
+  ToolOrder,
 } from '@ethosagent/types';
+import { orderToolDefinitions } from '@ethosagent/types';
 import { reduceToolSchemas } from './tool-schema';
 import { type AnthropicStreamParams, streamAnthropicMessages } from './transport';
 
@@ -25,6 +27,14 @@ export interface AnthropicProviderConfig {
   apiKey: string;
   model: string;
   baseUrl?: string;
+  /** Lane 2a — tool-definition ordering at the serialization boundary.
+   *  Default `'stable'` (deterministic ASCII sort). `'insertion'` is a
+   *  temporary rollback lever; removal tracked in plan/uncompleted-tasks.md. */
+  toolOrder?: ToolOrder;
+  /** Test seam — custom fetch handed to the Anthropic SDK client. Used by the
+   *  golden request-body harness to capture exact wire bytes. Absent → the
+   *  SDK's default fetch. */
+  fetchImpl?: typeof globalThis.fetch;
 }
 
 // ---------------------------------------------------------------------------
@@ -215,15 +225,18 @@ export class AnthropicProvider implements LLMProvider {
   }
 
   private readonly client: Anthropic;
+  private readonly toolOrder: ToolOrder;
 
   constructor(config: AnthropicProviderConfig) {
     this.model = config.model;
     this.client = new Anthropic({
       apiKey: config.apiKey,
       ...(config.baseUrl ? { baseURL: config.baseUrl } : {}),
+      ...(config.fetchImpl ? { fetch: config.fetchImpl } : {}),
     });
     this.maxContextTokens = modelContextTokens(config.model);
     this.supportsThinking = isThinkingModel(config.model);
+    this.toolOrder = config.toolOrder ?? 'stable';
   }
 
   async *complete(
@@ -255,10 +268,16 @@ export class AnthropicProvider implements LLMProvider {
       );
     }
 
+    // Lane 2a — deterministic ASCII-stable tool ordering at the serialization
+    // boundary. Tool definitions ship ahead of the messages and are part of
+    // the cacheable prefix; registration order is not stable across restarts.
+    // The ordering is a caching device, NOT a priority signal.
+    const orderedTools = orderToolDefinitions(tools, this.toolOrder);
+
     // Phase 5 — trim the fixed tool-schema cost at the serialization boundary:
     // strip unused `$defs` and normalize description whitespace. Safe/lossless
     // by default; `requestTokens.tools` below then reflects the reduced size.
-    const anthropicTools: Anthropic.Tool[] = reduceToolSchemas(tools).map((t) => ({
+    const anthropicTools: Anthropic.Tool[] = reduceToolSchemas(orderedTools).map((t) => ({
       name: t.name,
       description: t.description,
       input_schema: t.parameters as Anthropic.Tool['input_schema'],
@@ -318,10 +337,16 @@ export class AuthRotatingProvider implements LLMProvider {
   private readonly providers: AnthropicProvider[];
   private current = 0;
 
-  constructor(profiles: AuthProfile[], model: string) {
+  constructor(profiles: AuthProfile[], model: string, opts?: { toolOrder?: ToolOrder }) {
     const sorted = [...profiles].sort((a, b) => b.priority - a.priority);
     this.providers = sorted.map(
-      (p) => new AnthropicProvider({ apiKey: p.apiKey, model, baseUrl: p.baseUrl }),
+      (p) =>
+        new AnthropicProvider({
+          apiKey: p.apiKey,
+          model,
+          baseUrl: p.baseUrl,
+          ...(opts?.toolOrder ? { toolOrder: opts.toolOrder } : {}),
+        }),
     );
     if (this.providers.length === 0) throw new Error('AuthRotatingProvider: no profiles provided');
   }
@@ -394,7 +419,15 @@ export const anthropicFactory: LLMProviderFactory = async ({ config: cfg, secret
       'Using plaintext apiKey from config for anthropic; migrate to the secret store: ethos secrets set providers/anthropic/apiKey <key>',
     );
   }
-  return new AnthropicProvider({ apiKey, model: cfg.model as string });
+  return new AnthropicProvider({
+    apiKey,
+    model: cfg.model as string,
+    // Lane 2a — tool-ordering escape hatch threaded from config; invalid
+    // values fall through to the 'stable' default.
+    ...(cfg.toolOrder === 'insertion' || cfg.toolOrder === 'stable'
+      ? { toolOrder: cfg.toolOrder }
+      : {}),
+  });
 };
 
 export function activate(api: EthosPluginApi): void {

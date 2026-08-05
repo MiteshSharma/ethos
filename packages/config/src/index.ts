@@ -521,6 +521,16 @@ export interface EthosConfig {
    *   contextWindow: 8192
    */
   contextWindow?: number;
+  /**
+   * Lane 2a (eng review D6) — tool-definition ordering at the provider
+   * serialization boundary. `'stable'` (the default) applies the
+   * deterministic ASCII sort so the tool payload — part of the cacheable
+   * request prefix — is byte-identical across restarts; `'insertion'`
+   * restores the legacy registration-order bytes. Temporary rollback lever;
+   * removal tracked in plan/uncompleted-tasks.md (D13). Flat-key shape:
+   *   toolOrder: insertion
+   */
+  toolOrder?: 'insertion' | 'stable';
   // Per-personality model overrides: maps personality ID → model ID string
   modelRouting?: Record<string, string>;
   /**
@@ -999,6 +1009,7 @@ export async function writeConfig(storage: Storage, config: EthosConfig): Promis
   if (config.baseUrl) lines.push(`baseUrl: ${config.baseUrl}`);
   if (config.apiVersion) lines.push(`apiVersion: ${config.apiVersion}`);
   if (config.contextWindow !== undefined) lines.push(`contextWindow: ${config.contextWindow}`);
+  if (config.toolOrder !== undefined) lines.push(`toolOrder: ${config.toolOrder}`);
   if (config.modelRouting) {
     for (const [id, model] of Object.entries(config.modelRouting)) {
       lines.push(`modelRouting.${id}: ${model}`);
@@ -2028,6 +2039,10 @@ function parseConfigYaml(src: string): EthosConfig {
       const n = Number(kv.contextWindow);
       return Number.isFinite(n) && n > 0 ? Math.floor(n) : undefined;
     })(),
+    // Lane 2a — only the two known values are accepted; anything else is
+    // dropped so a typo cannot silently change the wire format.
+    toolOrder:
+      kv.toolOrder === 'insertion' ? 'insertion' : kv.toolOrder === 'stable' ? 'stable' : undefined,
     modelRouting: Object.keys(modelRouting).length > 0 ? modelRouting : undefined,
     toolSettings: Object.keys(toolSettings).length > 0 ? toolSettings : undefined,
     models,

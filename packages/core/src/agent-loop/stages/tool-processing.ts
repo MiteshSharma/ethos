@@ -664,15 +664,6 @@ export async function* processTools(
       }
     }
 
-    // Persist every result (rejected or not) so history matches what LLM sees
-    await deps.session.appendMessage({
-      sessionId: ctx.sessionId,
-      role: 'tool_result',
-      content: llmContent,
-      toolCallId: p.toolCallId,
-      toolName: p.name,
-    });
-
     const delimiterEnabled = ctx.personality.safety?.injectionDefense?.toolResultDelimiters ?? true;
     let finalContent: string;
     if (delimiterEnabled && result.ok) {
@@ -683,6 +674,15 @@ export async function* processTools(
     } else {
       finalContent = llmContent;
     }
+
+    // Persist what the LLM sees, delimiters included — stored bytes are the replay bytes (Lane 2b, #4555).
+    await deps.session.appendMessage({
+      sessionId: ctx.sessionId,
+      role: 'tool_result',
+      content: finalContent,
+      toolCallId: p.toolCallId,
+      toolName: p.name,
+    });
 
     toolResultContent.push({
       type: 'tool_result',

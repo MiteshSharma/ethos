@@ -71,7 +71,7 @@
     {
       "sessionId": "normalized",
       "role": "tool_result",
-      "content": "done",
+      "content": "===TOOL_RESULT_START:do_thing===\ndone\n===TOOL_RESULT_END===",
       "toolCallId": "tc1",
       "toolName": "do_thing",
       "id": "normalized",

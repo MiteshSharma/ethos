@@ -120,6 +120,13 @@ export interface WiringConfig {
    * fallbacks resolve their own windows.
    */
   contextWindow?: number;
+  /**
+   * Lane 2a (eng review D6) — tool-definition ordering at the provider
+   * serialization boundary. `'stable'` (default) is the deterministic ASCII
+   * sort; `'insertion'` restores legacy registration-order bytes. Temporary
+   * rollback lever; removal tracked in plan/uncompleted-tasks.md (D13).
+   */
+  toolOrder?: 'insertion' | 'stable';
   /** Maps personality ID → model ID for per-personality model overrides. */
   modelRouting?: Record<string, string>;
   /**
@@ -722,6 +729,9 @@ async function createLLMFromRegistry(
         ...(profile?.structuredOutput !== undefined
           ? { structuredOutput: profile.structuredOutput }
           : {}),
+        // Lane 2a — tool-ordering escape hatch (global, applies to every
+        // resolved provider). Absent → the provider's 'stable' default.
+        ...(config.toolOrder !== undefined ? { toolOrder: config.toolOrder } : {}),
       },
       secrets: config.secretsResolver ?? secrets,
       logger: log,
@@ -775,6 +785,8 @@ async function createLLMFromRegistry(
           })),
         ],
         config.model,
+        // Lane 2a — the tool-ordering escape hatch applies to rotation pools too.
+        config.toolOrder !== undefined ? { toolOrder: config.toolOrder } : undefined,
       );
     }
   }

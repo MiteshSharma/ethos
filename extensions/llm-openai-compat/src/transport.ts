@@ -3,7 +3,9 @@ import type {
   CompletionOptions,
   Message,
   ToolDefinitionLite,
+  ToolOrder,
 } from '@ethosagent/types';
+import { orderToolDefinitions } from '@ethosagent/types';
 import type OpenAI from 'openai';
 import { estimateCostOpenAI, normalizeGeminiSchema, toOpenAIMessages } from './index';
 
@@ -69,11 +71,19 @@ export function buildChatCompletionsParams(
     gemini?: boolean;
     countTokens?: (msgs: Message[]) => Promise<number>;
     structuredOutputDialect?: StructuredOutputDialect;
+    toolOrder?: ToolOrder;
   },
 ): ChatCompletionsStreamParams {
   const oaiMessages = toOpenAIMessages(messages, options.system);
 
-  const oaiTools: OpenAI.Chat.ChatCompletionTool[] = tools.map((t) => ({
+  // Lane 2a — deterministic ASCII-stable tool ordering at the serialization
+  // boundary. Tool definitions ship ahead of the messages and are part of the
+  // cacheable prefix (vLLM --enable-prefix-caching, llama.cpp --cache-reuse
+  // hash it); registration order is not stable across restarts. The ordering
+  // is a caching device, NOT a priority signal.
+  const orderedTools = orderToolDefinitions(tools, opts?.toolOrder ?? 'stable');
+
+  const oaiTools: OpenAI.Chat.ChatCompletionTool[] = orderedTools.map((t) => ({
     type: 'function',
     function: {
       name: t.name,
@@ -114,6 +124,7 @@ export async function buildChatCompletionsParamsAsync(
     gemini?: boolean;
     countTokens?: (msgs: Message[]) => Promise<number>;
     structuredOutputDialect?: StructuredOutputDialect;
+    toolOrder?: ToolOrder;
   },
 ): Promise<ChatCompletionsStreamParams> {
   const result = buildChatCompletionsParams(messages, tools, options, model, opts);

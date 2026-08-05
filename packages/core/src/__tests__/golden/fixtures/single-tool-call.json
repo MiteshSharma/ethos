@@ -71,7 +71,7 @@
     {
       "sessionId": "normalized",
       "role": "tool_result",
-      "content": "hello world",
+      "content": "===TOOL_RESULT_START:greet===\nhello world\n===TOOL_RESULT_END===",
       "toolCallId": "tc1",
       "toolName": "greet",
       "id": "normalized",

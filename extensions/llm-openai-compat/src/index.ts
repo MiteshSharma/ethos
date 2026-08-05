@@ -5,7 +5,9 @@ import type {
   Message,
   ProviderCapabilities,
   ToolDefinitionLite,
+  ToolOrder,
 } from '@ethosagent/types';
+import { orderToolDefinitions } from '@ethosagent/types';
 import OpenAI from 'openai';
 import { streamTextToolCalls } from './text-tool-call-transport';
 import { buildChatCompletionsParamsAsync, streamChatCompletions } from './transport';
@@ -36,6 +38,14 @@ export interface OpenAICompatProviderConfig {
    *  so internal JSON consumers request grammar-constrained decoding. Absent →
    *  capability stays unset. */
   structuredOutput?: boolean;
+  /** Lane 2a — tool-definition ordering at the serialization boundary.
+   *  Default `'stable'` (deterministic ASCII sort). `'insertion'` is a
+   *  temporary rollback lever; removal tracked in plan/uncompleted-tasks.md. */
+  toolOrder?: ToolOrder;
+  /** Test seam — custom fetch handed to the OpenAI SDK client. Used by the
+   *  golden request-body harness to capture exact wire bytes. Absent → the
+   *  SDK's default fetch. */
+  fetchImpl?: typeof globalThis.fetch;
 }
 
 /**
@@ -286,6 +296,8 @@ export class OpenAICompatProvider implements LLMProvider {
   readonly structuredOutput?: boolean;
   /** §3 request dialect for grammar-constrained JSON (openai/ollama/vllm). */
   private readonly structuredOutputDialect: 'openai' | 'ollama' | 'vllm';
+  /** Lane 2a — tool-definition ordering at the serialization boundary. */
+  private readonly toolOrder: ToolOrder;
 
   constructor(config: OpenAICompatProviderConfig) {
     this.name = config.name;
@@ -297,6 +309,7 @@ export class OpenAICompatProvider implements LLMProvider {
     this.maxOutputTokens = config.maxOutputTokens;
     this.structuredOutput = config.structuredOutput;
     this.structuredOutputDialect = detectStructuredOutputDialect(config.name, config.baseUrl);
+    this.toolOrder = config.toolOrder ?? 'stable';
 
     // Phase 1d — local-model context floor. Ollama silently truncates at its
     // default `num_ctx` (2–4k) and vLLM can be launched with a small
@@ -322,6 +335,7 @@ export class OpenAICompatProvider implements LLMProvider {
     this.client = new OpenAI({
       apiKey: config.apiKey,
       baseURL,
+      ...(config.fetchImpl ? { fetch: config.fetchImpl } : {}),
       ...(this.azure
         ? {
             defaultQuery: { 'api-version': '2024-08-01-preview' },
@@ -351,6 +365,7 @@ export class OpenAICompatProvider implements LLMProvider {
         gemini: this.gemini,
         countTokens: (msgs) => this.countTokens(msgs),
         structuredOutputDialect: this.structuredOutputDialect,
+        toolOrder: this.toolOrder,
       },
     );
 
@@ -364,7 +379,10 @@ export class OpenAICompatProvider implements LLMProvider {
       // Inject tool definitions into the system prompt so the model knows
       // what tools are available and how to invoke them via text XML.
       if (tools.length > 0) {
-        const toolDocs = tools
+        // Lane 2a — same deterministic ordering as the structured-tools path:
+        // the docs land in the request prefix, so they must be byte-stable
+        // across restarts. Caching device, not a priority signal.
+        const toolDocs = orderToolDefinitions(tools, this.toolOrder)
           .map(
             (t) =>
               `<tool>\n  <name>${t.name}</name>\n  <description>${t.description}</description>\n  <parameters>${JSON.stringify(t.parameters)}</parameters>\n</tool>`,
@@ -465,6 +483,11 @@ export const openaiCompatFactory: LLMProviderFactory = async ({
     ...(typeof cfg.maxOutputTokens === 'number' ? { maxOutputTokens: cfg.maxOutputTokens } : {}),
     ...(typeof cfg.structuredOutput === 'boolean'
       ? { structuredOutput: cfg.structuredOutput }
+      : {}),
+    // Lane 2a — tool-ordering escape hatch threaded from config; invalid
+    // values fall through to the 'stable' default.
+    ...(cfg.toolOrder === 'insertion' || cfg.toolOrder === 'stable'
+      ? { toolOrder: cfg.toolOrder }
       : {}),
   });
 };

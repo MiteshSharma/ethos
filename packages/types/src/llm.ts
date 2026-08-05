@@ -55,6 +55,13 @@ export interface CompletionOptions {
    * on that message so the prompt cache survives compaction. Anthropic allows
    * at most 4 breakpoints total (system + messages) — providers cap to the
    * limit and drop the rest. Providers without prompt caching ignore the field.
+   *
+   * Lane 2c — on local runtimes the equivalent of a cache breakpoint is
+   * BYTE-STABILITY of the request prefix, not a marker: vLLM
+   * (`--enable-prefix-caching`) and llama.cpp (`--cache-reuse`) hash prefixes,
+   * so there is nothing to annotate. Do NOT build an openai-compat consumer
+   * for this field — keeping the serialized request byte-stable across turns
+   * is what makes their caches hit.
    */
   cacheBreakpoints?: number[];
   /** Namespaced escape hatch for provider-specific options. Keys are provider
@@ -132,6 +139,41 @@ export interface ToolDefinitionLite {
   name: string;
   description: string;
   parameters: Record<string, unknown>;
+}
+
+/**
+ * Lane 2a — how a provider orders tool definitions when serializing the
+ * request body. `'stable'` (the default) applies the deterministic ASCII
+ * ordering below; `'insertion'` preserves registration order (the pre-Lane-2
+ * behavior). The escape hatch exists as a temporary rollback lever; removal
+ * is tracked in `plan/uncompleted-tasks.md` (eng review D6/D13).
+ */
+export type ToolOrder = 'insertion' | 'stable';
+
+/**
+ * Lane 2a — deterministic ASCII-stable ordering for tool definitions at the
+ * provider serialization boundary. Tool definitions ship AHEAD of messages in
+ * the request body, so they are part of the cacheable prefix; registration
+ * order is not stable across restarts (MCP, plugin, delegation, and goal
+ * tools register after loop construction, and MCP server connection order
+ * depends on network timing). Sorting by name (raw code-unit comparison — no
+ * locale, no collation tables) makes the prefix byte-identical across
+ * restarts.
+ *
+ * The ordering is a CACHING DEVICE, not a priority signal — it carries no
+ * semantic meaning and models must not be expected to prefer earlier tools.
+ *
+ * Applied at the provider boundary, NOT in `ToolRegistry.toDefinitions()`:
+ * callers of `toDefinitions` (bench, static estimates) must keep measuring
+ * the same set the provider sends, and one sort site per provider keeps one
+ * source of truth for what goes on the wire.
+ */
+export function orderToolDefinitions(
+  tools: ToolDefinitionLite[],
+  order: ToolOrder = 'stable',
+): ToolDefinitionLite[] {
+  if (order === 'insertion') return tools;
+  return [...tools].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
 }
 
 export interface AuthProfile {

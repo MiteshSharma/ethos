@@ -1451,6 +1451,10 @@ importers:
       '@ethosagent/types':
         specifier: workspace:*
         version: link:../../packages/types
+    devDependencies:
+      '@ethosagent/core':
+        specifier: workspace:*
+        version: link:../../packages/core
 
   extensions/skill-evolver:
     dependencies:
