@@ -119,6 +119,25 @@ describe('Model tier resolution', () => {
     expect(opts?.modelOverride).toBe('opus');
   });
 
+  it('tierOverride "dreaming" uses the declared dreaming model (background maintenance turns)', async () => {
+    const onComplete = vi.fn();
+    const llm = makeMockLLM(onComplete);
+    const loop = new AgentLoop({ llm, safety: createTestSafety() });
+
+    // biome-ignore lint/complexity/useLiteralKeys: `personalities` is private; bracket-string is the TS escape hatch for test access
+    loop['personalities'].define({
+      id: 'tiered',
+      name: 'Tiered',
+      provider: 'mock',
+      model: { default: 'sonnet', dreaming: 'haiku' },
+    });
+
+    await collect(loop.run('consolidate', { personalityId: 'tiered', tierOverride: 'dreaming' }));
+
+    const opts = onComplete.mock.calls[0]?.[0];
+    expect(opts?.modelOverride).toBe('haiku');
+  });
+
   it('tierOverride is per-run (second run without it uses default)', async () => {
     const onComplete = vi.fn();
     const llm = makeMockLLM(onComplete);

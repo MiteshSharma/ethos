@@ -289,6 +289,48 @@ describe('session/registerMcpServers', () => {
     expect(teardownCalled).toHaveBeenCalled();
   });
 
+  it('abandoned session is torn down when the connection closes', async () => {
+    // Client registers servers and then drops without sending session/end —
+    // the granted MCP connections must not outlive the transport.
+    const views: ReturnType<typeof makeMockSessionView>[] = [];
+
+    const { input, output } = makeServer({
+      createSessionView: () => {
+        const v = makeMockSessionView();
+        views.push(v);
+        return v.view;
+      },
+    });
+
+    const lines = readLines(output, 2);
+    send(input, {
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'session/registerMcpServers',
+      params: {
+        servers: [{ name: 'keyed-server', transport: 'stdio', command: 'echo' }],
+        sessionKey: 'abandoned-session',
+      },
+    });
+    // A registration with no sessionKey gets an ephemeral key the client can
+    // never name — only connection-close teardown can reclaim it.
+    send(input, {
+      jsonrpc: '2.0',
+      id: 2,
+      method: 'session/registerMcpServers',
+      params: { servers: [{ name: 'ephemeral-server', transport: 'stdio', command: 'echo' }] },
+    });
+    await lines;
+
+    expect(views).toHaveLength(2);
+    for (const v of views) expect(v.teardownCalled).not.toHaveBeenCalled();
+
+    input.end();
+    await new Promise((r) => setImmediate(r));
+
+    for (const v of views) expect(v.teardownCalled).toHaveBeenCalled();
+  });
+
   it('returns rejection for all servers when session views not configured', async () => {
     // No createSessionView provided
     const { input, output } = makeServer({});

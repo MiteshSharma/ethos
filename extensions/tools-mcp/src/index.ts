@@ -1406,8 +1406,16 @@ export function matchesGlob(name: string, pattern: string): boolean {
   return name === pattern;
 }
 
+/**
+ * `undefined` means "no personality context was supplied" — open mode. An
+ * empty array is an explicit empty allowlist and denies everything, mirroring
+ * the default-deny MCP gating core already applies (`personality.mcp_servers ??
+ * []` in packages/core/src/agent-loop/stages/turn-setup.ts). Without the
+ * distinction, a personality with no `mcp_servers` could lease MCP servers
+ * through a session view that it cannot reach in a normal turn.
+ */
 export function isServerAllowed(serverName: string, allowlist: string[] | undefined): boolean {
-  if (!allowlist || allowlist.length === 0) return true; // open mode
+  if (!allowlist) return true; // open mode — no personality context
   return allowlist.some((pattern) => matchesGlob(serverName, pattern));
 }
 

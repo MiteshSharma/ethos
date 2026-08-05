@@ -19,7 +19,9 @@ export function registerPostmortemHandler(opts: PostmortemHandlerOptions): () =>
   return hooks.registerVoid(
     'after_ticket_revision',
     async (payload: AfterTicketRevisionPayload) => {
-      const key = `postmortems/${payload.taskId}.md`;
+      // Flat key, no `/`: memory keys are file names within the scope dir and
+      // path separators are rejected by the provider.
+      const key = `postmortem-${payload.taskId}.md`;
       const shortId = payload.taskId.slice(0, 8);
       const content = [
         `# ${shortId} — needs revision`,

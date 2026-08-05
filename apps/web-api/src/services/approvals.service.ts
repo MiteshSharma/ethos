@@ -41,9 +41,35 @@ interface ApprovalEventMap {
   resolved: [sessionId: string, approvalId: string, decision: 'allow' | 'deny', decidedBy: string];
 }
 
+/**
+ * Minimal observability surface the approval audit trail needs. Declared
+ * locally so this service stays dependency-light; wiring's
+ * `EthosObservability` satisfies it structurally.
+ */
+export interface ApprovalObservability {
+  recordSafetyApproval(opts: {
+    decision: 'approved' | 'denied' | 'auto';
+    severity?: 'info' | 'warn';
+    code?: string;
+    cause?: string;
+    details?: Record<string, unknown>;
+  }): void;
+}
+
 export interface ApprovalsServiceOptions {
   allowlist: AllowlistRepository;
+  /**
+   * Sink for the safety audit trail (`ethos audit decisions`). Optional —
+   * absent means no audit rows, never a broken approval.
+   */
+  observability?: ApprovalObservability;
 }
+
+const AUDIT_CODES = {
+  approved: 'approval.allow',
+  denied: 'approval.deny',
+  auto: 'approval.auto_allow',
+} as const;
 
 export class ApprovalsService {
   private readonly pending = new Map<string, PendingApproval>();
@@ -61,6 +87,9 @@ export class ApprovalsService {
    */
   async requestApproval(req: ApprovalRequestInput): Promise<ApprovalDecision> {
     if (await this.opts.allowlist.matches(req.toolName, req.args)) {
+      // No human in the loop — an allowlist entry decided. Exactly the kind
+      // of silent auto-approval the audit trail exists to make visible.
+      this.audit(req, 'auto', 'allowlist', 'matched a stored allowlist entry');
       return { decision: 'allow' };
     }
     const approvalId = randomUUID();
@@ -92,13 +121,19 @@ export class ApprovalsService {
         args: scope === 'exact-args' ? p.request.args : null,
       });
     }
+    this.audit(p.request, 'approved', decidedBy, p.request.reason ?? 'approved', {
+      approvalId,
+      scope,
+    });
     p.resolve({ decision: 'allow' });
     this.emitter.emit('resolved', p.request.sessionId, approvalId, 'allow', decidedBy);
   }
 
   async deny(approvalId: string, reason: string | undefined, decidedBy: string): Promise<void> {
     const p = this.take(approvalId);
-    p.resolve({ decision: 'deny', reason: reason ?? 'denied by user' });
+    const denyReason = reason ?? 'denied by user';
+    this.audit(p.request, 'denied', decidedBy, denyReason, { approvalId });
+    p.resolve({ decision: 'deny', reason: denyReason });
     this.emitter.emit('resolved', p.request.sessionId, approvalId, 'deny', decidedBy);
   }
 
@@ -111,7 +146,45 @@ export class ApprovalsService {
     for (const [approvalId, p] of this.pending.entries()) {
       if (p.request.sessionId !== sessionId) continue;
       this.pending.delete(approvalId);
+      this.audit(p.request, 'denied', 'system', reason, { approvalId });
       p.resolve({ decision: 'deny', reason });
+    }
+  }
+
+  /**
+   * Write one decision to the safety audit trail (`ethos audit decisions`).
+   * Called from every path that settles an approval — user decision,
+   * allowlist auto-allow, session cancel — so the trail has no holes.
+   *
+   * Fail-open by construction: a throwing sink must never break a tool call
+   * the agent is already suspended on.
+   */
+  private audit(
+    request: ApprovalRequestInput,
+    decision: 'approved' | 'denied' | 'auto',
+    decidedBy: string,
+    cause: string,
+    extraDetails: Record<string, unknown> = {},
+  ): void {
+    const obs = this.opts.observability;
+    if (!obs) return;
+    try {
+      obs.recordSafetyApproval({
+        decision,
+        severity: decision === 'denied' ? 'warn' : 'info',
+        code: AUDIT_CODES[decision],
+        cause: `${request.toolName}: ${cause}`,
+        details: {
+          sessionId: request.sessionId,
+          toolCallId: request.toolCallId,
+          toolName: request.toolName,
+          decidedBy,
+          ...(request.reason ? { reason: request.reason } : {}),
+          ...extraDetails,
+        },
+      });
+    } catch {
+      // Audit is fail-open — a broken sink never breaks an approval.
     }
   }
 

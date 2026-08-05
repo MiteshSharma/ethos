@@ -152,7 +152,11 @@ export class MarkdownFileMemoryProvider implements MemoryProvider {
     // doesn't discover the rule by debugging a flaky test.
     const byKey = new Map<string, MemoryUpdate[]>();
     for (const u of updates) {
-      if (!isSafeKey(u.key)) continue;
+      // A malformed key is a caller bug, not a runtime condition. Skipping it
+      // silently loses the write with no trace — this provider has no logger
+      // or observability handle, so the only way to surface it is to throw,
+      // matching how resolveScopeDir rejects an unsafe scope id.
+      if (!isSafeKey(u.key)) throw new Error(`unsafe memory key: ${u.key}`);
       const list = byKey.get(u.key) ?? [];
       list.push(u);
       byKey.set(u.key, list);
