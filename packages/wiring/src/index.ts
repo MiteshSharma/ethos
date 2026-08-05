@@ -482,6 +482,21 @@ export {
   createA2aPeeringService,
 } from './a2a-peering-service';
 export { resolveKanbanDbPath } from './kanban-path';
+// Lane 1(b/c/e) + D8 — the shared static-floor measurement and window-scaled
+// result-budget arithmetic (consumed by build-agent-loop, `ethos bench
+// context`, and — later — Lane 6's fit verdict).
+export {
+  type ContextFitVerdict,
+  evaluateContextFit,
+  measureStaticFloor,
+  outputReserveTokens,
+  RESULT_BUDGET_CEILING_CHARS,
+  RESULT_BUDGET_FLOOR_CHARS,
+  resolveResultBudget,
+  type StaticFloorComponent,
+  type StaticFloorInputs,
+  type StaticFloorMeasurement,
+} from './static-floor';
 
 // Hard ceiling on a single summarizer call. The summarizer runs on the turn's
 // critical path before the main provider call, so a hung auxiliary provider

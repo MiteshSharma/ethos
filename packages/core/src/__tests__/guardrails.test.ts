@@ -44,7 +44,11 @@ describe('Orchestrator guardrails', () => {
       // tagged apart from the other `Prepped.rejected` sources (MCP policy,
       // reject_args, injection downgrade, watcher halt) — a counter, an
       // increment in the `before_tool_call` branch, and a one-line comment.
-      if (lineCount > 725) {
+      // Bumped 725 → 731: Lane 1(c) ingestion truncation caps tool-result
+      // content at both persist sites (main path + returnDirect). The logic
+      // lives in agent-loop/ingestion-cap.ts; only the import and the two
+      // commented call sites land here.
+      if (lineCount > 731) {
         violations.push(`${file}: ${lineCount} lines`);
       }
     }
@@ -58,7 +62,10 @@ describe('Orchestrator guardrails', () => {
       if (statSync(join(agentLoopDir, file)).isDirectory()) continue;
       const content = readFileSync(join(agentLoopDir, file), 'utf-8');
       const lineCount = content.split('\n').length;
-      if (lineCount > 500) {
+      // Bumped 500 → 502: Lane 1(a) threads the max-single-tool-result gate
+      // term through turn-end's evaluateGate deps (three lines; the arithmetic
+      // itself lives in compaction.ts's shared evaluateGate).
+      if (lineCount > 502) {
         violations.push(`${file}: ${lineCount} lines`);
       }
     }

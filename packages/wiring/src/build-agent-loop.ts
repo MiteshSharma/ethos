@@ -48,6 +48,12 @@ import {
   resolveSmallWindowMode,
   scaleHistoryLimit,
 } from './model-catalog';
+import {
+  evaluateContextFit,
+  measureStaticFloor,
+  RESULT_BUDGET_CEILING_CHARS,
+  resolveResultBudget,
+} from './static-floor';
 import type { WiringContext } from './types';
 
 export interface BuildAgentLoopDeps {
@@ -481,9 +487,19 @@ export async function buildAgentLoop(
       soulChars = 0;
     }
   }
-  const toolSchemaChars = JSON.stringify(tools.toDefinitions(activePerson.toolset)).length;
+  const toolDefinitions = tools.toDefinitions(activePerson.toolset);
+  const toolSchemaChars = JSON.stringify(toolDefinitions).length;
   const preludeChars = (profilePromptBudget?.compactPrelude ? preludeCompact : prelude).length;
-  const staticTokens = Math.ceil((soulChars + toolSchemaChars + preludeChars) / 4);
+  // D8 — the ONE static-floor arithmetic, shared with `ethos bench context`
+  // and the Lane 1(b) startup diagnostic below. Same number as the previous
+  // inline `ceil((soul + schemas + prelude) / 4)` estimate.
+  const staticFloor = measureStaticFloor({
+    soulChars,
+    toolSchemaChars,
+    toolCount: toolDefinitions.length,
+    preludeChars,
+  });
+  const staticTokens = staticFloor.tokens;
   const smallWindow = resolveSmallWindowMode({
     contextWindow: llm.maxContextTokens,
     staticTokens,
@@ -502,6 +518,37 @@ export async function buildAgentLoop(
     : profilePromptBudget;
   const historyLimit = smallWindow ? scaleHistoryLimit(llm.maxContextTokens) : undefined;
 
+  // Lane 1(b) — startup floor check, WARN-FIRST (plan risk note: some configs
+  // that "work" today only work because the server silently truncates; refuse
+  // only after a release of warning). `evaluateContextFit` produces the
+  // message so Lane 6's fit verdict reuses the identical diagnostic.
+  const contextFit = evaluateContextFit({
+    personalityId: activePerson.id,
+    model: config.model,
+    windowTokens: llm.maxContextTokens,
+    floor: staticFloor,
+  });
+  if (contextFit.message) log.warn(contextFit.message);
+
+  // Lane 1(c)+(e) — scale the per-turn tool-result budget DOWN with the served
+  // window; never UP (the flat 80k default is the ceiling, #111762). An
+  // explicit per-personality `context_engine_options.resultBudgetChars` may
+  // lower it further, never raise it past the ceiling. On frontier windows
+  // this resolves to the ceiling and the loop is byte-identical to today.
+  const rawResultBudget = activePerson.context_engine_options?.resultBudgetChars;
+  const resultBudgetChars = resolveResultBudget({
+    windowTokens: llm.maxContextTokens,
+    staticFloorTokens: staticFloor.tokens,
+    ...(typeof rawResultBudget === 'number' && rawResultBudget > 0
+      ? { configured: rawResultBudget }
+      : {}),
+  });
+  // Lane 1(a) delta — the gate's fourth term, derived from the effective
+  // per-result budget. Only set when scaling actually engaged (budget below
+  // the ceiling), so hosted frontier-window gate timing is unchanged.
+  const maxSingleToolResultTokens =
+    resultBudgetChars < RESULT_BUDGET_CEILING_CHARS ? Math.ceil(resultBudgetChars / 4) : undefined;
+
   const loop = new AgentLoop({
     llm,
     tools,
@@ -516,7 +563,10 @@ export async function buildAgentLoop(
     dataDir,
     modelRouting: config.modelRouting,
     ...(modelSampling ? { modelSampling } : {}),
-    compaction,
+    compaction: {
+      ...compaction,
+      ...(maxSingleToolResultTokens !== undefined ? { maxSingleToolResultTokens } : {}),
+    },
     ...(memoryConsolidation ? { memoryConsolidation } : {}),
     ...(promptBudget ? { promptBudget } : {}),
     memoryProviders: memoryProviderMap,
@@ -548,6 +598,9 @@ export async function buildAgentLoop(
       platform: profile,
       workingDir,
       ...(historyLimit !== undefined ? { historyLimit } : {}),
+      // Lane 1(c) — only passed when scaling engaged; at the ceiling the loop
+      // default (80k) applies and the config is byte-identical to today.
+      ...(resultBudgetChars < RESULT_BUDGET_CEILING_CHARS ? { resultBudgetChars } : {}),
     },
   });
 

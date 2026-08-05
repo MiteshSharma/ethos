@@ -6,6 +6,10 @@ export type {
   RunOptions,
 } from './agent-loop';
 export { AgentLoop, isKnownAgentEvent, KNOWN_AGENT_EVENT_TYPES } from './agent-loop';
+// Lane 1(b/c) — the gate's output-reserve constant, shared with wiring's
+// startup floor diagnostic and window-scaled result budget so there is ONE
+// reserve arithmetic, not a drifting copy.
+export { DEFAULT_OUTPUT_RESERVE_TOKENS } from './agent-loop/compaction';
 // Lane 2b — the production session-replay serialization path, exported so
 // restart-prefix tests (and any surface that rehydrates a session) render
 // stored history through EXACTLY the code the live loop uses. A test-local

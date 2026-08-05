@@ -230,6 +230,9 @@ export async function* maybeConsolidateAtTurnEnd(
         ? { charsPerToken: deps.compaction.charsPerToken }
         : {}),
       ...(deps.compaction?.gateDelta !== undefined ? { gateDelta: deps.compaction.gateDelta } : {}),
+      ...(deps.compaction?.maxSingleToolResultTokens !== undefined
+        ? { maxSingleToolResultTokens: deps.compaction.maxSingleToolResultTokens }
+        : {}),
       ...(lastActualInputTokens !== undefined ? { lastActualInputTokens } : {}),
       ...(staticTokens !== undefined ? { staticTokens } : {}),
     },

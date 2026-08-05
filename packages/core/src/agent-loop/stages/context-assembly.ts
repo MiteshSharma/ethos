@@ -569,6 +569,9 @@ export async function* assembleContext(
       ...(deps.compaction?.maxContextTokens !== undefined
         ? { maxContextTokens: deps.compaction.maxContextTokens }
         : {}),
+      ...(deps.compaction?.maxSingleToolResultTokens !== undefined
+        ? { maxSingleToolResultTokens: deps.compaction.maxSingleToolResultTokens }
+        : {}),
       ...(deps.compaction?.defaultEngine !== undefined
         ? { defaultEngine: deps.compaction.defaultEngine }
         : {}),

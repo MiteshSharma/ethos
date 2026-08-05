@@ -67,6 +67,9 @@ export interface LoopDeps {
     maxContextTokens?: number;
     /** Item 7 — minimum USER messages kept verbatim in the tail. Absent → 3. */
     minTailUserMessages?: number;
+    /** Lane 1(a) — largest-single-tool-result reserve, in tokens; subtracted
+     *  from the compactible region by `evaluateGate`. Absent → 0 (unchanged). */
+    maxSingleToolResultTokens?: number;
   };
   /** Phase 3 — silent memory-flush turn config. `enabled` gates the whole
    *  feature (default off); the rest tune the soft threshold, hard timebox +

@@ -1,5 +1,6 @@
 import { DefaultToolRegistry } from '@ethosagent/core';
 import type { PersonalityConfig, Tool } from '@ethosagent/types';
+import { measureStaticFloor } from '@ethosagent/wiring';
 import { describe, expect, it } from 'vitest';
 import { measurePersonalityStatic } from '../commands/bench';
 
@@ -63,5 +64,32 @@ describe('measurePersonalityStatic', () => {
     expect(row.toolCount).toBe(2);
     expect(row.toolSchemaChars).toBe(0);
     expect(row.estStaticTokens).toBe(Math.ceil(soul.length / 4));
+  });
+
+  // D8 cross-check — bench and build-agent-loop share ONE static-floor
+  // arithmetic: fed the same inputs, `measurePersonalityStatic` reports the
+  // exact number `measureStaticFloor` (which build-agent-loop consumes)
+  // produces, prelude included.
+  it('produces the same static-floor number as the shared wiring helper', () => {
+    const registry = new DefaultToolRegistry();
+    registry.register(makeTool('read_file'));
+    registry.register(makeTool('bash'));
+
+    const soul = 'I am the cross-check personality.';
+    const preludeChars = 1_337;
+    const row = measurePersonalityStatic(
+      makePersonality('xcheck', ['read_file', 'bash']),
+      soul,
+      registry,
+      preludeChars,
+    );
+    const floor = measureStaticFloor({
+      soulChars: soul.length,
+      toolSchemaChars: JSON.stringify(registry.toDefinitions(['read_file', 'bash'])).length,
+      toolCount: 2,
+      preludeChars,
+    });
+    expect(row.estStaticTokens).toBe(floor.tokens);
+    expect(row.toolCount).toBe(floor.toolCount);
   });
 });

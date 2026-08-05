@@ -35,6 +35,52 @@ export const KEEP_RECENT_ASSISTANT_TURNS = 3;
 /** Chars kept at the head and at the tail of a soft-trimmed tool_result. */
 export const SOFT_TRIM_KEEP_CHARS = 1_500;
 
+/**
+ * Lane 1(d) — quantized soft-trim buckets (the #111085 guard). Truncation
+ * lengths for aged results come from these FIXED buckets, selected by the
+ * result's age rank within the frozen soft set — NEVER from live budget
+ * arithmetic. A length computed from the live budget jitters by a few chars
+ * as the budget shifts, and a jitter near the top of the transcript forfeits
+ * the prefix cache for the entire tail below it. Each value is the TOTAL
+ * inline chars kept (head + tail together). Oldest results get the smallest
+ * bucket: they carry the least per-token signal, and the newest aged results
+ * are the likeliest to still be consulted.
+ *
+ * The TOP bucket is deliberately today's flat soft-trim total
+ * (`SOFT_TRIM_KEEP_CHARS × 2`), not the plan's illustrative 8,192: a bucket
+ * larger than the flat keep would let mid-sized results skip trimming that
+ * fires today, WEAKENING aging — buckets may only quantize the trim harder,
+ * never keep more than the pre-bucket behaviour did (the same never-scale-up
+ * principle as Lane 1(e)'s cap-the-cap).
+ */
+export const SOFT_TRIM_BUCKETS_CHARS = [512, 2_048, SOFT_TRIM_KEEP_CHARS * 2] as const;
+
+/**
+ * The bucket (total kept chars) for age rank `rank` (0 = oldest) out of
+ * `total` soft-aged results: oldest third → 512, middle third → 2,048,
+ * newest third → 3,000. Pure and deterministic — the rank comes from the
+ * frozen `AgingState.soft` order, so the assignment can never vary between
+ * threshold crossings.
+ */
+export function bucketKeepChars(rank: number, total: number): number {
+  const fallback = SOFT_TRIM_KEEP_CHARS * 2;
+  if (total <= 0 || rank < 0 || rank >= total) return fallback;
+  const share = rank / total;
+  const idx = share < 1 / 3 ? 0 : share < 2 / 3 ? 1 : 2;
+  return SOFT_TRIM_BUCKETS_CHARS[idx] ?? fallback;
+}
+
+/**
+ * Per-id keep-chars (per side) for a state's soft set. `state.soft` preserves
+ * the oldest-first order captured at the threshold crossing, and the state is
+ * frozen between crossings — so the bucket assignment is frozen with it and
+ * an aged result serializes byte-identically on every turn (#111085).
+ */
+export function softKeepMap(state: AgingState): Map<string, number> {
+  const total = state.soft.length;
+  return new Map(state.soft.map((id, i) => [id, Math.floor(bucketKeepChars(i, total) / 2)]));
+}
+
 const HARD_PLACEHOLDER =
   '[tool result cleared to reclaim context — re-run the tool if you need it again]';
 
@@ -61,8 +107,12 @@ export function extractSpillPath(content: string): string | null {
  * inline budget. Appending is skipped when the rewrite already carries a
  * pointer (notice landed in the kept head or tail), so a result can never end
  * up with two.
+ *
+ * Exported for the Lane 1(c) ingestion-time cap in stages/tool-processing.ts,
+ * which truncates an over-budget result BEFORE persisting it and must honour
+ * the same contract.
  */
-function preserveSpillPath(original: string, rewritten: string): string {
+export function preserveSpillPath(original: string, rewritten: string): string {
   const path = extractSpillPath(original);
   if (path === null || extractSpillPath(rewritten) !== null) return rewritten;
   return `${rewritten}\n[full output written to ${path} — use read_file to retrieve it]`;
@@ -174,6 +224,13 @@ export interface RewriteOpts {
    * in the static prefix and are never pruned.
    */
   skillNames?: Map<string, string>;
+  /**
+   * Lane 1(d) — per-id keep-chars (per side) for soft trims, built from the
+   * frozen state by {@link softKeepMap}. Ids not in the map (and callers that
+   * pass none, e.g. micro-compaction) fall back to the flat
+   * `SOFT_TRIM_KEEP_CHARS` default.
+   */
+  softKeepChars?: ReadonlyMap<string, number>;
 }
 
 /**
@@ -204,7 +261,7 @@ export function rewriteToolResults(
         return { ...b, content: hardClear(b.content, skillNames?.get(b.tool_use_id)) };
       }
       if (soft.has(b.tool_use_id)) {
-        const trimmed = softTrimContent(b.content);
+        const trimmed = softTrimContent(b.content, opts?.softKeepChars?.get(b.tool_use_id));
         if (trimmed !== b.content) {
           touched = true;
           return { ...b, content: trimmed };
@@ -231,5 +288,9 @@ export function applyAgingToView(
   opts?: RewriteOpts,
 ): { messages: Message[]; cacheBreakpoint?: number } {
   if (state.level === 'none') return { messages };
-  return rewriteToolResults(messages, new Set(state.soft), new Set(state.hard), opts);
+  // Lane 1(d) — soft-trim lengths come from quantized buckets keyed to the
+  // frozen soft-set order, never from live budget arithmetic (#111085).
+  const withBuckets: RewriteOpts | undefined =
+    state.soft.length > 0 ? { ...opts, softKeepChars: softKeepMap(state) } : opts;
+  return rewriteToolResults(messages, new Set(state.soft), new Set(state.hard), withBuckets);
 }

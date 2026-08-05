@@ -101,8 +101,8 @@ export interface AgentLoopConfig {
   // Maps personality ID → model ID. Resolution: modelRouting[id] → personality.model → llm.model
   modelRouting?: Record<string, string>;
   modelSampling?: ModelSamplingDefaults; // §7 — applied when the per-call value is unset
-  // biome-ignore format: §5 gate + Phase 3 turn-end/overflow/engine knobs; one line keeps agent-loop.ts under the size guardrail.
-  compaction?: { pressure?: number; target?: number; charsPerToken?: number; gateDelta?: number; autoCompact?: boolean; retryOnOverflow?: boolean; defaultEngine?: string; maxContextTokens?: number; minTailUserMessages?: number };
+  // biome-ignore format: §5 gate + Phase 3 turn-end/overflow/engine + Lane 1a knobs; one line keeps agent-loop.ts under the size guardrail.
+  compaction?: { pressure?: number; target?: number; charsPerToken?: number; gateDelta?: number; autoCompact?: boolean; retryOnOverflow?: boolean; defaultEngine?: string; maxContextTokens?: number; minTailUserMessages?: number; maxSingleToolResultTokens?: number };
   // biome-ignore format: Phase 3 silent memory-flush knobs (docs on LoopDeps.memoryConsolidation); one line keeps agent-loop.ts under the size guardrail.
   memoryConsolidation?: { enabled?: boolean; flushThreshold?: number; timeboxMs?: number; maxTokens?: number; maxDeltaChars?: number; minMessagesSinceFlush?: number };
   // biome-ignore format: §2/Phase 4 prompt-economy knobs (docs on LoopDeps.promptBudget); one line keeps agent-loop.ts under the size guardrail.

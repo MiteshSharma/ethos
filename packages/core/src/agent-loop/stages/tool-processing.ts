@@ -22,6 +22,7 @@ import { redactArgs } from '../../dry-run';
 import type { AgentLoopObservability } from '../../observability/agent-loop-observability';
 import { SimpleCompletionImpl } from '../../simple-completion';
 import { extractFilePath } from '../extract-file-path';
+import { capIngestedResult } from '../ingestion-cap';
 import { checkMcpEnabled, checkMcpRejectArgs } from '../mcp-policy';
 import { handleUntrustedResult } from '../result-defense';
 import { buildScopedStorage } from '../scoped-storage';
@@ -445,7 +446,8 @@ export async function* processTools(
       await deps.session.appendMessage({
         sessionId: ctx.sessionId,
         role: 'tool_result',
-        content: result.ok ? result.value : result.error,
+        // Lane 1(c) — same ingestion cap as the main persist path below.
+        content: capIngestedResult(result.ok ? result.value : result.error, deps.resultBudgetChars),
         toolCallId: p.toolCallId,
         toolName: p.name,
       });
@@ -663,6 +665,10 @@ export async function* processTools(
         }
       }
     }
+
+    // Lane 1(c) — ingestion cap, before the delimiter wrap so the END marker
+    // is never cut off and before persistence (see agent-loop/ingestion-cap.ts).
+    llmContent = capIngestedResult(llmContent, deps.resultBudgetChars);
 
     const delimiterEnabled = ctx.personality.safety?.injectionDefense?.toolResultDelimiters ?? true;
     let finalContent: string;
