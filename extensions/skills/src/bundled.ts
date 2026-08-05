@@ -32,6 +32,7 @@ export const BUNDLED_SKILL_IDS = [
   'framework/ethos-skill-authoring',
   'framework/native-mcp',
   'framework/codebase-inspection',
+  'writer/no-ai-slop',
 ] as const;
 
 export type BundledSkillId = (typeof BUNDLED_SKILL_IDS)[number];

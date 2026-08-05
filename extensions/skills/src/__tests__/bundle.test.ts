@@ -45,6 +45,10 @@ describe('@ethosagent/skills bundle', () => {
       // coding workflow. Added in lockstep with the first-party skills that
       // depend on it.
       'framework-usage',
+      // `writer` covers prose-craft skills (the `skills/writer/` tree). Added
+      // with the first one advertised in BUNDLED_SKILL_IDS
+      // (`writer/no-ai-slop`).
+      'writer',
     ]);
     for (const id of BUNDLED_SKILL_IDS) {
       const raw = readFileSync(join(SOURCE.dir, id, 'SKILL.md'), 'utf8');
