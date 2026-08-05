@@ -8,6 +8,7 @@ import type {
 import { orderToolDefinitions } from '@ethosagent/types';
 import type OpenAI from 'openai';
 import { estimateCostOpenAI, normalizeGeminiSchema, toOpenAIMessages } from './index';
+import type { LocalOpenAiRuntime } from './runtime-classify';
 import { sanitizeToolSchemaForGrammar } from './schema-sanitize';
 
 // ---------------------------------------------------------------------------
@@ -70,13 +71,24 @@ function applyStructuredOutput(
  * baselines must stay byte-identical. Same `Object.assign` extra-body
  * discipline as `applyStructuredOutput` above (the params are not in the
  * OpenAI SDK types).
+ *
+ * Post-review FIX 6 — the extras also fire for the lmstudio/llamacpp
+ * classifications (both accept top_k/min_p on their OpenAI-compat endpoints
+ * but fall through to the 'openai' response-format dialect), gated on the
+ * FIX 2-hardened `localRuntime` so a hosted alias never gets them.
  */
 function applySamplingExtras(
   oaiParams: OpenAI.Chat.ChatCompletionCreateParamsStreaming,
   options: CompletionOptions,
   dialect: StructuredOutputDialect,
+  localRuntime?: LocalOpenAiRuntime,
 ): void {
-  if (dialect !== 'ollama' && dialect !== 'vllm') return;
+  const local =
+    dialect === 'ollama' ||
+    dialect === 'vllm' ||
+    localRuntime === 'llamacpp' ||
+    localRuntime === 'lmstudio';
+  if (!local) return;
   const bag = options.providerOptions?.['openai-compat'];
   if (!bag) return;
   if (typeof bag.topK === 'number') Object.assign(oaiParams, { top_k: bag.topK });
@@ -96,6 +108,9 @@ export function buildChatCompletionsParams(
     gemini?: boolean;
     countTokens?: (msgs: Message[]) => Promise<number>;
     structuredOutputDialect?: StructuredOutputDialect;
+    /** FIX 6 — hardened local-runtime classification; extends the sampling
+     *  extras to lmstudio/llamacpp without touching response_format. */
+    localRuntime?: LocalOpenAiRuntime;
     toolOrder?: ToolOrder;
     /** Lane 3(a) — llamacpp-class grammar sanitizing at this boundary (D7).
      *  Absent → schemas pass through untouched (hosted dialects, Anthropic). */
@@ -157,7 +172,7 @@ export function buildChatCompletionsParams(
 
   const dialect = opts?.structuredOutputDialect ?? 'openai';
   applyStructuredOutput(oaiParams, options, dialect);
-  applySamplingExtras(oaiParams, options, dialect);
+  applySamplingExtras(oaiParams, options, dialect, opts?.localRuntime);
 
   return { oaiParams, requestTokens: undefined, effectiveModel };
 }
@@ -175,6 +190,7 @@ export async function buildChatCompletionsParamsAsync(
     gemini?: boolean;
     countTokens?: (msgs: Message[]) => Promise<number>;
     structuredOutputDialect?: StructuredOutputDialect;
+    localRuntime?: LocalOpenAiRuntime;
     toolOrder?: ToolOrder;
     toolSchemaProfile?: 'llamacpp';
     onSchemaChange?: (message: string) => void;
@@ -323,9 +339,15 @@ export async function* streamChatCompletions(
   //   - Nothing was streamed at all → name the failure. CompletionChunk has no
   //     error variant; the provider contract is to THROW, and AgentLoop's
   //     stream step surfaces it as an `error` AgentEvent (code `llm_error`).
-  //   - Content or tool calls WERE streamed → the output is real, only the
-  //     terminal chunk was lost. End the turn cleanly so the text isn't thrown
-  //     away: flush any pending tool calls and synthesize `done`.
+  //   - Tool-call deltas were MID-FLIGHT → THROW (post-review FIX 4). A
+  //     stream that dies mid-argument leaves silently truncated JSON;
+  //     flushing it as a complete `tool_use_end` would let downstream
+  //     json-repair close the braces and EXECUTE a mutating tool on
+  //     truncated args. A thrown error is recoverable; a wrong execution
+  //     is not.
+  //   - Pure text WAS streamed (no pending tools) → the output is real, only
+  //     the terminal chunk was lost. End the turn cleanly so the text isn't
+  //     thrown away: synthesize `done`.
   if (!sawFinishReason) {
     if (!sawOutput) {
       throw new Error(
@@ -333,11 +355,13 @@ export async function* streamChatCompletions(
           'finish_reason (the runtime may have aborted, hit OOM, or dropped the final chunk)',
       );
     }
-    const hadPendingTools = pendingTools.size > 0;
-    for (const [, tc] of pendingTools) {
-      yield { type: 'tool_use_end', toolCallId: tc.id, inputJson: tc.args };
+    if (pendingTools.size > 0) {
+      const names = [...pendingTools.values()].map((tc) => tc.name || '(unnamed)').join(', ');
+      throw new Error(
+        `model ${params.effectiveModel}: stream ended without finish_reason while tool-call ` +
+          `arguments were streaming (${names}) — refusing to execute a possibly truncated tool call`,
+      );
     }
-    pendingTools.clear();
-    yield { type: 'done', finishReason: hadPendingTools ? 'tool_use' : 'end_turn' };
+    yield { type: 'done', finishReason: 'end_turn' };
   }
 }

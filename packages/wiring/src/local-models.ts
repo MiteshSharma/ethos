@@ -29,6 +29,7 @@
 // ---------------------------------------------------------------------------
 
 import { join } from 'node:path';
+import { classifyLocalRuntime } from '@ethosagent/llm-openai-compat';
 import type { Storage } from '@ethosagent/types';
 
 /** Extract model ids from an OpenAI-compatible `GET /v1/models` body.
@@ -89,24 +90,20 @@ const PROBE_TIMEOUT_MS = 2500;
 /**
  * Detect which local runtime a `(providerName, baseUrl)` pair points at.
  * Name-based first (the configured alias is authoritative), then default-port
- * heuristics for endpoints configured under a generic alias. Returns
- * `undefined` for anything unrecognized — hosted endpoints are never probed.
- * A wrong port heuristic fails soft: probing an unknown server 404s and the
- * probe reports "unknown window", never a wrong one.
+ * heuristics — which fire ONLY for generic/unrecognized names (post-review
+ * FIX 2): a known hosted alias (openrouter/groq/deepseek/…) behind a proxy on
+ * :8080 must never be reclassified as llama.cpp, because this classification
+ * drives the Lane 3 sanitizer, the 32k architecture cap, and the
+ * payload-guard 'fail' severity. Returns `undefined` for anything hosted or
+ * unrecognized — hosted endpoints are never probed. Delegates to
+ * `classifyLocalRuntime` (@ethosagent/llm-openai-compat) so wiring and the
+ * provider share ONE rule set.
  */
 export function detectLocalRuntime(
   providerName: string,
   baseUrl: string,
 ): LocalRuntime | undefined {
-  const n = providerName.toLowerCase();
-  if (n === 'ollama') return 'ollama';
-  if (n === 'vllm') return 'vllm';
-  if (n === 'llamacpp' || n === 'llama.cpp' || n === 'llama-cpp') return 'llamacpp';
-  if (n === 'lmstudio' || n === 'lm-studio') return 'lmstudio';
-  if (baseUrl.includes(':11434')) return 'ollama'; // Ollama default port
-  if (baseUrl.includes(':1234')) return 'lmstudio'; // LM Studio default port
-  if (baseUrl.includes(':8080')) return 'llamacpp'; // llama.cpp server default port
-  return undefined;
+  return classifyLocalRuntime(providerName, baseUrl);
 }
 
 export interface WindowProbeResult {

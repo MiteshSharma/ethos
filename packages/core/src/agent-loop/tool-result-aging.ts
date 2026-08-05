@@ -228,7 +228,10 @@ export interface RewriteOpts {
    * Lane 1(d) — per-id keep-chars (per side) for soft trims, built from the
    * frozen state by {@link softKeepMap}. Ids not in the map (and callers that
    * pass none, e.g. micro-compaction) fall back to the flat
-   * `SOFT_TRIM_KEEP_CHARS` default.
+   * `SOFT_TRIM_KEEP_CHARS` default. Note: micro-compaction's flat-keep
+   * fallback causes a one-time byte change when bucketed aging later
+   * re-trims the same result — acceptable, because both fire at an already
+   * cache-invalidating threshold crossing.
    */
   softKeepChars?: ReadonlyMap<string, number>;
 }

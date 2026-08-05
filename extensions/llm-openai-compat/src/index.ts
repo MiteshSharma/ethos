@@ -10,11 +10,14 @@ import type {
 import { orderToolDefinitions } from '@ethosagent/types';
 import OpenAI from 'openai';
 import { parseThinkBlocks, withReasoningOnlyRetry } from './reasoning';
+import { classifyLocalRuntime, type LocalOpenAiRuntime } from './runtime-classify';
 import { detectTextToolCalls } from './text-tool-call-detect';
 import { streamTextToolCalls } from './text-tool-call-transport';
 import { buildChatCompletionsParamsAsync, streamChatCompletions } from './transport';
 
 export { parseThinkBlocks, withReasoningOnlyRetry } from './reasoning';
+export type { LocalOpenAiRuntime } from './runtime-classify';
+export { classifyLocalRuntime, HOSTED_PROVIDER_ALIASES } from './runtime-classify';
 export type { SanitizedToolSchema } from './schema-sanitize';
 export { GRAMMAR_MAX_LENGTH_CLAMP, sanitizeToolSchemaForGrammar } from './schema-sanitize';
 export { detectTextToolCalls, parseStructuralToolCall } from './text-tool-call-detect';
@@ -72,6 +75,11 @@ export interface OpenAICompatProviderConfig {
    *  reported ONCE per provider instance — tool payloads repeat on every
    *  request, and a per-request repeat would be log spam. */
   onDiagnostic?: (message: string) => void;
+  /** Post-review FIX 5 — explicit override for `<think>…</think>` TAG parsing
+   *  in the text stream. Absent → derived from the hardened local-runtime
+   *  classification (local → parse, hosted → pass through verbatim). Set
+   *  `true` in a model profile to opt a hosted reasoning model in. */
+  parseThinkTags?: boolean;
 }
 
 /**
@@ -330,6 +338,20 @@ export class OpenAICompatProvider implements LLMProvider {
   /** Lane 3(a) — llamacpp-class schema sanitizing; undefined → passthrough.
    *  Public for wiring tests. */
   readonly toolSchemaProfile?: 'llamacpp';
+  /** Post-review FIX 2/6 — hardened local-runtime classification of this
+   *  endpoint (known hosted aliases never classify local, regardless of
+   *  port). Gates the 16k floor, the local sampling extras, and FIX 5's
+   *  <think>-tag parsing. Public for wiring tests. */
+  readonly localRuntime?: LocalOpenAiRuntime;
+  /** Post-review FIX 5 — whether `<think>…</think>` TAGS in the text stream
+   *  are parsed into thinking_delta. LOCAL-GATED POLICY (plan §2:
+   *  off-unless-declared): hosted models legitimately emit balanced <think>
+   *  in visible text and it must reach the user verbatim. Contrast with the
+   *  `delta.reasoning_content` / `delta.reasoning` FIELD passthrough in
+   *  transport.ts, which stays universal — a field the server explicitly
+   *  labels as reasoning is structural, and passing it through cures the
+   *  empty-turn bug class. Field = bugfix; tag-parsing = local-gated policy. */
+  readonly parseThinkTags: boolean;
   /** Lane 3(a) — sanitizer diagnostics sink. */
   private readonly onDiagnostic?: (message: string) => void;
   /** Lane 3(a) — change lines already reported (once per instance). */
@@ -364,16 +386,19 @@ export class OpenAICompatProvider implements LLMProvider {
     this.toolOrder = config.toolOrder ?? 'stable';
     if (config.toolSchemaProfile !== undefined) this.toolSchemaProfile = config.toolSchemaProfile;
     if (config.onDiagnostic !== undefined) this.onDiagnostic = config.onDiagnostic;
+    const localRuntime = classifyLocalRuntime(config.name, config.baseUrl);
+    if (localRuntime !== undefined) this.localRuntime = localRuntime;
+    this.parseThinkTags = config.parseThinkTags ?? localRuntime !== undefined;
 
     // Phase 1d — local-model context floor. Ollama silently truncates at its
     // default `num_ctx` (2–4k) and vLLM can be launched with a small
     // `--max-model-len`; agentic tool use needs a documented 16k floor. When a
     // local backend reports an effective window below the floor, fail LOUDLY at
     // init rather than letting the server silently drop the prompt mid-session.
-    if (
-      (this.structuredOutputDialect === 'ollama' || this.structuredOutputDialect === 'vllm') &&
-      this.maxContextTokens < LOCAL_CONTEXT_FLOOR_TOKENS
-    ) {
+    // Post-review FIX 6/2 — gated on the hardened local classification: LM
+    // Studio (:1234) and llama.cpp (:8080) get the floor too, and a hosted
+    // alias behind a proxy on a local port never does.
+    if (localRuntime !== undefined && this.maxContextTokens < LOCAL_CONTEXT_FLOOR_TOKENS) {
       throw new Error(
         `${config.name}: effective context window ${this.maxContextTokens} tokens is below the ` +
           `${LOCAL_CONTEXT_FLOOR_TOKENS}-token floor required for agentic tool use. ` +
@@ -425,6 +450,9 @@ export class OpenAICompatProvider implements LLMProvider {
         gemini: this.gemini,
         countTokens: (msgs) => this.countTokens(msgs),
         structuredOutputDialect: this.structuredOutputDialect,
+        // FIX 6 — hardened local classification for the sampling extras
+        // (top_k/min_p on lmstudio/llamacpp too, never on hosted aliases).
+        ...(this.localRuntime !== undefined ? { localRuntime: this.localRuntime } : {}),
         toolOrder: this.toolOrder,
         // Lane 3(a) — llamacpp-class grammar sanitizing, dialect-gated.
         // Each transformation is logged ONCE per provider instance via the
@@ -486,12 +514,13 @@ export class OpenAICompatProvider implements LLMProvider {
         }
       }
 
-      // Lane 4b(b) — <think> stripping and the reasoning-only retry apply on
-      // this path too (reasoning models are the text-xml path's main users).
+      // Lane 4b(b) — <think> stripping (FIX 5: local-gated, see
+      // `parseThinkTags`) and the reasoning-only retry apply on this path too
+      // (reasoning models are the text-xml path's main users).
       yield* withReasoningOnlyRetry(
         () =>
           streamTextToolCalls(
-            parseThinkBlocks(
+            this.maybeParseThinkTags(
               streamChatCompletions(this.client, paramsNoTools, options.abortSignal),
             ),
           ),
@@ -501,7 +530,7 @@ export class OpenAICompatProvider implements LLMProvider {
     } else {
       const knownToolNames = new Set(tools.map((t) => t.name));
       const makeAttempt = (): AsyncIterable<CompletionChunk> => {
-        const base = parseThinkBlocks(
+        const base = this.maybeParseThinkTags(
           streamChatCompletions(this.client, params, options.abortSignal),
         );
         // Lane 4b(f) — watch stop-turns for tool calls emitted as text. Only
@@ -520,6 +549,17 @@ export class OpenAICompatProvider implements LLMProvider {
       };
       yield* withReasoningOnlyRetry(makeAttempt, params.effectiveModel, this.onDiagnostic);
     }
+  }
+
+  /** FIX 5 — apply `<think>`-TAG parsing only where it is policy (local
+   *  runtimes, or an explicit `parseThinkTags` opt-in). Hosted streams pass
+   *  through untouched so legitimate balanced `<think>` text is preserved
+   *  verbatim. The reasoning FIELD passthrough in transport.ts is separate
+   *  and universal (see the `parseThinkTags` doc for the split). */
+  private maybeParseThinkTags(
+    stream: AsyncIterable<CompletionChunk>,
+  ): AsyncIterable<CompletionChunk> {
+    return this.parseThinkTags ? parseThinkBlocks(stream) : stream;
   }
 
   /** Lane 4b(f) — flip (or discard) a pending text-tool-call latch based on
@@ -595,9 +635,13 @@ export const openaiCompatFactory: LLMProviderFactory = async ({
   // the front of the prompt. The floor protects a window that resolved SMALL;
   // this diagnostic covers the more dangerous case — a window that never
   // resolved at all. Warn, do not throw (warn-first release).
-  if (typeof cfg.maxContextTokens !== 'number') {
-    const dialect = detectStructuredOutputDialect(providerName, baseUrl);
-    if (dialect === 'ollama' || dialect === 'vllm') {
+  // Post-review FIX 6 — gated on the hardened local classification, so
+  // lmstudio/llamacpp configs get the warning too and hosted aliases never
+  // do. FIX 8 — wiring's window resolution emits the same diagnostic when it
+  // runs; it sets `windowResolutionDiagnosed` so the condition logs exactly
+  // ONE warning, from whichever path saw it.
+  if (typeof cfg.maxContextTokens !== 'number' && cfg.windowResolutionDiagnosed !== true) {
+    if (classifyLocalRuntime(providerName, baseUrl) !== undefined) {
       logger.warn(
         `window for ${cfg.model as string} on ${providerName} is unknown; assuming 128000 — ` +
           `set contextWindow in ~/.ethos/config.yaml (or raise num_ctx / --max-model-len so ` +
@@ -635,6 +679,10 @@ export const openaiCompatFactory: LLMProviderFactory = async ({
     // Lane 0's detectLocalRuntime. Absent → schemas pass through untouched.
     // Sanitizer transformations surface on the same logger path Lane 0 uses.
     ...(cfg.toolSchemaProfile === 'llamacpp' ? { toolSchemaProfile: 'llamacpp' as const } : {}),
+    // FIX 5 — explicit <think>-tag parsing override (model-profile opt-in for
+    // hosted reasoning models). Absent → the constructor derives it from the
+    // hardened local classification.
+    ...(typeof cfg.parseThinkTags === 'boolean' ? { parseThinkTags: cfg.parseThinkTags } : {}),
     onDiagnostic: (message: string) => logger.warn(message),
   });
 };

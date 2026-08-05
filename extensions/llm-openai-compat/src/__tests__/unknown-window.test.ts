@@ -98,4 +98,50 @@ describe('openaiCompatFactory — unknown-window diagnostic (Lane 0)', () => {
     });
     expect(unknownWindowWarns(warns)).toHaveLength(0);
   });
+
+  it('warns for LM Studio and llama.cpp classifications too (FIX 6)', async () => {
+    for (const [provider, baseUrl] of [
+      ['lmstudio', 'http://localhost:1234/v1'],
+      ['llamacpp', 'http://localhost:8080/v1'],
+    ] as const) {
+      const { logger, warns } = captureLogger();
+      await openaiCompatFactory({
+        config: { provider, model: 'qwen3', apiKey: 'local', baseUrl },
+        secrets: noopSecrets,
+        logger,
+      });
+      expect(unknownWindowWarns(warns)).toHaveLength(1);
+    }
+  });
+
+  it('stays silent for a hosted alias proxied through a local-looking port (FIX 2)', async () => {
+    const { logger, warns } = captureLogger();
+    await openaiCompatFactory({
+      config: {
+        provider: 'groq',
+        model: 'gemma2-9b-it',
+        apiKey: 'sk',
+        baseUrl: 'https://proxy.corp.example:8080/v1',
+      },
+      secrets: noopSecrets,
+      logger,
+    });
+    expect(unknownWindowWarns(warns)).toHaveLength(0);
+  });
+
+  it('suppresses the factory copy when wiring already emitted the diagnostic (FIX 8)', async () => {
+    const { logger, warns } = captureLogger();
+    await openaiCompatFactory({
+      config: {
+        provider: 'ollama',
+        model: 'qwen3',
+        apiKey: 'local',
+        baseUrl: 'http://localhost:11434/v1',
+        windowResolutionDiagnosed: true,
+      },
+      secrets: noopSecrets,
+      logger,
+    });
+    expect(unknownWindowWarns(warns)).toHaveLength(0);
+  });
 });

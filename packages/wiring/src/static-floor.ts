@@ -161,6 +161,40 @@ export function resolveResultBudget(opts: {
   return Math.min(base, Math.max(RESULT_BUDGET_FLOOR_CHARS, windowDerivedCap));
 }
 
+/**
+ * Post-review FIX 1 — the Lane 1(c)+(a) engagement gate. Window-derived
+ * result-budget scaling (and the gate-reserve term derived from it) engages
+ * ONLY for a detected LOCAL runtime or an explicit
+ * `context_engine_options.resultBudgetChars`. A HOSTED provider with a small
+ * catalog window (hosted DeepSeek 64k, groq gemma2-9b 8k, mistral 32k rows)
+ * and no knob set keeps the flat 80k default and NO
+ * `maxSingleToolResultTokens` — the plan's law: local-model work never
+ * changes hosted behavior without a key.
+ */
+export function resolveResultBudgetGate(opts: {
+  windowTokens: number;
+  staticFloorTokens: number;
+  /** True when the provider endpoint is a detected local runtime (FIX 2's
+   *  hardened `detectLocalRuntime`). */
+  localRuntime: boolean;
+  /** Explicit `context_engine_options.resultBudgetChars`, when set. */
+  configured?: number;
+}): { resultBudgetChars: number; maxSingleToolResultTokens?: number } {
+  if (!opts.localRuntime && opts.configured === undefined) {
+    return { resultBudgetChars: RESULT_BUDGET_CEILING_CHARS };
+  }
+  const resultBudgetChars = resolveResultBudget({
+    windowTokens: opts.windowTokens,
+    staticFloorTokens: opts.staticFloorTokens,
+    ...(opts.configured !== undefined ? { configured: opts.configured } : {}),
+  });
+  // Lane 1(a) — the gate's fourth term, derived from the effective per-result
+  // budget. Only set when scaling actually engaged (budget below the ceiling).
+  return resultBudgetChars < RESULT_BUDGET_CEILING_CHARS
+    ? { resultBudgetChars, maxSingleToolResultTokens: Math.ceil(resultBudgetChars / 4) }
+    : { resultBudgetChars };
+}
+
 // ---------------------------------------------------------------------------
 // Lane 3(a) — total tool-payload guard
 // ---------------------------------------------------------------------------

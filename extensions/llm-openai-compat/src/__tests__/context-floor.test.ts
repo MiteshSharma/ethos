@@ -58,4 +58,46 @@ describe('OpenAICompatProvider — local context floor (Phase 1d)', () => {
         }),
     ).not.toThrow();
   });
+
+  // Post-review FIX 6 — LM Studio and llama.cpp classifications get the floor
+  // too; post-review FIX 2 — a hosted alias behind a proxy on a local port
+  // never does.
+  it('throws for LM Studio below the floor (FIX 6)', () => {
+    expect(
+      () =>
+        new OpenAICompatProvider({
+          name: 'lmstudio',
+          apiKey: 'k',
+          baseUrl: 'http://localhost:1234/v1',
+          model: 'qwen3:8b',
+          maxContextTokens: 8_000,
+        }),
+    ).toThrow(/16000-token floor/);
+  });
+
+  it('throws for llama.cpp below the floor (FIX 6)', () => {
+    expect(
+      () =>
+        new OpenAICompatProvider({
+          name: 'llamacpp',
+          apiKey: 'k',
+          baseUrl: 'http://localhost:8080/v1',
+          model: 'qwen3-8b',
+          maxContextTokens: 8_000,
+        }),
+    ).toThrow(/16000-token floor/);
+  });
+
+  it('does NOT gate a hosted alias proxied through a local-looking port (FIX 2)', () => {
+    expect(
+      () =>
+        new OpenAICompatProvider({
+          name: 'openrouter',
+          apiKey: 'k',
+          baseUrl: 'https://proxy.corp.example:8080/v1',
+          model: 'some/model',
+          maxContextTokens: 8_000,
+        }),
+    ).not.toThrow();
+  });
 });

@@ -48,6 +48,10 @@ export interface GoldenRequestScenario {
   tools?: Tool[];
   /** Provider tool-ordering mode. Absent → the provider default ('stable'). */
   toolOrder?: ToolOrder;
+  /** FIX 9 — openai-compat identity overrides (name/model/baseUrl) so hosted
+   *  variants sharing the transport (Gemini alias, Azure) capture their own
+   *  URL/body baselines. Absent → the default hosted-OpenAI identity. */
+  openaiCompat?: { name: string; model: string; baseUrl: string };
   turns: GoldenRequestTurn[];
   personality?: Partial<PersonalityConfig>;
 }
@@ -165,6 +169,7 @@ function makeProvider(
   kind: GoldenProviderKind,
   captured: CapturedRequest[],
   toolOrder?: ToolOrder,
+  openaiCompat?: { name: string; model: string; baseUrl: string },
 ): LLMProvider {
   const fetchImpl = makeCaptureFetch(kind, captured);
   if (kind === 'anthropic') {
@@ -176,10 +181,10 @@ function makeProvider(
     });
   }
   return new OpenAICompatProvider({
-    name: 'openai',
-    model: 'gpt-4o',
+    name: openaiCompat?.name ?? 'openai',
+    model: openaiCompat?.model ?? 'gpt-4o',
     apiKey: 'test-key',
-    baseUrl: 'https://api.openai.com/v1',
+    baseUrl: openaiCompat?.baseUrl ?? 'https://api.openai.com/v1',
     fetchImpl,
     ...(toolOrder ? { toolOrder } : {}),
   });
@@ -193,7 +198,7 @@ export async function captureRequestBodies(
   scenario: GoldenRequestScenario,
 ): Promise<CapturedRequest[]> {
   const captured: CapturedRequest[] = [];
-  const llm = makeProvider(scenario.provider, captured, scenario.toolOrder);
+  const llm = makeProvider(scenario.provider, captured, scenario.toolOrder, scenario.openaiCompat);
 
   const tools = new DefaultToolRegistry();
   for (const tool of scenario.tools ?? []) tools.register(tool);

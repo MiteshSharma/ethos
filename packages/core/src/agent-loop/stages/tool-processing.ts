@@ -525,7 +525,9 @@ export async function* processTools(
 
     if (p.rejected !== undefined) {
       result = { ok: false, error: p.rejected, code: 'execution_failed' };
-      llmContent = p.rejected;
+      // Lane 1(c) — hook-authored rejection reasons ride the same ingestion
+      // cap as executed results (a plugin hook can return arbitrary text).
+      llmContent = capIngestedResult(p.rejected, deps.resultBudgetChars);
       // tool_end already emitted above; no after_tool_call hook for blocked tools
     } else {
       const execResult = execResultMap.get(p.toolCallId);
@@ -632,16 +634,25 @@ export async function* processTools(
         }
       }
 
+      // Lane 1(c) — ingestion cap, applied BEFORE the untrusted wrap
+      // (post-review FIX 7: capping the wrapped content could sever the
+      // closing </untrusted> tag, leaving the fence open for everything
+      // after it) and before the delimiter wrap so the END marker is never
+      // cut off, and before persistence (see agent-loop/ingestion-cap.ts).
+      llmContent = capIngestedResult(llmContent, deps.resultBudgetChars);
+
       // Ch.3a + 3c — provenance wrap + Tier-1 pattern check + optional
       // Tier-2 LLM classifier. Only applies on success; errors are
-      // framework-authored and skip wrapping.
+      // framework-authored and skip wrapping. Wraps the already-capped
+      // content, so the wrapper (a small constant) is the only growth past
+      // the budget and the fence always terminates.
       if (ctx.injectionDefenseEnabled && result.ok) {
         const tool = deps.tools.get(p.name);
         if (tool?.outputIsUntrusted) {
           const verdict = await handleUntrustedResult(
             p.name,
             p.args,
-            result.value,
+            llmContent,
             ctx.personality,
             ctx.traceId,
             deps.safety,
@@ -665,10 +676,6 @@ export async function* processTools(
         }
       }
     }
-
-    // Lane 1(c) — ingestion cap, before the delimiter wrap so the END marker
-    // is never cut off and before persistence (see agent-loop/ingestion-cap.ts).
-    llmContent = capIngestedResult(llmContent, deps.resultBudgetChars);
 
     const delimiterEnabled = ctx.personality.safety?.injectionDefense?.toolResultDelimiters ?? true;
     let finalContent: string;

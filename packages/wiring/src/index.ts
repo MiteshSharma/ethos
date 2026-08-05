@@ -622,6 +622,10 @@ export function buildCompressionSummarizer(
         ...(profile?.structuredOutput !== undefined
           ? { structuredOutput: profile.structuredOutput }
           : {}),
+        // FIX 8 — this path already surfaced any unknown-window diagnostic
+        // (prefixed 'compression summarizer:' above); the factory must not
+        // log a near-identical second copy.
+        windowResolutionDiagnosed: true,
       },
       secrets: config.secretsResolver ?? NOOP,
       logger: log,
@@ -701,6 +705,7 @@ export interface WindowProbeContext {
 export async function createLLM(
   config: WiringConfig,
   windowProbe?: WindowProbeContext,
+  log?: Logger,
 ): Promise<LLMProvider> {
   const registry = new DefaultLLMProviderRegistry();
   registerBuiltinProviders(registry);
@@ -711,7 +716,7 @@ export async function createLLM(
     debug: () => {},
     child: () => noop,
   };
-  return createLLMFromRegistry(registry, config, noop, undefined, windowProbe);
+  return createLLMFromRegistry(registry, config, log ?? noop, undefined, windowProbe);
 }
 
 /**
@@ -849,6 +854,10 @@ async function createLLMFromRegistry(
         ...(runtime === 'llamacpp' || runtime === 'ollama' || runtime === 'lmstudio'
           ? { toolSchemaProfile: 'llamacpp' }
           : {}),
+        // FIX 8 — resolveContextWindow above already logged any unknown-window
+        // diagnostic for this provider; suppress the factory's duplicate copy
+        // so the condition surfaces exactly ONE warning.
+        windowResolutionDiagnosed: true,
       },
       secrets: config.secretsResolver ?? secrets,
       logger: log,

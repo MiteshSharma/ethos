@@ -118,7 +118,18 @@ export async function* withReasoningOnlyRetry(
       else if (chunk.type === 'text_delta' && chunk.text.trim().length > 0) sawSubstance = true;
       else if (chunk.type === 'tool_use_start') sawSubstance = true;
 
-      if (chunk.type === 'done' && !isLastAttempt && sawThinking && !sawSubstance) {
+      // Post-review FIX 3 — never retry a turn that ended `max_tokens`
+      // (finish_reason 'length'): the output cap was exhausted mid-reasoning,
+      // so a retry re-pays the full request on hosted reasoning models and
+      // typically truncates again. Only a genuinely-complete reasoning-only
+      // turn ('end_turn') is worth one more attempt.
+      if (
+        chunk.type === 'done' &&
+        chunk.finishReason !== 'max_tokens' &&
+        !isLastAttempt &&
+        sawThinking &&
+        !sawSubstance
+      ) {
         // Suppress this done and retry; trailing chunks (usage) still pass.
         reasoningOnly = true;
         continue;

@@ -3,6 +3,8 @@
 // (#111762 cap-the-cap).
 
 import { describe, expect, it } from 'vitest';
+import { detectLocalRuntime } from '../local-models';
+import { lookupContextWindow } from '../model-catalog';
 import {
   evaluateContextFit,
   measureStaticFloor,
@@ -10,6 +12,7 @@ import {
   RESULT_BUDGET_CEILING_CHARS,
   RESULT_BUDGET_FLOOR_CHARS,
   resolveResultBudget,
+  resolveResultBudgetGate,
 } from '../static-floor';
 
 describe('measureStaticFloor (D8 — one arithmetic)', () => {
@@ -122,5 +125,73 @@ describe('resolveResultBudget (Lane 1c/1e)', () => {
     expect(resolveResultBudget({ windowTokens: 4_096, staticFloorTokens: 1_000 })).toBe(
       RESULT_BUDGET_FLOOR_CHARS,
     );
+  });
+});
+
+describe('resolveResultBudgetGate (post-review FIX 1 — local-only engagement)', () => {
+  it('hosted deepseek (catalog 64k window, no keys) keeps the flat 80k and NO gate-reserve term', () => {
+    // The exact hosted config the review named: hosted DeepSeek's catalog
+    // default window (64,000) is below the ~80k-token compactible threshold,
+    // so pre-fix the scaling engaged automatically — a hosted behavior change
+    // with no key set. The classification says hosted → flat default.
+    const windowTokens = lookupContextWindow('deepseek', 'deepseek-chat');
+    expect(windowTokens).toBe(64_000);
+    const localRuntime =
+      detectLocalRuntime('deepseek', 'https://api.deepseek.com/v1') !== undefined;
+    expect(localRuntime).toBe(false);
+
+    const gate = resolveResultBudgetGate({
+      windowTokens: windowTokens ?? 0,
+      staticFloorTokens: 5_000,
+      localRuntime,
+    });
+    expect(gate.resultBudgetChars).toBe(RESULT_BUDGET_CEILING_CHARS);
+    expect(gate.maxSingleToolResultTokens).toBeUndefined();
+  });
+
+  it('hosted groq gemma2-9b-it (8k catalog window, no keys) also stays flat', () => {
+    const windowTokens = lookupContextWindow('groq', 'gemma2-9b-it');
+    expect(windowTokens).toBe(8_192);
+    const gate = resolveResultBudgetGate({
+      windowTokens: windowTokens ?? 0,
+      staticFloorTokens: 1_000,
+      localRuntime: false,
+    });
+    expect(gate.resultBudgetChars).toBe(RESULT_BUDGET_CEILING_CHARS);
+    expect(gate.maxSingleToolResultTokens).toBeUndefined();
+  });
+
+  it('a local runtime engages the window-derived scaling and the gate-reserve term', () => {
+    const gate = resolveResultBudgetGate({
+      windowTokens: 32_768,
+      staticFloorTokens: 5_000,
+      localRuntime: true,
+    });
+    expect(gate.resultBudgetChars).toBe(
+      resolveResultBudget({ windowTokens: 32_768, staticFloorTokens: 5_000 }),
+    );
+    expect(gate.resultBudgetChars).toBeLessThan(RESULT_BUDGET_CEILING_CHARS);
+    expect(gate.maxSingleToolResultTokens).toBe(Math.ceil(gate.resultBudgetChars / 4));
+  });
+
+  it('an explicit resultBudgetChars knob engages the resolution even on hosted', () => {
+    const gate = resolveResultBudgetGate({
+      windowTokens: 200_000,
+      staticFloorTokens: 5_000,
+      localRuntime: false,
+      configured: 40_000,
+    });
+    expect(gate.resultBudgetChars).toBe(40_000);
+    expect(gate.maxSingleToolResultTokens).toBe(10_000);
+  });
+
+  it('a local frontier-sized window still resolves to the ceiling with no gate term', () => {
+    const gate = resolveResultBudgetGate({
+      windowTokens: 1_000_000,
+      staticFloorTokens: 5_000,
+      localRuntime: true,
+    });
+    expect(gate.resultBudgetChars).toBe(RESULT_BUDGET_CEILING_CHARS);
+    expect(gate.maxSingleToolResultTokens).toBeUndefined();
   });
 });

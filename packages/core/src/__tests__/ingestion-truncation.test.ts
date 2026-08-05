@@ -91,6 +91,48 @@ describe('Lane 1(c) — ingestion truncation of over-budget tool results', () =>
     expect(toolResult.content).not.toContain('F'.repeat(50));
   });
 
+  it('a capped UNTRUSTED result still terminates its </untrusted> wrapper (post-review FIX 7)', async () => {
+    const tools = new DefaultToolRegistry();
+    tools.register({
+      name: 'boom',
+      description: 'untrusted and huge',
+      schema: { type: 'object' },
+      capabilities: {},
+      outputIsUntrusted: true,
+      async execute(): Promise<ToolResult> {
+        return { ok: true, value: 'W'.repeat(20_000) };
+      },
+    });
+    const session = new InMemorySessionStore();
+    const loop = new AgentLoop({
+      llm: scriptedLLM(),
+      tools,
+      session,
+      safety: createTestSafety(),
+      options: { resultBudgetChars: BUDGET },
+    });
+
+    await drain(loop.run('go', { sessionKey: 'cli:ingest-untrusted' }));
+
+    const stored = await session.getSessionByKey('cli:ingest-untrusted');
+    if (!stored) throw new Error('session missing');
+    const messages = await session.getMessages(stored.id);
+    const toolResult = messages.find((m) => m.role === 'tool_result');
+    if (!toolResult) throw new Error('tool_result row missing');
+
+    // The cap ran (content shrank, marker present) …
+    expect(toolResult.content.length).toBeLessThan(20_000);
+    expect(toolResult.content).toContain('[truncated —');
+    // … and the provenance fence still opens AND closes — the cap must never
+    // sever the closing tag, or everything after the result would read as
+    // "inside the fence".
+    expect(toolResult.content).toContain('<untrusted ');
+    expect(toolResult.content).toContain('</untrusted>');
+    const openIdx = toolResult.content.indexOf('<untrusted ');
+    const closeIdx = toolResult.content.indexOf('</untrusted>');
+    expect(closeIdx).toBeGreaterThan(openIdx);
+  });
+
   it('leaves an in-budget result byte-identical (no marker, no rewrite)', async () => {
     const tools = new DefaultToolRegistry();
     tools.register({

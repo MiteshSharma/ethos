@@ -6,8 +6,12 @@
 //   - No finish_reason AND no output → an explicit error naming the model
 //     and "no output" (thrown; CompletionChunk has no error variant — the
 //     provider contract is to throw and AgentLoop surfaces `llm_error`).
-//   - Content streamed but no finish_reason → the turn ends cleanly with a
-//     synthesized `done`; the streamed text is preserved, not discarded.
+//   - Tool-call deltas mid-flight and no finish_reason → THROW (post-review
+//     FIX 4): flushing a mid-argument tool call as a complete tool_use_end
+//     lets downstream json-repair close the braces and execute a mutating
+//     tool on silently truncated args.
+//   - Pure text streamed (no pending tools) but no finish_reason → the turn
+//     ends cleanly with a synthesized `done`; the text is preserved.
 //
 // Unconditional across every dialect (universal bugfix per plan §2).
 
@@ -98,7 +102,7 @@ describe('streamChatCompletions — empty/silent-completion guard (Lane 4a(c))',
     expect(done).toEqual({ type: 'done', finishReason: 'end_turn' });
   });
 
-  it('flushes pending tool calls and synthesizes done tool_use when tool deltas streamed but no finish_reason arrived', async () => {
+  it('THROWS when tool-call arguments were mid-stream and no finish_reason arrived (FIX 4 — never execute a truncated call)', async () => {
     fakeChunks.current = [
       {
         choices: [
@@ -111,20 +115,34 @@ describe('streamChatCompletions — empty/silent-completion guard (Lane 4a(c))',
       {
         choices: [
           {
-            delta: { tool_calls: [{ index: 0, function: { arguments: '{"x":1}' } }] },
+            // Mid-argument fragment — the stream dies before the JSON closes.
+            delta: { tool_calls: [{ index: 0, function: { arguments: '{"x":1' } }] },
             finish_reason: null,
           },
         ],
       },
     ];
     const provider = await makeProvider();
-    const chunks = await collect(provider);
-
-    const toolEnd = chunks.find(
-      (c): c is Extract<CompletionChunk, { type: 'tool_use_end' }> => c.type === 'tool_use_end',
+    await expect(collect(provider)).rejects.toThrow(
+      /stream ended without finish_reason while tool-call arguments were streaming/,
     );
-    expect(toolEnd).toEqual({ type: 'tool_use_end', toolCallId: 'call_1', inputJson: '{"x":1}' });
-    expect(chunks.at(-1)).toEqual({ type: 'done', finishReason: 'tool_use' });
+  });
+
+  it('THROWS for a pending tool call even before any argument fragment arrived (still incomplete)', async () => {
+    fakeChunks.current = [
+      {
+        choices: [
+          {
+            delta: { tool_calls: [{ index: 0, id: 'call_1', function: { name: 'echo' } }] },
+            finish_reason: null,
+          },
+        ],
+      },
+    ];
+    const provider = await makeProvider();
+    await expect(collect(provider)).rejects.toThrow(
+      /while tool-call arguments were streaming \(echo\)/,
+    );
   });
 
   it('does not fire when the stream carries a normal finish_reason (guard is inert on healthy streams)', async () => {

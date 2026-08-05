@@ -60,7 +60,7 @@ import {
   evaluateToolSchemaBudget,
   measureStaticFloor,
   RESULT_BUDGET_CEILING_CHARS,
-  resolveResultBudget,
+  resolveResultBudgetGate,
 } from './static-floor';
 import { evaluateTierMismatch } from './tier-diagnostics';
 import type { WiringContext } from './types';
@@ -573,13 +573,18 @@ export async function buildAgentLoop(
     ? tools.toDefinitions(narrowedToolset)
     : toolDefinitions;
 
+  // Post-review FIX 2 — ONE hardened local-runtime classification for this
+  // loop's provider endpoint, shared by the payload guard below and the
+  // FIX 1 result-budget gate. Known hosted aliases never classify as local.
+  const localRuntime = detectLocalRuntime(config.provider, config.baseUrl ?? '') !== undefined;
+
   // Lane 3(a) — total serialized tool-payload guard. On a local dialect an
   // over-limit payload FAILS startup (llamacpp-class runtimes lose tool
   // calling entirely — the failure this prevents); hosted dialects WARN. In
   // neither case is the problem deferred to the first tool call.
   const payloadGuard = evaluateToolPayloadGuard({
     toolDefinitions: effectiveToolDefinitions,
-    localDialect: detectLocalRuntime(config.provider, config.baseUrl ?? '') !== undefined,
+    localDialect: localRuntime,
     ...(config.toolPayloadLimitChars !== undefined
       ? { limitChars: config.toolPayloadLimitChars }
       : {}),
@@ -606,21 +611,19 @@ export async function buildAgentLoop(
   // Lane 1(c)+(e) — scale the per-turn tool-result budget DOWN with the served
   // window; never UP (the flat 80k default is the ceiling, #111762). An
   // explicit per-personality `context_engine_options.resultBudgetChars` may
-  // lower it further, never raise it past the ceiling. On frontier windows
-  // this resolves to the ceiling and the loop is byte-identical to today.
+  // lower it further, never raise it past the ceiling. Post-review FIX 1: the
+  // scaling engages ONLY on a detected local runtime or that explicit knob —
+  // hosted providers with small catalog windows keep the flat 80k default and
+  // no gate-reserve term (the hosted-parity law).
   const rawResultBudget = activePerson.context_engine_options?.resultBudgetChars;
-  const resultBudgetChars = resolveResultBudget({
+  const { resultBudgetChars, maxSingleToolResultTokens } = resolveResultBudgetGate({
     windowTokens: llm.maxContextTokens,
     staticFloorTokens: staticFloor.tokens,
+    localRuntime,
     ...(typeof rawResultBudget === 'number' && rawResultBudget > 0
       ? { configured: rawResultBudget }
       : {}),
   });
-  // Lane 1(a) delta — the gate's fourth term, derived from the effective
-  // per-result budget. Only set when scaling actually engaged (budget below
-  // the ceiling), so hosted frontier-window gate timing is unchanged.
-  const maxSingleToolResultTokens =
-    resultBudgetChars < RESULT_BUDGET_CEILING_CHARS ? Math.ceil(resultBudgetChars / 4) : undefined;
 
   const loop = new AgentLoop({
     llm,

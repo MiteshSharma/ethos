@@ -3,7 +3,9 @@
 // provider's `maxContextTokens`. All network is stubbed via the probe
 // context's fetch seam — zero real calls.
 
+import type { OpenAICompatProvider } from '@ethosagent/llm-openai-compat';
 import { InMemoryStorage } from '@ethosagent/storage-fs';
+import type { Logger } from '@ethosagent/types';
 import { describe, expect, it } from 'vitest';
 import { createLLM, type WiringConfig } from '../index';
 import { windowProbeCachePath } from '../local-models';
@@ -110,5 +112,55 @@ describe('createLLM — Lane 0 window resolution (stubbed network)', () => {
       fetchImpl: failing,
     });
     expect(llm.maxContextTokens).toBe(32_768);
+  });
+
+  // Post-review FIX 2 — a hosted alias whose baseUrl carries a local-looking
+  // port must resolve as HOSTED end to end: no llamacpp sanitizer profile, no
+  // 32k architecture cap on its catalog window.
+  it('a hosted alias proxied through :8080 keeps hosted behavior (FIX 2)', async () => {
+    const storage = new InMemoryStorage();
+    const forbidden = (async () => {
+      throw new Error('TEST FAILURE: hosted endpoints are never probed');
+    }) as unknown as typeof fetch;
+
+    const llm = await createLLM(
+      {
+        provider: 'openrouter',
+        model: 'anthropic/claude-sonnet-4-6',
+        apiKey: 'sk',
+        baseUrl: 'https://proxy.corp.example:8080/v1',
+      },
+      { storage, dataDir: '/data', fetchImpl: forbidden },
+    );
+    // Catalog window (200k) uncapped — the 32k architecture cap is local-only.
+    expect(llm.maxContextTokens).toBe(200_000);
+    // No llamacpp schema sanitizer on a hosted endpoint.
+    expect((llm as OpenAICompatProvider).toolSchemaProfile).toBeUndefined();
+    expect((llm as OpenAICompatProvider).localRuntime).toBeUndefined();
+  });
+
+  // Post-review FIX 8 — the unresolved-window condition surfaces exactly ONE
+  // warning through the wiring path (wiring's resolution diagnostic; the
+  // factory's near-identical copy is suppressed).
+  it('an unresolved local window warns exactly once through the wiring path (FIX 8)', async () => {
+    const storage = new InMemoryStorage();
+    const failing = (async () => {
+      throw new Error('connect ECONNREFUSED');
+    }) as unknown as typeof fetch;
+    const warns: string[] = [];
+    const log: Logger = {
+      info: () => {},
+      warn: (msg: string) => {
+        warns.push(msg);
+      },
+      error: () => {},
+      debug: () => {},
+      child: () => log,
+    };
+
+    await createLLM(ollamaConfig(), { storage, dataDir: '/data', fetchImpl: failing }, log);
+
+    const unknownWindowWarns = warns.filter((w) => w.includes('is unknown; assuming 128000'));
+    expect(unknownWindowWarns).toHaveLength(1);
   });
 });

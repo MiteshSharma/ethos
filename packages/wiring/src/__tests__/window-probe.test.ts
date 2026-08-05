@@ -55,6 +55,23 @@ describe('detectLocalRuntime', () => {
     expect(detectLocalRuntime('openai', '')).toBeUndefined();
     expect(detectLocalRuntime('anthropic', '')).toBeUndefined();
   });
+
+  // Post-review FIX 2 — a known hosted alias NEVER classifies as local, even
+  // when its (proxied) baseUrl carries a local runtime's default port. The
+  // classification drives the Lane 3 sanitizer, the 32k architecture cap, and
+  // the payload-guard 'fail' severity — none of which may engage on hosted.
+  it('a hosted alias behind a proxy on a local port is NOT local (FIX 2)', () => {
+    for (const alias of ['openrouter', 'groq', 'deepseek', 'gemini', 'openai', 'azure', 'codex']) {
+      expect(detectLocalRuntime(alias, 'https://proxy.corp.example:8080/v1')).toBeUndefined();
+      expect(detectLocalRuntime(alias, 'https://proxy.corp.example:11434/v1')).toBeUndefined();
+      expect(detectLocalRuntime(alias, 'https://proxy.corp.example:1234/v1')).toBeUndefined();
+    }
+  });
+
+  it('port heuristics still fire for generic and unrecognized names', () => {
+    expect(detectLocalRuntime('openai-compat', 'http://localhost:8080/v1')).toBe('llamacpp');
+    expect(detectLocalRuntime('my-custom-endpoint', 'http://gpu-box:11434/v1')).toBe('ollama');
+  });
 });
 
 // ---------------------------------------------------------------------------

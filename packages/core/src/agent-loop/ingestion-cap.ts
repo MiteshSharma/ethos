@@ -3,9 +3,11 @@
 //
 // `executeParallel` already trims successful results to the split per-call
 // budget; what escapes it is the error path (`result.error` is never trimmed
-// there — the unbounded hole) and post-execution growth (untrusted-content
-// wrapping). This cap is the backstop: the FULL per-turn budget, not the
-// per-call split, so it can never fight `executeParallel`'s tighter trim. The
+// there — the unbounded hole). This cap is the backstop: the FULL per-turn
+// budget, not the per-call split, so it can never fight `executeParallel`'s
+// tighter trim. It runs BEFORE the untrusted wrap (post-review FIX 7 — a cap
+// applied after wrapping could sever the closing </untrusted> tag), so the
+// wrapper is the only growth past the budget — a small constant. The
 // truncation happens once at write time and the persisted bytes are frozen
 // thereafter — the stored bytes are the replay bytes (Lane 2b, #4555) — so
 // the #111085 live-budget-jitter concern does not apply here. A spill pointer

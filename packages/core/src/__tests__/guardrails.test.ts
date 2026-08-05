@@ -53,7 +53,11 @@ describe('Orchestrator guardrails', () => {
       // content at both persist sites (main path + returnDirect). The logic
       // lives in agent-loop/ingestion-cap.ts; only the import and the two
       // commented call sites land here.
-      if (lineCount > 731) {
+      // Bumped 731 → 738: post-review FIX 7 moves the ingestion cap BEFORE
+      // the untrusted wrap (so the cap can never sever </untrusted>) and adds
+      // the cap to the hook-rejected path — comment lines only, the logic is
+      // unchanged in size.
+      if (lineCount > 738) {
         violations.push(`${file}: ${lineCount} lines`);
       }
     }

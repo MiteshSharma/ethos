@@ -68,6 +68,19 @@ async function makeProvider(): Promise<LLMProvider> {
   });
 }
 
+/** FIX 5 — a HOSTED provider: <think>-TAG parsing must default OFF. */
+async function makeHostedProvider(parseThinkTags?: boolean): Promise<LLMProvider> {
+  const { OpenAICompatProvider } = await import('../index');
+  return new OpenAICompatProvider({
+    name: 'openrouter',
+    model: 'some/model',
+    apiKey: 'k',
+    baseUrl: 'https://openrouter.ai/api/v1',
+    onDiagnostic: (m) => diagnostics.push(m),
+    ...(parseThinkTags !== undefined ? { parseThinkTags } : {}),
+  });
+}
+
 async function collect(provider: LLMProvider): Promise<CompletionChunk[]> {
   const chunks: CompletionChunk[] = [];
   for await (const c of provider.complete([], [], {})) chunks.push(c);
@@ -202,5 +215,83 @@ describe('reasoning passthrough (Lane 4b(b))', () => {
     await collect(provider);
     expect(streams.createCalls).toBe(1);
     expect(diagnostics).toHaveLength(0);
+  });
+
+  it("does NOT retry a reasoning-only turn that ended finish_reason 'length' (FIX 3 — max_tokens exhausted, a retry double-spends)", async () => {
+    streams.queue = [
+      [
+        {
+          choices: [{ delta: { reasoning_content: 'truncated mid-thought' }, finish_reason: null }],
+        },
+        { choices: [{ delta: {}, finish_reason: 'length' }] },
+      ],
+    ];
+    const provider = await makeProvider();
+    const chunks = await collect(provider);
+
+    // Single pass-through: one request, the max_tokens done reaches the consumer.
+    expect(streams.createCalls).toBe(1);
+    expect(chunks.filter((c) => c.type === 'done')).toEqual([
+      { type: 'done', finishReason: 'max_tokens' },
+    ]);
+    expect(diagnostics).toHaveLength(0);
+  });
+});
+
+describe('<think>-tag parsing is local-gated (post-review FIX 5)', () => {
+  it('a hosted dialect passes balanced <think> content through verbatim — no thinking chunks', async () => {
+    streams.queue = [
+      [
+        { choices: [{ delta: { content: 'I would <think>quietly' }, finish_reason: null }] },
+        { choices: [{ delta: { content: '</think> about it' }, finish_reason: null }] },
+        { choices: [{ delta: {}, finish_reason: 'stop' }] },
+      ],
+    ];
+    const provider = await makeHostedProvider();
+    const chunks = await collect(provider);
+    expect(thinkingOf(chunks)).toBe('');
+    expect(textOf(chunks)).toBe('I would <think>quietly</think> about it');
+  });
+
+  it('the delta.reasoning_content FIELD passthrough stays universal on hosted dialects (structural, not tag convention)', async () => {
+    streams.queue = [
+      [
+        { choices: [{ delta: { reasoning_content: 'labeled reasoning' }, finish_reason: null }] },
+        { choices: [{ delta: { content: 'answer' }, finish_reason: null }] },
+        { choices: [{ delta: {}, finish_reason: 'stop' }] },
+      ],
+    ];
+    const provider = await makeHostedProvider();
+    const chunks = await collect(provider);
+    expect(thinkingOf(chunks)).toBe('labeled reasoning');
+    expect(textOf(chunks)).toBe('answer');
+  });
+
+  it('an explicit parseThinkTags: true opts a hosted model in', async () => {
+    streams.queue = [
+      [
+        { choices: [{ delta: { content: '<think>steps</think>answer' }, finish_reason: null }] },
+        { choices: [{ delta: {}, finish_reason: 'stop' }] },
+      ],
+    ];
+    const provider = await makeHostedProvider(true);
+    const chunks = await collect(provider);
+    expect(thinkingOf(chunks)).toBe('steps');
+    expect(textOf(chunks)).toBe('answer');
+  });
+
+  it('a local (lmstudio) dialect still strips balanced <think> blocks by default', async () => {
+    streams.queue = [
+      [
+        {
+          choices: [{ delta: { content: '<think>local steps</think>reply' }, finish_reason: null }],
+        },
+        { choices: [{ delta: {}, finish_reason: 'stop' }] },
+      ],
+    ];
+    const provider = await makeProvider();
+    const chunks = await collect(provider);
+    expect(thinkingOf(chunks)).toBe('local steps');
+    expect(textOf(chunks)).toBe('reply');
   });
 });

@@ -96,4 +96,32 @@ describe('topK/minP wiring (Lane 4b(e))', () => {
       expect(body).not.toContain('min_p');
     }
   });
+
+  // Post-review FIX 6 — lmstudio/llamacpp fall through to the 'openai'
+  // response-format dialect but DO accept top_k/min_p; the hardened
+  // localRuntime classification carries them there. Hosted stays clean.
+  it('reaches the wire for the lmstudio and llamacpp classifications (FIX 6)', () => {
+    for (const localRuntime of ['lmstudio', 'llamacpp'] as const) {
+      const params = buildChatCompletionsParams([], TOOLS, options, 'm', {
+        structuredOutputDialect: 'openai',
+        localRuntime,
+      });
+      const body = params.oaiParams as unknown as Record<string, unknown>;
+      expect(body.top_k).toBe(40);
+      expect(body.min_p).toBe(0.05);
+      // response_format selection is untouched — no format/guided_json keys.
+      const wire = JSON.stringify(params.oaiParams);
+      expect(wire).not.toContain('guided_json');
+      expect(wire).not.toContain('"format"');
+    }
+  });
+
+  it('stays ABSENT on the hosted path when no local classification is present (FIX 2)', () => {
+    const params = buildChatCompletionsParams([], TOOLS, options, 'm', {
+      structuredOutputDialect: 'openai',
+    });
+    const body = JSON.stringify(params.oaiParams);
+    expect(body).not.toContain('top_k');
+    expect(body).not.toContain('min_p');
+  });
 });
