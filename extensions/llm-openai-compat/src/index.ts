@@ -9,11 +9,15 @@ import type {
 } from '@ethosagent/types';
 import { orderToolDefinitions } from '@ethosagent/types';
 import OpenAI from 'openai';
+import { parseThinkBlocks, withReasoningOnlyRetry } from './reasoning';
+import { detectTextToolCalls } from './text-tool-call-detect';
 import { streamTextToolCalls } from './text-tool-call-transport';
 import { buildChatCompletionsParamsAsync, streamChatCompletions } from './transport';
 
+export { parseThinkBlocks, withReasoningOnlyRetry } from './reasoning';
 export type { SanitizedToolSchema } from './schema-sanitize';
 export { GRAMMAR_MAX_LENGTH_CLAMP, sanitizeToolSchemaForGrammar } from './schema-sanitize';
+export { detectTextToolCalls, parseStructuralToolCall } from './text-tool-call-detect';
 export { streamTextToolCalls } from './text-tool-call-transport';
 export type { ChatCompletionsStreamParams } from './transport';
 export {
@@ -283,7 +287,10 @@ export class OpenAICompatProvider implements LLMProvider {
   readonly model: string;
   readonly maxContextTokens: number;
   readonly supportsCaching = false;
-  readonly supportsThinking = false;
+  /** Lane 4b(b) — the transport passes reasoning through as thinking_delta
+   *  (`delta.reasoning_content` / `delta.reasoning` / balanced `<think>`
+   *  blocks), so the provider truthfully advertises thinking support. */
+  readonly supportsThinking = true;
   readonly supportsVision = { images: true, documents: false };
   readonly supportsCacheBreakpoints = false;
   readonly supportsTokenCounting: 'real' | 'estimated' = 'estimated';
@@ -294,7 +301,7 @@ export class OpenAICompatProvider implements LLMProvider {
       toolCalling: true,
       parallelToolCalls: true,
       visionImages: true,
-      thinking: false,
+      thinking: true,
       promptCaching: false,
       systemPromptStyle: 'system-role',
       tokenCounting: 'estimated',
@@ -327,6 +334,22 @@ export class OpenAICompatProvider implements LLMProvider {
   private readonly onDiagnostic?: (message: string) => void;
   /** Lane 3(a) — change lines already reported (once per instance). */
   private readonly reportedSchemaChanges = new Set<string>();
+  /** Lane 4b(f) — models latched to the text-xml transport after a confirmed
+   *  text tool call. PROCESS-LIFETIME ONLY (eng review D18): instance state,
+   *  no persistence, no state file — wiring constructs one provider per
+   *  process, so the latch dies with the process. The latch log recommends
+   *  `toolCallFormat: 'text-xml'` in a model profile for permanence. */
+  private readonly textToolCallLatchedModels = new Set<string>();
+  /** Lane 4b(f) — detections awaiting dispatch confirmation (D11: latch only
+   *  after the parsed call executed OK). Keyed by effective model. */
+  private readonly pendingTextToolCallLatches = new Map<
+    string,
+    { toolCallId: string; triggerText: string }
+  >();
+  /** Lane 4b(f) — per-instance seed keeping synthesized tool-call ids from
+   *  colliding with ids persisted by an earlier process in the same session. */
+  private readonly textToolCallIdSeed = Math.random().toString(36).slice(2, 8);
+  private textToolCallCounter = 0;
 
   constructor(config: OpenAICompatProviderConfig) {
     this.name = config.name;
@@ -419,7 +442,15 @@ export class OpenAICompatProvider implements LLMProvider {
       },
     );
 
-    if (this.toolCallFormat === 'text-xml') {
+    // Lane 4b(f) — settle a pending latch from a previous call: the parsed
+    // text tool call's result is now in the history if the loop dispatched it.
+    this.resolvePendingTextToolCallLatch(params.effectiveModel, messages);
+
+    const useTextXml =
+      this.toolCallFormat === 'text-xml' ||
+      this.textToolCallLatchedModels.has(params.effectiveModel);
+
+    if (useTextXml) {
       // Strip structured tools so the model uses text-based XML tool calls
       const paramsNoTools = {
         ...params,
@@ -455,11 +486,68 @@ export class OpenAICompatProvider implements LLMProvider {
         }
       }
 
-      yield* streamTextToolCalls(
-        streamChatCompletions(this.client, paramsNoTools, options.abortSignal),
+      // Lane 4b(b) — <think> stripping and the reasoning-only retry apply on
+      // this path too (reasoning models are the text-xml path's main users).
+      yield* withReasoningOnlyRetry(
+        () =>
+          streamTextToolCalls(
+            parseThinkBlocks(
+              streamChatCompletions(this.client, paramsNoTools, options.abortSignal),
+            ),
+          ),
+        params.effectiveModel,
+        this.onDiagnostic,
       );
     } else {
-      yield* streamChatCompletions(this.client, params, options.abortSignal);
+      const knownToolNames = new Set(tools.map((t) => t.name));
+      const makeAttempt = (): AsyncIterable<CompletionChunk> => {
+        const base = parseThinkBlocks(
+          streamChatCompletions(this.client, params, options.abortSignal),
+        );
+        // Lane 4b(f) — watch stop-turns for tool calls emitted as text. Only
+        // meaningful when tools were offered; the conversion feeds the latch.
+        if (knownToolNames.size === 0) return base;
+        return detectTextToolCalls(base, knownToolNames, {
+          nextToolCallId: () =>
+            `text-fallback-${this.textToolCallIdSeed}-${this.textToolCallCounter++}`,
+          onDetect: (detection) => {
+            this.pendingTextToolCallLatches.set(params.effectiveModel, {
+              toolCallId: detection.toolCallId,
+              triggerText: detection.triggerText,
+            });
+          },
+        });
+      };
+      yield* withReasoningOnlyRetry(makeAttempt, params.effectiveModel, this.onDiagnostic);
+    }
+  }
+
+  /** Lane 4b(f) — flip (or discard) a pending text-tool-call latch based on
+   *  the dispatch outcome now visible in the message history. A tool_result
+   *  with `is_error` unset means the loop executed the parsed call OK →
+   *  latch; `is_error: true` means dispatch failed → no latch (D11). */
+  private resolvePendingTextToolCallLatch(effectiveModel: string, messages: Message[]): void {
+    const pending = this.pendingTextToolCallLatches.get(effectiveModel);
+    if (!pending) return;
+    for (const msg of messages) {
+      if (typeof msg.content === 'string') continue;
+      for (const block of msg.content) {
+        if (block.type !== 'tool_result' || block.tool_use_id !== pending.toolCallId) continue;
+        this.pendingTextToolCallLatches.delete(effectiveModel);
+        if (block.is_error === true) return;
+        this.textToolCallLatchedModels.add(effectiveModel);
+        const trigger =
+          pending.triggerText.length > 500
+            ? `${pending.triggerText.slice(0, 500)}…`
+            : pending.triggerText;
+        this.onDiagnostic?.(
+          `text tool-call latch (${this.name}): model ${effectiveModel} emitted a tool call ` +
+            `as text and the parsed call dispatched OK — using the text-xml transport for ` +
+            `the remainder of this process. For permanence, set toolCallFormat: 'text-xml' ` +
+            `in a model profile for ${effectiveModel}. Triggering text: ${trigger}`,
+        );
+        return;
+      }
     }
   }
 

@@ -60,6 +60,30 @@ function applyStructuredOutput(
 }
 
 /**
+ * Lane 4b(e) — wire `topK`/`minP` from the profile system to the request
+ * body. `applySamplingDefaults` (packages/core/src/agent-loop/sampling.ts)
+ * writes them into `providerOptions['openai-compat']`; before this they were
+ * never read (dead config). Ollama and vLLM accept `top_k`/`min_p` as extra
+ * body params on their OpenAI-compat endpoints. Hosted dialects (openai /
+ * openrouter / gemini / groq / deepseek all map to 'openai') do NOT get them
+ * — they would 400 or be ignored inconsistently, and the hosted golden
+ * baselines must stay byte-identical. Same `Object.assign` extra-body
+ * discipline as `applyStructuredOutput` above (the params are not in the
+ * OpenAI SDK types).
+ */
+function applySamplingExtras(
+  oaiParams: OpenAI.Chat.ChatCompletionCreateParamsStreaming,
+  options: CompletionOptions,
+  dialect: StructuredOutputDialect,
+): void {
+  if (dialect !== 'ollama' && dialect !== 'vllm') return;
+  const bag = options.providerOptions?.['openai-compat'];
+  if (!bag) return;
+  if (typeof bag.topK === 'number') Object.assign(oaiParams, { top_k: bag.topK });
+  if (typeof bag.minP === 'number') Object.assign(oaiParams, { min_p: bag.minP });
+}
+
+/**
  * Pure function that converts Ethos messages + options into the OpenAI Chat
  * Completions streaming params object. No I/O — all side-effect-free.
  */
@@ -108,6 +132,11 @@ export function buildChatCompletionsParams(
         name: t.name,
         description: t.description,
         parameters,
+        // Lane 4b(g) — vLLM dialect ONLY (eng review D21). Without strict,
+        // vLLM's `tool_choice: auto` does not constrain arguments at all.
+        // Hosted dialects and other locals are unchanged (hosted golden
+        // baselines stay byte-identical).
+        ...(opts?.structuredOutputDialect === 'vllm' ? { strict: true } : {}),
       },
     };
   });
@@ -126,7 +155,9 @@ export function buildChatCompletionsParams(
     ...(oaiTools.length > 0 ? { tools: oaiTools } : {}),
   };
 
-  applyStructuredOutput(oaiParams, options, opts?.structuredOutputDialect ?? 'openai');
+  const dialect = opts?.structuredOutputDialect ?? 'openai';
+  applyStructuredOutput(oaiParams, options, dialect);
+  applySamplingExtras(oaiParams, options, dialect);
 
   return { oaiParams, requestTokens: undefined, effectiveModel };
 }
@@ -220,6 +251,23 @@ export async function* streamChatCompletions(
     if (!choice) continue;
 
     const delta = choice.delta;
+
+    // Lane 4b(b) — reasoning passthrough. Reasoning models emit their
+    // chain-of-thought in `delta.reasoning_content` (DeepSeek-R1, Qwen3 via
+    // vLLM/Ollama) or `delta.reasoning` (OpenRouter). Neither field is in the
+    // SDK's Delta type — narrow structural read, no `any`. Emitted as the
+    // EXISTING thinking_delta chunk variant and kept out of the text stream.
+    const reasoningDelta = delta as { reasoning_content?: unknown; reasoning?: unknown };
+    const reasoning =
+      typeof reasoningDelta.reasoning_content === 'string'
+        ? reasoningDelta.reasoning_content
+        : typeof reasoningDelta.reasoning === 'string'
+          ? reasoningDelta.reasoning
+          : undefined;
+    if (reasoning) {
+      sawOutput = true;
+      yield { type: 'thinking_delta', thinking: reasoning };
+    }
 
     if (delta.content) {
       sawOutput = true;
