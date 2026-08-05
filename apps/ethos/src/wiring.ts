@@ -197,8 +197,18 @@ async function withRotation(config: EthosConfig) {
   return { ...config, rotationKeys };
 }
 
-export async function createLLM(config: EthosConfig): Promise<LLMProvider> {
-  return packageCreateLLM(await withRotation(config));
+export async function createLLM(
+  config: EthosConfig,
+  opts: { probeWindowRefresh?: boolean } = {},
+): Promise<LLMProvider> {
+  // Lane 0 — thread the window-probe context so local runtimes resolve their
+  // SERVED context window (cache-first; `probeWindowRefresh` forces a live
+  // probe and rewrites the cache — `ethos doctor`).
+  return packageCreateLLM(await withRotation(config), {
+    storage: getStorage(),
+    dataDir: ethosDir(),
+    ...(opts.probeWindowRefresh === true ? { forceRefresh: true } : {}),
+  });
 }
 
 export async function createAgentLoop(
@@ -239,6 +249,12 @@ export async function createAgentLoop(
      * Gateway only — it is the one component that knows the mapping.
      */
     resolveOriginThreadId?: (sessionKey: string) => string | undefined;
+    /**
+     * Lane 0 (D16) — force a LIVE served-window probe (bypassing the disk
+     * cache) and rewrite the cache. Set by `ethos bench context`; chat and
+     * gateway startup leave it unset and ride the cache.
+     */
+    probeWindowRefresh?: boolean;
   } = {},
 ): Promise<CreateAgentLoopResult> {
   const rotated = await withRotation(config);
@@ -283,6 +299,7 @@ export async function createAgentLoop(
     ...(opts.slashRegistry ? { slashRegistry: opts.slashRegistry } : {}),
     ...(opts.originBotKey ? { originBotKey: opts.originBotKey } : {}),
     ...(opts.resolveOriginThreadId ? { resolveOriginThreadId: opts.resolveOriginThreadId } : {}),
+    ...(opts.probeWindowRefresh === true ? { probeWindowRefresh: true } : {}),
   });
 
   return result;

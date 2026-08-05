@@ -42,8 +42,20 @@ import { buildWiringContext } from './build-context';
 import { buildInfrastructure } from './build-infrastructure';
 import { composeAllTools } from './compose-tools';
 import { loadPlugins } from './load-plugins';
+import {
+  detectLocalRuntime,
+  probeServedWindowCached,
+  resolveContextWindow,
+  type WindowProbeResult,
+  windowProbeCachePath,
+} from './local-models';
 import { createUndecoratedBackend, type MemoryBackendSelection } from './memory-backend';
-import { lookupContextWindow, lookupProfile, mergeModelProfile } from './model-catalog';
+import {
+  lookupContextWindow,
+  lookupProfile,
+  mergeModelProfile,
+  PROVIDER_WINDOW_DEFAULTS,
+} from './model-catalog';
 import type { EthosObservability } from './observability/ethos-observability';
 import { registerBuiltinProviders } from './register-builtin-providers';
 import {
@@ -100,6 +112,14 @@ export interface WiringConfig {
   /** Azure-only: REST API version (e.g. `2024-10-21`). Required when
    *  `provider === 'azure'`; ignored otherwise. */
   apiVersion?: string;
+  /**
+   * Lane 0 (eng review D4) — operator override for the primary model's served
+   * context window (tokens). Wins over the probe and the catalog (precedence:
+   * config > probe > catalog > default); maps to the provider's
+   * `maxContextTokens`. Applied to the PRIMARY provider/model only — chain
+   * fallbacks resolve their own windows.
+   */
+  contextWindow?: number;
   /** Maps personality ID → model ID for per-personality model overrides. */
   modelRouting?: Record<string, string>;
   /**
@@ -420,6 +440,13 @@ export interface CreateAgentLoopOptions {
    * completion is delivered to the channel root.
    */
   resolveOriginThreadId?: (sessionKey: string) => string | undefined;
+  /**
+   * Lane 0 (eng review D16) — force a LIVE served-window probe (bypassing the
+   * 15-minute disk cache) and rewrite the cache. Set by the command paths
+   * whose numbers the operator tunes against (`ethos doctor`, `ethos bench
+   * context`); chat and gateway startup leave it unset and ride the cache.
+   */
+  probeWindowRefresh?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -544,7 +571,26 @@ function buildCompressionSummarizer(
   };
 }
 
-export async function createLLM(config: WiringConfig): Promise<LLMProvider> {
+/**
+ * Lane 0 (eng review D3+D16) — context needed to run the served-window probe
+ * with its disk cache. When absent, no probe runs and resolution falls back
+ * to config > catalog > default (preserves pre-Lane-0 callers unchanged).
+ */
+export interface WindowProbeContext {
+  storage: Storage;
+  dataDir: string;
+  /** Bypass the 15-min cache: probe LIVE and rewrite it. Set by the command
+   *  paths an operator tunes against (setup / doctor / personality show /
+   *  bench context); chat and gateway startup leave it unset. */
+  forceRefresh?: boolean;
+  /** Test seam — stub fetch so probes stay off the network. */
+  fetchImpl?: typeof fetch;
+}
+
+export async function createLLM(
+  config: WiringConfig,
+  windowProbe?: WindowProbeContext,
+): Promise<LLMProvider> {
   const registry = new DefaultLLMProviderRegistry();
   registerBuiltinProviders(registry);
   const noop: Logger = {
@@ -554,7 +600,7 @@ export async function createLLM(config: WiringConfig): Promise<LLMProvider> {
     debug: () => {},
     child: () => noop,
   };
-  return createLLMFromRegistry(registry, config, noop);
+  return createLLMFromRegistry(registry, config, noop, undefined, windowProbe);
 }
 
 /**
@@ -580,6 +626,7 @@ async function createLLMFromRegistry(
   config: WiringConfig,
   log: Logger,
   allowedPlugins?: string[],
+  windowProbe?: WindowProbeContext,
 ): Promise<LLMProvider> {
   const secrets: import('@ethosagent/types').SecretsResolver = {
     get: async () => null,
@@ -613,11 +660,43 @@ async function createLLMFromRegistry(
           `Available: ${registry.list().join(', ')}`,
       );
     }
-    // M1b — resolve the model's context window from the catalog and inject it
-    // so openai-compat-alias providers (ollama, groq, …) report their real
-    // window to compaction instead of the 128k default. A catalog miss leaves
-    // the field absent → the provider default still applies (no crash).
-    const contextWindow = lookupContextWindow(cfg.provider, cfg.model);
+    // Lane 0 — resolve the model's context window with the D15 precedence:
+    // config > probe > catalog > default. The probe runs only for a detected
+    // local runtime (hosted endpoints are never probed), cache-first on
+    // chat/gateway startup (D3) and live when the caller forces a refresh
+    // (D16). A full miss leaves the field absent → the provider default still
+    // applies (no crash), with the loud unknown-window diagnostic below.
+    const isPrimary = cfg.provider === config.provider && cfg.model === config.model;
+    const configWindow = isPrimary ? config.contextWindow : undefined;
+    const runtime = detectLocalRuntime(cfg.provider, cfg.baseUrl ?? '');
+    let windowProbeResult: WindowProbeResult | undefined;
+    if (runtime !== undefined && cfg.baseUrl !== undefined && windowProbe !== undefined) {
+      windowProbeResult = await probeServedWindowCached({
+        runtime,
+        baseUrl: cfg.baseUrl,
+        model: cfg.model,
+        storage: windowProbe.storage,
+        cachePath: windowProbeCachePath(windowProbe.dataDir),
+        ...(windowProbe.forceRefresh !== undefined
+          ? { forceRefresh: windowProbe.forceRefresh }
+          : {}),
+        ...(windowProbe.fetchImpl !== undefined ? { fetchImpl: windowProbe.fetchImpl } : {}),
+      });
+    }
+    const resolvedWindow = resolveContextWindow({
+      provider: cfg.provider,
+      model: cfg.model,
+      ...(configWindow !== undefined ? { configWindow } : {}),
+      ...(windowProbeResult !== undefined ? { probe: windowProbeResult } : {}),
+      ...(() => {
+        const catalogWindow =
+          lookupContextWindow(cfg.provider, cfg.model) ?? PROVIDER_WINDOW_DEFAULTS[cfg.provider];
+        return catalogWindow !== undefined ? { catalogWindow } : {};
+      })(),
+      localRuntime: runtime !== undefined,
+    });
+    for (const diagnostic of resolvedWindow.diagnostics) log.warn(diagnostic);
+    const contextWindow = resolvedWindow.contextWindow;
     // §7 — resolve the effective per-model profile (config override OVER catalog)
     // and thread its provider-facing fields (toolCallFormat, maxOutputTokens)
     // into the factory config, next to maxContextTokens. Sampling defaults are
@@ -840,6 +919,13 @@ export async function createAgentLoop(
     config,
     log,
     infra.activePerson.plugins,
+    // Lane 0 — startup consults the probe cache (D3); command paths that must
+    // show fresh numbers set probeWindowRefresh to force a live probe (D16).
+    {
+      storage: wiringCtx.storage,
+      dataDir: wiringCtx.dataDir,
+      ...(opts.probeWindowRefresh === true ? { forceRefresh: true } : {}),
+    },
   );
 
   // -------------------------------------------------------------------------

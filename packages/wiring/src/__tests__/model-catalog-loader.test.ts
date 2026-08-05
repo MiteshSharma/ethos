@@ -159,7 +159,7 @@ describe('bundledToManifest', () => {
     expect(manifest.providers.anthropic.models[0].id).toContain('claude');
   });
 
-  it('collapses openai/openrouter/gemini/groq/deepseek/ollama into openai-compat', () => {
+  it('collapses hosted openai/openrouter/gemini/groq/deepseek into openai-compat', () => {
     const manifest = bundledToManifest();
     // Should NOT have separate keys for these providers
     expect(manifest.providers.openai).toBeUndefined();
@@ -167,7 +167,29 @@ describe('bundledToManifest', () => {
     expect(manifest.providers.gemini).toBeUndefined();
     expect(manifest.providers.groq).toBeUndefined();
     expect(manifest.providers.deepseek).toBeUndefined();
-    expect(manifest.providers.ollama).toBeUndefined();
+  });
+
+  it('preserves local providers (ollama) under their own key (Lane 0)', () => {
+    const manifest = bundledToManifest();
+    expect(manifest.providers.ollama).toBeDefined();
+    const ids = manifest.providers.ollama.models.map((m) => m.id);
+    expect(ids).toContain('llama3.2');
+    expect(ids).toContain('mistral');
+  });
+
+  it('round-trips ollama rows: manifestToEntries(bundledToManifest()) keeps providerId ollama', () => {
+    // Lane 0 acceptance — the old encoder collapsed ollama into
+    // 'openai-compat', which manifestToEntries mapped back to 'openai',
+    // erasing the rows as Ollama rows.
+    const entries = manifestToEntries(bundledToManifest());
+    const ollamaIds = entries.filter((e) => e.providerId === 'ollama').map((e) => e.modelId);
+    expect(ollamaIds).toContain('llama3.2');
+    expect(ollamaIds).toContain('mistral');
+    // And no bundled ollama row leaks out under providerId 'openai'.
+    const openaiIds = new Set(
+      entries.filter((e) => e.providerId === 'openai').map((e) => e.modelId),
+    );
+    expect(openaiIds.has('llama3.2')).toBe(false);
   });
 });
 

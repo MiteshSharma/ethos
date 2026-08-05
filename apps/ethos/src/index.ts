@@ -1200,6 +1200,38 @@ async function runPersonalityShow(argv: string[]): Promise<void> {
     substitutionVars: { ethosHome: ethosDir(), cwd: process.cwd() },
   });
   console.log(`\n${renderCharacterSheet(described.config, soulMd, { posture })}`);
+
+  // Lane 0 (D16) — personality show probes the served context window LIVE and
+  // rewrites the probe cache, so the numbers an operator tunes against are
+  // never stale. Fail-soft: no config, no local runtime, or an unreachable
+  // endpoint never blocks the sheet.
+  try {
+    const cfg = await readConfig(storage, await getSecretsResolver());
+    if (cfg?.baseUrl) {
+      const { detectLocalRuntime, probeServedWindowCached, windowProbeCachePath } = await import(
+        '@ethosagent/wiring/local-models'
+      );
+      const runtime = detectLocalRuntime(cfg.provider, cfg.baseUrl);
+      if (runtime) {
+        const model = cfg.modelRouting?.[id] ?? cfg.model;
+        const probe = await probeServedWindowCached({
+          runtime,
+          baseUrl: cfg.baseUrl,
+          model,
+          storage,
+          cachePath: windowProbeCachePath(ethosDir()),
+          forceRefresh: true,
+        });
+        if (probe.contextWindow !== undefined) {
+          console.log(`\nServed context window (probed live): ${probe.contextWindow} tokens`);
+        } else if (probe.diagnostic) {
+          console.log(`\n${probe.diagnostic}`);
+        }
+      }
+    }
+  } catch {
+    // The probe is advisory — the character sheet is the command's contract.
+  }
 }
 
 // ---------------------------------------------------------------------------

@@ -233,6 +233,21 @@ export const MODEL_CATALOG: ModelCatalogEntry[] = [
     default: true,
   },
   { providerId: 'ollama', modelId: 'mistral', label: '7B', contextWindow: 32_768 },
+  // Lane 0 — commonly-run Ollama models. contextWindow values are conservative
+  // ARCHITECTURE maxima; the Lane 0 resolution caps catalog values for local
+  // runtimes at ARCH_WINDOW_CAP_TOKENS (32,768, local-models.ts) because the
+  // SERVED window is whatever num_ctx Ollama allocated — the /api/ps probe
+  // reports the truth, and these rows are only the fallback behind it.
+  { providerId: 'ollama', modelId: 'qwen3', label: '8B, hybrid reasoning', contextWindow: 40_960 },
+  { providerId: 'ollama', modelId: 'gemma3', label: '4B, multimodal', contextWindow: 131_072 },
+  { providerId: 'ollama', modelId: 'phi4', label: '14B', contextWindow: 16_384 },
+  {
+    providerId: 'ollama',
+    modelId: 'deepseek-r1',
+    label: 'reasoning, distilled',
+    contextWindow: 131_072,
+  },
+  { providerId: 'ollama', modelId: 'llama3.3', label: '70B', contextWindow: 131_072 },
   // Mistral — direct API. baseUrl: https://api.mistral.ai/v1
   // Set `baseUrl` in ~/.ethos/config.yaml; OpenAICompatProvider handles the
   // rest. Context windows are nominal — verify against the official pricing
@@ -379,6 +394,19 @@ export const MODEL_CATALOG: ModelCatalogEntry[] = [
     contextWindow: 200_000,
   },
 ];
+
+/**
+ * Lane 0 — provider-level window defaults for runtimes whose model set is
+ * operator-defined. vLLM serves whatever `--max-model-len` the operator set at
+ * launch, so there is no honest per-model catalog row — the probe reads the
+ * real `max_model_len` from `GET /v1/models`, and this default is only the
+ * conservative fallback when both the probe and explicit config are silent.
+ * (32,768 = ARCH_WINDOW_CAP_TOKENS — already at the local architecture cap,
+ * so the cap never has to fire on it.)
+ */
+export const PROVIDER_WINDOW_DEFAULTS: Record<string, number> = {
+  vllm: 32_768,
+};
 
 export function getModelsForProvider(providerId: string): ModelCatalogEntry[] {
   return MODEL_CATALOG.filter((m) => m.providerId === providerId);

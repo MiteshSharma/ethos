@@ -959,7 +959,9 @@ async function runProviderProbe(jsonMode: boolean): Promise<void> {
   let error: string | null = null;
 
   try {
-    const llm = await createLLM(config);
+    // Lane 0 (D16) — doctor probes the served window LIVE and rewrites the
+    // probe cache, so its numbers are never stale.
+    const llm = await createLLM(config, { probeWindowRefresh: true });
     const start = performance.now();
     // Consume the async iterable — we only need to confirm the provider responds.
     // Using max 1 token keeps the call as cheap as possible.

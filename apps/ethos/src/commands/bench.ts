@@ -266,7 +266,9 @@ export async function runBench(args: string[]): Promise<void> {
   let activePersonalityId = '';
   if (config) {
     const { createAgentLoop } = await import('../wiring');
-    const result = await createAgentLoop(config);
+    // Lane 0 (D16) — bench context probes the served window LIVE and rewrites
+    // the probe cache; the tuning loop must never show stale numbers.
+    const result = await createAgentLoop(config, { probeWindowRefresh: true });
     toolRegistry = result.toolRegistry;
     loop = result.loop;
     activePersonalityId = result.activePersonality.id;

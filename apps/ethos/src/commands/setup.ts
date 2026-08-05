@@ -9,7 +9,12 @@ import {
 } from '@ethosagent/config';
 import type { WizardStepId } from '@ethosagent/tui/setup';
 import { probeProvider } from '@ethosagent/wiring';
-import { fetchLocalModels } from '@ethosagent/wiring/local-models';
+import {
+  detectLocalRuntime,
+  fetchLocalModels,
+  probeServedWindowCached,
+  windowProbeCachePath,
+} from '@ethosagent/wiring/local-models';
 import { getProvider } from '@ethosagent/wiring/provider-catalog';
 import { redactErrorMessage } from '../redact-error';
 import { getFunnelTracker, getSecretsResolver, getStorage } from '../wiring';
@@ -239,6 +244,28 @@ async function runReadlineFallback({
     } else {
       console.log(`${c.yellow}Endpoint not reachable — enter a model name manually.${c.reset}`);
       model = (await ask(rl, 'Model: ')).trim();
+    }
+
+    // Lane 0 (D16) — setup probes the SERVED context window live and warms
+    // the probe cache. Fail-soft: an unreachable probe prints a diagnostic
+    // and setup continues.
+    const runtime = detectLocalRuntime(provider, baseUrl);
+    if (runtime && model) {
+      const probe = await probeServedWindowCached({
+        runtime,
+        baseUrl,
+        model,
+        storage: getStorage(),
+        cachePath: windowProbeCachePath(ethosDir()),
+        forceRefresh: true,
+      });
+      if (probe.contextWindow !== undefined) {
+        console.log(
+          `${c.dim}Served context window: ${probe.contextWindow.toLocaleString('en-US')} tokens${c.reset}`,
+        );
+      } else if (probe.diagnostic) {
+        console.log(`${c.yellow}${probe.diagnostic}${c.reset}`);
+      }
     }
   } else {
     const defaultModel =

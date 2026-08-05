@@ -432,6 +432,23 @@ export const openaiCompatFactory: LLMProviderFactory = async ({
       `Using plaintext apiKey from config for ${providerName}; migrate to the secret store: ethos secrets set providers/${providerName}/apiKey <key>`,
     );
   }
+  // Lane 0 — make the 16k floor meaningful on UNKNOWN windows. When no window
+  // was resolved (no config, no probe, no catalog), the constructor below
+  // defaults maxContextTokens to 128,000, which sails over the floor check
+  // while the local server may really be serving 4,096 and silently dropping
+  // the front of the prompt. The floor protects a window that resolved SMALL;
+  // this diagnostic covers the more dangerous case — a window that never
+  // resolved at all. Warn, do not throw (warn-first release).
+  if (typeof cfg.maxContextTokens !== 'number') {
+    const dialect = detectStructuredOutputDialect(providerName, baseUrl);
+    if (dialect === 'ollama' || dialect === 'vllm') {
+      logger.warn(
+        `window for ${cfg.model as string} on ${providerName} is unknown; assuming 128000 — ` +
+          `set contextWindow in ~/.ethos/config.yaml (or raise num_ctx / --max-model-len so ` +
+          `the probe can see the served window)`,
+      );
+    }
+  }
   return new OpenAICompatProvider({
     name: providerName,
     model: cfg.model as string,

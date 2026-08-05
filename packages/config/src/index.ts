@@ -510,6 +510,17 @@ export interface EthosConfig {
   /** Azure-only: REST API version (e.g. `2024-10-21`). Required when
    *  `provider === 'azure'`; ignored otherwise. */
   apiVersion?: string;
+  /**
+   * Lane 0 (eng review D4) — operator override for the model's served context
+   * window, in tokens. A window FACT (how many tokens the server accepts) —
+   * not a compaction POLICY (`compaction.maxContextTokens` is the ceiling
+   * compaction aims for, different semantics) — hence the name matches the
+   * catalog's `contextWindow` field rather than the provider-internal
+   * `maxContextTokens` it maps to. Wins over the window probe and the catalog
+   * (precedence: config > probe > catalog > default). Flat-key shape:
+   *   contextWindow: 8192
+   */
+  contextWindow?: number;
   // Per-personality model overrides: maps personality ID → model ID string
   modelRouting?: Record<string, string>;
   /**
@@ -987,6 +998,7 @@ export async function writeConfig(storage: Storage, config: EthosConfig): Promis
   if (config.memory) lines.push(`memory: ${config.memory}`);
   if (config.baseUrl) lines.push(`baseUrl: ${config.baseUrl}`);
   if (config.apiVersion) lines.push(`apiVersion: ${config.apiVersion}`);
+  if (config.contextWindow !== undefined) lines.push(`contextWindow: ${config.contextWindow}`);
   if (config.modelRouting) {
     for (const [id, model] of Object.entries(config.modelRouting)) {
       lines.push(`modelRouting.${id}: ${model}`);
@@ -2008,6 +2020,14 @@ function parseConfigYaml(src: string): EthosConfig {
             : undefined,
     baseUrl: kv.baseUrl,
     apiVersion: kv.apiVersion,
+    // Lane 0 (D4) — a window is a positive integer token count; anything else
+    // (zero, negative, non-numeric) is dropped so a typo cannot poison the
+    // provider's maxContextTokens.
+    contextWindow: (() => {
+      if (kv.contextWindow === undefined) return undefined;
+      const n = Number(kv.contextWindow);
+      return Number.isFinite(n) && n > 0 ? Math.floor(n) : undefined;
+    })(),
     modelRouting: Object.keys(modelRouting).length > 0 ? modelRouting : undefined,
     toolSettings: Object.keys(toolSettings).length > 0 ? toolSettings : undefined,
     models,
