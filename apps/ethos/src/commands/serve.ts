@@ -56,6 +56,7 @@ import {
   IdentityMap,
 } from '@ethosagent/wiring';
 import { appendErrorLog } from '../error-log';
+import { createAcpMcpWiring } from '../lib/acp-mcp-wiring';
 import { DeferredToolRegistry } from '../lib/deferred-tool-registry';
 import { KanbanPollLoop, writeRunActivityComments } from '../lib/kanban-poll';
 import { resolveSkillsCatalogDir } from '../lib/resolve-skills-catalog-dir';
@@ -522,21 +523,27 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
   const session = createSessionStore({ dataDir: dir });
   const mesh = new AgentMesh(meshRegistryPath(activeMeshName), { storage: getStorage() });
 
-  // ACP server (existing behavior — kept first so any breakage is obvious).
-  const acpServer = new AcpServer({
-    runner: loop,
-    session,
-    mesh,
-    ...(jobStore ? { jobStore } : {}),
-    ...(backgroundExecutor ? { backgroundExecutor } : {}),
-  });
-  acpServer.startHttp(acpPort);
-
   const personalities = await createPersonalityRegistry({
     storage: getStorage(),
     userPersonalitiesDir: dir,
   });
   await personalities.loadFromDirectory(join(dir, 'personalities'));
+
+  // ACP server (existing behavior — kept first so any breakage is obvious).
+  // The MCP session-grant wiring is omitted on the team-coordinator path,
+  // which has no McpManager — `session/registerMcpServers` then fails closed.
+  const acpServer = new AcpServer({
+    runner: loop,
+    session,
+    mesh,
+    ...(mcpManager
+      ? createAcpMcpWiring({ mcpManager, personalities, defaultPersonalityId: activePersonality })
+      : {}),
+    ...(jobStore ? { jobStore } : {}),
+    ...(backgroundExecutor ? { backgroundExecutor } : {}),
+  });
+  acpServer.startHttp(acpPort);
+
   const personalityConfig = personalities.get(activePersonality);
   const capabilities = personalityConfig?.capabilities ?? [];
 
@@ -901,6 +908,11 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
       getProvider: createLazyProvider(() => createLLM(config)),
       model: config.model,
     }),
+    // Every modal decision (and every allowlist auto-allow) lands in the
+    // safety audit trail behind `ethos audit decisions`.
+    approvalObservability: {
+      recordSafetyApproval: (o) => getEthosObservability().recordSafetyApproval(o),
+    },
     ...(skillsCatalogDir ? { catalogDir: skillsCatalogDir } : {}),
     ...(cronScheduler ? { cronScheduler } : {}),
     ...(toolRegistry ? { toolRegistry } : {}),

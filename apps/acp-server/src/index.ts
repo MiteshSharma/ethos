@@ -143,6 +143,7 @@ export class AcpServer {
 
   start(): void {
     const rl = createInterface({ input: this.input, terminal: false });
+    const ownedSessionKeys = new Set<string>();
     rl.on('line', (line) => {
       const trimmed = line.trim();
       if (!trimmed) return;
@@ -154,8 +155,16 @@ export class AcpServer {
         return;
       }
       if (req.id !== undefined) {
-        void this.dispatch(req, (msg) => this.send(msg)).catch(() => {});
+        void this.dispatch(
+          req,
+          (msg) => this.send(msg),
+          this.abortControllers,
+          ownedSessionKeys,
+        ).catch(() => {});
       }
+    });
+    rl.on('close', () => {
+      void this.teardownOwnedSessions(ownedSessionKeys);
     });
   }
 
@@ -472,6 +481,7 @@ export class AcpServer {
       if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(msg));
     };
     const abortControllers = new Map<Id, AbortController>();
+    const ownedSessionKeys = new Set<string>();
 
     ws.on('message', (data) => {
       let req: Request;
@@ -482,12 +492,13 @@ export class AcpServer {
         return;
       }
       if (req.id !== undefined) {
-        void this.dispatch(req, send, abortControllers).catch(() => {});
+        void this.dispatch(req, send, abortControllers, ownedSessionKeys).catch(() => {});
       }
     });
 
     ws.on('close', () => {
       for (const ac of abortControllers.values()) ac.abort();
+      void this.teardownOwnedSessions(ownedSessionKeys);
     });
   }
 
@@ -499,6 +510,8 @@ export class AcpServer {
     req: Request,
     send: (msg: object) => void,
     abortControllers?: Map<Id, AbortController>,
+    /** Session keys granted over this connection — torn down when it closes. */
+    ownedSessionKeys?: Set<string>,
   ): Promise<void> {
     const id = req.id ?? null;
     const controllers = abortControllers ?? this.abortControllers;
@@ -581,7 +594,7 @@ export class AcpServer {
             personalityId?: string;
             sessionKey?: string;
           };
-          const result = await this.handleRegisterMcpServers(p);
+          const result = await this.handleRegisterMcpServers(p, ownedSessionKeys);
           sendResult(result);
           break;
         }
@@ -689,11 +702,14 @@ export class AcpServer {
   // Phase 5 — session/registerMcpServers handler
   // ---------------------------------------------------------------------------
 
-  private async handleRegisterMcpServers(params: {
-    servers: McpServerConfig[];
-    personalityId?: string;
-    sessionKey?: string;
-  }): Promise<{ registered: string[]; rejected: { name: string; reason: string }[] }> {
+  private async handleRegisterMcpServers(
+    params: {
+      servers: McpServerConfig[];
+      personalityId?: string;
+      sessionKey?: string;
+    },
+    ownedSessionKeys?: Set<string>,
+  ): Promise<{ registered: string[]; rejected: { name: string; reason: string }[] }> {
     if (!this._createSessionView) {
       return {
         registered: [],
@@ -721,6 +737,7 @@ export class AcpServer {
       view = this._createSessionView();
       this._sessionViews.set(sessionKey, view);
     }
+    ownedSessionKeys?.add(sessionKey);
 
     return view.registerSessionServers(params.servers, allowlist);
   }
@@ -731,6 +748,20 @@ export class AcpServer {
       await view.teardown();
       this._sessionViews.delete(sessionKey);
     }
+  }
+
+  /**
+   * Tear down every session view granted over a transport connection that has
+   * closed. A client that drops or crashes without sending `session/end` would
+   * otherwise leave its granted MCP connections live until process exit, and
+   * the orphaned views would keep counting against MAX_ACP_SESSIONS. The
+   * connectionless HTTP `/rpc` transport has no such signal — those clients
+   * must call `session/end`.
+   */
+  private async teardownOwnedSessions(sessionKeys: Set<string>): Promise<void> {
+    const keys = [...sessionKeys];
+    sessionKeys.clear();
+    await Promise.allSettled(keys.map((key) => this.handleSessionEnd(key)));
   }
 
   // ---------------------------------------------------------------------------

@@ -340,8 +340,11 @@ export interface PersonalityConfig {
    */
   mcp_export?: PersonalityMcpExportConfig;
   /**
-   * Per-personality outbound approval policy. When `approve_before_send` is
-   * true, the gateway holds outbound messages in a pending queue until approved.
+   * Per-personality outbound approval policy. Declared but NOT yet enforced:
+   * the block is parsed, persisted and round-tripped, and has no runtime
+   * effect. Setting `approve_before_send: true` does NOT gate channel egress
+   * today — no pending queue exists and outbound messages send as usual.
+   * Treat it as inert until a release wires it into the gateway.
    * Counts as ONE field for the schema-freeze gate.
    */
   outbound_policy?: OutboundPolicyConfig;

@@ -47,7 +47,7 @@ import { createRoutes } from './routes';
 import type { RouteModule } from './routes/route-module';
 import { ApiKeysService } from './services/api-keys.service';
 import { createWebApprovalHook, type DangerPredicate } from './services/approval-hook';
-import { ApprovalsService } from './services/approvals.service';
+import { type ApprovalObservability, ApprovalsService } from './services/approvals.service';
 import { ConfigService } from './services/config.service';
 import { CronService } from './services/cron.service';
 import { DigestService } from './services/digest.service';
@@ -140,6 +140,12 @@ export interface CreateWebApiOptions {
    * `createDangerPredicate()` from `@ethosagent/wiring`.
    */
   dangerPredicate?: DangerPredicate;
+  /**
+   * Sink for the safety audit trail behind `ethos audit decisions` — every
+   * approval, denial and allowlist auto-allow is recorded through it. Boot
+   * code passes wiring's `EthosObservability`. Omitted (tests) → no rows.
+   */
+  approvalObservability?: ApprovalObservability;
   /**
    * Absolute path to the built `apps/web/dist` SPA. When set, the same
    * Hono app serves the client at `/*`. Omit in dev — Vite handles
@@ -401,7 +407,10 @@ export function createWebApi(opts: CreateWebApiOptions): CreateWebApiResult {
     secrets,
     ...(opts.onSetupComplete ? { onSetupComplete: opts.onSetupComplete } : {}),
   });
-  const approvalsService = new ApprovalsService({ allowlist: allowlistRepo });
+  const approvalsService = new ApprovalsService({
+    allowlist: allowlistRepo,
+    ...(opts.approvalObservability ? { observability: opts.approvalObservability } : {}),
+  });
   // Cron service degrades gracefully when no scheduler is provided —
   // tests and ACP-only deployments don't need it. Mutations throw a
   // clear error in that mode; reads return empty.

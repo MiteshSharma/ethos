@@ -130,10 +130,14 @@ export class DreamExecutor {
 
     let success = false;
     try {
+      // Dream turns run on the `dreaming` model tier — a personality that
+      // declares `model.dreaming` gets its cheaper maintenance model here.
+      // Falls back to `model.default` / the global model when it doesn't.
       for await (const event of loop.run(prompt, {
         personalityId,
         sessionKey,
         abortSignal: abort.signal,
+        tierOverride: 'dreaming',
       })) {
         if (event.type === 'done') {
           success = true;

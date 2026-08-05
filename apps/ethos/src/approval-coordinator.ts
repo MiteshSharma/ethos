@@ -72,6 +72,21 @@ interface CoordinatorEventMap {
   resolved: [approvalId: string, decision: 'allow' | 'deny', decidedBy: string];
 }
 
+/**
+ * Minimal observability surface the approval audit trail needs. Declared
+ * locally so this module keeps its zero-extension-import shape; wiring's
+ * `EthosObservability` satisfies it structurally.
+ */
+export interface ApprovalObservability {
+  recordSafetyApproval(opts: {
+    decision: 'approved' | 'denied' | 'auto';
+    severity?: 'info' | 'warn';
+    code?: string;
+    cause?: string;
+    details?: Record<string, unknown>;
+  }): void;
+}
+
 export interface ApprovalCoordinatorOptions {
   /**
    * Auto-deny a pending approval after this many ms. The backstop for a lost
@@ -80,6 +95,11 @@ export interface ApprovalCoordinatorOptions {
    * minutes; pass `0` to disable (tests, trusted-local automation).
    */
   timeoutMs?: number;
+  /**
+   * Sink for the safety audit trail (`ethos audit decisions`). Optional —
+   * absent means no audit rows, never a broken approval.
+   */
+  observability?: ApprovalObservability;
 }
 
 const DEFAULT_TIMEOUT_MS = 10 * 60 * 1000;
@@ -88,9 +108,11 @@ export class ApprovalCoordinator {
   private readonly pending = new Map<string, PendingEntry>();
   private readonly emitter = new EventEmitter<CoordinatorEventMap>();
   private readonly timeoutMs: number;
+  private readonly observability: ApprovalObservability | undefined;
 
   constructor(opts: ApprovalCoordinatorOptions = {}) {
     this.timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    this.observability = opts.observability;
     // Glue may attach several listeners (card poster + observability); the
     // default cap of 10 is plenty but we silence the warning to be safe.
     this.emitter.setMaxListeners(0);
@@ -174,8 +196,41 @@ export class ApprovalCoordinator {
     }
     this.pending.delete(approvalId);
     if (entry.timer) clearTimeout(entry.timer);
+    this.audit(entry.request, decision, decidedBy);
     entry.resolve(decision);
     this.emitter.emit('resolved', approvalId, decision.decision, decidedBy);
+  }
+
+  /**
+   * Write one decision to the safety audit trail. Sits inside `settle` so
+   * EVERY resolution is recorded — button click, timeout auto-deny, session
+   * cancel — not just the ones a surface remembered to subscribe to.
+   *
+   * Fail-open by construction: a throwing (or unavailable) sink must never
+   * block a tool call the agent is already suspended on.
+   */
+  private audit(request: PendingApproval, decision: ApprovalDecision, decidedBy: string): void {
+    if (!this.observability) return;
+    const denied = decision.decision === 'deny';
+    const cause = denied ? decision.reason : (request.reason ?? 'approved');
+    try {
+      this.observability.recordSafetyApproval({
+        decision: denied ? 'denied' : 'approved',
+        severity: denied ? 'warn' : 'info',
+        code: denied ? 'approval.deny' : 'approval.allow',
+        cause: `${request.toolName}: ${cause}`,
+        details: {
+          approvalId: request.approvalId,
+          sessionId: request.sessionId,
+          toolCallId: request.toolCallId,
+          toolName: request.toolName,
+          decidedBy,
+          ...(request.reason ? { reason: request.reason } : {}),
+        },
+      });
+    } catch {
+      // Audit is fail-open — a broken sink never breaks an approval.
+    }
   }
 
   /** Visible for tests + internal observability. */

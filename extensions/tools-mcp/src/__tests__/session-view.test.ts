@@ -72,8 +72,11 @@ describe('isServerAllowed', () => {
     expect(isServerAllowed('anything', undefined)).toBe(true);
   });
 
-  it('returns true when allowlist is empty (open mode)', () => {
-    expect(isServerAllowed('anything', [])).toBe(true);
+  it('returns false when allowlist is empty (explicit deny-all)', () => {
+    // A personality with no `mcp_servers` normalises to []. Treating that as
+    // open mode would let a session view lease servers the personality cannot
+    // reach in a normal turn.
+    expect(isServerAllowed('anything', [])).toBe(false);
   });
 
   it('filters by exact name', () => {
@@ -142,6 +145,28 @@ describe('McpSessionView', () => {
     expect(result.rejected.some((r) => r.name === 'blocked-server')).toBe(true);
     const blockedEntry = result.rejected.find((r) => r.name === 'blocked-server');
     expect(blockedEntry?.reason).toContain('not in personality MCP allowlist');
+
+    await view.teardown();
+    await globalManager.disconnect();
+  });
+
+  it('registerSessionServers grants nothing when the personality allowlist is empty', async () => {
+    const globalManager = new McpManager([]);
+    await globalManager.connect();
+    const view = new McpSessionView(globalManager);
+
+    const configs: McpServerConfig[] = [
+      { name: 'any-server', transport: 'stdio', command: 'echo' },
+    ];
+
+    // [] is what a personality with no `mcp_servers` normalises to. Nothing is
+    // grantable — the lease can never widen the personality's standing reach.
+    const result = await view.registerSessionServers(configs, []);
+
+    expect(result.registered).toHaveLength(0);
+    expect(result.rejected).toHaveLength(1);
+    expect(result.rejected[0]?.reason).toContain('not in personality MCP allowlist');
+    expect(view.getSessionTools()).toHaveLength(0);
 
     await view.teardown();
     await globalManager.disconnect();

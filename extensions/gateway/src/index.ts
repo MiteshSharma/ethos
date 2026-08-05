@@ -369,6 +369,16 @@ export interface GatewayConfig {
    */
   onTurnComplete?: (info: { platform: string }) => void;
   /**
+   * Optional hook fired when a turn STARTS, carrying the personality the turn
+   * resolved to. Team-bound bots resolve no personality and never fire it.
+   * The gateway holds no idle policy of its own — this is the activity signal
+   * the CLI gateway command feeds to `DreamExecutor.recordUserTurn()`, which
+   * owns the idle threshold, the daily cap, and cancelling an in-flight dream
+   * when the user comes back. Absent (tests, standalone) → no signal, no
+   * dreaming.
+   */
+  onUserTurn?: (info: { personalityId: string }) => void;
+  /**
    * Optional hook called when a sender is approved via `/allow <code>` so the
    * caller can persist the updated allowlist back to config.yaml.
    */
@@ -627,6 +637,8 @@ export class Gateway {
   private readonly observability: GatewayObservability | undefined;
   /** Hook fired after a turn completes with a delivered reply. */
   private readonly onTurnComplete: ((info: { platform: string }) => void) | undefined;
+  /** Hook fired at turn start with the resolved personality (activity signal). */
+  private readonly onUserTurn: ((info: { personalityId: string }) => void) | undefined;
   /** Global limiter on simultaneous turns (`maxConcurrentSessions` quota). */
   private readonly concurrency: TurnSemaphore;
   /** Per-lane queue cap — beyond this, saturated lanes get a busy rejection. */
@@ -754,6 +766,7 @@ export class Gateway {
     this.pairingDb = config.pairingDb;
     this.observability = config.observability;
     this.onTurnComplete = config.onTurnComplete;
+    this.onUserTurn = config.onUserTurn;
     // Global turn budget. Unset / non-positive => Infinity permits (unbounded,
     // preserving today's behavior). A positive value is the enforced quota.
     this.concurrency = new TurnSemaphore(
@@ -1816,6 +1829,10 @@ export class Gateway {
       bot.binding.type === 'team'
         ? undefined
         : (this.personalityIds.get(laneKey) ?? bot.binding.name);
+
+    // Activity signal, fired at turn START so a listener can cancel background
+    // work before the turn runs — not at completion, which would be too late.
+    if (personalityId) this.onUserTurn?.({ personalityId });
 
     this.activeTurns.set(laneKey, { adapter, chatId: message.chatId });
 

@@ -212,6 +212,37 @@ describe('MarkdownFileMemoryProvider', () => {
     });
   });
 
+  describe('sync — unsafe keys', () => {
+    it('throws instead of silently dropping a key with a path separator', async () => {
+      await expect(
+        provider.sync([{ action: 'replace', key: 'postmortems/abc.md', content: 'x' }], globalCtx),
+      ).rejects.toThrow(/unsafe memory key/);
+    });
+
+    it('does not write any key in the batch when one key is unsafe', async () => {
+      await expect(
+        provider.sync(
+          [
+            { action: 'replace', key: 'MEMORY.md', content: 'safe' },
+            { action: 'replace', key: '../escape.md', content: 'unsafe' },
+          ],
+          globalCtx,
+        ),
+      ).rejects.toThrow(/unsafe memory key/);
+      const written = await readFile(join(scopeDir, 'MEMORY.md'), 'utf-8').catch(() => null);
+      expect(written).toBeNull();
+    });
+
+    it('accepts a flat postmortem key', async () => {
+      await provider.sync(
+        [{ action: 'replace', key: 'postmortem-bda3f812.md', content: '# bounced' }],
+        globalCtx,
+      );
+      const content = await readFile(join(scopeDir, 'postmortem-bda3f812.md'), 'utf-8');
+      expect(content).toContain('# bounced');
+    });
+  });
+
   // Memory scope isolation — see plan/IMPROVEMENT.md P2-1.
   // The "memory scope per personality" promise on the landing page depends on
   // these tests. If any of them break, a personality marked `per-personality`

@@ -12,7 +12,14 @@
 export type ClarifyAnswerableBy = 'anyone' | 'originator';
 
 /** Which interactive surface a clarify request is carried on. */
-export type ClarifySurfaceType = 'tui' | 'cli' | 'web' | 'telegram' | 'slack' | 'discord';
+export type ClarifySurfaceType =
+  | 'tui'
+  | 'cli'
+  | 'web'
+  | 'telegram'
+  | 'slack'
+  | 'discord'
+  | 'whatsapp';
 
 /** How a pending clarify was resolved. */
 export type ClarifyResponseSource = 'user' | 'timeout-default' | 'timeout-no-default' | 'cancel';
