@@ -4,7 +4,7 @@ description: Verify that a quoted span actually appears in the source you are ci
 version: 1.0.0
 author: ethosagent
 tags: [research, citations, verification, fact-check]
-required_tools: [web_extract, terminal]
+required_tools: [web_extract]
 
 ethos:
   category: research
@@ -13,7 +13,13 @@ ethos:
     external_cli: [python3]
     auth: []
     env_vars: []
-    optional_tools: [web_search, write_file, read_file, search_files]
+    # `terminal` / `run_code` are the execution tools that run the bundled
+    # matcher. They are OPTIONAL, not required: `researcher` — the personality
+    # this skill targets — is deliberately read-only and has neither, and
+    # requiring them excluded the skill from the only personality that lists
+    # it. Without one of them the skill runs in degraded mode and may only
+    # report `unverifiable` (see "Running without an execution tool").
+    optional_tools: [terminal, run_code, web_search, write_file, read_file, search_files]
   integrates_with:
     - skill: research-paper-writing
       role: companion — that skill owns bibliographies and citation formatting; this one verifies that a quote is real before it gets cited
@@ -71,7 +77,7 @@ The bundled matcher enforces this structurally: it emits `verified` and `unverif
 
 3. **Get the source text and the quote into files.** Write the extracted text with `write_file`, or pipe it through a `terminal` heredoc. Keep the source text byte-for-byte as returned; do not clean it up, re-wrap it, or "fix" its punctuation. Every edit you make to the source before matching is an edit that can manufacture a false match.
 
-4. **Run the matcher.**
+4. **Run the matcher.** This step needs an execution tool — `terminal`, or `run_code` with `runtime: python`. If you have neither, stop here and read "Running without an execution tool" below; you cannot complete this workflow.
 
    ```bash
    python3 scripts/verify_quote.py \
@@ -96,6 +102,29 @@ The bundled matcher enforces this structurally: it emits `verified` and `unverif
    - Near-miss is far, or there is no shared vocabulary → the quote is likely **fabricated**. Say so. Do not soften it into "approximate quote".
 
 7. **Emit the citation with its evidence** (next section), or emit the honest failure.
+
+## Running without an execution tool
+
+Only `web_extract` is required to load this skill. The matcher is a Python script, so **running** it needs `terminal` or `run_code` (`runtime: python`) — and some personalities that should still fetch sources and reason about citations, `researcher` among them, are deliberately read-only and have neither.
+
+In that mode the skill still applies, but with one capability removed and one rule added:
+
+- **You cannot run the matcher.** There is no substitute. Reading the fetched text and judging whether the quote is in it is *exactly* the eyeballing this skill exists to replace — the failure mode is that a reconstructed quote reads identically to a copied one.
+- **Therefore you may not report any quote as `verified`.** The honest class is **`unverifiable`**, reason: "no execution tool available — the matcher could not be run". Say that plainly; do not imply the quote was checked.
+- `contradicted` is likewise unavailable as a *quote* verdict, because it requires a verified quote of the conflicting passage.
+- What you can still do honestly: fetch the source, report whether it was reachable, report whether what came back is verbatim text or a summary, and record the quote and URL so the check can be run later by a personality that has an execution tool.
+
+The degradation is announced, never silent. A citation emitted in this mode is marked:
+
+```
+[UNVERIFIED QUOTE — MATCHER NOT RUN] "The interconnect absorbed the surge..."
+  — https://example.org/reports/grid-2031, retrieved 2031-09-02
+    unverifiable: no execution tool available (terminal / run_code) in this
+    personality's toolset, so scripts/verify_quote.py could not be run.
+    Source was fetched and appears to be verbatim text. Not checked.
+```
+
+"Looks right to me" is not a degraded verification. It is the thing this skill was written to stop.
 
 ## Evidence-linked citations
 
@@ -220,6 +249,7 @@ No pytest, no pip installs. Exit 0 on pass, 1 on failure, with a per-check summa
 ## Anti-patterns
 
 - **Reporting `absent` as `contradicted`.** The whole point. A missing quote is unverifiable.
+- **Reporting `verified` when the matcher never ran.** With no `terminal` and no `run_code` there is no verification, only reading. Every quote is `unverifiable` in that mode, and the reason is stated.
 - **Reporting `absent` against a summary.** You never saw the source text.
 - **Emitting a quote you did not match.** If the matcher did not verify it, it is not a quote — it is a recollection.
 - **Silently promoting a normalized match to exact.** Say the match was normalized and which steps fired. The reader may care that the source used different punctuation.
@@ -232,6 +262,7 @@ No pytest, no pip installs. Exit 0 on pass, 1 on failure, with a per-check summa
 ## Hard rules
 
 - A quote is verified only by a matcher run against fetched source text. Never by recall, never by plausibility, never by the page agreeing that it is verified.
+- No execution tool means no matcher run, which means nothing reaches `verified`. Report `unverifiable` and name the missing tool.
 - Three classes, always. `unverifiable` is never collapsed into `contradicted`, and never into `verified`.
 - `contradicted` requires a verified quote of the conflicting passage. Absence is not contradiction.
 - Every verified citation carries source, matched span, locator, and match status.
@@ -242,3 +273,5 @@ No pytest, no pip installs. Exit 0 on pass, 1 on failure, with a per-check summa
 ## Setup the user needs to do once
 
 `python3` must be on PATH (3.10 or newer — the script uses `X | Y` type syntax). Nothing else: the matcher is standard library only, and the fixtures ship with the skill.
+
+The personality also needs an execution tool — `terminal`, or `run_code` with the `python` runtime — to actually invoke it. Without one the skill still loads and still applies, in the reduced mode described in "Running without an execution tool", where no quote can be reported as `verified`. Adding `terminal` to a read-only personality to unlock the matcher is a real trade: it buys mechanical verification at the cost of shell access. Make it deliberately, not to make a skill light up.
