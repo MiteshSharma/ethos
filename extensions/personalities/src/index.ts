@@ -38,6 +38,7 @@ export {
 } from './a2a-identity';
 export {
   type CharacterSheetExecution,
+  type CharacterSheetModelFit,
   firstParagraph,
   renderCharacterSheet,
 } from './character-sheet';

@@ -3,7 +3,7 @@
 // AgentLoop construction, not in the registry, so the renderer sees them verbatim.
 import type { ExecutionPosture, PersonalityConfig } from '@ethosagent/types';
 import { describe, expect, it } from 'vitest';
-import { renderCharacterSheet } from '../character-sheet';
+import { type CharacterSheetModelFit, renderCharacterSheet } from '../character-sheet';
 
 // The character sheet is the SOUL.md "tight character sheet" promise made
 // into a real artifact — one Markdown screen that says what a personality
@@ -307,5 +307,113 @@ describe('renderCharacterSheet — ## Execution section', () => {
     expect(sheet).toMatch(/Constitution clamp: budgetCapUsd 100 → 10/);
     // A clamp for a DIFFERENT personality must not leak onto this sheet.
     expect(sheet).not.toMatch(/budgetCapUsd 5 → 1/);
+  });
+});
+
+describe('renderCharacterSheet — ## Model fit section (Lane 6)', () => {
+  const fit: CharacterSheetModelFit = {
+    verdict: 'fits-degraded',
+    model: 'qwen3:8b',
+    windowTokens: 8_192,
+    windowSource: 'probe',
+    floor: {
+      tokens: 2_113,
+      toolCount: 3,
+      components: [
+        { name: 'SOUL.md', tokens: 812 },
+        { name: 'tool schemas', tokens: 961 },
+        { name: 'injection-defense prelude', tokens: 340 },
+      ],
+    },
+    outputReserveTokens: 4_096,
+    compactibleTokens: 1_983,
+    staticShare: 0.258,
+    degradations: [
+      'small-window mode active',
+      'toolset narrowed to declared small_window_toolset (2 tools): read_file, terminal',
+    ],
+    exclusions: [
+      '2 MCP servers not counted — schemas unknown until connect',
+      'tier models not evaluated',
+    ],
+  };
+
+  it('renders nothing new when modelFit is absent — the no-modelFit sheet is unchanged', () => {
+    const sheet = renderCharacterSheet(fullConfig, soulMd);
+    expect(sheet).toBe(renderCharacterSheet(fullConfig, soulMd, undefined, undefined));
+    expect(sheet).not.toContain('## Model fit');
+    expect(sheet).toMatch(/Estimated system-prompt tokens: ~\d+/);
+  });
+
+  it('prints the verdict with its inputs: window + source, floor breakdown, degradations, exclusions', () => {
+    const sheet = renderCharacterSheet(fullConfig, soulMd, undefined, fit);
+    expect(sheet).toContain('## Model fit');
+    expect(sheet).toContain('- Verdict: fits-degraded');
+    expect(sheet).toContain('- Model: qwen3:8b');
+    expect(sheet).toContain('- Window: 8,192 tokens (source: probe)');
+    expect(sheet).toContain('- Static floor: 2,113 tokens (3 tool schemas):');
+    expect(sheet).toContain('    - SOUL.md: 812 tokens');
+    expect(sheet).toContain('    - tool schemas: 961 tokens');
+    expect(sheet).toContain('    - injection-defense prelude: 340 tokens');
+    expect(sheet).toContain('- Output reserve: 4,096 tokens');
+    expect(sheet).toContain('- Compactible: 1,983 tokens');
+    expect(sheet).toContain('- Static share of window: 26%');
+    expect(sheet).toContain('    - small-window mode active');
+    expect(sheet).toContain('read_file, terminal');
+    expect(sheet).toContain('    - 2 MCP servers not counted — schemas unknown until connect');
+    expect(sheet).toContain('    - tier models not evaluated');
+  });
+
+  it('only appends the verdict section and swaps the prompt-size line — the rest is byte-identical', () => {
+    const plain = renderCharacterSheet(fullConfig, soulMd);
+    const withFit = renderCharacterSheet(fullConfig, soulMd, undefined, fit);
+    const idx = withFit.indexOf('\n## Model fit');
+    expect(idx).toBeGreaterThan(-1);
+    // Strip the appended section, then swap the measured prompt-size line
+    // back to the estimate: the result must be EXACTLY today's sheet.
+    const stripped = withFit.slice(0, idx);
+    const estimateLine = plain
+      .split('\n')
+      .find((l) => l.startsWith('- Estimated system-prompt tokens:'));
+    if (!estimateLine) throw new Error('expected an estimate line in the plain sheet');
+    const measuredLine =
+      '- System-prompt tokens: ~2113 (measured static floor — serialized tool schemas included)';
+    expect(stripped).toContain(measuredLine);
+    expect(stripped.replace(measuredLine, estimateLine)).toBe(plain);
+  });
+
+  it('renders an unknown verdict with no numbers — never the 128k default', () => {
+    const unknown: CharacterSheetModelFit = {
+      verdict: 'unknown',
+      model: 'mystery:7b',
+      windowSource: 'default',
+      floor: { tokens: 900, toolCount: 1, components: [{ name: 'SOUL.md', tokens: 900 }] },
+      degradations: [],
+      exclusions: ['1 MCP server not counted — schemas unknown until connect'],
+    };
+    const sheet = renderCharacterSheet(fullConfig, soulMd, undefined, unknown);
+    expect(sheet).toContain('- Verdict: unknown');
+    expect(sheet).toContain(
+      '- Window: unknown (no config, no probe, no catalog — verdict not computed against the default)',
+    );
+    expect(sheet).not.toContain('128,000');
+    expect(sheet).not.toContain('- Output reserve:');
+    expect(sheet).not.toContain('- Compactible:');
+    expect(sheet).not.toContain('NaN');
+  });
+
+  it('refuses verdict renders the refusal reason', () => {
+    const refuses: CharacterSheetModelFit = {
+      ...fit,
+      verdict: 'refuses',
+      degradations: [],
+      compactibleTokens: -1_002,
+      refusalReason:
+        'personality `engineer` cannot run on `qwen3:8b` (8,192 tokens): static prefix 7,200 + output reserve 4,096 exceeds the window. Largest contributor: tool schemas (4,800 tokens, 12 tools).',
+    };
+    const sheet = renderCharacterSheet(fullConfig, soulMd, undefined, refuses);
+    expect(sheet).toContain('- Verdict: refuses');
+    expect(sheet).toContain('- Refusal: personality `engineer` cannot run on `qwen3:8b`');
+    expect(sheet).toContain('Largest contributor: tool schemas (4,800 tokens, 12 tools).');
   });
 });

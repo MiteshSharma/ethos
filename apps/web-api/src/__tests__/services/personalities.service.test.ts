@@ -1,5 +1,9 @@
 import { join } from 'node:path';
-import { FilePersonalityRegistry } from '@ethosagent/personalities';
+import {
+  type CharacterSheetModelFit,
+  FilePersonalityRegistry,
+  renderCharacterSheet,
+} from '@ethosagent/personalities';
 import { SkillsLibrary } from '@ethosagent/skills';
 import { FsStorage, InMemoryStorage } from '@ethosagent/storage-fs';
 import type { CompletionChunk, LLMProvider, Message } from '@ethosagent/types';
@@ -144,6 +148,85 @@ describe('PersonalitiesService', () => {
     await expect(service.characterSheet('nope')).rejects.toMatchObject({
       code: 'PERSONALITY_NOT_FOUND',
     });
+  });
+
+  it('characterSheet threads the computed model fit through the SAME generator the CLI uses (Lane 6, D5)', async () => {
+    const storage = new InMemoryStorage();
+    const soulPath = join(DATA, 'personalities', 'researcher', 'SOUL.md');
+    await storage.mkdir(join(DATA, 'personalities', 'researcher'));
+    await storage.write(soulPath, '# Researcher\n\nI am a careful researcher.\n');
+
+    const registry = new FilePersonalityRegistry(storage, DATA);
+    const config = {
+      id: 'researcher',
+      name: 'Researcher',
+      model: 'qwen3:8b',
+      soulFile: soulPath,
+    };
+    registry.define(config);
+    registry.setDefault('researcher');
+    const library = new SkillsLibrary({ dataDir: DATA, storage });
+
+    const fit: CharacterSheetModelFit = {
+      verdict: 'refuses',
+      model: 'qwen3:8b',
+      windowTokens: 8_192,
+      windowSource: 'probe',
+      floor: {
+        tokens: 7_200,
+        toolCount: 12,
+        components: [
+          { name: 'SOUL.md', tokens: 2_060 },
+          { name: 'tool schemas', tokens: 4_800 },
+          { name: 'injection-defense prelude', tokens: 340 },
+        ],
+      },
+      outputReserveTokens: 4_096,
+      compactibleTokens: -3_104,
+      staticShare: 0.879,
+      degradations: [],
+      refusalReason:
+        'personality `researcher` cannot run on `qwen3:8b` (8,192 tokens): static prefix 7,200 + output reserve 4,096 exceeds the window. Largest contributor: tool schemas (4,800 tokens, 12 tools).',
+      exclusions: ['tier models not evaluated'],
+    };
+    const service = new PersonalitiesService({
+      personalities: registry,
+      library,
+      modelFit: async () => fit,
+    });
+
+    const { markdown } = await service.characterSheet('researcher');
+    // One generator, both surfaces: the RPC markdown IS renderCharacterSheet's
+    // output for the same inputs — byte-identical, no second renderer.
+    const soulMd = await registry.readSoulMd('researcher');
+    expect(markdown).toBe(renderCharacterSheet(config, soulMd, undefined, fit));
+    expect(markdown).toContain('- Verdict: refuses');
+    expect(markdown).toContain('Largest contributor: tool schemas (4,800 tokens, 12 tools).');
+  });
+
+  it('characterSheet renders without the verdict when the modelFit seam is absent or fails', async () => {
+    const storage = new InMemoryStorage();
+    const soulPath = join(DATA, 'personalities', 'researcher', 'SOUL.md');
+    await storage.mkdir(join(DATA, 'personalities', 'researcher'));
+    await storage.write(soulPath, '# Researcher\n\nI am a careful researcher.\n');
+    const registry = new FilePersonalityRegistry(storage, DATA);
+    registry.define({ id: 'researcher', name: 'Researcher', soulFile: soulPath });
+    registry.setDefault('researcher');
+    const library = new SkillsLibrary({ dataDir: DATA, storage });
+
+    const absent = new PersonalitiesService({ personalities: registry, library });
+    const failing = new PersonalitiesService({
+      personalities: registry,
+      library,
+      modelFit: async () => {
+        throw new Error('probe blew up');
+      },
+    });
+    const a = await absent.characterSheet('researcher');
+    const b = await failing.characterSheet('researcher');
+    expect(a.markdown).not.toContain('## Model fit');
+    // Fail-soft: a throwing seam degrades to the same verdict-less sheet.
+    expect(b.markdown).toBe(a.markdown);
   });
 
   // -------------------------------------------------------------------------

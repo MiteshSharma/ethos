@@ -1,5 +1,6 @@
 import { join } from 'node:path';
 import {
+  type CharacterSheetModelFit,
   type CreatePersonalityInput,
   type DescribedPersonality,
   type FilePersonalityRegistry,
@@ -72,6 +73,13 @@ export interface PersonalitiesServiceOptions {
    * Absent → no refresh (registry state as of last mutation/boot).
    */
   refresh?: () => Promise<void>;
+  /**
+   * Lane 6 (D5) — compute the arithmetic model-fit verdict for a personality.
+   * A closure over wiring's `resolvePersonalityModelFit` (the service never
+   * sees the tool registry or provider config). Absent, resolving `null`, or
+   * throwing → the sheet renders without the `## Model fit` section.
+   */
+  modelFit?: (personalityId: string) => Promise<CharacterSheetModelFit | null>;
 }
 
 export class PersonalitiesService {
@@ -107,9 +115,23 @@ export class PersonalitiesService {
     const described = this.opts.personalities.describe(id);
     if (!described) throw notFound(id);
     const soulMd = await this.opts.personalities.readSoulMd(id);
+    // Lane 6 — same computed verdict, same single generator as the CLI
+    // (D5: one generator, both surfaces). Fail-soft: a throwing seam renders
+    // the sheet without the verdict — the sheet is the RPC's contract.
+    let modelFit: CharacterSheetModelFit | undefined;
+    if (this.opts.modelFit) {
+      try {
+        modelFit = (await this.opts.modelFit(id)) ?? undefined;
+      } catch {
+        modelFit = undefined;
+      }
+    }
     const dataDir = this.opts.dataDir;
     if (!dataDir) {
-      return { markdown: renderCharacterSheet(described.config, soulMd), posture: null };
+      return {
+        markdown: renderCharacterSheet(described.config, soulMd, undefined, modelFit),
+        posture: null,
+      };
     }
     // Same posture resolver + renderer the CLI `personality show` uses — one
     // artifact, no second renderer (Phase 2a, lane E1).
@@ -120,7 +142,7 @@ export class PersonalitiesService {
       ...(this.opts.dockerBuildable === false ? { dockerBuildable: false } : {}),
     });
     return {
-      markdown: renderCharacterSheet(described.config, soulMd, { posture }),
+      markdown: renderCharacterSheet(described.config, soulMd, { posture }, modelFit),
       posture,
     };
   }

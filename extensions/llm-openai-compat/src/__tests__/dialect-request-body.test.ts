@@ -22,7 +22,7 @@ const TOOLS: ToolDefinitionLite[] = [
 
 function toolFns(params: ReturnType<typeof buildChatCompletionsParams>) {
   return (params.oaiParams.tools ?? []).map(
-    (t) => (t as { function: Record<string, unknown> }).function,
+    (t) => (t as unknown as { function: Record<string, unknown> }).function,
   );
 }
 
@@ -63,7 +63,7 @@ describe('topK/minP wiring (Lane 4b(e))', () => {
     const params = buildChatCompletionsParams([], TOOLS, options, 'm', {
       structuredOutputDialect: 'ollama',
     });
-    const body = params.oaiParams as Record<string, unknown>;
+    const body = params.oaiParams as unknown as Record<string, unknown>;
     expect(body.top_k).toBe(40);
     expect(body.min_p).toBe(0.05);
   });
@@ -72,7 +72,7 @@ describe('topK/minP wiring (Lane 4b(e))', () => {
     const params = buildChatCompletionsParams([], TOOLS, options, 'm', {
       structuredOutputDialect: 'vllm',
     });
-    const body = params.oaiParams as Record<string, unknown>;
+    const body = params.oaiParams as unknown as Record<string, unknown>;
     expect(body.top_k).toBe(40);
     expect(body.min_p).toBe(0.05);
   });

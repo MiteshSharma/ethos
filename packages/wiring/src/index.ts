@@ -489,6 +489,15 @@ export {
   createA2aPeeringService,
 } from './a2a-peering-service';
 export { resolveKanbanDbPath } from './kanban-path';
+// Lane 6 (D5 + D19) — the arithmetic model-fit verdict: `computeModelFit` is
+// the pure division; `resolvePersonalityModelFit` is the one assembler both
+// the CLI (`ethos personality show`) and the `personalities.characterSheet`
+// RPC seam call, so the surfaces can never disagree.
+export { type ComputeModelFitInputs, computeModelFit } from './model-fit';
+export {
+  type ResolvePersonalityModelFitOptions,
+  resolvePersonalityModelFit,
+} from './personality-fit';
 // Lane 1(b/c/e) + D8 — the shared static-floor measurement and window-scaled
 // result-budget arithmetic (consumed by build-agent-loop, `ethos bench
 // context`, and — later — Lane 6's fit verdict).
