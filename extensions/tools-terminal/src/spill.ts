@@ -111,3 +111,35 @@ export async function spillOversizedOutput(
   const tail = tailLen > 0 ? text.slice(text.length - tailLen) : '';
   return head + notice + tail;
 }
+
+/**
+ * The stable phrase inside the notice above, as a pattern. `reducers/bash.ts`
+ * rewrites a terminal result after the tool returns and before the budget
+ * trim, so without this the pointer is dropped on exactly the outputs that
+ * were big enough to need spilling. `tool-result-aging.ts` in
+ * `@ethosagent/core` deliberately keeps its own copy — that one crosses a
+ * package boundary and stays a string contract, per the header note. Inside
+ * this package there is one.
+ */
+const SPILL_PATH_RE = /full output written to (.+?) — use read_file/;
+
+/** The spill-file path carried by a terminal result, or null when it has none. */
+export function extractSpillPath(text: string): string | null {
+  return SPILL_PATH_RE.exec(text)?.[1] ?? null;
+}
+
+/**
+ * Re-attach the spill pointer when a rewrite dropped it. Mirrors
+ * `preserveSpillPath` in `@ethosagent/core`'s tool-result aging, which guards
+ * the same hazard one stage later: the notice sits at `HEAD_SHARE` of the
+ * inline body, so any rewrite keeping head + tail drops it, and a rewrite that
+ * replaces the value outright drops it always.
+ *
+ * Appending is skipped when `rewritten` already carries a pointer, so a result
+ * can never end up with two.
+ */
+export function preserveSpillPath(original: string, rewritten: string): string {
+  const path = extractSpillPath(original);
+  if (path === null || extractSpillPath(rewritten) !== null) return rewritten;
+  return `${rewritten}\n[full output written to ${path} — use read_file to retrieve it]`;
+}

@@ -1,4 +1,5 @@
 import type { ToolReducerContext, ToolResult, ToolResultReducer } from '@ethosagent/types';
+import { preserveSpillPath } from '../spill';
 
 function extractCommand(args: unknown): string {
   if (
@@ -102,14 +103,25 @@ function reduceGeneric(result: ToolResult): ToolResult {
   return { ok: true, value: head.join('\n') + marker + tail.join('\n') };
 }
 
+function reduceForCommand(cmd: string, result: ToolResult): ToolResult {
+  if (isGitStatus(cmd)) return reduceGitStatus(result);
+  if (isTestRun(cmd)) return reduceTestRun(result);
+  if (isInstall(cmd)) return reduceInstall(result);
+  return reduceGeneric(result);
+}
+
 export const bashReducer: ToolResultReducer = {
   toolName: 'terminal',
   reduce(result: ToolResult, ctx: ToolReducerContext): ToolResult {
     if (!result.ok) return result;
-    const cmd = extractCommand(ctx.args);
-    if (isGitStatus(cmd)) return reduceGitStatus(result);
-    if (isTestRun(cmd)) return reduceTestRun(result);
-    if (isInstall(cmd)) return reduceInstall(result);
-    return reduceGeneric(result);
+    const reduced = reduceForCommand(extractCommand(ctx.args), result);
+    if (!reduced.ok) return reduced;
+    // Every variant above rewrites the value: the summarizers replace it
+    // outright, and the generic one keeps head + tail — where the spill notice
+    // never is, since `spill.ts` puts it at 60% of the inline body. Without
+    // this the pointer to the spill file dies here, on exactly the oversized
+    // output it was written for.
+    const value = preserveSpillPath(result.value, reduced.value);
+    return value === reduced.value ? reduced : { ok: true, value };
   },
 };
