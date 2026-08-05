@@ -16,6 +16,7 @@ import {
   runManualCompaction,
   selectActiveWatermark,
 } from './manual-compact';
+import { runTurnComplete } from './turn-complete';
 import type { LoopDeps, TurnSetup } from './turn-context';
 
 // ---------------------------------------------------------------------------
@@ -190,12 +191,17 @@ export async function* maybeConsolidateAtTurnEnd(
   deps: LoopDeps,
   ctx: TurnEndCtx,
 ): AsyncGenerator<AgentEvent> {
+  if (ctx.abortSignal.aborted) return;
+  // Item 7 — the context engine's per-turn hook, fired BEFORE the maintenance
+  // gates below so an engine hears about every turn even when auto-compaction
+  // and the memory flush are both off. Logic lives in ./turn-complete.
+  await runTurnComplete(deps, ctx);
+
   // Context-economy Phase 2 — autoCompact is default ON (eval-gated flip);
   // only an explicit `autoCompact: false` disables the turn-end trigger.
   const autoCompact = deps.compaction?.autoCompact !== false;
   const flushEnabled = deps.memoryConsolidation?.enabled === true;
   if (!autoCompact && !flushEnabled) return;
-  if (ctx.abortSignal.aborted) return;
 
   // Shared cooldown: skip if a compaction fired this turn or within the window.
   if (ctx.compactedThisTurn) return;

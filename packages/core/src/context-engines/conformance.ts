@@ -295,5 +295,69 @@ export async function validateContextEngine(engine: ContextEngine): Promise<Conf
     }
   }
 
+  // Scenario 6: onTurnComplete (Item 7). Optional, like Scenario 5 — an engine
+  // that does not declare the verb skips it and still passes. When it IS
+  // declared, three things are checked, each mapping to a cache-safety property
+  // the framework relies on:
+  //   • it resolves to an object or null (never undefined, never a throw);
+  //   • every nominated id is a string that exists as a `tool_use` id in the
+  //     input — index-keyed or invented nominations would drift onto unrelated
+  //     messages as the array grows;
+  //   • the same input twice yields the same nominations, so a turn with no
+  //     state change rewrites the view byte-identically.
+  if (engine.onTurnComplete) {
+    const toolUseId = 'toolu_conformance_1';
+    const turnMessages: Message[] = [
+      userMsg('run the thing'),
+      {
+        role: 'assistant',
+        content: [{ type: 'tool_use', id: toolUseId, name: 'read_file', input: {} }],
+      },
+      {
+        role: 'user',
+        content: [
+          {
+            type: 'tool_result',
+            tool_use_id: toolUseId,
+            content: 'x'.repeat(4000),
+            is_error: false,
+          },
+        ],
+      },
+      assistantMsg('done'),
+    ];
+    const input = {
+      messages: turnMessages,
+      currentSystem: '',
+      pressureRatio: 0.9,
+      personality,
+      sessionMetadata,
+    };
+    try {
+      const first = await engine.onTurnComplete(input);
+      if (first !== null && (typeof first !== 'object' || Array.isArray(first))) {
+        failures.push('onTurnComplete: did not resolve to an object or null');
+      } else if (first !== null) {
+        const nominated = [...(first.trimToolResults ?? []), ...(first.clearToolResults ?? [])];
+        for (const id of nominated) {
+          if (typeof id !== 'string') {
+            failures.push(`onTurnComplete: nominated id ${String(id)} is not a string`);
+          } else if (id !== toolUseId) {
+            failures.push(
+              `onTurnComplete: nominated "${id}", which is not a tool_use id in the input`,
+            );
+          }
+        }
+        const second = await engine.onTurnComplete(input);
+        if (JSON.stringify(second) !== JSON.stringify(first)) {
+          failures.push('onTurnComplete: is not deterministic for identical input');
+        }
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      failures.push(`onTurnComplete: threw: ${msg}`);
+    }
+  }
+
   return { passed: failures.length === 0, failures };
 }

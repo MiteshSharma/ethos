@@ -99,6 +99,7 @@ export interface EthosPluginApi {
 
 ### Notes {#ethos-plugin-api-notes}
 
+- `ContextEngine` has two required members (`name`, `compact`) and two optional ones. `shouldCompact` is declared and conformance-tested but **not wired** — the framework never calls it. `onTurnComplete` **is** wired: it fires at the end of every turn, before the framework's turn-end auto-compaction and memory-flush gates, and lets an engine nominate stale `tool_use` ids for content-only trimming. Both are optional, so an engine built against an older SDK keeps compiling.
 - `registerClaimingHook` is NOT exposed. Claiming hooks are gateway-level routing decisions that must be coordinated centrally; plugins cannot register them.
 - Personalities registered via `registerPersonality` are NOT removed on plugin unload (the underlying registry has no `unregister`). They persist in memory until the process exits. Treat them as additive.
 - Per-personality gating is enforced by the `pluginId` tag. A plugin's tools / hooks fire only when the active personality lists the plugin in `personality.plugins:`.

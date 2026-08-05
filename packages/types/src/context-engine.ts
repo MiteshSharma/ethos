@@ -68,6 +68,52 @@ export interface ContextEngineSessionMetadata {
   turnNumber: number;
 }
 
+/**
+ * Item 7 — input to the per-turn {@link ContextEngine.onTurnComplete} hook.
+ *
+ * Deliberately NOT `ContextEngineCompactInput`: this hook fires after every
+ * turn, not only under pressure, so it carries no `targetTokens` (there is no
+ * budget to hit) and no `signal` (it runs after the turn's abort scope closed).
+ * What it adds instead is `pressureRatio` — the engine's only way to know how
+ * close the session is to the window without re-deriving the gate arithmetic.
+ */
+export interface ContextEngineTurnCompleteInput {
+  /** The LLM-facing message view as it stood at the end of the turn. */
+  messages: Message[];
+  /** The system prompt used for the turn (read-only — engines never mutate it). */
+  currentSystem: string;
+  /**
+   * Estimated whole-context usage as a fraction of the model window. Above 1.0
+   * is possible (the estimate can exceed the window before compaction runs).
+   */
+  pressureRatio: number;
+  personality: PersonalityConfig;
+  sessionMetadata: ContextEngineSessionMetadata;
+  /** Persistent store for engine-owned bookkeeping between turns. */
+  store?: ContextEngineStore;
+}
+
+/**
+ * Item 7 — what an engine may ask the framework to do after a turn.
+ *
+ * Both id lists name `tool_use` ids, never array indices: the message array
+ * grows every turn, so an index-keyed nomination would drift onto a different
+ * message. The framework applies them as CONTENT-ONLY rewrites of the matching
+ * `tool_result` blocks in the assembled view — it never removes or reorders a
+ * message, so a `tool_use` / `tool_result` pair can never be split.
+ *
+ * Nominations are cumulative and monotonic: the framework unions them into a
+ * persisted per-session state and never un-ages an id it has already aged.
+ */
+export interface ContextEngineTurnCompleteOutput {
+  /** `tool_use` ids whose results should be soft-trimmed (head + tail kept). */
+  trimToolResults?: string[];
+  /** `tool_use` ids whose results should be cleared to a placeholder. */
+  clearToolResults?: string[];
+  /** Free-form note for telemetry / `ethos doctor`. */
+  notes?: string;
+}
+
 // ---------------------------------------------------------------------------
 // Output types
 // ---------------------------------------------------------------------------
@@ -137,6 +183,27 @@ export interface ContextEngine {
    * design behaviour around it until a framework call site exists.
    */
   shouldCompact?(input: ContextEngineCompactInput): boolean;
+  /**
+   * Item 7 — per-turn hook. WIRED: the framework calls this at the end of every
+   * turn (after the `done` event, while the session lane is still held), before
+   * the turn-end auto-compaction and memory-flush gates — so an engine hears
+   * about every turn even when both of those are disabled.
+   *
+   * It is the amortization seam: instead of one long compaction stall at the
+   * pressure gate, an engine nominates a small slice of stale `tool_use` ids
+   * each turn and the framework applies them as content-only rewrites.
+   * Returning `null` (or not implementing the method at all) leaves the
+   * framework's own default micro-compaction schedule in charge.
+   *
+   * Optional by design: an engine registered from an out-of-tree package via
+   * `EthosPluginApi.registerContextEngine` keeps compiling without it.
+   *
+   * Must not throw — the framework catches and records, but a throwing hook
+   * buys the engine nothing.
+   */
+  onTurnComplete?(
+    input: ContextEngineTurnCompleteInput,
+  ): Promise<ContextEngineTurnCompleteOutput | null>;
 }
 
 // ---------------------------------------------------------------------------

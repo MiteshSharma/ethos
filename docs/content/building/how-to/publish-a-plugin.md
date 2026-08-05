@@ -33,7 +33,7 @@ cd ethos-plugin-myplugin
 pnpm init
 ```
 
-Set the `name`, `description`, the `ethos.type` manifest field, and the contract major. The loader hard-rejects plugins whose `ethos.pluginContractMajor` does not match `PLUGIN_CONTRACT_MAJOR` in `@ethosagent/plugin-contract` (currently `1`).
+Set the `name`, `description`, the `ethos.type` manifest field, and the contract major. `PLUGIN_CONTRACT_MAJOR` in `@ethosagent/plugin-contract` is currently `4`. The loader accepts any `ethos.pluginContractMajor` inside the inclusive supported range — `2` through `4` today — and rejects anything outside it.
 
 ```json
 {
@@ -48,7 +48,7 @@ Set the `name`, `description`, the `ethos.type` manifest field, and the contract
   "keywords": ["ethos", "ethos-plugin"],
   "ethos": {
     "type": "plugin",
-    "pluginContractMajor": 1
+    "pluginContractMajor": 4
   },
   "peerDependencies": {
     "@ethosagent/plugin-sdk": ">=0.1.0",
@@ -109,7 +109,7 @@ const plugin: EthosPlugin = { activate, deactivate };
 export default plugin;
 ```
 
-`EthosPluginApi` exposes six registration methods: `registerTool`, `registerVoidHook`, `registerModifyingHook`, `registerInjector`, `registerPersonality`, and `registerContextEngine`. See the [plugin SDK reference](../reference/plugin-sdk.md) for the full signatures.
+`EthosPluginApi` exposes 28 registration methods. The six you are most likely to start with are `registerTool`, `registerVoidHook`, `registerModifyingHook`, `registerInjector`, `registerPersonality`, and `registerContextEngine`. See the [plugin SDK reference](../reference/plugin-sdk.md) for the full list and signatures.
 
 ### 3. Add build config
 

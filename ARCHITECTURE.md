@@ -381,6 +381,16 @@ The personality schema is the worked example. [Personality governance](docs/cont
 | Memory contract | Any two repository maintainers | Adding, removing, or renaming a method on `MemoryProvider` | Method-count test (`memory-method-count`) |
 | Agent event union | Any two repository maintainers | Adding, removing, or renaming a variant | Variant enumeration test |
 | Tool contract | Any two repository maintainers | A change that affects already-shipped tool packages | Shape test |
+| Context engine contract | Any two repository maintainers | Adding, removing, or renaming a method on `ContextEngine` | Method-count test (`context-engine-method-count`) |
+
+Adding an **optional** method to `ContextEngine` is a §VI **Substantive** change:
+it needs two-maintainer approval, the drift gate bumped in the same commit, and
+a CHANGELOG entry naming the class. It does **not** bump
+`PLUGIN_CONTRACT_MAJOR` — per `packages/plugin-contract/src/version.ts`, only a
+field rename, a field removal, or a *required*-field addition does. Adding a
+**required** method additionally breaks every engine registered out-of-tree via
+`EthosPluginApi.registerContextEngine`, so it drags in the Plugin contract row
+above and its contract-major bump.
 
 ### Bump obligations
 
@@ -645,6 +655,14 @@ frozen_schemas:
     drift_gate: method_count_test
     frozen_method_count: 5
     frozen_methods: [prefetch, read, search, sync, list]
+
+  context_engine:
+    owner_class: any_two_maintainers
+    drift_gate: method_count_test
+    frozen_method_count: 3
+    frozen_methods: [compact, shouldCompact, onTurnComplete]
+    optional_method_addition: substantive
+    required_method_addition: substantive_plus_plugin_contract_major
 
 # ---- Exception policy (§VIII) ----------------------------------------
 # Active exceptions live in the sidecar, not here. This block defines

@@ -122,6 +122,15 @@ describe('checkPluginContractMajor', () => {
     expect(MIN_SUPPORTED_PLUGIN_CONTRACT_MAJOR).toBeLessThanOrEqual(PLUGIN_CONTRACT_MAJOR);
   });
 
+  // Item 7 stage 2 — adding the OPTIONAL `ContextEngine.onTurnComplete` method
+  // must not move the contract major. Per version.ts the only bump triggers are
+  // a field rename, a field removal, and a REQUIRED-field addition; an additive
+  // optional method stays on the same major. This pins that argument: if the
+  // method is ever made required, this assertion is the first thing to fail.
+  it('stays on major 4 across additive optional contract methods', () => {
+    expect(PLUGIN_CONTRACT_MAJOR).toBe(4);
+  });
+
   it('accepts an in-range older major (major-3 plugin on a major-4 build)', () => {
     const result = checkPluginContractMajor(3, 4, 'old-plugin');
     expect(result.ok).toBe(true);
