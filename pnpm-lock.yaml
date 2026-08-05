@@ -1378,6 +1378,9 @@ importers:
 
   extensions/platform-whatsapp:
     dependencies:
+      '@ethosagent/core':
+        specifier: workspace:*
+        version: link:../../packages/core
       '@ethosagent/types':
         specifier: workspace:*
         version: link:../../packages/types
