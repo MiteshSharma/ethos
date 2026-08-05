@@ -21,11 +21,14 @@ import type {
   ContextEngine,
   ContextEngineStore,
   ContextEngineTurnCompleteOutput,
+  Message,
   PersonalityConfig,
 } from '@ethosagent/types';
 import { evaluateGate } from './compaction';
 import { dedupHistory, toLLMMessages } from './history';
 import { reconstructFromWatermark, selectActiveWatermark } from './manual-compact';
+import { advanceMicroState } from './micro-compaction';
+import { loadMicroState, saveMicroState } from './micro-state';
 import type { LoopDeps } from './turn-context';
 import type { TurnEndCtx } from './turn-end';
 
@@ -57,7 +60,8 @@ function buildStore(deps: LoopDeps, personalityId: string): ContextEngineStore |
 }
 
 /**
- * Fire `ContextEngine.onTurnComplete` for the just-finished turn.
+ * Fire `ContextEngine.onTurnComplete` for the just-finished turn, then advance
+ * and persist the micro-compaction state the next turn's assembly applies.
  *
  * Fail-open by construction: an engine that throws is recorded and ignored —
  * turn-end maintenance and the next turn proceed unchanged.
@@ -69,9 +73,13 @@ export async function runTurnComplete(
   ctx: TurnEndCtx,
 ): Promise<ContextEngineTurnCompleteOutput | null> {
   const engine = resolveTurnEngine(deps, ctx.personality);
-  // No declared hook → no history load, no gate arithmetic. Engines that do not
-  // implement the verb pay nothing for its existence.
-  if (!engine?.onTurnComplete) return null;
+  // Micro-compaction needs somewhere to persist its state; without one it would
+  // re-derive from scratch every turn, which is exactly the churn it exists to
+  // avoid. Absent storage (tests, embedded hosts) → hook only.
+  const microEnabled = deps.storage !== undefined && deps.dataDir !== undefined;
+  // Neither a declared hook nor micro-compaction → no history load, no gate
+  // arithmetic. Engines that do not implement the verb pay nothing for it.
+  if (!engine?.onTurnComplete && !microEnabled) return null;
 
   const raw = (await deps.session.getMessages(ctx.sessionId, { limit: deps.historyLimit })).filter(
     (m) => m.role !== 'system',
@@ -95,34 +103,62 @@ export async function runTurnComplete(
     messages,
     ctx.systemPrompt,
   );
-  const store = buildStore(deps, ctx.personality.id);
+  const ratio = gate.window > 0 ? gate.current / gate.window : 0;
 
-  try {
-    const result = await engine.onTurnComplete({
-      messages,
-      currentSystem: ctx.systemPrompt,
-      pressureRatio: gate.window > 0 ? gate.current / gate.window : 0,
-      personality: ctx.personality,
-      sessionMetadata: {
-        sessionId: ctx.sessionId,
-        sessionKey: ctx.sessionKey,
-        turnNumber: ctx.turnNumber,
-      },
-      ...(store ? { store } : {}),
-    });
-    if (result?.notes) {
+  let nomination: ContextEngineTurnCompleteOutput | null = null;
+  if (engine?.onTurnComplete) {
+    const store = buildStore(deps, ctx.personality.id);
+    try {
+      nomination = await engine.onTurnComplete({
+        messages,
+        currentSystem: ctx.systemPrompt,
+        pressureRatio: ratio,
+        personality: ctx.personality,
+        sessionMetadata: {
+          sessionId: ctx.sessionId,
+          sessionKey: ctx.sessionKey,
+          turnNumber: ctx.turnNumber,
+        },
+        ...(store ? { store } : {}),
+      });
+      if (nomination?.notes) {
+        deps.observability?.recordCompaction({
+          code: 'context_engine_turn_complete',
+          cause: `${engine.name}: ${nomination.notes}`,
+        });
+      }
+    } catch (err) {
+      nomination = null;
       deps.observability?.recordCompaction({
-        code: 'context_engine_turn_complete',
-        cause: `${engine.name}: ${result.notes}`,
+        severity: 'warn',
+        code: 'context_engine_turn_complete_failed',
+        cause: err instanceof Error ? err.message : String(err),
       });
     }
-    return result ?? null;
-  } catch (err) {
-    deps.observability?.recordCompaction({
-      severity: 'warn',
-      code: 'context_engine_turn_complete_failed',
-      cause: err instanceof Error ? err.message : String(err),
-    });
-    return null;
   }
+
+  if (microEnabled) await advanceMicro(deps, ctx.sessionId, messages, ratio, nomination);
+  return nomination;
+}
+
+/**
+ * Advance and persist micro-compaction state. Writes only at a step crossing —
+ * between crossings the state is unchanged, so there is nothing to write and
+ * the next turn's assembly reapplies the identical set (cache-safe property 2).
+ */
+async function advanceMicro(
+  deps: LoopDeps,
+  sessionId: string,
+  messages: Message[],
+  ratio: number,
+  nomination: ContextEngineTurnCompleteOutput | null,
+): Promise<void> {
+  const prev = await loadMicroState(deps.storage, deps.dataDir, sessionId);
+  const advanced = advanceMicroState(prev, messages, ratio, nomination);
+  if (!advanced.changed) return;
+  await saveMicroState(deps.storage, deps.dataDir, sessionId, advanced.state);
+  deps.observability?.recordCompaction({
+    code: 'micro_compaction_step',
+    cause: `level ${prev.level} → ${advanced.state.level}: ${advanced.state.trimmed.length} trimmed, ${advanced.state.cleared.length} cleared`,
+  });
 }

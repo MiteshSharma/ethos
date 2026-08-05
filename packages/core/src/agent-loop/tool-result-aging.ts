@@ -14,6 +14,7 @@
 //     message, so a tool_use / tool_result pair can never be split.
 
 import type { Message, MessageContent } from '@ethosagent/types';
+import { ghostSkillMarker } from './ghost-skills';
 
 export type AgingLevel = 'none' | 'soft' | 'hard';
 
@@ -67,9 +68,15 @@ function preserveSpillPath(original: string, rewritten: string): string {
   return `${rewritten}\n[full output written to ${path} — use read_file to retrieve it]`;
 }
 
-/** Hard-clear replacement for one tool result, preserving any spill path. */
-function hardClear(content: string): string {
-  return preserveSpillPath(content, HARD_PLACEHOLDER);
+/**
+ * Hard-clear replacement for one tool result, preserving any spill path. When
+ * the cleared result is a `get_skill` body (Item 7 ghost-skill defense), the
+ * generic placeholder is replaced by one that NAMES the skill — the generic
+ * text tells the model something was cleared, but not that a capability its
+ * prompt still advertises has quietly stopped being loaded.
+ */
+function hardClear(content: string, skillName?: string): string {
+  return preserveSpillPath(content, skillName ? ghostSkillMarker(skillName) : HARD_PLACEHOLDER);
 }
 
 export const DEFAULT_AGING_STATE: AgingState = { level: 'none', soft: [], hard: [] };
@@ -105,8 +112,12 @@ export function softTrimContent(content: string, keepChars = SOFT_TRIM_KEEP_CHAR
 /**
  * tool_use ids from assistant turns OLDER than the most-recent
  * `keepRecentAssistantTurns` tool-using turns. These are the aging candidates.
+ *
+ * Exported for micro-compaction (Item 7), which draws from the SAME candidate
+ * pool in the same oldest-first order — one definition of "stale enough to
+ * rewrite", not two that can drift apart.
  */
-function oldToolUseIds(messages: Message[], keepRecentAssistantTurns: number): string[] {
+export function oldToolUseIds(messages: Message[], keepRecentAssistantTurns: number): string[] {
   const toolTurnIdx: number[] = [];
   messages.forEach((m, i) => {
     if (
@@ -154,20 +165,33 @@ export function advanceAgingState(
   return { state, changed: true };
 }
 
+/** Options shared by every content-only tool_result rewrite. */
+export interface RewriteOpts {
+  /**
+   * `tool_use_id` → skill name for `get_skill` results (Item 7 ghost-skill
+   * defense). Absent / empty → generic placeholders, which is what
+   * `injection_mode: 'full'` personalities get, since their skill bodies live
+   * in the static prefix and are never pruned.
+   */
+  skillNames?: Map<string, string>;
+}
+
 /**
- * Apply an aging state to the assembled message view. Returns a new array with
- * aged tool_result content rewritten, plus the index of the last aged message
- * (a stable `cache_control` boundary) when anything was aged.
+ * CONTENT-ONLY, IN-PLACE rewrite of the tool_result blocks named by `soft` and
+ * `hard`. Shared by tool-result aging and Item 7 micro-compaction so there is
+ * exactly one implementation of the invariant that matters: no message is ever
+ * removed, added, or reordered, so a `tool_use` / `tool_result` pair can never
+ * be split. Returns the index of the last rewritten message — a stable
+ * `cache_control` boundary — when anything changed.
  */
-export function applyAgingToView(
+export function rewriteToolResults(
   messages: Message[],
-  state: AgingState,
+  soft: ReadonlySet<string>,
+  hard: ReadonlySet<string>,
+  opts?: RewriteOpts,
 ): { messages: Message[]; cacheBreakpoint?: number } {
-  if (state.level === 'none' || (state.soft.length === 0 && state.hard.length === 0)) {
-    return { messages };
-  }
-  const softSet = new Set(state.soft);
-  const hardSet = new Set(state.hard);
+  if (soft.size === 0 && hard.size === 0) return { messages };
+  const skillNames = opts?.skillNames;
   let lastAgedIdx = -1;
 
   const out = messages.map((m, idx) => {
@@ -175,11 +199,11 @@ export function applyAgingToView(
     let touched = false;
     const content = m.content.map((b) => {
       if (b.type !== 'tool_result') return b;
-      if (hardSet.has(b.tool_use_id)) {
+      if (hard.has(b.tool_use_id)) {
         touched = true;
-        return { ...b, content: hardClear(b.content) };
+        return { ...b, content: hardClear(b.content, skillNames?.get(b.tool_use_id)) };
       }
-      if (softSet.has(b.tool_use_id)) {
+      if (soft.has(b.tool_use_id)) {
         const trimmed = softTrimContent(b.content);
         if (trimmed !== b.content) {
           touched = true;
@@ -194,4 +218,18 @@ export function applyAgingToView(
   });
 
   return lastAgedIdx >= 0 ? { messages: out, cacheBreakpoint: lastAgedIdx } : { messages: out };
+}
+
+/**
+ * Apply an aging state to the assembled message view. Returns a new array with
+ * aged tool_result content rewritten, plus the index of the last aged message
+ * (a stable `cache_control` boundary) when anything was aged.
+ */
+export function applyAgingToView(
+  messages: Message[],
+  state: AgingState,
+  opts?: RewriteOpts,
+): { messages: Message[]; cacheBreakpoint?: number } {
+  if (state.level === 'none') return { messages };
+  return rewriteToolResults(messages, new Set(state.soft), new Set(state.hard), opts);
 }

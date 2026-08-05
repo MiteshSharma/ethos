@@ -8,6 +8,7 @@ import {
 } from '../../attachment-text-resolver';
 import { estimateMessagesTokens, estimateTokens } from '../../context-engines/token-estimator';
 import { maybeCompact } from '../compaction';
+import { skillCallsFromMessages, usesSkillIndexMode } from '../ghost-skills';
 import { dedupHistory, toLLMMessages } from '../history';
 import {
   COMPACTION_TAIL_KEEP,
@@ -15,6 +16,8 @@ import {
   reconstructFromWatermark,
   selectActiveWatermark,
 } from '../manual-compact';
+import { applyMicroToView } from '../micro-compaction';
+import { loadMicroState } from '../micro-state';
 import {
   type AgingState,
   advanceAgingState,
@@ -238,9 +241,17 @@ export async function* assembleContext(
   // tail) instead of shipping the raw prefix again. This is what makes the
   // cooldown ship the COMPACTED view and `/compact` durable across turns. The
   // raw `history` still drives injectors/hooks; only the LLM view is compacted.
+  //
+  // Item 7 — ghost-skill defense. In `skills.injection_mode: 'index'` (the
+  // default) a skill's BODY arrives as a `get_skill` tool_result in the message
+  // array while only a stub sits in the prompt, so every pruner below can strip
+  // the instructions and leave the advertisement. Under `'full'` the body is in
+  // the static prefix and no pruner touches it — the markers are gated off.
+  const skillMarkers = usesSkillIndexMode(personality.skills?.injection_mode);
+  const ghostOpts = skillMarkers ? { skillMarkers: true } : undefined;
   const activeWatermark = selectActiveWatermark(await deps.session.listCompressions(sessionId));
   const reconstructed = activeWatermark
-    ? reconstructFromWatermark(history, activeWatermark)
+    ? reconstructFromWatermark(history, activeWatermark, ghostOpts)
     : { history, applied: false };
   const replayHistory = reconstructed.history;
   const watermarkApplied = reconstructed.applied;
@@ -472,7 +483,7 @@ export async function* assembleContext(
   // Q1 — collapse exact-duplicate tool results before building the
   // LLM-facing history, so re-reads of the same file don't burn tokens.
   // `replayHistory` carries any active compaction watermark (summary + tail).
-  let llmMessages = toLLMMessages(dedupHistory(replayHistory));
+  let llmMessages = toLLMMessages(dedupHistory(replayHistory, ghostOpts));
   // Phase 1c — actuals-first gate signal. The most recent assistant turn's
   // real input tokens (+ measured static sections system+tools) were persisted
   // by Phase 0; prefer them over the chars/4 estimate. Absent on the first
@@ -503,9 +514,23 @@ export async function* assembleContext(
     if (advanced.changed) {
       await saveAgingState(deps.storage, deps.dataDir, sessionId, advanced.state);
     }
-    const aged = applyAgingToView(llmMessages, advanced.state);
+    // Item 7 — micro-compaction is applied FIRST, then aging on top. Both are
+    // content-only rewrites of the same tool_result blocks, and aging's soft
+    // trim is a no-op on content it cannot shrink further, so the order is
+    // stable and the composition is idempotent. The state itself was advanced
+    // and persisted at the previous turn's end (agent-loop/turn-complete.ts);
+    // assembly only READS it, so nothing here varies within a turn.
+    const skillNames = skillMarkers ? skillCallsFromMessages(llmMessages) : undefined;
+    const rewriteOpts = skillNames?.size ? { skillNames } : undefined;
+    const micro = applyMicroToView(
+      llmMessages,
+      await loadMicroState(deps.storage, deps.dataDir, sessionId),
+      rewriteOpts,
+    );
+    const aged = applyAgingToView(micro.messages, advanced.state, rewriteOpts);
     llmMessages = aged.messages;
-    agingCacheBreakpoint = aged.cacheBreakpoint;
+    agingCacheBreakpoint = Math.max(aged.cacheBreakpoint ?? -1, micro.cacheBreakpoint ?? -1);
+    if (agingCacheBreakpoint < 0) agingCacheBreakpoint = undefined;
   }
   // E4 — pre-LLM compaction. If estimated context usage already exceeds
   // the personality's pressure threshold (80% of the model's window by

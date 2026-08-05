@@ -8,6 +8,7 @@ import type {
 import type { SummarizerFn } from '../context-engines/semantic-summary';
 import { estimateMessagesTokens, estimateTokens } from '../context-engines/token-estimator';
 import type { AgentLoopObservability } from '../observability/agent-loop-observability';
+import { droppedSkillNames, ghostSkillNotice, skillCallsFromHistory } from './ghost-skills';
 import { dedupHistory, toLLMMessages } from './history';
 
 // ---------------------------------------------------------------------------
@@ -87,16 +88,34 @@ export function computeKeptTailBoundary(
   return { index, keptFromMessageId: history[index]?.id };
 }
 
+/** Options for {@link reconstructFromWatermark}. */
+export interface ReconstructOpts {
+  /**
+   * Item 7 — emit a ghost-skill notice naming any skill whose `get_skill` body
+   * is inside the dropped prefix. Set only for `skills.injection_mode: 'index'`
+   * personalities; under `'full'` the body lives in the static prefix and is
+   * never dropped.
+   */
+  skillMarkers?: boolean;
+}
+
 /**
  * Reconstruct the LLM-facing history from a persisted watermark. Everything
  * strictly older than the boundary is replaced by a single synthetic summary
  * message (when the watermark carries summary text) or dropped (engines that
  * don't summarize). The boundary and everything after it — including messages
  * appended on later turns — are kept verbatim.
+ *
+ * Item 7 — this is the one pruner that leaves NO trace by default: a dropped
+ * `get_skill` result takes the skill's instructions with it while the index stub
+ * in the system prompt still advertises the skill. With `skillMarkers` on, the
+ * dropped names are carried into the synthetic message so the model knows to
+ * re-load rather than confabulate.
  */
 export function reconstructFromWatermark(
   history: StoredMessage[],
   watermark: CompressionEvent,
+  opts?: ReconstructOpts,
 ): { history: StoredMessage[]; applied: boolean } {
   const boundaryId = watermark.keptFromMessageId;
   if (!boundaryId) return { history, applied: false };
@@ -106,19 +125,34 @@ export function reconstructFromWatermark(
   // raw summarized prefix. idx === 0 → nothing older in the window to drop.
   const cut = idx > 0 ? idx : 0;
   const kept = history.slice(cut);
+  const ghosts =
+    opts?.skillMarkers && cut > 0
+      ? droppedSkillNames(history.slice(0, cut), skillCallsFromHistory(history))
+      : [];
   if (!watermark.summaryText) {
     // Drop-only watermark (e.g. drop_oldest): the drop survives via the boundary,
-    // but there is no summary message to prepend.
-    return { history: kept, applied: cut > 0 };
+    // but there is no summary message to prepend — unless skill bodies went with
+    // it, in which case the notice becomes the synthetic prefix message.
+    if (ghosts.length === 0) return { history: kept, applied: cut > 0 };
+    return {
+      history: [syntheticPrefix(watermark, ghostSkillNotice(ghosts)), ...kept],
+      applied: true,
+    };
   }
-  const summaryMsg: StoredMessage = {
+  const summary = renderWatermarkSummary(watermark.summaryText);
+  const content = ghosts.length > 0 ? `${summary}\n\n${ghostSkillNotice(ghosts)}` : summary;
+  return { history: [syntheticPrefix(watermark, content), ...kept], applied: true };
+}
+
+/** The single synthetic assistant row that stands in for the dropped prefix. */
+function syntheticPrefix(watermark: CompressionEvent, content: string): StoredMessage {
+  return {
     id: `wm:${watermark.id}`,
     sessionId: watermark.sessionId,
     role: 'assistant',
-    content: renderWatermarkSummary(watermark.summaryText),
+    content,
     timestamp: watermark.createdAt,
   };
-  return { history: [summaryMsg, ...kept], applied: true };
 }
 
 // ---------------------------------------------------------------------------
