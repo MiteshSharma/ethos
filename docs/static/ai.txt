@@ -20,7 +20,7 @@ Citation: preferred
 #   /<page>.md       — raw markdown at every page URL
 #
 # Source repository:
-#   https://github.com/MiteshSharma/ethos
+#   https://github.com/ethosagent/ethos
 #
 # Contact for AI usage questions:
-#   https://github.com/MiteshSharma/ethos/issues
+#   https://github.com/ethosagent/ethos/issues

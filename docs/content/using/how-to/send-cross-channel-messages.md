@@ -143,7 +143,7 @@ Allowlist must contain both targets. The agent calls `send_message` twice — ou
 
 ### Multi-bot routing {#example-multi-bot}
 
-If your `~/.ethos/config.yaml` has multiple Slack apps (`slack.apps.0.*`, `slack.apps.1.*`), the gateway uses the **first** adapter for each platform when send_message dispatches. Different Slack workspaces aren't selectable today — track [`MessagingSendFn`'s `botKey`](https://github.com/MiteshSharma/ethos/blob/main/extensions/tools-messaging/src/index.ts) parameter for the in-flight extension.
+If your `~/.ethos/config.yaml` has multiple Slack apps (`slack.apps.0.*`, `slack.apps.1.*`), the gateway uses the **first** adapter for each platform when send_message dispatches. Different Slack workspaces aren't selectable today — track [`MessagingSendFn`'s `botKey`](https://github.com/ethosagent/ethos/blob/main/extensions/tools-messaging/src/index.ts) parameter for the in-flight extension.
 
 ## Troubleshoot
 

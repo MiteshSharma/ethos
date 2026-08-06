@@ -13,13 +13,13 @@ If you have found a security issue in Ethos, this page tells you how to report i
 
 | Material | Where |
 |---|---|
-| Reporting channel | [GitHub private security advisories](https://github.com/MiteshSharma/ethos/security/advisories/new) |
+| Reporting channel | [GitHub private security advisories](https://github.com/ethosagent/ethos/security/advisories/new) |
 | In-scope controls catalogue | [Security controls](./controls.md) |
 | Out-of-scope reference | [Threat model — out of scope](./threat-model.md#discussion) |
 
 ## Reporting {#reporting}
 
-Open a GitHub private security advisory at `https://github.com/MiteshSharma/ethos/security/advisories/new`. The advisory is private until disclosure — only repo maintainers see it. We will add a dedicated security mailbox once one is set up; until then, the GitHub advisory is the canonical channel.
+Open a GitHub private security advisory at `https://github.com/ethosagent/ethos/security/advisories/new`. The advisory is private until disclosure — only repo maintainers see it. We will add a dedicated security mailbox once one is set up; until then, the GitHub advisory is the canonical channel.
 
 A good report includes:
 

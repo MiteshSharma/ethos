@@ -142,7 +142,7 @@ The cron fires under whatever personality you bound to it; that personality dele
 
 ## See also
 
-- [`coding-agent`](https://github.com/MiteshSharma/ethos/blob/main/skills/data/software-development/coding-agent/SKILL.md) — the bundled skill with adapters for claude-code, codex, opencode, and pi.
+- [`coding-agent`](https://github.com/ethosagent/ethos/blob/main/skills/data/software-development/coding-agent/SKILL.md) — the bundled skill with adapters for claude-code, codex, opencode, and pi.
 - [Codex CLI documentation](https://github.com/openai/codex) — auth flow + flags reference.
 - [Cron tools reference](../../building/reference/cron-tools.md) — scheduling recurring delegations.
 - [`delegate_task` tool](../../building/reference/tool-interface.md) — the framework primitive `coding-agent` builds on.

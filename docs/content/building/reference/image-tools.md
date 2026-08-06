@@ -14,7 +14,7 @@ The `image_generate` [tool](../../getting-started/glossary.md#tool) generates PN
 
 ## Source {#source}
 
-[`extensions/tools-image/src/index.ts`](https://github.com/MiteshSharma/ethos/tree/main/extensions/tools-image/src/index.ts). Factory: `createImageTools(): Tool[]`.
+[`extensions/tools-image/src/index.ts`](https://github.com/ethosagent/ethos/tree/main/extensions/tools-image/src/index.ts). Factory: `createImageTools(): Tool[]`.
 
 ## Tool surface {#tool-surface}
 

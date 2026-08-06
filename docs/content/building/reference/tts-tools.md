@@ -13,7 +13,7 @@ updated: 2026-05-17
 
 ## Source {#source}
 
-Tool factory: [`extensions/tools-tts/src/index.ts`](https://github.com/MiteshSharma/ethos/blob/main/extensions/tools-tts/src/index.ts) (`createTtsTools`). Provider implementations under [`extensions/tools-tts/src/providers/`](https://github.com/MiteshSharma/ethos/blob/main/extensions/tools-tts/src/providers). Wiring: [`packages/wiring/src/index.ts`](https://github.com/MiteshSharma/ethos/blob/main/packages/wiring/src/index.ts) registers the tool with the provider built from `config.auxiliary?.tts`.
+Tool factory: [`extensions/tools-tts/src/index.ts`](https://github.com/ethosagent/ethos/blob/main/extensions/tools-tts/src/index.ts) (`createTtsTools`). Provider implementations under [`extensions/tools-tts/src/providers/`](https://github.com/ethosagent/ethos/blob/main/extensions/tools-tts/src/providers). Wiring: [`packages/wiring/src/index.ts`](https://github.com/ethosagent/ethos/blob/main/packages/wiring/src/index.ts) registers the tool with the provider built from `config.auxiliary?.tts`.
 
 ## Schema {#schema}
 

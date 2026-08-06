@@ -11,7 +11,7 @@ updated: 2026-05-12
 
 ## Source {#source}
 
-Interface in [`packages/types/src/storage.ts`](https://github.com/MiteshSharma/ethos/blob/main/packages/types/src/storage.ts). Implementations in [`packages/storage-fs/src/`](https://github.com/MiteshSharma/ethos/blob/main/packages/storage-fs/src/index.ts).
+Interface in [`packages/types/src/storage.ts`](https://github.com/ethosagent/ethos/blob/main/packages/types/src/storage.ts). Implementations in [`packages/storage-fs/src/`](https://github.com/ethosagent/ethos/blob/main/packages/storage-fs/src/index.ts).
 
 ## Storage {#storage}
 

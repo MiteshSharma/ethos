@@ -11,7 +11,7 @@ The [tool](../../getting-started/glossary.md#tool) contract: what a tool must pr
 
 ## Source {#source}
 
-[`packages/types/src/tool.ts`](https://github.com/MiteshSharma/ethos/blob/main/packages/types/src/tool.ts) and [`packages/types/src/tool-reducer.ts`](https://github.com/MiteshSharma/ethos/blob/main/packages/types/src/tool-reducer.ts). Re-exported from `@ethosagent/types`.
+[`packages/types/src/tool.ts`](https://github.com/ethosagent/ethos/blob/main/packages/types/src/tool.ts) and [`packages/types/src/tool-reducer.ts`](https://github.com/ethosagent/ethos/blob/main/packages/types/src/tool-reducer.ts). Re-exported from `@ethosagent/types`.
 
 ## ToolResult {#tool-result}
 

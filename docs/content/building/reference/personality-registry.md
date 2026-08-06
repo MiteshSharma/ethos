@@ -11,7 +11,7 @@ updated: 2026-05-22
 
 ## Source {#source}
 
-[`extensions/personalities/src/index.ts`](https://github.com/MiteshSharma/ethos/blob/main/extensions/personalities/src/index.ts). Ships as `@ethosagent/personalities`.
+[`extensions/personalities/src/index.ts`](https://github.com/ethosagent/ethos/blob/main/extensions/personalities/src/index.ts). Ships as `@ethosagent/personalities`.
 
 ## FilePersonalityRegistry {#file-personality-registry}
 

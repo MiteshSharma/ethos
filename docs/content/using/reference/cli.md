@@ -11,7 +11,7 @@ The `ethos` binary dispatches a single top-level subcommand. Running it with no 
 
 ## Source {#source}
 
-Top-level dispatch lives in [`apps/ethos/src/index.ts`](https://github.com/MiteshSharma/ethos/blob/main/apps/ethos/src/index.ts). Each `case` in the `switch` is a subcommand; per-command flag parsing lives in [`apps/ethos/src/commands/`](https://github.com/MiteshSharma/ethos/tree/main/apps/ethos/src/commands).
+Top-level dispatch lives in [`apps/ethos/src/index.ts`](https://github.com/ethosagent/ethos/blob/main/apps/ethos/src/index.ts). Each `case` in the `switch` is a subcommand; per-command flag parsing lives in [`apps/ethos/src/commands/`](https://github.com/ethosagent/ethos/tree/main/apps/ethos/src/commands).
 
 ## Synopsis {#synopsis}
 
@@ -293,7 +293,7 @@ ethos process logs 6f6c1e2a-... --lines 50 --stream stderr
 ethos process stop 6f6c1e2a-...
 ```
 
-`logs` and `stop` exit `1` for an unknown id (`PROCESS_NOT_FOUND`). The `process_*` tool family it mirrors — `process_start`, `process_list`, `process_logs`, `process_stop`, `process_wait` — is documented in [`extensions/tools-process/README.md`](https://github.com/MiteshSharma/ethos/blob/main/extensions/tools-process/README.md); it is gated by a personality's `toolset.yaml` like every other tool.
+`logs` and `stop` exit `1` for an unknown id (`PROCESS_NOT_FOUND`). The `process_*` tool family it mirrors — `process_start`, `process_list`, `process_logs`, `process_stop`, `process_wait` — is documented in [`extensions/tools-process/README.md`](https://github.com/ethosagent/ethos/blob/main/extensions/tools-process/README.md); it is gated by a personality's `toolset.yaml` like every other tool.
 
 ## ethos logs {#ethos-logs}
 

@@ -13,7 +13,7 @@ updated: 2026-05-17
 
 ## Source {#source}
 
-Tool factory: [`extensions/tools-messaging/src/index.ts`](https://github.com/MiteshSharma/ethos/blob/main/extensions/tools-messaging/src/index.ts) (`createMessagingTools`). Gateway routing: [`extensions/gateway/src/index.ts` `sendTo()`](https://github.com/MiteshSharma/ethos/blob/main/extensions/gateway/src/index.ts). Allowlist wiring: [`packages/wiring/src/index.ts` `loadMessagingAllowlist()`](https://github.com/MiteshSharma/ethos/blob/main/packages/wiring/src/index.ts).
+Tool factory: [`extensions/tools-messaging/src/index.ts`](https://github.com/ethosagent/ethos/blob/main/extensions/tools-messaging/src/index.ts) (`createMessagingTools`). Gateway routing: [`extensions/gateway/src/index.ts` `sendTo()`](https://github.com/ethosagent/ethos/blob/main/extensions/gateway/src/index.ts). Allowlist wiring: [`packages/wiring/src/index.ts` `loadMessagingAllowlist()`](https://github.com/ethosagent/ethos/blob/main/packages/wiring/src/index.ts).
 
 ## Schema {#schema}
 
@@ -65,7 +65,7 @@ See [the messaging.json reference](../../using/reference/messaging-json.md) for 
 
 ## Wiring {#wiring}
 
-The tool is registered for every AgentLoop in [`packages/wiring/src/index.ts`](https://github.com/MiteshSharma/ethos/blob/main/packages/wiring/src/index.ts):
+The tool is registered for every AgentLoop in [`packages/wiring/src/index.ts`](https://github.com/ethosagent/ethos/blob/main/packages/wiring/src/index.ts):
 
 ```ts
 for (const tool of createMessagingTools({
@@ -77,7 +77,7 @@ for (const tool of createMessagingTools({
 })) tools.register(tool);
 ```
 
-The `gatewaySendFn` is a mutable that starts as a "not available" stub. When `ethos gateway` boots, [`apps/ethos/src/commands/gateway.ts`](https://github.com/MiteshSharma/ethos/blob/main/apps/ethos/src/commands/gateway.ts) replaces it with `gateway.sendTo(...)` for every active loop. In CLI mode (no gateway), the stub remains and the tool returns the "Gateway not active" error.
+The `gatewaySendFn` is a mutable that starts as a "not available" stub. When `ethos gateway` boots, [`apps/ethos/src/commands/gateway.ts`](https://github.com/ethosagent/ethos/blob/main/apps/ethos/src/commands/gateway.ts) replaces it with `gateway.sendTo(...)` for every active loop. In CLI mode (no gateway), the stub remains and the tool returns the "Gateway not active" error.
 
 ## Gateway routing {#gateway-routing}
 

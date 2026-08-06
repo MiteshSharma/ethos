@@ -54,7 +54,7 @@ Launch it. The bootstrap takes ~3 minutes; watch progress with **EC2 → Instanc
 
 ### 2. The bootstrap script {#the-bootstrap-script}
 
-The canonical script lives at [scripts/ec2-bootstrap.sh](https://github.com/MiteshSharma/ethos/blob/main/scripts/ec2-bootstrap.sh) in the repo. Paste its contents into the **User data** field at launch — or fetch it locally first if you want to review or modify:
+The canonical script lives at [scripts/ec2-bootstrap.sh](https://github.com/ethosagent/ethos/blob/main/scripts/ec2-bootstrap.sh) in the repo. Paste its contents into the **User data** field at launch — or fetch it locally first if you want to review or modify:
 
 ```bash
 curl -O https://ethosagent.ai/ec2-bootstrap.sh

@@ -61,7 +61,7 @@ The run is idempotent. If a target file already exists, the migrator skips it; p
 | Provider API keys | merged into `~/.ethos/config.yaml` |
 | `SOUL.md` (when present) | new personality at `~/.ethos/personalities/migrated/` |
 
-The implementation lives in [`extensions/claw-migrate/src/`](https://github.com/MiteshSharma/ethos/blob/main/extensions/claw-migrate/src/index.ts).
+The implementation lives in [`extensions/claw-migrate/src/`](https://github.com/ethosagent/ethos/blob/main/extensions/claw-migrate/src/index.ts).
 
 The two presets:
 
@@ -93,7 +93,7 @@ The migration merges API keys into `~/.ethos/config.yaml` but does not re-run th
 ethos doctor
 ```
 
-If the OpenClaw config used a provider name Ethos does not recognise (the catalog lives in [`packages/wiring/src/provider-catalog.ts`](https://github.com/MiteshSharma/ethos/blob/main/packages/wiring/src/provider-catalog.ts)), `doctor` flags it and `ethos setup auth` fixes it.
+If the OpenClaw config used a provider name Ethos does not recognise (the catalog lives in [`packages/wiring/src/provider-catalog.ts`](https://github.com/ethosagent/ethos/blob/main/packages/wiring/src/provider-catalog.ts)), `doctor` flags it and `ethos setup auth` fixes it.
 
 ## Verify
 

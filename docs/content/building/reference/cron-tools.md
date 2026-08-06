@@ -13,7 +13,7 @@ A single action-dispatch `cron` tool lets any personality schedule recurring wor
 
 ## Source {#source}
 
-Factory: [`extensions/tools-cron/src/index.ts`](https://github.com/MiteshSharma/ethos/blob/main/extensions/tools-cron/src/index.ts) (`createCronTool(scheduler)`). Scheduler implementation: [`@ethosagent/cron`](https://github.com/MiteshSharma/ethos/tree/main/packages/cron). Wiring at [`packages/wiring/src/index.ts`](https://github.com/MiteshSharma/ethos/blob/main/packages/wiring/src/index.ts) — registers the tool when `cronScheduler` is passed in via `CreateAgentLoopOptions`.
+Factory: [`extensions/tools-cron/src/index.ts`](https://github.com/ethosagent/ethos/blob/main/extensions/tools-cron/src/index.ts) (`createCronTool(scheduler)`). Scheduler implementation: [`@ethosagent/cron`](https://github.com/ethosagent/ethos/tree/main/packages/cron). Wiring at [`packages/wiring/src/index.ts`](https://github.com/ethosagent/ethos/blob/main/packages/wiring/src/index.ts) — registers the tool when `cronScheduler` is passed in via `CreateAgentLoopOptions`.
 
 ## Availability {#availability}
 
@@ -201,6 +201,6 @@ cron({ action: "remove", id: "morning-briefing" })
 
 ## See also {#see-also}
 
-- [`@ethosagent/cron` package](https://github.com/MiteshSharma/ethos/tree/main/packages/cron) — the scheduler implementation.
+- [`@ethosagent/cron` package](https://github.com/ethosagent/ethos/tree/main/packages/cron) — the scheduler implementation.
 - [`send_message` reference](messaging-tools.md) — pair with `cron` to schedule cross-channel notifications.
 - [CLI reference](../../using/reference/cli.md) — `ethos cron list / pause / resume / delete / run / create` for the operator-driven side of the same store.

@@ -7,7 +7,7 @@
   "description": "Ethos desktop app",
   "repository": {
     "type": "git",
-    "url": "https://github.com/MiteshSharma/ethos.git"
+    "url": "https://github.com/ethosagent/ethos.git"
   },
   "main": "dist/main/index.js",
   "scripts": {

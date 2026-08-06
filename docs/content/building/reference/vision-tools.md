@@ -16,7 +16,7 @@ It is intentionally **not** a streaming chat surface. Each call returns one enve
 
 ## Source {#source}
 
-The tool factory lives in [`extensions/tools-vision/src/index.ts`](https://github.com/MiteshSharma/ethos/blob/main/extensions/tools-vision/src/index.ts) (`createVisionTools`). The capability table lives in [`extensions/tools-vision/src/pricing.ts`](https://github.com/MiteshSharma/ethos/blob/main/extensions/tools-vision/src/pricing.ts). Wiring registers the tool in [`packages/wiring/src/index.ts`](https://github.com/MiteshSharma/ethos/blob/main/packages/wiring/src/index.ts), mirroring the `auxiliary.compression` pattern.
+The tool factory lives in [`extensions/tools-vision/src/index.ts`](https://github.com/ethosagent/ethos/blob/main/extensions/tools-vision/src/index.ts) (`createVisionTools`). The capability table lives in [`extensions/tools-vision/src/pricing.ts`](https://github.com/ethosagent/ethos/blob/main/extensions/tools-vision/src/pricing.ts). Wiring registers the tool in [`packages/wiring/src/index.ts`](https://github.com/ethosagent/ethos/blob/main/packages/wiring/src/index.ts), mirroring the `auxiliary.compression` pattern.
 
 ## Opting in {#opting-in}
 
@@ -48,7 +48,7 @@ Exactly one of `file_path` / `file_url` / `file_base64` must be set.
 | Field | Type | Required | Description |
 |---|---|---|---|
 | `file_path` | absolute path | one-of | Local file. Must lie inside the personality's `fs_reach` allowlist. |
-| `file_url` | HTTPS URL | one-of | Fetched through the [`@ethosagent/safety-network`](https://github.com/MiteshSharma/ethos/blob/main/extensions/safety-network) SSRF gate. Max 32 MB. |
+| `file_url` | HTTPS URL | one-of | Fetched through the [`@ethosagent/safety-network`](https://github.com/ethosagent/ethos/blob/main/extensions/safety-network) SSRF gate. Max 32 MB. |
 | `file_base64` | base64 string | one-of | Raw bytes. Optional `data:<mime>;base64,` prefix accepted. |
 | `prompt` | string | yes | Question or instruction for the model. |
 | `model` | string | no | Override; otherwise follows the model fallback chain below. |
@@ -189,7 +189,7 @@ Companion tool that analyses a video accessible via HTTPS URL. Same provider plu
 
 ### Source {#video-source}
 
-[`extensions/tools-vision/src/video.ts`](https://github.com/MiteshSharma/ethos/blob/main/extensions/tools-vision/src/video.ts) (`createVideoAnalyzeTool`). Capability column lives in the same pricing table: [`extensions/tools-vision/src/pricing.ts`](https://github.com/MiteshSharma/ethos/blob/main/extensions/tools-vision/src/pricing.ts) — providers without video support refuse with `VIDEO_NOT_SUPPORTED`.
+[`extensions/tools-vision/src/video.ts`](https://github.com/ethosagent/ethos/blob/main/extensions/tools-vision/src/video.ts) (`createVideoAnalyzeTool`). Capability column lives in the same pricing table: [`extensions/tools-vision/src/pricing.ts`](https://github.com/ethosagent/ethos/blob/main/extensions/tools-vision/src/pricing.ts) — providers without video support refuse with `VIDEO_NOT_SUPPORTED`.
 
 ### Schema {#video-schema}
 
@@ -221,7 +221,7 @@ Returns the model's text answer plus token usage and dollar cost in the standard
 
 ## See also {#see-also}
 
-- [`extensions/tools-vision/README.md`](https://github.com/MiteshSharma/ethos/blob/main/extensions/tools-vision/README.md) — package-level reference with the same surface plus the file map.
+- [`extensions/tools-vision/README.md`](https://github.com/ethosagent/ethos/blob/main/extensions/tools-vision/README.md) — package-level reference with the same surface plus the file map.
 - [`browser-tools`](browser-tools.md) — pair `browser_screenshot` with `vision_analyze` for vision-on-page.
 - [Personality config reference](../../using/reference/personality-yaml.md#toolset-yaml) — how `toolset.yaml` gates which personalities see `vision_analyze`.
 - [`config.yaml` reference](../../using/reference/config-yaml.md) — every field these subcommands read, including `auxiliary.*`.

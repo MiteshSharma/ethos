@@ -90,7 +90,7 @@ personality: researcher
 | `ollama` | `http://localhost:11434/v1` | n/a — local | No API key; the wizard offers the served model list. |
 | `vllm` | `http://localhost:8000/v1` | n/a — local | No API key; the wizard offers the served model list. |
 
-Provider strings are validated against [`packages/wiring/src/provider-catalog.ts`](https://github.com/MiteshSharma/ethos/blob/main/packages/wiring/src/provider-catalog.ts). Anything else is rejected by `ethos doctor`.
+Provider strings are validated against [`packages/wiring/src/provider-catalog.ts`](https://github.com/ethosagent/ethos/blob/main/packages/wiring/src/provider-catalog.ts). Anything else is rejected by `ethos doctor`.
 
 ### Local endpoints (Ollama and vLLM)
 

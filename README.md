@@ -4,7 +4,7 @@
 
 # Ethos
 
-[![CI](https://github.com/MiteshSharma/ethos/actions/workflows/ci.yml/badge.svg)](https://github.com/MiteshSharma/ethos/actions/workflows/ci.yml)
+[![CI](https://github.com/ethosagent/ethos/actions/workflows/ci.yml/badge.svg)](https://github.com/ethosagent/ethos/actions/workflows/ci.yml)
 [![npm](https://img.shields.io/npm/v/@ethosagent/cli.svg)](https://www.npmjs.com/package/@ethosagent/cli)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Node](https://img.shields.io/badge/node-%3E%3D24-brightgreen.svg)](https://nodejs.org/)
@@ -179,7 +179,7 @@ Three documents are mandatory reading before any non-trivial change:
 Local setup:
 
 ```bash
-git clone https://github.com/MiteshSharma/ethos
+git clone https://github.com/ethosagent/ethos
 cd ethos
 make prepare    # pnpm install + git hooks
 make check      # typecheck + lint + test (mirror of CI)
@@ -202,7 +202,7 @@ Open an issue before non-trivial changes — alignment is cheaper than rework. L
 
 ## Community
 
-- **Issues:** [github.com/MiteshSharma/ethos/issues](https://github.com/MiteshSharma/ethos/issues) — bug reports, feature requests, questions
+- **Issues:** [github.com/ethosagent/ethos/issues](https://github.com/ethosagent/ethos/issues) — bug reports, feature requests, questions
 - **Docs site:** [ethosagent.ai/docs](https://ethosagent.ai/docs)
 - **Plugin examples:** [`examples/plugins/`](./examples/plugins/) — `hello`, `personality`, `safety-adapter` (use as templates)
 - **OpenClaw skill catalog:** any [clawhub](https://github.com/anthropics/skills) skill installs unchanged via `ethos skills install <slug>`

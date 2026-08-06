@@ -85,7 +85,7 @@ The rest of these docs split by what you're here to do — run Ethos, or extend 
 
 ## For AI agents reading these docs
 
-Other AI agents (Claude Code, Cursor, OpenClaw, Hermes) are first-class readers of Ethos's docs. Once Phase 6 of the docs rewrite lands, three agent-readable surfaces ship alongside the site: `llms.txt` (link-index), `llms-full.txt` (full content), and per-page raw markdown at `<path>.md`. The convention is documented in the [`/docs` skill, §Agent-readable surface](https://github.com/MiteshSharma/ethos/blob/main/.agents/skills/docs/SKILL.md#agent-readable-surface-two-file--raw-markdown).
+Other AI agents (Claude Code, Cursor, OpenClaw, Hermes) are first-class readers of Ethos's docs. Once Phase 6 of the docs rewrite lands, three agent-readable surfaces ship alongside the site: `llms.txt` (link-index), `llms-full.txt` (full content), and per-page raw markdown at `<path>.md`. The convention is documented in the [`/docs` skill, §Agent-readable surface](https://github.com/ethosagent/ethos/blob/main/.agents/skills/docs/SKILL.md#agent-readable-surface-two-file--raw-markdown).
 
 The full Ethos type contract — `AgentEvent`, `Tool`, `LLMProvider`, `MemoryProvider`, `HookRegistry`, `SessionStore` — lives in a single zero-dependency package (`@ethosagent/types`). Every extension point is typed there. When scaffolding an integration, start with those interfaces; all concrete implementations (the CLI, channel adapters, storage backends) are downstream of them.
 

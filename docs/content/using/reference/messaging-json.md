@@ -26,7 +26,7 @@ updated: 2026-05-17
 | Top-level key | A [personality](../../getting-started/glossary.md#personality) id (matches the directory name under `~/.ethos/personalities/` or a bundled personality id) |
 | Value | An array of `<platform>:<target>` strings, or the wildcard `"*"` |
 
-Source: [`packages/wiring/src/index.ts` `loadMessagingAllowlist()`](https://github.com/MiteshSharma/ethos/blob/main/packages/wiring/src/index.ts).
+Source: [`packages/wiring/src/index.ts` `loadMessagingAllowlist()`](https://github.com/ethosagent/ethos/blob/main/packages/wiring/src/index.ts).
 
 ## Entry format {#entry-format}
 

@@ -69,7 +69,7 @@ claude --dangerously-skip-permissions
 |---|---|---|
 | `--name` | `dev` | Sandbox name |
 | `--dir` | `~/personal/sandbox` | Shared directory mounted into the sandbox |
-| `--ethos-url` | `git@github.com:MiteshSharma/ethos.git` | Remote URL of the project to clone |
+| `--ethos-url` | `git@github.com:ethosagent/ethos.git` | Remote URL of the project to clone |
 | `--ethos-branch` | `main` | Branch to track in `$DIR/<repo>` |
 
 Forking for a different project: change the defaults in `sandbox-setup.sh`, or always pass `--ethos-url` / `--ethos-branch` flags.

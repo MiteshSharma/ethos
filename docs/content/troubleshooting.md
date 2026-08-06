@@ -11,7 +11,7 @@ When something goes wrong, the CLI prints a three-line block: a code, a one-line
 
 ## Synopsis {#synopsis}
 
-User-facing errors are rendered by `formatError` in [`packages/types/src/errors.ts`](https://github.com/MiteshSharma/ethos/blob/main/packages/types/src/errors.ts):
+User-facing errors are rendered by `formatError` in [`packages/types/src/errors.ts`](https://github.com/ethosagent/ethos/blob/main/packages/types/src/errors.ts):
 
 ```
 ✗ INVALID_INPUT: --concurrency must be a positive integer
@@ -284,7 +284,7 @@ The full list of registered codes. Every code shipped in `@ethosagent/types` `Et
 
 ## Getting help {#getting-help}
 
-When filing a bug, include `node --version`, `pnpm --version`, your OS, the full three-line error block, the relevant slice of `~/.ethos/logs/errors.jsonl`, and steps to reproduce. Open an issue at [github.com/MiteshSharma/ethos/issues](https://github.com/MiteshSharma/ethos/issues) or a discussion at [github.com/MiteshSharma/ethos/discussions](https://github.com/MiteshSharma/ethos/discussions).
+When filing a bug, include `node --version`, `pnpm --version`, your OS, the full three-line error block, the relevant slice of `~/.ethos/logs/errors.jsonl`, and steps to reproduce. Open an issue at [github.com/ethosagent/ethos/issues](https://github.com/ethosagent/ethos/issues) or a discussion at [github.com/ethosagent/ethos/discussions](https://github.com/ethosagent/ethos/discussions).
 
 ## See also {#see-also}
 

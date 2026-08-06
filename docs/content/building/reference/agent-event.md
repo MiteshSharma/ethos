@@ -11,7 +11,7 @@ updated: 2026-07-03
 
 ## Source {#source}
 
-Defined in [`packages/core/src/agent-loop.ts`](https://github.com/MiteshSharma/ethos/blob/main/packages/core/src/agent-loop.ts). Re-exported from `@ethosagent/core` as `AgentEvent`.
+Defined in [`packages/core/src/agent-loop.ts`](https://github.com/ethosagent/ethos/blob/main/packages/core/src/agent-loop.ts). Re-exported from `@ethosagent/core` as `AgentEvent`.
 
 ## Signature {#signature}
 

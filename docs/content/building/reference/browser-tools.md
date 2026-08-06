@@ -13,7 +13,7 @@ Ethos ships a Playwright-backed browser surface with **twelve tools** covering n
 
 ## Source {#source}
 
-Factory: [`extensions/tools-browser/src/index.ts`](https://github.com/MiteshSharma/ethos/blob/main/extensions/tools-browser/src/index.ts) — `createBrowserTools`. Per-tool implementations split across `browser-actions.ts`, `browser-screenshot.ts`, `browser-vision-click.ts`, `browser-vision-type.ts`, `snapshot.ts`, `sessions.ts`, `a11y.ts`. Wiring at [`packages/wiring/src/index.ts`](https://github.com/MiteshSharma/ethos/blob/main/packages/wiring/src/index.ts).
+Factory: [`extensions/tools-browser/src/index.ts`](https://github.com/ethosagent/ethos/blob/main/extensions/tools-browser/src/index.ts) — `createBrowserTools`. Per-tool implementations split across `browser-actions.ts`, `browser-screenshot.ts`, `browser-vision-click.ts`, `browser-vision-type.ts`, `snapshot.ts`, `sessions.ts`, `a11y.ts`. Wiring at [`packages/wiring/src/index.ts`](https://github.com/ethosagent/ethos/blob/main/packages/wiring/src/index.ts).
 
 ## Tools {#tools}
 
@@ -68,7 +68,7 @@ If you need cross-turn state (a long-running scrape), drive multiple turns and p
 
 ## Capability declarations {#capabilities}
 
-The wiring declares capabilities per tool. The personality-lockdown enforcement gate at [`packages/core/src/agent-loop.ts`](https://github.com/MiteshSharma/ethos/blob/main/packages/core/src/agent-loop.ts) confirms each call's declared capabilities are satisfied. Today:
+The wiring declares capabilities per tool. The personality-lockdown enforcement gate at [`packages/core/src/agent-loop.ts`](https://github.com/ethosagent/ethos/blob/main/packages/core/src/agent-loop.ts) confirms each call's declared capabilities are satisfied. Today:
 
 - **Network**: only `browse_url` and `browser_navigate` carry `network: { allowedHosts: ['*'] }`. Other browser tools operate on a page already loaded by one of these, so they don't independently re-declare network reach.
 - **Vision**: `browser_vision_click` / `browser_vision_type` invoke `vision_analyze` internally, which carries `fs_reach: { read: 'from-personality' }` and the vision capability.

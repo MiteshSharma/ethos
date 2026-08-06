@@ -9,14 +9,14 @@
 # Usage: ./sandbox-setup.sh [--name NAME] [--dir DIR] [--ethos-url URL] [--ethos-branch BRANCH]
 #   --name           Sandbox name (default: dev)
 #   --dir            Sandbox shared directory (default: ~/personal/sandbox)
-#   --ethos-url      Ethos remote URL (default: git@github.com:MiteshSharma/ethos.git)
+#   --ethos-url      Ethos remote URL (default: git@github.com:ethosagent/ethos.git)
 #   --ethos-branch   Ethos branch to track (default: main)
 
 set -euo pipefail
 
 SANDBOX_NAME="dev"
 SANDBOX_DIR="$HOME/personal/sandbox"
-ETHOS_URL="git@github.com:MiteshSharma/ethos.git"
+ETHOS_URL="git@github.com:ethosagent/ethos.git"
 ETHOS_BRANCH="main"
 
 while [[ $# -gt 0 ]]; do

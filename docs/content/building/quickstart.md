@@ -26,14 +26,14 @@ The point is the dev loop, not the tool. By minute ten, you can sketch any tool 
 
 - Node 24 or newer. Check with `node --version`. The repo pins via `.nvmrc`; `make setup` installs it if you use nvm.
 - pnpm 10. `corepack enable` works, or `npm install -g pnpm@10`. The repo pins `packageManager` in the root `package.json`.
-- Git, plus a checkout of `https://github.com/MiteshSharma/ethos`.
+- Git, plus a checkout of `https://github.com/ethosagent/ethos`.
 - An Anthropic API key in the shell (`export ANTHROPIC_API_KEY=sk-ant-...`). OpenAI / OpenRouter / Ollama work via the OpenAI-compat provider, but Anthropic is the path of least resistance — Claude is the default model.
 - A terminal you can run two panes in (one for `pnpm dev`, one for `pnpm test`).
 
 ## 1. Clone and install
 
 ```bash
-git clone https://github.com/MiteshSharma/ethos.git
+git clone https://github.com/ethosagent/ethos.git
 cd ethos
 make prepare
 ```

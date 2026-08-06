@@ -162,7 +162,7 @@ docker run -d --name ethos \
 ### Option B — build from source then run
 
 ```bash
-git clone https://github.com/MiteshSharma/ethos.git
+git clone https://github.com/ethosagent/ethos.git
 cd ethos
 docker build -t ethos:local -f docker/Dockerfile docker/
 ```

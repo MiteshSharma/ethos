@@ -11,7 +11,7 @@ updated: 2026-05-12
 
 ## Source {#source}
 
-Defined in [`packages/types/src/llm.ts`](https://github.com/MiteshSharma/ethos/blob/main/packages/types/src/llm.ts). Re-exported from `@ethosagent/types`.
+Defined in [`packages/types/src/llm.ts`](https://github.com/ethosagent/ethos/blob/main/packages/types/src/llm.ts). Re-exported from `@ethosagent/types`.
 
 ## LLMProvider {#llm-provider}
 

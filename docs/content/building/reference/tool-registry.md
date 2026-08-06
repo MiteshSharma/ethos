@@ -11,7 +11,7 @@ The [tool](../../getting-started/glossary.md#tool) registry holds every tool the
 
 ## Source {#source}
 
-Interface in [`packages/types/src/tool.ts`](https://github.com/MiteshSharma/ethos/blob/main/packages/types/src/tool.ts) (`ToolRegistry`, `ToolFilterOpts`). Implementation in [`packages/core/src/tool-registry.ts`](https://github.com/MiteshSharma/ethos/blob/main/packages/core/src/tool-registry.ts) (`DefaultToolRegistry`). Reducer registry in [`packages/core/src/tool-reducer-registry.ts`](https://github.com/MiteshSharma/ethos/blob/main/packages/core/src/tool-reducer-registry.ts) (`DefaultToolResultReducerRegistry`).
+Interface in [`packages/types/src/tool.ts`](https://github.com/ethosagent/ethos/blob/main/packages/types/src/tool.ts) (`ToolRegistry`, `ToolFilterOpts`). Implementation in [`packages/core/src/tool-registry.ts`](https://github.com/ethosagent/ethos/blob/main/packages/core/src/tool-registry.ts) (`DefaultToolRegistry`). Reducer registry in [`packages/core/src/tool-reducer-registry.ts`](https://github.com/ethosagent/ethos/blob/main/packages/core/src/tool-reducer-registry.ts) (`DefaultToolResultReducerRegistry`).
 
 ## ToolRegistry {#tool-registry}
 

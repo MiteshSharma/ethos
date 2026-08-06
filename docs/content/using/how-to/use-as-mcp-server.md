@@ -24,7 +24,7 @@ The client's tool palette lists `ask_personality`, `list_personalities`, and `se
 
 ## What gets exposed
 
-The MCP server lives in [`apps/mcp-server/src/`](https://github.com/MiteshSharma/ethos/blob/main/apps/mcp-server/src/index.ts). Three primitives surface to the client:
+The MCP server lives in [`apps/mcp-server/src/`](https://github.com/ethosagent/ethos/blob/main/apps/mcp-server/src/index.ts). Three primitives surface to the client:
 
 | Kind | Identifier | What it does |
 |---|---|---|

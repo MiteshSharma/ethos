@@ -13,7 +13,7 @@ Two tools that let an agent discover and read its own [skill](../../getting-star
 
 ## Source {#source}
 
-Tool factory: [`extensions/tools-skills/src/index.ts`](https://github.com/MiteshSharma/ethos/blob/main/extensions/tools-skills/src/index.ts) (`createSkillsTools`). The factory takes a `listSkills` + `getSkillContent` callback pair; wiring at [`packages/wiring/src/index.ts`](https://github.com/MiteshSharma/ethos/blob/main/packages/wiring/src/index.ts) supplies those from the universal skill scanner.
+Tool factory: [`extensions/tools-skills/src/index.ts`](https://github.com/ethosagent/ethos/blob/main/extensions/tools-skills/src/index.ts) (`createSkillsTools`). The factory takes a `listSkills` + `getSkillContent` callback pair; wiring at [`packages/wiring/src/index.ts`](https://github.com/ethosagent/ethos/blob/main/packages/wiring/src/index.ts) supplies those from the universal skill scanner.
 
 ## `skills_list` {#skills-list}
 
@@ -105,5 +105,5 @@ Without these tools, an agent asked "do you have a skill for handling PRs?" woul
 ## See also {#see-also}
 
 - [`use-skills`](../../using/how-to/use-skills.md) — operator how-to for installing and authoring skills.
-- [`ethos-skill-authoring`](https://github.com/MiteshSharma/ethos/blob/main/skills/data/framework/ethos-skill-authoring/SKILL.md) — the bundled skill that documents skill authoring.
+- [`ethos-skill-authoring`](https://github.com/ethosagent/ethos/blob/main/skills/data/framework/ethos-skill-authoring/SKILL.md) — the bundled skill that documents skill authoring.
 - [Personality registry reference](personality-registry.md) — where the `skills.global_ingest` block is documented.

@@ -92,7 +92,7 @@ Point Ethos at it with `provider: vllm` semantics — any OpenAI-compatible `bas
 vllm serve Qwen/Qwen3-8B --enable-prefix-caching --enable-auto-tool-choice --tool-call-parser hermes
 ```
 
-- `--enable-prefix-caching` — reuses the byte-stable prompt prefix Ethos maintains across turns. The repo's [CLAUDE.md local-serving note](https://github.com/MiteshSharma/ethos/blob/main/CLAUDE.md) covers why the prefix stays byte-identical; this flag is the serving side of that contract.
+- `--enable-prefix-caching` — reuses the byte-stable prompt prefix Ethos maintains across turns. The repo's [CLAUDE.md local-serving note](https://github.com/ethosagent/ethos/blob/main/CLAUDE.md) covers why the prefix stays byte-identical; this flag is the serving side of that contract.
 - `--enable-auto-tool-choice --tool-call-parser <parser>` — the parser must match the model family:
 
 | Model family | `--tool-call-parser` |
@@ -163,4 +163,4 @@ Serving flags drift with upstream releases — this page's facts are pinned:
 | Ollama 4,096 default context, `ollama ps` CONTEXT column | Ollama releases current at 2026-08 | 2026-08 |
 | Qwen3 32k native / 131k YaRN; gpt-oss 4k native / 131k advertised | Model cards, current at 2026-08 | 2026-08 |
 
-If a number no longer matches your runtime's `--help` output, trust the runtime and [file a docs issue](https://github.com/MiteshSharma/ethos/issues).
+If a number no longer matches your runtime's `--help` output, trust the runtime and [file a docs issue](https://github.com/ethosagent/ethos/issues).

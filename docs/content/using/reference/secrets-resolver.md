@@ -11,7 +11,7 @@ updated: 2026-05-16
 
 The secrets resolver replaces `${secrets:<ref>}` placeholders in config values with actual secret material at runtime. It walks a precedence chain of backends until one returns a value. If none do, the placeholder stays unresolved and the dependent component fails with an actionable error.
 
-Source: [`packages/types/src/secrets.ts`](https://github.com/MiteshSharma/ethos/blob/main/packages/types/src/secrets.ts) (the `SecretsResolver` interface). Implementations: [`packages/storage-fs/src/secrets.ts`](https://github.com/MiteshSharma/ethos/blob/main/packages/storage-fs/src/secrets.ts), [`packages/storage-fs/src/env-secrets.ts`](https://github.com/MiteshSharma/ethos/blob/main/packages/storage-fs/src/env-secrets.ts), [`extensions/secrets-aws/src/index.ts`](https://github.com/MiteshSharma/ethos/blob/main/extensions/secrets-aws/src/index.ts).
+Source: [`packages/types/src/secrets.ts`](https://github.com/ethosagent/ethos/blob/main/packages/types/src/secrets.ts) (the `SecretsResolver` interface). Implementations: [`packages/storage-fs/src/secrets.ts`](https://github.com/ethosagent/ethos/blob/main/packages/storage-fs/src/secrets.ts), [`packages/storage-fs/src/env-secrets.ts`](https://github.com/ethosagent/ethos/blob/main/packages/storage-fs/src/env-secrets.ts), [`extensions/secrets-aws/src/index.ts`](https://github.com/ethosagent/ethos/blob/main/extensions/secrets-aws/src/index.ts).
 
 ## Interpolation syntax {#interpolation-syntax}
 

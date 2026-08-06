@@ -17,14 +17,14 @@ The controls fire in the order documented in the [runtime precedence diagram](./
 
 | Layer | Source |
 |---|---|
-| Channel controls | [`packages/safety/channel/src/`](https://github.com/MiteshSharma/ethos/tree/main/packages/safety/channel/src/) |
+| Channel controls | [`packages/safety/channel/src/`](https://github.com/ethosagent/ethos/tree/main/packages/safety/channel/src/) |
 | Tool boundary | [`packages/core/src/tool-registry.ts`](../../../packages/core/src/tool-registry.ts) |
 | Filesystem boundary | [`packages/storage-fs/src/scoped-storage.ts`](../../../packages/storage-fs/src/scoped-storage.ts) |
-| Network reach | [`packages/safety/network/src/`](https://github.com/MiteshSharma/ethos/tree/main/packages/safety/network/src/) |
-| Injection defenses | [`packages/safety/injection/src/`](https://github.com/MiteshSharma/ethos/tree/main/packages/safety/injection/src/) |
-| Watcher | [`packages/safety/watcher/src/`](https://github.com/MiteshSharma/ethos/tree/main/packages/safety/watcher/src/) |
-| Install scanner | [`packages/safety/scanner/src/`](https://github.com/MiteshSharma/ethos/tree/main/packages/safety/scanner/src/) |
-| Redaction + audit | [`extensions/observability-sqlite/src/`](https://github.com/MiteshSharma/ethos/tree/main/extensions/observability-sqlite/src/) |
+| Network reach | [`packages/safety/network/src/`](https://github.com/ethosagent/ethos/tree/main/packages/safety/network/src/) |
+| Injection defenses | [`packages/safety/injection/src/`](https://github.com/ethosagent/ethos/tree/main/packages/safety/injection/src/) |
+| Watcher | [`packages/safety/watcher/src/`](https://github.com/ethosagent/ethos/tree/main/packages/safety/watcher/src/) |
+| Install scanner | [`packages/safety/scanner/src/`](https://github.com/ethosagent/ethos/tree/main/packages/safety/scanner/src/) |
+| Redaction + audit | [`extensions/observability-sqlite/src/`](https://github.com/ethosagent/ethos/tree/main/extensions/observability-sqlite/src/) |
 | Personality schema | [`packages/types/src/personality.ts`](../../../packages/types/src/personality.ts) (`PersonalitySafetyConfig`) |
 
 ## Status legend {#status-legend}

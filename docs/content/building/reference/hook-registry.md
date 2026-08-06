@@ -11,7 +11,7 @@ A [hook](../../getting-started/glossary.md#hook) is a handler that fires at a na
 
 ## Source {#source}
 
-Interface in [`packages/types/src/hooks.ts`](https://github.com/MiteshSharma/ethos/blob/main/packages/types/src/hooks.ts). Implementation in [`packages/core/src/hook-registry.ts`](https://github.com/MiteshSharma/ethos/blob/main/packages/core/src/hook-registry.ts).
+Interface in [`packages/types/src/hooks.ts`](https://github.com/ethosagent/ethos/blob/main/packages/types/src/hooks.ts). Implementation in [`packages/core/src/hook-registry.ts`](https://github.com/ethosagent/ethos/blob/main/packages/core/src/hook-registry.ts).
 
 ## HookRegistry {#hook-registry}
 
@@ -99,7 +99,7 @@ See [hook-execution-models](../explanation/hook-execution-models.md) for the des
 
 ## Available hook points {#available-hook-points}
 
-Payload + result types live in [`packages/types/src/hooks.ts`](https://github.com/MiteshSharma/ethos/blob/main/packages/types/src/hooks.ts).
+Payload + result types live in [`packages/types/src/hooks.ts`](https://github.com/ethosagent/ethos/blob/main/packages/types/src/hooks.ts).
 
 ### Void hooks {#void-hooks}
 
@@ -137,7 +137,7 @@ Payload + result types live in [`packages/types/src/hooks.ts`](https://github.co
 
 ### Hook point payload reference {#hook-point-payloads}
 
-Key payload fields — see [`packages/types/src/hooks.ts`](https://github.com/MiteshSharma/ethos/blob/main/packages/types/src/hooks.ts) for the full type definitions.
+Key payload fields — see [`packages/types/src/hooks.ts`](https://github.com/ethosagent/ethos/blob/main/packages/types/src/hooks.ts) for the full type definitions.
 
 | Payload | Notable fields |
 |---|---|

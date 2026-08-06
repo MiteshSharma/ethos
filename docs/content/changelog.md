@@ -7,11 +7,11 @@ slug: changelog
 updated: 2026-06-09
 ---
 
-Version history for the `@ethosagent/cli` and its workspace packages. The current version lives in the [`VERSION`](https://github.com/MiteshSharma/ethos/blob/main/VERSION) file at the repo root. Entries are newest first.
+Version history for the `@ethosagent/cli` and its workspace packages. The current version lives in the [`VERSION`](https://github.com/ethosagent/ethos/blob/main/VERSION) file at the repo root. Entries are newest first.
 
 ## Source {#source}
 
-Entries are seeded from the commit log on `main`. For the canonical machine-readable view, run `git log --oneline` in the repo, or browse the [GitHub commit history](https://github.com/MiteshSharma/ethos/commits/main).
+Entries are seeded from the commit log on `main`. For the canonical machine-readable view, run `git log --oneline` in the repo, or browse the [GitHub commit history](https://github.com/ethosagent/ethos/commits/main).
 
 ## Conventions {#conventions}
 
@@ -64,7 +64,7 @@ Breaking
 Date · 2026-05-11
 Status · beta
 
-- Docs rewrite under the [`/docs` skill](https://github.com/MiteshSharma/ethos/blob/main/.agents/skills/docs/SKILL.md) (originally shipped as `DOCS.md` at the repo root) — two-persona shell ("Using Ethos" / "Building on Ethos"), Diátaxis four-pillar within each.
+- Docs rewrite under the [`/docs` skill](https://github.com/ethosagent/ethos/blob/main/.agents/skills/docs/SKILL.md) (originally shipped as `DOCS.md` at the repo root) — two-persona shell ("Using Ethos" / "Building on Ethos"), Diátaxis four-pillar within each.
 - Kanban [tool](getting-started/glossary.md#tool) for [personalities](getting-started/glossary.md#personality) that need to coordinate multi-step plans without leaning on the prompt.
 - Theming and [skin](getting-started/glossary.md#skin) engine — per-user skins pinned in `~/.ethos/config.yaml`, single `@ethosagent/design-tokens` source of truth across TUI and Web.
 
@@ -111,7 +111,7 @@ Breaking
 Date · 2026-04-10
 Status · beta
 
-- Observability — [`@ethosagent/observability-sqlite`](https://github.com/MiteshSharma/ethos/tree/main/extensions/observability-sqlite) ships and is wired into the production `AgentLoop`.
+- Observability — [`@ethosagent/observability-sqlite`](https://github.com/ethosagent/ethos/tree/main/extensions/observability-sqlite) ships and is wired into the production `AgentLoop`.
 - Wave B retention — `RetentionConfig`, `safety.observability` config, nightly prune cron, support-bundle export.
 - Setup wizard — single-step re-entry, paste enabled on every token and key input, disabled-with-label state for unsupported providers.
 

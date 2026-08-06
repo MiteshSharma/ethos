@@ -11,7 +11,7 @@ API keys are created via the `apiKeys.create` RPC (cookie-auth only). Each key c
 
 ## Source {#source}
 
-`ApiKeyScopeSchema` is defined in [`packages/web-contracts/src/schemas.ts`](https://github.com/MiteshSharma/ethos/blob/main/packages/web-contracts/src/schemas.ts).
+`ApiKeyScopeSchema` is defined in [`packages/web-contracts/src/schemas.ts`](https://github.com/ethosagent/ethos/blob/main/packages/web-contracts/src/schemas.ts).
 
 ## Scope table {#table}
 

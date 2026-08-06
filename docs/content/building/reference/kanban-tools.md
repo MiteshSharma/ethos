@@ -121,6 +121,6 @@ None of those require schema changes — the columns `workspace_mode`, `workspac
 
 ## Source {#source}
 
-- [`extensions/kanban-store`](https://github.com/MiteshSharma/ethos/tree/main/extensions/kanban-store) — schema, migrations, repository. Pure data layer.
-- [`extensions/tools-kanban`](https://github.com/MiteshSharma/ethos/tree/main/extensions/tools-kanban) — the 13 tool wrappers + `createKanbanTools` factory.
-- [`extensions/personalities/data/task-tracker/`](https://github.com/MiteshSharma/ethos/tree/main/extensions/personalities/data/task-tracker) — built-in personality with all 13 tools enabled.
+- [`extensions/kanban-store`](https://github.com/ethosagent/ethos/tree/main/extensions/kanban-store) — schema, migrations, repository. Pure data layer.
+- [`extensions/tools-kanban`](https://github.com/ethosagent/ethos/tree/main/extensions/tools-kanban) — the 13 tool wrappers + `createKanbanTools` factory.
+- [`extensions/personalities/data/task-tracker/`](https://github.com/ethosagent/ethos/tree/main/extensions/personalities/data/task-tracker) — built-in personality with all 13 tools enabled.

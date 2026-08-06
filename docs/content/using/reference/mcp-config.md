@@ -9,7 +9,7 @@ updated: 2026-06-03
 
 ## Synopsis {#synopsis}
 
-Ethos's MCP client reads servers from `~/.ethos/mcp.json`. The file is a **JSON array**; each entry is an `McpServerConfig`. Source of truth: [`McpServerConfig`](https://github.com/MiteshSharma/ethos/blob/main/extensions/tools-mcp/src/index.ts) in `@ethosagent/tools-mcp`.
+Ethos's MCP client reads servers from `~/.ethos/mcp.json`. The file is a **JSON array**; each entry is an `McpServerConfig`. Source of truth: [`McpServerConfig`](https://github.com/ethosagent/ethos/blob/main/extensions/tools-mcp/src/index.ts) in `@ethosagent/tools-mcp`.
 
 ```json
 [
@@ -138,7 +138,7 @@ Token storage paths (per-personality, owner-only 0600):
 
 Tokens are scoped to each personality. Two personalities using the same MCP server hold independent tokens — revoking one does not affect the other.
 
-Source of truth: [`oauth.ts`](https://github.com/MiteshSharma/ethos/blob/main/extensions/tools-mcp/src/oauth.ts).
+Source of truth: [`oauth.ts`](https://github.com/ethosagent/ethos/blob/main/extensions/tools-mcp/src/oauth.ts).
 
 ## Bearer token auth {#bearer}
 
@@ -178,7 +178,7 @@ Use `auth.type: "bearer"` when different personalities need separate API keys fo
 
 stdio servers run with a **minimal env**, not the operator's full process env. The default allowlist is `PATH`, `USER`, `LANG`, `LC_ALL`, `TERM`, `SHELL`. Everything else is stripped before the server starts.
 
-Additional rules applied by `buildMcpEnv` in [`@ethosagent/safety-scanner`](https://github.com/MiteshSharma/ethos/blob/main/packages/safety/scanner/src/mcp-env.ts):
+Additional rules applied by `buildMcpEnv` in [`@ethosagent/safety-scanner`](https://github.com/ethosagent/ethos/blob/main/packages/safety/scanner/src/mcp-env.ts):
 
 1. **Credential-pattern strip.** Any var whose name matches `(^|_)(KEY|TOKEN|SECRET|PASSWORD)($|_)` (case-insensitive) is removed unless explicitly listed in `mcpEnvPassthrough`. `API_KEY` and `OPENAI_API_KEY` are stripped; `KEYSTONE` and `MASTODON` are kept.
 2. **Pinned scratch dirs.** `HOME`, `TMPDIR`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_CACHE_HOME` are pinned to `~/.ethos/mcp-runtime/<name>/` (mode 0700). The subprocess cannot read `~/.aws`, `~/.ssh`, `~/.npmrc`, or any other dotfile from the operator's real home.
@@ -242,7 +242,7 @@ ethos personality mcp engineer            # list current attachments
 
 The personality registry watches `config.yaml`'s mtime and reloads on the next turn — no daemon restart needed.
 
-See also the [`native-mcp`](https://github.com/MiteshSharma/ethos/blob/main/skills/data/framework/native-mcp/SKILL.md) bundled skill for the operator workflow this reference is the schema for.
+See also the [`native-mcp`](https://github.com/ethosagent/ethos/blob/main/skills/data/framework/native-mcp/SKILL.md) bundled skill for the operator workflow this reference is the schema for.
 
 ## Tool naming {#tool-naming}
 
@@ -269,7 +269,7 @@ When a stdio server is added via `ethos mcp add`, Ethos queries `api.osv.dev` fo
 
 To skip the scan for a server that has known advisories you've evaluated, pass `--force` to `ethos mcp add`. There is no per-server opt-out flag in `mcp.json` itself — the scan runs at install time, not at every boot.
 
-Source of truth: [`osv-check.ts`](https://github.com/MiteshSharma/ethos/blob/main/extensions/tools-mcp/src/osv-check.ts).
+Source of truth: [`osv-check.ts`](https://github.com/ethosagent/ethos/blob/main/extensions/tools-mcp/src/osv-check.ts).
 
 ## Examples {#examples}
 
@@ -372,7 +372,7 @@ Click **Test connection** on the server row to verify tools surface correctly.
 
 - [Set up MCP for a personality](../how-to/set-up-mcp-for-a-personality.md) — step-by-step walkthrough of the two-step CLI flow and the web OAuth path.
 - [Use Ethos as an MCP server](../how-to/use-as-mcp-server.md) — the inverse: serving personalities to Claude Desktop, Cursor, Continue, Zed.
-- [`native-mcp`](https://github.com/MiteshSharma/ethos/blob/main/skills/data/framework/native-mcp/SKILL.md) — bundled skill that wraps the operator workflow.
+- [`native-mcp`](https://github.com/ethosagent/ethos/blob/main/skills/data/framework/native-mcp/SKILL.md) — bundled skill that wraps the operator workflow.
 - [Config field reference](config-yaml.md) — `~/.ethos/config.yaml` and the `${secrets:<ref>}` pattern.
 - [Personality config](personality-yaml.md) — the `mcp_servers:` attachment list.
-- [`tools-mcp` source](https://github.com/MiteshSharma/ethos/blob/main/extensions/tools-mcp/src/index.ts) — `McpServerConfig` interface.
+- [`tools-mcp` source](https://github.com/ethosagent/ethos/blob/main/extensions/tools-mcp/src/index.ts) — `McpServerConfig` interface.

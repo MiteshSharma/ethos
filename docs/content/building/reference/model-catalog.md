@@ -93,5 +93,5 @@ modelCatalog.providers.anthropic.url: https://internal.corp.example.com/anthropi
 
 ## Source {#source}
 
-- [`packages/wiring/src/model-catalog.ts`](https://github.com/MiteshSharma/ethos/blob/main/packages/wiring/src/model-catalog.ts) — the in-memory `MODEL_CATALOG` const that ships bundled with the CLI.
-- [`packages/wiring/scripts/build-model-catalog.ts`](https://github.com/MiteshSharma/ethos/blob/main/packages/wiring/scripts/build-model-catalog.ts) — build script that emits the published JSON from that const.
+- [`packages/wiring/src/model-catalog.ts`](https://github.com/ethosagent/ethos/blob/main/packages/wiring/src/model-catalog.ts) — the in-memory `MODEL_CATALOG` const that ships bundled with the CLI.
+- [`packages/wiring/scripts/build-model-catalog.ts`](https://github.com/ethosagent/ethos/blob/main/packages/wiring/scripts/build-model-catalog.ts) — build script that emits the published JSON from that const.

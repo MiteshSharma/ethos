@@ -11,9 +11,9 @@ The [capability framework](../explanation/why-capabilities.md) gates external ac
 
 ## Source {#source}
 
-Types in [`packages/types/src/tool-capabilities.ts`](https://github.com/MiteshSharma/ethos/blob/main/packages/types/src/tool-capabilities.ts). Re-exported from `@ethosagent/types`.
+Types in [`packages/types/src/tool-capabilities.ts`](https://github.com/ethosagent/ethos/blob/main/packages/types/src/tool-capabilities.ts). Re-exported from `@ethosagent/types`.
 
-Enforcement in [`packages/core/src/capability-validator.ts`](https://github.com/MiteshSharma/ethos/blob/main/packages/core/src/capability-validator.ts) (registration-time) and [`packages/core/src/capability-resolver.ts`](https://github.com/MiteshSharma/ethos/blob/main/packages/core/src/capability-resolver.ts) (call-time). Scoped implementations in [`packages/core/src/scoped/`](https://github.com/MiteshSharma/ethos/blob/main/packages/core/src/scoped/).
+Enforcement in [`packages/core/src/capability-validator.ts`](https://github.com/ethosagent/ethos/blob/main/packages/core/src/capability-validator.ts) (registration-time) and [`packages/core/src/capability-resolver.ts`](https://github.com/ethosagent/ethos/blob/main/packages/core/src/capability-resolver.ts) (call-time). Scoped implementations in [`packages/core/src/scoped/`](https://github.com/ethosagent/ethos/blob/main/packages/core/src/scoped/).
 
 ## ToolCapabilities {#tool-capabilities}
 

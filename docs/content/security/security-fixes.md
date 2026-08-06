@@ -19,11 +19,11 @@ A follow-up audit focused on promptware — malicious instructions embedded in t
 |---|---|
 | Schema for `PersonalitySafetyConfig` | [`packages/types/src/personality.ts`](../../../packages/types/src/personality.ts) |
 | Field-count gate | [`packages/types/src/__tests__/personality-field-count.test.ts`](../../../packages/types/src/__tests__/personality-field-count.test.ts) |
-| Injection defenses | [`packages/safety/injection/src/`](https://github.com/MiteshSharma/ethos/tree/main/packages/safety/injection/src/) |
-| Network defenses | [`packages/safety/network/src/`](https://github.com/MiteshSharma/ethos/tree/main/packages/safety/network/src/) |
-| Channel defenses | [`packages/safety/channel/src/`](https://github.com/MiteshSharma/ethos/tree/main/packages/safety/channel/src/) |
-| Install scanner | [`packages/safety/scanner/src/`](https://github.com/MiteshSharma/ethos/tree/main/packages/safety/scanner/src/) |
-| Filesystem boundary | [`extensions/tools-file/src/`](https://github.com/MiteshSharma/ethos/tree/main/extensions/tools-file/src/) |
+| Injection defenses | [`packages/safety/injection/src/`](https://github.com/ethosagent/ethos/tree/main/packages/safety/injection/src/) |
+| Network defenses | [`packages/safety/network/src/`](https://github.com/ethosagent/ethos/tree/main/packages/safety/network/src/) |
+| Channel defenses | [`packages/safety/channel/src/`](https://github.com/ethosagent/ethos/tree/main/packages/safety/channel/src/) |
+| Install scanner | [`packages/safety/scanner/src/`](https://github.com/ethosagent/ethos/tree/main/packages/safety/scanner/src/) |
+| Filesystem boundary | [`extensions/tools-file/src/`](https://github.com/ethosagent/ethos/tree/main/extensions/tools-file/src/) |
 | Redaction | [`extensions/observability-sqlite/src/redact.ts`](../../../extensions/observability-sqlite/src/redact.ts) |
 | PII redaction | [`packages/safety/redact/src/index.ts`](../../../packages/safety/redact/src/index.ts) |
 | C2 pattern catalog | [`packages/safety/injection/src/pattern-check.ts`](../../../packages/safety/injection/src/pattern-check.ts) |

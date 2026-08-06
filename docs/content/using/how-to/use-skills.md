@@ -40,7 +40,7 @@ Output groups skills by source. The expected labels are:
 | `claude-code-project` | `./.claude/skills/` in the cwd | community |
 | `opencode-project` | `./.opencode/skills/` in the cwd | community |
 
-The list comes from [`extensions/skills/src/universal-scanner.ts`](https://github.com/MiteshSharma/ethos/blob/main/extensions/skills/src/universal-scanner.ts). Other Hermes or OpenClaw paths are opt-in — see step 4.
+The list comes from [`extensions/skills/src/universal-scanner.ts`](https://github.com/ethosagent/ethos/blob/main/extensions/skills/src/universal-scanner.ts). Other Hermes or OpenClaw paths are opt-in — see step 4.
 
 ### 2. Install a skill from ClawHub
 

@@ -9,16 +9,16 @@ updated: 2026-07-10
 
 The team toolset is what an Ethos [personality](../../getting-started/glossary.md#personality) reaches for when it is running inside a team — `ctx.teamId` is set, a coordinator drives the board, and members claim work off it. Three toolsets ship: **kanban** for the durable task board, **team_memory** for shared knowledge, and **delegation** for spawning sub-agents and routing work across the [mesh](../../getting-started/glossary.md#mesh).
 
-Role gates decide who can call what. The coordinator gets the management surface (create, link, assign, archive); members get the work surface (complete, block, heartbeat on their own tasks); everyone can read, comment, and search. The gate is the `before_tool_call` hook implemented in [`extensions/tools-kanban/src/role-gate.ts`](https://github.com/MiteshSharma/ethos/blob/main/extensions/tools-kanban/src/role-gate.ts) — only registered when both a team manifest and a role are active. Solo personalities never see it.
+Role gates decide who can call what. The coordinator gets the management surface (create, link, assign, archive); members get the work surface (complete, block, heartbeat on their own tasks); everyone can read, comment, and search. The gate is the `before_tool_call` hook implemented in [`extensions/tools-kanban/src/role-gate.ts`](https://github.com/ethosagent/ethos/blob/main/extensions/tools-kanban/src/role-gate.ts) — only registered when both a team manifest and a role are active. Solo personalities never see it.
 
 This page is the umbrella reference. For schema-level kanban detail (statuses, store invariants, FTS5 search semantics), see [Kanban tools](./kanban-tools.md). For the team-memory user workflow, see [Share knowledge across a team with team memory](../../using/how-to/use-team-memory.md).
 
 ## Source {#source}
 
-- Kanban tools: [`extensions/tools-kanban/src/index.ts`](https://github.com/MiteshSharma/ethos/blob/main/extensions/tools-kanban/src/index.ts)
-- Team memory: [`extensions/tools-memory/src/index.ts`](https://github.com/MiteshSharma/ethos/blob/main/extensions/tools-memory/src/index.ts)
-- Delegation: [`extensions/tools-delegation/src/index.ts`](https://github.com/MiteshSharma/ethos/blob/main/extensions/tools-delegation/src/index.ts)
-- Role gate: [`extensions/tools-kanban/src/role-gate.ts`](https://github.com/MiteshSharma/ethos/blob/main/extensions/tools-kanban/src/role-gate.ts)
+- Kanban tools: [`extensions/tools-kanban/src/index.ts`](https://github.com/ethosagent/ethos/blob/main/extensions/tools-kanban/src/index.ts)
+- Team memory: [`extensions/tools-memory/src/index.ts`](https://github.com/ethosagent/ethos/blob/main/extensions/tools-memory/src/index.ts)
+- Delegation: [`extensions/tools-delegation/src/index.ts`](https://github.com/ethosagent/ethos/blob/main/extensions/tools-delegation/src/index.ts)
+- Role gate: [`extensions/tools-kanban/src/role-gate.ts`](https://github.com/ethosagent/ethos/blob/main/extensions/tools-kanban/src/role-gate.ts)
 
 ## Kanban tools {#kanban}
 
@@ -92,7 +92,7 @@ type Result = ClaimingHooks['before_ticket_complete'][1];
 
 When a handler rejects, the kanban tool also fires the void hook `after_ticket_revision` with `{ taskId, summary, acceptanceCriteria?, reason, assignee, autonomyTier?, successRatio? }` for observability and reputation tracking.
 
-The full type lives in [`packages/types/src/hooks.ts`](https://github.com/MiteshSharma/ethos/blob/main/packages/types/src/hooks.ts). For the hook registry's three execution models and how claiming differs from void and modifying, see [HookRegistry reference](./hook-registry.md).
+The full type lives in [`packages/types/src/hooks.ts`](https://github.com/ethosagent/ethos/blob/main/packages/types/src/hooks.ts). For the hook registry's three execution models and how claiming differs from void and modifying, see [HookRegistry reference](./hook-registry.md).
 
 ## See also {#see-also}
 

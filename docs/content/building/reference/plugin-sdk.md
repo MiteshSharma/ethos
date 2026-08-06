@@ -11,7 +11,7 @@ A [plugin](../../getting-started/glossary.md#plugin) is an npm package that expo
 
 ## Source {#source}
 
-[`packages/plugin-sdk/src/index.ts`](https://github.com/MiteshSharma/ethos/blob/main/packages/plugin-sdk/src/index.ts) — activation API. Tool helpers in [`tool-helpers.ts`](https://github.com/MiteshSharma/ethos/blob/main/packages/plugin-sdk/src/tool-helpers.ts) and test utilities in [`testing.ts`](https://github.com/MiteshSharma/ethos/blob/main/packages/plugin-sdk/src/testing.ts).
+[`packages/plugin-sdk/src/index.ts`](https://github.com/ethosagent/ethos/blob/main/packages/plugin-sdk/src/index.ts) — activation API. Tool helpers in [`tool-helpers.ts`](https://github.com/ethosagent/ethos/blob/main/packages/plugin-sdk/src/tool-helpers.ts) and test utilities in [`testing.ts`](https://github.com/ethosagent/ethos/blob/main/packages/plugin-sdk/src/testing.ts).
 
 ## EthosPlugin {#ethos-plugin}
 

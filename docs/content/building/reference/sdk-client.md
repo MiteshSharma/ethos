@@ -11,7 +11,7 @@ updated: 2026-05-13
 
 ## Source {#source}
 
-Defined in [`packages/sdk/src/client.ts`](https://github.com/MiteshSharma/ethos/blob/main/packages/sdk/src/client.ts). Re-exported from `@ethosagent/sdk`.
+Defined in [`packages/sdk/src/client.ts`](https://github.com/ethosagent/ethos/blob/main/packages/sdk/src/client.ts). Re-exported from `@ethosagent/sdk`.
 
 ## Installation {#install}
 
