@@ -130,7 +130,7 @@
     "grammy": "^1.26.0",
     "imapflow": "^1.0.170",
     "mailparser": "^3.7.2",
-    "nodemailer": "^6.10.1",
+    "nodemailer": "^9.0.3",
     "playwright": "^1.48.0",
     "qrcode-terminal": "^0.12.0"
   }
