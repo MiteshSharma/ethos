@@ -26,3 +26,6 @@ overrides:
   "@types/react": "^19.0.0"
   "@types/react-dom": "^19.0.0"
   "@smithy/types": "4.16.1"
+  # TS 7 (native compiler) breaks rollup-plugin-dts inside tsup — pin the whole graph
+  # to v6 so auto-installed peers (e.g. packages/safety/redact's local tsup) can't pull 7.
+  "typescript": "^6.0.0"
