@@ -1,5 +1,8 @@
 # Stage 1: install — build tools for native modules (argon2)
-FROM node:24-slim AS install
+# Pinned 2026-08-06: node:24.19.0 SIGBUSes the gateway at boot (suspected
+# node:sqlite mmap regression; last good 24.18.0). Minor-patch pin so 24.18.x
+# security patches still flow. Revisit when a fixed 24.x lands.
+FROM node:24.18-slim AS install
 
 RUN apt-get update \
   && apt-get install -y --no-install-recommends python3 make g++ \
@@ -21,7 +24,8 @@ RUN npm install -g --omit=dev @ethosagent/cli@${CLI_VERSION}
 RUN npm install -g argon2@^0.43.0
 
 # Stage 2: runtime — clean production image
-FROM node:24-slim AS runtime
+# Pinned to 24.18 — see note above the install stage.
+FROM node:24.18-slim AS runtime
 
 RUN apt-get update \
   && apt-get install -y --no-install-recommends curl \
