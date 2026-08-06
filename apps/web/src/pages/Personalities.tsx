@@ -242,7 +242,7 @@ export function Personalities() {
 
       {systemPersonalities.length > 0 ? (
         <>
-          <Divider orientation="left">System</Divider>
+          <Divider titlePlacement="left">System</Divider>
           <Table<Personality>
             rowKey="id"
             dataSource={systemPersonalities}
