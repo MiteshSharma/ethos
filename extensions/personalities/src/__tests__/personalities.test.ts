@@ -372,23 +372,21 @@ describe('FilePersonalityRegistry', () => {
       await expect(registry.loadFromDirectory(testDir)).rejects.toThrow(/approvalMode: off/);
     });
 
-    it.each([
-      'discord',
-      'slack',
-      'whatsapp',
-      'email',
-    ])('rejects approvalMode: off + %s', async (platform) => {
-      const personalityDir = join(testDir, `p-${platform}`);
-      await mkdir(personalityDir);
-      await writeFile(
-        join(personalityDir, 'config.yaml'),
-        `name: P\nplatform: ${platform}\nsafety:\n  approvalMode: off\n`,
-      );
-      await writeFile(join(personalityDir, 'SOUL.md'), '# P');
+    it.each(['discord', 'slack', 'whatsapp', 'email'])(
+      'rejects approvalMode: off + %s',
+      async (platform) => {
+        const personalityDir = join(testDir, `p-${platform}`);
+        await mkdir(personalityDir);
+        await writeFile(
+          join(personalityDir, 'config.yaml'),
+          `name: P\nplatform: ${platform}\nsafety:\n  approvalMode: off\n`,
+        );
+        await writeFile(join(personalityDir, 'SOUL.md'), '# P');
 
-      const registry = new FilePersonalityRegistry(new FsStorage());
-      await expect(registry.loadFromDirectory(testDir)).rejects.toThrow(/approvalMode: off/);
-    });
+        const registry = new FilePersonalityRegistry(new FsStorage());
+        await expect(registry.loadFromDirectory(testDir)).rejects.toThrow(/approvalMode: off/);
+      },
+    );
 
     it('allows approvalMode: off when platform is cli or absent', async () => {
       const personalityDir = join(testDir, 'cron');

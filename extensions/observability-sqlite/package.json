@@ -22,6 +22,6 @@
   },
   "devDependencies": {
     "@ethosagent/storage-fs": "workspace:*",
-    "vitest": "^4.1.5"
+    "vitest": "^4.1.10"
   }
 }

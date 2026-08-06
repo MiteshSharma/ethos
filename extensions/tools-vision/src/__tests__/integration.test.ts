@@ -532,11 +532,11 @@ describe('vision_analyze — P3 wiring integration', () => {
     // Confirm both request shapes landed on the provider: one image, one PDF.
     expect(imgCalls).toHaveLength(1);
     expect(pdfCalls).toHaveLength(1);
-    expect((imgCalls[0]?.messages[0]?.content as unknown[])[0]).toMatchObject({
+    expect((imgCalls[0]?.messages[0]?.content as unknown[] | undefined)?.[0]).toMatchObject({
       type: 'image',
       mediaType: 'image/png',
     });
-    expect((pdfCalls[0]?.messages[0]?.content as unknown[])[0]).toMatchObject({
+    expect((pdfCalls[0]?.messages[0]?.content as unknown[] | undefined)?.[0]).toMatchObject({
       type: 'document',
       mediaType: 'application/pdf',
     });
