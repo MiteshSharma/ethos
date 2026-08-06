@@ -75,7 +75,7 @@ export function sanitizeFilename(name: string): string {
 export function formatInlinedAttachment(resolved: ResolvedTextAttachment): string {
   const name = sanitizeFilename(resolved.attachment.filename ?? 'unnamed');
   const truncNote = resolved.truncatedFromChars
-    ? ` [truncated to ${resolved.text.length.toLocaleString()} chars from ${resolved.truncatedFromChars.toLocaleString()}]`
+    ? ` [truncated to ${resolved.text.length.toLocaleString('en-US')} chars from ${resolved.truncatedFromChars.toLocaleString('en-US')}]`
     : '';
   return `=== file: ${name}${truncNote} ===\n${resolved.text}\n=== end file ===`;
 }

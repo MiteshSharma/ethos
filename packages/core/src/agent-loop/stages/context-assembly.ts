@@ -186,7 +186,7 @@ export async function* assembleContext(
           const sanitized = deps.safety.injection.sanitize(extracted.text);
           const name = sanitizeFilename(att.filename ?? 'unnamed');
           const truncNote = extracted.truncatedFromChars
-            ? ` [truncated to ${sanitized.length.toLocaleString()} chars from ${extracted.truncatedFromChars.toLocaleString()}]`
+            ? ` [truncated to ${sanitized.length.toLocaleString('en-US')} chars from ${extracted.truncatedFromChars.toLocaleString('en-US')}]`
             : '';
           inlineBlocks.push(`=== file: ${name}${truncNote} ===\n${sanitized}\n=== end file ===`);
         } catch {
