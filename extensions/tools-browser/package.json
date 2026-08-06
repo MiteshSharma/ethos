@@ -18,11 +18,11 @@
     "build": "tsup src/index.ts --format esm --dts"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.96.0",
+    "@anthropic-ai/sdk": "^0.112.3",
     "@ethosagent/safety-network": "workspace:*",
     "@ethosagent/tools-web": "workspace:*",
     "@ethosagent/types": "workspace:*",
-    "openai": "^6.37.0",
+    "openai": "^6.48.0",
     "playwright": "^1.48.0"
   }
 }

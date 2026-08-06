@@ -14,7 +14,7 @@
     "build": "tsup src/index.ts --format esm --dts"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.96.0",
+    "@anthropic-ai/sdk": "^0.112.3",
     "@ethosagent/plugin-sdk": "workspace:*",
     "@ethosagent/types": "workspace:*"
   },
