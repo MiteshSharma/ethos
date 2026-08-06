@@ -201,6 +201,9 @@ importers:
       croner:
         specifier: ^9.0.0
         version: 9.1.0
+      diff:
+        specifier: ^7.0.0
+        version: 7.0.0
       gray-matter:
         specifier: ^4.0.3
         version: 4.0.3
@@ -353,6 +356,9 @@ importers:
       '@slack/bolt':
         specifier: ^3.21.0
         version: 3.22.0
+      '@whiskeysockets/baileys':
+        specifier: 7.0.0-rc13
+        version: 7.0.0-rc13(sharp@0.34.5)
       '@xenova/transformers':
         specifier: ^2.17.2
         version: 2.17.2
@@ -374,6 +380,9 @@ importers:
       playwright:
         specifier: ^1.48.0
         version: 1.60.0
+      qrcode-terminal:
+        specifier: ^0.12.0
+        version: 0.12.0
 
   apps/mcp-server:
     dependencies:

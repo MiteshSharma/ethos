@@ -59,7 +59,8 @@ help:
 	@echo "  lint               - biome check"
 	@echo "  format             - biome format --write"
 	@echo "  version-sync       - run scripts/check-version-sync.sh (G1 + G2)"
-	@echo "  check              - typecheck + tests + version-sync (blocking) + lint (advisory) — mirrors CI"
+	@echo "  bundle-deps        - run scripts/check-bundle-deps.sh (CLI bundle deps declared)"
+	@echo "  check              - typecheck + tests + version-sync + bundle-deps (blocking) + lint (advisory) — mirrors CI"
 	@echo ""
 	@echo "Versioning (VERSION file is the single source of truth — never edit package.json directly)"
 	@echo "  version            - Print current version"
@@ -299,8 +300,8 @@ docs-build:
 #
 # Each target wraps the matching scripts/check-*.sh so make / CI / humans all
 # run the same code path. CI's ci.yml jobs call the same scripts directly; the
-# composite `check` target runs all four via scripts/run-checks.sh and mirrors
-# CI's policy (typecheck + tests + version-sync block; lint advisory).
+# composite `check` target runs all five via scripts/run-checks.sh and mirrors
+# CI's policy (typecheck + tests + version-sync + bundle-deps block; lint advisory).
 
 test:
 	@$(NVM_EXEC) bash scripts/check-tests.sh
@@ -313,6 +314,9 @@ lint:
 
 version-sync:
 	@$(NVM_EXEC) bash scripts/check-version-sync.sh
+
+bundle-deps:
+	@$(NVM_EXEC) bash scripts/check-bundle-deps.sh
 
 format:
 	@$(NVM_EXEC) pnpm format

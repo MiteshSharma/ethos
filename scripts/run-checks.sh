@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Convenience: runs all four check-*.sh files and reports a combined summary.
-# Default policy mirrors CI: typecheck/tests/version-sync block; lint advisory.
+# Convenience: runs all five check-*.sh files and reports a combined summary.
+# Default policy mirrors CI: typecheck/tests/version-sync/bundle-deps block; lint advisory.
 # Override via env: LINT_BLOCKING=1 to make lint block as well.
 set -uo pipefail
 
@@ -30,6 +30,7 @@ run_check() {
 run_check typecheck    check-typecheck.sh    1
 run_check tests        check-tests.sh        1
 run_check version-sync check-version-sync.sh 1
+run_check bundle-deps  check-bundle-deps.sh  1
 run_check lint         check-lint.sh         "$LINT_BLOCKING"
 
 echo ""
