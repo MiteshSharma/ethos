@@ -15,6 +15,7 @@ extensions/*/dist
 apps/*/dist
 apps/ethos/data
 apps/ethos/web
+apps/ethos/skills
 *.db
 *.db-shm
 *.db-wal
