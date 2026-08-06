@@ -19,7 +19,7 @@
   "dependencies": {
     "@ethosagent/core": "workspace:*",
     "@ethosagent/types": "workspace:*",
-    "imapflow": "^1.0.170",
+    "imapflow": "^1.6.5",
     "mailparser": "^3.7.2",
     "nodemailer": "^6.10.1"
   },
