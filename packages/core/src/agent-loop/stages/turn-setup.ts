@@ -1,4 +1,5 @@
 import type { AgentEvent, ModelTierName, ToolFilterOpts } from '@ethosagent/types';
+import { parseSmallWindowToolset } from '../small-window-toolset';
 import type { LoopDeps, TurnSetupResult } from '../turn-context';
 import { resolveModelWithTier } from '../turn-context';
 
@@ -112,8 +113,25 @@ export async function* setupTurn(
   // Allowed tool names for this personality (undefined = no restriction)
   const baseToolset = opts.toolsetOverride ?? personality.toolset ?? undefined;
   const narrow = opts.toolsetNarrow;
-  const allowedTools =
+  let allowedTools =
     narrow && baseToolset ? baseToolset.filter((t) => narrow.includes(t)) : (narrow ?? baseToolset);
+
+  // Lane 3(b) / D20 — declared small-window toolset narrowing. When wiring
+  // resolved small-window mode AND this turn's personality declares
+  // `context_engine_options.small_window_toolset`, the effective toolset is
+  // the declared set (intersected — a declaration can never escalate beyond
+  // the allowlist computed above). `allowedTools` gates BOTH toDefinitions()
+  // and executeParallel downstream, so a narrowed-out tool is rejected exactly
+  // like a disallowed one. Static per loop + personality — never per turn —
+  // so the tool payload in the request prefix stays byte-stable.
+  if (deps.smallWindow) {
+    const declared = parseSmallWindowToolset(
+      personality.context_engine_options?.small_window_toolset,
+    );
+    if (declared) {
+      allowedTools = allowedTools ? allowedTools.filter((t) => declared.includes(t)) : declared;
+    }
+  }
   // Per-personality plugin + MCP gate (default-deny: missing field = no access)
   const allowedPlugins = personality.plugins ?? [];
 

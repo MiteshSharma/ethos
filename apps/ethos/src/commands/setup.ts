@@ -9,8 +9,13 @@ import {
 } from '@ethosagent/config';
 import type { WizardStepId } from '@ethosagent/tui/setup';
 import { probeProvider } from '@ethosagent/wiring';
-import { fetchLocalModels } from '@ethosagent/wiring/local-models';
-import { getProvider } from '@ethosagent/wiring/provider-catalog';
+import {
+  detectLocalRuntime,
+  fetchLocalModels,
+  probeServedWindowCached,
+  windowProbeCachePath,
+} from '@ethosagent/wiring/local-models';
+import { getProvider, PROVIDER_CATALOG } from '@ethosagent/wiring/provider-catalog';
 import { redactErrorMessage } from '../redact-error';
 import { getFunnelTracker, getSecretsResolver, getStorage } from '../wiring';
 
@@ -25,6 +30,15 @@ const c = {
 
 function ask(rl: ReturnType<typeof createInterface>, question: string): Promise<string> {
   return new Promise((resolve) => rl.question(question, resolve));
+}
+
+/** Lane 5 — the setup hint derives from the provider catalog (non-comingSoon
+ *  entries) so it can never drift from what wiring actually supports.
+ *  Exported for the drift test. */
+export function supportedProvidersHint(): string {
+  return PROVIDER_CATALOG.filter((p) => !p.comingSoon)
+    .map((p) => p.id)
+    .join(', ');
 }
 
 export interface SetupResult {
@@ -202,7 +216,7 @@ async function runReadlineFallback({
 
   console.log(`\n${c.cyan}${c.bold}ethos setup${c.reset}\n`);
 
-  console.log(`${c.dim}Supported providers: anthropic, openrouter, ollama, vllm, azure${c.reset}`);
+  console.log(`${c.dim}Supported providers: ${supportedProvidersHint()}${c.reset}`);
   const provider = (await ask(rl, 'Provider (anthropic): ')).trim() || 'anthropic';
 
   let model: string;
@@ -239,6 +253,28 @@ async function runReadlineFallback({
     } else {
       console.log(`${c.yellow}Endpoint not reachable — enter a model name manually.${c.reset}`);
       model = (await ask(rl, 'Model: ')).trim();
+    }
+
+    // Lane 0 (D16) — setup probes the SERVED context window live and warms
+    // the probe cache. Fail-soft: an unreachable probe prints a diagnostic
+    // and setup continues.
+    const runtime = detectLocalRuntime(provider, baseUrl);
+    if (runtime && model) {
+      const probe = await probeServedWindowCached({
+        runtime,
+        baseUrl,
+        model,
+        storage: getStorage(),
+        cachePath: windowProbeCachePath(ethosDir()),
+        forceRefresh: true,
+      });
+      if (probe.contextWindow !== undefined) {
+        console.log(
+          `${c.dim}Served context window: ${probe.contextWindow.toLocaleString('en-US')} tokens${c.reset}`,
+        );
+      } else if (probe.diagnostic) {
+        console.log(`${c.yellow}${probe.diagnostic}${c.reset}`);
+      }
     }
   } else {
     const defaultModel =

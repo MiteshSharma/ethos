@@ -1,4 +1,5 @@
 import type { PersonalityConfig, ToolRegistry } from '@ethosagent/types';
+import { evaluateToolSchemaBudget, measureStaticFloor } from '@ethosagent/wiring';
 
 // `ethos bench context` — context-economy Phase 0 (plan/phases/gap-context-economy.md §4).
 // Quantifies the per-turn context tax: a static per-personality table (SOUL.md
@@ -32,40 +33,45 @@ export interface StaticMeasurement {
   soulChars: number;
   toolCount: number;
   toolSchemaChars: number;
-  /** ceil((soulChars + toolSchemaChars) / 4) — the chars/4 estimate wiring uses. */
+  /**
+   * `measureStaticFloor().tokens` — the SAME chars/4 static-floor number
+   * wiring's build-agent-loop computes (D8: one arithmetic, shared helper).
+   * Includes the injection-defense prelude when `preludeChars` is passed;
+   * before Lane 1 this table silently omitted it and disagreed with wiring.
+   */
   estStaticTokens: number;
 }
 
 /**
  * Measure the static context tax one personality pays: SOUL.md size plus the
- * serialized tool schemas its resolved toolset exposes to the LLM. Pure —
- * takes the SOUL.md body and a ToolRegistry so it is testable without the CLI.
- * When no registry is available (no ~/.ethos config → no wired tools), tool
- * columns degrade to the toolset name count and zero schema chars.
+ * serialized tool schemas its resolved toolset exposes to the LLM, plus the
+ * injection-defense prelude. Pure — takes the SOUL.md body and a ToolRegistry
+ * so it is testable without the CLI. When no registry is available (no
+ * ~/.ethos config → no wired tools), tool columns degrade to the toolset name
+ * count and zero schema chars. Delegates the token estimate to wiring's
+ * `measureStaticFloor` so this table and build-agent-loop can never drift.
  */
 export function measurePersonalityStatic(
   personality: PersonalityConfig,
   soulMd: string,
   tools?: Pick<ToolRegistry, 'toDefinitions'>,
+  preludeChars = 0,
 ): StaticMeasurement {
   const soulChars = soulMd.length;
-  if (!tools) {
-    return {
-      id: personality.id,
-      soulChars,
-      toolCount: personality.toolset?.length ?? 0,
-      toolSchemaChars: 0,
-      estStaticTokens: Math.ceil(soulChars / 4),
-    };
-  }
-  const defs = tools.toDefinitions(personality.toolset);
-  const toolSchemaChars = JSON.stringify(defs).length;
+  const defs = tools?.toDefinitions(personality.toolset);
+  const toolSchemaChars = defs ? JSON.stringify(defs).length : 0;
+  const floor = measureStaticFloor({
+    soulChars,
+    toolSchemaChars,
+    toolCount: defs?.length ?? personality.toolset?.length ?? 0,
+    preludeChars,
+  });
   return {
     id: personality.id,
     soulChars,
-    toolCount: defs.length,
+    toolCount: floor.toolCount,
     toolSchemaChars,
-    estStaticTokens: Math.ceil((soulChars + toolSchemaChars) / 4),
+    estStaticTokens: floor.tokens,
   };
 }
 
@@ -264,12 +270,16 @@ export async function runBench(args: string[]): Promise<void> {
   let toolRegistry: ToolRegistry | undefined;
   let loop: import('@ethosagent/core').AgentLoop | undefined;
   let activePersonalityId = '';
+  let contextWindow: number | undefined;
   if (config) {
     const { createAgentLoop } = await import('../wiring');
-    const result = await createAgentLoop(config);
+    // Lane 0 (D16) — bench context probes the served window LIVE and rewrites
+    // the probe cache; the tuning loop must never show stale numbers.
+    const result = await createAgentLoop(config, { probeWindowRefresh: true });
     toolRegistry = result.toolRegistry;
     loop = result.loop;
     activePersonalityId = result.activePersonality.id;
+    contextWindow = result.contextWindow;
   } else {
     console.log(
       `${c.yellow}No ~/.ethos/config.yaml — measuring built-in personalities without a wired ` +
@@ -277,11 +287,17 @@ export async function runBench(args: string[]): Promise<void> {
     );
   }
 
-  // Static table — no LLM calls.
+  // Static table — no LLM calls. The injection-defense prelude is part of
+  // every assembled prompt, so it belongs in the static floor (D8: same
+  // number wiring computes; the full prelude is the default posture — a
+  // per-model compact-prelude profile would shave a few hundred chars).
+  const { INJECTION_DEFENSE_PRELUDE } = await import('@ethosagent/safety-injection');
   const staticRows: StaticMeasurement[] = [];
   for (const personality of reg.list()) {
     const soulMd = await reg.readSoulMd(personality.id);
-    staticRows.push(measurePersonalityStatic(personality, soulMd, toolRegistry));
+    staticRows.push(
+      measurePersonalityStatic(personality, soulMd, toolRegistry, INJECTION_DEFENSE_PRELUDE.length),
+    );
   }
   staticRows.sort((a, b) => b.estStaticTokens - a.estStaticTokens);
 
@@ -296,6 +312,21 @@ export async function runBench(args: string[]): Promise<void> {
       `  ${row.id.padEnd(24)}${String(row.soulChars).padStart(9)}${String(row.toolCount).padStart(7)}` +
         `${String(row.toolSchemaChars).padStart(11)}${String(row.estStaticTokens).padStart(9)}`,
     );
+  }
+
+  // Lane 3(b) — the schema-budget gate, wired into the bench (no second
+  // measurement path): the same `evaluateToolSchemaBudget` wiring runs at
+  // startup, dividing the SAME toDefinitions payload by the SAME served
+  // window. A personality flagged here is the one warned about at startup.
+  if (toolRegistry && contextWindow !== undefined) {
+    for (const personality of reg.list()) {
+      const verdict = evaluateToolSchemaBudget({
+        personalityId: personality.id,
+        windowTokens: contextWindow,
+        toolDefinitions: toolRegistry.toDefinitions(personality.toolset),
+      });
+      if (verdict.message) console.log(`  ${c.yellow}⚠ ${verdict.message}${c.reset}`);
+    }
   }
 
   // Live scenarios — only with --live and a configured provider.

@@ -1,4 +1,5 @@
 import type { AgentEvent } from '@ethosagent/types';
+import { coerceArgsToSchema, describeRepairedArgsFailure } from '../schema-coerce';
 import type { WatcherTap } from '../turn-context';
 
 // §4 (profile-gated remainder) — presence check for a REPAIRED tool call's
@@ -19,6 +20,33 @@ export function missingRequiredFields(schema: Record<string, unknown>, args: unk
     if (!(key in obj) || obj[key] === undefined) missing.push(key);
   }
   return missing;
+}
+
+// Lane 4a — full validation for REPAIRED tool arguments: stage-2 conservative
+// type coercion toward the tool's schema, then the presence check above plus a
+// type check on REQUIRED fields. Wrong-typed OPTIONAL fields do not reject
+// (behavior-preserving scope — they executed before this delta too). Returns
+// the (possibly coerced) args, plus a stage-3 per-field rejection reason when
+// a required field is still missing or wrong-typed after coercion.
+export function validateRepairedArgs(
+  schema: Record<string, unknown>,
+  args: unknown,
+): { args: unknown; reason?: string } {
+  const coerced = coerceArgsToSchema(schema, args);
+  const missing = missingRequiredFields(schema, coerced.args);
+  const required = new Set(
+    Array.isArray(schema.required)
+      ? schema.required.filter((k): k is string => typeof k === 'string')
+      : [],
+  );
+  const requiredMismatches = coerced.mismatches.filter((m) => required.has(m.field));
+  if (missing.length === 0 && requiredMismatches.length === 0) {
+    return { args: coerced.args };
+  }
+  return {
+    args: coerced.args,
+    reason: describeRepairedArgsFailure(schema, missing, requiredMismatches),
+  };
 }
 
 // Emit the standard rejection signal for a tool call that will not execute:

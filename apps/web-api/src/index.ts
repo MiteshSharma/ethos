@@ -277,6 +277,18 @@ export interface CreateWebApiOptions {
    */
   dockerBuildable?: boolean;
   /**
+   * Lane 6 (D5) — compute the arithmetic model-fit verdict for a personality
+   * id. Boot code passes a closure over wiring's `resolvePersonalityModelFit`
+   * (it needs the tool registry + provider config the web-api never sees);
+   * the `personalities.characterSheet` RPC threads the result into the SAME
+   * `renderCharacterSheet` generator the CLI uses. Absent (onboarding mode,
+   * tests, desktop) → the sheet renders without the `## Model fit` section.
+   * Resolving to `null` (or throwing) degrades the same way.
+   */
+  modelFit?: (
+    personalityId: string,
+  ) => Promise<import('@ethosagent/personalities').CharacterSheetModelFit | null>;
+  /**
    * Protocol route modules (A2A, Phase 3) contributed to the Hono app via the
    * explicit, reviewable seam. Each declares its mount path, auth posture, and
    * description; `enabled: false` skips it. Modules inherit the app-wide CORS +
@@ -399,6 +411,7 @@ export function createWebApi(opts: CreateWebApiOptions): CreateWebApiResult {
     // create path) is visible in the Personalities tab without a restart.
     refresh: () => opts.personalities.loadFromDirectory(join(opts.dataDir, 'personalities')),
     ...(opts.dockerBuildable === false ? { dockerBuildable: false } : {}),
+    ...(opts.modelFit ? { modelFit: opts.modelFit } : {}),
   });
   const configService = new ConfigService({ config: configRepo, secrets });
   const onboardingService = new OnboardingService({

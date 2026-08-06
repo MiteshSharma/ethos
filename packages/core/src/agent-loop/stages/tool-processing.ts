@@ -22,12 +22,13 @@ import { redactArgs } from '../../dry-run';
 import type { AgentLoopObservability } from '../../observability/agent-loop-observability';
 import { SimpleCompletionImpl } from '../../simple-completion';
 import { extractFilePath } from '../extract-file-path';
+import { capIngestedResult } from '../ingestion-cap';
 import { checkMcpEnabled, checkMcpRejectArgs } from '../mcp-policy';
 import { handleUntrustedResult } from '../result-defense';
 import { buildScopedStorage } from '../scoped-storage';
 import type { WatcherTap } from '../turn-context';
 import type { CompletedToolCall, UsageSink } from './stream-step';
-import { emitToolRejection, missingRequiredFields } from './tool-rejection';
+import { emitToolRejection, validateRepairedArgs } from './tool-rejection';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -222,21 +223,21 @@ export async function* processTools(
       continue;
     }
 
-    // §4 (remainder) — the streamed arguments were REPAIRED (chunk-handler's
-    // mechanical pass succeeded), so validate the repaired object against the
-    // tool's `required` fields — a dropped key must not run. Clean parses skip.
+    // §4 (remainder) + Lane 4a delta — the streamed arguments were REPAIRED,
+    // so validate them against the tool's schema: stage-2 type coercion, then
+    // the required-fields presence/type check w/ per-field feedback. Clean parses skip.
     if (tc.repair?.outcome === 'repaired') {
       const tool = deps.tools.get(tc.toolName);
       if (tool) {
-        const missing = missingRequiredFields(tool.schema, tc.args);
-        if (missing.length > 0) {
-          const reason = `repaired tool arguments are missing required field(s): ${missing.join(', ')}`;
-          yield* emitToolRejection(observe, tc.toolCallId, tc.toolName, reason);
+        const validated = validateRepairedArgs(tool.schema, tc.args);
+        tc.args = validated.args;
+        if (validated.reason !== undefined) {
+          yield* emitToolRejection(observe, tc.toolCallId, tc.toolName, validated.reason);
           prepped.push({
             toolCallId: tc.toolCallId,
             name: tc.toolName,
             args: tc.args ?? {},
-            rejected: reason,
+            rejected: validated.reason,
           });
           continue;
         }
@@ -445,7 +446,8 @@ export async function* processTools(
       await deps.session.appendMessage({
         sessionId: ctx.sessionId,
         role: 'tool_result',
-        content: result.ok ? result.value : result.error,
+        // Lane 1(c) — same ingestion cap as the main persist path below.
+        content: capIngestedResult(result.ok ? result.value : result.error, deps.resultBudgetChars),
         toolCallId: p.toolCallId,
         toolName: p.name,
       });
@@ -523,7 +525,9 @@ export async function* processTools(
 
     if (p.rejected !== undefined) {
       result = { ok: false, error: p.rejected, code: 'execution_failed' };
-      llmContent = p.rejected;
+      // Lane 1(c) — hook-authored rejection reasons ride the same ingestion
+      // cap as executed results (a plugin hook can return arbitrary text).
+      llmContent = capIngestedResult(p.rejected, deps.resultBudgetChars);
       // tool_end already emitted above; no after_tool_call hook for blocked tools
     } else {
       const execResult = execResultMap.get(p.toolCallId);
@@ -630,16 +634,25 @@ export async function* processTools(
         }
       }
 
+      // Lane 1(c) — ingestion cap, applied BEFORE the untrusted wrap
+      // (post-review FIX 7: capping the wrapped content could sever the
+      // closing </untrusted> tag, leaving the fence open for everything
+      // after it) and before the delimiter wrap so the END marker is never
+      // cut off, and before persistence (see agent-loop/ingestion-cap.ts).
+      llmContent = capIngestedResult(llmContent, deps.resultBudgetChars);
+
       // Ch.3a + 3c — provenance wrap + Tier-1 pattern check + optional
       // Tier-2 LLM classifier. Only applies on success; errors are
-      // framework-authored and skip wrapping.
+      // framework-authored and skip wrapping. Wraps the already-capped
+      // content, so the wrapper (a small constant) is the only growth past
+      // the budget and the fence always terminates.
       if (ctx.injectionDefenseEnabled && result.ok) {
         const tool = deps.tools.get(p.name);
         if (tool?.outputIsUntrusted) {
           const verdict = await handleUntrustedResult(
             p.name,
             p.args,
-            result.value,
+            llmContent,
             ctx.personality,
             ctx.traceId,
             deps.safety,
@@ -664,15 +677,6 @@ export async function* processTools(
       }
     }
 
-    // Persist every result (rejected or not) so history matches what LLM sees
-    await deps.session.appendMessage({
-      sessionId: ctx.sessionId,
-      role: 'tool_result',
-      content: llmContent,
-      toolCallId: p.toolCallId,
-      toolName: p.name,
-    });
-
     const delimiterEnabled = ctx.personality.safety?.injectionDefense?.toolResultDelimiters ?? true;
     let finalContent: string;
     if (delimiterEnabled && result.ok) {
@@ -683,6 +687,15 @@ export async function* processTools(
     } else {
       finalContent = llmContent;
     }
+
+    // Persist what the LLM sees, delimiters included — stored bytes are the replay bytes (Lane 2b, #4555).
+    await deps.session.appendMessage({
+      sessionId: ctx.sessionId,
+      role: 'tool_result',
+      content: finalContent,
+      toolCallId: p.toolCallId,
+      toolName: p.name,
+    });
 
     toolResultContent.push({
       type: 'tool_result',

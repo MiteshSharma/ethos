@@ -1194,12 +1194,55 @@ async function runPersonalityShow(argv: string[]): Promise<void> {
   // Resolve the execution posture so `## Execution` renders on the sheet
   // (Phase 2a, lane E1). Read-only — no daemon probe here; the static posture
   // (backend / network / memory / mounts / macOS caveat) is what `show` audits.
-  const { buildExecutionPosture } = await import('@ethosagent/wiring');
+  const { buildExecutionPosture, resolvePersonalityModelFit } = await import('@ethosagent/wiring');
   const posture = await buildExecutionPosture({
     personality: described.config,
     substitutionVars: { ethosHome: ethosDir(), cwd: process.cwd() },
   });
-  console.log(`\n${renderCharacterSheet(described.config, soulMd, { posture })}`);
+
+  // Lane 6 — the arithmetic model-fit verdict, rendered as the sheet's
+  // `## Model fit` section. The window resolution probes LIVE and rewrites the
+  // probe cache (D16 — this is a diagnostic command; the numbers an operator
+  // tunes against are never stale). The tool registry supplies the SERIALIZED
+  // schema payload the floor divides by (D8). Fail-soft: no config, or a loop
+  // that cannot be constructed, renders today's sheet without the verdict —
+  // the character sheet is the command's contract.
+  let modelFit: import('@ethosagent/personalities').CharacterSheetModelFit | undefined;
+  let loopConstructed = false;
+  try {
+    const cfg = await readConfig(storage, await getSecretsResolver());
+    if (cfg) {
+      const { createAgentLoop } = await import('./wiring');
+      const result = await createAgentLoop(cfg);
+      loopConstructed = true;
+      const model = cfg.modelRouting?.[id] ?? cfg.model;
+      modelFit = await resolvePersonalityModelFit({
+        personality: described.config,
+        soulMd,
+        toolDefinitions: result.toolRegistry.toDefinitions(described.config.toolset),
+        provider: cfg.provider,
+        model,
+        ...(cfg.baseUrl !== undefined ? { baseUrl: cfg.baseUrl } : {}),
+        ...(model === cfg.model && cfg.contextWindow !== undefined
+          ? { configWindow: cfg.contextWindow }
+          : {}),
+        ...(cfg.compaction?.smallWindow !== undefined
+          ? { smallWindowOverride: cfg.compaction.smallWindow }
+          : {}),
+        storage,
+        dataDir: ethosDir(),
+        forceProbeRefresh: true,
+      });
+    }
+  } catch {
+    // The verdict is advisory — the character sheet is the command's contract.
+  }
+  console.log(`\n${renderCharacterSheet(described.config, soulMd, { posture }, modelFit)}`);
+
+  // Loop construction can leave live handles (MCP children, background
+  // executors); the sheet is printed and flushed, so exit explicitly (same
+  // posture as `ethos bench context`).
+  if (loopConstructed) process.exit(process.exitCode ?? 0);
 }
 
 // ---------------------------------------------------------------------------

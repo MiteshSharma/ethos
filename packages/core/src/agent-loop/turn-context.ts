@@ -46,6 +46,9 @@ export interface LoopDeps {
   maxIdenticalToolCalls: number;
   maxConsecutiveIdenticalCalls: number;
   streamingTimeoutMs: number;
+  /** Lane 3(b) — small-window mode (resolved once by wiring); gates declared
+   *  `context_engine_options.small_window_toolset` narrowing in turn setup. */
+  smallWindow: boolean;
   modelRouting: Record<string, string>;
   /** §5 — resolved compaction gate config (pressure/target fractions +
    *  per-model charsPerToken). Undefined → gate uses its 0.8/0.7 + char/4
@@ -67,6 +70,9 @@ export interface LoopDeps {
     maxContextTokens?: number;
     /** Item 7 — minimum USER messages kept verbatim in the tail. Absent → 3. */
     minTailUserMessages?: number;
+    /** Lane 1(a) — largest-single-tool-result reserve, in tokens; subtracted
+     *  from the compactible region by `evaluateGate`. Absent → 0 (unchanged). */
+    maxSingleToolResultTokens?: number;
   };
   /** Phase 3 — silent memory-flush turn config. `enabled` gates the whole
    *  feature (default off); the rest tune the soft threshold, hard timebox +

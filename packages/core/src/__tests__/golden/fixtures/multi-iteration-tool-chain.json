@@ -87,7 +87,7 @@
     {
       "sessionId": "normalized",
       "role": "tool_result",
-      "content": "first-result",
+      "content": "===TOOL_RESULT_START:first===\nfirst-result\n===TOOL_RESULT_END===",
       "toolCallId": "tc1",
       "toolName": "first",
       "id": "normalized",
@@ -110,7 +110,7 @@
     {
       "sessionId": "normalized",
       "role": "tool_result",
-      "content": "second-result",
+      "content": "===TOOL_RESULT_START:second===\nsecond-result\n===TOOL_RESULT_END===",
       "toolCallId": "tc2",
       "toolName": "second",
       "id": "normalized",

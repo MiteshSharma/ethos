@@ -71,7 +71,7 @@
     {
       "sessionId": "normalized",
       "role": "tool_result",
-      "content": "<untrusted source=\"file:/etc/hosts\" tool=\"read_file\">\nfile contents here\n</untrusted>",
+      "content": "===TOOL_RESULT_START:read_file===\n<untrusted source=\"file:/etc/hosts\" tool=\"read_file\">\nfile contents here\n</untrusted>\n===TOOL_RESULT_END===",
       "toolCallId": "tc1",
       "toolName": "read_file",
       "id": "normalized",

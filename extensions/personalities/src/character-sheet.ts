@@ -58,6 +58,88 @@ function estimateSystemPromptTokens(soulMd: string, toolset: readonly string[]):
 }
 
 /**
+ * Lane 6 (eng review D5/D19) — the arithmetic model-fit verdict, as PLAIN DATA.
+ * Computed by `computeModelFit()` in `@ethosagent/wiring` (which can see the
+ * tool registry, the provider, and the window resolution) and passed in here;
+ * the personalities package never reaches up into wiring. One generator renders
+ * it for both the CLI (`ethos personality show`) and the
+ * `personalities.characterSheet` RPC.
+ */
+export interface CharacterSheetModelFit {
+  verdict: 'fits' | 'fits-degraded' | 'refuses' | 'unknown';
+  /** Model the verdict was computed against. */
+  model: string;
+  /** Resolved served window in tokens. Absent → unresolved (verdict `unknown`);
+   *  the verdict is NEVER computed against the 128,000-token default (D19). */
+  windowTokens?: number;
+  /** Where the window number came from. `default` = nothing resolved. */
+  windowSource: 'config' | 'probe' | 'catalog' | 'default';
+  /** Static-floor breakdown from `measureStaticFloor()` — serialized tool-schema
+   *  size, not toolset name count (D8). */
+  floor: {
+    tokens: number;
+    toolCount: number;
+    components: Array<{ name: string; tokens: number }>;
+  };
+  outputReserveTokens?: number;
+  /** `window − output reserve − static floor`; ≤ 0 → `refuses`. */
+  compactibleTokens?: number;
+  /** `floor.tokens / windowTokens`, when the window is known. */
+  staticShare?: number;
+  /** Named arithmetic costs in effect (small-window mode, narrowed toolset,
+   *  static share over the budget ratio). Non-empty → `fits-degraded`. */
+  degradations: string[];
+  /** The Lane 1(b) diagnostic — set on `refuses`, names the largest component. */
+  refusalReason?: string;
+  /** What the arithmetic could not see (MCP schemas, tier models). */
+  exclusions: string[];
+}
+
+/** Render the `## Model fit` block. Pure — takes the computed verdict data. */
+function modelFitSection(fit: CharacterSheetModelFit): string[] {
+  const n = (v: number) => v.toLocaleString('en-US');
+  const lines: string[] = ['## Model fit'];
+  lines.push(`- Verdict: ${fit.verdict}`);
+  lines.push(`- Model: ${fit.model}`);
+  // D19 — every verdict prints its inputs: the window and its source. An
+  // unresolved window prints "unknown", never a fallback number.
+  if (fit.windowTokens !== undefined) {
+    lines.push(`- Window: ${n(fit.windowTokens)} tokens (source: ${fit.windowSource})`);
+  } else {
+    lines.push(
+      '- Window: unknown (no config, no probe, no catalog — verdict not computed against the default)',
+    );
+  }
+  lines.push(
+    `- Static floor: ${n(fit.floor.tokens)} tokens (${fit.floor.toolCount} tool schema${
+      fit.floor.toolCount === 1 ? '' : 's'
+    }):`,
+  );
+  for (const comp of fit.floor.components) {
+    lines.push(`    - ${comp.name}: ${n(comp.tokens)} tokens`);
+  }
+  if (fit.outputReserveTokens !== undefined) {
+    lines.push(`- Output reserve: ${n(fit.outputReserveTokens)} tokens`);
+  }
+  if (fit.compactibleTokens !== undefined) {
+    lines.push(`- Compactible: ${n(fit.compactibleTokens)} tokens`);
+  }
+  if (fit.staticShare !== undefined) {
+    lines.push(`- Static share of window: ${Math.round(fit.staticShare * 100)}%`);
+  }
+  if (fit.degradations.length > 0) {
+    lines.push('- Degradations:');
+    for (const d of fit.degradations) lines.push(`    - ${d}`);
+  }
+  if (fit.refusalReason) lines.push(`- Refusal: ${fit.refusalReason}`);
+  if (fit.exclusions.length > 0) {
+    lines.push('- Exclusions:');
+    for (const e of fit.exclusions) lines.push(`    - ${e}`);
+  }
+  return lines;
+}
+
+/**
  * Optional context for the `## Execution` section. The renderer is pure: it
  * formats whatever posture the caller resolved (via the wiring posture
  * resolver) and the constitution enforcement it loaded. When `posture` is
@@ -211,6 +293,7 @@ export function renderCharacterSheet(
   config: PersonalityConfig,
   soulMd: string,
   execution?: CharacterSheetExecution,
+  modelFit?: CharacterSheetModelFit,
 ): string {
   const lines: string[] = [`# ${config.id} — ${config.name}`, ''];
 
@@ -241,12 +324,21 @@ export function renderCharacterSheet(
   lines.push(...bulletList(toolset, '(none)'));
   lines.push('');
 
-  // §2 — a rough estimate of the assembled system-prompt weight, so prompt
-  // cost is visible per personality. char/4 over the components the sheet
-  // already has (injection prelude + SOUL.md + toolset names); it does NOT
-  // include tool schemas or memory, so it reads low — hence "~" and "Estimated".
+  // §2 — the assembled system-prompt weight, so prompt cost is visible per
+  // personality. When the caller injects a computed model fit (Lane 6, D5),
+  // the ACCURATE `measureStaticFloor()` number replaces the old name-count
+  // estimate — serialized tool schemas included. Without it, fall back to the
+  // chars/4 estimate over the components the sheet already has (injection
+  // prelude + SOUL.md + toolset names), which does NOT include tool schemas
+  // or memory, so it reads low — hence "~" and "Estimated".
   lines.push('## Prompt size');
-  lines.push(`- Estimated system-prompt tokens: ~${estimateSystemPromptTokens(soulMd, toolset)}`);
+  if (modelFit) {
+    lines.push(
+      `- System-prompt tokens: ~${modelFit.floor.tokens} (measured static floor — serialized tool schemas included)`,
+    );
+  } else {
+    lines.push(`- Estimated system-prompt tokens: ~${estimateSystemPromptTokens(soulMd, toolset)}`);
+  }
   lines.push('');
 
   lines.push('## MCP servers');
@@ -294,6 +386,11 @@ export function renderCharacterSheet(
   if (execution) {
     lines.push('');
     lines.push(...executionSection(config, execution));
+  }
+
+  if (modelFit) {
+    lines.push('');
+    lines.push(...modelFitSection(modelFit));
   }
 
   return `${lines.join('\n')}\n`;

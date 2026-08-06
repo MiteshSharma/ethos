@@ -28,7 +28,12 @@ describe('Orchestrator guardrails', () => {
     // one property line in the `compactSession` call (the new compaction fields
     // themselves went onto the existing one-line `compaction?:` config shape).
     // The logic lives in agent-loop/manual-compact.ts.
-    expect(lineCount).toBeLessThanOrEqual(841);
+    // Bumped 841 → 846: Lane 3(b)'s `options.smallWindow` flag (declared
+    // small-window toolset narrowing, D20) — option decl + one-line doc,
+    // field, constructor default, deps threading (5 irreducible lines,
+    // compressed to one-line shapes). The narrowing logic itself lives in
+    // agent-loop/stages/turn-setup.ts + agent-loop/small-window-toolset.ts.
+    expect(lineCount).toBeLessThanOrEqual(846);
   });
 
   it('no stage file exceeds 700 lines', () => {
@@ -44,7 +49,15 @@ describe('Orchestrator guardrails', () => {
       // tagged apart from the other `Prepped.rejected` sources (MCP policy,
       // reject_args, injection downgrade, watcher halt) — a counter, an
       // increment in the `before_tool_call` branch, and a one-line comment.
-      if (lineCount > 725) {
+      // Bumped 725 → 731: Lane 1(c) ingestion truncation caps tool-result
+      // content at both persist sites (main path + returnDirect). The logic
+      // lives in agent-loop/ingestion-cap.ts; only the import and the two
+      // commented call sites land here.
+      // Bumped 731 → 738: post-review FIX 7 moves the ingestion cap BEFORE
+      // the untrusted wrap (so the cap can never sever </untrusted>) and adds
+      // the cap to the hook-rejected path — comment lines only, the logic is
+      // unchanged in size.
+      if (lineCount > 738) {
         violations.push(`${file}: ${lineCount} lines`);
       }
     }
@@ -58,7 +71,10 @@ describe('Orchestrator guardrails', () => {
       if (statSync(join(agentLoopDir, file)).isDirectory()) continue;
       const content = readFileSync(join(agentLoopDir, file), 'utf-8');
       const lineCount = content.split('\n').length;
-      if (lineCount > 500) {
+      // Bumped 500 → 502: Lane 1(a) threads the max-single-tool-result gate
+      // term through turn-end's evaluateGate deps (three lines; the arithmetic
+      // itself lives in compaction.ts's shared evaluateGate).
+      if (lineCount > 502) {
         violations.push(`${file}: ${lineCount} lines`);
       }
     }

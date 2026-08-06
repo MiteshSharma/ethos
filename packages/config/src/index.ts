@@ -510,6 +510,51 @@ export interface EthosConfig {
   /** Azure-only: REST API version (e.g. `2024-10-21`). Required when
    *  `provider === 'azure'`; ignored otherwise. */
   apiVersion?: string;
+  /**
+   * Lane 0 (eng review D4) — operator override for the model's served context
+   * window, in tokens. A window FACT (how many tokens the server accepts) —
+   * not a compaction POLICY (`compaction.maxContextTokens` is the ceiling
+   * compaction aims for, different semantics) — hence the name matches the
+   * catalog's `contextWindow` field rather than the provider-internal
+   * `maxContextTokens` it maps to. Wins over the window probe and the catalog
+   * (precedence: config > probe > catalog > default). Flat-key shape:
+   *   contextWindow: 8192
+   */
+  contextWindow?: number;
+  /**
+   * Lane 2a (eng review D6) — tool-definition ordering at the provider
+   * serialization boundary. `'stable'` (the default) applies the
+   * deterministic ASCII sort so the tool payload — part of the cacheable
+   * request prefix — is byte-identical across restarts; `'insertion'`
+   * restores the legacy registration-order bytes. Temporary rollback lever;
+   * removal tracked in plan/uncompleted-tasks.md (D13). Flat-key shape:
+   *   toolOrder: insertion
+   */
+  toolOrder?: 'insertion' | 'stable';
+  /**
+   * Lane 4a(d) — per-request deadline for the OpenAI-compat client, in
+   * milliseconds. Absent → the OpenAI SDK default (10 minutes) stays in
+   * force. The default is deliberately LONG: a cold local model load
+   * (Ollama paging weights into RAM/VRAM on the first turn) legitimately
+   * takes minutes, and a short default would break every fresh server
+   * start. Set this only when you know your serving latency. Flat-key shape:
+   *   requestTimeoutMs: 120000
+   */
+  requestTimeoutMs?: number;
+  /**
+   * Lane 4a(d) — retry count for the OpenAI-compat client. Absent → the
+   * OpenAI SDK default (2 retries). Flat-key shape:
+   *   maxRetries: 0
+   */
+  maxRetries?: number;
+  /**
+   * Lane 3(a) — total serialized tool-payload guard threshold, in chars.
+   * Absent → the wiring default (128 KiB). Exceeding it fails startup on a
+   * local dialect and warns on hosted ones, naming the offending tools.
+   * Flat-key shape:
+   *   toolPayloadLimitChars: 131072
+   */
+  toolPayloadLimitChars?: number;
   // Per-personality model overrides: maps personality ID → model ID string
   modelRouting?: Record<string, string>;
   /**
@@ -987,6 +1032,13 @@ export async function writeConfig(storage: Storage, config: EthosConfig): Promis
   if (config.memory) lines.push(`memory: ${config.memory}`);
   if (config.baseUrl) lines.push(`baseUrl: ${config.baseUrl}`);
   if (config.apiVersion) lines.push(`apiVersion: ${config.apiVersion}`);
+  if (config.contextWindow !== undefined) lines.push(`contextWindow: ${config.contextWindow}`);
+  if (config.toolOrder !== undefined) lines.push(`toolOrder: ${config.toolOrder}`);
+  if (config.requestTimeoutMs !== undefined)
+    lines.push(`requestTimeoutMs: ${config.requestTimeoutMs}`);
+  if (config.maxRetries !== undefined) lines.push(`maxRetries: ${config.maxRetries}`);
+  if (config.toolPayloadLimitChars !== undefined)
+    lines.push(`toolPayloadLimitChars: ${config.toolPayloadLimitChars}`);
   if (config.modelRouting) {
     for (const [id, model] of Object.entries(config.modelRouting)) {
       lines.push(`modelRouting.${id}: ${model}`);
@@ -2008,6 +2060,38 @@ function parseConfigYaml(src: string): EthosConfig {
             : undefined,
     baseUrl: kv.baseUrl,
     apiVersion: kv.apiVersion,
+    // Lane 0 (D4) — a window is a positive integer token count; anything else
+    // (zero, negative, non-numeric) is dropped so a typo cannot poison the
+    // provider's maxContextTokens.
+    contextWindow: (() => {
+      if (kv.contextWindow === undefined) return undefined;
+      const n = Number(kv.contextWindow);
+      return Number.isFinite(n) && n > 0 ? Math.floor(n) : undefined;
+    })(),
+    // Lane 2a — only the two known values are accepted; anything else is
+    // dropped so a typo cannot silently change the wire format.
+    toolOrder:
+      kv.toolOrder === 'insertion' ? 'insertion' : kv.toolOrder === 'stable' ? 'stable' : undefined,
+    // Lane 4a(d) — a deadline is a positive integer millisecond count; a retry
+    // count is a non-negative integer. Anything else is dropped so a typo
+    // cannot silently change the client's request behavior.
+    requestTimeoutMs: (() => {
+      if (kv.requestTimeoutMs === undefined) return undefined;
+      const n = Number(kv.requestTimeoutMs);
+      return Number.isFinite(n) && n > 0 ? Math.floor(n) : undefined;
+    })(),
+    maxRetries: (() => {
+      if (kv.maxRetries === undefined) return undefined;
+      const n = Number(kv.maxRetries);
+      return Number.isInteger(n) && n >= 0 ? n : undefined;
+    })(),
+    // Lane 3(a) — a payload limit is a positive integer char count; anything
+    // else is dropped so a typo cannot disable (or zero) the guard.
+    toolPayloadLimitChars: (() => {
+      if (kv.toolPayloadLimitChars === undefined) return undefined;
+      const n = Number(kv.toolPayloadLimitChars);
+      return Number.isFinite(n) && n > 0 ? Math.floor(n) : undefined;
+    })(),
     modelRouting: Object.keys(modelRouting).length > 0 ? modelRouting : undefined,
     toolSettings: Object.keys(toolSettings).length > 0 ? toolSettings : undefined,
     models,

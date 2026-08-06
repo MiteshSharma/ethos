@@ -86,7 +86,7 @@
     {
       "sessionId": "normalized",
       "role": "tool_result",
-      "content": "a-result",
+      "content": "===TOOL_RESULT_START:alpha===\na-result\n===TOOL_RESULT_END===",
       "toolCallId": "tc1",
       "toolName": "alpha",
       "id": "normalized",
@@ -95,7 +95,7 @@
     {
       "sessionId": "normalized",
       "role": "tool_result",
-      "content": "b-result",
+      "content": "===TOOL_RESULT_START:beta===\nb-result\n===TOOL_RESULT_END===",
       "toolCallId": "tc2",
       "toolName": "beta",
       "id": "normalized",

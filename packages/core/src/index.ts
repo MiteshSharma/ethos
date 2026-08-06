@@ -6,6 +6,23 @@ export type {
   RunOptions,
 } from './agent-loop';
 export { AgentLoop, isKnownAgentEvent, KNOWN_AGENT_EVENT_TYPES } from './agent-loop';
+// Lane 1(b/c) — the gate's output-reserve constant, shared with wiring's
+// startup floor diagnostic and window-scaled result budget so there is ONE
+// reserve arithmetic, not a drifting copy.
+export { DEFAULT_OUTPUT_RESERVE_TOKENS } from './agent-loop/compaction';
+// Lane 2b — the production session-replay serialization path, exported so
+// restart-prefix tests (and any surface that rehydrates a session) render
+// stored history through EXACTLY the code the live loop uses. A test-local
+// serializer here would prove nothing (Hermes #4555 failure class).
+export { dedupHistory, toLLMMessages } from './agent-loop/history';
+export { reconstructFromWatermark, selectActiveWatermark } from './agent-loop/manual-compact';
+// Lane 3(b) — declared small-window toolset parsing, shared with wiring's
+// startup narrowing diagnostic so both read the declaration identically.
+export { parseSmallWindowToolset } from './agent-loop/small-window-toolset';
+// Lane 5(i) — the tier resolution (with its provider-match guard), exported so
+// wiring's tier-mismatch startup diagnostic is tested against EXACTLY the
+// guard the loop runs, not a drifting re-statement of it.
+export { resolveModelWithTier } from './agent-loop/turn-context';
 export { buildAttachmentAnnotation } from './attachment-annotation';
 export { deriveBotKey } from './bot-key';
 export type { CapabilityBackends, CapabilityScopeIds } from './capability-resolver';

@@ -1,5 +1,6 @@
 import { DefaultToolRegistry } from '@ethosagent/core';
 import type { PersonalityConfig, Tool } from '@ethosagent/types';
+import { evaluateToolSchemaBudget, measureStaticFloor } from '@ethosagent/wiring';
 import { describe, expect, it } from 'vitest';
 import { measurePersonalityStatic } from '../commands/bench';
 
@@ -63,5 +64,56 @@ describe('measurePersonalityStatic', () => {
     expect(row.toolCount).toBe(2);
     expect(row.toolSchemaChars).toBe(0);
     expect(row.estStaticTokens).toBe(Math.ceil(soul.length / 4));
+  });
+
+  // D8 cross-check — bench and build-agent-loop share ONE static-floor
+  // arithmetic: fed the same inputs, `measurePersonalityStatic` reports the
+  // exact number `measureStaticFloor` (which build-agent-loop consumes)
+  // produces, prelude included.
+  it('produces the same static-floor number as the shared wiring helper', () => {
+    const registry = new DefaultToolRegistry();
+    registry.register(makeTool('read_file'));
+    registry.register(makeTool('bash'));
+
+    const soul = 'I am the cross-check personality.';
+    const preludeChars = 1_337;
+    const row = measurePersonalityStatic(
+      makePersonality('xcheck', ['read_file', 'bash']),
+      soul,
+      registry,
+      preludeChars,
+    );
+    const floor = measureStaticFloor({
+      soulChars: soul.length,
+      toolSchemaChars: JSON.stringify(registry.toDefinitions(['read_file', 'bash'])).length,
+      toolCount: 2,
+      preludeChars,
+    });
+    expect(row.estStaticTokens).toBe(floor.tokens);
+    expect(row.toolCount).toBe(floor.toolCount);
+  });
+
+  // Lane 3(b) cross-check — the schema-budget warning threshold and the bench
+  // measurement agree: for one personality, the chars/tokens the bench table
+  // reports ARE the numbers `evaluateToolSchemaBudget` (the startup warning,
+  // also wired into `ethos bench context`) divides by the served window.
+  it('the schema-budget warning reads the same measurement the bench reports', () => {
+    const registry = new DefaultToolRegistry();
+    registry.register(makeTool('read_file', 'A long description. '.repeat(400)));
+    registry.register(makeTool('bash', 'Another long description. '.repeat(400)));
+
+    const personality = makePersonality('budget-xcheck', ['read_file', 'bash']);
+    const row = measurePersonalityStatic(personality, '', registry);
+    const verdict = evaluateToolSchemaBudget({
+      personalityId: personality.id,
+      windowTokens: 8_000,
+      toolDefinitions: registry.toDefinitions(personality.toolset),
+    });
+
+    expect(verdict.toolSchemaChars).toBe(row.toolSchemaChars);
+    expect(verdict.toolSchemaTokens).toBe(Math.ceil(row.toolSchemaChars / 4));
+    expect(verdict.share).toBe(verdict.toolSchemaTokens / 8_000);
+    // Over the 0.4 default on an 8k window → the warning names the personality.
+    expect(verdict.message).toContain('budget-xcheck');
   });
 });

@@ -54,6 +54,7 @@ import {
   createMemoryProvider,
   createSessionStore,
   IdentityMap,
+  resolvePersonalityModelFit,
 } from '@ethosagent/wiring';
 import { appendErrorLog } from '../error-log';
 import { createAcpMcpWiring } from '../lib/acp-mcp-wiring';
@@ -892,6 +893,38 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
     // Loop-registry refresh — chat/completions await it before a turn so a
     // hot-dropped/edited personality resolves without a restart.
     ...(refreshLoopPersonalities ? { refreshPersonalities: refreshLoopPersonalities } : {}),
+    // Lane 6 (D5) — model-fit seam for the `personalities.characterSheet`
+    // RPC: the SAME wiring assembler the CLI `personality show` calls, so the
+    // two surfaces render one verdict. Cache-first probe (a web read is not a
+    // diagnostic command); the closure resolves null for unknown ids.
+    ...(toolRegistry
+      ? {
+          modelFit: async (personalityId: string) => {
+            const registry = toolRegistry;
+            if (!registry) return null;
+            const described = personalities.describe(personalityId);
+            if (!described) return null;
+            const soulMd = await personalities.readSoulMd(personalityId);
+            const model = config.modelRouting?.[personalityId] ?? config.model;
+            return resolvePersonalityModelFit({
+              personality: described.config,
+              soulMd,
+              toolDefinitions: registry.toDefinitions(described.config.toolset),
+              provider: config.provider,
+              model,
+              ...(config.baseUrl !== undefined ? { baseUrl: config.baseUrl } : {}),
+              ...(model === config.model && config.contextWindow !== undefined
+                ? { configWindow: config.contextWindow }
+                : {}),
+              ...(config.compaction?.smallWindow !== undefined
+                ? { smallWindowOverride: config.compaction.smallWindow }
+                : {}),
+              storage: getStorage(),
+              dataDir: dir,
+            });
+          },
+        }
+      : {}),
     chatDefaults: {
       model: config.model,
       provider: config.provider,

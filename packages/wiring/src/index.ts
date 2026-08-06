@@ -42,8 +42,20 @@ import { buildWiringContext } from './build-context';
 import { buildInfrastructure } from './build-infrastructure';
 import { composeAllTools } from './compose-tools';
 import { loadPlugins } from './load-plugins';
+import {
+  detectLocalRuntime,
+  probeServedWindowCached,
+  resolveContextWindow,
+  type WindowProbeResult,
+  windowProbeCachePath,
+} from './local-models';
 import { createUndecoratedBackend, type MemoryBackendSelection } from './memory-backend';
-import { lookupContextWindow, lookupProfile, mergeModelProfile } from './model-catalog';
+import {
+  lookupContextWindow,
+  lookupProfile,
+  mergeModelProfile,
+  PROVIDER_WINDOW_DEFAULTS,
+} from './model-catalog';
 import type { EthosObservability } from './observability/ethos-observability';
 import { registerBuiltinProviders } from './register-builtin-providers';
 import {
@@ -100,6 +112,37 @@ export interface WiringConfig {
   /** Azure-only: REST API version (e.g. `2024-10-21`). Required when
    *  `provider === 'azure'`; ignored otherwise. */
   apiVersion?: string;
+  /**
+   * Lane 0 (eng review D4) — operator override for the primary model's served
+   * context window (tokens). Wins over the probe and the catalog (precedence:
+   * config > probe > catalog > default); maps to the provider's
+   * `maxContextTokens`. Applied to the PRIMARY provider/model only — chain
+   * fallbacks resolve their own windows.
+   */
+  contextWindow?: number;
+  /**
+   * Lane 2a (eng review D6) — tool-definition ordering at the provider
+   * serialization boundary. `'stable'` (default) is the deterministic ASCII
+   * sort; `'insertion'` restores legacy registration-order bytes. Temporary
+   * rollback lever; removal tracked in plan/uncompleted-tasks.md (D13).
+   */
+  toolOrder?: 'insertion' | 'stable';
+  /**
+   * Lane 4a(d) — per-request deadline (ms) for OpenAI-compat clients. Absent
+   * → the OpenAI SDK default (10 minutes) stays in force; the default is
+   * deliberately long because a cold local model load takes minutes.
+   */
+  requestTimeoutMs?: number;
+  /** Lane 4a(d) — retry count for OpenAI-compat clients. Absent → the OpenAI
+   *  SDK default (2 retries). */
+  maxRetries?: number;
+  /**
+   * Lane 3(a) — total serialized tool-payload guard threshold, in chars.
+   * Absent → `TOOL_PAYLOAD_GUARD_DEFAULT_CHARS` (static-floor.ts). Exceeding
+   * it FAILS startup on a local dialect (losing tool calling entirely is the
+   * failure prevented) and WARNS on hosted ones.
+   */
+  toolPayloadLimitChars?: number;
   /** Maps personality ID → model ID for per-personality model overrides. */
   modelRouting?: Record<string, string>;
   /**
@@ -420,6 +463,13 @@ export interface CreateAgentLoopOptions {
    * completion is delivered to the channel root.
    */
   resolveOriginThreadId?: (sessionKey: string) => string | undefined;
+  /**
+   * Lane 0 (eng review D16) — force a LIVE served-window probe (bypassing the
+   * 15-minute disk cache) and rewrite the cache. Set by the command paths
+   * whose numbers the operator tunes against (`ethos doctor`, `ethos bench
+   * context`); chat and gateway startup leave it unset and ride the cache.
+   */
+  probeWindowRefresh?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -439,6 +489,37 @@ export {
   createA2aPeeringService,
 } from './a2a-peering-service';
 export { resolveKanbanDbPath } from './kanban-path';
+// Lane 6 (D5 + D19) — the arithmetic model-fit verdict: `computeModelFit` is
+// the pure division; `resolvePersonalityModelFit` is the one assembler both
+// the CLI (`ethos personality show`) and the `personalities.characterSheet`
+// RPC seam call, so the surfaces can never disagree.
+export { type ComputeModelFitInputs, computeModelFit } from './model-fit';
+export {
+  type ResolvePersonalityModelFitOptions,
+  resolvePersonalityModelFit,
+} from './personality-fit';
+// Lane 1(b/c/e) + D8 — the shared static-floor measurement and window-scaled
+// result-budget arithmetic (consumed by build-agent-loop, `ethos bench
+// context`, and — later — Lane 6's fit verdict).
+export {
+  type ContextFitVerdict,
+  evaluateContextFit,
+  evaluateToolPayloadGuard,
+  evaluateToolSchemaBudget,
+  type MeasurableToolDefinition,
+  measureStaticFloor,
+  measureToolSchemaSizes,
+  outputReserveTokens,
+  RESULT_BUDGET_CEILING_CHARS,
+  RESULT_BUDGET_FLOOR_CHARS,
+  resolveResultBudget,
+  type StaticFloorComponent,
+  type StaticFloorInputs,
+  type StaticFloorMeasurement,
+  TOOL_PAYLOAD_GUARD_DEFAULT_CHARS,
+  type ToolPayloadGuardVerdict,
+  type ToolSchemaBudgetVerdict,
+} from './static-floor';
 
 // Hard ceiling on a single summarizer call. The summarizer runs on the turn's
 // critical path before the main provider call, so a hung auxiliary provider
@@ -452,14 +533,22 @@ const SUMMARIZER_TIMEOUT_MS = 30_000;
 // ~one Haiku-tier call rather than a full main-model re-prompt. Fails open: a
 // throw here is caught by the engine's caller (`maybeCompact`), which ships
 // the un-compacted history and records a degradation event.
-function buildCompressionSummarizer(
+// Lane 5(ii) — the summarizer's provider gets the SAME window/profile
+// threading as the main provider (D15 precedence: config > cached probe >
+// catalog > default). Without it the provider inherits the 128k default —
+// the §0 mis-sizing — so the summarizer's own compaction arithmetic lies on
+// local setups. Exported for tests (asserted at the factory seam).
+export function buildCompressionSummarizer(
   registry: import('@ethosagent/types').LLMProviderRegistry,
   config: WiringConfig,
   observability: EthosObservability | undefined,
   log: Logger,
+  windowProbe?: WindowProbeContext,
 ): SummarizerFn {
   const aux = config.auxiliaryCompression;
   const providerName = aux?.provider ?? config.provider;
+  const model = aux?.model ?? config.model;
+  const baseUrl = aux?.baseUrl ?? config.baseUrl;
   let cachedProvider: LLMProvider | undefined;
 
   const getProvider = async (): Promise<LLMProvider> => {
@@ -477,13 +566,69 @@ function buildCompressionSummarizer(
       delete: async () => {},
       list: async () => [],
     };
+    // Lane 0 precedence, cache-first: the summarizer is not a diagnostic
+    // command, so the probe never forces a live refresh here — a warm cache
+    // resolves with no network call.
+    const isPrimary = providerName === config.provider && model === config.model;
+    const runtime = detectLocalRuntime(providerName, baseUrl ?? '');
+    let probe: WindowProbeResult | undefined;
+    if (runtime !== undefined && baseUrl !== undefined && windowProbe !== undefined) {
+      probe = await probeServedWindowCached({
+        runtime,
+        baseUrl,
+        model,
+        storage: windowProbe.storage,
+        cachePath: windowProbeCachePath(windowProbe.dataDir),
+        ...(windowProbe.fetchImpl !== undefined ? { fetchImpl: windowProbe.fetchImpl } : {}),
+      });
+    }
+    const resolvedWindow = resolveContextWindow({
+      provider: providerName,
+      model,
+      ...(isPrimary && config.contextWindow !== undefined
+        ? { configWindow: config.contextWindow }
+        : {}),
+      ...(probe !== undefined ? { probe } : {}),
+      ...(() => {
+        const catalogWindow =
+          lookupContextWindow(providerName, model) ?? PROVIDER_WINDOW_DEFAULTS[providerName];
+        return catalogWindow !== undefined ? { catalogWindow } : {};
+      })(),
+      localRuntime: runtime !== undefined,
+    });
+    for (const diagnostic of resolvedWindow.diagnostics) {
+      log.warn(`compression summarizer: ${diagnostic}`);
+    }
+    const profile = mergeModelProfile(
+      lookupProfile(providerName, model),
+      config.models?.[`${providerName}/${model}`],
+    );
     cachedProvider = await factory({
       config: {
         provider: providerName,
-        model: aux?.model ?? config.model,
+        model,
         apiKey: aux?.apiKey ?? config.apiKey,
-        ...((aux?.baseUrl ?? config.baseUrl) ? { baseUrl: aux?.baseUrl ?? config.baseUrl } : {}),
+        ...(baseUrl ? { baseUrl } : {}),
         ...(config.apiVersion ? { apiVersion: config.apiVersion } : {}),
+        ...(resolvedWindow.contextWindow !== undefined
+          ? { maxContextTokens: resolvedWindow.contextWindow }
+          : {}),
+        ...(profile?.toolCallFormat !== undefined
+          ? { toolCallFormat: profile.toolCallFormat }
+          : {}),
+        ...(profile?.maxOutputTokens !== undefined
+          ? { maxOutputTokens: profile.maxOutputTokens }
+          : {}),
+        ...(profile?.structuredOutput !== undefined
+          ? { structuredOutput: profile.structuredOutput }
+          : {}),
+        ...(profile?.parseThinkTags !== undefined
+          ? { parseThinkTags: profile.parseThinkTags }
+          : {}),
+        // FIX 8 — this path already surfaced any unknown-window diagnostic
+        // (prefixed 'compression summarizer:' above); the factory must not
+        // log a near-identical second copy.
+        windowResolutionDiagnosed: true,
       },
       secrets: config.secretsResolver ?? NOOP,
       logger: log,
@@ -544,7 +689,27 @@ function buildCompressionSummarizer(
   };
 }
 
-export async function createLLM(config: WiringConfig): Promise<LLMProvider> {
+/**
+ * Lane 0 (eng review D3+D16) — context needed to run the served-window probe
+ * with its disk cache. When absent, no probe runs and resolution falls back
+ * to config > catalog > default (preserves pre-Lane-0 callers unchanged).
+ */
+export interface WindowProbeContext {
+  storage: Storage;
+  dataDir: string;
+  /** Bypass the 15-min cache: probe LIVE and rewrite it. Set by the command
+   *  paths an operator tunes against (setup / doctor / personality show /
+   *  bench context); chat and gateway startup leave it unset. */
+  forceRefresh?: boolean;
+  /** Test seam — stub fetch so probes stay off the network. */
+  fetchImpl?: typeof fetch;
+}
+
+export async function createLLM(
+  config: WiringConfig,
+  windowProbe?: WindowProbeContext,
+  log?: Logger,
+): Promise<LLMProvider> {
   const registry = new DefaultLLMProviderRegistry();
   registerBuiltinProviders(registry);
   const noop: Logger = {
@@ -554,7 +719,7 @@ export async function createLLM(config: WiringConfig): Promise<LLMProvider> {
     debug: () => {},
     child: () => noop,
   };
-  return createLLMFromRegistry(registry, config, noop);
+  return createLLMFromRegistry(registry, config, log ?? noop, undefined, windowProbe);
 }
 
 /**
@@ -580,6 +745,7 @@ async function createLLMFromRegistry(
   config: WiringConfig,
   log: Logger,
   allowedPlugins?: string[],
+  windowProbe?: WindowProbeContext,
 ): Promise<LLMProvider> {
   const secrets: import('@ethosagent/types').SecretsResolver = {
     get: async () => null,
@@ -613,11 +779,43 @@ async function createLLMFromRegistry(
           `Available: ${registry.list().join(', ')}`,
       );
     }
-    // M1b — resolve the model's context window from the catalog and inject it
-    // so openai-compat-alias providers (ollama, groq, …) report their real
-    // window to compaction instead of the 128k default. A catalog miss leaves
-    // the field absent → the provider default still applies (no crash).
-    const contextWindow = lookupContextWindow(cfg.provider, cfg.model);
+    // Lane 0 — resolve the model's context window with the D15 precedence:
+    // config > probe > catalog > default. The probe runs only for a detected
+    // local runtime (hosted endpoints are never probed), cache-first on
+    // chat/gateway startup (D3) and live when the caller forces a refresh
+    // (D16). A full miss leaves the field absent → the provider default still
+    // applies (no crash), with the loud unknown-window diagnostic below.
+    const isPrimary = cfg.provider === config.provider && cfg.model === config.model;
+    const configWindow = isPrimary ? config.contextWindow : undefined;
+    const runtime = detectLocalRuntime(cfg.provider, cfg.baseUrl ?? '');
+    let windowProbeResult: WindowProbeResult | undefined;
+    if (runtime !== undefined && cfg.baseUrl !== undefined && windowProbe !== undefined) {
+      windowProbeResult = await probeServedWindowCached({
+        runtime,
+        baseUrl: cfg.baseUrl,
+        model: cfg.model,
+        storage: windowProbe.storage,
+        cachePath: windowProbeCachePath(windowProbe.dataDir),
+        ...(windowProbe.forceRefresh !== undefined
+          ? { forceRefresh: windowProbe.forceRefresh }
+          : {}),
+        ...(windowProbe.fetchImpl !== undefined ? { fetchImpl: windowProbe.fetchImpl } : {}),
+      });
+    }
+    const resolvedWindow = resolveContextWindow({
+      provider: cfg.provider,
+      model: cfg.model,
+      ...(configWindow !== undefined ? { configWindow } : {}),
+      ...(windowProbeResult !== undefined ? { probe: windowProbeResult } : {}),
+      ...(() => {
+        const catalogWindow =
+          lookupContextWindow(cfg.provider, cfg.model) ?? PROVIDER_WINDOW_DEFAULTS[cfg.provider];
+        return catalogWindow !== undefined ? { catalogWindow } : {};
+      })(),
+      localRuntime: runtime !== undefined,
+    });
+    for (const diagnostic of resolvedWindow.diagnostics) log.warn(diagnostic);
+    const contextWindow = resolvedWindow.contextWindow;
     // §7 — resolve the effective per-model profile (config override OVER catalog)
     // and thread its provider-facing fields (toolCallFormat, maxOutputTokens)
     // into the factory config, next to maxContextTokens. Sampling defaults are
@@ -643,6 +841,31 @@ async function createLLMFromRegistry(
         ...(profile?.structuredOutput !== undefined
           ? { structuredOutput: profile.structuredOutput }
           : {}),
+        // FIX 5 — <think>-tag parsing opt-in for hosted reasoning models.
+        // Absent → the provider derives it from its local classification.
+        ...(profile?.parseThinkTags !== undefined
+          ? { parseThinkTags: profile.parseThinkTags }
+          : {}),
+        // Lane 2a — tool-ordering escape hatch (global, applies to every
+        // resolved provider). Absent → the provider's 'stable' default.
+        ...(config.toolOrder !== undefined ? { toolOrder: config.toolOrder } : {}),
+        // Lane 4a(d) — request deadline + retry count (global, applies to
+        // every resolved provider). Absent → the SDK defaults stay in force.
+        ...(config.requestTimeoutMs !== undefined
+          ? { requestTimeoutMs: config.requestTimeoutMs }
+          : {}),
+        ...(config.maxRetries !== undefined ? { maxRetries: config.maxRetries } : {}),
+        // Lane 3(a) — llamacpp-class runtimes (llama.cpp server, Ollama,
+        // LM Studio — all GBNF grammar compilers) get the schema sanitizer at
+        // the provider boundary (D7). vLLM is local but not llamacpp-class
+        // (no GBNF lowering of tool schemas); hosted dialects never sanitize.
+        ...(runtime === 'llamacpp' || runtime === 'ollama' || runtime === 'lmstudio'
+          ? { toolSchemaProfile: 'llamacpp' }
+          : {}),
+        // FIX 8 — resolveContextWindow above already logged any unknown-window
+        // diagnostic for this provider; suppress the factory's duplicate copy
+        // so the condition surfaces exactly ONE warning.
+        windowResolutionDiagnosed: true,
       },
       secrets: config.secretsResolver ?? secrets,
       logger: log,
@@ -696,6 +919,8 @@ async function createLLMFromRegistry(
           })),
         ],
         config.model,
+        // Lane 2a — the tool-ordering escape hatch applies to rotation pools too.
+        config.toolOrder !== undefined ? { toolOrder: config.toolOrder } : undefined,
       );
     }
   }
@@ -720,6 +945,10 @@ export { applySkillPassthrough, deriveSkillPassthrough } from './skill-passthrou
 export interface CreateAgentLoopResult {
   loop: AgentLoop;
   toolRegistry: ToolRegistry;
+  /** Lane 3(b) — the served context window (tokens) of the primary provider.
+   *  `ethos bench context` uses it as the schema-budget denominator so the
+   *  bench table and the startup warning read the same numbers (D8). */
+  contextWindow: number;
   /** The McpManager instance from tool composition. Pass to createWebApi so
    *  re-auth via the web UI hits the live manager and updates the tool registry. */
   mcpManager: McpManager;
@@ -824,7 +1053,12 @@ export async function createAgentLoop(
     skillPool,
     buildCompressionSummarizer: () =>
       config.auxiliaryCompression?.model
-        ? buildCompressionSummarizer(infra.llmProviders, config, opts.observability, log)
+        ? buildCompressionSummarizer(infra.llmProviders, config, opts.observability, log, {
+            // Lane 5(ii) — cache-first window resolution for the summarizer's
+            // provider; never a forced live probe (not a diagnostic command).
+            storage: wiringCtx.storage,
+            dataDir: wiringCtx.dataDir,
+          })
         : undefined,
     ...(opts.slashRegistry ? { slashRegistry: opts.slashRegistry } : {}),
     ...(opts.cliSubcommandRegistry ? { cliSubcommandRegistry: opts.cliSubcommandRegistry } : {}),
@@ -840,6 +1074,13 @@ export async function createAgentLoop(
     config,
     log,
     infra.activePerson.plugins,
+    // Lane 0 — startup consults the probe cache (D3); command paths that must
+    // show fresh numbers set probeWindowRefresh to force a live probe (D16).
+    {
+      storage: wiringCtx.storage,
+      dataDir: wiringCtx.dataDir,
+      ...(opts.probeWindowRefresh === true ? { forceRefresh: true } : {}),
+    },
   );
 
   // -------------------------------------------------------------------------

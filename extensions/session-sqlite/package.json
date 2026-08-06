@@ -20,5 +20,8 @@
   "dependencies": {
     "@ethosagent/sqlite": "workspace:*",
     "@ethosagent/types": "workspace:*"
+  },
+  "devDependencies": {
+    "@ethosagent/core": "workspace:*"
   }
 }

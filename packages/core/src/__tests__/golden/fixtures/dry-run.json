@@ -84,7 +84,7 @@
     {
       "sessionId": "normalized",
       "role": "tool_result",
-      "content": "[dry-run] read_file would be called with: {\"path\":\"/tmp/x\"}",
+      "content": "===TOOL_RESULT_START:read_file===\n[dry-run] read_file would be called with: {\"path\":\"/tmp/x\"}\n===TOOL_RESULT_END===",
       "toolCallId": "tc1",
       "toolName": "read_file",
       "id": "normalized",

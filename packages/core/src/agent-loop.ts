@@ -101,8 +101,8 @@ export interface AgentLoopConfig {
   // Maps personality ID → model ID. Resolution: modelRouting[id] → personality.model → llm.model
   modelRouting?: Record<string, string>;
   modelSampling?: ModelSamplingDefaults; // §7 — applied when the per-call value is unset
-  // biome-ignore format: §5 gate + Phase 3 turn-end/overflow/engine knobs; one line keeps agent-loop.ts under the size guardrail.
-  compaction?: { pressure?: number; target?: number; charsPerToken?: number; gateDelta?: number; autoCompact?: boolean; retryOnOverflow?: boolean; defaultEngine?: string; maxContextTokens?: number; minTailUserMessages?: number };
+  // biome-ignore format: §5 gate + Phase 3 turn-end/overflow/engine + Lane 1a knobs; one line keeps agent-loop.ts under the size guardrail.
+  compaction?: { pressure?: number; target?: number; charsPerToken?: number; gateDelta?: number; autoCompact?: boolean; retryOnOverflow?: boolean; defaultEngine?: string; maxContextTokens?: number; minTailUserMessages?: number; maxSingleToolResultTokens?: number };
   // biome-ignore format: Phase 3 silent memory-flush knobs (docs on LoopDeps.memoryConsolidation); one line keeps agent-loop.ts under the size guardrail.
   memoryConsolidation?: { enabled?: boolean; flushThreshold?: number; timeboxMs?: number; maxTokens?: number; maxDeltaChars?: number; minMessagesSinceFlush?: number };
   // biome-ignore format: §2/Phase 4 prompt-economy knobs (docs on LoopDeps.promptBudget); one line keeps agent-loop.ts under the size guardrail.
@@ -208,6 +208,8 @@ export interface AgentLoopConfig {
      * `personality.streamingTimeoutMs`. Defaults to 600000 (10 minutes).
      */
     streamingTimeoutMs?: number;
+    /** Lane 3(b)/D20 — small-window mode (wiring-resolved); enables the turn personality's declared `small_window_toolset` narrowing. */
+    smallWindow?: boolean;
   };
 }
 
@@ -302,6 +304,7 @@ export class AgentLoop {
   private readonly maxIdenticalToolCalls: number;
   private readonly maxConsecutiveIdenticalCalls: number;
   private readonly streamingTimeoutMs: number;
+  private readonly smallWindow: boolean;
   private readonly modelRouting: Record<string, string>;
   private readonly modelSampling?: AgentLoopConfig['modelSampling'];
   private readonly compaction?: AgentLoopConfig['compaction'];
@@ -360,6 +363,7 @@ export class AgentLoop {
     this.maxIdenticalToolCalls = config.options?.maxIdenticalToolCalls ?? 25;
     this.maxConsecutiveIdenticalCalls = config.options?.maxConsecutiveIdenticalCalls ?? 5;
     this.streamingTimeoutMs = config.options?.streamingTimeoutMs ?? 600_000;
+    this.smallWindow = config.options?.smallWindow ?? false;
     this.modelRouting = config.modelRouting ?? {};
     this.modelSampling = config.modelSampling;
     if (config.compaction) this.compaction = config.compaction;
@@ -461,6 +465,7 @@ export class AgentLoop {
       maxIdenticalToolCalls: this.maxIdenticalToolCalls,
       maxConsecutiveIdenticalCalls: this.maxConsecutiveIdenticalCalls,
       streamingTimeoutMs: this.streamingTimeoutMs,
+      smallWindow: this.smallWindow,
       modelRouting: this.modelRouting,
       compaction: this.compaction,
       memoryConsolidation: this.memoryConsolidation,

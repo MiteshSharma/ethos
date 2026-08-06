@@ -89,6 +89,7 @@ function isValidProfile(obj: unknown): boolean {
   )
     return false;
   if (p.structuredOutput !== undefined && typeof p.structuredOutput !== 'boolean') return false;
+  if (p.parseThinkTags !== undefined && typeof p.parseThinkTags !== 'boolean') return false;
   // §5 — compaction thresholds are fractions in (0,1]; charsPerToken is a
   // positive divisor. Malformed values reject the whole profile; absent is fine.
   if (p.compaction !== undefined) {
@@ -165,12 +166,19 @@ export async function writeCachedManifest(
 export function bundledToManifest(): ModelCatalogManifest {
   const providers: Record<string, { models: ModelEntry[] }> = {};
   for (const entry of MODEL_CATALOG) {
+    // Lane 0 — local providers (ollama, vllm) keep their own manifest key.
+    // Collapsing them into 'openai-compat' erased them on the way back out:
+    // manifestToEntries maps 'openai-compat' → 'openai', so the bundled Ollama
+    // rows resurfaced as providerId 'openai' and were unreachable as Ollama
+    // rows. Hosted openai-compatible providers still collapse (unchanged).
     const key =
       entry.providerId === 'anthropic'
         ? 'anthropic'
         : entry.providerId === 'azure'
           ? 'azure'
-          : 'openai-compat';
+          : entry.providerId === 'ollama' || entry.providerId === 'vllm'
+            ? entry.providerId
+            : 'openai-compat';
     if (!providers[key]) providers[key] = { models: [] };
     const model: ModelEntry = {
       id: entry.modelId,
@@ -246,6 +254,11 @@ export function manifestToEntries(manifest: ModelCatalogManifest): ModelCatalogE
     anthropic: 'anthropic',
     azure: 'azure',
     'openai-compat': 'openai',
+    // Lane 0 — explicit inverses of bundledToManifest's local-provider keys.
+    // The `?? providerId` fall-through below would cover these identically;
+    // they are listed so the round-trip contract is visible in one place.
+    ollama: 'ollama',
+    vllm: 'vllm',
   };
   for (const [providerId, catalog] of Object.entries(manifest.providers)) {
     const mappedId = providerMapping[providerId] ?? providerId;

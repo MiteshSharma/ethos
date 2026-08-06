@@ -61,6 +61,20 @@ export interface CompactionDeps {
    */
   maxContextTokens?: number;
   /**
+   * Lane 1(a) delta — the largest single tool result the NEXT turn could add,
+   * in tokens (derived upstream from the effective per-call result budget).
+   * Reserved out of the compactible region alongside the static slice, so the
+   * gate fires early enough that a compaction which succeeds is not undone by
+   * the very next `read_file`:
+   *
+   *   compactible = window − static_prefix − reserved_output − max_single_tool_result
+   *
+   * Absent or 0 → the arithmetic is byte-identical to before (the hosted
+   * default; wiring only sets it when the window-scaled result budget is
+   * below its ceiling).
+   */
+  maxSingleToolResultTokens?: number;
+  /**
    * §5 — per-model gate estimator divisor (chars per token). When set, the gate
    * computes usage as `chars / charsPerToken` INSTEAD of char/4 and does NOT
    * apply the small-window safety factor (this is the accurate per-model value —
@@ -117,7 +131,8 @@ export interface GateEval {
   current: number;
   /** Model window after the output reserve is subtracted. */
   window: number;
-  /** `window` minus the measured static (system+tools) slice. */
+  /** `window` minus the measured static (system+tools) slice and the
+   *  max-single-tool-result reserve (Lane 1a) — the compactible region. */
   messagesWindow: number;
   /** Measured static (system+tools) tokens, clamped to `[0, window]`. */
   staticTokens: number;
@@ -129,6 +144,7 @@ export function evaluateGate(
     | 'llm'
     | 'reservedOutputTokens'
     | 'staticTokens'
+    | 'maxSingleToolResultTokens'
     | 'charsPerToken'
     | 'lastActualInputTokens'
     | 'gateDelta'
@@ -142,7 +158,12 @@ export function evaluateGate(
   const window = rawWindow - outputReserve;
 
   const staticTokens = Math.max(0, Math.min(deps.staticTokens ?? 0, window));
-  const messagesWindow = window - staticTokens;
+  // Lane 1(a) — the fourth term. One arithmetic for both gates: the reserve
+  // narrows `messagesWindow`, so `gateThreshold` (pre-LLM gate + turn-end
+  // trigger) and `maybeCompact`'s shrink target all honour it without a second
+  // threshold path. 0 when unset → identical to before.
+  const maxSingleToolResult = Math.max(0, deps.maxSingleToolResultTokens ?? 0);
+  const messagesWindow = Math.max(0, window - staticTokens - maxSingleToolResult);
 
   const charsPerToken = deps.charsPerToken;
   let estimate: number;
@@ -183,8 +204,10 @@ export function effectiveGate(g: GateEval, fraction: number, maxContextTokens?: 
 /**
  * Output-token headroom reserved when the caller doesn't specify a completion
  * budget. Keeps the pending response from pushing the request past the window.
+ * Exported (via `@ethosagent/core`) so wiring's startup floor diagnostic and
+ * result-budget scaling share the gate's exact reserve arithmetic (Lane 1b/1c).
  */
-const DEFAULT_OUTPUT_RESERVE_TOKENS = 4_096;
+export const DEFAULT_OUTPUT_RESERVE_TOKENS = 4_096;
 /**
  * Windows at or below this size get a conservative estimate inflation: char/4
  * undershoots real local tokenizers (~3.3–3.8 char/tok, worse on dense code)
