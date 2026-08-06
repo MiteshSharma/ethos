@@ -38,16 +38,15 @@ describe('checkSsrf — IP literal addresses', () => {
     if (result.blocked) expect(result.reason).toMatch(/SSRF blocked/);
   });
 
-  it.each([
-    'http://1.1.1.1/',
-    'http://8.8.8.8/',
-    'https://93.184.216.34/',
-  ])('allows public IP: %s', async (url) => {
-    // DNS lookup would be called for a hostname, not an IP literal — skip mock
-    vi.mocked(dnsPromises.lookup).mockResolvedValue([] as never);
-    const result = await checkSsrf(url);
-    expect(result.blocked).toBe(false);
-  });
+  it.each(['http://1.1.1.1/', 'http://8.8.8.8/', 'https://93.184.216.34/'])(
+    'allows public IP: %s',
+    async (url) => {
+      // DNS lookup would be called for a hostname, not an IP literal — skip mock
+      vi.mocked(dnsPromises.lookup).mockResolvedValue([] as never);
+      const result = await checkSsrf(url);
+      expect(result.blocked).toBe(false);
+    },
+  );
 });
 
 // ---------------------------------------------------------------------------
@@ -55,14 +54,13 @@ describe('checkSsrf — IP literal addresses', () => {
 // ---------------------------------------------------------------------------
 
 describe('checkSsrf — blocked hostnames', () => {
-  it.each([
-    'localhost',
-    '0.0.0.0',
-    'metadata.google.internal',
-  ])('blocks hostname: %s', async (host) => {
-    const result = await checkSsrf(`http://${host}/`);
-    expect(result.blocked).toBe(true);
-  });
+  it.each(['localhost', '0.0.0.0', 'metadata.google.internal'])(
+    'blocks hostname: %s',
+    async (host) => {
+      const result = await checkSsrf(`http://${host}/`);
+      expect(result.blocked).toBe(true);
+    },
+  );
 });
 
 // ---------------------------------------------------------------------------

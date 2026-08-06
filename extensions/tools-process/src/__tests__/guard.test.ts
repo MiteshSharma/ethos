@@ -46,26 +46,25 @@ describe('checkCommand', () => {
   });
 
   describe('SSH key destruction — should be blocked', () => {
-    it.each([
-      'rm -rf ~/.ssh',
-      'rm -rf ~/.ssh/known_hosts',
-      'rm ~/.ssh/id_rsa',
-    ])('blocks: %s', (cmd) => {
-      const result = checkCommand(cmd);
-      expect(result.dangerous).toBe(true);
-      if (result.dangerous) expect(result.reason).toMatch(/SSH key/);
-    });
+    it.each(['rm -rf ~/.ssh', 'rm -rf ~/.ssh/known_hosts', 'rm ~/.ssh/id_rsa'])(
+      'blocks: %s',
+      (cmd) => {
+        const result = checkCommand(cmd);
+        expect(result.dangerous).toBe(true);
+        if (result.dangerous) expect(result.reason).toMatch(/SSH key/);
+      },
+    );
   });
 
   describe('GPG secret deletion — should be blocked', () => {
-    it.each([
-      'gpg --delete-secret-keys 1234',
-      'gpg --delete-secret-key 1234',
-    ])('blocks: %s', (cmd) => {
-      const result = checkCommand(cmd);
-      expect(result.dangerous).toBe(true);
-      if (result.dangerous) expect(result.reason).toMatch(/GPG/);
-    });
+    it.each(['gpg --delete-secret-keys 1234', 'gpg --delete-secret-key 1234'])(
+      'blocks: %s',
+      (cmd) => {
+        const result = checkCommand(cmd);
+        expect(result.dangerous).toBe(true);
+        if (result.dangerous) expect(result.reason).toMatch(/GPG/);
+      },
+    );
   });
 
   describe('dd to block device — should be blocked', () => {
