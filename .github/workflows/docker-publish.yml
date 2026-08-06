@@ -155,6 +155,15 @@ jobs:
           if [ -z "$SMOKE_ANTHROPIC_API_KEY" ]; then
             echo "::warning::SMOKE_ANTHROPIC_API_KEY secret is not set — reply assertions will be skipped."
           fi
+          # setup-from-env fail()s before its existing-config branch when NO
+          # provider env var is set (setup-from-env.ts:126-130), so the container
+          # needs ANTHROPIC_API_KEY even to boot a pre-provisioned volume. Fall
+          # back to a dummy that only unlocks the heartbeat check — reply
+          # assertions still gate on the ORIGINAL secret. The secrets FILE
+          # content and the env var must MATCH so setup-from-env's
+          # `priorKey !== prov.apiKey` check self-skips validation
+          # (setup-from-env.ts:139).
+          SMOKE_KEY="${SMOKE_ANTHROPIC_API_KEY:-sk-ant-smoke-dummy-heartbeat-only}"
           DATA_DIR="$RUNNER_TEMP/ethos-data"
           mkdir -p "$DATA_DIR/secrets/providers/anthropic"
           cat > "$DATA_DIR/config.yaml" <<'EOF'
@@ -163,11 +172,12 @@ jobs:
           apiKey: ${secrets:providers/anthropic/apiKey}
           personality: researcher
           EOF
-          printf '%s\n' "$SMOKE_ANTHROPIC_API_KEY" > "$DATA_DIR/secrets/providers/anthropic/apiKey"
+          printf '%s\n' "$SMOKE_KEY" > "$DATA_DIR/secrets/providers/anthropic/apiKey"
           chmod 600 "$DATA_DIR/config.yaml" "$DATA_DIR/secrets/providers/anthropic/apiKey"
           # Container runs as uid 1000 (ethos) and needs rw on the volume.
           sudo chown -R 1000:1000 "$DATA_DIR"
           echo "DATA_DIR=$DATA_DIR" >> "$GITHUB_ENV"
+          echo "SMOKE_KEY=$SMOKE_KEY" >> "$GITHUB_ENV"
 
       - name: Compose up (single-service profile, published image)
         run: |
@@ -175,8 +185,12 @@ jobs:
           # `.env` → `docker compose up` → first web-UI reply, and `up` includes
           # the image pull. Stamp before it so the budget covers pull + boot.
           echo "BUDGET_START=$(date +%s)" >> "$GITHUB_ENV"
+          # SMOKE_KEY (real secret or dummy fallback) lets setup-from-env boot;
+          # ETHOS_SKIP_VALIDATION keeps a dummy key from tripping the provider probe.
           ETHOS_IMAGE="ethosagent/ethos:${VERSION}" \
           ETHOS_DATA_DIR="$DATA_DIR" \
+          ANTHROPIC_API_KEY="$SMOKE_KEY" \
+          ETHOS_SKIP_VALIDATION=1 \
           docker compose -f "$COMPOSE_FILE_PATH" up -d
 
       - name: Poll /healthz + baked healthcheck until healthy
