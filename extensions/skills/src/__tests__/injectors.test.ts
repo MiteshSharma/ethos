@@ -325,7 +325,7 @@ describe('SkillsInjector.resolveSkills', () => {
     const resolved = await injector.resolveSkills('researcher');
 
     expect(resolved.map((r) => r.id).sort()).toEqual(
-      (ctx.meta?.skillFilesUsed as string[]).slice().sort(),
+      ((ctx.meta?.skillFilesUsed ?? []) as string[]).slice().sort(),
     );
   });
 });

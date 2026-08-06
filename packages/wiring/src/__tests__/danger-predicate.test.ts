@@ -177,27 +177,29 @@ describe('createDangerPredicate — Ch.4b approvalMode', () => {
       for (const tool of READ_ONLY) expect(SMART_MODE_CONSEQUENTIAL_TOOLS).not.toContain(tool);
     });
 
-    it.each([
-      ...SMART_MODE_CONSEQUENTIAL_TOOLS,
-    ])('smart routes %s to the reviewer', async (tool) => {
-      let reviewed: string | undefined;
-      const pred = createDangerPredicate({
-        getPersonality: () => person('smart'),
-        smartApprove: async (p) => {
-          reviewed = p.toolName;
-          return { decision: 'approve', reason: 'routine' };
-        },
-      });
-      expect(await pred(payload(tool, { command: 'echo hi', path: 'notes.md' }))).toBeNull();
-      expect(reviewed).toBe(tool);
-    });
+    it.each([...SMART_MODE_CONSEQUENTIAL_TOOLS])(
+      'smart routes %s to the reviewer',
+      async (tool) => {
+        let reviewed: string | undefined;
+        const pred = createDangerPredicate({
+          getPersonality: () => person('smart'),
+          smartApprove: async (p) => {
+            reviewed = p.toolName;
+            return { decision: 'approve', reason: 'routine' };
+          },
+        });
+        expect(await pred(payload(tool, { command: 'echo hi', path: 'notes.md' }))).toBeNull();
+        expect(reviewed).toBe(tool);
+      },
+    );
 
-    it.each([
-      ...SMART_MODE_CONSEQUENTIAL_TOOLS,
-    ])('manual leaves %s unflagged — the default path is unchanged', async (tool) => {
-      const pred = createDangerPredicate({ getPersonality: () => person('manual') });
-      expect(await pred(payload(tool, { command: 'echo hi', path: 'notes.md' }))).toBeNull();
-    });
+    it.each([...SMART_MODE_CONSEQUENTIAL_TOOLS])(
+      'manual leaves %s unflagged — the default path is unchanged',
+      async (tool) => {
+        const pred = createDangerPredicate({ getPersonality: () => person('manual') });
+        expect(await pred(payload(tool, { command: 'echo hi', path: 'notes.md' }))).toBeNull();
+      },
+    );
 
     it.each([...SMART_MODE_CONSEQUENTIAL_TOOLS])('off leaves %s unflagged', async (tool) => {
       const pred = createDangerPredicate({ getPersonality: () => person('off') });
