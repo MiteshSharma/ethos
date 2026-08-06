@@ -47,7 +47,7 @@
     "@ethosagent/wiring": "workspace:*",
     "@hono/node-server": "^2.0.0",
     "@orpc/openapi": "^1.14.0",
-    "@orpc/server": "^1.14.0",
+    "@orpc/server": "^1.14.6",
     "hono": "^4.12.15",
     "zod": "^4.3.6"
   }
