@@ -26,7 +26,7 @@ If the `baseUrl` host is `generativelanguage.googleapis.com`, `normalizeGeminiSc
 
 ## Gotchas
 
-- OpenAI's `openai@4.87+` has a peer-dep on `zod@^3`. Ethos uses `zod@4` and never touches the structured-output features that depend on zod. The conflict is silenced via `pnpm.peerDependencyRules.ignoreMissing` in the root `package.json` — leave it alone.
+- OpenAI's `openai@4.87+` has a peer-dep on `zod@^3`. Ethos uses `zod@4` and never touches the structured-output features that depend on zod. The conflict is silenced via `peerDependencyRules.ignoreMissing` in `pnpm-workspace.yaml` — leave it alone.
 - The Gemini detection is host-substring-based. If a future Gemini compat URL changes, update `isGeminiEndpoint` (`src/index.ts:66`).
 - `supportsCaching` and `supportsThinking` are hard-coded `false` — neither concept maps cleanly across this many backends.
 - `countTokens` is an estimate, not authoritative. Don't use it for billing.

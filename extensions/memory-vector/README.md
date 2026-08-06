@@ -28,7 +28,7 @@ Embeddings are stored as raw `Buffer`s of the underlying `Float32Array` bytes. O
 
 ## Gotchas
 
-- `@ethosagent/sqlite` wraps Node 24's built-in `node:sqlite` — no native compilation or `pnpm.onlyBuiltDependencies` entry needed.
+- `@ethosagent/sqlite` wraps Node 24's built-in `node:sqlite` — no native compilation or `onlyBuiltDependencies` entry needed.
 - Table is `STRICT`. All bind values must match column types exactly — no silent coercion.
 - The embedding model (~25MB) downloads on first use and caches in `~/.cache/huggingface`. Provide `embedFn` in tests to avoid it.
 - The LRU is keyed on `ctx.query ?? ''`, so when no query is provided every call returns the same cached "most-recent K chunks" entry until `sync()` clears it.

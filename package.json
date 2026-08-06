@@ -44,28 +44,5 @@
     "playwright": "^1.59.1",
     "ws": "^8.20.0",
     "zod": "^4.3.6"
-  },
-  "pnpm": {
-    "onlyBuiltDependencies": [
-      "@discordjs/opus",
-      "argon2",
-      "electron",
-      "esbuild",
-      "playwright"
-    ],
-    "peerDependencyRules": {
-      "ignoreMissing": [
-        "zod"
-      ]
-    },
-    "overrides": {
-      "@types/react": "^19.0.0",
-      "@types/react-dom": "^19.0.0",
-      "@smithy/types": "4.16.1"
-    },
-    "ignoredBuiltDependencies": [
-      "@swc/core",
-      "keytar"
-    ]
   }
 }

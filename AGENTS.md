@@ -341,7 +341,7 @@ SQLite — @ethosagent/sqlite wraps node:sqlite
 @ethosagent/sqlite wraps Node 24's built-in node:sqlite (DatabaseSync) with a synchronous API. No native dependencies — no prebuild downloads, no C++ compilation needed. Import: `import Database from '@ethosagent/sqlite'`.
 
 openai package has a zod v3 peer dep — intentionally ignored
-openai@4.87+ lists zod@^3 as a peer dependency. Ethos uses zod@4. The zod dep is only used by openai for its structured outputs / .parse() features, which we don't use. It's suppressed via pnpm.peerDependencyRules.ignoreMissing: ["zod"] in the root package.json. Don't remove this or pnpm will emit peer conflict warnings on every install.
+openai@4.87+ lists zod@^3 as a peer dependency. Ethos uses zod@4. The zod dep is only used by openai for its structured outputs / .parse() features, which we don't use. It's suppressed via peerDependencyRules.ignoreMissing: ["zod"] in pnpm-workspace.yaml. Don't remove this or pnpm will emit peer conflict warnings on every install.
 
 Workspace package.json exports point to source
 All workspace package exports use "import": "./src/index.ts" (not ./dist/index.js). This lets Node 24 + tsx resolve them directly without a build step. The "production" condition points to ./dist/index.js for when you actually build. If you add a new workspace package, follow this pattern.

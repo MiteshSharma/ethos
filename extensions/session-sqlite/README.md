@@ -28,7 +28,7 @@ The CLI session-key convention `cli:<cwd-basename>` is enforced by callers, not 
 - Always tie-break by `rowid` when sorting by `timestamp` — millisecond-resolution timestamps collide easily.
 - Both tables are `STRICT`. Pass numbers as numbers, strings as strings; SQLite will throw rather than coerce.
 - `@ethosagent/sqlite` is synchronous. Every `async` method here returns immediately after the sync call. Don't introduce real awaits inside `db.prepare().run()` — it'll only add overhead.
-- `@ethosagent/sqlite` wraps Node 24's built-in `node:sqlite` — no native compilation or `pnpm.onlyBuiltDependencies` entry needed.
+- `@ethosagent/sqlite` wraps Node 24's built-in `node:sqlite` — no native compilation or `onlyBuiltDependencies` entry needed.
 - `escapeFtsQuery` quotes the entire input as one phrase. Multi-term `OR`/`NEAR`/`*` operators won't work — that's deliberate to avoid injection.
 - `pruneOldSessions` cascades to messages via `ON DELETE CASCADE`. The triggers handle FTS cleanup automatically through `messages_ad`.
 - `tool_calls` are stored as JSON-stringified text inside a `STRICT` column — keep that contract when adding fields.

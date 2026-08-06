@@ -6,3 +6,23 @@ packages:
   - "examples/plugins/*"
   - "examples/mission-control"
   - "docs"
+
+onlyBuiltDependencies:
+  - "@discordjs/opus"
+  - "argon2"
+  - "electron"
+  - "esbuild"
+  - "playwright"
+
+ignoredBuiltDependencies:
+  - "@swc/core"
+  - "keytar"
+
+peerDependencyRules:
+  ignoreMissing:
+    - "zod"
+
+overrides:
+  "@types/react": "^19.0.0"
+  "@types/react-dom": "^19.0.0"
+  "@smithy/types": "4.16.1"
