@@ -139,6 +139,120 @@ interface SupervisedChild {
   rotationTimer: NodeJS.Timeout | null;
 }
 
+/**
+ * The subset of a supervised child that shutdown touches. Structural on
+ * purpose: tests pass plain objects instead of real subprocesses.
+ */
+export interface ShutdownChild {
+  shuttingDown: boolean;
+  stableTimer: NodeJS.Timeout | null;
+  rotationTimer: NodeJS.Timeout | null;
+  process: {
+    pid?: number | undefined;
+    killed: boolean;
+    kill(signal: NodeJS.Signals): boolean;
+    once(event: 'exit', listener: () => void): unknown;
+  } | null;
+}
+
+export interface ShutdownDeps {
+  children: ShutdownChild[];
+  log: (msg: string) => void;
+  /** Runs once, before any child is signalled. Stops the watchdog and closes
+   *  the health server in production. */
+  beforeStop?: () => void;
+  /** Injectable for tests. Defaults to `process.exit`. */
+  exit?: (code: number) => void;
+  /** Injectable for tests. Defaults to `SHUTDOWN_GRACE_MS`. */
+  graceMs?: number;
+}
+
+/**
+ * Builds the SIGINT/SIGTERM handler: signal every child, then exit 0 — as soon
+ * as the last child is gone, or at the grace deadline, whichever comes first.
+ *
+ * `process.exit(0)` is the only thing that sets this process's exit code, so
+ * something must guarantee it runs. Letting the event loop drain instead is the
+ * bug this shape exists to prevent: Node then picks its own code (13, when the
+ * bundle has an unsettled top-level await) and the container looks like it
+ * crashed on a clean stop.
+ *
+ * Exported so tests can drive shutdown without spawning real children.
+ */
+export function createShutdownHandler(deps: ShutdownDeps): (signal: NodeJS.Signals) => void {
+  const { children, log, beforeStop, graceMs = SHUTDOWN_GRACE_MS } = deps;
+  const exit = deps.exit ?? ((code: number) => process.exit(code));
+
+  let shuttingDown = false;
+  let exited = false;
+  let graceTimer: NodeJS.Timeout | null = null;
+
+  // Idempotent: a child that exits after the SIGKILL sweep must not re-exit.
+  const finish = (): void => {
+    if (exited) return;
+    exited = true;
+    if (graceTimer) clearTimeout(graceTimer);
+    exit(0);
+  };
+
+  return (signal: NodeJS.Signals): void => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    beforeStop?.();
+    log(`\n${c.dim}run-all: ${signal} received, stopping children…${c.reset}`);
+
+    // Liveness is tracked here rather than read back off `child.killed`:
+    // Node sets `killed` once a signal has been *delivered*, not once the
+    // child is gone, so `!child.killed` would skip the SIGKILL sweep for
+    // exactly the children that ignored the SIGTERM.
+    const signalled: { child: NonNullable<ShutdownChild['process']>; exited: boolean }[] = [];
+    let pending = 0;
+    for (const sc of children) {
+      sc.shuttingDown = true;
+      if (sc.stableTimer) clearTimeout(sc.stableTimer);
+      if (sc.rotationTimer) clearInterval(sc.rotationTimer);
+      const child = sc.process;
+      if (!child) continue; // already dead, or waiting out a restart backoff
+      const entry = { child, exited: false };
+      signalled.push(entry);
+      pending++;
+      child.once('exit', () => {
+        entry.exited = true;
+        pending--;
+        if (pending === 0) finish();
+      });
+      if (child.pid && !child.killed) {
+        try {
+          child.kill('SIGTERM');
+        } catch {
+          /* already gone */
+        }
+      }
+    }
+
+    // Nothing to wait for — don't idle out the full grace period.
+    if (pending === 0) {
+      finish();
+      return;
+    }
+
+    // Deliberately NOT unref'd. This timer's whole job is to hold the event
+    // loop open until process.exit(0) runs; unref'ing it means a healthy,
+    // fast-draining shutdown never reaches the exit call.
+    graceTimer = setTimeout(() => {
+      for (const entry of signalled) {
+        if (entry.exited) continue;
+        try {
+          entry.child.kill('SIGKILL');
+        } catch {
+          /* gone */
+        }
+      }
+      finish();
+    }, graceMs);
+  };
+}
+
 export async function runAll(opts: RunAllOptions = {}): Promise<void> {
   const entryPoint = opts.entryPoint ?? process.argv[1];
   if (!entryPoint) {
@@ -179,40 +293,14 @@ export async function runAll(opts: RunAllOptions = {}): Promise<void> {
   });
 
   let healthServer: import('node:http').Server | null = null;
-  let shuttingDown = false;
-  const shutdown = (signal: NodeJS.Signals): void => {
-    if (shuttingDown) return;
-    shuttingDown = true;
-    if (stopWatchdog) stopWatchdog();
-    if (healthServer) healthServer.close();
-    log.log(`\n${c.dim}run-all: ${signal} received, stopping children…${c.reset}`);
-    for (const sc of children) {
-      sc.shuttingDown = true;
-      if (sc.stableTimer) clearTimeout(sc.stableTimer);
-      if (sc.rotationTimer) clearInterval(sc.rotationTimer);
-      const child = sc.process;
-      if (child?.pid && !child.killed) {
-        try {
-          child.kill('SIGTERM');
-        } catch {
-          /* already gone */
-        }
-      }
-    }
-    setTimeout(() => {
-      for (const sc of children) {
-        const child = sc.process;
-        if (child?.pid && !child.killed) {
-          try {
-            child.kill('SIGKILL');
-          } catch {
-            /* gone */
-          }
-        }
-      }
-      process.exit(0);
-    }, SHUTDOWN_GRACE_MS).unref();
-  };
+  const shutdown = createShutdownHandler({
+    children,
+    log: (msg) => log.log(msg),
+    beforeStop: () => {
+      if (stopWatchdog) stopWatchdog();
+      if (healthServer) healthServer.close();
+    },
+  });
 
   process.on('SIGINT', () => shutdown('SIGINT'));
   process.on('SIGTERM', () => shutdown('SIGTERM'));
