@@ -22,6 +22,10 @@ updates:
         patterns:
           - '@anthropic-ai/sdk'
           - 'openai'
+    ignore:
+      # TS 7 (native compiler) breaks rollup-plugin-dts inside tsup — revisit when tsup supports it.
+      - dependency-name: 'typescript'
+        update-types: ['version-update:semver-major']
     commit-message:
       prefix: chore
       include: scope
