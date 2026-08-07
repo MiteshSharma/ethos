@@ -45,10 +45,17 @@ COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 COPY docker-healthcheck.sh /usr/local/bin/docker-healthcheck.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh /usr/local/bin/docker-healthcheck.sh
 
+# A personality's default fs_reach grants write on [ownDir, cwd]. Created and
+# chowned before dropping privileges so the unprivileged runtime user can write
+# there; WORKDIR points at it so `process.cwd()` lands on a mounted, persistent
+# path instead of the (read-only, in compose) root filesystem.
+RUN mkdir -p /home/ethos/workspace && chown ethos:ethos /home/ethos/workspace
+
 USER ethos
-WORKDIR /home/ethos
+WORKDIR /home/ethos/workspace
 
 VOLUME /home/ethos/.ethos
+VOLUME /home/ethos/workspace
 EXPOSE 3000
 
 # Mode-aware: probes :3000 for ui/all, :3002 for gateway — a hardcoded :3000

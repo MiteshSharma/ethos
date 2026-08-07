@@ -69,6 +69,7 @@ To stop: `docker compose down`
 | Variable | Default | Description |
 |---|---|---|
 | `ETHOS_DATA_DIR` | `../ethos-data` | Where on **your machine** Ethos stores its state (config, secrets, sessions). Can be an absolute path or relative to the `docker/` folder. |
+| `ETHOS_WORKSPACE_DIR` | `../ethos-workspace` | Where on **your machine** the agent's working directory lives — files it creates in `cwd` land here and survive restarts. Same path rules as `ETHOS_DATA_DIR`. |
 
 ### Agent
 
