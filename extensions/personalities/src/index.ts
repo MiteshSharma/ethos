@@ -39,6 +39,7 @@ export {
 export {
   type CharacterSheetExecution,
   type CharacterSheetModelFit,
+  type CharacterSheetScriptSurface,
   firstParagraph,
   renderCharacterSheet,
 } from './character-sheet';

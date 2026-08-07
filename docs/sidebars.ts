@@ -53,6 +53,7 @@ const sidebars: SidebarsConfig = {
             'using/how-to/migrate-from-openclaw',
             'using/how-to/use-as-mcp-server',
             'using/how-to/schedule-tasks-with-cron',
+            'using/how-to/loop-over-tools-in-code',
             'using/how-to/set-up-mcp-for-a-personality',
             'using/how-to/use-web-dashboard',
             'using/how-to/use-admin-panel',

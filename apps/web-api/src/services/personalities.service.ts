@@ -1,6 +1,7 @@
 import { join } from 'node:path';
 import {
   type CharacterSheetModelFit,
+  type CharacterSheetScriptSurface,
   type CreatePersonalityInput,
   type DescribedPersonality,
   type FilePersonalityRegistry,
@@ -80,6 +81,14 @@ export interface PersonalitiesServiceOptions {
    * throwing → the sheet renders without the `## Model fit` section.
    */
   modelFit?: (personalityId: string) => Promise<CharacterSheetModelFit | null>;
+  /**
+   * tools-as-code-api Lane G — the script-callable surface for the sheet's
+   * `Script-callable (run_code)` line. A closure over core's
+   * `scriptCallableFor` against the live tool registry (same derivation the
+   * ScriptToolBridge enforces). Absent, resolving `null`, or throwing → the
+   * sheet renders without the line.
+   */
+  scriptSurface?: (personalityId: string) => Promise<CharacterSheetScriptSurface | null>;
 }
 
 export class PersonalitiesService {
@@ -126,10 +135,25 @@ export class PersonalitiesService {
         modelFit = undefined;
       }
     }
+    // Lane G — same fail-soft posture as modelFit: no seam, no line.
+    let scriptSurface: CharacterSheetScriptSurface | undefined;
+    if (this.opts.scriptSurface) {
+      try {
+        scriptSurface = (await this.opts.scriptSurface(id)) ?? undefined;
+      } catch {
+        scriptSurface = undefined;
+      }
+    }
     const dataDir = this.opts.dataDir;
     if (!dataDir) {
       return {
-        markdown: renderCharacterSheet(described.config, soulMd, undefined, modelFit),
+        markdown: renderCharacterSheet(
+          described.config,
+          soulMd,
+          undefined,
+          modelFit,
+          scriptSurface,
+        ),
         posture: null,
       };
     }
@@ -142,7 +166,13 @@ export class PersonalitiesService {
       ...(this.opts.dockerBuildable === false ? { dockerBuildable: false } : {}),
     });
     return {
-      markdown: renderCharacterSheet(described.config, soulMd, { posture }, modelFit),
+      markdown: renderCharacterSheet(
+        described.config,
+        soulMd,
+        { posture },
+        modelFit,
+        scriptSurface,
+      ),
       posture,
     };
   }

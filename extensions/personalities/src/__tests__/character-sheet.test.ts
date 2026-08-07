@@ -3,7 +3,11 @@
 // AgentLoop construction, not in the registry, so the renderer sees them verbatim.
 import type { ExecutionPosture, PersonalityConfig } from '@ethosagent/types';
 import { describe, expect, it } from 'vitest';
-import { type CharacterSheetModelFit, renderCharacterSheet } from '../character-sheet';
+import {
+  type CharacterSheetModelFit,
+  type CharacterSheetScriptSurface,
+  renderCharacterSheet,
+} from '../character-sheet';
 
 // The character sheet is the SOUL.md "tight character sheet" promise made
 // into a real artifact — one Markdown screen that says what a personality
@@ -415,5 +419,34 @@ describe('renderCharacterSheet — ## Model fit section (Lane 6)', () => {
     expect(sheet).toContain('- Verdict: refuses');
     expect(sheet).toContain('- Refusal: personality `engineer` cannot run on `qwen3:8b`');
     expect(sheet).toContain('Largest contributor: tool schemas (4,800 tokens, 12 tools).');
+  });
+});
+
+// tools-as-code-api Lane G — the script-callable surface line. Plain data
+// computed by callers via core's `scriptCallableFor` (the same derivation the
+// ScriptToolBridge enforces) and injected like the model-fit verdict.
+describe('renderCharacterSheet — script-callable surface (Lane G)', () => {
+  const scriptConfig: PersonalityConfig = {
+    ...fullConfig,
+    toolset: ['read_file', 'write_file', 'run_code', 'run_tests'],
+  };
+  const surface: CharacterSheetScriptSurface = { callable: ['read_file', 'write_file'] };
+
+  it('renders "N of M tools" with the exclusion categories when run_code is in the toolset', () => {
+    const sheet = renderCharacterSheet(scriptConfig, soulMd, undefined, undefined, surface);
+    expect(sheet).toContain(
+      '- Script-callable (run_code): 2 of 4 tools ' +
+        '(excluded: code, delegation, MCP, plugins, clarify, credential-bearing terminal/debug)',
+    );
+  });
+
+  it('omits the line when the personality has no run_code (the gate is the toolset)', () => {
+    const sheet = renderCharacterSheet(fullConfig, soulMd, undefined, undefined, surface);
+    expect(sheet).not.toContain('Script-callable');
+  });
+
+  it('omits the line fail-soft when no surface data is injected (no registry at the call site)', () => {
+    const sheet = renderCharacterSheet(scriptConfig, soulMd);
+    expect(sheet).not.toContain('Script-callable');
   });
 });

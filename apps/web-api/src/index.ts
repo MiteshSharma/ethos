@@ -289,6 +289,16 @@ export interface CreateWebApiOptions {
     personalityId: string,
   ) => Promise<import('@ethosagent/personalities').CharacterSheetModelFit | null>;
   /**
+   * tools-as-code-api Lane G — script-callable surface seam for the
+   * `personalities.characterSheet` RPC. The provider computes it via
+   * `scriptCallableFor()` from `@ethosagent/core` against the live tool
+   * registry — the SAME derivation the ScriptToolBridge enforces. Absent or
+   * resolving `null` → the sheet renders without the script-callable line.
+   */
+  scriptSurface?: (
+    personalityId: string,
+  ) => Promise<import('@ethosagent/personalities').CharacterSheetScriptSurface | null>;
+  /**
    * Protocol route modules (A2A, Phase 3) contributed to the Hono app via the
    * explicit, reviewable seam. Each declares its mount path, auth posture, and
    * description; `enabled: false` skips it. Modules inherit the app-wide CORS +
@@ -412,6 +422,7 @@ export function createWebApi(opts: CreateWebApiOptions): CreateWebApiResult {
     refresh: () => opts.personalities.loadFromDirectory(join(opts.dataDir, 'personalities')),
     ...(opts.dockerBuildable === false ? { dockerBuildable: false } : {}),
     ...(opts.modelFit ? { modelFit: opts.modelFit } : {}),
+    ...(opts.scriptSurface ? { scriptSurface: opts.scriptSurface } : {}),
   });
   const configService = new ConfigService({ config: configRepo, secrets });
   const onboardingService = new OnboardingService({

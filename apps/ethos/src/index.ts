@@ -1208,6 +1208,7 @@ async function runPersonalityShow(argv: string[]): Promise<void> {
   // that cannot be constructed, renders today's sheet without the verdict —
   // the character sheet is the command's contract.
   let modelFit: import('@ethosagent/personalities').CharacterSheetModelFit | undefined;
+  let scriptSurface: import('@ethosagent/personalities').CharacterSheetScriptSurface | undefined;
   let loopConstructed = false;
   try {
     const cfg = await readConfig(storage, await getSecretsResolver());
@@ -1215,6 +1216,11 @@ async function runPersonalityShow(argv: string[]): Promise<void> {
       const { createAgentLoop } = await import('./wiring');
       const result = await createAgentLoop(cfg);
       loopConstructed = true;
+      // Lane G (tools-as-code-api) — the script-callable surface, computed by
+      // the SAME derivation the ScriptToolBridge enforces. Fail-soft with the
+      // rest of this block: no loop → no line.
+      const { scriptCallableFor } = await import('@ethosagent/core');
+      scriptSurface = { callable: scriptCallableFor(described.config, result.toolRegistry) };
       const model = cfg.modelRouting?.[id] ?? cfg.model;
       modelFit = await resolvePersonalityModelFit({
         personality: described.config,
@@ -1237,7 +1243,9 @@ async function runPersonalityShow(argv: string[]): Promise<void> {
   } catch {
     // The verdict is advisory — the character sheet is the command's contract.
   }
-  console.log(`\n${renderCharacterSheet(described.config, soulMd, { posture }, modelFit)}`);
+  console.log(
+    `\n${renderCharacterSheet(described.config, soulMd, { posture }, modelFit, scriptSurface)}`,
+  );
 
   // Loop construction can leave live handles (MCP children, background
   // executors); the sheet is printed and flushed, so exit explicitly (same

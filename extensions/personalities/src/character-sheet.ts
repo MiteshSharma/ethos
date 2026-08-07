@@ -284,6 +284,20 @@ function executionSection(config: PersonalityConfig, exec: CharacterSheetExecuti
 }
 
 /**
+ * tools-as-code-api Lane G — the script-callable tool surface, as PLAIN DATA.
+ * Computed by callers via `scriptCallableFor()` from `@ethosagent/core` — the
+ * SAME derivation the ScriptToolBridge enforces, so the displayed surface
+ * cannot drift from the enforced one. Passed in like `CharacterSheetModelFit`:
+ * the personalities package never reaches into core/wiring for a registry.
+ * Absent (no live tool registry at the call site) → the line is omitted,
+ * mirroring the fail-soft `## Model fit` behaviour.
+ */
+export interface CharacterSheetScriptSurface {
+  /** Sorted tool names from `scriptCallableFor(personality, registry)`. */
+  callable: readonly string[];
+}
+
+/**
  * Render a personality's character sheet as Markdown. Pure — takes the
  * loaded config and the SOUL.md body, returns the artifact. Optional
  * fields render as explicit `(none)` / `(engine default)` states so a
@@ -294,6 +308,7 @@ export function renderCharacterSheet(
   soulMd: string,
   execution?: CharacterSheetExecution,
   modelFit?: CharacterSheetModelFit,
+  scriptSurface?: CharacterSheetScriptSurface,
 ): string {
   const lines: string[] = [`# ${config.id} — ${config.name}`, ''];
 
@@ -322,6 +337,15 @@ export function renderCharacterSheet(
     lines.push(`${toolset.length} tool${toolset.length === 1 ? '' : 's'}:`);
   }
   lines.push(...bulletList(toolset, '(none)'));
+  // Lane G — the in-script tool surface (`toolset ∩ SCRIPT_SAFE`), shown only
+  // when the personality can run scripts at all. The exclusion list mirrors
+  // the categories in core's SCRIPT_SAFE policy (script-safe.ts).
+  if (toolset.includes('run_code') && scriptSurface) {
+    lines.push(
+      `- Script-callable (run_code): ${scriptSurface.callable.length} of ${toolset.length} tools ` +
+        '(excluded: code, delegation, MCP, plugins, clarify, credential-bearing terminal/debug)',
+    );
+  }
   lines.push('');
 
   // §2 — the assembled system-prompt weight, so prompt cost is visible per

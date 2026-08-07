@@ -24,7 +24,7 @@ import {
   readRawConfig,
   writeConfig,
 } from '@ethosagent/config';
-import type { AgentLoop } from '@ethosagent/core';
+import { type AgentLoop, scriptCallableFor } from '@ethosagent/core';
 import { CronScheduler } from '@ethosagent/cron';
 import { LocalExecutionBackend } from '@ethosagent/execution-local';
 import { ConsoleLogger } from '@ethosagent/logger';
@@ -922,6 +922,16 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
               storage: getStorage(),
               dataDir: dir,
             });
+          },
+          // tools-as-code-api Lane G — the script-callable surface for the
+          // sheet's `Script-callable (run_code)` line. Same derivation the
+          // ScriptToolBridge enforces; resolves null for unknown ids.
+          scriptSurface: async (personalityId: string) => {
+            const registry = toolRegistry;
+            if (!registry) return null;
+            const described = personalities.describe(personalityId);
+            if (!described) return null;
+            return { callable: scriptCallableFor(described.config, registry) };
           },
         }
       : {}),
