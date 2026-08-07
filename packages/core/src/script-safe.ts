@@ -15,7 +15,13 @@ import type { PersonalityConfig, ToolRegistry } from '@ethosagent/types';
 // ---------------------------------------------------------------------------
 
 /** Why a tool is excluded from the script-callable surface. */
-export type ScriptExclusionCategory = 'code' | 'delegation' | 'mcp' | 'plugin' | 'clarify';
+export type ScriptExclusionCategory =
+  | 'code'
+  | 'delegation'
+  | 'mcp'
+  | 'plugin'
+  | 'clarify'
+  | 'credentials';
 
 const EXCLUSION_REASONS: Record<ScriptExclusionCategory, string> = {
   code: 'code-execution tools are not script-callable — recursion guard (a script cannot start a script)',
@@ -24,6 +30,10 @@ const EXCLUSION_REASONS: Record<ScriptExclusionCategory, string> = {
   mcp: 'MCP tools are not script-callable at v1',
   plugin: 'plugin tools are not script-callable at v1',
   clarify: 'clarify is not script-callable — a script waiting on a human is a hung container',
+  credentials:
+    'credential-returning tools are not script-callable — their results can carry secret ' +
+    'material (host environment via terminal, raw session transcripts via debug tools), ' +
+    'which must not reach untrusted sandboxed code',
 };
 
 /** Tool metadata the policy inspects — all of it available at the core layer. */
@@ -53,6 +63,13 @@ export function scriptExclusionFor(
   // declare `toolset: 'delegation'` — spawning has no depth ledger for a
   // script caller.
   if (meta.toolset === 'delegation') return 'delegation';
+  // Lane F verify-first #5 (2026-08 audit): `terminal`'s host-exec path
+  // inherits the full host environment (scoped-process defaults to
+  // process.env), so its result can echo provider keys; `debug` tools
+  // (get_session_events / get_observability) replay raw, unredacted
+  // transcript content from ANY stored session. Both would hand credential
+  // material to an untrusted script — excluded as a category.
+  if (meta.toolset === 'terminal' || meta.toolset === 'debug') return 'credentials';
   // Blocks the turn on an interactive surface mid-script.
   if (toolName === 'clarify') return 'clarify';
   return null;

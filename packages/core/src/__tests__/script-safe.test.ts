@@ -38,6 +38,8 @@ function makeRegistry(): DefaultToolRegistry {
     makeTool('task_status', 'delegation'),
     makeTool('mcp__linear__list_issues'),
     makeTool('clarify', 'interactive'),
+    makeTool('terminal', 'terminal'),
+    makeTool('get_session_events', 'debug'),
   ]);
   registry.register(makeTool('plugin_tool'), { pluginId: 'some-plugin' });
   return registry;
@@ -88,6 +90,8 @@ describe('scriptCallableFor', () => {
       'mcp__linear__list_issues',
       'plugin_tool',
       'clarify',
+      'terminal',
+      'get_session_events',
     ]) {
       expect(surface).not.toContain(excluded);
     }
@@ -115,6 +119,12 @@ describe('scriptExclusionFor — per-category mapping', () => {
     { name: 'mcp__linear__list_issues', meta: {}, category: 'mcp' },
     { name: 'plugin_tool', meta: { pluginId: 'some-plugin' }, category: 'plugin' },
     { name: 'clarify', meta: { toolset: 'interactive' }, category: 'clarify' },
+    // Lane F verify-first #5 (2026-08 credential audit): `terminal`'s host
+    // path can echo the full host environment; the `debug` tools replay raw,
+    // unredacted session transcripts. Both are credential-bearing results.
+    { name: 'terminal', meta: { toolset: 'terminal' }, category: 'credentials' },
+    { name: 'get_session_events', meta: { toolset: 'debug' }, category: 'credentials' },
+    { name: 'get_observability', meta: { toolset: 'debug' }, category: 'credentials' },
   ];
 
   for (const c of cases) {
@@ -138,6 +148,7 @@ describe('scriptExclusionError', () => {
       'mcp',
       'plugin',
       'clarify',
+      'credentials',
     ];
     for (const category of categories) {
       const error = scriptExclusionError('some_tool', category);
