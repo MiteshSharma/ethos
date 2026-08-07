@@ -95,6 +95,8 @@ export { InMemoryRequestDumpStore } from './request-dump-store';
 export { stripAnsiEscapes } from './sanitize-output';
 export type { SafeFetchFn, SecretsBackend } from './scoped';
 export { ScopedFetchImpl, ScopedFsImpl, ScopedProcessImpl, ScopedSecretsImpl } from './scoped';
+export type { ScriptExclusionCategory, ScriptSafeToolMeta } from './script-safe';
+export { scriptCallableFor, scriptExclusionError, scriptExclusionFor } from './script-safe';
 export { SimpleCompletionImpl } from './simple-completion';
 export { applyTemporalDecay, parseTemporalBound, toJournalKey } from './temporal';
 export { DefaultToolResultReducerRegistry } from './tool-reducer-registry';
