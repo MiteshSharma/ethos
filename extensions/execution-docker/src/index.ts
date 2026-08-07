@@ -9,6 +9,7 @@ import type {
   Constitution,
   ExecChunk,
   ExecOpts,
+  ExecRpcResponse,
   ExecSession,
   ExecutionBackend,
   ExecutionBackendConfig,
@@ -18,6 +19,17 @@ import type {
   SandboxAttestation,
   SecretsResolver,
 } from '@ethosagent/types';
+import {
+  encodeFrame,
+  FrameParser,
+  type HostFrame,
+  RPC_PROTOCOL_VERSION,
+  RpcProtocolError,
+  RpcVersionMismatchError,
+  type ShimFrame,
+} from './frames';
+
+export * from './frames';
 
 export class ExecAbortedError extends Error {
   readonly code = 'EXEC_ABORTED';
@@ -247,8 +259,26 @@ function substitute(
  * Queue-backed async generator that streams interleaved stdout/stderr chunks
  * from a spawned child process. Self-contained per backend (duplicated, not
  * shared) so each execution package has zero cross-package coupling.
+ *
+ * Two modes, gated on `opts.rpc` (tools-as-code-api Lane A):
+ *
+ * - Absent → today's path, byte-identical: raw stdout/stderr passthrough,
+ *   stdin written once then ended.
+ * - Present → framed mode: the container's stdout carries shim frames, which
+ *   are demultiplexed HERE — before `withByteCeiling` — so the output byte
+ *   ceiling counts only `output` frames, never RPC traffic. `opts.stdin` is
+ *   delivered as a `script` frame and stdin stays OPEN so `rpc_response`
+ *   frames can flow back for the execution's lifetime. `rpc_request` frames
+ *   are answered via `opts.rpc.onRequest`, serialized (one in-flight call at
+ *   a time), off the chunk-pump path — so a slow (or never-resolving) handler
+ *   cannot stall or outlive the exec stream: timeout/abort still kill the
+ *   container and terminate the stream, and a response that completes after
+ *   teardown is dropped, not written to a dead pipe.
+ *
+ * Exported for transport unit tests (driven with a scripted fake child — no
+ * Docker needed); not part of the backend's public contract.
  */
-async function* streamChild(
+export async function* streamChild(
   child: ChildProcess,
   opts: ExecOpts,
   killContainer: () => void,
@@ -259,10 +289,93 @@ async function* streamChild(
   let resolveNext: (() => void) | null = null;
   let exitCode: number | null = null;
 
-  child.stdout?.on('data', (c: Buffer) => {
-    chunks.push({ stream: 'stdout', data: c.toString('utf-8') });
-    resolveNext?.();
-  });
+  const rpc = opts.rpc;
+  let rpcTeardown: (() => void) | null = null;
+  if (rpc) {
+    const parser = new FrameParser();
+    let sawHello = false;
+    let closed = false;
+    let rpcChain: Promise<void> = Promise.resolve();
+    rpcTeardown = () => {
+      closed = true;
+      try {
+        child.stdin?.end();
+      } catch {
+        /* container already gone */
+      }
+    };
+    const failProtocol = (err: Error) => {
+      error = err;
+      child.kill('SIGKILL');
+      killContainer();
+      done = true;
+      resolveNext?.();
+    };
+    const writeFrame = (frame: HostFrame) => {
+      if (closed || !child.stdin || child.stdin.destroyed) return;
+      try {
+        child.stdin.write(encodeFrame(frame));
+      } catch {
+        /* container died mid-write; the stream error surfaces separately */
+      }
+    };
+    const onFrame = (frame: ShimFrame): void => {
+      if (!sawHello) {
+        if (frame.type !== 'hello') {
+          failProtocol(new RpcProtocolError(`first frame must be 'hello', got '${frame.type}'`));
+        } else if (frame.version !== RPC_PROTOCOL_VERSION) {
+          failProtocol(new RpcVersionMismatchError(RPC_PROTOCOL_VERSION, frame.version));
+        } else {
+          sawHello = true;
+        }
+        return;
+      }
+      if (frame.type === 'output') {
+        chunks.push({ stream: frame.stream, data: frame.data });
+        return;
+      }
+      if (frame.type === 'rpc_request') {
+        const { id, name, args } = frame;
+        // Serialized v1 contract: requests are answered strictly in order.
+        rpcChain = rpcChain.then(async () => {
+          let res: ExecRpcResponse;
+          try {
+            res = await rpc.onRequest({ name, args });
+          } catch (err) {
+            // Errors are data on this boundary; a throwing handler must not
+            // wedge the shim's blocked client.
+            res = {
+              ok: false,
+              error: err instanceof Error ? err.message : String(err),
+              code: 'rpc_handler_error',
+            };
+          }
+          writeFrame({ type: 'rpc_response', id, ...res });
+        });
+        return;
+      }
+      failProtocol(new RpcProtocolError(`unexpected frame type '${frame.type}'`));
+    };
+    child.stdout?.on('data', (c: Buffer) => {
+      let frames: ShimFrame[];
+      try {
+        frames = parser.push(c);
+      } catch (err) {
+        failProtocol(err instanceof Error ? err : new RpcProtocolError(String(err)));
+        return;
+      }
+      for (const frame of frames) {
+        if (done) break;
+        onFrame(frame);
+      }
+      resolveNext?.();
+    });
+  } else {
+    child.stdout?.on('data', (c: Buffer) => {
+      chunks.push({ stream: 'stdout', data: c.toString('utf-8') });
+      resolveNext?.();
+    });
+  }
   child.stderr?.on('data', (c: Buffer) => {
     chunks.push({ stream: 'stderr', data: c.toString('utf-8') });
     resolveNext?.();
@@ -308,8 +421,16 @@ async function* streamChild(
     }
   }
 
-  if (opts.stdin !== undefined) child.stdin?.write(opts.stdin, 'utf-8');
-  child.stdin?.end();
+  if (rpc) {
+    // Framed mode: deliver the script as frame 0 and keep stdin OPEN — the
+    // rpc_response frames flow back on it for the execution's lifetime.
+    child.stdin?.write(
+      encodeFrame({ type: 'script', version: RPC_PROTOCOL_VERSION, code: opts.stdin ?? '' }),
+    );
+  } else {
+    if (opts.stdin !== undefined) child.stdin?.write(opts.stdin, 'utf-8');
+    child.stdin?.end();
+  }
 
   try {
     while (true) {
@@ -332,6 +453,7 @@ async function* streamChild(
     }
   } finally {
     clearTimeout(timer);
+    rpcTeardown?.();
   }
 }
 
@@ -769,7 +891,7 @@ export class DockerExecutionBackend implements ExecutionBackend {
       networkMode: resolveNetworkMode(opts.personality),
       uid: info.uid,
       gid: info.gid,
-      stdin: opts.stdin !== undefined,
+      stdin: opts.stdin !== undefined || opts.rpc !== undefined,
       env: opts.env,
       mounts,
       tmpfs: scratchTmpfsFor(mounts),

@@ -1605,6 +1605,10 @@ importers:
       '@ethosagent/types':
         specifier: workspace:*
         version: link:../../packages/types
+    devDependencies:
+      '@ethosagent/execution-docker':
+        specifier: workspace:*
+        version: link:../execution-docker
 
   extensions/tools-cron:
     dependencies:

@@ -178,6 +178,7 @@ apps/ethos/src/error-log.ts — sync crash logger; must flush before process exi
 apps/ethos/tsup.config.ts and other build-time tooling
 extensions/skills/src/skill-compat.ts statSync — walks $PATH, not ~/.ethos/
 extensions/gateway/src/media.ts lstatSync — symlink-refusal on an arbitrary tool-produced outbound-media path (W3.2 exfiltration guard), not ~/.ethos/; Storage follows symlinks
+extensions/tools-code/src/shim/js-shim.ts — textual false positive: the `node:fs` import lives inside a String.raw literal (the container-side shim client source delivered at exec time, tools-as-code-api Lane A); the module itself performs no host filesystem access
 Error contract: read/exists/mtime return null for missing paths (common case, not exceptional). Everything else throws. ScopedStorage throws BoundaryError (also exported from @ethosagent/types) when a path is outside the allowlist; surfaces translate it into a user-facing tool error.
 
 Atomicity: use writeAtomic for any file where a partial write would corrupt state (config, keys, audit logs). It's a separate method, not an option, to prevent the "did the writer remember?" footgun.

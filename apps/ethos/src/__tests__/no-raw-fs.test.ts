@@ -59,6 +59,13 @@
 //                                 and follows symlinks, so symlink-refusal on an
 //                                 arbitrary path needs raw lstat.
 //
+//   extensions/tools-code/       Textual false positive: the `node:fs` import sits
+//   src/shim/js-shim.ts          inside a String.raw literal — it is the
+//                                 CONTAINER-side shim client source delivered at
+//                                 exec time (tools-as-code-api Lane A), not a host
+//                                 import. The module itself performs no filesystem
+//                                 access at all.
+//
 // If you need to add a new exception, document WHY here and in CLAUDE.md before
 // adding it to ALLOWED_PATHS below. The default answer for code on the
 // personality boundary is "use Storage."
@@ -105,6 +112,7 @@ const ALLOWED_FILES = new Set([
   'extensions/kanban-store/src/index.ts',
   'extensions/platform-whatsapp/src/session-store.ts',
   'extensions/request-dump/src/index.ts',
+  'extensions/tools-code/src/shim/js-shim.ts',
 ]);
 
 // Matches any static or dynamic import of node:fs or node:fs/promises.

@@ -12,12 +12,36 @@ export type ExecChunk =
    */
   | { stream: 'exit'; code: number };
 
+/** A script-initiated tool call crossing the framed-stdio RPC boundary (tools-as-code-api Lane A). */
+export interface ExecRpcRequest {
+  name: string;
+  args: unknown;
+}
+
+/** Host answer to a script-initiated call. Errors travel as data (`ok: false`), never as throws. */
+export interface ExecRpcResponse {
+  ok: boolean;
+  value?: string;
+  error?: string;
+  code?: string;
+}
+
 export interface ExecOpts {
   cwd?: string;
   env?: Record<string, string>;
   timeoutMs?: number;
   stdin?: string;
   signal?: AbortSignal;
+  /**
+   * Framed-stdio RPC seam (tools-as-code-api Lane A). When present, the docker
+   * backend runs the exec in framed mode: `stdin` is delivered to the runtime
+   * shim as a `script` frame, the child's stdin stays OPEN for `rpc_response`
+   * frames, and each `rpc_request` frame the shim emits is answered via
+   * `onRequest` (serialized — one in-flight call at a time). When absent, the
+   * write-then-end stdin path is unchanged. One-shot exec only — persistent
+   * sessions ignore it.
+   */
+  rpc?: { onRequest(req: ExecRpcRequest): Promise<ExecRpcResponse> };
   /**
    * Personality whose `fs_reach` derives the container mount set (docker
    * backend). Routed execution tools pass this so the OS-layer mount boundary
