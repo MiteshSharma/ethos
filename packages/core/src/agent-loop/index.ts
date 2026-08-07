@@ -11,7 +11,7 @@ export { extractFilePath } from './extract-file-path';
 export { dedupHistory, toLLMMessages } from './history';
 export { checkMcpEnabled, checkMcpRejectArgs } from './mcp-policy';
 export { describeSource, handleUntrustedResult } from './result-defense';
-export { buildScopedStorage, substitute } from './scoped-storage';
+export { buildScopedStorage } from './scoped-storage';
 export { assembleContext } from './stages/context-assembly';
 export type { TurnFinalizerContext } from './stages/turn-finalizer';
 export { finalizeTurn } from './stages/turn-finalizer';

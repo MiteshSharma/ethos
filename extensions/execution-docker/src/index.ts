@@ -5,6 +5,11 @@ import { type ChildProcess, spawn } from 'node:child_process';
 import { realpathSync } from 'node:fs';
 import { homedir, userInfo } from 'node:os';
 import { join, resolve as resolvePath } from 'node:path';
+// The fs_reach derivation is SHARED with the app-layer ScopedStorage scope
+// (packages/core/src/fs-reach.ts). Two copies would drift into silent data
+// loss: a write ScopedStorage permits but no mount backs is written into the
+// container's ephemeral layer and discarded by `docker run --rm`.
+import { deriveFsReachPaths, type FsReachVars, substitute } from '@ethosagent/core';
 import type {
   Constitution,
   ExecChunk,
@@ -29,6 +34,10 @@ import {
   type ShimFrame,
 } from './frames';
 
+// Re-exported so downstream consumers (and this package's tests) keep importing
+// the fs_reach substitution failure from the backend that throws it, even though
+// the canonical class now lives in core alongside the shared derivation.
+export { EmptySubstitutionError } from '@ethosagent/core';
 export * from './frames';
 
 export class ExecAbortedError extends Error {
@@ -79,17 +88,6 @@ export class ConstitutionMountError extends Error {
   ) {
     super(`Refusing to mount "${path}": ${reason}`);
     this.name = 'ConstitutionMountError';
-  }
-}
-
-export class EmptySubstitutionError extends Error {
-  readonly code = 'EMPTY_SUBSTITUTION';
-  constructor(
-    public readonly variable: string,
-    public readonly template: string,
-  ) {
-    super(`Substitution variable ${variable} is empty/unresolved in fs_reach path "${template}"`);
-    this.name = 'EmptySubstitutionError';
   }
 }
 
@@ -162,8 +160,12 @@ export function resolveNetworkMode(p?: PersonalityConfig): 'none' | 'bridge' {
 /** Output byte ceiling per exec (review #6). Past this the exec is killed. */
 const MAX_EXEC_OUTPUT_BYTES = 1_000_000;
 
-/** True when `p` resolves to or under one of the forbidden mount roots. */
-function isForbiddenMount(p: string): boolean {
+/**
+ * True when `p` resolves to or under one of the forbidden mount roots.
+ * Exported so the wiring-layer `fs_reach` directory pre-creation reuses THIS
+ * denylist rather than growing a second one that could disagree with it.
+ */
+export function isForbiddenMount(p: string): boolean {
   const abs = resolvePath(p);
   return FORBIDDEN_MOUNT_ROOTS.some((root) => abs === root || abs.startsWith(`${root}/`));
 }
@@ -208,7 +210,7 @@ function isUnderPath(path: string, prefix: string): boolean {
 function checkConstitutionMount(
   hostPath: string,
   constitution: Constitution | undefined,
-  vars: { ethosHome: string; self: string; cwd: string },
+  vars: FsReachVars,
 ): void {
   const fs = constitution?.filesystem;
   if (!fs) return;
@@ -227,32 +229,6 @@ function checkConstitutionMount(
       'outside the constitution allowedMountRoots allowlist',
     );
   }
-}
-
-/**
- * Local copy of the core substitution helper — extensions must not import core.
- * Throws EmptySubstitutionError when a token present in the template maps to an
- * empty value: an explicitly-declared fs_reach path whose substitution variable
- * is empty is a configuration error — fail loudly rather than mount a bogus path
- * (e.g. `${ETHOS_HOME}/skills` with an empty ethosHome would bind `/skills`).
- */
-function substitute(
-  template: string,
-  vars: { ethosHome: string; self: string; cwd: string },
-): string {
-  const checks: Array<[token: string, re: RegExp, value: string]> = [
-    ['${ETHOS_HOME}', /\$\{ETHOS_HOME\}/g, vars.ethosHome],
-    ['${self}', /\$\{self\}/g, vars.self],
-    ['${CWD}', /\$\{CWD\}/g, vars.cwd],
-  ];
-  let out = template;
-  for (const [token, re, value] of checks) {
-    if (template.includes(token)) {
-      if (value === '') throw new EmptySubstitutionError(token, template);
-      out = out.replace(re, value);
-    }
-  }
-  return out;
 }
 
 /**
@@ -931,18 +907,9 @@ export class DockerExecutionBackend implements ExecutionBackend {
   mountsFor(p: PersonalityConfig): MountSpec[] {
     const ethosHome = this.config.substitutionVars?.ethosHome ?? join(homedir(), '.ethos');
     const cwd = this.config.substitutionVars?.cwd ?? process.cwd();
-    const self = p.id;
-    const ownDir = `${join(ethosHome, 'personalities', self)}/`;
-
-    const reach = p.fs_reach;
-    const readPaths =
-      reach?.read && reach.read.length > 0
-        ? reach.read.map((path) => substitute(path, { ethosHome, self, cwd }))
-        : [ownDir, `${join(ethosHome, 'skills')}/`, cwd];
-    const writePaths =
-      reach?.write && reach.write.length > 0
-        ? reach.write.map((path) => substitute(path, { ethosHome, self, cwd }))
-        : [ownDir, cwd];
+    const vars: FsReachVars = { ethosHome, self: p.id, cwd };
+    // ONE derivation, shared with ScopedStorage — see the import note above.
+    const { read: readPaths, write: writePaths } = deriveFsReachPaths(p, vars);
 
     const byPath = new Map<string, MountSpec>();
     const add = (rawPath: string, mode: 'ro' | 'rw'): void => {
@@ -958,7 +925,6 @@ export class DockerExecutionBackend implements ExecutionBackend {
       // ACTUAL derived host path (and its symlink target), including the defaults
       // a no-fs_reach personality gets. The built-in denylist above still applies
       // unconditionally on top.
-      const vars = { ethosHome, self, cwd };
       checkConstitutionMount(hostPath, this.config.constitution, vars);
       if (realPath !== hostPath) checkConstitutionMount(realPath, this.config.constitution, vars);
       const existing = byPath.get(hostPath);

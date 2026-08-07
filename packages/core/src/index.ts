@@ -20,6 +20,9 @@ export { DEFAULT_OUTPUT_RESERVE_TOKENS } from './agent-loop/compaction';
 // serializer here would prove nothing (Hermes #4555 failure class).
 export { dedupHistory, toLLMMessages } from './agent-loop/history';
 export { reconstructFromWatermark, selectActiveWatermark } from './agent-loop/manual-compact';
+// The app-layer half of fs_reach enforcement. Exported so the docker/ScopedStorage
+// parity test drives EXACTLY the scope the loop builds, not a re-statement of it.
+export { buildScopedStorage } from './agent-loop/scoped-storage';
 // Lane 3(b) — declared small-window toolset parsing, shared with wiring's
 // startup narrowing diagnostic so both read the declaration identically.
 export { parseSmallWindowToolset } from './agent-loop/small-window-toolset';
@@ -81,6 +84,15 @@ export {
 } from './execution/conformance';
 export type { SessionLifecycleEvent, SessionManagerOptions } from './execution/session-manager';
 export { SessionManager } from './execution/session-manager';
+// The ONE fs_reach derivation. Both enforcement layers — ScopedStorage
+// (app) and the docker backend's bind mounts (OS) — consume this; a second
+// copy would drift into silent data loss (writes permitted but never mounted).
+export {
+  deriveFsReachPaths,
+  EmptySubstitutionError,
+  type FsReachVars,
+  substitute,
+} from './fs-reach';
 export { DefaultHookRegistry } from './hook-registry';
 export type { LearnRequest } from './learn';
 export { buildLearnPrompt, parseLearnArgs } from './learn';

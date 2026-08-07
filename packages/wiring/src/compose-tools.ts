@@ -82,6 +82,7 @@ import type {
   Tool,
 } from '@ethosagent/types';
 import type { InfrastructureResult } from './build-infrastructure';
+import { ensureFsReachDirs } from './fs-reach-dirs';
 import type { CreateAgentLoopOptions, WiringConfig, WiringProfile } from './index';
 import { resolveKanbanDbPath } from './kanban-path';
 import { MODEL_CATALOG } from './model-catalog';
@@ -369,6 +370,18 @@ export async function composeAllTools(
   const { dataDir, log } = wiringCtx;
   const { infra, profile } = deps;
   const { personalities, activePerson, hooks, capabilityBackends, tools, clarifyBridge } = infra;
+
+  // Materialize the personality's derived write directories BEFORE the posture
+  // branch below, so every posture gets them: docker would otherwise let the
+  // daemon auto-create the missing bind source as root (EACCES for the
+  // `--user <uid>:<gid>` container), and local `Storage.write()` requires the
+  // parent directory to already exist.
+  await ensureFsReachDirs(
+    activePerson,
+    wiringCtx.storage,
+    { ethosHome: dataDir, cwd: wiringCtx.workingDir },
+    log,
+  );
 
   // -------------------------------------------------------------------------
   // Execution posture + backend (Phase 2a lane c + security fix F1) — resolve
