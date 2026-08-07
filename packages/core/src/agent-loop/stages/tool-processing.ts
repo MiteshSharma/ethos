@@ -130,16 +130,19 @@ export async function* processTools(
 ): AsyncGenerator<AgentEvent, ProcessToolsResult> {
   // Step 9: Pre-flight hooks → execute non-rejected tools → collect all results
 
-  // Phase 30.2 — tools call ctx.emit() during execution. We drain progress
-  // events in real-time via an async queue that runs concurrently with
-  // executeParallel. The resolver is signalled on each push and on completion.
-  const progressQueue: Array<{
-    toolName: string;
-    message: string;
-    percent?: number;
-    audience: 'internal' | 'user' | 'dashboard';
-  }> = [];
+  // Phase 30.2 — tools call ctx.emit() during execution. We drain events in
+  // real-time via an async queue that runs concurrently with executeParallel.
+  // The resolver is signalled on each push and on completion. Lane E widened
+  // the queue from progress-only to AgentEvent so the ScriptToolBridge can
+  // emit inner-call tool_start/tool_end (audience: 'internal') mid-execution
+  // through the same drain.
+  const progressQueue: AgentEvent[] = [];
   let progressQueueResolve: (() => void) | null = null;
+  const pushLiveEvent = (event: AgentEvent): void => {
+    progressQueue.push(event);
+    progressQueueResolve?.();
+    progressQueueResolve = null;
+  };
 
   const scopedStorage = buildScopedStorage(
     ctx.personality,
@@ -183,14 +186,13 @@ export async function* processTools(
       percent?: number;
       audience?: 'internal' | 'user' | 'dashboard';
     }) => {
-      progressQueue.push({
+      pushLiveEvent({
+        type: 'tool_progress',
         toolName: event.toolName,
         message: event.message,
         ...(event.percent !== undefined && { percent: event.percent }),
         audience: event.audience ?? 'internal',
       });
-      progressQueueResolve?.();
-      progressQueueResolve = null;
     },
     resultBudgetChars: deps.resultBudgetChars,
     readMtimes: sessionMtimes,
@@ -205,8 +207,12 @@ export async function* processTools(
 
   // tools-as-code-api Lane B — attach the per-turn bridge to this batch's
   // ToolContext. `bind` reads the context lazily so the bridge sees the final
-  // object (including this very `scriptTools` field).
-  const scriptTools: ScriptToolsApi | undefined = ctx.scriptToolBridge?.bind(() => toolCtx);
+  // object (including this very `scriptTools` field). Lane E: the bridge's
+  // inner-call events ride the same live queue as tool progress.
+  const scriptTools: ScriptToolsApi | undefined = ctx.scriptToolBridge?.bind(
+    () => toolCtx,
+    pushLiveEvent,
+  );
   const toolCtx: ToolContext = scriptTools ? { ...toolCtxBase, scriptTools } : toolCtxBase;
 
   // Run before_tool_call hooks; build exec list with effective args
@@ -418,12 +424,12 @@ export async function* processTools(
       progressQueueResolve = null;
     },
   );
-  // Drain progress events in real-time while tools execute.
+  // Drain live events (tool progress + inner-call start/end) while tools execute.
   while (!toolsDone || progressQueue.length > 0) {
     while (progressQueue.length > 0) {
       const ev = progressQueue.shift();
       if (ev) {
-        yield { type: 'tool_progress', ...ev } as AgentEvent;
+        yield ev;
       }
     }
     if (!toolsDone) {

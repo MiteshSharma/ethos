@@ -82,8 +82,14 @@ export interface ScriptToolsApi {
    * Begin one script execution. `onAbortExecution` fires when enforcement
    * requires the whole execution to die (watcher pause/terminate) — the caller
    * wires it to the exec AbortController so the container is killed.
+   * `parentToolCallId` (Lane E) is the invoking `run_code` call's own id;
+   * inner-call events are namespaced `<parentToolCallId>#<n>` under it so a
+   * transcript reader can reconstruct the tree.
    */
-  startExecution(opts?: { onAbortExecution?: (reason: string) => void }): ScriptToolExecution;
+  startExecution(opts?: {
+    onAbortExecution?: (reason: string) => void;
+    parentToolCallId?: string;
+  }): ScriptToolExecution;
 }
 
 export interface ToolContext {
@@ -118,6 +124,14 @@ export interface ToolContext {
    * `ToolExecuteRequest`. Absent → the tool API is not wired for this turn.
    */
   scriptTools?: ScriptToolsApi;
+  /**
+   * tools-as-code-api Lane E — the executing call's own toolCallId, populated
+   * by the transport from `ToolExecuteRequest.toolCallId`. `run_code` threads
+   * it into `scriptTools.startExecution` as `parentToolCallId` so inner-call
+   * events are namespaced under the parent. Optional: hand-built test
+   * contexts may omit it; consumers must tolerate absence.
+   */
+  toolCallId?: string;
   /** Active personality for this turn. Tools that touch memory must thread this through. */
   personalityId?: string;
   /**

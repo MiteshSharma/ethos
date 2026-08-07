@@ -45,6 +45,7 @@ export class LocalToolTransport implements ToolTransport {
     const live = this.getLiveCtx?.();
 
     const ctx: ToolContext = {
+      toolCallId: request.toolCallId,
       sessionId: request.sessionId,
       sessionKey: request.sessionKey,
       platform: request.platform,

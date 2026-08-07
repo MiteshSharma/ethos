@@ -39,7 +39,10 @@ describe('Orchestrator guardrails', () => {
     // replaced the inline checkTurnBudgets call so the loop's boundary check
     // and the bridge's per-call check are ONE arithmetic. The bridge logic
     // itself lives in agent-loop/stages/script-tool-bridge.ts.
-    expect(lineCount).toBeLessThanOrEqual(873);
+    // Bumped 873 → 874: Lane E threads the loop's onToolMetric into the
+    // ScriptToolBridge deps (one conditional-spread line) so inner calls hit
+    // the same diagnostic seam as batch calls.
+    expect(lineCount).toBeLessThanOrEqual(874);
   });
 
   it('no stage file exceeds 700 lines', () => {
@@ -66,7 +69,10 @@ describe('Orchestrator guardrails', () => {
       // Bumped 738 → 746: tools-as-code-api Lane B — tool-processing binds the
       // per-turn ScriptToolBridge to the batch's ToolContext (two lines + the
       // ctx field + comment); the bridge itself is its own stage module.
-      if (lineCount > 746) {
+      // Bumped 746 → 752: Lane E generalizes the per-batch progress queue to
+      // AgentEvent (pushLiveEvent helper) so the bridge's inner-call
+      // tool_start/tool_end ride the same live drain as tool progress.
+      if (lineCount > 752) {
         violations.push(`${file}: ${lineCount} lines`);
       }
     }

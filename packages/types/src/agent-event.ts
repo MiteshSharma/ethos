@@ -66,7 +66,18 @@ export type ToolProgressAudience = 'internal' | 'user' | 'dashboard';
 export type AgentEvent =
   | { type: 'text_delta'; text: string }
   | { type: 'thinking_delta'; thinking: string }
-  | { type: 'tool_start'; toolCallId: string; toolName: string; args: unknown }
+  // tools-as-code-api Lane E — `audience` mirrors the Phase 30.2 field on
+  // `tool_end`. In-script inner calls emit real tool_start events tagged
+  // `'internal'` (toolCallId namespaced `<parentToolCallId>#<n>`); surfaces
+  // MUST NOT render those to the user. Absent = LLM-issued call, renders as
+  // before. Additive optional field — NOT a new event variant.
+  | {
+      type: 'tool_start';
+      toolCallId: string;
+      toolName: string;
+      args: unknown;
+      audience?: ToolProgressAudience;
+    }
   // Phase 30.2 — `audience` gates whether channel adapters / chat.ts surface
   // this event to the user. Default is `'internal'`; tools opt in to `'user'`
   // per event. Framework-emitted budget warnings are `'user'` (see step 7).

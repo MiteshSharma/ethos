@@ -429,6 +429,154 @@ describe('ScriptToolBridge — shared turn budget through AgentLoop', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Lane E — observability: internal inner-call events through a real turn
+// ---------------------------------------------------------------------------
+
+describe('ScriptToolBridge — Lane E inner-call events', () => {
+  it('a 5-call script yields 5 internal tool_start/tool_end pairs (namespaced ids) + 1 visible pair', async () => {
+    const tools = new DefaultToolRegistry();
+    tools.register(stubTool('run_code', { toolset: 'code' }));
+    tools.register(stubTool('worker'));
+    tools.register(
+      stubTool('scripty', {
+        execute: async (_args, ctx) => {
+          const api = ctx.scriptTools;
+          if (!api) return { ok: false, error: 'no bridge', code: 'not_available' };
+          // Namespacing mirrors run_code: the parent id comes from the
+          // transport-populated ctx.toolCallId.
+          const exec = api.startExecution({
+            ...(ctx.toolCallId !== undefined ? { parentToolCallId: ctx.toolCallId } : {}),
+          });
+          for (let i = 1; i <= 5; i++) await exec.call('worker', { i });
+          return { ok: true, value: 'did 5' };
+        },
+      }),
+    );
+    const loop = new AgentLoop({
+      llm: makeOneToolLLM('scripty'),
+      tools,
+      safety: createTestSafety(),
+    });
+    const events = await collect(loop.run('go', { sessionKey: 'lane-e-events' }));
+
+    const starts = events.filter(
+      (e): e is Extract<AgentEvent, { type: 'tool_start' }> => e.type === 'tool_start',
+    );
+    const ends = events.filter(
+      (e): e is Extract<AgentEvent, { type: 'tool_end' }> => e.type === 'tool_end',
+    );
+    const innerStarts = starts.filter((e) => e.audience === 'internal');
+    const innerEnds = ends.filter((e) => e.audience === 'internal');
+    expect(innerStarts).toHaveLength(5);
+    expect(innerEnds).toHaveLength(5);
+    // The scripted LLM issues the parent as `call-1`; inner ids nest under it.
+    expect(innerStarts.map((e) => e.toolCallId)).toEqual([
+      'call-1#1',
+      'call-1#2',
+      'call-1#3',
+      'call-1#4',
+      'call-1#5',
+    ]);
+    for (const e of [...innerStarts, ...innerEnds]) expect(e.toolName).toBe('worker');
+    // Exactly ONE visible (non-internal) pair — the driver tool itself.
+    const visibleStarts = starts.filter((e) => e.audience !== 'internal');
+    const visibleEnds = ends.filter((e) => e.audience !== 'internal');
+    expect(visibleStarts).toHaveLength(1);
+    expect(visibleStarts[0]?.toolName).toBe('scripty');
+    expect(visibleEnds).toHaveLength(1);
+    expect(visibleEnds[0]?.toolName).toBe('scripty');
+  });
+
+  it("onToolMetric keeps the batch path's pluginId gate — non-plugin inner calls do not fire it", async () => {
+    const metrics: string[] = [];
+    const tools = makeRegistry();
+    const counters = createTurnBudgetCounters();
+    const bridge = new ScriptToolBridge({
+      tools,
+      hooks: new DefaultHookRegistry(),
+      sessionId: 'metric-session',
+      traceId: undefined,
+      allowedTools: ['run_code', 'worker'],
+      allowedPlugins: [],
+      filterOpts: {},
+      watcherTap: NO_HALT_TAP,
+      counters,
+      checkBudgets: () =>
+        checkTurnBudgets(counters.totalToolCalls, 1000, counters.toolNameCounts, 1000, null, 1000),
+      onToolMetric: (m) => metrics.push(m.toolName),
+    });
+    const ctx = makeTestToolContext();
+    const api = bridge.bind(() => ctx);
+    const res = await api.startExecution().call('worker', {});
+    expect(res.ok).toBe(true);
+    // `worker` has no pluginId — same gate as tool-processing's metric push.
+    expect(metrics).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Lane F — secrets: redaction pin + canary exclusion
+// ---------------------------------------------------------------------------
+
+describe('ScriptToolBridge — Lane F secrets', () => {
+  // A string detectSecrets flags (AWS access key shape).
+  const SECRET = 'AKIAABCDEFGHIJKLMNOP';
+
+  it('run_code stdout traverses the safety redaction before persistence (verify-first #3 pin)', async () => {
+    const { InMemorySessionStore } = await import('../defaults/in-memory-session');
+    const session = new InMemorySessionStore();
+    const tools = new DefaultToolRegistry();
+    // Stub with run_code's exact surface shape: code toolset, untrusted output.
+    tools.register(
+      stubTool('run_code', {
+        toolset: 'code',
+        outputIsUntrusted: true,
+        execute: async () => ({ ok: true, value: `leaked: ${SECRET}` }),
+      }),
+    );
+    const loop = new AgentLoop({
+      llm: makeOneToolLLM('run_code', { runtime: 'python', code: 'x' }),
+      tools,
+      session,
+      safety: createTestSafety(),
+    });
+    await collect(loop.run('go', { sessionKey: 'redaction-pin' }));
+
+    const stored = await session.getSessionByKey('redaction-pin');
+    expect(stored).not.toBeNull();
+    const messages = stored ? await session.getMessages(stored.id) : [];
+    const toolResults = messages.filter((m) => m.role === 'tool_result');
+    expect(toolResults.length).toBeGreaterThan(0);
+    for (const m of toolResults) {
+      expect(m.content).not.toContain(SECRET);
+    }
+    expect(toolResults.some((m) => m.content.includes('[REDACTED:aws-key]'))).toBe(true);
+  });
+
+  it('a canary tool in an excluded credential toolset never reaches the script (verify-first #5)', async () => {
+    const CANARY = 'CANARY-a1b2c3-SECRET';
+    const tools = makeRegistry([
+      stubTool('get_session_events', {
+        toolset: 'debug',
+        execute: async () => ({ ok: true, value: CANARY }),
+      }),
+    ]);
+    const { api } = makeBridge({
+      tools,
+      allowedTools: ['run_code', 'worker', 'get_session_events'],
+    });
+    const res = await api.startExecution().call('get_session_events', {});
+    expect(res.ok).toBe(false);
+    expect(res.error).toContain('excluded category: credentials');
+    // The canary is absent from the entire result payload — the exact bytes
+    // run_code forwards 1:1 into the rpc_response frame.
+    expect(JSON.stringify(res)).not.toContain(CANARY);
+    // And the surface derivation never lists it.
+    expect(api.callableTools()).not.toContain('get_session_events');
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Grep-level guard — exactly ONE production before_tool_call fire site
 // ---------------------------------------------------------------------------
 

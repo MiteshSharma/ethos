@@ -761,18 +761,25 @@ async function runTurn(input: string, state: ChatState, loop: AgentLoop): Promis
       ...(toolsetNarrow ? { toolsetNarrow } : {}),
       ...(state.dryRun ? { dryRun: true } : {}),
     })) {
+      // Lane E (tools-as-code-api) — in-script inner calls carry
+      // `audience: 'internal'`. They must not drive turn-level UI state
+      // (iteration proxy, spinner, duration stats); rendering is gated in
+      // projectEvent (verbosity.ts).
+      const internalToolEvent =
+        (event.type === 'tool_start' || event.type === 'tool_end') && event.audience === 'internal';
+
       // Track iteration count — proxy by counting `run_start`+tool_start sequences.
       // Per AgentLoop, an iteration starts on before_llm_call hook. We don't get
       // that event externally, so use first tool_start or text_delta as proxy.
-      if (event.type === 'text_delta' || event.type === 'tool_start') {
+      if (event.type === 'text_delta' || (event.type === 'tool_start' && !internalToolEvent)) {
         if (state.iterationsThisTurn === 0) state.iterationsThisTurn = 1;
       }
-      if (event.type === 'tool_end') {
+      if (event.type === 'tool_end' && !internalToolEvent) {
         // A tool_end -> next iteration boundary, so the steer drain fires next.
         state.iterationsThisTurn++;
       }
 
-      if (event.type === 'tool_start') {
+      if (event.type === 'tool_start' && !internalToolEvent) {
         toolStartTimes.set(event.toolCallId, Date.now());
         toolArgs.set(event.toolCallId, event.args);
         toolNames.set(event.toolCallId, event.toolName);
@@ -782,11 +789,11 @@ async function runTurn(input: string, state: ChatState, loop: AgentLoop): Promis
         clearSpinner();
         if (state.verbosity !== 'quiet') out(`${c.bold}ethos${c.reset} > `);
       }
-      if (event.type === 'tool_start' && !spinnerCleared) {
+      if (event.type === 'tool_start' && !internalToolEvent && !spinnerCleared) {
         clearSpinner();
         if (state.verbosity !== 'quiet') out('\n');
       }
-      if (event.type === 'tool_end') {
+      if (event.type === 'tool_end' && !internalToolEvent) {
         toolDurations.push(event.durationMs);
       }
       if (event.type === 'usage') {

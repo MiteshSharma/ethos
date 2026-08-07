@@ -33,6 +33,9 @@ export const ToolStartEventSchema = z.object({
   toolCallId: z.string(),
   toolName: z.string(),
   args: z.unknown(),
+  /** Lane E (tools-as-code-api) — 'internal' marks in-script inner calls;
+   *  the web chat MUST NOT render a chip for them. */
+  audience: z.enum(['internal', 'user', 'dashboard']).optional(),
 });
 
 export const ToolProgressEventSchema = z.object({

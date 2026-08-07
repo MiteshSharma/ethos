@@ -615,6 +615,7 @@ export class AgentLoop {
       counters: budgetCounters,
       checkBudgets,
       turnAttachments: opts.attachments,
+      ...(this.onToolMetric ? { onToolMetric: this.onToolMetric } : {}),
     });
 
     const streamDeps: StreamStepDeps = {

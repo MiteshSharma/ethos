@@ -337,8 +337,14 @@ export class ChatService {
     bridge.on('thinking_delta', (thinking) =>
       this.append(sessionId, { type: 'thinking_delta', thinking }),
     );
-    bridge.on('tool_start', (toolCallId, toolName, args) =>
-      this.append(sessionId, { type: 'tool_start', toolCallId, toolName, args }),
+    bridge.on('tool_start', (toolCallId, toolName, args, audience) =>
+      this.append(sessionId, {
+        type: 'tool_start',
+        toolCallId,
+        toolName,
+        args,
+        ...(audience !== undefined ? { audience } : {}),
+      }),
     );
     bridge.on('tool_progress', (toolName, message, percent) =>
       this.append(sessionId, {
@@ -351,7 +357,7 @@ export class ChatService {
         audience: 'user',
       }),
     );
-    bridge.on('tool_end', (toolCallId, toolName, ok, durationMs, result, structured) =>
+    bridge.on('tool_end', (toolCallId, toolName, ok, durationMs, result, structured, audience) =>
       this.append(sessionId, {
         type: 'tool_end',
         toolCallId,
@@ -360,6 +366,7 @@ export class ChatService {
         durationMs,
         ...(result !== undefined ? { result } : {}),
         ...(structured !== undefined ? { structured } : {}),
+        ...(audience !== undefined ? { audience } : {}),
       }),
     );
     bridge.on('usage', (inputTokens, outputTokens, estimatedCostUsd) =>

@@ -15,12 +15,14 @@ import {
   ScriptToolBridge,
 } from '@ethosagent/core';
 import type {
+  AgentEvent,
   ExecChunk,
   ExecOpts,
   ExecRpcResponse,
   ExecutionBackend,
   Tool,
   ToolContext,
+  ToolProgressEvent,
 } from '@ethosagent/types';
 import { describe, expect, it } from 'vitest';
 import { createCodeTools } from '../index';
@@ -95,19 +97,23 @@ type HaltFn = () => {
   reason: string;
 } | null;
 
-function makeHarness(backend: ExecutionBackend, opts?: { getHalt?: HaltFn }) {
+function makeHarness(
+  backend: ExecutionBackend,
+  opts?: { getHalt?: HaltFn; extraTools?: Tool[]; allowedTools?: string[] },
+) {
   // Empty capability backends: run_code declares a process capability, and the
   // registry fails closed on capability-declaring tools without a backends bag.
   const tools = new DefaultToolRegistry({});
   for (const t of createCodeTools({ backend })) tools.register(t);
   tools.register(stubTool('worker'));
+  for (const t of opts?.extraTools ?? []) tools.register(t);
   const counters = createTurnBudgetCounters();
   const bridge = new ScriptToolBridge({
     tools,
     hooks: new DefaultHookRegistry(),
     sessionId: 's1',
     traceId: undefined,
-    allowedTools: ['run_code', 'worker'],
+    allowedTools: opts?.allowedTools ?? ['run_code', 'worker'],
     allowedPlugins: [],
     filterOpts: {},
     watcherTap: { observe: () => {}, getHalt: opts?.getHalt ?? (() => null) },
@@ -122,9 +128,21 @@ function makeHarness(backend: ExecutionBackend, opts?: { getHalt?: HaltFn }) {
         1000,
       ),
   });
+  // Lane E capture: the inner-call AgentEvents the bridge emits and the
+  // progress events run_code itself emits via ctx.emit.
+  const events: AgentEvent[] = [];
+  const progress: ToolProgressEvent[] = [];
   const base = makeTestToolContext();
-  const ctx: ToolContext = { ...base, scriptTools: bridge.bind(() => ctx) };
-  return { tools, ctx, counters };
+  const ctx: ToolContext = {
+    ...base,
+    toolCallId: 'parent-1',
+    emit: (e) => progress.push(e),
+    scriptTools: bridge.bind(
+      () => ctx,
+      (e) => events.push(e),
+    ),
+  };
+  return { tools, ctx, counters, events, progress };
 }
 
 // ---------------------------------------------------------------------------
@@ -240,6 +258,76 @@ describe('run_code × ScriptToolBridge', () => {
     const over = responses.at(-1);
     expect(over?.ok).toBe(false);
     expect(over?.code).toBe('per_execution_cap');
+  });
+
+  it('framed executions pass an empty env — no host secrets cross the boundary (Lane F pin)', async () => {
+    const backend = makeRpcBackend(async function* () {
+      yield { stream: 'exit', code: 0 };
+    });
+    const { tools, ctx } = makeHarness(backend);
+    await tools.get('run_code')?.execute({ runtime: 'python', code: 'x' }, ctx);
+    expect(backend.lastOpts?.env).toEqual({});
+  });
+
+  it('inner-call events are namespaced under the run_code parent id (Lane E)', async () => {
+    const backend = makeRpcBackend(async function* (call) {
+      await call('worker', { i: 1 });
+      await call('worker', { i: 2 });
+      yield { stream: 'exit', code: 0 };
+    });
+    const { tools, ctx, events, progress } = makeHarness(backend);
+    await tools.get('run_code')?.execute({ runtime: 'python', code: 'x' }, ctx);
+    const starts = events.filter(
+      (e): e is Extract<AgentEvent, { type: 'tool_start' }> => e.type === 'tool_start',
+    );
+    const ends = events.filter(
+      (e): e is Extract<AgentEvent, { type: 'tool_end' }> => e.type === 'tool_end',
+    );
+    expect(starts.map((e) => e.toolCallId)).toEqual(['parent-1#1', 'parent-1#2']);
+    expect(ends.map((e) => e.toolCallId)).toEqual(['parent-1#1', 'parent-1#2']);
+    for (const e of [...starts, ...ends]) expect(e.audience).toBe('internal');
+    // Below the threshold: no user-visible progress.
+    expect(progress.filter((p) => p.audience === 'user')).toEqual([]);
+  });
+
+  it(`emits ONE user-visible progress when an execution crosses 10 inner calls (Lane E)`, async () => {
+    const backend = makeRpcBackend(async function* (call) {
+      for (let i = 1; i <= 12; i++) await call('worker', { i });
+      yield { stream: 'exit', code: 0 };
+    });
+    const { tools, ctx, progress } = makeHarness(backend);
+    await tools.get('run_code')?.execute({ runtime: 'python', code: 'x' }, ctx);
+    const userProgress = progress.filter((p) => p.audience === 'user');
+    expect(userProgress).toHaveLength(1);
+    expect(userProgress[0]?.toolName).toBe('run_code');
+    expect(userProgress[0]?.message).toContain('10+ tool calls in code');
+  });
+
+  it('a canary from an excluded credential tool never crosses the rpc seam (Lane F)', async () => {
+    const CANARY = 'CANARY-xyzzy-SECRET';
+    const responses: ExecRpcResponse[] = [];
+    const backend = makeRpcBackend(async function* (call) {
+      responses.push(await call('get_session_events', { sessionId: 'any' }));
+      yield { stream: 'stdout', data: 'done\n' };
+      yield { stream: 'exit', code: 0 };
+    });
+    const { tools, ctx } = makeHarness(backend, {
+      extraTools: [
+        stubTool('get_session_events', {
+          toolset: 'debug',
+          execute: async () => ({ ok: true, value: CANARY }),
+        }),
+      ],
+      allowedTools: ['run_code', 'worker', 'get_session_events'],
+    });
+    const result = await tools.get('run_code')?.execute({ runtime: 'python', code: 'x' }, ctx);
+    expect(result?.ok).toBe(true);
+    // The script saw the exclusion error, never the canary — these response
+    // objects are the exact payloads the host writes into rpc_response frames.
+    expect(responses).toHaveLength(1);
+    expect(responses[0]?.ok).toBe(false);
+    expect(responses[0]?.error).toContain('excluded category: credentials');
+    expect(JSON.stringify(responses)).not.toContain(CANARY);
   });
 
   it('the run_code result entering history never exceeds its 10k cap regardless of script output', async () => {

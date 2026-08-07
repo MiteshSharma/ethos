@@ -183,6 +183,12 @@ export function applyEvent(state: ChatState, event: SseEvent, now: number): Chat
     }
 
     case 'tool_start': {
+      // Lane E (tools-as-code-api) — in-script inner calls are tagged
+      // `audience: 'internal'`: no chip, no currentOp churn. The stream is
+      // still alive, so refresh the stall clock.
+      if (event.audience === 'internal') {
+        return { ...state, lastStreamEventAt: now };
+      }
       // Two paths converge here:
       //   1. Auto-allowed call — no approval was needed, this is the
       //      first event. Append a fresh running block.
@@ -222,6 +228,10 @@ export function applyEvent(state: ChatState, event: SseEvent, now: number): Chat
     }
 
     case 'tool_end': {
+      // Lane E — internal inner-call ends have no chip to flip; skip.
+      if (event.audience === 'internal') {
+        return { ...state, lastStreamEventAt: now };
+      }
       // Find the matching running block by toolCallId and flip it.
       // The block could live in `currentTurn` (live) or in the last
       // assistant message of `messages` (when tool_end races the `done`

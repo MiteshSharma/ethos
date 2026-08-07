@@ -29,7 +29,15 @@ export interface BridgeOptions {
 interface BridgeEventMap {
   text_delta: [text: string];
   thinking_delta: [thinking: string];
-  tool_start: [toolCallId: string, toolName: string, args: unknown];
+  // Lane E (tools-as-code-api) — the trailing `audience` mirrors the optional
+  // AgentEvent field: 'internal' marks in-script inner calls that user-facing
+  // consumers must not render. Trailing/optional so 3-arg handlers keep working.
+  tool_start: [
+    toolCallId: string,
+    toolName: string,
+    args: unknown,
+    audience: 'internal' | 'user' | 'dashboard' | undefined,
+  ];
   tool_progress: [toolName: string, message: string, percent: number | undefined];
   tool_end: [
     toolCallId: string,
@@ -38,6 +46,7 @@ interface BridgeEventMap {
     durationMs: number,
     result: string | undefined,
     structured: Record<string, unknown> | undefined,
+    audience: 'internal' | 'user' | 'dashboard' | undefined,
   ];
   usage: [inputTokens: number, outputTokens: number, estimatedCostUsd: number];
   error: [error: string, code: string];
@@ -251,7 +260,7 @@ export class AgentBridge extends EventEmitter<BridgeEventMap> {
             this.emit('thinking_delta', event.thinking);
             break;
           case 'tool_start':
-            this.emit('tool_start', event.toolCallId, event.toolName, event.args);
+            this.emit('tool_start', event.toolCallId, event.toolName, event.args, event.audience);
             break;
           case 'tool_progress':
             this.emit('tool_progress', event.toolName, event.message, event.percent);
@@ -265,6 +274,7 @@ export class AgentBridge extends EventEmitter<BridgeEventMap> {
               event.durationMs,
               event.result,
               event.structured,
+              event.audience,
             );
             break;
           case 'usage':

@@ -1,4 +1,5 @@
 import type {
+  AgentEvent,
   Attachment,
   HookRegistry,
   ScriptToolCallResult,
@@ -62,12 +63,30 @@ export interface ScriptToolBridgeDeps {
   checkBudgets: () => ReturnType<typeof checkTurnBudgets>;
   /** The turn's inbound attachments, forwarded so the registry's live ctx stays stable. */
   turnAttachments?: Attachment[];
+  /**
+   * Lane E — the loop's per-tool metric callback (AgentLoopConfig.onToolMetric),
+   * fired per inner call under the SAME gate as the batch path (plugin-tagged
+   * tools only — the diagnostic store is keyed by pluginId). Plugin tools are
+   * excluded from the v1 script surface, so this is future-proofing: if
+   * SCRIPT_SAFE ever admits them, their metrics will not silently go missing.
+   */
+  onToolMetric?: (opts: {
+    pluginId: string;
+    toolName: string;
+    ok: boolean;
+    durationMs: number;
+    sessionId: string;
+    turnId: string;
+  }) => void;
 }
+
+/** Lane E — emit sink for inner-call `tool_start`/`tool_end` AgentEvents. */
+export type ScriptEventSink = (event: AgentEvent) => void;
 
 export class ScriptToolBridge {
   private readonly callable: string[];
   private readonly callableSet: Set<string>;
-  private rpcSeq = 0;
+  private execSeq = 0;
 
   constructor(private readonly deps: ScriptToolBridgeDeps) {
     // Lane C — the script-callable surface, computed ONCE per turn from the
@@ -82,21 +101,30 @@ export class ScriptToolBridge {
   /**
    * Bind this turn's bridge to one tool batch's ToolContext. `getCtx` is read
    * lazily per call so the bridge sees the fully-built context (including the
-   * `scriptTools` field that points back at this bridge).
+   * `scriptTools` field that points back at this bridge). `emitEvent` (Lane E)
+   * is the batch's live event queue: inner calls emit real `tool_start`/
+   * `tool_end` AgentEvents with `audience: 'internal'` through it. Absent
+   * (hand-built test contexts) → no events, enforcement unchanged.
    */
-  bind(getCtx: () => ToolContext): ScriptToolsApi {
+  bind(getCtx: () => ToolContext, emitEvent?: ScriptEventSink): ScriptToolsApi {
     return {
       callableTools: () => [...this.callable],
-      startExecution: (opts) => this.startExecution(getCtx, opts),
+      startExecution: (opts) => this.startExecution(getCtx, emitEvent, opts),
     };
   }
 
   private startExecution(
     getCtx: () => ToolContext,
-    opts?: { onAbortExecution?: (reason: string) => void },
+    emitEvent: ScriptEventSink | undefined,
+    opts?: { onAbortExecution?: (reason: string) => void; parentToolCallId?: string },
   ): ScriptToolExecution {
     let execCalls = 0;
     let abortedReason: string | null = null;
+    // Lane E — inner toolCallIds are namespaced `<parentToolCallId>#<n>` so a
+    // transcript reader can reconstruct the tree. When the caller cannot know
+    // its own id (a hand-built ToolContext without `toolCallId`), fall back to
+    // a deterministic per-execution namespace unique within the turn.
+    const namespace = opts?.parentToolCallId ?? `script:${++this.execSeq}`;
     const abortExecution = (reason: string): void => {
       if (abortedReason === null) {
         abortedReason = reason;
@@ -120,19 +148,27 @@ export class ScriptToolBridge {
             code: 'per_execution_cap',
           };
         }
-        return this.dispatch(getCtx, abortExecution, name, args);
+        return this.dispatch(
+          getCtx,
+          emitEvent,
+          abortExecution,
+          `${namespace}#${execCalls}`,
+          name,
+          args,
+        );
       },
     };
   }
 
   private async dispatch(
     getCtx: () => ToolContext,
+    emitEvent: ScriptEventSink | undefined,
     abortExecution: (reason: string) => void,
+    toolCallId: string,
     name: string,
     args: unknown,
   ): Promise<ScriptToolCallResult> {
     const d = this.deps;
-    const toolCallId = `script:${++this.rpcSeq}`;
     const scriptCtx = (): ToolContext => ({
       ...getCtx(),
       resultBudgetChars: SCRIPT_RESULT_BUDGET_CHARS,
@@ -150,6 +186,8 @@ export class ScriptToolBridge {
       if (exclusion !== null) {
         return { ok: false, error: scriptExclusionError(name, exclusion), code: 'not_available' };
       }
+      const startedAt = Date.now();
+      emitEvent?.({ type: 'tool_start', toolCallId, toolName: name, args, audience: 'internal' });
       const [rejected] = await d.tools.executeParallel(
         [{ toolCallId, name, args }],
         scriptCtx(),
@@ -157,9 +195,21 @@ export class ScriptToolBridge {
         d.filterOpts,
         d.turnAttachments,
       );
-      return rejected
-        ? toCallResult(rejected.result)
-        : { ok: false, error: 'Tool result missing', code: 'execution_failed' };
+      const rejection = rejected?.result ?? {
+        ok: false as const,
+        error: 'Tool result missing',
+        code: 'execution_failed' as const,
+      };
+      emitEvent?.({
+        type: 'tool_end',
+        toolCallId,
+        toolName: name,
+        ok: rejection.ok,
+        durationMs: Date.now() - startedAt,
+        audience: 'internal',
+        ...(rejection.ok ? {} : { error: rejection.error }),
+      });
+      return toCallResult(rejection);
     }
 
     // Step 2 — the single production `before_tool_call` fire site. A rejection
@@ -178,6 +228,17 @@ export class ScriptToolBridge {
       },
     );
     if (!decision.allowed) {
+      // Parity with the batch path's emitToolRejection: a hook-blocked call
+      // gets a terminal tool_end (no tool_start — it never reached execution).
+      emitEvent?.({
+        type: 'tool_end',
+        toolCallId,
+        toolName: name,
+        ok: false,
+        durationMs: 0,
+        audience: 'internal',
+        error: decision.reason,
+      });
       return { ok: false, error: decision.reason, code: 'tool_blocked' };
     }
     const effectiveArgs = decision.effectiveArgs;
@@ -212,7 +273,19 @@ export class ScriptToolBridge {
 
     // Step 5 — execute through the registry pipeline (allowlist again,
     // isAvailable, capability gates, invocation filters, post-trim) with the
-    // script-scoped result budget (Lane D — NOT the turn split).
+    // script-scoped result budget (Lane D — NOT the turn split). Lane E: real
+    // tool_start/tool_end events, tagged 'internal' so surfaces skip them
+    // while logs/telemetry/dev surfaces see the full tree. The result body is
+    // deliberately NOT copied onto the internal tool_end — inner results (up
+    // to 256 KB) belong to the script, not the event stream.
+    const startedAt = Date.now();
+    emitEvent?.({
+      type: 'tool_start',
+      toolCallId,
+      toolName: name,
+      args: effectiveArgs,
+      audience: 'internal',
+    });
     const [executed] = await d.tools.executeParallel(
       [{ toolCallId, name, args: effectiveArgs }],
       scriptCtx(),
@@ -225,6 +298,30 @@ export class ScriptToolBridge {
       error: 'Tool result missing',
       code: 'execution_failed' as const,
     };
+    const durationMs = Date.now() - startedAt;
+    emitEvent?.({
+      type: 'tool_end',
+      toolCallId,
+      toolName: name,
+      ok: result.ok,
+      durationMs,
+      audience: 'internal',
+      ...(result.ok ? {} : { error: result.error }),
+    });
+    // Lane E — per-inner-call metric, same pluginId gate as the batch path.
+    if (d.onToolMetric) {
+      const metricPluginId = d.tools.getPluginId?.(name);
+      if (metricPluginId) {
+        d.onToolMetric({
+          pluginId: metricPluginId,
+          toolName: name,
+          ok: result.ok,
+          durationMs,
+          sessionId: d.sessionId,
+          turnId: String(getCtx().currentTurn),
+        });
+      }
+    }
     d.watcherTap.observe({ type: 'tool_end', toolName: name, ok: result.ok });
     const endHalt = consultWatcherHalt(d.watcherTap.getHalt);
     if (endHalt.halted) {

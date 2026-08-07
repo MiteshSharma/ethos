@@ -18,6 +18,12 @@ const DEFAULT_TIMEOUT_MS = 30_000;
  */
 const TOOL_API_MAX_TIMEOUT_MS = 300_000;
 
+/**
+ * Lane E — inner-call count at which run_code emits its single user-visible
+ * `tool_progress` ("running N+ tool calls in code…").
+ */
+const PROGRESS_CALL_THRESHOLD = 10;
+
 // ---------------------------------------------------------------------------
 // Runtime definitions
 // ---------------------------------------------------------------------------
@@ -156,9 +162,29 @@ function createRunCodeTool(
             abortReason = reason;
             abort.abort();
           },
+          // Lane E — inner-call events are namespaced under this run_code
+          // call's own id (`<toolCallId>#<n>`).
+          ...(ctx.toolCallId !== undefined ? { parentToolCallId: ctx.toolCallId } : {}),
         });
         execOpts.signal = abort.signal;
-        execOpts.rpc = { onRequest: (req) => execution.call(req.name, req.args) };
+        // Lane E — one user-visible progress event when an execution crosses
+        // PROGRESS_CALL_THRESHOLD inner calls, so a long silent script stays
+        // legible. Per-event opt-in per the audience contract; emitted once.
+        let innerCalls = 0;
+        execOpts.rpc = {
+          onRequest: (req) => {
+            innerCalls++;
+            if (innerCalls === PROGRESS_CALL_THRESHOLD) {
+              ctx.emit({
+                type: 'progress',
+                toolName: 'run_code',
+                message: `running ${PROGRESS_CALL_THRESHOLD}+ tool calls in code…`,
+                audience: 'user',
+              });
+            }
+            return execution.call(req.name, req.args);
+          },
+        };
       }
 
       try {
