@@ -321,6 +321,7 @@ export class DefaultToolRegistry implements ToolRegistry {
       storage: ctx.storage,
       inboundAttachments: turnAttachments,
       a2aDelegation: ctx.a2aDelegation,
+      scriptTools: ctx.scriptTools,
     };
 
     const results = await Promise.allSettled(

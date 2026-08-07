@@ -10,9 +10,11 @@ import type {
   MessageContent,
   PersonalityConfig,
   PersonalityObservabilityConfig,
+  ScriptToolsApi,
   SessionStore,
   SteerSink,
   Storage,
+  ToolContext,
   ToolFilterOpts,
   ToolRegistry,
   ToolResult,
@@ -28,6 +30,7 @@ import { handleUntrustedResult } from '../result-defense';
 import { buildScopedStorage } from '../scoped-storage';
 import type { WatcherTap } from '../turn-context';
 import { consultWatcherHalt, enforceBeforeToolCall } from './per-call-enforcement';
+import type { ScriptToolBridge } from './script-tool-bridge';
 import type { CompletedToolCall, UsageSink } from './stream-step';
 import { emitToolRejection, validateRepairedArgs } from './tool-rejection';
 
@@ -86,6 +89,8 @@ export interface ToolProcessingContext {
   watcherTap: WatcherTap;
   usageSink: UsageSink;
   injectionDefenseEnabled: boolean;
+  /** tools-as-code-api Lane B — per-turn bridge for in-script tool calls. */
+  scriptToolBridge?: ScriptToolBridge;
 
   // Downgrade state — mutable refs
   dgEnabled: boolean;
@@ -197,6 +202,12 @@ export async function* processTools(
       ctx.usageSink.llmOutputTokens += output;
     }),
   };
+
+  // tools-as-code-api Lane B — attach the per-turn bridge to this batch's
+  // ToolContext. `bind` reads the context lazily so the bridge sees the final
+  // object (including this very `scriptTools` field).
+  const scriptTools: ScriptToolsApi | undefined = ctx.scriptToolBridge?.bind(() => toolCtx);
+  const toolCtx: ToolContext = scriptTools ? { ...toolCtxBase, scriptTools } : toolCtxBase;
 
   // Run before_tool_call hooks; build exec list with effective args
   // Rejected tools get tool_end ok:false + an error tool_result sent back to LLM
@@ -388,7 +399,7 @@ export async function* processTools(
     execInputs.length > 0
       ? deps.tools.executeParallel(
           execInputs,
-          toolCtxBase,
+          toolCtx,
           ctx.allowedTools,
           ctx.filterOpts,
           ctx.opts.attachments,

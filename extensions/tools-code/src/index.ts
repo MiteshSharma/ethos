@@ -1,13 +1,22 @@
 import { stripAnsiEscapes } from '@ethosagent/core';
 import type {
   ExecChunk,
+  ExecOpts,
   ExecutionBackend,
   PersonalityConfig,
   Tool,
   ToolResult,
 } from '@ethosagent/types';
+import { buildShimCommand, type ShimRuntime } from './shim';
 
 const DEFAULT_TIMEOUT_MS = 30_000;
+
+/**
+ * Lane D — wall-clock ceiling for executions that use the in-script tool API.
+ * A script looping over dozens of tool calls legitimately outlives the plain
+ * 30s default; plain executions keep today's semantics untouched.
+ */
+const TOOL_API_MAX_TIMEOUT_MS = 300_000;
 
 // ---------------------------------------------------------------------------
 // Runtime definitions
@@ -52,7 +61,15 @@ function createRunCodeTool(
 ): Tool {
   return {
     name: 'run_code',
-    description: `Run code in an isolated container. Supported runtimes: ${RUNTIME_NAMES}. No network access, memory-capped.`,
+    description:
+      `Run code in an isolated container. Supported runtimes: ${RUNTIME_NAMES}. No network access, memory-capped. ` +
+      "In-script tool API (python/js): scripts can call the agent's own tools via ethos.call(name, args) " +
+      '(python: import ethos first; js: global ethos). Each call returns {ok, value} or {ok, error, code}. ' +
+      'Prefer ONE run_code script over direct tool calls for workflows of 3+ tool calls with processing ' +
+      'logic between them: loop/filter/aggregate in code and print only the final result — intermediate ' +
+      "tool results never enter the conversation. Which tools are callable depends on the active personality's " +
+      'toolset; where the tool API is not wired, ethos is undefined and the call fails as a normal ' +
+      'interpreter error. Executions that use the tool API may raise timeout_ms up to 300000.',
     toolset: 'code',
     maxResultChars: 10_000,
     outputIsUntrusted: true,
@@ -110,19 +127,42 @@ function createRunCodeTool(
         };
       }
 
-      const { cmd } = RUNTIMES[runtime as Runtime];
-      const timeout = timeout_ms ?? DEFAULT_TIMEOUT_MS;
+      // tools-as-code-api Lane B/D — when the ScriptToolBridge is wired and the
+      // runtime has a shim, run framed: the shim injects ethos.call() and each
+      // in-script RPC request is answered through the bridge (the SAME per-call
+      // enforcement path as LLM-issued calls). A watcher halt aborts the whole
+      // execution via the exec abort signal — the script cannot outlive it.
+      const scriptTools = ctx.scriptTools;
+      const framed = scriptTools !== undefined && (runtime === 'python' || runtime === 'js');
+      const cmd = framed
+        ? buildShimCommand(runtime as ShimRuntime)
+        : RUNTIMES[runtime as Runtime].cmd;
+      const timeout = framed
+        ? Math.min(timeout_ms ?? DEFAULT_TIMEOUT_MS, TOOL_API_MAX_TIMEOUT_MS)
+        : (timeout_ms ?? DEFAULT_TIMEOUT_MS);
+
+      const execOpts: ExecOpts = {
+        stdin: code,
+        timeoutMs: timeout,
+        env: {},
+        personality,
+        sessionId: ctx.sessionId,
+      };
+      let abortReason: string | undefined;
+      if (framed && scriptTools) {
+        const abort = new AbortController();
+        const execution = scriptTools.startExecution({
+          onAbortExecution: (reason) => {
+            abortReason = reason;
+            abort.abort();
+          },
+        });
+        execOpts.signal = abort.signal;
+        execOpts.rpc = { onRequest: (req) => execution.call(req.name, req.args) };
+      }
 
       try {
-        const { stdout, stderr, exitCode } = await drainExec(
-          backend.exec(cmd, {
-            stdin: code,
-            timeoutMs: timeout,
-            env: {},
-            personality,
-            sessionId: ctx.sessionId,
-          }),
-        );
+        const { stdout, stderr, exitCode } = await drainExec(backend.exec(cmd, execOpts));
         const output = stripAnsiEscapes([stdout, stderr].filter(Boolean).join('\n').trim());
         // A non-zero interpreter exit means the code failed (syntax/runtime
         // error). A null exit code (older backend) preserves prior success.
@@ -135,6 +175,11 @@ function createRunCodeTool(
         }
         return { ok: true, value: output || '(no output)' };
       } catch (err) {
+        // A bridge-driven abort (watcher pause/terminate) killed the container:
+        // surface the watcher's reason, not the raw abort error.
+        if (abortReason !== undefined) {
+          return { ok: false, error: abortReason, code: 'execution_failed' };
+        }
         return {
           ok: false,
           error: err instanceof Error ? err.message : String(err),

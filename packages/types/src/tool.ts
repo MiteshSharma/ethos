@@ -50,6 +50,42 @@ export interface ToolProgressEvent {
   audience?: 'internal' | 'user' | 'dashboard';
 }
 
+/**
+ * Result of one in-script tool call across the script-tool seam
+ * (tools-as-code-api Lane B). Errors travel as data (`ok: false`), never as
+ * throws — the same contract as `ExecRpcResponse`, so `run_code` can forward
+ * results to the RPC transport 1:1.
+ */
+export interface ScriptToolCallResult {
+  ok: boolean;
+  value?: string;
+  error?: string;
+  code?: string;
+}
+
+/** One script execution's handle onto the agent's tools (per-execution call cap applies). */
+export interface ScriptToolExecution {
+  call(name: string, args: unknown): Promise<ScriptToolCallResult>;
+}
+
+/**
+ * The script-tool seam (tools-as-code-api Lane B). Implemented by core's
+ * ScriptToolBridge; consumed by `run_code`, which answers in-script
+ * `ethos.call(name, args)` RPC requests through it so script-initiated calls
+ * traverse the SAME per-call enforcement path as LLM-issued calls (personality
+ * allowlist, `before_tool_call` hooks, safety watchers, shared turn budgets).
+ */
+export interface ScriptToolsApi {
+  /** Sorted tool names callable from a script under this turn's personality. */
+  callableTools(): string[];
+  /**
+   * Begin one script execution. `onAbortExecution` fires when enforcement
+   * requires the whole execution to die (watcher pause/terminate) — the caller
+   * wires it to the exec AbortController so the container is killed.
+   */
+  startExecution(opts?: { onAbortExecution?: (reason: string) => void }): ScriptToolExecution;
+}
+
 export interface ToolContext {
   sessionId: string;
   sessionKey: string;
@@ -73,6 +109,15 @@ export interface ToolContext {
    * the per-trace fan-out budget (plan §P8). Absent for normal turns.
    */
   a2aDelegation?: { traceId: string; depth: number; reserveOutbound: () => boolean };
+  /**
+   * tools-as-code-api Lane B — set per turn by AgentLoop when a
+   * ScriptToolBridge is wired. `run_code` threads it into the exec RPC seam so
+   * in-script `ethos.call(name, args)` traverses the identical enforcement
+   * path as LLM-issued calls. Carries live callbacks, so like `a2aDelegation`
+   * it rides the transport's live side-channel, never the serializable
+   * `ToolExecuteRequest`. Absent → the tool API is not wired for this turn.
+   */
+  scriptTools?: ScriptToolsApi;
   /** Active personality for this turn. Tools that touch memory must thread this through. */
   personalityId?: string;
   /**

@@ -6,6 +6,10 @@ export type {
   RunOptions,
 } from './agent-loop';
 export { AgentLoop, isKnownAgentEvent, KNOWN_AGENT_EVENT_TYPES } from './agent-loop';
+// tools-as-code-api Lane B — the per-turn bridge (and its budget-counter
+// companions) are exported so integration tests and non-loop surfaces can
+// drive the EXACT enforcement path the loop wires, not a re-statement of it.
+export { checkTurnBudgets } from './agent-loop/budgets';
 // Lane 1(b/c) — the gate's output-reserve constant, shared with wiring's
 // startup floor diagnostic and window-scaled result budget so there is ONE
 // reserve arithmetic, not a drifting copy.
@@ -19,6 +23,17 @@ export { reconstructFromWatermark, selectActiveWatermark } from './agent-loop/ma
 // Lane 3(b) — declared small-window toolset parsing, shared with wiring's
 // startup narrowing diagnostic so both read the declaration identically.
 export { parseSmallWindowToolset } from './agent-loop/small-window-toolset';
+export {
+  createTurnBudgetCounters,
+  recordToolCallForBudgets,
+  type TurnBudgetCounters,
+} from './agent-loop/stages/per-call-enforcement';
+export {
+  SCRIPT_CALLS_PER_EXECUTION,
+  SCRIPT_RESULT_BUDGET_CHARS,
+  ScriptToolBridge,
+  type ScriptToolBridgeDeps,
+} from './agent-loop/stages/script-tool-bridge';
 // Lane 5(i) — the tier resolution (with its provider-match guard), exported so
 // wiring's tier-mismatch startup diagnostic is tested against EXACTLY the
 // guard the loop runs, not a drifting re-statement of it.

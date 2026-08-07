@@ -33,7 +33,13 @@ describe('Orchestrator guardrails', () => {
     // field, constructor default, deps threading (5 irreducible lines,
     // compressed to one-line shapes). The narrowing logic itself lives in
     // agent-loop/stages/turn-setup.ts + agent-loop/small-window-toolset.ts.
-    expect(lineCount).toBeLessThanOrEqual(846);
+    // Bumped 846 → 873: tools-as-code-api Lane B — the per-turn ScriptToolBridge
+    // construction (its deps ARE the turn's enforcement closure: allowlist,
+    // hooks, watcher tap, shared counters) plus the `checkBudgets` closure that
+    // replaced the inline checkTurnBudgets call so the loop's boundary check
+    // and the bridge's per-call check are ONE arithmetic. The bridge logic
+    // itself lives in agent-loop/stages/script-tool-bridge.ts.
+    expect(lineCount).toBeLessThanOrEqual(873);
   });
 
   it('no stage file exceeds 700 lines', () => {
@@ -57,7 +63,10 @@ describe('Orchestrator guardrails', () => {
       // the untrusted wrap (so the cap can never sever </untrusted>) and adds
       // the cap to the hook-rejected path — comment lines only, the logic is
       // unchanged in size.
-      if (lineCount > 738) {
+      // Bumped 738 → 746: tools-as-code-api Lane B — tool-processing binds the
+      // per-turn ScriptToolBridge to the batch's ToolContext (two lines + the
+      // ctx field + comment); the bridge itself is its own stage module.
+      if (lineCount > 746) {
         violations.push(`${file}: ${lineCount} lines`);
       }
     }

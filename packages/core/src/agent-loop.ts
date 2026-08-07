@@ -24,6 +24,7 @@ import {
   createTurnBudgetCounters,
   recordToolCallForBudgets,
 } from './agent-loop/stages/per-call-enforcement';
+import { ScriptToolBridge } from './agent-loop/stages/script-tool-bridge';
 import type { StreamStepDeps } from './agent-loop/stages/stream-step';
 import { streamStep } from './agent-loop/stages/stream-step';
 import { processTools } from './agent-loop/stages/tool-processing';
@@ -582,6 +583,40 @@ export class AgentLoop {
     if (opts.allowDangerousToolCalls) watcherTap.getHalt = () => null;
     const getHalt = watcherTap.getHalt;
 
+    // ONE budget check for both callers — the loop's iteration boundary below
+    // and the ScriptToolBridge's per-call check — so a script call fails with
+    // exactly the message the loop halts with. Reads live values (spend,
+    // denial streak) at call time.
+    const checkBudgets = () =>
+      checkTurnBudgets(
+        budgetCounters.totalToolCalls,
+        effectiveMaxToolCalls,
+        budgetCounters.toolNameCounts,
+        effectiveMaxIdentical,
+        budgetCounters.identicalStreak,
+        this.maxConsecutiveIdenticalCalls,
+        { spentUsd: this.sessionCosts.get(sessionKey) ?? 0, capUsd: personality.budgetCapUsd },
+        denialStreak,
+      );
+
+    // tools-as-code-api Lane B — per-turn bridge for in-script tool calls.
+    // Closes over the turn's allowlist, hook registry, watcher tap, and the
+    // SAME budget counters; threaded to tools via ToolContext.scriptTools.
+    const scriptToolBridge = new ScriptToolBridge({
+      tools: this.tools,
+      hooks: this.hooks,
+      observability: this.observability,
+      sessionId,
+      traceId,
+      allowedTools,
+      allowedPlugins,
+      filterOpts,
+      watcherTap,
+      counters: budgetCounters,
+      checkBudgets,
+      turnAttachments: opts.attachments,
+    });
+
     const streamDeps: StreamStepDeps = {
       llm: this.llm,
       tools: this.tools,
@@ -636,16 +671,7 @@ export class AgentLoop {
 
       // Budget guard — tool-call / per-tool repeat / session cost / denial streak.
       // Prior tool_results are in llmMessages, so breaking keeps the history valid.
-      const budgetResult = checkTurnBudgets(
-        budgetCounters.totalToolCalls,
-        effectiveMaxToolCalls,
-        budgetCounters.toolNameCounts,
-        effectiveMaxIdentical,
-        budgetCounters.identicalStreak,
-        this.maxConsecutiveIdenticalCalls,
-        { spentUsd: this.sessionCosts.get(sessionKey) ?? 0, capUsd: personality.budgetCapUsd },
-        denialStreak,
-      );
+      const budgetResult = checkBudgets();
       if (budgetResult.exceeded) {
         const { rule, toolName, count, message } = budgetResult;
         yield { type: 'tool_progress', toolName, message, audience: 'user' };
@@ -761,6 +787,7 @@ export class AgentLoop {
           watcherTap,
           usageSink,
           injectionDefenseEnabled,
+          scriptToolBridge,
           dgEnabled,
           dgRemaining: dgRemainingRef,
           dgTools,
