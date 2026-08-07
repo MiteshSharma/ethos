@@ -15,12 +15,15 @@ import type {
   Storage,
   ToolRegistry,
 } from '@ethosagent/types';
-import type { IdenticalStreak } from './agent-loop/budgets';
-import { checkTurnBudgets, updateDenialStreak, updateIdenticalStreak } from './agent-loop/budgets';
+import { checkTurnBudgets, updateDenialStreak } from './agent-loop/budgets';
 import { compactSession, type ManualCompactionResult } from './agent-loop/manual-compact';
 import { applyOverflowRetry } from './agent-loop/overflow';
 import { applySamplingDefaults, type ModelSamplingDefaults } from './agent-loop/sampling';
 import { assembleContext } from './agent-loop/stages/context-assembly';
+import {
+  createTurnBudgetCounters,
+  recordToolCallForBudgets,
+} from './agent-loop/stages/per-call-enforcement';
 import type { StreamStepDeps } from './agent-loop/stages/stream-step';
 import { streamStep } from './agent-loop/stages/stream-step';
 import { processTools } from './agent-loop/stages/tool-processing';
@@ -546,12 +549,11 @@ export class AgentLoop {
     const effectiveMaxIdentical = opts.maxIdenticalToolCalls ?? this.maxIdenticalToolCalls;
 
     // Tool-call budget tracking — prevents runaway loops (see IMPROVEMENT.md P1-3).
-    // Counted across all iterations within a single user turn.
-    let totalToolCalls = 0;
+    // Counted across all iterations within a single user turn; one mutable
+    // object so per-call enforcement shares the SAME counters (see
+    // agent-loop/stages/per-call-enforcement.ts + agent-loop/budgets.ts).
+    const budgetCounters = createTurnBudgetCounters();
     let successfulToolCalls = 0;
-    const toolNameCounts = new Map<string, number>();
-    // Pathology detectors, not throughput limits — see agent-loop/budgets.ts.
-    let identicalStreak: IdenticalStreak | null = null;
     let denialStreak = 0;
 
     // Dry-run tracking — accumulates across all iterations of a turn.
@@ -635,11 +637,11 @@ export class AgentLoop {
       // Budget guard — tool-call / per-tool repeat / session cost / denial streak.
       // Prior tool_results are in llmMessages, so breaking keeps the history valid.
       const budgetResult = checkTurnBudgets(
-        totalToolCalls,
+        budgetCounters.totalToolCalls,
         effectiveMaxToolCalls,
-        toolNameCounts,
+        budgetCounters.toolNameCounts,
         effectiveMaxIdentical,
-        identicalStreak,
+        budgetCounters.identicalStreak,
         this.maxConsecutiveIdenticalCalls,
         { spentUsd: this.sessionCosts.get(sessionKey) ?? 0, capUsd: personality.budgetCapUsd },
         denialStreak,
@@ -708,10 +710,8 @@ export class AgentLoop {
 
       // Update budget counters — these gate the NEXT iteration's LLM call.
       if (stepResult.outcome === 'tool-calls') {
-        totalToolCalls += stepResult.completedToolCalls.length;
         for (const tc of stepResult.completedToolCalls) {
-          toolNameCounts.set(tc.toolName, (toolNameCounts.get(tc.toolName) ?? 0) + 1);
-          identicalStreak = updateIdenticalStreak(identicalStreak, tc.toolName, tc.args);
+          recordToolCallForBudgets(budgetCounters, tc.toolName, tc.args);
         }
       }
 
@@ -799,8 +799,8 @@ export class AgentLoop {
       fullText,
       turnCount,
       successfulToolCalls,
-      totalToolCalls,
-      toolNames: [...toolNameCounts.keys()],
+      totalToolCalls: budgetCounters.totalToolCalls,
+      toolNames: [...budgetCounters.toolNameCounts.keys()],
       initialPrompt: text,
       activeSkillFiles,
       dryRunPlan: dryRunState.plan,

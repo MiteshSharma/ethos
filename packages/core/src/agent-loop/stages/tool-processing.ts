@@ -27,6 +27,7 @@ import { checkMcpEnabled, checkMcpRejectArgs } from '../mcp-policy';
 import { handleUntrustedResult } from '../result-defense';
 import { buildScopedStorage } from '../scoped-storage';
 import type { WatcherTap } from '../turn-context';
+import { consultWatcherHalt, enforceBeforeToolCall } from './per-call-enforcement';
 import type { CompletedToolCall, UsageSink } from './stream-step';
 import { emitToolRejection, validateRepairedArgs } from './tool-rejection';
 
@@ -268,35 +269,31 @@ export async function* processTools(
       continue;
     }
 
-    const beforeResult = await deps.hooks.fireModifying(
-      'before_tool_call',
+    const beforeDecision = await enforceBeforeToolCall(
+      { hooks: deps.hooks, observability: deps.observability },
       {
         sessionId: ctx.sessionId,
         toolCallId: tc.toolCallId,
         toolName: tc.toolName,
         args: tc.args,
+        allowedPlugins: ctx.allowedPlugins,
+        traceId: ctx.traceId,
       },
-      ctx.allowedPlugins,
     );
 
-    if (beforeResult.error) {
+    if (!beforeDecision.allowed) {
       hookDenials++;
-      deps.observability?.recordSafetyBlock({
-        traceId: ctx.traceId,
-        code: 'tool_blocked',
-        cause: beforeResult.error,
-      });
-      yield* emitToolRejection(observe, tc.toolCallId, tc.toolName, beforeResult.error);
+      yield* emitToolRejection(observe, tc.toolCallId, tc.toolName, beforeDecision.reason);
       prepped.push({
         toolCallId: tc.toolCallId,
         name: tc.toolName,
         args: tc.args,
-        rejected: beforeResult.error,
+        rejected: beforeDecision.reason,
       });
       continue;
     }
 
-    const effectiveArgs = beforeResult.args ?? tc.args;
+    const effectiveArgs = beforeDecision.effectiveArgs;
 
     // MCP enabled policy — short-circuit if the server is disabled for this personality.
     const enabledError = checkMcpEnabled(deps.mcpPolicy, tc.toolName);
@@ -371,11 +368,11 @@ export async function* processTools(
   // BEFORE the tool ran; we must not let it run anyway. This is
   // the bug Codex called out: the iteration-top check would only
   // fire AFTER the batch executed.
-  const haltDuringBatch = getHalt();
-  if (haltDuringBatch) {
+  const haltDuringBatch = consultWatcherHalt(getHalt);
+  if (haltDuringBatch.halted) {
     for (const p of prepped) {
       if (p.rejected === undefined) {
-        p.rejected = `Watcher halted before execution: ${haltDuringBatch.reason}`;
+        p.rejected = haltDuringBatch.rejectionReason;
       }
     }
   }
