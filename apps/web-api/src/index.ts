@@ -44,6 +44,7 @@ import { EvolverRepository } from './repositories/evolver.repository';
 import { PlatformsRepository } from './repositories/platforms.repository';
 import { WebTokenRepository } from './repositories/web-token.repository';
 import { createRoutes } from './routes';
+import { documentsRoutes } from './routes/documents';
 import type { RouteModule } from './routes/route-module';
 import { ApiKeysService } from './services/api-keys.service';
 import { createWebApprovalHook, type DangerPredicate } from './services/approval-hook';
@@ -51,6 +52,7 @@ import { type ApprovalObservability, ApprovalsService } from './services/approva
 import { ConfigService } from './services/config.service';
 import { CronService } from './services/cron.service';
 import { DigestService } from './services/digest.service';
+import { DocumentsService } from './services/documents.service';
 import { EvolverService } from './services/evolver.service';
 import { GoalsService } from './services/goals.service';
 import { KanbanService } from './services/kanban.service';
@@ -494,6 +496,14 @@ export function createWebApi(opts: CreateWebApiOptions): CreateWebApiResult {
     dataDir: opts.dataDir,
     personalities: opts.personalities,
   });
+  const documentsService = new DocumentsService({
+    personalities: opts.personalities,
+    dataDir: opts.dataDir,
+    storage,
+    // Same hot-reload seam the Personalities tab uses — a workdir declaration
+    // edited on disk takes effect on the next listing, without a restart.
+    refresh: () => opts.personalities.loadFromDirectory(join(opts.dataDir, 'personalities')),
+  });
   const voiceService = new VoiceService({
     sttRegistry: opts.sttProviderRegistry,
     providerName: opts.sttProviderName,
@@ -740,6 +750,7 @@ export function createWebApi(opts: CreateWebApiOptions): CreateWebApiResult {
       debug: debugService,
       apiKeys: apiKeysService,
       digest: digestService,
+      documents: documentsService,
       namedSecrets: namedSecretsService,
       toolSettings: toolSettingsService,
       voice: voiceService,
@@ -758,7 +769,21 @@ export function createWebApi(opts: CreateWebApiOptions): CreateWebApiResult {
     ...(opts.apiKeys ? { apiKeys: opts.apiKeys } : {}),
     ...(opts.listTeams ? { listTeams: opts.listTeams } : {}),
     ...(opts.webBaseUrl ? { webBaseUrl: opts.webBaseUrl } : {}),
-    ...(opts.routeModules ? { routeModules: opts.routeModules } : {}),
+    // The download route is a built-in module rather than a caller-supplied
+    // one: it needs `documentsService`, which is constructed here. Declaring it
+    // through the same seam keeps its auth posture explicit and reviewable, and
+    // mounts it BEFORE the static `/*` catch-all.
+    routeModules: [
+      ...(opts.routeModules ?? []),
+      {
+        basePath: '/documents',
+        router: documentsRoutes({ documents: documentsService }),
+        auth: 'cookie',
+        description:
+          'Streams a file from a personality workdir. Cookie-only: an `<a download>` ' +
+          'navigation carries `ethos_auth`, but a Bearer header cannot be attached to one.',
+      },
+    ],
     storage,
     secrets,
   });

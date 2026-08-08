@@ -11,6 +11,7 @@ import type { ApprovalsService } from '../services/approvals.service';
 import type { ConfigService } from '../services/config.service';
 import type { CronService } from '../services/cron.service';
 import type { DigestService } from '../services/digest.service';
+import type { DocumentsService } from '../services/documents.service';
 import type { EvolverService } from '../services/evolver.service';
 import type { GoalsService } from '../services/goals.service';
 import type { KanbanService } from '../services/kanban.service';
@@ -60,6 +61,8 @@ export interface RpcContext {
   tasks: TasksService;
   apiKeys: ApiKeysService;
   digest: DigestService;
+  /** Browse / delete files under a personality's declared workdir. */
+  documents: DocumentsService;
   /** Global named-secrets vault manager (Phase 2). */
   namedSecrets: NamedSecretsService;
   /** Generic per-personality tool settings (Phase 2). */

@@ -233,6 +233,7 @@ describe('contract router', () => {
       'dashboards',
       'debug',
       'digest',
+      'documents',
       'eval',
       'evolver',
       'files',

@@ -179,6 +179,8 @@ apps/ethos/tsup.config.ts and other build-time tooling
 extensions/skills/src/skill-compat.ts statSync — walks $PATH, not ~/.ethos/
 extensions/gateway/src/media.ts lstatSync — symlink-refusal on an arbitrary tool-produced outbound-media path (W3.2 exfiltration guard), not ~/.ethos/; Storage follows symlinks
 extensions/tools-code/src/shim/js-shim.ts — textual false positive: the `node:fs` import lives inside a String.raw literal (the container-side shim client source delivered at exec time, tools-as-code-api Lane A); the module itself performs no host filesystem access
+apps/web-api/src/services/documents.service.ts lstat — symlink-refusal on the operator-supplied Documents path; same rationale as gateway/media.ts. ScopedStorage confines the path, but Storage follows symlinks and has no lstat, so a symlink inside the workdir resolves outside it while passing the prefix test on the link path. Every path segment is lstat'd, not just the leaf, because a symlinked PARENT escapes with a non-symlink leaf
+apps/web-api/src/routes/documents.ts createReadStream — the download route streams bytes; Storage.readBytes would buffer a whole artifact into the server heap
 Error contract: read/exists/mtime return null for missing paths (common case, not exceptional). Everything else throws. ScopedStorage throws BoundaryError (also exported from @ethosagent/types) when a path is outside the allowlist; surfaces translate it into a user-facing tool error.
 
 Atomicity: use writeAtomic for any file where a partial write would corrupt state (config, keys, audit logs). It's a separate method, not an option, to prevent the "did the writer remember?" footgun.

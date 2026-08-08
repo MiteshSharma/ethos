@@ -22,6 +22,7 @@ import { contextRouter, filesRouter } from './context-resolve';
 import { cronRouter } from './cron';
 import { dashboardsRouter } from './dashboards';
 import { digestRouter } from './digest';
+import { documentsRouter } from './documents';
 import { evalRouter } from './eval';
 import { evolverRouter } from './evolver';
 import { goalsRouter } from './goals';
@@ -100,6 +101,7 @@ export const apiRouter = {
   a2a: a2aRouter,
   namedSecrets: namedSecretsRouter,
   toolSettings: toolSettingsRouter,
+  documents: documentsRouter,
 };
 
 export type ApiRouter = typeof apiRouter;

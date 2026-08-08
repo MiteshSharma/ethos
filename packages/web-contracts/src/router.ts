@@ -2728,6 +2728,52 @@ const toolSettings = {
 };
 
 // ---------------------------------------------------------------------------
+// Documents — the operator's view of the files the agent writes
+//
+// Rooted at the personality's declared `fs_reach.workdir`, NOT its personality
+// directory: SOUL.md / config.yaml / mcp.yaml stay off this surface. Every
+// `path` is RELATIVE to that root; the service joins and lets `ScopedStorage`
+// judge, so a `..` or absolute path is refused rather than interpreted.
+//
+// Bytes never travel over RPC. Download is a streaming, cookie-authenticated
+// `GET /documents/download` — see `apps/web-api/src/routes/documents.ts`.
+// ---------------------------------------------------------------------------
+
+const DocumentEntrySchema = z.object({
+  name: z.string(),
+  /** Path relative to the workdir root — feed it straight back to list/delete. */
+  path: z.string(),
+  isDir: z.boolean(),
+  /** Absent for directories and for entries that could not be stat'd. */
+  size: z.number().optional(),
+  mtimeMs: z.number().optional(),
+  /** Symlinks are LISTED so the operator can see them, but refused on
+   *  download and delete — they can point outside the workdir. */
+  isSymlink: z.boolean(),
+});
+
+/** Omitted `personalityId` means the configured default personality. */
+const DocumentsPersonalityInput = z.object({ personalityId: z.string().min(1).optional() });
+
+const DocumentsRootOutput = z.object({ root: z.string(), personalityId: z.string() });
+
+const DocumentsListInput = DocumentsPersonalityInput.extend({
+  /** Subdirectory relative to the root. Omitted = the root itself. */
+  path: z.string().optional(),
+});
+const DocumentsListOutput = z.object({ entries: z.array(DocumentEntrySchema) });
+
+const DocumentsDeleteInput = DocumentsPersonalityInput.extend({ path: z.string().min(1) });
+const DocumentsDeleteOutput = z.object({ ok: z.literal(true) });
+
+/** @experimental */
+const documents = {
+  root: oc.input(DocumentsPersonalityInput).output(DocumentsRootOutput),
+  list: oc.input(DocumentsListInput).output(DocumentsListOutput),
+  delete: oc.input(DocumentsDeleteInput).output(DocumentsDeleteOutput),
+};
+
+// ---------------------------------------------------------------------------
 // Root contract — every namespace mounted under one symbol
 // ---------------------------------------------------------------------------
 
@@ -2766,6 +2812,7 @@ export const contract = {
   a2a,
   namedSecrets,
   toolSettings,
+  documents,
 };
 
 export type Contract = typeof contract;

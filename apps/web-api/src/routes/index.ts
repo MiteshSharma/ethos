@@ -92,6 +92,8 @@ export interface ServiceContainer {
   debug: import('../features/debug/service').DebugService;
   apiKeys: import('../services/api-keys.service').ApiKeysService;
   digest: import('../services/digest.service').DigestService;
+  /** Browse / delete files under a personality's declared workdir. */
+  documents: import('../services/documents.service').DocumentsService;
   namedSecrets: import('../services/named-secrets.service').NamedSecretsService;
   toolSettings: import('../services/tool-settings.service').ToolSettingsService;
   voice?: import('../services/voice.service').VoiceService;
