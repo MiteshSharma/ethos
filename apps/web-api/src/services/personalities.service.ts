@@ -158,6 +158,10 @@ export class PersonalitiesService {
         scriptSurface = undefined;
       }
     }
+    // skill-declared-renderers Lane E — reuse `renderers()` rather than a second
+    // path to the injector, so the sheet's claim and the RPC the web renderer
+    // gates on are literally the same call. Already fail-closed to `[]`.
+    const { renderers } = await this.renderers(id);
     const dataDir = this.opts.dataDir;
     if (!dataDir) {
       return {
@@ -167,6 +171,7 @@ export class PersonalitiesService {
           undefined,
           modelFit,
           scriptSurface,
+          renderers,
         ),
         posture: null,
       };
@@ -186,6 +191,7 @@ export class PersonalitiesService {
         { posture },
         modelFit,
         scriptSurface,
+        renderers,
       ),
       posture,
     };

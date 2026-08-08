@@ -63,8 +63,10 @@ Introduce it in one line of prose before the fence ("Revenue by region:") so the
 |---|---|
 | Series types | `bar`, `line`, `pie`, `scatter`, `heatmap` |
 | Data | `dataset` (preferred — `dataset.source` as an array of rows or objects) or inline `series[].data` |
-| Top-level keys | `dataset`, `series`, `xAxis`, `yAxis`, `tooltip`, `legend`, `title`, `grid`, `color` |
+| Top-level keys | `dataset`, `series`, `xAxis`, `yAxis`, `tooltip`, `legend`, `title`, `grid`, `color`, `visualMap` |
 | Styling | Plain JSON values only — strings, numbers, booleans, arrays, objects |
+
+**`heatmap` requires `visualMap`.** It is the only series type that does: the colour scale *is* the value axis, so a heatmap without one draws a monochrome grid. Set `visualMap.min` / `visualMap.max` to the data's range. Every other series type ignores `visualMap` — omit it.
 
 **No JavaScript anywhere.** No functions, no expressions, no `data.url` or any other remote fetch. Formatter *callbacks* are not spec 1. If you need label formatting, use ECharts' plain-string template form (`"{b}: {c}"`) — that is a JSON string, not code.
 
@@ -119,6 +121,41 @@ Omit fixed pixel sizes. No `width`, no `height`, no hard-coded px in `grid`. The
 ```
 ````
 
+**Heatmap — with its required `visualMap`.** Both axes are categories; each data point is `[xIndex, yIndex, value]`:
+
+````
+```echarts
+{
+  "title": { "text": "Deploys by weekday and hour — last 30 days" },
+  "xAxis": { "type": "category", "data": ["Mon", "Tue", "Wed", "Thu", "Fri"] },
+  "yAxis": { "type": "category", "data": ["09:00", "13:00", "17:00"] },
+  "tooltip": {},
+  "grid": { "containLabel": true },
+  "visualMap": {
+    "min": 0,
+    "max": 12,
+    "calculable": true,
+    "orient": "horizontal",
+    "left": "center",
+    "bottom": 0
+  },
+  "series": [
+    {
+      "type": "heatmap",
+      "name": "Deploys",
+      "data": [
+        [0, 0, 2], [0, 1, 5], [0, 2, 1],
+        [1, 0, 3], [1, 1, 8], [1, 2, 4],
+        [2, 0, 1], [2, 1, 12], [2, 2, 6],
+        [3, 0, 4], [3, 1, 9], [3, 2, 3],
+        [4, 0, 2], [4, 1, 4], [4, 2, 0]
+      ]
+    }
+  ]
+}
+```
+````
+
 ## Graceful degradation
 
 A surface that cannot render the fence — CLI, Telegram, email, an older client — shows the JSON as a code block. That is the designed fallback, not a failure. Write every spec so it survives it:
@@ -143,7 +180,7 @@ If the user might want both, say so and ask — do not emit a fence and a PNG fo
 
 - **Do not put a function in the JSON.** Not as a value, not as a string that looks like one. It will be stripped or the whole block will fall back.
 - **Do not set `width` or `height`.** The surface sizes the chart.
-- **Do not use `data.url` or any remote reference.** All data is inline.
+- **Do not use `data.url`, an `image://…` icon, or any other remote reference.** All data is inline; remote-fetching strings are stripped.
 - **Do not emit more than one JSON object per fence**, and do not wrap the option in an extra key.
 - **Do not use a series type outside spec 1.** Unknown types do not render.
 - **Do not chart three numbers.** Say them.

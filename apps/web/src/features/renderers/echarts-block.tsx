@@ -5,6 +5,7 @@ import {
   LegendComponent,
   TitleComponent,
   TooltipComponent,
+  VisualMapComponent,
 } from 'echarts/components';
 import * as echarts from 'echarts/core';
 import { CanvasRenderer } from 'echarts/renderers';
@@ -36,6 +37,9 @@ echarts.use([
   LegendComponent,
   TitleComponent,
   TooltipComponent,
+  // `heatmap` cannot render without it: HeatmapView throws
+  // "Heatmap must use with visualMap" in dev and paints monochrome in prod.
+  VisualMapComponent,
   CanvasRenderer,
 ]);
 

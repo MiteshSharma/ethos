@@ -450,3 +450,47 @@ describe('renderCharacterSheet — script-callable surface (Lane G)', () => {
     expect(sheet).not.toContain('Script-callable');
   });
 });
+
+// skill-declared-renderers Lane E — the output-capability line. Same shape as
+// the script surface above: plain data computed by callers via
+// `SkillsInjector.resolveRenderers()`, the derivation the surfaces gate on.
+describe('renderCharacterSheet — renderers (Lane E)', () => {
+  it('names the declared renderer under Capabilities', () => {
+    const sheet = renderCharacterSheet(fullConfig, soulMd, undefined, undefined, undefined, [
+      'echarts@1',
+    ]);
+    expect(sheet).toContain('- Renders: echarts@1 (interactive charts — via charts skill)');
+  });
+
+  it('prints an unknown renderer as its bare spec string', () => {
+    // A skill may declare a renderer no surface maps; the sheet reports the
+    // declaration honestly rather than inventing a description for it.
+    const sheet = renderCharacterSheet(fullConfig, soulMd, undefined, undefined, undefined, [
+      'echarts@1',
+      'mermaid@2',
+    ]);
+    expect(sheet).toContain(
+      '- Renders: echarts@1 (interactive charts — via charts skill), mermaid@2',
+    );
+  });
+
+  it('omits the line for an absent or empty renderer set', () => {
+    expect(renderCharacterSheet(fullConfig, soulMd)).not.toContain('Renders:');
+    expect(
+      renderCharacterSheet(fullConfig, soulMd, undefined, undefined, undefined, []),
+    ).not.toContain('Renders:');
+  });
+
+  it('replaces the Capabilities "(none)" placeholder rather than contradicting it', () => {
+    const minimal: PersonalityConfig = { id: 'plain', name: 'Plain' };
+    const bare = renderCharacterSheet(minimal, '');
+    expect(bare).toMatch(/## Capabilities\n- \(none\)/);
+    const withRenderer = renderCharacterSheet(minimal, '', undefined, undefined, undefined, [
+      'echarts@1',
+    ]);
+    expect(withRenderer).toMatch(
+      /## Capabilities\n- Renders: echarts@1 \(interactive charts — via charts skill\)\n/,
+    );
+    expect(withRenderer).not.toContain('(none)\n- Renders');
+  });
+});

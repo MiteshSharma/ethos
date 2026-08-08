@@ -820,5 +820,19 @@ Emit an echarts fence.`;
       };
       expect(await service.renderers('researcher')).toEqual({ renderers: [] });
     });
+
+    // Lane E — the character sheet reads the SAME derivation, so the sheet's
+    // claim and the RPC the web renderer gates on cannot drift.
+    it('characterSheet names the declared renderer under Capabilities', async () => {
+      const { service } = await makeRenderersService(true);
+      const { markdown } = await service.characterSheet('researcher');
+      expect(markdown).toContain('- Renders: echarts@1 (interactive charts — via charts skill)');
+    });
+
+    it('characterSheet omits the Renders line when no injector is wired', async () => {
+      const { service } = await makeRenderersService(false);
+      const { markdown } = await service.characterSheet('researcher');
+      expect(markdown).not.toContain('Renders:');
+    });
   });
 });

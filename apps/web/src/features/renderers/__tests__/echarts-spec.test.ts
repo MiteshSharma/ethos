@@ -25,7 +25,19 @@ describe('spec-1 conformance with skills/document/charts/SKILL.md', () => {
   const fences = skillEchartsFences();
 
   it('extracts the documented examples from the real skill file', () => {
-    expect(fences.length).toBeGreaterThanOrEqual(2);
+    expect(fences.length).toBeGreaterThanOrEqual(3);
+  });
+
+  it('exercises heatmap, the one series type with a required companion key', () => {
+    // A series type documented but never exercised is how `heatmap` shipped
+    // against a top-level allowlist that omitted the `visualMap` it requires.
+    const charted = new Set(
+      fences.flatMap((source) => {
+        const option = JSON.parse(source) as { series?: { type?: string }[] };
+        return (option.series ?? []).map((s) => s.type);
+      }),
+    );
+    expect(charted.has('heatmap')).toBe(true);
   });
 
   it.each(fences.map((source, i) => [i, source]))(
@@ -64,9 +76,46 @@ describe('sanitizeChartOption', () => {
   });
 
   it('drops top-level keys outside spec 1', () => {
-    const result = sanitizeChartOption({ ...minimal, toolbox: {}, visualMap: {}, width: 800 });
+    const result = sanitizeChartOption({ ...minimal, toolbox: {}, dataZoom: {}, width: 800 });
     expect(result).not.toBeNull();
     expect(Object.keys(result ?? {}).sort()).toEqual(['series', 'title', 'xAxis', 'yAxis']);
+  });
+
+  it('keeps visualMap — heatmap cannot render without it', () => {
+    const result = sanitizeChartOption({
+      ...minimal,
+      series: [{ type: 'heatmap', data: [[0, 0, 4]] }],
+      visualMap: { min: 0, max: 12, calculable: true, inRange: { color: ['#eef', '#4A9EFF'] } },
+    });
+    expect(result?.visualMap).toEqual({
+      min: 0,
+      max: 12,
+      calculable: true,
+      inRange: { color: ['#eef', '#4A9EFF'] },
+    });
+  });
+
+  it('still filters sinks inside visualMap', () => {
+    const result = sanitizeChartOption({
+      ...minimal,
+      visualMap: {
+        min: 0,
+        formatter: '<img src=x onerror="alert(1)">',
+        textStyle: { color: 'red;position:fixed' },
+        handleIcon: 'image://https://tracker.example/pixel.png',
+      },
+    });
+    expect(result?.visualMap).toEqual({ min: 0, textStyle: {} });
+  });
+
+  it('drops image:// strings anywhere — spec 1 has no remote references', () => {
+    const result = sanitizeChartOption({
+      ...minimal,
+      legend: { icon: 'image://https://tracker.example/pixel.png' },
+      series: [{ type: 'scatter', symbol: 'image://https://tracker.example/p.png', data: [1] }],
+    });
+    expect(result?.legend).toEqual({});
+    expect(result?.series).toEqual([{ type: 'scatter', data: [1] }]);
   });
 
   it('strips function-shaped strings wherever they appear', () => {

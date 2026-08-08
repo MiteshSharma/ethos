@@ -298,10 +298,31 @@ export interface CharacterSheetScriptSurface {
 }
 
 /**
+ * What each known renderer name means in prose, so the sheet says more than an
+ * opaque `echarts@1`. A renderer with no entry prints its bare spec string —
+ * the declaration is honest either way, and a surface that maps no renderer of
+ * that name simply renders the fence as a code block.
+ */
+const RENDERER_NOTE: Record<string, string> = {
+  echarts: 'interactive charts — via charts skill',
+};
+
+/** `echarts@1` → `echarts@1 (interactive charts — via charts skill)`. */
+function renderSpecLabel(spec: string): string {
+  const note = RENDERER_NOTE[spec.split('@')[0] ?? ''];
+  return note ? `${spec} (${note})` : spec;
+}
+
+/**
  * Render a personality's character sheet as Markdown. Pure — takes the
  * loaded config and the SOUL.md body, returns the artifact. Optional
  * fields render as explicit `(none)` / `(engine default)` states so a
  * reader never has to guess whether a blank means "unset" or "missing".
+ *
+ * `renderers` is the skill-declared output capability (`ethos.renders`), as
+ * PLAIN DATA — computed by callers via `SkillsInjector.resolveRenderers()`,
+ * the SAME derivation the surfaces gate on, so the sheet cannot claim a
+ * capability the renderer path would refuse. Absent or empty → no line.
  */
 export function renderCharacterSheet(
   config: PersonalityConfig,
@@ -309,6 +330,7 @@ export function renderCharacterSheet(
   execution?: CharacterSheetExecution,
   modelFit?: CharacterSheetModelFit,
   scriptSurface?: CharacterSheetScriptSurface,
+  renderers?: readonly string[],
 ): string {
   const lines: string[] = [`# ${config.id} — ${config.name}`, ''];
 
@@ -323,8 +345,17 @@ export function renderCharacterSheet(
   lines.push(`- Dreaming: ${config.dreaming?.enable ? 'on' : 'off'}`);
   lines.push('');
 
+  // Output capability, derived from the skill set rather than the personality
+  // schema: a skill declaring `ethos.renders` both TEACHES the fence format and
+  // UNLOCKS the renderer, so one declaration drives both. It joins the declared
+  // capabilities rather than following them, so `(none)` still means "nothing
+  // here" instead of sitting above a line that contradicts it.
+  const capabilities = [...(config.capabilities ?? [])];
+  if (renderers && renderers.length > 0) {
+    capabilities.push(`Renders: ${renderers.map(renderSpecLabel).join(', ')}`);
+  }
   lines.push('## Capabilities');
-  lines.push(...bulletList(config.capabilities ?? [], '(none)'));
+  lines.push(...bulletList(capabilities, '(none)'));
   lines.push('');
 
   lines.push('## Memory');

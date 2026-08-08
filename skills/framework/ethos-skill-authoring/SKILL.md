@@ -72,6 +72,7 @@ First-party skills carry an additional block the scanner uses for routing:
 ```yaml
 ethos:
   category: <one of the validated categories>
+  renders: [<renderer@specVersion>, ...]   # optional — see below
   default_personalities: [<personality ids this skill complements>]
   prerequisites:
     external_cli: [<binaries the skill assumes exist>]
@@ -89,6 +90,15 @@ ethos:
 ```
 
 Valid `category` values today: `planning-and-process`, `quality-and-testing`, `github-workflow`, `delegation-and-orchestration`, `framework-usage`. Adding a new category requires updating the bundle-test allowlist in lockstep.
+
+### `ethos.renders` — declaring an output renderer
+
+A skill that teaches a fenced output format declares it here. `skills/document/charts/SKILL.md` is the reference example: `renders: ['echarts@1']` teaches the ```` ```echarts ```` fence AND unlocks the chart renderer for any personality whose skill set includes it. One declaration, both effects — what a personality is taught and what it may draw cannot drift apart.
+
+- **It goes under `ethos:`, not at top level.** Top level is the shared agentskills.io namespace (`name`, `description`, `tags`, `required_tools`); every Ethos-specific contract field lives in the `ethos:` block.
+- **The grammar is `<renderer-name>@<integer>`** — `/^[a-z][a-z0-9-]*@\d+$/`. Entries that do not match are dropped silently.
+- **Semver is rejected on purpose.** The integer is *our* spec version — a documented option subset owned by the skill — not the renderer library's npm version. There is no `echarts@1.1`: a changed subset is `echarts@2`. During a migration a skill declares both (`renders: ['echarts@1', 'echarts@2']`).
+- **Declaring a renderer no surface maps is harmless.** It is an inert capability claim. Surfaces keep their own curated, first-party registry and simply do not draw what they do not map; the fence falls back to a code block. This is also why a skill can never ship renderer code — it declares, the surface provides.
 
 ## Body — the standard shape
 

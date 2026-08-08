@@ -7,7 +7,17 @@
 // Everything here is pure — no echarts import, so the activation path can
 // decide "is this a renderable spec?" without pulling the lazy chunk.
 
-/** Top-level option keys spec 1 allows. Anything else is dropped. */
+/**
+ * Top-level option keys spec 1 allows. Anything else is dropped.
+ *
+ * `visualMap` is here because `heatmap` is an allowed series type and echarts
+ * cannot draw one without it — `HeatmapView.render` throws
+ * "Heatmap must use with visualMap" in dev and paints a monochrome grid in
+ * prod. It is pure declarative JSON (ranges, colours, labels) with no sink the
+ * other allowed keys don't already have: its `formatter` goes through
+ * `isHtmlSinkKey`, its `inRange`/`textStyle` colours through `isCssSinkKey`,
+ * and its `handleIcon`/`indicatorIcon` through the `image://` guard below.
+ */
 export const SPEC1_TOP_LEVEL_KEYS = [
   'color',
   'dataset',
@@ -16,6 +26,7 @@ export const SPEC1_TOP_LEVEL_KEYS = [
   'series',
   'title',
   'tooltip',
+  'visualMap',
   'xAxis',
   'yAxis',
 ] as const;
@@ -37,6 +48,17 @@ const UNSAFE_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
  */
 const FUNCTION_SHAPED =
   /^\s*(?:async\s+)?(?:function\b|new\s+Function\b|\(\s*[^)]*\)\s*=>|[A-Za-z_$][\w$]*\s*=>)/;
+
+/**
+ * echarts' one remote-fetch escape hatch. Any symbol-shaped string — a series
+ * `symbol`, a `visualMap.handleIcon`, a `legend.icon` — prefixed `image://`
+ * becomes an `<img>` src (`echarts/lib/util/symbol.js`), so a fence could beacon
+ * the reader's IP to a third party from the app origin. Spec 1's hard rule is
+ * "data is always inline, never a URL", which makes this a spec violation
+ * before it is a security one. Dropped at any depth; nothing else in echarts
+ * reads a leading `image://` as data.
+ */
+const REMOTE_IMAGE = /^\s*image:\/\//i;
 
 /**
  * Keys dropped at any depth. Pure JSON is not automatically inert: echarts
@@ -83,6 +105,7 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 
 function sanitizeString(value: string, key: string): string | typeof DROP {
   if (FUNCTION_SHAPED.test(value)) return DROP;
+  if (REMOTE_IMAGE.test(value)) return DROP;
   if (isHtmlSinkKey(key) && value.includes('<')) return DROP;
   if (isCssSinkKey(key) && (value.includes(';') || value.includes('<'))) return DROP;
   return value;

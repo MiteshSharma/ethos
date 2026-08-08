@@ -1209,6 +1209,7 @@ async function runPersonalityShow(argv: string[]): Promise<void> {
   // the character sheet is the command's contract.
   let modelFit: import('@ethosagent/personalities').CharacterSheetModelFit | undefined;
   let scriptSurface: import('@ethosagent/personalities').CharacterSheetScriptSurface | undefined;
+  let renderers: string[] | undefined;
   let loopConstructed = false;
   try {
     const cfg = await readConfig(storage, await getSecretsResolver());
@@ -1239,12 +1240,25 @@ async function runPersonalityShow(argv: string[]): Promise<void> {
         dataDir: ethosDir(),
         forceProbeRefresh: true,
       });
+      // skill-declared-renderers Lane E — the same `resolveRenderers` derivation
+      // the `personalities.renderers` RPC gates the web renderer on, so the
+      // sheet and the surface cannot disagree about what may be drawn. Last in
+      // the block: this one touches disk, and a skills read that fails should
+      // cost the Renders line, not the model-fit verdict above it.
+      renderers = await result.skillsInjector.resolveRenderers(id);
     }
   } catch {
     // The verdict is advisory — the character sheet is the command's contract.
   }
   console.log(
-    `\n${renderCharacterSheet(described.config, soulMd, { posture }, modelFit, scriptSurface)}`,
+    `\n${renderCharacterSheet(
+      described.config,
+      soulMd,
+      { posture },
+      modelFit,
+      scriptSurface,
+      renderers,
+    )}`,
   );
 
   // Loop construction can leave live handles (MCP children, background

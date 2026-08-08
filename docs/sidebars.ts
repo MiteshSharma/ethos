@@ -48,6 +48,7 @@ const sidebars: SidebarsConfig = {
             'using/how-to/use-zero-mode',
             'using/how-to/run-in-docker',
             'using/how-to/use-skills',
+            'using/how-to/interactive-charts-in-chat',
             'using/how-to/use-inline-context-refs',
             'using/how-to/manage-skill-evolution',
             'using/how-to/migrate-from-openclaw',
