@@ -5020,3 +5020,89 @@ textarea {
 .drag-handle:active {
   cursor: grabbing;
 }
+
+/* ── Documents tab — the operator's file surface ──────────────────── */
+
+.documents-rootline {
+  padding: 12px 24px 0;
+}
+
+.documents-breadcrumb {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px;
+  padding: 6px 24px 12px;
+}
+
+.documents-crumb {
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  font-family: "Geist Mono", ui-monospace, monospace;
+  font-size: 13px;
+  color: var(--ethos-text-dim);
+  transition: color var(--motion-fast, 80ms) ease;
+}
+
+.documents-crumb:hover {
+  color: var(--ethos-text);
+}
+
+.documents-crumb--current {
+  cursor: default;
+  color: var(--ethos-text);
+}
+
+.documents-crumb-sep {
+  margin: 0 4px;
+  font-family: "Geist Mono", ui-monospace, monospace;
+  font-size: 13px;
+  color: var(--ethos-text-tertiary);
+}
+
+.documents-mono {
+  font-family: "Geist Mono", ui-monospace, monospace;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  color: var(--ethos-text-dim);
+}
+
+.documents-dim {
+  color: var(--ethos-text-tertiary);
+}
+
+.documents-dir-btn {
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: inherit;
+  color: var(--ethos-info);
+  transition: color var(--motion-fast, 80ms) ease;
+}
+
+.documents-dir-btn:hover {
+  color: var(--ethos-text);
+}
+
+.documents-action {
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 12px;
+  color: var(--ethos-text-dim);
+  transition: color var(--motion-fast, 80ms) ease;
+}
+
+.documents-action:hover {
+  color: var(--ethos-text);
+}
+
+.documents-action--danger:hover {
+  color: var(--ethos-error);
+}

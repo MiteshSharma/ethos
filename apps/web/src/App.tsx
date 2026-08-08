@@ -21,6 +21,7 @@ import { CreateDashboardFlow } from './pages/CreateDashboardFlow';
 import { Cron } from './pages/Cron';
 import { Dashboards } from './pages/Dashboards';
 import { DashboardView } from './pages/DashboardView';
+import { Documents } from './pages/Documents';
 import { Eval } from './pages/Eval';
 import { GoalDetail } from './pages/GoalDetail';
 import { Goals } from './pages/Goals';
@@ -143,6 +144,7 @@ export function App() {
           <Route path="/teams/:name" element={<TeamControlCenter />} />
           <Route path="/settings" element={<Settings />} />
           <Route path="/memory" element={<Memory />} />
+          <Route path="/documents" element={<Documents />} />
           <Route path="/plugins" element={<Plugins />} />
           <Route path="/mcp" element={<Mcp />} />
           <Route path="/plugins/:pluginId" element={<PluginPage />} />

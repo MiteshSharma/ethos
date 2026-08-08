@@ -126,6 +126,12 @@ export function Sidebar({ collapsed, onToggle }: SidebarProps) {
             <NavRow path="/mcp" icon="🔌" label="MCP Servers" active={pathname === '/mcp'} />
             <NavRow path="/memory" icon="🧠" label="Memory" active={pathname === '/memory'} />
             <NavRow
+              path="/documents"
+              icon="📄"
+              label="Documents"
+              active={pathname === '/documents'}
+            />
+            <NavRow
               path="/communications"
               icon="📡"
               label="Platforms"
@@ -254,6 +260,12 @@ export function Sidebar({ collapsed, onToggle }: SidebarProps) {
           />
           <NavRow path="/mcp" icon="🔌" label="MCP Servers" active={pathname === '/mcp'} />
           <NavRow path="/memory" icon="🧠" label="Memory" active={pathname === '/memory'} />
+          <NavRow
+            path="/documents"
+            icon="📄"
+            label="Documents"
+            active={pathname === '/documents'}
+          />
           <NavRow
             path="/communications"
             icon="📡"

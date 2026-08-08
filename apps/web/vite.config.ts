@@ -5,9 +5,9 @@ import { defineConfig, type PluginOption } from 'vite';
 // Vite config for the web client. Two run modes:
 //
 //  • Dev   — `pnpm --filter @ethosagent/web dev` runs Vite at :5173 with the
-//            `/rpc`, `/sse`, `/auth`, `/openapi` paths proxied to the
-//            ethos-serve API on :3000. Cookies sent by the API stay scoped
-//            to localhost so the proxy is transparent.
+//            `/rpc`, `/sse`, `/auth`, `/openapi`, `/documents` paths proxied
+//            to the ethos-serve API on :3000. Cookies sent by the API stay
+//            scoped to localhost so the proxy is transparent.
 //  • Build — `pnpm --filter @ethosagent/web build` writes to `apps/web/dist/`.
 //            `apps/web-api`'s static handler serves that directory in
 //            production runs of `ethos serve`.
@@ -50,6 +50,11 @@ export default defineConfig({
       // OAuth callback — proxy to the API server so the server-side handler
       // runs regardless of whether the DCR redirect_uri points to :5173 or :3000.
       '/oauth': 'http://localhost:3000',
+      // Documents download streams bytes over a plain <a download> navigation
+      // authenticated by the `SameSite=Strict` `ethos_auth` cookie. It MUST be
+      // proxied: an absolute :3000 href from :5173 is cross-site and the
+      // browser silently drops the cookie, so the download 401s.
+      '/documents': 'http://localhost:3000',
     },
   },
   build: {

@@ -39,6 +39,7 @@ const MORE_LINKS: ReadonlyArray<MoreLink> = [
   { path: '/personalities', label: 'Personalities' },
   { path: '/skills', label: 'Skills' },
   { path: '/memory', label: 'Memory' },
+  { path: '/documents', label: 'Documents' },
   { path: '/communications', label: 'Communications' },
   { path: '/batch', label: 'Batch' },
   { path: '/eval', label: 'Eval' },

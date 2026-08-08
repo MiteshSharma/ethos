@@ -87,6 +87,7 @@ export function CommandPalette({ open, onClose, onToggleDrawer }: CommandPalette
       page('Mesh', '/mesh', ['swarm', 'agents', 'route']),
       page('Settings', '/settings', ['config', 'provider', 'model', 'key']),
       page('Memory', '/memory', ['notes', 'context', 'user', 'remember']),
+      page('Documents', '/documents', ['files', 'workdir', 'download', 'output', 'artifacts']),
       page('Plugins', '/plugins', ['mcp', 'install', 'tools']),
       page('Communications', '/communications', ['telegram', 'slack', 'discord', 'email', 'comms']),
       page('Personalities', '/personalities', ['agent', 'identity', 'wizard', 'duplicate']),
