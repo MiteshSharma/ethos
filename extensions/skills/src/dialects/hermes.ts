@@ -6,6 +6,7 @@ import {
   parseEthosExternalCliAlternatives,
   parseEthosFallbackForTools,
   parseEthosPermissions,
+  parseEthosRenders,
   parseEthosRequires,
 } from './ethos-namespace';
 
@@ -54,6 +55,7 @@ export function parseHermes(
     env_required: parseEthosEnvRequired(data),
     env_optional: parseEthosEnvOptional(data),
     external_cli_alternatives: parseEthosExternalCliAlternatives(data),
+    renders: parseEthosRenders(data),
     rawFrontmatter: data as Record<string, unknown>,
     dialect: 'hermes',
     mtimeMs,
