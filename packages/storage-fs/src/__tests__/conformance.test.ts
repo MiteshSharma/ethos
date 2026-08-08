@@ -1,4 +1,4 @@
-import { mkdtemp, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Storage } from '@ethosagent/types';
@@ -130,8 +130,11 @@ describe.each(backends)('Storage conformance — $name', ({ setup }) => {
     const entries = (await storage.listEntries(root)).sort((a, b) => a.name.localeCompare(b.name));
     const f = entries.find((e) => e.name === 'f.txt');
     const d = entries.find((e) => e.name === 'd');
-    expect(f).toEqual({ name: 'f.txt', isDir: false });
-    expect(d).toEqual({ name: 'd', isDir: true });
+    expect(f).toMatchObject({ name: 'f.txt', isDir: false });
+    expect(d).toMatchObject({ name: 'd', isDir: true });
+    // No backend reports a size for a directory — the number would be the
+    // dirent block, not the contents, so it is omitted everywhere.
+    expect(d?.size).toBeUndefined();
   });
 
   // --- Writes ------------------------------------------------------
@@ -329,5 +332,66 @@ describe.skipIf(process.platform === 'win32')('FsStorage — POSIX mode applicat
     await storage.writeAtomic(path, 'shh', { mode: 0o600 });
     const s = await stat(path);
     expect(s.mode & 0o777).toBe(0o600);
+  });
+});
+
+describe('FsStorage — listEntries metadata', () => {
+  let root: string;
+  let storage: FsStorage;
+
+  beforeEach(async () => {
+    root = await mkdtemp(join(tmpdir(), 'ethos-listmeta-'));
+    storage = new FsStorage();
+  });
+
+  afterEach(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+
+  it('reports size and mtimeMs for a file', async () => {
+    const path = join(root, 'f.txt');
+    await storage.write(path, 'hello');
+    const expected = await stat(path);
+    const entry = (await storage.listEntries(root)).find((e) => e.name === 'f.txt');
+    expect(entry?.isDir).toBe(false);
+    expect(entry?.size).toBe(5);
+    expect(entry?.mtimeMs).toBe(expected.mtimeMs);
+  });
+
+  it('omits size and mtimeMs for a directory', async () => {
+    await storage.mkdir(join(root, 'd'));
+    const entry = (await storage.listEntries(root)).find((e) => e.name === 'd');
+    expect(entry?.isDir).toBe(true);
+    expect(entry?.size).toBeUndefined();
+    expect(entry?.mtimeMs).toBeUndefined();
+  });
+
+  // One unstattable entry must not cost the caller the whole listing.
+  it.skipIf(process.platform === 'win32')(
+    'leaves a broken symlink without metadata instead of throwing',
+    async () => {
+      await storage.write(join(root, 'real.txt'), 'ok');
+      await symlink(join(root, 'gone.txt'), join(root, 'dangling'));
+      const entries = await storage.listEntries(root);
+      const dangling = entries.find((e) => e.name === 'dangling');
+      expect(dangling).toEqual({ name: 'dangling', isDir: false });
+      // The healthy sibling still carries its metadata.
+      expect(entries.find((e) => e.name === 'real.txt')?.size).toBe(2);
+    },
+  );
+});
+
+describe('InMemoryStorage — listEntries metadata', () => {
+  it('omits size and mtimeMs (its clock is a counter, not epoch-ms)', async () => {
+    const storage = new InMemoryStorage();
+    await storage.mkdir('/mem');
+    await storage.write('/mem/f.txt', 'hello');
+    await storage.mkdir('/mem/d');
+    const entries = await storage.listEntries('/mem');
+    expect(entries.map((e) => e.name).sort()).toEqual(['d', 'f.txt']);
+    for (const entry of entries) {
+      expect(entry.size).toBeUndefined();
+      expect(entry.mtimeMs).toBeUndefined();
+    }
   });
 });

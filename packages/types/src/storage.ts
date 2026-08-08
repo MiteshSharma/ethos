@@ -33,6 +33,27 @@ export interface StorageRemoveOptions {
 export interface StorageDirEntry {
   name: string;
   isDir: boolean;
+
+  /**
+   * File size in bytes. Optional because it is never free: a directory
+   * listing carries names and types, never sizes, so any backend that
+   * reports one paid an extra per-entry stat (or an equivalent remote
+   * HEAD) to get it. Backends with no stat semantics — InMemoryStorage,
+   * object stores that return keys only — omit it rather than invent a
+   * number. Omitted for directories as well: a directory's on-disk size
+   * is its dirent block, not the size of what it contains, so reporting
+   * it would mislead every consumer that asked.
+   */
+  size?: number;
+
+  /**
+   * Modification time in epoch-ms — the same units as `mtime()`, and
+   * omitted under the same conditions as `size`: the backend has no such
+   * concept, or the entry vanished between the listing and the stat.
+   * Absent means "not known", never "the epoch"; consumers must not
+   * coerce it to 0.
+   */
+  mtimeMs?: number;
 }
 
 export interface Storage {

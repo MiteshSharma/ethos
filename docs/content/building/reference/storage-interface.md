@@ -48,7 +48,7 @@ export interface Storage {
 | `exists(path)` | `boolean` | True if the path resolves to a file or directory. |
 | `mtime(path)` | `number \| null` | Modification time in epoch milliseconds, or `null` if absent. |
 | `list(dir)` | `string[]` | Immediate children (names only). Empty array if missing. |
-| `listEntries(dir)` | `StorageDirEntry[]` | Same as `list`, with `{ name, isDir }`. |
+| `listEntries(dir)` | `StorageDirEntry[]` | Same as `list`, with `{ name, isDir }` plus optional `size` (bytes) and `mtimeMs` (epoch-ms). Both are omitted for directories, and for any entry the backend cannot stat. |
 | `write(path, content, opts?)` | `void` | Write utf-8 text. Parent dir must already exist. `opts.mode` applies POSIX permissions atomically. |
 | `append(path, content)` | `void` | Append utf-8 text. Creates the file if missing. |
 | `writeAtomic(path, content, opts?)` | `void` | Write to `<path>.tmp.<pid>`, then rename. Use for files where a partial write would corrupt state (config, keys, audit). |

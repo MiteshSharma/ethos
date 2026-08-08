@@ -1,4 +1,4 @@
-import { existsSync as fsExistsSync } from 'node:fs';
+import { type Dirent, existsSync as fsExistsSync } from 'node:fs';
 import {
   appendFile,
   chmod,
@@ -10,6 +10,7 @@ import {
   stat,
   writeFile,
 } from 'node:fs/promises';
+import { join } from 'node:path';
 import type {
   Storage,
   StorageDirEntry,
@@ -67,13 +68,32 @@ export class FsStorage implements Storage {
   }
 
   async listEntries(dir: string): Promise<StorageDirEntry[]> {
+    let entries: Dirent[];
     try {
-      const entries = await readdir(dir, { withFileTypes: true });
-      return entries.map((e) => ({ name: e.name, isDir: e.isDirectory() }));
+      entries = await readdir(dir, { withFileTypes: true });
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === 'ENOENT') return [];
       throw err;
     }
+    // readdir yields names and types but never sizes, so size/mtimeMs cost
+    // one stat per file. Directories are skipped — their size is not a
+    // meaningful number (see StorageDirEntry) — which leaves the
+    // directory-walking callers (plugin loader, skills catalog, personality
+    // loader) at exactly zero extra syscalls. The stats are issued together
+    // so the file case costs one batched round, not N serialized waits.
+    return await Promise.all(
+      entries.map(async (e) => {
+        if (e.isDirectory()) return { name: e.name, isDir: true };
+        try {
+          const s = await stat(join(dir, e.name));
+          return { name: e.name, isDir: false, size: s.size, mtimeMs: s.mtimeMs };
+        } catch {
+          // A broken symlink or a file deleted mid-listing costs that entry
+          // its metadata, never the caller its whole listing.
+          return { name: e.name, isDir: false };
+        }
+      }),
+    );
   }
 
   async write(
