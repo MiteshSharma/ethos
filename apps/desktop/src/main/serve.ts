@@ -56,6 +56,7 @@ export async function startServer(port: number): Promise<number> {
     ttsProviders,
     voiceConfig,
     refreshPersonalities,
+    skillsInjector,
     onMemoryCaptured,
   } = await createAgentLoop(wiringConfig, {
     dataDir,
@@ -132,6 +133,9 @@ export async function startServer(port: number): Promise<number> {
     agentLoop: loop,
     personalities,
     refreshPersonalities,
+    // Renderer-capability seam for `personalities.renderers` (the loop's own
+    // injector — one scanner, one mtime cache for the process).
+    skillsInjector,
     chatDefaults: { model, provider },
     // Threaded with the turn's personality (learned from the loop's
     // `session_start`) so `denyRules` and `approvalMode` are enforced, plus a

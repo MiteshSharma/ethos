@@ -298,6 +298,9 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
   // Loop-registry refresh from createAgentLoop; undefined on the team-coordinator
   // path (createTeamAgentLoop has no personality registry to hot-reload).
   let refreshLoopPersonalities: (() => Promise<void>) | undefined;
+  // The loop's SkillsInjector — backs `personalities.renderers`. Undefined on
+  // the team-coordinator path, where the RPC degrades to no renderers.
+  let skillsInjector: import('@ethosagent/skills').SkillsInjector | undefined;
   let voiceConfig:
     | {
         sttProviderName?: string;
@@ -459,6 +462,7 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
     ttsProviders = result.ttsProviders;
     voiceConfig = result.voiceConfig;
     refreshLoopPersonalities = result.refreshPersonalities;
+    skillsInjector = result.skillsInjector;
   } else if (teamFlag) {
     // Chat UX: `ethos serve --team <name>` → run as the team's coordinator.
     const {
@@ -503,6 +507,7 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
     ttsProviders = result.ttsProviders;
     voiceConfig = result.voiceConfig;
     refreshLoopPersonalities = result.refreshPersonalities;
+    skillsInjector = result.skillsInjector;
   }
   let titleFn: ((systemPrompt: string, userMessage: string) => Promise<string>) | undefined;
   try {
@@ -893,6 +898,9 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
     // Loop-registry refresh — chat/completions await it before a turn so a
     // hot-dropped/edited personality resolves without a restart.
     ...(refreshLoopPersonalities ? { refreshPersonalities: refreshLoopPersonalities } : {}),
+    // Renderer-capability seam for `personalities.renderers` — the loop's own
+    // SkillsInjector, so the derivation reuses one scanner + mtime cache.
+    ...(skillsInjector ? { skillsInjector } : {}),
     // Lane 6 (D5) — model-fit seam for the `personalities.characterSheet`
     // RPC: the SAME wiring assembler the CLI `personality show` calls, so the
     // two surfaces render one verdict. Cache-first probe (a web read is not a

@@ -52,6 +52,7 @@ export const SCOPE_MAP: Record<string, Record<string, string>> = {
     list: 'personalities:read',
     get: 'personalities:read',
     characterSheet: 'personalities:read',
+    renderers: 'personalities:read',
     skillsList: 'personalities:read',
     skillsGet: 'personalities:read',
     livingSoul: 'personalities:read',

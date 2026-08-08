@@ -952,6 +952,12 @@ export interface CreateAgentLoopResult {
   /** The McpManager instance from tool composition. Pass to createWebApi so
    *  re-auth via the web UI hits the live manager and updates the tool registry. */
   mcpManager: McpManager;
+  /** The SkillsInjector from tool composition — the single eligibility decision
+   *  ("which skills does personality P see"). Pass to createWebApi so read-only
+   *  surfaces derive from THIS instance rather than building a second injector
+   *  with its own scanner + mtime cache. Note it closes over the LOOP's
+   *  personality registry, not the web-api's; refresh via `refreshPersonalities`. */
+  skillsInjector: import('@ethosagent/skills').SkillsInjector;
   /** Replace the messaging tool's send implementation with the real gateway.
    *  Called from gateway.ts after Gateway construction. Scoped to this loop
    *  instance — multiple loops in the same process are independent. */

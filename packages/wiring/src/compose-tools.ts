@@ -27,7 +27,7 @@ import {
   platformPrompt as telegramPrompt,
 } from '@ethosagent/platform-telegram/format';
 import { createSkillProposeTool } from '@ethosagent/skill-evolver';
-import type { UniversalScanner } from '@ethosagent/skills';
+import type { SkillsInjector, UniversalScanner } from '@ethosagent/skills';
 import { compose as composeSkills } from '@ethosagent/skills/compose';
 import { createCryptoStorage } from '@ethosagent/storage-crypto';
 import { FsStorage } from '@ethosagent/storage-fs';
@@ -302,6 +302,10 @@ export interface ComposeToolsResult {
   injectors: ContextInjector[];
   /** Universal scanner (needed by loadPlugins for plugin skill merging). */
   skillScanner: UniversalScanner;
+  /** The live SkillsInjector — surfaced so read-only surfaces (the web-api's
+   *  `personalities.renderers`) reuse THIS instance's resolveSkills + mtime
+   *  cache instead of constructing a second injector with a duplicate scanner. */
+  skillsInjector: SkillsInjector;
   /** McpManager instance — threaded to the web-api so re-auth hits the live manager. */
   mcpManager: McpManager;
 }
@@ -646,7 +650,7 @@ export async function composeAllTools(
     log,
     toolNamesForPersonality: createToolReachGetter(tools),
   });
-  const { skillPool, injectors, scanner: skillScanner } = skillsCompose;
+  const { skillPool, injectors, scanner: skillScanner, skillsInjector } = skillsCompose;
   for (const tool of skillsCompose.tools) tools.register(tool);
 
   const bootToolNames = new Set(activePerson.toolset ?? []);
@@ -848,6 +852,7 @@ export async function composeAllTools(
     skillPool,
     injectors,
     skillScanner,
+    skillsInjector,
     mcpManager,
   };
 }

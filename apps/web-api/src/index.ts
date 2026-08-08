@@ -10,7 +10,7 @@ import {
 } from '@ethosagent/dashboard';
 import type { GoalRunner } from '@ethosagent/goal-runner';
 import type { FilePersonalityRegistry } from '@ethosagent/personalities';
-import { SkillsLibrary } from '@ethosagent/skills';
+import { type SkillsInjector, SkillsLibrary } from '@ethosagent/skills';
 import { FileSecretsResolver, FsStorage } from '@ethosagent/storage-fs';
 import { McpJsonStore, type McpManager } from '@ethosagent/tools-mcp';
 import { buildDashboardTools } from '@ethosagent/tools-ui';
@@ -122,6 +122,13 @@ export interface CreateWebApiOptions {
    *  The Personalities-tab service refreshes `personalities` (this process's
    *  web-api registry) on its own from disk. Absent → no refresh. */
   refreshPersonalities?: () => Promise<void>;
+  /** The live `SkillsInjector` from wiring's `CreateAgentLoopResult`. Backs
+   *  `personalities.renderers` — the derivation of a personality's declared
+   *  renderer capabilities from its resolved skill set. Reusing the loop's
+   *  instance (rather than constructing a second one) keeps one scanner and one
+   *  mtime cache per process. Absent → `personalities.renderers` returns `[]`
+   *  and every fenced block stays a code block. */
+  skillsInjector?: SkillsInjector;
   /** Provider/model defaults stamped on web-created session rows. */
   chatDefaults: ChatDefaults;
   /** Origins to accept for cross-origin (CSRF) state-changing requests.
@@ -420,6 +427,8 @@ export function createWebApi(opts: CreateWebApiOptions): CreateWebApiResult {
     // personality dropped/edited on disk (by another process, or the loop's
     // create path) is visible in the Personalities tab without a restart.
     refresh: () => opts.personalities.loadFromDirectory(join(opts.dataDir, 'personalities')),
+    ...(opts.skillsInjector ? { skillsInjector: opts.skillsInjector } : {}),
+    ...(opts.refreshPersonalities ? { refreshLoopPersonalities: opts.refreshPersonalities } : {}),
     ...(opts.dockerBuildable === false ? { dockerBuildable: false } : {}),
     ...(opts.modelFit ? { modelFit: opts.modelFit } : {}),
     ...(opts.scriptSurface ? { scriptSurface: opts.scriptSurface } : {}),

@@ -395,6 +395,13 @@ const PersonalityDuplicateOutput = z.object({ personality: PersonalitySchema });
 const PersonalitySkillsListInput = z.object({ personalityId: z.string().min(1) });
 const PersonalitySkillsListOutput = z.object({ skills: z.array(PersonalitySkillSchema) });
 
+// Renderer capabilities (`ethos.renders`) declared by the personality's
+// resolved skill set — `<renderer>@<spec-version>` entries a chat surface
+// checks against its own curated registry before upgrading a fenced block
+// from a code block. Empty array = code block, which is also the failure mode.
+const PersonalityRenderersInput = z.object({ id: z.string().min(1) });
+const PersonalityRenderersOutput = z.object({ renderers: z.array(z.string()) });
+
 const PersonalitySkillsGetInput = z.object({
   personalityId: z.string().min(1),
   skillId: z.string().min(1),
@@ -537,6 +544,7 @@ const personalities = {
   update: oc.input(PersonalityUpdateInput).output(PersonalityUpdateOutput),
   delete: oc.input(PersonalityDeleteInput).output(PersonalityOkOutput),
   duplicate: oc.input(PersonalityDuplicateInput).output(PersonalityDuplicateOutput),
+  renderers: oc.input(PersonalityRenderersInput).output(PersonalityRenderersOutput),
   skillsList: oc.input(PersonalitySkillsListInput).output(PersonalitySkillsListOutput),
   skillsGet: oc.input(PersonalitySkillsGetInput).output(PersonalitySkillsGetOutput),
   skillsCreate: oc.input(PersonalitySkillsCreateInput).output(PersonalitySkillsCreateOutput),

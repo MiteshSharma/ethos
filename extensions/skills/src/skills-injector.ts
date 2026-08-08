@@ -9,6 +9,7 @@ import type {
   Skill,
   Storage,
 } from '@ethosagent/types';
+import { parseEthosRenders } from './dialects/ethos-namespace';
 import { filterSkill, warnMissingAllowList } from './ingest-filter';
 import { sanitize } from './prompt-injection-guard';
 import {
@@ -177,6 +178,38 @@ export class SkillsInjector implements ContextInjector {
     }
 
     return resolved;
+  }
+
+  /**
+   * Renderer capabilities declared by the personality's resolved skill set —
+   * the `ethos.renders` union over `resolveSkills(personalityId)`, sorted and
+   * deduplicated. A surface consults this to decide whether a fenced block may
+   * upgrade from a code block to an interactive renderer; an empty array means
+   * "code block", which is also what every failure degrades to.
+   *
+   * Lives here rather than in a consumer because both skill sources need the
+   * injector's private state: global-source skills carry the typed
+   * `Skill.renders`, while per-personality-dir skills carry only a `filePath`
+   * and must be frontmatter-parsed through the same mtime-cached read the
+   * prompt path uses.
+   */
+  async resolveRenderers(personalityId: string | undefined): Promise<string[]> {
+    const resolved = await this.resolveSkills(personalityId);
+    const renderers = new Set<string>();
+
+    for (const r of resolved) {
+      if (r.source === 'global') {
+        for (const spec of r.skill.renders ?? []) renderers.add(spec);
+        continue;
+      }
+      const raw = await this.readCached(r.filePath);
+      if (!raw) continue;
+      const parsed = parseSkillFrontmatter(raw);
+      if (!parsed) continue;
+      for (const spec of parseEthosRenders(parsed.raw) ?? []) renderers.add(spec);
+    }
+
+    return [...renderers].sort();
   }
 
   async inject(ctx: PromptContext): Promise<InjectionResult | null> {

@@ -32,6 +32,27 @@ export function usePersonalitySkillsList(personalityId: string) {
   });
 }
 
+/**
+ * Renderer capabilities (`<renderer>@<spec>`) the personality's skill set
+ * declares — what a chat surface is allowed to upgrade a fenced block into.
+ *
+ * Takes the id as a parameter rather than calling `useActivePersonality()`
+ * itself: that hook's session override is component-local `useState`, so a
+ * hook calling it independently would read the config personality and miss the
+ * override. Callers pass the id they actually rendered with.
+ *
+ * Fail-closed: loading and errored both yield an empty set, which every
+ * consumer must treat as "render the code block".
+ */
+export function useActiveRenderers(personalityId: string): { renderers: string[] } {
+  const query = useQuery({
+    queryKey: personalityKeys.renderers(personalityId),
+    queryFn: () => rpc.personalities.renderers({ id: personalityId }),
+    enabled: personalityId.length > 0,
+  });
+  return { renderers: query.data?.renderers ?? [] };
+}
+
 export function usePalettePersonalities(enabled: boolean) {
   return useQuery({
     queryKey: personalityKeys.palette(),

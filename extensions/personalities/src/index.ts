@@ -1313,16 +1313,21 @@ export class FilePersonalityRegistry implements PersonalityRegistry {
   // -------------------------------------------------------------------------
 
   private async loadOne(dir: string, id: string): Promise<void> {
-    // Fingerprint guard — invalidate when any of the three personality files change.
+    // Fingerprint guard — invalidate when any of the personality's inputs change.
     // mtime alone is enough: filesystems we run on (APFS / ext4 / NTFS) all
     // expose sub-millisecond mtime, so two writes within the same tick
     // is vanishingly unlikely for personality files (humans editing config).
+    // `skills/` is a DIRECTORY, and it is fingerprinted because `buildConfig`
+    // derives `skillsDirs` from its existence — without it, installing the
+    // first skill into a personality that had no `skills/` dir would never be
+    // seen until the process restarted.
     const fingerprint = await this.fileFingerprint([
       join(dir, 'config.yaml'),
       join(dir, 'SOUL.md'),
       join(dir, 'toolset.yaml'),
       join(dir, 'mcp.yaml'),
       join(dir, 'tools.yaml'),
+      join(dir, 'skills'),
     ]);
     if (this.fingerprintCache.get(dir) === fingerprint) return;
     this.fingerprintCache.set(dir, fingerprint);

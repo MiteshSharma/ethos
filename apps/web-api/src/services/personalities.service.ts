@@ -11,7 +11,7 @@ import {
   type UpdatePersonalityPatch,
 } from '@ethosagent/personalities';
 import { draftExpressionUpdate, draftSoulSplit } from '@ethosagent/skill-evolver';
-import type { PersonalitySkillRecord, SkillsLibrary } from '@ethosagent/skills';
+import type { PersonalitySkillRecord, SkillsInjector, SkillsLibrary } from '@ethosagent/skills';
 import { type McpJsonStore, mcpTokenSecretRef } from '@ethosagent/tools-mcp';
 import {
   EthosError,
@@ -74,6 +74,20 @@ export interface PersonalitiesServiceOptions {
    * Absent → no refresh (registry state as of last mutation/boot).
    */
   refresh?: () => Promise<void>;
+  /**
+   * The live `SkillsInjector` from wiring — backs `renderers()`. It resolves
+   * against the LOOP's personality registry (a different instance from
+   * `personalities` above), which is why `refreshLoopPersonalities` exists.
+   * Absent → `renderers()` returns `[]` (tests, onboarding, deployments with
+   * no loop).
+   */
+  skillsInjector?: SkillsInjector;
+  /**
+   * `CreateAgentLoopResult.refreshPersonalities` — reloads the LOOP registry
+   * the injector reads. Awaited in `renderers()` so a personality edited on
+   * disk (e.g. a `skills/` dir just created) is seen without a restart.
+   */
+  refreshLoopPersonalities?: () => Promise<void>;
   /**
    * Lane 6 (D5) — compute the arithmetic model-fit verdict for a personality.
    * A closure over wiring's `resolvePersonalityModelFit` (the service never
@@ -242,6 +256,35 @@ export class PersonalitiesService {
   async duplicate(id: string, newId: string): Promise<{ personality: Personality }> {
     const created = await this.opts.personalities.duplicate(id, newId);
     return { personality: toWire(created) };
+  }
+
+  /**
+   * Renderer capabilities the personality's resolved skill set declares
+   * (`ethos.renders`). Derived by the live `SkillsInjector` — the same
+   * eligibility decision that builds the prompt, so what a personality is
+   * TAUGHT and what it may RENDER cannot drift apart.
+   *
+   * Fail-closed by construction: no injector wired, an unknown personality, or
+   * a throwing derivation all yield `[]`, which every surface renders as a
+   * plain code block. A chart that appears a beat late is fine; a chart that
+   * appears for a personality without the skill is not.
+   */
+  async renderers(id: string): Promise<{ renderers: string[] }> {
+    const injector = this.opts.skillsInjector;
+    if (!injector) return { renderers: [] };
+    try {
+      // Two registries, both refreshed: this service reads its own (to reject an
+      // unknown id — `resolveSkills` would otherwise silently fall back to the
+      // DEFAULT personality's skills), while the injector closes over the LOOP's.
+      // Refreshing the loop's is what makes a freshly installed skills/ dir
+      // visible without a restart.
+      await this.opts.refresh?.();
+      await this.opts.refreshLoopPersonalities?.();
+      if (!this.opts.personalities.describe(id)) return { renderers: [] };
+      return { renderers: await injector.resolveRenderers(id) };
+    } catch {
+      return { renderers: [] };
+    }
   }
 
   // ---------------------------------------------------------------------------

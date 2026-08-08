@@ -87,7 +87,8 @@ export async function buildAgentLoop(
   const { dataDir, log } = wiringCtx;
   const { infra, toolsResult, pluginsResult, llm, profile } = deps;
   const { memoryProviders, personalities, hooks, sessionCompose, tools } = infra;
-  const { gatewaySendRef, goalStore, goalRunnerRef, injectors, mcpManager } = toolsResult;
+  const { gatewaySendRef, goalStore, goalRunnerRef, injectors, mcpManager, skillsInjector } =
+    toolsResult;
   const {
     pluginLoader,
     pluginRegistries,
@@ -971,6 +972,7 @@ export async function buildAgentLoop(
     // warning uses (no second measurement path).
     contextWindow: llm.maxContextTokens,
     mcpManager,
+    skillsInjector,
     setMessagingSend: (fn) => {
       ref.fn = fn;
     },

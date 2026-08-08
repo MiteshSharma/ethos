@@ -4,7 +4,7 @@ import {
   FilePersonalityRegistry,
   renderCharacterSheet,
 } from '@ethosagent/personalities';
-import { SkillsLibrary } from '@ethosagent/skills';
+import { SkillsInjector, SkillsLibrary, UniversalScanner } from '@ethosagent/skills';
 import { FsStorage, InMemoryStorage } from '@ethosagent/storage-fs';
 import type { CompletionChunk, LLMProvider, Message } from '@ethosagent/types';
 import { describe, expect, it } from 'vitest';
@@ -751,6 +751,74 @@ describe('PersonalitiesService', () => {
       const reloaded = await service.get('agent');
       expect(reloaded.personality.safety?.approvalMode).toBe('smart');
       expect(reloaded.personality.memory?.provider).toBe('vector');
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // renderers — skill-declared renderer capabilities, fail-closed
+  // -------------------------------------------------------------------------
+
+  describe('renderers', () => {
+    const CHARTS_MD = `---
+name: charts
+description: Interactive charts.
+required_tools: []
+
+ethos:
+  renders: ['echarts@1']
+---
+Emit an echarts fence.`;
+
+    /** Registry + injector over one InMemoryStorage, with the charts skill
+     *  installed into `researcher`'s per-personality skills/ dir. */
+    async function makeRenderersService(withInjector: boolean) {
+      const storage = new InMemoryStorage();
+      const pdir = join(DATA, 'personalities', 'researcher');
+      await storage.mkdir(join(pdir, 'skills'));
+      await storage.write(join(pdir, 'config.yaml'), 'name: Researcher\n');
+      await storage.write(join(pdir, 'SOUL.md'), '# Researcher\n');
+      await storage.write(join(pdir, 'skills', 'charts.md'), CHARTS_MD);
+
+      const registry = new FilePersonalityRegistry(storage, DATA);
+      await registry.loadFromDirectory(join(DATA, 'personalities'));
+      registry.setDefault('researcher');
+
+      const injector = new SkillsInjector(registry, {
+        storage,
+        globalSkillsDir: join(DATA, 'skills'),
+        // Hermetic pool — no real ~/.ethos or ~/.claude skills.
+        scanner: new UniversalScanner({ storage, sources: [] }),
+      });
+
+      const service = new PersonalitiesService({
+        personalities: registry,
+        library: new SkillsLibrary({ dataDir: DATA, storage }),
+        ...(withInjector ? { skillsInjector: injector } : {}),
+      });
+      return { service, injector };
+    }
+
+    it('returns the union of ethos.renders across the resolved skill set', async () => {
+      const { service } = await makeRenderersService(true);
+      expect(await service.renderers('researcher')).toEqual({ renderers: ['echarts@1'] });
+    });
+
+    it('returns [] when no injector is wired', async () => {
+      const { service } = await makeRenderersService(false);
+      expect(await service.renderers('researcher')).toEqual({ renderers: [] });
+    });
+
+    it('returns [] for an unknown personality instead of the default personality set', async () => {
+      const { service } = await makeRenderersService(true);
+      expect(await service.renderers('ghost')).toEqual({ renderers: [] });
+    });
+
+    it('returns [] when the derivation throws (fail-closed, never breaks the page)', async () => {
+      const { service, injector } = await makeRenderersService(true);
+      injector.resolveRenderers = async () => {
+        throw new Error('scanner exploded');
+      };
+      expect(await service.renderers('researcher')).toEqual({ renderers: [] });
     });
   });
 });
