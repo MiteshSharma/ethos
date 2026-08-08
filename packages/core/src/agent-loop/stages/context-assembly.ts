@@ -102,6 +102,10 @@ export async function* assembleContext(
     sessionId,
     sessionKey,
     personality,
+    // The turn's workdir (see TurnSetup.workingDir). Assembly must read the
+    // same value the tool contexts do, so `AGENTS.md`/`CLAUDE.md` discovery and
+    // the injectors agree with where the agent's writes actually land.
+    workingDir,
     turnNumber,
     lastCompactionTurn,
     allowedPlugins,
@@ -271,7 +275,7 @@ export async function* assembleContext(
     sessionId,
     sessionKey,
     platform: deps.platform,
-    workingDir: deps.workingDir,
+    workingDir,
   };
   let memSnapshot = await activeMemory.prefetch(memCtx);
 
@@ -295,7 +299,7 @@ export async function* assembleContext(
       sessionId,
       sessionKey,
       platform: deps.platform,
-      workingDir: deps.workingDir,
+      workingDir,
     };
     const userEntry = await activeMemory.read('USER.md', userCtx);
     if (userEntry?.content.trim()) {
@@ -333,7 +337,7 @@ export async function* assembleContext(
     platform: deps.platform,
     model: deps.llm.model,
     history,
-    workingDir: deps.workingDir,
+    workingDir,
     isDm: true,
     turnNumber: allMessages.length,
     personalityId: personality.id,

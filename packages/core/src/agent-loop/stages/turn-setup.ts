@@ -1,4 +1,7 @@
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 import type { AgentEvent, ModelTierName, ToolFilterOpts } from '@ethosagent/types';
+import { deriveFsReachPaths, EmptySubstitutionError } from '../../fs-reach';
 import { parseSmallWindowToolset } from '../small-window-toolset';
 import type { LoopDeps, TurnSetupResult } from '../turn-context';
 import { resolveModelWithTier } from '../turn-context';
@@ -68,6 +71,43 @@ export async function* setupTurn(
       type: 'error',
       error: `Budget cap of $${personality.budgetCapUsd.toFixed(2)} exceeded for this session ($${currentSpend.toFixed(4)} spent). Use /budget reset to start a new budget window.`,
       code: 'BUDGET_EXCEEDED',
+    };
+    yield { type: 'done', text: '', turnCount: 0 };
+    return { kind: 'refused' };
+  }
+
+  // The turn's filesystem reach — working directory AND read/write allowlist,
+  // from ONE derivation. `fs_reach` is a personality declaration and the
+  // personality resolves per turn, so the derivation lives here rather than on
+  // the loop; `deps.workingDir` is the boot-time cwd an undeclared personality
+  // keeps. The whole result is threaded on `TurnSetup` because the derivation
+  // is not idempotent: re-deriving downstream with the resolved workdir as
+  // `cwd` would compound a declared `${CWD}/...` workdir.
+  //
+  // `deriveFsReachPaths` throws `EmptySubstitutionError` when a DECLARED path
+  // names a substitution variable that resolves to empty — a configuration
+  // error, and previously an exception thrown mid-turn out of the tool stage.
+  // Refuse the turn the way this stage already refuses a blown budget cap or a
+  // missing credential: error event, done, `refused` — before
+  // `recordTurnStart` burns a turn number.
+  let workingDir: string;
+  let fsReach: { read: string[]; write: string[] };
+  try {
+    const derived = deriveFsReachPaths(personality, {
+      ethosHome: deps.dataDir ?? join(homedir(), '.ethos'),
+      self: personality.id,
+      cwd: deps.workingDir,
+    });
+    workingDir = derived.workdir;
+    fsReach = { read: derived.read, write: derived.write };
+  } catch (err) {
+    if (!(err instanceof EmptySubstitutionError)) throw err;
+    if (traceId) deps.observability?.endTrace(traceId, 'error');
+    deps.observability?.flush();
+    yield {
+      type: 'error',
+      error: `Personality "${personality.id}" has an unusable fs_reach: ${err.message}`,
+      code: 'FS_REACH_INVALID',
     };
     yield { type: 'done', text: '', turnCount: 0 };
     return { kind: 'refused' };
@@ -198,6 +238,8 @@ export async function* setupTurn(
       sessionId,
       sessionKey,
       personality,
+      workingDir,
+      fsReach,
       obsConfig,
       traceId,
       turnNumber,

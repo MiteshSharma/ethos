@@ -42,7 +42,12 @@ describe('Orchestrator guardrails', () => {
     // Bumped 873 → 874: Lane E threads the loop's onToolMetric into the
     // ScriptToolBridge deps (one conditional-spread line) so inner calls hit
     // the same diagnostic seam as batch calls.
-    expect(lineCount).toBeLessThanOrEqual(874);
+    // Bumped 874 → 877: `fs_reach.workdir` makes the working directory a
+    // per-TURN product instead of a loop field, so the orchestrator destructures
+    // `workingDir` + `fsReach` off TurnSetup and hands them to the tool stage
+    // (4 lines), minus the `workingDir` dep the stage no longer needs (1). The
+    // derivation itself lives in agent-loop/stages/turn-setup.ts.
+    expect(lineCount).toBeLessThanOrEqual(877);
   });
 
   it('no stage file exceeds 700 lines', () => {

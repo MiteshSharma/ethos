@@ -1,25 +1,23 @@
-import { homedir } from 'node:os';
-import { join } from 'node:path';
-import type { AgentSafety, PersonalityConfig, Storage } from '@ethosagent/types';
-import { deriveFsReachPaths } from '../fs-reach';
+import type { AgentSafety, Storage } from '@ethosagent/types';
 
+/**
+ * Decorate the base Storage with the turn's `fs_reach` scope.
+ *
+ * The scope arrives already derived — `deriveFsReachPaths` runs ONCE per turn,
+ * in the turn-setup stage, and the same result yields both this allowlist and
+ * `ToolContext.workingDir`. Re-deriving here would be worse than wasteful: a
+ * personality declaring `fs_reach.workdir: ${CWD}/out` resolves `${CWD}` against
+ * the *boot* cwd, so feeding the already-resolved workdir back in as `cwd` would
+ * compound it into `.../out/out`. One derivation, one scope.
+ *
+ * Returns undefined when no base Storage is wired, leaving
+ * `ToolContext.storage` unset (legacy behaviour — tools fall back to raw fs).
+ */
 export function buildScopedStorage(
-  personality: PersonalityConfig,
   storage: Storage | undefined,
   safety: AgentSafety,
-  dataDir: string | undefined,
-  workingDir: string,
+  scope: { read: string[]; write: string[] },
 ): Storage | undefined {
   if (!storage) return undefined;
-
-  const ethosHome = dataDir ?? join(homedir(), '.ethos');
-  // Shared with the docker backend's `mountsFor` (packages/core/src/fs-reach.ts)
-  // so the app-layer prefixes and the OS-layer bind mounts can never drift.
-  const { read, write } = deriveFsReachPaths(personality, {
-    ethosHome,
-    self: personality.id,
-    cwd: workingDir,
-  });
-
-  return safety.scopedStorageFactory(storage, { read, write });
+  return safety.scopedStorageFactory(storage, scope);
 }

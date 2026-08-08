@@ -60,7 +60,6 @@ export interface ToolProcessingDeps {
   sessionCosts: Map<string, number>;
   storage?: Storage;
   dataDir?: string;
-  workingDir: string;
   platform: string;
   resultBudgetChars: number;
   teamId?: string;
@@ -74,6 +73,12 @@ export interface ToolProcessingContext {
   sessionId: string;
   sessionKey: string;
   personality: PersonalityConfig;
+  /** The turn's working directory — see `TurnSetup.workingDir`. Per-turn, not
+   *  per-loop, because it comes from the turn's personality. */
+  workingDir: string;
+  /** The turn's `fs_reach` allowlist, from the same derivation as
+   *  `workingDir` — see `TurnSetup.fsReach`. */
+  fsReach: { read: string[]; write: string[] };
   traceId: string | undefined;
   obsConfig: PersonalityObservabilityConfig | undefined;
   effectiveModel: string;
@@ -144,13 +149,7 @@ export async function* processTools(
     progressQueueResolve = null;
   };
 
-  const scopedStorage = buildScopedStorage(
-    ctx.personality,
-    deps.storage,
-    deps.safety,
-    deps.dataDir,
-    deps.workingDir,
-  );
+  const scopedStorage = buildScopedStorage(deps.storage, deps.safety, ctx.fsReach);
 
   // FW-28 — retrieve or create the per-session mtime registry for this turn.
   let sessionMtimes = deps.sessionReadMtimes.get(ctx.sessionKey);
@@ -166,7 +165,7 @@ export async function* processTools(
     sessionId: ctx.sessionId,
     sessionKey: ctx.sessionKey,
     platform: deps.platform,
-    workingDir: deps.workingDir,
+    workingDir: ctx.workingDir,
     agentId: ctx.opts.agentId,
     rootSessionKey: ctx.opts.rootSessionKey ?? ctx.sessionKey,
     origin: ctx.opts.origin,
@@ -622,7 +621,7 @@ export async function* processTools(
             personalityId: ctx.personality.id,
             toolName: p.name,
             filePath: touchedPath,
-            workingDir: deps.workingDir,
+            workingDir: ctx.workingDir,
           },
           ctx.allowedPlugins,
         );

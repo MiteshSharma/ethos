@@ -1,17 +1,18 @@
 // biome-ignore-all lint/suspicious/noTemplateCurlyInString: fs_reach values are
 // literal substitution tokens (`${ETHOS_HOME}` etc.) resolved at runtime, not
 // JS template strings.
-import { buildScopedStorage } from '@ethosagent/core';
+import { buildScopedStorage, deriveFsReachPaths } from '@ethosagent/core';
 import type {
   AgentSafety,
   ExecutionBackendConfig,
   Logger,
+  MountSpec,
   PersonalityConfig,
   SecretsResolver,
   Storage,
 } from '@ethosagent/types';
 import { describe, expect, it } from 'vitest';
-import { DockerExecutionBackend } from '../index';
+import { buildDockerArgs, buildKeepAliveArgs, DockerExecutionBackend } from '../index';
 
 // ---------------------------------------------------------------------------
 // fs_reach parity — the app layer (ScopedStorage read/write prefixes) and the
@@ -44,7 +45,11 @@ const loggerStub: Logger = {
 
 const storageStub = {} as Storage;
 
-/** Captures the scope `buildScopedStorage` hands to the safety factory. */
+/**
+ * Captures the scope the app layer hands to the safety factory — the same two
+ * steps the turn takes: derive once (turn-setup), then decorate the base
+ * Storage with the derived allowlist (tool-processing).
+ */
 function captureScope(personality: PersonalityConfig): { read: string[]; write: string[] } {
   let captured: { read: string[]; write: string[] } | undefined;
   const safety = {
@@ -53,7 +58,12 @@ function captureScope(personality: PersonalityConfig): { read: string[]; write: 
       return base;
     },
   } as unknown as AgentSafety;
-  buildScopedStorage(personality, storageStub, safety, ETHOS_HOME, CWD);
+  const { read, write } = deriveFsReachPaths(personality, {
+    ethosHome: ETHOS_HOME,
+    self: personality.id,
+    cwd: CWD,
+  });
+  buildScopedStorage(storageStub, safety, { read, write });
   if (!captured) throw new Error('buildScopedStorage did not build a scope');
   return captured;
 }
@@ -105,6 +115,11 @@ const cases: Array<{ name: string; reach: PersonalityConfig['fs_reach'] }> = [
       write: ['${ETHOS_HOME}/personalities/${self}', '${CWD}/dist'],
     },
   },
+  { name: 'declared workdir only', reach: { workdir: '${ETHOS_HOME}/workspace/${self}' } },
+  {
+    name: 'declared workdir alongside declared read/write lists',
+    reach: { workdir: '/srv/documents', read: ['/data/corpus'], write: ['/data/out'] },
+  },
 ];
 
 describe('fs_reach parity — ScopedStorage prefixes ≡ docker mounts', () => {
@@ -151,5 +166,137 @@ describe('fs_reach parity — ScopedStorage prefixes ≡ docker mounts', () => {
           'the OS layer is more permissive than the app layer.',
       ).toBe(true);
     }
+  });
+
+  // The workdir is where the agent's relative writes land. A ro mount (or no
+  // mount) there is the same silent data loss, just guaranteed instead of
+  // conditional.
+  it('a declared workdir is mounted rw', () => {
+    const personality = {
+      id: SELF,
+      name: SELF,
+      fs_reach: { workdir: '${ETHOS_HOME}/workspace/${self}', write: ['/data/out'] },
+    } as unknown as PersonalityConfig;
+
+    expect(mountModes(personality).get(`${ETHOS_HOME}/workspace/${SELF}`)).toBe('rw');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// `--workdir` — the container has to START where the file tools write.
+//
+// Without `-w` the container starts in the image's own WORKDIR and
+// `ExecOpts.cwd` is silently dropped, so a declared workdir would take effect
+// for `write_file` and NOT for `bash`. The local backend has always honoured
+// `cwd`; this closes the divergence.
+// ---------------------------------------------------------------------------
+
+const IMAGE = 'x@sha256:abc';
+
+function mountsAt(paths: Array<[string, 'ro' | 'rw']>): MountSpec[] {
+  return paths.map(([hostPath, mode]) => ({ hostPath, containerPath: hostPath, mode }));
+}
+
+describe('docker --workdir', () => {
+  const mounts = mountsAt([
+    ['/srv/documents', 'rw'],
+    ['/data/corpus', 'ro'],
+  ]);
+
+  const base = {
+    image: IMAGE,
+    containerName: 'c',
+    memoryMb: 256,
+    networkMode: 'none' as const,
+    uid: 1000,
+    gid: 1000,
+  };
+
+  it('emits --workdir for a mounted cwd (run)', () => {
+    const args = buildDockerArgs({
+      ...base,
+      cmd: 'pwd',
+      stdin: false,
+      mounts,
+      cwd: '/srv/documents',
+    });
+    expect(args).toContain('--workdir');
+    expect(args[args.indexOf('--workdir') + 1]).toBe('/srv/documents');
+    // Before the image, or docker parses it as part of the command.
+    expect(args.indexOf('--workdir')).toBeLessThan(args.indexOf('--'));
+  });
+
+  it('emits --workdir for a mounted cwd (keep-alive)', () => {
+    const args = buildKeepAliveArgs({ ...base, mounts, cwd: '/srv/documents' });
+    expect(args[args.indexOf('--workdir') + 1]).toBe('/srv/documents');
+    expect(args.indexOf('--workdir')).toBeLessThan(args.indexOf('--'));
+  });
+
+  it('normalizes a trailing slash to the mount path', () => {
+    const args = buildDockerArgs({
+      ...base,
+      cmd: 'pwd',
+      stdin: false,
+      mounts,
+      cwd: '/srv/documents/',
+    });
+    expect(args[args.indexOf('--workdir') + 1]).toBe('/srv/documents');
+  });
+
+  it('emits --workdir for a read-only mount too (the shell may only need to read)', () => {
+    const args = buildDockerArgs({ ...base, cmd: 'ls', stdin: false, mounts, cwd: '/data/corpus' });
+    expect(args[args.indexOf('--workdir') + 1]).toBe('/data/corpus');
+  });
+
+  // An unmounted `-w` is NOT an error to docker — it creates the directory in
+  // the container's writable layer, which `--rm` then throws away. Dropping the
+  // flag leaves the image's WORKDIR, which is what every cwd got before.
+  it('drops --workdir when the cwd is not in the mount set', () => {
+    const args = buildDockerArgs({ ...base, cmd: 'pwd', stdin: false, mounts, cwd: '/elsewhere' });
+    expect(args).not.toContain('--workdir');
+  });
+
+  it('drops --workdir for a subdirectory of a mount (only exact mounts are emitted)', () => {
+    const args = buildDockerArgs({
+      ...base,
+      cmd: 'pwd',
+      stdin: false,
+      mounts,
+      cwd: '/srv/documents/sub',
+    });
+    expect(args).not.toContain('--workdir');
+  });
+
+  it('drops --workdir when no cwd is requested', () => {
+    expect(buildDockerArgs({ ...base, cmd: 'pwd', stdin: false, mounts })).not.toContain(
+      '--workdir',
+    );
+    expect(buildKeepAliveArgs({ ...base, mounts })).not.toContain('--workdir');
+  });
+
+  // The end-to-end shape: a personality declares a workdir, `mountsFor` binds
+  // it rw, and the container starts there. This is the pair that makes
+  // `write_file` and `bash` agree.
+  it('a declared fs_reach.workdir is both mounted rw and used as --workdir', () => {
+    const personality = {
+      id: SELF,
+      name: SELF,
+      fs_reach: { workdir: '/srv/documents', write: ['/data/out'] },
+    } as unknown as PersonalityConfig;
+
+    const derivedMounts = [...mountModes(personality)].map(
+      ([hostPath, mode]): MountSpec => ({ hostPath, containerPath: hostPath, mode }),
+    );
+    expect(mountModes(personality).get('/srv/documents')).toBe('rw');
+
+    const args = buildDockerArgs({
+      ...base,
+      cmd: 'pwd',
+      stdin: false,
+      mounts: derivedMounts,
+      // What tools-terminal passes: ctx.workingDir, which is now the derived workdir.
+      cwd: deriveFsReachPaths(personality, { ethosHome: ETHOS_HOME, self: SELF, cwd: CWD }).workdir,
+    });
+    expect(args[args.indexOf('--workdir') + 1]).toBe('/srv/documents');
   });
 });

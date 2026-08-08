@@ -122,6 +122,28 @@ export function scratchTmpfsFor(mounts: MountSpec[]): string[] {
 }
 
 /**
+ * `--workdir` args for a requested `ExecOpts.cwd` — empty when the path is not
+ * one the container can actually see.
+ *
+ * `mountsFor` binds with identity mapping (`hostPath === containerPath`), so a
+ * mounted host path exists at the same absolute path inside the container and
+ * `-w` lands the shell exactly where the file tools write. A path OUTSIDE the
+ * mount set is the dangerous case: Docker does not fail on it, it CREATES the
+ * directory in the container's own writable layer, and `docker run --rm`
+ * discards whatever is written there — the same silent data loss the fs_reach
+ * parity test exists to prevent. So an unmounted cwd is dropped and the image's
+ * own WORKDIR stands, which is exactly what every cwd got before this flag
+ * existed. A personality that declares `fs_reach.workdir` always lands in the
+ * mounted branch: `deriveFsReachPaths` injects a declared workdir into both the
+ * read and the write list, so it is always bound.
+ */
+export function workdirArgsFor(cwd: string | undefined, mounts: MountSpec[]): string[] {
+  if (!cwd) return [];
+  const containerPath = resolvePath(cwd);
+  return mounts.some((m) => m.containerPath === containerPath) ? ['--workdir', containerPath] : [];
+}
+
+/**
  * Resolve a personality's `safety.network` policy to the binary container
  * network posture (Phase 2a, review g). The OS-layer gate is binary —
  * `bridge` (open egress) or `none` (air-gapped) — because per-hostname egress
@@ -479,6 +501,9 @@ export function buildDockerArgs(opts: {
   env?: Record<string, string>;
   mounts?: MountSpec[];
   tmpfs?: readonly string[];
+  /** `ExecOpts.cwd`. Emitted as `--workdir` only when it is mounted — see
+   *  {@link workdirArgsFor}. */
+  cwd?: string;
 }): string[] {
   if (!opts.image.includes('@sha256:')) {
     throw new InvalidImageRefError(opts.image);
@@ -503,6 +528,7 @@ export function buildDockerArgs(opts: {
   for (const m of opts.mounts ?? []) {
     args.push('-v', `${m.hostPath}:${m.containerPath}:${m.mode}`);
   }
+  args.push(...workdirArgsFor(opts.cwd, opts.mounts ?? []));
   if (opts.env) {
     for (const [k, v] of Object.entries(opts.env)) {
       args.push('-e', `${k}=${v}`);
@@ -527,6 +553,10 @@ export function buildKeepAliveArgs(opts: {
   gid: number;
   mounts?: MountSpec[];
   tmpfs?: readonly string[];
+  /** `ExecOpts.cwd` of the exec that started the session. Emitted as
+   *  `--workdir` only when it is mounted — see {@link workdirArgsFor}. The
+   *  container's workdir is inherited by every later `docker exec` on it. */
+  cwd?: string;
 }): string[] {
   if (!opts.image.includes('@sha256:')) {
     throw new InvalidImageRefError(opts.image);
@@ -546,6 +576,7 @@ export function buildKeepAliveArgs(opts: {
   for (const m of opts.mounts ?? []) {
     args.push('-v', `${m.hostPath}:${m.containerPath}:${m.mode}`);
   }
+  args.push(...workdirArgsFor(opts.cwd, opts.mounts ?? []));
   args.push('--', opts.image, 'sleep', 'infinity');
   return args;
 }
@@ -614,6 +645,7 @@ class DockerPersistentSession implements ExecSession {
         gid: info.gid,
         mounts,
         tmpfs: scratchTmpfsFor(mounts),
+        cwd: opts.cwd,
       });
       await new Promise<void>((resolve, reject) => {
         const run = spawn('docker', args, { stdio: 'ignore' });
@@ -871,6 +903,7 @@ export class DockerExecutionBackend implements ExecutionBackend {
       env: opts.env,
       mounts,
       tmpfs: scratchTmpfsFor(mounts),
+      cwd: opts.cwd,
     });
     const killContainer = () => {
       spawn('docker', ['kill', containerName], { stdio: 'ignore' }).on('close', () => {
