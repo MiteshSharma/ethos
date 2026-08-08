@@ -57,6 +57,7 @@ const sidebars: SidebarsConfig = {
             'using/how-to/loop-over-tools-in-code',
             'using/how-to/set-up-mcp-for-a-personality',
             'using/how-to/use-web-dashboard',
+            'using/how-to/retrieve-agent-files',
             'using/how-to/use-admin-panel',
             'using/how-to/audit-user-identity',
             'using/how-to/set-up-approval-gates',

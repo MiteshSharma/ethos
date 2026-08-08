@@ -5,7 +5,7 @@ kind: how-to
 audience: user
 slug: use-web-dashboard
 time: "10 min"
-updated: 2026-06-09
+updated: 2026-08-08
 ---
 
 ## Task
@@ -46,13 +46,14 @@ Then open `http://localhost:3000` in your local browser.
 
 ### 2. Navigate the main tabs
 
-The sidebar shows seven tabs:
+The sidebar shows eight tabs:
 
 | Tab | Purpose |
 |---|---|
 | **Chat** | Interactive chat with the active personality. |
 | **Personalities** | Create, edit, and inspect personality configurations. |
 | **Memory** | Browse and search personality memory (`MEMORY.md`) and user memory (`USER.md`). |
+| **Documents** | Browse, download, and delete the files a personality wrote in its working directory. See [Retrieve files the agent wrote](retrieve-agent-files.md). |
 | **Cron** | View, manage, and test scheduled jobs. |
 | **MCP** | Add MCP servers, handle OAuth, manage tokens. |
 | **Dashboards** | View plugin data sources as customizable widget panels. |

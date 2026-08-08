@@ -4,7 +4,7 @@ description: "The Ethos desktop app (Electron): native Mac, Windows, and Linux i
 kind: reference
 audience: shared
 slug: platform-desktop
-updated: 2026-06-12
+updated: 2026-08-08
 ---
 
 The Ethos desktop app is an Electron shell that provides a native Mac, Windows, and Linux interface with the same [agent](../getting-started/glossary.md#agent) capabilities as the CLI and web dashboard. It runs in local mode (embedded server) or remote mode (connected to an external Ethos instance).
@@ -80,6 +80,8 @@ Configure the connection:
 │                                     │
 └─────────────────────────────────────┘
 ```
+
+Known limitation: file download from the **Documents** tab does not work in remote mode. Remote mode authenticates with a bearer token injected at the Electron network layer, and a header cannot ride the top-level navigation a download link performs. Open the same server in a browser to download. Local mode is unaffected. See [Retrieve files the agent wrote](../using/how-to/retrieve-agent-files.md).
 
 ## Security {#security}
 

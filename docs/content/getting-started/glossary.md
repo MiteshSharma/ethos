@@ -4,7 +4,7 @@ description: "Every Ethos domain term in one place: personality, skill, tool, ho
 kind: reference
 audience: shared
 slug: glossary
-updated: 2026-06-09
+updated: 2026-08-08
 ---
 
 Every domain term used elsewhere in the docs has one canonical entry here. Pages link to the entry on first use. The list is alphabetical inside each cluster; clusters are ordered by how often a newcomer hits them.
@@ -65,7 +65,7 @@ A field in a personality's `config.yaml` controlling whether its agent reads and
 
 ### fs_reach {#fs-reach}
 
-The per-personality filesystem allowlist. A list of absolute or glob paths a personality's file tools may read or write. Default-deny: anything not listed is unreachable. Surfaces as a `BoundaryError` when violated.
+The per-personality filesystem allowlist. A list of absolute or glob paths a personality's file tools may read or write. Default-deny: anything not listed is unreachable. Surfaces as a `BoundaryError` when violated. The same block also sets the personality's working directory via `fs_reach.workdir` — where its relative paths land. See [Personality config reference](../using/reference/personality-yaml.md#fs-reach).
 
 ## Tools, hooks, registries {#tools-hooks-registries}
 

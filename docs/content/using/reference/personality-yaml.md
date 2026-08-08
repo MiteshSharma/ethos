@@ -4,7 +4,7 @@ description: "Every field in a personality's config.yaml and toolset.yaml — mo
 kind: reference
 audience: user
 slug: personality-yaml
-updated: 2026-07-17
+updated: 2026-08-08
 ---
 
 A [personality](../../getting-started/glossary.md#personality) is a directory at `~/.ethos/personalities/<id>/` with three files:
@@ -122,13 +122,13 @@ streamingTimeoutMs: 300000
 
 Type: comma-separated absolute paths · Default: AgentLoop fallback scope
 
-Per-personality filesystem allowlist for the `read_file` / `write_file` tools. The runtime resolves these substitutions at construction time:
+Per-personality filesystem allowlist for the `read_file` / `write_file` tools. The runtime resolves these substitutions once per turn:
 
 | Token | Resolves to |
 |---|---|
 | `${ETHOS_HOME}` | `~/.ethos` |
 | `${self}` | This personality's id. |
-| `${CWD}` | `AgentLoop.workingDir`. |
+| `${CWD}` | The personality's working directory — [`fs_reach.workdir`](#fs-reach-workdir) when declared, otherwise the process working directory. |
 
 When unset, the fallback is:
 
@@ -137,12 +137,37 @@ read:  [~/.ethos/personalities/<self>/, ~/.ethos/skills/, ${CWD}]
 write: [~/.ethos/personalities/<self>/, ${CWD}]
 ```
 
-Paths outside the allowlist surface as a `BoundaryError` from `ScopedStorage` and are rendered as a user-facing tool error.
+A declared list replaces the defaults for that direction — it is not merged with them. Paths outside the allowlist surface as a `BoundaryError` from `ScopedStorage` and are rendered as a user-facing tool error.
 
 ```yaml
 fs_reach.read: ${CWD}, ${ETHOS_HOME}/skills, ${ETHOS_HOME}/personalities/${self}
 fs_reach.write: ${CWD}, ${ETHOS_HOME}/personalities/${self}
 ```
+
+Notes:
+
+- Under the container execution posture, the derived read and write paths are the container's bind mounts (read-only and read-write respectively), so the app-layer allowlist and the OS-layer mount set never disagree.
+- The active personality's derived write paths are created at startup if missing. Read-only paths are not — a read prefix that does not exist is simply an empty scope.
+- Paths under `/proc`, `/sys`, `/dev`, or a Docker socket are never mounted into a container and are never pre-created.
+
+## fs_reach.workdir {#fs-reach-workdir}
+
+Type: single absolute path · Default: the process working directory
+
+The personality's working directory. It takes the same substitution tokens as `fs_reach.read` / `fs_reach.write`, resolves to an absolute path, and becomes `${CWD}` for the rest of the `fs_reach` derivation. Every tool in the personality's toolset stands here: a bare relative path passed to `read_file` or `write_file` resolves against it, and the `terminal` tool runs its commands in it under both the local and the container execution posture.
+
+```yaml
+fs_reach.workdir: ${ETHOS_HOME}/workspace/${self}
+```
+
+Notes:
+
+- A declared workdir is added to both the derived read list and the derived write list, so it stays reachable even when `fs_reach.write` is declared and therefore replaces the defaults.
+- One path, not a list. The dotted key is the only accepted syntax — an indented `fs_reach:` block is refused at load with `Top-level key "fs_reach" cannot be a nested object in personality config`.
+- A token that resolves to an empty string refuses the turn with `FS_REACH_INVALID` rather than synthesizing a path at the filesystem root.
+- Unset changes nothing: the working directory is the process working directory and the read/write lists derive exactly as they did before this field existed.
+- `ethos personality show <id>` prints the declared value (tokens unresolved) as a `Workdir` line under **Filesystem reach**.
+- Files written here are retrievable from a browser — see [Retrieve files the agent wrote](../how-to/retrieve-agent-files.md).
 
 ## mcp_servers {#mcp-servers}
 
@@ -321,3 +346,4 @@ Optional sibling directory at `~/.ethos/personalities/<id>/skills/`. Per-persona
 - [CLI reference](./cli.md#ethos-personality) — the `ethos personality` subcommands that scaffold and edit these files.
 - [Glossary: personality](../../getting-started/glossary.md#personality) — one-line definition shared across every page that names the construct.
 - [Glossary: fs_reach](../../getting-started/glossary.md#fs-reach) — the path-allowlist field this file declares; backed by `ScopedStorage`.
+- [Retrieve files the agent wrote](../how-to/retrieve-agent-files.md) — `fs_reach.workdir` in practice, on a headless deployment.
