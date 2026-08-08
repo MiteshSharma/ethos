@@ -835,6 +835,12 @@ export async function runPersonalityImport(argv: string[]): Promise<void> {
       console.log(
         `    fs_reach:    read ${manifest.declared.fsReach.read.length} path(s), write ${manifest.declared.fsReach.write.length} path(s)`,
       );
+      // A declared workdir is read AND write reachable, so it belongs in the
+      // reach the operator is being asked to trust — the counts above do not
+      // include it.
+      if (manifest.declared.fsReach.workdir) {
+        console.log(`    Workdir:     ${manifest.declared.fsReach.workdir} (read + write)`);
+      }
       console.log(`    Toolset:     ${manifest.declared.toolset.length} tool(s)`);
       if (manifest.mcpServers.length > 0) {
         const mcpNames = manifest.mcpServers.map((s) => s.name).join(', ');

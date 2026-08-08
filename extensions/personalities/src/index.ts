@@ -1023,7 +1023,15 @@ export class FilePersonalityRegistry implements PersonalityRegistry {
         plugins: patch.plugins ?? config.plugins,
         capabilities: patch.capabilities === undefined ? config.capabilities : patch.capabilities,
         provider: patch.provider === undefined ? config.provider : patch.provider,
-        fs_reach: patch.fs_reach === undefined ? config.fs_reach : patch.fs_reach,
+        // Shallow-merged, like `safety` / `memory` / `nightly` / `skill_evolution`
+        // below: a patch carrying only `read` and `write` (what the web config
+        // editor sends) must not silently drop a hand-declared `workdir`. The
+        // whole-object replacements in this block are all scalars or arrays,
+        // which have no sub-keys to lose. Pass `workdir: ''` to clear it.
+        fs_reach:
+          patch.fs_reach === undefined
+            ? config.fs_reach
+            : { ...config.fs_reach, ...patch.fs_reach },
         dreaming: mergedDreaming,
         evolution_approval_mode: patch.evolution_approval_mode ?? config.evolution_approval_mode,
         skill_evolution: mergedSkillEvolution,

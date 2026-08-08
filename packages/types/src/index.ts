@@ -74,7 +74,11 @@ export interface BundleManifest {
   publisher: 'ethos';
   createdAt: string;
   declared: {
-    fsReach: { read: string[]; write: string[] };
+    /** `workdir` is optional so bundles exported before it existed still
+     *  validate. It is disclosed alongside read/write because a declared
+     *  workdir is injected into BOTH derived reach lists — omitting it
+     *  understates the filesystem reach the importer is being asked to grant. */
+    fsReach: { read: string[]; write: string[]; workdir?: string };
     toolset: string[];
     budgetCapUsd?: number;
   };

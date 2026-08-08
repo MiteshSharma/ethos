@@ -711,7 +711,11 @@ function toWire(d: DescribedPersonality): Personality {
     mcp_servers: c.mcp_servers ?? null,
     plugins: c.plugins ?? null,
     fs_reach: c.fs_reach
-      ? { read: c.fs_reach.read ?? null, write: c.fs_reach.write ?? null }
+      ? {
+          read: c.fs_reach.read ?? null,
+          write: c.fs_reach.write ?? null,
+          workdir: c.fs_reach.workdir ?? null,
+        }
       : null,
     ...(c.dreaming
       ? {

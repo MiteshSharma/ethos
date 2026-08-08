@@ -159,6 +159,67 @@ describe('fs_reach round-trip', () => {
     // truthiness guard used to look at read/write only.
     expect(fresh.get('reach-workdir')?.fs_reach?.workdir).toBe('${ETHOS_HOME}/workspace/${self}');
   });
+
+  // The regression guard for the data-loss bug: the web config editor builds
+  // `fs_reach` from its two path lists and sends the whole object. Before
+  // `fs_reach` was shallow-merged, that patch replaced the stored block
+  // wholesale and a hand-declared `workdir` vanished from disk — the agent
+  // silently reverted to process.cwd().
+  it('does NOT drop fs_reach.workdir when a read/write-only patch is applied', async () => {
+    const registry = makeRegistry();
+    await mkdir(join(testDir, 'personalities'), { recursive: true });
+    await registry.loadFromDirectory(join(testDir, 'personalities'));
+    await registry.create({
+      id: 'reach-preserve',
+      name: 'ReachPreserve',
+      toolset: ['read_file'],
+      soulMd: '# ReachPreserve\n',
+      fs_reach: { workdir: '${ETHOS_HOME}/workspace/${self}' },
+    });
+    expect(registry.get('reach-preserve')?.fs_reach?.workdir).toBe(
+      '${ETHOS_HOME}/workspace/${self}',
+    );
+
+    await registry.update('reach-preserve', {
+      fs_reach: { read: ['/data'], write: ['/data/output'] },
+    });
+
+    const raw = await readFile(
+      join(testDir, 'personalities', 'reach-preserve', 'config.yaml'),
+      'utf-8',
+    );
+    expect(raw).toContain('fs_reach.workdir: ${ETHOS_HOME}/workspace/${self}');
+
+    const fresh = makeRegistry();
+    await fresh.loadFromDirectory(join(testDir, 'personalities'));
+    const config = fresh.get('reach-preserve')?.fs_reach;
+    expect(config?.workdir).toBe('${ETHOS_HOME}/workspace/${self}');
+    expect(config?.read).toEqual(['/data']);
+    expect(config?.write).toEqual(['/data/output']);
+  });
+
+  it('clears fs_reach.workdir when the patch carries an empty string', async () => {
+    await seedPersonality('reach-clear', 'name: ReachClear\nfs_reach.workdir: /srv/ethos/out\n');
+    const registry = makeRegistry();
+    await registry.loadFromDirectory(join(testDir, 'personalities'));
+    expect(registry.get('reach-clear')?.fs_reach?.workdir).toBe('/srv/ethos/out');
+
+    // The config editor always sends `workdir`, empty string included, so the
+    // shallow merge never makes the field un-clearable from that surface.
+    await registry.update('reach-clear', {
+      fs_reach: { read: ['/data'], write: [], workdir: '' },
+    });
+
+    const raw = await readFile(
+      join(testDir, 'personalities', 'reach-clear', 'config.yaml'),
+      'utf-8',
+    );
+    expect(raw).not.toContain('fs_reach.workdir');
+
+    const fresh = makeRegistry();
+    await fresh.loadFromDirectory(join(testDir, 'personalities'));
+    expect(fresh.get('reach-clear')?.fs_reach?.workdir).toBeUndefined();
+  });
 });
 
 describe('dreaming round-trip', () => {

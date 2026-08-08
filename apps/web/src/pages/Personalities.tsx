@@ -370,6 +370,7 @@ interface WizardState {
   capabilities: string[];
   fsReachRead: string[];
   fsReachWrite: string[];
+  fsReachWorkdir: string;
   toolset: string[];
   soulMd: string;
   skills: string[];
@@ -398,6 +399,7 @@ function CreateWizard({ existingIds, onClose }: { existingIds: Set<string>; onCl
     capabilities: [],
     fsReachRead: [],
     fsReachWrite: [],
+    fsReachWorkdir: '',
     toolset: ['memory_read', 'memory_write', 'session_search', 'cron'],
     soulMd: SOUL_TEMPLATE,
     skills: [],
@@ -427,8 +429,16 @@ function CreateWizard({ existingIds, onClose }: { existingIds: Set<string>; onCl
             : {}),
         ...(state.provider ? { provider: state.provider as ProviderId } : {}),
         ...(state.capabilities.length > 0 ? { capabilities: state.capabilities } : {}),
-        ...(state.fsReachRead.length > 0 || state.fsReachWrite.length > 0
-          ? { fs_reach: { read: state.fsReachRead, write: state.fsReachWrite } }
+        ...(state.fsReachRead.length > 0 ||
+        state.fsReachWrite.length > 0 ||
+        state.fsReachWorkdir !== ''
+          ? {
+              fs_reach: {
+                read: state.fsReachRead,
+                write: state.fsReachWrite,
+                ...(state.fsReachWorkdir ? { workdir: state.fsReachWorkdir } : {}),
+              },
+            }
           : {}),
         ...(state.plugins.length > 0 ? { plugins: state.plugins } : {}),
         toolset: state.toolset,
@@ -1212,6 +1222,13 @@ function WizardConfigTab({
           onChange={(val) => setState((s) => ({ ...s, fsReachWrite: val }))}
         />
       </Form.Item>
+      <Form.Item label="Working directory" extra={FS_REACH_WORKDIR_HELP}>
+        <Input
+          placeholder={FS_REACH_WORKDIR_PLACEHOLDER}
+          value={state.fsReachWorkdir}
+          onChange={(e) => setState((s) => ({ ...s, fsReachWorkdir: e.target.value }))}
+        />
+      </Form.Item>
     </Form>
   );
 }
@@ -1607,6 +1624,12 @@ function ToolsetAffordances({ draft }: { draft: string }) {
 // biome-ignore lint/suspicious/noTemplateCurlyInString: literal placeholder text for the UI, not a template variable
 const FS_REACH_READ_PLACEHOLDER = 'e.g. /data, ${self}/docs';
 
+// biome-ignore lint/suspicious/noTemplateCurlyInString: literal placeholder text for the UI, not a template variable
+const FS_REACH_WORKDIR_PLACEHOLDER = 'e.g. ${ETHOS_HOME}/workspace/${self}';
+
+const FS_REACH_WORKDIR_HELP =
+  'Where relative paths the agent writes land, and the root of its Documents tab. Always both read- and write-reachable. Empty means the process working directory.';
+
 export function ConfigEditor({ id, personality }: { id: string; personality: Personality }) {
   const qc = useQueryClient();
   const { notification } = AntApp.useApp();
@@ -1621,6 +1644,7 @@ export function ConfigEditor({ id, personality }: { id: string; personality: Per
     capabilities: string[];
     fsReachRead: string[];
     fsReachWrite: string[];
+    fsReachWorkdir: string;
     dreaming: boolean;
     dreamingIdleMinutes: number;
     dreamingMaxPerDay: number;
@@ -1664,6 +1688,7 @@ export function ConfigEditor({ id, personality }: { id: string; personality: Per
       capabilities: personality.capabilities ?? [],
       fsReachRead: personality.fs_reach?.read ?? [],
       fsReachWrite: personality.fs_reach?.write ?? [],
+      fsReachWorkdir: personality.fs_reach?.workdir ?? '',
       dreaming: personality.dreaming?.enable ?? false,
       dreamingIdleMinutes: personality.dreaming?.idleMinutes ?? 60,
       dreamingMaxPerDay: personality.dreaming?.maxPerDay ?? 1,
@@ -1699,6 +1724,7 @@ export function ConfigEditor({ id, personality }: { id: string; personality: Per
       capabilities: string[];
       fsReachRead: string[];
       fsReachWrite: string[];
+      fsReachWorkdir: string;
       dreaming: boolean;
       dreamingIdleMinutes: number;
       dreamingMaxPerDay: number;
@@ -1734,7 +1760,14 @@ export function ConfigEditor({ id, personality }: { id: string; personality: Per
         model,
         provider: values.provider || '',
         capabilities: values.capabilities,
-        fs_reach: { read: values.fsReachRead, write: values.fsReachWrite },
+        // `workdir` is always sent, empty string included: the registry
+        // shallow-merges fs_reach sub-keys, so omitting it would preserve the
+        // stored value and make the field impossible to clear from here.
+        fs_reach: {
+          read: values.fsReachRead,
+          write: values.fsReachWrite,
+          workdir: values.fsReachWorkdir,
+        },
         dreaming: {
           enable: values.dreaming,
           idleMinutes: values.dreamingIdleMinutes,
@@ -1788,6 +1821,7 @@ export function ConfigEditor({ id, personality }: { id: string; personality: Per
           capabilities: values.capabilities ?? [],
           fsReachRead: values.fsReachRead ?? [],
           fsReachWrite: values.fsReachWrite ?? [],
+          fsReachWorkdir: values.fsReachWorkdir ?? '',
           dreaming: values.dreaming ?? false,
           dreamingIdleMinutes: values.dreamingIdleMinutes ?? 60,
           dreamingMaxPerDay: values.dreamingMaxPerDay ?? 1,
@@ -2113,6 +2147,9 @@ export function ConfigEditor({ id, personality }: { id: string; personality: Per
       </Form.Item>
       <Form.Item label="Write paths" name="fsReachWrite">
         <Select mode="tags" allowClear placeholder="e.g. /data/output" tokenSeparators={[',']} />
+      </Form.Item>
+      <Form.Item label="Working directory" name="fsReachWorkdir" extra={FS_REACH_WORKDIR_HELP}>
+        <Input placeholder={FS_REACH_WORKDIR_PLACEHOLDER} />
       </Form.Item>
       <Form.Item>
         <Button type="primary" htmlType="submit" loading={mut.isPending}>

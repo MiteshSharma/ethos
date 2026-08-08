@@ -303,6 +303,9 @@ const PersonalityCreateInput = z.object({
     .object({
       read: z.array(z.string()).optional(),
       write: z.array(z.string()).optional(),
+      /** Declared working directory. Tokens (`${ETHOS_HOME}`, `${self}`,
+       *  `${CWD}`) are stored verbatim and resolved at turn setup. */
+      workdir: z.string().optional(),
     })
     .optional(),
   skill_evolution: z
@@ -341,10 +344,14 @@ const PersonalityUpdateInput = z.object({
   plugins: z.array(z.string()).optional(),
   capabilities: z.array(z.string()).optional(),
   provider: ProviderIdSchema.or(z.literal('')).optional(),
+  /** Sub-keys are shallow-merged onto the stored block, so a patch carrying
+   *  only `read`/`write` leaves an existing `workdir` in place. `''` clears
+   *  the workdir. */
   fs_reach: z
     .object({
       read: z.array(z.string()).optional(),
       write: z.array(z.string()).optional(),
+      workdir: z.string().optional(),
     })
     .optional(),
   /** Idle-time dreaming controls. `enable` toggles dreaming; idleMinutes /

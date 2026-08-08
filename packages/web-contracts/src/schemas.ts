@@ -101,6 +101,9 @@ export const PersonalitySchema = z.object({
     .object({
       read: z.array(z.string()).nullable(),
       write: z.array(z.string()).nullable(),
+      /** Declared working directory, substitution tokens unresolved. null =
+       *  undeclared (the agent falls back to the process working directory). */
+      workdir: z.string().nullable(),
     })
     .nullable(),
   /** Idle-time dreaming state. Optional (omitted when unset) so the editor

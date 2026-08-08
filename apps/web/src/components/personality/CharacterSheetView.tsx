@@ -65,6 +65,7 @@ export function CharacterSheetView({ personality }: { personality: Personality }
   const plugins = personality.plugins ?? [];
   const read = personality.fs_reach?.read ?? [];
   const write = personality.fs_reach?.write ?? [];
+  const workdir = personality.fs_reach?.workdir;
 
   const posture = sheet?.posture ?? null;
 
@@ -210,6 +211,20 @@ export function CharacterSheetView({ personality }: { personality: Personality }
             )}
           </div>
         )}
+        {workdir ? (
+          <div
+            style={{
+              display: 'grid',
+              gridTemplateColumns: 'auto 1fr',
+              gap: '4px 16px',
+              marginTop: 6,
+              fontSize: 13,
+            }}
+          >
+            <Typography.Text type="secondary">Workdir</Typography.Text>
+            <span style={{ fontFamily: MONO, fontSize: 12.5 }}>{workdir}</span>
+          </div>
+        ) : null}
       </section>
 
       <section style={{ marginBottom: 20 }}>
