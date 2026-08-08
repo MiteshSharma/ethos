@@ -26,6 +26,13 @@ export default defineConfig({
       '@ethosagent/web-contracts': resolve(root, 'packages/web-contracts/src'),
       '@ethosagent/ui-components': resolve(root, 'packages/ui-components/src'),
     },
+    // Vite's default order puts '.js' ahead of '.ts'/'.tsx'. Several workspace
+    // packages still carry committed compiled mirrors next to their sources
+    // (`packages/ui-components/src/*.js`), which silently shadowed the real
+    // `.tsx` in every build — edits to the source were no-ops. TypeScript
+    // first matches what esbuild/tsup already do, so one resolution order
+    // holds across bundlers. Same class of bug as f7e920f.
+    extensions: ['.mts', '.ts', '.tsx', '.mjs', '.js', '.jsx', '.json'],
   },
   server: {
     port: 5173,

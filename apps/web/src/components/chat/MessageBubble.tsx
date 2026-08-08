@@ -1,4 +1,4 @@
-import { ContentRenderer } from '@ethosagent/ui-components';
+import { ContentRenderer, type FenceRendererResolver } from '@ethosagent/ui-components';
 import { useQuery } from '@tanstack/react-query';
 import { formatBytes, type MessageAttachment } from '../../lib/attachments';
 import type { AssistantBlock, AssistantTurn, UserMessage } from '../../lib/chat-reducer';
@@ -55,7 +55,16 @@ function AttachmentChip({ attachment }: { attachment: MessageAttachment }) {
   );
 }
 
-export function AssistantBubble({ turn, streaming }: { turn: AssistantTurn; streaming?: boolean }) {
+export function AssistantBubble({
+  turn,
+  streaming,
+  fenceRenderers,
+}: {
+  turn: AssistantTurn;
+  streaming?: boolean;
+  /** Fence-upgrade decision for this surface. Must be referentially stable. */
+  fenceRenderers?: FenceRendererResolver;
+}) {
   const lastBlock = turn.blocks[turn.blocks.length - 1];
   const cursorAfter = streaming && lastBlock?.kind === 'text';
   const fullText = turn.blocks
@@ -76,6 +85,7 @@ export function AssistantBubble({ turn, streaming }: { turn: AssistantTurn; stre
             key={blockKey(block, idx)}
             block={block}
             streamingTail={streaming && idx === turn.blocks.length - 1}
+            fenceRenderers={fenceRenderers}
           />
         ))}
         {streaming && !cursorAfter && lastBlock?.kind === 'tool' ? (
@@ -90,14 +100,23 @@ export function AssistantBubble({ turn, streaming }: { turn: AssistantTurn; stre
 function BlockRenderer({
   block,
   streamingTail,
+  fenceRenderers,
 }: {
   block: AssistantBlock;
   streamingTail?: boolean;
+  fenceRenderers?: FenceRendererResolver;
 }) {
   if (block.kind === 'text') {
     return (
       <>
-        <ContentRenderer content={block.content} format="markdown" />
+        <ContentRenderer
+          content={block.content}
+          format="markdown"
+          fenceRenderers={fenceRenderers}
+          // Only the tail block of a live turn can hold an unclosed fence;
+          // earlier blocks in the same turn are already complete.
+          streaming={streamingTail}
+        />
         {streamingTail ? <span className="streaming-cursor" aria-hidden="true" /> : null}
       </>
     );

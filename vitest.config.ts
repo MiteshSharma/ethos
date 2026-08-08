@@ -50,7 +50,15 @@ const srcAliases = {
 };
 
 export default defineConfig({
-  resolve: { alias: srcAliases },
+  resolve: {
+    alias: srcAliases,
+    // Mirrors apps/web/vite.config.ts: TypeScript sources win over the
+    // committed compiled `.js` mirrors that sit next to some `.tsx` files
+    // (packages/ui-components, apps/tui). Vite's default order resolves the
+    // stale mirror, so tests would assert against code the source no longer
+    // matches.
+    extensions: ['.mts', '.ts', '.tsx', '.mjs', '.js', '.jsx', '.json'],
+  },
   test: {
     include: [
       'packages/*/src/**/*.test.ts',

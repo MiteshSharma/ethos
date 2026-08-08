@@ -4776,6 +4776,27 @@ textarea {
   color: var(--ethos-text-dim);
 }
 
+/* Skill-declared fence renderers (```echarts). A chart is data-dense content,
+   so it earns a bordered container under the DESIGN.md card rule; the notice
+   is a plain line, not a card. */
+.chart-block {
+  margin: 8px 0;
+  border-radius: 8px;
+  overflow: hidden;
+  border: 1px solid var(--ethos-border);
+  background: var(--ethos-bg-elevated);
+}
+
+.chart-block-canvas {
+  width: 100%;
+}
+
+.fence-version-notice {
+  margin: 4px 0 8px;
+  font-size: 12px;
+  color: var(--ethos-text-dim);
+}
+
 /* HtmlBlock */
 .html-block {
   margin: 8px 0;

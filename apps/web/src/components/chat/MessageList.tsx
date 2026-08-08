@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { useFenceResolver } from '../../features/renderers/resolver';
 import type { AssistantTurn, ChatMessage } from '../../lib/chat-reducer';
 import { SaveToDashboardContextMenu } from '../dashboard/SaveToDashboardContextMenu';
 import { SaveToDashboardModal } from '../dashboard/SaveToDashboardModal';
@@ -29,6 +30,10 @@ export function MessageList({
   const [saveModalOpen, setSaveModalOpen] = useState(false);
   const [saveModalUserMessage, setSaveModalUserMessage] = useState<string | undefined>();
   const [showScrollDown, setShowScrollDown] = useState(false);
+  // One resolver for the whole list, derived from the personality actually
+  // being rendered with. History re-decides live on a personality switch —
+  // nothing is stamped onto a message.
+  const fenceRenderers = useFenceResolver(personalityId ?? '');
 
   const onScroll = () => {
     const el = listRef.current;
@@ -91,11 +96,13 @@ export function MessageList({
           <UserBubble key={m.id} message={m} />
         ) : (
           <SaveToDashboardContextMenu key={m.id} onSaveToDashboard={() => openSaveModal(idx)}>
-            <AssistantBubble turn={m} />
+            <AssistantBubble turn={m} fenceRenderers={fenceRenderers} />
           </SaveToDashboardContextMenu>
         ),
       )}
-      {currentTurn ? <AssistantBubble turn={currentTurn} streaming /> : null}
+      {currentTurn ? (
+        <AssistantBubble turn={currentTurn} streaming fenceRenderers={fenceRenderers} />
+      ) : null}
       {isThinking ? <ThinkingBubble /> : null}
       <SaveToDashboardModal
         open={saveModalOpen}
