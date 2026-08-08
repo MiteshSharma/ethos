@@ -17,6 +17,7 @@ import {
   DefaultToolRegistry,
   DefaultToolResultReducerRegistry,
   DefaultTtsProviderRegistry,
+  deriveFsReachPaths,
   FileClarifyStore,
 } from '@ethosagent/core';
 import { DockerExecutionBackend } from '@ethosagent/execution-docker';
@@ -63,6 +64,7 @@ import type {
   ExecutionBackendRegistry,
   HookRegistry,
   LLMProviderRegistry,
+  Logger,
   MemoryProviderRegistry,
   PersonalityConfig,
   StorageRegistry,
@@ -105,6 +107,44 @@ export interface InfrastructureResult {
    * just at load time.
    */
   constitution?: Constitution;
+}
+
+/**
+ * The `personalityFsReach` handed to `CapabilityBackends` — the allow set behind
+ * every `from-personality` tool capability (`ctx.scopedFs`).
+ *
+ * It goes through `deriveFsReachPaths` for the same reason ScopedStorage and the
+ * docker mounts do: three copies of one rule drift. Reading the raw declared
+ * config here meant an undeclared personality got an EMPTY set — which
+ * `ScopedFsImpl` treats as deny-all — while the other two layers gave it
+ * `ownDir + cwd`; and `${…}` tokens went unsubstituted.
+ *
+ * `EmptySubstitutionError` degrades to deny-all with a warning rather than
+ * throwing. Warn-and-degrade matches `ensureFsReachDirs` (one bad path must not
+ * take down the whole compose), and deny-all is the correct DIRECTION to degrade
+ * an allowlist in: an unresolvable declared path must never be treated as
+ * broader reach. The execution backend still throws the same error at exec time,
+ * so the loud failure survives where it can be acted on.
+ */
+export function derivePersonalityFsReach(
+  personality: PersonalityConfig,
+  vars: { ethosHome: string; cwd: string },
+  log: Logger,
+): { read: string[]; write: string[] } {
+  try {
+    const { read, write } = deriveFsReachPaths(personality, {
+      ethosHome: vars.ethosHome,
+      self: personality.id,
+      cwd: vars.cwd,
+    });
+    return { read, write };
+  } catch (err) {
+    log.warn('fs_reach: could not derive tool reach; falling back to deny-all', {
+      personalityId: personality.id,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return { read: [], write: [] };
+  }
 }
 
 /**
@@ -354,10 +394,11 @@ export async function buildInfrastructure(
       },
       logger: log,
     }),
-    personalityFsReach: {
-      read: effectiveActivePerson.fs_reach?.read ?? [],
-      write: effectiveActivePerson.fs_reach?.write ?? [],
-    },
+    personalityFsReach: derivePersonalityFsReach(
+      effectiveActivePerson,
+      { ethosHome: dataDir, cwd: wiringCtx.workingDir },
+      log,
+    ),
     personalityNetworkPolicy: effectiveActivePerson.safety?.network ?? {},
     safeFetch,
     alwaysDenyPaths: defaultAlwaysDeny(),

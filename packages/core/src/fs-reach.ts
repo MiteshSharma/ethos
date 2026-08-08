@@ -1,7 +1,7 @@
 // biome-ignore-all lint/suspicious/noTemplateCurlyInString: fs_reach substitution
 // tokens (`${ETHOS_HOME}` etc.) are literal markers resolved at runtime, not JS
 // template strings.
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import type { PersonalityConfig } from '@ethosagent/types';
 
 /**
@@ -11,6 +11,12 @@ import type { PersonalityConfig } from '@ethosagent/types';
  * drift the failure is silent data loss: ScopedStorage permits a write to a
  * path the container never mounted, the container writes into its own ephemeral
  * layer, and `docker run --rm` discards it. One function, no copies.
+ *
+ * The derivation also yields the personality's WORKING DIRECTORY — the third
+ * thing `fs_reach` decides. It lives here rather than in a sibling function
+ * because the workdir *is* the `${CWD}` the read/write entries substitute
+ * against; splitting them would reintroduce exactly the drift this module
+ * exists to prevent.
  */
 
 export class EmptySubstitutionError extends Error {
@@ -58,32 +64,63 @@ export function substitute(template: string, vars: FsReachVars): string {
   return out;
 }
 
+/** Trailing slashes are a prefix-matching artifact, not part of the identity. */
+const trimSlash = (path: string): string => (path.length > 1 ? path.replace(/\/+$/, '') : path);
+
 /**
- * Derive a personality's effective read/write filesystem reach.
+ * Add `workdir` to a derived list unless the list already reaches exactly it.
+ * Trailing slash matches the `ownDir` convention.
+ */
+function withWorkdir(paths: string[], workdir: string): string[] {
+  const target = trimSlash(workdir);
+  return paths.some((path) => trimSlash(path) === target) ? paths : [`${workdir}/`, ...paths];
+}
+
+/**
+ * Derive a personality's effective working directory and read/write reach.
+ *
+ * `workdir` is the declared `fs_reach.workdir`, substituted and resolved to an
+ * absolute path; when undeclared it is `vars.cwd`. It then serves as the `cwd`
+ * for the rest of the derivation — the workdir IS the personality's cwd, so
+ * `${CWD}` in a read/write entry and the `cwd` entry in the defaults both mean
+ * the workdir.
  *
  * Declared `fs_reach.read` / `fs_reach.write` win when non-empty; each entry is
  * substituted. When a list is absent or empty the defaults apply:
  *
- *   read  = [ownDir, `${ethosHome}/skills/`, cwd]
- *   write = [ownDir, cwd]
+ *   read  = [ownDir, `${ethosHome}/skills/`, workdir]
+ *   write = [ownDir, workdir]
  *
  * where `ownDir = ${ethosHome}/personalities/<self>/`. The defaults use the raw
  * variable values and never call `substitute`, so a personality that declares
  * nothing can never hit `EmptySubstitutionError`.
+ *
+ * A DECLARED workdir is additionally injected (deduped) into both lists: a
+ * declared `write` REPLACES the defaults, so declaring both a workdir and a
+ * write list would otherwise leave the workdir unwritable. The injection is
+ * conditional on the workdir being declared — with no declaration the returned
+ * lists are byte-for-byte what they were before `workdir` existed, so an
+ * existing personality's reach is never silently widened to include the cwd.
  */
 export function deriveFsReachPaths(
   personality: PersonalityConfig,
   vars: FsReachVars,
-): { read: string[]; write: string[] } {
-  const ownDir = `${join(vars.ethosHome, 'personalities', vars.self)}/`;
+): { read: string[]; write: string[]; workdir: string } {
   const reach = personality.fs_reach;
+  const declaredWorkdir = reach?.workdir;
+  const workdir = declaredWorkdir ? resolve(substitute(declaredWorkdir, vars)) : vars.cwd;
+  const effective: FsReachVars = { ...vars, cwd: workdir };
+
+  const ownDir = `${join(effective.ethosHome, 'personalities', effective.self)}/`;
   const read =
     reach?.read && reach.read.length > 0
-      ? reach.read.map((path) => substitute(path, vars))
-      : [ownDir, `${join(vars.ethosHome, 'skills')}/`, vars.cwd];
+      ? reach.read.map((path) => substitute(path, effective))
+      : [ownDir, `${join(effective.ethosHome, 'skills')}/`, effective.cwd];
   const write =
     reach?.write && reach.write.length > 0
-      ? reach.write.map((path) => substitute(path, vars))
-      : [ownDir, vars.cwd];
-  return { read, write };
+      ? reach.write.map((path) => substitute(path, effective))
+      : [ownDir, effective.cwd];
+
+  if (!declaredWorkdir) return { read, write, workdir };
+  return { read: withWorkdir(read, workdir), write: withWorkdir(write, workdir), workdir };
 }

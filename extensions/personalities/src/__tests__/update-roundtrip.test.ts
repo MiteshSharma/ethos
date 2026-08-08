@@ -137,6 +137,28 @@ describe('fs_reach round-trip', () => {
     expect(raw).toContain('fs_reach.read: /data, ${self}/docs');
     expect(raw).toContain('fs_reach.write: /data/output');
   });
+
+  it('persists fs_reach.workdir through update and re-load', async () => {
+    await seedPersonality('reach-workdir', 'name: ReachWorkdir\n');
+    const registry = makeRegistry();
+    await registry.loadFromDirectory(join(testDir, 'personalities'));
+
+    await registry.update('reach-workdir', {
+      fs_reach: { workdir: '${ETHOS_HOME}/workspace/${self}' },
+    });
+
+    const raw = await readFile(
+      join(testDir, 'personalities', 'reach-workdir', 'config.yaml'),
+      'utf-8',
+    );
+    expect(raw).toContain('fs_reach.workdir: ${ETHOS_HOME}/workspace/${self}');
+
+    const fresh = makeRegistry();
+    await fresh.loadFromDirectory(join(testDir, 'personalities'));
+    // A workdir-only declaration must still construct fs_reach — the loader's
+    // truthiness guard used to look at read/write only.
+    expect(fresh.get('reach-workdir')?.fs_reach?.workdir).toBe('${ETHOS_HOME}/workspace/${self}');
+  });
 });
 
 describe('dreaming round-trip', () => {
@@ -545,6 +567,7 @@ describe('lossless update — full config round-trip', () => {
     'plugins: kanban notes',
     'fs_reach.read: /data, ${self}/docs',
     'fs_reach.write: /data/output',
+    'fs_reach.workdir: ${ETHOS_HOME}/workspace/${self}',
     'streamingTimeoutMs: 90000',
     'budgetCapUsd: 12.5',
     'evolution_approval_mode: user',

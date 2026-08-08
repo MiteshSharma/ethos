@@ -227,10 +227,19 @@ export interface PersonalityConfig {
    *   read:  [~/.ethos/personalities/<self>/, ~/.ethos/skills/, ${CWD}]
    *   write: [~/.ethos/personalities/<self>/, ${CWD}]
    *
+   * `workdir` is this personality's working directory — where its relative
+   * file paths land. It takes the same substitutions, must resolve absolute,
+   * and BECOMES the `${CWD}` that the read/write entries substitute against.
+   * A declared workdir is always reachable: it is added to both derived
+   * lists, because a declared `write` REPLACES the defaults and would
+   * otherwise leave the workdir unwritable. When `workdir` is unset the
+   * working directory is the process cwd and read/write derive exactly as
+   * before.
+   *
    * Counts as ONE field for the schema-freeze gate (the nested shape is
    * a leaf type).
    */
-  fs_reach?: { read?: string[]; write?: string[] };
+  fs_reach?: { read?: string[]; write?: string[]; workdir?: string };
   /**
    * MCP servers this personality can reach. Server configs stay global in
    * ~/.ethos/mcp.json; this is a per-role allowlist keyed by server name.

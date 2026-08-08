@@ -15,6 +15,10 @@ import type { Logger, PersonalityConfig, Storage } from '@ethosagent/types';
  *   not exist on the host at all.
  * - local: `Storage.write()` requires the parent directory to already exist.
  *
+ * A declared `fs_reach.workdir` is part of the derived write set, so it is
+ * pre-created here too — the personality's working directory exists before its
+ * first relative write.
+ *
  * Read-only reach is NOT created: a read prefix that doesn't exist is simply an
  * empty scope, and materializing it would grant the personality a directory it
  * never asked to own.

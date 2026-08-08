@@ -412,8 +412,11 @@ export function renderCharacterSheet(
     lines.push(`- Read: ${read.length > 0 ? read.join(', ') : '(none)'}`);
     lines.push(`- Write: ${write.length > 0 ? write.join(', ') : '(none)'}`);
   } else {
-    lines.push('- (default — personality directory only)');
+    lines.push(
+      '- (default — read: own directory, ~/.ethos/skills/, working directory; write: own directory, working directory)',
+    );
   }
+  if (reach?.workdir) lines.push(`- Workdir: ${reach.workdir}`);
 
   const soul = parseLivingSoul(soulMd);
   const isLivingSoul = soul.expression !== '' || soul.learningLog.length > 0;

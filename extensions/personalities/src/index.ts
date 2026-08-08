@@ -594,7 +594,7 @@ export interface CreatePersonalityInput {
   capabilities?: string[];
   mcp_servers?: string[];
   plugins?: string[];
-  fs_reach?: { read?: string[]; write?: string[] };
+  fs_reach?: { read?: string[]; write?: string[]; workdir?: string };
   skill_evolution?: {
     enabled?: boolean;
     min_tool_calls?: number;
@@ -619,7 +619,7 @@ export interface UpdatePersonalityPatch {
   plugins?: string[];
   capabilities?: string[];
   provider?: string;
-  fs_reach?: { read?: string[]; write?: string[] };
+  fs_reach?: { read?: string[]; write?: string[]; workdir?: string };
   /** Partial dreaming config — shallow-merged onto the existing dreaming block
    *  so a patch that carries only `enable` (or only a cadence number) never
    *  drops sibling fields. */
@@ -946,7 +946,14 @@ export class FilePersonalityRegistry implements PersonalityRegistry {
         }
       }
       if (patch.fs_reach !== undefined) {
-        const allPaths = [...(patch.fs_reach.read ?? []), ...(patch.fs_reach.write ?? [])];
+        // workdir is validated by the same predicate — it lands in both derived
+        // reach lists, so an unchecked one would be a hole straight through this
+        // guard.
+        const allPaths = [
+          ...(patch.fs_reach.read ?? []),
+          ...(patch.fs_reach.write ?? []),
+          ...(patch.fs_reach.workdir ? [patch.fs_reach.workdir] : []),
+        ];
         for (const p of allPaths) {
           if (/[\n\r,]/.test(p) || p.includes('\0')) {
             throw new EthosError({
@@ -1389,17 +1396,19 @@ export class FilePersonalityRegistry implements PersonalityRegistry {
         ? Number.parseInt(cfg.streamingTimeoutMs, 10)
         : undefined;
 
-    // fs_reach.read / fs_reach.write are comma-separated path lists.
-    // Substitutions (${ETHOS_HOME}, ${self}, ${CWD}) are resolved by
-    // the AgentLoop at turn construction time — the registry only
-    // surfaces the raw strings.
+    // fs_reach.read / fs_reach.write are comma-separated path lists;
+    // fs_reach.workdir is a single path. Substitutions (${ETHOS_HOME},
+    // ${self}, ${CWD}) are resolved by the AgentLoop at turn construction
+    // time — the registry only surfaces the raw strings.
     const fsReachRead = parseCsv(cfg['fs_reach.read']);
     const fsReachWrite = parseCsv(cfg['fs_reach.write']);
+    const fsReachWorkdir = cfg['fs_reach.workdir']?.trim() || undefined;
     const fsReach: PersonalityConfig['fs_reach'] | undefined =
-      fsReachRead || fsReachWrite
+      fsReachRead || fsReachWrite || fsReachWorkdir
         ? {
             ...(fsReachRead ? { read: fsReachRead } : {}),
             ...(fsReachWrite ? { write: fsReachWrite } : {}),
+            ...(fsReachWorkdir ? { workdir: fsReachWorkdir } : {}),
           }
         : undefined;
 
@@ -1986,6 +1995,9 @@ function renderConfigYaml(input: RenderConfigInput): string {
   }
   if (input.fs_reach?.write !== undefined && input.fs_reach.write.length > 0) {
     lines.push(`fs_reach.write: ${input.fs_reach.write.join(', ')}`);
+  }
+  if (input.fs_reach?.workdir) {
+    lines.push(`fs_reach.workdir: ${input.fs_reach.workdir}`);
   }
   if (input.streamingTimeoutMs !== undefined) {
     lines.push(`streamingTimeoutMs: ${input.streamingTimeoutMs}`);

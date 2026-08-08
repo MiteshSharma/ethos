@@ -169,7 +169,11 @@ export function CharacterSheetView({ personality }: { personality: Personality }
       <section style={{ marginBottom: 20 }}>
         <SectionLabel>Filesystem reach</SectionLabel>
         {read.length === 0 && write.length === 0 ? (
-          <div style={{ marginTop: 6 }}>{dim('(default — personality directory only)')}</div>
+          <div style={{ marginTop: 6 }}>
+            {dim(
+              '(default — read: own directory, ~/.ethos/skills/, working directory; write: own directory, working directory)',
+            )}
+          </div>
         ) : (
           <div
             style={{

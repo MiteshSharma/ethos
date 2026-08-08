@@ -90,6 +90,29 @@ describe('update validation rejects bad inputs', () => {
         /fs_reach/,
       );
     });
+
+    // workdir lands in both derived reach lists, so it must clear the same bar
+    // as read/write — an unvalidated workdir is a hole straight through this
+    // guard.
+    it('rejects path traversal (..) in workdir', async () => {
+      await seedPersonality('v-workdir-dotdot');
+      const registry = makeRegistry();
+      await registry.loadFromDirectory(join(testDir, 'personalities'));
+
+      await expect(
+        registry.update('v-workdir-dotdot', { fs_reach: { workdir: '/srv/../etc' } }),
+      ).rejects.toThrow(/fs_reach/);
+    });
+
+    it('rejects null bytes in workdir', async () => {
+      await seedPersonality('v-workdir-nul');
+      const registry = makeRegistry();
+      await registry.loadFromDirectory(join(testDir, 'personalities'));
+
+      await expect(
+        registry.update('v-workdir-nul', { fs_reach: { workdir: '/srv/documents\0/etc' } }),
+      ).rejects.toThrow(/invalid characters/);
+    });
   });
 
   describe('capabilities validation', () => {
