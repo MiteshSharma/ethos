@@ -1,6 +1,6 @@
 {
   "name": "@ethosagent/web-contracts",
-  "version": "0.6.1",
+  "version": "0.6.2",
   "type": "module",
   "description": "Typed oRPC contract and Zod schemas for the Ethos web API",
   "license": "MIT",
