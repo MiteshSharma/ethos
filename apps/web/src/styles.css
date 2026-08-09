@@ -5193,3 +5193,46 @@ textarea {
   text-transform: uppercase;
   color: var(--ethos-text-dim);
 }
+
+/* ── Personality picker + favourite star ──────────────────────────── */
+
+.personality-select {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* Dropdown row: name on the left, star flush right. The option content box
+   is `overflow: hidden`, so the name owns the ellipsis and the star never
+   gets squeezed out by a long personality name. */
+.personality-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.personality-option-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Filled vs outline carries the meaning; color is only a scan aid, so this
+   stays inside the text ramp rather than borrowing a semantic color. */
+.personality-star {
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  font-size: 13px;
+  line-height: 1;
+  color: var(--ethos-text-tertiary);
+  transition: color var(--motion-fast, 80ms) ease;
+}
+
+.personality-star:hover,
+.personality-star--on {
+  color: var(--ethos-text);
+}

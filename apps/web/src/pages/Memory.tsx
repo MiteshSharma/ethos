@@ -20,6 +20,9 @@ import {
 } from 'antd';
 import type { Dayjs } from 'dayjs';
 import { useEffect, useState } from 'react';
+import { PersonalitySelect } from '../components/personality/PersonalitySelect';
+import { useFavouritePersonality } from '../hooks/useFavouritePersonality';
+import { resolvePersonalityId } from '../lib/favouritePersonality';
 import { rpc } from '../rpc';
 
 type MemoryHistorySource = MemoryHistoryEntry['source'];
@@ -30,13 +33,20 @@ export function Memory() {
   const [activeStore, setActiveStore] = useState<MemoryStoreId>('memory');
   const [personalityId, setPersonalityId] = useState<string | null>(null);
   const [userId, setUserId] = useState<string | null>(null);
+  const { favouriteId, toggleFavourite } = useFavouritePersonality();
 
   const personalitiesQuery = useQuery({
     queryKey: ['personalities', 'list'],
     queryFn: () => rpc.personalities.list({}),
   });
 
-  const effectivePersonalityId = personalityId ?? personalitiesQuery.data?.defaultId ?? null;
+  const personalities = personalitiesQuery.data?.items ?? [];
+  const effectivePersonalityId = resolvePersonalityId({
+    selectedId: personalityId,
+    favouriteId,
+    defaultId: personalitiesQuery.data?.defaultId ?? null,
+    available: personalities.map((p) => p.id),
+  });
 
   const usersQuery = useQuery({
     queryKey: ['memory', 'listUsers'],
@@ -77,7 +87,6 @@ export function Memory() {
   const fileByStore = new Map(files.map((f) => [f.store, f] as const));
   const memoryMode = configQuery.data?.memory ?? 'markdown';
 
-  const personalities = personalitiesQuery.data?.items ?? [];
   const users = usersQuery.data?.users ?? [];
 
   return (
@@ -86,16 +95,13 @@ export function Memory() {
         <Typography.Text type="secondary" style={{ fontSize: 12 }}>
           Personality
         </Typography.Text>
-        <Select
-          size="small"
-          style={{ width: 200 }}
-          value={effectivePersonalityId ?? undefined}
-          onChange={(v) => setPersonalityId(v)}
+        <PersonalitySelect
+          personalities={personalities}
+          value={effectivePersonalityId}
+          onChange={setPersonalityId}
           loading={personalitiesQuery.isLoading}
-          options={personalities.map((p) => ({
-            value: p.id,
-            label: p.name,
-          }))}
+          favouriteId={favouriteId}
+          onToggleFavourite={toggleFavourite}
         />
         {view === 'files' && activeStore === 'user' ? (
           <>

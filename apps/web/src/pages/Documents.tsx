@@ -1,13 +1,15 @@
 import { useQuery } from '@tanstack/react-query';
-import { Empty, Popconfirm, Select, Spin, Table, Tag, Tooltip, Typography } from 'antd';
+import { Empty, Popconfirm, Spin, Table, Tag, Tooltip, Typography } from 'antd';
 import { useState } from 'react';
 import { DocumentPreviewModal } from '../components/documents/DocumentPreviewModal';
+import { PersonalitySelect } from '../components/personality/PersonalitySelect';
 import { useDocumentDelete } from '../features/documents/api/mutations';
 import {
   type DocumentEntry,
   useDocumentsList,
   useDocumentsRoot,
 } from '../features/documents/api/queries';
+import { useFavouritePersonality } from '../hooks/useFavouritePersonality';
 import { formatBytes } from '../lib/attachments';
 import {
   documentCrumbs,
@@ -15,6 +17,7 @@ import {
   documentRowActions,
   sortDocumentEntries,
 } from '../lib/documents';
+import { resolvePersonalityId } from '../lib/favouritePersonality';
 import { rpc } from '../rpc';
 
 // Documents — the operator's view of the files the agent writes.
@@ -31,14 +34,20 @@ import { rpc } from '../rpc';
 
 export function Documents() {
   const [personalityId, setPersonalityId] = useState<string | null>(null);
+  const { favouriteId, toggleFavourite } = useFavouritePersonality();
 
   const personalitiesQuery = useQuery({
     queryKey: ['personalities', 'list'],
     queryFn: () => rpc.personalities.list({}),
   });
 
-  const effectiveId = personalityId ?? personalitiesQuery.data?.defaultId ?? null;
   const personalities = personalitiesQuery.data?.items ?? [];
+  const effectiveId = resolvePersonalityId({
+    selectedId: personalityId,
+    favouriteId,
+    defaultId: personalitiesQuery.data?.defaultId ?? null,
+    available: personalities.map((p) => p.id),
+  });
 
   return (
     <div className="documents-tab">
@@ -48,13 +57,13 @@ export function Documents() {
         <Typography.Text type="secondary" style={{ fontSize: 12 }}>
           Personality
         </Typography.Text>
-        <Select
-          size="small"
-          style={{ width: 200 }}
-          value={effectiveId ?? undefined}
+        <PersonalitySelect
+          personalities={personalities}
+          value={effectiveId}
           onChange={setPersonalityId}
           loading={personalitiesQuery.isLoading}
-          options={personalities.map((p) => ({ value: p.id, label: p.name }))}
+          favouriteId={favouriteId}
+          onToggleFavourite={toggleFavourite}
         />
       </header>
 
