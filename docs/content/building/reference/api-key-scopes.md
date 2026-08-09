@@ -4,10 +4,10 @@ description: "All API key scopes and what each one gates."
 kind: reference
 audience: developer
 slug: api-key-scopes
-updated: 2026-05-13
+updated: 2026-08-09
 ---
 
-API keys are created via the `apiKeys.create` RPC (cookie-auth only). Each key carries a set of scopes that determine which contract namespaces the bearer can access.
+A scope is one permission on one API key. Each key carries a set of them, and the set decides which surfaces the bearer reaches: the contract namespaces on `/rpc/*`, the SSE endpoint, and the OpenAI-compatible `/v1/*` endpoints. Two mint paths issue keys from this same vocabulary — the `apiKeys.create` RPC (cookie-auth only, used by the web Settings tab) and `ethos api-key create` on the CLI.
 
 ## Source {#source}
 
@@ -19,12 +19,22 @@ API keys are created via the `apiKeys.create` RPC (cookie-auth only). Each key c
 |---|---|
 | `sessions:read` | Read access to `sessions.list` and `sessions.get`. |
 | `sessions:write` | Write access to `sessions.fork`, `sessions.delete`, and `sessions.update`. |
-| `chat:send` | Access to `chat.send` and `chat.abort`. |
+| `chat` | The whole OpenAI-compatible surface: `/v1/models` and `/v1/chat/completions`. Asserted once at the `/v1` mount, so it covers every route under it. |
+| `chat:send` | Access to `chat.send` and `chat.abort` on `/rpc/*`. |
 | `personalities:read` | Read access to `personalities.list`, `personalities.get`, `personalities.characterSheet`, and personality skills read methods. |
 | `memory:read` | Read access to `memory.list` and `memory.get`. |
 | `memory:write` | Write access to `memory.write`. Implies `memory:read` at the server level. |
 | `tools:approve` | Access to `tools.approve` and `tools.deny` for the tool approval workflow. |
 | `events:subscribe` | Access to the SSE endpoint (`/sse/sessions/:sessionId`). Required for `EventStream`. |
+
+## `chat` vs `chat:send` {#chat-scopes}
+
+Two scopes read as "chat" and neither implies the other.
+
+- `chat` gates `/v1/*`, the OpenAI-compatible surface. Grant it to Cursor, Aider, Open WebUI, and the OpenAI Python/Node SDKs.
+- `chat:send` gates the `chat.send` and `chat.abort` RPC procedures on `/rpc/*`. Grant it to a Mission Control built on `@ethosagent/sdk`.
+- A key that drives both needs both listed.
+- `ethos api-key create` defaults `--scopes` to `chat`, because `/v1/*` is the surface the CLI mints keys for. The web UI has no default — pick the scopes in the create form.
 
 ## ApiKeyMetadata {#metadata}
 
@@ -61,6 +71,12 @@ const { secret, key } = await client.rpc.apiKeys.create({
 // `key` is the ApiKeyMetadata for the new key.
 ```
 
+The CLI mints from the same vocabulary, and rejects a scope that is not in the table above:
+
+```bash
+ethos api-key create --name "openai-clients" --scopes chat
+```
+
 ## Minimum viable scope set {#minimum}
 
 A Mission Control that sends messages and renders responses needs at minimum:
@@ -68,3 +84,11 @@ A Mission Control that sends messages and renders responses needs at minimum:
 - `chat:send` -- to start turns
 - `events:subscribe` -- to receive streamed responses
 - `sessions:read` -- to list and fetch session history
+
+An OpenAI-compatible client needs exactly one scope: `chat`.
+
+## See also {#see-also}
+
+- [Serve Ethos as an OpenAI-compatible backend](../how-to/openai-server-chat.md) -- the `/v1/*` surface the `chat` scope gates.
+- [Migrate from cookie auth to an API key](../how-to/migrate-cookie-to-api-key.md) -- moving an existing Mission Control onto bearer tokens.
+- [SDK client reference](sdk-client.md) -- the `@ethosagent/sdk` surface each `/rpc/*` scope unlocks.

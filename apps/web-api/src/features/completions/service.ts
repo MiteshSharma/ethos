@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { AgentEvent, AgentLoop } from '@ethosagent/core';
-import { createEventTranslator } from '@ethosagent/surface-kit';
+import { createEventTranslator, type EventTranslator } from '@ethosagent/surface-kit';
 import { type Attachment, EthosError } from '@ethosagent/types';
 import type {
   ChatCompletionChunk,
@@ -62,7 +62,6 @@ export class CompletionsService {
 
   async complete(input: CompletionsInput): Promise<ChatCompletionResponse> {
     const { sessionKey, lastUserText, attachments } = await this.prepareSession(input);
-    const finishReason: 'stop' | 'length' | 'tool_calls' = 'stop';
     const translator = createEventTranslator();
 
     for await (const event of this.driveLoop({
@@ -95,7 +94,7 @@ export class CompletionsService {
         {
           index: 0,
           message: { role: 'assistant', content: translator.text },
-          finish_reason: finishReason,
+          finish_reason: finishReason(translator),
         },
       ],
       usage: {
@@ -149,13 +148,13 @@ export class CompletionsService {
     }
 
     // Final chunk — empty delta + finish_reason terminator. OpenAI clients
-    // gate on this.
+    // gate on this. Same derivation as the non-streaming path.
     yield {
       id,
       object: 'chat.completion.chunk',
       created,
       model,
-      choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
+      choices: [{ index: 0, delta: {}, finish_reason: finishReason(translator) }],
     };
 
     // Optional usage chunk — only when the client opted in. OpenAI's docs
@@ -289,6 +288,26 @@ export class CompletionsService {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/**
+ * Derive the OpenAI `finish_reason` from the folded event stream. A `halt`
+ * event (tool budget tripped, or the safety watcher paused the turn) means the
+ * loop cut the turn short, so the assistant text is partial — `'length'` is the
+ * OpenAI-shaped way to tell the client "this answer is incomplete". Everything
+ * else is `'stop'`.
+ *
+ * `'tool_calls'` is never returned: server-tools mode runs tools inside the
+ * loop and never hands a tool call back to the client.
+ *
+ * The LLM's own `max_tokens` cutoff is NOT derivable here — the provider's
+ * finish reason is captured for observability inside the loop but never
+ * surfaced on the `AgentEvent` union, so this service cannot see it. Making
+ * that case report `'length'` requires the loop to emit it (an `AgentEvent`
+ * schema change, which is governed).
+ */
+function finishReason(translator: EventTranslator): 'stop' | 'length' {
+  return translator.halt !== null ? 'length' : 'stop';
+}
 
 /**
  * The OpenAI contract is that the final message in `messages[]` is the new

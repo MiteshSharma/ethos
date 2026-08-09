@@ -5,6 +5,7 @@ import {
   type ApiKeyRecord,
   SqliteApiKeyStore,
 } from '@ethosagent/session-sqlite';
+import { type ApiKeyScope, ApiKeyScopeSchema } from '@ethosagent/web-contracts';
 
 // `ethos api-key` — manage bearer-token credentials for the OpenAI-compat
 // `/v1/*` surface. Keys live alongside session state in `sessions.db` so
@@ -20,7 +21,11 @@ const c = {
   yellow: '\x1b[33m',
 };
 
-const DEFAULT_SCOPES = ['chat'];
+// `chat` is the `/v1/*` scope, and the default because that surface is the
+// only reason this command exists. Typed against `ApiKeyScope` so the CLI and
+// `ApiKeyScopeSchema` cannot drift: keys minted here and keys minted through
+// the web UI's `apiKeys.create` RPC must draw from one vocabulary.
+const DEFAULT_SCOPES: ApiKeyScope[] = ['chat'];
 const USAGE =
   'Usage: ethos api-key [create --name <label> [--scopes <a,b>] [--json] | list [--json] | revoke <prefix>]';
 
@@ -59,12 +64,7 @@ async function create(store: SqliteApiKeyStore, args: string[], jsonMode: boolea
     process.exit(1);
   }
   const scopesArg = parseFlagValue(args, '--scopes');
-  const scopes = scopesArg
-    ? scopesArg
-        .split(',')
-        .map((s) => s.trim())
-        .filter(Boolean)
-    : DEFAULT_SCOPES;
+  const scopes = scopesArg === undefined ? DEFAULT_SCOPES : parseScopes(scopesArg);
 
   const { secret, record } = await store.create({ name, scopes });
 
@@ -147,6 +147,38 @@ function formatKey(k: ApiKeyRecord): string {
   const lastUsed = k.lastUsed ? `last used ${k.lastUsed.toISOString()}` : 'never used';
   const status = k.revokedAt ? `${c.red}revoked${c.reset}` : `${c.dim}active${c.reset}`;
   return `${scopes}  ${c.dim}${lastUsed}${c.reset}  ${status}`;
+}
+
+/**
+ * Validate `--scopes a,b` against `ApiKeyScopeSchema`. Unknown scopes used to
+ * be accepted verbatim — `SqliteApiKeyStore.create` stores whatever it is
+ * handed — which minted a key that authenticated everywhere and authorized
+ * nothing. Fail loudly instead, and name the valid set.
+ */
+function parseScopes(raw: string): ApiKeyScope[] {
+  const requested = raw
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+  if (requested.length === 0) {
+    console.log(`${c.red}--scopes was empty. Pass at least one scope.${c.reset}`);
+    console.log(`${c.dim}Valid scopes: ${ApiKeyScopeSchema.options.join(', ')}${c.reset}`);
+    process.exit(1);
+  }
+  const scopes: ApiKeyScope[] = [];
+  const unknown: string[] = [];
+  for (const candidate of requested) {
+    const parsed = ApiKeyScopeSchema.safeParse(candidate);
+    if (parsed.success) scopes.push(parsed.data);
+    else unknown.push(candidate);
+  }
+  if (unknown.length > 0) {
+    const label = unknown.length === 1 ? 'scope' : 'scopes';
+    console.log(`${c.red}Unknown ${label}: ${unknown.join(', ')}${c.reset}`);
+    console.log(`${c.dim}Valid scopes: ${ApiKeyScopeSchema.options.join(', ')}${c.reset}`);
+    process.exit(1);
+  }
+  return scopes;
 }
 
 function parseFlagValue(args: string[], flag: string): string | undefined {

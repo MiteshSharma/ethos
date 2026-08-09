@@ -75,7 +75,7 @@ import {
   getStorage,
 } from '../wiring';
 import { parseFlagValue, parsePort } from './serve-helpers';
-import { listenWithFallback } from './serve-listen';
+import { formatNonLoopbackWarning, isLoopbackHost, listenWithFallback } from './serve-listen';
 
 // `ethos serve` boots:
 //   • ACP server on `--port` (default 3001) + mesh registration
@@ -107,7 +107,7 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
   // reachable off-loopback (non-loopback bind) or fronted by HTTPS
   // (`webBaseUrl`). The loopback-http default (127.0.0.1 without https) keeps
   // `Secure` off so the cookie still works over plain http on localhost.
-  const isLoopbackBind = webHost === '127.0.0.1' || webHost === 'localhost' || webHost === '::1';
+  const isLoopbackBind = isLoopbackHost(webHost);
 
   const dir = ethosDir();
 
@@ -232,6 +232,10 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
       console.log('  no SPA build found — run `pnpm --filter @ethosagent/web dev` for HMR,');
       console.log(`    then visit http://localhost:5173/auth/exchange?t=${token}`);
     }
+    // Reported against the bound port, not the requested one — listenWithFallback
+    // may have walked forward on EADDRINUSE.
+    const exposureWarning = formatNonLoopbackWarning(webHost, port);
+    if (exposureWarning) console.warn(`\n${exposureWarning}`);
 
     emitReady('serve');
     notifyReady();
@@ -1030,6 +1034,10 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
     console.log(`    then visit http://localhost:5173/auth/exchange?t=${token}`);
     console.log('  or `pnpm --filter @ethosagent/web build` to bundle into this server.');
   }
+  // Reported against the bound port, not the requested one — listenWithFallback
+  // may have walked forward on EADDRINUSE.
+  const exposureWarning = formatNonLoopbackWarning(webHost, port);
+  if (exposureWarning) console.warn(`\n${exposureWarning}`);
   webShutdown = () =>
     new Promise<void>((resolve) => {
       server.close(() => resolve());

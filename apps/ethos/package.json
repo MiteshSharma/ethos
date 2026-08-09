@@ -120,6 +120,7 @@
     "@ethosagent/tools-process": "workspace:*",
     "@ethosagent/watchers": "workspace:*",
     "@ethosagent/web-api": "workspace:*",
+    "@ethosagent/web-contracts": "workspace:*",
     "@ethosagent/wiring": "workspace:*"
   },
   "optionalDependencies": {

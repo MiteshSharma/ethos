@@ -1054,9 +1054,22 @@ export type KanbanAgent = z.infer<typeof KanbanAgentSchema>;
 // returned on create; subsequent reads never expose it.
 // ---------------------------------------------------------------------------
 
+// Two scopes read as "chat" and they are NOT interchangeable:
+//
+//   `chat`      gates the whole OpenAI-compatible `/v1/*` surface
+//               (`/v1/models`, `/v1/chat/completions`). Asserted by
+//               `bearerAuth` at the `/v1` mount in
+//               apps/web-api/src/routes/openai/index.ts.
+//   `chat:send` gates the `chat.send` / `chat.abort` RPC procedures on the
+//               browser-facing `/rpc/*` surface, via SCOPE_MAP in
+//               apps/web-api/src/middleware/dual-auth.ts.
+//
+// A key needs `chat` to drive Cursor/Aider/the OpenAI SDKs, and `chat:send` to
+// drive a Mission Control built on `@ethosagent/sdk`. Neither implies the other.
 export const ApiKeyScopeSchema = z.enum([
   'sessions:read',
   'sessions:write',
+  'chat',
   'chat:send',
   'personalities:read',
   'memory:read',

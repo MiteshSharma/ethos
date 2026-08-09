@@ -350,6 +350,9 @@ importers:
       '@ethosagent/web-api':
         specifier: workspace:*
         version: link:../web-api
+      '@ethosagent/web-contracts':
+        specifier: workspace:*
+        version: link:../../packages/web-contracts
       '@ethosagent/wiring':
         specifier: workspace:*
         version: link:../../packages/wiring

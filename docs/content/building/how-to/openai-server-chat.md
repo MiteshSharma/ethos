@@ -32,7 +32,7 @@ ethos serve --web-port 3000
 
 What this gives you:
 
-- `http://localhost:3000/v1/models` — catalog of personalities and registered teams in OpenAI shape.
+- `http://localhost:3000/v1/models` — catalog of personalities in OpenAI shape. `GET /v1/models/{id}` returns one entry.
 - `http://localhost:3000/v1/chat/completions` — streaming or non-streaming chat.
 - The ACP server still runs on `--port 3001` (default).
 

@@ -225,7 +225,9 @@ function rejectUnsupported(req: ChatCompletionRequest): Rejection | null {
   if (req.tools && req.tools.length > 0) {
     return {
       message:
-        'Client-side `tools` lands in C1. Drop the field or wait for the C1 release for client-tools mode.',
+        'Client-side `tools` are not supported. Ethos runs tools server-side — the ' +
+        "personality's toolset decides what the agent can call. Turn off tool/function " +
+        'calling in your client and omit the `tools` field.',
       code: 'client_tools_not_implemented',
       param: 'tools',
     };
@@ -233,14 +235,20 @@ function rejectUnsupported(req: ChatCompletionRequest): Rejection | null {
   for (const msg of req.messages) {
     if (msg.role === 'tool') {
       return {
-        message: '`role: "tool"` messages require client-tools mode (C1).',
+        message:
+          '`role: "tool"` messages are not supported. Ethos executes tools server-side, so ' +
+          'there are no client tool results to send back. Turn off tool/function calling in ' +
+          'your client and send only `user` and `assistant` messages.',
         code: 'client_tools_not_implemented',
         param: 'messages',
       };
     }
     if (msg.role === 'assistant' && msg.tool_calls && msg.tool_calls.length > 0) {
       return {
-        message: '`assistant.tool_calls` requires client-tools mode (C1).',
+        message:
+          '`assistant.tool_calls` is not supported. Ethos runs tools server-side and never ' +
+          'returns tool calls to the client. Turn off tool/function calling in your client ' +
+          'and drop `tool_calls` from the assistant messages.',
         code: 'client_tools_not_implemented',
         param: 'messages',
       };

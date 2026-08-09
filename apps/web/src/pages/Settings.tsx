@@ -2876,6 +2876,7 @@ function A2aSection() {
 const ALL_SCOPES: ApiKeyScope[] = [
   'sessions:read',
   'sessions:write',
+  'chat',
   'chat:send',
   'personalities:read',
   'memory:read',
@@ -2883,6 +2884,16 @@ const ALL_SCOPES: ApiKeyScope[] = [
   'tools:approve',
   'events:subscribe',
 ];
+
+/**
+ * Hints for the scopes whose names don't explain themselves. `chat` and
+ * `chat:send` are one letter apart in the checkbox list and gate completely
+ * different surfaces, so both are annotated. Unlisted scopes render bare.
+ */
+const SCOPE_HINTS: Partial<Record<ApiKeyScope, string>> = {
+  chat: 'OpenAI-compatible API (/v1/models, /v1/chat/completions) — for Cursor, Aider, the OpenAI SDKs',
+  'chat:send': 'chat.send and chat.abort RPC — for a Mission Control built on @ethosagent/sdk',
+};
 
 interface CreateKeyForm {
   name: string;
@@ -3303,7 +3314,19 @@ function ApiKeysSection() {
             rules={[{ required: true, message: 'Select at least one scope' }]}
           >
             <Checkbox.Group
-              options={ALL_SCOPES.map((s) => ({ label: s, value: s }))}
+              options={ALL_SCOPES.map((s) => ({
+                value: s,
+                label: SCOPE_HINTS[s] ? (
+                  <>
+                    {s}{' '}
+                    <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                      — {SCOPE_HINTS[s]}
+                    </Typography.Text>
+                  </>
+                ) : (
+                  s
+                ),
+              }))}
               style={{ display: 'flex', flexDirection: 'column', gap: 4 }}
             />
           </Form.Item>
