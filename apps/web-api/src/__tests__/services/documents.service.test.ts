@@ -3,6 +3,7 @@
 import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { personalityAssetDir } from '@ethosagent/core';
 import { FsStorage } from '@ethosagent/storage-fs';
 import { EthosError, type PersonalityConfig } from '@ethosagent/types';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -166,6 +167,33 @@ describe('DocumentsService', () => {
     await expect(service.root('nope')).rejects.toMatchObject({
       code: 'PERSONALITY_NOT_FOUND',
     });
+  });
+
+  // The point of unifying the asset folder with the workdir: what the render
+  // tools write through `files://` is what the operator sees here.
+  it('lists, downloads and deletes a file written to the asset folder', async () => {
+    const assetDir = personalityAssetDir(personality('${ETHOS_HOME}/workspace/${self}'), {
+      ethosHome: dataDir,
+      self: 'writer',
+      cwd: process.cwd(),
+    });
+    expect(assetDir).toBe(workdir);
+
+    await writeFile(join(assetDir, 'chart.png'), 'PNG');
+
+    const listed = await service.list({});
+    expect(listed.entries).toContainEqual(
+      expect.objectContaining({ name: 'chart.png', path: 'chart.png', isDir: false }),
+    );
+
+    expect(await service.resolveDownload({ path: 'chart.png' })).toEqual({
+      absolutePath: join(workdir, 'chart.png'),
+      filename: 'chart.png',
+      size: 3,
+    });
+
+    expect(await service.delete({ path: 'chart.png' })).toEqual({ ok: true });
+    expect(await service.list({})).toEqual({ entries: [] });
   });
 
   it('falls back to process.cwd() when no workdir is declared', async () => {

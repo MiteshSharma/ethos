@@ -91,6 +91,7 @@ export {
   deriveFsReachPaths,
   EmptySubstitutionError,
   type FsReachVars,
+  personalityAssetDir,
   substitute,
 } from './fs-reach';
 export { DefaultHookRegistry } from './hook-registry';

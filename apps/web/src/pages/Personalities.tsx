@@ -1202,7 +1202,7 @@ function WizardConfigTab({
         message="Filesystem reach"
         description="These paths control which directories this personality can read and write. Adding broad paths (e.g. /, /home) lets the personality access anything inside. Edit only if you understand the implications."
       />
-      <Form.Item label="Read paths">
+      <Form.Item label="Read paths" extra={FS_REACH_READ_HELP}>
         <Select
           mode="tags"
           allowClear
@@ -1212,7 +1212,7 @@ function WizardConfigTab({
           onChange={(val) => setState((s) => ({ ...s, fsReachRead: val }))}
         />
       </Form.Item>
-      <Form.Item label="Write paths">
+      <Form.Item label="Write paths" extra={FS_REACH_WRITE_HELP}>
         <Select
           mode="tags"
           allowClear
@@ -1627,8 +1627,12 @@ const FS_REACH_READ_PLACEHOLDER = 'e.g. /data, ${self}/docs';
 // biome-ignore lint/suspicious/noTemplateCurlyInString: literal placeholder text for the UI, not a template variable
 const FS_REACH_WORKDIR_PLACEHOLDER = 'e.g. ${ETHOS_HOME}/workspace/${self}';
 
+const FS_REACH_READ_HELP = 'Directories this personality may read from.';
+
+const FS_REACH_WRITE_HELP = 'Directories this personality may write to.';
+
 const FS_REACH_WORKDIR_HELP =
-  'Where relative paths the agent writes land, and the root of its Documents tab. Always both read- and write-reachable. Empty means the process working directory.';
+  'The one folder bare filenames land in — the output home for this personality, and what the Documents tab lists for download and deletion. Recommended: without it, output goes to whatever directory the server was started in.';
 
 export function ConfigEditor({ id, personality }: { id: string; personality: Personality }) {
   const qc = useQueryClient();
@@ -2137,7 +2141,7 @@ export function ConfigEditor({ id, personality }: { id: string; personality: Per
         message="Filesystem reach"
         description="These paths control which directories this personality can read and write. Adding broad paths (e.g. /, /home) lets the personality access anything inside. Edit only if you understand the implications."
       />
-      <Form.Item label="Read paths" name="fsReachRead">
+      <Form.Item label="Read paths" name="fsReachRead" extra={FS_REACH_READ_HELP}>
         <Select
           mode="tags"
           allowClear
@@ -2145,7 +2149,7 @@ export function ConfigEditor({ id, personality }: { id: string; personality: Per
           tokenSeparators={[',']}
         />
       </Form.Item>
-      <Form.Item label="Write paths" name="fsReachWrite">
+      <Form.Item label="Write paths" name="fsReachWrite" extra={FS_REACH_WRITE_HELP}>
         <Select mode="tags" allowClear placeholder="e.g. /data/output" tokenSeparators={[',']} />
       </Form.Item>
       <Form.Item label="Working directory" name="fsReachWorkdir" extra={FS_REACH_WORKDIR_HELP}>

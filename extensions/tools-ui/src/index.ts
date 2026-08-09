@@ -1,6 +1,49 @@
-import { homedir } from 'node:os';
-import { basename, extname } from 'node:path';
+import { basename, extname, join } from 'node:path';
 import type { Tool, ToolContext, ToolResult } from '@ethosagent/types';
+
+/**
+ * Resolves the asset folder a personality's `files://` URIs address.
+ *
+ * tools-ui never computes that path itself: the asset folder follows the
+ * personality's `fs_reach` (it IS the declared workdir when there is one), and
+ * that derivation lives in core, behind wiring. Supplying it here keeps the one
+ * derivation authoritative and this package dependent on contracts alone.
+ *
+ * `undefined` means the folder could not be resolved (unknown personality, or a
+ * declared workdir with an unresolvable substitution variable) — `files://` is
+ * then refused rather than guessed at.
+ */
+export type AssetDirResolver = (personalityId: string) => string | undefined;
+
+/** Resolve `files://<rest>` against the personality's asset folder. */
+function resolveFilesUri(
+  src: string,
+  ctx: ToolContext,
+  assetDir: AssetDirResolver,
+): { ok: true; path: string } | { ok: false; result: ToolResult } {
+  if (!ctx.personalityId) {
+    return {
+      ok: false,
+      result: {
+        ok: false,
+        code: 'not_available',
+        error: 'files:// requires a personality context',
+      },
+    };
+  }
+  const dir = assetDir(ctx.personalityId);
+  if (!dir) {
+    return {
+      ok: false,
+      result: {
+        ok: false,
+        code: 'not_available',
+        error: `Could not resolve the asset folder for personality "${ctx.personalityId}"`,
+      },
+    };
+  }
+  return { ok: true, path: join(dir, src.slice('files://'.length)) };
+}
 
 const IMAGE_EXTS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg']);
 const IMAGE_MIME: Record<string, string> = {
@@ -45,7 +88,7 @@ const EXT_TO_MIME: Record<string, string> = {
   '.gif': 'image/gif',
 };
 
-export const renderImageTool: Tool<SendImageArgs> = {
+export const createRenderImageTool = (assetDir: AssetDirResolver): Tool<SendImageArgs> => ({
   name: 'render_image',
   description:
     "Display an image in the chat UI. Accepts a URL (https://...), a base64 data URI (data:image/...;base64,...), an absolute file path (/tmp/image.png), a file:// URI (file:///tmp/image.png), or a files:// URI (files://chart.png) that resolves to the personality's asset folder. The image renders inline in the conversation.",
@@ -89,14 +132,9 @@ export const renderImageTool: Tool<SendImageArgs> = {
     if (isFilesUri || isFilePath || isFileUri) {
       let resolvedPath: string;
       if (isFilesUri) {
-        if (!ctx.personalityId) {
-          return {
-            ok: false,
-            code: 'not_available',
-            error: 'files:// requires a personality context',
-          };
-        }
-        resolvedPath = `${homedir()}/.ethos/personalities/${ctx.personalityId}/files/${src.slice('files://'.length)}`;
+        const resolved = resolveFilesUri(src, ctx, assetDir);
+        if (!resolved.ok) return resolved.result;
+        resolvedPath = resolved.path;
       } else {
         resolvedPath = isFileUri ? src.replace(/^file:\/\//, '') : src;
       }
@@ -127,7 +165,7 @@ export const renderImageTool: Tool<SendImageArgs> = {
       },
     };
   },
-};
+});
 
 export const renderHtmlTool: Tool<SendHtmlArgs> = {
   name: 'render_html',
@@ -174,7 +212,7 @@ interface SendFileArgs {
   title?: string;
 }
 
-export const renderFileTool: Tool<SendFileArgs> = {
+export const createRenderFileTool = (assetDir: AssetDirResolver): Tool<SendFileArgs> => ({
   name: 'render_file',
   description:
     'Render a local file inline in the chat UI. Accepts absolute paths (/tmp/file.pdf), file:// URIs, or files:// URIs ("files://report.pdf" resolves to the personality\'s asset folder). Images render as inline images; PDFs render in an embedded viewer; text/code/JSON/CSV/Markdown render as a formatted code block.',
@@ -207,14 +245,9 @@ export const renderFileTool: Tool<SendFileArgs> = {
 
     // resolve files:// → personality asset folder
     if (isFilesUri) {
-      if (!ctx.personalityId) {
-        return {
-          ok: false,
-          code: 'not_available',
-          error: 'files:// requires a personality context',
-        };
-      }
-      src = `${homedir()}/.ethos/personalities/${ctx.personalityId}/files/${src.slice('files://'.length)}`;
+      const resolved = resolveFilesUri(src, ctx, assetDir);
+      if (!resolved.ok) return resolved.result;
+      src = resolved.path;
     } else if (isFileUri) {
       // normalise file:// → absolute path
       src = src.replace(/^file:\/\//, '');
@@ -242,9 +275,10 @@ export const renderFileTool: Tool<SendFileArgs> = {
     try {
       const bytes = await ctx.scopedFs.readBytes(resolvedPath);
 
-      // auto-copy external files into the personality's files/ folder
-      if (ctx.personalityId && (isFilePath || isFileUri)) {
-        const dest = `${homedir()}/.ethos/personalities/${ctx.personalityId}/files/${basename(resolvedPath)}`;
+      // auto-copy external files into the personality's asset folder
+      const copyDir = ctx.personalityId ? assetDir(ctx.personalityId) : undefined;
+      if (copyDir && (isFilePath || isFileUri)) {
+        const dest = join(copyDir, basename(resolvedPath));
         ctx.scopedFs?.write(dest, bytes).catch(() => {}); // best-effort copy
       }
 
@@ -295,7 +329,7 @@ export const renderFileTool: Tool<SendFileArgs> = {
       };
     }
   },
-};
+});
 
 export { dashboardSaveTool } from './dashboard-save';
 export type { DashboardToolStore } from './dashboard-tools';
@@ -305,6 +339,10 @@ export {
   createDashboardCreateTool,
 } from './dashboard-tools';
 
-export function buildUiTools(): Tool[] {
-  return [renderImageTool as Tool, renderHtmlTool as Tool, renderFileTool as Tool];
+export function buildUiTools(assetDir: AssetDirResolver): Tool[] {
+  return [
+    createRenderImageTool(assetDir) as Tool,
+    renderHtmlTool as Tool,
+    createRenderFileTool(assetDir) as Tool,
+  ];
 }

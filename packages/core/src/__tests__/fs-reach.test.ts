@@ -3,7 +3,12 @@
 // JS template strings.
 import type { PersonalityConfig } from '@ethosagent/types';
 import { describe, expect, it } from 'vitest';
-import { deriveFsReachPaths, EmptySubstitutionError, type FsReachVars } from '../fs-reach';
+import {
+  deriveFsReachPaths,
+  EmptySubstitutionError,
+  type FsReachVars,
+  personalityAssetDir,
+} from '../fs-reach';
 
 const VARS: FsReachVars = {
   ethosHome: '/home/tester/.ethos',
@@ -99,5 +104,56 @@ describe('deriveFsReachPaths — workdir', () => {
       expect(err).toBeInstanceOf(EmptySubstitutionError);
       expect((err as EmptySubstitutionError).variable).toBe('${ETHOS_HOME}');
     }
+  });
+});
+
+describe('personalityAssetDir', () => {
+  // The regression that matters most: a personality that declares no workdir
+  // keeps the historical asset folder, byte for byte. Anything else silently
+  // moves every existing `files://` asset out from under the agent.
+  it('is <ethosHome>/personalities/<self>/files when no workdir is declared', () => {
+    expect(personalityAssetDir(personality(), VARS)).toBe(
+      '/home/tester/.ethos/personalities/workdir-bot/files',
+    );
+    expect(personalityAssetDir(personality({ read: ['/data'], write: ['/out'] }), VARS)).toBe(
+      '/home/tester/.ethos/personalities/workdir-bot/files',
+    );
+    // Never the cwd — the process working directory is not an asset store.
+    expect(personalityAssetDir(personality(), VARS)).not.toBe(VARS.cwd);
+  });
+
+  it('IS the workdir when one is declared', () => {
+    expect(personalityAssetDir(personality({ workdir: '/srv/documents' }), VARS)).toBe(
+      '/srv/documents',
+    );
+  });
+
+  it('substitutes and resolves a declared workdir exactly as the reach derivation does', () => {
+    const p = personality({ workdir: '${ETHOS_HOME}/workspace/${self}/./out' });
+    expect(personalityAssetDir(p, VARS)).toBe(deriveFsReachPaths(p, VARS).workdir);
+    expect(personalityAssetDir(p, VARS)).toBe('/home/tester/.ethos/workspace/workdir-bot/out');
+  });
+
+  it('lands inside the derived write reach in both branches, so assets are writable', () => {
+    const withinWrite = (p: PersonalityConfig): boolean =>
+      deriveFsReachPaths(p, VARS).write.some((entry) => {
+        const prefix = entry.replace(/\/+$/, '');
+        const dir = personalityAssetDir(p, VARS);
+        return dir === prefix || dir.startsWith(`${prefix}/`);
+      });
+
+    expect(withinWrite(personality())).toBe(true);
+    expect(withinWrite(personality({ workdir: '/srv/documents', write: ['/data/out'] }))).toBe(
+      true,
+    );
+  });
+
+  it('throws EmptySubstitutionError for an unresolvable declared workdir', () => {
+    expect(() =>
+      personalityAssetDir(personality({ workdir: '${ETHOS_HOME}/files' }), {
+        ...VARS,
+        ethosHome: '',
+      }),
+    ).toThrow(EmptySubstitutionError);
   });
 });

@@ -124,3 +124,26 @@ export function deriveFsReachPaths(
   if (!declaredWorkdir) return { read, write, workdir };
   return { read: withWorkdir(read, workdir), write: withWorkdir(write, workdir), workdir };
 }
+
+/**
+ * The personality's ASSET FOLDER — the directory a `files://` URI addresses and
+ * the one the asset-folder prompt injector advertises.
+ *
+ * A DECLARED `fs_reach.workdir` makes the asset folder BE the workdir, so the
+ * personality has ONE output home: render-tool assets land where its bare
+ * relative writes land, and the Documents tab (rooted at the same workdir)
+ * lists them. With no declaration the historical location stands —
+ * `<ethosHome>/personalities/<self>/files` — because the workdir would then be
+ * `process.cwd()`, whatever directory the process happened to start in.
+ *
+ * The workdir comes from `deriveFsReachPaths`, never from a second copy of the
+ * substitution rules: the asset folder must sit inside the personality's write
+ * reach, and that is the only place the reach is decided. Throws
+ * `EmptySubstitutionError` for the same reason `deriveFsReachPaths` does.
+ */
+export function personalityAssetDir(personality: PersonalityConfig, vars: FsReachVars): string {
+  const { workdir } = deriveFsReachPaths(personality, vars);
+  return personality.fs_reach?.workdir
+    ? workdir
+    : join(vars.ethosHome, 'personalities', vars.self, 'files');
+}

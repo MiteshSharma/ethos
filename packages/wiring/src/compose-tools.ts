@@ -1,9 +1,9 @@
-import { homedir } from 'node:os';
 import { join } from 'node:path';
 import {
   type DefaultToolRegistry,
   LastWriteWinsPolicy,
   LazyOnDemandPolicy,
+  personalityAssetDir,
   SessionManager,
 } from '@ethosagent/core';
 import type { GoalRunner } from '@ethosagent/goal-runner';
@@ -233,15 +233,50 @@ export function createTeamMemoryIndexInjector(
 }
 
 /**
- * ContextInjector that tells the agent about its personality asset folder.
- * Files placed at ~/.ethos/personalities/<id>/files/ are readable by render_*
- * tools via the files:// URI scheme (e.g. files://chart.png).
+ * Resolve any known personality's asset folder — the directory `files://`
+ * addresses. Wiring owns this because it is the composition root: it holds the
+ * personality registry, so `personalityAssetDir` (the one `fs_reach`
+ * derivation) runs here and tools-ui is handed the answer instead of deriving
+ * a path of its own.
+ *
+ * Resolved per call, never captured: the registry hot-reloads and a loop's
+ * personality can change mid-session (`/personality`), so a `fs_reach.workdir`
+ * edited on disk takes effect on the next turn.
+ *
+ * `undefined` when the personality is unknown, or when a declared workdir names
+ * an unresolvable substitution variable (`EmptySubstitutionError` — turn setup
+ * surfaces that; `files://` merely refuses).
+ */
+export function createAssetDirResolver(
+  lookup: (personalityId: string) => PersonalityConfig | undefined,
+  vars: { ethosHome: string; cwd: string },
+): (personalityId: string) => string | undefined {
+  return (personalityId) => {
+    const personality = lookup(personalityId);
+    if (!personality) return undefined;
+    try {
+      return personalityAssetDir(personality, {
+        ethosHome: vars.ethosHome,
+        self: personality.id,
+        cwd: vars.cwd,
+      });
+    } catch {
+      return undefined;
+    }
+  };
+}
+
+/**
+ * ContextInjector that tells the agent about its personality asset folder —
+ * the directory render tools reach through the `files://` URI scheme. The
+ * advertised path is the one `createAssetDirResolver` yields, so the prompt
+ * names the directory the tools actually resolve: the declared
+ * `fs_reach.workdir` when there is one, else `<ethosHome>/personalities/<id>/files`.
  */
 export function createPersonalityFilesInjector(
   personalityId: string,
-  homedirPath: string,
+  filesDir: string,
 ): ContextInjector {
-  const filesDir = `${homedirPath}/.ethos/personalities/${personalityId}/files`;
   return {
     id: `personality-files:${personalityId}`,
     priority: 30,
@@ -490,7 +525,11 @@ export async function composeAllTools(
     hostExecForbidden,
   }))
     tools.register(tool);
-  for (const tool of buildUiTools()) tools.register(tool);
+  const assetDirFor = createAssetDirResolver((id) => personalities.get(id), {
+    ethosHome: dataDir,
+    cwd: wiringCtx.workingDir,
+  });
+  for (const tool of buildUiTools(assetDirFor)) tools.register(tool);
 
   // One InMemoryTodoStore per process — lifetime tied to the AgentLoop.
   const { tools: todoTools } = composeTodo(wiringCtx);
@@ -832,7 +871,14 @@ export async function composeAllTools(
   // Personality files injector
   // -------------------------------------------------------------------------
 
-  injectors.push(createPersonalityFilesInjector(activePerson.id, homedir()));
+  // The prompt must name the SAME directory `files://` resolves to, so it goes
+  // through the one resolver. An unresolvable asset folder (declared workdir
+  // with an empty substitution variable) advertises nothing rather than a path
+  // the render tools would refuse.
+  const activeAssetDir = assetDirFor(activePerson.id);
+  if (activeAssetDir) {
+    injectors.push(createPersonalityFilesInjector(activePerson.id, activeAssetDir));
+  }
 
   // -------------------------------------------------------------------------
   // Debug tools (debug sessions only)
