@@ -190,7 +190,7 @@ describe('resolveCapabilities', () => {
     };
     const backends: CapabilityBackends = {
       storage,
-      personalityFsReach: { read: ['/persona/read'], write: ['/persona/write'] },
+      personalityFsReach: () => ({ read: ['/persona/read'], write: ['/persona/write'] }),
     };
     const result = resolveCapabilities(
       'tool-a',
@@ -243,7 +243,7 @@ describe('resolveCapabilities', () => {
       kvStoreFactory: vi.fn().mockReturnValue({ get: vi.fn() }),
       secretsBackend: vi.fn().mockResolvedValue('val'),
       storage,
-      personalityFsReach: { read: ['/data'], write: ['/out'] },
+      personalityFsReach: () => ({ read: ['/data'], write: ['/out'] }),
       personalityNetworkPolicy: { allow: ['api.example.com'] },
       safeFetch,
     };
@@ -298,7 +298,7 @@ describe('resolveCapabilities', () => {
     ];
     const backends: CapabilityBackends = {
       storage,
-      personalityFsReach: { read: ['/data'], write: [] },
+      personalityFsReach: () => ({ read: ['/data'], write: [] }),
       attachmentCache,
       inboundAttachments,
     };

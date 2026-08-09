@@ -45,7 +45,7 @@ const makeBackends = (): CapabilityBackends => ({
     rename: vi.fn(),
     chmod: vi.fn(),
   },
-  personalityFsReach: { read: ['/data'], write: ['/out'] },
+  personalityFsReach: () => ({ read: ['/data'], write: ['/out'] }),
   safeFetch,
 });
 

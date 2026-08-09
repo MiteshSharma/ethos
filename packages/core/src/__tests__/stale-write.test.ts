@@ -67,7 +67,7 @@ function makeScriptedLLM(script: ScriptStep[]): LLMProvider {
 // mutate via node:fs.
 const testBackends: CapabilityBackends = {
   storage: new FsStorage(),
-  personalityFsReach: { read: ['/'], write: ['/'] },
+  personalityFsReach: () => ({ read: ['/'], write: ['/'] }),
 };
 
 async function buildFileRegistry() {

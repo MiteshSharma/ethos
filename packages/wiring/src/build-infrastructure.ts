@@ -67,6 +67,7 @@ import type {
   Logger,
   MemoryProviderRegistry,
   PersonalityConfig,
+  PersonalityRegistry,
   StorageRegistry,
   SttProviderRegistry,
   TtsProviderRegistry,
@@ -145,6 +146,39 @@ export function derivePersonalityFsReach(
     });
     return { read: [], write: [] };
   }
+}
+
+/**
+ * The `personalityFsReach` resolver handed to `CapabilityBackends`.
+ *
+ * It resolves per tool execution against the LIVE registry instead of storing a
+ * derived `{read, write}`. Storing one froze the boundary at process start: an
+ * edit to `~/.ethos/personalities/<id>/config.yaml` reached the character sheet
+ * and the Documents root immediately, but the file tools kept refusing paths
+ * the config plainly allowed until `ethos serve` was restarted. Capturing a
+ * `PersonalityConfig` here would reintroduce exactly that, so the resolver
+ * holds only the registry and looks the personality up by id — an in-memory map
+ * lookup against the registry the surfaces already refresh, no disk I/O per
+ * call. Taking the id per call is also what makes a mid-session `/personality`
+ * switch resolve the new personality's reach.
+ *
+ * An id the registry does not know degrades to deny-all with a warning, never
+ * to the active personality's (wider) set — same direction as the
+ * `EmptySubstitutionError` degradation above.
+ */
+export function createPersonalityFsReachResolver(
+  personalities: Pick<PersonalityRegistry, 'get' | 'getDefault'>,
+  vars: { ethosHome: string; cwd: string },
+  log: Logger,
+): (personalityId?: string) => { read: string[]; write: string[] } {
+  return (personalityId?: string) => {
+    const person = personalityId ? personalities.get(personalityId) : personalities.getDefault();
+    if (!person) {
+      log.warn('fs_reach: unknown personality; falling back to deny-all', { personalityId });
+      return { read: [], write: [] };
+    }
+    return derivePersonalityFsReach(person, vars, log);
+  };
 }
 
 /**
@@ -394,8 +428,8 @@ export async function buildInfrastructure(
       },
       logger: log,
     }),
-    personalityFsReach: derivePersonalityFsReach(
-      effectiveActivePerson,
+    personalityFsReach: createPersonalityFsReachResolver(
+      personalities,
       { ethosHome: dataDir, cwd: wiringCtx.workingDir },
       log,
     ),
