@@ -5106,3 +5106,90 @@ textarea {
 .documents-action--danger:hover {
   color: var(--ethos-error);
 }
+
+.documents-row--previewable {
+  cursor: pointer;
+}
+
+/* ── Documents preview modal ──────────────────────────────────────── */
+
+.docpreview-notice {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.docpreview-notice p {
+  margin: 0;
+}
+
+.docpreview-notice-line {
+  margin: 0;
+  font-size: 14px;
+  color: var(--ethos-text);
+}
+
+.docpreview-error {
+  color: var(--ethos-error);
+}
+
+.docpreview-pre {
+  margin: 0;
+  font-family: "Geist Mono", ui-monospace, monospace;
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--ethos-text);
+  white-space: pre;
+  overflow-x: auto;
+}
+
+/* Media panes are height-capped below the modal body's own cap so a preview
+   never nests a second vertical scrollbar inside the first. */
+.docpreview-iframe,
+.docpreview-pdf {
+  display: block;
+  width: 100%;
+  height: 60vh;
+  min-height: 320px;
+  border: 1px solid var(--ethos-border);
+  border-radius: var(--radius-md, 8px);
+  background: var(--ethos-bg);
+}
+
+.docpreview-img {
+  display: block;
+  max-width: 100%;
+  max-height: 60vh;
+  margin: 0 auto;
+  object-fit: contain;
+  border-radius: var(--radius-md, 8px);
+}
+
+.docpreview-csv {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: "Geist Mono", ui-monospace, monospace;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  color: var(--ethos-text);
+}
+
+/* Cells carry classes rather than being matched as bare `th`/`td`: an element
+   selector here would sit below `.personalities-tab .ant-table-row td` in
+   specificity while appearing later in the file. */
+.docpreview-csv-th,
+.docpreview-csv-td {
+  padding: 4px 12px 4px 0;
+  text-align: left;
+  vertical-align: top;
+  border-bottom: 1px solid var(--ethos-border);
+  white-space: pre;
+}
+
+.docpreview-csv-th {
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ethos-text-dim);
+}

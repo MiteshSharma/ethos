@@ -41,6 +41,12 @@ export function documentCrumbs(path: string, rootLabel: string): DocumentCrumb[]
 export interface DocumentRowActions {
   canDownload: boolean;
   canDelete: boolean;
+  /**
+   * Preview reads bytes through the SAME download route, so it inherits both
+   * refusals verbatim: a symlink is refused there and must be refused here.
+   * Directories navigate on click instead.
+   */
+  canPreview: boolean;
 }
 
 export function documentRowActions(entry: {
@@ -48,7 +54,7 @@ export function documentRowActions(entry: {
   isSymlink: boolean;
 }): DocumentRowActions {
   const servable = !entry.isSymlink && !entry.isDir;
-  return { canDownload: servable, canDelete: servable };
+  return { canDownload: servable, canDelete: servable, canPreview: servable };
 }
 
 /**

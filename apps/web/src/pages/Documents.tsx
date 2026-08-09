@@ -1,6 +1,7 @@
 import { useQuery } from '@tanstack/react-query';
 import { Empty, Popconfirm, Select, Spin, Table, Tag, Tooltip, Typography } from 'antd';
 import { useState } from 'react';
+import { DocumentPreviewModal } from '../components/documents/DocumentPreviewModal';
 import { useDocumentDelete } from '../features/documents/api/mutations';
 import {
   type DocumentEntry,
@@ -78,6 +79,10 @@ export function Documents() {
 
 function Browser({ personalityId }: { personalityId: string }) {
   const [path, setPath] = useState('');
+  // The row being previewed. Rendered conditionally rather than kept mounted
+  // with `open={false}` so closing unmounts the modal, which is what revokes
+  // any object URL it created.
+  const [preview, setPreview] = useState<DocumentEntry | null>(null);
 
   const rootQuery = useDocumentsRoot(personalityId);
   const listQuery = useDocumentsList(personalityId, path);
@@ -154,8 +159,18 @@ function Browser({ personalityId }: { personalityId: string }) {
         // download and delete, so they get no buttons at all — a control
         // that always errors is worse than no control.
         const actions = documentRowActions(entry);
+        if (!actions.canDownload && !actions.canDelete) return null;
         return (
-          <div style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
+          // The row itself opens the preview, so the actions cell has to stop
+          // the click and the Enter key here — downloading or deleting must
+          // not also open a preview of the same file.
+          <div
+            role="toolbar"
+            aria-label={`Actions for ${entry.name}`}
+            style={{ display: 'flex', gap: 12, alignItems: 'center' }}
+            onClick={(e) => e.stopPropagation()}
+            onKeyDown={(e) => e.stopPropagation()}
+          >
             {actions.canDownload ? (
               <a
                 className="documents-action"
@@ -234,8 +249,33 @@ function Browser({ personalityId }: { personalityId: string }) {
             ),
           }}
           columns={columns}
+          onRow={(entry) => {
+            // Directories keep their existing behaviour — the name button
+            // navigates. Symlinks stay inert: preview reads bytes through the
+            // download route, which refuses them.
+            if (!documentRowActions(entry).canPreview) return {};
+            return {
+              className: 'documents-row--previewable',
+              tabIndex: 0,
+              onClick: () => setPreview(entry),
+              onKeyDown: (e) => {
+                if (e.key !== 'Enter' && e.key !== ' ') return;
+                e.preventDefault();
+                setPreview(entry);
+              },
+            };
+          }}
         />
       )}
+
+      {preview ? (
+        <DocumentPreviewModal
+          key={preview.path}
+          personalityId={personalityId}
+          entry={preview}
+          onClose={() => setPreview(null)}
+        />
+      ) : null}
     </>
   );
 }

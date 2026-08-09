@@ -36,10 +36,11 @@ describe('documentCrumbs', () => {
 });
 
 describe('documentRowActions', () => {
-  it('offers download and delete on a plain file', () => {
+  it('offers download, delete and preview on a plain file', () => {
     expect(documentRowActions({ isDir: false, isSymlink: false })).toEqual({
       canDownload: true,
       canDelete: true,
+      canPreview: true,
     });
   });
 
@@ -47,6 +48,7 @@ describe('documentRowActions', () => {
     expect(documentRowActions({ isDir: true, isSymlink: false })).toEqual({
       canDownload: false,
       canDelete: false,
+      canPreview: false,
     });
   });
 
@@ -54,11 +56,20 @@ describe('documentRowActions', () => {
     expect(documentRowActions({ isDir: false, isSymlink: true })).toEqual({
       canDownload: false,
       canDelete: false,
+      canPreview: false,
     });
     expect(documentRowActions({ isDir: true, isSymlink: true })).toEqual({
       canDownload: false,
       canDelete: false,
+      canPreview: false,
     });
+  });
+
+  it('refuses preview on a symlink for the same reason it refuses download', () => {
+    // A symlink's own path passes the workdir prefix check while its target
+    // need not be inside it. Preview reads bytes through the same route, so a
+    // previewable symlink would be the exact escape download already refuses.
+    expect(documentRowActions({ isDir: false, isSymlink: true }).canPreview).toBe(false);
   });
 });
 
