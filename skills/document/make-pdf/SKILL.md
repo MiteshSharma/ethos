@@ -1,6 +1,6 @@
 ---
 name: make-pdf
-description: Convert Markdown or HTML content to a PDF file using md-to-pdf. Writes content to a temp Markdown file under ~/.ethos/files/generated/, then runs md-to-pdf to produce a PDF alongside it. Output is A4 with standard margins. Useful for generating reports, summaries, or any document the user wants to print or share as a PDF.
+description: Convert Markdown or HTML content to a PDF file using md-to-pdf. Writes content to a temp Markdown file in the working directory, then runs md-to-pdf to produce a PDF alongside it. Output is A4 with standard margins. Useful for generating reports, summaries, or any document the user wants to print or share as a PDF.
 version: 1.0.0
 author: ethosagent
 tags: [document, pdf, export, markdown]
@@ -24,7 +24,7 @@ ethos:
 
 # Make PDF
 
-Convert Markdown or HTML content to a PDF file. The content is written to a temp Markdown file and rendered to PDF via `md-to-pdf`. Output lands at `~/.ethos/files/generated/<slug>.pdf`.
+Convert Markdown or HTML content to a PDF file. The content is written to a temp Markdown file and rendered to PDF via `md-to-pdf`. Output lands in the working directory as `<slug>.pdf`.
 
 ## When to use this skill
 
@@ -41,31 +41,25 @@ Convert Markdown or HTML content to a PDF file. The content is written to a temp
 
 ## Workflow
 
-**Step 1: Create the output directory**
+**Step 1: Write the content to a temp Markdown file**
 
-```bash
-mkdir -p ~/.ethos/files/generated
-```
-
-**Step 2: Write the content to a temp Markdown file**
-
-Use `write_file` to write the Markdown content to:
+Use `write_file` to write the Markdown content to a relative path, which resolves inside the working directory:
 
 ```
-~/.ethos/files/generated/<slug>.md
+<slug>.md
 ```
 
 Where `<slug>` is a short, descriptive, lowercase-hyphenated identifier for the document (e.g. `weekly-report-2026-06`, `project-summary`). Do not use spaces or special characters.
 
-**Step 3: Check if `md-to-pdf` is installed**
+**Step 2: Check if `md-to-pdf` is installed**
 
 ```bash
 which md-to-pdf 2>/dev/null || echo "not found"
 ```
 
-**Step 4a: If found — proceed to Step 5.**
+**Step 3a: If found — proceed to Step 4.**
 
-**Step 4b: If not found — attempt install**
+**Step 3b: If not found — attempt install**
 
 ```bash
 npm install -g md-to-pdf
@@ -78,34 +72,34 @@ If the install fails (no npm, no network, permission denied), stop and tell the 
 
 Do not proceed further.
 
-**Step 5: Convert to PDF**
+**Step 4: Convert to PDF**
 
 ```bash
-md-to-pdf ~/.ethos/files/generated/<slug>.md --pdf-options '{"format":"A4","margin":{"top":"20mm","bottom":"20mm","left":"15mm","right":"15mm"}}'
+md-to-pdf <slug>.md --pdf-options '{"format":"A4","margin":{"top":"20mm","bottom":"20mm","left":"15mm","right":"15mm"}}'
 ```
 
 `md-to-pdf` writes the output file alongside the input file, replacing `.md` with `.pdf`. The output path is:
 
 ```
-~/.ethos/files/generated/<slug>.pdf
+<slug>.pdf
 ```
 
-**Step 6: Confirm to the user**
+**Step 5: Confirm to the user**
 
 Tell the user:
 
-> "PDF created at: `~/.ethos/files/generated/<slug>.pdf`"
+> "PDF created at: `<slug>.pdf` in the working directory — visible in the Documents tab."
 
 ## Anti-patterns
 
 - **Do not guess a slug** — derive it from the document title or user's request. If the user says "generate a PDF of the Q2 report", the slug is `q2-report`.
-- **Do not skip the directory creation step** — `md-to-pdf` will fail silently if the directory doesn't exist.
+- **Do not write the Markdown to an absolute path** — a bare relative path is what puts it in the working directory; anywhere else is outside the personality's write reach.
 - **Do not embed absolute paths in the Markdown content** — use relative references or inline all images as base64 if the PDF needs them.
 - **Do not attempt conversion on empty or near-empty Markdown** — add meaningful content before invoking `md-to-pdf`.
 
 ## Hard rules
 
-- All generated files go to `~/.ethos/files/generated/`. Never write outside this directory.
+- All generated files go to the working directory. Always write a relative path — never write outside the working directory.
 - Always tell the user the exact output path after completion.
 - If `md-to-pdf` install fails, show the fallback message verbatim — do not proceed.
 - The slug must be lowercase, hyphen-separated, and contain no spaces or special characters.

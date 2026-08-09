@@ -1,6 +1,6 @@
 ---
 name: make-chart
-description: Render a Vega-Lite JSON specification to a PNG chart image using the vl2png command from the vega-cli package. Write the spec to ~/.ethos/files/generated/<slug>-spec.json, install vega-cli and vega-lite if missing, then run vl2png at 2x scale. Supports bar, line, point, area, and other Vega-Lite v5 mark types.
+description: Render a Vega-Lite JSON specification to a PNG chart image using the vl2png command from the vega-cli package. Write the spec to <slug>-spec.json in the working directory, install vega-cli and vega-lite if missing, then run vl2png at 2x scale. Supports bar, line, point, area, and other Vega-Lite v5 mark types.
 version: 1.0.0
 author: ethosagent
 tags: [document, chart, visualization, png, vega-lite]
@@ -24,7 +24,7 @@ ethos:
 
 # Make Chart
 
-Render a Vega-Lite JSON specification to a PNG chart image. Write the spec to `~/.ethos/files/generated/<slug>-spec.json`, then run `vl2png` to produce a PNG at `~/.ethos/files/generated/<slug>.png`. Supports bar, line, point, area, and any other Vega-Lite v5 mark type.
+Render a Vega-Lite JSON specification to a PNG chart image. Write the spec to `<slug>-spec.json`, then run `vl2png` to produce a PNG at `<slug>.png` — both relative paths, resolved inside the working directory. Supports bar, line, point, area, and any other Vega-Lite v5 mark type.
 
 ## When to use this skill
 
@@ -94,10 +94,10 @@ For a line chart, use `"mark": "line"` and set `"x"` to a temporal or ordinal fi
 
 **Step 1: Write the Vega-Lite spec**
 
-Construct the spec from the user's data and chart request. Use `write_file` to write it to:
+Construct the spec from the user's data and chart request. Use `write_file` to write it to a relative path, which resolves inside the working directory:
 
 ```
-~/.ethos/files/generated/<slug>-spec.json
+<slug>-spec.json
 ```
 
 Where `<slug>` is a lowercase-hyphenated identifier derived from the user's request (e.g. `monthly-revenue`, `category-breakdown`).
@@ -128,8 +128,10 @@ Do not proceed further.
 **Step 4: Render the PNG**
 
 ```bash
-vl2png ~/.ethos/files/generated/<slug>-spec.json ~/.ethos/files/generated/<slug>.png --scale 2
+vl2png <slug>-spec.json <slug>.png --scale 2
 ```
+
+The command runs with the working directory as its cwd, so both relative paths resolve there.
 
 `--scale 2` doubles the resolution for crisp rendering on high-DPI displays.
 
@@ -137,7 +139,7 @@ vl2png ~/.ethos/files/generated/<slug>-spec.json ~/.ethos/files/generated/<slug>
 
 Tell the user:
 
-> "Chart created at: `~/.ethos/files/generated/<slug>.png`"
+> "Chart created at: `<slug>.png` in the working directory — visible in the Documents tab."
 
 ## Anti-patterns
 
@@ -149,7 +151,7 @@ Tell the user:
 
 ## Hard rules
 
-- All generated files go to `~/.ethos/files/generated/`. Never write outside this directory.
+- All generated files go to the working directory. Always write a relative path — never write outside the working directory.
 - Always tell the user the exact output path after completion.
 - If `vl2png` install fails, show the fallback message verbatim — do not proceed.
 - Always use `data.values` (inline data) in the spec — never `data.url`.

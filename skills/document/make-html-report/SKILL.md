@@ -1,6 +1,6 @@
 ---
 name: make-html-report
-description: Generate a self-contained HTML report file with all CSS inline in a <style> block and no external dependencies. Uses write_file only — no CLI tools required. Output is a single .html file at ~/.ethos/files/generated/<slug>.html that can be opened directly in any browser.
+description: Generate a self-contained HTML report file with all CSS inline in a <style> block and no external dependencies. Uses write_file only — no CLI tools required. Output is a single .html file written to the working directory as <slug>.html that can be opened directly in any browser.
 version: 1.0.0
 author: ethosagent
 tags: [document, html, report, export]
@@ -22,7 +22,7 @@ ethos:
 
 # Make HTML Report
 
-Generate a self-contained HTML report with inline CSS. No installation required — this skill uses `write_file` only. The output is a single `.html` file at `~/.ethos/files/generated/<slug>.html` that opens in any browser without internet access.
+Generate a self-contained HTML report with inline CSS. No installation required — this skill uses `write_file` only. The output is a single `.html` file written to the working directory as `<slug>.html` that opens in any browser without internet access.
 
 ## When to use this skill
 
@@ -154,10 +154,10 @@ From the user's content, identify:
 
 **Step 2: Write the HTML file**
 
-Use `write_file` to write the complete HTML to:
+Use `write_file` to write the complete HTML to a relative path, which resolves inside the working directory:
 
 ```
-~/.ethos/files/generated/<slug>.html
+<slug>.html
 ```
 
 Where `<slug>` is a lowercase-hyphenated identifier derived from the report title (e.g. `q2-summary`, `onboarding-checklist`).
@@ -168,7 +168,7 @@ Write the complete document in one pass — do not write partial HTML and patch 
 
 Tell the user:
 
-> "HTML report created at: `~/.ethos/files/generated/<slug>.html`
+> "HTML report created at: `<slug>.html` in the working directory — visible in the Documents tab.
 > Open it in any browser — no internet connection needed."
 
 ## Anti-patterns
@@ -181,7 +181,7 @@ Tell the user:
 
 ## Hard rules
 
-- All generated files go to `~/.ethos/files/generated/`. Never write outside this directory.
+- All generated files go to the working directory. Always write a relative path — never write outside the working directory.
 - Always tell the user the exact output path and that they can open it in any browser.
 - All CSS must be inline in a single `<style>` block — no `<link>` tags, no CDN, no `@import url(...)`.
 - Always include `<meta charset="UTF-8">` and a descriptive `<title>`.
