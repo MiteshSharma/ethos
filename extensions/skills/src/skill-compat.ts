@@ -1,5 +1,6 @@
 import { statSync } from 'node:fs';
 import { delimiter, join } from 'node:path';
+import matter from 'gray-matter';
 
 // ---------------------------------------------------------------------------
 // OpenClaw (and clawdbot/clawdis) skill metadata schema. All three keys are
@@ -30,6 +31,8 @@ export interface ParsedFrontmatter {
 }
 
 const FRONTMATTER_RE = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?/;
+/** Matches a file that *opens* a frontmatter block, terminated or not. */
+const FRONTMATTER_OPEN_RE = /^---\r?\n/;
 const META_KEYS = ['openclaw', 'clawdbot', 'clawdis'] as const;
 const ETHOS_SKILL_DIR_TOKEN = '$' + '{ETHOS_SKILL_DIR}';
 const ETHOS_SESSION_ID_TOKEN = '$' + '{ETHOS_SESSION_ID}';
@@ -60,7 +63,16 @@ export function parseSkillFrontmatter(md: string): ParsedFrontmatter | null {
 
   const yaml = match[1];
   const body = md.slice(match[0].length);
-  const raw = parseYaml(yaml);
+
+  let raw: Record<string, unknown>;
+  try {
+    raw = parseYaml(yaml);
+  } catch {
+    // A malformed skill file must degrade to "no frontmatter", never take the
+    // caller down with it. Callers already fall back to the raw body when this
+    // returns null, so one broken skill costs one skill — not the process.
+    return null;
+  }
 
   const metadata = raw.metadata;
   let openclaw: OpenClawMeta | null = null;
@@ -77,6 +89,46 @@ export function parseSkillFrontmatter(md: string): ParsedFrontmatter | null {
   const usage = typeof raw.usage === 'string' ? raw.usage : undefined;
   const description = typeof raw.description === 'string' ? raw.description : undefined;
   return { raw, openclaw, body, usage, description };
+}
+
+/**
+ * Result of {@link checkSkillFrontmatter}. `parsed` is null when the file
+ * legitimately carries no frontmatter at all — that is a valid skill file,
+ * not a failure.
+ */
+export type FrontmatterCheck =
+  | { ok: true; parsed: ParsedFrontmatter | null }
+  | { ok: false; error: string };
+
+/**
+ * Validation gate for skill markdown that is about to be written to — or
+ * promoted into — a directory loaded at startup.
+ *
+ * `parseSkillFrontmatter` is deliberately lenient and returns null for BOTH
+ * "no frontmatter" and "unparseable frontmatter", which makes it useless as a
+ * write gate. This distinguishes the two, and validates with the same strict
+ * YAML parser the skill scanner uses (`gray-matter` → js-yaml). A file that
+ * passes here is a file the scanner can load; a file that fails here is one
+ * that would throw at load time.
+ *
+ * The canonical failure is an unquoted scalar containing `": "` — e.g.
+ * `description: we hit a problem: adding stocks` — which LLM-authored skills
+ * produce readily.
+ */
+export function checkSkillFrontmatter(md: string): FrontmatterCheck {
+  if (!FRONTMATTER_OPEN_RE.test(md)) return { ok: true, parsed: null };
+  try {
+    // The `{}` is load-bearing: gray-matter writes the file object into its
+    // module-global cache BEFORE parsing, so a throw leaves a half-built entry
+    // (`data: {}`, content unparsed) that every later call with identical
+    // content gets back silently. Passing any options bypasses that cache, so
+    // this gate answers the same way every time it is asked.
+    matter(md, {});
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return { ok: false, error: message.split('\n')[0] ?? message };
+  }
+  return { ok: true, parsed: parseSkillFrontmatter(md) };
 }
 
 /**

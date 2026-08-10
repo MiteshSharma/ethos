@@ -224,6 +224,37 @@ describe('SkillsLibrary', () => {
         code: 'SKILL_NOT_FOUND',
       });
     });
+
+    it('refuses to promote a candidate with unparseable frontmatter', async () => {
+      const broken = [
+        '---',
+        'name: stock-add',
+        'description: We repeatedly hit the same workflow problem: adding stocks with null sectors',
+        '---',
+        '',
+        'body',
+      ].join('\n');
+      await storage.mkdir(join(DATA, 'skills', '.pending'));
+      await storage.write(join(DATA, 'skills', '.pending', 'broken.md'), broken);
+
+      await expect(lib.approvePending('broken')).rejects.toMatchObject({
+        code: 'SKILL_INSTALL_FAILED',
+      });
+
+      // Pending file survives, live dir is untouched.
+      expect(await lib.pendingExists('broken')).toBe(true);
+      expect(await storage.read(join(DATA, 'skills', '.pending', 'broken.md'))).toBe(broken);
+      expect(await storage.exists(join(DATA, 'skills', 'broken.md'))).toBe(false);
+    });
+
+    it('names the offending file in the error', async () => {
+      await storage.mkdir(join(DATA, 'skills', '.pending'));
+      await storage.write(
+        join(DATA, 'skills', '.pending', 'bad.md'),
+        '---\nname: x\ndescription: a: b\n---\n\nbody',
+      );
+      await expect(lib.approvePending('bad')).rejects.toThrow(/bad\.md/);
+    });
   });
 
   describe('rejectPending', () => {

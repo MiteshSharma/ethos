@@ -269,3 +269,49 @@ Body`,
     expect(result?.renders).toBeUndefined();
   });
 });
+
+describe('UniversalScanner — malformed frontmatter', () => {
+  const DIR = '/skills';
+
+  const BROKEN = [
+    '---',
+    'name: stock-add',
+    'description: We repeatedly hit the same workflow problem: adding stocks with null sectors',
+    '---',
+    '',
+    'Body.',
+  ].join('\n');
+
+  it('skips a skill whose YAML frontmatter cannot be parsed instead of throwing', async () => {
+    const storage = new InMemoryStorage();
+    await storage.mkdir(DIR);
+    await storage.write(`${DIR}/broken.md`, BROKEN);
+
+    const skipped: Array<{ name: string; reason: string }> = [];
+    const pool = await new UniversalScanner({
+      storage,
+      sources: [{ label: 'ethos', dir: DIR }],
+      onSkip: (name, reason) => skipped.push({ name, reason }),
+    }).scan();
+
+    expect(pool.get('ethos/broken')).toBeUndefined();
+    expect(skipped).toHaveLength(1);
+    expect(skipped[0]?.name).toBe('ethos/broken');
+    expect(skipped[0]?.reason).toContain('invalid frontmatter');
+  });
+
+  it('still loads the healthy skills alongside a broken one', async () => {
+    const storage = new InMemoryStorage();
+    await storage.mkdir(DIR);
+    await storage.write(`${DIR}/broken.md`, BROKEN);
+    await storage.write(`${DIR}/good.md`, '---\nname: Good\ndescription: fine\n---\n\nBody.');
+
+    const pool = await new UniversalScanner({
+      storage,
+      sources: [{ label: 'ethos', dir: DIR }],
+    }).scan();
+
+    expect(pool.get('ethos/good')?.name).toBe('Good');
+    expect(pool.get('ethos/broken')).toBeUndefined();
+  });
+});

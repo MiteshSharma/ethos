@@ -159,6 +159,61 @@ describe('ethos evolve apply — missing file', () => {
   });
 });
 
+describe('ethos evolve apply — unparseable frontmatter', () => {
+  // `skillsDir` is scanned at startup, so promoting a file whose YAML cannot
+  // be parsed converts a bad proposal into a failed boot.
+  const BROKEN = [
+    '---',
+    'name: stock-add',
+    'description: We repeatedly hit the same workflow problem: adding stocks with null sectors',
+    '---',
+    '',
+    'Body.',
+  ].join('\n');
+
+  it('refuses to promote a single broken file and leaves it in pending', async () => {
+    await writeFile(join(pendingDir, 'broken.md'), BROKEN, 'utf-8');
+
+    const { apply } = await loadEvolveHelpers(testDir);
+    const stderrLines: string[] = [];
+    vi.spyOn(console, 'error').mockImplementation((...args) => {
+      stderrLines.push(args.join(' '));
+    });
+    const exitSpy = vi
+      .spyOn(process, 'exit')
+      .mockImplementation((_code?: string | number | null) => {
+        throw new Error('process.exit called');
+      });
+
+    await expect(apply(['broken.md'])).rejects.toThrow('process.exit called');
+    exitSpy.mockRestore();
+
+    expect(stderrLines.join('\n')).toMatch(/broken\.md/);
+    expect(await stat(join(pendingDir, 'broken.md')).catch(() => null)).not.toBeNull();
+    expect(await stat(join(skillsDir, 'broken.md')).catch(() => null)).toBeNull();
+  });
+
+  it('--all skips the broken file and still promotes the healthy ones', async () => {
+    await writeFile(join(pendingDir, 'broken.md'), BROKEN, 'utf-8');
+    await writeFile(join(pendingDir, 'good.md'), '---\nname: Good\n---\n\nBody.\n', 'utf-8');
+
+    const { apply } = await loadEvolveHelpers(testDir);
+    const stderrLines: string[] = [];
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    vi.spyOn(console, 'error').mockImplementation((...args) => {
+      stderrLines.push(args.join(' '));
+    });
+
+    await apply(['--all']);
+
+    expect(stderrLines.join('\n')).toMatch(/broken\.md/);
+    expect(await stat(join(pendingDir, 'broken.md')).catch(() => null)).not.toBeNull();
+    expect(await stat(join(skillsDir, 'broken.md')).catch(() => null)).toBeNull();
+    expect(await stat(join(skillsDir, 'good.md')).catch(() => null)).not.toBeNull();
+    expect(await stat(join(pendingDir, 'good.md')).catch(() => null)).toBeNull();
+  });
+});
+
 describe('registerEvolverCron', () => {
   it('exports registerEvolverCron as a callable function', async () => {
     const { registerEvolverCron } = await import('../cron');

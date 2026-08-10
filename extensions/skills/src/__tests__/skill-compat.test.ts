@@ -2,13 +2,43 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   applySubstitutions,
   checkRequirements,
+  checkSkillFrontmatter,
   parseSkillFrontmatter,
   shouldInject,
 } from '../skill-compat';
 
+/**
+ * The production incident: the skill evolver wrote an LLM-authored skill
+ * whose `description` was an unquoted scalar containing `": "`. A strict YAML
+ * parser cannot read it.
+ */
+const UNQUOTED_COLON = [
+  '---',
+  'name: stock-add',
+  'description: We repeatedly hit the same workflow problem: adding stocks with null sectors',
+  '---',
+  '',
+  'Body here.',
+].join('\n');
+
 describe('parseSkillFrontmatter', () => {
   it('returns null when no frontmatter is present', () => {
     expect(parseSkillFrontmatter('# Plain markdown\n\nNo frontmatter here.')).toBeNull();
+  });
+
+  it('does not throw on an unquoted colon-space value', () => {
+    // The hand-rolled parser is lenient and reads the value through to EOL.
+    // What matters is that it never propagates an exception to its callers.
+    expect(() => parseSkillFrontmatter(UNQUOTED_COLON)).not.toThrow();
+    expect(parseSkillFrontmatter(UNQUOTED_COLON)?.description).toBe(
+      'We repeatedly hit the same workflow problem: adding stocks with null sectors',
+    );
+  });
+
+  it('does not throw on an unterminated frontmatter block', () => {
+    expect(() =>
+      parseSkillFrontmatter('---\nname: x\ndescription: no close\n\nbody\n'),
+    ).not.toThrow();
   });
 
   it('parses a minimal frontmatter block', () => {
@@ -185,5 +215,36 @@ describe('checkRequirements', () => {
 
   it('fails when the current platform is not in the os list', () => {
     expect(checkRequirements({ os: [otherOs()] }, new Set())).toBe(`requires OS: ${otherOs()}`);
+  });
+});
+
+describe('checkSkillFrontmatter', () => {
+  it('accepts a file with no frontmatter at all', () => {
+    expect(checkSkillFrontmatter('# Plain markdown\n\nNo frontmatter here.')).toEqual({
+      ok: true,
+      parsed: null,
+    });
+  });
+
+  it('accepts well-formed frontmatter and returns the parse', () => {
+    const check = checkSkillFrontmatter('---\nname: my-skill\n---\n\nBody.');
+    expect(check.ok).toBe(true);
+    if (check.ok) expect(check.parsed?.raw.name).toBe('my-skill');
+  });
+
+  it('rejects an unquoted colon-space value', () => {
+    const check = checkSkillFrontmatter(UNQUOTED_COLON);
+    expect(check.ok).toBe(false);
+    if (!check.ok) expect(check.error.length).toBeGreaterThan(0);
+  });
+
+  it('rejects an unterminated frontmatter block', () => {
+    expect(checkSkillFrontmatter('---\nname: x\ndescription: no close\n\nbody\n').ok).toBe(false);
+  });
+
+  it('accepts a quoted value containing a colon', () => {
+    expect(
+      checkSkillFrontmatter('---\nname: ok\ndescription: "problem: solved"\n---\n\nBody.').ok,
+    ).toBe(true);
   });
 });

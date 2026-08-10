@@ -164,8 +164,13 @@ export function createRoutes(opts: CreateRoutesOptions): Hono {
       gatewayBlock = { status: 'down', adapters: [], lastHeartbeatAgeSec: null };
     }
 
-    const allAdaptersOk =
-      gatewayBlock.adapters.length > 0 && gatewayBlock.adapters.every((a) => a.ok);
+    // An EMPTY adapter list is healthy. A headless deployment with no Slack /
+    // Telegram / Discord bot attached is a normal configuration, and `every()`
+    // is vacuously true on `[]` — do NOT re-add a `length > 0` guard, it makes
+    // every such deployment permanently 503 and reports every restart as a
+    // failed start to any supervisor probing this endpoint. What must still
+    // fail is a gateway that is absent or stale, which `status === 'ok'` covers.
+    const allAdaptersOk = gatewayBlock.adapters.every((a) => a.ok);
     const healthy = gatewayBlock.status === 'ok' && allAdaptersOk;
     const status = healthy ? 'ok' : 'degraded';
 

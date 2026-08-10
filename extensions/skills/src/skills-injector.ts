@@ -82,7 +82,11 @@ export class SkillsInjector implements ContextInjector {
     this.storage = opts.storage;
     this.toolNamesForPersonality = opts.toolNamesForPersonality;
     this.maxInjectionChars = opts.maxInjectionChars ?? 40_000;
-    this.scanner = opts.scanner ?? new UniversalScanner({ storage: this.storage });
+    // Pass onSkip through so scan-time rejections (unparseable frontmatter,
+    // safety findings) reach the same reporting seam as filter-time ones,
+    // rather than vanishing.
+    this.scanner =
+      opts.scanner ?? new UniversalScanner({ storage: this.storage, onSkip: this.onSkip });
   }
 
   /**

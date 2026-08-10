@@ -32,6 +32,8 @@ export { sanitize } from './prompt-injection-guard';
 export {
   applySubstitutions,
   checkRequirements,
+  checkSkillFrontmatter,
+  type FrontmatterCheck,
   type OpenClawMeta,
   type ParsedFrontmatter,
   parseSkillFrontmatter,

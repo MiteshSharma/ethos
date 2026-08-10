@@ -1483,6 +1483,9 @@ importers:
       '@ethosagent/core':
         specifier: workspace:*
         version: link:../../packages/core
+      '@ethosagent/skills':
+        specifier: workspace:*
+        version: link:../skills
       '@ethosagent/storage-fs':
         specifier: workspace:*
         version: link:../../packages/storage-fs

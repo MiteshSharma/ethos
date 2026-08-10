@@ -219,6 +219,7 @@ export class UniversalScanner {
     const qualifiedName = `${source.label}/${name}`;
 
     const skill = this.parseWithDialect(raw, filePath, source.label, name, qualifiedName, mtimeMs);
+    if (!skill) return null;
 
     // Trust tier is fixed by which option the source arrived through —
     // `extraSources` always lands on `community`, `trustedFirstParty
@@ -234,6 +235,12 @@ export class UniversalScanner {
     return skill;
   }
 
+  /**
+   * Returns null when the file's frontmatter is unparseable. gray-matter
+   * parses YAML strictly, so an agent-authored skill with (say) an unquoted
+   * `": "` in its description throws here — and this runs at startup, before
+   * any port is bound. One bad file must cost one skill, not the process.
+   */
   private parseWithDialect(
     raw: string,
     filePath: string,
@@ -241,9 +248,21 @@ export class UniversalScanner {
     name: string,
     qualifiedName: string,
     mtimeMs: number,
-  ): Skill {
-    const { data } = matter(raw);
-    const fm = data as Record<string, unknown>;
+  ): Skill | null {
+    let fm: Record<string, unknown>;
+    let content: string;
+    try {
+      // `{}` bypasses gray-matter's module-global cache, which is populated
+      // BEFORE parsing — a throw leaves a half-built entry behind, so the same
+      // bad file would parse "successfully" into garbage on the next scan.
+      const file = matter(raw, {});
+      fm = file.data as Record<string, unknown>;
+      content = file.content;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      this.onSkip?.(qualifiedName, `invalid frontmatter: ${message.split('\n')[0] ?? message}`);
+      return null;
+    }
 
     let partial: Omit<Skill, 'qualifiedName'> | null = null;
 
@@ -258,7 +277,6 @@ export class UniversalScanner {
     if (partial) return { ...partial, qualifiedName };
 
     // Legacy: plain markdown with no recognized frontmatter
-    const { content } = matter(raw);
     return {
       qualifiedName,
       name,
