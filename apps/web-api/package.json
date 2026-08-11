@@ -44,6 +44,7 @@
     "@ethosagent/tools-mcp": "workspace:*",
     "@ethosagent/tools-ui": "workspace:*",
     "@ethosagent/types": "workspace:*",
+    "@ethosagent/voice-text": "workspace:*",
     "@ethosagent/web-contracts": "workspace:*",
     "@ethosagent/sqlite": "workspace:*",
     "@ethosagent/wiring": "workspace:*",

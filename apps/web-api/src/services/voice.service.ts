@@ -9,23 +9,7 @@ import type {
   TtsProvider,
   TtsProviderRegistry,
 } from '@ethosagent/types';
-
-const HALLUCINATION_PATTERNS = [
-  /^thanks?\s*(you\s*)?(for\s+)?(watching|listening|viewing)/i,
-  /^please\s+(like\s+and\s+)?subscribe/i,
-  /^(sub(scribe)?|like)\s+(to\s+)?(the\s+)?channel/i,
-  /^\s*$/,
-  /^\.+$/,
-  /^you$/i,
-  /^(music|applause|laughter)\s*$/i,
-  /^\[.*\]\s*$/,
-];
-
-function isHallucination(text: string): boolean {
-  const trimmed = text.trim();
-  if (trimmed.length === 0) return true;
-  return HALLUCINATION_PATTERNS.some((p) => p.test(trimmed));
-}
+import { isHallucination, truncateAtSentenceBoundary } from '@ethosagent/voice-text';
 
 export class VoiceService {
   private readonly sttRegistry: SttProviderRegistry | undefined;
@@ -195,16 +179,7 @@ export class VoiceService {
     if (!provider) throw new Error('No TTS provider configured — set auxiliary.tts in config');
 
     const maxChars = provider.caps.maxInputChars;
-    let input = text;
-    if (maxChars && input.length > maxChars) {
-      const truncated = input.slice(0, maxChars);
-      const lastEnd = Math.max(
-        truncated.lastIndexOf('.'),
-        truncated.lastIndexOf('!'),
-        truncated.lastIndexOf('?'),
-      );
-      input = lastEnd > maxChars * 0.5 ? truncated.slice(0, lastEnd + 1) : truncated;
-    }
+    const input = maxChars ? truncateAtSentenceBoundary(text, maxChars) : text;
 
     const result = await provider.synthesize(input, { voice });
     const base64 = Buffer.from(result.audio).toString('base64');

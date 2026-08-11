@@ -9,6 +9,7 @@
     }
   },
   "dependencies": {
-    "@ethosagent/types": "workspace:*"
+    "@ethosagent/types": "workspace:*",
+    "@ethosagent/voice-text": "workspace:*"
   }
 }

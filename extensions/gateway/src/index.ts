@@ -32,6 +32,13 @@ import type {
   TtsProvider,
   TtsProviderRegistry,
 } from '@ethosagent/types';
+import {
+  DEFAULT_VOICE_MODE,
+  sanitizeForSpeech,
+  shouldReplyWithVoice,
+  truncateAtSentenceBoundary,
+  type VoiceMode,
+} from '@ethosagent/voice-text';
 import { MessageDedupCache } from './dedup';
 import { beginDelivery, confirmDelivery, type DeliveryBinding } from './delivery';
 import {
@@ -42,12 +49,8 @@ import {
 import { DraftStreamer } from './streaming';
 import {
   buildTranscriptText,
-  DEFAULT_VOICE_MODE,
   hasAudioAttachments,
-  stripMarkdown,
   transcribeAudioAttachments,
-  truncateAtSentenceBoundary,
-  type VoiceMode,
 } from './voice-pipeline';
 
 export { SessionLane } from '@ethosagent/session-lane';
@@ -2064,13 +2067,16 @@ export class Gateway {
           // --- Voice pipeline: post-turn TTS synthesis ---
           const voiceMode = this.voiceModes.get(laneKey) ?? this.defaultVoiceMode;
           const hadAudio = this.lastInboundHadAudio.get(laneKey) ?? false;
-          const shouldSynth = voiceMode === 'all' || (voiceMode === 'mirror_inbound' && hadAudio);
+          const shouldSynth = shouldReplyWithVoice({
+            mode: voiceMode,
+            inboundHadAudio: hadAudio,
+          });
 
           if (shouldSynth) {
             const tts = await this.resolveTtsProvider();
             if (tts) {
               try {
-                let synthText = stripMarkdown(sanitized);
+                let synthText = sanitizeForSpeech(sanitized);
                 const maxChars = tts.caps.maxInputChars;
                 if (maxChars && synthText.length > maxChars) {
                   synthText = truncateAtSentenceBoundary(synthText, maxChars);

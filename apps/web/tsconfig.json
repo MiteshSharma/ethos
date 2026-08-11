@@ -9,7 +9,8 @@
       "@ethosagent/web-contracts": ["../../packages/web-contracts/src"],
       "@ethosagent/design-tokens": ["../../packages/design-tokens/src"],
       "@ethosagent/design-tokens/antd": ["../../packages/design-tokens/src/antd"],
-      "@ethosagent/ui-components": ["../../packages/ui-components/src"]
+      "@ethosagent/ui-components": ["../../packages/ui-components/src"],
+      "@ethosagent/voice-text": ["../../packages/voice-text/src"]
     }
   },
   "include": ["src/**/*.ts", "src/**/*.tsx", "vite.config.ts"]

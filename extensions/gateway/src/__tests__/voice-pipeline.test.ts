@@ -1,24 +1,10 @@
+// The hallucination filter, the markdown sanitizer, and the sentence-boundary
+// truncation this file used to cover now live in @ethosagent/voice-text — one
+// implementation, tested there. What remains is the gateway's own glue between
+// audio attachments and the transcript text handed to the loop.
+
 import { describe, expect, it } from 'vitest';
-import { buildTranscriptText, hasAudioAttachments, isHallucination } from '../voice-pipeline';
-
-describe('isHallucination', () => {
-  it('detects common Whisper hallucinations', () => {
-    expect(isHallucination('Thanks for watching')).toBe(true);
-    expect(isHallucination('Please subscribe')).toBe(true);
-    expect(isHallucination('Thank you for watching!')).toBe(true);
-    expect(isHallucination('')).toBe(true);
-    expect(isHallucination('   ')).toBe(true);
-    expect(isHallucination('...')).toBe(true);
-    expect(isHallucination('[Music]')).toBe(true);
-    expect(isHallucination('you')).toBe(true);
-  });
-
-  it('passes real transcripts through', () => {
-    expect(isHallucination('Hello, how are you doing today?')).toBe(false);
-    expect(isHallucination('Please send me the report')).toBe(false);
-    expect(isHallucination('Can you check the deployment?')).toBe(false);
-  });
-});
+import { buildTranscriptText, hasAudioAttachments } from '../voice-pipeline';
 
 describe('hasAudioAttachments', () => {
   it('returns false for undefined', () => {
@@ -60,51 +46,5 @@ describe('buildTranscriptText', () => {
 
   it('returns original text when no results', () => {
     expect(buildTranscriptText('hello', [])).toBe('hello');
-  });
-});
-
-import { stripMarkdown, truncateAtSentenceBoundary } from '../voice-pipeline';
-
-describe('stripMarkdown', () => {
-  it('removes code blocks', () => {
-    expect(stripMarkdown('Hello\n```js\nconst x = 1;\n```\nWorld')).toBe('Hello\n\nWorld');
-  });
-
-  it('removes inline code', () => {
-    expect(stripMarkdown('Use `foo()` here')).toBe('Use  here');
-  });
-
-  it('extracts link text', () => {
-    expect(stripMarkdown('See [docs](http://example.com)')).toBe('See docs');
-  });
-
-  it('removes heading markers', () => {
-    expect(stripMarkdown('## Title')).toBe('Title');
-  });
-
-  it('removes bold/italic', () => {
-    expect(stripMarkdown('**bold** and *italic*')).toBe('bold and italic');
-  });
-
-  it('passes plain text through', () => {
-    expect(stripMarkdown('Hello world')).toBe('Hello world');
-  });
-});
-
-describe('truncateAtSentenceBoundary', () => {
-  it('returns text unchanged when under limit', () => {
-    expect(truncateAtSentenceBoundary('Hello.', 100)).toBe('Hello.');
-  });
-
-  it('truncates at sentence boundary', () => {
-    const text = 'First sentence. Second sentence. Third sentence.';
-    const result = truncateAtSentenceBoundary(text, 20);
-    expect(result).toBe('First sentence.');
-  });
-
-  it('falls back to word boundary', () => {
-    const text = 'This is a long sentence without any periods';
-    const result = truncateAtSentenceBoundary(text, 25);
-    expect(result).toBe('This is a long sentence');
   });
 });

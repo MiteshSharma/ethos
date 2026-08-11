@@ -1,0 +1,17 @@
+{
+  "name": "@ethosagent/voice-text",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "The one speakable-text implementation: sanitizer, Unicode-aware sentence splitter, transcript hallucination filter, and the voice-reply decision. Zero runtime dependencies.",
+  "exports": {
+    ".": {
+      "import": "./src/index.ts",
+      "types": "./src/index.ts",
+      "production": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsup src/index.ts --format esm --dts"
+  }
+}

@@ -181,6 +181,7 @@
       "@ethosagent/tools-meeting": ["./extensions/tools-meeting/src"],
       "@ethosagent/voice-providers": ["./extensions/voice-providers/src"],
       "@ethosagent/voice-session": ["./extensions/voice-session/src"],
+      "@ethosagent/voice-text": ["./packages/voice-text/src"],
       "@ethosagent/example-mission-control": ["./examples/mission-control/src"],
       "@ethosagent/constitution": ["./extensions/constitution/src"]
     }

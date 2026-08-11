@@ -1,3 +1,4 @@
+import { splitSentences } from '@ethosagent/voice-text';
 import type { VoiceCallClient, VoiceCallEvent } from './voice-call-client';
 
 // Turn-based, LiveKit-free browser talk-mode. A `VoiceCallClient` that runs the
@@ -169,28 +170,6 @@ class PlayQueue {
       });
     }
   }
-}
-
-/**
- * Split accumulated reply text into complete sentences plus a trailing
- * incomplete remainder. A sentence is only cut at a terminator (`.`/`!`/`?`)
- * that is followed by whitespace, so "3.14" or a mid-stream "Dr." fragment is
- * not split prematurely; the leftover stays in `rest` for the next chunk (or the
- * end-of-turn flush).
- */
-export function splitSentences(buffer: string): { sentences: string[]; rest: string } {
-  const sentences: string[] = [];
-  let rest = buffer;
-  const boundary = /([.!?]+)(\s+)/;
-  while (true) {
-    const match = boundary.exec(rest);
-    if (!match) break;
-    const end = match.index + match[1].length;
-    const sentence = rest.slice(0, end).trim();
-    if (sentence) sentences.push(sentence);
-    rest = rest.slice(end + match[2].length);
-  }
-  return { sentences, rest };
 }
 
 function errorText(err: unknown, fallback: string): string {

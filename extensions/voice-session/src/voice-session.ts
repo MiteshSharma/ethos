@@ -14,11 +14,10 @@ import type {
   TtsProvider,
 } from '@ethosagent/types';
 import { isStreamingSttProvider, isStreamingTtsProvider } from '@ethosagent/types';
+import { isHallucination, SentenceChunker } from '@ethosagent/voice-text';
 import { createBufferedSttAdapter } from './buffered-stt';
 import { EndpointDetector } from './endpoint-detector';
-import { isHallucination } from './hallucination';
 import { PlayoutQueue } from './playout-queue';
-import { SentenceChunker } from './sentence-chunker';
 import type {
   AgentTurnRunner,
   AudioFormat,

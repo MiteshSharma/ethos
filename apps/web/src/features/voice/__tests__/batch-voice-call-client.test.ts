@@ -4,7 +4,6 @@ import {
   createBatchVoiceCallClient,
   createBrowserVoiceIoDriver,
   type SynthesizedClip,
-  splitSentences,
   type UtteranceCapture,
   type VoiceIoDriver,
 } from '../batch-voice-call-client';
@@ -98,26 +97,8 @@ function texts(events: VoiceCallEvent[], type: 'reply_sentence'): string[] {
     .map((e) => e.text);
 }
 
-describe('splitSentences', () => {
-  it('splits on terminators followed by whitespace, keeping the remainder', () => {
-    expect(splitSentences('Hello there. How are ')).toEqual({
-      sentences: ['Hello there.'],
-      rest: 'How are ',
-    });
-  });
-
-  it('does not split a decimal or a terminator with no trailing whitespace', () => {
-    expect(splitSentences('pi is 3.14 today')).toEqual({ sentences: [], rest: 'pi is 3.14 today' });
-    expect(splitSentences('Done.')).toEqual({ sentences: [], rest: 'Done.' });
-  });
-
-  it('handles multiple sentences and clustered terminators', () => {
-    expect(splitSentences('Yes! No? Maybe. tail')).toEqual({
-      sentences: ['Yes!', 'No?', 'Maybe.'],
-      rest: 'tail',
-    });
-  });
-});
+// Sentence splitting itself is tested in @ethosagent/voice-text — the client
+// imports that one implementation. What is tested here is the loop around it.
 
 describe('createBatchVoiceCallClient — full turn cycle', () => {
   it('listens → commits an utterance → speaks sentences in order → completes → listens again', async () => {

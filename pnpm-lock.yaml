@@ -457,6 +457,9 @@ importers:
       '@ethosagent/ui-components':
         specifier: workspace:*
         version: link:../../packages/ui-components
+      '@ethosagent/voice-text':
+        specifier: workspace:*
+        version: link:../../packages/voice-text
       '@ethosagent/web-contracts':
         specifier: workspace:*
         version: link:../../packages/web-contracts
@@ -602,6 +605,9 @@ importers:
       '@ethosagent/types':
         specifier: workspace:*
         version: link:../../packages/types
+      '@ethosagent/voice-text':
+        specifier: workspace:*
+        version: link:../../packages/voice-text
       '@ethosagent/web-contracts':
         specifier: workspace:*
         version: link:../../packages/web-contracts
@@ -1003,6 +1009,9 @@ importers:
       '@ethosagent/types':
         specifier: workspace:*
         version: link:../../packages/types
+      '@ethosagent/voice-text':
+        specifier: workspace:*
+        version: link:../../packages/voice-text
 
   extensions/goal-runner:
     dependencies:
@@ -1914,6 +1923,9 @@ importers:
       '@ethosagent/types':
         specifier: workspace:*
         version: link:../../packages/types
+      '@ethosagent/voice-text':
+        specifier: workspace:*
+        version: link:../../packages/voice-text
 
   extensions/watchers:
     dependencies:
@@ -2119,6 +2131,8 @@ importers:
       '@types/react':
         specifier: ^19.0.0
         version: 19.2.16
+
+  packages/voice-text: {}
 
   packages/web-contracts:
     dependencies:
