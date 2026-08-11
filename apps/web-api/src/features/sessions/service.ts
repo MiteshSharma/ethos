@@ -1,6 +1,8 @@
+import type { CardStore } from '@ethosagent/session-cards';
 import { EthosError } from '@ethosagent/types';
 import type {
   ContextAnatomyWire,
+  SessionCard,
   Session as WireSession,
   StoredMessage as WireStoredMessage,
 } from '@ethosagent/web-contracts';
@@ -18,6 +20,9 @@ export interface SessionsServiceOptions {
    *  `llm_call` spans. Injected by boot code (serve). Absent in contexts with
    *  no observability store (onboarding, tests) → the RPC returns null. */
   contextAnatomy?: (sessionId: string) => ContextAnatomyWire | null;
+  /** Durable UI-card store (ui-cards-canvas B2). Absent → `get` replays no
+   *  cards, which is the pre-B2 behaviour tests and embedders rely on. */
+  cards?: CardStore;
 }
 
 export interface ListInput {
@@ -44,13 +49,18 @@ export class SessionsService {
     };
   }
 
-  async get(id: string): Promise<{ session: WireSession; messages: WireStoredMessage[] }> {
+  async get(
+    id: string,
+  ): Promise<{ session: WireSession; messages: WireStoredMessage[]; cards: SessionCard[] }> {
     const session = await this.opts.sessions.get(id);
     if (!session) throw notFound(id);
     const messages = await this.opts.sessions.messages(id);
     return {
       session: toWireSession(session),
       messages: messages.map(toWireMessage),
+      // The contract always carries the array so the client never branches on
+      // undefined; a session with no store wired simply replays none.
+      cards: this.opts.cards?.list(id) ?? [],
     };
   }
 
@@ -63,6 +73,11 @@ export class SessionsService {
   async fork(id: string, personalityId?: string): Promise<{ session: WireSession }> {
     try {
       const fresh = await this.opts.sessions.fork(id, personalityId);
+      // A fork is not a fresh conversation: `SessionsRepository.fork` replays
+      // the source's entire message history into the new session, tool
+      // messages included. Skipping the cards would render that same history
+      // with its cards missing, so they come along.
+      this.opts.cards?.copySession(id, fresh.id);
       return { session: toWireSession(fresh) };
     } catch (err) {
       if (err instanceof Error && err.message.startsWith('session not found:')) {
@@ -76,6 +91,9 @@ export class SessionsService {
     const exists = await this.opts.sessions.get(id);
     if (!exists) throw notFound(id);
     await this.opts.sessions.delete(id);
+    // Cards live in their own database, outside the sessions.db cascade — a
+    // deleted session would otherwise leave its rows behind forever.
+    this.opts.cards?.deleteSession(id);
   }
 
   async export(id: string, _format: 'markdown'): Promise<{ content: string; filename: string }> {

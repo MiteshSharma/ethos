@@ -9,7 +9,9 @@ import {
   DashboardsService,
 } from '@ethosagent/dashboard';
 import type { GoalRunner } from '@ethosagent/goal-runner';
+import { ConsoleLogger } from '@ethosagent/logger';
 import type { FilePersonalityRegistry } from '@ethosagent/personalities';
+import { SQLiteCardStore } from '@ethosagent/session-cards';
 import { type SkillsInjector, SkillsLibrary } from '@ethosagent/skills';
 import { FileSecretsResolver, FsStorage } from '@ethosagent/storage-fs';
 import { McpJsonStore, type McpManager } from '@ethosagent/tools-mcp';
@@ -411,8 +413,15 @@ export function createWebApi(opts: CreateWebApiOptions): CreateWebApiResult {
   const systemBus = new SystemEventBus();
 
   // --- Services (business logic) ---
+  // Typed UI cards get their own database, not a column on the STRICT
+  // `messages` table: the envelopes are a rendering concern with their own
+  // version, and the LLM history has no use for them.
+  const cardStore = new SQLiteCardStore(join(opts.dataDir, 'cards.db'), {
+    logger: new ConsoleLogger({ component: 'cards' }),
+  });
   const sessionsService = new SessionsService({
     sessions: sessionsRepo,
+    cards: cardStore,
     ...(opts.contextAnatomyFn ? { contextAnatomy: opts.contextAnatomyFn } : {}),
   });
   const sharedMcpJsonStore = new McpJsonStore(storage);
@@ -591,6 +600,7 @@ export function createWebApi(opts: CreateWebApiOptions): CreateWebApiResult {
     sessions: chatRepo,
     buffer,
     defaults: opts.chatDefaults,
+    cardStore,
     onForget: (sessionId) => approvalsService.cancelForSession(sessionId),
     ...(opts.titleFn ? { titleFn: opts.titleFn } : {}),
     ...(opts.onTurnDone ? { onTurnDone: opts.onTurnDone } : {}),

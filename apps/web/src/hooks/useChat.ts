@@ -121,7 +121,10 @@ export function useChat(opts: UseChatOptions): UseChatResult {
         // Mark as loaded only after success so a Strict Mode
         // cancel+remount cycle retries rather than skipping.
         historyLoadedFor.current = currentSessionId;
-        dispatch({ kind: 'action', action: { type: 'history-loaded', messages: res.messages } });
+        dispatch({
+          kind: 'action',
+          action: { type: 'history-loaded', messages: res.messages, cards: res.cards },
+        });
       })
       .catch((err: unknown) => {
         if (cancelled) return;

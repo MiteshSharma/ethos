@@ -5236,3 +5236,339 @@ textarea {
 .personality-star--on {
   color: var(--ethos-text);
 }
+
+/* ---------------------------------------------------------------------------
+   Typed UI cards (features/cards). Chrome is deliberately thin: only the
+   kinds whose content is dense enough to need separating from prose — code,
+   table, chart, canvas — get a surface. Text, alert, detail, item_list and
+   the action pills sit directly on the message ("cards earn existence").
+   --------------------------------------------------------------------------- */
+
+.card-block {
+  margin: 8px 0;
+}
+
+.card-title {
+  font-size: 16px;
+  font-weight: 500;
+  line-height: 1.4;
+  color: var(--ethos-text);
+  margin-bottom: 4px;
+}
+
+.card-chip {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid var(--ethos-border);
+  border-radius: var(--radius-sm, 4px);
+  padding: 1px 8px;
+  font-family: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  color: var(--ethos-text-dim);
+}
+
+/* code */
+.card-code {
+  border: 1px solid var(--ethos-border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.card-code-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  background: var(--ethos-bg-elevated);
+  border-bottom: 1px solid var(--ethos-border);
+}
+
+.card-code-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ethos-text-dim);
+}
+
+.card-code-copy {
+  margin-left: auto;
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--ethos-text-tertiary);
+  transition: color var(--motion-fast, 80ms) ease;
+}
+
+.card-code-copy:hover {
+  color: var(--ethos-text);
+}
+
+.card-code-body {
+  margin: 0;
+  padding: 10px 12px;
+  overflow-x: auto;
+  background: var(--ethos-code-bg);
+  font-family: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--ethos-text);
+}
+
+/* alert — the glyph carries the severity, the color only speeds the scan */
+.card-alert {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.card-alert-icon {
+  flex: none;
+  margin-top: 2px;
+}
+
+.card-alert-info .card-alert-icon {
+  color: var(--ethos-info);
+}
+
+.card-alert-success .card-alert-icon {
+  color: var(--ethos-success);
+}
+
+.card-alert-warning .card-alert-icon {
+  color: var(--ethos-warning);
+}
+
+.card-alert-error .card-alert-icon {
+  color: var(--ethos-error);
+}
+
+.card-alert-title {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--ethos-text);
+}
+
+.card-alert-message {
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--ethos-text-dim);
+}
+
+/* detail */
+.card-detail-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.card-detail-head .card-title {
+  margin-bottom: 0;
+}
+
+.card-detail-grid {
+  margin: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.card-detail-row {
+  display: grid;
+  grid-template-columns: minmax(96px, 168px) 1fr;
+  gap: 12px;
+  align-items: baseline;
+}
+
+.card-detail-label {
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ethos-text-tertiary);
+}
+
+.card-detail-value {
+  margin: 0;
+  font-size: 14px;
+  color: var(--ethos-text);
+}
+
+/* item_list */
+.card-item-rows {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.card-item-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+}
+
+.card-status-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 9999px;
+  background: var(--ethos-text-tertiary);
+}
+
+.card-status-ok {
+  background: var(--ethos-success);
+}
+
+.card-status-warn {
+  background: var(--ethos-warning);
+}
+
+.card-status-error {
+  background: var(--ethos-error);
+}
+
+.card-item-name {
+  font-size: 14px;
+  color: var(--ethos-text);
+}
+
+.card-item-id {
+  font-family: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  color: var(--ethos-text-tertiary);
+}
+
+.card-item-meta {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--ethos-text-dim);
+}
+
+/* data_table — scrolls inside itself so a wide table never widens the column */
+.card-table-scroll {
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+.card-table-el {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+  color: var(--ethos-text);
+}
+
+.card-table-head-cell {
+  text-align: left;
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ethos-text-tertiary);
+  white-space: nowrap;
+  padding: 6px 16px 6px 0;
+  border-bottom: 1px solid var(--ethos-border);
+}
+
+.card-table-cell {
+  padding: 6px 16px 6px 0;
+  white-space: nowrap;
+}
+
+.card-table-numeric {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  font-family: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.card-table-totals .card-table-cell {
+  border-top: 1px solid var(--ethos-border-strong);
+  font-weight: 500;
+}
+
+.card-table-caption {
+  caption-side: bottom;
+  text-align: left;
+  padding-top: 6px;
+  font-size: 12px;
+  color: var(--ethos-text-tertiary);
+}
+
+/* metric_chart / canvas loading line */
+.card-chart-loading {
+  padding: 12px 0;
+  font-size: 12px;
+  color: var(--ethos-text-tertiary);
+}
+
+/* recommend_actions — the empty-state pill mechanic, in a row */
+.card-actions-question {
+  font-size: 14px;
+  color: var(--ethos-text-dim);
+  margin-bottom: 8px;
+}
+
+.card-actions-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.card-actions-pill {
+  padding: 6px 16px;
+}
+
+.card-actions-pill:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+/* canvas */
+.card-canvas {
+  border: 1px solid var(--ethos-border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.card-canvas-title {
+  padding: 6px 10px;
+  font-size: 12px;
+  font-weight: 600;
+  background: var(--ethos-bg-elevated);
+  color: var(--ethos-text-dim);
+  border-bottom: 1px solid var(--ethos-border);
+}
+
+.card-canvas-frame {
+  display: block;
+  width: 100%;
+  border: none;
+  transition: height var(--motion-default, 180ms) ease;
+}
+
+/* unknown-kind fallback */
+.card-unknown {
+  border: 1px solid var(--ethos-border);
+  border-radius: 8px;
+  padding: 10px 12px;
+}
+
+.card-unknown-label {
+  font-size: 13px;
+  color: var(--ethos-text-dim);
+}
+
+.card-unknown-details summary {
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--ethos-text-tertiary);
+  margin-top: 6px;
+}
+
+.card-unknown-payload {
+  margin: 6px 0 0;
+  overflow-x: auto;
+  font-family: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  color: var(--ethos-text-dim);
+}

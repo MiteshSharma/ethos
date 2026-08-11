@@ -23,6 +23,7 @@ export async function* setupTurn(
     tierOverride?: ModelTierName;
     toolsetOverride?: string[];
     toolsetNarrow?: string[];
+    toolsetExclude?: string[];
   },
 ): AsyncGenerator<AgentEvent, TurnSetupResult> {
   const sessionKey = opts.sessionKey ?? `${deps.platform}:default`;
@@ -189,10 +190,15 @@ export async function* setupTurn(
       )
     : undefined;
 
+  // Surface exclusion is deliberately NOT folded into `allowedTools`: it must
+  // outrank `alwaysInclude` and reach MCP/plugin tools too, which only the
+  // filterOpts path does. Static per surface, so tool definitions stay
+  // byte-identical across turns (see tool-definition-stability.test.ts).
   const filterOpts: ToolFilterOpts = {
     allowedMcpServers: personality.mcp_servers ?? [],
     allowedPlugins,
     ...(allowedMcpTools && Object.keys(allowedMcpTools).length > 0 ? { allowedMcpTools } : {}),
+    ...(opts.toolsetExclude ? { excludeTools: opts.toolsetExclude } : {}),
   };
 
   // Step 2: Fire session_start hooks

@@ -1,4 +1,4 @@
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import {
   type DefaultToolRegistry,
   LastWriteWinsPolicy,
@@ -60,7 +60,7 @@ import { createTerminalGuardHook, createTerminalTools } from '@ethosagent/tools-
 import { createThinkDeeperTool } from '@ethosagent/tools-tier';
 import { compose as composeTodo } from '@ethosagent/tools-todo/compose';
 import { createTtsTools } from '@ethosagent/tools-tts';
-import { buildUiTools } from '@ethosagent/tools-ui';
+import { buildCardTools, buildUiTools, createUiGuidanceInjector } from '@ethosagent/tools-ui';
 import { createVoiceTools } from '@ethosagent/tools-voice';
 import { compose as composeWatchers } from '@ethosagent/tools-watchers/compose';
 import type {
@@ -264,6 +264,82 @@ export function createAssetDirResolver(
       return undefined;
     }
   };
+}
+
+/**
+ * Resolve any known personality's OWN directory — the one holding `SOUL.md`,
+ * and beneath it the `ui/` Canvas templates `render_ui` reads.
+ *
+ * Distinct from the asset folder: assets follow `fs_reach` and may be
+ * relocated anywhere, whereas templates are authored alongside the
+ * personality's identity files and travel with it. `soulFile` is
+ * `<dir>/SOUL.md`, populated by the loader for built-in and user
+ * personalities alike, so `dirname` is the whole derivation.
+ *
+ * Resolved per call, never captured: the registry hot-reloads and a loop's
+ * personality can change mid-session (`/personality`).
+ *
+ * `undefined` when the personality is unknown, or when it is config-only and
+ * therefore has no `soulFile` — `render_ui` then refuses template mode rather
+ * than guessing at a directory.
+ */
+export function createPersonalityDirResolver(
+  lookup: (personalityId: string) => PersonalityConfig | undefined,
+): (personalityId: string) => string | undefined {
+  return (personalityId) => {
+    const soulFile = lookup(personalityId)?.soulFile;
+    return soulFile ? dirname(soulFile) : undefined;
+  };
+}
+
+/**
+ * Scan a personality's `ui/` folder once, at composition time, for the Canvas
+ * template catalog the UI-guidance injector advertises. Per-turn listing is
+ * forbidden here: the injector's content must stay byte-identical across turns
+ * or it breaks the static prompt prefix.
+ *
+ * Descriptions are best-effort — the first HTML comment, else the `<title>`.
+ * Any failure (missing folder, unreadable file) yields no catalog rather than
+ * failing composition.
+ */
+async function scanUiTemplates(
+  storage: Storage,
+  personalityDir: string,
+): Promise<Array<{ name: string; description?: string }>> {
+  const dir = join(personalityDir, 'ui');
+  try {
+    const entries = await storage.listEntries(dir);
+    const files = entries
+      .filter((e) => !e.isDir && e.name.endsWith('.html'))
+      .map((e) => e.name)
+      .sort(); // deterministic order — the prompt prefix depends on it
+    const catalog: Array<{ name: string; description?: string }> = [];
+    for (const file of files) {
+      const name = file.slice(0, -'.html'.length);
+      let description: string | undefined;
+      try {
+        const html = await storage.read(join(dir, file));
+        description = html ? templateDescription(html) : undefined;
+      } catch {
+        description = undefined;
+      }
+      catalog.push(description ? { name, description } : { name });
+    }
+    return catalog;
+  } catch {
+    return [];
+  }
+}
+
+/** First HTML comment, else `<title>`; single line, trimmed, capped. */
+function templateDescription(html: string): string | undefined {
+  const comment = /<!--([\s\S]*?)-->/.exec(html)?.[1];
+  const title = /<title>([\s\S]*?)<\/title>/i.exec(html)?.[1];
+  for (const candidate of [comment, title]) {
+    const line = candidate?.trim().split('\n')[0]?.trim();
+    if (line) return line.slice(0, 160);
+  }
+  return undefined;
 }
 
 /**
@@ -530,6 +606,8 @@ export async function composeAllTools(
     cwd: wiringCtx.workingDir,
   });
   for (const tool of buildUiTools(assetDirFor)) tools.register(tool);
+  const personalityDirFor = createPersonalityDirResolver((id) => personalities.get(id));
+  for (const tool of buildCardTools({ personalityDir: personalityDirFor })) tools.register(tool);
 
   // One InMemoryTodoStore per process — lifetime tied to the AgentLoop.
   const { tools: todoTools } = composeTodo(wiringCtx);
@@ -888,6 +966,26 @@ export async function composeAllTools(
   const activeAssetDir = assetDirFor(activePerson.id);
   if (activeAssetDir) {
     injectors.push(createPersonalityFilesInjector(activePerson.id, activeAssetDir));
+  }
+
+  // -------------------------------------------------------------------------
+  // UI-guidance injector — cards + Canvas composition rules
+  // -------------------------------------------------------------------------
+
+  // Gated on reach, not on registration: the card tools are always registered
+  // (the registry filters them per personality), but turn-composition rules are
+  // dead prompt weight for a personality that cannot emit a card. An undefined
+  // toolset means "all tools", so it qualifies.
+  const activeToolset = activePerson.toolset;
+  const reachesCards =
+    activeToolset === undefined ||
+    activeToolset.some((name: string) => name === 'emit_card' || name === 'render_ui');
+  if (reachesCards) {
+    const personalityDir = personalityDirFor(activePerson.id);
+    const templates = personalityDir
+      ? await scanUiTemplates(wiringCtx.storage, personalityDir)
+      : [];
+    injectors.push(createUiGuidanceInjector({ personalityId: activePerson.id, templates }));
   }
 
   // -------------------------------------------------------------------------

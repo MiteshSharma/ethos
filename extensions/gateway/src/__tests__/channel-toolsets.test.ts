@@ -1,7 +1,7 @@
 import type { AgentLoop } from '@ethosagent/core';
 import type { InboundMessage, PlatformAdapter } from '@ethosagent/types';
 import { describe, expect, it, vi } from 'vitest';
-import { Gateway } from '../index';
+import { CHANNEL_EXCLUDED_TOOLS, Gateway } from '../index';
 
 // Context-economy Phase 1 — static per-channel toolset narrowing. The value
 // is resolved from static GatewayConfig only and threaded to the lane turn as
@@ -100,5 +100,31 @@ describe('Gateway — static per-channel toolsetNarrow', () => {
 
     expect(loop.run).toHaveBeenCalledTimes(1);
     expect('toolsetNarrow' in runOptions(loop)).toBe(false);
+  });
+});
+
+// UI-card tools render nothing on a channel adapter, so the gateway subtracts
+// them from every lane turn. Unconditional — not config-driven, no opt-out.
+describe('Gateway — unconditional channel tool exclusion', () => {
+  it('passes CHANNEL_EXCLUDED_TOOLS as toolsetExclude on lane turns', async () => {
+    const loop = stubLoop();
+    const gw = makeGateway(loop, { whatsapp: ['read_file'] });
+
+    await gw.handleMessage(makeMessage('whatsapp'), stubAdapter());
+
+    expect(runOptions(loop).toolsetExclude).toEqual([...CHANNEL_EXCLUDED_TOOLS]);
+  });
+
+  it('passes toolsetExclude even when channelToolsets is unconfigured', async () => {
+    const loop = stubLoop();
+    const gw = makeGateway(loop);
+
+    await gw.handleMessage(makeMessage('telegram'), stubAdapter());
+
+    expect(runOptions(loop).toolsetExclude).toEqual([...CHANNEL_EXCLUDED_TOOLS]);
+  });
+
+  it('covers the UI-card tools', () => {
+    expect([...CHANNEL_EXCLUDED_TOOLS].sort()).toEqual(['emit_card', 'render_ui']);
   });
 });

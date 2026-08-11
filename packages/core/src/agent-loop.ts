@@ -274,6 +274,13 @@ export interface RunOptions {
    * declared `allowedTools` can never escalate beyond the personality allowlist.
    */
   toolsetNarrow?: string[];
+  /**
+   * Surface-level exclusion — tool names that must neither appear in the tool
+   * definitions nor execute. Independent of `toolsetNarrow`: narrow intersects
+   * the personality toolset, exclude subtracts unconditionally and defeats
+   * `alwaysInclude`. Set by the surface, never by the personality.
+   */
+  toolsetExclude?: string[];
   /** Override the per-turn tool-call cap for this run only (goal runs raise it; default applies when absent). */
   maxToolCallsPerTurn?: number;
   /** Override the per-tool-name repeat cap for this run only (goal runs raise it; default applies when absent). */

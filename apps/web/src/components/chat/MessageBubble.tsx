@@ -1,5 +1,6 @@
 import { ContentRenderer, type FenceRendererResolver } from '@ethosagent/ui-components';
 import { useQuery } from '@tanstack/react-query';
+import { CardView } from '../../features/cards/CardView';
 import { formatBytes, type MessageAttachment } from '../../lib/attachments';
 import type { AssistantBlock, AssistantTurn, UserMessage } from '../../lib/chat-reducer';
 import { rpc } from '../../rpc';
@@ -59,11 +60,14 @@ export function AssistantBubble({
   turn,
   streaming,
   fenceRenderers,
+  onSuggestPrompt,
 }: {
   turn: AssistantTurn;
   streaming?: boolean;
   /** Fence-upgrade decision for this surface. Must be referentially stable. */
   fenceRenderers?: FenceRendererResolver;
+  /** Puts a `recommend_actions` prompt in the composer. */
+  onSuggestPrompt?: (prompt: string) => void;
 }) {
   const lastBlock = turn.blocks[turn.blocks.length - 1];
   const cursorAfter = streaming && lastBlock?.kind === 'text';
@@ -86,6 +90,7 @@ export function AssistantBubble({
             block={block}
             streamingTail={streaming && idx === turn.blocks.length - 1}
             fenceRenderers={fenceRenderers}
+            onSuggestPrompt={onSuggestPrompt}
           />
         ))}
         {streaming && !cursorAfter && lastBlock?.kind === 'tool' ? (
@@ -101,10 +106,12 @@ function BlockRenderer({
   block,
   streamingTail,
   fenceRenderers,
+  onSuggestPrompt,
 }: {
   block: AssistantBlock;
   streamingTail?: boolean;
   fenceRenderers?: FenceRendererResolver;
+  onSuggestPrompt?: (prompt: string) => void;
 }) {
   if (block.kind === 'text') {
     return (
@@ -130,6 +137,9 @@ function BlockRenderer({
   if (block.kind === 'pdf') {
     return <PdfBlock block={block} />;
   }
+  if (block.kind === 'card') {
+    return <CardView card={block.card} onSuggestPrompt={onSuggestPrompt} />;
+  }
   return <ToolChip tool={block} />;
 }
 
@@ -138,5 +148,7 @@ function blockKey(block: AssistantBlock, idx: number): string {
   if (block.kind === 'image') return `image-${block.toolCallId}`;
   if (block.kind === 'html') return `html-${block.toolCallId}`;
   if (block.kind === 'pdf') return `pdf-${block.toolCallId}`;
+  // One tool call can emit several cards, so the id alone is not unique.
+  if (block.kind === 'card') return `card-${block.toolCallId}-${idx}`;
   return `tool-${block.toolCallId}`;
 }

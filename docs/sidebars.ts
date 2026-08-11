@@ -147,6 +147,7 @@ const sidebars: SidebarsConfig = {
             'building/how-to/deploy-mission-control-remote',
             'building/how-to/consume-attachments-in-a-tool',
             'building/how-to/enable-storage-encryption',
+            'building/how-to/author-a-canvas-template',
           ],
         },
         {
@@ -169,6 +170,7 @@ const sidebars: SidebarsConfig = {
             'building/reference/browser-tools',
             'building/reference/tts-tools',
             'building/reference/messaging-tools',
+            'building/reference/card-catalog',
             'building/reference/skills-tools',
             'building/reference/cron-tools',
             'building/reference/sdk-client',

@@ -7,6 +7,7 @@ Working examples for everything you can build with Ethos. Each subdirectory is a
 | [`plugins/`](./plugins/) | npm-publishable plugin packages (tools, hooks, injectors). Five worked examples covering the main extension surfaces. |
 | [`personalities/`](./personalities/) | Directory-based personality bundles you drop into `~/.ethos/personalities/<id>/`. Ready to use as-is or fork as templates. |
 | [`skills/`](./skills/) | Skill files in the format that `ethos skills install` and the OpenClaw-compat layer consume. |
+| [`canvas-templates/`](./canvas-templates/) | Canvas templates a personality drops into its own `ui/` folder and renders with `render_ui({ template, data })`. |
 
 ---
 
@@ -17,6 +18,7 @@ Working examples for everything you can build with Ethos. Each subdirectory is a
 - **A plugin:** add the directory path to your `~/.ethos/config.yaml` `plugins:` list, then list its tool names in your active personality's `toolset.yaml`.
 - **A personality:** copy the whole subdirectory (e.g., `tutor/`) into `~/.ethos/personalities/`. Restart `ethos chat`. Switch with `/personality tutor`.
 - **A skill:** copy the `.md` file into `~/.ethos/skills/`, or run `ethos skills install <slug>` if it's published.
+- **A Canvas template:** copy the `.html` file into `~/.ethos/personalities/<personality-id>/ui/`, and add `render_ui` to that personality's `toolset.yaml`.
 
 **To use one as a template:**
 

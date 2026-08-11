@@ -13,6 +13,7 @@
     "build": "tsup src/index.ts --format esm --dts"
   },
   "dependencies": {
-    "@ethosagent/types": "workspace:*"
+    "@ethosagent/types": "workspace:*",
+    "@ethosagent/web-contracts": "workspace:*"
   }
 }

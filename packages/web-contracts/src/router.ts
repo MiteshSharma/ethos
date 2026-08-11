@@ -1,5 +1,6 @@
 import { oc } from '@orpc/contract';
 import { z } from 'zod';
+import { SessionCardSchema } from './cards';
 import {
   A2aIdentityViewSchema,
   A2aPeerRowSchema,
@@ -118,6 +119,8 @@ const SessionGetInput = z.object({ id: z.string() });
 const SessionGetOutput = z.object({
   session: SessionSchema,
   messages: z.array(StoredMessageSchema),
+  /** Card envelopes emitted during this session, for replay. Empty when none. */
+  cards: z.array(SessionCardSchema),
 });
 
 const SessionForkInput = z.object({

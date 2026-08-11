@@ -1,8 +1,11 @@
-import type {
-  ApprovalRequest,
-  ClarifyRequestEvent,
-  SseEvent,
-  StoredMessage,
+import {
+  type ApprovalRequest,
+  type CardEnvelope,
+  CardEnvelopeSchema,
+  type ClarifyRequestEvent,
+  type SessionCard,
+  type SseEvent,
+  type StoredMessage,
 } from '@ethosagent/web-contracts';
 import type { MessageAttachment } from './attachments';
 
@@ -79,7 +82,18 @@ export interface PdfBlock {
   title?: string;
 }
 
-export type AssistantBlock = TextBlock | ToolBlock | ImageBlock | HtmlBlock | PdfBlock;
+/**
+ * A typed UI card emitted by a tool (`emit_card` / `render_ui`). The envelope
+ * is schema-validated before it lands here — on the live path by
+ * `CardEnvelopeSchema` below, on the replay path by the server.
+ */
+export interface CardBlock {
+  kind: 'card';
+  toolCallId: string;
+  card: CardEnvelope;
+}
+
+export type AssistantBlock = TextBlock | ToolBlock | ImageBlock | HtmlBlock | PdfBlock | CardBlock;
 
 export interface AssistantTurn {
   id: string;
@@ -149,7 +163,7 @@ export type ChatAction =
       attachments?: MessageAttachment[];
     }
   | { type: 'steer-user-message'; id: string; text: string; timestamp: number }
-  | { type: 'history-loaded'; messages: StoredMessage[] }
+  | { type: 'history-loaded'; messages: StoredMessage[]; cards?: SessionCard[] }
   | { type: 'send-failed'; userMessageId: string; error: string }
   | { type: 'clear-error' }
   /**
@@ -284,6 +298,20 @@ export function applyEvent(state: ChatState, event: SseEvent, now: number): Chat
           toolCallId: event.toolCallId,
           src: content,
           title: meta?.title as string | undefined,
+        };
+        return appendSiblingBlock(base, sibling);
+      }
+
+      // Typed UI cards (ui-cards-canvas). The server already gates the wire on
+      // this same schema; re-parsing here is belt-and-braces — a malformed
+      // envelope drops the card and keeps the plain tool chip.
+      if (event.structured?.card !== undefined) {
+        const parsed = CardEnvelopeSchema.safeParse(event.structured.card);
+        if (!parsed.success) return base;
+        const sibling: CardBlock = {
+          kind: 'card',
+          toolCallId: event.toolCallId,
+          card: parsed.data,
         };
         return appendSiblingBlock(base, sibling);
       }
@@ -474,7 +502,7 @@ export function applyAction(state: ChatState, action: ChatAction): ChatState {
     }
 
     case 'history-loaded': {
-      return { ...state, messages: parseHistory(action.messages) };
+      return { ...state, messages: parseHistory(action.messages, action.cards ?? []) };
     }
 
     case 'send-failed': {
@@ -575,7 +603,7 @@ function updateToolBlock(
  */
 function appendSiblingBlock(
   state: ChatState,
-  sibling: ImageBlock | HtmlBlock | PdfBlock,
+  sibling: ImageBlock | HtmlBlock | PdfBlock | CardBlock,
 ): ChatState {
   if (state.currentTurn) {
     return {
@@ -610,6 +638,7 @@ function turnsMatch(a: AssistantTurn, b: AssistantTurn): boolean {
     if (x.kind === 'image' && y.kind === 'image' && x.toolCallId !== y.toolCallId) return false;
     if (x.kind === 'html' && y.kind === 'html' && x.toolCallId !== y.toolCallId) return false;
     if (x.kind === 'pdf' && y.kind === 'pdf' && x.toolCallId !== y.toolCallId) return false;
+    if (x.kind === 'card' && y.kind === 'card' && x.toolCallId !== y.toolCallId) return false;
   }
   return true;
 }
@@ -621,8 +650,11 @@ function turnsMatch(a: AssistantTurn, b: AssistantTurn): boolean {
  * tool_result rows it produced. We collapse those into a single
  * AssistantTurn per logical user→done cycle so the UI matches what the
  * user actually saw stream.
+ *
+ * `cards` are the envelopes the session replayed alongside the messages; each
+ * one is placed next to the tool call that emitted it.
  */
-function parseHistory(stored: StoredMessage[]): ChatMessage[] {
+function parseHistory(stored: StoredMessage[], cards: SessionCard[] = []): ChatMessage[] {
   const ui: ChatMessage[] = [];
   let current: AssistantTurn | null = null;
 
@@ -699,5 +731,46 @@ function parseHistory(stored: StoredMessage[]): ChatMessage[] {
     // role === 'system' — skip in the chat surface.
   }
   flush();
+  insertReplayedCards(ui, cards);
   return ui;
+}
+
+/**
+ * Place each replayed card directly after the tool block that emitted it, so
+ * a reloaded turn reads in the same order it streamed. Cards are applied in
+ * `seq` order and mutate the freshly-built turns from `parseHistory` in place.
+ *
+ * No matching tool block is a defect upstream, not a reason to lose the card:
+ * it lands at the end of the last assistant turn instead.
+ */
+function insertReplayedCards(ui: ChatMessage[], cards: SessionCard[]): void {
+  for (const entry of [...cards].sort((a, b) => a.seq - b.seq)) {
+    const block: CardBlock = {
+      kind: 'card',
+      toolCallId: entry.toolCallId,
+      card: entry.envelope,
+    };
+    const turn = ui.find(
+      (m): m is AssistantTurn =>
+        m.role === 'assistant' &&
+        m.blocks.some((b) => b.kind === 'tool' && b.toolCallId === entry.toolCallId),
+    );
+    if (turn) {
+      const toolIdx = turn.blocks.findIndex(
+        (b) => b.kind === 'tool' && b.toolCallId === entry.toolCallId,
+      );
+      // Step past cards already placed for this call so `seq` order survives.
+      let at = toolIdx + 1;
+      while (turn.blocks[at]?.kind === 'card') at++;
+      turn.blocks.splice(at, 0, block);
+      continue;
+    }
+    for (let i = ui.length - 1; i >= 0; i--) {
+      const message = ui[i];
+      if (message?.role === 'assistant') {
+        message.blocks.push(block);
+        break;
+      }
+    }
+  }
 }

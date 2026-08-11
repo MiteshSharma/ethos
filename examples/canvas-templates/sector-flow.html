@@ -1,0 +1,179 @@
+<!-- Diverging money-flow matrix: sectors down one axis, time buckets across, each cell colored by net flow from outflow through neutral to inflow. -->
+<style>
+  .flow-chart {
+    width: 100%;
+  }
+  .flow-empty {
+    padding: 24px 12px;
+    color: var(--ethos-text-dim);
+    font-family: var(--ethos-font);
+    font-size: 14px;
+    line-height: 1.5;
+  }
+</style>
+
+<div id="sector-flow" class="flow-chart"></div>
+
+<script>
+/*
+ * Expected `data` (the value passed to render_ui, readable as window.ethosData):
+ *
+ *   {
+ *     "unit": "Cr",
+ *     "buckets": ["Mon", "Tue", "Wed", "Thu", "Fri"],
+ *     "sectors": ["Banks", "IT", "Pharma"],
+ *     "cells": [
+ *       { "sector": "Banks",  "bucket": "Mon", "value":  412 },
+ *       { "sector": "Banks",  "bucket": "Tue", "value": -180 },
+ *       { "sector": "IT",     "bucket": "Mon", "value":  -95 },
+ *       { "sector": "Pharma", "bucket": "Fri", "value":  260 }
+ *     ]
+ *   }
+ *
+ * `buckets` order left to right, `sectors` order top to bottom. `unit` is
+ * optional and appended to every number. Cells naming an unknown sector or
+ * bucket are ignored; missing cells render as gaps, not zeroes.
+ */
+(() => {
+  const root = document.getElementById('sector-flow');
+
+  const fail = (message) => {
+    root.className = 'flow-empty';
+    root.textContent = message;
+  };
+
+  if (typeof echarts === 'undefined') {
+    fail(
+      'Chart library not loaded. Render this template through the Ethos Canvas with libraries: ["echarts@1"].',
+    );
+    return;
+  }
+
+  const css = getComputedStyle(document.documentElement);
+  const token = (name) => css.getPropertyValue(name).trim();
+  const theme = {
+    outflow: token('--ethos-error'),
+    neutral: token('--ethos-bg-overlay'),
+    inflow: token('--ethos-success'),
+    bg: token('--ethos-bg'),
+    text: token('--ethos-text'),
+    dim: token('--ethos-text-dim'),
+    border: token('--ethos-border'),
+    elevated: token('--ethos-bg-elevated'),
+    font: token('--ethos-font'),
+    mono: token('--ethos-font-mono'),
+  };
+  if (!theme.outflow || !theme.inflow || !theme.neutral || !theme.text || !theme.bg) {
+    fail('Theme variables are missing. Render this template through the Ethos Canvas.');
+    return;
+  }
+
+  const texts = (value) =>
+    Array.isArray(value) ? value.filter((entry) => typeof entry === 'string' && entry.length > 0) : [];
+
+  const data = window.ethosData;
+  if (!data || typeof data !== 'object') {
+    fail('No data. This template renders the value passed as render_ui({ data }).');
+    return;
+  }
+  const buckets = texts(data.buckets);
+  const sectors = texts(data.sectors);
+  if (buckets.length === 0 || sectors.length === 0) {
+    fail('Data needs a non-empty `buckets` list and a non-empty `sectors` list.');
+    return;
+  }
+
+  const points = [];
+  let maxAbs = 0;
+  const cells = Array.isArray(data.cells) ? data.cells : [];
+  for (const cell of cells) {
+    if (!cell || typeof cell !== 'object') continue;
+    if (!Number.isFinite(cell.value)) continue;
+    const x = buckets.indexOf(cell.bucket);
+    const y = sectors.indexOf(cell.sector);
+    if (x === -1 || y === -1) continue;
+    points.push({ value: [x, y, cell.value] });
+    maxAbs = Math.max(maxAbs, Math.abs(cell.value));
+  }
+  if (points.length === 0) {
+    fail('No `cells` matched the declared sectors and buckets.');
+    return;
+  }
+  if (maxAbs === 0) maxAbs = 1;
+
+  const unit = typeof data.unit === 'string' ? data.unit : '';
+  const amount = (value) => {
+    const rounded = Math.abs(value) >= 100 ? Math.round(value) : Math.round(value * 10) / 10;
+    return `${rounded > 0 ? '+' : ''}${rounded}${unit ? ` ${unit}` : ''}`;
+  };
+
+  // Saturated cells carry the base background as their label so the number
+  // stays legible against the fill; quiet cells keep the body text color.
+  for (const point of points) {
+    const magnitude = Math.abs(point.value[2]);
+    point.label = { color: magnitude >= maxAbs * 0.5 ? theme.bg : theme.text };
+  }
+
+  const rowHeight = 34;
+  const chrome = 108;
+  root.style.height = `${sectors.length * rowHeight + chrome}px`;
+
+  const chart = echarts.init(root, null, { renderer: 'canvas' });
+  chart.setOption({
+    animation: !window.matchMedia('(prefers-reduced-motion: reduce)').matches,
+    textStyle: { fontFamily: theme.font, color: theme.text },
+    grid: { left: 8, right: 8, top: 8, bottom: 48, containLabel: true },
+    tooltip: {
+      backgroundColor: theme.elevated,
+      borderColor: theme.border,
+      textStyle: { color: theme.text, fontFamily: theme.font },
+      formatter: ({ value }) => `${sectors[value[1]]} · ${buckets[value[0]]}: ${amount(value[2])}`,
+    },
+    xAxis: {
+      type: 'category',
+      data: buckets,
+      axisTick: { show: false },
+      axisLine: { lineStyle: { color: theme.border } },
+      axisLabel: { color: theme.dim, fontFamily: theme.font },
+    },
+    yAxis: {
+      type: 'category',
+      data: sectors,
+      inverse: true,
+      axisTick: { show: false },
+      axisLine: { lineStyle: { color: theme.border } },
+      axisLabel: { color: theme.dim, fontFamily: theme.font },
+    },
+    visualMap: {
+      type: 'continuous',
+      min: -maxAbs,
+      max: maxAbs,
+      calculable: false,
+      orient: 'horizontal',
+      left: 'center',
+      bottom: 0,
+      itemWidth: 12,
+      itemHeight: 140,
+      inRange: { color: [theme.outflow, theme.neutral, theme.inflow] },
+      text: ['inflow', 'outflow'],
+      textStyle: { color: theme.dim, fontFamily: theme.font },
+    },
+    series: [
+      {
+        type: 'heatmap',
+        data: points,
+        label: {
+          show: true,
+          fontFamily: theme.mono,
+          fontSize: 11,
+          formatter: ({ value }) => amount(value[2]),
+        },
+        itemStyle: { borderColor: theme.bg, borderWidth: 2 },
+        emphasis: { itemStyle: { borderColor: theme.text } },
+      },
+    ],
+  });
+
+  window.addEventListener('resize', () => chart.resize());
+})();
+</script>

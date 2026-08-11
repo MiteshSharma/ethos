@@ -359,6 +359,13 @@ export interface ToolFilterOpts {
    * only the listed tools pass. undefined = no per-tool filter.
    */
   allowedMcpTools?: Record<string, string[]>;
+  /**
+   * Tool names that must never appear or execute on this surface, regardless
+   * of the personality toolset or `alwaysInclude`. Surface policy, not
+   * personality policy: the gateway sets it so UI-card tools stay off channel
+   * adapters while the web path keeps them. undefined = no exclusion.
+   */
+  excludeTools?: string[];
 }
 
 export interface ToolRegistry {

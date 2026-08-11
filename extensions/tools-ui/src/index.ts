@@ -1,5 +1,7 @@
 import { basename, extname, join } from 'node:path';
 import type { Tool, ToolContext, ToolResult } from '@ethosagent/types';
+import { emitCardTool } from './emit-card';
+import { createRenderUiTool, type PersonalityDirResolver } from './render-ui';
 
 /**
  * Resolves the asset folder a personality's `files://` URIs address.
@@ -338,6 +340,13 @@ export {
   createDashboardAddPanelTool,
   createDashboardCreateTool,
 } from './dashboard-tools';
+export type { EmitCardArgs } from './emit-card';
+export type { RenderUiArgs } from './render-ui';
+export type { UiGuidanceInjectorOptions, UiTemplateEntry } from './ui-guidance-injector';
+export { createUiGuidanceInjector } from './ui-guidance-injector';
+export { isUiPlatform, UI_PLATFORMS } from './ui-platform';
+export type { PersonalityDirResolver };
+export { createRenderUiTool, emitCardTool };
 
 export function buildUiTools(assetDir: AssetDirResolver): Tool[] {
   return [
@@ -345,4 +354,14 @@ export function buildUiTools(assetDir: AssetDirResolver): Tool[] {
     renderHtmlTool as Tool,
     createRenderFileTool(assetDir) as Tool,
   ];
+}
+
+/**
+ * The card lane — `emit_card` + `render_ui`. Separate from `buildUiTools` on
+ * purpose: those three `render_*` tools are `alwaysInclude`, these two are
+ * gated by the personality toolset (`ui`), so a factory that mixed them would
+ * hide the difference behind one call site.
+ */
+export function buildCardTools(opts: { personalityDir: PersonalityDirResolver }): Tool[] {
+  return [emitCardTool as Tool, createRenderUiTool(opts.personalityDir) as Tool];
 }

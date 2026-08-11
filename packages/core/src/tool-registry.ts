@@ -41,12 +41,17 @@ function mcpServerName(toolName: string): string | undefined {
   return toolName.split('__')[1];
 }
 
-/** Returns true when a tool passes the MCP server + plugin filters. */
+/** Returns true when a tool passes the surface exclusion + MCP server + plugin filters. */
 function passesFilter(entry: ToolEntry, filterOpts: ToolFilterOpts | undefined): boolean {
   if (!filterOpts) return true;
 
-  const { allowedMcpServers, allowedPlugins, allowedMcpTools } = filterOpts;
+  const { allowedMcpServers, allowedPlugins, allowedMcpTools, excludeTools } = filterOpts;
   const toolName = entry.tool.name;
+
+  // Surface gate: strictly stronger than the toolset gate. It applies to every
+  // tool — built-in, MCP, plugin — and defeats `alwaysInclude`, because it
+  // expresses what the surface cannot render, not what the personality may use.
+  if (excludeTools?.includes(toolName)) return false;
 
   // MCP server gate: MCP tools only appear when their server is in the allowlist.
   if (allowedMcpServers !== undefined) {
@@ -334,6 +339,21 @@ export class DefaultToolRegistry implements ToolRegistry {
             result: {
               ok: false,
               error: `Unknown tool: ${call.name}`,
+              code: 'not_available',
+            } as ToolResult,
+          };
+        }
+
+        // Surface gate (L8 execution-time half): checked before the
+        // MCP/plugin/alwaysInclude bypass below, because an excluded tool is
+        // off this surface no matter who registered it.
+        if (filterOpts?.excludeTools?.includes(call.name)) {
+          return {
+            toolCallId: call.toolCallId,
+            name: call.name,
+            result: {
+              ok: false,
+              error: `Tool ${call.name} is not available on this surface`,
               code: 'not_available',
             } as ToolResult,
           };

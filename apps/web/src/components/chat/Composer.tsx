@@ -21,6 +21,9 @@ export interface ComposerProps {
   /** Input-token count from the last turn — the current context size. Renders
    *  nothing when null/0 (before the first turn). */
   contextTokens?: number | null;
+  /** Text pushed in from a suggestion pill. `seq` makes picking the same
+   *  suggestion twice a fresh event; the draft is replaced, not appended. */
+  suggestion?: { text: string; seq: number };
 }
 
 export function Composer({
@@ -35,6 +38,7 @@ export function Composer({
   onRemoveAttachment,
   onGoalRun,
   contextTokens,
+  suggestion,
 }: ComposerProps) {
   const [text, setText] = useState('');
   const [isVoiceRecording, setIsVoiceRecording] = useState(false);
@@ -60,6 +64,13 @@ export function Composer({
 
   const hasReadyAttachments = attachments && attachments.length > 0;
   const isUploading = attachments?.some((a) => a.state === 'uploading');
+
+  // A suggestion pill fills the draft; it never sends on the user's behalf.
+  // Keyed on `seq` so the same suggestion picked twice still lands.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: `seq` is the event, `text` is the payload
+  useEffect(() => {
+    if (suggestion) setText(suggestion.text);
+  }, [suggestion?.seq]);
 
   useEffect(() => {
     if (atQuery === null) {

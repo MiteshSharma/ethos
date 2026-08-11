@@ -545,6 +545,9 @@ importers:
       '@ethosagent/llm-codex':
         specifier: workspace:*
         version: link:../../extensions/llm-codex
+      '@ethosagent/logger':
+        specifier: workspace:*
+        version: link:../../packages/logger
       '@ethosagent/memory-markdown':
         specifier: workspace:*
         version: link:../../extensions/memory-markdown
@@ -566,6 +569,9 @@ importers:
       '@ethosagent/plugin-loader':
         specifier: workspace:*
         version: link:../../extensions/plugin-loader
+      '@ethosagent/session-cards':
+        specifier: workspace:*
+        version: link:../../extensions/session-cards
       '@ethosagent/session-sqlite':
         specifier: workspace:*
         version: link:../../extensions/session-sqlite
@@ -1462,6 +1468,21 @@ importers:
         specifier: ^4.1.0
         version: 4.1.0
 
+  extensions/session-cards:
+    dependencies:
+      '@ethosagent/logger':
+        specifier: workspace:*
+        version: link:../../packages/logger
+      '@ethosagent/sqlite':
+        specifier: workspace:*
+        version: link:../../packages/sqlite
+      '@ethosagent/types':
+        specifier: workspace:*
+        version: link:../../packages/types
+      '@ethosagent/web-contracts':
+        specifier: workspace:*
+        version: link:../../packages/web-contracts
+
   extensions/session-sqlite:
     dependencies:
       '@ethosagent/sqlite':
@@ -1835,6 +1856,9 @@ importers:
       '@ethosagent/types':
         specifier: workspace:*
         version: link:../../packages/types
+      '@ethosagent/web-contracts':
+        specifier: workspace:*
+        version: link:../../packages/web-contracts
 
   extensions/tools-vision:
     dependencies:

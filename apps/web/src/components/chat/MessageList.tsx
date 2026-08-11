@@ -16,6 +16,8 @@ export interface MessageListProps {
   personalityId?: string;
   model?: string;
   sessionId?: string;
+  /** Puts a suggested prompt in the composer (`recommend_actions` pills). */
+  onSuggestPrompt?: (prompt: string) => void;
 }
 
 export function MessageList({
@@ -24,6 +26,7 @@ export function MessageList({
   personalityId,
   model,
   sessionId,
+  onSuggestPrompt,
 }: MessageListProps) {
   const listRef = useRef<HTMLDivElement>(null);
   const pinnedToBottomRef = useRef(true);
@@ -64,7 +67,9 @@ export function MessageList({
   }, [messages.length, currentTurn]);
 
   if (messages.length === 0 && !currentTurn) {
-    return <EmptyState personalityId={personalityId} model={model} />;
+    return (
+      <EmptyState personalityId={personalityId} model={model} onSuggestPrompt={onSuggestPrompt} />
+    );
   }
 
   // Derived "thinking" state: the user just sent a message, no SSE event
@@ -96,12 +101,21 @@ export function MessageList({
           <UserBubble key={m.id} message={m} />
         ) : (
           <SaveToDashboardContextMenu key={m.id} onSaveToDashboard={() => openSaveModal(idx)}>
-            <AssistantBubble turn={m} fenceRenderers={fenceRenderers} />
+            <AssistantBubble
+              turn={m}
+              fenceRenderers={fenceRenderers}
+              onSuggestPrompt={onSuggestPrompt}
+            />
           </SaveToDashboardContextMenu>
         ),
       )}
       {currentTurn ? (
-        <AssistantBubble turn={currentTurn} streaming fenceRenderers={fenceRenderers} />
+        <AssistantBubble
+          turn={currentTurn}
+          streaming
+          fenceRenderers={fenceRenderers}
+          onSuggestPrompt={onSuggestPrompt}
+        />
       ) : null}
       {isThinking ? <ThinkingBubble /> : null}
       <SaveToDashboardModal
@@ -155,7 +169,15 @@ const DEFAULT_PILLS = [
   'Run a skill',
 ] as const;
 
-function EmptyState({ personalityId, model }: { personalityId?: string; model?: string }) {
+function EmptyState({
+  personalityId,
+  model,
+  onSuggestPrompt,
+}: {
+  personalityId?: string;
+  model?: string;
+  onSuggestPrompt?: (prompt: string) => void;
+}) {
   return (
     <div className="message-list-empty">
       <div
@@ -181,7 +203,12 @@ function EmptyState({ personalityId, model }: { personalityId?: string; model?: 
       <div className="empty-state-tagline">Ready to help.</div>
       <div className="empty-state-pills">
         {DEFAULT_PILLS.map((p) => (
-          <button key={p} type="button" className="empty-state-pill">
+          <button
+            key={p}
+            type="button"
+            className="empty-state-pill"
+            onClick={() => onSuggestPrompt?.(p)}
+          >
             {p}
           </button>
         ))}

@@ -47,7 +47,12 @@ describe('Orchestrator guardrails', () => {
     // `workingDir` + `fsReach` off TurnSetup and hands them to the tool stage
     // (4 lines), minus the `workingDir` dep the stage no longer needs (1). The
     // derivation itself lives in agent-loop/stages/turn-setup.ts.
-    expect(lineCount).toBeLessThanOrEqual(877);
+    // Bumped 877 → 884: UI-cards D1 adds the `toolsetExclude` RunOptions field
+    // (surface-level tool exclusion) — one declaration plus the doc explaining
+    // how it differs from the adjacent `toolsetNarrow`. It is pass-through
+    // only; the enforcement lives in agent-loop/stages/turn-setup.ts and
+    // tool-registry.ts.
+    expect(lineCount).toBeLessThanOrEqual(884);
   });
 
   it('no stage file exceeds 700 lines', () => {

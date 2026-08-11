@@ -6,9 +6,11 @@ import {
   type SessionStreamBuffer,
 } from '@ethosagent/agent-bridge';
 import type { AgentLoop } from '@ethosagent/core';
+import type { CardStore } from '@ethosagent/session-cards';
 import { EthosError } from '@ethosagent/types';
-import type { SseEvent } from '@ethosagent/web-contracts';
+import type { CardEnvelope, SseEvent } from '@ethosagent/web-contracts';
 import type { SystemEventBus } from '../../services/system-event-bus';
+import { gateStructuredCard } from './card-gate';
 import type { ChatRepository } from './repository';
 
 // Chat orchestrator. The one place that touches `AgentBridge` per the spec
@@ -55,6 +57,13 @@ export interface ChatServiceOptions {
   systemBus?: SystemEventBus;
   /** Optional attachment cache for persisting inbound attachments. */
   attachmentCache?: import('@ethosagent/types').AttachmentCache;
+  /**
+   * Optional durable store for typed UI cards. When wired, a valid
+   * `tool_end.structured.card` is persisted so `sessions.get` can replay it
+   * after the in-memory stream buffer is reaped. Absent → cards live only for
+   * the length of the stream (tests, embedders).
+   */
+  cardStore?: CardStore;
   /**
    * Optional refresh closure — reloads the loop's personality registry from
    * disk before a turn runs, so a hot-dropped or edited personality resolves
@@ -357,7 +366,16 @@ export class ChatService {
         audience: 'user',
       }),
     );
-    bridge.on('tool_end', (toolCallId, toolName, ok, durationMs, result, structured, audience) =>
+    bridge.on('tool_end', (toolCallId, toolName, ok, durationMs, result, structured, audience) => {
+      // Cards are gated before anything else sees them: an envelope that does
+      // not match the contract is neither broadcast nor persisted.
+      const gated = gateStructuredCard(structured);
+      if (gated.issues) {
+        console.warn(
+          `[chat] dropped invalid card envelope from ${toolName} (${toolCallId}): ${gated.issues.join('; ')}`,
+        );
+      }
+      if (gated.card) this.persistCard(sessionId, toolCallId, gated.card);
       this.append(sessionId, {
         type: 'tool_end',
         toolCallId,
@@ -365,10 +383,10 @@ export class ChatService {
         ok,
         durationMs,
         ...(result !== undefined ? { result } : {}),
-        ...(structured !== undefined ? { structured } : {}),
+        ...(gated.structured !== undefined ? { structured: gated.structured } : {}),
         ...(audience !== undefined ? { audience } : {}),
-      }),
-    );
+      });
+    });
     bridge.on('usage', (inputTokens, outputTokens, estimatedCostUsd) =>
       this.append(sessionId, {
         type: 'usage',
@@ -393,6 +411,21 @@ export class ChatService {
       }
       void this.tryAutoTitle(sessionId);
     });
+  }
+
+  /**
+   * Persist a validated card for replay. Best-effort by design: a store
+   * failure costs one card on a later reload, and must never break the live
+   * stream the user is watching.
+   */
+  private persistCard(sessionId: string, toolCallId: string, envelope: CardEnvelope): void {
+    try {
+      this.opts.cardStore?.append(sessionId, toolCallId, envelope);
+    } catch (err) {
+      console.warn(
+        `[chat] card persist failed for session ${sessionId} (${toolCallId}): ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
   }
 
   private async tryAutoTitle(sessionId: string): Promise<void> {

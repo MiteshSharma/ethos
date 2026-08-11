@@ -4,6 +4,7 @@ import {
   type AssistantTurn,
   applyAction,
   applyEvent,
+  type CardBlock,
   type ChatState,
   initialChatState,
   type TextBlock,
@@ -529,5 +530,147 @@ describe('applyAction — UI/lifecycle transitions', () => {
     s = applyAction(s, { type: 'send-failed', userMessageId: 'u1', error: 'offline' });
     expect(s.messages).toEqual([]);
     expect(s.error).toBe('offline');
+  });
+});
+
+describe('typed UI cards', () => {
+  const cardEnvelope = {
+    kind: 'alert' as const,
+    specVersion: 1 as const,
+    payload: { severity: 'info' as const, message: 'Prices refreshed.' },
+  };
+
+  function turnWithTool(): ChatState {
+    let s: ChatState = initialChatState;
+    s = applyEvent(
+      s,
+      { type: 'tool_start', toolCallId: 'tc1', toolName: 'emit_card', args: {} },
+      NOW,
+    );
+    return s;
+  }
+
+  it('tool_end with a valid card appends one card block beside the tool chip', () => {
+    let s = turnWithTool();
+    s = applyEvent(
+      s,
+      {
+        type: 'tool_end',
+        toolCallId: 'tc1',
+        toolName: 'emit_card',
+        ok: true,
+        durationMs: 3,
+        structured: { card: cardEnvelope },
+      },
+      NOW,
+    );
+    const blocks = s.currentTurn?.blocks ?? [];
+    expect(blocks.map((b) => b.kind)).toEqual(['tool', 'card']);
+    const card = blocks[1] as CardBlock;
+    expect(card.toolCallId).toBe('tc1');
+    expect(card.card).toEqual(cardEnvelope);
+  });
+
+  it('tool_end with an invalid card appends nothing and does not throw', () => {
+    let s = turnWithTool();
+    s = applyEvent(
+      s,
+      {
+        type: 'tool_end',
+        toolCallId: 'tc1',
+        toolName: 'emit_card',
+        ok: true,
+        durationMs: 3,
+        // `severity` is not in the enum — the schema rejects it.
+        structured: { card: { kind: 'alert', specVersion: 1, payload: { severity: 'nope' } } },
+      },
+      NOW,
+    );
+    expect(s.currentTurn?.blocks.map((b) => b.kind)).toEqual(['tool']);
+  });
+
+  it('history-loaded places a replayed card directly after its tool block', () => {
+    const stored: StoredMessage[] = [
+      storedMsg({
+        id: 'a1',
+        role: 'assistant',
+        content: 'here you go',
+        toolCalls: [
+          { id: 'tc1', name: 'emit_card', input: {} },
+          { id: 'tc2', name: 'read_file', input: {} },
+        ],
+        timestamp: new Date(20).toISOString(),
+      }),
+    ];
+    const s = applyAction(initialChatState, {
+      type: 'history-loaded',
+      messages: stored,
+      cards: [
+        { toolCallId: 'tc1', seq: 1, envelope: cardEnvelope },
+        {
+          toolCallId: 'tc1',
+          seq: 0,
+          envelope: { ...cardEnvelope, payload: { ...cardEnvelope.payload, message: 'First.' } },
+        },
+      ],
+    });
+    const turn = s.messages[0] as AssistantTurn;
+    expect(turn.blocks.map((b) => b.kind)).toEqual(['text', 'tool', 'card', 'card', 'tool']);
+    // Ordered by seq, not by arrival.
+    expect((turn.blocks[2] as CardBlock).card.payload).toMatchObject({ message: 'First.' });
+  });
+
+  it('history-loaded appends a card with no matching tool block to the last turn', () => {
+    const stored: StoredMessage[] = [
+      storedMsg({
+        id: 'a1',
+        role: 'assistant',
+        content: 'here you go',
+        timestamp: new Date(20).toISOString(),
+      }),
+    ];
+    const s = applyAction(initialChatState, {
+      type: 'history-loaded',
+      messages: stored,
+      cards: [{ toolCallId: 'orphan', seq: 0, envelope: cardEnvelope }],
+    });
+    const turn = s.messages[0] as AssistantTurn;
+    expect(turn.blocks.map((b) => b.kind)).toEqual(['text', 'card']);
+  });
+
+  it('done dedupes a live turn against history that already holds the card', () => {
+    const stored: StoredMessage[] = [
+      storedMsg({
+        id: 'a1',
+        role: 'assistant',
+        content: '',
+        toolCalls: [{ id: 'tc1', name: 'emit_card', input: {} }],
+        timestamp: new Date(20).toISOString(),
+      }),
+    ];
+    let s = applyAction(initialChatState, {
+      type: 'history-loaded',
+      messages: stored,
+      cards: [{ toolCallId: 'tc1', seq: 0, envelope: cardEnvelope }],
+    });
+    s = applyEvent(
+      s,
+      { type: 'tool_start', toolCallId: 'tc1', toolName: 'emit_card', args: {} },
+      NOW,
+    );
+    s = applyEvent(
+      s,
+      {
+        type: 'tool_end',
+        toolCallId: 'tc1',
+        toolName: 'emit_card',
+        ok: true,
+        durationMs: 3,
+        structured: { card: cardEnvelope },
+      },
+      NOW,
+    );
+    s = applyEvent(s, { type: 'done', text: '', turnCount: 1 }, NOW);
+    expect(s.messages).toHaveLength(1);
   });
 });

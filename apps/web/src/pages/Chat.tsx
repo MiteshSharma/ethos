@@ -181,6 +181,13 @@ export function Chat() {
 
   const [pendingAttachments, setPendingAttachments] = useState<AttachmentPreview[]>([]);
 
+  // Suggestion pills (empty state + `recommend_actions` cards) fill the
+  // composer draft. `seq` makes a repeat pick a distinct event.
+  const [suggestion, setSuggestion] = useState<{ text: string; seq: number } | undefined>();
+  const handleSuggestPrompt = useCallback((text: string) => {
+    setSuggestion((prev) => ({ text, seq: (prev?.seq ?? 0) + 1 }));
+  }, []);
+
   const { intakeOpen, setIntakeOpen, detectedMessage, restatedGoal, openIntake } =
     useGoalDetection();
 
@@ -505,6 +512,7 @@ export function Chat() {
           personalityId={personalityId}
           model={model}
           sessionId={currentSessionId ?? undefined}
+          onSuggestPrompt={handleSuggestPrompt}
         />
         <TurnStatusBar
           isStreaming={state.isStreaming}
@@ -534,6 +542,7 @@ export function Chat() {
             onRemoveAttachment={handleRemoveAttachment}
             onGoalRun={handleGoalRunDirect}
             contextTokens={state.contextTokens}
+            suggestion={suggestion}
           />
         </div>
       </div>

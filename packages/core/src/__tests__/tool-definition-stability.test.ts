@@ -87,6 +87,7 @@ function makePersonalities() {
 
 async function runTwoTurns(
   toolsetNarrow?: string[],
+  toolsetExclude?: string[],
 ): Promise<{ first: ToolDefinitionLite[]; second: ToolDefinitionLite[] }> {
   const capturedTools: ToolDefinitionLite[][] = [];
   const loop = new AgentLoop({
@@ -95,7 +96,10 @@ async function runTwoTurns(
     personalities: makePersonalities(),
     safety: createTestSafety(),
   });
-  const opts = toolsetNarrow ? { toolsetNarrow } : {};
+  const opts = {
+    ...(toolsetNarrow ? { toolsetNarrow } : {}),
+    ...(toolsetExclude ? { toolsetExclude } : {}),
+  };
   await collect(loop.run('hello', opts));
   await collect(loop.run('hello', opts));
   expect(capturedTools).toHaveLength(2);
@@ -117,5 +121,21 @@ describe('§3.5 — tool-definition stability across turns', () => {
 
     expect(JSON.stringify(first)).toBe(JSON.stringify(second));
     expect(first.map((d) => d.name).sort()).toEqual(['beta', 'gamma']);
+  });
+
+  it('with a static toolsetExclude: byte-identical across turns, subtraction only', async () => {
+    // Surface exclusion (the gateway's UI-card drop) is static per surface, so
+    // it subtracts once and never varies per turn.
+    const { first, second } = await runTwoTurns(undefined, ['beta']);
+
+    expect(JSON.stringify(first)).toBe(JSON.stringify(second));
+    expect(first.map((d) => d.name).sort()).toEqual(['alpha', 'gamma']);
+  });
+
+  it('toolsetNarrow and toolsetExclude compose without per-turn drift', async () => {
+    const { first, second } = await runTwoTurns(['beta', 'gamma', 'delta'], ['gamma']);
+
+    expect(JSON.stringify(first)).toBe(JSON.stringify(second));
+    expect(first.map((d) => d.name).sort()).toEqual(['beta']);
   });
 });

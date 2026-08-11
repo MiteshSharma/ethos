@@ -156,6 +156,14 @@ const BACKGROUND_MAX_JOBS_PER_ROOT = 3;
  */
 const DELIVERED_WAKES_MAX = 4_096;
 
+/**
+ * Tools that render typed UI cards on the web surface. Channel adapters get
+ * prose instead — by design, not by omission — so they are excluded from every
+ * channel turn's tool definitions. The tools' own `ctx.platform` check is a
+ * backstop, not the gate.
+ */
+export const CHANNEL_EXCLUDED_TOOLS: readonly string[] = ['emit_card', 'render_ui'];
+
 /** Reply sent when a lane is rejected under saturation (typed busy result). */
 const SYSTEM_BUSY_MESSAGE =
   '⚠ The system is busy right now — too many requests in progress. Please try again in a moment.';
@@ -1962,6 +1970,9 @@ export class Gateway {
         steerSink,
         origin: `${message.platform}:${message.chatId}`,
         ...(toolsetNarrow ? { toolsetNarrow } : {}),
+        // Unconditional, not config-driven: UI-card tools have no rendering on
+        // any channel adapter, so they never reach a channel turn's tool list.
+        toolsetExclude: [...CHANNEL_EXCLUDED_TOOLS],
       })) {
         translator.push(event);
         // Feed the live draft. Progress folds in only for `audience:'user'`
