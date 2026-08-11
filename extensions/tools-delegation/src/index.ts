@@ -487,12 +487,21 @@ export function createDelegateTaskTool(loop: AgentLoop, background?: BackgroundT
         };
       }
 
-      const sessionKey = `${ctx.sessionKey}:sub:${label ?? 'task'}:${ctx.currentTurn}`;
+      // The child's personality is caller-selectable, and a session's
+      // personality is bound at creation and immutable thereafter (turn-setup
+      // refuses a mismatch with `personality_locked`). Two same-turn fan-out
+      // calls without a label would otherwise derive the identical key and the
+      // second would be refused — so the RESOLVED personality is part of the
+      // key. Resolved once, used for both the key and the child run, so the two
+      // can never diverge. An empty segment means "no personality in play"; a
+      // personality id is never empty, so it cannot alias a real one.
+      const childPersonalityId = personality ?? ctx.personalityId;
+      const sessionKey = `${ctx.sessionKey}:sub:${label ?? 'task'}:${childPersonalityId ?? ''}:${ctx.currentTurn}`;
       const childPrompt = return_mode === 'summary' ? prompt + SUMMARY_INSTRUCTION : prompt;
 
       try {
         const output = await runSubAgent(loop, childPrompt, {
-          personalityId: personality ?? ctx.personalityId,
+          personalityId: childPersonalityId,
           sessionKey,
           depth: depth + 1,
           abortSignal: ctx.abortSignal,

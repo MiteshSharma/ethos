@@ -515,4 +515,95 @@ describe('POST /v1/chat/completions', () => {
       expect(usageChunk.usage?.total_tokens).toBe(7);
     });
   });
+
+  // A session's personality is bound at creation and immutable. Stateful mode
+  // is the one place an HTTP client restates both on every call — the session
+  // in `X-Ethos-Session`, the personality in `model` — so it is the one place
+  // they can disagree. That must read as a client error, not a 500 and not a
+  // stream that dies mid-flight.
+  describe('personality binding on a pinned session', () => {
+    const usage = {
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheCreationTokens: 0,
+      estimatedCostUsd: 0,
+      apiCallCount: 0,
+      compactionCount: 0,
+    };
+
+    async function withBoundSession() {
+      const ctx = await withSetup();
+      await ctx.sessions.createSession({
+        key: `openai:${ctx.apiKeyId}:pinned`,
+        platform: 'openai',
+        model: 'claude-test',
+        provider: 'anthropic',
+        personalityId: 'engineer',
+        usage,
+      });
+      return ctx;
+    }
+
+    it('returns 400 personality_locked on the non-streaming path', async () => {
+      const { app, bearer } = await withBoundSession();
+      const res = await app.request('/chat/completions', {
+        method: 'POST',
+        headers: {
+          ...bearer,
+          'content-type': 'application/json',
+          'X-Ethos-Session': 'pinned',
+        },
+        body: JSON.stringify({
+          model: 'researcher',
+          messages: [{ role: 'user', content: 'hi' }],
+        }),
+      });
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as { error: { code: string; type: string; message: string } };
+      expect(body.error.code).toBe('personality_locked');
+      expect(body.error.type).toBe('invalid_request_error');
+      expect(body.error.message).toContain('engineer');
+      expect(body.error.message).toContain('researcher');
+    });
+
+    it('returns 400 personality_locked on the streaming path (no SSE opened)', async () => {
+      const { app, bearer } = await withBoundSession();
+      const res = await app.request('/chat/completions', {
+        method: 'POST',
+        headers: {
+          ...bearer,
+          'content-type': 'application/json',
+          'X-Ethos-Session': 'pinned',
+        },
+        body: JSON.stringify({
+          model: 'researcher',
+          messages: [{ role: 'user', content: 'hi' }],
+          stream: true,
+        }),
+      });
+      expect(res.status).toBe(400);
+      expect(res.headers.get('content-type')).not.toMatch(/text\/event-stream/);
+      const body = (await res.json()) as { error: { code: string; message: string } };
+      expect(body.error.code).toBe('personality_locked');
+      expect(body.error.message).toContain('engineer');
+    });
+
+    it('proceeds when the pinned session and the requested personality agree', async () => {
+      const { app, bearer } = await withBoundSession();
+      const res = await app.request('/chat/completions', {
+        method: 'POST',
+        headers: {
+          ...bearer,
+          'content-type': 'application/json',
+          'X-Ethos-Session': 'pinned',
+        },
+        body: JSON.stringify({
+          model: 'engineer',
+          messages: [{ role: 'user', content: 'hi' }],
+        }),
+      });
+      expect(res.status).toBe(200);
+    });
+  });
 });

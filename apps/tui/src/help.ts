@@ -14,7 +14,7 @@ export function buildHelpText(
 ): string {
   const lines = [
     '/new                          fresh session',
-    '/personality [list|<id>]      switch personality',
+    '/personality [list|<id>]      start a new session bound to <id>',
     '/model                        open model picker',
     '/sessions                     open session picker',
     '/memory                       show ~/.ethos/MEMORY.md',

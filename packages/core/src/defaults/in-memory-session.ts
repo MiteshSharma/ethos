@@ -41,6 +41,17 @@ export class InMemorySessionStore implements SessionStore {
   async updateSession(id: string, patch: Partial<Session>): Promise<void> {
     const session = this.sessions.get(id);
     if (!session) throw new Error(`Session not found: ${id}`);
+    // A session's personality is bound at creation and immutable thereafter.
+    // Binding an unset one is allowed; re-pointing a bound one never is.
+    if (
+      patch.personalityId !== undefined &&
+      session.personalityId != null &&
+      patch.personalityId !== session.personalityId
+    ) {
+      throw new Error(
+        `Session ${id} is bound to personality "${session.personalityId}" and cannot be changed to "${patch.personalityId}".`,
+      );
+    }
     this.sessions.set(id, { ...session, ...patch, updatedAt: new Date() });
   }
 

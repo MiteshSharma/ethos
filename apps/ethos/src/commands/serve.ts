@@ -75,6 +75,7 @@ import {
   getSecretsResolver,
   getStorage,
 } from '../wiring';
+import { runCronTurn } from './cron-turn';
 import { parseFlagValue, parsePort } from './serve-helpers';
 import { formatNonLoopbackWarning, isLoopbackHost, listenWithFallback } from './serve-listen';
 
@@ -315,6 +316,12 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
       }
     | undefined;
 
+  // Shared by the ACP server, the web API, and the cron `runJob` closure below
+  // (which reads a web-origin session's bound personality before reusing its
+  // key). Declared here so that closure has an in-scope binding, not a forward
+  // reference to a later `const`.
+  const session = createSessionStore({ dataDir: dir });
+
   // Cron scheduler — hoisted ABOVE the agent-loop construction so the
   // same scheduler instance can be threaded into createAgentLoop (registers
   // agent-callable `cron` tool against it) AND drive the web Cron tab's
@@ -406,27 +413,27 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
       const pers = cronPersonalities.get(pid);
       const toolsetOverride = pers?.toolset?.filter((t: string) => t !== 'cron');
 
-      // Use the originating web chat's session key so messages land in that
-      // session's history and the client can reload to show the cron turn.
       const webOrigin =
         job.origin?.platform === 'web' && job.origin.chatId ? job.origin.chatId : null;
-      const sessionKey = webOrigin ?? `cron:${job.id}:${new Date().toISOString()}`;
       const ranAt = new Date().toISOString();
-      let output = '';
-      for await (const event of loop.run(job.prompt ?? '', {
-        sessionKey,
+      const { sessionKey, output, reusedWebOrigin } = await runCronTurn({
+        loop,
+        sessions: session,
+        jobId: job.id,
+        prompt: job.prompt ?? '',
         personalityId: pid,
-        toolsetOverride,
-      })) {
-        if (event.type === 'text_delta') output += event.text;
-      }
+        webOrigin,
+        ...(toolsetOverride ? { toolsetOverride } : {}),
+      });
       if (chatService) {
         chatService.broadcastAll({
           type: 'cron.fired',
           jobId: job.id,
           ranAt,
           outputPath: null,
-          ...(webOrigin ? { sessionKey: webOrigin } : {}),
+          // Only point the client at the web session when the turn actually
+          // ran there; a personality-mismatched firing lives elsewhere.
+          ...(reusedWebOrigin && webOrigin ? { sessionKey: webOrigin } : {}),
         });
       }
       return { jobId: job.id, ranAt, output, sessionKey };
@@ -531,7 +538,6 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
     console.warn('[ethos] session auto-title disabled: failed to create title LLM:', err);
   }
 
-  const session = createSessionStore({ dataDir: dir });
   const mesh = new AgentMesh(meshRegistryPath(activeMeshName), { storage: getStorage() });
 
   const personalities = await createPersonalityRegistry({

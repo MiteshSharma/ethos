@@ -6,6 +6,13 @@ export interface Session {
   platform: string;
   model: string;
   provider: string;
+  /**
+   * The personality this session is bound to. Set at creation and immutable
+   * thereafter: `updateSession` throws if a patch would change it to a
+   * different id once set (setting it from unset is allowed, so legacy rows can
+   * be bound on first use). To involve a different personality, create a new
+   * session or fork this one into a child session.
+   */
   personalityId?: string;
   parentSessionId?: string;
   workingDir?: string;

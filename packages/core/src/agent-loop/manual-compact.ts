@@ -183,7 +183,12 @@ export interface ManualCompactionArgs {
 
 export interface ManualCompactionResult {
   ok: boolean;
-  reason?: 'too_short' | 'no_session';
+  /**
+   * Why the compaction did not run. `personality_locked` mirrors the turn-setup
+   * refusal code: the caller asked to compact as a personality the session is
+   * not bound to.
+   */
+  reason?: 'too_short' | 'no_session' | 'personality_locked';
   engineName: string;
   droppedCount: number;
   summaryTokens: number;
@@ -306,6 +311,13 @@ export interface CompactSessionDeps {
   minTailUserMessages?: number;
 }
 
+/**
+ * `opts.personalityId` is a FALLBACK, not an override: it applies only to a
+ * legacy session row that was created before the personality-binding rule and
+ * therefore carries no personality of its own. A bound session compacts as its
+ * own personality, and a conflicting id is refused — see the comment on the
+ * check below.
+ */
 export async function compactSession(
   deps: CompactSessionDeps,
   sessionKey: string,
@@ -326,14 +338,34 @@ export async function compactSession(
     };
   }
 
+  // A session's personality is bound at creation and never changes (see
+  // `setupTurn`). Compaction is not a read-only view: the summary it writes
+  // BECOMES this session's context on every later turn. Summarizing as some
+  // other personality would therefore change what the session is, through the
+  // back door the turn path already closed. Refuse the same way `setupTurn`
+  // does rather than silently honouring the caller.
+  if (session.personalityId && opts.personalityId && opts.personalityId !== session.personalityId) {
+    return {
+      ok: false,
+      reason: 'personality_locked',
+      engineName: 'none',
+      droppedCount: 0,
+      summaryTokens: 0,
+      preTotalTokens: 0,
+      postTotalTokens: 0,
+      summariesEnabled,
+    };
+  }
+
   const raw = (await deps.session.getMessages(session.id, { limit: deps.historyLimit })).filter(
     (m) => m.role !== 'system',
   );
   const active = selectActiveWatermark(await deps.session.listCompressions(session.id));
   const replay = active ? reconstructFromWatermark(raw, active).history : raw;
 
+  const effectivePersonalityId = session.personalityId ?? opts.personalityId;
   const personality =
-    (opts.personalityId ? deps.personalities.get(opts.personalityId) : null) ??
+    (effectivePersonalityId ? deps.personalities.get(effectivePersonalityId) : null) ??
     deps.personalities.getDefault();
   const engineName = deps.summarizer
     ? (personality.context_engine ?? 'semantic_summary')

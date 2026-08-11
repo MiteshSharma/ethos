@@ -1,15 +1,25 @@
 /**
- * Session continuity across personality switches (Decision D1).
+ * Session continuity within a personality.
  *
- * When a user runs `/personality engineer` mid-chat, the conversation thread
- * MUST stay in the same session — same session_id, same history. The session
- * belongs to the human, not to the role. A personality switch changes what the
- * agent can *do*, not *who the human is talking to*.
+ * A session's personality is bound when the session is created and is immutable
+ * thereafter. A turn that names a DIFFERENT personality for an already-bound
+ * session is refused with error code `personality_locked` — the transcript of
+ * one session is the record of one personality, and `personality evolve` reads
+ * it back as training evidence. The only sanctioned ways to involve another
+ * personality are to create a new session bound to it, or to fork into a child
+ * session bound to it. `/personality <id>` in the CLI therefore rotates the
+ * session key and starts a fresh session bound to the new personality.
  *
- * This test locks that contract so a future PR cannot accidentally introduce
- * per-personality session keys without CI catching it.
+ * This SUPERSEDES Decision D1, which held the inverse — that a personality
+ * switch must keep the same session because "the session belongs to the human,
+ * not to the role".
+ *
+ * Continuity is still a real property and still guarded here: the same session
+ * key with the same (or an unspecified) personality stays one session, one
+ * session_id, one thread.
  */
 
+import type { AgentEvent } from '@ethosagent/core';
 import { AgentLoop, InMemorySessionStore } from '@ethosagent/core';
 import type { CompletionChunk, LLMProvider } from '@ethosagent/types';
 import { describe, expect, it } from 'vitest';
@@ -42,18 +52,18 @@ function makeMockLLM(): LLMProvider {
   };
 }
 
-async function drain(gen: AsyncGenerator<unknown>): Promise<void> {
-  for await (const _ of gen) {
-    /* consume */
+/** Drain a turn to completion and hand back everything it emitted. */
+async function drain(gen: AsyncGenerator<AgentEvent>): Promise<AgentEvent[]> {
+  const events: AgentEvent[] = [];
+  for await (const event of gen) {
+    events.push(event);
   }
+  return events;
 }
 
-describe('session continuity across personality switches', () => {
-  it('switching personality keeps the same session — same session_id, same thread', async () => {
-    // The session store is shared; the same sessionKey maps to the same session
-    // regardless of which personality is active.
+describe('session personality binding and continuity', () => {
+  it('refuses a turn naming a different personality and leaves the session untouched', async () => {
     const session = new InMemorySessionStore();
-
     const loop = new AgentLoop({
       llm: makeMockLLM(),
       session,
@@ -62,7 +72,7 @@ describe('session continuity across personality switches', () => {
 
     const sessionKey = 'cli:session-continuity-test';
 
-    // Turn 1 — send as personality A
+    // Turn 1 — binds the session to personality A.
     await drain(
       loop.run('message from personality A', {
         sessionKey,
@@ -70,29 +80,30 @@ describe('session continuity across personality switches', () => {
       }),
     );
 
-    // Turn 2 — switch to personality B, same sessionKey
-    await drain(
+    // Turn 2 — same sessionKey, different personality. Must be refused.
+    const events = await drain(
       loop.run('message from personality B', {
         sessionKey,
         personalityId: 'engineer',
       }),
     );
 
-    // Both turns must live in the same session
-    const sess = await session.getSessionByKey(sessionKey);
-    expect(sess).not.toBeNull();
+    const error = events.find((e) => e.type === 'error');
+    expect(error).toBeDefined();
+    expect(error?.type === 'error' && error.code).toBe('personality_locked');
 
+    const sess = await session.getSessionByKey(sessionKey);
     if (!sess) throw new Error('Expected session to exist');
+
+    // The session stays bound to A, and the refused turn appended nothing.
+    expect(sess.personalityId).toBe('researcher');
     const messages = await session.getMessages(sess.id, { limit: 100 });
     const userMessages = messages.filter((m) => m.role === 'user');
-
-    // Both user messages are in one session — no fork, no per-personality sessions
-    expect(userMessages).toHaveLength(2);
-    expect(userMessages.some((m) => m.content === 'message from personality A')).toBe(true);
-    expect(userMessages.some((m) => m.content === 'message from personality B')).toBe(true);
+    expect(userMessages).toHaveLength(1);
+    expect(userMessages[0]?.content).toBe('message from personality A');
   });
 
-  it('switching personality does NOT create a new session', async () => {
+  it('keeps one session across turns with the same (or unspecified) personality', async () => {
     const session = new InMemorySessionStore();
     const loop = new AgentLoop({ llm: makeMockLLM(), session, safety: createTestSafety() });
     const sessionKey = 'cli:no-fork-test';
@@ -100,10 +111,47 @@ describe('session continuity across personality switches', () => {
     await drain(loop.run('first', { sessionKey, personalityId: 'researcher' }));
     const sessionAfterFirst = await session.getSessionByKey(sessionKey);
 
-    await drain(loop.run('second', { sessionKey, personalityId: 'engineer' }));
-    const sessionAfterSwitch = await session.getSessionByKey(sessionKey);
+    await drain(loop.run('second', { sessionKey, personalityId: 'researcher' }));
+    // A turn that names no personality inherits the session's binding.
+    await drain(loop.run('third', { sessionKey }));
+    const sessionAfterThird = await session.getSessionByKey(sessionKey);
 
-    // session_id is unchanged after the personality switch
-    expect(sessionAfterFirst?.id).toBe(sessionAfterSwitch?.id);
+    // Same session_id, one continuous thread.
+    expect(sessionAfterFirst?.id).toBe(sessionAfterThird?.id);
+    if (!sessionAfterThird) throw new Error('Expected session to exist');
+    expect(sessionAfterThird.personalityId).toBe('researcher');
+
+    const messages = await session.getMessages(sessionAfterThird.id, { limit: 100 });
+    const userMessages = messages.filter((m) => m.role === 'user');
+    expect(userMessages.map((m) => m.content)).toEqual(['first', 'second', 'third']);
+  });
+
+  it('a fresh session key binds cleanly to the new personality (the /personality fork path)', async () => {
+    const session = new InMemorySessionStore();
+    const loop = new AgentLoop({ llm: makeMockLLM(), session, safety: createTestSafety() });
+    const sessionKey = 'cli:fork-test';
+
+    await drain(loop.run('as researcher', { sessionKey, personalityId: 'researcher' }));
+    const original = await session.getSessionByKey(sessionKey);
+
+    // `/personality engineer` rotates the session key the way the CLI does.
+    const forkedKey = `${sessionKey}:${Date.now()}`;
+    const events = await drain(
+      loop.run('as engineer', { sessionKey: forkedKey, personalityId: 'engineer' }),
+    );
+    expect(events.some((e) => e.type === 'error')).toBe(false);
+
+    const forked = await session.getSessionByKey(forkedKey);
+    if (!forked) throw new Error('Expected forked session to exist');
+
+    expect(forked.id).not.toBe(original?.id);
+    expect(forked.personalityId).toBe('engineer');
+    expect(original?.personalityId).toBe('researcher');
+
+    // The forked session carries only its own turn.
+    const messages = await session.getMessages(forked.id, { limit: 100 });
+    expect(messages.filter((m) => m.role === 'user').map((m) => m.content)).toEqual([
+      'as engineer',
+    ]);
   });
 });

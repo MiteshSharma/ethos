@@ -1034,7 +1034,7 @@ export function buildChatHelpText(
     `  /new                  start a fresh session\n` +
     `  /personality          show current personality\n` +
     `  /personality list     list all personalities\n` +
-    `  /personality <id>     switch personality\n` +
+    `  /personality <id>     start a new session bound to <id>\n` +
     `  /model <name>         switch model for this session\n` +
     `  /tier <name>          override tier for next turn (trivial|default|deep)\n` +
     `  /memory               show ~/.ethos/MEMORY.md and USER.md\n` +
@@ -1107,8 +1107,22 @@ async function handleSlashCommand(
         );
         break;
       }
+      // A session's personality is bound at creation and immutable, so this
+      // cannot mutate the active session — the next turn would be refused with
+      // `personality_locked`. Mirror the gateway's `/personality` handler:
+      // set the new id AND rotate to a fresh session key, resetting the same
+      // per-session state `/new` resets.
+      loop.resetSessionCost(state.sessionKey);
+      ctx.notificationRouter.deregister(state.sessionKey);
       state.personalityId = arg;
-      out(`${c.dim}[personality: ${arg}]${c.reset}\n`);
+      state.sessionKey = `cli:${basename(process.cwd())}:${Date.now()}`;
+      ctx.notificationRouter.register(state.sessionKey, ctx.cliAdapter);
+      state.contextTokens = 0;
+      state.contextInputTokens = 0;
+      state.startedAt = Date.now();
+      out(
+        `${c.dim}[personality: ${arg} — new session started; personality is fixed for a session]${c.reset}\n`,
+      );
       break;
     }
 

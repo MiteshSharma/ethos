@@ -249,6 +249,18 @@ export class SQLiteSessionStore implements SessionStore {
       values.push(patch.title);
     }
     if (patch.personalityId !== undefined) {
+      // A session's personality is bound at creation and immutable thereafter.
+      // Binding an unset one is allowed; re-pointing a bound one never is.
+      const bound = (
+        this.db.prepare('SELECT personality_id FROM sessions WHERE id = ?').get(id) as
+          | { personality_id: string | null }
+          | undefined
+      )?.personality_id;
+      if (bound != null && bound !== patch.personalityId) {
+        throw new Error(
+          `Session ${id} is bound to personality "${bound}" and cannot be changed to "${patch.personalityId}".`,
+        );
+      }
       sets.push('personality_id = ?');
       values.push(patch.personalityId);
     }

@@ -207,7 +207,7 @@ describe('BatchRunner.run', () => {
 
     expect(stats.skipped).toBe(1);
     expect(calls).toHaveLength(1);
-    expect(calls[0]).toBe('batch:task-2');
+    expect(calls[0]).toBe('batch:researcher:task-2');
   });
 
   it('checkpoints atomically after each task', async () => {

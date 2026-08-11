@@ -119,7 +119,13 @@ export class EvalRunner {
     expectedMap: Map<string, EvalExpected>,
     writer: Writer,
   ): Promise<{ score: number }> {
-    const sessionKey = `eval:${task.id}`;
+    // The personality is part of the key: a session's personality is bound at
+    // creation and immutable, so a per-task-only key would bind on the first
+    // personality and refuse every other one — exactly what a cross-personality
+    // eval does. Tasks that name no personality keep the plain `eval:<id>` key.
+    const sessionKey = task.personalityId
+      ? `eval:${task.personalityId}:${task.id}`
+      : `eval:${task.id}`;
 
     await writer.append({
       schema_version: ATROPOS_SCHEMA_VERSION,

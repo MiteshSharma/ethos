@@ -435,6 +435,36 @@ describe('SQLiteSessionStore', () => {
     expect(unpinnedIds).toContain(s2.id);
     expect(unpinnedIds).toContain(s3.id);
   });
+
+  // -------------------------------------------------------------------------
+  // Personality binding — set at creation, immutable thereafter
+  // -------------------------------------------------------------------------
+
+  it('refuses to change a session bound to a personality', async () => {
+    const session = await store.createSession({ ...baseSession, personalityId: 'scribe' });
+
+    await expect(store.updateSession(session.id, { personalityId: 'auditor' })).rejects.toThrow(
+      /bound to personality "scribe"/,
+    );
+    expect((await store.getSession(session.id))?.personalityId).toBe('scribe');
+  });
+
+  it('allows binding a personality when the session has none', async () => {
+    const session = await store.createSession(baseSession);
+    expect(session.personalityId).toBeUndefined();
+
+    await store.updateSession(session.id, { personalityId: 'scribe' });
+    expect((await store.getSession(session.id))?.personalityId).toBe('scribe');
+  });
+
+  it('allows a no-op patch that repeats the bound personality', async () => {
+    const session = await store.createSession({ ...baseSession, personalityId: 'scribe' });
+
+    await store.updateSession(session.id, { personalityId: 'scribe', title: 'still scribe' });
+    const got = await store.getSession(session.id);
+    expect(got?.personalityId).toBe('scribe');
+    expect(got?.title).toBe('still scribe');
+  });
 });
 
 // -------------------------------------------------------------------------

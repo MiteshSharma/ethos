@@ -836,9 +836,23 @@ export function App({
           ]);
         } else {
           const newPersonality = args[0] ?? personality;
+          // A session's personality is bound at creation and immutable, so a
+          // switch cannot mutate the active session — the next turn would be
+          // refused with `personality_locked`. Rotate to a fresh session key
+          // and reset the same per-session state `/new` resets.
+          bridge.resetSessionCost(sessionKey);
+          setSessionKey(`cli:${basename(process.cwd())}:${Date.now()}`);
           setPersonality(newPersonality);
           setBudgetCapUsd(bridge.getPersonalityBudgetCap(newPersonality) ?? null);
-          setStatusMsg(`[personality: ${newPersonality}]`);
+          setMessages([]);
+          setCompletedTools([]);
+          setDelegations([]);
+          setTimelineEvents([]);
+          setFileActivity([]);
+          setUsage({ inputTokens: 0, outputTokens: 0, costUsd: 0 });
+          setStatusMsg(
+            `[personality: ${newPersonality} — new session started; personality is fixed for a session]`,
+          );
         }
         break;
       case 'model':

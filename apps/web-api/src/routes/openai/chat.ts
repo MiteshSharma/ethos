@@ -97,7 +97,17 @@ export function openAiChatRoutes(opts: OpenAiChatRouteOptions): Hono {
       ...(sessionKeyOverride ? { sessionKeyOverride } : {}),
     };
 
-    // 5. Branch: streaming vs JSON.
+    // 5. A pinned session's personality is immutable. Check it BEFORE the
+    //    streaming branch: once `streamSSE` opens, the status is pinned at 200
+    //    and the only way left to report a client error is a `server_error`
+    //    frame. Both branches are covered by this one call.
+    try {
+      await opts.completions.assertPersonalityUnlocked(input);
+    } catch (err) {
+      return jsonError(c, err);
+    }
+
+    // 6. Branch: streaming vs JSON.
     if (req.stream === true) {
       return streamCompletion(c, opts.completions, input);
     }
@@ -151,7 +161,7 @@ function jsonError(c: Context, err: unknown): Response {
       openAiErrorBody({
         message: err.cause,
         type: 'invalid_request_error',
-        code: 'invalid_request_body',
+        code: openAiCodeOf(err.details) ?? 'invalid_request_body',
       }),
       400,
     );
@@ -169,6 +179,17 @@ function jsonError(c: Context, err: unknown): Response {
     }),
     500,
   );
+}
+
+/**
+ * A user-facing `EthosError` may name the OpenAI-envelope `code` its 400 should
+ * carry (e.g. `personality_locked`) on `details.openAiCode`. Without one the
+ * generic `invalid_request_body` stands.
+ */
+function openAiCodeOf(details: unknown): string | null {
+  if (typeof details !== 'object' || details === null) return null;
+  const code = (details as { openAiCode?: unknown }).openAiCode;
+  return typeof code === 'string' ? code : null;
 }
 
 // ---------------------------------------------------------------------------

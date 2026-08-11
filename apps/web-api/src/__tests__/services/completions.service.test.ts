@@ -1,4 +1,5 @@
 import { SQLiteSessionStore } from '@ethosagent/session-sqlite';
+import { EthosError } from '@ethosagent/types';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { CompletionsRepository } from '../../features/completions/repository';
 import { CompletionsService } from '../../features/completions/service';
@@ -262,5 +263,109 @@ describe('CompletionsService.stream', () => {
     expect(opts).not.toBeNull();
     const o = opts as unknown as { abortSignal?: AbortSignal };
     expect(o.abortSignal).toBe(controller.signal);
+  });
+});
+
+describe('CompletionsService — session personality binding', () => {
+  let store: SQLiteSessionStore;
+  afterEach(() => store.close());
+
+  const usage = {
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheReadTokens: 0,
+    cacheCreationTokens: 0,
+    estimatedCostUsd: 0,
+    apiCallCount: 0,
+    compactionCount: 0,
+  };
+
+  async function bind(ctx: ReturnType<typeof makeService>, id: string, personalityId: string) {
+    await ctx.store.createSession({
+      key: `openai:${id}`,
+      platform: 'openai',
+      model: 'claude-test',
+      provider: 'anthropic',
+      personalityId,
+      usage,
+    });
+  }
+
+  it('assertPersonalityUnlocked rejects a conflicting personality on a pinned session', async () => {
+    const ctx = makeService({});
+    store = ctx.store;
+    await bind(ctx, 'pinned', 'engineer');
+
+    await expect(
+      ctx.service.assertPersonalityUnlocked({
+        req: userOnly('hi'),
+        personalityId: 'researcher',
+        sessionKeyOverride: 'pinned',
+      }),
+    ).rejects.toThrow(/bound to personality "engineer"/);
+  });
+
+  it('assertPersonalityUnlocked passes for a matching id, an unpinned request, and ethos-default', async () => {
+    const ctx = makeService({});
+    store = ctx.store;
+    await bind(ctx, 'pinned', 'engineer');
+
+    await expect(
+      ctx.service.assertPersonalityUnlocked({
+        req: userOnly('hi'),
+        personalityId: 'engineer',
+        sessionKeyOverride: 'pinned',
+      }),
+    ).resolves.toBeUndefined();
+    // No pin — a fresh ephemeral session per request can never conflict.
+    await expect(
+      ctx.service.assertPersonalityUnlocked({ req: userOnly('hi'), personalityId: 'researcher' }),
+    ).resolves.toBeUndefined();
+    // `model: ethos-default` names no personality, so there is nothing to conflict.
+    await expect(
+      ctx.service.assertPersonalityUnlocked({
+        req: userOnly('hi'),
+        personalityId: undefined,
+        sessionKeyOverride: 'pinned',
+      }),
+    ).resolves.toBeUndefined();
+  });
+
+  it("maps the loop's personality_locked refusal to INVALID_INPUT, not INTERNAL", async () => {
+    const ctx = makeService({
+      events: [
+        {
+          type: 'error',
+          error: 'Session openai:pinned is bound to personality "engineer".',
+          code: 'personality_locked',
+        },
+      ],
+    });
+    store = ctx.store;
+
+    const err = await ctx.service
+      .complete({ req: userOnly('hi'), personalityId: 'researcher' })
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(EthosError);
+    expect((err as EthosError).code).toBe('INVALID_INPUT');
+    expect((err as EthosError).details).toEqual({ openAiCode: 'personality_locked' });
+  });
+
+  it('binds the personality when it pre-creates a session for prior messages', async () => {
+    const ctx = makeService({ events: [{ type: 'done', text: '', turnCount: 1 }] });
+    store = ctx.store;
+    const req: ChatCompletionRequest = {
+      model: 'engineer',
+      messages: [
+        { role: 'user', content: 'first' },
+        { role: 'assistant', content: 'reply' },
+        { role: 'user', content: 'second' },
+      ],
+    };
+    await ctx.service.complete({ req, personalityId: 'engineer' });
+
+    const sessions = await ctx.store.listSessions();
+    const created = sessions.find((s) => s.key.startsWith('openai:ephem:'));
+    expect(created?.personalityId).toBe('engineer');
   });
 });

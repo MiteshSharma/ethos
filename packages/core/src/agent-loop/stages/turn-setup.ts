@@ -29,8 +29,9 @@ export async function* setupTurn(
   const sessionKey = opts.sessionKey ?? `${deps.platform}:default`;
 
   // Step 1: Resolve or create session
+  const existingSession = await deps.session.getSessionByKey(sessionKey);
   const ethosSession =
-    (await deps.session.getSessionByKey(sessionKey)) ??
+    existingSession ??
     (await deps.session.createSession({
       key: sessionKey,
       platform: deps.platform,
@@ -50,8 +51,37 @@ export async function* setupTurn(
     }));
 
   const sessionId = ethosSession.id;
+
+  // A session's personality is bound at creation and never changes. The
+  // effective personality therefore comes from the SESSION, not from the
+  // caller's per-turn `opts` — otherwise turn 2 of an existing session could
+  // run as a different personality while the session row still names the
+  // original, silently mixing two personalities into one transcript (which
+  // `personality evolve` then reads back as training evidence).
+  let effectivePersonalityId: string | undefined;
+  if (!existingSession) {
+    // Fresh session — this turn's personality is what it gets bound to.
+    effectivePersonalityId = opts.personalityId;
+  } else if (existingSession.personalityId) {
+    if (opts.personalityId && opts.personalityId !== existingSession.personalityId) {
+      yield {
+        type: 'error',
+        error: `Session ${sessionKey} is bound to personality "${existingSession.personalityId}". A session's personality cannot be changed. Start a new session as "${opts.personalityId}", or fork this one.`,
+        code: 'personality_locked',
+      };
+      yield { type: 'done', text: '', turnCount: 0 };
+      return { kind: 'refused' };
+    }
+    effectivePersonalityId = existingSession.personalityId;
+  } else if (opts.personalityId) {
+    // Legacy row created before the binding rule — bind it on first use rather
+    // than refusing, so pre-existing sessions become immutable from here on.
+    await deps.session.updateSession(sessionId, { personalityId: opts.personalityId });
+    effectivePersonalityId = opts.personalityId;
+  }
+
   const personality =
-    (opts.personalityId ? deps.personalities.get(opts.personalityId) : null) ??
+    (effectivePersonalityId ? deps.personalities.get(effectivePersonalityId) : null) ??
     deps.personalities.getDefault();
 
   const obsConfig = personality?.safety?.observability;
