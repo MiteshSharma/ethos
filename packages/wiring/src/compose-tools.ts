@@ -27,7 +27,7 @@ import {
   platformPrompt as telegramPrompt,
 } from '@ethosagent/platform-telegram/format';
 import { createSkillProposeTool } from '@ethosagent/skill-evolver';
-import type { SkillsInjector, UniversalScanner } from '@ethosagent/skills';
+import { type SkillsInjector, SkillsLibrary, type UniversalScanner } from '@ethosagent/skills';
 import { compose as composeSkills } from '@ethosagent/skills/compose';
 import { createCryptoStorage } from '@ethosagent/storage-crypto';
 import { FsStorage } from '@ethosagent/storage-fs';
@@ -696,8 +696,18 @@ export async function composeAllTools(
   const attachedServers = new Set(activePerson.mcp_servers ?? []);
   const skillPassthrough = deriveSkillPassthrough(skillPool, activePerson, bootToolNames);
 
-  // Skill introspection tools — skills_list + skill_view.
-  for (const tool of composeSkillsTools(wiringCtx, { skillPool }).tools) tools.register(tool);
+  // Skill introspection tools — skills_list + skill_view, plus the pending-queue
+  // review tools. The library handle is the same class the web Skills/Evolver
+  // tab drives, so chat-side approve/reject is one path, not a second one.
+  for (const tool of composeSkillsTools(wiringCtx, {
+    skillPool,
+    pendingSkills: new SkillsLibrary({
+      dataDir: wiringCtx.dataDir,
+      storage: wiringCtx.storage,
+    }),
+  }).tools) {
+    tools.register(tool);
+  }
 
   // skill_propose — lets the agent propose new skills from chat when asked,
   // gated by the 'skills' toolset so personalities opt in via toolset.yaml.

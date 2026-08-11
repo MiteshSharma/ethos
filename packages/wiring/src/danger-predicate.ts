@@ -44,11 +44,12 @@ export type SmartApprovalCallback = (
  *
  * Why smart-only: a personality that opts into `smart` is explicitly asking for
  * an LLM to judge its consequential calls. Before this list existed the only
- * non-hardline danger source was a caller-supplied `alwaysAsk`, which no
- * production caller passes — so `dangerReason` was always `null` under `smart`
- * and the reviewer was structurally unreachable. Confining the list to `smart`
- * keeps `manual` and `off` byte-identical to their previous behaviour: their
- * flag set stays exactly `opts.alwaysAsk` (empty unless a caller passes one).
+ * non-hardline danger source was a caller-supplied `alwaysAsk`, which at the
+ * time no production caller passed — so `dangerReason` was always `null` under
+ * `smart` and the reviewer was structurally unreachable. Confining the list to
+ * `smart` keeps `manual` and `off` at their previous behaviour: their flag set
+ * stays exactly `opts.alwaysAsk`, which the approval-surface entry points now
+ * populate with {@link APPROVAL_SURFACE_ALWAYS_ASK}.
  *
  * **Composition: union, not override.** Under `smart` the effective flag set is
  * `alwaysAsk ∪ SMART_MODE_CONSEQUENTIAL_TOOLS`; under `manual` / `off` it is
@@ -92,11 +93,38 @@ export const SMART_MODE_CONSEQUENTIAL_TOOLS: ReadonlyArray<string> = [
   'process_start',
 ];
 
+/**
+ * Tools every entry point WITH an approval surface flags via `alwaysAsk`, in
+ * every mode — not just `smart`.
+ *
+ * These two promote or discard a proposed skill, and the agent is also what
+ * proposes skills: left ungated it can approve its own proposal into the live
+ * library, which is a self-authorising write to the skill set. `requiresApproval:
+ * true` on the tool does NOT achieve this — that flag is declarative only (see
+ * `tool-processing.ts`, which emits `tool_approval_required` and then runs the
+ * tool regardless). `alwaysAsk` is the mechanism that actually prompts.
+ *
+ * Passed by the three approval-surface entry points: `apps/ethos/src/commands/
+ * serve.ts` and `apps/desktop/src/main/serve.ts` (web modal) and
+ * `apps/ethos/src/commands/gateway.ts` (Slack card). CLI and TUI deliberately do
+ * NOT pass it: they have no approval flow at all — only the synchronous,
+ * hard-blocking `createTerminalGuardHook` — so flagging a tool there would
+ * change nothing. Both tools' `description` strings say so, so the model is not
+ * told a prompt exists where none does.
+ */
+export const APPROVAL_SURFACE_ALWAYS_ASK: ReadonlyArray<string> = [
+  'skills_pending_approve',
+  'skills_pending_reject',
+];
+
 export interface CreateDangerPredicateOptions {
   /**
    * Tools that always require approval, in every mode. Unioned with
    * {@link SMART_MODE_CONSEQUENTIAL_TOOLS} when the resolved personality is on
    * `approvalMode: 'smart'`; used alone under `manual` and `off`.
+   *
+   * Every entry point that has an approval surface passes at least
+   * {@link APPROVAL_SURFACE_ALWAYS_ASK}.
    */
   alwaysAsk?: ReadonlyArray<string>;
   /** Resolves the active personality config for a given session. The
@@ -118,9 +146,9 @@ export interface CreateDangerPredicateOptions {
    * rot shaped).
    *
    * **Today, NO production caller passes this flag.** There are three
-   * production construction sites — `apps/ethos/src/commands/serve.ts:893`
-   * and `apps/desktop/src/main/serve.ts:134` (both feeding the web-profile
-   * approval modal) and `apps/ethos/src/commands/gateway.ts:1440` (feeding
+   * production construction sites — `apps/ethos/src/commands/serve.ts`
+   * and `apps/desktop/src/main/serve.ts` (both feeding the web-profile
+   * approval modal) and `apps/ethos/src/commands/gateway.ts` (feeding
    * the Slack approval card) — and all three intentionally omit the flag:
    * web and Slack both have channel ingress, so `off` mode would be
    * rejected by the registry anyway, and the predicate refuses to honor it

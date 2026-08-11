@@ -105,6 +105,45 @@ export interface StreamStepContext {
 }
 
 // ---------------------------------------------------------------------------
+// Terminal-failure persistence
+// ---------------------------------------------------------------------------
+
+/**
+ * Persist the partial assistant text produced before a TERMINAL stream failure
+ * (stalled watchdog / provider error). Nothing retries those paths and the
+ * orchestrator returns immediately on `outcome: 'fatal'`, so without this the
+ * text lives only in the client's streaming buffer and vanishes as soon as the
+ * next turn reloads history from the store.
+ *
+ * Text only — any tool calls still in flight never ran and never will, so their
+ * `tool_use` blocks would be orphans in the replayed history. Dropping them is
+ * the cheaper half of the Anthropic tool_use/tool_result contract.
+ *
+ * Deliberately NOT called on the recoverable `overflow` path: that one compacts
+ * and retries, and needs the clean history it has always had.
+ *
+ * Empty (or whitespace-only) text is not persisted — an empty assistant turn is
+ * noise, not context.
+ */
+async function persistInterruptedAssistant(
+  session: SessionStore,
+  sessionId: string,
+  text: string,
+  reason: string,
+): Promise<void> {
+  if (!text.trim()) return;
+  // Provider error messages can be multi-KB (HTML error pages, JSON dumps) and
+  // this marker replays into the next turn's context — keep it a label, not a
+  // payload. The full message still reaches the client on the `error` event.
+  const label = reason.length > 200 ? `${reason.slice(0, 200)}…` : reason;
+  await session.appendMessage({
+    sessionId,
+    role: 'assistant',
+    content: `${text}\n\n[interrupted — ${label}]`,
+  });
+}
+
+// ---------------------------------------------------------------------------
 // streamStep — one LLM streaming call
 // ---------------------------------------------------------------------------
 
@@ -260,6 +299,14 @@ export async function* streamStep(
     if (watchdogController.signal.aborted && !ctx.abortSignal.aborted) {
       deps.observability?.endTrace(ctx.traceId ?? '', 'error');
       deps.observability?.flush();
+      // Persist before yielding — a consumer that stops iterating on the error
+      // event closes the generator, and nothing after the yield would run.
+      await persistInterruptedAssistant(
+        deps.session,
+        ctx.sessionId,
+        chunkText,
+        `LLM stream stalled after ${watchdogMs}ms`,
+      );
       yield {
         type: 'error',
         error: `LLM stream stalled — no chunk for ${watchdogMs}ms`,
@@ -273,6 +320,12 @@ export async function* streamStep(
     if (watchdogController.signal.aborted && !ctx.abortSignal.aborted) {
       deps.observability?.endTrace(ctx.traceId ?? '', 'error');
       deps.observability?.flush();
+      await persistInterruptedAssistant(
+        deps.session,
+        ctx.sessionId,
+        chunkText,
+        `LLM stream stalled after ${watchdogMs}ms`,
+      );
       yield {
         type: 'error',
         error: `LLM stream stalled — no chunk for ${watchdogMs}ms`,
@@ -283,8 +336,8 @@ export async function* streamStep(
     const msg = err instanceof Error ? err.message : String(err);
     // Phase 3 — a context-overflow rejection is recoverable: hand it back to the
     // orchestrator (no `error` event) so it can compact-and-retry. The assistant
-    // message was NOT persisted (this catch precedes appendMessage), so the retry
-    // starts from a clean history.
+    // message is deliberately NOT persisted on this path (unlike the terminal
+    // failures above), so the retry starts from a clean history.
     if (isContextOverflowError(err)) {
       deps.observability?.recordCompaction({
         severity: 'warn',
@@ -295,6 +348,7 @@ export async function* streamStep(
     }
     deps.observability?.endTrace(ctx.traceId ?? '', 'error');
     deps.observability?.flush();
+    await persistInterruptedAssistant(deps.session, ctx.sessionId, chunkText, msg);
     yield { type: 'error', error: msg, code: 'llm_error' };
     return { outcome: 'fatal' };
   }

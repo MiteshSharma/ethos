@@ -355,7 +355,10 @@ export async function* processTools(
       obsConfig: ctx.obsConfig,
     });
     spanIds.set(tc.toolCallId, spanId ?? '');
-    // v2: requiresApproval gate
+    // v2: requiresApproval is ANNOUNCEMENT ONLY, NOT A GATE — this emits the
+    // event then runs the tool regardless, and nothing consumes it. The real
+    // gate is the `before_tool_call` approval hook, whose danger predicate flags
+    // tools BY NAME (`APPROVAL_SURFACE_ALWAYS_ASK`, packages/wiring). v2.2 scope.
     const reqApprovalTool = deps.tools.get(tc.toolName);
     if (reqApprovalTool?.requiresApproval) {
       yield {
@@ -364,8 +367,6 @@ export async function* processTools(
         toolName: tc.toolName,
         args: effectiveArgs,
       };
-      // Auto-approve when no approval surface is wired.
-      // Full approval flow (claiming hook + UI response) is v2.2 scope.
     }
 
     observe({ type: 'tool_start', toolName: tc.toolName, args: effectiveArgs });

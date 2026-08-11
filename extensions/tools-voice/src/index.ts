@@ -8,11 +8,16 @@
 // supplied at the app layer — this package binds ONLY to the interface, so it
 // typechecks and unit-tests against a fake trunk.
 //
-// APPROVAL: the tool is marked `requiresApproval: true`, so AgentLoop emits a
-// `tool_approval_required` event and gates execution on the approval surface
-// before the call is ever placed — the same mechanism every human-in-the-loop
-// tool uses (packages/core/.../tool-processing.ts). An autonomous turn cannot
-// dial a phone number without an explicit approval.
+// APPROVAL: the tool is marked `requiresApproval: true`. That flag is
+// DECLARATIVE ONLY — AgentLoop emits a `tool_approval_required` event and then
+// runs the tool regardless (packages/core/.../tool-processing.ts); nothing
+// consumes the event today, so the flag on its own blocks nothing. The
+// mechanism that actually prompts is the `before_tool_call` approval hook, whose
+// danger predicate flags tools by name via `alwaysAsk` (see
+// `APPROVAL_SURFACE_ALWAYS_ASK` in packages/wiring/src/danger-predicate.ts).
+// `call` is NOT in that set, so an autonomous turn on a surface with an approval
+// flow is not currently gated from dialling; adding it there is what would gate
+// it.
 
 import type {
   OutboundCallHandle,

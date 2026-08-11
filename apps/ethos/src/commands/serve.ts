@@ -48,6 +48,7 @@ import {
   WebTokenRepository,
 } from '@ethosagent/web-api';
 import {
+  APPROVAL_SURFACE_ALWAYS_ASK,
   buildA2aPeeringService,
   createApprovalDangerPredicate,
   createLazyProvider,
@@ -962,6 +963,7 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
       personalities,
       getProvider: createLazyProvider(() => createLLM(config)),
       model: config.model,
+      alwaysAsk: APPROVAL_SURFACE_ALWAYS_ASK,
     }),
     // Every modal decision (and every allowlist auto-allow) lands in the
     // safety audit trail behind `ethos audit decisions`.

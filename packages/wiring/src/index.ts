@@ -1255,6 +1255,7 @@ export {
   createLazyProvider,
 } from './approval-seams';
 export {
+  APPROVAL_SURFACE_ALWAYS_ASK,
   type CreateDangerPredicateOptions,
   canonicalizeArgs,
   createDangerPredicate,

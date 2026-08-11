@@ -7,6 +7,7 @@ import { FsStorage } from '@ethosagent/storage-fs';
 import { createWebApi } from '@ethosagent/web-api';
 import type { WiringConfig } from '@ethosagent/wiring';
 import {
+  APPROVAL_SURFACE_ALWAYS_ASK,
   createAgentLoop,
   createApprovalDangerPredicate,
   createLazyProvider,
@@ -146,6 +147,7 @@ export async function startServer(port: number): Promise<number> {
       personalities,
       getProvider: createLazyProvider(() => createLLM(wiringConfig)),
       model,
+      alwaysAsk: APPROVAL_SURFACE_ALWAYS_ASK,
     }),
     ...(onMemoryCaptured ? { onMemoryCaptured } : {}),
     toolRegistry,

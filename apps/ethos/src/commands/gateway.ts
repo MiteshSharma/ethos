@@ -62,6 +62,7 @@ import {
   type WatcherWakeEvent,
 } from '@ethosagent/watchers';
 import {
+  APPROVAL_SURFACE_ALWAYS_ASK,
   createApprovalDangerPredicate,
   createLazyProvider,
   createMemoryProvider,
@@ -1647,6 +1648,7 @@ function wireApprovalFlow(
     personalities: seams.personalities,
     getProvider: seams.getProvider,
     model: seams.model,
+    alwaysAsk: APPROVAL_SURFACE_ALWAYS_ASK,
   });
   for (const bot of approvalBots) {
     bot.loop.hooks.registerModifying(

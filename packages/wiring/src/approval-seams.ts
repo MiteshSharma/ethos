@@ -72,11 +72,16 @@ export interface CreateApprovalDangerPredicateOptions {
   /** Model the smart reviewer runs on (the primary model today). */
   model: string;
   /**
-   * Extra tools that always require approval, in every mode. No production
-   * caller sets this yet; it is threaded through so a caller can flag tools
-   * without reaching around this module. Under `approvalMode: 'smart'` the
-   * predicate unions it with `SMART_MODE_CONSEQUENTIAL_TOOLS` — under `manual`
-   * and `off` this is the only non-hardline danger source.
+   * Extra tools that always require approval, in every mode. All three
+   * production callers — `apps/ethos/src/commands/serve.ts` and
+   * `apps/desktop/src/main/serve.ts` (web modal) and
+   * `apps/ethos/src/commands/gateway.ts` (Slack card) — pass
+   * `APPROVAL_SURFACE_ALWAYS_ASK`, the set of tools that must never run
+   * unprompted on a surface that can prompt. A caller with additional
+   * deployment-specific tools to gate unions them in here. Under
+   * `approvalMode: 'smart'` the predicate unions this with
+   * `SMART_MODE_CONSEQUENTIAL_TOOLS` — under `manual` and `off` this is the
+   * only non-hardline danger source.
    */
   alwaysAsk?: ReadonlyArray<string>;
 }
