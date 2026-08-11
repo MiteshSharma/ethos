@@ -3,7 +3,11 @@ import { randomBytes } from 'node:crypto';
 import { readFile, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { TtsProvider, VoiceCapabilities } from '@ethosagent/types';
+import type {
+  TtsProvider,
+  VoiceCapabilities,
+  VoiceProviderFactoryContext,
+} from '@ethosagent/types';
 
 export interface CommandTtsConfig {
   name: string;
@@ -69,4 +73,38 @@ export class CommandTtsProvider implements TtsProvider {
       await unlink(outputPath).catch(() => {});
     }
   }
+}
+
+const OUTPUT_FORMATS = new Set(['opus', 'mp3', 'wav', 'pcm']);
+
+/**
+ * Registry factory for `command-tts` — the recipe path (Piper, macOS `say`,
+ * any CLI synthesizer). The operator supplies the command template in config:
+ *
+ *   auxiliary.tts.provider: command-tts
+ *   auxiliary.tts.command: say -o {output_path} --data-format=LEF32@22050 -f {input_path}
+ *
+ * `command` is required, for the same reason as `command-stt`.
+ */
+export function commandTtsFactory(ctx: VoiceProviderFactoryContext): CommandTtsProvider {
+  const command = ctx.config.command;
+  if (typeof command !== 'string' || command.trim().length === 0) {
+    throw new Error(
+      'command-tts requires a `command` template (e.g. `piper -m voice.onnx -f {output_path} < {input_path}`)',
+    );
+  }
+  const format = ctx.config.outputFormat;
+  const voices = ctx.config.voices;
+  const timeout = Number(ctx.config.timeout);
+  const maxTextLength = Number(ctx.config.maxTextLength);
+  return new CommandTtsProvider({
+    name: typeof ctx.config.name === 'string' ? ctx.config.name : 'command-tts',
+    command,
+    ...(typeof format === 'string' && OUTPUT_FORMATS.has(format)
+      ? { outputFormat: format as CommandTtsConfig['outputFormat'] }
+      : {}),
+    ...(Number.isFinite(timeout) && timeout > 0 ? { timeout } : {}),
+    ...(Number.isFinite(maxTextLength) && maxTextLength > 0 ? { maxTextLength } : {}),
+    ...(Array.isArray(voices) ? { voices: voices.map(String) } : {}),
+  });
 }

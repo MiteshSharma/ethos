@@ -1,6 +1,11 @@
 import { randomUUID } from 'node:crypto';
 import type { AgentLoop } from '@ethosagent/core';
-import { deriveBotKey, stripAnsiEscapes } from '@ethosagent/core';
+import {
+  deriveBotKey,
+  resolveSttProvider as resolveSharedStt,
+  resolveTtsProvider as resolveSharedTts,
+  stripAnsiEscapes,
+} from '@ethosagent/core';
 import type { DeliveryLedger } from '@ethosagent/delivery-ledger';
 import type { ChannelFilterConfig } from '@ethosagent/safety-channel';
 import {
@@ -479,7 +484,7 @@ export interface GatewayConfig {
   trustedChannelPlugins?: Set<string>;
   /** Trusted voice provider plugin IDs. Non-local STT/TTS providers must be
    *  in this set to be activated. Local providers (caps.local=true) are exempt. */
-  trustedVoicePlugins?: Set<string>;
+  trustedVoicePlugins?: ReadonlySet<string>;
   /** Resolves (platform, platformUserId) -> internal userId for per-user profiles. */
   resolveUserId?: (
     platform: string,
@@ -701,7 +706,12 @@ export class Gateway {
   private readonly resolveUserIdFn:
     | ((platform: string, platformUserId: string, displayLabel?: string) => Promise<string>)
     | undefined;
-  private readonly trustedVoicePlugins: Set<string> | undefined;
+  private readonly trustedVoicePlugins: ReadonlySet<string> | undefined;
+  /** Provider ids that actually resolved — answerable after the fact. */
+  private resolvedSttProviderId: string | undefined;
+  private resolvedTtsProviderId: string | undefined;
+  /** Why a configured provider did not resolve (refusal, unknown, init fail). */
+  private readonly voiceProviderErrors: { stt?: string; tts?: string } = {};
   private readonly pluginLoader: GatewayConfig['pluginLoader'];
   private readonly notificationRouter: GatewayConfig['notificationRouter'];
   /** Completion notices waiting for their lane to go idle. laneKey -> items. */
@@ -911,37 +921,31 @@ export class Gateway {
     }
   }
 
+  // Both resolvers delegate to the SHARED resolution path in
+  // `@ethosagent/core` — the same one web-api and the wiring-built
+  // VoiceSession stack use. Nothing here re-implements provider lookup or the
+  // local-only egress gate; a second implementation is exactly how "config
+  // says one provider, the pipeline used another" happens. The resolved id is
+  // remembered so callers can report which provider actually ran.
   private async resolveSttProvider(): Promise<SttProvider | null> {
     if (this.sttProviderResolved) return this.sttProvider;
     this.sttProviderResolved = true;
-    if (!this.sttProviderRegistry || !this.sttProviderName) return null;
-    const factory = this.sttProviderRegistry.get(this.sttProviderName);
-    if (!factory) return null;
-    try {
-      this.sttProvider = await factory({
-        config: this.sttProviderConfig,
-        secrets:
-          this.voiceSecretsResolver ??
-          ({
-            get: async () => null,
-            set: async () => {},
-            delete: async () => {},
-            list: async () => [],
-          } as import('@ethosagent/types').SecretsResolver),
-        logger: noopLogger,
-      });
-      // Trust gate: non-local providers require explicit allowlist
-      if (
-        this.sttProvider &&
-        !this.sttProvider.caps.local &&
-        this.trustedVoicePlugins !== undefined
-      ) {
-        if (!this.trustedVoicePlugins.has(this.sttProviderName ?? '')) {
-          this.sttProvider = null;
-        }
-      }
-    } catch {
-      // STT provider init failed — transcription will fall back to placeholder
+    const resolution = await resolveSharedStt({
+      registry: this.sttProviderRegistry,
+      providerName: this.sttProviderName,
+      providerConfig: this.sttProviderConfig,
+      ...(this.voiceSecretsResolver ? { secrets: this.voiceSecretsResolver } : {}),
+      logger: noopLogger,
+      ...(this.trustedVoicePlugins ? { trustedVoicePlugins: this.trustedVoicePlugins } : {}),
+    });
+    if (resolution.ok) {
+      this.sttProvider = resolution.provider;
+      this.resolvedSttProviderId = resolution.providerId;
+    } else if (resolution.code !== 'not_configured') {
+      // Transcription falls back to the placeholder path. The reason is kept
+      // (not swallowed) so a refused provider is reportable rather than
+      // looking like "voice just doesn't work here".
+      this.voiceProviderErrors.stt = resolution.error;
     }
     return this.sttProvider;
   }
@@ -949,36 +953,45 @@ export class Gateway {
   private async resolveTtsProvider(): Promise<TtsProvider | null> {
     if (this.ttsProviderResolved) return this.ttsProvider;
     this.ttsProviderResolved = true;
-    if (!this.ttsProviderRegistry || !this.ttsProviderName) return null;
-    const factory = this.ttsProviderRegistry.get(this.ttsProviderName);
-    if (!factory) return null;
-    try {
-      this.ttsProvider = await factory({
-        config: this.ttsProviderConfig,
-        secrets:
-          this.voiceSecretsResolver ??
-          ({
-            get: async () => null,
-            set: async () => {},
-            delete: async () => {},
-            list: async () => [],
-          } as import('@ethosagent/types').SecretsResolver),
-        logger: noopLogger,
-      });
-      // Trust gate: non-local providers require explicit allowlist
-      if (
-        this.ttsProvider &&
-        !this.ttsProvider.caps.local &&
-        this.trustedVoicePlugins !== undefined
-      ) {
-        if (!this.trustedVoicePlugins.has(this.ttsProviderName ?? '')) {
-          this.ttsProvider = null;
-        }
-      }
-    } catch {
-      // TTS provider init failed — voice replies disabled
+    const resolution = await resolveSharedTts({
+      registry: this.ttsProviderRegistry,
+      providerName: this.ttsProviderName,
+      providerConfig: this.ttsProviderConfig,
+      ...(this.voiceSecretsResolver ? { secrets: this.voiceSecretsResolver } : {}),
+      logger: noopLogger,
+      ...(this.trustedVoicePlugins ? { trustedVoicePlugins: this.trustedVoicePlugins } : {}),
+    });
+    if (resolution.ok) {
+      this.ttsProvider = resolution.provider;
+      this.resolvedTtsProviderId = resolution.providerId;
+    } else if (resolution.code !== 'not_configured') {
+      // Voice replies stay disabled; keep the reason for the same purpose.
+      this.voiceProviderErrors.tts = resolution.error;
     }
     return this.ttsProvider;
+  }
+
+  /**
+   * What voice resolution actually does here: the provider ids that serve this
+   * gateway, plus the reason either one is missing (unknown provider, failed
+   * init, or refused by the local-only egress gate). Resolution is memoized,
+   * so calling this is equivalent to what the first voice message triggers —
+   * which is exactly why it can answer "which provider ran".
+   */
+  async voiceProviderStatus(): Promise<{
+    stt: string | undefined;
+    tts: string | undefined;
+    sttError: string | undefined;
+    ttsError: string | undefined;
+  }> {
+    await this.resolveSttProvider();
+    await this.resolveTtsProvider();
+    return {
+      stt: this.resolvedSttProviderId,
+      tts: this.resolvedTtsProviderId,
+      sttError: this.voiceProviderErrors.stt,
+      ttsError: this.voiceProviderErrors.tts,
+    };
   }
 
   /**

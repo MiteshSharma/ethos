@@ -161,6 +161,10 @@ export async function startServer(port: number): Promise<number> {
     ttsProviderRegistry: ttsProviders,
     ttsProviderName: voiceConfig.ttsProviderName,
     ttsProviderConfig: voiceConfig.ttsProviderConfig,
+    // Local-only voice-egress gate (`voice.trustedPlugins`); undefined = off.
+    ...(voiceConfig.trustedVoicePlugins
+      ? { trustedVoicePlugins: voiceConfig.trustedVoicePlugins }
+      : {}),
     ...(skillsCatalogDir ? { catalogDir: skillsCatalogDir } : {}),
     ...(webDistDir ? { webDist: webDistDir } : {}),
   });

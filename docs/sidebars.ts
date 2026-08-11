@@ -168,7 +168,6 @@ const sidebars: SidebarsConfig = {
             'building/reference/image-tools',
             'building/reference/vision-tools',
             'building/reference/browser-tools',
-            'building/reference/tts-tools',
             'building/reference/messaging-tools',
             'building/reference/card-catalog',
             'building/reference/skills-tools',

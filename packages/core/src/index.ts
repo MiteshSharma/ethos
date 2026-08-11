@@ -119,6 +119,19 @@ export { DefaultMemoryProviderRegistry } from './providers/memory-registry';
 export { DefaultStorageRegistry } from './providers/storage-registry';
 export { DefaultSttProviderRegistry } from './providers/stt-registry';
 export { DefaultTtsProviderRegistry } from './providers/tts-registry';
+export type {
+  ResolveSttOptions,
+  ResolveTtsOptions,
+  ResolveVoiceProviderOptions,
+  VoiceResolution,
+  VoiceResolutionErrorCode,
+} from './providers/voice-resolution';
+export {
+  resolveSttProvider,
+  resolveTtsProvider,
+  unwrapVoiceResolution,
+  VoiceProviderError,
+} from './providers/voice-resolution';
 export { InMemoryRequestDumpStore } from './request-dump-store';
 export { stripAnsiEscapes } from './sanitize-output';
 export type { SafeFetchFn, SecretsBackend } from './scoped';

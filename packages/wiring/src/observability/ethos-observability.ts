@@ -162,6 +162,20 @@ export class EthosObservability {
     });
   }
 
+  /** One live voice turn: utterance committed → reply finished/interrupted. */
+  startVoiceTurnTrace(opts: {
+    sessionId?: string;
+    personalityId?: string;
+    attrs?: Record<string, unknown>;
+  }): string {
+    return this.writer.startTrace({
+      sessionId: opts.sessionId,
+      kind: 'voice.turn',
+      subjectId: opts.personalityId,
+      attrs: opts.attrs,
+    });
+  }
+
   startSystemTrace(opts: { attrs?: Record<string, unknown> } = {}): string {
     return this.writer.startTrace({ kind: 'system', attrs: opts.attrs });
   }

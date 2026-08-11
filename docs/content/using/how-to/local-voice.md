@@ -5,7 +5,7 @@ kind: how-to
 audience: user
 slug: local-voice
 time: "15 min"
-updated: 2026-07-13
+updated: 2026-08-12
 ---
 
 ## Task
@@ -71,6 +71,50 @@ auxiliary.tts.voice: af_bella
 
 Every field except `provider` is optional and falls back to the default shown. Restart `ethos` (or the gateway) after editing the file.
 
+## Use a local binary instead of a server
+
+If you already have `whisper-cli`, Piper, or macOS `say` on the machine, skip the servers: the `command-stt` and `command-tts` providers run a shell template you supply. Ethos writes the input file, runs the command, and reads the output file back.
+
+```yaml
+auxiliary.asr.provider: command-stt
+auxiliary.asr.command: whisper-cli -f {input_path} -otxt -of {output_path}
+
+auxiliary.tts.provider: command-tts
+auxiliary.tts.command: say -o {output_path} -f {input_path}
+auxiliary.tts.outputFormat: wav
+```
+
+Placeholders substituted before the command runs: `{input_path}`, `{output_path}`, `{language}` (STT), and `{format}`, `{voice}`, `{speed}` (TTS). Omit `command` and the provider refuses to load rather than failing on the first utterance.
+
+## Keep voice on this machine
+
+Local providers advertise `caps.local`, so Ethos can enforce "no audio leaves this machine" as a rule rather than a habit. Declare the allowlist:
+
+```yaml
+voice.trustedPlugins:
+```
+
+An empty value trusts local providers only. Every non-local provider — cloud STT/TTS, and hosted realtime providers when they land — must be named to be usable:
+
+```yaml
+voice.trustedPlugins: openai-tts
+```
+
+Declaring the key is what arms the gate; omitting it leaves the gate off, which is the default. With the gate armed, an untrusted provider fails on use with `... is not local and is not in voice.trustedPlugins — refusing to send audio off this machine` — on every surface, including a provider picked live in web **Settings → Voice**, and before any audio reaches it.
+
+Check what actually resolved:
+
+```bash
+ethos doctor
+```
+
+```
+Voice
+  ✓  STT local-stt (local)
+  ✓  TTS local-tts (local)
+  ✓  Egress gate armed (voice.trustedPlugins: local providers only)
+```
+
 ## Voice ids are server-specific
 
 The **Voice ID** field is free-form on purpose — every server and model names its voices differently. Kokoro ships `af_bella`, `am_adam`, and others; a different TTS server will use its own ids. Read your server's voice list (kokoro-fastapi serves it at `GET /v1/audio/voices`) and paste the id you want. Ethos does not validate it against a fixed list.
@@ -91,6 +135,8 @@ STT model names vary by server: some accept `whisper-large-v3`, others want the 
 - **Connection refused / no audio** — the server is down or on a different port. Re-run the `curl` checks above; fix the port in the matching `baseUrl`.
 - **`model not found` from the server** — the server wants a different model id. Try the fully qualified name (e.g. `Systran/faster-whisper-large-v3`) in the `model` field.
 - **Unknown or silent voice** — the Voice ID is not one your TTS server ships. Fetch the server's voice list and use an id from it.
+- **`refusing to send audio off this machine`** — `voice.trustedPlugins` is armed and the selected provider is not local. Add the provider id to the list, or switch to `local-stt` / `local-tts` / a `command-*` recipe.
+- **`command-stt requires a \`command\` template`** — the provider was selected without `auxiliary.asr.command`. Add the template, or pick a server-backed provider.
 
 ## See also
 

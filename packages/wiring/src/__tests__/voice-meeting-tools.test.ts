@@ -39,7 +39,9 @@ describe('voice + meeting tools registration (default install)', () => {
   it('compose-tools wires both factories (guards the "built but never registered" gap)', async () => {
     const root = join(import.meta.dirname, '..', '..', '..', '..');
     const src = await readFile(join(root, 'packages/wiring/src/compose-tools.ts'), 'utf8');
-    expect(src).toMatch(/createVoiceTools\(\)/);
+    // `createVoiceTools` now takes the trunk caller-ID from `voice.trunk`, so
+    // the guard checks the call site, not its (now non-empty) argument list.
+    expect(src).toMatch(/createVoiceTools\(/);
     expect(src).toMatch(/createMeetingTools\(\)/);
   });
 });

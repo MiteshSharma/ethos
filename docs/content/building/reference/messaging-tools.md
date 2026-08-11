@@ -147,7 +147,7 @@ The agent calls `send_message` twice — once per target — and the dedup cache
 
 `capabilities: {}` — no framework-level gate. The reason: send_message routes through an operator-owned adapter registry + operator-owned allowlist. There's no fs / network / process surface the tool itself adds; the adapter has those already. The allowlist is the policy, not a capability declaration.
 
-This contrasts with `text_to_speech`, which has `capabilities: {}` for the same reason (audio output via channel adapter), and `vision_analyze`, which has `fs_reach: { read: 'from-personality' }` because the tool itself opens files.
+This contrasts with `vision_analyze`, which has `fs_reach: { read: 'from-personality' }` because the tool itself opens files.
 
 ## See also {#see-also}
 

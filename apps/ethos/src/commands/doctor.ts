@@ -18,8 +18,10 @@ import { spawnSync } from 'node:child_process';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { type EthosConfig, ethosDir, readConfig, readRawConfig } from '@ethosagent/config';
+import { resolveSttProvider, resolveTtsProvider } from '@ethosagent/core';
 import { bundledSkillsSource, UniversalScanner } from '@ethosagent/skills';
 import type { Skill } from '@ethosagent/types';
+import { createBuiltinVoiceRegistries } from '@ethosagent/wiring';
 import { errorLogExists, errorLogPath, readRecentErrors } from '../error-log';
 import { buildVersionInfo } from '../version-info';
 import { createLLM, getFunnelTracker, getSecretsResolver, getStorage } from '../wiring';
@@ -661,6 +663,14 @@ export async function runDoctor(args: string[] = [], options?: DoctorOptions): P
   console.log('');
 
   // -------------------------------------------------------------------------
+  // Voice — what `config.voice.*` + `auxiliary.asr/tts` actually resolve to
+  // -------------------------------------------------------------------------
+
+  console.log(`${c.bold}Voice${c.reset}`);
+  for (const line of await voiceReport(config)) console.log(line);
+  console.log('');
+
+  // -------------------------------------------------------------------------
   // Plugin health checks (v2.2)
   // -------------------------------------------------------------------------
 
@@ -1161,6 +1171,75 @@ function readExternalCliRequirements(skill: Skill): { all: string[]; anyOf: stri
 
 function isOnPath(bin: string): boolean {
   return spawnSync('which', [bin], { stdio: 'ignore' }).status === 0;
+}
+
+/**
+ * Voice diagnostics. Runs the SAME resolution path the pipeline uses — same
+ * registries, same `trustedVoicePlugins` gate — so a refusal shows up here
+ * rather than as silent "voice doesn't work". Resolution constructs providers
+ * only; it makes no network calls.
+ */
+async function voiceReport(config: EthosConfig | null): Promise<string[]> {
+  const lines: string[] = [];
+  const asr = config?.auxiliary?.asr;
+  const tts = config?.auxiliary?.tts;
+  const voice = config?.voice;
+  if (!asr && !tts && !voice) {
+    lines.push(
+      `  ${c.dim}–  Not configured (no auxiliary.asr / auxiliary.tts / voice.*).${c.reset}`,
+    );
+    return lines;
+  }
+
+  const { sttProviders, ttsProviders } = createBuiltinVoiceRegistries();
+  const trustedVoicePlugins = voice?.trustedPlugins ? new Set(voice.trustedPlugins) : undefined;
+  const stt = await resolveSttProvider({
+    registry: sttProviders,
+    providerName: asr?.provider,
+    providerConfig: { ...asr },
+    ...(trustedVoicePlugins ? { trustedVoicePlugins } : {}),
+  });
+  const speech = await resolveTtsProvider({
+    registry: ttsProviders,
+    providerName: tts?.provider,
+    providerConfig: { ...tts },
+    ...(trustedVoicePlugins ? { trustedVoicePlugins } : {}),
+  });
+
+  for (const [label, result] of [
+    ['STT', stt],
+    ['TTS', speech],
+  ] as const) {
+    if (result.ok) {
+      const local = result.provider.caps.local ? 'local' : 'remote';
+      lines.push(
+        `  ${c.green}✓${c.reset}  ${label} ${c.cyan}${result.providerId}${c.reset} ${c.dim}(${local})${c.reset}`,
+      );
+    } else if (result.code === 'not_configured') {
+      lines.push(`  ${c.dim}–  ${label} not configured.${c.reset}`);
+    } else {
+      lines.push(`  ${c.red}✗${c.reset}  ${label}: ${c.dim}${result.error}${c.reset}`);
+    }
+  }
+
+  lines.push(
+    trustedVoicePlugins
+      ? `  ${c.green}✓${c.reset}  Egress gate armed ${c.dim}(voice.trustedPlugins: ${
+          trustedVoicePlugins.size > 0
+            ? [...trustedVoicePlugins].join(', ')
+            : 'local providers only'
+        })${c.reset}`
+      : `  ${c.dim}–  Egress gate off (set voice.trustedPlugins to restrict non-local providers).${c.reset}`,
+  );
+
+  if (voice) {
+    lines.push(
+      `  ${c.dim}–  ${voice.bots.length} voice bot(s); LiveKit ${
+        voice.livekit ? 'configured' : 'absent'
+      }; SIP trunk ${voice.trunk ? 'configured' : 'absent'}.${c.reset}`,
+    );
+  }
+  return lines;
 }
 
 async function checkSkillPrerequisites(): Promise<SkillPrereqIssue[]> {

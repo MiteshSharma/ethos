@@ -1,5 +1,5 @@
-export { type CommandSttConfig, CommandSttProvider } from './command-stt';
-export { type CommandTtsConfig, CommandTtsProvider } from './command-tts';
+export { type CommandSttConfig, CommandSttProvider, commandSttFactory } from './command-stt';
+export { type CommandTtsConfig, CommandTtsProvider, commandTtsFactory } from './command-tts';
 export { validateVoiceCaps } from './conformance';
 export { GroqSttProvider, groqSttFactory } from './groq-stt';
 export { LocalSttProvider, localSttFactory } from './local-stt';

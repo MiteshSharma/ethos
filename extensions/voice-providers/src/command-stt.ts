@@ -3,7 +3,11 @@ import { randomBytes } from 'node:crypto';
 import { readFile, unlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { SttProvider, VoiceCapabilities } from '@ethosagent/types';
+import type {
+  SttProvider,
+  VoiceCapabilities,
+  VoiceProviderFactoryContext,
+} from '@ethosagent/types';
 
 export interface CommandSttConfig {
   name: string;
@@ -52,4 +56,31 @@ export class CommandSttProvider implements SttProvider {
       await unlink(outputPath).catch(() => {});
     }
   }
+}
+
+/**
+ * Registry factory for `command-stt` — the recipe path (whisper.cpp, any CLI
+ * transcriber). The operator supplies the command template in config:
+ *
+ *   auxiliary.asr.provider: command-stt
+ *   auxiliary.asr.command: whisper-cli -f {input_path} -otxt -of {output_path}
+ *
+ * `command` is required: without it there is nothing to run, and a provider
+ * that resolves but can never transcribe is worse than a refusal.
+ */
+export function commandSttFactory(ctx: VoiceProviderFactoryContext): CommandSttProvider {
+  const command = ctx.config.command;
+  if (typeof command !== 'string' || command.trim().length === 0) {
+    throw new Error(
+      'command-stt requires a `command` template (e.g. `whisper-cli -f {input_path} -otxt -of {output_path}`)',
+    );
+  }
+  const languages = ctx.config.languages;
+  const timeout = Number(ctx.config.timeout);
+  return new CommandSttProvider({
+    name: typeof ctx.config.name === 'string' ? ctx.config.name : 'command-stt',
+    command,
+    ...(Number.isFinite(timeout) && timeout > 0 ? { timeout } : {}),
+    ...(Array.isArray(languages) ? { languages: languages.map(String) } : {}),
+  });
 }

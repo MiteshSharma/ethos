@@ -260,21 +260,33 @@ export interface WiringConfig {
    *  the gap for personalities that don't declare the tool. Keyed by
    *  personality ID (or `_default`). */
   toolSettings?: import('@ethosagent/config').ToolSettingsMap;
-  /** Voice STT provider. auxiliary.asr in config.yaml. */
+  /** Voice STT provider. auxiliary.asr in config.yaml. `command` is the shell
+   *  template the local `command-stt` recipe provider runs. */
   auxiliaryAsr?: {
     provider: string;
     model?: string;
     apiKey?: string;
     baseUrl?: string;
+    command?: string;
   };
-  /** Voice TTS provider. auxiliary.tts in config.yaml. */
+  /** Voice TTS provider. auxiliary.tts in config.yaml. `command` is the shell
+   *  template the local `command-tts` recipe provider runs. */
   auxiliaryTts?: {
     provider: string;
     model?: string;
     apiKey?: string;
     voice?: string;
     baseUrl?: string;
+    command?: string;
   };
+  /**
+   * Real-time voice deployment config — `voice.*` in config.yaml, mapped
+   * straight through from `EthosConfig`. Read by `buildVoiceStack`: bots give
+   * the personality binding + lane keys, `livekit`/`trunk` gate concrete
+   * transport construction (absent → those transports are simply not built),
+   * and `trustedPlugins` arms the local-only egress gate.
+   */
+  voice?: import('@ethosagent/config').EthosConfig['voice'];
   /**
    * memory-experience pillar B — proactive capture. Default-off; when
    * `enabled`, the capture runner is wired on the `agent_done` seam. `model`
@@ -1008,6 +1020,11 @@ export interface CreateAgentLoopResult {
   sttProviders: import('@ethosagent/types').SttProviderRegistry;
   /** TTS provider registry — threaded to Gateway for voice synthesis. */
   ttsProviders: import('@ethosagent/types').TtsProviderRegistry;
+  /**
+   * Real-time voice stack built from `config.voice.*`. Absent when no voice
+   * block is configured — the clean no-op every non-voice deployment takes.
+   */
+  voiceStack?: import('./voice-stack').VoiceStack;
   /** Voice provider config from auxiliary.asr / auxiliary.tts in config. */
   voiceConfig: {
     sttProviderName?: string;
@@ -1015,6 +1032,13 @@ export interface CreateAgentLoopResult {
     ttsProviderName?: string;
     ttsProviderConfig: Record<string, unknown>;
     secretsResolver: import('@ethosagent/types').SecretsResolver;
+    /**
+     * Local-only voice-egress allowlist from `voice.trustedPlugins`. Present
+     * only when the operator declared the key; surfaces pass it straight
+     * through so a non-local provider selection is refused with a typed error
+     * instead of quietly shipping audio off the machine.
+     */
+    trustedVoicePlugins?: ReadonlySet<string>;
   };
 }
 
@@ -1277,6 +1301,21 @@ export {
   probeProvider,
 } from './probe-provider';
 export { type CreateSmartApproverOptions, createSmartApprover } from './smart-approver';
+
+// ---------------------------------------------------------------------------
+// Real-time voice stack (config.voice.* → VoiceSession / transports)
+// ---------------------------------------------------------------------------
+
+export { createBuiltinVoiceRegistries } from './voice-registries';
+export {
+  type BuildVoiceStackDeps,
+  buildVoiceStack,
+  type CreateVoiceSessionOptions,
+  createObservabilitySpanSink,
+  createPcmToPath,
+  type LiveKitBindings,
+  type VoiceStack,
+} from './voice-stack';
 
 // ---------------------------------------------------------------------------
 // Ethos observability adapter

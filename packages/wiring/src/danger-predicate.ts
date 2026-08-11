@@ -97,7 +97,8 @@ export const SMART_MODE_CONSEQUENTIAL_TOOLS: ReadonlyArray<string> = [
  * Tools every entry point WITH an approval surface flags via `alwaysAsk`, in
  * every mode — not just `smart`.
  *
- * These two promote or discard a proposed skill, and the agent is also what
+ * The two `skills_pending_*` entries promote or discard a proposed skill, and
+ * the agent is also what
  * proposes skills: left ungated it can approve its own proposal into the live
  * library, which is a self-authorising write to the skill set. `requiresApproval:
  * true` on the tool does NOT achieve this — that flag is declarative only (see
@@ -111,10 +112,19 @@ export const SMART_MODE_CONSEQUENTIAL_TOOLS: ReadonlyArray<string> = [
  * hard-blocking `createTerminalGuardHook` — so flagging a tool there would
  * change nothing. Both tools' `description` strings say so, so the model is not
  * told a prompt exists where none does.
+ *
+ * `call` (outbound telephony) is listed for a different reason: the gate
+ * PREDATES the capability, deliberately. The tool self-reports unavailable
+ * until a SIP trunk is wired, so listing it changes nothing today — and when
+ * the trunk lands, dialling someone's phone is already gated instead of
+ * depending on whoever wires it to remember. An outbound call is the least
+ * reversible call in the registry: it happens on another person's device, in
+ * real time, in the operator's name.
  */
 export const APPROVAL_SURFACE_ALWAYS_ASK: ReadonlyArray<string> = [
   'skills_pending_approve',
   'skills_pending_reject',
+  'call',
 ];
 
 export interface CreateDangerPredicateOptions {

@@ -313,6 +313,7 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
         sttProviderConfig: Record<string, unknown>;
         ttsProviderName?: string;
         ttsProviderConfig: Record<string, unknown>;
+        trustedVoicePlugins?: ReadonlySet<string>;
       }
     | undefined;
 
@@ -999,6 +1000,12 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
     ...(ttsProviders ? { ttsProviderRegistry: ttsProviders } : {}),
     ...(voiceConfig?.ttsProviderName ? { ttsProviderName: voiceConfig.ttsProviderName } : {}),
     ...(voiceConfig ? { ttsProviderConfig: voiceConfig.ttsProviderConfig } : {}),
+    // Local-only voice-egress gate. Armed only when the operator declared
+    // `voice.trustedPlugins`; the browser talk lane then refuses a non-local
+    // provider instead of shipping audio off the machine.
+    ...(voiceConfig?.trustedVoicePlugins
+      ? { trustedVoicePlugins: voiceConfig.trustedVoicePlugins }
+      : {}),
     ...(titleFn ? { titleFn } : {}),
     // W4.1 — first completed web turn stamps funnel.first_reply.
     onTurnDone: () => {

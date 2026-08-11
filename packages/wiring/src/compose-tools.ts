@@ -59,7 +59,6 @@ import { compose as composeSkillsTools } from '@ethosagent/tools-skills/compose'
 import { createTerminalGuardHook, createTerminalTools } from '@ethosagent/tools-terminal';
 import { createThinkDeeperTool } from '@ethosagent/tools-tier';
 import { compose as composeTodo } from '@ethosagent/tools-todo/compose';
-import { createTtsTools } from '@ethosagent/tools-tts';
 import { buildCardTools, buildUiTools, createUiGuidanceInjector } from '@ethosagent/tools-ui';
 import { createVoiceTools } from '@ethosagent/tools-voice';
 import { compose as composeWatchers } from '@ethosagent/tools-watchers/compose';
@@ -741,15 +740,18 @@ export async function composeAllTools(
       tools.register(tool);
   }
 
-  // TTS tool — registers as unavailable when provider is null (no TTS configured).
-  for (const tool of createTtsTools({ provider: null })) tools.register(tool);
-
   // Voice tools — `voice_session` is the always-available capability marker that
   // makes a personality selectable for real-time voice (browser talk-mode /
   // telephony); the web talk-mode gate keys off its presence in the toolset. The
   // outbound `call` tool self-reports unavailable until a SIP trunk is wired
-  // (the live LiveKit/SIP binding is app-layer/manual, not wired here).
-  for (const tool of createVoiceTools()) tools.register(tool);
+  // (the live LiveKit/SIP binding is app-layer/manual, not wired here) — but its
+  // caller-ID comes from `voice.trunk.fromNumber` so the config is consumed in
+  // one place. `call` is in APPROVAL_SURFACE_ALWAYS_ASK, so the approval gate is
+  // in place before the capability ever goes live.
+  for (const tool of createVoiceTools(
+    config.voice?.trunk?.fromNumber ? { fromNumber: config.voice.trunk.fromNumber } : {},
+  ))
+    tools.register(tool);
 
   // Meeting tool — `meet_join` self-reports unavailable until a MeetingClient is
   // wired (the Playwright/browser binding is app-layer/manual, not wired here).

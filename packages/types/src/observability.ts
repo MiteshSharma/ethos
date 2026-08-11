@@ -5,7 +5,13 @@
  */
 export type TraceKind = string;
 
-export type SpanKind = 'tool_call' | 'llm_call' | 'hook' | 'mcp_call';
+/**
+ * `voice_stage` covers the per-turn voice pipeline stages (stt, first
+ * sentence, first audio, whole turn). It is a distinct kind because a voice
+ * stage is neither a tool nor an LLM call, and "which stage ate the latency"
+ * is the only question voice telemetry is asked.
+ */
+export type SpanKind = 'tool_call' | 'llm_call' | 'hook' | 'mcp_call' | 'voice_stage';
 
 /**
  * Opaque event category. Convention: `<domain>.<verb>` (e.g. `audit.transition`,

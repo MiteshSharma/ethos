@@ -11,6 +11,13 @@ export {
   PlayoutQueue,
   type PlayoutQueueCallbacks,
 } from './playout-queue';
+export {
+  BufferedVoiceSpanWriter,
+  type BufferedVoiceSpanWriterOptions,
+  type VoiceSpanSink,
+  type VoiceSpanStage,
+  type VoiceTurnSpan,
+} from './span-writer';
 export type {
   AgentTurnRunner,
   AudioFormat,
@@ -21,3 +28,4 @@ export type {
 } from './types';
 export { EnergyVad, type EnergyVadConfig, rmsEnergy } from './vad';
 export { VoiceSession, type VoiceSessionDeps } from './voice-session';
+export { encodeWav } from './wav';

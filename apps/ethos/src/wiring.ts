@@ -269,6 +269,7 @@ export async function createAgentLoop(
     ...(config.auxiliary?.web ? { auxiliaryWeb: config.auxiliary.web } : {}),
     ...(config.auxiliary?.asr ? { auxiliaryAsr: config.auxiliary.asr } : {}),
     ...(config.auxiliary?.tts ? { auxiliaryTts: config.auxiliary.tts } : {}),
+    ...(config.voice ? { voice: config.voice } : {}),
     ...(config.memoryCapture ? { memoryCapture: config.memoryCapture } : {}),
     ...(config.memoryVault ? { memoryVault: config.memoryVault } : {}),
     ...(config.memoryApproval ? { memoryApproval: config.memoryApproval } : {}),

@@ -677,8 +677,21 @@ export interface EthosConfig {
    *   voice.bots.0.bind.name: receptionist
    * LiveKit transport keys live alongside the bots under `voice.livekit.*`;
    * SIP trunk keys (telephony) live under `voice.trunk.*`.
+   *
+   * `trustedPlugins` is the local-only voice-egress allowlist:
+   *   voice.trustedPlugins: openai-tts, elevenlabs
+   * Declaring the key AT ALL arms the gate — providers advertising
+   * `caps.local` always pass, and every other provider must be named here or
+   * its selection is refused before a single audio byte leaves the machine.
+   * Absent (the default) leaves the gate off, which is why an empty list is a
+   * meaningful value, not the same as omitting the key.
    */
-  voice?: { bots: VoiceBotConfig[]; livekit?: VoiceLiveKitConfig; trunk?: VoiceTrunkConfig };
+  voice?: {
+    bots: VoiceBotConfig[];
+    livekit?: VoiceLiveKitConfig;
+    trunk?: VoiceTrunkConfig;
+    trustedPlugins?: string[];
+  };
   // Email platform
   emailImapHost?: string;
   emailImapPort?: number;
@@ -838,8 +851,19 @@ export interface EthosConfig {
     compression?: AuxiliaryCompressionConfig;
     vision?: AuxiliaryVisionConfig;
     web?: AuxiliaryWebConfig;
-    asr?: { provider: string; model?: string; apiKey?: string; baseUrl?: string };
-    tts?: { provider: string; model?: string; apiKey?: string; voice?: string; baseUrl?: string };
+    /** `command` is the shell template the `command-stt` provider runs
+     *  (placeholders: {input_path}, {output_path}, {language}). */
+    asr?: { provider: string; model?: string; apiKey?: string; baseUrl?: string; command?: string };
+    /** `command` is the shell template the `command-tts` provider runs
+     *  (placeholders: {input_path}, {output_path}, {format}, {voice}, {speed}). */
+    tts?: {
+      provider: string;
+      model?: string;
+      apiKey?: string;
+      voice?: string;
+      baseUrl?: string;
+      command?: string;
+    };
   };
   /** tools-web — web_search/web_extract backend selection. */
   web?: WebConfig;
@@ -1226,6 +1250,11 @@ export async function writeConfig(storage: Storage, config: EthosConfig): Promis
       if (t.username) lines.push(`voice.trunk.username: ${t.username}`);
       if (t.password) lines.push(`voice.trunk.password: ${t.password}`);
     }
+    // Serialized whenever present, INCLUDING the empty list — an empty
+    // allowlist is "trust nothing non-local", not "no opinion".
+    if (config.voice.trustedPlugins !== undefined) {
+      lines.push(`voice.trustedPlugins: ${config.voice.trustedPlugins.join(', ')}`);
+    }
   }
   if (config.teams) {
     for (const [name, tcfg] of Object.entries(config.teams)) {
@@ -1301,6 +1330,7 @@ export async function writeConfig(storage: Storage, config: EthosConfig): Promis
     if (a.model) lines.push(`auxiliary.asr.model: ${a.model}`);
     if (a.apiKey) lines.push(`auxiliary.asr.apiKey: ${a.apiKey}`);
     if (a.baseUrl) lines.push(`auxiliary.asr.baseUrl: ${a.baseUrl}`);
+    if (a.command) lines.push(`auxiliary.asr.command: ${a.command}`);
   }
   if (config.auxiliary?.tts) {
     const t = config.auxiliary.tts;
@@ -1309,6 +1339,7 @@ export async function writeConfig(storage: Storage, config: EthosConfig): Promis
     if (t.apiKey) lines.push(`auxiliary.tts.apiKey: ${t.apiKey}`);
     if (t.voice) lines.push(`auxiliary.tts.voice: ${t.voice}`);
     if (t.baseUrl) lines.push(`auxiliary.tts.baseUrl: ${t.baseUrl}`);
+    if (t.command) lines.push(`auxiliary.tts.command: ${t.command}`);
   }
   if (config.web?.search_backend) lines.push(`web.search_backend: ${config.web.search_backend}`);
   if (config.web?.extract_backend) lines.push(`web.extract_backend: ${config.web.extract_backend}`);
@@ -1511,6 +1542,8 @@ function parseConfigYaml(src: string): EthosConfig {
   const voiceBotsKv: Record<number, Record<string, string>> = {};
   const voiceLiveKitKv: Record<string, string> = {};
   const voiceTrunkKv: Record<string, string> = {};
+  /** Raw `voice.trustedPlugins` line; `undefined` = key absent = gate off. */
+  let voiceTrustedPluginsRaw: string | undefined;
   const teamsKv: Record<string, Record<string, string>> = {};
   const webhooksKv: Record<string, Record<string, string>> = {};
   // FW-16 — quick_commands.<name>.<field>: <value>
@@ -1594,6 +1627,14 @@ function parseConfigYaml(src: string): EthosConfig {
     const vtr = line.match(/^voice\.trunk\.(\w+):\s*(.+)$/);
     if (vtr) {
       voiceTrunkKv[vtr[1]] = vtr[2].trim().replace(/^["']|["']$/g, '');
+      continue;
+    }
+    // voice.trustedPlugins: <comma-separated provider ids>. Declaring the key
+    // AT ALL turns the local-only egress gate on, so an empty value is
+    // meaningful (= trust nothing non-local) and must not collapse to absent.
+    const vtp = line.match(/^voice\.trustedPlugins:\s*(.*)$/);
+    if (vtp) {
+      voiceTrustedPluginsRaw = vtp[1].trim().replace(/^["']|["']$/g, '');
       continue;
     }
     // teams.<name>.<field>: <value>
@@ -1918,25 +1959,23 @@ function parseConfigYaml(src: string): EthosConfig {
         ...(auxiliaryWebKv.baseUrl ? { baseUrl: auxiliaryWebKv.baseUrl } : {}),
       }
     : undefined;
-  const auxiliaryAsr:
-    | { provider: string; model?: string; apiKey?: string; baseUrl?: string }
-    | undefined = auxiliaryAsrKv.provider
+  const auxiliaryAsr: NonNullable<EthosConfig['auxiliary']>['asr'] = auxiliaryAsrKv.provider
     ? {
         provider: auxiliaryAsrKv.provider,
         ...(auxiliaryAsrKv.model ? { model: auxiliaryAsrKv.model } : {}),
         ...(auxiliaryAsrKv.apiKey ? { apiKey: auxiliaryAsrKv.apiKey } : {}),
         ...(auxiliaryAsrKv.baseUrl ? { baseUrl: auxiliaryAsrKv.baseUrl } : {}),
+        ...(auxiliaryAsrKv.command ? { command: auxiliaryAsrKv.command } : {}),
       }
     : undefined;
-  const auxiliaryTts:
-    | { provider: string; model?: string; apiKey?: string; voice?: string; baseUrl?: string }
-    | undefined = auxiliaryTtsKv.provider
+  const auxiliaryTts: NonNullable<EthosConfig['auxiliary']>['tts'] = auxiliaryTtsKv.provider
     ? {
         provider: auxiliaryTtsKv.provider,
         ...(auxiliaryTtsKv.model ? { model: auxiliaryTtsKv.model } : {}),
         ...(auxiliaryTtsKv.apiKey ? { apiKey: auxiliaryTtsKv.apiKey } : {}),
         ...(auxiliaryTtsKv.voice ? { voice: auxiliaryTtsKv.voice } : {}),
         ...(auxiliaryTtsKv.baseUrl ? { baseUrl: auxiliaryTtsKv.baseUrl } : {}),
+        ...(auxiliaryTtsKv.command ? { command: auxiliaryTtsKv.command } : {}),
       }
     : undefined;
   const webConfig: WebConfig | undefined =
@@ -2015,11 +2054,17 @@ function parseConfigYaml(src: string): EthosConfig {
   const voiceLiveKitResult = buildVoiceLiveKit(voiceLiveKitKv);
   const voiceTrunkResult = buildVoiceTrunk(voiceTrunkKv);
   const voiceSection =
-    voiceResult.bots.length > 0 || voiceLiveKitResult.livekit || voiceTrunkResult.trunk
+    voiceResult.bots.length > 0 ||
+    voiceLiveKitResult.livekit ||
+    voiceTrunkResult.trunk ||
+    voiceTrustedPluginsRaw !== undefined
       ? {
           bots: voiceResult.bots,
           ...(voiceLiveKitResult.livekit ? { livekit: voiceLiveKitResult.livekit } : {}),
           ...(voiceTrunkResult.trunk ? { trunk: voiceTrunkResult.trunk } : {}),
+          ...(voiceTrustedPluginsRaw !== undefined
+            ? { trustedPlugins: splitList(voiceTrustedPluginsRaw) }
+            : {}),
         }
       : undefined;
   const teams = buildTeamsConfig(teamsKv);

@@ -2563,6 +2563,9 @@ const VoiceSynthesizeOutput = z.object({
   audio: z.string(),
   format: z.enum(['opus', 'mp3', 'wav', 'pcm']),
   mimeType: z.string(),
+  /** Provider id that ACTUALLY synthesized this audio. Optional so an older
+   *  client that never asked for it keeps validating. */
+  provider: z.string().optional(),
 });
 
 /** @experimental */

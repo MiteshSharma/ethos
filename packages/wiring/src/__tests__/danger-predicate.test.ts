@@ -376,6 +376,41 @@ describe('createDangerPredicate — Ch.4b approvalMode', () => {
       expect(await pred(payload('write_file', { path: 'x' }))).toMatch(/explicit approval/);
     });
 
+    // The gate predates the capability: `call` self-reports unavailable until
+    // a SIP trunk is wired, and it must already be always-ask on the day one
+    // is. These assertions are what stop that flip from being silent.
+    describe('call (outbound telephony) is always-ask', () => {
+      it('is listed in the always-ask set', () => {
+        expect(APPROVAL_SURFACE_ALWAYS_ASK).toContain('call');
+      });
+
+      it.each(['manual', 'off', 'smart'] as const)('flags call under %s', async (mode) => {
+        const pred = createDangerPredicate({
+          alwaysAsk: APPROVAL_SURFACE_ALWAYS_ASK,
+          getPersonality: () => person(mode),
+          smartApprove: async () => ({ decision: 'ask', reason: 'undecided' }),
+        });
+        expect(await pred(payload('call', { to: '+15551234567' }))).toMatch(
+          /call requires explicit approval/,
+        );
+      });
+
+      it('flags call with no personality resolved', async () => {
+        const pred = createDangerPredicate({ alwaysAsk: APPROVAL_SURFACE_ALWAYS_ASK });
+        expect(await pred(payload('call', { to: '+15551234567' }))).toMatch(/explicit approval/);
+      });
+
+      it('does not flag the voice_session capability marker', async () => {
+        // `voice_session` marks a personality as voice-engageable; it places no
+        // call, so gating it would prompt on every voice turn for nothing.
+        const pred = createDangerPredicate({
+          alwaysAsk: APPROVAL_SURFACE_ALWAYS_ASK,
+          getPersonality: () => person('manual'),
+        });
+        expect(await pred(payload('voice_session', {}))).toBeNull();
+      });
+    });
+
     it('does not flag the read-only queue tools', async () => {
       // Listing and viewing the queue mutate nothing — gating a read would cost
       // a prompt for no safety benefit.

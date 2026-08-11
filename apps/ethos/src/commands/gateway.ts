@@ -861,6 +861,10 @@ export async function runGatewayStart(opts: GatewayStartOptions = {}): Promise<v
           ttsProviderName: voiceConfig.ttsProviderName,
           ttsProviderConfig: voiceConfig.ttsProviderConfig,
           voiceSecretsResolver: voiceConfig.secretsResolver,
+          // Local-only voice-egress gate (`voice.trustedPlugins`); undefined = off.
+          ...(voiceConfig.trustedVoicePlugins
+            ? { trustedVoicePlugins: voiceConfig.trustedVoicePlugins }
+            : {}),
           personalityDirectory,
           onTurnComplete,
           onUserTurn,
@@ -886,6 +890,10 @@ export async function runGatewayStart(opts: GatewayStartOptions = {}): Promise<v
           ttsProviderName: voiceConfig.ttsProviderName,
           ttsProviderConfig: voiceConfig.ttsProviderConfig,
           voiceSecretsResolver: voiceConfig.secretsResolver,
+          // Local-only voice-egress gate (`voice.trustedPlugins`); undefined = off.
+          ...(voiceConfig.trustedVoicePlugins
+            ? { trustedVoicePlugins: voiceConfig.trustedVoicePlugins }
+            : {}),
           personalityDirectory,
           onTurnComplete,
           onUserTurn,

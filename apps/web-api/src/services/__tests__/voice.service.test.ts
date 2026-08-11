@@ -114,6 +114,98 @@ describe('VoiceService', () => {
     );
   });
 
+  // The browser talk lane resolves through the SAME shared path as the gateway,
+  // so the local-only egress gate applies to a provider chosen live in Settings
+  // just as it does to one named in config.yaml.
+  describe('trustedVoicePlugins egress gate', () => {
+    function registryWith(local: boolean) {
+      const provider = {
+        name: 'cloud-stt',
+        caps: { kind: 'stt' as const, formats: ['opus' as const], local, contractVersion: 1 },
+        transcribe: vi.fn().mockResolvedValue('hello world'),
+      };
+      return {
+        provider,
+        registry: {
+          register: vi.fn(),
+          unregister: vi.fn(),
+          get: vi.fn(() => async () => provider),
+          list: vi.fn(() => ['cloud-stt']),
+        },
+      };
+    }
+
+    it('refuses a non-local provider when only local providers are trusted', async () => {
+      const { registry, provider } = registryWith(false);
+      const svc = new VoiceService({
+        sttRegistry: registry,
+        providerName: 'cloud-stt',
+        trustedVoicePlugins: new Set(),
+      });
+
+      await expect(svc.transcribe('dGVzdA==', 'audio/webm')).rejects.toThrow(
+        /refusing to send audio off this machine/,
+      );
+      // The refusal happens BEFORE any audio is handed to the provider.
+      expect(provider.transcribe).not.toHaveBeenCalled();
+    });
+
+    it('refuses a non-local provider selected live in Settings', async () => {
+      const { registry, provider } = registryWith(false);
+      const svc = new VoiceService({
+        sttRegistry: registry,
+        configGetter: async () => ({ voiceProvider: 'cloud-stt' }),
+        trustedVoicePlugins: new Set(),
+      });
+
+      await expect(svc.transcribe('dGVzdA==', 'audio/webm')).rejects.toThrow(
+        /refusing to send audio off this machine/,
+      );
+      expect(provider.transcribe).not.toHaveBeenCalled();
+    });
+
+    it('lets a local provider through with the gate armed', async () => {
+      const { registry } = registryWith(true);
+      const svc = new VoiceService({
+        sttRegistry: registry,
+        providerName: 'cloud-stt',
+        trustedVoicePlugins: new Set(),
+      });
+      await expect(svc.transcribe('dGVzdA==', 'audio/webm')).resolves.toBe('hello world');
+    });
+
+    it('lets an explicitly trusted non-local provider through', async () => {
+      const { registry } = registryWith(false);
+      const svc = new VoiceService({
+        sttRegistry: registry,
+        providerName: 'cloud-stt',
+        trustedVoicePlugins: new Set(['cloud-stt']),
+      });
+      await expect(svc.transcribe('dGVzdA==', 'audio/webm')).resolves.toBe('hello world');
+    });
+  });
+
+  it('synthesize reports the provider that actually ran', async () => {
+    const provider = {
+      name: 'local-tts',
+      caps: { kind: 'tts' as const, formats: ['wav' as const], local: true, contractVersion: 1 },
+      synthesize: vi.fn().mockResolvedValue({ audio: new Uint8Array([1]), format: 'wav' }),
+    };
+    const svc = new VoiceService({
+      ttsRegistry: {
+        register: vi.fn(),
+        unregister: vi.fn(),
+        get: vi.fn(() => async () => provider),
+        list: vi.fn(() => ['local-tts']),
+      },
+      ttsProviderName: 'local-tts',
+    });
+    await expect(svc.synthesize('hello')).resolves.toMatchObject({
+      format: 'wav',
+      provider: 'local-tts',
+    });
+  });
+
   it('transcribe filters empty text', async () => {
     const mockProvider = {
       name: 'test-stt',

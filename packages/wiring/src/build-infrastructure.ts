@@ -13,10 +13,8 @@ import {
   DefaultLLMProviderRegistry,
   DefaultMemoryProviderRegistry,
   DefaultStorageRegistry,
-  DefaultSttProviderRegistry,
   DefaultToolRegistry,
   DefaultToolResultReducerRegistry,
-  DefaultTtsProviderRegistry,
   deriveFsReachPaths,
   FileClarifyStore,
 } from '@ethosagent/core';
@@ -72,18 +70,12 @@ import type {
   SttProviderRegistry,
   TtsProviderRegistry,
 } from '@ethosagent/types';
-import {
-  groqSttFactory,
-  localSttFactory,
-  localTtsFactory,
-  openaiSttFactory,
-  openaiTtsFactory,
-} from '@ethosagent/voice-providers';
 import { activateFirstPartyPlugins } from './activate-first-party';
 import type { CreateAgentLoopOptions, WiringConfig } from './index';
 import { buildVaultBackend, composeGatedMemory } from './memory-backend';
 import { registerRemainingBuiltinProviders } from './register-builtin-providers';
 import type { WiringContext } from './types';
+import { createBuiltinVoiceRegistries } from './voice-registries';
 
 export interface InfrastructureResult {
   llmProviders: LLMProviderRegistry;
@@ -322,16 +314,11 @@ export async function buildInfrastructure(
     return createS3Storage(ctx.config, ctx.secrets);
   });
 
-  // Voice provider registries — built-ins registered here; plugins add more via
-  // registerSttProvider / registerTtsProvider.
-  const sttProviders = new DefaultSttProviderRegistry();
-  sttProviders.register('openai-stt', openaiSttFactory);
-  sttProviders.register('groq-stt', groqSttFactory);
-  sttProviders.register('local-stt', localSttFactory);
-
-  const ttsProviders = new DefaultTtsProviderRegistry();
-  ttsProviders.register('openai-tts', openaiTtsFactory);
-  ttsProviders.register('local-tts', localTtsFactory);
+  // Voice provider registries — the built-in roster lives in one place
+  // (`createBuiltinVoiceRegistries`) so diagnostics report exactly what the
+  // running system has; plugins add more via registerSttProvider /
+  // registerTtsProvider.
+  const { sttProviders, ttsProviders } = createBuiltinVoiceRegistries();
 
   // -------------------------------------------------------------------------
   // Personalities

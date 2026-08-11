@@ -1854,12 +1854,6 @@ importers:
         specifier: workspace:*
         version: link:../../packages/types
 
-  extensions/tools-tts:
-    dependencies:
-      '@ethosagent/types':
-        specifier: workspace:*
-        version: link:../../packages/types
-
   extensions/tools-ui:
     dependencies:
       '@ethosagent/types':
@@ -2253,6 +2247,9 @@ importers:
       '@ethosagent/platform-telegram':
         specifier: workspace:*
         version: link:../../extensions/platform-telegram
+      '@ethosagent/platform-voice':
+        specifier: workspace:*
+        version: link:../../extensions/platform-voice
       '@ethosagent/plugin-contract':
         specifier: workspace:*
         version: link:../plugin-contract
@@ -2355,9 +2352,6 @@ importers:
       '@ethosagent/tools-todo':
         specifier: workspace:*
         version: link:../../extensions/tools-todo
-      '@ethosagent/tools-tts':
-        specifier: workspace:*
-        version: link:../../extensions/tools-tts
       '@ethosagent/tools-ui':
         specifier: workspace:*
         version: link:../../extensions/tools-ui
@@ -2379,6 +2373,9 @@ importers:
       '@ethosagent/voice-providers':
         specifier: workspace:*
         version: link:../../extensions/voice-providers
+      '@ethosagent/voice-session':
+        specifier: workspace:*
+        version: link:../../extensions/voice-session
       '@ethosagent/watchers':
         specifier: workspace:*
         version: link:../../extensions/watchers

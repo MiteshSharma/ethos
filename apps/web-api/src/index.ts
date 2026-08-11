@@ -190,6 +190,13 @@ export interface CreateWebApiOptions {
   /** Config dict for the TTS provider factory. */
   ttsProviderConfig?: Record<string, unknown>;
   /**
+   * Local-only voice-egress allowlist (`voice.trustedPlugins`). Passed through
+   * to VoiceService so a non-local provider selected here — including one
+   * chosen live in Settings — is refused before any audio leaves the machine.
+   * Undefined leaves the gate off.
+   */
+  trustedVoicePlugins?: ReadonlySet<string>;
+  /**
    * Secret-backed file resolver under `<dataDir>/secrets/`. Used by the
    * Communications tab to write Telegram / Slack / Discord / email
    * tokens through `${secrets:<ref>}` indirection — so secrets land in
@@ -537,6 +544,7 @@ export function createWebApi(opts: CreateWebApiOptions): CreateWebApiResult {
     ttsRegistry: opts.ttsProviderRegistry,
     ttsProviderName: opts.ttsProviderName,
     ttsProviderConfig: opts.ttsProviderConfig,
+    ...(opts.trustedVoicePlugins ? { trustedVoicePlugins: opts.trustedVoicePlugins } : {}),
   });
   const debugService = new DebugService({ sessionStore: opts.sessionStore, agentLoop });
   // Project-level plugins (`<cwd>/.ethos/plugins/`) are out of scope

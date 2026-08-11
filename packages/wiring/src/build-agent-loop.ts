@@ -64,6 +64,7 @@ import {
 } from './static-floor';
 import { evaluateTierMismatch } from './tier-diagnostics';
 import type { WiringContext } from './types';
+import { buildVoiceStack } from './voice-stack';
 
 export interface BuildAgentLoopDeps {
   infra: InfrastructureResult;
@@ -964,6 +965,20 @@ export async function buildAgentLoop(
     onMemoryCapturedFn = (cb) => captureRunner.onCaptured(cb);
   }
 
+  // Real-time voice stack. Null (a clean no-op) unless `config.voice.*` is
+  // configured; LiveKit/SIP transports additionally need their app-supplied
+  // native bindings, which no in-repo caller passes yet.
+  const voiceStack = await buildVoiceStack({
+    config,
+    storage: wiringCtx.storage,
+    dataDir,
+    sttProviders: infra.sttProviders,
+    ttsProviders: infra.ttsProviders,
+    ...(config.secretsResolver ? { secrets: config.secretsResolver } : {}),
+    logger: log,
+    ...(opts.observability ? { observability: opts.observability } : {}),
+  });
+
   return {
     loop,
     toolRegistry: tools,
@@ -993,6 +1008,7 @@ export async function buildAgentLoop(
     refreshPersonalities: () => personalities.loadFromDirectory(join(dataDir, 'personalities')),
     sttProviders: infra.sttProviders,
     ttsProviders: infra.ttsProviders,
+    ...(voiceStack ? { voiceStack } : {}),
     voiceConfig: {
       sttProviderName: config.auxiliaryAsr?.provider,
       sttProviderConfig: config.auxiliaryAsr
@@ -1000,6 +1016,7 @@ export async function buildAgentLoop(
             apiKey: config.auxiliaryAsr.apiKey,
             model: config.auxiliaryAsr.model,
             baseUrl: config.auxiliaryAsr.baseUrl,
+            command: config.auxiliaryAsr.command,
           }
         : {},
       ttsProviderName: config.auxiliaryTts?.provider,
@@ -1009,10 +1026,17 @@ export async function buildAgentLoop(
             model: config.auxiliaryTts.model,
             voice: config.auxiliaryTts.voice,
             baseUrl: config.auxiliaryTts.baseUrl,
+            command: config.auxiliaryTts.command,
           }
         : {},
       secretsResolver:
         config.secretsResolver ?? (NOOP_SECRETS as import('@ethosagent/types').SecretsResolver),
+      // Armed only when `voice.trustedPlugins` is declared. Computed once here
+      // so every surface enforces the SAME allowlist instead of each deriving
+      // its own notion of "trusted".
+      ...(config.voice?.trustedPlugins
+        ? { trustedVoicePlugins: new Set(config.voice.trustedPlugins) }
+        : {}),
     },
   };
 }
