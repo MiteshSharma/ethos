@@ -107,7 +107,8 @@ describe('commandSttFactory', () => {
     const provider = commandSttFactory(
       ctx({
         name: 'whisper-cpp',
-        command: 'whisper-cli -f {input_path} -otxt -of {output_path}',
+        command:
+          'whisper-cli -f {input_path} -otxt -of {input_path} && mv {input_path}.txt {output_path}',
         languages: ['en', 'es'],
         timeout: 30,
       }),
@@ -145,6 +146,26 @@ describe('commandTtsFactory', () => {
     expect(provider.caps.formats).toEqual(['wav']);
     expect(provider.caps.maxInputChars).toBe(2000);
     expect(provider.caps.voices).toEqual(['en_US-amy']);
+  });
+
+  // `outputFormat` decides the extension `{output_path}` carries and the
+  // `{format}` substitution — CLI synthesizers pick their container from one or
+  // the other, so both have to be the configured format, not the `mp3` default.
+  it('gives {output_path} the configured extension and substitutes {format}', async () => {
+    const provider = commandTtsFactory(
+      ctx({
+        command: 'basename {output_path} .wav | tr -d "\\n" > {output_path}',
+        outputFormat: 'wav',
+      }),
+    );
+    const result = await provider.synthesize('hello');
+    expect(new TextDecoder().decode(result.audio)).toMatch(/^ethos-tts-out-[0-9a-f]{16}$/);
+    expect(result.format).toBe('wav');
+
+    const formatEcho = commandTtsFactory(
+      ctx({ command: 'printf %s {format} > {output_path}', outputFormat: 'wav' }),
+    );
+    expect(new TextDecoder().decode((await formatEcho.synthesize('hello')).audio)).toBe('wav');
   });
 
   it('ignores an unknown output format rather than trusting it', () => {

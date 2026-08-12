@@ -1,11 +1,11 @@
 import type {
-  TtsProvider,
+  StreamingTtsProvider,
   VoiceCapabilities,
   VoiceProviderFactoryContext,
 } from '@ethosagent/types';
-import { synthesizeOpenAiCompat } from './openai-compat';
+import { streamOpenAiCompat, synthesizeOpenAiCompat } from './openai-compat';
 
-export class OpenAiTtsProvider implements TtsProvider {
+export class OpenAiTtsProvider implements StreamingTtsProvider {
   readonly name = 'openai-tts';
   readonly caps: VoiceCapabilities;
   private readonly apiKey: string;
@@ -23,6 +23,7 @@ export class OpenAiTtsProvider implements TtsProvider {
       formats: ['opus'],
       voices: ['alloy', 'echo', 'fable', 'onyx', 'nova', 'shimmer'],
       local: false,
+      streaming: true,
       maxInputChars: 4096,
       contractVersion: 1,
     };
@@ -45,6 +46,31 @@ export class OpenAiTtsProvider implements TtsProvider {
       label: 'OpenAI TTS',
       signal: opts?.signal,
     });
+  }
+
+  /**
+   * Streaming synthesis. One request per incoming piece of text, consumed
+   * chunk-by-chunk as the response streams — the caller (a sentence at a time)
+   * gets audio before the sentence has finished synthesizing. Pieces are
+   * synthesized sequentially so the yielded audio stays in text order.
+   */
+  async *synthesizeStream(
+    text: AsyncIterable<string>,
+    opts?: { voice?: string; speed?: number; signal?: AbortSignal },
+  ): AsyncIterable<{ audio: Uint8Array; format: 'opus' }> {
+    for await (const piece of text) {
+      if (piece.trim().length === 0) continue;
+      yield* streamOpenAiCompat({
+        baseUrl: this.baseUrl,
+        apiKey: this.apiKey,
+        model: this.model,
+        voice: opts?.voice ?? this.defaultVoice,
+        input: piece,
+        speed: opts?.speed ?? 1.0,
+        label: 'OpenAI TTS',
+        signal: opts?.signal,
+      });
+    }
   }
 }
 

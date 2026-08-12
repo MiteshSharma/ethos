@@ -82,7 +82,12 @@ const OUTPUT_FORMATS = new Set(['opus', 'mp3', 'wav', 'pcm']);
  * any CLI synthesizer). The operator supplies the command template in config:
  *
  *   auxiliary.tts.provider: command-tts
- *   auxiliary.tts.command: say -o {output_path} --data-format=LEF32@22050 -f {input_path}
+ *   auxiliary.tts.outputFormat: wav
+ *   auxiliary.tts.command: say --file-format=WAVE --data-format=LEI16@22050 -o {output_path} -f {input_path}
+ *
+ * `say` derives its container from `--file-format`, not from the filename:
+ * without it, `-o <name>.mp3` writes a 16-byte silent file (exit 0) and
+ * `-o <name>.wav` fails with `Opening output file failed: fmt?`.
  *
  * `command` is required, for the same reason as `command-stt`.
  */

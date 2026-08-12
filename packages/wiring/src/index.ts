@@ -261,16 +261,20 @@ export interface WiringConfig {
    *  personality ID (or `_default`). */
   toolSettings?: import('@ethosagent/config').ToolSettingsMap;
   /** Voice STT provider. auxiliary.asr in config.yaml. `command` is the shell
-   *  template the local `command-stt` recipe provider runs. */
+   *  template the local `command-stt` recipe provider runs, `timeout` its
+   *  budget in seconds. */
   auxiliaryAsr?: {
     provider: string;
     model?: string;
     apiKey?: string;
     baseUrl?: string;
     command?: string;
+    timeout?: number;
   };
   /** Voice TTS provider. auxiliary.tts in config.yaml. `command` is the shell
-   *  template the local `command-tts` recipe provider runs. */
+   *  template the local `command-tts` recipe provider runs, `outputFormat` the
+   *  container it writes, `timeout` its budget in seconds, and `maxTextLength`
+   *  the per-call text cap it advertises as `caps.maxInputChars`. */
   auxiliaryTts?: {
     provider: string;
     model?: string;
@@ -278,6 +282,9 @@ export interface WiringConfig {
     voice?: string;
     baseUrl?: string;
     command?: string;
+    outputFormat?: 'opus' | 'mp3' | 'wav' | 'pcm';
+    timeout?: number;
+    maxTextLength?: number;
   };
   /**
    * Real-time voice deployment config — `voice.*` in config.yaml, mapped

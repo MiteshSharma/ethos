@@ -77,14 +77,40 @@ If you already have `whisper-cli`, Piper, or macOS `say` on the machine, skip th
 
 ```yaml
 auxiliary.asr.provider: command-stt
-auxiliary.asr.command: whisper-cli -f {input_path} -otxt -of {output_path}
+auxiliary.asr.command: whisper-cli -f {input_path} -otxt -of {input_path} && mv {input_path}.txt {output_path}
 
 auxiliary.tts.provider: command-tts
-auxiliary.tts.command: say -o {output_path} -f {input_path}
 auxiliary.tts.outputFormat: wav
+auxiliary.tts.command: say --file-format=WAVE --data-format=LEI16@22050 -o {output_path} -f {input_path}
 ```
 
 Placeholders substituted before the command runs: `{input_path}`, `{output_path}`, `{language}` (STT), and `{format}`, `{voice}`, `{speed}` (TTS). Omit `command` and the provider refuses to load rather than failing on the first utterance.
+
+Both templates are shaped around a flag detail worth knowing before you write your own:
+
+- **`whisper-cli -of` takes a path *without* an extension** and appends `.txt` itself. `{output_path}` already ends in `.txt`, so `-of {output_path}` writes `<name>.txt.txt` and Ethos then reads a file that was never created. Point `-of` at `{input_path}` and move the result onto `{output_path}`.
+- **`say` picks its container from `--file-format`, not from the filename.** `say -o out.mp3 -f in.txt` exits 0 and writes a 16-byte silent file — no error, no audio. `say -o out.wav` with no format flags fails outright with `Opening output file failed: fmt?`. The `--file-format=WAVE --data-format=LEI16@22050` pair writes a real 22.05 kHz mono WAV whatever the extension.
+
+Run your template by hand once and check the output is not a stub:
+
+```bash
+printf 'Hello from Ethos.' > /tmp/in.txt
+say --file-format=WAVE --data-format=LEI16@22050 -o /tmp/out.wav -f /tmp/in.txt
+ls -l /tmp/out.wav
+```
+
+```
+-rw-r--r--@ 1 you  wheel  127988 /tmp/out.wav
+```
+
+### Knobs the recipe providers read
+
+| Key | Provider | Default | Effect |
+|---|---|---|---|
+| `auxiliary.tts.outputFormat` | `command-tts` | `mp3` | Container the command writes: `opus`, `mp3`, `wav`, or `pcm`. Decides the extension `{output_path}` carries, the `{format}` substitution, and the MIME type the browser is handed. An unrecognized value is ignored and the default stands. |
+| `auxiliary.tts.timeout` | `command-tts` | `120` | Seconds one synthesis may run before the command is killed. |
+| `auxiliary.tts.maxTextLength` | `command-tts` | unset | Characters handed to one synthesis call. Longer replies are cut at a sentence boundary first. |
+| `auxiliary.asr.timeout` | `command-stt` | `120` | Seconds one transcription may run before the command is killed. |
 
 ## Keep voice on this machine
 
@@ -137,6 +163,8 @@ STT model names vary by server: some accept `whisper-large-v3`, others want the 
 - **Unknown or silent voice** — the Voice ID is not one your TTS server ships. Fetch the server's voice list and use an id from it.
 - **`refusing to send audio off this machine`** — `voice.trustedPlugins` is armed and the selected provider is not local. Add the provider id to the list, or switch to `local-stt` / `local-tts` / a `command-*` recipe.
 - **`command-stt requires a \`command\` template`** — the provider was selected without `auxiliary.asr.command`. Add the template, or pick a server-backed provider.
+- **The Play button runs but plays silence** — the command wrote a stub. Run the template by hand and check the byte size: `say -o out.mp3` produces a 16-byte file and exits 0. Use the `--file-format` form above.
+- **`ENOENT ... ethos-tts-out-<hex>.<ext>`** — the command wrote somewhere other than `{output_path}`, or wrote a different extension than `auxiliary.tts.outputFormat` declares. Ethos reads back exactly the path it substituted.
 
 ## See also
 

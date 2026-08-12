@@ -99,6 +99,45 @@ describe('buildVoiceStack', () => {
     await stack?.close();
   });
 
+  // `auxiliary.*.outputFormat` / `timeout` / `maxTextLength` were parsed and
+  // then dropped before they reached a factory — documented knobs that did
+  // nothing. The provider config assembled here is the one the factory reads.
+  it('forwards the per-provider knobs to the provider factories', async () => {
+    let sttConfig: Record<string, unknown> = {};
+    let ttsConfig: Record<string, unknown> = {};
+    const sttProviders = new DefaultSttProviderRegistry();
+    sttProviders.register('local-stt', (ctx) => {
+      sttConfig = ctx.config;
+      return batchStt('local-stt', true);
+    });
+    const ttsProviders = new DefaultTtsProviderRegistry();
+    ttsProviders.register('local-tts', (ctx) => {
+      ttsConfig = ctx.config;
+      return batchTts('local-tts', true);
+    });
+
+    const stack = await buildVoiceStack({
+      config: config({
+        voice: { bots: [] },
+        auxiliaryAsr: { provider: 'local-stt', command: 'transcribe {input_path}', timeout: 300 },
+        auxiliaryTts: {
+          provider: 'local-tts',
+          command: 'say --file-format=WAVE -o {output_path} -f {input_path}',
+          outputFormat: 'wav',
+          timeout: 45,
+          maxTextLength: 2000,
+        },
+      }),
+      logger,
+      sttProviders,
+      ttsProviders,
+    });
+
+    expect(sttConfig).toMatchObject({ command: 'transcribe {input_path}', timeout: 300 });
+    expect(ttsConfig).toMatchObject({ outputFormat: 'wav', timeout: 45, maxTextLength: 2000 });
+    await stack?.close();
+  });
+
   it('maps voice.bots[] to bot identities in config order', async () => {
     const stack = await buildVoiceStack(
       deps(

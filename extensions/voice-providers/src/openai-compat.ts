@@ -102,8 +102,7 @@ export async function transcribeOpenAiCompat(opts: {
   return json.text;
 }
 
-/** TTS — POST {baseUrl}/audio/speech, json body, returns opus audio bytes. */
-export async function synthesizeOpenAiCompat(opts: {
+export interface SpeechRequestOptions {
   baseUrl: string;
   model: string;
   voice: string;
@@ -115,7 +114,10 @@ export async function synthesizeOpenAiCompat(opts: {
   label: string;
   /** Aborts the request when the caller/UI times out. Absent → no timeout here. */
   signal?: AbortSignal;
-}): Promise<{ audio: Uint8Array; format: 'opus' }> {
+}
+
+/** POST {baseUrl}/audio/speech. Throws on a non-2xx, with the server's body. */
+async function speechResponse(opts: SpeechRequestOptions): Promise<Response> {
   const res = await fetch(`${opts.baseUrl}/audio/speech`, {
     method: 'POST',
     headers: {
@@ -136,7 +138,49 @@ export async function synthesizeOpenAiCompat(opts: {
     const body = await res.text().catch(() => '');
     throw new Error(`${opts.label} failed (${res.status}): ${body}`);
   }
+  return res;
+}
 
+/** TTS — POST {baseUrl}/audio/speech, json body, returns opus audio bytes. */
+export async function synthesizeOpenAiCompat(
+  opts: SpeechRequestOptions,
+): Promise<{ audio: Uint8Array; format: 'opus' }> {
+  const res = await speechResponse(opts);
   const buffer = await res.arrayBuffer();
   return { audio: new Uint8Array(buffer), format: 'opus' };
+}
+
+/**
+ * Streaming TTS — the SAME request as {@link synthesizeOpenAiCompat}, consumed
+ * as the chunked response body arrives instead of buffered whole. Both OpenAI
+ * and Kokoro stream `/audio/speech` as chunked transfer, so the first bytes of
+ * a sentence are playable long before the request completes.
+ *
+ * A server (or a test double) that hands back a fully-buffered response with no
+ * readable body degrades to a single chunk — same bytes, same order.
+ */
+export async function* streamOpenAiCompat(
+  opts: SpeechRequestOptions,
+): AsyncIterable<{ audio: Uint8Array; format: 'opus' }> {
+  const res = await speechResponse(opts);
+  const body = res.body;
+  if (!body) {
+    const buffer = await res.arrayBuffer();
+    if (buffer.byteLength > 0) yield { audio: new Uint8Array(buffer), format: 'opus' };
+    return;
+  }
+
+  const reader = body.getReader();
+  try {
+    let chunk = await reader.read();
+    while (!chunk.done) {
+      const value = chunk.value;
+      if (value && value.byteLength > 0) yield { audio: value, format: 'opus' };
+      chunk = await reader.read();
+    }
+  } finally {
+    // Barge-in breaks out of this generator mid-stream; releasing the reader
+    // hands the socket back instead of leaking it until GC.
+    await reader.cancel().catch(() => {});
+  }
 }

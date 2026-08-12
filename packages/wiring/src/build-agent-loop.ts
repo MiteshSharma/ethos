@@ -1015,6 +1015,7 @@ export async function buildAgentLoop(
             model: config.auxiliaryAsr.model,
             baseUrl: config.auxiliaryAsr.baseUrl,
             command: config.auxiliaryAsr.command,
+            timeout: config.auxiliaryAsr.timeout,
           }
         : {},
       ttsProviderName: config.auxiliaryTts?.provider,
@@ -1025,6 +1026,9 @@ export async function buildAgentLoop(
             voice: config.auxiliaryTts.voice,
             baseUrl: config.auxiliaryTts.baseUrl,
             command: config.auxiliaryTts.command,
+            outputFormat: config.auxiliaryTts.outputFormat,
+            timeout: config.auxiliaryTts.timeout,
+            maxTextLength: config.auxiliaryTts.maxTextLength,
           }
         : {},
       secretsResolver:

@@ -52,7 +52,7 @@ pnpm test
 
 `pnpm check` runs all three in that order.
 
-At the time of writing this branch ran **804 test files / 8560 tests, 0 failures**.
+At the time of writing this branch ran **806 test files / 8580 tests, 0 failures**.
 Those numbers are a snapshot, not a contract — they drift every time a test lands.
 Treat a *failure*, not a count mismatch, as the signal. (`find` reports 807
 `*.test.ts` files on disk; a few sit outside vitest's `include` globs in
@@ -70,7 +70,7 @@ pnpm vitest run \
   packages/types/src/__tests__/personality-field-count.test.ts
 ```
 
-Verified: 8 files, 128 tests, ~0.7s.
+Verified: 8 files, 129 tests, ~1.2s.
 
 Surfaces — browser talk-mode, web-api, gateway, providers, session:
 
@@ -81,11 +81,12 @@ pnpm vitest run \
   extensions/gateway/src/__tests__/voice-trust-gate.test.ts \
   extensions/gateway/src/__tests__/voice-pipeline.test.ts \
   packages/config/src/__tests__/config-voice-trusted-plugins.test.ts \
+  packages/config/src/__tests__/config-voice-provider-knobs.test.ts \
   extensions/voice-providers/src \
   extensions/voice-session/src
 ```
 
-Verified: 21 files, 177 tests, ~1.3s.
+Verified: 23 files, 196 tests, ~1.6s.
 
 What each one is defending:
 
@@ -97,6 +98,9 @@ What each one is defending:
 | `packages/wiring/src/__tests__/voice-stack.test.ts` | `buildVoiceStack`: absent config → `null`, the `trustedVoicePlugins` egress gate, transport construction, personality voice beating global config |
 | `extensions/gateway/src/__tests__/voice-trust-gate.test.ts` | The same gate on the gateway lane, including "gate off when no allowlist is passed" |
 | `packages/config/src/__tests__/config-voice-trusted-plugins.test.ts` | That declaring `voice.trustedPlugins` *at all* arms the gate, and that an empty list is a distinct, meaningful value |
+| `extensions/voice-providers/src/__tests__/streaming-tts.test.ts` | That `local-tts` / `openai-tts` really stream: chunks yielded as the body arrives, in order, one request per sentence — and that a batch-only provider is still gated off |
+| `extensions/voice-session/src/__tests__/playout-queue.test.ts` | Sentence prefetch: N+1 synthesizes while N plays, playout never reorders, nothing runs more than one sentence ahead, and cancel aborts the prefetched item |
+| `packages/config/src/__tests__/config-voice-provider-knobs.test.ts` | That `auxiliary.tts.outputFormat` / `timeout` / `maxTextLength` and `auxiliary.asr.timeout` are lifted onto `EthosConfig` and survive a write/read round-trip |
 | `extensions/voice-providers/src/__tests__/conformance.test.ts` | `validateSttProvider` / `validateTtsProvider`, incl. the refusal of a v1 STT provider that still declares the deleted `transcribe(audioPath)` |
 | `packages/types/src/__tests__/personality-field-count.test.ts` | That `PersonalityConfig` has exactly the 28 fields in `.personality-field-count` — adding `voice` bumped it from 27 |
 
@@ -164,30 +168,22 @@ macOS ships a TTS binary. This is the fastest possible way to hear Ethos speak.
 
 ```yaml
 auxiliary.tts.provider: command-tts
-auxiliary.tts.command: say --file-format=WAVE --data-format=LEI16@22050 -o {input_path}.wav -f {input_path} && ffmpeg -y -loglevel error -i {input_path}.wav {output_path} && rm -f {input_path}.wav
+auxiliary.tts.outputFormat: wav
+auxiliary.tts.command: say --file-format=WAVE --data-format=LEI16@22050 -o {output_path} -f {input_path}
 ```
 
 Why it is shaped like that, all verified by running it on this machine:
 
-- `command-tts` hard-codes its output extension to its `outputFormat`, which
-  **defaults to `mp3` and is not settable from `auxiliary.tts.*`** (see
-  [Known gaps](#4-config-keys-that-look-real-but-are-dropped)). So `{output_path}`
-  always ends in `.mp3`.
 - `say -o out.mp3 -f in.txt` exits 0 and writes a **16-byte silent file**. It does
-  not error; you simply get no audio.
+  not error; you simply get no audio. `say -o out.wav` with no format flags fails
+  outright: `Opening output file failed: fmt?`.
 - `say --file-format=WAVE --data-format=LEI16@22050` writes a genuine 22.05 kHz mono
-  WAV regardless of the file extension.
-- `ffmpeg` then converts it to a real MP3, so the bytes match the `audio/mpeg` MIME
-  type the web-api hands the browser. **`ffmpeg` must be on `PATH`** (`brew install ffmpeg`).
-
-Without `ffmpeg`, drop the conversion and accept a WAV labelled `mp3`:
-
-```yaml
-auxiliary.tts.command: say --file-format=WAVE --data-format=LEI16@22050 -o {output_path} -f {input_path}
-```
-
-Most browsers sniff the container and play it anyway, but the label is a lie and
-nothing in the codebase guarantees a given player tolerates it.
+  WAV — **127,988 bytes** for a one-sentence reply, against 16 for the silent stub.
+- `auxiliary.tts.outputFormat: wav` makes `{output_path}` end in `.wav` and makes the
+  provider report `format: 'wav'`, so the `audio/wav` MIME the web-api hands the
+  browser matches the bytes. Before this key was lifted onto `EthosConfig` it was
+  parsed and dropped, the extension was always `.mp3`, and the honest recipe needed
+  an `ffmpeg` transcode stage. It does not any more.
 
 #### Local binary STT
 
@@ -198,12 +194,13 @@ auxiliary.asr.command: whisper-cli -f {input_path} -otxt -of {input_path} && mv 
 
 **Caveat, stated plainly:** `whisper-cli` is not installed on this machine, so this
 template was **not** executed. It is written this way because `whisper.cpp`'s `-of`
-takes a path *without* an extension and appends `.txt` itself — while Ethos hands
-`{output_path}` as a path that already ends in `.txt` and then reads exactly that
-path back. The example in `docs/content/using/how-to/local-voice.md`
-(`-of {output_path}`) therefore looks like it would write `…​.txt.txt` and leave
-Ethos reading a file that does not exist. Verify against your own `whisper-cli
---help` before trusting either form.
+is documented as "output file path (without file extension)" and appends `.txt`
+itself — while Ethos hands `{output_path}` as a path that already ends in `.txt`
+and then reads exactly that path back (`extensions/voice-providers/src/command-stt.ts`).
+So `-of {output_path}` writes `<name>.txt.txt` and Ethos reads a file that was never
+created. `docs/content/using/how-to/local-voice.md` and the `commandSttFactory`
+docstring both carried that broken form; both now carry the `-of {input_path}` +
+`mv` form above. Verify against your own `whisper-cli --help` before trusting either.
 
 ### Check what actually resolved
 
@@ -440,10 +437,17 @@ STT server consuming the generated WAV.** Nothing in CI touches any of these.
 
 Do not go hunting for these. They do not exist on this branch.
 
-### 1. Streaming TTS providers
-No provider implements `synthesizeStream`. Synthesis is request/response per sentence.
-The conformance checker enforces that a provider declaring `caps.streaming` actually
-implements the streaming method — nothing declares it.
+### 1. Streaming TTS on the browser surface
+`local-tts` and `openai-tts` now implement `synthesizeStream` and declare
+`caps.streaming`, and `VoiceSession` uses it: audio is emitted chunk-by-chunk as the
+`/v1/audio/speech` response streams, and sentence N+1 is synthesized while N is
+still playing (`extensions/voice-session/src/playout-queue.ts`). A provider without
+`caps.streaming` still takes the batch path unchanged.
+
+What is NOT wired: **browser talk-mode does not use it.** Talk-mode calls the
+`voice.synthesize` RPC, which returns one base64 blob per sentence — the streaming
+path only runs on the `VoiceSession` stack. `command-tts`, `openai-stt`, `groq-stt`,
+`local-stt` and `command-stt` remain batch-only.
 
 ### 2. Binary-PCM WebSocket + WebAudio playout
 Browser talk-mode is the existing **batch HTTP** path: one `transcribe` call per
@@ -474,16 +478,19 @@ caller passes yet** (`build-agent-loop.ts:969-970`), and nothing in-repo current
 reads `result.voiceStack` to drive a live session — you hold the stack and call
 `createSession()` yourself.
 
-### 4. Config keys that look real but are dropped
-`auxiliary.tts.outputFormat` is documented in
-`docs/content/using/how-to/local-voice.md` and **has no effect**. The config parser
-matches `auxiliary.tts.<field>` into a key/value map, but only `provider`, `model`,
-`apiKey`, `voice`, `baseUrl` and `command` are lifted onto `EthosConfig`
-(`packages/config/src/index.ts`); `voice-stack.ts`'s `providerConfigFrom()` forwards
-the same six. So `command-tts` always uses its default `mp3` output extension, and
-`command-tts`'s other knobs (`outputFormat`, `voices`, `timeout`, `maxTextLength`) and
-`command-stt`'s (`languages`, `timeout`) are unreachable from `config.yaml` — the
-factories read them, nothing supplies them.
+### 4. Two list-valued config keys are still unreachable
+`auxiliary.tts.outputFormat`, `auxiliary.tts.timeout`, `auxiliary.tts.maxTextLength`
+and `auxiliary.asr.timeout` used to be matched by the parser and then dropped — the
+factories read them, nothing supplied them. They are lifted now: parser →
+`EthosConfig` → `providerConfigFrom()` → the provider (`packages/config/src/index.ts`,
+`packages/wiring/src/voice-stack.ts`, `packages/wiring/src/build-agent-loop.ts`).
+A garbage value (`timeout: soon`, `outputFormat: flac`) is dropped, so the provider
+default stands.
+
+Still unreachable, deliberately: `auxiliary.tts.voices` and `auxiliary.asr.languages`.
+Both are lists, and the flat `key: value` parser has no list encoding for them; both
+only populate advisory `caps.voices` / `caps.languages`, which nothing in the repo
+enforces. They are documented nowhere — do not write them expecting an effect.
 
 ### 5. No CallStrip UI, no per-personality voice editor
 The talk-mode UI is the minimal toggle plus `TalkModeCallBar` (speaking indicator,

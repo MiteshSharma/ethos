@@ -241,7 +241,16 @@ export async function buildVoiceStack(deps: BuildVoiceStackDeps): Promise<VoiceS
 
 function providerConfigFrom(
   cfg:
-    | { model?: string; apiKey?: string; baseUrl?: string; voice?: string; command?: string }
+    | {
+        model?: string;
+        apiKey?: string;
+        baseUrl?: string;
+        voice?: string;
+        command?: string;
+        outputFormat?: string;
+        timeout?: number;
+        maxTextLength?: number;
+      }
     | undefined,
 ): Record<string, unknown> {
   if (!cfg) return {};
@@ -251,6 +260,9 @@ function providerConfigFrom(
     ...(cfg.baseUrl !== undefined ? { baseUrl: cfg.baseUrl } : {}),
     ...(cfg.voice !== undefined ? { voice: cfg.voice } : {}),
     ...(cfg.command !== undefined ? { command: cfg.command } : {}),
+    ...(cfg.outputFormat !== undefined ? { outputFormat: cfg.outputFormat } : {}),
+    ...(cfg.timeout !== undefined ? { timeout: cfg.timeout } : {}),
+    ...(cfg.maxTextLength !== undefined ? { maxTextLength: cfg.maxTextLength } : {}),
   };
 }
 

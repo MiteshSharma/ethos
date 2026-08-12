@@ -852,10 +852,21 @@ export interface EthosConfig {
     vision?: AuxiliaryVisionConfig;
     web?: AuxiliaryWebConfig;
     /** `command` is the shell template the `command-stt` provider runs
-     *  (placeholders: {input_path}, {output_path}, {language}). */
-    asr?: { provider: string; model?: string; apiKey?: string; baseUrl?: string; command?: string };
+     *  (placeholders: {input_path}, {output_path}, {language}); `timeout` is
+     *  that command's budget, in seconds. */
+    asr?: {
+      provider: string;
+      model?: string;
+      apiKey?: string;
+      baseUrl?: string;
+      command?: string;
+      timeout?: number;
+    };
     /** `command` is the shell template the `command-tts` provider runs
-     *  (placeholders: {input_path}, {output_path}, {format}, {voice}, {speed}). */
+     *  (placeholders: {input_path}, {output_path}, {format}, {voice}, {speed});
+     *  `outputFormat` is the container that command writes — and the extension
+     *  `{output_path}` carries; `timeout` is its budget in seconds;
+     *  `maxTextLength` caps the text handed to one synthesis call. */
     tts?: {
       provider: string;
       model?: string;
@@ -863,6 +874,9 @@ export interface EthosConfig {
       voice?: string;
       baseUrl?: string;
       command?: string;
+      outputFormat?: 'opus' | 'mp3' | 'wav' | 'pcm';
+      timeout?: number;
+      maxTextLength?: number;
     };
   };
   /** tools-web — web_search/web_extract backend selection. */
@@ -1331,6 +1345,7 @@ export async function writeConfig(storage: Storage, config: EthosConfig): Promis
     if (a.apiKey) lines.push(`auxiliary.asr.apiKey: ${a.apiKey}`);
     if (a.baseUrl) lines.push(`auxiliary.asr.baseUrl: ${a.baseUrl}`);
     if (a.command) lines.push(`auxiliary.asr.command: ${a.command}`);
+    if (a.timeout) lines.push(`auxiliary.asr.timeout: ${a.timeout}`);
   }
   if (config.auxiliary?.tts) {
     const t = config.auxiliary.tts;
@@ -1340,6 +1355,9 @@ export async function writeConfig(storage: Storage, config: EthosConfig): Promis
     if (t.voice) lines.push(`auxiliary.tts.voice: ${t.voice}`);
     if (t.baseUrl) lines.push(`auxiliary.tts.baseUrl: ${t.baseUrl}`);
     if (t.command) lines.push(`auxiliary.tts.command: ${t.command}`);
+    if (t.outputFormat) lines.push(`auxiliary.tts.outputFormat: ${t.outputFormat}`);
+    if (t.timeout) lines.push(`auxiliary.tts.timeout: ${t.timeout}`);
+    if (t.maxTextLength) lines.push(`auxiliary.tts.maxTextLength: ${t.maxTextLength}`);
   }
   if (config.web?.search_backend) lines.push(`web.search_backend: ${config.web.search_backend}`);
   if (config.web?.extract_backend) lines.push(`web.extract_backend: ${config.web.extract_backend}`);
@@ -1966,6 +1984,7 @@ function parseConfigYaml(src: string): EthosConfig {
         ...(auxiliaryAsrKv.apiKey ? { apiKey: auxiliaryAsrKv.apiKey } : {}),
         ...(auxiliaryAsrKv.baseUrl ? { baseUrl: auxiliaryAsrKv.baseUrl } : {}),
         ...(auxiliaryAsrKv.command ? { command: auxiliaryAsrKv.command } : {}),
+        ...positiveNumber('timeout', auxiliaryAsrKv.timeout),
       }
     : undefined;
   const auxiliaryTts: NonNullable<EthosConfig['auxiliary']>['tts'] = auxiliaryTtsKv.provider
@@ -1976,6 +1995,11 @@ function parseConfigYaml(src: string): EthosConfig {
         ...(auxiliaryTtsKv.voice ? { voice: auxiliaryTtsKv.voice } : {}),
         ...(auxiliaryTtsKv.baseUrl ? { baseUrl: auxiliaryTtsKv.baseUrl } : {}),
         ...(auxiliaryTtsKv.command ? { command: auxiliaryTtsKv.command } : {}),
+        ...(isAudioFormat(auxiliaryTtsKv.outputFormat)
+          ? { outputFormat: auxiliaryTtsKv.outputFormat }
+          : {}),
+        ...positiveNumber('timeout', auxiliaryTtsKv.timeout),
+        ...positiveNumber('maxTextLength', auxiliaryTtsKv.maxTextLength),
       }
     : undefined;
   const webConfig: WebConfig | undefined =
@@ -2415,6 +2439,22 @@ function parseToolPreviewLength(v: string | undefined): number | undefined {
   const n = Number(v);
   if (!Number.isFinite(n) || n < 0 || !Number.isInteger(n)) return undefined;
   return n;
+}
+
+/**
+ * Lift one optional positive-number voice knob. A garbage or non-positive
+ * value yields no key at all, so the provider's own default stands — the same
+ * "unset" the operator would get by not writing the line.
+ */
+function positiveNumber<K extends string>(key: K, raw: string | undefined): { [P in K]?: number } {
+  if (!raw) return {};
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n <= 0) return {};
+  return { [key]: n } as { [P in K]?: number };
+}
+
+function isAudioFormat(v: string | undefined): v is 'opus' | 'mp3' | 'wav' | 'pcm' {
+  return v === 'opus' || v === 'mp3' || v === 'wav' || v === 'pcm';
 }
 
 function buildRetentionConfig(kv: Record<string, string>): RetentionConfig | undefined {

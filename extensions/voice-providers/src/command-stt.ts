@@ -92,7 +92,12 @@ function extensionFor(mimeType: string | undefined): string {
  * transcriber). The operator supplies the command template in config:
  *
  *   auxiliary.asr.provider: command-stt
- *   auxiliary.asr.command: whisper-cli -f {input_path} -otxt -of {output_path}
+ *   auxiliary.asr.command: whisper-cli -f {input_path} -otxt -of {input_path} && mv {input_path}.txt {output_path}
+ *
+ * whisper.cpp's `-of` takes a path WITHOUT an extension and appends `.txt`
+ * itself, while `{output_path}` already ends in `.txt` — so `-of {output_path}`
+ * writes `<name>.txt.txt` and this provider then reads a file that was never
+ * created. Hence the `-of {input_path}` + `mv` shape above.
  *
  * `command` is required: without it there is nothing to run, and a provider
  * that resolves but can never transcribe is worse than a refusal.
@@ -101,7 +106,8 @@ export function commandSttFactory(ctx: VoiceProviderFactoryContext): CommandSttP
   const command = ctx.config.command;
   if (typeof command !== 'string' || command.trim().length === 0) {
     throw new Error(
-      'command-stt requires a `command` template (e.g. `whisper-cli -f {input_path} -otxt -of {output_path}`)',
+      'command-stt requires a `command` template ' +
+        '(e.g. `whisper-cli -f {input_path} -otxt -of {input_path} && mv {input_path}.txt {output_path}`)',
     );
   }
   const languages = ctx.config.languages;

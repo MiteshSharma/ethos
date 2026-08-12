@@ -1,4 +1,4 @@
-import type { AgentEvent } from '@ethosagent/types';
+import type { AgentEvent, StreamingTtsProvider } from '@ethosagent/types';
 import { describe, expect, it } from 'vitest';
 import type { AgentTurnRunner, VoiceSessionEvent } from '../types';
 import { VoiceSession } from '../voice-session';
@@ -22,6 +22,13 @@ function collect(session: VoiceSession): VoiceSessionEvent[] {
   const events: VoiceSessionEvent[] = [];
   session.on((e) => events.push(e));
   return events;
+}
+
+/** First byte of every `reply_audio` event, in emission order. */
+function audioBytes(events: VoiceSessionEvent[]): number[] {
+  return events
+    .filter((e) => e.type === 'reply_audio')
+    .map((e) => (e.type === 'reply_audio' ? (e.audio[0] ?? -1) : -1));
 }
 
 // Drives one full utterance: speech frames then enough trailing silence to
@@ -134,6 +141,62 @@ describe('VoiceSession', () => {
     expect(events.filter((e) => e.type === 'reply_sentence').map((e) => e.type)).toHaveLength(1);
     expect(events.filter((e) => e.type === 'reply_audio')).toHaveLength(1);
     expect(events.find((e) => e.type === 'reply_complete')).toMatchObject({ text: 'Done.' });
+  });
+
+  // A streaming provider is used chunk-by-chunk (several `reply_audio` events
+  // per sentence) AND the next sentence is synthesized while the current one is
+  // still streaming — proven by the recorded call order, not by timing.
+  it('streaming TTS: chunks play in order while the next sentence prefetches', async () => {
+    const clock = makeClock();
+    const calls: string[] = [];
+    const gate = deferred();
+    const tts: StreamingTtsProvider = {
+      name: 'chunked-tts',
+      caps: { kind: 'tts', formats: ['pcm'], streaming: true, contractVersion: 1 },
+      synthesize: async () => ({ audio: new Uint8Array([0]), format: 'pcm' }),
+      async *synthesizeStream(text) {
+        for await (const sentence of text) {
+          const first = sentence.startsWith('Hello');
+          calls.push(`start:${sentence}`);
+          yield { audio: new Uint8Array([first ? 1 : 3]), format: 'pcm' as const };
+          if (first) await gate.promise;
+          yield { audio: new Uint8Array([first ? 2 : 4]), format: 'pcm' as const };
+          calls.push(`end:${sentence}`);
+        }
+      },
+    };
+    const session = new VoiceSession({
+      runner: scriptedRunner([
+        { type: 'text_delta', text: 'Hello there. ' },
+        { type: 'text_delta', text: 'How are you today?' },
+      ]),
+      stt: streamingStt('hi'),
+      tts,
+      vad: new FakeVad(),
+      now: clock.now,
+    });
+    const events = collect(session);
+
+    speakUtterance(session, clock);
+    await waitForEvent(events, 'reply_audio');
+    await tick();
+
+    // Sentence two synthesized to completion while sentence one is still held.
+    expect(calls).toEqual([
+      'start:Hello there.',
+      'start:How are you today?',
+      'end:How are you today?',
+    ]);
+    // …and not one byte of it has played out of turn.
+    expect(audioBytes(events)).toEqual([1]);
+
+    gate.resolve();
+    await session.idle();
+
+    expect(audioBytes(events)).toEqual([1, 2, 3, 4]);
+    expect(events.find((e) => e.type === 'reply_complete')).toMatchObject({
+      text: 'Hello there. How are you today?',
+    });
   });
 
   it('never speaks thinking_delta or tool_* events', async () => {
