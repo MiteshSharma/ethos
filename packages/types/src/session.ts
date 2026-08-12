@@ -46,6 +46,14 @@ export interface StoredMessage {
   toolCalls?: Array<{ id: string; name: string; input: unknown }>;
   timestamp: Date;
   usage?: TokenUsage;
+  /**
+   * Observability trace id of the turn that persisted this message — the SAME
+   * id the turn's trace carries in `observability.db`, so `sessions.db` rows
+   * join to traces/spans without a second identity. Undefined — never `''` or
+   * `'null'` — on messages written outside a traced turn (no observability
+   * wired) or by a store that does not persist it.
+   */
+  traceId?: string;
 }
 
 export interface SessionFilter {

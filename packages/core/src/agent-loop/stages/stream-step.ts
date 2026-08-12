@@ -133,6 +133,7 @@ async function persistInterruptedAssistant(
   sessionId: string,
   text: string,
   reason: string,
+  traceId: string | undefined,
 ): Promise<void> {
   if (!text.trim()) return;
   // Provider error messages can be multi-KB (HTML error pages, JSON dumps) and
@@ -143,6 +144,7 @@ async function persistInterruptedAssistant(
     sessionId,
     role: 'assistant',
     content: `${text}\n\n[interrupted — ${label}]`,
+    traceId,
   });
 }
 
@@ -309,6 +311,7 @@ export async function* streamStep(
         ctx.sessionId,
         chunkText,
         `LLM stream stalled after ${watchdogMs}ms`,
+        ctx.traceId,
       );
       yield {
         type: 'error',
@@ -328,6 +331,7 @@ export async function* streamStep(
         ctx.sessionId,
         chunkText,
         `LLM stream stalled after ${watchdogMs}ms`,
+        ctx.traceId,
       );
       yield {
         type: 'error',
@@ -351,7 +355,7 @@ export async function* streamStep(
     }
     deps.observability?.endTrace(ctx.traceId ?? '', 'error');
     deps.observability?.flush();
-    await persistInterruptedAssistant(deps.session, ctx.sessionId, chunkText, msg);
+    await persistInterruptedAssistant(deps.session, ctx.sessionId, chunkText, msg, ctx.traceId);
     yield { type: 'error', error: msg, code: 'llm_error' };
     return { outcome: 'fatal' };
   }
@@ -406,6 +410,9 @@ export async function* streamStep(
       estimatedCostUsd: llmEstimatedCostUsd,
       ...(llmRequestTokens ? { requestTokens: llmRequestTokens } : {}),
     },
+    // A3 — the turn's observability trace id, so this row joins to the trace
+    // and its `llm_call` span in `observability.db`.
+    traceId: ctx.traceId,
   });
 
   // A1 — mirror the row just written into the turn's rollup accumulator. Kept

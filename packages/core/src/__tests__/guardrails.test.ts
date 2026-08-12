@@ -113,7 +113,11 @@ describe('Orchestrator guardrails', () => {
       // recording why the old "errors are framework-authored" claim was false.
       // Merge (voice V1a + G-INJ): both landed here, so the ceiling is base +
       // both deltas, not either one alone. Measured at 784.
-      if (lineCount > 784) {
+      // Bumped 784 -> 787 (analytics A3): the turn's `traceId` is stamped on
+      // the three message rows tool-processing persists (returnDirect results,
+      // the main tool_result path, and user_steer) so `sessions.db` joins to
+      // `observability.db`. One field per persist call, no logic.
+      if (lineCount > 787) {
         violations.push(`${file}: ${lineCount} lines`);
       }
     }

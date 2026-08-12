@@ -150,6 +150,37 @@ describe('SQLiteSessionStore', () => {
     ]);
   });
 
+  // A3 — `trace_id` was written by nobody and read by nobody. It is the join
+  // key from these rows to the turn's trace in `observability.db`, so it has to
+  // survive a write/read cycle byte-for-byte, and absence has to stay absence
+  // (not '' and not the string 'null').
+  it('round-trips a message traceId', async () => {
+    const session = await store.createSession(baseSession);
+
+    await store.appendMessage({
+      sessionId: session.id,
+      role: 'assistant',
+      content: 'traced',
+      traceId: 'trace-abc-123',
+    });
+
+    const msgs = await store.getMessages(session.id);
+    expect(msgs[0]?.traceId).toBe('trace-abc-123');
+  });
+
+  it('round-trips a message without a traceId as undefined', async () => {
+    const session = await store.createSession(baseSession);
+
+    await store.appendMessage({
+      sessionId: session.id,
+      role: 'user',
+      content: 'untraced',
+    });
+
+    const msgs = await store.getMessages(session.id);
+    expect(msgs[0]?.traceId).toBeUndefined();
+  });
+
   // -------------------------------------------------------------------------
   // Usage
   // -------------------------------------------------------------------------

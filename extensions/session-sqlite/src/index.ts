@@ -348,8 +348,8 @@ export class SQLiteSessionStore implements SessionStore {
         `INSERT INTO messages
          (id, session_id, role, content, tool_call_id, tool_name, tool_calls,
           input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
-          estimated_cost_usd, timestamp)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+          estimated_cost_usd, trace_id, timestamp)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       )
       .run(
         id,
@@ -364,6 +364,7 @@ export class SQLiteSessionStore implements SessionStore {
         data.usage?.cacheReadTokens ?? null,
         data.usage?.cacheCreationTokens ?? null,
         data.usage?.estimatedCostUsd ?? null,
+        data.traceId ?? null,
         timestamp,
       );
 
@@ -738,6 +739,7 @@ interface MessageRow {
   cache_read_tokens: number | null;
   cache_creation_tokens: number | null;
   estimated_cost_usd: number | null;
+  trace_id: string | null;
   timestamp: string;
 }
 
@@ -810,6 +812,7 @@ function rowToMessage(r: MessageRow): StoredMessage {
             estimatedCostUsd: r.estimated_cost_usd ?? 0,
           }
         : undefined,
+    traceId: r.trace_id ?? undefined,
     timestamp: new Date(r.timestamp),
   };
 }

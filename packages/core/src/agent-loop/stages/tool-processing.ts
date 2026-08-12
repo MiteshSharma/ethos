@@ -470,6 +470,7 @@ export async function* processTools(
         content: capIngestedResult(result.ok ? result.value : result.error, deps.resultBudgetChars),
         toolCallId: p.toolCallId,
         toolName: p.name,
+        traceId: ctx.traceId,
       });
     }
     // Emit tool_end for all completed tools
@@ -741,6 +742,7 @@ export async function* processTools(
       content: finalContent,
       toolCallId: p.toolCallId,
       toolName: p.name,
+      traceId: ctx.traceId,
     });
 
     toolResultContent.push({
@@ -772,6 +774,7 @@ export async function* processTools(
         sessionId: ctx.sessionId,
         role: 'user_steer',
         content: steerText,
+        traceId: ctx.traceId,
       });
     }
   }

@@ -114,6 +114,7 @@ export async function* assembleContext(
     lastCompactionTurn,
     allowedPlugins,
     memScopeId,
+    traceId,
   } = setup;
 
   // Step 3: Persist the user message.
@@ -253,6 +254,7 @@ export async function* assembleContext(
     sessionId,
     role: 'user',
     content: annotatedText,
+    traceId,
   });
 
   // Step 4: Load history (trimmed to most-recent limit)
