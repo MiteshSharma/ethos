@@ -42,6 +42,11 @@ export type VoiceCallEvent =
   | { type: 'interrupted'; text: string }
   // The reply finished playing uninterrupted. `text` is the played reply.
   | { type: 'reply_complete'; text: string }
+  // The call spent its budget. `text` is the sign-off the session is speaking
+  // right now; the call ends once it has been said. Not an `error`: nothing went
+  // wrong, a limit the operator set was reached, and the strip says so in words
+  // rather than putting a failure where the state word goes.
+  | { type: 'budget_wind_down'; text: string }
   // An error surfaced. `provider` names the provider that failed, when known, so
   // a degraded-to-text notice can say WHICH one.
   | { type: 'error'; error: string; code?: string; provider?: string }
@@ -84,6 +89,7 @@ const VoiceCallControlEventSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('filler'), text: z.string() }),
   z.object({ type: z.literal('interrupted'), text: z.string() }),
   z.object({ type: z.literal('reply_complete'), text: z.string() }),
+  z.object({ type: z.literal('budget_wind_down'), text: z.string() }),
   z.object({
     type: z.literal('error'),
     error: z.string(),

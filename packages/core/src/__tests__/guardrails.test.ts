@@ -64,7 +64,13 @@ describe('Orchestrator guardrails', () => {
     // itself lives in agent-loop/approval-posture.ts.
     // Merge (voice V1a + G4): both landed in the same file, so the ceiling is
     // base + both deltas, not either one alone. Measured at 903.
-    expect(lineCount).toBeLessThanOrEqual(903);
+    // Bumped 903 -> 913 (voice V1b): `addSessionCost`. The realtime tier's
+    // per-audio-minute accrual is spend the loop did not incur, on the lane key
+    // `agent_consult` runs its turns on, so it has to reach the SAME
+    // `sessionCosts` map `budgetCapUsd` reads — two statements and their doc.
+    // The metering, the cap and the spoken wind-down all live in
+    // apps/web-api/src/voice/realtime-control-lane.ts.
+    expect(lineCount).toBeLessThanOrEqual(913);
   });
 
   it('no stage file exceeds 700 lines', () => {

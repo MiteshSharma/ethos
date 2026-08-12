@@ -381,6 +381,60 @@ describe('voiceCallReducer — realtime tier degrade', () => {
   });
 });
 
+describe('voiceCallReducer — budget wind-down (DR1 ★)', () => {
+  const SIGN_OFF = "That's the spending limit for this call, so I'll stop here.";
+
+  it('captions the spoken sign-off and keeps captioning it after the call ends', () => {
+    let state = driveThroughClient([{ type: 'budget_wind_down', text: SIGN_OFF }]);
+    // Still speaking — the sentence is being said right now.
+    expect(state.status).toBe('agent_speaking');
+    expect(state.windDown).toBe(SIGN_OFF);
+    expect(voiceCaption(state)).toBe(SIGN_OFF);
+
+    state = voiceCallReducer(state, { type: 'client-event', event: { type: 'disconnected' } });
+    expect(state.status).toBe('ended');
+    // The reason survives the close: `call ended` with nothing to explain it is
+    // what this state exists to avoid.
+    expect(voiceCaption(state)).toBe(SIGN_OFF);
+    expect(state.windDown).toBe(SIGN_OFF);
+  });
+
+  it('keeps the sign-off in the transcript that persists into chat', () => {
+    const state = driveThroughClient([
+      { type: 'reply_sentence', text: 'Here is the answer.' },
+      { type: 'budget_wind_down', text: SIGN_OFF },
+    ]);
+    expect(
+      voiceTranscriptToMessages(state.transcript).map((m) =>
+        m.role === 'assistant' ? m.blocks[0] : m,
+      ),
+    ).toEqual([
+      { kind: 'text', content: 'Here is the answer.' },
+      { kind: 'text', content: SIGN_OFF },
+    ]);
+  });
+
+  it('is not an error: nothing lands where the state word or a notice goes', () => {
+    const state = driveThroughClient([{ type: 'budget_wind_down', text: SIGN_OFF }]);
+    expect(state.error).toBeNull();
+    expect(state.degraded).toBeNull();
+    expect(state.notice).toBeNull();
+  });
+
+  it('a fresh call forgets it', () => {
+    let state = driveThroughClient([{ type: 'budget_wind_down', text: SIGN_OFF }]);
+    state = voiceCallReducer(state, { type: 'start' });
+    expect(state.windDown).toBeNull();
+  });
+
+  it('parses off the control channel like every other control event', () => {
+    expect(parseVoiceCallControlEvent({ type: 'budget_wind_down', text: SIGN_OFF })).toEqual({
+      type: 'budget_wind_down',
+      text: SIGN_OFF,
+    });
+  });
+});
+
 describe('tier-degrade code', () => {
   it('is the same string the transport emits', () => {
     // The reducer keeps its own literal so it imports no transport; this is the

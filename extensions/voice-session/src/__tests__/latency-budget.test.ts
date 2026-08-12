@@ -4,6 +4,7 @@ import {
   summarizeLatency,
   turnLatenciesFromSpans,
   VOICE_LATENCY_BUDGET_MS,
+  VOICE_REALTIME_LATENCY_BUDGET_MS,
 } from '../latency-budget';
 import type { VoiceTurnSpan } from '../span-writer';
 
@@ -152,5 +153,83 @@ describe('summarizeLatency', () => {
       tts_first_audio: 300,
       pipeline: 1_600,
     });
+  });
+});
+
+// --- realtime tier ---------------------------------------------------------
+//
+// One hosted session hears, thinks and speaks behind one wire and reports one
+// moment. So mouth-to-ear is MEASURED and the two stages under it are an
+// attribution of it, split at whatever commit marker the provider offered.
+
+/** A realtime turn: first audio `audioMs` after the user stopped talking. */
+function realtimeSpans(turnId: string, audioMs: number, provider = 'openai-realtime') {
+  return [span(turnId, 'realtime_first_audio', 0, audioMs, { realtimeProvider: provider })];
+}
+
+describe('turnLatenciesFromSpans — realtime tier', () => {
+  it('splits mouth-to-ear at the provider’s commit marker', () => {
+    const [turn] = turnLatenciesFromSpans(realtimeSpans('u1', 640), { u1: 260 });
+    expect(turn?.stages).toEqual({
+      endpoint: 260,
+      realtime_first_audio: 380,
+      // Measured, not summed: the span already starts where the user stopped.
+      pipeline: 640,
+    });
+  });
+
+  it('still reports mouth-to-ear when no commit marker landed first', () => {
+    // Providers that transcribe asynchronously give no marker before the audio.
+    // The total is unaffected; the endpointing is inside the provider stage,
+    // and there is no endpoint row rather than a zero that would pass a budget
+    // nothing measured.
+    const [turn] = turnLatenciesFromSpans(realtimeSpans('u1', 640));
+    expect(turn?.stages).toEqual({ realtime_first_audio: 640, pipeline: 640 });
+  });
+
+  it('names the realtime provider that actually ran', () => {
+    const [turn] = turnLatenciesFromSpans(realtimeSpans('u1', 500, 'gemini-live'));
+    expect(turn?.realtimeProvider).toBe('gemini-live');
+    // One provider both hears and speaks — there is no stt/tts split to claim.
+    expect(turn?.sttProvider).toBeUndefined();
+    expect(turn?.ttsProvider).toBeUndefined();
+  });
+});
+
+describe('summarizeLatency — realtime tier', () => {
+  it('holds the ≤800 ms mouth-to-ear budget the plan committed to', () => {
+    expect(VOICE_REALTIME_LATENCY_BUDGET_MS).toEqual({
+      endpoint: 300,
+      realtime_first_audio: 500,
+      pipeline: 800,
+    });
+  });
+
+  it('checks realtime turns against the realtime table, and says which tier', () => {
+    const turns = turnLatenciesFromSpans(
+      [...realtimeSpans('u1', 640), ...realtimeSpans('u2', 700)],
+      { u1: 260, u2: 280 },
+    );
+    const report = summarizeLatency(turns, 'realtime');
+    expect(report.tier).toBe('realtime');
+    expect(report.stages.map((s) => s.stage)).toEqual([
+      'endpoint',
+      'realtime_first_audio',
+      'pipeline',
+    ]);
+    expect(report.stages.find((s) => s.stage === 'pipeline')?.budgetMs).toBe(800);
+    expect(report.withinBudget).toBe(true);
+  });
+
+  it('fails a tier that makes the pipeline budget but not the mouth-to-ear one', () => {
+    // 900 ms is fine for the pipeline tier and a miss for this one — which is
+    // the whole reason the tier has its own table rather than a shared one.
+    const turns = turnLatenciesFromSpans(realtimeSpans('u1', 900), { u1: 200 });
+    expect(summarizeLatency(turns, 'realtime').withinBudget).toBe(false);
+    expect(summarizeLatency(turns).withinBudget).toBe(true);
+  });
+
+  it('defaults to the pipeline tier, so existing callers are unchanged', () => {
+    expect(summarizeLatency([]).tier).toBe('pipeline');
   });
 });

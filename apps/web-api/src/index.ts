@@ -599,6 +599,8 @@ export function createWebApi(opts: CreateWebApiOptions): CreateWebApiResult {
       const sttRoster = await resolveRoster(parseSttRoster(raw.passthrough));
       const realtimeRoster = await resolveRoster(parseRealtimeRoster(raw.passthrough));
       const tier = raw.passthrough['voice.tier'];
+      const rawBudget = Number(raw.passthrough['voice.realtime.sessionBudgetUsd']);
+      const budgetUsd = Number.isFinite(rawBudget) && rawBudget > 0 ? rawBudget : null;
       return {
         voiceProvider: raw.voiceProvider,
         voiceApiKey: await resolveKey(raw.voiceApiKey),
@@ -616,6 +618,10 @@ export function createWebApi(opts: CreateWebApiOptions): CreateWebApiResult {
           : {}),
         voiceRealtimeDefault: raw.passthrough['voice.realtime.default'] ?? null,
         voiceTier: tier === 'pipeline' || tier === 'realtime' ? tier : null,
+        // The cap on ONE realtime session, read live for the same reason the
+        // roster is: it is edited in Settings → Voice, and an operator who has
+        // just lowered it means the next call, not the next restart.
+        voiceRealtimeSessionBudgetUsd: budgetUsd,
       };
     },
     ...(opts.sttRoster ? { sttRoster: opts.sttRoster } : {}),
@@ -667,6 +673,14 @@ export function createWebApi(opts: CreateWebApiOptions): CreateWebApiResult {
                 sessions: opts.sessionStore,
                 personalities: opts.personalities,
                 defaults: opts.chatDefaults,
+                // Per-audio-minute pricing + the session cap, resolved from the
+                // same roster selection the mint makes. The browser is never
+                // asked what a minute costs.
+                pricing: (personalityId) => voiceService.realtimeSessionCost(personalityId),
+                // The loop already holds this talk session's spend under its
+                // lane key — every `agent_consult` turn runs there — so audio
+                // minutes join the same total rather than starting a second one.
+                budget: agentLoop,
               },
               laneId,
             ),

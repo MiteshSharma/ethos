@@ -58,6 +58,8 @@ export interface UseVoiceCall {
   degraded: VoiceDegradedNotice | null;
   /** Voice works, but not on the configured tier. Null until it happens. */
   notice: string | null;
+  /** The sign-off spoken when the call hit its spending limit. Null otherwise. */
+  windDown: string | null;
   /** Which tier is serving this call. Null until the transport decides. */
   tier: 'pipeline' | 'realtime' | null;
   /** The browser refused the mic — render guidance, not a dead icon. */
@@ -240,6 +242,7 @@ export function useVoiceCall(options: UseVoiceCallOptions = {}): UseVoiceCall {
     error: state.error,
     degraded: state.degraded,
     notice: state.notice,
+    windDown: state.windDown,
     tier: state.tier,
     micDenied: state.micDenied,
     sttProvider: state.sttProvider,

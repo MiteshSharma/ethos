@@ -59,6 +59,17 @@ export interface VoiceCallState {
    * this field exists to prevent.
    */
   notice: string | null;
+  /**
+   * The call reached its spending limit and is signing off — this is the
+   * sentence being spoken. Null on every call that does not.
+   *
+   * A field of its own rather than a `status`, because the status word says
+   * what the call is DOING and the call is still speaking while this is set.
+   * It is what puts the `budget reached` chip beside the caption, and it
+   * survives the transition to `ended` so the last thing on screen explains why
+   * the call stopped instead of just reading `call ended`.
+   */
+  windDown: string | null;
   /** Which tier is actually serving this call, once it is known. */
   tier: 'pipeline' | 'realtime' | null;
   /** The browser refused the mic. Rendered as guidance, never a dead icon. */
@@ -74,6 +85,7 @@ export const initialVoiceCallState: VoiceCallState = {
   error: null,
   degraded: null,
   notice: null,
+  windDown: null,
   tier: null,
   micDenied: false,
   sttProvider: null,
@@ -174,6 +186,19 @@ function applyClientEvent(state: VoiceCallState, event: VoiceCallEvent): VoiceCa
         ];
       }
       return { ...state, status: 'agent_speaking', transcript };
+    }
+
+    case 'budget_wind_down': {
+      // The sign-off is a spoken agent line like any other, so it lands in the
+      // transcript that persists into chat — the reason the call ended is part
+      // of the conversation, not a UI-only annotation that disappears with the
+      // strip. The status stays `agent_speaking` because it is being said right
+      // now; `disconnected` moves it to `ended` once it has been.
+      const transcript = [
+        ...closeOpenAgentLine(state.transcript),
+        line(state.transcript, 'agent', event.text),
+      ];
+      return { ...state, status: 'agent_speaking', transcript, windDown: event.text };
     }
 
     case 'filler': {
@@ -297,7 +322,13 @@ function finalizeAgentLine(
  * caption-only source that could disagree with what was actually said. Returns
  * null when the agent is not the one talking.
  */
-export function voiceCaption(state: Pick<VoiceCallState, 'status' | 'transcript'>): string | null {
+export function voiceCaption(
+  state: Pick<VoiceCallState, 'status' | 'transcript' | 'windDown'>,
+): string | null {
+  // The wind-down sentence outlives the speaking state: it is the explanation
+  // for a call that is about to end, and a caption that vanished at `ended`
+  // would leave the strip reading `call ended` with no reason attached.
+  if (state.windDown) return state.windDown;
   if (state.status !== 'agent_speaking' && state.status !== 'interrupted') return null;
   for (let i = state.transcript.length - 1; i >= 0; i--) {
     const line = state.transcript[i];

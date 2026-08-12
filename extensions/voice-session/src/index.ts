@@ -13,8 +13,13 @@ export {
   turnLatenciesFromSpans,
   VOICE_LATENCY_BUDGET_MS,
   VOICE_LATENCY_STAGES,
+  VOICE_REALTIME_LATENCY_BUDGET_MS,
+  VOICE_REALTIME_LATENCY_STAGES,
   type VoiceLatencyReport,
   type VoiceLatencyStage,
+  type VoiceLatencyTier,
+  type VoicePipelineLatencyStage,
+  type VoiceRealtimeLatencyStage,
   type VoiceTurnLatency,
 } from './latency-budget';
 export {

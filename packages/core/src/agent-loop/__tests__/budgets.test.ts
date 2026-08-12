@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  checkCostBudget,
   checkTurnBudgets,
   type IdenticalStreak,
   MAX_CONSECUTIVE_DENIALS,
@@ -163,6 +164,26 @@ describe('cost cap', () => {
   it('reports cost ahead of the tool-call budget when both are blown', () => {
     const r = checkTurnBudgets(100, 100, new Map(), 25, null, 5, { spentUsd: 1, capUsd: 0.5 });
     expect(r.exceeded && r.rule).toBe('cost-cap');
+  });
+
+  it('is the SAME check callers outside a turn run — one threshold, one message', () => {
+    // The realtime voice tier accrues wall-clock audio cost on its own control
+    // lane, where there are no tool calls, no identical-call streak and no
+    // denials to check. It calls `checkCostBudget` directly; if that stopped
+    // agreeing with the turn check, a call and a turn would stop for money at
+    // different moments and say different things about it.
+    const cases: Array<[number, number | undefined]> = [
+      [0.049, 0.05],
+      [0.05, 0.05],
+      [1, 0.5],
+      [999, undefined],
+      [0, 0],
+    ];
+    for (const [spentUsd, capUsd] of cases) {
+      expect(checkCostBudget({ spentUsd, ...(capUsd === undefined ? {} : { capUsd }) })).toEqual(
+        cost(spentUsd, capUsd),
+      );
+    }
   });
 });
 

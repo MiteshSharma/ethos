@@ -596,6 +596,7 @@ export function Chat() {
             onToggleMute={voice.toggleMute}
             onHangUp={voice.hangUp}
             caption={voiceCaption(voice)}
+            windDown={voice.windDown}
             degraded={voice.degraded}
             micDenied={voice.micDenied}
             onDismissNotice={voice.dismissNotice}

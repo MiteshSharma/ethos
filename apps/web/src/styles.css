@@ -2616,6 +2616,17 @@ textarea {
   color: var(--ethos-text-secondary);
 }
 
+/* The budget wind-down chip. Same mono label vocabulary as `{provider} · {model}`,
+   outlined in the amber connection-dot token so it reads as a limit the call
+   reached rather than a failure. Not a badge, not a banner. */
+.talk-budget-chip {
+  flex-shrink: 0;
+  padding: 2px 8px;
+  border: 1px solid var(--ethos-warning);
+  border-radius: 9999px;
+  color: var(--ethos-text-secondary);
+}
+
 .talk-call-detail {
   display: flex;
   flex-wrap: wrap;

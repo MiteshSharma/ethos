@@ -9,7 +9,15 @@ export { AgentLoop, isKnownAgentEvent, KNOWN_AGENT_EVENT_TYPES } from './agent-l
 // tools-as-code-api Lane B — the per-turn bridge (and its budget-counter
 // companions) are exported so integration tests and non-loop surfaces can
 // drive the EXACT enforcement path the loop wires, not a re-statement of it.
-export { checkTurnBudgets } from './agent-loop/budgets';
+// `checkCostBudget` is the `cost-cap` half on its own, for spend that accrues
+// outside a turn (the realtime voice tier's per-audio-minute accrual).
+export {
+  type BudgetExceeded,
+  type BudgetRule,
+  type CostBudget,
+  checkCostBudget,
+  checkTurnBudgets,
+} from './agent-loop/budgets';
 // Lane 1(b/c) — the gate's output-reserve constant, shared with wiring's
 // startup floor diagnostic and window-scaled result budget so there is ONE
 // reserve arithmetic, not a drifting copy.

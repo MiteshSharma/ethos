@@ -2,10 +2,15 @@ import type { RealtimeToolHost } from '@ethosagent/tools-voice';
 import type { VoiceServerFrame } from '@ethosagent/web-contracts';
 import { describe, expect, it } from 'vitest';
 import {
+  REALTIME_ACCRUAL_INTERVAL_MS,
+  REALTIME_BUDGET_SIGN_OFF,
   REALTIME_MAX_DEAD_AIR_MS,
   RealtimeControlLane,
   type RealtimeControlLaneDeps,
+  type RealtimeControlLaneEvent,
+  type RealtimeHaltEvent,
   type RealtimeSessionBinding,
+  type RealtimeUsageEvent,
 } from '../realtime-control-lane';
 
 // A hand-driven clock. Nothing here uses real timers: the acceptance criterion
@@ -56,13 +61,38 @@ interface Harness {
   /** Resolve the in-flight consult with `output`. */
   finish(callId: string, output?: string): void;
   order: string[];
+  /** Every usage event the lane reported, in order. */
+  usage: RealtimeUsageEvent[];
+  halts: RealtimeHaltEvent[];
+  laneEvents: RealtimeControlLaneEvent[];
+  /**
+   * What the lane observes as this session's spend: everything it accrued plus
+   * anything a consult added. Stands in for `AgentLoop.sessionCosts`.
+   */
+  spendUsd(): number;
+  /** A consulted turn spending money on the same lane key. */
+  addConsultSpend(usd: number): void;
+  /** `{frame, open}` per send, so "before the close" is observable, not assumed. */
+  timeline: Array<{ t: string; open: boolean }>;
 }
 
-function harness(opts: { laneKey?: string; handled?: string[] } = {}): Harness {
+function harness(
+  opts: {
+    laneKey?: string;
+    handled?: string[];
+    costPerMinuteUsd?: number;
+    sessionBudgetUsd?: number;
+  } = {},
+): Harness {
   const clock = new FakeClock();
   const frames: VoiceServerFrame[] = [];
   const transcripts: Array<{ role: string; text: string }> = [];
   const order: string[] = [];
+  const usage: RealtimeUsageEvent[] = [];
+  const halts: RealtimeHaltEvent[] = [];
+  const laneEvents: RealtimeControlLaneEvent[] = [];
+  const timeline: Array<{ t: string; open: boolean }> = [];
+  let consultSpend = 0;
   const pendingCalls = new Map<string, (output: string) => void>();
 
   const host: RealtimeToolHost = {
@@ -88,25 +118,52 @@ function harness(opts: { laneKey?: string; handled?: string[] } = {}): Harness {
     storeSessionId: 'row-1',
     host,
     workingDir: '/tmp',
+    ...(opts.costPerMinuteUsd !== undefined ? { costPerMinuteUsd: opts.costPerMinuteUsd } : {}),
+    ...(opts.sessionBudgetUsd !== undefined ? { sessionBudgetUsd: opts.sessionBudgetUsd } : {}),
   };
+
+  let accruedUsd = 0;
+  const spendUsd = (): number => accruedUsd + consultSpend;
 
   const deps: RealtimeControlLaneDeps = {
     open: async () => binding,
     persistTranscript: async (_binding, role, text) => {
       transcripts.push({ role, text });
     },
+    onUsage: (_binding, event) => {
+      usage.push(event);
+      // What `AgentLoop.addSessionCost` does in production.
+      accruedUsd += event.estimatedCostUsd;
+    },
+    onHalt: (_binding, halt) => halts.push(halt),
+    sessionSpendUsd: () => spendUsd(),
+    onEvent: (event) => laneEvents.push(event),
     now: clock.now,
     setTimer: clock.setTimer,
     clearTimer: clock.clearTimer,
   };
 
-  const lane = new RealtimeControlLane({ deps, send: (frame) => frames.push(frame) });
+  const lane = new RealtimeControlLane({
+    deps,
+    send: (frame) => {
+      frames.push(frame);
+      timeline.push({ t: frame.t, open: lane.isOpen });
+    },
+  });
   return {
     lane,
     frames,
     clock,
     transcripts,
     order,
+    usage,
+    halts,
+    laneEvents,
+    timeline,
+    spendUsd,
+    addConsultSpend: (usd) => {
+      consultSpend += usd;
+    },
     finish: (callId, output = 'the answer') => pendingCalls.get(callId)?.(output),
   };
 }
@@ -279,6 +336,170 @@ describe('realtime control lane — one lane, strict FIFO', () => {
     expect(h.order).toEqual(['start:c1', 'end:c1']);
     expect(h.frames.filter((f) => f.t === 'realtime_tool_result')).toEqual([]);
     expect(h.lane.isOpen).toBe(false);
+  });
+});
+
+// $0.60/min is $0.01/second, so every number below is readable by eye: one
+// 15 s accrual tick is $0.15.
+const RATE_PER_MINUTE = 0.6;
+
+describe('realtime control lane — per-audio-minute accrual', () => {
+  it('prices wall-clock audio time, tick by tick, as usage events', async () => {
+    const h = harness({ costPerMinuteUsd: RATE_PER_MINUTE });
+    h.lane.handle({ t: 'realtime_start', canSay: true });
+    await settle();
+
+    h.clock.advanceTo(REALTIME_ACCRUAL_INTERVAL_MS);
+    expect(h.usage).toEqual([
+      { type: 'usage', inputTokens: 0, outputTokens: 0, estimatedCostUsd: 0.15 },
+    ]);
+
+    h.clock.advanceTo(REALTIME_ACCRUAL_INTERVAL_MS * 2);
+    expect(h.usage).toHaveLength(2);
+    // Nothing was generated and nothing was said — the meter is the open socket.
+    expect(h.spendUsd()).toBeCloseTo(0.3, 10);
+  });
+
+  it('bills the part-tick a hangup interrupts instead of dropping it', async () => {
+    const h = harness({ costPerMinuteUsd: RATE_PER_MINUTE });
+    h.lane.handle({ t: 'realtime_start', canSay: true });
+    await settle();
+
+    // 40 s: two whole ticks and ten seconds that would otherwise be free.
+    h.clock.advanceTo(40_000);
+    h.lane.handle({ t: 'realtime_end' });
+
+    expect(h.spendUsd()).toBeCloseTo(0.4, 10);
+    expect(h.usage).toHaveLength(3);
+  });
+
+  it('accrues NOTHING for an unpriced entry, and says the cost is unknown', async () => {
+    // `costPerMinuteUsd` absent means the rate is unknown, not zero. A $0.00
+    // usage event for a session the provider is billing by the minute would be
+    // a claim — and the flattering one.
+    const h = harness({ sessionBudgetUsd: 0.01 });
+    h.lane.handle({ t: 'realtime_start', canSay: true });
+    await settle();
+    h.clock.advanceTo(10 * 60_000);
+
+    expect(h.usage).toEqual([]);
+    expect(h.halts).toEqual([]);
+    expect(h.laneEvents).toContainEqual({ type: 'unpriced', laneKey: 'voice:web:browser:chat-9' });
+    expect(h.lane.isOpen).toBe(true);
+  });
+});
+
+describe('realtime control lane — budget wind-down', () => {
+  it('speaks a sign-off and closes cleanly, in that order', async () => {
+    const h = harness({ costPerMinuteUsd: RATE_PER_MINUTE, sessionBudgetUsd: 0.3 });
+    h.lane.handle({ t: 'realtime_start', canSay: true });
+    await settle();
+    h.lane.handle({ t: 'realtime_tool_call', callId: 'c1', name: 'agent_consult', args: {} });
+    await settle();
+
+    // Two ticks: $0.30 accrued against a $0.30 cap.
+    h.clock.advanceTo(REALTIME_ACCRUAL_INTERVAL_MS * 2);
+
+    // 1. the halt, in the vocabulary a turn halts in.
+    expect(h.halts).toEqual([
+      {
+        type: 'halt',
+        kind: 'budget',
+        rule: 'cost-cap',
+        toolName: '_budget',
+        message: expect.stringContaining('budget cap for this session'),
+      },
+    ]);
+    // 2. the sign-off, and 3. the answer for the consult that will never
+    // return — both dispatched while the lane was still open, which is what
+    // "before the close" means here.
+    const tail = h.timeline.slice(-2);
+    expect(tail).toEqual([
+      { t: 'realtime_wind_down', open: true },
+      { t: 'realtime_tool_result', open: true },
+    ]);
+    expect(h.frames.at(-2)).toEqual({
+      t: 'realtime_wind_down',
+      text: REALTIME_BUDGET_SIGN_OFF,
+      reason: 'budget',
+    });
+    expect(h.frames.at(-1)).toEqual({
+      t: 'realtime_tool_result',
+      callId: 'c1',
+      ok: false,
+      output: 'This call reached its spending limit before that finished.',
+    });
+    // 4. and only then the close.
+    expect(h.lane.isOpen).toBe(false);
+  });
+
+  it('emits nothing at all after the close', async () => {
+    const h = harness({ costPerMinuteUsd: RATE_PER_MINUTE, sessionBudgetUsd: 0.15 });
+    h.lane.handle({ t: 'realtime_start', canSay: true });
+    await settle();
+    h.lane.handle({ t: 'realtime_tool_call', callId: 'c1', name: 'agent_consult', args: {} });
+    await settle();
+    h.clock.advanceTo(REALTIME_ACCRUAL_INTERVAL_MS);
+    const settled = h.frames.length;
+    const usageSettled = h.usage.length;
+
+    // The consult comes back late, more audio time "passes", and another tool
+    // call arrives from a provider that has not noticed yet.
+    h.finish('c1');
+    h.lane.handle({ t: 'realtime_tool_call', callId: 'c2', name: 'agent_consult', args: {} });
+    h.lane.handle({ t: 'realtime_transcript', role: 'user', text: 'still there?' });
+    h.clock.advanceTo(10 * 60_000);
+    await settle();
+
+    expect(h.frames).toHaveLength(settled);
+    expect(h.usage).toHaveLength(usageSettled);
+    expect(h.halts).toHaveLength(1);
+    expect(h.transcripts).toEqual([]);
+  });
+
+  it('winds down on a provider that cannot speak verbatim, too', async () => {
+    // Gemini Live. The frame still goes: the browser captions it, and a call
+    // that ends without a word is the dropped stream this criterion forbids.
+    const h = harness({ costPerMinuteUsd: RATE_PER_MINUTE, sessionBudgetUsd: 0.15 });
+    h.lane.handle({ t: 'realtime_start', canSay: false });
+    await settle();
+    h.clock.advanceTo(REALTIME_ACCRUAL_INTERVAL_MS);
+
+    expect(h.frames.filter((f) => f.t === 'realtime_wind_down')).toEqual([
+      { t: 'realtime_wind_down', text: REALTIME_BUDGET_SIGN_OFF, reason: 'budget' },
+    ]);
+    expect(h.lane.isOpen).toBe(false);
+  });
+
+  it('counts what the consults spent, not only the audio', async () => {
+    // The cap is what this CALL costs. A session whose audio is cheap and whose
+    // agent turns are not is exactly the case a per-audio-minute-only cap would
+    // never catch.
+    const h = harness({ costPerMinuteUsd: RATE_PER_MINUTE, sessionBudgetUsd: 1 });
+    h.lane.handle({ t: 'realtime_start', canSay: true });
+    await settle();
+    h.addConsultSpend(0.9);
+
+    h.clock.advanceTo(REALTIME_ACCRUAL_INTERVAL_MS);
+
+    expect(h.spendUsd()).toBeCloseTo(1.05, 10);
+    expect(h.halts).toHaveLength(1);
+    expect(h.lane.isOpen).toBe(false);
+  });
+
+  it('does not wind down a call that is already hanging up', async () => {
+    // The final part-tick can cross the cap on the way out. There is nothing
+    // left to wind down from, and a sign-off spoken into a closing socket is a
+    // line nobody hears.
+    const h = harness({ costPerMinuteUsd: RATE_PER_MINUTE, sessionBudgetUsd: 0.05 });
+    h.lane.handle({ t: 'realtime_start', canSay: true });
+    await settle();
+    h.clock.advanceTo(5_000);
+    h.lane.handle({ t: 'realtime_end' });
+
+    expect(h.spendUsd()).toBeCloseTo(0.05, 10);
+    expect(h.halts).toEqual([]);
+    expect(h.frames.filter((f) => f.t === 'realtime_wind_down')).toEqual([]);
   });
 });
 

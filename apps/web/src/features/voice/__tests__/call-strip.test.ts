@@ -76,6 +76,23 @@ describe('CallStrip — DR1 interaction states', () => {
     expect(html).toContain('reconnecting…');
   });
 
+  it('budget wind-down: the spoken sign-off captioned + a `budget reached` mono chip', () => {
+    const signOff = 'That’s the spending limit for this call, so I’ll stop here.';
+    const html = strip({ status: 'agent_speaking', caption: signOff, windDown: signOff });
+    expect(html).toContain('spending limit for this call');
+    expect(html).toContain('budget reached');
+    // In the mono label vocabulary — not a badge, not a banner — and the strip
+    // is still a strip while the sentence is being said.
+    expect(html).toContain('talk-mono talk-budget-chip');
+    expect(html).toContain('aria-label="End call"');
+  });
+
+  it('shows no chip on a call that did not reach its budget', () => {
+    expect(strip({ status: 'agent_speaking', caption: 'anything' })).not.toContain(
+      'budget reached',
+    );
+  });
+
   it('degraded to text: the strip collapses to a dismissible notice naming the provider', () => {
     const html = strip({
       status: 'ended',

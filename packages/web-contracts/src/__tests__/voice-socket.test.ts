@@ -60,6 +60,36 @@ describe('voice socket framing', () => {
     expect(Array.from(decoded?.payload ?? [])).toEqual([1, 2, 3]);
   });
 
+  it('round-trips the budget wind-down frame, reason and all', () => {
+    const bytes = encodeVoiceFrame({
+      t: 'realtime_wind_down',
+      text: 'That’s the spending limit for this call.',
+      reason: 'budget',
+    });
+    expect(decodeVoiceServerFrame(bytes)?.header).toEqual({
+      t: 'realtime_wind_down',
+      text: 'That’s the spending limit for this call.',
+      reason: 'budget',
+    });
+  });
+
+  it('refuses a wind-down with no line to say, and one with an unknown reason', () => {
+    // A wind-down whose text is empty would end the call in silence — the
+    // dropped stream the frame exists to prevent.
+    const empty = encodeVoiceFrame({
+      t: 'realtime_wind_down',
+      text: '',
+      reason: 'budget',
+    } as never);
+    expect(decodeVoiceServerFrame(empty)).toBeNull();
+    const wrongReason = encodeVoiceFrame({
+      t: 'realtime_wind_down',
+      text: 'bye',
+      reason: 'boredom',
+    } as never);
+    expect(decodeVoiceServerFrame(wrongReason)).toBeNull();
+  });
+
   it('rejects a frame whose header does not match the contract', () => {
     const bogus = encodeVoiceFrame({ t: 'utterance_end', utteranceId: 'u1' });
     // A server frame decoder must not accept a client frame.

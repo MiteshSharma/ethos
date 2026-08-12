@@ -1,6 +1,8 @@
+import { checkCostBudget } from '@ethosagent/core';
 import { SessionLane } from '@ethosagent/session-lane';
 import type { RealtimeToolCall, RealtimeToolHost } from '@ethosagent/tools-voice';
 import { AGENT_CONSULT_TOOL } from '@ethosagent/tools-voice';
+import type { AgentEvent } from '@ethosagent/types';
 import { DEFAULT_VOICE_FILLER_TEXT } from '@ethosagent/voice-session';
 import type { VoiceClientFrame, VoiceServerFrame } from '@ethosagent/web-contracts';
 
@@ -33,7 +35,30 @@ export interface RealtimeSessionBinding {
   /** Working directory a dispatched tool runs against. */
   workingDir: string;
   personalityId?: string;
+  /**
+   * USD per minute of audio for the roster entry serving this call
+   * (`RealtimeProviderEntry.costPerMinuteUsd`).
+   *
+   * ABSENT MEANS UNPRICED, NOT FREE. Nothing accrues, no usage event is
+   * emitted, and no cap can bite — because a $0.00 usage event for a session
+   * the provider is billing by the minute is a claim, and the flattering one.
+   * The lane reports the state once through `onEvent` instead, so an operator
+   * can see that this call's cost is unknown rather than zero.
+   */
+  costPerMinuteUsd?: number;
+  /**
+   * Cap on this session's accrued spend, in USD. Absent → uncapped.
+   *
+   * Resolved by the deps as the LOWER of `voice.realtime.sessionBudgetUsd` and
+   * the speaking personality's `budgetCapUsd` — see `createRealtimeControlDeps`
+   * for why two caps cannot be allowed to ignore each other.
+   */
+  sessionBudgetUsd?: number;
 }
+
+/** The `usage` / `halt` AgentEvent variants, reported verbatim by this lane. */
+export type RealtimeUsageEvent = Extract<AgentEvent, { type: 'usage' }>;
+export type RealtimeHaltEvent = Extract<AgentEvent, { type: 'halt' }>;
 
 /** Everything the lane drives. All injected; none of it is reached for. */
 export interface RealtimeControlLaneDeps {
@@ -55,6 +80,28 @@ export interface RealtimeControlLaneDeps {
     role: 'user' | 'assistant',
     text: string,
   ): Promise<void>;
+  /**
+   * One slice of accrued audio cost, shaped as the `usage` AgentEvent so it
+   * lands wherever token cost lands (`/usage`, the session row, the session
+   * budget). Zero tokens, because none were spent: this is wall-clock time.
+   */
+  onUsage?(binding: RealtimeSessionBinding, usage: RealtimeUsageEvent): void;
+  /**
+   * The session cap was reached. The same `halt` AgentEvent a turn emits, with
+   * the same `cost-cap` rule — a realtime session that stops for money must be
+   * indistinguishable, downstream, from a turn that stops for money.
+   */
+  onHalt?(binding: RealtimeSessionBinding, halt: RealtimeHaltEvent): void;
+  /**
+   * Everything this talk session has spent so far, in USD — audio AND every
+   * turn `agent_consult` ran on the same lane key. Read live (never cached) and
+   * read AFTER `onUsage` has folded the newest slice in, so the cap governs the
+   * call's whole bill rather than only its audio.
+   *
+   * Absent → the lane falls back to its own accrued audio total, which is the
+   * honest answer when nothing is tracking consults.
+   */
+  sessionSpendUsd?(binding: RealtimeSessionBinding): number;
   /** Monotonic-enough clock. Injected so the no-dead-air test can fake it. */
   now?: () => number;
   /** Timer seam. Same reason. Returns a handle `clearTimer` understands. */
@@ -67,7 +114,11 @@ export interface RealtimeControlLaneDeps {
 export type RealtimeControlLaneEvent =
   | { type: 'opened'; laneKey: string; tools: string[] }
   | { type: 'open_failed'; error: string }
-  | { type: 'tool_dispatched'; callId: string; name: string; ok: boolean; ms: number };
+  | { type: 'tool_dispatched'; callId: string; name: string; ok: boolean; ms: number }
+  /** No `costPerMinuteUsd` for the entry serving this call — cost is UNKNOWN. */
+  | { type: 'unpriced'; laneKey: string }
+  /** The cap was reached; the sign-off has been dispatched and the lane is closing. */
+  | { type: 'wind_down'; laneKey: string; spentUsd: number; capUsd: number };
 
 export interface RealtimeControlLaneOptions {
   deps: RealtimeControlLaneDeps;
@@ -107,6 +158,34 @@ export const DEFAULT_REALTIME_FILLER: RealtimeFillerConfig = {
 /** The dead-air budget the acceptance criterion names. Exported for the test. */
 export const REALTIME_MAX_DEAD_AIR_MS = 2_000;
 
+/**
+ * How often accrued audio time is priced and reported.
+ *
+ * Fifteen seconds is a compromise between two errors that both matter. Too
+ * coarse and the cap bites late: at a 60 s tick a session can run most of a
+ * minute past its budget before anything notices, and the wind-down the user
+ * hears arrives that much after the money ran out. Too fine and a lane that is
+ * otherwise idle wakes up constantly to emit usage events nobody reads. Fifteen
+ * bounds the overshoot at a quarter-minute of the rate — under a cent at every
+ * published realtime price — and costs four wakeups a minute beside a socket
+ * carrying 50 audio frames a second.
+ */
+export const REALTIME_ACCRUAL_INTERVAL_MS = 15_000;
+
+/**
+ * What the session says on its way out when the budget cap is reached.
+ *
+ * It is the last thing the person hears, so it is written as speech: no rule
+ * name, no number, no "budget exceeded". It says what happened, that it is
+ * ending, and where the conversation continues — in that order, because the
+ * listener may only catch the first clause.
+ */
+export const REALTIME_BUDGET_SIGN_OFF =
+  "That's the spending limit for this call, so I'll stop here — we can keep going in chat.";
+
+/** Answer for a consult that the wind-down cut short. Spoken, so it is prose. */
+const REALTIME_WIND_DOWN_TOOL_RESULT = 'This call reached its spending limit before that finished.';
+
 export class RealtimeControlLane {
   private readonly opts: RealtimeControlLaneOptions;
   private readonly deps: RealtimeControlLaneDeps;
@@ -131,6 +210,17 @@ export class RealtimeControlLane {
   private started = false;
   private closed = false;
   private fillerHandle: unknown = null;
+  /** Tool calls this lane has accepted and not yet answered. Keyed by call id. */
+  private readonly unanswered = new Set<string>();
+  private accrualHandle: unknown = null;
+  /** Clock reading at which this session's audio time started. */
+  private audioStartedAt = 0;
+  /** Audio seconds already priced. The difference from elapsed is what is owed. */
+  private billedSeconds = 0;
+  /** This session's audio cost so far. Not the whole bill — consults add to it. */
+  private accruedAudioUsd = 0;
+  /** True from the moment the sign-off is dispatched. */
+  private windingDown = false;
 
   constructor(opts: RealtimeControlLaneOptions) {
     this.opts = opts;
@@ -151,6 +241,11 @@ export class RealtimeControlLane {
     return this.started && !this.closed;
   }
 
+  /** This session's accrued AUDIO cost in USD. Zero while the entry is unpriced. */
+  get audioCostUsd(): number {
+    return this.accruedAudioUsd;
+  }
+
   /** Route one control frame. Non-realtime frames are not this lane's business. */
   handle(frame: VoiceClientFrame): void {
     if (this.closed) return;
@@ -159,6 +254,7 @@ export class RealtimeControlLane {
         this.start(frame);
         return;
       case 'realtime_tool_call':
+        this.unanswered.add(frame.callId);
         this.enqueueToolCall({ callId: frame.callId, name: frame.name, args: frame.args });
         return;
       case 'realtime_transcript':
@@ -175,7 +271,15 @@ export class RealtimeControlLane {
   /** Socket closed. Abort the running consult and drop everything queued. */
   close(): void {
     if (this.closed) return;
+    // Price the part-interval since the last tick BEFORE closing. Dropping it
+    // would make every session cheaper in our own reporting than it was on the
+    // provider's invoice, by up to one tick — which is the flattering error.
+    // The cap is NOT checked here: a call that is already ending has nothing to
+    // wind down from, and speaking a sign-off into a closing socket would be a
+    // line nobody hears.
+    this.accrue(false);
     this.closed = true;
+    this.stopAccrual();
     this.stopFiller();
     this.lane.abort();
   }
@@ -184,6 +288,10 @@ export class RealtimeControlLane {
     if (this.started) return;
     this.started = true;
     this.canSay = frame.canSay;
+    // Billing starts HERE, not when the binding resolves: the provider socket is
+    // already open by the time the browser sends this frame, and the seconds a
+    // session store lookup takes are seconds the provider is charging for.
+    this.audioStartedAt = this.now();
     void this.lane
       .enqueue(async () => {
         const binding = await this.deps.open({
@@ -205,6 +313,7 @@ export class RealtimeControlLane {
           laneKey: binding.laneKey,
           tools: binding.host.handled,
         });
+        this.startAccrual(binding);
       })
       .catch((err: unknown) => {
         const message = err instanceof Error ? err.message : String(err);
@@ -243,12 +352,11 @@ export class RealtimeControlLane {
           // bootstrap failed. Answering keeps the provider's turn accounting
           // intact — an unanswered tool call leaves a realtime session waiting
           // forever, which sounds exactly like the agent ignoring the person.
-          this.opts.send({
-            t: 'realtime_tool_result',
-            callId: call.callId,
-            ok: false,
-            output: 'This call has not finished connecting to the assistant.',
-          });
+          this.answer(
+            call.callId,
+            false,
+            'This call has not finished connecting to the assistant.',
+          );
           return;
         }
         const startedAt = this.now();
@@ -280,12 +388,7 @@ export class RealtimeControlLane {
           this.stopFiller();
         }
         if (this.closed) return;
-        this.opts.send({
-          t: 'realtime_tool_result',
-          callId: call.callId,
-          ok: result.ok,
-          output: result.output,
-        });
+        this.answer(call.callId, result.ok, result.output);
         this.deps.onEvent?.({
           type: 'tool_dispatched',
           callId: call.callId,
@@ -313,6 +416,136 @@ export class RealtimeControlLane {
   private speak(text: string, kind: 'ack' | 'filler'): void {
     if (this.closed) return;
     this.opts.send({ t: 'realtime_speak', text, kind });
+  }
+
+  /** Answer one tool call and stop tracking it as outstanding. */
+  private answer(callId: string, ok: boolean, output: string): void {
+    this.unanswered.delete(callId);
+    this.opts.send({ t: 'realtime_tool_result', callId, ok, output });
+  }
+
+  // --- per-audio-minute accrual --------------------------------------------
+  //
+  // The first cost in this system that accrues while nothing is being
+  // generated. A realtime session is billed for the wall-clock time its socket
+  // is open, whether the model is talking, the user is talking, or the line is
+  // silent — so the meter is elapsed time, not turns, and it keeps running
+  // through a mute.
+
+  private startAccrual(binding: RealtimeSessionBinding): void {
+    const rate = binding.costPerMinuteUsd;
+    if (rate === undefined || !(rate > 0)) {
+      // Unpriced, and said out loud rather than reported as free.
+      this.deps.onEvent?.({ type: 'unpriced', laneKey: binding.laneKey });
+      return;
+    }
+    const tick = (): void => {
+      this.accrualHandle = null;
+      if (this.closed) return;
+      this.accrue();
+      if (this.closed) return;
+      this.accrualHandle = this.setTimer(tick, REALTIME_ACCRUAL_INTERVAL_MS);
+    };
+    this.accrualHandle = this.setTimer(tick, REALTIME_ACCRUAL_INTERVAL_MS);
+  }
+
+  private stopAccrual(): void {
+    if (this.accrualHandle === null) return;
+    this.clearTimer(this.accrualHandle);
+    this.accrualHandle = null;
+  }
+
+  /**
+   * Price every audio second that has elapsed since the last time we did, fold
+   * it into the session's spend, and check the cap.
+   *
+   * Pro-rata by the second, not rounded up to a whole minute: we do not know
+   * how the provider rounds, and `estimatedCostUsd` says what this is — an
+   * estimate. Rounding up would over-report and trip the cap early; dropping
+   * the remainder would under-report and never trip it at all.
+   */
+  private accrue(checkCap = true): void {
+    const binding = this.binding;
+    const rate = binding?.costPerMinuteUsd;
+    if (!binding || rate === undefined || !(rate > 0)) return;
+    const elapsedSeconds = Math.max(0, (this.now() - this.audioStartedAt) / 1_000);
+    const owedSeconds = elapsedSeconds - this.billedSeconds;
+    if (owedSeconds <= 0) return;
+    this.billedSeconds = elapsedSeconds;
+    const cost = (owedSeconds / 60) * rate;
+    this.accruedAudioUsd += cost;
+    this.deps.onUsage?.(binding, {
+      type: 'usage',
+      inputTokens: 0,
+      outputTokens: 0,
+      estimatedCostUsd: cost,
+    });
+    if (checkCap) this.checkBudget(binding);
+  }
+
+  /**
+   * Has this call spent its cap?
+   *
+   * The spend read back is the SESSION's, not just the audio's: the deps hand
+   * back what `agent_consult`'s turns have added on the same lane key plus the
+   * slice just folded in, because an operator's cap means "what this call
+   * costs", and half a bill is not a budget.
+   */
+  private checkBudget(binding: RealtimeSessionBinding): void {
+    if (binding.sessionBudgetUsd === undefined) return;
+    const spentUsd = this.deps.sessionSpendUsd?.(binding) ?? this.accruedAudioUsd;
+    const verdict = checkCostBudget({ spentUsd, capUsd: binding.sessionBudgetUsd });
+    if (!verdict.exceeded) return;
+    this.windDown(binding, verdict.rule, verdict.message, spentUsd);
+  }
+
+  /**
+   * Graceful spoken wind-down (plan eng-review D10): the session says one short
+   * sentence and closes cleanly. Never a dropped stream.
+   *
+   * The ORDER below is the whole behaviour, and it is what the test asserts:
+   *
+   *   1. the halt is reported, with the same `cost-cap` rule a turn halts on;
+   *   2. the sign-off is DISPATCHED — before anything closes, so the browser
+   *      has the line in hand while its media socket is still up;
+   *   3. every tool call this lane accepted and has not answered gets an
+   *      answer, because a realtime session waits forever on an unanswered
+   *      call and "forever" here would be the last thing the user experiences;
+   *   4. only then does the lane close.
+   *
+   * The browser owns the media socket on this tier, so step 4 closes the
+   * CONTROL lane; the sign-off's own audio finishes on the far side, and the
+   * client ends the call when the utterance completes.
+   */
+  private windDown(
+    binding: RealtimeSessionBinding,
+    rule: string,
+    message: string,
+    spentUsd: number,
+  ): void {
+    if (this.closed || this.windingDown) return;
+    this.windingDown = true;
+    this.stopAccrual();
+    this.stopFiller();
+
+    this.deps.onHalt?.(binding, {
+      type: 'halt',
+      kind: 'budget',
+      rule,
+      toolName: '_budget',
+      message,
+    });
+    this.opts.send({ t: 'realtime_wind_down', text: REALTIME_BUDGET_SIGN_OFF, reason: 'budget' });
+    for (const callId of [...this.unanswered]) {
+      this.answer(callId, false, REALTIME_WIND_DOWN_TOOL_RESULT);
+    }
+    this.deps.onEvent?.({
+      type: 'wind_down',
+      laneKey: binding.laneKey,
+      spentUsd,
+      capUsd: binding.sessionBudgetUsd ?? 0,
+    });
+    this.close();
   }
 
   private startFiller(): void {

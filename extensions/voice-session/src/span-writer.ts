@@ -20,6 +20,17 @@ export type VoiceSpanStage =
   | 'llm_first_sentence'
   /** Turn start → first synthesized audio frame emitted. */
   | 'tts_first_audio'
+  /**
+   * REALTIME TIER ONLY — turn start → the provider's first audio frame.
+   *
+   * The hosted tier has no `stt` / `llm_first_sentence` / `tts_first_audio` to
+   * record: one duplex session hears, thinks and speaks behind one wire, and
+   * splitting a number it never reports would be three invented spans. So the
+   * tier contributes ONE stage, and the mouth-to-ear total is that plus the
+   * endpoint time the caller measured — exactly the shape the pipeline tier's
+   * total already has.
+   */
+  | 'realtime_first_audio'
   /** The whole turn: utterance committed → reply finished (or interrupted). */
   | 'turn';
 
@@ -34,6 +45,14 @@ export interface VoiceTurnSpan {
   sttProvider?: string;
   /** The TTS provider that ACTUALLY ran. */
   ttsProvider?: string;
+  /**
+   * The REALTIME provider that actually ran, on a turn served by the hosted
+   * tier. Its own field rather than stamping the STT and TTS ones with the same
+   * id: on this tier there is no listening/speaking split to name, and a reader
+   * that saw `sttProvider === ttsProvider` would have to guess whether that
+   * meant "one provider did both" or "the same vendor was configured twice".
+   */
+  realtimeProvider?: string;
   /** Lane/session this turn belonged to, when the caller knows it. */
   laneKey?: string;
   error?: string;

@@ -87,6 +87,8 @@ function service(opts: {
   personalityVoice?: Record<string, { voice?: Record<string, unknown> }>;
   mint?: () => Promise<RealtimeEphemeralToken>;
   registryOverride?: RealtimeVoiceProviderRegistry;
+  /** Live Settings values, in the shape web-api's `configGetter` supplies. */
+  sessionBudgetUsd?: number;
 }): VoiceService {
   const reg =
     opts.registryOverride ??
@@ -113,6 +115,9 @@ function service(opts: {
     ...(opts.trustedVoicePlugins ? { trustedVoicePlugins: opts.trustedVoicePlugins } : {}),
     ...(opts.personalityVoice
       ? { personalities: { get: (id: string) => opts.personalityVoice?.[id] } }
+      : {}),
+    ...(opts.sessionBudgetUsd !== undefined
+      ? { configGetter: async () => ({ voiceRealtimeSessionBudgetUsd: opts.sessionBudgetUsd }) }
       : {}),
   });
 }
@@ -282,5 +287,44 @@ describe('mintRealtimeToken — no refusal ever carries key material', () => {
       expect(result.message).not.toContain(OPERATOR_KEY);
       expect(result.message).not.toContain('sk-');
     }
+  });
+});
+
+describe('realtimeSessionCost — what a call costs and what caps it', () => {
+  const PRICED: RealtimeProviderEntry = { ...OPENAI_ENTRY, costPerMinuteUsd: 0.06 };
+
+  it('reads the rate off the entry the mint would select', async () => {
+    const cost = await service({
+      roster: { live: PRICED },
+      realtimeDefault: 'live',
+      sessionBudgetUsd: 1.5,
+    }).realtimeSessionCost();
+
+    expect(cost).toEqual({ costPerMinuteUsd: 0.06, sessionBudgetUsd: 1.5 });
+  });
+
+  it('follows the personality to ITS entry, so the priced session is the minted one', async () => {
+    const cost = await service({
+      roster: { live: PRICED, cheap: { provider: 'gemini-live', costPerMinuteUsd: 0.01 } },
+      realtimeDefault: 'live',
+      personalityVoice: { scout: { voice: { realtime_provider: 'cheap' } } },
+    }).realtimeSessionCost('scout');
+
+    expect(cost.costPerMinuteUsd).toBe(0.01);
+  });
+
+  it('reports an unpriced entry as unpriced, never as free', async () => {
+    const cost = await service({
+      roster: { live: OPENAI_ENTRY },
+      realtimeDefault: 'live',
+      sessionBudgetUsd: 1.5,
+    }).realtimeSessionCost();
+
+    expect(cost.costPerMinuteUsd).toBeUndefined();
+    expect(cost.sessionBudgetUsd).toBe(1.5);
+  });
+
+  it('has no rate at all when the deployment has no realtime entry', async () => {
+    expect(await service({}).realtimeSessionCost()).toEqual({});
   });
 });

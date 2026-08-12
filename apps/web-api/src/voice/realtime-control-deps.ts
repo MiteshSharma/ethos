@@ -26,6 +26,26 @@ import type { RealtimeControlLaneDeps, RealtimeSessionBinding } from './realtime
 // `browser`, and every segment is URL-encoded so no id can smuggle a separator
 // and alias itself onto the other's key. That is structural, not statistical.
 
+/** What one realtime talk session costs and what caps it. See {@link RealtimeControlDepsOptions.pricing}. */
+export interface RealtimeSessionPricing {
+  /** `RealtimeProviderEntry.costPerMinuteUsd` for the entry serving this call. */
+  costPerMinuteUsd?: number;
+  /** `voice.realtime.sessionBudgetUsd`. */
+  sessionBudgetUsd?: number;
+}
+
+/**
+ * The budget authority. Structurally `AgentLoop` — that is deliberate: the
+ * talk-session lane key is the same key `agent_consult` runs its turns on, so
+ * the loop's `sessionCosts` map is where this call's whole bill already lives.
+ */
+export interface RealtimeBudgetAuthority {
+  addSessionCost(sessionKey: string, usd: number): void;
+  getSessionCost(sessionKey: string): number;
+  /** The speaking personality's `budgetCapUsd`; undefined = no personality cap. */
+  getPersonalityBudgetCap(personalityId?: string): number | undefined;
+}
+
 export interface RealtimeControlDepsOptions {
   /** The registry the agent runs on — advertised == handled derives from it. */
   toolRegistry: ToolRegistry;
@@ -34,6 +54,17 @@ export interface RealtimeControlDepsOptions {
   sessions: SessionStore;
   /** Personality lookup; supplies the toolset that gates direct-call tools. */
   personalities: { get(id: string): { toolset?: string[] } | undefined };
+  /**
+   * The per-audio-minute rate and the session cap, resolved SERVER-side for the
+   * personality about to talk.
+   *
+   * Server-side on purpose: a billing rate the page supplied would be a billing
+   * rate the page could set to zero. Absent → nothing accrues and no cap bites,
+   * which is what a deployment with no realtime pricing configured already has.
+   */
+  pricing?(personalityId?: string): Promise<RealtimeSessionPricing>;
+  /** Where accrued audio cost goes, and where the cap is read from. */
+  budget?: RealtimeBudgetAuthority;
   /** Defaults stamped on a freshly created talk session row. */
   defaults: { model: string; provider: string; workingDir?: string };
   /**
@@ -59,6 +90,7 @@ export function createRealtimeControlDeps(
 ): RealtimeControlLaneDeps {
   const botKey = opts.botKey ?? 'web';
   const platform = opts.platform ?? 'web';
+  const budget = opts.budget;
 
   return {
     async open(info): Promise<RealtimeSessionBinding> {
@@ -89,9 +121,30 @@ export function createRealtimeControlDeps(
       const toolset = info.personalityId
         ? opts.personalities.get(info.personalityId)?.toolset
         : undefined;
+      // A pricing lookup that fails leaves the call UNPRICED — it must not take
+      // the agent down with it. The lane says so through its `unpriced` event
+      // rather than reporting the session as free.
+      const pricing: RealtimeSessionPricing =
+        (await opts.pricing?.(info.personalityId).catch((): RealtimeSessionPricing => ({}))) ?? {};
+      // TWO CAPS, ONE BUDGET. `voice.realtime.sessionBudgetUsd` caps a realtime
+      // call; the personality's `budgetCapUsd` caps everything this personality
+      // spends on a session key — and the consults this call makes run on THIS
+      // lane key, so that cap is already live here whether or not the tier
+      // knows about it. Left alone, the personality cap would bite first, on
+      // the next consult, as a refused turn the caller hears as silence. So the
+      // lane takes the LOWER of the two and winds down on it: the same money,
+      // the same threshold, but spoken instead of silent.
+      const caps = [
+        pricing.sessionBudgetUsd,
+        budget?.getPersonalityBudgetCap(info.personalityId),
+      ].filter((cap): cap is number => typeof cap === 'number' && cap > 0);
       return {
         laneKey,
         storeSessionId: row.id,
+        ...(pricing.costPerMinuteUsd !== undefined
+          ? { costPerMinuteUsd: pricing.costPerMinuteUsd }
+          : {}),
+        ...(caps.length > 0 ? { sessionBudgetUsd: Math.min(...caps) } : {}),
         host: createRealtimeToolHost({
           registry: opts.toolRegistry,
           ...(opts.hooks ? { hooks: opts.hooks } : {}),
@@ -112,5 +165,23 @@ export function createRealtimeControlDeps(
         content: text,
       });
     },
+
+    onUsage(binding, usage): void {
+      // The two places token cost goes, so audio minutes land in both: the
+      // loop's per-session spend (what `budgetCapUsd` and every budget halt
+      // read) and the session row (what `/usage` and the Sessions tab read).
+      budget?.addSessionCost(binding.laneKey, usage.estimatedCostUsd);
+      void opts.sessions
+        .updateUsage(binding.storeSessionId, { estimatedCostUsd: usage.estimatedCostUsd })
+        .catch(() => {
+          // A failed usage write must not end a live call. The authoritative
+          // in-memory total the cap reads is unaffected.
+        });
+    },
+
+    // Only when there IS an authority holding the session's whole bill. Absent,
+    // the lane falls back to its own audio total rather than being told the
+    // session has spent nothing.
+    ...(budget ? { sessionSpendUsd: (binding) => budget.getSessionCost(binding.laneKey) } : {}),
   };
 }

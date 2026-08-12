@@ -242,6 +242,28 @@ const RealtimeSpeakSchema = z.object({
   kind: z.enum(['ack', 'filler']),
 });
 
+/**
+ * The call has spent its budget: say this, then hang up.
+ *
+ * A separate frame from `realtime_speak` because it carries an INSTRUCTION as
+ * well as a line. The browser owns the media socket on this tier, so the server
+ * cannot close the call itself — it can only ask, and what it asks for is
+ * ordered: speak the sign-off, let it finish, then end the call. A `realtime_speak`
+ * followed by a socket drop would be a teardown mid-word, which is exactly the
+ * failure this frame exists to avoid.
+ *
+ * `text` is spoken verbatim where the provider has a verbatim-speech frame and
+ * captioned everywhere — the same degradation as the consult ack, for the same
+ * reason: the listener must SEE why the call ended even on a provider that
+ * cannot say it.
+ */
+const RealtimeWindDownSchema = z.object({
+  t: z.literal('realtime_wind_down'),
+  text: z.string().min(1),
+  /** Why. One value today; a union so a second reason cannot be mistaken for this one. */
+  reason: z.literal('budget'),
+});
+
 const VoiceServerFrameSchema = z.discriminatedUnion('t', [
   ReadySchema,
   TranscriptSchema,
@@ -252,6 +274,7 @@ const VoiceServerFrameSchema = z.discriminatedUnion('t', [
   RealtimeReadySchema,
   RealtimeToolResultSchema,
   RealtimeSpeakSchema,
+  RealtimeWindDownSchema,
 ]);
 
 export type VoiceServerFrame = z.infer<typeof VoiceServerFrameSchema>;

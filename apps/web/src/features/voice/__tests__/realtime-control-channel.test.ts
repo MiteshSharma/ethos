@@ -87,6 +87,7 @@ function setup(
     control?: FakeControlTransport | null;
     chatSessionId?: string;
     ticket?: RealtimeSessionTicket;
+    windDownGraceMs?: number;
   } = {},
 ) {
   const socket = new FakeProviderSocket();
@@ -101,6 +102,7 @@ function setup(
     ...(control ? { control } : {}),
     personalityId: 'ada',
     chatSessionId: () => opts.chatSessionId ?? 'chat-9',
+    ...(opts.windDownGraceMs !== undefined ? { windDownGraceMs: opts.windDownGraceMs } : {}),
   });
   client.on((event) => events.push(event));
   return { socket, control, events, client };
@@ -268,6 +270,76 @@ describe('control channel — transcripts', () => {
       { t: 'realtime_transcript', role: 'assistant', text: 'Friday.' },
     ]);
     await client.disconnect();
+  });
+});
+
+describe('control channel — budget wind-down', () => {
+  it('says the sign-off, then ends the call when it has been said', async () => {
+    const { socket, control, client, events } = setup();
+    await client.connect();
+    socket.deliver(OPEN);
+    await settle();
+    socket.sent.length = 0;
+
+    control?.deliver({
+      t: 'realtime_wind_down',
+      text: "That's the limit for this call.",
+      reason: 'budget',
+    });
+    await settle();
+
+    // Captioned AND spoken — and the call is still up while it is being said.
+    expect(events).toContainEqual({
+      type: 'budget_wind_down',
+      text: "That's the limit for this call.",
+    });
+    expect(socket.sent).toContainEqual({
+      type: 'response.create',
+      response: {
+        output_modalities: ['audio'],
+        instructions:
+          "Say exactly this to the user, verbatim, adding nothing: That's the limit for this call.",
+      },
+    });
+    expect(events.some((e) => e.type === 'disconnected')).toBe(false);
+
+    // The provider finishes the utterance — THAT is the clean close.
+    socket.deliver({ type: 'response.output_audio_transcript.done', transcript: 'said it' });
+    socket.deliver({ type: 'response.done', response: { id: 'r1' } });
+    await settle();
+
+    expect(events.at(-1)).toEqual({ type: 'disconnected' });
+  });
+
+  it('ends immediately on a provider that cannot speak the line', async () => {
+    // Gemini Live: no verbatim-speech frame, so there is no utterance to wait
+    // for. The sentence is still captioned — the listener sees why it ended.
+    const { client, control, events } = setup({
+      ticket: { ...TICKET, providerId: 'gemini-live' },
+    });
+    await client.connect();
+    await settle();
+
+    control?.deliver({ t: 'realtime_wind_down', text: 'Out of budget.', reason: 'budget' });
+    await settle();
+
+    expect(events).toContainEqual({ type: 'budget_wind_down', text: 'Out of budget.' });
+    expect(events.at(-1)).toEqual({ type: 'disconnected' });
+  });
+
+  it('ends the call anyway when the provider never reports the line finished', async () => {
+    // The backstop. Without it a budget-halted session sits open on a paid
+    // socket — the exact opposite of what a budget halt is for.
+    const { client, control, events, socket } = setup({ windDownGraceMs: 0 });
+    await client.connect();
+    socket.deliver(OPEN);
+    await settle();
+
+    control?.deliver({ t: 'realtime_wind_down', text: 'Out of budget.', reason: 'budget' });
+    await settle();
+    await settle();
+
+    expect(events.at(-1)).toEqual({ type: 'disconnected' });
   });
 });
 

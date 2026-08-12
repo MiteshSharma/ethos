@@ -90,7 +90,20 @@ export interface RealtimeVoiceCallDeps {
   socketFactory: RealtimeSocketFactory;
   wakeLock?: WakeLock;
   chime?: boolean;
+  /**
+   * How long the call is allowed to keep speaking after a wind-down before it
+   * is ended anyway.
+   *
+   * The sign-off must not be cut mid-word, so the close waits for the provider
+   * to report the response finished. This is the backstop for a provider that
+   * never reports one — without it a budget-halted session would sit open on a
+   * paid socket, which is the exact opposite of what a budget halt is for.
+   */
+  windDownGraceMs?: number;
 }
+
+/** Long enough for one spoken sentence, short enough that a stuck call still ends. */
+const DEFAULT_WIND_DOWN_GRACE_MS = 6_000;
 
 /**
  * Thrown by `connect()` when the browser's audio clock cannot run at the rate
@@ -148,6 +161,9 @@ export function createRealtimeVoiceCallClient(deps: RealtimeVoiceCallDeps): Voic
   let speaking = false;
   /** Unsubscribe from the control channel's server frames. */
   let unsubscribeControl: (() => void) | null = null;
+  /** Set once a wind-down is in progress; the call ends when the line is done. */
+  let windingDown = false;
+  let windDownTimer: ReturnType<typeof setTimeout> | null = null;
 
   /** Send one control frame, when a control channel is wired. */
   const control = (frame: VoiceClientFrame): void => {
@@ -194,6 +210,51 @@ export function createRealtimeVoiceCallClient(deps: RealtimeVoiceCallDeps): Voic
     const spoken = replyText.trim();
     resetResponse();
     emit({ type: 'interrupted', text: spoken });
+  };
+
+  /** Whether the wind-down has already ended the call. Makes the close once-only. */
+  let windDownEnded = false;
+
+  /** End a winding-down call: the line has been said (or the grace ran out). */
+  const endAfterWindDown = (): void => {
+    if (windDownTimer !== null) {
+      clearTimeout(windDownTimer);
+      windDownTimer = null;
+    }
+    if (windDownEnded) return;
+    windDownEnded = true;
+    // `disconnected` AFTER teardown, so the UI's terminal state and the released
+    // mic land together rather than the strip ending on a still-open socket.
+    void teardown().finally(() => emit({ type: 'disconnected' }));
+  };
+
+  /**
+   * The budget wind-down (plan DR1 "★ Budget wind-down"). The server has spent
+   * this call's budget and asked for one sentence and a clean close.
+   *
+   * The order is the point: caption, speak, then close when the speaking is
+   * DONE. Closing on receipt would cut the sentence mid-word, which is the
+   * dropped stream the criterion forbids; on a provider that cannot speak a
+   * line verbatim there is nothing to wait for, so the call ends immediately
+   * with the sentence captioned.
+   */
+  const beginWindDown = (text: string): void => {
+    if (windingDown || disposed) return;
+    windingDown = true;
+    emit({ type: 'budget_wind_down', text });
+    // Stop capturing now: every further second of mic is a second billed to a
+    // call that is already over, and nothing said into it will be answered.
+    deps.capture.setMicEnabled(false);
+    const say = session?.say?.bind(session);
+    if (!say) {
+      endAfterWindDown();
+      return;
+    }
+    void say(text).catch(() => endAfterWindDown());
+    windDownTimer = setTimeout(
+      endAfterWindDown,
+      deps.windDownGraceMs ?? DEFAULT_WIND_DOWN_GRACE_MS,
+    );
   };
 
   const onEvent = (event: RealtimeEvent): void => {
@@ -262,6 +323,8 @@ export function createRealtimeVoiceCallClient(deps: RealtimeVoiceCallDeps): Voic
           emit({ type: 'reply_complete', text: spoken });
           control({ t: 'realtime_transcript', role: 'assistant', text: spoken });
         }
+        // The sign-off has finished playing — this is the clean close.
+        if (windingDown) endAfterWindDown();
         return;
       }
 
@@ -312,6 +375,9 @@ export function createRealtimeVoiceCallClient(deps: RealtimeVoiceCallDeps): Voic
         void say?.(frame.text).catch(() => {});
         return;
       }
+      case 'realtime_wind_down':
+        beginWindDown(frame.text);
+        return;
       default:
         // Every other server frame belongs to the pipeline tier's audio lane.
         return;
@@ -330,6 +396,10 @@ export function createRealtimeVoiceCallClient(deps: RealtimeVoiceCallDeps): Voic
   const teardown = async (): Promise<void> => {
     if (disposed) return;
     disposed = true;
+    if (windDownTimer !== null) {
+      clearTimeout(windDownTimer);
+      windDownTimer = null;
+    }
     unsubscribe?.();
     unsubscribe = null;
     // Tell the control lane the call is over BEFORE the socket goes: it aborts

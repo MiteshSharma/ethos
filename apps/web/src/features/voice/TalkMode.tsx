@@ -76,6 +76,12 @@ export interface TalkModeCallBarProps {
   onHangUp: () => void;
   /** Live caption of what the agent is saying right now. */
   caption?: string | null;
+  /**
+   * The call reached its spending limit: the caption is the spoken sign-off and
+   * this puts a `budget reached` mono chip beside it (DR1 "★ Budget wind-down").
+   * A chip in the existing label vocabulary — never a badge, never a banner.
+   */
+  windDown?: string | null;
   /** Voice fell back to text — the strip collapses to a dismissible notice. */
   degraded?: VoiceDegradedNotice | null;
   /**
@@ -130,6 +136,7 @@ export function TalkModeCallBar({
   onToggleMute,
   onHangUp,
   caption,
+  windDown,
   degraded,
   notice,
   tier,
@@ -195,6 +202,7 @@ export function TalkModeCallBar({
         <span className="talk-status-label" role="status">
           {error ?? STATUS_LABEL[status]}
         </span>
+        {windDown ? <span className="talk-mono talk-budget-chip">budget reached</span> : null}
         {caption ? (
           <span className="talk-caption" aria-live="polite">
             {caption}

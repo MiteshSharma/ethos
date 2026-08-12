@@ -4,6 +4,7 @@ import {
   resolveTtsProvider,
   resolveTtsProviderForPersonality,
   resolveVoicePreferences,
+  selectRealtimeEntry,
   selectSttEntry,
   selectTtsEntry,
   ttsEntryProviderConfig,
@@ -157,6 +158,21 @@ interface LiveVoiceConfig {
   voiceRealtimeDefault?: string | null;
   /** `voice.tier` — the deployment's default voice engine. */
   voiceTier?: 'pipeline' | 'realtime' | null;
+  /** `voice.realtime.sessionBudgetUsd` — USD cap on ONE realtime session. */
+  voiceRealtimeSessionBudgetUsd?: number | null;
+}
+
+/**
+ * What one realtime call costs per audio minute, and the cap on its total.
+ *
+ * Both halves come from the same place the mint reads — the roster entry the
+ * personality resolves to, and the deployment's session budget — because a
+ * session priced by one selection and capped by another is not a budget.
+ * `costPerMinuteUsd` absent means the entry is UNPRICED: cost unknown, not zero.
+ */
+export interface RealtimeSessionCost {
+  costPerMinuteUsd?: number;
+  sessionBudgetUsd?: number;
 }
 
 export class VoiceService {
@@ -567,12 +583,40 @@ export class VoiceService {
     roster: Readonly<Record<string, RealtimeProviderEntry>> | undefined;
     defaultEntry: string | undefined;
     tier: 'pipeline' | 'realtime' | undefined;
+    sessionBudgetUsd: number | undefined;
   }> {
     const live = this.configGetter ? await this.configGetter().catch(() => null) : null;
+    const budget = live?.voiceRealtimeSessionBudgetUsd;
     return {
       roster: live?.voiceRealtimeProviders ?? this.realtimeRoster,
       defaultEntry: live?.voiceRealtimeDefault ?? this.realtimeDefaultEntry,
       tier: live?.voiceTier ?? this.tier,
+      sessionBudgetUsd: typeof budget === 'number' ? budget : undefined,
+    };
+  }
+
+  /**
+   * The per-audio-minute rate and the cap for the call `personalityId` is about
+   * to make.
+   *
+   * The rate is the SELECTED roster entry's — the same selection
+   * {@link mintRealtimeToken} makes, run through the same pure function, so the
+   * session that gets billed and the session that gets minted are the same one.
+   * Nothing is constructed: this decides, it does not open a provider.
+   */
+  async realtimeSessionCost(personalityId?: string): Promise<RealtimeSessionCost> {
+    const { roster, defaultEntry, sessionBudgetUsd } = await this.realtimeDefaults();
+    const personality = personalityId ? this.personalities?.get(personalityId)?.voice : undefined;
+    const requested = personality?.realtime_provider;
+    const selection = selectRealtimeEntry({
+      ...(requested ? { requestedName: requested } : {}),
+      ...(roster ? { roster } : {}),
+      ...(defaultEntry ? { defaultEntryName: defaultEntry } : {}),
+    });
+    const rate = selection.entry?.costPerMinuteUsd;
+    return {
+      ...(typeof rate === 'number' ? { costPerMinuteUsd: rate } : {}),
+      ...(sessionBudgetUsd !== undefined ? { sessionBudgetUsd } : {}),
     };
   }
 
