@@ -67,19 +67,20 @@ function subtractPrunedUsage(sessDb: BetterSqlite3.Database, iso: string): void 
   const sessionCols = columnsOf('sessions');
   if (!USAGE_COLUMNS.every((c) => sessionCols.has(c) && messageCols.has(c))) return;
 
-  const live = messageCols.has('deleted_at') ? 'AND m.deleted_at IS NULL' : '';
-  const sets = USAGE_COLUMNS.map(
-    (col) =>
-      `${col} = max(${col} - COALESCE((SELECT SUM(m.${col}) FROM messages m
-         WHERE m.session_id = sessions.id ${live} AND m.timestamp < ?), 0), 0)`,
-  ).join(', ');
+  const live = messageCols.has('deleted_at') ? 'AND deleted_at IS NULL' : '';
+  const sets = USAGE_COLUMNS.map((col) => `${col} = max(sessions.${col} - pruned.${col}, 0)`).join(
+    ', ',
+  );
+  const sums = USAGE_COLUMNS.map((col) => `COALESCE(SUM(${col}), 0) AS ${col}`).join(', ');
 
   sessDb
     .prepare(
       `UPDATE sessions SET ${sets}
-       WHERE id IN (SELECT DISTINCT session_id FROM messages WHERE timestamp < ?)`,
+       FROM (SELECT session_id, ${sums} FROM messages
+             WHERE timestamp < ? ${live} GROUP BY session_id) AS pruned
+       WHERE sessions.id = pruned.session_id`,
     )
-    .run(...USAGE_COLUMNS.map(() => iso), iso);
+    .run(iso);
 }
 
 export interface PruneResult {

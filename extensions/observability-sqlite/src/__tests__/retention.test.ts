@@ -501,6 +501,73 @@ describe('pruneObservability', () => {
     expect(row.estimated_cost_usd).toBeCloseTo(0.003, 10);
     sessDb.close();
   });
+
+  // The subtraction is one grouped pass joined back onto `sessions`, so a wrong
+  // join key would still look right with a single session. Pin the per-session
+  // attribution: each session gets its own total, and one with nothing to prune
+  // is left alone.
+  it('subtracts per-session totals when several sessions are pruned in one call', () => {
+    const sessDb = makeSessDb();
+    const oldIso = new Date(NOW - 400 * 86_400_000).toISOString();
+    const recentIso = new Date(RECENT).toISOString();
+
+    // s1: two pruned turns + one surviving turn.
+    insertSession(sessDb, 's1', { inputTokens: 130, outputTokens: 27, estimatedCostUsd: 0.016 });
+    insertMessage(sessDb, 's1', 'old-a', oldIso, {
+      inputTokens: 100,
+      outputTokens: 20,
+      estimatedCostUsd: 0.01,
+    });
+    insertMessage(sessDb, 's1', 'old-b', oldIso, {
+      inputTokens: 23,
+      outputTokens: 4,
+      estimatedCostUsd: 0.004,
+    });
+    insertMessage(sessDb, 's1', 'recent', recentIso, {
+      inputTokens: 7,
+      outputTokens: 3,
+      estimatedCostUsd: 0.002,
+    });
+    // s2: a different total, entirely prunable.
+    insertSession(sessDb, 's2', { inputTokens: 60, outputTokens: 11, estimatedCostUsd: 0.009 });
+    insertMessage(sessDb, 's2', 'old', oldIso, {
+      inputTokens: 60,
+      outputTokens: 11,
+      estimatedCostUsd: 0.009,
+    });
+    // s3: nothing prunable — must not be touched by s1/s2's subtraction.
+    insertSession(sessDb, 's3', { inputTokens: 40, outputTokens: 4, estimatedCostUsd: 0.004 });
+    insertMessage(sessDb, 's3', 'recent', recentIso, {
+      inputTokens: 40,
+      outputTokens: 4,
+      estimatedCostUsd: 0.004,
+    });
+
+    expect(
+      pruneObservability(db, RETENTION_DEFAULTS, { dryRun: false, now: NOW, sessDb }).messages,
+    ).toBe(3);
+
+    const rows = sessDb
+      .prepare(
+        'SELECT id, input_tokens, output_tokens, estimated_cost_usd FROM sessions ORDER BY id',
+      )
+      .all() as Array<{
+      id: string;
+      input_tokens: number;
+      output_tokens: number;
+      estimated_cost_usd: number;
+    }>;
+
+    expect(rows.map((r) => [r.id, r.input_tokens, r.output_tokens])).toEqual([
+      ['s1', 7, 3],
+      ['s2', 0, 0],
+      ['s3', 40, 4],
+    ]);
+    expect(rows[0]?.estimated_cost_usd).toBeCloseTo(0.002, 10);
+    expect(rows[1]?.estimated_cost_usd).toBeCloseTo(0, 10);
+    expect(rows[2]?.estimated_cost_usd).toBeCloseTo(0.004, 10);
+    sessDb.close();
+  });
 });
 
 // Mirrors the columns of the real sessions.db that retention pruning touches.
