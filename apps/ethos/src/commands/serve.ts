@@ -302,6 +302,7 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
     | undefined;
   let sttProviders: import('@ethosagent/types').SttProviderRegistry | undefined;
   let ttsProviders: import('@ethosagent/types').TtsProviderRegistry | undefined;
+  let realtimeProviders: import('@ethosagent/types').RealtimeVoiceProviderRegistry | undefined;
   // Loop-registry refresh from createAgentLoop; undefined on the team-coordinator
   // path (createTeamAgentLoop has no personality registry to hot-reload).
   let refreshLoopPersonalities: (() => Promise<void>) | undefined;
@@ -316,6 +317,9 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
         ttsProviderConfig: Record<string, unknown>;
         ttsRoster?: Record<string, import('@ethosagent/types').TtsProviderEntry>;
         sttRoster?: Record<string, import('@ethosagent/types').SttProviderEntry>;
+        realtimeRoster?: Record<string, import('@ethosagent/types').RealtimeProviderEntry>;
+        realtimeDefault?: string;
+        tier?: 'pipeline' | 'realtime';
         trustedVoicePlugins?: ReadonlySet<string>;
       }
     | undefined;
@@ -476,6 +480,7 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
     backgroundExecutor = result.backgroundExecutor;
     sttProviders = result.sttProviders;
     ttsProviders = result.ttsProviders;
+    realtimeProviders = result.realtimeProviders;
     voiceConfig = result.voiceConfig;
     refreshLoopPersonalities = result.refreshPersonalities;
     skillsInjector = result.skillsInjector;
@@ -521,6 +526,7 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
     backgroundExecutor = result.backgroundExecutor;
     sttProviders = result.sttProviders;
     ttsProviders = result.ttsProviders;
+    realtimeProviders = result.realtimeProviders;
     voiceConfig = result.voiceConfig;
     refreshLoopPersonalities = result.refreshPersonalities;
     skillsInjector = result.skillsInjector;
@@ -1018,6 +1024,12 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
     // `voice.stt_provider` pick from.
     ...(voiceConfig?.ttsRoster ? { ttsRoster: voiceConfig.ttsRoster } : {}),
     ...(voiceConfig?.sttRoster ? { sttRoster: voiceConfig.sttRoster } : {}),
+    // Realtime tier — the registry backs `voice.realtimeToken`; the roster and
+    // tier default are boot snapshots that live Settings config overrides.
+    ...(realtimeProviders ? { realtimeProviderRegistry: realtimeProviders } : {}),
+    ...(voiceConfig?.realtimeRoster ? { realtimeRoster: voiceConfig.realtimeRoster } : {}),
+    ...(voiceConfig?.realtimeDefault ? { realtimeDefault: voiceConfig.realtimeDefault } : {}),
+    ...(voiceConfig?.tier ? { voiceTier: voiceConfig.tier } : {}),
     // Local-only voice-egress gate. Armed only when the operator declared
     // `voice.trustedPlugins`; the browser talk lane then refuses a non-local
     // provider instead of shipping audio off the machine.

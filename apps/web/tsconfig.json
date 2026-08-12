@@ -10,7 +10,9 @@
       "@ethosagent/design-tokens": ["../../packages/design-tokens/src"],
       "@ethosagent/design-tokens/antd": ["../../packages/design-tokens/src/antd"],
       "@ethosagent/ui-components": ["../../packages/ui-components/src"],
-      "@ethosagent/voice-text": ["../../packages/voice-text/src"]
+      "@ethosagent/voice-text": ["../../packages/voice-text/src"],
+      "@ethosagent/voice-realtime-protocol": ["../../packages/voice-realtime-protocol/src"],
+      "@ethosagent/types": ["../../packages/types/src"]
     }
   },
   "include": ["src/**/*.ts", "src/**/*.tsx", "vite.config.ts"]

@@ -66,6 +66,7 @@ import type {
   MemoryProviderRegistry,
   PersonalityConfig,
   PersonalityRegistry,
+  RealtimeVoiceProviderRegistry,
   StorageRegistry,
   SttProviderRegistry,
   TtsProviderRegistry,
@@ -92,6 +93,7 @@ export interface InfrastructureResult {
   clarifyBridge: ClarifyBridge;
   sttProviders: SttProviderRegistry;
   ttsProviders: TtsProviderRegistry;
+  realtimeProviders: RealtimeVoiceProviderRegistry;
   constitutionEnforcement?: ConstitutionEnforcement;
   /**
    * The loaded operator constitution. `undefined` only in SAFE MODE (malformed
@@ -318,7 +320,7 @@ export async function buildInfrastructure(
   // (`createBuiltinVoiceRegistries`) so diagnostics report exactly what the
   // running system has; plugins add more via registerSttProvider /
   // registerTtsProvider.
-  const { sttProviders, ttsProviders } = createBuiltinVoiceRegistries();
+  const { sttProviders, ttsProviders, realtimeProviders } = createBuiltinVoiceRegistries();
 
   // -------------------------------------------------------------------------
   // Personalities
@@ -459,6 +461,7 @@ export async function buildInfrastructure(
     clarifyBridge,
     sttProviders,
     ttsProviders,
+    realtimeProviders,
     constitutionEnforcement,
     constitution,
   };

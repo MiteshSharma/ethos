@@ -2826,6 +2826,72 @@ const VoiceSttEntriesOutput = z.object({
   roster: z.record(z.string(), VoiceSttEntrySchema),
 });
 
+const VoiceRealtimeTokenInput = z.object({
+  /** Personality about to talk. Its `voice.realtime_provider` picks the roster
+   *  entry and its `voice.tier` decides whether the realtime tier runs at all. */
+  personalityId: z.string().optional(),
+});
+
+/**
+ * Why the browser is NOT getting a realtime session. Each reason renders as
+ * different copy, which is the whole point of typing them: "this deployment has
+ * no realtime provider" and "your local-only gate refused the one it has" are
+ * the same non-event to the user unless the surface can tell them apart.
+ *
+ * `pipeline_preferred` is not a failure — it is the configured answer, so the
+ * surface renders no notice and simply starts the pipeline call.
+ */
+const VoiceRealtimeRefusalReason = z.enum([
+  /** `voice.tier` (personality first, then deployment) asked for the pipeline. */
+  'pipeline_preferred',
+  /** No realtime roster entry is configured, or none is named as the default. */
+  'not_configured',
+  /** The personality (or `voice.realtime.default`) names an entry this deployment lacks. */
+  'unknown_entry',
+  /** `voice.trustedPlugins` refuses the resolved provider — the local-only egress gate. */
+  'untrusted_provider',
+  /** The provider is server-relayed (`caps.ephemeralToken !== true`) — Gemini Live. */
+  'no_browser_token',
+  /** The provider would not construct, or the mint itself failed. */
+  'provider_unavailable',
+]);
+
+/**
+ * A minted browser-direct session, or a typed refusal.
+ *
+ * The success arm carries BOTH sample rates because the two are not necessarily
+ * equal (`RealtimeVoiceCapabilities` in `@ethosagent/types`): the browser
+ * captures at `inputSampleRate` and plays out at `outputSampleRate`.
+ *
+ * `token` is a short-lived provider credential minted for this session. The
+ * operator's long-lived API key never appears here, and no part of it appears
+ * in a refusal message either.
+ */
+const VoiceRealtimeTokenOutput = z.discriminatedUnion('ok', [
+  z.object({
+    ok: z.literal(true),
+    /** The REGISTERED provider id that minted it (`openai-realtime`), never the roster label. */
+    providerId: z.string(),
+    /** Model the token was minted against; null when the provider pins none. */
+    model: z.string().nullable(),
+    token: z.string(),
+    /** Absolute expiry, epoch milliseconds. Not a TTL — no clock arithmetic at the edge. */
+    expiresAt: z.number(),
+    /** Endpoint the browser connects to with `token`. */
+    url: z.string(),
+    inputSampleRate: z.number(),
+    outputSampleRate: z.number(),
+  }),
+  z.object({
+    ok: z.literal(false),
+    reason: VoiceRealtimeRefusalReason,
+    /** Renderable sentence. Never carries credentials. */
+    message: z.string(),
+    /** The provider that was actually about to run, when one was resolved. */
+    providerId: z.string().nullable(),
+  }),
+]);
+
 /** @experimental */
 const voice = {
   transcribe: oc.input(VoiceTranscribeInput).output(VoiceTranscribeOutput),
@@ -2835,6 +2901,8 @@ const voice = {
   ttsEntries: oc.output(VoiceTtsEntriesOutput),
   /** Selectable STT entries. Read-only and construction-free. */
   sttEntries: oc.output(VoiceSttEntriesOutput),
+  /** Mint a browser-direct realtime credential, or say why not. */
+  realtimeToken: oc.input(VoiceRealtimeTokenInput).output(VoiceRealtimeTokenOutput),
 };
 
 // ---------------------------------------------------------------------------

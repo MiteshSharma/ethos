@@ -21,10 +21,41 @@ indicator/controls, and the live transcript. Part of
 - **`gating.ts`** — `personalityCanTalk(toolset)`: the §3(e) toolset gate.
 - **`TalkMode.tsx`** — the toggle + in-call control bar + speaking indicator.
 
-### The two transports
+### The two tiers
 
 `talk-mode-client.ts` picks one at call time. Both implement `VoiceCallClient`
-and emit the same events, so nothing above them knows which is running.
+and emit the same `VoiceCallEvent`s, so `TalkModeCallBar`, `useVoiceCall` and
+`voiceCallReducer` do not know which tier is running.
+
+| | Realtime | Pipeline |
+|---|---|---|
+| Who owns the conversation | a hosted speech-to-speech provider (OpenAI Realtime) | STT → the Ethos agent turn → TTS |
+| Transport | one duplex WebSocket **straight to the provider**, opened with a server-minted ephemeral token | the binary PCM lane to web-api (or the batch RPC fallback) |
+| VAD / barge-in | the provider's, surfaced as `speech_started` | `PcmEndpointer`, locally |
+| Chosen when | `voice.realtimeToken` returns a token | anything else — including the explicit private/offline choice |
+
+The tier decision is SERVER-side (`VoiceService.mintRealtimeToken`), so one
+authority owns `voice.tier`, the realtime roster and the local-only egress gate.
+The browser's rule is one line: a token means realtime, anything else means
+pipeline, and every refusal that is not the configured preference is shown as a
+dismissible notice above a live strip — never a silent downgrade, never a dead
+mic. The pipeline tier is the private/offline mode; `use private mode` in the
+strip's detail row takes it deliberately.
+
+**Why WebSocket and not WebRTC** on the realtime tier: it reuses
+`createBrowserVoiceCapture` and `AbsolutePlayout` wholesale, where WebRTC would
+fork the audio path and re-implement barge-in and absolute-time pacing. The
+reasoning is in `realtime-voice-call-client.ts`'s header — read it before
+"fixing" the transport.
+
+The provider frame mapping lives in `@ethosagent/voice-realtime-protocol`,
+shared verbatim with the server-side providers in
+`extensions/voice-providers/`. That package carries no transport, and
+`packages/voice-realtime-protocol/src/__tests__/browser-safety.test.ts` fails
+the build if anything reachable from the browser entry points imports `ws` or a
+`node:` builtin.
+
+### The two pipeline transports
 
 | | Streaming (default) | Batch (fallback) |
 |---|---|---|

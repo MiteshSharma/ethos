@@ -81,7 +81,8 @@ const provider: RealtimeVoiceProvider = {
   name: 'fake-realtime',
   caps: {
     kind: 'realtime',
-    sampleRate: 24_000,
+    inputSampleRate: 24_000,
+    outputSampleRate: 24_000,
     local: false,
     voices: ['alloy'],
     languages: ['en'],
@@ -100,7 +101,15 @@ const provider: RealtimeVoiceProvider = {
 // contract — both are optional, and this is the shape a local provider takes.
 const minimalProvider: RealtimeVoiceProvider = {
   name: 'minimal-realtime',
-  caps: { kind: 'realtime', sampleRate: 16_000, local: true, contractVersion: 1 },
+  // Asymmetric on purpose: the contract carries two rates because a provider
+  // is not obliged to listen and speak at the same one.
+  caps: {
+    kind: 'realtime',
+    inputSampleRate: 16_000,
+    outputSampleRate: 24_000,
+    local: true,
+    contractVersion: 1,
+  },
   async open() {
     return {
       events: {

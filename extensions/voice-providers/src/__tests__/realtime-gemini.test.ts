@@ -6,7 +6,7 @@ import {
   type RealtimeConformanceTarget,
   runRealtimeContractSuite,
 } from '../realtime-conformance';
-import { downsample24kTo16k, GeminiLiveProvider } from '../realtime-gemini';
+import { GeminiLiveProvider } from '../realtime-gemini';
 
 const target: RealtimeConformanceTarget = {
   label: 'gemini-live',
@@ -47,10 +47,10 @@ const target: RealtimeConformanceTarget = {
     if (frame.realtimeInput?.audio?.mimeType !== 'audio/pcm;rate=16000') {
       errors.push(`audio mimeType was "${frame.realtimeInput?.audio?.mimeType}"`);
     }
-    // The caller hands 24 kHz (the declared caps rate); the wire takes 16 kHz.
-    const expected = Buffer.from(downsample24kTo16k(pcm)).toString('base64');
-    if (frame.realtimeInput?.audio?.data !== expected) {
-      errors.push('audio frame did not carry the 16 kHz decimation of the supplied PCM');
+    // The caller captures at `caps.inputSampleRate` (16 kHz), so the bytes it
+    // hands in are the bytes on the wire — nothing here resamples anything.
+    if (frame.realtimeInput?.audio?.data !== Buffer.from(pcm).toString('base64')) {
+      errors.push('audio frame did not carry the supplied PCM verbatim');
     }
     return errors;
   },
@@ -189,23 +189,5 @@ describe('gemini-live wire details', () => {
       { type: 'error', code: 'go_away' },
       { type: 'closed' },
     ]);
-  });
-});
-
-describe('downsample24kTo16k', () => {
-  it('decimates 3 input samples to 2 output samples', () => {
-    const input = new Int16Array([0, 3000, 6000, 9000, 12_000, 15_000]);
-    const out = downsample24kTo16k(new Uint8Array(input.buffer));
-    expect(out.byteLength).toBe(8);
-
-    const samples = new Int16Array(out.buffer, out.byteOffset, out.byteLength / 2);
-    // positions 0, 1.5, 3, 4.5 → exact, midpoint, exact, midpoint
-    expect(Array.from(samples)).toEqual([0, 4500, 9000, 13_500]);
-  });
-
-  it('handles a lone trailing sample without reading past the buffer', () => {
-    const input = new Int16Array([1000, 2000, 3000, 4000]);
-    const out = downsample24kTo16k(new Uint8Array(input.buffer));
-    expect(out.byteLength).toBe(4);
   });
 });

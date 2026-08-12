@@ -1012,6 +1012,7 @@ export async function buildAgentLoop(
     refreshPersonalities: () => personalities.loadFromDirectory(join(dataDir, 'personalities')),
     sttProviders: infra.sttProviders,
     ttsProviders: infra.ttsProviders,
+    realtimeProviders: infra.realtimeProviders,
     ...(voiceStack ? { voiceStack } : {}),
     voiceConfig: {
       sttProviderName: config.auxiliaryAsr?.provider,
@@ -1043,6 +1044,16 @@ export async function buildAgentLoop(
       // name instead.
       ...(config.voice?.tts?.providers ? { ttsRoster: config.voice.tts.providers } : {}),
       ...(config.voice?.stt?.providers ? { sttRoster: config.voice.stt.providers } : {}),
+      // The realtime roster (`voice.realtime.providers.*`) plus the two keys
+      // that decide whether the realtime tier runs at all: which entry a
+      // personality that names none gets, and the deployment's tier default.
+      ...(config.voice?.realtime?.providers
+        ? { realtimeRoster: config.voice.realtime.providers }
+        : {}),
+      ...(config.voice?.realtime?.default
+        ? { realtimeDefault: config.voice.realtime.default }
+        : {}),
+      ...(config.voice?.tier ? { tier: config.voice.tier } : {}),
       secretsResolver:
         config.secretsResolver ?? (NOOP_SECRETS as import('@ethosagent/types').SecretsResolver),
       // Armed only when `voice.trustedPlugins` is declared. Computed once here

@@ -25,6 +25,11 @@ export default defineConfig({
     alias: {
       '@ethosagent/web-contracts': resolve(root, 'packages/web-contracts/src'),
       '@ethosagent/ui-components': resolve(root, 'packages/ui-components/src'),
+      // The realtime tier's frame mapping, shared with the server-side
+      // providers. Carries no transport, so nothing node-only rides along —
+      // `packages/voice-realtime-protocol/src/__tests__/browser-safety.test.ts`
+      // fails the build if that stops being true.
+      '@ethosagent/voice-realtime-protocol': resolve(root, 'packages/voice-realtime-protocol/src'),
     },
     // Vite's default order puts '.js' ahead of '.ts'/'.tsx'. Several workspace
     // packages still carry committed compiled mirrors next to their sources

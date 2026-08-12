@@ -78,12 +78,41 @@ export interface TalkModeCallBarProps {
   caption?: string | null;
   /** Voice fell back to text — the strip collapses to a dismissible notice. */
   degraded?: VoiceDegradedNotice | null;
+  /**
+   * Voice WORKS but not on the configured tier (realtime was refused or
+   * unavailable). Renders as a dismissible line ABOVE a live strip, because the
+   * call is still going — unlike `degraded`, which replaces the strip.
+   */
+  notice?: string | null;
+  /** Which tier is serving this call, for the mono detail label. */
+  tier?: 'pipeline' | 'realtime' | null;
+  /** True while the user has explicitly chosen the private/offline pipeline. */
+  privateMode?: boolean;
+  /**
+   * Choose the private/offline pipeline for this conversation. Offered only
+   * while the realtime tier is running — the pipeline IS the private mode, so
+   * there is nothing to offer once it is already what is serving.
+   */
+  onUsePrivateMode?: () => void;
+  /**
+   * Undo that choice. Offered only while the choice is in effect: on a call
+   * that landed on the pipeline because realtime was REFUSED, a "use realtime"
+   * control would be a button that cannot work.
+   */
+  onLeavePrivateMode?: () => void;
   /** The browser refused the mic — guidance, never a dead mic icon. */
   micDenied?: boolean;
   onDismissNotice?: () => void;
   /** Providers + models that ACTUALLY served this call, for the mono labels. */
   sttProvider?: string | null;
   sttModel?: string | null;
+  /**
+   * The realtime provider and model actually serving this call. Known exactly
+   * (the mint answered with both), unlike the pipeline tier's model, which the
+   * page still reads from the deployment default.
+   */
+  realtimeProvider?: string | null;
+  realtimeModel?: string | null;
   ttsProvider?: string | null;
   ttsModel?: string | null;
   latency?: VoiceTurnLatency;
@@ -102,10 +131,17 @@ export function TalkModeCallBar({
   onHangUp,
   caption,
   degraded,
+  notice,
+  tier,
+  privateMode,
+  onUsePrivateMode,
+  onLeavePrivateMode,
   micDenied,
   onDismissNotice,
   sttProvider,
   sttModel,
+  realtimeProvider,
+  realtimeModel,
   ttsProvider,
   ttsModel,
   latency,
@@ -136,11 +172,24 @@ export function TalkModeCallBar({
     );
   }
 
-  const summary = providerSummary({ status, sttProvider, sttModel, ttsProvider, ttsModel });
+  const summary = providerSummary({
+    status,
+    sttProvider,
+    sttModel,
+    ttsProvider,
+    ttsModel,
+    realtimeProvider,
+    realtimeModel,
+  });
   const totalMs = latency?.totalMs ?? null;
 
   return (
     <section className="talk-call-bar" aria-label="Voice call controls">
+      {/* The tier fell back. The call is LIVE underneath, so this is a line
+          above the strip rather than the strip collapsing into it. */}
+      {notice ? (
+        <InlineNotice className="talk-notice-tier" text={notice} onDismiss={onDismissNotice} />
+      ) : null}
       <div className="talk-call-row">
         <SpeakingIndicator status={status} micLevels={micLevels} muted={muted} />
         <span className="talk-status-label" role="status">
@@ -188,11 +237,34 @@ export function TalkModeCallBar({
       </div>
       {detailOpen ? (
         <div className="talk-call-detail talk-mono">
-          {sttProvider ? <span>{label('stt', sttProvider, sttModel)}</span> : null}
-          {ttsProvider ? <span>{label('tts', ttsProvider, ttsModel)}</span> : null}
-          <span>llm {formatMs(latency?.llmMs)}</span>
-          <span>audio {formatMs(latency?.ttsMs)}</span>
-          <span>total {formatMs(latency?.totalMs)}</span>
+          {callDetailItems({
+            tier,
+            realtimeProvider,
+            realtimeModel,
+            sttProvider,
+            sttModel,
+            ttsProvider,
+            ttsModel,
+            latency,
+          }).map((item) => (
+            <span key={item}>{item}</span>
+          ))}
+          {/* The private/offline mode IS the pipeline tier, so it is only worth
+              offering while something else is serving — and only worth undoing
+              while the user's own choice is what is holding the call there. */}
+          {privateMode && onLeavePrivateMode ? (
+            <button
+              type="button"
+              className="talk-mono talk-private-btn"
+              onClick={onLeavePrivateMode}
+            >
+              leave private mode
+            </button>
+          ) : tier === 'realtime' && onUsePrivateMode ? (
+            <button type="button" className="talk-mono talk-private-btn" onClick={onUsePrivateMode}>
+              use private mode
+            </button>
+          ) : null}
         </div>
       ) : null}
     </section>
@@ -224,6 +296,38 @@ function InlineNotice({
   );
 }
 
+/**
+ * The expandable detail row's mono labels, in order.
+ *
+ * Pure and exported so the label vocabulary is testable without a DOM: the row
+ * only exists while the toggle is open, and a `renderToStaticMarkup` harness
+ * always renders it closed.
+ */
+export function callDetailItems(opts: {
+  tier?: 'pipeline' | 'realtime' | null;
+  realtimeProvider?: string | null;
+  realtimeModel?: string | null;
+  sttProvider?: string | null;
+  sttModel?: string | null;
+  ttsProvider?: string | null;
+  ttsModel?: string | null;
+  latency?: VoiceTurnLatency | undefined;
+}): string[] {
+  return [
+    // Which engine is talking, in the same mono label vocabulary as the
+    // providers beside it — never a badge, never a debug panel.
+    ...(opts.tier ? [`tier ${opts.tier}`] : []),
+    ...(opts.realtimeProvider
+      ? [label('realtime', opts.realtimeProvider, opts.realtimeModel)]
+      : []),
+    ...(opts.sttProvider ? [label('stt', opts.sttProvider, opts.sttModel)] : []),
+    ...(opts.ttsProvider ? [label('tts', opts.ttsProvider, opts.ttsModel)] : []),
+    `llm ${formatMs(opts.latency?.llmMs)}`,
+    `audio ${formatMs(opts.latency?.ttsMs)}`,
+    `total ${formatMs(opts.latency?.totalMs)}`,
+  ];
+}
+
 /** `{provider} · {model}` in the existing vocabulary — never a badge. */
 function label(kind: string, provider: string, model: string | null | undefined): string {
   return model ? `${kind} ${provider} · ${model}` : `${kind} ${provider}`;
@@ -240,7 +344,16 @@ function providerSummary(opts: {
   sttModel?: string | null;
   ttsProvider?: string | null;
   ttsModel?: string | null;
+  realtimeProvider?: string | null;
+  realtimeModel?: string | null;
 }): string {
+  // On the realtime tier ONE provider both hears and speaks, so there is no
+  // listening/speaking split to pick between.
+  if (opts.realtimeProvider) {
+    return opts.realtimeModel
+      ? `${opts.realtimeProvider} · ${opts.realtimeModel}`
+      : opts.realtimeProvider;
+  }
   const speaking = opts.status === 'agent_speaking' || opts.status === 'interrupted';
   if (speaking && opts.ttsProvider) {
     return opts.ttsModel ? `${opts.ttsProvider} · ${opts.ttsModel}` : opts.ttsProvider;

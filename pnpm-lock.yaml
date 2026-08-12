@@ -451,6 +451,9 @@ importers:
       '@ethosagent/ui-components':
         specifier: workspace:*
         version: link:../../packages/ui-components
+      '@ethosagent/voice-realtime-protocol':
+        specifier: workspace:*
+        version: link:../../packages/voice-realtime-protocol
       '@ethosagent/voice-text':
         specifier: workspace:*
         version: link:../../packages/voice-text
@@ -1923,6 +1926,12 @@ importers:
       '@ethosagent/types':
         specifier: workspace:*
         version: link:../../packages/types
+      '@ethosagent/voice-realtime-protocol':
+        specifier: workspace:*
+        version: link:../../packages/voice-realtime-protocol
+      ws:
+        specifier: ^8.20.0
+        version: 8.21.0
 
   extensions/voice-session:
     dependencies:
@@ -2137,6 +2146,12 @@ importers:
       '@types/react':
         specifier: ^19.0.0
         version: 19.2.16
+
+  packages/voice-realtime-protocol:
+    dependencies:
+      '@ethosagent/types':
+        specifier: workspace:*
+        version: link:../types
 
   packages/voice-text: {}
 

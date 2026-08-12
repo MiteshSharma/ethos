@@ -19,8 +19,8 @@ import { runVoiceAgentTurn } from '../features/voice/chat-voice-runner';
 import { personalityCanTalk } from '../features/voice/gating';
 import { createPushToTalkHandlers } from '../features/voice/push-to-talk';
 import { TalkModeCallBar, TalkModeToggle } from '../features/voice/TalkMode';
-import { createTalkModeClient } from '../features/voice/talk-mode-client';
-import { useVoiceCall } from '../features/voice/useVoiceCall';
+import { createTalkModeClient, type RealtimeTokenAnswer } from '../features/voice/talk-mode-client';
+import { useVoiceCall, type VoiceCallClientHooks } from '../features/voice/useVoiceCall';
 import type { VoiceCallClient } from '../features/voice/voice-call-client';
 import { voiceCaption } from '../features/voice/voice-call-reducer';
 import { useActivePersonality } from '../hooks/useActivePersonality';
@@ -357,13 +357,41 @@ export function Chat() {
   const sessionIdRef = useRef(currentSessionId);
   sessionIdRef.current = currentSessionId;
 
+  // The user's explicit private/offline choice. Held in a ref because the
+  // client factory reads it at CONNECT time — flipping it must change what the
+  // next call dials, not rebuild a client mid-call — and mirrored into state so
+  // the strip can offer the way back out.
+  const [privateVoice, setPrivateVoice] = useState(false);
+  const privateVoiceRef = useRef(false);
+  privateVoiceRef.current = privateVoice;
+  // Which realtime provider/model actually served the call. Reported by the
+  // transport once the mint answered, so the strip's `{provider} · {model}`
+  // names what ran instead of what config defaults to.
+  const [realtimeRan, setRealtimeRan] = useState<{ provider: string; model: string | null } | null>(
+    null,
+  );
+
   const createVoiceClient = useCallback(
-    (): VoiceCallClient =>
+    (hooks: VoiceCallClientHooks): VoiceCallClient =>
       // Streaming (binary PCM over one persistent WebSocket, WebAudio playout)
       // where the browser supports it; the batch RPC path otherwise. Same
       // events either way, so nothing below this line changes.
       createTalkModeClient({
         sessionId: () => sessionIdRef.current,
+        // The realtime tier is decided SERVER-side: this asks for a credential
+        // and gets either one or a typed reason, and the transport degrades to
+        // the local pipeline with that reason on screen.
+        mintRealtimeToken: (): Promise<RealtimeTokenAnswer> =>
+          rpc.voice.realtimeToken({ ...(personalityId ? { personalityId } : {}) }),
+        forcePipeline: privateVoiceRef.current,
+        onTier: (tier, detail) => {
+          hooks.onTier(tier);
+          setRealtimeRan(
+            tier === 'realtime' && detail.provider
+              ? { provider: detail.provider, model: detail.model ?? null }
+              : null,
+          );
+        },
         // `personalityId` picks the STT entry the same way it picks the voice,
         // so the batch fallback hears through the same engine the streaming
         // lane does rather than silently reverting to the global default.
@@ -442,14 +470,43 @@ export function Chat() {
     voice.start();
   }, [sttConfigured, voice.start, notification]);
 
+  /**
+   * Turn on the private/offline mode for the NEXT call.
+   *
+   * It cannot switch mid-call: the two tiers hold different sockets and
+   * different audio graphs, so "switching" is hanging up and dialling again.
+   * Saying that plainly beats silently reconnecting under the user.
+   */
+  const handleUsePrivateMode = useCallback(() => {
+    setPrivateVoice(true);
+    voice.hangUp();
+    notification.info({
+      message: 'Private mode',
+      description:
+        'Voice will run entirely on the local pipeline. Start the call again to talk privately.',
+      placement: 'topRight',
+    });
+  }, [voice.hangUp, notification]);
+
+  /** Undo the private/offline choice. Takes effect on the next call, same as on. */
+  const handleLeavePrivateMode = useCallback(() => {
+    setPrivateVoice(false);
+    voice.hangUp();
+    notification.info({
+      message: 'Private mode off',
+      description: 'Start the call again to use the realtime voice tier.',
+      placement: 'topRight',
+    });
+  }, [voice.hangUp, notification]);
+
   useEffect(() => {
     // The strip owns the mic-denied and degraded-to-text stories — a toast on
     // top of them would say the same thing twice, in a place the user cannot
     // act on.
-    if (voice.error && !voice.micDenied && !voice.degraded) {
+    if (voice.error && !voice.micDenied && !voice.degraded && !voice.notice) {
       notification.info({ message: 'Voice', description: voice.error, placement: 'topRight' });
     }
-  }, [voice.error, voice.micDenied, voice.degraded, notification]);
+  }, [voice.error, voice.micDenied, voice.degraded, voice.notice, notification]);
 
   // Keyboard push-to-talk: hold Space to talk, Esc ends the call. Bound only
   // while a call is up, and never while the user is typing (Space is a
@@ -542,10 +599,17 @@ export function Chat() {
             degraded={voice.degraded}
             micDenied={voice.micDenied}
             onDismissNotice={voice.dismissNotice}
+            notice={voice.notice}
+            tier={voice.tier}
+            privateMode={privateVoice}
+            onUsePrivateMode={handleUsePrivateMode}
+            onLeavePrivateMode={handleLeavePrivateMode}
             sttProvider={voice.sttProvider ?? configQuery.data?.voiceProvider ?? null}
             sttModel={configQuery.data?.voiceModel ?? null}
             ttsProvider={voice.ttsProvider ?? configQuery.data?.voiceTtsProvider ?? null}
             ttsModel={configQuery.data?.voiceTtsModel ?? null}
+            realtimeProvider={realtimeRan?.provider ?? null}
+            realtimeModel={realtimeRan?.model ?? null}
             latency={voice.latency}
           />
         ) : null}

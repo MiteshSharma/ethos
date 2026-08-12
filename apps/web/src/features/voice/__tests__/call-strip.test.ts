@@ -1,7 +1,7 @@
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
-import { TalkModeCallBar, type TalkModeCallBarProps } from '../TalkMode';
+import { callDetailItems, TalkModeCallBar, type TalkModeCallBarProps } from '../TalkMode';
 import type { VoiceCallStatus } from '../voice-call-reducer';
 
 // The CallStrip's nine interaction states (plan DR1). Each case asserts what
@@ -159,5 +159,118 @@ describe('CallStrip — controls', () => {
     const html = strip({ status: 'listening' });
     expect(html).toContain('talk-call-row');
     expect(html).not.toContain('ant-card');
+  });
+});
+
+describe('CallStrip — the realtime tier renders in the SAME strip (DR3)', () => {
+  it('names the realtime provider and its model, one label for both directions', () => {
+    // On this tier ONE provider both hears and speaks, so there is no
+    // listening/speaking split to choose between.
+    const html = strip({
+      status: 'agent_speaking',
+      tier: 'realtime',
+      realtimeProvider: 'openai-realtime',
+      realtimeModel: 'gpt-realtime',
+    });
+    expect(html).toContain('openai-realtime · gpt-realtime');
+    expect(html).toContain('talk-mono');
+    expect(html).not.toContain('badge');
+  });
+
+  it('the tier is a mono label in the expandable detail, never a new surface', () => {
+    // Rendered only when the detail is open, which it is not by default — the
+    // tier is a detail, not a dashboard.
+    const collapsed = strip({ status: 'listening', tier: 'realtime' });
+    expect(collapsed).not.toContain('talk-call-detail');
+    expect(collapsed).not.toContain('tier realtime');
+  });
+
+  it('a refused realtime tier is a dismissible line ABOVE a live strip', () => {
+    // Unlike `degraded`, which replaces the strip: voice still works here, so
+    // the controls must survive.
+    const html = strip({
+      status: 'listening',
+      tier: 'pipeline',
+      notice: 'Realtime provider "gemini-live" cannot issue a browser credential.',
+      onDismissNotice: () => {},
+    });
+    expect(html).toContain('talk-notice-tier');
+    expect(html).toContain('cannot issue a browser credential');
+    // The call is still up: mute and hang-up are still there.
+    expect(html).toContain('aria-label="Mute microphone"');
+    expect(html).toContain('aria-label="End call"');
+    expect(html).toContain('aria-label="Dismiss"');
+  });
+
+  it('the private-mode choice is reversible while it is the user’s own choice', () => {
+    // A one-way door would be the wrong control: the pipeline can also be
+    // serving because realtime was REFUSED, and offering "use realtime" there
+    // would be a button that cannot work.
+    const props = {
+      status: 'listening' as const,
+      tier: 'pipeline' as const,
+      onUsePrivateMode: () => {},
+      onLeavePrivateMode: () => {},
+    };
+    // Both controls live in the collapsed detail, so neither reaches the strip
+    // row itself. (`renderToStaticMarkup` always renders the toggle closed, so
+    // the open row's contents are covered by `callDetailItems` below instead.)
+    expect(strip({ ...props, privateMode: true })).not.toContain('leave private mode');
+    expect(strip({ ...props, privateMode: false })).not.toContain('use private mode');
+  });
+
+  it('keeps the private-mode control behind the toggle, not on the strip itself', () => {
+    // The strip does not grow a control row for the tier; the choice lives in
+    // the same expandable detail the provider labels do.
+    const html = strip({
+      status: 'listening',
+      tier: 'realtime',
+      realtimeProvider: 'openai-realtime',
+      onUsePrivateMode: () => {},
+    });
+    expect(html).not.toContain('talk-private-btn');
+    expect(html).not.toContain('talk-call-detail');
+  });
+});
+
+describe('CallStrip — the expandable detail row', () => {
+  it('leads with the tier, then the provider that served, then the stages', () => {
+    expect(
+      callDetailItems({
+        tier: 'realtime',
+        realtimeProvider: 'openai-realtime',
+        realtimeModel: 'gpt-realtime',
+        latency: { llmMs: 300, ttsMs: 120, totalMs: 420 },
+      }),
+    ).toEqual([
+      'tier realtime',
+      'realtime openai-realtime · gpt-realtime',
+      'llm 300ms',
+      'audio 120ms',
+      'total 420ms',
+    ]);
+  });
+
+  it('names the pipeline tier’s two providers separately', () => {
+    expect(
+      callDetailItems({
+        tier: 'pipeline',
+        sttProvider: 'local-stt',
+        sttModel: 'whisper-large-v3',
+        ttsProvider: 'local-tts',
+        ttsModel: 'kokoro',
+      }),
+    ).toEqual([
+      'tier pipeline',
+      'stt local-stt · whisper-large-v3',
+      'tts local-tts · kokoro',
+      'llm —',
+      'audio —',
+      'total —',
+    ]);
+  });
+
+  it('says nothing about a tier nobody reported', () => {
+    expect(callDetailItems({})).toEqual(['llm —', 'audio —', 'total —']);
   });
 });

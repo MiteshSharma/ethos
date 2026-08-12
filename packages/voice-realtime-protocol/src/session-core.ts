@@ -2,10 +2,12 @@
 // socket, own the event stream, buffer outbound audio until the provider has
 // confirmed the session, and guarantee exactly one terminal `closed` event.
 //
-// The two providers differ only in what they write and how they decode; if this
-// bookkeeping lived in each of them it would drift, and the half that drifted
-// would be the half nobody exercises (Gemini) — which is precisely the failure
-// the shared conformance suite exists to catch.
+// The two providers differ only in what they write and how they decode — that
+// half is a `RealtimeProtocolCodec` (`./codec`), and `createRealtimeProtocolSession`
+// (`./session`) is the two bolted together. If this bookkeeping lived in each
+// provider it would drift, and the half that drifted would be the half nobody
+// exercises (Gemini) — which is precisely the failure the shared conformance
+// suite exists to catch.
 
 import type { RealtimeEvent } from '@ethosagent/types';
 import { RealtimeEventQueue } from './event-queue';

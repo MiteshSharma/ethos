@@ -19,18 +19,30 @@ export const REALTIME_CONTRACT_VERSION = 1;
 
 /**
  * The only audio encoding on this contract: signed 16-bit little-endian PCM,
- * mono, at `caps.sampleRate`. Both target providers accept it, and it is what
- * the browser ↔ web-api voice lane already carries (`VOICE_PCM_MIME` in
- * `@ethosagent/web-contracts`). A format-negotiation layer here would be an
- * abstraction with one implementation on each side, so there isn't one:
- * a provider that speaks something else transcodes at its own edge.
+ * mono, at `caps.inputSampleRate` going up and `caps.outputSampleRate` coming
+ * down. Both target providers accept it, and it is what the browser ↔ web-api
+ * voice lane already carries (`VOICE_PCM_MIME` in `@ethosagent/web-contracts`).
+ * A format-negotiation layer here would be an abstraction with one
+ * implementation on each side, so there isn't one: a provider that speaks
+ * something else transcodes at its own edge.
  */
 export const REALTIME_AUDIO_FORMAT = 'pcm_s16le';
 
 export interface RealtimeVoiceCapabilities {
   kind: 'realtime';
-  /** Sample rate, in Hz, of the PCM16 mono frames in BOTH directions. */
-  sampleRate: number;
+  /**
+   * Sample rate, in Hz, the provider ACCEPTS on {@link RealtimeSession.sendAudio}.
+   *
+   * Separate from {@link RealtimeVoiceCapabilities.outputSampleRate} because a
+   * realtime provider is not obliged to be symmetric — Gemini Live listens at
+   * 16 kHz and speaks at 24 kHz. A single number forced the asymmetric provider
+   * to resample every captured frame internally, which is pure loss on the
+   * audio hot path for a fact the caller could simply have been told. Callers
+   * capture at THIS rate.
+   */
+  inputSampleRate: number;
+  /** Sample rate, in Hz, of the PCM16 mono frames the provider SENDS. Callers play out at this rate. */
+  outputSampleRate: number;
   /**
    * The session runs on this machine and no audio leaves it. This exact flag
    * is what the local-only egress gate keys on (`resolve()` in
@@ -84,7 +96,7 @@ export interface RealtimeSessionOptions {
 export type RealtimeEvent =
   /** Session is live and accepting audio. Gates the "start sending mic" edge. */
   | { type: 'session_open'; sessionId: string; model?: string }
-  /** Output speech. The surface plays these frames; PCM16 mono at `sampleRate`. */
+  /** Output speech. The surface plays these frames; PCM16 mono at `caps.outputSampleRate`. */
   | { type: 'audio'; pcm: Uint8Array; sampleRate: number }
   /**
    * Incremental transcript for EITHER role. `isFinal` marks the settled text;
@@ -120,7 +132,7 @@ export interface RealtimeSession {
    * iterable completes after the `closed` event.
    */
   readonly events: AsyncIterable<RealtimeEvent>;
-  /** Push captured mic audio. PCM16 mono at `caps.sampleRate`. */
+  /** Push captured mic audio. PCM16 mono at `caps.inputSampleRate`. */
   sendAudio(pcm: Uint8Array): Promise<void>;
   /** Answer a `tool_call` event. `output` is the tool result, already stringified. */
   sendToolResult(callId: string, output: string): Promise<void>;

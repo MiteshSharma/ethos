@@ -17,9 +17,20 @@ import { classifyVoiceStartError } from './voice-start-error';
 
 const METER_BARS = 32;
 
+/** What the hook hands a client factory so the client can report back. */
+export interface VoiceCallClientHooks {
+  /**
+   * Which tier this call settled on. The TRANSPORT decides — realtime only runs
+   * when a token was actually minted AND the provider socket actually opened —
+   * so the reducer is told rather than asked, and the strip's tier label can
+   * never claim a tier that did not run.
+   */
+  onTier(tier: 'pipeline' | 'realtime'): void;
+}
+
 export interface UseVoiceCallOptions {
   /** Factory for the live-call client. Defaults to the unwired placeholder. */
-  createClient?: () => VoiceCallClient;
+  createClient?: (hooks: VoiceCallClientHooks) => VoiceCallClient;
 }
 
 /**
@@ -45,6 +56,10 @@ export interface UseVoiceCall {
   error: string | null;
   /** Voice fell back to text. Null until it does, or once dismissed. */
   degraded: VoiceDegradedNotice | null;
+  /** Voice works, but not on the configured tier. Null until it happens. */
+  notice: string | null;
+  /** Which tier is serving this call. Null until the transport decides. */
+  tier: 'pipeline' | 'realtime' | null;
   /** The browser refused the mic — render guidance, not a dead icon. */
   micDenied: boolean;
   sttProvider: string | null;
@@ -167,7 +182,7 @@ export function useVoiceCall(options: UseVoiceCallOptions = {}): UseVoiceCall {
     if (state.status !== 'idle' && state.status !== 'ended') return;
     dispatch({ type: 'start' });
 
-    const client = createClient();
+    const client = createClient({ onTier: (tier) => dispatch({ type: 'tier', tier }) });
     clientRef.current = client;
     setLatency(NO_LATENCY);
     turnMarks.current = null;
@@ -224,6 +239,8 @@ export function useVoiceCall(options: UseVoiceCallOptions = {}): UseVoiceCall {
     muted,
     error: state.error,
     degraded: state.degraded,
+    notice: state.notice,
+    tier: state.tier,
     micDenied: state.micDenied,
     sttProvider: state.sttProvider,
     ttsProvider: state.ttsProvider,

@@ -1012,6 +1012,11 @@ export interface CreateAgentLoopResult {
   /** TTS provider registry — threaded to Gateway for voice synthesis. */
   ttsProviders: import('@ethosagent/types').TtsProviderRegistry;
   /**
+   * Realtime (speech-to-speech) provider registry — threaded to web-api so the
+   * browser talk lane can mint an ephemeral token on the realtime tier.
+   */
+  realtimeProviders: import('@ethosagent/types').RealtimeVoiceProviderRegistry;
+  /**
    * Real-time voice stack built from `config.voice.*`. Absent when no voice
    * block is configured — the clean no-op every non-voice deployment takes.
    */
@@ -1034,6 +1039,17 @@ export interface CreateAgentLoopResult {
      * `auxiliary.asr` default.
      */
     sttRoster?: Record<string, import('@ethosagent/types').SttProviderEntry>;
+    /**
+     * Named REALTIME roster from `voice.realtime.providers.*`. Unlike the other
+     * two this roster has no `auxiliary.*` default underneath it:
+     * `realtimeDefault` NAMES one of these entries, and a deployment with
+     * neither simply has no realtime tier.
+     */
+    realtimeRoster?: Record<string, import('@ethosagent/types').RealtimeProviderEntry>;
+    /** `voice.realtime.default` — the roster key a personality that names none gets. */
+    realtimeDefault?: string;
+    /** `voice.tier` — the deployment's default voice engine. */
+    tier?: 'pipeline' | 'realtime';
     secretsResolver: import('@ethosagent/types').SecretsResolver;
     /**
      * Local-only voice-egress allowlist from `voice.trustedPlugins`. Present

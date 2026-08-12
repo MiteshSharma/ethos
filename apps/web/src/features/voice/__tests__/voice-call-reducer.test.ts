@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest';
+import { TIER_DEGRADED_CODE as TRANSPORT_TIER_DEGRADED_CODE } from '../talk-mode-client';
 import { parseVoiceCallControlEvent, type VoiceCallEvent } from '../voice-call-client';
 import {
   initialVoiceCallState,
   MIC_DENIED_CODE,
+  TIER_DEGRADED_CODE,
   type VoiceCallState,
   voiceCallReducer,
   voiceCaption,
@@ -339,5 +341,50 @@ describe('voiceCaption', () => {
   it('captions nothing while the user has the floor', () => {
     const state = driveThroughClient([{ type: 'utterance_committed', text: 'hi' }]);
     expect(voiceCaption(state)).toBeNull();
+  });
+});
+
+describe('voiceCallReducer — realtime tier degrade', () => {
+  it('keeps the call alive and surfaces the reason as a dismissible notice', () => {
+    // The realtime tier was refused; the pipeline tier is serving the call. The
+    // strip must NOT collapse the way `degraded` makes it — voice still works.
+    const state = driveThroughClient([
+      {
+        type: 'error',
+        error: 'Realtime provider "gemini-live" cannot issue a browser credential.',
+        code: TIER_DEGRADED_CODE,
+      },
+      { type: 'utterance_committed', text: 'hi' },
+    ]);
+    expect(state.notice).toBe('Realtime provider "gemini-live" cannot issue a browser credential.');
+    expect(state.degraded).toBeNull();
+    expect(state.status).toBe('thinking');
+    // The state word stays the state word — the reason lives in the notice.
+    expect(state.error).toBeNull();
+  });
+
+  it('clears the tier notice on dismiss', () => {
+    let state = driveThroughClient([
+      { type: 'error', error: 'no browser credential', code: TIER_DEGRADED_CODE },
+    ]);
+    state = voiceCallReducer(state, { type: 'dismiss-notice' });
+    expect(state.notice).toBeNull();
+  });
+
+  it('records the tier the transport settled on', () => {
+    let state = voiceCallReducer(initialVoiceCallState, { type: 'start' });
+    expect(state.tier).toBeNull();
+    state = voiceCallReducer(state, { type: 'tier', tier: 'realtime' });
+    expect(state.tier).toBe('realtime');
+    // A fresh call forgets it — the next one may land on a different tier.
+    expect(voiceCallReducer(state, { type: 'start' }).tier).toBeNull();
+  });
+});
+
+describe('tier-degrade code', () => {
+  it('is the same string the transport emits', () => {
+    // The reducer keeps its own literal so it imports no transport; this is the
+    // pin that stops the two from drifting apart silently.
+    expect(TIER_DEGRADED_CODE).toBe(TRANSPORT_TIER_DEGRADED_CODE);
   });
 });

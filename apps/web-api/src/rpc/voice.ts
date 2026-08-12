@@ -30,4 +30,19 @@ export const voiceRouter = {
     if (!context.voice) return { default: { providerId: null }, roster: {} };
     return context.voice.listSttEntries();
   }),
+  realtimeToken: os.voice.realtimeToken.handler(async ({ input, context }) => {
+    // No service wired = no realtime tier, which is a state the browser
+    // renders (it starts a pipeline call) rather than an error to throw at it.
+    if (!context.voice) {
+      return {
+        ok: false as const,
+        reason: 'not_configured' as const,
+        message: 'No realtime voice provider is configured for this deployment.',
+        providerId: null,
+      };
+    }
+    return context.voice.mintRealtimeToken({
+      ...(input.personalityId ? { personalityId: input.personalityId } : {}),
+    });
+  }),
 };

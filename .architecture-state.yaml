@@ -987,6 +987,11 @@ tiers:
     tier: 2
     assigned: 2026-08-12
 
+  packages/voice-realtime-protocol:
+    package: "@ethosagent/voice-realtime-protocol"
+    tier: 2
+    assigned: 2026-08-12
+
   packages/voice-text:
     package: "@ethosagent/voice-text"
     tier: 2

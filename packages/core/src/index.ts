@@ -117,17 +117,23 @@ export { DefaultDocumentExtractorRegistry } from './providers/document-extractor
 export { DefaultExecutionBackendRegistry } from './providers/execution-registry';
 export { DefaultLLMProviderRegistry } from './providers/llm-registry';
 export { DefaultMemoryProviderRegistry } from './providers/memory-registry';
+export { DefaultRealtimeVoiceProviderRegistry } from './providers/realtime-registry';
 export { DefaultStorageRegistry } from './providers/storage-registry';
 export { DefaultSttProviderRegistry } from './providers/stt-registry';
 export { DefaultTtsProviderRegistry } from './providers/tts-registry';
 export type {
+  RealtimeEntrySelection,
+  RealtimeProviderForPersonality,
   ResolvedVoicePreferences,
+  ResolveRealtimeForPersonalityOptions,
+  ResolveRealtimeOptions,
   ResolveSttForPersonalityOptions,
   ResolveSttOptions,
   ResolveTtsForPersonalityOptions,
   ResolveTtsOptions,
   ResolveVoicePreferencesOptions,
   ResolveVoiceProviderOptions,
+  SelectRealtimeEntryOptions,
   SelectSttEntryOptions,
   SelectTtsEntryOptions,
   SelectVoiceEntryOptions,
@@ -141,11 +147,15 @@ export type {
   VoiceResolutionErrorCode,
 } from './providers/voice-resolution';
 export {
+  realtimeEntryProviderConfig,
+  resolveRealtimeProvider,
+  resolveRealtimeProviderForPersonality,
   resolveSttProvider,
   resolveSttProviderForPersonality,
   resolveTtsProvider,
   resolveTtsProviderForPersonality,
   resolveVoicePreferences,
+  selectRealtimeEntry,
   selectSttEntry,
   selectTtsEntry,
   sttEntryProviderConfig,

@@ -18,6 +18,9 @@
 import type {
   Logger,
   PersonalityVoiceConfig,
+  RealtimeProviderEntry,
+  RealtimeVoiceProvider,
+  RealtimeVoiceProviderRegistry,
   SecretsResolver,
   SttProvider,
   SttProviderEntry,
@@ -67,6 +70,11 @@ export interface ResolveTtsOptions extends ResolveVoiceProviderOptions {
   registry: TtsProviderRegistry | undefined;
 }
 
+export interface ResolveRealtimeOptions extends ResolveVoiceProviderOptions {
+  /** Registry to resolve from. Absent → `not_configured`. */
+  registry: RealtimeVoiceProviderRegistry | undefined;
+}
+
 const NOOP_SECRETS: SecretsResolver = {
   get: async () => null,
   set: async () => {},
@@ -84,8 +92,23 @@ const NOOP_LOGGER: Logger = {
   },
 };
 
+/** The three provider kinds, and the config key each one's default lives under. */
+type VoiceKind = 'stt' | 'tts' | 'realtime';
+
+/**
+ * Where each kind's default entry comes from, for the unknown-name log line.
+ * Realtime has no `auxiliary.*` sibling — its default is a roster key named by
+ * `voice.realtime.default`, which is why {@link selectRealtimeEntry} needs a
+ * second lookup that the other two do not.
+ */
+const DEFAULT_ENTRY_KEY: Record<VoiceKind, string> = {
+  tts: 'auxiliary.tts',
+  stt: 'auxiliary.asr',
+  realtime: 'voice.realtime.default',
+};
+
 async function resolve<P extends { caps: { local?: boolean } }>(
-  kind: 'stt' | 'tts',
+  kind: VoiceKind,
   opts: ResolveVoiceProviderOptions,
   lookup: ((name: string) => ((ctx: FactoryContext) => P | Promise<P>) | undefined) | undefined,
 ): Promise<VoiceResolution<P>> {
@@ -157,6 +180,23 @@ export function resolveTtsProvider(opts: ResolveTtsOptions): Promise<VoiceResolu
   return resolve<TtsProvider>('tts', opts, registry ? (name) => registry.get(name) : undefined);
 }
 
+/**
+ * Resolve the configured realtime (speech-to-speech) provider. The single
+ * realtime resolution path, and the same `resolve()` — so the local-only egress
+ * gate applies to a hosted realtime session exactly as it does to a hosted
+ * transcriber, without a second copy of the rule to keep in step.
+ */
+export function resolveRealtimeProvider(
+  opts: ResolveRealtimeOptions,
+): Promise<VoiceResolution<RealtimeVoiceProvider>> {
+  const registry = opts.registry;
+  return resolve<RealtimeVoiceProvider>(
+    'realtime',
+    opts,
+    registry ? (name) => registry.get(name) : undefined,
+  );
+}
+
 /** Error carrying the resolution failure code, for callers that throw. */
 export class VoiceProviderError extends Error {
   readonly code: VoiceResolutionErrorCode;
@@ -224,6 +264,7 @@ export interface VoiceEntrySelection<E> {
 
 export type TtsEntrySelection = VoiceEntrySelection<TtsProviderEntry>;
 export type SttEntrySelection = VoiceEntrySelection<SttProviderEntry>;
+export type RealtimeEntrySelection = VoiceEntrySelection<RealtimeProviderEntry>;
 
 export interface SelectVoiceEntryOptions<E> {
   /** `voice.tts_provider` / `voice.stt_provider` for the personality this turn. */
@@ -236,6 +277,19 @@ export interface SelectVoiceEntryOptions<E> {
 
 export type SelectTtsEntryOptions = SelectVoiceEntryOptions<TtsProviderEntry>;
 export type SelectSttEntryOptions = SelectVoiceEntryOptions<SttProviderEntry>;
+
+export interface SelectRealtimeEntryOptions extends SelectVoiceEntryOptions<RealtimeProviderEntry> {
+  /**
+   * `voice.realtime.default` — the roster key this deployment falls back to.
+   *
+   * The one place the realtime roster is NOT a mirror of the other two: TTS and
+   * STT fall back to an `auxiliary.*` entry that lives outside the roster,
+   * whereas realtime's default NAMES one of the roster's own entries. Absent,
+   * or naming an entry this deployment lacks, means "no realtime provider" —
+   * which is a legitimate deployment, not an error.
+   */
+  defaultEntryName?: string;
+}
 
 /**
  * Pick the roster entry for a turn:
@@ -252,7 +306,7 @@ export type SelectSttEntryOptions = SelectVoiceEntryOptions<SttProviderEntry>;
  * a name + config pair (every surface does) needs no second representation.
  */
 function selectVoiceEntry<E>(
-  kind: 'stt' | 'tts',
+  kind: VoiceKind,
   opts: SelectVoiceEntryOptions<E>,
 ): VoiceEntrySelection<E> {
   const requested = opts.requestedName?.trim();
@@ -260,7 +314,7 @@ function selectVoiceEntry<E>(
 
   const entry = opts.roster?.[requested];
   if (!entry) {
-    const defaultKey = kind === 'tts' ? 'auxiliary.tts' : 'auxiliary.asr';
+    const defaultKey = DEFAULT_ENTRY_KEY[kind];
     opts.logger?.warn(
       `voice: ${kind.toUpperCase()} provider "${requested}" is not in voice.${kind}.providers — ` +
         `falling back to the default ${defaultKey} entry`,
@@ -293,6 +347,42 @@ export function selectSttEntry(opts: SelectSttEntryOptions): SttEntrySelection {
 }
 
 /**
+ * Pick the realtime entry for a call: the personality's `voice.realtime_provider`
+ * first, then the deployment's `voice.realtime.default`, then nothing.
+ *
+ * The same decision as {@link selectTtsEntry}, run twice, because realtime's
+ * default is itself a roster key rather than a separate `auxiliary.*` entry.
+ * `entry: undefined` therefore means "this deployment has no realtime provider"
+ * — a real state the browser renders as "continuing on the pipeline tier",
+ * NOT the "use the default entry" it means for the other two kinds.
+ *
+ * The `reason` still reports why we ended up here (`roster` / `default` /
+ * `unknown_name`), so a personality naming an entry this machine lacks is
+ * distinguishable from one naming nothing at all — the surfaces render
+ * different copy for those two.
+ */
+export function selectRealtimeEntry(opts: SelectRealtimeEntryOptions): RealtimeEntrySelection {
+  const named = selectVoiceEntry<RealtimeProviderEntry>('realtime', {
+    ...(opts.requestedName ? { requestedName: opts.requestedName } : {}),
+    ...(opts.roster ? { roster: opts.roster } : {}),
+    ...(opts.logger ? { logger: opts.logger } : {}),
+  });
+  if (named.reason === 'roster') return named;
+
+  const fallbackName = opts.defaultEntryName?.trim();
+  const fallback = fallbackName ? opts.roster?.[fallbackName] : undefined;
+  if (!fallback || !fallbackName) return named;
+  return {
+    entry: fallback,
+    entryName: fallbackName,
+    // Why we are on the deployment default, not "the deployment default is a
+    // roster pick" — an unknown personality name stays visible.
+    reason: named.reason,
+    ...(named.requestedName ? { requestedName: named.requestedName } : {}),
+  };
+}
+
+/**
  * Factory config for one roster entry: every field EXCEPT `provider`, which
  * names the provider and is not a knob the factory reads.
  *
@@ -322,6 +412,13 @@ export function ttsEntryProviderConfig(
 /** Factory config for one STT roster entry. */
 export function sttEntryProviderConfig(
   entry: SttProviderEntry | undefined,
+): Record<string, unknown> {
+  return voiceEntryProviderConfig(entry);
+}
+
+/** Factory config for one realtime roster entry. */
+export function realtimeEntryProviderConfig(
+  entry: RealtimeProviderEntry | undefined,
 ): Record<string, unknown> {
   return voiceEntryProviderConfig(entry);
 }
@@ -373,6 +470,68 @@ export interface SttProviderForPersonality {
   resolution: VoiceResolution<SttProvider>;
   /** Which entry was chosen, and why — observable rather than inferred. */
   selection: SttEntrySelection;
+}
+
+export interface ResolveRealtimeForPersonalityOptions {
+  /** Registry to resolve from. Absent → `not_configured`. */
+  registry: RealtimeVoiceProviderRegistry | undefined;
+  /** `voice.realtime.providers.*`. */
+  roster?: Readonly<Record<string, RealtimeProviderEntry>>;
+  /** `voice.realtime.default` — the roster key used when the personality names none. */
+  defaultEntryName?: string;
+  /**
+   * The calling personality's `voice` block; `realtime_provider` names the entry.
+   *
+   * There is deliberately no `defaultProviderName` / `defaultProviderConfig`
+   * pair here, unlike the STT and TTS options: realtime has no `auxiliary.*`
+   * entry to fall back to, so the ONLY source of a provider is the roster.
+   */
+  personality?: PersonalityVoiceConfig;
+  secrets?: SecretsResolver;
+  logger?: Logger;
+  /** Local-only egress gate; see {@link ResolveVoiceProviderOptions}. */
+  trustedVoicePlugins?: ReadonlySet<string>;
+}
+
+export interface RealtimeProviderForPersonality {
+  /** The resolution, keyed on the entry's UNDERLYING provider id. */
+  resolution: VoiceResolution<RealtimeVoiceProvider>;
+  /** Which entry was chosen, and why — observable rather than inferred. */
+  selection: RealtimeEntrySelection;
+}
+
+/**
+ * Select this personality's realtime entry and resolve its provider. The exact
+ * mirror of {@link resolveTtsProviderForPersonality} and
+ * {@link resolveSttProviderForPersonality}, including the security line: the
+ * gate keys on `entry.provider` and the constructed provider's `caps.local`,
+ * never on the roster label. An entry called `local-realtime` backed by a
+ * hosted speech-to-speech model is refused before a session is opened and
+ * before a browser token is minted — and the refusal names the REAL provider,
+ * so an operator reading it is told what was actually about to run.
+ */
+export async function resolveRealtimeProviderForPersonality(
+  opts: ResolveRealtimeForPersonalityOptions,
+): Promise<RealtimeProviderForPersonality> {
+  const selection = selectRealtimeEntry({
+    ...(opts.personality?.realtime_provider
+      ? { requestedName: opts.personality.realtime_provider }
+      : {}),
+    ...(opts.roster ? { roster: opts.roster } : {}),
+    ...(opts.defaultEntryName ? { defaultEntryName: opts.defaultEntryName } : {}),
+    ...(opts.logger ? { logger: opts.logger } : {}),
+  });
+  const resolution = await resolveRealtimeProvider({
+    registry: opts.registry,
+    // No default provider id to fall back to: realtime lives entirely in the
+    // roster, so no entry means `not_configured` rather than a silent default.
+    providerName: selection.entry?.provider,
+    providerConfig: realtimeEntryProviderConfig(selection.entry),
+    ...(opts.secrets ? { secrets: opts.secrets } : {}),
+    ...(opts.logger ? { logger: opts.logger } : {}),
+    ...(opts.trustedVoicePlugins ? { trustedVoicePlugins: opts.trustedVoicePlugins } : {}),
+  });
+  return { resolution, selection };
 }
 
 /**

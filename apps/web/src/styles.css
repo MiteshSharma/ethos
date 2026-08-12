@@ -2514,6 +2514,14 @@ textarea {
   color: var(--ethos-warning);
 }
 
+/* The tier fell back to the local pipeline. The call is still live underneath,
+   so this sits ABOVE the strip rather than replacing it, and keeps the
+   secondary text colour — nothing failed, the call is simply not running where
+   it was configured to. */
+.talk-notice-tier {
+  border-bottom: none;
+}
+
 .talk-indicator {
   display: flex;
   align-items: center;
@@ -2613,6 +2621,19 @@ textarea {
   flex-wrap: wrap;
   gap: 12px;
   padding-left: 132px;
+}
+
+/* The explicit private/offline choice, in the mono detail row beside the tier
+   label it answers. A text control, not a button chrome — it belongs to the
+   same label vocabulary as everything else on this row. */
+.talk-private-btn {
+  padding: 0;
+  background: none;
+  border: none;
+  color: var(--ethos-accent);
+  cursor: pointer;
+  /* ≥44px touch target (DR5) without a 44px-tall text row. */
+  min-height: 44px;
 }
 
 .talk-btn {

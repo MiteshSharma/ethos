@@ -43,7 +43,12 @@ import { SessionsService } from './features/sessions/service';
 import { AUTH_COOKIE } from './middleware/auth';
 import type { ApiKeyAdminStore } from './middleware/bearer-auth';
 import { AllowlistRepository } from './repositories/allowlist.repository';
-import { ConfigRepository, parseSttRoster, parseTtsRoster } from './repositories/config.repository';
+import {
+  ConfigRepository,
+  parseRealtimeRoster,
+  parseSttRoster,
+  parseTtsRoster,
+} from './repositories/config.repository';
 import { EvolverRepository } from './repositories/evolver.repository';
 import { PlatformsRepository } from './repositories/platforms.repository';
 import { WebTokenRepository } from './repositories/web-token.repository';
@@ -182,6 +187,14 @@ export interface CreateWebApiOptions {
   attachmentCache?: import('@ethosagent/types').AttachmentCache;
   /** STT provider registry for voice transcription. */
   sttProviderRegistry?: import('@ethosagent/types').SttProviderRegistry;
+  /** Realtime (speech-to-speech) registry — backs `voice.realtimeToken`. */
+  realtimeProviderRegistry?: import('@ethosagent/types').RealtimeVoiceProviderRegistry;
+  /** Boot snapshot of `voice.realtime.providers.*`; live config wins over it. */
+  realtimeRoster?: Record<string, import('@ethosagent/types').RealtimeProviderEntry>;
+  /** Boot snapshot of `voice.realtime.default`. */
+  realtimeDefault?: string;
+  /** Boot snapshot of `voice.tier`. */
+  voiceTier?: 'pipeline' | 'realtime';
   /** Name of the STT provider (from auxiliary.asr.provider). */
   sttProviderName?: string;
   /** Config dict for the STT provider factory. */
@@ -582,6 +595,8 @@ export function createWebApi(opts: CreateWebApiOptions): CreateWebApiResult {
       };
       const ttsRoster = await resolveRoster(parseTtsRoster(raw.passthrough));
       const sttRoster = await resolveRoster(parseSttRoster(raw.passthrough));
+      const realtimeRoster = await resolveRoster(parseRealtimeRoster(raw.passthrough));
+      const tier = raw.passthrough['voice.tier'];
       return {
         voiceProvider: raw.voiceProvider,
         voiceApiKey: await resolveKey(raw.voiceApiKey),
@@ -594,6 +609,11 @@ export function createWebApi(opts: CreateWebApiOptions): CreateWebApiResult {
         voiceTtsModel: raw.voiceTtsModel,
         ...(Object.keys(ttsRoster).length > 0 ? { voiceTtsProviders: ttsRoster } : {}),
         ...(Object.keys(sttRoster).length > 0 ? { voiceSttProviders: sttRoster } : {}),
+        ...(Object.keys(realtimeRoster).length > 0
+          ? { voiceRealtimeProviders: realtimeRoster }
+          : {}),
+        voiceRealtimeDefault: raw.passthrough['voice.realtime.default'] ?? null,
+        voiceTier: tier === 'pipeline' || tier === 'realtime' ? tier : null,
       };
     },
     ...(opts.sttRoster ? { sttRoster: opts.sttRoster } : {}),
@@ -601,6 +621,13 @@ export function createWebApi(opts: CreateWebApiOptions): CreateWebApiResult {
     ttsProviderName: opts.ttsProviderName,
     ttsProviderConfig: opts.ttsProviderConfig,
     ...(opts.ttsRoster ? { ttsRoster: opts.ttsRoster } : {}),
+    // Realtime (speech-to-speech) tier. The registry is injected; the roster,
+    // its default entry and the tier default are read LIVE above, so a realtime
+    // provider added in Settings is mintable on the next call.
+    ...(opts.realtimeProviderRegistry ? { realtimeRegistry: opts.realtimeProviderRegistry } : {}),
+    ...(opts.realtimeRoster ? { realtimeRoster: opts.realtimeRoster } : {}),
+    ...(opts.realtimeDefault ? { realtimeDefault: opts.realtimeDefault } : {}),
+    ...(opts.voiceTier ? { tier: opts.voiceTier } : {}),
     ...(opts.trustedVoicePlugins ? { trustedVoicePlugins: opts.trustedVoicePlugins } : {}),
     // Per-personality voice on the browser path: the same registry the
     // Personalities tab refreshes, so an edited `voice.tts_voice` is heard on

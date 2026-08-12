@@ -49,6 +49,18 @@ export interface VoiceCallState {
   error: string | null;
   /** Set when voice is no longer usable this call. Null once dismissed. */
   degraded: VoiceDegradedNotice | null;
+  /**
+   * Voice IS working, but not the way it was configured to — the realtime tier
+   * was unavailable and this call is running on the local pipeline instead.
+   *
+   * Distinct from `degraded` because the call continues: `degraded` collapses
+   * the strip (there is nothing left to control), this sits above a live strip
+   * as a dismissible line. A downgrade the user is not told about is the thing
+   * this field exists to prevent.
+   */
+  notice: string | null;
+  /** Which tier is actually serving this call, once it is known. */
+  tier: 'pipeline' | 'realtime' | null;
   /** The browser refused the mic. Rendered as guidance, never a dead icon. */
   micDenied: boolean;
   /** Providers that actually served this call, for the mono `{provider}` label. */
@@ -61,6 +73,8 @@ export const initialVoiceCallState: VoiceCallState = {
   transcript: [],
   error: null,
   degraded: null,
+  notice: null,
+  tier: null,
   micDenied: false,
   sttProvider: null,
   ttsProvider: null,
@@ -71,8 +85,10 @@ export type VoiceCallAction =
   | { type: 'connected' }
   | { type: 'hang-up' }
   | { type: 'reset' }
-  /** User dismissed the degraded-to-text / mic-denied notice. */
+  /** User dismissed the degraded-to-text / mic-denied / tier notice. */
   | { type: 'dismiss-notice' }
+  /** The transport settled on a tier. Reported once per call. */
+  | { type: 'tier'; tier: 'pipeline' | 'realtime' }
   | { type: 'client-event'; event: VoiceCallEvent };
 
 const INTERRUPTED_MARKER = '[interrupted]';
@@ -86,6 +102,17 @@ export const MIC_DENIED_CODE = 'mic_permission_denied';
  * already text-only. Either way the honest thing to say is "continuing in text".
  */
 const DEGRADING_CODES = new Set(['transcribe_failed', 'synthesize_failed', 'voice_unavailable']);
+
+/**
+ * The realtime tier was unavailable and the call fell back to the local
+ * pipeline. NOT a degrading code: voice works, so the call goes on and the
+ * reason renders as a dismissible line above a live strip.
+ *
+ * Kept as a literal rather than imported from `talk-mode-client` so the pure
+ * reducer stays free of transport imports; the two are pinned together by
+ * `voice-call-reducer.test.ts`.
+ */
+export const TIER_DEGRADED_CODE = 'realtime_unavailable';
 
 export function voiceCallReducer(state: VoiceCallState, action: VoiceCallAction): VoiceCallState {
   switch (action.type) {
@@ -103,7 +130,10 @@ export function voiceCallReducer(state: VoiceCallState, action: VoiceCallAction)
       return initialVoiceCallState;
 
     case 'dismiss-notice':
-      return { ...state, degraded: null, micDenied: false, error: null };
+      return { ...state, degraded: null, micDenied: false, notice: null, error: null };
+
+    case 'tier':
+      return { ...state, tier: action.tier };
 
     case 'client-event':
       return applyClientEvent(state, action.event);
@@ -189,6 +219,12 @@ function applyClientEvent(state: VoiceCallState, event: VoiceCallEvent): VoiceCa
       };
 
     case 'error':
+      if (event.code === TIER_DEGRADED_CODE) {
+        // Voice keeps working on the pipeline tier — the status is untouched
+        // and `error` stays clear, so the strip does not put a failure where
+        // the state word goes.
+        return { ...state, notice: event.error };
+      }
       if (event.code === MIC_DENIED_CODE) {
         return { ...state, status: 'ended', error: event.error, micDenied: true };
       }

@@ -55,6 +55,7 @@ export async function startServer(port: number): Promise<number> {
     toolRegistry,
     sttProviders,
     ttsProviders,
+    realtimeProviders,
     voiceConfig,
     refreshPersonalities,
     skillsInjector,
@@ -165,6 +166,12 @@ export async function startServer(port: number): Promise<number> {
     // `voice.stt_provider` pick from.
     ...(voiceConfig.ttsRoster ? { ttsRoster: voiceConfig.ttsRoster } : {}),
     ...(voiceConfig.sttRoster ? { sttRoster: voiceConfig.sttRoster } : {}),
+    // Realtime tier — the registry backs `voice.realtimeToken`; the roster and
+    // tier default are boot snapshots that live Settings config overrides.
+    realtimeProviderRegistry: realtimeProviders,
+    ...(voiceConfig.realtimeRoster ? { realtimeRoster: voiceConfig.realtimeRoster } : {}),
+    ...(voiceConfig.realtimeDefault ? { realtimeDefault: voiceConfig.realtimeDefault } : {}),
+    ...(voiceConfig.tier ? { voiceTier: voiceConfig.tier } : {}),
     // Local-only voice-egress gate (`voice.trustedPlugins`); undefined = off.
     ...(voiceConfig.trustedVoicePlugins
       ? { trustedVoicePlugins: voiceConfig.trustedVoicePlugins }

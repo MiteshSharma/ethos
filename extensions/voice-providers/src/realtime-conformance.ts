@@ -27,7 +27,7 @@ import type {
   RealtimeSocketFactory,
   RealtimeSocketHandlers,
   RealtimeSocketInit,
-} from './realtime/socket';
+} from '@ethosagent/voice-realtime-protocol';
 
 // ---------------------------------------------------------------------------
 // Static validation — the direct mirror of `validateSttProvider`
@@ -36,8 +36,14 @@ import type {
 export function validateRealtimeCaps(caps: RealtimeVoiceCapabilities): string[] {
   const errors: string[] = [];
   if (caps.kind !== 'realtime') errors.push(`Invalid kind: ${caps.kind}`);
-  if (!Number.isFinite(caps.sampleRate) || caps.sampleRate <= 0) {
-    errors.push('sampleRate must be a positive number of Hz');
+  // Two rates, checked separately: a provider is not obliged to be symmetric,
+  // and a caller that captures at the OUTPUT rate ships the provider audio it
+  // cannot transcribe.
+  if (!Number.isFinite(caps.inputSampleRate) || caps.inputSampleRate <= 0) {
+    errors.push('inputSampleRate must be a positive number of Hz');
+  }
+  if (!Number.isFinite(caps.outputSampleRate) || caps.outputSampleRate <= 0) {
+    errors.push('outputSampleRate must be a positive number of Hz');
   }
   if (caps.contractVersion !== REALTIME_CONTRACT_VERSION) {
     errors.push(
@@ -164,7 +170,11 @@ export interface RealtimeConformanceTarget {
   speechStarted: unknown;
   /** A recoverable provider-level error frame and the event it must become. */
   providerError: { frame: unknown; error: string; code: string };
-  /** Assert the wire shape written for one `sendAudio(pcm)`. */
+  /**
+   * Assert the wire shape written for one `sendAudio(pcm)`. `pcm` is supplied
+   * at the provider's declared `caps.inputSampleRate`, so an implementation
+   * that resamples it is a failure, not an accommodation.
+   */
   expectAudioWrite(sent: unknown[], pcm: Uint8Array): string[];
   /** Assert the wire shape written for one `sendToolResult(callId, output)`. */
   expectToolResultWrite(sent: unknown[], callId: string, output: string): string[];
@@ -184,7 +194,7 @@ export interface RealtimeConformanceTarget {
 export const REALTIME_CONTRACT_CHECKS = [
   'caps and provider shape',
   'session opens and the event stream terminates on close',
-  'output audio delta becomes one audio event at the declared sample rate',
+  'output audio delta becomes one audio event at the declared OUTPUT sample rate',
   'user transcript deltas carry role=user with correct finality',
   'assistant transcript deltas carry role=assistant with correct finality',
   'tool call parses args and sendToolResult writes the provider shape',
@@ -192,6 +202,7 @@ export const REALTIME_CONTRACT_CHECKS = [
   'a provider error becomes an error event without killing the stream',
   'an abrupt socket close becomes a closed event with a reason',
   'audio sent before the session is confirmed is buffered, not dropped',
+  'audio supplied at the declared INPUT sample rate reaches the wire unresampled',
 ] as const;
 
 export type RealtimeContractCheckName = (typeof REALTIME_CONTRACT_CHECKS)[number];
@@ -328,7 +339,7 @@ export async function runRealtimeContractSuite(
     }),
 
     await runCheck(
-      'output audio delta becomes one audio event at the declared sample rate',
+      'output audio delta becomes one audio event at the declared OUTPUT sample rate',
       async () => {
         const errors: string[] = [];
         const harness = await openHarness(target);
@@ -347,8 +358,8 @@ export async function runRealtimeContractSuite(
           if (event.type === 'audio') {
             must(
               errors,
-              event.sampleRate === harness.provider.caps.sampleRate,
-              `audio event sampleRate ${event.sampleRate} != caps.sampleRate ${harness.provider.caps.sampleRate}`,
+              event.sampleRate === harness.provider.caps.outputSampleRate,
+              `audio event sampleRate ${event.sampleRate} != caps.outputSampleRate ${harness.provider.caps.outputSampleRate}`,
             );
             must(
               errors,
@@ -542,6 +553,34 @@ export async function runRealtimeContractSuite(
         );
 
         await confirm(target, harness);
+        errors.push(...target.expectAudioWrite(harness.server.sent.slice(baseline), pcm));
+        await harness.session.close();
+        return errors;
+      },
+    ),
+
+    await runCheck(
+      'audio supplied at the declared INPUT sample rate reaches the wire unresampled',
+      async () => {
+        // The steady-state path — `sendAudio` AFTER the session is confirmed,
+        // rather than the buffered-then-flushed one above. The contract says
+        // callers capture at `caps.inputSampleRate`, so the provider has
+        // nothing to convert: every byte handed in must appear on the wire.
+        // The single-rate contract this replaced obliged the asymmetric
+        // provider to decimate here, which is loss on the audio hot path.
+        const errors: string[] = [];
+        const harness = await openHarness(target);
+        await confirm(target, harness);
+        must(
+          errors,
+          harness.provider.caps.inputSampleRate > 0,
+          'caps.inputSampleRate is not a usable rate',
+        );
+
+        const baseline = harness.server.sent.length;
+        const pcm = new Uint8Array([0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88]);
+        await harness.session.sendAudio(pcm);
+        await settle();
         errors.push(...target.expectAudioWrite(harness.server.sent.slice(baseline), pcm));
         await harness.session.close();
         return errors;
