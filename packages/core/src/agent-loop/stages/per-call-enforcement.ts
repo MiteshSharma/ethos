@@ -1,4 +1,4 @@
-import type { HookRegistry } from '@ethosagent/types';
+import type { HookRegistry, VoiceTurnOrigin } from '@ethosagent/types';
 import type { AgentLoopObservability } from '../../observability/agent-loop-observability';
 import { type IdenticalStreak, updateIdenticalStreak } from '../budgets';
 import type { HaltDecision, WatcherTap } from '../turn-context';
@@ -23,6 +23,9 @@ export interface BeforeToolCallInput {
   args: unknown;
   allowedPlugins: string[];
   traceId: string | undefined;
+  /** Set when the turn arrived as speech — forwarded verbatim onto the hook
+   *  payload so the danger predicate can apply the spoken-confirmation gate. */
+  voiceOrigin?: VoiceTurnOrigin;
 }
 
 export type BeforeToolCallDecision =
@@ -45,6 +48,7 @@ export async function enforceBeforeToolCall(
       toolCallId: input.toolCallId,
       toolName: input.toolName,
       args: input.args,
+      ...(input.voiceOrigin ? { voiceOrigin: input.voiceOrigin } : {}),
     },
     input.allowedPlugins,
   );

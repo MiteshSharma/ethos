@@ -7,6 +7,7 @@ import {
   sanitizeFilename,
 } from '../../attachment-text-resolver';
 import { estimateMessagesTokens, estimateTokens } from '../../context-engines/token-estimator';
+import { buildVoiceOriginAnnotation } from '../../voice-origin';
 import { maybeCompact } from '../compaction';
 import { skillCallsFromMessages, usesSkillIndexMode } from '../ghost-skills';
 import { dedupHistory, toLLMMessages } from '../history';
@@ -96,6 +97,9 @@ export async function* assembleContext(
     /** T3 — max output tokens for the pending completion; reserved from the
      *  context window by compaction so the response can't overflow. */
     maxCompletionTokens?: number;
+    /** Set when this turn's text is a transcript of speech. Rendered as a
+     *  message-level annotation on the persisted user message. */
+    voiceOrigin?: import('@ethosagent/types').VoiceTurnOrigin;
   },
 ): AsyncGenerator<AgentEvent, AssembledContext> {
   const {
@@ -224,7 +228,22 @@ export async function* assembleContext(
 
   const inlinePrefix = [...attachmentErrors, ...budgetedBlocks].join('\n\n');
 
-  const fullPrefix = [attachmentAnnotation, inlinePrefix].filter(Boolean).join('\n\n');
+  // Voice-origin annotation (voice V1a, eng-review D16). It sits BESIDE the
+  // attachment annotation, never in place of it: the audio marker and the
+  // transcript both survive on the same message, which is the whole point —
+  // a transcript that replaces the media marker is how the model forgets it is
+  // in a voice conversation and answers with a markdown table.
+  //
+  // It is on the MESSAGE, not in the system prompt. A session mixes typed and
+  // spoken turns, so a per-turn system section would break the byte-identical
+  // static prefix (`__tests__/prompt-prefix-stability.test.ts`).
+  const voiceOriginAnnotation = opts.voiceOrigin
+    ? buildVoiceOriginAnnotation(opts.voiceOrigin)
+    : '';
+
+  const fullPrefix = [attachmentAnnotation, voiceOriginAnnotation, inlinePrefix]
+    .filter(Boolean)
+    .join('\n\n');
   const rawAnnotatedText = fullPrefix ? `${fullPrefix}\n\n${text}` : text;
   const annotatedText = piiConfig?.enabled
     ? deps.safety.redaction.redactPii(rawAnnotatedText, piiConfig.extraPatterns)

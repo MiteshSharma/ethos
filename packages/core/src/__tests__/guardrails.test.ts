@@ -52,7 +52,12 @@ describe('Orchestrator guardrails', () => {
     // how it differs from the adjacent `toolsetNarrow`. It is pass-through
     // only; the enforcement lives in agent-loop/stages/turn-setup.ts and
     // tool-registry.ts.
-    expect(lineCount).toBeLessThanOrEqual(884);
+    // Bumped 884 → 893: voice V1a adds the `voiceOrigin` RunOptions field (a
+    // declaration, its doc, one import and one conditional spread into the
+    // tool stage). Pass-through only — the annotation is rendered in
+    // agent-loop/stages/context-assembly.ts and the gate that reads it lives
+    // in @ethosagent/wiring.
+    expect(lineCount).toBeLessThanOrEqual(893);
   });
 
   it('no stage file exceeds 700 lines', () => {
@@ -82,7 +87,11 @@ describe('Orchestrator guardrails', () => {
       // Bumped 746 → 752: Lane E generalizes the per-batch progress queue to
       // AgentEvent (pushLiveEvent helper) so the bridge's inner-call
       // tool_start/tool_end ride the same live drain as tool progress.
-      if (lineCount > 752) {
+      // Bumped 752 → 759: voice V1a threads the turn's `voiceOrigin` onto the
+      // `before_tool_call` payload (a ctx field + doc, one import, one
+      // conditional spread) so the approval surface can tell a spoken request
+      // from a typed one. No logic — the gate itself is in @ethosagent/wiring.
+      if (lineCount > 759) {
         violations.push(`${file}: ${lineCount} lines`);
       }
     }

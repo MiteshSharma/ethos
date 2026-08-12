@@ -142,7 +142,10 @@ export { ScopedFetchImpl, ScopedFsImpl, ScopedProcessImpl, ScopedSecretsImpl } f
 export type { ScriptExclusionCategory, ScriptSafeToolMeta } from './script-safe';
 export { scriptCallableFor, scriptExclusionError, scriptExclusionFor } from './script-safe';
 export { SimpleCompletionImpl } from './simple-completion';
+export type { SpokenStyleInjectorOptions } from './spoken-style-injector';
+export { createSpokenStyleInjector, SPOKEN_STYLE_BLOCK } from './spoken-style-injector';
 export { applyTemporalDecay, parseTemporalBound, toJournalKey } from './temporal';
 export { DefaultToolResultReducerRegistry } from './tool-reducer-registry';
 export { DefaultToolRegistry } from './tool-registry';
 export { SsrfError, type ValidateUrlOptions, validateUrl } from './url-validator';
+export { buildVoiceOriginAnnotation, VOICE_ORIGIN_TAG } from './voice-origin';

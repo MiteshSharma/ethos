@@ -171,3 +171,45 @@ export interface TtsProviderRegistry {
   get(name: string): TtsProviderFactory | undefined;
   list(): string[];
 }
+
+// ---------------------------------------------------------------------------
+// Voice-origin annotation (voice V1a, eng-review D16)
+// ---------------------------------------------------------------------------
+
+/**
+ * Who spoke a voice turn, for authorization purposes.
+ *
+ * - `owner`   — the operator's own microphone: browser talk-mode, the desktop
+ *               satellite, a voice note in the owner's own DM.
+ * - `far_end` — somebody else's mouth on the far end of a call. Never
+ *               owner-authoritative: a far-end caller's voice can NEVER
+ *               satisfy an owner-level confirmation (eng-review D13). The
+ *               spoken-confirmation gate enforces that ahead of any recorded
+ *               confirmation, so the rule cannot be argued away by a caller
+ *               who says the right words.
+ */
+export type VoiceSpeaker = 'owner' | 'far_end';
+
+/**
+ * "This turn arrived as speech."
+ *
+ * A MESSAGE-LEVEL fact, not a system-prompt fact (eng-review D16). One session
+ * mixes typed and spoken turns, so putting this in the static prefix would
+ * change the prompt per turn and destroy prefix caching. It rides on the
+ * transcribed user message as an annotation instead — an annotation ON the
+ * audio marker, never a replacement for it — and on the `before_tool_call`
+ * payload so the approval surface can tell a spoken request from a typed one.
+ */
+export interface VoiceTurnOrigin {
+  /**
+   * How the audio reached the agent. Free-form but stable per surface, e.g.
+   * `telegram-voice-note`, `browser-talk-mode`.
+   */
+  transport: string;
+  /** Whose voice it is. See {@link VoiceSpeaker}. */
+  speaker: VoiceSpeaker;
+  /** STT provider that produced the transcript, when the surface knows it. */
+  sttProvider?: string;
+  /** BCP-47 tag of the utterance, when the surface knows it. */
+  language?: string;
+}

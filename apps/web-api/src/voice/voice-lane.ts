@@ -28,7 +28,7 @@ export interface VoiceLaneDeps {
   /** Stream one reply segment's audio. */
   synthesize(
     text: string,
-    opts: { voice?: string; signal: AbortSignal },
+    opts: { voice?: string; personalityId?: string; language?: string; signal: AbortSignal },
   ): AsyncIterable<{ audio: Uint8Array; format: 'opus' | 'mp3' | 'wav' | 'pcm'; provider: string }>;
 }
 
@@ -276,8 +276,14 @@ export class VoiceLane {
     let seq = 0;
     let provider = '';
     try {
+      // `voice` is the client's global default; `personalityId` is what lets
+      // the server prefer the personality's own voice over it. The lane does
+      // not choose — it forwards both and `VoiceService` applies the one
+      // shared precedence rule.
       const stream = this.opts.deps.synthesize(frame.text, {
         ...(frame.voice ? { voice: frame.voice } : {}),
+        ...(frame.personalityId ? { personalityId: frame.personalityId } : {}),
+        ...(frame.language ? { language: frame.language } : {}),
         signal: state.controller.signal,
       });
       for await (const chunk of stream) {

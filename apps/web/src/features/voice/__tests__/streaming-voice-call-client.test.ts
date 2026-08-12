@@ -373,3 +373,48 @@ describe('streaming talk-mode — lifecycle', () => {
     await client.disconnect();
   });
 });
+
+// Per-personality voice (task A16). The client sends WHO is speaking, not the
+// voice it thinks they should use — the server owns the precedence rule
+// (`resolveVoicePreferences`), so talk-mode and channel replies cannot drift.
+describe('streaming talk-mode — voice selection on the wire', () => {
+  it('sends personalityId alongside the global voice on every synthesize frame', async () => {
+    const { transport, capture, client } = setup({
+      voice: 'am_michael',
+      personalityId: 'voice',
+      runAgentTurn: async function* () {
+        yield 'Clear skies.';
+      },
+    });
+    await client.connect();
+
+    capture.emit({ type: 'speech_start' });
+    capture.emit({ type: 'frame', data: Int16Array.from([1]) });
+    capture.emit({ type: 'speech_end' });
+    transport.deliver({ t: 'transcript', utteranceId: 'u1', text: 'weather?', final: true });
+
+    await vi.waitFor(() => expect(transport.frames('synthesize')).toHaveLength(1));
+    expect(transport.frames('synthesize')[0]).toMatchObject({
+      voice: 'am_michael',
+      personalityId: 'voice',
+    });
+  });
+
+  it('omits personalityId when there is none rather than sending an empty string', async () => {
+    const { transport, capture, client } = setup({
+      voice: 'am_michael',
+      runAgentTurn: async function* () {
+        yield 'Clear skies.';
+      },
+    });
+    await client.connect();
+
+    capture.emit({ type: 'speech_start' });
+    capture.emit({ type: 'frame', data: Int16Array.from([1]) });
+    capture.emit({ type: 'speech_end' });
+    transport.deliver({ t: 'transcript', utteranceId: 'u1', text: 'weather?', final: true });
+
+    await vi.waitFor(() => expect(transport.frames('synthesize')).toHaveLength(1));
+    expect(transport.frames('synthesize')[0]).not.toHaveProperty('personalityId');
+  });
+});

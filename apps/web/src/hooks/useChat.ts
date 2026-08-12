@@ -53,7 +53,11 @@ export interface UseChatResult {
   /** Server-assigned session id once a turn has run. Null on a fresh chat
    *  before the user types anything. */
   currentSessionId: string | null;
-  sendMessage: (text: string, attachments?: AttachmentPreview[]) => Promise<void>;
+  sendMessage: (
+    text: string,
+    attachments?: AttachmentPreview[],
+    opts?: { origin?: 'text' | 'voice' },
+  ) => Promise<void>;
   /** Steer the running turn. Returns true if accepted, false if the turn
    *  already ended or the RPC failed. */
   steerMessage: (text: string) => Promise<boolean>;
@@ -182,7 +186,11 @@ export function useChat(opts: UseChatOptions): UseChatResult {
   const onSessionCreated = opts.onSessionCreated;
   const personalityId = opts.personalityId;
   const sendMessage = useCallback(
-    async (text: string, attachments?: AttachmentPreview[]): Promise<void> => {
+    async (
+      text: string,
+      attachments?: AttachmentPreview[],
+      opts?: { origin?: 'text' | 'voice' },
+    ): Promise<void> => {
       const trimmed = text.trim();
       if (!trimmed && !attachments?.length) return;
 
@@ -204,6 +212,9 @@ export function useChat(opts: UseChatOptions): UseChatResult {
           clientId: getClientId(),
           text: trimmed,
           ...(personalityId ? { personalityId } : {}),
+          // Talk-mode marks its turns so the server can annotate them as
+          // spoken. Typed sends omit it entirely.
+          ...(opts?.origin === 'voice' ? { origin: 'voice' as const } : {}),
           ...(attachments?.length
             ? {
                 attachments: attachments.map((a) => ({

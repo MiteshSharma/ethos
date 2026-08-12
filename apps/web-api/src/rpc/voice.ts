@@ -10,6 +10,10 @@ export const voiceRouter = {
   }),
   synthesize: os.voice.synthesize.handler(async ({ input, context }) => {
     if (!context.voice) throw new Error('Voice synthesis not configured');
-    return context.voice.synthesize(input.text, input.voice);
+    return context.voice.synthesize(input.text, {
+      ...(input.voice ? { voice: input.voice } : {}),
+      ...(input.personalityId ? { personalityId: input.personalityId } : {}),
+      ...(input.language ? { language: input.language } : {}),
+    });
   }),
 };

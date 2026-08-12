@@ -554,6 +554,10 @@ export function createWebApi(opts: CreateWebApiOptions): CreateWebApiResult {
     ttsProviderName: opts.ttsProviderName,
     ttsProviderConfig: opts.ttsProviderConfig,
     ...(opts.trustedVoicePlugins ? { trustedVoicePlugins: opts.trustedVoicePlugins } : {}),
+    // Per-personality voice on the browser path: the same registry the
+    // Personalities tab refreshes, so an edited `voice.tts_voice` is heard on
+    // the next spoken reply without a restart.
+    personalities: opts.personalities,
   });
   // The persistent binary voice lane (talk-mode). Constructed here so it shares
   // this process's VoiceService — same provider resolution, same egress gate as

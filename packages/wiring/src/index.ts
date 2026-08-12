@@ -1308,6 +1308,14 @@ export {
   probeProvider,
 } from './probe-provider';
 export { type CreateSmartApproverOptions, createSmartApprover } from './smart-approver';
+export {
+  farEndRefusalReason,
+  SPOKEN_CONFIRMATION_TOOLS,
+  type SpokenConfirmationOptions,
+  type SpokenConfirmationRecord,
+  spokenConfirmationReason,
+  withSpokenConfirmation,
+} from './spoken-confirmation';
 
 // ---------------------------------------------------------------------------
 // Real-time voice stack (config.voice.* → VoiceSession / transports)

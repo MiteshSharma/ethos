@@ -80,6 +80,7 @@ export function createTalkModeClient(deps: TalkModeClientDeps): VoiceCallClient 
     wakeLock: createWakeLock(),
     ...(deps.sessionId ? { sessionId: deps.sessionId } : {}),
     ...(deps.voice ? { voice: deps.voice } : {}),
+    ...(deps.personalityId ? { personalityId: deps.personalityId } : {}),
     ...(deps.chime !== undefined ? { chime: deps.chime } : {}),
   });
 }

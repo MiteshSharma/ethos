@@ -376,3 +376,70 @@ async function waitForTitle(
     await new Promise((r) => setTimeout(r, 5));
   }
 }
+
+// Talk-mode turns are ordinary chat turns on the ordinary chat session — same
+// personality, same history. The ONLY thing that distinguishes them is that
+// the text is a transcript, and the loop has to be told so, or the model
+// answers a spoken question in markdown (voice V1a task A10).
+describe('ChatService — voice-origin on talk-mode turns', () => {
+  let store: SQLiteSessionStore;
+  let sessions: ChatRepository;
+  let buffer: SessionStreamBuffer<SseEvent>;
+
+  beforeEach(() => {
+    store = new SQLiteSessionStore(':memory:');
+    sessions = new ChatRepository(store);
+    buffer = new SessionStreamBuffer<SseEvent>();
+  });
+
+  afterEach(() => {
+    buffer.destroy();
+    store.close();
+  });
+
+  function serviceCapturing(runOpts: Array<Record<string, unknown>>) {
+    const loop = makeStubAgentLoop({
+      events: [{ type: 'done', text: 'ok', turnCount: 1 }],
+      onRun: (_input, opts) => {
+        runOpts.push(opts as Record<string, unknown>);
+      },
+    });
+    return new ChatService({
+      loop,
+      sessions,
+      buffer,
+      defaults: { model: 'claude-test', provider: 'anthropic' },
+    });
+  }
+
+  it("origin: 'voice' becomes an owner-spoken voiceOrigin on the run", async () => {
+    const runOpts: Array<Record<string, unknown>> = [];
+    await serviceCapturing(runOpts).send({ clientId: 'tab-1', text: 'call mum', origin: 'voice' });
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(runOpts).toHaveLength(1);
+    expect(runOpts[0]?.voiceOrigin).toEqual({
+      transport: 'browser-talk-mode',
+      // The browser session IS the owner's, behind the same auth as the rest
+      // of the surface. A far-end caller cannot reach this code path.
+      speaker: 'owner',
+    });
+  });
+
+  it('a typed send carries no voiceOrigin at all', async () => {
+    const runOpts: Array<Record<string, unknown>> = [];
+    await serviceCapturing(runOpts).send({ clientId: 'tab-1', text: 'call mum' });
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(runOpts).toHaveLength(1);
+    expect(runOpts[0]?.voiceOrigin).toBeUndefined();
+  });
+
+  it("an explicit origin: 'text' is treated as typed", async () => {
+    const runOpts: Array<Record<string, unknown>> = [];
+    await serviceCapturing(runOpts).send({ clientId: 'tab-1', text: 'hi', origin: 'text' });
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(runOpts[0]?.voiceOrigin).toBeUndefined();
+  });
+});

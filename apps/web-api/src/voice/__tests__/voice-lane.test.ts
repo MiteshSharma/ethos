@@ -353,3 +353,41 @@ describe('VoiceLane — cross-lane isolation (regression)', () => {
     expect(audioOf(alice.sent)).toEqual(['alice:private-to-alice']);
   });
 });
+
+// Per-personality voice (task A16). The lane does not CHOOSE a voice — it must
+// hand the server both the client's global default and who is speaking, so the
+// one shared precedence rule in `VoiceService` can apply. A lane that dropped
+// `personalityId` would leave talk-mode permanently on the global voice with
+// nothing in the wire format to show why.
+describe('VoiceLane — voice selection passthrough', () => {
+  function synthArgs(
+    frame: Partial<{ voice: string; personalityId: string; language: string }>,
+  ): Array<Record<string, unknown>> {
+    const seen: Array<Record<string, unknown>> = [];
+    const { lane } = makeLane({
+      synthesize: async function* (_text, opts) {
+        const { signal: _signal, ...rest } = opts;
+        seen.push(rest);
+        yield { audio: new Uint8Array([1]), format: 'opus' as const, provider: 'fake-tts' };
+      },
+    });
+    lane.handle({ t: 'utterance_start', utteranceId: 'u1', sampleRate: 16_000 }, new Uint8Array());
+    lane.handle(
+      { t: 'synthesize', utteranceId: 'u1', segmentId: 's0', text: 'hola', ...frame },
+      new Uint8Array(),
+    );
+    return seen;
+  }
+
+  it('forwards personalityId and language alongside the global voice', async () => {
+    const seen = synthArgs({ voice: 'am_michael', personalityId: 'voice', language: 'es' });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(seen).toEqual([{ voice: 'am_michael', personalityId: 'voice', language: 'es' }]);
+  });
+
+  it('omits what the client did not send rather than sending empty strings', async () => {
+    const seen = synthArgs({ personalityId: 'voice' });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(seen).toEqual([{ personalityId: 'voice' }]);
+  });
+});

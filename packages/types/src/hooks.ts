@@ -12,6 +12,7 @@ import type { PersonalityConfig } from './personality';
 import type { InboundMessage, OutboundMessage } from './platform';
 import type { StoredMessage } from './session';
 import type { ToolResult } from './tool';
+import type { VoiceTurnOrigin } from './voice';
 
 // ---------------------------------------------------------------------------
 // Hook payload types
@@ -73,6 +74,19 @@ export interface BeforeToolCallPayload {
   toolCallId: string;
   toolName: string;
   args: unknown;
+  /**
+   * Set when the turn that produced this call arrived as SPEECH. Absent means
+   * the turn was typed — which is the common case, and why this is optional.
+   *
+   * It rides the payload rather than being looked up from session state
+   * because a single session mixes typed and spoken turns: "was this call
+   * asked for out loud" is a property of the turn, and only the loop running
+   * the turn knows it. The spoken-confirmation gate
+   * (`withSpokenConfirmation`, `@ethosagent/wiring`) reads it to require a
+   * verbal re-confirmation on high-impact calls, and to refuse outright when
+   * `speaker` is `far_end`.
+   */
+  voiceOrigin?: VoiceTurnOrigin;
 }
 
 export interface BeforeToolCallResult {

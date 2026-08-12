@@ -110,6 +110,11 @@ What each one is defending:
 | `packages/config/src/__tests__/config-voice-provider-knobs.test.ts` | That `auxiliary.tts.outputFormat` / `timeout` / `maxTextLength` and `auxiliary.asr.timeout` are lifted onto `EthosConfig` and survive a write/read round-trip |
 | `extensions/voice-providers/src/__tests__/conformance.test.ts` | `validateSttProvider` / `validateTtsProvider`, incl. the refusal of a v1 STT provider that still declares the deleted `transcribe(audioPath)` |
 | `packages/types/src/__tests__/personality-field-count.test.ts` | That `PersonalityConfig` has exactly the 28 fields in `.personality-field-count` — adding `voice` bumped it from 27 |
+| `extensions/personalities/src/__tests__/voice-personality.test.ts` | The built-in `voice` personality: its declared voice block, its restricted toolset, and the ~2k-token static-prompt budget (latency decision L5) |
+| `packages/core/src/__tests__/voice-origin-annotation.test.ts` | That a spoken turn is marked on the MESSAGE (never in the system prompt), rides alongside the audio marker rather than replacing it, reaches the `before_tool_call` payload, and leaves a mixed typed+spoken session's static prefix byte-identical |
+| `packages/core/src/__tests__/spoken-style-injector.test.ts` | That the spoken-style block is personality-gated, static, and does not move the prompt prefix between turns |
+| `packages/wiring/src/__tests__/spoken-confirmation.test.ts` | The spoken-confirmation gate — including that a far-end caller's voice can never satisfy an owner confirmation, even with a recorded confirmation on the same call id |
+| `extensions/gateway/src/__tests__/voice-personality-voice.test.ts` · `apps/web-api/src/services/__tests__/voice-personality-voice.test.ts` | That the personality's voice reaches the TTS provider on the channel and browser paths, asserted on the provider's argument |
 
 ---
 
@@ -261,7 +266,10 @@ Open `http://localhost:3000`.
    `voice_session`. Otherwise the button renders **disabled** with the tooltip
    *"Voice not enabled for `<name>` — add the voice_session capability to its
    toolset"* (`apps/web/src/features/voice/TalkMode.tsx`, predicate in `gating.ts`).
-   **No built-in personality ships with `voice_session`** — add it yourself:
+
+   The built-in **`voice`** personality ships with it — pick `Voice` in the
+   personality bar and the phone button is live. To enable it on a personality
+   of your own:
 
    ```bash
    mkdir -p ~/.ethos/personalities/talker
@@ -407,22 +415,36 @@ no `voice` block.
 - Fast-lane model: claude-haiku-4-5
 ```
 
-> **Which surfaces honor this today.** `resolveVoicePreferences` has exactly one
-> consumer — `packages/wiring/src/voice-stack.ts:181` — so a personality's `voice.*`
-> is honored on the `VoiceSession` path built by `buildVoiceStack`, i.e. when
-> `voice.bots[]` is configured.
+> **Which surfaces honor this today.** All three: the `VoiceSession` stack built
+> by `buildVoiceStack`, channel replies through the gateway, and browser
+> talk-mode. Every one of them resolves through the same
+> `resolveVoicePreferences`, so "which voice served this reply" has one answer.
 >
-> It is **not** yet honored on the two paths most people will exercise first:
+> - **Channel voice notes / replies** — the gateway reads the personality's
+>   `voice` block through the optional `personalityDirectory.voice(id)` seam
+>   (wired in `apps/ethos/src/commands/gateway.ts`) and passes the resolved
+>   voice to `tts.synthesize`. The gateway has no per-turn language signal, so
+>   the language rung is unused there and the personality's default voice wins.
+> - **Browser talk-mode and the Play button** — the client sends `personalityId`
+>   (and, where known, `language`) alongside the global voice it read from
+>   Settings; `VoiceService` applies the precedence server-side. The global
+>   value the client sends is the *lowest* rung, so a personality's declared
+>   voice is heard over it rather than being overridden by it.
 >
-> - **Channel voice notes through the gateway** — `extensions/gateway/src/index.ts:2111`
->   calls `tts.synthesize(synthText)` with no voice argument, so you get the
->   provider's configured default.
-> - **Browser talk-mode** — `apps/web/src/pages/Chat.tsx` passes the *global*
->   `auxiliary.tts.voice` through to the `synthesize` RPC.
+> Proof, asserting what the TTS provider actually received:
 >
-> On those two surfaces, setting `voice.tts_voice` on a personality changes the
-> character sheet but not what you hear. That is a known gap, not a bug in your
-> config — see [Known gaps](#3-personality-voice-is-not-on-the-gateway-or-talk-mode-audio-path).
+> ```bash
+> pnpm vitest run \
+>   extensions/gateway/src/__tests__/voice-personality-voice.test.ts \
+>   apps/web-api/src/services/__tests__/voice-personality-voice.test.ts \
+>   apps/web-api/src/voice/__tests__/voice-lane.test.ts \
+>   apps/web/src/features/voice/__tests__/streaming-voice-call-client.test.ts
+> ```
+>
+> Still on the global voice: the **`Play` button** on an assistant bubble
+> (`apps/web/src/components/chat/PlayButton.tsx` calls
+> `rpc.voice.synthesize({ text })` with no `personalityId`). The RPC accepts the
+> field; the button does not yet pass it.
 
 ---
 
@@ -490,29 +512,31 @@ Manual verification still needed (nothing in CI drives real audio): a real mic i
 real browser, a real STT/TTS server behind it, and the reconnect + wake-lock paths
 on a phone.
 
-### 3. Personality voice is not on the gateway or talk-mode audio path
-The `VoiceSession` stack itself **is** wired: `buildVoiceStack()` runs on the normal
-`createAgentLoop` path (`packages/wiring/src/build-agent-loop.ts:971`) and populates
-`CreateAgentLoopResult.voiceStack` (`:1009`) whenever `config.voice.*` is configured.
-Provider resolution, the egress gate, the per-turn voice spans and the buffered span
-writer all come with it.
+### 3. Personality voice — wired everywhere except the Play button
+`resolveVoicePreferences` used to have exactly one consumer
+(`packages/wiring/src/voice-stack.ts`), so a personality's `voice.tts_voice`
+changed its character sheet and nothing you could hear on the two surfaces most
+people reach first. It now has three:
 
-The gap is narrower than "not wired": `resolveVoicePreferences` is consumed only by
-that stack (`packages/wiring/src/voice-stack.ts:181`). The two surfaces you are most
-likely to try first do not go through it —
+- `packages/wiring/src/voice-stack.ts` — the `VoiceSession` stack;
+- `extensions/gateway/src/index.ts` — channel replies, via the optional
+  `personalityDirectory.voice(id)` seam;
+- `apps/web-api/src/services/voice.service.ts` — the browser `synthesize` RPC
+  **and** the binary WS lane, from the `personalityId` the client now sends.
 
-- gateway voice notes: `extensions/gateway/src/index.ts:2111` →
-  `tts.synthesize(synthText)`, no voice argument;
-- browser talk-mode: passes the global `auxiliary.tts.voice`.
+Precedence is the same everywhere because it is the same function:
+`voice.languages.<tag>` > `voice.tts_voice` > global `auxiliary.tts.voice`.
 
-— so a personality's `voice.tts_voice` / `voice.languages.<tag>` shows up in the
-character sheet without changing the audio on those two paths. See §4.
+What remains: the **Play button** does not send `personalityId`, so a
+click-to-hear on an assistant bubble still uses the global voice. The gateway
+has no per-turn language detection, so `voice.languages.*` cannot select there
+yet — the personality's default voice is used instead of a wrong-language one.
 
-Two related caveats on the stack itself, both from the source: the LiveKit and SIP
-transports additionally require app-supplied native bindings, which **no in-repo
-caller passes yet** (`build-agent-loop.ts:969-970`), and nothing in-repo currently
-reads `result.voiceStack` to drive a live session — you hold the stack and call
-`createSession()` yourself.
+Two related caveats on the `VoiceSession` stack itself, both from the source:
+the LiveKit and SIP transports additionally require app-supplied native
+bindings, which **no in-repo caller passes yet** (`build-agent-loop.ts:969-970`),
+and nothing in-repo currently reads `result.voiceStack` to drive a live
+session — you hold the stack and call `createSession()` yourself.
 
 ### 4. Two list-valued config keys are still unreachable
 `auxiliary.tts.outputFormat`, `auxiliary.tts.timeout`, `auxiliary.tts.maxTextLength`
@@ -534,9 +558,18 @@ status, mute, hang up). Settings → Voice edits the **global** STT/TTS provider
 and the VAD tuning; there is **no UI** for `voice.trustedPlugins` and none for a
 personality's `voice.*` block — both are config-file only.
 
-### 6. No built-in `voice` personality
-No personality under `extensions/personalities/data/` lists `voice_session`. Talk-mode
-is disabled everywhere until you add it to a personality yourself.
+### 6. Built-in `voice` personality — shipped
+`extensions/personalities/data/voice/` is the first built-in that lists
+`voice_session`, so talk-mode's phone button is enabled for it out of the box.
+It declares `voice.tts_voice: af_bella`, `voice.tier: pipeline`, a fast-lane
+`voice.model`, and a Spanish entry in its language map; its toolset carries
+nothing that writes to disk or runs a shell (consequential work leaves the
+spoken lane through `delegate_task`).
+
+Its static prompt is budget-gated at ~2k tokens (latency decision L5) by
+`extensions/personalities/src/__tests__/voice-personality.test.ts` — SOUL.md
+plus the spoken-style injector measure ~2.3k chars / ~580 tokens today, so
+there is headroom, and the test is what stops it being spent silently.
 
 ### 7. Not built at all
 Realtime tier / OpenAI Realtime / Gemini Live; channel TTS-out beyond Telegram and the

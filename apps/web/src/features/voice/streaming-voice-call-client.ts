@@ -43,7 +43,10 @@ export interface StreamingVoiceCallDeps {
   runAgentTurn(text: string, signal: AbortSignal): AsyncIterable<string>;
   /** Chat session this call belongs to — carried to the server for telemetry. */
   sessionId?: () => string | null;
+  /** Global default voice from Settings — LOWEST precedence server-side. */
   voice?: string;
+  /** Active personality; its declared `voice.tts_voice` beats `voice` above. */
+  personalityId?: string;
   chime?: boolean;
   /** Keeps the screen awake for the duration of the call. */
   wakeLock?: WakeLock;
@@ -254,6 +257,7 @@ export function createStreamingVoiceCallClient(deps: StreamingVoiceCallDeps): Vo
         segmentId: id,
         text: sentence,
         ...(deps.voice ? { voice: deps.voice } : {}),
+        ...(deps.personalityId ? { personalityId: deps.personalityId } : {}),
       });
     };
 

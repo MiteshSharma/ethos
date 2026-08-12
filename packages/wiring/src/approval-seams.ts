@@ -21,6 +21,7 @@ import type {
 } from '@ethosagent/types';
 import { createDangerPredicate, type DangerPredicate } from './danger-predicate';
 import { createSmartApprover } from './smart-approver';
+import { type SpokenConfirmationRecord, withSpokenConfirmation } from './spoken-confirmation';
 
 /**
  * Backstop on the session → personality map. Entries are added on
@@ -84,6 +85,14 @@ export interface CreateApprovalDangerPredicateOptions {
    * only non-hardline danger source.
    */
   alwaysAsk?: ReadonlyArray<string>;
+  /**
+   * Verbal re-confirmations already given on an owner-trusted voice surface,
+   * keyed by `toolCallId`. Optional — the spoken-confirmation gate is applied
+   * either way; without this nothing is ever pre-confirmed, so a spoken
+   * high-impact request always reaches the approval surface. A far-end
+   * caller's voice is refused regardless of what this contains.
+   */
+  spokenConfirmations?: SpokenConfirmationRecord;
 }
 
 /**
@@ -117,18 +126,25 @@ export function createApprovalDangerPredicate(
   // constructs the reviewer — and therefore never constructs a provider.
   let approver: ReturnType<typeof createSmartApprover> | undefined;
 
-  return createDangerPredicate({
-    ...(opts.alwaysAsk ? { alwaysAsk: opts.alwaysAsk } : {}),
-    getPersonality: (payload): PersonalityConfig | undefined => {
-      const id = activeBySession.get(payload.sessionId);
-      // Unknown session (no `session_start` seen) → no personality, which is
-      // the legacy `manual` default. Never guess a personality here: guessing
-      // could apply another personality's `approvalMode: 'off'`.
-      return id === undefined ? undefined : opts.personalities.get(id);
-    },
-    smartApprove: (payload, reason) => {
-      approver ??= createSmartApprover({ getProvider: opts.getProvider, model: opts.model });
-      return approver(payload, reason);
-    },
-  });
+  // Spoken-confirmation gate wraps the predicate on every approval surface.
+  // Inert for typed turns (no `voiceOrigin` on the payload), so this costs
+  // nothing until a surface actually speaks — and it is in place BEFORE
+  // telephony can produce a far-end caller (voice V1a, eng-review D13).
+  return withSpokenConfirmation(
+    createDangerPredicate({
+      ...(opts.alwaysAsk ? { alwaysAsk: opts.alwaysAsk } : {}),
+      getPersonality: (payload): PersonalityConfig | undefined => {
+        const id = activeBySession.get(payload.sessionId);
+        // Unknown session (no `session_start` seen) → no personality, which is
+        // the legacy `manual` default. Never guess a personality here: guessing
+        // could apply another personality's `approvalMode: 'off'`.
+        return id === undefined ? undefined : opts.personalities.get(id);
+      },
+      smartApprove: (payload, reason) => {
+        approver ??= createSmartApprover({ getProvider: opts.getProvider, model: opts.model });
+        return approver(payload, reason);
+      },
+    }),
+    opts.spokenConfirmations ? { confirmations: opts.spokenConfirmations } : {},
+  );
 }

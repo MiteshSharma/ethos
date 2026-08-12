@@ -1,0 +1,16 @@
+# Deliberately small. Latency decision L5 caps this personality's static prompt
+# at ~2k tokens, and every tool definition is prompt weight paid on every spoken
+# turn. Nothing that writes to the filesystem or runs a shell is here: a
+# consequential action asked for out loud goes through `delegate_task` to the
+# full agent, where the normal approval surface applies.
+#
+# `voice_session` is the toolset entry that gates browser talk-mode
+# (apps/web/src/features/voice/gating.ts). This is the first built-in to carry it.
+- voice_session
+- memory_read
+- memory_write
+- session_search
+- web_search
+- delegate_task
+- task_status
+- task_result

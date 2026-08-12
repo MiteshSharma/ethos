@@ -14,6 +14,7 @@ import type {
   SteerSink,
   Storage,
   ToolRegistry,
+  VoiceTurnOrigin,
 } from '@ethosagent/types';
 import { checkTurnBudgets, updateDenialStreak } from './agent-loop/budgets';
 import { compactSession, type ManualCompactionResult } from './agent-loop/manual-compact';
@@ -287,6 +288,13 @@ export interface RunOptions {
   maxIdenticalToolCalls?: number;
   /** When true, bypass safety-watcher halts for this run (opt-in, dangerous; caps still apply). */
   allowDangerousToolCalls?: boolean;
+  /** Set when this turn's text is a transcript of speech (voice V1a, D16).
+   *  Effects are message-level only — the system prompt is untouched, so
+   *  `prompt-prefix-stability` holds for a session mixing typed and spoken
+   *  turns. See `./voice-origin` (the annotation, rendered alongside the
+   *  `<attachments>` audio marker) and `withSpokenConfirmation` in
+   *  `@ethosagent/wiring` (the gate it reaches via `before_tool_call`). */
+  voiceOrigin?: VoiceTurnOrigin;
 }
 
 // ---------------------------------------------------------------------------
@@ -807,6 +815,7 @@ export class AgentLoop {
           dryRunState,
           tierEscalationRef,
           steerSink: opts.steerSink,
+          ...(opts.voiceOrigin ? { voiceOrigin: opts.voiceOrigin } : {}),
           opts: {
             agentId: opts.agentId,
             rootSessionKey: opts.rootSessionKey,

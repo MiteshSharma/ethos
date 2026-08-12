@@ -113,8 +113,16 @@ export interface BatchVoiceCallDeps {
    * aborts the turn on barge-in / hang-up.
    */
   runAgentTurn(text: string, signal: AbortSignal): AsyncIterable<string>;
-  /** Optional TTS voice id passed through to `synthesize`. */
+  /** Optional TTS voice id passed through to `synthesize`. Global default —
+   *  the server prefers the personality's own voice over it. */
   voice?: string;
+  /**
+   * Active personality. The batch path does not send it itself (its
+   * `synthesize` closure owns the RPC call and already carries it); it is
+   * declared here so `createTalkModeClient` can forward one set of deps to
+   * either transport.
+   */
+  personalityId?: string;
   /**
    * Play the brief "processing" earcon after each captured utterance. Defaults
    * to true; set false (from the `display.voice_chime` config toggle) to keep

@@ -1,6 +1,12 @@
-import { resolveSttProvider, resolveTtsProvider, type VoiceResolution } from '@ethosagent/core';
+import {
+  resolveSttProvider,
+  resolveTtsProvider,
+  resolveVoicePreferences,
+  type VoiceResolution,
+} from '@ethosagent/core';
 import {
   isStreamingTtsProvider,
+  type PersonalityVoiceConfig,
   type SecretsResolver,
   type SttProvider,
   type SttProviderRegistry,
@@ -8,6 +14,25 @@ import {
   type TtsProviderRegistry,
 } from '@ethosagent/types';
 import { isHallucination, truncateAtSentenceBoundary } from '@ethosagent/voice-text';
+
+/**
+ * Just enough of a personality registry to answer "how does this one sound".
+ * Structural so the service does not depend on the concrete registry class —
+ * and so a test can hand it a literal.
+ */
+export interface VoicePersonalityLookup {
+  get(id: string): { voice?: PersonalityVoiceConfig } | undefined;
+}
+
+/** Per-call voice selection inputs. See {@link VoiceService.synthesize}. */
+export interface SynthesisVoiceOptions {
+  /** Global default the caller read from config — lowest precedence. */
+  voice?: string;
+  /** Personality speaking; its `voice` block beats `voice` above. */
+  personalityId?: string;
+  /** BCP-47 tag, selecting from the personality's language→voice map. */
+  language?: string;
+}
 
 /** Live-config shape the Settings tab persists. */
 interface LiveVoiceConfig {
@@ -44,6 +69,13 @@ export class VoiceService {
    */
   private readonly trustedVoicePlugins: ReadonlySet<string> | undefined;
 
+  /**
+   * Personality lookup for per-personality voice. Optional: absent → every
+   * reply speaks in the global `auxiliary.tts.voice`, which is what this
+   * surface did before personalities could declare a voice.
+   */
+  private readonly personalities: VoicePersonalityLookup | undefined;
+
   get isConfigured(): boolean {
     return Boolean(this.sttRegistry && this.initialProviderName);
   }
@@ -62,6 +94,7 @@ export class VoiceService {
     ttsProviderName?: string;
     ttsProviderConfig?: Record<string, unknown>;
     trustedVoicePlugins?: ReadonlySet<string>;
+    personalities?: VoicePersonalityLookup;
   }) {
     this.sttRegistry = opts.sttRegistry;
     this.initialProviderName = opts.providerName;
@@ -72,6 +105,28 @@ export class VoiceService {
     this.initialTtsProviderName = opts.ttsProviderName;
     this.initialTtsProviderConfig = opts.ttsProviderConfig ?? {};
     this.trustedVoicePlugins = opts.trustedVoicePlugins;
+    this.personalities = opts.personalities;
+  }
+
+  /**
+   * The voice this reply should be spoken in.
+   *
+   * Precedence lives in ONE function for the whole repo
+   * (`resolveVoicePreferences`, `@ethosagent/core`): language-specific voice >
+   * personality voice > global config. The caller-supplied `voice` is the
+   * global rung — it is what the browser read out of Settings — so a
+   * personality that declares its own voice is heard over it rather than being
+   * silently overridden by the default the client happened to send.
+   */
+  private voiceFor(opts: SynthesisVoiceOptions | undefined): string | undefined {
+    const personality = opts?.personalityId
+      ? this.personalities?.get(opts.personalityId)?.voice
+      : undefined;
+    return resolveVoicePreferences({
+      ...(personality ? { personality } : {}),
+      ...(opts?.voice ? { globalTtsVoice: opts.voice } : {}),
+      ...(opts?.language ? { language: opts.language } : {}),
+    }).ttsVoice;
   }
 
   private async resolve(): Promise<VoiceResolution<SttProvider>> {
@@ -153,7 +208,7 @@ export class VoiceService {
 
   async synthesize(
     text: string,
-    voice?: string,
+    opts?: SynthesisVoiceOptions,
   ): Promise<{
     audio: string;
     format: 'opus' | 'mp3' | 'wav' | 'pcm';
@@ -173,7 +228,8 @@ export class VoiceService {
     const maxChars = provider.caps.maxInputChars;
     const input = maxChars ? truncateAtSentenceBoundary(text, maxChars) : text;
 
-    const result = await provider.synthesize(input, { voice });
+    const voice = this.voiceFor(opts);
+    const result = await provider.synthesize(input, voice ? { voice } : {});
     const base64 = Buffer.from(result.audio).toString('base64');
     const formatMimeMap: Record<string, string> = {
       opus: 'audio/ogg;codecs=opus',
@@ -198,7 +254,7 @@ export class VoiceService {
    */
   async *synthesizeStream(
     text: string,
-    opts?: { voice?: string; signal?: AbortSignal },
+    opts?: SynthesisVoiceOptions & { signal?: AbortSignal },
   ): AsyncIterable<{
     audio: Uint8Array;
     format: 'opus' | 'mp3' | 'wav' | 'pcm';
@@ -216,8 +272,9 @@ export class VoiceService {
     const providerId = resolution.providerId;
     const maxChars = provider.caps.maxInputChars;
     const input = maxChars ? truncateAtSentenceBoundary(text, maxChars) : text;
+    const voice = this.voiceFor(opts);
     const synthOpts = {
-      ...(opts?.voice ? { voice: opts.voice } : {}),
+      ...(voice ? { voice } : {}),
       ...(opts?.signal ? { signal: opts.signal } : {}),
     };
 

@@ -559,6 +559,10 @@ export async function runGatewayStart(opts: GatewayStartOptions = {}): Promise<v
       }
     },
     has: (id: string): boolean => seamPersonalities.get(id) != null,
+    // Per-personality voice for channel TTS. Read from the SAME registry the
+    // refresh above reloads, so an edited `voice.tts_voice` is audible on the
+    // next spoken reply without a restart.
+    voice: (id: string) => seamPersonalities.get(id)?.voice,
     list: (): Array<{ id: string; name: string; isDefault: boolean }> => {
       const defaultId = seamPersonalities.getDefault().id;
       return seamPersonalities.list().map((p) => ({

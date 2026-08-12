@@ -67,7 +67,12 @@ const SynthesizeSchema = z.object({
   /** Reply segment (one sentence), ordered by the client. */
   segmentId: z.string().min(1),
   text: z.string(),
+  /** Global default voice from config — lowest precedence (see the RPC input). */
   voice: z.string().optional(),
+  /** Personality speaking this segment; its `voice.tts_voice` beats `voice`. */
+  personalityId: z.string().optional(),
+  /** BCP-47 tag, selecting from the personality's language→voice map. */
+  language: z.string().optional(),
 });
 
 const CancelSchema = z.object({

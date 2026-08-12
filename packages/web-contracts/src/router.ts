@@ -605,6 +605,13 @@ const ChatSendInput = z.object({
    *  stream emits a `dry_run_summary` event with the tool plan instead of
    *  running the tools. */
   dryRun: z.boolean().optional(),
+  /**
+   * How this turn's text reached the client. `voice` means `text` is a
+   * transcript of the user speaking (talk-mode), which the server turns into a
+   * MESSAGE-LEVEL voice-origin annotation on the turn — never a system-prompt
+   * section, because one session mixes typed and spoken turns. Default `text`.
+   */
+  origin: z.enum(['text', 'voice']).optional(),
   attachments: z
     .array(
       z.object({
@@ -2557,7 +2564,15 @@ const VoiceTranscribeOutput = z.object({
 });
 const VoiceSynthesizeInput = z.object({
   text: z.string().min(1),
+  /** Global default voice the client read from config. The LOWEST precedence
+   *  rung — the active personality's `voice.tts_voice` beats it, and a
+   *  language-specific entry beats that (`resolveVoicePreferences`). */
   voice: z.string().optional(),
+  /** Personality speaking this reply. Without it the server cannot honour a
+   *  personality's declared voice and falls back to the global default. */
+  personalityId: z.string().optional(),
+  /** BCP-47 tag of the reply, selecting from the personality's language map. */
+  language: z.string().optional(),
 });
 const VoiceSynthesizeOutput = z.object({
   audio: z.string(),

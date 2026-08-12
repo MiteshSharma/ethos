@@ -376,11 +376,20 @@ export function Chat() {
           ? {
               synthesize: (text, voice) =>
                 rpc.voice
-                  .synthesize({ text, ...(voice ? { voice } : {}) })
+                  .synthesize({
+                    text,
+                    ...(voice ? { voice } : {}),
+                    ...(personalityId ? { personalityId } : {}),
+                  })
                   .then((r) => ({ audioBase64: r.audio, mimeType: r.mimeType })),
             }
           : {}),
+        // `voice` is the GLOBAL default from Settings; `personalityId` is what
+        // lets the server prefer the active personality's declared voice over
+        // it. Precedence is resolved server-side in one place
+        // (`resolveVoicePreferences`) so every surface agrees.
         ...(ttsVoice ? { voice: ttsVoice } : {}),
+        ...(personalityId ? { personalityId } : {}),
         chime: voiceChime,
         tuning: {
           ...(voiceEndpointSilenceMs !== undefined
@@ -403,6 +412,7 @@ export function Chat() {
       voiceSpeechMinMs,
       sendMessage,
       abortTurn,
+      personalityId,
     ],
   );
 

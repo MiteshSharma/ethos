@@ -18,6 +18,7 @@ import type {
   ToolFilterOpts,
   ToolRegistry,
   ToolResult,
+  VoiceTurnOrigin,
 } from '@ethosagent/types';
 import type { ContextStore } from '../../context-store';
 import { redactArgs } from '../../dry-run';
@@ -112,6 +113,11 @@ export interface ToolProcessingContext {
 
   // Steer
   steerSink?: SteerSink;
+
+  /** Set when this turn's text is a transcript of speech — threaded onto every
+   *  `before_tool_call` payload so the approval surface can tell a spoken
+   *  request from a typed one. Absent on typed turns. */
+  voiceOrigin?: VoiceTurnOrigin;
 
   // Run options
   opts: {
@@ -294,6 +300,7 @@ export async function* processTools(
         args: tc.args,
         allowedPlugins: ctx.allowedPlugins,
         traceId: ctx.traceId,
+        ...(ctx.voiceOrigin ? { voiceOrigin: ctx.voiceOrigin } : {}),
       },
     );
 

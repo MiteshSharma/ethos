@@ -1,5 +1,6 @@
 import { dirname, join } from 'node:path';
 import {
+  createSpokenStyleInjector,
   type DefaultToolRegistry,
   LastWriteWinsPolicy,
   LazyOnDemandPolicy,
@@ -988,6 +989,27 @@ export async function composeAllTools(
       ? await scanUiTemplates(wiringCtx.storage, personalityDir)
       : [];
     injectors.push(createUiGuidanceInjector({ personalityId: activePerson.id, templates }));
+  }
+
+  // -------------------------------------------------------------------------
+  // Spoken-style injector — how a voice personality talks (voice V1a §4)
+  // -------------------------------------------------------------------------
+
+  // Gated on DECLARED intent to be heard: a `voice` block, or `voice_session`
+  // in the toolset. Unlike the card injector above, an undefined toolset
+  // ("all tools") does NOT qualify — most personalities are text-only, and
+  // ~900 chars of rules about speaking is dead weight on every one of them.
+  //
+  // The content is built from the personality id ALONE and never consults the
+  // turn, so the static prompt prefix stays byte-identical across turns — a
+  // session that mixes typed and spoken turns is exactly the case that would
+  // break if the per-turn fact lived here instead of on the message
+  // (`packages/core/src/__tests__/prompt-prefix-stability.test.ts`).
+  const speaks =
+    activePerson.voice !== undefined ||
+    (activeToolset?.some((name: string) => name === 'voice_session') ?? false);
+  if (speaks) {
+    injectors.push(createSpokenStyleInjector({ personalityId: activePerson.id }));
   }
 
   // -------------------------------------------------------------------------

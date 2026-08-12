@@ -85,6 +85,8 @@ export interface ChatSendInput {
   personalityId?: string;
   userId?: string;
   dryRun?: boolean;
+  /** `voice` → `text` is a transcript of speech (talk-mode). Default `text`. */
+  origin?: 'text' | 'voice';
   attachments?: Array<{
     type: 'image' | 'file';
     data: string;
@@ -209,6 +211,14 @@ export class ChatService {
         ...(input.userId ? { userId: input.userId } : {}),
         ...(input.dryRun ? { dryRun: true } : {}),
         ...(loopAttachments?.length ? { attachments: loopAttachments } : {}),
+        // Talk-mode turn: the loop renders a message-level `<voice-origin>`
+        // annotation on the persisted user message so the model knows it is
+        // speaking. `owner` — this is the operator's own browser session,
+        // behind the same auth as the rest of the surface; a far-end caller
+        // can never reach this code path.
+        ...(input.origin === 'voice'
+          ? { voiceOrigin: { transport: 'browser-talk-mode', speaker: 'owner' as const } }
+          : {}),
       })
       .catch((err) => {
         // bridge.send doesn't reject for in-flight failures (those land as

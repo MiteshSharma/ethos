@@ -14,8 +14,17 @@ import { subscribeToSession } from '../../sse';
 export interface ChatVoiceRunnerDeps {
   /** The active chat session id, read lazily (it can change between turns). */
   sessionId: () => string | null;
-  /** The chat hook's send — drives the optimistic user bubble + streamed reply. */
-  sendMessage: (text: string) => Promise<void>;
+  /**
+   * The chat hook's send — drives the optimistic user bubble + streamed reply.
+   * The third argument marks the turn as SPOKEN so the server annotates it; a
+   * runner that omits it would produce a turn indistinguishable from typing,
+   * which is the failure this exists to prevent.
+   */
+  sendMessage: (
+    text: string,
+    attachments?: undefined,
+    opts?: { origin?: 'text' | 'voice' },
+  ) => Promise<void>;
   /** Abort the running chat turn (barge-in / hang-up stops the agent server-side). */
   abortTurn: () => Promise<void>;
 }
@@ -105,10 +114,10 @@ export async function* runVoiceAgentTurn(
 
   try {
     if (tap) {
-      sendPromise = deps.sendMessage(text);
+      sendPromise = deps.sendMessage(text, undefined, { origin: 'voice' });
     } else {
       // No existing session: await the send to learn the created id, then tap.
-      await deps.sendMessage(text);
+      await deps.sendMessage(text, undefined, { origin: 'voice' });
       const createdId = deps.sessionId();
       if (createdId) tap = tapSessionReply(createdId);
     }

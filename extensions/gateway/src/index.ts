@@ -4,6 +4,7 @@ import {
   deriveBotKey,
   resolveSttProvider as resolveSharedStt,
   resolveTtsProvider as resolveSharedTts,
+  resolveVoicePreferences,
   stripAnsiEscapes,
 } from '@ethosagent/core';
 import type { DeliveryLedger } from '@ethosagent/delivery-ledger';
@@ -29,6 +30,7 @@ import type {
   InboundMessage,
   Logger,
   OutboundMessage,
+  PersonalityVoiceConfig,
   PlatformAdapter,
   PlatformAdapterFactory,
   SteerSink,
@@ -37,6 +39,7 @@ import type {
   SttProviderRegistry,
   TtsProvider,
   TtsProviderRegistry,
+  VoiceTurnOrigin,
 } from '@ethosagent/types';
 import {
   DEFAULT_VOICE_MODE,
@@ -449,6 +452,15 @@ export interface GatewayConfig {
     refresh(): Promise<void>;
     has(id: string): boolean;
     list(): Array<{ id: string; name: string; isDefault: boolean }>;
+    /**
+     * The personality's `voice` block, when it declares one. Optional so the
+     * seam stays backwards-compatible; absent → channel TTS falls back to the
+     * global `auxiliary.tts.voice`, which is what every deployment did before
+     * per-personality voice existed. Read AFTER `refresh()`, so an edited
+     * `voice.tts_voice` takes effect on the next spoken reply without a
+     * restart, exactly like the rest of the directory.
+     */
+    voice?(id: string): PersonalityVoiceConfig | undefined;
   };
   /**
    * Optional attachment cache for cleaning up cached files on session reset
@@ -1920,6 +1932,14 @@ export class Gateway {
       // --- Voice pipeline: auto-transcribe audio attachments ---
       const attachmentCache = this.attachmentCache;
       const storage = this.storage;
+      // Set only when a transcript actually reached the turn. It becomes a
+      // MESSAGE-LEVEL `<voice-origin>` annotation inside AgentLoop, riding
+      // ALONGSIDE the `<attachments>` audio marker rather than replacing it —
+      // the transcript is an annotation on the audio message, never a
+      // substitute for it (OC #87269 / Hermes #51131). Nothing goes into the
+      // system prompt, so a lane that mixes typed and spoken messages keeps a
+      // byte-identical static prefix.
+      let voiceOrigin: VoiceTurnOrigin | undefined;
       if (hasAudioAttachments(message.attachments) && attachmentCache && storage) {
         const provider = await this.resolveSttProvider();
         const results = await transcribeAudioAttachments(
@@ -1928,6 +1948,14 @@ export class Gateway {
           (url) => storage.readBytes(attachmentCache.resolveLocalPath(url)),
         );
         text = buildTranscriptText(text, results);
+        // A channel voice note is the account owner's own message on their own
+        // lane — channel ingress is already sender-gated. A far-end caller
+        // arrives over telephony (V4), never here.
+        voiceOrigin = {
+          transport: `${message.platform}-voice-note`,
+          speaker: 'owner',
+          ...(this.resolvedSttProviderId ? { sttProvider: this.resolvedSttProviderId } : {}),
+        };
       }
 
       const wrapped = wrapUntrusted({ content: text, toolName: 'channel_message' });
@@ -1998,6 +2026,7 @@ export class Gateway {
         userId,
         steerSink,
         origin: `${message.platform}:${message.chatId}`,
+        ...(voiceOrigin ? { voiceOrigin } : {}),
         ...(toolsetNarrow ? { toolsetNarrow } : {}),
         // Unconditional, not config-driven: UI-card tools have no rendering on
         // any channel adapter, so they never reach a channel turn's tool list.
@@ -2108,7 +2137,29 @@ export class Gateway {
                   synthText = truncateAtSentenceBoundary(synthText, maxChars);
                 }
                 if (synthText.length > 0) {
-                  const result = await tts.synthesize(synthText);
+                  // Per-personality voice on the CHANNEL path (voice V1a §4).
+                  // Same resolution function the VoiceSession stack uses, so
+                  // "which voice served this reply" has one answer across
+                  // surfaces: language-specific > personality > global config.
+                  // (The gateway has no per-turn language signal today, so the
+                  // language rung is unused here and the personality's default
+                  // voice wins; `resolveVoicePreferences` owns the ordering
+                  // either way.)
+                  const personalityVoice = personalityId
+                    ? this.personalityDirectory?.voice?.(personalityId)
+                    : undefined;
+                  const globalTtsVoice =
+                    typeof this.ttsProviderConfig.voice === 'string'
+                      ? this.ttsProviderConfig.voice
+                      : undefined;
+                  const voicePrefs = resolveVoicePreferences({
+                    ...(personalityVoice ? { personality: personalityVoice } : {}),
+                    ...(globalTtsVoice ? { globalTtsVoice } : {}),
+                  });
+                  const result = await tts.synthesize(
+                    synthText,
+                    voicePrefs.ttsVoice ? { voice: voicePrefs.ttsVoice } : undefined,
+                  );
                   if (result.format === 'opus' && 'sendVoice' in adapter) {
                     const voiceAdapter = adapter as {
                       sendVoice(
