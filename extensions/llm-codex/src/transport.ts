@@ -1,3 +1,4 @@
+import { estimateCost } from '@ethosagent/pricing';
 import type { CompletionChunk, TokenUsage } from '@ethosagent/types';
 
 // ---------------------------------------------------------------------------
@@ -206,7 +207,11 @@ export async function* streamResponsesApi(
           outputTokens,
           cacheReadTokens: 0,
           cacheCreationTokens: 0,
-          estimatedCostUsd: 0, // Codex pricing not publicly available
+          // Codex model ids that the shared table knows price normally; the
+          // rest resolve to 0 AND report `pricing.unknown_model`, so a
+          // subscription-served model shows up as an acknowledged blind spot
+          // rather than as a silent, unmarked zero.
+          estimatedCostUsd: estimateCost(body.model, { inputTokens, outputTokens }).costUsd,
           requestTokens,
         };
         yield { type: 'usage', usage, metadata: {} };

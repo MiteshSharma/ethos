@@ -23,7 +23,7 @@ Tool use is streamed as three discrete events: `content_block_start` (id + name)
 
 `AuthRotatingProvider` (`src/index.ts:299`) sorts profiles by `priority` (high-first) at construction, then on each `complete()` call iterates from the current index forward. `classifyError()` decides whether the failure is rotation-eligible — anything other than `auth`/`rate_limit`/`overloaded` is rethrown immediately. After a full rotation back to `startIdx` it gives up and rethrows the last error.
 
-Cost is estimated from a per-model-prefix `PRICING` table (`src/index.ts:40`); unknown prefixes fall back to the Sonnet rate. The `200_000` token context is a flat default for all current Claude models.
+Cost is estimated by `estimateCost` from `@ethosagent/pricing` — the one cache-aware rate table shared by every provider extension. An unrecognised model costs 0 and reports `pricing.unknown_model`; it no longer falls back to the Sonnet rate. The `200_000` token context is a flat default for all current Claude models.
 
 ## Gotchas
 

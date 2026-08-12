@@ -104,6 +104,7 @@
     "@ethosagent/request-dump": "workspace:*",
     "@ethosagent/personalities": "workspace:*",
     "@ethosagent/personality-judge": "workspace:*",
+    "@ethosagent/pricing": "workspace:*",
     "@ethosagent/safety-redact": "workspace:*",
     "@ethosagent/secrets-aws": "workspace:*",
     "@ethosagent/session-lane": "workspace:*",

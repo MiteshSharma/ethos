@@ -1,3 +1,4 @@
+import { estimateCost } from '@ethosagent/pricing';
 import type {
   CompletionChunk,
   CompletionOptions,
@@ -7,7 +8,7 @@ import type {
 } from '@ethosagent/types';
 import { orderToolDefinitions } from '@ethosagent/types';
 import type OpenAI from 'openai';
-import { estimateCostOpenAI, normalizeGeminiSchema, toOpenAIMessages } from './index';
+import { normalizeGeminiSchema, toOpenAIMessages } from './index';
 import type { LocalOpenAiRuntime } from './runtime-classify';
 import { sanitizeToolSchemaForGrammar } from './schema-sanitize';
 
@@ -19,6 +20,11 @@ export interface ChatCompletionsStreamParams {
   oaiParams: OpenAI.Chat.ChatCompletionCreateParamsStreaming;
   requestTokens?: { system: number; tools: number; messages: number };
   effectiveModel: string;
+  /** Served by a local runtime (Ollama, vLLM, llama.cpp, LM Studio). Pricing
+   *  reads this rather than guessing from the model name: `deepseek-r1` and
+   *  `mistral` name both an Ollama pull and a paid hosted model, so the name
+   *  alone cannot tell an intentional $0 from an unpriced one. */
+  localRuntime?: boolean;
 }
 
 type StructuredOutputDialect = 'openai' | 'ollama' | 'vllm';
@@ -174,7 +180,12 @@ export function buildChatCompletionsParams(
   applyStructuredOutput(oaiParams, options, dialect);
   applySamplingExtras(oaiParams, options, dialect, opts?.localRuntime);
 
-  return { oaiParams, requestTokens: undefined, effectiveModel };
+  return {
+    oaiParams,
+    requestTokens: undefined,
+    effectiveModel,
+    localRuntime: opts?.localRuntime !== undefined,
+  };
 }
 
 /**
@@ -252,11 +263,14 @@ export async function* streamChatCompletions(
           outputTokens: chunk.usage.completion_tokens,
           cacheReadTokens: 0,
           cacheCreationTokens: 0,
-          estimatedCostUsd: estimateCostOpenAI(
+          estimatedCostUsd: estimateCost(
             params.effectiveModel,
-            chunk.usage.prompt_tokens,
-            chunk.usage.completion_tokens,
-          ),
+            {
+              inputTokens: chunk.usage.prompt_tokens,
+              outputTokens: chunk.usage.completion_tokens,
+            },
+            { localRuntime: params.localRuntime },
+          ).costUsd,
           requestTokens: params.requestTokens,
         },
         metadata: {},

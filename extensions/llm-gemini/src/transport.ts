@@ -1,7 +1,9 @@
+import { estimateCost } from '@ethosagent/pricing';
 import type {
   CompletionChunk,
   CompletionOptions,
   Message,
+  TokenUsage,
   ToolDefinitionLite,
 } from '@ethosagent/types';
 
@@ -37,7 +39,7 @@ export async function* streamGeminiGenerate(
 
   if (!response.body) throw new Error('Gemini response has no body');
 
-  yield* parseGeminiSSE(response.body);
+  yield* parseGeminiSSE(response.body, config.model);
 }
 
 function buildGeminiBody(
@@ -96,7 +98,10 @@ function convertPart(c: { type: string; [key: string]: unknown }): Record<string
   }
 }
 
-async function* parseGeminiSSE(body: ReadableStream<Uint8Array>): AsyncGenerator<CompletionChunk> {
+async function* parseGeminiSSE(
+  body: ReadableStream<Uint8Array>,
+  model: string,
+): AsyncGenerator<CompletionChunk> {
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let buffer = '';
@@ -120,7 +125,7 @@ async function* parseGeminiSSE(body: ReadableStream<Uint8Array>): AsyncGenerator
 
         try {
           const event = JSON.parse(dataLine);
-          yield* handleGeminiEvent(event, toolCallCounter);
+          yield* handleGeminiEvent(event, toolCallCounter, model);
           const candidates = event.candidates as Array<Record<string, unknown>> | undefined;
           if (candidates?.[0]) {
             const content = candidates[0].content as Record<string, unknown> | undefined;
@@ -141,24 +146,42 @@ async function* parseGeminiSSE(body: ReadableStream<Uint8Array>): AsyncGenerator
   }
 }
 
+/**
+ * Map Gemini's `usageMetadata` onto `TokenUsage`, priced.
+ *
+ * `promptTokenCount` INCLUDES `cachedContentTokenCount`, so the cached slice is
+ * subtracted before the input rate is applied — otherwise a cache hit is billed
+ * twice, once at the input rate and once at the cache-read rate. The reported
+ * token counts keep Gemini's own meaning; only the cost math splits them.
+ */
+function geminiUsage(meta: Record<string, number>, model: string): TokenUsage {
+  const promptTokens = meta.promptTokenCount ?? 0;
+  const outputTokens = meta.candidatesTokenCount ?? 0;
+  const cacheReadTokens = meta.cachedContentTokenCount ?? 0;
+  return {
+    inputTokens: promptTokens,
+    outputTokens,
+    cacheReadTokens,
+    cacheCreationTokens: 0,
+    // Previously hardcoded to 0, which reported every Gemini turn as free.
+    estimatedCostUsd: estimateCost(model, {
+      inputTokens: Math.max(promptTokens - cacheReadTokens, 0),
+      outputTokens,
+      cacheReadTokens,
+    }).costUsd,
+  };
+}
+
 function* handleGeminiEvent(
   event: Record<string, unknown>,
   toolCallOffset: number,
+  model: string,
 ): Generator<CompletionChunk> {
   const candidates = event.candidates as Array<Record<string, unknown>> | undefined;
   if (!candidates?.length) {
     const meta = event.usageMetadata as Record<string, number> | undefined;
     if (meta) {
-      yield {
-        type: 'usage',
-        usage: {
-          inputTokens: meta.promptTokenCount ?? 0,
-          outputTokens: meta.candidatesTokenCount ?? 0,
-          cacheReadTokens: meta.cachedContentTokenCount ?? 0,
-          cacheCreationTokens: 0,
-          estimatedCostUsd: 0,
-        },
-      };
+      yield { type: 'usage', usage: geminiUsage(meta, model) };
     }
     return;
   }
@@ -197,15 +220,6 @@ function* handleGeminiEvent(
 
   const meta = event.usageMetadata as Record<string, number> | undefined;
   if (meta) {
-    yield {
-      type: 'usage',
-      usage: {
-        inputTokens: meta.promptTokenCount ?? 0,
-        outputTokens: meta.candidatesTokenCount ?? 0,
-        cacheReadTokens: meta.cachedContentTokenCount ?? 0,
-        cacheCreationTokens: 0,
-        estimatedCostUsd: 0,
-      },
-    };
+    yield { type: 'usage', usage: geminiUsage(meta, model) };
   }
 }

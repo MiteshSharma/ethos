@@ -9,6 +9,7 @@ import {
   ObservabilityService,
   SQLiteObservabilityStore,
 } from '@ethosagent/observability-sqlite';
+import { setUnknownModelReporter } from '@ethosagent/pricing';
 import {
   EnvSecretsResolver,
   FileSecretsResolver,
@@ -111,6 +112,16 @@ export function getObservabilityService(): ObservabilityService {
     ethosObsSingleton = new EthosObservability(obsSingleton);
     setObservabilityService(ethosObsSingleton);
     setMeshObservabilityService(ethosObsSingleton);
+    // A5 — provider transports call `estimateCost` with no observability handle
+    // of their own, so the sink for unpriced models is bound here, once per
+    // process. The pricing package does the per-model de-duplication.
+    setUnknownModelReporter((model) => {
+      ethosObsSingleton?.recordUnknownModelPricing({
+        code: 'pricing.unknown_model',
+        cause: `No rate for model "${model}" — its calls are recorded as $0.`,
+        model,
+      });
+    });
   }
   return obsSingleton;
 }

@@ -302,6 +302,9 @@ importers:
       '@ethosagent/personality-judge':
         specifier: workspace:*
         version: link:../../extensions/personality-judge
+      '@ethosagent/pricing':
+        specifier: workspace:*
+        version: link:../../packages/pricing
       '@ethosagent/request-dump':
         specifier: workspace:*
         version: link:../../extensions/request-dump
@@ -1080,6 +1083,9 @@ importers:
       '@ethosagent/plugin-sdk':
         specifier: workspace:*
         version: link:../../packages/plugin-sdk
+      '@ethosagent/pricing':
+        specifier: workspace:*
+        version: link:../../packages/pricing
       '@ethosagent/types':
         specifier: workspace:*
         version: link:../../packages/types
@@ -1108,6 +1114,9 @@ importers:
       '@ethosagent/plugin-sdk':
         specifier: workspace:*
         version: link:../../packages/plugin-sdk
+      '@ethosagent/pricing':
+        specifier: workspace:*
+        version: link:../../packages/pricing
       '@ethosagent/types':
         specifier: workspace:*
         version: link:../../packages/types
@@ -1120,6 +1129,9 @@ importers:
       '@ethosagent/plugin-sdk':
         specifier: workspace:*
         version: link:../../packages/plugin-sdk
+      '@ethosagent/pricing':
+        specifier: workspace:*
+        version: link:../../packages/pricing
       '@ethosagent/types':
         specifier: workspace:*
         version: link:../../packages/types
@@ -1133,6 +1145,9 @@ importers:
       '@ethosagent/plugin-sdk':
         specifier: workspace:*
         version: link:../../packages/plugin-sdk
+      '@ethosagent/pricing':
+        specifier: workspace:*
+        version: link:../../packages/pricing
       '@ethosagent/types':
         specifier: workspace:*
         version: link:../../packages/types
@@ -1142,6 +1157,9 @@ importers:
       '@ethosagent/plugin-sdk':
         specifier: workspace:*
         version: link:../../packages/plugin-sdk
+      '@ethosagent/pricing':
+        specifier: workspace:*
+        version: link:../../packages/pricing
       '@ethosagent/types':
         specifier: workspace:*
         version: link:../../packages/types
@@ -1497,6 +1515,9 @@ importers:
 
   extensions/session-sqlite:
     dependencies:
+      '@ethosagent/pricing':
+        specifier: workspace:*
+        version: link:../../packages/pricing
       '@ethosagent/sqlite':
         specifier: workspace:*
         version: link:../../packages/sqlite
@@ -2046,6 +2067,12 @@ importers:
       '@ethosagent/oauth-core':
         specifier: workspace:*
         version: link:../oauth-core
+
+  packages/pricing:
+    dependencies:
+      '@ethosagent/types':
+        specifier: workspace:*
+        version: link:../types
 
   packages/safety/channel:
     dependencies:

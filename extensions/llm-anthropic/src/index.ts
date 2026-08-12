@@ -53,46 +53,6 @@ function isThinkingModel(model: string): boolean {
   );
 }
 
-// Pricing per million tokens (approximate — update as pricing changes)
-const PRICING: Array<{
-  prefix: string;
-  input: number;
-  output: number;
-  cacheRead: number;
-  cacheWrite: number;
-}> = [
-  { prefix: 'claude-opus-4', input: 15, output: 75, cacheRead: 1.5, cacheWrite: 18.75 },
-  { prefix: 'claude-sonnet-4', input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 },
-  { prefix: 'claude-haiku-4', input: 0.8, output: 4, cacheRead: 0.08, cacheWrite: 1.0 },
-  { prefix: 'claude-3-7-sonnet', input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 },
-  { prefix: 'claude-3-5-sonnet', input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 },
-  { prefix: 'claude-3-5-haiku', input: 0.8, output: 4, cacheRead: 0.08, cacheWrite: 1.0 },
-  { prefix: 'claude-3-opus', input: 15, output: 75, cacheRead: 1.5, cacheWrite: 18.75 },
-];
-
-export function estimateCost(
-  model: string,
-  inputTokens: number,
-  outputTokens: number,
-  cacheReadTokens: number,
-  cacheCreationTokens: number,
-): number {
-  const p = PRICING.find((r) => model.includes(r.prefix)) ?? {
-    input: 3,
-    output: 15,
-    cacheRead: 0.3,
-    cacheWrite: 3.75,
-  };
-  const M = 1_000_000;
-  return (
-    (inputTokens * p.input +
-      outputTokens * p.output +
-      cacheReadTokens * p.cacheRead +
-      cacheCreationTokens * p.cacheWrite) /
-    M
-  );
-}
-
 function classifyError(err: unknown): FailoverReason {
   if (err instanceof Anthropic.AuthenticationError) return 'auth';
   if (err instanceof Anthropic.RateLimitError) return 'rate_limit';

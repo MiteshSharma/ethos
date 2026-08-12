@@ -1,6 +1,6 @@
 import type Anthropic from '@anthropic-ai/sdk';
+import { estimateCost } from '@ethosagent/pricing';
 import type { CompletionChunk } from '@ethosagent/types';
-import { estimateCost } from './index';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -126,13 +126,12 @@ export async function* streamAnthropicMessages(
               outputTokens,
               cacheReadTokens,
               cacheCreationTokens,
-              estimatedCostUsd: estimateCost(
-                params.model,
+              estimatedCostUsd: estimateCost(params.model, {
                 inputTokens,
                 outputTokens,
                 cacheReadTokens,
                 cacheCreationTokens,
-              ),
+              }).costUsd,
               requestTokens,
             },
             metadata: {},

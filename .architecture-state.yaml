@@ -35,7 +35,7 @@ version: 1
 #
 # §II names five layers and does not partition packages/* exhaustively. The
 # library packages not listed below (a2a, agent-bridge, config, design-tokens,
-# logger, oauth-core, plugin-contract, plugin-sdk, sdk, session-lane,
+# logger, oauth-core, plugin-contract, plugin-sdk, pricing, sdk, session-lane,
 # surface-kit, ui-components, web-contracts) have no layer assignment today.
 # They all carry a tier, which is the assignment the security boundary needs.
 # `packages/sqlite` is the one exception: it is classified `vendored` below,
@@ -959,6 +959,11 @@ tiers:
 
   packages/plugin-contract:
     package: "@ethosagent/plugin-contract"
+    tier: 2
+    assigned: 2026-08-12
+
+  packages/pricing:
+    package: "@ethosagent/pricing"
     tier: 2
     assigned: 2026-08-12
 

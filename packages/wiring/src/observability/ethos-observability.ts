@@ -40,6 +40,8 @@ export const ETHOS_EVENT_CATEGORIES = [
   'audit.injection_flag',
   'audit.redacted',
   'audit.compaction',
+  'audit.cost_recompute',
+  'pricing.unknown_model',
   'tool.repair',
   'channel.pairing',
   'channel.allow',
@@ -301,6 +303,36 @@ export class EthosObservability {
 
   recordCompaction(opts: EventBase & { severity?: EventSeverity }): void {
     this.emit('audit.compaction', 'info', opts);
+  }
+
+  /**
+   * A5 — an LLM call used a model `@ethosagent/pricing` has no rate for, so its
+   * cost was recorded as 0. Emitted at most once per model per process (the
+   * de-duplication lives in the pricing package); a spend total that silently
+   * absorbs unpriced calls is the failure mode this exists to make visible.
+   *
+   * Distinct from a locally-served model, which costs 0 for real and emits
+   * nothing.
+   */
+  recordUnknownModelPricing(opts: EventBase & { model: string }): void {
+    this.emit('pricing.unknown_model', 'warn', opts, { model: opts.model });
+  }
+
+  /** A5 backfill — `ethos data recompute-costs` rewrote stored message costs. */
+  recordCostRecompute(
+    opts: EventBase & {
+      messagesScanned: number;
+      messagesUpdated: number;
+      sessionsUpdated: number;
+      unpricedModels: string[];
+    },
+  ): void {
+    this.emit('audit.cost_recompute', 'info', opts, {
+      messagesScanned: opts.messagesScanned,
+      messagesUpdated: opts.messagesUpdated,
+      sessionsUpdated: opts.sessionsUpdated,
+      unpricedModels: opts.unpricedModels,
+    });
   }
 
   recordToolRepair(

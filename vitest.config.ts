@@ -47,6 +47,7 @@ const srcAliases = {
   '@ethosagent/llm-openai-compat': resolve('./extensions/llm-openai-compat/src'),
   '@ethosagent/llm-codex': resolve('./extensions/llm-codex/src'),
   '@ethosagent/logger': resolve('./packages/logger/src'),
+  '@ethosagent/pricing': resolve('./packages/pricing/src'),
 };
 
 export default defineConfig({

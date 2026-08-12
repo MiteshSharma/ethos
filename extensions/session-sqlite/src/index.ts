@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { estimateCost } from '@ethosagent/pricing';
 import Database, { migrate } from '@ethosagent/sqlite';
 import type {
   CompressionEvent,
@@ -27,6 +28,18 @@ export {
   type SessionKeyMigrationResult,
 } from './session-key-migration';
 export { SqliteKeyValueStore };
+
+/** Outcome of {@link SQLiteSessionStore.recomputeMessageCosts}. */
+export interface RecomputeCostsResult {
+  /** Message rows carrying token counts, i.e. rows a cost can be derived for. */
+  messagesScanned: number;
+  /** Rows whose stored cost differed from the recomputed one and were rewritten. */
+  messagesUpdated: number;
+  /** Sessions whose derived rollup total had to be rebuilt. */
+  sessionsUpdated: number;
+  /** Models with no rate — their rows were (re)written as 0. Sorted, unique. */
+  unpricedModels: string[];
+}
 
 // ---------------------------------------------------------------------------
 // SQLiteSessionStore
@@ -636,6 +649,88 @@ export class SQLiteSessionStore implements SessionStore {
   // ---------------------------------------------------------------------------
   // Maintenance
   // ---------------------------------------------------------------------------
+
+  /**
+   * A5 backfill — re-derive `messages.estimated_cost_usd` from the token counts
+   * already stored on each row, using the one shared rate table.
+   *
+   * History written before `@ethosagent/pricing` existed is poisoned in two
+   * directions: three providers hardcoded every call to $0, and llm-anthropic
+   * priced any unrecognised `claude-*` id at Sonnet rates. Both are recorded
+   * numbers, so no amount of fixing the emitters repairs what is already on
+   * disk. This does.
+   *
+   * The model comes from `sessions.model` — `messages` has no model column, and
+   * the session's model is the only per-row signal that exists. A session whose
+   * model was switched mid-conversation is re-priced entirely at its current
+   * model; that is a known approximation and still strictly better than a
+   * column of zeros.
+   *
+   * IDEMPOTENT. The cost is a pure function of (model, token counts), and the
+   * session rollup is rewritten to the sum it must equal rather than adjusted by
+   * a delta, so a second run writes nothing and reports 0 rows updated.
+   *
+   * ROLLUP INVARIANT (analytics decision 9). `sessions.estimated_cost_usd` is a
+   * derived cache of the live `messages` rows. Rewriting message costs without
+   * rebuilding it would leave the cache stale — the exact invariant A1's
+   * consistency test pins — so both land in one transaction.
+   */
+  async recomputeMessageCosts(): Promise<RecomputeCostsResult> {
+    const rows = this.db
+      .prepare(
+        `SELECT m.id, m.input_tokens, m.output_tokens, m.cache_read_tokens,
+                m.cache_creation_tokens, m.estimated_cost_usd, s.model
+         FROM messages m
+         JOIN sessions s ON s.id = m.session_id
+         WHERE m.input_tokens IS NOT NULL`,
+      )
+      .all() as Array<{
+      id: string;
+      input_tokens: number;
+      output_tokens: number | null;
+      cache_read_tokens: number | null;
+      cache_creation_tokens: number | null;
+      estimated_cost_usd: number | null;
+      model: string;
+    }>;
+
+    const unpriced = new Set<string>();
+    const updates: Array<{ id: string; cost: number }> = [];
+    for (const r of rows) {
+      const { costUsd, basis } = estimateCost(r.model, {
+        inputTokens: r.input_tokens,
+        outputTokens: r.output_tokens ?? 0,
+        cacheReadTokens: r.cache_read_tokens ?? 0,
+        cacheCreationTokens: r.cache_creation_tokens ?? 0,
+      });
+      if (basis === 'unknown') unpriced.add(r.model);
+      if (r.estimated_cost_usd !== costUsd) updates.push({ id: r.id, cost: costUsd });
+    }
+
+    // `IS NOT` is SQLite's null-safe comparison, so a session already holding
+    // the right total is left alone and the reported count means "changed".
+    const sessionsUpdated = this.db.transaction(() => {
+      const setCost = this.db.prepare('UPDATE messages SET estimated_cost_usd = ? WHERE id = ?');
+      for (const u of updates) setCost.run(u.cost, u.id);
+      return this.db
+        .prepare(
+          `UPDATE sessions SET estimated_cost_usd = COALESCE(
+             (SELECT SUM(estimated_cost_usd) FROM messages
+              WHERE session_id = sessions.id AND deleted_at IS NULL), 0.0)
+           WHERE estimated_cost_usd IS NOT COALESCE(
+             (SELECT SUM(estimated_cost_usd) FROM messages
+              WHERE session_id = sessions.id AND deleted_at IS NULL), 0.0)`,
+        )
+        .run().changes;
+    })();
+
+    return {
+      messagesScanned: rows.length,
+      messagesUpdated: updates.length,
+      sessionsUpdated,
+      unpricedModels: [...unpriced].sort(),
+    };
+  }
 
   // ---------------------------------------------------------------------------
   // FW-4 — title management

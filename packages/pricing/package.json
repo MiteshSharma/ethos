@@ -1,8 +1,9 @@
 {
-  "name": "@ethosagent/llm-codex",
+  "name": "@ethosagent/pricing",
   "version": "0.0.0",
   "private": true,
   "type": "module",
+  "description": "The one cache-aware LLM rate table plus estimateCost(). Consumed by every provider extension so token→USD is computed in exactly one place. Depends only on @ethosagent/types.",
   "exports": {
     ".": {
       "import": "./src/index.ts",
@@ -14,12 +15,6 @@
     "build": "tsup src/index.ts --format esm --dts"
   },
   "dependencies": {
-    "@ethosagent/oauth-core": "workspace:*",
-    "@ethosagent/plugin-sdk": "workspace:*",
-    "@ethosagent/pricing": "workspace:*",
     "@ethosagent/types": "workspace:*"
-  },
-  "devDependencies": {
-    "@ethosagent/storage-fs": "workspace:*"
   }
 }
