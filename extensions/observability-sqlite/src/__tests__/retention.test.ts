@@ -346,6 +346,65 @@ describe('pruneObservability', () => {
     sessDb.close();
   });
 
+  // A1a — `ethos data prune` opens sessions.db raw, without running the store's
+  // migrations, so the file may predate the usage rollup entirely. Pruning
+  // messages is the primary job: a rollup that cannot be maintained is skipped,
+  // never allowed to block the delete.
+  it('prunes messages on a sessions.db with no sessions table', () => {
+    const sessDb = new Database(':memory:');
+    sessDb.exec(`
+      CREATE TABLE messages (
+        id         INTEGER PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        content    TEXT NOT NULL,
+        timestamp  TEXT NOT NULL
+      ) STRICT;
+    `);
+    insertMinimalMessage(sessDb, 's1', 'old', new Date(NOW - 400 * 86_400_000).toISOString());
+    insertMinimalMessage(sessDb, 's1', 'recent', new Date(RECENT).toISOString());
+
+    const result = pruneObservability(db, RETENTION_DEFAULTS, {
+      dryRun: false,
+      now: NOW,
+      sessDb,
+    });
+
+    expect(result.messages).toBe(1);
+    const remaining = (sessDb.prepare('SELECT COUNT(*) as n FROM messages').get() as { n: number })
+      .n;
+    expect(remaining).toBe(1);
+    sessDb.close();
+  });
+
+  it('prunes messages when the sessions table lacks the usage columns', () => {
+    const sessDb = new Database(':memory:');
+    sessDb.exec(`
+      CREATE TABLE sessions (id TEXT PRIMARY KEY, key TEXT NOT NULL) STRICT;
+
+      CREATE TABLE messages (
+        id         INTEGER PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        content    TEXT NOT NULL,
+        timestamp  TEXT NOT NULL
+      ) STRICT;
+    `);
+    sessDb.prepare('INSERT INTO sessions (id, key) VALUES (?, ?)').run('s1', 'cli:old');
+    insertMinimalMessage(sessDb, 's1', 'old', new Date(NOW - 400 * 86_400_000).toISOString());
+    insertMinimalMessage(sessDb, 's1', 'recent', new Date(RECENT).toISOString());
+
+    const result = pruneObservability(db, RETENTION_DEFAULTS, {
+      dryRun: false,
+      now: NOW,
+      sessDb,
+    });
+
+    expect(result.messages).toBe(1);
+    const remaining = (sessDb.prepare('SELECT COUNT(*) as n FROM messages').get() as { n: number })
+      .n;
+    expect(remaining).toBe(1);
+    sessDb.close();
+  });
+
   // A1 / analytics decision 9 — the session rollup columns are a derived cache
   // of the surviving `messages` rows, so a prune has to take the pruned rows'
   // usage back out of them.
@@ -483,6 +542,18 @@ function insertSession(
       'INSERT INTO sessions (id, input_tokens, output_tokens, estimated_cost_usd) VALUES (?, ?, ?, ?)',
     )
     .run(id, usage.inputTokens, usage.outputTokens, usage.estimatedCostUsd);
+}
+
+/** Insert into a pre-usage-columns `messages` table (id/session_id/content/timestamp only). */
+function insertMinimalMessage(
+  sessDb: Database.Database,
+  sessionId: string,
+  content: string,
+  timestamp: string,
+): void {
+  sessDb
+    .prepare('INSERT INTO messages (session_id, content, timestamp) VALUES (?, ?, ?)')
+    .run(sessionId, content, timestamp);
 }
 
 function insertMessage(

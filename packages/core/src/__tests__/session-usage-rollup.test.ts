@@ -8,11 +8,19 @@
 // tests pin is `rollup == SUM(messages)` — including on the paths where the
 // turn dies before the finalizer runs.
 
-import type { CompletionChunk, LLMProvider, Message, TokenUsage } from '@ethosagent/types';
+import type {
+  CompletionChunk,
+  LLMProvider,
+  Message,
+  SessionUsage,
+  TokenUsage,
+} from '@ethosagent/types';
 import { describe, expect, it } from 'vitest';
 import type { AgentEvent } from '../agent-loop';
 import { AgentLoop } from '../agent-loop';
+import { createTurnUsage, flushTurnUsage } from '../agent-loop/stages/turn-finalizer';
 import { InMemorySessionStore } from '../defaults/in-memory-session';
+import type { AgentLoopObservability } from '../observability/agent-loop-observability';
 import { createTestSafety } from './helpers/test-safety';
 
 interface UsageTotals {
@@ -90,6 +98,41 @@ async function messageSum(session: InMemorySessionStore, key: string): Promise<U
     }),
     { ...ZERO },
   );
+}
+
+/** Session store whose rollup write always fails — everything else is real. */
+class RollupWriteFails extends InMemorySessionStore {
+  override async updateUsage(): Promise<void> {
+    throw new Error('sessions.db is locked');
+  }
+}
+
+/** Session store that records the deltas handed to `updateUsage`. */
+class RollupWriteRecords extends InMemorySessionStore {
+  readonly deltas: Partial<SessionUsage>[] = [];
+  override async updateUsage(_sessionId: string, delta: Partial<SessionUsage>): Promise<void> {
+    this.deltas.push(delta);
+  }
+}
+
+/** Minimal observability that records the `code` of every error it is handed. */
+function makeErrorRecorder(): { observability: AgentLoopObservability; codes: string[] } {
+  const codes: string[] = [];
+  const observability: AgentLoopObservability = {
+    startTurnTrace: () => 'trace-1',
+    endTrace: () => {},
+    startSpan: () => 'span-1',
+    endSpan: () => {},
+    recordError: (opts) => {
+      if (opts.code) codes.push(opts.code);
+    },
+    recordSafetyBlock: () => {},
+    recordCompaction: () => {},
+    recordTierEscalation: () => {},
+    recordTierOverride: () => {},
+    flush: () => {},
+  };
+  return { observability, codes };
 }
 
 describe('session usage rollups (A1)', () => {
@@ -210,5 +253,88 @@ describe('session usage rollups (A1)', () => {
     const totals = await rollup(session, 'cli:fatal');
     expect(totals).toEqual(await messageSum(session, 'cli:fatal'));
     expect(totals.inputTokens).toBe(70);
+  });
+});
+
+// A1a — the flush writes first and drains only on success, so a failed rollup
+// write leaves the delta recoverable instead of silently dropping it, and the
+// early exits still emit the error event they exist for.
+describe('turn usage flush failure (A1a)', () => {
+  it('keeps the delta in the accumulator when the rollup write fails', async () => {
+    const usage = createTurnUsage();
+    usage.inputTokens = 100;
+    usage.outputTokens = 20;
+    usage.cacheReadTokens = 5;
+    usage.cacheCreationTokens = 7;
+    usage.estimatedCostUsd = 0.0125;
+    const { observability, codes } = makeErrorRecorder();
+
+    await flushTurnUsage(new RollupWriteFails(), 'sess-1', usage, observability);
+
+    // Nothing was written, so nothing may be drained — the delta is still here.
+    expect(usage).toEqual({
+      inputTokens: 100,
+      outputTokens: 20,
+      cacheReadTokens: 5,
+      cacheCreationTokens: 7,
+      estimatedCostUsd: 0.0125,
+    });
+    // Best-effort, but not silent.
+    expect(codes).toEqual(['usage_rollup_flush_failed']);
+  });
+
+  it('drains only what it wrote, keeping usage that arrived mid-write', async () => {
+    const session = new RollupWriteRecords();
+    const usage = createTurnUsage();
+    usage.inputTokens = 10;
+    usage.estimatedCostUsd = 0.001;
+
+    const pending = flushTurnUsage(session, 'sess-1', usage);
+    usage.inputTokens += 4; // a stream step appended while the write was in flight
+    await pending;
+
+    expect(session.deltas).toEqual([
+      {
+        inputTokens: 10,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        cacheCreationTokens: 0,
+        estimatedCostUsd: 0.001,
+      },
+    ]);
+    expect(usage.inputTokens).toBe(4);
+    expect(usage.estimatedCostUsd).toBe(0);
+  });
+
+  it('still yields the early exit error event when the rollup write fails', async () => {
+    const session = new RollupWriteFails();
+    const { observability, codes } = makeErrorRecorder();
+    // Call 0 persists an assistant message (so the accumulator is non-empty),
+    // call 1 overflows — an unrecoverable overflow with retry off is one of the
+    // five exits that flush and then yield their error.
+    const llm = makeLLM((i) =>
+      i === 0
+        ? {
+            chunks: [
+              { type: 'tool_use_start', toolCallId: 'c1', toolName: 'nope' },
+              { type: 'tool_use_end', toolCallId: 'c1', inputJson: '{}' },
+              usageChunk({ inputTokens: 70, outputTokens: 11, estimatedCostUsd: 0.005 }),
+              { type: 'done', finishReason: 'tool_use' },
+            ],
+          }
+        : { chunks: [], throwError: new Error('prompt is too long') },
+    );
+    const loop = new AgentLoop({
+      llm,
+      session,
+      safety: createTestSafety(),
+      observability,
+      compaction: { retryOnOverflow: false },
+    });
+
+    const events = await drain(loop.run('go', { sessionKey: 'cli:flush-fails' }));
+
+    expect(events.some((e) => e.type === 'error' && e.code === 'context_overflow')).toBe(true);
+    expect(codes).toContain('usage_rollup_flush_failed');
   });
 });

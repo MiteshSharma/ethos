@@ -36,6 +36,8 @@ export interface AgentLoopObservability {
     status: 'ok' | 'error' | 'blocked',
     attrs?: Record<string, unknown>,
   ): void;
+  /** Optional — `EthosObservability` satisfies it; lighter adapters may not. */
+  recordError?(opts: RecordEventOpts): void;
   recordSafetyBlock(opts: RecordEventOpts): void;
   recordCompaction(opts: RecordEventOpts): void;
   recordToolRepair?(

@@ -35,11 +35,26 @@ export function createTurnUsage(): TurnUsageAccumulator {
  * stream failure, unrecoverable overflow, return-direct) can flush without
  * double-counting when `finalizeTurn` also runs. A turn that never reaches the
  * finalizer still leaves the rollup equal to `SUM(messages)`.
+ *
+ * Write first, drain only on success: if `updateUsage` throws, the accumulator
+ * still holds the delta, so a later flush can still get it into the rollup. The
+ * drain subtracts exactly what was written rather than assigning zero, so usage
+ * appended while the await was in flight survives.
+ *
+ * The write is best-effort. Three of the five early exits (abort, watcher
+ * terminate, unrecoverable overflow) flush and then yield the error event they
+ * exist to emit, and a storage failure must not replace that event with a
+ * thrown generator. Nothing is lost either way: the `messages`
+ * rows are authoritative (analytics decision 9) and already persisted, so the
+ * rollup — a derived display cache — stays rebuildable. Not silent: the failure
+ * is recorded, same shape as `compaction_persist_failed` in
+ * `agent-loop/compaction.ts`.
  */
 export async function flushTurnUsage(
   session: SessionStore,
   sessionId: string,
   usage: TurnUsageAccumulator,
+  observability?: AgentLoopObservability,
 ): Promise<void> {
   const delta = { ...usage };
   if (
@@ -51,12 +66,21 @@ export async function flushTurnUsage(
   ) {
     return;
   }
-  usage.inputTokens = 0;
-  usage.outputTokens = 0;
-  usage.cacheReadTokens = 0;
-  usage.cacheCreationTokens = 0;
-  usage.estimatedCostUsd = 0;
-  await session.updateUsage(sessionId, delta);
+  try {
+    await session.updateUsage(sessionId, delta);
+  } catch (err) {
+    observability?.recordError?.({
+      severity: 'warn',
+      code: 'usage_rollup_flush_failed',
+      cause: err instanceof Error ? err.message : String(err),
+    });
+    return;
+  }
+  usage.inputTokens -= delta.inputTokens;
+  usage.outputTokens -= delta.outputTokens;
+  usage.cacheReadTokens -= delta.cacheReadTokens;
+  usage.cacheCreationTokens -= delta.cacheCreationTokens;
+  usage.estimatedCostUsd -= delta.estimatedCostUsd;
 }
 
 export interface TurnFinalizerContext {
@@ -85,7 +109,7 @@ export async function* finalizeTurn(
 ): AsyncGenerator<AgentEvent> {
   // Step 11: Update usage — API-call count plus this turn's token/cost rollup.
   await session.updateUsage(ctx.sessionId, { apiCallCount: ctx.turnCount });
-  await flushTurnUsage(session, ctx.sessionId, ctx.turnUsage);
+  await flushTurnUsage(session, ctx.sessionId, ctx.turnUsage, observability);
 
   // Step 12: Fire agent_done hook
   await hooks.fireVoid(

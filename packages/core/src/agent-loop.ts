@@ -661,7 +661,7 @@ export class AgentLoop {
 
     for (let iteration = 0; iteration < this.maxIterations; iteration++) {
       if (abortSignal.aborted) {
-        await flushTurnUsage(this.session, sessionId, turnUsage);
+        await flushTurnUsage(this.session, sessionId, turnUsage, this.observability);
         yield { type: 'error', error: 'Aborted', code: 'aborted' };
         if (traceId) {
           this.observability?.endTrace(traceId, 'aborted');
@@ -679,7 +679,7 @@ export class AgentLoop {
       const halt = getHalt();
       if (halt) {
         if (halt.action === 'terminate') {
-          await flushTurnUsage(this.session, sessionId, turnUsage);
+          await flushTurnUsage(this.session, sessionId, turnUsage, this.observability);
           yield {
             type: 'error',
             error: `Watcher: ${halt.reason}`,
@@ -753,7 +753,7 @@ export class AgentLoop {
           iteration--; // retry this iteration with the shrunk history
           continue;
         }
-        await flushTurnUsage(this.session, sessionId, turnUsage);
+        await flushTurnUsage(this.session, sessionId, turnUsage, this.observability);
         yield { type: 'error', error: stepResult.error, code: 'context_overflow' };
         if (traceId) {
           this.observability?.endTrace(traceId, 'error');
@@ -763,7 +763,7 @@ export class AgentLoop {
       }
 
       if (stepResult.outcome === 'fatal') {
-        await flushTurnUsage(this.session, sessionId, turnUsage);
+        await flushTurnUsage(this.session, sessionId, turnUsage, this.observability);
         return;
       }
 
@@ -851,7 +851,7 @@ export class AgentLoop {
 
       if (toolResult.kind === 'return-direct') {
         fullText = toolResult.text;
-        await flushTurnUsage(this.session, sessionId, turnUsage);
+        await flushTurnUsage(this.session, sessionId, turnUsage, this.observability);
         return;
       }
 

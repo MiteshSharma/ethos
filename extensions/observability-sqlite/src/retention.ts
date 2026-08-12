@@ -53,12 +53,21 @@ const USAGE_COLUMNS = [
  * excluded — the column is absent on `sessions.db` files old enough to predate
  * undo, in which case there is nothing to double-subtract either. The floor at
  * zero protects sessions whose rollups predate the columns being maintained.
+ *
+ * Nothing here may assume the current schema: `ethos data prune` opens
+ * `sessions.db` raw without running the store's migrations, so the `sessions`
+ * table (and the usage columns on either table) can be missing entirely —
+ * `table_info` then returns no rows. Pruning messages is the primary job, so a
+ * rollup that cannot be maintained is skipped rather than allowed to throw.
  */
 function subtractPrunedUsage(sessDb: BetterSqlite3.Database, iso: string): void {
-  const hasDeletedAt = (sessDb.pragma('table_info(messages)') as Array<{ name: string }>).some(
-    (c) => c.name === 'deleted_at',
-  );
-  const live = hasDeletedAt ? 'AND m.deleted_at IS NULL' : '';
+  const columnsOf = (table: string) =>
+    new Set((sessDb.pragma(`table_info(${table})`) as Array<{ name: string }>).map((c) => c.name));
+  const messageCols = columnsOf('messages');
+  const sessionCols = columnsOf('sessions');
+  if (!USAGE_COLUMNS.every((c) => sessionCols.has(c) && messageCols.has(c))) return;
+
+  const live = messageCols.has('deleted_at') ? 'AND m.deleted_at IS NULL' : '';
   const sets = USAGE_COLUMNS.map(
     (col) =>
       `${col} = max(${col} - COALESCE((SELECT SUM(m.${col}) FROM messages m
