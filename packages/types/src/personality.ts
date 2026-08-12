@@ -140,6 +140,17 @@ export interface OutboundPolicyConfig {
  * Absent = inherit the global `auxiliary.tts.*` defaults.
  */
 export interface PersonalityVoiceConfig {
+  /**
+   * Name of an entry in the deployment's TTS roster (`voice.providers.<name>.*`
+   * in `~/.ethos/config.yaml`). A LABEL the operator chose, never a provider id
+   * — the egress gate keys on the entry's underlying `provider`, so naming an
+   * entry `local-kokoro` buys nothing.
+   *
+   * Absent, or naming an entry this machine does not have, falls back to the
+   * default `auxiliary.tts` entry: a personality shared between machines must
+   * still speak on one that lacks its preferred provider.
+   */
+  provider?: string;
   /** TTS voice id, provider-specific (e.g. `af_bella` for Kokoro, `alloy` for OpenAI). */
   tts_voice?: string;
   /**

@@ -22,6 +22,7 @@ import type {
   SttProvider,
   SttProviderRegistry,
   TtsProvider,
+  TtsProviderEntry,
   TtsProviderRegistry,
 } from '@ethosagent/types';
 
@@ -175,6 +176,177 @@ export function unwrapVoiceResolution<P>(resolution: VoiceResolution<P>): {
 } {
   if (!resolution.ok) throw new VoiceProviderError(resolution);
   return { provider: resolution.provider, providerId: resolution.providerId };
+}
+
+// ---------------------------------------------------------------------------
+// TTS provider roster
+//
+// A deployment can configure several named TTS providers (`voice.providers.*`
+// in `~/.ethos/config.yaml`) and a personality picks one by name
+// (`voice.provider`). `auxiliary.tts` stays the DEFAULT entry, so a config that
+// declares no roster behaves exactly as it did.
+//
+// The roster key is a label the operator typed. It is not a provider id and it
+// is never what the egress gate keys on: selection happens here, the gate keys
+// on the selected entry's `provider` (and the constructed provider's `caps`),
+// so naming a cloud entry `local-kokoro` cannot walk it past a local-only gate.
+// ---------------------------------------------------------------------------
+
+/** Why a given TTS entry was selected. */
+export type TtsEntrySelectionReason =
+  /** The personality named a roster entry and it exists. */
+  | 'roster'
+  /** No name given (or an empty one) — the default `auxiliary.tts` entry. */
+  | 'default'
+  /** A name was given but no roster entry carries it — fell back to the default. */
+  | 'unknown_name';
+
+export interface TtsEntrySelection {
+  /**
+   * The roster entry that serves this turn. `undefined` means "the default
+   * entry" — `auxiliary.tts`, whose provider name and factory config the
+   * caller already holds.
+   */
+  entry: TtsProviderEntry | undefined;
+  /** Roster key that served, when a roster entry did. */
+  entryName: string | undefined;
+  reason: TtsEntrySelectionReason;
+  /** The name the personality asked for, when it did not resolve. */
+  requestedName?: string;
+}
+
+export interface SelectTtsEntryOptions {
+  /** `PersonalityConfig.voice.provider` for the personality speaking this turn. */
+  requestedName?: string;
+  /** `voice.providers.*` — roster key → entry. */
+  roster?: Readonly<Record<string, TtsProviderEntry>>;
+  /** Logs the unknown-name fallback. Optional; the reason is returned either way. */
+  logger?: Logger;
+}
+
+/**
+ * Pick the TTS entry for a turn:
+ *
+ *   1. `requestedName` names a roster entry → that entry (`roster`).
+ *   2. `requestedName` is present but unknown → the default entry
+ *      (`unknown_name`). A personality shared between machines must still
+ *      speak on one that lacks its preferred provider — but the fallback is a
+ *      returned reason (and a log line), never silence.
+ *   3. No name → the default entry (`default`).
+ *
+ * Pure: it decides, it does not construct. The "default entry" is expressed as
+ * `entry: undefined` so a caller that holds `auxiliary.tts` as a name + config
+ * pair (every surface does) needs no second representation of it.
+ *
+ * Voice-id precedence is unchanged and applies WITHIN the chosen entry: pass
+ * `selection.entry?.voice` (falling back to the default entry's voice) as
+ * `globalTtsVoice` to {@link resolveVoicePreferences}, so a language-specific
+ * voice still beats `tts_voice`, which still beats the entry's own default.
+ */
+export function selectTtsEntry(opts: SelectTtsEntryOptions): TtsEntrySelection {
+  const requested = opts.requestedName?.trim();
+  if (!requested) return { entry: undefined, entryName: undefined, reason: 'default' };
+
+  const entry = opts.roster?.[requested];
+  if (!entry) {
+    opts.logger?.warn(
+      `voice: TTS provider "${requested}" is not in voice.providers — ` +
+        'falling back to the default auxiliary.tts entry',
+    );
+    return {
+      entry: undefined,
+      entryName: undefined,
+      reason: 'unknown_name',
+      requestedName: requested,
+    };
+  }
+  return { entry, entryName: requested, reason: 'roster' };
+}
+
+/**
+ * Factory config for one roster entry. `provider` is deliberately absent — it
+ * names the provider, it is not a knob the factory reads.
+ */
+export function ttsEntryProviderConfig(
+  entry: TtsProviderEntry | undefined,
+): Record<string, unknown> {
+  if (!entry) return {};
+  return {
+    ...(entry.model !== undefined ? { model: entry.model } : {}),
+    ...(entry.apiKey !== undefined ? { apiKey: entry.apiKey } : {}),
+    ...(entry.voice !== undefined ? { voice: entry.voice } : {}),
+    ...(entry.baseUrl !== undefined ? { baseUrl: entry.baseUrl } : {}),
+    ...(entry.command !== undefined ? { command: entry.command } : {}),
+    ...(entry.outputFormat !== undefined ? { outputFormat: entry.outputFormat } : {}),
+    ...(entry.timeout !== undefined ? { timeout: entry.timeout } : {}),
+    ...(entry.maxTextLength !== undefined ? { maxTextLength: entry.maxTextLength } : {}),
+  };
+}
+
+export interface ResolveTtsForPersonalityOptions {
+  /** Registry to resolve from. Absent → `not_configured`. */
+  registry: TtsProviderRegistry | undefined;
+  /** The speaking personality's `voice` block; its `provider` names the entry. */
+  personality?: PersonalityVoiceConfig;
+  /** `voice.providers.*`. */
+  roster?: Readonly<Record<string, TtsProviderEntry>>;
+  /** `auxiliary.tts.provider` — the default entry's provider id. */
+  defaultProviderName?: string;
+  /** `auxiliary.tts.*` as factory config — the default entry's knobs. */
+  defaultProviderConfig?: Record<string, unknown>;
+  secrets?: SecretsResolver;
+  logger?: Logger;
+  /** Local-only egress gate; see {@link ResolveVoiceProviderOptions}. */
+  trustedVoicePlugins?: ReadonlySet<string>;
+}
+
+export interface TtsProviderForPersonality {
+  /** The resolution, keyed on the entry's UNDERLYING provider id. */
+  resolution: VoiceResolution<TtsProvider>;
+  /** Which entry was chosen, and why — observable rather than inferred. */
+  selection: TtsEntrySelection;
+  /**
+   * The chosen entry's own voice id — the lowest rung of the voice precedence,
+   * evaluated WITHIN the chosen provider. Feed it to
+   * {@link resolveVoicePreferences} as `globalTtsVoice`.
+   */
+  globalTtsVoice: string | undefined;
+}
+
+/**
+ * Select this personality's TTS entry and resolve its provider.
+ *
+ * The security-relevant line: `providerName` is `entry.provider` — the
+ * registered provider id — never the roster key. The trust gate therefore
+ * tests the id that is actually about to run, alongside the caps of the
+ * provider that was actually constructed. A roster entry called
+ * `local-anything` backed by a non-local provider is refused exactly as if the
+ * operator had named that provider directly.
+ */
+export async function resolveTtsProviderForPersonality(
+  opts: ResolveTtsForPersonalityOptions,
+): Promise<TtsProviderForPersonality> {
+  const selection = selectTtsEntry({
+    ...(opts.personality?.provider ? { requestedName: opts.personality.provider } : {}),
+    ...(opts.roster ? { roster: opts.roster } : {}),
+    ...(opts.logger ? { logger: opts.logger } : {}),
+  });
+  const defaultConfig = opts.defaultProviderConfig ?? {};
+  const providerConfig = selection.entry ? ttsEntryProviderConfig(selection.entry) : defaultConfig;
+  const entryVoice = providerConfig.voice;
+  const resolution = await resolveTtsProvider({
+    registry: opts.registry,
+    providerName: selection.entry?.provider ?? opts.defaultProviderName,
+    providerConfig,
+    ...(opts.secrets ? { secrets: opts.secrets } : {}),
+    ...(opts.logger ? { logger: opts.logger } : {}),
+    ...(opts.trustedVoicePlugins ? { trustedVoicePlugins: opts.trustedVoicePlugins } : {}),
+  });
+  return {
+    resolution,
+    selection,
+    globalTtsVoice: typeof entryVoice === 'string' ? entryVoice : undefined,
+  };
 }
 
 // ---------------------------------------------------------------------------

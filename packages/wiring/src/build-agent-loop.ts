@@ -1037,6 +1037,10 @@ export async function buildAgentLoop(
             maxTextLength: config.auxiliaryTts.maxTextLength,
           }
         : {},
+      // The named TTS roster (`voice.providers.*`). `auxiliary.tts` above stays
+      // the default entry; this is what a personality's `voice.provider` can
+      // name instead.
+      ...(config.voice?.providers ? { ttsRoster: config.voice.providers } : {}),
       secretsResolver:
         config.secretsResolver ?? (NOOP_SECRETS as import('@ethosagent/types').SecretsResolver),
       // Armed only when `voice.trustedPlugins` is declared. Computed once here

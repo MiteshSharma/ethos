@@ -1693,10 +1693,16 @@ function buildMemoryConfig(
  * map. The language map mirrors `memory.options.*`: any `voice.languages.<tag>`
  * key becomes an entry.
  *
+ *   voice.provider: studio
  *   voice.tts_voice: af_bella
  *   voice.tier: pipeline
  *   voice.model: claude-haiku-4-5
  *   voice.languages.es: ef_dora
+ *
+ * `voice.provider` names an entry in the deployment's `voice.providers.*`
+ * roster. It is kept verbatim — validating it here would mean this loader knew
+ * the machine's config, and a name this machine lacks is a fallback at
+ * resolution time (`selectTtsEntry`), not a load failure.
  *
  * An unknown `voice.tier` is dropped rather than thrown on: a bad voice id
  * should not make a personality unloadable — it falls back to the global voice.
@@ -1704,6 +1710,7 @@ function buildMemoryConfig(
 function buildVoiceConfig(
   cfg: Record<string, string>,
 ): import('@ethosagent/types').PersonalityVoiceConfig | undefined {
+  const provider = cfg['voice.provider'];
   const ttsVoice = cfg['voice.tts_voice'];
   const tier = cfg['voice.tier'];
   const model = cfg['voice.model'];
@@ -1714,6 +1721,7 @@ function buildVoiceConfig(
     if (tag.length > 0 && value) languages[tag] = value;
   }
   const out: import('@ethosagent/types').PersonalityVoiceConfig = {
+    ...(provider ? { provider } : {}),
     ...(ttsVoice ? { tts_voice: ttsVoice } : {}),
     ...(tier === 'pipeline' || tier === 'realtime' ? { tier } : {}),
     ...(model ? { model } : {}),
@@ -2137,6 +2145,7 @@ function renderConfigYaml(input: RenderConfigInput): string {
   }
   if (input.voice !== undefined) {
     const v = input.voice;
+    if (v.provider !== undefined) lines.push(`voice.provider: ${yamlScalar(v.provider)}`);
     if (v.tts_voice !== undefined) lines.push(`voice.tts_voice: ${yamlScalar(v.tts_voice)}`);
     if (v.tier !== undefined) lines.push(`voice.tier: ${v.tier}`);
     if (v.model !== undefined) lines.push(`voice.model: ${yamlScalar(v.model)}`);

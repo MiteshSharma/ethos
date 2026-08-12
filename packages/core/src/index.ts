@@ -123,16 +123,24 @@ export { DefaultTtsProviderRegistry } from './providers/tts-registry';
 export type {
   ResolvedVoicePreferences,
   ResolveSttOptions,
+  ResolveTtsForPersonalityOptions,
   ResolveTtsOptions,
   ResolveVoicePreferencesOptions,
   ResolveVoiceProviderOptions,
+  SelectTtsEntryOptions,
+  TtsEntrySelection,
+  TtsEntrySelectionReason,
+  TtsProviderForPersonality,
   VoiceResolution,
   VoiceResolutionErrorCode,
 } from './providers/voice-resolution';
 export {
   resolveSttProvider,
   resolveTtsProvider,
+  resolveTtsProviderForPersonality,
   resolveVoicePreferences,
+  selectTtsEntry,
+  ttsEntryProviderConfig,
   unwrapVoiceResolution,
   VoiceProviderError,
 } from './providers/voice-resolution';

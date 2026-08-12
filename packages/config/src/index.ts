@@ -10,6 +10,7 @@ import type {
   RetentionEventsConfig,
   SecretsResolver,
   Storage,
+  TtsProviderEntry,
 } from '@ethosagent/types';
 
 // ---------------------------------------------------------------------------
@@ -941,6 +942,22 @@ export interface EthosConfig {
    * `off` never speaks back, `mirror_inbound` speaks when it was spoken to,
    * `all` speaks every reply. `/voice <mode>` overrides it per lane at runtime;
    * this is only where a lane starts. Absent = `mirror_inbound`.
+   *
+   * `providers` is the named TTS roster — several configured providers a
+   * personality can pick between by name (`voice.provider:` in its
+   * `config.yaml`). Two dotted levels, same shape as an `auxiliary.tts` entry:
+   *   voice.providers.mac-say.provider: command-tts
+   *   voice.providers.mac-say.command: say -o {output_path} -f {input_path}
+   *   voice.providers.mac-say.outputFormat: wav
+   *   voice.providers.studio.provider: openai-tts
+   *   voice.providers.studio.apiKey: ${secrets:voice/providers/studio/apiKey}
+   * `auxiliary.tts` remains the DEFAULT entry: a personality that names no
+   * provider — or names one this machine does not have — speaks through it, so
+   * a deployment with no roster is unchanged. Names are restricted to
+   * `[A-Za-z0-9_-]+` so they round-trip through the line-based format.
+   *
+   * TTS only, deliberately: nothing consumes a per-personality ASR choice, and
+   * an unconsumed knob is a promise the code does not keep.
    */
   voice?: {
     bots: VoiceBotConfig[];
@@ -948,6 +965,7 @@ export interface EthosConfig {
     trunk?: VoiceTrunkConfig;
     trustedPlugins?: string[];
     defaultMode?: 'off' | 'mirror_inbound' | 'all';
+    providers?: Record<string, TtsProviderEntry>;
   };
   // Email platform
   emailImapHost?: string;
@@ -1119,22 +1137,14 @@ export interface EthosConfig {
       command?: string;
       timeout?: number;
     };
-    /** `command` is the shell template the `command-tts` provider runs
-     *  (placeholders: {input_path}, {output_path}, {format}, {voice}, {speed});
-     *  `outputFormat` is the container that command writes — and the extension
-     *  `{output_path}` carries; `timeout` is its budget in seconds;
-     *  `maxTextLength` caps the text handed to one synthesis call. */
-    tts?: {
-      provider: string;
-      model?: string;
-      apiKey?: string;
-      voice?: string;
-      baseUrl?: string;
-      command?: string;
-      outputFormat?: 'opus' | 'mp3' | 'wav' | 'pcm';
-      timeout?: number;
-      maxTextLength?: number;
-    };
+    /** The DEFAULT TTS entry. `command` is the shell template the `command-tts`
+     *  provider runs (placeholders: {input_path}, {output_path}, {format},
+     *  {voice}, {speed}); `outputFormat` is the container that command writes —
+     *  and the extension `{output_path}` carries; `timeout` is its budget in
+     *  seconds; `maxTextLength` caps the text handed to one synthesis call.
+     *  Same shape as every `voice.providers.<name>` roster entry, because it IS
+     *  one — the one a personality gets when it names no other. */
+    tts?: TtsProviderEntry;
   };
   /** tools-web — web_search/web_extract backend selection. */
   web?: WebConfig;
@@ -1422,6 +1432,26 @@ async function externalizeConfigSecrets(
         password: await externalizeSecret(trunk.password, ref('voice.trunk.password'), secrets),
       },
     };
+  }
+  if (r.voice?.providers) {
+    // Per-ENTRY refs. A roster key must not be able to route its credential
+    // around the vault, so each entry externalizes exactly like
+    // `auxiliary.tts.apiKey` does — `voice.providers.<name>.apiKey` →
+    // `voice/providers/<name>/apiKey`.
+    const providers: Record<string, TtsProviderEntry> = {};
+    for (const [name, entry] of Object.entries(r.voice.providers)) {
+      providers[name] = entry.apiKey
+        ? {
+            ...entry,
+            apiKey: await externalizeSecret(
+              entry.apiKey,
+              ref(`voice.providers.${name}.apiKey`),
+              secrets,
+            ),
+          }
+        : entry;
+    }
+    r.voice = { ...r.voice, providers };
   }
   if (r.auxiliary) {
     const aux = { ...r.auxiliary };
@@ -1711,6 +1741,9 @@ export async function writeConfig(
     if (config.voice.defaultMode) {
       lines.push(`voice.defaultMode: ${config.voice.defaultMode}`);
     }
+    for (const [name, entry] of Object.entries(config.voice.providers ?? {})) {
+      lines.push(...ttsProviderEntryLines(`voice.providers.${name}`, entry));
+    }
   }
   if (config.teams) {
     for (const [name, tcfg] of Object.entries(config.teams)) {
@@ -1790,16 +1823,7 @@ export async function writeConfig(
     if (a.timeout) lines.push(`auxiliary.asr.timeout: ${a.timeout}`);
   }
   if (config.auxiliary?.tts) {
-    const t = config.auxiliary.tts;
-    lines.push(`auxiliary.tts.provider: ${t.provider}`);
-    if (t.model) lines.push(`auxiliary.tts.model: ${t.model}`);
-    if (t.apiKey) lines.push(`auxiliary.tts.apiKey: ${t.apiKey}`);
-    if (t.voice) lines.push(`auxiliary.tts.voice: ${t.voice}`);
-    if (t.baseUrl) lines.push(`auxiliary.tts.baseUrl: ${t.baseUrl}`);
-    if (t.command) lines.push(`auxiliary.tts.command: ${t.command}`);
-    if (t.outputFormat) lines.push(`auxiliary.tts.outputFormat: ${t.outputFormat}`);
-    if (t.timeout) lines.push(`auxiliary.tts.timeout: ${t.timeout}`);
-    if (t.maxTextLength) lines.push(`auxiliary.tts.maxTextLength: ${t.maxTextLength}`);
+    lines.push(...ttsProviderEntryLines('auxiliary.tts', config.auxiliary.tts));
   }
   if (config.web?.search_backend) lines.push(`web.search_backend: ${config.web.search_backend}`);
   if (config.web?.extract_backend) lines.push(`web.extract_backend: ${config.web.extract_backend}`);
@@ -2019,6 +2043,15 @@ export async function resolveConfigSecrets(
       },
     };
   }
+  if (r.voice?.providers) {
+    const providers: Record<string, TtsProviderEntry> = {};
+    for (const [name, entry] of Object.entries(r.voice.providers)) {
+      providers[name] = entry.apiKey
+        ? { ...entry, apiKey: await resolveSecretValue(entry.apiKey, secrets) }
+        : entry;
+    }
+    r.voice = { ...r.voice, providers };
+  }
   if (r.webhooks) {
     const hooks: Record<string, WebhookHookConfig> = {};
     for (const [id, hook] of Object.entries(r.webhooks)) {
@@ -2071,6 +2104,8 @@ function parseConfigYaml(src: string): EthosConfig {
   const voiceBotsKv: Record<number, Record<string, string>> = {};
   const voiceLiveKitKv: Record<string, string> = {};
   const voiceTrunkKv: Record<string, string> = {};
+  /** `voice.providers.<name>.<field>` — the named TTS roster, keyed by name. */
+  const voiceProvidersKv: Record<string, Record<string, string>> = {};
   /** Raw `voice.trustedPlugins` line; `undefined` = key absent = gate off. */
   let voiceTrustedPluginsRaw: string | undefined;
   /** `voice.defaultMode`; `undefined` = key absent = the built-in default. */
@@ -2146,6 +2181,19 @@ function parseConfigYaml(src: string): EthosConfig {
       const idx = Number(vbot[1]);
       voiceBotsKv[idx] ??= {};
       voiceBotsKv[idx][vbot[2]] = vbot[3].trim().replace(/^["']|["']$/g, '');
+      continue;
+    }
+    // voice.providers.<name>.<field>: <value> — the named TTS roster. Two
+    // dotted levels, matched the same way `telegram.bots.<n>.<field>` is: the
+    // name is anchored to the identifier charset so the split is unambiguous
+    // and the second level is a plain field. Must precede the `voice.*` blocks
+    // below only in spirit — none of them can match this shape — but it is
+    // written first so the relationship is obvious to the next reader.
+    const vprov = line.match(/^voice\.providers\.([A-Za-z0-9_-]+)\.(\w+):\s*(.+)$/);
+    if (vprov) {
+      const name = vprov[1];
+      voiceProvidersKv[name] ??= {};
+      voiceProvidersKv[name][vprov[2]] = vprov[3].trim().replace(/^["']|["']$/g, '');
       continue;
     }
     // voice.livekit.<field>: <value>
@@ -2517,21 +2565,7 @@ function parseConfigYaml(src: string): EthosConfig {
         ...positiveNumber('timeout', auxiliaryAsrKv.timeout),
       }
     : undefined;
-  const auxiliaryTts: NonNullable<EthosConfig['auxiliary']>['tts'] = auxiliaryTtsKv.provider
-    ? {
-        provider: auxiliaryTtsKv.provider,
-        ...(auxiliaryTtsKv.model ? { model: auxiliaryTtsKv.model } : {}),
-        ...(auxiliaryTtsKv.apiKey ? { apiKey: auxiliaryTtsKv.apiKey } : {}),
-        ...(auxiliaryTtsKv.voice ? { voice: auxiliaryTtsKv.voice } : {}),
-        ...(auxiliaryTtsKv.baseUrl ? { baseUrl: auxiliaryTtsKv.baseUrl } : {}),
-        ...(auxiliaryTtsKv.command ? { command: auxiliaryTtsKv.command } : {}),
-        ...(isAudioFormat(auxiliaryTtsKv.outputFormat)
-          ? { outputFormat: auxiliaryTtsKv.outputFormat }
-          : {}),
-        ...positiveNumber('timeout', auxiliaryTtsKv.timeout),
-        ...positiveNumber('maxTextLength', auxiliaryTtsKv.maxTextLength),
-      }
-    : undefined;
+  const auxiliaryTts = buildTtsProviderEntry(auxiliaryTtsKv);
   const webConfig: WebConfig | undefined =
     webKv.search_backend || webKv.extract_backend
       ? {
@@ -2607,12 +2641,14 @@ function parseConfigYaml(src: string): EthosConfig {
   const voiceResult = buildVoiceBots(voiceBotsKv);
   const voiceLiveKitResult = buildVoiceLiveKit(voiceLiveKitKv);
   const voiceTrunkResult = buildVoiceTrunk(voiceTrunkKv);
+  const voiceProviders = buildTtsProviderRoster(voiceProvidersKv);
   const voiceSection =
     voiceResult.bots.length > 0 ||
     voiceLiveKitResult.livekit ||
     voiceTrunkResult.trunk ||
     voiceTrustedPluginsRaw !== undefined ||
-    voiceDefaultMode !== undefined
+    voiceDefaultMode !== undefined ||
+    voiceProviders !== undefined
       ? {
           bots: voiceResult.bots,
           ...(voiceLiveKitResult.livekit ? { livekit: voiceLiveKitResult.livekit } : {}),
@@ -2621,6 +2657,7 @@ function parseConfigYaml(src: string): EthosConfig {
             ? { trustedPlugins: splitList(voiceTrustedPluginsRaw) }
             : {}),
           ...(voiceDefaultMode ? { defaultMode: voiceDefaultMode } : {}),
+          ...(voiceProviders ? { providers: voiceProviders } : {}),
         }
       : undefined;
   const teams = buildTeamsConfig(teamsKv);
@@ -3002,6 +3039,62 @@ function positiveNumber<K extends string>(key: K, raw: string | undefined): { [P
 
 function isAudioFormat(v: string | undefined): v is 'opus' | 'mp3' | 'wav' | 'pcm' {
   return v === 'opus' || v === 'mp3' || v === 'wav' || v === 'pcm';
+}
+
+/**
+ * One TTS entry from its flat `<field>: <value>` map. Shared by the default
+ * `auxiliary.tts` entry and every `voice.providers.<name>` roster entry — one
+ * builder, so the roster cannot drift into supporting a different field set
+ * than the default it falls back to. No `provider` → no entry.
+ */
+function buildTtsProviderEntry(kv: Record<string, string>): TtsProviderEntry | undefined {
+  if (!kv.provider) return undefined;
+  return {
+    provider: kv.provider,
+    ...(kv.model ? { model: kv.model } : {}),
+    ...(kv.apiKey ? { apiKey: kv.apiKey } : {}),
+    ...(kv.voice ? { voice: kv.voice } : {}),
+    ...(kv.baseUrl ? { baseUrl: kv.baseUrl } : {}),
+    ...(kv.command ? { command: kv.command } : {}),
+    ...(isAudioFormat(kv.outputFormat) ? { outputFormat: kv.outputFormat } : {}),
+    ...positiveNumber('timeout', kv.timeout),
+    ...positiveNumber('maxTextLength', kv.maxTextLength),
+  };
+}
+
+/**
+ * The `voice.providers.*` roster. An entry missing `provider` names nothing
+ * resolvable, so it is dropped rather than half-built — the same rule
+ * `auxiliary.tts` follows.
+ */
+/**
+ * Serialize one TTS entry under `prefix` (`auxiliary.tts` or
+ * `voice.providers.<name>`). The write-side mirror of
+ * {@link buildTtsProviderEntry} — same field set, same file, so a round-trip
+ * cannot lose a field on only one of the two paths.
+ */
+function ttsProviderEntryLines(prefix: string, entry: TtsProviderEntry): string[] {
+  const lines = [`${prefix}.provider: ${entry.provider}`];
+  if (entry.model) lines.push(`${prefix}.model: ${entry.model}`);
+  if (entry.apiKey) lines.push(`${prefix}.apiKey: ${entry.apiKey}`);
+  if (entry.voice) lines.push(`${prefix}.voice: ${entry.voice}`);
+  if (entry.baseUrl) lines.push(`${prefix}.baseUrl: ${entry.baseUrl}`);
+  if (entry.command) lines.push(`${prefix}.command: ${entry.command}`);
+  if (entry.outputFormat) lines.push(`${prefix}.outputFormat: ${entry.outputFormat}`);
+  if (entry.timeout) lines.push(`${prefix}.timeout: ${entry.timeout}`);
+  if (entry.maxTextLength) lines.push(`${prefix}.maxTextLength: ${entry.maxTextLength}`);
+  return lines;
+}
+
+function buildTtsProviderRoster(
+  kv: Record<string, Record<string, string>>,
+): Record<string, TtsProviderEntry> | undefined {
+  const out: Record<string, TtsProviderEntry> = {};
+  for (const [name, fields] of Object.entries(kv)) {
+    const entry = buildTtsProviderEntry(fields);
+    if (entry) out[name] = entry;
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
 }
 
 function buildRetentionConfig(kv: Record<string, string>): RetentionConfig | undefined {

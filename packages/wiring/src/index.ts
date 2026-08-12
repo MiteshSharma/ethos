@@ -271,21 +271,12 @@ export interface WiringConfig {
     command?: string;
     timeout?: number;
   };
-  /** Voice TTS provider. auxiliary.tts in config.yaml. `command` is the shell
-   *  template the local `command-tts` recipe provider runs, `outputFormat` the
-   *  container it writes, `timeout` its budget in seconds, and `maxTextLength`
-   *  the per-call text cap it advertises as `caps.maxInputChars`. */
-  auxiliaryTts?: {
-    provider: string;
-    model?: string;
-    apiKey?: string;
-    voice?: string;
-    baseUrl?: string;
-    command?: string;
-    outputFormat?: 'opus' | 'mp3' | 'wav' | 'pcm';
-    timeout?: number;
-    maxTextLength?: number;
-  };
+  /** DEFAULT voice TTS provider. auxiliary.tts in config.yaml. `command` is the
+   *  shell template the local `command-tts` recipe provider runs, `outputFormat`
+   *  the container it writes, `timeout` its budget in seconds, and
+   *  `maxTextLength` the per-call text cap it advertises as
+   *  `caps.maxInputChars`. Named alternatives live in `voice.providers.*`. */
+  auxiliaryTts?: import('@ethosagent/types').TtsProviderEntry;
   /**
    * Real-time voice deployment config — `voice.*` in config.yaml, mapped
    * straight through from `EthosConfig`. Read by `buildVoiceStack`: bots give
@@ -1038,6 +1029,12 @@ export interface CreateAgentLoopResult {
     sttProviderConfig: Record<string, unknown>;
     ttsProviderName?: string;
     ttsProviderConfig: Record<string, unknown>;
+    /**
+     * Named TTS roster from `voice.providers.*`, keyed by the operator's label.
+     * A personality's `voice.provider` names one of these; anything else (and
+     * anything unknown) falls back to `ttsDefaultEntry`.
+     */
+    ttsRoster?: Record<string, import('@ethosagent/types').TtsProviderEntry>;
     secretsResolver: import('@ethosagent/types').SecretsResolver;
     /**
      * Local-only voice-egress allowlist from `voice.trustedPlugins`. Present

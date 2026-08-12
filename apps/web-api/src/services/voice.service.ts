@@ -1,7 +1,8 @@
 import {
   resolveSttProvider,
-  resolveTtsProvider,
+  resolveTtsProviderForPersonality,
   resolveVoicePreferences,
+  selectTtsEntry,
   type VoiceResolution,
 } from '@ethosagent/core';
 import {
@@ -11,6 +12,7 @@ import {
   type SttProvider,
   type SttProviderRegistry,
   type TtsProvider,
+  type TtsProviderEntry,
   type TtsProviderRegistry,
 } from '@ethosagent/types';
 import { isHallucination, truncateAtSentenceBoundary } from '@ethosagent/voice-text';
@@ -59,8 +61,16 @@ export class VoiceService {
   private readonly ttsRegistry: TtsProviderRegistry | undefined;
   private readonly initialTtsProviderName: string | undefined;
   private readonly initialTtsProviderConfig: Record<string, unknown>;
+  /**
+   * Named TTS roster (`voice.providers.*`). A personality's `voice.provider`
+   * picks from it; everything else uses the default entry below. Absent → this
+   * surface behaves exactly as it did before rosters existed.
+   */
+  private readonly ttsRoster: Readonly<Record<string, TtsProviderEntry>> | undefined;
+  /** Cache key is the ENTRY that served — `''` for the default entry. */
   private ttsProvider: TtsProvider | null = null;
   private resolvedTtsName: string | undefined;
+  private resolvedTtsEntryName = '';
 
   /**
    * Local-only voice-egress allowlist. Undefined → gate off. Threaded into the
@@ -93,6 +103,7 @@ export class VoiceService {
     ttsRegistry?: TtsProviderRegistry;
     ttsProviderName?: string;
     ttsProviderConfig?: Record<string, unknown>;
+    ttsRoster?: Readonly<Record<string, TtsProviderEntry>>;
     trustedVoicePlugins?: ReadonlySet<string>;
     personalities?: VoicePersonalityLookup;
   }) {
@@ -104,8 +115,16 @@ export class VoiceService {
     this.ttsRegistry = opts.ttsRegistry;
     this.initialTtsProviderName = opts.ttsProviderName;
     this.initialTtsProviderConfig = opts.ttsProviderConfig ?? {};
+    this.ttsRoster = opts.ttsRoster;
     this.trustedVoicePlugins = opts.trustedVoicePlugins;
     this.personalities = opts.personalities;
+  }
+
+  /** The `voice` block of the personality speaking this reply, if any. */
+  private personalityVoice(
+    opts: SynthesisVoiceOptions | undefined,
+  ): PersonalityVoiceConfig | undefined {
+    return opts?.personalityId ? this.personalities?.get(opts.personalityId)?.voice : undefined;
   }
 
   /**
@@ -113,18 +132,20 @@ export class VoiceService {
    *
    * Precedence lives in ONE function for the whole repo
    * (`resolveVoicePreferences`, `@ethosagent/core`): language-specific voice >
-   * personality voice > global config. The caller-supplied `voice` is the
-   * global rung — it is what the browser read out of Settings — so a
-   * personality that declares its own voice is heard over it rather than being
-   * silently overridden by the default the client happened to send.
+   * personality voice > global config, evaluated WITHIN the provider that was
+   * chosen. The global rung is the chosen roster entry's own `voice` when a
+   * roster entry served, and otherwise what the browser read out of Settings —
+   * so a personality that declares its own voice is heard over it rather than
+   * being silently overridden by the default the client happened to send.
    */
-  private voiceFor(opts: SynthesisVoiceOptions | undefined): string | undefined {
-    const personality = opts?.personalityId
-      ? this.personalities?.get(opts.personalityId)?.voice
-      : undefined;
+  private voiceFor(
+    opts: SynthesisVoiceOptions | undefined,
+    globalTtsVoice: string | undefined,
+  ): string | undefined {
+    const personality = this.personalityVoice(opts);
     return resolveVoicePreferences({
       ...(personality ? { personality } : {}),
-      ...(opts?.voice ? { globalTtsVoice: opts.voice } : {}),
+      ...(globalTtsVoice ? { globalTtsVoice } : {}),
       ...(opts?.language ? { language: opts.language } : {}),
     }).ttsVoice;
   }
@@ -167,7 +188,22 @@ export class VoiceService {
     return resolution;
   }
 
-  private async resolveTts(): Promise<VoiceResolution<TtsProvider>> {
+  /**
+   * Resolve the TTS provider for this reply.
+   *
+   * Roster-aware: the speaking personality's `voice.provider` picks an entry
+   * from `voice.providers.*`; no name, or a name this deployment does not
+   * have, falls back to the default `auxiliary.tts` entry the constructor (or
+   * live Settings) supplied. The chosen entry's voice comes back as
+   * `globalTtsVoice` so the voice precedence is evaluated within it.
+   */
+  private async resolveTts(
+    personality?: PersonalityVoiceConfig,
+    clientVoice?: string,
+  ): Promise<{
+    resolution: VoiceResolution<TtsProvider>;
+    globalTtsVoice: string | undefined;
+  }> {
     let name = this.initialTtsProviderName;
     let config: Record<string, unknown> = this.initialTtsProviderConfig;
 
@@ -184,26 +220,56 @@ export class VoiceService {
       }
     }
 
-    const cachedTtsName = this.resolvedTtsName;
-    if (cachedTtsName !== undefined && cachedTtsName === name && this.ttsProvider) {
-      return { ok: true, provider: this.ttsProvider, providerId: cachedTtsName };
+    // Pure decision — it names the entry and the voice rung, and keys the
+    // memo. `resolveTtsProviderForPersonality` below stays the authority on
+    // which provider id is actually constructed and gated.
+    const selection = selectTtsEntry({
+      ...(personality?.provider ? { requestedName: personality.provider } : {}),
+      ...(this.ttsRoster ? { roster: this.ttsRoster } : {}),
+    });
+    const entryName = selection.entryName ?? '';
+    // Lowest voice rung, evaluated within the chosen provider. On a roster
+    // entry that is the entry's own voice and nothing else — the Settings
+    // default belongs to `auxiliary.tts`, and its voice ids need not exist on
+    // a different provider.
+    const defaultVoice = typeof config.voice === 'string' ? config.voice : undefined;
+    const globalTtsVoice = selection.entry ? selection.entry.voice : (clientVoice ?? defaultVoice);
+
+    // The memo holds ONE provider — the last entry that spoke. It stays valid
+    // while the same entry serves; on the default entry the live Settings name
+    // must match too, since that one can change under us.
+    const cachedId = this.resolvedTtsName;
+    if (
+      this.ttsProvider &&
+      cachedId !== undefined &&
+      entryName === this.resolvedTtsEntryName &&
+      (selection.entry !== undefined || cachedId === name)
+    ) {
+      return {
+        resolution: { ok: true, provider: this.ttsProvider, providerId: cachedId },
+        globalTtsVoice,
+      };
     }
 
-    const resolution = await resolveTtsProvider({
+    const { resolution } = await resolveTtsProviderForPersonality({
       registry: this.ttsRegistry,
-      providerName: name,
-      providerConfig: config,
+      ...(personality ? { personality } : {}),
+      ...(this.ttsRoster ? { roster: this.ttsRoster } : {}),
+      ...(name ? { defaultProviderName: name } : {}),
+      defaultProviderConfig: config,
       ...(this.secrets ? { secrets: this.secrets } : {}),
       ...(this.trustedVoicePlugins ? { trustedVoicePlugins: this.trustedVoicePlugins } : {}),
     });
     if (resolution.ok) {
       this.ttsProvider = resolution.provider;
       this.resolvedTtsName = resolution.providerId;
+      this.resolvedTtsEntryName = entryName;
     } else {
       this.ttsProvider = null;
       this.resolvedTtsName = undefined;
+      this.resolvedTtsEntryName = '';
     }
-    return resolution;
+    return { resolution, globalTtsVoice };
   }
 
   async synthesize(
@@ -215,7 +281,10 @@ export class VoiceService {
     mimeType: string;
     provider: string;
   }> {
-    const resolution = await this.resolveTts();
+    const { resolution, globalTtsVoice } = await this.resolveTts(
+      this.personalityVoice(opts),
+      opts?.voice,
+    );
     if (!resolution.ok) {
       throw new Error(
         resolution.code === 'not_configured'
@@ -228,7 +297,7 @@ export class VoiceService {
     const maxChars = provider.caps.maxInputChars;
     const input = maxChars ? truncateAtSentenceBoundary(text, maxChars) : text;
 
-    const voice = this.voiceFor(opts);
+    const voice = this.voiceFor(opts, globalTtsVoice);
     const result = await provider.synthesize(input, voice ? { voice } : {});
     const base64 = Buffer.from(result.audio).toString('base64');
     const formatMimeMap: Record<string, string> = {
@@ -260,7 +329,10 @@ export class VoiceService {
     format: 'opus' | 'mp3' | 'wav' | 'pcm';
     provider: string;
   }> {
-    const resolution = await this.resolveTts();
+    const { resolution, globalTtsVoice } = await this.resolveTts(
+      this.personalityVoice(opts),
+      opts?.voice,
+    );
     if (!resolution.ok) {
       throw new Error(
         resolution.code === 'not_configured'
@@ -272,7 +344,7 @@ export class VoiceService {
     const providerId = resolution.providerId;
     const maxChars = provider.caps.maxInputChars;
     const input = maxChars ? truncateAtSentenceBoundary(text, maxChars) : text;
-    const voice = this.voiceFor(opts);
+    const voice = this.voiceFor(opts, globalTtsVoice);
     const synthOpts = {
       ...(voice ? { voice } : {}),
       ...(opts?.signal ? { signal: opts.signal } : {}),

@@ -193,6 +193,12 @@ export interface CreateWebApiOptions {
   /** Config dict for the TTS provider factory. */
   ttsProviderConfig?: Record<string, unknown>;
   /**
+   * Named TTS roster (`voice.providers.*`), keyed by the operator's label. A
+   * personality's `voice.provider` picks one; an absent or unknown name falls
+   * back to the `ttsProviderName`/`ttsProviderConfig` default above.
+   */
+  ttsRoster?: Readonly<Record<string, import('@ethosagent/types').TtsProviderEntry>>;
+  /**
    * Local-only voice-egress allowlist (`voice.trustedPlugins`). Passed through
    * to VoiceService so a non-local provider selected here — including one
    * chosen live in Settings — is refused before any audio leaves the machine.
@@ -571,6 +577,7 @@ export function createWebApi(opts: CreateWebApiOptions): CreateWebApiResult {
     ttsRegistry: opts.ttsProviderRegistry,
     ttsProviderName: opts.ttsProviderName,
     ttsProviderConfig: opts.ttsProviderConfig,
+    ...(opts.ttsRoster ? { ttsRoster: opts.ttsRoster } : {}),
     ...(opts.trustedVoicePlugins ? { trustedVoicePlugins: opts.trustedVoicePlugins } : {}),
     // Per-personality voice on the browser path: the same registry the
     // Personalities tab refreshes, so an edited `voice.tts_voice` is heard on

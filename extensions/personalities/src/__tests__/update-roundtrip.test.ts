@@ -852,6 +852,42 @@ describe('voice round-trip', () => {
     });
   });
 
+  // `voice.provider` names an entry in the deployment's `voice.providers.*`
+  // TTS roster. It is a SUB-KEY of the existing `voice` block, not a new
+  // top-level PersonalityConfig field — the field count stays where it is.
+  it('parses voice.provider and keeps it verbatim through an update', async () => {
+    await seedPersonality(
+      'voice-roster',
+      'name: VoiceRoster\nvoice.provider: studio\nvoice.tts_voice: alloy\n',
+    );
+    const registry = makeRegistry();
+    await registry.loadFromDirectory(join(testDir, 'personalities'));
+    expect(registry.get('voice-roster')?.voice).toEqual({
+      provider: 'studio',
+      tts_voice: 'alloy',
+    });
+
+    await registry.update('voice-roster', { description: 'still points at studio' });
+    const raw = await readFile(
+      join(testDir, 'personalities', 'voice-roster', 'config.yaml'),
+      'utf-8',
+    );
+    expect(raw).toContain('voice.provider: studio');
+
+    const fresh = makeRegistry();
+    await fresh.loadFromDirectory(join(testDir, 'personalities'));
+    expect(fresh.get('voice-roster')?.voice?.provider).toBe('studio');
+  });
+
+  it('loads a personality naming a provider this machine has never heard of', async () => {
+    // Validation would mean the loader knew the machine's config. It does not:
+    // an unknown name is a resolution-time fallback, never a load failure.
+    await seedPersonality('voice-alien', 'name: VoiceAlien\nvoice.provider: elevenlabs-studio\n');
+    const registry = makeRegistry();
+    await registry.loadFromDirectory(join(testDir, 'personalities'));
+    expect(registry.get('voice-alien')?.voice).toEqual({ provider: 'elevenlabs-studio' });
+  });
+
   it('carries no voice block when no voice.* key is set', async () => {
     await seedPersonality('voice-absent', 'name: VoiceAbsent\n');
     const registry = makeRegistry();

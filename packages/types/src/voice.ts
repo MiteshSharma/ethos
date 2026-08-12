@@ -145,6 +145,35 @@ export function isStreamingTtsProvider(p: TtsProvider): p is StreamingTtsProvide
   );
 }
 
+/**
+ * One configured TTS provider — the shape `auxiliary.tts` has always had, named
+ * so a deployment can carry SEVERAL of them (`voice.providers.<name>.*`) and a
+ * personality can pick one by name via `PersonalityVoiceConfig.provider`.
+ *
+ * `provider` is the REGISTERED provider id (`openai-tts`, `command-tts`, …).
+ * The roster key is a label the operator chose; it is never a provider id and
+ * never what the local-only egress gate keys on — see `selectTtsEntry` in
+ * `@ethosagent/core`.
+ */
+export interface TtsProviderEntry {
+  /** Registered provider id, e.g. `openai-tts` / `command-tts`. */
+  provider: string;
+  model?: string;
+  apiKey?: string;
+  /** Default voice id for this entry; a personality's own voice wins over it. */
+  voice?: string;
+  baseUrl?: string;
+  /** Shell template for `command-tts`
+   *  (placeholders: {input_path}, {output_path}, {format}, {voice}, {speed}). */
+  command?: string;
+  /** Container the provider is asked to write. */
+  outputFormat?: 'opus' | 'mp3' | 'wav' | 'pcm';
+  /** Budget for `command`, in seconds. */
+  timeout?: number;
+  /** Chars handed to one synthesis call. */
+  maxTextLength?: number;
+}
+
 export interface VoiceProviderFactoryContext {
   config: Record<string, unknown>;
   secrets: import('./secrets').SecretsResolver;
