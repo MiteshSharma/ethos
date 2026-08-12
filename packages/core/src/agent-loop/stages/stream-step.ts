@@ -298,6 +298,11 @@ export async function* streamStep(
       outputTokens: llmOutputTokens,
       cacheReadTokens: llmCacheReadTokens,
       cacheCreationTokens: llmCacheCreationTokens,
+      // A2 — the span used to carry tokens but no money, so every cost
+      // aggregate over `llm_call` spans read 0. This is the provider's own
+      // reported cost (already summed off the usage chunks above), not a
+      // re-derivation: core must not depend on @ethosagent/pricing.
+      estimatedCostUsd: llmEstimatedCostUsd,
       ...(llmRequestTokens ? { requestTokens: llmRequestTokens } : {}),
     });
 

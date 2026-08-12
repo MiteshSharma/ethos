@@ -111,7 +111,20 @@ export type AgentEvent =
       /** Error message from the tool's ToolResult. Only set when `ok: false`. */
       error?: string;
     }
-  | { type: 'usage'; inputTokens: number; outputTokens: number; estimatedCostUsd: number }
+  // A6 — `cacheReadTokens` / `cacheCreationTokens` are ADDITIVE-OPTIONAL (see
+  // ARCHITECTURE.md §VII, Agent event union). They mirror the provider's
+  // `TokenUsage` fields and are present only when the provider actually
+  // reported cache activity; a cacheless call omits them rather than
+  // reporting a misleading 0, so consumers can tell "no caching" apart from
+  // "cached nothing this call".
+  | {
+      type: 'usage';
+      inputTokens: number;
+      outputTokens: number;
+      estimatedCostUsd: number;
+      cacheReadTokens?: number;
+      cacheCreationTokens?: number;
+    }
   | { type: 'error'; error: string; code: string }
   | { type: 'done'; text: string; turnCount: number }
   /**

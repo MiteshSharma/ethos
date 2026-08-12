@@ -74,11 +74,19 @@ export function* handleChunk(
     }
 
     case 'usage':
+      // A6 — cache tokens used to be dropped here, so no AgentEvent consumer
+      // could see cache activity at all. Carried through only when non-zero:
+      // the provider reports 0 for a cacheless call, and an always-present 0
+      // reads as "cached nothing" rather than "caching not in play".
       yield {
         type: 'usage',
         inputTokens: chunk.usage.inputTokens,
         outputTokens: chunk.usage.outputTokens,
         estimatedCostUsd: chunk.usage.estimatedCostUsd,
+        ...(chunk.usage.cacheReadTokens ? { cacheReadTokens: chunk.usage.cacheReadTokens } : {}),
+        ...(chunk.usage.cacheCreationTokens
+          ? { cacheCreationTokens: chunk.usage.cacheCreationTokens }
+          : {}),
       };
       break;
 
