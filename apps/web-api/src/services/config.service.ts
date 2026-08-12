@@ -3,6 +3,7 @@ import { secretRefFromValue } from '@ethosagent/config';
 import { EthosError, type SecretsResolver } from '@ethosagent/types';
 import {
   type ConfigRepository,
+  parseRealtimeRoster,
   parseSttRoster,
   parseTtsRoster,
   type RawProviderEntry,
@@ -214,6 +215,30 @@ export interface VoiceSttProviderUpdateInput {
   timeout?: number;
 }
 
+/** One entry of the named realtime roster (`voice.realtime.providers.<name>.*`).
+ *  The speech-to-speech sibling of the two above — no command or timeout,
+ *  because there is no shelled-out request to bound; instead a per-minute rate,
+ *  which is what a duplex session is billed on. */
+export interface VoiceRealtimeProviderGetResult {
+  provider: string;
+  model: string | null;
+  apiKeyPreview: string | null;
+  baseUrl: string | null;
+  voice: string | null;
+  /** USD per minute of audio. */
+  costPerMinuteUsd: number | null;
+}
+
+/** Update shape for one realtime roster entry. Same write-only `apiKey` rule. */
+export interface VoiceRealtimeProviderUpdateInput {
+  provider: string;
+  model?: string;
+  apiKey?: string;
+  baseUrl?: string;
+  voice?: string;
+  costPerMinuteUsd?: number;
+}
+
 // -- passthrough read helpers ------------------------------------------------
 
 function passStr(p: Record<string, string>, key: string): string | null {
@@ -411,6 +436,24 @@ async function parseVoiceSttProviders(
   return out;
 }
 
+async function parseVoiceRealtimeProviders(
+  p: Record<string, string>,
+  keyPreview: (value: string | undefined) => Promise<string | null>,
+): Promise<Record<string, VoiceRealtimeProviderGetResult>> {
+  const out: Record<string, VoiceRealtimeProviderGetResult> = {};
+  for (const [name, entry] of Object.entries(parseRealtimeRoster(p))) {
+    out[name] = {
+      provider: entry.provider,
+      model: entry.model ?? null,
+      apiKeyPreview: await keyPreview(entry.apiKey),
+      baseUrl: entry.baseUrl ?? null,
+      voice: entry.voice ?? null,
+      costPerMinuteUsd: entry.costPerMinuteUsd ?? null,
+    };
+  }
+  return out;
+}
+
 function parseChannelToolsets(p: Record<string, string>): Record<string, string[]> {
   const out: Record<string, string[]> = {};
   for (const [key, value] of Object.entries(p)) {
@@ -444,6 +487,7 @@ const SETTINGS_PATCH_KEYS = [
   'channelToolsets',
   'voiceTtsProviders',
   'voiceSttProviders',
+  'voiceRealtimeProviders',
   'nightlyPass',
   'weeklyDigest',
   'modelCatalog',
@@ -617,6 +661,19 @@ function validateSettingsPatch(patch: ConfigUpdateInput): void {
       checkInt(`voiceSttProviders.${name}.timeout`, entry.timeout, 1, 3600);
     }
   }
+  if (patch.voiceRealtimeProviders) {
+    for (const [name, entry] of Object.entries(patch.voiceRealtimeProviders)) {
+      checkRecordKey(`voiceRealtimeProviders.${name}`, name);
+      if (!entry?.provider) {
+        invalidValue(`voiceRealtimeProviders.${name}.provider`, 'is required');
+      }
+      // A rate is money per minute, so fractions are the norm — `checkPositive`,
+      // not `checkInt`. The CLI's parser drops a non-positive rate; refusing it
+      // here means the operator hears about it instead of it vanishing.
+      checkPositive(`voiceRealtimeProviders.${name}.costPerMinuteUsd`, entry.costPerMinuteUsd);
+    }
+  }
+  checkPositive('voiceRealtimeSessionBudgetUsd', patch.voiceRealtimeSessionBudgetUsd);
   if (patch.webhooks) {
     for (const [hookId, hook] of Object.entries(patch.webhooks)) {
       checkRecordKey(`webhooks.${hookId}`, hookId);
@@ -780,6 +837,15 @@ export interface ConfigGetResult {
   /** `voice.stt.providers.*` — the named STT roster. `auxiliary.asr` is the
    *  default entry and lives in the `voice*` STT fields above, not here. */
   voiceSttProviders: Record<string, VoiceSttProviderGetResult>;
+  /** `voice.realtime.providers.*` — the named realtime roster. This one has no
+   *  `auxiliary.*` default entry; `voiceRealtimeDefault` names one of these. */
+  voiceRealtimeProviders: Record<string, VoiceRealtimeProviderGetResult>;
+  /** `voice.realtime.default` — a roster label, never a provider id. */
+  voiceRealtimeDefault: string | null;
+  /** `voice.tier` — the deployment's default voice engine. */
+  voiceTier: 'pipeline' | 'realtime' | null;
+  /** `voice.realtime.sessionBudgetUsd` — USD cap on one session. */
+  voiceRealtimeSessionBudgetUsd: number | null;
   nightlyPass: { enabled: boolean; cron: string };
   weeklyDigest: { enabled: boolean; cron: string; recipients: string[] };
   modelCatalog: { enabled: boolean; url: string | null; ttlHours: number };
@@ -850,6 +916,14 @@ export interface ConfigUpdateInput {
   voiceTtsProviders?: Record<string, VoiceProviderUpdateInput>;
   /** `voice.stt.providers.*`. Same full-replacement rule. */
   voiceSttProviders?: Record<string, VoiceSttProviderUpdateInput>;
+  /** `voice.realtime.providers.*`. Same full-replacement rule. */
+  voiceRealtimeProviders?: Record<string, VoiceRealtimeProviderUpdateInput>;
+  /** `voice.realtime.default`; null clears the key. */
+  voiceRealtimeDefault?: string | null;
+  /** `voice.tier`; null clears the key. */
+  voiceTier?: 'pipeline' | 'realtime' | null;
+  /** `voice.realtime.sessionBudgetUsd`; null clears the cap. */
+  voiceRealtimeSessionBudgetUsd?: number | null;
   // Settings-page additions. For every scalar below, `null` (or '') deletes
   // the config.yaml key so the built-in default applies again; `undefined`
   // leaves it unchanged. Record fields are full replacements.
@@ -1034,6 +1108,9 @@ export class ConfigService {
       voiceTrustedPlugins:
         p['voice.trustedPlugins'] === undefined ? null : splitList(p['voice.trustedPlugins']),
       voiceDefaultMode: pickEnumOrNull(p['voice.defaultMode'], ['off', 'mirror_inbound', 'all']),
+      voiceRealtimeDefault: passStr(p, 'voice.realtime.default'),
+      voiceTier: pickEnumOrNull(p['voice.tier'], ['pipeline', 'realtime']),
+      voiceRealtimeSessionBudgetUsd: passNumOrNull(p, 'voice.realtime.sessionBudgetUsd'),
       apiVersion: passStr(p, 'apiVersion'),
       verbose: passBool(p, 'verbose', false),
       displayVerbosity: pickEnum(
@@ -1109,6 +1186,7 @@ export class ConfigService {
       channelToolsets: parseChannelToolsets(p),
       voiceTtsProviders: await parseVoiceTtsProviders(p, (v) => this.keyPreview(v)),
       voiceSttProviders: await parseVoiceSttProviders(p, (v) => this.keyPreview(v)),
+      voiceRealtimeProviders: await parseVoiceRealtimeProviders(p, (v) => this.keyPreview(v)),
       nightlyPass: {
         enabled: passBool(p, 'nightlyPass.enabled', false),
         cron: p['nightlyPass.cron'] || '0 3 * * *',
@@ -1378,6 +1456,9 @@ export class ConfigService {
     set('auxiliary.tts.maxTextLength', patch.voiceTtsMaxTextLength);
     set('auxiliary.asr.timeout', patch.voiceSttTimeoutMs);
     set('voice.defaultMode', patch.voiceDefaultMode);
+    set('voice.tier', patch.voiceTier);
+    set('voice.realtime.default', patch.voiceRealtimeDefault);
+    set('voice.realtime.sessionBudgetUsd', patch.voiceRealtimeSessionBudgetUsd);
     // Clearing the list removes the key, which turns the egress gate off — the
     // gate is armed by DECLARING the key, so there is nothing to keep here.
     setList('voice.trustedPlugins', patch.voiceTrustedPlugins, ', ');
@@ -1396,7 +1477,8 @@ export class ConfigService {
       patch.quickCommands !== undefined ||
       patch.channelToolsets !== undefined ||
       patch.voiceTtsProviders !== undefined ||
-      patch.voiceSttProviders !== undefined;
+      patch.voiceSttProviders !== undefined ||
+      patch.voiceRealtimeProviders !== undefined;
     const currentPassthrough = replacesRecords
       ? ((await this.opts.config.read())?.passthrough ?? {})
       : {};
@@ -1441,13 +1523,18 @@ export class ConfigService {
         }
       }
     }
-    // Write-only key, shared by both rosters: a provided value wins, otherwise
-    // the stored one is re-written so a form that never saw the key cannot
-    // erase it. The value re-written is the `${secrets:…}` reference, which
-    // `externalizeSecret` passes through untouched — no second vault entry. The
-    // stored key is looked up under the OLD spelling too, so an operator who
-    // saves an existing `voice.providers.*` entry keeps its credential.
-    const carryRosterKey = (kind: 'tts' | 'stt', name: string, provided?: string): void => {
+    // Write-only key, shared by all three rosters: a provided value wins,
+    // otherwise the stored one is re-written so a form that never saw the key
+    // cannot erase it. The value re-written is the `${secrets:…}` reference,
+    // which `externalizeSecret` passes through untouched — no second vault
+    // entry. The stored key is looked up under the OLD spelling too, so an
+    // operator who saves an existing `voice.providers.*` entry keeps its
+    // credential.
+    const carryRosterKey = (
+      kind: 'tts' | 'stt' | 'realtime',
+      name: string,
+      provided?: string,
+    ): void => {
       const apiKey =
         provided ||
         currentPassthrough[`voice.${kind}.providers.${name}.apiKey`] ||
@@ -1482,6 +1569,18 @@ export class ConfigService {
         set(`voice.stt.providers.${name}.baseUrl`, entry.baseUrl);
         set(`voice.stt.providers.${name}.command`, entry.command);
         set(`voice.stt.providers.${name}.timeout`, entry.timeout);
+      }
+    }
+    if (patch.voiceRealtimeProviders !== undefined) {
+      deletePrefix('voice.realtime.providers.');
+      for (const [name, entry] of Object.entries(patch.voiceRealtimeProviders)) {
+        if (!entry) continue;
+        set(`voice.realtime.providers.${name}.provider`, entry.provider);
+        set(`voice.realtime.providers.${name}.model`, entry.model);
+        carryRosterKey('realtime', name, entry.apiKey);
+        set(`voice.realtime.providers.${name}.baseUrl`, entry.baseUrl);
+        set(`voice.realtime.providers.${name}.voice`, entry.voice);
+        set(`voice.realtime.providers.${name}.costPerMinuteUsd`, entry.costPerMinuteUsd);
       }
     }
     if (patch.webhooks !== undefined) {
@@ -1527,7 +1626,7 @@ export class ConfigService {
       .filter(
         (k) =>
           /^webhooks\.[^.]+\.secret$/.test(k) ||
-          /^voice\.(?:(?:tts|stt)\.)?providers\.[^.]+\.apiKey$/.test(k),
+          /^voice\.(?:(?:tts|stt|realtime)\.)?providers\.[^.]+\.apiKey$/.test(k),
       )
       .map((k) => secretRefFromValue(currentPassthrough[k] ?? ''))
       .filter((ref): ref is string => ref !== null && !survivingRefs.has(ref));
@@ -1553,6 +1652,9 @@ export class ConfigService {
     delete cleaned.voiceSttTimeoutMs;
     delete cleaned.voiceTrustedPlugins;
     delete cleaned.voiceDefaultMode;
+    delete cleaned.voiceTier;
+    delete cleaned.voiceRealtimeDefault;
+    delete cleaned.voiceRealtimeSessionBudgetUsd;
 
     // Convert providers to repository format when present.
     let repoProviders: RawProviderEntry[] | undefined;

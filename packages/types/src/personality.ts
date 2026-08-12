@@ -165,6 +165,17 @@ export interface PersonalityVoiceConfig {
    * engine than the deployment default.
    */
   stt_provider?: string;
+  /**
+   * Name of an entry in the deployment's REALTIME roster
+   * (`voice.realtime.providers.<name>.*`). The speech-to-speech sibling of
+   * `tts_provider` / `stt_provider`, under the same rules: a LABEL the operator
+   * chose, never a provider id, and a name this machine lacks falls back to
+   * `voice.realtime.default` rather than failing the load.
+   *
+   * Only consulted when a turn runs on the realtime tier; on the pipeline tier
+   * `tts_provider` / `stt_provider` are what speak and listen.
+   */
+  realtime_provider?: string;
   /** TTS voice id, provider-specific (e.g. `af_bella` for Kokoro, `alloy` for OpenAI). */
   tts_voice?: string;
   /**

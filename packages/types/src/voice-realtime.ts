@@ -188,6 +188,16 @@ export interface RealtimeProviderEntry {
   baseUrl?: string;
   /** Default voice id for this entry; a personality's own voice wins over it. */
   voice?: string;
+  /**
+   * What this entry costs per minute of audio, in USD — the provider's own
+   * published rate, typed by the operator. A realtime session is billed by
+   * wall-clock audio time rather than by token, so this is the only number
+   * that turns session duration into money: multiplied by the session's audio
+   * minutes it becomes the accrued cost that usage events report and that
+   * `voice.realtime.sessionBudgetUsd` halts on. Absent = no rate known, so
+   * nothing accrues and a budget cannot bite.
+   */
+  costPerMinuteUsd?: number;
 }
 
 export type RealtimeVoiceProviderFactory = (

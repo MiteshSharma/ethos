@@ -6,6 +6,7 @@ import { detectSecrets } from '@ethosagent/safety-redact';
 import { REF_TO_ENV } from '@ethosagent/storage-fs';
 import type {
   ModelProfile,
+  RealtimeProviderEntry,
   RetentionConfig,
   RetentionEventsConfig,
   SecretsResolver,
@@ -964,6 +965,22 @@ export interface EthosConfig {
    * `voice.tts.providers.<name>.*` — it shipped before STT had a roster, when
    * "providers" could only mean one thing. It is never written back: a config
    * re-serialized from either spelling carries only the new one.
+   *
+   * `realtime.providers` is the THIRD roster, on the same three dotted levels
+   * and through the same builder — hosted speech-to-speech engines that own the
+   * audio in both directions instead of a transcribe → think → speak pipeline:
+   *   voice.realtime.providers.live.provider: openai-realtime
+   *   voice.realtime.providers.live.apiKey: ${secrets:voice/realtime/providers/live/apiKey}
+   *   voice.realtime.providers.live.costPerMinuteUsd: 0.06
+   * `realtime.default` names the entry a deployment uses when a personality
+   * names none, and `realtime.sessionBudgetUsd` caps the accrued cost of ONE
+   * session (rate × audio minutes) before it is cut short.
+   *
+   * `tier` is the deployment's default voice engine: `realtime` runs talk mode
+   * as one hosted duplex session, `pipeline` is the explicit private/offline
+   * mode (STT → LLM → TTS, which is what local providers can serve). Absent
+   * leaves the choice to the surface. Anything other than those two values is
+   * ignored, the same way an unknown `defaultMode` is.
    */
   voice?: {
     bots: VoiceBotConfig[];
@@ -971,8 +988,16 @@ export interface EthosConfig {
     trunk?: VoiceTrunkConfig;
     trustedPlugins?: string[];
     defaultMode?: 'off' | 'mirror_inbound' | 'all';
+    tier?: 'pipeline' | 'realtime';
     tts?: { providers: Record<string, TtsProviderEntry> };
     stt?: { providers: Record<string, SttProviderEntry> };
+    realtime?: {
+      providers?: Record<string, RealtimeProviderEntry>;
+      /** Roster entry name a deployment falls back to. Not a provider id. */
+      default?: string;
+      /** USD cap on ONE realtime session's accrued cost. */
+      sessionBudgetUsd?: number;
+    };
   };
   // Email platform
   emailImapHost?: string;
@@ -1438,9 +1463,11 @@ async function externalizeConfigSecrets(
   // Per-ENTRY refs. A roster key must not be able to route its credential
   // around the vault, so each entry externalizes exactly like
   // `auxiliary.tts.apiKey` does — `voice.tts.providers.<name>.apiKey` →
-  // `voice/tts/providers/<name>/apiKey`, and the STT roster the same way.
+  // `voice/tts/providers/<name>/apiKey`, and the STT and realtime rosters the
+  // same way. Same-named entries in different rosters therefore land on
+  // different refs and cannot overwrite each other.
   const externalizeRoster = async <E extends { apiKey?: string }>(
-    kind: 'tts' | 'stt',
+    kind: 'tts' | 'stt' | 'realtime',
     roster: Record<string, E>,
   ): Promise<Record<string, E>> => {
     const out: Record<string, E> = {};
@@ -1468,6 +1495,15 @@ async function externalizeConfigSecrets(
     r.voice = {
       ...r.voice,
       stt: { providers: await externalizeRoster('stt', r.voice.stt.providers) },
+    };
+  }
+  if (r.voice?.realtime?.providers) {
+    r.voice = {
+      ...r.voice,
+      realtime: {
+        ...r.voice.realtime,
+        providers: await externalizeRoster('realtime', r.voice.realtime.providers),
+      },
     };
   }
   if (r.auxiliary) {
@@ -1758,6 +1794,9 @@ export async function writeConfig(
     if (config.voice.defaultMode) {
       lines.push(`voice.defaultMode: ${config.voice.defaultMode}`);
     }
+    if (config.voice.tier) {
+      lines.push(`voice.tier: ${config.voice.tier}`);
+    }
     // Always the NEW spelling, whichever one was read. A config parsed from
     // `voice.providers.*` re-serializes as `voice.tts.providers.*` and never
     // carries both.
@@ -1770,6 +1809,21 @@ export async function writeConfig(
       lines.push(
         ...voiceProviderEntryLines(`voice.stt.providers.${name}`, entry, STT_ENTRY_FIELDS),
       );
+    }
+    for (const [name, entry] of Object.entries(config.voice.realtime?.providers ?? {})) {
+      lines.push(
+        ...voiceProviderEntryLines(
+          `voice.realtime.providers.${name}`,
+          entry,
+          REALTIME_ENTRY_FIELDS,
+        ),
+      );
+    }
+    if (config.voice.realtime?.default) {
+      lines.push(`voice.realtime.default: ${config.voice.realtime.default}`);
+    }
+    if (config.voice.realtime?.sessionBudgetUsd !== undefined) {
+      lines.push(`voice.realtime.sessionBudgetUsd: ${config.voice.realtime.sessionBudgetUsd}`);
     }
   }
   if (config.teams) {
@@ -2081,6 +2135,15 @@ export async function resolveConfigSecrets(
   if (r.voice?.stt?.providers) {
     r.voice = { ...r.voice, stt: { providers: await resolveRoster(r.voice.stt.providers) } };
   }
+  if (r.voice?.realtime?.providers) {
+    r.voice = {
+      ...r.voice,
+      realtime: {
+        ...r.voice.realtime,
+        providers: await resolveRoster(r.voice.realtime.providers),
+      },
+    };
+  }
   if (r.webhooks) {
     const hooks: Record<string, WebhookHookConfig> = {};
     for (const [id, hook] of Object.entries(r.webhooks)) {
@@ -2139,10 +2202,18 @@ function parseConfigYaml(src: string): EthosConfig {
   const voiceTtsProvidersLegacyKv: Record<string, Record<string, string>> = {};
   /** `voice.stt.providers.<name>.<field>` — the named STT roster. */
   const voiceSttProvidersKv: Record<string, Record<string, string>> = {};
+  /** `voice.realtime.providers.<name>.<field>` — the named realtime roster. */
+  const voiceRealtimeProvidersKv: Record<string, Record<string, string>> = {};
   /** Raw `voice.trustedPlugins` line; `undefined` = key absent = gate off. */
   let voiceTrustedPluginsRaw: string | undefined;
   /** `voice.defaultMode`; `undefined` = key absent = the built-in default. */
   let voiceDefaultMode: 'off' | 'mirror_inbound' | 'all' | undefined;
+  /** `voice.tier`; `undefined` = key absent = the surface decides. */
+  let voiceTier: 'pipeline' | 'realtime' | undefined;
+  /** `voice.realtime.default` — names a realtime roster entry. */
+  let voiceRealtimeDefault: string | undefined;
+  /** `voice.realtime.sessionBudgetUsd` — USD cap on one session's accrued cost. */
+  let voiceRealtimeSessionBudgetUsd: number | undefined;
   const teamsKv: Record<string, Record<string, string>> = {};
   const webhooksKv: Record<string, Record<string, string>> = {};
   // FW-16 — quick_commands.<name>.<field>: <value>
@@ -2216,17 +2287,38 @@ function parseConfigYaml(src: string): EthosConfig {
       voiceBotsKv[idx][vbot[2]] = vbot[3].trim().replace(/^["']|["']$/g, '');
       continue;
     }
-    // voice.<tts|stt>.providers.<name>.<field>: <value> — the named rosters.
-    // The name is anchored to the identifier charset so the split is
+    // voice.<tts|stt|realtime>.providers.<name>.<field>: <value> — the named
+    // rosters. The name is anchored to the identifier charset so the split is
     // unambiguous and the last level is a plain field, exactly the way
-    // `telegram.bots.<n>.<field>` is matched. One regex serves both rosters so
-    // the two cannot acquire different name rules.
-    const vprov = line.match(/^voice\.(tts|stt)\.providers\.([A-Za-z0-9_-]+)\.(\w+):\s*(.+)$/);
+    // `telegram.bots.<n>.<field>` is matched. One regex serves all three rosters
+    // so they cannot acquire different name rules.
+    const vprov = line.match(
+      /^voice\.(tts|stt|realtime)\.providers\.([A-Za-z0-9_-]+)\.(\w+):\s*(.+)$/,
+    );
     if (vprov) {
-      const bag = vprov[1] === 'stt' ? voiceSttProvidersKv : voiceTtsProvidersKv;
+      const bag =
+        vprov[1] === 'stt'
+          ? voiceSttProvidersKv
+          : vprov[1] === 'realtime'
+            ? voiceRealtimeProvidersKv
+            : voiceTtsProvidersKv;
       const name = vprov[2];
       bag[name] ??= {};
       bag[name][vprov[3]] = vprov[4].trim().replace(/^["']|["']$/g, '');
+      continue;
+    }
+    // voice.realtime.default / voice.realtime.sessionBudgetUsd. Matched AFTER
+    // the roster line above, whose third level is `providers` and whose tail
+    // carries dots — so this `(\w+)` can never swallow a roster key.
+    const vrt = line.match(/^voice\.realtime\.(\w+):\s*(.+)$/);
+    if (vrt) {
+      const value = vrt[2].trim().replace(/^["']|["']$/g, '');
+      if (vrt[1] === 'default') {
+        voiceRealtimeDefault = value;
+      } else if (vrt[1] === 'sessionBudgetUsd') {
+        const n = Number(value);
+        if (Number.isFinite(n) && n > 0) voiceRealtimeSessionBudgetUsd = n;
+      }
       continue;
     }
     // voice.providers.<name>.<field> — the OLDER spelling of the TTS roster,
@@ -2269,6 +2361,15 @@ function parseConfigYaml(src: string): EthosConfig {
       if (mode === 'off' || mode === 'mirror_inbound' || mode === 'all') {
         voiceDefaultMode = mode;
       }
+      continue;
+    }
+    // voice.tier: pipeline | realtime — the deployment's default voice engine.
+    // An unknown value is ignored rather than thrown on, exactly like the mode
+    // above: a typo here must not make the whole config unloadable.
+    const vtier = line.match(/^voice\.tier:\s*(.+)$/);
+    if (vtier) {
+      const tier = vtier[1].trim().replace(/^["']|["']$/g, '');
+      if (tier === 'pipeline' || tier === 'realtime') voiceTier = tier;
       continue;
     }
     // teams.<name>.<field>: <value>
@@ -2698,14 +2799,35 @@ function parseConfigYaml(src: string): EthosConfig {
     voiceSttProvidersKv,
     STT_ENTRY_FIELDS,
   );
+  const voiceRealtimeProviders = buildVoiceProviderRoster<RealtimeProviderEntry>(
+    voiceRealtimeProvidersKv,
+    REALTIME_ENTRY_FIELDS,
+  );
+  // `default` and `sessionBudgetUsd` stand on their own: a deployment can name a
+  // default (or cap a session) before its roster is typed in, and losing the cap
+  // because the roster is momentarily empty would be the wrong way round.
+  const voiceRealtime =
+    voiceRealtimeProviders !== undefined ||
+    voiceRealtimeDefault !== undefined ||
+    voiceRealtimeSessionBudgetUsd !== undefined
+      ? {
+          ...(voiceRealtimeProviders ? { providers: voiceRealtimeProviders } : {}),
+          ...(voiceRealtimeDefault ? { default: voiceRealtimeDefault } : {}),
+          ...(voiceRealtimeSessionBudgetUsd !== undefined
+            ? { sessionBudgetUsd: voiceRealtimeSessionBudgetUsd }
+            : {}),
+        }
+      : undefined;
   const voiceSection =
     voiceResult.bots.length > 0 ||
     voiceLiveKitResult.livekit ||
     voiceTrunkResult.trunk ||
     voiceTrustedPluginsRaw !== undefined ||
     voiceDefaultMode !== undefined ||
+    voiceTier !== undefined ||
     voiceTtsProviders !== undefined ||
-    voiceSttProviders !== undefined
+    voiceSttProviders !== undefined ||
+    voiceRealtime !== undefined
       ? {
           bots: voiceResult.bots,
           ...(voiceLiveKitResult.livekit ? { livekit: voiceLiveKitResult.livekit } : {}),
@@ -2714,8 +2836,10 @@ function parseConfigYaml(src: string): EthosConfig {
             ? { trustedPlugins: splitList(voiceTrustedPluginsRaw) }
             : {}),
           ...(voiceDefaultMode ? { defaultMode: voiceDefaultMode } : {}),
+          ...(voiceTier ? { tier: voiceTier } : {}),
           ...(voiceTtsProviders ? { tts: { providers: voiceTtsProviders } } : {}),
           ...(voiceSttProviders ? { stt: { providers: voiceSttProviders } } : {}),
+          ...(voiceRealtime ? { realtime: voiceRealtime } : {}),
         }
       : undefined;
   const teams = buildTeamsConfig(teamsKv);
@@ -3091,13 +3215,16 @@ function isAudioFormat(v: string | undefined): v is 'opus' | 'mp3' | 'wav' | 'pc
 // Voice provider entries — ONE builder and ONE serializer, parameterised by
 // field set.
 //
-// There are four places an entry shape is read or written: the default TTS
+// There are five places an entry shape is read or written: the default TTS
 // entry (`auxiliary.tts`), the TTS roster (`voice.tts.providers.<name>`), the
-// default STT entry (`auxiliary.asr`), and the STT roster
-// (`voice.stt.providers.<name>`). Four hand-written field lists would be four
-// chances for a roster to quietly stop supporting a field its default still
-// has. So the field set is DATA — a spec keyed to the entry interface, checked
-// by the compiler — and the code that walks it is written once.
+// default STT entry (`auxiliary.asr`), the STT roster
+// (`voice.stt.providers.<name>`), and the realtime roster
+// (`voice.realtime.providers.<name>`, which has no `auxiliary.*` default —
+// `voice.realtime.default` names one of its own entries instead). Five
+// hand-written field lists would be five chances for a roster to quietly stop
+// supporting a field its default still has. So the field set is DATA — a spec
+// keyed to the entry interface, checked by the compiler — and the code that
+// walks it is written once.
 // ---------------------------------------------------------------------------
 
 /**
@@ -3127,6 +3254,20 @@ const STT_ENTRY_FIELDS: readonly VoiceEntryFieldSpec<SttProviderEntry>[] = [
   { name: 'baseUrl', kind: 'string' },
   { name: 'command', kind: 'string' },
   { name: 'timeout', kind: 'positiveNumber' },
+];
+
+/**
+ * No `command` and no `timeout`: a realtime provider is a duplex SESSION, not a
+ * request you shell out for and time out. `costPerMinuteUsd` rides the existing
+ * `positiveNumber` kind, so a rate of `0` reads as absent — which is what it
+ * means for accrual, since a free minute costs nothing to charge.
+ */
+const REALTIME_ENTRY_FIELDS: readonly VoiceEntryFieldSpec<RealtimeProviderEntry>[] = [
+  { name: 'model', kind: 'string' },
+  { name: 'apiKey', kind: 'string' },
+  { name: 'baseUrl', kind: 'string' },
+  { name: 'voice', kind: 'string' },
+  { name: 'costPerMinuteUsd', kind: 'positiveNumber' },
 ];
 
 /**

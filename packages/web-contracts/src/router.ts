@@ -293,10 +293,11 @@ const PersonalityNightlyInput = z
  * The editable slice of a personality's `voice` block — how it sounds and what
  * it listens through.
  *
- * `tts_provider` / `stt_provider` name entries in the deployment's
- * `voice.tts.providers.*` / `voice.stt.providers.*` rosters (LABELS, never
- * credentials); `tts_voice` is the TTS provider's voice id. `''` clears the key,
- * so "Default" is expressible.
+ * `tts_provider` / `stt_provider` / `realtime_provider` name entries in the
+ * deployment's `voice.tts.providers.*` / `voice.stt.providers.*` /
+ * `voice.realtime.providers.*` rosters (LABELS, never credentials); `tts_voice`
+ * is the TTS provider's voice id. `''` clears the key, so "Default" is
+ * expressible.
  *
  * `tier`, `model` and `languages` are deliberately absent: they round-trip
  * through config.yaml but nothing consumes them yet, and a form field is a
@@ -306,6 +307,7 @@ const PersonalityVoiceInput = z
   .object({
     tts_provider: z.string().optional(),
     stt_provider: z.string().optional(),
+    realtime_provider: z.string().optional(),
     tts_voice: z.string().optional(),
   })
   .optional();
@@ -950,6 +952,31 @@ const VoiceSttProviderEntryUpdateSchema = z.object({
   timeout: z.number().int().min(1).max(3600).optional(),
 });
 
+/** One entry of the named REALTIME roster (`voice.realtime.providers.<name>.*`)
+ *  — hosted speech-to-speech. No `command` or `timeout`: a realtime provider is
+ *  a duplex session, not a request you shell out for. `costPerMinuteUsd` is the
+ *  provider's published rate, which is what turns session minutes into the cost
+ *  `voiceRealtimeSessionBudgetUsd` halts on. API key never round-trips. */
+const VoiceRealtimeProviderEntryGetSchema = z.object({
+  /** Registered provider id (`openai-realtime`, `gemini-live`, …). */
+  provider: z.string(),
+  model: z.string().nullable(),
+  apiKeyPreview: z.string().nullable(),
+  baseUrl: z.string().nullable(),
+  voice: z.string().nullable(),
+  costPerMinuteUsd: z.number().nullable(),
+});
+const VoiceRealtimeProviderEntryUpdateSchema = z.object({
+  provider: z.string().min(1),
+  model: z.string().optional(),
+  /** Write-only; never echoed back. Omit to keep the stored key. */
+  apiKey: z.string().optional(),
+  baseUrl: z.string().optional(),
+  voice: z.string().optional(),
+  /** USD per minute of audio. Fractional — 6 cents a minute is `0.06`. */
+  costPerMinuteUsd: z.number().positive().max(100).optional(),
+});
+
 const ConfigGetOutput = z.object({
   provider: z.string(),
   model: z.string(),
@@ -1027,6 +1054,20 @@ const ConfigGetOutput = z.object({
    *  (the `voiceProvider` / `voiceModel` / … fields above) stays the DEFAULT
    *  entry and is NOT repeated here. */
   voiceSttProviders: z.record(z.string(), VoiceSttProviderEntryGetSchema),
+  /** `voice.realtime.providers.<name>.*` — the named realtime roster. Unlike
+   *  the other two this roster has no `auxiliary.*` default entry; the default
+   *  is `voiceRealtimeDefault`, which NAMES one of these. */
+  voiceRealtimeProviders: z.record(z.string(), VoiceRealtimeProviderEntryGetSchema),
+  /** `voice.realtime.default` — the realtime roster entry a personality that
+   *  names none gets. A label from `voiceRealtimeProviders`, never a provider
+   *  id. Null = key absent. */
+  voiceRealtimeDefault: z.string().nullable(),
+  /** `voice.tier` — the deployment's default voice engine. Null = key absent
+   *  (the surface decides). */
+  voiceTier: z.enum(['pipeline', 'realtime']).nullable(),
+  /** `voice.realtime.sessionBudgetUsd` — USD cap on ONE realtime session's
+   *  accrued cost. Null = no cap. */
+  voiceRealtimeSessionBudgetUsd: z.number().nullable(),
   // -- Settings-page additions (keys with no other UI home) ------------------
   /** Azure-only REST API version (`apiVersion`); null when unset. */
   apiVersion: z.string().nullable(),
@@ -1280,6 +1321,17 @@ const ConfigUpdateInput = z.object({
   voiceSttProviders: z
     .record(z.string().regex(VoiceProviderNameRegex), VoiceSttProviderEntryUpdateSchema)
     .optional(),
+  /** `voice.realtime.providers.*` — the named realtime roster. Same
+   *  full-replacement rule: an omitted entry is a deletion. */
+  voiceRealtimeProviders: z
+    .record(z.string().regex(VoiceProviderNameRegex), VoiceRealtimeProviderEntryUpdateSchema)
+    .optional(),
+  /** `voice.realtime.default`; null clears the key. */
+  voiceRealtimeDefault: z.string().nullable().optional(),
+  /** `voice.tier`; null clears the key. */
+  voiceTier: z.enum(['pipeline', 'realtime']).nullable().optional(),
+  /** `voice.realtime.sessionBudgetUsd`; null clears the cap. */
+  voiceRealtimeSessionBudgetUsd: z.number().positive().max(10_000).nullable().optional(),
   // -- Settings-page additions (see the null-clears note above) --------------
   /** Azure-only REST API version (`apiVersion`). */
   apiVersion: z.string().nullable().optional(),

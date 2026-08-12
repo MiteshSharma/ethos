@@ -6,6 +6,7 @@ import {
 } from '@ethosagent/config';
 import { deriveBotKey } from '@ethosagent/core';
 import type {
+  RealtimeProviderEntry,
   SecretsResolver,
   Storage,
   SttProviderEntry,
@@ -487,16 +488,16 @@ function stripQuotes(s: string): string {
 }
 
 /**
- * The named voice rosters (`voice.<tts|stt>.providers.<name>.<field>`) out of
- * the passthrough block, which is where these lines land — this parser models no
- * key, it just round-trips them.
+ * The named voice rosters (`voice.<tts|stt|realtime>.providers.<name>.<field>`)
+ * out of the passthrough block, which is where these lines land — this parser
+ * models no key, it just round-trips them.
  *
  * Deliberately a mirror of `buildVoiceProviderEntry` in `@ethosagent/config`:
  * same charset for the name, same field sets, and the same rule that an entry
  * without `provider` names nothing resolvable and is dropped rather than
  * half-built. Two readers of one file format is already one too many; they must
- * at least agree on what a valid entry is. Both kinds run through ONE walker
- * here for the same reason they do there.
+ * at least agree on what a valid entry is. All three kinds run through ONE
+ * walker here for the same reason they do there.
  *
  * `voice.providers.<name>.<field>` — the older TTS-only spelling — is accepted
  * on read and merged UNDER the new keys, so a hand-written config from before
@@ -515,6 +516,14 @@ const TTS_ROSTER_FIELDS = {
 const STT_ROSTER_FIELDS = {
   strings: ['model', 'apiKey', 'baseUrl', 'command'],
   numbers: ['timeout'],
+  audioFormat: false,
+} as const;
+
+/** No `command` / `timeout`: a realtime provider is a duplex session, not a
+ *  request you shell out for and time out. */
+const REALTIME_ROSTER_FIELDS = {
+  strings: ['model', 'apiKey', 'baseUrl', 'voice'],
+  numbers: ['costPerMinuteUsd'],
   audioFormat: false,
 } as const;
 
@@ -585,6 +594,15 @@ export function parseSttRoster(
   return buildRoster<SttProviderEntry>(
     collectRoster(passthrough, ['voice.stt.providers']),
     STT_ROSTER_FIELDS,
+  );
+}
+
+export function parseRealtimeRoster(
+  passthrough: Record<string, string>,
+): Record<string, RealtimeProviderEntry> {
+  return buildRoster<RealtimeProviderEntry>(
+    collectRoster(passthrough, ['voice.realtime.providers']),
+    REALTIME_ROSTER_FIELDS,
   );
 }
 

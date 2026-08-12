@@ -152,15 +152,16 @@ export const PersonalitySchema = z.object({
     })
     .optional(),
   /** How this personality sounds and listens. Only the sub-keys the editor
-   *  writes are surfaced — `voice.tts_provider` / `voice.stt_provider` (roster
-   *  labels) and `voice.tts_voice`. `tier` / `model` / `languages` stay in
-   *  config.yaml: nothing consumes them yet, so echoing them here would invite a
-   *  form field that does not work. Omitted when the personality declares no
-   *  voice. */
+   *  writes are surfaced — `voice.tts_provider` / `voice.stt_provider` /
+   *  `voice.realtime_provider` (roster labels) and `voice.tts_voice`. `tier` /
+   *  `model` / `languages` stay in config.yaml: nothing consumes them yet, so
+   *  echoing them here would invite a form field that does not work. Omitted
+   *  when the personality declares no voice. */
   voice: z
     .object({
       tts_provider: z.string().optional(),
       stt_provider: z.string().optional(),
+      realtime_provider: z.string().optional(),
       tts_voice: z.string().optional(),
     })
     .optional(),

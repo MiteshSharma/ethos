@@ -608,10 +608,11 @@ export interface CreatePersonalityInput {
   dreaming?: import('@ethosagent/types').DreamingConfig;
   evolution_approval_mode?: 'auto' | 'user';
   nightly?: import('@ethosagent/types').PersonalityConfig['nightly'];
-  /** How this personality sounds and listens. `tts_provider` / `stt_provider`
-   *  name entries in the deployment's `voice.tts.providers.*` /
-   *  `voice.stt.providers.*` rosters; `tts_voice` is the TTS provider's voice
-   *  id. Empty strings are dropped, so an editor can send blanks for "unset". */
+  /** How this personality sounds and listens. `tts_provider` / `stt_provider` /
+   *  `realtime_provider` name entries in the deployment's `voice.tts.providers.*` /
+   *  `voice.stt.providers.*` / `voice.realtime.providers.*` rosters; `tts_voice`
+   *  is the TTS provider's voice id. Empty strings are dropped, so an editor can
+   *  send blanks for "unset". */
   voice?: EditableVoiceConfig;
 }
 
@@ -625,11 +626,17 @@ export interface CreatePersonalityInput {
 export interface EditableVoiceConfig {
   tts_provider?: string;
   stt_provider?: string;
+  realtime_provider?: string;
   tts_voice?: string;
 }
 
 /** The editable sub-keys, in one place — the merge walks exactly this list. */
-const EDITABLE_VOICE_KEYS = ['tts_provider', 'stt_provider', 'tts_voice'] as const;
+const EDITABLE_VOICE_KEYS = [
+  'tts_provider',
+  'stt_provider',
+  'realtime_provider',
+  'tts_voice',
+] as const;
 
 export interface UpdatePersonalityPatch {
   name?: string;
@@ -1752,16 +1759,18 @@ function buildMemoryConfig(
  *
  *   voice.tts_provider: studio
  *   voice.stt_provider: whisper-es
+ *   voice.realtime_provider: live
  *   voice.tts_voice: af_bella
  *   voice.tier: pipeline
  *   voice.model: claude-haiku-4-5
  *   voice.languages.es: ef_dora
  *
- * `voice.tts_provider` / `voice.stt_provider` name entries in the deployment's
- * `voice.tts.providers.*` / `voice.stt.providers.*` rosters. They are kept
- * verbatim — validating them here would mean this loader knew the machine's
- * config, and a name this machine lacks is a fallback at resolution time
- * (`selectTtsEntry` / `selectSttEntry`), not a load failure.
+ * `voice.tts_provider` / `voice.stt_provider` / `voice.realtime_provider` name
+ * entries in the deployment's `voice.tts.providers.*` / `voice.stt.providers.*`
+ * / `voice.realtime.providers.*` rosters. They are kept verbatim — validating
+ * them here would mean this loader knew the machine's config, and a name this
+ * machine lacks is a fallback at resolution time (`selectTtsEntry` /
+ * `selectSttEntry`), not a load failure.
  *
  * `voice.provider` is accepted as the older spelling of `voice.tts_provider`
  * (it shipped before a personality could name an STT engine). The explicit new
@@ -1776,6 +1785,7 @@ function buildVoiceConfig(
 ): import('@ethosagent/types').PersonalityVoiceConfig | undefined {
   const ttsProvider = cfg['voice.tts_provider'] || cfg['voice.provider'];
   const sttProvider = cfg['voice.stt_provider'];
+  const realtimeProvider = cfg['voice.realtime_provider'];
   const ttsVoice = cfg['voice.tts_voice'];
   const tier = cfg['voice.tier'];
   const model = cfg['voice.model'];
@@ -1788,6 +1798,7 @@ function buildVoiceConfig(
   const out: import('@ethosagent/types').PersonalityVoiceConfig = {
     ...(ttsProvider ? { tts_provider: ttsProvider } : {}),
     ...(sttProvider ? { stt_provider: sttProvider } : {}),
+    ...(realtimeProvider ? { realtime_provider: realtimeProvider } : {}),
     ...(ttsVoice ? { tts_voice: ttsVoice } : {}),
     ...(tier === 'pipeline' || tier === 'realtime' ? { tier } : {}),
     ...(model ? { model } : {}),
@@ -2218,6 +2229,9 @@ function renderConfigYaml(input: RenderConfigInput): string {
     }
     if (v.stt_provider !== undefined) {
       lines.push(`voice.stt_provider: ${yamlScalar(v.stt_provider)}`);
+    }
+    if (v.realtime_provider !== undefined) {
+      lines.push(`voice.realtime_provider: ${yamlScalar(v.realtime_provider)}`);
     }
     if (v.tts_voice !== undefined) lines.push(`voice.tts_voice: ${yamlScalar(v.tts_voice)}`);
     if (v.tier !== undefined) lines.push(`voice.tier: ${v.tier}`);

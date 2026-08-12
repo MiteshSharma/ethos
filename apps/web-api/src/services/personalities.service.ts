@@ -760,11 +760,15 @@ function toWire(d: DescribedPersonality): Personality {
     // routes on yet.
     ...(c.voice?.tts_provider !== undefined ||
     c.voice?.stt_provider !== undefined ||
+    c.voice?.realtime_provider !== undefined ||
     c.voice?.tts_voice !== undefined
       ? {
           voice: {
             ...(c.voice.tts_provider !== undefined ? { tts_provider: c.voice.tts_provider } : {}),
             ...(c.voice.stt_provider !== undefined ? { stt_provider: c.voice.stt_provider } : {}),
+            ...(c.voice.realtime_provider !== undefined
+              ? { realtime_provider: c.voice.realtime_provider }
+              : {}),
             ...(c.voice.tts_voice !== undefined ? { tts_voice: c.voice.tts_voice } : {}),
           },
         }

@@ -883,6 +883,35 @@ describe('voice round-trip', () => {
     expect(fresh.get('voice-roster')?.voice?.stt_provider).toBe('whisper-es');
   });
 
+  // `voice.realtime_provider` is the third roster key, added with the hosted
+  // speech-to-speech tier. Also a SUB-KEY of the same `voice` block, so the
+  // top-level field count is untouched by it too.
+  it('parses the realtime roster key and keeps it verbatim through an update', async () => {
+    await seedPersonality(
+      'voice-realtime',
+      'name: VoiceRealtime\nvoice.tts_provider: studio\nvoice.realtime_provider: live\n',
+    );
+    const registry = makeRegistry();
+    await registry.loadFromDirectory(join(testDir, 'personalities'));
+    expect(registry.get('voice-realtime')?.voice).toEqual({
+      tts_provider: 'studio',
+      realtime_provider: 'live',
+    });
+
+    await registry.update('voice-realtime', { voice: { realtime_provider: 'gemini' } });
+    const raw = await readFile(
+      join(testDir, 'personalities', 'voice-realtime', 'config.yaml'),
+      'utf-8',
+    );
+    expect(raw).toContain('voice.realtime_provider: gemini');
+    // A patch naming only this sub-key leaves its siblings alone.
+    expect(raw).toContain('voice.tts_provider: studio');
+
+    const fresh = makeRegistry();
+    await fresh.loadFromDirectory(join(testDir, 'personalities'));
+    expect(fresh.get('voice-realtime')?.voice?.realtime_provider).toBe('gemini');
+  });
+
   // `voice.provider` was the spelling before a personality could name an STT
   // engine. A hand-written config still carrying it must load, and re-serialize
   // to the new key alone.

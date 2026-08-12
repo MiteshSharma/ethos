@@ -147,6 +147,7 @@ type ConfigGetData = Awaited<ReturnType<typeof rpc.config.get>>;
 type QuickCommandPatch = NonNullable<ConfigUpdatePatch['quickCommands']>[string];
 type VoiceTtsProviderPatch = NonNullable<ConfigUpdatePatch['voiceTtsProviders']>[string];
 type VoiceSttProviderPatch = NonNullable<ConfigUpdatePatch['voiceSttProviders']>[string];
+type VoiceRealtimeProviderPatch = NonNullable<ConfigUpdatePatch['voiceRealtimeProviders']>[string];
 type RetentionSubkey = keyof ConfigGetData['retention'];
 
 /** Mirrors ConfigRecordKeySchema in @ethosagent/web-contracts. */
@@ -183,14 +184,15 @@ interface ChannelToolsetRow {
 }
 
 /**
- * One row of a named voice roster (`voice.<tts|stt>.providers.<name>.*`). Same
- * fields as the Default provider above it, because a roster entry IS a default
- * entry — the one a personality gets when it names this row instead.
+ * One row of a named voice roster (`voice.<tts|stt|realtime>.providers.<name>.*`).
+ * For STT and TTS these are the same fields as the Default provider above them,
+ * because a roster entry IS a default entry — the one a personality gets when it
+ * names this row instead.
  *
- * ONE row shape serves both kinds, carrying the union of the two field sets;
- * the row component renders only the fields its kind has. Two row types would
- * be two editors, and the whole point of this section is that the ear and the
- * voice are configured the same way.
+ * ONE row shape serves all three kinds, carrying the union of the field sets;
+ * the row component renders only the fields its kind has. Three row types would
+ * be three editors, and the whole point of this section is that the ear, the
+ * voice and the live session are configured the same way.
  *
  * `apiKey` is the freshly typed key (write-only, blank on load);
  * `apiKeyPreview` is the redacted view of what is stored.
@@ -202,36 +204,48 @@ interface VoiceProviderRow {
   model: string;
   apiKey: string;
   apiKeyPreview: string | null;
-  /** TTS only. */
+  /** TTS and realtime. */
   voice: string;
   baseUrl: string;
+  /** STT / TTS only. */
   command: string;
   /** TTS only. */
   outputFormat: string;
-  /** Seconds. */
+  /** STT / TTS only. Seconds. */
   timeout: number | null;
   /** TTS only. */
   maxTextLength: number | null;
+  /** Realtime only. USD per minute of audio. */
+  costPerMinuteUsd: number | null;
 }
 
-/** What differs between the STT and TTS rosters — everything else is shared. */
+/** What differs between the three rosters — everything else is shared. */
 interface VoiceRosterKindSpec {
-  kind: 'stt' | 'tts';
+  kind: 'stt' | 'tts' | 'realtime';
   label: string;
   /** Config key the row's name becomes, shown in copy and in the name error. */
   configKey: string;
+  /** Heading over the rows. For STT/TTS they are additions to a separate
+   *  default entry; for realtime they ARE the entries, one of which the default
+   *  select names — so the two cannot share one word. */
+  rosterHeading: string;
   blurb: string;
   addLabel: string;
   providerOptions: { label: string; value: string }[];
-  /** Provider id whose row renders a command template instead of a base URL. */
-  commandProvider: string;
-  commandPlaceholders: string;
-  commandExample: string;
+  /** Provider id whose row renders a command template instead of a base URL.
+   *  Absent for a kind with no shell-backed provider (realtime). */
+  commandProvider?: string;
+  commandPlaceholders?: string;
+  commandExample?: string;
   defaultProvider: string;
   modelPlaceholder: string;
   baseUrlPlaceholder: string;
   /** TTS-only controls: default voice, audio format, max text length. */
   audioOutputFields: boolean;
+  /** Per-request timeout. Meaningless for a duplex session, so realtime is out. */
+  timeoutField: boolean;
+  /** Realtime-only: the voice id and the per-minute rate. */
+  realtimeFields: boolean;
 }
 
 interface RetentionRow {
@@ -262,7 +276,15 @@ function channelToolsetRowsFromConfig(map: ConfigGetData['channelToolsets']): Ch
     .map(([platform, toolsets]) => ({ _id: nextRowId++, platform, toolsets }));
 }
 
-function voiceTtsProviderRowsFromConfig(
+/**
+ * config → rows, and rows → patch: one pair per roster kind, at module scope so
+ * both directions of the round trip are testable without mounting the form.
+ *
+ * The `apiKey` rule is the same in all three: blank means "keep the stored key",
+ * because the browser is never handed it to type back, so a blank field cannot
+ * mean "clear it".
+ */
+export function voiceTtsProviderRowsFromConfig(
   map: ConfigGetData['voiceTtsProviders'],
 ): VoiceProviderRow[] {
   return Object.entries(map)
@@ -280,10 +302,11 @@ function voiceTtsProviderRowsFromConfig(
       outputFormat: entry.outputFormat ?? '',
       timeout: entry.timeout,
       maxTextLength: entry.maxTextLength,
+      costPerMinuteUsd: null,
     }));
 }
 
-function voiceSttProviderRowsFromConfig(
+export function voiceSttProviderRowsFromConfig(
   map: ConfigGetData['voiceSttProviders'],
 ): VoiceProviderRow[] {
   return Object.entries(map)
@@ -301,7 +324,69 @@ function voiceSttProviderRowsFromConfig(
       outputFormat: '',
       timeout: entry.timeout,
       maxTextLength: null,
+      costPerMinuteUsd: null,
     }));
+}
+
+export function voiceRealtimeProviderRowsFromConfig(
+  map: ConfigGetData['voiceRealtimeProviders'],
+): VoiceProviderRow[] {
+  return Object.entries(map)
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([name, entry]) => ({
+      _id: nextRowId++,
+      name,
+      provider: entry.provider,
+      model: entry.model ?? '',
+      apiKey: '',
+      apiKeyPreview: entry.apiKeyPreview,
+      voice: entry.voice ?? '',
+      baseUrl: entry.baseUrl ?? '',
+      command: '',
+      outputFormat: '',
+      timeout: null,
+      maxTextLength: null,
+      costPerMinuteUsd: entry.costPerMinuteUsd,
+    }));
+}
+
+export function voiceTtsProviderPatchFromRow(row: VoiceProviderRow): VoiceTtsProviderPatch {
+  const outputFormat = audioFormatOrNull(row.outputFormat);
+  return {
+    provider: row.provider,
+    ...(row.model.trim() ? { model: row.model.trim() } : {}),
+    ...(row.apiKey ? { apiKey: row.apiKey } : {}),
+    ...(row.voice.trim() ? { voice: row.voice.trim() } : {}),
+    ...(row.baseUrl.trim() ? { baseUrl: row.baseUrl.trim() } : {}),
+    ...(row.command.trim() ? { command: row.command.trim() } : {}),
+    ...(outputFormat ? { outputFormat } : {}),
+    ...(row.timeout ? { timeout: row.timeout } : {}),
+    ...(row.maxTextLength ? { maxTextLength: row.maxTextLength } : {}),
+  };
+}
+
+export function voiceSttProviderPatchFromRow(row: VoiceProviderRow): VoiceSttProviderPatch {
+  return {
+    provider: row.provider,
+    ...(row.model.trim() ? { model: row.model.trim() } : {}),
+    ...(row.apiKey ? { apiKey: row.apiKey } : {}),
+    ...(row.baseUrl.trim() ? { baseUrl: row.baseUrl.trim() } : {}),
+    ...(row.command.trim() ? { command: row.command.trim() } : {}),
+    ...(row.timeout ? { timeout: row.timeout } : {}),
+  };
+}
+
+export function voiceRealtimeProviderPatchFromRow(
+  row: VoiceProviderRow,
+): VoiceRealtimeProviderPatch {
+  return {
+    provider: row.provider,
+    ...(row.model.trim() ? { model: row.model.trim() } : {}),
+    ...(row.apiKey ? { apiKey: row.apiKey } : {}),
+    ...(row.baseUrl.trim() ? { baseUrl: row.baseUrl.trim() } : {}),
+    ...(row.voice.trim() ? { voice: row.voice.trim() } : {}),
+    ...(row.costPerMinuteUsd ? { costPerMinuteUsd: row.costPerMinuteUsd } : {}),
+  };
 }
 
 function retentionRowsFromConfig(
@@ -512,6 +597,11 @@ interface FormShape {
   voiceEgressGate: boolean;
   voiceTrustedPlugins: string[];
   voiceDefaultMode: string;
+  /** `voice.tier` — '' = unset, so the surface picks. */
+  voiceTier: string;
+  /** `voice.realtime.default` — a realtime roster label, '' = unset. */
+  voiceRealtimeDefault: string;
+  voiceRealtimeSessionBudgetUsd: number | null;
   // -- Settings-page additions (config.get/config.update passthrough keys) ----
   displayVerbosity: 'quiet' | 'default' | 'verbose' | 'debug';
   displayBusyInputMode: 'interrupt' | 'queue' | 'steer';
@@ -587,6 +677,7 @@ const VOICE_TEST_PHRASE = 'Hello — this is an Ethos voice test.';
 
 const AUDIO_FORMATS = ['opus', 'mp3', 'wav', 'pcm'] as const;
 const VOICE_MODES = ['off', 'mirror_inbound', 'all'] as const;
+const VOICE_TIERS = ['pipeline', 'realtime'] as const;
 
 /** The provider menus, shared by each kind's Default entry and its roster rows. */
 const STT_PROVIDER_OPTIONS = [
@@ -600,11 +691,16 @@ const TTS_PROVIDER_OPTIONS = [
   { label: 'Local (Kokoro / OpenAI-compatible)', value: 'local-tts' },
   { label: 'Custom command (macOS say / Piper / any CLI)', value: 'command-tts' },
 ];
+const REALTIME_PROVIDER_OPTIONS = [
+  { label: 'OpenAI Realtime', value: 'openai-realtime' },
+  { label: 'Gemini Live', value: 'gemini-live' },
+];
 
 const STT_ROSTER_SPEC: VoiceRosterKindSpec = {
   kind: 'stt',
   label: 'STT',
   configKey: 'voice.stt.providers',
+  rosterHeading: 'Additional providers',
   blurb:
     'Extra speech-to-text engines a personality can pick by name. A personality that names one is transcribed through it; one that names nothing, or a name this machine does not have, uses the default above.',
   addLabel: 'Add STT provider',
@@ -616,12 +712,15 @@ const STT_ROSTER_SPEC: VoiceRosterKindSpec = {
   modelPlaceholder: 'whisper-large-v3',
   baseUrlPlaceholder: 'http://localhost:8000/v1',
   audioOutputFields: false,
+  timeoutField: true,
+  realtimeFields: false,
 };
 
 const TTS_ROSTER_SPEC: VoiceRosterKindSpec = {
   kind: 'tts',
   label: 'TTS',
   configKey: 'voice.tts.providers',
+  rosterHeading: 'Additional providers',
   blurb:
     'Extra text-to-speech providers a personality can pick by name. A personality that names one speaks through it; one that names nothing, or a name this machine does not have, uses the default above.',
   addLabel: 'Add TTS provider',
@@ -633,6 +732,25 @@ const TTS_ROSTER_SPEC: VoiceRosterKindSpec = {
   modelPlaceholder: 'kokoro',
   baseUrlPlaceholder: 'http://localhost:8880/v1',
   audioOutputFields: true,
+  timeoutField: true,
+  realtimeFields: false,
+};
+
+const REALTIME_ROSTER_SPEC: VoiceRosterKindSpec = {
+  kind: 'realtime',
+  label: 'Realtime',
+  configKey: 'voice.realtime.providers',
+  rosterHeading: 'Realtime providers',
+  blurb:
+    'Hosted speech-to-speech engines — one live session handles listening and speaking together, instead of transcribing, thinking, then synthesizing. A personality can pick one by name; the default below is what everything else uses.',
+  addLabel: 'Add realtime provider',
+  providerOptions: REALTIME_PROVIDER_OPTIONS,
+  defaultProvider: 'openai-realtime',
+  modelPlaceholder: 'gpt-realtime',
+  baseUrlPlaceholder: 'https://api.openai.com/v1',
+  audioOutputFields: false,
+  timeoutField: false,
+  realtimeFields: true,
 };
 
 /** Empty select → null, which clears the key back to its built-in default. */
@@ -642,6 +760,10 @@ function audioFormatOrNull(value: string): (typeof AUDIO_FORMATS)[number] | null
 
 function voiceModeOrNull(value: string): (typeof VOICE_MODES)[number] | null {
   return VOICE_MODES.find((m) => m === value) ?? null;
+}
+
+function voiceTierOrNull(value: string): (typeof VOICE_TIERS)[number] | null {
+  return VOICE_TIERS.find((t) => t === value) ?? null;
 }
 
 /** Antd rule wrapper — the field only renders for a `command-*` provider, so an
@@ -883,6 +1005,9 @@ export function Settings() {
   const [channelToolsetRows, setChannelToolsetRows] = useState<ChannelToolsetRow[]>([]);
   const [voiceTtsProviderRows, setVoiceTtsProviderRows] = useState<VoiceProviderRow[]>([]);
   const [voiceSttProviderRows, setVoiceSttProviderRows] = useState<VoiceProviderRow[]>([]);
+  const [voiceRealtimeProviderRows, setVoiceRealtimeProviderRows] = useState<VoiceProviderRow[]>(
+    [],
+  );
   const [retentionRows, setRetentionRows] = useState<RetentionRow[]>([]);
   const hydratedRef = useRef(false);
 
@@ -941,6 +1066,9 @@ export function Settings() {
         voiceEgressGate: configQuery.data.voiceTrustedPlugins !== null,
         voiceTrustedPlugins: configQuery.data.voiceTrustedPlugins ?? [],
         voiceDefaultMode: configQuery.data.voiceDefaultMode ?? '',
+        voiceTier: configQuery.data.voiceTier ?? '',
+        voiceRealtimeDefault: configQuery.data.voiceRealtimeDefault ?? '',
+        voiceRealtimeSessionBudgetUsd: configQuery.data.voiceRealtimeSessionBudgetUsd,
         displayVerbosity: configQuery.data.displayVerbosity,
         displayBusyInputMode: configQuery.data.displayBusyInputMode,
         displayToolPreviewLength: configQuery.data.displayToolPreviewLength,
@@ -1002,6 +1130,9 @@ export function Settings() {
         setChannelToolsetRows(channelToolsetRowsFromConfig(configQuery.data.channelToolsets));
         setVoiceTtsProviderRows(voiceTtsProviderRowsFromConfig(configQuery.data.voiceTtsProviders));
         setVoiceSttProviderRows(voiceSttProviderRowsFromConfig(configQuery.data.voiceSttProviders));
+        setVoiceRealtimeProviderRows(
+          voiceRealtimeProviderRowsFromConfig(configQuery.data.voiceRealtimeProviders),
+        );
         setRetentionRows(
           retentionRowsFromConfig(
             configQuery.data.retention,
@@ -1133,8 +1264,8 @@ export function Settings() {
 
     // Each roster replaces itself wholesale on save, so an omitted row IS a
     // deletion — and an entry with no `provider` names nothing resolvable, the
-    // same rule the CLI's parser applies. One validator for both kinds: the two
-    // rosters must reject the same names for the same reasons.
+    // same rule the CLI's parser applies. One validator for all three kinds:
+    // the rosters must reject the same names for the same reasons.
     const validateRoster = (
       rows: VoiceProviderRow[],
       spec: VoiceRosterKindSpec,
@@ -1169,34 +1300,28 @@ export function Settings() {
     if (!ttsRosterRows) return;
     const sttRosterRows = validateRoster(voiceSttProviderRows, STT_ROSTER_SPEC);
     if (!sttRosterRows) return;
+    const realtimeRosterRows = validateRoster(voiceRealtimeProviderRows, REALTIME_ROSTER_SPEC);
+    if (!realtimeRosterRows) return;
+    // The default NAMES a row, so a name that no longer exists would write a
+    // dangling key — caught here rather than discovered on the first spoken turn.
+    const realtimeDefault = values.voiceRealtimeDefault.trim();
+    if (realtimeDefault && !realtimeRosterRows[realtimeDefault]) {
+      return fail(
+        `Default realtime provider "${realtimeDefault}" is not one of the realtime providers below.`,
+      );
+    }
 
     const voiceTtsProviders: Record<string, VoiceTtsProviderPatch> = {};
     for (const [name, row] of Object.entries(ttsRosterRows)) {
-      const outputFormat = audioFormatOrNull(row.outputFormat);
-      voiceTtsProviders[name] = {
-        provider: row.provider,
-        ...(row.model.trim() ? { model: row.model.trim() } : {}),
-        // Blank = "keep the stored key"; the browser never sees it, so a blank
-        // field cannot mean "clear it".
-        ...(row.apiKey ? { apiKey: row.apiKey } : {}),
-        ...(row.voice.trim() ? { voice: row.voice.trim() } : {}),
-        ...(row.baseUrl.trim() ? { baseUrl: row.baseUrl.trim() } : {}),
-        ...(row.command.trim() ? { command: row.command.trim() } : {}),
-        ...(outputFormat ? { outputFormat } : {}),
-        ...(row.timeout ? { timeout: row.timeout } : {}),
-        ...(row.maxTextLength ? { maxTextLength: row.maxTextLength } : {}),
-      };
+      voiceTtsProviders[name] = voiceTtsProviderPatchFromRow(row);
     }
     const voiceSttProviders: Record<string, VoiceSttProviderPatch> = {};
     for (const [name, row] of Object.entries(sttRosterRows)) {
-      voiceSttProviders[name] = {
-        provider: row.provider,
-        ...(row.model.trim() ? { model: row.model.trim() } : {}),
-        ...(row.apiKey ? { apiKey: row.apiKey } : {}),
-        ...(row.baseUrl.trim() ? { baseUrl: row.baseUrl.trim() } : {}),
-        ...(row.command.trim() ? { command: row.command.trim() } : {}),
-        ...(row.timeout ? { timeout: row.timeout } : {}),
-      };
+      voiceSttProviders[name] = voiceSttProviderPatchFromRow(row);
+    }
+    const voiceRealtimeProviders: Record<string, VoiceRealtimeProviderPatch> = {};
+    for (const [name, row] of Object.entries(realtimeRosterRows)) {
+      voiceRealtimeProviders[name] = voiceRealtimeProviderPatchFromRow(row);
     }
 
     const retention: Partial<Record<RetentionSubkey, string>> = {};
@@ -1274,6 +1399,9 @@ export function Settings() {
       // Off = drop the key entirely, which is what turns the gate off.
       voiceTrustedPlugins: values.voiceEgressGate ? values.voiceTrustedPlugins : null,
       voiceDefaultMode: voiceModeOrNull(values.voiceDefaultMode),
+      voiceTier: voiceTierOrNull(values.voiceTier),
+      voiceRealtimeDefault: realtimeDefault || null,
+      voiceRealtimeSessionBudgetUsd: values.voiceRealtimeSessionBudgetUsd ?? null,
       ...(!values.voiceEnabled
         ? configQuery.data?.voiceProvider || configQuery.data?.voiceTtsProvider
           ? { voiceProvider: '', voiceTtsProvider: '' }
@@ -1407,6 +1535,7 @@ export function Settings() {
       channelToolsets,
       voiceTtsProviders,
       voiceSttProviders,
+      voiceRealtimeProviders,
     };
     if (primary.apiKey) patch.apiKey = primary.apiKey;
     if (primary.baseUrl !== undefined) patch.baseUrl = primary.baseUrl;
@@ -2133,6 +2262,20 @@ export function Settings() {
             {({ getFieldValue }) =>
               getFieldValue('voiceEnabled') ? (
                 <>
+                  <Form.Item
+                    name="voiceTier"
+                    label="How the agent talks"
+                    extra="Pipeline transcribes you, thinks, then speaks — it can run entirely on this machine with local speech-to-text and text-to-speech, so no audio has to leave it. Realtime hands the whole conversation to one hosted session, which answers faster and can be interrupted mid-sentence, but needs an OpenAI Realtime or Gemini Live key below."
+                  >
+                    <Select
+                      allowClear
+                      placeholder="Automatic — realtime when one is configured"
+                      options={[
+                        { label: 'Pipeline — private, works offline', value: 'pipeline' },
+                        { label: 'Realtime — fastest, hosted', value: 'realtime' },
+                      ]}
+                    />
+                  </Form.Item>
                   <VoiceSectionLabel>Speech-to-text</VoiceSectionLabel>
                   <Form.Item
                     name="voiceProvider"
@@ -2358,6 +2501,41 @@ export function Settings() {
                     rows={voiceTtsProviderRows}
                     setRows={setVoiceTtsProviderRows}
                   />
+                  <VoiceSectionLabel>Realtime (speech-to-speech)</VoiceSectionLabel>
+                  <Form.Item
+                    name="voiceRealtimeDefault"
+                    label="Default provider"
+                    extra={
+                      voiceRealtimeProviderRows.length === 0
+                        ? 'Add a realtime provider below, then choose which one everything uses by default.'
+                        : 'Which of the providers below a personality gets when it names none of its own.'
+                    }
+                  >
+                    <Select
+                      allowClear
+                      disabled={voiceRealtimeProviderRows.length === 0}
+                      placeholder={
+                        voiceRealtimeProviderRows.length === 0
+                          ? 'No realtime providers yet'
+                          : 'Select a provider...'
+                      }
+                      options={voiceRealtimeProviderRows
+                        .filter((r) => r.name.trim())
+                        .map((r) => ({ label: r.name.trim(), value: r.name.trim() }))}
+                    />
+                  </Form.Item>
+                  <VoiceProviderRoster
+                    spec={REALTIME_ROSTER_SPEC}
+                    rows={voiceRealtimeProviderRows}
+                    setRows={setVoiceRealtimeProviderRows}
+                  />
+                  <Form.Item
+                    name="voiceRealtimeSessionBudgetUsd"
+                    label="Stop a call at (USD)"
+                    extra="One realtime conversation ends once it has cost this much, using the per-minute rate on the provider above. Blank = no limit."
+                  >
+                    <InputNumber min={0.01} max={10000} step={0.5} placeholder="No limit" />
+                  </Form.Item>
                 </>
               ) : null
             }
@@ -2503,17 +2681,19 @@ export function Settings() {
 // ---------------------------------------------------------------------------
 
 /**
- * A named voice roster (`voice.<tts|stt>.providers.<name>.*`) — extra providers
- * a personality can pick between by name, alongside the default entry above.
+ * A named voice roster (`voice.<tts|stt|realtime>.providers.<name>.*`) — extra
+ * providers a personality can pick between by name, alongside the default above.
  *
- * Rows carry the same fields as the default entry of that kind because a roster
- * entry IS one. Saving replaces the whole roster, so removing a row deletes the
- * entry (and its stored key); an untouched API-key field keeps the stored key,
- * because the browser is never handed it to type back.
+ * For STT and TTS the rows carry the same fields as the default entry of that
+ * kind, because a roster entry IS one; the realtime roster has no `auxiliary.*`
+ * default, so its "default" is a select naming one of these rows. Saving
+ * replaces the whole roster, so removing a row deletes the entry (and its stored
+ * key); an untouched API-key field keeps the stored key, because the browser is
+ * never handed it to type back.
  *
- * ONE component for both kinds, parameterised by {@link VoiceRosterKindSpec}.
- * Forking it per kind would let the ear and the voice drift apart in the exact
- * surface whose job is to show they are the same shape.
+ * ONE component for all three kinds, parameterised by {@link VoiceRosterKindSpec}.
+ * Forking it per kind would let the ear, the voice and the live session drift
+ * apart in the exact surface whose job is to show they are the same shape.
  */
 function VoiceProviderRoster({
   spec,
@@ -2543,13 +2723,14 @@ function VoiceProviderRoster({
         outputFormat: '',
         timeout: null,
         maxTextLength: null,
+        costPerMinuteUsd: null,
       },
     ]);
 
   return (
     <div style={{ marginBottom: 16 }}>
       <Typography.Text strong style={{ fontSize: 13 }}>
-        Additional providers
+        {spec.rosterHeading}
       </Typography.Text>
       <Typography.Paragraph type="secondary" style={{ marginTop: 4 }}>
         {spec.blurb} Each name becomes a {spec.configKey}.&lt;name&gt; key. Saving replaces the
@@ -2647,12 +2828,12 @@ function VoiceProviderRoster({
                   onChange={(e) => update(idx, { model: e.target.value })}
                 />
               </div>
-              {spec.audioOutputFields ? (
+              {spec.audioOutputFields || spec.realtimeFields ? (
                 <div style={{ flex: 1 }}>
                   <RowLabel>Default voice</RowLabel>
                   <Input
                     size="small"
-                    placeholder="af_bella"
+                    placeholder={spec.realtimeFields ? 'cedar' : 'af_bella'}
                     value={row.voice}
                     onChange={(e) => update(idx, { voice: e.target.value })}
                   />
@@ -2674,18 +2855,42 @@ function VoiceProviderRoster({
                   />
                 </div>
               ) : null}
-              <div style={{ width: 140 }}>
-                <RowLabel>Timeout (seconds)</RowLabel>
-                <InputNumber
-                  size="small"
-                  style={{ width: '100%' }}
-                  min={1}
-                  max={3600}
-                  placeholder="120"
-                  value={row.timeout}
-                  onChange={(v) => update(idx, { timeout: v })}
-                />
-              </div>
+              {spec.timeoutField ? (
+                <div style={{ width: 140 }}>
+                  <RowLabel>Timeout (seconds)</RowLabel>
+                  <InputNumber
+                    size="small"
+                    style={{ width: '100%' }}
+                    min={1}
+                    max={3600}
+                    placeholder="120"
+                    value={row.timeout}
+                    onChange={(v) => update(idx, { timeout: v })}
+                  />
+                </div>
+              ) : null}
+              {spec.realtimeFields ? (
+                <div style={{ width: 200 }}>
+                  <RowLabel>Rate (USD per minute)</RowLabel>
+                  <InputNumber
+                    size="small"
+                    style={{ width: '100%' }}
+                    min={0.001}
+                    max={100}
+                    step={0.01}
+                    placeholder="0.06"
+                    value={row.costPerMinuteUsd}
+                    onChange={(v) => update(idx, { costPerMinuteUsd: v })}
+                  />
+                  <Typography.Paragraph
+                    type="secondary"
+                    style={{ fontSize: 11, marginTop: 4, marginBottom: 0 }}
+                  >
+                    What this provider bills you per minute of audio. Ethos uses it to add up what a
+                    call has cost.
+                  </Typography.Paragraph>
+                </div>
+              ) : null}
               {spec.audioOutputFields ? (
                 <div style={{ width: 160 }}>
                   <RowLabel>Max text length</RowLabel>
