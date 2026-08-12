@@ -300,7 +300,12 @@ describe('realtimeSessionCost — what a call costs and what caps it', () => {
       sessionBudgetUsd: 1.5,
     }).realtimeSessionCost();
 
-    expect(cost).toEqual({ costPerMinuteUsd: 0.06, sessionBudgetUsd: 1.5 });
+    // `providerId` rides along so this call's latency spans can name what ran.
+    expect(cost).toEqual({
+      costPerMinuteUsd: 0.06,
+      sessionBudgetUsd: 1.5,
+      providerId: 'openai-realtime',
+    });
   });
 
   it('follows the personality to ITS entry, so the priced session is the minted one', async () => {

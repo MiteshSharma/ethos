@@ -11,11 +11,16 @@ import type { VoiceCallStatus, VoiceDegradedNotice } from './voice-call-reducer'
 // motion primitives.
 //
 // The nine interaction states of DR1 are all rendered from one component:
-// idle (the strip is absent), connecting, listening, thinking, agent speaking,
-// barge-in acknowledged, reconnecting, degraded-to-text, and mic-permission
-// denied. The last two collapse the strip into an inline notice — the
-// conversation continues in text either way, so the strip gets out of the way
-// rather than sitting there broken.
+// idle (the strip is absent), connecting, listening, thinking/consulting, agent
+// speaking, barge-in acknowledged, reconnecting, degraded-to-text, and
+// mic-permission denied. The last two collapse the strip into an inline notice
+// — the conversation continues in text either way, so the strip gets out of the
+// way rather than sitting there broken.
+//
+// `thinking` and `consulting` are one DR1 row (the accent dot steady) and two
+// state words: both mean "the agent has the floor and is not talking", and the
+// word is the only thing that says whether it is composing a reply or off
+// checking something.
 
 /** Geist Mono state word, in the connection-dot vocabulary. Lowercase mono. */
 const STATUS_LABEL: Record<VoiceCallStatus, string> = {
@@ -24,6 +29,7 @@ const STATUS_LABEL: Record<VoiceCallStatus, string> = {
   reconnecting: 'reconnecting…',
   listening: 'listening',
   thinking: 'thinking',
+  consulting: 'consulting',
   agent_speaking: 'speaking',
   interrupted: 'interrupted — go ahead',
   ended: 'call ended',
@@ -372,6 +378,13 @@ function providerSummary(opts: {
   return '';
 }
 
+/** Screen-reader wording for the accent dot's three meanings. */
+function agentActivityLabel(status: VoiceCallStatus): string {
+  if (status === 'consulting') return 'Agent is checking something';
+  if (status === 'thinking') return 'Agent is thinking';
+  return 'Agent is speaking';
+}
+
 function SpeakingIndicator({
   status,
   micLevels,
@@ -389,15 +402,22 @@ function SpeakingIndicator({
       </div>
     );
   }
-  // Thinking — the accent dot STEADY: the personality has the floor but is not
-  // yet talking. Speaking — the same dot, pulsing.
-  if (status === 'thinking' || status === 'agent_speaking' || status === 'interrupted') {
-    const speaking = status !== 'thinking';
+  // Thinking / consulting — the accent dot STEADY: the personality has the
+  // floor but is not talking. Speaking — the same dot, pulsing. A consult is
+  // the steady one even while its filler line is being said, because what the
+  // listener is waiting through is the round trip, not the sentence.
+  if (
+    status === 'thinking' ||
+    status === 'consulting' ||
+    status === 'agent_speaking' ||
+    status === 'interrupted'
+  ) {
+    const speaking = status === 'agent_speaking' || status === 'interrupted';
     return (
       <div
         className={`talk-indicator${status === 'interrupted' ? ' talk-indicator-flash' : ''}`}
         role="img"
-        aria-label={speaking ? 'Agent is speaking' : 'Agent is thinking'}
+        aria-label={agentActivityLabel(status)}
       >
         <span className={`talk-agent-dot${speaking ? ' talk-agent-pulse' : ''}`} />
       </div>

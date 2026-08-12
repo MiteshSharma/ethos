@@ -2826,6 +2826,27 @@ const VoiceSttEntriesOutput = z.object({
   roster: z.record(z.string(), VoiceSttEntrySchema),
 });
 
+/**
+ * One selectable REALTIME entry — `providerId` only, for the same reason the
+ * STT one is: this procedure constructs no provider, so it can report what an
+ * entry NAMES but not what it advertises.
+ */
+const VoiceRealtimeEntrySchema = z.object({ providerId: z.string().nullable() });
+/**
+ * The roster a personality's `voice.realtime_provider` picks from.
+ *
+ * There is no `auxiliary.*` entry under this tier the way there is under TTS
+ * and STT, so instead of a synthetic "default entry" this carries the roster
+ * label `voice.realtime.default` NAMES. A deployment with an empty roster has
+ * no realtime tier rather than an implicit one, and the editor says so instead
+ * of offering a Default that resolves to nothing.
+ */
+const VoiceRealtimeEntriesOutput = z.object({
+  roster: z.record(z.string(), VoiceRealtimeEntrySchema),
+  /** The label `voice.realtime.default` names, or null when the key is unset. */
+  defaultEntryName: z.string().nullable(),
+});
+
 const VoiceRealtimeTokenInput = z.object({
   /** Personality about to talk. Its `voice.realtime_provider` picks the roster
    *  entry and its `voice.tier` decides whether the realtime tier runs at all. */
@@ -2901,6 +2922,8 @@ const voice = {
   ttsEntries: oc.output(VoiceTtsEntriesOutput),
   /** Selectable STT entries. Read-only and construction-free. */
   sttEntries: oc.output(VoiceSttEntriesOutput),
+  /** Selectable REALTIME entries. Read-only and construction-free. */
+  realtimeEntries: oc.output(VoiceRealtimeEntriesOutput),
   /** Mint a browser-direct realtime credential, or say why not. */
   realtimeToken: oc.input(VoiceRealtimeTokenInput).output(VoiceRealtimeTokenOutput),
 };

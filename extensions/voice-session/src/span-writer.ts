@@ -63,6 +63,20 @@ export interface VoiceSpanSink {
   write(spans: VoiceTurnSpan[]): void | Promise<void>;
 }
 
+/**
+ * The one method a producer of spans needs.
+ *
+ * Narrower than {@link BufferedVoiceSpanWriter} on purpose: a surface that
+ * records spans must not be able to flush, close or reconfigure the writer it
+ * was handed — those belong to whoever built it. It also keeps the realtime
+ * control lane (`apps/web-api`) from importing a class it would only ever call
+ * one method on, so there is exactly ONE span path and no surface can grow a
+ * private second one.
+ */
+export interface VoiceSpanRecorder {
+  record(span: VoiceTurnSpan): void;
+}
+
 export interface BufferedVoiceSpanWriterOptions {
   sink: VoiceSpanSink;
   /** Flush cadence in ms. 0 disables the timer (flush only on `close()`). Default 5000. */
@@ -75,7 +89,7 @@ export interface BufferedVoiceSpanWriterOptions {
   onError?: (err: unknown) => void;
 }
 
-export class BufferedVoiceSpanWriter {
+export class BufferedVoiceSpanWriter implements VoiceSpanRecorder {
   private readonly sink: VoiceSpanSink;
   private readonly flushIntervalMs: number;
   private readonly maxBuffered: number;

@@ -12,10 +12,16 @@ indicator/controls, and the live transcript. Part of
   default `createUnwiredVoiceCallClient()` reports the manual binding step
   instead of connecting, so the tree typechecks and tests without
   `livekit-client` or a running LiveKit server.
-- **`voice-call-reducer.ts`** — the pure call state machine
-  (`idle | connecting | listening | agent_speaking | interrupted | ended`),
-  transcript accumulation, barge-in/interrupted handling, and the
+- **`voice-call-reducer.ts`** — the pure call state machine (`idle |
+  connecting | reconnecting | listening | thinking | consulting |
+  agent_speaking | interrupted | ended`), transcript accumulation,
+  barge-in/interrupted handling, the `[interrupted]` marker convention
+  (`markInterrupted`, used by the chat projection AND by the realtime tier's
+  transcript write, so history and screen agree), and the
   `voiceTranscriptToMessages` projection into the existing `MessageList`.
+  `chatMessagesWithVoice` is what Chat renders: on the pipeline tier the spoken
+  turns are already in `messages` via `sendMessage`, on the realtime tier the
+  transcript is the ONLY record the page has of the call.
 - **`useVoiceCall.ts`** — drives a `VoiceCallClient` through the reducer and owns
   the mic level meter (same AudioContext/analyser pattern as `useVoiceRecorder`).
 - **`gating.ts`** — `personalityCanTalk(toolset)`: the §3(e) toolset gate.
@@ -41,6 +47,17 @@ pipeline, and every refusal that is not the configured preference is shown as a
 dismissible notice above a live strip — never a silent downgrade, never a dead
 mic. The pipeline tier is the private/offline mode; `use private mode` in the
 strip's detail row takes it deliberately.
+
+The realtime tier holds TWO sockets: the provider's (media) and the app's
+(control). Each reconnects on the same backoff shape
+(`VOICE_RECONNECT_BACKOFF_MS`), but only the app lane repeats its last delay
+forever — the provider socket walks the schedule once and then degrades to text,
+because every redial spends an ephemeral credential and yields a provider
+session with no memory of the conversation. A ticket is reused while its own
+`expiresAt` allows it and re-minted through the server otherwise; the continuity
+across a redial is the transcript already written to the control lane, which is
+why an in-flight reply is flushed to history (marked `[interrupted]`) before the
+retry rather than after it.
 
 **Why WebSocket and not WebRTC** on the realtime tier: it reuses
 `createBrowserVoiceCapture` and `AbsolutePlayout` wholesale, where WebRTC would
@@ -86,11 +103,14 @@ Streaming pieces, all unit-tested with fakes (no sockets, no audio hardware):
 The server end is `apps/web-api/src/voice/` (`voice-lane.ts` is the
 per-connection conversation, `voice-socket.ts` the upgrade + `ws` binding).
 
-Unit tests cover the reducer (incl. barge-in), the gating predicate, and the
-untrusted-JSON `parseVoiceCallControlEvent` guard. There is no
+Unit tests cover the reducer (incl. barge-in and the chat projection), the
+gating predicate, the untrusted-JSON `parseVoiceCallControlEvent` guard, and the
+realtime tier's control channel and provider-link reconnect. There is no
 `@testing-library/react` / jsdom harness in this repo, so component rendering is
-not tested; the toggle's gating is verified through the pure `personalityCanTalk`
-function it calls.
+not tested beyond `renderToStaticMarkup` (`call-strip.test.ts`); the toggle's
+gating is verified through the pure `personalityCanTalk` function it calls, and
+Chat's wiring of `chatMessagesWithVoice` is verified through that pure function
+rather than through the page.
 
 ## Going live — the manual `livekit-client` binding (NOT run in CI)
 

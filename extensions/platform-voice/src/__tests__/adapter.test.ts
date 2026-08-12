@@ -56,6 +56,29 @@ describe('VoiceChannelAdapter', () => {
     );
   });
 
+  // The two assertions above compare against the encoder, so they hold no
+  // matter what shape the encoder produces. This one names the LITERAL string,
+  // because the lane key is a durable identifier: the day a phone leg is
+  // actually wired (no in-repo caller supplies the LiveKit bindings today —
+  // `buildVoiceStack` builds no adapter without them, which is why the B6
+  // change from `voice:<botKey>:<callerId>` to `voice:<botKey>:livekit:<callerId>`
+  // orphaned nothing and needed no migration), every call history is filed
+  // under it. Changing it silently after that point is what would strand a
+  // caller's history, so a change to it must fail a test, not a support ticket.
+  it('pins the literal lane-key shape a call history would be filed under', () => {
+    const transport = new FakeVoiceTransport('+15551234567');
+    const session = makeSession(makeClock(), scriptedRunner([]));
+    const adapter = new VoiceChannelAdapter({
+      transport,
+      session,
+      bot: { id: 'reception', match: '+1*' },
+    });
+
+    // `+` is URL-encoded — every segment is, so no caller id can smuggle a
+    // separator and alias itself onto another lane.
+    expect(adapter.laneKey).toBe('voice:reception:livekit:%2B15551234567');
+  });
+
   it('bridges a full call: inbound frames -> reply audio on the outbound sink', async () => {
     const clock = makeClock();
     const transport = new FakeVoiceTransport('+15551234567');

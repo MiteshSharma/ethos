@@ -1,7 +1,7 @@
 import { TurnStatusBar } from '@ethosagent/ui-components';
 import { useQueryClient } from '@tanstack/react-query';
 import { App as AntApp, ConfigProvider } from 'antd';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { ApprovalModal } from '../components/chat/ApprovalModal';
 import { ClarifyCard } from '../components/chat/ClarifyCard';
@@ -22,7 +22,7 @@ import { TalkModeCallBar, TalkModeToggle } from '../features/voice/TalkMode';
 import { createTalkModeClient, type RealtimeTokenAnswer } from '../features/voice/talk-mode-client';
 import { useVoiceCall, type VoiceCallClientHooks } from '../features/voice/useVoiceCall';
 import type { VoiceCallClient } from '../features/voice/voice-call-client';
-import { voiceCaption } from '../features/voice/voice-call-reducer';
+import { chatMessagesWithVoice, voiceCaption } from '../features/voice/voice-call-reducer';
 import { useActivePersonality } from '../hooks/useActivePersonality';
 import { useChat } from '../hooks/useChat';
 import { useNewSessionModal } from '../hooks/useNewSessionModal';
@@ -458,6 +458,16 @@ export function Chat() {
   const voice = useVoiceCall({ createClient: createVoiceClient });
   const inCall = voice.status !== 'idle' && voice.status !== 'ended';
 
+  // DR5's persistent transcript. On the realtime tier the provider owns the
+  // conversation and nothing ever reaches `sendMessage`, so the spoken turns
+  // land in the SAME message list only because they are projected here — the
+  // strip's captions are not a record, they scroll away with the call.
+  const { tier: voiceTier, transcript: voiceTranscript } = voice;
+  const messages = useMemo(
+    () => chatMessagesWithVoice(state.messages, { tier: voiceTier, transcript: voiceTranscript }),
+    [state.messages, voiceTier, voiceTranscript],
+  );
+
   const handleTalkToggle = useCallback(() => {
     if (!sttConfigured) {
       notification.info({
@@ -629,7 +639,7 @@ export function Chat() {
           <ClarifyCard key={pendingClarify.requestId} request={pendingClarify} />
         ) : null}
         <MessageList
-          messages={state.messages}
+          messages={messages}
           currentTurn={state.currentTurn}
           personalityId={personalityId}
           model={model}

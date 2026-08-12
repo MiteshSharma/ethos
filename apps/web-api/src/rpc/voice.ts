@@ -30,6 +30,12 @@ export const voiceRouter = {
     if (!context.voice) return { default: { providerId: null }, roster: {} };
     return context.voice.listSttEntries();
   }),
+  realtimeEntries: os.voice.realtimeEntries.handler(async ({ context }) => {
+    // No service wired = no realtime tier, which is the same answer the editor
+    // renders for a deployment that configured no roster.
+    if (!context.voice) return { roster: {}, defaultEntryName: null };
+    return context.voice.listRealtimeEntries();
+  }),
   realtimeToken: os.voice.realtimeToken.handler(async ({ input, context }) => {
     // No service wired = no realtime tier, which is a state the browser
     // renders (it starts a pipeline call) rather than an error to throw at it.

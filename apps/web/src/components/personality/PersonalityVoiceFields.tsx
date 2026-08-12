@@ -8,17 +8,25 @@ import { rpc } from '../../rpc';
 // its mark, not a config knob — plus the one technical override that belongs
 // with them: which engine hears it.
 //
-// Three controls: which TTS provider (a `voice.tts.providers.<name>` roster
-// label, or the default entry), which voice, and which STT provider (a
-// `voice.stt.providers.<name>` label, or the default). `voice.tier`,
+// Four controls: which TTS provider (a `voice.tts.providers.<name>` roster
+// label, or the default entry), which voice, which STT provider (a
+// `voice.stt.providers.<name>` label, or the default), and which REALTIME
+// provider (a `voice.realtime.providers.<name>` label, or none). `voice.tier`,
 // `voice.model` and the per-language map are deliberately absent — they
 // persist, but nothing routes on them yet, and a form field is a promise that
 // it works.
 //
-// The STT select sits LAST and carries quieter copy: a personality's voice is
-// identity, its ear is an override. It is not hidden behind a disclosure,
-// though — a control you have to go looking for is not symmetric with one you
-// do not, and the point of the pair is that they read the same way.
+// The realtime select is here BECAUSE it routes: `voice.realtime_provider`
+// picks the roster entry the ephemeral-token mint resolves and the entry whose
+// per-minute rate bills the call. A key that decides both, editable only by
+// hand-writing config.yaml, is the yaml-only key the parity rule exists to
+// forbid.
+//
+// The two override selects sit LAST and carry quieter copy: a personality's
+// voice is identity, its ear and its hosted engine are overrides. Neither is
+// hidden behind a disclosure, though — a control you have to go looking for is
+// not symmetric with one you do not, and the point of the set is that they read
+// the same way.
 
 /** Fixed phrase Preview synthesizes, so what you hear is the voice, not the text. */
 const PREVIEW_PHRASE = 'Hello — this is how I sound.';
@@ -34,6 +42,8 @@ export interface PersonalityVoice {
   ttsVoice: string;
   /** STT roster entry name; `''` = the default entry. */
   sttProvider: string;
+  /** Realtime roster entry name; `''` = whatever `voice.realtime.default` names. */
+  realtimeProvider: string;
 }
 
 export function PersonalityVoiceFields({
@@ -50,6 +60,10 @@ export function PersonalityVoiceFields({
   const sttQuery = useQuery({
     queryKey: ['voice', 'sttEntries'],
     queryFn: () => rpc.voice.sttEntries(),
+  });
+  const realtimeQuery = useQuery({
+    queryKey: ['voice', 'realtimeEntries'],
+    queryFn: () => rpc.voice.realtimeEntries(),
   });
 
   const data = ttsQuery.data;
@@ -73,6 +87,23 @@ export function PersonalityVoiceFields({
     value.sttProvider !== DEFAULT_ENTRY && !sttRosterNames.includes(value.sttProvider)
       ? value.sttProvider
       : null;
+
+  const realtimeData = realtimeQuery.data;
+  const realtimeRosterNames = Object.keys(realtimeData?.roster ?? {}).sort((a, b) =>
+    a.localeCompare(b),
+  );
+  const unknownRealtimeName =
+    value.realtimeProvider !== DEFAULT_ENTRY &&
+    !realtimeRosterNames.includes(value.realtimeProvider)
+      ? value.realtimeProvider
+      : null;
+  // `voice.realtime.default` NAMES a roster label; there is no `auxiliary.*`
+  // entry beneath this tier. So the "unset" row says which label it defers to,
+  // or admits there is none — a Default that resolves to nothing would be a
+  // control that reads as configured while doing nothing.
+  const realtimeDefaultLabel = realtimeData?.defaultEntryName
+    ? `Deployment default (${realtimeData.defaultEntryName})`
+    : 'Deployment default (none configured)';
 
   return (
     <>
@@ -152,6 +183,36 @@ export function PersonalityVoiceFields({
             })),
             ...(unknownSttName
               ? [{ label: `${unknownSttName} — not configured here`, value: unknownSttName }]
+              : []),
+          ]}
+        />
+      </Form.Item>
+      <Form.Item
+        label="Realtime provider"
+        help={
+          unknownRealtimeName
+            ? `"${unknownRealtimeName}" is not configured on this machine — calls will fall back to the deployment default until it is.`
+            : 'Which hosted speech-to-speech provider serves this personality in talk mode. Picks the entry the call is minted against and billed at. Providers are configured in Settings → Voice.'
+        }
+        validateStatus={unknownRealtimeName ? 'warning' : undefined}
+      >
+        <Select
+          loading={realtimeQuery.isLoading}
+          value={value.realtimeProvider}
+          onChange={(next: string) => onChange({ ...value, realtimeProvider: next })}
+          options={[
+            { label: realtimeDefaultLabel, value: DEFAULT_ENTRY },
+            ...realtimeRosterNames.map((name) => ({
+              label: `${name} — ${realtimeData?.roster[name]?.providerId ?? ''}`,
+              value: name,
+            })),
+            ...(unknownRealtimeName
+              ? [
+                  {
+                    label: `${unknownRealtimeName} — not configured here`,
+                    value: unknownRealtimeName,
+                  },
+                ]
               : []),
           ]}
         />

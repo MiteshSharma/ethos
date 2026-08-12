@@ -16,6 +16,13 @@ export type VoiceCallStatus =
   | 'listening'
   /** Utterance committed, reply not yet flowing — the agent is working. */
   | 'thinking'
+  /**
+   * The agent is off consulting (an `agent_consult` round trip) and saying so
+   * while it waits. DR1's "Thinking / consulting" row: the accent dot STEADY,
+   * with the spoken filler captioned — a consult can take seconds, and a
+   * pulsing dot would claim it is mid-sentence the whole time.
+   */
+  | 'consulting'
   | 'agent_speaking'
   | 'interrupted'
   | 'ended';
@@ -203,11 +210,14 @@ function applyClientEvent(state: VoiceCallState, event: VoiceCallEvent): VoiceCa
 
     case 'filler': {
       // Standalone spoken filler — its own closed line, not part of the reply.
+      // `consulting`, not `agent_speaking`: the filler is what a WAIT sounds
+      // like, and the strip says so with the steady dot while captioning the
+      // line (DR1 "Thinking / consulting").
       const transcript = [
         ...state.transcript,
         { ...line(state.transcript, 'agent', event.text), filler: true },
       ];
-      return { ...state, status: 'agent_speaking', transcript };
+      return { ...state, status: 'consulting', transcript };
     }
 
     case 'reply_audio':
@@ -329,13 +339,34 @@ export function voiceCaption(
   // for a call that is about to end, and a caption that vanished at `ended`
   // would leave the strip reading `call ended` with no reason attached.
   if (state.windDown) return state.windDown;
-  if (state.status !== 'agent_speaking' && state.status !== 'interrupted') return null;
+  // `consulting` is captioned for the same reason it exists: the spoken filler
+  // is the only thing standing between the listener and dead air.
+  if (
+    state.status !== 'agent_speaking' &&
+    state.status !== 'interrupted' &&
+    state.status !== 'consulting'
+  ) {
+    return null;
+  }
   for (let i = state.transcript.length - 1; i >= 0; i--) {
     const line = state.transcript[i];
     if (line?.role !== 'agent') continue;
     return line.text.trim() || null;
   }
   return null;
+}
+
+/**
+ * Mark an agent line that barge-in — or a dropped link — cut off mid-sentence.
+ *
+ * ONE marker convention for the whole feature. The chat projection below and
+ * the realtime tier's transcript write (`realtime-voice-call-client.ts`) both
+ * call this, so the line the server persists and the line the user reads carry
+ * the same annotation instead of two spellings of the same fact. The A0
+ * regression pin fixes the shape for the pipeline tier.
+ */
+export function markInterrupted(text: string): string {
+  return text.includes(INTERRUPTED_MARKER) ? text : `${text} ${INTERRUPTED_MARKER}`.trim();
 }
 
 /**
@@ -349,10 +380,7 @@ export function voiceTranscriptToMessages(transcript: VoiceTranscriptLine[]): Ch
     if (l.role === 'user') {
       return { id: l.id, role: 'user', content: l.text, timestamp: 0 };
     }
-    const content =
-      l.interrupted && !l.text.includes(INTERRUPTED_MARKER)
-        ? `${l.text} ${INTERRUPTED_MARKER}`.trim()
-        : l.text;
+    const content = l.interrupted ? markInterrupted(l.text) : l.text;
     return {
       id: l.id,
       role: 'assistant',
@@ -360,4 +388,30 @@ export function voiceTranscriptToMessages(transcript: VoiceTranscriptLine[]): Ch
       timestamp: 0,
     };
   });
+}
+
+/**
+ * The message list Chat renders while talk-mode is (or was) running — DR5's
+ * "persistent transcript", not just live captions.
+ *
+ * The two tiers reach the list by different routes, which is why this is a
+ * decision rather than a concatenation:
+ *
+ * - PIPELINE: every spoken turn goes through the chat hook's `sendMessage`
+ *   (`chat-voice-runner.ts`), so it is already in `messages` as an ordinary
+ *   turn. Projecting the transcript on top would show each turn twice.
+ * - REALTIME: the provider owns the conversation and the browser never runs a
+ *   chat turn, so `messages` knows nothing about the call. The transcript is
+ *   the page's only record of it — without this, a realtime conversation
+ *   appears NOWHERE in Chat and the captions vanish with the strip.
+ *
+ * Appended, not interleaved: a realtime call happens after whatever was typed
+ * before it, and the lines carry no wall clock to sort by (`timestamp: 0`).
+ */
+export function chatMessagesWithVoice(
+  messages: ChatMessage[],
+  call: Pick<VoiceCallState, 'tier' | 'transcript'>,
+): ChatMessage[] {
+  if (call.tier !== 'realtime' || call.transcript.length === 0) return messages;
+  return [...messages, ...voiceTranscriptToMessages(call.transcript)];
 }

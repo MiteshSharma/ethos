@@ -84,6 +84,12 @@ export interface SttEntryInfo {
   providerId: string | null;
 }
 
+/** One selectable REALTIME entry. Same shape and same reasoning as the STT one. */
+export interface RealtimeEntryInfo {
+  /** Registered provider id the entry names (`openai-realtime`), never the label. */
+  providerId: string | null;
+}
+
 /**
  * Why the browser is not getting a realtime session. Mirrors the
  * `voice.realtimeToken` contract in `@ethosagent/web-contracts` — kept as a
@@ -173,6 +179,12 @@ interface LiveVoiceConfig {
 export interface RealtimeSessionCost {
   costPerMinuteUsd?: number;
   sessionBudgetUsd?: number;
+  /**
+   * Registered provider id of the selected entry (`openai-realtime`), never the
+   * roster label. The control lane stamps it on this call's latency spans, so
+   * "620 ms" is attributable to a provider rather than to the tier at large.
+   */
+  providerId?: string;
 }
 
 export class VoiceService {
@@ -232,6 +244,20 @@ export class VoiceService {
   private readonly realtimeRoster: Readonly<Record<string, RealtimeProviderEntry>> | undefined;
   private readonly realtimeDefaultEntry: string | undefined;
   private readonly tier: 'pipeline' | 'realtime' | undefined;
+  /**
+   * Boot snapshot of the TYPED `voice.realtime.sessionBudgetUsd`, forwarded
+   * through wiring like `realtimeDefault` and `tier` are.
+   *
+   * It exists because the live-config path is not always there. `configGetter`
+   * is optional — a `VoiceService` built without one (a surface with no config
+   * repo, a test, an embedder) read the cap from nowhere and reported no cap,
+   * and "no cap" is indistinguishable from "uncapped by choice" at every point
+   * downstream. A cap that silently does not apply is worse than no cap, so the
+   * parsed value now reaches this class by a route that does not depend on a
+   * second, optional one. Live config still wins when it is present: an
+   * operator who just lowered the cap in Settings means the next call.
+   */
+  private readonly realtimeSessionBudgetUsd: number | undefined;
 
   /** Personality identity + advertised tools for a realtime session. */
   private readonly realtimeSurface: RealtimeSessionSurface | undefined;
@@ -261,6 +287,8 @@ export class VoiceService {
     realtimeDefault?: string;
     /** `voice.tier`. */
     tier?: 'pipeline' | 'realtime';
+    /** `voice.realtime.sessionBudgetUsd`, from typed config at boot. */
+    realtimeSessionBudgetUsd?: number;
     trustedVoicePlugins?: ReadonlySet<string>;
     personalities?: VoicePersonalityLookup;
     /** See {@link RealtimeSessionSurface}. */
@@ -280,6 +308,7 @@ export class VoiceService {
     this.realtimeRoster = opts.realtimeRoster;
     this.realtimeDefaultEntry = opts.realtimeDefault;
     this.tier = opts.tier;
+    this.realtimeSessionBudgetUsd = opts.realtimeSessionBudgetUsd;
     this.trustedVoicePlugins = opts.trustedVoicePlugins;
     this.personalities = opts.personalities;
     this.realtimeSurface = opts.realtimeSurface;
@@ -572,6 +601,30 @@ export class VoiceService {
   }
 
   /**
+   * Every REALTIME entry a personality can name, and the provider id each names.
+   *
+   * Construction-free like {@link listSttEntries}, and for a sharper reason: a
+   * realtime provider is built to mint ONE credential, so constructing the whole
+   * roster to label a form would spend a credential per entry per page load.
+   *
+   * No synthetic default entry. `voice.realtime.default` names a roster label,
+   * so the label is what comes back — a UI that invented a "Default" row here
+   * would be offering a selection that resolves to nothing on a deployment with
+   * an empty roster.
+   */
+  async listRealtimeEntries(): Promise<{
+    roster: Record<string, RealtimeEntryInfo>;
+    defaultEntryName: string | null;
+  }> {
+    const { roster, defaultEntry } = await this.realtimeDefaults();
+    const entries: Record<string, RealtimeEntryInfo> = {};
+    for (const [entryName, entry] of Object.entries(roster ?? {})) {
+      entries[entryName] = { providerId: entry.provider };
+    }
+    return { roster: entries, defaultEntryName: defaultEntry ?? null };
+  }
+
+  /**
    * The realtime roster, boot values overlaid with live config.
    *
    * Same rule as {@link ttsDefaults} for the roster half — it is edited from
@@ -591,7 +644,14 @@ export class VoiceService {
       roster: live?.voiceRealtimeProviders ?? this.realtimeRoster,
       defaultEntry: live?.voiceRealtimeDefault ?? this.realtimeDefaultEntry,
       tier: live?.voiceTier ?? this.tier,
-      sessionBudgetUsd: typeof budget === 'number' ? budget : undefined,
+      // A live NUMBER wins — an operator who just lowered the cap in Settings
+      // means the next call. A live ABSENCE does not: it falls through to the
+      // boot snapshot rather than erasing it. The two agree in the normal case,
+      // and where they disagree the disagreement is a read that failed or a
+      // deployment with no config repo, neither of which is an instruction to
+      // stop capping. Removing a cap therefore takes effect on restart, which
+      // is the direction to be wrong in when the subject is money.
+      sessionBudgetUsd: typeof budget === 'number' ? budget : this.realtimeSessionBudgetUsd,
     };
   }
 
@@ -617,6 +677,7 @@ export class VoiceService {
     return {
       ...(typeof rate === 'number' ? { costPerMinuteUsd: rate } : {}),
       ...(sessionBudgetUsd !== undefined ? { sessionBudgetUsd } : {}),
+      ...(selection.entry?.provider ? { providerId: selection.entry.provider } : {}),
     };
   }
 

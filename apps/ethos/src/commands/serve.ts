@@ -320,9 +320,14 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
         realtimeRoster?: Record<string, import('@ethosagent/types').RealtimeProviderEntry>;
         realtimeDefault?: string;
         tier?: 'pipeline' | 'realtime';
+        realtimeSessionBudgetUsd?: number;
         trustedVoicePlugins?: ReadonlySet<string>;
       }
     | undefined;
+  // The voice stack, held only for its span writer: the browser realtime tier
+  // records per-turn latency into the SAME writer the pipeline tier uses, so a
+  // deployment has one voice-span buffer and one sink rather than two.
+  let voiceStack: import('@ethosagent/wiring').VoiceStack | undefined;
 
   // Shared by the ACP server, the web API, and the cron `runJob` closure below
   // (which reads a web-origin session's bound personality before reusing its
@@ -482,6 +487,7 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
     ttsProviders = result.ttsProviders;
     realtimeProviders = result.realtimeProviders;
     voiceConfig = result.voiceConfig;
+    voiceStack = result.voiceStack;
     refreshLoopPersonalities = result.refreshPersonalities;
     skillsInjector = result.skillsInjector;
   } else if (teamFlag) {
@@ -528,6 +534,7 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
     ttsProviders = result.ttsProviders;
     realtimeProviders = result.realtimeProviders;
     voiceConfig = result.voiceConfig;
+    voiceStack = result.voiceStack;
     refreshLoopPersonalities = result.refreshPersonalities;
     skillsInjector = result.skillsInjector;
   }
@@ -1030,6 +1037,14 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
     ...(voiceConfig?.realtimeRoster ? { realtimeRoster: voiceConfig.realtimeRoster } : {}),
     ...(voiceConfig?.realtimeDefault ? { realtimeDefault: voiceConfig.realtimeDefault } : {}),
     ...(voiceConfig?.tier ? { voiceTier: voiceConfig.tier } : {}),
+    // The typed per-call cap. Live Settings config still wins; this is the
+    // route that exists whether or not the live read does.
+    ...(voiceConfig?.realtimeSessionBudgetUsd !== undefined
+      ? { realtimeSessionBudgetUsd: voiceConfig.realtimeSessionBudgetUsd }
+      : {}),
+    // Realtime turns record their latency into the voice stack's span writer —
+    // the same one the pipeline tier uses.
+    ...(voiceStack ? { voiceSpans: voiceStack.spans } : {}),
     // Local-only voice-egress gate. Armed only when the operator declared
     // `voice.trustedPlugins`; the browser talk lane then refuses a non-local
     // provider instead of shipping audio off the machine.

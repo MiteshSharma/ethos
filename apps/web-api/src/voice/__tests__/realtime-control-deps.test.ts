@@ -125,6 +125,41 @@ describe('talk-session binding', () => {
     expect(binding.sessionBudgetUsd).toBe(1.5);
   });
 
+  it('binds the resolved provider id so latency spans can name what ran', async () => {
+    const sessions = new InMemorySessionStore();
+    const binding = await build(sessions, 'lane-1', {
+      pricing: async () => ({ costPerMinuteUsd: 0.06, providerId: 'openai-realtime' }),
+    }).open({ sessionId: 'chat-9' });
+
+    expect(binding.realtimeProvider).toBe('openai-realtime');
+  });
+
+  it('records spans through the injected writer, and nowhere else', async () => {
+    const sessions = new InMemorySessionStore();
+    const spans: Array<{ turnId: string }> = [];
+    const deps = build(sessions, 'lane-1', { spans: { record: (span) => spans.push(span) } });
+    const binding = await deps.open({ sessionId: 'chat-9' });
+
+    deps.recordSpan?.({
+      turnId: 'turn-1',
+      stage: 'realtime_first_audio',
+      startTs: 0,
+      endTs: 640,
+      status: 'ok',
+      laneKey: binding.laneKey,
+    });
+
+    expect(spans.map((s) => s.turnId)).toEqual(['turn-1']);
+  });
+
+  it('has no span recorder at all when no writer is wired', async () => {
+    // Absent, not a no-op stub: a deployment with no observability store drops
+    // realtime spans, and the lane can see that it is dropping them.
+    const sessions = new InMemorySessionStore();
+    expect(build(new InMemorySessionStore()).recordSpan).toBeUndefined();
+    expect(build(sessions, 'lane-1', {}).recordSpan).toBeUndefined();
+  });
+
   it('leaves an unpriced entry unpriced rather than free', async () => {
     const sessions = new InMemorySessionStore();
     const binding = await build(sessions, 'lane-1', {

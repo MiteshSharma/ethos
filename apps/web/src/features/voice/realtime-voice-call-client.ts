@@ -17,7 +17,8 @@ import {
 import type { EndpointerEvent } from './pcm-endpointer';
 import type { VoiceCaptureIo } from './streaming-voice-call-client';
 import type { VoiceCallClient, VoiceCallEvent } from './voice-call-client';
-import type { VoiceTransport } from './voice-socket-transport';
+import { markInterrupted } from './voice-call-reducer';
+import { VOICE_RECONNECT_BACKOFF_MS, type VoiceTransport } from './voice-socket-transport';
 import type { WakeLock } from './wake-lock';
 import type { PlayoutSink } from './webaudio-playout';
 
@@ -88,6 +89,19 @@ export interface RealtimeVoiceCallDeps {
   playout: PlayoutSink;
   /** Provider socket seam. Injected so the whole client tests with a fake. */
   socketFactory: RealtimeSocketFactory;
+  /**
+   * Mint a FRESH ticket for a mid-call redial, or null when the server will not
+   * serve one. Absent → a redial can only reuse the ticket it already holds, so
+   * a drop after the credential expired ends the call.
+   *
+   * The mint is the SERVER's decision every time: a browser that reconnected on
+   * a refusal would be dialling a tier the server just declined to serve.
+   */
+  mintTicket?: () => Promise<RealtimeSessionTicket | null>;
+  /** Provider-socket reconnect schedule. Test seam; defaults to the app lane's. */
+  reconnectDelaysMs?: number[];
+  schedule?: (fn: () => void, ms: number) => unknown;
+  cancelSchedule?: (handle: unknown) => void;
   wakeLock?: WakeLock;
   chime?: boolean;
   /**
@@ -104,6 +118,15 @@ export interface RealtimeVoiceCallDeps {
 
 /** Long enough for one spoken sentence, short enough that a stuck call still ends. */
 const DEFAULT_WIND_DOWN_GRACE_MS = 6_000;
+
+/**
+ * How much of a ticket's remaining life a redial needs in hand before it will
+ * reuse it, rather than treating it as spent.
+ *
+ * A credential that expires during the handshake fails the redial AND burns one
+ * of a small number of attempts, so the margin buys the round trip.
+ */
+const TICKET_REUSE_MARGIN_MS = 5_000;
 
 /**
  * Thrown by `connect()` when the browser's audio clock cannot run at the rate
@@ -145,11 +168,15 @@ export function createRealtimeVoiceCallClient(deps: RealtimeVoiceCallDeps): Voic
     for (const listener of [...listeners]) listener(event);
   };
 
-  const ticket = deps.session;
+  /** The credential this call is dialling on. Replaced by a redial's fresh mint. */
+  let ticket = deps.session;
   let session: ReturnType<typeof createRealtimeProtocolSession> | null = null;
   let disposed = false;
   let pump: Promise<void> | null = null;
   let unsubscribe: (() => void) | null = null;
+  const schedule = deps.schedule ?? ((fn: () => void, ms: number) => setTimeout(fn, ms));
+  const cancelSchedule =
+    deps.cancelSchedule ?? ((handle: unknown) => clearTimeout(handle as never));
 
   /** Assistant text streamed since the current response began. */
   let replyText = '';
@@ -159,8 +186,37 @@ export function createRealtimeVoiceCallClient(deps: RealtimeVoiceCallDeps): Voic
   let announced = false;
   /** True while the model has the floor — gates the interrupted/complete split. */
   let speaking = false;
+  /**
+   * True from a barge-in (or a dropped link) until the provider confirms the
+   * cancelled response finished.
+   *
+   * `response.cancel` is a request, not a stop: the provider keeps streaming
+   * transcript and audio for a few more frames. None of it was heard, and the
+   * spoken prefix has ALREADY been written out marked `[interrupted]` — so
+   * letting the tail through would caption words nobody heard and persist the
+   * same turn a second time.
+   */
+  let cancelled = false;
+  /**
+   * Responses this client ASKED the provider to speak (consult filler) that have
+   * not reported done yet.
+   *
+   * A filler is not the model's reply, even though the provider streams it back
+   * through the same events: it was already captioned as `filler`, so echoing it
+   * as `reply_sentence` / `reply_complete` would duplicate the line in the
+   * transcript, persist "One moment." as an assistant turn, and drop the strip
+   * out of `consulting` a few hundred ms after it entered — which is the whole
+   * point of the state. The audio still plays; only the reply framing is
+   * suppressed. A count, not a flag, because the lane repeats the filler while
+   * a slow consult runs and two of them can overlap.
+   */
+  let fillerResponses = 0;
   /** Unsubscribe from the control channel's server frames. */
   let unsubscribeControl: (() => void) | null = null;
+  /** Reconnect bookkeeping for the PROVIDER socket (the app lane owns its own). */
+  let reconnectAttempt = 0;
+  let reconnectHandle: unknown = null;
+  let reconnecting = false;
   /** Set once a wind-down is in progress; the call ends when the line is done. */
   let windingDown = false;
   let windDownTimer: ReturnType<typeof setTimeout> | null = null;
@@ -175,6 +231,7 @@ export function createRealtimeVoiceCallClient(deps: RealtimeVoiceCallDeps): Voic
     sentenceBuffer = '';
     announced = false;
     speaking = false;
+    cancelled = false;
   };
 
   const flushSentences = (final: boolean): void => {
@@ -188,8 +245,12 @@ export function createRealtimeVoiceCallClient(deps: RealtimeVoiceCallDeps): Voic
   };
 
   /**
-   * Barge-in. The provider's VAD heard the user over the model, so playout stops
-   * immediately and the model is told to stop generating.
+   * End the model's turn early and KEEP what it managed to say.
+   *
+   * Shared by barge-in and a dropped provider socket, because both leave the
+   * same facts on the table: playout has stopped, the words already spoken are
+   * the honest record of the turn, and more frames of a turn nobody will hear
+   * may still arrive.
    *
    * `text` is what the model had SAID so far, which on this tier is the honest
    * answer available: the provider streams its transcript ahead of the audio it
@@ -197,8 +258,31 @@ export function createRealtimeVoiceCallClient(deps: RealtimeVoiceCallDeps): Voic
    * words the user did not quite hear before the cut. The pipeline tier can be
    * exact because it schedules audio per sentence and knows when each one ended;
    * this tier cannot, and inventing a truncation point would be a guess printed
-   * as a fact. The line still lands in the transcript marked `[interrupted]`,
-   * which is the behaviour the A0 regression pin fixes for the pipeline tier.
+   * as a fact.
+   *
+   * The line is WRITTEN TO SESSION HISTORY here, marked `[interrupted]` by the
+   * one marker helper the chat projection uses — not left for `response_done`,
+   * which by then has an empty `replyText` and would persist nothing. On a
+   * conversational tier barge-in is the common case, so leaving it to the
+   * completion path silently drops most of the assistant's history.
+   */
+  const abandonResponse = (): void => {
+    flushSentences(true);
+    const spoken = replyText.trim();
+    // A filler line is already captioned and deliberately never persisted; it
+    // must not turn into an interrupted assistant turn either.
+    const wasFiller = fillerResponses > 0;
+    resetResponse();
+    cancelled = true;
+    emit({ type: 'interrupted', text: spoken });
+    if (spoken && !wasFiller) {
+      control({ t: 'realtime_transcript', role: 'assistant', text: markInterrupted(spoken) });
+    }
+  };
+
+  /**
+   * Barge-in. The provider's VAD heard the user over the model, so playout stops
+   * immediately and the model is told to stop generating.
    */
   const onSpeechStarted = (): void => {
     if (!speaking) return;
@@ -206,10 +290,7 @@ export function createRealtimeVoiceCallClient(deps: RealtimeVoiceCallDeps): Voic
     void session?.interrupt().catch(() => {
       // The socket is already gone; the `closed` event is what the UI acts on.
     });
-    flushSentences(true);
-    const spoken = replyText.trim();
-    resetResponse();
-    emit({ type: 'interrupted', text: spoken });
+    abandonResponse();
   };
 
   /** Whether the wind-down has already ended the call. Makes the close once-only. */
@@ -261,6 +342,9 @@ export function createRealtimeVoiceCallClient(deps: RealtimeVoiceCallDeps): Voic
     if (disposed) return;
     switch (event.type) {
       case 'session_open':
+        // The link is good again — the next drop gets the full schedule back.
+        reconnecting = false;
+        reconnectAttempt = 0;
         emit({ type: 'link', status: 'open' });
         return;
 
@@ -269,6 +353,12 @@ export function createRealtimeVoiceCallClient(deps: RealtimeVoiceCallDeps): Voic
           // Only the settled user transcript commits a turn: partials churn and
           // the reducer treats each one as "the user finished speaking".
           if (event.isFinal && event.text.trim()) {
+            // A new user turn ends any response still open from the last one.
+            // The self-heal for a provider that never reports one done: left
+            // stuck, either flag would mute every reply for the rest of the
+            // call, which is a far worse failure than one leaked filler line.
+            cancelled = false;
+            fillerResponses = 0;
             emit({
               type: 'utterance_committed',
               text: event.text.trim(),
@@ -281,7 +371,11 @@ export function createRealtimeVoiceCallClient(deps: RealtimeVoiceCallDeps): Voic
           }
           return;
         }
+        if (cancelled) return;
         speaking = true;
+        // A line WE asked for is not the model's reply — see `fillerResponses`.
+        // `speaking` is still set, so the user can talk over a filler.
+        if (fillerResponses > 0) return;
         if (event.isFinal) {
           // The settled assistant text is authoritative — it replaces the
           // deltas rather than appending to them.
@@ -295,7 +389,12 @@ export function createRealtimeVoiceCallClient(deps: RealtimeVoiceCallDeps): Voic
         return;
 
       case 'audio': {
+        if (cancelled) return;
         speaking = true;
+        // Played before the reply framing is decided: a consult filler is heard
+        // exactly like any other line, it just is not reported as the answer.
+        deps.playout.playPcm16(pcm16FromBytes(event.pcm), event.sampleRate);
+        if (fillerResponses > 0) return;
         if (!announced) {
           announced = true;
           // Announce WHICH provider is speaking once per response, not per
@@ -307,7 +406,6 @@ export function createRealtimeVoiceCallClient(deps: RealtimeVoiceCallDeps): Voic
             provider: ticket.providerId,
           });
         }
-        deps.playout.playPcm16(pcm16FromBytes(event.pcm), event.sampleRate);
         return;
       }
 
@@ -316,6 +414,9 @@ export function createRealtimeVoiceCallClient(deps: RealtimeVoiceCallDeps): Voic
         return;
 
       case 'response_done': {
+        // One response finished, whichever kind it was. Decremented first so a
+        // filler that never reports done cannot mute the reply after it.
+        if (fillerResponses > 0) fillerResponses -= 1;
         flushSentences(true);
         const spoken = replyText.trim();
         resetResponse();
@@ -347,9 +448,143 @@ export function createRealtimeVoiceCallClient(deps: RealtimeVoiceCallDeps): Voic
         return;
 
       case 'closed':
-        emit({ type: 'disconnected' });
+        onProviderClosed();
         return;
     }
+  };
+
+  // --- provider-socket reconnect (DR1 "Reconnecting") ------------------------
+  //
+  // The headline use case is a phone browser in a car, where a blip is normal
+  // and a call that dies on one is a call nobody trusts. The protocol package
+  // deliberately does NOT reconnect (`packages/voice-realtime-protocol/src/
+  // socket.ts`) — that is the right call there and the reason the policy lives
+  // here: only the caller knows whether the CONVERSATION should continue.
+  //
+  // What a redial cannot restore is the provider's own memory of the call: the
+  // new session starts blank. The continuity is the transcript this client has
+  // been writing to the control lane all along, which is why the in-flight
+  // reply is flushed to history before the retry rather than after it.
+
+  /** Open a provider session on the current ticket and start pumping its events. */
+  const openProviderSession = async (): Promise<void> => {
+    resetResponse();
+    fillerResponses = 0;
+    const { codec, subprotocols } = codecFor(ticket);
+    const live = createRealtimeProtocolSession({
+      socketFactory: deps.socketFactory,
+      init: {
+        url: ticket.url,
+        ...(subprotocols.length > 0 ? { subprotocols } : {}),
+      },
+      codec,
+      // No handshake frame: the session's configuration was baked into the
+      // ephemeral token when the server minted it.
+    });
+    await live.connect();
+    session = live;
+    pump = (async () => {
+      for await (const event of live.events) onEvent(event);
+    })();
+  };
+
+  /**
+   * A credential for the redial.
+   *
+   * The ticket carries its own `expiresAt`, so "can this one be reused" is
+   * answerable rather than guessed: inside its lifetime the same ephemeral
+   * secret opens a new session, which is the fast path the blip needs. Past it
+   * the secret is dead — a hosted provider's browser credential is short-lived
+   * on purpose — and only the server can issue another, so with no mint seam
+   * wired the honest move is to stop rather than retry a token that cannot work.
+   */
+  const nextTicket = async (): Promise<RealtimeSessionTicket | null> => {
+    if (Date.now() + TICKET_REUSE_MARGIN_MS < ticket.expiresAt) return ticket;
+    const mint = deps.mintTicket;
+    if (!mint) return null;
+    return await mint().catch(() => null);
+  };
+
+  /** Stop retrying and degrade to text, naming the provider that went quiet. */
+  const giveUp = (message: string): void => {
+    reconnecting = false;
+    // `voice_unavailable` is the reducer's existing degrade code: the strip
+    // collapses into one dismissible row and chat keeps working — the same
+    // ending a failed STT or TTS gets, because it is the same ending.
+    emit({
+      type: 'error',
+      error: message,
+      code: 'voice_unavailable',
+      provider: ticket.providerId,
+    });
+    void teardown().finally(() => emit({ type: 'disconnected' }));
+  };
+
+  /** Queue the next attempt. False when the schedule is spent — then we stop. */
+  const scheduleReconnect = (): boolean => {
+    if (disposed || windingDown) return false;
+    const delays = deps.reconnectDelaysMs ?? VOICE_RECONNECT_BACKOFF_MS;
+    const delay = delays[reconnectAttempt];
+    // The app lane repeats its last delay forever; this one walks the schedule
+    // ONCE. Each attempt spends an ephemeral credential and yields a provider
+    // session with no memory of the conversation, so retrying indefinitely
+    // holds a dead call on screen and keeps minting for it.
+    if (delay === undefined) return false;
+    reconnectAttempt += 1;
+    if (!reconnecting) {
+      reconnecting = true;
+      emit({ type: 'link', status: 'reconnecting' });
+    }
+    reconnectHandle = schedule(() => {
+      reconnectHandle = null;
+      void redial();
+    }, delay);
+    return true;
+  };
+
+  const redial = async (): Promise<void> => {
+    if (disposed) return;
+    const next = await nextTicket();
+    if (disposed) return;
+    if (!next) {
+      giveUp('The voice link dropped and could not be re-established. Continuing in text.');
+      return;
+    }
+    if (next.inputSampleRate !== deps.capture.sampleRate) {
+      // The mic graph was built for the old rate and cannot be rebuilt under a
+      // live call — refusing beats resampling here for the same reason it does
+      // at connect.
+      giveUp('The realtime voice service came back at a rate this browser cannot capture.');
+      return;
+    }
+    ticket = next;
+    try {
+      await openProviderSession();
+    } catch {
+      if (!scheduleReconnect()) {
+        giveUp('The voice link dropped and could not be re-established. Continuing in text.');
+      }
+    }
+  };
+
+  /**
+   * The provider socket went away without us closing it.
+   *
+   * A9's rule for the pipeline tier applies unchanged: the in-flight utterance
+   * is DISCARDED and the call returns to a fresh listen. Mic frames captured
+   * while the link is down go nowhere (`session` is null), and no partial
+   * utterance is replayed into a session that never heard its beginning.
+   */
+  const onProviderClosed = (): void => {
+    session = null;
+    deps.playout.stop();
+    if (speaking) abandonResponse();
+    if (windingDown) {
+      // The sign-off's socket closing IS the end of a call that was ending.
+      endAfterWindDown();
+      return;
+    }
+    if (!scheduleReconnect()) emit({ type: 'disconnected' });
   };
 
   /**
@@ -372,7 +607,13 @@ export function createRealtimeVoiceCallClient(deps: RealtimeVoiceCallDeps): Voic
       case 'realtime_speak': {
         emit({ type: 'filler', text: frame.text });
         const say = session?.say?.bind(session);
-        void say?.(frame.text).catch(() => {});
+        if (!say) return;
+        // Counted BEFORE the write: the provider's echo of this line arrives on
+        // the reply events and must not be mistaken for the model's answer.
+        fillerResponses += 1;
+        void say(frame.text).catch(() => {
+          if (fillerResponses > 0) fillerResponses -= 1;
+        });
         return;
       }
       case 'realtime_wind_down':
@@ -400,6 +641,10 @@ export function createRealtimeVoiceCallClient(deps: RealtimeVoiceCallDeps): Voic
       clearTimeout(windDownTimer);
       windDownTimer = null;
     }
+    if (reconnectHandle !== null) {
+      cancelSchedule(reconnectHandle);
+      reconnectHandle = null;
+    }
     unsubscribe?.();
     unsubscribe = null;
     // Tell the control lane the call is over BEFORE the socket goes: it aborts
@@ -419,18 +664,9 @@ export function createRealtimeVoiceCallClient(deps: RealtimeVoiceCallDeps): Voic
   return {
     async connect(): Promise<void> {
       disposed = false;
+      reconnectAttempt = 0;
+      reconnecting = false;
       resetResponse();
-      const { codec, subprotocols } = codecFor(ticket);
-      const live = createRealtimeProtocolSession({
-        socketFactory: deps.socketFactory,
-        init: {
-          url: ticket.url,
-          ...(subprotocols.length > 0 ? { subprotocols } : {}),
-        },
-        codec,
-        // No handshake frame: the session's configuration was baked into the
-        // ephemeral token when the server minted it.
-      });
       emit({ type: 'link', status: 'connecting' });
       if (deps.control) {
         unsubscribeControl = deps.control.on(onControlFrame);
@@ -447,11 +683,7 @@ export function createRealtimeVoiceCallClient(deps: RealtimeVoiceCallDeps): Voic
           });
         });
       }
-      await live.connect();
-      session = live;
-      pump = (async () => {
-        for await (const event of live.events) onEvent(event);
-      })();
+      await openProviderSession();
 
       await deps.capture.start();
       if (deps.capture.sampleRate !== ticket.inputSampleRate) {
@@ -462,12 +694,14 @@ export function createRealtimeVoiceCallClient(deps: RealtimeVoiceCallDeps): Voic
         throw new RealtimeSampleRateError(ticket.inputSampleRate, deps.capture.sampleRate);
       }
       // Declared AFTER the provider socket is up, because `canSay` is a
-      // property of the codec that was chosen for it.
+      // property of the codec that was chosen for it. Sent once per CALL, not
+      // once per socket: a redial does not re-open the control lane's session,
+      // and a second `realtime_start` would be ignored by it anyway.
       const chatSessionId = deps.chatSessionId?.();
       const personalityId = deps.personalityId;
       control({
         t: 'realtime_start',
-        canSay: typeof live.say === 'function',
+        canSay: typeof session?.say === 'function',
         ...(chatSessionId ? { sessionId: chatSessionId } : {}),
         ...(personalityId ? { personalityId } : {}),
       });

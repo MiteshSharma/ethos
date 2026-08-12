@@ -30,6 +30,7 @@ export {
 export {
   BufferedVoiceSpanWriter,
   type BufferedVoiceSpanWriterOptions,
+  type VoiceSpanRecorder,
   type VoiceSpanSink,
   type VoiceSpanStage,
   type VoiceTurnSpan,

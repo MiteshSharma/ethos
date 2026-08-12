@@ -1050,6 +1050,16 @@ export interface CreateAgentLoopResult {
     realtimeDefault?: string;
     /** `voice.tier` — the deployment's default voice engine. */
     tier?: 'pipeline' | 'realtime';
+    /**
+     * `voice.realtime.sessionBudgetUsd` — USD cap on ONE realtime call.
+     *
+     * Forwarded for the same reason `tier` is. Without it the only route from
+     * the parsed config to the surface that enforces the cap was web-api's
+     * OPTIONAL live-config read, so a surface built without that read was
+     * silently uncapped — and a cap that silently does not apply is worse than
+     * no cap, because the deployment believes it has one.
+     */
+    realtimeSessionBudgetUsd?: number;
     secretsResolver: import('@ethosagent/types').SecretsResolver;
     /**
      * Local-only voice-egress allowlist from `voice.trustedPlugins`. Present

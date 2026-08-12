@@ -36,6 +36,13 @@
 // deployment holds those sockets in a page — so a live realtime run is the
 // provider's leg, honestly labelled, not the full user experience.
 //
+// A DEPLOYED realtime call writes the same `realtime_first_audio` span this
+// harness builds by hand: the browser reports its measured mouth-to-ear on the
+// control socket (`realtime_turn_latency`) and `RealtimeControlLane` records it
+// into the deployment's voice span writer, stamped with the provider that
+// served the call. The budget below is therefore checkable against production
+// telemetry with these same two functions, not only against this script.
+//
 // scripts/ is tooling (like apps/ethos), so console.* is allowed here.
 
 import { readFileSync } from 'node:fs';
@@ -430,6 +437,15 @@ async function runMockRealtime(assertBudget: boolean): Promise<boolean> {
 
   const report = summarizeLatency(turnLatenciesFromSpans(spans, endpointByTurn), 'realtime');
   printReport('Realtime tier latency budget (mock provider)', report);
+  // Said plainly, because a green table is persuasive and this one is not
+  // evidence about any provider: the mock sleeps for exactly as long as the
+  // flags say, so passing proves the span→budget path works, nothing more.
+  console.log(
+    '\n  Mock timings come from --realtime-commit-ms / --realtime-audio-ms, so this\n' +
+      '  run exercises the measurement path, not a provider. The claim about a real\n' +
+      "  provider comes from `pnpm bench:voice:live:realtime` or from a deployment's\n" +
+      '  own realtime_first_audio spans.',
+  );
   if (!emitCommitMarker) {
     console.log(
       '\n  No commit marker was emitted, so there is no endpoint row: the\n' +

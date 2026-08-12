@@ -1075,6 +1075,13 @@ export async function buildAgentLoop(
         ? { realtimeDefault: config.voice.realtime.default }
         : {}),
       ...(config.voice?.tier ? { tier: config.voice.tier } : {}),
+      // The cap on ONE realtime call. Forwarded here rather than left to
+      // web-api's live-config read alone — that read is optional, and a
+      // deployment whose cap depends on an optional code path does not have a
+      // cap, it has a coincidence.
+      ...(config.voice?.realtime?.sessionBudgetUsd !== undefined
+        ? { realtimeSessionBudgetUsd: config.voice.realtime.sessionBudgetUsd }
+        : {}),
       secretsResolver:
         config.secretsResolver ?? (NOOP_SECRETS as import('@ethosagent/types').SecretsResolver),
       // Armed only when `voice.trustedPlugins` is declared. Computed once here

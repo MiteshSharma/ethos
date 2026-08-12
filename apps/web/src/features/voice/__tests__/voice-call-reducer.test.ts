@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { TIER_DEGRADED_CODE as TRANSPORT_TIER_DEGRADED_CODE } from '../talk-mode-client';
 import { parseVoiceCallControlEvent, type VoiceCallEvent } from '../voice-call-client';
 import {
+  chatMessagesWithVoice,
   initialVoiceCallState,
   MIC_DENIED_CODE,
   TIER_DEGRADED_CODE,
@@ -135,6 +136,25 @@ describe('voiceCallReducer — transcript', () => {
     ]);
   });
 
+  it('a spoken filler is a CONSULT, not speech — the steady-dot state', () => {
+    // DR1's "Thinking / consulting" row. The round trip can take seconds, and
+    // the pulsing dot would claim the agent is mid-sentence for all of it.
+    const consulting = driveThroughClient([
+      { type: 'utterance_committed', text: 'what did we decide?' },
+      { type: 'filler', text: 'Let me check.' },
+    ]);
+    expect(consulting.status).toBe('consulting');
+    // Captioned throughout — that is what makes the wait visible, not dead air.
+    expect(voiceCaption(consulting)).toBe('Let me check.');
+
+    // The answer it was waiting for is ordinary speech again.
+    const answered = voiceCallReducer(consulting, {
+      type: 'client-event',
+      event: { type: 'reply_sentence', text: 'Friday.' },
+    });
+    expect(answered.status).toBe('agent_speaking');
+  });
+
   it('reply_audio marks the agent speaking without touching the transcript', () => {
     const before = driveThroughClient([{ type: 'utterance_committed', text: 'hi' }]);
     const after = voiceCallReducer(before, {
@@ -226,6 +246,68 @@ describe('voiceTranscriptToMessages', () => {
       kind: 'text',
       content: 'partial [interrupted]',
     });
+  });
+});
+
+describe('chatMessagesWithVoice — DR5 persistent transcript', () => {
+  const typed = [{ id: 'm1', role: 'user' as const, content: 'typed earlier', timestamp: 1 }];
+
+  function callOn(tier: 'pipeline' | 'realtime' | null): VoiceCallState {
+    let state = voiceCallReducer(initialVoiceCallState, { type: 'start' });
+    if (tier) state = voiceCallReducer(state, { type: 'tier', tier });
+    state = voiceCallReducer(state, { type: 'connected' });
+    for (const event of [
+      { type: 'utterance_committed', text: 'what did we decide?' },
+      { type: 'reply_complete', text: 'Friday.' },
+    ] satisfies VoiceCallEvent[]) {
+      state = voiceCallReducer(state, { type: 'client-event', event });
+    }
+    return state;
+  }
+
+  it('shows a realtime call in the chat list — it reaches it no other way', () => {
+    // The realtime tier never calls `sendMessage`, so without this the whole
+    // conversation exists only as captions that scroll away with the strip.
+    const messages = chatMessagesWithVoice(typed, callOn('realtime'));
+    expect(messages).toHaveLength(3);
+    expect(messages[1]).toEqual({
+      id: 'voice-0',
+      role: 'user',
+      content: 'what did we decide?',
+      timestamp: 0,
+    });
+    expect(messages[2]?.role === 'assistant' && messages[2].blocks).toEqual([
+      { kind: 'text', content: 'Friday.' },
+    ]);
+  });
+
+  it('leaves the pipeline tier alone — its turns are already in the list', () => {
+    // `chat-voice-runner` routes every pipeline turn through `sendMessage`;
+    // projecting on top of that would render each spoken turn twice.
+    expect(chatMessagesWithVoice(typed, callOn('pipeline'))).toBe(typed);
+    expect(chatMessagesWithVoice(typed, callOn(null))).toBe(typed);
+  });
+
+  it('survives the call ending — the transcript is what stays behind', () => {
+    const ended = voiceCallReducer(callOn('realtime'), { type: 'hang-up' });
+    expect(chatMessagesWithVoice(typed, ended)).toHaveLength(3);
+  });
+
+  it('carries the [interrupted] marker into chat, like the pipeline tier', () => {
+    let state = voiceCallReducer(initialVoiceCallState, { type: 'start' });
+    state = voiceCallReducer(state, { type: 'tier', tier: 'realtime' });
+    state = voiceCallReducer(state, {
+      type: 'client-event',
+      event: { type: 'reply_sentence', text: 'Once upon a time' },
+    });
+    state = voiceCallReducer(state, {
+      type: 'client-event',
+      event: { type: 'interrupted', text: 'Once upon a time' },
+    });
+    const [msg] = chatMessagesWithVoice([], state);
+    expect(msg?.role === 'assistant' && msg.blocks).toEqual([
+      { kind: 'text', content: 'Once upon a time [interrupted]' },
+    ]);
   });
 });
 

@@ -43,7 +43,12 @@ import type {
   SttProviderRegistry,
   TtsProviderRegistry,
 } from '@ethosagent/types';
-import type { AgentTurnRunner, VoiceSessionConfig, VoiceSpanSink } from '@ethosagent/voice-session';
+import type {
+  AgentTurnRunner,
+  VoiceSessionConfig,
+  VoiceSpanRecorder,
+  VoiceSpanSink,
+} from '@ethosagent/voice-session';
 import { BufferedVoiceSpanWriter, EnergyVad, VoiceSession } from '@ethosagent/voice-session';
 import type { WiringConfig } from './index';
 import type { EthosObservability } from './observability/ethos-observability';
@@ -121,6 +126,17 @@ export interface VoiceStack {
   readonly sipTrunk?: SipTrunkClient;
   /** Caller-ID for outbound calls, from `voice.trunk.fromNumber`. */
   readonly fromNumber?: string;
+  /**
+   * The deployment's ONE voice span writer, `record`-only.
+   *
+   * Exposed so the browser realtime tier — whose media socket never touches
+   * this process, and which therefore builds no `VoiceSession` here — records
+   * its per-turn latency into the SAME buffer and the SAME sink as the pipeline
+   * tier. The alternative was a second writer in web-api, which would mean two
+   * buffers, two flush timers and two chances for one of them to grow a
+   * synchronous write on an audio path.
+   */
+  readonly spans: VoiceSpanRecorder;
   /** Flush buffered spans and stop the flush timer. */
   close(): Promise<void>;
 }
@@ -220,6 +236,7 @@ export async function buildVoiceStack(deps: BuildVoiceStackDeps): Promise<VoiceS
       : {}),
     ...(voice.trunk && deps.trunk ? { sipTrunk: deps.trunk } : {}),
     ...(voice.trunk?.fromNumber ? { fromNumber: voice.trunk.fromNumber } : {}),
+    spans: spanWriter,
     close: () => spanWriter.close(),
   };
 
@@ -328,6 +345,10 @@ export function createObservabilitySpanSink(obs: EthosObservability): VoiceSpanS
             turnId,
             ...(first.sttProvider ? { sttProvider: first.sttProvider } : {}),
             ...(first.ttsProvider ? { ttsProvider: first.ttsProvider } : {}),
+            // The hosted tier's own stamp. Dropping it here would have left the
+            // realtime turn's trace saying only that SOME provider took 620 ms,
+            // which is the half of the latency criterion that names a provider.
+            ...(first.realtimeProvider ? { realtimeProvider: first.realtimeProvider } : {}),
           },
         });
         let worst: 'ok' | 'error' | 'aborted' = 'ok';
@@ -341,6 +362,7 @@ export function createObservabilitySpanSink(obs: EthosObservability): VoiceSpanS
               durationMs: span.endTs - span.startTs,
               ...(span.sttProvider ? { sttProvider: span.sttProvider } : {}),
               ...(span.ttsProvider ? { ttsProvider: span.ttsProvider } : {}),
+              ...(span.realtimeProvider ? { realtimeProvider: span.realtimeProvider } : {}),
               ...(span.error ? { error: span.error } : {}),
             },
           });

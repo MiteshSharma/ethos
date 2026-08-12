@@ -57,6 +57,7 @@ export async function startServer(port: number): Promise<number> {
     ttsProviders,
     realtimeProviders,
     voiceConfig,
+    voiceStack,
     refreshPersonalities,
     skillsInjector,
     onMemoryCaptured,
@@ -172,6 +173,12 @@ export async function startServer(port: number): Promise<number> {
     ...(voiceConfig.realtimeRoster ? { realtimeRoster: voiceConfig.realtimeRoster } : {}),
     ...(voiceConfig.realtimeDefault ? { realtimeDefault: voiceConfig.realtimeDefault } : {}),
     ...(voiceConfig.tier ? { voiceTier: voiceConfig.tier } : {}),
+    // The typed per-call cap, and the span writer realtime turns record into —
+    // both the same objects the `ethos serve` path passes.
+    ...(voiceConfig.realtimeSessionBudgetUsd !== undefined
+      ? { realtimeSessionBudgetUsd: voiceConfig.realtimeSessionBudgetUsd }
+      : {}),
+    ...(voiceStack ? { voiceSpans: voiceStack.spans } : {}),
     // Local-only voice-egress gate (`voice.trustedPlugins`); undefined = off.
     ...(voiceConfig.trustedVoicePlugins
       ? { trustedVoicePlugins: voiceConfig.trustedVoicePlugins }

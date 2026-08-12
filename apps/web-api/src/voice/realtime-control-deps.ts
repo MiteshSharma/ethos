@@ -1,6 +1,7 @@
 import { voiceLaneKey } from '@ethosagent/core';
 import { createRealtimeToolHost } from '@ethosagent/tools-voice';
 import type { HookRegistry, SessionStore, ToolRegistry } from '@ethosagent/types';
+import type { VoiceSpanRecorder } from '@ethosagent/voice-session';
 import type { RealtimeControlLaneDeps, RealtimeSessionBinding } from './realtime-control-lane';
 
 // Binds one browser talk session to its own lane — the "own lane per talk
@@ -32,6 +33,12 @@ export interface RealtimeSessionPricing {
   costPerMinuteUsd?: number;
   /** `voice.realtime.sessionBudgetUsd`. */
   sessionBudgetUsd?: number;
+  /**
+   * Registered provider id of the entry that priced this call — the same
+   * selection the mint makes, so it names what actually ran. Stamped on this
+   * call's latency spans.
+   */
+  providerId?: string;
 }
 
 /**
@@ -65,6 +72,13 @@ export interface RealtimeControlDepsOptions {
   pricing?(personalityId?: string): Promise<RealtimeSessionPricing>;
   /** Where accrued audio cost goes, and where the cap is read from. */
   budget?: RealtimeBudgetAuthority;
+  /**
+   * The deployment's voice span writer — the SAME one the pipeline tier records
+   * into, so both tiers' latency lands in one store under one schema. Omit and
+   * realtime turns write no spans, which is what a deployment with no
+   * observability store already had.
+   */
+  spans?: VoiceSpanRecorder;
   /** Defaults stamped on a freshly created talk session row. */
   defaults: { model: string; provider: string; workingDir?: string };
   /**
@@ -144,6 +158,7 @@ export function createRealtimeControlDeps(
         ...(pricing.costPerMinuteUsd !== undefined
           ? { costPerMinuteUsd: pricing.costPerMinuteUsd }
           : {}),
+        ...(pricing.providerId ? { realtimeProvider: pricing.providerId } : {}),
         ...(caps.length > 0 ? { sessionBudgetUsd: Math.min(...caps) } : {}),
         host: createRealtimeToolHost({
           registry: opts.toolRegistry,
@@ -183,5 +198,9 @@ export function createRealtimeControlDeps(
     // the lane falls back to its own audio total rather than being told the
     // session has spent nothing.
     ...(budget ? { sessionSpendUsd: (binding) => budget.getSessionCost(binding.laneKey) } : {}),
+
+    // `record` only — see `RealtimeControlLaneDeps.recordSpan` for why the lane
+    // is not handed the writer itself.
+    ...(opts.spans ? { recordSpan: (span) => opts.spans?.record(span) } : {}),
   };
 }

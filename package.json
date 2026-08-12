@@ -29,7 +29,9 @@
     "docs:check": "pnpm --filter docs run check",
     "test:catalog-smoke": "bash scripts/smoke-test-catalog.sh",
     "bench:voice": "tsx scripts/voice-latency-bench.ts --assert-budget",
-    "bench:voice:live": "tsx scripts/voice-latency-bench.ts --live"
+    "bench:voice:realtime": "tsx scripts/voice-latency-bench.ts --tier=realtime --assert-budget",
+    "bench:voice:live": "tsx scripts/voice-latency-bench.ts --live",
+    "bench:voice:live:realtime": "tsx scripts/voice-latency-bench.ts --live --tier=realtime"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.5.6",

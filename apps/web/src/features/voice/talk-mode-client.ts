@@ -197,6 +197,18 @@ export function createTalkModeClient(deps: TalkModeClientDeps): VoiceCallClient 
         url: deps.socketUrl ?? voiceSocketUrl(window.location),
       }),
       wakeLock: createWakeLock(),
+      // A fresh credential when the provider socket drops and the one in hand
+      // has expired. It is the SAME mint the call opened on, so a server that
+      // has since stopped serving the realtime tier refuses the redial too and
+      // the call degrades instead of dialling a tier nobody offered.
+      ...(deps.mintRealtimeToken
+        ? {
+            mintTicket: async (): Promise<RealtimeSessionTicket | null> => {
+              const answer = await deps.mintRealtimeToken?.();
+              return answer?.ok ? answer : null;
+            },
+          }
+        : {}),
       ...(deps.sessionId ? { chatSessionId: deps.sessionId } : {}),
       ...(deps.personalityId ? { personalityId: deps.personalityId } : {}),
       ...(deps.chime !== undefined ? { chime: deps.chime } : {}),

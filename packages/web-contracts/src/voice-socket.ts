@@ -131,6 +131,41 @@ const RealtimeTranscriptSchema = z.object({
   text: z.string().min(1),
 });
 
+/**
+ * One completed realtime turn's mouth-to-ear latency, as measured in the page.
+ *
+ * THE PAGE MEASURES IT BECAUSE THE PAGE IS THE ONLY PLACE BOTH MOMENTS EXIST.
+ * On this tier the media socket runs browser → provider; the server never sees
+ * a frame of audio, so it cannot time one. The two moments that bracket the
+ * number the ≤800 ms budget is about — the user stopping talking, and the first
+ * audio frame of the reply — are both observed there and nowhere else. A server
+ * that timed its own control frames instead would be timing a settled
+ * transcript relayed over a second socket, and reporting it as mouth-to-ear
+ * would be a number that omits the thing it claims to measure.
+ *
+ * `firstAudioMs` is therefore the WHOLE interval, endpointing included: the
+ * provider owns the VAD and does not say when it decided, so its silence
+ * window is inside this figure. That makes the reported value an UPPER bound on
+ * mouth-to-ear, which is the right direction — a budget that only fails
+ * pessimistically cannot flatter the tier. Splitting the provider's own leg out
+ * needs a commit marker only the bench harness can see, so the split stays in
+ * `scripts/voice-latency-bench.ts` rather than being guessed here.
+ *
+ * NOT measured, on either side: the browser's own capture and playout legs —
+ * mic → first PCM frame, and provider audio → speaker. They are real user
+ * latency and they are not in this number.
+ *
+ * Telemetry only. Nothing routes, bills or halts on it, which is why an absent
+ * frame costs a turn its span and nothing else.
+ */
+const RealtimeTurnLatencySchema = z.object({
+  t: z.literal('realtime_turn_latency'),
+  /** Groups this turn's spans. Opaque; the server never parses it. */
+  turnId: z.string().min(1),
+  /** Milliseconds from the user's last speech frame to the reply's first audio frame. */
+  firstAudioMs: z.number().nonnegative().finite(),
+});
+
 const RealtimeEndSchema = z.object({
   t: z.literal('realtime_end'),
 });
@@ -145,6 +180,7 @@ const VoiceClientFrameSchema = z.discriminatedUnion('t', [
   RealtimeStartSchema,
   RealtimeToolCallSchema,
   RealtimeTranscriptSchema,
+  RealtimeTurnLatencySchema,
   RealtimeEndSchema,
 ]);
 

@@ -22,12 +22,18 @@ class FakeProviderSocket {
   readonly sent: unknown[] = [];
   init: RealtimeSocketInit | undefined;
   clientClosed = false;
+  /** Every `init` this factory was handed, in order — one per dial. */
+  readonly dials: RealtimeSocketInit[] = [];
+  /** True → the next socket closes before it opens, as a still-dead network does. */
+  refuse = false;
   private handlers: RealtimeSocketHandlers | undefined;
 
   readonly factory: RealtimeSocketFactory = (init, handlers): RealtimeSocket => {
     this.init = init;
+    this.dials.push(init);
     this.handlers = handlers;
-    queueMicrotask(() => handlers.onOpen());
+    const refused = this.refuse;
+    queueMicrotask(() => (refused ? handlers.onClose('still down') : handlers.onOpen()));
     return {
       send: (data: string) => {
         this.sent.push(JSON.parse(data));
@@ -47,6 +53,36 @@ class FakeProviderSocket {
   }
 }
 
+/** Timer seam for the reconnect backoff: nothing fires until the test says so. */
+class FakeSchedule {
+  readonly delays: number[] = [];
+  private next = 1;
+  private readonly tasks = new Map<number, () => void>();
+
+  readonly schedule = (fn: () => void, ms: number): unknown => {
+    this.delays.push(ms);
+    const handle = this.next;
+    this.next += 1;
+    this.tasks.set(handle, fn);
+    return handle;
+  };
+
+  readonly cancel = (handle: unknown): void => {
+    this.tasks.delete(handle as number);
+  };
+
+  /** Fire everything queued, in the order it was queued. */
+  run(): void {
+    const due = [...this.tasks.values()];
+    this.tasks.clear();
+    for (const fn of due) fn();
+  }
+
+  get pending(): number {
+    return this.tasks.size;
+  }
+}
+
 const TICKET: RealtimeSessionTicket = {
   providerId: 'openai-realtime',
   model: 'gpt-realtime',
@@ -57,12 +93,19 @@ const TICKET: RealtimeSessionTicket = {
   outputSampleRate: 24_000,
 };
 
-function setup(ticket: RealtimeSessionTicket = TICKET) {
+function setup(
+  ticket: RealtimeSessionTicket = TICKET,
+  opts: {
+    reconnectDelaysMs?: number[];
+    mintTicket?: () => Promise<RealtimeSessionTicket | null>;
+  } = {},
+) {
   const socket = new FakeProviderSocket();
   // `FakeVoiceCapture.sampleRate` is 16 kHz, matching the ticket's input rate:
   // the client refuses to run when they disagree rather than resampling.
   const capture = new FakeVoiceCapture();
   const playout = new FakePlayout();
+  const clock = new FakeSchedule();
   const events: VoiceCallEvent[] = [];
   const client = createRealtimeVoiceCallClient({
     session: ticket,
@@ -70,9 +113,13 @@ function setup(ticket: RealtimeSessionTicket = TICKET) {
     playout,
     socketFactory: socket.factory,
     chime: false,
+    schedule: clock.schedule,
+    cancelSchedule: clock.cancel,
+    ...(opts.reconnectDelaysMs ? { reconnectDelaysMs: opts.reconnectDelaysMs } : {}),
+    ...(opts.mintTicket ? { mintTicket: opts.mintTicket } : {}),
   });
   client.on((event) => events.push(event));
-  return { socket, capture, playout, events, client };
+  return { socket, capture, playout, clock, events, client };
 }
 
 /** One macrotask boundary drains whatever the socket callbacks queued. */
@@ -275,16 +322,6 @@ describe('realtime voice call client — failure and teardown', () => {
     await client.disconnect();
   });
 
-  it('reports a dropped socket as disconnected', async () => {
-    const { socket, events, client } = setup();
-    await client.connect();
-    socket.deliver(OPEN);
-    socket.drop('upstream reset the connection');
-    await settle();
-    expect(events.at(-1)).toEqual({ type: 'disconnected' });
-    await client.disconnect();
-  });
-
   it('releases the mic, the socket and the playout on disconnect', async () => {
     const { socket, capture, playout, client } = setup();
     await client.connect();
@@ -332,5 +369,124 @@ describe('realtime voice call client — failure and teardown', () => {
         writable: true,
       });
     }
+  });
+});
+
+describe('realtime voice call client — provider link drop (DR1 "Reconnecting")', () => {
+  it('reconnects on the app lane’s backoff instead of ending the call', async () => {
+    const { socket, events, clock, client } = setup();
+    await client.connect();
+    socket.deliver(OPEN);
+    await settle();
+
+    socket.drop('network went away');
+    await settle();
+
+    // The strip goes amber, not dead — the composer stays usable meanwhile.
+    expect(events.at(-1)).toEqual({ type: 'link', status: 'reconnecting' });
+    expect(events.some((e) => e.type === 'disconnected')).toBe(false);
+    // The same first delay the app's voice socket uses: one policy, not two.
+    expect(clock.delays).toEqual([250]);
+
+    clock.run();
+    await settle();
+    socket.deliver(OPEN);
+    await settle();
+
+    // A second dial actually happened, and the link is live again.
+    expect(socket.dials).toHaveLength(2);
+    expect(events.at(-1)).toEqual({ type: 'link', status: 'open' });
+    await client.disconnect();
+  });
+
+  it('discards the in-flight turn and keeps the honestly-spoken prefix', async () => {
+    // A9's rule, unchanged: the in-flight utterance is discarded and the call
+    // comes back to a fresh listen. What was already SAID is not discarded.
+    const { socket, playout, events, client } = setup();
+    await client.connect();
+    socket.deliver(OPEN);
+    socket.deliver({ type: 'response.output_audio_transcript.delta', delta: 'Sentence one. ' });
+    await settle();
+    const stopsBefore = playout.stops;
+
+    socket.drop('network went away');
+    await settle();
+
+    expect(playout.stops).toBe(stopsBefore + 1);
+    expect(events).toContainEqual({ type: 'interrupted', text: 'Sentence one.' });
+    await client.disconnect();
+  });
+
+  it('re-mints an expired credential rather than redialling with a dead one', async () => {
+    const expired = { ...TICKET, expiresAt: Date.now() - 1 };
+    const fresh = { ...TICKET, token: 'ek_fresh', expiresAt: Date.now() + 60_000 };
+    const { socket, clock, client } = setup(expired, { mintTicket: () => Promise.resolve(fresh) });
+    await client.connect();
+    socket.deliver(OPEN);
+    await settle();
+
+    socket.drop('network went away');
+    await settle();
+    clock.run();
+    await settle();
+
+    // The redial carries the NEW secret; the expired one is never re-offered.
+    expect(socket.dials[1]?.subprotocols).toContain('openai-insecure-api-key.ek_fresh');
+    await client.disconnect();
+  });
+
+  it('gives up and degrades to text when the credential is dead and nothing can mint', async () => {
+    const expired = { ...TICKET, expiresAt: Date.now() - 1 };
+    const { socket, events, clock, client } = setup(expired);
+    await client.connect();
+    socket.deliver(OPEN);
+    await settle();
+
+    socket.drop('network went away');
+    await settle();
+    clock.run();
+    await settle();
+
+    // No second dial was attempted on a secret that cannot work.
+    expect(socket.dials).toHaveLength(1);
+    expect(events.some((e) => e.type === 'error' && e.code === 'voice_unavailable')).toBe(true);
+    expect(events.at(-1)).toEqual({ type: 'disconnected' });
+  });
+
+  it('stops after the schedule is spent rather than retrying forever', async () => {
+    const { socket, events, clock, client } = setup(TICKET, { reconnectDelaysMs: [1, 2] });
+    await client.connect();
+    socket.deliver(OPEN);
+    await settle();
+
+    // The network is still down for every attempt.
+    socket.refuse = true;
+    socket.drop('network went away');
+    await settle();
+    clock.run();
+    await settle();
+    clock.run();
+    await settle();
+
+    expect(clock.delays).toEqual([1, 2]);
+    expect(clock.pending).toBe(0);
+    // Three dials total: the original plus the schedule's two attempts.
+    expect(socket.dials).toHaveLength(3);
+    expect(events.some((e) => e.type === 'error' && e.code === 'voice_unavailable')).toBe(true);
+    expect(events.at(-1)).toEqual({ type: 'disconnected' });
+  });
+
+  it('does not redial a call the user hung up', async () => {
+    const { socket, clock, client } = setup();
+    await client.connect();
+    socket.deliver(OPEN);
+    await settle();
+
+    await client.disconnect();
+    socket.drop('closed');
+    await settle();
+
+    expect(clock.pending).toBe(0);
+    expect(socket.dials).toHaveLength(1);
   });
 });

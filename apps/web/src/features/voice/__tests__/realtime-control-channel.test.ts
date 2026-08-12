@@ -93,10 +93,11 @@ function setup(
   const socket = new FakeProviderSocket();
   const control = opts.control === null ? null : (opts.control ?? new FakeControlTransport());
   const events: VoiceCallEvent[] = [];
+  const playout = new FakePlayout();
   const client = createRealtimeVoiceCallClient({
     session: opts.ticket ?? TICKET,
     capture: new FakeVoiceCapture(),
-    playout: new FakePlayout(),
+    playout,
     socketFactory: socket.factory,
     chime: false,
     ...(control ? { control } : {}),
@@ -105,12 +106,16 @@ function setup(
     ...(opts.windDownGraceMs !== undefined ? { windDownGraceMs: opts.windDownGraceMs } : {}),
   });
   client.on((event) => events.push(event));
-  return { socket, control, events, client };
+  return { socket, control, events, client, playout };
 }
 
 const settle = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0));
 
 const OPEN = { type: 'session.created', session: { id: 'sess_1', model: 'gpt-realtime' } };
+
+function audioFrame(bytes: number[]): unknown {
+  return { type: 'response.output_audio.delta', delta: btoa(String.fromCharCode(...bytes)) };
+}
 
 describe('control channel — opening', () => {
   it('declares the call, its chat session and whether the provider can speak verbatim', async () => {
@@ -221,6 +226,59 @@ describe('control channel — filler', () => {
     await client.disconnect();
   });
 
+  it('never re-reports the line it asked for as the model’s reply', async () => {
+    // The provider echoes a `say()` back through the ordinary reply events. Left
+    // alone it would duplicate the filler in the transcript, persist "Let me
+    // check." as an assistant turn, and drop the strip out of `consulting` a few
+    // hundred ms after it entered — for a wait that can run for seconds.
+    const { socket, control, client, events, playout } = setup();
+    await client.connect();
+    socket.deliver(OPEN);
+    await settle();
+    const before = control?.sent.length ?? 0;
+
+    control?.deliver({ t: 'realtime_speak', text: 'Let me check.', kind: 'ack' });
+    await settle();
+    socket.deliver({ type: 'response.output_audio_transcript.delta', delta: 'Let me check. ' });
+    socket.deliver(audioFrame([1, 0]));
+    socket.deliver({ type: 'response.done' });
+    await settle();
+
+    expect(events.filter((e) => e.type === 'filler')).toHaveLength(1);
+    expect(events.some((e) => e.type === 'reply_sentence')).toBe(false);
+    expect(events.some((e) => e.type === 'reply_complete')).toBe(false);
+    expect(control?.sent.slice(before).filter((f) => f.t === 'realtime_transcript')).toEqual([]);
+    // Still HEARD, though — suppressing the reply framing must not mute it.
+    expect(playout.pcm).toHaveLength(1);
+    await client.disconnect();
+  });
+
+  it('reports the reply that follows a filler normally', async () => {
+    // The suppression is scoped to the filler's own response; the answer the
+    // consult was waiting for is an ordinary reply again.
+    const { socket, control, client, events } = setup();
+    await client.connect();
+    socket.deliver(OPEN);
+    await settle();
+
+    control?.deliver({ t: 'realtime_speak', text: 'Let me check.', kind: 'ack' });
+    await settle();
+    socket.deliver({ type: 'response.done' });
+    await settle();
+
+    socket.deliver({ type: 'response.output_audio_transcript.delta', delta: 'It was Friday. ' });
+    socket.deliver({ type: 'response.done' });
+    await settle();
+
+    expect(events).toContainEqual({ type: 'reply_complete', text: 'It was Friday.' });
+    expect(control?.sent).toContainEqual({
+      t: 'realtime_transcript',
+      role: 'assistant',
+      text: 'It was Friday.',
+    });
+    await client.disconnect();
+  });
+
   it('degrades on a provider with no verbatim-speech frame: captioned, not spoken', async () => {
     // Gemini Live's codec omits `encodeSay`, so the session omits `say()`. The
     // browser declares `canSay: false` — the server then sends the ack once and
@@ -269,6 +327,54 @@ describe('control channel — transcripts', () => {
       { t: 'realtime_transcript', role: 'user', text: 'what did we decide?' },
       { t: 'realtime_transcript', role: 'assistant', text: 'Friday.' },
     ]);
+    await client.disconnect();
+  });
+
+  it('persists the spoken prefix on barge-in, marked [interrupted]', async () => {
+    // On a conversational tier barge-in is the COMMON case. Leaving the write to
+    // `response_done` — whose `replyText` the barge-in has already cleared —
+    // silently drops most of the assistant's history from the session.
+    const { socket, control, client } = setup();
+    await client.connect();
+    socket.deliver(OPEN);
+    await settle();
+    const before = control?.sent.length ?? 0;
+
+    socket.deliver({ type: 'response.output_audio_transcript.delta', delta: 'Sentence one. ' });
+    socket.deliver({ type: 'input_audio_buffer.speech_started' });
+    await settle();
+
+    expect(control?.sent.slice(before)).toEqual([
+      { t: 'realtime_transcript', role: 'assistant', text: 'Sentence one. [interrupted]' },
+    ]);
+    await client.disconnect();
+  });
+
+  it('writes a barged-in turn exactly once, whatever the provider streams after', async () => {
+    // `response.cancel` is a request, not a stop: transcript and audio keep
+    // arriving for a few frames. None of it was heard, so none of it may be
+    // captioned, played, or persisted as a second version of the same turn.
+    const { socket, control, client, events, playout } = setup();
+    await client.connect();
+    socket.deliver(OPEN);
+    await settle();
+    const before = control?.sent.length ?? 0;
+
+    socket.deliver({ type: 'response.output_audio_transcript.delta', delta: 'Sentence one. ' });
+    socket.deliver({ type: 'input_audio_buffer.speech_started' });
+    await settle();
+    const playedBefore = playout.pcm.length;
+
+    socket.deliver({ type: 'response.output_audio_transcript.delta', delta: 'Sentence two. ' });
+    socket.deliver(audioFrame([1, 0]));
+    socket.deliver({ type: 'response.done' });
+    await settle();
+
+    expect(control?.sent.slice(before)).toEqual([
+      { t: 'realtime_transcript', role: 'assistant', text: 'Sentence one. [interrupted]' },
+    ]);
+    expect(events.some((e) => e.type === 'reply_complete')).toBe(false);
+    expect(playout.pcm).toHaveLength(playedBefore);
     await client.disconnect();
   });
 });

@@ -1,4 +1,10 @@
 import type { RealtimeToolHost } from '@ethosagent/tools-voice';
+import type { VoiceTurnSpan } from '@ethosagent/voice-session';
+import {
+  summarizeLatency,
+  turnLatenciesFromSpans,
+  VOICE_REALTIME_LATENCY_BUDGET_MS,
+} from '@ethosagent/voice-session';
 import type { VoiceServerFrame } from '@ethosagent/web-contracts';
 import { describe, expect, it } from 'vitest';
 import {
@@ -65,6 +71,8 @@ interface Harness {
   usage: RealtimeUsageEvent[];
   halts: RealtimeHaltEvent[];
   laneEvents: RealtimeControlLaneEvent[];
+  /** Every latency span the lane recorded, in order. */
+  spans: VoiceTurnSpan[];
   /**
    * What the lane observes as this session's spend: everything it accrued plus
    * anything a consult added. Stands in for `AgentLoop.sessionCosts`.
@@ -82,6 +90,7 @@ function harness(
     handled?: string[];
     costPerMinuteUsd?: number;
     sessionBudgetUsd?: number;
+    realtimeProvider?: string;
   } = {},
 ): Harness {
   const clock = new FakeClock();
@@ -91,6 +100,7 @@ function harness(
   const usage: RealtimeUsageEvent[] = [];
   const halts: RealtimeHaltEvent[] = [];
   const laneEvents: RealtimeControlLaneEvent[] = [];
+  const spans: VoiceTurnSpan[] = [];
   const timeline: Array<{ t: string; open: boolean }> = [];
   let consultSpend = 0;
   const pendingCalls = new Map<string, (output: string) => void>();
@@ -120,6 +130,7 @@ function harness(
     workingDir: '/tmp',
     ...(opts.costPerMinuteUsd !== undefined ? { costPerMinuteUsd: opts.costPerMinuteUsd } : {}),
     ...(opts.sessionBudgetUsd !== undefined ? { sessionBudgetUsd: opts.sessionBudgetUsd } : {}),
+    ...(opts.realtimeProvider ? { realtimeProvider: opts.realtimeProvider } : {}),
   };
 
   let accruedUsd = 0;
@@ -137,6 +148,7 @@ function harness(
     },
     onHalt: (_binding, halt) => halts.push(halt),
     sessionSpendUsd: () => spendUsd(),
+    recordSpan: (span) => spans.push(span),
     onEvent: (event) => laneEvents.push(event),
     now: clock.now,
     setTimer: clock.setTimer,
@@ -159,6 +171,7 @@ function harness(
     usage,
     halts,
     laneEvents,
+    spans,
     timeline,
     spendUsd,
     addConsultSpend: (usd) => {
@@ -201,6 +214,62 @@ describe('realtime control lane — opening', () => {
       },
     ]);
     expect(h.order).toEqual([]);
+  });
+});
+
+describe('realtime control lane — latency spans', () => {
+  it('records a provider-stamped span for a turn the browser reported', async () => {
+    const h = harness({ realtimeProvider: 'openai-realtime' });
+    h.lane.handle({ t: 'realtime_start', canSay: true });
+    await settle();
+    h.clock.advanceTo(10_000);
+
+    h.lane.handle({ t: 'realtime_turn_latency', turnId: 'turn-1', firstAudioMs: 640 });
+
+    expect(h.spans).toEqual([
+      {
+        turnId: 'turn-1',
+        stage: 'realtime_first_audio',
+        // Anchored at arrival: the DURATION is the measurement, the absolute
+        // pair only has to sit on this process's timeline.
+        startTs: 10_000 - 640,
+        endTs: 10_000,
+        status: 'ok',
+        laneKey: 'voice:web:browser:chat-9',
+        realtimeProvider: 'openai-realtime',
+      },
+    ]);
+  });
+
+  it('feeds the same budget module the bench checks, and can fail it', async () => {
+    // The point of the span existing at all: a deployed call produces the exact
+    // artifact `summarizeLatency` reads, so the ≤800 ms claim is falsifiable by
+    // telemetry rather than only by a harness that was told the answer.
+    const h = harness({ realtimeProvider: 'openai-realtime' });
+    h.lane.handle({ t: 'realtime_start', canSay: true });
+    await settle();
+
+    for (const [i, ms] of [600, 640, 980].entries()) {
+      h.clock.advanceTo(10_000 * (i + 1));
+      h.lane.handle({ t: 'realtime_turn_latency', turnId: `turn-${i}`, firstAudioMs: ms });
+    }
+
+    const report = summarizeLatency(turnLatenciesFromSpans(h.spans), 'realtime');
+    const mouthToEar = report.stages.find((s) => s.stage === 'pipeline');
+    expect(mouthToEar?.budgetMs).toBe(VOICE_REALTIME_LATENCY_BUDGET_MS.pipeline);
+    expect(mouthToEar?.count).toBe(3);
+    // p90 of {600, 640, 980} is 980 — over budget, and the report says so
+    // rather than averaging the tail away.
+    expect(mouthToEar?.p90).toBe(980);
+    expect(mouthToEar?.withinBudget).toBe(false);
+    expect(h.spans.every((s) => s.realtimeProvider === 'openai-realtime')).toBe(true);
+  });
+
+  it('drops a report that arrives before the call has a lane to name', async () => {
+    // An unattributed duration is not evidence of anything, so it is not stored.
+    const h = harness();
+    h.lane.handle({ t: 'realtime_turn_latency', turnId: 'turn-1', firstAudioMs: 500 });
+    expect(h.spans).toEqual([]);
   });
 });
 
@@ -386,6 +455,26 @@ describe('realtime control lane — per-audio-minute accrual', () => {
     expect(h.halts).toEqual([]);
     expect(h.laneEvents).toContainEqual({ type: 'unpriced', laneKey: 'voice:web:browser:chat-9' });
     expect(h.lane.isOpen).toBe(true);
+  });
+
+  it('says so out loud when a metered call opens with no cap', async () => {
+    // A per-minute meter with no ceiling is a legitimate configuration and an
+    // expensive accident, and silence cannot tell them apart. `sessionBudgetUsd`
+    // unset and `sessionBudgetUsd` set but never reaching this process used to
+    // look identical from here.
+    const h = harness({ costPerMinuteUsd: RATE_PER_MINUTE });
+    h.lane.handle({ t: 'realtime_start', canSay: true });
+    await settle();
+
+    expect(h.laneEvents).toContainEqual({ type: 'uncapped', laneKey: 'voice:web:browser:chat-9' });
+  });
+
+  it('stays quiet when a cap is in force', async () => {
+    const h = harness({ costPerMinuteUsd: RATE_PER_MINUTE, sessionBudgetUsd: 1 });
+    h.lane.handle({ t: 'realtime_start', canSay: true });
+    await settle();
+
+    expect(h.laneEvents.some((e) => e.type === 'uncapped')).toBe(false);
   });
 });
 

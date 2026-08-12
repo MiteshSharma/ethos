@@ -57,6 +57,17 @@ describe('CallStrip — DR1 interaction states', () => {
     expect(html).toContain('Agent is thinking');
   });
 
+  it('consulting: the same STEADY dot, with the filler captioned', () => {
+    // DR1's "Thinking / consulting" row. A consult round trip can run for
+    // seconds; the pulsing dot would read as "mid-sentence" for all of it.
+    const html = strip({ status: 'consulting', caption: 'Let me check.' });
+    expect(html).toContain('talk-agent-dot');
+    expect(html).not.toContain('talk-agent-pulse');
+    expect(html).toContain('consulting');
+    expect(html).toContain('Let me check.');
+    expect(html).toContain('Agent is checking something');
+  });
+
   it('agent speaking: the accent dot pulses and the caption is live', () => {
     const html = strip({ status: 'agent_speaking', caption: 'The weather today is clear.' });
     expect(html).toContain('talk-agent-pulse');

@@ -197,6 +197,18 @@ export interface CreateWebApiOptions {
   realtimeDefault?: string;
   /** Boot snapshot of `voice.tier`. */
   voiceTier?: 'pipeline' | 'realtime';
+  /**
+   * Boot snapshot of `voice.realtime.sessionBudgetUsd` — the cap on ONE
+   * realtime call. Live config still wins; this is what keeps the cap alive on
+   * a surface with no live-config read, which used to be silently uncapped.
+   */
+  realtimeSessionBudgetUsd?: number;
+  /**
+   * The deployment's voice span writer (`VoiceStack.spans`). Realtime turns
+   * record their per-turn latency into it, so both tiers' spans land in one
+   * buffer and one sink. Omit → realtime turns write no spans.
+   */
+  voiceSpans?: import('@ethosagent/voice-session').VoiceSpanRecorder;
   /** Name of the STT provider (from auxiliary.asr.provider). */
   sttProviderName?: string;
   /** Config dict for the STT provider factory. */
@@ -636,6 +648,12 @@ export function createWebApi(opts: CreateWebApiOptions): CreateWebApiResult {
     ...(opts.realtimeRoster ? { realtimeRoster: opts.realtimeRoster } : {}),
     ...(opts.realtimeDefault ? { realtimeDefault: opts.realtimeDefault } : {}),
     ...(opts.voiceTier ? { tier: opts.voiceTier } : {}),
+    // The typed cap, from `EthosConfig.voice.realtime.sessionBudgetUsd`. Live
+    // config still wins; this is the route that does not depend on the live
+    // read existing.
+    ...(opts.realtimeSessionBudgetUsd !== undefined
+      ? { realtimeSessionBudgetUsd: opts.realtimeSessionBudgetUsd }
+      : {}),
     ...(opts.trustedVoicePlugins ? { trustedVoicePlugins: opts.trustedVoicePlugins } : {}),
     // Per-personality voice on the browser path: the same registry the
     // Personalities tab refreshes, so an edited `voice.tts_voice` is heard on
@@ -681,6 +699,11 @@ export function createWebApi(opts: CreateWebApiOptions): CreateWebApiResult {
                 // lane key — every `agent_consult` turn runs there — so audio
                 // minutes join the same total rather than starting a second one.
                 budget: agentLoop,
+                // Per-turn latency for the hosted tier. The browser owns the
+                // media socket here, so the moment it reports is the only
+                // measurement of mouth-to-ear that exists; it lands in the
+                // deployment's ONE span writer, beside the pipeline tier's.
+                ...(opts.voiceSpans ? { spans: opts.voiceSpans } : {}),
               },
               laneId,
             ),

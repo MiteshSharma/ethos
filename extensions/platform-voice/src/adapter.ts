@@ -12,6 +12,18 @@
 // `livekit` kind segment is what makes a phone leg and a browser talk session
 // structurally unable to collide on one conversation.
 //
+// NO MIGRATION FROM THE PRE-`kind` SHAPE, AND NONE IS NEEDED. This key used to
+// read `voice:<botKey>:<callerId>`, and that shape never reached durable
+// storage in any deployment: this class is constructed only by
+// `createLiveKitTransport`, which `buildVoiceStack` wires only when an app
+// supplies native LiveKit bindings — and no in-repo caller supplies them, so
+// `VoiceStack.createLiveKitAdapter` is absent in every shipped configuration
+// and no phone leg has ever run. No session row, no span and no artifact was
+// filed under the old key, so there is nothing to read back or rewrite. What
+// replaces the migration is a literal-shape pin in `__tests__/adapter.test.ts`:
+// once telephony IS wired, call histories become durable under this exact
+// string, and the next change to it has to be a deliberate one.
+//
 // Dedup boundary (see README.md): audio frames are transport MEDIA and go
 // straight to the transport sink — NEVER through MessageDedupCache. Discrete
 // artifacts sent AS channel messages (call summary / transcript to a paired

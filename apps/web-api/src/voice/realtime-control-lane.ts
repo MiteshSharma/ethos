@@ -3,6 +3,7 @@ import { SessionLane } from '@ethosagent/session-lane';
 import type { RealtimeToolCall, RealtimeToolHost } from '@ethosagent/tools-voice';
 import { AGENT_CONSULT_TOOL } from '@ethosagent/tools-voice';
 import type { AgentEvent } from '@ethosagent/types';
+import type { VoiceTurnSpan } from '@ethosagent/voice-session';
 import { DEFAULT_VOICE_FILLER_TEXT } from '@ethosagent/voice-session';
 import type { VoiceClientFrame, VoiceServerFrame } from '@ethosagent/web-contracts';
 
@@ -46,6 +47,16 @@ export interface RealtimeSessionBinding {
    * can see that this call's cost is unknown rather than zero.
    */
   costPerMinuteUsd?: number;
+  /**
+   * The REGISTERED realtime provider id serving this call (`openai-realtime`),
+   * never the roster label. Resolved server-side, by the same selection the
+   * mint makes — a call only exists because the mint served it, so the entry
+   * that priced it is the entry that ran.
+   *
+   * It is the `including provider id` half of the latency criterion: a span
+   * that says 620 ms without saying whose 620 ms it was cannot be acted on.
+   */
+  realtimeProvider?: string;
   /**
    * Cap on this session's accrued spend, in USD. Absent → uncapped.
    *
@@ -102,6 +113,20 @@ export interface RealtimeControlLaneDeps {
    * honest answer when nothing is tracking consults.
    */
   sessionSpendUsd?(binding: RealtimeSessionBinding): number;
+  /**
+   * Append one latency span for a completed realtime turn.
+   *
+   * Backed by the deployment's ONE `BufferedVoiceSpanWriter` — the same writer
+   * the pipeline tier's `VoiceSession` records into, flushing to the same
+   * observability sink. It is `record`-only (`VoiceSpanRecorder`) so this lane
+   * cannot flush, close or otherwise take the writer off its buffered timer:
+   * the property that keeps spans off the audio path is the writer's, and a
+   * surface that could reach past it would eventually be the surface that did.
+   *
+   * Absent → spans are dropped, which is the honest state of a deployment with
+   * no observability store wired.
+   */
+  recordSpan?(span: VoiceTurnSpan): void;
   /** Monotonic-enough clock. Injected so the no-dead-air test can fake it. */
   now?: () => number;
   /** Timer seam. Same reason. Returns a handle `clearTimer` understands. */
@@ -117,6 +142,16 @@ export type RealtimeControlLaneEvent =
   | { type: 'tool_dispatched'; callId: string; name: string; ok: boolean; ms: number }
   /** No `costPerMinuteUsd` for the entry serving this call — cost is UNKNOWN. */
   | { type: 'unpriced'; laneKey: string }
+  /**
+   * No cap resolved for this call — it will run until the person hangs up.
+   *
+   * Said out loud for the same reason `unpriced` is: a per-minute meter with no
+   * ceiling is a legitimate configuration and an expensive accident, and the
+   * two are indistinguishable from silence. `voice.realtime.sessionBudgetUsd`
+   * unset and `voice.realtime.sessionBudgetUsd` set but not reaching this
+   * process used to look identical from here; now only one of them is quiet.
+   */
+  | { type: 'uncapped'; laneKey: string }
   /** The cap was reached; the sign-off has been dispatched and the lane is closing. */
   | { type: 'wind_down'; laneKey: string; spentUsd: number; capUsd: number };
 
@@ -260,6 +295,9 @@ export class RealtimeControlLane {
       case 'realtime_transcript':
         this.persist(frame.role, frame.text);
         return;
+      case 'realtime_turn_latency':
+        this.recordLatency(frame.turnId, frame.firstAudioMs);
+        return;
       case 'realtime_end':
         this.close();
         return;
@@ -313,6 +351,9 @@ export class RealtimeControlLane {
           laneKey: binding.laneKey,
           tools: binding.host.handled,
         });
+        if (binding.sessionBudgetUsd === undefined) {
+          this.deps.onEvent?.({ type: 'uncapped', laneKey: binding.laneKey });
+        }
         this.startAccrual(binding);
       })
       .catch((err: unknown) => {
@@ -338,6 +379,49 @@ export class RealtimeControlLane {
         // A failed write must not end a live call. The captions the user reads
         // come off the provider stream, not off this write.
       });
+    });
+  }
+
+  /**
+   * Write one completed realtime turn's latency span.
+   *
+   * WHAT THIS SPAN MEASURES. `firstAudioMs` is the browser's own measurement of
+   * the interval the ≤800 ms budget names: the user's last speech frame → the
+   * reply's first audio frame. It is recorded under `realtime_first_audio`,
+   * which `turnLatenciesFromSpans` reads as mouth-to-ear on this tier — so a
+   * deployed call now produces the exact artifact the budget module checks, and
+   * a tier that misses 800 ms says so in its own telemetry.
+   *
+   * WHAT IT DOES NOT. The endpointing is inside it (the provider owns the VAD
+   * and never says when it decided), and the browser's capture and playout legs
+   * are outside it. The first makes the number an upper bound — safe, because a
+   * budget can only fail pessimistically on it; the second is simply missing,
+   * and no amount of server-side timing would recover it.
+   *
+   * NOT ON THE AUDIO PATH: this is a control frame on the slow socket, and
+   * `record()` is an in-memory append. The flush to SQLite belongs to the
+   * writer's own timer.
+   */
+  private recordLatency(turnId: string, firstAudioMs: number): void {
+    const binding = this.binding;
+    // A latency report that arrives before the bootstrap settled has no lane to
+    // name and no provider to stamp. Dropping it beats writing an unattributed
+    // span — a duration nobody can attribute is not evidence of anything.
+    if (!binding || this.closed) return;
+    // Anchored at ARRIVAL, not at a page-supplied wall clock: the duration is
+    // what the browser measured and what every consumer reads
+    // (`endTs - startTs`), while the absolute pair only has to be a plausible
+    // position on THIS process's timeline. Trusting a browser's `Date.now()` as
+    // an absolute would put spans in the future on a machine with a skewed clock.
+    const endTs = this.now();
+    this.deps.recordSpan?.({
+      turnId,
+      stage: 'realtime_first_audio',
+      startTs: endTs - firstAudioMs,
+      endTs,
+      status: 'ok',
+      laneKey: binding.laneKey,
+      ...(binding.realtimeProvider ? { realtimeProvider: binding.realtimeProvider } : {}),
     });
   }
 

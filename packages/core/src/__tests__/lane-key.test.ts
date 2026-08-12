@@ -38,6 +38,19 @@ describe('voiceLaneKey', () => {
     expect(forged).not.toContain(':sip:');
   });
 
+  it('pins the literal shape every voice surface files history under', () => {
+    // A lane key is a DURABLE identifier — a session row's key, the label on a
+    // span, the conversation a redelivery returns to. Its shape is therefore
+    // part of the storage contract, and changing it silently orphans whatever
+    // was stored under the old one. Asserting the literal string (rather than
+    // re-deriving it from this same function) is what makes such a change fail
+    // here instead of in someone's history.
+    expect(voiceLaneKey('web', { kind: 'browser', id: 'chat-9' })).toBe('voice:web:browser:chat-9');
+    expect(voiceLaneKey('reception', { kind: 'livekit', id: 'caller-a' })).toBe(
+      'voice:reception:livekit:caller-a',
+    );
+  });
+
   it('never collides with a typed web chat session key', () => {
     // Typed chat rows are keyed `web:<uuid>`; a talk session is `voice:…`. The
     // prefix alone makes the two namespaces disjoint, which is what stops a
