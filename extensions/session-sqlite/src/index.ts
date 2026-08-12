@@ -571,10 +571,65 @@ export class SQLiteSessionStore implements SessionStore {
     if (toDelete.length === 0) return 0;
     const now = new Date().toISOString();
     const placeholders = toDelete.map(() => '?').join(',');
-    this.db
-      .prepare(`UPDATE messages SET deleted_at = ? WHERE id IN (${placeholders})`)
-      .run(now, ...toDelete);
+    // The session's token/cost columns are a derived cache of the surviving
+    // `messages` rows (analytics decision 9), so the soft-delete and the
+    // rollup subtraction have to land together or the cache goes stale.
+    this.db.transaction(() => {
+      this.subtractMessageUsage(sessionId, toDelete);
+      this.db
+        .prepare(`UPDATE messages SET deleted_at = ? WHERE id IN (${placeholders})`)
+        .run(now, ...toDelete);
+    })();
     return pairs;
+  }
+
+  /**
+   * Take the usage recorded on the given (still-live) messages back out of the
+   * session's rollup columns. Only rows belonging to `sessionId` that have not
+   * already been soft-deleted count, so a row can never be subtracted twice.
+   *
+   * Clamped at zero: sessions written before rollups were maintained carry
+   * message usage the columns never saw, and a negative total is a worse lie
+   * than a floored one.
+   */
+  private subtractMessageUsage(sessionId: string, messageIds: string[]): void {
+    const placeholders = messageIds.map(() => '?').join(',');
+    const removed = this.db
+      .prepare(
+        `SELECT COALESCE(SUM(input_tokens), 0)          AS input_tokens,
+                COALESCE(SUM(output_tokens), 0)         AS output_tokens,
+                COALESCE(SUM(cache_read_tokens), 0)     AS cache_read_tokens,
+                COALESCE(SUM(cache_creation_tokens), 0) AS cache_creation_tokens,
+                COALESCE(SUM(estimated_cost_usd), 0)    AS estimated_cost_usd
+         FROM messages
+         WHERE session_id = ? AND deleted_at IS NULL AND id IN (${placeholders})`,
+      )
+      .get(sessionId, ...messageIds) as {
+      input_tokens: number;
+      output_tokens: number;
+      cache_read_tokens: number;
+      cache_creation_tokens: number;
+      estimated_cost_usd: number;
+    };
+
+    this.db
+      .prepare(
+        `UPDATE sessions SET
+           input_tokens          = max(input_tokens - ?, 0),
+           output_tokens         = max(output_tokens - ?, 0),
+           cache_read_tokens     = max(cache_read_tokens - ?, 0),
+           cache_creation_tokens = max(cache_creation_tokens - ?, 0),
+           estimated_cost_usd    = max(estimated_cost_usd - ?, 0.0)
+         WHERE id = ?`,
+      )
+      .run(
+        removed.input_tokens,
+        removed.output_tokens,
+        removed.cache_read_tokens,
+        removed.cache_creation_tokens,
+        removed.estimated_cost_usd,
+        sessionId,
+      );
   }
 
   // ---------------------------------------------------------------------------

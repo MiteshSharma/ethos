@@ -166,6 +166,98 @@ describe('SQLiteSessionStore', () => {
     expect(updated?.usage.apiCallCount).toBe(2);
   });
 
+  // A1 / analytics decision 9 — the session rollup is a derived cache of the
+  // live `messages` rows, so soft-deleting a turn has to take its usage back out.
+  it('keeps the rollup equal to SUM(messages) after undoTurns', async () => {
+    const session = await store.createSession(baseSession);
+
+    const turn = async (usage: {
+      inputTokens: number;
+      outputTokens: number;
+      cacheReadTokens: number;
+      cacheCreationTokens: number;
+      estimatedCostUsd: number;
+    }) => {
+      await store.appendMessage({ sessionId: session.id, role: 'user', content: 'q' });
+      await store.appendMessage({ sessionId: session.id, role: 'assistant', content: 'a', usage });
+      await store.updateUsage(session.id, usage);
+    };
+
+    await turn({
+      inputTokens: 100,
+      outputTokens: 20,
+      cacheReadTokens: 5,
+      cacheCreationTokens: 7,
+      estimatedCostUsd: 0.01,
+    });
+    await turn({
+      inputTokens: 50,
+      outputTokens: 10,
+      cacheReadTokens: 1,
+      cacheCreationTokens: 2,
+      estimatedCostUsd: 0.005,
+    });
+
+    expect(await store.undoTurns(session.id, 1)).toBe(1);
+
+    const live = await store.getMessages(session.id);
+    const sum = live.reduce(
+      (acc, m) => ({
+        inputTokens: acc.inputTokens + (m.usage?.inputTokens ?? 0),
+        outputTokens: acc.outputTokens + (m.usage?.outputTokens ?? 0),
+        cacheReadTokens: acc.cacheReadTokens + (m.usage?.cacheReadTokens ?? 0),
+        cacheCreationTokens: acc.cacheCreationTokens + (m.usage?.cacheCreationTokens ?? 0),
+        estimatedCostUsd: acc.estimatedCostUsd + (m.usage?.estimatedCostUsd ?? 0),
+      }),
+      {
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        cacheCreationTokens: 0,
+        estimatedCostUsd: 0,
+      },
+    );
+
+    const after = await store.getSession(session.id);
+    expect(sum).toEqual({
+      inputTokens: 100,
+      outputTokens: 20,
+      cacheReadTokens: 5,
+      cacheCreationTokens: 7,
+      estimatedCostUsd: 0.01,
+    });
+    expect(after?.usage.inputTokens).toBe(sum.inputTokens);
+    expect(after?.usage.outputTokens).toBe(sum.outputTokens);
+    expect(after?.usage.cacheReadTokens).toBe(sum.cacheReadTokens);
+    expect(after?.usage.cacheCreationTokens).toBe(sum.cacheCreationTokens);
+    expect(after?.usage.estimatedCostUsd).toBeCloseTo(sum.estimatedCostUsd, 10);
+  });
+
+  it('floors the rollup at zero when undoing usage it never recorded', async () => {
+    // Sessions written before rollups were maintained: message rows carry usage
+    // the columns never saw. Subtracting must not push them negative.
+    const session = await store.createSession(baseSession);
+    await store.appendMessage({ sessionId: session.id, role: 'user', content: 'q' });
+    await store.appendMessage({
+      sessionId: session.id,
+      role: 'assistant',
+      content: 'a',
+      usage: {
+        inputTokens: 100,
+        outputTokens: 20,
+        cacheReadTokens: 0,
+        cacheCreationTokens: 0,
+        estimatedCostUsd: 0.01,
+      },
+    });
+
+    await store.undoTurns(session.id, 1);
+
+    const after = await store.getSession(session.id);
+    expect(after?.usage.inputTokens).toBe(0);
+    expect(after?.usage.estimatedCostUsd).toBe(0);
+  });
+
   // -------------------------------------------------------------------------
   // Full-text search
   // -------------------------------------------------------------------------

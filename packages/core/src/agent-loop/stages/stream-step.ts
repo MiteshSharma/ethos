@@ -18,6 +18,7 @@ import { handleChunk } from '../chunk-handler';
 import { isContextOverflowError } from '../overflow';
 import type { WatcherTap } from '../turn-context';
 import { resolveModelWithTier } from '../turn-context';
+import type { TurnUsageAccumulator } from './turn-finalizer';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -71,6 +72,8 @@ export interface StreamStepDeps {
   observability?: AgentLoopObservability;
   requestDumpStore?: RequestDumpStore;
   sessionCosts: Map<string, number>;
+  /** A1 — per-turn rollup accumulator, flushed by the turn finalizer. */
+  turnUsage: TurnUsageAccumulator;
   streamingTimeoutMs: number;
   modelRouting: Record<string, string>;
 }
@@ -404,6 +407,15 @@ export async function* streamStep(
       ...(llmRequestTokens ? { requestTokens: llmRequestTokens } : {}),
     },
   });
+
+  // A1 — mirror the row just written into the turn's rollup accumulator. Kept
+  // adjacent to the append so the session's cached usage columns can only ever
+  // reflect message rows that actually landed (analytics decision 9).
+  deps.turnUsage.inputTokens += llmInputTokens;
+  deps.turnUsage.outputTokens += llmOutputTokens;
+  deps.turnUsage.cacheReadTokens += llmCacheReadTokens;
+  deps.turnUsage.cacheCreationTokens += llmCacheCreationTokens;
+  deps.turnUsage.estimatedCostUsd += llmEstimatedCostUsd;
 
   // Fire after_llm_call — content gated by personality observability config
   const llmDurationMs = Date.now() - llmStartTs;

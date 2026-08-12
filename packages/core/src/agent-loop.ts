@@ -31,7 +31,7 @@ import { ScriptToolBridge } from './agent-loop/stages/script-tool-bridge';
 import type { StreamStepDeps } from './agent-loop/stages/stream-step';
 import { streamStep } from './agent-loop/stages/stream-step';
 import { processTools } from './agent-loop/stages/tool-processing';
-import { finalizeTurn } from './agent-loop/stages/turn-finalizer';
+import { createTurnUsage, finalizeTurn, flushTurnUsage } from './agent-loop/stages/turn-finalizer';
 import { setupTurn } from './agent-loop/stages/turn-setup';
 import type { LoopDeps } from './agent-loop/turn-context';
 import { buildTurnEndCtx, maybeConsolidateAtTurnEnd } from './agent-loop/turn-end';
@@ -642,6 +642,10 @@ export class AgentLoop {
       ...(this.onToolMetric ? { onToolMetric: this.onToolMetric } : {}),
     });
 
+    // A1 — this turn's token/cost rollup: filled as each assistant message is
+    // persisted, flushed by the finalizer (and by the early exits that skip it).
+    const turnUsage = createTurnUsage();
+
     const streamDeps: StreamStepDeps = {
       llm: this.llm,
       tools: this.tools,
@@ -650,12 +654,14 @@ export class AgentLoop {
       observability: this.observability,
       requestDumpStore: this.requestDumpStore,
       sessionCosts: this.sessionCosts,
+      turnUsage,
       streamingTimeoutMs: this.streamingTimeoutMs,
       modelRouting: this.modelRouting,
     };
 
     for (let iteration = 0; iteration < this.maxIterations; iteration++) {
       if (abortSignal.aborted) {
+        await flushTurnUsage(this.session, sessionId, turnUsage);
         yield { type: 'error', error: 'Aborted', code: 'aborted' };
         if (traceId) {
           this.observability?.endTrace(traceId, 'aborted');
@@ -673,6 +679,7 @@ export class AgentLoop {
       const halt = getHalt();
       if (halt) {
         if (halt.action === 'terminate') {
+          await flushTurnUsage(this.session, sessionId, turnUsage);
           yield {
             type: 'error',
             error: `Watcher: ${halt.reason}`,
@@ -746,6 +753,7 @@ export class AgentLoop {
           iteration--; // retry this iteration with the shrunk history
           continue;
         }
+        await flushTurnUsage(this.session, sessionId, turnUsage);
         yield { type: 'error', error: stepResult.error, code: 'context_overflow' };
         if (traceId) {
           this.observability?.endTrace(traceId, 'error');
@@ -754,7 +762,10 @@ export class AgentLoop {
         return;
       }
 
-      if (stepResult.outcome === 'fatal') return;
+      if (stepResult.outcome === 'fatal') {
+        await flushTurnUsage(this.session, sessionId, turnUsage);
+        return;
+      }
 
       fullText += stepResult.fullTextDelta;
       turnCount++;
@@ -840,6 +851,7 @@ export class AgentLoop {
 
       if (toolResult.kind === 'return-direct') {
         fullText = toolResult.text;
+        await flushTurnUsage(this.session, sessionId, turnUsage);
         return;
       }
 
@@ -863,6 +875,7 @@ export class AgentLoop {
       dryRunPlan: dryRunState.plan,
       dryRunCapped: dryRunState.capped,
       isDryRun: opts.dryRun ?? false,
+      turnUsage,
     });
 
     // Phase 3 — turn-end context maintenance (silent memory flush at 70%,

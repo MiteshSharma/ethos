@@ -325,27 +325,13 @@ describe('pruneObservability', () => {
   });
 
   it('messages pruning uses ISO timestamp column and prunes old messages', () => {
-    // Create a minimal sessions.db schema in a separate in-memory db.
-    const sessDb = new Database(':memory:');
-    sessDb.exec(`
-      CREATE TABLE messages (
-        id       INTEGER PRIMARY KEY,
-        session_id TEXT NOT NULL,
-        content    TEXT NOT NULL,
-        timestamp  TEXT NOT NULL
-      ) STRICT;
-    `);
+    const sessDb = makeSessDb();
 
     // Messages retention default is 365d. Use 400d-old message to cross the cutoff.
-    const veryOld = NOW - 400 * 86_400_000;
-    const oldIso = new Date(veryOld).toISOString();
+    const oldIso = new Date(NOW - 400 * 86_400_000).toISOString();
     const recentIso = new Date(RECENT).toISOString();
-    sessDb
-      .prepare('INSERT INTO messages (session_id, content, timestamp) VALUES (?, ?, ?)')
-      .run('s1', 'old msg', oldIso);
-    sessDb
-      .prepare('INSERT INTO messages (session_id, content, timestamp) VALUES (?, ?, ?)')
-      .run('s1', 'recent msg', recentIso);
+    insertMessage(sessDb, 's1', 'old msg', oldIso);
+    insertMessage(sessDb, 's1', 'recent msg', recentIso);
 
     const result = pruneObservability(db, RETENTION_DEFAULTS, {
       dryRun: false,
@@ -359,7 +345,169 @@ describe('pruneObservability', () => {
     expect(remaining).toBe(1); // recent message kept
     sessDb.close();
   });
+
+  // A1 / analytics decision 9 — the session rollup columns are a derived cache
+  // of the surviving `messages` rows, so a prune has to take the pruned rows'
+  // usage back out of them.
+  it('keeps the session rollup equal to SUM(messages) after pruning', () => {
+    const sessDb = makeSessDb();
+    const oldIso = new Date(NOW - 400 * 86_400_000).toISOString();
+    const recentIso = new Date(RECENT).toISOString();
+
+    // s1: one pruned turn (100/20/0.01) + one surviving turn (7/3/0.002).
+    insertSession(sessDb, 's1', {
+      inputTokens: 107,
+      outputTokens: 23,
+      estimatedCostUsd: 0.012,
+    });
+    insertMessage(sessDb, 's1', 'old', oldIso, {
+      inputTokens: 100,
+      outputTokens: 20,
+      estimatedCostUsd: 0.01,
+    });
+    insertMessage(sessDb, 's1', 'recent', recentIso, {
+      inputTokens: 7,
+      outputTokens: 3,
+      estimatedCostUsd: 0.002,
+    });
+    // s2 has nothing old — its rollup must not move.
+    insertSession(sessDb, 's2', { inputTokens: 40, outputTokens: 4, estimatedCostUsd: 0.004 });
+    insertMessage(sessDb, 's2', 'recent', recentIso, {
+      inputTokens: 40,
+      outputTokens: 4,
+      estimatedCostUsd: 0.004,
+    });
+
+    const result = pruneObservability(db, RETENTION_DEFAULTS, {
+      dryRun: false,
+      now: NOW,
+      sessDb,
+    });
+    expect(result.messages).toBe(1);
+
+    const rows = sessDb
+      .prepare(
+        `SELECT s.id,
+                s.input_tokens, s.output_tokens, s.estimated_cost_usd,
+                COALESCE((SELECT SUM(m.input_tokens) FROM messages m WHERE m.session_id = s.id), 0)       AS sum_input,
+                COALESCE((SELECT SUM(m.output_tokens) FROM messages m WHERE m.session_id = s.id), 0)      AS sum_output,
+                COALESCE((SELECT SUM(m.estimated_cost_usd) FROM messages m WHERE m.session_id = s.id), 0) AS sum_cost
+         FROM sessions s ORDER BY s.id`,
+      )
+      .all() as Array<Record<string, number>>;
+
+    for (const r of rows) {
+      expect(r.input_tokens).toBe(r.sum_input);
+      expect(r.output_tokens).toBe(r.sum_output);
+      expect(r.estimated_cost_usd).toBeCloseTo(r.sum_cost ?? 0, 10);
+    }
+    expect(rows[0]?.input_tokens).toBe(7);
+    expect(rows[1]?.input_tokens).toBe(40);
+    sessDb.close();
+  });
+
+  it('does not double-subtract usage already removed by an undo', () => {
+    const sessDb = makeSessDb();
+    const oldIso = new Date(NOW - 400 * 86_400_000).toISOString();
+
+    // The old row was soft-deleted (undone), which already subtracted its usage.
+    // The rollup reflects only the surviving message, and hard-pruning the
+    // undone row must leave it untouched.
+    insertSession(sessDb, 's1', { inputTokens: 50, outputTokens: 5, estimatedCostUsd: 0.003 });
+    insertMessage(
+      sessDb,
+      's1',
+      'undone',
+      oldIso,
+      { inputTokens: 100, outputTokens: 20, estimatedCostUsd: 0.01 },
+      oldIso,
+    );
+    insertMessage(sessDb, 's1', 'recent', new Date(RECENT).toISOString(), {
+      inputTokens: 50,
+      outputTokens: 5,
+      estimatedCostUsd: 0.003,
+    });
+
+    expect(
+      pruneObservability(db, RETENTION_DEFAULTS, { dryRun: false, now: NOW, sessDb }).messages,
+    ).toBe(1);
+
+    const row = sessDb.prepare('SELECT * FROM sessions WHERE id = ?').get('s1') as {
+      input_tokens: number;
+      output_tokens: number;
+      estimated_cost_usd: number;
+    };
+    expect(row.input_tokens).toBe(50);
+    expect(row.output_tokens).toBe(5);
+    expect(row.estimated_cost_usd).toBeCloseTo(0.003, 10);
+    sessDb.close();
+  });
 });
+
+// Mirrors the columns of the real sessions.db that retention pruning touches.
+function makeSessDb(): Database.Database {
+  const sessDb = new Database(':memory:');
+  sessDb.exec(`
+      CREATE TABLE sessions (
+        id                    TEXT PRIMARY KEY,
+        input_tokens          INTEGER NOT NULL DEFAULT 0,
+        output_tokens         INTEGER NOT NULL DEFAULT 0,
+        cache_read_tokens     INTEGER NOT NULL DEFAULT 0,
+        cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+        estimated_cost_usd    REAL NOT NULL DEFAULT 0
+      ) STRICT;
+
+      CREATE TABLE messages (
+        id       INTEGER PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        content    TEXT NOT NULL,
+        timestamp  TEXT NOT NULL,
+        input_tokens INTEGER,
+        output_tokens INTEGER,
+        cache_read_tokens INTEGER,
+        cache_creation_tokens INTEGER,
+        estimated_cost_usd REAL,
+        deleted_at TEXT
+      ) STRICT;
+    `);
+  return sessDb;
+}
+
+function insertSession(
+  sessDb: Database.Database,
+  id: string,
+  usage: { inputTokens: number; outputTokens: number; estimatedCostUsd: number },
+): void {
+  sessDb
+    .prepare(
+      'INSERT INTO sessions (id, input_tokens, output_tokens, estimated_cost_usd) VALUES (?, ?, ?, ?)',
+    )
+    .run(id, usage.inputTokens, usage.outputTokens, usage.estimatedCostUsd);
+}
+
+function insertMessage(
+  sessDb: Database.Database,
+  sessionId: string,
+  content: string,
+  timestamp: string,
+  usage?: { inputTokens: number; outputTokens: number; estimatedCostUsd: number },
+  deletedAt?: string,
+): void {
+  sessDb
+    .prepare(
+      `INSERT INTO messages (session_id, content, timestamp, input_tokens, output_tokens, estimated_cost_usd, deleted_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .run(
+      sessionId,
+      content,
+      timestamp,
+      usage?.inputTokens ?? null,
+      usage?.outputTokens ?? null,
+      usage?.estimatedCostUsd ?? null,
+      deletedAt ?? null,
+    );
+}
 
 // ---------------------------------------------------------------------------
 // G4: referenced blobs survive prune

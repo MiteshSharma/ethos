@@ -34,6 +34,45 @@ export function mergeRetentionConfig(
   };
 }
 
+/** Rollup columns on `sessions`, and their per-message counterparts. */
+const USAGE_COLUMNS = [
+  'input_tokens',
+  'output_tokens',
+  'cache_read_tokens',
+  'cache_creation_tokens',
+  'estimated_cost_usd',
+] as const;
+
+/**
+ * Take the usage of the messages about to be pruned back out of the session
+ * rollup columns. Those columns are a derived cache of the surviving `messages`
+ * rows (analytics decision 9), so the subtraction has to happen before the
+ * delete and inside its transaction.
+ *
+ * Already soft-deleted rows were subtracted when they were undone, so they are
+ * excluded — the column is absent on `sessions.db` files old enough to predate
+ * undo, in which case there is nothing to double-subtract either. The floor at
+ * zero protects sessions whose rollups predate the columns being maintained.
+ */
+function subtractPrunedUsage(sessDb: BetterSqlite3.Database, iso: string): void {
+  const hasDeletedAt = (sessDb.pragma('table_info(messages)') as Array<{ name: string }>).some(
+    (c) => c.name === 'deleted_at',
+  );
+  const live = hasDeletedAt ? 'AND m.deleted_at IS NULL' : '';
+  const sets = USAGE_COLUMNS.map(
+    (col) =>
+      `${col} = max(${col} - COALESCE((SELECT SUM(m.${col}) FROM messages m
+         WHERE m.session_id = sessions.id ${live} AND m.timestamp < ?), 0), 0)`,
+  ).join(', ');
+
+  sessDb
+    .prepare(
+      `UPDATE sessions SET ${sets}
+       WHERE id IN (SELECT DISTINCT session_id FROM messages WHERE timestamp < ?)`,
+    )
+    .run(...USAGE_COLUMNS.map(() => iso), iso);
+}
+
 export interface PruneResult {
   traces: number;
   spans: number;
@@ -255,9 +294,11 @@ export function pruneObservability(
             .get(iso) as { n: number }
         ).n;
       } else {
-        result.messages = opts.sessDb
-          .prepare('DELETE FROM messages WHERE timestamp < ?')
-          .run(iso).changes;
+        const sessDb = opts.sessDb;
+        result.messages = sessDb.transaction((): number => {
+          subtractPrunedUsage(sessDb, iso);
+          return sessDb.prepare('DELETE FROM messages WHERE timestamp < ?').run(iso).changes;
+        })();
       }
     }
   }

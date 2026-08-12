@@ -64,7 +64,15 @@ describe('Orchestrator guardrails', () => {
     // itself lives in agent-loop/approval-posture.ts.
     // Merge (voice V1a + G4): both landed in the same file, so the ceiling is
     // base + both deltas, not either one alone. Measured at 903.
-    expect(lineCount).toBeLessThanOrEqual(903);
+    // Bumped 903 -> 916 (analytics A1): the per-turn usage accumulator — its
+    // construction, one property into the stream deps, one into the finalizer
+    // context, and one drain call at each of the five exits that return without
+    // reaching the finalizer (abort, watcher terminate, unrecoverable overflow,
+    // fatal stream failure, return-direct). The rollup is a derived cache of the
+    // `messages` rows, so every path that persisted a message has to flush or
+    // the cache silently under-reports. The accumulate/flush logic itself lives
+    // in agent-loop/stages/turn-finalizer.ts.
+    expect(lineCount).toBeLessThanOrEqual(916);
   });
 
   it('no stage file exceeds 700 lines', () => {
