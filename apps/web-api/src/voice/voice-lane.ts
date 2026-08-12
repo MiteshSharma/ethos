@@ -20,10 +20,12 @@ import {
 
 /** Provider seams the lane drives. Both are per-call, both are abortable. */
 export interface VoiceLaneDeps {
-  /** Transcribe one complete utterance (WAV bytes) → text + provider that ran. */
+  /** Transcribe one complete utterance (WAV bytes) → text + provider that ran.
+   *  `personalityId` lets the resolver honour that personality's own
+   *  `voice.stt_provider`, the same way `synthesize` honours its voice. */
   transcribe(
     audio: { data: Uint8Array; mimeType: string },
-    signal: AbortSignal,
+    opts: { personalityId?: string; signal: AbortSignal },
   ): Promise<{ text: string; provider: string }>;
   /** Stream one reply segment's audio. */
   synthesize(
@@ -71,6 +73,8 @@ const MIME_BY_FORMAT: Record<string, string> = {
 interface UtteranceState {
   id: string;
   sampleRate: number;
+  /** Personality listening, when the client named one. Picks the STT entry. */
+  personalityId: string | undefined;
   chunks: PcmChunk[];
   bytes: number;
   controller: AbortController;
@@ -109,7 +113,7 @@ export class VoiceLane {
         });
         return;
       case 'utterance_start':
-        this.startUtterance(frame.utteranceId, frame.sampleRate);
+        this.startUtterance(frame.utteranceId, frame.sampleRate, frame.personalityId);
         return;
       case 'audio':
         this.appendAudio(frame.utteranceId, payload);
@@ -143,7 +147,7 @@ export class VoiceLane {
     this.activeUtteranceId = null;
   }
 
-  private startUtterance(id: string, sampleRate: number): void {
+  private startUtterance(id: string, sampleRate: number, personalityId?: string): void {
     // A new utterance supersedes every older one: the user moved on, so any
     // transcript or audio still in flight for a previous utterance is stale
     // and must never reach the client.
@@ -155,6 +159,7 @@ export class VoiceLane {
     this.utterances.set(id, {
       id,
       sampleRate,
+      personalityId,
       chunks: [],
       bytes: 0,
       controller: new AbortController(),
@@ -198,7 +203,10 @@ export class VoiceLane {
     try {
       const result = await this.opts.deps.transcribe(
         { data: wav, mimeType: 'audio/wav' },
-        state.controller.signal,
+        {
+          ...(state.personalityId ? { personalityId: state.personalityId } : {}),
+          signal: state.controller.signal,
+        },
       );
       if (this.isStale(state)) {
         this.opts.send({

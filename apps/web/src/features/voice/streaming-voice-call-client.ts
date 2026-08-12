@@ -45,7 +45,8 @@ export interface StreamingVoiceCallDeps {
   sessionId?: () => string | null;
   /** Global default voice from Settings — LOWEST precedence server-side. */
   voice?: string;
-  /** Active personality; its declared `voice.tts_voice` beats `voice` above. */
+  /** Active personality; its declared `voice.tts_voice` beats `voice` above,
+   *  and its `voice.stt_provider` picks which engine transcribes it. */
   personalityId?: string;
   chime?: boolean;
   /** Keeps the screen awake for the duration of the call. */
@@ -110,6 +111,9 @@ export function createStreamingVoiceCallClient(deps: StreamingVoiceCallDeps): Vo
       t: 'utterance_start',
       utteranceId: id,
       sampleRate: deps.capture.sampleRate,
+      // The same personality that picks the voice picks the ear: the server
+      // resolves this utterance's STT entry from its `voice.stt_provider`.
+      ...(deps.personalityId ? { personalityId: deps.personalityId } : {}),
     });
   };
 

@@ -364,8 +364,17 @@ export function Chat() {
       // events either way, so nothing below this line changes.
       createTalkModeClient({
         sessionId: () => sessionIdRef.current,
+        // `personalityId` picks the STT entry the same way it picks the voice,
+        // so the batch fallback hears through the same engine the streaming
+        // lane does rather than silently reverting to the global default.
         transcribe: (audioBase64, mimeType) =>
-          rpc.voice.transcribe({ audio: audioBase64, mimeType }).then((r) => r.transcript),
+          rpc.voice
+            .transcribe({
+              audio: audioBase64,
+              mimeType,
+              ...(personalityId ? { personalityId } : {}),
+            })
+            .then((r) => r.transcript),
         // Reuse the existing chat send + stream so the spoken turn shares the
         // active chat session (same personality, same persisted history).
         runAgentTurn: (text, signal) =>

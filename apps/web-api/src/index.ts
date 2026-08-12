@@ -23,7 +23,6 @@ import type {
   SecretsResolver,
   SessionStore,
   Storage,
-  TtsProviderEntry,
 } from '@ethosagent/types';
 import type { SseEvent } from '@ethosagent/web-contracts';
 import {
@@ -44,7 +43,7 @@ import { SessionsService } from './features/sessions/service';
 import { AUTH_COOKIE } from './middleware/auth';
 import type { ApiKeyAdminStore } from './middleware/bearer-auth';
 import { AllowlistRepository } from './repositories/allowlist.repository';
-import { ConfigRepository, parseTtsRoster } from './repositories/config.repository';
+import { ConfigRepository, parseSttRoster, parseTtsRoster } from './repositories/config.repository';
 import { EvolverRepository } from './repositories/evolver.repository';
 import { PlatformsRepository } from './repositories/platforms.repository';
 import { WebTokenRepository } from './repositories/web-token.repository';
@@ -187,6 +186,12 @@ export interface CreateWebApiOptions {
   sttProviderName?: string;
   /** Config dict for the STT provider factory. */
   sttProviderConfig?: Record<string, unknown>;
+  /**
+   * Named STT roster (`voice.stt.providers.*`), keyed by the operator's label.
+   * A personality's `voice.stt_provider` picks one; an absent or unknown name
+   * falls back to the `sttProviderName`/`sttProviderConfig` default above.
+   */
+  sttRoster?: Readonly<Record<string, import('@ethosagent/types').SttProviderEntry>>;
   /** TTS provider registry for voice synthesis. */
   ttsProviderRegistry?: import('@ethosagent/types').TtsProviderRegistry;
   /** Name of the TTS provider (from auxiliary.tts.provider). */
@@ -194,9 +199,9 @@ export interface CreateWebApiOptions {
   /** Config dict for the TTS provider factory. */
   ttsProviderConfig?: Record<string, unknown>;
   /**
-   * Named TTS roster (`voice.providers.*`), keyed by the operator's label. A
-   * personality's `voice.provider` picks one; an absent or unknown name falls
-   * back to the `ttsProviderName`/`ttsProviderConfig` default above.
+   * Named TTS roster (`voice.tts.providers.*`), keyed by the operator's label.
+   * A personality's `voice.tts_provider` picks one; an absent or unknown name
+   * falls back to the `ttsProviderName`/`ttsProviderConfig` default above.
    */
   ttsRoster?: Readonly<Record<string, import('@ethosagent/types').TtsProviderEntry>>;
   /**
@@ -562,14 +567,21 @@ export function createWebApi(opts: CreateWebApiOptions): CreateWebApiResult {
       const resolveKey = async (v: string | undefined): Promise<string | undefined> =>
         v ? await resolveSecretRef(v, secrets) : v;
       if (!raw) return null;
-      // The roster is edited from Settings → Voice, so it is read live here
-      // rather than trusted from the boot snapshot: an entry added a minute ago
-      // must be selectable and previewable without a restart.
-      const roster: Record<string, TtsProviderEntry> = {};
-      for (const [name, entry] of Object.entries(parseTtsRoster(raw.passthrough))) {
-        const apiKey = await resolveKey(entry.apiKey);
-        roster[name] = apiKey === undefined ? entry : { ...entry, apiKey };
-      }
+      // The rosters are edited from Settings → Voice, so they are read live
+      // here rather than trusted from the boot snapshot: an entry added a
+      // minute ago must be selectable and previewable without a restart.
+      const resolveRoster = async <E extends { apiKey?: string }>(
+        roster: Record<string, E>,
+      ): Promise<Record<string, E>> => {
+        const out: Record<string, E> = {};
+        for (const [name, entry] of Object.entries(roster)) {
+          const apiKey = await resolveKey(entry.apiKey);
+          out[name] = apiKey === undefined ? entry : { ...entry, apiKey };
+        }
+        return out;
+      };
+      const ttsRoster = await resolveRoster(parseTtsRoster(raw.passthrough));
+      const sttRoster = await resolveRoster(parseSttRoster(raw.passthrough));
       return {
         voiceProvider: raw.voiceProvider,
         voiceApiKey: await resolveKey(raw.voiceApiKey),
@@ -580,9 +592,11 @@ export function createWebApi(opts: CreateWebApiOptions): CreateWebApiResult {
         voiceTtsVoice: raw.voiceTtsVoice,
         voiceTtsBaseUrl: raw.voiceTtsBaseUrl,
         voiceTtsModel: raw.voiceTtsModel,
-        ...(Object.keys(roster).length > 0 ? { voiceProviders: roster } : {}),
+        ...(Object.keys(ttsRoster).length > 0 ? { voiceTtsProviders: ttsRoster } : {}),
+        ...(Object.keys(sttRoster).length > 0 ? { voiceSttProviders: sttRoster } : {}),
       };
     },
+    ...(opts.sttRoster ? { sttRoster: opts.sttRoster } : {}),
     ttsRegistry: opts.ttsProviderRegistry,
     ttsProviderName: opts.ttsProviderName,
     ttsProviderConfig: opts.ttsProviderConfig,

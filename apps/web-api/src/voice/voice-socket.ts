@@ -68,8 +68,13 @@ export function createVoiceSocket(opts: VoiceSocketOptions): VoiceSocket {
       send,
       ...(opts.limits ? { limits: opts.limits } : {}),
       deps: {
-        transcribe: (audio, signal) =>
-          opts.voice.transcribeBytes(audio.data, audio.mimeType, signal),
+        transcribe: (audio, transcribeOpts) =>
+          opts.voice.transcribeBytes(
+            audio.data,
+            audio.mimeType,
+            transcribeOpts.signal,
+            transcribeOpts.personalityId ? { personalityId: transcribeOpts.personalityId } : {},
+          ),
         synthesize: (text, synthOpts) => opts.voice.synthesizeStream(text, synthOpts),
       },
     });

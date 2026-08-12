@@ -260,22 +260,15 @@ export interface WiringConfig {
    *  the gap for personalities that don't declare the tool. Keyed by
    *  personality ID (or `_default`). */
   toolSettings?: import('@ethosagent/config').ToolSettingsMap;
-  /** Voice STT provider. auxiliary.asr in config.yaml. `command` is the shell
-   *  template the local `command-stt` recipe provider runs, `timeout` its
-   *  budget in seconds. */
-  auxiliaryAsr?: {
-    provider: string;
-    model?: string;
-    apiKey?: string;
-    baseUrl?: string;
-    command?: string;
-    timeout?: number;
-  };
+  /** DEFAULT voice STT provider. auxiliary.asr in config.yaml. `command` is the
+   *  shell template the local `command-stt` recipe provider runs, `timeout` its
+   *  budget in seconds. Named alternatives live in `voice.stt.providers.*`. */
+  auxiliaryAsr?: import('@ethosagent/types').SttProviderEntry;
   /** DEFAULT voice TTS provider. auxiliary.tts in config.yaml. `command` is the
    *  shell template the local `command-tts` recipe provider runs, `outputFormat`
    *  the container it writes, `timeout` its budget in seconds, and
    *  `maxTextLength` the per-call text cap it advertises as
-   *  `caps.maxInputChars`. Named alternatives live in `voice.providers.*`. */
+   *  `caps.maxInputChars`. Named alternatives live in `voice.tts.providers.*`. */
   auxiliaryTts?: import('@ethosagent/types').TtsProviderEntry;
   /**
    * Real-time voice deployment config — `voice.*` in config.yaml, mapped
@@ -1030,11 +1023,17 @@ export interface CreateAgentLoopResult {
     ttsProviderName?: string;
     ttsProviderConfig: Record<string, unknown>;
     /**
-     * Named TTS roster from `voice.providers.*`, keyed by the operator's label.
-     * A personality's `voice.provider` names one of these; anything else (and
-     * anything unknown) falls back to `ttsDefaultEntry`.
+     * Named TTS roster from `voice.tts.providers.*`, keyed by the operator's
+     * label. A personality's `voice.tts_provider` names one of these; anything
+     * else (and anything unknown) falls back to the `auxiliary.tts` default.
      */
     ttsRoster?: Record<string, import('@ethosagent/types').TtsProviderEntry>;
+    /**
+     * Named STT roster from `voice.stt.providers.*`. The exact mirror:
+     * `voice.stt_provider` names one, anything unknown falls back to the
+     * `auxiliary.asr` default.
+     */
+    sttRoster?: Record<string, import('@ethosagent/types').SttProviderEntry>;
     secretsResolver: import('@ethosagent/types').SecretsResolver;
     /**
      * Local-only voice-egress allowlist from `voice.trustedPlugins`. Present

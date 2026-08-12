@@ -608,9 +608,10 @@ export interface CreatePersonalityInput {
   dreaming?: import('@ethosagent/types').DreamingConfig;
   evolution_approval_mode?: 'auto' | 'user';
   nightly?: import('@ethosagent/types').PersonalityConfig['nightly'];
-  /** How this personality sounds. `provider` names an entry in the deployment's
-   *  `voice.providers.*` roster; `tts_voice` is that provider's voice id. Empty
-   *  strings are dropped, so an editor can send blanks for "unset". */
+  /** How this personality sounds and listens. `tts_provider` / `stt_provider`
+   *  name entries in the deployment's `voice.tts.providers.*` /
+   *  `voice.stt.providers.*` rosters; `tts_voice` is the TTS provider's voice
+   *  id. Empty strings are dropped, so an editor can send blanks for "unset". */
   voice?: EditableVoiceConfig;
 }
 
@@ -622,9 +623,13 @@ export interface CreatePersonalityInput {
  * or update API would be advertising a control that does nothing.
  */
 export interface EditableVoiceConfig {
-  provider?: string;
+  tts_provider?: string;
+  stt_provider?: string;
   tts_voice?: string;
 }
+
+/** The editable sub-keys, in one place — the merge walks exactly this list. */
+const EDITABLE_VOICE_KEYS = ['tts_provider', 'stt_provider', 'tts_voice'] as const;
 
 export interface UpdatePersonalityPatch {
   name?: string;
@@ -681,7 +686,7 @@ function mergeVoiceConfig(
   patch: EditableVoiceConfig,
 ): import('@ethosagent/types').PersonalityVoiceConfig | undefined {
   const next: import('@ethosagent/types').PersonalityVoiceConfig = { ...existing };
-  for (const key of ['provider', 'tts_voice'] as const) {
+  for (const key of EDITABLE_VOICE_KEYS) {
     const value = patch[key];
     if (value === undefined) continue;
     if (value === '') delete next[key];
@@ -925,7 +930,7 @@ export class FilePersonalityRegistry implements PersonalityRegistry {
     await this.storage.mkdir(dir);
     await this.storage.mkdir(join(dir, 'files'));
     // Through `mergeVoiceConfig` even on create, so blank editor fields become
-    // "no voice block" rather than `voice.provider: ` lines the loader ignores.
+    // "no voice block" rather than `voice.tts_provider: ` lines the loader ignores.
     const voice = input.voice ? mergeVoiceConfig(undefined, input.voice) : undefined;
     await this.storage.write(
       join(dir, 'config.yaml'),
@@ -1745,16 +1750,23 @@ function buildMemoryConfig(
  * map. The language map mirrors `memory.options.*`: any `voice.languages.<tag>`
  * key becomes an entry.
  *
- *   voice.provider: studio
+ *   voice.tts_provider: studio
+ *   voice.stt_provider: whisper-es
  *   voice.tts_voice: af_bella
  *   voice.tier: pipeline
  *   voice.model: claude-haiku-4-5
  *   voice.languages.es: ef_dora
  *
- * `voice.provider` names an entry in the deployment's `voice.providers.*`
- * roster. It is kept verbatim — validating it here would mean this loader knew
- * the machine's config, and a name this machine lacks is a fallback at
- * resolution time (`selectTtsEntry`), not a load failure.
+ * `voice.tts_provider` / `voice.stt_provider` name entries in the deployment's
+ * `voice.tts.providers.*` / `voice.stt.providers.*` rosters. They are kept
+ * verbatim — validating them here would mean this loader knew the machine's
+ * config, and a name this machine lacks is a fallback at resolution time
+ * (`selectTtsEntry` / `selectSttEntry`), not a load failure.
+ *
+ * `voice.provider` is accepted as the older spelling of `voice.tts_provider`
+ * (it shipped before a personality could name an STT engine). The explicit new
+ * key wins; the renderer only ever writes the new one, so a personality
+ * re-saved from either spelling carries one key, not two.
  *
  * An unknown `voice.tier` is dropped rather than thrown on: a bad voice id
  * should not make a personality unloadable — it falls back to the global voice.
@@ -1762,7 +1774,8 @@ function buildMemoryConfig(
 function buildVoiceConfig(
   cfg: Record<string, string>,
 ): import('@ethosagent/types').PersonalityVoiceConfig | undefined {
-  const provider = cfg['voice.provider'];
+  const ttsProvider = cfg['voice.tts_provider'] || cfg['voice.provider'];
+  const sttProvider = cfg['voice.stt_provider'];
   const ttsVoice = cfg['voice.tts_voice'];
   const tier = cfg['voice.tier'];
   const model = cfg['voice.model'];
@@ -1773,7 +1786,8 @@ function buildVoiceConfig(
     if (tag.length > 0 && value) languages[tag] = value;
   }
   const out: import('@ethosagent/types').PersonalityVoiceConfig = {
-    ...(provider ? { provider } : {}),
+    ...(ttsProvider ? { tts_provider: ttsProvider } : {}),
+    ...(sttProvider ? { stt_provider: sttProvider } : {}),
     ...(ttsVoice ? { tts_voice: ttsVoice } : {}),
     ...(tier === 'pipeline' || tier === 'realtime' ? { tier } : {}),
     ...(model ? { model } : {}),
@@ -2197,7 +2211,14 @@ function renderConfigYaml(input: RenderConfigInput): string {
   }
   if (input.voice !== undefined) {
     const v = input.voice;
-    if (v.provider !== undefined) lines.push(`voice.provider: ${yamlScalar(v.provider)}`);
+    // Always the NEW spelling — a personality read from `voice.provider` is
+    // written back as `voice.tts_provider`, never both.
+    if (v.tts_provider !== undefined) {
+      lines.push(`voice.tts_provider: ${yamlScalar(v.tts_provider)}`);
+    }
+    if (v.stt_provider !== undefined) {
+      lines.push(`voice.stt_provider: ${yamlScalar(v.stt_provider)}`);
+    }
     if (v.tts_voice !== undefined) lines.push(`voice.tts_voice: ${yamlScalar(v.tts_voice)}`);
     if (v.tier !== undefined) lines.push(`voice.tier: ${v.tier}`);
     if (v.model !== undefined) lines.push(`voice.model: ${yamlScalar(v.model)}`);

@@ -46,6 +46,9 @@ const UtteranceStartSchema = z.object({
   utteranceId: z.string().min(1),
   /** Sample rate of the PCM frames that follow. */
   sampleRate: z.number().int().positive(),
+  /** Personality listening; its `voice.stt_provider` picks the STT entry. The
+   *  mirror of `personalityId` on `synthesize`. Absent → the default entry. */
+  personalityId: z.string().optional(),
 });
 
 const ClientAudioSchema = z.object({

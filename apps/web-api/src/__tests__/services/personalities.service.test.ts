@@ -627,11 +627,11 @@ describe('PersonalitiesService', () => {
         name: 'Agent',
         toolset: [],
         soulMd: '# Agent',
-        voice: { provider: 'studio', tts_voice: 'nova' },
+        voice: { tts_provider: 'studio', tts_voice: 'nova' },
       });
-      expect(personality.voice).toEqual({ provider: 'studio', tts_voice: 'nova' });
+      expect(personality.voice).toEqual({ tts_provider: 'studio', tts_voice: 'nova' });
       const reloaded = await service.get('agent');
-      expect(reloaded.personality.voice).toEqual({ provider: 'studio', tts_voice: 'nova' });
+      expect(reloaded.personality.voice).toEqual({ tts_provider: 'studio', tts_voice: 'nova' });
     });
 
     it('an update back to the default entry clears the provider on the wire too', async () => {
@@ -641,16 +641,16 @@ describe('PersonalitiesService', () => {
         name: 'Agent',
         toolset: [],
         soulMd: '# Agent',
-        voice: { provider: 'studio', tts_voice: 'nova' },
+        voice: { tts_provider: 'studio', tts_voice: 'nova' },
       });
 
       // What the edit form sends after switching the select back to Default.
       const { personality } = await service.update('agent', {
-        voice: { provider: '', tts_voice: 'nova' },
+        voice: { tts_provider: '', tts_voice: 'nova' },
       });
       expect(personality.voice).toEqual({ tts_voice: 'nova' });
 
-      const cleared = await service.update('agent', { voice: { provider: '', tts_voice: '' } });
+      const cleared = await service.update('agent', { voice: { tts_provider: '', tts_voice: '' } });
       expect(cleared.personality.voice).toBeUndefined();
     });
 

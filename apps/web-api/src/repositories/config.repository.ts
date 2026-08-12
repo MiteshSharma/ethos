@@ -5,7 +5,12 @@ import {
   secretRefForConfigKey,
 } from '@ethosagent/config';
 import { deriveBotKey } from '@ethosagent/core';
-import type { SecretsResolver, Storage, TtsProviderEntry } from '@ethosagent/types';
+import type {
+  SecretsResolver,
+  Storage,
+  SttProviderEntry,
+  TtsProviderEntry,
+} from '@ethosagent/types';
 import { requireStorage } from './require-storage';
 
 // Read/write `~/.ethos/config.yaml` from the web side. The file is shared
@@ -482,51 +487,105 @@ function stripQuotes(s: string): string {
 }
 
 /**
- * The named TTS roster (`voice.providers.<name>.<field>`) out of the passthrough
- * block, which is where these lines land — this parser models no key, it just
- * round-trips them.
+ * The named voice rosters (`voice.<tts|stt>.providers.<name>.<field>`) out of
+ * the passthrough block, which is where these lines land — this parser models no
+ * key, it just round-trips them.
  *
- * Deliberately a mirror of `buildTtsProviderEntry` in `@ethosagent/config`: same
- * charset for the name, same field set, and the same rule that an entry without
- * `provider` names nothing resolvable and is dropped rather than half-built.
- * Two readers of one file format is already one too many; they must at least
- * agree on what a valid entry is.
+ * Deliberately a mirror of `buildVoiceProviderEntry` in `@ethosagent/config`:
+ * same charset for the name, same field sets, and the same rule that an entry
+ * without `provider` names nothing resolvable and is dropped rather than
+ * half-built. Two readers of one file format is already one too many; they must
+ * at least agree on what a valid entry is. Both kinds run through ONE walker
+ * here for the same reason they do there.
+ *
+ * `voice.providers.<name>.<field>` — the older TTS-only spelling — is accepted
+ * on read and merged UNDER the new keys, so a hand-written config from before
+ * the rename still loads. Nothing writes it back.
  *
  * `apiKey` comes back exactly as stored — usually a `${secrets:…}` reference.
  * Callers that hand entries to a provider factory must resolve it first;
  * callers that show it to a browser must redact it.
  */
+const TTS_ROSTER_FIELDS = {
+  strings: ['model', 'apiKey', 'voice', 'baseUrl', 'command'],
+  numbers: ['timeout', 'maxTextLength'],
+  audioFormat: true,
+} as const;
+
+const STT_ROSTER_FIELDS = {
+  strings: ['model', 'apiKey', 'baseUrl', 'command'],
+  numbers: ['timeout'],
+  audioFormat: false,
+} as const;
+
+interface RosterFieldSet {
+  readonly strings: readonly string[];
+  readonly numbers: readonly string[];
+  readonly audioFormat: boolean;
+}
+
+function collectRoster(
+  passthrough: Record<string, string>,
+  prefixes: readonly string[],
+): Record<string, Record<string, string>> {
+  const bag: Record<string, Record<string, string>> = {};
+  // Prefixes are applied in order and later ones overwrite earlier ones, so the
+  // canonical spelling wins over the legacy alias regardless of key order.
+  for (const prefix of prefixes) {
+    const re = new RegExp(`^${prefix.replace(/\./g, '\\.')}\\.([A-Za-z0-9_-]+)\\.(\\w+)$`);
+    for (const [key, value] of Object.entries(passthrough)) {
+      const m = key.match(re);
+      const name = m?.[1];
+      const field = m?.[2];
+      if (!name || !field) continue;
+      const slot = bag[name] ?? {};
+      bag[name] = slot;
+      slot[field] = value;
+    }
+  }
+  return bag;
+}
+
+function buildRoster<E extends { provider: string }>(
+  bag: Record<string, Record<string, string>>,
+  fields: RosterFieldSet,
+): Record<string, E> {
+  const out: Record<string, E> = {};
+  for (const [name, kv] of Object.entries(bag)) {
+    if (!kv.provider) continue;
+    const entry: Record<string, string | number> = { provider: kv.provider };
+    for (const field of fields.strings) {
+      const value = kv[field];
+      if (value) entry[field] = value;
+    }
+    for (const field of fields.numbers) {
+      const n = Number(kv[field]);
+      if (kv[field] && Number.isFinite(n) && n > 0) entry[field] = n;
+    }
+    if (fields.audioFormat && isAudioFormat(kv.outputFormat)) {
+      entry.outputFormat = kv.outputFormat;
+    }
+    out[name] = entry as E;
+  }
+  return out;
+}
+
 export function parseTtsRoster(
   passthrough: Record<string, string>,
 ): Record<string, TtsProviderEntry> {
-  const bag: Record<string, Record<string, string>> = {};
-  for (const [key, value] of Object.entries(passthrough)) {
-    const m = key.match(/^voice\.providers\.([A-Za-z0-9_-]+)\.(\w+)$/);
-    const name = m?.[1];
-    const field = m?.[2];
-    if (!name || !field) continue;
-    const slot = bag[name] ?? {};
-    bag[name] = slot;
-    slot[field] = value;
-  }
-  const out: Record<string, TtsProviderEntry> = {};
-  for (const [name, kv] of Object.entries(bag)) {
-    if (!kv.provider) continue;
-    const timeout = Number(kv.timeout);
-    const maxTextLength = Number(kv.maxTextLength);
-    out[name] = {
-      provider: kv.provider,
-      ...(kv.model ? { model: kv.model } : {}),
-      ...(kv.apiKey ? { apiKey: kv.apiKey } : {}),
-      ...(kv.voice ? { voice: kv.voice } : {}),
-      ...(kv.baseUrl ? { baseUrl: kv.baseUrl } : {}),
-      ...(kv.command ? { command: kv.command } : {}),
-      ...(isAudioFormat(kv.outputFormat) ? { outputFormat: kv.outputFormat } : {}),
-      ...(Number.isFinite(timeout) && timeout > 0 ? { timeout } : {}),
-      ...(Number.isFinite(maxTextLength) && maxTextLength > 0 ? { maxTextLength } : {}),
-    };
-  }
-  return out;
+  return buildRoster<TtsProviderEntry>(
+    collectRoster(passthrough, ['voice.providers', 'voice.tts.providers']),
+    TTS_ROSTER_FIELDS,
+  );
+}
+
+export function parseSttRoster(
+  passthrough: Record<string, string>,
+): Record<string, SttProviderEntry> {
+  return buildRoster<SttProviderEntry>(
+    collectRoster(passthrough, ['voice.stt.providers']),
+    STT_ROSTER_FIELDS,
+  );
 }
 
 function isAudioFormat(v: string | undefined): v is 'opus' | 'mp3' | 'wav' | 'pcm' {

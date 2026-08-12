@@ -1,5 +1,5 @@
 // The named TTS roster: `voice.providers.<name>.*` in config, picked per
-// personality by `voice.provider`.
+// personality by `voice.tts_provider`.
 //
 // The property that matters most here is the security one. A roster key is a
 // LABEL the operator typed; the local-only egress gate keys on the underlying
@@ -113,7 +113,7 @@ describe('resolveTtsProviderForPersonality', () => {
   it('constructs the named entry with that entry’s own knobs — not the default’s', async () => {
     const { resolution, selection } = await resolveTtsProviderForPersonality({
       registry: registry(),
-      personality: { provider: 'studio' },
+      personality: { tts_provider: 'studio' },
       roster: ROSTER,
       defaultProviderName: DEFAULT_NAME,
       defaultProviderConfig: DEFAULT_CONFIG,
@@ -154,7 +154,7 @@ describe('resolveTtsProviderForPersonality', () => {
     const { resolution, selection } = await resolveTtsProviderForPersonality({
       registry: registry(),
       // A personality shared from a machine that has an `elevenlabs` entry.
-      personality: { provider: 'elevenlabs' },
+      personality: { tts_provider: 'elevenlabs' },
       roster: ROSTER,
       defaultProviderName: DEFAULT_NAME,
       defaultProviderConfig: DEFAULT_CONFIG,
@@ -169,7 +169,7 @@ describe('resolveTtsProviderForPersonality', () => {
   it('reports not_configured when neither the roster nor a default entry answers', async () => {
     const { resolution } = await resolveTtsProviderForPersonality({
       registry: registry(),
-      personality: { provider: 'studio' },
+      personality: { tts_provider: 'studio' },
     });
     expect(resolution).toMatchObject({ ok: false, code: 'not_configured' });
   });
@@ -188,7 +188,7 @@ describe('egress gate keys on the resolved provider, never on the roster label',
   it('refuses a roster entry named "local-kokoro" that is backed by a non-local provider', async () => {
     const { resolution, selection } = await resolveTtsProviderForPersonality({
       registry: registry(),
-      personality: { provider: 'local-kokoro' },
+      personality: { tts_provider: 'local-kokoro' },
       roster: DISGUISED,
       // Gate armed, allowlist empty: only `caps.local` providers may speak.
       trustedVoicePlugins: new Set<string>(),
@@ -207,7 +207,7 @@ describe('egress gate keys on the resolved provider, never on the roster label',
   it('still admits a roster entry whose underlying provider really is local', async () => {
     const { resolution } = await resolveTtsProviderForPersonality({
       registry: registry(),
-      personality: { provider: 'totally-offline' },
+      personality: { tts_provider: 'totally-offline' },
       roster: DISGUISED,
       trustedVoicePlugins: new Set<string>(),
     });
@@ -219,7 +219,7 @@ describe('egress gate keys on the resolved provider, never on the roster label',
   it('admits a non-local roster entry only when its UNDERLYING id is allowlisted', async () => {
     const byLabel = await resolveTtsProviderForPersonality({
       registry: registry(),
-      personality: { provider: 'local-kokoro' },
+      personality: { tts_provider: 'local-kokoro' },
       roster: DISGUISED,
       // Allowlisting the LABEL must not help.
       trustedVoicePlugins: new Set(['local-kokoro']),
@@ -228,7 +228,7 @@ describe('egress gate keys on the resolved provider, never on the roster label',
 
     const byProviderId = await resolveTtsProviderForPersonality({
       registry: registry(),
-      personality: { provider: 'local-kokoro' },
+      personality: { tts_provider: 'local-kokoro' },
       roster: DISGUISED,
       trustedVoicePlugins: new Set(['openai-tts']),
     });
@@ -238,7 +238,7 @@ describe('egress gate keys on the resolved provider, never on the roster label',
 
 describe('voice precedence within the chosen roster entry', () => {
   async function speak(personality: {
-    provider?: string;
+    tts_provider?: string;
     tts_voice?: string;
     languages?: Record<string, string>;
   }): Promise<string | undefined> {
@@ -260,16 +260,16 @@ describe('voice precedence within the chosen roster entry', () => {
   }
 
   it("uses the entry's own voice when the personality declares none", async () => {
-    expect(await speak({ provider: 'studio' })).toBe('alloy');
+    expect(await speak({ tts_provider: 'studio' })).toBe('alloy');
   });
 
   it("prefers the personality's tts_voice over the entry's voice", async () => {
-    expect(await speak({ provider: 'studio', tts_voice: 'nova' })).toBe('nova');
+    expect(await speak({ tts_provider: 'studio', tts_voice: 'nova' })).toBe('nova');
   });
 
   it('prefers a language-specific voice over both', async () => {
     expect(
-      await speak({ provider: 'studio', tts_voice: 'nova', languages: { es: 'shimmer' } }),
+      await speak({ tts_provider: 'studio', tts_voice: 'nova', languages: { es: 'shimmer' } }),
     ).toBe('shimmer');
   });
 

@@ -315,6 +315,7 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
         ttsProviderName?: string;
         ttsProviderConfig: Record<string, unknown>;
         ttsRoster?: Record<string, import('@ethosagent/types').TtsProviderEntry>;
+        sttRoster?: Record<string, import('@ethosagent/types').SttProviderEntry>;
         trustedVoicePlugins?: ReadonlySet<string>;
       }
     | undefined;
@@ -1013,8 +1014,10 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
     ...(ttsProviders ? { ttsProviderRegistry: ttsProviders } : {}),
     ...(voiceConfig?.ttsProviderName ? { ttsProviderName: voiceConfig.ttsProviderName } : {}),
     ...(voiceConfig ? { ttsProviderConfig: voiceConfig.ttsProviderConfig } : {}),
-    // Named TTS roster — what a personality's `voice.provider` picks from.
+    // Named rosters — what a personality's `voice.tts_provider` /
+    // `voice.stt_provider` pick from.
     ...(voiceConfig?.ttsRoster ? { ttsRoster: voiceConfig.ttsRoster } : {}),
+    ...(voiceConfig?.sttRoster ? { sttRoster: voiceConfig.sttRoster } : {}),
     // Local-only voice-egress gate. Armed only when the operator declared
     // `voice.trustedPlugins`; the browser talk lane then refuses a non-local
     // provider instead of shipping audio off the machine.

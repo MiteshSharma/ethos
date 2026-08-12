@@ -140,7 +140,7 @@ describe('VoiceService.synthesize — preview override', () => {
 
   it('beats the stored voice of the personality being edited', async () => {
     const { voice, ran } = harness({
-      personality: { provider: 'studio', tts_voice: 'alloy' },
+      personality: { tts_provider: 'studio', tts_voice: 'alloy' },
       roster: { studio: { provider: 'openai-tts', apiKey: 'sk-studio' } },
     });
 

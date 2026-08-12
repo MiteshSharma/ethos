@@ -290,18 +290,24 @@ const PersonalityNightlyInput = z
   .optional();
 
 /**
- * The editable slice of a personality's `voice` block — how it sounds.
+ * The editable slice of a personality's `voice` block — how it sounds and what
+ * it listens through.
  *
- * `provider` names an entry in the deployment's `voice.providers.*` roster (a
- * LABEL, never a credential); `tts_voice` is that provider's voice id. `''`
- * clears the key, so "Default" is expressible.
+ * `tts_provider` / `stt_provider` name entries in the deployment's
+ * `voice.tts.providers.*` / `voice.stt.providers.*` rosters (LABELS, never
+ * credentials); `tts_voice` is the TTS provider's voice id. `''` clears the key,
+ * so "Default" is expressible.
  *
  * `tier`, `model` and `languages` are deliberately absent: they round-trip
  * through config.yaml but nothing consumes them yet, and a form field is a
  * promise that it works.
  */
 const PersonalityVoiceInput = z
-  .object({ provider: z.string().optional(), tts_voice: z.string().optional() })
+  .object({
+    tts_provider: z.string().optional(),
+    stt_provider: z.string().optional(),
+    tts_voice: z.string().optional(),
+  })
   .optional();
 
 const PersonalityCreateInput = z.object({
@@ -883,13 +889,13 @@ const AuxModelUpdateSchema = z.object({
 });
 
 /** Roster-entry key. The parser in `@ethosagent/config` matches
- *  `voice.providers.([A-Za-z0-9_-]+).<field>`, so a name outside that charset
- *  would serialize to a line the loader silently drops. */
+ *  `voice.<tts|stt>.providers.([A-Za-z0-9_-]+).<field>`, so a name outside that
+ *  charset would serialize to a line the loader silently drops. */
 const VoiceProviderNameRegex = /^[A-Za-z0-9_-]+$/;
 
-/** One entry of the named TTS roster (`voice.providers.<name>.*`). Same field
- *  set as the default `auxiliary.tts` entry, because it IS one — the entry a
- *  personality gets when it names no other. API key never round-trips. */
+/** One entry of the named TTS roster (`voice.tts.providers.<name>.*`). Same
+ *  field set as the default `auxiliary.tts` entry, because it IS one — the entry
+ *  a personality gets when it names no other. API key never round-trips. */
 const VoiceProviderEntryGetSchema = z.object({
   /** Registered provider id (`openai-tts`, `local-tts`, `command-tts`, …). */
   provider: z.string(),
@@ -899,7 +905,7 @@ const VoiceProviderEntryGetSchema = z.object({
   baseUrl: z.string().nullable(),
   command: z.string().nullable(),
   outputFormat: z.enum(['opus', 'mp3', 'wav', 'pcm']).nullable(),
-  /** `voice.providers.<name>.timeout` — seconds, the unit `command-tts` reads. */
+  /** `voice.tts.providers.<name>.timeout` — seconds, `command-tts`'s unit. */
   timeout: z.number().nullable(),
   maxTextLength: z.number().nullable(),
 });
@@ -917,6 +923,31 @@ const VoiceProviderEntryUpdateSchema = z.object({
   /** Seconds. */
   timeout: z.number().int().min(1).max(3600).optional(),
   maxTextLength: z.number().int().min(100).max(100_000).optional(),
+});
+
+/** One entry of the named STT roster (`voice.stt.providers.<name>.*`). The
+ *  mirror of the TTS entry over the `auxiliary.asr` field set — no `voice`,
+ *  `outputFormat` or `maxTextLength`, which only mean something when producing
+ *  audio. API key never round-trips. */
+const VoiceSttProviderEntryGetSchema = z.object({
+  /** Registered provider id (`openai-stt`, `local-stt`, `command-stt`, …). */
+  provider: z.string(),
+  model: z.string().nullable(),
+  apiKeyPreview: z.string().nullable(),
+  baseUrl: z.string().nullable(),
+  command: z.string().nullable(),
+  /** `voice.stt.providers.<name>.timeout` — seconds, `command-stt`'s unit. */
+  timeout: z.number().nullable(),
+});
+const VoiceSttProviderEntryUpdateSchema = z.object({
+  provider: z.string().min(1),
+  model: z.string().optional(),
+  /** Write-only; never echoed back. Omit to keep the stored key. */
+  apiKey: z.string().optional(),
+  baseUrl: z.string().optional(),
+  command: z.string().optional(),
+  /** Seconds. */
+  timeout: z.number().int().min(1).max(3600).optional(),
 });
 
 const ConfigGetOutput = z.object({
@@ -987,10 +1018,15 @@ const ConfigGetOutput = z.object({
   voiceTrustedPlugins: z.array(z.string()).nullable(),
   /** `voice.defaultMode` — where a new channel lane starts. */
   voiceDefaultMode: z.enum(['off', 'mirror_inbound', 'all']).nullable(),
-  /** `voice.providers.<name>.*` — the named TTS roster, keyed by the operator's
-   *  label. `auxiliary.tts` (the `voiceTts*` fields above) stays the DEFAULT
-   *  entry and is NOT repeated here. Empty object = no roster configured. */
-  voiceProviders: z.record(z.string(), VoiceProviderEntryGetSchema),
+  /** `voice.tts.providers.<name>.*` — the named TTS roster, keyed by the
+   *  operator's label. `auxiliary.tts` (the `voiceTts*` fields above) stays the
+   *  DEFAULT entry and is NOT repeated here. Empty object = no roster.
+   *  The older `voice.providers.*` spelling is read into this same map. */
+  voiceTtsProviders: z.record(z.string(), VoiceProviderEntryGetSchema),
+  /** `voice.stt.providers.<name>.*` — the named STT roster. `auxiliary.asr`
+   *  (the `voiceProvider` / `voiceModel` / … fields above) stays the DEFAULT
+   *  entry and is NOT repeated here. */
+  voiceSttProviders: z.record(z.string(), VoiceSttProviderEntryGetSchema),
   // -- Settings-page additions (keys with no other UI home) ------------------
   /** Azure-only REST API version (`apiVersion`); null when unset. */
   apiVersion: z.string().nullable(),
@@ -1233,11 +1269,16 @@ const ConfigUpdateInput = z.object({
   voiceTrustedPlugins: z.array(z.string()).nullable().optional(),
   /** `voice.defaultMode`; null clears the key (back to `mirror_inbound`). */
   voiceDefaultMode: z.enum(['off', 'mirror_inbound', 'all']).nullable().optional(),
-  /** `voice.providers.*` — the named TTS roster. Present = REPLACE the whole
-   *  roster (every `voice.providers.` key is dropped, then these are written),
-   *  so an omitted entry is a deletion. Absent leaves the roster untouched. */
-  voiceProviders: z
+  /** `voice.tts.providers.*` — the named TTS roster. Present = REPLACE the whole
+   *  roster (every `voice.tts.providers.` key — and every legacy
+   *  `voice.providers.` key — is dropped, then these are written), so an omitted
+   *  entry is a deletion. Absent leaves the roster untouched. */
+  voiceTtsProviders: z
     .record(z.string().regex(VoiceProviderNameRegex), VoiceProviderEntryUpdateSchema)
+    .optional(),
+  /** `voice.stt.providers.*` — the named STT roster. Same full-replacement rule. */
+  voiceSttProviders: z
+    .record(z.string().regex(VoiceProviderNameRegex), VoiceSttProviderEntryUpdateSchema)
     .optional(),
   // -- Settings-page additions (see the null-clears note above) --------------
   /** Azure-only REST API version (`apiVersion`). */
@@ -2659,6 +2700,12 @@ const digest = {
 const VoiceTranscribeInput = z.object({
   audio: z.string().min(1),
   mimeType: z.string().min(1),
+  /** Personality listening. Without it the server cannot honour a personality's
+   *  declared `voice.stt_provider` and uses the default `auxiliary.asr` entry —
+   *  the mirror of `personalityId` on `voice.synthesize`. */
+  personalityId: z.string().optional(),
+  /** BCP-47 tag handed to the provider, when the client knows it. */
+  language: z.string().optional(),
 });
 const VoiceTranscribeOutput = z.object({
   transcript: z.string(),
@@ -2675,10 +2722,11 @@ const VoiceSynthesizeInput = z.object({
   /** BCP-47 tag of the reply, selecting from the personality's language map. */
   language: z.string().optional(),
   /**
-   * Audition an unsaved selection: `provider` names a `voice.providers.<name>`
-   * roster entry and `voice` the voice id, and both BEAT the personality's own
-   * `voice` block and the global default. The personality editor's Preview
-   * button uses it, since the selection it is previewing is not on disk yet.
+   * Audition an unsaved selection: `provider` names a
+   * `voice.tts.providers.<name>` roster entry and `voice` the voice id, and
+   * both BEAT the personality's own `voice` block and the global default. The
+   * personality editor's Preview button uses it, since the selection it is
+   * previewing is not on disk yet.
    *
    * `provider` is a roster LABEL, never a provider id or a credential — an
    * unknown label falls back to the default entry exactly as a personality's
@@ -2709,8 +2757,21 @@ const VoiceTtsEntrySchema = z.object({
 const VoiceTtsEntriesOutput = z.object({
   /** The `auxiliary.tts` default entry — what a personality that names nothing gets. */
   default: VoiceTtsEntrySchema,
-  /** `voice.providers.*`, keyed by the operator's label. */
+  /** `voice.tts.providers.*`, keyed by the operator's label. */
   roster: z.record(z.string(), VoiceTtsEntrySchema),
+});
+
+/**
+ * One selectable STT entry. `providerId` only: an ear advertises no voice ids,
+ * so there is nothing to construct a provider to read, and this procedure makes
+ * no provider at all.
+ */
+const VoiceSttEntrySchema = z.object({ providerId: z.string().nullable() });
+const VoiceSttEntriesOutput = z.object({
+  /** The `auxiliary.asr` default entry — what a personality that names nothing gets. */
+  default: VoiceSttEntrySchema,
+  /** `voice.stt.providers.*`, keyed by the operator's label. */
+  roster: z.record(z.string(), VoiceSttEntrySchema),
 });
 
 /** @experimental */
@@ -2720,6 +2781,8 @@ const voice = {
   /** Selectable TTS entries + the voice ids each advertises. Read-only: it
    *  constructs providers to read their caps and synthesizes nothing. */
   ttsEntries: oc.output(VoiceTtsEntriesOutput),
+  /** Selectable STT entries. Read-only and construction-free. */
+  sttEntries: oc.output(VoiceSttEntriesOutput),
 };
 
 // ---------------------------------------------------------------------------

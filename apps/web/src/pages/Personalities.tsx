@@ -383,10 +383,12 @@ interface WizardState {
   skillEvolutionMinToolCalls: number;
   skillEvolutionCooldownMinutes: number;
   evolutionApprovalMode: 'auto' | 'user';
-  /** `voice.provider` — a `voice.providers.*` roster name; '' = the default entry. */
-  voiceProvider: string;
+  /** `voice.tts_provider` — a `voice.tts.providers.*` roster name; '' = default. */
+  voiceTtsProvider: string;
   /** `voice.tts_voice`. */
   voiceTtsVoice: string;
+  /** `voice.stt_provider` — a `voice.stt.providers.*` roster name; '' = default. */
+  voiceSttProvider: string;
 }
 
 const SOUL_TEMPLATE = `# About me\n\nI am a {role}. I {what I do}. I {how I work}.\n\n## How I respond\n\n- {tone / shape}\n- {tone / shape}\n- {tone / shape}\n`;
@@ -416,8 +418,9 @@ function CreateWizard({ existingIds, onClose }: { existingIds: Set<string>; onCl
     skillEvolutionMinToolCalls: 3,
     skillEvolutionCooldownMinutes: 30,
     evolutionApprovalMode: 'user',
-    voiceProvider: '',
+    voiceTtsProvider: '',
     voiceTtsVoice: '',
+    voiceSttProvider: '',
   });
 
   const createMut = useMutation({
@@ -459,13 +462,14 @@ function CreateWizard({ existingIds, onClose }: { existingIds: Set<string>; onCl
           cooldown_minutes: state.skillEvolutionCooldownMinutes,
         },
         evolution_approval_mode: state.evolutionApprovalMode,
-        // Omitted entirely when neither is set, so a personality created
-        // without touching these carries no `voice` block at all.
-        ...(state.voiceProvider || state.voiceTtsVoice
+        // Omitted entirely when none is set, so a personality created without
+        // touching these carries no `voice` block at all.
+        ...(state.voiceTtsProvider || state.voiceTtsVoice || state.voiceSttProvider
           ? {
               voice: {
-                ...(state.voiceProvider ? { provider: state.voiceProvider } : {}),
+                ...(state.voiceTtsProvider ? { tts_provider: state.voiceTtsProvider } : {}),
                 ...(state.voiceTtsVoice ? { tts_voice: state.voiceTtsVoice } : {}),
+                ...(state.voiceSttProvider ? { stt_provider: state.voiceSttProvider } : {}),
               },
             }
           : {}),
@@ -623,9 +627,18 @@ function IdentityStep({
         />
       </Form.Item>
       <PersonalityVoiceFields
-        value={{ provider: state.voiceProvider, ttsVoice: state.voiceTtsVoice }}
+        value={{
+          ttsProvider: state.voiceTtsProvider,
+          ttsVoice: state.voiceTtsVoice,
+          sttProvider: state.voiceSttProvider,
+        }}
         onChange={(next) =>
-          setState((s) => ({ ...s, voiceProvider: next.provider, voiceTtsVoice: next.ttsVoice }))
+          setState((s) => ({
+            ...s,
+            voiceTtsProvider: next.ttsProvider,
+            voiceTtsVoice: next.ttsVoice,
+            voiceSttProvider: next.sttProvider,
+          }))
         }
       />
     </Form>
@@ -1700,7 +1713,11 @@ export function ConfigEditor({ id, personality }: { id: string; personality: Per
   // pair (the voice control switches between a select and free text as the
   // provider changes), and threading that through registered Form.Items buys
   // nothing but indirection.
-  const [voice, setVoice] = useState<PersonalityVoice>({ provider: '', ttsVoice: '' });
+  const [voice, setVoice] = useState<PersonalityVoice>({
+    ttsProvider: '',
+    ttsVoice: '',
+    sttProvider: '',
+  });
   const catalogQuery = useQuery({
     queryKey: ['models', 'catalog'],
     queryFn: () => rpc.models.catalog(),
@@ -1746,8 +1763,9 @@ export function ConfigEditor({ id, personality }: { id: string; personality: Per
       nightlyExpression: personality.nightly?.expression ?? true,
     });
     setVoice({
-      provider: personality.voice?.provider ?? '',
+      ttsProvider: personality.voice?.tts_provider ?? '',
       ttsVoice: personality.voice?.tts_voice ?? '',
+      sttProvider: personality.voice?.stt_provider ?? '',
     });
   }, [personality, form]);
 
@@ -1824,10 +1842,14 @@ export function ConfigEditor({ id, personality }: { id: string; personality: Per
         },
         safety: { approvalMode: values.safetyApprovalMode },
         memory: { provider: values.memoryProvider },
-        // Both sub-keys always sent, empty string included: the registry
+        // Every sub-key always sent, empty string included: the registry
         // shallow-merges the voice block, so omitting one would preserve the
         // stored value and make "back to the default provider" unexpressible.
-        voice: { provider: voice.provider, tts_voice: voice.ttsVoice },
+        voice: {
+          tts_provider: voice.ttsProvider,
+          tts_voice: voice.ttsVoice,
+          stt_provider: voice.sttProvider,
+        },
         nightly: {
           enabled: values.nightlyEnabled,
           judge: {

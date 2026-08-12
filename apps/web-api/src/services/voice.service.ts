@@ -1,8 +1,9 @@
 import {
-  resolveSttProvider,
+  resolveSttProviderForPersonality,
   resolveTtsProvider,
   resolveTtsProviderForPersonality,
   resolveVoicePreferences,
+  selectSttEntry,
   selectTtsEntry,
   ttsEntryProviderConfig,
   type VoiceResolution,
@@ -12,6 +13,7 @@ import {
   type PersonalityVoiceConfig,
   type SecretsResolver,
   type SttProvider,
+  type SttProviderEntry,
   type SttProviderRegistry,
   type TtsProvider,
   type TtsProviderEntry,
@@ -26,6 +28,18 @@ import { isHallucination, truncateAtSentenceBoundary } from '@ethosagent/voice-t
  */
 export interface VoicePersonalityLookup {
   get(id: string): { voice?: PersonalityVoiceConfig } | undefined;
+}
+
+/** Per-call transcription inputs. See {@link VoiceService.transcribeBytes}. */
+export interface TranscriptionVoiceOptions {
+  /**
+   * Personality listening to this utterance. Its `voice.stt_provider` picks an
+   * entry from the STT roster; absent → the default `auxiliary.asr` entry, which
+   * is what this surface did before rosters existed.
+   */
+  personalityId?: string;
+  /** BCP-47 tag handed to the provider, when the surface knows it. */
+  language?: string;
 }
 
 /** Per-call voice selection inputs. See {@link VoiceService.synthesize}. */
@@ -56,6 +70,15 @@ export interface TtsEntryInfo {
   voices: string[] | null;
 }
 
+/**
+ * One selectable STT entry. No `voices` twin: an ear has no voice ids, and
+ * inventing a null field for symmetry would be symmetry for its own sake.
+ */
+export interface SttEntryInfo {
+  /** Registered provider id the entry names. Null = nothing configured. */
+  providerId: string | null;
+}
+
 /** Live-config shape the Settings tab persists. */
 interface LiveVoiceConfig {
   voiceProvider?: string | null;
@@ -67,8 +90,10 @@ interface LiveVoiceConfig {
   voiceTtsVoice?: string | null;
   voiceTtsBaseUrl?: string | null;
   voiceTtsModel?: string | null;
-  /** `voice.providers.*` as stored, with API keys already resolved. */
-  voiceProviders?: Readonly<Record<string, TtsProviderEntry>> | null;
+  /** `voice.tts.providers.*` as stored, with API keys already resolved. */
+  voiceTtsProviders?: Readonly<Record<string, TtsProviderEntry>> | null;
+  /** `voice.stt.providers.*` as stored, with API keys already resolved. */
+  voiceSttProviders?: Readonly<Record<string, SttProviderEntry>> | null;
 }
 
 export class VoiceService {
@@ -77,16 +102,26 @@ export class VoiceService {
   private readonly initialProviderConfig: Record<string, unknown>;
   private readonly secrets: SecretsResolver | undefined;
   private readonly configGetter?: () => Promise<LiveVoiceConfig | null>;
+  /**
+   * Named STT roster (`voice.stt.providers.*`). A personality's
+   * `voice.stt_provider` picks from it; everything else uses the default
+   * `auxiliary.asr` entry. Absent → this surface behaves exactly as it did
+   * before rosters existed.
+   */
+  private readonly sttRoster: Readonly<Record<string, SttProviderEntry>> | undefined;
+  /** Memo of the last entry that transcribed. Keyed by that entry's FIELDS. */
   private provider: SttProvider | null = null;
   private resolvedName: string | undefined;
+  private resolvedSttEntryKey = '';
 
   private readonly ttsRegistry: TtsProviderRegistry | undefined;
   private readonly initialTtsProviderName: string | undefined;
   private readonly initialTtsProviderConfig: Record<string, unknown>;
   /**
-   * Named TTS roster (`voice.providers.*`). A personality's `voice.provider`
-   * picks from it; everything else uses the default entry below. Absent → this
-   * surface behaves exactly as it did before rosters existed.
+   * Named TTS roster (`voice.tts.providers.*`). A personality's
+   * `voice.tts_provider` picks from it; everything else uses the default entry
+   * below. Absent → this surface behaves exactly as it did before rosters
+   * existed.
    */
   private readonly ttsRoster: Readonly<Record<string, TtsProviderEntry>> | undefined;
   /** Cache key is the ENTRY that served — `''` for the default entry. */
@@ -120,6 +155,7 @@ export class VoiceService {
     sttRegistry?: SttProviderRegistry;
     providerName?: string;
     providerConfig?: Record<string, unknown>;
+    sttRoster?: Readonly<Record<string, SttProviderEntry>>;
     secrets?: SecretsResolver;
     configGetter?: () => Promise<LiveVoiceConfig | null>;
     ttsRegistry?: TtsProviderRegistry;
@@ -132,6 +168,7 @@ export class VoiceService {
     this.sttRegistry = opts.sttRegistry;
     this.initialProviderName = opts.providerName;
     this.initialProviderConfig = opts.providerConfig ?? {};
+    this.sttRoster = opts.sttRoster;
     this.secrets = opts.secrets;
     this.configGetter = opts.configGetter;
     this.ttsRegistry = opts.ttsRegistry;
@@ -155,7 +192,7 @@ export class VoiceService {
     const override = opts?.override;
     if (override?.provider || override?.voice) {
       return {
-        ...(override.provider ? { provider: override.provider } : {}),
+        ...(override.provider ? { tts_provider: override.provider } : {}),
         ...(override.voice ? { tts_voice: override.voice } : {}),
       };
     }
@@ -185,40 +222,86 @@ export class VoiceService {
     }).ttsVoice;
   }
 
-  private async resolve(): Promise<VoiceResolution<SttProvider>> {
+  /**
+   * The default STT entry and the roster, boot values overlaid with live config.
+   *
+   * Same rule as {@link ttsDefaults}: the constructor's provider wins for the
+   * DEFAULT entry and live Settings fill in only when boot supplied none, while
+   * the ROSTER is edited from Settings and so a getter-supplied roster replaces
+   * the boot snapshot outright.
+   */
+  private async sttDefaults(): Promise<{
+    name: string | undefined;
+    config: Record<string, unknown>;
+    roster: Readonly<Record<string, SttProviderEntry>> | undefined;
+  }> {
     let name = this.initialProviderName;
     let config: Record<string, unknown> = this.initialProviderConfig;
+    const live = this.configGetter ? await this.configGetter().catch(() => null) : null;
+    if (!name && live?.voiceProvider) {
+      name = live.voiceProvider;
+      config = {
+        apiKey: live.voiceApiKey ?? undefined,
+        baseUrl: live.voiceBaseUrl ?? undefined,
+        model: live.voiceModel ?? undefined,
+      };
+    }
+    return { name, config, roster: live?.voiceSttProviders ?? this.sttRoster };
+  }
 
-    if (!name && this.configGetter) {
-      const live = await this.configGetter().catch(() => null);
-      if (live?.voiceProvider) {
-        name = live.voiceProvider;
-        config = {
-          apiKey: live.voiceApiKey ?? undefined,
-          baseUrl: live.voiceBaseUrl ?? undefined,
-          model: live.voiceModel ?? undefined,
-        };
-      }
+  /**
+   * Resolve the STT provider for this utterance.
+   *
+   * Roster-aware, mirroring {@link resolveTts}: the listening personality's
+   * `voice.stt_provider` picks an entry from `voice.stt.providers.*`; no name,
+   * or a name this deployment does not have, falls back to the default
+   * `auxiliary.asr` entry.
+   */
+  private async resolve(
+    personality?: PersonalityVoiceConfig,
+  ): Promise<VoiceResolution<SttProvider>> {
+    const { name, config, roster } = await this.sttDefaults();
+
+    // Pure decision — it names the entry and keys the memo.
+    // `resolveSttProviderForPersonality` stays the authority on which provider
+    // id is actually constructed and gated.
+    const selection = selectSttEntry({
+      ...(personality?.stt_provider ? { requestedName: personality.stt_provider } : {}),
+      ...(roster ? { roster } : {}),
+    });
+
+    // The memo holds ONE provider — the last entry that transcribed. The key
+    // carries the entry's FIELDS, not just its name: the roster is editable
+    // from Settings, so `whisper-es` after an edit is a different provider than
+    // `whisper-es` before it.
+    const entryKey = `${selection.entryName ?? ''} ${JSON.stringify(selection.entry ?? null)}`;
+    const cachedId = this.resolvedName;
+    if (
+      this.provider &&
+      cachedId !== undefined &&
+      entryKey === this.resolvedSttEntryKey &&
+      (selection.entry !== undefined || cachedId === name)
+    ) {
+      return { ok: true, provider: this.provider, providerId: cachedId };
     }
 
-    const cachedName = this.resolvedName;
-    if (cachedName !== undefined && cachedName === name && this.provider) {
-      return { ok: true, provider: this.provider, providerId: cachedName };
-    }
-
-    const resolution = await resolveSttProvider({
+    const { resolution } = await resolveSttProviderForPersonality({
       registry: this.sttRegistry,
-      providerName: name,
-      providerConfig: config,
+      ...(personality ? { personality } : {}),
+      ...(roster ? { roster } : {}),
+      ...(name ? { defaultProviderName: name } : {}),
+      defaultProviderConfig: config,
       ...(this.secrets ? { secrets: this.secrets } : {}),
       ...(this.trustedVoicePlugins ? { trustedVoicePlugins: this.trustedVoicePlugins } : {}),
     });
     if (resolution.ok) {
       this.provider = resolution.provider;
       this.resolvedName = resolution.providerId;
+      this.resolvedSttEntryKey = entryKey;
     } else {
       this.provider = null;
       this.resolvedName = undefined;
+      this.resolvedSttEntryKey = '';
     }
     return resolution;
   }
@@ -245,7 +328,7 @@ export class VoiceService {
     // memo. `resolveTtsProviderForPersonality` below stays the authority on
     // which provider id is actually constructed and gated.
     const selection = selectTtsEntry({
-      ...(personality?.provider ? { requestedName: personality.provider } : {}),
+      ...(personality?.tts_provider ? { requestedName: personality.tts_provider } : {}),
       ...(roster ? { roster } : {}),
     });
     // Lowest voice rung, evaluated within the chosen provider. On a roster
@@ -320,7 +403,7 @@ export class VoiceService {
         model: live.voiceTtsModel ?? undefined,
       };
     }
-    return { name, config, roster: live?.voiceProviders ?? this.ttsRoster };
+    return { name, config, roster: live?.voiceTtsProviders ?? this.ttsRoster };
   }
 
   /**
@@ -360,6 +443,26 @@ export class VoiceService {
       entries[entryName] = await describe(entry.provider, ttsEntryProviderConfig(entry));
     }
     return { default: await describe(name, config), roster: entries };
+  }
+
+  /**
+   * Every STT entry a personality can name, and the provider id each names.
+   *
+   * Unlike {@link listTtsEntries} this constructs NOTHING: there is no
+   * `caps.voices` equivalent to read for an ear, so building a transcriber just
+   * to name it would spend credentials and connections for an answer already in
+   * the config.
+   */
+  async listSttEntries(): Promise<{
+    default: SttEntryInfo;
+    roster: Record<string, SttEntryInfo>;
+  }> {
+    const { name, roster } = await this.sttDefaults();
+    const entries: Record<string, SttEntryInfo> = {};
+    for (const [entryName, entry] of Object.entries(roster ?? {})) {
+      entries[entryName] = { providerId: entry.provider };
+    }
+    return { default: { providerId: name ?? null }, roster: entries };
   }
 
   async synthesize(
@@ -459,8 +562,12 @@ export class VoiceService {
     data: Uint8Array,
     mimeType: string,
     signal?: AbortSignal,
+    opts?: TranscriptionVoiceOptions,
   ): Promise<{ text: string; provider: string }> {
-    const resolution = await this.resolve();
+    const personality = opts?.personalityId
+      ? this.personalities?.get(opts.personalityId)?.voice
+      : undefined;
+    const resolution = await this.resolve(personality);
     if (!resolution.ok) {
       throw new Error(
         resolution.code === 'not_configured'
@@ -471,7 +578,10 @@ export class VoiceService {
 
     const raw = await resolution.provider.transcribeBuffer(
       { data, mimeType },
-      signal ? { signal } : undefined,
+      {
+        ...(opts?.language ? { language: opts.language } : {}),
+        ...(signal ? { signal } : {}),
+      },
     );
     if (isHallucination(raw)) {
       throw new Error('Could not transcribe audio — try again');
@@ -483,7 +593,11 @@ export class VoiceService {
     return { text: trimmed, provider: resolution.providerId };
   }
 
-  async transcribe(audioBase64: string, mimeType: string): Promise<string> {
+  async transcribe(
+    audioBase64: string,
+    mimeType: string,
+    opts?: TranscriptionVoiceOptions,
+  ): Promise<string> {
     // The browser's utterance goes to the provider as bytes. It used to land
     // in a temp file first, purely so the provider could read it back — a
     // write, a read and a cleanup obligation on captured voice, for a payload
@@ -492,6 +606,8 @@ export class VoiceService {
     const result = await this.transcribeBytes(
       new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength),
       mimeType,
+      undefined,
+      opts,
     );
     return result.text;
   }

@@ -137,20 +137,34 @@ export interface OutboundPolicyConfig {
  * concern stays out — voice modes, VAD tuning, per-adapter affordances, and
  * wake routes all remain gateway/config-owned.
  *
- * Absent = inherit the global `auxiliary.tts.*` defaults.
+ * Absent = inherit the global `auxiliary.asr.*` / `auxiliary.tts.*` defaults.
  */
 export interface PersonalityVoiceConfig {
   /**
-   * Name of an entry in the deployment's TTS roster (`voice.providers.<name>.*`
-   * in `~/.ethos/config.yaml`). A LABEL the operator chose, never a provider id
-   * — the egress gate keys on the entry's underlying `provider`, so naming an
-   * entry `local-kokoro` buys nothing.
+   * Name of an entry in the deployment's TTS roster
+   * (`voice.tts.providers.<name>.*` in `~/.ethos/config.yaml`). A LABEL the
+   * operator chose, never a provider id — the egress gate keys on the entry's
+   * underlying `provider`, so naming an entry `local-kokoro` buys nothing.
    *
    * Absent, or naming an entry this machine does not have, falls back to the
    * default `auxiliary.tts` entry: a personality shared between machines must
    * still speak on one that lacks its preferred provider.
+   *
+   * `voice.provider` is still ACCEPTED on read as the older spelling of this
+   * key; the loader maps it here and re-serializes the new one, so a config
+   * never carries both.
    */
-  provider?: string;
+  tts_provider?: string;
+  /**
+   * Name of an entry in the deployment's STT roster
+   * (`voice.stt.providers.<name>.*`). The exact mirror of `tts_provider`, down
+   * to the fallback: unknown here → the default `auxiliary.asr` entry.
+   *
+   * A personality's VOICE is identity; its EAR is a technical override — a
+   * Spanish-tuned or local-only personality transcribing through a different
+   * engine than the deployment default.
+   */
+  stt_provider?: string;
   /** TTS voice id, provider-specific (e.g. `af_bella` for Kokoro, `alloy` for OpenAI). */
   tts_voice?: string;
   /**

@@ -5,25 +5,35 @@ import { Link } from 'react-router-dom';
 import { rpc } from '../../rpc';
 
 // How a personality sounds — the identity fields that sit beside its name and
-// its mark, not a config knob.
+// its mark, not a config knob — plus the one technical override that belongs
+// with them: which engine hears it.
 //
-// Two controls only: which TTS provider (a `voice.providers.<name>` roster
-// label, or the default entry) and which voice. `voice.tier`, `voice.model` and
-// the per-language map are deliberately absent — they persist, but nothing
-// routes on them yet, and a form field is a promise that it works.
+// Three controls: which TTS provider (a `voice.tts.providers.<name>` roster
+// label, or the default entry), which voice, and which STT provider (a
+// `voice.stt.providers.<name>` label, or the default). `voice.tier`,
+// `voice.model` and the per-language map are deliberately absent — they
+// persist, but nothing routes on them yet, and a form field is a promise that
+// it works.
+//
+// The STT select sits LAST and carries quieter copy: a personality's voice is
+// identity, its ear is an override. It is not hidden behind a disclosure,
+// though — a control you have to go looking for is not symmetric with one you
+// do not, and the point of the pair is that they read the same way.
 
 /** Fixed phrase Preview synthesizes, so what you hear is the voice, not the text. */
 const PREVIEW_PHRASE = 'Hello — this is how I sound.';
 
-/** Value the provider select uses for "the default `auxiliary.tts` entry".
- *  Sent to the API as `''`, which clears `voice.provider` from config.yaml. */
+/** Value a provider select uses for "the default `auxiliary.*` entry".
+ *  Sent to the API as `''`, which clears the key from config.yaml. */
 const DEFAULT_ENTRY = '';
 
 export interface PersonalityVoice {
-  /** Roster entry name; `''` = the default entry. */
-  provider: string;
+  /** TTS roster entry name; `''` = the default entry. */
+  ttsProvider: string;
   /** Voice id; `''` = the provider's own default. */
   ttsVoice: string;
+  /** STT roster entry name; `''` = the default entry. */
+  sttProvider: string;
 }
 
 export function PersonalityVoiceFields({
@@ -33,24 +43,36 @@ export function PersonalityVoiceFields({
   value: PersonalityVoice;
   onChange: (next: PersonalityVoice) => void;
 }) {
-  const entriesQuery = useQuery({
+  const ttsQuery = useQuery({
     queryKey: ['voice', 'ttsEntries'],
     queryFn: () => rpc.voice.ttsEntries(),
   });
+  const sttQuery = useQuery({
+    queryKey: ['voice', 'sttEntries'],
+    queryFn: () => rpc.voice.sttEntries(),
+  });
 
-  const data = entriesQuery.data;
+  const data = ttsQuery.data;
   const rosterNames = Object.keys(data?.roster ?? {}).sort((a, b) => a.localeCompare(b));
   const configured = Boolean(data && (data.default.providerId || rosterNames.length > 0));
   // A personality authored elsewhere can name an entry this machine lacks. Keep
   // it selectable and say so, rather than silently rewriting it to Default on
   // the next save.
   const unknownName =
-    value.provider !== DEFAULT_ENTRY && !rosterNames.includes(value.provider)
-      ? value.provider
+    value.ttsProvider !== DEFAULT_ENTRY && !rosterNames.includes(value.ttsProvider)
+      ? value.ttsProvider
       : null;
 
-  const selected = value.provider === DEFAULT_ENTRY ? data?.default : data?.roster[value.provider];
+  const selected =
+    value.ttsProvider === DEFAULT_ENTRY ? data?.default : data?.roster[value.ttsProvider];
   const voices = selected?.voices ?? null;
+
+  const sttData = sttQuery.data;
+  const sttRosterNames = Object.keys(sttData?.roster ?? {}).sort((a, b) => a.localeCompare(b));
+  const unknownSttName =
+    value.sttProvider !== DEFAULT_ENTRY && !sttRosterNames.includes(value.sttProvider)
+      ? value.sttProvider
+      : null;
 
   return (
     <>
@@ -64,9 +86,9 @@ export function PersonalityVoiceFields({
         validateStatus={unknownName ? 'warning' : undefined}
       >
         <Select
-          loading={entriesQuery.isLoading}
-          value={value.provider}
-          onChange={(next: string) => onChange({ provider: next, ttsVoice: '' })}
+          loading={ttsQuery.isLoading}
+          value={value.ttsProvider}
+          onChange={(next: string) => onChange({ ...value, ttsProvider: next, ttsVoice: '' })}
           options={[
             {
               label: `Default (${data?.default.providerId ?? 'not configured'})`,
@@ -106,8 +128,36 @@ export function PersonalityVoiceFields({
           />
         )}
       </Form.Item>
+      <Form.Item
+        label="Speech-to-text provider"
+        help={
+          unknownSttName
+            ? `"${unknownSttName}" is not configured on this machine — this personality will fall back to the default until it is.`
+            : 'Only if this personality needs a different engine to hear it — a language-tuned or local-only transcriber. Otherwise it uses the default from Settings → Voice.'
+        }
+        validateStatus={unknownSttName ? 'warning' : undefined}
+      >
+        <Select
+          loading={sttQuery.isLoading}
+          value={value.sttProvider}
+          onChange={(next: string) => onChange({ ...value, sttProvider: next })}
+          options={[
+            {
+              label: `Default (${sttData?.default.providerId ?? 'not configured'})`,
+              value: DEFAULT_ENTRY,
+            },
+            ...sttRosterNames.map((name) => ({
+              label: `${name} — ${sttData?.roster[name]?.providerId ?? ''}`,
+              value: name,
+            })),
+            ...(unknownSttName
+              ? [{ label: `${unknownSttName} — not configured here`, value: unknownSttName }]
+              : []),
+          ]}
+        />
+      </Form.Item>
       {configured ? (
-        <VoicePreview provider={value.provider} ttsVoice={value.ttsVoice} />
+        <VoicePreview provider={value.ttsProvider} ttsVoice={value.ttsVoice} />
       ) : (
         <Typography.Paragraph type="secondary">
           No text-to-speech provider is configured, so there is nothing to preview yet. Set one up

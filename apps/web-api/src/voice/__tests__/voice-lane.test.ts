@@ -85,6 +85,46 @@ describe('VoiceLane — capture → transcript', () => {
     });
   });
 
+  // The lane is what makes `voice.stt_provider` real on the talk path: the
+  // personality on `utterance_start` has to reach the resolver, or the roster
+  // is an inert knob.
+  it('carries the utterance’s personality through to transcription', async () => {
+    const seen: Array<string | undefined> = [];
+    const { lane, frames } = makeLane({
+      transcribe: (_audio, opts) => {
+        seen.push(opts.personalityId);
+        return Promise.resolve({ text: 'hola', provider: 'spanish-stt' });
+      },
+    });
+
+    lane.handle(
+      { t: 'utterance_start', utteranceId: 'u1', sampleRate: 16_000, personalityId: 'translator' },
+      new Uint8Array(),
+    );
+    lane.handle({ t: 'audio', utteranceId: 'u1', seq: 0 }, pcm(100));
+    lane.handle({ t: 'utterance_end', utteranceId: 'u1' }, new Uint8Array());
+    await vi.waitFor(() => expect(frames().some((f) => f.t === 'transcript')).toBe(true));
+
+    expect(seen).toEqual(['translator']);
+  });
+
+  it('omits the personality when the client named none', async () => {
+    const seen: Array<string | undefined> = [];
+    const { lane, frames } = makeLane({
+      transcribe: (_audio, opts) => {
+        seen.push(opts.personalityId);
+        return Promise.resolve({ text: 'hi', provider: 'local-stt' });
+      },
+    });
+
+    lane.handle({ t: 'utterance_start', utteranceId: 'u1', sampleRate: 16_000 }, new Uint8Array());
+    lane.handle({ t: 'audio', utteranceId: 'u1', seq: 0 }, pcm(100));
+    lane.handle({ t: 'utterance_end', utteranceId: 'u1' }, new Uint8Array());
+    await vi.waitFor(() => expect(frames().some((f) => f.t === 'transcript')).toBe(true));
+
+    expect(seen).toEqual([undefined]);
+  });
+
   it('discards an utterance that exceeds the capture cap', () => {
     const sent: Sent[] = [];
     const lane = new VoiceLane({

@@ -145,7 +145,8 @@ function rowsFromConfig(
 type ConfigUpdatePatch = Parameters<typeof rpc.config.update>[0];
 type ConfigGetData = Awaited<ReturnType<typeof rpc.config.get>>;
 type QuickCommandPatch = NonNullable<ConfigUpdatePatch['quickCommands']>[string];
-type VoiceProviderPatch = NonNullable<ConfigUpdatePatch['voiceProviders']>[string];
+type VoiceTtsProviderPatch = NonNullable<ConfigUpdatePatch['voiceTtsProviders']>[string];
+type VoiceSttProviderPatch = NonNullable<ConfigUpdatePatch['voiceSttProviders']>[string];
 type RetentionSubkey = keyof ConfigGetData['retention'];
 
 /** Mirrors ConfigRecordKeySchema in @ethosagent/web-contracts. */
@@ -182,9 +183,14 @@ interface ChannelToolsetRow {
 }
 
 /**
- * One row of the named TTS roster (`voice.providers.<name>.*`). Same fields as
- * the Default provider above it, because a roster entry IS a default entry —
- * the one a personality gets when it names this row instead.
+ * One row of a named voice roster (`voice.<tts|stt>.providers.<name>.*`). Same
+ * fields as the Default provider above it, because a roster entry IS a default
+ * entry — the one a personality gets when it names this row instead.
+ *
+ * ONE row shape serves both kinds, carrying the union of the two field sets;
+ * the row component renders only the fields its kind has. Two row types would
+ * be two editors, and the whole point of this section is that the ear and the
+ * voice are configured the same way.
  *
  * `apiKey` is the freshly typed key (write-only, blank on load);
  * `apiKeyPreview` is the redacted view of what is stored.
@@ -196,13 +202,36 @@ interface VoiceProviderRow {
   model: string;
   apiKey: string;
   apiKeyPreview: string | null;
+  /** TTS only. */
   voice: string;
   baseUrl: string;
   command: string;
+  /** TTS only. */
   outputFormat: string;
   /** Seconds. */
   timeout: number | null;
+  /** TTS only. */
   maxTextLength: number | null;
+}
+
+/** What differs between the STT and TTS rosters — everything else is shared. */
+interface VoiceRosterKindSpec {
+  kind: 'stt' | 'tts';
+  label: string;
+  /** Config key the row's name becomes, shown in copy and in the name error. */
+  configKey: string;
+  blurb: string;
+  addLabel: string;
+  providerOptions: { label: string; value: string }[];
+  /** Provider id whose row renders a command template instead of a base URL. */
+  commandProvider: string;
+  commandPlaceholders: string;
+  commandExample: string;
+  defaultProvider: string;
+  modelPlaceholder: string;
+  baseUrlPlaceholder: string;
+  /** TTS-only controls: default voice, audio format, max text length. */
+  audioOutputFields: boolean;
 }
 
 interface RetentionRow {
@@ -233,7 +262,9 @@ function channelToolsetRowsFromConfig(map: ConfigGetData['channelToolsets']): Ch
     .map(([platform, toolsets]) => ({ _id: nextRowId++, platform, toolsets }));
 }
 
-function voiceProviderRowsFromConfig(map: ConfigGetData['voiceProviders']): VoiceProviderRow[] {
+function voiceTtsProviderRowsFromConfig(
+  map: ConfigGetData['voiceTtsProviders'],
+): VoiceProviderRow[] {
   return Object.entries(map)
     .sort(([a], [b]) => a.localeCompare(b))
     .map(([name, entry]) => ({
@@ -249,6 +280,27 @@ function voiceProviderRowsFromConfig(map: ConfigGetData['voiceProviders']): Voic
       outputFormat: entry.outputFormat ?? '',
       timeout: entry.timeout,
       maxTextLength: entry.maxTextLength,
+    }));
+}
+
+function voiceSttProviderRowsFromConfig(
+  map: ConfigGetData['voiceSttProviders'],
+): VoiceProviderRow[] {
+  return Object.entries(map)
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([name, entry]) => ({
+      _id: nextRowId++,
+      name,
+      provider: entry.provider,
+      model: entry.model ?? '',
+      apiKey: '',
+      apiKeyPreview: entry.apiKeyPreview,
+      voice: '',
+      baseUrl: entry.baseUrl ?? '',
+      command: entry.command ?? '',
+      outputFormat: '',
+      timeout: entry.timeout,
+      maxTextLength: null,
     }));
 }
 
@@ -314,6 +366,31 @@ const ROW_BOX_STYLE: CSSProperties = {
   padding: 12,
   marginBottom: 12,
 };
+
+/**
+ * A section label inside an existing card — DESIGN.md "micro / section labels":
+ * 11px / 500 / uppercase / 0.08em. Used to split the Voice card into its
+ * Speech-to-text and Text-to-speech halves WITHOUT minting a second Card
+ * (cards earn existence; a heading is enough to separate two halves of one
+ * subject).
+ */
+function VoiceSectionLabel({ children }: { children: ReactNode }) {
+  return (
+    <Typography.Paragraph
+      style={{
+        fontSize: 11,
+        fontWeight: 500,
+        letterSpacing: '0.08em',
+        textTransform: 'uppercase',
+        opacity: 0.6,
+        marginTop: 24,
+        marginBottom: 12,
+      }}
+    >
+      {children}
+    </Typography.Paragraph>
+  );
+}
 
 function RowLabel({ children }: { children: ReactNode }) {
   return (
@@ -510,6 +587,53 @@ const VOICE_TEST_PHRASE = 'Hello — this is an Ethos voice test.';
 
 const AUDIO_FORMATS = ['opus', 'mp3', 'wav', 'pcm'] as const;
 const VOICE_MODES = ['off', 'mirror_inbound', 'all'] as const;
+
+/** The provider menus, shared by each kind's Default entry and its roster rows. */
+const STT_PROVIDER_OPTIONS = [
+  { label: 'OpenAI Whisper', value: 'openai-stt' },
+  { label: 'Groq Whisper (free tier)', value: 'groq-stt' },
+  { label: 'Local (Whisper / OpenAI-compatible)', value: 'local-stt' },
+  { label: 'Custom command (whisper.cpp / any CLI)', value: 'command-stt' },
+];
+const TTS_PROVIDER_OPTIONS = [
+  { label: 'OpenAI TTS', value: 'openai-tts' },
+  { label: 'Local (Kokoro / OpenAI-compatible)', value: 'local-tts' },
+  { label: 'Custom command (macOS say / Piper / any CLI)', value: 'command-tts' },
+];
+
+const STT_ROSTER_SPEC: VoiceRosterKindSpec = {
+  kind: 'stt',
+  label: 'STT',
+  configKey: 'voice.stt.providers',
+  blurb:
+    'Extra speech-to-text engines a personality can pick by name. A personality that names one is transcribed through it; one that names nothing, or a name this machine does not have, uses the default above.',
+  addLabel: 'Add STT provider',
+  providerOptions: STT_PROVIDER_OPTIONS,
+  commandProvider: 'command-stt',
+  commandPlaceholders: COMMAND_STT_PLACEHOLDERS,
+  commandExample: COMMAND_STT_EXAMPLE,
+  defaultProvider: 'local-stt',
+  modelPlaceholder: 'whisper-large-v3',
+  baseUrlPlaceholder: 'http://localhost:8000/v1',
+  audioOutputFields: false,
+};
+
+const TTS_ROSTER_SPEC: VoiceRosterKindSpec = {
+  kind: 'tts',
+  label: 'TTS',
+  configKey: 'voice.tts.providers',
+  blurb:
+    'Extra text-to-speech providers a personality can pick by name. A personality that names one speaks through it; one that names nothing, or a name this machine does not have, uses the default above.',
+  addLabel: 'Add TTS provider',
+  providerOptions: TTS_PROVIDER_OPTIONS,
+  commandProvider: 'command-tts',
+  commandPlaceholders: COMMAND_TTS_PLACEHOLDERS,
+  commandExample: COMMAND_TTS_EXAMPLE,
+  defaultProvider: 'local-tts',
+  modelPlaceholder: 'kokoro',
+  baseUrlPlaceholder: 'http://localhost:8880/v1',
+  audioOutputFields: true,
+};
 
 /** Empty select → null, which clears the key back to its built-in default. */
 function audioFormatOrNull(value: string): (typeof AUDIO_FORMATS)[number] | null {
@@ -757,7 +881,8 @@ export function Settings() {
   const [providerRows, setProviderRows] = useState<ProviderRow[]>([emptyRow()]);
   const [quickCommandRows, setQuickCommandRows] = useState<QuickCommandRow[]>([]);
   const [channelToolsetRows, setChannelToolsetRows] = useState<ChannelToolsetRow[]>([]);
-  const [voiceProviderRows, setVoiceProviderRows] = useState<VoiceProviderRow[]>([]);
+  const [voiceTtsProviderRows, setVoiceTtsProviderRows] = useState<VoiceProviderRow[]>([]);
+  const [voiceSttProviderRows, setVoiceSttProviderRows] = useState<VoiceProviderRow[]>([]);
   const [retentionRows, setRetentionRows] = useState<RetentionRow[]>([]);
   const hydratedRef = useRef(false);
 
@@ -875,7 +1000,8 @@ export function Settings() {
         );
         setQuickCommandRows(quickCommandRowsFromConfig(configQuery.data.quickCommands));
         setChannelToolsetRows(channelToolsetRowsFromConfig(configQuery.data.channelToolsets));
-        setVoiceProviderRows(voiceProviderRowsFromConfig(configQuery.data.voiceProviders));
+        setVoiceTtsProviderRows(voiceTtsProviderRowsFromConfig(configQuery.data.voiceTtsProviders));
+        setVoiceSttProviderRows(voiceSttProviderRowsFromConfig(configQuery.data.voiceSttProviders));
         setRetentionRows(
           retentionRowsFromConfig(
             configQuery.data.retention,
@@ -1005,24 +1131,49 @@ export function Settings() {
       channelToolsets[platform] = row.toolsets;
     }
 
-    // The roster replaces itself wholesale on save, so an omitted row IS a
+    // Each roster replaces itself wholesale on save, so an omitted row IS a
     // deletion — and an entry with no `provider` names nothing resolvable, the
-    // same rule the CLI's parser applies.
-    const voiceProviders: Record<string, VoiceProviderPatch> = {};
-    for (const row of voiceProviderRows) {
-      const name = row.name.trim();
-      if (!RECORD_KEY_RE.test(name)) {
-        return fail(
-          `Voice provider "${name}": the name becomes a voice.providers.<name> config key, so it may only use letters, digits, hyphens, or underscores.`,
-        );
+    // same rule the CLI's parser applies. One validator for both kinds: the two
+    // rosters must reject the same names for the same reasons.
+    const validateRoster = (
+      rows: VoiceProviderRow[],
+      spec: VoiceRosterKindSpec,
+    ): Record<string, VoiceProviderRow> | null => {
+      const out: Record<string, VoiceProviderRow> = {};
+      for (const row of rows) {
+        const name = row.name.trim();
+        if (!RECORD_KEY_RE.test(name)) {
+          fail(
+            `${spec.label} provider "${name}": the name becomes a ${spec.configKey}.<name> config key, so it may only use letters, digits, hyphens, or underscores.`,
+          );
+          return null;
+        }
+        if (out[name]) {
+          fail(`Duplicate ${spec.label} provider "${name}".`);
+          return null;
+        }
+        if (!row.provider) {
+          fail(`${spec.label} provider "${name}" needs a provider.`);
+          return null;
+        }
+        if (row.provider === spec.commandProvider && !row.command.trim()) {
+          fail(`${spec.label} provider "${name}" needs a command template.`);
+          return null;
+        }
+        out[name] = row;
       }
-      if (voiceProviders[name]) return fail(`Duplicate voice provider "${name}".`);
-      if (!row.provider) return fail(`Voice provider "${name}" needs a TTS provider.`);
-      if (row.provider === 'command-tts' && !row.command.trim()) {
-        return fail(`Voice provider "${name}" needs a command template.`);
-      }
+      return out;
+    };
+
+    const ttsRosterRows = validateRoster(voiceTtsProviderRows, TTS_ROSTER_SPEC);
+    if (!ttsRosterRows) return;
+    const sttRosterRows = validateRoster(voiceSttProviderRows, STT_ROSTER_SPEC);
+    if (!sttRosterRows) return;
+
+    const voiceTtsProviders: Record<string, VoiceTtsProviderPatch> = {};
+    for (const [name, row] of Object.entries(ttsRosterRows)) {
       const outputFormat = audioFormatOrNull(row.outputFormat);
-      voiceProviders[name] = {
+      voiceTtsProviders[name] = {
         provider: row.provider,
         ...(row.model.trim() ? { model: row.model.trim() } : {}),
         // Blank = "keep the stored key"; the browser never sees it, so a blank
@@ -1034,6 +1185,17 @@ export function Settings() {
         ...(outputFormat ? { outputFormat } : {}),
         ...(row.timeout ? { timeout: row.timeout } : {}),
         ...(row.maxTextLength ? { maxTextLength: row.maxTextLength } : {}),
+      };
+    }
+    const voiceSttProviders: Record<string, VoiceSttProviderPatch> = {};
+    for (const [name, row] of Object.entries(sttRosterRows)) {
+      voiceSttProviders[name] = {
+        provider: row.provider,
+        ...(row.model.trim() ? { model: row.model.trim() } : {}),
+        ...(row.apiKey ? { apiKey: row.apiKey } : {}),
+        ...(row.baseUrl.trim() ? { baseUrl: row.baseUrl.trim() } : {}),
+        ...(row.command.trim() ? { command: row.command.trim() } : {}),
+        ...(row.timeout ? { timeout: row.timeout } : {}),
       };
     }
 
@@ -1243,7 +1405,8 @@ export function Settings() {
       personalityRetention,
       quickCommands,
       channelToolsets,
-      voiceProviders,
+      voiceTtsProviders,
+      voiceSttProviders,
     };
     if (primary.apiKey) patch.apiKey = primary.apiKey;
     if (primary.baseUrl !== undefined) patch.baseUrl = primary.baseUrl;
@@ -1970,9 +2133,11 @@ export function Settings() {
             {({ getFieldValue }) =>
               getFieldValue('voiceEnabled') ? (
                 <>
+                  <VoiceSectionLabel>Speech-to-text</VoiceSectionLabel>
                   <Form.Item
                     name="voiceProvider"
-                    label="STT Provider"
+                    label="Default provider"
+                    extra="Speech-to-text engine for transcribing what you say. This is the default entry — a personality that names no engine of its own is transcribed through it."
                     rules={[{ required: true, message: 'Select a provider to enable voice' }]}
                   >
                     <Select
@@ -1985,12 +2150,7 @@ export function Settings() {
                         if (!form.getFieldValue('voiceModel')) patch.voiceModel = d.model;
                         if (Object.keys(patch).length > 0) form.setFieldsValue(patch);
                       }}
-                      options={[
-                        { label: 'OpenAI Whisper', value: 'openai-stt' },
-                        { label: 'Groq Whisper (free tier)', value: 'groq-stt' },
-                        { label: 'Local (Whisper / OpenAI-compatible)', value: 'local-stt' },
-                        { label: 'Custom command (whisper.cpp / any CLI)', value: 'command-stt' },
-                      ]}
+                      options={STT_PROVIDER_OPTIONS}
                     />
                   </Form.Item>
                   <Form.Item
@@ -2063,9 +2223,15 @@ export function Settings() {
                       return <SttTest disabled={!saved?.voiceProvider} dirty={dirty} />;
                     }}
                   </Form.Item>
+                  <VoiceProviderRoster
+                    spec={STT_ROSTER_SPEC}
+                    rows={voiceSttProviderRows}
+                    setRows={setVoiceSttProviderRows}
+                  />
+                  <VoiceSectionLabel>Text-to-speech</VoiceSectionLabel>
                   <Form.Item
                     name="voiceTtsProvider"
-                    label="TTS Provider (default)"
+                    label="Default provider"
                     extra="Text-to-speech provider for reading agent responses aloud. This is the default entry — a personality that names no provider of its own speaks through it."
                   >
                     <Select
@@ -2081,14 +2247,7 @@ export function Settings() {
                         if (!form.getFieldValue('voiceTtsModel')) patch.voiceTtsModel = d.model;
                         if (Object.keys(patch).length > 0) form.setFieldsValue(patch);
                       }}
-                      options={[
-                        { label: 'OpenAI TTS', value: 'openai-tts' },
-                        { label: 'Local (Kokoro / OpenAI-compatible)', value: 'local-tts' },
-                        {
-                          label: 'Custom command (macOS say / Piper / any CLI)',
-                          value: 'command-tts',
-                        },
-                      ]}
+                      options={TTS_PROVIDER_OPTIONS}
                     />
                   </Form.Item>
                   <Form.Item
@@ -2194,7 +2353,11 @@ export function Settings() {
                       ) : null
                     }
                   </Form.Item>
-                  <VoiceProviderRoster rows={voiceProviderRows} setRows={setVoiceProviderRows} />
+                  <VoiceProviderRoster
+                    spec={TTS_ROSTER_SPEC}
+                    rows={voiceTtsProviderRows}
+                    setRows={setVoiceTtsProviderRows}
+                  />
                 </>
               ) : null
             }
@@ -2340,18 +2503,24 @@ export function Settings() {
 // ---------------------------------------------------------------------------
 
 /**
- * The named TTS roster (`voice.providers.<name>.*`) — extra providers a
- * personality can pick between by name, alongside the default entry above.
+ * A named voice roster (`voice.<tts|stt>.providers.<name>.*`) — extra providers
+ * a personality can pick between by name, alongside the default entry above.
  *
- * Rows carry the same fields as the default entry because a roster entry IS
- * one. Saving replaces the whole roster, so removing a row deletes the entry
- * (and its stored key); an untouched API-key field keeps the stored key,
+ * Rows carry the same fields as the default entry of that kind because a roster
+ * entry IS one. Saving replaces the whole roster, so removing a row deletes the
+ * entry (and its stored key); an untouched API-key field keeps the stored key,
  * because the browser is never handed it to type back.
+ *
+ * ONE component for both kinds, parameterised by {@link VoiceRosterKindSpec}.
+ * Forking it per kind would let the ear and the voice drift apart in the exact
+ * surface whose job is to show they are the same shape.
  */
 function VoiceProviderRoster({
+  spec,
   rows,
   setRows,
 }: {
+  spec: VoiceRosterKindSpec;
   rows: VoiceProviderRow[];
   setRows: Dispatch<SetStateAction<VoiceProviderRow[]>>;
 }) {
@@ -2364,7 +2533,7 @@ function VoiceProviderRoster({
       {
         _id: nextRowId++,
         name: '',
-        provider: 'local-tts',
+        provider: spec.defaultProvider,
         model: '',
         apiKey: '',
         apiKeyPreview: null,
@@ -2383,10 +2552,8 @@ function VoiceProviderRoster({
         Additional providers
       </Typography.Text>
       <Typography.Paragraph type="secondary" style={{ marginTop: 4 }}>
-        Extra text-to-speech providers a personality can pick by name
-        (voice.providers.&lt;name&gt;). A personality that names one speaks through it; one that
-        names nothing, or a name this machine does not have, uses the default above. Saving replaces
-        the whole list.
+        {spec.blurb} Each name becomes a {spec.configKey}.&lt;name&gt; key. Saving replaces the
+        whole list.
       </Typography.Paragraph>
       {rows.map((row, idx) => {
         const nameValid = row.name === '' || RECORD_KEY_RE.test(row.name);
@@ -2419,7 +2586,7 @@ function VoiceProviderRoster({
                 />
                 {nameValid ? null : (
                   <Typography.Text type="danger" style={{ fontSize: 11 }}>
-                    This name becomes a voice.providers.&lt;name&gt; key in config.yaml — letters,
+                    This name becomes a {spec.configKey}.&lt;name&gt; key in config.yaml — letters,
                     digits, hyphens and underscores only, or the loader will not see it.
                   </Typography.Text>
                 )}
@@ -2431,21 +2598,17 @@ function VoiceProviderRoster({
                   style={{ width: '100%' }}
                   value={row.provider}
                   onChange={(v: string) => update(idx, { provider: v })}
-                  options={[
-                    { label: 'OpenAI TTS', value: 'openai-tts' },
-                    { label: 'Local (Kokoro / OpenAI-compatible)', value: 'local-tts' },
-                    { label: 'Custom command (macOS say / Piper / any CLI)', value: 'command-tts' },
-                  ]}
+                  options={spec.providerOptions}
                 />
               </div>
             </div>
-            {row.provider === 'command-tts' ? (
+            {row.provider === spec.commandProvider ? (
               <div style={{ marginBottom: 8 }}>
-                <RowLabel>Command ({COMMAND_TTS_PLACEHOLDERS})</RowLabel>
+                <RowLabel>Command ({spec.commandPlaceholders})</RowLabel>
                 <Input
                   size="small"
                   style={{ fontFamily: 'Geist Mono, monospace' }}
-                  placeholder={COMMAND_TTS_EXAMPLE}
+                  placeholder={spec.commandExample}
                   value={row.command}
                   onChange={(e) => update(idx, { command: e.target.value })}
                 />
@@ -2456,7 +2619,7 @@ function VoiceProviderRoster({
                   <RowLabel>Base URL</RowLabel>
                   <Input
                     size="small"
-                    placeholder="http://localhost:8880/v1"
+                    placeholder={spec.baseUrlPlaceholder}
                     value={row.baseUrl}
                     onChange={(e) => update(idx, { baseUrl: e.target.value })}
                   />
@@ -2479,34 +2642,38 @@ function VoiceProviderRoster({
                 <RowLabel>Model</RowLabel>
                 <Input
                   size="small"
-                  placeholder="kokoro"
+                  placeholder={spec.modelPlaceholder}
                   value={row.model}
                   onChange={(e) => update(idx, { model: e.target.value })}
                 />
               </div>
-              <div style={{ flex: 1 }}>
-                <RowLabel>Default voice</RowLabel>
-                <Input
-                  size="small"
-                  placeholder="af_bella"
-                  value={row.voice}
-                  onChange={(e) => update(idx, { voice: e.target.value })}
-                />
-              </div>
+              {spec.audioOutputFields ? (
+                <div style={{ flex: 1 }}>
+                  <RowLabel>Default voice</RowLabel>
+                  <Input
+                    size="small"
+                    placeholder="af_bella"
+                    value={row.voice}
+                    onChange={(e) => update(idx, { voice: e.target.value })}
+                  />
+                </div>
+              ) : null}
             </div>
             <div style={{ display: 'flex', gap: 8 }}>
-              <div style={{ width: 140 }}>
-                <RowLabel>Audio format</RowLabel>
-                <Select
-                  size="small"
-                  allowClear
-                  style={{ width: '100%' }}
-                  placeholder="provider default"
-                  value={row.outputFormat || undefined}
-                  onChange={(v: string | undefined) => update(idx, { outputFormat: v ?? '' })}
-                  options={AUDIO_FORMATS.map((f) => ({ label: f, value: f }))}
-                />
-              </div>
+              {spec.audioOutputFields ? (
+                <div style={{ width: 140 }}>
+                  <RowLabel>Audio format</RowLabel>
+                  <Select
+                    size="small"
+                    allowClear
+                    style={{ width: '100%' }}
+                    placeholder="provider default"
+                    value={row.outputFormat || undefined}
+                    onChange={(v: string | undefined) => update(idx, { outputFormat: v ?? '' })}
+                    options={AUDIO_FORMATS.map((f) => ({ label: f, value: f }))}
+                  />
+                </div>
+              ) : null}
               <div style={{ width: 140 }}>
                 <RowLabel>Timeout (seconds)</RowLabel>
                 <InputNumber
@@ -2519,25 +2686,27 @@ function VoiceProviderRoster({
                   onChange={(v) => update(idx, { timeout: v })}
                 />
               </div>
-              <div style={{ width: 160 }}>
-                <RowLabel>Max text length</RowLabel>
-                <InputNumber
-                  size="small"
-                  style={{ width: '100%' }}
-                  min={100}
-                  max={100000}
-                  step={100}
-                  placeholder="4096"
-                  value={row.maxTextLength}
-                  onChange={(v) => update(idx, { maxTextLength: v })}
-                />
-              </div>
+              {spec.audioOutputFields ? (
+                <div style={{ width: 160 }}>
+                  <RowLabel>Max text length</RowLabel>
+                  <InputNumber
+                    size="small"
+                    style={{ width: '100%' }}
+                    min={100}
+                    max={100000}
+                    step={100}
+                    placeholder="4096"
+                    value={row.maxTextLength}
+                    onChange={(v) => update(idx, { maxTextLength: v })}
+                  />
+                </div>
+              ) : null}
             </div>
           </div>
         );
       })}
       <Button type="dashed" size="small" onClick={add} style={{ width: '100%' }}>
-        Add provider
+        {spec.addLabel}
       </Button>
     </div>
   );

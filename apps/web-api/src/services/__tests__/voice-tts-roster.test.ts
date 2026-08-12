@@ -1,7 +1,7 @@
 // The named TTS roster on the BROWSER path.
 //
-// A deployment configures several TTS providers (`voice.providers.*`); a
-// personality picks one with `voice.provider`. This asserts on what the TTS
+// A deployment configures several TTS providers (`voice.tts.providers.*`); a
+// personality picks one with `voice.tts_provider`. This asserts on what the TTS
 // provider actually received — which provider ran, with which credentials, and
 // in which voice — rather than that a resolver was called.
 
@@ -61,7 +61,7 @@ const ROSTER: Record<string, TtsProviderEntry> = {
 
 describe('VoiceService — personality picks a roster entry', () => {
   it('synthesizes through the named entry, with that entry’s credentials', async () => {
-    const { voice, ran } = harness({ personality: { provider: 'studio' }, roster: ROSTER });
+    const { voice, ran } = harness({ personality: { tts_provider: 'studio' }, roster: ROSTER });
     const result = await voice.synthesize('hello', { personalityId: 'talker' });
 
     expect(result.provider).toBe('openai-tts');
@@ -75,9 +75,9 @@ describe('VoiceService — personality picks a roster entry', () => {
 
   it('lets a second personality speak through a different entry in the same process', async () => {
     const registryRoster = ROSTER;
-    const studio = harness({ personality: { provider: 'studio' }, roster: registryRoster });
+    const studio = harness({ personality: { tts_provider: 'studio' }, roster: registryRoster });
     await studio.voice.synthesize('hello', { personalityId: 'talker' });
-    const mac = harness({ personality: { provider: 'mac-say' }, roster: registryRoster });
+    const mac = harness({ personality: { tts_provider: 'mac-say' }, roster: registryRoster });
     await mac.voice.synthesize('hello', { personalityId: 'talker' });
 
     expect(studio.ran[0]?.provider).toBe('openai-tts');
@@ -96,7 +96,7 @@ describe('VoiceService — personality picks a roster entry', () => {
 
   it('falls back to the default entry — and still speaks — on a provider this machine lacks', async () => {
     const { voice, ran } = harness({
-      personality: { provider: 'elevenlabs', tts_voice: 'af_sky' },
+      personality: { tts_provider: 'elevenlabs', tts_voice: 'af_sky' },
       roster: ROSTER,
     });
     const result = await voice.synthesize('hello', { personalityId: 'talker' });
@@ -107,7 +107,7 @@ describe('VoiceService — personality picks a roster entry', () => {
 
   it('keeps language > tts_voice > entry voice inside the chosen entry', async () => {
     const { voice, ran } = harness({
-      personality: { provider: 'studio', tts_voice: 'nova', languages: { es: 'shimmer' } },
+      personality: { tts_provider: 'studio', tts_voice: 'nova', languages: { es: 'shimmer' } },
       roster: ROSTER,
     });
     await voice.synthesize('hello', { personalityId: 'talker' });
@@ -127,7 +127,7 @@ describe('VoiceService — the egress gate keys on the entry’s provider, not i
 
   it('refuses a local-sounding roster entry backed by a non-local provider', async () => {
     const { voice, ran } = harness({
-      personality: { provider: 'local-kokoro' },
+      personality: { tts_provider: 'local-kokoro' },
       roster: DISGUISED,
       trustedVoicePlugins: new Set<string>(),
     });

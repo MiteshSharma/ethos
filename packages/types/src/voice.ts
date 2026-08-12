@@ -147,8 +147,8 @@ export function isStreamingTtsProvider(p: TtsProvider): p is StreamingTtsProvide
 
 /**
  * One configured TTS provider — the shape `auxiliary.tts` has always had, named
- * so a deployment can carry SEVERAL of them (`voice.providers.<name>.*`) and a
- * personality can pick one by name via `PersonalityVoiceConfig.provider`.
+ * so a deployment can carry SEVERAL of them (`voice.tts.providers.<name>.*`) and
+ * a personality can pick one by name via `PersonalityVoiceConfig.tts_provider`.
  *
  * `provider` is the REGISTERED provider id (`openai-tts`, `command-tts`, …).
  * The roster key is a label the operator chose; it is never a provider id and
@@ -172,6 +172,30 @@ export interface TtsProviderEntry {
   timeout?: number;
   /** Chars handed to one synthesis call. */
   maxTextLength?: number;
+}
+
+/**
+ * One configured STT provider — the shape `auxiliary.asr` has always had, named
+ * so a deployment can carry SEVERAL of them (`voice.stt.providers.<name>.*`) and
+ * a personality can pick one by name via `PersonalityVoiceConfig.stt_provider`.
+ *
+ * The exact mirror of {@link TtsProviderEntry}, minus the fields that only mean
+ * something when you are producing audio (`voice`, `outputFormat`,
+ * `maxTextLength`). Same rule about the roster key: it is a label the operator
+ * chose, never a provider id, and never what the local-only egress gate keys on
+ * — see `selectSttEntry` in `@ethosagent/core`.
+ */
+export interface SttProviderEntry {
+  /** Registered provider id, e.g. `openai-stt` / `command-stt`. */
+  provider: string;
+  model?: string;
+  apiKey?: string;
+  baseUrl?: string;
+  /** Shell template for `command-stt`
+   *  (placeholders: {input_path}, {output_path}, {language}). */
+  command?: string;
+  /** Budget for `command`, in seconds. */
+  timeout?: number;
 }
 
 export interface VoiceProviderFactoryContext {

@@ -852,18 +852,20 @@ describe('voice round-trip', () => {
     });
   });
 
-  // `voice.provider` names an entry in the deployment's `voice.providers.*`
-  // TTS roster. It is a SUB-KEY of the existing `voice` block, not a new
-  // top-level PersonalityConfig field — the field count stays where it is.
-  it('parses voice.provider and keeps it verbatim through an update', async () => {
+  // `voice.tts_provider` / `voice.stt_provider` name entries in the deployment's
+  // `voice.tts.providers.*` / `voice.stt.providers.*` rosters. They are SUB-KEYS
+  // of the existing `voice` block, not new top-level PersonalityConfig fields —
+  // the field count stays where it is.
+  it('parses both roster keys and keeps them verbatim through an update', async () => {
     await seedPersonality(
       'voice-roster',
-      'name: VoiceRoster\nvoice.provider: studio\nvoice.tts_voice: alloy\n',
+      'name: VoiceRoster\nvoice.tts_provider: studio\nvoice.stt_provider: whisper-es\nvoice.tts_voice: alloy\n',
     );
     const registry = makeRegistry();
     await registry.loadFromDirectory(join(testDir, 'personalities'));
     expect(registry.get('voice-roster')?.voice).toEqual({
-      provider: 'studio',
+      tts_provider: 'studio',
+      stt_provider: 'whisper-es',
       tts_voice: 'alloy',
     });
 
@@ -872,24 +874,70 @@ describe('voice round-trip', () => {
       join(testDir, 'personalities', 'voice-roster', 'config.yaml'),
       'utf-8',
     );
-    expect(raw).toContain('voice.provider: studio');
+    expect(raw).toContain('voice.tts_provider: studio');
+    expect(raw).toContain('voice.stt_provider: whisper-es');
 
     const fresh = makeRegistry();
     await fresh.loadFromDirectory(join(testDir, 'personalities'));
-    expect(fresh.get('voice-roster')?.voice?.provider).toBe('studio');
+    expect(fresh.get('voice-roster')?.voice?.tts_provider).toBe('studio');
+    expect(fresh.get('voice-roster')?.voice?.stt_provider).toBe('whisper-es');
+  });
+
+  // `voice.provider` was the spelling before a personality could name an STT
+  // engine. A hand-written config still carrying it must load, and re-serialize
+  // to the new key alone.
+  it('accepts the older voice.provider spelling and rewrites it as voice.tts_provider', async () => {
+    await seedPersonality(
+      'voice-legacy',
+      'name: VoiceLegacy\nvoice.provider: studio\nvoice.tts_voice: alloy\n',
+    );
+    const registry = makeRegistry();
+    await registry.loadFromDirectory(join(testDir, 'personalities'));
+    expect(registry.get('voice-legacy')?.voice).toEqual({
+      tts_provider: 'studio',
+      tts_voice: 'alloy',
+    });
+
+    await registry.update('voice-legacy', { description: 'unrelated edit' });
+    const raw = await readFile(
+      join(testDir, 'personalities', 'voice-legacy', 'config.yaml'),
+      'utf-8',
+    );
+    expect(raw).toContain('voice.tts_provider: studio');
+    expect(raw).not.toMatch(/^voice\.provider:/m);
+
+    const fresh = makeRegistry();
+    await fresh.loadFromDirectory(join(testDir, 'personalities'));
+    expect(fresh.get('voice-legacy')?.voice?.tts_provider).toBe('studio');
+  });
+
+  it('prefers the new spelling when a config somehow carries both', async () => {
+    await seedPersonality(
+      'voice-both',
+      'name: VoiceBoth\nvoice.provider: old\nvoice.tts_provider: new\n',
+    );
+    const registry = makeRegistry();
+    await registry.loadFromDirectory(join(testDir, 'personalities'));
+    expect(registry.get('voice-both')?.voice).toEqual({ tts_provider: 'new' });
   });
 
   it('loads a personality naming a provider this machine has never heard of', async () => {
     // Validation would mean the loader knew the machine's config. It does not:
     // an unknown name is a resolution-time fallback, never a load failure.
-    await seedPersonality('voice-alien', 'name: VoiceAlien\nvoice.provider: elevenlabs-studio\n');
+    await seedPersonality(
+      'voice-alien',
+      'name: VoiceAlien\nvoice.tts_provider: elevenlabs-studio\nvoice.stt_provider: deepgram-eu\n',
+    );
     const registry = makeRegistry();
     await registry.loadFromDirectory(join(testDir, 'personalities'));
-    expect(registry.get('voice-alien')?.voice).toEqual({ provider: 'elevenlabs-studio' });
+    expect(registry.get('voice-alien')?.voice).toEqual({
+      tts_provider: 'elevenlabs-studio',
+      stt_provider: 'deepgram-eu',
+    });
   });
 
   // The editor's write path: create with a voice, retune it, and clear it back
-  // to the default entry — all through the two sub-keys the web form exposes.
+  // to the default entry — all through the sub-keys the web form exposes.
   it('writes the voice a create carries, and nothing when it carries none', async () => {
     const registry = makeRegistry();
     await registry.loadFromDirectory(join(testDir, 'personalities'));
@@ -899,21 +947,22 @@ describe('voice round-trip', () => {
       name: 'VoiceCreated',
       toolset: ['read_file'],
       soulMd: '# VoiceCreated\n',
-      voice: { provider: 'studio', tts_voice: 'nova' },
+      voice: { tts_provider: 'studio', stt_provider: 'whisper-es', tts_voice: 'nova' },
     });
     expect(registry.get('voice-created')?.voice).toEqual({
-      provider: 'studio',
+      tts_provider: 'studio',
+      stt_provider: 'whisper-es',
       tts_voice: 'nova',
     });
 
-    // Blank form fields are not a voice block — an empty `voice.provider:` line
+    // Blank form fields are not a voice block — an empty `voice.tts_provider:` line
     // would be a key the loader reads back as nothing.
     await registry.create({
       id: 'voice-blank',
       name: 'VoiceBlank',
       toolset: ['read_file'],
       soulMd: '# VoiceBlank\n',
-      voice: { provider: '', tts_voice: '' },
+      voice: { tts_provider: '', stt_provider: '', tts_voice: '' },
     });
     expect(registry.get('voice-blank')?.voice).toBeUndefined();
     const blankRaw = await readFile(
@@ -926,7 +975,7 @@ describe('voice round-trip', () => {
   it('updates one voice sub-key without disturbing the others', async () => {
     await seedPersonality(
       'voice-patch',
-      'name: VoicePatch\nvoice.provider: studio\nvoice.tts_voice: alloy\nvoice.languages.es: ef_dora\n',
+      'name: VoicePatch\nvoice.tts_provider: studio\nvoice.tts_voice: alloy\nvoice.languages.es: ef_dora\n',
     );
     const registry = makeRegistry();
     await registry.loadFromDirectory(join(testDir, 'personalities'));
@@ -938,7 +987,7 @@ describe('voice round-trip', () => {
     // The hand-written language map is not something the web form can express,
     // so a save from it must not be able to delete one.
     expect(fresh.get('voice-patch')?.voice).toEqual({
-      provider: 'studio',
+      tts_provider: 'studio',
       tts_voice: 'nova',
       languages: { es: 'ef_dora' },
     });
@@ -947,18 +996,18 @@ describe('voice round-trip', () => {
   it('an empty provider clears the key, putting it back on the default entry', async () => {
     await seedPersonality(
       'voice-clear',
-      'name: VoiceClear\nvoice.provider: studio\nvoice.tts_voice: alloy\n',
+      'name: VoiceClear\nvoice.tts_provider: studio\nvoice.tts_voice: alloy\n',
     );
     const registry = makeRegistry();
     await registry.loadFromDirectory(join(testDir, 'personalities'));
 
-    await registry.update('voice-clear', { voice: { provider: '', tts_voice: 'alloy' } });
+    await registry.update('voice-clear', { voice: { tts_provider: '', tts_voice: 'alloy' } });
 
     const raw = await readFile(
       join(testDir, 'personalities', 'voice-clear', 'config.yaml'),
       'utf-8',
     );
-    expect(raw).not.toContain('voice.provider');
+    expect(raw).not.toContain('voice.tts_provider');
     const fresh = makeRegistry();
     await fresh.loadFromDirectory(join(testDir, 'personalities'));
     expect(fresh.get('voice-clear')?.voice).toEqual({ tts_voice: 'alloy' });
@@ -969,7 +1018,7 @@ describe('voice round-trip', () => {
     const registry = makeRegistry();
     await registry.loadFromDirectory(join(testDir, 'personalities'));
 
-    await registry.update('voice-drop', { voice: { provider: '', tts_voice: '' } });
+    await registry.update('voice-drop', { voice: { tts_provider: '', tts_voice: '' } });
 
     const fresh = makeRegistry();
     await fresh.loadFromDirectory(join(testDir, 'personalities'));

@@ -3,10 +3,10 @@ import { InMemorySecretsResolver, InMemoryStorage } from '@ethosagent/storage-fs
 import { describe, expect, it } from 'vitest';
 import { type EthosConfig, ethosDir, readConfig, readRawConfig, writeConfig } from '../index';
 
-// `voice.providers.<name>.*` — the named TTS roster.
+// `voice.tts.providers.<name>.*` — the named TTS roster.
 //
-// Two dotted levels (name, then field), the same shape `telegram.bots.<n>.<f>`
-// and `memory.options.<k>` already use. Each entry carries exactly the fields an
+// Three dotted levels (kind, name, then field), the same split
+// `telegram.bots.<n>.<f>` and `memory.options.<k>` already use. Each entry carries exactly the fields an
 // `auxiliary.tts` entry carries, because it IS one — `auxiliary.tts` stays the
 // default entry and is untouched by any of this.
 
@@ -21,22 +21,22 @@ async function load(lines: string[]): Promise<EthosConfig> {
   return cfg;
 }
 
-describe('voice.providers roster parsing', () => {
+describe('voice.tts.providers roster parsing', () => {
   it('parses several entries, each with the full auxiliary.tts field set', async () => {
     const cfg = await load([
-      'voice.providers.mac-say.provider: command-tts',
-      'voice.providers.mac-say.command: say --file-format=WAVE -o {output_path} -f {input_path}',
-      'voice.providers.mac-say.outputFormat: wav',
-      'voice.providers.mac-say.timeout: 45',
-      'voice.providers.mac-say.maxTextLength: 2000',
-      'voice.providers.studio.provider: openai-tts',
-      'voice.providers.studio.apiKey: sk-studio',
-      'voice.providers.studio.model: gpt-4o-mini-tts',
-      'voice.providers.studio.voice: alloy',
-      'voice.providers.studio.baseUrl: https://api.openai.com/v1',
+      'voice.tts.providers.mac-say.provider: command-tts',
+      'voice.tts.providers.mac-say.command: say --file-format=WAVE -o {output_path} -f {input_path}',
+      'voice.tts.providers.mac-say.outputFormat: wav',
+      'voice.tts.providers.mac-say.timeout: 45',
+      'voice.tts.providers.mac-say.maxTextLength: 2000',
+      'voice.tts.providers.studio.provider: openai-tts',
+      'voice.tts.providers.studio.apiKey: sk-studio',
+      'voice.tts.providers.studio.model: gpt-4o-mini-tts',
+      'voice.tts.providers.studio.voice: alloy',
+      'voice.tts.providers.studio.baseUrl: https://api.openai.com/v1',
     ]);
 
-    expect(cfg.voice?.providers).toEqual({
+    expect(cfg.voice?.tts?.providers).toEqual({
       'mac-say': {
         provider: 'command-tts',
         command: 'say --file-format=WAVE -o {output_path} -f {input_path}',
@@ -58,10 +58,10 @@ describe('voice.providers roster parsing', () => {
     const cfg = await load([
       'auxiliary.tts.provider: kokoro-tts',
       'auxiliary.tts.voice: af_bella',
-      'voice.providers.studio.provider: openai-tts',
+      'voice.tts.providers.studio.provider: openai-tts',
     ]);
     expect(cfg.auxiliary?.tts).toEqual({ provider: 'kokoro-tts', voice: 'af_bella' });
-    expect(cfg.voice?.providers?.studio).toEqual({ provider: 'openai-tts' });
+    expect(cfg.voice?.tts?.providers?.studio).toEqual({ provider: 'openai-tts' });
   });
 
   it('is absent — with no voice section at all — when no roster key is present', async () => {
@@ -71,20 +71,20 @@ describe('voice.providers roster parsing', () => {
 
   it('drops an entry that names no provider rather than half-building it', async () => {
     const cfg = await load([
-      'voice.providers.broken.voice: alloy',
-      'voice.providers.studio.provider: openai-tts',
+      'voice.tts.providers.broken.voice: alloy',
+      'voice.tts.providers.studio.provider: openai-tts',
     ]);
-    expect(Object.keys(cfg.voice?.providers ?? {})).toEqual(['studio']);
+    expect(Object.keys(cfg.voice?.tts?.providers ?? {})).toEqual(['studio']);
   });
 
   it('drops a nonsense format or number on a roster entry, exactly as auxiliary.tts does', async () => {
     const cfg = await load([
-      'voice.providers.studio.provider: openai-tts',
-      'voice.providers.studio.outputFormat: flac',
-      'voice.providers.studio.timeout: soon',
-      'voice.providers.studio.maxTextLength: -5',
+      'voice.tts.providers.studio.provider: openai-tts',
+      'voice.tts.providers.studio.outputFormat: flac',
+      'voice.tts.providers.studio.timeout: soon',
+      'voice.tts.providers.studio.maxTextLength: -5',
     ]);
-    expect(cfg.voice?.providers?.studio).toEqual({ provider: 'openai-tts' });
+    expect(cfg.voice?.tts?.providers?.studio).toEqual({ provider: 'openai-tts' });
   });
 
   it('coexists with voice.bots, the trust gate and the LiveKit block', async () => {
@@ -93,28 +93,28 @@ describe('voice.providers roster parsing', () => {
       'voice.bots.0.bind.type: personality',
       'voice.bots.0.bind.name: receptionist',
       'voice.trustedPlugins: openai-tts',
-      'voice.providers.studio.provider: openai-tts',
+      'voice.tts.providers.studio.provider: openai-tts',
     ]);
     expect(cfg.voice?.bots).toHaveLength(1);
     expect(cfg.voice?.trustedPlugins).toEqual(['openai-tts']);
-    expect(cfg.voice?.providers?.studio?.provider).toBe('openai-tts');
+    expect(cfg.voice?.tts?.providers?.studio?.provider).toBe('openai-tts');
   });
 });
 
-describe('voice.providers round-trip', () => {
+describe('voice.tts.providers round-trip', () => {
   it('survives write -> read with several entries and every field', async () => {
     const cfg = await load([
       'auxiliary.tts.provider: kokoro-tts',
       'auxiliary.tts.voice: af_bella',
-      'voice.providers.mac-say.provider: command-tts',
-      'voice.providers.mac-say.command: say -o {output_path} -f {input_path}',
-      'voice.providers.mac-say.outputFormat: wav',
-      'voice.providers.mac-say.timeout: 45',
-      'voice.providers.mac-say.maxTextLength: 2000',
-      'voice.providers.studio.provider: openai-tts',
-      'voice.providers.studio.model: gpt-4o-mini-tts',
-      'voice.providers.studio.voice: alloy',
-      'voice.providers.studio.baseUrl: https://api.openai.com/v1',
+      'voice.tts.providers.mac-say.provider: command-tts',
+      'voice.tts.providers.mac-say.command: say -o {output_path} -f {input_path}',
+      'voice.tts.providers.mac-say.outputFormat: wav',
+      'voice.tts.providers.mac-say.timeout: 45',
+      'voice.tts.providers.mac-say.maxTextLength: 2000',
+      'voice.tts.providers.studio.provider: openai-tts',
+      'voice.tts.providers.studio.model: gpt-4o-mini-tts',
+      'voice.tts.providers.studio.voice: alloy',
+      'voice.tts.providers.studio.baseUrl: https://api.openai.com/v1',
     ]);
 
     const storage = new InMemoryStorage();
@@ -122,17 +122,17 @@ describe('voice.providers round-trip', () => {
     await writeConfig(storage, cfg, new InMemorySecretsResolver());
     const reread = await readRawConfig(storage);
 
-    expect(reread?.voice?.providers).toEqual(cfg.voice?.providers);
+    expect(reread?.voice?.tts?.providers).toEqual(cfg.voice?.tts?.providers);
     expect(reread?.auxiliary?.tts).toEqual(cfg.auxiliary?.tts);
   });
 
   it('externalizes each entry’s apiKey under its OWN ref, and resolves it back', async () => {
     const cfg = await load([
-      'voice.providers.studio.provider: openai-tts',
-      'voice.providers.studio.apiKey: sk-studio-secret',
-      'voice.providers.eleven.provider: elevenlabs',
-      'voice.providers.eleven.apiKey: el-secret',
-      'voice.providers.mac-say.provider: command-tts',
+      'voice.tts.providers.studio.provider: openai-tts',
+      'voice.tts.providers.studio.apiKey: sk-studio-secret',
+      'voice.tts.providers.eleven.provider: elevenlabs',
+      'voice.tts.providers.eleven.apiKey: el-secret',
+      'voice.tts.providers.mac-say.provider: command-tts',
     ]);
 
     const storage = new InMemoryStorage();
@@ -146,21 +146,79 @@ describe('voice.providers round-trip', () => {
     expect(onDisk).not.toContain('el-secret');
     expect(onDisk).toContain(
       // biome-ignore lint/suspicious/noTemplateCurlyInString: literal match, not a template
-      'voice.providers.studio.apiKey: ${secrets:voice/providers/studio/apiKey}',
+      'voice.tts.providers.studio.apiKey: ${secrets:voice/tts/providers/studio/apiKey}',
     );
     expect(onDisk).toContain(
       // biome-ignore lint/suspicious/noTemplateCurlyInString: literal match, not a template
-      'voice.providers.eleven.apiKey: ${secrets:voice/providers/eleven/apiKey}',
+      'voice.tts.providers.eleven.apiKey: ${secrets:voice/tts/providers/eleven/apiKey}',
     );
 
     // In the vault: one ref per entry, no sharing.
-    expect(await secrets.get('voice/providers/studio/apiKey')).toBe('sk-studio-secret');
-    expect(await secrets.get('voice/providers/eleven/apiKey')).toBe('el-secret');
+    expect(await secrets.get('voice/tts/providers/studio/apiKey')).toBe('sk-studio-secret');
+    expect(await secrets.get('voice/tts/providers/eleven/apiKey')).toBe('el-secret');
 
     // And the read path hands the provider factory a usable key again.
     const resolved = await readConfig(storage, secrets);
-    expect(resolved?.voice?.providers?.studio?.apiKey).toBe('sk-studio-secret');
-    expect(resolved?.voice?.providers?.eleven?.apiKey).toBe('el-secret');
-    expect(resolved?.voice?.providers?.['mac-say']).toEqual({ provider: 'command-tts' });
+    expect(resolved?.voice?.tts?.providers?.studio?.apiKey).toBe('sk-studio-secret');
+    expect(resolved?.voice?.tts?.providers?.eleven?.apiKey).toBe('el-secret');
+    expect(resolved?.voice?.tts?.providers?.['mac-say']).toEqual({ provider: 'command-tts' });
+  });
+});
+
+// The older `voice.providers.<name>.*` spelling shipped before STT had a roster
+// and may already sit in a hand-written config. It must still load, and a
+// re-serialize must produce ONLY the new spelling — never both, or the next
+// reader has two sources of truth for one entry.
+describe('voice.providers — the older spelling', () => {
+  it('loads as the TTS roster', async () => {
+    const cfg = await load([
+      'voice.providers.studio.provider: openai-tts',
+      'voice.providers.studio.voice: alloy',
+      'voice.providers.studio.timeout: 45',
+    ]);
+    expect(cfg.voice?.tts?.providers).toEqual({
+      studio: { provider: 'openai-tts', voice: 'alloy', timeout: 45 },
+    });
+  });
+
+  it('re-serializes to voice.tts.providers, and never emits both', async () => {
+    const cfg = await load([
+      'voice.providers.studio.provider: openai-tts',
+      'voice.providers.studio.voice: alloy',
+    ]);
+
+    const storage = new InMemoryStorage();
+    await storage.mkdir(ethosDir());
+    await writeConfig(storage, cfg, new InMemorySecretsResolver());
+    const onDisk = (await storage.read(join(ethosDir(), 'config.yaml'))) ?? '';
+
+    expect(onDisk).toContain('voice.tts.providers.studio.provider: openai-tts');
+    expect(onDisk).not.toMatch(/^voice\.providers\./m);
+
+    const reread = await readRawConfig(storage);
+    expect(reread?.voice?.tts?.providers).toEqual(cfg.voice?.tts?.providers);
+  });
+
+  it('loses to the new spelling per field, whichever order they appear in', async () => {
+    const newFirst = await load([
+      'voice.tts.providers.studio.provider: local-tts',
+      'voice.providers.studio.provider: openai-tts',
+      'voice.providers.studio.voice: alloy',
+    ]);
+    const legacyFirst = await load([
+      'voice.providers.studio.provider: openai-tts',
+      'voice.providers.studio.voice: alloy',
+      'voice.tts.providers.studio.provider: local-tts',
+    ]);
+    // The new key wins on `provider`; the legacy-only `voice` field still rides
+    // along, so a half-migrated config is not silently truncated.
+    const expected = { studio: { provider: 'local-tts', voice: 'alloy' } };
+    expect(newFirst.voice?.tts?.providers).toEqual(expected);
+    expect(legacyFirst.voice?.tts?.providers).toEqual(expected);
+  });
+
+  it('does not feed the STT roster', async () => {
+    const cfg = await load(['voice.providers.studio.provider: openai-tts']);
+    expect(cfg.voice?.stt).toBeUndefined();
   });
 });

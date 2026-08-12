@@ -161,8 +161,10 @@ export async function startServer(port: number): Promise<number> {
     ttsProviderRegistry: ttsProviders,
     ttsProviderName: voiceConfig.ttsProviderName,
     ttsProviderConfig: voiceConfig.ttsProviderConfig,
-    // Named TTS roster — what a personality's `voice.provider` picks from.
+    // Named rosters — what a personality's `voice.tts_provider` /
+    // `voice.stt_provider` pick from.
     ...(voiceConfig.ttsRoster ? { ttsRoster: voiceConfig.ttsRoster } : {}),
+    ...(voiceConfig.sttRoster ? { sttRoster: voiceConfig.sttRoster } : {}),
     // Local-only voice-egress gate (`voice.trustedPlugins`); undefined = off.
     ...(voiceConfig.trustedVoicePlugins
       ? { trustedVoicePlugins: voiceConfig.trustedVoicePlugins }

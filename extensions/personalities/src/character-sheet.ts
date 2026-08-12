@@ -641,7 +641,8 @@ function renderSpecLabel(spec: string): string {
  */
 function voiceSection(voice: NonNullable<PersonalityConfig['voice']>): string[] {
   const lines: string[] = ['## Voice'];
-  lines.push(`- TTS provider: ${voice.provider ?? '(default auxiliary.tts)'}`);
+  lines.push(`- TTS provider: ${voice.tts_provider ?? '(default auxiliary.tts)'}`);
+  lines.push(`- STT provider: ${voice.stt_provider ?? '(default auxiliary.asr)'}`);
   lines.push(`- TTS voice: ${voice.tts_voice ?? '(global default)'}`);
   const languages = Object.entries(voice.languages ?? {});
   if (languages.length > 0) {

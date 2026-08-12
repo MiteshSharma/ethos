@@ -5,7 +5,10 @@ export const voiceRouter = {
     if (!context.voice) {
       throw new Error('Voice transcription not configured');
     }
-    const transcript = await context.voice.transcribe(input.audio, input.mimeType);
+    const transcript = await context.voice.transcribe(input.audio, input.mimeType, {
+      ...(input.personalityId ? { personalityId: input.personalityId } : {}),
+      ...(input.language ? { language: input.language } : {}),
+    });
     return { transcript };
   }),
   synthesize: os.voice.synthesize.handler(async ({ input, context }) => {
@@ -22,5 +25,9 @@ export const voiceRouter = {
     // personality editor renders around — not an error to throw at it.
     if (!context.voice) return { default: { providerId: null, voices: null }, roster: {} };
     return context.voice.listTtsEntries();
+  }),
+  sttEntries: os.voice.sttEntries.handler(async ({ context }) => {
+    if (!context.voice) return { default: { providerId: null }, roster: {} };
+    return context.voice.listSttEntries();
   }),
 };

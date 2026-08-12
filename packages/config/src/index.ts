@@ -10,6 +10,7 @@ import type {
   RetentionEventsConfig,
   SecretsResolver,
   Storage,
+  SttProviderEntry,
   TtsProviderEntry,
 } from '@ethosagent/types';
 
@@ -943,21 +944,26 @@ export interface EthosConfig {
    * `all` speaks every reply. `/voice <mode>` overrides it per lane at runtime;
    * this is only where a lane starts. Absent = `mirror_inbound`.
    *
-   * `providers` is the named TTS roster — several configured providers a
-   * personality can pick between by name (`voice.provider:` in its
-   * `config.yaml`). Two dotted levels, same shape as an `auxiliary.tts` entry:
-   *   voice.providers.mac-say.provider: command-tts
-   *   voice.providers.mac-say.command: say -o {output_path} -f {input_path}
-   *   voice.providers.mac-say.outputFormat: wav
-   *   voice.providers.studio.provider: openai-tts
-   *   voice.providers.studio.apiKey: ${secrets:voice/providers/studio/apiKey}
-   * `auxiliary.tts` remains the DEFAULT entry: a personality that names no
-   * provider — or names one this machine does not have — speaks through it, so
-   * a deployment with no roster is unchanged. Names are restricted to
+   * `tts.providers` / `stt.providers` are the named rosters — several
+   * configured providers a personality can pick between by name
+   * (`voice.tts_provider:` / `voice.stt_provider:` in its `config.yaml`). Three
+   * dotted levels, each entry the same shape as `auxiliary.tts` / `auxiliary.asr`:
+   *   voice.tts.providers.mac-say.provider: command-tts
+   *   voice.tts.providers.mac-say.command: say -o {output_path} -f {input_path}
+   *   voice.tts.providers.mac-say.outputFormat: wav
+   *   voice.tts.providers.studio.provider: openai-tts
+   *   voice.tts.providers.studio.apiKey: ${secrets:voice/tts/providers/studio/apiKey}
+   *   voice.stt.providers.whisper-es.provider: local-stt
+   *   voice.stt.providers.whisper-es.baseUrl: http://localhost:8000/v1
+   * `auxiliary.tts` / `auxiliary.asr` remain the DEFAULT entries: a personality
+   * that names no provider — or names one this machine does not have — uses
+   * them, so a deployment with no roster is unchanged. Names are restricted to
    * `[A-Za-z0-9_-]+` so they round-trip through the line-based format.
    *
-   * TTS only, deliberately: nothing consumes a per-personality ASR choice, and
-   * an unconsumed knob is a promise the code does not keep.
+   * `voice.providers.<name>.*` is ACCEPTED on read as the older spelling of
+   * `voice.tts.providers.<name>.*` — it shipped before STT had a roster, when
+   * "providers" could only mean one thing. It is never written back: a config
+   * re-serialized from either spelling carries only the new one.
    */
   voice?: {
     bots: VoiceBotConfig[];
@@ -965,7 +971,8 @@ export interface EthosConfig {
     trunk?: VoiceTrunkConfig;
     trustedPlugins?: string[];
     defaultMode?: 'off' | 'mirror_inbound' | 'all';
-    providers?: Record<string, TtsProviderEntry>;
+    tts?: { providers: Record<string, TtsProviderEntry> };
+    stt?: { providers: Record<string, SttProviderEntry> };
   };
   // Email platform
   emailImapHost?: string;
@@ -1126,24 +1133,19 @@ export interface EthosConfig {
     compression?: AuxiliaryCompressionConfig;
     vision?: AuxiliaryVisionConfig;
     web?: AuxiliaryWebConfig;
-    /** `command` is the shell template the `command-stt` provider runs
-     *  (placeholders: {input_path}, {output_path}, {language}); `timeout` is
-     *  that command's budget, in seconds. */
-    asr?: {
-      provider: string;
-      model?: string;
-      apiKey?: string;
-      baseUrl?: string;
-      command?: string;
-      timeout?: number;
-    };
+    /** The DEFAULT STT entry. `command` is the shell template the `command-stt`
+     *  provider runs (placeholders: {input_path}, {output_path}, {language});
+     *  `timeout` is that command's budget, in seconds. Same shape as every
+     *  `voice.stt.providers.<name>` roster entry, because it IS one — the one a
+     *  personality gets when it names no other. */
+    asr?: SttProviderEntry;
     /** The DEFAULT TTS entry. `command` is the shell template the `command-tts`
      *  provider runs (placeholders: {input_path}, {output_path}, {format},
      *  {voice}, {speed}); `outputFormat` is the container that command writes —
      *  and the extension `{output_path}` carries; `timeout` is its budget in
      *  seconds; `maxTextLength` caps the text handed to one synthesis call.
-     *  Same shape as every `voice.providers.<name>` roster entry, because it IS
-     *  one — the one a personality gets when it names no other. */
+     *  Same shape as every `voice.tts.providers.<name>` roster entry, because it
+     *  IS one — the one a personality gets when it names no other. */
     tts?: TtsProviderEntry;
   };
   /** tools-web — web_search/web_extract backend selection. */
@@ -1433,25 +1435,40 @@ async function externalizeConfigSecrets(
       },
     };
   }
-  if (r.voice?.providers) {
-    // Per-ENTRY refs. A roster key must not be able to route its credential
-    // around the vault, so each entry externalizes exactly like
-    // `auxiliary.tts.apiKey` does — `voice.providers.<name>.apiKey` →
-    // `voice/providers/<name>/apiKey`.
-    const providers: Record<string, TtsProviderEntry> = {};
-    for (const [name, entry] of Object.entries(r.voice.providers)) {
-      providers[name] = entry.apiKey
+  // Per-ENTRY refs. A roster key must not be able to route its credential
+  // around the vault, so each entry externalizes exactly like
+  // `auxiliary.tts.apiKey` does — `voice.tts.providers.<name>.apiKey` →
+  // `voice/tts/providers/<name>/apiKey`, and the STT roster the same way.
+  const externalizeRoster = async <E extends { apiKey?: string }>(
+    kind: 'tts' | 'stt',
+    roster: Record<string, E>,
+  ): Promise<Record<string, E>> => {
+    const out: Record<string, E> = {};
+    for (const [name, entry] of Object.entries(roster)) {
+      out[name] = entry.apiKey
         ? {
             ...entry,
             apiKey: await externalizeSecret(
               entry.apiKey,
-              ref(`voice.providers.${name}.apiKey`),
+              ref(`voice.${kind}.providers.${name}.apiKey`),
               secrets,
             ),
           }
         : entry;
     }
-    r.voice = { ...r.voice, providers };
+    return out;
+  };
+  if (r.voice?.tts?.providers) {
+    r.voice = {
+      ...r.voice,
+      tts: { providers: await externalizeRoster('tts', r.voice.tts.providers) },
+    };
+  }
+  if (r.voice?.stt?.providers) {
+    r.voice = {
+      ...r.voice,
+      stt: { providers: await externalizeRoster('stt', r.voice.stt.providers) },
+    };
   }
   if (r.auxiliary) {
     const aux = { ...r.auxiliary };
@@ -1741,8 +1758,18 @@ export async function writeConfig(
     if (config.voice.defaultMode) {
       lines.push(`voice.defaultMode: ${config.voice.defaultMode}`);
     }
-    for (const [name, entry] of Object.entries(config.voice.providers ?? {})) {
-      lines.push(...ttsProviderEntryLines(`voice.providers.${name}`, entry));
+    // Always the NEW spelling, whichever one was read. A config parsed from
+    // `voice.providers.*` re-serializes as `voice.tts.providers.*` and never
+    // carries both.
+    for (const [name, entry] of Object.entries(config.voice.tts?.providers ?? {})) {
+      lines.push(
+        ...voiceProviderEntryLines(`voice.tts.providers.${name}`, entry, TTS_ENTRY_FIELDS),
+      );
+    }
+    for (const [name, entry] of Object.entries(config.voice.stt?.providers ?? {})) {
+      lines.push(
+        ...voiceProviderEntryLines(`voice.stt.providers.${name}`, entry, STT_ENTRY_FIELDS),
+      );
     }
   }
   if (config.teams) {
@@ -1814,16 +1841,10 @@ export async function writeConfig(
     if (w.baseUrl) lines.push(`auxiliary.web.baseUrl: ${w.baseUrl}`);
   }
   if (config.auxiliary?.asr) {
-    const a = config.auxiliary.asr;
-    lines.push(`auxiliary.asr.provider: ${a.provider}`);
-    if (a.model) lines.push(`auxiliary.asr.model: ${a.model}`);
-    if (a.apiKey) lines.push(`auxiliary.asr.apiKey: ${a.apiKey}`);
-    if (a.baseUrl) lines.push(`auxiliary.asr.baseUrl: ${a.baseUrl}`);
-    if (a.command) lines.push(`auxiliary.asr.command: ${a.command}`);
-    if (a.timeout) lines.push(`auxiliary.asr.timeout: ${a.timeout}`);
+    lines.push(...voiceProviderEntryLines('auxiliary.asr', config.auxiliary.asr, STT_ENTRY_FIELDS));
   }
   if (config.auxiliary?.tts) {
-    lines.push(...ttsProviderEntryLines('auxiliary.tts', config.auxiliary.tts));
+    lines.push(...voiceProviderEntryLines('auxiliary.tts', config.auxiliary.tts, TTS_ENTRY_FIELDS));
   }
   if (config.web?.search_backend) lines.push(`web.search_backend: ${config.web.search_backend}`);
   if (config.web?.extract_backend) lines.push(`web.extract_backend: ${config.web.extract_backend}`);
@@ -2043,14 +2064,22 @@ export async function resolveConfigSecrets(
       },
     };
   }
-  if (r.voice?.providers) {
-    const providers: Record<string, TtsProviderEntry> = {};
-    for (const [name, entry] of Object.entries(r.voice.providers)) {
-      providers[name] = entry.apiKey
+  const resolveRoster = async <E extends { apiKey?: string }>(
+    roster: Record<string, E>,
+  ): Promise<Record<string, E>> => {
+    const out: Record<string, E> = {};
+    for (const [name, entry] of Object.entries(roster)) {
+      out[name] = entry.apiKey
         ? { ...entry, apiKey: await resolveSecretValue(entry.apiKey, secrets) }
         : entry;
     }
-    r.voice = { ...r.voice, providers };
+    return out;
+  };
+  if (r.voice?.tts?.providers) {
+    r.voice = { ...r.voice, tts: { providers: await resolveRoster(r.voice.tts.providers) } };
+  }
+  if (r.voice?.stt?.providers) {
+    r.voice = { ...r.voice, stt: { providers: await resolveRoster(r.voice.stt.providers) } };
   }
   if (r.webhooks) {
     const hooks: Record<string, WebhookHookConfig> = {};
@@ -2104,8 +2133,12 @@ function parseConfigYaml(src: string): EthosConfig {
   const voiceBotsKv: Record<number, Record<string, string>> = {};
   const voiceLiveKitKv: Record<string, string> = {};
   const voiceTrunkKv: Record<string, string> = {};
-  /** `voice.providers.<name>.<field>` — the named TTS roster, keyed by name. */
-  const voiceProvidersKv: Record<string, Record<string, string>> = {};
+  /** `voice.tts.providers.<name>.<field>` — the named TTS roster, keyed by name. */
+  const voiceTtsProvidersKv: Record<string, Record<string, string>> = {};
+  /** The older `voice.providers.<name>.<field>` spelling, merged under the above. */
+  const voiceTtsProvidersLegacyKv: Record<string, Record<string, string>> = {};
+  /** `voice.stt.providers.<name>.<field>` — the named STT roster. */
+  const voiceSttProvidersKv: Record<string, Record<string, string>> = {};
   /** Raw `voice.trustedPlugins` line; `undefined` = key absent = gate off. */
   let voiceTrustedPluginsRaw: string | undefined;
   /** `voice.defaultMode`; `undefined` = key absent = the built-in default. */
@@ -2183,17 +2216,30 @@ function parseConfigYaml(src: string): EthosConfig {
       voiceBotsKv[idx][vbot[2]] = vbot[3].trim().replace(/^["']|["']$/g, '');
       continue;
     }
-    // voice.providers.<name>.<field>: <value> — the named TTS roster. Two
-    // dotted levels, matched the same way `telegram.bots.<n>.<field>` is: the
-    // name is anchored to the identifier charset so the split is unambiguous
-    // and the second level is a plain field. Must precede the `voice.*` blocks
-    // below only in spirit — none of them can match this shape — but it is
-    // written first so the relationship is obvious to the next reader.
-    const vprov = line.match(/^voice\.providers\.([A-Za-z0-9_-]+)\.(\w+):\s*(.+)$/);
+    // voice.<tts|stt>.providers.<name>.<field>: <value> — the named rosters.
+    // The name is anchored to the identifier charset so the split is
+    // unambiguous and the last level is a plain field, exactly the way
+    // `telegram.bots.<n>.<field>` is matched. One regex serves both rosters so
+    // the two cannot acquire different name rules.
+    const vprov = line.match(/^voice\.(tts|stt)\.providers\.([A-Za-z0-9_-]+)\.(\w+):\s*(.+)$/);
     if (vprov) {
-      const name = vprov[1];
-      voiceProvidersKv[name] ??= {};
-      voiceProvidersKv[name][vprov[2]] = vprov[3].trim().replace(/^["']|["']$/g, '');
+      const bag = vprov[1] === 'stt' ? voiceSttProvidersKv : voiceTtsProvidersKv;
+      const name = vprov[2];
+      bag[name] ??= {};
+      bag[name][vprov[3]] = vprov[4].trim().replace(/^["']|["']$/g, '');
+      continue;
+    }
+    // voice.providers.<name>.<field> — the OLDER spelling of the TTS roster,
+    // from before STT had one. Read-time alias only: it is merged UNDER the new
+    // spelling below (so a file carrying both is decided by the key, not by
+    // line order) and re-serializes as `voice.tts.providers.*`.
+    const vprovLegacy = line.match(/^voice\.providers\.([A-Za-z0-9_-]+)\.(\w+):\s*(.+)$/);
+    if (vprovLegacy) {
+      const name = vprovLegacy[1];
+      voiceTtsProvidersLegacyKv[name] ??= {};
+      voiceTtsProvidersLegacyKv[name][vprovLegacy[2]] = vprovLegacy[3]
+        .trim()
+        .replace(/^["']|["']$/g, '');
       continue;
     }
     // voice.livekit.<field>: <value>
@@ -2555,17 +2601,10 @@ function parseConfigYaml(src: string): EthosConfig {
         ...(auxiliaryWebKv.baseUrl ? { baseUrl: auxiliaryWebKv.baseUrl } : {}),
       }
     : undefined;
-  const auxiliaryAsr: NonNullable<EthosConfig['auxiliary']>['asr'] = auxiliaryAsrKv.provider
-    ? {
-        provider: auxiliaryAsrKv.provider,
-        ...(auxiliaryAsrKv.model ? { model: auxiliaryAsrKv.model } : {}),
-        ...(auxiliaryAsrKv.apiKey ? { apiKey: auxiliaryAsrKv.apiKey } : {}),
-        ...(auxiliaryAsrKv.baseUrl ? { baseUrl: auxiliaryAsrKv.baseUrl } : {}),
-        ...(auxiliaryAsrKv.command ? { command: auxiliaryAsrKv.command } : {}),
-        ...positiveNumber('timeout', auxiliaryAsrKv.timeout),
-      }
-    : undefined;
-  const auxiliaryTts = buildTtsProviderEntry(auxiliaryTtsKv);
+  // The default entries go through the SAME builder as their rosters, so a
+  // field the default supports is a field the roster supports.
+  const auxiliaryAsr = buildVoiceProviderEntry<SttProviderEntry>(auxiliaryAsrKv, STT_ENTRY_FIELDS);
+  const auxiliaryTts = buildVoiceProviderEntry<TtsProviderEntry>(auxiliaryTtsKv, TTS_ENTRY_FIELDS);
   const webConfig: WebConfig | undefined =
     webKv.search_backend || webKv.extract_backend
       ? {
@@ -2641,14 +2680,32 @@ function parseConfigYaml(src: string): EthosConfig {
   const voiceResult = buildVoiceBots(voiceBotsKv);
   const voiceLiveKitResult = buildVoiceLiveKit(voiceLiveKitKv);
   const voiceTrunkResult = buildVoiceTrunk(voiceTrunkKv);
-  const voiceProviders = buildTtsProviderRoster(voiceProvidersKv);
+  // Legacy `voice.providers.*` entries merge UNDER the new spelling, per name
+  // and per field, so a file mid-migration keeps whichever fields it has
+  // already moved and the new key always wins.
+  const mergedTtsProvidersKv: Record<string, Record<string, string>> = {};
+  for (const [name, fields] of Object.entries(voiceTtsProvidersLegacyKv)) {
+    mergedTtsProvidersKv[name] = { ...fields };
+  }
+  for (const [name, fields] of Object.entries(voiceTtsProvidersKv)) {
+    mergedTtsProvidersKv[name] = { ...mergedTtsProvidersKv[name], ...fields };
+  }
+  const voiceTtsProviders = buildVoiceProviderRoster<TtsProviderEntry>(
+    mergedTtsProvidersKv,
+    TTS_ENTRY_FIELDS,
+  );
+  const voiceSttProviders = buildVoiceProviderRoster<SttProviderEntry>(
+    voiceSttProvidersKv,
+    STT_ENTRY_FIELDS,
+  );
   const voiceSection =
     voiceResult.bots.length > 0 ||
     voiceLiveKitResult.livekit ||
     voiceTrunkResult.trunk ||
     voiceTrustedPluginsRaw !== undefined ||
     voiceDefaultMode !== undefined ||
-    voiceProviders !== undefined
+    voiceTtsProviders !== undefined ||
+    voiceSttProviders !== undefined
       ? {
           bots: voiceResult.bots,
           ...(voiceLiveKitResult.livekit ? { livekit: voiceLiveKitResult.livekit } : {}),
@@ -2657,7 +2714,8 @@ function parseConfigYaml(src: string): EthosConfig {
             ? { trustedPlugins: splitList(voiceTrustedPluginsRaw) }
             : {}),
           ...(voiceDefaultMode ? { defaultMode: voiceDefaultMode } : {}),
-          ...(voiceProviders ? { providers: voiceProviders } : {}),
+          ...(voiceTtsProviders ? { tts: { providers: voiceTtsProviders } } : {}),
+          ...(voiceSttProviders ? { stt: { providers: voiceSttProviders } } : {}),
         }
       : undefined;
   const teams = buildTeamsConfig(teamsKv);
@@ -3025,73 +3083,109 @@ function parseToolPreviewLength(v: string | undefined): number | undefined {
   return n;
 }
 
-/**
- * Lift one optional positive-number voice knob. A garbage or non-positive
- * value yields no key at all, so the provider's own default stands — the same
- * "unset" the operator would get by not writing the line.
- */
-function positiveNumber<K extends string>(key: K, raw: string | undefined): { [P in K]?: number } {
-  if (!raw) return {};
-  const n = Number(raw);
-  if (!Number.isFinite(n) || n <= 0) return {};
-  return { [key]: n } as { [P in K]?: number };
-}
-
 function isAudioFormat(v: string | undefined): v is 'opus' | 'mp3' | 'wav' | 'pcm' {
   return v === 'opus' || v === 'mp3' || v === 'wav' || v === 'pcm';
 }
 
+// ---------------------------------------------------------------------------
+// Voice provider entries — ONE builder and ONE serializer, parameterised by
+// field set.
+//
+// There are four places an entry shape is read or written: the default TTS
+// entry (`auxiliary.tts`), the TTS roster (`voice.tts.providers.<name>`), the
+// default STT entry (`auxiliary.asr`), and the STT roster
+// (`voice.stt.providers.<name>`). Four hand-written field lists would be four
+// chances for a roster to quietly stop supporting a field its default still
+// has. So the field set is DATA — a spec keyed to the entry interface, checked
+// by the compiler — and the code that walks it is written once.
+// ---------------------------------------------------------------------------
+
 /**
- * One TTS entry from its flat `<field>: <value>` map. Shared by the default
- * `auxiliary.tts` entry and every `voice.providers.<name>` roster entry — one
- * builder, so the roster cannot drift into supporting a different field set
- * than the default it falls back to. No `provider` → no entry.
+ * One field of a voice-provider entry. `name` is constrained to a key of `E`
+ * other than `provider` (which every entry has and which is always written
+ * first), so a spec cannot name a field the interface does not carry.
  */
-function buildTtsProviderEntry(kv: Record<string, string>): TtsProviderEntry | undefined {
+interface VoiceEntryFieldSpec<E> {
+  name: Exclude<keyof E, 'provider'> & string;
+  kind: 'string' | 'audioFormat' | 'positiveNumber';
+}
+
+const TTS_ENTRY_FIELDS: readonly VoiceEntryFieldSpec<TtsProviderEntry>[] = [
+  { name: 'model', kind: 'string' },
+  { name: 'apiKey', kind: 'string' },
+  { name: 'voice', kind: 'string' },
+  { name: 'baseUrl', kind: 'string' },
+  { name: 'command', kind: 'string' },
+  { name: 'outputFormat', kind: 'audioFormat' },
+  { name: 'timeout', kind: 'positiveNumber' },
+  { name: 'maxTextLength', kind: 'positiveNumber' },
+];
+
+const STT_ENTRY_FIELDS: readonly VoiceEntryFieldSpec<SttProviderEntry>[] = [
+  { name: 'model', kind: 'string' },
+  { name: 'apiKey', kind: 'string' },
+  { name: 'baseUrl', kind: 'string' },
+  { name: 'command', kind: 'string' },
+  { name: 'timeout', kind: 'positiveNumber' },
+];
+
+/**
+ * One entry from its flat `<field>: <value>` map. No `provider` → no entry: an
+ * entry that names nothing resolvable is dropped rather than half-built.
+ *
+ * The single `as E` is backed by the compiler: `VoiceEntryFieldSpec<E>` only
+ * admits names that are keys of `E`, and every value written is one of the
+ * kinds those keys declare.
+ */
+function buildVoiceProviderEntry<E extends { provider: string }>(
+  kv: Record<string, string>,
+  fields: readonly VoiceEntryFieldSpec<E>[],
+): E | undefined {
   if (!kv.provider) return undefined;
-  return {
-    provider: kv.provider,
-    ...(kv.model ? { model: kv.model } : {}),
-    ...(kv.apiKey ? { apiKey: kv.apiKey } : {}),
-    ...(kv.voice ? { voice: kv.voice } : {}),
-    ...(kv.baseUrl ? { baseUrl: kv.baseUrl } : {}),
-    ...(kv.command ? { command: kv.command } : {}),
-    ...(isAudioFormat(kv.outputFormat) ? { outputFormat: kv.outputFormat } : {}),
-    ...positiveNumber('timeout', kv.timeout),
-    ...positiveNumber('maxTextLength', kv.maxTextLength),
-  };
+  const out: Record<string, string | number> = { provider: kv.provider };
+  for (const field of fields) {
+    const raw = kv[field.name];
+    if (!raw) continue;
+    if (field.kind === 'positiveNumber') {
+      const n = Number(raw);
+      if (Number.isFinite(n) && n > 0) out[field.name] = n;
+    } else if (field.kind === 'audioFormat') {
+      if (isAudioFormat(raw)) out[field.name] = raw;
+    } else {
+      out[field.name] = raw;
+    }
+  }
+  return out as E;
 }
 
 /**
- * The `voice.providers.*` roster. An entry missing `provider` names nothing
- * resolvable, so it is dropped rather than half-built — the same rule
- * `auxiliary.tts` follows.
+ * Serialize one entry under `prefix` (`auxiliary.tts`, `auxiliary.asr`, or a
+ * `voice.<kind>.providers.<name>` roster key). The write-side mirror of
+ * {@link buildVoiceProviderEntry}, walking the SAME spec — a round-trip cannot
+ * lose a field on only one of the two paths.
  */
-/**
- * Serialize one TTS entry under `prefix` (`auxiliary.tts` or
- * `voice.providers.<name>`). The write-side mirror of
- * {@link buildTtsProviderEntry} — same field set, same file, so a round-trip
- * cannot lose a field on only one of the two paths.
- */
-function ttsProviderEntryLines(prefix: string, entry: TtsProviderEntry): string[] {
+function voiceProviderEntryLines<E extends { provider: string }>(
+  prefix: string,
+  entry: E,
+  fields: readonly VoiceEntryFieldSpec<E>[],
+): string[] {
   const lines = [`${prefix}.provider: ${entry.provider}`];
-  if (entry.model) lines.push(`${prefix}.model: ${entry.model}`);
-  if (entry.apiKey) lines.push(`${prefix}.apiKey: ${entry.apiKey}`);
-  if (entry.voice) lines.push(`${prefix}.voice: ${entry.voice}`);
-  if (entry.baseUrl) lines.push(`${prefix}.baseUrl: ${entry.baseUrl}`);
-  if (entry.command) lines.push(`${prefix}.command: ${entry.command}`);
-  if (entry.outputFormat) lines.push(`${prefix}.outputFormat: ${entry.outputFormat}`);
-  if (entry.timeout) lines.push(`${prefix}.timeout: ${entry.timeout}`);
-  if (entry.maxTextLength) lines.push(`${prefix}.maxTextLength: ${entry.maxTextLength}`);
+  for (const field of fields) {
+    const value = entry[field.name];
+    if (!value) continue;
+    lines.push(`${prefix}.${field.name}: ${String(value)}`);
+  }
   return lines;
 }
 
-function buildTtsProviderRoster(
+/** A whole roster (`voice.tts.providers.*` / `voice.stt.providers.*`). */
+function buildVoiceProviderRoster<E extends { provider: string }>(
   kv: Record<string, Record<string, string>>,
-): Record<string, TtsProviderEntry> | undefined {
-  const out: Record<string, TtsProviderEntry> = {};
-  for (const [name, fields] of Object.entries(kv)) {
-    const entry = buildTtsProviderEntry(fields);
+  fields: readonly VoiceEntryFieldSpec<E>[],
+): Record<string, E> | undefined {
+  const out: Record<string, E> = {};
+  for (const [name, entryKv] of Object.entries(kv)) {
+    const entry = buildVoiceProviderEntry(entryKv, fields);
     if (entry) out[name] = entry;
   }
   return Object.keys(out).length > 0 ? out : undefined;
