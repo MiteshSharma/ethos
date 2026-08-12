@@ -9,6 +9,7 @@
     }
   },
   "dependencies": {
-    "@ethosagent/types": "workspace:*"
+    "@ethosagent/types": "workspace:*",
+    "ws": "^8.20.0"
   }
 }
