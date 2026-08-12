@@ -52,11 +52,12 @@ pnpm test
 
 `pnpm check` runs all three in that order.
 
-At the time of writing this branch ran **806 test files / 8580 tests, 0 failures**.
-Those numbers are a snapshot, not a contract — they drift every time a test lands.
-Treat a *failure*, not a count mismatch, as the signal. (`find` reports 807
-`*.test.ts` files on disk; a few sit outside vitest's `include` globs in
-`vitest.config.ts`.)
+At the time of writing this branch ran **815 test files / 8768 tests** (the two
+`doctor-provider-probe` cases that reach the network fail in an offline sandbox —
+they fail identically on `main`). Those numbers are a snapshot, not a contract —
+they drift every time a test lands. Treat a *failure*, not a count mismatch, as
+the signal. (`find` reports more `*.test.ts` files on disk than vitest runs; a few
+sit outside the `include` globs in `vitest.config.ts`.)
 
 ### The suites worth knowing by name
 
@@ -77,6 +78,8 @@ Surfaces — browser talk-mode, web-api, gateway, providers, session:
 ```bash
 pnpm vitest run \
   apps/web/src/features/voice \
+  apps/web-api/src/voice \
+  packages/web-contracts/src/__tests__/voice-socket.test.ts \
   apps/web-api/src/services/__tests__/voice.service.test.ts \
   extensions/gateway/src/__tests__/voice-trust-gate.test.ts \
   extensions/gateway/src/__tests__/voice-pipeline.test.ts \
@@ -93,6 +96,10 @@ What each one is defending:
 | Suite | Pins |
 |---|---|
 | `apps/web/src/features/voice/__tests__/talk-mode-regression-pin.test.ts` | The browser talk loop before the streaming rewrite: utterance → transcribe → turn → **ordered** playout, sentence pipelining, barge-in, the thinking earcon gate, and dropped phantom utterances |
+| `apps/web-api/src/voice/__tests__/voice-lane.test.ts` | The server end of the binary lane: a superseded utterance's transcript/audio is dropped rather than sent, bounded capture and utterance maps, and **cross-lane isolation** — two lanes sharing an utterance id and one provider service never see each other's audio |
+| `apps/web-api/src/voice/__tests__/voice-socket.test.ts` | The upgrade policy (path, Origin, auth cookie) and one real `ws` round trip, including the lane dying with a dropped socket |
+| `apps/web/src/features/voice/__tests__/webaudio-playout.test.ts` | Absolute-time pacing: consecutive buffers are contiguous on the audio clock however late or jittery their arrival, and a dry queue never schedules into the past |
+| `apps/web/src/features/voice/__tests__/streaming-voice-call-client.test.ts` | The streaming conversation: PCM up, audio down, stale results dropped, barge-in keeps only what was heard, and a WS drop discards the in-flight utterance |
 | `packages/voice-text/src/__tests__/drift-gate.test.ts` | That no second copy of `sanitizeForSpeech` / `splitSentences` / `isHallucination` reappears in gateway, voice-session, web-api or web |
 | `packages/core/src/__tests__/voice-resolution.test.ts` | The four resolution outcomes (`not_configured`, `unknown_provider`, `untrusted_provider`, `init_failed`) and the `resolveVoicePreferences` precedence table |
 | `packages/wiring/src/__tests__/voice-stack.test.ts` | `buildVoiceStack`: absent config → `null`, the `trustedVoicePlugins` egress gate, transport construction, personality voice beating global config |
@@ -264,11 +271,16 @@ Open `http://localhost:3000`.
 
    Personalities hot-reload; no restart needed.
 
-   What talk-mode is today: a **batch HTTP loop in the browser**
-   (`batch-voice-call-client.ts`) — mic → energy VAD endpoint → `transcribe` RPC →
-   the normal chat turn → sentence split → `synthesize` RPC per sentence → `<audio>`
-   playout, with barge-in. It is not a WebSocket/PCM stream (see
-   [Known gaps](#6-known-gaps--not-yet-built)).
+   What talk-mode is today: a **persistent binary WebSocket**
+   (`streaming-voice-call-client.ts` → `GET /voice/ws`) — mic PCM streams up as it
+   is captured, the endpoint fires the transcript back down, the normal chat turn
+   runs, each reply sentence is synthesized on the same socket, and the audio is
+   scheduled on the WebAudio clock. Barge-in cancels the utterance server-side, so
+   nothing already in flight for it is ever played.
+
+   A browser missing any streaming piece falls back to the **batch HTTP loop**
+   (`batch-voice-call-client.ts`) — `transcribe` RPC per utterance, `synthesize`
+   RPC per sentence, `<audio>` playout. Same conversation, same events.
 
    VAD and barge-in are tunable live under **Settings → Voice → Advanced**. Defaults
    (`DEFAULT_VOICE_TUNING`): `endpointSilenceMs 700`, `bargeThreshold 0.06`,
@@ -449,10 +461,34 @@ What is NOT wired: **browser talk-mode does not use it.** Talk-mode calls the
 path only runs on the `VoiceSession` stack. `command-tts`, `openai-stt`, `groq-stt`,
 `local-stt` and `command-stt` remain batch-only.
 
-### 2. Binary-PCM WebSocket + WebAudio playout
-Browser talk-mode is the existing **batch HTTP** path: one `transcribe` call per
-utterance, one `synthesize` call per sentence, `<audio>` element playout. There is no
-PCM WebSocket and no WebAudio scheduler.
+### 2. Binary-PCM WebSocket + WebAudio playout — now the default
+Browser talk-mode opens **one persistent WebSocket** at `GET /voice/ws` and carries
+binary frames both ways: mic PCM up, synthesized audio down. No base64, no JSON
+audio bodies, no per-utterance HTTP. Playout is `AbsolutePlayout` (WebAudio),
+which schedules each buffer where the previous one ended on the audio clock.
+
+The batch RPC path is still there and still works — `talk-mode-client.ts` falls
+back to it when a browser lacks `WebSocket`, `AudioContext`, `getUserMedia` or
+`createScriptProcessor` (and on `forceBatch`). Both paths emit the same events,
+so the UI is identical.
+
+Two honest limits:
+
+- **Sentence-granular, not frame-granular, for container codecs.** `local-tts` and
+  `openai-tts` emit opus; a mid-stream opus slice is not independently decodable,
+  so the lane tags those frames `codec: 'encoded'` and the browser decodes each
+  SEGMENT (one sentence) at `segment_end`. A provider that emits `pcm` gets true
+  frame-by-frame playout. First audio still starts long before the reply finishes.
+- **No resampling.** The mic's PCM goes up at the `AudioContext`'s own rate
+  (typically 48 kHz) and the lane wraps it in a WAV header for the STT provider.
+
+Proof: `apps/web-api/src/voice/__tests__/`, `apps/web/src/features/voice/__tests__/`
+(`webaudio-playout`, `voice-socket-transport`, `pcm-endpointer`,
+`streaming-voice-call-client`, `talk-mode-client`, `wake-lock`).
+
+Manual verification still needed (nothing in CI drives real audio): a real mic in a
+real browser, a real STT/TTS server behind it, and the reconnect + wake-lock paths
+on a phone.
 
 ### 3. Personality voice is not on the gateway or talk-mode audio path
 The `VoiceSession` stack itself **is** wired: `buildVoiceStack()` runs on the normal

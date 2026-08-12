@@ -605,6 +605,9 @@ importers:
       '@ethosagent/types':
         specifier: workspace:*
         version: link:../../packages/types
+      '@ethosagent/voice-session':
+        specifier: workspace:*
+        version: link:../../extensions/voice-session
       '@ethosagent/voice-text':
         specifier: workspace:*
         version: link:../../packages/voice-text
@@ -626,6 +629,9 @@ importers:
       hono:
         specifier: ^4.12.15
         version: 4.12.23
+      ws:
+        specifier: ^8.20.0
+        version: 8.21.0
       zod:
         specifier: ^4.3.6
         version: 4.4.3

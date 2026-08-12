@@ -1034,6 +1034,9 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
     WEB_PORT_FALLBACK_ATTEMPTS,
     webHost,
   );
+  // Talk-mode's persistent binary lane (`GET /voice/ws`). Same server, same
+  // auth cookie; unattached it simply 404s and the browser uses the batch RPCs.
+  created.voiceSocket.attach(server);
   console.log('');
   const displayHost = webHost === '0.0.0.0' ? 'localhost' : webHost;
   console.log(`ethos web UI listening on http://${displayHost}:${port}`);
@@ -1054,9 +1057,12 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
   const exposureWarning = formatNonLoopbackWarning(webHost, port);
   if (exposureWarning) console.warn(`\n${exposureWarning}`);
   webShutdown = () =>
-    new Promise<void>((resolve) => {
-      server.close(() => resolve());
-    });
+    created.voiceSocket.close().then(
+      () =>
+        new Promise<void>((resolve) => {
+          server.close(() => resolve());
+        }),
+    );
 
   emitReady('serve');
   notifyReady();

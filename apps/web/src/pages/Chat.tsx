@@ -15,10 +15,10 @@ import { useGoalDetection } from '../features/goals/useGoalDetection';
 import { usePersonalityGet } from '../features/personalities/api/queries';
 import { useSessionRenameFromChat } from '../features/sessions/api/mutations';
 import { useSessionGet } from '../features/sessions/api/queries';
-import { createBatchVoiceCallClient } from '../features/voice/batch-voice-call-client';
 import { runVoiceAgentTurn } from '../features/voice/chat-voice-runner';
 import { personalityCanTalk } from '../features/voice/gating';
 import { TalkModeCallBar, TalkModeToggle } from '../features/voice/TalkMode';
+import { createTalkModeClient } from '../features/voice/talk-mode-client';
 import { useVoiceCall } from '../features/voice/useVoiceCall';
 import type { VoiceCallClient } from '../features/voice/voice-call-client';
 import { useActivePersonality } from '../hooks/useActivePersonality';
@@ -357,7 +357,11 @@ export function Chat() {
 
   const createVoiceClient = useCallback(
     (): VoiceCallClient =>
-      createBatchVoiceCallClient({
+      // Streaming (binary PCM over one persistent WebSocket, WebAudio playout)
+      // where the browser supports it; the batch RPC path otherwise. Same
+      // events either way, so nothing below this line changes.
+      createTalkModeClient({
+        sessionId: () => sessionIdRef.current,
         transcribe: (audioBase64, mimeType) =>
           rpc.voice.transcribe({ audio: audioBase64, mimeType }).then((r) => r.transcript),
         // Reuse the existing chat send + stream so the spoken turn shares the

@@ -39,6 +39,7 @@ import { CompletionsService } from './features/completions/service';
 import { DebugService } from './features/debug/service';
 import { SessionsRepository } from './features/sessions/repository';
 import { SessionsService } from './features/sessions/service';
+import { AUTH_COOKIE } from './middleware/auth';
 import type { ApiKeyAdminStore } from './middleware/bearer-auth';
 import { AllowlistRepository } from './repositories/allowlist.repository';
 import { ConfigRepository } from './repositories/config.repository';
@@ -72,6 +73,7 @@ import { SystemEventBus } from './services/system-event-bus';
 import { TasksService } from './services/tasks.service';
 import { ToolSettingsService } from './services/tool-settings.service';
 import { VoiceService } from './services/voice.service';
+import { createVoiceSocket, readCookie, type VoiceSocket } from './voice/voice-socket';
 
 // Public entry for `@ethosagent/web-api`. Boot code (`apps/ethos/src/commands/
 // serve.ts`) builds the dependencies it has lying around — a `SessionStore`,
@@ -365,6 +367,13 @@ export interface CreateWebApiResult {
    *  completions, platform status, session titles, health) to the
    *  desktop app via `GET /sse/system`. */
   systemBus: SystemEventBus;
+  /**
+   * The binary voice lane for browser talk-mode. Boot code calls
+   * `voiceSocket.attach(server)` on the listening HTTP server to serve
+   * `GET /voice/ws`; skipping the call simply leaves the lane unmounted and
+   * talk-mode falls back to the batch RPC path.
+   */
+  voiceSocket: VoiceSocket;
 }
 
 export function createWebApi(opts: CreateWebApiOptions): CreateWebApiResult {
@@ -545,6 +554,18 @@ export function createWebApi(opts: CreateWebApiOptions): CreateWebApiResult {
     ttsProviderName: opts.ttsProviderName,
     ttsProviderConfig: opts.ttsProviderConfig,
     ...(opts.trustedVoicePlugins ? { trustedVoicePlugins: opts.trustedVoicePlugins } : {}),
+  });
+  // The persistent binary voice lane (talk-mode). Constructed here so it shares
+  // this process's VoiceService — same provider resolution, same egress gate as
+  // the batch RPCs — but it only carries traffic once boot code attaches it to
+  // the listening HTTP server (`voiceSocket.attach(server)`).
+  const voiceSocket = createVoiceSocket({
+    voice: voiceService,
+    authenticate: async (req) => {
+      const cookie = readCookie(req.headers.cookie, AUTH_COOKIE);
+      return cookie ? tokens.matches(cookie) : false;
+    },
+    ...(opts.allowedOrigins ? { allowedOrigins: opts.allowedOrigins } : {}),
   });
   const debugService = new DebugService({ sessionStore: opts.sessionStore, agentLoop });
   // Project-level plugins (`<cwd>/.ethos/plugins/`) are out of scope
@@ -819,7 +840,7 @@ export function createWebApi(opts: CreateWebApiOptions): CreateWebApiResult {
     }).start();
   }
 
-  return { app, chatService, systemBus };
+  return { app, chatService, systemBus, voiceSocket };
 }
 
 /**

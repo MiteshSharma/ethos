@@ -1,10 +1,11 @@
 import { resolveSttProvider, resolveTtsProvider, type VoiceResolution } from '@ethosagent/core';
-import type {
-  SecretsResolver,
-  SttProvider,
-  SttProviderRegistry,
-  TtsProvider,
-  TtsProviderRegistry,
+import {
+  isStreamingTtsProvider,
+  type SecretsResolver,
+  type SttProvider,
+  type SttProviderRegistry,
+  type TtsProvider,
+  type TtsProviderRegistry,
 } from '@ethosagent/types';
 import { isHallucination, truncateAtSentenceBoundary } from '@ethosagent/voice-text';
 
@@ -189,7 +190,57 @@ export class VoiceService {
     };
   }
 
-  async transcribe(audioBase64: string, mimeType: string): Promise<string> {
+  /**
+   * Streaming synthesis for the binary WS lane: audio chunks as the provider
+   * produces them, so the browser can start playing sentence N while N+1 is
+   * still being generated. A provider without `caps.streaming` yields exactly
+   * one chunk — same bytes, same order, just no early start.
+   */
+  async *synthesizeStream(
+    text: string,
+    opts?: { voice?: string; signal?: AbortSignal },
+  ): AsyncIterable<{
+    audio: Uint8Array;
+    format: 'opus' | 'mp3' | 'wav' | 'pcm';
+    provider: string;
+  }> {
+    const resolution = await this.resolveTts();
+    if (!resolution.ok) {
+      throw new Error(
+        resolution.code === 'not_configured'
+          ? 'No TTS provider configured — set auxiliary.tts in config'
+          : resolution.error,
+      );
+    }
+    const provider = resolution.provider;
+    const providerId = resolution.providerId;
+    const maxChars = provider.caps.maxInputChars;
+    const input = maxChars ? truncateAtSentenceBoundary(text, maxChars) : text;
+    const synthOpts = {
+      ...(opts?.voice ? { voice: opts.voice } : {}),
+      ...(opts?.signal ? { signal: opts.signal } : {}),
+    };
+
+    if (isStreamingTtsProvider(provider)) {
+      for await (const chunk of provider.synthesizeStream(once(input), synthOpts)) {
+        yield { ...chunk, provider: providerId };
+      }
+      return;
+    }
+    const single = await provider.synthesize(input, synthOpts);
+    yield { ...single, provider: providerId };
+  }
+
+  /**
+   * Transcribe raw utterance bytes. The WS lane hands PCM-derived WAV straight
+   * from memory; the batch RPC decodes base64 first and lands here too, so both
+   * surfaces share one hallucination filter and one provider resolution.
+   */
+  async transcribeBytes(
+    data: Uint8Array,
+    mimeType: string,
+    signal?: AbortSignal,
+  ): Promise<{ text: string; provider: string }> {
     const resolution = await this.resolve();
     if (!resolution.ok) {
       throw new Error(
@@ -199,15 +250,10 @@ export class VoiceService {
       );
     }
 
-    // The browser's utterance goes to the provider as bytes. It used to land
-    // in a temp file first, purely so the provider could read it back — a
-    // write, a read and a cleanup obligation on captured voice, for a payload
-    // that never needed to touch this disk.
-    const buf = Buffer.from(audioBase64, 'base64');
-    const raw = await resolution.provider.transcribeBuffer({
-      data: new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength),
-      mimeType,
-    });
+    const raw = await resolution.provider.transcribeBuffer(
+      { data, mimeType },
+      signal ? { signal } : undefined,
+    );
     if (isHallucination(raw)) {
       throw new Error('Could not transcribe audio — try again');
     }
@@ -215,6 +261,24 @@ export class VoiceService {
     if (!trimmed) {
       throw new Error('Could not transcribe audio — try again');
     }
-    return trimmed;
+    return { text: trimmed, provider: resolution.providerId };
   }
+
+  async transcribe(audioBase64: string, mimeType: string): Promise<string> {
+    // The browser's utterance goes to the provider as bytes. It used to land
+    // in a temp file first, purely so the provider could read it back — a
+    // write, a read and a cleanup obligation on captured voice, for a payload
+    // that never needed to touch this disk.
+    const buf = Buffer.from(audioBase64, 'base64');
+    const result = await this.transcribeBytes(
+      new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength),
+      mimeType,
+    );
+    return result.text;
+  }
+}
+
+/** One-shot async iterable — the streaming TTS contract consumes text lazily. */
+async function* once(text: string): AsyncIterable<string> {
+  yield text;
 }

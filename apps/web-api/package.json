@@ -44,6 +44,7 @@
     "@ethosagent/tools-mcp": "workspace:*",
     "@ethosagent/tools-ui": "workspace:*",
     "@ethosagent/types": "workspace:*",
+    "@ethosagent/voice-session": "workspace:*",
     "@ethosagent/voice-text": "workspace:*",
     "@ethosagent/web-contracts": "workspace:*",
     "@ethosagent/sqlite": "workspace:*",
@@ -52,6 +53,7 @@
     "@orpc/openapi": "^1.14.0",
     "@orpc/server": "^1.14.6",
     "hono": "^4.12.15",
+    "ws": "^8.20.0",
     "zod": "^4.3.6"
   }
 }

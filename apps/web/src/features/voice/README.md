@@ -21,6 +21,40 @@ indicator/controls, and the live transcript. Part of
 - **`gating.ts`** — `personalityCanTalk(toolset)`: the §3(e) toolset gate.
 - **`TalkMode.tsx`** — the toggle + in-call control bar + speaking indicator.
 
+### The two transports
+
+`talk-mode-client.ts` picks one at call time. Both implement `VoiceCallClient`
+and emit the same events, so nothing above them knows which is running.
+
+| | Streaming (default) | Batch (fallback) |
+|---|---|---|
+| Mic up | binary PCM frames over one persistent WebSocket (`/voice/ws`) | one `voice.transcribe` RPC per utterance, base64 in JSON |
+| Reply down | binary audio frames on the same socket | one `voice.synthesize` RPC per sentence, base64 in JSON |
+| Playout | `AbsolutePlayout` — WebAudio, scheduled on the audio clock | `new Audio(dataURL)`, one fully-buffered clip at a time |
+| Endpointing | `PcmEndpointer` over the captured samples | AnalyserNode + `setInterval` |
+| Chosen when | `WebSocket` + `AudioContext` + `getUserMedia` + `createScriptProcessor` all exist | anything above is missing, or `forceBatch` |
+
+Streaming pieces, all unit-tested with fakes (no sockets, no audio hardware):
+
+- **`voice-socket-transport.ts`** — the socket: framing via
+  `@ethosagent/web-contracts`, status changes, and auto-reconnect with backoff.
+- **`pcm-endpointer.ts`** — speech start/end, pre-roll and barge-in, timed off
+  sample counts rather than the wall clock.
+- **`webaudio-playout.ts`** — `AbsolutePlayout`: every buffer starts where the
+  previous one ended, on the context's absolute timeline, so late frames cannot
+  accumulate drift.
+- **`streaming-voice-call-client.ts`** — the conversation, including the
+  utterance-id staleness rules (a superseded utterance's transcript and audio
+  are dropped, never played) and the WS-drop rule (the in-flight utterance is
+  discarded and the call returns to a fresh listen).
+- **`browser-streaming-io.ts`** — the browser-only glue (getUserMedia, the PCM
+  tap, the `AudioContext` adapter). Verified by hand, not in CI.
+- **`wake-lock.ts`** — holds the screen awake for the call, re-acquiring it when
+  the page becomes visible again.
+
+The server end is `apps/web-api/src/voice/` (`voice-lane.ts` is the
+per-connection conversation, `voice-socket.ts` the upgrade + `ws` binding).
+
 Unit tests cover the reducer (incl. barge-in), the gating predicate, and the
 untrusted-JSON `parseVoiceCallControlEvent` guard. There is no
 `@testing-library/react` / jsdom harness in this repo, so component rendering is
