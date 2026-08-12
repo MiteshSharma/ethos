@@ -608,6 +608,22 @@ export interface CreatePersonalityInput {
   dreaming?: import('@ethosagent/types').DreamingConfig;
   evolution_approval_mode?: 'auto' | 'user';
   nightly?: import('@ethosagent/types').PersonalityConfig['nightly'];
+  /** How this personality sounds. `provider` names an entry in the deployment's
+   *  `voice.providers.*` roster; `tts_voice` is that provider's voice id. Empty
+   *  strings are dropped, so an editor can send blanks for "unset". */
+  voice?: EditableVoiceConfig;
+}
+
+/**
+ * The sub-keys of `PersonalityVoiceConfig` an editor may write.
+ *
+ * `tier`, `model` and `languages` are excluded on purpose: they parse and
+ * serialize, but nothing routes on them yet, so exposing them through a create
+ * or update API would be advertising a control that does nothing.
+ */
+export interface EditableVoiceConfig {
+  provider?: string;
+  tts_voice?: string;
 }
 
 export interface UpdatePersonalityPatch {
@@ -645,6 +661,33 @@ export interface UpdatePersonalityPatch {
    *  (incl. the full judge sub-object), so a one-level shallow merge onto the
    *  existing block is correct — `judge` is replaced wholesale, not deep-merged. */
   nightly?: import('@ethosagent/types').PersonalityConfig['nightly'];
+  /** Voice sub-keys, shallow-merged onto the stored `voice` block so a patch
+   *  carrying only `tts_voice` leaves a hand-written `languages` map alone.
+   *  `''` CLEARS that sub-key — the same convention `fs_reach.workdir` uses,
+   *  and the only way the editor can express "back to the default provider". */
+  voice?: EditableVoiceConfig;
+}
+
+/**
+ * Apply an editable voice patch to the stored `voice` block.
+ *
+ * `''` clears a sub-key, `undefined` leaves it, anything else sets it. Sub-keys
+ * the editor cannot write (`tier`, `model`, `languages`) ride through
+ * untouched, so hand-authored config survives a save from the web.
+ * A block left with nothing in it is dropped rather than written empty.
+ */
+function mergeVoiceConfig(
+  existing: import('@ethosagent/types').PersonalityVoiceConfig | undefined,
+  patch: EditableVoiceConfig,
+): import('@ethosagent/types').PersonalityVoiceConfig | undefined {
+  const next: import('@ethosagent/types').PersonalityVoiceConfig = { ...existing };
+  for (const key of ['provider', 'tts_voice'] as const) {
+    const value = patch[key];
+    if (value === undefined) continue;
+    if (value === '') delete next[key];
+    else next[key] = value;
+  }
+  return Object.keys(next).length > 0 ? next : undefined;
 }
 
 export class FilePersonalityRegistry implements PersonalityRegistry {
@@ -881,7 +924,13 @@ export class FilePersonalityRegistry implements PersonalityRegistry {
     const dir = this.userPathFor(input.id);
     await this.storage.mkdir(dir);
     await this.storage.mkdir(join(dir, 'files'));
-    await this.storage.write(join(dir, 'config.yaml'), renderConfigYaml(input));
+    // Through `mergeVoiceConfig` even on create, so blank editor fields become
+    // "no voice block" rather than `voice.provider: ` lines the loader ignores.
+    const voice = input.voice ? mergeVoiceConfig(undefined, input.voice) : undefined;
+    await this.storage.write(
+      join(dir, 'config.yaml'),
+      renderConfigYaml({ ...input, ...(voice ? { voice } : { voice: undefined }) }),
+    );
     await this.storage.write(join(dir, 'toolset.yaml'), renderToolsetYaml(input.toolset));
     await this.storage.write(join(dir, 'SOUL.md'), input.soulMd);
     await this.refreshUserDir();
@@ -914,7 +963,8 @@ export class FilePersonalityRegistry implements PersonalityRegistry {
       patch.skill_evolution !== undefined ||
       patch.safety !== undefined ||
       patch.memory !== undefined ||
-      patch.nightly !== undefined
+      patch.nightly !== undefined ||
+      patch.voice !== undefined
     ) {
       const config = existing.config;
       if (patch.provider !== undefined && patch.provider !== '') {
@@ -1040,6 +1090,8 @@ export class FilePersonalityRegistry implements PersonalityRegistry {
         memory: patch.memory === undefined ? config.memory : { ...config.memory, ...patch.memory },
         nightly:
           patch.nightly === undefined ? config.nightly : { ...config.nightly, ...patch.nightly },
+        voice:
+          patch.voice === undefined ? config.voice : mergeVoiceConfig(config.voice, patch.voice),
       };
       // renderConfigYaml's safety emission is suppressed here (render with
       // `safety: undefined`) so we append exactly one safety block — never a

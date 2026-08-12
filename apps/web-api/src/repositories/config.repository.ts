@@ -5,7 +5,7 @@ import {
   secretRefForConfigKey,
 } from '@ethosagent/config';
 import { deriveBotKey } from '@ethosagent/core';
-import type { SecretsResolver, Storage } from '@ethosagent/types';
+import type { SecretsResolver, Storage, TtsProviderEntry } from '@ethosagent/types';
 import { requireStorage } from './require-storage';
 
 // Read/write `~/.ethos/config.yaml` from the web side. The file is shared
@@ -479,6 +479,58 @@ export class ConfigRepository {
 
 function stripQuotes(s: string): string {
   return s.replace(/^["']|["']$/g, '');
+}
+
+/**
+ * The named TTS roster (`voice.providers.<name>.<field>`) out of the passthrough
+ * block, which is where these lines land — this parser models no key, it just
+ * round-trips them.
+ *
+ * Deliberately a mirror of `buildTtsProviderEntry` in `@ethosagent/config`: same
+ * charset for the name, same field set, and the same rule that an entry without
+ * `provider` names nothing resolvable and is dropped rather than half-built.
+ * Two readers of one file format is already one too many; they must at least
+ * agree on what a valid entry is.
+ *
+ * `apiKey` comes back exactly as stored — usually a `${secrets:…}` reference.
+ * Callers that hand entries to a provider factory must resolve it first;
+ * callers that show it to a browser must redact it.
+ */
+export function parseTtsRoster(
+  passthrough: Record<string, string>,
+): Record<string, TtsProviderEntry> {
+  const bag: Record<string, Record<string, string>> = {};
+  for (const [key, value] of Object.entries(passthrough)) {
+    const m = key.match(/^voice\.providers\.([A-Za-z0-9_-]+)\.(\w+)$/);
+    const name = m?.[1];
+    const field = m?.[2];
+    if (!name || !field) continue;
+    const slot = bag[name] ?? {};
+    bag[name] = slot;
+    slot[field] = value;
+  }
+  const out: Record<string, TtsProviderEntry> = {};
+  for (const [name, kv] of Object.entries(bag)) {
+    if (!kv.provider) continue;
+    const timeout = Number(kv.timeout);
+    const maxTextLength = Number(kv.maxTextLength);
+    out[name] = {
+      provider: kv.provider,
+      ...(kv.model ? { model: kv.model } : {}),
+      ...(kv.apiKey ? { apiKey: kv.apiKey } : {}),
+      ...(kv.voice ? { voice: kv.voice } : {}),
+      ...(kv.baseUrl ? { baseUrl: kv.baseUrl } : {}),
+      ...(kv.command ? { command: kv.command } : {}),
+      ...(isAudioFormat(kv.outputFormat) ? { outputFormat: kv.outputFormat } : {}),
+      ...(Number.isFinite(timeout) && timeout > 0 ? { timeout } : {}),
+      ...(Number.isFinite(maxTextLength) && maxTextLength > 0 ? { maxTextLength } : {}),
+    };
+  }
+  return out;
+}
+
+function isAudioFormat(v: string | undefined): v is 'opus' | 'mp3' | 'wav' | 'pcm' {
+  return v === 'opus' || v === 'mp3' || v === 'wav' || v === 'pcm';
 }
 
 /**

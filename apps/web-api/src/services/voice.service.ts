@@ -1,8 +1,10 @@
 import {
   resolveSttProvider,
+  resolveTtsProvider,
   resolveTtsProviderForPersonality,
   resolveVoicePreferences,
   selectTtsEntry,
+  ttsEntryProviderConfig,
   type VoiceResolution,
 } from '@ethosagent/core';
 import {
@@ -34,6 +36,24 @@ export interface SynthesisVoiceOptions {
   personalityId?: string;
   /** BCP-47 tag, selecting from the personality's language→voice map. */
   language?: string;
+  /**
+   * Audition an unsaved selection. `provider` names a roster entry and `voice`
+   * the voice id; together they stand IN PLACE OF the personality's own `voice`
+   * block, so the personality editor can preview a choice that is not on disk.
+   *
+   * It is not a privileged path: `provider` is a roster label like any other,
+   * an unknown one falls back to the default entry, and the egress gate still
+   * keys on the provider that actually gets constructed.
+   */
+  override?: { provider?: string; voice?: string };
+}
+
+/** One selectable TTS entry and the voice ids it advertises. */
+export interface TtsEntryInfo {
+  /** Registered provider id the entry names. Null = nothing configured. */
+  providerId: string | null;
+  /** `caps.voices`. Null = the provider takes open-ended voice ids. */
+  voices: string[] | null;
 }
 
 /** Live-config shape the Settings tab persists. */
@@ -47,6 +67,8 @@ interface LiveVoiceConfig {
   voiceTtsVoice?: string | null;
   voiceTtsBaseUrl?: string | null;
   voiceTtsModel?: string | null;
+  /** `voice.providers.*` as stored, with API keys already resolved. */
+  voiceProviders?: Readonly<Record<string, TtsProviderEntry>> | null;
 }
 
 export class VoiceService {
@@ -70,7 +92,7 @@ export class VoiceService {
   /** Cache key is the ENTRY that served — `''` for the default entry. */
   private ttsProvider: TtsProvider | null = null;
   private resolvedTtsName: string | undefined;
-  private resolvedTtsEntryName = '';
+  private resolvedTtsEntryKey = '';
 
   /**
    * Local-only voice-egress allowlist. Undefined → gate off. Threaded into the
@@ -120,10 +142,23 @@ export class VoiceService {
     this.personalities = opts.personalities;
   }
 
-  /** The `voice` block of the personality speaking this reply, if any. */
+  /**
+   * The `voice` block this reply is spoken with.
+   *
+   * An `override` is expressed AS a voice block rather than as a second
+   * resolution path, so a previewed selection travels the same precedence and
+   * the same egress gate as a stored one — there is one way to pick a voice.
+   */
   private personalityVoice(
     opts: SynthesisVoiceOptions | undefined,
   ): PersonalityVoiceConfig | undefined {
+    const override = opts?.override;
+    if (override?.provider || override?.voice) {
+      return {
+        ...(override.provider ? { provider: override.provider } : {}),
+        ...(override.voice ? { tts_voice: override.voice } : {}),
+      };
+    }
     return opts?.personalityId ? this.personalities?.get(opts.personalityId)?.voice : undefined;
   }
 
@@ -204,30 +239,15 @@ export class VoiceService {
     resolution: VoiceResolution<TtsProvider>;
     globalTtsVoice: string | undefined;
   }> {
-    let name = this.initialTtsProviderName;
-    let config: Record<string, unknown> = this.initialTtsProviderConfig;
-
-    if (!name && this.configGetter) {
-      const live = await this.configGetter().catch(() => null);
-      if (live?.voiceTtsProvider) {
-        name = live.voiceTtsProvider;
-        config = {
-          apiKey: live.voiceTtsApiKey ?? undefined,
-          voice: live.voiceTtsVoice ?? undefined,
-          baseUrl: live.voiceTtsBaseUrl ?? undefined,
-          model: live.voiceTtsModel ?? undefined,
-        };
-      }
-    }
+    const { name, config, roster } = await this.ttsDefaults();
 
     // Pure decision — it names the entry and the voice rung, and keys the
     // memo. `resolveTtsProviderForPersonality` below stays the authority on
     // which provider id is actually constructed and gated.
     const selection = selectTtsEntry({
       ...(personality?.provider ? { requestedName: personality.provider } : {}),
-      ...(this.ttsRoster ? { roster: this.ttsRoster } : {}),
+      ...(roster ? { roster } : {}),
     });
-    const entryName = selection.entryName ?? '';
     // Lowest voice rung, evaluated within the chosen provider. On a roster
     // entry that is the entry's own voice and nothing else — the Settings
     // default belongs to `auxiliary.tts`, and its voice ids need not exist on
@@ -236,13 +256,15 @@ export class VoiceService {
     const globalTtsVoice = selection.entry ? selection.entry.voice : (clientVoice ?? defaultVoice);
 
     // The memo holds ONE provider — the last entry that spoke. It stays valid
-    // while the same entry serves; on the default entry the live Settings name
-    // must match too, since that one can change under us.
+    // while the same entry serves, and the key carries the entry's FIELDS, not
+    // just its name: the roster is editable from Settings, so `studio` after an
+    // edit is a different provider than `studio` before it.
+    const entryKey = `${selection.entryName ?? ''} ${JSON.stringify(selection.entry ?? null)}`;
     const cachedId = this.resolvedTtsName;
     if (
       this.ttsProvider &&
       cachedId !== undefined &&
-      entryName === this.resolvedTtsEntryName &&
+      entryKey === this.resolvedTtsEntryKey &&
       (selection.entry !== undefined || cachedId === name)
     ) {
       return {
@@ -254,7 +276,7 @@ export class VoiceService {
     const { resolution } = await resolveTtsProviderForPersonality({
       registry: this.ttsRegistry,
       ...(personality ? { personality } : {}),
-      ...(this.ttsRoster ? { roster: this.ttsRoster } : {}),
+      ...(roster ? { roster } : {}),
       ...(name ? { defaultProviderName: name } : {}),
       defaultProviderConfig: config,
       ...(this.secrets ? { secrets: this.secrets } : {}),
@@ -263,13 +285,81 @@ export class VoiceService {
     if (resolution.ok) {
       this.ttsProvider = resolution.provider;
       this.resolvedTtsName = resolution.providerId;
-      this.resolvedTtsEntryName = entryName;
+      this.resolvedTtsEntryKey = entryKey;
     } else {
       this.ttsProvider = null;
       this.resolvedTtsName = undefined;
-      this.resolvedTtsEntryName = '';
+      this.resolvedTtsEntryKey = '';
     }
     return { resolution, globalTtsVoice };
+  }
+
+  /**
+   * The default TTS entry and the roster, boot values overlaid with live config.
+   *
+   * The default entry keeps the rule it has always had: the constructor's
+   * provider wins, and live Settings fill in only when boot supplied none. The
+   * ROSTER is the other way round — it is edited from Settings, so a boot
+   * snapshot is stale the moment an operator adds an entry, and a roster the
+   * getter returns replaces it.
+   */
+  private async ttsDefaults(): Promise<{
+    name: string | undefined;
+    config: Record<string, unknown>;
+    roster: Readonly<Record<string, TtsProviderEntry>> | undefined;
+  }> {
+    let name = this.initialTtsProviderName;
+    let config: Record<string, unknown> = this.initialTtsProviderConfig;
+    const live = this.configGetter ? await this.configGetter().catch(() => null) : null;
+    if (!name && live?.voiceTtsProvider) {
+      name = live.voiceTtsProvider;
+      config = {
+        apiKey: live.voiceTtsApiKey ?? undefined,
+        voice: live.voiceTtsVoice ?? undefined,
+        baseUrl: live.voiceTtsBaseUrl ?? undefined,
+        model: live.voiceTtsModel ?? undefined,
+      };
+    }
+    return { name, config, roster: live?.voiceProviders ?? this.ttsRoster };
+  }
+
+  /**
+   * Every TTS entry a personality can name, and the voice ids each advertises.
+   *
+   * Providers are CONSTRUCTED (that is the only way to read `caps.voices`) but
+   * never asked to synthesize, so this makes no network call and moves no
+   * audio. An entry whose provider will not construct — no credential, an
+   * unregistered id, refused by the egress gate — reports the id it names with
+   * `voices: null`, which reads as "open-ended" at the surface. That is the
+   * honest answer: we do not know its voices, so do not offer a list.
+   */
+  async listTtsEntries(): Promise<{
+    default: TtsEntryInfo;
+    roster: Record<string, TtsEntryInfo>;
+  }> {
+    const { name, config, roster } = await this.ttsDefaults();
+    const describe = async (
+      providerId: string | undefined,
+      providerConfig: Record<string, unknown>,
+    ): Promise<TtsEntryInfo> => {
+      if (!providerId) return { providerId: null, voices: null };
+      const resolution = await resolveTtsProvider({
+        registry: this.ttsRegistry,
+        providerName: providerId,
+        providerConfig,
+        ...(this.secrets ? { secrets: this.secrets } : {}),
+        ...(this.trustedVoicePlugins ? { trustedVoicePlugins: this.trustedVoicePlugins } : {}),
+      });
+      return {
+        providerId,
+        voices: resolution.ok ? (resolution.provider.caps.voices ?? null) : null,
+      };
+    };
+    const entries: Record<string, TtsEntryInfo> = {};
+    for (const [entryName, entry] of Object.entries(roster ?? {})) {
+      entries[entryName] = await describe(entry.provider, ttsEntryProviderConfig(entry));
+    }
+    return { default: await describe(name, config), roster: entries };
   }
 
   async synthesize(

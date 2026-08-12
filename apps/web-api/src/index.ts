@@ -23,6 +23,7 @@ import type {
   SecretsResolver,
   SessionStore,
   Storage,
+  TtsProviderEntry,
 } from '@ethosagent/types';
 import type { SseEvent } from '@ethosagent/web-contracts';
 import {
@@ -43,7 +44,7 @@ import { SessionsService } from './features/sessions/service';
 import { AUTH_COOKIE } from './middleware/auth';
 import type { ApiKeyAdminStore } from './middleware/bearer-auth';
 import { AllowlistRepository } from './repositories/allowlist.repository';
-import { ConfigRepository } from './repositories/config.repository';
+import { ConfigRepository, parseTtsRoster } from './repositories/config.repository';
 import { EvolverRepository } from './repositories/evolver.repository';
 import { PlatformsRepository } from './repositories/platforms.repository';
 import { WebTokenRepository } from './repositories/web-token.repository';
@@ -560,19 +561,27 @@ export function createWebApi(opts: CreateWebApiOptions): CreateWebApiResult {
       // value reaches a provider factory, which expects a usable key.
       const resolveKey = async (v: string | undefined): Promise<string | undefined> =>
         v ? await resolveSecretRef(v, secrets) : v;
-      return raw
-        ? {
-            voiceProvider: raw.voiceProvider,
-            voiceApiKey: await resolveKey(raw.voiceApiKey),
-            voiceBaseUrl: raw.voiceBaseUrl,
-            voiceModel: raw.voiceModel,
-            voiceTtsProvider: raw.voiceTtsProvider,
-            voiceTtsApiKey: await resolveKey(raw.voiceTtsApiKey),
-            voiceTtsVoice: raw.voiceTtsVoice,
-            voiceTtsBaseUrl: raw.voiceTtsBaseUrl,
-            voiceTtsModel: raw.voiceTtsModel,
-          }
-        : null;
+      if (!raw) return null;
+      // The roster is edited from Settings → Voice, so it is read live here
+      // rather than trusted from the boot snapshot: an entry added a minute ago
+      // must be selectable and previewable without a restart.
+      const roster: Record<string, TtsProviderEntry> = {};
+      for (const [name, entry] of Object.entries(parseTtsRoster(raw.passthrough))) {
+        const apiKey = await resolveKey(entry.apiKey);
+        roster[name] = apiKey === undefined ? entry : { ...entry, apiKey };
+      }
+      return {
+        voiceProvider: raw.voiceProvider,
+        voiceApiKey: await resolveKey(raw.voiceApiKey),
+        voiceBaseUrl: raw.voiceBaseUrl,
+        voiceModel: raw.voiceModel,
+        voiceTtsProvider: raw.voiceTtsProvider,
+        voiceTtsApiKey: await resolveKey(raw.voiceTtsApiKey),
+        voiceTtsVoice: raw.voiceTtsVoice,
+        voiceTtsBaseUrl: raw.voiceTtsBaseUrl,
+        voiceTtsModel: raw.voiceTtsModel,
+        ...(Object.keys(roster).length > 0 ? { voiceProviders: roster } : {}),
+      };
     },
     ttsRegistry: opts.ttsProviderRegistry,
     ttsProviderName: opts.ttsProviderName,

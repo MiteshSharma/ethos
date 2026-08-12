@@ -1,7 +1,11 @@
 import { randomBytes } from 'node:crypto';
 import { secretRefFromValue } from '@ethosagent/config';
 import { EthosError, type SecretsResolver } from '@ethosagent/types';
-import type { ConfigRepository, RawProviderEntry } from '../repositories/config.repository';
+import {
+  type ConfigRepository,
+  parseTtsRoster,
+  type RawProviderEntry,
+} from '../repositories/config.repository';
 
 // Read/update the parts of `~/.ethos/config.yaml` the web UI exposes. The
 // raw API key NEVER leaves this layer — `get` returns a redacted preview
@@ -157,6 +161,36 @@ export type QuickCommandUpdateInput =
   | { type: 'exec'; command: string; gateway?: boolean; channels?: string[] }
   | { type: 'reply'; reply: string; gateway?: boolean; channels?: string[] };
 
+/** One entry of the named TTS roster (`voice.providers.<name>.*`), API key
+ *  redacted to a preview exactly like `auxiliary.tts.apiKey`. */
+export interface VoiceProviderGetResult {
+  provider: string;
+  model: string | null;
+  apiKeyPreview: string | null;
+  voice: string | null;
+  baseUrl: string | null;
+  command: string | null;
+  outputFormat: 'opus' | 'mp3' | 'wav' | 'pcm' | null;
+  /** Seconds — the unit `command-tts` reads. */
+  timeout: number | null;
+  maxTextLength: number | null;
+}
+
+/** Update shape for one roster entry. `apiKey` is write-only: the form never
+ *  receives it, so an omitted field KEEPS the stored key rather than clearing
+ *  it (same rule as `webhooks.<id>.secret`). */
+export interface VoiceProviderUpdateInput {
+  provider: string;
+  model?: string;
+  apiKey?: string;
+  voice?: string;
+  baseUrl?: string;
+  command?: string;
+  outputFormat?: 'opus' | 'mp3' | 'wav' | 'pcm';
+  timeout?: number;
+  maxTextLength?: number;
+}
+
 // -- passthrough read helpers ------------------------------------------------
 
 function passStr(p: Record<string, string>, key: string): string | null {
@@ -307,6 +341,35 @@ function parseQuickCommands(p: Record<string, string>): Record<string, QuickComm
   return out;
 }
 
+/**
+ * The named TTS roster, redacted for the browser.
+ *
+ * Entry discovery is `parseTtsRoster` (the repository), so this surface and the
+ * VoiceService that actually speaks through the roster agree on what an entry
+ * is; the only thing added here is redaction — the raw key never leaves this
+ * layer, same as `auxiliary.tts.apiKey`.
+ */
+async function parseVoiceProviders(
+  p: Record<string, string>,
+  keyPreview: (value: string | undefined) => Promise<string | null>,
+): Promise<Record<string, VoiceProviderGetResult>> {
+  const out: Record<string, VoiceProviderGetResult> = {};
+  for (const [name, entry] of Object.entries(parseTtsRoster(p))) {
+    out[name] = {
+      provider: entry.provider,
+      model: entry.model ?? null,
+      apiKeyPreview: await keyPreview(entry.apiKey),
+      voice: entry.voice ?? null,
+      baseUrl: entry.baseUrl ?? null,
+      command: entry.command ?? null,
+      outputFormat: entry.outputFormat ?? null,
+      timeout: entry.timeout ?? null,
+      maxTextLength: entry.maxTextLength ?? null,
+    };
+  }
+  return out;
+}
+
 function parseChannelToolsets(p: Record<string, string>): Record<string, string[]> {
   const out: Record<string, string[]> = {};
   for (const [key, value] of Object.entries(p)) {
@@ -338,6 +401,7 @@ const SETTINGS_PATCH_KEYS = [
   'webhooks',
   'quickCommands',
   'channelToolsets',
+  'voiceProviders',
   'nightlyPass',
   'weeklyDigest',
   'modelCatalog',
@@ -487,6 +551,19 @@ function validateSettingsPatch(patch: ConfigUpdateInput): void {
       if (qc.type === 'reply' && !qc.reply) {
         invalidValue(`quickCommands.${name}.reply`, 'is required for type reply');
       }
+    }
+  }
+  if (patch.voiceProviders) {
+    for (const [name, entry] of Object.entries(patch.voiceProviders)) {
+      // The name becomes a `voice.providers.<name>.<field>` line; outside this
+      // charset the CLI's parser would not match it and the entry would vanish
+      // on the next read.
+      checkRecordKey(`voiceProviders.${name}`, name);
+      if (!entry?.provider) {
+        invalidValue(`voiceProviders.${name}.provider`, 'is required');
+      }
+      checkInt(`voiceProviders.${name}.timeout`, entry.timeout, 1, 3600);
+      checkInt(`voiceProviders.${name}.maxTextLength`, entry.maxTextLength, 100, 100_000);
     }
   }
   if (patch.webhooks) {
@@ -646,6 +723,9 @@ export interface ConfigGetResult {
   webhooks: Record<string, WebhookGetResult>;
   quickCommands: Record<string, QuickCommandGetResult>;
   channelToolsets: Record<string, string[]>;
+  /** `voice.providers.*` — the named TTS roster. `auxiliary.tts` is the default
+   *  entry and lives in the `voiceTts*` fields above, not here. */
+  voiceProviders: Record<string, VoiceProviderGetResult>;
   nightlyPass: { enabled: boolean; cron: string };
   weeklyDigest: { enabled: boolean; cron: string; recipients: string[] };
   modelCatalog: { enabled: boolean; url: string | null; ttlHours: number };
@@ -711,6 +791,9 @@ export interface ConfigUpdateInput {
   voiceSttTimeoutMs?: number | null;
   voiceTrustedPlugins?: string[] | null;
   voiceDefaultMode?: 'off' | 'mirror_inbound' | 'all' | null;
+  /** `voice.providers.*`. Present REPLACES the whole roster — an omitted entry
+   *  is a deletion, and its vault key is dropped with it. */
+  voiceProviders?: Record<string, VoiceProviderUpdateInput>;
   // Settings-page additions. For every scalar below, `null` (or '') deletes
   // the config.yaml key so the built-in default applies again; `undefined`
   // leaves it unchanged. Record fields are full replacements.
@@ -968,6 +1051,7 @@ export class ConfigService {
       webhooks: parseWebhooks(p),
       quickCommands: parseQuickCommands(p),
       channelToolsets: parseChannelToolsets(p),
+      voiceProviders: await parseVoiceProviders(p, (v) => this.keyPreview(v)),
       nightlyPass: {
         enabled: passBool(p, 'nightlyPass.enabled', false),
         cron: p['nightlyPass.cron'] || '0 3 * * *',
@@ -1253,7 +1337,8 @@ export class ConfigService {
       patch.personalityRetention !== undefined ||
       patch.webhooks !== undefined ||
       patch.quickCommands !== undefined ||
-      patch.channelToolsets !== undefined;
+      patch.channelToolsets !== undefined ||
+      patch.voiceProviders !== undefined;
     const currentPassthrough = replacesRecords
       ? ((await this.opts.config.read())?.passthrough ?? {})
       : {};
@@ -1298,6 +1383,26 @@ export class ConfigService {
         }
       }
     }
+    if (patch.voiceProviders !== undefined) {
+      deletePrefix('voice.providers.');
+      for (const [name, entry] of Object.entries(patch.voiceProviders)) {
+        if (!entry) continue;
+        set(`voice.providers.${name}.provider`, entry.provider);
+        set(`voice.providers.${name}.model`, entry.model);
+        // Write-only key: a provided value wins, otherwise the stored one is
+        // re-written so a form that never saw the key cannot erase it. The
+        // value re-written is the `${secrets:…}` reference, which
+        // `externalizeSecret` passes through untouched — no second vault entry.
+        const apiKey = entry.apiKey || currentPassthrough[`voice.providers.${name}.apiKey`];
+        if (apiKey) passthroughPatch[`voice.providers.${name}.apiKey`] = apiKey;
+        set(`voice.providers.${name}.voice`, entry.voice);
+        set(`voice.providers.${name}.baseUrl`, entry.baseUrl);
+        set(`voice.providers.${name}.command`, entry.command);
+        set(`voice.providers.${name}.outputFormat`, entry.outputFormat);
+        set(`voice.providers.${name}.timeout`, entry.timeout);
+        set(`voice.providers.${name}.maxTextLength`, entry.maxTextLength);
+      }
+    }
     if (patch.webhooks !== undefined) {
       deletePrefix('webhooks.');
       for (const [hookId, hook] of Object.entries(patch.webhooks)) {
@@ -1323,12 +1428,14 @@ export class ConfigService {
     // A key both deleted (prefix replacement) and re-set in the same patch
     // must survive — the delete pass runs first, so drop it from the list.
     const finalDeletes = [...new Set(deleteKeys)].filter((k) => !(k in passthroughPatch));
-    // `webhooks.<id>.secret` is externalized (ref `webhooks/<id>/secret`), and
-    // that config key is the only thing pointing at the vault entry. Dropping
-    // the key alone leaves the material behind forever, so parse the ref that
-    // was STORED and hand it to the post-write cleanup below.
+    // `webhooks.<id>.secret` and `voice.providers.<name>.apiKey` are both
+    // externalized, and the config key is the only thing pointing at the vault
+    // entry. Dropping the key alone leaves the material behind forever, so
+    // parse the ref that was STORED and hand it to the post-write cleanup.
     const droppedSecretRefs = finalDeletes
-      .filter((k) => /^webhooks\.[^.]+\.secret$/.test(k))
+      .filter(
+        (k) => /^webhooks\.[^.]+\.secret$/.test(k) || /^voice\.providers\.[^.]+\.apiKey$/.test(k),
+      )
       .map((k) => secretRefFromValue(currentPassthrough[k] ?? ''))
       .filter((ref): ref is string => ref !== null);
     if (finalDeletes.length > 0) {

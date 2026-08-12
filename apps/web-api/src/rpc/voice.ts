@@ -14,6 +14,13 @@ export const voiceRouter = {
       ...(input.voice ? { voice: input.voice } : {}),
       ...(input.personalityId ? { personalityId: input.personalityId } : {}),
       ...(input.language ? { language: input.language } : {}),
+      ...(input.override ? { override: input.override } : {}),
     });
+  }),
+  ttsEntries: os.voice.ttsEntries.handler(async ({ context }) => {
+    // No service wired = nothing configured, which is a legitimate state the
+    // personality editor renders around — not an error to throw at it.
+    if (!context.voice) return { default: { providerId: null, voices: null }, roster: {} };
+    return context.voice.listTtsEntries();
   }),
 };

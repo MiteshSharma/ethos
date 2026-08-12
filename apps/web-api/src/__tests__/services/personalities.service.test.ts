@@ -617,6 +617,53 @@ describe('PersonalitiesService', () => {
       });
       expect(reloaded.personality.skill_evolution?.model).toBe('gpt-4o-mini');
     });
+
+    // The personality editor's voice fields — create, edit, and clear, all the
+    // way through config.yaml and back out on the wire.
+    it('persists the voice a create carries and reads it back on the wire', async () => {
+      const { service } = await makeRealService();
+      const { personality } = await service.create({
+        id: 'agent',
+        name: 'Agent',
+        toolset: [],
+        soulMd: '# Agent',
+        voice: { provider: 'studio', tts_voice: 'nova' },
+      });
+      expect(personality.voice).toEqual({ provider: 'studio', tts_voice: 'nova' });
+      const reloaded = await service.get('agent');
+      expect(reloaded.personality.voice).toEqual({ provider: 'studio', tts_voice: 'nova' });
+    });
+
+    it('an update back to the default entry clears the provider on the wire too', async () => {
+      const { service } = await makeRealService();
+      await service.create({
+        id: 'agent',
+        name: 'Agent',
+        toolset: [],
+        soulMd: '# Agent',
+        voice: { provider: 'studio', tts_voice: 'nova' },
+      });
+
+      // What the edit form sends after switching the select back to Default.
+      const { personality } = await service.update('agent', {
+        voice: { provider: '', tts_voice: 'nova' },
+      });
+      expect(personality.voice).toEqual({ tts_voice: 'nova' });
+
+      const cleared = await service.update('agent', { voice: { provider: '', tts_voice: '' } });
+      expect(cleared.personality.voice).toBeUndefined();
+    });
+
+    it('omits voice entirely for a personality that declares none', async () => {
+      const { service } = await makeRealService();
+      const { personality } = await service.create({
+        id: 'agent',
+        name: 'Agent',
+        toolset: [],
+        soulMd: '# Agent',
+      });
+      expect(personality.voice).toBeUndefined();
+    });
   });
 
   // -------------------------------------------------------------------------

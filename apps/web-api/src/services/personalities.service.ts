@@ -755,6 +755,17 @@ function toWire(d: DescribedPersonality): Personality {
       : {}),
     ...(c.memory?.provider !== undefined ? { memory: { provider: c.memory.provider } } : {}),
     ...(c.nightly !== undefined ? { nightly: c.nightly } : {}),
+    // Only the two sub-keys the editor writes. `tier` / `model` / `languages`
+    // stay on disk: echoing them here would invite a form field for a knob
+    // nothing routes on yet.
+    ...(c.voice?.provider !== undefined || c.voice?.tts_voice !== undefined
+      ? {
+          voice: {
+            ...(c.voice.provider !== undefined ? { provider: c.voice.provider } : {}),
+            ...(c.voice.tts_voice !== undefined ? { tts_voice: c.voice.tts_voice } : {}),
+          },
+        }
+      : {}),
     system: d.builtin && SYSTEM_PERSONALITY_IDS.has(c.id),
     builtin: d.builtin,
     version: 1,

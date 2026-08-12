@@ -38,6 +38,10 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { LivingSoulSection } from '../components/LivingSoulSection';
 import { ExecutionTab } from '../components/personality/ExecutionTab';
+import {
+  type PersonalityVoice,
+  PersonalityVoiceFields,
+} from '../components/personality/PersonalityVoiceFields';
 import { PersonalityRingAvatar } from '../components/ui/PersonalityRingAvatar';
 import { toolAffordance } from '../lib/execution-posture';
 import {
@@ -379,6 +383,10 @@ interface WizardState {
   skillEvolutionMinToolCalls: number;
   skillEvolutionCooldownMinutes: number;
   evolutionApprovalMode: 'auto' | 'user';
+  /** `voice.provider` — a `voice.providers.*` roster name; '' = the default entry. */
+  voiceProvider: string;
+  /** `voice.tts_voice`. */
+  voiceTtsVoice: string;
 }
 
 const SOUL_TEMPLATE = `# About me\n\nI am a {role}. I {what I do}. I {how I work}.\n\n## How I respond\n\n- {tone / shape}\n- {tone / shape}\n- {tone / shape}\n`;
@@ -408,6 +416,8 @@ function CreateWizard({ existingIds, onClose }: { existingIds: Set<string>; onCl
     skillEvolutionMinToolCalls: 3,
     skillEvolutionCooldownMinutes: 30,
     evolutionApprovalMode: 'user',
+    voiceProvider: '',
+    voiceTtsVoice: '',
   });
 
   const createMut = useMutation({
@@ -449,6 +459,16 @@ function CreateWizard({ existingIds, onClose }: { existingIds: Set<string>; onCl
           cooldown_minutes: state.skillEvolutionCooldownMinutes,
         },
         evolution_approval_mode: state.evolutionApprovalMode,
+        // Omitted entirely when neither is set, so a personality created
+        // without touching these carries no `voice` block at all.
+        ...(state.voiceProvider || state.voiceTtsVoice
+          ? {
+              voice: {
+                ...(state.voiceProvider ? { provider: state.voiceProvider } : {}),
+                ...(state.voiceTtsVoice ? { tts_voice: state.voiceTtsVoice } : {}),
+              },
+            }
+          : {}),
       }),
     onSuccess: async () => {
       if (state.skills.length > 0) {
@@ -602,6 +622,12 @@ function IdentityStep({
           onChange={(e) => setState((s) => ({ ...s, description: e.target.value }))}
         />
       </Form.Item>
+      <PersonalityVoiceFields
+        value={{ provider: state.voiceProvider, ttsVoice: state.voiceTtsVoice }}
+        onChange={(next) =>
+          setState((s) => ({ ...s, voiceProvider: next.provider, voiceTtsVoice: next.ttsVoice }))
+        }
+      />
     </Form>
   );
 }
@@ -1670,6 +1696,11 @@ export function ConfigEditor({ id, personality }: { id: string; personality: Per
   const [tieredMode, setTieredMode] = useState(
     typeof personality.model === 'object' && personality.model !== null,
   );
+  // Voice lives outside the Antd form: `PersonalityVoiceFields` is a controlled
+  // pair (the voice control switches between a select and free text as the
+  // provider changes), and threading that through registered Form.Items buys
+  // nothing but indirection.
+  const [voice, setVoice] = useState<PersonalityVoice>({ provider: '', ttsVoice: '' });
   const catalogQuery = useQuery({
     queryKey: ['models', 'catalog'],
     queryFn: () => rpc.models.catalog(),
@@ -1713,6 +1744,10 @@ export function ConfigEditor({ id, personality }: { id: string; personality: Per
       nightlyJudgeEnabled: personality.nightly?.judge?.enabled ?? true,
       nightlyJudgeMinInteractions: personality.nightly?.judge?.minInteractions ?? 20,
       nightlyExpression: personality.nightly?.expression ?? true,
+    });
+    setVoice({
+      provider: personality.voice?.provider ?? '',
+      ttsVoice: personality.voice?.tts_voice ?? '',
     });
   }, [personality, form]);
 
@@ -1789,6 +1824,10 @@ export function ConfigEditor({ id, personality }: { id: string; personality: Per
         },
         safety: { approvalMode: values.safetyApprovalMode },
         memory: { provider: values.memoryProvider },
+        // Both sub-keys always sent, empty string included: the registry
+        // shallow-merges the voice block, so omitting one would preserve the
+        // stored value and make "back to the default provider" unexpressible.
+        voice: { provider: voice.provider, tts_voice: voice.ttsVoice },
         nightly: {
           enabled: values.nightlyEnabled,
           judge: {
@@ -1852,6 +1891,7 @@ export function ConfigEditor({ id, personality }: { id: string; personality: Per
       <Form.Item label="Description" name="description">
         <Input />
       </Form.Item>
+      <PersonalityVoiceFields value={voice} onChange={setVoice} />
       <Form.Item
         label="Provider"
         name="provider"

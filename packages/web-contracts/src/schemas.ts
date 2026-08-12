@@ -151,6 +151,12 @@ export const PersonalitySchema = z.object({
       expression: z.boolean().optional(),
     })
     .optional(),
+  /** How this personality sounds. Only the two sub-keys the editor writes are
+   *  surfaced — `voice.provider` (a `voice.providers.*` roster label) and
+   *  `voice.tts_voice`. `tier` / `model` / `languages` stay in config.yaml:
+   *  nothing consumes them yet, so echoing them here would invite a form field
+   *  that does not work. Omitted when the personality declares no voice. */
+  voice: z.object({ provider: z.string().optional(), tts_voice: z.string().optional() }).optional(),
   system: z.boolean(),
   /** True when the personality lives in the package's built-in data directory
    *  (read-only). User-created personalities under `~/.ethos/personalities/`

@@ -888,6 +888,94 @@ describe('voice round-trip', () => {
     expect(registry.get('voice-alien')?.voice).toEqual({ provider: 'elevenlabs-studio' });
   });
 
+  // The editor's write path: create with a voice, retune it, and clear it back
+  // to the default entry — all through the two sub-keys the web form exposes.
+  it('writes the voice a create carries, and nothing when it carries none', async () => {
+    const registry = makeRegistry();
+    await registry.loadFromDirectory(join(testDir, 'personalities'));
+
+    await registry.create({
+      id: 'voice-created',
+      name: 'VoiceCreated',
+      toolset: ['read_file'],
+      soulMd: '# VoiceCreated\n',
+      voice: { provider: 'studio', tts_voice: 'nova' },
+    });
+    expect(registry.get('voice-created')?.voice).toEqual({
+      provider: 'studio',
+      tts_voice: 'nova',
+    });
+
+    // Blank form fields are not a voice block — an empty `voice.provider:` line
+    // would be a key the loader reads back as nothing.
+    await registry.create({
+      id: 'voice-blank',
+      name: 'VoiceBlank',
+      toolset: ['read_file'],
+      soulMd: '# VoiceBlank\n',
+      voice: { provider: '', tts_voice: '' },
+    });
+    expect(registry.get('voice-blank')?.voice).toBeUndefined();
+    const blankRaw = await readFile(
+      join(testDir, 'personalities', 'voice-blank', 'config.yaml'),
+      'utf-8',
+    );
+    expect(blankRaw).not.toContain('voice.');
+  });
+
+  it('updates one voice sub-key without disturbing the others', async () => {
+    await seedPersonality(
+      'voice-patch',
+      'name: VoicePatch\nvoice.provider: studio\nvoice.tts_voice: alloy\nvoice.languages.es: ef_dora\n',
+    );
+    const registry = makeRegistry();
+    await registry.loadFromDirectory(join(testDir, 'personalities'));
+
+    await registry.update('voice-patch', { voice: { tts_voice: 'nova' } });
+
+    const fresh = makeRegistry();
+    await fresh.loadFromDirectory(join(testDir, 'personalities'));
+    // The hand-written language map is not something the web form can express,
+    // so a save from it must not be able to delete one.
+    expect(fresh.get('voice-patch')?.voice).toEqual({
+      provider: 'studio',
+      tts_voice: 'nova',
+      languages: { es: 'ef_dora' },
+    });
+  });
+
+  it('an empty provider clears the key, putting it back on the default entry', async () => {
+    await seedPersonality(
+      'voice-clear',
+      'name: VoiceClear\nvoice.provider: studio\nvoice.tts_voice: alloy\n',
+    );
+    const registry = makeRegistry();
+    await registry.loadFromDirectory(join(testDir, 'personalities'));
+
+    await registry.update('voice-clear', { voice: { provider: '', tts_voice: 'alloy' } });
+
+    const raw = await readFile(
+      join(testDir, 'personalities', 'voice-clear', 'config.yaml'),
+      'utf-8',
+    );
+    expect(raw).not.toContain('voice.provider');
+    const fresh = makeRegistry();
+    await fresh.loadFromDirectory(join(testDir, 'personalities'));
+    expect(fresh.get('voice-clear')?.voice).toEqual({ tts_voice: 'alloy' });
+  });
+
+  it('clearing every sub-key removes the voice block entirely', async () => {
+    await seedPersonality('voice-drop', 'name: VoiceDrop\nvoice.tts_voice: alloy\n');
+    const registry = makeRegistry();
+    await registry.loadFromDirectory(join(testDir, 'personalities'));
+
+    await registry.update('voice-drop', { voice: { provider: '', tts_voice: '' } });
+
+    const fresh = makeRegistry();
+    await fresh.loadFromDirectory(join(testDir, 'personalities'));
+    expect(fresh.get('voice-drop')?.voice).toBeUndefined();
+  });
+
   it('carries no voice block when no voice.* key is set', async () => {
     await seedPersonality('voice-absent', 'name: VoiceAbsent\n');
     const registry = makeRegistry();
