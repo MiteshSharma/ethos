@@ -50,14 +50,19 @@ interface BridgeEventMap {
   ];
   usage: [inputTokens: number, outputTokens: number, estimatedCostUsd: number];
   error: [error: string, code: string];
-  done: [text: string, turnCount: number];
+  // B3 — the trailing `traceId` mirrors the optional AgentEvent field: the
+  // turn's observability trace id, or undefined when no adapter is wired.
+  // Trailing/optional so existing 2-arg handlers keep working.
+  done: [text: string, turnCount: number, traceId: string | undefined];
   idle: [];
   queued: [input: string, queueDepth: number];
-  /** Phase 5 — emitted once per turn with the resolved provider/model and routing source. */
+  /** Phase 5 — emitted once per turn with the resolved provider/model and routing source.
+   *  B3 — the trailing `traceId` is the turn identity; see `done` above. */
   run_start: [
     provider: string,
     model: string,
     source: 'team-coordinator' | 'team-personality' | 'personality' | 'global',
+    traceId: string | undefined,
   ];
   /** Emitted when dryRun is active — carries the planned tool calls. */
   dry_run_summary: [plan: DryRunToolPlan[], capped: number];
@@ -254,7 +259,7 @@ export class AgentBridge extends EventEmitter<BridgeEventMap> {
           case 'done':
             clearTimeout(timeoutHandle);
             this.flushText();
-            this.emit('done', event.text, event.turnCount);
+            this.emit('done', event.text, event.turnCount, event.traceId);
             break;
           case 'thinking_delta':
             this.emit('thinking_delta', event.thinking);
@@ -286,7 +291,7 @@ export class AgentBridge extends EventEmitter<BridgeEventMap> {
             this.emit('error', event.error, event.code);
             break;
           case 'run_start':
-            this.emit('run_start', event.provider, event.model, event.source);
+            this.emit('run_start', event.provider, event.model, event.source, event.traceId);
             break;
           case 'dry_run_summary':
             this.emit('dry_run_summary', event.plan, event.capped);

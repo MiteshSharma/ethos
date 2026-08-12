@@ -81,6 +81,15 @@ export interface ChatServiceOptions {
 export interface ChatSendInput {
   sessionId?: string;
   clientId: string;
+  /**
+   * B1/B3 — the `x-request-id` of the HTTP request that asked for this turn.
+   * Threaded in by the RPC layer. It becomes the returned `turnId`, so the
+   * handle a tab gets back is the same id the response header and any error
+   * envelope carry, instead of a third UUID that names nothing else. The
+   * turn's own `traceId` is a DIFFERENT id and arrives on the SSE stream
+   * (`run_start.traceId`) — see the note on `ChatSendOutput.turnId`.
+   */
+  requestId?: string;
   text: string;
   personalityId?: string;
   userId?: string;
@@ -97,6 +106,13 @@ export interface ChatSendInput {
 
 export interface ChatSendOutput {
   sessionId: string;
+  /**
+   * The request id of the `chat.send` that started this turn (see
+   * `ChatSendInput.requestId`). It is NOT the turn's `traceId`: `send` returns
+   * before the loop has run turn-setup, and blocking until it had would mean
+   * waiting behind the bridge's FIFO queue for any turn already in flight. The
+   * `traceId` reaches the client on the SSE stream instead.
+   */
   turnId: string;
 }
 
@@ -186,7 +202,10 @@ export class ChatService {
       }
     }
 
-    const turnId = randomUUID();
+    // No UUID minted here: the request that started the turn already has an id
+    // (`x-request-id`). The fallback covers callers with no HTTP request behind
+    // them (tests, embedders).
+    const turnId = input.requestId ?? randomUUID();
 
     // Refresh the loop's personality registry from disk before the turn runs so
     // a hot-dropped or edited personality resolves without a restart. No-op when
@@ -408,12 +427,21 @@ export class ChatService {
     bridge.on('dry_run_summary', (plan, capped) =>
       this.append(sessionId, { type: 'dry_run_summary', plan, capped }),
     );
-    bridge.on('run_start', (provider, model, source) =>
-      this.append(sessionId, { type: 'run_start', provider, model, source }),
+    // B3 — the turn's `traceId` is passed straight through onto the stream on
+    // both the opening and closing event of the turn. This is the only turn
+    // identity web-api publishes; it does not mint one of its own.
+    bridge.on('run_start', (provider, model, source, traceId) =>
+      this.append(sessionId, {
+        type: 'run_start',
+        provider,
+        model,
+        source,
+        ...(traceId ? { traceId } : {}),
+      }),
     );
     bridge.on('error', (error, code) => this.append(sessionId, { type: 'error', error, code }));
-    bridge.on('done', (text, turnCount) => {
-      this.append(sessionId, { type: 'done', text, turnCount });
+    bridge.on('done', (text, turnCount, traceId) => {
+      this.append(sessionId, { type: 'done', text, turnCount, ...(traceId ? { traceId } : {}) });
       try {
         this.opts.onTurnDone?.();
       } catch {

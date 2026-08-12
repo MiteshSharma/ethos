@@ -76,6 +76,10 @@ export const TurnDoneEventSchema = z.object({
   type: z.literal('done'),
   text: z.string(),
   turnCount: z.number().int().nonnegative(),
+  /** B3 (additive-optional) — the turn's observability trace id, mirrored from
+   *  the `done` AgentEvent. Absent when the server has no observability
+   *  adapter wired. */
+  traceId: z.string().optional(),
 });
 
 export const TurnErrorEventSchema = z.object({
@@ -190,6 +194,22 @@ export const RunStartEventSchema = z.object({
   provider: z.string(),
   model: z.string(),
   source: z.enum(['team-coordinator', 'team-personality', 'personality', 'global']),
+  /** B3 (additive-optional) — the turn's observability trace id. This is the
+   *  turn identity a tab quotes in a bug report; it joins the SSE stream to
+   *  `observability.db`, `messages.trace_id`, and (later) the provider request
+   *  ids on the turn's `llm_call` spans. */
+  traceId: z.string().optional(),
+});
+
+// B1 — the FIRST frame of every `/sse/sessions/:id` stream. Carries the
+// `x-request-id` of the SSE request itself. The same id is on the response's
+// `x-request-id` header, but `EventSource` gives browser clients no way to
+// read response headers, so the id has to ride the stream to be quotable from
+// the UI. Written outside the replay buffer (no `id:` line), so it never
+// disturbs `Last-Event-ID` resume.
+export const StreamMetaEventSchema = z.object({
+  type: z.literal('stream_meta'),
+  requestId: z.string(),
 });
 
 export const ProtocolUpgradeRequiredEventSchema = z.object({
@@ -225,6 +245,7 @@ export const SseEventSchema = z.discriminatedUnion('type', [
   MemoryCapturedEventSchema,
   DryRunSummaryEventSchema,
   RunStartEventSchema,
+  StreamMetaEventSchema,
   ProtocolUpgradeRequiredEventSchema,
 ]);
 export type SseEvent = z.infer<typeof SseEventSchema>;

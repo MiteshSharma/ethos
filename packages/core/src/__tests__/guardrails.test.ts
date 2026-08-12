@@ -117,7 +117,11 @@ describe('Orchestrator guardrails', () => {
       // the three message rows tool-processing persists (returnDirect results,
       // the main tool_result path, and user_steer) so `sessions.db` joins to
       // `observability.db`. One field per persist call, no logic.
-      if (lineCount > 787) {
+      // Bumped 787 -> 792 (analytics B3): the turn's `traceId` now rides the
+      // `done` AgentEvent, and the return-direct exit is one of the two places
+      // that emits one. A single conditional spread, which no longer fits on
+      // the one-line yield — so the cost is the five lines the formatter takes.
+      if (lineCount > 792) {
         violations.push(`${file}: ${lineCount} lines`);
       }
     }

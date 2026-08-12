@@ -4,6 +4,7 @@ import type { SecretsResolver, Storage } from '@ethosagent/types';
 import { Hono } from 'hono';
 import { getCookie } from 'hono/cookie';
 import { cors } from 'hono/cors';
+import { requestId } from 'hono/request-id';
 import type { ChatService } from '../features/chat/service';
 import type { SessionsService } from '../features/sessions/service';
 import { authMiddleware } from '../middleware/auth';
@@ -131,8 +132,22 @@ export function resolveCorsOrigin(
 export function createRoutes(opts: CreateRoutesOptions): Hono {
   const app = new Hono();
 
+  // B1 — `x-request-id` on every request/response pair. Registered FIRST,
+  // ahead of `/healthz` and every other route, because Hono stops the chain at
+  // the first handler that returns a response: a middleware mounted later
+  // simply never runs for a route registered earlier, and "echo on every
+  // response" has to mean every response.
+  //
+  // Behaviour comes from Hono's own middleware: an inbound `x-request-id` is
+  // respected as-is when it is at most 255 chars of `[A-Za-z0-9_\-=]`, and a
+  // UUID is generated otherwise. That character/length filter is load-bearing,
+  // not cosmetic — the id is reflected into a response header and an error
+  // envelope, so an unvalidated inbound value would be a header-injection
+  // vector. Downstream code reads it with `c.get('requestId')`.
+  app.use('*', requestId({ headerName: 'x-request-id' }));
+
   // Unauthenticated health-check for container probes (liveness / readiness).
-  // Registered before any middleware so it never requires auth or CORS.
+  // Registered before any auth / CORS middleware so it never requires either.
   // Reads the gateway heartbeat file written by the gateway process to surface
   // adapter health alongside the serve process's own uptime.
   app.get('/healthz', async (c) => {

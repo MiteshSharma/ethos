@@ -126,7 +126,13 @@ export type AgentEvent =
       cacheCreationTokens?: number;
     }
   | { type: 'error'; error: string; code: string }
-  | { type: 'done'; text: string; turnCount: number }
+  // B3 — `traceId` is ADDITIVE-OPTIONAL (see ARCHITECTURE.md §VII, Agent event
+  // union: the bump trigger is adding/removing/renaming a VARIANT, which this
+  // is not). It is the turn's observability trace id — the same id the turn's
+  // spans hang off and `messages.trace_id` carries — so a surface that only
+  // sees the event stream can still name the turn. Absent when no
+  // observability adapter is wired.
+  | { type: 'done'; text: string; turnCount: number; traceId?: string }
   /**
    * Emitted when the loop stops a turn early for safety: a per-turn tool
    * budget tripped (`kind: 'budget'`, rule is one of 'tool-budget' |
@@ -151,12 +157,17 @@ export type AgentEvent =
    * Carries the resolved provider/model and the routing source so consumers
    * (TUI status bar, CLI verbose mode, telemetry) can show the effective model.
    * `source` reflects which routing rule selected the model (see model_update.md).
+   *
+   * B3 — `traceId` is ADDITIVE-OPTIONAL, same rationale as on `done`. This is
+   * the first event of a turn, so it is where a surface learns the turn's
+   * identity before any output arrives.
    */
   | {
       type: 'run_start';
       provider: string;
       model: string;
       source: 'team-coordinator' | 'team-personality' | 'personality' | 'global';
+      traceId?: string;
     }
   | {
       type: 'dry_run_summary';

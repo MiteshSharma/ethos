@@ -103,7 +103,7 @@ export async function* setupTurn(
       error: `Budget cap of $${personality.budgetCapUsd.toFixed(2)} exceeded for this session ($${currentSpend.toFixed(4)} spent). Use /budget reset to start a new budget window.`,
       code: 'BUDGET_EXCEEDED',
     };
-    yield { type: 'done', text: '', turnCount: 0 };
+    yield { type: 'done', text: '', turnCount: 0, ...(traceId ? { traceId } : {}) };
     return { kind: 'refused' };
   }
 
@@ -140,7 +140,7 @@ export async function* setupTurn(
       error: `Personality "${personality.id}" has an unusable fs_reach: ${err.message}`,
       code: 'FS_REACH_INVALID',
     };
-    yield { type: 'done', text: '', turnCount: 0 };
+    yield { type: 'done', text: '', turnCount: 0, ...(traceId ? { traceId } : {}) };
     return { kind: 'refused' };
   }
 
@@ -174,11 +174,15 @@ export async function* setupTurn(
 
   // Phase 5: emit run_start trace so consumers (TUI, CLI verbose, telemetry)
   // can surface the resolved provider/model and routing source.
+  // B3 — the turn's `traceId` rides `run_start` so a surface that only sees the
+  // event stream can name the turn (and join it to `observability.db`) before
+  // any output arrives. Omitted when no observability adapter is wired.
   yield {
     type: 'run_start',
     provider: deps.llm.name,
     model: effectiveModel,
     source: modelSource,
+    ...(traceId ? { traceId } : {}),
   };
 
   // Allowed tool names for this personality (undefined = no restriction)
@@ -261,7 +265,7 @@ export async function* setupTurn(
         sessionKey,
         pendingUserMessage: text,
       };
-      yield { type: 'done', text: '', turnCount: 0 };
+      yield { type: 'done', text: '', turnCount: 0, ...(traceId ? { traceId } : {}) };
       return { kind: 'refused' };
     }
   }

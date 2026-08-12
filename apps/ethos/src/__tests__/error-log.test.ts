@@ -74,4 +74,50 @@ describe('error-log', () => {
     // Current log holds only the new entry.
     expect(statSync(path).size).toBeLessThan(1024);
   });
+
+  // B3 — one turn identity. An `errors.jsonl` row that names the turn's
+  // `traceId` is the difference between a line you can only read and one you
+  // can look up (`ethos trace <id>`), which is the whole point of putting a
+  // single id on the turn.
+  it('carries the turn traceId on the row when the caller supplies one', async () => {
+    const { appendErrorLog, readRecentErrors } = await freshLog();
+    appendErrorLog(new EthosError({ code: 'LLM_ERROR', cause: 'boom', action: 'retry' }), {
+      command: 'chat',
+      traceId: 'trace-abc',
+    });
+    const entries = readRecentErrors();
+    expect(entries[0]?.traceId).toBe('trace-abc');
+    expect(entries[0]?.command).toBe('chat');
+  });
+
+  it('omits traceId entirely when the error happened outside a turn', async () => {
+    const { appendErrorLog, readRecentErrors } = await freshLog();
+    appendErrorLog(new EthosError({ code: 'INTERNAL', cause: 'no turn', action: 'x' }), {
+      command: 'serve',
+    });
+    const entry = readRecentErrors()[0];
+    expect(entry?.traceId).toBeUndefined();
+    expect(Object.hasOwn(entry ?? {}, 'traceId')).toBe(false);
+  });
+
+  it('lifts traceId onto the observability event, not into its details blob', async () => {
+    const { appendErrorLog, setObservabilityService } = await freshLog();
+    const seen: Array<Record<string, unknown>> = [];
+    setObservabilityService({
+      recordError: (opts) => {
+        seen.push({ ...opts });
+      },
+    });
+    appendErrorLog(new EthosError({ code: 'LLM_ERROR', cause: 'boom', action: 'retry' }), {
+      command: 'chat',
+      traceId: 'trace-xyz',
+    });
+    setObservabilityService({ recordError: () => {} });
+
+    expect(seen).toHaveLength(1);
+    expect(seen[0]?.traceId).toBe('trace-xyz');
+    const details = seen[0]?.details as Record<string, unknown>;
+    expect(details.command).toBe('chat');
+    expect(Object.hasOwn(details, 'traceId')).toBe(false);
+  });
 });

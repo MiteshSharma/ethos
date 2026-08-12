@@ -131,7 +131,14 @@ export async function* finalizeTurn(
   if (ctx.traceId) observability?.endTrace(ctx.traceId, 'ok');
   observability?.flush();
 
-  yield { type: 'done', text: ctx.fullText, turnCount: ctx.turnCount };
+  // B3 — `traceId` closes the turn under the same identity `run_start` opened
+  // it with, so a consumer that joined the stream late still gets it.
+  yield {
+    type: 'done',
+    text: ctx.fullText,
+    turnCount: ctx.turnCount,
+    ...(ctx.traceId ? { traceId: ctx.traceId } : {}),
+  };
 
   // dry_run_summary comes AFTER done — ordering preserved
   if (ctx.isDryRun && ctx.dryRunPlan.length > 0) {

@@ -26,7 +26,12 @@ import { ethosDir } from '@ethosagent/config';
 import type { EthosError } from '@ethosagent/types';
 
 interface ErrorLogObservability {
-  recordError(opts: { code?: string; cause?: string; details?: Record<string, unknown> }): void;
+  recordError(opts: {
+    code?: string;
+    cause?: string;
+    traceId?: string;
+    details?: Record<string, unknown>;
+  }): void;
 }
 
 let _obs: ErrorLogObservability | undefined;
@@ -83,6 +88,14 @@ interface LogContext {
   personalityId?: string;
   toolName?: string;
   command?: string;
+  /**
+   * B3 — the turn's observability trace id, when the error happened inside a
+   * turn. This is the single turn identity: the same id the turn's spans hang
+   * off, that `messages.trace_id` carries, and that the `run_start` / `done`
+   * AgentEvents expose. It is what turns a line in `errors.jsonl` into
+   * something you can look up (`ethos trace <id>`) rather than just read.
+   */
+  traceId?: string;
 }
 
 export interface LoggedError {
@@ -95,6 +108,8 @@ export interface LoggedError {
   personalityId?: string;
   toolName?: string;
   command?: string;
+  /** The turn's observability trace id — see `LogContext.traceId`. */
+  traceId?: string;
 }
 
 export function rotateIfNeeded(filePath: string, config: LogRotationConfig): void {
@@ -149,10 +164,16 @@ export function appendErrorLog(err: EthosError, ctx: LogContext = {}): void {
     };
     appendFileSync(logPath(), `${JSON.stringify(entry)}\n`);
     try {
+      // `traceId` is lifted out of `details` and onto the event itself so the
+      // observability row lands under the turn's trace instead of burying the
+      // id in an opaque blob — that is what makes the jsonl row and the trace
+      // the same lookup.
+      const { traceId, ...rest } = ctx;
       _obs?.recordError({
         code: err.code,
         cause: err.cause,
-        details: { action: err.action, ...ctx },
+        ...(traceId ? { traceId } : {}),
+        details: { action: err.action, ...rest },
       });
     } catch {
       // Observability is best-effort — never mask the primary log write.

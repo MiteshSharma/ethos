@@ -9,13 +9,15 @@ import { type AgentEvent, type AgentLoop, stripAnsiEscapes } from '@ethosagent/c
 import { FsAttachmentCache, FsStorage } from '@ethosagent/storage-fs';
 import { parseSlashCommand, shouldSurfaceProgress } from '@ethosagent/surface-kit';
 import type { SplashInventory } from '@ethosagent/tui';
-import type {
-  Attachment,
-  JobStore,
-  NotificationAdapter,
-  SteerSink,
-  Storage,
+import {
+  type Attachment,
+  type JobStore,
+  type NotificationAdapter,
+  type SteerSink,
+  type Storage,
+  toEthosError,
 } from '@ethosagent/types';
+import { appendErrorLog } from '../error-log';
 import { resolveAtRefs } from '../lib/at-refs';
 import { makeCompleter } from '../lib/autocomplete';
 import { formatClarifyPrompt, parseClarifyAnswer } from '../lib/clarify-prompt';
@@ -741,6 +743,10 @@ async function runTurn(input: string, state: ChatState, loop: AgentLoop): Promis
   const toolArgs = new Map<string, unknown>();
   const toolNames = new Map<string, string>();
   let hasText = false;
+  // B3 — the turn's single identity, learned from the first event of the turn.
+  // Used to stamp any error this turn writes to `errors.jsonl`, so the log line
+  // and the trace in `observability.db` name the same turn.
+  let turnTraceId: string | undefined;
 
   // Drain pending attachments — pass to loop.run() and clear the list.
   const turnAttachments =
@@ -806,6 +812,7 @@ async function runTurn(input: string, state: ChatState, loop: AgentLoop): Promis
         // Latest turn's input tokens = current context size (mirrors web composer).
         state.contextInputTokens = event.inputTokens;
       }
+      if (event.type === 'run_start') turnTraceId = event.traceId;
       if (event.type === 'error') clearSpinner();
 
       renderEventForVerbosity(event, state, {
@@ -837,6 +844,14 @@ async function runTurn(input: string, state: ChatState, loop: AgentLoop): Promis
     clearSpinner();
     if (!state.abort?.signal.aborted) {
       out(`\n${c.red}Error: ${err instanceof Error ? err.message : String(err)}${c.reset}`);
+      // Phase 30.10 says every error rendered through a surface path lands in
+      // `errors.jsonl`; a turn that threw out of `loop.run` was the one path
+      // that only printed. B3 makes it worth logging: the row carries the
+      // turn's `traceId`, so `ethos trace <id>` resolves the failed turn.
+      appendErrorLog(toEthosError(err), {
+        command: 'chat',
+        ...(turnTraceId ? { traceId: turnTraceId } : {}),
+      });
     }
   } finally {
     clearInterval(spinnerInterval);

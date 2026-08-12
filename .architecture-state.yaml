@@ -250,7 +250,7 @@ register_anchors:
     - { path: packages/safety/injection/src/downgrade.ts, line: 23, contains: "export function resolveDowngradedTools" }
     - { path: packages/core/src/agent-loop/stages/context-assembly.ts, line: 380, contains: "deps.safety.injection.prelude" }
     - { path: packages/core/src/agent-loop.ts, line: 600, contains: "resolveDowngradedTools(dgConfig?.tools)" }
-    - { path: packages/core/src/agent-loop/stages/tool-processing.ts, line: 693, contains: "await handleUntrustedResult(" }
+    - { path: packages/core/src/agent-loop/stages/tool-processing.ts, line: 698, contains: "await handleUntrustedResult(" }
     - { path: packages/core/src/agent-loop/result-defense.ts, line: 26, contains: "export async function handleUntrustedResult" }
 
   G-SEC:

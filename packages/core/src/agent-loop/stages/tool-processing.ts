@@ -490,7 +490,12 @@ export async function* processTools(
     }
     if (ctx.traceId) deps.observability?.endTrace(ctx.traceId, 'ok');
     deps.observability?.flush();
-    yield { type: 'done', text: directResult.result.value, turnCount: ctx.turnCount };
+    yield {
+      type: 'done',
+      text: directResult.result.value,
+      turnCount: ctx.turnCount,
+      ...(ctx.traceId ? { traceId: ctx.traceId } : {}),
+    };
     return { kind: 'return-direct', text: directResult.result.value, turnCount: ctx.turnCount };
   }
 
