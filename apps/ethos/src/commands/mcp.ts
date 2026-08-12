@@ -29,9 +29,11 @@ import {
   getPreset,
   MCP_PRESETS,
   McpJsonStore,
+  mcpEnvSecretRef,
   revokeToken,
   runDcrAuthorization,
   runPkceLogin,
+  storeEnvSecrets,
 } from '@ethosagent/tools-mcp';
 import type { SecretsResolver } from '@ethosagent/types';
 import { writeJson } from '../json-output';
@@ -335,6 +337,21 @@ async function readMcpJson(): Promise<McpServerConfig[]> {
   return mcpStore.read();
 }
 
+/**
+ * `--env KEY=value` values are credential material more often than not
+ * (API tokens for the server subprocess). G-SEC forbids writing a secret
+ * value into an MCP server config, so the value goes to the SecretsResolver
+ * and `mcp.json` gets the `${secrets:ref}` — resolved at spawn time by
+ * McpClient. Returns the map to persist in place of the raw values.
+ */
+async function persistEnvSecrets(
+  serverName: string,
+  env: Record<string, string>,
+): Promise<Record<string, string>> {
+  if (Object.keys(env).length === 0) return {};
+  return storeEnvSecrets(serverName, env, await getSecretsResolver());
+}
+
 async function runAdd(argv: string[]): Promise<void> {
   const parsed = parseAddArgs(argv);
 
@@ -365,25 +382,27 @@ async function runAdd(argv: string[]): Promise<void> {
 
     const envKeys = Object.keys(parsed.env);
     const envPassthrough = envKeys.length > 0 ? envKeys : undefined;
+    const envRefs = await persistEnvSecrets(parsed.name, parsed.env);
 
     entry = {
       name: parsed.name,
       transport: 'stdio',
       command: preset.command,
       args: preset.args,
-      ...(envKeys.length > 0 ? { env: parsed.env } : {}),
+      ...(envKeys.length > 0 ? { env: envRefs } : {}),
       ...(envPassthrough ? { mcpEnvPassthrough: envPassthrough } : {}),
     };
   } else if (parsed.command) {
     const envKeys = Object.keys(parsed.env);
     const envPassthrough = envKeys.length > 0 ? envKeys : undefined;
+    const envRefs = await persistEnvSecrets(parsed.name, parsed.env);
 
     entry = {
       name: parsed.name,
       transport: 'stdio',
       command: parsed.command,
       ...(parsed.args.length > 0 ? { args: parsed.args } : {}),
-      ...(envKeys.length > 0 ? { env: parsed.env } : {}),
+      ...(envKeys.length > 0 ? { env: envRefs } : {}),
       ...(envPassthrough ? { mcpEnvPassthrough: envPassthrough } : {}),
     };
   } else if (parsed.url) {
@@ -405,6 +424,11 @@ async function runAdd(argv: string[]): Promise<void> {
 
   await mcpStore.upsert(entry.name, entry);
   console.log(`Added MCP server '${parsed.name}' to ~/.ethos/mcp.json`);
+  for (const key of Object.keys(parsed.env)) {
+    console.log(
+      `  ${key} stored as secret '${mcpEnvSecretRef(parsed.name, key)}' — mcp.json holds only the reference.`,
+    );
+  }
 }
 
 interface UrlAddResult {

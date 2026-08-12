@@ -16,6 +16,7 @@
   "dependencies": {
     "@ethosagent/agent-bridge": "workspace:*",
     "@ethosagent/agent-mesh": "workspace:*",
+    "@ethosagent/config": "workspace:*",
     "@ethosagent/core": "workspace:*",
     "@ethosagent/digest": "workspace:*",
     "@ethosagent/batch-runner": "workspace:*",

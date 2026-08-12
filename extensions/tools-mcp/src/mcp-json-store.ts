@@ -89,7 +89,12 @@ export class McpJsonStore {
   private async writeAll(entries: McpServerConfig[]): Promise<void> {
     const parent = dirOf(this.path);
     await this.storage.mkdir(parent);
-    await this.storage.writeAtomic(this.path, `${JSON.stringify(entries, null, 2)}\n`);
+    // 0o600 — mcp.json carries `headers` and `env` for every configured
+    // server; credential-adjacent even though values themselves live in the
+    // SecretsResolver.
+    await this.storage.writeAtomic(this.path, `${JSON.stringify(entries, null, 2)}\n`, {
+      mode: 0o600,
+    });
   }
 
   private serialize<T>(op: () => Promise<T>): Promise<T> {

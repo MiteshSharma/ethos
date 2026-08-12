@@ -1,7 +1,7 @@
 import { join } from 'node:path';
-import { InMemoryStorage } from '@ethosagent/storage-fs';
+import { InMemorySecretsResolver, InMemoryStorage } from '@ethosagent/storage-fs';
 import { isEthosError } from '@ethosagent/types';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ConfigRepository } from '../../repositories/config.repository';
 import { ConfigService, redactKey } from '../../services/config.service';
 
@@ -26,16 +26,22 @@ describe('redactKey', () => {
 
 const DATA = '/data';
 
+function secretRef(path: string): string {
+  return ['${', 'secrets:', path, '}'].join('');
+}
+
 describe('ConfigService', () => {
   let storage: InMemoryStorage;
+  let secrets: InMemorySecretsResolver;
   let repo: ConfigRepository;
   let service: ConfigService;
 
   beforeEach(async () => {
     storage = new InMemoryStorage();
+    secrets = new InMemorySecretsResolver();
     await storage.mkdir(DATA);
-    repo = new ConfigRepository({ dataDir: DATA, storage });
-    service = new ConfigService({ config: repo });
+    repo = new ConfigRepository({ dataDir: DATA, storage, secrets });
+    service = new ConfigService({ config: repo, secrets });
   });
 
   it('get throws CONFIG_MISSING when no file exists', async () => {
@@ -84,10 +90,15 @@ describe('ConfigService', () => {
 
     const written = await storage.read(join(DATA, 'config.yaml'));
     expect(written).toContain('personality: engineer');
-    expect(written).toContain('telegramToken: tg-1234567890');
-    expect(written).toContain('slackBotToken: xoxb-abc');
+    // Credentials are preserved as vault references, never as literals.
+    expect(written).toContain(`telegramToken: "${secretRef('telegram/token')}"`);
+    expect(written).toContain(`slackBotToken: "${secretRef('slack/botToken')}"`);
+    expect(await secrets.get('telegram/token')).toBe('tg-1234567890');
+    expect(await secrets.get('slack/botToken')).toBe('xoxb-abc');
     // The apiKey wasn't part of the patch — must remain.
-    expect(written).toContain('apiKey: sk-anthropic-1234567890abcdef');
+    expect(written).toContain(`apiKey: "${secretRef('providers/anthropic/apiKey')}"`);
+    expect(await secrets.get('providers/anthropic/apiKey')).toBe('sk-anthropic-1234567890abcdef');
+    expect(written).not.toContain('sk-anthropic-1234567890abcdef');
   });
 
   it('update with empty apiKey is a no-op (does not erase the existing key)', async () => {
@@ -99,7 +110,8 @@ describe('ConfigService', () => {
     );
     await service.update({ apiKey: '' });
     const written = await storage.read(join(DATA, 'config.yaml'));
-    expect(written).toContain('apiKey: sk-keep-this');
+    expect(written).toContain(`apiKey: "${secretRef('providers/anthropic/apiKey')}"`);
+    expect(await secrets.get('providers/anthropic/apiKey')).toBe('sk-keep-this');
   });
 
   it('get returns providers with redacted keys', async () => {
@@ -148,8 +160,10 @@ describe('ConfigService', () => {
     );
     await service.update({ apiKey: 'sk-new-key-12345' });
     const written = await storage.read(join(DATA, 'config.yaml'));
-    expect(written).toContain('apiKey: sk-new-key-12345');
+    expect(written).toContain(`apiKey: "${secretRef('providers/anthropic/apiKey')}"`);
+    expect(written).not.toContain('sk-new-key-12345');
     expect(written).not.toContain('sk-old');
+    expect(await secrets.get('providers/anthropic/apiKey')).toBe('sk-new-key-12345');
   });
 
   it('update translates adminEnabled into the admin.enabled passthrough key', async () => {
@@ -349,6 +363,7 @@ describe('ConfigService', () => {
 
 describe('ConfigService — settings passthrough groups', () => {
   let storage: InMemoryStorage;
+  let secrets: InMemorySecretsResolver;
   let repo: ConfigRepository;
   let service: ConfigService;
 
@@ -367,9 +382,14 @@ describe('ConfigService — settings passthrough groups', () => {
 
   beforeEach(async () => {
     storage = new InMemoryStorage();
+    secrets = new InMemorySecretsResolver();
     await storage.mkdir(DATA);
-    repo = new ConfigRepository({ dataDir: DATA, storage });
-    service = new ConfigService({ config: repo });
+    repo = new ConfigRepository({ dataDir: DATA, storage, secrets });
+    service = new ConfigService({ config: repo, secrets });
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
   });
 
   it('get returns settings defaults when the keys are absent', async () => {
@@ -579,6 +599,62 @@ describe('ConfigService — settings passthrough groups', () => {
     await service.update({ webhooks: {} });
     const written3 = await storage.read(join(DATA, 'config.yaml'));
     expect(written3).not.toContain('webhooks.');
+  });
+
+  it('webhooks: removing a hook deletes the vault entry its config key referenced', async () => {
+    await writeBase();
+    await service.update({
+      webhooks: {
+        alerts: { personalityId: 'researcher' },
+        builds: { personalityId: 'researcher' },
+      },
+    });
+    expect(await secrets.list()).toEqual(
+      expect.arrayContaining(['webhooks/alerts/secret', 'webhooks/builds/secret']),
+    );
+
+    await service.update({ webhooks: { builds: { personalityId: 'researcher' } } });
+
+    const listed = await secrets.list();
+    expect(listed).not.toContain('webhooks/alerts/secret');
+    // The survivor's material is untouched.
+    expect(listed).toContain('webhooks/builds/secret');
+    const written = await storage.read(join(DATA, 'config.yaml'));
+    expect(written).not.toContain('webhooks.alerts.');
+    expect(written).toContain(`webhooks.builds.secret: "${secretRef('webhooks/builds/secret')}"`);
+  });
+
+  it('webhooks: keeps a ref a surviving hook still points at', async () => {
+    // Only reachable via a hand-edited config.yaml — minted refs embed the
+    // webhook id — but a shared ref must never be deleted out from under
+    // the hook that still reads it.
+    const shared = 'webhooks/alerts/secret';
+    await secrets.set(shared, 'shhh');
+    await writeBase([
+      'webhooks.alerts.personalityId: researcher',
+      `webhooks.alerts.secret: ${secretRef(shared)}`,
+      'webhooks.builds.personalityId: researcher',
+      `webhooks.builds.secret: ${secretRef(shared)}`,
+    ]);
+
+    await service.update({ webhooks: { builds: { personalityId: 'researcher' } } });
+
+    expect(await secrets.list()).toContain(shared);
+    const written = await storage.read(join(DATA, 'config.yaml'));
+    expect(written).not.toContain('webhooks.alerts.');
+    expect(written).toContain(`webhooks.builds.secret: "${secretRef(shared)}"`);
+  });
+
+  it('webhooks: a failing vault delete surfaces, and the config change still stands', async () => {
+    await writeBase();
+    await service.update({ webhooks: { alerts: { personalityId: 'researcher' } } });
+    vi.spyOn(secrets, 'delete').mockRejectedValue(new Error('vault is read-only'));
+
+    await expect(service.update({ webhooks: {} })).rejects.toThrow('vault is read-only');
+
+    // config.yaml is the source of truth and was written first: the hook is gone.
+    const written = await storage.read(join(DATA, 'config.yaml'));
+    expect(written).not.toContain('webhooks.');
   });
 
   it('round-trips quick commands, channel toolsets, and retention with replace semantics', async () => {

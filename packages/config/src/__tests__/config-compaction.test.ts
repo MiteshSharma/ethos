@@ -1,7 +1,7 @@
 // §5 — global compaction gate thresholds (`compaction.pressure` / `.target`).
 
 import { join } from 'node:path';
-import { InMemoryStorage } from '@ethosagent/storage-fs';
+import { InMemorySecretsResolver, InMemoryStorage } from '@ethosagent/storage-fs';
 import { describe, expect, it } from 'vitest';
 import { ethosDir, readRawConfig, writeConfig } from '../index';
 
@@ -75,7 +75,7 @@ describe('compaction: global gate thresholds config parsing', () => {
         minTailUserMessages: 4,
       },
     };
-    await writeConfig(storage, original);
+    await writeConfig(storage, original, new InMemorySecretsResolver());
     const roundTripped = await readRawConfig(storage);
     expect(roundTripped?.compaction).toEqual(original.compaction);
   });

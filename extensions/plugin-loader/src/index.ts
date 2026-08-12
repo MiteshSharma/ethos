@@ -16,7 +16,12 @@ import {
   PLUGIN_CONTRACT_MAJOR,
 } from '@ethosagent/plugin-contract';
 import type { EthosPlugin, PluginRegistries, PluginRouteEntry } from '@ethosagent/plugin-sdk';
-import { type CredentialStorage, PluginApiImpl } from '@ethosagent/plugin-sdk';
+import {
+  migrateLegacyPluginCredentials,
+  PluginApiImpl,
+  pluginCredentialPrefix,
+  pluginCredentialRef,
+} from '@ethosagent/plugin-sdk';
 import {
   canInstall,
   deriveTier,
@@ -25,7 +30,14 @@ import {
   scanPluginCode,
   type TrustTier,
 } from '@ethosagent/safety-scanner';
-import type { HealthCheckResult, Logger, PlatformAdapter, Storage } from '@ethosagent/types';
+import { FileSecretsResolver } from '@ethosagent/storage-fs';
+import type {
+  HealthCheckResult,
+  Logger,
+  PlatformAdapter,
+  SecretsResolver,
+  Storage,
+} from '@ethosagent/types';
 import { isValidSecretName } from '@ethosagent/types';
 import { derivePluginId, isGrantRevoked, readGrants } from './grants';
 import {
@@ -36,6 +48,13 @@ import {
   readLockfile,
 } from './lockfile';
 
+// Plugin credential refs — re-exported so the CLI writer mints refs from the
+// same definition the loader and `PluginApiImpl` use, instead of a second copy.
+export {
+  migrateLegacyPluginCredentials,
+  pluginCredentialPrefix,
+  pluginCredentialRef,
+} from '@ethosagent/plugin-sdk';
 export type {
   PluginGrant,
   PluginGrantCapabilities,
@@ -119,12 +138,22 @@ export interface PluginLoaderOptions {
    * The wiring layer uses this to register the adapter with the Gateway.
    */
   onPlatformAdapterRegistered?: (pluginId: string, adapter: PlatformAdapter) => void;
-  /** Credential storage backend. Defaults to the injected `storage`.
-   *  Must implement `existsSync` in addition to the Storage interface. */
-  credentialStorage?: CredentialStorage;
-  /** Ethos data directory (e.g. `~/.ethos`). Credential files are stored
-   *  under `<dataDir>/plugins/<pluginId>/credentials/`. Defaults to
-   *  `$HOME/.ethos`. Override in tests with a temporary directory. */
+  /** Storage for credential METADATA — the `<key>.meta` sidecars, which carry
+   *  an `updatedAt` timestamp and no credential material. Defaults to the
+   *  injected `storage`. */
+  credentialStorage?: Storage;
+  /**
+   * Vault for plugin credential material. G-SEC: the sole storage and
+   * retrieval path for credentials — refs are `plugins/<pluginId>/<key>`.
+   * Defaults to a `FileSecretsResolver` rooted at `<dataDir>/secrets`, the
+   * same directory the CLI and web-api resolvers use. Hosts that already
+   * built a resolver (env / AWS chain) should inject it.
+   */
+  secrets?: SecretsResolver;
+  /** Ethos data directory (e.g. `~/.ethos`). Credential metadata is stored
+   *  under `<dataDir>/plugins/<pluginId>/credentials/`, and the default vault
+   *  under `<dataDir>/secrets`. Defaults to `$HOME/.ethos`. Override in tests
+   *  with a temporary directory. */
   dataDir?: string;
   /** Called when a plugin registers an HTTP route. */
   onRouteRegistered?: (entry: PluginRouteEntry) => void;
@@ -138,7 +167,10 @@ export class PluginLoader {
   private readonly pluginSkillSources: { label: string; dir: string }[] = [];
   private readonly plugins = new Map<string, EthosPlugin>();
   private readonly compatCallbacks: OpenClawCompatCallbacks;
-  private readonly credentialStorage: CredentialStorage;
+  private readonly credentialStorage: Storage;
+  private readonly secrets: SecretsResolver;
+  /** Plugin ids whose legacy on-disk credentials have already been migrated. */
+  private readonly migratedCredentials = new Set<string>();
   private readonly dataDir: string;
   private readonly manifests = new Map<string, EthosPluginPackageJson>();
   private readonly onRouteRegistered?: (entry: PluginRouteEntry) => void;
@@ -149,8 +181,11 @@ export class PluginLoader {
   constructor(registries: PluginRegistries, opts: PluginLoaderOptions) {
     this.registries = registries;
     this.storage = opts.storage;
-    this.credentialStorage = opts.credentialStorage ?? (opts.storage as CredentialStorage);
+    this.credentialStorage = opts.credentialStorage ?? opts.storage;
     this.dataDir = opts.dataDir ?? join(homedir(), '.ethos');
+    this.secrets =
+      opts.secrets ??
+      new FileSecretsResolver({ dir: join(this.dataDir, 'secrets'), storage: opts.storage });
     this.logger = opts.logger ?? noopLogger;
     this.compatCallbacks = {
       onPlatformAdapter: opts.onPlatformAdapterRegistered,
@@ -757,34 +792,73 @@ export class PluginLoader {
   // indistinguishable from "no such credential", which would hide the attempt
   // from the operator and from the logs.
 
-  /** The credential directory for a plugin. Throws if `pluginId` is not a plain id. */
-  private credentialsDir(pluginId: string): string {
+  /** Refuse a plugin id that is not a plain identifier. Returns it unchanged. */
+  private assertPluginId(pluginId: string): string {
     if (!isValidPluginId(pluginId)) {
       throw new CredentialPathError(`Invalid plugin id "${pluginId}"`);
     }
+    return pluginId;
+  }
+
+  /** The credential metadata directory for a plugin. Throws if `pluginId` is not a plain id. */
+  private credentialsDir(pluginId: string): string {
+    this.assertPluginId(pluginId);
     const pluginsBase = join(this.dataDir, 'plugins');
     const dir = join(pluginsBase, pluginId, 'credentials');
     assertWithinBase(pluginsBase, dir);
     return dir;
   }
 
-  /** Path to one credential file. Throws if either segment is unsafe. */
-  private credentialFile(pluginId: string, name: string): string {
+  /** Path to one credential's metadata sidecar. Throws if either segment is unsafe. */
+  private credentialMetaFile(pluginId: string, name: string): string {
     const dir = this.credentialsDir(pluginId);
     if (!isValidSecretName(name)) {
       throw new CredentialPathError(`Invalid credential name "${name}"`);
     }
-    const path = join(dir, name);
+    const path = join(dir, `${name}.meta`);
     assertWithinBase(dir, path);
     return path;
   }
 
+  /** The vault ref for one credential. Throws if either segment is unsafe. */
+  private credentialRef(pluginId: string, name: string): string {
+    this.assertPluginId(pluginId);
+    if (!isValidSecretName(name)) {
+      throw new CredentialPathError(`Invalid credential name "${name}"`);
+    }
+    return pluginCredentialRef(pluginId, name);
+  }
+
+  /**
+   * Move this plugin's pre-vault credentials into the `SecretsResolver`, once
+   * per process. Runs before every credential read/write and before a plugin
+   * is activated, so an install that predates the vault keeps working with no
+   * operator action.
+   */
+  private async ensureCredentialsMigrated(pluginId: string): Promise<void> {
+    if (this.migratedCredentials.has(pluginId)) return;
+    // Claimed before the await so two concurrent callers cannot both migrate.
+    this.migratedCredentials.add(pluginId);
+    try {
+      await migrateLegacyPluginCredentials({
+        secrets: this.secrets,
+        storage: this.credentialStorage,
+        pluginId,
+        legacyDir: this.credentialsDir(pluginId),
+      });
+    } catch (err) {
+      this.migratedCredentials.delete(pluginId);
+      throw err;
+    }
+  }
+
   /** Set a credential value for a loaded plugin. Throws if the plugin is not loaded. */
   async setCredential(pluginId: string, key: string, value: string): Promise<void> {
-    // The write lands in `PluginApiImpl.setSecret`, which builds its own path
-    // from `key` and does not validate it. Validate at this boundary — the RPC
-    // entry point — so the write half is refused on the same rule as the reads.
-    this.credentialFile(pluginId, key);
+    // Validate at this boundary — the RPC entry point — before anything is
+    // read, written or migrated, so a hostile key is refused on the same rule
+    // as the reads and never reaches storage.
+    this.credentialRef(pluginId, key);
+    await this.ensureCredentialsMigrated(pluginId);
     const impl = this.apis.get(pluginId);
     if (!impl) throw new Error(`Plugin "${pluginId}" is not loaded`);
     await impl.setSecret(key, value);
@@ -792,8 +866,7 @@ export class PluginLoader {
 
   /** Read credential metadata (updatedAt timestamp). Returns null if unset. */
   async getCredentialMeta(pluginId: string, key: string): Promise<{ updatedAt: string } | null> {
-    const metaPath = `${this.credentialFile(pluginId, key)}.meta`;
-    const raw = await this.credentialStorage.read(metaPath);
+    const raw = await this.credentialStorage.read(this.credentialMetaFile(pluginId, key));
     if (raw === null) return null;
     try {
       return JSON.parse(raw) as { updatedAt: string };
@@ -804,15 +877,21 @@ export class PluginLoader {
 
   /** Remove a credential and its metadata for a plugin. */
   async clearCredential(pluginId: string, key: string): Promise<void> {
-    const credPath = this.credentialFile(pluginId, key);
-    const metaPath = `${credPath}.meta`;
-    await this.credentialStorage.remove(credPath).catch(() => {});
+    const ref = this.credentialRef(pluginId, key);
+    const metaPath = this.credentialMetaFile(pluginId, key);
+    await this.ensureCredentialsMigrated(pluginId);
+    await this.secrets.delete(ref);
     await this.credentialStorage.remove(metaPath).catch(() => {});
+    // A loaded plugin's `hasSecret` answers from a primed set — without this
+    // it would keep reporting a credential the operator just cleared.
+    this.apis.get(pluginId)?.forgetSecret(key);
   }
 
   /** Read the raw credential value. Returns null if unset. */
   async getCredentialValue(pluginId: string, ref: string): Promise<string | null> {
-    return this.credentialStorage.read(this.credentialFile(pluginId, ref));
+    const vaultRef = this.credentialRef(pluginId, ref);
+    await this.ensureCredentialsMigrated(pluginId);
+    return this.secrets.get(vaultRef);
   }
 
   /** Return a redacted preview of a credential (first 4 + last 4 chars).
@@ -843,7 +922,11 @@ export class PluginLoader {
     }>
   > {
     const declared = this.readDeclaredCredentials(pluginId);
-    const basePath = this.credentialsDir(pluginId);
+    const prefix = pluginCredentialPrefix(this.assertPluginId(pluginId));
+    await this.ensureCredentialsMigrated(pluginId);
+    const setKeys = new Set(
+      (await this.secrets.list(prefix)).map((ref) => ref.slice(prefix.length)),
+    );
 
     const result: Array<{
       key: string;
@@ -872,10 +955,9 @@ export class PluginLoader {
       }
       seenKeys.add(cred.key);
       const meta = await this.getCredentialMeta(pluginId, cred.key);
-      const isSet = await this.credentialStorage.exists(join(basePath, cred.key));
       result.push({
         key: cred.key,
-        isSet,
+        isSet: setKeys.has(cred.key),
         updatedAt: meta?.updatedAt ?? null,
         label: cred.label,
         type: cred.type,
@@ -885,10 +967,8 @@ export class PluginLoader {
       });
     }
 
-    // Scan for undeclared credentials on disk
-    const entries = await this.credentialStorage.list(basePath).catch(() => [] as string[]);
-    for (const name of entries) {
-      if (name.endsWith('.meta')) continue;
+    // Scan the vault for credentials the manifest never declared
+    for (const name of setKeys) {
       if (seenKeys.has(name)) continue;
       if (!isValidSecretName(name)) continue;
       const meta = await this.getCredentialMeta(pluginId, name);
@@ -968,6 +1048,38 @@ export class PluginLoader {
     this.loadedManifests.set(id, entry);
   }
 
+  /** Build the api object handed to one plugin. */
+  private makeApi(id: string): PluginApiImpl {
+    return new PluginApiImpl(id, this.registries, {
+      secrets: this.secrets,
+      storage: this.credentialStorage,
+      basePath: join(this.dataDir, 'plugins', id),
+    });
+  }
+
+  /**
+   * Migrate this plugin's legacy on-disk credentials into the vault and prime
+   * the api's key set, so the synchronous `hasSecret` is answerable from the
+   * first call. Returns an error message when it failed — the caller aborts
+   * the load rather than handing the plugin an api whose credential view is
+   * silently empty.
+   */
+  private async initCredentials(id: string, api: PluginApiImpl): Promise<string | null> {
+    try {
+      await this.ensureCredentialsMigrated(id);
+      await api.primeSecrets();
+      return null;
+    } catch (err) {
+      const message = `Credential init failed: ${String(err)}`;
+      this.logger.warn(`[plugin-loader] Plugin "${id}" ${message}`, {
+        component: 'plugin-loader',
+        pluginId: id,
+        error: String(err),
+      });
+      return message;
+    }
+  }
+
   private async activatePlugin(id: string, mod: unknown): Promise<void> {
     // Validate declared dependencies are loaded before activation
     const manifest = this.manifests.get(id);
@@ -1006,11 +1118,13 @@ export class PluginLoader {
       await this.unload(id);
     }
 
-    const basePath = join(this.dataDir, 'plugins', id);
-    const api = new PluginApiImpl(id, this.registries, {
-      storage: this.credentialStorage,
-      basePath,
-    });
+    const api = this.makeApi(id);
+    const credentialError = await this.initCredentials(id, api);
+    if (credentialError) {
+      this.trackManifestStatus(id, 'failed', credentialError);
+      api.cleanup();
+      return;
+    }
 
     try {
       await mod.activate(api);
@@ -1034,11 +1148,16 @@ export class PluginLoader {
     id: string,
     registerFn: (...args: unknown[]) => unknown,
   ): Promise<void> {
-    const basePath = join(this.dataDir, 'plugins', id);
-    const ethosApi = new PluginApiImpl(id, this.registries, {
-      storage: this.credentialStorage,
-      basePath,
-    });
+    const ethosApi = this.makeApi(id);
+    const credentialError = await this.initCredentials(id, ethosApi);
+    if (credentialError) {
+      this.logger.warn(`[plugin-loader] OpenClaw plugin "${id}": ${credentialError}`, {
+        component: 'plugin-loader',
+        pluginId: id,
+      });
+      ethosApi.cleanup();
+      return;
+    }
     const shim = createOpenClawApiShim(id, ethosApi, this.compatCallbacks);
 
     try {

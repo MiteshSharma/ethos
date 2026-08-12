@@ -1,5 +1,5 @@
 import { join } from 'node:path';
-import { InMemoryStorage } from '@ethosagent/storage-fs';
+import { InMemorySecretsResolver, InMemoryStorage } from '@ethosagent/storage-fs';
 import { describe, expect, it } from 'vitest';
 import { ethosDir, readRawConfig, writeConfig } from '../index';
 
@@ -71,7 +71,7 @@ describe('modelCatalog config parsing', () => {
         },
       },
     };
-    await writeConfig(storage, original);
+    await writeConfig(storage, original, new InMemorySecretsResolver());
     const roundTripped = await readRawConfig(storage);
     expect(roundTripped?.modelCatalog).toEqual(original.modelCatalog);
   });
@@ -88,7 +88,7 @@ describe('modelCatalog config parsing', () => {
         enabled: false,
       },
     };
-    await writeConfig(storage, original);
+    await writeConfig(storage, original, new InMemorySecretsResolver());
     const roundTripped = await readRawConfig(storage);
     expect(roundTripped?.modelCatalog?.enabled).toBe(false);
   });
@@ -105,7 +105,7 @@ describe('modelCatalog config parsing', () => {
         enabled: true,
       },
     };
-    await writeConfig(storage, original);
+    await writeConfig(storage, original, new InMemorySecretsResolver());
     const raw = await storage.read(join(ethosDir(), 'config.yaml'));
     // enabled: true is not serialized (it's the default)
     expect(raw).not.toContain('modelCatalog.enabled');

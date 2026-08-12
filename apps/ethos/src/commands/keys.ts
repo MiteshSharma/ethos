@@ -1,4 +1,4 @@
-import { readKeys, writeKeys } from '@ethosagent/config';
+import { readKeys, rotationSecretRef, writeKeys } from '@ethosagent/config';
 import { writeJson } from '../json-output';
 import { getSecretsResolver, getStorage } from '../wiring';
 
@@ -67,16 +67,12 @@ export async function runKeys(args: string[]): Promise<void> {
       const prioIdx = args.indexOf('--priority');
       const priority = prioIdx >= 0 ? Number(args[prioIdx + 1]) : 50;
 
+      // The key value is handed over plaintext: `writeKeys` is the single
+      // path that mints the ref and stores the material (G-SEC). Minting one
+      // here too would be a second scheme for the same file.
       const keys = await readKeys(storage);
-      const id = `key-${Date.now()}`;
-      const secretRef = `rotation/${id}`;
-      await (await getSecretsResolver()).set(secretRef, apiKey);
-      keys.push({
-        apiKey: `\${secrets:${secretRef}}`,
-        priority,
-        ...(label ? { label } : {}),
-      });
-      await writeKeys(storage, keys);
+      keys.push({ apiKey, priority, ...(label ? { label } : {}) });
+      await writeKeys(storage, keys, await getSecretsResolver());
       console.log(
         `${c.green}✓ Key added${c.reset}  ${maskKey(apiKey)}  ${c.dim}priority ${priority}${c.reset}`,
       );
@@ -95,8 +91,29 @@ export async function runKeys(args: string[]): Promise<void> {
         process.exit(1);
       }
       const removed = keys.splice(idx - 1, 1)[0];
-      await writeKeys(storage, keys);
+      const secrets = await getSecretsResolver();
+      await writeKeys(storage, keys, secrets);
       console.log(`${c.green}✓ Removed${c.reset}  ${maskKey(removed?.apiKey ?? '')}`);
+
+      // The profile is gone from keys.json; its material would otherwise sit in
+      // the vault unreferenced. Refs are content-addressed, so two profiles
+      // holding the same key value share one ref — drop it only when no
+      // survivor still points at it.
+      const ref = removed ? rotationSecretRef(removed) : null;
+      if (ref && !keys.some((k) => rotationSecretRef(k) === ref)) {
+        try {
+          await secrets.delete(ref);
+        } catch (err) {
+          // Non-fatal — keys.json is the source of truth and is already
+          // written, so the removal stands. Surfaced rather than swallowed
+          // (§V S7) because what is left behind is credential material.
+          const msg = err instanceof Error ? err.message : String(err);
+          console.log(
+            `${c.red}⚠ Stored key material was not deleted:${c.reset} ${msg}\n` +
+              `${c.dim}  Remove it with: ethos secrets remove ${ref}${c.reset}`,
+          );
+        }
+      }
       break;
     }
 

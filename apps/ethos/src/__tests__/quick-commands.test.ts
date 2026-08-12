@@ -1,6 +1,6 @@
 import { join } from 'node:path';
 import { ethosDir, readRawConfig, writeConfig } from '@ethosagent/config';
-import { InMemoryStorage } from '@ethosagent/storage-fs';
+import { InMemorySecretsResolver, InMemoryStorage } from '@ethosagent/storage-fs';
 import { describe, expect, it } from 'vitest';
 import { grantQuickCommandConsent, hasQuickCommandConsent } from '../lib/onboarding';
 import { formatQuickCommandOutput, runQuickCommand } from '../lib/quick-command-runner';
@@ -140,7 +140,7 @@ describe('quick_commands config parsing', () => {
         gs: { type: 'exec' as const, command: 'git status' },
       },
     };
-    await writeConfig(storage, original);
+    await writeConfig(storage, original, new InMemorySecretsResolver());
     const roundTripped = await readRawConfig(storage);
     expect(roundTripped?.quick_commands).toEqual(original.quick_commands);
   });

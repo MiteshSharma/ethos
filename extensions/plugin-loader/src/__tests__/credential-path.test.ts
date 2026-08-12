@@ -4,18 +4,20 @@
 //
 // `plugins.getCredential`, `plugins.getCredentialMeta` and the loader's
 // `clearCredential` take `pluginId` and a credential name straight off the
-// wire (`z.string().min(1)` — nothing upstream narrows either) and join them
-// into `<dataDir>/plugins/<pluginId>/credentials/<name>`. `join()` normalises
+// wire (`z.string().min(1)` — nothing upstream narrows either). They become a
+// vault ref (`plugins/<pluginId>/<name>`) and a metadata path
+// (`<dataDir>/plugins/<pluginId>/credentials/<name>.meta`). `join()` normalises
 // `..`, so an unchecked name turns a read into an arbitrary read, a delete into
-// an arbitrary delete, and a meta lookup into an arbitrary stat.
+// an arbitrary delete, and a meta lookup into an arbitrary stat — and an
+// unchecked ref segment lands one plugin's read inside another's prefix.
 //
-// Every assertion below inspects WHAT REACHED THE STORAGE, not whether a call
-// threw. A weaker shape was tried and discarded: asserting only that the call
-// rejects passes against the vulnerable implementation too, because a traversal
-// to a path that happens not to exist also "fails". So each test seeds a real
-// file at the traversal target and asserts (a) the sink was never handed a path
-// outside the plugin's own credential directory, and (b) the planted content
-// never came back.
+// Every assertion below inspects WHAT REACHED THE SINK — the storage AND the
+// vault — not whether a call threw. A weaker shape was tried and discarded:
+// asserting only that the call rejects passes against the vulnerable
+// implementation too, because a traversal to a path that happens not to exist
+// also "fails". So each test seeds a real file at the traversal target and
+// asserts (a) neither sink was ever handed a path or ref outside this plugin's
+// own credentials, and (b) the planted content never came back.
 // ---------------------------------------------------------------------------
 
 import { join } from 'node:path';
@@ -27,14 +29,16 @@ import {
   DefaultToolRegistry,
 } from '@ethosagent/core';
 import type { PluginRegistries } from '@ethosagent/plugin-sdk';
-import { InMemoryStorage } from '@ethosagent/storage-fs';
-import type { ContextInjector, StorageRemoveOptions } from '@ethosagent/types';
+import { InMemorySecretsResolver, InMemoryStorage } from '@ethosagent/storage-fs';
+import type { ContextInjector, SecretRef, StorageRemoveOptions } from '@ethosagent/types';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { CredentialPathError, PluginLoader } from '../index';
 
 const DATA_DIR = '/data';
 const PLUGIN_ID = 'tools-zerodha';
 const CRED_DIR = join(DATA_DIR, 'plugins', PLUGIN_ID, 'credentials');
+/** The vault prefix this plugin's refs must never leave. */
+const REF_PREFIX = `plugins/${PLUGIN_ID}/`;
 
 /** The file a traversal is trying to reach. Outside the credential dir. */
 const SECRET_PATH = join(DATA_DIR, 'config.yaml');
@@ -86,18 +90,52 @@ class RecordingStorage extends InMemoryStorage {
   }
 }
 
+/** Records every ref handed to the vault — the other sink a bad name reaches. */
+class RecordingSecrets extends InMemorySecretsResolver {
+  readonly touched: string[] = [];
+
+  override async get(ref: SecretRef): Promise<string | null> {
+    this.touched.push(ref);
+    return super.get(ref);
+  }
+
+  override async set(ref: SecretRef, value: string): Promise<void> {
+    this.touched.push(ref);
+    return super.set(ref, value);
+  }
+
+  override async delete(ref: SecretRef): Promise<void> {
+    this.touched.push(ref);
+    return super.delete(ref);
+  }
+
+  override async list(prefix?: string): Promise<SecretRef[]> {
+    this.touched.push(prefix ?? '<all>');
+    return super.list(prefix);
+  }
+
+  /** Refs touched that are not inside this plugin's own vault prefix. */
+  outsideOwnPrefix(): string[] {
+    return this.touched.filter((r) => !r.startsWith(REF_PREFIX));
+  }
+}
+
 let storage: RecordingStorage;
+let secrets: RecordingSecrets;
 let loader: PluginLoader;
 
 beforeEach(async () => {
   storage = new RecordingStorage();
+  secrets = new RecordingSecrets();
   await storage.mkdir(CRED_DIR);
+  // Seeded at the LEGACY path, not in the vault — the first credential call
+  // migrates it, so this also covers the pre-vault install.
   await storage.write(join(CRED_DIR, 'api_key'), 'plugin-secret-value');
   await storage.write(join(CRED_DIR, 'api_key.meta'), '{"updatedAt":"2026-08-12T10:00:00.000Z"}');
   await storage.write(SECRET_PATH, SECRET_CONTENT);
   storage.touched.length = 0;
 
-  loader = new PluginLoader(makeRegistries(), { storage, dataDir: DATA_DIR });
+  loader = new PluginLoader(makeRegistries(), { storage, secrets, dataDir: DATA_DIR });
 });
 
 // The payloads. Each is a distinct escape route, not a variation on one.
@@ -119,6 +157,7 @@ describe('getCredentialValue — arbitrary read', () => {
     const value = await loader.getCredentialValue(PLUGIN_ID, 'api_key');
     expect(value).toBe('plugin-secret-value');
     expect(storage.outsideCredentialDir()).toEqual([]);
+    expect(secrets.outsideOwnPrefix()).toEqual([]);
   });
 
   it.each(HOSTILE_NAMES)('refuses ref %j without ever reading it', async (ref) => {
@@ -128,6 +167,7 @@ describe('getCredentialValue — arbitrary read', () => {
     expect(await storage.read(SECRET_PATH)).toBe(SECRET_CONTENT);
     storage.touched.length = 0;
     expect(storage.outsideCredentialDir()).toEqual([]);
+    expect(secrets.touched).toEqual([]);
   });
 
   it.each(HOSTILE_PLUGIN_IDS)('refuses pluginId %j without ever reading it', async (pluginId) => {
@@ -135,6 +175,7 @@ describe('getCredentialValue — arbitrary read', () => {
       CredentialPathError,
     );
     expect(storage.touched).toEqual([]);
+    expect(secrets.touched).toEqual([]);
   });
 
   it('the preview oracle inherits the refusal', async () => {
@@ -142,20 +183,24 @@ describe('getCredentialValue — arbitrary read', () => {
       CredentialPathError,
     );
     expect(storage.touched).toEqual([]);
+    expect(secrets.touched).toEqual([]);
   });
 });
 
 describe('clearCredential — arbitrary delete', () => {
   it('deletes a legitimate credential and its meta, and nothing else', async () => {
     await loader.clearCredential(PLUGIN_ID, 'api_key');
+    expect(await secrets.get(`${REF_PREFIX}api_key`)).toBeNull();
     expect(await storage.exists(join(CRED_DIR, 'api_key'))).toBe(false);
     expect(await storage.exists(join(CRED_DIR, 'api_key.meta'))).toBe(false);
     expect(storage.outsideCredentialDir()).toEqual([]);
+    expect(secrets.outsideOwnPrefix()).toEqual([]);
   });
 
   it.each(HOSTILE_NAMES)('refuses key %j and leaves the target file intact', async (key) => {
     await expect(loader.clearCredential(PLUGIN_ID, key)).rejects.toThrow(CredentialPathError);
     expect(storage.touched).toEqual([]);
+    expect(secrets.touched).toEqual([]);
     // `remove` swallows its own errors, so "it did not throw" proves nothing
     // about deletion — check the file is still there.
     expect(await storage.read(SECRET_PATH)).toBe(SECRET_CONTENT);
@@ -164,6 +209,7 @@ describe('clearCredential — arbitrary delete', () => {
   it.each(HOSTILE_PLUGIN_IDS)('refuses pluginId %j and deletes nothing', async (pluginId) => {
     await expect(loader.clearCredential(pluginId, 'api_key')).rejects.toThrow(CredentialPathError);
     expect(storage.touched).toEqual([]);
+    expect(secrets.touched).toEqual([]);
     expect(await storage.exists(join(CRED_DIR, 'api_key'))).toBe(true);
   });
 });
@@ -212,14 +258,16 @@ describe('setCredential — arbitrary write', () => {
 });
 
 describe('listCredentialKeys', () => {
-  it('lists on-disk keys for a valid plugin id', async () => {
+  it('lists this plugin keys for a valid plugin id', async () => {
     const keys = await loader.listCredentialKeys(PLUGIN_ID);
     expect(keys.map((k) => k.key)).toEqual(['api_key']);
     expect(storage.outsideCredentialDir()).toEqual([]);
+    expect(secrets.outsideOwnPrefix()).toEqual([]);
   });
 
   it.each(HOSTILE_PLUGIN_IDS)('refuses pluginId %j without listing it', async (pluginId) => {
     await expect(loader.listCredentialKeys(pluginId)).rejects.toThrow(CredentialPathError);
     expect(storage.touched).toEqual([]);
+    expect(secrets.touched).toEqual([]);
   });
 });

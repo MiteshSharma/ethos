@@ -1,6 +1,6 @@
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { InMemoryStorage } from '@ethosagent/storage-fs';
+import { InMemorySecretsResolver, InMemoryStorage } from '@ethosagent/storage-fs';
 import { afterEach, describe, expect, it } from 'vitest';
 import { type EthosConfig, ethosDir, readRawConfig, writeConfig } from '../index';
 
@@ -67,7 +67,7 @@ describe('parseConfigYaml — whatsapp.<n>.<field>', () => {
         },
       ],
     };
-    await writeConfig(storage, original);
+    await writeConfig(storage, original, new InMemorySecretsResolver());
 
     const raw = await storage.read(join(ethosDir(), 'config.yaml'));
     expect(raw).toContain('whatsapp.0.id: wa1');
@@ -91,7 +91,7 @@ describe('parseConfigYaml — whatsapp.<n>.<field>', () => {
         scout: { web_search: { provider: 'brave', secret: 'brave-main' } },
       },
     };
-    await writeConfig(storage, original);
+    await writeConfig(storage, original, new InMemorySecretsResolver());
 
     const raw = await storage.read(join(ethosDir(), 'config.yaml'));
     expect(raw).toContain('toolSettings._default.web_search.provider: tavily');
@@ -113,7 +113,7 @@ describe('parseConfigYaml — whatsapp.<n>.<field>', () => {
       personality: 'researcher',
       whatsapp: [{ id: 'wa1', default_mode: 'all', phone_number: '+1 555 123 4567' }],
     };
-    await writeConfig(storage, original);
+    await writeConfig(storage, original, new InMemorySecretsResolver());
 
     const raw = await storage.read(join(ethosDir(), 'config.yaml'));
     expect(raw).toContain('whatsapp.0.phone_number: +1 555 123 4567');
@@ -150,7 +150,7 @@ describe('parseConfigYaml — whatsapp.<n>.<field>', () => {
 
     const storage = new InMemoryStorage();
     await storage.mkdir(ethosDir());
-    await writeConfig(storage, cfg);
+    await writeConfig(storage, cfg, new InMemorySecretsResolver());
     const raw = await storage.read(join(ethosDir(), 'config.yaml'));
     expect(raw).toContain('whatsapp.0.bind.type: personality');
     expect(raw).toContain('whatsapp.0.bind.name: researcher');
@@ -226,7 +226,7 @@ describe('parseConfigYaml — admin.enabled', () => {
       personality: 'researcher',
       admin: { enabled: true },
     };
-    await writeConfig(storage, original);
+    await writeConfig(storage, original, new InMemorySecretsResolver());
 
     const raw = await storage.read(join(ethosDir(), 'config.yaml'));
     expect(raw).toContain('admin.enabled: true');
@@ -272,7 +272,7 @@ describe('parseConfigYaml — a2a.enabled', () => {
       personality: 'researcher',
       a2a: { enabled: true },
     };
-    await writeConfig(storage, original);
+    await writeConfig(storage, original, new InMemorySecretsResolver());
 
     const raw = await storage.read(join(ethosDir(), 'config.yaml'));
     expect(raw).toContain('a2a.enabled: true');
@@ -315,13 +315,17 @@ describe('parseConfigYaml — security.trusted_github_orgs', () => {
   it('round-trips a configured list through writeConfig and back', async () => {
     const storage = new InMemoryStorage();
     await storage.mkdir(ethosDir());
-    await writeConfig(storage, {
-      provider: 'anthropic',
-      model: 'claude-opus-4-7',
-      apiKey: 'sk',
-      personality: 'researcher',
-      security: { trustedGitHubOrgs: ['acme-corp'] },
-    });
+    await writeConfig(
+      storage,
+      {
+        provider: 'anthropic',
+        model: 'claude-opus-4-7',
+        apiKey: 'sk',
+        personality: 'researcher',
+        security: { trustedGitHubOrgs: ['acme-corp'] },
+      },
+      new InMemorySecretsResolver(),
+    );
 
     const raw = await storage.read(join(ethosDir(), 'config.yaml'));
     expect(raw).toContain('security.trusted_github_orgs: acme-corp');
@@ -333,13 +337,17 @@ describe('parseConfigYaml — security.trusted_github_orgs', () => {
   it('round-trips an empty list without restoring the default', async () => {
     const storage = new InMemoryStorage();
     await storage.mkdir(ethosDir());
-    await writeConfig(storage, {
-      provider: 'anthropic',
-      model: 'claude-opus-4-7',
-      apiKey: 'sk',
-      personality: 'researcher',
-      security: { trustedGitHubOrgs: [] },
-    });
+    await writeConfig(
+      storage,
+      {
+        provider: 'anthropic',
+        model: 'claude-opus-4-7',
+        apiKey: 'sk',
+        personality: 'researcher',
+        security: { trustedGitHubOrgs: [] },
+      },
+      new InMemorySecretsResolver(),
+    );
 
     const roundTripped = await readRawConfig(storage);
     expect(roundTripped?.security).toEqual({ trustedGitHubOrgs: [] });
@@ -429,7 +437,7 @@ describe('parseConfigYaml — display.streaming_edits', () => {
       personality: 'researcher',
       displayStreamingEdits: 'all',
     };
-    await writeConfig(storage, original);
+    await writeConfig(storage, original, new InMemorySecretsResolver());
 
     const raw = await storage.read(join(ethosDir(), 'config.yaml'));
     expect(raw).toContain('display.streaming_edits: all');

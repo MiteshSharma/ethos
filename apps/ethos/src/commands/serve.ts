@@ -865,7 +865,8 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
     a2aState.enabled = enabled;
     try {
       const raw = await readRawConfig(a2aStorage);
-      if (raw) await writeConfig(a2aStorage, { ...raw, a2a: { enabled } });
+      if (raw)
+        await writeConfig(a2aStorage, { ...raw, a2a: { enabled } }, await getSecretsResolver());
     } catch (err) {
       console.warn(
         `  a2a:          failed to persist a2a.enabled=${enabled} to config.yaml (toggle still applied for this process):`,

@@ -512,6 +512,9 @@ importers:
       '@ethosagent/batch-runner':
         specifier: workspace:*
         version: link:../../extensions/batch-runner
+      '@ethosagent/config':
+        specifier: workspace:*
+        version: link:../../packages/config
       '@ethosagent/core':
         specifier: workspace:*
         version: link:../../packages/core

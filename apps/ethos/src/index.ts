@@ -363,7 +363,11 @@ try {
           console.error('Run ethos setup first.');
           process.exit(1);
         }
-        await writeConfig(getStorage(), { ...cfg, personality: args[2] });
+        await writeConfig(
+          getStorage(),
+          { ...cfg, personality: args[2] },
+          await getSecretsResolver(),
+        );
         console.log(`Personality set to: ${args[2]}`);
       } else if (sub === 'mcp') {
         await runPersonalityMcp(args.slice(2));

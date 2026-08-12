@@ -4,7 +4,7 @@ import type { EthosConfig } from '@ethosagent/config';
 import { readRawConfig, writeConfig } from '@ethosagent/config';
 import { teamsDir } from '@ethosagent/team-supervisor';
 import { EthosError } from '@ethosagent/types';
-import { getStorage } from '../wiring';
+import { getSecretsResolver, getStorage } from '../wiring';
 
 const c = {
   reset: '\x1b[0m',
@@ -85,13 +85,21 @@ export async function runSet(args: string[]): Promise<void> {
 
   if (sub === 'team') {
     resolveTeamExists(name);
-    await writeConfig(getStorage(), { ...config, activeContext: { type: 'team', name } });
+    await writeConfig(
+      getStorage(),
+      { ...config, activeContext: { type: 'team', name } },
+      await getSecretsResolver(),
+    );
     console.log(
       `${c.green}✓${c.reset} Active context set to ${c.bold}team:${name}${c.reset}\n` +
         `${c.dim}Start the team first: ethos team start ${name}${c.reset}`,
     );
   } else {
-    await writeConfig(getStorage(), { ...config, activeContext: { type: 'personality', name } });
+    await writeConfig(
+      getStorage(),
+      { ...config, activeContext: { type: 'personality', name } },
+      await getSecretsResolver(),
+    );
     console.log(
       `${c.green}✓${c.reset} Active context set to ${c.bold}personality:${name}${c.reset}`,
     );

@@ -8,15 +8,19 @@ import {
   computeIntegrity,
   derivePluginId,
   grantsPath,
+  migrateLegacyPluginCredentials,
   type PluginGrant,
   type PluginLockEntry,
+  pluginCredentialPrefix,
+  pluginCredentialRef,
   readGrants,
   readLockfile,
   recordGrant,
   revokeGrant,
   writeLockfile,
 } from '@ethosagent/plugin-loader';
-import type { Storage } from '@ethosagent/types';
+import { FileSecretsResolver } from '@ethosagent/storage-fs';
+import type { SecretsResolver, Storage } from '@ethosagent/types';
 import { EthosError } from '@ethosagent/types';
 import {
   canInstall,
@@ -632,11 +636,24 @@ async function runCredentials(args: string[]): Promise<void> {
 
   const flag = args[1] ?? '--list';
   const dataDir = join(homedir(), '.ethos');
+  // Metadata sidecars (`<key>.meta`) and any pre-vault plaintext credentials.
   const credDir = join(dataDir, 'plugins', pluginId, 'credentials');
+  // G-SEC — credential VALUES live only here, under `plugins/<pluginId>/<key>`,
+  // the same refs the plugin api and the `plugins.*` RPC use.
+  const secrets = new FileSecretsResolver({
+    dir: join(ethosDir(), 'secrets'),
+    storage: getStorage(),
+  });
+  await migrateLegacyPluginCredentials({
+    secrets,
+    storage: getStorage(),
+    pluginId,
+    legacyDir: credDir,
+  });
 
   switch (flag) {
     case '--list': {
-      await listCredentials(pluginId, credDir);
+      await listCredentials(pluginId, credDir, secrets);
       break;
     }
     case '--set': {
@@ -645,7 +662,7 @@ async function runCredentials(args: string[]): Promise<void> {
         console.log('Usage: ethos plugin credentials <pluginId> --set KEY[=VALUE]');
         process.exit(1);
       }
-      await setCredential(pluginId, credDir, keyArg);
+      await setCredential(pluginId, credDir, keyArg, secrets);
       break;
     }
     case '--clear': {
@@ -654,7 +671,7 @@ async function runCredentials(args: string[]): Promise<void> {
         console.log('Usage: ethos plugin credentials <pluginId> --clear KEY');
         process.exit(1);
       }
-      await clearCredential(credDir, key);
+      await clearCredential(pluginId, credDir, key, secrets);
       break;
     }
     default:
@@ -693,15 +710,15 @@ async function readPluginCredentialDeclarations(
   return [];
 }
 
-async function listCredentials(pluginId: string, credDir: string): Promise<void> {
+async function listCredentials(
+  pluginId: string,
+  credDir: string,
+  secrets: SecretsResolver,
+): Promise<void> {
   const declared = await readPluginCredentialDeclarations(pluginId);
 
-  let entries: string[] = [];
-  try {
-    entries = (await readdir(credDir)).filter((name) => !name.endsWith('.meta'));
-  } catch {
-    // credentials dir doesn't exist yet
-  }
+  const prefix = pluginCredentialPrefix(pluginId);
+  const entries = (await secrets.list(prefix)).map((ref) => ref.slice(prefix.length));
 
   const allKeys = new Set([...declared.map((d) => d.key), ...entries]);
 
@@ -742,7 +759,12 @@ async function listCredentials(pluginId: string, credDir: string): Promise<void>
   console.log();
 }
 
-async function setCredential(pluginId: string, credDir: string, keyArg: string): Promise<void> {
+async function setCredential(
+  pluginId: string,
+  credDir: string,
+  keyArg: string,
+  secrets: SecretsResolver,
+): Promise<void> {
   const eqIdx = keyArg.indexOf('=');
   let key: string;
   let value: string;
@@ -762,9 +784,13 @@ async function setCredential(pluginId: string, credDir: string, keyArg: string):
     process.exit(1);
   }
 
-  await mkdir(credDir, { recursive: true });
+  // The value goes to the vault and nowhere else; only the `updatedAt` sidecar
+  // stays on disk. Same ref and same sidecar path as PluginApiImpl.setSecret
+  // (packages/plugin-sdk/src/index.ts), so the two writers cannot drift.
+  await secrets.set(pluginCredentialRef(pluginId, key), value);
 
-  await writeFile(join(credDir, key), value, { mode: 0o600 });
+  // 0o700 — same lockdown PluginApiImpl.setSecret applies to this directory.
+  await mkdir(credDir, { recursive: true, mode: 0o700 });
   await writeFile(
     join(credDir, `${key}.meta`),
     JSON.stringify({ updatedAt: new Date().toISOString() }),
@@ -784,8 +810,13 @@ function promptSecret(prompt: string): Promise<string> {
   });
 }
 
-async function clearCredential(credDir: string, key: string): Promise<void> {
-  await rm(join(credDir, key), { force: true }).catch(() => {});
+async function clearCredential(
+  pluginId: string,
+  credDir: string,
+  key: string,
+  secrets: SecretsResolver,
+): Promise<void> {
+  await secrets.delete(pluginCredentialRef(pluginId, key));
   await rm(join(credDir, `${key}.meta`), { force: true }).catch(() => {});
 
   console.log(`${c.green}✓${c.reset} Credential ${c.cyan}${key}${c.reset} cleared.`);

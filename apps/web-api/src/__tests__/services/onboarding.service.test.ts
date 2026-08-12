@@ -13,9 +13,11 @@ const DATA = '/data';
 
 describe('OnboardingService', () => {
   let storage: InMemoryStorage;
+  let secrets: InMemorySecretsResolver;
 
   beforeEach(async () => {
     storage = new InMemoryStorage();
+    secrets = new InMemorySecretsResolver();
     await storage.mkdir(DATA);
   });
 
@@ -26,7 +28,7 @@ describe('OnboardingService', () => {
       onSetupComplete?: () => void;
     } = {},
   ) {
-    const config = new ConfigRepository({ dataDir: DATA, storage });
+    const config = new ConfigRepository({ dataDir: DATA, storage, secrets });
     const personalities = makeStubPersonalityRegistry(
       extras.personalities ?? [{ id: 'researcher', name: 'Researcher' }],
       DATA,
@@ -191,11 +193,13 @@ describe('OnboardingService', () => {
         apiKey: 'sk-test',
         personalityId: 'researcher',
       });
-      const repo = new ConfigRepository({ dataDir: DATA, storage });
+      const repo = new ConfigRepository({ dataDir: DATA, storage, secrets });
       const raw = await repo.read();
       expect(raw?.provider).toBe('anthropic');
       expect(raw?.model).toBe('claude-opus-4-7');
-      expect(raw?.apiKey).toBe('sk-test');
+      // The key lands in the vault; config.yaml gets the ref (G-SEC).
+      expect(raw?.apiKey).toBe(['${', 'secrets:providers/anthropic/apiKey}'].join(''));
+      expect(await secrets.get('providers/anthropic/apiKey')).toBe('sk-test');
       expect(raw?.personality).toBe('researcher');
     });
 

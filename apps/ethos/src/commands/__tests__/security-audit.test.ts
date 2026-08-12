@@ -1,6 +1,9 @@
+import { chmodSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import type { PersonalityConfig } from '@ethosagent/types';
-import { describe, expect, it } from 'vitest';
-import { runSecurityAuditAndCollect } from '../security-audit';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { check0700, runSecurityAuditAndCollect, whatsAppSessionDirs } from '../security-audit';
 
 function p(overrides: Partial<PersonalityConfig>): PersonalityConfig {
   return { id: 'p', name: 'P', ...overrides };
@@ -42,5 +45,50 @@ describe('runSecurityAuditAndCollect', () => {
   it('passes for a clean default personality', async () => {
     const { findings } = await runSecurityAuditAndCollect([p({})]);
     expect(findings.find((f) => f.severity === 'fail')).toBeUndefined();
+  });
+});
+
+describe('whatsAppSessionDirs', () => {
+  it('always includes the default session directory', () => {
+    expect(whatsAppSessionDirs(undefined, '/home/u/.ethos')).toEqual(['/home/u/.ethos/whatsapp']);
+  });
+
+  it('includes configured overrides alongside the default, deduped', () => {
+    expect(
+      whatsAppSessionDirs(
+        [{ session_dir: '/srv/wa-a' }, {}, { session_dir: '/srv/wa-a' }],
+        '/home/u/.ethos',
+      ),
+    ).toEqual(['/home/u/.ethos/whatsapp', '/srv/wa-a']);
+  });
+});
+
+describe('check0700', () => {
+  let root: string;
+
+  beforeEach(() => {
+    root = mkdtempSync(join(tmpdir(), 'sec-audit-'));
+  });
+
+  afterEach(() => {
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it('is ok for a 0700 directory', async () => {
+    const dir = join(root, 'locked');
+    mkdirSync(dir, { mode: 0o700 });
+    chmodSync(dir, 0o700);
+    expect(await check0700(dir)).toBe('ok');
+  });
+
+  it('warns for a world-readable directory', async () => {
+    const dir = join(root, 'open');
+    mkdirSync(dir);
+    chmodSync(dir, 0o755);
+    expect(await check0700(dir)).toBe('warn');
+  });
+
+  it('is ok for a missing directory', async () => {
+    expect(await check0700(join(root, 'nope'))).toBe('ok');
   });
 });

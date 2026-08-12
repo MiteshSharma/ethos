@@ -1,5 +1,5 @@
 import { join } from 'node:path';
-import { InMemoryStorage } from '@ethosagent/storage-fs';
+import { InMemorySecretsResolver, InMemoryStorage } from '@ethosagent/storage-fs';
 import { describe, expect, it } from 'vitest';
 import { type EthosConfig, ethosDir, readRawConfig, writeConfig } from '../index';
 
@@ -80,7 +80,7 @@ describe('writeConfig — quick_commands round-trip', () => {
         local: { type: 'exec', command: 'uptime' },
       },
     };
-    await writeConfig(storage, original);
+    await writeConfig(storage, original, new InMemorySecretsResolver());
 
     const raw = await storage.read(join(ethosDir(), 'config.yaml'));
     expect(raw).toContain('quick_commands.status.gateway: true');
