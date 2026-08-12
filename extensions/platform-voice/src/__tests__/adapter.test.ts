@@ -1,4 +1,4 @@
-import { deriveBotKey } from '@ethosagent/core';
+import { deriveBotKey, voiceLaneKey } from '@ethosagent/core';
 import type { AgentEvent } from '@ethosagent/types';
 import type { AgentTurnRunner, VoiceSessionEvent } from '@ethosagent/voice-session';
 import { VoiceSession } from '@ethosagent/voice-session';
@@ -36,7 +36,9 @@ describe('VoiceChannelAdapter', () => {
 
     expect(adapter.botKey).toBe(deriveBotKey('+1555*'));
     expect(adapter.callerId).toBe('+15551234567');
-    expect(adapter.laneKey).toBe(`voice:${deriveBotKey('+1555*')}:+15551234567`);
+    expect(adapter.laneKey).toBe(
+      voiceLaneKey(deriveBotKey('+1555*'), { kind: 'livekit', id: '+15551234567' }),
+    );
   });
 
   it('honors an explicit bot id over the derived key', () => {
@@ -49,7 +51,9 @@ describe('VoiceChannelAdapter', () => {
     });
 
     expect(adapter.botKey).toBe('reception');
-    expect(adapter.laneKey).toBe('voice:reception:room-participant-7');
+    expect(adapter.laneKey).toBe(
+      voiceLaneKey('reception', { kind: 'livekit', id: 'room-participant-7' }),
+    );
   });
 
   it('bridges a full call: inbound frames -> reply audio on the outbound sink', async () => {

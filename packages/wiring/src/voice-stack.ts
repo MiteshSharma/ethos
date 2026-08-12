@@ -20,10 +20,12 @@
 //      bypassed by constructing a provider some other way.
 
 import {
+  deriveBotKey,
   resolveSttProvider,
   resolveTtsProvider,
   resolveVoicePreferences,
   unwrapVoiceResolution,
+  voiceLaneKey,
 } from '@ethosagent/core';
 import type {
   LiveKitRoomClient,
@@ -282,9 +284,17 @@ function buildLiveKitAdapterFactory(args: {
         agentIdentity: opts.agentIdentity ?? 'ethos',
       },
       bot,
+      // Same encoder, same botKey derivation as `VoiceChannelAdapter.laneKey`.
+      // These two used to be hand-written and DISAGREED — the adapter hashed an
+      // absent `bot.id` through `deriveBotKey`, this one interpolated the raw
+      // `bot.match` — so the span a turn wrote and the lane it ran on named the
+      // same call differently. One encoder is the fix.
       createSession: (callerId: string) =>
         args.createSession({
-          laneKey: `voice:${bot.id ?? bot.match}:${callerId}`,
+          laneKey: voiceLaneKey(bot.id ?? deriveBotKey(bot.match), {
+            kind: 'livekit',
+            id: callerId,
+          }),
           runner: opts.runner,
         }),
       ...(opts.sendArtifact ? { sendArtifact: opts.sendArtifact } : {}),

@@ -79,6 +79,8 @@ import { SystemEventBus } from './services/system-event-bus';
 import { TasksService } from './services/tasks.service';
 import { ToolSettingsService } from './services/tool-settings.service';
 import { VoiceService } from './services/voice.service';
+import { createRealtimeControlDeps } from './voice/realtime-control-deps';
+import { createRealtimeSurface } from './voice/realtime-surface';
 import { createVoiceSocket, readCookie, type VoiceSocket } from './voice/voice-socket';
 
 // Public entry for `@ethosagent/web-api`. Boot code (`apps/ethos/src/commands/
@@ -633,13 +635,43 @@ export function createWebApi(opts: CreateWebApiOptions): CreateWebApiResult {
     // Personalities tab refreshes, so an edited `voice.tts_voice` is heard on
     // the next spoken reply without a restart.
     personalities: opts.personalities,
+    // Who a realtime session is (SOUL.md + the consult boundary policy) and
+    // what it may call (generated from the wired tool registry). Baked into
+    // the ephemeral credential at mint: a live session is configured once.
+    realtimeSurface: createRealtimeSurface({
+      storage,
+      ...(opts.toolRegistry ? { toolRegistry: opts.toolRegistry } : {}),
+      personalities: opts.personalities,
+      ...(opts.refreshPersonalities ? { refresh: opts.refreshPersonalities } : {}),
+    }),
   });
   // The persistent binary voice lane (talk-mode). Constructed here so it shares
   // this process's VoiceService — same provider resolution, same egress gate as
   // the batch RPCs — but it only carries traffic once boot code attaches it to
   // the listening HTTP server (`voiceSocket.attach(server)`).
+  const realtimeControlRegistry = opts.toolRegistry;
   const voiceSocket = createVoiceSocket({
     voice: voiceService,
+    // The realtime tier's CONTROL channel: same socket, same credential, but
+    // the frames carry tool calls and transcripts instead of audio. Wired only
+    // when a tool registry exists — without one there is nothing to consult,
+    // and a lane that accepted the frames anyway would advertise an agent it
+    // cannot reach.
+    ...(realtimeControlRegistry
+      ? {
+          realtime: (laneId: string) =>
+            createRealtimeControlDeps(
+              {
+                toolRegistry: realtimeControlRegistry,
+                hooks: agentLoop.hooks,
+                sessions: opts.sessionStore,
+                personalities: opts.personalities,
+                defaults: opts.chatDefaults,
+              },
+              laneId,
+            ),
+        }
+      : {}),
     authenticate: async (req) => {
       const cookie = readCookie(req.headers.cookie, AUTH_COOKIE);
       return cookie ? tokens.matches(cookie) : false;

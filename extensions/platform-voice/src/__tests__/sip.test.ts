@@ -1,4 +1,4 @@
-import { deriveBotKey } from '@ethosagent/core';
+import { deriveBotKey, voiceLaneKey } from '@ethosagent/core';
 import type { AgentTurnRunner } from '@ethosagent/voice-session';
 import { VoiceSession } from '@ethosagent/voice-session';
 import { describe, expect, it } from 'vitest';
@@ -100,7 +100,9 @@ describe('createInboundDispatcher', () => {
     // callerId is the CALLER's number (per-caller lane), not the dialed DID.
     expect(adapter?.callerId).toBe('+15551234567');
     expect(adapter?.botKey).toBe('reception');
-    expect(adapter?.laneKey).toBe('voice:reception:+15551234567');
+    expect(adapter?.laneKey).toBe(
+      voiceLaneKey('reception', { kind: 'livekit', id: '+15551234567' }),
+    );
   });
 
   it('returns null for a dialed number bound to no bot', () => {
@@ -120,7 +122,9 @@ describe('createInboundDispatcher', () => {
     // history via the SessionStore path.
     const second = dispatch({ ...call, roomName: 'sip-room-b' });
 
-    expect(first?.laneKey).toBe(`voice:reception:${call.fromNumber}`);
+    expect(first?.laneKey).toBe(
+      voiceLaneKey('reception', { kind: 'livekit', id: call.fromNumber }),
+    );
     expect(second?.laneKey).toBe(first?.laneKey);
   });
 
@@ -135,7 +139,9 @@ describe('createInboundDispatcher', () => {
       roomName: 'r',
     });
     expect(adapter?.botKey).toBe(deriveBotKey('+1555*'));
-    expect(adapter?.laneKey).toBe(`voice:${deriveBotKey('+1555*')}:+15559998888`);
+    expect(adapter?.laneKey).toBe(
+      voiceLaneKey(deriveBotKey('+1555*'), { kind: 'livekit', id: '+15559998888' }),
+    );
   });
 });
 

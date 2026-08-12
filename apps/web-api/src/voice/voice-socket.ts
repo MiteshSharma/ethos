@@ -9,6 +9,8 @@ import {
 } from '@ethosagent/web-contracts';
 import { type WebSocket, WebSocketServer } from 'ws';
 import type { VoiceService } from '../services/voice.service';
+import type { RealtimeControlLaneDeps } from './realtime-control-lane';
+import { RealtimeControlLane } from './realtime-control-lane';
 import { VoiceLane, type VoiceLaneLimits } from './voice-lane';
 
 // The `ws` half of the browser voice lane. Same upgrade posture as the ACP
@@ -19,9 +21,23 @@ import { VoiceLane, type VoiceLaneLimits } from './voice-lane';
 // This file owns the socket; `VoiceLane` owns the conversation. Each accepted
 // connection gets its OWN lane — the only shared object is the `VoiceService`
 // that resolves providers, which holds no per-call state.
+//
+// A connection carries EITHER tier. On the pipeline tier the frames are audio
+// and `VoiceLane` handles them. On the realtime tier the audio has gone
+// straight to the provider and this socket is the CONTROL channel:
+// `realtime_*` frames route to a `RealtimeControlLane` instead — the agent, the
+// talk-session lane, the transcript and the approval surface. Both lanes exist
+// per connection and neither observes the other; which one does work is decided
+// by the frames the browser actually sends.
 
 export interface VoiceSocketOptions {
   voice: VoiceService;
+  /**
+   * Per-connection realtime control deps. Absent → `realtime_*` frames are
+   * ignored, which is the honest behaviour for a deployment with no agent
+   * wired: the pipeline tier still works and nothing pretends to consult.
+   */
+  realtime?: (laneId: string) => RealtimeControlLaneDeps;
   /** Credential check for the upgrade request. Rejected → 401, no socket. */
   authenticate(req: IncomingMessage): Promise<boolean>;
   /** Extra Origins allowed beyond loopback. Same rule as the HTTP surface. */
@@ -55,6 +71,7 @@ export function createVoiceSocket(opts: VoiceSocketOptions): VoiceSocket {
   const path = opts.path ?? VOICE_SOCKET_PATH;
   const wss = new WebSocketServer({ noServer: true });
   const lanes = new Map<WebSocket, VoiceLane>();
+  const controls = new Map<WebSocket, RealtimeControlLane>();
   let laneSeq = 0;
 
   const onConnection = (socket: WebSocket): void => {
@@ -79,6 +96,11 @@ export function createVoiceSocket(opts: VoiceSocketOptions): VoiceSocket {
       },
     });
     lanes.set(socket, lane);
+    const realtimeDeps = opts.realtime?.(laneId);
+    const control = realtimeDeps
+      ? new RealtimeControlLane({ deps: realtimeDeps, send: (frame) => send(frame) })
+      : null;
+    if (control) controls.set(socket, control);
 
     socket.on('message', (data: unknown, isBinary: boolean) => {
       if (!isBinary) return;
@@ -89,12 +111,18 @@ export function createVoiceSocket(opts: VoiceSocketOptions): VoiceSocket {
         send({ t: 'error', code: 'bad_frame', message: 'Unrecognized voice frame — ignored.' });
         return;
       }
+      if (frame.header.t.startsWith('realtime_')) {
+        control?.handle(frame.header);
+        return;
+      }
       lane.handle(frame.header, frame.payload);
     });
 
     const teardown = (): void => {
       lane.close();
+      control?.close();
       lanes.delete(socket);
+      controls.delete(socket);
     };
     socket.on('close', teardown);
     socket.on('error', teardown);
@@ -134,9 +162,11 @@ export function createVoiceSocket(opts: VoiceSocketOptions): VoiceSocket {
     close(): Promise<void> {
       for (const [socket, lane] of lanes) {
         lane.close();
+        controls.get(socket)?.close();
         socket.close();
       }
       lanes.clear();
+      controls.clear();
       return new Promise((resolve) => wss.close(() => resolve()));
     },
   };

@@ -55,6 +55,8 @@
     "@orpc/server": "^1.14.6",
     "hono": "^4.12.15",
     "ws": "^8.20.0",
-    "zod": "^4.3.6"
+    "zod": "^4.3.6",
+    "@ethosagent/session-lane": "workspace:*",
+    "@ethosagent/tools-voice": "workspace:*"
   }
 }

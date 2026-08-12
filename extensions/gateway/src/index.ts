@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { AgentLoop } from '@ethosagent/core';
 import {
+  buildLaneKey,
   deriveBotKey,
   resolveSttProvider as resolveSharedStt,
   resolveTtsProvider as resolveSharedTts,
@@ -119,34 +120,6 @@ export interface GatewayObservability {
     cause?: string;
     details?: Record<string, unknown>;
   }): void;
-}
-
-// ---------------------------------------------------------------------------
-// Lane / session key encoding
-// ---------------------------------------------------------------------------
-
-/**
- * Build a lane / session key from its segments. Each segment is
- * URL-encoded so a segment that happens to contain the `:` separator
- * (e.g. a future adapter's `threadId` with a colon) cannot alias two
- * distinct conversations onto the same key.
- *
- * Continuity with pre-encoding session keys is only guaranteed for
- * segments that are themselves URL-safe: platform identifiers
- * (`telegram` / `slack` / ...), the hex-derived default botKey
- * (`deriveBotKey` in `packages/core/src/bot-key.ts`), numeric Slack
- * `thread_ts`, and the chat IDs the supported platforms emit. An
- * operator who configures a custom `id:` value containing reserved
- * characters will see their existing SQLite session key change shape
- * once after upgrade and their history orphan — that's the cost of
- * choosing an unusual botKey, not a regression in the common case.
- *
- * Treat the returned string as opaque. The Gateway never decodes it;
- * collisions only matter at construction time, and the encoder is the
- * single point of truth for what a lane key looks like.
- */
-function buildLaneKey(...segments: string[]): string {
-  return segments.map(encodeURIComponent).join(':');
 }
 
 // ---------------------------------------------------------------------------

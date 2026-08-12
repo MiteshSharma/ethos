@@ -13,6 +13,7 @@ import {
   isStreamingTtsProvider,
   type PersonalityVoiceConfig,
   type RealtimeProviderEntry,
+  type RealtimeToolDefinition,
   type RealtimeVoiceProviderRegistry,
   type SecretsResolver,
   type SttProvider,
@@ -109,6 +110,24 @@ export type RealtimeTokenResult =
     }
   | { ok: false; reason: RealtimeRefusalReason; message: string; providerId: string | null };
 
+/**
+ * How a realtime session is CONFIGURED — the personality's identity and the
+ * tools it may call, resolved at mint time.
+ *
+ * A seam rather than an inline lookup because the two halves live in different
+ * layers: the identity is a file under `~/.ethos/personalities/`, and the tool
+ * list is generated from the wired tool registry (`deriveRealtimeToolset` in
+ * `@ethosagent/tools-voice`). Absent → a session with no instructions and no
+ * tools, which is what B4 shipped and what a deployment with no agent wired
+ * still gets.
+ */
+export interface RealtimeSessionSurface {
+  describe(personalityId?: string): Promise<{
+    instructions: string;
+    tools: RealtimeToolDefinition[];
+  }>;
+}
+
 /** Per-call realtime inputs. See {@link VoiceService.mintRealtimeToken}. */
 export interface RealtimeTokenOptions {
   /** Personality about to talk; picks the roster entry and the tier. */
@@ -198,6 +217,9 @@ export class VoiceService {
   private readonly realtimeDefaultEntry: string | undefined;
   private readonly tier: 'pipeline' | 'realtime' | undefined;
 
+  /** Personality identity + advertised tools for a realtime session. */
+  private readonly realtimeSurface: RealtimeSessionSurface | undefined;
+
   get isConfigured(): boolean {
     return Boolean(this.sttRegistry && this.initialProviderName);
   }
@@ -225,6 +247,8 @@ export class VoiceService {
     tier?: 'pipeline' | 'realtime';
     trustedVoicePlugins?: ReadonlySet<string>;
     personalities?: VoicePersonalityLookup;
+    /** See {@link RealtimeSessionSurface}. */
+    realtimeSurface?: RealtimeSessionSurface;
   }) {
     this.sttRegistry = opts.sttRegistry;
     this.initialProviderName = opts.providerName;
@@ -242,6 +266,7 @@ export class VoiceService {
     this.tier = opts.tier;
     this.trustedVoicePlugins = opts.trustedVoicePlugins;
     this.personalities = opts.personalities;
+    this.realtimeSurface = opts.realtimeSurface;
   }
 
   /**
@@ -618,15 +643,32 @@ export class VoiceService {
     }
 
     const entryModel = selection.entry?.model;
+    // The session's identity and its tool list, baked into the credential. Both
+    // are resolved BEFORE the mint call: a session is configured once, at open,
+    // and there is no second chance to tell a live realtime model who it is.
+    // A surface that throws must not take the call down — a session with no
+    // instructions still hears and speaks, it just has no personality, which is
+    // exactly the state this deployment was in before the seam existed.
+    const surface = await this.realtimeSurface
+      ?.describe(opts?.personalityId)
+      .catch(() => undefined);
+    // The voice follows the ONE precedence function the rest of this file uses
+    // (`resolveVoicePreferences`): the personality's own `voice.tts_voice`
+    // beats the roster entry's default. A realtime provider speaks with the
+    // same voice the pipeline tier would have used for this personality —
+    // switching tiers must not switch who you are talking to.
+    const voice = resolveVoicePreferences({
+      ...(personality ? { personality } : {}),
+      ...(selection.entry?.voice ? { globalTtsVoice: selection.entry.voice } : {}),
+      ...(opts?.language ? { language: opts.language } : {}),
+    }).ttsVoice;
     let token: Awaited<ReturnType<typeof mint>>;
     try {
       token = await mint({
-        // The session's instructions are the personality's job and arrive with
-        // the consult wiring (B5). What the token has to pin today is the model
-        // and the voice, both of which come from the roster entry.
-        instructions: '',
+        instructions: surface?.instructions ?? '',
+        ...(surface?.tools?.length ? { tools: surface.tools } : {}),
         ...(entryModel ? { model: entryModel } : {}),
-        ...(selection.entry?.voice ? { voice: selection.entry.voice } : {}),
+        ...(voice ? { voice } : {}),
         ...(opts?.language ? { language: opts.language } : {}),
       });
     } catch {

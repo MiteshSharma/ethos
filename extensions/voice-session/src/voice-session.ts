@@ -27,6 +27,7 @@ import type {
   VoiceSessionEvent,
   VoiceSessionState,
 } from './types';
+import { DEFAULT_VOICE_FILLER_TEXT } from './types';
 
 export interface VoiceSessionDeps {
   runner: AgentTurnRunner;
@@ -305,7 +306,7 @@ export class VoiceSession {
   }
 
   private speakFiller(): void {
-    const text = this.config.fillerText ?? 'One moment.';
+    const text = this.config.fillerText ?? DEFAULT_VOICE_FILLER_TEXT;
     this.emit({ type: 'filler', text });
     this.playout.enqueue({
       text,

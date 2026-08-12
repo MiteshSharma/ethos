@@ -96,6 +96,8 @@ export {
   substitute,
 } from './fs-reach';
 export { DefaultHookRegistry } from './hook-registry';
+export type { VoiceLaneClient, VoiceLaneClientKind } from './lane-key';
+export { buildLaneKey, voiceLaneKey } from './lane-key';
 export type { LearnRequest } from './learn';
 export { buildLearnPrompt, parseLearnArgs } from './learn';
 export type { LocalToolTransportLiveCtx } from './local-tool-transport';

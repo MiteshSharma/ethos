@@ -28,6 +28,7 @@ import {
 } from '@ethosagent/tools-delegation';
 import { createMemoryTools } from '@ethosagent/tools-memory';
 import { createVisionTools } from '@ethosagent/tools-vision';
+import { createAgentConsultTool } from '@ethosagent/tools-voice';
 import { createWebTools } from '@ethosagent/tools-web';
 import type {
   LLMProvider,
@@ -756,6 +757,26 @@ export async function buildAgentLoop(
     backgroundDeps,
   ))
     tools.register(tool);
+
+  // `agent_consult` — the hosted-realtime voice surface's one call back into
+  // the agent. Loop-bearing for the same reason the delegation tools are, so it
+  // registers here rather than in `compose-tools`. Registered UNCONDITIONALLY:
+  // the realtime seam advertises what the registry actually holds
+  // (`deriveRealtimeToolset`), so a conditional registration would silently
+  // produce a session that offers nothing and a model that stops asking.
+  //
+  // The voice origin is fixed to browser talk-mode because that is the only
+  // surface that can open a realtime session in this repo today — `voice.realtimeToken`
+  // mints behind the web-api session cookie, which is the operator's own browser.
+  // V4's call path introduces a `far_end` speaker, and it MUST construct its own
+  // consult tool with that origin rather than reuse this one: the spoken-confirmation
+  // gate refuses a far-end caller BEFORE consulting any confirmation record, and
+  // that refusal keys on exactly this field.
+  tools.register(
+    createAgentConsultTool(loop, {
+      voiceOrigin: { transport: 'browser-talk-mode', speaker: 'owner' },
+    }),
+  );
 
   // Goal runner — loop-bearing, constructed after the loop exists (mirrors
   // createDelegationTools handing the loop to tools post-construction). Shares

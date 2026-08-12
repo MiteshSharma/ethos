@@ -8,10 +8,16 @@ import {
   type RealtimeSocketFactory,
 } from '@ethosagent/voice-realtime-protocol';
 import { splitSentences } from '@ethosagent/voice-text';
-import { pcm16FromBytes, pcm16ToBytes } from '@ethosagent/web-contracts';
+import {
+  pcm16FromBytes,
+  pcm16ToBytes,
+  type VoiceClientFrame,
+  type VoiceServerFrame,
+} from '@ethosagent/web-contracts';
 import type { EndpointerEvent } from './pcm-endpointer';
 import type { VoiceCaptureIo } from './streaming-voice-call-client';
 import type { VoiceCallClient, VoiceCallEvent } from './voice-call-client';
+import type { VoiceTransport } from './voice-socket-transport';
 import type { WakeLock } from './wake-lock';
 import type { PlayoutSink } from './webaudio-playout';
 
@@ -38,6 +44,15 @@ import type { PlayoutSink } from './webaudio-playout';
 // This client implements the existing `VoiceCallClient` unchanged, so
 // `TalkModeCallBar`, `useVoiceCall` and `voiceCallReducer` do not know which
 // tier is running.
+//
+// TWO SOCKETS, ON PURPOSE. The provider socket above is the MEDIA channel. The
+// app's own voice socket stays open beside it as the CONTROL channel, carrying
+// the traffic that must not live in a page: a tool call to service, a settled
+// transcript to persist, a line to speak while the agent works. The browser is
+// a relay on that path and decides nothing — it does not run the tool, does not
+// choose the words, does not know the lane key until the server names it. That
+// is what keeps the agent, the approval surface and the session history
+// server-side while the audio still takes one hop.
 
 /** `reply_audio` here is a provider announcement, not a carrier of samples. */
 const EMPTY_AUDIO = new Uint8Array(0);
@@ -57,6 +72,17 @@ export interface RealtimeSessionTicket {
 
 export interface RealtimeVoiceCallDeps {
   session: RealtimeSessionTicket;
+  /**
+   * The app's voice socket, held open as this call's control channel. Absent →
+   * the session runs with no tools (nothing was advertised to it either), which
+   * is a legitimate degraded call rather than a broken one: the provider still
+   * hears and answers, it just cannot reach the agent.
+   */
+  control?: VoiceTransport;
+  /** Chat session the call belongs to — the stable half of the talk lane key. */
+  chatSessionId?: () => string | null;
+  /** Personality speaking; picks the toolset the control lane will service. */
+  personalityId?: string;
   /** Mic capture, in `continuous` mode — the provider does the endpointing. */
   capture: VoiceCaptureIo;
   playout: PlayoutSink;
@@ -120,6 +146,13 @@ export function createRealtimeVoiceCallClient(deps: RealtimeVoiceCallDeps): Voic
   let announced = false;
   /** True while the model has the floor — gates the interrupted/complete split. */
   let speaking = false;
+  /** Unsubscribe from the control channel's server frames. */
+  let unsubscribeControl: (() => void) | null = null;
+
+  /** Send one control frame, when a control channel is wired. */
+  const control = (frame: VoiceClientFrame): void => {
+    deps.control?.send(frame);
+  };
 
   const resetResponse = (): void => {
     replyText = '';
@@ -180,6 +213,10 @@ export function createRealtimeVoiceCallClient(deps: RealtimeVoiceCallDeps): Voic
               text: event.text.trim(),
               provider: ticket.providerId,
             });
+            // The settled transcript IS this call's text history. Sent final
+            // only: partials churn, and each one would write the same turn
+            // again.
+            control({ t: 'realtime_transcript', role: 'user', text: event.text.trim() });
           }
           return;
         }
@@ -221,15 +258,25 @@ export function createRealtimeVoiceCallClient(deps: RealtimeVoiceCallDeps): Voic
         flushSentences(true);
         const spoken = replyText.trim();
         resetResponse();
-        if (spoken) emit({ type: 'reply_complete', text: spoken });
+        if (spoken) {
+          emit({ type: 'reply_complete', text: spoken });
+          control({ t: 'realtime_transcript', role: 'assistant', text: spoken });
+        }
         return;
       }
 
       case 'tool_call':
-        // Nothing is advertised to the session yet, so the model has nothing to
-        // call. `agent_consult` and its filler arrive with B5; until then a tool
-        // call is a can't-happen and answering it with an invented result would
-        // be worse than leaving it unanswered.
+        // Relayed verbatim. The browser does not run tools and does not decide
+        // which ones exist — the server advertised the list at mint and answers
+        // with `realtime_tool_result` on the same `callId`. With no control
+        // channel there is nothing to relay to; the session was minted with no
+        // tools in that case, so this is unreachable rather than dropped.
+        control({
+          t: 'realtime_tool_call',
+          callId: event.callId,
+          name: event.name,
+          args: event.args,
+        });
         return;
 
       case 'error':
@@ -238,6 +285,35 @@ export function createRealtimeVoiceCallClient(deps: RealtimeVoiceCallDeps): Voic
 
       case 'closed':
         emit({ type: 'disconnected' });
+        return;
+    }
+  };
+
+  /**
+   * Server frames on the control channel.
+   *
+   * `realtime_speak` is the consult filler. It is spoken through the provider
+   * when the wire has a verbatim-speech frame, and ALWAYS captioned — a
+   * provider without one (Gemini Live) still shows the listener that a check is
+   * in progress, and the boundary policy covers the audible half by telling the
+   * model to announce the check itself before it calls the tool.
+   */
+  const onControlFrame = (frame: VoiceServerFrame): void => {
+    if (disposed) return;
+    switch (frame.t) {
+      case 'realtime_tool_result':
+        void session?.sendToolResult(frame.callId, frame.output).catch(() => {
+          // The socket is gone; the `closed` event is what the UI acts on.
+        });
+        return;
+      case 'realtime_speak': {
+        emit({ type: 'filler', text: frame.text });
+        const say = session?.say?.bind(session);
+        void say?.(frame.text).catch(() => {});
+        return;
+      }
+      default:
+        // Every other server frame belongs to the pipeline tier's audio lane.
         return;
     }
   };
@@ -256,6 +332,11 @@ export function createRealtimeVoiceCallClient(deps: RealtimeVoiceCallDeps): Voic
     disposed = true;
     unsubscribe?.();
     unsubscribe = null;
+    // Tell the control lane the call is over BEFORE the socket goes: it aborts
+    // an in-flight consult rather than finishing an agent turn nobody will hear.
+    control({ t: 'realtime_end' });
+    unsubscribeControl?.();
+    unsubscribeControl = null;
     deps.playout.stop();
     await session?.close();
     session = null;
@@ -281,6 +362,21 @@ export function createRealtimeVoiceCallClient(deps: RealtimeVoiceCallDeps): Voic
         // ephemeral token when the server minted it.
       });
       emit({ type: 'link', status: 'connecting' });
+      if (deps.control) {
+        unsubscribeControl = deps.control.on(onControlFrame);
+        await deps.control.connect().catch(() => {
+          // A control channel that will not open costs the call its tools, not
+          // the call. The session was still minted advertising them, so the
+          // model may offer one — which is why the failure is surfaced.
+          emit({
+            type: 'error',
+            error:
+              'Could not reach the assistant; this call can hear you but cannot look things up.',
+            code: 'realtime_control_unavailable',
+            provider: ticket.providerId,
+          });
+        });
+      }
       await live.connect();
       session = live;
       pump = (async () => {
@@ -295,6 +391,16 @@ export function createRealtimeVoiceCallClient(deps: RealtimeVoiceCallDeps): Voic
         await teardown();
         throw new RealtimeSampleRateError(ticket.inputSampleRate, deps.capture.sampleRate);
       }
+      // Declared AFTER the provider socket is up, because `canSay` is a
+      // property of the codec that was chosen for it.
+      const chatSessionId = deps.chatSessionId?.();
+      const personalityId = deps.personalityId;
+      control({
+        t: 'realtime_start',
+        canSay: typeof live.say === 'function',
+        ...(chatSessionId ? { sessionId: chatSessionId } : {}),
+        ...(personalityId ? { personalityId } : {}),
+      });
       void deps.wakeLock?.acquire();
       unsubscribe = deps.capture.on(onCaptureEvent);
       // The session is live — say so out loud. First-run users get an audible

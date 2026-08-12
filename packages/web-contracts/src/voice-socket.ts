@@ -84,6 +84,57 @@ const CancelSchema = z.object({
   reason: z.enum(['barge_in', 'hangup', 'superseded']),
 });
 
+// --- realtime tier: the CONTROL channel -------------------------------------
+//
+// On the realtime tier the audio does NOT come through here. The browser holds
+// a second socket straight to the hosted provider (that is the tier's whole
+// latency argument) and keeps THIS one open beside it as a control channel.
+//
+// The split is the point. Media wants the shortest path to the provider;
+// control wants the agent, the lane, the session history and the approval
+// surface, all of which live server-side and none of which belong in a page.
+// So the frames below carry the small, slow, consequential traffic — a tool
+// call to service, a transcript to persist, a line to speak — and never a
+// sample of audio.
+//
+// One connection is one talk session, so nothing here carries a session id:
+// the lane is the socket. That is also what makes a second browser tab a second
+// conversation rather than an interleaving of the first.
+
+const RealtimeStartSchema = z.object({
+  t: z.literal('realtime_start'),
+  /** Chat session the call belongs to — the stable half of the lane key. */
+  sessionId: z.string().optional(),
+  /** Personality speaking; picks the toolset the session was minted with. */
+  personalityId: z.string().optional(),
+  /**
+   * The provider socket can speak a line verbatim (`RealtimeSession.say`).
+   * False → the server captions filler instead of asking for speech it knows
+   * cannot be produced. Gemini Live is the false case.
+   */
+  canSay: z.boolean(),
+});
+
+const RealtimeToolCallSchema = z.object({
+  t: z.literal('realtime_tool_call'),
+  /** Provider-issued call id; the answer must carry it back unchanged. */
+  callId: z.string().min(1),
+  name: z.string().min(1),
+  /** Model-authored arguments. Untrusted — the tool validates its own shape. */
+  args: z.record(z.string(), z.unknown()),
+});
+
+const RealtimeTranscriptSchema = z.object({
+  t: z.literal('realtime_transcript'),
+  role: z.enum(['user', 'assistant']),
+  /** FINAL text only. Partials churn and would write the same turn many times. */
+  text: z.string().min(1),
+});
+
+const RealtimeEndSchema = z.object({
+  t: z.literal('realtime_end'),
+});
+
 const VoiceClientFrameSchema = z.discriminatedUnion('t', [
   ClientHelloSchema,
   UtteranceStartSchema,
@@ -91,6 +142,10 @@ const VoiceClientFrameSchema = z.discriminatedUnion('t', [
   UtteranceEndSchema,
   SynthesizeSchema,
   CancelSchema,
+  RealtimeStartSchema,
+  RealtimeToolCallSchema,
+  RealtimeTranscriptSchema,
+  RealtimeEndSchema,
 ]);
 
 export type VoiceClientFrame = z.infer<typeof VoiceClientFrameSchema>;
@@ -156,6 +211,37 @@ const ServerErrorSchema = z.object({
   provider: z.string().optional(),
 });
 
+const RealtimeReadySchema = z.object({
+  t: z.literal('realtime_ready'),
+  /** The talk session's own lane. Opaque; surfaced for telemetry and tests. */
+  laneKey: z.string().min(1),
+  /**
+   * Every tool name this control channel will service.
+   *
+   * Observability, not instruction: the session was already minted advertising
+   * exactly these, and the browser does not re-derive anything from the list.
+   * It is on the wire so a live call can be asked what it will actually answer
+   * — the runtime companion to the advertised == handled test, and the frame
+   * V4's call path reuses when it keeps its own copy of that test.
+   */
+  tools: z.array(z.string()),
+});
+
+const RealtimeToolResultSchema = z.object({
+  t: z.literal('realtime_tool_result'),
+  callId: z.string().min(1),
+  ok: z.boolean(),
+  /** Already sanitized for speech. Goes straight to `sendToolResult`. */
+  output: z.string(),
+});
+
+const RealtimeSpeakSchema = z.object({
+  t: z.literal('realtime_speak'),
+  text: z.string().min(1),
+  /** `ack` is the immediate "checking"; `filler` is the keep-alive after it. */
+  kind: z.enum(['ack', 'filler']),
+});
+
 const VoiceServerFrameSchema = z.discriminatedUnion('t', [
   ReadySchema,
   TranscriptSchema,
@@ -163,6 +249,9 @@ const VoiceServerFrameSchema = z.discriminatedUnion('t', [
   SegmentEndSchema,
   DroppedSchema,
   ServerErrorSchema,
+  RealtimeReadySchema,
+  RealtimeToolResultSchema,
+  RealtimeSpeakSchema,
 ]);
 
 export type VoiceServerFrame = z.infer<typeof VoiceServerFrameSchema>;

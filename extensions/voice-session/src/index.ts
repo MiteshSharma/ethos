@@ -37,6 +37,7 @@ export type {
   VoiceSessionEvent,
   VoiceSessionState,
 } from './types';
+export { DEFAULT_VOICE_FILLER_TEXT } from './types';
 export { EnergyVad, type EnergyVadConfig, rmsEnergy } from './vad';
 export { VoiceSession, type VoiceSessionDeps } from './voice-session';
 export { encodeWav } from './wav';

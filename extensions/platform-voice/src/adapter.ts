@@ -4,9 +4,13 @@
 // One adapter owns one live call: transport inbound audio -> session.pushAudio;
 // session `reply_audio` events -> the transport outbound sink. It stamps a
 // stable botKey (deriveBotKey, the canonical `@ethosagent/core` primitive every
-// adapter reuses) and builds the per-caller lane key `voice:<botKey>:<callerId>`
-// so each caller gets their own session and, through the normal SessionStore
-// path, cross-call memory (plan/phases/gap-voice-realtime.md §3(b)).
+// adapter reuses) and builds the per-caller lane key through `voiceLaneKey`
+// (`voice:<botKey>:livekit:<callerId>`) so each caller gets their own session
+// and, through the normal SessionStore path, cross-call memory
+// (plan/phases/gap-voice-realtime.md §3(b)). `voiceLaneKey` is shared with the
+// wiring-built VoiceSession stack and the browser realtime control lane: the
+// `livekit` kind segment is what makes a phone leg and a browser talk session
+// structurally unable to collide on one conversation.
 //
 // Dedup boundary (see README.md): audio frames are transport MEDIA and go
 // straight to the transport sink — NEVER through MessageDedupCache. Discrete
@@ -15,7 +19,7 @@
 // production is the gateway's single deduped send path. The adapter never rolls
 // its own dedup.
 
-import { deriveBotKey } from '@ethosagent/core';
+import { deriveBotKey, voiceLaneKey } from '@ethosagent/core';
 import type { VoiceSession, VoiceSessionEvent } from '@ethosagent/voice-session';
 import type { VoiceTransport } from './transport';
 
@@ -70,7 +74,7 @@ export class VoiceChannelAdapter {
     this.sendArtifact = deps.sendArtifact;
     this.botKey = deps.bot.id ?? deriveBotKey(deps.bot.match);
     this.callerId = deps.transport.callerId;
-    this.laneKey = `voice:${this.botKey}:${this.callerId}`;
+    this.laneKey = voiceLaneKey(this.botKey, { kind: 'livekit', id: this.callerId });
   }
 
   /** Connect the transport and wire the bidirectional audio bridge. */

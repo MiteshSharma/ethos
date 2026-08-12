@@ -189,7 +189,16 @@ export function createTalkModeClient(deps: TalkModeClientDeps): VoiceCallClient 
       capture,
       playout: createBrowserPlayout(context),
       socketFactory: createBrowserRealtimeSocket,
+      // The app's own voice socket, held open beside the provider's as this
+      // call's CONTROL channel — the same transport the pipeline tier carries
+      // audio on, minus the audio. It is where `agent_consult`, the transcript
+      // and the approval surface live.
+      control: createVoiceSocketTransport({
+        url: deps.socketUrl ?? voiceSocketUrl(window.location),
+      }),
       wakeLock: createWakeLock(),
+      ...(deps.sessionId ? { chatSessionId: deps.sessionId } : {}),
+      ...(deps.personalityId ? { personalityId: deps.personalityId } : {}),
       ...(deps.chime !== undefined ? { chime: deps.chime } : {}),
     });
   };
