@@ -42,6 +42,13 @@ import {
 import { DEFAULT_VOICE_TUNING } from '../features/voice/batch-voice-call-client';
 import { useVoiceRecorder } from '../hooks/useVoiceRecorder';
 import { isDesktop } from '../lib/desktop';
+import {
+  COMMAND_STT_EXAMPLE,
+  COMMAND_STT_PLACEHOLDERS,
+  COMMAND_TTS_EXAMPLE,
+  COMMAND_TTS_PLACEHOLDERS,
+  validateCommandTemplate,
+} from '../lib/voice-command-template';
 import { rpc } from '../rpc';
 import { DesktopSettings } from './DesktopSettings';
 
@@ -373,6 +380,9 @@ interface FormShape {
   voiceTtsVoice: string;
   voiceTtsBaseUrl: string;
   voiceTtsModel: string;
+  /** Shell templates for `command-stt` / `command-tts`. */
+  voiceSttCommand: string;
+  voiceTtsCommand: string;
   voiceTtsOutputFormat: string;
   voiceTtsTimeoutMs: number | null;
   voiceTtsMaxTextLength: number | null;
@@ -466,6 +476,13 @@ function voiceModeOrNull(value: string): (typeof VOICE_MODES)[number] | null {
   return VOICE_MODES.find((m) => m === value) ?? null;
 }
 
+/** Antd rule wrapper — the field only renders for a `command-*` provider, so an
+ *  unconditional rule here IS the "required when that provider is selected" one. */
+function commandTemplateValidator(_rule: unknown, value: string): Promise<void> {
+  const error = validateCommandTemplate(value);
+  return error ? Promise.reject(new Error(error)) : Promise.resolve();
+}
+
 // Advanced VAD / barge-in tuning sliders. `name` is the FormShape/config field,
 // `defaultKey` maps to DEFAULT_VOICE_TUNING for the reset affordance, and the
 // range/step mirror the Zod bounds on ConfigUpdateInput. `unit` renders the
@@ -543,6 +560,7 @@ const STT_TEST_DIRTY_FIELDS: (keyof FormShape)[] = [
   'voiceModel',
   'voiceBaseUrl',
   'voiceApiKey',
+  'voiceSttCommand',
 ];
 const TTS_TEST_DIRTY_FIELDS: (keyof FormShape)[] = [
   'voiceTtsProvider',
@@ -550,6 +568,7 @@ const TTS_TEST_DIRTY_FIELDS: (keyof FormShape)[] = [
   'voiceTtsBaseUrl',
   'voiceTtsVoice',
   'voiceTtsApiKey',
+  'voiceTtsCommand',
 ];
 
 // Synthesizes a fixed phrase via the saved TTS provider and plays it back.
@@ -743,6 +762,8 @@ export function Settings() {
         voiceTtsVoice: configQuery.data.voiceTtsVoice ?? '',
         voiceTtsBaseUrl: configQuery.data.voiceTtsBaseUrl ?? '',
         voiceTtsModel: configQuery.data.voiceTtsModel ?? '',
+        voiceSttCommand: configQuery.data.voiceSttCommand ?? '',
+        voiceTtsCommand: configQuery.data.voiceTtsCommand ?? '',
         voiceTtsOutputFormat: configQuery.data.voiceTtsOutputFormat ?? '',
         voiceTtsTimeoutMs: configQuery.data.voiceTtsTimeoutMs,
         voiceTtsMaxTextLength: configQuery.data.voiceTtsMaxTextLength,
@@ -1003,6 +1024,9 @@ export function Settings() {
       voiceBargeSustainMs: values.voiceBargeSustainMs,
       voiceSpeechThreshold: values.voiceSpeechThreshold,
       voiceSpeechMinMs: values.voiceSpeechMinMs,
+      // Empty string = null = the key is dropped from config.yaml.
+      voiceSttCommand: values.voiceSttCommand || null,
+      voiceTtsCommand: values.voiceTtsCommand || null,
       voiceTtsOutputFormat: audioFormatOrNull(values.voiceTtsOutputFormat),
       voiceTtsTimeoutMs: values.voiceTtsTimeoutMs ?? null,
       voiceTtsMaxTextLength: values.voiceTtsMaxTextLength ?? null,
@@ -1886,6 +1910,7 @@ export function Settings() {
                         { label: 'OpenAI Whisper', value: 'openai-stt' },
                         { label: 'Groq Whisper (free tier)', value: 'groq-stt' },
                         { label: 'Local (Whisper / OpenAI-compatible)', value: 'local-stt' },
+                        { label: 'Custom command (whisper.cpp / any CLI)', value: 'command-stt' },
                       ]}
                     />
                   </Form.Item>
@@ -1893,17 +1918,29 @@ export function Settings() {
                     noStyle
                     shouldUpdate={(prev, cur) => prev.voiceProvider !== cur.voiceProvider}
                   >
-                    {({ getFieldValue: getStt }) =>
-                      getStt('voiceProvider') === 'local-stt' ? (
-                        <Form.Item
-                          name="voiceBaseUrl"
-                          label="STT Base URL"
-                          extra="Endpoint for your local (OpenAI-compatible) server. Leave blank for the default."
-                        >
-                          <Input placeholder="http://localhost:8000/v1" />
-                        </Form.Item>
-                      ) : null
-                    }
+                    {({ getFieldValue: getStt }) => (
+                      <>
+                        {getStt('voiceProvider') === 'local-stt' ? (
+                          <Form.Item
+                            name="voiceBaseUrl"
+                            label="STT Base URL"
+                            extra="Endpoint for your local (OpenAI-compatible) server. Leave blank for the default."
+                          >
+                            <Input placeholder="http://localhost:8000/v1" />
+                          </Form.Item>
+                        ) : null}
+                        {getStt('voiceProvider') === 'command-stt' ? (
+                          <Form.Item
+                            name="voiceSttCommand"
+                            label="STT command"
+                            extra={`Shell template run once per utterance. Placeholders: ${COMMAND_STT_PLACEHOLDERS}. {input_path} and {output_path} are required.`}
+                            rules={[{ validator: commandTemplateValidator }]}
+                          >
+                            <Input placeholder={COMMAND_STT_EXAMPLE} />
+                          </Form.Item>
+                        ) : null}
+                      </>
+                    )}
                   </Form.Item>
                   <Form.Item
                     name="voiceModel"
@@ -1942,6 +1979,7 @@ export function Settings() {
                         (getStt('voiceProvider') ?? '') !== (saved?.voiceProvider ?? '') ||
                         (getStt('voiceModel') ?? '') !== (saved?.voiceModel ?? '') ||
                         (getStt('voiceBaseUrl') ?? '') !== (saved?.voiceBaseUrl ?? '') ||
+                        (getStt('voiceSttCommand') ?? '') !== (saved?.voiceSttCommand ?? '') ||
                         Boolean(getStt('voiceApiKey'));
                       return <SttTest disabled={!saved?.voiceProvider} dirty={dirty} />;
                     }}
@@ -1967,6 +2005,10 @@ export function Settings() {
                       options={[
                         { label: 'OpenAI TTS', value: 'openai-tts' },
                         { label: 'Local (Kokoro / OpenAI-compatible)', value: 'local-tts' },
+                        {
+                          label: 'Custom command (macOS say / Piper / any CLI)',
+                          value: 'command-tts',
+                        },
                       ]}
                     />
                   </Form.Item>
@@ -1984,6 +2026,16 @@ export function Settings() {
                               extra="Endpoint for your local (OpenAI-compatible) server. Leave blank for the default."
                             >
                               <Input placeholder="http://localhost:8880/v1" />
+                            </Form.Item>
+                          ) : null}
+                          {getTts('voiceTtsProvider') === 'command-tts' ? (
+                            <Form.Item
+                              name="voiceTtsCommand"
+                              label="TTS command"
+                              extra={`Shell template run once per synthesis. Placeholders: ${COMMAND_TTS_PLACEHOLDERS}. {input_path} and {output_path} are required; set the audio format below to match what the command writes.`}
+                              rules={[{ validator: commandTemplateValidator }]}
+                            >
+                              <Input placeholder={COMMAND_TTS_EXAMPLE} />
                             </Form.Item>
                           ) : null}
                           <Form.Item
@@ -2053,6 +2105,8 @@ export function Settings() {
                                   (saved?.voiceTtsBaseUrl ?? '') ||
                                 (getTtsField('voiceTtsVoice') ?? '') !==
                                   (saved?.voiceTtsVoice ?? '') ||
+                                (getTtsField('voiceTtsCommand') ?? '') !==
+                                  (saved?.voiceTtsCommand ?? '') ||
                                 Boolean(getTtsField('voiceTtsApiKey'));
                               return <TtsTest disabled={!saved?.voiceTtsProvider} dirty={dirty} />;
                             }}

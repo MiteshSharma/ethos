@@ -913,6 +913,10 @@ const ConfigGetOutput = z.object({
   voiceTtsVoice: z.string().nullable(),
   voiceTtsBaseUrl: z.string().nullable(),
   voiceTtsModel: z.string().nullable(),
+  /** `auxiliary.asr.command` — shell template the `command-stt` provider runs. */
+  voiceSttCommand: z.string().nullable(),
+  /** `auxiliary.tts.command` — shell template the `command-tts` provider runs. */
+  voiceTtsCommand: z.string().nullable(),
   /** `auxiliary.tts.outputFormat` — container the TTS provider is asked for. */
   voiceTtsOutputFormat: z.enum(['opus', 'mp3', 'wav', 'pcm']).nullable(),
   /** `auxiliary.tts.timeout`, ms. */
@@ -1151,6 +1155,10 @@ const ConfigUpdateInput = z.object({
   voiceTtsVoice: z.string().optional(),
   voiceTtsBaseUrl: z.string().optional(),
   voiceTtsModel: z.string().optional(),
+  /** `auxiliary.asr.command` — `command-stt`'s shell template; null clears the key. */
+  voiceSttCommand: z.string().nullable().optional(),
+  /** `auxiliary.tts.command` — `command-tts`'s shell template; null clears the key. */
+  voiceTtsCommand: z.string().nullable().optional(),
   /** `auxiliary.tts.outputFormat`; null clears the key. */
   voiceTtsOutputFormat: z.enum(['opus', 'mp3', 'wav', 'pcm']).nullable().optional(),
   /** `auxiliary.tts.timeout`, ms; null clears the key. */

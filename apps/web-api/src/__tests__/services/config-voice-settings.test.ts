@@ -108,6 +108,48 @@ describe('Settings → Voice config keys', () => {
     expect((await service.get()).voiceDefaultMode).toBeNull();
   });
 
+  it('round-trips the command-provider shell templates', async () => {
+    await seed([]);
+    const ttsCommand =
+      'say --file-format=WAVE --data-format=LEI16@22050 -o {output_path} -f {input_path}';
+    const sttCommand =
+      'whisper-cli -f {input_path} -otxt -of {input_path} && mv {input_path}.txt {output_path}';
+    await service.update({
+      voiceProvider: 'command-stt',
+      voiceSttCommand: sttCommand,
+      voiceTtsProvider: 'command-tts',
+      voiceTtsCommand: ttsCommand,
+      voiceTtsOutputFormat: 'wav',
+    });
+
+    const written = await yaml();
+    expect(written).toContain('auxiliary.asr.provider: command-stt');
+    expect(written).toContain('auxiliary.tts.provider: command-tts');
+
+    const config = await service.get();
+    expect(config.voiceProvider).toBe('command-stt');
+    expect(config.voiceSttCommand).toBe(sttCommand);
+    expect(config.voiceTtsProvider).toBe('command-tts');
+    expect(config.voiceTtsCommand).toBe(ttsCommand);
+    expect(config.voiceTtsOutputFormat).toBe('wav');
+  });
+
+  it('reads command templates written by hand, and null clears them', async () => {
+    await seed([
+      'auxiliary.asr.command: whisper-cli -f {input_path} -o {output_path}',
+      'auxiliary.tts.command: piper -f {output_path} < {input_path}',
+    ]);
+    const before = await service.get();
+    expect(before.voiceSttCommand).toBe('whisper-cli -f {input_path} -o {output_path}');
+    expect(before.voiceTtsCommand).toBe('piper -f {output_path} < {input_path}');
+
+    await service.update({ voiceSttCommand: null, voiceTtsCommand: null });
+    const cleared = await service.get();
+    expect(cleared.voiceSttCommand).toBeNull();
+    expect(cleared.voiceTtsCommand).toBeNull();
+    expect(await yaml()).not.toContain('auxiliary.tts.command');
+  });
+
   it('leaves an untouched voice key alone when a sibling is updated', async () => {
     await seed(['voice.defaultMode: all', 'auxiliary.tts.timeout: 45000']);
     await service.update({ voiceSttTimeoutMs: 9_000 });

@@ -570,6 +570,10 @@ export interface ConfigGetResult {
   voiceTtsVoice: string | null;
   voiceTtsBaseUrl: string | null;
   voiceTtsModel: string | null;
+  /** `auxiliary.asr.command` / `auxiliary.tts.command` — the shell templates the
+   *  `command-stt` / `command-tts` providers run. */
+  voiceSttCommand: string | null;
+  voiceTtsCommand: string | null;
   voiceTtsOutputFormat: 'opus' | 'mp3' | 'wav' | 'pcm' | null;
   voiceTtsTimeoutMs: number | null;
   voiceTtsMaxTextLength: number | null;
@@ -695,6 +699,8 @@ export interface ConfigUpdateInput {
   voiceTtsVoice?: string;
   voiceTtsBaseUrl?: string;
   voiceTtsModel?: string;
+  voiceSttCommand?: string | null;
+  voiceTtsCommand?: string | null;
   voiceTtsOutputFormat?: 'opus' | 'mp3' | 'wav' | 'pcm' | null;
   voiceTtsTimeoutMs?: number | null;
   voiceTtsMaxTextLength?: number | null;
@@ -867,6 +873,8 @@ export class ConfigService {
       voiceTtsVoice: raw.voiceTtsVoice ?? null,
       voiceTtsBaseUrl: raw.voiceTtsBaseUrl ?? null,
       voiceTtsModel: raw.voiceTtsModel ?? null,
+      voiceSttCommand: passStr(p, 'auxiliary.asr.command'),
+      voiceTtsCommand: passStr(p, 'auxiliary.tts.command'),
       voiceTtsOutputFormat: pickEnumOrNull(p['auxiliary.tts.outputFormat'], [
         'opus',
         'mp3',
@@ -1207,6 +1215,8 @@ export class ConfigService {
     setAux('auxiliary.web', patch.auxWeb);
     // Voice keys with no other UI home. `auxiliary.*` keys the CLI parses but
     // the repository does not model, plus the two `voice.*` keys.
+    set('auxiliary.asr.command', patch.voiceSttCommand);
+    set('auxiliary.tts.command', patch.voiceTtsCommand);
     set('auxiliary.tts.outputFormat', patch.voiceTtsOutputFormat);
     set('auxiliary.tts.timeout', patch.voiceTtsTimeoutMs);
     set('auxiliary.tts.maxTextLength', patch.voiceTtsMaxTextLength);
@@ -1312,6 +1322,8 @@ export class ConfigService {
     delete cleaned.memoryNotices;
     delete cleaned.voiceChime;
     // Written above as flat config keys; never repository fields.
+    delete cleaned.voiceSttCommand;
+    delete cleaned.voiceTtsCommand;
     delete cleaned.voiceTtsOutputFormat;
     delete cleaned.voiceTtsTimeoutMs;
     delete cleaned.voiceTtsMaxTextLength;
