@@ -302,7 +302,7 @@ register_anchors:
 
 # ---- Security tiers -------------------------------------------------------
 # Every workspace package under packages/, packages/safety/, extensions/, and
-# apps/ carries a tier. 119 packages: 10 at Tier 0, 25 at Tier 1, 84 at Tier 2.
+# apps/ carries a tier. 119 packages: 10 at Tier 0, 23 at Tier 1, 86 at Tier 2.
 #
 # The tier bounds what we promise to be CORRECT, not what we promise to LOOK
 # AT. Triage reads the guarantee register first and the tier second — a Tier 2
@@ -439,16 +439,6 @@ tiers:
     tier: 1
     assigned: 2026-08-12
 
-  extensions/execution-process-backend:
-    package: "@ethosagent/execution-process-backend"
-    tier: 1
-    assigned: 2026-08-12
-
-  extensions/execution-ssh:
-    package: "@ethosagent/execution-ssh"
-    tier: 1
-    assigned: 2026-08-12
-
   extensions/gateway:
     package: "@ethosagent/gateway"
     tier: 1
@@ -539,6 +529,17 @@ tiers:
     tier: 1
     assigned: 2026-08-12
 
+  # Promoted from Tier 2 by the 2026-08-12 plugin-loader audit (PL-003): this
+  # package is a credential store. `credPath()` (packages/plugin-sdk/src/index.ts:628)
+  # resolves `<basePath>/credentials/<key>`, and hasSecret/getSecret/setSecret
+  # (:632-655) read and write plugin credential material there — a storage path
+  # for secrets outside SecretsResolver, which G-SEC publishes as the sole one.
+  # It writes credential material, which is why it sits on a trust boundary.
+  packages/plugin-sdk:
+    package: "@ethosagent/plugin-sdk"
+    tier: 1
+    assigned: 2026-08-12
+
   # ---------------------------------------------------------------------------
   # Tier 2 — extensions, not owned. Best-effort. A bug is a bug, not a CVE.
   # They inherit exactly what the kernel enforces and nothing more. A Tier 2
@@ -623,6 +624,29 @@ tiers:
 
   extensions/eval-harness:
     package: "@ethosagent/eval-harness"
+    tier: 2
+    assigned: 2026-08-12
+
+  # Demoted from Tier 1 by the 2026-08-12 non-docker execution-backends audit:
+  # it is a reference plugin with no production caller, no tests, and a name no
+  # resolution path can reach — `activate()` registers it as
+  # `<pluginId>/process` (packages/plugin-sdk/src/index.ts:606) while
+  # packages/wiring/src/compose-tools.ts:541 resolves the literal `'docker'`
+  # and nothing else. Promote back the day a resolution path selects it.
+  extensions/execution-process-backend:
+    package: "@ethosagent/execution-process-backend"
+    tier: 2
+    assigned: 2026-08-12
+
+  # Demoted from Tier 1 by the same audit: the backend is registered
+  # (packages/wiring/src/build-infrastructure.ts:254) but never resolved —
+  # compose-tools.ts:541 resolves only `'docker'` — and `ExecutionBackendConfig.ssh`
+  # (packages/types/src/execution.ts:177) has no writer anywhere, so no line of
+  # this package can execute in production. STANDING PROMOTION: this returns to
+  # Tier 1 the day `ExecutionBackendConfig.ssh` acquires a writer, because that
+  # is the moment a remote host becomes reachable from a personality.
+  extensions/execution-ssh:
+    package: "@ethosagent/execution-ssh"
     tier: 2
     assigned: 2026-08-12
 
@@ -940,11 +964,6 @@ tiers:
 
   packages/plugin-contract:
     package: "@ethosagent/plugin-contract"
-    tier: 2
-    assigned: 2026-08-12
-
-  packages/plugin-sdk:
-    package: "@ethosagent/plugin-sdk"
     tier: 2
     assigned: 2026-08-12
 

@@ -14,7 +14,7 @@ Scope is defined by **what we published as a guarantee**, not by which directory
      ids: G-TOOLS, G-CAP, G-FS, G-NET, G-INJ, G-SEC, G-RED, G-APP, G-EXEC, G-WATCH, G-CHAN, G-AUDIT
 -->
 - **The guarantee register** — twelve named guarantees, each with the `file:line` that enforces it, in [docs/content/security/security-boundary.md](docs/content/security/security-boundary.md#register). Anything not in the register is not guaranteed.
-- **The tier roster** — every workspace package carries a tier in [`.architecture-state.yaml`](.architecture-state.yaml), committed and dated before any report arrives. 119 packages: 10 at Tier 0, 25 at Tier 1, 84 at Tier 2.
+- **The tier roster** — every workspace package carries a tier in [`.architecture-state.yaml`](.architecture-state.yaml), committed and dated before any report arrives. 119 packages: 10 at Tier 0, 23 at Tier 1, 86 at Tier 2.
 
 | Tier | What we promise | Disclosure treatment |
 |---|---|---|
@@ -22,7 +22,7 @@ Scope is defined by **what we published as a guarantee**, not by which directory
 | **1 — guarded surfaces** | We review this on a trust boundary and respond to reports | In disclosure scope; fix-or-ETA commitment, **no correctness guarantee** |
 | **2 — extensions** | Nothing beyond what the kernel enforces | Out of scope; triaged as a normal bug |
 
-**Tier 0** is `@ethosagent/types`, the six `@ethosagent/safety-*` packages, the named enforcement files in `@ethosagent/core` and `@ethosagent/wiring`, and `@ethosagent/storage-fs`. **Tier 1** is the gateway and its seven platform adapters, the execution backends and exec-bearing tools, the third-party-code loaders (`tools-mcp`, `skills`, `skill-evolver`, `plugin-loader`), `apps/web-api`, the credential and data-at-rest packages, and the audit and delivery stores. Everything else is **Tier 2**. The sidecar is authoritative per package.
+**Tier 0** is `@ethosagent/types`, the six `@ethosagent/safety-*` packages, the named enforcement files in `@ethosagent/core` and `@ethosagent/wiring`, and `@ethosagent/storage-fs`. **Tier 1** is the gateway and its seven platform adapters, the reachable execution backends (`execution-docker`, `execution-local`) and the exec-bearing tools, the third-party-code loaders (`tools-mcp`, `skills`, `skill-evolver`, `plugin-loader`), `apps/web-api`, the credential and data-at-rest packages (including `plugin-sdk`, which writes plugin credential material), and the audit and delivery stores. Everything else is **Tier 2**. The sidecar is authoritative per package.
 
 > **A Tier 2 finding that reaches a Tier 0 guarantee is a Tier 0 finding.** The tiers bound what we promise to be *correct*, not what we promise to *look at*. When an extension bug composes into a kernel breach, the extension is not the vulnerability — the kernel's failure to contain it is, and that is where the fix lands.
 
