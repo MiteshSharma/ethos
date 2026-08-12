@@ -378,6 +378,12 @@ export interface ToolRegistry {
   getForToolset(toolset: string): Tool[];
   /** v2.2 — Return the plugin id that registered a tool, if any. */
   getPluginId?(name: string): string | undefined;
+  /**
+   * `durationMs` is that ONE call's wall clock, not the batch's — parallel
+   * calls finish at different times and each reports its own. Optional
+   * because implementations may omit it; callers fall back to their own
+   * timing when it is absent.
+   */
   executeParallel(
     calls: Array<{ toolCallId: string; name: string; args: unknown }>,
     ctx: ToolContext,
@@ -385,7 +391,7 @@ export interface ToolRegistry {
     filterOpts?: ToolFilterOpts,
     turnAttachments?: import('./platform').Attachment[],
     filters?: import('./tool-filter').ToolInvocationFilter[],
-  ): Promise<Array<{ toolCallId: string; name: string; result: ToolResult }>>;
+  ): Promise<Array<{ toolCallId: string; name: string; result: ToolResult; durationMs?: number }>>;
   toDefinitions(
     allowedTools?: string[],
     filterOpts?: ToolFilterOpts,

@@ -405,7 +405,7 @@ export async function* processTools(
     .filter((p) => p.rejected === undefined)
     .map((p) => ({ toolCallId: p.toolCallId, name: p.name, args: p.args }));
 
-  const startedAt = Date.now();
+  const batchStartedAt = Date.now();
   let toolsDone = false;
   const toolsPromise =
     execInputs.length > 0
@@ -480,7 +480,7 @@ export async function* processTools(
         toolCallId: r.toolCallId,
         toolName: r.name,
         ok: r.result.ok,
-        durationMs: Date.now() - startedAt,
+        durationMs: r.durationMs ?? Date.now() - batchStartedAt,
         result: r.result.ok ? r.result.value : r.result.error,
         ...(r.result.ok && r.result.structured !== undefined
           ? { structured: r.result.structured }
@@ -534,7 +534,6 @@ export async function* processTools(
   let localSuccessfulToolCalls = 0;
 
   for (const p of prepped) {
-    const durationMs = Date.now() - startedAt;
     let result: ToolResult;
     // Ch.3a — `result` carries the original raw value for tool_end events
     // and after_tool_call hooks (the user-visible chip and audit trail
@@ -555,6 +554,7 @@ export async function* processTools(
       // tool_end already emitted above; no after_tool_call hook for blocked tools
     } else {
       const execResult = execResultMap.get(p.toolCallId);
+      const durationMs = execResult?.durationMs ?? Date.now() - batchStartedAt;
       // Ch.3a provenance — the ONLY known-internal result on this branch is the
       // fallback we construct right here (the registry lost the call). It is
       // identified by its construction site, not by inspecting its text.
