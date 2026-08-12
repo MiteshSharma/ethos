@@ -913,6 +913,19 @@ const ConfigGetOutput = z.object({
   voiceTtsVoice: z.string().nullable(),
   voiceTtsBaseUrl: z.string().nullable(),
   voiceTtsModel: z.string().nullable(),
+  /** `auxiliary.tts.outputFormat` — container the TTS provider is asked for. */
+  voiceTtsOutputFormat: z.enum(['opus', 'mp3', 'wav', 'pcm']).nullable(),
+  /** `auxiliary.tts.timeout`, ms. */
+  voiceTtsTimeoutMs: z.number().nullable(),
+  /** `auxiliary.tts.maxTextLength` — chars per synthesis request. */
+  voiceTtsMaxTextLength: z.number().nullable(),
+  /** `auxiliary.asr.timeout`, ms. */
+  voiceSttTimeoutMs: z.number().nullable(),
+  /** `voice.trustedPlugins` — the local-only egress allowlist. `null` = key
+   *  absent = gate OFF; a list arms it (providers with `caps.local` always pass). */
+  voiceTrustedPlugins: z.array(z.string()).nullable(),
+  /** `voice.defaultMode` — where a new channel lane starts. */
+  voiceDefaultMode: z.enum(['off', 'mirror_inbound', 'all']).nullable(),
   // -- Settings-page additions (keys with no other UI home) ------------------
   /** Azure-only REST API version (`apiVersion`); null when unset. */
   apiVersion: z.string().nullable(),
@@ -1138,6 +1151,19 @@ const ConfigUpdateInput = z.object({
   voiceTtsVoice: z.string().optional(),
   voiceTtsBaseUrl: z.string().optional(),
   voiceTtsModel: z.string().optional(),
+  /** `auxiliary.tts.outputFormat`; null clears the key. */
+  voiceTtsOutputFormat: z.enum(['opus', 'mp3', 'wav', 'pcm']).nullable().optional(),
+  /** `auxiliary.tts.timeout`, ms; null clears the key. */
+  voiceTtsTimeoutMs: z.number().int().min(1_000).max(600_000).nullable().optional(),
+  /** `auxiliary.tts.maxTextLength`, chars; null clears the key. */
+  voiceTtsMaxTextLength: z.number().int().min(100).max(100_000).nullable().optional(),
+  /** `auxiliary.asr.timeout`, ms; null clears the key. */
+  voiceSttTimeoutMs: z.number().int().min(1_000).max(600_000).nullable().optional(),
+  /** `voice.trustedPlugins`; null (or an empty list) clears the key, which
+   *  turns the local-only egress gate OFF. */
+  voiceTrustedPlugins: z.array(z.string()).nullable().optional(),
+  /** `voice.defaultMode`; null clears the key (back to `mirror_inbound`). */
+  voiceDefaultMode: z.enum(['off', 'mirror_inbound', 'all']).nullable().optional(),
   // -- Settings-page additions (see the null-clears note above) --------------
   /** Azure-only REST API version (`apiVersion`). */
   apiVersion: z.string().nullable().optional(),

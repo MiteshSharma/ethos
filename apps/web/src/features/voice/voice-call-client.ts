@@ -26,19 +26,25 @@ export type VoiceCallAudioFormat = 'opus' | 'mp3' | 'wav' | 'pcm';
  */
 export type VoiceCallEvent =
   // A committed utterance's transcript is ready — the agent turn is about to run.
-  | { type: 'utterance_committed'; text: string }
+  // `provider` is the STT provider that ACTUALLY ran, when the transport knows it.
+  | { type: 'utterance_committed'; text: string; provider?: string }
   // A complete sentence of the reply was flushed to synthesis.
   | { type: 'reply_sentence'; text: string }
-  // A chunk of synthesized audio is ready for playout.
-  | { type: 'reply_audio'; audio: Uint8Array; format: VoiceCallAudioFormat }
+  // A chunk of synthesized audio is ready for playout. `provider` is the TTS
+  // provider that ACTUALLY ran, when the transport knows it.
+  | { type: 'reply_audio'; audio: Uint8Array; format: VoiceCallAudioFormat; provider?: string }
+  // Transport link state. The strip renders `reconnecting` from this; the
+  // composer stays usable for text throughout.
+  | { type: 'link'; status: 'connecting' | 'open' | 'reconnecting' }
   // A spoken filler ("One moment.") was queued during a long tool run.
   | { type: 'filler'; text: string }
   // Barge-in: the reply was interrupted. `text` is the honest played reply.
   | { type: 'interrupted'; text: string }
   // The reply finished playing uninterrupted. `text` is the played reply.
   | { type: 'reply_complete'; text: string }
-  // A recoverable error (synthesis/runner failure) surfaced.
-  | { type: 'error'; error: string; code?: string }
+  // An error surfaced. `provider` names the provider that failed, when known, so
+  // a degraded-to-text notice can say WHICH one.
+  | { type: 'error'; error: string; code?: string; provider?: string }
   // Transport-level: the room closed (remote hang-up, server disconnect).
   | { type: 'disconnected' };
 
@@ -68,12 +74,22 @@ export interface VoiceCallClient {
 // casting them — external JSON is never trusted with `as` (CLAUDE.md "API
 // response type safety").
 const VoiceCallControlEventSchema = z.discriminatedUnion('type', [
-  z.object({ type: z.literal('utterance_committed'), text: z.string() }),
+  z.object({
+    type: z.literal('utterance_committed'),
+    text: z.string(),
+    provider: z.string().optional(),
+  }),
+  z.object({ type: z.literal('link'), status: z.enum(['connecting', 'open', 'reconnecting']) }),
   z.object({ type: z.literal('reply_sentence'), text: z.string() }),
   z.object({ type: z.literal('filler'), text: z.string() }),
   z.object({ type: z.literal('interrupted'), text: z.string() }),
   z.object({ type: z.literal('reply_complete'), text: z.string() }),
-  z.object({ type: z.literal('error'), error: z.string(), code: z.string().optional() }),
+  z.object({
+    type: z.literal('error'),
+    error: z.string(),
+    code: z.string().optional(),
+    provider: z.string().optional(),
+  }),
   z.object({ type: z.literal('disconnected') }),
 ]);
 

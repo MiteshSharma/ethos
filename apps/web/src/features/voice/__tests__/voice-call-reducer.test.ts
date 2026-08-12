@@ -2,8 +2,10 @@ import { describe, expect, it } from 'vitest';
 import { parseVoiceCallControlEvent, type VoiceCallEvent } from '../voice-call-client';
 import {
   initialVoiceCallState,
+  MIC_DENIED_CODE,
   type VoiceCallState,
   voiceCallReducer,
+  voiceCaption,
   voiceTranscriptToMessages,
 } from '../voice-call-reducer';
 import { FakeVoiceCallClient } from './fake-voice-call-client';
@@ -17,7 +19,7 @@ function reduce(events: Array<Parameters<typeof voiceCallReducer>[1]>): VoiceCal
 // hook does (subscribe -> dispatch 'client-event').
 function driveThroughClient(events: VoiceCallEvent[]): VoiceCallState {
   const client = new FakeVoiceCallClient();
-  let state: VoiceCallState = { status: 'listening', transcript: [], error: null };
+  let state: VoiceCallState = { ...initialVoiceCallState, status: 'listening' };
   const unsubscribe = client.on((event) => {
     state = voiceCallReducer(state, { type: 'client-event', event });
   });
@@ -34,14 +36,18 @@ describe('voiceCallReducer — connection lifecycle', () => {
     expect(listening.status).toBe('listening');
   });
 
-  it('start clears a prior transcript and error', () => {
+  it('start clears a prior transcript, error and notices', () => {
     const dirty: VoiceCallState = {
+      ...initialVoiceCallState,
       status: 'ended',
       transcript: [{ id: 'voice-0', role: 'user', text: 'old' }],
       error: 'boom',
+      degraded: { provider: 'openai-tts', message: 'boom' },
+      micDenied: true,
+      sttProvider: 'local-stt',
     };
     const fresh = voiceCallReducer(dirty, { type: 'start' });
-    expect(fresh).toEqual({ status: 'connecting', transcript: [], error: null });
+    expect(fresh).toEqual({ ...initialVoiceCallState, status: 'connecting' });
   });
 
   it('hang-up ends the call; reset returns to idle', () => {
@@ -62,9 +68,11 @@ describe('voiceCallReducer — connection lifecycle', () => {
 });
 
 describe('voiceCallReducer — transcript', () => {
-  it('appends a user line on utterance_committed', () => {
+  it('appends a user line on utterance_committed and enters thinking', () => {
     const state = driveThroughClient([{ type: 'utterance_committed', text: 'what time is it' }]);
-    expect(state.status).toBe('listening');
+    // The gap between "you stopped talking" and "it started answering" is its
+    // own state (DR1 thinking) — the accent dot goes steady, not back to a mic.
+    expect(state.status).toBe('thinking');
     expect(state.transcript).toEqual([{ id: 'voice-0', role: 'user', text: 'what time is it' }]);
   });
 
@@ -153,14 +161,14 @@ describe('voiceCallReducer — barge-in', () => {
     });
   });
 
-  it('recovers to listening when the user speaks over the interruption', () => {
+  it('leaves the interrupted state when the user speaks over the interruption', () => {
     const state = driveThroughClient([
       { type: 'utterance_committed', text: 'story please' },
       { type: 'reply_sentence', text: 'Once' },
       { type: 'interrupted', text: 'Once [interrupted]' },
       { type: 'utterance_committed', text: 'actually never mind' },
     ]);
-    expect(state.status).toBe('listening');
+    expect(state.status).toBe('thinking');
     expect(state.transcript[2]).toEqual({
       id: 'voice-2',
       role: 'user',
@@ -231,5 +239,105 @@ describe('parseVoiceCallControlEvent (untrusted transport JSON)', () => {
     expect(parseVoiceCallControlEvent({ type: 'reply_sentence' })).toBeNull();
     expect(parseVoiceCallControlEvent({ type: 'nope' })).toBeNull();
     expect(parseVoiceCallControlEvent('garbage')).toBeNull();
+  });
+});
+
+describe('voiceCallReducer — link state (DR1 reconnecting)', () => {
+  it('a dropped link becomes reconnecting, and recovers to listening', () => {
+    const dropped = driveThroughClient([{ type: 'link', status: 'reconnecting' }]);
+    expect(dropped.status).toBe('reconnecting');
+    const back = voiceCallReducer(dropped, {
+      type: 'client-event',
+      event: { type: 'link', status: 'open' },
+    });
+    expect(back.status).toBe('listening');
+  });
+
+  it('link noise never revives an idle or ended call', () => {
+    const idle = voiceCallReducer(initialVoiceCallState, {
+      type: 'client-event',
+      event: { type: 'link', status: 'reconnecting' },
+    });
+    expect(idle.status).toBe('idle');
+  });
+});
+
+describe('voiceCallReducer — degraded to text and mic permission', () => {
+  it('a provider failure ends voice and names the provider', () => {
+    const state = driveThroughClient([
+      {
+        type: 'error',
+        error: 'Speech synthesis failed',
+        code: 'synthesize_failed',
+        provider: 'openai-tts',
+      },
+    ]);
+    expect(state.status).toBe('ended');
+    expect(state.degraded).toEqual({
+      provider: 'openai-tts',
+      message: 'Speech synthesis failed',
+    });
+  });
+
+  it('a refused mic is guidance, not a degraded-provider notice', () => {
+    const state = driveThroughClient([
+      { type: 'error', error: 'Allow the microphone…', code: MIC_DENIED_CODE },
+    ]);
+    expect(state.micDenied).toBe(true);
+    expect(state.degraded).toBeNull();
+  });
+
+  it('dismissing clears both notices without restarting the call', () => {
+    const denied = driveThroughClient([
+      { type: 'error', error: 'Allow the microphone…', code: MIC_DENIED_CODE },
+    ]);
+    const dismissed = voiceCallReducer(denied, { type: 'dismiss-notice' });
+    expect(dismissed.micDenied).toBe(false);
+    expect(dismissed.error).toBeNull();
+    expect(dismissed.status).toBe('ended');
+  });
+
+  it('an unrecognized error code stays recoverable', () => {
+    const state = driveThroughClient([
+      { type: 'error', error: 'transient', code: 'utterance_too_long' },
+    ]);
+    expect(state.degraded).toBeNull();
+    expect(state.error).toBe('transient');
+  });
+});
+
+describe('voiceCallReducer — provider attribution', () => {
+  it('records the providers that actually served the turn', () => {
+    const state = driveThroughClient([
+      { type: 'utterance_committed', text: 'hi', provider: 'local-stt' },
+      { type: 'reply_sentence', text: 'Hello.' },
+      { type: 'reply_audio', audio: new Uint8Array(), format: 'pcm', provider: 'local-tts' },
+    ]);
+    expect(state.sttProvider).toBe('local-stt');
+    expect(state.ttsProvider).toBe('local-tts');
+  });
+});
+
+describe('voiceCaption', () => {
+  it('captions the agent line while it is speaking', () => {
+    const state = driveThroughClient([
+      { type: 'utterance_committed', text: 'hi' },
+      { type: 'reply_sentence', text: 'Hello there.' },
+    ]);
+    expect(voiceCaption(state)).toBe('Hello there.');
+  });
+
+  it('keeps captioning the interrupted line after barge-in', () => {
+    const state = driveThroughClient([
+      { type: 'utterance_committed', text: 'story' },
+      { type: 'reply_sentence', text: 'Once upon a time' },
+      { type: 'interrupted', text: 'Once upon a time' },
+    ]);
+    expect(voiceCaption(state)).toBe('Once upon a time');
+  });
+
+  it('captions nothing while the user has the floor', () => {
+    const state = driveThroughClient([{ type: 'utterance_committed', text: 'hi' }]);
+    expect(voiceCaption(state)).toBeNull();
   });
 });

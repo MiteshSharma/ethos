@@ -174,6 +174,33 @@ in accent, so the speaking cue reads as identity, not status. The call strip is 
 slim bar on the existing Chat — no new full-screen surface ("cards earn
 existence").
 
+### CallStrip
+
+The component that renders the indicator above, plus everything else a live call
+needs. One component, one slim strip on Chat — **rows, never the `Card`
+primitive**. Nine states, all in existing vocabulary:
+
+| State | What the user sees |
+|---|---|
+| Idle / entry | No strip. 16px stroke mic glyph in the composer card next to send; "Try voice" pill in the empty-chat grid. |
+| Connecting | 10px amber (`--warning`) dot pulsing via `status-dot-pulse` + `connecting` in Geist Mono. |
+| Listening | Red `AudioBars` mic meter. |
+| Thinking | The accent dot **steady** — the personality has the floor but is not talking yet. |
+| Agent speaking | The same 10px accent dot **pulsing** + the live caption line in `--text-secondary`. |
+| Barge-in acknowledged | Caption truncates; one `--motion-default` accent flash; the line stays in the transcript marked `[interrupted]`. |
+| Reconnecting | Amber dot + `reconnecting…`; the composer stays usable for text. |
+| Degraded to text | The strip collapses to a dismissible inline **row**: "Voice unavailable — provider X failed; continuing in text." |
+| Mic permission denied | An inline row with the browser's re-grant path. Never a dead mic icon. |
+
+The provider that served the turn and its latency render as **Geist Mono
+`{provider} · {model}` + `NNNms`** — the same label vocabulary as the TopBar.
+Not a badge, not a debug panel. The per-stage breakdown sits behind an
+expandable toggle, collapsed by default.
+
+Controls are ≥44px touch targets; `prefers-reduced-motion` stops every pulse and
+the barge-in flash. At 375px the mark, state and mute/end persist and the mono
+detail collapses behind the toggle's tap.
+
 ## Sidebar
 
 ### Icons
@@ -333,3 +360,4 @@ The web UI specifically must avoid these patterns. Code review checks for them.
 | 2026-06-11 | Personality marks → circular frame (accent ring + circle-clipped cells) | New circular ring logo; marks follow the logo's geometry. User-directed. Docs `PersonalityMark` updated; `apps/web/src/components/ui/PersonalityMark.tsx` and `packages/web-contracts/src/marks.ts` are follow-ups to keep cross-surface parity. |
 | 2026-07-16 | Docs landing page: personality icon → annulus ring (logo geometry); landing shows 3 specialists with cross-provider model routing | User-directed during landing-page 3D redesign (hero-demos hybrid). Scope: docs landing page; app surfaces still use the generative grid mark pending a follow-up decision. |
 | 2026-07-19 | In-call speaking indicator (talk-mode) | Phase B browser talk-mode needs a "who's speaking" cue. Reuses `AudioBars` for the user mic and an accent `status-dot-pulse` dot for the agent — accent, not a semantic color, so the cue reads as personality identity. No new primitives. |
+| 2026-08-12 | CallStrip added to the component inventory (voice V1a, DR3) | Talk-mode's nine states needed one home. A slim strip of ROWS on Chat, not a new surface and not a `Card`; the thinking state is the existing accent dot held steady, connecting/reconnecting borrows the amber connection dot, and provider + latency reuse the `{provider} · {model}` mono label rather than a badge or debug panel. |

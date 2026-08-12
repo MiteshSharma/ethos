@@ -685,12 +685,19 @@ export interface EthosConfig {
    * its selection is refused before a single audio byte leaves the machine.
    * Absent (the default) leaves the gate off, which is why an empty list is a
    * meaningful value, not the same as omitting the key.
+   *
+   * `defaultMode` is the voice-reply mode a NEW channel lane starts in:
+   *   voice.defaultMode: mirror_inbound
+   * `off` never speaks back, `mirror_inbound` speaks when it was spoken to,
+   * `all` speaks every reply. `/voice <mode>` overrides it per lane at runtime;
+   * this is only where a lane starts. Absent = `mirror_inbound`.
    */
   voice?: {
     bots: VoiceBotConfig[];
     livekit?: VoiceLiveKitConfig;
     trunk?: VoiceTrunkConfig;
     trustedPlugins?: string[];
+    defaultMode?: 'off' | 'mirror_inbound' | 'all';
   };
   // Email platform
   emailImapHost?: string;
@@ -1269,6 +1276,9 @@ export async function writeConfig(storage: Storage, config: EthosConfig): Promis
     if (config.voice.trustedPlugins !== undefined) {
       lines.push(`voice.trustedPlugins: ${config.voice.trustedPlugins.join(', ')}`);
     }
+    if (config.voice.defaultMode) {
+      lines.push(`voice.defaultMode: ${config.voice.defaultMode}`);
+    }
   }
   if (config.teams) {
     for (const [name, tcfg] of Object.entries(config.teams)) {
@@ -1562,6 +1572,8 @@ function parseConfigYaml(src: string): EthosConfig {
   const voiceTrunkKv: Record<string, string> = {};
   /** Raw `voice.trustedPlugins` line; `undefined` = key absent = gate off. */
   let voiceTrustedPluginsRaw: string | undefined;
+  /** `voice.defaultMode`; `undefined` = key absent = the built-in default. */
+  let voiceDefaultMode: 'off' | 'mirror_inbound' | 'all' | undefined;
   const teamsKv: Record<string, Record<string, string>> = {};
   const webhooksKv: Record<string, Record<string, string>> = {};
   // FW-16 — quick_commands.<name>.<field>: <value>
@@ -1653,6 +1665,15 @@ function parseConfigYaml(src: string): EthosConfig {
     const vtp = line.match(/^voice\.trustedPlugins:\s*(.*)$/);
     if (vtp) {
       voiceTrustedPluginsRaw = vtp[1].trim().replace(/^["']|["']$/g, '');
+      continue;
+    }
+    // voice.defaultMode: off | mirror_inbound | all — where a new lane starts.
+    const vdm = line.match(/^voice\.defaultMode:\s*(.+)$/);
+    if (vdm) {
+      const mode = vdm[1].trim().replace(/^["']|["']$/g, '');
+      if (mode === 'off' || mode === 'mirror_inbound' || mode === 'all') {
+        voiceDefaultMode = mode;
+      }
       continue;
     }
     // teams.<name>.<field>: <value>
@@ -2081,7 +2102,8 @@ function parseConfigYaml(src: string): EthosConfig {
     voiceResult.bots.length > 0 ||
     voiceLiveKitResult.livekit ||
     voiceTrunkResult.trunk ||
-    voiceTrustedPluginsRaw !== undefined
+    voiceTrustedPluginsRaw !== undefined ||
+    voiceDefaultMode !== undefined
       ? {
           bots: voiceResult.bots,
           ...(voiceLiveKitResult.livekit ? { livekit: voiceLiveKitResult.livekit } : {}),
@@ -2089,6 +2111,7 @@ function parseConfigYaml(src: string): EthosConfig {
           ...(voiceTrustedPluginsRaw !== undefined
             ? { trustedPlugins: splitList(voiceTrustedPluginsRaw) }
             : {}),
+          ...(voiceDefaultMode ? { defaultMode: voiceDefaultMode } : {}),
         }
       : undefined;
   const teams = buildTeamsConfig(teamsKv);

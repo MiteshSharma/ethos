@@ -7,6 +7,17 @@
 export { createBufferedSttAdapter } from './buffered-stt';
 export { EndpointDetector, type EndpointDetectorConfig } from './endpoint-detector';
 export {
+  percentile,
+  type StagePercentiles,
+  summarizeLatency,
+  turnLatenciesFromSpans,
+  VOICE_LATENCY_BUDGET_MS,
+  VOICE_LATENCY_STAGES,
+  type VoiceLatencyReport,
+  type VoiceLatencyStage,
+  type VoiceTurnLatency,
+} from './latency-budget';
+export {
   type PlayoutItem,
   PlayoutQueue,
   type PlayoutQueueCallbacks,

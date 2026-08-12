@@ -366,6 +366,12 @@ pnpm vitest run \
 Manual check: set `voice.trustedPlugins:` (empty) and `auxiliary.tts.provider:
 openai-tts`, then run `ethos doctor`. The TTS line turns red with the refusal above.
 
+In the UI: **Settings → Voice → Restrict voice egress** arms the gate and edits the
+allowlist. The switch off deletes the key (gate off); the switch on writes the
+providers you list. The declared-but-EMPTY form above is the one shape Settings
+cannot write — the web config writer drops an empty value — so set that line by
+hand if you want "trust nothing non-local".
+
 ---
 
 ## 4. Per-personality voice
@@ -552,11 +558,25 @@ Both are lists, and the flat `key: value` parser has no list encoding for them; 
 only populate advisory `caps.voices` / `caps.languages`, which nothing in the repo
 enforces. They are documented nowhere — do not write them expecting an effect.
 
-### 5. No CallStrip UI, no per-personality voice editor
-The talk-mode UI is the minimal toggle plus `TalkModeCallBar` (speaking indicator,
-status, mute, hang up). Settings → Voice edits the **global** STT/TTS provider fields
-and the VAD tuning; there is **no UI** for `voice.trustedPlugins` and none for a
-personality's `voice.*` block — both are config-file only.
+### 5. CallStrip shipped; per-personality voice editor still config-file only
+The talk-mode UI is the CallStrip (`apps/web/src/features/voice/TalkMode.tsx`):
+nine states — connecting, listening, thinking, speaking, barge-in, reconnecting,
+degraded-to-text, mic-permission-denied, plus the idle entry points — with a live
+caption line and the `{provider} · {model}` mono label. See DESIGN.md § CallStrip.
+
+Settings → Voice now edits every voice key the plans introduced, including
+`voice.trustedPlugins`, `voice.defaultMode`, and the `auxiliary.*` timeouts and
+output format. One edge stays config-file only: an allowlist that is **declared
+but empty** (`voice.trustedPlugins:` with no value) arms the gate with nothing
+trusted. Settings treats an empty list as "gate off" because the web config
+writer cannot round-trip an empty value; write that line by hand if you want it.
+
+A personality's own `voice.*` block (`tts_voice`, `languages`, `tier`, `model`)
+is still edited in the personality's `config.yaml` and rendered read-only in the
+character sheet — there is no web editor for it. The `tier` and `model` fields
+have no consumer yet either (`resolveVoicePreferences` returns them and nothing
+reads them until the realtime tier and fast-lane routing land), so no global
+default was added for them: it would be a knob that does nothing.
 
 ### 6. Built-in `voice` personality — shipped
 `extensions/personalities/data/voice/` is the first built-in that lists
@@ -575,6 +595,49 @@ there is headroom, and the test is what stops it being spent silently.
 Realtime tier / OpenAI Realtime / Gemini Live; channel TTS-out beyond Telegram and the
 ffmpeg transcode stage; the wake-word satellite; telephony beyond the typed seams.
 `shouldReplyWithVoice` accepts a `wakeTriggered` flag that nothing sets yet.
+
+---
+
+## 6b. Latency — the bench
+
+Two modes, one budget table (`VOICE_LATENCY_BUDGET_MS` in
+`extensions/voice-session/src/latency-budget.ts`):
+
+| Stage | Budget | What it covers |
+|---|---|---|
+| `endpoint` | ≤300ms | Last speech frame → the turn starting. Includes the configured silence threshold. |
+| `stt` | ≤200ms | Committed audio → final transcript. |
+| `llm_first_sentence` | ≤800ms | Transcript → first sentence handed to synthesis. |
+| `tts_first_audio` | ≤300ms | First sentence → first audio frame out. |
+| `pipeline` | ≤1600ms | Mouth to ear. |
+
+```bash
+pnpm bench:voice          # mock providers, deterministic, no credentials
+pnpm bench:voice:live     # whatever ~/.ethos/config.yaml has configured
+```
+
+Both drive a real `VoiceSession` and read the **per-turn spans it writes** — the
+same telemetry a deployment sees — so the bench cannot report a number the
+product does not. Live mode adds `--turns=N` (default 10) and reports p50/p90/p99
+per stage; budgets are checked against **p90**. `--assert-budget` exits non-zero
+on a miss.
+
+Because the spans are cumulative from the turn start, the arithmetic that turns
+them into stage-owned time lives in `latency-budget.ts` and is unit-tested
+(`extensions/voice-session/src/__tests__/latency-budget.test.ts`) — `scripts/`
+is outside the vitest globs, so a budget implemented only in the script would be
+a budget nobody checks.
+
+Live mode measures STT and TTS against the **real configured providers**,
+resolved through the same functions (and the same egress gate) every surface
+uses. The LLM is deliberately a fixed reply so model variance stays out of the
+TTS numbers. Without `--audio=<file.wav>` the bench feeds a synthetic tone: a
+real transcriber returns nothing for it, so only the STT stage is reported. Pass
+a recorded 16-bit PCM WAV of someone speaking to get the whole pipeline.
+
+`--endpoint-silence-ms=N` (default 250) sets how much silence the detector waits
+for. It is part of endpoint latency by definition, so a threshold at or above
+300ms can never meet the endpoint budget.
 
 ---
 

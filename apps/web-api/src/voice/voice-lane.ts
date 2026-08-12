@@ -237,6 +237,7 @@ export class VoiceLane {
         code: 'transcribe_failed',
         message: errorMessage(err, 'Could not transcribe audio — try again'),
         utteranceId: id,
+        ...providerOf(err),
       });
     }
   }
@@ -331,6 +332,9 @@ export class VoiceLane {
         code: 'synthesize_failed',
         message: errorMessage(err, 'Speech synthesis failed'),
         utteranceId: frame.utteranceId,
+        // Whatever the stream managed to name before it broke, else the
+        // resolution error's own provider id.
+        ...(provider ? { provider } : providerOf(err)),
       });
     }
   }
@@ -372,4 +376,16 @@ export class VoiceLane {
 
 function errorMessage(err: unknown, fallback: string): string {
   return err instanceof Error && err.message ? err.message : fallback;
+}
+
+/**
+ * Name the provider behind a failure when the error carries one
+ * (`VoiceProviderError.providerId` from `@ethosagent/core`). Structural rather
+ * than an instanceof import: the lane stays free of provider-resolution
+ * dependencies, and any error that names its provider gets to say so.
+ */
+function providerOf(err: unknown): { provider?: string } {
+  if (typeof err !== 'object' || err === null) return {};
+  const id = (err as { providerId?: unknown }).providerId;
+  return typeof id === 'string' && id ? { provider: id } : {};
 }

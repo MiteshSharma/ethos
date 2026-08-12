@@ -18,6 +18,8 @@ export interface MessageListProps {
   sessionId?: string;
   /** Puts a suggested prompt in the composer (`recommend_actions` pills). */
   onSuggestPrompt?: (prompt: string) => void;
+  /** Starts talk-mode from the empty state. Absent = no "Try voice" pill. */
+  onTryVoice?: () => void;
 }
 
 export function MessageList({
@@ -27,6 +29,7 @@ export function MessageList({
   model,
   sessionId,
   onSuggestPrompt,
+  onTryVoice,
 }: MessageListProps) {
   const listRef = useRef<HTMLDivElement>(null);
   const pinnedToBottomRef = useRef(true);
@@ -68,7 +71,12 @@ export function MessageList({
 
   if (messages.length === 0 && !currentTurn) {
     return (
-      <EmptyState personalityId={personalityId} model={model} onSuggestPrompt={onSuggestPrompt} />
+      <EmptyState
+        personalityId={personalityId}
+        model={model}
+        onSuggestPrompt={onSuggestPrompt}
+        {...(onTryVoice ? { onTryVoice } : {})}
+      />
     );
   }
 
@@ -173,10 +181,12 @@ function EmptyState({
   personalityId,
   model,
   onSuggestPrompt,
+  onTryVoice,
 }: {
   personalityId?: string;
   model?: string;
   onSuggestPrompt?: (prompt: string) => void;
+  onTryVoice?: () => void;
 }) {
   return (
     <div className="message-list-empty">
@@ -212,6 +222,14 @@ function EmptyState({
             {p}
           </button>
         ))}
+        {/* The one pill that does not pre-fill the composer — it starts a call
+            (DR2 first-conversation moment). Rendered only where talk-mode is
+            actually available, so it is never a dead end. */}
+        {onTryVoice ? (
+          <button type="button" className="empty-state-pill" onClick={onTryVoice}>
+            Try voice
+          </button>
+        ) : null}
       </div>
     </div>
   );

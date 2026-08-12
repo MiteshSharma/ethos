@@ -17,10 +17,12 @@ import { useSessionRenameFromChat } from '../features/sessions/api/mutations';
 import { useSessionGet } from '../features/sessions/api/queries';
 import { runVoiceAgentTurn } from '../features/voice/chat-voice-runner';
 import { personalityCanTalk } from '../features/voice/gating';
+import { createPushToTalkHandlers } from '../features/voice/push-to-talk';
 import { TalkModeCallBar, TalkModeToggle } from '../features/voice/TalkMode';
 import { createTalkModeClient } from '../features/voice/talk-mode-client';
 import { useVoiceCall } from '../features/voice/useVoiceCall';
 import type { VoiceCallClient } from '../features/voice/voice-call-client';
+import { voiceCaption } from '../features/voice/voice-call-reducer';
 import { useActivePersonality } from '../hooks/useActivePersonality';
 import { useChat } from '../hooks/useChat';
 import { useNewSessionModal } from '../hooks/useNewSessionModal';
@@ -432,10 +434,33 @@ export function Chat() {
   }, [sttConfigured, voice.start, notification]);
 
   useEffect(() => {
-    if (voice.error) {
+    // The strip owns the mic-denied and degraded-to-text stories — a toast on
+    // top of them would say the same thing twice, in a place the user cannot
+    // act on.
+    if (voice.error && !voice.micDenied && !voice.degraded) {
       notification.info({ message: 'Voice', description: voice.error, placement: 'topRight' });
     }
-  }, [voice.error, notification]);
+  }, [voice.error, voice.micDenied, voice.degraded, notification]);
+
+  // Keyboard push-to-talk: hold Space to talk, Esc ends the call. Bound only
+  // while a call is up, and never while the user is typing (Space is a
+  // character before it is a control).
+  useEffect(() => {
+    if (!inCall) return;
+    const handlers = createPushToTalkHandlers({
+      onHold: () => voice.pressToTalk(true),
+      onRelease: () => voice.pressToTalk(false),
+      onEnd: voice.hangUp,
+    });
+    const down = (event: KeyboardEvent) => handlers.keyDown(event);
+    const up = (event: KeyboardEvent) => handlers.keyUp(event);
+    window.addEventListener('keydown', down);
+    window.addEventListener('keyup', up);
+    return () => {
+      window.removeEventListener('keydown', down);
+      window.removeEventListener('keyup', up);
+    };
+  }, [inCall, voice.pressToTalk, voice.hangUp]);
 
   const handleSwitchPersonality = async (newId: string) => {
     // No-op: same personality clicked.
@@ -496,7 +521,7 @@ export function Chat() {
             />
           }
         />
-        {inCall ? (
+        {inCall || voice.degraded || voice.micDenied ? (
           <TalkModeCallBar
             status={voice.status}
             micLevels={voice.micLevels}
@@ -504,6 +529,15 @@ export function Chat() {
             error={voice.error}
             onToggleMute={voice.toggleMute}
             onHangUp={voice.hangUp}
+            caption={voiceCaption(voice)}
+            degraded={voice.degraded}
+            micDenied={voice.micDenied}
+            onDismissNotice={voice.dismissNotice}
+            sttProvider={voice.sttProvider ?? configQuery.data?.voiceProvider ?? null}
+            sttModel={configQuery.data?.voiceModel ?? null}
+            ttsProvider={voice.ttsProvider ?? configQuery.data?.voiceTtsProvider ?? null}
+            ttsModel={configQuery.data?.voiceTtsModel ?? null}
+            latency={voice.latency}
           />
         ) : null}
         <GoalIntakeModal
@@ -527,6 +561,7 @@ export function Chat() {
           model={model}
           sessionId={currentSessionId ?? undefined}
           onSuggestPrompt={handleSuggestPrompt}
+          {...(canTalk && !inCall ? { onTryVoice: handleTalkToggle } : {})}
         />
         <TurnStatusBar
           isStreaming={state.isStreaming}
@@ -557,6 +592,13 @@ export function Chat() {
             onGoalRun={handleGoalRunDirect}
             contextTokens={state.contextTokens}
             suggestion={suggestion}
+            {...(canTalk
+              ? {
+                  onTalkMode: handleTalkToggle,
+                  talkModeActive: inCall,
+                  talkModeHint: inCall ? 'In call' : `Talk to ${capitalize(personalityId)}`,
+                }
+              : {})}
           />
         </div>
       </div>

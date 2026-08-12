@@ -869,6 +869,8 @@ export async function runGatewayStart(opts: GatewayStartOptions = {}): Promise<v
           ...(voiceConfig.trustedVoicePlugins
             ? { trustedVoicePlugins: voiceConfig.trustedVoicePlugins }
             : {}),
+          // Where a NEW lane starts (`voice.defaultMode`); `/voice` still wins per lane.
+          ...(config.voice?.defaultMode ? { defaultVoiceMode: config.voice.defaultMode } : {}),
           personalityDirectory,
           onTurnComplete,
           onUserTurn,
@@ -901,6 +903,8 @@ export async function runGatewayStart(opts: GatewayStartOptions = {}): Promise<v
           ...(voiceConfig.trustedVoicePlugins
             ? { trustedVoicePlugins: voiceConfig.trustedVoicePlugins }
             : {}),
+          // Where a NEW lane starts (`voice.defaultMode`); `/voice` still wins per lane.
+          ...(config.voice?.defaultMode ? { defaultVoiceMode: config.voice.defaultMode } : {}),
           personalityDirectory,
           onTurnComplete,
           onUserTurn,

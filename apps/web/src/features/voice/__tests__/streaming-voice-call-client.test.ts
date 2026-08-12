@@ -87,6 +87,9 @@ describe('streaming talk-mode — utterance over the binary lane', () => {
     });
     client.on((event) => events.push(event));
     await client.connect();
+    // One earcon for "the session is ready" (DR2 first-conversation moment),
+    // before the user has said anything.
+    expect(capture.earcons).toBe(1);
 
     capture.emit({ type: 'speech_start' });
     capture.emit({ type: 'frame', data: Int16Array.from([500, -500, 250]) });
@@ -102,7 +105,8 @@ describe('streaming talk-mode — utterance over the binary lane', () => {
       { t: 'utterance_start', utteranceId: 'u1', sampleRate: 16_000 },
     ]);
     expect(transport.frames('utterance_end')).toHaveLength(1);
-    expect(capture.earcons).toBe(1);
+    // …and a second on endpoint: the thinking earcon.
+    expect(capture.earcons).toBe(2);
 
     transport.deliver({
       t: 'transcript',

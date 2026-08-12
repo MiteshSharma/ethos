@@ -373,6 +373,14 @@ interface FormShape {
   voiceTtsVoice: string;
   voiceTtsBaseUrl: string;
   voiceTtsModel: string;
+  voiceTtsOutputFormat: string;
+  voiceTtsTimeoutMs: number | null;
+  voiceTtsMaxTextLength: number | null;
+  voiceSttTimeoutMs: number | null;
+  /** Arms the local-only egress gate (`voice.trustedPlugins` is declared). */
+  voiceEgressGate: boolean;
+  voiceTrustedPlugins: string[];
+  voiceDefaultMode: string;
   // -- Settings-page additions (config.get/config.update passthrough keys) ----
   displayVerbosity: 'quiet' | 'default' | 'verbose' | 'debug';
   displayBusyInputMode: 'interrupt' | 'queue' | 'steer';
@@ -445,6 +453,18 @@ const TTS_PROVIDER_DEFAULTS: Record<string, { baseUrl: string; model: string }> 
 
 // Fixed phrase the "Test TTS" button synthesizes so the check is deterministic.
 const VOICE_TEST_PHRASE = 'Hello — this is an Ethos voice test.';
+
+const AUDIO_FORMATS = ['opus', 'mp3', 'wav', 'pcm'] as const;
+const VOICE_MODES = ['off', 'mirror_inbound', 'all'] as const;
+
+/** Empty select → null, which clears the key back to its built-in default. */
+function audioFormatOrNull(value: string): (typeof AUDIO_FORMATS)[number] | null {
+  return AUDIO_FORMATS.find((f) => f === value) ?? null;
+}
+
+function voiceModeOrNull(value: string): (typeof VOICE_MODES)[number] | null {
+  return VOICE_MODES.find((m) => m === value) ?? null;
+}
 
 // Advanced VAD / barge-in tuning sliders. `name` is the FormShape/config field,
 // `defaultKey` maps to DEFAULT_VOICE_TUNING for the reset affordance, and the
@@ -723,6 +743,13 @@ export function Settings() {
         voiceTtsVoice: configQuery.data.voiceTtsVoice ?? '',
         voiceTtsBaseUrl: configQuery.data.voiceTtsBaseUrl ?? '',
         voiceTtsModel: configQuery.data.voiceTtsModel ?? '',
+        voiceTtsOutputFormat: configQuery.data.voiceTtsOutputFormat ?? '',
+        voiceTtsTimeoutMs: configQuery.data.voiceTtsTimeoutMs,
+        voiceTtsMaxTextLength: configQuery.data.voiceTtsMaxTextLength,
+        voiceSttTimeoutMs: configQuery.data.voiceSttTimeoutMs,
+        voiceEgressGate: configQuery.data.voiceTrustedPlugins !== null,
+        voiceTrustedPlugins: configQuery.data.voiceTrustedPlugins ?? [],
+        voiceDefaultMode: configQuery.data.voiceDefaultMode ?? '',
         displayVerbosity: configQuery.data.displayVerbosity,
         displayBusyInputMode: configQuery.data.displayBusyInputMode,
         displayToolPreviewLength: configQuery.data.displayToolPreviewLength,
@@ -976,6 +1003,13 @@ export function Settings() {
       voiceBargeSustainMs: values.voiceBargeSustainMs,
       voiceSpeechThreshold: values.voiceSpeechThreshold,
       voiceSpeechMinMs: values.voiceSpeechMinMs,
+      voiceTtsOutputFormat: audioFormatOrNull(values.voiceTtsOutputFormat),
+      voiceTtsTimeoutMs: values.voiceTtsTimeoutMs ?? null,
+      voiceTtsMaxTextLength: values.voiceTtsMaxTextLength ?? null,
+      voiceSttTimeoutMs: values.voiceSttTimeoutMs ?? null,
+      // Off = drop the key entirely, which is what turns the gate off.
+      voiceTrustedPlugins: values.voiceEgressGate ? values.voiceTrustedPlugins : null,
+      voiceDefaultMode: voiceModeOrNull(values.voiceDefaultMode),
       ...(!values.voiceEnabled
         ? configQuery.data?.voiceProvider || configQuery.data?.voiceTtsProvider
           ? { voiceProvider: '', voiceTtsProvider: '' }
@@ -1890,6 +1924,13 @@ export function Settings() {
                     <Input.Password placeholder="Enter API key..." />
                   </Form.Item>
                   <Form.Item
+                    name="voiceSttTimeoutMs"
+                    label="STT timeout (ms)"
+                    extra="How long one transcription may take. Blank = provider default."
+                  >
+                    <InputNumber min={1000} max={600000} step={1000} placeholder="30000" />
+                  </Form.Item>
+                  <Form.Item
                     noStyle
                     shouldUpdate={(prev, cur) =>
                       STT_TEST_DIRTY_FIELDS.some((k) => prev[k] !== cur[k])
@@ -1971,6 +2012,31 @@ export function Settings() {
                             <Input placeholder="e.g. af_bella" />
                           </Form.Item>
                           <Form.Item
+                            name="voiceTtsOutputFormat"
+                            label="TTS audio format"
+                            extra="Container the provider is asked for. Blank = the provider's own default."
+                          >
+                            <Select
+                              allowClear
+                              placeholder="Provider default"
+                              options={AUDIO_FORMATS.map((f) => ({ label: f, value: f }))}
+                            />
+                          </Form.Item>
+                          <Form.Item
+                            name="voiceTtsTimeoutMs"
+                            label="TTS timeout (ms)"
+                            extra="How long one synthesis request may take. Blank = provider default."
+                          >
+                            <InputNumber min={1000} max={600000} step={1000} placeholder="30000" />
+                          </Form.Item>
+                          <Form.Item
+                            name="voiceTtsMaxTextLength"
+                            label="TTS max text length"
+                            extra="Characters per synthesis request; longer replies are split or refused by the provider."
+                          >
+                            <InputNumber min={100} max={100000} step={100} placeholder="4096" />
+                          </Form.Item>
+                          <Form.Item
                             noStyle
                             shouldUpdate={(prev, cur) =>
                               TTS_TEST_DIRTY_FIELDS.some((k) => prev[k] !== cur[k])
@@ -1996,6 +2062,54 @@ export function Settings() {
                     }
                   </Form.Item>
                 </>
+              ) : null
+            }
+          </Form.Item>
+          <Form.Item
+            name="voiceDefaultMode"
+            label="Voice replies on channels"
+            extra="Where a new conversation starts. Off never speaks; Mirror inbound speaks when it was spoken to; All speaks every reply. `/voice <mode>` still overrides it per conversation."
+          >
+            <Select
+              allowClear
+              placeholder="Mirror inbound (default)"
+              options={[
+                { label: 'Off — never speak', value: 'off' },
+                { label: 'Mirror inbound — speak when spoken to', value: 'mirror_inbound' },
+                { label: 'All — speak every reply', value: 'all' },
+              ]}
+            />
+          </Form.Item>
+          <Form.Item
+            name="voiceEgressGate"
+            valuePropName="checked"
+            label="Restrict voice egress"
+            extra="Only providers that run on this machine, plus the ones you list below, may receive audio. Off = any configured provider may."
+          >
+            <Switch />
+          </Form.Item>
+          <Form.Item
+            noStyle
+            shouldUpdate={(prev, cur) => prev.voiceEgressGate !== cur.voiceEgressGate}
+          >
+            {({ getFieldValue }) =>
+              getFieldValue('voiceEgressGate') ? (
+                <Form.Item
+                  name="voiceTrustedPlugins"
+                  label="Trusted voice providers"
+                  extra="Provider ids allowed to send audio off this machine (e.g. openai-tts, elevenlabs). Local providers always pass. Clearing the list turns the restriction off."
+                >
+                  <Select
+                    mode="tags"
+                    tokenSeparators={[',']}
+                    placeholder="openai-tts"
+                    options={[
+                      { label: 'openai-tts', value: 'openai-tts' },
+                      { label: 'openai-stt', value: 'openai-stt' },
+                      { label: 'groq-stt', value: 'groq-stt' },
+                    ]}
+                  />
+                </Form.Item>
               ) : null
             }
           </Form.Item>

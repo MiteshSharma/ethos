@@ -3,9 +3,11 @@ import { createUnwiredVoiceCallClient, type VoiceCallClient } from './voice-call
 import {
   initialVoiceCallState,
   type VoiceCallStatus,
+  type VoiceDegradedNotice,
   type VoiceTranscriptLine,
   voiceCallReducer,
 } from './voice-call-reducer';
+import { classifyVoiceStartError } from './voice-start-error';
 
 // Drives a `VoiceCallClient` through the pure `voiceCallReducer` and owns the
 // browser-only concerns the reducer deliberately excludes: the mic level meter
@@ -20,6 +22,20 @@ export interface UseVoiceCallOptions {
   createClient?: () => VoiceCallClient;
 }
 
+/**
+ * Wall-clock latency of the last spoken turn, in ms. Measured client-side from
+ * the events the user actually experienced — mouth to ear — so the number in
+ * the strip is the one the user felt, not a server-side estimate of it.
+ */
+export interface VoiceTurnLatency {
+  /** Utterance committed → first reply sentence. The model's thinking time. */
+  llmMs: number | null;
+  /** First sentence → first audio out of the speaker. */
+  ttsMs: number | null;
+  /** Utterance committed → first audio. The number that matters. */
+  totalMs: number | null;
+}
+
 export interface UseVoiceCall {
   status: VoiceCallStatus;
   transcript: VoiceTranscriptLine[];
@@ -27,10 +43,23 @@ export interface UseVoiceCall {
   micLevels: number[];
   muted: boolean;
   error: string | null;
+  /** Voice fell back to text. Null until it does, or once dismissed. */
+  degraded: VoiceDegradedNotice | null;
+  /** The browser refused the mic — render guidance, not a dead icon. */
+  micDenied: boolean;
+  sttProvider: string | null;
+  ttsProvider: string | null;
+  latency: VoiceTurnLatency;
   start: () => void;
   hangUp: () => void;
   toggleMute: () => void;
+  /** Push-to-talk: mic open while held, closed on release. */
+  pressToTalk: (down: boolean) => void;
+  /** Clear the degraded / mic-denied notice. */
+  dismissNotice: () => void;
 }
+
+const NO_LATENCY: VoiceTurnLatency = { llmMs: null, ttsMs: null, totalMs: null };
 
 const flatLevels = () => Array.from({ length: METER_BARS }, () => 0);
 
@@ -39,6 +68,9 @@ export function useVoiceCall(options: UseVoiceCallOptions = {}): UseVoiceCall {
   const [state, dispatch] = useReducer(voiceCallReducer, initialVoiceCallState);
   const [micLevels, setMicLevels] = useState<number[]>(flatLevels);
   const [muted, setMuted] = useState(false);
+  const [latency, setLatency] = useState<VoiceTurnLatency>(NO_LATENCY);
+  /** Marks for the in-flight turn: when it committed, when it first spoke. */
+  const turnMarks = useRef<{ committedAt: number; sentenceAt: number | null } | null>(null);
 
   const clientRef = useRef<VoiceCallClient | null>(null);
   const unsubscribeRef = useRef<(() => void) | null>(null);
@@ -99,14 +131,49 @@ export function useVoiceCall(options: UseVoiceCallOptions = {}): UseVoiceCall {
     rafRef.current = requestAnimationFrame(tick);
   }, []);
 
+  /**
+   * Stopwatch for the mouth-to-ear stages. Kept in a ref and written to state
+   * only at the two points the numbers change, so the audio path never drives a
+   * render per event.
+   */
+  const markLatency = useCallback((type: string) => {
+    const at = performance.now();
+    if (type === 'utterance_committed') {
+      turnMarks.current = { committedAt: at, sentenceAt: null };
+      setLatency(NO_LATENCY);
+      return;
+    }
+    const marks = turnMarks.current;
+    if (!marks) return;
+    if (type === 'reply_sentence' && marks.sentenceAt === null) {
+      marks.sentenceAt = at;
+      setLatency((prev) => ({ ...prev, llmMs: Math.round(at - marks.committedAt) }));
+      return;
+    }
+    if (type === 'reply_audio') {
+      setLatency((prev) =>
+        prev.totalMs !== null
+          ? prev
+          : {
+              llmMs: prev.llmMs,
+              ttsMs: marks.sentenceAt === null ? null : Math.round(at - marks.sentenceAt),
+              totalMs: Math.round(at - marks.committedAt),
+            },
+      );
+    }
+  }, []);
+
   const start = useCallback(() => {
     if (state.status !== 'idle' && state.status !== 'ended') return;
     dispatch({ type: 'start' });
 
     const client = createClient();
     clientRef.current = client;
+    setLatency(NO_LATENCY);
+    turnMarks.current = null;
     unsubscribeRef.current = client.on((event) => {
       dispatch({ type: 'client-event', event });
+      markLatency(event.type);
       if (event.type === 'disconnected') teardown();
     });
 
@@ -120,12 +187,12 @@ export function useVoiceCall(options: UseVoiceCallOptions = {}): UseVoiceCall {
         if (stream) startMeter(stream);
       })
       .catch((err: unknown) => {
-        const messageText = err instanceof Error ? err.message : 'Could not start voice call';
-        dispatch({ type: 'client-event', event: { type: 'error', error: messageText } });
+        // A refused mic is guidance, not a retry — the classifier decides which.
+        dispatch({ type: 'client-event', event: classifyVoiceStartError(err) });
         teardown();
         dispatch({ type: 'hang-up' });
       });
-  }, [state.status, createClient, startMeter, teardown]);
+  }, [state.status, createClient, startMeter, teardown, markLatency]);
 
   const hangUp = useCallback(() => {
     teardown();
@@ -140,14 +207,31 @@ export function useVoiceCall(options: UseVoiceCallOptions = {}): UseVoiceCall {
     });
   }, []);
 
+  // Push-to-talk is mute, driven by a key instead of a button: held = open,
+  // released = closed. Once the user has used it, the call stays closed between
+  // presses, which is the whole point of holding a key to speak.
+  const pressToTalk = useCallback((down: boolean) => {
+    clientRef.current?.setMuted(!down);
+    setMuted(!down);
+  }, []);
+
+  const dismissNotice = useCallback(() => dispatch({ type: 'dismiss-notice' }), []);
+
   return {
     status: state.status,
     transcript: state.transcript,
     micLevels,
     muted,
     error: state.error,
+    degraded: state.degraded,
+    micDenied: state.micDenied,
+    sttProvider: state.sttProvider,
+    ttsProvider: state.ttsProvider,
+    latency,
     start,
     hangUp,
     toggleMute,
+    pressToTalk,
+    dismissNotice,
   };
 }

@@ -2,6 +2,7 @@ import { personalityAccent } from '@ethosagent/design-tokens';
 import { useQuery } from '@tanstack/react-query';
 import { Dropdown, Input } from 'antd';
 import { type KeyboardEvent, useCallback, useEffect, useRef, useState } from 'react';
+import { TalkMicIcon } from '../../features/voice/TalkMode';
 import type { AttachmentPreview } from '../../lib/attachments';
 import { formatContextTokens } from '../../lib/format-context-tokens';
 import { rpc } from '../../rpc';
@@ -24,6 +25,12 @@ export interface ComposerProps {
   /** Text pushed in from a suggestion pill. `seq` makes picking the same
    *  suggestion twice a fresh event; the draft is replaced, not appended. */
   suggestion?: { text: string; seq: number };
+  /** Start talk-mode. Absent = this surface has no live-call affordance. */
+  onTalkMode?: () => void;
+  /** True while a call is up — the glyph reads active and stops re-arming. */
+  talkModeActive?: boolean;
+  /** Hover text for the talk glyph; also its accessible name. */
+  talkModeHint?: string;
 }
 
 export function Composer({
@@ -39,6 +46,9 @@ export function Composer({
   onGoalRun,
   contextTokens,
   suggestion,
+  onTalkMode,
+  talkModeActive,
+  talkModeHint,
 }: ComposerProps) {
   const [text, setText] = useState('');
   const [isVoiceRecording, setIsVoiceRecording] = useState(false);
@@ -436,6 +446,19 @@ export function Composer({
               <span className="composer-context-meter">
                 {formatContextTokens(contextTokens)} tokens
               </span>
+            ) : null}
+            {onTalkMode ? (
+              <button
+                type="button"
+                className={`composer-talk-btn${talkModeActive ? ' composer-talk-active' : ''}`}
+                onClick={onTalkMode}
+                disabled={talkModeActive}
+                title={talkModeHint ?? 'Talk'}
+                aria-label={talkModeHint ?? 'Talk'}
+                aria-pressed={talkModeActive ?? false}
+              >
+                <TalkMicIcon />
+              </button>
             ) : null}
             {voiceEnabled && (
               <VoiceButton

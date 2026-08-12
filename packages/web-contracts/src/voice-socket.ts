@@ -148,6 +148,9 @@ const ServerErrorSchema = z.object({
   message: z.string(),
   code: z.string(),
   utteranceId: z.string().optional(),
+  /** The provider that failed, when the stage had one resolved. Lets a
+   *  degraded-to-text notice name WHICH provider let the user down. */
+  provider: z.string().optional(),
 });
 
 const VoiceServerFrameSchema = z.discriminatedUnion('t', [

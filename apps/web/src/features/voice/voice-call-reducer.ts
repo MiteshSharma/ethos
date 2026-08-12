@@ -11,7 +11,11 @@ import type { VoiceCallEvent } from './voice-call-client';
 export type VoiceCallStatus =
   | 'idle'
   | 'connecting'
+  /** Link dropped mid-call; the socket is retrying. Text chat stays usable. */
+  | 'reconnecting'
   | 'listening'
+  /** Utterance committed, reply not yet flowing — the agent is working. */
+  | 'thinking'
   | 'agent_speaking'
   | 'interrupted'
   | 'ended';
@@ -28,17 +32,38 @@ export interface VoiceTranscriptLine {
   open?: boolean;
 }
 
+/**
+ * Voice fell back to text: the strip collapses to a dismissible inline notice
+ * naming the provider that failed, and chat keeps working.
+ */
+export interface VoiceDegradedNotice {
+  /** The provider that actually failed, when the server named it. */
+  provider: string | null;
+  message: string;
+}
+
 export interface VoiceCallState {
   status: VoiceCallStatus;
   transcript: VoiceTranscriptLine[];
   /** Last recoverable error surfaced by the session. Cleared on a fresh call. */
   error: string | null;
+  /** Set when voice is no longer usable this call. Null once dismissed. */
+  degraded: VoiceDegradedNotice | null;
+  /** The browser refused the mic. Rendered as guidance, never a dead icon. */
+  micDenied: boolean;
+  /** Providers that actually served this call, for the mono `{provider}` label. */
+  sttProvider: string | null;
+  ttsProvider: string | null;
 }
 
 export const initialVoiceCallState: VoiceCallState = {
   status: 'idle',
   transcript: [],
   error: null,
+  degraded: null,
+  micDenied: false,
+  sttProvider: null,
+  ttsProvider: null,
 };
 
 export type VoiceCallAction =
@@ -46,15 +71,27 @@ export type VoiceCallAction =
   | { type: 'connected' }
   | { type: 'hang-up' }
   | { type: 'reset' }
+  /** User dismissed the degraded-to-text / mic-denied notice. */
+  | { type: 'dismiss-notice' }
   | { type: 'client-event'; event: VoiceCallEvent };
 
 const INTERRUPTED_MARKER = '[interrupted]';
 
+/** The browser refused the mic — guidance, not an error banner. */
+export const MIC_DENIED_CODE = 'mic_permission_denied';
+
+/**
+ * Error codes that end voice for this call rather than annoying the user with a
+ * retry. STT failing means we cannot hear at all; TTS failing means the reply is
+ * already text-only. Either way the honest thing to say is "continuing in text".
+ */
+const DEGRADING_CODES = new Set(['transcribe_failed', 'synthesize_failed', 'voice_unavailable']);
+
 export function voiceCallReducer(state: VoiceCallState, action: VoiceCallAction): VoiceCallState {
   switch (action.type) {
     case 'start':
-      // Fresh call — clear any prior transcript/error.
-      return { status: 'connecting', transcript: [], error: null };
+      // Fresh call — clear any prior transcript/error/notice.
+      return { ...initialVoiceCallState, status: 'connecting' };
 
     case 'connected':
       return { ...state, status: 'listening' };
@@ -65,6 +102,9 @@ export function voiceCallReducer(state: VoiceCallState, action: VoiceCallAction)
     case 'reset':
       return initialVoiceCallState;
 
+    case 'dismiss-notice':
+      return { ...state, degraded: null, micDenied: false, error: null };
+
     case 'client-event':
       return applyClientEvent(state, action.event);
   }
@@ -73,13 +113,19 @@ export function voiceCallReducer(state: VoiceCallState, action: VoiceCallAction)
 function applyClientEvent(state: VoiceCallState, event: VoiceCallEvent): VoiceCallState {
   switch (event.type) {
     case 'utterance_committed': {
-      // The user finished speaking; the agent will respond. Close any open
+      // The user finished speaking; the agent is now working on the reply —
+      // that gap is `thinking`, the steady-accent-dot state. Close any open
       // agent line and append the user's committed utterance.
       const transcript = [
         ...closeOpenAgentLine(state.transcript),
         line(state.transcript, 'user', event.text),
       ];
-      return { ...state, status: 'listening', transcript };
+      return {
+        ...state,
+        status: 'thinking',
+        transcript,
+        ...(event.provider ? { sttProvider: event.provider } : {}),
+      };
     }
 
     case 'reply_sentence': {
@@ -111,8 +157,20 @@ function applyClientEvent(state: VoiceCallState, event: VoiceCallEvent): VoiceCa
 
     case 'reply_audio':
       // Audio playout is the hook's concern; the reducer only tracks that the
-      // agent is speaking.
-      return { ...state, status: 'agent_speaking' };
+      // agent is speaking, plus which provider actually produced the audio.
+      return {
+        ...state,
+        status: 'agent_speaking',
+        ...(event.provider ? { ttsProvider: event.provider } : {}),
+      };
+
+    case 'link':
+      // A dropped link never ends the conversation on its own — the socket
+      // retries, and the composer stays usable for text meanwhile.
+      if (state.status === 'idle' || state.status === 'ended') return state;
+      if (event.status === 'reconnecting') return { ...state, status: 'reconnecting' };
+      if (state.status === 'reconnecting') return { ...state, status: 'listening' };
+      return state;
 
     case 'reply_complete':
       return {
@@ -131,6 +189,17 @@ function applyClientEvent(state: VoiceCallState, event: VoiceCallEvent): VoiceCa
       };
 
     case 'error':
+      if (event.code === MIC_DENIED_CODE) {
+        return { ...state, status: 'ended', error: event.error, micDenied: true };
+      }
+      if (event.code && DEGRADING_CODES.has(event.code)) {
+        return {
+          ...state,
+          status: 'ended',
+          error: event.error,
+          degraded: { provider: event.provider ?? null, message: event.error },
+        };
+      }
       // Recoverable — keep the current status, surface the message.
       return { ...state, error: event.error };
 
@@ -182,6 +251,24 @@ function finalizeAgentLine(
     return [...transcript.slice(0, -1), finalized(last)];
   }
   return [...transcript, finalized({})];
+}
+
+/**
+ * The live caption line for the call strip: what the agent is saying right now.
+ *
+ * Captions ARE the accessibility story for talk-mode, so this is derived from
+ * the same transcript that persists into chat history — there is no second,
+ * caption-only source that could disagree with what was actually said. Returns
+ * null when the agent is not the one talking.
+ */
+export function voiceCaption(state: Pick<VoiceCallState, 'status' | 'transcript'>): string | null {
+  if (state.status !== 'agent_speaking' && state.status !== 'interrupted') return null;
+  for (let i = state.transcript.length - 1; i >= 0; i--) {
+    const line = state.transcript[i];
+    if (line?.role !== 'agent') continue;
+    return line.text.trim() || null;
+  }
+  return null;
 }
 
 /**

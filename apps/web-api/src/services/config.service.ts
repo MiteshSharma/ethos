@@ -193,6 +193,14 @@ function splitList(raw: string | undefined): string[] {
     .filter((s) => s.length > 0);
 }
 
+/** Like {@link pickEnum} but with no default — an unset key stays null. */
+function pickEnumOrNull<T extends string>(
+  value: string | undefined,
+  allowed: readonly T[],
+): T | null {
+  return allowed.find((a) => a === value) ?? null;
+}
+
 function pickEnum<T extends string>(
   value: string | undefined,
   allowed: readonly T[],
@@ -562,6 +570,13 @@ export interface ConfigGetResult {
   voiceTtsVoice: string | null;
   voiceTtsBaseUrl: string | null;
   voiceTtsModel: string | null;
+  voiceTtsOutputFormat: 'opus' | 'mp3' | 'wav' | 'pcm' | null;
+  voiceTtsTimeoutMs: number | null;
+  voiceTtsMaxTextLength: number | null;
+  voiceSttTimeoutMs: number | null;
+  /** `null` = the key is absent = the local-only egress gate is OFF. */
+  voiceTrustedPlugins: string[] | null;
+  voiceDefaultMode: 'off' | 'mirror_inbound' | 'all' | null;
   // Settings-page additions — see the passthrough-groups comment above.
   apiVersion: string | null;
   verbose: boolean;
@@ -680,6 +695,12 @@ export interface ConfigUpdateInput {
   voiceTtsVoice?: string;
   voiceTtsBaseUrl?: string;
   voiceTtsModel?: string;
+  voiceTtsOutputFormat?: 'opus' | 'mp3' | 'wav' | 'pcm' | null;
+  voiceTtsTimeoutMs?: number | null;
+  voiceTtsMaxTextLength?: number | null;
+  voiceSttTimeoutMs?: number | null;
+  voiceTrustedPlugins?: string[] | null;
+  voiceDefaultMode?: 'off' | 'mirror_inbound' | 'all' | null;
   // Settings-page additions. For every scalar below, `null` (or '') deletes
   // the config.yaml key so the built-in default applies again; `undefined`
   // leaves it unchanged. Record fields are full replacements.
@@ -846,6 +867,20 @@ export class ConfigService {
       voiceTtsVoice: raw.voiceTtsVoice ?? null,
       voiceTtsBaseUrl: raw.voiceTtsBaseUrl ?? null,
       voiceTtsModel: raw.voiceTtsModel ?? null,
+      voiceTtsOutputFormat: pickEnumOrNull(p['auxiliary.tts.outputFormat'], [
+        'opus',
+        'mp3',
+        'wav',
+        'pcm',
+      ]),
+      voiceTtsTimeoutMs: passNumOrNull(p, 'auxiliary.tts.timeout'),
+      voiceTtsMaxTextLength: passNumOrNull(p, 'auxiliary.tts.maxTextLength'),
+      voiceSttTimeoutMs: passNumOrNull(p, 'auxiliary.asr.timeout'),
+      // An absent key = the gate is off, which is NOT the same as an allowlist
+      // that happens to be empty.
+      voiceTrustedPlugins:
+        p['voice.trustedPlugins'] === undefined ? null : splitList(p['voice.trustedPlugins']),
+      voiceDefaultMode: pickEnumOrNull(p['voice.defaultMode'], ['off', 'mirror_inbound', 'all']),
       apiVersion: passStr(p, 'apiVersion'),
       verbose: passBool(p, 'verbose', false),
       displayVerbosity: pickEnum(
@@ -1170,6 +1205,16 @@ export class ConfigService {
     setAux('auxiliary.compression', patch.auxCompression);
     setAux('auxiliary.vision', patch.auxVision);
     setAux('auxiliary.web', patch.auxWeb);
+    // Voice keys with no other UI home. `auxiliary.*` keys the CLI parses but
+    // the repository does not model, plus the two `voice.*` keys.
+    set('auxiliary.tts.outputFormat', patch.voiceTtsOutputFormat);
+    set('auxiliary.tts.timeout', patch.voiceTtsTimeoutMs);
+    set('auxiliary.tts.maxTextLength', patch.voiceTtsMaxTextLength);
+    set('auxiliary.asr.timeout', patch.voiceSttTimeoutMs);
+    set('voice.defaultMode', patch.voiceDefaultMode);
+    // Clearing the list removes the key, which turns the egress gate off — the
+    // gate is armed by DECLARING the key, so there is nothing to keep here.
+    setList('voice.trustedPlugins', patch.voiceTrustedPlugins, ', ');
     set('a2a.enabled', patch.a2aEnabled);
     set('plugins.auto_install', patch.pluginsAutoInstall);
     set('webBaseUrl', patch.webBaseUrl);
@@ -1266,6 +1311,13 @@ export class ConfigService {
     delete cleaned.memoryCaptureModel;
     delete cleaned.memoryNotices;
     delete cleaned.voiceChime;
+    // Written above as flat config keys; never repository fields.
+    delete cleaned.voiceTtsOutputFormat;
+    delete cleaned.voiceTtsTimeoutMs;
+    delete cleaned.voiceTtsMaxTextLength;
+    delete cleaned.voiceSttTimeoutMs;
+    delete cleaned.voiceTrustedPlugins;
+    delete cleaned.voiceDefaultMode;
 
     // Convert providers to repository format when present.
     let repoProviders: RawProviderEntry[] | undefined;

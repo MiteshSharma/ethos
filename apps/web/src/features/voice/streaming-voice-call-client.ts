@@ -62,6 +62,9 @@ interface Segment {
 
 const DEFAULT_TTS_SAMPLE_RATE = 24_000;
 
+/** `reply_audio` here is a provider announcement, not a carrier of samples. */
+const EMPTY_AUDIO = new Uint8Array(0);
+
 export function createStreamingVoiceCallClient(deps: StreamingVoiceCallDeps): VoiceCallClient {
   const listeners = new Set<(event: VoiceCallEvent) => void>();
   const emit = (event: VoiceCallEvent): void => {
@@ -77,6 +80,8 @@ export function createStreamingVoiceCallClient(deps: StreamingVoiceCallDeps): Vo
   const pendingEncoded = new Map<string, Uint8Array[]>();
   let disposed = false;
   let unsubs: Array<() => void> = [];
+  /** Last TTS provider announced to the UI; re-announced only when it changes. */
+  let announcedTtsProvider: string | null = null;
 
   /** Everything tied to the current utterance goes away together. */
   const discardUtterance = (): void => {
@@ -160,12 +165,28 @@ export function createStreamingVoiceCallClient(deps: StreamingVoiceCallDeps): Vo
         if (isStale(frame.utteranceId) || !frame.final) return;
         const text = frame.text.trim();
         if (!text) return;
-        emit({ type: 'utterance_committed', text });
+        emit({
+          type: 'utterance_committed',
+          text,
+          ...(frame.provider ? { provider: frame.provider } : {}),
+        });
         void runTurn(frame.utteranceId, text);
         return;
       }
       case 'audio': {
         if (isStale(frame.utteranceId)) return;
+        // Announce WHICH provider is speaking — once, not per frame. Audio
+        // frames arrive faster than any UI needs to re-render, so this fires
+        // only when the answer changes.
+        if (frame.provider && frame.provider !== announcedTtsProvider) {
+          announcedTtsProvider = frame.provider;
+          emit({
+            type: 'reply_audio',
+            audio: EMPTY_AUDIO,
+            format: frame.codec === 'pcm_s16le' ? 'pcm' : 'opus',
+            provider: frame.provider,
+          });
+        }
         if (frame.codec === 'pcm_s16le') {
           const endsAt = deps.playout.playPcm16(
             pcm16FromBytes(payload),
@@ -208,7 +229,12 @@ export function createStreamingVoiceCallClient(deps: StreamingVoiceCallDeps): Vo
         return;
       case 'error': {
         if (frame.utteranceId && isStale(frame.utteranceId)) return;
-        emit({ type: 'error', error: frame.message, code: frame.code });
+        emit({
+          type: 'error',
+          error: frame.message,
+          code: frame.code,
+          ...(frame.provider ? { provider: frame.provider } : {}),
+        });
         if (frame.utteranceId === activeUtteranceId) {
           discardUtterance();
           deps.capture.setBargeInEnabled(false);
@@ -330,8 +356,18 @@ export function createStreamingVoiceCallClient(deps: StreamingVoiceCallDeps): Vo
             deps.capture.setBargeInEnabled(false);
             deps.capture.setCaptureEnabled(true);
           }
+          if (status !== 'closed') emit({ type: 'link', status });
         }),
       ];
+      // The session is live — say so out loud. First-run users get an audible
+      // "go ahead" instead of guessing whether the mic is on.
+      if (deps.chime !== false) {
+        try {
+          deps.capture.playEarcon();
+        } catch {
+          // Best-effort acknowledgement; never fails a connect.
+        }
+      }
     },
 
     async disconnect(): Promise<void> {
