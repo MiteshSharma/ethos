@@ -1450,6 +1450,7 @@ export class FilePersonalityRegistry implements PersonalityRegistry {
     const memoryConfig = buildMemoryConfig(cfg);
     const mcpExport = buildMcpExportConfig(cfg);
     const outboundPolicy = buildOutboundPolicy(cfg);
+    const voice = buildVoiceConfig(cfg);
 
     const model = buildModelConfig(cfg);
 
@@ -1484,6 +1485,7 @@ export class FilePersonalityRegistry implements PersonalityRegistry {
       ...(evolutionApprovalMode !== undefined
         ? { evolution_approval_mode: evolutionApprovalMode }
         : {}),
+      ...(voice !== undefined ? { voice } : {}),
     };
 
     validateUnsafeCombinations(id, config);
@@ -1677,6 +1679,46 @@ function buildMemoryConfig(
     else options[subKey] = value;
   }
   return { provider, ...(Object.keys(options).length > 0 ? { options } : {}) };
+}
+
+/**
+ * Parse the dotted `voice.*` keys into `PersonalityConfig.voice`.
+ *
+ * Dotted keys, not a nested block: `config.yaml` is flat by design, the flat
+ * parser already reads `[\w.]+` keys, and every comparable field (`fs_reach.*`,
+ * `memory.options.*`, `nightly.judge.*`) uses the same shape. Adding `voice` to
+ * `NESTED_BLOCKS` would mean a second parse path, a second render path, and a
+ * raw-block-preservation dance like `safety`'s — for four scalars and a string
+ * map. The language map mirrors `memory.options.*`: any `voice.languages.<tag>`
+ * key becomes an entry.
+ *
+ *   voice.tts_voice: af_bella
+ *   voice.tier: pipeline
+ *   voice.model: claude-haiku-4-5
+ *   voice.languages.es: ef_dora
+ *
+ * An unknown `voice.tier` is dropped rather than thrown on: a bad voice id
+ * should not make a personality unloadable — it falls back to the global voice.
+ */
+function buildVoiceConfig(
+  cfg: Record<string, string>,
+): import('@ethosagent/types').PersonalityVoiceConfig | undefined {
+  const ttsVoice = cfg['voice.tts_voice'];
+  const tier = cfg['voice.tier'];
+  const model = cfg['voice.model'];
+  const languages: Record<string, string> = {};
+  for (const [key, value] of Object.entries(cfg)) {
+    if (!key.startsWith('voice.languages.')) continue;
+    const tag = key.slice('voice.languages.'.length);
+    if (tag.length > 0 && value) languages[tag] = value;
+  }
+  const out: import('@ethosagent/types').PersonalityVoiceConfig = {
+    ...(ttsVoice ? { tts_voice: ttsVoice } : {}),
+    ...(tier === 'pipeline' || tier === 'realtime' ? { tier } : {}),
+    ...(model ? { model } : {}),
+    ...(Object.keys(languages).length > 0 ? { languages } : {}),
+  };
+  return Object.keys(out).length > 0 ? out : undefined;
 }
 
 function buildOutboundPolicy(
@@ -1974,6 +2016,7 @@ type RenderConfigInput = Omit<CreatePersonalityInput, 'id' | 'soulMd'> &
     | 'memory'
     | 'mcp_export'
     | 'outbound_policy'
+    | 'voice'
   >;
 
 function renderConfigYaml(input: RenderConfigInput): string {
@@ -2092,6 +2135,15 @@ function renderConfigYaml(input: RenderConfigInput): string {
   }
   if (input.evolution_approval_mode !== undefined) {
     lines.push(`evolution_approval_mode: ${yamlScalar(input.evolution_approval_mode)}`);
+  }
+  if (input.voice !== undefined) {
+    const v = input.voice;
+    if (v.tts_voice !== undefined) lines.push(`voice.tts_voice: ${yamlScalar(v.tts_voice)}`);
+    if (v.tier !== undefined) lines.push(`voice.tier: ${v.tier}`);
+    if (v.model !== undefined) lines.push(`voice.model: ${yamlScalar(v.model)}`);
+    for (const [tag, id] of Object.entries(v.languages ?? {})) {
+      lines.push(`voice.languages.${tag}: ${yamlScalar(id)}`);
+    }
   }
   if (input.safety !== undefined && Object.keys(input.safety).length > 0) {
     lines.push('safety:');

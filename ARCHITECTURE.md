@@ -624,6 +624,19 @@ frozen_schemas:
       - per_channel_display
       - templates_labels
       - capabilities_outside_toolset
+    # §VI amendment, voice V1a (eng-review D2): ONE field is carved out of
+    # voice_speech_audio. `voice` carries identity — TTS voice id, language→voice
+    # map, tier preference, fast-lane model — on the reasoning that a deployment
+    # chooses the voice PROVIDER while the personality chooses how it SOUNDS,
+    # the same way it chooses its model. Voice modes, VAD tuning and per-channel
+    # speech affordances remain forbidden, and the exception is closed at both
+    # ends: `personality-field-count.test.ts` fails if a second speech/audio
+    # field appears.
+    granted_field_exceptions:
+      - field: voice
+        category: voice_speech_audio
+        rationale: identity_not_setting
+        granted_by: voice_v1a_amendment
 
   plugin_contract:
     owner_class: plugin_platform_maintainers

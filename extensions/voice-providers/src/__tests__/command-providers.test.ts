@@ -1,7 +1,11 @@
+import { readFile, stat, unlink } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import type { Logger, SecretsResolver, VoiceProviderFactoryContext } from '@ethosagent/types';
 import { describe, expect, it } from 'vitest';
 import { CommandSttProvider, commandSttFactory } from '../command-stt';
 import { CommandTtsProvider, commandTtsFactory } from '../command-tts';
+import { validateSttProvider } from '../conformance';
 
 const noopLogger: Logger = {
   info() {},
@@ -34,6 +38,50 @@ describe('CommandSttProvider', () => {
     expect(provider.caps.kind).toBe('stt');
     expect(provider.caps.local).toBe(true);
     expect(provider.caps.formats).toContain('opus');
+    expect(validateSttProvider(provider)).toEqual([]);
+  });
+
+  // The one provider that genuinely needs a path — it shells out to a binary.
+  // So it writes its own temp file, gives it the right suffix, locks it to
+  // 0o600, and deletes it. No caller materializes audio on its behalf.
+  it('materializes the utterance itself, at 0o600, with a MIME-derived suffix', async () => {
+    // The transcript is the input file's NAME; `cp -p` leaves a mode-preserving
+    // copy behind so the test can inspect what the binary was actually handed.
+    const provider = new CommandSttProvider({
+      name: 'echo-stt',
+      command: 'basename {input_path} > {output_path}; cp -p {input_path} {input_path}.seen',
+    });
+
+    const name = await provider.transcribeBuffer({
+      data: new Uint8Array([1, 2, 3, 4]),
+      mimeType: 'audio/webm',
+    });
+
+    // Suffix derived from the declared MIME, so the binary can sniff it.
+    expect(name).toMatch(/^ethos-stt-[0-9a-f]{16}\.webm$/);
+
+    const original = join(tmpdir(), name);
+    const copy = `${original}.seen`;
+    try {
+      // The bytes the binary saw are the bytes we were handed.
+      expect(Array.from(await readFile(copy))).toEqual([1, 2, 3, 4]);
+      // Captured voice is written owner-only.
+      expect((await stat(copy)).mode & 0o777).toBe(0o600);
+      // ...and does not outlive the transcription that consumed it.
+      await expect(stat(original)).rejects.toThrow();
+    } finally {
+      await unlink(copy).catch(() => {});
+    }
+  });
+
+  it('defaults to a .wav suffix when the MIME is absent or unknown', async () => {
+    const provider = new CommandSttProvider({
+      name: 'name-stt',
+      command: 'basename {input_path} > {output_path}',
+    });
+    await expect(provider.transcribeBuffer({ data: new Uint8Array([1]) })).resolves.toMatch(
+      /\.wav$/,
+    );
   });
 });
 

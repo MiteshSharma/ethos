@@ -20,6 +20,7 @@ import type {
   StreamingSttProvider,
   StreamingTtsProvider,
 } from '@ethosagent/types';
+import { STT_CONTRACT_VERSION } from '@ethosagent/types';
 import {
   type AgentTurnRunner,
   VoiceSession,
@@ -40,8 +41,8 @@ function arg(name: string, fallback: number): number {
 function mockStt(endpointMs: number): StreamingSttProvider {
   return {
     name: 'mock-stt',
-    caps: { kind: 'stt', formats: ['pcm'], streaming: true, contractVersion: 1 },
-    transcribe: async () => 'what is the weather today',
+    caps: { kind: 'stt', formats: ['pcm'], streaming: true, contractVersion: STT_CONTRACT_VERSION },
+    transcribeBuffer: async () => 'what is the weather today',
     async *transcribeStream() {
       // Endpoint stability + STT settling.
       await sleep(endpointMs);

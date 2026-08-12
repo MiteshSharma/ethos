@@ -1,8 +1,10 @@
 import type {
+  SttAudio,
   SttProvider,
   VoiceCapabilities,
   VoiceProviderFactoryContext,
 } from '@ethosagent/types';
+import { STT_CONTRACT_VERSION } from '@ethosagent/types';
 import { transcribeOpenAiCompat } from './openai-compat';
 
 export class OpenAiSttProvider implements SttProvider {
@@ -21,21 +23,22 @@ export class OpenAiSttProvider implements SttProvider {
       kind: 'stt',
       formats: ['opus', 'mp3', 'wav'],
       local: false,
-      contractVersion: 1,
+      contractVersion: STT_CONTRACT_VERSION,
     };
   }
 
-  async transcribe(
-    audioPath: string,
+  async transcribeBuffer(
+    audio: SttAudio,
     opts?: { language?: string; signal?: AbortSignal },
   ): Promise<string> {
     return transcribeOpenAiCompat({
       baseUrl: this.baseUrl,
       apiKey: this.apiKey,
       model: this.model,
-      audioPath,
+      audio,
       label: 'OpenAI STT',
-      signal: opts?.signal,
+      ...(opts?.language ? { language: opts.language } : {}),
+      ...(opts?.signal ? { signal: opts.signal } : {}),
     });
   }
 }

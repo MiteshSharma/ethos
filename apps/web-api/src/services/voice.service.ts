@@ -1,7 +1,3 @@
-import { randomBytes } from 'node:crypto';
-import { unlink, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import { resolveSttProvider, resolveTtsProvider, type VoiceResolution } from '@ethosagent/core';
 import type {
   SecretsResolver,
@@ -203,23 +199,22 @@ export class VoiceService {
       );
     }
 
+    // The browser's utterance goes to the provider as bytes. It used to land
+    // in a temp file first, purely so the provider could read it back — a
+    // write, a read and a cleanup obligation on captured voice, for a payload
+    // that never needed to touch this disk.
     const buf = Buffer.from(audioBase64, 'base64');
-    const ext = mimeType.includes('webm') ? '.webm' : mimeType.includes('ogg') ? '.ogg' : '.wav';
-    const tempPath = join(tmpdir(), `ethos-web-stt-${randomBytes(8).toString('hex')}${ext}`);
-
-    try {
-      await writeFile(tempPath, buf);
-      const raw = await resolution.provider.transcribe(tempPath);
-      if (isHallucination(raw)) {
-        throw new Error('Could not transcribe audio — try again');
-      }
-      const trimmed = raw.trim();
-      if (!trimmed) {
-        throw new Error('Could not transcribe audio — try again');
-      }
-      return trimmed;
-    } finally {
-      await unlink(tempPath).catch(() => {});
+    const raw = await resolution.provider.transcribeBuffer({
+      data: new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength),
+      mimeType,
+    });
+    if (isHallucination(raw)) {
+      throw new Error('Could not transcribe audio — try again');
     }
+    const trimmed = raw.trim();
+    if (!trimmed) {
+      throw new Error('Could not transcribe audio — try again');
+    }
+    return trimmed;
   }
 }

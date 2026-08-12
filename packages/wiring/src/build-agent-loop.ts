@@ -970,8 +970,6 @@ export async function buildAgentLoop(
   // native bindings, which no in-repo caller passes yet.
   const voiceStack = await buildVoiceStack({
     config,
-    storage: wiringCtx.storage,
-    dataDir,
     sttProviders: infra.sttProviders,
     ttsProviders: infra.ttsProviders,
     ...(config.secretsResolver ? { secrets: config.secretsResolver } : {}),

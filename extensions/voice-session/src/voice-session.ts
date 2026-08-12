@@ -158,15 +158,14 @@ export class VoiceSession {
     await this.playout.idle();
   }
 
+  /**
+   * Prefer live partials when the provider advertises them; otherwise wrap the
+   * batch provider in the utterance-buffered adapter. Total by construction —
+   * every configured provider yields a working session, because the buffered
+   * fallback needs nothing injected.
+   */
   private resolveStt(stt: SttProvider): StreamingSttProvider {
-    if (isStreamingSttProvider(stt)) return stt;
-    const pcmToPath = this.config.pcmToPath;
-    if (!pcmToPath) {
-      throw new Error(
-        'VoiceSession: batch STT provider requires config.pcmToPath for utterance-buffered fallback',
-      );
-    }
-    return createBufferedSttAdapter(stt, pcmToPath);
+    return isStreamingSttProvider(stt) ? stt : createBufferedSttAdapter(stt);
   }
 
   private async handleUtterance(chunks: PcmChunk[]): Promise<void> {

@@ -823,3 +823,75 @@ describe('safety block preservation', () => {
     expect(raw).toContain('api.example.com');
   });
 });
+
+// `PersonalityConfig.voice` — the voice V1a schema amendment. It rides the
+// established DOTTED-KEY convention (`fs_reach.*`, `memory.options.*`,
+// `nightly.judge.*`) rather than becoming a second nested block, so the flat
+// parser reads it unchanged and the renderer emits it the same way it emits
+// every other structured field.
+describe('voice round-trip', () => {
+  it('parses the dotted voice.* keys into the voice block', async () => {
+    await seedPersonality(
+      'voice-parse',
+      `${[
+        'name: VoiceParse',
+        'voice.tts_voice: af_bella',
+        'voice.tier: pipeline',
+        'voice.model: claude-haiku-4-5',
+        'voice.languages.es: ef_dora',
+        'voice.languages.ja: jf_alpha',
+      ].join('\n')}\n`,
+    );
+    const registry = makeRegistry();
+    await registry.loadFromDirectory(join(testDir, 'personalities'));
+
+    expect(registry.get('voice-parse')?.voice).toEqual({
+      tts_voice: 'af_bella',
+      tier: 'pipeline',
+      model: 'claude-haiku-4-5',
+      languages: { es: 'ef_dora', ja: 'jf_alpha' },
+    });
+  });
+
+  it('carries no voice block when no voice.* key is set', async () => {
+    await seedPersonality('voice-absent', 'name: VoiceAbsent\n');
+    const registry = makeRegistry();
+    await registry.loadFromDirectory(join(testDir, 'personalities'));
+    expect(registry.get('voice-absent')?.voice).toBeUndefined();
+  });
+
+  it('drops an unknown tier rather than making the personality unloadable', async () => {
+    await seedPersonality(
+      'voice-bad-tier',
+      'name: VoiceBadTier\nvoice.tts_voice: af_bella\nvoice.tier: telepathy\n',
+    );
+    const registry = makeRegistry();
+    await registry.loadFromDirectory(join(testDir, 'personalities'));
+    expect(registry.get('voice-bad-tier')?.voice).toEqual({ tts_voice: 'af_bella' });
+  });
+
+  it('survives an unrelated update and re-load', async () => {
+    await seedPersonality(
+      'voice-persist',
+      'name: VoicePersist\nvoice.tts_voice: af_bella\nvoice.languages.es: ef_dora\n',
+    );
+    const registry = makeRegistry();
+    await registry.loadFromDirectory(join(testDir, 'personalities'));
+
+    await registry.update('voice-persist', { description: 'now with a description' });
+
+    const raw = await readFile(
+      join(testDir, 'personalities', 'voice-persist', 'config.yaml'),
+      'utf-8',
+    );
+    expect(raw).toContain('voice.tts_voice: af_bella');
+    expect(raw).toContain('voice.languages.es: ef_dora');
+
+    const fresh = makeRegistry();
+    await fresh.loadFromDirectory(join(testDir, 'personalities'));
+    expect(fresh.get('voice-persist')?.voice).toEqual({
+      tts_voice: 'af_bella',
+      languages: { es: 'ef_dora' },
+    });
+  });
+});

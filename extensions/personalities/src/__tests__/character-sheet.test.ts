@@ -494,3 +494,46 @@ describe('renderCharacterSheet — renderers (Lane E)', () => {
     expect(withRenderer).not.toContain('(none)\n- Renders');
   });
 });
+
+// The voice V1a schema amendment made visible. `renderCharacterSheet` is the
+// single generator behind `ethos personality show <id>` and the web
+// Personalities tab, so the block landing here is the block a user sees.
+describe('voice block', () => {
+  const base: PersonalityConfig = { id: 'speaker', name: 'Speaker' };
+
+  it('is omitted entirely when the personality declares no voice', () => {
+    expect(renderCharacterSheet(base, '')).not.toContain('## Voice');
+  });
+
+  it('renders every knob, naming what each unset one inherits', () => {
+    const sheet = renderCharacterSheet({ ...base, voice: { tts_voice: 'af_bella' } }, '');
+    expect(sheet).toContain('## Voice');
+    expect(sheet).toContain('- TTS voice: af_bella');
+    expect(sheet).toContain('- Tier: (deployment default)');
+    expect(sheet).toContain('- Fast-lane model: (personality model)');
+  });
+
+  it('lists the language map in stable order', () => {
+    const sheet = renderCharacterSheet(
+      {
+        ...base,
+        voice: {
+          tts_voice: 'af_bella',
+          languages: { ja: 'jf_alpha', es: 'ef_dora' },
+          tier: 'realtime',
+          model: 'claude-haiku-4-5',
+        },
+      },
+      '',
+    );
+    expect(sheet).toContain('- By language:\n    - es: ef_dora\n    - ja: jf_alpha');
+    expect(sheet).toContain('- Tier: realtime');
+    expect(sheet).toContain('- Fast-lane model: claude-haiku-4-5');
+  });
+
+  it('says the TTS voice is inherited when only the model is declared', () => {
+    const sheet = renderCharacterSheet({ ...base, voice: { model: 'fast' } }, '');
+    expect(sheet).toContain('- TTS voice: (global default)');
+    expect(sheet).toContain('- Fast-lane model: fast');
+  });
+});

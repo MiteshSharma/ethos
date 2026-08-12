@@ -17,6 +17,7 @@
 
 import type {
   Logger,
+  PersonalityVoiceConfig,
   SecretsResolver,
   SttProvider,
   SttProviderRegistry,
@@ -174,4 +175,58 @@ export function unwrapVoiceResolution<P>(resolution: VoiceResolution<P>): {
 } {
   if (!resolution.ok) throw new VoiceProviderError(resolution);
   return { provider: resolution.provider, providerId: resolution.providerId };
+}
+
+// ---------------------------------------------------------------------------
+// Personality voice preferences
+// ---------------------------------------------------------------------------
+
+export interface ResolveVoicePreferencesOptions {
+  /** `PersonalityConfig.voice` for the personality speaking this turn. */
+  personality?: PersonalityVoiceConfig;
+  /** Global default from `auxiliary.tts.voice` in `~/.ethos/config.yaml`. */
+  globalTtsVoice?: string;
+  /** Global fast-lane model default, when a deployment configures one. */
+  globalModel?: string;
+  /** Global tier default. */
+  globalTier?: 'pipeline' | 'realtime';
+  /** BCP-47 tag of the turn, selecting from the language→voice map. */
+  language?: string;
+}
+
+export interface ResolvedVoicePreferences {
+  /** Voice id to hand the TTS provider. Undefined → the provider's own default. */
+  ttsVoice?: string;
+  /** Which tier this personality wants. Undefined → the deployment decides. */
+  tier?: 'pipeline' | 'realtime';
+  /** Fast-lane model for spoken turns. Undefined → the personality's normal model. */
+  model?: string;
+}
+
+/**
+ * Resolve the effective voice preferences for a turn: personality first,
+ * global config as the fallback.
+ *
+ * Voice is part of a personality's identity, not a deployment setting — a
+ * deployment picks the PROVIDER, the personality picks how it SOUNDS. So the
+ * `voice` block wins wherever it speaks, and silence in it means "inherit".
+ * Language-specific entries beat the personality's default voice, because a
+ * personality that declares a Spanish voice means it when speaking Spanish.
+ *
+ * Sole resolution path for this precedence: the character sheet, the session
+ * builder, and (later) the realtime tier all read the same answer.
+ */
+export function resolveVoicePreferences(
+  opts: ResolveVoicePreferencesOptions,
+): ResolvedVoicePreferences {
+  const personality = opts.personality;
+  const languageVoice = opts.language ? personality?.languages?.[opts.language] : undefined;
+  const ttsVoice = languageVoice ?? personality?.tts_voice ?? opts.globalTtsVoice;
+  const tier = personality?.tier ?? opts.globalTier;
+  const model = personality?.model ?? opts.globalModel;
+  return {
+    ...(ttsVoice ? { ttsVoice } : {}),
+    ...(tier ? { tier } : {}),
+    ...(model ? { model } : {}),
+  };
 }

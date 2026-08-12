@@ -19,9 +19,12 @@
 //      provider that actually ran, and the local-only egress gate cannot be
 //      bypassed by constructing a provider some other way.
 
-import { createHash } from 'node:crypto';
-import { join } from 'node:path';
-import { resolveSttProvider, resolveTtsProvider, unwrapVoiceResolution } from '@ethosagent/core';
+import {
+  resolveSttProvider,
+  resolveTtsProvider,
+  resolveVoicePreferences,
+  unwrapVoiceResolution,
+} from '@ethosagent/core';
 import type {
   LiveKitRoomClient,
   LiveKitTokenMinter,
@@ -33,20 +36,13 @@ import type {
 import { createLiveKitTransport } from '@ethosagent/platform-voice';
 import type {
   Logger,
-  PcmChunk,
+  PersonalityConfig,
   SecretsResolver,
-  Storage,
-  SttProvider,
   SttProviderRegistry,
   TtsProviderRegistry,
 } from '@ethosagent/types';
 import type { AgentTurnRunner, VoiceSessionConfig, VoiceSpanSink } from '@ethosagent/voice-session';
-import {
-  BufferedVoiceSpanWriter,
-  EnergyVad,
-  encodeWav,
-  VoiceSession,
-} from '@ethosagent/voice-session';
+import { BufferedVoiceSpanWriter, EnergyVad, VoiceSession } from '@ethosagent/voice-session';
 import type { WiringConfig } from './index';
 import type { EthosObservability } from './observability/ethos-observability';
 
@@ -62,9 +58,6 @@ export interface LiveKitBindings {
 
 export interface BuildVoiceStackDeps {
   config: WiringConfig;
-  storage: Storage;
-  /** Root of `~/.ethos` — buffered utterance audio lands under it. */
-  dataDir: string;
   sttProviders: SttProviderRegistry;
   ttsProviders: TtsProviderRegistry;
   secrets?: SecretsResolver;
@@ -78,10 +71,18 @@ export interface BuildVoiceStackDeps {
 }
 
 export interface CreateVoiceSessionOptions {
-  /** `voice:<botKey>:<callerId>` — stamped on spans and used to key temp audio. */
+  /** `voice:<botKey>:<callerId>` — stamped on every span for this lane. */
   laneKey: string;
   /** Drives one agent turn. `AgentLoop` satisfies this structurally. */
   runner: AgentTurnRunner;
+  /**
+   * The personality speaking on this lane. Its `voice` block wins over the
+   * global `auxiliary.tts.*` defaults — voice is part of who a personality is,
+   * not a deployment setting (see `PersonalityConfig.voice`).
+   */
+  personality?: PersonalityConfig;
+  /** BCP-47 tag selecting from the personality's language→voice map. */
+  language?: string;
   /** Endpointing / filler / voice overrides layered over the resolved defaults. */
   sessionConfig?: VoiceSessionConfig;
 }
@@ -171,33 +172,30 @@ export async function buildVoiceStack(deps: BuildVoiceStackDeps): Promise<VoiceS
     onDrop: (total) => deps.logger.warn(`voice: span buffer full — ${total} span(s) dropped`),
   });
 
-  const audioDir = join(deps.dataDir, 'tmp', 'voice');
-
   const createSession = (opts: CreateVoiceSessionOptions): VoiceSession => {
     const stt = unwrapVoiceResolution(sttResolution);
     const speech = unwrapVoiceResolution(ttsResolution);
-    // Batch-only providers read a FILE, so they get the utterance-buffered
-    // fallback with a session-keyed path through Storage. Streaming providers
-    // never call it (VoiceSession prefers `transcribeStream`), so supplying it
-    // unconditionally costs nothing and is what makes construction from real
-    // config total instead of throwing.
-    const pcmToPath = createPcmToPath({
-      storage: deps.storage,
-      dir: audioDir,
-      laneKey: opts.laneKey,
+    // Personality voice > global `auxiliary.tts.voice`. Resolved through the
+    // SAME function every other surface uses, so "which voice served this
+    // turn" has one answer.
+    const preferences = resolveVoicePreferences({
+      ...(opts.personality?.voice ? { personality: opts.personality.voice } : {}),
+      ...(tts?.voice ? { globalTtsVoice: tts.voice } : {}),
+      ...(opts.language ? { language: opts.language } : {}),
     });
     return new VoiceSession({
       runner: opts.runner,
-      stt: withTempFileCleanup(stt.provider, deps.storage),
+      // Batch-only providers get the utterance-buffered fallback inside
+      // VoiceSession — WAV bytes in memory, no temp file, nothing to inject.
+      stt: stt.provider,
       tts: speech.provider,
       vad: new EnergyVad(),
       spans: spanWriter,
       laneKey: opts.laneKey,
       logger: deps.logger,
       config: {
-        ...(tts?.voice ? { ttsVoice: tts.voice } : {}),
+        ...(preferences.ttsVoice ? { ttsVoice: preferences.ttsVoice } : {}),
         ...opts.sessionConfig,
-        pcmToPath,
       },
     });
   };
@@ -253,56 +251,6 @@ function providerConfigFrom(
     ...(cfg.baseUrl !== undefined ? { baseUrl: cfg.baseUrl } : {}),
     ...(cfg.voice !== undefined ? { voice: cfg.voice } : {}),
     ...(cfg.command !== undefined ? { command: cfg.command } : {}),
-  };
-}
-
-/**
- * Filesystem-safe stem for a lane key. Sanitizing alone would collide
- * (`voice:a:b` and `voice_a_b` sanitize identically), so a short digest of the
- * ORIGINAL key is appended — two lanes must never share one utterance file.
- */
-function laneFileStem(laneKey: string): string {
-  const safe = laneKey.replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 96);
-  const digest = createHash('sha256').update(laneKey).digest('hex').slice(0, 8);
-  return `${safe}-${digest}`;
-}
-
-/**
- * Materialize a buffered utterance as a WAV a batch STT provider can read.
- * One file per lane (overwritten each utterance — a lane has one utterance in
- * flight at a time), written atomically so a provider can never read a
- * half-flushed header. All of it goes through `Storage`, never `node:fs`.
- */
-export function createPcmToPath(opts: {
-  storage: Storage;
-  dir: string;
-  laneKey: string;
-}): (chunks: PcmChunk[]) => Promise<string> {
-  const path = join(opts.dir, `${laneFileStem(opts.laneKey)}.wav`);
-  return async (chunks: PcmChunk[]): Promise<string> => {
-    await opts.storage.mkdir(opts.dir);
-    await opts.storage.writeAtomic(path, encodeWav(chunks), { mode: 0o600 });
-    return path;
-  };
-}
-
-/**
- * Wrap a batch STT provider so the temp utterance file is removed once it has
- * been read. Captured voice is the most sensitive artifact the system touches;
- * it should not outlive the transcription that consumed it.
- */
-function withTempFileCleanup(provider: SttProvider, storage: Storage): SttProvider {
-  if (provider.caps.streaming === true) return provider;
-  return {
-    name: provider.name,
-    caps: provider.caps,
-    transcribe: async (audioPath, transcribeOpts) => {
-      try {
-        return await provider.transcribe(audioPath, transcribeOpts);
-      } finally {
-        await storage.remove(audioPath).catch(() => {});
-      }
-    },
   };
 }
 

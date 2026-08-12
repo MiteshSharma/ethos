@@ -1,13 +1,16 @@
 import { execFile } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { readFile, unlink } from 'node:fs/promises';
+import { readFile, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type {
+  SttAudio,
   SttProvider,
   VoiceCapabilities,
   VoiceProviderFactoryContext,
 } from '@ethosagent/types';
+import { STT_CONTRACT_VERSION } from '@ethosagent/types';
+import { AUDIO_EXT_BY_MIME, baseMimeType } from './openai-compat';
 
 export interface CommandSttConfig {
   name: string;
@@ -32,18 +35,33 @@ export class CommandSttProvider implements SttProvider {
       formats: ['opus', 'mp3', 'wav'],
       local: true,
       languages: config.languages,
-      contractVersion: 1,
+      contractVersion: STT_CONTRACT_VERSION,
     };
   }
 
-  async transcribe(audioPath: string, opts?: { language?: string }): Promise<string> {
-    const outputPath = join(tmpdir(), `ethos-stt-${randomBytes(8).toString('hex')}.txt`);
+  /**
+   * The one provider that genuinely needs a path: it hands `{input_path}` to a
+   * binary. So it materializes the utterance itself, in the OS temp dir, mode
+   * 0o600, and unlinks it in `finally` — the file never outlives the call that
+   * created it. This is deliberately provider-local: the alternative (every
+   * caller writing a temp file so ONE provider can read one) is what the
+   * buffer contract exists to delete.
+   *
+   * `~/.ethos/` access goes through `Storage`; this is `os.tmpdir()` and a
+   * provider-owned lifetime, which is why `extensions/voice-providers/` is a
+   * documented `node:fs` carve-out (see `apps/ethos/src/__tests__/no-raw-fs.test.ts`).
+   */
+  async transcribeBuffer(audio: SttAudio, opts?: { language?: string }): Promise<string> {
+    const stem = `ethos-stt-${randomBytes(8).toString('hex')}`;
+    const inputPath = join(tmpdir(), `${stem}.${extensionFor(audio.mimeType)}`);
+    const outputPath = join(tmpdir(), `${stem}.txt`);
     const cmd = this.command
-      .replace(/\{input_path\}/g, audioPath)
+      .replace(/\{input_path\}/g, inputPath)
       .replace(/\{output_path\}/g, outputPath)
       .replace(/\{language\}/g, opts?.language ?? 'auto');
 
     try {
+      await writeFile(inputPath, audio.data, { mode: 0o600 });
       await new Promise<void>((resolve, reject) => {
         execFile('sh', ['-c', cmd], { timeout: this.timeout }, (err) => {
           if (err) reject(err);
@@ -53,9 +71,20 @@ export class CommandSttProvider implements SttProvider {
       const result = await readFile(outputPath, 'utf-8');
       return result.trim();
     } finally {
-      await unlink(outputPath).catch(() => {});
+      await Promise.all([unlink(inputPath).catch(() => {}), unlink(outputPath).catch(() => {})]);
     }
   }
+}
+
+/**
+ * Extension for the temp input file. CLI transcribers (whisper.cpp and
+ * friends) sniff the container from the suffix, so an honest one matters.
+ * Unknown/absent MIME → `wav`, the format the utterance-buffered fallback
+ * produces and the one every such binary accepts.
+ */
+function extensionFor(mimeType: string | undefined): string {
+  const base = baseMimeType(mimeType);
+  return (base ? AUDIO_EXT_BY_MIME[base] : undefined) ?? 'wav';
 }
 
 /**

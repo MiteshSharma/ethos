@@ -1,3 +1,4 @@
+import { STT_CONTRACT_VERSION } from '@ethosagent/types';
 import { describe, expect, it, vi } from 'vitest';
 import { VoiceService } from '../voice.service';
 
@@ -5,8 +6,12 @@ import { VoiceService } from '../voice.service';
 function serviceReturning(raw: string): VoiceService {
   const provider = {
     name: 'test-stt',
-    caps: { kind: 'stt' as const, formats: ['opus' as const], contractVersion: 1 },
-    transcribe: vi.fn().mockResolvedValue(raw),
+    caps: {
+      kind: 'stt' as const,
+      formats: ['opus' as const],
+      contractVersion: STT_CONTRACT_VERSION,
+    },
+    transcribeBuffer: vi.fn().mockResolvedValue(raw),
   };
   return new VoiceService({
     sttRegistry: {
@@ -49,8 +54,12 @@ describe('VoiceService', () => {
   it('transcribe uses configGetter when initial provider is not set', async () => {
     const mockProvider = {
       name: 'test-stt',
-      caps: { kind: 'stt' as const, formats: ['opus' as const], contractVersion: 1 },
-      transcribe: vi.fn().mockResolvedValue('hello world'),
+      caps: {
+        kind: 'stt' as const,
+        formats: ['opus' as const],
+        contractVersion: STT_CONTRACT_VERSION,
+      },
+      transcribeBuffer: vi.fn().mockResolvedValue('hello world'),
     };
     const registry = {
       register: vi.fn(),
@@ -71,8 +80,12 @@ describe('VoiceService', () => {
   it('transcribe filters hallucinated text', async () => {
     const mockProvider = {
       name: 'test-stt',
-      caps: { kind: 'stt' as const, formats: ['opus' as const], contractVersion: 1 },
-      transcribe: vi.fn().mockResolvedValue('Thanks for watching!'),
+      caps: {
+        kind: 'stt' as const,
+        formats: ['opus' as const],
+        contractVersion: STT_CONTRACT_VERSION,
+      },
+      transcribeBuffer: vi.fn().mockResolvedValue('Thanks for watching!'),
     };
     const registry = {
       register: vi.fn(),
@@ -114,6 +127,38 @@ describe('VoiceService', () => {
     );
   });
 
+  // The browser's utterance goes to the provider as bytes. It used to be
+  // written to a temp file first so the provider could read it back — a write,
+  // a read and a cleanup obligation on captured voice, for nothing.
+  it('hands the provider the decoded bytes and the recorded MIME, not a path', async () => {
+    const provider = {
+      name: 'test-stt',
+      caps: {
+        kind: 'stt' as const,
+        formats: ['opus' as const],
+        contractVersion: STT_CONTRACT_VERSION,
+      },
+      transcribeBuffer: vi.fn().mockResolvedValue('hello world'),
+    };
+    const svc = new VoiceService({
+      sttRegistry: {
+        register: vi.fn(),
+        unregister: vi.fn(),
+        get: vi.fn(() => async () => provider),
+        list: vi.fn(() => ['test-stt']),
+      },
+      providerName: 'test-stt',
+    });
+
+    // 'dGVzdA==' is base64('test').
+    await expect(svc.transcribe('dGVzdA==', 'audio/webm;codecs=opus')).resolves.toBe('hello world');
+
+    const arg = provider.transcribeBuffer.mock.calls[0]?.[0];
+    expect(arg.mimeType).toBe('audio/webm;codecs=opus');
+    expect(arg.data).toBeInstanceOf(Uint8Array);
+    expect(new TextDecoder().decode(arg.data)).toBe('test');
+  });
+
   // The browser talk lane resolves through the SAME shared path as the gateway,
   // so the local-only egress gate applies to a provider chosen live in Settings
   // just as it does to one named in config.yaml.
@@ -121,8 +166,13 @@ describe('VoiceService', () => {
     function registryWith(local: boolean) {
       const provider = {
         name: 'cloud-stt',
-        caps: { kind: 'stt' as const, formats: ['opus' as const], local, contractVersion: 1 },
-        transcribe: vi.fn().mockResolvedValue('hello world'),
+        caps: {
+          kind: 'stt' as const,
+          formats: ['opus' as const],
+          local,
+          contractVersion: STT_CONTRACT_VERSION,
+        },
+        transcribeBuffer: vi.fn().mockResolvedValue('hello world'),
       };
       return {
         provider,
@@ -147,7 +197,7 @@ describe('VoiceService', () => {
         /refusing to send audio off this machine/,
       );
       // The refusal happens BEFORE any audio is handed to the provider.
-      expect(provider.transcribe).not.toHaveBeenCalled();
+      expect(provider.transcribeBuffer).not.toHaveBeenCalled();
     });
 
     it('refuses a non-local provider selected live in Settings', async () => {
@@ -161,7 +211,7 @@ describe('VoiceService', () => {
       await expect(svc.transcribe('dGVzdA==', 'audio/webm')).rejects.toThrow(
         /refusing to send audio off this machine/,
       );
-      expect(provider.transcribe).not.toHaveBeenCalled();
+      expect(provider.transcribeBuffer).not.toHaveBeenCalled();
     });
 
     it('lets a local provider through with the gate armed', async () => {
@@ -209,8 +259,12 @@ describe('VoiceService', () => {
   it('transcribe filters empty text', async () => {
     const mockProvider = {
       name: 'test-stt',
-      caps: { kind: 'stt' as const, formats: ['opus' as const], contractVersion: 1 },
-      transcribe: vi.fn().mockResolvedValue('   '),
+      caps: {
+        kind: 'stt' as const,
+        formats: ['opus' as const],
+        contractVersion: STT_CONTRACT_VERSION,
+      },
+      transcribeBuffer: vi.fn().mockResolvedValue('   '),
     };
     const registry = {
       register: vi.fn(),

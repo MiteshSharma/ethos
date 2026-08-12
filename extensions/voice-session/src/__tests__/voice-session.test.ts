@@ -111,6 +111,9 @@ describe('VoiceSession', () => {
     expect(session.lastReplyText()).toBe('Hello there. [interrupted]');
   });
 
+  // Construction is TOTAL: a batch-only provider needs nothing injected. The
+  // utterance-buffered fallback encodes the frames as a WAV in memory, so
+  // there is no `pcmToPath` to forget and no session that throws without one.
   it('batch-only STT/TTS fallback path works', async () => {
     const clock = makeClock();
     const session = new VoiceSession({
@@ -119,7 +122,6 @@ describe('VoiceSession', () => {
       tts: batchTts(),
       vad: new FakeVad(),
       now: clock.now,
-      config: { pcmToPath: async () => '/fake/utterance.wav' },
     });
     const events = collect(session);
 

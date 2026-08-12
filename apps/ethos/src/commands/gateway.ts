@@ -876,6 +876,9 @@ export async function runGatewayStart(opts: GatewayStartOptions = {}): Promise<v
       : new Gateway({
           bots,
           attachmentCache,
+          // Reading cached attachment bytes: an inbound voice note is
+          // transcribed from the audio itself, not from a path.
+          storage,
           adapters: adapterMap,
           deliveryLedger,
           resolveUserId,

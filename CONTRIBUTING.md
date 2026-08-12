@@ -67,6 +67,8 @@ Defined in `packages/types/src/personality.ts`. Any PR adding a top-level field 
 
 The schema is intentionally narrow. Voice modes, emotion tags, mood files, and label or response templates are NOT personality concerns — they belong in skills or per-channel adapter config.
 
+One exception was granted deliberately, and it is the shape every future request in this category will be measured against: `voice` (voice V1a, eng-review D2) carries a personality's TTS voice id, language→voice map, tier preference, and fast-lane model. It survived review because a deployment chooses the voice *provider* while the personality chooses how it *sounds* — identity, like `model`, not a setting. Voice *modes*, VAD tuning, and per-channel speech affordances stay out, and `personality-field-count.test.ts` now fails if a second speech/audio-shaped top-level field appears.
+
 ### Plugin contract
 
 Defined in `packages/plugin-contract/src/`. Any breaking change (field

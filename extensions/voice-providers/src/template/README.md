@@ -11,9 +11,14 @@ Starter template for building a custom Ethos voice provider plugin.
 
 ## Example STT provider
 
+An STT provider receives the utterance **as bytes**, never as a path. Declare
+`STT_CONTRACT_VERSION` in your caps — a provider still declaring `1` is claiming
+the removed `transcribe(audioPath)` signature and fails conformance.
+
 ```typescript
 import type { EthosPluginApi } from '@ethosagent/plugin-sdk';
-import type { SttProvider, VoiceCapabilities } from '@ethosagent/types';
+import type { SttAudio, SttProvider, VoiceCapabilities } from '@ethosagent/types';
+import { STT_CONTRACT_VERSION } from '@ethosagent/types';
 
 class MySttProvider implements SttProvider {
   readonly name = 'my-stt';
@@ -21,11 +26,16 @@ class MySttProvider implements SttProvider {
     kind: 'stt',
     formats: ['opus', 'mp3', 'wav'],
     local: false,
-    contractVersion: 1,
+    contractVersion: STT_CONTRACT_VERSION,
   };
 
-  async transcribe(audioPath: string): Promise<string> {
-    // Your implementation here
+  async transcribeBuffer(
+    audio: SttAudio,
+    opts?: { language?: string; signal?: AbortSignal },
+  ): Promise<string> {
+    // `audio.data` is the complete utterance; `audio.mimeType` describes it
+    // (e.g. 'audio/webm', 'audio/wav'). Honour `opts.signal` so barge-in can
+    // abort an in-flight upload.
     return 'transcribed text';
   }
 }
@@ -34,6 +44,17 @@ export function activate(api: EthosPluginApi): void {
   api.registerSttProvider('my-stt', () => new MySttProvider());
 }
 ```
+
+If your transcriber is a binary that needs a file on disk, write your own temp
+file inside `transcribeBuffer` and delete it in a `finally` — see
+`command-stt.ts`. Do not ask the caller for a path: captured voice is the most
+sensitive artifact the system handles, and whoever writes it owns deleting it.
+
+### Streaming STT (optional)
+
+Implement `StreamingSttProvider` in addition and set `caps.streaming: true`.
+Callers prefer `transcribeStream` when the flag is set and fall back to
+`transcribeBuffer` otherwise, so a streaming provider must still implement both.
 
 ## Example TTS provider
 
@@ -74,11 +95,14 @@ auxiliary:
 
 ## Conformance
 
-Use `validateVoiceCaps` from `@ethosagent/voice-providers` to verify your caps declaration:
+Use `validateSttProvider` / `validateTtsProvider` from `@ethosagent/voice-providers`
+to check the whole provider — caps *and* the methods those caps promise:
 
 ```typescript
-import { validateVoiceCaps } from '@ethosagent/voice-providers';
+import { validateSttProvider } from '@ethosagent/voice-providers';
 
-const errors = validateVoiceCaps(myProvider.caps);
+const errors = validateSttProvider(myProvider);
 if (errors.length > 0) throw new Error(errors.join(', '));
 ```
+
+`validateVoiceCaps` is still exported for a caps-only check.

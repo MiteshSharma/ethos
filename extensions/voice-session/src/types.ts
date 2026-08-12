@@ -59,11 +59,4 @@ export interface VoiceSessionConfig {
   ttsVoice?: string;
   /** Speaking-rate multiplier forwarded to the TTS provider. */
   ttsSpeed?: number;
-  /**
-   * Materializes buffered utterance PCM to a path a batch STT provider can
-   * read. REQUIRED only when the injected STT provider is batch-only (not
-   * streaming) — the utterance-buffered fallback needs it. Keeping it injected
-   * keeps this package free of `node:fs`.
-   */
-  pcmToPath?: (chunks: PcmChunk[]) => Promise<string>;
 }

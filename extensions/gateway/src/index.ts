@@ -32,6 +32,7 @@ import type {
   PlatformAdapter,
   PlatformAdapterFactory,
   SteerSink,
+  Storage,
   SttProvider,
   SttProviderRegistry,
   TtsProvider,
@@ -454,6 +455,13 @@ export interface GatewayConfig {
    * (`/new`) and lane eviction. When absent, no cleanup is performed.
    */
   attachmentCache?: AttachmentCache;
+  /**
+   * Storage used to read cached attachment bytes — today only for transcribing
+   * inbound voice notes, which need the audio itself and not just its path.
+   * Absent (with `attachmentCache` present) means audio attachments still land
+   * as `(voice message)`; they are simply not transcribed.
+   */
+  storage?: Storage;
   /** STT provider registry for resolving voice transcription providers by name. */
   sttProviderRegistry?: SttProviderRegistry;
   /** Name of the STT provider to use (from auxiliary.asr.provider in config). */
@@ -673,6 +681,8 @@ export class Gateway {
   private readonly personalityDirectory: GatewayConfig['personalityDirectory'];
   /** Optional attachment cache for cleanup on /new and lane eviction. */
   private readonly attachmentCache: AttachmentCache | undefined;
+  /** Optional storage for reading cached attachment bytes (voice-note STT). */
+  private readonly storage: Storage | undefined;
   /** STT provider registry for resolving voice transcription providers by name. */
   private readonly sttProviderRegistry: SttProviderRegistry | undefined;
   /** Name of the STT provider to use (from auxiliary.asr.provider in config). */
@@ -823,6 +833,7 @@ export class Gateway {
     this.greetingProvider = config.greetingProvider;
     this.personalityDirectory = config.personalityDirectory;
     this.attachmentCache = config.attachmentCache;
+    this.storage = config.storage;
     this.sttProviderRegistry = config.sttProviderRegistry;
     this.sttProviderName = config.sttProviderName;
     this.ttsProviderRegistry = config.ttsProviderRegistry;
@@ -1907,12 +1918,14 @@ export class Gateway {
       let errored: { error: string; code: string } | null = null;
 
       // --- Voice pipeline: auto-transcribe audio attachments ---
-      if (hasAudioAttachments(message.attachments) && this.attachmentCache) {
+      const attachmentCache = this.attachmentCache;
+      const storage = this.storage;
+      if (hasAudioAttachments(message.attachments) && attachmentCache && storage) {
         const provider = await this.resolveSttProvider();
         const results = await transcribeAudioAttachments(
           message.attachments ?? [],
           provider,
-          (url) => this.attachmentCache?.resolveLocalPath(url) ?? url,
+          (url) => storage.readBytes(attachmentCache.resolveLocalPath(url)),
         );
         text = buildTranscriptText(text, results);
       }

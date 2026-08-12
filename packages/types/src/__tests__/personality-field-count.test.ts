@@ -73,6 +73,28 @@ function countFields(src: string): number {
   return count;
 }
 
+/** Top-level field names on `PersonalityConfig`, in declaration order. */
+function fieldNames(src: string): string[] {
+  const startIdx = src.indexOf('export interface PersonalityConfig');
+  if (startIdx < 0) throw new Error('PersonalityConfig interface not found');
+  const body = src.slice(src.indexOf('{', startIdx) + 1);
+  const names: string[] = [];
+  let depth = 0;
+  for (const line of body.split('\n')) {
+    const trimmed = line.trim();
+    if (depth === 0 && trimmed === '}') break;
+    if (depth === 0) {
+      const m = trimmed.match(/^([A-Za-z_$][\w]*)\??\s*:/);
+      if (m?.[1]) names.push(m[1]);
+    }
+    for (const ch of line) {
+      if (ch === '{') depth++;
+      else if (ch === '}') depth--;
+    }
+  }
+  return names;
+}
+
 describe('Phase 30.8: PersonalityConfig schema freeze', () => {
   it('field count matches .personality-field-count (bump the file in lockstep with schema changes)', () => {
     const src = readFileSync(SOURCE, 'utf-8');
@@ -83,5 +105,21 @@ describe('Phase 30.8: PersonalityConfig schema freeze', () => {
       actual,
       `PersonalityConfig has ${actual} fields; .personality-field-count says ${declared}. Bump the file (and follow the personality-schema-change PR rules in packages/types/src/personality.ts header).`,
     ).toBe(declared);
+  });
+
+  // The voice V1a amendment (eng-review D2) granted EXACTLY ONE field in the
+  // otherwise-forbidden speech/audio category: `voice`, carrying identity —
+  // which voice this personality speaks in. The amendment is not a licence for
+  // voice modes, VAD tuning, or per-channel speech affordances, so the
+  // narrowness is pinned mechanically rather than left to review memory.
+  it('grants exactly one speech/audio field — `voice` — per the V1a amendment', () => {
+    const names = fieldNames(readFileSync(SOURCE, 'utf-8'));
+    const speechFields = names.filter((n) => /voice|speech|audio|tts|stt|spoken/i.test(n));
+    expect(
+      speechFields,
+      'Only `voice` is sanctioned. Voice modes, VAD tuning, and per-channel speech ' +
+        'affordances belong in ~/.ethos/config.yaml or adapter config — see the ' +
+        '"Common rejections" note in packages/types/src/personality.ts.',
+    ).toEqual(['voice']);
   });
 });

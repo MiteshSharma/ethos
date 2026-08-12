@@ -314,6 +314,26 @@ function renderSpecLabel(spec: string): string {
 }
 
 /**
+ * Render the `## Voice` block from `PersonalityConfig.voice` — the sanctioned
+ * schema amendment made visible. Each unset knob prints what it inherits, so a
+ * reader never has to guess whether a blank means "unset" or "missing".
+ */
+function voiceSection(voice: NonNullable<PersonalityConfig['voice']>): string[] {
+  const lines: string[] = ['## Voice'];
+  lines.push(`- TTS voice: ${voice.tts_voice ?? '(global default)'}`);
+  const languages = Object.entries(voice.languages ?? {});
+  if (languages.length > 0) {
+    lines.push('- By language:');
+    for (const [tag, id] of languages.sort(([a], [b]) => a.localeCompare(b))) {
+      lines.push(`    - ${tag}: ${id}`);
+    }
+  }
+  lines.push(`- Tier: ${voice.tier ?? '(deployment default)'}`);
+  lines.push(`- Fast-lane model: ${voice.model ?? '(personality model)'}`);
+  return lines;
+}
+
+/**
  * Render a personality's character sheet as Markdown. Pure — takes the
  * loaded config and the SOUL.md body, returns the artifact. Optional
  * fields render as explicit `(none)` / `(engine default)` states so a
@@ -344,6 +364,14 @@ export function renderCharacterSheet(
   lines.push(`- Provider: ${config.provider ?? '(engine default)'}`);
   lines.push(`- Dreaming: ${config.dreaming?.enable ? 'on' : 'off'}`);
   lines.push('');
+
+  // Voice — rendered only when the personality declares one. A personality
+  // with no `voice` block inherits the deployment's voice, and a section that
+  // said so on every sheet would be noise ("cards earn existence").
+  if (config.voice) {
+    lines.push(...voiceSection(config.voice));
+    lines.push('');
+  }
 
   // Output capability, derived from the skill set rather than the personality
   // schema: a skill declaring `ethos.renders` both TEACHES the fence format and

@@ -1,9 +1,11 @@
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import type { Logger, SecretsResolver, VoiceProviderFactoryContext } from '@ethosagent/types';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { validateVoiceCaps } from '../conformance';
+import type {
+  Logger,
+  SecretsResolver,
+  SttAudio,
+  VoiceProviderFactoryContext,
+} from '@ethosagent/types';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { validateSttProvider, validateVoiceCaps } from '../conformance';
 import { localSttFactory } from '../local-stt';
 import { localTtsFactory } from '../local-tts';
 
@@ -32,20 +34,14 @@ function ctx(config: Record<string, unknown>): VoiceProviderFactoryContext {
   return { config, secrets: noopSecrets, logger: noopLogger };
 }
 
+/** The captured utterance, in memory — no temp file anywhere in this suite. */
+const utterance: SttAudio = { data: new Uint8Array([1, 2, 3]), mimeType: 'audio/ogg' };
+
 describe('local-stt provider', () => {
-  let dir: string;
-  let audioPath: string;
   const originalFetch = globalThis.fetch;
 
-  beforeEach(async () => {
-    dir = await mkdtemp(join(tmpdir(), 'local-stt-'));
-    audioPath = join(dir, 'clip.ogg');
-    await writeFile(audioPath, Buffer.from([1, 2, 3]));
-  });
-
-  afterEach(async () => {
+  afterEach(() => {
     globalThis.fetch = originalFetch;
-    await rm(dir, { recursive: true, force: true });
   });
 
   it('builds with caps.local:true and passes conformance', () => {
@@ -53,6 +49,7 @@ describe('local-stt provider', () => {
     expect(provider.name).toBe('local-stt');
     expect(provider.caps.local).toBe(true);
     expect(validateVoiceCaps(provider.caps)).toEqual([]);
+    expect(validateSttProvider(provider)).toEqual([]);
   });
 
   it('applies Whisper defaults (localhost:8000, whisper-large-v3) with no api key', async () => {
@@ -62,7 +59,7 @@ describe('local-stt provider', () => {
     globalThis.fetch = fetchMock as unknown as typeof fetch;
 
     const provider = localSttFactory(ctx({}));
-    await provider.transcribe(audioPath);
+    await provider.transcribeBuffer(utterance);
 
     const [url, init] = fetchMock.mock.calls[0];
     expect(url).toBe('http://localhost:8000/v1/audio/transcriptions');
@@ -83,12 +80,28 @@ describe('local-stt provider', () => {
         apiKey: 'local-key',
       }),
     );
-    await provider.transcribe(audioPath);
+    await provider.transcribeBuffer(utterance);
 
     const [url, init] = fetchMock.mock.calls[0];
     expect(url).toBe('http://box.lan:9001/v1/audio/transcriptions');
     expect((init.body as FormData).get('model')).toBe('Systran/faster-whisper-large-v3');
     expect((init.headers as Record<string, string>).Authorization).toBe('Bearer local-key');
+  });
+
+  it('uploads the utterance bytes directly — no temp file is written', async () => {
+    const fetchMock = vi.fn(
+      async (_url: string, _init: RequestInit) => new Response(JSON.stringify({ text: 'ok' })),
+    );
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    await localSttFactory(ctx({})).transcribeBuffer({
+      data: new Uint8Array([7, 7, 7, 7]),
+      mimeType: 'audio/webm',
+    });
+
+    const file = (fetchMock.mock.calls[0][1].body as FormData).get('file') as File;
+    expect(file.name).toBe('audio.webm');
+    expect(Array.from(new Uint8Array(await file.arrayBuffer()))).toEqual([7, 7, 7, 7]);
   });
 });
 

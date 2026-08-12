@@ -1312,7 +1312,6 @@ export {
   buildVoiceStack,
   type CreateVoiceSessionOptions,
   createObservabilitySpanSink,
-  createPcmToPath,
   type LiveKitBindings,
   type VoiceStack,
 } from './voice-stack';

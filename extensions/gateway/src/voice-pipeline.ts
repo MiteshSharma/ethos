@@ -11,10 +11,19 @@ export interface TranscribeResult {
   attachmentIndex: number;
 }
 
+/**
+ * Read a cached attachment's bytes. Injected because the gateway does not own
+ * filesystem access — the caller composes `AttachmentCache.resolveLocalPath`
+ * with a `Storage`, which is how every other attachment reader in the repo
+ * does it. Returns null when the bytes are gone; that attachment degrades to
+ * `(voice message)` rather than failing the turn.
+ */
+export type ReadAttachmentBytes = (url: string) => Promise<Uint8Array | null>;
+
 export async function transcribeAudioAttachments(
   attachments: Attachment[],
   sttProvider: SttProvider | null,
-  resolveLocalPath: (url: string) => string,
+  readBytes: ReadAttachmentBytes,
 ): Promise<TranscribeResult[]> {
   const results: TranscribeResult[] = [];
   for (let i = 0; i < attachments.length; i++) {
@@ -27,8 +36,12 @@ export async function transcribeAudioAttachments(
     }
 
     try {
-      const localPath = resolveLocalPath(att.url);
-      const raw = await sttProvider.transcribe(localPath);
+      const data = await readBytes(att.url);
+      if (!data) {
+        results.push({ transcript: null, attachmentIndex: i });
+        continue;
+      }
+      const raw = await sttProvider.transcribeBuffer({ data, mimeType: att.mimeType });
       const transcript = isHallucination(raw) ? null : raw;
       results.push({ transcript, attachmentIndex: i });
     } catch {

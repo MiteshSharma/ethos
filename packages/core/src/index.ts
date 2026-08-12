@@ -120,8 +120,10 @@ export { DefaultStorageRegistry } from './providers/storage-registry';
 export { DefaultSttProviderRegistry } from './providers/stt-registry';
 export { DefaultTtsProviderRegistry } from './providers/tts-registry';
 export type {
+  ResolvedVoicePreferences,
   ResolveSttOptions,
   ResolveTtsOptions,
+  ResolveVoicePreferencesOptions,
   ResolveVoiceProviderOptions,
   VoiceResolution,
   VoiceResolutionErrorCode,
@@ -129,6 +131,7 @@ export type {
 export {
   resolveSttProvider,
   resolveTtsProvider,
+  resolveVoicePreferences,
   unwrapVoiceResolution,
   VoiceProviderError,
 } from './providers/voice-resolution';

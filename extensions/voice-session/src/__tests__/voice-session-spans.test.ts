@@ -1,4 +1,5 @@
 import type { StreamingSttProvider } from '@ethosagent/types';
+import { STT_CONTRACT_VERSION } from '@ethosagent/types';
 import { describe, expect, it } from 'vitest';
 import { BufferedVoiceSpanWriter, type VoiceTurnSpan } from '../span-writer';
 import { VoiceSession } from '../voice-session';
@@ -28,8 +29,8 @@ function writerCollecting(spans: VoiceTurnSpan[]): BufferedVoiceSpanWriter {
 function failingStt(): StreamingSttProvider {
   return {
     name: 'boom-stt',
-    caps: { kind: 'stt', formats: ['pcm'], streaming: true, contractVersion: 1 },
-    transcribe: async () => '',
+    caps: { kind: 'stt', formats: ['pcm'], streaming: true, contractVersion: STT_CONTRACT_VERSION },
+    transcribeBuffer: async () => '',
     // biome-ignore lint/correctness/useYield: the provider throws before it can yield
     async *transcribeStream() {
       throw new Error('stt down');

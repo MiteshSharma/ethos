@@ -128,6 +128,37 @@ export interface OutboundPolicyConfig {
   approver_personality?: string;
 }
 
+/**
+ * How a personality SOUNDS. The sanctioned exception to the "no voice/speech
+ * fields on PersonalityConfig" rule (voice V1a, eng-review D2): a deployment
+ * chooses the voice PROVIDER, the personality chooses its own voice, the same
+ * way it chooses its own model. Everything that is a deployment or per-channel
+ * concern stays out — voice modes, VAD tuning, per-adapter affordances, and
+ * wake routes all remain gateway/config-owned.
+ *
+ * Absent = inherit the global `auxiliary.tts.*` defaults.
+ */
+export interface PersonalityVoiceConfig {
+  /** TTS voice id, provider-specific (e.g. `af_bella` for Kokoro, `alloy` for OpenAI). */
+  tts_voice?: string;
+  /**
+   * BCP-47 tag → TTS voice id. Wins over `tts_voice` when the turn's language
+   * is known: a personality that declares a Spanish voice means it in Spanish.
+   */
+  languages?: Record<string, string>;
+  /**
+   * Preferred voice tier. `pipeline` = STT → LLM → TTS (V1a); `realtime` =
+   * hosted speech-to-speech (V1b). A preference, not a guarantee — a
+   * deployment with no realtime provider serves `pipeline` either way.
+   */
+  tier?: 'pipeline' | 'realtime';
+  /**
+   * Fast-lane model for spoken turns. Conversational latency and agentic depth
+   * want different models; this is how a personality says which one talks.
+   */
+  model?: string;
+}
+
 export interface DreamingConfig {
   enable: boolean;
   idleMinutes: number;
@@ -184,7 +215,10 @@ export interface LivingSoul {
 //
 // Common rejections — these belong in skills or per-channel adapter config,
 // NOT here:
-//   - voice modes / TTS settings
+//   - voice MODES, VAD tuning, per-channel voice affordances (the `voice`
+//     field below is identity — which voice this personality speaks in — and
+//     is the one sanctioned exception, granted by the voice V1a amendment;
+//     it is not a licence for further speech/audio settings)
 //   - emotion / mood / sentiment tags
 //   - label or response templates
 //   - per-channel UI affordances
@@ -396,6 +430,15 @@ export interface PersonalityConfig {
     judge?: { enabled?: boolean; minInteractions?: number };
     expression?: boolean;
   };
+  /**
+   * Voice V1a — how this personality SOUNDS: TTS voice id, language→voice map,
+   * tier preference, fast-lane model. See {@link PersonalityVoiceConfig} for
+   * why this is identity rather than a deployment setting, and what stays out.
+   * Absent = inherit the global `auxiliary.tts.*` config.
+   * Counts as ONE field for the schema-freeze gate (the nested shape is a
+   * leaf type — same precedent as `fs_reach`).
+   */
+  voice?: PersonalityVoiceConfig;
 }
 
 /**

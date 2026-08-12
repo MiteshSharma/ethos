@@ -8,14 +8,15 @@
 import type { AgentLoop } from '@ethosagent/core';
 import { DefaultSttProviderRegistry, DefaultTtsProviderRegistry } from '@ethosagent/core';
 import type { SttProvider, TtsProvider } from '@ethosagent/types';
+import { STT_CONTRACT_VERSION } from '@ethosagent/types';
 import { describe, expect, it, vi } from 'vitest';
 import { Gateway } from '../index';
 
 function stt(name: string, local: boolean): SttProvider {
   return {
     name,
-    caps: { kind: 'stt', formats: ['wav'], local, contractVersion: 1 },
-    transcribe: async () => 'transcript',
+    caps: { kind: 'stt', formats: ['wav'], local, contractVersion: STT_CONTRACT_VERSION },
+    transcribeBuffer: async () => 'transcript',
   };
 }
 

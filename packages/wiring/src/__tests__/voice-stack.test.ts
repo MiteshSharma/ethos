@@ -1,9 +1,15 @@
 import { DefaultSttProviderRegistry, DefaultTtsProviderRegistry } from '@ethosagent/core';
-import { InMemoryStorage } from '@ethosagent/storage-fs';
-import type { AgentEvent, Logger, SttProvider, TtsProvider } from '@ethosagent/types';
+import type {
+  AgentEvent,
+  Logger,
+  PersonalityConfig,
+  SttProvider,
+  TtsProvider,
+} from '@ethosagent/types';
+import { STT_CONTRACT_VERSION } from '@ethosagent/types';
 import { describe, expect, it } from 'vitest';
 import type { WiringConfig } from '../index';
-import { buildVoiceStack, createPcmToPath } from '../voice-stack';
+import { buildVoiceStack } from '../voice-stack';
 
 const warnings: string[] = [];
 const logger: Logger = {
@@ -17,8 +23,8 @@ const logger: Logger = {
 function batchStt(name: string, local: boolean): SttProvider {
   return {
     name,
-    caps: { kind: 'stt', formats: ['wav'], local, contractVersion: 1 },
-    transcribe: async () => 'hello from the batch provider',
+    caps: { kind: 'stt', formats: ['wav'], local, contractVersion: STT_CONTRACT_VERSION },
+    transcribeBuffer: async () => 'hello from the batch provider',
   };
 }
 
@@ -54,8 +60,13 @@ function config(overrides: Partial<WiringConfig> = {}): WiringConfig {
   };
 }
 
-function deps(cfg: WiringConfig, storage = new InMemoryStorage()) {
-  return { config: cfg, storage, dataDir: '/home/u/.ethos', logger, ...registries() };
+function deps(cfg: WiringConfig) {
+  return { config: cfg, logger, ...registries() };
+}
+
+/** Minimal personality carrying only the `voice` block under test. */
+function personalityWithVoice(voice: PersonalityConfig['voice']): PersonalityConfig {
+  return { id: 'v', name: 'V', ...(voice ? { voice } : {}) };
 }
 
 /** A runner that closes the turn immediately — these tests exercise wiring, not turns. */
@@ -105,20 +116,22 @@ describe('buildVoiceStack', () => {
     await stack?.close();
   });
 
-  // The construction blocker this task existed to remove: VoiceSession's
-  // `resolveStt` throws for a batch-only provider unless `pcmToPath` is
-  // supplied, and nothing in production supplied one.
-  it('drives a batch-only STT provider end to end via a Storage-written WAV', async () => {
-    const storage = new InMemoryStorage();
-    const seenPaths: string[] = [];
+  // The construction blocker this task existed to remove: a batch-only
+  // provider used to need an injected `pcmToPath`, and nothing in production
+  // supplied one. With the buffer contract there is nothing to inject.
+  it('drives a batch-only STT provider end to end on in-memory WAV bytes', async () => {
+    const seen: Array<{ data: Uint8Array; mimeType?: string }> = [];
     const sttProviders = new DefaultSttProviderRegistry();
     sttProviders.register('local-stt', () => ({
       name: 'local-stt',
-      caps: { kind: 'stt' as const, formats: ['wav' as const], local: true, contractVersion: 1 },
-      transcribe: async (audioPath: string) => {
-        seenPaths.push(audioPath);
-        // The provider reads a real file: assert it exists WHILE transcribing.
-        expect(await storage.exists(audioPath)).toBe(true);
+      caps: {
+        kind: 'stt' as const,
+        formats: ['wav' as const],
+        local: true,
+        contractVersion: STT_CONTRACT_VERSION,
+      },
+      transcribeBuffer: async (audio: { data: Uint8Array; mimeType?: string }) => {
+        seen.push(audio);
         return 'the buffered utterance';
       },
     }));
@@ -127,8 +140,6 @@ describe('buildVoiceStack', () => {
 
     const stack = await buildVoiceStack({
       config: config({ voice: { bots: [] } }),
-      storage,
-      dataDir: '/home/u/.ethos',
       logger,
       sttProviders,
       ttsProviders,
@@ -154,34 +165,72 @@ describe('buildVoiceStack', () => {
     await session.idle();
 
     expect(transcripts).toEqual(['the buffered utterance']);
-    // Session-keyed path: sanitized for the filesystem, with a digest of the
-    // ORIGINAL lane key so two lanes can never share one utterance file.
-    expect(seenPaths[0]).toMatch(
-      /^\/home\/u\/\.ethos\/tmp\/voice\/voice_bot_caller_one-[0-9a-f]{8}\.wav$/,
-    );
-    // Captured audio does not outlive the transcription that consumed it.
-    expect(await storage.exists(seenPaths[0] ?? '')).toBe(false);
+    // The provider got a real WAV, in memory — 44-byte RIFF header and all.
+    expect(seen).toHaveLength(1);
+    expect(seen[0]?.mimeType).toBe('audio/wav');
+    const wav = seen[0]?.data ?? new Uint8Array();
+    expect(String.fromCharCode(...wav.slice(0, 4))).toBe('RIFF');
+    expect(wav.byteLength).toBeGreaterThan(44);
     await stack?.close();
   });
 
-  // No process-global voice state: two lanes must not share an audio artifact.
-  it('keeps per-lane utterance audio in distinct, non-colliding files', async () => {
-    const storage = new InMemoryStorage();
-    const paths = new Set<string>();
-    const stack = await buildVoiceStack(deps(config({ voice: { bots: [] } }), storage));
+  // No process-global voice state: two lanes must not see each other's audio.
+  // There is no shared temp file to collide on any more, so the invariant is
+  // asserted where it now lives — the per-session buffer.
+  it("keeps two lanes' utterances separate", async () => {
+    const byProvider: Uint8Array[] = [];
+    const sttProviders = new DefaultSttProviderRegistry();
+    sttProviders.register('local-stt', () => ({
+      name: 'local-stt',
+      caps: {
+        kind: 'stt' as const,
+        formats: ['wav' as const],
+        local: true,
+        contractVersion: STT_CONTRACT_VERSION,
+      },
+      transcribeBuffer: async (audio: { data: Uint8Array }) => {
+        byProvider.push(audio.data);
+        return `utterance ${byProvider.length}`;
+      },
+    }));
+    const ttsProviders = new DefaultTtsProviderRegistry();
+    ttsProviders.register('local-tts', () => batchTts('local-tts', true));
+
+    const stack = await buildVoiceStack({
+      config: config({ voice: { bots: [] } }),
+      logger,
+      sttProviders,
+      ttsProviders,
+    });
     if (!stack) throw new Error('expected a voice stack');
 
-    for (const laneKey of ['voice:bot:a:b', 'voice:bot:a_b', 'voice:bot:other']) {
-      const pcmToPath = createPcmToPath({
-        storage,
-        dir: '/home/u/.ethos/tmp/voice',
+    const transcripts: string[] = [];
+    for (const [laneKey, level] of [
+      ['voice:bot:a:b', 8_000],
+      ['voice:bot:a_b', 12_000],
+    ] as const) {
+      const session = stack.createSession({
         laneKey,
+        runner,
+        sessionConfig: { endpointSilenceMs: 0 },
       });
-      paths.add(await pcmToPath([{ data: Int16Array.from([1, 2]), sampleRate: 16_000 }]));
+      session.on((e) => {
+        if (e.type === 'utterance_committed') transcripts.push(e.text);
+      });
+      for (let i = 0; i < 5; i++) {
+        session.pushAudio({ data: new Int16Array(320).fill(level), sampleRate: 16_000 });
+      }
+      for (let i = 0; i < 6; i++) {
+        session.pushAudio({ data: new Int16Array(320), sampleRate: 16_000 });
+      }
+      await session.idle();
     }
 
-    // `a:b` and `a_b` sanitize identically — only the digest keeps them apart.
-    expect(paths.size).toBe(3);
+    expect(transcripts).toEqual(['utterance 1', 'utterance 2']);
+    // `a:b` and `a_b` used to sanitize to the same filename; with no file to
+    // share, the two lanes' audio simply never meets.
+    expect(byProvider).toHaveLength(2);
+    expect(Array.from(byProvider[0] ?? [])).not.toEqual(Array.from(byProvider[1] ?? []));
     await stack.close();
   });
 
@@ -284,5 +333,113 @@ describe('buildVoiceStack', () => {
     expect(stack?.providerError).toContain('nope-stt');
     expect(() => stack?.createSession({ laneKey: 'voice:b:c', runner })).toThrow(/nope-stt/);
     await stack?.close();
+  });
+
+  // `PersonalityConfig.voice` is not decorative: a deployment picks the
+  // PROVIDER, the personality picks how it sounds. These pin the precedence at
+  // the construction site that actually serves a turn.
+  describe('personality voice takes precedence over global config', () => {
+    /** Drive one spoken turn and report the voice id the TTS provider saw. */
+    async function voiceUsedFor(opts: {
+      globalVoice?: string;
+      personality?: PersonalityConfig;
+      language?: string;
+    }): Promise<string | undefined> {
+      const spoken: Array<string | undefined> = [];
+      const sttProviders = new DefaultSttProviderRegistry();
+      sttProviders.register('local-stt', () => batchStt('local-stt', true));
+      const ttsProviders = new DefaultTtsProviderRegistry();
+      ttsProviders.register('local-tts', () => ({
+        name: 'local-tts',
+        caps: { kind: 'tts' as const, formats: ['wav' as const], local: true, contractVersion: 1 },
+        synthesize: async (_text: string, o?: { voice?: string }) => {
+          spoken.push(o?.voice);
+          return { audio: new Uint8Array([1]), format: 'wav' as const };
+        },
+      }));
+
+      const stack = await buildVoiceStack({
+        config: config({
+          voice: { bots: [] },
+          ...(opts.globalVoice
+            ? { auxiliaryTts: { provider: 'local-tts', voice: opts.globalVoice } }
+            : {}),
+        }),
+        logger,
+        sttProviders,
+        ttsProviders,
+      });
+      if (!stack) throw new Error('expected a voice stack');
+
+      const session = stack.createSession({
+        laneKey: 'voice:bot:caller',
+        runner: {
+          async *run(): AsyncGenerator<AgentEvent> {
+            yield { type: 'text_delta', text: 'Hello there.' };
+            yield { type: 'done', text: 'Hello there.', turnCount: 1 };
+          },
+        },
+        ...(opts.personality ? { personality: opts.personality } : {}),
+        ...(opts.language ? { language: opts.language } : {}),
+        sessionConfig: { endpointSilenceMs: 0 },
+      });
+      for (let i = 0; i < 5; i++) {
+        session.pushAudio({ data: new Int16Array(320).fill(12_000), sampleRate: 16_000 });
+      }
+      for (let i = 0; i < 6; i++) {
+        session.pushAudio({ data: new Int16Array(320), sampleRate: 16_000 });
+      }
+      await session.idle();
+      await stack.close();
+      return spoken[0];
+    }
+
+    it('uses the global voice when the personality declares none', async () => {
+      await expect(voiceUsedFor({ globalVoice: 'af_global' })).resolves.toBe('af_global');
+    });
+
+    it('prefers the personality voice over the global default', async () => {
+      await expect(
+        voiceUsedFor({
+          globalVoice: 'af_global',
+          personality: personalityWithVoice({ tts_voice: 'af_mine' }),
+        }),
+      ).resolves.toBe('af_mine');
+    });
+
+    it('inherits the global voice when the personality block omits tts_voice', async () => {
+      await expect(
+        voiceUsedFor({
+          globalVoice: 'af_global',
+          personality: personalityWithVoice({ model: 'haiku' }),
+        }),
+      ).resolves.toBe('af_global');
+    });
+
+    it("prefers a language-specific voice over the personality's default", async () => {
+      await expect(
+        voiceUsedFor({
+          globalVoice: 'af_global',
+          personality: personalityWithVoice({
+            tts_voice: 'af_mine',
+            languages: { es: 'ef_dora' },
+          }),
+          language: 'es',
+        }),
+      ).resolves.toBe('ef_dora');
+    });
+
+    it('falls back to the personality default for an unmapped language', async () => {
+      await expect(
+        voiceUsedFor({
+          globalVoice: 'af_global',
+          personality: personalityWithVoice({
+            tts_voice: 'af_mine',
+            languages: { es: 'ef_dora' },
+          }),
+          language: 'de',
+        }),
+      ).resolves.toBe('af_mine');
+    });
   });
 });

@@ -1,13 +1,14 @@
 // Minimal 16-bit mono WAV encoder for buffered utterances.
 //
-// Batch STT providers read a FILE, so the utterance-buffered fallback has to
-// materialize the captured PCM frames as something a provider can post. WAV is
-// the least-surprising container: every `POST /audio/transcriptions`-shaped
-// server accepts it, it needs no codec, and the header is 44 fixed bytes.
+// A batch STT provider takes a complete utterance, so the utterance-buffered
+// fallback has to hand it the captured PCM frames as something a provider can
+// post. WAV is the least-surprising container: every
+// `POST /audio/transcriptions`-shaped server accepts it, it needs no codec,
+// and the header is 44 fixed bytes.
 //
-// This lives here (pure, no `node:fs`) so the caller that owns filesystem
-// access — the wiring layer, through the `Storage` abstraction — only has to
-// write the bytes.
+// Pure and in-memory: it returns BYTES, not a path. Nothing here (or in the
+// fallback that calls it) touches the filesystem — that is what makes
+// `VoiceSession` construction total for any configured provider.
 
 import type { PcmChunk } from '@ethosagent/types';
 

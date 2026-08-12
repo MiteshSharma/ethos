@@ -8,6 +8,7 @@ import type {
   StreamingSttProvider,
   StreamingTtsProvider,
 } from '@ethosagent/types';
+import { STT_CONTRACT_VERSION } from '@ethosagent/types';
 import type { AgentTurnRunner, Vad } from '@ethosagent/voice-session';
 import type { OutboundCallHandle, OutboundCallRequest, SipTrunkClient } from '../sip/trunk-client';
 import type { OutboundAudioFrame, VoiceTransport } from '../transport';
@@ -89,8 +90,8 @@ export const tick = (): Promise<void> => new Promise((r) => setImmediate(r));
 export function streamingStt(text: string): StreamingSttProvider {
   return {
     name: 'fake-stt',
-    caps: { kind: 'stt', formats: ['pcm'], streaming: true, contractVersion: 1 },
-    transcribe: async () => text,
+    caps: { kind: 'stt', formats: ['pcm'], streaming: true, contractVersion: STT_CONTRACT_VERSION },
+    transcribeBuffer: async () => text,
     async *transcribeStream() {
       yield { text, isFinal: true };
     },
