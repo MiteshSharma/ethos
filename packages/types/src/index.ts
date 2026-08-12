@@ -58,6 +58,7 @@ export type {
   ToolResultReducerRegistry,
 } from './tool-reducer';
 export * from './voice';
+export * from './voice-realtime';
 
 // Phase 5 — Personality export/import portable bundles
 export interface ExportStamp {
