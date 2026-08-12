@@ -25,7 +25,15 @@ export interface ChatCompletionsStreamParams {
    *  `mistral` name both an Ollama pull and a paid hosted model, so the name
    *  alone cannot tell an intentional $0 from an unpriced one. */
   localRuntime?: boolean;
+  /** B2 — the loop's client-minted per-LLM-call id, sent outbound on the
+   *  `X-Client-Request-Id` header. Absent → no header is sent. */
+  clientRequestId?: string;
 }
+
+/** B2 — outbound correlation header. OpenAI, OpenRouter and the local runtimes
+ *  all pass unknown `X-`-prefixed request headers through to their logs, so one
+ *  header name works across every openai-compat dialect. */
+const CLIENT_REQUEST_ID_HEADER = 'X-Client-Request-Id';
 
 type StructuredOutputDialect = 'openai' | 'ollama' | 'vllm';
 
@@ -185,6 +193,9 @@ export function buildChatCompletionsParams(
     requestTokens: undefined,
     effectiveModel,
     localRuntime: opts?.localRuntime !== undefined,
+    // B2 — carried beside the body, not in it: the id is a request HEADER, so
+    // it never perturbs the byte-stable prefix the local caches hash.
+    ...(options.requestId ? { clientRequestId: options.requestId } : {}),
   };
 }
 
@@ -239,7 +250,12 @@ export async function* streamChatCompletions(
   params: ChatCompletionsStreamParams,
   signal?: AbortSignal,
 ): AsyncIterable<CompletionChunk> {
-  const stream = await client.chat.completions.create(params.oaiParams, { signal });
+  const stream = await client.chat.completions.create(params.oaiParams, {
+    signal,
+    ...(params.clientRequestId
+      ? { headers: { [CLIENT_REQUEST_ID_HEADER]: params.clientRequestId } }
+      : {}),
+  });
 
   // Track streaming tool calls by index (OpenAI streams them as deltas)
   const pendingTools = new Map<number, { id: string; name: string; args: string }>();

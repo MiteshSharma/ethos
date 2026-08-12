@@ -239,6 +239,8 @@ export async function* streamStep(
   let llmEstimatedCostUsd = 0;
   let llmRequestTokens: { system: number; tools: number; messages: number } | undefined;
   let llmFinishReason: 'end_turn' | 'tool_use' | 'max_tokens' | 'stop_sequence' | undefined;
+  // B2 — the provider's server-assigned id for this call, when it reports one.
+  let providerRequestId: string | undefined;
   const llmStartTs = Date.now();
 
   try {
@@ -247,6 +249,11 @@ export async function* streamStep(
       system: ctx.systemPrompt,
       cacheSystemPrompt: true,
       abortSignal: combinedSignal,
+      // B2 — the client-minted id above goes outward where the provider
+      // supports it (openai-compat: `X-Client-Request-Id`), so a provider-side
+      // log line can be matched back to this call. Providers without a
+      // client-id convention ignore it.
+      requestId,
       ...(iterModelOverride ? { modelOverride: iterModelOverride } : {}),
       ...(ctx.cacheBreakpoints ? { cacheBreakpoints: ctx.cacheBreakpoints } : {}),
       ...(ctx.opts.temperature !== undefined ? { temperature: ctx.opts.temperature } : {}),
@@ -264,6 +271,7 @@ export async function* streamStep(
       armWatchdog();
       if (chunk.type === 'done') llmFinishReason = chunk.finishReason;
       if (chunk.type === 'usage') {
+        if (chunk.providerRequestId) providerRequestId = chunk.providerRequestId;
         llmCacheReadTokens += chunk.usage.cacheReadTokens;
         llmCacheCreationTokens += chunk.usage.cacheCreationTokens;
         llmEstimatedCostUsd += chunk.usage.estimatedCostUsd;
@@ -303,6 +311,11 @@ export async function* streamStep(
       // reported cost (already summed off the usage chunks above), not a
       // re-derivation: core must not depend on @ethosagent/pricing.
       estimatedCostUsd: llmEstimatedCostUsd,
+      // B2 — the two request ids, kept apart on purpose. `clientRequestId` is
+      // ours (minted above, sent outbound); `providerRequestId` is the
+      // server's, and it is the one a provider support ticket asks for.
+      clientRequestId: requestId,
+      ...(providerRequestId ? { providerRequestId } : {}),
       ...(llmRequestTokens ? { requestTokens: llmRequestTokens } : {}),
     });
 
@@ -327,7 +340,12 @@ export async function* streamStep(
     }
   } catch (err) {
     disarmWatchdog();
-    deps.observability?.endSpan(llmSpanId ?? '', 'error');
+    // B2 — a failed call is exactly the one an operator quotes in a support
+    // ticket, so the ids go on the error span too.
+    deps.observability?.endSpan(llmSpanId ?? '', 'error', {
+      clientRequestId: requestId,
+      ...(providerRequestId ? { providerRequestId } : {}),
+    });
     if (watchdogController.signal.aborted && !ctx.abortSignal.aborted) {
       deps.observability?.endTrace(ctx.traceId ?? '', 'error');
       deps.observability?.flush();
@@ -459,7 +477,10 @@ export async function* streamStep(
   // turnNumber uses turnCount + 1 to match the original post-increment behavior.
   if (deps.requestDumpStore) {
     await deps.requestDumpStore.append({
+      // B2 — `requestId` is the client-minted outbound id; `providerRequestId`
+      // is the server-assigned one. Same pair as the `llm_call` span attrs.
       requestId,
+      ...(providerRequestId ? { providerRequestId } : {}),
       timestamp: new Date().toISOString(),
       sessionId: ctx.sessionId,
       personalityId: ctx.personality.id,

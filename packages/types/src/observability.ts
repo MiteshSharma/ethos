@@ -168,7 +168,12 @@ export interface ObservabilityWriter {
 // ---------------------------------------------------------------------------
 
 export interface RequestDumpRecord {
+  /** The loop's client-minted per-LLM-call id (sent outbound as
+   *  `X-Client-Request-Id` where the provider supports it). */
   requestId: string;
+  /** B2 — the provider's server-assigned id for the same call (Anthropic's
+   *  `request-id` header). Absent when the provider exposes none. */
+  providerRequestId?: string;
   timestamp: string;
   sessionId: string;
   personalityId?: string;
