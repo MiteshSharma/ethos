@@ -1,4 +1,11 @@
-import { resolve } from 'node:path';
+// Raw `node:fs` here is the documented Law 7 carve-out for this package: it
+// IS the filesystem adapter. `Storage` follows symlinks and exposes no
+// `lstat`, so the symbolic-containment check below cannot be expressed
+// through the contract it guards. Sync (`lstatSync`, not `fs/promises`)
+// because `check()` is synchronous and every Storage method calls it before
+// awaiting anything.
+import { lstatSync, readlinkSync } from 'node:fs';
+import { dirname, join, relative, resolve, sep } from 'node:path';
 import {
   BoundaryError,
   type Storage,
@@ -6,6 +13,9 @@ import {
   type StorageRemoveOptions,
   type StorageWriteOptions,
 } from '@ethosagent/types';
+
+/** Bound on symlink hops followed while validating a single path. */
+const MAX_SYMLINK_HOPS = 32;
 
 export interface ScopedStorageScope {
   /** Absolute path prefixes that may be read. */
@@ -30,6 +40,23 @@ export interface ScopedStorageScope {
  * Order of checks (any deny wins over any allow):
  *   1. always-deny — request rejected.
  *   2. allow allowlist — request rejected if no prefix matches.
+ *   3. symbolic containment — layers 1 and 2 are lexical, and `resolve()`
+ *      is a string operation while a symlink is a filesystem fact. A link
+ *      planted inside an allowed prefix pointing outside it passes both.
+ *      Layer 3 walks the path segment by segment BELOW the matched prefix
+ *      and follows any link it finds, re-judging layers 1 and 2 against
+ *      where the link actually lands (G11).
+ *
+ * This closes **misdirection**, not **TOCTOU**: an attacker who can swap a
+ * path between this walk and the subsequent open still wins, and closing
+ * that needs container-level remediation.
+ *
+ * Layer 3 is a deliberate DUPLICATE of `checkReach` in
+ * `packages/core/src/scoped/scoped-fs.ts` — the same guarantee enforced at
+ * the other personality filesystem boundary. It is not shared code because
+ * `@ethosagent/core` may not import `@ethosagent/storage-fs` at runtime
+ * (storage-fs is the security kernel; core is not, and core depends on it
+ * only as a devDependency). **The two must change together.**
  *
  * Prefixes are matched literally — there is no glob expansion. Pass paths
  * that end in `/` for directory scopes; ScopedStorage normalizes them so
@@ -57,9 +84,40 @@ export class ScopedStorage implements Storage {
       throw new BoundaryError(kind, path, this.denyPrefixes, 'always-deny floor');
     }
     const allowed = kind === 'read' ? this.readPrefixes : this.writePrefixes;
-    if (!isPathAllowed(path, allowed)) {
+    let prefix = matchAllowedPrefix(path, allowed);
+    if (prefix === null) {
       throw new BoundaryError(kind, path, allowed);
     }
+
+    // Symbolic containment. The lexical layers above are judged FIRST and
+    // with no filesystem access at all: a path outside the allowlist is
+    // refused on its string form and never reaches an `lstat`, so the
+    // boundary leaks no existence information about paths it does not
+    // govern. Only a path already inside the allowlist gets asked whether
+    // it *really* is.
+    //
+    // Each hop rewrites the path through one link and re-walks from the
+    // (possibly different) allowed prefix that now contains it, so a link
+    // whose own target sits behind another link is resolved too. The
+    // resolved target is never named in the error: the boundary must not
+    // hand back a path it just refused.
+    let current = path;
+    for (let hop = 0; hop < MAX_SYMLINK_HOPS; hop++) {
+      const next = followFirstSymlink(prefix, current);
+      if (next === null) return;
+      const nextPrefix = matchAllowedPrefix(next, allowed);
+      if (nextPrefix === null || isPathAllowed(next, this.denyPrefixes)) {
+        throw new BoundaryError(
+          kind,
+          path,
+          allowed,
+          'resolves outside the allowlist through a symbolic link',
+        );
+      }
+      current = next;
+      prefix = nextPrefix;
+    }
+    throw new BoundaryError(kind, path, allowed, 'follows too many symbolic links to resolve');
   }
 
   async read(path: string): Promise<string | null> {
@@ -145,15 +203,58 @@ function normalizePrefix(prefix: string): string {
 }
 
 function isPathAllowed(path: string, prefixes: readonly string[]): boolean {
+  return matchAllowedPrefix(path, prefixes) !== null;
+}
+
+/**
+ * The matched prefix containing `path` in slash-less root form, or null when
+ * no prefix contains it. Purely lexical — no filesystem access. The root
+ * form is what the symlink walk uses as its floor: only segments BELOW it
+ * are inspected.
+ */
+function matchAllowedPrefix(path: string, prefixes: readonly string[]): string | null {
   for (const prefix of prefixes) {
-    if (path === prefix) return true;
+    if (path === prefix) return prefix.endsWith('/') ? prefix.slice(0, -1) || sep : prefix;
     const withoutSlash = prefix.endsWith('/') ? prefix.slice(0, -1) : prefix;
     // Allow the directory itself (without trailing slash) — needed so
     // `mkdir(<personality-dir>)` and `list(<personality-dir>)` succeed
     // when the configured prefix has a trailing slash.
-    if (path === withoutSlash) return true;
+    if (path === withoutSlash) return withoutSlash || sep;
     const withSlash = `${withoutSlash}/`;
-    if (path.startsWith(withSlash)) return true;
+    if (path.startsWith(withSlash)) return withoutSlash || sep;
   }
-  return false;
+  return null;
+}
+
+/**
+ * Walk `target` one segment at a time below `prefixRoot`, `lstat`ing each.
+ * Returns the path rewritten through the FIRST symbolic link found (that
+ * link's target plus the remaining segments), or null when the walk crosses
+ * no link.
+ *
+ * Per-segment, not leaf-only: a symlinked PARENT escapes the allowlist
+ * behind a perfectly ordinary leaf. A missing segment is not a link —
+ * `lstat` finding nothing is the normal case for a write to a file that does
+ * not exist yet, and nothing can live below a segment that is absent, so the
+ * walk stops. Only the portion BELOW the matched prefix is walked: segments
+ * above it are the operator's own layout (`/var` → `/private/var` on macOS),
+ * not an escape.
+ *
+ * Mirror of `followFirstSymlink` in `packages/core/src/scoped/scoped-fs.ts`.
+ */
+function followFirstSymlink(prefixRoot: string, target: string): string | null {
+  const rel = relative(prefixRoot, target);
+  if (rel === '') return null;
+
+  const segments = rel.split(sep);
+  let cursor = prefixRoot;
+  for (let i = 0; i < segments.length; i++) {
+    cursor = join(cursor, segments[i] ?? '');
+    const stat = lstatSync(cursor, { throwIfNoEntry: false });
+    if (stat === undefined) return null;
+    if (!stat.isSymbolicLink()) continue;
+    const linkTarget = resolve(dirname(cursor), readlinkSync(cursor));
+    return resolve(join(linkTarget, ...segments.slice(i + 1)));
+  }
+  return null;
 }

@@ -310,6 +310,17 @@ export interface CreateWebApiOptions {
     personalityId: string,
   ) => Promise<import('@ethosagent/personalities').CharacterSheetScriptSurface | null>;
   /**
+   * §4.7 — declared-reach seam for the `## Boundary` section of the
+   * `personalities.characterSheet` RPC. The provider computes it via
+   * `toolsDeclaringNetwork()` from `@ethosagent/core` against the live tool
+   * registry — the SAME `capabilities` declaration G-CAP intersects per call.
+   * Absent or resolving `null` → the section still renders, it just never
+   * reports a guarantee as inapplicable for reach it cannot see.
+   */
+  boundary?: (
+    personalityId: string,
+  ) => Promise<import('@ethosagent/personalities').CharacterSheetBoundary | null>;
+  /**
    * Protocol route modules (A2A, Phase 3) contributed to the Hono app via the
    * explicit, reviewable seam. Each declares its mount path, auth posture, and
    * description; `enabled: false` skips it. Modules inherit the app-wide CORS +
@@ -443,6 +454,7 @@ export function createWebApi(opts: CreateWebApiOptions): CreateWebApiResult {
     ...(opts.dockerBuildable === false ? { dockerBuildable: false } : {}),
     ...(opts.modelFit ? { modelFit: opts.modelFit } : {}),
     ...(opts.scriptSurface ? { scriptSurface: opts.scriptSurface } : {}),
+    ...(opts.boundary ? { boundary: opts.boundary } : {}),
   });
   const configService = new ConfigService({ config: configRepo, secrets });
   const onboardingService = new OnboardingService({

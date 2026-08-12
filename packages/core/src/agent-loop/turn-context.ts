@@ -189,7 +189,6 @@ export interface AssembledContext {
   llmMessages: import('@ethosagent/types').Message[];
   cacheBreakpoints: number[] | undefined;
   activeSkillFiles: string[] | undefined;
-  injectionDefenseEnabled: boolean;
   baseMessageCount: number;
   userScopeId: string | undefined;
   /** Phase 3 — a pressure-gated compaction fired during THIS turn's assembly.

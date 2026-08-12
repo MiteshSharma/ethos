@@ -52,7 +52,13 @@ describe('Orchestrator guardrails', () => {
     // how it differs from the adjacent `toolsetNarrow`. It is pass-through
     // only; the enforcement lives in agent-loop/stages/turn-setup.ts and
     // tool-registry.ts.
-    expect(lineCount).toBeLessThanOrEqual(884);
+    // Bumped 884 → 894: G4's approval-posture declaration. The orchestrator
+    // keeps only pass-through — the `logger` config field (Law 10 sink for the
+    // `ungated` notice), the latched guard field, its one-line construction,
+    // and the single call at the first tool dispatch. The check itself, and the
+    // rationale for why it runs there rather than at construction, lives in
+    // agent-loop/approval-posture.ts.
+    expect(lineCount).toBeLessThanOrEqual(894);
   });
 
   it('no stage file exceeds 700 lines', () => {
@@ -82,7 +88,13 @@ describe('Orchestrator guardrails', () => {
       // Bumped 746 → 752: Lane E generalizes the per-batch progress queue to
       // AgentEvent (pushLiveEvent helper) so the bridge's inner-call
       // tool_start/tool_end ride the same live drain as tool progress.
-      if (lineCount > 752) {
+      // Bumped 752 → 777: G-INJ — the result-defense path no longer gates on
+      // `result.ok`, so an `outputIsUntrusted` tool's ERROR text (an MCP server
+      // answering `isError: true`) is wrapped and arms the downgrade. Two
+      // provenance flags and the delimiter condition; the bulk is the comment
+      // recording why the old "errors are framework-authored" claim was false,
+      // so the gate is not reintroduced.
+      if (lineCount > 777) {
         violations.push(`${file}: ${lineCount} lines`);
       }
     }

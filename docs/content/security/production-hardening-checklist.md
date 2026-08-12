@@ -299,7 +299,7 @@ curl -s -X POST -H "Authorization: Bearer $ETHOS_TOKEN" \
 # Should return an error indicating write operations are not allowed
 ```
 
-See [Security controls -- read-only SQL enforcement](./controls.md#read-only-sql) and [Register a plugin data source](../building/how-to/register-plugin-data-source.md).
+See [Security controls -- read-only plugin data source access](./controls.md#read-only-sql) and [Register a plugin data source](../building/how-to/register-plugin-data-source.md).
 
 ## Verify
 

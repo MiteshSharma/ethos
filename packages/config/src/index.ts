@@ -922,6 +922,19 @@ export interface EthosConfig {
    */
   a2a?: { enabled?: boolean };
   /**
+   * Operator-controlled security settings.
+   *
+   * `trustedGitHubOrgs` — the GitHub organizations whose skills and plugins
+   * resolve to the `trusted-repo` install tier. The configured list REPLACES
+   * the shipped default (`ethosagent`, `anthropic`) rather than extending it,
+   * so an operator can remove an org they do not trust. An explicitly empty
+   * value is meaningful — it trusts no organization — and is distinct from the
+   * key being absent, which leaves the default in force. Config keys:
+   *   security.trusted_github_orgs: acme-corp, ethosagent
+   *   security.trusted_github_orgs: ""     # trust no org
+   */
+  security?: { trustedGitHubOrgs?: string[] };
+  /**
    * Governed-learning nightly pass scheduler (Phase 3c E). Default-off: when
    * absent or `enabled !== true`, no timer is created and behavior is
    * unchanged. When enabled, `ethos serve` / `ethos gateway start` fire the
@@ -1352,6 +1365,16 @@ export async function writeConfig(storage: Storage, config: EthosConfig): Promis
     lines.push(`plugins.auto_install: ${config.pluginsAutoInstall}`);
   if (config.admin?.enabled !== undefined) lines.push(`admin.enabled: ${config.admin.enabled}`);
   if (config.a2a?.enabled !== undefined) lines.push(`a2a.enabled: ${config.a2a.enabled}`);
+  // Written even when the list is empty — `""` is how "trust no org" survives
+  // a round-trip, and dropping the line would silently restore the default.
+  if (config.security?.trustedGitHubOrgs !== undefined)
+    lines.push(
+      `security.trusted_github_orgs: ${
+        config.security.trustedGitHubOrgs.length > 0
+          ? config.security.trustedGitHubOrgs.join(',')
+          : '""'
+      }`,
+    );
   if (config.nightlyPass) {
     if (config.nightlyPass.enabled !== undefined)
       lines.push(`nightlyPass.enabled: ${config.nightlyPass.enabled}`);
@@ -1822,6 +1845,14 @@ function parseConfigYaml(src: string): EthosConfig {
       kv['a2a.enabled'] = a2a[1].trim().replace(/^["']|["']$/g, '');
       continue;
     }
+    // security.trusted_github_orgs: <org,list>
+    // `(.*)` — not `(.+)` — on purpose: an empty value is a meaningful
+    // configuration ("trust no org"), distinct from the key being absent.
+    const sec = line.match(/^security\.trusted_github_orgs:\s*(.*)$/);
+    if (sec) {
+      kv['security.trusted_github_orgs'] = sec[1].trim().replace(/^["']|["']$/g, '');
+      continue;
+    }
     // nightlyPass.<field>: <value>
     const np = line.match(/^nightlyPass\.(\w+):\s*(.+)$/);
     if (np) {
@@ -2167,6 +2198,17 @@ function parseConfigYaml(src: string): EthosConfig {
     admin:
       kv['admin.enabled'] !== undefined ? { enabled: kv['admin.enabled'] === 'true' } : undefined,
     a2a: kv['a2a.enabled'] !== undefined ? { enabled: kv['a2a.enabled'] === 'true' } : undefined,
+    // `!== undefined` — not truthiness: an empty value must survive as `[]`
+    // (trust no org) instead of collapsing back to the shipped default.
+    security:
+      kv['security.trusted_github_orgs'] !== undefined
+        ? {
+            trustedGitHubOrgs: kv['security.trusted_github_orgs']
+              .split(/[,\s]+/)
+              .map((o) => o.trim())
+              .filter((o) => o.length > 0),
+          }
+        : undefined,
     nightlyPass:
       kv['nightlyPass.enabled'] !== undefined || kv['nightlyPass.cron'] !== undefined
         ? {

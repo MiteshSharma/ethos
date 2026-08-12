@@ -93,7 +93,6 @@ export interface ToolProcessingContext {
   userScopeId: string | undefined;
   watcherTap: WatcherTap;
   usageSink: UsageSink;
-  injectionDefenseEnabled: boolean;
   /** tools-as-code-api Lane B — per-turn bridge for in-script tool calls. */
   scriptToolBridge?: ScriptToolBridge;
 
@@ -536,6 +535,9 @@ export async function* processTools(
     // and is what gets persisted to history so toLLMMessages() replays
     // the exact bytes the model saw on the prior turn.
     let llmContent: string;
+    // Ch.3a — set when this result went through the injection pipeline, so the
+    // delimiter fence below covers untrusted errors as well as untrusted values.
+    let passedInjectionPipeline = false;
 
     if (p.rejected !== undefined) {
       result = { ok: false, error: p.rejected, code: 'execution_failed' };
@@ -545,6 +547,10 @@ export async function* processTools(
       // tool_end already emitted above; no after_tool_call hook for blocked tools
     } else {
       const execResult = execResultMap.get(p.toolCallId);
+      // Ch.3a provenance — the ONLY known-internal result on this branch is the
+      // fallback we construct right here (the registry lost the call). It is
+      // identified by its construction site, not by inspecting its text.
+      const frameworkAuthored = execResult === undefined;
       result = execResult?.result ?? {
         ok: false,
         error: 'Tool result missing',
@@ -655,12 +661,25 @@ export async function* processTools(
       // cut off, and before persistence (see agent-loop/ingestion-cap.ts).
       llmContent = capIngestedResult(llmContent, deps.resultBudgetChars);
 
-      // Ch.3a + 3c — provenance wrap + Tier-1 pattern check + optional
-      // Tier-2 LLM classifier. Only applies on success; errors are
-      // framework-authored and skip wrapping. Wraps the already-capped
-      // content, so the wrapper (a small constant) is the only growth past
-      // the budget and the fence always terminates.
-      if (ctx.injectionDefenseEnabled && result.ok) {
+      // Ch.3a + 3c — provenance wrap + Tier-1 pattern check + optional Tier-2
+      // LLM classifier. §V S6: unconditional — no personality knob skips it,
+      // and neither does the ok/error discriminant. This was gated on
+      // `result.ok` on the claim that errors are framework-authored; false for
+      // exactly the tools the defense exists for — MCP tools declare
+      // `outputIsUntrusted` and a server answering `isError: true` has its own
+      // text lifted verbatim into `error` (extensions/tools-mcp). One boolean
+      // bypassed both the wrap and the downgrade.
+      //
+      // Framework-authored is decided by construction site, never by reading
+      // the string: `p.rejected` (handled above, never reaches here) and the
+      // `Tool result missing` fallback flagged as `frameworkAuthored` above.
+      // Everything else came from `executeParallel` and is indistinguishable
+      // here from tool-authored text — `ToolResult` has no origin field and
+      // `code` is tool-controlled — so it takes the fail-safe side.
+      //
+      // Wraps the already-capped content, so the wrapper (a small constant) is
+      // the only growth past the budget and the fence always terminates.
+      if (!frameworkAuthored) {
         const tool = deps.tools.get(p.name);
         if (tool?.outputIsUntrusted) {
           const verdict = await handleUntrustedResult(
@@ -673,6 +692,7 @@ export async function* processTools(
             deps.observability,
           );
           llmContent = verdict.wrappedContent;
+          passedInjectionPipeline = true;
           if (verdict.containsInstructions) {
             deps.observability?.recordSafetyBlock({
               traceId: ctx.traceId,
@@ -686,6 +706,8 @@ export async function* processTools(
               audience: 'user',
             };
           }
+          // Ch.3d — arms on the error path too; wrapping without arming still
+          // lets the next call reach a dangerous tool.
           untrustedReadThisIteration = true;
         }
       }
@@ -693,7 +715,10 @@ export async function* processTools(
 
     const delimiterEnabled = ctx.personality.safety?.injectionDefense?.toolResultDelimiters ?? true;
     let finalContent: string;
-    if (delimiterEnabled && result.ok) {
+    // Fence successes plus any error that carried untrusted content — the
+    // escaping below is what stops attacker text forging a framework
+    // delimiter, and that text is now reachable on the error path.
+    if (delimiterEnabled && (result.ok || passedInjectionPipeline)) {
       const escaped = llmContent
         .replace(/===TOOL_RESULT_START/g, '=​==TOOL_RESULT_START')
         .replace(/===TOOL_RESULT_END/g, '=​==TOOL_RESULT_END');

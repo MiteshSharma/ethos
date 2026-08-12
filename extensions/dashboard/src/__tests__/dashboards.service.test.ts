@@ -238,6 +238,50 @@ describe('DashboardsService', () => {
     ).toThrow('sqlQuery is required');
   });
 
+  it('rejects unvetted SQL on updatePanel when queryType is not in the patch', () => {
+    const d = svc.create('user-1', 'D', 'p1');
+    const p = svc.addPanel(d.id, {
+      queryType: 'sql',
+      blockType: 'table',
+      content: '[]',
+      sqlQuery: 'SELECT * FROM users',
+      pluginId: 'my-plugin',
+      dataSourceId: 'ds-1',
+    });
+
+    // The reachable case: the panel is already queryType 'sql', so a patch
+    // carrying only sqlQuery used to skip the guard and store executable text.
+    expect(() => svc.updatePanel(p.id, { sqlQuery: 'DROP TABLE users' })).toThrow(
+      'SQL query must start with SELECT',
+    );
+    expect(() => svc.updatePanel(p.id, { sqlQuery: 'SELECT 1; DROP TABLE users' })).toThrow(
+      'SQL query must not contain multiple statements',
+    );
+    expect(svc.getPanel(p.id)?.sqlQuery).toBe('SELECT * FROM users');
+
+    // A SELECT-only patch still lands.
+    svc.updatePanel(p.id, { sqlQuery: 'SELECT id FROM users' });
+    expect(svc.getPanel(p.id)?.sqlQuery).toBe('SELECT id FROM users');
+  });
+
+  it('rejects unvetted SQL stored on a non-sql panel that a later patch could activate', () => {
+    const d = svc.create('user-1', 'D', 'p1');
+    const p = svc.addPanel(d.id, {
+      queryType: 'prompt',
+      blockType: 'table',
+      content: '[]',
+      prompt: 'summarise',
+    });
+
+    // Staging the text under a non-sql queryType and flipping the type in a
+    // second patch reaches the same executor, so the guard must not depend on
+    // queryType at all.
+    expect(() => svc.updatePanel(p.id, { sqlQuery: 'DELETE FROM users' })).toThrow(
+      'SQL query must start with SELECT',
+    );
+    expect(svc.getPanel(p.id)?.sqlQuery).toBeFalsy();
+  });
+
   // -----------------------------------------------------------------------
   // Panel updates
   // -----------------------------------------------------------------------

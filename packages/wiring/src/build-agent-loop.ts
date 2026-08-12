@@ -312,6 +312,11 @@ export async function buildAgentLoop(
     },
     scopedStorageFactory: (base, scope) =>
       new ScopedStorageCls(base, { ...scope, alwaysDeny: defaultAlwaysDenyFn() }),
+    // G4 — this composition root gates tool calls behind the danger predicate
+    // (`./danger-predicate`, reached via the `before_tool_call` modifying hooks
+    // each surface registers). Declaring it makes core verify the claim at the
+    // first tool dispatch instead of assuming it.
+    approvalPosture: { kind: 'gated', policy: 'danger-predicate' },
     watcher,
   };
 
@@ -648,6 +653,7 @@ export async function buildAgentLoop(
     ...(promptBudget ? { promptBudget } : {}),
     memoryProviders: memoryProviderMap,
     safety,
+    logger: log,
     documentExtractors,
     contextEngines,
     ...(llmHandle ? { llmHandle } : {}),

@@ -7,6 +7,7 @@ import type {
   DryRunToolPlan,
   HookRegistry,
   LLMProvider,
+  Logger,
   MemoryProvider,
   PersonalityRegistry,
   RequestDumpStore,
@@ -15,6 +16,7 @@ import type {
   Storage,
   ToolRegistry,
 } from '@ethosagent/types';
+import { createApprovalPostureGuard } from './agent-loop/approval-posture';
 import { checkTurnBudgets, updateDenialStreak } from './agent-loop/budgets';
 import { compactSession, type ManualCompactionResult } from './agent-loop/manual-compact';
 import { applyOverflowRetry } from './agent-loop/overflow';
@@ -180,6 +182,9 @@ export interface AgentLoopConfig {
   } | null>;
   /** Injected safety bundle — injection defense, redaction, and scoped storage. */
   safety: AgentSafety;
+  /** Library output sink (Law 10). Carries the once-per-loop `ungated`
+   *  approval-posture notice; omitted → the framework stays silent. */
+  logger?: Logger;
   options?: {
     maxIterations?: number;
     historyLimit?: number;
@@ -346,6 +351,8 @@ export class AgentLoop {
   /** v2.2 — Pre-turn credential check callback. */
   private readonly credentialCheck?: AgentLoopConfig['credentialCheck'];
   private readonly safety: AgentSafety;
+  /** G4 — see `agent-loop/approval-posture.ts`. Latches after its first run. */
+  private readonly checkApprovalPosture: () => void;
   /** Per-session accumulated spend in USD. Keyed by sessionKey. Reset via resetSessionCost(). */
   private readonly sessionCosts = new Map<string, number>();
   /** FW-28 — per-session mtime registry. Keyed by sessionKey → (absPath → record). */
@@ -393,6 +400,7 @@ export class AgentLoop {
     if (config.onToolMetric) this.onToolMetric = config.onToolMetric;
     if (config.credentialCheck) this.credentialCheck = config.credentialCheck;
     this.safety = config.safety;
+    this.checkApprovalPosture = createApprovalPostureGuard(this.safety, this.hooks, config.logger);
     this.contextEngines = config.contextEngines ?? new DefaultContextEngineRegistry();
     if (config.llmHandle) this.llmHandle = config.llmHandle;
   }
@@ -518,7 +526,6 @@ export class AgentLoop {
       llmMessages: initialLlmMessages,
       cacheBreakpoints: initialCacheBreakpoints,
       activeSkillFiles,
-      injectionDefenseEnabled,
       baseMessageCount,
       userScopeId,
       compactedThisTurn,
@@ -580,7 +587,7 @@ export class AgentLoop {
     // matching the chapter's "counter resets when the user sends a fresh
     // message" contract.
     const dgConfig = personality.safety?.injectionDefense?.postReadDowngrade;
-    const dgEnabled = injectionDefenseEnabled && dgConfig?.enabled !== false;
+    const dgEnabled = dgConfig?.enabled !== false;
     const dgTurns = dgConfig?.turns ?? 2;
     const dgTools = this.safety.injection.resolveDowngradedTools(dgConfig?.tools);
     const dgRemainingRef = { value: 0 };
@@ -756,6 +763,10 @@ export class AgentLoop {
       const { completedToolCalls } = stepResult;
       const usageSink = stepResult.usageSink;
 
+      // G4 — the first tool dispatch is where the posture has to hold: every
+      // surface's hooks are registered by now and nothing has executed yet.
+      this.checkApprovalPosture();
+
       // Stage: Tool processing (pre-flight hooks, execution, result collection)
       const toolResult = yield* processTools(
         {
@@ -797,7 +808,6 @@ export class AgentLoop {
           userScopeId,
           watcherTap,
           usageSink,
-          injectionDefenseEnabled,
           scriptToolBridge,
           dgEnabled,
           dgRemaining: dgRemainingRef,

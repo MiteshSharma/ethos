@@ -1209,6 +1209,7 @@ async function runPersonalityShow(argv: string[]): Promise<void> {
   // the character sheet is the command's contract.
   let modelFit: import('@ethosagent/personalities').CharacterSheetModelFit | undefined;
   let scriptSurface: import('@ethosagent/personalities').CharacterSheetScriptSurface | undefined;
+  let boundary: import('@ethosagent/personalities').CharacterSheetBoundary | undefined;
   let renderers: string[] | undefined;
   let loopConstructed = false;
   try {
@@ -1220,8 +1221,12 @@ async function runPersonalityShow(argv: string[]): Promise<void> {
       // Lane G (tools-as-code-api) — the script-callable surface, computed by
       // the SAME derivation the ScriptToolBridge enforces. Fail-soft with the
       // rest of this block: no loop → no line.
-      const { scriptCallableFor } = await import('@ethosagent/core');
+      const { scriptCallableFor, toolsDeclaringNetwork } = await import('@ethosagent/core');
       scriptSurface = { callable: scriptCallableFor(described.config, result.toolRegistry) };
+      // §4.7 — which tools in reach DECLARE network egress, so the `## Boundary`
+      // section can say G-NET is inapplicable rather than implying reach this
+      // personality does not have. Same declaration G-CAP intersects per call.
+      boundary = { networkTools: toolsDeclaringNetwork(described.config, result.toolRegistry) };
       const model = cfg.modelRouting?.[id] ?? cfg.model;
       modelFit = await resolvePersonalityModelFit({
         personality: described.config,
@@ -1258,6 +1263,7 @@ async function runPersonalityShow(argv: string[]): Promise<void> {
       modelFit,
       scriptSurface,
       renderers,
+      boundary,
     )}`,
   );
 

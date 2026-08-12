@@ -4,7 +4,7 @@ description: Catalogue of shipped, partial, and planned security controls — ch
 kind: reference
 audience: shared
 slug: security-controls
-updated: 2026-06-09
+updated: 2026-08-12
 ---
 
 Most controls on this page are shipped — code in `packages/` and `extensions/`, tests next to it, audit trail in `observability.db`. A small number are **partial** or **planned** with a designed interface but the enforcement not yet wired; those are tagged inline so customers can plan around them.
@@ -131,11 +131,19 @@ All filesystem access under `~/.ethos/` flows through the `Storage` interface fr
 
 *Status: Shipped (misdirection defense). Planned (TOCTOU race closure).*
 
-After path expansion, Ethos calls `realpath()` to resolve symlinks and re-checks the resolved path against the personality's [fs reach](../getting-started/glossary.md#fs-reach). This defends against the symlink-misdirection bypass — a symlink at `~/proj/notes.md → ~/.ssh/id_rsa` planted inside an allowed directory is rejected after resolution, not let through by naive prefix match.
+The reach check does two things, and both are needed. First it normalises the path lexically — `normalize(resolve(path))` — so `..`, `.`, and redundant-slash traversal cannot walk out of an allowed prefix. Then it walks **every segment** of the path with `lstat` and refuses any segment that is a symbolic link. A symlink at `~/proj/notes.md → ~/.ssh/id_rsa` planted inside an allowed directory is refused at the link, before anything opens the target.
 
-What this does **not** close on its own is the resolve-then-open TOCTOU race: an attacker who can swap a path between the `realpath()` and the `open()` can still redirect the read. Closing that race requires kernel-tied operations (`openat`-style directory handles plus no-follow semantics) — designed for, tracked separately, not yet wired in. The source comments note this explicitly.
+The walk is per-segment rather than leaf-only because **a symlinked parent escapes with a non-symlink leaf**: `<allowed>/data → /etc` makes `<allowed>/data/passwd` a perfectly ordinary file whose link path passes any prefix test. Checking only the last component misses the whole attack.
 
-- Source: `extensions/tools-file/src/index.ts`
+Normalisation alone does not close this. `resolve()` is a string operation and a symlink is a filesystem fact — the lexically-resolved link path is neither under a denied prefix nor outside the allowed one, so it passes the always-deny floor and the allow check both. The floor's guarantee is *"this path string is not a sensitive path"*, not *"this read does not reach a sensitive file."* The segment walk is what supplies the second property.
+
+The check lives at the boundary, not in each tool, so file tools, vision, web-api, gateway, and any future consumer inherit it from one place.
+
+What this does **not** close is the check-then-open TOCTOU race: an attacker who can swap a path between the walk and the `open()` can still redirect the read. Closing that race requires kernel-tied operations (`openat`-style directory handles plus no-follow semantics) that Node does not expose — designed for, tracked separately, not yet wired in, and realistically a container-level remediation rather than a framework one.
+
+- Source: `packages/core/src/scoped/scoped-fs.ts` (`checkReach`)
+- Tests: `extensions/tools-file/src/__tests__/boundary.test.ts`
+- History: this defense was originally implemented as a path-canonicalisation call inside the file tools and was dropped during a refactor that centralised normalisation at the boundary, without this page being updated. It is re-implemented at the boundary as the segment walk described above. See [Pre-launch hardening pass, entry 8](./security-fixes.md#8-symlink-misdirection) for the dated correction.
 
 ### Bash + filesystem boundary {#bash-filesystem-boundary}
 
@@ -215,7 +223,7 @@ After a read from an untrusted source flags the classifier, a configurable subse
 
 - Source: `packages/safety/injection/src/downgrade.ts`
 - Audit category: `audit.injection_flag`
-- Per-personality knob: `safety.injectionDefense` — `strict` | `balanced` | `off`. Default is `balanced`.
+- Per-personality knob: `safety.injectionDefense.postReadDowngrade` — `{ enabled, turns, tools }`. The block narrows the downgrade; there is no master switch that turns the injection pipeline off. ARCHITECTURE.md §V S6 makes the inbound safety pipeline non-opt-out-able by personality, channel, or tool.
 
 ### Memory injection scanning {#memory-injection-scanning}
 
@@ -262,6 +270,8 @@ The patterns cover Anthropic API keys (`sk-ant-…`), OpenAI API keys (`sk-…`)
 
 Newly installed skills and plugins are scanned for prompt-injection patterns (hidden Unicode, base64 blobs, instructions to call sensitive tools), declared-but-unused permissions, and required-tool inflation (a "format-a-date" skill that declares `required_tools: [bash, web_post]`).
 
+The scanner is **pre-install and advisory**. It reads text before the code is installed; it sandboxes nothing, constrains nothing at runtime, and is evaded by string concatenation. It is published as a non-boundary — see [What is not a boundary](./security-boundary.md#non-boundaries) — and nothing on this page should be read as strengthening that.
+
 - Source: `packages/safety/scanner/src/skill-scanner.ts`, `packages/safety/scanner/src/plugin-scanner.ts`
 - Audit category: `install.scan`
 
@@ -269,9 +279,43 @@ Newly installed skills and plugins are scanned for prompt-injection patterns (hi
 
 *Status: Shipped.*
 
-A skill is `community` (third-party) by default. Operators can promote skills to `partner` or `internal` tiers, which relax certain checks (e.g. an internal skill may declare `bash` without a scanner warning). Promotion is a deliberate operator action and is audit-logged.
+There are four tiers. A tier is **derived from the source string** the skill or plugin was installed from, on every scan. It is not assigned per skill, cannot be promoted, and produces no audit event — there is no promotion action to record.
+
+| Tier | Derived from | Yellow findings | Red findings |
+|---|---|---|---|
+| `builtin` | The literal source `builtin` — code shipped inside this repository | Auto-acknowledged | Installs with `--force` |
+| `trusted-repo` | `github.com/<org>/<repo>` where `<org>` is listed in `security.trusted_github_orgs` | Acknowledgment required; `--force` stands in for it | Installs with `--force` |
+| `community` | Any other `github.com/…`, `clawhub/…`, or `hermeshub/…` source | Acknowledgment required; `--force` stands in for it | Blocked; `--force` is ignored |
+| `untrusted` | A local path or a raw URL | Acknowledgment required; `--force` stands in for it | Blocked; `--force` is ignored |
+
+`builtin` is the only tier that auto-acknowledges yellow findings. Overriding a red finding with `--force` is the only privilege `trusted-repo` holds over `community`.
+
+`security.trusted_github_orgs` is operator-configurable and **replaces** the shipped default (`ethosagent, anthropic`) rather than extending it. Set it to a different list to trust different organizations, or to an empty value to trust no organization by name. Organization matching is exact on the path segment; a source containing `.` or `..` is refused. See [`security.trusted_github_orgs`](../using/reference/config-yaml.md#security-trusted-github-orgs).
+
+Residual risk: a red finding in a configured organization is overridable with `--force`.
 
 - Source: `packages/safety/scanner/src/trust-tiers.ts`
+
+### Plugin capability grants {#plugin-capability-grants}
+
+*Status: Shipped.*
+
+A grant is a **consent record, not runtime enforcement**. It is not a boundary and it does not confine a plugin.
+
+`PluginLoader` `import()`s a plugin's entry module directly into the Ethos process. The plugin shares the process, the environment, the filesystem, and your API keys. Installing a plugin is equivalent to running arbitrary code as your user. This is an accepted, documented Tier 1 property — see [Gaps, disclosed](./security-boundary.md#gaps).
+
+At install the operator is shown what the plugin **declares** in `ethos.permissions` (`shell` — intent to shell out; `network` — declared hosts, or none), told in plain words what installing it means, and their agreement is recorded durably alongside the scan findings as they stood at that moment. The record's field is named `capabilities`, and there are no per-capability toggles: it records what was declared and what was agreed to. Nothing checks a plugin against its declaration while it runs, and an undeclared capability is not blocked.
+
+| Command | What it does |
+|---|---|
+| `ethos plugin grants` | Lists every recorded grant — package, version, source, what was declared, the scan result at install, and any revocation date |
+| `ethos plugin revoke <pluginId>` | Withdraws the grant. The record is kept with a `revokedAt` date rather than deleted |
+
+Revocation prevents the **next** load and blocks lockfile auto-install. It cannot claw back anything an already-loaded plugin did — that code has already run as the user.
+
+- Source: `extensions/plugin-loader/src/grants.ts`
+- Record: `<pluginsDir>/grants.json`
+- Load-path gate: `extensions/plugin-loader/src/index.ts`
 
 ### MCP environment minimization {#mcp-environment-minimization}
 
@@ -326,13 +370,28 @@ The admin panel (Mission Control) requires a bearer token for every API request.
 - Source: `apps/web-api/src/middleware/auth.ts`
 - Cross-ref: [Authenticate your dashboard users](../building/how-to/authenticate-dashboard-users.md)
 
-## Read-only SQL enforcement {#read-only-sql}
+## Read-only plugin data source access {#read-only-sql}
 
-*Status: Shipped.*
+*Status: Shipped (read-only connection). Partial (statement guard).*
 
-Plugin data sources expose SQLite databases to the dashboard for read-only queries. The query executor enforces read-only mode: every query runs inside a read-only transaction, and statements containing write keywords (`INSERT`, `UPDATE`, `DELETE`, `DROP`, `ALTER`, `CREATE`) are rejected before execution.
+Plugin data sources expose SQLite databases to the dashboard. Read-only enforcement lives at the SQLite connection, not in a keyword filter: both query paths open the database with `new Database(dbPath, { readonly: true })`, so the engine refuses every write regardless of what the statement text says.
 
-- Source: `apps/web-api/src/services/data-source.ts`
+Connection-level read-only is the stronger property. A denylist of write keywords is a guess about what a string means, and SQL offers cheap ways to make a write not look like one — a leading comment, unexpected casing, a `WITH` prefix, or a keyword that never appears at the position the filter inspects. A connection opened read-only does not interpret intent; SQLite refuses the write at execution. A filter has to be right on every statement it will ever see; the connection has to be right once.
+
+| Layer | Where | What it does |
+|---|---|---|
+| Read-only connection | `dashboards.service.ts:1035`, `dashboard-refresh.ts:127` | Engine-level refusal of all writes. Covers both query paths. |
+| SELECT-only statement guard | `interpolate-params.ts:128` (`assertSelectOnlySql`) | Write-time. Requires a single statement beginning with `SELECT`, and rejects embedded `;`. |
+| Param allowlist | `interpolate-params.ts:106` (`findInvalidParamKeys`) | Values interpolated into panel SQL must match a declared `select`/`options` option or a `YYYY-MM-DD` date. Template positions cannot be `?`-bound, so this allowlist is the injection defense on that path. |
+| Keyword prefix denylist | `dashboards.service.ts:1026` | Ad-hoc `dashboards.runQuery` RPC only. Rejects eight leading keywords. It tests only the statement's first word — a usability guard, not a boundary. |
+
+Both paths that read a plugin data source carry the read-only connection: `runPluginQuery`, behind the ad-hoc `dashboards.runQuery` RPC, and `refreshSinglePanel`, behind scheduled and manual panel refresh. There is no third path — `getDataSourcePath` in `extensions/plugin-loader/src/index.ts` has exactly these two callers.
+
+The statement guard does not have that coverage, which is why the status is split. `addPanel` guards every SQL panel it stores, but `updatePanel` applies the guard only when the patch also sets `queryType: 'sql'` (`dashboards.service.ts:551`). A patch that changes `sqlQuery` alone on a panel that is already of type `sql` persists unvetted text, and the refresh path executes it. The read-only connection is what keeps that from being a write primitive. Until the guard condition is corrected, read the connection as the load-bearing control and the statement guard as the layer above it, not the reverse.
+
+Registration itself is not validated. `PluginApi.registerDataSource(id, path)` records whatever identifier and filesystem path the plugin passes, with no path containment, extension check, or identifier constraint. A plugin can therefore point a data source at any SQLite file the host process can open. That is consistent with the plugin trust model — plugin code already runs in-process — but it means the boundary here is read-only access, not restricted reach.
+
+- Source: `extensions/dashboard/src/dashboards.service.ts`, `extensions/dashboard/src/dashboard-refresh.ts`, `extensions/dashboard/src/interpolate-params.ts`
 - Cross-ref: [Register a plugin data source](../building/how-to/register-plugin-data-source.md)
 
 ## Desktop remote connection security {#desktop-remote-connection}
@@ -341,12 +400,14 @@ Plugin data sources expose SQLite databases to the dashboard for read-only queri
 
 When Mission Control connects to a remote Ethos instance, the connection token is stored in the OS keychain rather than in plaintext config. The desktop app retrieves the token at connection time via `keytar` and transmits it over TLS. CORS is restricted to the configured origin.
 
-- Source: `apps/desktop/src/remote-auth.ts`
+- Source: `apps/desktop/src/main/remote-auth.ts`
 - Cross-ref: [Deploy Mission Control with a remote Ethos](../building/how-to/deploy-mission-control-remote.md)
 
 ## Removed empty safety stubs {#removed-empty-safety-stubs}
 
-`extensions/safety-injection/` and `extensions/safety-scanner/` were empty stub directories that shipped no code. They have been removed. The real injection defense and install scanner implementations live at `packages/safety/injection/` and `packages/safety/scanner/` respectively — the source paths listed throughout this page.
+Five directories under `extensions/` carried safety-package names and shipped no code: `safety-injection/` and `safety-scanner/`, removed earlier, and `safety-channel/`, `safety-network/`, and `safety-watcher/`, removed in this release. All five are gone. The real implementations live under `packages/safety/` — `injection/`, `scanner/`, `channel/`, `network/`, `watcher/`, and `redact/` — which are the source paths listed throughout this page and the Tier 0 members named in [the security boundary](./security-boundary.md#tiers).
+
+Empty directories with kernel names in the extensions tree are not cosmetic. They point a reader looking for the kernel at the wrong tier, which is the one thing the tier roster exists to prevent.
 
 ## Per-personality vs. global {#per-personality-vs-global}
 
@@ -384,6 +445,7 @@ The tests include adversarial bypass attempts — encoding tricks, redirect chai
 
 ## See also {#see-also}
 
+- [What does Ethos guarantee, and what is outside its security boundary?](./security-boundary.md) — which of these controls are published guarantees, and which are not.
 - [How does Ethos defend against the threats it knows about?](./overview.md) — the layered model and runtime precedence.
 - [What is the threat model?](./threat-model.md) — what each control is defending against.
 - [Pre-launch hardening pass](./security-fixes.md) — the issues a pre-launch review surfaced and how each was folded in.

@@ -1,7 +1,7 @@
 // biome-ignore-all lint/suspicious/noTemplateCurlyInString: fs_reach values are
 // literal `${self}` / `${shared}` tokens in config.yaml — they resolve at
 // AgentLoop construction, not in the registry, so the renderer sees them verbatim.
-import type { ExecutionPosture, PersonalityConfig } from '@ethosagent/types';
+import { type ExecutionPosture, GUARANTEE_IDS, type PersonalityConfig } from '@ethosagent/types';
 import { describe, expect, it } from 'vitest';
 import {
   type CharacterSheetModelFit,
@@ -492,5 +492,196 @@ describe('renderCharacterSheet — renderers (Lane E)', () => {
       /## Capabilities\n- Renders: echarts@1 \(interactive charts — via charts skill\)\n/,
     );
     expect(withRenderer).not.toContain('(none)\n- Renders');
+  });
+});
+
+// §4.7 — the register-status section. The register (published in
+// docs/content/security/security-boundary.md) says what Ethos guarantees in
+// general; this section says which of those twelve guarantees are enforced,
+// narrowed, relaxed, or inapplicable for THIS personality. The value is in the
+// narrowings and relaxations being visible without cross-referencing the doc,
+// so these tests assert the STATE, never merely that a section exists.
+describe('renderCharacterSheet — ## Boundary section (§4.7)', () => {
+  /** Pull the one table row for a guarantee id. */
+  function row(sheet: string, id: string): string {
+    const line = sheet.split('\n').find((l) => l.startsWith(`| ${id} `));
+    if (!line) throw new Error(`no ${id} row in the sheet`);
+    return line;
+  }
+
+  /** The status cell of a row. */
+  function status(sheet: string, id: string): string {
+    return (row(sheet, id).split('|')[2] ?? '').trim();
+  }
+
+  const permissive: PersonalityConfig = {
+    id: 'wide',
+    name: 'Wide',
+    // No toolset declared at all: every registered built-in tool is reachable.
+    safety: {
+      approvalMode: 'off',
+      network: { allow_private_urls: true },
+      injectionDefense: { postReadDowngrade: { enabled: false } },
+      observability: { storeToolBodies: 'full' },
+    },
+  };
+
+  const tight: PersonalityConfig = {
+    id: 'tight',
+    name: 'Tight',
+    toolset: ['read_file', 'web_extract'],
+    fs_reach: { read: ['/srv/app', '/etc/app'], write: ['/srv/app'], workdir: '/srv/app' },
+    safety: {
+      approvalMode: 'manual',
+      denyRules: ['git push --force', 'rm -rf /'],
+      network: { allow: ['api.internal'], deny: ['evil.example'] },
+      injectionDefense: { classifier: { alwaysCallLLM: true } },
+      observability: { storeToolArgs: 'redacted', redactPatterns: ['acme_[a-z]+'] },
+    },
+  };
+
+  /** Chat-only: no network-declaring tool, no exec-bearing tool. */
+  const chatOnly: PersonalityConfig = {
+    id: 'poet',
+    name: 'Poet',
+    toolset: ['memory_read'],
+  };
+
+  const nonePosture: ExecutionPosture = {
+    backend: 'none',
+    networkMode: 'none',
+    memoryMb: 256,
+    containerized: false,
+    mounts: [],
+    scratchPaths: [],
+  };
+
+  it('reports all twelve register rows, in register order', () => {
+    const sheet = renderCharacterSheet(fullConfig, soulMd);
+    expect(sheet).toContain('## Boundary');
+    const ids = sheet
+      .split('\n')
+      .filter((l) => l.startsWith('| G-'))
+      .map((l) => (l.split('|')[1] ?? '').trim());
+    expect(ids).toEqual([...GUARANTEE_IDS]);
+  });
+
+  it('surfaces the actual relaxations a permissive personality made', () => {
+    const sheet = renderCharacterSheet(permissive, soulMd);
+    expect(status(sheet, 'G-TOOLS')).toBe('relaxed');
+    expect(row(sheet, 'G-TOOLS')).toContain('no toolset declared');
+    expect(status(sheet, 'G-NET')).toBe('relaxed');
+    expect(row(sheet, 'G-NET')).toContain('allow_private_urls');
+    expect(row(sheet, 'G-NET')).toContain('cloud metadata still blocked');
+    expect(status(sheet, 'G-APP')).toBe('relaxed');
+    expect(row(sheet, 'G-APP')).toContain('approvalMode off');
+    expect(status(sheet, 'G-RED')).toBe('relaxed');
+    expect(row(sheet, 'G-RED')).toContain('tool bodies full');
+  });
+
+  it('reports a narrowed injection pipeline as relaxed-but-never-off (no opt-out)', () => {
+    const sheet = renderCharacterSheet(permissive, soulMd);
+    expect(status(sheet, 'G-INJ')).toBe('relaxed');
+    expect(row(sheet, 'G-INJ')).toContain('post-read downgrade off');
+    // The register has no waiver for G-INJ: the row must say what still runs.
+    expect(row(sheet, 'G-INJ')).toContain('no opt-out');
+  });
+
+  it('names each narrowing a tightly-scoped personality made', () => {
+    const sheet = renderCharacterSheet(tight, soulMd);
+    expect(status(sheet, 'G-TOOLS')).toBe('narrowed');
+    expect(row(sheet, 'G-TOOLS')).toContain('2 tools allowed');
+    expect(status(sheet, 'G-FS')).toBe('narrowed');
+    expect(row(sheet, 'G-FS')).toContain('2 read / 1 write prefixes');
+    expect(row(sheet, 'G-FS')).toContain('workdir /srv/app');
+    expect(status(sheet, 'G-NET')).toBe('narrowed');
+    expect(row(sheet, 'G-NET')).toContain('host allowlist: 1 host');
+    expect(row(sheet, 'G-NET')).toContain('1 deny rule');
+    expect(status(sheet, 'G-CAP')).toBe('narrowed');
+    expect(row(sheet, 'G-CAP')).toContain('fs_reach + network allowlist');
+    expect(status(sheet, 'G-INJ')).toBe('narrowed');
+    expect(row(sheet, 'G-INJ')).toContain('LLM classifier on every untrusted result');
+    expect(status(sheet, 'G-RED')).toBe('narrowed');
+    expect(row(sheet, 'G-RED')).toContain('+1 pattern');
+    expect(status(sheet, 'G-APP')).toBe('enforced');
+    expect(row(sheet, 'G-APP')).toContain('2 deny rules bind first');
+  });
+
+  it('states both the allowlist and the private-network opt-in when a personality does both', () => {
+    const both: PersonalityConfig = {
+      ...tight,
+      safety: { network: { allow: ['api.internal'], allow_private_urls: true } },
+    };
+    const sheet = renderCharacterSheet(both, soulMd);
+    expect(status(sheet, 'G-NET')).toBe('relaxed');
+    expect(row(sheet, 'G-NET')).toContain('allow_private_urls');
+    expect(row(sheet, 'G-NET')).toContain('host allowlist: 1 host');
+  });
+
+  it('marks G-NET and G-EXEC not applicable for a personality with no network or exec tool', () => {
+    const sheet = renderCharacterSheet(
+      chatOnly,
+      soulMd,
+      { posture: nonePosture },
+      undefined,
+      undefined,
+      undefined,
+      { networkTools: [] },
+    );
+    expect(status(sheet, 'G-NET')).toBe('n/a');
+    expect(row(sheet, 'G-NET')).toContain('no tool in this toolset declares network reach');
+    expect(status(sheet, 'G-EXEC')).toBe('n/a');
+    expect(row(sheet, 'G-EXEC')).toContain('no exec-bearing tool');
+    // Everything that still binds a chat-only personality stays enforced.
+    expect(status(sheet, 'G-INJ')).toBe('enforced');
+    expect(status(sheet, 'G-SEC')).toBe('enforced');
+    expect(status(sheet, 'G-AUDIT')).toBe('enforced');
+  });
+
+  it('never claims inapplicable network reach when MCP servers or plugins are attached', () => {
+    const withMcp: PersonalityConfig = { ...chatOnly, mcp_servers: ['github'] };
+    const sheet = renderCharacterSheet(
+      withMcp,
+      soulMd,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { networkTools: [] },
+    );
+    expect(status(sheet, 'G-NET')).not.toBe('n/a');
+    expect(row(sheet, 'G-NET')).toContain('MCP/plugin-side only');
+  });
+
+  it('does not claim inapplicability when no reach data is injected (no registry at the call site)', () => {
+    const sheet = renderCharacterSheet(chatOnly, soulMd);
+    expect(status(sheet, 'G-NET')).toBe('enforced');
+    expect(row(sheet, 'G-NET')).toContain('safeFetch floor');
+    expect(status(sheet, 'G-EXEC')).toBe('enforced');
+    expect(row(sheet, 'G-EXEC')).toContain('no execution posture resolved on this surface');
+  });
+
+  it('describes the resolved posture in the same words as ## Execution', () => {
+    const hostFallback: ExecutionPosture = {
+      backend: 'local',
+      networkMode: 'bridge',
+      memoryMb: 512,
+      containerized: false,
+      mounts: [],
+      scratchPaths: [],
+      hostFallback: { reason: 'docker-disabled' },
+    };
+    const sheet = renderCharacterSheet(fullConfig, soulMd, { posture: hostFallback });
+    expect(status(sheet, 'G-EXEC')).toBe('enforced');
+    expect(row(sheet, 'G-EXEC')).toContain(
+      'local (un-sandboxed — runs on host; Docker unavailable)',
+    );
+    expect(row(sheet, 'G-EXEC')).toContain('host fallback: docker-disabled');
+  });
+
+  it('says channel admission is decided outside the personality', () => {
+    const sheet = renderCharacterSheet(fullConfig, soulMd);
+    expect(status(sheet, 'G-CHAN')).toBe('n/a');
+    expect(row(sheet, 'G-CHAN')).toContain('unconfigured platform is ungated');
   });
 });

@@ -548,7 +548,13 @@ export class DashboardsService {
       paramDefaults?: Record<string, string>;
     },
   ): void {
-    if (patch.queryType === 'sql' && patch.sqlQuery) {
+    // Vet on the persist condition, not on a sibling field: `queryType` and
+    // `sqlQuery` are independently optional, so an existing sql panel can be
+    // patched with `sqlQuery` alone, and a non-sql panel can be given sql text
+    // now and flipped to `queryType: 'sql'` in a later patch. Either way the
+    // text ends up executed by refreshSinglePanel, so any SQL text that is
+    // about to be stored is vetted regardless of what else is in the patch.
+    if (patch.sqlQuery) {
       assertSelectOnlySql(patch.sqlQuery);
     }
     if (patch.paramDefaults !== undefined) {

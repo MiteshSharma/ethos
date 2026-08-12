@@ -1,5 +1,6 @@
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { assertWithinBase } from '@ethosagent/core';
 import { noopLogger } from '@ethosagent/logger';
 import {
   createOpenClawApiShim,
@@ -25,10 +26,41 @@ import {
   type TrustTier,
 } from '@ethosagent/safety-scanner';
 import type { HealthCheckResult, Logger, PlatformAdapter, Storage } from '@ethosagent/types';
-import { type PluginLockEntry, readLockfile } from './lockfile';
+import { isValidSecretName } from '@ethosagent/types';
+import { derivePluginId, isGrantRevoked, readGrants } from './grants';
+import {
+  DEFAULT_REGISTRY,
+  isValidPluginId,
+  type PluginLockEntry,
+  type PluginLockfile,
+  readLockfile,
+} from './lockfile';
 
+export type {
+  PluginGrant,
+  PluginGrantCapabilities,
+  PluginGrantScan,
+  PluginGrants,
+} from './grants';
+export {
+  derivePluginId,
+  grantsPath,
+  isGrantRevoked,
+  readGrants,
+  recordGrant,
+  revokeGrant,
+  writeGrants,
+} from './grants';
 export type { PluginLockEntry, PluginLockfile } from './lockfile';
-export { computeIntegrity, readLockfile, verifyIntegrity, writeLockfile } from './lockfile';
+export {
+  computeIntegrity,
+  isExactVersion,
+  isValidNpmPackageName,
+  isValidPluginId,
+  readLockfile,
+  verifyIntegrity,
+  writeLockfile,
+} from './lockfile';
 export { loadWidgetTemplates } from './widgets-loader';
 
 export interface InstalledPluginManifest {
@@ -57,6 +89,20 @@ export interface InstalledPluginManifest {
   status?: 'loaded' | 'failed';
   /** Error message when status is 'failed'. */
   error?: string;
+}
+
+/**
+ * A credential request named a plugin id or a credential whose shape is not a
+ * single safe path segment. Thrown, not swallowed: `null` would read as "no
+ * such credential" and make a traversal attempt indistinguishable from a miss.
+ */
+export class CredentialPathError extends Error {
+  readonly code = 'invalid-credential-path' as const;
+
+  constructor(message: string) {
+    super(message);
+    this.name = 'CredentialPathError';
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -171,9 +217,22 @@ export class PluginLoader {
       this.manifests.set(id, pkgJson as unknown as EthosPluginPackageJson);
     }
 
+    const ethosField = pkgJson.ethos as Record<string, unknown> | undefined;
+
+    // G5 — the operator withdrew consent for this plugin. Refuse before any of
+    // its code or skills reach the process. This is a load-time refusal, not
+    // containment: it stops the next import, not anything a previous one did.
+    const declaredId = typeof ethosField?.id === 'string' ? ethosField.id : undefined;
+    const revoked = await this.revokedGrantId([id, declaredId]);
+    if (revoked) {
+      const reason = `Plugin "${id}" has a revoked capability grant (${revoked}) — not loaded. Re-install it to grant again.`;
+      this.logger.warn(`[plugin-loader] ${reason}`, { component: 'plugin-loader', pluginId: id });
+      this.trackManifestStatus(id, 'failed', reason);
+      return;
+    }
+
     // Skills-dir: any package declaring ethos.skills_dir contributes skills
     // without needing an activate() entry point.
-    const ethosField = pkgJson.ethos as Record<string, unknown> | undefined;
     const skillsDirRel = ethosField?.skills_dir;
     if (typeof skillsDirRel === 'string') {
       this.pluginSkillSources.push({ label: id, dir: resolve(dir, skillsDirRel) });
@@ -295,10 +354,32 @@ export class PluginLoader {
         if (!src) continue;
         const raw = JSON.parse(src);
 
-        // Skills-dir: any package declaring ethos.skills_dir contributes skills.
         const ethosNm = (raw as Record<string, unknown>).ethos as
           | Record<string, unknown>
           | undefined;
+        const isEthos = isEthosPlugin(raw);
+        const isOpenClaw = isOpenClawPackageJson(raw);
+
+        // G5 — the operator withdrew consent for this package. Refuse before
+        // its skills or its code reach the process. Load-time refusal only;
+        // it undoes nothing an earlier load already did.
+        const nmPluginId = derivePluginId(raw, name);
+        const nmRevoked = await this.revokedGrantId([nmPluginId]);
+        if (nmRevoked) {
+          const reason = `Plugin "${nmPluginId}" has a revoked capability grant — not loaded. Re-install it to grant again.`;
+          this.logger.warn(`[plugin-loader] ${reason}`, {
+            component: 'plugin-loader',
+            pluginId: nmPluginId,
+          });
+          if (isEthos || isOpenClaw) {
+            this.manifests.set(nmPluginId, raw as EthosPluginPackageJson);
+            this.pluginPaths.set(nmPluginId, join(nmDir, name));
+            this.trackManifestStatus(nmPluginId, 'failed', reason);
+          }
+          continue;
+        }
+
+        // Skills-dir: any package declaring ethos.skills_dir contributes skills.
         const skillsDirNm = ethosNm?.skills_dir;
         if (typeof skillsDirNm === 'string') {
           this.pluginSkillSources.push({
@@ -307,8 +388,6 @@ export class PluginLoader {
           });
         }
 
-        const isEthos = isEthosPlugin(raw);
-        const isOpenClaw = isOpenClawPackageJson(raw);
         if (!isEthos && !isOpenClaw) continue;
 
         if (isEthos) {
@@ -412,7 +491,27 @@ export class PluginLoader {
     pluginIds: string[],
     opts: { dryRun?: boolean; autoInstall?: boolean } = {},
   ): Promise<Array<PluginLockEntry & { id: string }>> {
-    const lockfile = await readLockfile(this.storage, personalityDir);
+    // A hostile or corrupt lockfile throws (see `readLockfile`). Refuse the
+    // whole auto-install for this personality rather than letting the throw
+    // escape into wiring and take the agent down — installing nothing is the
+    // fail-closed outcome, and the warning names the file so tampering is not
+    // mistaken for "this personality pins nothing".
+    let lockfile: PluginLockfile;
+    try {
+      lockfile = await readLockfile(this.storage, personalityDir, {
+        onReject: (id, reason) =>
+          this.logger.warn(`[plugin-loader] Ignoring plugins.lock entry "${id}" — ${reason}`, {
+            component: 'plugin-loader',
+            pluginId: id,
+          }),
+      });
+    } catch (err) {
+      this.logger.error(
+        `[plugin-loader] Refusing to auto-install from ${personalityDir}: ${err instanceof Error ? err.message : String(err)}`,
+        { component: 'plugin-loader' },
+      );
+      return [];
+    }
     if (Object.keys(lockfile).length === 0) return [];
 
     const missing: Array<PluginLockEntry & { id: string }> = [];
@@ -441,30 +540,58 @@ export class PluginLoader {
   }
 
   private async installFromLockEntry(entry: PluginLockEntry & { id: string }): Promise<void> {
-    const { execSync } = await import('node:child_process');
+    const { execFileSync } = await import('node:child_process');
     const pluginsDir = join(this.dataDir, 'plugins');
     const exactSpec = `${entry.package}@${entry.version}`;
-    const registryArg =
-      entry.registry !== 'https://registry.npmjs.org' ? `--registry=${entry.registry}` : '';
+
+    // G5 — auto-install fetches code from a registry and imports it into this
+    // process with nobody at the keyboard. A lockfile entry is a pin, not the
+    // operator's consent: a personality bundle carried to a new machine brings
+    // the pin along, and the operator on THIS machine never agreed to anything.
+    // Refuse rather than manufacture a grant. Already-installed plugins are
+    // unaffected — this gate is only on fetching something new.
+    const grants = await readGrants(this.storage, pluginsDir, {
+      onReject: (id, reason) =>
+        this.logger.warn(`[plugin-loader] Ignoring grant record "${id}" — ${reason}.`, {
+          component: 'plugin-loader',
+          pluginId: id,
+        }),
+    });
+    const grant = grants[entry.id];
+    if (!grant || grant.revokedAt) {
+      const why = grant ? 'its capability grant was revoked' : 'no capability grant is recorded';
+      this.logger.warn(
+        `[plugin-loader] Not auto-installing ${entry.id} (${exactSpec}) — ${why}. Run: ethos plugin install ${entry.package}`,
+        { component: 'plugin-loader', pluginId: entry.id },
+      );
+      return;
+    }
+    // npm is invoked with an ARGV ARRAY through `execFileSync` — no shell, so
+    // no field here can be quoted or escaped out of. Every field additionally
+    // passed `validateLockEntry` on the way out of `readLockfile`; the argv
+    // array is the second half of the defence, not the only half.
+    const args = ['install', '--prefix', pluginsDir, '--ignore-scripts', '--no-audit'];
+    if (entry.registry !== DEFAULT_REGISTRY) args.push('--registry', entry.registry);
+    args.push(exactSpec);
 
     try {
-      execSync(
-        `npm install --prefix "${pluginsDir}" --ignore-scripts --no-audit ${registryArg} ${exactSpec}`.trim(),
-        { stdio: 'pipe', timeout: 60_000 },
+      execFileSync('npm', args, { stdio: 'pipe', timeout: 60_000 });
+
+      // No `npm rebuild` here, deliberately. `npm rebuild` re-runs the
+      // preinstall/install/postinstall scripts that `--ignore-scripts`
+      // suppressed on the line above — verified on npm 11.12.1 — and it ran
+      // BEFORE `loadFromNodeModules`'s safety scan, inverting this loader's own
+      // "scan before executing any code" ordering. `npm rebuild
+      // --ignore-scripts` is not an alternative: those scripts ARE how a native
+      // addon compiles, so with the flag the rebuild recompiles nothing.
+      // Trade-off, stated rather than hidden: a lockfile plugin shipping a
+      // native addon (e.g. argon2) now loads without its compiled binding until
+      // the operator rebuilds it deliberately. The two sibling install paths
+      // (`ethos plugin install`, personality import) never rebuilt either.
+      this.logger.info(
+        `[plugin-loader] Auto-installed plugin ${entry.id} (${exactSpec}) — lifecycle scripts were not run; if it ships a native addon, run: npm rebuild --prefix ${pluginsDir} ${entry.package}`,
+        { component: 'plugin-loader', pluginId: entry.id },
       );
-
-      this.logger.info(`[plugin-loader] Auto-installed plugin ${entry.id} (${exactSpec})`, {
-        component: 'plugin-loader',
-        pluginId: entry.id,
-      });
-
-      // Rebuild native addons (e.g. argon2) — safe: only recompiles C++,
-      // does not run arbitrary lifecycle scripts.
-      try {
-        execSync(`npm rebuild --prefix "${pluginsDir}"`, { stdio: 'pipe', timeout: 60_000 });
-      } catch {
-        // best-effort — if rebuild fails the plugin may still load without native deps
-      }
 
       await this.loadFromNodeModules(join(pluginsDir, 'node_modules'));
     } catch (err) {
@@ -616,9 +743,48 @@ export class PluginLoader {
   // ---------------------------------------------------------------------------
   // Credential management
   // ---------------------------------------------------------------------------
+  //
+  // `pluginId` and the credential name arrive from the `plugins.*` RPC, whose
+  // wire schemas constrain them to `z.string().min(1)` — nothing upstream of
+  // here checks either. `join()` NORMALISES `..`, so an unchecked name is an
+  // arbitrary path: a read (`getCredentialValue`), a delete (`clearCredential`)
+  // and a stat (`getCredentialMeta`) over the whole filesystem the agent user
+  // can reach, against a bare `FsStorage` with no `ScopedStorage` under it.
+  //
+  // Both path builders below therefore validate the SEGMENT before joining and
+  // then assert containment of the result, and every credential method goes
+  // through them. Refusal is a thrown typed error, never `null`: a null here is
+  // indistinguishable from "no such credential", which would hide the attempt
+  // from the operator and from the logs.
+
+  /** The credential directory for a plugin. Throws if `pluginId` is not a plain id. */
+  private credentialsDir(pluginId: string): string {
+    if (!isValidPluginId(pluginId)) {
+      throw new CredentialPathError(`Invalid plugin id "${pluginId}"`);
+    }
+    const pluginsBase = join(this.dataDir, 'plugins');
+    const dir = join(pluginsBase, pluginId, 'credentials');
+    assertWithinBase(pluginsBase, dir);
+    return dir;
+  }
+
+  /** Path to one credential file. Throws if either segment is unsafe. */
+  private credentialFile(pluginId: string, name: string): string {
+    const dir = this.credentialsDir(pluginId);
+    if (!isValidSecretName(name)) {
+      throw new CredentialPathError(`Invalid credential name "${name}"`);
+    }
+    const path = join(dir, name);
+    assertWithinBase(dir, path);
+    return path;
+  }
 
   /** Set a credential value for a loaded plugin. Throws if the plugin is not loaded. */
   async setCredential(pluginId: string, key: string, value: string): Promise<void> {
+    // The write lands in `PluginApiImpl.setSecret`, which builds its own path
+    // from `key` and does not validate it. Validate at this boundary — the RPC
+    // entry point — so the write half is refused on the same rule as the reads.
+    this.credentialFile(pluginId, key);
     const impl = this.apis.get(pluginId);
     if (!impl) throw new Error(`Plugin "${pluginId}" is not loaded`);
     await impl.setSecret(key, value);
@@ -626,8 +792,7 @@ export class PluginLoader {
 
   /** Read credential metadata (updatedAt timestamp). Returns null if unset. */
   async getCredentialMeta(pluginId: string, key: string): Promise<{ updatedAt: string } | null> {
-    const basePath = join(this.dataDir, 'plugins', pluginId);
-    const metaPath = `${basePath}/credentials/${key}.meta`;
+    const metaPath = `${this.credentialFile(pluginId, key)}.meta`;
     const raw = await this.credentialStorage.read(metaPath);
     if (raw === null) return null;
     try {
@@ -639,8 +804,7 @@ export class PluginLoader {
 
   /** Remove a credential and its metadata for a plugin. */
   async clearCredential(pluginId: string, key: string): Promise<void> {
-    const basePath = join(this.dataDir, 'plugins', pluginId, 'credentials');
-    const credPath = `${basePath}/${key}`;
+    const credPath = this.credentialFile(pluginId, key);
     const metaPath = `${credPath}.meta`;
     await this.credentialStorage.remove(credPath).catch(() => {});
     await this.credentialStorage.remove(metaPath).catch(() => {});
@@ -648,8 +812,7 @@ export class PluginLoader {
 
   /** Read the raw credential value. Returns null if unset. */
   async getCredentialValue(pluginId: string, ref: string): Promise<string | null> {
-    const credPath = join(this.dataDir, 'plugins', pluginId, 'credentials', ref);
-    return this.credentialStorage.read(credPath);
+    return this.credentialStorage.read(this.credentialFile(pluginId, ref));
   }
 
   /** Return a redacted preview of a credential (first 4 + last 4 chars).
@@ -680,7 +843,7 @@ export class PluginLoader {
     }>
   > {
     const declared = this.readDeclaredCredentials(pluginId);
-    const basePath = join(this.dataDir, 'plugins', pluginId, 'credentials');
+    const basePath = this.credentialsDir(pluginId);
 
     const result: Array<{
       key: string;
@@ -696,9 +859,20 @@ export class PluginLoader {
     const seenKeys = new Set<string>();
 
     for (const cred of declared) {
+      // A key the credential API cannot address is a key nothing can ever set
+      // or read, so listing it would only offer the operator a dead control.
+      // Skipped rather than thrown: one bad declaration must not blank the
+      // whole panel for a plugin whose other credentials are fine.
+      if (!isValidSecretName(cred.key)) {
+        this.logger.warn(
+          `[plugin-loader] Plugin "${pluginId}" declares credential key "${cred.key}", which is not a plain name — skipping.`,
+          { component: 'plugin-loader', pluginId },
+        );
+        continue;
+      }
       seenKeys.add(cred.key);
       const meta = await this.getCredentialMeta(pluginId, cred.key);
-      const isSet = await this.credentialStorage.exists(`${basePath}/${cred.key}`);
+      const isSet = await this.credentialStorage.exists(join(basePath, cred.key));
       result.push({
         key: cred.key,
         isSet,
@@ -716,6 +890,7 @@ export class PluginLoader {
     for (const name of entries) {
       if (name.endsWith('.meta')) continue;
       if (seenKeys.has(name)) continue;
+      if (!isValidSecretName(name)) continue;
       const meta = await this.getCredentialMeta(pluginId, name);
       result.push({
         key: name,
@@ -737,6 +912,30 @@ export class PluginLoader {
   // ---------------------------------------------------------------------------
   // Internal
   // ---------------------------------------------------------------------------
+
+  /**
+   * Return the id whose capability grant has been revoked, or `null` when none
+   * of `ids` is revoked.
+   *
+   * Read fresh from disk on every check — an `ethos plugin revoke` in another
+   * process must take effect on the next load, not after a restart. This is a
+   * consent check, not a sandbox: it decides whether we import the plugin at
+   * all. Once imported, a plugin is unconstrained, and revoking afterwards
+   * cannot undo what it did.
+   */
+  private async revokedGrantId(ids: Array<string | undefined>): Promise<string | null> {
+    const grants = await readGrants(this.storage, join(this.dataDir, 'plugins'), {
+      onReject: (id, reason) =>
+        this.logger.warn(`[plugin-loader] Ignoring grant record "${id}" — ${reason}.`, {
+          component: 'plugin-loader',
+          pluginId: id,
+        }),
+    });
+    for (const id of ids) {
+      if (id && isGrantRevoked(grants, id)) return id;
+    }
+    return null;
+  }
 
   /** Record activation status for a plugin in the loadedManifests map. */
   private trackManifestStatus(

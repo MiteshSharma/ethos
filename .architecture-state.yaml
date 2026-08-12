@@ -1,0 +1,1019 @@
+# .architecture-state.yaml — the operational state sidecar
+#
+# WHAT THIS IS. The mechanical inventory of what this repository currently
+# CONTAINS: which package sits at which path, which layer it belongs to, which
+# security tier it is held to, and which §VIII exceptions are open right now.
+#
+# WHAT THIS IS NOT. It is not policy. ARCHITECTURE.md §IX is the authority on
+# what is ALLOWED — layers, dependency direction, laws, exception shape. This
+# file records only what EXISTS. Where the two disagree, §IX wins and this file
+# is the thing to fix. §IX declares this file by name
+# (`state_sidecar: ".architecture-state.yaml"`), and §VIII sends active
+# exceptions here rather than into the constitution.
+#
+# HOW IT CHANGES. Freely, in an ordinary PR, in the same commit as the change it
+# records. Adding a package means adding its tier here. That is deliberate: a
+# tier assigned AFTER a security report arrives is rationalisation, not triage,
+# and a reporter reading `git log` can tell the difference. Every assignment
+# carries the date it was made so the pre-commitment is checkable.
+#
+# READ WITH. docs/content/security/security-boundary.md (the tier roster and the
+# guarantee register), SECURITY.md (the triage decision table), ARCHITECTURE.md
+# §II (layers), §VIII (exceptions), §IX (validator rules).
+
+version: 1
+
+# ---- Layers (§II) ---------------------------------------------------------
+# The path inventory behind ARCHITECTURE.md §II's layer model. Order matches
+# §IX: a layer may depend on any layer beneath it and none above it.
+#
+# `security-kernel` covers six packages under packages/safety/ plus the named
+# enforcement files inside packages/core and packages/wiring. §II names the
+# layer and §IX carries its rules, so this entry is the path inventory behind a
+# constitutional layer rather than the record-of-fact-without-policy it was
+# before the Phase 2 amendment (plan/phases/security-boundary.md G1).
+#
+# §II names five layers and does not partition packages/* exhaustively. The
+# library packages not listed below (a2a, agent-bridge, config, design-tokens,
+# logger, oauth-core, plugin-contract, plugin-sdk, sdk, session-lane,
+# surface-kit, ui-components, web-contracts) have no layer assignment today.
+# They all carry a tier, which is the assignment the security boundary needs.
+# `packages/sqlite` is the one exception: it is classified `vendored` below,
+# which is a positive statement rather than an absence.
+
+layers:
+  - name: contracts
+    paths:
+      - packages/types
+
+  - name: security-kernel
+    paths:
+      - packages/safety/channel
+      - packages/safety/injection
+      - packages/safety/network
+      - packages/safety/redact
+      - packages/safety/scanner
+      - packages/safety/watcher
+      - packages/storage-fs
+    # Enforcement points that live inside other packages. Listed by file
+    # because the packages they sit in are only partly kernel; the same files
+    # appear as `kernel_paths` on the package entries under `tiers:` below.
+    embedded_paths:
+      - packages/core/src/agent-loop.ts
+      - packages/core/src/tool-registry.ts
+      - packages/core/src/agent-loop/approval-posture.ts
+      - packages/core/src/agent-loop/stages/context-assembly.ts
+      - packages/core/src/agent-loop/stages/per-call-enforcement.ts
+      - packages/core/src/agent-loop/stages/tool-processing.ts
+      - packages/core/src/agent-loop/stages/tool-rejection.ts
+      - packages/core/src/agent-loop/result-defense.ts
+      - packages/core/src/scoped/scoped-fs.ts
+      - packages/core/src/scoped/scoped-fetch.ts
+      - packages/core/src/scoped/scoped-process.ts
+      - packages/core/src/scoped/scoped-secrets.ts
+      - packages/core/src/scoped/scoped-attachments.ts
+      - packages/core/src/fs-reach.ts
+      - packages/core/src/path-boundary.ts
+      - packages/core/src/url-validator.ts
+      - packages/core/src/capability-validator.ts
+      - packages/core/src/capability-resolver.ts
+      - packages/core/src/hook-registry.ts
+      - packages/core/src/script-safe.ts
+      - packages/wiring/src/build-agent-loop.ts
+      - packages/wiring/src/danger-predicate.ts
+      - packages/wiring/src/approval-seams.ts
+      - packages/wiring/src/smart-approver.ts
+      - packages/wiring/src/resolve-execution-posture.ts
+      - packages/wiring/src/skill-passthrough.ts
+
+  - name: core
+    paths:
+      - packages/core
+
+  - name: extensions
+    paths:
+      - extensions/*
+
+  - name: wiring
+    paths:
+      - packages/wiring
+
+  - name: apps
+    paths:
+      - apps/*
+
+# ---- Vendored runtime shims ----------------------------------------------
+# Workspace packages that are functionally EXTERNAL dependencies which happen
+# to live in-repo: a thin wrapper over a platform primitive, carrying no Ethos
+# semantics, no contract, and no policy. The layer check reads them the way it
+# reads an npm dependency — a closed layer (contracts / security-kernel / core)
+# may depend on one without that edge being an unclassified reach.
+#
+# This is the narrowest possible carve-out and it is deliberately expensive to
+# claim: `rationale` is REQUIRED and must be non-empty, and the validator fails
+# on an entry without one. The bar is "no Ethos semantics" — not "small", not
+# "infrastructural", not "nobody has assigned it a layer yet". A package that
+# implements an Ethos contract (`@ethosagent/logger` implements `Logger`) or
+# encodes an Ethos decision (`@ethosagent/design-tokens` is DESIGN.md as code)
+# does NOT qualify, however low-level it looks.
+#
+# A vendored package still carries a tier. Vendoring answers "which layer
+# rules apply", never "is this in the security boundary".
+
+vendored:
+  "@ethosagent/sqlite":
+    path: packages/sqlite
+    assigned: 2026-08-12
+    rationale: >-
+      A synchronous shim over Node's built-in `node:sqlite` (`DatabaseSync`),
+      resolved through `process.getBuiltinModule` so a bundler cannot rewrite
+      the `node:` specifier. It has zero dependencies, imports nothing from
+      `@ethosagent/*`, and contains no Ethos semantics: no contract, no
+      personality concept, no policy, no boundary decision — only parameter
+      marshalling and a `run/get/all` surface over the platform API. It exists
+      as a workspace package rather than an npm dependency because it is
+      Node-version-coupled glue we must be able to patch in the same commit as
+      its caller. `packages/safety/channel` depends on it for the DM pairing
+      store, which legitimately needs SQLite; routing that through a contract
+      seam would add an indirection whose only purpose is to satisfy a layer
+      rule aimed at Ethos-semantic coupling that this package does not have.
+
+# ---- App entry modules (§II thin wiring adapter, §IX composition_root) -----
+# §II grants an app "its own thin wiring adapter" and §IX grants apps
+# `composition_root: "entry modules only"`. Neither enumerates WHICH modules,
+# so Law 5 had no machine-readable boundary and the validator could only report
+# it at manifest granularity, as advisory. This is that inventory: the files in
+# each app that are permitted to import extensions and the security kernel
+# directly.
+#
+# Derived from what the code actually is, not from what would make findings go
+# away: the module each app's package.json names as its entry point, plus the
+# app's dedicated wiring adapter where one exists by name
+# (`apps/ethos/src/wiring.ts`, the archetype). Everything else in an app is
+# ordinary app code and must reach concrete implementations through
+# `@ethosagent/wiring`.
+#
+# Adding a path here is a claim that the file IS a composition root. It is not
+# a suppression mechanism — the Law 5 file check is advisory today precisely
+# because the repository does not yet match this inventory (see the note on the
+# check in scripts/check-architecture.mjs), and padding the list to green the
+# build would destroy the only signal that says so.
+
+app_entry_modules:
+  apps/acp-server:
+    - apps/acp-server/src/index.ts
+  apps/desktop:
+    - apps/desktop/src/main/index.ts
+    # The desktop's in-process backend composition root, and nothing else: it
+    # builds the agent loop, session store, personality registry and identity
+    # map, hands them to createWebApi, and binds the Hono server. Its only
+    # app-specific state is the module-level server handle / bound port that
+    # start/stop/getPort exist to manage.
+    - apps/desktop/src/main/serve.ts
+  apps/ethos:
+    - apps/ethos/src/index.ts
+    - apps/ethos/src/wiring.ts
+    # Named wiring adapter for the ACP session-scoped MCP grant, extracted from
+    # the acp command: it binds the concrete McpSessionView (@ethosagent/tools-mcp)
+    # into acp-server's SessionViewFactory seam and closes the allowlist resolver
+    # over the personality registry. Composition only — no command logic.
+    - apps/ethos/src/lib/acp-mcp-wiring.ts
+  apps/mcp-server:
+    - apps/mcp-server/src/index.ts
+  apps/tui:
+    - apps/tui/src/index.ts
+    - apps/tui/src/setup/index.ts
+  apps/web-api:
+    - apps/web-api/src/index.ts
+
+# ---- Register anchors -----------------------------------------------------
+# What each guarantee-register citation is ASSERTING at the line it points to.
+#
+# WHY THIS EXISTS. The register cites enforcement points as
+# `<path>#L<line>` permalinks. A line number alone catches only half of
+# citation drift: delete the file or the line, and the check fails; but INSERT
+# twelve lines above the enforcement point and every anchor below it silently
+# re-aims at real, non-blank, unrelated code. G11 — the reason this whole
+# programme exists — was a published claim that had drifted from its
+# enforcement point. A drift check that catches deletion but not displacement
+# lets G11 recur in a quieter form, and this was found empirically: a lane
+# adding a comment block to scoped-fs.ts would have pushed both G-FS anchors
+# down onto other real lines with nothing failing.
+#
+# HOW IT WORKS. Every citation in the register must have exactly one entry
+# here, matched on (row, path, line), and the cited line must CONTAIN the
+# `contains` string. Move the code and the substring stops matching: CI fails
+# and names the row. An entry matching no citation fails too, so this list
+# cannot rot into a graveyard of anchors for claims that were withdrawn.
+#
+# CHOOSING `contains`. Pick the symbol or literal that IS the enforcement — a
+# function name, an error token, the condition itself. Not indentation, not
+# `{`, not a word that would still match a different line in the same file.
+# The test to apply: if this string still matched after the control was
+# rewritten, the anchor is worthless.
+
+register_anchors:
+  G-TOOLS:
+    - { path: packages/core/src/tool-registry.ts, line: 206, contains: "toDefinitions(allowedTools" }
+    - { path: packages/core/src/tool-registry.ts, line: 369, contains: "!allowedTools.includes(call.name)" }
+    - { path: packages/core/src/tool-registry.ts, line: 274, contains: "enforce tool access at execution time" }
+    - { path: packages/core/src/agent-loop/stages/tool-rejection.ts, line: 56, contains: "export function* emitToolRejection" }
+    - { path: packages/core/src/script-safe.ts, line: 96, contains: "export function scriptCallableFor" }
+
+  G-CAP:
+    - { path: packages/core/src/capability-validator.ts, line: 19, contains: "export function validateRegistration" }
+    - { path: packages/core/src/capability-resolver.ts, line: 60, contains: "export function resolveCapabilities" }
+    - { path: packages/core/src/scoped/scoped-process.ts, line: 8, contains: "this.allowedBinaries.has(binary)" }
+    - { path: packages/core/src/scoped/scoped-secrets.ts, line: 12, contains: "!this.isDeclared(ref)" }
+    - { path: packages/core/src/scoped/scoped-attachments.ts, line: 22, contains: "a.ref === att.ref" }
+
+  G-FS:
+    - { path: packages/core/src/fs-reach.ts, line: 105, contains: "export function deriveFsReachPaths" }
+    - { path: packages/core/src/scoped/scoped-fs.ts, line: 102, contains: "private checkReach(" }
+    - { path: packages/core/src/scoped/scoped-fs.ts, line: 136, contains: "through a symbolic link" }
+    - { path: packages/storage-fs/src/scoped-storage.ts, line: 79, contains: "private check(rawPath" }
+    - { path: packages/core/src/path-boundary.ts, line: 17, contains: "export function assertWithinBase" }
+
+  G-NET:
+    - { path: packages/safety/network/src/safe-fetch.ts, line: 66, contains: "export async function safeFetch" }
+    - { path: packages/safety/network/src/safe-fetch.ts, line: 77, contains: "hop < maxHops" }
+    - { path: packages/safety/network/src/safe-fetch.ts, line: 85, contains: "redirect: 'manual'" }
+    - { path: packages/safety/network/src/scheme.ts, line: 21, contains: "parsed.protocol !== 'https:'" }
+    - { path: packages/safety/network/src/safe-fetch.ts, line: 300, contains: "function stripAuthHeaders" }
+    - { path: packages/safety/network/src/safe-fetch.ts, line: 11, contains: "v1 honesty about DNS rebinding" }
+    - { path: packages/core/src/scoped/scoped-fetch.ts, line: 57, contains: "!this.isHostAllowed(parsed.hostname)" }
+    - { path: packages/core/src/url-validator.ts, line: 135, contains: "export function validateUrl" }
+
+  G-INJ:
+    - { path: packages/safety/injection/src/wrap.ts, line: 35, contains: "export function wrapUntrusted" }
+    - { path: packages/safety/injection/src/classifier.ts, line: 60, contains: "export function createLLMClassifier" }
+    - { path: packages/safety/injection/src/downgrade.ts, line: 23, contains: "export function resolveDowngradedTools" }
+    - { path: packages/core/src/agent-loop/stages/context-assembly.ts, line: 359, contains: "deps.safety.injection.prelude" }
+    - { path: packages/core/src/agent-loop.ts, line: 592, contains: "resolveDowngradedTools(dgConfig?.tools)" }
+    - { path: packages/core/src/agent-loop/stages/tool-processing.ts, line: 685, contains: "await handleUntrustedResult(" }
+    - { path: packages/core/src/agent-loop/result-defense.ts, line: 26, contains: "export async function handleUntrustedResult" }
+
+  G-SEC:
+    - { path: packages/types/src/secrets.ts, line: 18, contains: "export interface SecretsResolver" }
+    - { path: packages/wiring/src/skill-passthrough.ts, line: 31, contains: "export function applySkillPassthrough" }
+    - { path: packages/wiring/src/skill-passthrough.ts, line: 9, contains: "export function deriveSkillPassthrough" }
+
+  G-RED:
+    - { path: packages/safety/redact/src/index.ts, line: 39, contains: "export function detectSecrets" }
+    - { path: packages/safety/redact/src/index.ts, line: 51, contains: "export function redactString" }
+    - { path: packages/safety/redact/src/index.ts, line: 68, contains: "export function redactJson" }
+    - { path: extensions/observability-sqlite/src/store.ts, line: 114, contains: "redactJson(trace.attrs)" }
+    - { path: extensions/observability-sqlite/src/store.ts, line: 156, contains: "redactJson(span.attrs, extraRedactPatterns)" }
+    - { path: extensions/observability-sqlite/src/store.ts, line: 193, contains: "redactJson(attrs, extraRedactPatterns)" }
+    - { path: extensions/observability-sqlite/src/store.ts, line: 234, contains: "redactJson(event.details, extraRedactPatterns)" }
+
+  G-APP:
+    - { path: packages/wiring/src/danger-predicate.ts, line: 264, contains: "mode === 'smart' && opts.smartApprove" }
+    - { path: packages/wiring/src/danger-predicate.ts, line: 231, contains: "SMART_MODE_CONSEQUENTIAL_TOOLS" }
+    - { path: packages/wiring/src/smart-approver.ts, line: 144, contains: "reviewer gave no usable verdict" }
+    - { path: packages/wiring/src/smart-approver.ts, line: 149, contains: "reviewer error (fail-closed)" }
+    - { path: packages/core/src/agent-loop/stages/per-call-enforcement.ts, line: 37, contains: "export async function enforceBeforeToolCall" }
+    - { path: packages/core/src/hook-registry.ts, line: 94, contains: "async fireModifying" }
+    - { path: packages/wiring/src/approval-seams.ts, line: 97, contains: "export function createApprovalDangerPredicate" }
+    - { path: packages/core/src/agent-loop/approval-posture.ts, line: 38, contains: "export function createApprovalPostureGuard" }
+
+  G-EXEC:
+    - { path: packages/wiring/src/resolve-execution-posture.ts, line: 197, contains: "export function resolveExecutionPosture" }
+    - { path: packages/wiring/src/resolve-execution-posture.ts, line: 252, contains: "const dockerUnbuildable" }
+    - { path: packages/wiring/src/resolve-execution-posture.ts, line: 289, contains: "posture.hostFallback = { reason: 'docker-disabled' }" }
+    - { path: packages/wiring/src/resolve-execution-posture.ts, line: 338, contains: "dockerAvailable === false && !posture.dockerAbsent" }
+
+  G-WATCH:
+    - { path: packages/safety/watcher/src/rules.ts, line: 20, contains: "export function rateLimitRule" }
+    - { path: packages/safety/watcher/src/rules.ts, line: 79, contains: "export function tokenBudgetRule" }
+    - { path: packages/safety/watcher/src/rules.ts, line: 110, contains: "export function compoundingErrorRule" }
+    - { path: packages/safety/watcher/src/rules.ts, line: 161, contains: "export function suspiciousSequenceRule" }
+    - { path: packages/safety/watcher/src/rules.ts, line: 205, contains: "export function defaultRules" }
+    - { path: packages/wiring/src/build-agent-loop.ts, line: 258, contains: "defaultRules: watcherDefaultRules" }
+
+  G-CHAN:
+    - { path: packages/safety/channel/src/channel-filter.ts, line: 102, contains: "export function checkMessage" }
+    - { path: packages/safety/channel/src/channel-filter.ts, line: 70, contains: "export function isSenderAllowed" }
+    - { path: packages/safety/channel/src/channel-filter.ts, line: 24, contains: "dmPolicy?:" }
+    - { path: packages/safety/channel/src/channel-filter.ts, line: 31, contains: "contextVisibility?:" }
+
+  G-AUDIT:
+    - { path: extensions/observability-sqlite/src/store.ts, line: 114, contains: "redactJson(trace.attrs)" }
+
+# ---- Security tiers -------------------------------------------------------
+# Every workspace package under packages/, packages/safety/, extensions/, and
+# apps/ carries a tier. 119 packages: 10 at Tier 0, 25 at Tier 1, 84 at Tier 2.
+#
+# The tier bounds what we promise to be CORRECT, not what we promise to LOOK
+# AT. Triage reads the guarantee register first and the tier second — a Tier 2
+# finding that defeats a published Tier 0 guarantee is a Tier 0 finding, and
+# the fix belongs in the kernel rather than at the reporting site. The contract
+# per tier is in docs/content/security/security-boundary.md; the four triage
+# verdicts are in SECURITY.md.
+#
+# The workspace also includes `docs` and `examples/*` (pnpm-workspace.yaml).
+# They ship no runtime code into an agent process and carry no tier.
+
+tiers:
+  # ---------------------------------------------------------------------------
+  # Tier 0 — security kernel (the TCB). Guaranteed, CVE-eligible, no §VIII
+  # exception path. A Tier 2 extension must not be able to weaken a Tier 0
+  # guarantee. Roster and rationale: docs/content/security/security-boundary.md
+  # ---------------------------------------------------------------------------
+
+  packages/core:
+    package: "@ethosagent/core"
+    tier: 0
+    assigned: 2026-08-12
+    # Only these files are kernel. The rest of packages/core is Tier 1 by
+    # default — it carries no named guarantee from the register.
+    kernel_paths:
+      - packages/core/src/agent-loop.ts
+      - packages/core/src/tool-registry.ts
+      - packages/core/src/agent-loop/approval-posture.ts
+      - packages/core/src/agent-loop/stages/context-assembly.ts
+      - packages/core/src/agent-loop/stages/per-call-enforcement.ts
+      - packages/core/src/agent-loop/stages/tool-processing.ts
+      - packages/core/src/agent-loop/stages/tool-rejection.ts
+      - packages/core/src/agent-loop/result-defense.ts
+      - packages/core/src/scoped/scoped-fs.ts
+      - packages/core/src/scoped/scoped-fetch.ts
+      - packages/core/src/scoped/scoped-process.ts
+      - packages/core/src/scoped/scoped-secrets.ts
+      - packages/core/src/scoped/scoped-attachments.ts
+      - packages/core/src/fs-reach.ts
+      - packages/core/src/path-boundary.ts
+      - packages/core/src/url-validator.ts
+      - packages/core/src/capability-validator.ts
+      - packages/core/src/capability-resolver.ts
+      - packages/core/src/hook-registry.ts
+      - packages/core/src/script-safe.ts
+    # NOT kernel, deliberately:
+    #   sanitize-output.ts — `stripAnsiEscapes` is a pure string utility with no
+    #     chokepoint. Every caller opts in (apps/ethos render paths,
+    #     extensions/gateway, extensions/tools-code), so nothing in the kernel
+    #     guarantees it runs and no register row publishes it. Tier 1 by default
+    #     is the honest reading.
+    #   safety-conformance.ts — `runAgentSafetyConformance` TESTS the kernel; it
+    #     is invoked only from tests and sits on no request path. A test of an
+    #     enforcement point is not an enforcement point. It appears in the
+    #     register as a "Verify it yourself" reference instead.
+
+  packages/safety/channel:
+    package: "@ethosagent/safety-channel"
+    tier: 0
+    assigned: 2026-08-12
+
+  packages/safety/injection:
+    package: "@ethosagent/safety-injection"
+    tier: 0
+    assigned: 2026-08-12
+
+  packages/safety/network:
+    package: "@ethosagent/safety-network"
+    tier: 0
+    assigned: 2026-08-12
+
+  packages/safety/redact:
+    package: "@ethosagent/safety-redact"
+    tier: 0
+    assigned: 2026-08-12
+
+  packages/safety/scanner:
+    package: "@ethosagent/safety-scanner"
+    tier: 0
+    assigned: 2026-08-12
+
+  packages/safety/watcher:
+    package: "@ethosagent/safety-watcher"
+    tier: 0
+    assigned: 2026-08-12
+
+  packages/storage-fs:
+    package: "@ethosagent/storage-fs"
+    tier: 0
+    assigned: 2026-08-12
+
+  packages/types:
+    package: "@ethosagent/types"
+    tier: 0
+    assigned: 2026-08-12
+
+  packages/wiring:
+    package: "@ethosagent/wiring"
+    tier: 0
+    assigned: 2026-08-12
+    # Only these files are kernel. The rest of packages/wiring is Tier 1 by
+    # default — it carries no named guarantee from the register.
+    kernel_paths:
+      - packages/wiring/src/build-agent-loop.ts
+      - packages/wiring/src/danger-predicate.ts
+      - packages/wiring/src/approval-seams.ts
+      - packages/wiring/src/smart-approver.ts
+      - packages/wiring/src/resolve-execution-posture.ts
+      - packages/wiring/src/skill-passthrough.ts
+
+  # ---------------------------------------------------------------------------
+  # Tier 1 — guarded surfaces. Not the kernel; they sit ON a trust boundary.
+  # In disclosure scope with a stated response commitment. The promise is
+  # "we review this hard", not "we guarantee this".
+  # ---------------------------------------------------------------------------
+
+  apps/web-api:
+    package: "@ethosagent/web-api"
+    tier: 1
+    assigned: 2026-08-12
+
+  extensions/delivery-ledger:
+    package: "@ethosagent/delivery-ledger"
+    tier: 1
+    assigned: 2026-08-12
+
+  extensions/execution-docker:
+    package: "@ethosagent/execution-docker"
+    tier: 1
+    assigned: 2026-08-12
+
+  extensions/execution-local:
+    package: "@ethosagent/execution-local"
+    tier: 1
+    assigned: 2026-08-12
+
+  extensions/execution-process-backend:
+    package: "@ethosagent/execution-process-backend"
+    tier: 1
+    assigned: 2026-08-12
+
+  extensions/execution-ssh:
+    package: "@ethosagent/execution-ssh"
+    tier: 1
+    assigned: 2026-08-12
+
+  extensions/gateway:
+    package: "@ethosagent/gateway"
+    tier: 1
+    assigned: 2026-08-12
+
+  extensions/observability-sqlite:
+    package: "@ethosagent/observability-sqlite"
+    tier: 1
+    assigned: 2026-08-12
+
+  extensions/platform-discord:
+    package: "@ethosagent/platform-discord"
+    tier: 1
+    assigned: 2026-08-12
+
+  extensions/platform-email:
+    package: "@ethosagent/platform-email"
+    tier: 1
+    assigned: 2026-08-12
+
+  extensions/platform-meeting:
+    package: "@ethosagent/platform-meeting"
+    tier: 1
+    assigned: 2026-08-12
+
+  extensions/platform-slack:
+    package: "@ethosagent/platform-slack"
+    tier: 1
+    assigned: 2026-08-12
+
+  extensions/platform-telegram:
+    package: "@ethosagent/platform-telegram"
+    tier: 1
+    assigned: 2026-08-12
+
+  extensions/platform-voice:
+    package: "@ethosagent/platform-voice"
+    tier: 1
+    assigned: 2026-08-12
+
+  extensions/platform-whatsapp:
+    package: "@ethosagent/platform-whatsapp"
+    tier: 1
+    assigned: 2026-08-12
+
+  extensions/plugin-loader:
+    package: "@ethosagent/plugin-loader"
+    tier: 1
+    assigned: 2026-08-12
+
+  extensions/secrets-aws:
+    package: "@ethosagent/secrets-aws"
+    tier: 1
+    assigned: 2026-08-12
+
+  extensions/session-sqlite:
+    package: "@ethosagent/session-sqlite"
+    tier: 1
+    assigned: 2026-08-12
+
+  extensions/skill-evolver:
+    package: "@ethosagent/skill-evolver"
+    tier: 1
+    assigned: 2026-08-12
+
+  extensions/skills:
+    package: "@ethosagent/skills"
+    tier: 1
+    assigned: 2026-08-12
+
+  extensions/storage-crypto:
+    package: "@ethosagent/storage-crypto"
+    tier: 1
+    assigned: 2026-08-12
+
+  extensions/tools-code:
+    package: "@ethosagent/tools-code"
+    tier: 1
+    assigned: 2026-08-12
+
+  extensions/tools-mcp:
+    package: "@ethosagent/tools-mcp"
+    tier: 1
+    assigned: 2026-08-12
+
+  extensions/tools-terminal:
+    package: "@ethosagent/tools-terminal"
+    tier: 1
+    assigned: 2026-08-12
+
+  # ---------------------------------------------------------------------------
+  # Tier 2 — extensions, not owned. Best-effort. A bug is a bug, not a CVE.
+  # They inherit exactly what the kernel enforces and nothing more. A Tier 2
+  # finding that reaches a Tier 0 guarantee is a Tier 0 finding — the kernel's
+  # failure to contain it is the vulnerability, not the extension.
+  # ---------------------------------------------------------------------------
+
+  apps/acp-server:
+    package: "@ethosagent/acp-server"
+    tier: 2
+    assigned: 2026-08-12
+
+  apps/desktop:
+    package: "@ethosagent/desktop"
+    tier: 2
+    assigned: 2026-08-12
+
+  apps/ethos:
+    package: "@ethosagent/cli"
+    tier: 2
+    assigned: 2026-08-12
+
+  apps/mcp-server:
+    package: "@ethosagent/mcp-server"
+    tier: 2
+    assigned: 2026-08-12
+
+  apps/tui:
+    package: "@ethosagent/tui"
+    tier: 2
+    assigned: 2026-08-12
+
+  apps/vscode-extension:
+    package: "ethos-vscode"
+    tier: 2
+    assigned: 2026-08-12
+
+  apps/web:
+    package: "@ethosagent/web"
+    tier: 2
+    assigned: 2026-08-12
+
+  extensions/agent-mesh:
+    package: "@ethosagent/agent-mesh"
+    tier: 2
+    assigned: 2026-08-12
+
+  extensions/batch-runner:
+    package: "@ethosagent/batch-runner"
+    tier: 2
+    assigned: 2026-08-12
+
+  extensions/claw-migrate:
+    package: "@ethosagent/claw-migrate"
+    tier: 2
+    assigned: 2026-08-12
+
+  extensions/constitution:
+    package: "@ethosagent/constitution"
+    tier: 2
+    assigned: 2026-08-12
+
+  extensions/cron:
+    package: "@ethosagent/cron"
+    tier: 2
+    assigned: 2026-08-12
+
+  extensions/dashboard:
+    package: "@ethosagent/dashboard"
+    tier: 2
+    assigned: 2026-08-12
+
+  extensions/digest:
+    package: "@ethosagent/digest"
+    tier: 2
+    assigned: 2026-08-12
+
+  extensions/document-extractors:
+    package: "@ethosagent/document-extractors"
+    tier: 2
+    assigned: 2026-08-12
+
+  extensions/eval-harness:
+    package: "@ethosagent/eval-harness"
+    tier: 2
+    assigned: 2026-08-12
+
+  extensions/goal-runner:
+    package: "@ethosagent/goal-runner"
+    tier: 2
+    assigned: 2026-08-12
+
+  extensions/goal-store:
+    package: "@ethosagent/goal-store"
+    tier: 2
+    assigned: 2026-08-12
+
+  extensions/job-runner:
+    package: "@ethosagent/job-runner"
+    tier: 2
+    assigned: 2026-08-12
+
+  extensions/job-store:
+    package: "@ethosagent/job-store"
+    tier: 2
+    assigned: 2026-08-12
+
+  extensions/kanban-store:
+    package: "@ethosagent/kanban-store"
+    tier: 2
+    assigned: 2026-08-12
+
+  extensions/llm-anthropic:
+    package: "@ethosagent/llm-anthropic"
+    tier: 2
+    assigned: 2026-08-12
+
+  extensions/llm-azure:
+    package: "@ethosagent/llm-azure"
+    tier: 2
+    assigned: 2026-08-12
+
+  extensions/llm-bedrock:
+    package: "@ethosagent/llm-bedrock"
+    tier: 2
+    assigned: 2026-08-12
+
+  extensions/llm-codex:
+    package: "@ethosagent/llm-codex"
+    tier: 2
+    assigned: 2026-08-12
+
+  extensions/llm-gemini:
+    package: "@ethosagent/llm-gemini-native"
+    tier: 2
+    assigned: 2026-08-12
+
+  extensions/llm-openai-compat:
+    package: "@ethosagent/llm-openai-compat"
+    tier: 2
+    assigned: 2026-08-12
+
+  extensions/memory-approval:
+    package: "@ethosagent/memory-approval"
+    tier: 2
+    assigned: 2026-08-12
+
+  extensions/memory-capture:
+    package: "@ethosagent/memory-capture"
+    tier: 2
+    assigned: 2026-08-12
+
+  extensions/memory-history:
+    package: "@ethosagent/memory-history"
+    tier: 2
+    assigned: 2026-08-12
+
+  extensions/memory-markdown:
+    package: "@ethosagent/memory-markdown"
+    tier: 2
+    assigned: 2026-08-12
+
+  extensions/memory-vault:
+    package: "@ethosagent/memory-vault"
+    tier: 2
+    assigned: 2026-08-12
+
+  extensions/memory-vector:
+    package: "@ethosagent/memory-vector"
+    tier: 2
+    assigned: 2026-08-12
+
+  extensions/nightly-loop:
+    package: "@ethosagent/nightly-loop"
+    tier: 2
+    assigned: 2026-08-12
+
+  extensions/oauth:
+    package: "@ethosagent/oauth"
+    tier: 2
+    assigned: 2026-08-12
+
+  extensions/openclaw-compat:
+    package: "@ethosagent/openclaw-compat"
+    tier: 2
+    assigned: 2026-08-12
+
+  extensions/personalities:
+    package: "@ethosagent/personalities"
+    tier: 2
+    assigned: 2026-08-12
+
+  extensions/personality-judge:
+    package: "@ethosagent/personality-judge"
+    tier: 2
+    assigned: 2026-08-12
+
+  extensions/request-dump:
+    package: "@ethosagent/request-dump"
+    tier: 2
+    assigned: 2026-08-12
+
+  # Demoted from Tier 1 by the 2026-08-12 execution-docker / sandbox-docker
+  # audit (DKR-008): `run()` has no caller in the repo, the class implements no
+  # ExecutionBackend, produces no attestation, and has no fs_reach linkage, so
+  # it sits on no trust boundary. `DockerSandbox` is constructed in
+  # packages/wiring/src/build-infrastructure.ts, but only `init()` and
+  # `isAvailable()` are ever called — no execution flows through it. Tier 1
+  # spends review attention and a disclosure commitment on unreachable code.
+  extensions/sandbox-docker:
+    package: "@ethosagent/sandbox-docker"
+    tier: 2
+    assigned: 2026-08-12
+
+  extensions/session-cards:
+    package: "@ethosagent/session-cards"
+    tier: 2
+    assigned: 2026-08-12
+
+  extensions/storage-memory-backend:
+    package: "@ethosagent/storage-memory-backend"
+    tier: 2
+    assigned: 2026-08-12
+
+  extensions/storage-s3:
+    package: "@ethosagent/storage-s3"
+    tier: 2
+    assigned: 2026-08-12
+
+  extensions/team-supervisor:
+    package: "@ethosagent/team-supervisor"
+    tier: 2
+    assigned: 2026-08-12
+
+  extensions/tools-a2a:
+    package: "@ethosagent/tools-a2a"
+    tier: 2
+    assigned: 2026-08-12
+
+  extensions/tools-browser:
+    package: "@ethosagent/tools-browser"
+    tier: 2
+    assigned: 2026-08-12
+
+  extensions/tools-cron:
+    package: "@ethosagent/tools-cron"
+    tier: 2
+    assigned: 2026-08-12
+
+  extensions/tools-debug:
+    package: "@ethosagent/tools-debug"
+    tier: 2
+    assigned: 2026-08-12
+
+  extensions/tools-delegation:
+    package: "@ethosagent/tools-delegation"
+    tier: 2
+    assigned: 2026-08-12
+
+  extensions/tools-file:
+    package: "@ethosagent/tools-file"
+    tier: 2
+    assigned: 2026-08-12
+
+  extensions/tools-goals:
+    package: "@ethosagent/tools-goals"
+    tier: 2
+    assigned: 2026-08-12
+
+  extensions/tools-image:
+    package: "@ethosagent/tools-image"
+    tier: 2
+    assigned: 2026-08-12
+
+  extensions/tools-interactive:
+    package: "@ethosagent/tools-interactive"
+    tier: 2
+    assigned: 2026-08-12
+
+  extensions/tools-kanban:
+    package: "@ethosagent/tools-kanban"
+    tier: 2
+    assigned: 2026-08-12
+
+  extensions/tools-meeting:
+    package: "@ethosagent/tools-meeting"
+    tier: 2
+    assigned: 2026-08-12
+
+  extensions/tools-memory:
+    package: "@ethosagent/tools-memory"
+    tier: 2
+    assigned: 2026-08-12
+
+  extensions/tools-messaging:
+    package: "@ethosagent/tools-messaging"
+    tier: 2
+    assigned: 2026-08-12
+
+  extensions/tools-personality-design:
+    package: "@ethosagent/tools-personality-design"
+    tier: 2
+    assigned: 2026-08-12
+
+  extensions/tools-process:
+    package: "@ethosagent/tools-process"
+    tier: 2
+    assigned: 2026-08-12
+
+  extensions/tools-skills:
+    package: "@ethosagent/tools-skills"
+    tier: 2
+    assigned: 2026-08-12
+
+  extensions/tools-tier:
+    package: "@ethosagent/tools-tier"
+    tier: 2
+    assigned: 2026-08-12
+
+  extensions/tools-todo:
+    package: "@ethosagent/tools-todo"
+    tier: 2
+    assigned: 2026-08-12
+
+  extensions/tools-tts:
+    package: "@ethosagent/tools-tts"
+    tier: 2
+    assigned: 2026-08-12
+
+  extensions/tools-ui:
+    package: "@ethosagent/tools-ui"
+    tier: 2
+    assigned: 2026-08-12
+
+  extensions/tools-vision:
+    package: "@ethosagent/tools-vision"
+    tier: 2
+    assigned: 2026-08-12
+
+  extensions/tools-voice:
+    package: "@ethosagent/tools-voice"
+    tier: 2
+    assigned: 2026-08-12
+
+  extensions/tools-watchers:
+    package: "@ethosagent/tools-watchers"
+    tier: 2
+    assigned: 2026-08-12
+
+  extensions/tools-web:
+    package: "@ethosagent/tools-web"
+    tier: 2
+    assigned: 2026-08-12
+
+  extensions/voice-providers:
+    package: "@ethosagent/voice-providers"
+    tier: 2
+    assigned: 2026-08-12
+
+  extensions/voice-session:
+    package: "@ethosagent/voice-session"
+    tier: 2
+    assigned: 2026-08-12
+
+  extensions/watchers:
+    package: "@ethosagent/watchers"
+    tier: 2
+    assigned: 2026-08-12
+
+  packages/a2a:
+    package: "@ethosagent/a2a"
+    tier: 2
+    assigned: 2026-08-12
+
+  packages/agent-bridge:
+    package: "@ethosagent/agent-bridge"
+    tier: 2
+    assigned: 2026-08-12
+
+  packages/config:
+    package: "@ethosagent/config"
+    tier: 2
+    assigned: 2026-08-12
+
+  packages/design-tokens:
+    package: "@ethosagent/design-tokens"
+    tier: 2
+    assigned: 2026-08-12
+
+  packages/logger:
+    package: "@ethosagent/logger"
+    tier: 2
+    assigned: 2026-08-12
+
+  packages/oauth-core:
+    package: "@ethosagent/oauth-core"
+    tier: 2
+    assigned: 2026-08-12
+
+  packages/plugin-contract:
+    package: "@ethosagent/plugin-contract"
+    tier: 2
+    assigned: 2026-08-12
+
+  packages/plugin-sdk:
+    package: "@ethosagent/plugin-sdk"
+    tier: 2
+    assigned: 2026-08-12
+
+  packages/sdk:
+    package: "@ethosagent/sdk"
+    tier: 2
+    assigned: 2026-08-12
+
+  packages/session-lane:
+    package: "@ethosagent/session-lane"
+    tier: 2
+    assigned: 2026-08-12
+
+  packages/sqlite:
+    package: "@ethosagent/sqlite"
+    tier: 2
+    assigned: 2026-08-12
+
+  packages/surface-kit:
+    package: "@ethosagent/surface-kit"
+    tier: 2
+    assigned: 2026-08-12
+
+  packages/ui-components:
+    package: "@ethosagent/ui-components"
+    tier: 2
+    assigned: 2026-08-12
+
+  packages/web-contracts:
+    package: "@ethosagent/web-contracts"
+    tier: 2
+    assigned: 2026-08-12
+
+# ---- Active exceptions (§VIII) --------------------------------------------
+# Every entry requires all seven fields from ARCHITECTURE.md §VIII: `id`,
+# `law`, `scope`, `reason`, `owner`, `created`, `removal_condition`,
+# `review_by`. An exception with no named owner, an unobservable
+# `removal_condition`, or a `review_by` that has passed without a renewal PR is
+# a violation, not an exception. There is no permanent-grandfather list. §V
+# Safety Constitution rules take no exceptions at all — they are amended
+# through §VI or not at all, and no Tier 0 package is eligible for one.
+#
+# Empty was the correct state until the first entry below. It is not "no
+# exceptions were needed"; it is "no exception has been granted through §VIII
+# since this file existed".
+
+exceptions:
+  - id: EX-001
+    law: "§III Law 5 — apps depend on [contracts, wiring] only"
+    scope: apps/ethos/src/redact-error.ts
+    reason: >-
+      The crash logger imports @ethosagent/safety-redact directly instead of
+      taking redaction through the composition root. It runs on the bootstrap
+      path, BEFORE wiring exists, and it is synchronous by construction: it
+      must finish writing before the process exits, so it cannot await a
+      composition root that has not been built and in the crash case may never
+      be. Routing it through wiring was measured against the alternatives and
+      is the wrong direction — 18 ms direct versus 121 ms through the narrow
+      subpath, paid on every CLI start to serve a path that runs only when the
+      process is already dying. Redaction on this path is not optional: a crash
+      log is exactly where an unredacted credential ends up, so removing the
+      import rather than the coupling is not available either.
+    owner: "@MiteshSharma"
+    created: 2026-08-12
+    removal_condition: >-
+      apps/ethos/src/redact-error.ts no longer imports @ethosagent/safety-redact
+      — either because the crash logger stops needing redaction, or because the
+      redaction primitives it uses are inlined into apps/ethos and the workspace
+      dependency is dropped from apps/ethos/package.json. Observable as: the
+      import is absent from the file and the validator reports no Law 5 finding
+      for this path with this entry removed.
+    review_by: 2027-02-12

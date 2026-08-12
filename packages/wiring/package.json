@@ -28,6 +28,10 @@
     "./conformance": {
       "import": "./src/conformance/index.ts",
       "types": "./src/conformance/index.ts"
+    },
+    "./security-kernel": {
+      "import": "./src/security-kernel.ts",
+      "types": "./src/security-kernel.ts"
     }
   },
   "scripts": {
@@ -68,7 +72,9 @@
     "@ethosagent/platform-slack": "workspace:*",
     "@ethosagent/platform-telegram": "workspace:*",
     "@ethosagent/plugin-loader": "workspace:*",
+    "@ethosagent/safety-channel": "workspace:*",
     "@ethosagent/safety-injection": "workspace:*",
+    "@ethosagent/safety-scanner": "workspace:*",
     "@ethosagent/safety-watcher": "workspace:*",
     "@ethosagent/sandbox-docker": "workspace:*",
     "@ethosagent/session-sqlite": "workspace:*",

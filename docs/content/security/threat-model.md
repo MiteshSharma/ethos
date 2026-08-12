@@ -4,7 +4,7 @@ description: What Ethos defends against, what's out of scope, and the single-ope
 kind: explanation
 audience: shared
 slug: threat-model
-updated: 2026-06-09
+updated: 2026-08-12
 ---
 
 A security model is only as useful as the threat model it's grounded in. This page is explicit about both halves: what Ethos defends against, and what Ethos does *not* claim to defend.
@@ -96,7 +96,7 @@ The same assumption rules out "agent acts on behalf of arbitrary internet users"
 | Filesystem escape | `ScopedStorage`, `BoundaryError`, per-personality `fs_reach` |
 | Network exfiltration / SSRF | Network policy, scheme allowlist, cloud-metadata blocklist, redirect revalidation |
 | Credential leakage | Pattern-based redaction at the observability store layer; per-personality redaction modes |
-| Plugin data source injection | Read-only SQL enforcement, plugin data source registration validation |
+| Plugin data source injection | Read-only SQLite connections, SELECT-only panel-SQL guard, param allowlist on interpolated values |
 | Admin panel unauthorized access | Admin panel token authentication, CORS restriction |
 
 Each control is documented in [Security controls](./controls.md) with the file path where it lives in the codebase. The cross-reference is intentional: customers evaluating Ethos can read the source, not just the marketing.
@@ -105,7 +105,7 @@ Each control is documented in [Security controls](./controls.md) with the file p
 
 ### In-scope coverage is wide; per-threat depth varies
 
-The in-scope column lists eight threat classes; the controls catalogue lists more than twenty mechanisms. The depth is not uniform. Filesystem escape has three independent layers (`ScopedStorage`, `realpath` resolution, per-personality `fs_reach`) plus the `BoundaryError` propagation path. Adversarially-iterated prompt injection has only the two structural mechanisms (provenance + post-read downgrade) — the regex layer is acknowledged as a v1 floor. Customers reading this should treat the threat class, not the control count, as the unit of confidence.
+The in-scope column lists eight threat classes; the controls catalogue lists more than twenty mechanisms. The depth is not uniform. Filesystem escape has three independent layers — `ScopedStorage`'s per-personality prefix allowlist, the lexical normalisation that defeats `..` traversal, and the per-segment symlink walk that defeats misdirection — plus the `BoundaryError` propagation path. Adversarially-iterated prompt injection has only the two structural mechanisms (provenance + post-read downgrade) — the regex layer is acknowledged as a v1 floor. Customers reading this should treat the threat class, not the control count, as the unit of confidence.
 
 ### "Owner is sovereign" rules out a class of features
 
@@ -117,7 +117,7 @@ A vendor that ships a security page with no "we don't promise this" section is m
 
 ### Pattern classifiers are not load-bearing
 
-The regex pattern catalog in the injection classifier and the network reach scheme allowlist are *v1 floors*. They stop the dumbest attacks; they do not stop a determined attacker who iterates on encoding. The load-bearing defenses are structural: provenance markers + post-read tool downgrade for injection, `realpath` + `fs_reach` for filesystem, the cloud-metadata blocklist + redirect revalidation for network. The split is in the source comments so customers can reason about which controls survive an adversary that knows them.
+The regex pattern catalog in the injection classifier and the network reach scheme allowlist are *v1 floors*. They stop the dumbest attacks; they do not stop a determined attacker who iterates on encoding. The load-bearing defenses are structural: provenance markers + post-read tool downgrade for injection, `fs_reach` + the per-segment symlink walk for filesystem, the cloud-metadata blocklist + redirect revalidation for network. The split is in the source comments so customers can reason about which controls survive an adversary that knows them.
 
 ### Out-of-band threats need out-of-band defenses
 
@@ -129,7 +129,7 @@ When a control changes — a new pattern in the redaction set, a new rule in the
 
 ### Reasoning by class, not by count
 
-The list above is eight threat classes. The controls catalogue is more than twenty mechanisms. The mapping is intentionally many-to-many: most threats have two or three controls; most controls defend against more than one threat. A customer evaluating Ethos should read the in-scope column for *which classes are covered*, then follow the cross-reference to the catalogue to see *how many independent layers* defend each class. Reasoning by number-of-controls leads to the wrong conclusion when one class has three orthogonal layers (filesystem escape: `ScopedStorage`, `realpath`, `BoundaryError`) and another has two (adversarial injection: provenance, post-read downgrade). The depth varies, by design, with the realism of the failure mode.
+The list above is eight threat classes. The controls catalogue is more than twenty mechanisms. The mapping is intentionally many-to-many: most threats have two or three controls; most controls defend against more than one threat. A customer evaluating Ethos should read the in-scope column for *which classes are covered*, then follow the cross-reference to the catalogue to see *how many independent layers* defend each class. Reasoning by number-of-controls leads to the wrong conclusion when one class has three orthogonal layers (filesystem escape: `ScopedStorage`, lexical normalisation, the per-segment symlink walk) and another has two (adversarial injection: provenance, post-read downgrade). The depth varies, by design, with the realism of the failure mode.
 
 ### Where assumptions are spelled out in source
 
@@ -158,6 +158,7 @@ All three cases produce a release-notes entry and an update to this page; custom
 
 ## See also
 
+- [What does Ethos guarantee, and what is outside its security boundary?](./security-boundary.md) — the tier roster, the ten published guarantees, and what is explicitly not a boundary.
 - [How does Ethos defend against the threats it knows about?](./overview.md) — the layered model and the runtime precedence diagram.
 - [Security controls](./controls.md) — the catalogue, with file paths for verification.
 - [Pre-launch hardening pass](./security-fixes.md) — the sixteen issues a pre-launch review surfaced.

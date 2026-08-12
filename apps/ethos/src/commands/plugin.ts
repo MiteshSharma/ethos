@@ -6,18 +6,24 @@ import { createInterface } from 'node:readline';
 import { ethosDir } from '@ethosagent/config';
 import {
   computeIntegrity,
+  derivePluginId,
+  grantsPath,
+  type PluginGrant,
   type PluginLockEntry,
+  readGrants,
   readLockfile,
+  recordGrant,
+  revokeGrant,
   writeLockfile,
 } from '@ethosagent/plugin-loader';
+import type { Storage } from '@ethosagent/types';
+import { EthosError } from '@ethosagent/types';
 import {
   canInstall,
   type PluginScanPermissions,
   type ScanFinding,
   scanPluginCode,
-} from '@ethosagent/safety-scanner';
-import type { Storage } from '@ethosagent/types';
-import { EthosError } from '@ethosagent/types';
+} from '@ethosagent/wiring/security-kernel';
 import { writeJson } from '../json-output';
 import { getStorage } from '../wiring';
 
@@ -40,19 +46,22 @@ export async function runPlugin(args: string[]): Promise<void> {
 
   switch (sub) {
     case 'install': {
-      const pkg = args[1];
+      const yesFlag = args.includes('--yes');
+      const rest = args.filter((a) => a !== '--yes');
+      const pkg = rest[1];
       if (!pkg) {
-        console.log('Usage: ethos plugin install <package> [--personality <id>]');
+        console.log('Usage: ethos plugin install <package> [--personality <id>] [--yes]');
+        console.log('  --yes  record the capability grant without an interactive prompt');
         process.exit(1);
       }
-      const pFlagIdx = args.indexOf('--personality');
-      const personalityId = pFlagIdx >= 0 ? args[pFlagIdx + 1] : undefined;
+      const pFlagIdx = rest.indexOf('--personality');
+      const personalityId = pFlagIdx >= 0 ? rest[pFlagIdx + 1] : undefined;
       if (pFlagIdx >= 0 && !personalityId) {
-        console.log('Usage: ethos plugin install <package> [--personality <id>]');
+        console.log('Usage: ethos plugin install <package> [--personality <id>] [--yes]');
         process.exit(1);
       }
       try {
-        await installPlugin(pkg, personalityId);
+        await installPlugin(pkg, personalityId, yesFlag);
       } catch (err) {
         if (err instanceof EthosError) {
           console.error(`${c.red}${err.cause}${c.reset}\n${c.dim}→ ${err.action}${c.reset}`);
@@ -78,7 +87,12 @@ export async function runPlugin(args: string[]): Promise<void> {
         console.error(`${c.red}Remove failed.${c.reset}`);
         process.exit(result.status ?? 1);
       }
+      // Removing the package does not withdraw consent: the grant still stands,
+      // so a personality lockfile can auto-install it again. Say so.
       console.log(`\n${c.green}✓ Removed.${c.reset}`);
+      console.log(
+        `${c.dim}The capability grant stands. Withdraw it with: ${c.reset}ethos plugin revoke <pluginId>`,
+      );
       break;
     }
 
@@ -92,9 +106,24 @@ export async function runPlugin(args: string[]): Promise<void> {
       break;
     }
 
+    case 'grants': {
+      await listGrants(args.includes('--json'));
+      break;
+    }
+
+    case 'revoke': {
+      const pluginId = args[1];
+      if (!pluginId) {
+        console.log('Usage: ethos plugin revoke <pluginId>');
+        process.exit(1);
+      }
+      await revokePluginGrant(pluginId);
+      break;
+    }
+
     default:
       console.log(
-        'Usage: ethos plugin [install <pkg> | remove <pkg> | list | credentials <pluginId>]',
+        'Usage: ethos plugin [install <pkg> | remove <pkg> | list | grants | revoke <pluginId> | credentials <pluginId>]',
       );
   }
 }
@@ -103,7 +132,7 @@ export async function runPlugin(args: string[]): Promise<void> {
 // Install: download to temp, scan, prompt, then commit
 // ---------------------------------------------------------------------------
 
-async function installPlugin(pkg: string, personalityId?: string): Promise<void> {
+async function installPlugin(pkg: string, personalityId?: string, yesFlag = false): Promise<void> {
   const dir = pluginsDir();
   const tmpDir = join(dir, `.tmp-scan-${process.pid}`);
 
@@ -129,6 +158,13 @@ async function installPlugin(pkg: string, personalityId?: string): Promise<void>
   // changed between the scan and the install).
   let exactSpec = pkg;
 
+  // Consent is taken AFTER the temp scan dir is cleaned up, so the grant draft
+  // is carried out of the `try`. `blockedBy` is likewise reported after the
+  // `finally` — `process.exit()` skips `finally`, which would leave the temp
+  // scan tree behind.
+  let blockedBy: string | undefined;
+  let draft: Omit<PluginGrant, 'grantedAt' | 'consent'> | undefined;
+
   try {
     // Step 2: locate the installed package dir from the manifest npm wrote —
     // deriving the dir from the argument string fails for tarballs, git URLs,
@@ -149,6 +185,9 @@ async function installPlugin(pkg: string, personalityId?: string): Promise<void>
     let author = '(unsigned)';
     let networkDisplay = '(none declared)';
     let shellDisplay = '(none declared)';
+    let pkgName = pkg;
+    let pkgVersion = 'unknown';
+    let pluginId = derivePluginId(undefined, pkg);
     try {
       const rawMeta = JSON.parse(await readFile(join(pkgDir, 'package.json'), 'utf-8')) as Record<
         string,
@@ -164,7 +203,12 @@ async function installPlugin(pkg: string, personalityId?: string): Promise<void>
       // Pin to the exact resolved version so the final install commits what was scanned.
       const metaName = typeof rawMeta.name === 'string' ? rawMeta.name : undefined;
       const metaVersion = typeof rawMeta.version === 'string' ? rawMeta.version : undefined;
+      if (metaName) pkgName = metaName;
+      if (metaVersion) pkgVersion = metaVersion;
       if (metaName && metaVersion) exactSpec = `${metaName}@${metaVersion}`;
+      // Key the grant by the id the LOADER resolves, so a revocation recorded
+      // here is the one the loader looks up.
+      pluginId = derivePluginId(rawMeta, pkgName);
     } catch {
       // package.json already verified to exist; malformed JSON is safe to ignore here
     }
@@ -199,28 +243,74 @@ async function installPlugin(pkg: string, personalityId?: string): Promise<void>
       }
     }
 
-    // Step 7: decide
+    // Step 7: red findings are a hard stop; everything else goes to consent.
     const decision = canInstall(scanResult, tier);
-    if (!decision.allowed) {
-      if (hasRed) {
-        console.log(`\n${c.red}✗ Install blocked:${c.reset} ${decision.blockedBy}`);
-        console.log(`${c.dim}Review the findings above or choose a different package.${c.reset}`);
-        process.exit(1);
-      }
-      // Yellow-only: prompt user to acknowledge
-      const confirmed = await promptConfirm(
-        `\n${c.yellow}⚠ Install '${pkg}' with the warnings above? [y/N]${c.reset} `,
-      );
-      if (!confirmed) {
-        console.log(`${c.dim}Install cancelled.${c.reset}`);
-        process.exit(0);
-      }
+    if (!decision.allowed && hasRed) {
+      blockedBy = decision.blockedBy ?? 'red safety finding';
+    } else {
+      draft = {
+        id: pluginId,
+        package: pkgName,
+        version: pkgVersion,
+        source: `npm:${exactSpec}`,
+        capabilities: {
+          shell: permissions.shell === true,
+          network: permissions.network ?? null,
+        },
+        // Verbatim, as shown above. A later reviewer needs what the operator
+        // saw, not a re-scan of code that may have changed since.
+        scan: { tier, findings, hasRed, hasYellow },
+      };
     }
   } finally {
     await rm(tmpDir, { recursive: true, force: true });
   }
 
-  // Step 8: approved — install into the final plugins dir using the exact resolved
+  if (blockedBy !== undefined || draft === undefined) {
+    console.log(
+      `\n${c.red}✗ Install blocked:${c.reset} ${blockedBy ?? 'the package could not be scanned'}`,
+    );
+    console.log(`${c.dim}Review the findings above or choose a different package.${c.reset}`);
+    process.exit(1);
+  }
+
+  // Step 8: consent. No grant, no install — the operator is told what they are
+  // taking on and agrees to it, and that agreement is written down first.
+  printPluginConsequence(draft);
+  const mode = resolvePluginConsent({
+    pkg,
+    yesFlag,
+    isTTY: !!process.stdin.isTTY,
+    managed: process.env.ETHOS_MANAGED === '1',
+  });
+  let consent: PluginGrant['consent'] = 'flag';
+  if (mode === 'prompt') {
+    const confirmed = await promptConfirm(
+      `\n${c.bold}Install ${pkg} and record this grant? [y/N]${c.reset} `,
+    );
+    if (!confirmed) {
+      console.log(
+        `${c.dim}Install cancelled. Nothing was installed and no grant recorded.${c.reset}`,
+      );
+      process.exit(0);
+    }
+    consent = 'interactive';
+  }
+
+  // Recorded BEFORE the code lands on disk: if the grant cannot be written,
+  // the install does not happen. A grant for an install that then fails is
+  // harmless (it grants nothing on its own and is revocable); code on disk
+  // with no recorded consent is the thing we refuse to produce.
+  await recordGrant(getStorage(), dir, {
+    ...draft,
+    grantedAt: new Date().toISOString(),
+    consent,
+  });
+  console.log(
+    `${c.green}✓${c.reset} Grant recorded for ${c.cyan}${draft.id}${c.reset} ${c.dim}(ethos plugin grants)${c.reset}`,
+  );
+
+  // Step 9: approved — install into the final plugins dir using the exact resolved
   // spec captured during the scan. --ignore-scripts is intentional: lifecycle
   // scripts (preinstall/install/postinstall) are not scanned and can execute
   // arbitrary code. Plugins must not rely on npm lifecycle scripts for their
@@ -240,25 +330,183 @@ async function installPlugin(pkg: string, personalityId?: string): Promise<void>
   console.log(`\n${c.green}✓ Installed.${c.reset} Restart ethos to load the plugin.`);
 
   if (personalityId) {
-    const lastAt = exactSpec.lastIndexOf('@');
-    const pkgName = lastAt > 0 ? exactSpec.slice(0, lastAt) : exactSpec;
-    const pkgVersion = lastAt > 0 ? exactSpec.slice(lastAt + 1) : 'unknown';
-    const pluginId = pkgName.startsWith('@') ? (pkgName.split('/')[1] ?? pkgName) : pkgName;
-    const pkgJsonPath = join(pluginsDir(), 'node_modules', pkgName, 'package.json');
+    const pkgJsonPath = join(pluginsDir(), 'node_modules', draft.package, 'package.json');
     const integrity = await computeIntegrity(pkgJsonPath);
     const entry: PluginLockEntry = {
-      package: pkgName,
-      version: pkgVersion,
+      package: draft.package,
+      version: draft.version,
       registry: 'https://registry.npmjs.org',
       integrity,
     };
     const personalityDir = join(ethosDir(), 'personalities', personalityId);
     const storage = getStorage();
-    await updatePersonalityPluginConfig(storage, personalityDir, pluginId, entry);
+    await updatePersonalityPluginConfig(storage, personalityDir, draft.id, entry);
     console.log(
-      `${c.green}✓${c.reset} Added ${c.cyan}${pluginId}${c.reset} to personality ${c.bold}${personalityId}${c.reset}.`,
+      `${c.green}✓${c.reset} Added ${c.cyan}${draft.id}${c.reset} to personality ${c.bold}${personalityId}${c.reset}.`,
     );
   }
+}
+
+// ---------------------------------------------------------------------------
+// Consent — the operator consequence sentence and the grant decision
+// ---------------------------------------------------------------------------
+
+/**
+ * The G5 sentence, shown at the moment the operator takes the risk on rather
+ * than in a doc they read afterwards.
+ *
+ * Do not soften this. `PluginLoader` `import()`s the plugin's entry module into
+ * the ethos process; the plugin shares the process, the environment, the
+ * filesystem, and the API keys. There is no sandbox to fall back on.
+ */
+export const PLUGIN_CONSEQUENCE =
+  'Installing a plugin is equivalent to running arbitrary code as your user.';
+
+/** Print the consequence block plus the capabilities the grant will record. */
+function printPluginConsequence(draft: Omit<PluginGrant, 'grantedAt' | 'consent'>): void {
+  const network =
+    draft.capabilities.network === null
+      ? '(none declared)'
+      : draft.capabilities.network.length > 0
+        ? draft.capabilities.network.join(' · ')
+        : '(any host)';
+
+  console.log(`\n${c.bold}What installing this plugin means${c.reset}`);
+  console.log(`  ${PLUGIN_CONSEQUENCE}`);
+  console.log(
+    `  ${c.dim}${draft.package} runs inside the ethos process — your files, your environment,${c.reset}`,
+  );
+  console.log(
+    `  ${c.dim}your API keys. The safety scan is a static, pre-install read of the source${c.reset}`,
+  );
+  console.log(
+    `  ${c.dim}for known-dangerous patterns. It is advisory: it sandboxes nothing, it can${c.reset}`,
+  );
+  console.log(`  ${c.dim}be evaded, and nothing confines this plugin once it is loaded.${c.reset}`);
+  console.log(
+    `  ${c.dim}The capabilities below are what the plugin declares, not limits it is held to.${c.reset}`,
+  );
+
+  console.log(`\n${c.bold}Grant to record${c.reset}`);
+  console.log(`  ${'Plugin'.padEnd(20)}${draft.id}  ${c.dim}${draft.source}${c.reset}`);
+  console.log(`  ${'Declares shell'.padEnd(20)}${draft.capabilities.shell ? 'yes' : 'no'}`);
+  console.log(`  ${'Declares network'.padEnd(20)}${network}`);
+  console.log(
+    `  ${'Scan at install'.padEnd(20)}${draft.scan.tier} · ${draft.scan.findings.length} finding(s)`,
+  );
+}
+
+/**
+ * Resolve the install decision without hanging on stdin — same shape as the
+ * skills install path's `resolveYellowFindings`.
+ *
+ * Exported for testing; not part of the public CLI surface.
+ *
+ * @returns `'proceed'` when `--yes` records consent unattended, `'prompt'` when
+ * the caller must ask. Throws `EthosError` when consent cannot be taken at all.
+ */
+export function resolvePluginConsent(opts: {
+  pkg: string;
+  yesFlag: boolean;
+  isTTY: boolean;
+  managed: boolean;
+}): 'proceed' | 'prompt' {
+  const { pkg, yesFlag, isTTY, managed } = opts;
+
+  // --yes RECORDS consent unattended (CI, managed hosts). It does not skip the
+  // grant — the grant is still written with `consent: 'flag'` so an operator
+  // can see later that nobody was at the keyboard.
+  if (yesFlag) {
+    console.log(`\n${c.yellow}⚠ Consent recorded for '${pkg}' via --yes.${c.reset}`);
+    return 'proceed';
+  }
+
+  if (!isTTY || managed) {
+    throw new EthosError({
+      code: 'PLUGIN_INSTALL_FAILED',
+      cause: `Installing '${pkg}' needs a recorded capability grant and stdin is not a TTY.`,
+      action: 'Re-run with --yes to record the grant unattended, or install interactively.',
+    });
+  }
+
+  return 'prompt';
+}
+
+// ---------------------------------------------------------------------------
+// Grants — inspect and revoke
+// ---------------------------------------------------------------------------
+
+async function listGrants(jsonMode: boolean): Promise<void> {
+  const dir = pluginsDir();
+  const grants = await readGrants(getStorage(), dir);
+  const entries = Object.values(grants).sort((a, b) => a.id.localeCompare(b.id));
+
+  if (jsonMode) {
+    writeJson(entries);
+    return;
+  }
+
+  if (entries.length === 0) {
+    console.log(`\n${c.dim}No plugin grants recorded.${c.reset}`);
+    console.log(
+      `${c.dim}A grant is written when you run: ${c.reset}ethos plugin install <package>\n`,
+    );
+    return;
+  }
+
+  console.log(`\n${c.bold}Plugin grants${c.reset}  ${c.dim}(${grantsPath(dir)})${c.reset}`);
+  for (const g of entries) {
+    const network =
+      g.capabilities.network === null
+        ? '(none declared)'
+        : g.capabilities.network.length > 0
+          ? g.capabilities.network.join(' · ')
+          : '(any host)';
+    const red = g.scan.findings.filter((f) => f.severity === 'red').length;
+    const yellow = g.scan.findings.filter((f) => f.severity === 'yellow').length;
+
+    console.log(`\n  ${c.cyan}${g.id}${c.reset}  ${c.dim}v${g.version}${c.reset}`);
+    console.log(`    ${'granted'.padEnd(14)}${g.grantedAt} ${c.dim}(${g.consent})${c.reset}`);
+    console.log(`    ${'source'.padEnd(14)}${c.dim}${g.source}${c.reset}`);
+    console.log(
+      `    ${'declares'.padEnd(14)}${c.dim}shell: ${g.capabilities.shell ? 'yes' : 'no'} · network: ${network}${c.reset}`,
+    );
+    console.log(
+      `    ${'scan at grant'.padEnd(14)}${c.dim}${g.scan.tier} · ${red} red · ${yellow} yellow${c.reset}`,
+    );
+    for (const f of g.scan.findings) {
+      const color = f.severity === 'red' ? c.red : c.yellow;
+      console.log(`      ${color}${f.severity}${c.reset}  ${c.dim}${f.rule}${c.reset}`);
+    }
+    if (g.revokedAt) {
+      console.log(`    ${c.red}revoked${c.reset}       ${g.revokedAt}`);
+    }
+  }
+
+  console.log(
+    `\n${c.dim}A grant records consent; it is not a sandbox. Revoking stops the loader from${c.reset}`,
+  );
+  console.log(
+    `${c.dim}importing the plugin again — it cannot undo what an already-loaded plugin did.${c.reset}\n`,
+  );
+}
+
+async function revokePluginGrant(pluginId: string): Promise<void> {
+  const dir = pluginsDir();
+  const revoked = await revokeGrant(getStorage(), dir, pluginId);
+  if (!revoked) {
+    console.error(`${c.red}No active grant for '${pluginId}'.${c.reset}`);
+    console.error(`${c.dim}→ ethos plugin grants${c.reset}`);
+    process.exit(1);
+  }
+  console.log(`${c.green}✓${c.reset} Revoked the grant for ${c.cyan}${pluginId}${c.reset}.`);
+  console.log(
+    `${c.dim}The loader will refuse to import it from the next load onwards. Anything it${c.reset}`,
+  );
+  console.log(
+    `${c.dim}already did in a running process stands — revocation cannot claw that back.${c.reset}`,
+  );
+  console.log(`${c.dim}Remove the package too with: ${c.reset}ethos plugin remove ${pluginId}`);
 }
 
 /**

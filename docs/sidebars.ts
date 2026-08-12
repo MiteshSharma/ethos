@@ -224,6 +224,7 @@ const sidebars: SidebarsConfig = {
       collapsed: true,
       items: [
         'security/overview',
+        'security/security-boundary',
         'security/white-paper',
         'security/threat-model',
         'security/controls',

@@ -18,6 +18,7 @@
   },
   "dependencies": {
     "@ethosagent/agent-mesh": "workspace:*",
+    "@ethosagent/core": "workspace:*",
     "@ethosagent/types": "workspace:*"
   },
   "devDependencies": {

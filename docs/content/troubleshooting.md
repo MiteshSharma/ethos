@@ -4,7 +4,7 @@ description: "Error catalogue for Ethos — common failure modes by symptom, wit
 kind: reference
 audience: shared
 slug: troubleshooting
-updated: 2026-05-22
+updated: 2026-08-12
 ---
 
 When something goes wrong, the CLI prints a three-line block: a code, a one-line cause, and a one-line action. Search this page for the code or the symptom you saw. Each entry follows the same shape: **Cause**, **Fix**, **Prevent** (when applicable).
@@ -202,6 +202,14 @@ Cause · A plugin declares a `pluginContractMajor` not supported by this CLI.
 
 Fix · Upgrade the plugin or the CLI per `packages/plugin-contract/MIGRATIONS.md`. Check both with `ethos plugins list` and `ethos --version`.
 
+### `PLUGIN_INSTALL_FAILED` {#plugin-install-failed}
+
+Cause · `ethos plugins install` could not record the capability grant. Installing a plugin runs its code in your Ethos process, so the install refuses to proceed without a grant on record — and stdin is not a TTY, so nobody could be asked.
+
+Fix · Re-run interactively and answer the prompt, or pass `--yes` to record the grant unattended. A `--yes` grant is stored with `consent: 'flag'`, so a later reader can see nobody was at the keyboard.
+
+Prevent · On CI and managed hosts, pass `--yes` in the install command rather than relying on a prompt that will never render.
+
 ## Channels and gateway {#channels-and-gateway}
 
 ### Duplicate outbound message on a channel adapter {#duplicate-outbound}
@@ -257,6 +265,8 @@ The full list of registered codes. Every code shipped in `@ethosagent/types` `Et
 | `LLM_ERROR` | Provider returned a non-recoverable error mid-stream. | Re-run. If repeated, file a bug with the cause. |
 | `STREAM_TIMEOUT` | The LLM streamed nothing for the watchdog window. | Re-run; tune `streamingTimeoutMs` if your network is slow. |
 | `INVALID_INPUT` | A required CLI flag is missing or out of range. | Read the printed `Usage:` and re-run. |
+| `INVALID_PROVIDER` | `--provider` names a provider Ethos does not ship. | Use one of the providers listed in the cause. |
+| `INVALID_TOOLSET` | `--toolsets` names a toolset that does not exist. | Use one of the toolsets listed in the cause. |
 | `FILE_NOT_FOUND` | A path passed to a CLI flag does not exist. | Verify the path and re-run. |
 | `BATCH_INVALID_LINE` | A line in the batch JSONL file is malformed. | Fix the named line and re-run `ethos batch`. |
 | `EVAL_INVALID_LINE` | A line in the eval JSONL file is malformed. | Fix the named line and re-run `ethos eval run`. |
@@ -268,17 +278,28 @@ The full list of registered codes. Every code shipped in `@ethosagent/types` `Et
 | `JOB_LOCK_FAILED` | Another cron command holds the lock. | Wait and re-run; kill stuck `ethos cron` processes. |
 | `CRON_INVALID` | Cron expression failed validation. | Use a valid 5-field expression (see `crontab.guru`). |
 | `CRON_PERSONALITY_MISSING` | The personality named on a cron job no longer exists. | Update the job to a current personality id. |
+| `CRON_RUN_FAILED` | A cron job's turn ended in an error event. | `ethos cron list`, then check the job's personality and prompt. |
 | `MCP_TRANSPORT_INVALID` | An MCP server entry is missing `command` (stdio) or `url` (sse). | Edit the MCP server entry in `~/.ethos/config.yaml`. |
+| `MCP_SERVER_NOT_FOUND` | The named MCP server is not attached to that personality. | Attach the server first, then set its token. |
+| `SECRETS_UNAVAILABLE` | The server has no secrets resolver wired. | Start the server with secrets configured. |
 | `REGISTRY_FETCH_FAILED` | `ethos upgrade` could not reach `registry.npmjs.org`. | Check network. Install manually: `npm i -g @ethosagent/cli@latest`. |
 | `NETWORK_ERROR` | A non-registry network call failed. | Re-run. Check your connection. |
 | `SKILL_INSTALL_FAILED` | `ethos skills install` did not complete. | Re-run; verify the source slug. |
 | `SKILL_NOT_FOUND` | Skill id is not under `~/.ethos/skills/`. | Refresh the Skills tab; the file may have been deleted. |
 | `SKILL_EXISTS` | A new skill collides with an existing file. | Pick a different id, or open and edit the existing skill. |
+| `SKILL_READONLY` | System skills cannot be edited or deleted. | Duplicate into `~/.ethos/skills/`, then edit the copy. |
+| `MISSING_SKILL` | A name passed to `-s` is not a plain filename under `~/.ethos/skills/`. | Use a bare skill name; confirm `<name>.md` exists. |
 | `PERSONALITY_EXISTS` | Personality id is already taken. | Pick a different id. |
 | `PERSONALITY_READ_ONLY` | Built-in personalities cannot be modified directly. | Duplicate, then edit the copy. |
 | `PLUGIN_CONTRACT_INCOMPATIBLE` | Plugin declares an unsupported `pluginContractMajor`. | Upgrade the plugin or CLI per the migration guide. |
+| `PLUGIN_INSTALL_FAILED` | The install needs a recorded capability grant and stdin is not a TTY. | Install interactively, or pass `--yes` to record the grant. |
 | `TEAM_MANIFEST_INVALID` | `team.yaml` failed schema validation. | Fix the named field and re-run `ethos team start`. |
+| `IMPORT_BLOCKED` | A backup archive entry escapes the data dir or is not a regular file. | Inspect the archive — it may be corrupted or malicious. |
+| `MEMORY_CONFLICT` | A memory entry changed on disk between your read and your write. | Re-read the entry and retry the write. |
 | `UNAUTHORIZED` | A web API request lacks valid auth. | Sign in again from the web UI. |
+| `FORBIDDEN` | Authenticated, but the caller may not perform this action. | Use an account with the required role. |
+| `NOT_FOUND` | A web API resource id does not resolve. | Refresh the list and re-select. |
+| `NOT_CONFIGURED` | The server was started without a piece the route needs (LLM, storage, memory). | Restart the server with that component configured. |
 | `SESSION_NOT_FOUND` | The session id passed to the web API does not exist. | Refresh the session list. |
 | `INTERNAL` | An unexpected error escaped to the surface. | Re-run. If repeated, file an issue with the printed `details`. |
 

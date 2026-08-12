@@ -282,6 +282,70 @@ describe('parseConfigYaml — a2a.enabled', () => {
   });
 });
 
+describe('parseConfigYaml — security.trusted_github_orgs', () => {
+  const base = [
+    'provider: anthropic',
+    'model: claude-opus-4-7',
+    'apiKey: sk',
+    'personality: researcher',
+  ];
+
+  it('leaves config.security undefined when the key is absent', async () => {
+    const cfg = await loadYaml(base.join('\n'));
+    expect(cfg.security).toBeUndefined();
+  });
+
+  it('parses a comma-separated org list', async () => {
+    const cfg = await loadYaml(
+      [...base, 'security.trusted_github_orgs: acme-corp, ethosagent'].join('\n'),
+    );
+    expect(cfg.security).toEqual({ trustedGitHubOrgs: ['acme-corp', 'ethosagent'] });
+  });
+
+  it('parses an explicitly empty list as [] rather than undefined', async () => {
+    const cfg = await loadYaml([...base, 'security.trusted_github_orgs: ""'].join('\n'));
+    expect(cfg.security).toEqual({ trustedGitHubOrgs: [] });
+  });
+
+  it('parses a bare key with no value as [] rather than undefined', async () => {
+    const cfg = await loadYaml([...base, 'security.trusted_github_orgs:'].join('\n'));
+    expect(cfg.security).toEqual({ trustedGitHubOrgs: [] });
+  });
+
+  it('round-trips a configured list through writeConfig and back', async () => {
+    const storage = new InMemoryStorage();
+    await storage.mkdir(ethosDir());
+    await writeConfig(storage, {
+      provider: 'anthropic',
+      model: 'claude-opus-4-7',
+      apiKey: 'sk',
+      personality: 'researcher',
+      security: { trustedGitHubOrgs: ['acme-corp'] },
+    });
+
+    const raw = await storage.read(join(ethosDir(), 'config.yaml'));
+    expect(raw).toContain('security.trusted_github_orgs: acme-corp');
+
+    const roundTripped = await readRawConfig(storage);
+    expect(roundTripped?.security).toEqual({ trustedGitHubOrgs: ['acme-corp'] });
+  });
+
+  it('round-trips an empty list without restoring the default', async () => {
+    const storage = new InMemoryStorage();
+    await storage.mkdir(ethosDir());
+    await writeConfig(storage, {
+      provider: 'anthropic',
+      model: 'claude-opus-4-7',
+      apiKey: 'sk',
+      personality: 'researcher',
+      security: { trustedGitHubOrgs: [] },
+    });
+
+    const roundTripped = await readRawConfig(storage);
+    expect(roundTripped?.security).toEqual({ trustedGitHubOrgs: [] });
+  });
+});
+
 describe('parseConfigYaml — storage backend', () => {
   const base = [
     'provider: anthropic',

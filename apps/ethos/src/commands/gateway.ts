@@ -32,8 +32,6 @@ import {
   firstParagraph,
   PersonalityA2aIdentityProvider,
 } from '@ethosagent/personalities';
-import { initPairingDb } from '@ethosagent/safety-channel';
-import { sanitize, wrapUntrusted } from '@ethosagent/safety-injection';
 import { bundledSkillsSource, createInjectors } from '@ethosagent/skills';
 import Database from '@ethosagent/sqlite';
 import { readRuntime, removeRuntime } from '@ethosagent/team-supervisor';
@@ -67,7 +65,10 @@ import {
   createLazyProvider,
   createMemoryProvider,
   IdentityMap,
+  initPairingDb,
   type MessagingSendFn,
+  sanitize,
+  wrapUntrusted,
 } from '@ethosagent/wiring';
 import {
   ApprovalCoordinator,

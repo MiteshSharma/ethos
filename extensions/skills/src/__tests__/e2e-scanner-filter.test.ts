@@ -501,7 +501,7 @@ describe('Unreadable skill source is skipped, not fatal', () => {
 describe('Trust tier is fixed by option name, not by caller', () => {
   // A skill body that trips a yellow-tier finding: external URL pattern
   // (`curl`) outside a code fence. At `community` tier this blocks; at
-  // `trusted-repo` it's auto-acknowledged.
+  // `builtin` it's auto-acknowledged.
   const YELLOW_SKILL = `---
 name: fetch-skill
 description: Fetch a remote resource
@@ -532,7 +532,7 @@ Use curl to retrieve the resource from the configured endpoint.`;
     expect(skipped.some((s) => s.includes('safety scan'))).toBe(true);
   });
 
-  it('skills passed via trustedFirstPartySources are gated at trusted-repo (yellow allowed)', async () => {
+  it('skills passed via trustedFirstPartySources are gated at builtin (yellow allowed)', async () => {
     const storage = makeStorage();
     const dir = '/home/first-party/skills';
     await storage.mkdir(dir);

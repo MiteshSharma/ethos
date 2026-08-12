@@ -1,5 +1,9 @@
+import { mkdtemp, realpath, rm, symlink, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { BoundaryError } from '@ethosagent/types';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { FsStorage } from '../fs-storage';
 import { InMemoryStorage } from '../in-memory-storage';
 import { ScopedStorage } from '../scoped-storage';
 
@@ -180,6 +184,101 @@ describe('ScopedStorage', () => {
         write: ['/home/'],
       });
       await expect(scoped.read('/home/.ssh/id_rsa')).resolves.toBe('PRIVATE KEY');
+    });
+  });
+
+  // G11 — symbolic containment. The allow/deny layers above are lexical, and
+  // `resolve()` cannot see a symlink. These cases run against real temp dirs
+  // (a symlink is a filesystem fact, not a string) with a real FsStorage
+  // underneath, so an escape that slipped past `check()` would actually read
+  // the out-of-bounds bytes.
+  describe('symbolic containment', () => {
+    let root: string;
+    let outside: string;
+
+    beforeEach(async () => {
+      // realpath: on macOS /var is a symlink to /private/var, and the allow
+      // prefixes must share canonical form with the request paths for the
+      // lexical layer. Everything below `root` is what the walk inspects.
+      root = await realpath(await mkdtemp(join(tmpdir(), 'ethos-scoped-symlink-')));
+      outside = await realpath(await mkdtemp(join(tmpdir(), 'ethos-scoped-outside-')));
+      await writeFile(join(root, 'inside.txt'), 'mine');
+      await writeFile(join(outside, 'secret.txt'), 'theirs');
+    });
+
+    afterEach(async () => {
+      await rm(root, { recursive: true, force: true });
+      await rm(outside, { recursive: true, force: true });
+    });
+
+    const scopedAt = (readPaths: string[], writePaths: string[], alwaysDeny?: string[]) =>
+      new ScopedStorage(new FsStorage(), {
+        read: readPaths,
+        write: writePaths,
+        ...(alwaysDeny ? { alwaysDeny } : {}),
+      });
+
+    it('rejects a symlink inside the allowlist that points outside it', async () => {
+      await symlink(join(outside, 'secret.txt'), join(root, 'link.txt'));
+      const scoped = scopedAt([root], []);
+      await expect(scoped.read(join(root, 'link.txt'))).rejects.toBeInstanceOf(BoundaryError);
+      await expect(scoped.read(join(root, 'link.txt'))).rejects.toThrow(/symbolic link/);
+    });
+
+    it('rejects a symlinked parent directory reached through an ordinary leaf', async () => {
+      await symlink(outside, join(root, 'sub'));
+      const scoped = scopedAt([root], []);
+      await expect(scoped.read(join(root, 'sub', 'secret.txt'))).rejects.toThrow(/symbolic link/);
+    });
+
+    it('does not leak the resolved target in the rejection message', async () => {
+      await symlink(join(outside, 'secret.txt'), join(root, 'link.txt'));
+      const scoped = scopedAt([root], []);
+      await expect(scoped.read(join(root, 'link.txt'))).rejects.toThrow(
+        expect.objectContaining({ message: expect.not.stringContaining(outside) }),
+      );
+    });
+
+    it('allows a symlink whose target stays inside the allowlist, unrewritten', async () => {
+      // `check()` decides reachability; it is not a canonicalizer. The inner
+      // Storage must still receive the path the caller asked for.
+      await symlink(join(root, 'inside.txt'), join(root, 'alias.txt'));
+      const fs = new FsStorage();
+      const readSpy = vi.spyOn(fs, 'read');
+      const scoped = new ScopedStorage(fs, { read: [root], write: [] });
+      await expect(scoped.read(join(root, 'alias.txt'))).resolves.toBe('mine');
+      expect(readSpy).toHaveBeenCalledWith(join(root, 'alias.txt'));
+    });
+
+    it('allows a write to a path that does not exist yet (ENOENT is not a symlink)', async () => {
+      const scoped = scopedAt([], [root]);
+      await scoped.mkdir(join(root, 'nested'));
+      await scoped.write(join(root, 'nested', 'new.txt'), 'body');
+      await expect(new FsStorage().read(join(root, 'nested', 'new.txt'))).resolves.toBe('body');
+    });
+
+    it('re-applies the deny floor to the resolved target, not just the link path', async () => {
+      // The allowlist covers the link AND its target; only the floor rejects.
+      const vault = join(outside, 'vault');
+      await symlink(vault, join(root, 'shortcut'));
+      const scoped = scopedAt([root, outside], [], [vault]);
+      await expect(scoped.read(join(root, 'shortcut'))).rejects.toThrow(/symbolic link/);
+    });
+
+    it('refuses a symlink cycle instead of following it forever', async () => {
+      await symlink(join(root, 'b'), join(root, 'a'));
+      await symlink(join(root, 'a'), join(root, 'b'));
+      const scoped = scopedAt([root], []);
+      // BoundaryError specifically, not the ELOOP the kernel would raise if
+      // the walk let the read through — Node's ELOOP message happens to
+      // contain the same words, so the instance check is what has teeth.
+      await expect(scoped.read(join(root, 'a'))).rejects.toBeInstanceOf(BoundaryError);
+      await expect(scoped.read(join(root, 'a'))).rejects.toThrow(/too many symbolic links/);
+    });
+
+    it('leaves an ordinary in-bounds read untouched', async () => {
+      const scoped = scopedAt([root], []);
+      await expect(scoped.read(join(root, 'inside.txt'))).resolves.toBe('mine');
     });
   });
 });

@@ -350,15 +350,14 @@ export async function* assembleContext(
 
   // Ch.3a — prepend the injection-defense prelude so the model knows how to
   // read `<untrusted>` blocks before any personality content sets the tone.
-  const injectionDefenseEnabled = personality.safety?.injectionDefense?.enabled !== false;
-  if (injectionDefenseEnabled) {
-    // §2 — a lean model's `promptBudget.compactPrelude` swaps in the short
-    // prelude variant; fall back to the full prelude when none is wired.
-    const prelude = deps.promptBudget?.compactPrelude
+  // §V S6: unconditional — no personality, channel, or tool can opt out.
+  // §2 — a lean model's `promptBudget.compactPrelude` swaps in the short
+  // prelude variant; fall back to the full prelude when none is wired.
+  systemParts.push(
+    deps.promptBudget?.compactPrelude
       ? (deps.safety.injection.preludeCompact ?? deps.safety.injection.prelude)
-      : deps.safety.injection.prelude;
-    systemParts.push(prelude);
-  }
+      : deps.safety.injection.prelude,
+  );
 
   // SOUL.md / personality identity — routes through Storage so ScopedStorage
   // and InMemoryStorage fixtures work correctly. Only runs when storage is
@@ -629,7 +628,6 @@ export async function* assembleContext(
     llmMessages,
     cacheBreakpoints,
     activeSkillFiles,
-    injectionDefenseEnabled,
     baseMessageCount: allMessages.length,
     userScopeId,
     compactedThisTurn: compacted.notice !== undefined,

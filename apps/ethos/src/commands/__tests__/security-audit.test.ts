@@ -39,14 +39,6 @@ describe('runSecurityAuditAndCollect', () => {
     expect(warn).toBeDefined();
   });
 
-  it('warns when injectionDefense is disabled', async () => {
-    const { findings } = await runSecurityAuditAndCollect([
-      p({ safety: { injectionDefense: { enabled: false } } }),
-    ]);
-    const warn = findings.find((f) => f.section === 'Injection defense' && f.severity === 'warn');
-    expect(warn).toBeDefined();
-  });
-
   it('passes for a clean default personality', async () => {
     const { findings } = await runSecurityAuditAndCollect([p({})]);
     expect(findings.find((f) => f.severity === 'fail')).toBeUndefined();

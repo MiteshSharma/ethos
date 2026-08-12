@@ -161,14 +161,6 @@ export async function runSecurityAudit(argv: string[]): Promise<void> {
         message: `${p.id}: allow_private_urls=true (cloud-metadata still blocked, but RFC1918 is reachable)`,
       });
     }
-    const inj = p.safety?.injectionDefense;
-    if (inj?.enabled === false) {
-      findings.push({
-        severity: 'warn',
-        section: 'Injection defense',
-        message: `${p.id}: injectionDefense disabled (no provenance wrapping or post-read downgrade)`,
-      });
-    }
   }
 
   // ---- Apply fixes ----
@@ -258,13 +250,6 @@ export async function runSecurityAuditAndCollect(
         severity: 'warn',
         section: 'Network policy',
         message: `${p.id}: allow_private_urls=true`,
-      });
-    }
-    if (p.safety?.injectionDefense?.enabled === false) {
-      findings.push({
-        severity: 'warn',
-        section: 'Injection defense',
-        message: `${p.id}: injectionDefense disabled`,
       });
     }
   }

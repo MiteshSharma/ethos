@@ -124,6 +124,7 @@
       "@ethosagent/agent-bridge": ["./packages/agent-bridge/src"],
       "@ethosagent/wiring": ["./packages/wiring/src"],
       "@ethosagent/wiring/conformance": ["./packages/wiring/src/conformance"],
+      "@ethosagent/wiring/security-kernel": ["./packages/wiring/src/security-kernel"],
       "@ethosagent/wiring/provider-catalog": ["./packages/wiring/src/provider-catalog"],
       "@ethosagent/wiring/model-catalog": ["./packages/wiring/src/model-catalog"],
       "@ethosagent/wiring/local-models": ["./packages/wiring/src/local-models"],
