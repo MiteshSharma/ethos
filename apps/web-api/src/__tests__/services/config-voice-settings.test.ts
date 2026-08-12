@@ -1,5 +1,5 @@
 import { join } from 'node:path';
-import { InMemoryStorage } from '@ethosagent/storage-fs';
+import { InMemorySecretsResolver, InMemoryStorage } from '@ethosagent/storage-fs';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { ConfigRepository } from '../../repositories/config.repository';
 import { ConfigService } from '../../services/config.service';
@@ -20,13 +20,15 @@ const BASE = [
 
 describe('Settings → Voice config keys', () => {
   let storage: InMemoryStorage;
+  let secrets: InMemorySecretsResolver;
   let service: ConfigService;
 
   beforeEach(async () => {
     storage = new InMemoryStorage();
+    secrets = new InMemorySecretsResolver();
     await storage.mkdir(DATA);
-    const repo = new ConfigRepository({ dataDir: DATA, storage });
-    service = new ConfigService({ config: repo });
+    const repo = new ConfigRepository({ dataDir: DATA, storage, secrets });
+    service = new ConfigService({ config: repo, secrets });
   });
 
   async function seed(lines: string[]): Promise<void> {

@@ -1,10 +1,11 @@
 import { join } from 'node:path';
-import { InMemoryStorage } from '@ethosagent/storage-fs';
+import { InMemorySecretsResolver, InMemoryStorage } from '@ethosagent/storage-fs';
 import { describe, expect, it } from 'vitest';
 import {
   type EthosConfig,
   ethosDir,
   loadConfigStrict,
+  readConfig,
   readRawConfig,
   validateBotBindings,
   writeConfig,
@@ -12,6 +13,10 @@ import {
 
 // Voice bot binding schema — plan/phases/gap-voice-realtime.md §3(b),(e).
 // Mirrors telegram.bots[] but keyed on a room/number `match` pattern.
+
+function secretRef(path: string): string {
+  return ['${', 'secrets:', path, '}'].join('');
+}
 
 async function load(yaml: string): Promise<EthosConfig> {
   const storage = new InMemoryStorage();
@@ -99,7 +104,7 @@ describe('parseConfigYaml — voice.bots[]', () => {
     };
     const storage = new InMemoryStorage();
     await storage.mkdir(ethosDir());
-    await writeConfig(storage, original);
+    await writeConfig(storage, original, new InMemorySecretsResolver());
     const reloaded = await readRawConfig(storage);
 
     expect(reloaded?.voice?.bots).toEqual(original.voice?.bots);
@@ -230,8 +235,12 @@ describe('parseConfigYaml — voice.livekit.*', () => {
     };
     const storage = new InMemoryStorage();
     await storage.mkdir(ethosDir());
-    await writeConfig(storage, original);
-    const reloaded = await readRawConfig(storage);
+    const secrets = new InMemorySecretsResolver();
+    await writeConfig(storage, original, secrets);
+    const onDisk = await readRawConfig(storage);
+    expect(onDisk?.voice?.livekit?.apiKey).toBe(secretRef('voice/livekit/apiKey'));
+    expect(onDisk?.voice?.livekit?.apiSecret).toBe(secretRef('voice/livekit/apiSecret'));
+    const reloaded = await readConfig(storage, secrets);
 
     expect(reloaded?.voice).toEqual(original.voice);
   });
@@ -320,8 +329,11 @@ describe('parseConfigYaml — voice.trunk.*', () => {
     };
     const storage = new InMemoryStorage();
     await storage.mkdir(ethosDir());
-    await writeConfig(storage, original);
-    const reloaded = await readRawConfig(storage);
+    const secrets = new InMemorySecretsResolver();
+    await writeConfig(storage, original, secrets);
+    const onDisk = await readRawConfig(storage);
+    expect(onDisk?.voice?.trunk?.password).toBe(secretRef('voice/trunk/password'));
+    const reloaded = await readConfig(storage, secrets);
 
     expect(reloaded?.voice).toEqual(original.voice);
   });

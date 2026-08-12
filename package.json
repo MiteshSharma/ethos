@@ -19,6 +19,7 @@
     "test:watch": "vitest",
     "typecheck": "pnpm exec tsc --noEmit -p tsconfig.json && pnpm --filter @ethosagent/web typecheck && pnpm --filter @ethosagent/desktop typecheck",
     "check": "pnpm typecheck && pnpm lint && pnpm test",
+    "check:architecture": "node scripts/check-architecture.mjs --unenforced",
     "lint": "biome check .",
     "lint:fix": "biome check --write .",
     "format": "biome format --write .",
@@ -38,7 +39,8 @@
     "tsx": "^4.23.5",
     "typescript": "^6.0.0",
     "vite": "^6.0.0",
-    "vitest": "^4.1.10"
+    "vitest": "^4.1.10",
+    "yaml": "^2.9.0"
   },
   "dependencies": {
     "@types/ws": "^8.18.1",

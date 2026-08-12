@@ -169,8 +169,10 @@ export class FsStorage implements Storage {
   }
 
   /** Synchronous existence check. Not on the Storage interface (which is
-   *  async-only) — exists as a concrete-class method for the `hasSecret`
-   *  use case in PluginApiImpl. */
+   *  async-only). Added for `PluginApiImpl.hasSecret`, which no longer needs
+   *  it — plugin credentials live in the SecretsResolver and `hasSecret`
+   *  answers from a primed key set. Kept for external callers of this
+   *  concrete class; nothing in the repo depends on it. */
   existsSync(path: string): boolean {
     return fsExistsSync(path);
   }

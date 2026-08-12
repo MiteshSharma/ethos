@@ -134,7 +134,7 @@ async function buildRealDeps(): Promise<A2aCommandDeps> {
   return {
     peering,
     loadConfig: () => readRawConfig(storage),
-    saveConfig: (cfg) => writeConfig(storage, cfg),
+    saveConfig: (cfg) => writeConfig(storage, cfg, secrets),
     confirm,
   };
 }

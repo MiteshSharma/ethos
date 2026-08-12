@@ -2,7 +2,11 @@
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
     "rootDir": "src",
-    "outDir": "dist"
+    "outDir": "dist",
+    // The base config sets `types: []`. This package is a thin shim over
+    // `node:sqlite` and touches Buffer/process directly, so declaration emit
+    // needs the node ambient types re-enabled here.
+    "types": ["node"]
   },
   "include": ["src"]
 }

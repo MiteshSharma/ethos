@@ -47,6 +47,178 @@ async function resolveSecretValue(value: string, secrets: SecretsResolver): Prom
   return resolved;
 }
 
+/**
+ * Public single-value counterpart of `resolveConfigSecrets`, for surfaces that
+ * hold one credential-bearing string rather than a whole `EthosConfig` (the
+ * web's own config reader). Throws when a referenced secret is missing —
+ * failing loudly beats handing a provider the literal reference string.
+ */
+export async function resolveSecretRef(value: string, secrets: SecretsResolver): Promise<string> {
+  return resolveSecretValue(value, secrets);
+}
+
+// ---------------------------------------------------------------------------
+// ${secrets:ref} externalization (write path)
+// ---------------------------------------------------------------------------
+
+/** True when `value` is ENTIRELY `${secrets:…}` reference(s) — i.e. it carries
+ *  no literal credential material. */
+function isSecretRef(value: string): boolean {
+  return value.replace(SECRETS_REF_RE, '').trim().length === 0;
+}
+
+const SINGLE_SECRET_REF_RE = /^\$\{secrets:([^}]+)\}$/;
+
+/**
+ * The vault ref a stored config value points at, or `null` when it points at
+ * none (a legacy plaintext value predating externalization never had material
+ * stored, so there is nothing to delete).
+ *
+ * The read-back counterpart of `externalizeSecret`, and the ONE parser for the
+ * `${secrets:…}` wire format on the removal path. Read the ref that was
+ * WRITTEN — never re-derive one: ref names embed context the value alone does
+ * not carry (provider name, bot key, content hash), and `externalizeSecret`'s
+ * idempotent branch means a field keeps whatever ref it was first minted with.
+ * Re-minting from what is on disk would name a ref the vault has never heard
+ * of and orphan the real one.
+ *
+ * Deliberately strict: the whole value must be exactly one reference. A value
+ * that merely CONTAINS a reference (`Bearer ${secrets:x}`) or concatenates
+ * several yields `null`. Callers use this to decide which credential material
+ * to DELETE, so a loose parse deletes material something else still needs.
+ */
+export function secretRefFromValue(value: string): string | null {
+  return value.match(SINGLE_SECRET_REF_RE)?.[1] ?? null;
+}
+
+/**
+ * Store a credential in the vault and return the `${secrets:<ref>}` reference
+ * that belongs in config.yaml. This is the ONLY way a credential-bearing field
+ * reaches disk (G-SEC / ARCHITECTURE.md §V S9 — config references a secret by
+ * name, never by value).
+ *
+ * Idempotent: a value that is ALREADY a reference is returned untouched.
+ * Re-wrapping would corrupt the config and orphan the stored secret, so that
+ * branch is the load-bearing one on every rewrite of an existing config.
+ * Empty / undefined values are returned unchanged — there is nothing to store.
+ */
+export async function externalizeSecret(
+  value: string,
+  ref: string,
+  secrets: SecretsResolver,
+): Promise<string>;
+export async function externalizeSecret(
+  value: string | undefined,
+  ref: string,
+  secrets: SecretsResolver,
+): Promise<string | undefined>;
+export async function externalizeSecret(
+  value: string | undefined,
+  ref: string,
+  secrets: SecretsResolver,
+): Promise<string | undefined> {
+  if (value === undefined || value === '') return value;
+  if (isSecretRef(value)) return value;
+  await secrets.set(ref, value);
+  return `\${secrets:${ref}}`;
+}
+
+/** Context `secretRefForConfigKey` needs for the keys whose ref embeds a value
+ *  from elsewhere in the config. */
+export interface SecretRefContext {
+  /** The `provider:` value — names the ref for the top-level `apiKey`. */
+  provider?: string;
+  /** Provider-chain names by index. `providers.<n>.apiKey` refs embed the
+   *  provider name, matching what `ethos fallback add` already mints. */
+  providerChain?: readonly string[];
+  /** Stable botKey per `telegram.bots.<n>` — `deriveBotKey(bot)`. Keys the
+   *  ref by identity rather than array position, matching what the web
+   *  Communications tab (PlatformsRepository) already mints. Falls back to
+   *  the index when the caller can't supply one. */
+  telegramBotKeys?: readonly (string | undefined)[];
+  /** Stable botKey per `slack.apps.<n>` — see `telegramBotKeys`. */
+  slackAppKeys?: readonly (string | undefined)[];
+  /** Stable identity per rotation key in `~/.ethos/keys.json` —
+   *  `rotationKeyId(profile)`. See `telegramBotKeys`. */
+  rotationKeyIds?: readonly (string | undefined)[];
+}
+
+/** Flat key → ref, for keys whose ref name doesn't follow from the key path. */
+const STATIC_SECRET_REFS: Record<string, string> = {
+  telegramToken: 'telegram/token',
+  discordToken: 'discord/token',
+  slackBotToken: 'slack/botToken',
+  slackAppToken: 'slack/appToken',
+  slackSigningSecret: 'slack/signingSecret',
+  emailPassword: 'email/password',
+};
+
+/** Indexed key families. The ref is keyed by the entry's stable botKey when the
+ *  caller supplies one, so reordering the array can't point two entries at one
+ *  ref; the array index is the fallback. */
+const INDEXED_SECRET_REFS: ReadonlyArray<{
+  re: RegExp;
+  ref: (m: RegExpMatchArray, ctx: SecretRefContext) => string;
+}> = [
+  {
+    re: /^telegram\.bots\.(\d+)\.token$/,
+    ref: (m, ctx) => `telegram/bots/${ctx.telegramBotKeys?.[Number(m[1])] ?? m[1]}/token`,
+  },
+  {
+    re: /^slack\.apps\.(\d+)\.(botToken|appToken|signingSecret)$/,
+    ref: (m, ctx) => `slack/apps/${ctx.slackAppKeys?.[Number(m[1])] ?? m[1]}/${m[2]}`,
+  },
+  {
+    // `~/.ethos/keys.json`, not config.yaml — the rotation pool is a second
+    // file through the same ref minter. `rotation/` is the prefix `ethos keys`
+    // has always used, so it can't collide with the `providers/…` refs above.
+    re: /^keys\.(\d+)\.apiKey$/,
+    ref: (m, ctx) => `rotation/${ctx.rotationKeyIds?.[Number(m[1])] ?? m[1]}`,
+  },
+];
+
+/** Credential leaves `SECRET_FIELD_NAMES` doesn't list (it catches these by
+ *  regex instead). The write path can't rely on a regex — it must externalize
+ *  them by name. */
+const EXTRA_SECRET_LEAVES = new Set(['apiSecret', 'secret']);
+
+/**
+ * Map a flat config key (`apiKey`, `telegram.bots.0.token`, `webhooks.x.secret`)
+ * to the vault ref its value belongs at, or `null` when the key carries no
+ * credential.
+ *
+ * The single ref-naming scheme: both config serializers — `writeConfig` here
+ * and `ConfigRepository` in apps/web-api — go through it, so a rewrite from
+ * either surface lands on the same ref instead of minting a second one and
+ * orphaning the first.
+ */
+export function secretRefForConfigKey(key: string, ctx: SecretRefContext = {}): string | null {
+  // `toolSettings.<id>.web_search.secret` is a secret NAME, not a value
+  // (WebSearchToolSetting) — externalizing it would break the binding.
+  if (key.startsWith('toolSettings.')) return null;
+  if (key === 'apiKey') return `providers/${ctx.provider ?? 'default'}/apiKey`;
+  const chain = key.match(/^providers\.(\d+)\.apiKey$/);
+  if (chain?.[1] !== undefined) {
+    const name = ctx.providerChain?.[Number(chain[1])];
+    return name ? `providers/${chain[1]}/${name}/apiKey` : `providers/${chain[1]}/apiKey`;
+  }
+  const staticRef = STATIC_SECRET_REFS[key];
+  if (staticRef) return staticRef;
+  for (const rule of INDEXED_SECRET_REFS) {
+    const m = key.match(rule.re);
+    if (m) return rule.ref(m, ctx);
+  }
+  // Catch-all: any other key whose LEAF names a credential field. Keeps keys
+  // this table doesn't enumerate (notably apps/web-api's passthrough block,
+  // which round-trips keys it never models) from reaching disk in plaintext.
+  // `auxiliary.tts.apiKey` → `auxiliary/tts/apiKey`.
+  const leaf = key.slice(key.lastIndexOf('.') + 1);
+  if (SECRET_FIELD_NAMES.has(leaf) || EXTRA_SECRET_LEAVES.has(leaf)) {
+    return key.replace(/\./g, '/');
+  }
+  return null;
+}
+
 // ---------------------------------------------------------------------------
 // Key rotation pool
 // ---------------------------------------------------------------------------
@@ -73,12 +245,90 @@ export async function readKeys(storage: Storage, secrets?: SecretsResolver): Pro
   }
 }
 
-export async function writeKeys(storage: Storage, keys: KeyProfile[]): Promise<void> {
+/**
+ * Stable identity for a rotation key, used to name its vault ref.
+ *
+ * `KeyProfile` has no id field and `label` is optional and not unique, so
+ * there is nothing to key on but the material itself — the same position
+ * `telegram.bots.<n>` is in when the operator omits `id:`. Hashing the value
+ * gives a ref that survives reordering, is identical across rewrites, and
+ * leaks nothing. Reuses core's `deriveBotKey` rather than hashing here: two
+ * implementations of the algorithm is two ways for it to diverge.
+ *
+ * Only meaningful for a plaintext value. A profile that already carries a
+ * `${secrets:…}` reference keeps whatever ref it was minted with — the ref
+ * derived here is discarded by `externalizeSecret`'s idempotent branch.
+ */
+function rotationKeyId(profile: KeyProfile): string {
+  return deriveBotKeyFromSeed(profile.apiKey);
+}
+
+/**
+ * Write-path mirror of `readKeys`: `apiKey` — the one credential-bearing
+ * field on `KeyProfile` — is moved into the vault and replaced by its
+ * `${secrets:<ref>}` reference. `priority` and `label` carry no credential
+ * and are serialized as-is.
+ *
+ * Existing installs migrate implicitly: the first `writeKeys` after upgrade
+ * lifts whatever plaintext keys.json still carries into `~/.ethos/secrets/`.
+ */
+async function externalizeRotationKeys(
+  keys: KeyProfile[],
+  secrets: SecretsResolver,
+): Promise<KeyProfile[]> {
+  const ctx: SecretRefContext = { rotationKeyIds: keys.map(rotationKeyId) };
+  const out: KeyProfile[] = [];
+  for (const [i, profile] of keys.entries()) {
+    const key = `keys.${i}.apiKey`;
+    const ref = secretRefForConfigKey(key, ctx);
+    if (ref === null) throw new Error(`No secret ref is defined for config key '${key}'`);
+    out.push({ ...profile, apiKey: await externalizeSecret(profile.apiKey, ref, secrets) });
+  }
+  return out;
+}
+
+/**
+ * Serialize `~/.ethos/keys.json` (the key-rotation pool).
+ *
+ * `secrets` is REQUIRED for the same reason it is on `writeConfig`: an
+ * omittable control is not a guarantee. Every key value is externalized into
+ * the vault before serialization, so the file holds ordering and refs only
+ * (G-SEC / ARCHITECTURE.md §V S9).
+ */
+export async function writeKeys(
+  storage: Storage,
+  keys: KeyProfile[],
+  secrets: SecretsResolver,
+): Promise<void> {
+  const externalized = await externalizeRotationKeys(keys, secrets);
+  // Fail-closed gate: the same field policy `writeConfig` applies, on exactly
+  // what is about to be serialized. Reused rather than re-implemented so the
+  // two write paths can never disagree about what counts as plaintext.
+  validateNoPlaintextSecrets({ keys: externalized });
   await storage.mkdir(ethosDir());
-  // 0o600 — keys file contains rotation API keys; restrict to owner.
-  await storage.write(join(ethosDir(), 'keys.json'), `${JSON.stringify(keys, null, 2)}\n`, {
+  // 0o600 — keys file contains rotation key refs and ordering; restrict to owner.
+  await storage.write(join(ethosDir(), 'keys.json'), `${JSON.stringify(externalized, null, 2)}\n`, {
     mode: 0o600,
   });
+}
+
+/**
+ * The vault ref a rotation profile's `apiKey` points at, or `null` when it
+ * points at none — a legacy plaintext profile predating externalization never
+ * had material stored, so there is nothing to delete.
+ *
+ * The removal-side counterpart of `externalizeRotationKeys`. `rotationKeyId`
+ * hashes the key VALUE, but `readKeys(storage)` — what `ethos keys` uses —
+ * hands back the reference string, so the ref is parsed out of it by
+ * `secretRefFromValue` rather than re-derived. The profile-shaped signature is
+ * what the rotation-pool callers read against; the parsing itself lives in one
+ * place.
+ *
+ * Refs are content-addressed, so two profiles holding the SAME key value share
+ * one ref. Callers deleting on removal must check the surviving profiles first.
+ */
+export function rotationSecretRef(profile: KeyProfile): string | null {
+  return secretRefFromValue(profile.apiKey);
 }
 
 export interface ActiveContext {
@@ -967,6 +1217,19 @@ export interface EthosConfig {
    */
   a2a?: { enabled?: boolean };
   /**
+   * Operator-controlled security settings.
+   *
+   * `trustedGitHubOrgs` — the GitHub organizations whose skills and plugins
+   * resolve to the `trusted-repo` install tier. The configured list REPLACES
+   * the shipped default (`ethosagent`, `anthropic`) rather than extending it,
+   * so an operator can remove an org they do not trust. An explicitly empty
+   * value is meaningful — it trusts no organization — and is distinct from the
+   * key being absent, which leaves the default in force. Config keys:
+   *   security.trusted_github_orgs: acme-corp, ethosagent
+   *   security.trusted_github_orgs: ""     # trust no org
+   */
+  security?: { trustedGitHubOrgs?: string[] };
+  /**
    * Governed-learning nightly pass scheduler (Phase 3c E). Default-off: when
    * absent or `enabled !== true`, no timer is created and behavior is
    * unchanged. When enabled, `ethos serve` / `ethos gateway start` fire the
@@ -1065,7 +1328,176 @@ export async function readConfig(
   return resolveConfigSecrets(raw, secrets);
 }
 
-export async function writeConfig(storage: Storage, config: EthosConfig): Promise<void> {
+/**
+ * Write-path mirror of `resolveConfigSecrets`: every credential-bearing field
+ * is moved into the vault and replaced by its `${secrets:<ref>}` reference.
+ * Values that are already references pass through untouched, so rewriting an
+ * externalized config is a no-op on the vault.
+ *
+ * Existing installs migrate implicitly — the first `writeConfig` after upgrade
+ * lifts whatever plaintext the file still carries into `~/.ethos/secrets/`.
+ */
+async function externalizeConfigSecrets(
+  config: EthosConfig,
+  secrets: SecretsResolver,
+): Promise<EthosConfig> {
+  const ctx: SecretRefContext = {
+    provider: config.provider,
+    providerChain: config.providers?.map((p) => p.provider),
+    telegramBotKeys: config.telegram?.bots.map((b) => deriveBotKey(b)),
+    slackAppKeys: config.slack?.apps.map((a) => deriveBotKey(a)),
+  };
+  const ref = (key: string): string => {
+    const r = secretRefForConfigKey(key, ctx);
+    if (r === null) throw new Error(`No secret ref is defined for config key '${key}'`);
+    return r;
+  };
+
+  const r = { ...config };
+  r.apiKey = await externalizeSecret(r.apiKey, ref('apiKey'), secrets);
+  r.telegramToken = await externalizeSecret(r.telegramToken, ref('telegramToken'), secrets);
+  r.discordToken = await externalizeSecret(r.discordToken, ref('discordToken'), secrets);
+  r.slackBotToken = await externalizeSecret(r.slackBotToken, ref('slackBotToken'), secrets);
+  r.slackAppToken = await externalizeSecret(r.slackAppToken, ref('slackAppToken'), secrets);
+  r.slackSigningSecret = await externalizeSecret(
+    r.slackSigningSecret,
+    ref('slackSigningSecret'),
+    secrets,
+  );
+  r.emailPassword = await externalizeSecret(r.emailPassword, ref('emailPassword'), secrets);
+
+  if (r.providers) {
+    const out: ProviderConfig[] = [];
+    for (const [i, p] of r.providers.entries()) {
+      out.push({
+        ...p,
+        apiKey: await externalizeSecret(p.apiKey, ref(`providers.${i}.apiKey`), secrets),
+      });
+    }
+    r.providers = out;
+  }
+  if (r.telegram?.bots) {
+    const bots: TelegramBotConfig[] = [];
+    for (const [i, bot] of r.telegram.bots.entries()) {
+      bots.push({
+        ...bot,
+        token: await externalizeSecret(bot.token, ref(`telegram.bots.${i}.token`), secrets),
+      });
+    }
+    r.telegram = { ...r.telegram, bots };
+  }
+  if (r.slack?.apps) {
+    const apps: SlackAppConfig[] = [];
+    for (const [i, app] of r.slack.apps.entries()) {
+      apps.push({
+        ...app,
+        botToken: await externalizeSecret(app.botToken, ref(`slack.apps.${i}.botToken`), secrets),
+        appToken: await externalizeSecret(app.appToken, ref(`slack.apps.${i}.appToken`), secrets),
+        signingSecret: await externalizeSecret(
+          app.signingSecret,
+          ref(`slack.apps.${i}.signingSecret`),
+          secrets,
+        ),
+      });
+    }
+    r.slack = { ...r.slack, apps };
+  }
+  if (r.voice?.livekit) {
+    const lk = r.voice.livekit;
+    r.voice = {
+      ...r.voice,
+      livekit: {
+        ...lk,
+        apiKey: await externalizeSecret(lk.apiKey, ref('voice.livekit.apiKey'), secrets),
+        apiSecret: await externalizeSecret(lk.apiSecret, ref('voice.livekit.apiSecret'), secrets),
+      },
+    };
+  }
+  if (r.voice?.trunk?.password) {
+    const trunk = r.voice.trunk;
+    r.voice = {
+      ...r.voice,
+      trunk: {
+        ...trunk,
+        password: await externalizeSecret(trunk.password, ref('voice.trunk.password'), secrets),
+      },
+    };
+  }
+  if (r.auxiliary) {
+    const aux = { ...r.auxiliary };
+    if (aux.compression?.apiKey) {
+      aux.compression = {
+        ...aux.compression,
+        apiKey: await externalizeSecret(
+          aux.compression.apiKey,
+          ref('auxiliary.compression.apiKey'),
+          secrets,
+        ),
+      };
+    }
+    if (aux.vision?.apiKey) {
+      aux.vision = {
+        ...aux.vision,
+        apiKey: await externalizeSecret(aux.vision.apiKey, ref('auxiliary.vision.apiKey'), secrets),
+      };
+    }
+    if (aux.web?.apiKey) {
+      aux.web = {
+        ...aux.web,
+        apiKey: await externalizeSecret(aux.web.apiKey, ref('auxiliary.web.apiKey'), secrets),
+      };
+    }
+    if (aux.asr?.apiKey) {
+      aux.asr = {
+        ...aux.asr,
+        apiKey: await externalizeSecret(aux.asr.apiKey, ref('auxiliary.asr.apiKey'), secrets),
+      };
+    }
+    if (aux.tts?.apiKey) {
+      aux.tts = {
+        ...aux.tts,
+        apiKey: await externalizeSecret(aux.tts.apiKey, ref('auxiliary.tts.apiKey'), secrets),
+      };
+    }
+    r.auxiliary = aux;
+  }
+  if (r.webhooks) {
+    const hooks: Record<string, WebhookHookConfig> = {};
+    for (const [id, hook] of Object.entries(r.webhooks)) {
+      hooks[id] = {
+        ...hook,
+        secret: await externalizeSecret(hook.secret, ref(`webhooks.${id}.secret`), secrets),
+      };
+    }
+    r.webhooks = hooks;
+  }
+  if (r.memoryCapture?.apiKey) {
+    r.memoryCapture = {
+      ...r.memoryCapture,
+      apiKey: await externalizeSecret(r.memoryCapture.apiKey, ref('memoryCapture.apiKey'), secrets),
+    };
+  }
+  return r;
+}
+
+/**
+ * Serialize `~/.ethos/config.yaml`.
+ *
+ * `secrets` is REQUIRED, not optional: every credential value is externalized
+ * into the vault before serialization, and an optional resolver would be a
+ * control a caller could silently omit — which is exactly how plaintext
+ * credentials kept reaching disk (G-SEC).
+ */
+export async function writeConfig(
+  storage: Storage,
+  input: EthosConfig,
+  secrets: SecretsResolver,
+): Promise<void> {
+  const config = await externalizeConfigSecrets(input, secrets);
+  // Fail-closed gate: the same field policy `loadConfigStrict` enforces at
+  // boot, applied to exactly what is about to be serialized. Reused rather
+  // than re-implemented so the write and boot checks can never disagree.
+  validateNoPlaintextSecrets(config);
   await storage.mkdir(ethosDir());
   const lines = [
     `schemaVersion: ${config.schemaVersion ?? CURRENT_ETHOS_CONFIG_SCHEMA_VERSION}`,
@@ -1411,6 +1843,16 @@ export async function writeConfig(storage: Storage, config: EthosConfig): Promis
     lines.push(`plugins.auto_install: ${config.pluginsAutoInstall}`);
   if (config.admin?.enabled !== undefined) lines.push(`admin.enabled: ${config.admin.enabled}`);
   if (config.a2a?.enabled !== undefined) lines.push(`a2a.enabled: ${config.a2a.enabled}`);
+  // Written even when the list is empty — `""` is how "trust no org" survives
+  // a round-trip, and dropping the line would silently restore the default.
+  if (config.security?.trustedGitHubOrgs !== undefined)
+    lines.push(
+      `security.trusted_github_orgs: ${
+        config.security.trustedGitHubOrgs.length > 0
+          ? config.security.trustedGitHubOrgs.join(',')
+          : '""'
+      }`,
+    );
   if (config.nightlyPass) {
     if (config.nightlyPass.enabled !== undefined)
       lines.push(`nightlyPass.enabled: ${config.nightlyPass.enabled}`);
@@ -1529,6 +1971,65 @@ export async function resolveConfigSecrets(
         ...r.auxiliary.vision,
         apiKey: await resolveSecretValue(r.auxiliary.vision.apiKey, secrets),
       },
+    };
+  }
+  if (r.auxiliary?.web?.apiKey) {
+    r.auxiliary = {
+      ...r.auxiliary,
+      web: {
+        ...r.auxiliary.web,
+        apiKey: await resolveSecretValue(r.auxiliary.web.apiKey, secrets),
+      },
+    };
+  }
+  if (r.auxiliary?.asr?.apiKey) {
+    r.auxiliary = {
+      ...r.auxiliary,
+      asr: {
+        ...r.auxiliary.asr,
+        apiKey: await resolveSecretValue(r.auxiliary.asr.apiKey, secrets),
+      },
+    };
+  }
+  if (r.auxiliary?.tts?.apiKey) {
+    r.auxiliary = {
+      ...r.auxiliary,
+      tts: {
+        ...r.auxiliary.tts,
+        apiKey: await resolveSecretValue(r.auxiliary.tts.apiKey, secrets),
+      },
+    };
+  }
+  if (r.voice?.livekit) {
+    r.voice = {
+      ...r.voice,
+      livekit: {
+        ...r.voice.livekit,
+        apiKey: await resolveSecretValue(r.voice.livekit.apiKey, secrets),
+        apiSecret: await resolveSecretValue(r.voice.livekit.apiSecret, secrets),
+      },
+    };
+  }
+  if (r.voice?.trunk?.password) {
+    r.voice = {
+      ...r.voice,
+      trunk: {
+        ...r.voice.trunk,
+        password: await resolveSecretValue(r.voice.trunk.password, secrets),
+      },
+    };
+  }
+  if (r.webhooks) {
+    const hooks: Record<string, WebhookHookConfig> = {};
+    for (const [id, hook] of Object.entries(r.webhooks)) {
+      hooks[id] = { ...hook, secret: await resolveSecretValue(hook.secret, secrets) };
+    }
+    r.webhooks = hooks;
+  }
+  if (r.memoryCapture?.apiKey) {
+    r.memoryCapture = {
+      ...r.memoryCapture,
+      apiKey: await resolveSecretValue(r.memoryCapture.apiKey, secrets),
     };
   }
   return r;
@@ -1902,6 +2403,14 @@ function parseConfigYaml(src: string): EthosConfig {
       kv['a2a.enabled'] = a2a[1].trim().replace(/^["']|["']$/g, '');
       continue;
     }
+    // security.trusted_github_orgs: <org,list>
+    // `(.*)` — not `(.+)` — on purpose: an empty value is a meaningful
+    // configuration ("trust no org"), distinct from the key being absent.
+    const sec = line.match(/^security\.trusted_github_orgs:\s*(.*)$/);
+    if (sec) {
+      kv['security.trusted_github_orgs'] = sec[1].trim().replace(/^["']|["']$/g, '');
+      continue;
+    }
     // nightlyPass.<field>: <value>
     const np = line.match(/^nightlyPass\.(\w+):\s*(.+)$/);
     if (np) {
@@ -2259,6 +2768,17 @@ function parseConfigYaml(src: string): EthosConfig {
     admin:
       kv['admin.enabled'] !== undefined ? { enabled: kv['admin.enabled'] === 'true' } : undefined,
     a2a: kv['a2a.enabled'] !== undefined ? { enabled: kv['a2a.enabled'] === 'true' } : undefined,
+    // `!== undefined` — not truthiness: an empty value must survive as `[]`
+    // (trust no org) instead of collapsing back to the shipped default.
+    security:
+      kv['security.trusted_github_orgs'] !== undefined
+        ? {
+            trustedGitHubOrgs: kv['security.trusted_github_orgs']
+              .split(/[,\s]+/)
+              .map((o) => o.trim())
+              .filter((o) => o.length > 0),
+          }
+        : undefined,
     nightlyPass:
       kv['nightlyPass.enabled'] !== undefined || kv['nightlyPass.cron'] !== undefined
         ? {
@@ -2386,8 +2906,12 @@ const SECRET_FIELD_NAMES = new Set([
  *
  * Skips validation entirely when no SecretsResolver is configured (local dev
  * without secrets infrastructure).
+ *
+ * The check is purely structural, so the parameter is any on-disk object
+ * graph, not only `EthosConfig` — `writeKeys` runs the same gate over
+ * `~/.ethos/keys.json`.
  */
-export function validateNoPlaintextSecrets(config: EthosConfig): void {
+export function validateNoPlaintextSecrets(config: object): void {
   const violations: Array<{ field: string; label: string }> = [];
   walkStringValues(config, '', (field, value) => {
     const stripped = value.replace(SECRETS_REF_RE, '');

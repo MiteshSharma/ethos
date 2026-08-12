@@ -37,6 +37,7 @@ export {
   PersonalityA2aIdentityProvider,
 } from './a2a-identity';
 export {
+  type CharacterSheetBoundary,
   type CharacterSheetExecution,
   type CharacterSheetModelFit,
   type CharacterSheetScriptSurface,
@@ -1894,8 +1895,6 @@ function buildSafetyConfig(raw: Record<string, unknown>): PersonalitySafetyConfi
   const inj = raw.injectionDefense as Record<string, unknown> | undefined;
   if (inj) {
     const out: NonNullable<PersonalitySafetyConfig['injectionDefense']> = {};
-    const enabled = nestedBool(inj.enabled);
-    if (enabled !== undefined) out.enabled = enabled;
     const classifier = inj.classifier as Record<string, unknown> | undefined;
     if (classifier) {
       const alwaysCallLLM = nestedBool(classifier.alwaysCallLLM);

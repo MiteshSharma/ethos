@@ -2,7 +2,7 @@ import { readRawConfig, writeConfig } from '@ethosagent/config';
 import { mergeRetentionConfig, parseDuration } from '@ethosagent/observability-sqlite';
 import { RETENTION_DEFAULTS, type RetentionConfig } from '@ethosagent/types';
 import { writeJson } from '../json-output';
-import { getStorage } from '../wiring';
+import { getSecretsResolver, getStorage } from '../wiring';
 
 // ---------------------------------------------------------------------------
 // ethos retention show [--personality <id>] [--defaults]
@@ -255,18 +255,22 @@ export async function runRetention(sub: string, argv: string[]): Promise<void> {
     if (flags.personality) {
       const existing = config.personalitiesConfig?.[flags.personality]?.retention ?? {};
       const updated = setRetentionValue(existing, category, duration);
-      await writeConfig(storage, {
-        ...config,
-        personalitiesConfig: {
-          ...config.personalitiesConfig,
-          [flags.personality]: { retention: updated },
+      await writeConfig(
+        storage,
+        {
+          ...config,
+          personalitiesConfig: {
+            ...config.personalitiesConfig,
+            [flags.personality]: { retention: updated },
+          },
         },
-      });
+        await getSecretsResolver(),
+      );
       console.log(`Set ${category} = ${duration} for personality ${flags.personality}`);
     } else {
       const existing = config.retention ?? {};
       const updated = setRetentionValue(existing, category, duration);
-      await writeConfig(storage, { ...config, retention: updated });
+      await writeConfig(storage, { ...config, retention: updated }, await getSecretsResolver());
       console.log(`Set retention.${category} = ${duration}`);
     }
     return;
@@ -280,13 +284,17 @@ export async function runRetention(sub: string, argv: string[]): Promise<void> {
         const pcfg = config.personalitiesConfig ?? {};
         const updated = { ...pcfg };
         delete updated[flags.personality];
-        await writeConfig(storage, {
-          ...config,
-          personalitiesConfig: Object.keys(updated).length > 0 ? updated : undefined,
-        });
+        await writeConfig(
+          storage,
+          {
+            ...config,
+            personalitiesConfig: Object.keys(updated).length > 0 ? updated : undefined,
+          },
+          await getSecretsResolver(),
+        );
         console.log(`Reset all retention overrides for personality ${flags.personality}`);
       } else {
-        await writeConfig(storage, { ...config, retention: undefined });
+        await writeConfig(storage, { ...config, retention: undefined }, await getSecretsResolver());
         console.log('Reset all global retention settings to defaults');
       }
       return;
@@ -302,22 +310,30 @@ export async function runRetention(sub: string, argv: string[]): Promise<void> {
     if (flags.personality) {
       const existing = config.personalitiesConfig?.[flags.personality]?.retention ?? {};
       const updated = deleteRetentionValue(existing, category);
-      await writeConfig(storage, {
-        ...config,
-        personalitiesConfig: {
-          ...config.personalitiesConfig,
-          [flags.personality]: { retention: updated },
+      await writeConfig(
+        storage,
+        {
+          ...config,
+          personalitiesConfig: {
+            ...config.personalitiesConfig,
+            [flags.personality]: { retention: updated },
+          },
         },
-      });
+        await getSecretsResolver(),
+      );
       console.log(`Reset retention.${category} for personality ${flags.personality} to default`);
     } else {
       const existing = config.retention ?? {};
       const updated = deleteRetentionValue(existing, category);
       const isEmpty = Object.keys(updated).length === 0 && !updated.events;
-      await writeConfig(storage, {
-        ...config,
-        retention: isEmpty ? undefined : updated,
-      });
+      await writeConfig(
+        storage,
+        {
+          ...config,
+          retention: isEmpty ? undefined : updated,
+        },
+        await getSecretsResolver(),
+      );
       console.log(`Reset retention.${category} to default`);
     }
     return;

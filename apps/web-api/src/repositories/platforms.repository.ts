@@ -1,4 +1,5 @@
 import { join } from 'node:path';
+import { secretRefFromValue } from '@ethosagent/config';
 import { deriveBotKey } from '@ethosagent/core';
 import type { SecretsResolver, Storage } from '@ethosagent/types';
 import type {
@@ -103,13 +104,6 @@ const ALL_PLATFORM_IDS: readonly PlatformId[] = [
 const LEGACY_TELEGRAM_BOT_KEY = 'legacy-telegram';
 const LEGACY_SLACK_BOT_KEY = 'legacy-slack';
 
-/** Parse `${secrets:<ref>}` from a passthrough value. Returns the ref
- *  path, or null if the value isn't a secret reference. */
-function extractSecretRef(value: string): string | null {
-  const m = value.match(/^\$\{secrets:([^}]+)\}$/);
-  return m?.[1] ?? null;
-}
-
 // Mirrors sanitizeBotKey in extensions/platform-whatsapp/src/session-store.ts —
 // the Baileys session dir for a bot is `<sessionDir>/<sanitized botKey>/`.
 function sanitizeBotKey(key: string): string {
@@ -212,7 +206,7 @@ export class PlatformsRepository {
       if (!configKey) continue;
       const value = passthrough[configKey];
       if (!value) continue;
-      const ref = extractSecretRef(value);
+      const ref = secretRefFromValue(value);
       if (ref) await this.opts.secrets.delete(ref);
     }
     if (keys.length > 0) await this.opts.config.deletePassthroughKeys(keys);
@@ -348,7 +342,7 @@ export class PlatformsRepository {
     }
     if (targetIndex === undefined || !targetFields) return;
     const tokenValue = targetFields.token ?? '';
-    const ref = extractSecretRef(tokenValue);
+    const ref = secretRefFromValue(tokenValue);
     if (ref) await this.opts.secrets.delete(ref);
     const toDelete = Object.keys(passthrough).filter((k) =>
       k.startsWith(`telegram.bots.${targetIndex}.`),
@@ -471,7 +465,7 @@ export class PlatformsRepository {
     if (targetIndex === undefined || !targetFields) return;
     for (const fieldName of ['botToken', 'appToken', 'signingSecret']) {
       const value = targetFields[fieldName] ?? '';
-      const ref = extractSecretRef(value);
+      const ref = secretRefFromValue(value);
       if (ref) await this.opts.secrets.delete(ref);
     }
     const toDelete = Object.keys(passthrough).filter((k) =>

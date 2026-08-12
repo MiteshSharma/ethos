@@ -1,12 +1,32 @@
 import type { ScanResult, TierPolicy, TrustTier } from './types';
 
 /**
- * Trusted GitHub organizations. Matched by exact segment against the
- * first two path segments of a `github.com/<org>/<repo>` source string.
- * Prefix matching (startsWith) is NOT used — it would allow an attacker
- * slug like `github.com/ethosagent/../../evil` to pass.
+ * Shipped default trusted GitHub organizations. Matched by exact segment
+ * against the first two path segments of a `github.com/<org>/<repo>` source
+ * string. Prefix matching (startsWith) is NOT used — it would allow an
+ * attacker slug like `github.com/ethosagent/../../evil` to pass.
+ *
+ * This is a DEFAULT, not a floor: an operator replaces it wholesale via
+ * `security.trusted_github_orgs` in `~/.ethos/config.yaml`, which reaches
+ * this module as `TrustTierOptions.trustedGitHubOrgs`. Removing `anthropic`
+ * — or trusting no org at all — must be expressible, so the configured value
+ * replaces this list rather than extending it.
  */
-const TRUSTED_GITHUB_ORGS = new Set(['ethosagent', 'anthropic']);
+export const DEFAULT_TRUSTED_GITHUB_ORGS: readonly string[] = ['ethosagent', 'anthropic'];
+
+export interface TrustTierOptions {
+  /**
+   * Operator-configured trusted GitHub organizations, passed down from the
+   * composition root (`packages/safety/*` is a Tier 0 kernel package — it
+   * imports contracts only and never reads config or the environment at use
+   * time).
+   *
+   * - `undefined` — not configured; `DEFAULT_TRUSTED_GITHUB_ORGS` applies.
+   * - `[]` — configured empty; NO organization is trusted. This is a
+   *   meaningful value and must not fall back to the default.
+   */
+  trustedGitHubOrgs?: readonly string[];
+}
 
 /**
  * Extract the organization segment from a `github.com/<org>/…` source.
@@ -27,11 +47,15 @@ function extractGitHubOrg(source: string): string | undefined {
   return org;
 }
 
-export function deriveTier(source: string): TrustTier {
+export function deriveTier(source: string, opts: TrustTierOptions = {}): TrustTier {
   if (source === 'builtin') return 'builtin';
 
+  // `??` — and NOT `||` or a `.length` check — is what distinguishes "not
+  // configured" (undefined → default) from "configured empty" (`[]` → trust
+  // nobody by org).
+  const trustedOrgs = opts.trustedGitHubOrgs ?? DEFAULT_TRUSTED_GITHUB_ORGS;
   const org = extractGitHubOrg(source);
-  if (org && TRUSTED_GITHUB_ORGS.has(org)) return 'trusted-repo';
+  if (org && trustedOrgs.includes(org)) return 'trusted-repo';
 
   // community: clawhub, hermeshub, arbitrary github (not in trusted list)
   if (
@@ -44,12 +68,27 @@ export function deriveTier(source: string): TrustTier {
   return 'untrusted';
 }
 
+/**
+ * `autoAcknowledgeYellow` is `builtin`-only. `builtin` means code shipped
+ * inside this repository — a claim about provenance we can actually make.
+ * "A repo owned by an org someone listed" is a different, weaker claim, so
+ * `trusted-repo` no longer silently acknowledges yellow findings; they
+ * surface and the operator acknowledges them.
+ *
+ * `trusted-repo` keeps `canOverrideRed` deliberately. It never fires on its
+ * own — `canInstall` honours it only alongside an explicit `force` — so it
+ * buys the operator a lever, not a silent pass, and the operator is the one
+ * who put the org on the list. It is also the only thing left distinguishing
+ * `trusted-repo` from `community`; collapsing the two would make the tier
+ * vestigial. The residual risk is stated plainly: a red finding in a
+ * configured org is overridable with `--force`.
+ */
 export function getTierPolicy(tier: TrustTier): TierPolicy {
   switch (tier) {
     case 'builtin':
       return { tier, canOverrideRed: true, autoAcknowledgeYellow: true };
     case 'trusted-repo':
-      return { tier, canOverrideRed: true, autoAcknowledgeYellow: true };
+      return { tier, canOverrideRed: true, autoAcknowledgeYellow: false };
     case 'community':
       return { tier, canOverrideRed: false, autoAcknowledgeYellow: false };
     case 'untrusted':
@@ -86,12 +125,12 @@ export function canInstall(
   }
 
   if (result.hasYellow && !policy.autoAcknowledgeYellow) {
-    // untrusted/community requires per-finding acknowledgment — in the CLI this means
-    // the user must confirm; in the API we treat unacknowledged yellow as blocking.
+    // Every tier but `builtin` requires per-finding acknowledgment — in the CLI this
+    // means the user must confirm; in the API we treat unacknowledged yellow as blocking.
     if (!opts.force) {
       return {
         allowed: false,
-        blockedBy: 'yellow findings require acknowledgment (untrusted source)',
+        blockedBy: 'yellow findings require acknowledgment (source is not builtin)',
       };
     }
   }

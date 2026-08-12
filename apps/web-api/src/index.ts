@@ -1,6 +1,7 @@
 import { join } from 'node:path';
 import { SessionStreamBuffer } from '@ethosagent/agent-bridge';
 import { AgentMesh, defaultRegistryPath } from '@ethosagent/agent-mesh';
+import { resolveSecretRef } from '@ethosagent/config';
 import type { AgentLoop } from '@ethosagent/core';
 import type { CronScheduler } from '@ethosagent/cron';
 import {
@@ -319,6 +320,17 @@ export interface CreateWebApiOptions {
     personalityId: string,
   ) => Promise<import('@ethosagent/personalities').CharacterSheetScriptSurface | null>;
   /**
+   * §4.7 — declared-reach seam for the `## Boundary` section of the
+   * `personalities.characterSheet` RPC. The provider computes it via
+   * `toolsDeclaringNetwork()` from `@ethosagent/core` against the live tool
+   * registry — the SAME `capabilities` declaration G-CAP intersects per call.
+   * Absent or resolving `null` → the section still renders, it just never
+   * reports a guarantee as inapplicable for reach it cannot see.
+   */
+  boundary?: (
+    personalityId: string,
+  ) => Promise<import('@ethosagent/personalities').CharacterSheetBoundary | null>;
+  /**
    * Protocol route modules (A2A, Phase 3) contributed to the Hono app via the
    * explicit, reviewable seam. Each declares its mount path, auth posture, and
    * description; `enabled: false` skips it. Modules inherit the app-wide CORS +
@@ -393,12 +405,15 @@ export function createWebApi(opts: CreateWebApiOptions): CreateWebApiResult {
   // below receives this single instance (never a silent FsStorage fallback).
   const storage: Storage = opts.storage ?? new FsStorage();
 
+  const secrets: SecretsResolver =
+    opts.secrets ?? new FileSecretsResolver({ dir: join(opts.dataDir, 'secrets'), storage });
+
   // --- Repositories (data access only) ---
   const tokens = new WebTokenRepository({ dataDir: opts.dataDir, storage });
   const sessionsRepo = new SessionsRepository(opts.sessionStore);
   const chatRepo = new ChatRepository(opts.sessionStore);
   const completionsRepo = new CompletionsRepository(opts.sessionStore);
-  const configRepo = new ConfigRepository({ dataDir: opts.dataDir, storage });
+  const configRepo = new ConfigRepository({ dataDir: opts.dataDir, storage, secrets });
   const allowlistRepo = new AllowlistRepository({ dataDir: opts.dataDir, storage });
   // Gap 11 — lazy getter so skills' `requires.tools` gates see the live
   // registry (including MCP/plugin tools registered after boot). Omitted
@@ -417,8 +432,6 @@ export function createWebApi(opts: CreateWebApiOptions): CreateWebApiResult {
   // the same path `ethos serve` writes to via meshRegistryPath('default').
   const mesh = new AgentMesh(defaultRegistryPath(), { storage });
   const memoryProvider = opts.memoryProvider;
-  const secrets: SecretsResolver =
-    opts.secrets ?? new FileSecretsResolver({ dir: join(opts.dataDir, 'secrets'), storage });
   const platformsRepo = new PlatformsRepository({
     config: configRepo,
     secrets,
@@ -459,6 +472,7 @@ export function createWebApi(opts: CreateWebApiOptions): CreateWebApiResult {
     ...(opts.dockerBuildable === false ? { dockerBuildable: false } : {}),
     ...(opts.modelFit ? { modelFit: opts.modelFit } : {}),
     ...(opts.scriptSurface ? { scriptSurface: opts.scriptSurface } : {}),
+    ...(opts.boundary ? { boundary: opts.boundary } : {}),
   });
   const configService = new ConfigService({ config: configRepo, secrets });
   const onboardingService = new OnboardingService({
@@ -536,14 +550,18 @@ export function createWebApi(opts: CreateWebApiOptions): CreateWebApiResult {
     secrets,
     configGetter: async () => {
       const raw = await configRepo.read();
+      // Keys are stored as `${secrets:<ref>}` (G-SEC) — resolve before the
+      // value reaches a provider factory, which expects a usable key.
+      const resolveKey = async (v: string | undefined): Promise<string | undefined> =>
+        v ? await resolveSecretRef(v, secrets) : v;
       return raw
         ? {
             voiceProvider: raw.voiceProvider,
-            voiceApiKey: raw.voiceApiKey,
+            voiceApiKey: await resolveKey(raw.voiceApiKey),
             voiceBaseUrl: raw.voiceBaseUrl,
             voiceModel: raw.voiceModel,
             voiceTtsProvider: raw.voiceTtsProvider,
-            voiceTtsApiKey: raw.voiceTtsApiKey,
+            voiceTtsApiKey: await resolveKey(raw.voiceTtsApiKey),
             voiceTtsVoice: raw.voiceTtsVoice,
             voiceTtsBaseUrl: raw.voiceTtsBaseUrl,
             voiceTtsModel: raw.voiceTtsModel,

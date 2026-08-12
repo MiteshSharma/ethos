@@ -1,5 +1,5 @@
 import { join } from 'node:path';
-import { InMemoryStorage } from '@ethosagent/storage-fs';
+import { InMemorySecretsResolver, InMemoryStorage } from '@ethosagent/storage-fs';
 import { describe, expect, it } from 'vitest';
 import { type EthosConfig, ethosDir, readRawConfig, writeConfig } from '../index';
 
@@ -54,7 +54,7 @@ describe('voice.defaultMode', () => {
       personality: 'researcher',
       voice: { bots: [], trustedPlugins: ['openai-tts'], defaultMode: 'all' },
     };
-    await writeConfig(storage, config);
+    await writeConfig(storage, config, new InMemorySecretsResolver());
     const reread = await readRawConfig(storage);
     expect(reread?.voice?.defaultMode).toBe('all');
     expect(reread?.voice?.trustedPlugins).toEqual(['openai-tts']);

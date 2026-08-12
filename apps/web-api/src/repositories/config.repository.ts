@@ -1,5 +1,11 @@
 import { dirname, join } from 'node:path';
-import type { Storage } from '@ethosagent/types';
+import {
+  externalizeSecret,
+  type SecretRefContext,
+  secretRefForConfigKey,
+} from '@ethosagent/config';
+import { deriveBotKey } from '@ethosagent/core';
+import type { SecretsResolver, Storage } from '@ethosagent/types';
 import { requireStorage } from './require-storage';
 
 // Read/write `~/.ethos/config.yaml` from the web side. The file is shared
@@ -17,6 +23,13 @@ export interface ConfigRepositoryOptions {
   dataDir: string;
   /** Storage backend. Injected by the composition root; required. */
   storage: Storage;
+  /**
+   * Credential vault. Required, not optional: every credential-bearing value
+   * this repository serializes is externalized through it and the file gets
+   * only a `${secrets:<ref>}` reference (G-SEC / §V S9). An optional resolver
+   * would be a control a caller could silently omit.
+   */
+  secrets: SecretsResolver;
 }
 
 /** A single entry in the provider chain (providers.N.* lines in config.yaml). */
@@ -71,11 +84,16 @@ export interface RawConfig {
 
 export class ConfigRepository {
   private readonly storage: Storage;
+  private readonly secrets: SecretsResolver;
   private readonly path: string;
   private writeChain: Promise<void> = Promise.resolve();
 
   constructor(opts: ConfigRepositoryOptions) {
     this.storage = requireStorage(opts.storage, 'ConfigRepository');
+    if (!opts.secrets) {
+      throw new Error('ConfigRepository requires a SecretsResolver');
+    }
+    this.secrets = opts.secrets;
     this.path = join(opts.dataDir, 'config.yaml');
   }
 
@@ -336,9 +354,63 @@ export class ConfigRepository {
     return current;
   }
 
-  private async write(config: RawConfig): Promise<void> {
+  /**
+   * Move every credential-bearing value into the vault, leaving the config
+   * with `${secrets:<ref>}` references only (G-SEC / §V S9). Ref naming and
+   * the already-a-reference passthrough come from `@ethosagent/config`, so
+   * this serializer and the CLI's `writeConfig` mint the same refs for the
+   * same fields instead of each inventing a scheme.
+   *
+   * Passthrough keys are covered too: the settings form writes credentials
+   * (`auxiliary.*.apiKey`, `webhooks.<id>.secret`, platform tokens) through
+   * that block, and it round-trips keys this layer never models.
+   */
+  private async externalizeSecrets(config: RawConfig): Promise<RawConfig> {
+    const ctx: SecretRefContext = {
+      ...(config.provider ? { provider: config.provider } : {}),
+      providerChain: config.providers.map((p) => p.provider),
+      telegramBotKeys: botKeys(config.passthrough, 'telegram.bots', 'token'),
+      slackAppKeys: botKeys(config.passthrough, 'slack.apps', 'botToken'),
+    };
+    const ref = (key: string): string => {
+      const r = secretRefForConfigKey(key, ctx);
+      if (r === null) throw new Error(`No secret ref is defined for config key '${key}'`);
+      return r;
+    };
+    const next: RawConfig = { ...config };
+    next.apiKey = await externalizeSecret(next.apiKey, ref('apiKey'), this.secrets);
+    next.voiceApiKey = await externalizeSecret(
+      next.voiceApiKey,
+      ref('auxiliary.asr.apiKey'),
+      this.secrets,
+    );
+    next.voiceTtsApiKey = await externalizeSecret(
+      next.voiceTtsApiKey,
+      ref('auxiliary.tts.apiKey'),
+      this.secrets,
+    );
+    const providers: RawProviderEntry[] = [];
+    for (const [i, p] of config.providers.entries()) {
+      providers.push({
+        ...p,
+        apiKey: await externalizeSecret(p.apiKey, ref(`providers.${i}.apiKey`), this.secrets),
+      });
+    }
+    next.providers = providers;
+    const passthrough: Record<string, string> = {};
+    for (const [key, value] of Object.entries(config.passthrough)) {
+      const keyRef = secretRefForConfigKey(key, ctx);
+      passthrough[key] =
+        keyRef === null ? value : ((await externalizeSecret(value, keyRef, this.secrets)) ?? value);
+    }
+    next.passthrough = passthrough;
+    return next;
+  }
+
+  private async write(input: RawConfig): Promise<void> {
     await this.storage.mkdir(dirname(this.path));
 
+    const config = await this.externalizeSecrets(input);
     const lines: string[] = [];
     if (config.provider) lines.push(`provider: ${yamlScalar(config.provider)}`);
     if (config.model) lines.push(`model: ${yamlScalar(config.model)}`);
@@ -398,15 +470,40 @@ export class ConfigRepository {
     for (const key of Object.keys(config.passthrough).sort()) {
       lines.push(`${yamlScalar(key)}: ${yamlScalar(config.passthrough[key] ?? '')}`);
     }
-    // config.yaml holds plaintext provider apiKeys — write it 0o600 so a
-    // web-driven update never regresses the file to a world-readable mode
-    // (matches apps/ethos/src/config.ts and web-token.repository.ts).
+    // Credential values live in the vault, not here — but write 0o600 anyway
+    // so a web-driven update never regresses the file to a world-readable
+    // mode (matches apps/ethos/src/config.ts and web-token.repository.ts).
     await this.storage.writeAtomic(this.path, `${lines.join('\n')}\n`, { mode: 0o600 });
   }
 }
 
 function stripQuotes(s: string): string {
   return s.replace(/^["']|["']$/g, '');
+}
+
+/**
+ * Stable botKey per indexed passthrough entry (`telegram.bots.<n>`,
+ * `slack.apps.<n>`), so a token's ref is keyed by bot identity rather than
+ * array position. Explicit `.id` wins — that is what PlatformsRepository
+ * writes; otherwise derive from the token, which lands on the same key
+ * PlatformsRepository would have derived from the same token.
+ */
+function botKeys(
+  passthrough: Record<string, string>,
+  prefix: string,
+  tokenField: string,
+): (string | undefined)[] {
+  const keys: (string | undefined)[] = [];
+  const re = new RegExp(`^${prefix.replace(/\./g, '\\.')}\\.(\\d+)\\.(id|${tokenField})$`);
+  for (const [key, value] of Object.entries(passthrough)) {
+    const m = key.match(re);
+    const idx = m?.[1];
+    if (idx === undefined) continue;
+    const i = Number(idx);
+    if (m?.[2] === 'id') keys[i] = value;
+    else if (keys[i] === undefined) keys[i] = deriveBotKey(value);
+  }
+  return keys;
 }
 
 /** Escape a value for safe YAML scalar emission. If the value contains

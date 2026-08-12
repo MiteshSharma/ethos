@@ -70,34 +70,44 @@ The primary mental model.
                           │   Apps   │      user-facing entry points
                           └────┬─────┘
                                │
-                          ┌────▼─────┐
-                          │  Wiring  │      composition roots
-                          └─┬──────┬─┘
-                            │      │
-                     ┌──────▼─┐  ┌─▼──────────┐
-                     │  Core  │  │ Extensions │
-                     └──────┬─┘  └─┬──────────┘
-                            │      │
-                         ┌──▼──────▼──┐
-                         │ Contracts  │      interfaces, zero internal deps
-                         └────────────┘
+              ┌────────────────▼──────────────────┐
+              │              Wiring               │   composition roots
+              └─────┬──────────┬──────────┬───────┘
+                    │          │          │
+      ┌─────────────▼───┐  ┌───▼────┐  ┌──▼─────────┐
+      │ Security kernel │  │  Core  │  │ Extensions │
+      └───────┬─────────┘  └───┬────┘  └─────┬──────┘
+              │                │             │
+            ┌─▼────────────────▼─────────────▼──┐
+            │             Contracts             │   interfaces, zero
+            └───────────────────────────────────┘   internal deps
 ```
 
 **Contracts** are the floor: pure TypeScript interfaces, value types,
 discriminated unions. They have no internal dependencies. Everything
 else depends on them.
 
+**Security kernel** is the layer that implements the safety primitives
+§V mandates. It depends on contracts only and imports nothing above
+itself. Core does not import it at runtime: core consumes kernel
+capability through injected contract types, and wiring is the layer that
+binds an implementation to that seam. This is a restriction on core, not
+a licence for anyone else — a kernel that core could import directly
+would make the engine unswappable and the kernel unreplaceable.
+
 **Core** is the framework engine: the agent loop, the registries, the
-default context engines, and the safety primitives mandated by §V. Core
-depends on contracts only.
+default context engines, and the enforcement points at which the §V
+safety primitives are applied. Core depends on contracts only.
 
 **Extensions** are concrete implementations of contracts: providers,
 tools, memory backends, platform adapters, persistence stores, content
-bundles. Extensions depend on contracts and on core; they do not assume
-the presence of sibling extensions outside the patterns in §IV.
+bundles. Extensions depend on contracts, on the security kernel, and on
+core; they do not assume the presence of sibling extensions outside the
+patterns in §IV.
 
 **Wiring** is the composition layer: the only layer that imports
-extensions by name and assembles them into a running system.
+extensions by name, assembles them into a running system, and binds a
+security-kernel implementation to the seam core is constructed with.
 
 **Apps** are user-facing entry points: CLIs, TUIs, web clients, IDE
 extensions, protocol servers. Apps drive wiring; they do not bypass it.
@@ -196,6 +206,16 @@ contract for all output. `console.*` is permitted only in app entry
 modules and in build/test tooling. *Rationale:* silent libraries
 compose; chatty libraries pollute every embedder.
 
+### Law 11 — Kernel guarantees are not weakenable from outside
+A module outside the security kernel must not be able to weaken a
+guarantee the kernel enforces. *Rationale:* a guarantee an extension can
+switch off was never a guarantee, and the failure is silent — which is
+how a shipped control claim survived in the documentation after the code
+stopped implementing it.
+
+Like §V, this law has no exception path under §VIII: an exception to it
+is, by definition, a module that can weaken a kernel guarantee.
+
 ------------------------------------------------------------------------
 
 ## IV. Extension Patterns
@@ -265,9 +285,10 @@ These rules are absolute. They have no exception path. They predate any
 feature and outlive any release. Amendments to this section follow §VI
 structural-class rules.
 
-Safety primitives located in the core layer follow the same bump
-procedure as the engine itself; breaking changes require the unanimous
-maintainer agreement that core changes require.
+Safety primitives, whether they sit in the security kernel or at a core
+enforcement point, follow the same bump procedure as the engine itself;
+breaking changes require the unanimous maintainer agreement that core
+changes require.
 
 **S1 — Tool allowlist is authoritative.**
 The personality toolset is the sole authority on which tools the model
@@ -301,8 +322,12 @@ action is a contract violation.
 
 **S6 — Inbound text passes safety injection.**
 Every inbound user message and every retrieved memory passes through the
-safety injection pipeline before reaching the LLM. The pipeline is part
-of core; it cannot be opted out of by personality, channel, or tool.
+safety injection pipeline before reaching the LLM. The pipeline is
+reachable only through the safety seam injected into every agent loop;
+no personality, channel, or tool may disable it, and no schema field may
+exist whose effect is to disable it. A personality safety block may only
+ever narrow what the framework already permits; a field that widens
+policy is a violation of this rule, not a configuration of it.
 
 **S7 — Boundary errors are user-facing.**
 A boundary violation — storage scope, tool allowlist, sandbox
@@ -444,6 +469,9 @@ exception is a temporary, named, time-bounded carve-out.
   unobservable.
 - Exceptions to §V Safety Constitution rules. Safety rules are amended
   through §VI or not at all.
+- Exceptions to §III Law 11. An exception permitting a module outside
+  the security kernel to weaken a kernel guarantee is the violation the
+  law names.
 - Exceptions broader than a single named scope. A pattern-wide
   exception is a law change, not an exception.
 
@@ -495,25 +523,36 @@ layers:
     forbids:
       - internal_workspace_deps: all
 
-  - name: core
-    role: "Framework engine plus §V-mandated safety primitives."
+  - name: security-kernel
+    role: "Implementations of the §V-mandated safety primitives."
     depends_on: [contracts]
     forbids:
+      - imports_outside_layer: [core, extensions, wiring, apps]
+      - raw_filesystem_apis: true
+      - direct_console_writes: true
+
+  - name: core
+    role: "Framework engine. Applies §V safety primitives through injected seams."
+    depends_on: [contracts]
+    # Core reaches the kernel only through contract types bound by wiring.
+    type_only_deps: [security-kernel]
+    forbids:
       - imports_outside_layer: [extensions, wiring, apps]
+      - runtime_imports_of_layer: [security-kernel]
       - raw_filesystem_apis: true
       - direct_console_writes: true
 
   - name: extensions
     role: "Concrete implementations of contracts."
-    depends_on: [contracts, core]
+    depends_on: [contracts, security-kernel, core]
     sibling_dependencies: permitted
     forbids:
       - direct_console_writes: true
       - raw_filesystem_apis_outside_storage_contract: true
 
   - name: wiring
-    role: "Composition root. Imports concrete extensions by name."
-    depends_on: [contracts, core, extensions]
+    role: "Composition root. Imports concrete extensions by name and binds the kernel."
+    depends_on: [contracts, security-kernel, core, extensions]
     composition_root: true
 
   - name: apps
@@ -565,6 +604,12 @@ laws:
     allowed_in: layer:apps/entry
     contract: logger
 
+  L11_kernel_guarantees_not_weakenable:
+    check: forbid_external_weakening_of_kernel_guarantee
+    scope: "* except layer:security-kernel"
+    severity: error
+    no_exception_path: true
+
 # ---- Safety constitution (§V) ----------------------------------------
 # These have no exception path. A violation here is a release blocker.
 
@@ -593,7 +638,12 @@ safety:
 
   S6_inbound_safety_injection:
     pipeline_position: before_llm
+    reachable_only_via: injected_safety_seam
     opt_out: forbidden
+    personality_safety_fields: narrowing_only
+    # Mechanical: no schema field disables the pipeline, so the rule is
+    # enforced by the personality drift gate, not by review.
+    enforcement: mechanical
 
   S7_boundary_errors_surface:
     typed_error: required
@@ -688,6 +738,7 @@ exception_policy:
     - missing_owner
     - unobservable_removal_condition
     - safety_constitution_carve_out
+    - kernel_guarantee_carve_out
     - pattern_wide_scope
   expiry:
     on_review_by_passed: surface_as_violation

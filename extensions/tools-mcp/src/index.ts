@@ -357,7 +357,7 @@ export class McpClient {
       return new StdioClientTransport({
         command,
         args: this._config.args,
-        env: mergedEnv,
+        env: await resolveEnvSecretRefs(this._config.name, mergedEnv, this._secrets),
         stderr: 'pipe',
       });
     }
@@ -1514,11 +1514,70 @@ export async function loadMcpConfig(storage: Storage): Promise<McpServerConfig[]
 }
 
 // ---------------------------------------------------------------------------
-// Token secret ref helper
+// Secret ref helpers
 // ---------------------------------------------------------------------------
 
 export function mcpTokenSecretRef(serverName: string): string {
   return `mcp/${serverName}/access_token`;
+}
+
+export function mcpEnvSecretRef(serverName: string, key: string): string {
+  return `mcp/${serverName}/env/${key}`;
+}
+
+/** Matches a value that is ENTIRELY a `${secrets:ref}` reference. */
+const ENV_SECRET_REF_RE = /^\$\{secrets:([^}]+)\}$/;
+
+/**
+ * Store each stdio `env` value in the SecretsResolver and return the
+ * `${secrets:ref}` map to persist in its place. G-SEC: `mcp.json` may
+ * reference a secret by name, never carry its value.
+ */
+export async function storeEnvSecrets(
+  serverName: string,
+  env: Record<string, string>,
+  secrets: SecretsResolver,
+): Promise<Record<string, string>> {
+  const refs: Record<string, string> = {};
+  for (const [key, value] of Object.entries(env)) {
+    const ref = mcpEnvSecretRef(serverName, key);
+    await secrets.set(ref, value);
+    refs[key] = `\${secrets:${ref}}`;
+  }
+  return refs;
+}
+
+/**
+ * Materialise `${secrets:ref}` env values at spawn time. Values that are not
+ * a reference (a literal from an older `mcp.json`, or an inherited process
+ * env var) pass through untouched.
+ */
+export async function resolveEnvSecretRefs(
+  serverName: string,
+  env: Record<string, string>,
+  secrets: SecretsResolver | undefined,
+): Promise<Record<string, string>> {
+  const resolved: Record<string, string> = {};
+  for (const [key, value] of Object.entries(env)) {
+    const ref = ENV_SECRET_REF_RE.exec(value)?.[1];
+    if (!ref) {
+      resolved[key] = value;
+      continue;
+    }
+    if (!secrets) {
+      throw new Error(
+        `MCP server '${serverName}': env '${key}' references secret '${ref}' but no secrets resolver is configured.`,
+      );
+    }
+    const secret = await secrets.get(ref);
+    if (secret === null) {
+      throw new Error(
+        `MCP server '${serverName}': secret '${ref}' not found. Run 'ethos secrets set ${ref} <value>' to store it.`,
+      );
+    }
+    resolved[key] = secret;
+  }
+  return resolved;
 }
 
 // Re-export schema rewrite helper for external use / testing

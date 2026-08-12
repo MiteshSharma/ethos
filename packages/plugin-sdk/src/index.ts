@@ -24,6 +24,7 @@ import type {
   PluginPageSpec,
   PluginRendererSpec,
   PostTurnEvaluator,
+  SecretsResolver,
   SlashCommandContext,
   Storage,
   StorageFactory,
@@ -37,6 +38,8 @@ import type {
   TtsProviderRegistry,
   VoidHooks,
 } from '@ethosagent/types';
+import { isValidSecretName } from '@ethosagent/types';
+import { pluginCredentialPrefix, pluginCredentialRef } from './credentials';
 import type { DiagnosticStore } from './diagnostic-store';
 import { PluginMonitorRunner } from './monitor-runner';
 
@@ -58,8 +61,35 @@ export function intersectToolGrants(
 // CredentialStorage — Storage + synchronous existence check
 // ---------------------------------------------------------------------------
 
+/**
+ * @deprecated Nothing in the SDK needs `existsSync` any more. `hasSecret` used
+ * to stat a credential file through it; credentials now live in the
+ * `SecretsResolver` vault and `hasSecret` answers from a primed in-memory set
+ * (see `PluginApiImpl.primeSecrets`). Kept because this package is published —
+ * removing an exported interface is a break for anyone who imported it. Pass a
+ * plain `Storage` instead; `PluginLoaderOptions.credentialStorage` accepts one.
+ */
 export interface CredentialStorage extends Storage {
   existsSync(path: string): boolean;
+}
+
+// ---------------------------------------------------------------------------
+// Plugin credentials
+// ---------------------------------------------------------------------------
+
+export interface PluginCredentialOptions {
+  /**
+   * The vault. G-SEC: the sole storage and retrieval path for this plugin's
+   * credential material. Refs are `plugins/<pluginId>/<key>`.
+   */
+  secrets: SecretsResolver;
+  /**
+   * Storage for the `<key>.meta` sidecar — an `updatedAt` timestamp, no
+   * credential material. The operator UI reads it for rotation hints.
+   */
+  storage: Storage;
+  /** `<dataDir>/plugins/<pluginId>` — the sidecars live under `credentials/`. */
+  basePath: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -208,15 +238,19 @@ export interface EthosPluginApi {
    *  `auxiliary.tts.provider: <name>` in config.yaml. */
   registerTtsProvider(name: string, factory: TtsProviderFactory): void;
 
-  /** Check whether a secret exists (synchronous). */
+  /** Check whether a secret exists (synchronous). Answered from the key set
+   *  loaded when the plugin was activated, plus every `setSecret` since — a
+   *  credential written by another process afterwards reads as absent until
+   *  the plugin reloads. `getSecret` is the authoritative check. */
   hasSecret(key: string): boolean;
 
   /** Read a secret value. Returns null if the secret doesn't exist or no
-   *  credential storage is configured. */
+   *  credential storage is configured. Throws if `key` is not a plain name
+   *  (alphanumeric, underscores, hyphens). */
   getSecret(key: string): Promise<string | null>;
 
   /** Write a secret value + metadata. Throws if no credential storage is
-   *  configured. */
+   *  configured, or if `key` is not a plain name. */
   setSecret(key: string, value: string): Promise<void>;
 
   /** Register a handler called after `setSecret`. Returns an unsubscribe fn. */
@@ -424,8 +458,11 @@ export class PluginApiImpl implements EthosPluginApi {
   private readonly registeredTtsProviders: string[] = [];
   private readonly registeredInjectors: ContextInjector[] = [];
   private readonly registeredPersonalities: string[] = [];
-  private readonly credentialStorage: CredentialStorage | null;
+  private readonly secrets: SecretsResolver | null;
+  private readonly credentialStorage: Storage | null;
   private readonly credentialBasePath: string | null;
+  /** Keys known to exist in the vault. Backs the synchronous `hasSecret`. */
+  private readonly knownSecretKeys = new Set<string>();
   private readonly credentialUpdateHandlers: Array<(key: string) => void | Promise<void>> = [];
   private readonly registeredFilters: ToolInvocationFilter[] = [];
   private readonly registeredEvaluators: PostTurnEvaluator[] = [];
@@ -457,10 +494,11 @@ export class PluginApiImpl implements EthosPluginApi {
   constructor(
     pluginId: string,
     registries: PluginRegistries,
-    credentialOpts?: { storage: CredentialStorage; basePath: string },
+    credentialOpts?: PluginCredentialOptions,
   ) {
     this.pluginId = pluginId;
     this.registries = registries;
+    this.secrets = credentialOpts?.secrets ?? null;
     this.credentialStorage = credentialOpts?.storage ?? null;
     this.credentialBasePath = credentialOpts?.basePath ?? null;
   }
@@ -624,32 +662,82 @@ export class PluginApiImpl implements EthosPluginApi {
   }
 
   // ---- Credential methods ------------------------------------------------
+  //
+  // Credential VALUES live only in the `SecretsResolver` vault, under
+  // `plugins/<pluginId>/<key>` (G-SEC — see ./credentials.ts). The only thing
+  // this class still writes to storage is the `<key>.meta` sidecar, which
+  // carries an `updatedAt` timestamp and nothing else.
 
-  private credPath(key: string): string {
-    return `${this.credentialBasePath}/credentials/${key}`;
+  /** Path of the non-secret metadata sidecar for `key`. */
+  private metaPath(key: string): string {
+    return `${this.credentialBasePath}/credentials/${key}.meta`;
   }
 
+  /**
+   * Load the keys this plugin already has in the vault so the synchronous
+   * `hasSecret` can answer without I/O. The host awaits this once, before it
+   * hands the api to the plugin — a constructor cannot await, and `hasSecret`
+   * is part of the frozen plugin contract, so it cannot become async.
+   */
+  async primeSecrets(): Promise<void> {
+    if (!this.secrets) return;
+    const prefix = pluginCredentialPrefix(this.pluginId);
+    const refs = await this.secrets.list(prefix);
+    this.knownSecretKeys.clear();
+    for (const ref of refs) {
+      const key = ref.slice(prefix.length);
+      if (isValidSecretName(key)) this.knownSecretKeys.add(key);
+    }
+  }
+
+  /** Drop `key` from the primed set — the host calls this after deleting a
+   *  credential out from under a loaded plugin. */
+  forgetSecret(key: string): void {
+    this.knownSecretKeys.delete(key);
+  }
+
+  /**
+   * Whether this plugin has `key` in the vault.
+   *
+   * Answers from the set primed at load plus every `setSecret` since, so it is
+   * synchronous. That leaves a staleness window: a credential written by
+   * ANOTHER process (the `ethos plugin credentials --set` CLI, or a second
+   * daemon) after this plugin loaded reads as absent until the plugin is
+   * reloaded. `getSecret` is async and always authoritative — treat a `false`
+   * here as "not known to be set", not as proof of absence.
+   */
   hasSecret(key: string): boolean {
-    if (!this.credentialStorage || !this.credentialBasePath) return false;
-    return this.credentialStorage.existsSync(this.credPath(key));
+    return this.knownSecretKeys.has(key);
   }
 
   async getSecret(key: string): Promise<string | null> {
-    if (!this.credentialStorage || !this.credentialBasePath) return null;
-    return this.credentialStorage.read(this.credPath(key));
+    if (!this.secrets) return null;
+    return this.secrets.get(pluginCredentialRef(this.pluginId, key));
   }
 
   async setSecret(key: string, value: string): Promise<void> {
-    if (!this.credentialStorage || !this.credentialBasePath) {
+    if (!this.secrets || !this.credentialStorage || !this.credentialBasePath) {
       throw new Error(`Plugin "${this.pluginId}" has no credential storage configured`);
     }
+    // Throws on a key that is not a plain name — before anything is written,
+    // so a traversal-shaped key cannot land somewhere else instead.
+    const ref = pluginCredentialRef(this.pluginId, key);
+    await this.secrets.set(ref, value);
+
     const dir = `${this.credentialBasePath}/credentials`;
     await this.credentialStorage.mkdir(dir);
-    await this.credentialStorage.writeAtomic(this.credPath(key), value);
     await this.credentialStorage.writeAtomic(
-      `${this.credPath(key)}.meta`,
+      this.metaPath(key),
       JSON.stringify({ updatedAt: new Date().toISOString() }),
+      { mode: 0o600 },
     );
+    // Idempotent dir lockdown, applied on every set so a directory created
+    // before this (or by another writer) ends up owner-only too — the listing
+    // still reveals WHICH credentials a plugin has. Tolerated to fail on
+    // backends with no POSIX permissions.
+    await this.credentialStorage.chmod(dir, 0o700).catch(() => {});
+
+    this.knownSecretKeys.add(key);
     await this.fireCredentialUpdate(key);
   }
 
@@ -1215,6 +1303,12 @@ export type {
   VoidHooks,
 } from '@ethosagent/types';
 export { ContextStore } from './context-registry';
+export {
+  type LegacyCredentialMigrationOptions,
+  migrateLegacyPluginCredentials,
+  pluginCredentialPrefix,
+  pluginCredentialRef,
+} from './credentials';
 export { DiagnosticStore } from './diagnostic-store';
 export { LocalOAuthServer } from './local-oauth-server';
 export { OAuthCoordinatorImpl } from './oauth-coordinator';

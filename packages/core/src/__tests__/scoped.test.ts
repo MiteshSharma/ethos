@@ -1,6 +1,9 @@
+import { mkdtemp, realpath, rm, symlink, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import type { NetworkPolicy } from '@ethosagent/safety-network';
 import { safeFetch } from '@ethosagent/safety-network';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ScopedFetchImpl } from '../scoped/scoped-fetch';
 import { ScopedFsImpl } from '../scoped/scoped-fs';
 import { ScopedProcessImpl } from '../scoped/scoped-process';
@@ -249,6 +252,90 @@ describe('ScopedFsImpl', () => {
     const storage = makeStorage();
     const fs = new ScopedFsImpl(storage, new Set(['/data']), new Set([]));
     await expect(fs.listEntries('/tmp')).rejects.toThrow('PATH_NOT_REACHABLE');
+  });
+
+  // G11 — symbolic containment. The layers above are lexical, and
+  // normalize(resolve()) cannot see a symlink. These cases run against a real
+  // temp directory (the Storage itself stays mocked — only checkReach touches
+  // the filesystem) because a symlink is a filesystem fact, not a string.
+  describe('symbolic containment', () => {
+    let root: string;
+    let outside: string;
+
+    beforeEach(async () => {
+      // realpath: on macOS /var is a symlink to /private/var, and the allow
+      // prefixes must share canonical form with the request paths for the
+      // lexical layer. Everything below `root` is what the walk inspects.
+      root = await realpath(await mkdtemp(join(tmpdir(), 'ethos-symlink-')));
+      outside = await realpath(await mkdtemp(join(tmpdir(), 'ethos-outside-')));
+      await writeFile(join(root, 'inside.txt'), 'mine');
+      await writeFile(join(outside, 'secret.txt'), 'theirs');
+    });
+
+    afterEach(async () => {
+      await rm(root, { recursive: true, force: true });
+      await rm(outside, { recursive: true, force: true });
+    });
+
+    it('rejects a symlink inside the reach that points outside it', async () => {
+      await symlink(join(outside, 'secret.txt'), join(root, 'link.txt'));
+      const fs = new ScopedFsImpl(makeStorage(), new Set([root]), new Set([]));
+      await expect(fs.read(join(root, 'link.txt'))).rejects.toThrow(
+        /PATH_NOT_REACHABLE:.*symbolic link/,
+      );
+    });
+
+    it('rejects a symlinked parent directory reached through an ordinary leaf', async () => {
+      await symlink(outside, join(root, 'sub'));
+      const fs = new ScopedFsImpl(makeStorage(), new Set([root]), new Set([]));
+      await expect(fs.read(join(root, 'sub', 'secret.txt'))).rejects.toThrow(
+        /PATH_NOT_REACHABLE:.*symbolic link/,
+      );
+    });
+
+    it('allows a symlink whose target stays inside the reach, unrewritten', async () => {
+      // The check does not rewrite the caller's path — Storage still receives
+      // what was asked for. checkReach decides reachability; it is not a
+      // canonicalizer, and rewriting would change what every consumer sees.
+      await symlink(join(root, 'inside.txt'), join(root, 'alias.txt'));
+      const storage = makeStorage();
+      storage.read.mockResolvedValue('mine');
+      const fs = new ScopedFsImpl(storage, new Set([root]), new Set([]));
+      await expect(fs.read(join(root, 'alias.txt'))).resolves.toBe('mine');
+      expect(storage.read).toHaveBeenCalledWith(join(root, 'alias.txt'));
+    });
+
+    it('allows a write to a path that does not exist yet (ENOENT is not a symlink)', async () => {
+      const storage = makeStorage();
+      storage.write.mockResolvedValue(undefined);
+      const fs = new ScopedFsImpl(storage, new Set([]), new Set([root]));
+      await fs.write(join(root, 'nested', 'new.txt'), 'body');
+      expect(storage.write).toHaveBeenCalledWith(join(root, 'nested', 'new.txt'), 'body');
+    });
+
+    it('re-applies the deny floor to the resolved target, not just the link path', async () => {
+      // The allowlist covers the link AND its target; only the floor rejects.
+      const vault = join(outside, 'vault');
+      await symlink(vault, join(root, 'shortcut'));
+      const fs = new ScopedFsImpl(
+        makeStorage(),
+        new Set([root, outside]),
+        new Set([]),
+        [vault], // always-deny floor
+      );
+      await expect(fs.read(join(root, 'shortcut'))).rejects.toThrow(
+        /PATH_NOT_REACHABLE:.*symbolic link/,
+      );
+    });
+
+    it('refuses a symlink cycle instead of following it forever', async () => {
+      await symlink(join(root, 'b'), join(root, 'a'));
+      await symlink(join(root, 'a'), join(root, 'b'));
+      const fs = new ScopedFsImpl(makeStorage(), new Set([root]), new Set([]));
+      await expect(fs.read(join(root, 'a'))).rejects.toThrow(
+        /PATH_NOT_REACHABLE:.*too many symbolic links/,
+      );
+    });
   });
 });
 

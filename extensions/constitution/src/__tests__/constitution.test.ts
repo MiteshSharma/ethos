@@ -98,6 +98,10 @@ function createTestSafety(): AgentSafety {
     },
     scopedStorageFactory: (base, scope) =>
       new ScopedStorage(base, { ...scope, alwaysDeny: defaultAlwaysDeny() }),
+    approvalPosture: {
+      kind: 'ungated',
+      reason: 'test fixture — no approval policy is registered',
+    },
   };
 }
 

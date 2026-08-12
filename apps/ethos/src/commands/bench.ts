@@ -291,7 +291,7 @@ export async function runBench(args: string[]): Promise<void> {
   // every assembled prompt, so it belongs in the static floor (D8: same
   // number wiring computes; the full prelude is the default posture — a
   // per-model compact-prelude profile would shave a few hundred chars).
-  const { INJECTION_DEFENSE_PRELUDE } = await import('@ethosagent/safety-injection');
+  const { INJECTION_DEFENSE_PRELUDE } = await import('@ethosagent/wiring/security-kernel');
   const staticRows: StaticMeasurement[] = [];
   for (const personality of reg.list()) {
     const soulMd = await reg.readSoulMd(personality.id);

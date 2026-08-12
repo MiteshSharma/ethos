@@ -681,7 +681,6 @@ describe('lossless update — full config round-trip', () => {
     '      - evil.com',
     '    allow_private_urls: true',
     '  injectionDefense:',
-    '    enabled: false',
     '    classifier:',
     '      alwaysCallLLM: true',
     '    postReadDowngrade:',

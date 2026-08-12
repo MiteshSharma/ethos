@@ -54,6 +54,9 @@ importers:
       vitest:
         specifier: ^4.1.10
         version: 4.1.10(@types/node@22.19.19)(vite@6.4.3(@types/node@22.19.19)(jiti@2.7.0)(lightningcss@1.32.0)(terser@5.48.0)(tsx@4.23.9)(yaml@2.9.0))
+      yaml:
+        specifier: ^2.9.0
+        version: 2.9.0
 
   apps/acp-server:
     dependencies:
@@ -302,18 +305,9 @@ importers:
       '@ethosagent/request-dump':
         specifier: workspace:*
         version: link:../../extensions/request-dump
-      '@ethosagent/safety-channel':
-        specifier: workspace:*
-        version: link:../../packages/safety/channel
-      '@ethosagent/safety-injection':
-        specifier: workspace:*
-        version: link:../../packages/safety/injection
       '@ethosagent/safety-redact':
         specifier: workspace:*
         version: link:../../packages/safety/redact
-      '@ethosagent/safety-scanner':
-        specifier: workspace:*
-        version: link:../../packages/safety/scanner
       '@ethosagent/secrets-aws':
         specifier: workspace:*
         version: link:../../extensions/secrets-aws
@@ -521,6 +515,9 @@ importers:
       '@ethosagent/batch-runner':
         specifier: workspace:*
         version: link:../../extensions/batch-runner
+      '@ethosagent/config':
+        specifier: workspace:*
+        version: link:../../packages/config
       '@ethosagent/core':
         specifier: workspace:*
         version: link:../../packages/core
@@ -1595,6 +1592,9 @@ importers:
       '@ethosagent/logger':
         specifier: workspace:*
         version: link:../../packages/logger
+      '@ethosagent/storage-fs':
+        specifier: workspace:*
+        version: link:../../packages/storage-fs
       '@ethosagent/types':
         specifier: workspace:*
         version: link:../../packages/types
@@ -1681,6 +1681,9 @@ importers:
       '@ethosagent/agent-mesh':
         specifier: workspace:*
         version: link:../agent-mesh
+      '@ethosagent/core':
+        specifier: workspace:*
+        version: link:../../packages/core
       '@ethosagent/types':
         specifier: workspace:*
         version: link:../../packages/types
@@ -1752,6 +1755,9 @@ importers:
 
   extensions/tools-mcp:
     dependencies:
+      '@ethosagent/core':
+        specifier: workspace:*
+        version: link:../../packages/core
       '@ethosagent/logger':
         specifier: workspace:*
         version: link:../../packages/logger
@@ -2268,12 +2274,18 @@ importers:
       '@ethosagent/request-dump':
         specifier: workspace:*
         version: link:../../extensions/request-dump
+      '@ethosagent/safety-channel':
+        specifier: workspace:*
+        version: link:../safety/channel
       '@ethosagent/safety-injection':
         specifier: workspace:*
         version: link:../safety/injection
       '@ethosagent/safety-network':
         specifier: workspace:*
         version: link:../safety/network
+      '@ethosagent/safety-scanner':
+        specifier: workspace:*
+        version: link:../safety/scanner
       '@ethosagent/safety-watcher':
         specifier: workspace:*
         version: link:../safety/watcher

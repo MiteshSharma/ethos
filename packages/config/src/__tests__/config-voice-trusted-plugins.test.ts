@@ -1,5 +1,5 @@
 import { join } from 'node:path';
-import { InMemoryStorage } from '@ethosagent/storage-fs';
+import { InMemorySecretsResolver, InMemoryStorage } from '@ethosagent/storage-fs';
 import { describe, expect, it } from 'vitest';
 import { type EthosConfig, ethosDir, readRawConfig, writeConfig } from '../index';
 
@@ -60,7 +60,7 @@ describe('voice.trustedPlugins', () => {
       };
       const storage = new InMemoryStorage();
       await storage.mkdir(ethosDir());
-      await writeConfig(storage, original);
+      await writeConfig(storage, original, new InMemorySecretsResolver());
       const reloaded = await readRawConfig(storage);
       expect(reloaded?.voice?.trustedPlugins).toEqual(trustedPlugins);
     }
@@ -86,7 +86,7 @@ describe('auxiliary.asr/tts command templates', () => {
 
     const storage = new InMemoryStorage();
     await storage.mkdir(ethosDir());
-    await writeConfig(storage, cfg);
+    await writeConfig(storage, cfg, new InMemorySecretsResolver());
     const reloaded = await readRawConfig(storage);
     expect(reloaded?.auxiliary?.asr?.command).toBe(cfg.auxiliary?.asr?.command);
     expect(reloaded?.auxiliary?.tts?.command).toBe(cfg.auxiliary?.tts?.command);

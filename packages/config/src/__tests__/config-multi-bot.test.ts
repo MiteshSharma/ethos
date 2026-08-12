@@ -1,5 +1,5 @@
 import { join } from 'node:path';
-import { InMemoryStorage } from '@ethosagent/storage-fs';
+import { InMemorySecretsResolver, InMemoryStorage } from '@ethosagent/storage-fs';
 import { describe, expect, it } from 'vitest';
 import {
   applyPlatformShim,
@@ -7,12 +7,17 @@ import {
   type EthosConfig,
   ethosDir,
   loadConfigStrict,
+  readConfig,
   readRawConfig,
   validateBotBindings,
   writeConfig,
 } from '../index';
 
 // Multi-bot routing schema (plan/phases/multi_bot_routing.md, Phase 0).
+
+function secretRef(path: string): string {
+  return ['${', 'secrets:', path, '}'].join('');
+}
 
 async function load(yaml: string): Promise<EthosConfig> {
   const storage = new InMemoryStorage();
@@ -482,9 +487,24 @@ describe('writeConfig round-trips the new list shapes', () => {
       },
       teams: { eng: { autoStop: true } },
     };
-    await writeConfig(storage, original);
+    const secrets = new InMemorySecretsResolver();
+    await writeConfig(storage, original, secrets);
 
-    const roundTripped = await readRawConfig(storage);
+    // Every bot token is externalized; the file keeps only the refs, keyed by
+    // the entry's stable botKey (explicit `id`, else derived from the token)
+    // so reordering the array can't repoint one entry's ref at another's.
+    const onDisk = await readRawConfig(storage);
+    const bot1Key = deriveBotKey({ token: 't2' });
+    const appKey = deriveBotKey({ botToken: 'xoxb' });
+    expect(onDisk?.telegram?.bots[0]?.token).toBe(secretRef('telegram/bots/bot-a/token'));
+    expect(onDisk?.telegram?.bots[1]?.token).toBe(secretRef(`telegram/bots/${bot1Key}/token`));
+    expect(onDisk?.slack?.apps[0]?.botToken).toBe(secretRef(`slack/apps/${appKey}/botToken`));
+    expect(onDisk?.slack?.apps[0]?.appToken).toBe(secretRef(`slack/apps/${appKey}/appToken`));
+    expect(onDisk?.slack?.apps[0]?.signingSecret).toBe(
+      secretRef(`slack/apps/${appKey}/signingSecret`),
+    );
+
+    const roundTripped = await readConfig(storage, secrets);
     expect(roundTripped?.telegram).toEqual(original.telegram);
     expect(roundTripped?.slack).toEqual(original.slack);
     expect(roundTripped?.teams).toEqual(original.teams);

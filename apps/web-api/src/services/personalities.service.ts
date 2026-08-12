@@ -1,5 +1,6 @@
 import { join } from 'node:path';
 import {
+  type CharacterSheetBoundary,
   type CharacterSheetModelFit,
   type CharacterSheetScriptSurface,
   type CreatePersonalityInput,
@@ -103,6 +104,13 @@ export interface PersonalitiesServiceOptions {
    * sheet renders without the line.
    */
   scriptSurface?: (personalityId: string) => Promise<CharacterSheetScriptSurface | null>;
+  /**
+   * §4.7 — declared network reach for the sheet's `## Boundary` section. A
+   * closure over core's `toolsDeclaringNetwork` against the live tool registry.
+   * Absent, resolving `null`, or throwing → the section renders without an
+   * inapplicability verdict for reach it cannot see.
+   */
+  boundary?: (personalityId: string) => Promise<CharacterSheetBoundary | null>;
 }
 
 export class PersonalitiesService {
@@ -158,6 +166,16 @@ export class PersonalitiesService {
         scriptSurface = undefined;
       }
     }
+    // §4.7 — declared network reach for the `## Boundary` section. Same
+    // fail-soft posture as the seams above: no seam, no inapplicability claim.
+    let boundary: CharacterSheetBoundary | undefined;
+    if (this.opts.boundary) {
+      try {
+        boundary = (await this.opts.boundary(id)) ?? undefined;
+      } catch {
+        boundary = undefined;
+      }
+    }
     // skill-declared-renderers Lane E — reuse `renderers()` rather than a second
     // path to the injector, so the sheet's claim and the RPC the web renderer
     // gates on are literally the same call. Already fail-closed to `[]`.
@@ -172,6 +190,7 @@ export class PersonalitiesService {
           modelFit,
           scriptSurface,
           renderers,
+          boundary,
         ),
         posture: null,
       };
@@ -192,6 +211,7 @@ export class PersonalitiesService {
         modelFit,
         scriptSurface,
         renderers,
+        boundary,
       ),
       posture,
     };

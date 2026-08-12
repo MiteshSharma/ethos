@@ -1,5 +1,5 @@
 import { join } from 'node:path';
-import { InMemoryStorage } from '@ethosagent/storage-fs';
+import { InMemorySecretsResolver, InMemoryStorage } from '@ethosagent/storage-fs';
 import { describe, expect, it } from 'vitest';
 import { type EthosConfig, ethosDir, readRawConfig, writeConfig } from '../index';
 
@@ -73,7 +73,7 @@ describe('auxiliary voice provider knobs', () => {
 
     const storage = new InMemoryStorage();
     await storage.mkdir(ethosDir());
-    await writeConfig(storage, cfg);
+    await writeConfig(storage, cfg, new InMemorySecretsResolver());
     const reread = await readRawConfig(storage);
 
     expect(reread?.auxiliary?.asr?.timeout).toBe(300);

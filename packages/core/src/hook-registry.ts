@@ -1,4 +1,10 @@
-import type { ClaimingHooks, HookRegistry, ModifyingHooks, VoidHooks } from '@ethosagent/types';
+import type {
+  ClaimingHooks,
+  HookName,
+  HookRegistry,
+  ModifyingHooks,
+  VoidHooks,
+} from '@ethosagent/types';
 
 type AnyHandler = (...args: unknown[]) => Promise<unknown>;
 
@@ -131,6 +137,16 @@ export class DefaultHookRegistry implements HookRegistry {
       }
     }
     return { handled: false } as ClaimingHooks[K][1];
+  }
+
+  hasHandlers(model: 'void' | 'modifying' | 'claiming', name: HookName): boolean {
+    const map =
+      model === 'void'
+        ? this.voidHandlers
+        : model === 'modifying'
+          ? this.modifyingHandlers
+          : this.claimingHandlers;
+    return (map.get(name) ?? []).length > 0;
   }
 
   unregisterPlugin(pluginId: string): void {

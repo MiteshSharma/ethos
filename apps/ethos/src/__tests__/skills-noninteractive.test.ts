@@ -7,8 +7,8 @@
 
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import type { ScanFinding } from '@ethosagent/safety-scanner';
 import { EthosError } from '@ethosagent/types';
+import type { ScanFinding } from '@ethosagent/wiring/security-kernel';
 import { describe, expect, it } from 'vitest';
 import { resolveYellowFindings } from '../commands/skills';
 

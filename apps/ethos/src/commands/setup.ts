@@ -143,11 +143,11 @@ export async function runSetup(startAtStep?: WizardStepId): Promise<SetupResult 
       emailSmtpPort: answers.emailSmtpPort,
     };
 
-    await writeConfig(storage, config);
+    await writeConfig(storage, config, secrets);
     await scaffoldEthosDir(storage);
 
     if (answers.rotationKeys && answers.rotationKeys.length > 0) {
-      await writeKeys(storage, answers.rotationKeys);
+      await writeKeys(storage, answers.rotationKeys, secrets);
     }
 
     await recordSetupFunnel(config, 'tui');
@@ -356,9 +356,9 @@ async function runReadlineFallback({
 
   rl.close();
 
+  const secrets = await getSecretsResolver();
   let apiKeyRef = '';
   if (apiKey) {
-    const secrets = await getSecretsResolver();
     const ref = `providers/${provider}/apiKey`;
     await secrets.set(ref, apiKey);
     apiKeyRef = `\${secrets:${ref}}`;
@@ -372,7 +372,7 @@ async function runReadlineFallback({
     baseUrl,
     apiVersion,
   };
-  await writeConfig(storage, config);
+  await writeConfig(storage, config, secrets);
   await scaffoldEthosDir(storage);
 
   console.log(`\n${c.green}✓ Config saved to ~/.ethos/config.yaml${c.reset}`);

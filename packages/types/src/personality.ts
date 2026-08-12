@@ -68,12 +68,13 @@ export interface PersonalitySafetyConfig {
    * values when absent, so a personality with no `injectionDefense` block
    * still gets provenance wrapping on `outputIsUntrusted` tools and a 2-turn
    * post-read downgrade for the default dangerous-tool list.
+   *
+   * There is deliberately no master switch. ARCHITECTURE.md §V S6 makes the
+   * inbound safety pipeline non-opt-out-able by personality, channel, or
+   * tool; these knobs may only narrow behaviour within it, never remove it.
    */
   injectionDefense?: {
-    /** Master switch. Default: true. Setting `false` skips wrapping, pattern
-     *  check, and post-read downgrade — used by tests and headless tooling. */
-    enabled?: boolean;
-    /** Tier-2 LLM classifier policy. Tier-1 regex always runs when enabled. */
+    /** Tier-2 LLM classifier policy. Tier-1 regex always runs. */
     classifier?: {
       /**
        * Force the LLM classifier to fire on every `outputIsUntrusted` result

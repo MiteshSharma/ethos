@@ -3,8 +3,10 @@ import {
   type EthosConfig,
   type ProviderConfig,
   readRawConfig,
+  secretRefFromValue,
   writeConfig,
 } from '@ethosagent/config';
+import type { SecretsResolver } from '@ethosagent/types';
 import { getSecretsResolver, getStorage } from '../wiring';
 
 // `ethos fallback` — interactive editor for the `providers:` chain in
@@ -148,7 +150,7 @@ async function addEntry(config: EthosConfig): Promise<void> {
     chain.push(entry);
 
     const next: EthosConfig = { ...config, providers: chain };
-    await writeConfig(getStorage(), next);
+    await writeConfig(getStorage(), next, secrets);
 
     console.log(`\n${c.green}✓ Added fallback ${idx + 1}: ${provider}${c.reset}`);
     console.log(
@@ -174,20 +176,24 @@ async function removeEntry(config: EthosConfig, idx: number): Promise<void> {
 
   chain.splice(idx, 1);
 
-  // Best-effort cleanup of the underlying secret. The ref index doesn't
-  // shift even though the array did — operators with multiple removes
-  // may want to manually `ethos secrets list | grep providers/` to
-  // audit dangling refs. We intentionally don't renumber: the original
-  // ref strings in other entries would mis-resolve otherwise.
-  const ref = extractSecretRef(removed.apiKey);
-  if (ref) {
-    await (await getSecretsResolver()).delete(ref);
-  }
-
+  // Config first, vault second. The reverse order leaves config referencing
+  // material that is already gone whenever the write fails; this way the worst
+  // case is vault litter.
+  const secrets = await getSecretsResolver();
   const next: EthosConfig = { ...config, providers: chain.length > 0 ? chain : undefined };
-  await writeConfig(getStorage(), next);
+  await writeConfig(getStorage(), next, secrets);
 
   console.log(`${c.green}✓ Removed fallback ${idx + 1} (${removed.provider})${c.reset}`);
+
+  // Cleanup of the underlying secret. The ref index doesn't shift even though
+  // the array did — we intentionally don't renumber: the original ref strings
+  // in the surviving entries would mis-resolve otherwise. That also means a
+  // later `add` can mint the ref a survivor already holds, so drop it only
+  // when no survivor still points at it.
+  const ref = secretRefFromValue(removed.apiKey);
+  if (ref && !chain.some((e) => secretRefFromValue(e.apiKey) === ref)) {
+    await deleteSecretMaterial(secrets, ref);
+  }
 }
 
 async function clearChain(config: EthosConfig): Promise<void> {
@@ -197,23 +203,45 @@ async function clearChain(config: EthosConfig): Promise<void> {
     return;
   }
 
-  // Delete all underlying secrets we wrote.
+  // Config first, vault second — same order as `remove`.
   const secrets = await getSecretsResolver();
-  for (const entry of chain) {
-    const ref = extractSecretRef(entry.apiKey);
-    if (ref) {
-      await secrets.delete(ref).catch(() => {
-        // ignore — operator may have rotated secrets out-of-band
-      });
-    }
-  }
-
   const next: EthosConfig = { ...config, providers: undefined };
-  await writeConfig(getStorage(), next);
+  await writeConfig(getStorage(), next, secrets);
 
   console.log(
     `${c.green}✓ Cleared ${chain.length} fallback provider${chain.length === 1 ? '' : 's'}${c.reset}`,
   );
+
+  // Delete all underlying secrets we wrote. Deduped: two entries can hold the
+  // same ref, and no entry survives the clear to keep any of them alive.
+  const refs = new Set<string>();
+  for (const entry of chain) {
+    const ref = secretRefFromValue(entry.apiKey);
+    if (ref) refs.add(ref);
+  }
+  for (const ref of refs) {
+    await deleteSecretMaterial(secrets, ref);
+  }
+}
+
+/**
+ * Drop one vault entry whose config reference is already gone.
+ *
+ * Non-fatal — config.yaml is the source of truth and is already written, so the
+ * removal stands. Surfaced rather than swallowed (ARCHITECTURE.md §V S7)
+ * because what is left behind is credential material, and the operator gets the
+ * exact command to clean it up.
+ */
+async function deleteSecretMaterial(secrets: SecretsResolver, ref: string): Promise<void> {
+  try {
+    await secrets.delete(ref);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.log(
+      `${c.red}⚠ Stored key material was not deleted:${c.reset} ${msg}\n` +
+        `${c.dim}  Remove it with: ethos secrets remove ${ref}${c.reset}`,
+    );
+  }
 }
 
 function ask(rl: Interface, prompt: string): Promise<string> {
@@ -228,9 +256,4 @@ function maskRef(value: string | undefined): string {
   // Raw value — show only the last 4 chars.
   if (value.length <= 8) return `${c.yellow}****${c.reset} (plaintext)`;
   return `${c.yellow}****${value.slice(-4)}${c.reset}${c.dim} (plaintext — migrate to secrets resolver)${c.reset}`;
-}
-
-function extractSecretRef(value: string): string | null {
-  const m = value.match(/^\$\{secrets:([^}]+)\}$/);
-  return m?.[1] ?? null;
 }

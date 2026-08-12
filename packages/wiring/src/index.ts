@@ -1372,3 +1372,14 @@ export {
 // ---------------------------------------------------------------------------
 
 export { createOAuthService } from './oauth-factory';
+
+// ---------------------------------------------------------------------------
+// Security kernel — passthrough for apps (ARCHITECTURE.md §II, §III Law 5)
+//
+// The list lives in ./security-kernel so a lazily-loaded CLI command can import
+// it WITHOUT the composition root's import graph (a barrel import costs ~7s and
+// loads every extension). Re-exported here so surfaces already on the barrel —
+// gateway, serve — keep one import.
+// ---------------------------------------------------------------------------
+
+export * from './security-kernel';

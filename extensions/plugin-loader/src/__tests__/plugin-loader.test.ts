@@ -8,8 +8,8 @@ import {
   DefaultPersonalityRegistry,
   DefaultToolRegistry,
 } from '@ethosagent/core';
-import type { CredentialStorage, PluginRegistries } from '@ethosagent/plugin-sdk';
-import { FsStorage, InMemoryStorage } from '@ethosagent/storage-fs';
+import type { PluginRegistries } from '@ethosagent/plugin-sdk';
+import { FsStorage, InMemorySecretsResolver, InMemoryStorage } from '@ethosagent/storage-fs';
 import type { ContextInjector, Logger } from '@ethosagent/types';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { PluginLoader } from '../index';
@@ -208,7 +208,8 @@ export async function deactivate() {}
       const credStorage = new InMemoryStorage();
       const loader = new PluginLoader(registries, {
         storage: new FsStorage(),
-        credentialStorage: credStorage as CredentialStorage,
+        credentialStorage: credStorage,
+        secrets: new InMemorySecretsResolver(),
         dataDir: testDir,
       });
 
@@ -217,12 +218,14 @@ export async function deactivate() {}
       );
     });
 
-    it('setCredential writes credential and meta files via PluginApiImpl', async () => {
+    it('setCredential puts the value in the vault and only meta on disk', async () => {
       const registries = makeRegistries();
       const credStorage = new InMemoryStorage();
+      const secrets = new InMemorySecretsResolver();
       const loader = new PluginLoader(registries, {
         storage: new FsStorage(),
-        credentialStorage: credStorage as CredentialStorage,
+        credentialStorage: credStorage,
+        secrets,
         dataDir: '/test-data',
       });
 
@@ -232,9 +235,11 @@ export async function deactivate() {}
 
       await loader.setCredential('cred-test', 'API_KEY', 'my-secret-value');
 
-      // Verify the credential file was written
-      const credValue = await credStorage.read('/test-data/plugins/cred-test/credentials/API_KEY');
-      expect(credValue).toBe('my-secret-value');
+      // G-SEC — the value is in the vault, and nowhere on disk.
+      expect(await secrets.get('plugins/cred-test/API_KEY')).toBe('my-secret-value');
+      expect(await credStorage.exists('/test-data/plugins/cred-test/credentials/API_KEY')).toBe(
+        false,
+      );
 
       // Verify the meta file was written
       const metaRaw = await credStorage.read(
@@ -248,9 +253,11 @@ export async function deactivate() {}
     it('getCredentialMeta returns null for unset credential', async () => {
       const registries = makeRegistries();
       const credStorage = new InMemoryStorage();
+      const secrets = new InMemorySecretsResolver();
       const loader = new PluginLoader(registries, {
         storage: new FsStorage(),
-        credentialStorage: credStorage as CredentialStorage,
+        credentialStorage: credStorage,
+        secrets,
         dataDir: '/test-data',
       });
 
@@ -261,9 +268,11 @@ export async function deactivate() {}
     it('getCredentialMeta returns updatedAt after setCredential', async () => {
       const registries = makeRegistries();
       const credStorage = new InMemoryStorage();
+      const secrets = new InMemorySecretsResolver();
       const loader = new PluginLoader(registries, {
         storage: new FsStorage(),
-        credentialStorage: credStorage as CredentialStorage,
+        credentialStorage: credStorage,
+        secrets,
         dataDir: '/test-data',
       });
 
@@ -282,9 +291,11 @@ export async function deactivate() {}
     it('clearCredential removes credential and meta files', async () => {
       const registries = makeRegistries();
       const credStorage = new InMemoryStorage();
+      const secrets = new InMemorySecretsResolver();
       const loader = new PluginLoader(registries, {
         storage: new FsStorage(),
-        credentialStorage: credStorage as CredentialStorage,
+        credentialStorage: credStorage,
+        secrets,
         dataDir: '/test-data',
       });
 
@@ -294,18 +305,14 @@ export async function deactivate() {}
       await loader.setCredential('clear-test', 'SECRET', 'value');
 
       // Verify they exist
-      expect(await credStorage.exists('/test-data/plugins/clear-test/credentials/SECRET')).toBe(
-        true,
-      );
+      expect(await secrets.get('plugins/clear-test/SECRET')).toBe('value');
       expect(
         await credStorage.exists('/test-data/plugins/clear-test/credentials/SECRET.meta'),
       ).toBe(true);
 
       await loader.clearCredential('clear-test', 'SECRET');
 
-      expect(await credStorage.exists('/test-data/plugins/clear-test/credentials/SECRET')).toBe(
-        false,
-      );
+      expect(await secrets.get('plugins/clear-test/SECRET')).toBeNull();
       expect(
         await credStorage.exists('/test-data/plugins/clear-test/credentials/SECRET.meta'),
       ).toBe(false);
@@ -314,9 +321,11 @@ export async function deactivate() {}
     it('listCredentialKeys merges manifest declarations with storage state', async () => {
       const registries = makeRegistries();
       const credStorage = new InMemoryStorage();
+      const secrets = new InMemorySecretsResolver();
       const loader = new PluginLoader(registries, {
         storage: new FsStorage(),
-        credentialStorage: credStorage as CredentialStorage,
+        credentialStorage: credStorage,
+        secrets,
         dataDir: '/test-data',
       });
 
@@ -355,12 +364,9 @@ export async function deactivate() {}
       // Set only one of the declared credentials
       await loader.setCredential('list-test', 'API_KEY', 'secret-value');
 
-      // Also write an undeclared credential directly to credStorage
+      // Also write an undeclared credential straight into the vault
+      await secrets.set('plugins/list-test/EXTRA_TOKEN', 'extra-value');
       await credStorage.mkdir('/test-data/plugins/list-test/credentials');
-      await credStorage.write(
-        '/test-data/plugins/list-test/credentials/EXTRA_TOKEN',
-        'extra-value',
-      );
       await credStorage.write(
         '/test-data/plugins/list-test/credentials/EXTRA_TOKEN.meta',
         JSON.stringify({ updatedAt: '2026-01-01T00:00:00.000Z' }),
@@ -394,12 +400,67 @@ export async function deactivate() {}
       expect(extra?.updatedAt).toBe('2026-01-01T00:00:00.000Z');
     });
 
+    it('migrates a pre-vault plaintext credential on first touch', async () => {
+      // The upgrade case: a plugin installed before credentials moved into the
+      // vault. Its credential must keep working with no operator action, and
+      // the plaintext copy must not survive the migration.
+      const registries = makeRegistries();
+      const credStorage = new InMemoryStorage();
+      const secrets = new InMemorySecretsResolver();
+      const loader = new PluginLoader(registries, {
+        storage: new FsStorage(),
+        credentialStorage: credStorage,
+        secrets,
+        dataDir: '/test-data',
+      });
+
+      const legacyDir = '/test-data/plugins/legacy-test/credentials';
+      await credStorage.mkdir(legacyDir);
+      await credStorage.write(`${legacyDir}/API_KEY`, 'sk-from-before');
+
+      expect(await loader.getCredentialValue('legacy-test', 'API_KEY')).toBe('sk-from-before');
+      expect(await secrets.get('plugins/legacy-test/API_KEY')).toBe('sk-from-before');
+      expect(await credStorage.exists(`${legacyDir}/API_KEY`)).toBe(false);
+    });
+
+    it('a migrated credential is visible to hasSecret when the plugin loads', async () => {
+      const registries = makeRegistries();
+      const credStorage = new InMemoryStorage();
+      const secrets = new InMemorySecretsResolver();
+      const loader = new PluginLoader(registries, {
+        storage: new FsStorage(),
+        credentialStorage: credStorage,
+        secrets,
+        dataDir: '/test-data',
+      });
+
+      const legacyDir = '/test-data/plugins/prime-test/credentials';
+      await credStorage.mkdir(legacyDir);
+      await credStorage.write(`${legacyDir}/TOKEN`, 'tok');
+
+      // The plugin asks synchronously during activate() — the only moment that
+      // proves priming happened before the api was handed over.
+      await writePlugin(
+        testDir,
+        'prime-test',
+        `export async function activate(api) {
+          globalThis.__primeTestHasSecret = api.hasSecret('TOKEN');
+        }`,
+      );
+      await loader.loadFromDirectory(testDir);
+
+      expect(loader.isLoaded('prime-test')).toBe(true);
+      expect((globalThis as Record<string, unknown>).__primeTestHasSecret).toBe(true);
+    });
+
     it('listCredentialKeys returns empty array for plugin with no credentials', async () => {
       const registries = makeRegistries();
       const credStorage = new InMemoryStorage();
+      const secrets = new InMemorySecretsResolver();
       const loader = new PluginLoader(registries, {
         storage: new FsStorage(),
-        credentialStorage: credStorage as CredentialStorage,
+        credentialStorage: credStorage,
+        secrets,
         dataDir: '/test-data',
       });
 

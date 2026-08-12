@@ -53,6 +53,16 @@
 //                                 symlink-refusal on an arbitrary project path
 //                                 requires raw lstat (Storage.mtime follows symlinks).
 //
+//   packages/core/               lstat/readlink walk the segments of a path that has
+//   src/scoped/scoped-fs.ts      already passed the lexical fs_reach check, to refuse
+//                                 a symlink that resolves outside the reach (G11).
+//                                 This IS the personality filesystem boundary, not a
+//                                 module sitting behind it: Storage follows symlinks
+//                                 and exposes no lstat, so the check cannot be
+//                                 expressed through the contract it guards. Same
+//                                 rationale as gateway/media.ts and
+//                                 web-api/documents.service.ts.
+//
 //   extensions/gateway/          lstat refuses symlinked path-based outbound media
 //   src/media.ts                 (W3.2) before it reaches an adapter — an
 //                                 exfiltration guard on an ARBITRARY tool-produced
@@ -104,6 +114,7 @@ const ALLOWED_PREFIXES = [
 
 // Specific files (relative to ROOT) that are permitted to import node:fs.
 const ALLOWED_FILES = new Set([
+  'packages/core/src/scoped/scoped-fs.ts',
   'extensions/cron/src/index.ts',
   'extensions/claw-migrate/src/index.ts',
   'extensions/skills/src/skill-compat.ts',

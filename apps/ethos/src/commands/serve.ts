@@ -24,7 +24,7 @@ import {
   readRawConfig,
   writeConfig,
 } from '@ethosagent/config';
-import { type AgentLoop, scriptCallableFor } from '@ethosagent/core';
+import { type AgentLoop, scriptCallableFor, toolsDeclaringNetwork } from '@ethosagent/core';
 import { CronScheduler } from '@ethosagent/cron';
 import { LocalExecutionBackend } from '@ethosagent/execution-local';
 import { ConsoleLogger } from '@ethosagent/logger';
@@ -33,7 +33,6 @@ import {
   createPersonalityRegistry,
   PersonalityA2aIdentityProvider,
 } from '@ethosagent/personalities';
-import { sanitize, wrapUntrusted } from '@ethosagent/safety-injection';
 import { SessionLane } from '@ethosagent/session-lane';
 import { SqliteApiKeyStore } from '@ethosagent/session-sqlite';
 import { FsAttachmentCache, FsStorage } from '@ethosagent/storage-fs';
@@ -56,6 +55,8 @@ import {
   createSessionStore,
   IdentityMap,
   resolvePersonalityModelFit,
+  sanitize,
+  wrapUntrusted,
 } from '@ethosagent/wiring';
 import { appendErrorLog } from '../error-log';
 import { createAcpMcpWiring } from '../lib/acp-mcp-wiring';
@@ -865,7 +866,8 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
     a2aState.enabled = enabled;
     try {
       const raw = await readRawConfig(a2aStorage);
-      if (raw) await writeConfig(a2aStorage, { ...raw, a2a: { enabled } });
+      if (raw)
+        await writeConfig(a2aStorage, { ...raw, a2a: { enabled } }, await getSecretsResolver());
     } catch (err) {
       console.warn(
         `  a2a:          failed to persist a2a.enabled=${enabled} to config.yaml (toggle still applied for this process):`,
@@ -952,6 +954,16 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
             const described = personalities.describe(personalityId);
             if (!described) return null;
             return { callable: scriptCallableFor(described.config, registry) };
+          },
+          // §4.7 — declared network reach for the sheet's `## Boundary`
+          // section, so the Web tab reports G-NET inapplicable on exactly the
+          // personalities the CLI does. Resolves null for unknown ids.
+          boundary: async (personalityId: string) => {
+            const registry = toolRegistry;
+            if (!registry) return null;
+            const described = personalities.describe(personalityId);
+            if (!described) return null;
+            return { networkTools: toolsDeclaringNetwork(described.config, registry) };
           },
         }
       : {}),

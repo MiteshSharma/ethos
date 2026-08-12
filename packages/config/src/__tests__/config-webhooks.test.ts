@@ -1,7 +1,18 @@
 import { join } from 'node:path';
-import { InMemoryStorage } from '@ethosagent/storage-fs';
+import { InMemorySecretsResolver, InMemoryStorage } from '@ethosagent/storage-fs';
 import { describe, expect, it } from 'vitest';
-import { type EthosConfig, ethosDir, loadConfigStrict, readRawConfig, writeConfig } from '../index';
+import {
+  type EthosConfig,
+  ethosDir,
+  loadConfigStrict,
+  readConfig,
+  readRawConfig,
+  writeConfig,
+} from '../index';
+
+function secretRef(path: string): string {
+  return ['${', 'secrets:', path, '}'].join('');
+}
 
 async function load(yaml: string): Promise<EthosConfig> {
   const storage = new InMemoryStorage();
@@ -124,7 +135,7 @@ describe('parseConfigYaml — webhooks', () => {
     expect(result?.config.webhooks).toBeUndefined();
   });
 
-  it('round-trips through writeConfig → readRawConfig', async () => {
+  it('round-trips through writeConfig → readConfig', async () => {
     const storage = new InMemoryStorage();
     await storage.mkdir(ethosDir());
     const original: EthosConfig = {
@@ -144,8 +155,13 @@ describe('parseConfigYaml — webhooks', () => {
         },
       },
     };
-    await writeConfig(storage, original);
-    const reloaded = await readRawConfig(storage);
+    const secrets = new InMemorySecretsResolver();
+    await writeConfig(storage, original, secrets);
+    // Bearer secrets are externalized — the file holds refs, the vault the values.
+    const onDisk = await readRawConfig(storage);
+    expect(onDisk?.webhooks?.hook1?.secret).toBe(secretRef('webhooks/hook1/secret'));
+    expect(onDisk?.webhooks?.hook3?.secret).toBe(secretRef('webhooks/hook3/secret'));
+    const reloaded = await readConfig(storage, secrets);
     expect(reloaded?.webhooks).toEqual(original.webhooks);
   });
 });

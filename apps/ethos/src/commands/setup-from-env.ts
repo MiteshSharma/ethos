@@ -203,7 +203,7 @@ export async function runSetupFromEnv(): Promise<void> {
       channelFilter:
         telegramConfigured && ownerId ? { telegram: { ownerUserId: ownerId } } : undefined,
     };
-    await writeConfig(storage, config);
+    await writeConfig(storage, config, secrets);
     await scaffoldEthosDir(storage);
   }
 

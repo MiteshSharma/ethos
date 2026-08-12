@@ -17,7 +17,7 @@ describe('PlatformsRepository', () => {
   beforeEach(() => {
     storage = new InMemoryStorage();
     secrets = new InMemorySecretsResolver();
-    configRepo = new ConfigRepository({ dataDir: DATA, storage });
+    configRepo = new ConfigRepository({ dataDir: DATA, storage, secrets });
     repo = new PlatformsRepository({ config: configRepo, secrets });
   });
 
@@ -140,7 +140,7 @@ describe('PlatformsRepository multi-bot telegram', () => {
   beforeEach(() => {
     storage = new InMemoryStorage();
     secrets = new InMemorySecretsResolver();
-    configRepo = new ConfigRepository({ dataDir: DATA, storage });
+    configRepo = new ConfigRepository({ dataDir: DATA, storage, secrets });
     repo = new PlatformsRepository({ config: configRepo, secrets });
   });
 
@@ -228,7 +228,9 @@ describe('PlatformsRepository multi-bot telegram', () => {
     const bot = await repo.addTelegramBot('111:AAA', { type: 'personality', name: 'coder' });
 
     const yaml = await storage.read(join(DATA, 'config.yaml'));
-    expect(yaml).toContain('telegramToken: legacy');
+    // The legacy flat token survives — as a vault ref (G-SEC), not a literal.
+    expect(yaml).toContain('telegramToken: "${secrets:telegram/token}"');
+    expect(await secrets.get('telegram/token')).toBe('legacy');
     expect(yaml).toContain(
       `telegram.bots.0.token: "\${secrets:telegram/bots/${bot.botKey}/token}"`,
     );
@@ -288,7 +290,7 @@ describe('PlatformsRepository multi-bot slack', () => {
   beforeEach(() => {
     storage = new InMemoryStorage();
     secrets = new InMemorySecretsResolver();
-    configRepo = new ConfigRepository({ dataDir: DATA, storage });
+    configRepo = new ConfigRepository({ dataDir: DATA, storage, secrets });
     repo = new PlatformsRepository({ config: configRepo, secrets });
   });
 
@@ -404,7 +406,7 @@ describe('PlatformsRepository multi-bot whatsapp', () => {
   beforeEach(() => {
     storage = new InMemoryStorage();
     secrets = new InMemorySecretsResolver();
-    configRepo = new ConfigRepository({ dataDir: DATA, storage });
+    configRepo = new ConfigRepository({ dataDir: DATA, storage, secrets });
     repo = new PlatformsRepository({ config: configRepo, secrets, dataDir: DATA, storage });
   });
 
@@ -589,7 +591,7 @@ describe('PlatformsRepository channel filter', () => {
   beforeEach(() => {
     storage = new InMemoryStorage();
     secrets = new InMemorySecretsResolver();
-    configRepo = new ConfigRepository({ dataDir: DATA, storage });
+    configRepo = new ConfigRepository({ dataDir: DATA, storage, secrets });
     repo = new PlatformsRepository({ config: configRepo, secrets });
   });
 

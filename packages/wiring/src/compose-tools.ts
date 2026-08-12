@@ -813,6 +813,10 @@ export async function composeAllTools(
   const mcpManager = new McpManager(mcpConfig, {
     logger: log,
     enableScopeProbe: process.env.ETHOS_MCP_SCOPE_PROBE === '1',
+    // stdio clients need a resolver to materialise `${secrets:...}` env refs
+    // at spawn time. OAuth transports still get the per-personality scoped
+    // resolver derived from `innerSecrets`.
+    secrets: config.secretsResolver,
     innerSecrets: config.secretsResolver,
     onToolsChanged: (added, removedNames) => {
       for (const t of added) tools.register(t);

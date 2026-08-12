@@ -1,6 +1,8 @@
 // System-prompt prelude that teaches the model how to read provenance fences
-// produced by `wrapUntrusted`. Prepended by AgentLoop at turn start when
-// `safety.injectionDefense.enabled !== false` (default).
+// produced by `wrapUntrusted`. Prepended by AgentLoop at the start of every
+// turn, unconditionally — ARCHITECTURE.md §V S6 makes the inbound safety
+// pipeline non-opt-out-able by personality, channel, or tool, so there is no
+// config switch that can suppress this prelude.
 
 export const INJECTION_DEFENSE_PRELUDE = `## External-content safety
 

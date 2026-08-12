@@ -43,6 +43,7 @@ export {
 export { resolveModelWithTier } from './agent-loop/turn-context';
 export { buildAttachmentAnnotation } from './attachment-annotation';
 export { deriveBotKey } from './bot-key';
+export { toolsDeclaringNetwork } from './capability-reach';
 export type { CapabilityBackends, CapabilityScopeIds } from './capability-resolver';
 export { resolveCapabilities } from './capability-resolver';
 export type { CapabilityValidationError } from './capability-validator';
@@ -136,6 +137,10 @@ export {
   VoiceProviderError,
 } from './providers/voice-resolution';
 export { InMemoryRequestDumpStore } from './request-dump-store';
+export {
+  type AgentSafetyConformanceResult,
+  runAgentSafetyConformance,
+} from './safety-conformance';
 export { stripAnsiEscapes } from './sanitize-output';
 export type { SafeFetchFn, SecretsBackend } from './scoped';
 export { ScopedFetchImpl, ScopedFsImpl, ScopedProcessImpl, ScopedSecretsImpl } from './scoped';

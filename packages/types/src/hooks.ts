@@ -378,4 +378,13 @@ export interface HookRegistry {
   ): Promise<ClaimingHooks[K][1]>;
 
   unregisterPlugin(pluginId: string): void;
+
+  /**
+   * Introspection: is at least one handler registered for `name` under the
+   * given execution model? Not an execution model of its own — it exists so a
+   * consumer can verify that a declared policy has an implementation behind it
+   * (see `ApprovalPosture` in `./safety`) without firing the hook, which would
+   * mean invoking real approval logic with a synthetic payload.
+   */
+  hasHandlers(model: 'void' | 'modifying' | 'claiming', name: HookName): boolean;
 }

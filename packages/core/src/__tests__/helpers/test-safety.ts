@@ -39,6 +39,12 @@ export function createTestSafety(overrides?: TestSafetyOverrides): AgentSafety {
     scopedStorageFactory:
       overrides?.scopedStorageFactory ??
       ((base, scope) => new ScopedStorage(base, { ...scope, alwaysDeny: defaultAlwaysDeny() })),
+    // G4 — a test fixture genuinely has no approval flow. Declaring it is the
+    // point: `ungated` is honest, an omitted field would be a silent default.
+    approvalPosture: overrides?.approvalPosture ?? {
+      kind: 'ungated',
+      reason: 'test fixture — no approval policy is registered',
+    },
     watcher: overrides?.watcher,
   };
 }

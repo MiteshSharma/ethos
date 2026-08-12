@@ -32,8 +32,6 @@ import {
   firstParagraph,
   PersonalityA2aIdentityProvider,
 } from '@ethosagent/personalities';
-import { initPairingDb } from '@ethosagent/safety-channel';
-import { sanitize, wrapUntrusted } from '@ethosagent/safety-injection';
 import { bundledSkillsSource, createInjectors } from '@ethosagent/skills';
 import Database from '@ethosagent/sqlite';
 import { readRuntime, removeRuntime } from '@ethosagent/team-supervisor';
@@ -67,7 +65,10 @@ import {
   createLazyProvider,
   createMemoryProvider,
   IdentityMap,
+  initPairingDb,
   type MessagingSendFn,
+  sanitize,
+  wrapUntrusted,
 } from '@ethosagent/wiring';
 import {
   ApprovalCoordinator,
@@ -268,7 +269,7 @@ export async function runGatewaySetup(): Promise<void> {
     return;
   }
 
-  await writeConfig(storage, { ...config, telegramToken: token });
+  await writeConfig(storage, { ...config, telegramToken: token }, await getSecretsResolver());
   console.log(`${c.green}✓ Token saved to ~/.ethos/config.yaml${c.reset}`);
   console.log(
     `\n${c.dim}Run ${c.reset}${c.bold}ethos gateway start${c.reset}${c.dim} to start the bot.${c.reset}\n`,

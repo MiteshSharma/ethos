@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { canInstall, deriveTier, getTierPolicy } from '../trust-tiers';
+import { canInstall, DEFAULT_TRUSTED_GITHUB_ORGS, deriveTier, getTierPolicy } from '../trust-tiers';
 import type { ScanResult } from '../types';
 
 // ---------------------------------------------------------------------------
@@ -66,6 +66,85 @@ describe('deriveTier', () => {
   it('returns "untrusted" for relative path', () => {
     expect(deriveTier('./my-skill')).toBe('untrusted');
   });
+
+  it('rejects a traversal segment in the org position', () => {
+    expect(deriveTier('github.com/../ethosagent/skill')).toBe('community');
+    expect(deriveTier('github.com/./repo')).toBe('community');
+  });
+
+  it('rejects a traversal segment anywhere in the path', () => {
+    expect(deriveTier('github.com/ethosagent/../../evil')).toBe('community');
+    expect(deriveTier('github.com/ethosagent/./evil')).toBe('community');
+  });
+
+  it('does not prefix-match the org segment', () => {
+    expect(deriveTier('github.com/ethosagent-evil/skill')).toBe('community');
+  });
+
+  it('requires both an org and a repo segment', () => {
+    expect(deriveTier('github.com/ethosagent')).toBe('community');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// deriveTier — operator-configurable trusted orgs
+// ---------------------------------------------------------------------------
+
+describe('deriveTier — configurable trusted orgs', () => {
+  it('applies the shipped default when trustedGitHubOrgs is not configured', () => {
+    expect(DEFAULT_TRUSTED_GITHUB_ORGS).toEqual(['ethosagent', 'anthropic']);
+    for (const org of DEFAULT_TRUSTED_GITHUB_ORGS) {
+      expect(deriveTier(`github.com/${org}/thing`)).toBe('trusted-repo');
+      expect(deriveTier(`github.com/${org}/thing`, {})).toBe('trusted-repo');
+      expect(deriveTier(`github.com/${org}/thing`, { trustedGitHubOrgs: undefined })).toBe(
+        'trusted-repo',
+      );
+    }
+  });
+
+  it('a configured set REPLACES the default rather than merging with it', () => {
+    const opts = { trustedGitHubOrgs: ['acme-corp'] };
+    expect(deriveTier('github.com/acme-corp/skill', opts)).toBe('trusted-repo');
+    // Both shipped defaults are gone — an operator can drop `anthropic`.
+    expect(deriveTier('github.com/anthropic/tools', opts)).toBe('community');
+    expect(deriveTier('github.com/ethosagent/some-skill', opts)).toBe('community');
+  });
+
+  it('an operator can keep one default org while dropping the other', () => {
+    const opts = { trustedGitHubOrgs: ['ethosagent'] };
+    expect(deriveTier('github.com/ethosagent/some-skill', opts)).toBe('trusted-repo');
+    expect(deriveTier('github.com/anthropic/tools', opts)).toBe('community');
+  });
+
+  it('an empty configured set trusts no org and does not fall back to the default', () => {
+    const opts = { trustedGitHubOrgs: [] };
+    expect(deriveTier('github.com/ethosagent/some-skill', opts)).toBe('community');
+    expect(deriveTier('github.com/anthropic/tools', opts)).toBe('community');
+    expect(deriveTier('github.com/acme-corp/skill', opts)).toBe('community');
+  });
+
+  it('an org outside the configured set resolves to community', () => {
+    expect(deriveTier('github.com/random-user/hack', { trustedGitHubOrgs: ['acme-corp'] })).toBe(
+      'community',
+    );
+  });
+
+  it('keeps the traversal rejection under a configured set', () => {
+    const opts = { trustedGitHubOrgs: ['acme-corp'] };
+    expect(deriveTier('github.com/acme-corp/../../evil', opts)).toBe('community');
+    expect(deriveTier('github.com/acme-corp-evil/skill', opts)).toBe('community');
+  });
+
+  it('never promotes a non-github source, however the set is configured', () => {
+    const opts = { trustedGitHubOrgs: ['acme-corp'] };
+    expect(deriveTier('clawhub/acme-corp', opts)).toBe('community');
+    expect(deriveTier('/local/acme-corp/skill', opts)).toBe('untrusted');
+    expect(deriveTier('https://acme-corp.example.com/skill', opts)).toBe('untrusted');
+  });
+
+  it('still resolves "builtin" ahead of any org configuration', () => {
+    expect(deriveTier('builtin', { trustedGitHubOrgs: [] })).toBe('builtin');
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -80,11 +159,17 @@ describe('getTierPolicy', () => {
     expect(p.autoAcknowledgeYellow).toBe(true);
   });
 
-  it('trusted-repo: can override red, auto-acknowledges yellow', () => {
+  it('trusted-repo: can override red, does NOT auto-acknowledge yellow', () => {
     const p = getTierPolicy('trusted-repo');
     expect(p.tier).toBe('trusted-repo');
     expect(p.canOverrideRed).toBe(true);
-    expect(p.autoAcknowledgeYellow).toBe(true);
+    expect(p.autoAcknowledgeYellow).toBe(false);
+  });
+
+  it('builtin is the only tier that auto-acknowledges yellow', () => {
+    const tiers = ['builtin', 'trusted-repo', 'community', 'untrusted'] as const;
+    const autoAck = tiers.filter((t) => getTierPolicy(t).autoAcknowledgeYellow);
+    expect(autoAck).toEqual(['builtin']);
   });
 
   it('community: cannot override red, does not auto-acknowledge yellow', () => {
@@ -163,8 +248,14 @@ describe('canInstall — yellow findings', () => {
     expect(canInstall(yellowFindings(), 'builtin').allowed).toBe(true);
   });
 
-  it('allows install for trusted-repo with yellow findings (auto-acknowledged)', () => {
-    expect(canInstall(yellowFindings(), 'trusted-repo').allowed).toBe(true);
+  it('blocks install for trusted-repo with yellow findings and no force', () => {
+    const decision = canInstall(yellowFindings(), 'trusted-repo');
+    expect(decision.allowed).toBe(false);
+    expect(decision.blockedBy).toContain('acknowledgment');
+  });
+
+  it('allows install for trusted-repo with yellow findings and force=true', () => {
+    expect(canInstall(yellowFindings(), 'trusted-repo', { force: true }).allowed).toBe(true);
   });
 
   it('blocks install for untrusted with yellow findings and no force', () => {

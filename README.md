@@ -139,6 +139,15 @@ Bots are bound to a personality at config time. The default binding locks `/pers
 | [Deploy on EC2](https://ethosagent.ai/docs/using/how-to/deploy-on-ec2) | A full production walkthrough including IAM, secrets, log rotation, backup. |
 | [Tool capability framework](https://ethosagent.ai/docs/building/explanation/why-capabilities) | The declarative contract every tool implements: network, secrets, storage, fs_reach, process. |
 
+## The security boundary
+
+<!-- register-claim
+     ids:   G-TOOLS, G-CAP, G-FS, G-NET, G-INJ, G-SEC, G-RED, G-APP, G-EXEC, G-WATCH, G-CHAN, G-AUDIT
+     names: tool allowlist, capability scoping, filesystem reach, network egress, injection defense,
+            secrets, redaction, approval gating, execution posture, watcher, channel admission, audit
+-->
+Ethos publishes a closed list of twelve security guarantees, and each one names the `file:line` that enforces it, the adjacent thing it explicitly does *not* cover, and what you should add yourself if you need more. Together they bound what an agent may invoke and what its tools reach once running (tool allowlist, capability scoping), where it may read, write, and connect (filesystem reach, network egress), what it can be talked into by content it did not author (injection defense, channel admission), what it may hold and what leaves in the clear (secrets, redaction, audit), and what stands between the model and a dangerous call (approval gating, execution posture, watcher). Behind the list sits a three-tier partition of the source: a guaranteed security kernel, guarded surfaces that sit on a trust boundary, and extensions that inherit exactly what the kernel enforces and nothing more. Every workspace package carries its tier in [`.architecture-state.yaml`](.architecture-state.yaml), committed and dated, so scope is a lookup rather than an argument. The list of things that are deliberately *not* boundaries is published in the same place — the approval gate against an adversarial LLM, credential redaction, the plugin scanner, the classifier's regex tier — because the absences are what a reader most reasonably gets wrong. Start at [What does Ethos guarantee?](https://ethosagent.ai/docs/security/security-boundary), and read [SECURITY.md](SECURITY.md) before filing a report: it carries the same four-verdict decision table a maintainer uses, so you can reach the verdict yourself.
+
 ## Migrating from OpenClaw or Hermes
 
 `ethos claw migrate` carries memory, skills, platform tokens, and provider keys from an existing OpenClaw or Hermes install into the Ethos layout. Dry-run first:

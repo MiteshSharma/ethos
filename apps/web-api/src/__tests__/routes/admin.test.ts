@@ -180,13 +180,13 @@ describe('ConfigService — adminEnabled + resolveProviderCredentials', () => {
   ): Promise<ConfigService> {
     const storage = new InMemoryStorage();
     const dataDir = '/data';
-    const repo = new ConfigRepository({ dataDir, storage });
     const secrets: SecretsResolver = {
       get: async (ref) => secretValues[ref] ?? null,
       set: async () => {},
       delete: async () => {},
       list: async () => [],
     };
+    const repo = new ConfigRepository({ dataDir, storage, secrets });
     await storage.mkdir(dataDir);
     await storage.write(join(dataDir, 'config.yaml'), yaml);
     return new ConfigService({ config: repo, secrets });

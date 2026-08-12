@@ -21,6 +21,7 @@ import { basename, join, resolve, sep } from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import { createGunzip, createGzip } from 'node:zlib';
 import { ethosDir } from '@ethosagent/config';
+import { isExactVersion, isValidNpmPackageName, isValidPluginId } from '@ethosagent/plugin-loader';
 import { type BundleManifest, EthosError } from '@ethosagent/types';
 import { writeJson } from '../json-output';
 import { getSecretsResolver } from '../wiring';
@@ -996,9 +997,18 @@ export async function runPersonalityImport(argv: string[]): Promise<void> {
       updateConfigLine(configYamlPath, 'mcp_servers', mcpToEnable);
     }
 
-    // Plugin handling
+    // Plugin handling.
+    //
+    // `manifest.plugins` comes out of the bundle, which is a shared artefact —
+    // the same attacker-controlled input as `plugins.lock`. The three fields
+    // used below are validated with the SAME predicates the lockfile path uses
+    // (`@ethosagent/plugin-loader`), so the two install surfaces cannot drift
+    // apart. The rule they replace, `/^[@a-zA-Z0-9._/-]+$/`, did reject
+    // `--registry=http://evil` (no `=` or `:` in the class) but admitted every
+    // local path spec and every bare option-shaped token: `../../evil`, `./x`,
+    // `..`, `-g`, `--registry`, `--foo` all passed it and would have been
+    // handed to npm as the package to install.
     const pluginsToAttach: string[] = [];
-    const SAFE_PKG_RE = /^[@a-zA-Z0-9._/-]+$/;
 
     if (manifest.plugins.length > 0) {
       const pluginsDir = join(homedir(), '.ethos', 'plugins');
@@ -1006,11 +1016,25 @@ export async function runPersonalityImport(argv: string[]): Promise<void> {
       const nodeModulesDir = join(pluginsDir, 'node_modules');
 
       for (const plugin of manifest.plugins) {
+        // The id becomes a path segment (`node_modules/<id>`) and a token in
+        // config.yaml's space-separated `plugins:` list. Check it before either.
+        if (!isValidPluginId(plugin.id)) {
+          console.warn(`  ⚠ Plugin id "${plugin.id}" is not a plain identifier — skipping.`);
+          continue;
+        }
         pluginsToAttach.push(plugin.id);
 
-        // Validate plugin source/version before any install attempt
-        if (!SAFE_PKG_RE.test(plugin.source) || !SAFE_PKG_RE.test(plugin.version)) {
-          console.warn(`  ⚠ Plugin "${plugin.id}" has unsafe source/version — skipping install.`);
+        // Validate plugin source/version before any install attempt. `version`
+        // is held to exact semver for the same reason the lockfile is: the
+        // bundle records what the exporter HAD, so a range, a dist-tag, or a
+        // `file:`/`git+ssh:` spec here is not a weaker pin, it is a different
+        // package from a different place. A bundle exported on a machine where
+        // the plugin was not installed carries `version: "unknown"`; that now
+        // warns here instead of failing inside npm.
+        if (!isValidNpmPackageName(plugin.source) || !isExactVersion(plugin.version)) {
+          console.warn(
+            `  ⚠ Plugin "${plugin.id}" has an unusable source/version (${plugin.source}@${plugin.version}) — skipping install.`,
+          );
           continue;
         }
 

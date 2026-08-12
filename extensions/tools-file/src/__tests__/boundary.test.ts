@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ScopedFsImpl } from '@ethosagent/core';
@@ -37,9 +37,13 @@ describe('tools-file — fs_reach boundary enforcement', () => {
   beforeEach(async () => {
     // Canonicalize through realpath: on macOS, tmpdir() lives under
     // /var/folders/... which is a symlink to /private/var/folders/...
-    // ScopedFsImpl.checkReach() compares canonicalized paths with
-    // normalize(resolve(...)), which does NOT follow symlinks, so the
-    // allowlist prefixes and the request paths must share canonical form.
+    // ScopedFsImpl.checkReach() compares the allow prefixes and the request
+    // path LEXICALLY with normalize(resolve(...)), so the two must share
+    // canonical form. Its symlink walk does not help here and is not meant
+    // to: the walk starts at the matched allow prefix and only descends, so
+    // the /var → /private/var link ABOVE the prefix is never resolved. That
+    // is deliberate — segments above the allowlist root are the operator's
+    // own layout, not an escape from the reach.
     dataDir = await realpath(await mkdtemp(join(tmpdir(), 'ethos-fsreach-')));
     cwd = await realpath(await mkdtemp(join(tmpdir(), 'ethos-cwd-')));
     // Seed two personality dirs with their own MEMORY.md
@@ -139,13 +143,54 @@ describe('tools-file — fs_reach boundary enforcement', () => {
     if (!result.ok) expect(result.code).toBe('not_available');
   });
 
-  // Ch.5 — symlink-defeats-allowlist coverage
-  // Symlink resolution moved out of the tool layer: ScopedFsImpl is
-  // responsible for resolving symlinks before boundary checks. The tool
-  // now passes the lexical path through; these tests belong in the
-  // scoped-fs test suite once that layer gains realpath support.
-  it.skip('rejects a symlink inside the allowlist that points outside it', async () => {
-    // Skipped — see comment above.
+  // Ch.5 — symlink-defeats-allowlist coverage (G11).
+  // Symlink resolution lives in the tool's capability backend, not in the
+  // tool: ScopedFsImpl.checkReach() walks the path below the matched allow
+  // prefix and re-judges the deny floor and the allowlist against wherever
+  // a link actually lands. These cases exercise that through the tool, which
+  // is the shape a personality actually experiences.
+  it('rejects a symlink inside the allowlist that points outside it', async () => {
+    const link = join(cwd, 'notes.md');
+    await symlink(join(dataDir, 'personalities', 'engineer', 'MEMORY.md'), link);
+    const ctx = makeCtx({ workingDir: cwd, scopedFs: researcherFs() });
+    const result = await readFileTool.execute({ path: link }, ctx);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toMatch(/Filesystem boundary/);
+  });
+
+  it('rejects a symlinked PARENT directory even when the leaf is an ordinary file', async () => {
+    // The leaf-only bypass: `<cwd>/peek` is a link to engineer's dir, and
+    // `<cwd>/peek/MEMORY.md` is a plain file. lstat on the leaf says
+    // "not a link" — only a per-segment walk catches this.
+    await symlink(join(dataDir, 'personalities', 'engineer'), join(cwd, 'peek'));
+    const ctx = makeCtx({ workingDir: cwd, scopedFs: researcherFs() });
+    const result = await readFileTool.execute({ path: join(cwd, 'peek', 'MEMORY.md') }, ctx);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toMatch(/Filesystem boundary/);
+  });
+
+  it('ALLOWS a symlink whose target is inside the allowlist', async () => {
+    // Chosen semantics: resolve-and-recheck, not refuse-all-symlinks. A link
+    // that lands inside the reach reaches nothing the personality could not
+    // reach by its literal path, so refusing it would be a behaviour change
+    // beyond closing the escape.
+    await writeFile(join(cwd, 'real.md'), 'in-bounds body');
+    await symlink(join(cwd, 'real.md'), join(cwd, 'alias.md'));
+    const ctx = makeCtx({ workingDir: cwd, scopedFs: researcherFs() });
+    const result = await readFileTool.execute({ path: join(cwd, 'alias.md') }, ctx);
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.value).toContain('in-bounds body');
+  });
+
+  it('ALLOWS a write to a path that does not exist yet inside the allowlist', async () => {
+    // The ENOENT case. `lstat` on a not-yet-created leaf finds nothing; that
+    // is the normal state of every first write, not a boundary violation.
+    const ctx = makeCtx({ workingDir: cwd, scopedFs: researcherFs() });
+    const result = await writeFileTool.execute(
+      { path: join(cwd, 'brand', 'new', 'file.md'), content: 'fresh' },
+      ctx,
+    );
+    expect(result.ok).toBe(true);
   });
 
   it('rejects a path matching the alwaysDeny floor even when allow includes its parent', async () => {
@@ -194,16 +239,32 @@ describe('tools-file — fs_reach boundary enforcement', () => {
       if (!result.ok) expect(result.error).toMatch(/Filesystem boundary/);
     });
 
-    // Symlink resolution moved out of the tool layer — see comment above
-    // the first skipped symlink test in this file.
-    it.skip('rejects a symlink chain that lands in the deny prefix after multiple hops', async () => {
-      // Skipped — see comment above.
+    it('rejects a symlink chain that lands in the deny prefix after multiple hops', async () => {
+      // hop1 stays inside the reach, which is exactly why one hop is not
+      // enough: the boundary has to keep following until the path stops
+      // moving. Both links are in-bounds; only the third target is not.
+      await symlink(join(cwd, 'hop2'), join(cwd, 'hop1'));
+      await symlink('/etc/passwd', join(cwd, 'hop2'));
+      const ctx = makeCtx({ workingDir: cwd, scopedFs: scoped });
+      const result = await readFileTool.execute({ path: join(cwd, 'hop1') }, ctx);
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.error).toMatch(/Filesystem boundary/);
     });
 
-    // Symlink resolution moved out of the tool layer — see comment above
-    // the first skipped symlink test in this file.
-    it.skip('rejects a symlink to a deny-listed directory (not just files inside it)', async () => {
-      // Skipped — see comment above.
+    it('rejects a symlink to a deny-listed directory (not just files inside it)', async () => {
+      // The allowlist here deliberately GRANTS /root, so the allow check
+      // cannot be what rejects this — the deny floor has to be re-applied
+      // to the resolved target, not just to the link path.
+      const reach = new Set([cwd, '/root']);
+      const permissive = new ScopedFsImpl(new FsStorage(), reach, reach, defaultAlwaysDeny());
+      await symlink('/root', join(cwd, 'rootdir'));
+      const ctx = makeCtx({ workingDir: cwd, scopedFs: permissive });
+      const result = await readFileTool.execute(
+        { path: join(cwd, 'rootdir', '.ssh', 'id_rsa') },
+        ctx,
+      );
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.error).toMatch(/Filesystem boundary/);
     });
   });
 });

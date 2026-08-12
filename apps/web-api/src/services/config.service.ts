@@ -1,4 +1,5 @@
 import { randomBytes } from 'node:crypto';
+import { secretRefFromValue } from '@ethosagent/config';
 import { EthosError, type SecretsResolver } from '@ethosagent/types';
 import type { ConfigRepository, RawProviderEntry } from '../repositories/config.repository';
 
@@ -517,12 +518,15 @@ function parseWebSearchBackend(v: string | undefined): 'exa' | 'tavily' | 'brave
   return v === 'exa' || v === 'tavily' || v === 'brave' ? v : null;
 }
 
-function parseAuxModel(p: Record<string, string>, prefix: string): AuxModelGetResult {
-  const rawKey = p[`${prefix}.apiKey`];
+async function parseAuxModel(
+  p: Record<string, string>,
+  prefix: string,
+  keyPreview: (value: string | undefined) => Promise<string | null>,
+): Promise<AuxModelGetResult> {
   return {
     model: passStr(p, `${prefix}.model`),
     provider: passStr(p, `${prefix}.provider`),
-    apiKeyPreview: rawKey ? redactKey(rawKey) : null,
+    apiKeyPreview: await keyPreview(p[`${prefix}.apiKey`]),
     baseUrl: passStr(p, `${prefix}.baseUrl`),
   };
 }
@@ -810,18 +814,20 @@ export class ConfigService {
     return {
       provider: raw.provider ?? '',
       model: raw.model ?? '',
-      apiKeyPreview: redactKey(raw.apiKey),
+      apiKeyPreview: (await this.keyPreview(raw.apiKey)) ?? redactKey(undefined),
       baseUrl: raw.baseUrl ?? null,
       personality: raw.personality ?? 'researcher',
       memory: raw.memory ?? 'markdown',
       modelRouting: raw.modelRouting,
       skin: raw.skin ?? 'default',
-      providers: raw.providers.map((p) => ({
-        provider: p.provider,
-        model: p.model ?? null,
-        apiKeyPreview: redactKey(p.apiKey),
-        baseUrl: p.baseUrl ?? null,
-      })),
+      providers: await Promise.all(
+        raw.providers.map(async (p) => ({
+          provider: p.provider,
+          model: p.model ?? null,
+          apiKeyPreview: (await this.keyPreview(p.apiKey)) ?? redactKey(undefined),
+          baseUrl: p.baseUrl ?? null,
+        })),
+      ),
       approvalMode: raw.approvalMode ?? 'manual',
       verbosity: raw.verbosity ?? 'balanced',
       debugMode: raw.debugMode ?? false,
@@ -865,11 +871,11 @@ export class ConfigService {
         VOICE_TUNING['display.voice_speech_min_ms'].default,
       ),
       voiceProvider: raw.voiceProvider ?? null,
-      voiceApiKeyPreview: raw.voiceApiKey ? redactKey(raw.voiceApiKey) : null,
+      voiceApiKeyPreview: await this.keyPreview(raw.voiceApiKey),
       voiceBaseUrl: raw.voiceBaseUrl ?? null,
       voiceModel: raw.voiceModel ?? null,
       voiceTtsProvider: raw.voiceTtsProvider ?? null,
-      voiceTtsApiKeyPreview: raw.voiceTtsApiKey ? redactKey(raw.voiceTtsApiKey) : null,
+      voiceTtsApiKeyPreview: await this.keyPreview(raw.voiceTtsApiKey),
       voiceTtsVoice: raw.voiceTtsVoice ?? null,
       voiceTtsBaseUrl: raw.voiceTtsBaseUrl ?? null,
       voiceTtsModel: raw.voiceTtsModel ?? null,
@@ -937,7 +943,7 @@ export class ConfigService {
       },
       memoryCapture: {
         provider: passStr(p, 'memoryCapture.provider'),
-        apiKeyPreview: p['memoryCapture.apiKey'] ? redactKey(p['memoryCapture.apiKey']) : null,
+        apiKeyPreview: await this.keyPreview(p['memoryCapture.apiKey']),
         baseUrl: passStr(p, 'memoryCapture.baseUrl'),
         maxPerHour: passNum(p, 'memoryCapture.maxPerHour', 6),
         maxPerDay: passNum(p, 'memoryCapture.maxPerDay', 30),
@@ -983,9 +989,9 @@ export class ConfigService {
       },
       webSearchBackend: parseWebSearchBackend(p['web.search_backend']),
       webExtractBackend: p['web.extract_backend'] === 'htmltext' ? 'htmltext' : null,
-      auxCompression: parseAuxModel(p, 'auxiliary.compression'),
-      auxVision: parseAuxModel(p, 'auxiliary.vision'),
-      auxWeb: parseAuxModel(p, 'auxiliary.web'),
+      auxCompression: await parseAuxModel(p, 'auxiliary.compression', (v) => this.keyPreview(v)),
+      auxVision: await parseAuxModel(p, 'auxiliary.vision', (v) => this.keyPreview(v)),
+      auxWeb: await parseAuxModel(p, 'auxiliary.web', (v) => this.keyPreview(v)),
       a2aEnabled: passBool(p, 'a2a.enabled', false),
       pluginsAutoInstall:
         p['plugins.auto_install'] === undefined ? null : p['plugins.auto_install'] === 'true',
@@ -1029,6 +1035,15 @@ export class ConfigService {
       };
     }
     return null;
+  }
+
+  /** Redacted preview of a stored credential. Values in config.yaml are
+   *  `${secrets:<ref>}` references (G-SEC), so resolve before redacting —
+   *  redacting the reference itself would render `${s…Key}` and tell the
+   *  user nothing about which key is set. */
+  private async keyPreview(value: string | undefined): Promise<string | null> {
+    if (!value) return null;
+    return redactKey(await this.resolveSecretRefs(value));
   }
 
   /** Substitute `${secrets:ref}` references via the resolver. An
@@ -1308,6 +1323,14 @@ export class ConfigService {
     // A key both deleted (prefix replacement) and re-set in the same patch
     // must survive — the delete pass runs first, so drop it from the list.
     const finalDeletes = [...new Set(deleteKeys)].filter((k) => !(k in passthroughPatch));
+    // `webhooks.<id>.secret` is externalized (ref `webhooks/<id>/secret`), and
+    // that config key is the only thing pointing at the vault entry. Dropping
+    // the key alone leaves the material behind forever, so parse the ref that
+    // was STORED and hand it to the post-write cleanup below.
+    const droppedSecretRefs = finalDeletes
+      .filter((k) => /^webhooks\.[^.]+\.secret$/.test(k))
+      .map((k) => secretRefFromValue(currentPassthrough[k] ?? ''))
+      .filter((ref): ref is string => ref !== null);
     if (finalDeletes.length > 0) {
       await this.opts.config.deletePassthroughKeys(finalDeletes);
     }
@@ -1371,6 +1394,42 @@ export class ConfigService {
         ? { voiceTtsModel: patch.voiceTtsModel || undefined }
         : {}),
     });
+
+    await this.deleteOrphanedSecrets(droppedSecretRefs);
+  }
+
+  /**
+   * Drop vault entries whose last config reference was just removed.
+   *
+   * Runs AFTER the config write, never before: delete-first plus a failed
+   * write leaves config referencing material that is gone, while write-first
+   * leaves at worst vault litter. `ConfigRepository.deletePassthroughKeys` is
+   * deliberately vault-blind — it is the shared "drop a config key" primitive —
+   * so the deletion belongs here, alongside the caller that knows the key
+   * carried a credential (same shape as PlatformsRepository's removals).
+   *
+   * Refs still named by a surviving passthrough entry are kept: deleting one
+   * would break that entry. Webhook refs embed the webhook id so a collision
+   * needs a hand-edited config.yaml, but the check costs one read and the
+   * failure mode it guards is a live credential deleted out from under a hook.
+   *
+   * A failing delete propagates (ARCHITECTURE.md §V S7 — no silent failure).
+   * The config change already landed; the error is how the operator learns
+   * credential material was left behind.
+   */
+  private async deleteOrphanedSecrets(refs: string[]): Promise<void> {
+    const secrets = this.opts.secrets;
+    if (!secrets || refs.length === 0) return;
+    const surviving = new Set<string>();
+    const after = await this.opts.config.read();
+    for (const value of Object.values(after?.passthrough ?? {})) {
+      const ref = secretRefFromValue(value);
+      if (ref) surviving.add(ref);
+    }
+    for (const ref of new Set(refs)) {
+      if (surviving.has(ref)) continue;
+      await secrets.delete(ref);
+    }
   }
 }
 
