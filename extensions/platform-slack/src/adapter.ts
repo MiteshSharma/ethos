@@ -63,6 +63,7 @@ import {
   handleClarifyModalSubmission,
 } from './interactions/clarify';
 import { type RawSlackFile, resolveChannelMode } from './routing/triage';
+import { createUsernameResolver, type UsernameResolver } from './routing/usernames';
 import { BackfillStateStore } from './store/backfill-state';
 import { ChannelOverrideStore } from './store/channel-overrides';
 import { ThreadStateStore } from './store/thread-state';
@@ -224,6 +225,8 @@ export class SlackAdapter implements PlatformAdapter, ApprovalCapableAdapter {
   readonly defaultChannelMode: ChannelMode;
 
   private readonly allowedBotIds: string[] | undefined;
+  /** `users.info` display-name resolver, cached (24 h TTL, ≤1024 entries). */
+  private readonly users: UsernameResolver;
   private readonly app: App;
   private readonly client: App['client'];
   private readonly backfillState: BackfillStateStore | undefined;
@@ -286,6 +289,7 @@ export class SlackAdapter implements PlatformAdapter, ApprovalCapableAdapter {
       socketMode: true,
     });
     this.client = this.app.client;
+    this.users = createUsernameResolver(this.client);
 
     this.botKey = config.botKey;
     this.id = `slack:${this.botKey}`;
@@ -349,6 +353,7 @@ export class SlackAdapter implements PlatformAdapter, ApprovalCapableAdapter {
         channelOverrides: this.channelOverrides,
         threadState: this.threadState,
         backfillState: this.backfillState,
+        users: this.users,
         ...(this.allowedBotIds ? { allowedBotIds: this.allowedBotIds } : {}),
       },
       {

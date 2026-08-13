@@ -13,6 +13,7 @@ import {
   triageMention,
   triageMessage,
 } from '../routing/triage';
+import type { UsernameResolver } from '../routing/usernames';
 
 export interface MessageEventHandlers {
   onEnvelope(message: InboundMessage): void;
@@ -26,21 +27,33 @@ const BACKFILL_CHAR_LIMIT = 4000;
  *  edits to the same message collapse into a single inbound envelope. */
 const EDIT_DEBOUNCE_MS = 200;
 
+interface HistoryMessage {
+  text?: string;
+  user?: string;
+  username?: string;
+  subtype?: string;
+  bot_id?: string;
+  bot_profile?: { name?: string };
+}
+
+/** History line author, in the order Slack makes the name available: the
+ *  resolved display name, then the name a bot post carries itself, then the
+ *  raw id as a last resort. */
+function historyAuthor(msg: HistoryMessage, names: Map<string, string>): string {
+  const resolved = msg.user ? names.get(msg.user) : undefined;
+  return resolved ?? msg.username ?? msg.bot_profile?.name ?? msg.user ?? 'unknown';
+}
+
 async function fetchSlackHistory(
   client: App['client'],
   channelId: string,
   threadTs: string | undefined,
   triggeringTs: string | undefined,
   allowedBotIds: string[] | undefined,
+  users: UsernameResolver | undefined,
 ): Promise<string | undefined> {
   try {
-    let messages: {
-      text?: string;
-      user?: string;
-      username?: string;
-      subtype?: string;
-      bot_id?: string;
-    }[];
+    let messages: HistoryMessage[];
     if (threadTs) {
       const res = await client.conversations.replies({
         channel: channelId,
@@ -60,7 +73,7 @@ async function fetchSlackHistory(
       messages = (res.messages ?? []) as typeof messages;
     }
 
-    const lines = messages
+    const included = messages
       .filter((m) => {
         if (!m.text?.trim()) return false;
         // Allowlisted bots contribute to history; every other bot stays out.
@@ -68,9 +81,15 @@ async function fetchSlackHistory(
         return !m.bot_id && m.subtype !== 'bot_message';
       })
       .reverse()
-      .slice(-BACKFILL_INCLUDE_LIMIT)
-      .map((m) => `${m.username ?? m.user ?? 'unknown'}: ${m.text?.trim()}`)
-      .join('\n');
+      .slice(-BACKFILL_INCLUDE_LIMIT);
+
+    // One batch for the whole thread: the resolver collapses duplicate ids and
+    // serves repeat authors from its cache, so a 40-message thread from three
+    // people costs three `users.info` calls, not forty.
+    const authorIds = included.map((m) => m.user).filter((u): u is string => Boolean(u));
+    const names = users ? await users.resolveMany(authorIds) : new Map<string, string>();
+
+    const lines = included.map((m) => `${historyAuthor(m, names)}: ${m.text?.trim()}`).join('\n');
 
     if (!lines) return undefined;
 
@@ -138,6 +157,9 @@ export function registerMessageEvents(
           subtype: inner.subtype as string | undefined,
           files: inner.files as RawSlackMessage['files'],
           ...(innerBotId ? { bot_id: innerBotId } : {}),
+          // Bot posts name themselves; a human's name comes from `users.info`.
+          username: inner.username as string | undefined,
+          bot_profile: inner.bot_profile as { name?: string } | undefined,
         };
 
         void triageMessage(syntheticMsg, triage)
@@ -166,6 +188,7 @@ export function registerMessageEvents(
           threadTs,
           triggeringTs,
           triage.allowedBotIds,
+          triage.users,
         );
         await triage.backfillState.mark(channelId, threadTs);
         if (priorContext) {
@@ -189,6 +212,7 @@ export function registerMessageEvents(
           threadTs,
           triggeringTs,
           triage.allowedBotIds,
+          triage.users,
         );
         await triage.backfillState.mark(channelId, threadTs);
         if (priorContext) {

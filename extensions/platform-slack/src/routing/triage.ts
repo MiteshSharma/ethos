@@ -8,6 +8,7 @@ import type { BackfillStateStore } from '../store/backfill-state';
 import type { ChannelOverrideStore } from '../store/channel-overrides';
 import type { ThreadStateStore } from '../store/thread-state';
 import { shouldRespond } from './channel-mode';
+import type { UsernameResolver } from './usernames';
 
 /** What the adapter knows about itself + its persistent state. */
 export interface TriageContext {
@@ -19,6 +20,9 @@ export interface TriageContext {
   /** Slack `bot_id`s whose messages are allowed to reach the agent. Absent or
    *  empty denies every bot — the gate is default-closed. */
   allowedBotIds?: string[];
+  /** `users.info` display-name resolver. Absent (or unable to resolve) leaves
+   *  `InboundMessage.username` unset. */
+  users?: UsernameResolver;
 }
 
 /**
@@ -53,6 +57,10 @@ export interface RawSlackMessage {
   files?: RawSlackFile[];
   /** Present on messages authored by an app/workflow rather than a human. */
   bot_id?: string;
+  /** Display name Slack stamps on bot/workflow posts. Humans don't carry it. */
+  username?: string;
+  /** Richer bot identity on newer bot posts; `username` is the older field. */
+  bot_profile?: { name?: string };
 }
 
 /** Subset of the Slack `app_mention` event we actually consume. */
@@ -112,6 +120,7 @@ export async function triageMessage(
       // identity the gateway's channel filter can allowlist by (it keys on
       // `userId`). Two gates, both must open.
       userId: allowedBot ? msg.bot_id : msg.user,
+      username: await resolveSenderName(msg, allowedBot, ctx),
       text: text || (hasFiles ? '(file attachment)' : ''),
       ts: msg.ts,
       threadTs,
@@ -138,6 +147,7 @@ export async function triageMention(
       botKey: ctx.botKey,
       channel: evt.channel,
       userId: evt.user,
+      username: evt.user ? await ctx.users?.resolve(evt.user) : undefined,
       text,
       ts: evt.ts,
       threadTs: evt.thread_ts,
@@ -149,6 +159,24 @@ export async function triageMention(
   };
 }
 
+/**
+ * Human-readable sender name for the envelope. Telegram's analogue is
+ * `ctx.from?.username` — the handle the platform shows, left `undefined` when
+ * the platform doesn't have one. Slack's equivalent needs a `users.info` call.
+ *
+ * An allowlisted bot has no `user` for `users.info` to resolve, but Slack
+ * stamps the app's own name onto the payload, so we read it from there.
+ */
+async function resolveSenderName(
+  msg: RawSlackMessage,
+  allowedBot: boolean,
+  ctx: TriageContext,
+): Promise<string | undefined> {
+  if (allowedBot) return msg.username ?? msg.bot_profile?.name;
+  if (!msg.user) return undefined;
+  return ctx.users?.resolve(msg.user);
+}
+
 export function resolveChannelMode(channel: string, ctx: TriageContext): ChannelMode {
   const override = ctx.channelOverrides?.get(channel);
   return override ?? ctx.defaultChannelMode ?? DEFAULT_CHANNEL_MODE;
@@ -158,6 +186,7 @@ interface EnvelopeInputs {
   botKey: string;
   channel: string;
   userId: string | undefined;
+  username: string | undefined;
   text: string;
   ts: string | undefined;
   threadTs: string | undefined;
@@ -178,6 +207,7 @@ function buildEnvelope(input: EnvelopeInputs): InboundMessage {
     botKey: input.botKey,
     chatId: input.channel,
     userId: input.userId,
+    username: input.username,
     text: input.text,
     isDm: input.isDm,
     isGroupMention: input.isGroupMention,
