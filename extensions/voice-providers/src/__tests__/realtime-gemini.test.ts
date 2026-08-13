@@ -1,97 +1,11 @@
 import type { RealtimeVoiceProvider } from '@ethosagent/types';
-import { beforeAll, describe, expect, it } from 'vitest';
-import {
-  createFakeRealtimeServer,
-  REALTIME_CONTRACT_CHECKS,
-  type RealtimeConformanceTarget,
-  runRealtimeContractSuite,
-} from '../realtime-conformance';
+import { describe, expect, it } from 'vitest';
+import { createFakeRealtimeServer } from '../realtime-conformance';
 import { GeminiLiveProvider } from '../realtime-gemini';
 
-const target: RealtimeConformanceTarget = {
-  label: 'gemini-live',
-  createProvider: (socketFactory) => new GeminiLiveProvider({ apiKey: 'test-key', socketFactory }),
-  confirmSession: [{ setupComplete: {} }],
-  audioDelta: (pcmBase64) => ({
-    serverContent: {
-      modelTurn: { parts: [{ inlineData: { mimeType: 'audio/pcm;rate=24000', data: pcmBase64 } }] },
-    },
-  }),
-  // Gemini streams transcripts with NO finality flag — `turnComplete` is the
-  // only boundary — so the settled text is the accumulation of the deltas.
-  userTranscript: {
-    partial: { serverContent: { inputTranscription: { text: 'what is the weather' } } },
-    partialText: 'what is the weather',
-    final: { serverContent: { turnComplete: true } },
-    finalText: 'what is the weather',
-  },
-  assistantTranscript: {
-    partial: { serverContent: { outputTranscription: { text: 'it is sunny' } } },
-    partialText: 'it is sunny',
-    final: { serverContent: { turnComplete: true } },
-    finalText: 'it is sunny',
-  },
-  toolCall: (callId, name, args) => ({ toolCall: { functionCalls: [{ id: callId, name, args }] } }),
-  // Not "the user started speaking" but "I stopped because they did" — the same
-  // barge-in trigger arriving from the other side of the decision.
-  speechStarted: { serverContent: { interrupted: true } },
-  providerError: {
-    frame: { error: { code: 'INVALID_ARGUMENT', message: 'unsupported voice' } },
-    error: 'unsupported voice',
-    code: 'INVALID_ARGUMENT',
-  },
-  expectAudioWrite: (sent, pcm) => {
-    if (sent.length !== 1) return [`expected 1 audio frame, got ${sent.length}`];
-    const frame = sent[0] as { realtimeInput?: { audio?: { mimeType?: string; data?: string } } };
-    const errors: string[] = [];
-    if (frame.realtimeInput?.audio?.mimeType !== 'audio/pcm;rate=16000') {
-      errors.push(`audio mimeType was "${frame.realtimeInput?.audio?.mimeType}"`);
-    }
-    // The caller captures at `caps.inputSampleRate` (16 kHz), so the bytes it
-    // hands in are the bytes on the wire — nothing here resamples anything.
-    if (frame.realtimeInput?.audio?.data !== Buffer.from(pcm).toString('base64')) {
-      errors.push('audio frame did not carry the supplied PCM verbatim');
-    }
-    return errors;
-  },
-  expectToolResultWrite: (sent, callId, output) => {
-    if (sent.length !== 1) return [`expected 1 toolResponse frame, got ${sent.length}`];
-    const frame = sent[0] as {
-      toolResponse?: {
-        functionResponses?: Array<{ id?: string; name?: string; response?: { output?: string } }>;
-      };
-    };
-    const response = frame.toolResponse?.functionResponses?.[0];
-    const errors: string[] = [];
-    if (!response) return ['frame carried no functionResponses'];
-    if (response.id !== callId) errors.push(`functionResponse id was "${response.id}"`);
-    if (response.name !== 'lookup') errors.push(`functionResponse name was "${response.name}"`);
-    if (response.response?.output !== output) {
-      errors.push(`functionResponse output was "${response.response?.output}"`);
-    }
-    return errors;
-  },
-  // Gemini cancels generation server-side the moment its VAD hears the user, so
-  // there is nothing for the client to write. The contract only obliges
-  // `interrupt()` to resolve — this is the asymmetry it has to absorb.
-  expectInterruptWrite: (sent) =>
-    sent.length === 0 ? [] : [`expected no cancel frame, got ${JSON.stringify(sent)}`],
-};
-
-describe('gemini-live — shared realtime contract suite', () => {
-  let results: Map<string, string[]>;
-
-  beforeAll(async () => {
-    const checks = await runRealtimeContractSuite(target);
-    results = new Map(checks.map((check) => [check.name, check.errors]));
-  });
-
-  for (const name of REALTIME_CONTRACT_CHECKS) {
-    it(name, () => {
-      expect(results.get(name) ?? ['the check did not run']).toEqual([]);
-    });
-  }
-});
+// The shared 11-check contract suite runs from `realtime-contract.test.ts`,
+// which drives every REGISTERED provider. What stays here is this provider's
+// own wire detail — the part no other provider shares.
 
 describe('gemini-live wire details', () => {
   it('connects with the key as a query parameter and no Authorization header', async () => {

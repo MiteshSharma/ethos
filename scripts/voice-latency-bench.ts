@@ -54,13 +54,13 @@ import type {
   PcmChunk,
   RealtimeEvent,
   RealtimeSession,
-  RealtimeVoiceProvider,
   StreamingSttProvider,
   StreamingTtsProvider,
   SttProvider,
   TtsProvider,
 } from '@ethosagent/types';
-import { REALTIME_CONTRACT_VERSION, STT_CONTRACT_VERSION } from '@ethosagent/types';
+import { STT_CONTRACT_VERSION } from '@ethosagent/types';
+import { createFakeRealtimeProvider } from '@ethosagent/voice-providers';
 import {
   type AgentTurnRunner,
   BufferedVoiceSpanWriter,
@@ -241,88 +241,12 @@ function recordEndpoints(
 
 // --- realtime tier ---------------------------------------------------------
 
-/**
- * A mock hosted realtime provider: server-side VAD that commits `commitMs`
- * after the last frame it was sent, then a first audio frame `audioMs` later.
- *
- * Deliberately shaped like the real thing rather than like a stopwatch — it
- * commits on silence, it emits the user transcript as its commit marker, and it
- * can be told to withhold that marker (`emitCommitMarker: false`), which is the
- * case a provider that transcribes asynchronously actually presents.
- */
-function mockRealtime(opts: {
-  commitMs: number;
-  audioMs: number;
-  emitCommitMarker: boolean;
-}): RealtimeVoiceProvider {
-  return {
-    name: 'mock-realtime',
-    caps: {
-      kind: 'realtime',
-      inputSampleRate: 16_000,
-      outputSampleRate: 24_000,
-      contractVersion: REALTIME_CONTRACT_VERSION,
-    },
-    open(): Promise<RealtimeSession> {
-      const queue: RealtimeEvent[] = [];
-      let wake: (() => void) | null = null;
-      let closed = false;
-      let commitTimer: ReturnType<typeof setTimeout> | null = null;
-
-      const push = (event: RealtimeEvent): void => {
-        queue.push(event);
-        const w = wake;
-        wake = null;
-        w?.();
-      };
-      const commit = (): void => {
-        if (closed) return;
-        if (opts.emitCommitMarker) {
-          push({ type: 'transcript', role: 'user', text: 'what is the weather', isFinal: true });
-        }
-        setTimeout(() => {
-          if (closed) return;
-          push({ type: 'audio', pcm: new Uint8Array([0, 0]), sampleRate: 24_000 });
-          push({ type: 'response_done', responseId: 'r1' });
-        }, opts.audioMs);
-      };
-
-      const events: AsyncIterable<RealtimeEvent> = {
-        async *[Symbol.asyncIterator]() {
-          for (;;) {
-            const next = queue.shift();
-            if (next) {
-              yield next;
-              if (next.type === 'closed') return;
-              continue;
-            }
-            if (closed) return;
-            await new Promise<void>((resolve) => {
-              wake = resolve;
-            });
-          }
-        },
-      };
-
-      push({ type: 'session_open', sessionId: 'mock', model: 'mock-realtime-1' });
-      return Promise.resolve({
-        events,
-        sendAudio: async () => {
-          // Every frame restarts the silence window — the provider's VAD.
-          if (commitTimer) clearTimeout(commitTimer);
-          commitTimer = setTimeout(commit, opts.commitMs);
-        },
-        sendToolResult: async () => {},
-        interrupt: async () => {},
-        close: async () => {
-          closed = true;
-          if (commitTimer) clearTimeout(commitTimer);
-          push({ type: 'closed', reason: 'bench' });
-        },
-      });
-    },
-  };
-}
+// The mock hosted realtime provider is the SHARED fake
+// (`createFakeRealtimeProvider` in `@ethosagent/voice-providers`), not a second
+// one written here: it commits on silence like a hosted VAD, emits the user
+// transcript as its commit marker, and can be told to withhold that marker
+// (`emitCommitMarker: false`), which is the case a provider that transcribes
+// asynchronously actually presents.
 
 /** One realtime turn's observations. `commitAt` is null when no marker landed. */
 interface RealtimeTurnMarks {
@@ -421,7 +345,7 @@ async function runMockRealtime(assertBudget: boolean): Promise<boolean> {
   const emitCommitMarker = !process.argv.includes('--no-commit-marker');
   const turns = Math.max(1, Math.trunc(arg('turns', 5)));
 
-  const provider = mockRealtime({ commitMs, audioMs, emitCommitMarker });
+  const provider = createFakeRealtimeProvider({ commitMs, audioMs, emitCommitMarker });
   const session = await provider.open({ instructions: 'bench' });
   const events = session.events[Symbol.asyncIterator]();
   const speech = Array.from({ length: 5 }, speechFrame);

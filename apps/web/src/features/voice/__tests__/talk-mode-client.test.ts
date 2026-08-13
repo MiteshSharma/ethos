@@ -1,10 +1,12 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import type { VoiceCallEvent } from '../voice-call-client';
 import {
   createTalkModeClient,
   realtimeDegradeNotice,
   realtimeTalkModeSupported,
   streamingTalkModeSupported,
   type TalkModeEnvironment,
+  TIER_DEGRADED_CODE,
 } from '../talk-mode-client';
 
 const full: TalkModeEnvironment = {
@@ -165,6 +167,93 @@ describe('realtime refusal → what the user is told', () => {
     ).toBeNull();
   });
 });
+
+describe('a Gemini-shaped refusal reaches the user', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('shows the reason and runs the call on the pipeline tier', async () => {
+    // Gemini Live ships CONTRACT-ONLY: there is no server relay, so the mint
+    // refuses with `no_browser_token` on every call. That refusal must arrive
+    // as a visible notice AND put the call on the pipeline — a silent fallback
+    // is how "contract-only" turns into "quietly broken", and the only thing
+    // standing between the two is `no_browser_token` staying out of
+    // `SILENT_REFUSALS`. Asserted end to end through the client, not through
+    // the pure notice function, because the emit is the half that can rot.
+    vi.stubGlobal('AudioContext', FakeAudioContext);
+    vi.stubGlobal('WebSocket', UnreachableSocket);
+
+    const events: VoiceCallEvent[] = [];
+    const tiers: string[] = [];
+    const mintRealtimeToken = vi.fn(() =>
+      Promise.resolve({
+        ok: false as const,
+        reason: 'no_browser_token',
+        message:
+          'Realtime provider "gemini-live" cannot issue a browser credential, ' +
+          'so this browser cannot connect to it directly.',
+        providerId: 'gemini-live',
+      }),
+    );
+
+    const client = createTalkModeClient({
+      transcribe: () => Promise.resolve('hello'),
+      runAgentTurn: async function* () {
+        yield 'hi';
+      },
+      // A browser that COULD run the realtime tier — otherwise the refusal
+      // under test never gets asked for.
+      environment: full,
+      socketUrl: 'ws://voice.test/voice',
+      mintRealtimeToken,
+      onTier: (tier) => tiers.push(tier),
+      createDriver: () => fakeDriver(),
+    });
+    client.on((event) => events.push(event));
+
+    // The pipeline client it falls back to opens a real voice socket, which
+    // node has nothing to answer. Both facts under test — which tier was
+    // chosen, and what the user was told — are settled before that connect.
+    await client.connect().catch(() => {});
+
+    expect(mintRealtimeToken).toHaveBeenCalledTimes(1);
+    expect(tiers).toEqual(['pipeline']);
+    expect(events).toContainEqual({
+      type: 'error',
+      error: expect.stringContaining('gemini-live'),
+      code: TIER_DEGRADED_CODE,
+    });
+    await client.disconnect();
+  });
+});
+
+/** Enough of an `AudioContext` for the pipeline client to be CONSTRUCTED. */
+class FakeAudioContext {
+  readonly sampleRate = 16_000;
+  readonly currentTime = 0;
+  close(): Promise<void> {
+    return Promise.resolve();
+  }
+}
+
+/** A voice socket that reports its failure instead of hanging the test. */
+class UnreachableSocket {
+  binaryType = 'arraybuffer';
+  readonly readyState = 0;
+  onopen: ((event: unknown) => void) | null = null;
+  onclose: ((event: unknown) => void) | null = null;
+  onerror: ((event: unknown) => void) | null = null;
+  onmessage: ((event: { data: unknown }) => void) | null = null;
+
+  constructor() {
+    // Next macrotask, so the transport has assigned its handlers by then.
+    setTimeout(() => this.onerror?.(new Error('no voice lane in node')), 0);
+  }
+
+  send(): void {}
+  close(): void {}
+}
 
 /** Minimal driver so the batch client can run one utterance in node. */
 function fakeDriver() {

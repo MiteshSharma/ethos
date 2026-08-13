@@ -27,6 +27,13 @@ export {
   validateRealtimeProvider,
 } from './realtime-conformance';
 export {
+  createFakeRealtimeProvider,
+  type FakeRealtimeOptions,
+  type FakeRealtimeProvider,
+  type FakeRealtimeReply,
+  type FakeRealtimeSession,
+} from './realtime-fake';
+export {
   type GeminiLiveOptions,
   GeminiLiveProvider,
   geminiLiveFactory,

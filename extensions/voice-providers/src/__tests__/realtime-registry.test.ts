@@ -1,38 +1,12 @@
-import type {
-  Logger,
-  RealtimeVoiceProviderFactory,
-  RealtimeVoiceProviderRegistry,
-  SecretsResolver,
-  VoiceProviderFactoryContext,
-} from '@ethosagent/types';
+import type { Logger, SecretsResolver, VoiceProviderFactoryContext } from '@ethosagent/types';
 import { describe, expect, it } from 'vitest';
 import { validateRealtimeProvider } from '../realtime-conformance';
 import { registerBuiltInRealtimeProviders } from '../realtime-registry';
+import { TestRealtimeRegistry } from './test-realtime-registry';
 
 // WHICH providers this package ships, and that each one resolves into something
-// that satisfies the contract. The registry CLASS itself lives beside its
-// STT/TTS siblings in `packages/core` and is tested there; this file uses a
-// throwaway registry so the extension keeps no dependency on the kernel.
-
-class TestRealtimeRegistry implements RealtimeVoiceProviderRegistry {
-  private readonly factories = new Map<string, RealtimeVoiceProviderFactory>();
-
-  register(name: string, factory: RealtimeVoiceProviderFactory): void {
-    this.factories.set(name, factory);
-  }
-
-  unregister(name: string): void {
-    this.factories.delete(name);
-  }
-
-  get(name: string): RealtimeVoiceProviderFactory | undefined {
-    return this.factories.get(name);
-  }
-
-  list(): string[] {
-    return [...this.factories.keys()];
-  }
-}
+// that satisfies the contract STATICALLY. The BEHAVIOURAL suite runs from
+// `realtime-contract.test.ts`, over the same registry.
 
 const noopLogger: Logger = {
   debug() {},
