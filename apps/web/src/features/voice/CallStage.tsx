@@ -1,4 +1,6 @@
-import { useEffect, useRef, useState } from 'react';
+import type { ClarifyRequestEvent } from '@ethosagent/web-contracts';
+import { type CSSProperties, useEffect, useRef, useState } from 'react';
+import { ClarifyCard } from '../../components/chat/ClarifyCard';
 import { watchReducedMotion } from '../../lib/reduced-motion';
 import {
   CALL_MOTION,
@@ -13,16 +15,27 @@ import {
   waveHeight,
 } from './call-motion';
 import { MicIcon, MicOffIcon, PhoneDownIcon } from './TalkMode';
+import { markInterrupted, type VoiceTranscriptLine } from './voice-call-reducer';
 
-// The in-call overlay (DESIGN.md § "Call overlay").
+// The Call Stage (DESIGN.md § "Call Stage").
 //
-// A NON-BLOCKING centered dialog over Chat: no backdrop, no focus trap, no
-// scroll lock. The layer underneath is `pointer-events: none` so the message
-// list and the composer stay live behind it — which is not a nicety, it is what
-// makes minimizing safe to offer without ending the call, and what keeps the
-// Reconnecting promise ("the composer stays usable for text") true while the
-// overlay is up. `Esc` is not handled here on purpose: it belongs to the call,
-// and Chat's push-to-talk handler still ends the call with it.
+// A MODE, not a dialog: while a call carries audio the Chat page IS this — the
+// shape and its controls, and this call's transcript on the right. TWO columns,
+// not three: there is deliberately no navigation rail on the left. A rail during
+// a call is an invitation to wander off mid-sentence, and the point of the mode
+// is that the call has the user's attention. The right column is the one thing
+// worth looking away to — what is happening in THIS call.
+//
+// The single way back to the composer without hanging up is the "Back to chat"
+// control in the transcript header. It is the same collapse the spine used to
+// be (`onExpandChat` → `stageOpen: false`), so the CallStrip still takes over
+// and its restore control still brings the stage back — DESIGN.md's Reconnecting
+// row promises text stays reachable, and this is what keeps that promise.
+//
+// The reserved clarify slot at the base of the transcript column is the reason
+// this direction was chosen over a centered dialog: a question the agent asks
+// mid-call FILLS a panel the user is already looking at instead of appearing
+// over the conversation. Nothing arrives, nothing leaves, nothing moves.
 //
 // The canvas is a port of the approved motion lab. Everything about HOW it
 // moves lives in `call-motion.ts`, pure and tested; this file is the graph work
@@ -30,7 +43,7 @@ import { MicIcon, MicOffIcon, PhoneDownIcon } from './TalkMode';
 // because JS-driven drawing is invisible to the stylesheet's `animation: none`
 // (the rule `mic-meter.ts` had to learn first).
 
-export interface CallOverlayProps {
+export interface CallStageProps {
   state: CallVisualState;
   treatment: CallTreatment;
   /** Already-resolved hex — `personality` is resolved by the caller. */
@@ -46,10 +59,16 @@ export interface CallOverlayProps {
   statusLabel: string;
   /** Geist Mono `{provider} · {model}` — the strip's and TopBar's label. */
   providerLabel: string;
+  /** Newest turn's total latency, in ms. Null until a turn has completed. */
+  latencyMs: number | null;
+  /** This call's turns, newest last. Not chat history. */
+  transcript: VoiceTranscriptLine[];
+  /** The pending clarify, rendered in the reserved slot. Null leaves it dimmed. */
+  clarify: ClarifyRequestEvent | null;
   muted: boolean;
   onToggleMute: () => void;
-  /** Collapse to the CallStrip. Does NOT end the call. */
-  onMinimize: () => void;
+  /** Collapse the stage — back to normal chat. Does NOT end the call. */
+  onExpandChat: () => void;
   onHangUp: () => void;
 }
 
@@ -60,7 +79,44 @@ export function stateDescription(state: CallVisualState, personalityName: string
   return `${personalityName} is speaking`;
 }
 
-export function CallOverlay({
+/** One row of the transcript column. */
+export interface CallStageTurn {
+  id: string;
+  label: string;
+  text: string;
+  role: 'user' | 'agent';
+  /** The agent line still accumulating — the label says so, in accent. */
+  live: boolean;
+  /** Spoken filler ("One moment."), not reply content. Dimmed. */
+  filler: boolean;
+}
+
+/**
+ * The transcript column's rows, derived from the CALL's transcript.
+ *
+ * The source is the same `VoiceTranscriptLine[]` the reducer already maintains
+ * and the strip already captions from — there is no second record, and no chat
+ * history here: this column is what was said on THIS call, which is the only
+ * thing that vanishes when the call ends.
+ */
+export function callStageTurns(
+  transcript: VoiceTranscriptLine[],
+  personalityName: string,
+): CallStageTurn[] {
+  return transcript.map((line) => ({
+    id: line.id,
+    role: line.role,
+    label:
+      line.role === 'user' ? 'You' : line.open ? `${personalityName} · speaking` : personalityName,
+    // The same `[interrupted]` marker the chat projection appends, from the
+    // same helper — a barge-in reads identically in both records.
+    text: line.interrupted ? markInterrupted(line.text) : line.text,
+    live: line.role === 'agent' && Boolean(line.open),
+    filler: Boolean(line.filler),
+  }));
+}
+
+export function CallStage({
   state,
   treatment,
   accent,
@@ -70,11 +126,14 @@ export function CallOverlay({
   agentLevel,
   statusLabel,
   providerLabel,
+  latencyMs,
+  transcript,
+  clarify,
   muted,
   onToggleMute,
-  onMinimize,
+  onExpandChat,
   onHangUp,
-}: CallOverlayProps) {
+}: CallStageProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   /** Newest mic reading. A ref, so a 60Hz meter never restarts the loop. */
   const micLevelRef = useRef(0);
@@ -184,22 +243,34 @@ export function CallOverlay({
     };
   }, [state, treatment, accent, personalityId, agentLevel, reduced]);
 
+  const turns = callStageTurns(transcript, personalityName);
+  const footer = [providerLabel, latencyMs === null ? '' : `${latencyMs}ms`]
+    .filter(Boolean)
+    .join(' · ');
+
   return (
-    <div className="call-overlay-layer">
-      <section className="call-overlay" role="dialog" aria-label={`Call with ${personalityName}`}>
+    <section
+      className="call-stage"
+      aria-label={`Call with ${personalityName}`}
+      // The stage carries the call's accent itself. The PersonalityBar — the
+      // other place identity showed — is deliberately not on screen in this
+      // mode, so the stage's own `var(--accent, …)` rules (the live turn label,
+      // the focus ring) resolve to the personality holding the floor rather
+      // than to the generic info blue.
+      style={{ '--accent': accent } as CSSProperties}
+    >
+      <div className="call-stage-main">
         <canvas
           ref={canvasRef}
-          className="call-overlay-canvas"
+          className="call-stage-canvas"
           role="img"
           aria-label={stateDescription(state, personalityName)}
         />
-        <div className="call-overlay-foot">
-          <span className="talk-mono call-overlay-state" role="status">
-            {statusLabel}
-          </span>
-          {providerLabel ? <span className="talk-mono">{providerLabel}</span> : null}
+        <div className="call-stage-who">{personalityName}</div>
+        <div className="talk-mono call-stage-state" role="status">
+          {statusLabel}
         </div>
-        <div className="call-overlay-actions">
+        <div className="call-stage-actions">
           <button
             type="button"
             className={`talk-btn${muted ? ' talk-btn-active' : ''}`}
@@ -208,15 +279,6 @@ export function CallOverlay({
             aria-label={muted ? 'Unmute microphone' : 'Mute microphone'}
           >
             {muted ? <MicOffIcon /> : <MicIcon />}
-          </button>
-          {/* Minimize, never "close": the call keeps running in the strip. */}
-          <button
-            type="button"
-            className="talk-btn"
-            onClick={onMinimize}
-            aria-label="Minimize call to the strip"
-          >
-            <MinimizeIcon />
           </button>
           <button
             type="button"
@@ -227,8 +289,51 @@ export function CallOverlay({
             <PhoneDownIcon />
           </button>
         </div>
-      </section>
-    </div>
+        {footer ? <div className="talk-mono call-stage-foot">{footer}</div> : null}
+      </div>
+
+      <div className="call-stage-transcript">
+        <div className="call-stage-transcript-head">
+          <span className="talk-mono">This call</span>
+          {/* The ONE control that leaves the mode without ending the call. Not
+              a rail, not a nav — a single text button, in the column the user
+              is already glancing at. Same handler the spine had, so collapse
+              and the strip's restore stay the same round trip. */}
+          <button
+            type="button"
+            className="call-stage-back"
+            onClick={onExpandChat}
+            aria-label="Back to chat — the call keeps running"
+          >
+            Back to chat
+          </button>
+        </div>
+        <div className="call-stage-turns">
+          {turns.map((turn) => (
+            <div
+              key={turn.id}
+              className={`call-stage-turn call-stage-turn-${turn.role}${turn.live ? ' call-stage-turn-live' : ''}${turn.filler ? ' call-stage-turn-filler' : ''}`}
+            >
+              <span className="talk-mono call-stage-turn-label">{turn.label}</span>
+              <span className="call-stage-turn-text">{turn.text}</span>
+            </div>
+          ))}
+        </div>
+        {/* The reserved slot. ALWAYS rendered — dimmed when there is nothing to
+            answer — so a mid-call question fills a panel that is already on
+            screen instead of arriving on top of the conversation. */}
+        <div className={`call-stage-slot${clarify ? '' : ' call-stage-slot-empty'}`}>
+          {clarify ? (
+            <ClarifyCard key={clarify.requestId} request={clarify} variant="slot" />
+          ) : (
+            <>
+              <span className="talk-mono">Asked aloud</span>
+              <span className="call-stage-slot-empty-text">No open question</span>
+            </>
+          )}
+        </div>
+      </div>
+    </section>
   );
 }
 
@@ -409,21 +514,4 @@ function drawThinkingOrbit(
     ctx.lineWidth = 2.6;
     ctx.stroke();
   }
-}
-
-function MinimizeIcon() {
-  return (
-    <svg
-      width="16"
-      height="16"
-      viewBox="0 0 16 16"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.5"
-      strokeLinecap="round"
-      aria-hidden="true"
-    >
-      <path d="M3 10h10" />
-    </svg>
-  );
 }

@@ -8,6 +8,13 @@ import { rpc } from '../../rpc';
 // request, fire the matching RPC, and let the SSE `clarify.resolved` event
 // drop it from `pendingClarifies` so the card collapses naturally. We don't
 // manage open/closed state locally.
+//
+// `variant` is presentation ONLY. During a call the Call Stage renders this same
+// component in its reserved transcript slot (`slot`), where it is a filled panel
+// rather than a card that appeared: no `alertdialog` role, no `aria-modal`, and
+// no header icon competing with the slot's own label. Everything that resolves
+// the request — the `clarify.respond` call, the countdown, the cancel — is
+// shared, because a second answering path would be a second teardown.
 
 function formatCountdown(deadlineAt: string, now: number): string {
   const ms = new Date(deadlineAt).getTime() - now;
@@ -21,9 +28,11 @@ function formatCountdown(deadlineAt: string, now: number): string {
 
 export interface ClarifyCardProps {
   request: ClarifyRequestEvent;
+  /** `card` (default) floats over Chat; `slot` fills the Call Stage's reserved panel. */
+  variant?: 'card' | 'slot';
 }
 
-export function ClarifyCard({ request }: ClarifyCardProps) {
+export function ClarifyCard({ request, variant = 'card' }: ClarifyCardProps) {
   const [text, setText] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
@@ -55,17 +64,18 @@ export function ClarifyCard({ request }: ClarifyCardProps) {
       ? `Default \`${request.default}\` in ${countdown}`
       : `Times out in ${countdown}`;
 
-  return (
-    <div
-      className="clarify-card"
-      role="alertdialog"
-      aria-modal="true"
-      aria-labelledby="clarify-card-title"
-    >
+  const isSlot = variant === 'slot';
+
+  const body = (
+    <>
       <header className="clarify-card-header">
-        <span className="clarify-card-icon" aria-hidden="true">
-          ?
-        </span>
+        {isSlot ? (
+          <span className="talk-mono clarify-card-slot-key">Asked aloud</span>
+        ) : (
+          <span className="clarify-card-icon" aria-hidden="true">
+            ?
+          </span>
+        )}
         <h2 id="clarify-card-title" className="clarify-card-title">
           {request.question}
         </h2>
@@ -111,6 +121,24 @@ export function ClarifyCard({ request }: ClarifyCardProps) {
           Cancel
         </Button>
       </footer>
+    </>
+  );
+
+  // In the slot the question is already on screen and always was: a labelled
+  // region, not an `alertdialog`, because nothing was interrupted by its
+  // arrival — that is the entire point of a reserved slot.
+  return isSlot ? (
+    <section className="clarify-card clarify-card-slot" aria-labelledby="clarify-card-title">
+      {body}
+    </section>
+  ) : (
+    <div
+      className="clarify-card"
+      role="alertdialog"
+      aria-modal="true"
+      aria-labelledby="clarify-card-title"
+    >
+      {body}
     </div>
   );
 }

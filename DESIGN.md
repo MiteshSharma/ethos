@@ -156,21 +156,62 @@ Three-state dot (8px circle, `border-radius: 9999px`):
 Web surface: rendered in TopBar right-hand side alongside `{provider} · {model}` mono label.
 Desktop surface: rendered in sidebar bottom as an 8px dot inside a 20px glow ring (`border: 1.5px solid rgba(74,222,128,0.4)`).
 
-### Call overlay
+### Call Stage
 
-Talk-mode's primary surface is a **non-blocking call overlay**: a centered dialog
-over Chat on `--bg-elevated`, `md` (8px) radius, entering over `--motion-slow`
-(240ms) with the standard ease. It is **not** full-screen, it does **not** trap
-focus and it does **not** dim the page — the message list scrolls and the
-composer still accepts text while it is up. This reverses the earlier "no new
-full-screen surface" line: a call is not a status cue, and a 10px dot is not
-enough surface to carry three continuously-changing states.
+Talk-mode's primary surface is a **mode, not a dialog**. Starting a call switches
+the Chat page **into** Call Stage; ending the call returns it to normal chat.
+Nothing floats over the conversation, because while a call is carrying audio the
+call *is* the conversation. This reverses the earlier "no new full-screen
+surface" line: a call is not a status cue, and a 10px dot is not enough surface
+to carry three continuously-changing states.
 
-Dismissing the overlay **minimizes it to the CallStrip; it does not end the
-call.** That is required, not a nicety — the Reconnecting row below promises the
-composer stays usable for text throughout, so the surface that covers the
-composer's neighbourhood must be closable without hanging up. Only the strip's
-hang-up control and `Esc` end a call.
+**Two** columns, filling the chat tab:
+
+| Column | Width | What it holds |
+|---|---|---|
+| Stage | flexible | The shape on canvas, the personality's name, the mono state word, mute + end, and a Geist Mono `{provider} · {model} · NNNms` footer. |
+| This call | 320px | **This call's** turns, newest last — not chat history. A header reading `This call` plus the **Back to chat** control. At its base, the reserved clarify slot. |
+
+**There is no left navigation rail, and that is the decision.** A rail is an
+invitation to move around the UI, and moving around the UI mid-sentence is
+exactly what a call cannot afford. The only column worth looking away to is the
+one that says what is happening in *this* call. Nothing else earns a column.
+
+The PersonalityBar is **not** rendered in this mode either, for the same reason:
+rename, fork and new-session are the wrong things to offer someone who is
+talking. Identity is carried by the stage itself — the accent-coloured shape
+holding the personality's initial, and the name beneath it.
+
+Below 760px the transcript's turns and clarify slot drop, as before. The column
+itself does **not**: it now carries the only exit that is not a hang-up, so it
+collapses to its header row and restacks under the stage — one line holding
+`This call` and a 44px `Back to chat`. The controls and the way back to text are
+never what gets cut.
+
+**Enter and exit are automatic and derived from the CALL, never from the drawn
+state** (`callStageMounted`). A live call is the mode through every status it
+passes through, including `connecting` and `reconnecting`. Degraded, mic-denied
+and ended return to normal chat, where the CallStrip carries the explanation and
+the way to act on it. The only manual exit is **Back to chat**, a single small
+text button in the transcript header — not a rail, not a second mechanism. It
+collapses the mode without hanging up: the Reconnecting row below promises the
+composer stays usable for text, and in a mode this is what keeps that promise.
+Only hang-up and `Esc` end a call.
+
+#### The reserved clarify slot
+
+The slot sits at the base of the transcript column for the whole call — dimmed,
+reading `No open question`, when there is nothing to answer — and a mid-turn
+`clarify` **fills it in place**. A reserved slot rather than a popup, because
+things appearing and disappearing mid-call read as instability, and attention
+for a surface that just moved is the one thing a person on a call cannot spare.
+The slot holds its own height and does not flex; the scrolling turn list above
+absorbs the difference, so filling it moves nothing on screen.
+
+Off-call the clarify card is unchanged: it still floats over Chat as an
+`alertdialog`. Both are the same component and resolve through the same
+`clarify.respond` / `clarify.resolved` path — in the slot it is a labelled
+region, not an alert, because nothing was interrupted by its arrival.
 
 Three user-selectable treatments, all driven by the same amplitude signal:
 
@@ -183,7 +224,7 @@ Three user-selectable treatments, all driven by the same amplitude signal:
 Color is `display.call_accent`: `personality` (default — follows the active
 personality's `--accent`, so the shape says *which* agent holds the floor) or an
 explicit hex. Both keys are edited in Settings → Voice → Call appearance. Nothing
-else about the overlay is user-configurable.
+else about the stage is user-configurable.
 
 #### Motion class: continuous amplitude-driven motion
 
@@ -194,7 +235,7 @@ A duplex call has no such moment to animate. What the listener needs — is it
 hearing me, is it working, is it talking — is true continuously and has to be
 shown continuously, so the shape is driven by an audio amplitude signal for as
 long as the call is up. The transition scale still governs everything else about
-the overlay (enter, minimize, hover, focus ring).
+the stage (entering the mode, hover, focus ring).
 
 The motion constants — smoothing, gain, travel, wave speed, glow, orbit rate —
 are **fixed in code**, not exposed: `CALL_MOTION` in
@@ -207,8 +248,8 @@ are **fixed in code**, not exposed: `CALL_MOTION` in
 | Listening | The shape in `--error` red — the live-mic vocabulary the composer's `AudioBars` already uses. Amplitude is the mic level. |
 | Thinking | **Amplitude-independent** — nobody is talking. The circle contracts to 84%, a comet arc orbits it, and a slow 0.5Hz breath keeps the shape alive at rest. Accent-colored. |
 | Speaking | Accent-colored, amplitude driven by the agent's own output level (an analyser on the playout graph). |
-| Connecting / Reconnecting | Rendered **inside** the overlay, not instead of it: the Thinking shape (busy, accent, amplitude-independent — nobody is talking) with the mono state word reading `connecting` / `reconnecting…`. The overlay is mounted by the call, never by the state — unmounting it for a status a live call passes through replays the 240ms entrance and restarts the canvas, which the user reads as the dialog closing and reopening between turns. The overlay is non-blocking, so the composer stays usable throughout regardless. |
-| Degraded / Mic-denied / Ended | The overlay comes down and the CallStrip below takes over. These are the states where what the user needs is the explanation and a way to act on it, and the strip is what carries both. |
+| Connecting / Reconnecting | Rendered **inside** the stage, not instead of it: the Thinking shape (busy, accent, amplitude-independent — nobody is talking) with the mono state word reading `connecting` / `reconnecting…`. The stage is mounted by the call, never by the state — unmounting it for a status a live call passes through replays the 240ms entrance and restarts the canvas, which the user reads as the whole surface flickering out and back between turns. Text stays reachable throughout via **Back to chat**. |
+| Degraded / Mic-denied / Ended | The mode ends, Chat returns to normal, and the CallStrip takes over. These are the states where what the user needs is the explanation and a way to act on it, and the strip is what carries both. |
 
 `prefers-reduced-motion`: the comet collapses to a **static ring** — no orbit, no
 wave, no glow, and the amplitude smoothing drops out so nothing drifts after the
@@ -220,8 +261,10 @@ Controls are ≥44px touch targets. The provider label stays Geist Mono
 
 ### CallStrip
 
-The overlay's minimized form, and the only form for the states that are not
-carrying audio. One slim strip on Chat — **rows, never the `Card` primitive**.
+What normal chat shows for a call: the form the Call Stage collapses to, and the
+only form for the states that are not carrying audio (degraded, mic-denied, a
+call that ended with something left to explain). One slim strip on Chat —
+**rows, never the `Card` primitive**.
 Nine states, all in existing vocabulary:
 
 | State | What the user sees |
@@ -245,8 +288,8 @@ Controls are ≥44px touch targets; `prefers-reduced-motion` stops every pulse a
 the barge-in flash. At 375px the mark, state and mute/end persist and the mono
 detail collapses behind the toggle's tap.
 
-While a call is carrying audio the strip also carries the control that reopens
-the overlay — minimize and restore are the same call, not two surfaces.
+While a call is carrying audio the strip also carries the control that returns to
+the Call Stage — collapse and restore are the same call, not two surfaces.
 
 ## Sidebar
 
@@ -314,8 +357,8 @@ Transitions allowed on: `opacity`, `transform`, `color`, `background-color`, `bo
 
 `prefers-reduced-motion` → all motion is instant. `* { transition: none !important; animation: none !important; }`.
 
-One exception to the scale, not to the preference: the call overlay's
-**continuous amplitude-driven motion** (see "Call overlay") is not a state
+One exception to the scale, not to the preference: the Call Stage's
+**continuous amplitude-driven motion** (see "Call Stage") is not a state
 transition and has no duration token. It still stops under
 `prefers-reduced-motion`, and it is the only place in the system allowed to move
 without a transition.
@@ -415,3 +458,4 @@ The web UI specifically must avoid these patterns. Code review checks for them.
 | 2026-07-19 | In-call speaking indicator (talk-mode) | Phase B browser talk-mode needs a "who's speaking" cue. Reuses `AudioBars` for the user mic and an accent `status-dot-pulse` dot for the agent — accent, not a semantic color, so the cue reads as personality identity. No new primitives. |
 | 2026-08-12 | CallStrip added to the component inventory (voice V1a, DR3) | Talk-mode's nine states needed one home. A slim strip of ROWS on Chat, not a new surface and not a `Card`; the thinking state is the existing accent dot held steady, connecting/reconnecting borrows the amber connection dot, and provider + latency reuse the `{provider} · {model}` mono label rather than a badge or debug panel. |
 | 2026-08-13 | Call overlay supersedes the 2026-07-19 "In-call speaking indicator" entry | A 10px pulsing dot cannot express three continuously-changing states, so the call gets a non-blocking centered overlay (three treatments, amplitude-driven) that minimizes to the strip rather than ending the call. Adds one new motion class — continuous amplitude-driven motion — because the 80/180/240ms transition scale has no way to express a duplex call's need for continuous feedback. The strip keeps every state that is not carrying audio. |
+| 2026-08-14 | Call Stage supersedes the 2026-08-13 "Call overlay" entry | The user rejected the centered dialog: things appearing and disappearing mid-call read as instability. A call is now a MODE — Chat switches into a **two-column** stage (shape, this call's transcript) and returns to normal chat when the call ends. There is no left rail and no PersonalityBar: a navigation column mid-call invites wandering around the UI mid-sentence, and rename/fork/new-session are the wrong controls to offer someone who is talking. The one way back to the composer without hanging up is a single small **Back to chat** text button in the transcript header — the same collapse the strip's restore control reverses. The clarify question gets a reserved slot in the transcript column that is always on screen and fills in place, instead of a card that arrives over the conversation. Everything the overlay entry decided about the SHAPE — three treatments, the amplitude motion class, the per-state colour rules, mounting by the call rather than the state — carries over unchanged; only the container was wrong. |

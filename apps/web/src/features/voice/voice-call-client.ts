@@ -79,7 +79,7 @@ export interface VoiceCallClient {
   micStream(): MediaStream | null;
   /**
    * Smoothed level of the agent's own speech right now, 0..1 — what drives the
-   * call overlay's speaking state.
+   * Call Stage's speaking state.
    *
    * Optional because it is a property of the audio GRAPH, and the batch tier
    * has none: it hands a data URL to an `Audio` element, where no analyser can

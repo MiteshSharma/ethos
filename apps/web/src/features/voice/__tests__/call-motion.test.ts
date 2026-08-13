@@ -2,8 +2,8 @@ import { describe, expect, it } from 'vitest';
 import {
   CALL_MOTION,
   callDrive,
-  callOverlayMounted,
-  callOverlayVisual,
+  callStageMounted,
+  callStageVisual,
   callStateColor,
   callVisualState,
   glowAlpha,
@@ -17,7 +17,7 @@ import {
   waveHeight,
 } from '../call-motion';
 
-// The call overlay's rules, tested where they are decidable. The canvas itself
+// The Call Stage's rules, tested where they are decidable. The canvas itself
 // is not in this suite (apps/web has no DOM), and does not need to be: every
 // judgement the drawing makes — which source drives which state, how many times
 // the signal is smoothed, what reduced motion removes, which color a state is —
@@ -56,17 +56,17 @@ describe('callVisualState', () => {
   });
 });
 
-describe('callOverlayVisual', () => {
+describe('callStageVisual', () => {
   it('draws the busy shape for a transient status instead of nothing', () => {
-    // The overlay stays up through a reconnect, so `connecting` and
+    // The stage stays up through a reconnect, so `connecting` and
     // `reconnecting` need a shape. Thinking is the honest one: nobody is
     // talking, so it is amplitude-independent, and it is accent rather than
     // the live-mic red.
-    expect(callOverlayVisual('connecting')).toBe('thinking');
-    expect(callOverlayVisual('reconnecting')).toBe('thinking');
+    expect(callStageVisual('connecting')).toBe('thinking');
+    expect(callStageVisual('reconnecting')).toBe('thinking');
     // NOT the previous shape: a red "your microphone is live" circle held
     // through a reconnect is a lie the mono caption underneath cannot undo.
-    expect(callOverlayVisual('reconnecting')).not.toBe('listening');
+    expect(callStageVisual('reconnecting')).not.toBe('listening');
   });
 
   it('leaves every drawn status exactly where callVisualState put it', () => {
@@ -77,12 +77,12 @@ describe('callOverlayVisual', () => {
       'agent_speaking',
       'interrupted',
     ] as const) {
-      expect(callOverlayVisual(status)).toBe(callVisualState(status));
+      expect(callStageVisual(status)).toBe(callVisualState(status));
     }
   });
 });
 
-describe('callOverlayMounted', () => {
+describe('callStageMounted', () => {
   const live = {
     status: 'listening',
     degraded: false,
@@ -91,10 +91,10 @@ describe('callOverlayMounted', () => {
   } as const;
 
   it('stays mounted across a transient status while the call is live', () => {
-    // THE bug this predicate exists for: the overlay used to be derived from
-    // the drawn state, so a mid-call reconnect unmounted it and the remount
+    // THE bug this predicate exists for: the call surface used to be derived
+    // from the drawn state, so a mid-call reconnect unmounted it and the remount
     // replayed the 240ms enter animation and restarted the canvas — the user
-    // saw the dialog close and reopen between turns.
+    // saw the whole mode flicker out and back between turns.
     for (const status of [
       'connecting',
       'listening',
@@ -105,27 +105,28 @@ describe('callOverlayMounted', () => {
       'reconnecting',
       'listening',
     ] as const) {
-      expect(callOverlayMounted({ ...live, status })).toBe(true);
+      expect(callStageMounted({ ...live, status })).toBe(true);
     }
   });
 
   it('hands over to the strip when voice degraded to text', () => {
-    expect(callOverlayMounted({ ...live, degraded: true })).toBe(false);
+    expect(callStageMounted({ ...live, degraded: true })).toBe(false);
   });
 
   it('hands over to the strip when the mic was denied', () => {
-    expect(callOverlayMounted({ ...live, micDenied: true })).toBe(false);
+    expect(callStageMounted({ ...live, micDenied: true })).toBe(false);
   });
 
   it('comes down when the call is over — or never started', () => {
-    expect(callOverlayMounted({ ...live, status: 'ended' })).toBe(false);
-    expect(callOverlayMounted({ ...live, status: 'idle' })).toBe(false);
+    expect(callStageMounted({ ...live, status: 'ended' })).toBe(false);
+    expect(callStageMounted({ ...live, status: 'idle' })).toBe(false);
   });
 
-  it('respects the minimize, and only the minimize, on a healthy call', () => {
-    expect(callOverlayMounted({ ...live, minimized: true })).toBe(false);
-    // Minimizing does not end the call, so restoring puts it straight back.
-    expect(callOverlayMounted({ ...live, minimized: false })).toBe(true);
+  it('respects the collapse, and only the collapse, on a healthy call', () => {
+    expect(callStageMounted({ ...live, minimized: true })).toBe(false);
+    // Going back to chat does not end the call, so restoring puts the
+    // stage straight back.
+    expect(callStageMounted({ ...live, minimized: false })).toBe(true);
   });
 });
 

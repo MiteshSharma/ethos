@@ -1,9 +1,9 @@
 import { accentFor, DEFAULT_TOKENS } from '@ethosagent/design-tokens';
 import type { VoiceCallStatus } from './voice-call-reducer';
 
-// The call overlay's motion rules, with no canvas and no React in sight.
+// The Call Stage's motion rules, with no canvas and no React in sight.
 //
-// DESIGN.md § "Call overlay" adds one motion class to the system — continuous
+// DESIGN.md § "Call Stage" adds one motion class to the system — continuous
 // amplitude-driven motion — and fixes its constants in code rather than in
 // config: the user picks a treatment and a color, nothing else. Everything that
 // decides HOW the shape moves lives here, pure, so the rules that are hard to
@@ -14,7 +14,7 @@ import type { VoiceCallStatus } from './voice-call-reducer';
 /**
  * The six tuning constants, fixed by the motion lab the user approved. NOT
  * configurable — `display.call_style` and `display.call_accent` are the only
- * two user choices (DESIGN.md § "Call overlay").
+ * two user choices (DESIGN.md § "Call Stage").
  */
 export const CALL_MOTION = {
   /** Amplitude low-pass. Applied exactly once per signal — see `callDrive`. */
@@ -34,7 +34,7 @@ export const CALL_MOTION = {
 /** The three treatments a user can pick (`display.call_style`). */
 export type CallTreatment = 'liquid' | 'orb' | 'rings';
 
-/** What the overlay draws. Three states, not nine — the strip owns the rest. */
+/** What the stage draws. Three states, not nine — the strip owns the rest. */
 export type CallVisualState = 'listening' | 'thinking' | 'speaking';
 
 /**
@@ -60,11 +60,11 @@ export const REDUCED_MOTION_LEVEL = 0.35;
  * Which of the three drawn states a call status is, or null when the status has
  * no shape of its own.
  *
- * Null is NOT "take the overlay down". Connecting / reconnecting / ended have no
- * amplitude to draw, but two of them happen DURING a live call, and an overlay
- * that unmounts for them restarts its enter animation and its canvas — which is
- * the dialog closing and reopening as far as the user is concerned. Mounting is
- * `callOverlayMounted`; what a mounted overlay draws is `callOverlayVisual`.
+ * Null is NOT "leave the Call Stage". Connecting / reconnecting / ended have no
+ * amplitude to draw, but two of them happen DURING a live call, and a stage that
+ * unmounts for them restarts its enter animation and its canvas — which is the
+ * whole mode flickering out and back as far as the user is concerned. Mounting is
+ * `callStageMounted`; what a mounted stage draws is `callStageVisual`.
  */
 export function callVisualState(status: VoiceCallStatus): CallVisualState | null {
   switch (status) {
@@ -82,7 +82,7 @@ export function callVisualState(status: VoiceCallStatus): CallVisualState | null
 }
 
 /**
- * What a mounted overlay draws for a status that has no shape of its own.
+ * What a mounted stage draws for a status that has no shape of its own.
  *
  * A live call that is connecting or reconnecting is BUSY, so it borrows the
  * thinking shape: amplitude-independent (nobody is talking), accent rather than
@@ -91,33 +91,33 @@ export function callVisualState(status: VoiceCallStatus): CallVisualState | null
  * doubt. Holding the PREVIOUS shape instead would leave a red "your microphone
  * is live" circle up through a reconnect, which is a lie the caption cannot undo.
  */
-export function callOverlayVisual(status: VoiceCallStatus): CallVisualState {
+export function callStageVisual(status: VoiceCallStatus): CallVisualState {
   return callVisualState(status) ?? 'thinking';
 }
 
-/** Everything that decides whether the call overlay is on screen. */
-export interface CallOverlayMount {
+/** Everything that decides whether Chat is in Call Stage mode. */
+export interface CallStageMount {
   status: VoiceCallStatus;
   /** Voice fell back to text. Only the strip can explain that. */
   degraded: boolean;
   /** The browser refused the mic. Same — the strip owns the guidance. */
   micDenied: boolean;
-  /** The user collapsed the overlay to the strip. Never ends the call. */
+  /** The user went back to chat. Never ends the call. */
   minimized: boolean;
 }
 
 /**
- * Is the call overlay on screen?
+ * Is Chat in Call Stage mode?
  *
- * Deliberately NOT a function of the drawn state. Once the overlay is up it
- * stays up for the whole call and every state change renders inside it; deriving
- * the mount from the state instead is what made a mid-call reconnect look like
- * the dialog closing and reopening. It comes down for three reasons only: the
- * user minimized it, the call is over, or the call failed in a way that has
+ * Deliberately NOT a function of the drawn state. Once the stage is up it stays
+ * up for the whole call and every state change renders inside it; deriving the
+ * mount from the state instead is what made a mid-call reconnect look like the
+ * mode closing and reopening. It comes down for three reasons only: the user
+ * went back to chat, the call is over, or the call failed in a way that has
  * something to say (degraded to text, mic denied) and the strip is where that
  * gets said.
  */
-export function callOverlayMounted(input: CallOverlayMount): boolean {
+export function callStageMounted(input: CallStageMount): boolean {
   if (input.status === 'idle' || input.status === 'ended') return false;
   if (input.degraded || input.micDenied) return false;
   return !input.minimized;

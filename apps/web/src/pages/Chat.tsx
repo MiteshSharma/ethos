@@ -15,10 +15,10 @@ import { useGoalDetection } from '../features/goals/useGoalDetection';
 import { usePersonalityGet } from '../features/personalities/api/queries';
 import { useSessionRenameFromChat } from '../features/sessions/api/mutations';
 import { useSessionGet } from '../features/sessions/api/queries';
-import { CallOverlay } from '../features/voice/CallOverlay';
+import { CallStage } from '../features/voice/CallStage';
 import {
-  callOverlayMounted,
-  callOverlayVisual,
+  callStageMounted,
+  callStageVisual,
   resolveCallAccent,
 } from '../features/voice/call-motion';
 import { runVoiceAgentTurn } from '../features/voice/chat-voice-runner';
@@ -59,6 +59,9 @@ import { rpc } from '../rpc';
 //   │  [error banner if present]     │
 //   │  Composer (sticky bottom)      │
 //   └────────────────────────────────┘
+//
+// While a call is carrying audio the page renders the Call Stage INSTEAD of
+// that composition — a mode, not a layer over it (DESIGN.md § "Call Stage").
 //
 // The whole subtree is wrapped in a per-personality `<ConfigProvider>`
 // so Antd primitives inherit the active accent (Send button background,
@@ -474,14 +477,15 @@ export function Chat() {
   const voice = useVoiceCall({ createClient: createVoiceClient });
   const inCall = voice.status !== 'idle' && voice.status !== 'ended';
 
-  // The call overlay (DESIGN.md § "Call overlay"). It opens with the call and
-  // MINIMIZES to the strip — dismissing it never hangs up, because the strip
-  // below it is what keeps the composer honest while a call is reconnecting.
-  const [overlayOpen, setOverlayOpen] = useState(true);
+  // The Call Stage (DESIGN.md § "Call Stage"). Starting a call switches this
+  // page INTO the stage; ending it returns to normal chat. The stage's "Back to
+  // chat" control collapses it back to the strip without hanging up — that is
+  // what keeps the composer reachable while a call is reconnecting.
+  const [stageOpen, setStageOpen] = useState(true);
   useEffect(() => {
-    if (inCall) setOverlayOpen(true);
+    if (inCall) setStageOpen(true);
   }, [inCall]);
-  const callVisual = callOverlayVisual(voice.status);
+  const callVisual = callStageVisual(voice.status);
   const callAccent = resolveCallAccent(configQuery.data?.callAccent, personalityId);
   const callProviderLabel = providerSummary({
     status: voice.status,
@@ -492,20 +496,20 @@ export function Chat() {
     realtimeProvider: realtimeRan?.provider ?? null,
     realtimeModel: realtimeRan?.model ?? null,
   });
-  // The overlay is mounted by the CALL, not by the drawn state: connecting and
-  // reconnecting render INSIDE it (see `callOverlayVisual`), because unmounting
+  // The stage is mounted by the CALL, not by the drawn state: connecting and
+  // reconnecting render INSIDE it (see `callStageVisual`), because unmounting
   // for a transient status restarts the enter animation and the canvas, and that
-  // reads as the dialog closing and reopening mid-sentence. Degraded / mic-denied
+  // reads as the mode flickering out and back mid-sentence. Degraded / mic-denied
   // still hand over to the strip — that is where the explanation lives.
-  // `available` and `visible` differ only in the minimize, so the strip offers to
-  // restore an overlay exactly when there is one to restore.
-  const overlayMount = {
+  // `available` and `visible` differ only in the collapse, so the strip offers to
+  // restore a stage exactly when there is one to restore.
+  const stageMount = {
     status: voice.status,
     degraded: voice.degraded !== null,
     micDenied: voice.micDenied,
   };
-  const overlayAvailable = callOverlayMounted({ ...overlayMount, minimized: false });
-  const overlayVisible = callOverlayMounted({ ...overlayMount, minimized: !overlayOpen });
+  const stageAvailable = callStageMounted({ ...stageMount, minimized: false });
+  const stageVisible = callStageMounted({ ...stageMount, minimized: !stageOpen });
 
   // DR5's persistent transcript. On the realtime tier the provider owns the
   // conversation and nothing ever reaches `sendMessage`, so the spoken turns
@@ -662,6 +666,44 @@ export function Chat() {
     openNewSessionModal();
   };
 
+  // Call Stage is a MODE: while it is up it IS the chat surface, so the normal
+  // chat chrome (personality bar, message list, composer) is not also on screen
+  // behind it — including the PersonalityBar, whose rename/fork/new-session are
+  // the wrong things to offer mid-call. The way back to text is the stage's own
+  // "Back to chat" control, which collapses the mode WITHOUT ending the call and
+  // hands over to the strip.
+  if (stageVisible) {
+    return (
+      <ConfigProvider theme={personalityTheme(personalityId)}>
+        <div className="chat-tab chat-tab-call">
+          <CallStage
+            state={callVisual}
+            treatment={configQuery.data?.callStyle ?? 'liquid'}
+            accent={callAccent}
+            personalityId={personalityId}
+            personalityName={capitalize(personalityId)}
+            micLevels={voice.micLevels}
+            agentLevel={voice.agentLevel}
+            statusLabel={STATUS_LABEL[voice.status]}
+            providerLabel={callProviderLabel}
+            latencyMs={voice.latency?.totalMs ?? null}
+            transcript={voice.transcript}
+            clarify={pendingClarify ?? null}
+            muted={voice.muted}
+            onToggleMute={voice.toggleMute}
+            onExpandChat={() => setStageOpen(false)}
+            onHangUp={voice.hangUp}
+          />
+          {/* An approval is a hard gate on a running turn — it outranks the
+              mode and keeps its own surface, exactly as it does off-call. */}
+          {pendingApproval ? (
+            <ApprovalModal key={pendingApproval.approvalId} request={pendingApproval} />
+          ) : null}
+        </div>
+      </ConfigProvider>
+    );
+  }
+
   return (
     <ConfigProvider theme={personalityTheme(personalityId)}>
       <div className="chat-tab">
@@ -682,13 +724,13 @@ export function Chat() {
           }
         />
         {/* Not `inCall`: a finished call can still be the only thing on screen
-            explaining why it finished. `callStripVisible` owns that rule.
-            `!overlayVisible` is the minimize relationship: the strip is what the
-            overlay minimizes TO, so the two are never up together. Nothing is
-            lost by the gate — every state the strip alone can explain (degraded,
-            mic-denied, ended) already forces `overlayVisible` false, and the
-            transient ones the overlay now carries itself. */}
-        {callStripVisible(voice) && !overlayVisible ? (
+            explaining why it finished. `callStripVisible` owns that rule. This
+            branch only runs when the stage is down — the strip is what the stage
+            collapses TO, so the two are never up together. Nothing is lost by
+            that: every state the strip alone can explain (degraded, mic-denied,
+            ended) already forces `stageVisible` false, and the transient ones the
+            stage carries itself. */}
+        {callStripVisible(voice) ? (
           <TalkModeCallBar
             status={voice.status}
             micLevels={voice.micLevels}
@@ -713,24 +755,7 @@ export function Chat() {
             realtimeProvider={realtimeRan?.provider ?? null}
             realtimeModel={realtimeRan?.model ?? null}
             latency={voice.latency}
-            {...(overlayAvailable && !overlayOpen ? { onExpand: () => setOverlayOpen(true) } : {})}
-          />
-        ) : null}
-        {overlayVisible ? (
-          <CallOverlay
-            state={callVisual}
-            treatment={configQuery.data?.callStyle ?? 'liquid'}
-            accent={callAccent}
-            personalityId={personalityId}
-            personalityName={capitalize(personalityId)}
-            micLevels={voice.micLevels}
-            agentLevel={voice.agentLevel}
-            statusLabel={STATUS_LABEL[voice.status]}
-            providerLabel={callProviderLabel}
-            muted={voice.muted}
-            onToggleMute={voice.toggleMute}
-            onMinimize={() => setOverlayOpen(false)}
-            onHangUp={voice.hangUp}
+            {...(stageAvailable && !stageOpen ? { onExpand: () => setStageOpen(true) } : {})}
           />
         ) : null}
         <GoalIntakeModal

@@ -6,7 +6,7 @@
 // off relative timers (or off `ended`) accumulates the scheduler's lateness —
 // a few milliseconds per clip becomes an audible warble over a long call.
 //
-// (The output analyser is here for the same reason: the call overlay's speaking
+// (The output analyser is here for the same reason: the Call Stage's speaking
 // state is amplitude-driven, and the only place the agent's own level exists is
 // on this graph, between the scheduled sources and the destination.)
 //
@@ -76,7 +76,7 @@ export interface PlayoutSink {
   readonly speaking: boolean;
   /**
    * Smoothed level of what is coming out of the speakers right now, 0..1.
-   * Zero whenever nothing is scheduled — the call overlay draws from this, and
+   * Zero whenever nothing is scheduled — the Call Stage draws from this, and
    * an analyser tail after the last buffer would keep the shape talking.
    */
   outputLevel(): number;

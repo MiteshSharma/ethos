@@ -2265,7 +2265,7 @@ export function Settings() {
           <Form.Item
             name="callStyle"
             label="Treatment"
-            extra="How the in-call overlay draws the agent. All three follow the same voice level; only the shape differs."
+            extra="How the Call Stage draws the agent. All three follow the same voice level; only the shape differs."
           >
             <Select options={CALL_STYLE_OPTIONS} />
           </Form.Item>

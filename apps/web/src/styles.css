@@ -2700,84 +2700,243 @@ textarea {
   opacity: 0.9;
 }
 
-/* The in-call overlay (DESIGN.md § "Call overlay").
+/* The Call Stage (DESIGN.md § "Call Stage").
 
-   The layer takes NO pointer events; only the panel does. That is what makes
-   the overlay non-blocking — the message list scrolls and the composer takes
-   text behind it — and it is why there is no backdrop, no scroll lock and no
-   focus trap anywhere in this block. `z-index` sits below Antd's modal layer
-   (1000) so an approval request still lands on top of a live call. */
-.call-overlay-layer {
-  position: fixed;
-  inset: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  pointer-events: none;
-  z-index: 200;
+   A MODE, not a dialog: TWO columns filling the chat tab — the shape, and this
+   call's transcript. There is no left rail on purpose: a navigation column
+   during a call invites wandering off mid-sentence, which is the opposite of
+   what the mode is for. Nothing here is fixed-position and nothing overlays
+   anything, because there is nothing underneath: while a call carries audio
+   this IS the chat surface. */
+.chat-tab-call {
+  grid-template-rows: 1fr;
 }
 
-.call-overlay {
-  pointer-events: auto;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 12px;
-  padding: 16px;
-  /* md (8px) — a surface container, not a chip and not a drawer. */
-  border-radius: 8px;
-  background: var(--ethos-bg-elevated);
-  border: 1px solid var(--ethos-border);
-  box-shadow: 0 12px 32px var(--ethos-shadow-overlay);
-  animation: call-overlay-in 240ms cubic-bezier(0.16, 1, 0.3, 1);
+.call-stage {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 320px);
+  min-height: 0;
+  background: var(--ethos-bg);
+  animation: call-stage-in 240ms cubic-bezier(0.16, 1, 0.3, 1);
 }
 
-/* --motion-slow, the drawer/modal duration. The shape's own motion has no
-   duration token at all — see DESIGN.md on continuous amplitude-driven
-   motion — but the surface arriving is an ordinary state transition. */
-@keyframes call-overlay-in {
+/* --motion-slow, the drawer/modal duration. It plays ONCE, when the call
+   starts: the stage is mounted by the call and not by the state, so a mid-call
+   reconnect never replays it. The shape's own motion has no duration token at
+   all — see DESIGN.md on continuous amplitude-driven motion. */
+@keyframes call-stage-in {
   from {
     opacity: 0;
-    transform: translateY(8px);
   }
   to {
     opacity: 1;
-    transform: none;
   }
 }
 
-.call-overlay-canvas {
-  display: block;
-  width: 240px;
-  height: 240px;
-}
-
-.call-overlay-foot {
+/* Column 1 — the stage itself. */
+.call-stage-main {
+  position: relative;
   display: flex;
-  flex-wrap: wrap;
+  flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 4px 12px;
+  padding: 26px;
+  min-width: 0;
 }
 
-.call-overlay-state {
-  color: var(--ethos-text-secondary);
+.call-stage-canvas {
+  display: block;
+  width: min(62%, 236px);
+  aspect-ratio: 1;
 }
 
-.call-overlay-actions {
+.call-stage-who {
+  margin-top: 20px;
+  font-size: 15px;
+  font-weight: 500;
+  color: var(--ethos-text);
+}
+
+.call-stage-state {
+  margin-top: 5px;
+}
+
+.call-stage-actions {
+  margin-top: 24px;
   display: flex;
   align-items: center;
   gap: 8px;
 }
 
+.call-stage-foot {
+  position: absolute;
+  bottom: 14px;
+}
+
+/* Column 2 — this call's turns, and the reserved clarify slot at its base. */
+.call-stage-transcript {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border-left: 1px solid var(--ethos-border);
+  background: var(--ethos-bg-elevated);
+}
+
+/* The header carries the label AND the only way out of the mode that is not a
+   hang-up. The vertical padding is small because the button supplies the row's
+   height — a 44px target, same as every other control on the stage. */
+.call-stage-transcript-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 10px 4px 16px;
+  border-bottom: 1px solid var(--ethos-border);
+}
+
+.call-stage-back {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: var(--ethos-text-dim);
+  font-size: 12px;
+  cursor: pointer;
+  transition: color 80ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.call-stage-back:hover {
+  color: var(--ethos-text);
+}
+
+.call-stage-back:focus-visible {
+  outline: 2px solid var(--accent, var(--ethos-info));
+  outline-offset: 2px;
+}
+
+.call-stage-turns {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.call-stage-turn {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.call-stage-turn-text {
+  font-size: 13px;
+  color: var(--ethos-text);
+}
+
+.call-stage-turn-agent .call-stage-turn-text {
+  color: var(--ethos-text-dim);
+}
+
+.call-stage-turn-filler .call-stage-turn-text {
+  color: var(--ethos-text-tertiary);
+}
+
+.call-stage-turn-live .call-stage-turn-label {
+  color: var(--accent, var(--ethos-info));
+}
+
+/* The reserved slot. It is on screen for the whole call — dimmed while there is
+   nothing to answer — so a question FILLS a panel the user is already looking
+   at. `min-height` holds the space a question plus its options takes, and the
+   turns list above it is the flexible one, so filling the slot moves nothing:
+   that stability is the whole reason this direction beat a popup. */
+.call-stage-slot {
+  flex: none;
+  margin: 0 16px 14px;
+  padding: 11px 13px;
+  min-height: 96px;
+  border: 1px dashed var(--ethos-border-strong);
+  border-radius: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.call-stage-slot-empty {
+  opacity: 0.4;
+}
+
+.call-stage-slot-empty-text {
+  font-size: 13px;
+  color: var(--ethos-text-dim);
+}
+
+/* The clarify card, filling the slot rather than floating over Chat. */
+.call-stage-slot .clarify-card-slot {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.call-stage-slot .clarify-card-header {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.call-stage-slot .clarify-card-title {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--ethos-text);
+}
+
+.call-stage-slot .clarify-card-options,
+.call-stage-slot .clarify-card-freeform {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.call-stage-slot .clarify-card-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--ethos-text-tertiary);
+}
+
+/* Below 760px the transcript CONTENT drops, exactly as it did when a spine
+   carried the way back. The column itself cannot drop with it any more: it now
+   holds the only exit that is not a hang-up, and hiding it would strand the
+   user in the mode. So the column collapses to its header row and restacks
+   under the stage — one line holding "This call" and a 44px "Back to chat". */
+@media (max-width: 760px) {
+  .call-stage {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr) auto;
+  }
+
+  .call-stage-transcript {
+    border-left: 0;
+    border-top: 1px solid var(--ethos-border);
+  }
+
+  .call-stage-turns,
+  .call-stage-slot {
+    display: none;
+  }
+}
+
 /* 375px: the mark, the state, the caption and mute/end persist; the mono
    provider+latency detail collapses behind the toggle's tap target. */
 @media (max-width: 420px) {
-  .call-overlay-canvas {
-    width: 180px;
-    height: 180px;
-  }
-
   .talk-indicator {
     width: 72px;
   }
@@ -2826,7 +2985,7 @@ textarea {
   .talk-agent-pulse,
   .talk-link-pulse,
   .talk-indicator-flash,
-  .call-overlay {
+  .call-stage {
     animation: none;
   }
 

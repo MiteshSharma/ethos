@@ -57,7 +57,7 @@ export interface UseVoiceCall {
   micLevels: number[];
   /**
    * The agent's own smoothed output level (0..1), READ per animation frame by
-   * the call overlay's canvas.
+   * the Call Stage's canvas.
    *
    * A getter rather than a value on purpose. `micLevels` is state because the
    * strip's bars are React-rendered; the overlay draws itself, so publishing a

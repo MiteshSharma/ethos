@@ -113,8 +113,8 @@ export interface TalkModeCallBarProps {
    */
   onLeavePrivateMode?: () => void;
   /**
-   * Reopen the call overlay. Passed only while a call is carrying audio and the
-   * overlay is minimized — minimize and restore are the same call, not two
+   * Return to the Call Stage. Passed only while a call is carrying audio and the
+   * stage is collapsed — collapse and restore are the same call, not two
    * surfaces (DESIGN.md § "CallStrip").
    */
   onExpand?: () => void;
@@ -258,7 +258,7 @@ export function TalkModeCallBar({
                   type="button"
                   className="talk-btn talk-expand-btn"
                   onClick={onExpand}
-                  aria-label="Show the call overlay"
+                  aria-label="Show the call stage"
                 >
                   <ExpandIcon />
                 </button>
@@ -395,7 +395,7 @@ function formatMs(ms: number | null | undefined): string {
 
 /**
  * Which provider is worth naming right now: the one currently doing the work.
- * Exported so the call overlay prints the SAME label as the strip it minimizes
+ * Exported so the Call Stage prints the SAME label as the strip it collapses
  * into, rather than a second opinion about which engine is running.
  */
 export function providerSummary(opts: {
@@ -518,7 +518,7 @@ function PhoneIcon() {
   );
 }
 
-/** Restore the minimized overlay. The panel it reopens, in 16px stroke. */
+/** Return to the Call Stage. The surface it reopens, in 16px stroke. */
 function ExpandIcon() {
   return (
     <svg
@@ -536,7 +536,7 @@ function ExpandIcon() {
   );
 }
 
-/** Shared with the call overlay, which draws the same three controls. */
+/** Shared with the Call Stage, which draws the same controls. */
 export function PhoneDownIcon() {
   return (
     <svg

@@ -1139,12 +1139,12 @@ export interface EthosConfig {
    */
   displayStreamingEdits?: 'off' | 'dms' | 'all';
   /**
-   * Which treatment the in-call overlay draws (DESIGN.md § "Call overlay").
+   * Which treatment the Call Stage draws (DESIGN.md § "Call Stage").
    * Config key: `display.call_style`. Unset = `liquid`.
    */
   displayCallStyle?: 'liquid' | 'orb' | 'rings';
   /**
-   * What color the in-call overlay draws in. Config key: `display.call_accent`.
+   * What color the Call Stage draws in. Config key: `display.call_accent`.
    *   `'personality'` (default) — follow the active personality's `--accent`
    *   `'#RRGGBB'`               — an explicit hex
    * Anything else is ignored, so a typo falls back to the personality accent
