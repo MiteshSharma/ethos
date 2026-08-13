@@ -10,6 +10,7 @@
 //   - This bot is in — channels the bot is in + their channel mode, + Refresh.
 
 import type { PendingClarify } from '@ethosagent/types';
+import { HOME_RESTRICTED_TEXT } from '../authz';
 import { clarifyHomeEntryBlocks } from '../blocks/clarify';
 import { type KanbanTicket, kanbanListBlocks } from '../blocks/kanban';
 import { type SessionSummary, sessionListBlocks } from '../blocks/session';
@@ -91,6 +92,10 @@ export interface HomeViewInput {
   pendingClarifies?: PendingClarify[];
   /** Ethos web UI origin (no trailing slash) for session deep links. */
   webUiBaseUrl?: string;
+  /** Viewer is not on the bot's allowlist. The private sections (sessions,
+   *  kanban, memory, channel roster) are replaced by a notice saying so —
+   *  their empty states would otherwise read as "there is nothing here". */
+  restricted?: boolean;
 }
 
 export function buildHomeView(input: HomeViewInput): SlackHomeView {
@@ -121,6 +126,16 @@ export function buildHomeView(input: HomeViewInput): SlackHomeView {
     }
     if (clarifies.overflow > 0) blocks.push(context([`+ ${clarifies.overflow} more`]));
     blocks.push(divider());
+  }
+
+  // Restricted viewer — everything below this point is bot-private state, and
+  // `app_home_opened` fires for any workspace member who opens the app. Say so
+  // instead of rendering the sections' empty states, which would read as
+  // "there is nothing here". "Waiting on you" above is already per-viewer.
+  if (input.restricted) {
+    blocks.push(section(HOME_RESTRICTED_TEXT));
+    blocks.push(refreshActionsBlock());
+    return { type: 'home', blocks };
   }
 
   // Recent sessions.
@@ -170,7 +185,15 @@ export function buildHomeView(input: HomeViewInput): SlackHomeView {
     }
     if (channels.overflow > 0) blocks.push(context([`+ ${channels.overflow} more`]));
   }
-  blocks.push({
+  blocks.push(refreshActionsBlock());
+
+  return { type: 'home', blocks };
+}
+
+/** The Refresh button. Rendered on every view, restricted or not — a viewer
+ *  who was just added to the allowlist re-publishes without leaving the tab. */
+function refreshActionsBlock(): SlackBlock {
+  return {
     type: 'actions',
     elements: [
       {
@@ -179,7 +202,5 @@ export function buildHomeView(input: HomeViewInput): SlackHomeView {
         text: { type: 'plain_text', text: 'Refresh', emoji: true },
       },
     ],
-  });
-
-  return { type: 'home', blocks };
+  };
 }

@@ -389,7 +389,11 @@ export interface SlackAppConfig {
   /** Slack emoji name (no colons) reacted onto inbound messages to
    *  acknowledge receipt. Absent = the adapter's default (`eyes`). */
   receiptReaction?: string;
-  /** Slash-command allowlist of Slack user IDs. Empty/absent = everyone. */
+  /** Slack user IDs allowed to run `/ethos` and see the App Home tab's private
+   *  sections. Narrows `channel_filter.slack` (`ownerUserId` +
+   *  `recipientAllowlist`); it cannot widen it, so an id listed here that is
+   *  not allowlisted on the message surface stays denied. Empty/absent = the
+   *  `channel_filter.slack` allowlist alone. Both empty = nobody. */
   allowedSlashUsers?: string[];
   /** Slack `bot_id`s whose messages reach the agent. Empty/absent drops every
    *  bot/workflow message, which is the behaviour before this key existed. */

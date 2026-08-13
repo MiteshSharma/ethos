@@ -2117,6 +2117,36 @@ async function createTelegramGreetingProvider() {
   };
 }
 
+/**
+ * Effective allowlist for a Slack app's out-of-band surfaces — the `/ethos`
+ * slash command and the App Home tab. Neither is an inbound message, so the
+ * gateway's `checkMessage` never sees them; this is where they get their
+ * trust set, and it is derived from the message surface's so the two cannot
+ * disagree about who is trusted.
+ *
+ * Base = `channel_filter.slack` (`ownerUserId` + `recipientAllowlist`), the
+ * exact set `checkMessage` admits. `slack.apps.<i>.allowedSlashUsers`, when
+ * set, *narrows* that base — it can never widen it, so a user who cannot get
+ * a message to the bot can never drive its privileged surfaces either.
+ *
+ * Fail-closed: no `channel_filter.slack` entry, no allowlisted senders, or an
+ * `allowedSlashUsers` list that shares no id with the base, all yield `[]`,
+ * and an empty list authorizes nobody. `channel_filter.slack.enabled: false`
+ * is deliberately not an escape hatch here — disabling the message filter
+ * opens the message surface, not the surfaces that write MEMORY.md and
+ * rewrite channel routing.
+ */
+function slackSlashAllowlist(
+  filter: { ownerUserId?: string; recipientAllowlist?: string[] } | undefined,
+  allowedSlashUsers: string[] | undefined,
+): string[] {
+  const base: string[] = [];
+  if (filter?.ownerUserId) base.push(filter.ownerUserId);
+  if (filter?.recipientAllowlist) base.push(...filter.recipientAllowlist);
+  if (!allowedSlashUsers || allowedSlashUsers.length === 0) return base;
+  return base.filter((id) => allowedSlashUsers.includes(id));
+}
+
 export async function buildAdapters(
   config: EthosConfig,
   loadAdapter: AdapterModuleLoader,
@@ -2230,6 +2260,19 @@ export async function buildAdapters(
             signingSecret: appCfg.signingSecret,
             botKey,
             binding: { type: appCfg.bind.type, name: appCfg.bind.name },
+            // Always passed, never conditionally spread: an omitted key would
+            // leave the gate's state implicit, and this gate denies by
+            // default precisely so nothing depends on omission.
+            allowedUsers: slackSlashAllowlist(
+              config.channelFilter?.slack,
+              appCfg.allowedSlashUsers,
+            ),
+            // CHS-005 — adapter-local refusals land in the same audit trail as
+            // approvals. Resolved lazily so a boot that never refuses anything
+            // does not open the observability DB.
+            observability: {
+              recordSafetyBlock: (opts) => getEthosObservability().recordSafetyBlock(opts),
+            },
             storage: slackStorage,
             personalityCard,
             personalityUnfurl,
@@ -2263,6 +2306,11 @@ export async function buildAdapters(
         new mod.DiscordAdapter({
           token: config.discordToken,
           botKey: discordBotKey(config.discordToken),
+          // CHS-005 — see the Slack adapter above; a refused approval click is
+          // otherwise visible only to the person refused.
+          observability: {
+            recordSafetyBlock: (opts) => getEthosObservability().recordSafetyBlock(opts),
+          },
         }),
       );
     }
@@ -2445,6 +2493,11 @@ async function buildSlackClarifySurfaces(
       bridge,
       store: bridge.store,
       getSessionRouting,
+      // CHS-005 — the cross-tenant gate drops a click silently by design; the
+      // audit row is what makes a replay attempt investigable afterwards.
+      observability: {
+        recordSafetyBlock: (opts) => getEthosObservability().recordSafetyBlock(opts),
+      },
     });
     // Wire the App Home "Waiting on you" data source. Setter must run
     // before adapter.start() so registerHomeEvents picks it up.

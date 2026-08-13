@@ -434,6 +434,74 @@ describe('buildAdapters — Slack surface wiring (SP-A)', () => {
     expect(await cfg.personalityUnfurl.lookupPersonality('no-such-personality')).toBeNull();
   });
 
+  // CHS-001 — the slash / App Home allowlist. `checkMessage` never sees these
+  // surfaces, so the trust set has to be handed to the adapter here, derived
+  // from the message surface's own allowlist so the two cannot disagree.
+  it('derives allowedUsers from channel_filter.slack when allowedSlashUsers is unset', async () => {
+    const adapters = await buildAdapters(
+      {
+        ...baseConfig,
+        channelFilter: {
+          slack: { ownerUserId: 'U-owner', recipientAllowlist: ['U-teammate'] },
+        },
+        slack: { apps: [slackApp({ type: 'personality', name: 'researcher' })] },
+      },
+      makeLoader(),
+    );
+
+    expect((adapters[0] as CapturedAdapter).capturedConfig).toMatchObject({
+      allowedUsers: ['U-owner', 'U-teammate'],
+    });
+  });
+
+  it('lets allowedSlashUsers narrow the channel_filter allowlist, never widen it', async () => {
+    const adapters = await buildAdapters(
+      {
+        ...baseConfig,
+        channelFilter: {
+          slack: { ownerUserId: 'U-owner', recipientAllowlist: ['U-teammate'] },
+        },
+        slack: {
+          apps: [
+            {
+              ...slackApp({ type: 'personality', name: 'researcher' }),
+              // `U-stranger` cannot message the bot, so it cannot drive the
+              // slash surface either — it is dropped, not added.
+              allowedSlashUsers: ['U-owner', 'U-stranger'],
+            },
+          ],
+        },
+      },
+      makeLoader(),
+    );
+
+    expect((adapters[0] as CapturedAdapter).capturedConfig).toMatchObject({
+      allowedUsers: ['U-owner'],
+    });
+  });
+
+  it('passes an empty allowedUsers (deny-all) when no channel_filter.slack exists', async () => {
+    const adapters = await buildAdapters(
+      { ...baseConfig, slack: { apps: [slackApp({ type: 'personality', name: 'researcher' })] } },
+      makeLoader(),
+    );
+
+    expect((adapters[0] as CapturedAdapter).capturedConfig).toMatchObject({ allowedUsers: [] });
+  });
+
+  it('does not treat channel_filter.slack.enabled: false as an open slash surface', async () => {
+    const adapters = await buildAdapters(
+      {
+        ...baseConfig,
+        channelFilter: { slack: { enabled: false } },
+        slack: { apps: [slackApp({ type: 'personality', name: 'researcher' })] },
+      },
+      makeLoader(),
+    );
+
+    expect((adapters[0] as CapturedAdapter).capturedConfig).toMatchObject({ allowedUsers: [] });
+  });
+
   it('wires kanban readers for team-bound bots only', async () => {
     const adapters = await buildAdapters(
       {

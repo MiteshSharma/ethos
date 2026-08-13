@@ -320,6 +320,10 @@ describe('home/handlers — registerHomeEvents', () => {
   const deps = {
     binding: { type: 'team' as const, name: 'eng' },
     displayName: 'Eng',
+    // The private sections are default-deny (CHS-001); these tests are about
+    // gathering and publishing, so they run as allowlisted viewers. The gate
+    // itself is covered in `slash-authz.test.ts`.
+    allowedUsers: ['U123', 'U999'],
     channelOverrides: { entries: () => [['C1', 'all']] as Array<[string, 'all']> },
     session: {
       recentSessions: async () => [

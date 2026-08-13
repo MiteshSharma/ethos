@@ -138,6 +138,15 @@ export interface SlackAdapterConfig {
    * must allowlist that same id for the message to be admitted.
    */
   allowedBotIds?: string[];
+  /**
+   * Slack user IDs allowed to drive the bot's out-of-band surfaces: the
+   * `/ethos` slash command and the private sections of the App Home tab.
+   * Neither is an inbound message, so neither reaches the gateway's
+   * `checkMessage` — this list is their only authorization control, and it is
+   * default-closed. Absent or empty denies everyone, including the operator;
+   * wire it from the same trust source the message surface uses.
+   */
+  allowedUsers?: string[];
   /** Storage instance rooted at `~/.ethos`. When provided, the adapter
    *  persists per-channel mode overrides and thread-participation state
    *  under `~/.ethos/slack/<botKey>/`. */
@@ -250,6 +259,8 @@ export class SlackAdapter implements PlatformAdapter, ApprovalCapableAdapter {
   readonly defaultChannelMode: ChannelMode;
 
   private readonly allowedBotIds: string[] | undefined;
+  /** Slash-command / App Home allowlist. Undefined denies every user. */
+  private readonly allowedUsers: string[] | undefined;
   /** `users.info` display-name resolver, cached (24 h TTL, ≤1024 entries). */
   private readonly users: UsernameResolver;
   private readonly app: App;
@@ -324,6 +335,7 @@ export class SlackAdapter implements PlatformAdapter, ApprovalCapableAdapter {
     this.binding = config.binding;
     this.defaultChannelMode = config.defaultChannelMode ?? DEFAULT_CHANNEL_MODE;
     this.allowedBotIds = config.allowedBotIds;
+    this.allowedUsers = config.allowedUsers;
     this.storage = config.storage;
     this.memory = config.memory;
     this.kanban = config.kanban;
@@ -440,6 +452,7 @@ export class SlackAdapter implements PlatformAdapter, ApprovalCapableAdapter {
         personalityCard: this.personalityCard,
         storage: this.storage,
         submitAgentTurn: this.makeAskSubmitter(),
+        allowedUsers: this.allowedUsers,
       });
       try {
         await respond({
@@ -606,6 +619,7 @@ export class SlackAdapter implements PlatformAdapter, ApprovalCapableAdapter {
       kanban: this.kanban,
       clarify: this.clarifyHomeReader,
       webUiBaseUrl: this.webUiBaseUrl,
+      allowedUsers: this.allowedUsers,
     });
 
     // `link_shared` URL unfurling. `registerLinkEvents` is a no-op when

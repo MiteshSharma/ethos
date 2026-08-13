@@ -5,6 +5,7 @@
 // Slack app.
 
 import type { Storage } from '@ethosagent/types';
+import { isUserAuthorized, SLASH_DENIED_TEXT } from '../authz';
 import { type SlackBlock, section } from '../blocks/shared';
 import type { Binding, ChannelMode } from '../config';
 import type { ChannelOverrideStore } from '../store/channel-overrides';
@@ -37,10 +38,12 @@ export interface SlashContext {
   /** Hook for `/ethos ask` — the adapter wires this to gateway.handleMessage. */
   submitAgentTurn?: (input: { channel: string; user: string; text: string }) => Promise<void>;
   /**
-   * Allowlist of Slack user IDs permitted to run slash commands. When set
-   * (non-empty), only these users may invoke `/ethos`; others receive an
-   * ephemeral "not authorized" response. When unset or empty, all workspace
-   * members are allowed (backwards-compatible default).
+   * Allowlist of Slack user IDs permitted to run slash commands. Only these
+   * users may invoke `/ethos`; everyone else receives an ephemeral "not
+   * authorized" response. Default-deny: when unset or empty, nobody is
+   * authorized — `/ethos memory add` writes into the system prompt and
+   * `/ethos channel-mode` rewrites routing, so an open default is a hole,
+   * not a compatibility affordance.
    */
   allowedUsers?: string[];
 }
@@ -67,24 +70,16 @@ export function parseSubcommand(text: string): { name: Subcommand | 'unknown'; r
   return { name: known, rest: restParts.join(' ') };
 }
 
-/** Check whether the invoking user is authorized. When `allowedUsers` is
- *  configured (non-empty), only listed user IDs may proceed. */
-function isUserAuthorized(userId: string, allowedUsers: string[] | undefined): boolean {
-  if (!allowedUsers || allowedUsers.length === 0) return true;
-  return allowedUsers.includes(userId);
-}
-
 export async function dispatch(
   payload: SlashCommandPayload,
   ctx: SlashContext,
 ): Promise<SlashResponse> {
+  // Authorization first, before the payload is parsed: every subcommand below
+  // either reads bot-private state or mutates it, so the gate is the whole
+  // surface, not a per-subcommand decision.
   if (!isUserAuthorized(payload.user_id, ctx.allowedUsers)) {
-    const blocks = [section('You are not authorized to use this command.')];
-    return {
-      blocks,
-      text: 'You are not authorized to use this command.',
-      responseType: 'ephemeral',
-    };
+    const blocks = [section(SLASH_DENIED_TEXT)];
+    return { blocks, text: SLASH_DENIED_TEXT, responseType: 'ephemeral' };
   }
 
   const { name, rest } = parseSubcommand(payload.text);

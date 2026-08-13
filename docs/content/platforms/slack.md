@@ -134,6 +134,16 @@ From inside `ethos chat`:
 /deny slack U02ABCDEFGH
 ```
 
+### 5a. Restrict who can run `/ethos` and open App Home
+
+`/ethos` and the App Home tab never become inbound messages, so the filter above does not see them. They get their own gate, and it is default-deny: the allowlist is `ownerUserId` + `recipientAllowlist` from the block above, optionally narrowed by [`slack.apps.<i>.allowedSlashUsers`](../using/reference/config-yaml.md#slack-apps).
+
+```yaml
+slack.apps.0.allowedSlashUsers: U01ABCDEFGH,U02ABCDEFGH
+```
+
+A user who is not on that allowlist gets an ephemeral "You are not authorized to use this command" and an App Home tab whose memory, session, kanban, and channel sections are replaced by a notice. Configure `ownerUserId` before rolling out: with no `channel_filter.slack` entry, nobody — including you — can run `/ethos memory add`, `/ethos channel-mode`, or read the bot's memory from App Home.
+
 ### 6. Drive multi-workspace deployments
 
 A Slack app is installed per workspace. Each installation issues its own bot token. To run the same Ethos app across several workspaces:
