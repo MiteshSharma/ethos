@@ -236,6 +236,7 @@ Slack rotates the WebSocket; Bolt reconnects automatically. Persistent flapping 
 | `channel.mention_gate` | gateway audit | Allowlisted sender posted in a channel without `@mentioning` the bot. | Mention the bot or reply in-thread. |
 | `channel.pairing.sent` | gateway audit | First DM from a non-allowlisted user; pairing code emitted. | Owner runs `/allow <code>` to approve. |
 | `channel.context_stripped` | gateway audit | Quoted thread content from a non-allowlisted user was removed before the turn. | Expected when `contextVisibility: allowlist`. |
+| `channel.prior_context_stripped` | gateway audit | Thread-backfill lines from non-allowlisted authors were removed; `details.dropped` is `true` when nothing survived. | Expected when `contextVisibility: allowlist`. Add the author's user id (or a bot's `bot_id`) to `recipientAllowlist` to keep their lines. |
 | `invalid_auth` | adapter health | Bot token revoked or wrong. | Reinstall the app, copy the new `xoxb-…` token. |
 | `not_in_channel` | delivery result | Bot is not a member of the target channel. | Invite the bot. |
 | `missing_scope` | delivery result | App lacks a Bot Token Scope. | Add the scope, reinstall, update the token. |

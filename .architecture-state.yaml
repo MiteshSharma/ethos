@@ -292,10 +292,10 @@ register_anchors:
     - { path: packages/wiring/src/build-agent-loop.ts, line: 259, contains: "defaultRules: watcherDefaultRules" }
 
   G-CHAN:
-    - { path: packages/safety/channel/src/channel-filter.ts, line: 102, contains: "export function checkMessage" }
-    - { path: packages/safety/channel/src/channel-filter.ts, line: 70, contains: "export function isSenderAllowed" }
+    - { path: packages/safety/channel/src/channel-filter.ts, line: 111, contains: "export function checkMessage" }
+    - { path: packages/safety/channel/src/channel-filter.ts, line: 79, contains: "export function isSenderAllowed" }
     - { path: packages/safety/channel/src/channel-filter.ts, line: 24, contains: "dmPolicy?:" }
-    - { path: packages/safety/channel/src/channel-filter.ts, line: 31, contains: "contextVisibility?:" }
+    - { path: packages/safety/channel/src/channel-filter.ts, line: 33, contains: "contextVisibility?:" }
 
   G-AUDIT:
     - { path: extensions/observability-sqlite/src/store.ts, line: 114, contains: "redactJson(trace.attrs)" }

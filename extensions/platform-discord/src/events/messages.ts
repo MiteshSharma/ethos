@@ -1,4 +1,9 @@
-import type { Attachment, AttachmentCache, InboundMessage } from '@ethosagent/types';
+import type {
+  Attachment,
+  AttachmentCache,
+  InboundMessage,
+  PriorContextEntry,
+} from '@ethosagent/types';
 import type { Client, Message } from 'discord.js';
 import type { ChannelMode } from '../config';
 import type { TriageContext } from '../routing/triage';
@@ -46,10 +51,11 @@ export function registerMessageHandler(ctx: MessageContext): void {
         : message.channelId;
       const bfThreadId = message.channel.isThread() ? message.channelId : undefined;
       if (!ctx.backfillState.hasDone(bfChatId, bfThreadId)) {
-        const priorContext = await fetchChannelHistory(message);
+        const history = await fetchChannelHistory(message);
         await ctx.backfillState.mark(bfChatId, bfThreadId);
-        if (priorContext) {
-          envelope.priorContext = priorContext;
+        if (history) {
+          envelope.priorContext = history.text;
+          envelope.priorContextEntries = history.entries;
         }
       }
     }
@@ -262,7 +268,13 @@ const BACKFILL_FETCH_LIMIT = 50;
 const BACKFILL_INCLUDE_LIMIT = 40;
 const BACKFILL_CHAR_LIMIT = 4000;
 
-async function fetchChannelHistory(message: Message): Promise<string | undefined> {
+/** Backfilled history plus the per-line attribution the channel filter needs. */
+interface DiscordHistory {
+  text: string;
+  entries: PriorContextEntry[];
+}
+
+async function fetchChannelHistory(message: Message): Promise<DiscordHistory | undefined> {
   try {
     const fetched = await message.channel.messages.fetch({
       limit: BACKFILL_FETCH_LIMIT,
@@ -270,22 +282,56 @@ async function fetchChannelHistory(message: Message): Promise<string | undefined
     });
     if (fetched.size === 0) return undefined;
 
-    const lines = [...fetched.values()]
+    // `userId` is the id the gateway's channel filter allowlists by, so it has
+    // to match what `triageMessage` stamps on a live envelope: `author.id`.
+    const entries: PriorContextEntry[] = [...fetched.values()]
       .reverse()
       .filter((m) => m.content.trim() && !m.author.bot)
       .slice(-BACKFILL_INCLUDE_LIMIT)
-      .map((m) => `${m.author.username}: ${m.content.trim()}`)
-      .join('\n');
+      .map((m) => ({ userId: m.author.id, text: `${m.author.username}: ${m.content.trim()}` }));
 
+    const { kept, omitted } = capHistory(entries);
+    const lines = kept.map((e) => e.text).join('\n');
     if (!lines) return undefined;
 
-    const trimmed =
-      lines.length > BACKFILL_CHAR_LIMIT
-        ? `[... earlier messages omitted]\n${lines.slice(-BACKFILL_CHAR_LIMIT)}`
-        : lines;
+    const trimmed = omitted ? `[... earlier messages omitted]\n${lines}` : lines;
 
-    return `[Recent channel history — ${fetched.size} messages before bot joined]\n\n${trimmed}`;
+    return {
+      text: `[Recent channel history — ${fetched.size} messages before bot joined]\n\n${trimmed}`,
+      entries: kept,
+    };
   } catch {
     return undefined;
   }
+}
+
+/**
+ * Trim the history to `BACKFILL_CHAR_LIMIT`, newest first, dropping whole
+ * entries rather than slicing mid-line — the rendered text and the entries
+ * have to stay byte-identical or the channel filter cannot rebuild one from
+ * the other.
+ *
+ * Duplicated in `platform-slack/src/events/messages.ts` — the two adapter
+ * packages cannot import each other, and the backfill constants beside it are
+ * already duplicated for the same reason.
+ */
+function capHistory(entries: PriorContextEntry[]): {
+  kept: PriorContextEntry[];
+  omitted: boolean;
+} {
+  const kept: PriorContextEntry[] = [];
+  let budget = BACKFILL_CHAR_LIMIT;
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const entry = entries[i];
+    const cost = entry.text.length + (kept.length > 0 ? 1 : 0);
+    if (cost > budget) {
+      // A single line wider than the whole budget still gets a tail slice —
+      // otherwise one long message would evade the cap entirely.
+      if (kept.length === 0) kept.push({ ...entry, text: entry.text.slice(-BACKFILL_CHAR_LIMIT) });
+      return { kept, omitted: true };
+    }
+    budget -= cost;
+    kept.unshift(entry);
+  }
+  return { kept, omitted: false };
 }

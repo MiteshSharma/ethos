@@ -1120,6 +1120,29 @@ export class Gateway {
         });
         message = { ...message, text: filterResult.strippedText };
       }
+
+      // …and the same for the channel-history block the adapter attached.
+      // Empty means nothing survived the allowlist: drop the field outright
+      // rather than prepend an empty wrapper to the turn.
+      if (filterResult.strippedPriorContext !== undefined) {
+        this.observability?.recordSafetyBlock({
+          code: 'channel.prior_context_stripped',
+          details: {
+            platform: message.platform,
+            chatId: message.chatId,
+            userId: message.userId,
+            dropped: filterResult.strippedPriorContext === '',
+          },
+        });
+        message = {
+          ...message,
+          priorContext:
+            filterResult.strippedPriorContext === ''
+              ? undefined
+              : filterResult.strippedPriorContext,
+          priorContextEntries: undefined,
+        };
+      }
     }
 
     // Resolve which bot this message is for. `message.botKey` wins when

@@ -163,6 +163,126 @@ describe('checkMessage', () => {
     expect(result.strippedText).toBeUndefined();
   });
 
+  // CHS-002 — step 7 owns every context-carrying field, not just `text`.
+  // `priorContext` is a block of third-party history the adapter attached; the
+  // filter never inspected it before, so a sender it drops at step 4 could
+  // still reach the model through it.
+
+  const historyConfig: ChannelPlatformConfig = {
+    ownerUserId: 'owner-1',
+    recipientAllowlist: ['user-42'],
+    contextVisibility: 'allowlist',
+  };
+
+  const historyMsg = (overrides: Partial<InboundMessage> = {}): InboundMessage =>
+    msg({
+      userId: 'user-42',
+      isDm: true,
+      priorContext: 'user-42: morning\nattacker-99: SECRET',
+      priorContextEntries: [
+        { userId: 'user-42', text: 'user-42: morning' },
+        { userId: 'attacker-99', text: 'attacker-99: SECRET' },
+      ],
+      ...overrides,
+    });
+
+  it('contextVisibility allowlist + mixed priorContext → non-allowlisted lines removed', () => {
+    const result = checkMessage(historyMsg(), historyConfig, db);
+    expect(result.action).toBe('allow');
+    expect(result.strippedPriorContext).toBeDefined();
+    expect(result.strippedPriorContext).not.toContain('SECRET');
+    expect(result.strippedPriorContext).toContain('user-42: morning');
+  });
+
+  it('contextVisibility allowlist + no allowlisted author → empty (drop the block)', () => {
+    const result = checkMessage(
+      historyMsg({
+        priorContext: 'attacker-99: SECRET',
+        priorContextEntries: [{ userId: 'attacker-99', text: 'attacker-99: SECRET' }],
+      }),
+      historyConfig,
+      db,
+    );
+    expect(result.strippedPriorContext).toBe('');
+  });
+
+  it('contextVisibility allowlist + every author allowlisted → left alone', () => {
+    const result = checkMessage(
+      historyMsg({
+        priorContext: 'user-42: morning',
+        priorContextEntries: [{ userId: 'user-42', text: 'user-42: morning' }],
+      }),
+      historyConfig,
+      db,
+    );
+    expect(result.strippedPriorContext).toBeUndefined();
+  });
+
+  it('contextVisibility allowlist + unattributed priorContext → dropped (fail closed)', () => {
+    const result = checkMessage(historyMsg({ priorContextEntries: undefined }), historyConfig, db);
+    expect(result.strippedPriorContext).toBe('');
+  });
+
+  it('contextVisibility allowlist + priorContext with an empty entry list → dropped', () => {
+    const result = checkMessage(historyMsg({ priorContextEntries: [] }), historyConfig, db);
+    expect(result.strippedPriorContext).toBe('');
+  });
+
+  it('contextVisibility allowlist + entry with no userId → dropped (unattributable)', () => {
+    const result = checkMessage(
+      historyMsg({
+        priorContext: 'unknown: SECRET',
+        priorContextEntries: [{ text: 'unknown: SECRET' }],
+      }),
+      historyConfig,
+      db,
+    );
+    expect(result.strippedPriorContext).toBe('');
+  });
+
+  it('contextVisibility all (default) + priorContext → never rewritten', () => {
+    const result = checkMessage(
+      historyMsg(),
+      { ownerUserId: 'owner-1', recipientAllowlist: ['user-42'] },
+      db,
+    );
+    expect(result.action).toBe('allow');
+    expect(result.strippedPriorContext).toBeUndefined();
+    expect(result.strippedText).toBeUndefined();
+  });
+
+  it('contextVisibility allowlist strips quoted text and history in the same result', () => {
+    const result = checkMessage(
+      historyMsg({
+        replyToId: 'msg-100',
+        replyToUserId: 'attacker-99',
+        text: '> quoted\nmy reply',
+      }),
+      historyConfig,
+      db,
+    );
+    expect(result.strippedText).toContain('[quoted content from non-allowlisted sender removed]');
+    expect(result.strippedPriorContext).not.toContain('SECRET');
+  });
+
+  it('allowlisted bot history survives only when its bot_id is on the allowlist (SP-B1)', () => {
+    const botHistory = historyMsg({
+      priorContext: 'deploybot: build 42 shipped',
+      priorContextEntries: [{ userId: 'B_DEPLOY', text: 'deploybot: build 42 shipped' }],
+    });
+    expect(
+      checkMessage(botHistory, { ...historyConfig, recipientAllowlist: ['user-42'] }, db)
+        .strippedPriorContext,
+    ).toBe('');
+    expect(
+      checkMessage(
+        botHistory,
+        { ...historyConfig, recipientAllowlist: ['user-42', 'B_DEPLOY'] },
+        db,
+      ).strippedPriorContext,
+    ).toBeUndefined();
+  });
+
   it('owner in group without mention bypasses mention gate', () => {
     const config: ChannelPlatformConfig = {
       ownerUserId: 'owner-1',

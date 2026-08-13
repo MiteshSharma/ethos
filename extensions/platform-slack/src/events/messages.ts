@@ -3,7 +3,7 @@
 // `adapter.onMessage()`). All Slack-specific decisions live in
 // `routing/triage`; this file just wires Bolt up to it.
 
-import type { InboundMessage } from '@ethosagent/types';
+import type { InboundMessage, PriorContextEntry } from '@ethosagent/types';
 import type { App, MessageEvent } from '@slack/bolt';
 import {
   isAllowedBotId,
@@ -44,6 +44,12 @@ function historyAuthor(msg: HistoryMessage, names: Map<string, string>): string 
   return resolved ?? msg.username ?? msg.bot_profile?.name ?? msg.user ?? 'unknown';
 }
 
+/** Backfilled history plus the per-line attribution the channel filter needs. */
+interface SlackHistory {
+  text: string;
+  entries: PriorContextEntry[];
+}
+
 async function fetchSlackHistory(
   client: App['client'],
   channelId: string,
@@ -51,7 +57,7 @@ async function fetchSlackHistory(
   triggeringTs: string | undefined,
   allowedBotIds: string[] | undefined,
   users: UsernameResolver | undefined,
-): Promise<string | undefined> {
+): Promise<SlackHistory | undefined> {
   try {
     let messages: HistoryMessage[];
     if (threadTs) {
@@ -89,20 +95,55 @@ async function fetchSlackHistory(
     const authorIds = included.map((m) => m.user).filter((u): u is string => Boolean(u));
     const names = users ? await users.resolveMany(authorIds) : new Map<string, string>();
 
-    const lines = included.map((m) => `${historyAuthor(m, names)}: ${m.text?.trim()}`).join('\n');
+    // `userId` is the id the gateway's channel filter allowlists by, so it has
+    // to match what `triageMessage` stamps on a live envelope: a human's
+    // `user`, an allowlisted bot's `bot_id`.
+    const entries: PriorContextEntry[] = included.map((m) => ({
+      userId: m.bot_id ?? m.user,
+      text: `${historyAuthor(m, names)}: ${m.text?.trim()}`,
+    }));
 
+    const { kept, omitted } = capHistory(entries);
+    const lines = kept.map((e) => e.text).join('\n');
     if (!lines) return undefined;
 
-    const trimmed =
-      lines.length > BACKFILL_CHAR_LIMIT
-        ? `[... earlier messages omitted]\n${lines.slice(-BACKFILL_CHAR_LIMIT)}`
-        : lines;
-
+    const trimmed = omitted ? `[... earlier messages omitted]\n${lines}` : lines;
     const label = threadTs ? 'thread history' : 'channel history';
-    return `[Recent ${label} — before bot joined]\n\n${trimmed}`;
+    return { text: `[Recent ${label} — before bot joined]\n\n${trimmed}`, entries: kept };
   } catch {
     return undefined;
   }
+}
+
+/**
+ * Trim the history to `BACKFILL_CHAR_LIMIT`, newest first, dropping whole
+ * entries rather than slicing mid-line — the rendered text and the entries
+ * have to stay byte-identical or the channel filter cannot rebuild one from
+ * the other.
+ *
+ * Duplicated in `platform-discord/src/events/messages.ts` — the two adapter
+ * packages cannot import each other, and the backfill constants beside it are
+ * already duplicated for the same reason.
+ */
+function capHistory(entries: PriorContextEntry[]): {
+  kept: PriorContextEntry[];
+  omitted: boolean;
+} {
+  const kept: PriorContextEntry[] = [];
+  let budget = BACKFILL_CHAR_LIMIT;
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const entry = entries[i];
+    const cost = entry.text.length + (kept.length > 0 ? 1 : 0);
+    if (cost > budget) {
+      // A single line wider than the whole budget still gets a tail slice —
+      // otherwise one long message would evade the cap entirely.
+      if (kept.length === 0) kept.push({ ...entry, text: entry.text.slice(-BACKFILL_CHAR_LIMIT) });
+      return { kept, omitted: true };
+    }
+    budget -= cost;
+    kept.unshift(entry);
+  }
+  return { kept, omitted: false };
 }
 
 export function registerMessageEvents(
@@ -162,6 +203,8 @@ export function registerMessageEvents(
           bot_profile: inner.bot_profile as { name?: string } | undefined,
         };
 
+        if (inner.parent_user_id) syntheticMsg.parent_user_id = inner.parent_user_id as string;
+
         void triageMessage(syntheticMsg, triage)
           .then((result) => {
             if (result.envelope) {
@@ -182,7 +225,7 @@ export function registerMessageEvents(
       const channelId = result.envelope.chatId;
       const threadTs = result.envelope.threadId;
       if (threadTs && !triage.backfillState.hasDone(channelId, threadTs)) {
-        const priorContext = await fetchSlackHistory(
+        const history = await fetchSlackHistory(
           app.client,
           channelId,
           threadTs,
@@ -191,8 +234,9 @@ export function registerMessageEvents(
           triage.users,
         );
         await triage.backfillState.mark(channelId, threadTs);
-        if (priorContext) {
-          result.envelope.priorContext = priorContext;
+        if (history) {
+          result.envelope.priorContext = history.text;
+          result.envelope.priorContextEntries = history.entries;
         }
       }
     }
@@ -206,7 +250,7 @@ export function registerMessageEvents(
       const channelId = result.envelope.chatId;
       const threadTs = result.envelope.threadId;
       if (threadTs && !triage.backfillState.hasDone(channelId, threadTs)) {
-        const priorContext = await fetchSlackHistory(
+        const history = await fetchSlackHistory(
           app.client,
           channelId,
           threadTs,
@@ -215,8 +259,9 @@ export function registerMessageEvents(
           triage.users,
         );
         await triage.backfillState.mark(channelId, threadTs);
-        if (priorContext) {
-          result.envelope.priorContext = priorContext;
+        if (history) {
+          result.envelope.priorContext = history.text;
+          result.envelope.priorContextEntries = history.entries;
         }
       }
     }

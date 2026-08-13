@@ -243,6 +243,7 @@ Role mentions are not the same as user mentions; the adapter only checks `messag
 | `channel.mention_gate` | gateway audit | Allowlisted sender posted in a guild without `@mentioning` the bot. | Mention the bot or reply to one of its messages. |
 | `channel.pairing.sent` | gateway audit | First DM from a non-allowlisted user; pairing code emitted. | Owner runs `/allow <code>` to approve. |
 | `channel.context_stripped` | gateway audit | Quoted content from a non-allowlisted user was removed before the turn. | Expected when `contextVisibility: allowlist`. |
+| `channel.prior_context_stripped` | gateway audit | Channel-backfill lines from non-allowlisted authors were removed; `details.dropped` is `true` when nothing survived. | Expected when `contextVisibility: allowlist`. Add the author's snowflake to `recipientAllowlist` to keep their lines. |
 | `Channel not found or not sendable` | delivery result | Bot was kicked, channel deleted, or `chatId` is not a text channel. | Re-invite or update routing. |
 
 ## See also

@@ -55,6 +55,8 @@ export interface RawSlackMessage {
   channel_type?: string;
   subtype?: string;
   files?: RawSlackFile[];
+  /** Author of the thread parent, stamped by Slack on every threaded reply. */
+  parent_user_id?: string;
   /** Present on messages authored by an app/workflow rather than a human. */
   bot_id?: string;
   /** Display name Slack stamps on bot/workflow posts. Humans don't carry it. */
@@ -70,6 +72,8 @@ export interface RawSlackMention {
   text: string;
   ts: string;
   thread_ts?: string;
+  /** Author of the thread parent; present when the mention is a thread reply. */
+  parent_user_id?: string;
 }
 
 export interface TriageResult {
@@ -124,6 +128,7 @@ export async function triageMessage(
       text: text || (hasFiles ? '(file attachment)' : ''),
       ts: msg.ts,
       threadTs,
+      parentUserId: msg.parent_user_id,
       isDm,
       isGroupMention: false,
       raw: msg,
@@ -151,6 +156,7 @@ export async function triageMention(
       text,
       ts: evt.ts,
       threadTs: evt.thread_ts,
+      parentUserId: evt.parent_user_id,
       isDm: false,
       isGroupMention: true,
       raw: evt,
@@ -190,6 +196,7 @@ interface EnvelopeInputs {
   text: string;
   ts: string | undefined;
   threadTs: string | undefined;
+  parentUserId: string | undefined;
   isDm: boolean;
   isGroupMention: boolean;
   raw: unknown;
@@ -211,7 +218,13 @@ function buildEnvelope(input: EnvelopeInputs): InboundMessage {
     text: input.text,
     isDm: input.isDm,
     isGroupMention: input.isGroupMention,
+    // Slack has no per-message quote-reply; the thread parent is the message
+    // this one replies to. `parent_user_id` is Slack's own field for its
+    // author and rides on the event, so no extra API call is needed. Absent
+    // on top-level posts (there is no parent) — and the channel filter's
+    // step 7a reads `replyToUserId === undefined` as "adapter can't say".
     replyToId: input.threadTs,
+    replyToUserId: input.parentUserId,
     messageId: input.ts,
     ...(input.threadTs ? { threadId: input.threadTs } : {}),
     raw: input.raw,

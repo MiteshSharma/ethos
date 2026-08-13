@@ -74,7 +74,29 @@ export interface InboundMessage {
    * this to the user text so the LLM has ambient channel context.
    */
   priorContext?: string;
+  /**
+   * Per-line attribution for `priorContext`, in the same order. Adapters that
+   * set `priorContext` should set this too: the channel filter needs a sender
+   * id per line to enforce `contextVisibility: 'allowlist'`, and it cannot
+   * recover one from the rendered string. An adapter that supplies
+   * `priorContext` without this loses the whole block under that setting —
+   * unattributable third-party content fails closed, it does not pass.
+   */
+  priorContextEntries?: PriorContextEntry[];
   raw: unknown;
+}
+
+/** One attributed line of `InboundMessage.priorContext`. */
+export interface PriorContextEntry {
+  /**
+   * Platform sender id for this line, in the same id space as
+   * `InboundMessage.userId` — that is what the channel filter's allowlist
+   * matches against. Leave undefined when the adapter cannot attribute the
+   * line; the filter then treats it as non-allowlisted.
+   */
+  userId?: string;
+  /** The rendered line, exactly as it appears in `priorContext`. */
+  text: string;
 }
 
 export interface OutboundMessage {
