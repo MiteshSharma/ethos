@@ -81,6 +81,15 @@ export interface UseVoiceCall {
   sttProvider: string | null;
   ttsProvider: string | null;
   latency: VoiceTurnLatency;
+  /**
+   * Speak a question through the live call and return the answer the user
+   * speaks — what makes the `clarify` tool voice-native.
+   *
+   * Resolves null when there is no call, when the serving tier cannot speak, or
+   * when `signal` aborts. All three mean the same thing to the caller: keep the
+   * on-screen affordance, because nothing was asked out loud.
+   */
+  ask: (question: string, signal: AbortSignal) => Promise<string | null>;
   start: () => void;
   hangUp: () => void;
   toggleMute: () => void;
@@ -255,6 +264,15 @@ export function useVoiceCall(options: UseVoiceCallOptions = {}): UseVoiceCall {
 
   const dismissNotice = useCallback(() => dispatch({ type: 'dismiss-notice' }), []);
 
+  // Read through the ref for the same reason `agentLevel` does — and because
+  // that ref is null unless a call is actually up, which is what makes "no
+  // call" resolve null without the caller having to check first.
+  const ask = useCallback(
+    (question: string, signal: AbortSignal): Promise<string | null> =>
+      clientRef.current?.ask?.(question, signal) ?? Promise.resolve(null),
+    [],
+  );
+
   // Read through the ref, so a hung-up call reads zero rather than whatever the
   // last graph was holding.
   const agentLevel = useCallback(() => clientRef.current?.outputLevel?.() ?? 0, []);
@@ -274,6 +292,7 @@ export function useVoiceCall(options: UseVoiceCallOptions = {}): UseVoiceCall {
     sttProvider: state.sttProvider,
     ttsProvider: state.ttsProvider,
     latency,
+    ask,
     start,
     hangUp,
     toggleMute,

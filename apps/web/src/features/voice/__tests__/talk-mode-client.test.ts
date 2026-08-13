@@ -41,6 +41,22 @@ describe('talk-mode transport selection', () => {
     await client.disconnect();
   });
 
+  it('has nothing to ask before a tier is chosen', async () => {
+    // `ask` is delegated to whichever tier ends up serving, and a tier that
+    // cannot speak (or has not been picked yet) answers null — the clarify card
+    // is the affordance in every one of those cases.
+    const client = createTalkModeClient({
+      transcribe: () => Promise.resolve('hello'),
+      runAgentTurn: async function* () {
+        yield 'hi';
+      },
+      environment: full,
+      createDriver: () => fakeDriver(),
+    });
+
+    await expect(client.ask?.('Deploy where?', new AbortController().signal)).resolves.toBeNull();
+  });
+
   it('honours forceBatch even on a capable browser', async () => {
     const transcribe = vi.fn(() => Promise.resolve('hello'));
     const client = createTalkModeClient({

@@ -301,6 +301,13 @@ export function createTalkModeClient(deps: TalkModeClientDeps): VoiceCallClient 
       return inner?.outputLevel?.() ?? 0;
     },
 
+    // Whichever tier ended up serving. The realtime tier has no `ask` — the
+    // provider owns the turn and the floor there — so a clarify on it stays
+    // card-only, which is what the null says.
+    ask(question: string, signal: AbortSignal): Promise<string | null> {
+      return inner?.ask?.(question, signal) ?? Promise.resolve(null);
+    },
+
     on(listener: (event: VoiceCallEvent) => void): () => void {
       listeners.add(listener);
       return () => {

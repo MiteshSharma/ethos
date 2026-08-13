@@ -61,6 +61,24 @@ interface Segment {
   endsAt: number | null;
 }
 
+/**
+ * A clarify question being spoken, and then listened to for an answer.
+ *
+ * Non-null only while the agent is parked inside the `clarify` tool: the turn
+ * is still running and still owns the utterance id, which is why the answer is
+ * captured on THAT id rather than a new one (see `askClarify`).
+ */
+interface AskState {
+  /** Synthesis segment the question was sent as. */
+  segmentId: string;
+  /** Called once the question's audio has been handed to the playout clock. */
+  spoken: () => void;
+  /** Ends the ask with the spoken answer, or null when there will not be one. */
+  settle: (answer: string | null) => void;
+  /** True once the question has been said and the floor is back with the user. */
+  listening: boolean;
+}
+
 const DEFAULT_TTS_SAMPLE_RATE = 24_000;
 
 /** `reply_audio` here is a provider announcement, not a carrier of samples. */
@@ -83,6 +101,10 @@ export function createStreamingVoiceCallClient(deps: StreamingVoiceCallDeps): Vo
   let unsubs: Array<() => void> = [];
   /** Last TTS provider announced to the UI; re-announced only when it changes. */
   let announcedTtsProvider: string | null = null;
+  /** The clarify question on the floor right now, if any. */
+  let pendingAsk: AskState | null = null;
+  /** Segment ids for spoken questions — never collide with a reply's `s0`, `s1`. */
+  let askCount = 0;
 
   /** Everything tied to the current utterance goes away together. */
   const discardUtterance = (): void => {
@@ -91,21 +113,18 @@ export function createStreamingVoiceCallClient(deps: StreamingVoiceCallDeps): Vo
     activeUtteranceId = null;
     segments = [];
     pendingEncoded.clear();
+    // A clarify question dies with the utterance it was asked inside: the turn
+    // that was waiting on it is gone, so the card is what answers it now.
+    pendingAsk?.settle(null);
     deps.playout.stop();
   };
 
   const isStale = (utteranceId: string): boolean => disposed || utteranceId !== activeUtteranceId;
 
-  const startUtterance = (): void => {
-    const previous = activeUtteranceId;
-    if (previous) {
-      // The user started over. Tell the server to stop working on the old one
-      // so its results are never sent, and drop whatever is already queued.
-      deps.transport.send({ t: 'cancel', utteranceId: previous, reason: 'superseded' });
-      discardUtterance();
-    }
-    const id = nextId();
-    activeUtteranceId = id;
+  /** Tell the server to start capturing on whatever utterance id is active. */
+  const openUtterance = (): void => {
+    const id = activeUtteranceId;
+    if (!id) return;
     seq = 0;
     deps.transport.send({
       t: 'utterance_start',
@@ -117,10 +136,29 @@ export function createStreamingVoiceCallClient(deps: StreamingVoiceCallDeps): Vo
     });
   };
 
+  const startUtterance = (): void => {
+    const previous = activeUtteranceId;
+    if (previous) {
+      // The user started over. Tell the server to stop working on the old one
+      // so its results are never sent, and drop whatever is already queued.
+      deps.transport.send({ t: 'cancel', utteranceId: previous, reason: 'superseded' });
+      discardUtterance();
+    }
+    activeUtteranceId = nextId();
+    openUtterance();
+  };
+
   const onCaptureEvent = (event: EndpointerEvent): void => {
     if (disposed) return;
     switch (event.type) {
       case 'speech_start':
+        // An answer to a clarify question belongs to the utterance the blocked
+        // turn already owns. Minting a new one would supersede it here AND on
+        // the lane, cancelling the very turn the answer is for.
+        if (pendingAsk?.listening) {
+          openUtterance();
+          return;
+        }
         startUtterance();
         return;
       case 'frame': {
@@ -183,6 +221,12 @@ export function createStreamingVoiceCallClient(deps: StreamingVoiceCallDeps): Vo
           text,
           ...(frame.provider ? { provider: frame.provider } : {}),
         });
+        // The answer to a clarify question is not a new turn: it goes back to
+        // the tool that is blocking the one already running.
+        if (pendingAsk?.listening) {
+          pendingAsk.settle(text);
+          return;
+        }
         void runTurn(frame.utteranceId, text);
         return;
       }
@@ -205,7 +249,9 @@ export function createStreamingVoiceCallClient(deps: StreamingVoiceCallDeps): Vo
             pcm16FromBytes(payload),
             frame.sampleRate ?? DEFAULT_TTS_SAMPLE_RATE,
           );
-          markSegmentEnd(frame.segmentId, endsAt);
+          // A spoken question is not one of the reply's segments — it must not
+          // count towards the turn's "everything scheduled" wait.
+          if (frame.segmentId !== pendingAsk?.segmentId) markSegmentEnd(frame.segmentId, endsAt);
           return;
         }
         const parts = pendingEncoded.get(frame.segmentId) ?? [];
@@ -216,18 +262,32 @@ export function createStreamingVoiceCallClient(deps: StreamingVoiceCallDeps): Vo
       case 'segment_end': {
         const parts = pendingEncoded.get(frame.segmentId);
         pendingEncoded.delete(frame.segmentId);
-        if (isStale(frame.utteranceId) || !parts?.length) return;
+        const isQuestion = frame.segmentId === pendingAsk?.segmentId;
+        if (isStale(frame.utteranceId)) return;
+        if (!parts?.length) {
+          // PCM: every frame was scheduled as it landed, so the segment ending
+          // IS the question having been said.
+          if (isQuestion) pendingAsk?.spoken();
+          return;
+        }
         const utteranceId = frame.utteranceId;
         const segmentId = frame.segmentId;
+        const ask = pendingAsk;
         void deps.playout
           .playEncoded(concat(parts))
           .then((endsAt) => {
-            if (!isStale(utteranceId)) markSegmentEnd(segmentId, endsAt);
+            if (isStale(utteranceId)) return;
+            if (isQuestion) ask?.spoken();
+            else markSegmentEnd(segmentId, endsAt);
           })
           .catch(() => {
             // An undecodable clip loses its audio, not the conversation: the
-            // segment is marked done so the turn can still complete.
-            if (!isStale(utteranceId)) markSegmentEnd(segmentId, deps.playout.now());
+            // segment is marked done so the turn can still complete. A question
+            // nobody heard ends the ask instead — the card is how it gets
+            // answered now.
+            if (isStale(utteranceId)) return;
+            if (isQuestion) ask?.settle(null);
+            else markSegmentEnd(segmentId, deps.playout.now());
           });
         return;
       }
@@ -243,6 +303,21 @@ export function createStreamingVoiceCallClient(deps: StreamingVoiceCallDeps): Vo
         return;
       case 'error': {
         if (frame.utteranceId && isStale(frame.utteranceId)) return;
+        // A clarify question that could not be spoken ends the ASK, not the
+        // turn. The agent is still parked in the tool with its card on screen,
+        // and discarding the utterance here would abort the turn and take the
+        // card with it. The code is dropped for the same reason: one line that
+        // failed to synthesize is not "voice is unusable for this call" — the
+        // next one that fails says so, through the branch below.
+        if (pendingAsk && !pendingAsk.listening && frame.utteranceId === activeUtteranceId) {
+          emit({
+            type: 'error',
+            error: frame.message,
+            ...(frame.provider ? { provider: frame.provider } : {}),
+          });
+          pendingAsk.settle(null);
+          return;
+        }
         emit({
           type: 'error',
           error: frame.message,
@@ -352,6 +427,86 @@ export function createStreamingVoiceCallClient(deps: StreamingVoiceCallDeps): Vo
     await deps.playout.whenIdle();
   }
 
+  /**
+   * Speak a clarify question and hear the answer, without ending the turn that
+   * asked it.
+   *
+   * The turn is parked inside the `clarify` tool, and it is the turn that owns
+   * the utterance id — so everything here stays on that id: the question's
+   * synthesis, the answer's capture, and the reply that follows once the tool
+   * unblocks. A fresh id would supersede the turn on the lane and cancel it.
+   *
+   * The only difference from a reply sentence is the gating, and it is the
+   * existing gating either way: while the question plays the mic is closed and
+   * barge-in armed, exactly as for any other agent speech (which is what stops
+   * the question from being heard as its own answer); once it HAS been said the
+   * floor goes back — capture on, barge-in off, because there is nothing left
+   * to interrupt.
+   */
+  async function askClarify(question: string, signal: AbortSignal): Promise<string | null> {
+    const utteranceId = activeUtteranceId;
+    // No utterance means no turn to ask inside and nothing for the lane to
+    // attach the synthesis to. The card is already on screen; leave it to it.
+    if (disposed || pendingAsk || !utteranceId || signal.aborted) return null;
+
+    let settled = false;
+    let deliver: (answer: string | null) => void = () => {};
+    const answer = new Promise<string | null>((resolve) => {
+      deliver = resolve;
+    });
+    let announceSpoken: () => void = () => {};
+    const spoken = new Promise<void>((resolve) => {
+      announceSpoken = resolve;
+    });
+    const ask: AskState = {
+      segmentId: `q${askCount++}`,
+      spoken: announceSpoken,
+      settle: (value) => {
+        if (settled) return;
+        settled = true;
+        deliver(value);
+      },
+      listening: false,
+    };
+    pendingAsk = ask;
+    const onAbort = (): void => ask.settle(null);
+    signal.addEventListener('abort', onAbort, { once: true });
+
+    // Captioned and transcripted like any other spoken line, because that is
+    // what it is: the personality saying a sentence of this turn out loud.
+    emit({ type: 'reply_sentence', text: question });
+    deps.transport.send({
+      t: 'synthesize',
+      utteranceId,
+      segmentId: ask.segmentId,
+      text: question,
+      ...(deps.voice ? { voice: deps.voice } : {}),
+      ...(deps.personalityId ? { personalityId: deps.personalityId } : {}),
+    });
+
+    try {
+      await Promise.race([spoken, answer]);
+      if (settled) return await answer;
+      await deps.playout.whenIdle();
+      if (settled) return await answer;
+      ask.listening = true;
+      deps.capture.setBargeInEnabled(false);
+      deps.capture.setCaptureEnabled(true);
+      emit({ type: 'reply_complete', text: question });
+      return await answer;
+    } finally {
+      signal.removeEventListener('abort', onAbort);
+      if (pendingAsk === ask) pendingAsk = null;
+      // The agent takes the floor back — but only if the turn survived. A
+      // barge-in, a hang-up or a dropped link has already returned the call to
+      // a fresh listen, and re-closing the mic there would deafen it.
+      if (!disposed && turnController && activeUtteranceId === utteranceId) {
+        deps.capture.setCaptureEnabled(false);
+        deps.capture.setBargeInEnabled(true);
+      }
+    }
+  }
+
   return {
     async connect(): Promise<void> {
       disposed = false;
@@ -412,6 +567,8 @@ export function createStreamingVoiceCallClient(deps: StreamingVoiceCallDeps): Vo
     outputLevel(): number {
       return deps.playout.outputLevel();
     },
+
+    ask: askClarify,
 
     on(listener: (event: VoiceCallEvent) => void): () => void {
       listeners.add(listener);

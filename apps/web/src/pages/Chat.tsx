@@ -22,6 +22,7 @@ import {
   resolveCallAccent,
 } from '../features/voice/call-motion';
 import { runVoiceAgentTurn } from '../features/voice/chat-voice-runner';
+import { runVoiceClarify } from '../features/voice/clarify-voice';
 import { personalityCanTalk } from '../features/voice/gating';
 import { createPushToTalkHandlers } from '../features/voice/push-to-talk';
 import {
@@ -592,6 +593,34 @@ export function Chat() {
       window.removeEventListener('keyup', up);
     };
   }, [inCall, voice.pressToTalk, voice.hangUp]);
+
+  // Voice-native clarify. While a call is up, the agent's mid-turn question is
+  // SPOKEN and the next thing the user says answers it — routed to
+  // `clarify.respond`, not sent as a new chat turn. Without a call this effect
+  // does nothing at all and the card behaves exactly as it always has.
+  //
+  // The card renders throughout either way (below), non-blocking: the visual
+  // record of what was asked, the fallback when the tier cannot speak or
+  // synthesis fails, and still clickable — whichever answer lands first wins.
+  // Cleanup runs when the request leaves `pendingClarifies`, which is the
+  // existing `clarify.resolved` path (answered here, answered on the card,
+  // timed out, cancelled); aborting the ask there is what takes voice back out
+  // of "the next thing you say answers this".
+  const askByVoice = voice.ask;
+  useEffect(() => {
+    if (!pendingClarify || !inCall) return;
+    const controller = new AbortController();
+    void runVoiceClarify({
+      request: pendingClarify,
+      ask: askByVoice,
+      respond: (answer) =>
+        rpc.clarify
+          .respond({ requestId: pendingClarify.requestId, answer, source: 'user' })
+          .then(() => undefined),
+      signal: controller.signal,
+    });
+    return () => controller.abort();
+  }, [pendingClarify, inCall, askByVoice]);
 
   const handleSwitchPersonality = async (newId: string) => {
     // No-op: same personality clicked.

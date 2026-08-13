@@ -87,6 +87,26 @@ export interface VoiceCallClient {
    * level, and the overlay draws at rest.
    */
   outputLevel?(): number;
+  /**
+   * Speak `question` and return the next thing the user says — WITHOUT ending
+   * the agent turn that is in flight. This is what makes the `clarify` tool
+   * voice-native: the tool blocks the turn mid-way, so the question has to be
+   * asked and answered inside a turn that is still running.
+   *
+   * Resolves the spoken answer, or null for every "this cannot happen": the
+   * tier cannot speak, there is no turn to ask inside, synthesis failed, the
+   * call went away, or `signal` aborted because the on-screen card was answered
+   * first. Null is never a silent swallow — the caller's fallback is the card,
+   * which is rendered the whole time.
+   *
+   * Optional for the same reason as `outputLevel?()` above: it is a property of
+   * what the TIER can do, not of the boundary. The pipeline tiers own the turn
+   * and the floor, so they implement it. The realtime tier does not: the hosted
+   * provider owns both, and an answer spoken into it is consumed by the
+   * provider's own model turn rather than reaching the blocked tool. A tier
+   * without one reports nothing and the clarify stays card-only.
+   */
+  ask?(question: string, signal: AbortSignal): Promise<string | null>;
   /** Subscribe to call/transcript events. Returns an unsubscribe function. */
   on(listener: (event: VoiceCallEvent) => void): () => void;
 }
