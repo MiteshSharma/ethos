@@ -230,23 +230,41 @@ export function TalkModeCallBar({
               {!summary && totalMs === null ? <span className="talk-mono">·</span> : null}
             </button>
           ) : null}
-          <button
-            type="button"
-            className={`talk-btn${muted ? ' talk-btn-active' : ''}`}
-            onClick={onToggleMute}
-            aria-pressed={muted}
-            aria-label={muted ? 'Unmute microphone' : 'Mute microphone'}
-          >
-            {muted ? <MicOffIcon /> : <MicIcon />}
-          </button>
-          <button
-            type="button"
-            className="talk-btn talk-hangup-btn"
-            onClick={onHangUp}
-            aria-label="End call"
-          >
-            <PhoneDownIcon />
-          </button>
+          {/* The call is over and the strip is only still on screen to say WHY
+              — the budget sign-off, or a failure the user has not been told
+              about anywhere else. Mute and hang-up control nothing now, so they
+              give way to the same dismiss control the collapsed notices use;
+              without it the explanation would have no way off the screen. */}
+          {status === 'ended' && onDismissNotice ? (
+            <button
+              type="button"
+              className="talk-btn"
+              onClick={onDismissNotice}
+              aria-label="Dismiss"
+            >
+              <CloseIcon />
+            </button>
+          ) : (
+            <>
+              <button
+                type="button"
+                className={`talk-btn${muted ? ' talk-btn-active' : ''}`}
+                onClick={onToggleMute}
+                aria-pressed={muted}
+                aria-label={muted ? 'Unmute microphone' : 'Mute microphone'}
+              >
+                {muted ? <MicOffIcon /> : <MicIcon />}
+              </button>
+              <button
+                type="button"
+                className="talk-btn talk-hangup-btn"
+                onClick={onHangUp}
+                aria-label="End call"
+              >
+                <PhoneDownIcon />
+              </button>
+            </>
+          )}
         </div>
       </div>
       {detailOpen ? (
@@ -327,6 +345,13 @@ export function callDetailItems(opts: {
   ttsModel?: string | null;
   latency?: VoiceTurnLatency | undefined;
 }): string[] {
+  // On the realtime tier ONE provider both hears and speaks, and the `realtime`
+  // row already names it with the model the mint actually returned. The stt/tts
+  // rows are the PIPELINE's two-engine split: their models come from the
+  // deployment's pipeline config, which no part of a realtime call ever ran. So
+  // they are suppressed here rather than printed beside the provider that did —
+  // the row must never advertise a `{provider} · {model}` pair that did not run.
+  const pipelineStages = opts.tier !== 'realtime';
   return [
     // Which engine is talking, in the same mono label vocabulary as the
     // providers beside it — never a badge, never a debug panel.
@@ -334,8 +359,8 @@ export function callDetailItems(opts: {
     ...(opts.realtimeProvider
       ? [label('realtime', opts.realtimeProvider, opts.realtimeModel)]
       : []),
-    ...(opts.sttProvider ? [label('stt', opts.sttProvider, opts.sttModel)] : []),
-    ...(opts.ttsProvider ? [label('tts', opts.ttsProvider, opts.ttsModel)] : []),
+    ...(pipelineStages && opts.sttProvider ? [label('stt', opts.sttProvider, opts.sttModel)] : []),
+    ...(pipelineStages && opts.ttsProvider ? [label('tts', opts.ttsProvider, opts.ttsModel)] : []),
     `llm ${formatMs(opts.latency?.llmMs)}`,
     `audio ${formatMs(opts.latency?.ttsMs)}`,
     `total ${formatMs(opts.latency?.totalMs)}`,
@@ -394,6 +419,12 @@ function SpeakingIndicator({
   micLevels: number[];
   muted: boolean;
 }) {
+  // Ended — the strip is only still here to explain why. There is no mic to
+  // meter and no dot to pulse, so the slot goes empty but keeps its width: the
+  // row must not jump sideways as the call settles into its explanation.
+  if (status === 'ended') {
+    return <div className="talk-indicator" />;
+  }
   // Connecting / reconnecting — amber dot, the connection-dot vocabulary.
   if (status === 'connecting' || status === 'reconnecting') {
     return (

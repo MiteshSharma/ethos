@@ -22,7 +22,11 @@ import { TalkModeCallBar, TalkModeToggle } from '../features/voice/TalkMode';
 import { createTalkModeClient, type RealtimeTokenAnswer } from '../features/voice/talk-mode-client';
 import { useVoiceCall, type VoiceCallClientHooks } from '../features/voice/useVoiceCall';
 import type { VoiceCallClient } from '../features/voice/voice-call-client';
-import { chatMessagesWithVoice, voiceCaption } from '../features/voice/voice-call-reducer';
+import {
+  callStripVisible,
+  chatMessagesWithVoice,
+  voiceCaption,
+} from '../features/voice/voice-call-reducer';
 import { useActivePersonality } from '../hooks/useActivePersonality';
 import { useChat } from '../hooks/useChat';
 import { useNewSessionModal } from '../hooks/useNewSessionModal';
@@ -597,7 +601,9 @@ export function Chat() {
             />
           }
         />
-        {inCall || voice.degraded || voice.micDenied ? (
+        {/* Not `inCall`: a finished call can still be the only thing on screen
+            explaining why it finished. `callStripVisible` owns that rule. */}
+        {callStripVisible(voice) ? (
           <TalkModeCallBar
             status={voice.status}
             micLevels={voice.micLevels}

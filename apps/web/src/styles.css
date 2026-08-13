@@ -2487,10 +2487,19 @@ textarea {
   border-bottom: 1px solid var(--ethos-border);
 }
 
+/* Wrapping is the overflow guarantee, not a nicety. The indicator, the chip and
+   the controls are all `flex-shrink: 0` by design — a clipped tap target or a
+   half-drawn meter is worse than a second line — and at 375px the widest state
+   (the `interrupted — go ahead` label beside the detail, mute and end controls)
+   measures ~402px against a 343px content box. Without a wrap rule that
+   overflows the viewport; with one, an item that does not fit takes the next
+   line instead. `call-strip-layout.test.ts` computes both numbers from this
+   stylesheet and pins the rule. */
 .talk-call-row {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 12px;
+  gap: 8px 12px;
 }
 
 /* Degraded-to-text and mic-permission-denied: the strip collapses to one row
@@ -2568,12 +2577,15 @@ textarea {
   animation: status-dot-pulse 1s ease-in-out infinite;
 }
 
+/* Shrinks rather than overflows: this slot also carries a recoverable error
+   message, which has no length bound, and one item wider than the row is the
+   single case `flex-wrap` cannot rescue. */
 .talk-status-label {
   font-family: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 12px;
   color: var(--ethos-text-secondary);
   font-variant-numeric: tabular-nums;
-  flex-shrink: 0;
+  min-width: 0;
 }
 
 /* Live caption of the agent's speech — the a11y story for talk-mode. */
@@ -2688,19 +2700,40 @@ textarea {
   opacity: 0.9;
 }
 
-/* 375px: the mark, the state and mute/end persist; the mono provider+latency
-   detail collapses behind the toggle's tap target. */
+/* 375px: the mark, the state, the caption and mute/end persist; the mono
+   provider+latency detail collapses behind the toggle's tap target. */
 @media (max-width: 420px) {
   .talk-indicator {
     width: 72px;
   }
 
+  /* Captions ARE the accessibility story for talk-mode (DR5), and the phone is
+     the headline use case — hiding them here removed the feature exactly where
+     it mattered most. They keep their place instead, on a full-width second
+     line: `order` puts them after the controls so line one still holds the
+     mark, the state word and mute/end, and `flex-basis: 100%` gives them the
+     whole width to ellipsize into rather than a scrap between two chips. */
   .talk-caption {
+    order: 1;
+    flex-basis: 100%;
+  }
+
+  /* The plan: "mono latency/tier detail collapses behind a tap" — ALL of it.
+     The latency reading used to be exempt, which both contradicted the plan and
+     put the widest text back on the narrowest row. Every number is one tap away
+     in the detail row below. */
+  .talk-detail-btn .talk-mono {
     display: none;
   }
 
-  .talk-detail-btn .talk-mono:not(.talk-latency) {
-    display: none;
+  /* …which would otherwise leave an empty pill beside two icon buttons. The
+     marker is the same `·` separator the mono labels are built from, so the
+     control still reads as "more detail" without new markup or a new glyph. */
+  .talk-detail-btn::after {
+    content: "···";
+    font-family: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 12px;
+    color: var(--ethos-text-tertiary);
   }
 
   .talk-detail-btn {

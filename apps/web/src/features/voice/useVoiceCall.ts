@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useReducer, useRef, useState } from 'react';
+import { watchReducedMotion } from '../../lib/reduced-motion';
+import { createMicMeter } from './mic-meter';
 import { createUnwiredVoiceCallClient, type VoiceCallClient } from './voice-call-client';
 import {
   initialVoiceCallState,
@@ -92,19 +94,28 @@ export function useVoiceCall(options: UseVoiceCallOptions = {}): UseVoiceCall {
   const clientRef = useRef<VoiceCallClient | null>(null);
   const unsubscribeRef = useRef<(() => void) | null>(null);
   const audioCtxRef = useRef<AudioContext | null>(null);
-  const analyserRef = useRef<AnalyserNode | null>(null);
-  const rafRef = useRef<number | null>(null);
+  const stopMeterRef = useRef<(() => void) | null>(null);
+  /**
+   * The OS reduced-motion preference, kept in a ref because the meter loop
+   * reads it per frame and must not re-subscribe (or re-render) to notice a
+   * change. Subscribed once for the life of the hook, not per call.
+   */
+  const reducedMotionRef = useRef(false);
+  useEffect(
+    () =>
+      watchReducedMotion((reduced) => {
+        reducedMotionRef.current = reduced;
+      }),
+    [],
+  );
 
   const teardownMeter = useCallback(() => {
-    if (rafRef.current !== null) {
-      cancelAnimationFrame(rafRef.current);
-      rafRef.current = null;
-    }
+    stopMeterRef.current?.();
+    stopMeterRef.current = null;
     if (audioCtxRef.current) {
       void audioCtxRef.current.close().catch(() => {});
       audioCtxRef.current = null;
     }
-    analyserRef.current = null;
     setMicLevels(flatLevels());
   }, []);
 
@@ -127,25 +138,18 @@ export function useVoiceCall(options: UseVoiceCallOptions = {}): UseVoiceCall {
     const analyser = audioCtx.createAnalyser();
     analyser.fftSize = 64;
     source.connect(analyser);
-    analyserRef.current = analyser;
 
-    const tick = () => {
-      const a = analyserRef.current;
-      if (a) {
-        const data = new Uint8Array(a.frequencyBinCount);
-        a.getByteFrequencyData(data);
-        let sum = 0;
-        for (let i = 0; i < data.length; i++) sum += data[i] ?? 0;
-        const avg = Math.min(1, sum / data.length / 160);
-        setMicLevels((prev) => {
-          const next = prev.slice(1);
-          next.push(avg);
-          return next;
-        });
-      }
-      rafRef.current = requestAnimationFrame(tick);
-    };
-    rafRef.current = requestAnimationFrame(tick);
+    // The loop lives in `mic-meter.ts` — including the reduced-motion freeze,
+    // which CSS structurally cannot deliver for bars that are redrawn from JS
+    // every frame.
+    stopMeterRef.current = createMicMeter({
+      analyser,
+      bars: METER_BARS,
+      onLevels: setMicLevels,
+      reducedMotion: () => reducedMotionRef.current,
+      requestFrame: (cb) => requestAnimationFrame(cb),
+      cancelFrame: (handle) => cancelAnimationFrame(handle),
+    });
   }, []);
 
   /**

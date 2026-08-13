@@ -301,4 +301,85 @@ describe('CallStrip — the expandable detail row', () => {
   it('says nothing about a tier nobody reported', () => {
     expect(callDetailItems({})).toEqual(['llm —', 'audio —', 'total —']);
   });
+
+  it('never names a pipeline stt/tts pair on a realtime call', () => {
+    // Chat hands the strip the deployment's PIPELINE provider+model as the
+    // stt/tts defaults on every call, and the realtime transport stamps its own
+    // provider onto the same fields. Left alone, the two combine into
+    // `stt openai-realtime · whisper-1` — a provider·model pair that never ran.
+    // One realtime provider hears and speaks, and the `realtime` row above
+    // already names it with the model the mint actually returned.
+    expect(
+      callDetailItems({
+        tier: 'realtime',
+        realtimeProvider: 'openai-realtime',
+        realtimeModel: 'gpt-realtime',
+        sttProvider: 'openai-realtime',
+        sttModel: 'whisper-1',
+        ttsProvider: 'openai-realtime',
+        ttsModel: 'tts-1',
+        latency: { llmMs: 300, ttsMs: 120, totalMs: 420 },
+      }),
+    ).toEqual([
+      'tier realtime',
+      'realtime openai-realtime · gpt-realtime',
+      'llm 300ms',
+      'audio 120ms',
+      'total 420ms',
+    ]);
+  });
+});
+
+describe('CallStrip — a call that has stopped but is not finished explaining', () => {
+  // No apostrophes: `renderToStaticMarkup` escapes them, and the point here is
+  // the sentence surviving, not the entity encoding.
+  const SIGN_OFF = 'That is the spending limit for this call, so we will stop here.';
+
+  it('still shows the budget chip and its reason after the call ends', () => {
+    const html = strip({ status: 'ended', windDown: SIGN_OFF, caption: SIGN_OFF });
+    expect(html).toContain('budget reached');
+    expect(html).toContain(SIGN_OFF);
+    expect(html).toContain('call ended');
+  });
+
+  it('trades the dead controls for a way to dismiss the explanation', () => {
+    // Mute and hang-up control nothing once the call is over, and an
+    // explanation with no way off the screen is furniture.
+    const html = strip({
+      status: 'ended',
+      windDown: SIGN_OFF,
+      onDismissNotice: () => {},
+    });
+    expect(html).toContain('aria-label="Dismiss"');
+    expect(html).not.toContain('aria-label="End call"');
+    expect(html).not.toContain('aria-label="Mute microphone"');
+  });
+
+  it('keeps both halves of a call that never started', () => {
+    // Realtime refused, then the pipeline fallback failed too: the refusal is
+    // the notice line, the failure takes the state word's place, and neither
+    // has anywhere else to be said.
+    const html = strip({
+      status: 'ended',
+      notice: 'Realtime voice is not available for this deployment: untrusted provider.',
+      error: 'Could not open the voice socket.',
+      onDismissNotice: () => {},
+    });
+    expect(html).toContain('untrusted provider');
+    expect(html).toContain('Could not open the voice socket.');
+  });
+
+  it('does not leave a live-looking mic meter on a dead call', () => {
+    // The mic is closed by the time the strip is explaining itself; a red
+    // AudioBars row would claim it is still listening.
+    const html = strip({ status: 'ended', windDown: SIGN_OFF });
+    expect(html).toContain('talk-indicator');
+    expect(html).not.toContain('composer-voice-bar');
+  });
+
+  it('keeps mute and hang-up while the call is still running', () => {
+    const html = strip({ status: 'listening', onDismissNotice: () => {} });
+    expect(html).toContain('aria-label="End call"');
+    expect(html).not.toContain('aria-label="Dismiss"');
+  });
 });

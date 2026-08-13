@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { TIER_DEGRADED_CODE as TRANSPORT_TIER_DEGRADED_CODE } from '../talk-mode-client';
 import { parseVoiceCallControlEvent, type VoiceCallEvent } from '../voice-call-client';
 import {
+  callStripVisible,
   chatMessagesWithVoice,
   initialVoiceCallState,
   MIC_DENIED_CODE,
@@ -11,6 +12,7 @@ import {
   voiceCaption,
   voiceTranscriptToMessages,
 } from '../voice-call-reducer';
+import { classifyVoiceStartError } from '../voice-start-error';
 import { FakeVoiceCallClient } from './fake-voice-call-client';
 
 // Reduce a whole event sequence — the shape the hook feeds the reducer.
@@ -514,6 +516,85 @@ describe('voiceCallReducer — budget wind-down (DR1 ★)', () => {
       type: 'budget_wind_down',
       text: SIGN_OFF,
     });
+  });
+});
+
+describe('callStripVisible — what Chat still renders after a call stops', () => {
+  const SIGN_OFF = "That's the spending limit for this call, so I'll stop here.";
+
+  it('shows the strip for a live call and drops it when one simply ends', () => {
+    expect(callStripVisible({ ...initialVoiceCallState, status: 'listening' })).toBe(true);
+    expect(callStripVisible({ ...initialVoiceCallState, status: 'ended' })).toBe(false);
+    expect(callStripVisible(initialVoiceCallState)).toBe(false);
+  });
+
+  it('keeps the budget explanation on screen as the call closes', () => {
+    // The whole point of the wind-down: the sign-off is spoken, the client
+    // disconnects, and the `budget reached` chip must not vanish at the exact
+    // moment it is the only thing explaining why the call stopped.
+    let state = driveThroughClient([
+      { type: 'budget_wind_down', text: SIGN_OFF },
+      { type: 'disconnected' },
+    ]);
+    expect(state.status).toBe('ended');
+    expect(callStripVisible(state)).toBe(true);
+    expect(voiceCaption(state)).toBe(SIGN_OFF);
+
+    // …and it is dismissible, so it does not become furniture.
+    state = voiceCallReducer(state, { type: 'dismiss-notice' });
+    expect(state.windDown).toBeNull();
+    expect(callStripVisible(state)).toBe(false);
+  });
+
+  it('does not let a mid-call dismiss take the budget chip with it', () => {
+    // The tier notice has its own dismiss control and it sits above a LIVE
+    // strip; using it must not silence the wind-down that is still being said.
+    const state = voiceCallReducer(
+      driveThroughClient([
+        { type: 'error', error: 'Realtime refused; on the pipeline.', code: TIER_DEGRADED_CODE },
+        { type: 'budget_wind_down', text: SIGN_OFF },
+      ]),
+      { type: 'dismiss-notice' },
+    );
+    expect(state.notice).toBeNull();
+    expect(state.windDown).toBe(SIGN_OFF);
+  });
+
+  it('keeps a refusal on screen when the fallback tier also fails to start', () => {
+    // The edge: realtime is refused (a notice above the strip), the pipeline
+    // fallback then throws out of `connect()`, and the hook's catch ends the
+    // call. Unmounting there would leave the user with neither explanation —
+    // not the refusal, not the failure.
+    const refusal = 'Realtime voice is not available for this deployment: untrusted provider.';
+    let state = driveThroughClient([
+      { type: 'error', error: refusal, code: TIER_DEGRADED_CODE },
+      classifyVoiceStartError(new Error('Could not open the voice socket.')),
+    ]);
+    state = voiceCallReducer(state, { type: 'hang-up' });
+
+    expect(state.status).toBe('ended');
+    expect(callStripVisible(state)).toBe(true);
+    // Both halves survive: why realtime did not run, and why nothing else did.
+    expect(state.notice).toBe(refusal);
+    expect(state.error).toBe('Could not open the voice socket.');
+
+    state = voiceCallReducer(state, { type: 'dismiss-notice' });
+    expect(callStripVisible(state)).toBe(false);
+  });
+
+  it('still drops the strip when the downgrade was the whole story', () => {
+    // A call that merely ran on the fallback tier and then ended normally
+    // leaves no error behind, so the notice goes with the strip rather than
+    // outliving the conversation it was about.
+    const state = voiceCallReducer(
+      driveThroughClient([
+        { type: 'error', error: 'Realtime refused; on the pipeline.', code: TIER_DEGRADED_CODE },
+        { type: 'utterance_committed', text: 'hi' },
+      ]),
+      { type: 'hang-up' },
+    );
+    expect(state.notice).not.toBeNull();
+    expect(callStripVisible(state)).toBe(false);
   });
 });
 

@@ -149,7 +149,18 @@ export function voiceCallReducer(state: VoiceCallState, action: VoiceCallAction)
       return initialVoiceCallState;
 
     case 'dismiss-notice':
-      return { ...state, degraded: null, micDenied: false, notice: null, error: null };
+      return {
+        ...state,
+        degraded: null,
+        micDenied: false,
+        notice: null,
+        error: null,
+        // The sign-off outlives the call on purpose (see `windDown`), so it is
+        // only dismissible once there is nothing left for it to explain.
+        // Dismissing the tier notice mid-call must not take the `budget
+        // reached` chip with it.
+        ...(state.status === 'ended' ? { windDown: null } : {}),
+      };
 
     case 'tier':
       return { ...state, tier: action.tier };
@@ -322,6 +333,44 @@ function finalizeAgentLine(
     return [...transcript.slice(0, -1), finalized(last)];
   }
   return [...transcript, finalized({})];
+}
+
+/**
+ * Does Chat still render the CallStrip?
+ *
+ * A live call, obviously. The reason this is a function rather than
+ * `status !== 'idle' && status !== 'ended'` is the OTHER half: a call that has
+ * stopped is not always finished TALKING to the user, and unmounting the strip
+ * the instant the status turns `ended` throws away the only thing on screen
+ * that explains what just happened.
+ *
+ * Two states this actually loses, both reachable today:
+ *
+ * - The budget wind-down. The sign-off is spoken, `disconnected` lands, and the
+ *   `budget reached` chip plus its caption would vanish at the exact moment
+ *   they matter. `windDown` is documented to survive `ended` for this reason;
+ *   this is what makes that true on screen.
+ * - A call that never started. The realtime tier is refused (a dismissible
+ *   `notice` above the strip) and then the pipeline fallback ALSO fails to
+ *   start — the failure lands in `error` and the call goes straight to `ended`.
+ *   Unmounting there leaves the user with no explanation at all, neither the
+ *   refusal nor the failure.
+ *
+ * `error` rather than `notice` is the second condition on purpose: a call that
+ * merely ran on the fallback tier and then ended normally leaves `error` null
+ * (see the `TIER_DEGRADED_CODE` branch above), so the strip still goes away
+ * when the downgrade was the whole story. `degraded` and `micDenied` imply an
+ * `error` today, but they are listed because they are what the strip COLLAPSES
+ * for, and that must not depend on a coupling somewhere else.
+ *
+ * Everything here is cleared by `dismiss-notice`, so the post-call strip always
+ * has a way off the screen.
+ */
+export function callStripVisible(
+  state: Pick<VoiceCallState, 'status' | 'degraded' | 'micDenied' | 'windDown' | 'error'>,
+): boolean {
+  if (state.status !== 'idle' && state.status !== 'ended') return true;
+  return Boolean(state.degraded || state.micDenied || state.windDown || state.error);
 }
 
 /**

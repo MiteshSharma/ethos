@@ -24,6 +24,11 @@ indicator/controls, and the live transcript. Part of
   transcript is the ONLY record the page has of the call.
 - **`useVoiceCall.ts`** — drives a `VoiceCallClient` through the reducer and owns
   the mic level meter (same AudioContext/analyser pattern as `useVoiceRecorder`).
+- **`mic-meter.ts`** — the meter's animation loop, behind an injected clock and
+  analyser. Split out because `prefers-reduced-motion` has to stop it HERE: the
+  bars are redrawn from JS every frame, so the stylesheet's `animation: none`
+  removes only the smoothing and the bars keep moving. CSS cannot express this
+  and a stylesheet assertion cannot test it.
 - **`gating.ts`** — `personalityCanTalk(toolset)`: the §3(e) toolset gate.
 - **`TalkMode.tsx`** — the toggle + in-call control bar + speaking indicator.
 
