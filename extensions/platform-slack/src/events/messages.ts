@@ -6,6 +6,7 @@
 import type { InboundMessage } from '@ethosagent/types';
 import type { App, MessageEvent } from '@slack/bolt';
 import {
+  isAllowedBotId,
   type RawSlackMention,
   type RawSlackMessage,
   type TriageContext,
@@ -28,8 +29,9 @@ const EDIT_DEBOUNCE_MS = 200;
 async function fetchSlackHistory(
   client: App['client'],
   channelId: string,
-  threadTs?: string,
-  triggeringTs?: string,
+  threadTs: string | undefined,
+  triggeringTs: string | undefined,
+  allowedBotIds: string[] | undefined,
 ): Promise<string | undefined> {
   try {
     let messages: {
@@ -59,7 +61,12 @@ async function fetchSlackHistory(
     }
 
     const lines = messages
-      .filter((m) => m.text?.trim() && !m.bot_id && m.subtype !== 'bot_message')
+      .filter((m) => {
+        if (!m.text?.trim()) return false;
+        // Allowlisted bots contribute to history; every other bot stays out.
+        if (isAllowedBotId(m.bot_id, allowedBotIds)) return true;
+        return !m.bot_id && m.subtype !== 'bot_message';
+      })
       .reverse()
       .slice(-BACKFILL_INCLUDE_LIMIT)
       .map((m) => `${m.username ?? m.user ?? 'unknown'}: ${m.text?.trim()}`)
@@ -100,8 +107,11 @@ export function registerMessageEvents(
       const inner = rawObj.message as Record<string, unknown> | undefined;
       if (!inner) return;
 
-      // Reject edited bot messages to prevent feedback loops
-      if (inner.bot_id || inner.bot_profile) return;
+      // Reject edited bot messages to prevent feedback loops, unless the
+      // operator has allowlisted this bot's `bot_id`.
+      const innerBotId = inner.bot_id as string | undefined;
+      if ((innerBotId || inner.bot_profile) && !isAllowedBotId(innerBotId, triage.allowedBotIds))
+        return;
 
       const channel = rawObj.channel as string | undefined;
       if (!channel) return;
@@ -127,6 +137,7 @@ export function registerMessageEvents(
           channel_type: rawObj.channel_type as string | undefined,
           subtype: inner.subtype as string | undefined,
           files: inner.files as RawSlackMessage['files'],
+          ...(innerBotId ? { bot_id: innerBotId } : {}),
         };
 
         void triageMessage(syntheticMsg, triage)
@@ -149,7 +160,13 @@ export function registerMessageEvents(
       const channelId = result.envelope.chatId;
       const threadTs = result.envelope.threadId;
       if (threadTs && !triage.backfillState.hasDone(channelId, threadTs)) {
-        const priorContext = await fetchSlackHistory(app.client, channelId, threadTs, triggeringTs);
+        const priorContext = await fetchSlackHistory(
+          app.client,
+          channelId,
+          threadTs,
+          triggeringTs,
+          triage.allowedBotIds,
+        );
         await triage.backfillState.mark(channelId, threadTs);
         if (priorContext) {
           result.envelope.priorContext = priorContext;
@@ -166,7 +183,13 @@ export function registerMessageEvents(
       const channelId = result.envelope.chatId;
       const threadTs = result.envelope.threadId;
       if (threadTs && !triage.backfillState.hasDone(channelId, threadTs)) {
-        const priorContext = await fetchSlackHistory(app.client, channelId, threadTs, triggeringTs);
+        const priorContext = await fetchSlackHistory(
+          app.client,
+          channelId,
+          threadTs,
+          triggeringTs,
+          triage.allowedBotIds,
+        );
         await triage.backfillState.mark(channelId, threadTs);
         if (priorContext) {
           result.envelope.priorContext = priorContext;

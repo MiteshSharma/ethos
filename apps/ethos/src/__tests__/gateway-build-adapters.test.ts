@@ -356,6 +356,29 @@ describe('buildAdapters — Slack surface wiring (SP-A)', () => {
     });
   });
 
+  // SP-B1 — the bot allowlist has to survive the trip from config to adapter;
+  // an unwired key is a gate that silently never opens.
+  it('passes allowedBotIds through to the adapter', async () => {
+    const adapters = await buildAdapters(
+      {
+        ...baseConfig,
+        slack: {
+          apps: [
+            {
+              ...slackApp({ type: 'personality', name: 'researcher' }),
+              allowedBotIds: ['B_DEPLOY'],
+            },
+          ],
+        },
+      },
+      makeLoader(),
+    );
+
+    expect((adapters[0] as CapturedAdapter).capturedConfig).toMatchObject({
+      allowedBotIds: ['B_DEPLOY'],
+    });
+  });
+
   it('omits the knobs the operator did not set, leaving adapter defaults in charge', async () => {
     const adapters = await buildAdapters(
       { ...baseConfig, slack: { apps: [slackApp({ type: 'personality', name: 'researcher' })] } },
@@ -366,6 +389,7 @@ describe('buildAdapters — Slack surface wiring (SP-A)', () => {
     expect(cfg).not.toHaveProperty('defaultChannelMode');
     expect(cfg).not.toHaveProperty('receiptReaction');
     expect(cfg).not.toHaveProperty('webUiBaseUrl');
+    expect(cfg).not.toHaveProperty('allowedBotIds');
   });
 
   it('wires session + personality-unfurl readers on every Slack bot', async () => {

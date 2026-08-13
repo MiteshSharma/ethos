@@ -391,6 +391,9 @@ export interface SlackAppConfig {
   receiptReaction?: string;
   /** Slash-command allowlist of Slack user IDs. Empty/absent = everyone. */
   allowedSlashUsers?: string[];
+  /** Slack `bot_id`s whose messages reach the agent. Empty/absent drops every
+   *  bot/workflow message, which is the behaviour before this key existed. */
+  allowedBotIds?: string[];
 }
 
 /**
@@ -1723,6 +1726,9 @@ export async function writeConfig(
       }
       if (app.allowedSlashUsers?.length) {
         lines.push(`slack.apps.${i}.allowedSlashUsers: ${app.allowedSlashUsers.join(',')}`);
+      }
+      if (app.allowedBotIds?.length) {
+        lines.push(`slack.apps.${i}.allowedBotIds: ${app.allowedBotIds.join(',')}`);
       }
     }
   }
@@ -3471,6 +3477,13 @@ function buildSlackApps(kv: Record<number, Record<string, string>>): {
         .map((s) => s.trim())
         .filter(Boolean);
       if (users.length > 0) app.allowedSlashUsers = users;
+    }
+    if (entry.allowedBotIds) {
+      const botIds = entry.allowedBotIds
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean);
+      if (botIds.length > 0) app.allowedBotIds = botIds;
     }
     apps.push(app);
   }

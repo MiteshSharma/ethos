@@ -2242,6 +2242,7 @@ export async function buildAdapters(
               : {}),
             ...(appCfg.defaultChannelMode ? { defaultChannelMode: appCfg.defaultChannelMode } : {}),
             ...(appCfg.receiptReaction ? { receiptReaction: appCfg.receiptReaction } : {}),
+            ...(appCfg.allowedBotIds?.length ? { allowedBotIds: appCfg.allowedBotIds } : {}),
             ...(webUiBaseUrl ? { webUiBaseUrl } : {}),
           }),
         );

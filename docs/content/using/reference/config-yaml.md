@@ -4,7 +4,7 @@ description: "Every field in ~/.ethos/config.yaml — provider, model, channel t
 kind: reference
 audience: user
 slug: config-yaml
-updated: 2026-08-12
+updated: 2026-08-13
 ---
 
 `~/.ethos/config.yaml` is a flat `key: value` file. Dotted keys (e.g. `retention.messages`, `providers.0.provider`) are how nested structures appear on disk — there is no indentation-based nesting. The parser ignores quotes around values.
@@ -173,6 +173,7 @@ Multi-app list shape for Slack. Each entry creates one Slack adapter bound to a 
 | `slack.apps.<i>.bind.type` | `personality` \| `team` | — | Required. Same semantics as the Telegram equivalent. |
 | `slack.apps.<i>.bind.name` | string | — | Required. Personality id or team name. |
 | `slack.apps.<i>.bind.allowSlashSwitch` | boolean | `false` | Allow per-channel `/personality` switching. |
+| `slack.apps.<i>.allowedBotIds` | string list | unset | Comma-separated Slack `bot_id`s whose messages reach the agent, in new posts, edits, and thread backfill alike. Absent or empty drops every bot- and workflow-authored message — the gate is default-closed. Read a bot's id from the `bot_id` field of any message it has posted. |
 
 ```yaml
 slack.apps.0.botToken: "xoxb-..."
@@ -181,7 +182,12 @@ slack.apps.0.signingSecret: "abc123..."
 slack.apps.0.id: eng-slack
 slack.apps.0.bind.type: team
 slack.apps.0.bind.name: eng
+slack.apps.0.allowedBotIds: B01DEPLOYBOT,B02ALERTBOT
 ```
+
+Notes:
+
+- An allowlisted bot's message carries `userId = <bot_id>`, and the gateway's channel filter allowlists by `userId`. Two gates guard a bot message and both must open: `allowedBotIds` here, plus the same `bot_id` in `channelFilter.slack.recipientAllowlist` (or no filter configured at all). See [Run an agent on Slack](../../platforms/slack.md) for the filter block. There is no bypass — an operator who opens one gate and forgets the other sees the bot's messages silently dropped at the gateway.
 
 ## teams.\* {#teams}
 

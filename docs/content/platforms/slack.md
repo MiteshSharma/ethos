@@ -5,7 +5,7 @@ kind: how-to
 audience: shared
 slug: platform-slack
 time: "15 min"
-updated: 2026-06-09
+updated: 2026-08-13
 ---
 
 ## Task
@@ -95,7 +95,7 @@ Expected boot lines include `⚡️ Bolt app started`. Socket Mode means no reve
 
 When the inbound message has a `thread_ts` or the `replyToId` is set, the adapter passes `thread_ts` to `chat.postMessage` so the reply lands in the same thread. New top-level mentions start a new thread when the agent's reply spans multiple chunks.
 
-The adapter skips messages with any `subtype` (bot messages, edits, joins) — Bolt surfaces those as `message` events too.
+The adapter skips messages with any `subtype` (bot messages, edits, joins) — Bolt surfaces those as `message` events too. Bot- and workflow-authored posts are the one exception: allowlist their `bot_id` under [`slack.apps.<i>.allowedBotIds`](../using/reference/config-yaml.md#slack-apps) and they reach the agent.
 
 ### 4a. Plugin commands
 

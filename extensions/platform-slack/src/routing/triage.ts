@@ -16,6 +16,21 @@ export interface TriageContext {
   channelOverrides?: ChannelOverrideStore;
   threadState?: ThreadStateStore;
   backfillState?: BackfillStateStore;
+  /** Slack `bot_id`s whose messages are allowed to reach the agent. Absent or
+   *  empty denies every bot — the gate is default-closed. */
+  allowedBotIds?: string[];
+}
+
+/**
+ * Default-closed allowlist test for bot-authored messages. An absent or empty
+ * list denies every bot, which is the behaviour before the allowlist existed.
+ */
+export function isAllowedBotId(
+  botId: string | undefined,
+  allowedBotIds: string[] | undefined,
+): boolean {
+  if (!botId || !allowedBotIds || allowedBotIds.length === 0) return false;
+  return allowedBotIds.includes(botId);
 }
 
 /** Subset of a Slack file object attached to a `file_share` message. */
@@ -36,6 +51,8 @@ export interface RawSlackMessage {
   channel_type?: string;
   subtype?: string;
   files?: RawSlackFile[];
+  /** Present on messages authored by an app/workflow rather than a human. */
+  bot_id?: string;
 }
 
 /** Subset of the Slack `app_mention` event we actually consume. */
@@ -62,7 +79,10 @@ export async function triageMessage(
 ): Promise<TriageResult> {
   const channelMode = resolveChannelMode(msg.channel, ctx);
 
-  if (msg.subtype && msg.subtype !== 'file_share')
+  // Bot/workflow posts arrive as `subtype: 'bot_message'`. They reach the
+  // agent only when the operator has allowlisted their `bot_id`.
+  const allowedBot = isAllowedBotId(msg.bot_id, ctx.allowedBotIds);
+  if (msg.subtype && msg.subtype !== 'file_share' && !(msg.subtype === 'bot_message' && allowedBot))
     return { drop: 'subtype', effectiveMode: channelMode };
   const text = msg.text?.trim() ?? '';
   const hasFiles = msg.subtype === 'file_share' && Array.isArray(msg.files) && msg.files.length > 0;
@@ -88,7 +108,10 @@ export async function triageMessage(
     envelope: buildEnvelope({
       botKey: ctx.botKey,
       channel: msg.channel,
-      userId: msg.user,
+      // An allowlisted bot has no `user`; stamping the `bot_id` gives it an
+      // identity the gateway's channel filter can allowlist by (it keys on
+      // `userId`). Two gates, both must open.
+      userId: allowedBot ? msg.bot_id : msg.user,
       text: text || (hasFiles ? '(file attachment)' : ''),
       ts: msg.ts,
       threadTs,

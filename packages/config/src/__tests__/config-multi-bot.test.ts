@@ -111,6 +111,72 @@ describe('parseConfigYaml — telegram.bots[] / slack.apps[]', () => {
     });
   });
 
+  // SP-B1 — the bot/workflow allowlist. Same flat grammar, same default-closed
+  // posture: an operator who never writes the key gets today's behaviour.
+  it('parses allowedBotIds as a trimmed comma-separated list', async () => {
+    const cfg = await load(
+      [
+        'provider: anthropic',
+        'model: m',
+        'apiKey: sk',
+        'personality: p',
+        'slack.apps.0.botToken: xoxb-1',
+        'slack.apps.0.appToken: xapp-1',
+        'slack.apps.0.signingSecret: s1',
+        'slack.apps.0.bind.type: personality',
+        'slack.apps.0.bind.name: researcher',
+        'slack.apps.0.allowedBotIds: B1, B2 ,,B3',
+      ].join('\n'),
+    );
+
+    expect(cfg.slack?.apps[0]?.allowedBotIds).toEqual(['B1', 'B2', 'B3']);
+  });
+
+  it('leaves allowedBotIds absent when the key is empty (gate stays closed)', async () => {
+    const cfg = await load(
+      [
+        'provider: anthropic',
+        'model: m',
+        'apiKey: sk',
+        'personality: p',
+        'slack.apps.0.botToken: xoxb-1',
+        'slack.apps.0.appToken: xapp-1',
+        'slack.apps.0.signingSecret: s1',
+        'slack.apps.0.bind.type: personality',
+        'slack.apps.0.bind.name: researcher',
+        'slack.apps.0.allowedBotIds: ,',
+      ].join('\n'),
+    );
+
+    expect(cfg.slack?.apps[0]).not.toHaveProperty('allowedBotIds');
+  });
+
+  it('round-trips allowedBotIds through writeConfig', async () => {
+    const storage = new InMemoryStorage();
+    await storage.mkdir(ethosDir());
+    const original: EthosConfig = {
+      provider: 'anthropic',
+      model: 'm',
+      apiKey: 'sk',
+      personality: 'p',
+      slack: {
+        apps: [
+          {
+            botToken: 'xoxb-1',
+            appToken: 'xapp-1',
+            signingSecret: 's1',
+            bind: { type: 'personality', name: 'researcher' },
+            allowedBotIds: ['B1', 'B2'],
+          },
+        ],
+      },
+    };
+    await writeConfig(storage, original, new InMemorySecretsResolver());
+    const reloaded = await readRawConfig(storage);
+
+    expect(reloaded?.slack?.apps[0]?.allowedBotIds).toEqual(['B1', 'B2']);
+  });
+
   it('omits the Slack surface knobs when unset (adapter defaults stay in charge)', async () => {
     const cfg = await load(
       [

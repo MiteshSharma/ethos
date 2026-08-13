@@ -130,6 +130,13 @@ export interface SlackAdapterConfig {
   binding?: Binding;
   /** Default channel mode for unmapped channels. Defaults to `mention_only`. */
   defaultChannelMode?: ChannelMode;
+  /**
+   * Slack `bot_id`s whose messages reach the agent. Absent or empty drops
+   * every bot/workflow message — the gate is default-closed. An allowlisted
+   * bot's envelope carries `userId = <bot_id>`, so the gateway channel filter
+   * must allowlist that same id for the message to be admitted.
+   */
+  allowedBotIds?: string[];
   /** Storage instance rooted at `~/.ethos`. When provided, the adapter
    *  persists per-channel mode overrides and thread-participation state
    *  under `~/.ethos/slack/<botKey>/`. */
@@ -216,6 +223,7 @@ export class SlackAdapter implements PlatformAdapter, ApprovalCapableAdapter {
   readonly binding: Binding | undefined;
   readonly defaultChannelMode: ChannelMode;
 
+  private readonly allowedBotIds: string[] | undefined;
   private readonly app: App;
   private readonly client: App['client'];
   private readonly backfillState: BackfillStateStore | undefined;
@@ -283,6 +291,7 @@ export class SlackAdapter implements PlatformAdapter, ApprovalCapableAdapter {
     this.id = `slack:${this.botKey}`;
     this.binding = config.binding;
     this.defaultChannelMode = config.defaultChannelMode ?? DEFAULT_CHANNEL_MODE;
+    this.allowedBotIds = config.allowedBotIds;
     this.storage = config.storage;
     this.memory = config.memory;
     this.kanban = config.kanban;
@@ -340,6 +349,7 @@ export class SlackAdapter implements PlatformAdapter, ApprovalCapableAdapter {
         channelOverrides: this.channelOverrides,
         threadState: this.threadState,
         backfillState: this.backfillState,
+        ...(this.allowedBotIds ? { allowedBotIds: this.allowedBotIds } : {}),
       },
       {
         onEnvelope: (msg) => {
