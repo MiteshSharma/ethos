@@ -82,6 +82,81 @@ describe('parseConfigYaml — telegram.bots[] / slack.apps[]', () => {
     });
   });
 
+  // Slack surface knobs (plan/phases/slack-parity-multimodal.md, Part A1).
+  // They ride the same flat dotted grammar as the rest of `slack.apps.<n>.*`;
+  // the adapter has accepted them since it was written, so the only question
+  // these answer is whether an operator can actually express them.
+  it('parses the Slack surface knobs (defaultChannelMode / receiptReaction / allowedSlashUsers)', async () => {
+    const cfg = await load(
+      [
+        'provider: anthropic',
+        'model: m',
+        'apiKey: sk',
+        'personality: p',
+        'slack.apps.0.botToken: xoxb-1',
+        'slack.apps.0.appToken: xapp-1',
+        'slack.apps.0.signingSecret: s1',
+        'slack.apps.0.bind.type: personality',
+        'slack.apps.0.bind.name: researcher',
+        'slack.apps.0.defaultChannelMode: thread_follow',
+        'slack.apps.0.receiptReaction: eyes',
+        'slack.apps.0.allowedSlashUsers: U1, U2 ,U3',
+      ].join('\n'),
+    );
+
+    expect(cfg.slack?.apps[0]).toMatchObject({
+      defaultChannelMode: 'thread_follow',
+      receiptReaction: 'eyes',
+      allowedSlashUsers: ['U1', 'U2', 'U3'],
+    });
+  });
+
+  it('omits the Slack surface knobs when unset (adapter defaults stay in charge)', async () => {
+    const cfg = await load(
+      [
+        'provider: anthropic',
+        'model: m',
+        'apiKey: sk',
+        'personality: p',
+        'slack.apps.0.botToken: xoxb-1',
+        'slack.apps.0.appToken: xapp-1',
+        'slack.apps.0.signingSecret: s1',
+        'slack.apps.0.bind.type: personality',
+        'slack.apps.0.bind.name: researcher',
+      ].join('\n'),
+    );
+
+    const app = cfg.slack?.apps[0];
+    expect(app).not.toHaveProperty('defaultChannelMode');
+    expect(app).not.toHaveProperty('receiptReaction');
+    expect(app).not.toHaveProperty('allowedSlashUsers');
+  });
+
+  it('rejects an out-of-range defaultChannelMode instead of passing it through', async () => {
+    const storage = new InMemoryStorage();
+    await storage.mkdir(ethosDir());
+    await storage.write(
+      join(ethosDir(), 'config.yaml'),
+      [
+        'provider: anthropic',
+        'model: m',
+        'apiKey: sk',
+        'personality: p',
+        'slack.apps.0.botToken: xoxb-1',
+        'slack.apps.0.appToken: xapp-1',
+        'slack.apps.0.signingSecret: s1',
+        'slack.apps.0.bind.type: personality',
+        'slack.apps.0.bind.name: researcher',
+        'slack.apps.0.defaultChannelMode: shout',
+      ].join('\n'),
+    );
+    const loaded = await loadConfigStrict(storage);
+    expect(loaded?.parseErrors.some((e) => e.includes("invalid defaultChannelMode 'shout'"))).toBe(
+      true,
+    );
+    expect(loaded?.config.slack?.apps ?? []).toHaveLength(0);
+  });
+
   it('parses teams.<name>.autoStop runtime knob', async () => {
     const cfg = await load(
       [
@@ -508,5 +583,34 @@ describe('writeConfig round-trips the new list shapes', () => {
     expect(roundTripped?.telegram).toEqual(original.telegram);
     expect(roundTripped?.slack).toEqual(original.slack);
     expect(roundTripped?.teams).toEqual(original.teams);
+  });
+
+  it('writes and re-reads the Slack surface knobs without loss', async () => {
+    const storage = new InMemoryStorage();
+    await storage.mkdir(ethosDir());
+    const original: EthosConfig = {
+      provider: 'anthropic',
+      model: 'claude-opus-4-7',
+      apiKey: 'sk',
+      personality: 'researcher',
+      slack: {
+        apps: [
+          {
+            botToken: 'xoxb',
+            appToken: 'xapp',
+            signingSecret: 'sig',
+            bind: { type: 'personality', name: 'coder' },
+            defaultChannelMode: 'all',
+            receiptReaction: 'hourglass_flowing_sand',
+            allowedSlashUsers: ['U123', 'U456'],
+          },
+        ],
+      },
+    };
+    const secrets = new InMemorySecretsResolver();
+    await writeConfig(storage, original, secrets);
+
+    const roundTripped = await readConfig(storage, secrets);
+    expect(roundTripped?.slack).toEqual(original.slack);
   });
 });

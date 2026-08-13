@@ -26,6 +26,7 @@ import {
   type GatewayBotConfig,
 } from '@ethosagent/gateway';
 import { registerGoalNotifications } from '@ethosagent/goal-runner';
+import { KanbanStore } from '@ethosagent/kanban-store';
 import { ConsoleLogger } from '@ethosagent/logger';
 import {
   createPersonalityRegistry,
@@ -52,6 +53,7 @@ import {
   type PersonalityRegistry,
   type PlatformAdapter,
   resolveModelDisplay,
+  type SessionStore,
   type ToolRegistry,
 } from '@ethosagent/types';
 import {
@@ -64,9 +66,11 @@ import {
   createApprovalDangerPredicate,
   createLazyProvider,
   createMemoryProvider,
+  createSessionStore,
   IdentityMap,
   initPairingDb,
   type MessagingSendFn,
+  resolveKanbanDbPath,
   sanitize,
   wrapUntrusted,
 } from '@ethosagent/wiring';
@@ -1905,6 +1909,138 @@ async function createSlackPersonalityCardReader() {
   };
 }
 
+/** How many recent sessions the App Home reader hands the Slack adapter. The
+ *  view caps its own list at 5 and renders "+ N more" from the overflow, so a
+ *  slightly larger window makes that counter meaningful without unbounded IO. */
+const SLACK_RECENT_SESSION_LIMIT = 10;
+
+/**
+ * Build the App Home "Recent sessions" reader and the `/sessions/<id>` unfurl
+ * reader, both backed by the gateway's `sessions.db`. Mirrors
+ * `createSlackMemoryReader`: the Slack package never imports
+ * `@ethosagent/session-sqlite`, it just consumes these narrow shapes.
+ *
+ * The store is opened on first read, not at boot — `buildAdapters` runs in
+ * contexts (tests, `--dry-run`-style construction) where touching the session
+ * database would be a surprising side effect.
+ *
+ * `recentSessions` filters on the gateway's own lane-key prefix
+ * (`slack:<botKey>:`, each segment URL-encoded — see `buildLaneKey` in
+ * `@ethosagent/gateway`), so one workspace's App Home never lists another
+ * bot's conversations.
+ */
+function createSlackSessionReaders(botKey: string) {
+  let store: SessionStore | undefined;
+  const sessions = (): SessionStore => {
+    store ??= createSessionStore({ dataDir: ethosDir() });
+    return store;
+  };
+  const prefix = `slack:${encodeURIComponent(botKey)}:`;
+  return {
+    session: {
+      async recentSessions() {
+        const rows = await sessions().listSessions({
+          keyPrefix: prefix,
+          limit: SLACK_RECENT_SESSION_LIMIT,
+        });
+        return rows.map((s) => ({
+          id: s.id,
+          // The lane key's tail is the channel (plus thread, when threaded) —
+          // the only human-meaningful part of an otherwise opaque key.
+          label: s.key.slice(prefix.length) || s.key,
+          lastActivity: s.updatedAt,
+        }));
+      },
+    },
+    sessionUnfurl: {
+      async lookupSession(id: string) {
+        const s = await sessions().getSession(id);
+        if (!s) return null;
+        return {
+          id: s.id,
+          // Sessions store the personality id, which is what operators name
+          // their personalities by; no registry lookup buys anything here.
+          personalityName: s.personalityId ?? 'unknown',
+          lastActivity: s.updatedAt,
+        };
+      },
+    },
+  };
+}
+
+/**
+ * Build the `/personalities/<id>` unfurl reader. Same registry the
+ * `/ethos personality rich` card reader uses, reloaded per lookup (mtime-cached,
+ * so an edited personality unfurls without a gateway restart).
+ */
+async function createSlackPersonalityUnfurlReader() {
+  const storage = getStorage();
+  const personalitiesDir = join(ethosDir(), 'personalities');
+  const registry = await createPersonalityRegistry({
+    storage,
+    userPersonalitiesDir: personalitiesDir,
+  });
+  return {
+    async lookupPersonality(id: string) {
+      await registry.loadFromDirectory(personalitiesDir);
+      const config = registry.get(id);
+      if (!config) return null;
+      return { id: config.id, name: config.name, description: config.description ?? '' };
+    },
+  };
+}
+
+/**
+ * Build the `/ethos kanban list` reader and the `/kanban/<ticket>` unfurl
+ * reader for a team-bound Slack bot. Both open the team's `board.db` per call
+ * and close it — the board is small, the reads are rare (a slash command or a
+ * pasted link), and a long-lived handle in the adapter would outlive the
+ * board's own lifecycle. A team with no board yet degrades to an empty list /
+ * skipped unfurl rather than creating one.
+ */
+function createSlackKanbanReaders(teamName: string) {
+  const boardPath = resolveKanbanDbPath({ teamName }, ethosDir());
+  const open = async (): Promise<KanbanStore | null> => {
+    if (!(await getStorage().exists(boardPath))) return null;
+    return new KanbanStore(boardPath, { teamId: teamName });
+  };
+  return {
+    kanban: {
+      async listOpenTickets() {
+        const store = await open();
+        if (!store) return [];
+        try {
+          return store
+            .listTasks({ limit: 200 })
+            .filter((t) => t.status !== 'done' && t.status !== 'archived')
+            .map((t) => ({ id: t.id, title: t.title, status: t.status, assignee: t.assignee }));
+        } finally {
+          store.close();
+        }
+      },
+    },
+    kanbanUnfurl: {
+      async lookupTicket(id: string) {
+        const store = await open();
+        if (!store) return null;
+        try {
+          const task = store.getTask(id);
+          if (!task) return null;
+          return {
+            id: task.id,
+            title: task.title,
+            status: task.status,
+            assignee: task.assignee,
+            parentGoal: store.getParents(task.id)[0]?.title ?? null,
+          };
+        } finally {
+          store.close();
+        }
+      },
+    },
+  };
+}
+
 /**
  * Build the Telegram `/personality rich` card reader. Mirrors the Slack
  * reader but renders the card as Telegram Markdown text via the Telegram
@@ -2061,6 +2197,15 @@ export async function buildAdapters(
       // personality id, so it isn't bot-specific. The handler only consults
       // it for personality bindings (`/ethos personality rich`).
       const personalityCard = await createSlackPersonalityCardReader();
+      // Likewise bot-agnostic: `lookupPersonality` takes the id from the
+      // shared URL.
+      const personalityUnfurl = await createSlackPersonalityUnfurlReader();
+      // The Ethos web UI origin is not a Slack-specific setting — it's the
+      // same public URL the OAuth redirect and the web app use
+      // (`ETHOS_PUBLIC_URL` env > `webBaseUrl` in config.yaml). Passing it is
+      // what turns App Home deep links on AND registers the `link_shared`
+      // unfurl handler at all; without it `registerLinkEvents` returns early.
+      const webUiBaseUrl = config.webBaseUrl;
       for (const appCfg of config.slack?.apps ?? []) {
         // `/ethos memory show|add` reads the bound personality's MEMORY.md.
         // Team bindings have no single MEMORY.md, so they keep degrading to
@@ -2069,17 +2214,35 @@ export async function buildAdapters(
           appCfg.bind.type === 'personality'
             ? createSlackMemoryReader(appCfg.bind.name)
             : undefined;
+        const botKey = deriveBotKey(appCfg);
+        // Session rows are per-bot: the reader filters on this bot's lane-key
+        // prefix.
+        const { session, sessionUnfurl } = createSlackSessionReaders(botKey);
+        // Kanban is a team feature — a personality-bound bot has no board, and
+        // the slash command already says so. Leaving the readers unwired keeps
+        // the App Home section and the ticket unfurl hidden for those bots.
+        const kanbanReaders =
+          appCfg.bind.type === 'team' ? createSlackKanbanReaders(appCfg.bind.name) : undefined;
         adapters.push(
           new mod.SlackAdapter({
             botToken: appCfg.botToken,
             appToken: appCfg.appToken,
             signingSecret: appCfg.signingSecret,
-            botKey: deriveBotKey(appCfg),
+            botKey,
             binding: { type: appCfg.bind.type, name: appCfg.bind.name },
             storage: slackStorage,
             personalityCard,
+            personalityUnfurl,
+            session,
+            sessionUnfurl,
             ...(attachmentCache ? { cache: attachmentCache } : {}),
             ...(memory ? { memory } : {}),
+            ...(kanbanReaders
+              ? { kanban: kanbanReaders.kanban, kanbanUnfurl: kanbanReaders.kanbanUnfurl }
+              : {}),
+            ...(appCfg.defaultChannelMode ? { defaultChannelMode: appCfg.defaultChannelMode } : {}),
+            ...(appCfg.receiptReaction ? { receiptReaction: appCfg.receiptReaction } : {}),
+            ...(webUiBaseUrl ? { webUiBaseUrl } : {}),
           }),
         );
       }

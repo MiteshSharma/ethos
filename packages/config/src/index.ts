@@ -383,6 +383,14 @@ export interface SlackAppConfig {
   signingSecret: string;
   bind: BotBinding;
   piiRedaction?: boolean;
+  /** Channel mode for channels with no per-channel override. Absent = the
+   *  adapter's own default (`mention_only`). */
+  defaultChannelMode?: 'mention_only' | 'thread_follow' | 'all';
+  /** Slack emoji name (no colons) reacted onto inbound messages to
+   *  acknowledge receipt. Absent = the adapter's default (`eyes`). */
+  receiptReaction?: string;
+  /** Slash-command allowlist of Slack user IDs. Empty/absent = everyone. */
+  allowedSlashUsers?: string[];
 }
 
 /**
@@ -1706,6 +1714,15 @@ export async function writeConfig(
       lines.push(`slack.apps.${i}.bind.name: ${app.bind.name}`);
       if (app.bind.allowSlashSwitch) {
         lines.push(`slack.apps.${i}.bind.allowSlashSwitch: true`);
+      }
+      if (app.defaultChannelMode) {
+        lines.push(`slack.apps.${i}.defaultChannelMode: ${app.defaultChannelMode}`);
+      }
+      if (app.receiptReaction) {
+        lines.push(`slack.apps.${i}.receiptReaction: ${app.receiptReaction}`);
+      }
+      if (app.allowedSlashUsers?.length) {
+        lines.push(`slack.apps.${i}.allowedSlashUsers: ${app.allowedSlashUsers.join(',')}`);
       }
     }
   }
@@ -3430,13 +3447,32 @@ function buildSlackApps(kv: Record<number, Record<string, string>>): {
       continue;
     }
     if (!result.bind) continue;
-    apps.push({
+    const app: SlackAppConfig = {
       botToken: entry.botToken,
       appToken: entry.appToken,
       signingSecret: entry.signingSecret,
       bind: result.bind,
       ...(entry.id ? { id: entry.id } : {}),
-    });
+    };
+    const mode = entry.defaultChannelMode;
+    if (mode) {
+      if (mode !== 'mention_only' && mode !== 'thread_follow' && mode !== 'all') {
+        errors.push(
+          `${label}: invalid defaultChannelMode '${mode}' (expected 'mention_only', 'thread_follow' or 'all').`,
+        );
+        continue;
+      }
+      app.defaultChannelMode = mode;
+    }
+    if (entry.receiptReaction) app.receiptReaction = entry.receiptReaction;
+    if (entry.allowedSlashUsers) {
+      const users = entry.allowedSlashUsers
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean);
+      if (users.length > 0) app.allowedSlashUsers = users;
+    }
+    apps.push(app);
   }
   return { apps, errors };
 }
