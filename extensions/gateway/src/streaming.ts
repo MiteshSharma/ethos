@@ -83,7 +83,12 @@ export function parseRetryAfterSeconds(error: string | undefined): number | null
 /** The subset of PlatformAdapter the streamer drives. */
 export interface StreamAdapter {
   send(chatId: string, message: OutboundMessage): Promise<DeliveryResult>;
-  editMessage?(chatId: string, messageId: string, text: string): Promise<DeliveryResult>;
+  editMessage?(
+    chatId: string,
+    messageId: string,
+    text: string,
+    opts?: { final?: boolean },
+  ): Promise<DeliveryResult>;
 }
 
 export interface DraftStreamerOptions {
@@ -216,7 +221,12 @@ export class DraftStreamer {
       let attempts = 0;
       // Try the final edit; honor a single flood-wait so the true final lands.
       while (attempts < 2) {
-        const res = await this.adapter.editMessage(this.chatId, this.messageId, finalText);
+        // `final: true` tells the adapter no further text is coming, so a
+        // terminal-only presentation is safe to apply. Intermediate flushes in
+        // `doFlush` deliberately pass nothing.
+        const res = await this.adapter.editMessage(this.chatId, this.messageId, finalText, {
+          final: true,
+        });
         if (res.ok) {
           this.lastRenderedBody = finalText;
           finalRendered = true;

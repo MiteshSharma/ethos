@@ -177,6 +177,57 @@ describe('parseConfigYaml — telegram.bots[] / slack.apps[]', () => {
     expect(reloaded?.slack?.apps[0]?.allowedBotIds).toEqual(['B1', 'B2']);
   });
 
+  // SP-B3 — the long-answer snippet fallback. On by default in the adapter;
+  // this key exists to retune or switch it off.
+  it('parses longReplyThresholdChars, including 0 (fallback disabled)', async () => {
+    const slackApp = (extra: string) =>
+      [
+        'provider: anthropic',
+        'model: m',
+        'apiKey: sk',
+        'personality: p',
+        'slack.apps.0.botToken: xoxb-1',
+        'slack.apps.0.appToken: xapp-1',
+        'slack.apps.0.signingSecret: s1',
+        'slack.apps.0.bind.type: personality',
+        'slack.apps.0.bind.name: researcher',
+        extra,
+      ].join('\n');
+
+    const tuned = await load(slackApp('slack.apps.0.longReplyThresholdChars: 12000'));
+    expect(tuned.slack?.apps[0]?.longReplyThresholdChars).toBe(12000);
+
+    const off = await load(slackApp('slack.apps.0.longReplyThresholdChars: 0'));
+    expect(off.slack?.apps[0]?.longReplyThresholdChars).toBe(0);
+  });
+
+  it('round-trips longReplyThresholdChars: 0 through writeConfig', async () => {
+    const storage = new InMemoryStorage();
+    await storage.mkdir(ethosDir());
+    const original: EthosConfig = {
+      provider: 'anthropic',
+      model: 'm',
+      apiKey: 'sk',
+      personality: 'p',
+      slack: {
+        apps: [
+          {
+            botToken: 'xoxb-1',
+            appToken: 'xapp-1',
+            signingSecret: 's1',
+            bind: { type: 'personality', name: 'researcher' },
+            longReplyThresholdChars: 0,
+          },
+        ],
+      },
+    };
+    await writeConfig(storage, original, new InMemorySecretsResolver());
+    const reloaded = await readRawConfig(storage);
+
+    // `0` must survive: it is the off switch, not an absent value.
+    expect(reloaded?.slack?.apps[0]?.longReplyThresholdChars).toBe(0);
+  });
+
   it('omits the Slack surface knobs when unset (adapter defaults stay in charge)', async () => {
     const cfg = await load(
       [

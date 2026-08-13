@@ -173,7 +173,11 @@ Multi-app list shape for Slack. Each entry creates one Slack adapter bound to a 
 | `slack.apps.<i>.bind.type` | `personality` \| `team` | — | Required. Same semantics as the Telegram equivalent. |
 | `slack.apps.<i>.bind.name` | string | — | Required. Personality id or team name. |
 | `slack.apps.<i>.bind.allowSlashSwitch` | boolean | `false` | Allow per-channel `/personality` switching. |
+| `slack.apps.<i>.defaultChannelMode` | `mention_only` \| `thread_follow` \| `all` | `mention_only` | When the agent replies in a channel with no per-channel override. `thread_follow` also answers follow-ups in threads it has already posted in; `all` answers every message. |
+| `slack.apps.<i>.receiptReaction` | string | `eyes` | Emoji name (no colons) reacted onto an inbound message on arrival and removed once the reply lands. Needs the `reactions:write` scope; without it the reaction is skipped silently. |
+| `slack.apps.<i>.allowedSlashUsers` | string list | unset | Comma-separated Slack user ids allowed to run `/ethos`. Absent or empty means everyone in the workspace. |
 | `slack.apps.<i>.allowedBotIds` | string list | unset | Comma-separated Slack `bot_id`s whose messages reach the agent, in new posts, edits, and thread backfill alike. Absent or empty drops every bot- and workflow-authored message — the gate is default-closed. Read a bot's id from the `bot_id` field of any message it has posted. |
+| `slack.apps.<i>.longReplyThresholdChars` | integer | `9000` | Reply length above which the agent posts a short lead message ending in "full answer attached" plus the complete text as an `answer.md` upload, instead of four or more chunked messages. `0` disables the fallback. The upload needs the `files:write` scope; without it the reply falls back to the chunked messages. |
 
 ```yaml
 slack.apps.0.botToken: "xoxb-..."

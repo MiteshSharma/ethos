@@ -394,6 +394,10 @@ export interface SlackAppConfig {
   /** Slack `bot_id`s whose messages reach the agent. Empty/absent drops every
    *  bot/workflow message, which is the behaviour before this key existed. */
   allowedBotIds?: string[];
+  /** Reply length (characters) above which the adapter posts a lead message
+   *  plus the full answer as `answer.md` instead of a chunk wall. Absent = the
+   *  adapter's default (9000); `0` disables the fallback. */
+  longReplyThresholdChars?: number;
 }
 
 /**
@@ -1729,6 +1733,9 @@ export async function writeConfig(
       }
       if (app.allowedBotIds?.length) {
         lines.push(`slack.apps.${i}.allowedBotIds: ${app.allowedBotIds.join(',')}`);
+      }
+      if (app.longReplyThresholdChars !== undefined) {
+        lines.push(`slack.apps.${i}.longReplyThresholdChars: ${app.longReplyThresholdChars}`);
       }
     }
   }
@@ -3484,6 +3491,16 @@ function buildSlackApps(kv: Record<number, Record<string, string>>): {
         .map((s) => s.trim())
         .filter(Boolean);
       if (botIds.length > 0) app.allowedBotIds = botIds;
+    }
+    if (entry.longReplyThresholdChars) {
+      const threshold = Number(entry.longReplyThresholdChars);
+      if (!Number.isInteger(threshold) || threshold < 0) {
+        errors.push(
+          `${label}: invalid longReplyThresholdChars '${entry.longReplyThresholdChars}' (expected a non-negative integer; 0 disables).`,
+        );
+        continue;
+      }
+      app.longReplyThresholdChars = threshold;
     }
     apps.push(app);
   }

@@ -170,6 +170,14 @@ export interface SlackAdapterConfig {
   /** Optional attachment cache for downloading and caching inbound file attachments. */
   cache?: AttachmentCache;
   /**
+   * Character count above which one outbound reply is posted as a short lead
+   * message plus the complete text uploaded as `answer.md`, instead of a
+   * multi-message chunk wall. Defaults to `3 × maxMessageLength` (9000) — a
+   * reply that would take four or more messages. `0` (or any non-positive
+   * value) disables the fallback and restores the plain chunked send.
+   */
+  longReplyThresholdChars?: number;
+  /**
    * Slack emoji name (no colons) set as a reaction on inbound messages to
    * acknowledge receipt, then cleared once the agent's reply has landed.
    * Default `'eyes'` (👀). Requires the `reactions:write` bot scope; missing
@@ -189,6 +197,23 @@ function slackFileSource(att: Attachment): Buffer | string {
   const m = att.url.match(/^data:[^;,]+;base64,(.*)$/s);
   if (m?.[1] !== undefined) return Buffer.from(m[1], 'base64');
   return att.url;
+}
+
+/** Marker closing the lead message when the full answer rides as a file. */
+const LONG_REPLY_SUFFIX = '\n\n*full answer attached*';
+/** Filename of the uploaded complete answer. */
+const LONG_REPLY_FILENAME = 'answer.md';
+/** Default long-reply threshold, as a multiple of `maxMessageLength`. */
+const LONG_REPLY_CHUNK_MULTIPLE = 3;
+
+/**
+ * The lead message for a long answer: the text up to the first chunk boundary
+ * with the "full answer attached" marker appended. The chunk budget is reduced
+ * by the marker so the composed lead still fits in one Slack message.
+ */
+function leadMessage(rendered: string, maxLength: number): string {
+  const first = chunkText(rendered, maxLength - LONG_REPLY_SUFFIX.length)[0] ?? '';
+  return `${first.trimEnd()}${LONG_REPLY_SUFFIX}`;
 }
 
 export class SlackAdapter implements PlatformAdapter, ApprovalCapableAdapter {
@@ -272,6 +297,9 @@ export class SlackAdapter implements PlatformAdapter, ApprovalCapableAdapter {
 
   /** Emoji name (no colons) for the inbound-receipt reaction. */
   private readonly receiptReaction: string;
+
+  /** Long-answer snippet-fallback threshold; `<= 0` disables the fallback. */
+  private readonly longReplyThresholdChars: number;
   /**
    * Pending receipt-reaction ledger. Keyed by `${chatId}:${threadTs|'top'}`
    * so concurrent in-flight replies in different threads of the same channel
@@ -308,6 +336,8 @@ export class SlackAdapter implements PlatformAdapter, ApprovalCapableAdapter {
     this.cache = config.cache;
     this.botToken = config.botToken;
     this.receiptReaction = config.receiptReaction ?? 'eyes';
+    this.longReplyThresholdChars =
+      config.longReplyThresholdChars ?? LONG_REPLY_CHUNK_MULTIPLE * this.maxMessageLength;
     this.logger = (config.logger ?? noopLogger).child({ component: 'slack' });
 
     if (config.storage) {
@@ -639,18 +669,28 @@ export class SlackAdapter implements PlatformAdapter, ApprovalCapableAdapter {
       // sets `replyToId` for outbound today.
       const threadTs = message.threadId;
 
-      const chunks = chunkText(toNativeMarkdown(message.text), this.maxMessageLength);
-      const ids: string[] = [];
+      const rendered = toNativeMarkdown(message.text);
+      const chunks = chunkText(rendered, this.maxMessageLength);
 
-      for (const chunk of chunks) {
-        const result = await this.client.chat.postMessage({
-          channel: chatId,
-          text: chunk,
-          ...(threadTs ? { thread_ts: threadTs } : {}),
-          mrkdwn: true,
-        });
-        const ts = result.ts as string | undefined;
-        if (ts) ids.push(ts);
+      // A reply long enough to become a message wall goes out as a lead
+      // message plus the whole answer as `answer.md`. `undefined` means the
+      // fallback declined to take the reply — fall through to the wall.
+      let ids = this.isLongReply(rendered)
+        ? await this.sendLongAnswer(chatId, rendered, chunks, threadTs)
+        : undefined;
+
+      if (!ids) {
+        ids = [];
+        for (const chunk of chunks) {
+          const result = await this.client.chat.postMessage({
+            channel: chatId,
+            text: chunk,
+            ...(threadTs ? { thread_ts: threadTs } : {}),
+            mrkdwn: true,
+          });
+          const ts = result.ts as string | undefined;
+          if (ts) ids.push(ts);
+        }
       }
 
       this.rememberChunkIds(ids);
@@ -703,6 +743,105 @@ export class SlackAdapter implements PlatformAdapter, ApprovalCapableAdapter {
   }
 
   // ---------------------------------------------------------------------------
+  // Long-answer snippet fallback (SP-B3)
+  //
+  // Four-plus messages of prose is a wall nobody reads. Past
+  // `longReplyThresholdChars` the reply becomes a lead message ending in
+  // "*full answer attached*" plus the complete text uploaded as `answer.md`,
+  // threaded under the lead. The upload is an attachment, not a `send()`, so
+  // the gateway's `MessageDedupCache` — which gates `adapter.send()` on the
+  // reply text — is untouched by it.
+  // ---------------------------------------------------------------------------
+
+  /** Whether a rendered reply crosses the long-answer threshold. */
+  private isLongReply(rendered: string): boolean {
+    return this.longReplyThresholdChars > 0 && rendered.length > this.longReplyThresholdChars;
+  }
+
+  /**
+   * Upload the complete answer as `answer.md` under `threadTs`.
+   * `initial_comment` is deliberately unset: the lead message already carries
+   * the opening text and a comment would repeat it.
+   *
+   * Returns `false` instead of throwing when the upload fails — including the
+   * `missing_scope` case for a workspace that never granted `files:write`.
+   * Silent degradation is the same policy the receipt reaction and the
+   * username resolver follow; the caller falls back to the chunk wall.
+   */
+  private async uploadAnswerFile(chatId: string, text: string, threadTs: string): Promise<boolean> {
+    try {
+      await this.client.files.uploadV2({
+        channel_id: chatId,
+        file: Buffer.from(text, 'utf8'),
+        filename: LONG_REPLY_FILENAME,
+        thread_ts: threadTs,
+      });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Post the lead message and attach the full answer. Returns the posted
+   * message ids, or `undefined` when Slack accepted the lead but returned no
+   * `ts` — without it the upload can't be threaded under the lead, so the
+   * caller posts the ordinary wall instead.
+   */
+  private async sendLongAnswer(
+    chatId: string,
+    rendered: string,
+    chunks: string[],
+    threadTs: string | undefined,
+  ): Promise<string[] | undefined> {
+    const lead = await this.client.chat.postMessage({
+      channel: chatId,
+      text: leadMessage(rendered, this.maxMessageLength),
+      ...(threadTs ? { thread_ts: threadTs } : {}),
+      mrkdwn: true,
+    });
+    const leadTs = lead.ts as string | undefined;
+    if (!leadTs) return undefined;
+
+    if (await this.uploadAnswerFile(chatId, rendered, threadTs ?? leadTs)) return [leadTs];
+
+    // The lead promised an attachment that will never arrive. Expand it back
+    // into today's chunk wall in place — a message wall beats a broken promise.
+    return reflowChunks(chunks, [leadTs], this.reflowOps(chatId, threadTs));
+  }
+
+  /** `reflowChunks` operations bound to one channel. `threadTs` keeps appended
+   *  chunks in the thread the reply belongs to; `editMessage` has no thread
+   *  context and passes none, exactly as before. */
+  private reflowOps(
+    chatId: string,
+    threadTs?: string,
+  ): {
+    edit: (id: string, text: string) => Promise<string>;
+    append: (text: string) => Promise<string>;
+    deleteId: (id: string) => Promise<void>;
+  } {
+    return {
+      edit: async (ts, chunk) => {
+        await this.client.chat.update({ channel: chatId, ts, text: chunk });
+        return ts;
+      },
+      append: async (chunk) => {
+        const result = await this.client.chat.postMessage({
+          channel: chatId,
+          text: chunk,
+          ...(threadTs ? { thread_ts: threadTs } : {}),
+          mrkdwn: true,
+        });
+        return (result.ts as string | undefined) ?? '';
+      },
+      deleteId: async (ts) => {
+        await this.client.chat.delete({ channel: chatId, ts });
+      },
+    };
+  }
+
+  // ---------------------------------------------------------------------------
   // Receipt reactions — best-effort acknowledgement of inbound messages.
   //
   // Telegram has the same behaviour: set 👀 on inbound, clear when the reply
@@ -750,28 +889,33 @@ export class SlackAdapter implements PlatformAdapter, ApprovalCapableAdapter {
       .catch(() => {});
   }
 
-  async editMessage(chatId: string, messageId: string, text: string): Promise<DeliveryResult> {
+  async editMessage(
+    chatId: string,
+    messageId: string,
+    text: string,
+    opts?: { final?: boolean },
+  ): Promise<DeliveryResult> {
     try {
-      const newChunks = chunkText(toNativeMarkdown(text), this.maxMessageLength);
+      const rendered = toNativeMarkdown(text);
       const existingIds = this.chunkMap.get(messageId) ?? [messageId];
+      let newChunks = chunkText(rendered, this.maxMessageLength);
 
-      const updatedIds = await reflowChunks(newChunks, existingIds, {
-        edit: async (ts, chunk) => {
-          await this.client.chat.update({ channel: chatId, ts, text: chunk });
-          return ts;
-        },
-        append: async (chunk) => {
-          const result = await this.client.chat.postMessage({
-            channel: chatId,
-            text: chunk,
-            mrkdwn: true,
-          });
-          return (result.ts as string | undefined) ?? '';
-        },
-        deleteId: async (ts) => {
-          await this.client.chat.delete({ channel: chatId, ts });
-        },
-      });
+      // Long-answer fallback on the TERMINAL edit only. An intermediate draft
+      // flush can't know how much more text is coming, and collapsing on every
+      // flush would upload one `answer.md` per flush. The upload runs BEFORE
+      // the collapse: if the file never lands, the chunk wall stays exactly as
+      // it is rather than being deleted with nothing to replace it.
+      // `editMessage` carries no thread context, so the lead's own ts is the
+      // thread parent for the upload. When the draft already lives in a
+      // thread, Slack files that under the same parent thread.
+      if (opts?.final && this.isLongReply(rendered)) {
+        const leadTs = existingIds[0] ?? messageId;
+        if (await this.uploadAnswerFile(chatId, rendered, leadTs)) {
+          newChunks = [leadMessage(rendered, this.maxMessageLength)];
+        }
+      }
+
+      const updatedIds = await reflowChunks(newChunks, existingIds, this.reflowOps(chatId));
 
       this.chunkMap.delete(messageId);
       this.rememberChunkIds(updatedIds);

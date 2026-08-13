@@ -53,6 +53,7 @@ In `https://api.slack.com/apps`:
    - `users:read` — resolve user ids when audit-logging.
    - `files:read` — download user-attached files from `url_private_download`. Without it, Slack returns an HTML page in place of the file bytes; see [Receive files via Slack](../using/how-to/receive-files-via-slack.md).
    - `reactions:write` — set and clear the 👀 receipt reaction on inbound messages (best-effort; missing scope just drops the reaction).
+   - `files:write` — upload a long answer as `answer.md` instead of a four-message wall (best-effort; missing scope falls back to the chunked messages). Tune with `slack.apps.<i>.longReplyThresholdChars`.
 3. Under **Socket Mode** → **Enable Socket Mode**.
 4. Under **Basic Information** → **App-Level Tokens** → **Generate Token and Scopes**, add the `connections:write` scope. Copy the `xapp-…` token.
 5. Under **Event Subscriptions** → **Enable Events**, subscribe to bot events:

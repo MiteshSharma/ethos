@@ -116,7 +116,21 @@ export interface PlatformAdapter {
   stop(): Promise<void>;
   send(chatId: string, message: OutboundMessage): Promise<DeliveryResult>;
   sendTyping?(chatId: string): Promise<void>;
-  editMessage?(chatId: string, messageId: string, text: string): Promise<DeliveryResult>;
+  /**
+   * Replace the content of an already-sent message. `opts.final` marks the
+   * LAST edit of a streaming draft — the caller knows no further text is
+   * coming, which lets an adapter apply a terminal-only presentation (Slack
+   * collapses an over-long answer into a lead message plus a file). Absent or
+   * `false` means "more edits may follow"; adapters may ignore the field
+   * entirely, and a three-parameter implementation still satisfies this
+   * contract.
+   */
+  editMessage?(
+    chatId: string,
+    messageId: string,
+    text: string,
+    opts?: { final?: boolean },
+  ): Promise<DeliveryResult>;
   onMessage(handler: (message: InboundMessage) => void): void;
   health(): Promise<{ ok: boolean; latencyMs?: number }>;
   registerCommands?(cmds: { name: string; description: string }[]): Promise<void>;

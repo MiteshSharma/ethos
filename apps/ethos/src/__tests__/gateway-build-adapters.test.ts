@@ -379,6 +379,30 @@ describe('buildAdapters — Slack surface wiring (SP-A)', () => {
     });
   });
 
+  // SP-B3 — the long-answer fallback is on by default, so the only thing this
+  // key has to do is arrive: `0` is the off switch and must not be dropped as
+  // a falsy value on the way through.
+  it('passes longReplyThresholdChars: 0 through to the adapter', async () => {
+    const adapters = await buildAdapters(
+      {
+        ...baseConfig,
+        slack: {
+          apps: [
+            {
+              ...slackApp({ type: 'personality', name: 'researcher' }),
+              longReplyThresholdChars: 0,
+            },
+          ],
+        },
+      },
+      makeLoader(),
+    );
+
+    expect((adapters[0] as CapturedAdapter).capturedConfig).toMatchObject({
+      longReplyThresholdChars: 0,
+    });
+  });
+
   it('omits the knobs the operator did not set, leaving adapter defaults in charge', async () => {
     const adapters = await buildAdapters(
       { ...baseConfig, slack: { apps: [slackApp({ type: 'personality', name: 'researcher' })] } },
