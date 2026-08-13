@@ -120,6 +120,15 @@ export interface RealtimeVoiceCallDeps {
 const DEFAULT_WIND_DOWN_GRACE_MS = 6_000;
 
 /**
+ * Clock for the turn-latency span. MONOTONIC, not wall: `Date.now()` steps
+ * backwards on an NTP correction mid-call, and a negative mouth-to-ear figure
+ * is worse than none. `performance` is guarded for the same reason the batch
+ * client guards it — a test or a non-browser host may not have one.
+ */
+const monotonicNow = (): number =>
+  typeof performance !== 'undefined' ? performance.now() : Date.now();
+
+/**
  * How much of a ticket's remaining life a redial needs in hand before it will
  * reuse it, rather than treating it as spent.
  *
@@ -211,6 +220,21 @@ export function createRealtimeVoiceCallClient(deps: RealtimeVoiceCallDeps): Voic
    * a slow consult runs and two of them can overlap.
    */
   let fillerResponses = 0;
+  /**
+   * The turn whose first audio frame has not been reported yet: the id its span
+   * is grouped by, and the monotonic reading taken at the user's speech-end
+   * edge. Null between turns, and null again the moment the span is sent — that
+   * null IS the once-per-turn guard.
+   *
+   * THE PAGE IS THE ONLY PLACE BOTH MOMENTS EXIST. On this tier the media
+   * socket runs browser → provider, so the server never sees a frame of audio
+   * and cannot time one; see `RealtimeTurnLatencySchema` in
+   * `@ethosagent/web-contracts` for what the number does and does not cover.
+   */
+  let pendingTurn: { turnId: string; startedAt: number } | null = null;
+  /** Turn ids are opaque to the server; this is the pipeline tier's id shape. */
+  const turnIdPrefix = Math.random().toString(36).slice(2, 8);
+  let turnCount = 0;
   /** Unsubscribe from the control channel's server frames. */
   let unsubscribeControl: (() => void) | null = null;
   /** Reconnect bookkeeping for the PROVIDER socket (the app lane owns its own). */
@@ -224,6 +248,28 @@ export function createRealtimeVoiceCallClient(deps: RealtimeVoiceCallDeps): Voic
   /** Send one control frame, when a control channel is wired. */
   const control = (frame: VoiceClientFrame): void => {
     deps.control?.send(frame);
+  };
+
+  /**
+   * Report this turn's mouth-to-ear span — once, on the first audio frame of
+   * the REPLY.
+   *
+   * "Of the reply" is doing work: a consult filler is audio the user hears
+   * sooner, and timing to it would report a turn that answered in four seconds
+   * as one that answered in three hundred milliseconds. So this sits inside the
+   * announce-once guard, past the filler suppression, and measures the thing
+   * the ≤800 ms budget is about. Telemetry only — an unreported turn costs its
+   * span and nothing else, which is why every abandoned path just drops it.
+   */
+  const reportTurnLatency = (): void => {
+    const turn = pendingTurn;
+    if (!turn) return;
+    pendingTurn = null;
+    control({
+      t: 'realtime_turn_latency',
+      turnId: turn.turnId,
+      firstAudioMs: monotonicNow() - turn.startedAt,
+    });
   };
 
   const resetResponse = (): void => {
@@ -273,6 +319,10 @@ export function createRealtimeVoiceCallClient(deps: RealtimeVoiceCallDeps): Voic
     // must not turn into an interrupted assistant turn either.
     const wasFiller = fillerResponses > 0;
     resetResponse();
+    // A turn cut short before its first audio frame has no mouth-to-ear figure
+    // — the ear never got there. Reporting one later, off the next response,
+    // would time a turn the user already interrupted.
+    pendingTurn = null;
     cancelled = true;
     emit({ type: 'interrupted', text: spoken });
     if (spoken && !wasFiller) {
@@ -322,6 +372,10 @@ export function createRealtimeVoiceCallClient(deps: RealtimeVoiceCallDeps): Voic
   const beginWindDown = (text: string): void => {
     if (windingDown || disposed) return;
     windingDown = true;
+    // The sign-off is the server's line, not an answer to whatever was asked
+    // last, so the turn still awaiting audio is dropped rather than timed
+    // against it.
+    pendingTurn = null;
     emit({ type: 'budget_wind_down', text });
     // Stop capturing now: every further second of mic is a second billed to a
     // call that is already over, and nothing said into it will be answered.
@@ -359,6 +413,11 @@ export function createRealtimeVoiceCallClient(deps: RealtimeVoiceCallDeps): Voic
             // call, which is a far worse failure than one leaked filler line.
             cancelled = false;
             fillerResponses = 0;
+            // The user has stopped talking: this is where the span starts.
+            // Stamped BEFORE the listeners run, so a slow UI render is not
+            // counted as provider latency. A turn still waiting to be reported
+            // is simply replaced — the newer turn is the one being timed.
+            pendingTurn = { turnId: `${turnIdPrefix}-${++turnCount}`, startedAt: monotonicNow() };
             emit({
               type: 'utterance_committed',
               text: event.text.trim(),
@@ -397,6 +456,9 @@ export function createRealtimeVoiceCallClient(deps: RealtimeVoiceCallDeps): Voic
         if (fillerResponses > 0) return;
         if (!announced) {
           announced = true;
+          // First audio of the reply — the far end of the span the user's
+          // speech-end edge opened.
+          reportTurnLatency();
           // Announce WHICH provider is speaking once per response, not per
           // frame: audio arrives far faster than any UI needs to re-render.
           emit({

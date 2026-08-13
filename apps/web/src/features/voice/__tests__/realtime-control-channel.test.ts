@@ -379,6 +379,137 @@ describe('control channel — transcripts', () => {
   });
 });
 
+describe('control channel — turn latency', () => {
+  /** The user finished an utterance — the edge the span starts at. */
+  function userSpoke(socket: FakeProviderSocket, text: string): void {
+    socket.deliver({
+      type: 'conversation.item.input_audio_transcription.completed',
+      transcript: text,
+    });
+  }
+
+  const latencies = (control: FakeControlTransport | null) =>
+    (control?.sent ?? []).filter((f) => f.t === 'realtime_turn_latency');
+
+  it('reports one span per turn, on the reply’s first audio frame', async () => {
+    const { socket, control, client } = setup();
+    await client.connect();
+    socket.deliver(OPEN);
+    await settle();
+
+    userSpoke(socket, 'what did we decide?');
+    socket.deliver(audioFrame([1, 0]));
+    // Two more frames of the same reply: the span is already reported.
+    socket.deliver(audioFrame([2, 0]));
+    socket.deliver(audioFrame([3, 0]));
+    socket.deliver({ type: 'response.done' });
+    await settle();
+
+    const spans = latencies(control);
+    expect(spans).toHaveLength(1);
+    expect(spans[0]).toMatchObject({ t: 'realtime_turn_latency', turnId: expect.any(String) });
+    const ms = spans[0]?.t === 'realtime_turn_latency' ? spans[0].firstAudioMs : -1;
+    expect(ms).toBeGreaterThanOrEqual(0);
+    expect(Number.isFinite(ms)).toBe(true);
+
+    // The span belongs to the turn, so it is sent after the transcript that
+    // opened it and before the assistant line that closed it.
+    const kinds = (control?.sent ?? []).map((f) => f.t);
+    expect(kinds.indexOf('realtime_transcript')).toBeLessThan(
+      kinds.indexOf('realtime_turn_latency'),
+    );
+    await client.disconnect();
+  });
+
+  it('gives each turn its own span and its own id', async () => {
+    const { socket, control, client } = setup();
+    await client.connect();
+    socket.deliver(OPEN);
+    await settle();
+
+    userSpoke(socket, 'first?');
+    socket.deliver(audioFrame([1, 0]));
+    socket.deliver({ type: 'response.done' });
+    userSpoke(socket, 'second?');
+    socket.deliver(audioFrame([2, 0]));
+    socket.deliver({ type: 'response.done' });
+    await settle();
+
+    const spans = latencies(control);
+    expect(spans).toHaveLength(2);
+    const ids = spans.map((f) => (f.t === 'realtime_turn_latency' ? f.turnId : ''));
+    expect(new Set(ids).size).toBe(2);
+    await client.disconnect();
+  });
+
+  it('reports nothing for a turn barged in before any audio arrived', async () => {
+    // No audio played means no mouth-to-ear interval happened. Timing the next
+    // response instead would report a turn the user had already interrupted.
+    const { socket, control, client } = setup();
+    await client.connect();
+    socket.deliver(OPEN);
+    await settle();
+
+    userSpoke(socket, 'what did we decide?');
+    socket.deliver({ type: 'response.output_audio_transcript.delta', delta: 'It was ' });
+    socket.deliver({ type: 'input_audio_buffer.speech_started' });
+    await settle();
+    // The cancelled response's tail still arrives; none of it was heard.
+    socket.deliver(audioFrame([1, 0]));
+    socket.deliver({ type: 'response.done' });
+    await settle();
+
+    expect(latencies(control)).toEqual([]);
+    await client.disconnect();
+  });
+
+  it('does not time the consult filler as the reply’s first audio', async () => {
+    // The filler is heard sooner than the answer, and it is not the answer:
+    // timing to it would report a turn that took seconds as one that took
+    // milliseconds. The span waits for the reply the consult was fetching.
+    const { socket, control, client } = setup();
+    await client.connect();
+    socket.deliver(OPEN);
+    await settle();
+
+    userSpoke(socket, 'what did we decide?');
+    await settle();
+    control?.deliver({ t: 'realtime_speak', text: 'Let me check.', kind: 'ack' });
+    await settle();
+    socket.deliver(audioFrame([1, 0]));
+    socket.deliver({ type: 'response.done' });
+    await settle();
+
+    expect(latencies(control)).toEqual([]);
+
+    socket.deliver({ type: 'response.output_audio_transcript.delta', delta: 'Friday. ' });
+    socket.deliver(audioFrame([2, 0]));
+    socket.deliver({ type: 'response.done' });
+    await settle();
+
+    expect(latencies(control)).toHaveLength(1);
+    await client.disconnect();
+  });
+
+  it('reports nothing for the wind-down sign-off', async () => {
+    // The sign-off is the server's line, not an answer to the last thing asked.
+    const { socket, control, client } = setup();
+    await client.connect();
+    socket.deliver(OPEN);
+    await settle();
+
+    userSpoke(socket, 'what did we decide?');
+    await settle();
+    control?.deliver({ t: 'realtime_wind_down', text: 'Out of budget.', reason: 'budget' });
+    await settle();
+    socket.deliver(audioFrame([1, 0]));
+    socket.deliver({ type: 'response.done' });
+    await settle();
+
+    expect(latencies(control)).toEqual([]);
+  });
+});
+
 describe('control channel — budget wind-down', () => {
   it('says the sign-off, then ends the call when it has been said', async () => {
     const { socket, control, client, events } = setup();
