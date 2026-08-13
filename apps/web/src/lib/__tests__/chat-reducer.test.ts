@@ -520,6 +520,66 @@ describe('applyAction — UI/lifecycle transitions', () => {
     expect(s.messages).toEqual([]);
   });
 
+  it('a second question keeps the partial answer, marked [interrupted]', () => {
+    // Talk-mode barge-in: Q1 → the answer starts streaming → the user speaks
+    // again, which reaches this reducer as an ordinary send. The partial answer
+    // used to be DISCARDED here, so the two questions closed up next to each
+    // other and text the user had already read vanished.
+    let s = applyAction(initialChatState, {
+      type: 'submit-user-message',
+      id: 'u1',
+      text: 'tell me a story',
+      timestamp: 1,
+    });
+    s = applyEvent(s, { type: 'text_delta', text: 'Once upon a time' }, NOW);
+    s = applyAction(s, {
+      type: 'submit-user-message',
+      id: 'u2',
+      text: 'actually never mind',
+      timestamp: 2,
+    });
+
+    expect(s.messages.map((m) => m.role)).toEqual(['user', 'assistant', 'user']);
+    const kept = s.messages[1] as AssistantTurn;
+    expect(kept.blocks).toEqual([{ kind: 'text', content: 'Once upon a time [interrupted]' }]);
+    expect(s.currentTurn).toBeNull();
+  });
+
+  it('marks a turn cut off mid-tool-call, which has no sentence to mark', () => {
+    let s = applyEvent(
+      initialChatState,
+      { type: 'tool_start', toolCallId: 'tc1', toolName: 'read_file', args: {} },
+      NOW,
+    );
+    s = applyAction(s, { type: 'submit-user-message', id: 'u1', text: 'stop', timestamp: 1 });
+    const kept = s.messages[0] as AssistantTurn;
+    expect(kept.blocks.map((b) => b.kind)).toEqual(['tool', 'text']);
+    expect((kept.blocks[1] as TextBlock).content).toBe('[interrupted]');
+  });
+
+  it('keeps nothing when no answer had started', () => {
+    const s = applyAction(initialChatState, {
+      type: 'submit-user-message',
+      id: 'u1',
+      text: 'hi',
+      timestamp: 1,
+    });
+    expect(s.messages).toHaveLength(1);
+  });
+
+  it('a late done does not append the turn a second time', () => {
+    let s = applyAction(initialChatState, {
+      type: 'submit-user-message',
+      id: 'u1',
+      text: 'q1',
+      timestamp: 1,
+    });
+    s = applyEvent(s, { type: 'text_delta', text: 'partial' }, NOW);
+    s = applyAction(s, { type: 'submit-user-message', id: 'u2', text: 'q2', timestamp: 2 });
+    s = applyEvent(s, { type: 'done', text: 'partial', turnCount: 1 }, NOW);
+    expect(s.messages.map((m) => m.role)).toEqual(['user', 'assistant', 'user']);
+  });
+
   it('send-failed drops the optimistic user message and surfaces the error', () => {
     let s = applyAction(initialChatState, {
       type: 'submit-user-message',

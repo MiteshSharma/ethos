@@ -287,6 +287,11 @@ export function createBatchVoiceCallClient(deps: BatchVoiceCallDeps): VoiceCallC
       }
       if (!capture || disposed) break;
 
+      // The utterance endpointed: the user is done and the system is working.
+      // The audible half of that is the earcon below; this is the visible half,
+      // and it fires now rather than after the transcribe round trip.
+      emit({ type: 'speech_end' });
+
       // Acknowledge the captured utterance the instant it endpoints, covering
       // the transcribe → LLM → first-audio gap. Fire-and-forget: never blocks or
       // fails the turn. Gated by the `chime` dep (display.voice_chime toggle).
@@ -303,9 +308,16 @@ export function createBatchVoiceCallClient(deps: BatchVoiceCallDeps): VoiceCallC
         transcript = (await deps.transcribe(capture.audioBase64, capture.mimeType)).trim();
       } catch (err) {
         emit({ type: 'error', error: errorText(err, 'Transcription failed') });
+        emit({ type: 'utterance_dropped' });
         continue;
       }
-      if (!transcript || disposed) continue;
+      if (disposed) break;
+      if (!transcript) {
+        // Heard something, understood nothing. The loop goes straight back to
+        // listening, so the UI must too.
+        emit({ type: 'utterance_dropped' });
+        continue;
+      }
 
       emit({ type: 'utterance_committed', text: transcript });
       await runTurn(transcript);

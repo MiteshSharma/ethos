@@ -739,6 +739,10 @@ export interface ConfigGetResult {
   debugPanelModel: string | null;
   adminEnabled: boolean;
   streamingEdits: 'off' | 'dms' | 'all';
+  /** In-call overlay treatment (display.call_style). */
+  callStyle: 'liquid' | 'orb' | 'rings';
+  /** In-call overlay color (display.call_accent): `personality` or a hex. */
+  callAccent: string;
   autoCompact: boolean;
   memoryConsolidationEnabled: boolean;
   memoryCaptureEnabled: boolean;
@@ -883,6 +887,8 @@ export interface ConfigUpdateInput {
   debugPanelModel?: string | null;
   adminEnabled?: boolean;
   streamingEdits?: 'off' | 'dms' | 'all';
+  callStyle?: 'liquid' | 'orb' | 'rings';
+  callAccent?: string;
   autoCompact?: boolean;
   memoryConsolidationEnabled?: boolean;
   memoryCaptureEnabled?: boolean;
@@ -1049,6 +1055,8 @@ export class ConfigService {
       debugPanelModel: raw.debugPanelModel ?? null,
       adminEnabled: raw.passthrough['admin.enabled'] === 'true',
       streamingEdits: parseStreamingEdits(raw.passthrough['display.streaming_edits']),
+      callStyle: parseCallStyle(raw.passthrough['display.call_style']),
+      callAccent: parseCallAccent(raw.passthrough['display.call_accent']),
       // Default ON since the context-economy Phase 2 flip — off only when
       // explicitly disabled.
       autoCompact: raw.passthrough['compaction.autoCompact'] !== 'false',
@@ -1301,6 +1309,12 @@ export class ConfigService {
     }
     if (patch.streamingEdits !== undefined) {
       passthroughPatch['display.streaming_edits'] = patch.streamingEdits;
+    }
+    if (patch.callStyle !== undefined) {
+      passthroughPatch['display.call_style'] = patch.callStyle;
+    }
+    if (patch.callAccent !== undefined) {
+      passthroughPatch['display.call_accent'] = parseCallAccent(patch.callAccent);
     }
     if (patch.autoCompact !== undefined) {
       passthroughPatch['compaction.autoCompact'] = patch.autoCompact ? 'true' : 'false';
@@ -1637,6 +1651,8 @@ export class ConfigService {
     const passthrough = Object.keys(passthroughPatch).length > 0 ? passthroughPatch : undefined;
     delete cleaned.adminEnabled;
     delete cleaned.streamingEdits;
+    delete cleaned.callStyle;
+    delete cleaned.callAccent;
     delete cleaned.autoCompact;
     delete cleaned.memoryConsolidationEnabled;
     delete cleaned.memoryCaptureEnabled;
@@ -1743,6 +1759,20 @@ const SECRETS_REF_RE = /\$\{secrets:([^}]+)\}/g;
  *  unrecognized falls back to the effective default, `'dms'`. */
 function parseStreamingEdits(value: string | undefined): 'off' | 'dms' | 'all' {
   return value === 'off' || value === 'all' ? value : 'dms';
+}
+
+/** `display.call_style` — the in-call overlay treatment. Unset = liquid. */
+function parseCallStyle(value: string | undefined): 'liquid' | 'orb' | 'rings' {
+  return value === 'orb' || value === 'rings' ? value : 'liquid';
+}
+
+/**
+ * `display.call_accent` — `personality` or a 6-digit hex. Anything else (a typo,
+ * a hand-edited config) resolves to `personality` rather than reaching a canvas
+ * fillStyle.
+ */
+function parseCallAccent(value: string | undefined): string {
+  return value !== undefined && /^#[0-9a-fA-F]{6}$/.test(value) ? value : 'personality';
 }
 
 // ---------------------------------------------------------------------------

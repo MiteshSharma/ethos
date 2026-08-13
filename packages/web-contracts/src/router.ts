@@ -997,6 +997,10 @@ const ConfigGetOutput = z.object({
   adminEnabled: z.boolean(),
   /** Channel streaming draft edits (display.streaming_edits). */
   streamingEdits: z.enum(['off', 'dms', 'all']),
+  /** In-call overlay treatment (display.call_style). */
+  callStyle: z.enum(['liquid', 'orb', 'rings']),
+  /** In-call overlay color (display.call_accent): `personality` or `#RRGGBB`. */
+  callAccent: z.string(),
   /** Auto-compact long sessions near the model window (compaction.autoCompact). */
   autoCompact: z.boolean(),
   /** Silent memory-flush turn (memoryConsolidation.enabled). */
@@ -1273,6 +1277,9 @@ const ConfigUpdateInput = z.object({
   debugPanelModel: z.string().nullable().optional(),
   adminEnabled: z.boolean().optional(),
   streamingEdits: z.enum(['off', 'dms', 'all']).optional(),
+  callStyle: z.enum(['liquid', 'orb', 'rings']).optional(),
+  /** `personality` or `#RRGGBB`; anything else resolves to `personality`. */
+  callAccent: z.string().optional(),
   autoCompact: z.boolean().optional(),
   memoryConsolidationEnabled: z.boolean().optional(),
   memoryCaptureEnabled: z.boolean().optional(),

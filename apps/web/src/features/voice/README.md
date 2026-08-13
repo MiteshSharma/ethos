@@ -20,8 +20,10 @@ and the two call tiers behind them. Shipped by
   connecting | reconnecting | listening | thinking | consulting |
   agent_speaking | interrupted | ended`), transcript accumulation,
   barge-in/interrupted handling, the `[interrupted]` marker convention
-  (`markInterrupted`, used by the chat projection AND by the realtime tier's
-  transcript write, so history and screen agree), and the
+  (`markInterrupted` — defined in `lib/chat-reducer.ts` because the chat
+  transcript marks cut-off answers the same way, re-exported here and used by
+  the chat projection AND by the realtime tier's transcript write, so history
+  and screen agree), and the
   `voiceTranscriptToMessages` projection into the existing `MessageList`.
   `chatMessagesWithVoice` is what Chat renders: on the pipeline tier the spoken
   turns are already in `messages` via `sendMessage`, on the realtime tier the

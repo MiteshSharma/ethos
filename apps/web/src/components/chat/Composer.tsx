@@ -25,9 +25,11 @@ export interface ComposerProps {
   /** Text pushed in from a suggestion pill. `seq` makes picking the same
    *  suggestion twice a fresh event; the draft is replaced, not appended. */
   suggestion?: { text: string; seq: number };
-  /** Start talk-mode. Absent = this surface has no live-call affordance. */
+  /** Toggle talk-mode: starts a call, or ends the one in progress. Absent =
+   *  this surface has no live-call affordance. */
   onTalkMode?: () => void;
-  /** True while a call is up — the glyph reads active and stops re-arming. */
+  /** True while a call is up — the glyph reads active, and the composer's own
+   *  push-to-talk mic stands down so the two never contend for the device. */
   talkModeActive?: boolean;
   /** Hover text for the talk glyph; also its accessible name. */
   talkModeHint?: string;
@@ -452,7 +454,6 @@ export function Composer({
                 type="button"
                 className={`composer-talk-btn${talkModeActive ? ' composer-talk-active' : ''}`}
                 onClick={onTalkMode}
-                disabled={talkModeActive}
                 title={talkModeHint ?? 'Talk'}
                 aria-label={talkModeHint ?? 'Talk'}
                 aria-pressed={talkModeActive ?? false}
@@ -467,6 +468,7 @@ export function Composer({
                 }}
                 onRecordingChange={setIsVoiceRecording}
                 disabled={disabled || isStreaming}
+                micBusy={talkModeActive}
                 accent={accent}
               />
             )}

@@ -108,3 +108,59 @@ describe('AbsolutePlayout — absolute-time pacing', () => {
     expect(playout.playPcm16(frame(), 16_000)).toBeGreaterThan(0);
   });
 });
+
+// The agent's own speaking level. It exists for exactly one reason — the call
+// overlay's speaking state is amplitude-driven (DESIGN.md § "Call overlay") —
+// and the only place it can be measured is between the scheduled sources and
+// the destination, which is why the analyser lives on this graph.
+describe('AbsolutePlayout — output level', () => {
+  it('routes every scheduled source through the analyser, not the destination', () => {
+    const ctx = new FakePlayoutContext();
+    const playout = new AbsolutePlayout(ctx, { leadSeconds: LEAD });
+
+    playout.playPcm16(frame(), 16_000);
+    playout.playPcm16(frame(), 16_000);
+
+    expect(ctx.connectedTo).toEqual([ctx.analyser, ctx.analyser]);
+    // …and the analyser is what reaches the speakers.
+    expect(ctx.analyser.connected).toEqual([ctx.destination]);
+  });
+
+  it('reports zero while nothing is scheduled, whatever the analyser holds', () => {
+    const ctx = new FakePlayoutContext();
+    const playout = new AbsolutePlayout(ctx, { leadSeconds: LEAD });
+    ctx.analyser.bins = [255, 255, 255, 255];
+
+    // Silence is silence: an analyser still decaying after the last buffer must
+    // not keep the shape talking.
+    expect(playout.outputLevel()).toBe(0);
+  });
+
+  it('smooths towards the analyser reading while audio is scheduled', () => {
+    const ctx = new FakePlayoutContext();
+    const playout = new AbsolutePlayout(ctx, { leadSeconds: LEAD });
+    ctx.analyser.bins = [255, 255, 255, 255];
+    playout.playPcm16(frame(), 16_000);
+
+    const first = playout.outputLevel();
+    const second = playout.outputLevel();
+    const third = playout.outputLevel();
+
+    // One low-pass step per read: rising, never a jump to the raw value.
+    expect(first).toBeGreaterThan(0);
+    expect(second).toBeGreaterThan(first);
+    expect(third).toBeGreaterThan(second);
+    expect(third).toBeLessThan(1);
+  });
+
+  it('resets the level on stop, so barge-in silences the shape too', () => {
+    const ctx = new FakePlayoutContext();
+    const playout = new AbsolutePlayout(ctx, { leadSeconds: LEAD });
+    ctx.analyser.bins = [255, 255, 255, 255];
+    playout.playPcm16(frame(), 16_000);
+    expect(playout.outputLevel()).toBeGreaterThan(0);
+
+    playout.stop();
+    expect(playout.outputLevel()).toBe(0);
+  });
+});

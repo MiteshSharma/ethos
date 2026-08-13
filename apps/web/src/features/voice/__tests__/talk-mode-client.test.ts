@@ -1,5 +1,4 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { VoiceCallEvent } from '../voice-call-client';
 import {
   createTalkModeClient,
   realtimeDegradeNotice,
@@ -8,6 +7,7 @@ import {
   type TalkModeEnvironment,
   TIER_DEGRADED_CODE,
 } from '../talk-mode-client';
+import type { VoiceCallEvent } from '../voice-call-client';
 
 const full: TalkModeEnvironment = {
   hasWebSocket: true,
@@ -232,6 +232,15 @@ describe('a Gemini-shaped refusal reaches the user', () => {
 class FakeAudioContext {
   readonly sampleRate = 16_000;
   readonly currentTime = 0;
+  /** The playout meters its own output, so the graph now needs one of these. */
+  createAnalyser() {
+    return {
+      fftSize: 256,
+      frequencyBinCount: 128,
+      getByteFrequencyData: () => {},
+      connect: () => {},
+    };
+  }
   close(): Promise<void> {
     return Promise.resolve();
   }

@@ -295,6 +295,12 @@ export function createTalkModeClient(deps: TalkModeClientDeps): VoiceCallClient 
       return inner?.micStream() ?? null;
     },
 
+    // Whichever tier ended up serving. The batch fallback has no analyser, so
+    // it reports nothing and the overlay draws at rest.
+    outputLevel(): number {
+      return inner?.outputLevel?.() ?? 0;
+    },
+
     on(listener: (event: VoiceCallEvent) => void): () => void {
       listeners.add(listener);
       return () => {

@@ -477,7 +477,7 @@ export function applyAction(state: ChatState, action: ChatAction): ChatState {
       };
       return {
         ...state,
-        messages: [...state.messages, message],
+        messages: [...keepInterruptedTurn(state.messages, state.currentTurn), message],
         currentTurn: null,
         isStreaming: false,
         error: null,
@@ -546,6 +546,48 @@ export function applyAction(state: ChatState, action: ChatAction): ChatState {
 
 function ensureTurn(turn: AssistantTurn | null, now: number): AssistantTurn {
   return turn ?? { id: `asst-${now}`, role: 'assistant', blocks: [], timestamp: now };
+}
+
+const INTERRUPTED_MARKER = '[interrupted]';
+
+/**
+ * Mark reply text that was cut off before it finished.
+ *
+ * ONE marker convention for the whole app. It lives here rather than beside the
+ * voice call state machine because BOTH transcripts need it and only one of them
+ * can own it: the spoken transcript (`features/voice/voice-call-reducer.ts`,
+ * which re-exports this) and the chat transcript below. Two spellings of the
+ * same fact would be worse than the coupling.
+ */
+export function markInterrupted(text: string): string {
+  return text.includes(INTERRUPTED_MARKER) ? text : `${text} ${INTERRUPTED_MARKER}`.trim();
+}
+
+/**
+ * A new user message arriving while an assistant turn is still in flight.
+ *
+ * The partial answer is KEPT, marked `[interrupted]` — the same convention
+ * barge-in already uses for the spoken transcript (DESIGN.md: "the line stays in
+ * the transcript marked `[interrupted]`"). Discarding it, which is what this
+ * used to do, throws away text the user has already READ: talk-mode's second
+ * question arrives here as an ordinary `sendMessage`, so the answer being
+ * watched simply vanished and the two questions closed up next to each other.
+ *
+ * A turn with no blocks yet has nothing to keep and is dropped as before — the
+ * same guard `done` uses, and what keeps a late `done` from appending a second
+ * copy of a turn already committed here.
+ */
+function keepInterruptedTurn(messages: ChatMessage[], turn: AssistantTurn | null): ChatMessage[] {
+  if (!turn || turn.blocks.length === 0) return messages;
+  const last = turn.blocks[turn.blocks.length - 1];
+  // The marker rides the trailing sentence when there is one. A turn cut off
+  // mid-tool-call has no sentence to mark, and a bare marker block is still the
+  // honest thing to show: something was started and did not finish.
+  const blocks: AssistantBlock[] =
+    last?.kind === 'text'
+      ? [...turn.blocks.slice(0, -1), { kind: 'text', content: markInterrupted(last.content) }]
+      : [...turn.blocks, { kind: 'text', content: INTERRUPTED_MARKER }];
+  return [...messages, { ...turn, blocks }];
 }
 
 function dedupeApproval(current: ApprovalRequest[], next: ApprovalRequest): ApprovalRequest[] {

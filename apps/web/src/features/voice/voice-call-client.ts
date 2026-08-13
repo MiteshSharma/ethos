@@ -24,6 +24,16 @@ export type VoiceCallAudioFormat = 'opus' | 'mp3' | 'wav' | 'pcm';
  * Consumers must treat an unknown `type` as a no-op (forward-compatible).
  */
 export type VoiceCallEvent =
+  // Endpointing heard the user stop talking. The transcript is still in flight;
+  // this is what moves the UI to `thinking` at the moment the user actually
+  // finished rather than when the STT round trip returns. Emitted only by the
+  // tiers that endpoint IN THE BROWSER (pipeline: streaming + batch) — on the
+  // realtime tier the provider owns VAD and reports no speech-end edge.
+  | { type: 'speech_end' }
+  // The utterance a `speech_end` opened produced nothing to answer: an empty
+  // transcript, or the server dropped it. Hands the floor back so the UI does
+  // not sit thinking about a turn that will never arrive.
+  | { type: 'utterance_dropped' }
   // A committed utterance's transcript is ready — the agent turn is about to run.
   // `provider` is the STT provider that ACTUALLY ran, when the transport knows it.
   | { type: 'utterance_committed'; text: string; provider?: string }
@@ -67,6 +77,16 @@ export interface VoiceCallClient {
   setMuted(muted: boolean): void;
   /** The local mic MediaStream once connected, for a level meter. Null otherwise. */
   micStream(): MediaStream | null;
+  /**
+   * Smoothed level of the agent's own speech right now, 0..1 — what drives the
+   * call overlay's speaking state.
+   *
+   * Optional because it is a property of the audio GRAPH, and the batch tier
+   * has none: it hands a data URL to an `Audio` element, where no analyser can
+   * be inserted. A tier without one reports nothing rather than a fabricated
+   * level, and the overlay draws at rest.
+   */
+  outputLevel?(): number;
   /** Subscribe to call/transcript events. Returns an unsubscribe function. */
   on(listener: (event: VoiceCallEvent) => void): () => void;
 }

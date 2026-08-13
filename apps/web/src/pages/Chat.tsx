@@ -15,10 +15,21 @@ import { useGoalDetection } from '../features/goals/useGoalDetection';
 import { usePersonalityGet } from '../features/personalities/api/queries';
 import { useSessionRenameFromChat } from '../features/sessions/api/mutations';
 import { useSessionGet } from '../features/sessions/api/queries';
+import { CallOverlay } from '../features/voice/CallOverlay';
+import {
+  callOverlayMounted,
+  callOverlayVisual,
+  resolveCallAccent,
+} from '../features/voice/call-motion';
 import { runVoiceAgentTurn } from '../features/voice/chat-voice-runner';
 import { personalityCanTalk } from '../features/voice/gating';
 import { createPushToTalkHandlers } from '../features/voice/push-to-talk';
-import { TalkModeCallBar, TalkModeToggle } from '../features/voice/TalkMode';
+import {
+  providerSummary,
+  STATUS_LABEL,
+  TalkModeCallBar,
+  TalkModeToggle,
+} from '../features/voice/TalkMode';
 import { createTalkModeClient, type RealtimeTokenAnswer } from '../features/voice/talk-mode-client';
 import { useVoiceCall, type VoiceCallClientHooks } from '../features/voice/useVoiceCall';
 import type { VoiceCallClient } from '../features/voice/voice-call-client';
@@ -462,6 +473,39 @@ export function Chat() {
   const voice = useVoiceCall({ createClient: createVoiceClient });
   const inCall = voice.status !== 'idle' && voice.status !== 'ended';
 
+  // The call overlay (DESIGN.md § "Call overlay"). It opens with the call and
+  // MINIMIZES to the strip — dismissing it never hangs up, because the strip
+  // below it is what keeps the composer honest while a call is reconnecting.
+  const [overlayOpen, setOverlayOpen] = useState(true);
+  useEffect(() => {
+    if (inCall) setOverlayOpen(true);
+  }, [inCall]);
+  const callVisual = callOverlayVisual(voice.status);
+  const callAccent = resolveCallAccent(configQuery.data?.callAccent, personalityId);
+  const callProviderLabel = providerSummary({
+    status: voice.status,
+    sttProvider: voice.sttProvider ?? configQuery.data?.voiceProvider ?? null,
+    sttModel: configQuery.data?.voiceModel ?? null,
+    ttsProvider: voice.ttsProvider ?? configQuery.data?.voiceTtsProvider ?? null,
+    ttsModel: configQuery.data?.voiceTtsModel ?? null,
+    realtimeProvider: realtimeRan?.provider ?? null,
+    realtimeModel: realtimeRan?.model ?? null,
+  });
+  // The overlay is mounted by the CALL, not by the drawn state: connecting and
+  // reconnecting render INSIDE it (see `callOverlayVisual`), because unmounting
+  // for a transient status restarts the enter animation and the canvas, and that
+  // reads as the dialog closing and reopening mid-sentence. Degraded / mic-denied
+  // still hand over to the strip — that is where the explanation lives.
+  // `available` and `visible` differ only in the minimize, so the strip offers to
+  // restore an overlay exactly when there is one to restore.
+  const overlayMount = {
+    status: voice.status,
+    degraded: voice.degraded !== null,
+    micDenied: voice.micDenied,
+  };
+  const overlayAvailable = callOverlayMounted({ ...overlayMount, minimized: false });
+  const overlayVisible = callOverlayMounted({ ...overlayMount, minimized: !overlayOpen });
+
   // DR5's persistent transcript. On the realtime tier the provider owns the
   // conversation and nothing ever reaches `sendMessage`, so the spoken turns
   // land in the SAME message list only because they are projected here — the
@@ -472,7 +516,14 @@ export function Chat() {
     [state.messages, voiceTier, voiceTranscript],
   );
 
+  // A real toggle: the composer glyph both starts the call and ends it. The
+  // strip's hang-up button and Esc stay the primary way out — this is the
+  // second affordance for the control that claims `aria-pressed`.
   const handleTalkToggle = useCallback(() => {
+    if (inCall) {
+      voice.hangUp();
+      return;
+    }
     if (!sttConfigured) {
       notification.info({
         message: 'Voice',
@@ -482,7 +533,7 @@ export function Chat() {
       return;
     }
     voice.start();
-  }, [sttConfigured, voice.start, notification]);
+  }, [inCall, sttConfigured, voice.start, voice.hangUp, notification]);
 
   /**
    * Turn on the private/offline mode for the NEXT call.
@@ -602,8 +653,13 @@ export function Chat() {
           }
         />
         {/* Not `inCall`: a finished call can still be the only thing on screen
-            explaining why it finished. `callStripVisible` owns that rule. */}
-        {callStripVisible(voice) ? (
+            explaining why it finished. `callStripVisible` owns that rule.
+            `!overlayVisible` is the minimize relationship: the strip is what the
+            overlay minimizes TO, so the two are never up together. Nothing is
+            lost by the gate — every state the strip alone can explain (degraded,
+            mic-denied, ended) already forces `overlayVisible` false, and the
+            transient ones the overlay now carries itself. */}
+        {callStripVisible(voice) && !overlayVisible ? (
           <TalkModeCallBar
             status={voice.status}
             micLevels={voice.micLevels}
@@ -628,6 +684,24 @@ export function Chat() {
             realtimeProvider={realtimeRan?.provider ?? null}
             realtimeModel={realtimeRan?.model ?? null}
             latency={voice.latency}
+            {...(overlayAvailable && !overlayOpen ? { onExpand: () => setOverlayOpen(true) } : {})}
+          />
+        ) : null}
+        {overlayVisible ? (
+          <CallOverlay
+            state={callVisual}
+            treatment={configQuery.data?.callStyle ?? 'liquid'}
+            accent={callAccent}
+            personalityId={personalityId}
+            personalityName={capitalize(personalityId)}
+            micLevels={voice.micLevels}
+            agentLevel={voice.agentLevel}
+            statusLabel={STATUS_LABEL[voice.status]}
+            providerLabel={callProviderLabel}
+            muted={voice.muted}
+            onToggleMute={voice.toggleMute}
+            onMinimize={() => setOverlayOpen(false)}
+            onHangUp={voice.hangUp}
           />
         ) : null}
         <GoalIntakeModal
@@ -686,7 +760,7 @@ export function Chat() {
               ? {
                   onTalkMode: handleTalkToggle,
                   talkModeActive: inCall,
-                  talkModeHint: inCall ? 'In call' : `Talk to ${capitalize(personalityId)}`,
+                  talkModeHint: inCall ? 'End call' : `Talk to ${capitalize(personalityId)}`,
                 }
               : {})}
           />

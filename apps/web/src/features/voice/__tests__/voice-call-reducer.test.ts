@@ -5,6 +5,7 @@ import {
   callStripVisible,
   chatMessagesWithVoice,
   initialVoiceCallState,
+  isTerminalClientEvent,
   MIC_DENIED_CODE,
   TIER_DEGRADED_CODE,
   type VoiceCallState,
@@ -165,6 +166,98 @@ describe('voiceCallReducer — transcript', () => {
     });
     expect(after.status).toBe('agent_speaking');
     expect(after.transcript).toEqual(before.transcript);
+  });
+});
+
+describe('voiceCallReducer — speech_end (thinking starts when the user stops)', () => {
+  it('enters thinking at the speech-end edge, not when the transcript returns', () => {
+    // The bug this pins: `thinking` used to wait for `utterance_committed`,
+    // which is a hosted-STT round trip away (~2s on Whisper). For all of it the
+    // strip read `listening` — telling the user to keep talking.
+    const state = driveThroughClient([{ type: 'speech_end' }]);
+    expect(state.status).toBe('thinking');
+    // Nothing is claimed about WHAT was said until the transcript lands.
+    expect(state.transcript).toEqual([]);
+  });
+
+  it('still lands the transcript exactly once when it arrives', () => {
+    const state = driveThroughClient([
+      { type: 'speech_end' },
+      { type: 'utterance_committed', text: 'what time is it', provider: 'openai-stt' },
+    ]);
+    expect(state.status).toBe('thinking');
+    expect(state.transcript).toEqual([{ id: 'voice-0', role: 'user', text: 'what time is it' }]);
+    expect(state.sttProvider).toBe('openai-stt');
+  });
+
+  it('closes the open agent line on commit the same way it always did', () => {
+    const state = driveThroughClient([
+      { type: 'utterance_committed', text: 'q1' },
+      { type: 'reply_sentence', text: 'a1' },
+      { type: 'speech_end' },
+      { type: 'utterance_committed', text: 'q2' },
+    ]);
+    expect(state.transcript).toEqual([
+      { id: 'voice-0', role: 'user', text: 'q1' },
+      { id: 'voice-1', role: 'agent', text: 'a1', open: false },
+      { id: 'voice-2', role: 'user', text: 'q2' },
+    ]);
+  });
+
+  it('does not speak over a state that outranks it', () => {
+    for (const status of ['idle', 'ended', 'reconnecting'] as const) {
+      const state = voiceCallReducer(
+        { ...initialVoiceCallState, status },
+        { type: 'client-event', event: { type: 'speech_end' } },
+      );
+      expect(state.status).toBe(status);
+    }
+  });
+
+  it('leaves barge-in intact: the cut line stays, the new utterance thinks', () => {
+    const state = driveThroughClient([
+      { type: 'utterance_committed', text: 'tell me a story' },
+      { type: 'reply_sentence', text: 'Once upon a time' },
+      { type: 'interrupted', text: 'Once upon a time [interrupted]' },
+      { type: 'speech_end' },
+    ]);
+    expect(state.status).toBe('thinking');
+    expect(state.transcript[1]).toEqual({
+      id: 'voice-1',
+      role: 'agent',
+      text: 'Once upon a time [interrupted]',
+      interrupted: true,
+      open: false,
+    });
+  });
+
+  it('hands the floor back when the utterance produced nothing to answer', () => {
+    // Otherwise an unintelligible noise leaves the strip thinking forever about
+    // a turn that will never arrive, while the mic is in fact still listening.
+    const state = driveThroughClient([{ type: 'speech_end' }, { type: 'utterance_dropped' }]);
+    expect(state.status).toBe('listening');
+    expect(state.transcript).toEqual([]);
+  });
+
+  it('a drop never rewinds a call that has already moved on', () => {
+    const speaking = driveThroughClient([
+      { type: 'speech_end' },
+      { type: 'utterance_committed', text: 'hi' },
+      { type: 'reply_sentence', text: 'Hello.' },
+      { type: 'utterance_dropped' },
+    ]);
+    expect(speaking.status).toBe('agent_speaking');
+
+    const ended = voiceCallReducer(
+      { ...initialVoiceCallState, status: 'ended' },
+      { type: 'client-event', event: { type: 'utterance_dropped' } },
+    );
+    expect(ended.status).toBe('ended');
+  });
+
+  it('neither event ends the call', () => {
+    expect(isTerminalClientEvent({ type: 'speech_end' })).toBe(false);
+    expect(isTerminalClientEvent({ type: 'utterance_dropped' })).toBe(false);
   });
 });
 
@@ -595,6 +688,79 @@ describe('callStripVisible — what Chat still renders after a call stops', () =
     );
     expect(state.notice).not.toBeNull();
     expect(callStripVisible(state)).toBe(false);
+  });
+});
+
+describe('isTerminalClientEvent', () => {
+  const degradingCodes = ['transcribe_failed', 'synthesize_failed', 'voice_unavailable'];
+
+  it('is true for every code that ends voice for the call', () => {
+    for (const code of degradingCodes) {
+      expect(isTerminalClientEvent({ type: 'error', error: 'boom', code })).toBe(true);
+    }
+    expect(isTerminalClientEvent({ type: 'error', error: 'Allow…', code: MIC_DENIED_CODE })).toBe(
+      true,
+    );
+    expect(isTerminalClientEvent({ type: 'disconnected' })).toBe(true);
+  });
+
+  it('is false for events the call survives', () => {
+    // The tier downgrade is the sharp one: voice still WORKS, so tearing the mic
+    // down here would kill a call that is about to run on the pipeline.
+    expect(
+      isTerminalClientEvent({ type: 'error', error: 'on the pipeline', code: TIER_DEGRADED_CODE }),
+    ).toBe(false);
+    expect(isTerminalClientEvent({ type: 'error', error: 'transient' })).toBe(false);
+    expect(
+      isTerminalClientEvent({ type: 'error', error: 'transient', code: 'utterance_too_long' }),
+    ).toBe(false);
+    expect(isTerminalClientEvent({ type: 'utterance_committed', text: 'hi' })).toBe(false);
+    expect(isTerminalClientEvent({ type: 'reply_sentence', text: 'Hello.' })).toBe(false);
+    expect(isTerminalClientEvent({ type: 'link', status: 'reconnecting' })).toBe(false);
+    expect(isTerminalClientEvent({ type: 'budget_wind_down', text: 'Out of budget.' })).toBe(false);
+  });
+
+  it('agrees with the reducer about which events reach `ended`', () => {
+    // The predicate is what makes the hook release the mic; the reducer is what
+    // makes the strip say the call is over. If they ever disagree, one of the two
+    // is lying to the user — this is the pin that keeps them in step.
+    const live: VoiceCallState = { ...initialVoiceCallState, status: 'listening' };
+    const events: VoiceCallEvent[] = [
+      ...degradingCodes.map((code): VoiceCallEvent => ({ type: 'error', error: 'boom', code })),
+      { type: 'error', error: 'Allow…', code: MIC_DENIED_CODE },
+      { type: 'error', error: 'on the pipeline', code: TIER_DEGRADED_CODE },
+      { type: 'error', error: 'transient', code: 'utterance_too_long' },
+      { type: 'disconnected' },
+      { type: 'utterance_committed', text: 'hi' },
+      { type: 'reply_sentence', text: 'Hello.' },
+      { type: 'reply_complete', text: 'Hello.' },
+      { type: 'interrupted', text: 'Hel' },
+      { type: 'filler', text: 'One moment.' },
+      { type: 'budget_wind_down', text: 'Out of budget.' },
+      { type: 'link', status: 'reconnecting' },
+    ];
+    for (const event of events) {
+      const ended = voiceCallReducer(live, { type: 'client-event', event }).status === 'ended';
+      expect({ event: event.type, code: 'code' in event ? event.code : null, ended }).toEqual({
+        event: event.type,
+        code: 'code' in event ? event.code : null,
+        ended: isTerminalClientEvent(event),
+      });
+    }
+  });
+
+  it('leaves the degraded notice standing so the strip can explain itself', () => {
+    // Teardown is refs-only in the hook, but the guarantee that matters is
+    // stated here: the state a torn-down degrade leaves behind still renders.
+    const state = driveThroughClient([
+      { type: 'error', error: 'Voice unavailable', code: 'voice_unavailable', provider: 'openai' },
+    ]);
+    expect(isTerminalClientEvent({ type: 'error', error: 'x', code: 'voice_unavailable' })).toBe(
+      true,
+    );
+    expect(state.status).toBe('ended');
+    expect(state.degraded).toEqual({ provider: 'openai', message: 'Voice unavailable' });
+    expect(callStripVisible(state)).toBe(true);
   });
 });
 

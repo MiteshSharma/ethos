@@ -133,6 +133,10 @@ export function createStreamingVoiceCallClient(deps: StreamingVoiceCallDeps): Vo
         const id = activeUtteranceId;
         if (!id) return;
         deps.transport.send({ t: 'utterance_end', utteranceId: id });
+        // Say so BEFORE the earcon and long before the transcript: the user has
+        // stopped and the system is working, and the UI should not still be
+        // claiming it is listening for the whole STT round trip.
+        emit({ type: 'speech_end' });
         if (deps.chime !== false) {
           try {
             deps.capture.playEarcon();
@@ -168,7 +172,12 @@ export function createStreamingVoiceCallClient(deps: StreamingVoiceCallDeps): Vo
       case 'transcript': {
         if (isStale(frame.utteranceId) || !frame.final) return;
         const text = frame.text.trim();
-        if (!text) return;
+        if (!text) {
+          // Heard something, understood nothing. The call keeps listening, so
+          // the UI has to stop thinking about it.
+          emit({ type: 'utterance_dropped' });
+          return;
+        }
         emit({
           type: 'utterance_committed',
           text,
@@ -229,6 +238,7 @@ export function createStreamingVoiceCallClient(deps: StreamingVoiceCallDeps): Vo
         if (frame.utteranceId === activeUtteranceId && frame.reason === 'too_large') {
           discardUtterance();
           deps.capture.setCaptureEnabled(true);
+          emit({ type: 'utterance_dropped' });
         }
         return;
       case 'error': {
@@ -243,6 +253,10 @@ export function createStreamingVoiceCallClient(deps: StreamingVoiceCallDeps): Vo
           discardUtterance();
           deps.capture.setBargeInEnabled(false);
           deps.capture.setCaptureEnabled(true);
+          // Back to listening. A degrading code has already ended the call by
+          // now, and the reducer only reverses a `thinking` — so this reaches
+          // exactly the recoverable errors that leave the call running.
+          emit({ type: 'utterance_dropped' });
         }
         return;
       }
@@ -393,6 +407,10 @@ export function createStreamingVoiceCallClient(deps: StreamingVoiceCallDeps): Vo
 
     micStream(): MediaStream | null {
       return deps.capture.micStream();
+    },
+
+    outputLevel(): number {
+      return deps.playout.outputLevel();
     },
 
     on(listener: (event: VoiceCallEvent) => void): () => void {

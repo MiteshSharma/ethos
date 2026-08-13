@@ -792,6 +792,10 @@ export function createRealtimeVoiceCallClient(deps: RealtimeVoiceCallDeps): Voic
       return deps.capture.micStream();
     },
 
+    outputLevel(): number {
+      return deps.playout.outputLevel();
+    },
+
     on(listener: (event: VoiceCallEvent) => void): () => void {
       listeners.add(listener);
       return () => {

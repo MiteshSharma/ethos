@@ -2700,9 +2700,84 @@ textarea {
   opacity: 0.9;
 }
 
+/* The in-call overlay (DESIGN.md § "Call overlay").
+
+   The layer takes NO pointer events; only the panel does. That is what makes
+   the overlay non-blocking — the message list scrolls and the composer takes
+   text behind it — and it is why there is no backdrop, no scroll lock and no
+   focus trap anywhere in this block. `z-index` sits below Antd's modal layer
+   (1000) so an approval request still lands on top of a live call. */
+.call-overlay-layer {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+  z-index: 200;
+}
+
+.call-overlay {
+  pointer-events: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  padding: 16px;
+  /* md (8px) — a surface container, not a chip and not a drawer. */
+  border-radius: 8px;
+  background: var(--ethos-bg-elevated);
+  border: 1px solid var(--ethos-border);
+  box-shadow: 0 12px 32px var(--ethos-shadow-overlay);
+  animation: call-overlay-in 240ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+/* --motion-slow, the drawer/modal duration. The shape's own motion has no
+   duration token at all — see DESIGN.md on continuous amplitude-driven
+   motion — but the surface arriving is an ordinary state transition. */
+@keyframes call-overlay-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.call-overlay-canvas {
+  display: block;
+  width: 240px;
+  height: 240px;
+}
+
+.call-overlay-foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 4px 12px;
+}
+
+.call-overlay-state {
+  color: var(--ethos-text-secondary);
+}
+
+.call-overlay-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 /* 375px: the mark, the state, the caption and mute/end persist; the mono
    provider+latency detail collapses behind the toggle's tap target. */
 @media (max-width: 420px) {
+  .call-overlay-canvas {
+    width: 180px;
+    height: 180px;
+  }
+
   .talk-indicator {
     width: 72px;
   }
@@ -2750,7 +2825,8 @@ textarea {
 @media (prefers-reduced-motion: reduce) {
   .talk-agent-pulse,
   .talk-link-pulse,
-  .talk-indicator-flash {
+  .talk-indicator-flash,
+  .call-overlay {
     animation: none;
   }
 

@@ -150,6 +150,13 @@ export function playoutContextFrom(ctx: AudioContext): PlayoutContext {
     },
     createBuffer: (channels, frames, sampleRate) => ctx.createBuffer(channels, frames, sampleRate),
     createBufferSource: () => ctx.createBufferSource() as unknown as PlayoutSource,
+    createAnalyser: () => {
+      const analyser = ctx.createAnalyser();
+      // Same size the mic meter uses: enough bins for a voice envelope, small
+      // enough that reading it every animation frame costs nothing.
+      analyser.fftSize = 256;
+      return analyser;
+    },
     decodeAudioData: (data) => ctx.decodeAudioData(data),
     fillMono: (buffer, samples) => {
       (buffer as AudioBuffer).getChannelData(0).set(samples);

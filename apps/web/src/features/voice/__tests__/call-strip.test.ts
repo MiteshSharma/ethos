@@ -382,4 +382,18 @@ describe('CallStrip — a call that has stopped but is not finished explaining',
     expect(html).toContain('aria-label="End call"');
     expect(html).not.toContain('aria-label="Dismiss"');
   });
+
+  it('carries the restore control only while the overlay is minimized', () => {
+    // Minimize and restore are the same call, not two surfaces (DESIGN.md
+    // § "CallStrip"): Chat passes `onExpand` only while the overlay is down,
+    // so an overlay that is already up cannot offer to open itself again.
+    expect(strip({ status: 'listening', onExpand: () => {} })).toContain(
+      'aria-label="Show the call overlay"',
+    );
+    expect(strip({ status: 'listening' })).not.toContain('aria-label="Show the call overlay"');
+    // A finished call has nothing to restore.
+    expect(strip({ status: 'ended', onExpand: () => {}, onDismissNotice: () => {} })).not.toContain(
+      'aria-label="Show the call overlay"',
+    );
+  });
 });

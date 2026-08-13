@@ -1,12 +1,39 @@
-import type { PlayoutBuffer, PlayoutContext, PlayoutSource } from '../webaudio-playout';
+import type {
+  PlayoutAnalyser,
+  PlayoutBuffer,
+  PlayoutContext,
+  PlayoutSource,
+} from '../webaudio-playout';
+
+/** A hand-driven `AnalyserNode`: `bins` is whatever the test wants measured. */
+export class FakePlayoutAnalyser implements PlayoutAnalyser {
+  bins: number[] = [];
+  /** Every node connected to this analyser's output. */
+  readonly connected: unknown[] = [];
+
+  get frequencyBinCount(): number {
+    return this.bins.length;
+  }
+
+  getByteFrequencyData(array: Uint8Array): void {
+    for (let i = 0; i < array.length; i++) array[i] = this.bins[i] ?? 0;
+  }
+
+  connect(destination: unknown): void {
+    this.connected.push(destination);
+  }
+}
 
 /** A recording stand-in for `AudioContext` with a hand-cranked clock. */
 export class FakePlayoutContext implements PlayoutContext {
   currentTime = 0;
   readonly destination = { id: 'destination' };
+  readonly analyser = new FakePlayoutAnalyser();
   /** Every source that was started, in schedule order. */
   readonly starts: Array<{ at: number; duration: number }> = [];
   readonly stopped: PlayoutSource[] = [];
+  /** What each scheduled source was connected to, in schedule order. */
+  readonly connectedTo: unknown[] = [];
   /** Resolvers for pending `decodeAudioData` calls, in call order. */
   private readonly decodes: Array<(buffer: PlayoutBuffer) => void> = [];
 
@@ -16,13 +43,20 @@ export class FakePlayoutContext implements PlayoutContext {
 
   fillMono(): void {}
 
+  createAnalyser(): PlayoutAnalyser {
+    return this.analyser;
+  }
+
   createBufferSource(): PlayoutSource {
     const starts = this.starts;
     const stopped = this.stopped;
+    const connectedTo = this.connectedTo;
     const source: PlayoutSource = {
       buffer: null,
       onended: null,
-      connect: () => {},
+      connect: (destination: unknown) => {
+        connectedTo.push(destination);
+      },
       start(at: number) {
         starts.push({ at, duration: source.buffer?.duration ?? 0 });
       },

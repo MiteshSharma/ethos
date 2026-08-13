@@ -156,29 +156,73 @@ Three-state dot (8px circle, `border-radius: 9999px`):
 Web surface: rendered in TopBar right-hand side alongside `{provider} · {model}` mono label.
 Desktop surface: rendered in sidebar bottom as an 8px dot inside a 20px glow ring (`border: 1.5px solid rgba(74,222,128,0.4)`).
 
-### In-call speaking indicator
+### Call overlay
 
-Talk-mode (real-time voice) needs a glanceable "who is speaking now" signal in
-the in-call control strip. Two states, reusing existing vocabulary — no new color
-or motion primitives:
+Talk-mode's primary surface is a **non-blocking call overlay**: a centered dialog
+over Chat on `--bg-elevated`, `md` (8px) radius, entering over `--motion-slow`
+(240ms) with the standard ease. It is **not** full-screen, it does **not** trap
+focus and it does **not** dim the page — the message list scrolls and the
+composer still accepts text while it is up. This reverses the earlier "no new
+full-screen surface" line: a call is not a status cue, and a 10px dot is not
+enough surface to carry three continuously-changing states.
 
-- **User speaking (listening):** reuse the composer's `AudioBars` mic meter (red
-  `--error` bars) — the mic is live/recording, same as voice-note capture.
-- **Agent speaking:** a single 10px dot in the active personality's `--accent`,
-  pulsing via the existing `status-dot-pulse` keyframe. Accent (not a semantic
-  color) because it says "this personality is talking" — the same identity
-  affordance as the personality bar. `prefers-reduced-motion` stops the pulse.
+Dismissing the overlay **minimizes it to the CallStrip; it does not end the
+call.** That is required, not a nicety — the Reconnecting row below promises the
+composer stays usable for text throughout, so the surface that covers the
+composer's neighbourhood must be closable without hanging up. Only the strip's
+hang-up control and `Esc` end a call.
 
-Rationale: mirrors the connection-status dot vocabulary (colored pulsing dot) but
-in accent, so the speaking cue reads as identity, not status. The call strip is a
-slim bar on the existing Chat — no new full-screen surface ("cards earn
-existence").
+Three user-selectable treatments, all driven by the same amplitude signal:
+
+| Treatment | `display.call_style` | What it is |
+|---|---|---|
+| Liquid (default) | `liquid` | The personality circle fills like a vessel; the surface is two summed sines, so it reads as liquid rather than a progress bar. |
+| Orb | `orb` | A radial-gradient body whose rim deforms with amplitude. |
+| Rings | `rings` | Three concentric rings breathing outward from a solid core. |
+
+Color is `display.call_accent`: `personality` (default — follows the active
+personality's `--accent`, so the shape says *which* agent holds the floor) or an
+explicit hex. Both keys are edited in Settings → Voice → Call appearance. Nothing
+else about the overlay is user-configurable.
+
+#### Motion class: continuous amplitude-driven motion
+
+This is a **new motion category**, and the first one added to this system. The
+scale below (80 / 180 / 240ms, "no bounces or springs") describes *state
+transitions*: something changes, the change takes a fixed time, the motion ends.
+A duplex call has no such moment to animate. What the listener needs — is it
+hearing me, is it working, is it talking — is true continuously and has to be
+shown continuously, so the shape is driven by an audio amplitude signal for as
+long as the call is up. The transition scale still governs everything else about
+the overlay (enter, minimize, hover, focus ring).
+
+The motion constants — smoothing, gain, travel, wave speed, glow, orbit rate —
+are **fixed in code**, not exposed: `CALL_MOTION` in
+`apps/web/src/features/voice/call-motion.ts`.
+
+#### States
+
+| State | What the user sees |
+|---|---|
+| Listening | The shape in `--error` red — the live-mic vocabulary the composer's `AudioBars` already uses. Amplitude is the mic level. |
+| Thinking | **Amplitude-independent** — nobody is talking. The circle contracts to 84%, a comet arc orbits it, and a slow 0.5Hz breath keeps the shape alive at rest. Accent-colored. |
+| Speaking | Accent-colored, amplitude driven by the agent's own output level (an analyser on the playout graph). |
+| Connecting / Reconnecting | Rendered **inside** the overlay, not instead of it: the Thinking shape (busy, accent, amplitude-independent — nobody is talking) with the mono state word reading `connecting` / `reconnecting…`. The overlay is mounted by the call, never by the state — unmounting it for a status a live call passes through replays the 240ms entrance and restarts the canvas, which the user reads as the dialog closing and reopening between turns. The overlay is non-blocking, so the composer stays usable throughout regardless. |
+| Degraded / Mic-denied / Ended | The overlay comes down and the CallStrip below takes over. These are the states where what the user needs is the explanation and a way to act on it, and the strip is what carries both. |
+
+`prefers-reduced-motion`: the comet collapses to a **static ring** — no orbit, no
+wave, no glow, and the amplitude smoothing drops out so nothing drifts after the
+signal stops. State stays legible without a frame of motion: the color, the
+contraction and the mono state word carry it.
+
+Controls are ≥44px touch targets. The provider label stays Geist Mono
+`{provider} · {model}`, the same vocabulary as the TopBar and the strip.
 
 ### CallStrip
 
-The component that renders the indicator above, plus everything else a live call
-needs. One component, one slim strip on Chat — **rows, never the `Card`
-primitive**. Nine states, all in existing vocabulary:
+The overlay's minimized form, and the only form for the states that are not
+carrying audio. One slim strip on Chat — **rows, never the `Card` primitive**.
+Nine states, all in existing vocabulary:
 
 | State | What the user sees |
 |---|---|
@@ -200,6 +244,9 @@ expandable toggle, collapsed by default.
 Controls are ≥44px touch targets; `prefers-reduced-motion` stops every pulse and
 the barge-in flash. At 375px the mark, state and mute/end persist and the mono
 detail collapses behind the toggle's tap.
+
+While a call is carrying audio the strip also carries the control that reopens
+the overlay — minimize and restore are the same call, not two surfaces.
 
 ## Sidebar
 
@@ -266,6 +313,12 @@ Single easing, short durations, no bounces or springs.
 Transitions allowed on: `opacity`, `transform`, `color`, `background-color`, `border-color`, `outline-color`. **Never on text content** (no width-animating text reveals — they cause layout thrash).
 
 `prefers-reduced-motion` → all motion is instant. `* { transition: none !important; animation: none !important; }`.
+
+One exception to the scale, not to the preference: the call overlay's
+**continuous amplitude-driven motion** (see "Call overlay") is not a state
+transition and has no duration token. It still stops under
+`prefers-reduced-motion`, and it is the only place in the system allowed to move
+without a transition.
 
 ## Personality marks (generative SVG)
 
@@ -361,3 +414,4 @@ The web UI specifically must avoid these patterns. Code review checks for them.
 | 2026-07-16 | Docs landing page: personality icon → annulus ring (logo geometry); landing shows 3 specialists with cross-provider model routing | User-directed during landing-page 3D redesign (hero-demos hybrid). Scope: docs landing page; app surfaces still use the generative grid mark pending a follow-up decision. |
 | 2026-07-19 | In-call speaking indicator (talk-mode) | Phase B browser talk-mode needs a "who's speaking" cue. Reuses `AudioBars` for the user mic and an accent `status-dot-pulse` dot for the agent — accent, not a semantic color, so the cue reads as personality identity. No new primitives. |
 | 2026-08-12 | CallStrip added to the component inventory (voice V1a, DR3) | Talk-mode's nine states needed one home. A slim strip of ROWS on Chat, not a new surface and not a `Card`; the thinking state is the existing accent dot held steady, connecting/reconnecting borrows the amber connection dot, and provider + latency reuse the `{provider} · {model}` mono label rather than a badge or debug panel. |
+| 2026-08-13 | Call overlay supersedes the 2026-07-19 "In-call speaking indicator" entry | A 10px pulsing dot cannot express three continuously-changing states, so the call gets a non-blocking centered overlay (three treatments, amplitude-driven) that minimizes to the strip rather than ending the call. Adds one new motion class — continuous amplitude-driven motion — because the 80/180/240ms transition scale has no way to express a duplex call's need for continuous feedback. The strip keeps every state that is not carrying audio. |

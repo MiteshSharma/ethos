@@ -23,7 +23,7 @@ import type { VoiceCallStatus, VoiceDegradedNotice } from './voice-call-reducer'
 // checking something.
 
 /** Geist Mono state word, in the connection-dot vocabulary. Lowercase mono. */
-const STATUS_LABEL: Record<VoiceCallStatus, string> = {
+export const STATUS_LABEL: Record<VoiceCallStatus, string> = {
   idle: '',
   connecting: 'connecting',
   reconnecting: 'reconnecting…',
@@ -112,6 +112,12 @@ export interface TalkModeCallBarProps {
    * control would be a button that cannot work.
    */
   onLeavePrivateMode?: () => void;
+  /**
+   * Reopen the call overlay. Passed only while a call is carrying audio and the
+   * overlay is minimized — minimize and restore are the same call, not two
+   * surfaces (DESIGN.md § "CallStrip").
+   */
+  onExpand?: () => void;
   /** The browser refused the mic — guidance, never a dead mic icon. */
   micDenied?: boolean;
   onDismissNotice?: () => void;
@@ -149,6 +155,7 @@ export function TalkModeCallBar({
   privateMode,
   onUsePrivateMode,
   onLeavePrivateMode,
+  onExpand,
   micDenied,
   onDismissNotice,
   sttProvider,
@@ -246,6 +253,16 @@ export function TalkModeCallBar({
             </button>
           ) : (
             <>
+              {onExpand ? (
+                <button
+                  type="button"
+                  className="talk-btn talk-expand-btn"
+                  onClick={onExpand}
+                  aria-label="Show the call overlay"
+                >
+                  <ExpandIcon />
+                </button>
+              ) : null}
               <button
                 type="button"
                 className={`talk-btn${muted ? ' talk-btn-active' : ''}`}
@@ -376,8 +393,12 @@ function formatMs(ms: number | null | undefined): string {
   return ms === null || ms === undefined ? '—' : `${ms}ms`;
 }
 
-/** Which provider is worth naming right now: the one currently doing the work. */
-function providerSummary(opts: {
+/**
+ * Which provider is worth naming right now: the one currently doing the work.
+ * Exported so the call overlay prints the SAME label as the strip it minimizes
+ * into, rather than a second opinion about which engine is running.
+ */
+export function providerSummary(opts: {
   status: VoiceCallStatus;
   sttProvider?: string | null;
   sttModel?: string | null;
@@ -497,7 +518,26 @@ function PhoneIcon() {
   );
 }
 
-function PhoneDownIcon() {
+/** Restore the minimized overlay. The panel it reopens, in 16px stroke. */
+function ExpandIcon() {
+  return (
+    <svg
+      width="16"
+      height="16"
+      viewBox="0 0 16 16"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.5"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <rect x="3" y="3.5" width="10" height="9" rx="1.5" />
+    </svg>
+  );
+}
+
+/** Shared with the call overlay, which draws the same three controls. */
+export function PhoneDownIcon() {
   return (
     <svg
       width="16"
@@ -541,7 +581,7 @@ export function TalkMicIcon() {
   );
 }
 
-function MicIcon() {
+export function MicIcon() {
   return (
     <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
       <rect x="6" y="2" width="4" height="8" rx="2" stroke="currentColor" strokeWidth="1.5" />
@@ -559,7 +599,7 @@ function MicIcon() {
   );
 }
 
-function MicOffIcon() {
+export function MicOffIcon() {
   return (
     <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
       <rect x="6" y="2" width="4" height="8" rx="2" stroke="currentColor" strokeWidth="1.5" />

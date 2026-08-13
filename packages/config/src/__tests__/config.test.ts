@@ -446,3 +446,67 @@ describe('parseConfigYaml — display.streaming_edits', () => {
     expect(roundTripped?.displayStreamingEdits).toBe('all');
   });
 });
+
+describe('parseConfigYaml — display.call_style / display.call_accent', () => {
+  const base = [
+    'provider: anthropic',
+    'model: claude-opus-4-7',
+    'apiKey: sk',
+    'personality: researcher',
+  ];
+
+  it('parses the three call treatments verbatim', async () => {
+    for (const style of ['liquid', 'orb', 'rings'] as const) {
+      const cfg = await loadYaml([...base, `display.call_style: ${style}`].join('\n'));
+      expect(cfg.displayCallStyle).toBe(style);
+    }
+  });
+
+  it('leaves both undefined when absent (liquid + personality applied by the surface)', async () => {
+    const cfg = await loadYaml(base.join('\n'));
+    expect(cfg.displayCallStyle).toBeUndefined();
+    expect(cfg.displayCallAccent).toBeUndefined();
+  });
+
+  it('omits an invalid treatment', async () => {
+    const cfg = await loadYaml([...base, 'display.call_style: sparkles'].join('\n'));
+    expect(cfg.displayCallStyle).toBeUndefined();
+  });
+
+  it('parses `personality` and a 6-digit hex, and drops anything else', async () => {
+    const personality = await loadYaml([...base, 'display.call_accent: personality'].join('\n'));
+    expect(personality.displayCallAccent).toBe('personality');
+
+    const hex = await loadYaml([...base, 'display.call_accent: "#4ADE80"'].join('\n'));
+    expect(hex.displayCallAccent).toBe('#4ADE80');
+
+    // A typo must not reach a canvas fillStyle — the surface falls back to the
+    // personality accent instead of painting the call an unreadable color.
+    for (const bad of ['red', '#GGGGGG', '#4ADE8']) {
+      const cfg = await loadYaml([...base, `display.call_accent: "${bad}"`].join('\n'));
+      expect(cfg.displayCallAccent).toBeUndefined();
+    }
+  });
+
+  it('round-trips through writeConfig and back', async () => {
+    const storage = new InMemoryStorage();
+    await storage.mkdir(ethosDir());
+    const original: EthosConfig = {
+      provider: 'anthropic',
+      model: 'claude-opus-4-7',
+      apiKey: 'sk',
+      personality: 'researcher',
+      displayCallStyle: 'orb',
+      displayCallAccent: '#E879F9',
+    };
+    await writeConfig(storage, original, new InMemorySecretsResolver());
+
+    const raw = await storage.read(join(ethosDir(), 'config.yaml'));
+    expect(raw).toContain('display.call_style: orb');
+    expect(raw).toContain('display.call_accent: #E879F9');
+
+    const roundTripped = await readRawConfig(storage);
+    expect(roundTripped?.displayCallStyle).toBe('orb');
+    expect(roundTripped?.displayCallAccent).toBe('#E879F9');
+  });
+});

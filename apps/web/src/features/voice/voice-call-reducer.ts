@@ -1,4 +1,4 @@
-import type { ChatMessage } from '../../lib/chat-reducer';
+import { type ChatMessage, markInterrupted } from '../../lib/chat-reducer';
 import type { VoiceCallEvent } from './voice-call-client';
 
 // Pure state machine for a live voice call. Extracted from the `useVoiceCall`
@@ -110,8 +110,6 @@ export type VoiceCallAction =
   | { type: 'tier'; tier: 'pipeline' | 'realtime' }
   | { type: 'client-event'; event: VoiceCallEvent };
 
-const INTERRUPTED_MARKER = '[interrupted]';
-
 /** The browser refused the mic — guidance, not an error banner. */
 export const MIC_DENIED_CODE = 'mic_permission_denied';
 
@@ -172,10 +170,36 @@ export function voiceCallReducer(state: VoiceCallState, action: VoiceCallAction)
 
 function applyClientEvent(state: VoiceCallState, event: VoiceCallEvent): VoiceCallState {
   switch (event.type) {
+    case 'speech_end':
+      // Endpointing heard the user stop. `thinking` starts HERE, not when the
+      // transcript comes back: on a hosted STT the round trip is a second or
+      // two, and until this existed the strip read `listening` for all of it —
+      // telling the user to keep talking when the system was already working.
+      //
+      // Only three states outrank it. `idle`/`ended` have no turn to think
+      // about, and `reconnecting` is the truer thing to be showing: the
+      // utterance is discarded when the link drops, so nothing is coming.
+      if (state.status === 'idle' || state.status === 'ended' || state.status === 'reconnecting') {
+        return state;
+      }
+      return { ...state, status: 'thinking' };
+
+    case 'utterance_dropped':
+      // Nothing came back for the utterance this call went `thinking` about —
+      // an empty transcript, or the server dropped it. The floor goes back to
+      // the user rather than leaving the strip thinking about a turn that will
+      // never arrive. Narrow on purpose: a call that has since moved on (the
+      // reply is flowing, the link dropped, the call ended) keeps where it got
+      // to.
+      return state.status === 'thinking' ? { ...state, status: 'listening' } : state;
+
     case 'utterance_committed': {
       // The user finished speaking; the agent is now working on the reply —
-      // that gap is `thinking`, the steady-accent-dot state. Close any open
-      // agent line and append the user's committed utterance.
+      // that gap is `thinking`, the steady-accent-dot state (already entered at
+      // `speech_end` on the tiers that endpoint locally; re-entered here for the
+      // realtime tier, where the provider owns VAD and this is the first the
+      // browser hears of it). Close any open agent line and append the user's
+      // committed utterance.
       const transcript = [
         ...closeOpenAgentLine(state.transcript),
         line(state.transcript, 'user', event.text),
@@ -288,6 +312,25 @@ function applyClientEvent(state: VoiceCallState, event: VoiceCallEvent): VoiceCa
     case 'disconnected':
       return { ...state, status: 'ended' };
   }
+}
+
+/**
+ * Does this client event END the call?
+ *
+ * The transitions above are state and nothing else — no branch here releases the
+ * microphone. `useVoiceCall` owns teardown, and it needs to know which events
+ * oblige it to run one. Reading the same two constants the `error` branch reads
+ * is what stops the two from drifting: a new degrading code is added in one
+ * place and both the transition to `ended` and the teardown follow it.
+ *
+ * Before this existed, only `disconnected` tore down. A mid-call degrade left
+ * the strip saying the call had ended while capture kept running — the mic stayed
+ * live and the endpointer kept firing its earcon on every utterance.
+ */
+export function isTerminalClientEvent(event: VoiceCallEvent): boolean {
+  if (event.type === 'disconnected') return true;
+  if (event.type !== 'error' || !event.code) return false;
+  return event.code === MIC_DENIED_CODE || DEGRADING_CODES.has(event.code);
 }
 
 // --- transcript helpers ----------------------------------------------------
@@ -408,15 +451,15 @@ export function voiceCaption(
 /**
  * Mark an agent line that barge-in — or a dropped link — cut off mid-sentence.
  *
- * ONE marker convention for the whole feature. The chat projection below and
- * the realtime tier's transcript write (`realtime-voice-call-client.ts`) both
- * call this, so the line the server persists and the line the user reads carry
- * the same annotation instead of two spellings of the same fact. The A0
+ * Re-exported from `lib/chat-reducer.ts`, which is where the marker convention
+ * now lives: the chat transcript needs the same annotation (a second question
+ * asked mid-answer keeps the partial answer, marked), and only one module can
+ * own it. The chat projection below and the realtime tier's transcript write
+ * (`realtime-voice-call-client.ts`) still reach it through here, so the line the
+ * server persists and the line the user reads carry the same annotation. The A0
  * regression pin fixes the shape for the pipeline tier.
  */
-export function markInterrupted(text: string): string {
-  return text.includes(INTERRUPTED_MARKER) ? text : `${text} ${INTERRUPTED_MARKER}`.trim();
-}
+export { markInterrupted };
 
 /**
  * Project the live transcript into `ChatMessage`s for the existing `MessageList`.

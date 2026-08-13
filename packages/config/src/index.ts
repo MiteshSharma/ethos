@@ -1139,6 +1139,19 @@ export interface EthosConfig {
    */
   displayStreamingEdits?: 'off' | 'dms' | 'all';
   /**
+   * Which treatment the in-call overlay draws (DESIGN.md § "Call overlay").
+   * Config key: `display.call_style`. Unset = `liquid`.
+   */
+  displayCallStyle?: 'liquid' | 'orb' | 'rings';
+  /**
+   * What color the in-call overlay draws in. Config key: `display.call_accent`.
+   *   `'personality'` (default) — follow the active personality's `--accent`
+   *   `'#RRGGBB'`               — an explicit hex
+   * Anything else is ignored, so a typo falls back to the personality accent
+   * rather than painting the call an unreadable color.
+   */
+  displayCallAccent?: string;
+  /**
    * context_compression F1 — auxiliary model wiring. `auxiliary.compression`
    * configures the cheap summarizer that `semantic_summary` uses to condense
    * long histories. Config keys:
@@ -1694,6 +1707,8 @@ export async function writeConfig(
     lines.push(`display.memory_notices: ${config.displayMemoryNotices}`);
   if (config.displayStreamingEdits)
     lines.push(`display.streaming_edits: ${config.displayStreamingEdits}`);
+  if (config.displayCallStyle) lines.push(`display.call_style: ${config.displayCallStyle}`);
+  if (config.displayCallAccent) lines.push(`display.call_accent: ${config.displayCallAccent}`);
   if (config.displayDebugPanel) lines.push('display.debug_panel: true');
   if (config.displayDebugPanelModel)
     lines.push(`display.debug_panel_model: ${config.displayDebugPanelModel}`);
@@ -2963,6 +2978,8 @@ function parseConfigYaml(src: string): EthosConfig {
     displayDebugPanel: displayKv.debug_panel === 'true' ? true : undefined,
     displayDebugPanelModel: displayKv.debug_panel_model || undefined,
     displayStreamingEdits: parseStreamingEdits(displayKv.streaming_edits),
+    displayCallStyle: parseCallStyle(displayKv.call_style),
+    displayCallAccent: parseCallAccent(displayKv.call_accent),
     quick_commands,
     channelToolsets,
     channelFilter,
@@ -3198,6 +3215,16 @@ function parseBusyMode(v: string | undefined): EthosConfig['displayBusyInputMode
 
 function parseStreamingEdits(v: string | undefined): EthosConfig['displayStreamingEdits'] {
   return v === 'off' || v === 'dms' || v === 'all' ? v : undefined;
+}
+
+function parseCallStyle(v: string | undefined): EthosConfig['displayCallStyle'] {
+  return v === 'liquid' || v === 'orb' || v === 'rings' ? v : undefined;
+}
+
+/** `personality` or a 6-digit hex. Anything else is dropped, not coerced. */
+function parseCallAccent(v: string | undefined): string | undefined {
+  if (v === 'personality') return v;
+  return v !== undefined && /^#[0-9a-fA-F]{6}$/.test(v) ? v : undefined;
 }
 
 function parseToolPreviewLength(v: string | undefined): number | undefined {

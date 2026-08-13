@@ -572,6 +572,12 @@ interface FormShape {
   memoryNotices: boolean;
   voiceEnabled: boolean;
   voiceChime: boolean;
+  /** In-call overlay treatment (display.call_style). */
+  callStyle: 'liquid' | 'orb' | 'rings';
+  /** `personality`, one of the preset hexes, or `custom`. */
+  callAccent: string;
+  /** The hex behind `callAccent: 'custom'`. Ignored otherwise. */
+  callAccentCustom: string;
   voiceEndpointSilenceMs: number;
   voiceBargeThreshold: number;
   voiceBargeSustainMs: number;
@@ -674,6 +680,31 @@ const TTS_PROVIDER_DEFAULTS: Record<string, { baseUrl: string; model: string }> 
 
 // Fixed phrase the "Test TTS" button synthesizes so the check is deterministic.
 const VOICE_TEST_PHRASE = 'Hello — this is an Ethos voice test.';
+
+/**
+ * Call-overlay color presets: the personality default plus DESIGN.md's five
+ * personality accents. Anything else is a hand-entered hex.
+ */
+const CALL_ACCENT_PRESETS: ReadonlyArray<{ value: string; label: string }> = [
+  { value: 'personality', label: 'Personality — follow the active agent' },
+  { value: '#4A9EFF', label: 'Researcher blue · #4A9EFF' },
+  { value: '#4ADE80', label: 'Engineer green · #4ADE80' },
+  { value: '#F59E0B', label: 'Reviewer amber · #F59E0B' },
+  { value: '#E879F9', label: 'Coach magenta · #E879F9' },
+  { value: '#94A3B8', label: 'Operator grey · #94A3B8' },
+];
+
+const CALL_ACCENT_CUSTOM = 'custom';
+
+function isCallAccentPreset(value: string): boolean {
+  return CALL_ACCENT_PRESETS.some((preset) => preset.value === value);
+}
+
+const CALL_STYLE_OPTIONS = [
+  { value: 'liquid', label: 'Liquid — the circle fills as it speaks' },
+  { value: 'orb', label: 'Orb — a body that deforms with the voice' },
+  { value: 'rings', label: 'Rings — concentric rings breathing outward' },
+];
 
 const AUDIO_FORMATS = ['opus', 'mp3', 'wav', 'pcm'] as const;
 const VOICE_MODES = ['off', 'mirror_inbound', 'all'] as const;
@@ -1043,6 +1074,15 @@ export function Settings() {
         memoryNotices: configQuery.data.memoryNotices,
         voiceEnabled: Boolean(configQuery.data.voiceProvider),
         voiceChime: configQuery.data.voiceChime,
+        callStyle: configQuery.data.callStyle,
+        // A hex the presets do not cover lands in the custom field, so a
+        // hand-edited config.yaml survives a round trip through this form.
+        callAccent: isCallAccentPreset(configQuery.data.callAccent)
+          ? configQuery.data.callAccent
+          : CALL_ACCENT_CUSTOM,
+        callAccentCustom: isCallAccentPreset(configQuery.data.callAccent)
+          ? ''
+          : configQuery.data.callAccent,
         voiceEndpointSilenceMs: configQuery.data.voiceEndpointSilenceMs,
         voiceBargeThreshold: configQuery.data.voiceBargeThreshold,
         voiceBargeSustainMs: configQuery.data.voiceBargeSustainMs,
@@ -1384,6 +1424,9 @@ export function Settings() {
       memoryCaptureModel: values.memoryCaptureModel,
       memoryNotices: values.memoryNotices,
       voiceChime: values.voiceChime,
+      callStyle: values.callStyle,
+      callAccent:
+        values.callAccent === CALL_ACCENT_CUSTOM ? values.callAccentCustom : values.callAccent,
       voiceEndpointSilenceMs: values.voiceEndpointSilenceMs,
       voiceBargeThreshold: values.voiceBargeThreshold,
       voiceBargeSustainMs: values.voiceBargeSustainMs,
@@ -2217,6 +2260,45 @@ export function Settings() {
             extra="Play a short sound while the agent is thinking (after you stop speaking)."
           >
             <Switch />
+          </Form.Item>
+          <VoiceSectionLabel>Call appearance</VoiceSectionLabel>
+          <Form.Item
+            name="callStyle"
+            label="Treatment"
+            extra="How the in-call overlay draws the agent. All three follow the same voice level; only the shape differs."
+          >
+            <Select options={CALL_STYLE_OPTIONS} />
+          </Form.Item>
+          <Form.Item
+            name="callAccent"
+            label="Color"
+            extra="What the overlay is drawn in while the agent speaks. Listening is always the red mic color."
+          >
+            <Select
+              options={[
+                ...CALL_ACCENT_PRESETS,
+                { value: CALL_ACCENT_CUSTOM, label: 'Custom hex…' },
+              ]}
+            />
+          </Form.Item>
+          <Form.Item noStyle shouldUpdate={(prev, cur) => prev.callAccent !== cur.callAccent}>
+            {({ getFieldValue }) =>
+              getFieldValue('callAccent') === CALL_ACCENT_CUSTOM ? (
+                <Form.Item
+                  name="callAccentCustom"
+                  label="Custom color"
+                  rules={[
+                    {
+                      pattern: /^#[0-9a-fA-F]{6}$/,
+                      message: 'Six-digit hex, e.g. #4ADE80.',
+                    },
+                  ]}
+                  extra="Six-digit hex. Anything else falls back to the personality accent."
+                >
+                  <Input placeholder="#4ADE80" />
+                </Form.Item>
+              ) : null
+            }
           </Form.Item>
           <Collapse
             ghost

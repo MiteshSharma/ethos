@@ -125,6 +125,9 @@ describe('createBatchVoiceCallClient — full turn cycle', () => {
 
     await vi.waitFor(() => expect(events.some((e) => e.type === 'reply_complete')).toBe(true));
 
+    // The endpoint is reported first, before the transcribe round trip — that
+    // is what puts the UI in `thinking` when the user actually stopped talking.
+    expect(events[0]).toEqual({ type: 'speech_end' });
     // Transcript trimmed and committed.
     expect(events.find((e) => e.type === 'utterance_committed')).toEqual({
       type: 'utterance_committed',
@@ -164,6 +167,9 @@ describe('createBatchVoiceCallClient — full turn cycle', () => {
     // Loop moves on to the next capture without committing anything.
     await vi.waitFor(() => expect(driver.captureCalls).toBeGreaterThanOrEqual(2));
     expect(events.some((e) => e.type === 'utterance_committed')).toBe(false);
+    // The floor goes back to the user: the endpoint said "thinking", so
+    // something has to say "listening" again or the strip sticks there.
+    expect(events.map((e) => e.type)).toEqual(['speech_end', 'utterance_dropped']);
     expect(runAgentTurn).not.toHaveBeenCalled();
     // The earcon still fired — the utterance was captured, just transcribed to
     // nothing. Acknowledgement happens on capture, before transcription.

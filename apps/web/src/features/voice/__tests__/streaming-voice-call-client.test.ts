@@ -149,6 +149,36 @@ describe('streaming talk-mode — utterance over the binary lane', () => {
   });
 });
 
+describe('streaming talk-mode — the speech-end edge', () => {
+  it('reports the endpoint immediately, without waiting for the transcript', async () => {
+    const { capture, client, events } = setup();
+    client.on((event) => events.push(event));
+    await client.connect();
+
+    capture.emit({ type: 'speech_start' });
+    capture.emit({ type: 'frame', data: Int16Array.from([500]) });
+    capture.emit({ type: 'speech_end' });
+
+    // The transcript is still a round trip away — this is the whole point.
+    expect(events.map((e) => e.type)).toEqual(['speech_end']);
+    await client.disconnect();
+  });
+
+  it('hands the floor back when the transcript comes back empty', async () => {
+    const { transport, capture, client, events } = setup();
+    client.on((event) => events.push(event));
+    await client.connect();
+
+    capture.emit({ type: 'speech_start' });
+    capture.emit({ type: 'frame', data: Int16Array.from([500]) });
+    capture.emit({ type: 'speech_end' });
+    transport.deliver({ t: 'transcript', utteranceId: 'u1', text: '   ', final: true });
+
+    expect(events.map((e) => e.type)).toEqual(['speech_end', 'utterance_dropped']);
+    await client.disconnect();
+  });
+});
+
 describe('streaming talk-mode — utterance-ID staleness discipline', () => {
   it('drops a transcript for an utterance the user has already replaced', async () => {
     const runAgentTurn = vi.fn(async function* () {

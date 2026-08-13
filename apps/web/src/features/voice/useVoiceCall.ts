@@ -4,6 +4,7 @@ import { createMicMeter } from './mic-meter';
 import { createUnwiredVoiceCallClient, type VoiceCallClient } from './voice-call-client';
 import {
   initialVoiceCallState,
+  isTerminalClientEvent,
   type VoiceCallStatus,
   type VoiceDegradedNotice,
   type VoiceTranscriptLine,
@@ -54,6 +55,17 @@ export interface UseVoiceCall {
   transcript: VoiceTranscriptLine[];
   /** Rolling mic-level history (0..1) for the speaking indicator. */
   micLevels: number[];
+  /**
+   * The agent's own smoothed output level (0..1), READ per animation frame by
+   * the call overlay's canvas.
+   *
+   * A getter rather than a value on purpose. `micLevels` is state because the
+   * strip's bars are React-rendered; the overlay draws itself, so publishing a
+   * number 60 times a second through `useState` would re-render the whole Chat
+   * page per frame for a canvas that never reads props. Stable identity, so it
+   * can sit in an effect's dependency list without restarting the loop.
+   */
+  agentLevel: () => number;
   muted: boolean;
   error: string | null;
   /** Voice fell back to text. Null until it does, or once dismissed. */
@@ -195,7 +207,12 @@ export function useVoiceCall(options: UseVoiceCallOptions = {}): UseVoiceCall {
     unsubscribeRef.current = client.on((event) => {
       dispatch({ type: 'client-event', event });
       markLatency(event.type);
-      if (event.type === 'disconnected') teardown();
+      // EVERY route to a terminal state releases the mic, not just the
+      // transport-level one. A degrade or a refused mic ends the call in the
+      // reducer, and a call that has visibly ended must not still be capturing:
+      // the dispatch above is already queued, so tearing down here drops the
+      // capture path without touching the notice the strip is about to render.
+      if (isTerminalClientEvent(event)) teardown();
     });
 
     client
@@ -238,10 +255,15 @@ export function useVoiceCall(options: UseVoiceCallOptions = {}): UseVoiceCall {
 
   const dismissNotice = useCallback(() => dispatch({ type: 'dismiss-notice' }), []);
 
+  // Read through the ref, so a hung-up call reads zero rather than whatever the
+  // last graph was holding.
+  const agentLevel = useCallback(() => clientRef.current?.outputLevel?.() ?? 0, []);
+
   return {
     status: state.status,
     transcript: state.transcript,
     micLevels,
+    agentLevel,
     muted,
     error: state.error,
     degraded: state.degraded,

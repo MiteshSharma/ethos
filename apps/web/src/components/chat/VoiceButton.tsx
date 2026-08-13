@@ -1,5 +1,5 @@
 import { message } from 'antd';
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useVoiceRecorder } from '../../hooks/useVoiceRecorder';
 import { rpc } from '../../rpc';
 
@@ -22,8 +22,17 @@ interface VoiceButtonProps {
   onTranscript: (text: string) => void;
   onRecordingChange?: (recording: boolean) => void;
   disabled?: boolean;
+  /**
+   * Something else holds the microphone — today, a live talk-mode call. The
+   * button stays rendered (the composer row must not jump) but cannot arm, and
+   * a capture already in flight is dropped rather than left contending for the
+   * device.
+   */
+  micBusy?: boolean;
   accent?: string;
 }
+
+const MIC_BUSY_LABEL = 'Mic in use by the call';
 
 export function AudioBars({ levels }: { levels: number[] }) {
   return (
@@ -44,6 +53,7 @@ export function VoiceButton({
   onTranscript,
   onRecordingChange,
   disabled,
+  micBusy,
   accent,
 }: VoiceButtonProps) {
   const { isRecording, elapsedMs, audioLevels, startRecording, stopRecording, cancelRecording } =
@@ -51,16 +61,27 @@ export function VoiceButton({
   const [isTranscribing, setIsTranscribing] = useState(false);
   const longPressRef = useRef(false);
 
+  // Greying the button out does not release a MediaRecorder or a getUserMedia
+  // stream — only tearing the capture down does. So the moment the call takes
+  // the mic, an in-flight recording is cancelled (not stopped-and-transcribed:
+  // the user never released the button, so there is nothing to send).
+  useEffect(() => {
+    if (!micBusy) return;
+    longPressRef.current = false;
+    cancelRecording();
+    onRecordingChange?.(false);
+  }, [micBusy, cancelRecording, onRecordingChange]);
+
   const handlePointerDown = useCallback(
     (e: React.PointerEvent) => {
-      if (disabled || isTranscribing) return;
+      if (disabled || micBusy || isTranscribing) return;
       e.preventDefault();
       (e.target as HTMLElement).setPointerCapture(e.pointerId);
       longPressRef.current = true;
       void startRecording();
       onRecordingChange?.(true);
     },
-    [disabled, isTranscribing, startRecording, onRecordingChange],
+    [disabled, micBusy, isTranscribing, startRecording, onRecordingChange],
   );
 
   const handlePointerUp = useCallback(async () => {
@@ -134,8 +155,15 @@ export function VoiceButton({
         onPointerDown={handlePointerDown}
         onPointerUp={handlePointerUp}
         onPointerLeave={handlePointerLeave}
-        disabled={disabled}
-        aria-label={isRecording ? 'Recording… release to send' : 'Hold to record voice'}
+        disabled={disabled || micBusy}
+        title={micBusy ? MIC_BUSY_LABEL : undefined}
+        aria-label={
+          micBusy
+            ? MIC_BUSY_LABEL
+            : isRecording
+              ? 'Recording… release to send'
+              : 'Hold to record voice'
+        }
         style={isRecording ? undefined : { background: accent ?? 'var(--accent)' }}
       >
         <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">

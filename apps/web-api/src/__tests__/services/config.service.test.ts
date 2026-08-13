@@ -195,6 +195,32 @@ describe('ConfigService', () => {
     expect(result.memoryCaptureEnabled).toBe(false);
     expect(result.memoryCaptureModel).toBeNull();
     expect(result.memoryNotices).toBe(false);
+    // Call overlay: liquid, following the personality accent.
+    expect(result.callStyle).toBe('liquid');
+    expect(result.callAccent).toBe('personality');
+  });
+
+  it('persists the call-overlay keys and refuses a color that is not a color', async () => {
+    await storage.write(
+      join(DATA, 'config.yaml'),
+      ['provider: anthropic', 'model: m', 'apiKey: sk-keep', 'personality: researcher'].join('\n'),
+    );
+
+    await service.update({ callStyle: 'orb', callAccent: '#E879F9' });
+    let written = await storage.read(join(DATA, 'config.yaml'));
+    expect(written).toContain('display.call_style: orb');
+    expect(written).toContain('display.call_accent: "#E879F9"');
+    let result = await service.get();
+    expect(result.callStyle).toBe('orb');
+    expect(result.callAccent).toBe('#E879F9');
+
+    // A hand-typed non-color resolves to the personality accent rather than
+    // reaching a canvas fillStyle.
+    await service.update({ callAccent: 'chartreuse' });
+    written = await storage.read(join(DATA, 'config.yaml'));
+    expect(written).toContain('display.call_accent: personality');
+    result = await service.get();
+    expect(result.callAccent).toBe('personality');
   });
 
   it('get reads the behavior flags from their flat config keys', async () => {
