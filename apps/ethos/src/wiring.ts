@@ -201,10 +201,19 @@ export async function createLLM(
   config: EthosConfig,
   opts: { probeWindowRefresh?: boolean } = {},
 ): Promise<LLMProvider> {
+  // The provider factories resolve credentials from the secret store before
+  // falling back to the plaintext config key, and some (codex, bedrock) have
+  // no config key at all. Without the resolver those factories see the
+  // package's null-object fallback and every stored credential reads as
+  // absent — `createAgentLoop` threads it, so this must too.
+  const wiringConfig: WiringConfig = {
+    ...(await withRotation(config)),
+    secretsResolver: await getSecretsResolver(),
+  };
   // Lane 0 — thread the window-probe context so local runtimes resolve their
   // SERVED context window (cache-first; `probeWindowRefresh` forces a live
   // probe and rewrites the cache — `ethos doctor`).
-  return packageCreateLLM(await withRotation(config), {
+  return packageCreateLLM(wiringConfig, {
     storage: getStorage(),
     dataDir: ethosDir(),
     ...(opts.probeWindowRefresh === true ? { forceRefresh: true } : {}),

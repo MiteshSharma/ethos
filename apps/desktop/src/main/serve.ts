@@ -3,7 +3,7 @@ import type { AddressInfo } from 'node:net';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { createPersonalityRegistry } from '@ethosagent/personalities';
-import { FsStorage } from '@ethosagent/storage-fs';
+import { FileSecretsResolver, FsStorage } from '@ethosagent/storage-fs';
 import { createWebApi } from '@ethosagent/web-api';
 import type { WiringConfig } from '@ethosagent/wiring';
 import {
@@ -48,6 +48,14 @@ export async function startServer(port: number): Promise<number> {
     personality: (store.get('personalityId') as string | undefined) ?? 'operator',
     memory: store.get('memory') ?? 'markdown',
     ...(baseUrl ? { baseUrl } : {}),
+    // Same store the codex device-auth IPC handler writes to (see ipc.ts).
+    // Without it the provider factories get the wiring package's null-object
+    // fallback, so credentials that only live in the secret store — codex
+    // OAuth tokens above all — read as absent at every LLM construction.
+    secretsResolver: new FileSecretsResolver({
+      dir: join(dataDir, 'secrets'),
+      storage: new FsStorage(),
+    }),
   };
 
   const {
