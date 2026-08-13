@@ -5,7 +5,7 @@ kind: how-to
 audience: user
 slug: local-voice
 time: "15 min"
-updated: 2026-08-12
+updated: 2026-08-13
 ---
 
 ## Task
@@ -120,13 +120,19 @@ Local providers advertise `caps.local`, so Ethos can enforce "no audio leaves th
 voice.trustedPlugins:
 ```
 
-An empty value trusts local providers only. Every non-local provider — cloud STT/TTS, and hosted realtime providers when they land — must be named to be usable:
+An empty value trusts local providers only. Every non-local provider must be named to be usable — cloud STT/TTS, and the hosted realtime engines in [`voice.realtime.providers.*`](../reference/config-yaml.md#voice-realtime-providers), which go through the same gate:
 
 ```yaml
-voice.trustedPlugins: openai-tts
+voice.trustedPlugins: openai-tts, openai-realtime
 ```
 
+Name the **provider id**, not your roster label. The gate keys on the entry's `provider` field and the constructed provider's `caps.local`, so an entry called `local-anything` backed by a hosted model is still refused.
+
 Declaring the key is what arms the gate; omitting it leaves the gate off, which is the default. With the gate armed, an untrusted provider fails on use with `... is not local and is not in voice.trustedPlugins — refusing to send audio off this machine` — on every surface, including a provider picked live in web **Settings → Voice**, and before any audio reaches it.
+
+On the realtime tier that same sentence is what the browser shows: `VoiceService.mintRealtimeToken` ([`apps/web-api/src/services/voice.service.ts`](https://github.com/ethosagent/ethos/blob/main/apps/web-api/src/services/voice.service.ts)) returns it as a typed `untrusted_provider` refusal, the call continues on the local pipeline, and a dismissible notice above the live call strip says why. Voice keeps working; it just stays on this machine.
+
+One realtime provider cannot serve a browser call whatever the allowlist says: `gemini-live` declares `caps.ephemeralToken: false`, so there is no browser credential to mint and the call falls back to the pipeline with a notice. That is a stated limitation of this release, not a misconfiguration.
 
 Check what actually resolved:
 
@@ -170,3 +176,5 @@ STT model names vary by server: some accept `whisper-large-v3`, others want the 
 
 - [Qualify a local model](qualify-a-local-model) — score a local text model before trusting it with work.
 - [Configure providers](configure-providers) — wire the main LLM provider, including local OpenAI-compatible endpoints.
+- [`config.yaml` reference: voice](../reference/config-yaml.md#voice-tier) — every `voice.*` key, including the hosted realtime roster and the per-session spend cap.
+- [Personality config reference: `voice.*`](../reference/personality-yaml.md#voice) — how one personality overrides the deployment's voice, tier, and engines.

@@ -31,8 +31,9 @@ Where something could not be verified from inside the repo, it says so.
 | Local server TTS | A Kokoro-style server speaking `POST /v1/audio/speech` (default `http://localhost:8880/v1`) |
 | Local binary STT | `whisper-cli` (or any CLI transcriber) on `PATH` |
 | Browser talk-mode | A built SPA (`make web`) and a personality whose toolset lists `voice_session` |
+| Browser realtime tier | An OpenAI key with Realtime access and a `voice.realtime.providers.<name>` entry. `gemini-live` is contract-only and cannot serve a browser call — see [4b. The realtime tier](#4b-the-realtime-tier) |
 | Voice notes over Telegram | A Telegram bot token in `~/.ethos/config.yaml` |
-| Telephony, LiveKit realtime | Native bindings, a LiveKit server, a SIP trunk, a rented number — none are repo dependencies |
+| Telephony, LiveKit transport | Native bindings, a LiveKit server, a SIP trunk, a rented number — none are repo dependencies |
 
 **How do I just hear it talk?** Configure `auxiliary.tts` (30 seconds — see
 [Cheapest smoke test](#cheapest-smoke-test-macos-say)), run `make web`, open
@@ -90,6 +91,38 @@ pnpm vitest run \
 ```
 
 Verified: 23 files, 196 tests, ~1.6s.
+
+The realtime tier — contract, providers, mint, control lane, browser:
+
+```bash
+pnpm vitest run \
+  packages/types/src/__tests__/voice-realtime.test.ts \
+  packages/voice-realtime-protocol/src \
+  extensions/voice-providers/src/__tests__/realtime-contract.test.ts \
+  extensions/voice-providers/src/__tests__/realtime-openai.test.ts \
+  extensions/voice-providers/src/__tests__/realtime-gemini.test.ts \
+  extensions/voice-providers/src/__tests__/realtime-registry.test.ts \
+  extensions/voice-providers/src/__tests__/realtime-fake.test.ts \
+  packages/core/src/__tests__/voice-realtime-roster-resolution.test.ts \
+  apps/web-api/src/services/__tests__/voice-realtime-token.test.ts \
+  apps/web-api/src/services/__tests__/voice-realtime-session-config.test.ts \
+  apps/web-api/src/services/__tests__/voice-realtime-session-cost.test.ts \
+  extensions/tools-voice/src/__tests__/realtime-host.test.ts \
+  apps/web-api/src/voice/__tests__/realtime-control-lane.test.ts \
+  apps/web-api/src/voice/__tests__/realtime-control-deps.test.ts \
+  apps/web/src/features/voice/__tests__/realtime-voice-call-client.test.ts \
+  apps/web/src/features/voice/__tests__/realtime-control-channel.test.ts \
+  apps/web/src/features/voice/__tests__/talk-mode-client.test.ts \
+  apps/web/src/features/voice/__tests__/voice-call-reducer.test.ts \
+  apps/web/src/features/voice/__tests__/call-strip.test.ts \
+  apps/web/src/features/voice/__tests__/call-strip-css.test.ts \
+  apps/web/src/features/voice/__tests__/call-strip-layout.test.ts \
+  apps/web/src/features/voice/__tests__/mic-meter.test.ts
+```
+
+Verified: 22 files, 292 tests, ~11s. What each defends is in
+[4b. The realtime tier](#4b-the-realtime-tier); every one of them runs against
+fakes, with no credential and no socket.
 
 What each one is defending:
 
@@ -454,6 +487,115 @@ no `voice` block.
 
 ---
 
+## 4b. The realtime tier
+
+The second voice tier shipped: one hosted speech-to-speech session owns hearing,
+thinking and speaking, instead of STT → agent turn → TTS. Browser talk-mode holds
+the provider socket itself, opened with a credential the server minted; the app
+keeps a second **control** socket for transcripts, `agent_consult`, cost accrual
+and the turn-latency report.
+
+### Configuring it
+
+```yaml
+voice.realtime.providers.live.provider: openai-realtime
+voice.realtime.providers.live.model: gpt-realtime
+voice.realtime.providers.live.apiKey: ${secrets:voice/realtime/providers/live/apiKey}
+voice.realtime.providers.live.costPerMinuteUsd: 0.06
+voice.realtime.default: live
+voice.realtime.sessionBudgetUsd: 1.50
+voice.tier: realtime
+```
+
+`live` is a label the operator chose, not a provider id — the egress gate keys on
+the entry's `provider` and the constructed provider's `caps.local`, so calling an
+entry `local-anything` buys nothing. Settings → Voice edits every key above. The
+full field reference is
+[`docs/content/using/reference/config-yaml.md`](docs/content/using/reference/config-yaml.md#voice-realtime-providers).
+
+Two providers are registered (`extensions/voice-providers/src/realtime-registry.ts`):
+`openai-realtime` and `gemini-live`.
+
+### Gemini Live is contract-only — stated as a limitation
+
+`gemini-live` exists to prove the provider contract is **not OpenAI-shaped**: a
+different wire vocabulary, and 16 kHz in / 24 kHz out against OpenAI's 24/24. It
+is exercised by the shared conformance suite like any other provider.
+
+It declares `caps.ephemeralToken: false` (`extensions/voice-providers/src/realtime-gemini.ts`),
+so `VoiceService.mintRealtimeToken` refuses with `no_browser_token` and the call
+continues on the pipeline tier behind a visible notice. **There is no server-relay
+path in this phase** — nothing in `apps/web-api` opens a Gemini session on the
+browser's behalf. Selecting it as your realtime default means every browser call
+falls back to the pipeline, by design, and says so on screen. Do not read the
+"server-relayed" wording in the provider header as a shipped feature.
+
+### What is covered automatically
+
+Everything below runs against fakes — no credential, no socket, nothing that
+leaves the machine. The one command that runs all of it is in
+[§1](#the-suites-worth-knowing-by-name).
+
+| Suite | Pins |
+|---|---|
+| `packages/types/src/__tests__/voice-realtime.test.ts` | `REALTIME_CONTRACT_VERSION`, the single audio format, exhaustive handling of every `RealtimeEvent` variant, and that the contract is implementable — including by a provider that omits both optional methods |
+| `extensions/voice-providers/src/realtime-conformance.ts` | The shared suite itself — the 11 checks in `REALTIME_CONTRACT_CHECKS`, from "caps and provider shape" to "audio supplied at the declared INPUT sample rate reaches the wire unresampled" |
+| `extensions/voice-providers/src/__tests__/realtime-contract.test.ts` | Those 11 checks run per **registered** provider, via `describe.each(registry.list())`. A provider added to the registry without a conformance target fails the coverage guard rather than shipping untested |
+| `realtime-openai.test.ts` · `realtime-gemini.test.ts` | Per-provider detail that is not contract: model pinning, headers, handshake shape |
+| `realtime-registry.test.ts` | That both built-ins register under their configured ids, and that each declares the sample rates it actually speaks |
+| `realtime-fake.test.ts` | `extensions/voice-providers/src/realtime-fake.ts` — the one provider-level fake, shared by the conformance harness and the mock bench, so the thing the tests drive and the thing the bench drives are the same thing |
+| `packages/voice-realtime-protocol/src/__tests__/browser-safety.test.ts` | That nothing reachable from the browser entry points imports `ws` or a `node:` builtin — the frame mapping is shared verbatim between browser and server |
+| `packages/core/src/__tests__/voice-realtime-roster-resolution.test.ts` | Roster selection and the egress gate keying on the **resolved provider**, never the roster label |
+| `apps/web-api/src/services/__tests__/voice-realtime-token.test.ts` | Every typed refusal — `not_configured`, `unknown_entry`, `untrusted_provider`, `no_browser_token`, `provider_unavailable`, `pipeline_preferred` — and that no refusal message carries key material |
+| `...voice-realtime-session-config.test.ts` | What is baked into the credential before the mint: the personality's identity plus the boundary policy as instructions, the advertised tool list, and the voice — the personality's beating the roster entry's. A surface that throws leaves a usable session rather than taking the call down |
+| `...voice-realtime-session-cost.test.ts` | Per-minute rate selection from the entry the mint would pick; an unpriced entry reported as unpriced, never as free |
+| `extensions/tools-voice/src/__tests__/realtime-host.test.ts` | **advertised == handled** — every advertised tool definition is dispatched, and a name never advertised is refused rather than left hanging |
+| `apps/web-api/src/voice/__tests__/realtime-control-lane.test.ts` | No dead air over 2s during a slow consult, strict FIFO consults, per-minute accrual tick by tick, a wind-down that speaks then closes in that order, and provider-stamped latency spans |
+| `...realtime-control-deps.test.ts` | Lane keying `voice:<botKey>:browser:<id>`, resumed on reconnect, never interleaved with the typed chat in the same browser session |
+| `apps/web/src/features/voice/__tests__/realtime-voice-call-client.test.ts` | The browser's provider link: the token carried in a subprotocol with no handshake of its own, capture at the provider's input rate, playout at its output rate, barge-in keeping the honestly-spoken prefix, an expired credential re-minted rather than redialled, and the backoff schedule spent once before degrading to text |
+| `realtime-control-channel.test.ts` | The control socket, including the `realtime_turn_latency` report |
+| `talk-mode-client.test.ts` | Tier selection, and the pin that `no_browser_token` is **never a silent downgrade** |
+| `voice-call-reducer.test.ts` | Call state and the `[interrupted]` marker shared by history and screen |
+| `call-strip.test.ts` · `call-strip-css.test.ts` · `call-strip-layout.test.ts` | The DR5 contract: ≥44px touch targets, `prefers-reduced-motion` stopping every pulse, and the caption staying on screen at 375px instead of being traded for the fit |
+| `mic-meter.test.ts` | That reduced motion stops the meter bars in JS — the stylesheet cannot, because the bars are redrawn every frame |
+
+The wire contract for the browser's latency report is `RealtimeTurnLatencySchema`
+in `packages/web-contracts/src/voice-socket.ts`.
+
+### What needs credentials, and what only a human can check
+
+**Nothing in CI touches any of this.**
+
+An **OpenAI key with Realtime access** plus a `voice.realtime.providers.<name>`
+entry is the only path that mints a real browser credential and opens a real
+provider socket. Everything in the table above uses fakes. Gemini Live cannot be
+exercised from a browser at all, by design (above).
+
+Manual only, because no fake can stand in:
+
+- **Real mic and speakers.** Capture at the provider's own input rate (24 kHz for
+  OpenAI Realtime, 16 kHz for Gemini Live — nothing resamples), absolute-time
+  playout, audible barge-in, the thinking earcon, and the screen wake lock.
+- **A real network blip on a phone.** Two independent socket backoffs: the app
+  lane repeats its last delay forever, the provider socket walks the schedule once
+  and then degrades to text.
+- **Real mouth-to-ear.** `pnpm bench:voice:live:realtime`, or a deployment's own
+  `realtime_first_audio` spans. The mock bench "exercises the measurement path,
+  not a provider" — its own words, printed on every run.
+- **A real per-minute invoice**, reconciled against the accrued cost. The rate is
+  a number the operator typed; nothing verifies it against the provider's bill.
+
+### One honest measurement limit
+
+A deployed realtime turn writes exactly one span: `realtime_first_audio`, the
+browser's own measurement of last speech frame → first audio frame. The budget
+module reads it as mouth-to-ear. **`endpoint` is absent and unmeasurable** — the
+provider owns the VAD and never reports when it decided — so the endpointing sits
+*inside* the reported number, making it an upper bound. The browser's own capture
+and playout legs sit outside it and are simply not measured.
+
+---
+
 ## 5. What needs credentials or hardware you supply
 
 | Capability | You must provide | How to verify | Already proven against fakes |
@@ -463,13 +605,16 @@ no `voice` block.
 | Binary STT/TTS (`command-*`) | Real `whisper-cli` / Piper / `say` on `PATH` | Run your template by hand first, then `ethos doctor` | `extensions/voice-providers/src/__tests__/command-providers.test.ts` (template substitution, temp-file lifetime, `command` required) |
 | Cloud STT/TTS (`openai-stt`, `groq-stt`, `openai-tts`) | Real API keys — and an entry in `voice.trustedPlugins` if the gate is armed | `ethos doctor` shows `(remote)`; a turn produces audio | Resolution, trust gate and HTTP shaping are tested; the live endpoints are not called |
 | Batch STT over a generated WAV | A real batch STT server that accepts the utterance-buffered WAV | Talk-mode against a batch-only provider | `extensions/voice-session/src/__tests__/wav.test.ts`, `buffered-stt.test.ts` — encoder correctness only, no server ever consumes the bytes |
-| LiveKit realtime transport | `@livekit/rtc-node` + `livekit-server-sdk` (**not repo dependencies**), a LiveKit server, and app-layer `LiveKitBindings` | Manual only — see `apps/web/src/features/voice/README.md` §"Going live" | `extensions/platform-voice/src/__tests__/` against fake room clients |
+| Browser realtime tier (`openai-realtime`) | An OpenAI key with Realtime access, a `voice.realtime.providers.<name>` entry, and a place in `voice.trustedPlugins` if the gate is armed | Start talk-mode; the strip's detail row names the realtime provider and model that served the call | Mint, refusals, control lane, cost and the browser link are all tested against fakes ([§4b](#4b-the-realtime-tier)); no socket is ever opened |
+| Browser realtime tier (`gemini-live`) | Nothing will make this work in a browser | Not possible — `caps.ephemeralToken: false`, so the mint refuses `no_browser_token` and the call falls back to the pipeline with a visible notice. Deliberate; see [§4b](#4b-the-realtime-tier) | The refusal itself is pinned, on both the server and browser sides |
+| LiveKit transport | `@livekit/rtc-node` + `livekit-server-sdk` (**not repo dependencies**), a LiveKit server, and app-layer `LiveKitBindings` | Manual only — see `extensions/platform-voice/README.md` | `extensions/platform-voice/src/__tests__/` against fake room clients |
 | Telephony (`call`, inbound SIP) | A SIP trunk, a rented E.164 number, a `SipTrunkClient` implementation | Manual only | `extensions/tools-voice/src/__tests__/call.test.ts`; `call` self-reports unavailable with no trunk, and is in `APPROVAL_SURFACE_ALWAYS_ASK` so it always prompts |
 | Telegram voice notes | A bot token | Send a voice note to the bot with `ethos gateway` running | `extensions/gateway/src/__tests__/voice-pipeline.test.ts` |
 
 Manual-verification list, condensed: **LiveKit native bindings, a SIP trunk plus a
-rented number, real cloud STT/TTS keys, real `command-*` binaries, and a real batch
-STT server consuming the generated WAV.** Nothing in CI touches any of these.
+rented number, real cloud STT/TTS keys, a real OpenAI Realtime key, real
+`command-*` binaries, and a real batch STT server consuming the generated WAV.**
+Nothing in CI touches any of these.
 
 ---
 
@@ -560,9 +705,22 @@ enforces. They are documented nowhere — do not write them expecting an effect.
 
 ### 5. CallStrip shipped; per-personality voice editor still config-file only
 The talk-mode UI is the CallStrip (`apps/web/src/features/voice/TalkMode.tsx`):
-nine states — connecting, listening, thinking, speaking, barge-in, reconnecting,
-degraded-to-text, mic-permission-denied, plus the idle entry points — with a live
-caption line and the `{provider} · {model}` mono label. See DESIGN.md § CallStrip.
+nine states — connecting, listening, thinking/consulting, speaking, barge-in,
+reconnecting, degraded-to-text, mic-permission-denied, plus the idle entry points
+— with a live caption line and the `{provider} · {model}` mono label. See
+DESIGN.md § CallStrip.
+
+The realtime tier added three renderings on top of those nine, none of which is a
+new state word:
+
+- **A tier notice above a live strip.** Realtime was refused or dropped and the
+  call is continuing on the pipeline. Dismissible, and never silent — unlike
+  `degraded`, which replaces the strip, this one sits above a working call.
+- **A `budget reached` mono chip** beside the state word during the spoken
+  wind-down, with the sign-off as the caption.
+- **A realtime detail row.** `{realtime provider} · {model}` (one provider serves
+  the whole turn, so there is no STT/TTS pair to show) plus a `use private mode`
+  control that takes the call to the pipeline deliberately.
 
 Settings → Voice now edits every voice key the plans introduced, including
 `voice.trustedPlugins`, `voice.defaultMode`, and the `auxiliary.*` timeouts and
@@ -573,10 +731,20 @@ writer cannot round-trip an empty value; write that line by hand if you want it.
 
 A personality's own `voice.*` block (`tts_voice`, `languages`, `tier`, `model`)
 is still edited in the personality's `config.yaml` and rendered read-only in the
-character sheet — there is no web editor for it. The `tier` and `model` fields
-have no consumer yet either (`resolveVoicePreferences` returns them and nothing
-reads them until the realtime tier and fast-lane routing land), so no global
-default was added for them: it would be a knob that does nothing.
+character sheet — there is no web editor for it.
+
+`voice.tier` now has a consumer: `VoiceService.mintRealtimeToken`
+(`apps/web-api/src/services/voice.service.ts`) runs it through
+`resolveVoicePreferences` against the deployment's `voice.tier`, and an explicit
+`pipeline` refuses the mint with `pipeline_preferred`. Absent from both means
+"try realtime". The global default is editable in Settings → Voice.
+
+`voice.model` — the fast-lane model for spoken turns — still has **no consumer**.
+`resolveVoicePreferences` resolves and returns it, and nothing reads the result;
+no caller even passes the `globalModel` option. The realtime tier does not use it:
+a realtime call's model comes from the roster entry (`selection.entry.model` in
+`mintRealtimeToken`), not from the personality's `voice.model`. Fast-lane routing
+for pipeline turns has not landed.
 
 ### 6. Built-in `voice` personality — shipped
 `extensions/personalities/data/voice/` is the first built-in that lists
@@ -592,16 +760,23 @@ plus the spoken-style injector measure ~2.3k chars / ~580 tokens today, so
 there is headroom, and the test is what stops it being spent silently.
 
 ### 7. Not built at all
-Realtime tier / OpenAI Realtime / Gemini Live; channel TTS-out beyond Telegram and the
-ffmpeg transcode stage; the wake-word satellite; telephony beyond the typed seams.
-`shouldReplyWithVoice` accepts a `wakeTriggered` flag that nothing sets yet.
+Channel TTS-out beyond Telegram and the ffmpeg transcode stage; the wake-word
+satellite; telephony beyond the typed seams. `shouldReplyWithVoice` accepts a
+`wakeTriggered` flag that nothing sets yet.
+
+The realtime tier itself shipped ([§4b](#4b-the-realtime-tier)). Two things inside
+it did not: a **server-relay path**, so `gemini-live` is contract-only and cannot
+serve a browser call; and a **fast-lane model** for spoken pipeline turns, so
+`voice.model` on a personality still resolves to nothing.
 
 ---
 
 ## 6b. Latency — the bench
 
-Two modes, one budget table (`VOICE_LATENCY_BUDGET_MS` in
-`extensions/voice-session/src/latency-budget.ts`):
+Two tiers, two modes, one module
+(`extensions/voice-session/src/latency-budget.ts`).
+
+Pipeline tier (`VOICE_LATENCY_BUDGET_MS`):
 
 | Stage | Budget | What it covers |
 |---|---|---|
@@ -611,16 +786,45 @@ Two modes, one budget table (`VOICE_LATENCY_BUDGET_MS` in
 | `tts_first_audio` | ≤300ms | First sentence → first audio frame out. |
 | `pipeline` | ≤1600ms | Mouth to ear. |
 
+Realtime tier (`VOICE_REALTIME_LATENCY_BUDGET_MS`) — three stages, because one
+hosted session owns hearing, thinking and speaking and reports one moment:
+
+| Stage | Budget | What it covers |
+|---|---|---|
+| `endpoint` | ≤300ms | Same human fact as above, but the threshold belongs to the **provider's** server VAD (500ms by default on OpenAI Realtime), which no deployment setting can shorten. A live run will normally miss this and still make the total. The number is printed, not moved to fit. |
+| `realtime_first_audio` | ≤500ms | What is left for the hosted session to think and start speaking. Separable only when the provider marks the commit before its first audio; several transcribe asynchronously and do not, and then the endpointing is inside this stage. The bench reports which case it saw. |
+| `pipeline` | ≤800ms | Mouth to ear. The only stage measured **directly** on this tier, and the reason the tier exists. |
+
 ```bash
-pnpm bench:voice          # mock providers, deterministic, no credentials
-pnpm bench:voice:live     # whatever ~/.ethos/config.yaml has configured
+pnpm bench:voice                  # pipeline tier, mock providers, no credentials
+pnpm bench:voice:realtime         # realtime tier, shared fake provider, no credentials
+pnpm bench:voice:live             # pipeline tier against ~/.ethos/config.yaml
+pnpm bench:voice:live:realtime    # realtime tier against a configured roster entry + key
 ```
 
-Both drive a real `VoiceSession` and read the **per-turn spans it writes** — the
-same telemetry a deployment sees — so the bench cannot report a number the
-product does not. Live mode adds `--turns=N` (default 10) and reports p50/p90/p99
-per stage; budgets are checked against **p90**. `--assert-budget` exits non-zero
-on a miss.
+`pnpm bench:voice:realtime` verified here — 5 turns, all three stages PASS:
+
+```
+  Stage                 p50    p90    p99    Budget   Result
+  --------------------  -----  -----  -----  -------  ------
+  endpoint              254ms  261ms  261ms  ≤ 300ms  PASS
+  realtime_first_audio  360ms  363ms  363ms  ≤ 500ms  PASS
+  pipeline              614ms  615ms  615ms  ≤ 800ms  PASS
+```
+
+The mock timings come from `--realtime-commit-ms` / `--realtime-audio-ms`, so
+that run "exercises the measurement path, not a provider" — the script's own
+words, printed under the table. A real number needs
+`pnpm bench:voice:live:realtime` (a roster entry and a key) or a deployment's own
+`realtime_first_audio` spans.
+
+Both pipeline modes drive a real `VoiceSession` and read the **per-turn spans it
+writes** — the same telemetry a deployment sees — so the bench cannot report a
+number the product does not. The realtime modes drive a real `RealtimeSession`
+(the shared fake provider, or the configured one) and build the same
+`realtime_first_audio` span a deployed call writes. Live mode adds `--turns=N`
+(default 10) and reports p50/p90/p99 per stage; budgets are checked against
+**p90** on both tiers. `--assert-budget` exits non-zero on a miss.
 
 Because the spans are cumulative from the turn start, the arithmetic that turns
 them into stage-owned time lives in `latency-budget.ts` and is unit-tested
@@ -703,7 +907,14 @@ If it passes alone, it was load. If it fails alone, it is real.
 ## See also
 
 - `docs/content/using/how-to/local-voice.md` — the canonical local-server recipe
-- `apps/web/src/features/voice/README.md` — the manual `livekit-client` binding
+- `docs/content/using/reference/config-yaml.md` — every `voice.*` config key,
+  including the realtime roster, `voice.tier` and the per-session budget
+- `docs/content/using/reference/personality-yaml.md` — the personality's own
+  `voice.*` block
+- `apps/web/src/features/voice/README.md` — the browser tiers, both transports,
+  and what only a human can verify
 - `extensions/voice-providers/src/template/` — scaffold for a third-party provider
 - `extensions/voice-providers/src/conformance.ts` — `validateSttProvider` /
   `validateTtsProvider`; a provider that passes these is callable by every surface
+- `extensions/voice-providers/src/realtime-conformance.ts` — the 11-check realtime
+  contract suite every registered realtime provider is run through

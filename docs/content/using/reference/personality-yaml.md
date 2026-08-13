@@ -1,10 +1,10 @@
 ---
 title: "Personality config reference"
-description: "Every field in a personality's config.yaml and toolset.yaml — model, fs_reach, MCP, plugins, budget, safety."
+description: "Every field in a personality's config.yaml and toolset.yaml — model, fs_reach, MCP, plugins, budget, voice, safety."
 kind: reference
 audience: user
 slug: personality-yaml
-updated: 2026-08-08
+updated: 2026-08-13
 ---
 
 A [personality](../../getting-started/glossary.md#personality) is a directory at `~/.ethos/personalities/<id>/` with three files:
@@ -312,6 +312,37 @@ Controls what the observability store persists for this personality.
 | `safety.observability.storeLlmPayloads` | `none` \| `metadata` \| `full` | LLM request and response payloads. |
 | `safety.observability.redactPatterns` | string[] | Substrings redacted from anything stored. |
 
+## voice.\* {#voice}
+
+Type: dotted block · Default: unset (inherit the deployment's voice config)
+
+How this personality sounds and which engines serve it. A deployment picks the *provider*; the personality picks how it *sounds*, so anything declared here beats the global [`auxiliary.tts.*` / `voice.*`](./config-yaml.md#voice-tier) settings, and silence means inherit. There is no web editor — this block is edited in the file and rendered read-only by `ethos personality show`.
+
+| Field | Type | Description |
+|---|---|---|
+| `voice.tts_voice` | string | Voice id handed to the TTS provider. Provider-specific and free-form — `af_bella` for Kokoro, `alloy` for OpenAI. |
+| `voice.languages.<tag>` | string | BCP-47 tag → voice id. Beats `tts_voice` when the turn's language is known. Only browser talk-mode supplies a language today; the gateway has no per-turn language signal, so the default voice wins there. |
+| `voice.tier` | `pipeline` \| `realtime` | Preferred voice engine, beating the deployment's [`voice.tier`](./config-yaml.md#voice-tier). A preference, not a guarantee: a deployment with no realtime provider serves `pipeline` either way. An unrecognised value is dropped rather than thrown on — a bad voice field must not make a personality unloadable. |
+| `voice.tts_provider` | string | Names an entry in the deployment's TTS roster (`voice.tts.providers.<name>`). A **label** the operator chose, never a provider id. A name this machine lacks falls back to the default `auxiliary.tts` entry, so a shared personality still speaks. |
+| `voice.stt_provider` | string | The same, for the STT roster. A personality's voice is identity; its ear is a technical override. |
+| `voice.realtime_provider` | string | The same, for the [realtime roster](./config-yaml.md#voice-realtime-providers). Consulted only on the realtime tier; falls back to `voice.realtime.default`. |
+| `voice.model` | string | Intended as a fast-lane model for spoken turns. **No consumer yet** — it is parsed, resolved, and read by nothing. Declaring it changes only the character sheet. |
+
+```yaml
+voice.tts_voice: af_bella
+voice.languages.es: ef_dora
+voice.tier: realtime
+voice.realtime_provider: live
+```
+
+Notes:
+
+- Voice-id precedence, resolved in one function (`resolveVoicePreferences`) so every surface agrees: `voice.languages.<tag>` > `voice.tts_voice` > the chosen entry's own `voice` > global `auxiliary.tts.voice`. A realtime call uses the same order, so switching tiers does not switch who you are talking to.
+- Naming a roster entry buys no trust. The [egress gate](./config-yaml.md#voice-trusted-plugins) keys on the entry's underlying `provider`, so an entry called `local-anything` backed by a hosted model is still refused.
+- `voice.provider` is accepted on read as the older spelling of `voice.tts_provider` and re-serialized as the new one; a file never carries both.
+- Talk-mode also needs `voice_session` in [`toolset.yaml`](#toolset-yaml). Without it the phone button renders disabled.
+- Confirm what parsed with `ethos personality show <id>` — it emits a `## Voice` block, and omits the section entirely when the personality declares no `voice` block.
+
 ## toolset.yaml {#toolset-yaml}
 
 Flat YAML list of tool names. Each entry on its own line, prefixed with `- `. Tools missing from this list are filtered out before the LLM sees them.
@@ -347,3 +378,4 @@ Optional sibling directory at `~/.ethos/personalities/<id>/skills/`. Per-persona
 - [Glossary: personality](../../getting-started/glossary.md#personality) — one-line definition shared across every page that names the construct.
 - [Glossary: fs_reach](../../getting-started/glossary.md#fs-reach) — the path-allowlist field this file declares; backed by `ScopedStorage`.
 - [Retrieve files the agent wrote](../how-to/retrieve-agent-files.md) — `fs_reach.workdir` in practice, on a headless deployment.
+- [Local voice: Kokoro TTS + Whisper large v3 STT](../how-to/local-voice.md) — configure the providers this file's `voice.*` block picks between.
