@@ -14,8 +14,8 @@ import { classifyVoiceStartError } from './voice-start-error';
 // Drives a `VoiceCallClient` through the pure `voiceCallReducer` and owns the
 // browser-only concerns the reducer deliberately excludes: the mic level meter
 // (same AudioContext/analyser pattern as `useVoiceRecorder`) and mute state.
-// The client is injected so the UI works against the fake in tests and the real
-// `livekit-client` binding in production.
+// The client is injected so the UI works against the fake in tests and against
+// `createTalkModeClient` (realtime or pipeline tier) in production.
 
 const METER_BARS = 32;
 

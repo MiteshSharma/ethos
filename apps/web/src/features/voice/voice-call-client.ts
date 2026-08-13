@@ -2,13 +2,12 @@ import { z } from 'zod';
 
 // Isolated, typed boundary for a live browser voice call (talk-mode).
 //
-// This is the ONLY seam talk-mode's UI + state logic bind to. The production
-// implementation wraps `livekit-client` (a WebRTC room: publishes the local mic
-// track, subscribes to the agent's audio track, and carries transcript/control
-// events over a data channel) — that package is NOT installed here, deliberately,
-// so the whole feature typechecks and unit-tests against a fake without a running
-// LiveKit server. See `apps/web/src/features/voice/README.md` for the manual
-// binding step.
+// This is the ONLY seam talk-mode's UI + state logic bind to. The implementation
+// that actually runs in the app is `createTalkModeClient` (`talk-mode-client.ts`),
+// which picks the realtime tier (one duplex WebSocket to a hosted provider) or
+// the pipeline tier (binary PCM to web-api, batch RPC as fallback). Neither
+// needs a native dependency, so the whole feature typechecks, unit-tests against
+// fakes, and ships without one. See `apps/web/src/features/voice/README.md`.
 //
 // The event stream mirrors `VoiceSessionEvent` from
 // `extensions/voice-session/src/types.ts` — kept as a local mirror (not an import)
@@ -72,12 +71,13 @@ export interface VoiceCallClient {
   on(listener: (event: VoiceCallEvent) => void): () => void;
 }
 
-// Zod schema for the JSON-serializable control events a real transport carries
-// over its data channel (everything except `reply_audio`, which arrives as a
-// media frame, not JSON). The production `livekit-client` binding MUST parse
-// inbound data-channel payloads through `parseVoiceCallControlEvent` rather than
-// casting them — external JSON is never trusted with `as` (CLAUDE.md "API
-// response type safety").
+// Zod schema for the JSON-serializable control events a transport can carry as
+// JSON (everything except `reply_audio`, which arrives as a media frame). The
+// shipped transports parse their own wire formats through
+// `@ethosagent/web-contracts`, so nothing in the app calls the guard below
+// today; it is the rule any future JSON-carrying transport MUST follow —
+// external JSON is never trusted with `as` (CLAUDE.md "API response type
+// safety").
 const VoiceCallControlEventSchema = z.discriminatedUnion('type', [
   z.object({
     type: z.literal('utterance_committed'),
@@ -110,14 +110,16 @@ export function parseVoiceCallControlEvent(raw: unknown): VoiceCallEvent | null 
 }
 
 const UNWIRED_MESSAGE =
-  'Live voice transport is not installed. Install livekit-client and implement ' +
-  'VoiceCallClient (see apps/web/src/features/voice/README.md) to talk in the browser.';
+  'No voice transport was supplied for this call. Nothing is missing from the ' +
+  'install — pass `createTalkModeClient` (features/voice/talk-mode-client.ts) as ' +
+  '`useVoiceCall({ createClient })`, the way Chat does, to talk in the browser.';
 
 /**
- * Default client used until the real transport is wired. `connect()` rejects with
- * an honest message pointing at the manual binding step; every other method is a
- * no-op. This keeps the toggle + in-call UI fully functional and testable while
- * the green tree stays free of the native `livekit-client` dependency.
+ * The boundary's inert default: `connect()` rejects instead of dialling and every
+ * other method is a no-op, so the toggle + in-call UI stay fully functional and
+ * testable with no transport wired at all. Nothing in the app uses it — `Chat.tsx`
+ * injects `createTalkModeClient` — so reaching this rejection means a caller of
+ * `useVoiceCall` omitted `createClient`.
  */
 export function createUnwiredVoiceCallClient(): VoiceCallClient {
   return {

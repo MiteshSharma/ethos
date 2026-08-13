@@ -1,4 +1,14 @@
-// Gemini Live — BidiGenerateContent over WebSocket, server-relayed.
+// Gemini Live — BidiGenerateContent over WebSocket, a server-held session.
+//
+// NOT a browser transport, and NOT a server relay for one: `caps.ephemeralToken`
+// is false, so `VoiceService.mintRealtimeToken` refuses with `no_browser_token`
+// and browser talk-mode degrades visibly to the pipeline tier. No production
+// code path calls `open()` in this phase either — the only callers are this
+// package's tests, the shared conformance suite, and
+// `scripts/voice-latency-bench.ts`. What this provider earns its place with is
+// the CONTRACT: it runs the same `realtime-conformance.ts` checks as OpenAI
+// Realtime, which is what proves the contract is not OpenAI-shaped. V4's SIP
+// bridge is the intended server-side consumer of `open()`.
 //
 // The wire mapping is NOT here: it is `createGeminiLiveCodec` in
 // `@ethosagent/voice-realtime-protocol`, whose header documents every way this

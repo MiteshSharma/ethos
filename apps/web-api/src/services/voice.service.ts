@@ -735,8 +735,18 @@ export class VoiceService {
     const provider = resolution.provider;
     const mint = provider.mintEphemeralToken?.bind(provider);
     if (provider.caps.ephemeralToken !== true || !mint) {
-      // Gemini Live lands here BY DESIGN — it is server-relayed and has no
-      // browser-direct credential to hand out. Fully usable server-side.
+      // Gemini Live lands here BY DESIGN — `caps.ephemeralToken: false`, so
+      // there is no browser-direct credential to hand out. It is NOT a
+      // server-relay fallback: in this phase NOTHING in production calls
+      // `RealtimeVoiceProvider.open()` (the only non-test callers are
+      // `scripts/voice-latency-bench.ts`), so a deployment that configures it
+      // as the realtime default gets this refusal and a VISIBLE degrade to the
+      // pipeline tier — the call continues, it just is not realtime.
+      // What Gemini Live does earn is the contract: it runs the same shared
+      // conformance suite as OpenAI Realtime
+      // (`extensions/voice-providers/src/realtime-conformance.ts`), which is
+      // what proves the contract is not OpenAI-shaped. V4's SIP bridge is the
+      // intended server-side consumer of `open()`.
       return {
         ok: false,
         reason: 'no_browser_token',

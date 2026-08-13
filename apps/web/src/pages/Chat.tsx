@@ -334,9 +334,9 @@ export function Chat() {
 
   // Talk-mode (Phase B). The call affordance is gated on the active
   // personality's toolset (§3(e)) — voice availability is a personality
-  // capability, not a config field. The live-call client is injected; until
-  // `livekit-client` is wired (see features/voice/README.md) the default client
-  // reports the manual step honestly instead of connecting.
+  // capability, not a config field. The live-call client is injected — this page
+  // supplies `createTalkModeClient` below (see features/voice/README.md), which
+  // picks the realtime or pipeline tier at call time.
   const personalityQuery = usePersonalityGet(personalityId);
   const canTalk = personalityCanTalk(personalityQuery.data?.personality.toolset);
 

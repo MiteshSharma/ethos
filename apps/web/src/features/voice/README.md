@@ -13,9 +13,9 @@ and the two call tiers behind them. Shipped by
   `createUnwiredVoiceCallClient()` is the boundary's inert default — `connect()`
   rejects instead of dialling, so the tree typechecks and tests with no transport
   at all. **`Chat.tsx` does not use it:** it injects `createTalkModeClient`, which
-  is what actually runs in the app. Its rejection message still names
-  `livekit-client`, which no browser tier needs any more; treat that string as
-  stale, not as an instruction.
+  is what actually runs in the app. Its rejection message says exactly that — a
+  caller of `useVoiceCall` omitted `createClient`. No browser tier needs a native
+  dependency, so there is no install step behind it.
 - **`voice-call-reducer.ts`** — the pure call state machine (`idle |
   connecting | reconnecting | listening | thinking | consulting |
   agent_speaking | interrupted | ended`), transcript accumulation,
