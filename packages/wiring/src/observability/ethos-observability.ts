@@ -50,6 +50,10 @@ export const ETHOS_EVENT_CATEGORIES = [
   'install.event',
   'tier.escalation',
   'tier.override',
+  // AN-C1 — separate categories, not one with a mode field, so `ethos usage
+  // --by-skill` counts them with two indexed reads rather than a JSON probe.
+  'skill.invoked',
+  'skill.exposed',
   'heartbeat.decision',
   'memory.pending_cap',
   'a2a.auth',
@@ -303,6 +307,21 @@ export class EthosObservability {
 
   recordCompaction(opts: EventBase & { severity?: EventSeverity }): void {
     this.emit('audit.compaction', 'info', opts);
+  }
+
+  /**
+   * AN-C1 — a skill reached the model. `mode` separates a deliberate
+   * `get_skill` call from injection-mode prompt presence; `ethos usage
+   * --by-skill` reports the two as distinct columns because they are distinct
+   * costs. The skill name rides `details` so the events table needs no new
+   * column.
+   */
+  recordSkillInvocation(
+    opts: EventBase & { skill: string; mode: 'invoked' | 'exposed'; severity?: EventSeverity },
+  ): void {
+    this.emit(opts.mode === 'invoked' ? 'skill.invoked' : 'skill.exposed', 'info', opts, {
+      skill: opts.skill,
+    });
   }
 
   /**

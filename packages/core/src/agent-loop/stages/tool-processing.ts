@@ -29,6 +29,7 @@ import { capIngestedResult } from '../ingestion-cap';
 import { checkMcpEnabled, checkMcpRejectArgs } from '../mcp-policy';
 import { handleUntrustedResult } from '../result-defense';
 import { buildScopedStorage } from '../scoped-storage';
+import { recordSkillInvoked } from '../skill-telemetry';
 import type { WatcherTap } from '../turn-context';
 import { consultWatcherHalt, enforceBeforeToolCall } from './per-call-enforcement';
 import type { ScriptToolBridge } from './script-tool-bridge';
@@ -352,6 +353,10 @@ export async function* processTools(
       });
       continue;
     }
+
+    // AN-C1 — a `get_skill` call is an INVOCATION, distinct from assembly's
+    // `exposed`. The rule lives in agent-loop/skill-telemetry.ts.
+    recordSkillInvoked(deps.observability, tc.toolName, effectiveArgs, ctx.traceId);
 
     const spanId = deps.observability?.startSpan({
       traceId: ctx.traceId ?? '',

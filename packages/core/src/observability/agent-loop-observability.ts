@@ -58,5 +58,24 @@ export interface AgentLoopObservability {
       personalityId: string;
     },
   ): void;
+  /**
+   * AN-C1 — a skill reached the model, and how.
+   *
+   * `invoked` is a deliberate `get_skill` call: the model asked for the body.
+   * `exposed` is injection-mode presence — the skill sat in the prompt whether
+   * the model used it or not. They are counted separately because they cost
+   * differently and mean different things: exposure is a standing token bill
+   * paid every turn, invocation is a choice the model made once. One combined
+   * "skill used" number would hide which of the two you are paying for.
+   *
+   * `exposed` is deduped per turn by the caller: a skill in the prompt is there
+   * for the whole turn, so one event per (turn, skill).
+   *
+   * Optional, like `recordToolRepair` — `EthosObservability` satisfies it,
+   * lighter adapters need not.
+   */
+  recordSkillInvocation?(
+    opts: RecordEventOpts & { skill: string; mode: 'invoked' | 'exposed' },
+  ): void;
   flush(): void;
 }

@@ -121,7 +121,12 @@ describe('Orchestrator guardrails', () => {
       // `done` AgentEvent, and the return-direct exit is one of the two places
       // that emits one. A single conditional spread, which no longer fits on
       // the one-line yield — so the cost is the five lines the formatter takes.
-      if (lineCount > 792) {
+      // Bumped 792 -> 797 (analytics C1): `get_skill` calls are recorded as
+      // skill INVOCATIONS, distinct from the injection-mode exposures assembly
+      // records. The rule — which tool counts, how the name is extracted, the
+      // optional-sink guard — lives in agent-loop/skill-telemetry.ts; only the
+      // import and a two-line commented call land here.
+      if (lineCount > 797) {
         violations.push(`${file}: ${lineCount} lines`);
       }
     }

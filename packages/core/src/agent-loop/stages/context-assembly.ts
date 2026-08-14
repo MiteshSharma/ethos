@@ -20,6 +20,7 @@ import {
 } from '../manual-compact';
 import { applyMicroToView } from '../micro-compaction';
 import { loadMicroState } from '../micro-state';
+import { recordSkillsExposed } from '../skill-telemetry';
 import {
   type AgingState,
   advanceAgingState,
@@ -453,6 +454,12 @@ export async function* assembleContext(
     Array.isArray(rawSkills) && rawSkills.every((s) => typeof s === 'string')
       ? (rawSkills as string[])
       : undefined;
+
+  // AN-C1 — one `skill.exposed` per skill in this turn's prompt. Emitted here
+  // (not in the injector) because the turn's `traceId` is in hand and assembly
+  // runs once per turn, which is the dedup the contract asks for. The rule
+  // lives in agent-loop/skill-telemetry.ts.
+  recordSkillsExposed(deps.observability, activeSkillFiles, traceId);
 
   // Memory injected last, as context about the user. The snapshot is a
   // list of (key, content) pairs; render USER.md as "About You" first,
