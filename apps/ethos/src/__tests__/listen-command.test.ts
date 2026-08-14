@@ -26,7 +26,7 @@ function preflight(overrides: Partial<ListenPreflight> = {}): ListenPreflight {
       { name: 'engine:transcript', ok: true, detail: 'no native bindings' },
       { name: 'models', ok: false, detail: 'model directory missing — /m' },
       { name: 'microphone', ok: true, detail: '1 input device(s): stdin' },
-      { name: 'gateway', ok: true, detail: 'answered 200' },
+      { name: 'satellite-lane', ok: true, detail: 'answered 200' },
     ],
     configuredEngine: 'transcript',
     transcriptEngineOk: true,
@@ -146,7 +146,7 @@ describe('runListenCommand --json', () => {
         { name: 'engine:transcript', ok: true },
         { name: 'models', ok: true },
         { name: 'microphone', ok: false, detail: 'no input devices' },
-        { name: 'gateway', ok: true },
+        { name: 'satellite-lane', ok: true },
       ],
     });
     await runListenCommand(['doctor', '--json'], deps(pre));
@@ -209,7 +209,7 @@ describe('the daemon refuses to start deaf', () => {
           { name: 'engine:sherpa', ok: false, detail: 'wake model file missing — /m/encoder.onnx' },
           { name: 'models', ok: false, detail: 'model directory missing — /m' },
           { name: 'microphone', ok: true },
-          { name: 'gateway', ok: true },
+          { name: 'satellite-lane', ok: true },
         ],
       }),
     );
@@ -227,7 +227,7 @@ describe('the daemon refuses to start deaf', () => {
           { name: 'engine:transcript', ok: true },
           { name: 'models', ok: true },
           { name: 'microphone', ok: true },
-          { name: 'gateway', ok: false, detail: 'ECONNREFUSED' },
+          { name: 'satellite-lane', ok: false, detail: 'ECONNREFUSED' },
         ],
       }),
     );

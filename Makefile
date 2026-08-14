@@ -220,8 +220,25 @@ gateway:
 # and the target prints the pipe rather than letting you find that out the hard
 # way. The daemon's own banner carries the rest.
 
+# `ethos listen doctor` reuses the repo's three-way exit contract verbatim (see
+# `computeDoctorExit` in apps/ethos/src/commands/doctor.ts, and ListenFailFlags
+# in apps/ethos/src/commands/listen.ts):
+#   0 - everything passes
+#   1 - something is genuinely broken on this host (bad config, missing wake
+#       model, engine that won't load) — a human has to fix it
+#   2 - nothing is broken, but a dependency simply isn't up right now (server
+#       down, no mic piped in) — recoverable, and the point of the contract is
+#       letting CI tell this apart from a 1
+# Make treats every nonzero status as a build failure, so without translating
+# here a warn-level run prints "Nothing is broken on this host" and then
+# `make: *** [listen-doctor] Error 2` — the two lines contradict each other.
+# So exit 2 passes at the make level; exit 1 still fails the build. Do not
+# "simplify" this back to a bare command.
 listen-doctor:
-	@$(NVM_EXEC) pnpm exec tsx apps/ethos/src/index.ts listen doctor $(ARGS)
+	@$(NVM_EXEC) pnpm exec tsx apps/ethos/src/index.ts listen doctor $(ARGS); \
+		status=$$?; \
+		if [ $$status -eq 2 ]; then exit 0; fi; \
+		exit $$status
 
 listen:
 	@echo "ethos listen reads raw PCM from stdin. Pipe a microphone into it:"

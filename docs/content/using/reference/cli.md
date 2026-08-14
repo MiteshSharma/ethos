@@ -141,9 +141,9 @@ Synopsis: `ethos listen [doctor] [--url <ws url>] [--route <id>] [--device <id>]
 |---|---|---|---|
 | `doctor` | subcommand | — | Preflight only: engine, model files, capture device, server reachability. Exits without starting anything. |
 | `--url <ws url>` | string | derived from `webBaseUrl`, else `http://127.0.0.1:3000` | Satellite lane URL. A bare origin gets `/satellite/ws` appended; a URL with a path is taken as given. |
-| `--route <id>` | string | the only enabled route, if there is exactly one | The `voice.wake.routes` entry every captured utterance is attributed to. Required when two or more routes are enabled — the daemon refuses rather than guessing which personality answers. |
+| `--route <id>` | string | the only enabled route, if there is exactly one | The route every captured utterance is attributed to, resolved against the table the server pushes on connect — a `voice.wake.routes` id, or a synthesized `auto:<personality-id>` one. Required when two or more routes are enabled — the daemon refuses rather than guessing which personality answers. |
 | `--device <id>` | string | the enumerated default | Capture device. This build enumerates `stdin` only. |
-| `--json` | flag | off | `doctor` only. One JSON object on stdout — probes, resolved route, node id, lane URL, and `exit` — then exits. |
+| `--json` | flag | off | `doctor` only. One JSON object on stdout — probes, `configuredRoutes` and `requestedRoute` (never a resolved route: this command does not connect), node id, lane URL, and `exit` — then exits. |
 
 Capture is a pipe — the daemon reads raw signed 16-bit little-endian **mono** PCM at **16 kHz** from stdin, and there is no microphone binding.
 

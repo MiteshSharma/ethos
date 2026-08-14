@@ -38,7 +38,7 @@ Read this before you buy hardware.
 
 ## 1. Add a wake route
 
-Every unprivileged personality already answers to `hey <name>`, with no configuration, on any satellite that actually matches phrases. `ethos listen` matches nothing, so it needs a configured route to attribute your speech to — this step is required for it.
+Every unprivileged personality already answers to `hey <name>`, with no configuration: the server synthesizes an `auto:<personality-id>` route for each one and pushes the merged table to every satellite on connect. `ethos listen` matches no phrase of its own, so it names one route from that table with `--route`, and `--route auto:<personality-id>` reaches a synthesized one with no config at all. Write your own route when you want a chosen phrase, a stable id, or a personality the defaults exclude — the rest of this page uses one.
 
 Open **Settings → Voice → Wake routes**, or write it by hand in `~/.ethos/config.yaml`:
 
@@ -53,7 +53,7 @@ A route saved in Settings is pushed to every connected satellite immediately. A 
 
 ## 2. Preflight the satellite machine
 
-Run the doctor before you run the daemon. It asks the engine to load what it would load and the device to enumerate what it would open, so nothing is reported available on a guess.
+Run the doctor before you run the daemon. It asks the engine to load what it would load and the device to enumerate what it would open, so nothing is reported available on a guess. The `satellite-lane` row sends a real WebSocket upgrade to `/satellite/ws` with no auth cookie, so a `401` on it means the lane is mounted and refused the probe — which is the answer it is looking for.
 
 ```bash
 ethos listen doctor
@@ -65,13 +65,15 @@ ethos listen doctor  wake satellite preflight
   ✓  engine:transcript      no native bindings and no model files — matches wake phrases against STT output
   ⚠  models                 not required by the 'transcript' engine — model directory missing — ~/.ethos/models/wake
   ✓  microphone             1 input device(s): raw s16le mono PCM on stdin @ 16000 Hz
-  ⚠  gateway                http://127.0.0.1:3000/healthz answered 503
+  ⚠  satellite-lane         ws://127.0.0.1:3000/satellite/ws: connection refused (ECONNREFUSED) — nothing is listening there, so the server is not running. Start it with `ethos serve`.
   ✓  node id                pi-kitchen-f089dce2 (~/.ethos/listen-node-id)
   ✓  satellite url          ws://127.0.0.1:3000/satellite/ws
-  ✓  route                  kitchen: "hey engineer" → engineer
+  –  route                  configured here: kitchen ("hey engineer" → engineer). The effective table is the server's: it adds a "hey <name>" route (auto:<personalityId>) for every unprivileged personality and pushes the merged table on connect, so what this host can reach is only knowable once it has connected.
 
 ⚠ Nothing is broken on this host, but it cannot listen right now.
 ```
+
+The `route` row is a dash rather than a verdict. This command never connects, so it has none to give: it reports what your own `config.yaml` contributes and names the server as the authority for the rest.
 
 Exit codes are `0` clean, `1` for a host that will never hear you (no config, no usable engine, missing models for a `sherpa` host), and `2` for something true right now that may not be in a minute — no pipe attached, or the server not started. Add `--json` for one machine-readable object; its `engine.daemonMode` field reads `"push-to-talk"`, so a script cannot infer acoustic wake from the engine name.
 
@@ -79,6 +81,10 @@ If the server is on another machine, point at it:
 
 ```bash
 ethos listen doctor --url ws://ethos.local:3000
+```
+
+```
+  ✓  satellite url          ws://ethos.local:3000/satellite/ws
 ```
 
 A bare origin gets the lane path appended for you.
@@ -97,16 +103,17 @@ ffmpeg -f avfoundation -i :0 -ar 16000 -ac 1 -f s16le - | ethos listen --route k
 arecord -f S16_LE -r 16000 -c 1 -t raw | ethos listen --route kitchen
 ```
 
-The preflight rows print first, then the two lines that say what this daemon is:
+The preflight rows print first, then the line that names the lane it is dialling for its route table, then the two that say what this daemon is:
 
 ```
-Push-to-talk: nothing is acoustically wake-matched here. Every utterance on the pipe is sent as "hey engineer" → engineer (route kitchen).
+Connecting to ws://127.0.0.1:3000/satellite/ws for the wake route table (want route kitchen)...
+Push-to-talk: nothing is acoustically wake-matched here. Every utterance on the pipe is sent as "hey engineer" → engineer (route kitchen, from voice.wake.routes).
 Listening on raw s16le mono PCM on stdin @ 16000 Hz. Press Ctrl+C to stop; close the pipe to stop talking.
 ```
 
 Get the sample rate right. Raw PCM carries no header, so piping 44.1 kHz stereo produces garbage that nothing can detect — the flags above are the contract.
 
-Omit `--route` only when exactly one route is enabled. With two or more, the daemon refuses rather than guessing which personality answers.
+Omit `--route` only when the server's pushed table holds exactly one enabled route. It usually holds more — one synthesized route per unprivileged personality — so name the one you mean. With two or more, the daemon refuses rather than guessing which personality answers.
 
 From a clone, `make listen` prints both pipelines and then runs the daemon, and `make listen-doctor` runs the preflight.
 
@@ -138,20 +145,21 @@ Why the default is a refusal rather than a warning is in [Why can't a voice in t
 
 ## Verify
 
-With the server up and the pipe attached, the preflight goes clean — the last three rows and the summary are what to read:
+With the server up and the pipe attached, the preflight goes clean — the lane row, the address it would dial, and the route row are what to read:
 
 ```bash
 ethos listen doctor
 ```
 
 ```
+  ✓  satellite-lane         ws://127.0.0.1:3000/satellite/ws is mounted — answered 401 to a probe sent with no auth cookie, which is the expected refusal
   ✓  satellite url          ws://127.0.0.1:3000/satellite/ws
-  ✓  route                  kitchen: "hey engineer" → engineer
+  –  route                  configured here: kitchen ("hey engineer" → engineer). The effective table is the server's: it adds a "hey <name>" route (auto:<personalityId>) for every unprivileged personality and pushes the merged table on connect, so what this host can reach is only knowable once it has connected.
 
 ✓ Preflight clean. Start with ethos listen.
 ```
 
-That exits `0`: the engine loaded, a device enumerated, the route resolved, and the server answered.
+That exits `0`: the engine loaded, a device enumerated, and the satellite lane answered. Routing is the one thing it does not settle — `ethos listen` resolves `--route` against the table the server pushes when it connects.
 
 The daemon also writes a heartbeat every 10 seconds:
 
@@ -166,7 +174,7 @@ cat ~/.ethos/listen-health.json
 Finally, confirm the personality really answered as itself: ask it for something only its toolset allows. One turn narrates as four lines — what opened, what the server heard, what the personality said, and the re-arm:
 
 ```
-● speech — utterance u1-mf3k9 open as engineer (route kitchen).
+● speech — utterance u1-msszeiml open as engineer (route kitchen).
   › you: what is on my calendar
   ‹ engineer: Two meetings, both after lunch.
   ↩ turn complete. Listening again.
@@ -179,7 +187,7 @@ The `‹` line is the whole answer on this host — there is no loudspeaker to s
 - **`✗ Nothing is piped to stdin — not starting.`** You ran `ethos listen` from a shell with no pipe. Enumerating a device that will never produce a sample is the false-available failure this preflight exists to refuse. Pipe `ffmpeg` or `arecord` in.
 - **`✗ No usable wake engine on this host — not starting.`** Every engine probe failed, including the dependency-free one. Read the `engine:` rows above the message.
 - **`⚠ degraded engine:sherpa: sherpa-onnx-node is not installed`** — the acoustic engine is unavailable and the daemon continues on push-to-talk. Install the peer on that host, or set `voice.wake.engine: fallback`.
-- **`no enabled wake route '<id>'`** — the id after `--route` is not in `voice.wake.routes`, or it is `enabled: false`. The message lists the ids that are configured.
+- **`✗ the server's wake route table has no enabled route '<id>'`** — the id after `--route` is not in the table the server pushed, or it is disabled. The message lists every id that was pushed, synthesized `auto:<personality-id>` ones included.
 - **`No wake route matches "<phrase>"`** from the server — the satellite's pushed table is stale, or the route was deleted. It refreshes on reconnect.
 - **`⚠ playout the server is sending synthesized audio, and this host has no output device`** — the server is an older build: a current one skips synthesis for a `playback: false` node. The audio is discarded. The reply text still prints.
 - **`⚠ edge stt`** — `voice.wake.edgeStt` is on, but neither shipped host has an on-device recognizer. Audio *will* be streamed to the server, and the "no audio leaves the machine" guarantee does not hold there.

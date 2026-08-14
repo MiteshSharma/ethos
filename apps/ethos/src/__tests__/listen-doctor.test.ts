@@ -11,15 +11,19 @@ import type { AddressInfo } from 'node:net';
 import { InMemoryStorage } from '@ethosagent/storage-fs';
 import type { WakeEngine, WakeEngineFactory, WakeRoute } from '@ethosagent/voice-satellite';
 import { runSatelliteDoctor, transcriptWakeEngineFactory } from '@ethosagent/voice-satellite';
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   chooseRoute,
   computeListenExit,
   deriveListenFailFlags,
   deriveListenUrls,
+  LANE_PROBE_NAME,
+  type ListenCommandDeps,
   type ListenPreflight,
   probeHealthz,
   probeSatelliteLane,
+  runListenCommand,
+  withLaneProbeName,
 } from '../commands/listen';
 
 const MODEL_DIR = '/home/pi/.ethos/models/wake';
@@ -61,7 +65,9 @@ function preflightFrom(
   overrides: Partial<ListenPreflight> = {},
 ): ListenPreflight {
   return {
-    probes,
+    // Through the same rename production applies: the shared doctor calls the
+    // reachability row `gateway`, this host calls it `satellite-lane`.
+    probes: withLaneProbeName(probes),
     configuredEngine: 'transcript',
     transcriptEngineOk: probes.some((p) => p.name === 'engine:transcript' && p.ok),
     modelsRequired: false,
@@ -449,6 +455,207 @@ describe('probeSatelliteLane', () => {
     );
     expect(result.ok).toBe(false);
     expect(result.detail).toContain(`${port}`);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The diagnosis itself — the row cost a real user a debugging round because it
+// said `…/satellite/ws: ; http://…/healthz: fetch failed`: an empty reason, an
+// opaque undici wrapper, and the same cause printed twice.
+// ---------------------------------------------------------------------------
+
+/** A port nothing is on: bind, read the number, release. */
+async function deadPort(): Promise<number> {
+  const server = await serverWith({});
+  const { port } = server;
+  await server.close();
+  return port;
+}
+
+describe('a refused connection says WHY, and what to do about it', () => {
+  it('names the errno, the cause, and the remedy — and never says `fetch failed`', async () => {
+    const port = await deadPort();
+    const result = await probeSatelliteLane(
+      `ws://127.0.0.1:${port}/satellite/ws`,
+      `http://127.0.0.1:${port}/healthz`,
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.detail).not.toBe('');
+    expect(result.detail).toContain('ECONNREFUSED');
+    expect(result.detail).toContain('refused');
+    // The remedy, because "the server is not running" is the answer nine times
+    // in ten and the operator should not have to go and look it up.
+    expect(result.detail).toContain('ethos serve');
+    // undici's opaque lid. If this string is back, the unwrap regressed.
+    expect(result.detail).not.toContain('fetch failed');
+    expect(result.code).toBe('ECONNREFUSED');
+  });
+
+  it('reports the cause ONCE — no `a; b` with the same failure on both sides', async () => {
+    const port = await deadPort();
+    const result = await probeSatelliteLane(
+      `ws://127.0.0.1:${port}/satellite/ws`,
+      `http://127.0.0.1:${port}/healthz`,
+    );
+    // /healthz rides the same transport to the same port, so it can only fail
+    // the same way. It must not be dialled, let alone concatenated on.
+    expect(result.detail).not.toContain('/healthz');
+    expect(result.detail.match(/ECONNREFUSED/g)).toHaveLength(1);
+  });
+
+  it('a dual-stack `localhost` refusal is not the empty string', async () => {
+    // The original defect: `net.connect` to a name that resolves to both ::1
+    // and 127.0.0.1 rejects with an AggregateError whose OWN message is '', so
+    // the row printed a bare `:` followed by `;`.
+    const port = await deadPort();
+    const result = await probeSatelliteLane(
+      `ws://localhost:${port}/satellite/ws`,
+      `http://localhost:${port}/healthz`,
+    );
+    expect(result.ok).toBe(false);
+    expect(result.detail).not.toBe('');
+    expect(result.detail).not.toMatch(/:\s*;/);
+    expect(result.detail).toContain('ECONNREFUSED');
+    expect(result.code).toBe('ECONNREFUSED');
+  });
+
+  it('the 404 "no satellite lane" diagnosis survives, code and all', async () => {
+    const server = await serverWith({
+      onUpgrade: (socket) => {
+        socket.write('HTTP/1.1 404 Not Found\r\n\r\n');
+        socket.destroy();
+      },
+      healthz: { status: 200, body: { status: 'ok' } },
+    });
+    const result = await probeSatelliteLane(
+      `ws://127.0.0.1:${server.port}/satellite/ws`,
+      `http://127.0.0.1:${server.port}/healthz`,
+    );
+    expect(result.ok).toBe(false);
+    expect(result.detail).toContain('no satellite lane');
+    expect(result.detail).not.toContain('ECONNREFUSED');
+    expect(result.code).toBe('NO_SATELLITE_LANE');
+    await server.close();
+  });
+
+  it('no probe row ever carries an empty detail', async () => {
+    const port = await deadPort();
+    const storage = await storageWithModels();
+    const result = await runSatelliteDoctor({
+      engineFactories: [transcriptWakeEngineFactory],
+      storage,
+      modelDir: MODEL_DIR,
+      audioDevice: { list: async () => [{ id: 'stdin', label: 'stdin' }] },
+      gatewayProbe: () =>
+        probeSatelliteLane(
+          `ws://127.0.0.1:${port}/satellite/ws`,
+          `http://127.0.0.1:${port}/healthz`,
+        ),
+    });
+    for (const row of result.probes) {
+      expect(row.detail, `probe '${row.name}' reported a failure with no reason`).not.toBe('');
+    }
+  });
+});
+
+describe('the reachability row is not called `gateway`', () => {
+  it('the row a satellite host reads is the lane, under the lane’s name', async () => {
+    const storage = await storageWithModels();
+    const result = await runSatelliteDoctor({
+      engineFactories: [transcriptWakeEngineFactory],
+      storage,
+      modelDir: MODEL_DIR,
+      audioDevice: { list: async () => [{ id: 'stdin', label: 'stdin' }] },
+      gatewayProbe: async () => ({ ok: false, detail: 'down' }),
+    });
+    const names = withLaneProbeName(result.probes).map((p) => p.name);
+    expect(names).toContain(LANE_PROBE_NAME);
+    // A row saying `gateway` sends the operator off to look at a Telegram bot.
+    expect(names).not.toContain('gateway');
+  });
+
+  it('an unreachable lane still drives serverUnreachable under the new name', async () => {
+    const storage = await storageWithModels();
+    const result = await runSatelliteDoctor({
+      engineFactories: [transcriptWakeEngineFactory],
+      storage,
+      modelDir: MODEL_DIR,
+      audioDevice: { list: async () => [{ id: 'stdin', label: 'stdin' }] },
+      gatewayProbe: async () => ({ ok: false, detail: 'down' }),
+    });
+    const flags = deriveListenFailFlags(preflightFrom(result.probes));
+    expect(flags.serverUnreachable).toBe(true);
+    expect(computeListenExit(flags)).toBe(2);
+  });
+});
+
+describe('--json carries the machine-readable reason', () => {
+  let stdout: string[];
+
+  beforeEach(() => {
+    stdout = [];
+    vi.spyOn(process.stdout, 'write').mockImplementation((chunk: unknown) => {
+      stdout.push(String(chunk));
+      return true;
+    });
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    process.exitCode = undefined;
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    process.exitCode = undefined;
+  });
+
+  it('the refused case carries the errno on the lane probe', async () => {
+    const pre = preflightFrom(
+      [
+        { name: 'engine:transcript', ok: true, detail: 'no native bindings' },
+        { name: 'models', ok: true, detail: '2 file(s)' },
+        { name: 'microphone', ok: true, detail: '1 input device(s): stdin' },
+        {
+          name: LANE_PROBE_NAME,
+          ok: false,
+          detail:
+            'ws://127.0.0.1:3000/satellite/ws: connection refused (ECONNREFUSED) — ' +
+            'nothing is listening there, so the server is not running. Start it with `ethos serve`.',
+        },
+      ],
+      { laneFailureCode: 'ECONNREFUSED' },
+    );
+    const deps: ListenCommandDeps = { preflight: async () => pre, start: async () => {} };
+
+    await runListenCommand(['doctor', '--json'], deps);
+
+    const parsed = JSON.parse(stdout[0] ?? '') as {
+      exit: number;
+      probes: Array<{ name: string; ok: boolean; detail?: string; code?: string }>;
+    };
+    const lane = parsed.probes.find((p) => p.name === LANE_PROBE_NAME);
+    expect(lane?.ok).toBe(false);
+    expect(lane?.code).toBe('ECONNREFUSED');
+    expect(lane?.detail).toContain('ethos serve');
+    expect(parsed.probes.map((p) => p.name)).not.toContain('gateway');
+    expect(parsed.exit).toBe(2);
+  });
+
+  it('a reachable lane carries no code at all', async () => {
+    const pre = preflightFrom([
+      { name: 'engine:transcript', ok: true, detail: 'no native bindings' },
+      { name: 'models', ok: true, detail: '2 file(s)' },
+      { name: 'microphone', ok: true, detail: '1 input device(s): stdin' },
+      { name: LANE_PROBE_NAME, ok: true, detail: 'accepted the upgrade' },
+    ]);
+    const deps: ListenCommandDeps = { preflight: async () => pre, start: async () => {} };
+
+    await runListenCommand(['doctor', '--json'], deps);
+
+    const parsed = JSON.parse(stdout[0] ?? '') as {
+      probes: Array<{ name: string; code?: string }>;
+    };
+    expect(parsed.probes.find((p) => p.name === LANE_PROBE_NAME)?.code).toBeUndefined();
   });
 });
 
