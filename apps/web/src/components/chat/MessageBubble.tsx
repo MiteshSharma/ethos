@@ -20,6 +20,15 @@ export function UserBubble({ message }: { message: UserMessage }) {
   return (
     <div className="message-row message-row-user">
       {message.isSteer && <div className="message-steer-label">↗ Steering</div>}
+      {/* The turn arrived as speech. The marker sits ABOVE the transcript, in
+          the same 11px mono treatment as the steering marker, so the
+          transcript is fully readable beside it and never replaces the fact
+          that it was spoken. */}
+      {message.origin === 'voice' && (
+        <div className="message-voice-label" role="note" aria-label="Sent by voice">
+          voice
+        </div>
+      )}
       {message.content ? <div className="message-user">{message.content}</div> : null}
       {attachments.length > 0 ? (
         <div className="message-attachments">

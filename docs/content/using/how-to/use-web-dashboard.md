@@ -5,7 +5,7 @@ kind: how-to
 audience: user
 slug: use-web-dashboard
 time: "10 min"
-updated: 2026-08-08
+updated: 2026-08-14
 ---
 
 ## Task
@@ -138,13 +138,14 @@ The MCP tab also shows:
 
 ### 8. Chat with a personality
 
-Navigate to the **Chat** tab. Select a personality from the dropdown at the top. Type a message and press Enter.
+Navigate to the **Chat** tab. Type a message and press Enter.
+
+A session belongs to the personality it started with. The bar at the top of the chat shows which one that is — accent stripe, mark, name, and model — and there is no control to change it mid-conversation. To talk to a different personality, click **+** in that bar (or press ⌘K and choose **New chat session**) and pick one in the New Session picker. The previous conversation stays in the **Sessions** tab, still under its own personality.
 
 The chat view streams the agent's response in real time, showing tool calls inline with expandable detail panels. Each tool call shows the tool name, arguments, and result. Slash commands work the same as in the CLI:
 
 | Command | Effect |
 |---|---|
-| `/personality <id>` | Switch to a different personality mid-session. |
 | `/new` | Start a fresh session (clears conversation history). |
 | `/skills` | List skills the active personality can access. |
 | `/memory` | Show the active personality's memory summary. |

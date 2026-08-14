@@ -4,9 +4,11 @@ import { useConfig } from '../features/config/api/queries';
 // Resolves the currently active personality for the chat surface.
 //
 // Source of truth (W2a): the user's `~/.ethos/config.yaml` `personality`
-// field, surfaced via `rpc.config.get()`. The user can override this for
-// the current chat session via the personality switcher (W2d) — that
-// override lives in component state, never written back to the config.
+// field, surfaced via `rpc.config.get()`. The override is the SESSION's
+// binding, not a preference: a session belongs to the personality it started
+// with, so Chat sets it from the opened session's stored `personalityId`, or
+// from the New Session picker when a fresh one is being started. It lives in
+// component state and is never written back to the config.
 //
 // Returns `null` while the config query is loading; callers render a
 // neutral chrome until the personality resolves so the very first paint

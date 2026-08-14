@@ -3,7 +3,7 @@ import type { AddressInfo } from 'node:net';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { createPersonalityRegistry } from '@ethosagent/personalities';
-import { FsStorage } from '@ethosagent/storage-fs';
+import { FileSecretsResolver, FsStorage } from '@ethosagent/storage-fs';
 import { createWebApi } from '@ethosagent/web-api';
 import type { WiringConfig } from '@ethosagent/wiring';
 import {
@@ -24,6 +24,9 @@ type ServerHandle = ReturnType<typeof honoServe>;
 
 let serverHandle: ServerHandle | null = null;
 let boundPort: number | null = null;
+/** Kept so `stopServer` can drop live WS lanes before the port closes. */
+let voiceSocketHandle: { close(): Promise<void> } | null = null;
+let satelliteSocketHandle: { close(): Promise<void> } | null = null;
 
 function getDataDir(): string {
   return store.get('dataDir') ?? join(homedir(), '.ethos');
@@ -48,6 +51,14 @@ export async function startServer(port: number): Promise<number> {
     personality: (store.get('personalityId') as string | undefined) ?? 'operator',
     memory: store.get('memory') ?? 'markdown',
     ...(baseUrl ? { baseUrl } : {}),
+    // Same store the codex device-auth IPC handler writes to (see ipc.ts).
+    // Without it the provider factories get the wiring package's null-object
+    // fallback, so credentials that only live in the secret store — codex
+    // OAuth tokens above all — read as absent at every LLM construction.
+    secretsResolver: new FileSecretsResolver({
+      dir: join(dataDir, 'secrets'),
+      storage: new FsStorage(),
+    }),
   };
 
   const {
@@ -55,7 +66,9 @@ export async function startServer(port: number): Promise<number> {
     toolRegistry,
     sttProviders,
     ttsProviders,
+    realtimeProviders,
     voiceConfig,
+    voiceStack,
     refreshPersonalities,
     skillsInjector,
     onMemoryCaptured,
@@ -119,7 +132,11 @@ export async function startServer(port: number): Promise<number> {
     return undefined;
   })();
 
-  const { app: webApp } = createWebApi({
+  const {
+    app: webApp,
+    voiceSocket,
+    satelliteSocket,
+  } = createWebApi({
     dataDir,
     sessionStore: session,
     memoryProvider: createMemoryProvider({
@@ -165,6 +182,18 @@ export async function startServer(port: number): Promise<number> {
     // `voice.stt_provider` pick from.
     ...(voiceConfig.ttsRoster ? { ttsRoster: voiceConfig.ttsRoster } : {}),
     ...(voiceConfig.sttRoster ? { sttRoster: voiceConfig.sttRoster } : {}),
+    // Realtime tier — the registry backs `voice.realtimeToken`; the roster and
+    // tier default are boot snapshots that live Settings config overrides.
+    realtimeProviderRegistry: realtimeProviders,
+    ...(voiceConfig.realtimeRoster ? { realtimeRoster: voiceConfig.realtimeRoster } : {}),
+    ...(voiceConfig.realtimeDefault ? { realtimeDefault: voiceConfig.realtimeDefault } : {}),
+    ...(voiceConfig.tier ? { voiceTier: voiceConfig.tier } : {}),
+    // The typed per-call cap, and the span writer realtime turns record into —
+    // both the same objects the `ethos serve` path passes.
+    ...(voiceConfig.realtimeSessionBudgetUsd !== undefined
+      ? { realtimeSessionBudgetUsd: voiceConfig.realtimeSessionBudgetUsd }
+      : {}),
+    ...(voiceStack ? { voiceSpans: voiceStack.spans } : {}),
     // Local-only voice-egress gate (`voice.trustedPlugins`); undefined = off.
     ...(voiceConfig.trustedVoicePlugins
       ? { trustedVoicePlugins: voiceConfig.trustedVoicePlugins }
@@ -179,6 +208,22 @@ export async function startServer(port: number): Promise<number> {
         { fetch: webApp.fetch, port: p, hostname: '127.0.0.1' },
         (info: AddressInfo) => {
           serverHandle = s;
+          // Talk-mode's streaming binary lane (`GET /voice/ws`). Unattached, the
+          // route answers and never upgrades, so browser talk-mode silently
+          // falls back to the batch RPC path — which is what the desktop has
+          // been doing since the lane shipped.
+          voiceSocket.attach(s);
+          voiceSocketHandle = voiceSocket;
+          // The wake-satellite lane (`GET /satellite/ws`). Without this the
+          // desktop would serve a satellite endpoint that never upgrades: the
+          // route answers, the socket never opens, and the in-process host
+          // across `satellite.ts` reconnects forever against its own backend.
+          // Both lanes register through the SHARED upgrade router, so the order
+          // of these two calls does not matter and neither can swallow the
+          // other's upgrade. Same calls `ethos serve` makes; see
+          // apps/ethos/src/commands/serve.ts.
+          satelliteSocket.attach(s);
+          satelliteSocketHandle = satelliteSocket;
           resolve(info.port);
         },
       );
@@ -205,8 +250,16 @@ export async function startServer(port: number): Promise<number> {
 export async function stopServer(): Promise<void> {
   if (!serverHandle) return;
   const s = serverHandle;
+  const voice = voiceSocketHandle;
+  const satellites = satelliteSocketHandle;
   serverHandle = null;
+  voiceSocketHandle = null;
+  satelliteSocketHandle = null;
   boundPort = null;
+  // Sockets first: `server.close()` waits on open connections, and both a
+  // talk-mode tab and a satellite hold their lane open indefinitely by design.
+  if (voice) await voice.close();
+  if (satellites) await satellites.close();
   await new Promise<void>((resolve) => s.close(() => resolve()));
 }
 

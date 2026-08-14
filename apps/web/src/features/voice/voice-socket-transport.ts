@@ -48,7 +48,13 @@ export interface VoiceSocketTransportOptions {
   cancelSchedule?: (handle: unknown) => void;
 }
 
-const DEFAULT_BACKOFF_MS = [250, 500, 1000, 2000, 5000];
+/**
+ * The one reconnect policy for a voice link, exported so the realtime tier's
+ * PROVIDER socket retries on the same shape rather than inventing a second one.
+ * This transport repeats the last entry forever; the provider socket walks the
+ * schedule once (see `realtime-voice-call-client.ts` for why it must stop).
+ */
+export const VOICE_RECONNECT_BACKOFF_MS = [250, 500, 1000, 2000, 5000];
 
 /** Build the lane URL for the current page (ws:// or wss:// to match the page). */
 export function voiceSocketUrl(location: { protocol: string; host: string }): string {
@@ -57,7 +63,7 @@ export function voiceSocketUrl(location: { protocol: string; host: string }): st
 }
 
 export function createVoiceSocketTransport(opts: VoiceSocketTransportOptions): VoiceTransport {
-  const backoff = opts.reconnectDelaysMs ?? DEFAULT_BACKOFF_MS;
+  const backoff = opts.reconnectDelaysMs ?? VOICE_RECONNECT_BACKOFF_MS;
   const schedule = opts.schedule ?? ((fn, ms) => setTimeout(fn, ms));
   const cancel = opts.cancelSchedule ?? ((handle) => clearTimeout(handle as never));
   const createSocket =

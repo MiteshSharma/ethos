@@ -30,6 +30,18 @@ export function createBrowserVoiceCapture(opts: {
   context: AudioContext;
   tuning?: Partial<VoiceTuning>;
   frameSamples?: number;
+  /**
+   * Emit EVERY captured frame and run no local endpointer.
+   *
+   * The realtime tier's provider owns VAD: it decides where an utterance starts
+   * and ends, and it needs an unbroken microphone stream to do that. Feeding it
+   * only the frames a local endpointer had already decided were speech would
+   * hand it a chopped signal and a second opinion it never asked for. On this
+   * path `setCaptureEnabled` / `setBargeInEnabled` are no-ops (there is no
+   * endpointer to gate) and mute still works, because mute is the user's
+   * decision rather than a detector's.
+   */
+  continuous?: boolean;
   /** Called after the mic is released — where the caller closes the context. */
   onDispose?: () => Promise<void>;
 }): VoiceCaptureIo {
@@ -53,16 +65,20 @@ export function createBrowserVoiceCapture(opts: {
         audio: { echoCancellation: true, noiseSuppression: true },
       });
       if (ctx.state === 'suspended') await ctx.resume().catch(() => {});
-      endpointer = new PcmEndpointer(sampleRate, opts.tuning ?? {});
+      endpointer = opts.continuous ? null : new PcmEndpointer(sampleRate, opts.tuning ?? {});
       source = ctx.createMediaStreamSource(stream);
       processor = ctx.createScriptProcessor(frameSamples, 1, 1);
       processor.onaudioprocess = (event) => {
-        if (!micEnabled || !endpointer) return;
+        if (!micEnabled) return;
         const input = event.inputBuffer.getChannelData(0);
         const pcm = new Int16Array(input.length);
         for (let i = 0; i < input.length; i++) {
           const clamped = Math.max(-1, Math.min(1, input[i] ?? 0));
           pcm[i] = clamped < 0 ? clamped * 32768 : clamped * 32767;
+        }
+        if (!endpointer) {
+          emit({ type: 'frame', data: pcm });
+          return;
         }
         for (const produced of endpointer.push(pcm)) emit(produced);
       };
@@ -134,6 +150,13 @@ export function playoutContextFrom(ctx: AudioContext): PlayoutContext {
     },
     createBuffer: (channels, frames, sampleRate) => ctx.createBuffer(channels, frames, sampleRate),
     createBufferSource: () => ctx.createBufferSource() as unknown as PlayoutSource,
+    createAnalyser: () => {
+      const analyser = ctx.createAnalyser();
+      // Same size the mic meter uses: enough bins for a voice envelope, small
+      // enough that reading it every animation frame costs nothing.
+      analyser.fftSize = 256;
+      return analyser;
+    },
     decodeAudioData: (data) => ctx.decodeAudioData(data),
     fillMono: (buffer, samples) => {
       (buffer as AudioBuffer).getChannelData(0).set(samples);

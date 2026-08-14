@@ -446,3 +446,376 @@ describe('parseConfigYaml — display.streaming_edits', () => {
     expect(roundTripped?.displayStreamingEdits).toBe('all');
   });
 });
+
+describe('parseConfigYaml — display.call_style / display.call_accent', () => {
+  const base = [
+    'provider: anthropic',
+    'model: claude-opus-4-7',
+    'apiKey: sk',
+    'personality: researcher',
+  ];
+
+  it('parses the three call treatments verbatim', async () => {
+    for (const style of ['liquid', 'orb', 'rings'] as const) {
+      const cfg = await loadYaml([...base, `display.call_style: ${style}`].join('\n'));
+      expect(cfg.displayCallStyle).toBe(style);
+    }
+  });
+
+  it('parses `personality` — the default, and the only non-pinning value', async () => {
+    const cfg = await loadYaml([...base, 'display.call_style: personality'].join('\n'));
+    expect(cfg.displayCallStyle).toBe('personality');
+  });
+
+  it('leaves both undefined when absent (personality applied by the surface)', async () => {
+    const cfg = await loadYaml(base.join('\n'));
+    expect(cfg.displayCallStyle).toBeUndefined();
+    expect(cfg.displayCallAccent).toBeUndefined();
+  });
+
+  it('omits an invalid treatment', async () => {
+    const cfg = await loadYaml([...base, 'display.call_style: sparkles'].join('\n'));
+    expect(cfg.displayCallStyle).toBeUndefined();
+  });
+
+  it('parses `personality` and a 6-digit hex, and drops anything else', async () => {
+    const personality = await loadYaml([...base, 'display.call_accent: personality'].join('\n'));
+    expect(personality.displayCallAccent).toBe('personality');
+
+    const hex = await loadYaml([...base, 'display.call_accent: "#4ADE80"'].join('\n'));
+    expect(hex.displayCallAccent).toBe('#4ADE80');
+
+    // A typo must not reach a canvas fillStyle — the surface falls back to the
+    // personality accent instead of painting the call an unreadable color.
+    for (const bad of ['red', '#GGGGGG', '#4ADE8']) {
+      const cfg = await loadYaml([...base, `display.call_accent: "${bad}"`].join('\n'));
+      expect(cfg.displayCallAccent).toBeUndefined();
+    }
+  });
+
+  it('round-trips through writeConfig and back', async () => {
+    const storage = new InMemoryStorage();
+    await storage.mkdir(ethosDir());
+    const original: EthosConfig = {
+      provider: 'anthropic',
+      model: 'claude-opus-4-7',
+      apiKey: 'sk',
+      personality: 'researcher',
+      displayCallStyle: 'orb',
+      displayCallAccent: '#E879F9',
+    };
+    await writeConfig(storage, original, new InMemorySecretsResolver());
+
+    const raw = await storage.read(join(ethosDir(), 'config.yaml'));
+    expect(raw).toContain('display.call_style: orb');
+    expect(raw).toContain('display.call_accent: #E879F9');
+
+    const roundTripped = await readRawConfig(storage);
+    expect(roundTripped?.displayCallStyle).toBe('orb');
+    expect(roundTripped?.displayCallAccent).toBe('#E879F9');
+  });
+});
+
+describe('parseConfigYaml — voice.channels / voice.transcode / voice.artifacts', () => {
+  const base = [
+    'provider: anthropic',
+    'model: claude-opus-4-7',
+    'apiKey: sk',
+    'personality: researcher',
+  ];
+
+  it('parses each new key to its typed value', async () => {
+    const cfg = await loadYaml(
+      [
+        ...base,
+        'voice.channels.telegram.ttsOut: true',
+        'voice.channels.slack.ttsOut: false',
+        'voice.transcode.ffmpegPath: /opt/homebrew/bin/ffmpeg',
+        'voice.transcode.bitrateKbps: 48',
+        'voice.transcode.timeout: 45',
+        'voice.artifacts.abandonAfterDays: 14',
+        'voice.artifacts.maxTotalMb: 1024',
+      ].join('\n'),
+    );
+    expect(cfg.voice?.channels).toEqual({
+      telegram: { ttsOut: true },
+      slack: { ttsOut: false },
+    });
+    expect(cfg.voice?.transcode).toEqual({
+      ffmpegPath: '/opt/homebrew/bin/ffmpeg',
+      bitrateKbps: 48,
+      timeout: 45,
+    });
+    expect(cfg.voice?.artifacts).toEqual({ abandonAfterDays: 14, maxTotalMb: 1024 });
+  });
+
+  it('leaves voice undefined for a config with no voice keys at all', async () => {
+    const cfg = await loadYaml(base.join('\n'));
+    expect(cfg.voice).toBeUndefined();
+  });
+
+  it('ignores an unknown platform id', async () => {
+    const cfg = await loadYaml(
+      [...base, 'voice.channels.matrix.ttsOut: true', 'voice.channels.discord.ttsOut: true'].join(
+        '\n',
+      ),
+    );
+    expect(cfg.voice?.channels).toEqual({ discord: { ttsOut: true } });
+  });
+
+  it('ignores a non-boolean ttsOut, leaving the section absent rather than throwing', async () => {
+    const cfg = await loadYaml([...base, 'voice.channels.slack.ttsOut: yes'].join('\n'));
+    expect(cfg.voice).toBeUndefined();
+    expect(cfg.apiKey).toBe('sk');
+  });
+
+  it('ignores out-of-range and non-numeric values, and still loads the rest', async () => {
+    const cfg = await loadYaml(
+      [
+        ...base,
+        'voice.transcode.bitrateKbps: 4',
+        'voice.transcode.timeout: 601',
+        'voice.artifacts.abandonAfterDays: soon',
+        'voice.artifacts.maxTotalMb: 512',
+      ].join('\n'),
+    );
+    expect(cfg.voice?.transcode).toBeUndefined();
+    expect(cfg.voice?.artifacts).toEqual({ maxTotalMb: 512 });
+    expect(cfg.personality).toBe('researcher');
+  });
+
+  it('round-trips through writeConfig and back', async () => {
+    const storage = new InMemoryStorage();
+    await storage.mkdir(ethosDir());
+    const voice: NonNullable<EthosConfig['voice']> = {
+      bots: [],
+      channels: { telegram: { ttsOut: true }, whatsapp: { ttsOut: false } },
+      transcode: { ffmpegPath: '/usr/bin/ffmpeg', bitrateKbps: 32, timeout: 30 },
+      artifacts: { abandonAfterDays: 7, maxTotalMb: 512 },
+    };
+    const original: EthosConfig = {
+      provider: 'anthropic',
+      model: 'claude-opus-4-7',
+      apiKey: 'sk',
+      personality: 'researcher',
+      voice,
+    };
+    await writeConfig(storage, original, new InMemorySecretsResolver());
+
+    const raw = await storage.read(join(ethosDir(), 'config.yaml'));
+    expect(raw).toContain('voice.channels.telegram.ttsOut: true');
+    expect(raw).toContain('voice.channels.whatsapp.ttsOut: false');
+    expect(raw).toContain('voice.transcode.ffmpegPath: /usr/bin/ffmpeg');
+    expect(raw).toContain('voice.transcode.bitrateKbps: 32');
+    expect(raw).toContain('voice.transcode.timeout: 30');
+    expect(raw).toContain('voice.artifacts.abandonAfterDays: 7');
+    expect(raw).toContain('voice.artifacts.maxTotalMb: 512');
+
+    const roundTripped = await readRawConfig(storage);
+    expect(roundTripped?.voice).toEqual(voice);
+  });
+});
+
+describe('parseConfigYaml — voice.wake', () => {
+  const base = [
+    'provider: anthropic',
+    'model: claude-opus-4-7',
+    'apiKey: sk',
+    'personality: researcher',
+  ];
+
+  it('parses every wake key to its typed value', async () => {
+    const cfg = await loadYaml(
+      [
+        ...base,
+        'voice.wake.enabled: true',
+        'voice.wake.engine: fallback',
+        'voice.wake.sensitivity: 0.6',
+        'voice.wake.confirmationFrames: 2',
+        'voice.wake.edgeStt: false',
+        'voice.wake.idleTimeout: 30',
+        'voice.wake.routes.eng.phrase: hey engineer',
+        'voice.wake.routes.eng.personality: engineer',
+        'voice.wake.routes.eng.privileged: true',
+        'voice.wake.routes.eng.enabled: false',
+        'voice.wake.nodes.desk.inputDevice: MacBook Pro Microphone',
+        'voice.wake.nodes.desk.enabled: false',
+      ].join('\n'),
+    );
+    expect(cfg.voice?.wake).toEqual({
+      enabled: true,
+      engine: 'fallback',
+      sensitivity: 0.6,
+      confirmationFrames: 2,
+      edgeStt: false,
+      idleTimeout: 30,
+      routes: {
+        eng: { phrase: 'hey engineer', personality: 'engineer', privileged: true, enabled: false },
+      },
+      nodes: { desk: { inputDevice: 'MacBook Pro Microphone', enabled: false } },
+    });
+  });
+
+  it('leaves privileged and enabled ABSENT when not written', async () => {
+    const cfg = await loadYaml(
+      [
+        ...base,
+        'voice.wake.routes.eng.phrase: hey engineer',
+        'voice.wake.routes.eng.personality: engineer',
+        'voice.wake.nodes.desk.inputDevice: Built-in',
+      ].join('\n'),
+    );
+    const route = cfg.voice?.wake?.routes?.eng;
+    expect(route).toEqual({ phrase: 'hey engineer', personality: 'engineer' });
+    expect('privileged' in (route ?? {})).toBe(false);
+    expect('enabled' in (route ?? {})).toBe(false);
+    expect(cfg.voice?.wake?.nodes?.desk).toEqual({ inputDevice: 'Built-in' });
+  });
+
+  it('drops a route missing personality, keeping a complete sibling', async () => {
+    const cfg = await loadYaml(
+      [
+        ...base,
+        'voice.wake.routes.broken.phrase: hey nobody',
+        'voice.wake.routes.trader.phrase: hey swing trader',
+        'voice.wake.routes.trader.personality: trader',
+      ].join('\n'),
+    );
+    expect(cfg.voice?.wake?.routes).toEqual({
+      trader: { phrase: 'hey swing trader', personality: 'trader' },
+    });
+  });
+
+  it('drops a route missing phrase', async () => {
+    const cfg = await loadYaml(
+      [...base, 'voice.wake.routes.eng.personality: engineer', 'voice.wake.enabled: true'].join(
+        '\n',
+      ),
+    );
+    expect(cfg.voice?.wake).toEqual({ enabled: true });
+  });
+
+  it('drops a route whose id is outside the identifier charset', async () => {
+    const cfg = await loadYaml(
+      [
+        ...base,
+        'voice.wake.routes.bad id.phrase: hey engineer',
+        'voice.wake.routes.bad id.personality: engineer',
+        'voice.wake.routes.good.phrase: hey trader',
+        'voice.wake.routes.good.personality: trader',
+      ].join('\n'),
+    );
+    expect(cfg.voice?.wake?.routes).toEqual({
+      good: { phrase: 'hey trader', personality: 'trader' },
+    });
+  });
+
+  it('drops a node whose id is outside the identifier charset', async () => {
+    const cfg = await loadYaml(
+      [
+        ...base,
+        'voice.wake.nodes.bad id.inputDevice: Mic',
+        'voice.wake.nodes.pi.inputDevice: ReSpeaker',
+      ].join('\n'),
+    );
+    expect(cfg.voice?.wake?.nodes).toEqual({ pi: { inputDevice: 'ReSpeaker' } });
+  });
+
+  it('ignores out-of-bounds numbers while the rest of the wake block still loads', async () => {
+    const cfg = await loadYaml(
+      [
+        ...base,
+        'voice.wake.sensitivity: 1.5',
+        'voice.wake.confirmationFrames: 0',
+        'voice.wake.idleTimeout: 2',
+        'voice.wake.engine: sherpa',
+        'voice.wake.edgeStt: true',
+      ].join('\n'),
+    );
+    expect(cfg.voice?.wake).toEqual({ engine: 'sherpa', edgeStt: true });
+    expect(cfg.personality).toBe('researcher');
+  });
+
+  it('accepts the inclusive bounds', async () => {
+    const cfg = await loadYaml(
+      [
+        ...base,
+        'voice.wake.sensitivity: 1',
+        'voice.wake.confirmationFrames: 10',
+        'voice.wake.idleTimeout: 600',
+      ].join('\n'),
+    );
+    expect(cfg.voice?.wake).toEqual({
+      sensitivity: 1,
+      confirmationFrames: 10,
+      idleTimeout: 600,
+    });
+  });
+
+  it('ignores an unknown engine value', async () => {
+    const cfg = await loadYaml(
+      [...base, 'voice.wake.engine: porcupine', 'voice.wake.enabled: true'].join('\n'),
+    );
+    expect(cfg.voice?.wake).toEqual({ enabled: true });
+  });
+
+  it('leaves voice undefined for a config with no voice keys at all', async () => {
+    const cfg = await loadYaml(base.join('\n'));
+    expect(cfg.voice).toBeUndefined();
+  });
+
+  it('produces a voice section from wake keys alone', async () => {
+    const cfg = await loadYaml([...base, 'voice.wake.enabled: false'].join('\n'));
+    expect(cfg.voice).toEqual({ bots: [], wake: { enabled: false } });
+  });
+
+  it('round-trips two routes and two nodes through writeConfig and back', async () => {
+    const storage = new InMemoryStorage();
+    await storage.mkdir(ethosDir());
+    const voice: NonNullable<EthosConfig['voice']> = {
+      bots: [],
+      wake: {
+        enabled: true,
+        engine: 'openwakeword',
+        sensitivity: 0.75,
+        confirmationFrames: 3,
+        edgeStt: true,
+        idleTimeout: 45,
+        routes: {
+          eng: {
+            phrase: 'hey engineer',
+            personality: 'engineer',
+            privileged: true,
+          },
+          trader: { phrase: 'hey swing trader', personality: 'trader', enabled: false },
+        },
+        nodes: {
+          desk: { inputDevice: 'MacBook Pro Microphone', enabled: true },
+          kitchen: { inputDevice: 'ReSpeaker 4-Mic Array' },
+        },
+      },
+    };
+    const original: EthosConfig = {
+      provider: 'anthropic',
+      model: 'claude-opus-4-7',
+      apiKey: 'sk',
+      personality: 'researcher',
+      voice,
+    };
+    await writeConfig(storage, original, new InMemorySecretsResolver());
+
+    const raw = await storage.read(join(ethosDir(), 'config.yaml'));
+    expect(raw).toContain('voice.wake.engine: openwakeword');
+    expect(raw).toContain('voice.wake.sensitivity: 0.75');
+    expect(raw).toContain('voice.wake.confirmationFrames: 3');
+    expect(raw).toContain('voice.wake.edgeStt: true');
+    expect(raw).toContain('voice.wake.idleTimeout: 45');
+    expect(raw).toContain('voice.wake.routes.eng.phrase: hey engineer');
+    expect(raw).toContain('voice.wake.routes.eng.privileged: true');
+    expect(raw).toContain('voice.wake.routes.trader.enabled: false');
+    expect(raw).toContain('voice.wake.nodes.kitchen.inputDevice: ReSpeaker 4-Mic Array');
+
+    const roundTripped = await readRawConfig(storage);
+    expect(roundTripped?.voice).toEqual(voice);
+  });
+});

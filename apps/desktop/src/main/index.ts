@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { FsStorage } from '@ethosagent/storage-fs';
 import { WebTokenRepository } from '@ethosagent/web-api';
 import { app, BrowserWindow, nativeTheme, session, type Tray } from 'electron';
+import type { SatelliteStatus } from '../shared/ipc-contract';
 import { initAutoUpdater } from './auto-update';
 import { restartBackendAsync, startBackend, startBackendAsync, stopBackend } from './backend';
 import { showErrorWindow } from './error-window';
@@ -13,9 +14,10 @@ import { showMinimizeNotification } from './notifications';
 import { registerProtocolHandler } from './protocol-handler';
 import { registerQuickChatIpc, showQuickChat } from './quick-chat-window';
 import { syncRemoteAuth } from './remote-auth';
+import { onSatelliteStatus, setWakeEnabled, startSatellite, stopSatellite } from './satellite';
 import { isBackgroundMode, logBackgroundStartup } from './startup-mode';
 import { store } from './store';
-import { createTray, destroyTray } from './tray';
+import { createTray, destroyTray, setTrayState, setWakeTray, type TrayState } from './tray';
 
 let mainWindow: BrowserWindow | null = null;
 let trayInstance: Tray | null = null;
@@ -87,6 +89,38 @@ async function startBackendWithRetry(port: number): Promise<number> {
   }
 }
 
+/** Toggle wake from the tray. The host persists before it restarts anything. */
+function toggleWake(enabled: boolean): void {
+  setWakeEnabled(enabled).catch((err: unknown) => {
+    console.error('[ethos] failed to toggle wake:', err);
+  });
+}
+
+/**
+ * What the menu bar shows for a satellite status.
+ *
+ * A host that is not RUNNING leaves the tray at `idle` rather than painting an
+ * error glyph: on every desktop without a microphone binding the satellite is
+ * permanently degraded, and a red icon in the menu bar for a feature the user
+ * never turned on is noise, not information. The diagnosis lives in the tooltip
+ * and in Settings → Voice, which is where someone looking for it will look.
+ */
+function trayStateForSatellite(status: SatelliteStatus): TrayState {
+  if (status.state !== 'running') return 'idle';
+  switch (status.capture) {
+    case 'listening':
+    case 'idle':
+    case 'capturing':
+      return 'listening';
+    case 'thinking':
+      return 'thinking';
+    case 'speaking':
+      return 'botActive';
+    default:
+      return 'muted';
+  }
+}
+
 function activateDesktop(): void {
   if (desktopActivated) return;
   desktopActivated = true;
@@ -95,6 +129,40 @@ function activateDesktop(): void {
     startBackend(3001);
   }
   trayInstance = createTray(() => mainWindow, createWindow);
+  // Seeded from the PERSISTED switch before the host has published anything, so
+  // the tooltip cannot claim "listening" for the moment between tray creation
+  // and the first status — the honesty criterion applies to that moment too.
+  setWakeTray({ wakeEnabled: store.get('wakeEnabled', true), phrases: [] }, toggleWake);
+
+  onSatelliteStatus((status) => {
+    const tray = trayInstance;
+    if (tray && !tray.isDestroyed()) {
+      setTrayState(tray, trayStateForSatellite(status));
+    }
+    setWakeTray(
+      {
+        wakeEnabled: status.wakeEnabled,
+        phrases: status.phrases,
+        // A reason is only a "not listening" reason when the host is not
+        // listening; a degraded transition the machine recovered from is not.
+        ...(status.state === 'running' || status.reason === undefined
+          ? {}
+          : { detail: status.reason }),
+      },
+      toggleWake,
+    );
+    const win = mainWindow;
+    if (win && !win.isDestroyed()) {
+      win.webContents.send('satellite:stateChanged', status);
+    }
+  });
+
+  startSatellite().catch((err: unknown) => {
+    // startSatellite never rejects; this is the last line of the "must not
+    // crash the app" guarantee rather than an expected path.
+    console.error('[ethos] satellite host failed to start:', err);
+  });
+
   if (mainWindow && !mainWindow.isDestroyed()) {
     registerGlobalShortcuts(mainWindow, showQuickChat);
   }
@@ -273,6 +341,7 @@ app.on('window-all-closed', () => {
 
 app.on('before-quit', () => {
   isQuitting = true;
+  void stopSatellite();
   stopBackend();
   unregisterGlobalShortcuts();
   destroyTray();

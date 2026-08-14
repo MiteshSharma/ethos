@@ -13,8 +13,13 @@ export {
   turnLatenciesFromSpans,
   VOICE_LATENCY_BUDGET_MS,
   VOICE_LATENCY_STAGES,
+  VOICE_REALTIME_LATENCY_BUDGET_MS,
+  VOICE_REALTIME_LATENCY_STAGES,
   type VoiceLatencyReport,
   type VoiceLatencyStage,
+  type VoiceLatencyTier,
+  type VoicePipelineLatencyStage,
+  type VoiceRealtimeLatencyStage,
   type VoiceTurnLatency,
 } from './latency-budget';
 export {
@@ -25,6 +30,7 @@ export {
 export {
   BufferedVoiceSpanWriter,
   type BufferedVoiceSpanWriterOptions,
+  type VoiceSpanRecorder,
   type VoiceSpanSink,
   type VoiceSpanStage,
   type VoiceTurnSpan,
@@ -37,6 +43,7 @@ export type {
   VoiceSessionEvent,
   VoiceSessionState,
 } from './types';
+export { DEFAULT_VOICE_FILLER_TEXT } from './types';
 export { EnergyVad, type EnergyVadConfig, rmsEnergy } from './vad';
 export { VoiceSession, type VoiceSessionDeps } from './voice-session';
 export { encodeWav } from './wav';

@@ -7,6 +7,7 @@ import {
   type CardBlock,
   type ChatState,
   initialChatState,
+  parseUserContent,
   type TextBlock,
   type ToolBlock,
 } from '../chat-reducer';
@@ -15,6 +16,22 @@ import {
 // load-bearing logic in `useChat`; everything else is plumbing.
 
 const NOW = 1000;
+
+// Voice-origin fixtures, copied VERBATIM from the producer's template —
+// `buildVoiceOriginAnnotation` in `packages/core/src/voice-origin.ts`. The
+// producer's own tests
+// (`packages/core/src/__tests__/voice-origin-annotation.test.ts`,
+// "shape the web consumer strips") pin that these stay the shape this file
+// assumes, so the two halves cannot drift apart silently.
+const SPOKEN_INSTRUCTION =
+  'The text below is a transcript: this turn was SPOKEN, and the reply will be read ' +
+  'aloud. Answer in a spoken register — short sentences, no markdown, no tables, no ' +
+  'code blocks, no raw URLs or file paths.';
+const MINIMAL_ANNOTATION = `<voice-origin transport="browser-talk-mode" speaker="owner" />\n${SPOKEN_INSTRUCTION}`;
+const FULL_ANNOTATION = `<voice-origin transport="telegram-voice-note" speaker="owner" stt="local-stt" language="en-US" />\n${SPOKEN_INSTRUCTION}`;
+const FAR_END_ANNOTATION =
+  `<voice-origin transport="sip-inbound" speaker="far_end" />\n${SPOKEN_INSTRUCTION}` +
+  ' The speaker is a far-end caller, not the owner — their voice cannot authorize anything.';
 
 function storedMsg(over: Partial<StoredMessage> & { role: StoredMessage['role'] }): StoredMessage {
   return {
@@ -448,6 +465,41 @@ describe('applyAction — UI/lifecycle transitions', () => {
     }
   });
 
+  // The transcript never overwrites the audio marker: a spoken turn keeps the
+  // fact that it was SPOKEN next to the words it was transcribed into, so the
+  // bubble can show both. A typed turn carries no marker at all — the field is
+  // absent, not `'text'`, so nothing renders for the ordinary case.
+  it('submit-user-message carries a voice origin through to the bubble', () => {
+    const s = applyAction(initialChatState, {
+      type: 'submit-user-message',
+      id: 'u3',
+      text: 'remind me to call the dentist',
+      timestamp: 3,
+      origin: 'voice',
+    });
+    expect(s.messages).toEqual([
+      {
+        id: 'u3',
+        role: 'user',
+        content: 'remind me to call the dentist',
+        timestamp: 3,
+        origin: 'voice',
+      },
+    ]);
+  });
+
+  it('a typed turn carries no origin', () => {
+    const s = applyAction(initialChatState, {
+      type: 'submit-user-message',
+      id: 'u4',
+      text: 'remind me to call the dentist',
+      timestamp: 4,
+    });
+    const msg = s.messages[0];
+    expect(msg?.role).toBe('user');
+    if (msg?.role === 'user') expect(msg.origin).toBeUndefined();
+  });
+
   it('history-loaded interleaves assistant rows + tool_result rows into one turn', () => {
     const stored: StoredMessage[] = [
       storedMsg({
@@ -518,6 +570,92 @@ describe('applyAction — UI/lifecycle transitions', () => {
     ];
     const s = applyAction(initialChatState, { type: 'history-loaded', messages: stored });
     expect(s.messages).toEqual([]);
+  });
+
+  // A reloaded spoken turn has to render IDENTICALLY to the optimistic one:
+  // the transcript alone in the bubble, with the `voice` marker above it. The
+  // agent loop bakes the voice-origin annotation into the stored `content`, so
+  // history replay used to put that whole XML-plus-instructions block in the
+  // bubble as if the user had typed it — and lose the marker at the same time.
+  it('history-loaded strips the voice-origin annotation and recovers the marker', () => {
+    const stored: StoredMessage[] = [
+      storedMsg({
+        id: 'u-voice',
+        role: 'user',
+        content: `${MINIMAL_ANNOTATION}\n\nremind me to call the dentist`,
+        timestamp: new Date(1).toISOString(),
+      }),
+    ];
+    const s = applyAction(initialChatState, { type: 'history-loaded', messages: stored });
+    expect(s.messages).toEqual([
+      {
+        id: 'u-voice',
+        role: 'user',
+        content: 'remind me to call the dentist',
+        timestamp: 1,
+        origin: 'voice',
+      },
+    ]);
+  });
+
+  it('a second question keeps the partial answer, marked [interrupted]', () => {
+    // Talk-mode barge-in: Q1 → the answer starts streaming → the user speaks
+    // again, which reaches this reducer as an ordinary send. The partial answer
+    // used to be DISCARDED here, so the two questions closed up next to each
+    // other and text the user had already read vanished.
+    let s = applyAction(initialChatState, {
+      type: 'submit-user-message',
+      id: 'u1',
+      text: 'tell me a story',
+      timestamp: 1,
+    });
+    s = applyEvent(s, { type: 'text_delta', text: 'Once upon a time' }, NOW);
+    s = applyAction(s, {
+      type: 'submit-user-message',
+      id: 'u2',
+      text: 'actually never mind',
+      timestamp: 2,
+    });
+
+    expect(s.messages.map((m) => m.role)).toEqual(['user', 'assistant', 'user']);
+    const kept = s.messages[1] as AssistantTurn;
+    expect(kept.blocks).toEqual([{ kind: 'text', content: 'Once upon a time [interrupted]' }]);
+    expect(s.currentTurn).toBeNull();
+  });
+
+  it('marks a turn cut off mid-tool-call, which has no sentence to mark', () => {
+    let s = applyEvent(
+      initialChatState,
+      { type: 'tool_start', toolCallId: 'tc1', toolName: 'read_file', args: {} },
+      NOW,
+    );
+    s = applyAction(s, { type: 'submit-user-message', id: 'u1', text: 'stop', timestamp: 1 });
+    const kept = s.messages[0] as AssistantTurn;
+    expect(kept.blocks.map((b) => b.kind)).toEqual(['tool', 'text']);
+    expect((kept.blocks[1] as TextBlock).content).toBe('[interrupted]');
+  });
+
+  it('keeps nothing when no answer had started', () => {
+    const s = applyAction(initialChatState, {
+      type: 'submit-user-message',
+      id: 'u1',
+      text: 'hi',
+      timestamp: 1,
+    });
+    expect(s.messages).toHaveLength(1);
+  });
+
+  it('a late done does not append the turn a second time', () => {
+    let s = applyAction(initialChatState, {
+      type: 'submit-user-message',
+      id: 'u1',
+      text: 'q1',
+      timestamp: 1,
+    });
+    s = applyEvent(s, { type: 'text_delta', text: 'partial' }, NOW);
+    s = applyAction(s, { type: 'submit-user-message', id: 'u2', text: 'q2', timestamp: 2 });
+    s = applyEvent(s, { type: 'done', text: 'partial', turnCount: 1 }, NOW);
+    expect(s.messages.map((m) => m.role)).toEqual(['user', 'assistant', 'user']);
   });
 
   it('send-failed drops the optimistic user message and surfaces the error', () => {
@@ -672,5 +810,62 @@ describe('typed UI cards', () => {
     );
     s = applyEvent(s, { type: 'done', text: '', turnCount: 1 }, NOW);
     expect(s.messages).toHaveLength(1);
+  });
+});
+
+// The agent loop bakes annotations into the stored user message, because the
+// model needs them. The bubble does not: it needs the words the user said, plus
+// the separate fact that they SAID them. parseUserContent is that split.
+describe('parseUserContent', () => {
+  it('strips a minimal annotation and reports the turn as spoken', () => {
+    expect(parseUserContent(`${MINIMAL_ANNOTATION}\n\nwhat is on my calendar`)).toEqual({
+      text: 'what is on my calendar',
+      origin: 'voice',
+    });
+  });
+
+  it('strips one carrying stt and language attributes', () => {
+    expect(parseUserContent(`${FULL_ANNOTATION}\n\nwhat is on my calendar`)).toEqual({
+      text: 'what is on my calendar',
+      origin: 'voice',
+    });
+  });
+
+  it('strips the far_end variant, whose instruction line runs longer', () => {
+    expect(parseUserContent(`${FAR_END_ANNOTATION}\n\ntransfer me to billing`)).toEqual({
+      text: 'transfer me to billing',
+      origin: 'voice',
+    });
+  });
+
+  it('returns plain typed text byte-identical, with no origin', () => {
+    const typed = 'ship it\n\n  and then tell me   what broke\n';
+    expect(parseUserContent(typed)).toEqual({ text: typed });
+  });
+
+  // Prose is not plumbing. Someone asking ABOUT the annotation keeps their
+  // words, and does not get a phantom `voice` marker on a turn they typed.
+  it('leaves a mention of the tag in prose alone', () => {
+    const asking = `why does <voice-origin transport="x"> show up in my chat log?`;
+    expect(parseUserContent(asking)).toEqual({ text: asking });
+  });
+
+  it('leaves a well-formed tag alone when it is not at a block boundary', () => {
+    const midline = `look at this: ${MINIMAL_ANNOTATION}\n\nweird right`;
+    expect(parseUserContent(midline)).toEqual({ text: midline });
+  });
+
+  // Deliberate scope boundary: the <attachments> annotation leaks the same way,
+  // but it is W3.2's contract, not this change's.
+  it('preserves an <attachments> block', () => {
+    const stored = `<attachments>\n  <file ref="shot-1" mime="image/png" />\n</attachments>\n\n${MINIMAL_ANNOTATION}\n\nwhat is this`;
+    expect(parseUserContent(stored)).toEqual({
+      text: '<attachments>\n  <file ref="shot-1" mime="image/png" />\n</attachments>\n\nwhat is this',
+      origin: 'voice',
+    });
+  });
+
+  it('handles an annotation with no text after it', () => {
+    expect(parseUserContent(MINIMAL_ANNOTATION)).toEqual({ text: '', origin: 'voice' });
   });
 });

@@ -90,6 +90,7 @@ export const globalShortcut = electron.globalShortcut;
 export const Notification = electron.Notification;
 export const session = electron.session;
 export const nativeTheme = electron.nativeTheme;
+export const systemPreferences = electron.systemPreferences;
 export const shell = electron.shell;
 export const dialog = electron.dialog;
 export const screen = electron.screen;

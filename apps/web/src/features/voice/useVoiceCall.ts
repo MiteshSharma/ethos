@@ -1,7 +1,10 @@
 import { useCallback, useEffect, useReducer, useRef, useState } from 'react';
+import { watchReducedMotion } from '../../lib/reduced-motion';
+import { createMicMeter } from './mic-meter';
 import { createUnwiredVoiceCallClient, type VoiceCallClient } from './voice-call-client';
 import {
   initialVoiceCallState,
+  isTerminalClientEvent,
   type VoiceCallStatus,
   type VoiceDegradedNotice,
   type VoiceTranscriptLine,
@@ -12,14 +15,25 @@ import { classifyVoiceStartError } from './voice-start-error';
 // Drives a `VoiceCallClient` through the pure `voiceCallReducer` and owns the
 // browser-only concerns the reducer deliberately excludes: the mic level meter
 // (same AudioContext/analyser pattern as `useVoiceRecorder`) and mute state.
-// The client is injected so the UI works against the fake in tests and the real
-// `livekit-client` binding in production.
+// The client is injected so the UI works against the fake in tests and against
+// `createTalkModeClient` (realtime or pipeline tier) in production.
 
 const METER_BARS = 32;
 
+/** What the hook hands a client factory so the client can report back. */
+export interface VoiceCallClientHooks {
+  /**
+   * Which tier this call settled on. The TRANSPORT decides — realtime only runs
+   * when a token was actually minted AND the provider socket actually opened —
+   * so the reducer is told rather than asked, and the strip's tier label can
+   * never claim a tier that did not run.
+   */
+  onTier(tier: 'pipeline' | 'realtime'): void;
+}
+
 export interface UseVoiceCallOptions {
   /** Factory for the live-call client. Defaults to the unwired placeholder. */
-  createClient?: () => VoiceCallClient;
+  createClient?: (hooks: VoiceCallClientHooks) => VoiceCallClient;
 }
 
 /**
@@ -41,15 +55,41 @@ export interface UseVoiceCall {
   transcript: VoiceTranscriptLine[];
   /** Rolling mic-level history (0..1) for the speaking indicator. */
   micLevels: number[];
+  /**
+   * The agent's own smoothed output level (0..1), READ per animation frame by
+   * the Call Stage's canvas.
+   *
+   * A getter rather than a value on purpose. `micLevels` is state because the
+   * strip's bars are React-rendered; the overlay draws itself, so publishing a
+   * number 60 times a second through `useState` would re-render the whole Chat
+   * page per frame for a canvas that never reads props. Stable identity, so it
+   * can sit in an effect's dependency list without restarting the loop.
+   */
+  agentLevel: () => number;
   muted: boolean;
   error: string | null;
   /** Voice fell back to text. Null until it does, or once dismissed. */
   degraded: VoiceDegradedNotice | null;
+  /** Voice works, but not on the configured tier. Null until it happens. */
+  notice: string | null;
+  /** The sign-off spoken when the call hit its spending limit. Null otherwise. */
+  windDown: string | null;
+  /** Which tier is serving this call. Null until the transport decides. */
+  tier: 'pipeline' | 'realtime' | null;
   /** The browser refused the mic — render guidance, not a dead icon. */
   micDenied: boolean;
   sttProvider: string | null;
   ttsProvider: string | null;
   latency: VoiceTurnLatency;
+  /**
+   * Speak a question through the live call and return the answer the user
+   * speaks — what makes the `clarify` tool voice-native.
+   *
+   * Resolves null when there is no call, when the serving tier cannot speak, or
+   * when `signal` aborts. All three mean the same thing to the caller: keep the
+   * on-screen affordance, because nothing was asked out loud.
+   */
+  ask: (question: string, signal: AbortSignal) => Promise<string | null>;
   start: () => void;
   hangUp: () => void;
   toggleMute: () => void;
@@ -75,19 +115,28 @@ export function useVoiceCall(options: UseVoiceCallOptions = {}): UseVoiceCall {
   const clientRef = useRef<VoiceCallClient | null>(null);
   const unsubscribeRef = useRef<(() => void) | null>(null);
   const audioCtxRef = useRef<AudioContext | null>(null);
-  const analyserRef = useRef<AnalyserNode | null>(null);
-  const rafRef = useRef<number | null>(null);
+  const stopMeterRef = useRef<(() => void) | null>(null);
+  /**
+   * The OS reduced-motion preference, kept in a ref because the meter loop
+   * reads it per frame and must not re-subscribe (or re-render) to notice a
+   * change. Subscribed once for the life of the hook, not per call.
+   */
+  const reducedMotionRef = useRef(false);
+  useEffect(
+    () =>
+      watchReducedMotion((reduced) => {
+        reducedMotionRef.current = reduced;
+      }),
+    [],
+  );
 
   const teardownMeter = useCallback(() => {
-    if (rafRef.current !== null) {
-      cancelAnimationFrame(rafRef.current);
-      rafRef.current = null;
-    }
+    stopMeterRef.current?.();
+    stopMeterRef.current = null;
     if (audioCtxRef.current) {
       void audioCtxRef.current.close().catch(() => {});
       audioCtxRef.current = null;
     }
-    analyserRef.current = null;
     setMicLevels(flatLevels());
   }, []);
 
@@ -110,25 +159,18 @@ export function useVoiceCall(options: UseVoiceCallOptions = {}): UseVoiceCall {
     const analyser = audioCtx.createAnalyser();
     analyser.fftSize = 64;
     source.connect(analyser);
-    analyserRef.current = analyser;
 
-    const tick = () => {
-      const a = analyserRef.current;
-      if (a) {
-        const data = new Uint8Array(a.frequencyBinCount);
-        a.getByteFrequencyData(data);
-        let sum = 0;
-        for (let i = 0; i < data.length; i++) sum += data[i] ?? 0;
-        const avg = Math.min(1, sum / data.length / 160);
-        setMicLevels((prev) => {
-          const next = prev.slice(1);
-          next.push(avg);
-          return next;
-        });
-      }
-      rafRef.current = requestAnimationFrame(tick);
-    };
-    rafRef.current = requestAnimationFrame(tick);
+    // The loop lives in `mic-meter.ts` — including the reduced-motion freeze,
+    // which CSS structurally cannot deliver for bars that are redrawn from JS
+    // every frame.
+    stopMeterRef.current = createMicMeter({
+      analyser,
+      bars: METER_BARS,
+      onLevels: setMicLevels,
+      reducedMotion: () => reducedMotionRef.current,
+      requestFrame: (cb) => requestAnimationFrame(cb),
+      cancelFrame: (handle) => cancelAnimationFrame(handle),
+    });
   }, []);
 
   /**
@@ -167,14 +209,19 @@ export function useVoiceCall(options: UseVoiceCallOptions = {}): UseVoiceCall {
     if (state.status !== 'idle' && state.status !== 'ended') return;
     dispatch({ type: 'start' });
 
-    const client = createClient();
+    const client = createClient({ onTier: (tier) => dispatch({ type: 'tier', tier }) });
     clientRef.current = client;
     setLatency(NO_LATENCY);
     turnMarks.current = null;
     unsubscribeRef.current = client.on((event) => {
       dispatch({ type: 'client-event', event });
       markLatency(event.type);
-      if (event.type === 'disconnected') teardown();
+      // EVERY route to a terminal state releases the mic, not just the
+      // transport-level one. A degrade or a refused mic ends the call in the
+      // reducer, and a call that has visibly ended must not still be capturing:
+      // the dispatch above is already queued, so tearing down here drops the
+      // capture path without touching the notice the strip is about to render.
+      if (isTerminalClientEvent(event)) teardown();
     });
 
     client
@@ -217,17 +264,35 @@ export function useVoiceCall(options: UseVoiceCallOptions = {}): UseVoiceCall {
 
   const dismissNotice = useCallback(() => dispatch({ type: 'dismiss-notice' }), []);
 
+  // Read through the ref for the same reason `agentLevel` does — and because
+  // that ref is null unless a call is actually up, which is what makes "no
+  // call" resolve null without the caller having to check first.
+  const ask = useCallback(
+    (question: string, signal: AbortSignal): Promise<string | null> =>
+      clientRef.current?.ask?.(question, signal) ?? Promise.resolve(null),
+    [],
+  );
+
+  // Read through the ref, so a hung-up call reads zero rather than whatever the
+  // last graph was holding.
+  const agentLevel = useCallback(() => clientRef.current?.outputLevel?.() ?? 0, []);
+
   return {
     status: state.status,
     transcript: state.transcript,
     micLevels,
+    agentLevel,
     muted,
     error: state.error,
     degraded: state.degraded,
+    notice: state.notice,
+    windDown: state.windDown,
+    tier: state.tier,
     micDenied: state.micDenied,
     sttProvider: state.sttProvider,
     ttsProvider: state.ttsProvider,
     latency,
+    ask,
     start,
     hangUp,
     toggleMute,

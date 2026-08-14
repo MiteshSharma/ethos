@@ -1030,6 +1030,27 @@ describe('AgentLoop', () => {
       await collect(loop.run('hi', { sessionKey: sk }));
       expect(loop.getSessionCost(sk)).toBeCloseTo(0.0002);
     });
+
+    it('addSessionCost() folds spend incurred outside a turn into the same total', async () => {
+      // The realtime voice tier: audio billed by wall-clock minute on a socket
+      // the browser holds, on the same lane key `agent_consult` runs turns on.
+      const loop = new AgentLoop({ llm: makeMockLLM(['ok']), safety: createTestSafety() });
+      const sk = 'voice:web:browser:chat-9';
+
+      loop.addSessionCost(sk, 0.15);
+      expect(loop.getSessionCost(sk)).toBeCloseTo(0.15);
+
+      await collect(loop.run('hi', { sessionKey: sk }));
+      expect(loop.getSessionCost(sk)).toBeCloseTo(0.1501);
+
+      // A budget that can be moved backwards is not a budget.
+      loop.addSessionCost(sk, -1);
+      loop.addSessionCost(sk, Number.NaN);
+      expect(loop.getSessionCost(sk)).toBeCloseTo(0.1501);
+
+      loop.resetSessionCost(sk);
+      expect(loop.getSessionCost(sk)).toBe(0);
+    });
   });
 
   describe('history replay tool_use/tool_result pairing', () => {

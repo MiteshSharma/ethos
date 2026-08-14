@@ -130,14 +130,66 @@ export interface OutboundPolicyConfig {
 }
 
 /**
- * How a personality SOUNDS. The sanctioned exception to the "no voice/speech
- * fields on PersonalityConfig" rule (voice V1a, eng-review D2): a deployment
- * chooses the voice PROVIDER, the personality chooses its own voice, the same
- * way it chooses its own model. Everything that is a deployment or per-channel
- * concern stays out — voice modes, VAD tuning, per-adapter affordances, and
- * wake routes all remain gateway/config-owned.
+ * How a personality's call LOOKS (DESIGN.md § "Call Stage"). Three treatments,
+ * all driven by the same amplitude signal — only the shape differs.
+ */
+export type CallTreatment = 'liquid' | 'orb' | 'rings';
+
+/** The treatments in a fixed order. The derivation below indexes into this. */
+export const CALL_TREATMENTS: readonly CallTreatment[] = ['liquid', 'orb', 'rings'];
+
+/**
+ * The treatment a personality gets when nobody picked one.
  *
- * Absent = inherit the global `auxiliary.asr.*` / `auxiliary.tts.*` defaults.
+ * Content-addressed on the id, so the same personality draws the same shape on
+ * every machine and across restarts — a look that is part of who it is, not an
+ * accident of insertion order or a random seed. Deliberately the same hash
+ * `accentFor` in `@ethosagent/design-tokens` uses for the accent: one
+ * derivation shape for "identity → look", not two.
+ */
+export function derivedCallTreatment(personalityId: string): CallTreatment {
+  let hash = 0;
+  for (let i = 0; i < personalityId.length; i++) {
+    hash = (hash * 31 + personalityId.charCodeAt(i)) | 0;
+  }
+  return CALL_TREATMENTS[Math.abs(hash) % CALL_TREATMENTS.length] ?? 'liquid';
+}
+
+/**
+ * The ONE precedence rule for which treatment a call draws. Every surface calls
+ * this — a second copy of the order is a second answer to the same question.
+ *
+ *   1. The personality's own `voice.call_style` — explicit identity wins.
+ *   2. The operator's `display.call_style`, when it names a concrete treatment
+ *      (`personality`, the default, is not a pin — it defers to step 3).
+ *   3. Derived from the personality id, so every personality has a distinct
+ *      look with nothing configured.
+ */
+export function resolveCallTreatment(input: {
+  personalityId: string;
+  /** `PersonalityConfig.voice.call_style`. */
+  personalityCallStyle?: CallTreatment | undefined;
+  /** `display.call_style` from `~/.ethos/config.yaml`. */
+  operatorCallStyle?: CallTreatment | 'personality' | undefined;
+}): CallTreatment {
+  if (input.personalityCallStyle) return input.personalityCallStyle;
+  const operator = input.operatorCallStyle;
+  if (operator && operator !== 'personality') return operator;
+  return derivedCallTreatment(input.personalityId);
+}
+
+/**
+ * How a personality SOUNDS, and how its call LOOKS. The sanctioned exception to
+ * the "no voice/speech fields on PersonalityConfig" rule (voice V1a,
+ * eng-review D2), widened by the personality-presentation amendment: a
+ * deployment chooses the voice PROVIDER, the personality chooses its own voice
+ * and its own call treatment, the same way it chooses its own model.
+ * Everything that is a deployment or per-channel concern stays out — voice
+ * modes, VAD tuning, per-adapter affordances, and wake routes all remain
+ * gateway/config-owned.
+ *
+ * Absent = inherit the global `auxiliary.asr.*` / `auxiliary.tts.*` defaults,
+ * and a call treatment derived from the personality id.
  */
 export interface PersonalityVoiceConfig {
   /**
@@ -165,6 +217,17 @@ export interface PersonalityVoiceConfig {
    * engine than the deployment default.
    */
   stt_provider?: string;
+  /**
+   * Name of an entry in the deployment's REALTIME roster
+   * (`voice.realtime.providers.<name>.*`). The speech-to-speech sibling of
+   * `tts_provider` / `stt_provider`, under the same rules: a LABEL the operator
+   * chose, never a provider id, and a name this machine lacks falls back to
+   * `voice.realtime.default` rather than failing the load.
+   *
+   * Only consulted when a turn runs on the realtime tier; on the pipeline tier
+   * `tts_provider` / `stt_provider` are what speak and listen.
+   */
+  realtime_provider?: string;
   /** TTS voice id, provider-specific (e.g. `af_bella` for Kokoro, `alloy` for OpenAI). */
   tts_voice?: string;
   /**
@@ -183,6 +246,14 @@ export interface PersonalityVoiceConfig {
    * want different models; this is how a personality says which one talks.
    */
   model?: string;
+  /**
+   * Which treatment the Call Stage draws for this personality — how it LOOKS
+   * while it holds the floor, the visual sibling of `tts_voice`. Absent falls
+   * through to the operator's `display.call_style` and then to a value derived
+   * from the id, so a personality always has a look; see
+   * {@link resolveCallTreatment} for the one precedence rule every surface uses.
+   */
+  call_style?: CallTreatment;
 }
 
 export interface DreamingConfig {
@@ -239,15 +310,23 @@ export interface LivingSoul {
 // this interface at test time and fails if the count drifts from
 // `.personality-field-count`. Culture sets the rule; CI enforces it.
 //
-// Common rejections — these belong in skills or per-channel adapter config,
-// NOT here:
+// How a personality PRESENTS itself — how it sounds, how its call is drawn —
+// is identity, and lives as sub-keys of the `voice` block below (the
+// personality-presentation amendment). It is not a new top-level field, and it
+// is not a licence for one.
+//
+// Common rejections — these belong in skills, in `~/.ethos/config.yaml`, or in
+// per-channel adapter config, NOT here:
 //   - voice MODES, VAD tuning, per-channel voice affordances (the `voice`
-//     field below is identity — which voice this personality speaks in — and
-//     is the one sanctioned exception, granted by the voice V1a amendment;
-//     it is not a licence for further speech/audio settings)
+//     field below is identity — which voice this personality speaks in and
+//     what its call looks like — and is the one sanctioned exception, granted
+//     by the voice V1a amendment; it is not a licence for further
+//     speech/audio SETTINGS)
 //   - emotion / mood / sentiment tags
 //   - label or response templates
 //   - per-channel UI affordances
+//   - operator and deployment concerns: transport, credentials, rosters,
+//     endpoints, anything an operator sets once for the machine
 export interface PersonalityConfig {
   /** @internal Personality directory name; populated by the loader, not user-set. */
   id: string;
@@ -458,8 +537,10 @@ export interface PersonalityConfig {
   };
   /**
    * Voice V1a — how this personality SOUNDS: TTS voice id, language→voice map,
-   * tier preference, fast-lane model. See {@link PersonalityVoiceConfig} for
-   * why this is identity rather than a deployment setting, and what stays out.
+   * tier preference, fast-lane model — and, since the personality-presentation
+   * amendment, how its call LOOKS (`call_style`). See
+   * {@link PersonalityVoiceConfig} for why this is identity rather than a
+   * deployment setting, and what stays out.
    * Absent = inherit the global `auxiliary.tts.*` config.
    * Counts as ONE field for the schema-freeze gate (the nested shape is a
    * leaf type — same precedent as `fs_reach`).

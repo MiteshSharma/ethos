@@ -5,7 +5,7 @@ kind: tutorial
 audience: user
 slug: first-personality
 time: "20 min"
-updated: 2026-05-22
+updated: 2026-08-14
 ---
 
 The three user-facing built-in personalities cover the common roles. This tutorial builds a fourth — a `strategist` for long-horizon planning — and uses it to prove the things personalities atomically change: prompt, tools, and model. Plus hot-reload and per-personality memory isolation, so you can edit identity prose while chat is running and verify that each personality keeps its own context.
@@ -365,7 +365,7 @@ A read or write outside the allowlist raises a `BoundaryError` at the tool bound
 
 The personality schema is intentionally frozen. The following categories do NOT belong in `config.yaml`:
 
-- **Voice modes / TTS settings** — channel-adapter concerns.
+- **Voice modes / TTS engine settings** — operator concerns, set in `~/.ethos/config.yaml`. (Which *voice* the personality speaks in is identity and does belong here — that is the `voice` block.)
 - **Emotion / mood / sentiment tags** — prompt-engineering concerns; put them in `SOUL.md`.
 - **Per-channel UI affordances** (button text, response templates) — adapter concerns.
 - **Default skill content** — skills are their own files, not personality fields.

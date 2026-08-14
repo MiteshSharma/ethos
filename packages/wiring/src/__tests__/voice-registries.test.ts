@@ -44,6 +44,13 @@ describe('createBuiltinVoiceRegistries', () => {
     expect((await ttsFactory(ctx)).caps.local).toBe(true);
   });
 
+  it('registers both hosted realtime providers', () => {
+    // The third KIND. Neither is `caps.local`, so a deployment that armed
+    // `voice.trustedPlugins` must name them before a realtime session opens.
+    const { realtimeProviders } = createBuiltinVoiceRegistries();
+    expect(realtimeProviders.list().sort()).toEqual(['gemini-live', 'openai-realtime']);
+  });
+
   it('returns fresh registries per call — plugin registrations do not leak between loops', () => {
     const a = createBuiltinVoiceRegistries();
     a.sttProviders.register('plugin-stt', () => {

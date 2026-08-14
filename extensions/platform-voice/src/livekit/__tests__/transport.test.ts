@@ -1,3 +1,4 @@
+import { voiceLaneKey } from '@ethosagent/core';
 import type { AgentEvent, PcmChunk } from '@ethosagent/types';
 import type { AgentTurnRunner, VoiceSessionEvent } from '@ethosagent/voice-session';
 import { VoiceSession } from '@ethosagent/voice-session';
@@ -202,7 +203,9 @@ describe('LiveKitVoiceTransport <-> VoiceChannelAdapter <-> VoiceSession', () =>
     await adapter.start();
     expect(client.connected).toBe(true);
     expect(minter.minted).toEqual([{ roomName: 'room-a', identity: 'agent' }]);
-    expect(adapter.laneKey).toBe(`voice:${adapter.botKey}:+15551234567`);
+    expect(adapter.laneKey).toBe(
+      voiceLaneKey(adapter.botKey, { kind: 'livekit', id: '+15551234567' }),
+    );
 
     feedRemote(client, clock, remoteSpeechFrame(), 5);
     feedRemote(client, clock, remoteSilenceFrame(), 30);
@@ -288,8 +291,8 @@ describe('createLiveKitTransport (wiring seam)', () => {
     const a2 = makeAdapter('caller-b');
 
     expect(a1.callerId).toBe('caller-a');
-    expect(a1.laneKey).toBe('voice:reception:caller-a');
-    expect(a2.laneKey).toBe('voice:reception:caller-b');
+    expect(a1.laneKey).toBe(voiceLaneKey('reception', { kind: 'livekit', id: 'caller-a' }));
+    expect(a2.laneKey).toBe(voiceLaneKey('reception', { kind: 'livekit', id: 'caller-b' }));
     // One fresh client per participant — sessions do not share a room client.
     expect(clients).toHaveLength(2);
 

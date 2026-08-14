@@ -34,8 +34,22 @@ import Database, { migrate } from '@ethosagent/sqlite';
  *   redelivery sweep by whichever process owns its `botKey`.
  * - `redelivering` — atomically claimed by exactly one sweeping process.
  * - `delivered` — the adapter confirmed. Prunable once past retention.
+ * - `abandoned` — given up on by its owner after `abandonStale`. A terminal
+ *   state that is NOT delivery: it records that the reply was owed and never
+ *   arrived, which is a different fact from `delivered` and worth keeping
+ *   distinct until retention removes both.
  */
-export type DeliveryStatus = 'pending' | 'redelivering' | 'delivered';
+export type DeliveryStatus = 'pending' | 'redelivering' | 'delivered' | 'abandoned';
+
+/**
+ * What the obligation owes the user.
+ *
+ * The distinction is not cosmetic: a `voice` obligation's payload is an
+ * artifact on disk, so redelivering it means re-sending bytes rather than
+ * re-sending a string, and abandoning it means someone has to release those
+ * bytes.
+ */
+export type DeliveryKind = 'text' | 'voice';
 
 export interface DeliveryObligation {
   id: string;
@@ -58,6 +72,22 @@ export interface DeliveryObligation {
   content: string;
   createdAt: number;
   status: DeliveryStatus;
+  /** `text` for a written reply, `voice` for a synthesized voice note. Rows
+   *  written before v3 read as `text`, which is what they were. */
+  kind: DeliveryKind;
+  /**
+   * Artifact key for a `voice` obligation — redelivery RE-SENDS the stored
+   * artifact rather than re-synthesizing, so a redelivered voice note is
+   * byte-identical to the one the user did not receive.
+   *
+   * `content` stays populated alongside it, holding the SPOKEN TEXT: the row
+   * stays human-readable in the DB, still hashes to a dedup-comparable value,
+   * and a voice row whose artifact has vanished is still diagnosable.
+   */
+  artifactRef?: string;
+  /** The `VoiceAudioFormat` the artifact holds, so redelivery re-sends it
+   *  without re-deriving the format from the bytes. */
+  mediaFormat?: string;
 }
 
 export interface RecordDeliveryInput {
@@ -67,8 +97,35 @@ export interface RecordDeliveryInput {
   sessionId: string;
   /** Empty string is normalized to "no thread" — it carries no routing signal. */
   threadId?: string;
+  /** For a `voice` obligation this is the spoken text, not a placeholder. */
   content: string;
+  /** Defaults to `'text'`. */
+  kind?: DeliveryKind;
+  artifactRef?: string;
+  mediaFormat?: string;
 }
+
+/** Row counts per {@link DeliveryStatus}. */
+export interface DeliveryStatusCounts {
+  pending: number;
+  redelivering: number;
+  delivered: number;
+  abandoned: number;
+}
+
+/**
+ * Ledger counts for an operator display.
+ *
+ * `voice` repeats the same four counts over `kind = 'voice'` rows only, because
+ * "17 pending" answers a different question depending on whether those are text
+ * replies or synthesized artifacts still sitting on disk.
+ */
+export interface DeliveryStats extends DeliveryStatusCounts {
+  voice: DeliveryStatusCounts;
+}
+
+/** Widest window {@link DeliveryLedger.listRecent} will open. */
+const MAX_RECENT = 200;
 
 /**
  * The contract the gateway codes against, so surfaces can inject a fake
@@ -88,8 +145,45 @@ export interface DeliveryLedger {
   /** Put a claimed-but-undelivered obligation back in the `pending` pool. */
   release(id: string): Promise<void>;
   get(id: string): Promise<DeliveryObligation | null>;
-  /** Delete `delivered` rows created before `cutoffMs`. Returns rows removed. */
+  /**
+   * Give up on obligations older than `cutoffMs` that this process OWNS, and
+   * return them so the caller can release whatever they hold (a voice
+   * obligation's artifact).
+   *
+   * The ledger's standing rule is that age alone never authorizes touching a
+   * `pending` row — an old row may belong to a live peer mid-send. That rule is
+   * about REDELIVERY, which must not double-send; abandonment is the opposite
+   * decision and needs the same ownership filter plus a cutoff far longer than
+   * any real send. The default the gateway passes is days, not minutes.
+   *
+   * `redelivering` rows are swept too: a process that claimed a row and then
+   * died leaves it claimed forever, and that is exactly the state that needs a
+   * backstop.
+   */
+  abandonStale(botKeys: readonly string[], cutoffMs: number): Promise<DeliveryObligation[]>;
+  /**
+   * Delete terminal rows — `delivered` and `abandoned` — created before
+   * `cutoffMs`. Returns rows removed.
+   *
+   * `pending` and `redelivering` are never age-pruned: they are live
+   * obligations, and age is not evidence about them. They become prunable only
+   * by first passing through `abandonStale`, which is an ownership-filtered
+   * decision rather than a deletion driven by the clock alone.
+   */
   pruneDelivered(cutoffMs: number): Promise<number>;
+  /** Counts by status, and by status for `kind = 'voice'`. Read-only. */
+  stats(): Promise<DeliveryStats>;
+  /**
+   * Most recent obligations, newest first. Read-only; for operator display.
+   *
+   * NOT ownership-filtered, unlike `listPending`: that filter exists so a
+   * process never REDELIVERS a peer's traffic, and nothing here sends anything.
+   * An operator looking at one ledger file should see the whole file.
+   *
+   * `limit` is clamped to 1–{@link MAX_RECENT} — an unbounded read of a table
+   * whose rows hold full reply text is a memory hazard, not a feature.
+   */
+  listRecent(limit: number): Promise<DeliveryObligation[]>;
 }
 
 // ---------------------------------------------------------------------------
@@ -110,7 +204,14 @@ const SCHEMA = `
     -- v2. Declared LAST so a freshly-created table and a v1 table upgraded by
     -- ALTER TABLE ADD COLUMN end up with identical column order. Nullable:
     -- most replies have no thread, and NULL is the honest encoding of that.
-    thread_id    TEXT
+    thread_id    TEXT,
+    -- v3, appended after thread_id for the same reason. All three nullable and
+    -- WITHOUT a DEFAULT: a row written before these columns existed genuinely
+    -- has no value for them, and NULL says so. kind is normalized to 'text' on
+    -- read instead, which is the truth about every pre-v3 row.
+    kind         TEXT,
+    artifact_ref TEXT,
+    media_format TEXT
   ) STRICT;
 
   CREATE INDEX IF NOT EXISTS delivery_status_bot ON delivery_obligations(status, bot_key);
@@ -125,9 +226,23 @@ const SCHEMA = `
  * row recorded before the column existed) and keeps the table STRICT, since
  * `ALTER TABLE ADD COLUMN` does not touch the table's STRICT-ness.
  */
+/**
+ * v2 → v3: let a voice note be an obligation.
+ *
+ * A voice reply's payload is a synthesized artifact, and re-synthesizing it on
+ * redelivery would hand the user a different recording than the one that was
+ * lost (a TTS pass is not deterministic, and the personality's voice may have
+ * changed in between). Storing the artifact key means redelivery re-sends the
+ * exact bytes that were owed.
+ */
 const MIGRATIONS = {
   2: (db: Database.Database): void => {
     db.exec('ALTER TABLE delivery_obligations ADD COLUMN thread_id TEXT');
+  },
+  3: (db: Database.Database): void => {
+    db.exec('ALTER TABLE delivery_obligations ADD COLUMN kind TEXT');
+    db.exec('ALTER TABLE delivery_obligations ADD COLUMN artifact_ref TEXT');
+    db.exec('ALTER TABLE delivery_obligations ADD COLUMN media_format TEXT');
   },
 };
 
@@ -142,6 +257,9 @@ interface ObligationRow {
   created_at: number;
   status: string;
   thread_id: string | null;
+  kind: string | null;
+  artifact_ref: string | null;
+  media_format: string | null;
 }
 
 function rowToObligation(r: ObligationRow): DeliveryObligation {
@@ -156,7 +274,27 @@ function rowToObligation(r: ObligationRow): DeliveryObligation {
     content: r.content,
     createdAt: r.created_at,
     status: r.status as DeliveryStatus,
+    // NULL means "written before voice obligations existed", and every such row
+    // was a text reply. Callers never have to special-case the pre-v3 shape.
+    kind: (r.kind ?? 'text') as DeliveryKind,
+    artifactRef: r.artifact_ref ?? undefined,
+    mediaFormat: r.media_format ?? undefined,
   };
+}
+
+function emptyCounts(): DeliveryStatusCounts {
+  return { pending: 0, redelivering: 0, delivered: 0, abandoned: 0 };
+}
+
+function isDeliveryStatus(v: string): v is DeliveryStatus {
+  return v === 'pending' || v === 'redelivering' || v === 'delivered' || v === 'abandoned';
+}
+
+/** Clamp — never a thrown error: a display asking for too much should get a
+ *  page, not a failure. A non-integer or NaN falls back to the widest window. */
+function clampRecentLimit(limit: number): number {
+  if (!Number.isInteger(limit)) return MAX_RECENT;
+  return Math.min(MAX_RECENT, Math.max(1, limit));
 }
 
 // ---------------------------------------------------------------------------
@@ -186,7 +324,7 @@ export class SQLiteDeliveryLedger implements DeliveryLedger {
 
     migrate(this.db, {
       name: 'delivery-ledger',
-      targetVersion: 2,
+      targetVersion: 3,
       baseline: SCHEMA,
       migrations: MIGRATIONS,
     });
@@ -199,8 +337,8 @@ export class SQLiteDeliveryLedger implements DeliveryLedger {
       .prepare(
         `INSERT INTO delivery_obligations
          (id, bot_key, platform, chat_id, session_id, content_hash, content, created_at, status,
-          thread_id)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)`,
+          thread_id, kind, artifact_ref, media_format)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)`,
       )
       .run(
         id,
@@ -214,6 +352,11 @@ export class SQLiteDeliveryLedger implements DeliveryLedger {
         // Normalized at the durable boundary so the sweep never has to decide
         // whether '' means a thread. NULL is the single encoding of "no thread".
         input.threadId ? input.threadId : null,
+        input.kind ?? 'text',
+        // Same normalization as thread_id: '' is not a smaller artifact key, it
+        // is an absent one, and a sweep that tried to load it would fail late.
+        input.artifactRef ? input.artifactRef : null,
+        input.mediaFormat ? input.mediaFormat : null,
       );
     return id;
   }
@@ -274,15 +417,89 @@ export class SQLiteDeliveryLedger implements DeliveryLedger {
     return row ? rowToObligation(row) : null;
   }
 
+  async abandonStale(botKeys: readonly string[], cutoffMs: number): Promise<DeliveryObligation[]> {
+    if (botKeys.length === 0) return [];
+    const placeholders = botKeys.map(() => '?').join(', ');
+    // SELECT and UPDATE in one transaction so the rows returned to the caller
+    // are exactly the rows this call abandoned. Split apart, a peer could claim
+    // a row between the two statements and the caller would then release an
+    // artifact that a live send is still reading from.
+    const abandon = this.db.transaction((): DeliveryObligation[] => {
+      const rows = this.db
+        .prepare(
+          `SELECT * FROM delivery_obligations
+           WHERE status IN ('pending', 'redelivering')
+             AND bot_key IN (${placeholders})
+             AND created_at < ?
+           ORDER BY created_at ASC, rowid ASC`,
+        )
+        .all(...botKeys, cutoffMs) as ObligationRow[];
+      if (rows.length === 0) return [];
+      this.db
+        .prepare(
+          `UPDATE delivery_obligations SET status = 'abandoned'
+           WHERE status IN ('pending', 'redelivering')
+             AND bot_key IN (${placeholders})
+             AND created_at < ?`,
+        )
+        .run(...botKeys, cutoffMs);
+      // Report the post-update state — the caller is being handed rows it has
+      // just given up on, not a snapshot of what they were a statement ago.
+      return rows.map((r) => ({ ...rowToObligation(r), status: 'abandoned' as const }));
+    });
+    return abandon();
+  }
+
   async pruneDelivered(cutoffMs: number): Promise<number> {
-    // ONLY `delivered`. A `pending` row is the whole point of the ledger and is
-    // never pruned, however old — an aged pending row is not proof of a crash
-    // (it may belong to a live peer), so age can never authorize deleting it.
-    // `redelivering` is likewise left alone: it is by definition claimed.
+    // Terminal rows only: `delivered` and `abandoned`. A `pending` row is the
+    // whole point of the ledger and is never age-pruned — an aged pending row
+    // is not proof of a crash (it may belong to a live peer), so age can never
+    // authorize deleting it. `redelivering` is likewise left alone: it is by
+    // definition claimed. Both reach this method only via `abandonStale`, which
+    // filters by ownership before the clock gets a vote.
     const result = this.db
-      .prepare(`DELETE FROM delivery_obligations WHERE status = 'delivered' AND created_at < ?`)
+      .prepare(
+        `DELETE FROM delivery_obligations
+         WHERE status IN ('delivered', 'abandoned') AND created_at < ?`,
+      )
       .run(cutoffMs);
     return result.changes;
+  }
+
+  async stats(): Promise<DeliveryStats> {
+    // One GROUP BY over (status, kind) rather than eight COUNT(*) round trips.
+    // `kind IS NULL` is a pre-v3 row, which was a text reply — the same
+    // normalization `rowToObligation` applies.
+    const rows = this.db
+      .prepare(
+        `SELECT status, COALESCE(kind, 'text') AS kind, COUNT(*) AS n
+         FROM delivery_obligations
+         GROUP BY status, COALESCE(kind, 'text')`,
+      )
+      .all() as Array<{ status: string; kind: string; n: number }>;
+    const out: DeliveryStats = {
+      ...emptyCounts(),
+      voice: emptyCounts(),
+    };
+    for (const row of rows) {
+      if (!isDeliveryStatus(row.status)) continue;
+      out[row.status] += row.n;
+      if (row.kind === 'voice') out.voice[row.status] += row.n;
+    }
+    return out;
+  }
+
+  async listRecent(limit: number): Promise<DeliveryObligation[]> {
+    // Same rowid tie-break the session store uses: rows written inside one
+    // millisecond otherwise come back in an arbitrary order.
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM delivery_obligations
+         ORDER BY created_at DESC, rowid DESC
+         LIMIT ?`,
+      )
+      .all(clampRecentLimit(limit)) as ObligationRow[];
+    return rows.map(rowToObligation);
   }
 
   close(): void {

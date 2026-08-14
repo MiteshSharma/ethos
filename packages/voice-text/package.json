@@ -3,7 +3,10 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "description": "The one speakable-text implementation: sanitizer, Unicode-aware sentence splitter, transcript hallucination filter, and the voice-reply decision. Zero runtime dependencies.",
+  "description": "The one speakable-text implementation: sanitizer, Unicode-aware sentence splitter, transcript hallucination filter, and the voice-reply decision. No external runtime dependencies.",
+  "dependencies": {
+    "@ethosagent/types": "workspace:*"
+  },
   "exports": {
     ".": {
       "import": "./src/index.ts",

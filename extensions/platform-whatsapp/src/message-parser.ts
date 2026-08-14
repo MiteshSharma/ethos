@@ -1,4 +1,5 @@
 import type { Attachment, InboundMessage } from '@ethosagent/types';
+import { voiceAudioExtension, voiceAudioFormatFromMime } from '@ethosagent/types';
 
 export interface RawWhatsAppMessage {
   key: {
@@ -89,7 +90,7 @@ export function hasMedia(msg: RawWhatsAppMessage): boolean {
 
 export function getMediaMeta(
   msg: RawWhatsAppMessage,
-): { mime: string; filename: string; type: 'image' | 'file' } | null {
+): { mime: string; filename: string; type: 'image' | 'file' | 'audio' } | null {
   const m = msg.message;
   if (m?.imageMessage) {
     return {
@@ -106,10 +107,18 @@ export function getMediaMeta(
     };
   }
   if (m?.audioMessage) {
+    // `type: 'audio'` is what the gateway's transcription gate keys on — a
+    // push-to-talk memo classified as `file` never reaches STT. The extension
+    // is derived from the mimetype rather than hardcoded, because WhatsApp
+    // sends `audio/ogg; codecs=opus` for push-to-talk but `audio/mpeg` or
+    // `audio/mp4` for a forwarded audio file, and both the transcode stage and
+    // the STT providers key off the container.
+    const mime = m.audioMessage.mimetype ?? 'audio/ogg';
+    const format = voiceAudioFormatFromMime(mime);
     return {
-      mime: m.audioMessage.mimetype ?? 'audio/ogg',
-      filename: 'audio.ogg',
-      type: 'file',
+      mime,
+      filename: `audio.${format ? voiceAudioExtension(format) : 'ogg'}`,
+      type: 'audio',
     };
   }
   if (m?.videoMessage) {

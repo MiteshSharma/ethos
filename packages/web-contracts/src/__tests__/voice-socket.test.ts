@@ -60,6 +60,36 @@ describe('voice socket framing', () => {
     expect(Array.from(decoded?.payload ?? [])).toEqual([1, 2, 3]);
   });
 
+  it('round-trips the budget wind-down frame, reason and all', () => {
+    const bytes = encodeVoiceFrame({
+      t: 'realtime_wind_down',
+      text: 'That’s the spending limit for this call.',
+      reason: 'budget',
+    });
+    expect(decodeVoiceServerFrame(bytes)?.header).toEqual({
+      t: 'realtime_wind_down',
+      text: 'That’s the spending limit for this call.',
+      reason: 'budget',
+    });
+  });
+
+  it('refuses a wind-down with no line to say, and one with an unknown reason', () => {
+    // A wind-down whose text is empty would end the call in silence — the
+    // dropped stream the frame exists to prevent.
+    const empty = encodeVoiceFrame({
+      t: 'realtime_wind_down',
+      text: '',
+      reason: 'budget',
+    } as never);
+    expect(decodeVoiceServerFrame(empty)).toBeNull();
+    const wrongReason = encodeVoiceFrame({
+      t: 'realtime_wind_down',
+      text: 'bye',
+      reason: 'boredom',
+    } as never);
+    expect(decodeVoiceServerFrame(wrongReason)).toBeNull();
+  });
+
   it('rejects a frame whose header does not match the contract', () => {
     const bogus = encodeVoiceFrame({ t: 'utterance_end', utteranceId: 'u1' });
     // A server frame decoder must not accept a client frame.
@@ -68,6 +98,42 @@ describe('voice socket framing', () => {
     expect(decodeVoiceClientFrame(new Uint8Array([VOICE_SOCKET_VERSION, 0, 40]))).toBeNull();
     expect(decodeVoiceClientFrame(new Uint8Array([99, 0, 0]))).toBeNull();
     expect(decodeVoiceClientFrame(new Uint8Array([]))).toBeNull();
+  });
+
+  it('round-trips a realtime turn-latency report', () => {
+    const bytes = encodeVoiceFrame({
+      t: 'realtime_turn_latency',
+      turnId: 'turn-1',
+      firstAudioMs: 640,
+    });
+    expect(decodeVoiceClientFrame(bytes)?.header).toEqual({
+      t: 'realtime_turn_latency',
+      turnId: 'turn-1',
+      firstAudioMs: 640,
+    });
+  });
+
+  it('refuses a latency report that is not a finite, non-negative duration', () => {
+    // The page is the only place this number can be measured, which is exactly
+    // why it is parsed rather than trusted: a negative duration would land in
+    // the same store the latency budget is read back from.
+    const negative = encodeVoiceFrame({
+      t: 'realtime_turn_latency',
+      turnId: 'turn-1',
+      firstAudioMs: -1,
+    });
+    expect(decodeVoiceClientFrame(negative)).toBeNull();
+
+    // NaN and Infinity do not survive JSON — they arrive as `null`, which the
+    // schema must refuse too rather than coercing to zero.
+    const nulled = new TextEncoder().encode(
+      JSON.stringify({ t: 'realtime_turn_latency', turnId: 'turn-1', firstAudioMs: null }),
+    );
+    const nullFrame = new Uint8Array(3 + nulled.length);
+    nullFrame[0] = VOICE_SOCKET_VERSION;
+    nullFrame[2] = nulled.length;
+    nullFrame.set(nulled, 3);
+    expect(decodeVoiceClientFrame(nullFrame)).toBeNull();
   });
 
   it('rejects a header that is valid JSON but an unknown type', () => {

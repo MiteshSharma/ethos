@@ -1,11 +1,11 @@
 ---
 title: "Receive files via Telegram"
-description: "Configure your Telegram bot to ingest photos and documents from users."
+description: "Configure your Telegram bot to ingest photos, documents, and voice messages from users."
 kind: how-to
 audience: user
 slug: receive-files-via-telegram
 time: "5 min"
-updated: 2026-05-14
+updated: 2026-08-14
 ---
 
 ## Task
@@ -60,10 +60,14 @@ When no text accompanies the file, the adapter surfaces `(attached image)` or `(
 |---|---|---|---|
 | Photos | `photo` | `image` | The adapter picks the highest-resolution variant. MIME type is always `image/jpeg` (Telegram compresses photos). |
 | Documents | `document` | `file` | PDFs, text files, spreadsheets, images sent as documents. MIME type comes from Telegram's detection. |
+| Voice messages | `voice` | `audio` | Ogg/Opus. Transcribed by the gateway's speech-to-text stage; the transcript is appended to the turn text. |
+| Audio files | `audio` | `audio` | Forwarded music, MP3 uploads. Same transcription path as voice messages. |
+
+Audio needs an STT provider configured — see [Send and receive voice notes on a channel](voice-notes-on-channels.md). Without one, the upload still reaches the agent as an audio marker with no transcript.
 
 ## Not supported yet
 
-Voice messages, audio files, video, animations (GIFs), and stickers are intentionally dropped. The inbound caption still reaches the agent, but no attachment is created. These types are deferred until transcription and media analysis tools ship.
+Video, animations (GIFs), and stickers are intentionally dropped. The inbound caption still reaches the agent, but no attachment is created. These types are deferred until media analysis tools ship.
 
 ## Limits
 
@@ -73,7 +77,7 @@ Voice messages, audio files, video, animations (GIFs), and stickers are intentio
 
 ## How it works
 
-1. User sends a photo or document to the bot.
+1. User sends a photo, document, or voice message to the bot.
 2. The adapter calls `bot.api.getFile(fileId)` to get the download URL.
 3. The adapter downloads the file from `https://api.telegram.org/file/bot<token>/<file_path>`.
 4. The file is written to the `AttachmentCache` at `~/.ethos/cache/attachments/`.

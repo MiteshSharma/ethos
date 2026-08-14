@@ -1,5 +1,31 @@
+import type { CaptureState, DoctorProbeRow } from '@ethosagent/voice-satellite';
+
 export interface OnboardingState {
   configured: boolean;
+}
+
+/**
+ * Lifecycle of the desktop wake-satellite host — deliberately NOT derived from
+ * "is the socket open". `wake_off` is a first-class state because the persisted
+ * off-switch must be distinguishable from a failure, and `degraded` is one
+ * because a failing preflight has to be able to say why.
+ */
+export type SatelliteState = 'stopped' | 'running' | 'degraded' | 'wake_off';
+
+export interface SatelliteStatus {
+  state: SatelliteState;
+  /** The persisted switch, not a live inference. */
+  wakeEnabled: boolean;
+  /** Stable across restarts; the gateway lane key derives from it. */
+  nodeId: string;
+  /** What the capture machine reports. `null` when no machine was built. */
+  capture: CaptureState | null;
+  /** Why the host is degraded or off. */
+  reason?: string;
+  /** Preflight rows, so a Settings row can name the failing probe inline. */
+  probes: DoctorProbeRow[];
+  /** Enabled wake phrases from the gateway's pushed routing table. */
+  phrases: string[];
 }
 
 export interface ValidateProviderRequest {
@@ -226,6 +252,14 @@ export interface IpcContract {
   'gateway:start': { request: undefined; response: { ok: boolean } };
   'gateway:stop': { request: undefined; response: { ok: boolean } };
   'gateway:logPath': { request: undefined; response: { path: string } };
+  'satellite:status': { request: undefined; response: SatelliteStatus };
+  'satellite:start': { request: undefined; response: { ok: boolean } };
+  'satellite:stop': { request: undefined; response: { ok: boolean } };
+  'satellite:doctor': {
+    request: undefined;
+    response: { ok: boolean; probes: DoctorProbeRow[] };
+  };
+  'satellite:setWakeEnabled': { request: { enabled: boolean }; response: { ok: boolean } };
 }
 
 /** Main-to-renderer push events (via webContents.send, NOT ipcMain.handle) */
@@ -235,6 +269,7 @@ export interface RendererEvents {
   'oauth:callback': { code: string; state: string };
   'plugin:oauthComplete': { oauthRef: string };
   'codex:authComplete': { ok: boolean; error?: string };
+  'satellite:stateChanged': SatelliteStatus;
 }
 
 export const RENDERER_EVENTS = {
@@ -243,6 +278,7 @@ export const RENDERER_EVENTS = {
   'oauth:callback': 'oauth:callback',
   'plugin:oauthComplete': 'plugin:oauthComplete',
   'codex:authComplete': 'codex:authComplete',
+  'satellite:stateChanged': 'satellite:stateChanged',
 } as const;
 
 export type IpcChannel = keyof IpcContract;
@@ -298,4 +334,9 @@ export const IPC_CHANNELS: { [K in IpcChannel]: K } = {
   'gateway:start': 'gateway:start',
   'gateway:stop': 'gateway:stop',
   'gateway:logPath': 'gateway:logPath',
+  'satellite:status': 'satellite:status',
+  'satellite:start': 'satellite:start',
+  'satellite:stop': 'satellite:stop',
+  'satellite:doctor': 'satellite:doctor',
+  'satellite:setWakeEnabled': 'satellite:setWakeEnabled',
 };

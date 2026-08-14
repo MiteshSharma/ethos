@@ -1931,7 +1931,6 @@ body,
   flex-shrink: 0;
 }
 
-.personality-switcher-trigger,
 .personality-bar-new {
   display: inline-flex;
   align-items: center;
@@ -1946,33 +1945,14 @@ body,
   transition: background-color 80ms cubic-bezier(0.16, 1, 0.3, 1);
 }
 
-.personality-switcher-trigger:hover,
 .personality-bar-new:hover {
   background: var(--ethos-hover);
   color: var(--ethos-text);
 }
 
-.personality-switcher-trigger:focus-visible,
 .personality-bar-new:focus-visible {
   outline: 2px solid var(--accent, var(--ethos-info));
   outline-offset: 1px;
-}
-
-.personality-menu-row {
-  display: inline-flex;
-  align-items: center;
-  gap: 10px;
-  min-width: 160px;
-}
-
-.personality-menu-name {
-  flex: 1;
-  font-size: 13px;
-}
-
-.personality-menu-active {
-  color: var(--ethos-text-dim);
-  font-size: 12px;
 }
 
 .message-list {
@@ -2098,6 +2078,19 @@ body,
   width: 100%;
 }
 
+/* "This turn was spoken." Same row treatment as the steering marker above —
+   11px mono, tertiary, its own line over the bubble — so the transcript below
+   stays whole and the marker is never what the transcript replaced. Not a
+   badge, not a colored chip: the marker carries no status, only provenance. */
+.message-voice-label {
+  font-size: 11px;
+  font-family: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--ethos-text-tertiary);
+  text-align: right;
+  margin-bottom: 3px;
+  width: 100%;
+}
+
 .message-attachments {
   display: flex;
   flex-wrap: wrap;
@@ -2180,6 +2173,13 @@ body,
   font-size: 14px;
   line-height: 1.55;
   max-width: 100%;
+}
+
+/* Links in agent text carry the accent (DESIGN.md § "Per-personality accent").
+   Markdown links are plain <a>, not Antd primitives, so ConfigProvider's
+   colorLink never reaches them — the rule has to be here. */
+.message-assistant a {
+  color: var(--accent, var(--ethos-info));
 }
 
 /* "Agent is thinking" placeholder — three dots that pulse in sequence
@@ -2277,7 +2277,7 @@ body,
 
 input,
 textarea {
-  caret-color: var(--ethos-info);
+  caret-color: var(--accent, var(--ethos-info));
 }
 
 /* The streaming cursor is a single character-width block that pulses
@@ -2346,7 +2346,7 @@ textarea {
   width: 32px;
   height: 32px;
   border-radius: 9999px;
-  background: var(--ethos-info);
+  background: var(--accent, var(--ethos-info));
   border: none;
   cursor: pointer;
   display: flex;
@@ -2359,8 +2359,10 @@ textarea {
     opacity 0.15s ease;
 }
 
+/* Hover brightens whatever the accent is, rather than naming a second blue —
+   a hardcoded hover colour would jump off the personality's accent on hover. */
 .composer-send-btn:hover:not(:disabled) {
-  background: #3a8eef;
+  filter: brightness(1.12);
 }
 
 .composer-send-btn:disabled {
@@ -2445,6 +2447,74 @@ textarea {
    control strip, and the speaking indicator. Reuses existing tokens and the
    composer's AudioBars meter; the accent agent-speaking pulse is the one new
    pattern (see DESIGN.md "In-call speaking indicator"). */
+/* Settings → Voice → Delivery status. Rows of mono counts, not tiles: the
+   ledger is data, and "cards earn existence" means four boxes do not. */
+.voice-delivery-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 24px;
+}
+
+.voice-delivery-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.voice-delivery-mono {
+  font-family: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  color: var(--ethos-text-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+
+.voice-delivery-count {
+  font-family: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 20px;
+  line-height: 1.3;
+  color: var(--ethos-text);
+  font-variant-numeric: tabular-nums;
+}
+
+.voice-delivery-split {
+  opacity: 0.75;
+}
+
+/* Per-conversation voice mode, in the personality bar's actions cluster. The
+   three state words are Geist Mono because they are the config values
+   verbatim — the same vocabulary `/voice <mode>` takes. */
+.voice-mode-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  /* A fieldset for the grouping semantics only — none of its chrome. */
+  margin: 0;
+  padding: 0;
+  border: 0;
+  min-inline-size: 0;
+}
+
+.voice-mode-caption {
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ethos-text-tertiary);
+  white-space: nowrap;
+}
+
+.voice-mode-opt {
+  font-family: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+}
+
+/* Inheriting the deployment default — the lane chose nothing, so the selected
+   word is drawn at tertiary weight. The caption says so in words too; this is
+   the second cue, never the only one. */
+.voice-mode-toggle-inherited .voice-mode-opt {
+  color: var(--ethos-text-tertiary);
+}
+
 .talk-toggle-btn {
   display: inline-flex;
   align-items: center;
@@ -2487,10 +2557,19 @@ textarea {
   border-bottom: 1px solid var(--ethos-border);
 }
 
+/* Wrapping is the overflow guarantee, not a nicety. The indicator, the chip and
+   the controls are all `flex-shrink: 0` by design — a clipped tap target or a
+   half-drawn meter is worse than a second line — and at 375px the widest state
+   (the `interrupted — go ahead` label beside the detail, mute and end controls)
+   measures ~402px against a 343px content box. Without a wrap rule that
+   overflows the viewport; with one, an item that does not fit takes the next
+   line instead. `call-strip-layout.test.ts` computes both numbers from this
+   stylesheet and pins the rule. */
 .talk-call-row {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 12px;
+  gap: 8px 12px;
 }
 
 /* Degraded-to-text and mic-permission-denied: the strip collapses to one row
@@ -2512,6 +2591,14 @@ textarea {
 
 .talk-notice-mic .talk-notice-text {
   color: var(--ethos-warning);
+}
+
+/* The tier fell back to the local pipeline. The call is still live underneath,
+   so this sits ABOVE the strip rather than replacing it, and keeps the
+   secondary text colour — nothing failed, the call is simply not running where
+   it was configured to. */
+.talk-notice-tier {
+  border-bottom: none;
 }
 
 .talk-indicator {
@@ -2560,12 +2647,15 @@ textarea {
   animation: status-dot-pulse 1s ease-in-out infinite;
 }
 
+/* Shrinks rather than overflows: this slot also carries a recoverable error
+   message, which has no length bound, and one item wider than the row is the
+   single case `flex-wrap` cannot rescue. */
 .talk-status-label {
   font-family: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 12px;
   color: var(--ethos-text-secondary);
   font-variant-numeric: tabular-nums;
-  flex-shrink: 0;
+  min-width: 0;
 }
 
 /* Live caption of the agent's speech — the a11y story for talk-mode. */
@@ -2608,11 +2698,35 @@ textarea {
   color: var(--ethos-text-secondary);
 }
 
+/* The budget wind-down chip. Same mono label vocabulary as `{provider} · {model}`,
+   outlined in the amber connection-dot token so it reads as a limit the call
+   reached rather than a failure. Not a badge, not a banner. */
+.talk-budget-chip {
+  flex-shrink: 0;
+  padding: 2px 8px;
+  border: 1px solid var(--ethos-warning);
+  border-radius: 9999px;
+  color: var(--ethos-text-secondary);
+}
+
 .talk-call-detail {
   display: flex;
   flex-wrap: wrap;
   gap: 12px;
   padding-left: 132px;
+}
+
+/* The explicit private/offline choice, in the mono detail row beside the tier
+   label it answers. A text control, not a button chrome — it belongs to the
+   same label vocabulary as everything else on this row. */
+.talk-private-btn {
+  padding: 0;
+  background: none;
+  border: none;
+  color: var(--ethos-accent);
+  cursor: pointer;
+  /* ≥44px touch target (DR5) without a 44px-tall text row. */
+  min-height: 44px;
 }
 
 .talk-btn {
@@ -2656,19 +2770,274 @@ textarea {
   opacity: 0.9;
 }
 
-/* 375px: the mark, the state and mute/end persist; the mono provider+latency
-   detail collapses behind the toggle's tap target. */
+/* The Call Stage (DESIGN.md § "Call Stage").
+
+   A MODE, not a dialog: TWO columns filling the chat tab — the shape, and this
+   call's transcript. There is no left rail on purpose: a navigation column
+   during a call invites wandering off mid-sentence, which is the opposite of
+   what the mode is for. Nothing here is fixed-position and nothing overlays
+   anything, because there is nothing underneath: while a call carries audio
+   this IS the chat surface. */
+.chat-tab-call {
+  grid-template-rows: 1fr;
+}
+
+.call-stage {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 320px);
+  min-height: 0;
+  background: var(--ethos-bg);
+  animation: call-stage-in 240ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+/* --motion-slow, the drawer/modal duration. It plays ONCE, when the call
+   starts: the stage is mounted by the call and not by the state, so a mid-call
+   reconnect never replays it. The shape's own motion has no duration token at
+   all — see DESIGN.md on continuous amplitude-driven motion. */
+@keyframes call-stage-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+/* Column 1 — the stage itself. */
+.call-stage-main {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 26px;
+  min-width: 0;
+}
+
+.call-stage-canvas {
+  display: block;
+  width: min(62%, 236px);
+  aspect-ratio: 1;
+}
+
+.call-stage-who {
+  margin-top: 20px;
+  font-size: 15px;
+  font-weight: 500;
+  color: var(--ethos-text);
+}
+
+.call-stage-state {
+  margin-top: 5px;
+}
+
+.call-stage-actions {
+  margin-top: 24px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.call-stage-foot {
+  position: absolute;
+  bottom: 14px;
+}
+
+/* Column 2 — this call's turns, and the reserved clarify slot at its base. */
+.call-stage-transcript {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border-left: 1px solid var(--ethos-border);
+  background: var(--ethos-bg-elevated);
+}
+
+/* The header carries the label AND the only way out of the mode that is not a
+   hang-up. The vertical padding is small because the button supplies the row's
+   height — a 44px target, same as every other control on the stage. */
+.call-stage-transcript-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 10px 4px 16px;
+  border-bottom: 1px solid var(--ethos-border);
+}
+
+.call-stage-back {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: var(--ethos-text-dim);
+  font-size: 12px;
+  cursor: pointer;
+  transition: color 80ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.call-stage-back:hover {
+  color: var(--ethos-text);
+}
+
+.call-stage-back:focus-visible {
+  outline: 2px solid var(--accent, var(--ethos-info));
+  outline-offset: 2px;
+}
+
+.call-stage-turns {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.call-stage-turn {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.call-stage-turn-text {
+  font-size: 13px;
+  color: var(--ethos-text);
+}
+
+.call-stage-turn-agent .call-stage-turn-text {
+  color: var(--ethos-text-dim);
+}
+
+.call-stage-turn-filler .call-stage-turn-text {
+  color: var(--ethos-text-tertiary);
+}
+
+.call-stage-turn-live .call-stage-turn-label {
+  color: var(--accent, var(--ethos-info));
+}
+
+/* The reserved slot. It is on screen for the whole call — dimmed while there is
+   nothing to answer — so a question FILLS a panel the user is already looking
+   at. `min-height` holds the space a question plus its options takes, and the
+   turns list above it is the flexible one, so filling the slot moves nothing:
+   that stability is the whole reason this direction beat a popup. */
+.call-stage-slot {
+  flex: none;
+  margin: 0 16px 14px;
+  padding: 11px 13px;
+  min-height: 96px;
+  border: 1px dashed var(--ethos-border-strong);
+  border-radius: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.call-stage-slot-empty {
+  opacity: 0.4;
+}
+
+.call-stage-slot-empty-text {
+  font-size: 13px;
+  color: var(--ethos-text-dim);
+}
+
+/* The clarify card, filling the slot rather than floating over Chat. */
+.call-stage-slot .clarify-card-slot {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.call-stage-slot .clarify-card-header {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.call-stage-slot .clarify-card-title {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--ethos-text);
+}
+
+.call-stage-slot .clarify-card-options,
+.call-stage-slot .clarify-card-freeform {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.call-stage-slot .clarify-card-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--ethos-text-tertiary);
+}
+
+/* Below 760px the transcript CONTENT drops, exactly as it did when a spine
+   carried the way back. The column itself cannot drop with it any more: it now
+   holds the only exit that is not a hang-up, and hiding it would strand the
+   user in the mode. So the column collapses to its header row and restacks
+   under the stage — one line holding "This call" and a 44px "Back to chat". */
+@media (max-width: 760px) {
+  .call-stage {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr) auto;
+  }
+
+  .call-stage-transcript {
+    border-left: 0;
+    border-top: 1px solid var(--ethos-border);
+  }
+
+  .call-stage-turns,
+  .call-stage-slot {
+    display: none;
+  }
+}
+
+/* 375px: the mark, the state, the caption and mute/end persist; the mono
+   provider+latency detail collapses behind the toggle's tap target. */
 @media (max-width: 420px) {
   .talk-indicator {
     width: 72px;
   }
 
+  /* Captions ARE the accessibility story for talk-mode (DR5), and the phone is
+     the headline use case — hiding them here removed the feature exactly where
+     it mattered most. They keep their place instead, on a full-width second
+     line: `order` puts them after the controls so line one still holds the
+     mark, the state word and mute/end, and `flex-basis: 100%` gives them the
+     whole width to ellipsize into rather than a scrap between two chips. */
   .talk-caption {
+    order: 1;
+    flex-basis: 100%;
+  }
+
+  /* The plan: "mono latency/tier detail collapses behind a tap" — ALL of it.
+     The latency reading used to be exempt, which both contradicted the plan and
+     put the widest text back on the narrowest row. Every number is one tap away
+     in the detail row below. */
+  .talk-detail-btn .talk-mono {
     display: none;
   }
 
-  .talk-detail-btn .talk-mono:not(.talk-latency) {
-    display: none;
+  /* …which would otherwise leave an empty pill beside two icon buttons. The
+     marker is the same `·` separator the mono labels are built from, so the
+     control still reads as "more detail" without new markup or a new glyph. */
+  .talk-detail-btn::after {
+    content: "···";
+    font-family: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 12px;
+    color: var(--ethos-text-tertiary);
   }
 
   .talk-detail-btn {
@@ -2685,11 +3054,325 @@ textarea {
 @media (prefers-reduced-motion: reduce) {
   .talk-agent-pulse,
   .talk-link-pulse,
-  .talk-indicator-flash {
+  .talk-indicator-flash,
+  .call-stage {
     animation: none;
   }
 
   .composer-voice-bar {
+    transition: none;
+  }
+}
+
+/* ---------------------------------------------------------------------------
+   Wake routes + satellites (voice V3, DR3)
+
+   Dense LIST ROWS, not the Card primitive — "cards earn existence" reserves
+   that for skill rows, cron rows and task tiles. A routing table and a fleet
+   of microphones are both things you scan for the one that is wrong, and a
+   bordered box per entry turns scanning into reading.
+   --------------------------------------------------------------------------- */
+
+.wake-route-mono,
+.sat-mono,
+.wake-route-phrase {
+  font-family: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
+.wake-route-list {
+  display: flex;
+  flex-direction: column;
+}
+
+.wake-route-row {
+  padding: 8px 0;
+  border-bottom: 1px solid var(--ethos-border);
+  transition: background-color var(--motion-fast, 80ms) var(--ease, ease);
+}
+
+.wake-route-row:last-child {
+  border-bottom: none;
+}
+
+/* The tester lit this row: a 2px ring in the personality's OWN accent, which
+   the row already carries as `--accent` from its selected personality. The
+   ring is the existing accent vocabulary (the same `2px solid var(--accent)`
+   the focus rings use) rather than a colored left border, which the anti-slop
+   table names as the "we have to differentiate rows somehow" pattern. Inset
+   offset so it does not overlap the row above. Identity is the proof — you
+   recognize the agent that answered, not a generic highlight. */
+.wake-route-row--matched {
+  background: var(--ethos-surface-tint);
+  outline: 2px solid var(--accent, var(--ethos-info));
+  outline-offset: -2px;
+}
+
+/* Same shape, semantic color. Never color alone: the row also carries the
+   server's sentence underneath it. */
+.wake-route-row--error {
+  outline: 2px solid var(--ethos-error);
+  outline-offset: -2px;
+}
+
+.wake-route-main {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.wake-route-phrase {
+  flex: 1 1 200px;
+  min-width: 160px;
+}
+
+.wake-route-arrow,
+.sat-row-arrow {
+  color: var(--ethos-text-tertiary);
+  flex-shrink: 0;
+}
+
+/* Reserves the mark's width before a personality is picked, so choosing one
+   does not shove the rest of the row sideways. */
+.wake-route-mark-slot {
+  display: inline-block;
+  width: 20px;
+  height: 20px;
+  flex-shrink: 0;
+}
+
+.wake-route-personality {
+  flex: 0 1 180px;
+  min-width: 140px;
+}
+
+.wake-route-flag {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.wake-route-flag-label,
+.sat-wake-label {
+  font-size: 12px;
+  color: var(--ethos-text-secondary);
+}
+
+.wake-route-note {
+  display: block;
+  margin-top: 4px;
+  font-size: 12px;
+}
+
+/* The synthesized `hey <name>` defaults, inline in the secondary note. Not
+   rows — they are read-only — but each one carries its personality's mark, so
+   the claim "every personality answers to 'hey <name>'" names WHICH agent
+   answers rather than listing bare strings. */
+.wake-implicit-list {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
+  vertical-align: middle;
+  margin-right: 6px;
+}
+
+.wake-implicit-route {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  /* Matched adds a 2px ring; the padding is here unconditionally so lighting
+     one up moves nothing beside it. */
+  padding: 2px 5px;
+  border-radius: var(--radius-sm, 4px);
+  transition: background-color var(--motion-fast, 80ms) var(--ease, ease);
+}
+
+/* The tester heard this default. Identical vocabulary to `.wake-route-row--matched`
+   — same tint, same 2px inset ring in the personality's OWN accent — because
+   "matched" is one fact and a read-only route earning a second highlight
+   treatment would make the operator learn it twice. */
+.wake-implicit-route--matched {
+  background: var(--ethos-surface-tint);
+  outline: 2px solid var(--accent, var(--ethos-info));
+  outline-offset: -2px;
+}
+
+.wake-settings-readout {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.wake-settings-fact {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.wake-settings-label {
+  font-size: 13px;
+  color: var(--ethos-text-secondary);
+  min-width: 160px;
+}
+
+.wake-settings-key {
+  color: var(--ethos-text-tertiary);
+  margin-left: auto;
+}
+
+.wake-satellites {
+  display: flex;
+  flex-direction: column;
+  margin-top: 8px;
+}
+
+.sat-row {
+  padding: 8px 0;
+  border-bottom: 1px solid var(--ethos-border);
+}
+
+.sat-row:last-child {
+  border-bottom: none;
+}
+
+.sat-row-main {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.sat-name {
+  font-size: 14px;
+  color: var(--ethos-text);
+}
+
+.sat-state {
+  color: var(--ethos-text-secondary);
+}
+
+.sat-caps,
+.sat-wake-age,
+.sat-wake-none {
+  color: var(--ethos-text-tertiary);
+}
+
+.sat-wake-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+.sat-row-wake {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+  flex-wrap: wrap;
+}
+
+.sat-wake-phrase {
+  color: var(--ethos-text-secondary);
+}
+
+.sat-row-detail {
+  display: block;
+  margin-top: 4px;
+  font-size: 12px;
+}
+
+/* The connection dot's extra states (DESIGN.md § "Connection status
+   indicator", extended for a microphone). Same `.sb-dot` base, same
+   `status-dot-pulse` keyframe — a satellite's liveness is the same question
+   the sidebar dot already answers, with two states a websocket does not have:
+   a mic that is armed, and a mic the user switched off on purpose. */
+.sb-dot--listening {
+  background: var(--ethos-success);
+}
+
+.sb-dot--speaking {
+  background: var(--accent, var(--ethos-info));
+}
+
+.sb-dot--muted {
+  background: var(--ethos-text-tertiary);
+}
+
+/* Hollow, not grey: wake-off is PERSISTED and muted is momentary, and the
+   whole point of the indicator-honesty rule is that those two do not look
+   alike. */
+.sb-dot--wake-off {
+  background: transparent;
+  border: 1.5px solid var(--ethos-text-tertiary);
+}
+
+.sb-dot--degraded {
+  background: var(--ethos-error);
+}
+
+.sb-dot--pulse {
+  animation: status-dot-pulse 1.2s ease-in-out infinite;
+}
+
+/* A liveness cue, NOT a meter. The node protocol carries no amplitude, so
+   these bars say "the capture loop is running", which is the only thing the
+   row actually knows. Drawing invented levels would be the dishonest version
+   of the same reassurance. */
+.sat-bars {
+  display: inline-flex;
+  align-items: flex-end;
+  gap: 2px;
+  height: 12px;
+  flex-shrink: 0;
+}
+
+.sat-bar {
+  width: 2px;
+  height: 4px;
+  border-radius: 1px;
+  background: var(--ethos-success);
+  animation: sat-bar-breathe 1.1s ease-in-out infinite;
+}
+
+.sat-bar:nth-child(2) {
+  animation-delay: 0.18s;
+}
+
+.sat-bar:nth-child(3) {
+  animation-delay: 0.36s;
+}
+
+@keyframes sat-bar-breathe {
+  0%,
+  100% {
+    height: 4px;
+  }
+  50% {
+    height: 12px;
+  }
+}
+
+/* DR5: every pulse stops. The liveness bars hold their tallest height so the
+   row still reads as armed without a frame of motion, and the speaking dot
+   stays solid accent — colour and the mono state word carry the state, exactly
+   as they do on the Call Stage. */
+@media (prefers-reduced-motion: reduce) {
+  .sat-bar,
+  .sb-dot--pulse {
+    animation: none;
+  }
+
+  .sat-bar {
+    height: 12px;
+  }
+
+  .wake-route-row {
     transition: none;
   }
 }

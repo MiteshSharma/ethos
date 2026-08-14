@@ -13,3 +13,37 @@ export {
 } from './openai-compat';
 export { OpenAiSttProvider, openaiSttFactory } from './openai-stt';
 export { OpenAiTtsProvider, openaiTtsFactory } from './openai-tts';
+export { createWsRealtimeSocket } from './realtime/socket';
+export {
+  createFakeRealtimeServer,
+  type FakeRealtimeServer,
+  REALTIME_CONTRACT_CHECKS,
+  type RealtimeConformanceCheck,
+  type RealtimeConformanceTarget,
+  type RealtimeContractCheckName,
+  runRealtimeContractSuite,
+  type TranscriptScript,
+  validateRealtimeCaps,
+  validateRealtimeProvider,
+} from './realtime-conformance';
+export {
+  createFakeRealtimeProvider,
+  type FakeRealtimeOptions,
+  type FakeRealtimeProvider,
+  type FakeRealtimeReply,
+  type FakeRealtimeSession,
+} from './realtime-fake';
+export {
+  type GeminiLiveOptions,
+  GeminiLiveProvider,
+  geminiLiveFactory,
+} from './realtime-gemini';
+export {
+  type OpenAiRealtimeOptions,
+  OpenAiRealtimeProvider,
+  openaiRealtimeFactory,
+} from './realtime-openai';
+export {
+  BUILT_IN_REALTIME_PROVIDERS,
+  registerBuiltInRealtimeProviders,
+} from './realtime-registry';

@@ -6,6 +6,7 @@ import { detectSecrets } from '@ethosagent/safety-redact';
 import { REF_TO_ENV } from '@ethosagent/storage-fs';
 import type {
   ModelProfile,
+  RealtimeProviderEntry,
   RetentionConfig,
   RetentionEventsConfig,
   SecretsResolver,
@@ -491,6 +492,32 @@ export interface VoiceTrunkConfig {
   username?: string;
   /** SIP auth password/token. Optional; read as a literal (like apiSecret). */
   password?: string;
+}
+
+/**
+ * One wake-phrase → personality route (`voice.wake.routes.<id>`).
+ *
+ * Lives here, next to `VoiceBotConfig` / `VoiceTrunkConfig`, rather than in
+ * `@ethosagent/types`: a wake route is a DEPLOYMENT routing fact the operator
+ * writes in `config.yaml`, not a runtime contract the kernel resolves. Nothing
+ * in `packages/core` reads it — which is exactly why `TtsProviderEntry` had to
+ * live in contracts and this does not.
+ */
+export interface WakeRouteConfig {
+  /** The spoken trigger, e.g. `hey engineer`. */
+  phrase: string;
+  /** Personality id this phrase wakes. Validated against the registry at dispatch. */
+  personality: string;
+  /**
+   * Opt-in for a PRIVILEGED personality (eng-review D13). The default wake
+   * surface exposes only unprivileged personalities: anyone within earshot can
+   * trigger a wake, so a personality with consequential tools must be named
+   * explicitly here before a voice from across the room can reach it. Absent =
+   * false = not wake-reachable if the personality is privileged.
+   */
+  privileged?: boolean;
+  /** Route off without deleting it. Absent = enabled. */
+  enabled?: boolean;
 }
 
 export interface ProviderConfig {
@@ -983,15 +1010,123 @@ export interface EthosConfig {
    * `voice.tts.providers.<name>.*` — it shipped before STT had a roster, when
    * "providers" could only mean one thing. It is never written back: a config
    * re-serialized from either spelling carries only the new one.
+   *
+   * `realtime.providers` is the THIRD roster, on the same three dotted levels
+   * and through the same builder — hosted speech-to-speech engines that own the
+   * audio in both directions instead of a transcribe → think → speak pipeline:
+   *   voice.realtime.providers.live.provider: openai-realtime
+   *   voice.realtime.providers.live.apiKey: ${secrets:voice/realtime/providers/live/apiKey}
+   *   voice.realtime.providers.live.costPerMinuteUsd: 0.06
+   * `realtime.default` names the entry a deployment uses when a personality
+   * names none, and `realtime.sessionBudgetUsd` caps the accrued cost of ONE
+   * session (rate × audio minutes) before it is cut short.
+   *
+   * `tier` is the deployment's default voice engine: `realtime` runs talk mode
+   * as one hosted duplex session, `pipeline` is the explicit private/offline
+   * mode (STT → LLM → TTS, which is what local providers can serve). Absent
+   * leaves the choice to the surface. Anything other than those two values is
+   * ignored, the same way an unknown `defaultMode` is.
    */
   voice?: {
+    /**
+     * Per-channel TTS-out default: which platforms speak their replies without
+     * being asked. Keyed by platform id (`telegram`, `slack`, `discord`,
+     * `whatsapp`, `email` — see `VOICE_CHANNEL_PLATFORMS`), value
+     * `true`/`false`.
+     *
+     *   voice.channels.slack.ttsOut: false
+     *
+     * A platform absent here inherits `voice.defaultMode`. An explicit `false`
+     * means "never speak on this channel", and outranks a lane's mode — an
+     * operator turning a channel off is a deployment decision, not a
+     * conversational one. `/voice all` in a Slack lane with
+     * `voice.channels.slack.ttsOut: false` stays silent. An unknown platform id
+     * or a non-boolean value is ignored, the same way an unknown `tier` is.
+     */
+    channels?: Record<string, { ttsOut?: boolean }>;
+    /**
+     * ffmpeg transcode stage. Present because voice notes only render as voice
+     * bubbles in the container each platform wants, and the host binary is the
+     * one new runtime dependency this feature has. Out-of-range numbers are
+     * dropped, not clamped.
+     */
+    transcode?: {
+      /** Path or name of the ffmpeg binary. Default: `ffmpeg` on PATH. */
+      ffmpegPath?: string;
+      /** Target bitrate for compressed containers, kbps. 8–320. Default 32 (voice). */
+      bitrateKbps?: number;
+      /** Budget for one ffmpeg invocation, seconds. 1–600. Default 30. */
+      timeout?: number;
+    };
+    /**
+     * Retention for synthesized voice artifacts. An artifact is deleted the
+     * moment its delivery obligation is confirmed; these two keys bound what
+     * happens to the ones that are never confirmed.
+     */
+    artifacts?: {
+      /**
+       * Give up on an undelivered obligation after this many days and delete
+       * its artifact. 1–365. Default 7.
+       */
+      abandonAfterDays?: number;
+      /**
+       * Total on-disk cap for the artifact directory, MiB. Oldest-first
+       * eviction once exceeded — the backstop for runaway accumulation when
+       * neither delivery nor abandonment has fired. 1–102400. Default 512.
+       */
+      maxTotalMb?: number;
+    };
+    /**
+     * Wake-word satellites: "hey engineer" from across the room wakes THAT
+     * personality, with its toolset, memory scope and model routing intact.
+     *
+     * Routing is a DEPLOYMENT concern and deliberately not a PersonalityConfig
+     * field: which phrase reaches which personality depends on the room and the
+     * people in it, and two deployments of one personality can reasonably
+     * disagree. Voice IDENTITY — the TTS voice, language map, tier, fast-lane
+     * model — is on `PersonalityConfig.voice` and stays there.
+     *
+     * Out-of-range numbers and unknown engine ids are ignored rather than
+     * clamped, and a route id outside `[A-Za-z0-9_-]+` is dropped: a typo here
+     * must not make the whole config unloadable.
+     */
+    wake?: {
+      /** Master switch. Absent → satellites decide from their own persisted state. */
+      enabled?: boolean;
+      /** Wake matcher: `fallback` (built-in, no native deps) | `sherpa` | `openwakeword`. */
+      engine?: 'fallback' | 'sherpa' | 'openwakeword';
+      /** Match threshold, 0..1. Higher = fewer false accepts, more misses. */
+      sensitivity?: number;
+      /** Consecutive matching frames before a wake fires — the false-accept damper. */
+      confirmationFrames?: number;
+      /** Transcribe on the satellite instead of shipping audio upstream. */
+      edgeStt?: boolean;
+      /**
+       * Seconds of silence that end the LISTENING state. Ends listening ONLY —
+       * never the session (eng-review D15). A post-timeout re-wake resumes the
+       * same conversation.
+       */
+      idleTimeout?: number;
+      /** Phrase → personality. Key is an operator-chosen route id. */
+      routes?: Record<string, WakeRouteConfig>;
+      /** Per-satellite overrides, keyed by the node's stable id. */
+      nodes?: Record<string, { inputDevice?: string; enabled?: boolean }>;
+    };
     bots: VoiceBotConfig[];
     livekit?: VoiceLiveKitConfig;
     trunk?: VoiceTrunkConfig;
     trustedPlugins?: string[];
     defaultMode?: 'off' | 'mirror_inbound' | 'all';
+    tier?: 'pipeline' | 'realtime';
     tts?: { providers: Record<string, TtsProviderEntry> };
     stt?: { providers: Record<string, SttProviderEntry> };
+    realtime?: {
+      providers?: Record<string, RealtimeProviderEntry>;
+      /** Roster entry name a deployment falls back to. Not a provider id. */
+      default?: string;
+      /** USD cap on ONE realtime session's accrued cost. */
+      sessionBudgetUsd?: number;
+    };
   };
   // Email platform
   emailImapHost?: string;
@@ -1132,6 +1267,25 @@ export interface EthosConfig {
    * Config key: `display.streaming_edits`.
    */
   displayStreamingEdits?: 'off' | 'dms' | 'all';
+  /**
+   * Which treatment the Call Stage draws (DESIGN.md § "Call Stage").
+   * Config key: `display.call_style`.
+   *   `'personality'` (default) — each personality draws its own treatment:
+   *     its `voice.call_style` if it declares one, otherwise a shape derived
+   *     from its id.
+   *   `'liquid' | 'orb' | 'rings'` — pin one treatment for every personality
+   *     that has not declared its own.
+   * Unset = `personality`.
+   */
+  displayCallStyle?: 'liquid' | 'orb' | 'rings' | 'personality';
+  /**
+   * What color the Call Stage draws in. Config key: `display.call_accent`.
+   *   `'personality'` (default) — follow the active personality's `--accent`
+   *   `'#RRGGBB'`               — an explicit hex
+   * Anything else is ignored, so a typo falls back to the personality accent
+   * rather than painting the call an unreadable color.
+   */
+  displayCallAccent?: string;
   /**
    * context_compression F1 — auxiliary model wiring. `auxiliary.compression`
    * configures the cheap summarizer that `semantic_summary` uses to condense
@@ -1457,9 +1611,11 @@ async function externalizeConfigSecrets(
   // Per-ENTRY refs. A roster key must not be able to route its credential
   // around the vault, so each entry externalizes exactly like
   // `auxiliary.tts.apiKey` does — `voice.tts.providers.<name>.apiKey` →
-  // `voice/tts/providers/<name>/apiKey`, and the STT roster the same way.
+  // `voice/tts/providers/<name>/apiKey`, and the STT and realtime rosters the
+  // same way. Same-named entries in different rosters therefore land on
+  // different refs and cannot overwrite each other.
   const externalizeRoster = async <E extends { apiKey?: string }>(
-    kind: 'tts' | 'stt',
+    kind: 'tts' | 'stt' | 'realtime',
     roster: Record<string, E>,
   ): Promise<Record<string, E>> => {
     const out: Record<string, E> = {};
@@ -1487,6 +1643,15 @@ async function externalizeConfigSecrets(
     r.voice = {
       ...r.voice,
       stt: { providers: await externalizeRoster('stt', r.voice.stt.providers) },
+    };
+  }
+  if (r.voice?.realtime?.providers) {
+    r.voice = {
+      ...r.voice,
+      realtime: {
+        ...r.voice.realtime,
+        providers: await externalizeRoster('realtime', r.voice.realtime.providers),
+      },
     };
   }
   if (r.auxiliary) {
@@ -1677,6 +1842,8 @@ export async function writeConfig(
     lines.push(`display.memory_notices: ${config.displayMemoryNotices}`);
   if (config.displayStreamingEdits)
     lines.push(`display.streaming_edits: ${config.displayStreamingEdits}`);
+  if (config.displayCallStyle) lines.push(`display.call_style: ${config.displayCallStyle}`);
+  if (config.displayCallAccent) lines.push(`display.call_accent: ${config.displayCallAccent}`);
   if (config.displayDebugPanel) lines.push('display.debug_panel: true');
   if (config.displayDebugPanelModel)
     lines.push(`display.debug_panel_model: ${config.displayDebugPanelModel}`);
@@ -1792,6 +1959,59 @@ export async function writeConfig(
     if (config.voice.defaultMode) {
       lines.push(`voice.defaultMode: ${config.voice.defaultMode}`);
     }
+    if (config.voice.tier) {
+      lines.push(`voice.tier: ${config.voice.tier}`);
+    }
+    for (const [platform, entry] of Object.entries(config.voice.channels ?? {})) {
+      if (entry.ttsOut !== undefined) {
+        lines.push(`voice.channels.${platform}.ttsOut: ${entry.ttsOut}`);
+      }
+    }
+    if (config.voice.transcode) {
+      const tc = config.voice.transcode;
+      if (tc.ffmpegPath) lines.push(`voice.transcode.ffmpegPath: ${tc.ffmpegPath}`);
+      if (tc.bitrateKbps !== undefined)
+        lines.push(`voice.transcode.bitrateKbps: ${tc.bitrateKbps}`);
+      if (tc.timeout !== undefined) lines.push(`voice.transcode.timeout: ${tc.timeout}`);
+    }
+    if (config.voice.artifacts) {
+      const ar = config.voice.artifacts;
+      if (ar.abandonAfterDays !== undefined) {
+        lines.push(`voice.artifacts.abandonAfterDays: ${ar.abandonAfterDays}`);
+      }
+      if (ar.maxTotalMb !== undefined) lines.push(`voice.artifacts.maxTotalMb: ${ar.maxTotalMb}`);
+    }
+    if (config.voice.wake) {
+      const wk = config.voice.wake;
+      if (wk.enabled !== undefined) lines.push(`voice.wake.enabled: ${wk.enabled}`);
+      if (wk.engine) lines.push(`voice.wake.engine: ${wk.engine}`);
+      if (wk.sensitivity !== undefined) lines.push(`voice.wake.sensitivity: ${wk.sensitivity}`);
+      if (wk.confirmationFrames !== undefined) {
+        lines.push(`voice.wake.confirmationFrames: ${wk.confirmationFrames}`);
+      }
+      if (wk.edgeStt !== undefined) lines.push(`voice.wake.edgeStt: ${wk.edgeStt}`);
+      if (wk.idleTimeout !== undefined) lines.push(`voice.wake.idleTimeout: ${wk.idleTimeout}`);
+      // `phrase` and `personality` are unconditional — a route is only ever
+      // built with both, and a half-written route would round-trip to nothing.
+      for (const [id, route] of Object.entries(wk.routes ?? {})) {
+        lines.push(`voice.wake.routes.${id}.phrase: ${route.phrase}`);
+        lines.push(`voice.wake.routes.${id}.personality: ${route.personality}`);
+        if (route.privileged !== undefined) {
+          lines.push(`voice.wake.routes.${id}.privileged: ${route.privileged}`);
+        }
+        if (route.enabled !== undefined) {
+          lines.push(`voice.wake.routes.${id}.enabled: ${route.enabled}`);
+        }
+      }
+      for (const [id, node] of Object.entries(wk.nodes ?? {})) {
+        if (node.inputDevice) {
+          lines.push(`voice.wake.nodes.${id}.inputDevice: ${node.inputDevice}`);
+        }
+        if (node.enabled !== undefined) {
+          lines.push(`voice.wake.nodes.${id}.enabled: ${node.enabled}`);
+        }
+      }
+    }
     // Always the NEW spelling, whichever one was read. A config parsed from
     // `voice.providers.*` re-serializes as `voice.tts.providers.*` and never
     // carries both.
@@ -1804,6 +2024,21 @@ export async function writeConfig(
       lines.push(
         ...voiceProviderEntryLines(`voice.stt.providers.${name}`, entry, STT_ENTRY_FIELDS),
       );
+    }
+    for (const [name, entry] of Object.entries(config.voice.realtime?.providers ?? {})) {
+      lines.push(
+        ...voiceProviderEntryLines(
+          `voice.realtime.providers.${name}`,
+          entry,
+          REALTIME_ENTRY_FIELDS,
+        ),
+      );
+    }
+    if (config.voice.realtime?.default) {
+      lines.push(`voice.realtime.default: ${config.voice.realtime.default}`);
+    }
+    if (config.voice.realtime?.sessionBudgetUsd !== undefined) {
+      lines.push(`voice.realtime.sessionBudgetUsd: ${config.voice.realtime.sessionBudgetUsd}`);
     }
   }
   if (config.teams) {
@@ -2115,6 +2350,15 @@ export async function resolveConfigSecrets(
   if (r.voice?.stt?.providers) {
     r.voice = { ...r.voice, stt: { providers: await resolveRoster(r.voice.stt.providers) } };
   }
+  if (r.voice?.realtime?.providers) {
+    r.voice = {
+      ...r.voice,
+      realtime: {
+        ...r.voice.realtime,
+        providers: await resolveRoster(r.voice.realtime.providers),
+      },
+    };
+  }
   if (r.webhooks) {
     const hooks: Record<string, WebhookHookConfig> = {};
     for (const [id, hook] of Object.entries(r.webhooks)) {
@@ -2173,10 +2417,37 @@ function parseConfigYaml(src: string): EthosConfig {
   const voiceTtsProvidersLegacyKv: Record<string, Record<string, string>> = {};
   /** `voice.stt.providers.<name>.<field>` — the named STT roster. */
   const voiceSttProvidersKv: Record<string, Record<string, string>> = {};
+  /** `voice.realtime.providers.<name>.<field>` — the named realtime roster. */
+  const voiceRealtimeProvidersKv: Record<string, Record<string, string>> = {};
   /** Raw `voice.trustedPlugins` line; `undefined` = key absent = gate off. */
   let voiceTrustedPluginsRaw: string | undefined;
   /** `voice.defaultMode`; `undefined` = key absent = the built-in default. */
   let voiceDefaultMode: 'off' | 'mirror_inbound' | 'all' | undefined;
+  /** `voice.tier`; `undefined` = key absent = the surface decides. */
+  let voiceTier: 'pipeline' | 'realtime' | undefined;
+  /** `voice.realtime.default` — names a realtime roster entry. */
+  let voiceRealtimeDefault: string | undefined;
+  /** `voice.realtime.sessionBudgetUsd` — USD cap on one session's accrued cost. */
+  let voiceRealtimeSessionBudgetUsd: number | undefined;
+  /** `voice.channels.<platform>.ttsOut` — per-channel TTS-out overrides. */
+  const voiceChannelsKv: Record<string, { ttsOut?: boolean }> = {};
+  /** `voice.transcode.<field>` — ffmpeg stage knobs, range-checked on the way in. */
+  const voiceTranscodeKv: { ffmpegPath?: string; bitrateKbps?: number; timeout?: number } = {};
+  /** `voice.artifacts.<field>` — retention bounds, range-checked on the way in. */
+  const voiceArtifactsKv: { abandonAfterDays?: number; maxTotalMb?: number } = {};
+  /** `voice.wake.<field>` — satellite wake knobs, range-checked on the way in. */
+  const voiceWakeKv: {
+    enabled?: boolean;
+    engine?: 'fallback' | 'sherpa' | 'openwakeword';
+    sensitivity?: number;
+    confirmationFrames?: number;
+    edgeStt?: boolean;
+    idleTimeout?: number;
+  } = {};
+  /** `voice.wake.routes.<id>.<field>` — raw route fields, keyed by route id. */
+  const voiceWakeRoutesKv: Record<string, Record<string, string>> = {};
+  /** `voice.wake.nodes.<id>.<field>` — per-satellite overrides, keyed by node id. */
+  const voiceWakeNodesKv: Record<string, Record<string, string>> = {};
   const teamsKv: Record<string, Record<string, string>> = {};
   const webhooksKv: Record<string, Record<string, string>> = {};
   // FW-16 — quick_commands.<name>.<field>: <value>
@@ -2250,17 +2521,38 @@ function parseConfigYaml(src: string): EthosConfig {
       voiceBotsKv[idx][vbot[2]] = vbot[3].trim().replace(/^["']|["']$/g, '');
       continue;
     }
-    // voice.<tts|stt>.providers.<name>.<field>: <value> — the named rosters.
-    // The name is anchored to the identifier charset so the split is
+    // voice.<tts|stt|realtime>.providers.<name>.<field>: <value> — the named
+    // rosters. The name is anchored to the identifier charset so the split is
     // unambiguous and the last level is a plain field, exactly the way
-    // `telegram.bots.<n>.<field>` is matched. One regex serves both rosters so
-    // the two cannot acquire different name rules.
-    const vprov = line.match(/^voice\.(tts|stt)\.providers\.([A-Za-z0-9_-]+)\.(\w+):\s*(.+)$/);
+    // `telegram.bots.<n>.<field>` is matched. One regex serves all three rosters
+    // so they cannot acquire different name rules.
+    const vprov = line.match(
+      /^voice\.(tts|stt|realtime)\.providers\.([A-Za-z0-9_-]+)\.(\w+):\s*(.+)$/,
+    );
     if (vprov) {
-      const bag = vprov[1] === 'stt' ? voiceSttProvidersKv : voiceTtsProvidersKv;
+      const bag =
+        vprov[1] === 'stt'
+          ? voiceSttProvidersKv
+          : vprov[1] === 'realtime'
+            ? voiceRealtimeProvidersKv
+            : voiceTtsProvidersKv;
       const name = vprov[2];
       bag[name] ??= {};
       bag[name][vprov[3]] = vprov[4].trim().replace(/^["']|["']$/g, '');
+      continue;
+    }
+    // voice.realtime.default / voice.realtime.sessionBudgetUsd. Matched AFTER
+    // the roster line above, whose third level is `providers` and whose tail
+    // carries dots — so this `(\w+)` can never swallow a roster key.
+    const vrt = line.match(/^voice\.realtime\.(\w+):\s*(.+)$/);
+    if (vrt) {
+      const value = vrt[2].trim().replace(/^["']|["']$/g, '');
+      if (vrt[1] === 'default') {
+        voiceRealtimeDefault = value;
+      } else if (vrt[1] === 'sessionBudgetUsd') {
+        const n = Number(value);
+        if (Number.isFinite(n) && n > 0) voiceRealtimeSessionBudgetUsd = n;
+      }
       continue;
     }
     // voice.providers.<name>.<field> — the OLDER spelling of the TTS roster,
@@ -2302,6 +2594,98 @@ function parseConfigYaml(src: string): EthosConfig {
       const mode = vdm[1].trim().replace(/^["']|["']$/g, '');
       if (mode === 'off' || mode === 'mirror_inbound' || mode === 'all') {
         voiceDefaultMode = mode;
+      }
+      continue;
+    }
+    // voice.tier: pipeline | realtime — the deployment's default voice engine.
+    // An unknown value is ignored rather than thrown on, exactly like the mode
+    // above: a typo here must not make the whole config unloadable.
+    const vtier = line.match(/^voice\.tier:\s*(.+)$/);
+    if (vtier) {
+      const tier = vtier[1].trim().replace(/^["']|["']$/g, '');
+      if (tier === 'pipeline' || tier === 'realtime') voiceTier = tier;
+      continue;
+    }
+    // voice.channels.<platform>.ttsOut: true | false — which channels speak
+    // their replies without being asked. Only the platforms in
+    // VOICE_CHANNEL_PLATFORMS are accepted; an unknown id or a non-boolean is
+    // dropped, so a typo cannot invent a channel entry no adapter will read.
+    const vch = line.match(/^voice\.channels\.([A-Za-z0-9_-]+)\.ttsOut:\s*(.+)$/);
+    if (vch) {
+      const platform = vch[1];
+      const value = vch[2].trim().replace(/^["']|["']$/g, '');
+      if (isVoiceChannelPlatform(platform) && (value === 'true' || value === 'false')) {
+        voiceChannelsKv[platform] = { ttsOut: value === 'true' };
+      }
+      continue;
+    }
+    // voice.transcode.<field> — ffmpeg stage. Out-of-range or non-numeric
+    // values are ignored, same rule as the mode and tier above.
+    const vtc = line.match(/^voice\.transcode\.(\w+):\s*(.+)$/);
+    if (vtc) {
+      const value = vtc[2].trim().replace(/^["']|["']$/g, '');
+      if (vtc[1] === 'ffmpegPath') {
+        if (value) voiceTranscodeKv.ffmpegPath = value;
+      } else if (vtc[1] === 'bitrateKbps') {
+        const n = parseBoundedInt(value, 8, 320);
+        if (n !== undefined) voiceTranscodeKv.bitrateKbps = n;
+      } else if (vtc[1] === 'timeout') {
+        const n = parseBoundedInt(value, 1, 600);
+        if (n !== undefined) voiceTranscodeKv.timeout = n;
+      }
+      continue;
+    }
+    // voice.artifacts.<field> — retention for synthesized voice artifacts.
+    const vart = line.match(/^voice\.artifacts\.(\w+):\s*(.+)$/);
+    if (vart) {
+      const value = vart[2].trim().replace(/^["']|["']$/g, '');
+      if (vart[1] === 'abandonAfterDays') {
+        const n = parseBoundedInt(value, 1, 365);
+        if (n !== undefined) voiceArtifactsKv.abandonAfterDays = n;
+      } else if (vart[1] === 'maxTotalMb') {
+        const n = parseBoundedInt(value, 1, 102400);
+        if (n !== undefined) voiceArtifactsKv.maxTotalMb = n;
+      }
+      continue;
+    }
+    // voice.wake.routes.<id>.<field> / voice.wake.nodes.<id>.<field> — the two
+    // record-valued wake sub-blocks. One regex serves both so they cannot
+    // acquire different id rules, and the id is anchored to the identifier
+    // charset exactly like a provider roster name: a key the serializer could
+    // not round-trip is dropped here rather than corrupting the file later.
+    // Matched BEFORE the scalar `voice.wake.<field>` line below.
+    const vwrec = line.match(/^voice\.wake\.(routes|nodes)\.([A-Za-z0-9_-]+)\.(\w+):\s*(.+)$/);
+    if (vwrec) {
+      const bag = vwrec[1] === 'routes' ? voiceWakeRoutesKv : voiceWakeNodesKv;
+      const id = vwrec[2];
+      bag[id] ??= {};
+      bag[id][vwrec[3]] = vwrec[4].trim().replace(/^["']|["']$/g, '');
+      continue;
+    }
+    // voice.wake.<field> — the scalar satellite knobs. An unknown engine and an
+    // out-of-range number are ignored rather than clamped or thrown on, same
+    // rule as the mode and tier above.
+    const vwk = line.match(/^voice\.wake\.(\w+):\s*(.+)$/);
+    if (vwk) {
+      const field = vwk[1];
+      const value = vwk[2].trim().replace(/^["']|["']$/g, '');
+      if (field === 'enabled') {
+        if (value === 'true' || value === 'false') voiceWakeKv.enabled = value === 'true';
+      } else if (field === 'edgeStt') {
+        if (value === 'true' || value === 'false') voiceWakeKv.edgeStt = value === 'true';
+      } else if (field === 'engine') {
+        if (value === 'fallback' || value === 'sherpa' || value === 'openwakeword') {
+          voiceWakeKv.engine = value;
+        }
+      } else if (field === 'sensitivity') {
+        const n = parseBoundedFloat(value, 0, 1);
+        if (n !== undefined) voiceWakeKv.sensitivity = n;
+      } else if (field === 'confirmationFrames') {
+        const n = parseBoundedInt(value, 1, 10);
+        if (n !== undefined) voiceWakeKv.confirmationFrames = n;
+      } else if (field === 'idleTimeout') {
+        const n = parseBoundedInt(value, 5, 600);
+        if (n !== undefined) voiceWakeKv.idleTimeout = n;
       }
       continue;
     }
@@ -2732,14 +3116,58 @@ function parseConfigYaml(src: string): EthosConfig {
     voiceSttProvidersKv,
     STT_ENTRY_FIELDS,
   );
+  const voiceRealtimeProviders = buildVoiceProviderRoster<RealtimeProviderEntry>(
+    voiceRealtimeProvidersKv,
+    REALTIME_ENTRY_FIELDS,
+  );
+  // `default` and `sessionBudgetUsd` stand on their own: a deployment can name a
+  // default (or cap a session) before its roster is typed in, and losing the cap
+  // because the roster is momentarily empty would be the wrong way round.
+  const voiceRealtime =
+    voiceRealtimeProviders !== undefined ||
+    voiceRealtimeDefault !== undefined ||
+    voiceRealtimeSessionBudgetUsd !== undefined
+      ? {
+          ...(voiceRealtimeProviders ? { providers: voiceRealtimeProviders } : {}),
+          ...(voiceRealtimeDefault ? { default: voiceRealtimeDefault } : {}),
+          ...(voiceRealtimeSessionBudgetUsd !== undefined
+            ? { sessionBudgetUsd: voiceRealtimeSessionBudgetUsd }
+            : {}),
+        }
+      : undefined;
+  // Each of the three V2 sub-sections stands on its own: an operator can cap
+  // artifact disk before naming an ffmpeg path, and vice versa.
+  const voiceChannels = Object.keys(voiceChannelsKv).length > 0 ? voiceChannelsKv : undefined;
+  const voiceTranscode = Object.keys(voiceTranscodeKv).length > 0 ? voiceTranscodeKv : undefined;
+  const voiceArtifacts = Object.keys(voiceArtifactsKv).length > 0 ? voiceArtifactsKv : undefined;
+  // The wake block stands on its own too: an operator can set the engine before
+  // typing a single route, and a routes-only config is the common first edit.
+  const voiceWakeRoutes = buildWakeRoutes(voiceWakeRoutesKv);
+  const voiceWakeNodes = buildWakeNodes(voiceWakeNodesKv);
+  const voiceWake =
+    Object.keys(voiceWakeKv).length > 0 ||
+    voiceWakeRoutes !== undefined ||
+    voiceWakeNodes !== undefined
+      ? {
+          ...voiceWakeKv,
+          ...(voiceWakeRoutes ? { routes: voiceWakeRoutes } : {}),
+          ...(voiceWakeNodes ? { nodes: voiceWakeNodes } : {}),
+        }
+      : undefined;
   const voiceSection =
     voiceResult.bots.length > 0 ||
     voiceLiveKitResult.livekit ||
     voiceTrunkResult.trunk ||
     voiceTrustedPluginsRaw !== undefined ||
     voiceDefaultMode !== undefined ||
+    voiceTier !== undefined ||
     voiceTtsProviders !== undefined ||
-    voiceSttProviders !== undefined
+    voiceSttProviders !== undefined ||
+    voiceRealtime !== undefined ||
+    voiceChannels !== undefined ||
+    voiceTranscode !== undefined ||
+    voiceArtifacts !== undefined ||
+    voiceWake !== undefined
       ? {
           bots: voiceResult.bots,
           ...(voiceLiveKitResult.livekit ? { livekit: voiceLiveKitResult.livekit } : {}),
@@ -2748,8 +3176,14 @@ function parseConfigYaml(src: string): EthosConfig {
             ? { trustedPlugins: splitList(voiceTrustedPluginsRaw) }
             : {}),
           ...(voiceDefaultMode ? { defaultMode: voiceDefaultMode } : {}),
+          ...(voiceTier ? { tier: voiceTier } : {}),
           ...(voiceTtsProviders ? { tts: { providers: voiceTtsProviders } } : {}),
           ...(voiceSttProviders ? { stt: { providers: voiceSttProviders } } : {}),
+          ...(voiceRealtime ? { realtime: voiceRealtime } : {}),
+          ...(voiceChannels ? { channels: voiceChannels } : {}),
+          ...(voiceTranscode ? { transcode: voiceTranscode } : {}),
+          ...(voiceArtifacts ? { artifacts: voiceArtifacts } : {}),
+          ...(voiceWake ? { wake: voiceWake } : {}),
         }
       : undefined;
   const teams = buildTeamsConfig(teamsKv);
@@ -2873,6 +3307,8 @@ function parseConfigYaml(src: string): EthosConfig {
     displayDebugPanel: displayKv.debug_panel === 'true' ? true : undefined,
     displayDebugPanelModel: displayKv.debug_panel_model || undefined,
     displayStreamingEdits: parseStreamingEdits(displayKv.streaming_edits),
+    displayCallStyle: parseCallStyle(displayKv.call_style),
+    displayCallAccent: parseCallAccent(displayKv.call_accent),
     quick_commands,
     channelToolsets,
     channelFilter,
@@ -3110,11 +3546,112 @@ function parseStreamingEdits(v: string | undefined): EthosConfig['displayStreami
   return v === 'off' || v === 'dms' || v === 'all' ? v : undefined;
 }
 
+function parseCallStyle(v: string | undefined): EthosConfig['displayCallStyle'] {
+  return v === 'liquid' || v === 'orb' || v === 'rings' || v === 'personality' ? v : undefined;
+}
+
+/** `personality` or a 6-digit hex. Anything else is dropped, not coerced. */
+function parseCallAccent(v: string | undefined): string | undefined {
+  if (v === 'personality') return v;
+  return v !== undefined && /^#[0-9a-fA-F]{6}$/.test(v) ? v : undefined;
+}
+
 function parseToolPreviewLength(v: string | undefined): number | undefined {
   if (!v) return undefined;
   const n = Number(v);
   if (!Number.isFinite(n) || n < 0 || !Number.isInteger(n)) return undefined;
   return n;
+}
+
+/**
+ * Platform ids that may carry a `voice.channels.<platform>.ttsOut` override —
+ * the channels that have an adapter able to act on it. Anything else is
+ * ignored on read.
+ */
+export const VOICE_CHANNEL_PLATFORMS = [
+  'telegram',
+  'slack',
+  'discord',
+  'whatsapp',
+  'email',
+] as const;
+
+/** Exported so the RPC boundary (web-api's ConfigService) can REFUSE a platform
+ *  id this parser would silently drop, rather than keeping a second list. */
+export function isVoiceChannelPlatform(v: string): boolean {
+  return (VOICE_CHANNEL_PLATFORMS as readonly string[]).includes(v);
+}
+
+/** An integer inside [min, max], or `undefined` — never a clamped near-miss. */
+function parseBoundedInt(v: string, min: number, max: number): number | undefined {
+  const n = Number(v);
+  return Number.isInteger(n) && n >= min && n <= max ? n : undefined;
+}
+
+/**
+ * A finite number inside [min, max], or `undefined` — the float sibling of
+ * `parseBoundedInt`, for the one wake bound (`sensitivity`) that is a fraction
+ * rather than a count. Same contract: never a clamped near-miss.
+ */
+function parseBoundedFloat(v: string, min: number, max: number): number | undefined {
+  const n = Number(v);
+  return Number.isFinite(n) && n >= min && n <= max ? n : undefined;
+}
+
+/**
+ * `voice.wake.routes.<id>` — phrase → personality.
+ *
+ * A route missing `phrase` OR `personality` is DROPPED entirely rather than
+ * half-built: a phrase-less route can never fire and a personality-less one
+ * would wake nothing, so keeping the remnant would hide the typo behind an
+ * entry that looks configured in the Settings UI.
+ */
+function buildWakeRoutes(
+  kv: Record<string, Record<string, string>>,
+): Record<string, WakeRouteConfig> | undefined {
+  const out: Record<string, WakeRouteConfig> = {};
+  for (const [id, fields] of Object.entries(kv)) {
+    const phrase = fields.phrase;
+    const personality = fields.personality;
+    if (!phrase || !personality) continue;
+    // `privileged` and `enabled` stay ABSENT unless written: the consumer must
+    // be able to tell "operator said no" from "operator never said".
+    out[id] = {
+      phrase,
+      personality,
+      ...(fields.privileged === 'true'
+        ? { privileged: true }
+        : fields.privileged === 'false'
+          ? { privileged: false }
+          : {}),
+      ...(fields.enabled === 'true'
+        ? { enabled: true }
+        : fields.enabled === 'false'
+          ? { enabled: false }
+          : {}),
+    };
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+/** `voice.wake.nodes.<id>` — per-satellite overrides. An entry with no
+ *  recognised field is dropped rather than kept as an empty object. */
+function buildWakeNodes(
+  kv: Record<string, Record<string, string>>,
+): Record<string, { inputDevice?: string; enabled?: boolean }> | undefined {
+  const out: Record<string, { inputDevice?: string; enabled?: boolean }> = {};
+  for (const [id, fields] of Object.entries(kv)) {
+    const entry = {
+      ...(fields.inputDevice ? { inputDevice: fields.inputDevice } : {}),
+      ...(fields.enabled === 'true'
+        ? { enabled: true }
+        : fields.enabled === 'false'
+          ? { enabled: false }
+          : {}),
+    };
+    if (Object.keys(entry).length > 0) out[id] = entry;
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
 }
 
 function isAudioFormat(v: string | undefined): v is 'opus' | 'mp3' | 'wav' | 'pcm' {
@@ -3125,13 +3662,16 @@ function isAudioFormat(v: string | undefined): v is 'opus' | 'mp3' | 'wav' | 'pc
 // Voice provider entries — ONE builder and ONE serializer, parameterised by
 // field set.
 //
-// There are four places an entry shape is read or written: the default TTS
+// There are five places an entry shape is read or written: the default TTS
 // entry (`auxiliary.tts`), the TTS roster (`voice.tts.providers.<name>`), the
-// default STT entry (`auxiliary.asr`), and the STT roster
-// (`voice.stt.providers.<name>`). Four hand-written field lists would be four
-// chances for a roster to quietly stop supporting a field its default still
-// has. So the field set is DATA — a spec keyed to the entry interface, checked
-// by the compiler — and the code that walks it is written once.
+// default STT entry (`auxiliary.asr`), the STT roster
+// (`voice.stt.providers.<name>`), and the realtime roster
+// (`voice.realtime.providers.<name>`, which has no `auxiliary.*` default —
+// `voice.realtime.default` names one of its own entries instead). Five
+// hand-written field lists would be five chances for a roster to quietly stop
+// supporting a field its default still has. So the field set is DATA — a spec
+// keyed to the entry interface, checked by the compiler — and the code that
+// walks it is written once.
 // ---------------------------------------------------------------------------
 
 /**
@@ -3161,6 +3701,20 @@ const STT_ENTRY_FIELDS: readonly VoiceEntryFieldSpec<SttProviderEntry>[] = [
   { name: 'baseUrl', kind: 'string' },
   { name: 'command', kind: 'string' },
   { name: 'timeout', kind: 'positiveNumber' },
+];
+
+/**
+ * No `command` and no `timeout`: a realtime provider is a duplex SESSION, not a
+ * request you shell out for and time out. `costPerMinuteUsd` rides the existing
+ * `positiveNumber` kind, so a rate of `0` reads as absent — which is what it
+ * means for accrual, since a free minute costs nothing to charge.
+ */
+const REALTIME_ENTRY_FIELDS: readonly VoiceEntryFieldSpec<RealtimeProviderEntry>[] = [
+  { name: 'model', kind: 'string' },
+  { name: 'apiKey', kind: 'string' },
+  { name: 'baseUrl', kind: 'string' },
+  { name: 'voice', kind: 'string' },
+  { name: 'costPerMinuteUsd', kind: 'positiveNumber' },
 ];
 
 /**

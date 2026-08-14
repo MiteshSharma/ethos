@@ -8,6 +8,7 @@ import { join } from 'node:path';
 import { noopLogger } from '@ethosagent/logger';
 import type {
   AdapterCapabilities,
+  AdapterVoiceCaps,
   ApprovalCapableAdapter,
   ApprovalDecisionEvent,
   Attachment,
@@ -17,7 +18,9 @@ import type {
   Logger,
   OutboundMessage,
   PlatformAdapter,
+  SendVoiceNoteOptions,
   Storage,
+  VoiceOutboundAdapter,
 } from '@ethosagent/types';
 import boltPkg from '@slack/bolt';
 import {
@@ -125,19 +128,18 @@ export function isSlackDownloadUrl(rawUrl: string): boolean {
 }
 
 const IMAGE_EXTS = new Set(['jpg', 'jpeg', 'png', 'gif', 'webp', 'heic', 'bmp', 'svg', 'tiff']);
-const SKIP_EXTS = new Set([
-  'mp3',
-  'mp4',
-  'mov',
-  'webm',
-  'wav',
-  'ogg',
-  'flac',
-  'aac',
-  'm4a',
-  'avi',
-  'mkv',
-]);
+/**
+ * Audio uploads are now ADMITTED rather than skipped, and classified as
+ * `type: 'audio'`, because channel STT consumes them. Skipping them meant a
+ * Slack voice memo never reached transcription at all.
+ */
+const AUDIO_EXTS = new Set(['mp3', 'wav', 'ogg', 'flac', 'aac', 'm4a']);
+/**
+ * Video stays skipped — nothing downstream consumes it. `webm` is ambiguous
+ * (it carries either audio or video) and is overwhelmingly video on Slack, so
+ * it stays on the skip list rather than being classified as audio.
+ */
+const SKIP_EXTS = new Set(['mp4', 'mov', 'webm', 'avi', 'mkv']);
 
 /**
  * CHS-005 — minimal structural view of the observability sink.
@@ -281,7 +283,7 @@ function leadMessage(rendered: string, maxLength: number): string {
   return `${first.trimEnd()}${LONG_REPLY_SUFFIX}`;
 }
 
-export class SlackAdapter implements PlatformAdapter, ApprovalCapableAdapter {
+export class SlackAdapter implements PlatformAdapter, ApprovalCapableAdapter, VoiceOutboundAdapter {
   readonly id: string;
   readonly displayName = 'Slack';
   get canSendTyping(): boolean {
@@ -309,6 +311,21 @@ export class SlackAdapter implements PlatformAdapter, ApprovalCapableAdapter {
       webhookMode: false,
     };
   }
+
+  /**
+   * Declared voice capabilities. Slack has no voice-bubble primitive: an
+   * uploaded audio file gets an inline player, which is a `file`, not a
+   * `voice_note` — declaring it honestly is the point of the caps model.
+   * `mp3` leads because Slack's inline player is most reliable with it.
+   */
+  readonly voiceCaps: AdapterVoiceCaps = {
+    inbound: ['mp3', 'm4a', 'wav', 'ogg'],
+    outbound: {
+      formats: ['mp3', 'm4a', 'wav'],
+      kind: 'file',
+      maxBytes: 25 * 1024 * 1024,
+    },
+  };
 
   readonly botKey: string;
   readonly binding: Binding | undefined;
@@ -819,6 +836,33 @@ export class SlackAdapter implements PlatformAdapter, ApprovalCapableAdapter {
     }
   }
 
+  /**
+   * The declared voice sink — a `files.uploadV2` of the synthesized audio,
+   * which Slack renders with an inline player. `opts.threadId` is Slack's
+   * `thread_ts`, the same translation `send()` and `sendWithAttachments()` use.
+   * Never throws: `{ok:true}` is the delivery ledger's only proof of delivery.
+   */
+  async sendVoiceNote(
+    chatId: string,
+    audio: Uint8Array,
+    opts: SendVoiceNoteOptions,
+  ): Promise<DeliveryResult> {
+    try {
+      const res = (await this.client.files.uploadV2({
+        channel_id: chatId,
+        file: Buffer.from(audio),
+        filename: opts.filename,
+        ...(opts.caption ? { initial_comment: opts.caption } : {}),
+        ...(opts.threadId ? { thread_ts: opts.threadId } : {}),
+      })) as { files?: Array<{ ts?: string }> };
+      if (opts.threadId) await this.threadState?.recordPost(chatId, opts.threadId);
+      const ts = res.files?.[0]?.ts;
+      return { ok: true, ...(ts ? { messageId: ts } : {}) };
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
+  }
+
   // ---------------------------------------------------------------------------
   // Long-answer snippet fallback (SP-B3)
   //
@@ -1199,7 +1243,8 @@ export class SlackAdapter implements PlatformAdapter, ApprovalCapableAdapter {
   /**
    * Enrich an inbound envelope with file attachments downloaded from Slack.
    * Best-effort: files that fail to download or exceed the size cap are
-   * silently skipped. Audio/video files are skipped in v1.
+   * silently skipped. Video files are skipped; audio is admitted as
+   * `type: 'audio'` so channel STT can transcribe it.
    */
   private async extractFileAttachments(
     envelope: InboundMessage,
@@ -1223,7 +1268,11 @@ export class SlackAdapter implements PlatformAdapter, ApprovalCapableAdapter {
       // off one) exfiltrates the workspace token in an Authorization header.
       if (!isSlackDownloadUrl(file.url_private_download)) continue;
 
-      const type = IMAGE_EXTS.has(ext) ? ('image' as const) : ('file' as const);
+      const type = IMAGE_EXTS.has(ext)
+        ? ('image' as const)
+        : AUDIO_EXTS.has(ext)
+          ? ('audio' as const)
+          : ('file' as const);
 
       try {
         const res = await fetch(file.url_private_download, {

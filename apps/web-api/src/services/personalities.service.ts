@@ -125,6 +125,18 @@ export class PersonalitiesService {
     };
   }
 
+  /**
+   * Does this id resolve, after a disk refresh?
+   *
+   * For validating a reference to a personality where the caller does not want
+   * the personality itself — the wake-route editor, which must refuse a route
+   * naming nothing rather than let it fail silently in a room later.
+   */
+  async exists(id: string): Promise<boolean> {
+    await this.opts.refresh?.();
+    return this.opts.personalities.describe(id) !== null;
+  }
+
   async get(
     id: string,
   ): Promise<{ personality: Personality; soulMd: string; mcpPolicy: McpPolicy | null }> {
@@ -760,12 +772,18 @@ function toWire(d: DescribedPersonality): Personality {
     // routes on yet.
     ...(c.voice?.tts_provider !== undefined ||
     c.voice?.stt_provider !== undefined ||
-    c.voice?.tts_voice !== undefined
+    c.voice?.realtime_provider !== undefined ||
+    c.voice?.tts_voice !== undefined ||
+    c.voice?.call_style !== undefined
       ? {
           voice: {
             ...(c.voice.tts_provider !== undefined ? { tts_provider: c.voice.tts_provider } : {}),
             ...(c.voice.stt_provider !== undefined ? { stt_provider: c.voice.stt_provider } : {}),
+            ...(c.voice.realtime_provider !== undefined
+              ? { realtime_provider: c.voice.realtime_provider }
+              : {}),
             ...(c.voice.tts_voice !== undefined ? { tts_voice: c.voice.tts_voice } : {}),
+            ...(c.voice.call_style !== undefined ? { call_style: c.voice.call_style } : {}),
           },
         }
       : {}),

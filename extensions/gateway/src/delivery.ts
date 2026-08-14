@@ -1,4 +1,4 @@
-import type { DeliveryLedger } from '@ethosagent/delivery-ledger';
+import type { DeliveryKind, DeliveryLedger } from '@ethosagent/delivery-ledger';
 
 // ---------------------------------------------------------------------------
 // Two-phase delivery-obligation wrapper (item 9)
@@ -33,7 +33,18 @@ function errMsg(err: unknown): string {
  */
 export async function beginDelivery(
   binding: DeliveryBinding | undefined,
-  input: { chatId: string; sessionId: string; threadId?: string | undefined; content: string },
+  input: {
+    chatId: string;
+    sessionId: string;
+    threadId?: string | undefined;
+    content: string;
+    /** Defaults to `'text'`. `'voice'` rows redeliver bytes, not a string. */
+    kind?: DeliveryKind;
+    /** Artifact key for a `voice` row — what redelivery re-sends. */
+    artifactRef?: string | undefined;
+    /** The `VoiceAudioFormat` the artifact holds. */
+    mediaFormat?: string | undefined;
+  },
 ): Promise<string | null> {
   if (!binding || !input.content) return null;
   try {
@@ -47,6 +58,12 @@ export async function beginDelivery(
       // chat, out of the context that made the answer legible.
       threadId: input.threadId,
       content: input.content,
+      // For a voice row `content` is the SPOKEN TEXT, so the row still hashes
+      // to a dedup-comparable value and stays diagnosable when its artifact is
+      // gone. These three carry everything the sweep needs to re-send bytes.
+      ...(input.kind ? { kind: input.kind } : {}),
+      ...(input.artifactRef ? { artifactRef: input.artifactRef } : {}),
+      ...(input.mediaFormat ? { mediaFormat: input.mediaFormat } : {}),
     });
   } catch (err) {
     binding.onLedgerError?.('record', errMsg(err));

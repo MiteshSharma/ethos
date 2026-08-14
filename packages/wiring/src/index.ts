@@ -1012,6 +1012,11 @@ export interface CreateAgentLoopResult {
   /** TTS provider registry — threaded to Gateway for voice synthesis. */
   ttsProviders: import('@ethosagent/types').TtsProviderRegistry;
   /**
+   * Realtime (speech-to-speech) provider registry — threaded to web-api so the
+   * browser talk lane can mint an ephemeral token on the realtime tier.
+   */
+  realtimeProviders: import('@ethosagent/types').RealtimeVoiceProviderRegistry;
+  /**
    * Real-time voice stack built from `config.voice.*`. Absent when no voice
    * block is configured — the clean no-op every non-voice deployment takes.
    */
@@ -1034,6 +1039,27 @@ export interface CreateAgentLoopResult {
      * `auxiliary.asr` default.
      */
     sttRoster?: Record<string, import('@ethosagent/types').SttProviderEntry>;
+    /**
+     * Named REALTIME roster from `voice.realtime.providers.*`. Unlike the other
+     * two this roster has no `auxiliary.*` default underneath it:
+     * `realtimeDefault` NAMES one of these entries, and a deployment with
+     * neither simply has no realtime tier.
+     */
+    realtimeRoster?: Record<string, import('@ethosagent/types').RealtimeProviderEntry>;
+    /** `voice.realtime.default` — the roster key a personality that names none gets. */
+    realtimeDefault?: string;
+    /** `voice.tier` — the deployment's default voice engine. */
+    tier?: 'pipeline' | 'realtime';
+    /**
+     * `voice.realtime.sessionBudgetUsd` — USD cap on ONE realtime call.
+     *
+     * Forwarded for the same reason `tier` is. Without it the only route from
+     * the parsed config to the surface that enforces the cap was web-api's
+     * OPTIONAL live-config read, so a surface built without that read was
+     * silently uncapped — and a cap that silently does not apply is worse than
+     * no cap, because the deployment believes it has one.
+     */
+    realtimeSessionBudgetUsd?: number;
     secretsResolver: import('@ethosagent/types').SecretsResolver;
     /**
      * Local-only voice-egress allowlist from `voice.trustedPlugins`. Present

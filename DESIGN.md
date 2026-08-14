@@ -59,13 +59,29 @@ Dark mode is **primary**. Light mode is **supported but not optimized** (used by
 
 ### Per-personality accent (the load-bearing identity affordance)
 
-The chat tab swaps `--accent` per active personality via a second `<ConfigProvider>` wrapper. Accent flows through:
-- Personality bar accent stripe (3-4px tall)
-- Composer caret color (`caret-color: var(--accent)`)
-- Send button background
-- Focus ring (`outline: 2px solid var(--accent); outline-offset: 1px`)
-- Link color in agent text
-- Active sidebar item left-border (when chat tab is active)
+The chat tab swaps the accent per active personality two ways at once, from one
+resolver (`personalityAccent` in `apps/web/src/lib/theme.ts`): a second
+`<ConfigProvider>` carries it as Antd's `colorPrimary`, and the element that
+provider wraps carries it as `--accent`. Both are needed — a `ConfigProvider`
+renders no DOM node, so raw CSS cannot read a variable off it. In Call Stage the
+same element carries the call's accent instead, which is the personality's unless
+`display.call_accent` pins a hex.
+
+Accent flows through:
+
+| Flow | Where it lives |
+|---|---|
+| Personality bar accent stripe (3px tall) | `PersonalityBar.tsx`, inline `background` |
+| Composer caret color | `input, textarea { caret-color: var(--accent, …) }` |
+| Send button background (and its hover, which brightens the accent rather than naming a second blue) | `.composer-send-btn` |
+| Focus ring (`outline: 2px solid var(--accent); outline-offset: 1px`) | 17 `:focus-visible` rules in `styles.css` |
+| Link color in agent text | `.message-assistant a` |
+
+**The sidebar is chrome, not identity.** The active nav item's left-border stays
+`--ethos-info`: the rail is outside the personality subtree, it is up while every
+tab is up, and tinting global navigation by whoever last spoke in Chat makes the
+app's furniture move with the conversation. Identity is carried inside the
+surface that has one.
 
 | Personality | Hex | Reasoning |
 |---|---|---|
@@ -156,29 +172,160 @@ Three-state dot (8px circle, `border-radius: 9999px`):
 Web surface: rendered in TopBar right-hand side alongside `{provider} · {model}` mono label.
 Desktop surface: rendered in sidebar bottom as an 8px dot inside a 20px glow ring (`border: 1.5px solid rgba(74,222,128,0.4)`).
 
-### In-call speaking indicator
+**Extended for a microphone (SatelliteRow, voice V3).** A wake satellite has
+states a websocket does not, so the same `.sb-dot` base gains three modifiers
+rather than a second dot being drawn:
 
-Talk-mode (real-time voice) needs a glanceable "who is speaking now" signal in
-the in-call control strip. Two states, reusing existing vocabulary — no new color
-or motion primitives:
+- **Listening**: `#4ADE80` (solid) + three CSS liveness bars. The bars are a
+  cue, not a meter — the node protocol carries no amplitude, and inventing
+  levels would be the dishonest version of "the mic is armed".
+- **Speaking**: `var(--accent)` (pulsing) — the same "the agent has the floor"
+  vocabulary as the CallStrip.
+- **Muted**: `--text-tertiary` (solid).
+- **Wake off**: **hollow** — transparent fill, 1.5px `--text-tertiary` ring.
+  Hollow rather than a second grey because wake-off is *persisted* and muted is
+  momentary, and the indicator-honesty rule is worthless if the two look alike.
+- **Degraded**: `#F87171` (solid), with the failing probe named inline.
 
-- **User speaking (listening):** reuse the composer's `AudioBars` mic meter (red
-  `--error` bars) — the mic is live/recording, same as voice-note capture.
-- **Agent speaking:** a single 10px dot in the active personality's `--accent`,
-  pulsing via the existing `status-dot-pulse` keyframe. Accent (not a semantic
-  color) because it says "this personality is talking" — the same identity
-  affordance as the personality bar. `prefers-reduced-motion` stops the pulse.
+`prefers-reduced-motion` stops the pulse and the bars; the bars hold their
+tallest height so the row still reads as armed.
 
-Rationale: mirrors the connection-status dot vocabulary (colored pulsing dot) but
-in accent, so the speaking cue reads as identity, not status. The call strip is a
-slim bar on the existing Chat — no new full-screen surface ("cards earn
-existence").
+### Personality bar
+
+The bar at the top of the chat tab is **identity, read-only**: accent stripe,
+mark, name, model. It carries no control that changes which personality the
+conversation is with, because a session belongs to the personality it started
+with. The two controls it does carry act on the session, not on identity —
+rename, and `+` to start a new one (which is where a personality gets chosen,
+via the New Session picker). The same rule holds everywhere in the web UI: the
+command palette offers no "switch personality" verb, and a `?personality=`
+deep-link is honoured only alongside `new=1`.
+
+### Call Stage
+
+Talk-mode's primary surface is a **mode, not a dialog**. Starting a call switches
+the Chat page **into** Call Stage; ending the call returns it to normal chat.
+Nothing floats over the conversation, because while a call is carrying audio the
+call *is* the conversation. This reverses the earlier "no new full-screen
+surface" line: a call is not a status cue, and a 10px dot is not enough surface
+to carry three continuously-changing states.
+
+**Two** columns, filling the chat tab:
+
+| Column | Width | What it holds |
+|---|---|---|
+| Stage | flexible | The shape on canvas, the personality's name, the mono state word, mute + end, and a Geist Mono `{provider} · {model} · NNNms` footer. |
+| This call | 320px | **This call's** turns, newest last — not chat history. A header reading `This call` plus the **Back to chat** control. At its base, the reserved clarify slot. |
+
+**There is no left navigation rail, and that is the decision.** A rail is an
+invitation to move around the UI, and moving around the UI mid-sentence is
+exactly what a call cannot afford. The only column worth looking away to is the
+one that says what is happening in *this* call. Nothing else earns a column.
+
+The PersonalityBar is **not** rendered in this mode either, for the same reason:
+rename and new-session are the wrong things to offer someone who is
+talking. Identity is carried by the stage itself — the accent-coloured shape
+holding the personality's initial, and the name beneath it.
+
+Below 760px the transcript's turns and clarify slot drop, as before. The column
+itself does **not**: it now carries the only exit that is not a hang-up, so it
+collapses to its header row and restacks under the stage — one line holding
+`This call` and a 44px `Back to chat`. The controls and the way back to text are
+never what gets cut.
+
+**Enter and exit are automatic and derived from the CALL, never from the drawn
+state** (`callStageMounted`). A live call is the mode through every status it
+passes through, including `connecting` and `reconnecting`. Degraded, mic-denied
+and ended return to normal chat, where the CallStrip carries the explanation and
+the way to act on it. The only manual exit is **Back to chat**, a single small
+text button in the transcript header — not a rail, not a second mechanism. It
+collapses the mode without hanging up: the Reconnecting row below promises the
+composer stays usable for text, and in a mode this is what keeps that promise.
+Only hang-up and `Esc` end a call.
+
+#### The reserved clarify slot
+
+The slot sits at the base of the transcript column for the whole call — dimmed,
+reading `No open question`, when there is nothing to answer — and a mid-turn
+`clarify` **fills it in place**. A reserved slot rather than a popup, because
+things appearing and disappearing mid-call read as instability, and attention
+for a surface that just moved is the one thing a person on a call cannot spare.
+The slot holds its own height and does not flex; the scrolling turn list above
+absorbs the difference, so filling it moves nothing on screen.
+
+Off-call the clarify card is unchanged: it still floats over Chat as an
+`alertdialog`. Both are the same component and resolve through the same
+`clarify.respond` / `clarify.resolved` path — in the slot it is a labelled
+region, not an alert, because nothing was interrupted by its arrival.
+
+Three treatments, all driven by the same amplitude signal:
+
+| Treatment | Value | What it is |
+|---|---|---|
+| Liquid | `liquid` | The personality circle fills like a vessel; the surface is two summed sines, so it reads as liquid rather than a progress bar. |
+| Orb | `orb` | A radial-gradient body whose rim deforms with amplitude. |
+| Rings | `rings` | Three concentric rings breathing outward from a solid core. |
+
+**Which one a call draws is the personality's, not the app's.** The shape is
+identity — the same argument the accent already won — so a personality declares
+it as `voice.call_style`, edited in its Identity step next to the voice fields.
+It is optional and there is no "unset" look: an undeclared personality gets a
+treatment derived from its id, deterministically, so a fresh install already
+shows five agents that do not look alike. `display.call_style` sits between the
+two for operators who want one shape everywhere; its default, `personality`, is
+not a pin. The order is one function — `resolveCallTreatment` in
+`packages/types/src/personality.ts`:
+
+1. the personality's `voice.call_style`
+2. `display.call_style`, when it names a concrete treatment
+3. derived from the personality id
+
+Color is `display.call_accent`: `personality` (default — follows the active
+personality's accent, so the shape says *which* agent holds the floor) or an
+explicit hex. `display.call_style` and `display.call_accent` are edited in
+Settings → Voice → Call appearance. Nothing else about the stage is
+configurable — the motion constants are fixed in code.
+
+#### Motion class: continuous amplitude-driven motion
+
+This is a **new motion category**, and the first one added to this system. The
+scale below (80 / 180 / 240ms, "no bounces or springs") describes *state
+transitions*: something changes, the change takes a fixed time, the motion ends.
+A duplex call has no such moment to animate. What the listener needs — is it
+hearing me, is it working, is it talking — is true continuously and has to be
+shown continuously, so the shape is driven by an audio amplitude signal for as
+long as the call is up. The transition scale still governs everything else about
+the stage (entering the mode, hover, focus ring).
+
+The motion constants — smoothing, gain, travel, wave speed, glow, orbit rate —
+are **fixed in code**, not exposed: `CALL_MOTION` in
+`apps/web/src/features/voice/call-motion.ts`.
+
+#### States
+
+| State | What the user sees |
+|---|---|
+| Listening | The shape in `--error` red — the live-mic vocabulary the composer's `AudioBars` already uses. Amplitude is the mic level. |
+| Thinking | **Amplitude-independent** — nobody is talking. The circle contracts to 84%, a comet arc orbits it, and a slow 0.5Hz breath keeps the shape alive at rest. Accent-colored. |
+| Speaking | Accent-colored, amplitude driven by the agent's own output level (an analyser on the playout graph). |
+| Connecting / Reconnecting | Rendered **inside** the stage, not instead of it: the Thinking shape (busy, accent, amplitude-independent — nobody is talking) with the mono state word reading `connecting` / `reconnecting…`. The stage is mounted by the call, never by the state — unmounting it for a status a live call passes through replays the 240ms entrance and restarts the canvas, which the user reads as the whole surface flickering out and back between turns. Text stays reachable throughout via **Back to chat**. |
+| Degraded / Mic-denied / Ended | The mode ends, Chat returns to normal, and the CallStrip takes over. These are the states where what the user needs is the explanation and a way to act on it, and the strip is what carries both. |
+
+`prefers-reduced-motion`: the comet collapses to a **static ring** — no orbit, no
+wave, no glow, and the amplitude smoothing drops out so nothing drifts after the
+signal stops. State stays legible without a frame of motion: the color, the
+contraction and the mono state word carry it.
+
+Controls are ≥44px touch targets. The provider label stays Geist Mono
+`{provider} · {model}`, the same vocabulary as the TopBar and the strip.
 
 ### CallStrip
 
-The component that renders the indicator above, plus everything else a live call
-needs. One component, one slim strip on Chat — **rows, never the `Card`
-primitive**. Nine states, all in existing vocabulary:
+What normal chat shows for a call: the form the Call Stage collapses to, and the
+only form for the states that are not carrying audio (degraded, mic-denied, a
+call that ended with something left to explain). One slim strip on Chat —
+**rows, never the `Card` primitive**.
+Nine states, all in existing vocabulary:
 
 | State | What the user sees |
 |---|---|
@@ -200,6 +347,9 @@ expandable toggle, collapsed by default.
 Controls are ≥44px touch targets; `prefers-reduced-motion` stops every pulse and
 the barge-in flash. At 375px the mark, state and mute/end persist and the mono
 detail collapses behind the toggle's tap.
+
+While a call is carrying audio the strip also carries the control that returns to
+the Call Stage — collapse and restore are the same call, not two surfaces.
 
 ## Sidebar
 
@@ -266,6 +416,12 @@ Single easing, short durations, no bounces or springs.
 Transitions allowed on: `opacity`, `transform`, `color`, `background-color`, `border-color`, `outline-color`. **Never on text content** (no width-animating text reveals — they cause layout thrash).
 
 `prefers-reduced-motion` → all motion is instant. `* { transition: none !important; animation: none !important; }`.
+
+One exception to the scale, not to the preference: the Call Stage's
+**continuous amplitude-driven motion** (see "Call Stage") is not a state
+transition and has no duration token. It still stops under
+`prefers-reduced-motion`, and it is the only place in the system allowed to move
+without a transition.
 
 ## Personality marks (generative SVG)
 
@@ -361,3 +517,8 @@ The web UI specifically must avoid these patterns. Code review checks for them.
 | 2026-07-16 | Docs landing page: personality icon → annulus ring (logo geometry); landing shows 3 specialists with cross-provider model routing | User-directed during landing-page 3D redesign (hero-demos hybrid). Scope: docs landing page; app surfaces still use the generative grid mark pending a follow-up decision. |
 | 2026-07-19 | In-call speaking indicator (talk-mode) | Phase B browser talk-mode needs a "who's speaking" cue. Reuses `AudioBars` for the user mic and an accent `status-dot-pulse` dot for the agent — accent, not a semantic color, so the cue reads as personality identity. No new primitives. |
 | 2026-08-12 | CallStrip added to the component inventory (voice V1a, DR3) | Talk-mode's nine states needed one home. A slim strip of ROWS on Chat, not a new surface and not a `Card`; the thinking state is the existing accent dot held steady, connecting/reconnecting borrows the amber connection dot, and provider + latency reuse the `{provider} · {model}` mono label rather than a badge or debug panel. |
+| 2026-08-13 | Call overlay supersedes the 2026-07-19 "In-call speaking indicator" entry | A 10px pulsing dot cannot express three continuously-changing states, so the call gets a non-blocking centered overlay (three treatments, amplitude-driven) that minimizes to the strip rather than ending the call. Adds one new motion class — continuous amplitude-driven motion — because the 80/180/240ms transition scale has no way to express a duplex call's need for continuous feedback. The strip keeps every state that is not carrying audio. |
+| 2026-08-14 | Call Stage supersedes the 2026-08-13 "Call overlay" entry | The user rejected the centered dialog: things appearing and disappearing mid-call read as instability. A call is now a MODE — Chat switches into a **two-column** stage (shape, this call's transcript) and returns to normal chat when the call ends. There is no left rail and no PersonalityBar: a navigation column mid-call invites wandering around the UI mid-sentence, and rename/fork/new-session are the wrong controls to offer someone who is talking. The one way back to the composer without hanging up is a single small **Back to chat** text button in the transcript header — the same collapse the strip's restore control reverses. The clarify question gets a reserved slot in the transcript column that is always on screen and fills in place, instead of a card that arrives over the conversation. Everything the overlay entry decided about the SHAPE — three treatments, the amplitude motion class, the per-state colour rules, mounting by the call rather than the state — carries over unchanged; only the container was wrong. |
+| 2026-08-14 | `--accent` is defined, and the call treatment is the personality's | Two halves of one correction. (1) `--accent` was READ 19 times across `styles.css` and defined NOWHERE, so every per-personality colour in raw CSS silently rendered the generic info blue — Antd primitives tinted, the CSS around them did not. It is now stamped on the chat subtree's own element from the same resolver `personalityTheme` uses, and `CallStage`'s local copy was removed so there is exactly one definition. (2) The call treatment moved from an app-wide `display.call_style` to `voice.call_style` on the personality, defaulting to a shape DERIVED from the personality id — every agent looks distinct with nothing configured, and the operator key becomes a pin rather than the source. Owner's doctrine: a personality is not just its tools and plugins, it is also how it looks and feels. |
+| 2026-08-14 | `WakeRouteRow` and `SatelliteRow` added to the component inventory (voice V3, DR3) | Wake routing needed two list surfaces and neither earns a `Card`: a routing table and a fleet of microphones are both things you scan for the one entry that is wrong, and a bordered box per entry turns scanning into reading. Both are dense rows in Settings → Voice (DR4 — no new sidebar item). Satellite liveness extends the existing connection dot rather than drawing a new one, adding listening / speaking / muted / **hollow** wake-off / degraded. Phrases, state words, node ids, capabilities and ages are Geist Mono, because every one of them is a literal the operator also sees in `ethos listen doctor` output or in `config.yaml`. The route editor's live phrase tester lights the matching row in that **personality's own accent** — the identity affordance is the proof, so you recognize the agent that answered rather than reading a generic highlight. |
+| 2026-08-14 | A session is bound to the personality it started with; the in-chat switcher is removed | Owner's call: "A session belongs to a personality that joined this when session started. Then you can't switch." The dropdown in the personality bar is gone, along with the auto-fork-on-switch behaviour it needed and the command palette's "Switch personality →" verb. Identity stays fully visible — stripe, mark, name, model — it just isn't a control any more. Choosing an agent is part of STARTING a session: the New Session picker (`+` in the bar, "New chat session" in the palette) is the one entry point, and a `?personality=` deep-link now applies only with `new=1`. Forking a session is still offered where it belongs, in the Sessions tab. |

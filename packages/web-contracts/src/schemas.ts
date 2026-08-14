@@ -151,17 +151,20 @@ export const PersonalitySchema = z.object({
       expression: z.boolean().optional(),
     })
     .optional(),
-  /** How this personality sounds and listens. Only the sub-keys the editor
-   *  writes are surfaced — `voice.tts_provider` / `voice.stt_provider` (roster
-   *  labels) and `voice.tts_voice`. `tier` / `model` / `languages` stay in
-   *  config.yaml: nothing consumes them yet, so echoing them here would invite a
-   *  form field that does not work. Omitted when the personality declares no
-   *  voice. */
+  /** How this personality sounds, listens, and looks on a call. Only the
+   *  sub-keys the editor writes are surfaced — `voice.tts_provider` /
+   *  `voice.stt_provider` / `voice.realtime_provider` (roster labels),
+   *  `voice.tts_voice`, and `voice.call_style`. `tier` / `model` / `languages`
+   *  stay in config.yaml: nothing consumes them yet, so echoing them here would
+   *  invite a form field that does not work. Omitted when the personality
+   *  declares no voice. */
   voice: z
     .object({
       tts_provider: z.string().optional(),
       stt_provider: z.string().optional(),
+      realtime_provider: z.string().optional(),
       tts_voice: z.string().optional(),
+      call_style: z.enum(['liquid', 'orb', 'rings']).optional(),
     })
     .optional(),
   system: z.boolean(),

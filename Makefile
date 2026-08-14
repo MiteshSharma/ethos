@@ -40,6 +40,9 @@ help:
 	@echo "  web                   - Build SPA + run ethos serve with mounted static (single port :3000)"
 	@echo "  gateway-setup         - Configure Telegram bot token"
 	@echo "  gateway               - Start the Telegram gateway in foreground (dev)"
+	@echo "  listen                - Start the wake-word satellite, capturing from the mic (DEVICE=<id> to pick one)"
+	@echo "  listen-devices        - List this host's audio input devices (for DEVICE=)"
+	@echo "  listen-doctor         - Preflight the wake stack (engine, models, mic, server)"
 	@echo "  cron                  - Manage cron jobs (list|create|pause|resume|delete|run)"
 	@echo "  personality           - Manage personalities (list | set <id>)"
 	@echo "  memory                - View or clear memory (show | clear)"
@@ -208,6 +211,140 @@ gateway-setup:
 
 gateway:
 	@$(NVM_EXEC) pnpm exec tsx apps/ethos/src/index.ts gateway start
+
+# ---------- wake satellite ----------
+#
+# `ethos listen` reads raw s16le mono 16 kHz PCM from STDIN — there is no native
+# microphone binding, deliberately (apps/ethos/src/lib/stdin-pcm-device.ts: a
+# per-arch native module would break the daemon on exactly the Pi/server hosts it
+# was written for). The pipe IS the device.
+#
+# That is the CLI's contract, not this target's. `make listen` builds the capture
+# half for you — a `make` target whose whole job is "try this feature" cannot ask
+# you to hand-assemble an ffmpeg line and get a device index right first try. The
+# raw form stays supported and is what a Pi with unusual hardware should use:
+#
+#   <your capture> | pnpm exec tsx apps/ethos/src/index.ts listen
+#
+# `-nostats -loglevel error` is not decoration. Both processes share the
+# terminal, and ffmpeg writes a carriage-returned progress line to stderr that
+# overwrites the daemon's own output mid-line ("› you: hello7.9kbits/s speed=
+# 1x"). `-loglevel error` drops the banner and the meter; `-nostats` is what
+# keeps the meter gone on builds that print it regardless of log level. Real
+# errors — bad device index, no permission — still print. arecord's `-q` does
+# the same for its one banner line; it has no meter to silence.
+
+# Fixed by the daemon's contract: s16le, mono, at this rate. Raw PCM carries no
+# header, so a mismatch here is silent garbage rather than an error — which is
+# why the rate is stated once and derived everywhere, never re-typed.
+LISTEN_RATE := 16000
+
+# Which input to capture from. `default` means "whatever the OS calls the system
+# default input" on BOTH platforms — avfoundation's `:default` pseudo-device and
+# ALSA's `default` PCM — and that is deliberately not an index. Indices SHIFT:
+# unplug a USB headset and the `:2` you memorised stops existing while `:1`
+# silently becomes the built-in mic. An index baked into this file is wrong the
+# first time the hardware moves, and the failure lands as an ffmpeg error buried
+# above an otherwise-clean preflight. Override after checking `make listen-devices`:
+#
+#   DEVICE=1 make listen         (macOS: avfoundation audio device index)
+#   DEVICE=hw:1,0 make listen    (Linux: ALSA device name)
+DEVICE ?= default
+
+# `ethos listen doctor` reuses the repo's three-way exit contract verbatim (see
+# `computeDoctorExit` in apps/ethos/src/commands/doctor.ts, and ListenFailFlags
+# in apps/ethos/src/commands/listen.ts):
+#   0 - everything passes
+#   1 - something is genuinely broken on this host (bad config, missing wake
+#       model, engine that won't load) — a human has to fix it
+#   2 - nothing is broken, but a dependency simply isn't up right now (server
+#       down, no mic piped in) — recoverable, and the point of the contract is
+#       letting CI tell this apart from a 1
+# Make treats every nonzero status as a build failure, so without translating
+# here a warn-level run prints "Nothing is broken on this host" and then
+# `make: *** [listen-doctor] Error 2` — the two lines contradict each other.
+# So exit 2 passes at the make level; exit 1 still fails the build. Do not
+# "simplify" this back to a bare command.
+listen-doctor:
+	@$(NVM_EXEC) pnpm exec tsx apps/ethos/src/index.ts listen doctor $(ARGS); \
+		status=$$?; \
+		if [ $$status -eq 2 ]; then exit 0; fi; \
+		exit $$status
+
+# The device list, platform-aware. This is what you need the moment the default
+# input is the wrong one, and until now it existed only inside an error message.
+#
+# avfoundation has no "just list them" mode: `-list_devices true` needs an `-i`
+# it then refuses to open, so the command ALWAYS exits non-zero and writes the
+# list to stderr. Hence `|| true` and the 2>&1 — the nonzero status here means
+# nothing. The sed strips the `[AVFoundation indev @ 0x...] ` prefix off every
+# line; if it matches nothing, the raw output is printed instead so a genuine
+# ffmpeg failure is never swallowed by a filter that expected it to succeed.
+listen-devices:
+	@bash -c 'case "$$(uname -s)" in \
+	    Darwin) \
+	      command -v ffmpeg >/dev/null 2>&1 || { echo "listen-devices needs ffmpeg on macOS. Install: brew install ffmpeg" >&2; exit 1; }; \
+	      out=$$(ffmpeg -hide_banner -f avfoundation -list_devices true -i "" 2>&1 || true); \
+	      rows=$$(printf "%s\n" "$$out" | sed -n "s/^\[AVFoundation indev @ [^]]*\] //p"); \
+	      if [ -n "$$rows" ]; then printf "%s\n" "$$rows"; else printf "%s\n" "$$out"; fi; \
+	      echo ""; \
+	      echo "Capture from one with: DEVICE=<audio index> make listen   (default: the system default input)" ;; \
+	    Linux) \
+	      command -v arecord >/dev/null 2>&1 || { echo "listen-devices needs arecord on Linux. Install: apt install alsa-utils" >&2; exit 1; }; \
+	      arecord -l; \
+	      echo ""; \
+	      echo "Capture from one with: DEVICE=hw:<card>,<device> make listen   (default: the ALSA default PCM)" ;; \
+	    *) echo "listen-devices only knows macOS (ffmpeg) and Linux (arecord); this host reports $$(uname -s)." >&2; exit 1 ;; \
+	  esac'
+
+# Capture + daemon, one pipeline.
+#
+# `set -o pipefail` is load-bearing: without it the pipeline reports only the
+# daemon's status, and a capture command that died on a bad device would be
+# masked by whatever the daemon happened to exit with. Both halves already
+# agree in the common case — a dead capture closes the pipe, and the daemon
+# exits 1 when the pipe closes having carried zero frames (CAPTURE_ENDED_EXIT
+# in apps/ethos/src/commands/listen.ts) — but that agreement is the daemon's
+# behaviour to change, not something this target should depend on.
+#
+# No `trap "kill 0"` here, unlike web-dev. That target runs two INDEPENDENT
+# background processes and must reap them by hand; this is a single foreground
+# pipeline, so the shell does not return until both members have exited, and a
+# capture still running after the daemon dies is killed by SIGPIPE on its next
+# write (which, at $(LISTEN_RATE) Hz, is immediate). Ctrl+C reaches every member
+# directly — they share make's process group.
+#
+# 130 (128 + SIGINT) maps to 0 for the same reason listen-doctor maps 2 to 0:
+# Ctrl+C is how this target is SUPPOSED to end. The daemon handles SIGINT,
+# prints "Shutting down..." and exits 0 (listen.ts registers `shutdown(0)`), but
+# the interrupted capture reports 130 and pipefail forwards it — so make would
+# stamp "*** [listen] Error 130" directly under a clean shutdown message. Only
+# 130 is translated; nothing in this pipeline produces it except a signal.
+listen:
+	@$(NVM_EXEC) bash -c 'set -o pipefail; \
+	  case "$$(uname -s)" in \
+	    Darwin) \
+	      command -v ffmpeg >/dev/null 2>&1 || { echo "make listen captures the mic with ffmpeg on macOS, and ffmpeg is not on PATH. Install it (brew install ffmpeg), or pipe your own s16le/mono/$(LISTEN_RATE) capture into: pnpm exec tsx apps/ethos/src/index.ts listen" >&2; exit 1; }; \
+	      if [ "$(DEVICE)" = default ]; then \
+	        desc="the macOS system default input (avfoundation :default)"; \
+	      else \
+	        name=$$(ffmpeg -hide_banner -f avfoundation -list_devices true -i "" 2>&1 | sed -n "/audio devices:/,\$$p" | sed -n "s/.*\[$(DEVICE)\] //p" | head -1); \
+	        desc="avfoundation :$(DEVICE) — $${name:-NO SUCH AUDIO DEVICE INDEX on this host; run make listen-devices}"; \
+	      fi; \
+	      capture="ffmpeg -nostats -loglevel error -f avfoundation -i :$(DEVICE) -ar $(LISTEN_RATE) -ac 1 -f s16le -" ;; \
+	    Linux) \
+	      command -v arecord >/dev/null 2>&1 || { echo "make listen captures the mic with arecord on Linux, and arecord is not on PATH. Install it (apt install alsa-utils), or pipe your own s16le/mono/$(LISTEN_RATE) capture into: pnpm exec tsx apps/ethos/src/index.ts listen" >&2; exit 1; }; \
+	      desc="ALSA device $(DEVICE)"; \
+	      capture="arecord -q -D $(DEVICE) -f S16_LE -r $(LISTEN_RATE) -c 1 -t raw" ;; \
+	    *) echo "make listen can only build a capture pipeline on macOS (ffmpeg) or Linux (arecord); this host reports $$(uname -s). Pipe your own s16le/mono/$(LISTEN_RATE) PCM into: pnpm exec tsx apps/ethos/src/index.ts listen" >&2; exit 1 ;; \
+	  esac; \
+	  echo "Microphone: $$desc"; \
+	  echo "            override with DEVICE=<id> make listen; see make listen-devices"; \
+	  echo ""; \
+	  $$capture | pnpm exec tsx apps/ethos/src/index.ts listen $(ARGS); \
+	  status=$$?; \
+	  if [ $$status -eq 130 ]; then exit 0; fi; \
+	  exit $$status'
 
 cron:
 	@$(NVM_EXEC) pnpm exec tsx apps/ethos/src/index.ts cron $(ARGS)
@@ -514,7 +651,9 @@ clean:
 	@echo "Clean complete."
 
 .PHONY: help setup setup-nvm setup-node setup-pnpm setup-gstack prepare \
-        dev tui web web-dev web-build gateway-setup gateway cron personality memory keys \
+        dev tui web web-dev web-build gateway-setup gateway \
+        listen listen-devices listen-doctor \
+        cron personality memory keys \
         start-gateway-daemon stop-gateway-daemon delete-gateway-daemon status-gateway-daemon \
         docs docs-build \
         test typecheck lint version-sync format check \

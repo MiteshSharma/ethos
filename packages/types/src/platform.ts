@@ -259,6 +259,186 @@ export interface ChannelContext {
   logger: Logger;
 }
 
+// ---------------------------------------------------------------------------
+// Adapter voice capabilities — DECLARED, not sniffed
+//
+// `ChannelCapabilities.voice` above answers "can this channel do TTS at all?".
+// It cannot answer "in what container, rendered as what, under what byte cap"
+// — which is what the gateway needs before it hands bytes to an adapter. The
+// old `'sendVoice' in adapter` duck-type answered neither: it could not tell a
+// playable voice bubble from a plain file attachment, which is why Telegram
+// audio arrived as a document. Adapters declare `voiceCaps` instead.
+// ---------------------------------------------------------------------------
+
+/**
+ * Container/codec label for channel voice audio.
+ *
+ * Deliberately wider than `VoiceCapabilities.formats` (the PROVIDER-side set,
+ * which is only what a TTS/STT engine emits or eats): a channel's constraints
+ * include containers no provider produces. `silk` and `amr` are here because
+ * the CJK platforms (LINE / Feishu / DingTalk / QQ) require them — no adapter
+ * in this repo declares them yet, and the point is that the caps model can
+ * express them when one does, rather than needing a schema change to arrive.
+ */
+export type VoiceAudioFormat =
+  | 'opus'
+  | 'ogg'
+  | 'mp3'
+  | 'wav'
+  | 'pcm'
+  | 'm4a'
+  | 'aac'
+  | 'amr'
+  | 'silk'
+  | 'webm'
+  | 'flac';
+
+/**
+ * Canonical MIME type per format. A `Record` over the union on purpose: adding
+ * a member to {@link VoiceAudioFormat} is a compile error until it is mapped.
+ */
+const VOICE_AUDIO_MIME_TYPES: Record<VoiceAudioFormat, string> = {
+  opus: 'audio/ogg; codecs=opus',
+  ogg: 'audio/ogg',
+  mp3: 'audio/mpeg',
+  wav: 'audio/wav',
+  pcm: 'audio/L16',
+  m4a: 'audio/mp4',
+  aac: 'audio/aac',
+  amr: 'audio/amr',
+  silk: 'audio/silk',
+  webm: 'audio/webm',
+  flac: 'audio/flac',
+};
+
+/**
+ * Canonical file extension per format. Same `Record` discipline as
+ * {@link VOICE_AUDIO_MIME_TYPES}. Note `opus` → `ogg`: the Opus bytes
+ * Telegram and WhatsApp accept ride in an Ogg container.
+ */
+const VOICE_AUDIO_EXTENSIONS: Record<VoiceAudioFormat, string> = {
+  opus: 'ogg',
+  ogg: 'ogg',
+  mp3: 'mp3',
+  wav: 'wav',
+  pcm: 'pcm',
+  m4a: 'm4a',
+  aac: 'aac',
+  amr: 'amr',
+  silk: 'silk',
+  webm: 'webm',
+  flac: 'flac',
+};
+
+/** MIME types (already lowercased, parameters stripped) → format. */
+const VOICE_AUDIO_MIME_ALIASES: Record<string, VoiceAudioFormat> = {
+  'audio/mpeg': 'mp3',
+  'audio/mp3': 'mp3',
+  'audio/ogg': 'ogg',
+  'audio/opus': 'opus',
+  'audio/wav': 'wav',
+  'audio/x-wav': 'wav',
+  'audio/wave': 'wav',
+  'audio/mp4': 'm4a',
+  'audio/x-m4a': 'm4a',
+  'audio/webm': 'webm',
+  'audio/amr': 'amr',
+  'audio/3gpp': 'amr',
+  'audio/aac': 'aac',
+  'audio/flac': 'flac',
+  'audio/x-flac': 'flac',
+  'audio/silk': 'silk',
+  'audio/l16': 'pcm',
+  'audio/pcm': 'pcm',
+};
+
+/** Canonical MIME type for a {@link VoiceAudioFormat}. */
+export function voiceAudioMimeType(format: VoiceAudioFormat): string {
+  return VOICE_AUDIO_MIME_TYPES[format];
+}
+
+/** Canonical file extension (no dot) for a {@link VoiceAudioFormat}. */
+export function voiceAudioExtension(format: VoiceAudioFormat): string {
+  return VOICE_AUDIO_EXTENSIONS[format];
+}
+
+/** Best-effort format for a MIME type, or `undefined` when unrecognized. */
+export function voiceAudioFormatFromMime(
+  mimeType: string | undefined,
+): VoiceAudioFormat | undefined {
+  if (!mimeType) return undefined;
+  const normalized = mimeType.toLowerCase().trim();
+  // The codecs parameter is load-bearing: `audio/ogg; codecs=opus` is opus,
+  // not a generic ogg container. Checked BEFORE parameters are stripped.
+  if (normalized.includes('codecs=opus')) return 'opus';
+  const base = (normalized.split(';')[0] ?? '').trim();
+  return VOICE_AUDIO_MIME_ALIASES[base];
+}
+
+export interface AdapterVoiceCaps {
+  /** Formats this platform delivers INBOUND, for telemetry + transcode hinting. */
+  inbound: VoiceAudioFormat[];
+  outbound: {
+    /**
+     * Accepted outbound formats, MOST PREFERRED FIRST. The gateway's transcode
+     * stage targets `formats[0]` and falls back along the list.
+     */
+    formats: VoiceAudioFormat[];
+    /**
+     * `voice_note` renders as a playable voice bubble; `file` renders as a
+     * plain attachment. The distinction the old `'sendVoice' in adapter` check
+     * could not make, and the reason Telegram audio arrived as a document.
+     */
+    kind: 'voice_note' | 'file';
+    /**
+     * Platform flags the sink must set — e.g. WhatsApp's `{ ptt: true }`,
+     * which is what turns an audio message into a push-to-talk bubble.
+     */
+    flags?: Readonly<Record<string, string | number | boolean>>;
+    /** Hard byte cap for one voice note, when the platform imposes one. */
+    maxBytes?: number;
+  };
+}
+
+/** Options for {@link VoiceOutboundAdapter.sendVoiceNote}. */
+export interface SendVoiceNoteOptions {
+  /** Format of `audio` — always one the adapter declared in its caps. */
+  format: VoiceAudioFormat;
+  mimeType: string;
+  filename: string;
+  threadId?: string;
+  caption?: string;
+}
+
+/**
+ * An adapter that can deliver synthesized speech.
+ *
+ * Declared, not sniffed: the gateway consults `voiceCaps` instead of probing
+ * for a method name, so every new adapter gets TTS-out by declaring caps and
+ * the gateway never has to know which platform it is talking to.
+ */
+export interface VoiceOutboundAdapter {
+  readonly voiceCaps: AdapterVoiceCaps;
+  sendVoiceNote(
+    chatId: string,
+    audio: Uint8Array,
+    opts: SendVoiceNoteOptions,
+  ): Promise<DeliveryResult>;
+}
+
+/** True when `adapter` declares voice caps AND implements the sink. */
+export function isVoiceOutboundAdapter(
+  adapter: PlatformAdapter,
+): adapter is PlatformAdapter & VoiceOutboundAdapter {
+  const candidate = adapter as Partial<VoiceOutboundAdapter>;
+  if (typeof candidate.sendVoiceNote !== 'function') return false;
+  const caps = candidate.voiceCaps;
+  if (typeof caps !== 'object' || caps === null) return false;
+  const outbound = caps.outbound;
+  if (typeof outbound !== 'object' || outbound === null) return false;
+  return Array.isArray(outbound.formats) && outbound.formats.length > 0;
+}
+
 /** Declared in package.json under `ethos.channel`. */
 export interface ChannelManifest {
   id: string;

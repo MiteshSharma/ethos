@@ -20,7 +20,7 @@ class FakeVoiceIoDriver implements VoiceIoDriver {
   started = false;
   stopped = false;
   blockPlayback = false;
-  private bargeEnabled = false;
+  bargeEnabled = false;
   private readonly bargeListeners = new Set<() => void>();
 
   start(): Promise<void> {
@@ -52,11 +52,18 @@ class FakeVoiceIoDriver implements VoiceIoDriver {
   play(audioBase64: string, _mimeType: string, signal: AbortSignal): Promise<void> {
     this.playCalls.push(audioBase64);
     if (!this.blockPlayback) return Promise.resolve();
-    return new Promise((_resolve, reject) => {
+    return new Promise((resolve, reject) => {
+      this.playing.push(resolve);
       signal.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')), {
         once: true,
       });
     });
+  }
+
+  /** Finish whatever blocked playout is in flight. */
+  private readonly playing: Array<() => void> = [];
+  finishPlayback(): void {
+    for (const resolve of this.playing.splice(0)) resolve();
   }
 
   playEarcon(): void {
@@ -100,6 +107,126 @@ function texts(events: VoiceCallEvent[], type: 'reply_sentence'): string[] {
 // Sentence splitting itself is tested in @ethosagent/voice-text — the client
 // imports that one implementation. What is tested here is the loop around it.
 
+describe('createBatchVoiceCallClient — ask(), the spoken clarify question', () => {
+  /** A turn parked inside the blocked `clarify` tool. */
+  async function* parkedTurn(): AsyncGenerator<string> {
+    await new Promise<void>(() => {});
+  }
+
+  /** Connect, commit one utterance, and stop with the turn parked. */
+  async function parkedCall(deps: Partial<BatchVoiceCallDeps> & { driver: FakeVoiceIoDriver }) {
+    const { driver, ...rest } = deps;
+    const client = createBatchVoiceCallClient({
+      transcribe: () => Promise.resolve('deploy it'),
+      runAgentTurn: parkedTurn,
+      createDriver: () => driver,
+      ...rest,
+    });
+    const events = collect(client);
+    await client.connect();
+    // The turn arms barge-in as it starts — that is "parked with the floor".
+    await vi.waitFor(() => expect(driver.bargeEnabled).toBe(true));
+    return { client, events };
+  }
+
+  it('speaks the question, hears the answer, and hands the floor back', async () => {
+    const driver = new FakeVoiceIoDriver();
+    driver.utterances.push(
+      { audioBase64: 'ASK-ME', mimeType: 'audio/webm' },
+      { audioBase64: 'ANSWER', mimeType: 'audio/webm' },
+    );
+    const transcripts = ['deploy it', '  production  '];
+    let bargeWhileSpeaking: boolean | null = null;
+    const { client, events } = await parkedCall({
+      driver,
+      transcribe: () => Promise.resolve(transcripts.shift() ?? ''),
+      synthesize: (text): Promise<SynthesizedClip> => {
+        // Barge-in is off for the question: there is no reply to interrupt, and
+        // a barge would abort the turn the card is waiting on.
+        bargeWhileSpeaking = driver.bargeEnabled;
+        return Promise.resolve({ audioBase64: `tts:${text}`, mimeType: 'audio/mp3' });
+      },
+    });
+
+    const answer = await client.ask?.('Deploy where?', new AbortController().signal);
+
+    expect(answer).toBe('production');
+    expect(bargeWhileSpeaking).toBe(false);
+    expect(driver.playCalls).toContain('tts:Deploy where?');
+    // Handed back to the turn, which is about to speak its reply.
+    expect(driver.bargeEnabled).toBe(true);
+    expect(texts(events, 'reply_sentence')).toEqual(['Deploy where?']);
+    expect(events.some((e) => e.type === 'utterance_committed' && e.text === 'production')).toBe(
+      true,
+    );
+    await client.disconnect();
+  });
+
+  it('speaks the question BEHIND what the agent was already saying', async () => {
+    // This tier hands a data URL to an `Audio` element and has no scheduler, so
+    // a question that started while the previous sentence was still playing
+    // would be two voices at once.
+    const driver = new FakeVoiceIoDriver();
+    driver.blockPlayback = true;
+    driver.utterances.push(
+      { audioBase64: 'ASK-ME', mimeType: 'audio/webm' },
+      { audioBase64: 'ANSWER', mimeType: 'audio/webm' },
+    );
+    const transcripts = ['deploy it', 'production'];
+    const { client } = await parkedCall({
+      driver,
+      transcribe: () => Promise.resolve(transcripts.shift() ?? ''),
+      synthesize: (text): Promise<SynthesizedClip> =>
+        Promise.resolve({ audioBase64: `tts:${text}`, mimeType: 'audio/mp3' }),
+      runAgentTurn: async function* () {
+        yield 'Let me check. ';
+        await new Promise<void>(() => {});
+      },
+    });
+    await vi.waitFor(() => expect(driver.playCalls).toEqual(['tts:Let me check.']));
+
+    const answer = client.ask?.('Deploy where?', new AbortController().signal);
+
+    // The sentence before it is still playing — the question has not started.
+    await vi.waitFor(() => expect(driver.playCalls).toEqual(['tts:Let me check.']));
+    driver.finishPlayback();
+    await vi.waitFor(() =>
+      expect(driver.playCalls).toEqual(['tts:Let me check.', 'tts:Deploy where?']),
+    );
+    driver.finishPlayback();
+
+    await expect(answer).resolves.toBe('production');
+    await client.disconnect();
+  });
+
+  it('stays card-only when the question cannot be synthesized', async () => {
+    const driver = new FakeVoiceIoDriver();
+    driver.utterances.push({ audioBase64: 'ASK-ME', mimeType: 'audio/webm' });
+    const { client } = await parkedCall({
+      driver,
+      synthesize: () => Promise.reject(new Error('tts down')),
+    });
+
+    const answer = await client.ask?.('Deploy where?', new AbortController().signal);
+
+    expect(answer).toBeNull();
+    // Nothing was heard, so nothing was captured for an answer either.
+    expect(driver.captureCalls).toBe(1);
+    expect(driver.bargeEnabled).toBe(true);
+    await client.disconnect();
+  });
+
+  it('stays card-only when the call has no TTS at all', async () => {
+    const driver = new FakeVoiceIoDriver();
+    driver.utterances.push({ audioBase64: 'ASK-ME', mimeType: 'audio/webm' });
+    const { client } = await parkedCall({ driver });
+
+    await expect(client.ask?.('Deploy where?', new AbortController().signal)).resolves.toBeNull();
+    expect(driver.playCalls).toEqual([]);
+    await client.disconnect();
+  });
+});
+
 describe('createBatchVoiceCallClient — full turn cycle', () => {
   it('listens → commits an utterance → speaks sentences in order → completes → listens again', async () => {
     const driver = new FakeVoiceIoDriver();
@@ -125,6 +252,9 @@ describe('createBatchVoiceCallClient — full turn cycle', () => {
 
     await vi.waitFor(() => expect(events.some((e) => e.type === 'reply_complete')).toBe(true));
 
+    // The endpoint is reported first, before the transcribe round trip — that
+    // is what puts the UI in `thinking` when the user actually stopped talking.
+    expect(events[0]).toEqual({ type: 'speech_end' });
     // Transcript trimmed and committed.
     expect(events.find((e) => e.type === 'utterance_committed')).toEqual({
       type: 'utterance_committed',
@@ -164,6 +294,9 @@ describe('createBatchVoiceCallClient — full turn cycle', () => {
     // Loop moves on to the next capture without committing anything.
     await vi.waitFor(() => expect(driver.captureCalls).toBeGreaterThanOrEqual(2));
     expect(events.some((e) => e.type === 'utterance_committed')).toBe(false);
+    // The floor goes back to the user: the endpoint said "thinking", so
+    // something has to say "listening" again or the strip sticks there.
+    expect(events.map((e) => e.type)).toEqual(['speech_end', 'utterance_dropped']);
     expect(runAgentTurn).not.toHaveBeenCalled();
     // The earcon still fired — the utterance was captured, just transcribed to
     // nothing. Acknowledgement happens on capture, before transcription.

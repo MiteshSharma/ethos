@@ -1,38 +1,66 @@
-// Voice pipeline latency harness. Two modes, one budget table.
+// Voice latency harness. Two tiers, two modes, one budget module.
 //
 //   Mock (CI, no credentials, deterministic):
 //     pnpm tsx scripts/voice-latency-bench.ts [--assert-budget] \
 //       [--endpoint-ms=N] [--llm-ms=N] [--tts-ms=N]
+//     pnpm tsx scripts/voice-latency-bench.ts --tier=realtime [--assert-budget] \
+//       [--realtime-commit-ms=N] [--realtime-audio-ms=N] [--no-commit-marker]
 //
 //   Live (whatever ~/.ethos/config.yaml has configured — real providers,
 //   real network, real models):
 //     pnpm tsx scripts/voice-latency-bench.ts --live [--turns=N] [--assert-budget]
+//     pnpm tsx scripts/voice-latency-bench.ts --live --tier=realtime \
+//       [--entry=<roster key>] [--turns=N] [--audio=file.wav] [--assert-budget]
 //
-// Both report against the SAME pipeline-tier budgets
-// (`VOICE_LATENCY_BUDGET_MS` in @ethosagent/voice-session):
+// Pipeline tier (`VOICE_LATENCY_BUDGET_MS`):
 //   endpoint ≤300ms | STT ≤200ms | LLM first sentence ≤800ms
 //   | first audio ≤300ms | mouth-to-ear ≤1600ms
 //
-// The numbers come from the per-turn SPANS a real VoiceSession writes, not from
-// a parallel measurement the bench invented — so what the bench reports is what
-// the deployment's own telemetry would show. Live mode reports p50/p90/p99 and
-// checks the budget against p90.
+// Realtime tier (`VOICE_REALTIME_LATENCY_BUDGET_MS`):
+//   endpoint ≤300ms | provider first audio ≤500ms | mouth-to-ear ≤800ms
+//
+// The numbers come from the per-turn SPANS a real session writes, not from a
+// parallel measurement the bench invented — so what the bench reports is what
+// the deployment's own telemetry would show. Both modes report p50/p90/p99 and
+// check budgets against p90.
+//
+// WHAT THE REALTIME TIER CAN AND CANNOT MEASURE. A hosted realtime session
+// reports one moment — its first audio frame — so mouth-to-ear is measured and
+// the two stages under it are an ATTRIBUTION of it, split at whatever commit
+// marker the provider offers (its final user transcript). Providers that
+// transcribe asynchronously deliver that marker after the audio, or not at all;
+// then the endpoint stage is absent and the provider stage carries the
+// endpointing inside it, and the bench says so instead of printing a zero. In
+// mock mode the split is exact because the mock provider emits the marker.
+// Nothing here measures the BROWSER's own capture and playout — the tier's real
+// deployment holds those sockets in a page — so a live realtime run is the
+// provider's leg, honestly labelled, not the full user experience.
+//
+// A DEPLOYED realtime call writes the same `realtime_first_audio` span this
+// harness builds by hand: the browser reports its measured mouth-to-ear on the
+// control socket (`realtime_turn_latency`) and `RealtimeControlLane` records it
+// into the deployment's voice span writer, stamped with the provider that
+// served the call. The budget below is therefore checkable against production
+// telemetry with these same two functions, not only against this script.
 //
 // scripts/ is tooling (like apps/ethos), so console.* is allowed here.
 
 import { readFileSync } from 'node:fs';
 import { readRawConfig } from '@ethosagent/config';
-import { resolveSttProvider, resolveTtsProvider } from '@ethosagent/core';
+import { resolveRealtimeProvider, resolveSttProvider, resolveTtsProvider } from '@ethosagent/core';
 import { FsStorage } from '@ethosagent/storage-fs';
 import type {
   AgentEvent,
   PcmChunk,
+  RealtimeEvent,
+  RealtimeSession,
   StreamingSttProvider,
   StreamingTtsProvider,
   SttProvider,
   TtsProvider,
 } from '@ethosagent/types';
 import { STT_CONTRACT_VERSION } from '@ethosagent/types';
+import { createFakeRealtimeProvider } from '@ethosagent/voice-providers';
 import {
   type AgentTurnRunner,
   BufferedVoiceSpanWriter,
@@ -40,7 +68,9 @@ import {
   summarizeLatency,
   turnLatenciesFromSpans,
   VOICE_LATENCY_BUDGET_MS,
+  VOICE_REALTIME_LATENCY_BUDGET_MS,
   type VoiceLatencyReport,
+  type VoiceLatencyTier,
   VoiceSession,
   type VoiceTurnSpan,
 } from '@ethosagent/voice-session';
@@ -207,6 +237,227 @@ function recordEndpoints(
     if (starts.length === 0) continue;
     into[id] = Math.max(0, Math.min(...starts) - speechEndedAt);
   }
+}
+
+// --- realtime tier ---------------------------------------------------------
+
+// The mock hosted realtime provider is the SHARED fake
+// (`createFakeRealtimeProvider` in `@ethosagent/voice-providers`), not a second
+// one written here: it commits on silence like a hosted VAD, emits the user
+// transcript as its commit marker, and can be told to withhold that marker
+// (`emitCommitMarker: false`), which is the case a provider that transcribes
+// asynchronously actually presents.
+
+/** One realtime turn's observations. `commitAt` is null when no marker landed. */
+interface RealtimeTurnMarks {
+  speechEndedAt: number;
+  commitAt: number | null;
+  firstAudioAt: number;
+}
+
+/**
+ * Drive one utterance through a realtime session and time the provider's leg.
+ *
+ * Everything here is REAL elapsed time: unlike the pipeline tier there is no
+ * silence window of ours to fast-forward through — the waiting IS the provider
+ * deciding you stopped talking, and virtualizing it would delete the thing the
+ * endpoint budget is about.
+ */
+async function driveRealtimeUtterance(
+  session: RealtimeSession,
+  events: AsyncIterator<RealtimeEvent>,
+  speech: readonly PcmChunk[],
+  timeoutMs: number,
+): Promise<RealtimeTurnMarks | null> {
+  for (const frame of speech) await session.sendAudio(pcm16Bytes(frame));
+  const speechEndedAt = performance.now();
+  let commitAt: number | null = null;
+
+  const deadline = performance.now() + timeoutMs;
+  for (;;) {
+    if (performance.now() > deadline) return null;
+    const next = await Promise.race([
+      events.next(),
+      sleep(Math.max(0, deadline - performance.now())).then(() => null),
+    ]);
+    if (!next || next.done) return null;
+    const event = next.value;
+    if (
+      event.type === 'transcript' &&
+      event.role === 'user' &&
+      event.isFinal &&
+      commitAt === null
+    ) {
+      commitAt = performance.now();
+      continue;
+    }
+    if (event.type === 'audio') {
+      return { speechEndedAt, commitAt, firstAudioAt: performance.now() };
+    }
+    if (event.type === 'closed') return null;
+  }
+}
+
+/** PCM16 frame → the little-endian bytes the realtime contract carries. */
+function pcm16Bytes(chunk: PcmChunk): Uint8Array {
+  const out = new Uint8Array(chunk.data.length * 2);
+  for (let i = 0; i < chunk.data.length; i++) {
+    const value = chunk.data[i] ?? 0;
+    out[i * 2] = value & 0xff;
+    out[i * 2 + 1] = (value >> 8) & 0xff;
+  }
+  return out;
+}
+
+/**
+ * Turn the observed marks into the spans a realtime turn writes, plus the
+ * commit-marker delay the latency module treats as `endpoint`.
+ *
+ * The span is cumulative from the moment the user stopped talking — this tier's
+ * only observable turn start — so it IS mouth-to-ear, and the provider's own
+ * leg is what remains after the marker. No marker means no endpoint entry: the
+ * endpointing is then inside the provider stage, and saying so beats printing a
+ * zero that would pass a budget nothing measured.
+ */
+function recordRealtimeTurn(
+  marks: RealtimeTurnMarks,
+  turnId: string,
+  providerId: string,
+  spans: VoiceTurnSpan[],
+  endpointByTurn: Record<string, number>,
+): void {
+  spans.push({
+    turnId,
+    stage: 'realtime_first_audio',
+    startTs: marks.speechEndedAt,
+    endTs: marks.firstAudioAt,
+    status: 'ok',
+    realtimeProvider: providerId,
+  });
+  if (marks.commitAt !== null) {
+    endpointByTurn[turnId] = Math.max(0, marks.commitAt - marks.speechEndedAt);
+  }
+}
+
+async function runMockRealtime(assertBudget: boolean): Promise<boolean> {
+  const commitMs = arg('realtime-commit-ms', 250);
+  const audioMs = arg('realtime-audio-ms', 350);
+  const emitCommitMarker = !process.argv.includes('--no-commit-marker');
+  const turns = Math.max(1, Math.trunc(arg('turns', 5)));
+
+  const provider = createFakeRealtimeProvider({ commitMs, audioMs, emitCommitMarker });
+  const session = await provider.open({ instructions: 'bench' });
+  const events = session.events[Symbol.asyncIterator]();
+  const speech = Array.from({ length: 5 }, speechFrame);
+
+  const spans: VoiceTurnSpan[] = [];
+  const endpointByTurn: Record<string, number> = {};
+  for (let i = 0; i < turns; i++) {
+    const marks = await driveRealtimeUtterance(session, events, speech, 5_000);
+    if (!marks) break;
+    recordRealtimeTurn(marks, `mock-${i}`, provider.name, spans, endpointByTurn);
+  }
+  await session.close();
+
+  const report = summarizeLatency(turnLatenciesFromSpans(spans, endpointByTurn), 'realtime');
+  printReport('Realtime tier latency budget (mock provider)', report);
+  // Said plainly, because a green table is persuasive and this one is not
+  // evidence about any provider: the mock sleeps for exactly as long as the
+  // flags say, so passing proves the span→budget path works, nothing more.
+  console.log(
+    '\n  Mock timings come from --realtime-commit-ms / --realtime-audio-ms, so this\n' +
+      '  run exercises the measurement path, not a provider. The claim about a real\n' +
+      "  provider comes from `pnpm bench:voice:live:realtime` or from a deployment's\n" +
+      '  own realtime_first_audio spans.',
+  );
+  if (!emitCommitMarker) {
+    console.log(
+      '\n  No commit marker was emitted, so there is no endpoint row: the\n' +
+        "  provider's endpointing is inside the first-audio stage.",
+    );
+  }
+  return finish(report, assertBudget);
+}
+
+async function runLiveRealtime(assertBudget: boolean): Promise<boolean> {
+  const turns = Math.max(1, Math.trunc(arg('turns', 5)));
+  const audioPath = stringArg('audio');
+  const storage = new FsStorage();
+  const config = await readRawConfig(storage);
+  if (!config) {
+    console.error('No ~/.ethos/config.yaml — run `ethos setup` before the live bench.');
+    return false;
+  }
+
+  const roster = config.voice?.realtime?.providers ?? {};
+  const entryName = stringArg('entry') ?? config.voice?.realtime?.default;
+  const entry = entryName ? roster[entryName] : undefined;
+  if (!entry) {
+    console.error(
+      'No realtime entry to bench. Configure voice.realtime.providers.<name> and either\n' +
+        'voice.realtime.default or --entry=<name>.',
+    );
+    return false;
+  }
+
+  const trusted = config.voice?.trustedPlugins ? new Set(config.voice.trustedPlugins) : undefined;
+  const registries = createBuiltinVoiceRegistries();
+  // Same resolution path (and same local-only egress gate) every surface uses.
+  const resolution = await resolveRealtimeProvider({
+    registry: registries.realtimeProviders,
+    providerName: entry.provider,
+    providerConfig: {
+      apiKey: entry.apiKey,
+      baseUrl: entry.baseUrl,
+      model: entry.model,
+      voice: entry.voice,
+    },
+    ...(trusted ? { trustedVoicePlugins: trusted } : {}),
+  });
+  if (!resolution.ok) {
+    console.error(`Realtime: ${resolution.error}`);
+    return false;
+  }
+  console.log(
+    `Live realtime provider — ${resolution.providerId}` +
+      `${entry.model ? ` · ${entry.model}` : ''}${trusted ? ' (egress gate armed)' : ''}`,
+  );
+  if (!audioPath) {
+    console.log(
+      'No --audio=<file.wav>: feeding a synthetic tone. A hosted VAD will not commit a\n' +
+        'turn for it, so expect no turns at all. Pass a recorded utterance.',
+    );
+  }
+
+  const session = await resolution.provider.open({
+    instructions: 'You are a latency benchmark. Answer in one short sentence.',
+    ...(entry.model ? { model: entry.model } : {}),
+  });
+  const events = session.events[Symbol.asyncIterator]();
+  const speech = audioPath ? readWavFrames(audioPath) : Array.from({ length: 25 }, speechFrame);
+
+  const spans: VoiceTurnSpan[] = [];
+  const endpointByTurn: Record<string, number> = {};
+  let missedMarker = 0;
+  for (let i = 0; i < turns; i++) {
+    const marks = await driveRealtimeUtterance(session, events, speech, 15_000);
+    if (!marks) break;
+    if (marks.commitAt === null) missedMarker++;
+    recordRealtimeTurn(marks, `live-${i}`, resolution.providerId, spans, endpointByTurn);
+    process.stdout.write(`  turn ${i + 1}/${turns}\r`);
+  }
+  await session.close();
+
+  const report = summarizeLatency(turnLatenciesFromSpans(spans, endpointByTurn), 'realtime');
+  printReport(`Realtime tier latency (live, ${spans.length} turns)`, report);
+  if (missedMarker > 0) {
+    console.log(
+      `\n  ${missedMarker} of ${spans.length} turns had no commit marker before the first\n` +
+        "  audio frame, so the provider's endpointing is inside the first-audio\n" +
+        '  stage for those turns. Mouth-to-ear is unaffected.',
+    );
+  }
+  return finish(report, assertBudget);
 }
 
 // --- mock mode -------------------------------------------------------------
@@ -450,17 +701,26 @@ function finish(report: VoiceLatencyReport, assertBudget: boolean): boolean {
   return false;
 }
 
+function tierArg(): VoiceLatencyTier {
+  return stringArg('tier') === 'realtime' ? 'realtime' : 'pipeline';
+}
+
 async function main(): Promise<void> {
   const assertBudget = process.argv.includes('--assert-budget');
   const live = process.argv.includes('--live');
+  const tier = tierArg();
   if (!live) {
+    const budgets =
+      tier === 'realtime' ? VOICE_REALTIME_LATENCY_BUDGET_MS : VOICE_LATENCY_BUDGET_MS;
     console.log(
-      `Budgets: ${Object.entries(VOICE_LATENCY_BUDGET_MS)
+      `Budgets (${tier}): ${Object.entries(budgets)
         .map(([k, v]) => `${k} ≤${v}ms`)
         .join(' | ')}`,
     );
   }
-  const ok = live ? await runLive(assertBudget) : await runMock(assertBudget);
+  const run =
+    tier === 'realtime' ? (live ? runLiveRealtime : runMockRealtime) : live ? runLive : runMock;
+  const ok = await run(assertBudget);
   if (!ok) process.exit(1);
 }
 

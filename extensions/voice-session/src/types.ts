@@ -5,6 +5,16 @@ import type { AgentEvent, PcmChunk } from '@ethosagent/types';
 export type AudioFormat = 'opus' | 'mp3' | 'wav' | 'pcm';
 
 /**
+ * The line spoken when a turn goes quiet during a long tool run.
+ *
+ * Exported because it is not only this orchestrator's: the hosted-realtime
+ * tier's consult filler (`RealtimeControlLane` in web-api) speaks the same
+ * words, and two surfaces of one assistant saying different things while they
+ * think is a seam the listener can hear.
+ */
+export const DEFAULT_VOICE_FILLER_TEXT = 'One moment.';
+
+/**
  * Structural interface over the thing that drives one agent turn. The real
  * implementation is `AgentLoop.run()` from `@ethosagent/core`, but this
  * package depends only on the shape — dependency injection at construction

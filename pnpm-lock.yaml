@@ -99,9 +99,15 @@ importers:
       '@ethosagent/storage-fs':
         specifier: workspace:*
         version: link:../../packages/storage-fs
+      '@ethosagent/types':
+        specifier: workspace:*
+        version: link:../../packages/types
       '@ethosagent/ui-components':
         specifier: workspace:*
         version: link:../../packages/ui-components
+      '@ethosagent/voice-satellite':
+        specifier: workspace:*
+        version: link:../../extensions/voice-satellite
       '@ethosagent/web-api':
         specifier: workspace:*
         version: link:../web-api
@@ -341,6 +347,9 @@ importers:
       '@ethosagent/tools-process':
         specifier: workspace:*
         version: link:../../extensions/tools-process
+      '@ethosagent/voice-satellite':
+        specifier: workspace:*
+        version: link:../../extensions/voice-satellite
       '@ethosagent/watchers':
         specifier: workspace:*
         version: link:../../extensions/watchers
@@ -451,9 +460,15 @@ importers:
       '@ethosagent/sdk':
         specifier: workspace:*
         version: link:../../packages/sdk
+      '@ethosagent/types':
+        specifier: workspace:*
+        version: link:../../packages/types
       '@ethosagent/ui-components':
         specifier: workspace:*
         version: link:../../packages/ui-components
+      '@ethosagent/voice-realtime-protocol':
+        specifier: workspace:*
+        version: link:../../packages/voice-realtime-protocol
       '@ethosagent/voice-text':
         specifier: workspace:*
         version: link:../../packages/voice-text
@@ -530,6 +545,9 @@ importers:
       '@ethosagent/dashboard':
         specifier: workspace:*
         version: link:../../extensions/dashboard
+      '@ethosagent/delivery-ledger':
+        specifier: workspace:*
+        version: link:../../extensions/delivery-ledger
       '@ethosagent/digest':
         specifier: workspace:*
         version: link:../../extensions/digest
@@ -575,6 +593,9 @@ importers:
       '@ethosagent/session-cards':
         specifier: workspace:*
         version: link:../../extensions/session-cards
+      '@ethosagent/session-lane':
+        specifier: workspace:*
+        version: link:../../packages/session-lane
       '@ethosagent/session-sqlite':
         specifier: workspace:*
         version: link:../../extensions/session-sqlite
@@ -602,6 +623,9 @@ importers:
       '@ethosagent/tools-ui':
         specifier: workspace:*
         version: link:../../extensions/tools-ui
+      '@ethosagent/tools-voice':
+        specifier: workspace:*
+        version: link:../../extensions/tools-voice
       '@ethosagent/types':
         specifier: workspace:*
         version: link:../../packages/types
@@ -1920,12 +1944,18 @@ importers:
 
   extensions/tools-voice:
     dependencies:
+      '@ethosagent/core':
+        specifier: workspace:*
+        version: link:../../packages/core
       '@ethosagent/platform-voice':
         specifier: workspace:*
         version: link:../platform-voice
       '@ethosagent/types':
         specifier: workspace:*
         version: link:../../packages/types
+      '@ethosagent/voice-text':
+        specifier: workspace:*
+        version: link:../../packages/voice-text
 
   extensions/tools-watchers:
     dependencies:
@@ -1950,6 +1980,34 @@ importers:
       '@ethosagent/types':
         specifier: workspace:*
         version: link:../../packages/types
+      '@ethosagent/voice-realtime-protocol':
+        specifier: workspace:*
+        version: link:../../packages/voice-realtime-protocol
+      ws:
+        specifier: ^8.20.0
+        version: 8.21.0
+
+  extensions/voice-satellite:
+    dependencies:
+      '@ethosagent/types':
+        specifier: workspace:*
+        version: link:../../packages/types
+      '@ethosagent/voice-session':
+        specifier: workspace:*
+        version: link:../voice-session
+      '@ethosagent/voice-text':
+        specifier: workspace:*
+        version: link:../../packages/voice-text
+      '@ethosagent/web-contracts':
+        specifier: workspace:*
+        version: link:../../packages/web-contracts
+      ws:
+        specifier: ^8.20.0
+        version: 8.21.0
+    devDependencies:
+      '@ethosagent/storage-fs':
+        specifier: workspace:*
+        version: link:../../packages/storage-fs
 
   extensions/voice-session:
     dependencies:
@@ -2171,10 +2229,23 @@ importers:
         specifier: ^19.0.0
         version: 19.2.16
 
-  packages/voice-text: {}
+  packages/voice-realtime-protocol:
+    dependencies:
+      '@ethosagent/types':
+        specifier: workspace:*
+        version: link:../types
+
+  packages/voice-text:
+    dependencies:
+      '@ethosagent/types':
+        specifier: workspace:*
+        version: link:../types
 
   packages/web-contracts:
     dependencies:
+      '@ethosagent/types':
+        specifier: workspace:*
+        version: link:../types
       '@orpc/contract':
         specifier: ^1.14.3
         version: 1.14.14

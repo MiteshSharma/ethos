@@ -26,6 +26,25 @@ import type {
 } from '@ethosagent/platform-voice';
 import type { Tool, ToolContext, ToolResult } from '@ethosagent/types';
 
+export type { AgentConsultOptions, DeriveRealtimeToolsetOptions } from './agent-consult';
+export {
+  AGENT_CONSULT_MAX_RESULT_CHARS,
+  AGENT_CONSULT_TOOL,
+  buildRealtimeInstructions,
+  createAgentConsultTool,
+  deriveRealtimeToolset,
+  REALTIME_BOUNDARY_POLICY,
+  REALTIME_SAFE_TOOLS,
+} from './agent-consult';
+export type {
+  RealtimeDispatchContext,
+  RealtimeToolCall,
+  RealtimeToolHost,
+  RealtimeToolHostOptions,
+  RealtimeToolResult,
+} from './realtime-host';
+export { createRealtimeToolHost, REALTIME_UNKNOWN_TOOL } from './realtime-host';
+
 export interface VoiceToolsOptions {
   /**
    * SIP trunk boundary used to place the call. Optional: default installs wire

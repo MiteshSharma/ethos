@@ -2,13 +2,12 @@ import { z } from 'zod';
 
 // Isolated, typed boundary for a live browser voice call (talk-mode).
 //
-// This is the ONLY seam talk-mode's UI + state logic bind to. The production
-// implementation wraps `livekit-client` (a WebRTC room: publishes the local mic
-// track, subscribes to the agent's audio track, and carries transcript/control
-// events over a data channel) — that package is NOT installed here, deliberately,
-// so the whole feature typechecks and unit-tests against a fake without a running
-// LiveKit server. See `apps/web/src/features/voice/README.md` for the manual
-// binding step.
+// This is the ONLY seam talk-mode's UI + state logic bind to. The implementation
+// that actually runs in the app is `createTalkModeClient` (`talk-mode-client.ts`),
+// which picks the realtime tier (one duplex WebSocket to a hosted provider) or
+// the pipeline tier (binary PCM to web-api, batch RPC as fallback). Neither
+// needs a native dependency, so the whole feature typechecks, unit-tests against
+// fakes, and ships without one. See `apps/web/src/features/voice/README.md`.
 //
 // The event stream mirrors `VoiceSessionEvent` from
 // `extensions/voice-session/src/types.ts` — kept as a local mirror (not an import)
@@ -25,6 +24,16 @@ export type VoiceCallAudioFormat = 'opus' | 'mp3' | 'wav' | 'pcm';
  * Consumers must treat an unknown `type` as a no-op (forward-compatible).
  */
 export type VoiceCallEvent =
+  // Endpointing heard the user stop talking. The transcript is still in flight;
+  // this is what moves the UI to `thinking` at the moment the user actually
+  // finished rather than when the STT round trip returns. Emitted only by the
+  // tiers that endpoint IN THE BROWSER (pipeline: streaming + batch) — on the
+  // realtime tier the provider owns VAD and reports no speech-end edge.
+  | { type: 'speech_end' }
+  // The utterance a `speech_end` opened produced nothing to answer: an empty
+  // transcript, or the server dropped it. Hands the floor back so the UI does
+  // not sit thinking about a turn that will never arrive.
+  | { type: 'utterance_dropped' }
   // A committed utterance's transcript is ready — the agent turn is about to run.
   // `provider` is the STT provider that ACTUALLY ran, when the transport knows it.
   | { type: 'utterance_committed'; text: string; provider?: string }
@@ -42,6 +51,11 @@ export type VoiceCallEvent =
   | { type: 'interrupted'; text: string }
   // The reply finished playing uninterrupted. `text` is the played reply.
   | { type: 'reply_complete'; text: string }
+  // The call spent its budget. `text` is the sign-off the session is speaking
+  // right now; the call ends once it has been said. Not an `error`: nothing went
+  // wrong, a limit the operator set was reached, and the strip says so in words
+  // rather than putting a failure where the state word goes.
+  | { type: 'budget_wind_down'; text: string }
   // An error surfaced. `provider` names the provider that failed, when known, so
   // a degraded-to-text notice can say WHICH one.
   | { type: 'error'; error: string; code?: string; provider?: string }
@@ -63,16 +77,47 @@ export interface VoiceCallClient {
   setMuted(muted: boolean): void;
   /** The local mic MediaStream once connected, for a level meter. Null otherwise. */
   micStream(): MediaStream | null;
+  /**
+   * Smoothed level of the agent's own speech right now, 0..1 — what drives the
+   * Call Stage's speaking state.
+   *
+   * Optional because it is a property of the audio GRAPH, and the batch tier
+   * has none: it hands a data URL to an `Audio` element, where no analyser can
+   * be inserted. A tier without one reports nothing rather than a fabricated
+   * level, and the overlay draws at rest.
+   */
+  outputLevel?(): number;
+  /**
+   * Speak `question` and return the next thing the user says — WITHOUT ending
+   * the agent turn that is in flight. This is what makes the `clarify` tool
+   * voice-native: the tool blocks the turn mid-way, so the question has to be
+   * asked and answered inside a turn that is still running.
+   *
+   * Resolves the spoken answer, or null for every "this cannot happen": the
+   * tier cannot speak, there is no turn to ask inside, synthesis failed, the
+   * call went away, or `signal` aborted because the on-screen card was answered
+   * first. Null is never a silent swallow — the caller's fallback is the card,
+   * which is rendered the whole time.
+   *
+   * Optional for the same reason as `outputLevel?()` above: it is a property of
+   * what the TIER can do, not of the boundary. The pipeline tiers own the turn
+   * and the floor, so they implement it. The realtime tier does not: the hosted
+   * provider owns both, and an answer spoken into it is consumed by the
+   * provider's own model turn rather than reaching the blocked tool. A tier
+   * without one reports nothing and the clarify stays card-only.
+   */
+  ask?(question: string, signal: AbortSignal): Promise<string | null>;
   /** Subscribe to call/transcript events. Returns an unsubscribe function. */
   on(listener: (event: VoiceCallEvent) => void): () => void;
 }
 
-// Zod schema for the JSON-serializable control events a real transport carries
-// over its data channel (everything except `reply_audio`, which arrives as a
-// media frame, not JSON). The production `livekit-client` binding MUST parse
-// inbound data-channel payloads through `parseVoiceCallControlEvent` rather than
-// casting them — external JSON is never trusted with `as` (CLAUDE.md "API
-// response type safety").
+// Zod schema for the JSON-serializable control events a transport can carry as
+// JSON (everything except `reply_audio`, which arrives as a media frame). The
+// shipped transports parse their own wire formats through
+// `@ethosagent/web-contracts`, so nothing in the app calls the guard below
+// today; it is the rule any future JSON-carrying transport MUST follow —
+// external JSON is never trusted with `as` (CLAUDE.md "API response type
+// safety").
 const VoiceCallControlEventSchema = z.discriminatedUnion('type', [
   z.object({
     type: z.literal('utterance_committed'),
@@ -84,6 +129,7 @@ const VoiceCallControlEventSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('filler'), text: z.string() }),
   z.object({ type: z.literal('interrupted'), text: z.string() }),
   z.object({ type: z.literal('reply_complete'), text: z.string() }),
+  z.object({ type: z.literal('budget_wind_down'), text: z.string() }),
   z.object({
     type: z.literal('error'),
     error: z.string(),
@@ -104,14 +150,16 @@ export function parseVoiceCallControlEvent(raw: unknown): VoiceCallEvent | null 
 }
 
 const UNWIRED_MESSAGE =
-  'Live voice transport is not installed. Install livekit-client and implement ' +
-  'VoiceCallClient (see apps/web/src/features/voice/README.md) to talk in the browser.';
+  'No voice transport was supplied for this call. Nothing is missing from the ' +
+  'install — pass `createTalkModeClient` (features/voice/talk-mode-client.ts) as ' +
+  '`useVoiceCall({ createClient })`, the way Chat does, to talk in the browser.';
 
 /**
- * Default client used until the real transport is wired. `connect()` rejects with
- * an honest message pointing at the manual binding step; every other method is a
- * no-op. This keeps the toggle + in-call UI fully functional and testable while
- * the green tree stays free of the native `livekit-client` dependency.
+ * The boundary's inert default: `connect()` rejects instead of dialling and every
+ * other method is a no-op, so the toggle + in-call UI stay fully functional and
+ * testable with no transport wired at all. Nothing in the app uses it — `Chat.tsx`
+ * injects `createTalkModeClient` — so reaching this rejection means a caller of
+ * `useVoiceCall` omitted `createClient`.
  */
 export function createUnwiredVoiceCallClient(): VoiceCallClient {
   return {

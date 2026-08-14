@@ -11,19 +11,25 @@ import type { VoiceCallStatus, VoiceDegradedNotice } from './voice-call-reducer'
 // motion primitives.
 //
 // The nine interaction states of DR1 are all rendered from one component:
-// idle (the strip is absent), connecting, listening, thinking, agent speaking,
-// barge-in acknowledged, reconnecting, degraded-to-text, and mic-permission
-// denied. The last two collapse the strip into an inline notice — the
-// conversation continues in text either way, so the strip gets out of the way
-// rather than sitting there broken.
+// idle (the strip is absent), connecting, listening, thinking/consulting, agent
+// speaking, barge-in acknowledged, reconnecting, degraded-to-text, and
+// mic-permission denied. The last two collapse the strip into an inline notice
+// — the conversation continues in text either way, so the strip gets out of the
+// way rather than sitting there broken.
+//
+// `thinking` and `consulting` are one DR1 row (the accent dot steady) and two
+// state words: both mean "the agent has the floor and is not talking", and the
+// word is the only thing that says whether it is composing a reply or off
+// checking something.
 
 /** Geist Mono state word, in the connection-dot vocabulary. Lowercase mono. */
-const STATUS_LABEL: Record<VoiceCallStatus, string> = {
+export const STATUS_LABEL: Record<VoiceCallStatus, string> = {
   idle: '',
   connecting: 'connecting',
   reconnecting: 'reconnecting…',
   listening: 'listening',
   thinking: 'thinking',
+  consulting: 'consulting',
   agent_speaking: 'speaking',
   interrupted: 'interrupted — go ahead',
   ended: 'call ended',
@@ -76,14 +82,55 @@ export interface TalkModeCallBarProps {
   onHangUp: () => void;
   /** Live caption of what the agent is saying right now. */
   caption?: string | null;
+  /**
+   * The call reached its spending limit: the caption is the spoken sign-off and
+   * this puts a `budget reached` mono chip beside it (DR1 "★ Budget wind-down").
+   * A chip in the existing label vocabulary — never a badge, never a banner.
+   */
+  windDown?: string | null;
   /** Voice fell back to text — the strip collapses to a dismissible notice. */
   degraded?: VoiceDegradedNotice | null;
+  /**
+   * Voice WORKS but not on the configured tier (realtime was refused or
+   * unavailable). Renders as a dismissible line ABOVE a live strip, because the
+   * call is still going — unlike `degraded`, which replaces the strip.
+   */
+  notice?: string | null;
+  /** Which tier is serving this call, for the mono detail label. */
+  tier?: 'pipeline' | 'realtime' | null;
+  /** True while the user has explicitly chosen the private/offline pipeline. */
+  privateMode?: boolean;
+  /**
+   * Choose the private/offline pipeline for this conversation. Offered only
+   * while the realtime tier is running — the pipeline IS the private mode, so
+   * there is nothing to offer once it is already what is serving.
+   */
+  onUsePrivateMode?: () => void;
+  /**
+   * Undo that choice. Offered only while the choice is in effect: on a call
+   * that landed on the pipeline because realtime was REFUSED, a "use realtime"
+   * control would be a button that cannot work.
+   */
+  onLeavePrivateMode?: () => void;
+  /**
+   * Return to the Call Stage. Passed only while a call is carrying audio and the
+   * stage is collapsed — collapse and restore are the same call, not two
+   * surfaces (DESIGN.md § "CallStrip").
+   */
+  onExpand?: () => void;
   /** The browser refused the mic — guidance, never a dead mic icon. */
   micDenied?: boolean;
   onDismissNotice?: () => void;
   /** Providers + models that ACTUALLY served this call, for the mono labels. */
   sttProvider?: string | null;
   sttModel?: string | null;
+  /**
+   * The realtime provider and model actually serving this call. Known exactly
+   * (the mint answered with both), unlike the pipeline tier's model, which the
+   * page still reads from the deployment default.
+   */
+  realtimeProvider?: string | null;
+  realtimeModel?: string | null;
   ttsProvider?: string | null;
   ttsModel?: string | null;
   latency?: VoiceTurnLatency;
@@ -101,11 +148,20 @@ export function TalkModeCallBar({
   onToggleMute,
   onHangUp,
   caption,
+  windDown,
   degraded,
+  notice,
+  tier,
+  privateMode,
+  onUsePrivateMode,
+  onLeavePrivateMode,
+  onExpand,
   micDenied,
   onDismissNotice,
   sttProvider,
   sttModel,
+  realtimeProvider,
+  realtimeModel,
   ttsProvider,
   ttsModel,
   latency,
@@ -136,16 +192,30 @@ export function TalkModeCallBar({
     );
   }
 
-  const summary = providerSummary({ status, sttProvider, sttModel, ttsProvider, ttsModel });
+  const summary = providerSummary({
+    status,
+    sttProvider,
+    sttModel,
+    ttsProvider,
+    ttsModel,
+    realtimeProvider,
+    realtimeModel,
+  });
   const totalMs = latency?.totalMs ?? null;
 
   return (
     <section className="talk-call-bar" aria-label="Voice call controls">
+      {/* The tier fell back. The call is LIVE underneath, so this is a line
+          above the strip rather than the strip collapsing into it. */}
+      {notice ? (
+        <InlineNotice className="talk-notice-tier" text={notice} onDismiss={onDismissNotice} />
+      ) : null}
       <div className="talk-call-row">
         <SpeakingIndicator status={status} micLevels={micLevels} muted={muted} />
         <span className="talk-status-label" role="status">
           {error ?? STATUS_LABEL[status]}
         </span>
+        {windDown ? <span className="talk-mono talk-budget-chip">budget reached</span> : null}
         {caption ? (
           <span className="talk-caption" aria-live="polite">
             {caption}
@@ -167,32 +237,83 @@ export function TalkModeCallBar({
               {!summary && totalMs === null ? <span className="talk-mono">·</span> : null}
             </button>
           ) : null}
-          <button
-            type="button"
-            className={`talk-btn${muted ? ' talk-btn-active' : ''}`}
-            onClick={onToggleMute}
-            aria-pressed={muted}
-            aria-label={muted ? 'Unmute microphone' : 'Mute microphone'}
-          >
-            {muted ? <MicOffIcon /> : <MicIcon />}
-          </button>
-          <button
-            type="button"
-            className="talk-btn talk-hangup-btn"
-            onClick={onHangUp}
-            aria-label="End call"
-          >
-            <PhoneDownIcon />
-          </button>
+          {/* The call is over and the strip is only still on screen to say WHY
+              — the budget sign-off, or a failure the user has not been told
+              about anywhere else. Mute and hang-up control nothing now, so they
+              give way to the same dismiss control the collapsed notices use;
+              without it the explanation would have no way off the screen. */}
+          {status === 'ended' && onDismissNotice ? (
+            <button
+              type="button"
+              className="talk-btn"
+              onClick={onDismissNotice}
+              aria-label="Dismiss"
+            >
+              <CloseIcon />
+            </button>
+          ) : (
+            <>
+              {onExpand ? (
+                <button
+                  type="button"
+                  className="talk-btn talk-expand-btn"
+                  onClick={onExpand}
+                  aria-label="Show the call stage"
+                >
+                  <ExpandIcon />
+                </button>
+              ) : null}
+              <button
+                type="button"
+                className={`talk-btn${muted ? ' talk-btn-active' : ''}`}
+                onClick={onToggleMute}
+                aria-pressed={muted}
+                aria-label={muted ? 'Unmute microphone' : 'Mute microphone'}
+              >
+                {muted ? <MicOffIcon /> : <MicIcon />}
+              </button>
+              <button
+                type="button"
+                className="talk-btn talk-hangup-btn"
+                onClick={onHangUp}
+                aria-label="End call"
+              >
+                <PhoneDownIcon />
+              </button>
+            </>
+          )}
         </div>
       </div>
       {detailOpen ? (
         <div className="talk-call-detail talk-mono">
-          {sttProvider ? <span>{label('stt', sttProvider, sttModel)}</span> : null}
-          {ttsProvider ? <span>{label('tts', ttsProvider, ttsModel)}</span> : null}
-          <span>llm {formatMs(latency?.llmMs)}</span>
-          <span>audio {formatMs(latency?.ttsMs)}</span>
-          <span>total {formatMs(latency?.totalMs)}</span>
+          {callDetailItems({
+            tier,
+            realtimeProvider,
+            realtimeModel,
+            sttProvider,
+            sttModel,
+            ttsProvider,
+            ttsModel,
+            latency,
+          }).map((item) => (
+            <span key={item}>{item}</span>
+          ))}
+          {/* The private/offline mode IS the pipeline tier, so it is only worth
+              offering while something else is serving — and only worth undoing
+              while the user's own choice is what is holding the call there. */}
+          {privateMode && onLeavePrivateMode ? (
+            <button
+              type="button"
+              className="talk-mono talk-private-btn"
+              onClick={onLeavePrivateMode}
+            >
+              leave private mode
+            </button>
+          ) : tier === 'realtime' && onUsePrivateMode ? (
+            <button type="button" className="talk-mono talk-private-btn" onClick={onUsePrivateMode}>
+              use private mode
+            </button>
+          ) : null}
         </div>
       ) : null}
     </section>
@@ -224,6 +345,45 @@ function InlineNotice({
   );
 }
 
+/**
+ * The expandable detail row's mono labels, in order.
+ *
+ * Pure and exported so the label vocabulary is testable without a DOM: the row
+ * only exists while the toggle is open, and a `renderToStaticMarkup` harness
+ * always renders it closed.
+ */
+export function callDetailItems(opts: {
+  tier?: 'pipeline' | 'realtime' | null;
+  realtimeProvider?: string | null;
+  realtimeModel?: string | null;
+  sttProvider?: string | null;
+  sttModel?: string | null;
+  ttsProvider?: string | null;
+  ttsModel?: string | null;
+  latency?: VoiceTurnLatency | undefined;
+}): string[] {
+  // On the realtime tier ONE provider both hears and speaks, and the `realtime`
+  // row already names it with the model the mint actually returned. The stt/tts
+  // rows are the PIPELINE's two-engine split: their models come from the
+  // deployment's pipeline config, which no part of a realtime call ever ran. So
+  // they are suppressed here rather than printed beside the provider that did —
+  // the row must never advertise a `{provider} · {model}` pair that did not run.
+  const pipelineStages = opts.tier !== 'realtime';
+  return [
+    // Which engine is talking, in the same mono label vocabulary as the
+    // providers beside it — never a badge, never a debug panel.
+    ...(opts.tier ? [`tier ${opts.tier}`] : []),
+    ...(opts.realtimeProvider
+      ? [label('realtime', opts.realtimeProvider, opts.realtimeModel)]
+      : []),
+    ...(pipelineStages && opts.sttProvider ? [label('stt', opts.sttProvider, opts.sttModel)] : []),
+    ...(pipelineStages && opts.ttsProvider ? [label('tts', opts.ttsProvider, opts.ttsModel)] : []),
+    `llm ${formatMs(opts.latency?.llmMs)}`,
+    `audio ${formatMs(opts.latency?.ttsMs)}`,
+    `total ${formatMs(opts.latency?.totalMs)}`,
+  ];
+}
+
 /** `{provider} · {model}` in the existing vocabulary — never a badge. */
 function label(kind: string, provider: string, model: string | null | undefined): string {
   return model ? `${kind} ${provider} · ${model}` : `${kind} ${provider}`;
@@ -233,14 +393,27 @@ function formatMs(ms: number | null | undefined): string {
   return ms === null || ms === undefined ? '—' : `${ms}ms`;
 }
 
-/** Which provider is worth naming right now: the one currently doing the work. */
-function providerSummary(opts: {
+/**
+ * Which provider is worth naming right now: the one currently doing the work.
+ * Exported so the Call Stage prints the SAME label as the strip it collapses
+ * into, rather than a second opinion about which engine is running.
+ */
+export function providerSummary(opts: {
   status: VoiceCallStatus;
   sttProvider?: string | null;
   sttModel?: string | null;
   ttsProvider?: string | null;
   ttsModel?: string | null;
+  realtimeProvider?: string | null;
+  realtimeModel?: string | null;
 }): string {
+  // On the realtime tier ONE provider both hears and speaks, so there is no
+  // listening/speaking split to pick between.
+  if (opts.realtimeProvider) {
+    return opts.realtimeModel
+      ? `${opts.realtimeProvider} · ${opts.realtimeModel}`
+      : opts.realtimeProvider;
+  }
   const speaking = opts.status === 'agent_speaking' || opts.status === 'interrupted';
   if (speaking && opts.ttsProvider) {
     return opts.ttsModel ? `${opts.ttsProvider} · ${opts.ttsModel}` : opts.ttsProvider;
@@ -249,6 +422,13 @@ function providerSummary(opts: {
     return opts.sttModel ? `${opts.sttProvider} · ${opts.sttModel}` : opts.sttProvider;
   }
   return '';
+}
+
+/** Screen-reader wording for the accent dot's three meanings. */
+function agentActivityLabel(status: VoiceCallStatus): string {
+  if (status === 'consulting') return 'Agent is checking something';
+  if (status === 'thinking') return 'Agent is thinking';
+  return 'Agent is speaking';
 }
 
 function SpeakingIndicator({
@@ -260,6 +440,12 @@ function SpeakingIndicator({
   micLevels: number[];
   muted: boolean;
 }) {
+  // Ended — the strip is only still here to explain why. There is no mic to
+  // meter and no dot to pulse, so the slot goes empty but keeps its width: the
+  // row must not jump sideways as the call settles into its explanation.
+  if (status === 'ended') {
+    return <div className="talk-indicator" />;
+  }
   // Connecting / reconnecting — amber dot, the connection-dot vocabulary.
   if (status === 'connecting' || status === 'reconnecting') {
     return (
@@ -268,15 +454,22 @@ function SpeakingIndicator({
       </div>
     );
   }
-  // Thinking — the accent dot STEADY: the personality has the floor but is not
-  // yet talking. Speaking — the same dot, pulsing.
-  if (status === 'thinking' || status === 'agent_speaking' || status === 'interrupted') {
-    const speaking = status !== 'thinking';
+  // Thinking / consulting — the accent dot STEADY: the personality has the
+  // floor but is not talking. Speaking — the same dot, pulsing. A consult is
+  // the steady one even while its filler line is being said, because what the
+  // listener is waiting through is the round trip, not the sentence.
+  if (
+    status === 'thinking' ||
+    status === 'consulting' ||
+    status === 'agent_speaking' ||
+    status === 'interrupted'
+  ) {
+    const speaking = status === 'agent_speaking' || status === 'interrupted';
     return (
       <div
         className={`talk-indicator${status === 'interrupted' ? ' talk-indicator-flash' : ''}`}
         role="img"
-        aria-label={speaking ? 'Agent is speaking' : 'Agent is thinking'}
+        aria-label={agentActivityLabel(status)}
       >
         <span className={`talk-agent-dot${speaking ? ' talk-agent-pulse' : ''}`} />
       </div>
@@ -325,7 +518,26 @@ function PhoneIcon() {
   );
 }
 
-function PhoneDownIcon() {
+/** Return to the Call Stage. The surface it reopens, in 16px stroke. */
+function ExpandIcon() {
+  return (
+    <svg
+      width="16"
+      height="16"
+      viewBox="0 0 16 16"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.5"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <rect x="3" y="3.5" width="10" height="9" rx="1.5" />
+    </svg>
+  );
+}
+
+/** Shared with the Call Stage, which draws the same controls. */
+export function PhoneDownIcon() {
   return (
     <svg
       width="16"
@@ -369,7 +581,7 @@ export function TalkMicIcon() {
   );
 }
 
-function MicIcon() {
+export function MicIcon() {
   return (
     <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
       <rect x="6" y="2" width="4" height="8" rx="2" stroke="currentColor" strokeWidth="1.5" />
@@ -387,7 +599,7 @@ function MicIcon() {
   );
 }
 
-function MicOffIcon() {
+export function MicOffIcon() {
   return (
     <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
       <rect x="6" y="2" width="4" height="8" rx="2" stroke="currentColor" strokeWidth="1.5" />

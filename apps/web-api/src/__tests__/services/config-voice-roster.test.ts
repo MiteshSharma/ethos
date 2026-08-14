@@ -347,3 +347,220 @@ describe('Settings → Voice STT provider roster', () => {
     expect(Object.keys(read.voiceSttProviders)).toEqual(['groq']);
   });
 });
+
+// The realtime roster is the third sibling: same round trip, same vault rules,
+// same name validation — plus the three scalars that decide which entry a
+// deployment uses, which engine it prefers, and where a session stops.
+describe('Settings → Voice realtime provider roster', () => {
+  let storage: InMemoryStorage;
+  let secrets: InMemorySecretsResolver;
+  let service: ConfigService;
+  const previousStateDir = process.env.ETHOS_STATE_DIR;
+
+  beforeAll(() => {
+    process.env.ETHOS_STATE_DIR = DATA;
+  });
+  afterAll(() => {
+    if (previousStateDir === undefined) delete process.env.ETHOS_STATE_DIR;
+    else process.env.ETHOS_STATE_DIR = previousStateDir;
+  });
+
+  beforeEach(async () => {
+    storage = new InMemoryStorage();
+    secrets = new InMemorySecretsResolver();
+    await storage.mkdir(DATA);
+    const repo = new ConfigRepository({ dataDir: DATA, storage, secrets });
+    service = new ConfigService({ config: repo, secrets });
+    await storage.write(join(DATA, 'config.yaml'), BASE.join('\n'));
+  });
+
+  async function yaml(): Promise<string> {
+    return (await storage.read(join(DATA, 'config.yaml'))) ?? '';
+  }
+
+  it('round-trips an entry through write, read, and the CLI loader', async () => {
+    await service.update({
+      voiceRealtimeProviders: {
+        live: {
+          provider: 'openai-realtime',
+          model: 'gpt-realtime',
+          voice: 'cedar',
+          costPerMinuteUsd: 0.06,
+        },
+      },
+    });
+
+    const read = await service.get();
+    expect(read.voiceRealtimeProviders.live).toEqual({
+      provider: 'openai-realtime',
+      model: 'gpt-realtime',
+      apiKeyPreview: null,
+      baseUrl: null,
+      voice: 'cedar',
+      costPerMinuteUsd: 0.06,
+    });
+
+    const loaded = await readRawConfig(storage);
+    expect(loaded?.voice?.realtime?.providers?.live).toEqual({
+      provider: 'openai-realtime',
+      model: 'gpt-realtime',
+      voice: 'cedar',
+      costPerMinuteUsd: 0.06,
+    });
+  });
+
+  it('round-trips the tier, default entry and session budget to the CLI loader', async () => {
+    await service.update({
+      voiceTier: 'realtime',
+      voiceRealtimeDefault: 'live',
+      voiceRealtimeSessionBudgetUsd: 1.5,
+      voiceRealtimeProviders: { live: { provider: 'openai-realtime' } },
+    });
+
+    const read = await service.get();
+    expect(read.voiceTier).toBe('realtime');
+    expect(read.voiceRealtimeDefault).toBe('live');
+    expect(read.voiceRealtimeSessionBudgetUsd).toBe(1.5);
+
+    const loaded = await readRawConfig(storage);
+    expect(loaded?.voice?.tier).toBe('realtime');
+    expect(loaded?.voice?.realtime?.default).toBe('live');
+    expect(loaded?.voice?.realtime?.sessionBudgetUsd).toBe(1.5);
+  });
+
+  it('clears the tier, default and budget when the patch sends null', async () => {
+    await service.update({
+      voiceTier: 'realtime',
+      voiceRealtimeDefault: 'live',
+      voiceRealtimeSessionBudgetUsd: 1.5,
+    });
+    await service.update({
+      voiceTier: null,
+      voiceRealtimeDefault: null,
+      voiceRealtimeSessionBudgetUsd: null,
+    });
+
+    const read = await service.get();
+    expect(read.voiceTier).toBeNull();
+    expect(read.voiceRealtimeDefault).toBeNull();
+    expect(read.voiceRealtimeSessionBudgetUsd).toBeNull();
+    expect(await yaml()).not.toContain('voice.tier');
+  });
+
+  it('moves an entry API key into the vault on its own realtime ref', async () => {
+    await service.update({
+      voiceRealtimeProviders: {
+        live: { provider: 'openai-realtime', apiKey: 'sk-live-abcdefghijkl' },
+      },
+    });
+
+    const file = await yaml();
+    expect(file).not.toContain('sk-live-abcdefghijkl');
+    expect(file).toContain(
+      'voice.realtime.providers.live.apiKey: "${secrets:voice/realtime/providers/live/apiKey}"',
+    );
+    expect(await secrets.get('voice/realtime/providers/live/apiKey')).toBe('sk-live-abcdefghijkl');
+
+    const preview = (await service.get()).voiceRealtimeProviders.live?.apiKeyPreview;
+    expect(preview).not.toBeNull();
+    expect(preview).not.toContain('abcdefghijkl');
+  });
+
+  // The vault-ref GC is the sharp edge: the config key is the ONLY pointer to
+  // the vault entry, so a roster the cleanup regex does not recognise leaks its
+  // credentials on every removal — and one that ignores `survivingRefs` blanks
+  // a credential the operator never touched.
+  it('a save that omits apiKey keeps the stored key; removing the row drops it', async () => {
+    await service.update({
+      voiceRealtimeProviders: {
+        live: { provider: 'openai-realtime', apiKey: 'sk-live-abcdefghijkl' },
+      },
+    });
+    await service.update({
+      voiceRealtimeProviders: { live: { provider: 'openai-realtime', voice: 'cedar' } },
+    });
+    expect(await secrets.get('voice/realtime/providers/live/apiKey')).toBe('sk-live-abcdefghijkl');
+    expect((await service.get()).voiceRealtimeProviders.live?.voice).toBe('cedar');
+
+    await service.update({ voiceRealtimeProviders: {} });
+    expect((await service.get()).voiceRealtimeProviders).toEqual({});
+    expect(await secrets.get('voice/realtime/providers/live/apiKey')).toBeNull();
+  });
+
+  it('leaves a surviving ref alone while realtime keys are in the same delete batch', async () => {
+    // A legacy `voice.providers.*` TTS entry (deleted key, ref re-written under
+    // the new spelling) alongside a realtime roster replacement. The legacy
+    // credential must survive the shared delete pass; the dropped realtime row
+    // must still have its own vault entry collected.
+    await service.update({
+      voiceTtsProviders: { studio: { provider: 'openai-tts', apiKey: 'sk-studio-abcdefghijkl' } },
+      voiceRealtimeProviders: {
+        live: { provider: 'openai-realtime', apiKey: 'sk-live-abcdefghijkl' },
+      },
+    });
+    const legacy = (await yaml()).replace(/^voice\.tts\.providers\./gm, 'voice.providers.');
+    await storage.write(join(DATA, 'config.yaml'), legacy);
+
+    await service.update({
+      voiceTtsProviders: { studio: { provider: 'openai-tts', voice: 'shimmer' } },
+      voiceRealtimeProviders: {},
+    });
+
+    expect(await secrets.get('voice/tts/providers/studio/apiKey')).toBe('sk-studio-abcdefghijkl');
+    expect(await secrets.get('voice/realtime/providers/live/apiKey')).toBeNull();
+    expect((await service.get()).voiceTtsProviders.studio?.apiKeyPreview).not.toBeNull();
+  });
+
+  it('keeps a same-named entry in each roster on its own vault ref', async () => {
+    await service.update({
+      voiceTtsProviders: { house: { provider: 'openai-tts', apiKey: 'sk-tts-abcdefghijkl' } },
+      voiceRealtimeProviders: {
+        house: { provider: 'openai-realtime', apiKey: 'sk-realtime-abcdefghijkl' },
+      },
+    });
+    expect(await secrets.get('voice/tts/providers/house/apiKey')).toBe('sk-tts-abcdefghijkl');
+    expect(await secrets.get('voice/realtime/providers/house/apiKey')).toBe(
+      'sk-realtime-abcdefghijkl',
+    );
+
+    // Dropping only the realtime row must not touch the TTS credential.
+    await service.update({ voiceRealtimeProviders: {} });
+    expect(await secrets.get('voice/tts/providers/house/apiKey')).toBe('sk-tts-abcdefghijkl');
+    expect(await secrets.get('voice/realtime/providers/house/apiKey')).toBeNull();
+  });
+
+  it('refuses a name the config format cannot carry', async () => {
+    await expect(
+      service.update({ voiceRealtimeProviders: { 'my live': { provider: 'openai-realtime' } } }),
+    ).rejects.toThrow(/identifier/);
+    expect(await yaml()).not.toContain('voice.realtime.providers');
+  });
+
+  it('an entry with no provider is refused rather than half-written', async () => {
+    await expect(
+      service.update({ voiceRealtimeProviders: { live: { provider: '' } } }),
+    ).rejects.toThrow(/provider is required/);
+  });
+
+  it('refuses a non-positive rate instead of silently dropping it', async () => {
+    await expect(
+      service.update({
+        voiceRealtimeProviders: { live: { provider: 'openai-realtime', costPerMinuteUsd: 0 } },
+      }),
+    ).rejects.toThrow(/positive number/);
+  });
+
+  it('replacing the realtime roster leaves the other two alone', async () => {
+    await service.update({
+      voiceTtsProviders: { studio: { provider: 'openai-tts' } },
+      voiceSttProviders: { spanish: { provider: 'local-stt' } },
+      voiceRealtimeProviders: { live: { provider: 'openai-realtime' } },
+    });
+    await service.update({ voiceRealtimeProviders: { gemini: { provider: 'gemini-live' } } });
+
+    const read = await service.get();
+    expect(Object.keys(read.voiceTtsProviders)).toEqual(['studio']);
+    expect(Object.keys(read.voiceSttProviders)).toEqual(['spanish']);
+    expect(Object.keys(read.voiceRealtimeProviders)).toEqual(['gemini']);
+  });
+});

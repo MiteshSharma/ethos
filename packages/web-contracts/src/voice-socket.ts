@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { encodeFrame, splitFrame } from './frame-codec';
 
 // Wire format for the browser ↔ web-api voice lane: ONE persistent WebSocket
 // carrying binary frames both directions (mic PCM up, synthesized audio down).
@@ -16,6 +17,10 @@ import { z } from 'zod';
 // `headerLen` is big-endian. There are no text frames: a control message is a
 // frame with an empty payload, so both sides have exactly one decode path.
 //
+// The layout itself lives in `frame-codec.ts` — the wake-satellite lane speaks
+// the same one, and a wire contract that exists in two files drifts. This file
+// owns what the HEADERS are allowed to say; the codec owns how bytes are cut.
+//
 // Why the header is self-describing rather than "audio bytes belong to
 // whatever utterance is current": an in-flight result whose utterance was
 // superseded by barge-in or by a newer utterance MUST be droppable, and that
@@ -31,7 +36,9 @@ export const VOICE_SOCKET_VERSION = 1;
 /** MIME the mic lane sends: signed 16-bit little-endian PCM, mono. */
 export const VOICE_PCM_MIME = 'audio/pcm;codec=s16le';
 
-const HEADER_OFFSET = 3;
+// Re-exported from their new home so every existing importer of the voice lane
+// keeps resolving. Both lanes carry PCM, so the helpers moved to the codec.
+export { pcm16FromBytes, pcm16ToBytes } from './frame-codec';
 
 // --- client → server -------------------------------------------------------
 
@@ -84,6 +91,92 @@ const CancelSchema = z.object({
   reason: z.enum(['barge_in', 'hangup', 'superseded']),
 });
 
+// --- realtime tier: the CONTROL channel -------------------------------------
+//
+// On the realtime tier the audio does NOT come through here. The browser holds
+// a second socket straight to the hosted provider (that is the tier's whole
+// latency argument) and keeps THIS one open beside it as a control channel.
+//
+// The split is the point. Media wants the shortest path to the provider;
+// control wants the agent, the lane, the session history and the approval
+// surface, all of which live server-side and none of which belong in a page.
+// So the frames below carry the small, slow, consequential traffic — a tool
+// call to service, a transcript to persist, a line to speak — and never a
+// sample of audio.
+//
+// One connection is one talk session, so nothing here carries a session id:
+// the lane is the socket. That is also what makes a second browser tab a second
+// conversation rather than an interleaving of the first.
+
+const RealtimeStartSchema = z.object({
+  t: z.literal('realtime_start'),
+  /** Chat session the call belongs to — the stable half of the lane key. */
+  sessionId: z.string().optional(),
+  /** Personality speaking; picks the toolset the session was minted with. */
+  personalityId: z.string().optional(),
+  /**
+   * The provider socket can speak a line verbatim (`RealtimeSession.say`).
+   * False → the server captions filler instead of asking for speech it knows
+   * cannot be produced. Gemini Live is the false case.
+   */
+  canSay: z.boolean(),
+});
+
+const RealtimeToolCallSchema = z.object({
+  t: z.literal('realtime_tool_call'),
+  /** Provider-issued call id; the answer must carry it back unchanged. */
+  callId: z.string().min(1),
+  name: z.string().min(1),
+  /** Model-authored arguments. Untrusted — the tool validates its own shape. */
+  args: z.record(z.string(), z.unknown()),
+});
+
+const RealtimeTranscriptSchema = z.object({
+  t: z.literal('realtime_transcript'),
+  role: z.enum(['user', 'assistant']),
+  /** FINAL text only. Partials churn and would write the same turn many times. */
+  text: z.string().min(1),
+});
+
+/**
+ * One completed realtime turn's mouth-to-ear latency, as measured in the page.
+ *
+ * THE PAGE MEASURES IT BECAUSE THE PAGE IS THE ONLY PLACE BOTH MOMENTS EXIST.
+ * On this tier the media socket runs browser → provider; the server never sees
+ * a frame of audio, so it cannot time one. The two moments that bracket the
+ * number the ≤800 ms budget is about — the user stopping talking, and the first
+ * audio frame of the reply — are both observed there and nowhere else. A server
+ * that timed its own control frames instead would be timing a settled
+ * transcript relayed over a second socket, and reporting it as mouth-to-ear
+ * would be a number that omits the thing it claims to measure.
+ *
+ * `firstAudioMs` is therefore the WHOLE interval, endpointing included: the
+ * provider owns the VAD and does not say when it decided, so its silence
+ * window is inside this figure. That makes the reported value an UPPER bound on
+ * mouth-to-ear, which is the right direction — a budget that only fails
+ * pessimistically cannot flatter the tier. Splitting the provider's own leg out
+ * needs a commit marker only the bench harness can see, so the split stays in
+ * `scripts/voice-latency-bench.ts` rather than being guessed here.
+ *
+ * NOT measured, on either side: the browser's own capture and playout legs —
+ * mic → first PCM frame, and provider audio → speaker. They are real user
+ * latency and they are not in this number.
+ *
+ * Telemetry only. Nothing routes, bills or halts on it, which is why an absent
+ * frame costs a turn its span and nothing else.
+ */
+const RealtimeTurnLatencySchema = z.object({
+  t: z.literal('realtime_turn_latency'),
+  /** Groups this turn's spans. Opaque; the server never parses it. */
+  turnId: z.string().min(1),
+  /** Milliseconds from the user's last speech frame to the reply's first audio frame. */
+  firstAudioMs: z.number().nonnegative().finite(),
+});
+
+const RealtimeEndSchema = z.object({
+  t: z.literal('realtime_end'),
+});
+
 const VoiceClientFrameSchema = z.discriminatedUnion('t', [
   ClientHelloSchema,
   UtteranceStartSchema,
@@ -91,6 +184,11 @@ const VoiceClientFrameSchema = z.discriminatedUnion('t', [
   UtteranceEndSchema,
   SynthesizeSchema,
   CancelSchema,
+  RealtimeStartSchema,
+  RealtimeToolCallSchema,
+  RealtimeTranscriptSchema,
+  RealtimeTurnLatencySchema,
+  RealtimeEndSchema,
 ]);
 
 export type VoiceClientFrame = z.infer<typeof VoiceClientFrameSchema>;
@@ -156,6 +254,59 @@ const ServerErrorSchema = z.object({
   provider: z.string().optional(),
 });
 
+const RealtimeReadySchema = z.object({
+  t: z.literal('realtime_ready'),
+  /** The talk session's own lane. Opaque; surfaced for telemetry and tests. */
+  laneKey: z.string().min(1),
+  /**
+   * Every tool name this control channel will service.
+   *
+   * Observability, not instruction: the session was already minted advertising
+   * exactly these, and the browser does not re-derive anything from the list.
+   * It is on the wire so a live call can be asked what it will actually answer
+   * — the runtime companion to the advertised == handled test, and the frame
+   * V4's call path reuses when it keeps its own copy of that test.
+   */
+  tools: z.array(z.string()),
+});
+
+const RealtimeToolResultSchema = z.object({
+  t: z.literal('realtime_tool_result'),
+  callId: z.string().min(1),
+  ok: z.boolean(),
+  /** Already sanitized for speech. Goes straight to `sendToolResult`. */
+  output: z.string(),
+});
+
+const RealtimeSpeakSchema = z.object({
+  t: z.literal('realtime_speak'),
+  text: z.string().min(1),
+  /** `ack` is the immediate "checking"; `filler` is the keep-alive after it. */
+  kind: z.enum(['ack', 'filler']),
+});
+
+/**
+ * The call has spent its budget: say this, then hang up.
+ *
+ * A separate frame from `realtime_speak` because it carries an INSTRUCTION as
+ * well as a line. The browser owns the media socket on this tier, so the server
+ * cannot close the call itself — it can only ask, and what it asks for is
+ * ordered: speak the sign-off, let it finish, then end the call. A `realtime_speak`
+ * followed by a socket drop would be a teardown mid-word, which is exactly the
+ * failure this frame exists to avoid.
+ *
+ * `text` is spoken verbatim where the provider has a verbatim-speech frame and
+ * captioned everywhere — the same degradation as the consult ack, for the same
+ * reason: the listener must SEE why the call ended even on a provider that
+ * cannot say it.
+ */
+const RealtimeWindDownSchema = z.object({
+  t: z.literal('realtime_wind_down'),
+  text: z.string().min(1),
+  /** Why. One value today; a union so a second reason cannot be mistaken for this one. */
+  reason: z.literal('budget'),
+});
+
 const VoiceServerFrameSchema = z.discriminatedUnion('t', [
   ReadySchema,
   TranscriptSchema,
@@ -163,6 +314,10 @@ const VoiceServerFrameSchema = z.discriminatedUnion('t', [
   SegmentEndSchema,
   DroppedSchema,
   ServerErrorSchema,
+  RealtimeReadySchema,
+  RealtimeToolResultSchema,
+  RealtimeSpeakSchema,
+  RealtimeWindDownSchema,
 ]);
 
 export type VoiceServerFrame = z.infer<typeof VoiceServerFrameSchema>;
@@ -173,43 +328,12 @@ export interface DecodedVoiceFrame<T> {
   payload: Uint8Array;
 }
 
-const encoder = new TextEncoder();
-const decoder = new TextDecoder();
-
 /** Encode one frame. `payload` is empty for control frames. */
 export function encodeVoiceFrame(
   header: VoiceClientFrame | VoiceServerFrame,
   payload?: Uint8Array,
 ): Uint8Array {
-  const headerBytes = encoder.encode(JSON.stringify(header));
-  if (headerBytes.length > 0xffff) {
-    throw new Error('Voice frame header exceeds 64 KiB');
-  }
-  const body = payload ?? EMPTY;
-  const out = new Uint8Array(HEADER_OFFSET + headerBytes.length + body.length);
-  out[0] = VOICE_SOCKET_VERSION;
-  out[1] = (headerBytes.length >> 8) & 0xff;
-  out[2] = headerBytes.length & 0xff;
-  out.set(headerBytes, HEADER_OFFSET);
-  out.set(body, HEADER_OFFSET + headerBytes.length);
-  return out;
-}
-
-const EMPTY = new Uint8Array(0);
-
-function splitFrame(bytes: Uint8Array): { header: unknown; payload: Uint8Array } | null {
-  if (bytes.length < HEADER_OFFSET) return null;
-  if (bytes[0] !== VOICE_SOCKET_VERSION) return null;
-  const headerLen = ((bytes[1] ?? 0) << 8) | (bytes[2] ?? 0);
-  const headerEnd = HEADER_OFFSET + headerLen;
-  if (bytes.length < headerEnd) return null;
-  let header: unknown;
-  try {
-    header = JSON.parse(decoder.decode(bytes.subarray(HEADER_OFFSET, headerEnd)));
-  } catch {
-    return null;
-  }
-  return { header, payload: bytes.subarray(headerEnd) };
+  return encodeFrame(VOICE_SOCKET_VERSION, header, payload);
 }
 
 /**
@@ -220,8 +344,8 @@ function splitFrame(bytes: Uint8Array): { header: unknown; payload: Uint8Array }
 export function decodeVoiceClientFrame(
   bytes: Uint8Array,
 ): DecodedVoiceFrame<VoiceClientFrame> | null {
-  const split = splitFrame(bytes);
-  if (!split) return null;
+  const split = splitFrame(VOICE_SOCKET_VERSION, bytes);
+  if (!split.ok) return null;
   const parsed = VoiceClientFrameSchema.safeParse(split.header);
   return parsed.success ? { header: parsed.data, payload: split.payload } : null;
 }
@@ -230,33 +354,8 @@ export function decodeVoiceClientFrame(
 export function decodeVoiceServerFrame(
   bytes: Uint8Array,
 ): DecodedVoiceFrame<VoiceServerFrame> | null {
-  const split = splitFrame(bytes);
-  if (!split) return null;
+  const split = splitFrame(VOICE_SOCKET_VERSION, bytes);
+  if (!split.ok) return null;
   const parsed = VoiceServerFrameSchema.safeParse(split.header);
   return parsed.success ? { header: parsed.data, payload: split.payload } : null;
-}
-
-/**
- * Read a PCM payload as 16-bit samples. Copies: a WebSocket payload can land
- * at any byte offset in its backing buffer, and `new Int16Array(buf, offset)`
- * throws on an odd one. A trailing odd byte is dropped rather than throwing —
- * a truncated frame must not kill a live call.
- */
-export function pcm16FromBytes(bytes: Uint8Array): Int16Array {
-  const samples = new Int16Array(bytes.length >> 1);
-  for (let i = 0; i < samples.length; i++) {
-    samples[i] = (((bytes[i * 2] ?? 0) | ((bytes[i * 2 + 1] ?? 0) << 8)) << 16) >> 16;
-  }
-  return samples;
-}
-
-/** Serialize 16-bit samples as little-endian payload bytes. */
-export function pcm16ToBytes(samples: Int16Array): Uint8Array {
-  const out = new Uint8Array(samples.length * 2);
-  for (let i = 0; i < samples.length; i++) {
-    const value = samples[i] ?? 0;
-    out[i * 2] = value & 0xff;
-    out[i * 2 + 1] = (value >> 8) & 0xff;
-  }
-  return out;
 }

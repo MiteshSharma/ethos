@@ -3,7 +3,7 @@ import { InMemorySecretsResolver, InMemoryStorage } from '@ethosagent/storage-fs
 import { isEthosError } from '@ethosagent/types';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ConfigRepository } from '../../repositories/config.repository';
-import { ConfigService, redactKey } from '../../services/config.service';
+import { ConfigService, type ConfigUpdateInput, redactKey } from '../../services/config.service';
 
 describe('redactKey', () => {
   it('returns <unset> for missing keys', () => {
@@ -195,6 +195,32 @@ describe('ConfigService', () => {
     expect(result.memoryCaptureEnabled).toBe(false);
     expect(result.memoryCaptureModel).toBeNull();
     expect(result.memoryNotices).toBe(false);
+    // Call Stage: shape and colour both follow the personality by default.
+    expect(result.callStyle).toBe('personality');
+    expect(result.callAccent).toBe('personality');
+  });
+
+  it('persists the call-overlay keys and refuses a color that is not a color', async () => {
+    await storage.write(
+      join(DATA, 'config.yaml'),
+      ['provider: anthropic', 'model: m', 'apiKey: sk-keep', 'personality: researcher'].join('\n'),
+    );
+
+    await service.update({ callStyle: 'orb', callAccent: '#E879F9' });
+    let written = await storage.read(join(DATA, 'config.yaml'));
+    expect(written).toContain('display.call_style: orb');
+    expect(written).toContain('display.call_accent: "#E879F9"');
+    let result = await service.get();
+    expect(result.callStyle).toBe('orb');
+    expect(result.callAccent).toBe('#E879F9');
+
+    // A hand-typed non-color resolves to the personality accent rather than
+    // reaching a canvas fillStyle.
+    await service.update({ callAccent: 'chartreuse' });
+    written = await storage.read(join(DATA, 'config.yaml'));
+    expect(written).toContain('display.call_accent: personality');
+    result = await service.get();
+    expect(result.callAccent).toBe('personality');
   });
 
   it('get reads the behavior flags from their flat config keys', async () => {
@@ -793,5 +819,139 @@ describe('ConfigService — settings passthrough groups', () => {
     const written = await storage.read(join(DATA, 'config.yaml'));
     expect(written).not.toContain('memoryApproval');
     expect(written).not.toContain('webhooks.');
+  });
+
+  // -- Voice-notes-everywhere operator keys (voice V2 settings parity) --------
+
+  it('get returns the voice channel/transcode/artifact keys as unset', async () => {
+    await writeBase();
+    const r = await service.get();
+    expect(r.voiceChannelTtsOut).toEqual({});
+    expect(r.voiceTranscodeFfmpegPath).toBeNull();
+    expect(r.voiceTranscodeBitrateKbps).toBeNull();
+    expect(r.voiceTranscodeTimeoutSec).toBeNull();
+    expect(r.voiceArtifactAbandonAfterDays).toBeNull();
+    expect(r.voiceArtifactMaxTotalMb).toBeNull();
+  });
+
+  it('get parses the voice channel/transcode/artifact keys from config.yaml', async () => {
+    await writeBase([
+      'voice.channels.telegram.ttsOut: true',
+      'voice.channels.slack.ttsOut: false',
+      // Neither an adapter nor the CLI parser knows this platform; the read
+      // path drops it exactly as packages/config does on load.
+      'voice.channels.carrier-pigeon.ttsOut: true',
+      'voice.transcode.ffmpegPath: /opt/homebrew/bin/ffmpeg',
+      'voice.transcode.bitrateKbps: 48',
+      'voice.transcode.timeout: 45',
+      'voice.artifacts.abandonAfterDays: 14',
+      'voice.artifacts.maxTotalMb: 1024',
+    ]);
+    const r = await service.get();
+    expect(r.voiceChannelTtsOut).toEqual({ telegram: true, slack: false });
+    expect(r.voiceTranscodeFfmpegPath).toBe('/opt/homebrew/bin/ffmpeg');
+    expect(r.voiceTranscodeBitrateKbps).toBe(48);
+    expect(r.voiceTranscodeTimeoutSec).toBe(45);
+    expect(r.voiceArtifactAbandonAfterDays).toBe(14);
+    expect(r.voiceArtifactMaxTotalMb).toBe(1024);
+  });
+
+  it('update writes each voice operator key to its yaml key and round-trips', async () => {
+    await writeBase();
+    await service.update({
+      voiceChannelTtsOut: { telegram: true, whatsapp: false },
+      voiceTranscodeFfmpegPath: '/usr/bin/ffmpeg',
+      voiceTranscodeBitrateKbps: 64,
+      voiceTranscodeTimeoutSec: 90,
+      voiceArtifactAbandonAfterDays: 30,
+      voiceArtifactMaxTotalMb: 2048,
+    });
+
+    const written = await storage.read(join(DATA, 'config.yaml'));
+    expect(written).toContain('voice.channels.telegram.ttsOut: true');
+    expect(written).toContain('voice.channels.whatsapp.ttsOut: false');
+    expect(written).toContain('voice.transcode.ffmpegPath: /usr/bin/ffmpeg');
+    expect(written).toContain('voice.transcode.bitrateKbps: 64');
+    // The RPC field says `Sec`; the yaml key is the bare `timeout`.
+    expect(written).toContain('voice.transcode.timeout: 90');
+    expect(written).toContain('voice.artifacts.abandonAfterDays: 30');
+    expect(written).toContain('voice.artifacts.maxTotalMb: 2048');
+
+    const r = await service.get();
+    expect(r.voiceChannelTtsOut).toEqual({ telegram: true, whatsapp: false });
+    expect(r.voiceTranscodeFfmpegPath).toBe('/usr/bin/ffmpeg');
+    expect(r.voiceTranscodeBitrateKbps).toBe(64);
+    expect(r.voiceTranscodeTimeoutSec).toBe(90);
+    expect(r.voiceArtifactAbandonAfterDays).toBe(30);
+    expect(r.voiceArtifactMaxTotalMb).toBe(2048);
+  });
+
+  it('voiceChannelTtsOut replaces the whole map — an omitted platform disappears', async () => {
+    await writeBase();
+    await service.update({ voiceChannelTtsOut: { telegram: true, slack: false, discord: true } });
+    expect((await service.get()).voiceChannelTtsOut).toEqual({
+      telegram: true,
+      slack: false,
+      discord: true,
+    });
+
+    await service.update({ voiceChannelTtsOut: { slack: true } });
+    const written = await storage.read(join(DATA, 'config.yaml'));
+    expect(written).not.toContain('voice.channels.telegram');
+    expect(written).not.toContain('voice.channels.discord');
+    expect(written).toContain('voice.channels.slack.ttsOut: true');
+    // An omitted platform is "no override", which is not the same as `false`.
+    expect((await service.get()).voiceChannelTtsOut).toEqual({ slack: true });
+  });
+
+  it('null clears each voice operator scalar back to its built-in default', async () => {
+    await writeBase([
+      'voice.transcode.ffmpegPath: /usr/bin/ffmpeg',
+      'voice.transcode.bitrateKbps: 64',
+      'voice.transcode.timeout: 90',
+      'voice.artifacts.abandonAfterDays: 30',
+      'voice.artifacts.maxTotalMb: 2048',
+    ]);
+    await service.update({
+      voiceTranscodeFfmpegPath: null,
+      voiceTranscodeBitrateKbps: null,
+      voiceTranscodeTimeoutSec: null,
+      voiceArtifactAbandonAfterDays: null,
+      voiceArtifactMaxTotalMb: null,
+    });
+
+    const written = await storage.read(join(DATA, 'config.yaml'));
+    expect(written).not.toContain('voice.transcode.');
+    expect(written).not.toContain('voice.artifacts.');
+    const r = await service.get();
+    expect(r.voiceTranscodeFfmpegPath).toBeNull();
+    expect(r.voiceTranscodeBitrateKbps).toBeNull();
+    expect(r.voiceTranscodeTimeoutSec).toBeNull();
+    expect(r.voiceArtifactAbandonAfterDays).toBeNull();
+    expect(r.voiceArtifactMaxTotalMb).toBeNull();
+  });
+
+  it('rejects out-of-range voice operator values and unknown channel platforms', async () => {
+    await writeBase();
+    const cases: ConfigUpdateInput[] = [
+      { voiceTranscodeBitrateKbps: 7 },
+      { voiceTranscodeBitrateKbps: 321 },
+      { voiceTranscodeTimeoutSec: 0 },
+      { voiceTranscodeTimeoutSec: 601 },
+      { voiceArtifactAbandonAfterDays: 0 },
+      { voiceArtifactAbandonAfterDays: 366 },
+      { voiceArtifactMaxTotalMb: 0 },
+      { voiceArtifactMaxTotalMb: 102_401 },
+      // A typo'd platform is REFUSED at the RPC boundary, not dropped the way
+      // the yaml parser drops it on load.
+      { voiceChannelTtsOut: { telegran: true } },
+    ];
+    for (const patch of cases) {
+      await expect(service.update(patch)).rejects.toMatchObject({ code: 'CONFIG_INVALID' });
+    }
+    const written = await storage.read(join(DATA, 'config.yaml'));
+    expect(written).not.toContain('voice.transcode.');
+    expect(written).not.toContain('voice.artifacts.');
+    expect(written).not.toContain('voice.channels.');
   });
 });

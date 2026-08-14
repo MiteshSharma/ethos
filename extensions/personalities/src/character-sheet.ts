@@ -1,5 +1,6 @@
 import {
   type ConstitutionEnforcement,
+  derivedCallTreatment,
   type ExecutionPosture,
   GUARANTEE_IDS,
   type GuaranteeId,
@@ -638,11 +639,23 @@ function renderSpecLabel(spec: string): string {
  * Render the `## Voice` block from `PersonalityConfig.voice` — the sanctioned
  * schema amendment made visible. Each unset knob prints what it inherits, so a
  * reader never has to guess whether a blank means "unset" or "missing".
+ *
+ * `Call look` prints the DERIVED treatment when unset rather than `(default)`,
+ * because there is no default to name: an undeclared personality still draws a
+ * specific shape, and the sheet's job is to say which one. It cannot see the
+ * operator's `display.call_style`, so the derived value is stated as what it
+ * is — the floor, which a pinned `display.call_style` overrides.
  */
-function voiceSection(voice: NonNullable<PersonalityConfig['voice']>): string[] {
+function voiceSection(
+  voice: NonNullable<PersonalityConfig['voice']>,
+  personalityId: string,
+): string[] {
   const lines: string[] = ['## Voice'];
   lines.push(`- TTS provider: ${voice.tts_provider ?? '(default auxiliary.tts)'}`);
   lines.push(`- STT provider: ${voice.stt_provider ?? '(default auxiliary.asr)'}`);
+  lines.push(
+    `- Realtime provider: ${voice.realtime_provider ?? '(deployment voice.realtime.default)'}`,
+  );
   lines.push(`- TTS voice: ${voice.tts_voice ?? '(global default)'}`);
   const languages = Object.entries(voice.languages ?? {});
   if (languages.length > 0) {
@@ -653,6 +666,9 @@ function voiceSection(voice: NonNullable<PersonalityConfig['voice']>): string[] 
   }
   lines.push(`- Tier: ${voice.tier ?? '(deployment default)'}`);
   lines.push(`- Fast-lane model: ${voice.model ?? '(personality model)'}`);
+  lines.push(
+    `- Call look: ${voice.call_style ?? `${derivedCallTreatment(personalityId)} (derived from id)`}`,
+  );
   return lines;
 }
 
@@ -697,7 +713,7 @@ export function renderCharacterSheet(
   // with no `voice` block inherits the deployment's voice, and a section that
   // said so on every sheet would be noise ("cards earn existence").
   if (config.voice) {
-    lines.push(...voiceSection(config.voice));
+    lines.push(...voiceSection(config.voice, config.id));
     lines.push('');
   }
 

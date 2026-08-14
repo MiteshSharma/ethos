@@ -4,7 +4,7 @@ description: "A personality is a frozen schema plus a character sheet — every 
 kind: explanation
 audience: developer
 slug: personality-governance
-updated: 2026-05-13
+updated: 2026-08-14
 ---
 
 ## Context
@@ -32,7 +32,37 @@ The personality-alignment phase is the worked example. Four fields were removed 
 
 None of these described who the agent *is*. They described how a surface rendered it or how a session behaved. Removing them shrank `.personality-field-count` from 26 to 22 — and the schema got truer to what it claims to be.
 
-The categories that may never become fields are named in `ARCHITECTURE.md` §VII and the `packages/types/src/personality.ts` header: voice and TTS, emotion and mood tags, response templates, per-channel display affordances, and anything that grants a capability the [toolset](../../getting-started/glossary.md#tool) does not already express. Each is a real product need. None is a personality concern.
+The categories that may never become **top-level fields** are named in `ARCHITECTURE.md` §VII and the `packages/types/src/personality.ts` header: emotion and mood tags, response templates, per-channel display affordances, and anything that grants a capability the [toolset](../../getting-started/glossary.md#tool) does not already express. Each is a real product need. None is a personality concern. Speech and audio configuration is on that list too, with one sanctioned exception — the `voice` block — described next.
+
+### How a personality presents itself is identity
+
+The rule above has been amended once, deliberately, and the amendment is worth reading as a correction rather than a loophole.
+
+The repo owner's position:
+
+> Every personality can choose what its personality is. Personality is not just tools or plugins but also how it looks and feels.
+
+That reverses part of the reasoning the personality-alignment phase used. `skin` was removed on the argument that "a personality is an identity, not a colour palette" — which quietly assumed that anything *visual* is decoration and therefore a per-user setting. That assumption is what the amendment rejects. A team of agents that are interchangeable grey is not a team you can tell apart, and a framework whose whole thesis is that personality is architecture cannot treat presentation as chrome. How a personality **presents itself** — how it sounds, how it is drawn while it holds the floor — is part of who it is.
+
+Two keys carry that today, both sub-keys of the `voice` block:
+
+| Key | What it decides |
+|---|---|
+| `voice.tts_voice` | Which voice this personality speaks in. |
+| `voice.call_style` | Which treatment the Call Stage draws for it — `liquid`, `orb`, or `rings`. |
+
+Neither is a top-level field, and that is the amendment's first limit: presentation attaches to an identity block that already exists, so `.personality-field-count` does not move and the freeze gate keeps doing its job. The second limit is the content test, restated as a pair of questions:
+
+- *Would changing it make this feel like a different agent?* Then it is identity, and it is arguable.
+- *Could two deployments of the same personality reasonably disagree about it?* Then it is a setting, and it belongs to the operator in `~/.ethos/config.yaml`.
+
+VAD tuning, endpointing, barge thresholds, provider rosters, credentials, and per-channel affordances all fail the second question — a machine that cannot run a local transcriber has a real reason to disagree, and a personality that renders differently on Slack than on Telegram is not expressing identity, it is expressing a channel. They stay out.
+
+Wake routing is the clearest worked example of the second question doing its job. Which spoken phrase reaches which personality looks like identity — it is, after all, the agent's *name* — and it still belongs to the operator. Two households running the same `engineer` would reasonably disagree about whether the kitchen microphone answers to "hey engineer" or "hey work", because the answer depends on the room, the other agents in it, and who else is within earshot. So [wake routes](../../getting-started/glossary.md#wake-route) live in `voice.wake.routes.<id>` in `~/.ethos/config.yaml` and in `WakeRouteConfig` in `packages/config`, not on `PersonalityConfig` — and the personality is not left nameless by that, because the server synthesizes a default route from the name the personality already declares — the bare name, with a greeting in front of it optional. Identity supplies the name; deployment decides what the house answers to.
+
+`skin`, `verbosity` and `busyInputMode` stay removed. The amendment does not restore them, and it is not a general licence for per-personality display overrides: each presentation key is argued and added on its own, on an identity block, or it is not added.
+
+**A default, not a form field.** `voice.call_style` is optional, and an undeclared personality is not shapeless — `resolveCallTreatment` in `packages/types/src/personality.ts` derives a treatment from the personality id, deterministically, so every personality has a distinct look before anyone configures anything. Declaring the key overrides the derivation; an operator's `display.call_style` sits between the two. One function holds that order, and the character sheet prints whichever answer applies — the declared treatment, or the derived one, said out loud rather than left blank. Identity you have to opt into is identity most personalities never get.
 
 ### The freeze gate makes the rule mechanical
 
@@ -78,7 +108,7 @@ The bump procedure is not red tape. It is the schema defending the property that
 
 **The character sheet is read-only.** You cannot edit a personality through its character sheet; it is a derived view. Editing happens in the three source files (or the Web Identity / Toolset / Config tabs). The sheet is the audit surface, not the control surface — that separation keeps the generated artifact trustworthy.
 
-**Display preferences lost their per-personality home.** Removing `skin`, `verbosity`, and `busyInputMode` means a user who wanted one personality to always render in `paper` and another in `mono` no longer can. That capability was cut deliberately: per-personality display overrides will return as a per-user preferences layer only if real demand surfaces, designed on evidence rather than carried speculatively on the identity schema.
+**Display preferences have no general per-personality home.** Removing `skin`, `verbosity`, and `busyInputMode` means a user who wanted one personality to always render in `paper` and another in `mono` still cannot. The presentation amendment did not reopen that door: it added two specific keys that describe how a personality presents *itself* (`voice.tts_voice`, `voice.call_style`), each argued on its own, on an identity block that already existed. A skin is a preference about the whole app; a call treatment is a fact about one agent. The cost of drawing the line there is that every further presentation key is an argument rather than a config entry — which is the friction working, not a gap.
 
 **The sheet is only as good as `SOUL.md`.** The role prose is the first paragraph of `SOUL.md`. A personality whose `SOUL.md` opens with throat-clearing gets a weak character sheet. The fix is upstream — write a concrete first paragraph — not a richer renderer.
 

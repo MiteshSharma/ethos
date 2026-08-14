@@ -5,7 +5,7 @@ kind: how-to
 audience: user
 slug: receive-files-via-slack
 time: "5 min"
-updated: 2026-05-16
+updated: 2026-08-14
 ---
 
 ## Task
@@ -68,11 +68,14 @@ When no text accompanies the file, the adapter surfaces `(file attachment)` as t
 | Category | Extensions | Attachment type |
 |---|---|---|
 | Images | jpg, jpeg, png, gif, webp, heic, bmp, svg, tiff | `image` |
+| Audio | mp3, wav, ogg, flac, aac, m4a | `audio` |
 | Documents | pdf, txt, csv, json, yaml, md, and all other non-skipped extensions | `file` |
+
+Audio uploads are transcribed by the gateway's speech-to-text stage and the transcript is appended to the turn text — see [Send and receive voice notes on a channel](voice-notes-on-channels.md). Without an STT provider configured, the upload still reaches the agent as an audio marker with no transcript.
 
 ## Not supported yet
 
-Audio (mp3, wav, ogg, flac, aac, m4a) and video (mp4, mov, webm, avi, mkv) files are intentionally skipped. These types are deferred until transcription and media analysis tools ship.
+Video (mp4, mov, avi, mkv) is skipped, deferred until media analysis tools ship. `webm` is skipped with them: it carries either audio or video, and on Slack it is overwhelmingly video, so it is not admitted as audio.
 
 ## Limits
 
@@ -84,7 +87,7 @@ Audio (mp3, wav, ogg, flac, aac, m4a) and video (mp4, mov, webm, avi, mkv) files
 
 1. User attaches a file to a message and @mentions the bot (or the channel mode allows the message through).
 2. Slack delivers the message as a `file_share` subtype with a `files` array.
-3. The adapter classifies each file by extension: image extensions become `type: 'image'`, everything else becomes `type: 'file'`, and audio/video extensions are skipped.
+3. The adapter classifies each file by extension: image extensions become `type: 'image'`, audio extensions become `type: 'audio'`, everything else becomes `type: 'file'`, and video extensions are skipped.
 4. The adapter fetches each file from `url_private_download` with the bot token in the `Authorization` header.
 5. The file is written to the `AttachmentCache` at `~/.ethos/cache/attachments/`.
 6. The `InboundMessage` carries an `attachments` array with `type`, `ref`, `url` (a `file://` path), `mimeType`, and optional `filename` and `sizeBytes`.

@@ -1,10 +1,10 @@
 ---
 title: "Personality config reference"
-description: "Every field in a personality's config.yaml and toolset.yaml — model, fs_reach, MCP, plugins, budget, safety."
+description: "Every field in a personality's config.yaml and toolset.yaml — model, fs_reach, MCP, plugins, budget, voice, safety."
 kind: reference
 audience: user
 slug: personality-yaml
-updated: 2026-08-08
+updated: 2026-08-14
 ---
 
 A [personality](../../getting-started/glossary.md#personality) is a directory at `~/.ethos/personalities/<id>/` with three files:
@@ -312,6 +312,40 @@ Controls what the observability store persists for this personality.
 | `safety.observability.storeLlmPayloads` | `none` \| `metadata` \| `full` | LLM request and response payloads. |
 | `safety.observability.redactPatterns` | string[] | Substrings redacted from anything stored. |
 
+## voice.\* {#voice}
+
+Type: dotted block · Default: unset (inherit the deployment's voice config)
+
+How this personality sounds, which engines serve it, and how its call is drawn. A deployment picks the *provider*; the personality picks how it *sounds* and how it *looks*, so anything declared here beats the global [`auxiliary.tts.*` / `voice.*`](./config-yaml.md#voice-tier) and `display.call_style` settings, and silence means inherit. The provider, voice and call-look keys are editable in the web Personalities tab (Identity step); `tier`, `model` and the language map are file-only.
+
+| Field | Type | Description |
+|---|---|---|
+| `voice.tts_voice` | string | Voice id handed to the TTS provider. Provider-specific and free-form — `af_bella` for Kokoro, `alloy` for OpenAI. |
+| `voice.languages.<tag>` | string | BCP-47 tag → voice id. Beats `tts_voice` when the turn's language is known. Two surfaces supply one: browser talk-mode reports the language it heard, and the gateway derives it from an inbound voice note's transcript with `detectLanguage()` (`@ethosagent/voice-text`). Detection is constrained to the tags declared here and to nothing else — a personality with no language map supplies no candidates, so no guess is made and `tts_voice` wins. |
+| `voice.tier` | `pipeline` \| `realtime` | Preferred voice engine, beating the deployment's [`voice.tier`](./config-yaml.md#voice-tier). A preference, not a guarantee: a deployment with no realtime provider serves `pipeline` either way. An unrecognised value is dropped rather than thrown on — a bad voice field must not make a personality unloadable. |
+| `voice.tts_provider` | string | Names an entry in the deployment's TTS roster (`voice.tts.providers.<name>`). A **label** the operator chose, never a provider id. A name this machine lacks falls back to the default `auxiliary.tts` entry, so a shared personality still speaks. |
+| `voice.stt_provider` | string | The same, for the STT roster. A personality's voice is identity; its ear is a technical override. |
+| `voice.realtime_provider` | string | The same, for the [realtime roster](./config-yaml.md#voice-realtime-providers). Consulted only on the realtime tier; falls back to `voice.realtime.default`. |
+| `voice.model` | string | Intended as a fast-lane model for spoken turns. **No consumer yet** — it is parsed, resolved, and read by nothing. Declaring it changes only the character sheet. |
+| `voice.call_style` | `liquid` \| `orb` \| `rings` | Which treatment the Call Stage draws for this personality — `liquid`, the circle filling like a vessel; `orb`, a body deforming with the voice; `rings`, concentric rings breathing outward. Unset is **not** a fixed default: the treatment falls through to the operator's `display.call_style` when that names a concrete shape, and otherwise to one derived from the personality id, so every personality already looks distinct. An unrecognised value is dropped rather than thrown on. |
+
+```yaml
+voice.tts_voice: af_bella
+voice.languages.es: ef_dora
+voice.tier: realtime
+voice.realtime_provider: live
+voice.call_style: rings
+```
+
+Notes:
+
+- Voice-id precedence, resolved in one function (`resolveVoicePreferences`) so every surface agrees: `voice.languages.<tag>` > `voice.tts_voice` > the chosen entry's own `voice` > global `auxiliary.tts.voice`. A realtime call uses the same order, so switching tiers does not switch who you are talking to.
+- Naming a roster entry buys no trust. The [egress gate](./config-yaml.md#voice-trusted-plugins) keys on the entry's underlying `provider`, so an entry called `local-anything` backed by a hosted model is still refused.
+- `voice.provider` is accepted on read as the older spelling of `voice.tts_provider` and re-serialized as the new one; a file never carries both.
+- Talk-mode also needs `voice_session` in [`toolset.yaml`](#toolset-yaml). Without it the phone button renders disabled.
+- Call-look precedence, resolved in one function (`resolveCallTreatment` in `packages/types/src/personality.ts`) so every surface agrees: `voice.call_style` > a concrete `display.call_style` > derived from the personality id. `display.call_style: personality` is the default and is not a pin — it defers to the derivation.
+- Confirm what parsed with `ethos personality show <id>` — it emits a `## Voice` block, and omits the section entirely when the personality declares no `voice` block. Its `Call look` line names the derived treatment when the key is unset, because there is no blank state to report.
+
 ## toolset.yaml {#toolset-yaml}
 
 Flat YAML list of tool names. Each entry on its own line, prefixed with `- `. Tools missing from this list are filtered out before the LLM sees them.
@@ -347,3 +381,4 @@ Optional sibling directory at `~/.ethos/personalities/<id>/skills/`. Per-persona
 - [Glossary: personality](../../getting-started/glossary.md#personality) — one-line definition shared across every page that names the construct.
 - [Glossary: fs_reach](../../getting-started/glossary.md#fs-reach) — the path-allowlist field this file declares; backed by `ScopedStorage`.
 - [Retrieve files the agent wrote](../how-to/retrieve-agent-files.md) — `fs_reach.workdir` in practice, on a headless deployment.
+- [Local voice: Kokoro TTS + Whisper large v3 STT](../how-to/local-voice.md) — configure the providers this file's `voice.*` block picks between.

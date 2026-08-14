@@ -28,6 +28,7 @@ import {
 } from '@ethosagent/tools-delegation';
 import { createMemoryTools } from '@ethosagent/tools-memory';
 import { createVisionTools } from '@ethosagent/tools-vision';
+import { createAgentConsultTool } from '@ethosagent/tools-voice';
 import { createWebTools } from '@ethosagent/tools-web';
 import type {
   LLMProvider,
@@ -757,6 +758,26 @@ export async function buildAgentLoop(
   ))
     tools.register(tool);
 
+  // `agent_consult` — the hosted-realtime voice surface's one call back into
+  // the agent. Loop-bearing for the same reason the delegation tools are, so it
+  // registers here rather than in `compose-tools`. Registered UNCONDITIONALLY:
+  // the realtime seam advertises what the registry actually holds
+  // (`deriveRealtimeToolset`), so a conditional registration would silently
+  // produce a session that offers nothing and a model that stops asking.
+  //
+  // The voice origin is fixed to browser talk-mode because that is the only
+  // surface that can open a realtime session in this repo today — `voice.realtimeToken`
+  // mints behind the web-api session cookie, which is the operator's own browser.
+  // V4's call path introduces a `far_end` speaker, and it MUST construct its own
+  // consult tool with that origin rather than reuse this one: the spoken-confirmation
+  // gate refuses a far-end caller BEFORE consulting any confirmation record, and
+  // that refusal keys on exactly this field.
+  tools.register(
+    createAgentConsultTool(loop, {
+      voiceOrigin: { transport: 'browser-talk-mode', speaker: 'owner' },
+    }),
+  );
+
   // Goal runner — loop-bearing, constructed after the loop exists (mirrors
   // createDelegationTools handing the loop to tools post-construction). Shares
   // the single goalStore from tool composition via goalRunnerRef late-binding.
@@ -1012,6 +1033,7 @@ export async function buildAgentLoop(
     refreshPersonalities: () => personalities.loadFromDirectory(join(dataDir, 'personalities')),
     sttProviders: infra.sttProviders,
     ttsProviders: infra.ttsProviders,
+    realtimeProviders: infra.realtimeProviders,
     ...(voiceStack ? { voiceStack } : {}),
     voiceConfig: {
       sttProviderName: config.auxiliaryAsr?.provider,
@@ -1043,6 +1065,23 @@ export async function buildAgentLoop(
       // name instead.
       ...(config.voice?.tts?.providers ? { ttsRoster: config.voice.tts.providers } : {}),
       ...(config.voice?.stt?.providers ? { sttRoster: config.voice.stt.providers } : {}),
+      // The realtime roster (`voice.realtime.providers.*`) plus the two keys
+      // that decide whether the realtime tier runs at all: which entry a
+      // personality that names none gets, and the deployment's tier default.
+      ...(config.voice?.realtime?.providers
+        ? { realtimeRoster: config.voice.realtime.providers }
+        : {}),
+      ...(config.voice?.realtime?.default
+        ? { realtimeDefault: config.voice.realtime.default }
+        : {}),
+      ...(config.voice?.tier ? { tier: config.voice.tier } : {}),
+      // The cap on ONE realtime call. Forwarded here rather than left to
+      // web-api's live-config read alone — that read is optional, and a
+      // deployment whose cap depends on an optional code path does not have a
+      // cap, it has a coincidence.
+      ...(config.voice?.realtime?.sessionBudgetUsd !== undefined
+        ? { realtimeSessionBudgetUsd: config.voice.realtime.sessionBudgetUsd }
+        : {}),
       secretsResolver:
         config.secretsResolver ?? (NOOP_SECRETS as import('@ethosagent/types').SecretsResolver),
       // Armed only when `voice.trustedPlugins` is declared. Computed once here

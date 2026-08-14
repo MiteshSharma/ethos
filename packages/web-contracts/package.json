@@ -37,6 +37,7 @@
     "build": "tsup src/index.ts --format esm --dts"
   },
   "dependencies": {
+    "@ethosagent/types": "workspace:*",
     "@orpc/contract": "^1.14.3",
     "zod": "^4.3.6"
   }

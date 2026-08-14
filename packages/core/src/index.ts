@@ -9,7 +9,15 @@ export { AgentLoop, isKnownAgentEvent, KNOWN_AGENT_EVENT_TYPES } from './agent-l
 // tools-as-code-api Lane B — the per-turn bridge (and its budget-counter
 // companions) are exported so integration tests and non-loop surfaces can
 // drive the EXACT enforcement path the loop wires, not a re-statement of it.
-export { checkTurnBudgets } from './agent-loop/budgets';
+// `checkCostBudget` is the `cost-cap` half on its own, for spend that accrues
+// outside a turn (the realtime voice tier's per-audio-minute accrual).
+export {
+  type BudgetExceeded,
+  type BudgetRule,
+  type CostBudget,
+  checkCostBudget,
+  checkTurnBudgets,
+} from './agent-loop/budgets';
 // Lane 1(b/c) — the gate's output-reserve constant, shared with wiring's
 // startup floor diagnostic and window-scaled result budget so there is ONE
 // reserve arithmetic, not a drifting copy.
@@ -96,6 +104,8 @@ export {
   substitute,
 } from './fs-reach';
 export { DefaultHookRegistry } from './hook-registry';
+export type { VoiceLaneClient, VoiceLaneClientKind } from './lane-key';
+export { buildLaneKey, satelliteLaneKey, voiceLaneKey } from './lane-key';
 export type { LearnRequest } from './learn';
 export { buildLearnPrompt, parseLearnArgs } from './learn';
 export type { LocalToolTransportLiveCtx } from './local-tool-transport';
@@ -117,17 +127,23 @@ export { DefaultDocumentExtractorRegistry } from './providers/document-extractor
 export { DefaultExecutionBackendRegistry } from './providers/execution-registry';
 export { DefaultLLMProviderRegistry } from './providers/llm-registry';
 export { DefaultMemoryProviderRegistry } from './providers/memory-registry';
+export { DefaultRealtimeVoiceProviderRegistry } from './providers/realtime-registry';
 export { DefaultStorageRegistry } from './providers/storage-registry';
 export { DefaultSttProviderRegistry } from './providers/stt-registry';
 export { DefaultTtsProviderRegistry } from './providers/tts-registry';
 export type {
+  RealtimeEntrySelection,
+  RealtimeProviderForPersonality,
   ResolvedVoicePreferences,
+  ResolveRealtimeForPersonalityOptions,
+  ResolveRealtimeOptions,
   ResolveSttForPersonalityOptions,
   ResolveSttOptions,
   ResolveTtsForPersonalityOptions,
   ResolveTtsOptions,
   ResolveVoicePreferencesOptions,
   ResolveVoiceProviderOptions,
+  SelectRealtimeEntryOptions,
   SelectSttEntryOptions,
   SelectTtsEntryOptions,
   SelectVoiceEntryOptions,
@@ -141,11 +157,15 @@ export type {
   VoiceResolutionErrorCode,
 } from './providers/voice-resolution';
 export {
+  realtimeEntryProviderConfig,
+  resolveRealtimeProvider,
+  resolveRealtimeProviderForPersonality,
   resolveSttProvider,
   resolveSttProviderForPersonality,
   resolveTtsProvider,
   resolveTtsProviderForPersonality,
   resolveVoicePreferences,
+  selectRealtimeEntry,
   selectSttEntry,
   selectTtsEntry,
   sttEntryProviderConfig,
@@ -170,4 +190,11 @@ export { applyTemporalDecay, parseTemporalBound, toJournalKey } from './temporal
 export { DefaultToolResultReducerRegistry } from './tool-reducer-registry';
 export { DefaultToolRegistry } from './tool-registry';
 export { SsrfError, type ValidateUrlOptions, validateUrl } from './url-validator';
+// Voice V2 Lane 6a — the durable per-lane `/voice` mode, shared by the gateway
+// and web-api so a mode set on one surface is the same fact on the other.
+export {
+  LaneVoiceModeStore,
+  type LaneVoiceModeStoreOptions,
+  laneVoiceModePath,
+} from './voice/lane-voice-mode';
 export { buildVoiceOriginAnnotation, VOICE_ORIGIN_TAG } from './voice-origin';

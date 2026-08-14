@@ -450,6 +450,16 @@ export class AgentLoop {
     this.sessionCosts.delete(sessionKey);
   }
 
+  /** Fold spend incurred OUTSIDE a turn into a session's budget — the realtime
+   *  voice tier's per-audio-minute accrual, billed on a socket the browser holds
+   *  and keyed on the same lane `agent_consult` runs its turns on, so
+   *  `budgetCapUsd` governs the whole call. Non-positive deltas are ignored: a
+   *  budget that can be moved backwards is not a budget. */
+  addSessionCost(sessionKey: string, usd: number): void {
+    if (!Number.isFinite(usd) || usd <= 0) return;
+    this.sessionCosts.set(sessionKey, (this.sessionCosts.get(sessionKey) ?? 0) + usd);
+  }
+
   /** Manual `/compact` — force a compaction outside a turn (delegates to
    *  `compactSession`; the wired summarizer, if any, comes from `llmHandle`). */
   async compact(

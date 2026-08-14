@@ -1,8 +1,13 @@
 import { randomBytes } from 'node:crypto';
-import { secretRefFromValue } from '@ethosagent/config';
+import {
+  isVoiceChannelPlatform,
+  secretRefFromValue,
+  VOICE_CHANNEL_PLATFORMS,
+} from '@ethosagent/config';
 import { EthosError, type SecretsResolver } from '@ethosagent/types';
 import {
   type ConfigRepository,
+  parseRealtimeRoster,
   parseSttRoster,
   parseTtsRoster,
   type RawProviderEntry,
@@ -214,6 +219,30 @@ export interface VoiceSttProviderUpdateInput {
   timeout?: number;
 }
 
+/** One entry of the named realtime roster (`voice.realtime.providers.<name>.*`).
+ *  The speech-to-speech sibling of the two above — no command or timeout,
+ *  because there is no shelled-out request to bound; instead a per-minute rate,
+ *  which is what a duplex session is billed on. */
+export interface VoiceRealtimeProviderGetResult {
+  provider: string;
+  model: string | null;
+  apiKeyPreview: string | null;
+  baseUrl: string | null;
+  voice: string | null;
+  /** USD per minute of audio. */
+  costPerMinuteUsd: number | null;
+}
+
+/** Update shape for one realtime roster entry. Same write-only `apiKey` rule. */
+export interface VoiceRealtimeProviderUpdateInput {
+  provider: string;
+  model?: string;
+  apiKey?: string;
+  baseUrl?: string;
+  voice?: string;
+  costPerMinuteUsd?: number;
+}
+
 // -- passthrough read helpers ------------------------------------------------
 
 function passStr(p: Record<string, string>, key: string): string | null {
@@ -411,6 +440,42 @@ async function parseVoiceSttProviders(
   return out;
 }
 
+async function parseVoiceRealtimeProviders(
+  p: Record<string, string>,
+  keyPreview: (value: string | undefined) => Promise<string | null>,
+): Promise<Record<string, VoiceRealtimeProviderGetResult>> {
+  const out: Record<string, VoiceRealtimeProviderGetResult> = {};
+  for (const [name, entry] of Object.entries(parseRealtimeRoster(p))) {
+    out[name] = {
+      provider: entry.provider,
+      model: entry.model ?? null,
+      apiKeyPreview: await keyPreview(entry.apiKey),
+      baseUrl: entry.baseUrl ?? null,
+      voice: entry.voice ?? null,
+      costPerMinuteUsd: entry.costPerMinuteUsd ?? null,
+    };
+  }
+  return out;
+}
+
+/**
+ * `voice.channels.<platform>.ttsOut` → a flat platform→boolean map.
+ *
+ * Unknown platforms and non-boolean values are dropped, matching what the
+ * yaml parser in `@ethosagent/config` already did to them on load — the read
+ * path reports what the deployment ACTUALLY has, not what someone typed. The
+ * write path is stricter; see `validateSettingsPatch`.
+ */
+function parseVoiceChannelTtsOut(p: Record<string, string>): Record<string, boolean> {
+  const out: Record<string, boolean> = {};
+  for (const [key, value] of Object.entries(p)) {
+    const platform = key.match(/^voice\.channels\.([^.]+)\.ttsOut$/)?.[1];
+    if (!platform || !isVoiceChannelPlatform(platform)) continue;
+    if (value === 'true' || value === 'false') out[platform] = value === 'true';
+  }
+  return out;
+}
+
 function parseChannelToolsets(p: Record<string, string>): Record<string, string[]> {
   const out: Record<string, string[]> = {};
   for (const [key, value] of Object.entries(p)) {
@@ -444,6 +509,9 @@ const SETTINGS_PATCH_KEYS = [
   'channelToolsets',
   'voiceTtsProviders',
   'voiceSttProviders',
+  'voiceRealtimeProviders',
+  'voiceChannelTtsOut',
+  'wakeRoutes',
   'nightlyPass',
   'weeklyDigest',
   'modelCatalog',
@@ -617,6 +685,52 @@ function validateSettingsPatch(patch: ConfigUpdateInput): void {
       checkInt(`voiceSttProviders.${name}.timeout`, entry.timeout, 1, 3600);
     }
   }
+  if (patch.voiceRealtimeProviders) {
+    for (const [name, entry] of Object.entries(patch.voiceRealtimeProviders)) {
+      checkRecordKey(`voiceRealtimeProviders.${name}`, name);
+      if (!entry?.provider) {
+        invalidValue(`voiceRealtimeProviders.${name}.provider`, 'is required');
+      }
+      // A rate is money per minute, so fractions are the norm — `checkPositive`,
+      // not `checkInt`. The CLI's parser drops a non-positive rate; refusing it
+      // here means the operator hears about it instead of it vanishing.
+      checkPositive(`voiceRealtimeProviders.${name}.costPerMinuteUsd`, entry.costPerMinuteUsd);
+    }
+  }
+  if (patch.wakeRoutes) {
+    for (const [id, route] of Object.entries(patch.wakeRoutes)) {
+      // The id becomes a `voice.wake.routes.<id>.<field>` line; outside this
+      // charset neither parser would match it and the route would vanish on
+      // the next read — a wake phrase that silently stops existing.
+      checkRecordKey(`wakeRoutes.${id}`, id);
+      if (!route?.phrase?.trim()) invalidValue(`wakeRoutes.${id}.phrase`, 'is required');
+      if (!route?.personality?.trim()) {
+        invalidValue(`wakeRoutes.${id}.personality`, 'is required');
+      }
+    }
+  }
+  checkPositive('voiceRealtimeSessionBudgetUsd', patch.voiceRealtimeSessionBudgetUsd);
+  if (patch.voiceChannelTtsOut) {
+    for (const platform of Object.keys(patch.voiceChannelTtsOut)) {
+      // REFUSED, not dropped — the opposite of what the yaml parser does with
+      // the same typo. There a bad hand-edit must not make the config
+      // unloadable, so an unknown platform is ignored; here there is a caller
+      // waiting on a response, and silently discarding their toggle would leave
+      // the Settings page showing a switch that never took.
+      if (!isVoiceChannelPlatform(platform)) {
+        invalidValue(
+          `voiceChannelTtsOut.${platform}`,
+          `is not a voice channel platform (${VOICE_CHANNEL_PLATFORMS.join(', ')})`,
+        );
+      }
+    }
+  }
+  // Bounds mirror the `parseBoundedInt` ranges in packages/config, which DROPS
+  // an out-of-range value; a direct (non-RPC) caller hears about it instead.
+  checkInt('voiceTranscodeBitrateKbps', patch.voiceTranscodeBitrateKbps, 8, 320);
+  checkInt('voiceTranscodeTimeoutSec', patch.voiceTranscodeTimeoutSec, 1, 600);
+  checkInt('voiceArtifactAbandonAfterDays', patch.voiceArtifactAbandonAfterDays, 1, 365);
+  checkInt('voiceArtifactMaxTotalMb', patch.voiceArtifactMaxTotalMb, 1, 102_400);
   if (patch.webhooks) {
     for (const [hookId, hook] of Object.entries(patch.webhooks)) {
       checkRecordKey(`webhooks.${hookId}`, hookId);
@@ -682,6 +796,10 @@ export interface ConfigGetResult {
   debugPanelModel: string | null;
   adminEnabled: boolean;
   streamingEdits: 'off' | 'dms' | 'all';
+  /** Call Stage treatment (display.call_style): `personality` or a pinned one. */
+  callStyle: 'liquid' | 'orb' | 'rings' | 'personality';
+  /** In-call overlay color (display.call_accent): `personality` or a hex. */
+  callAccent: string;
   autoCompact: boolean;
   memoryConsolidationEnabled: boolean;
   memoryCaptureEnabled: boolean;
@@ -713,6 +831,14 @@ export interface ConfigGetResult {
   /** `null` = the key is absent = the local-only egress gate is OFF. */
   voiceTrustedPlugins: string[] | null;
   voiceDefaultMode: 'off' | 'mirror_inbound' | 'all' | null;
+  /** `voice.channels.<platform>.ttsOut` — an absent platform has no override. */
+  voiceChannelTtsOut: Record<string, boolean>;
+  voiceTranscodeFfmpegPath: string | null;
+  voiceTranscodeBitrateKbps: number | null;
+  /** `voice.transcode.timeout`, SECONDS. */
+  voiceTranscodeTimeoutSec: number | null;
+  voiceArtifactAbandonAfterDays: number | null;
+  voiceArtifactMaxTotalMb: number | null;
   // Settings-page additions — see the passthrough-groups comment above.
   apiVersion: string | null;
   verbose: boolean;
@@ -780,6 +906,15 @@ export interface ConfigGetResult {
   /** `voice.stt.providers.*` — the named STT roster. `auxiliary.asr` is the
    *  default entry and lives in the `voice*` STT fields above, not here. */
   voiceSttProviders: Record<string, VoiceSttProviderGetResult>;
+  /** `voice.realtime.providers.*` — the named realtime roster. This one has no
+   *  `auxiliary.*` default entry; `voiceRealtimeDefault` names one of these. */
+  voiceRealtimeProviders: Record<string, VoiceRealtimeProviderGetResult>;
+  /** `voice.realtime.default` — a roster label, never a provider id. */
+  voiceRealtimeDefault: string | null;
+  /** `voice.tier` — the deployment's default voice engine. */
+  voiceTier: 'pipeline' | 'realtime' | null;
+  /** `voice.realtime.sessionBudgetUsd` — USD cap on one session. */
+  voiceRealtimeSessionBudgetUsd: number | null;
   nightlyPass: { enabled: boolean; cron: string };
   weeklyDigest: { enabled: boolean; cron: string; recipients: string[] };
   modelCatalog: { enabled: boolean; url: string | null; ttlHours: number };
@@ -817,6 +952,8 @@ export interface ConfigUpdateInput {
   debugPanelModel?: string | null;
   adminEnabled?: boolean;
   streamingEdits?: 'off' | 'dms' | 'all';
+  callStyle?: 'liquid' | 'orb' | 'rings' | 'personality';
+  callAccent?: string;
   autoCompact?: boolean;
   memoryConsolidationEnabled?: boolean;
   memoryCaptureEnabled?: boolean;
@@ -845,11 +982,33 @@ export interface ConfigUpdateInput {
   voiceSttTimeoutMs?: number | null;
   voiceTrustedPlugins?: string[] | null;
   voiceDefaultMode?: 'off' | 'mirror_inbound' | 'all' | null;
+  /** `voice.channels.<platform>.ttsOut`. Present REPLACES the whole map — an
+   *  omitted platform loses its override and inherits `voice.defaultMode`
+   *  again. An unrecognized platform id is refused, not dropped. */
+  voiceChannelTtsOut?: Record<string, boolean>;
+  /** `voice.transcode.ffmpegPath`; null clears the key. */
+  voiceTranscodeFfmpegPath?: string | null;
+  /** `voice.transcode.bitrateKbps`, 8–320; null clears the key. */
+  voiceTranscodeBitrateKbps?: number | null;
+  /** `voice.transcode.timeout`, SECONDS, 1–600; null clears the key. */
+  voiceTranscodeTimeoutSec?: number | null;
+  /** `voice.artifacts.abandonAfterDays`, 1–365; null clears the key. */
+  voiceArtifactAbandonAfterDays?: number | null;
+  /** `voice.artifacts.maxTotalMb`, 1–102400; null clears the key. */
+  voiceArtifactMaxTotalMb?: number | null;
   /** `voice.tts.providers.*`. Present REPLACES the whole roster — an omitted
    *  entry is a deletion, and its vault key is dropped with it. */
   voiceTtsProviders?: Record<string, VoiceProviderUpdateInput>;
   /** `voice.stt.providers.*`. Same full-replacement rule. */
   voiceSttProviders?: Record<string, VoiceSttProviderUpdateInput>;
+  /** `voice.realtime.providers.*`. Same full-replacement rule. */
+  voiceRealtimeProviders?: Record<string, VoiceRealtimeProviderUpdateInput>;
+  /** `voice.realtime.default`; null clears the key. */
+  voiceRealtimeDefault?: string | null;
+  /** `voice.tier`; null clears the key. */
+  voiceTier?: 'pipeline' | 'realtime' | null;
+  /** `voice.realtime.sessionBudgetUsd`; null clears the cap. */
+  voiceRealtimeSessionBudgetUsd?: number | null;
   // Settings-page additions. For every scalar below, `null` (or '') deletes
   // the config.yaml key so the built-in default applies again; `undefined`
   // leaves it unchanged. Record fields are full replacements.
@@ -914,6 +1073,16 @@ export interface ConfigUpdateInput {
   webhooks?: Record<string, WebhookUpdateInput>;
   quickCommands?: Record<string, QuickCommandUpdateInput>;
   channelToolsets?: Record<string, string[]>;
+  /**
+   * `voice.wake.routes.<id>` — the wake-phrase → personality table, replaced
+   * wholesale (a present key drops every existing route first, like the voice
+   * rosters above). A route the operator deleted in the UI must actually stop
+   * answering the door, so a merge would be the wrong semantics here.
+   */
+  wakeRoutes?: Record<
+    string,
+    { phrase: string; personality: string; privileged?: boolean; enabled?: boolean }
+  >;
   nightlyPass?: { enabled?: boolean | null; cron?: string | null };
   weeklyDigest?: { enabled?: boolean | null; cron?: string | null; recipients?: string[] | null };
   modelCatalog?: { enabled?: boolean | null; url?: string | null; ttlHours?: number | null };
@@ -935,6 +1104,17 @@ export interface ConfigServiceOptions {
    *  resolve to '' so checks fail honestly instead of probing with the
    *  literal reference string. */
   secrets?: SecretsResolver;
+  /**
+   * Fired after a successful `update()` write lands.
+   *
+   * A seam, not a dependency: this service must not know that wake satellites
+   * exist, but a Settings save is the one moment the pushed routing table can
+   * change, and eng-review D5 makes that save the trigger for the push. The
+   * composition root closes over whatever needs telling. Awaited so a caller
+   * that reads back immediately sees the effect, but a listener that throws
+   * must not fail the config write that already landed.
+   */
+  onUpdated?: () => void | Promise<void>;
 }
 
 export class ConfigService {
@@ -975,6 +1155,8 @@ export class ConfigService {
       debugPanelModel: raw.debugPanelModel ?? null,
       adminEnabled: raw.passthrough['admin.enabled'] === 'true',
       streamingEdits: parseStreamingEdits(raw.passthrough['display.streaming_edits']),
+      callStyle: parseCallStyle(raw.passthrough['display.call_style']),
+      callAccent: parseCallAccent(raw.passthrough['display.call_accent']),
       // Default ON since the context-economy Phase 2 flip — off only when
       // explicitly disabled.
       autoCompact: raw.passthrough['compaction.autoCompact'] !== 'false',
@@ -1034,6 +1216,15 @@ export class ConfigService {
       voiceTrustedPlugins:
         p['voice.trustedPlugins'] === undefined ? null : splitList(p['voice.trustedPlugins']),
       voiceDefaultMode: pickEnumOrNull(p['voice.defaultMode'], ['off', 'mirror_inbound', 'all']),
+      voiceChannelTtsOut: parseVoiceChannelTtsOut(p),
+      voiceTranscodeFfmpegPath: passStr(p, 'voice.transcode.ffmpegPath'),
+      voiceTranscodeBitrateKbps: passNumOrNull(p, 'voice.transcode.bitrateKbps'),
+      voiceTranscodeTimeoutSec: passNumOrNull(p, 'voice.transcode.timeout'),
+      voiceArtifactAbandonAfterDays: passNumOrNull(p, 'voice.artifacts.abandonAfterDays'),
+      voiceArtifactMaxTotalMb: passNumOrNull(p, 'voice.artifacts.maxTotalMb'),
+      voiceRealtimeDefault: passStr(p, 'voice.realtime.default'),
+      voiceTier: pickEnumOrNull(p['voice.tier'], ['pipeline', 'realtime']),
+      voiceRealtimeSessionBudgetUsd: passNumOrNull(p, 'voice.realtime.sessionBudgetUsd'),
       apiVersion: passStr(p, 'apiVersion'),
       verbose: passBool(p, 'verbose', false),
       displayVerbosity: pickEnum(
@@ -1109,6 +1300,7 @@ export class ConfigService {
       channelToolsets: parseChannelToolsets(p),
       voiceTtsProviders: await parseVoiceTtsProviders(p, (v) => this.keyPreview(v)),
       voiceSttProviders: await parseVoiceSttProviders(p, (v) => this.keyPreview(v)),
+      voiceRealtimeProviders: await parseVoiceRealtimeProviders(p, (v) => this.keyPreview(v)),
       nightlyPass: {
         enabled: passBool(p, 'nightlyPass.enabled', false),
         cron: p['nightlyPass.cron'] || '0 3 * * *',
@@ -1223,6 +1415,12 @@ export class ConfigService {
     }
     if (patch.streamingEdits !== undefined) {
       passthroughPatch['display.streaming_edits'] = patch.streamingEdits;
+    }
+    if (patch.callStyle !== undefined) {
+      passthroughPatch['display.call_style'] = patch.callStyle;
+    }
+    if (patch.callAccent !== undefined) {
+      passthroughPatch['display.call_accent'] = parseCallAccent(patch.callAccent);
     }
     if (patch.autoCompact !== undefined) {
       passthroughPatch['compaction.autoCompact'] = patch.autoCompact ? 'true' : 'false';
@@ -1378,6 +1576,16 @@ export class ConfigService {
     set('auxiliary.tts.maxTextLength', patch.voiceTtsMaxTextLength);
     set('auxiliary.asr.timeout', patch.voiceSttTimeoutMs);
     set('voice.defaultMode', patch.voiceDefaultMode);
+    set('voice.transcode.ffmpegPath', patch.voiceTranscodeFfmpegPath);
+    set('voice.transcode.bitrateKbps', patch.voiceTranscodeBitrateKbps);
+    // The yaml key is `timeout`; the field says `Sec` because the unit is the
+    // one thing a bare `timeout` next to five `*Ms` neighbours cannot convey.
+    set('voice.transcode.timeout', patch.voiceTranscodeTimeoutSec);
+    set('voice.artifacts.abandonAfterDays', patch.voiceArtifactAbandonAfterDays);
+    set('voice.artifacts.maxTotalMb', patch.voiceArtifactMaxTotalMb);
+    set('voice.tier', patch.voiceTier);
+    set('voice.realtime.default', patch.voiceRealtimeDefault);
+    set('voice.realtime.sessionBudgetUsd', patch.voiceRealtimeSessionBudgetUsd);
     // Clearing the list removes the key, which turns the egress gate off — the
     // gate is armed by DECLARING the key, so there is nothing to keep here.
     setList('voice.trustedPlugins', patch.voiceTrustedPlugins, ', ');
@@ -1396,7 +1604,10 @@ export class ConfigService {
       patch.quickCommands !== undefined ||
       patch.channelToolsets !== undefined ||
       patch.voiceTtsProviders !== undefined ||
-      patch.voiceSttProviders !== undefined;
+      patch.voiceSttProviders !== undefined ||
+      patch.voiceRealtimeProviders !== undefined ||
+      patch.voiceChannelTtsOut !== undefined ||
+      patch.wakeRoutes !== undefined;
     const currentPassthrough = replacesRecords
       ? ((await this.opts.config.read())?.passthrough ?? {})
       : {};
@@ -1422,6 +1633,15 @@ export class ConfigService {
         }
       }
     }
+    if (patch.voiceChannelTtsOut !== undefined) {
+      // Full replacement, same rule as the rosters: an omitted platform is not
+      // "unchanged", it is "no override" — which is a different deployment
+      // decision from `false` and has to be expressible.
+      deletePrefix('voice.channels.');
+      for (const [platform, ttsOut] of Object.entries(patch.voiceChannelTtsOut)) {
+        set(`voice.channels.${platform}.ttsOut`, ttsOut);
+      }
+    }
     if (patch.channelToolsets !== undefined) {
       deletePrefix('channel_toolsets.');
       for (const [platform, tools] of Object.entries(patch.channelToolsets)) {
@@ -1441,13 +1661,18 @@ export class ConfigService {
         }
       }
     }
-    // Write-only key, shared by both rosters: a provided value wins, otherwise
-    // the stored one is re-written so a form that never saw the key cannot
-    // erase it. The value re-written is the `${secrets:…}` reference, which
-    // `externalizeSecret` passes through untouched — no second vault entry. The
-    // stored key is looked up under the OLD spelling too, so an operator who
-    // saves an existing `voice.providers.*` entry keeps its credential.
-    const carryRosterKey = (kind: 'tts' | 'stt', name: string, provided?: string): void => {
+    // Write-only key, shared by all three rosters: a provided value wins,
+    // otherwise the stored one is re-written so a form that never saw the key
+    // cannot erase it. The value re-written is the `${secrets:…}` reference,
+    // which `externalizeSecret` passes through untouched — no second vault
+    // entry. The stored key is looked up under the OLD spelling too, so an
+    // operator who saves an existing `voice.providers.*` entry keeps its
+    // credential.
+    const carryRosterKey = (
+      kind: 'tts' | 'stt' | 'realtime',
+      name: string,
+      provided?: string,
+    ): void => {
       const apiKey =
         provided ||
         currentPassthrough[`voice.${kind}.providers.${name}.apiKey`] ||
@@ -1482,6 +1707,35 @@ export class ConfigService {
         set(`voice.stt.providers.${name}.baseUrl`, entry.baseUrl);
         set(`voice.stt.providers.${name}.command`, entry.command);
         set(`voice.stt.providers.${name}.timeout`, entry.timeout);
+      }
+    }
+    if (patch.voiceRealtimeProviders !== undefined) {
+      deletePrefix('voice.realtime.providers.');
+      for (const [name, entry] of Object.entries(patch.voiceRealtimeProviders)) {
+        if (!entry) continue;
+        set(`voice.realtime.providers.${name}.provider`, entry.provider);
+        set(`voice.realtime.providers.${name}.model`, entry.model);
+        carryRosterKey('realtime', name, entry.apiKey);
+        set(`voice.realtime.providers.${name}.baseUrl`, entry.baseUrl);
+        set(`voice.realtime.providers.${name}.voice`, entry.voice);
+        set(`voice.realtime.providers.${name}.costPerMinuteUsd`, entry.costPerMinuteUsd);
+      }
+    }
+    if (patch.wakeRoutes !== undefined) {
+      // Wholesale replacement — see the field's docs. `privileged` and
+      // `enabled` are written only when explicitly false/true so a hand-written
+      // config that never said either keeps saying nothing.
+      deletePrefix('voice.wake.routes.');
+      for (const [id, route] of Object.entries(patch.wakeRoutes)) {
+        if (!route) continue;
+        set(`voice.wake.routes.${id}.phrase`, route.phrase);
+        set(`voice.wake.routes.${id}.personality`, route.personality);
+        if (route.privileged !== undefined) {
+          set(`voice.wake.routes.${id}.privileged`, route.privileged);
+        }
+        if (route.enabled !== undefined) {
+          set(`voice.wake.routes.${id}.enabled`, route.enabled);
+        }
       }
     }
     if (patch.webhooks !== undefined) {
@@ -1527,7 +1781,7 @@ export class ConfigService {
       .filter(
         (k) =>
           /^webhooks\.[^.]+\.secret$/.test(k) ||
-          /^voice\.(?:(?:tts|stt)\.)?providers\.[^.]+\.apiKey$/.test(k),
+          /^voice\.(?:(?:tts|stt|realtime)\.)?providers\.[^.]+\.apiKey$/.test(k),
       )
       .map((k) => secretRefFromValue(currentPassthrough[k] ?? ''))
       .filter((ref): ref is string => ref !== null && !survivingRefs.has(ref));
@@ -1538,6 +1792,8 @@ export class ConfigService {
     const passthrough = Object.keys(passthroughPatch).length > 0 ? passthroughPatch : undefined;
     delete cleaned.adminEnabled;
     delete cleaned.streamingEdits;
+    delete cleaned.callStyle;
+    delete cleaned.callAccent;
     delete cleaned.autoCompact;
     delete cleaned.memoryConsolidationEnabled;
     delete cleaned.memoryCaptureEnabled;
@@ -1553,6 +1809,14 @@ export class ConfigService {
     delete cleaned.voiceSttTimeoutMs;
     delete cleaned.voiceTrustedPlugins;
     delete cleaned.voiceDefaultMode;
+    delete cleaned.voiceTranscodeFfmpegPath;
+    delete cleaned.voiceTranscodeBitrateKbps;
+    delete cleaned.voiceTranscodeTimeoutSec;
+    delete cleaned.voiceArtifactAbandonAfterDays;
+    delete cleaned.voiceArtifactMaxTotalMb;
+    delete cleaned.voiceTier;
+    delete cleaned.voiceRealtimeDefault;
+    delete cleaned.voiceRealtimeSessionBudgetUsd;
 
     // Convert providers to repository format when present.
     let repoProviders: RawProviderEntry[] | undefined;
@@ -1596,6 +1860,11 @@ export class ConfigService {
     });
 
     await this.deleteOrphanedSecrets(droppedSecretRefs);
+    try {
+      await this.opts.onUpdated?.();
+    } catch {
+      // The write landed; a broken listener is not the caller's problem.
+    }
   }
 
   /**
@@ -1641,6 +1910,21 @@ const SECRETS_REF_RE = /\$\{secrets:([^}]+)\}/g;
  *  unrecognized falls back to the effective default, `'dms'`. */
 function parseStreamingEdits(value: string | undefined): 'off' | 'dms' | 'all' {
   return value === 'off' || value === 'all' ? value : 'dms';
+}
+
+/** `display.call_style` — the Call Stage treatment. Unset = `personality`,
+ *  which lets each personality draw its own (declared or derived). */
+function parseCallStyle(value: string | undefined): 'liquid' | 'orb' | 'rings' | 'personality' {
+  return value === 'orb' || value === 'rings' || value === 'liquid' ? value : 'personality';
+}
+
+/**
+ * `display.call_accent` — `personality` or a 6-digit hex. Anything else (a typo,
+ * a hand-edited config) resolves to `personality` rather than reaching a canvas
+ * fillStyle.
+ */
+function parseCallAccent(value: string | undefined): string {
+  return value !== undefined && /^#[0-9a-fA-F]{6}$/.test(value) ? value : 'personality';
 }
 
 // ---------------------------------------------------------------------------

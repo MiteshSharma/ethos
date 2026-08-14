@@ -1,15 +1,16 @@
 // The one voice-reply decision (voice V1a, eng-review D3).
 //
-// Pure function on purpose: persistence of the per-lane mode belongs to the
-// gateway's Storage-backed state machine, not here. Every reply surface — the
+// Pure function on purpose: persistence of the per-lane mode belongs to
+// `LaneVoiceModeStore` in `@ethosagent/core`, not here. Every reply surface — the
 // gateway reply path, the hook-claimed reply path, the browser talk path, V2's
 // channel sinks, V3's wake-triggered turns — asks this and nothing else.
 
-/** Per-lane voice mode. Persisted by the caller; `/voice <mode>` mutates it. */
-export type VoiceMode = 'off' | 'mirror_inbound' | 'all';
+import type { VoiceMode } from '@ethosagent/types';
 
-/** Mode a lane starts in: speak back when spoken to, stay quiet otherwise. */
-export const DEFAULT_VOICE_MODE: VoiceMode = 'mirror_inbound';
+// `VoiceMode` and its default live in `@ethosagent/types`: core's
+// `LaneVoiceModeStore` persists the mode, and core depends on contracts only.
+// Re-exported here so every existing importer of this module is unaffected.
+export { DEFAULT_VOICE_MODE, type VoiceMode } from '@ethosagent/types';
 
 export interface VoiceReplyDecisionInput {
   /** The lane's persisted voice mode. */

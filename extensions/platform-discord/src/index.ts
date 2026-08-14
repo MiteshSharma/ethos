@@ -1,5 +1,6 @@
 import type {
   AdapterCapabilities,
+  AdapterVoiceCaps,
   ApprovalCapableAdapter,
   ApprovalDecisionEvent,
   AttachmentCache,
@@ -7,9 +8,19 @@ import type {
   InboundMessage,
   OutboundMessage,
   PlatformAdapter,
+  SendVoiceNoteOptions,
   Storage,
+  VoiceOutboundAdapter,
 } from '@ethosagent/types';
-import { Client, GatewayIntentBits, type Interaction, Partials, REST, Routes } from 'discord.js';
+import {
+  AttachmentBuilder,
+  Client,
+  GatewayIntentBits,
+  type Interaction,
+  Partials,
+  REST,
+  Routes,
+} from 'discord.js';
 import { chunkText, reflowChunks } from './chunking';
 import type { clarifyModalPayload } from './clarify-blocks';
 import type { CommandContext, CommandPayload } from './commands';
@@ -85,14 +96,38 @@ interface DiscordAdapterConfig {
   postThinkingPlaceholder?: boolean;
 }
 
-export class DiscordAdapter implements PlatformAdapter, ApprovalCapableAdapter {
+export class DiscordAdapter
+  implements PlatformAdapter, ApprovalCapableAdapter, VoiceOutboundAdapter
+{
   readonly id: string;
   readonly displayName = 'Discord';
   readonly canSendTyping = true;
   readonly canEditMessage = true;
   readonly canReact = true;
+  /**
+   * Stays `false` even though {@link sendVoiceNote} can attach a file. The
+   * gateway derives generic outbound-media caps from this flag (see
+   * `outboundMediaCaps` in `@ethosagent/gateway`), and `send()` still ignores
+   * `OutboundMessage.attachments` — flipping it would make the gateway build
+   * attachments that Discord then silently drops. It flips when `send()`
+   * learns to upload attachments, not before.
+   */
   readonly canSendFiles = false;
   readonly maxMessageLength = 2000;
+
+  /**
+   * Declared voice capabilities. Discord has no voice-bubble primitive for
+   * bot messages — an uploaded audio file gets an inline player — so the
+   * honest declaration is `kind: 'file'`.
+   */
+  readonly voiceCaps: AdapterVoiceCaps = {
+    inbound: ['ogg', 'mp3', 'm4a', 'wav'],
+    outbound: {
+      formats: ['mp3', 'ogg', 'wav'],
+      kind: 'file',
+      maxBytes: 25 * 1024 * 1024,
+    },
+  };
 
   get capabilities(): AdapterCapabilities {
     return {
@@ -105,6 +140,7 @@ export class DiscordAdapter implements PlatformAdapter, ApprovalCapableAdapter {
       homeView: true,
       joinGreeting: false,
       roleBasedApprovals: true,
+      // Kept in sync with `canSendFiles` — see the note there.
       outboundFiles: false,
       webhookMode: false,
     };
@@ -273,6 +309,41 @@ export class DiscordAdapter implements PlatformAdapter, ApprovalCapableAdapter {
       }
 
       return { ok: true, messageId: ids[0] };
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
+  }
+
+  /**
+   * The declared voice sink — attaches the synthesized audio, which Discord
+   * renders with an inline player. Threads are addressed the same way `send()`
+   * addresses them: by replacing the target channel with the thread's id.
+   * Never throws: `{ok:true}` is the delivery ledger's only proof of delivery.
+   */
+  async sendVoiceNote(
+    chatId: string,
+    audio: Uint8Array,
+    opts: SendVoiceNoteOptions,
+  ): Promise<DeliveryResult> {
+    try {
+      const targetId = opts.threadId ?? chatId;
+      const channel = await this.client.channels.fetch(targetId);
+      if (!channel || !('send' in channel)) {
+        return { ok: false, error: 'Channel not found or not sendable' };
+      }
+
+      // biome-ignore lint/suspicious/noExplicitAny: discord.js channel union
+      const sent = await (channel as any).send({
+        files: [new AttachmentBuilder(Buffer.from(audio), { name: opts.filename })],
+        ...(opts.caption ? { content: opts.caption } : {}),
+        allowedMentions: { parse: [] },
+      });
+
+      if (opts.threadId && this.threadState) {
+        await this.threadState.recordPost(chatId, opts.threadId);
+      }
+
+      return { ok: true, messageId: String(sent.id) };
     } catch (err) {
       return { ok: false, error: err instanceof Error ? err.message : String(err) };
     }
@@ -691,6 +762,7 @@ export const capabilities: AdapterCapabilities = {
   homeView: true,
   joinGreeting: false,
   roleBasedApprovals: true,
+  // Kept in sync with `DiscordAdapter.canSendFiles` — see the note there.
   outboundFiles: false,
   webhookMode: false,
 };

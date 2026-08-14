@@ -5,7 +5,7 @@ kind: how-to
 audience: shared
 slug: platform-discord
 time: "15 min"
-updated: 2026-06-09
+updated: 2026-08-14
 ---
 
 ## Task
@@ -32,6 +32,7 @@ The Discord adapter lags Slack and Telegram on several gateway-contract features
 - DM routing.
 - Outbound chunking to Discord's 2,000-char cap with edit-in-place streaming.
 - Clarify questions surface as buttons + modals, with the handler split across two modules — `extensions/platform-discord/src/clarify-blocks.ts` (component builders) and `extensions/platform-discord/src/clarify-interactions.ts` (button + modal callback handlers).
+- Inbound attachments are downloaded from the Discord CDN into the attachment cache and surfaced on `InboundMessage.attachments`. Images become `type: 'image'`, audio uploads become `type: 'audio'` so the gateway transcribes them, executables are skipped, and anything over 25 MB is dropped.
 - Outbound dedup via the shared `MessageDedupCache` (30s TTL).
 - Plugin commands registered via `registerSlashCommand()` are registered as Discord application commands at startup. They appear in the Discord command picker alongside built-in commands.
 
@@ -41,7 +42,6 @@ The Discord adapter lags Slack and Telegram on several gateway-contract features
 |---|---|---|
 | `botKey` on `InboundMessage` | Stamped by the adapter; gateway routes by `${platform}:${botKey}:${chatId}`. | Not populated. Multi-bot Discord deployments collapse to one lane. See [Run multiple bots](../using/how-to/run-multiple-bots.md). |
 | Thread routing | Slack uses `thread_ts`; Telegram uses forum topics. Each gets a distinct `threadId`. | Discord threads are flattened into the parent channel; replies land in the parent, not the thread. |
-| Inbound files / images | Slack and Telegram cache attachments and surface them as `InboundAttachment[]`. | Not implemented — vision and code-review personalities can't receive Discord attachments. |
 | Receipt reaction | Slack sets 👀 on inbound and clears it on first response; Telegram does the same with 👀. | Not implemented — users have no visual ack until the first streamed chunk lands. |
 | Channel modes | Slack supports `mention_only` / `thread_follow` / `all` per channel with persisted overrides. | Single static `mentionOnly` flag at adapter-construction time. |
 | Persistent store | Slack persists thread participation and per-channel mode overrides under `~/.ethos/slack/<botKey>/`. | No persistence — gateway restart loses every thread-follow decision. |

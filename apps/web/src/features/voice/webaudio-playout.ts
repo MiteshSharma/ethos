@@ -6,10 +6,16 @@
 // off relative timers (or off `ended`) accumulates the scheduler's lateness —
 // a few milliseconds per clip becomes an audible warble over a long call.
 //
+// (The output analyser is here for the same reason: the Call Stage's speaking
+// state is amplitude-driven, and the only place the agent's own level exists is
+// on this graph, between the scheduled sources and the destination.)
+//
 // Everything here schedules against the audio clock instead: each buffer starts
 // at an ABSOLUTE time on the context's timeline, and the next one starts exactly
 // where the previous one ends. Late delivery cannot compound, because the next
 // start time is derived from the previous start time, never from "now".
+
+import { CALL_MOTION, smoothLevel } from './call-motion';
 
 /** The slice of `AudioBuffer` this module needs. */
 export interface PlayoutBuffer {
@@ -25,12 +31,27 @@ export interface PlayoutSource {
   onended: (() => void) | null;
 }
 
+/**
+ * The slice of `AnalyserNode` the playout meters its OWN output with.
+ *
+ * The overlay's speaking state is amplitude-driven (DESIGN.md § "Call
+ * overlay"), and the only place the agent's level exists is on the way to the
+ * speakers. `fftSize` is set by whoever creates the node, not here — this stays
+ * a read-only view so the fake in tests is three lines.
+ */
+export interface PlayoutAnalyser {
+  readonly frequencyBinCount: number;
+  getByteFrequencyData(array: Uint8Array): void;
+  connect(destination: unknown): void;
+}
+
 /** The slice of `AudioContext` this module needs (adapter in browser glue). */
 export interface PlayoutContext {
   readonly currentTime: number;
   readonly destination: unknown;
   createBuffer(channels: number, frames: number, sampleRate: number): PlayoutBuffer;
   createBufferSource(): PlayoutSource;
+  createAnalyser(): PlayoutAnalyser;
   decodeAudioData(data: ArrayBuffer): Promise<PlayoutBuffer>;
   /** Fill channel 0 of a buffer created by `createBuffer`. */
   fillMono(buffer: PlayoutBuffer, samples: Float32Array): void;
@@ -53,6 +74,12 @@ export interface PlayoutSink {
   stop(): void;
   /** True while audio is scheduled at or beyond the current time. */
   readonly speaking: boolean;
+  /**
+   * Smoothed level of what is coming out of the speakers right now, 0..1.
+   * Zero whenever nothing is scheduled — the Call Stage draws from this, and
+   * an analyser tail after the last buffer would keep the shape talking.
+   */
+  outputLevel(): number;
 }
 
 export interface AbsolutePlayoutOptions {
@@ -73,6 +100,14 @@ export class AbsolutePlayout implements PlayoutSink {
   private readonly ctx: PlayoutContext;
   private readonly lead: number;
   private readonly delay: (ms: number) => Promise<void>;
+  /**
+   * Every source plays through this on the way to the destination, so the
+   * measured level is the mix the user actually hears rather than a guess from
+   * the bytes that were queued.
+   */
+  private readonly analyser: PlayoutAnalyser;
+  /** Smoothed output level, 0..1. Advanced by `outputLevel`, not by a timer. */
+  private level = 0;
   /** Absolute time the currently scheduled audio runs out. */
   private cursor = 0;
   private live: PlayoutSource[] = [];
@@ -83,6 +118,8 @@ export class AbsolutePlayout implements PlayoutSink {
     this.ctx = ctx;
     this.lead = opts.leadSeconds ?? DEFAULT_LEAD_SECONDS;
     this.delay = opts.delay ?? ((ms) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+    this.analyser = ctx.createAnalyser();
+    this.analyser.connect(ctx.destination);
   }
 
   playPcm16(samples: Int16Array, sampleRate: number): number {
@@ -127,6 +164,26 @@ export class AbsolutePlayout implements PlayoutSink {
     return this.cursor > this.ctx.currentTime;
   }
 
+  outputLevel(): number {
+    // Nothing scheduled means silence, whatever the analyser's decay still
+    // holds. Reset rather than smooth down, so the shape stops when the voice
+    // does instead of trailing it.
+    if (!this.speaking) {
+      this.level = 0;
+      return 0;
+    }
+    const data = new Uint8Array(this.analyser.frequencyBinCount);
+    this.analyser.getByteFrequencyData(data);
+    // Voice energy concentrates low, so the first bins carry the envelope.
+    const bins = Math.min(40, data.length);
+    if (bins === 0) return this.level;
+    let sum = 0;
+    for (let i = 0; i < bins; i++) sum += data[i] ?? 0;
+    const raw = Math.min(1, (sum / bins / 255) * 1.9);
+    this.level = smoothLevel(this.level, raw, CALL_MOTION.smoothing);
+    return this.level;
+  }
+
   stop(): void {
     for (const source of this.live) {
       try {
@@ -137,13 +194,14 @@ export class AbsolutePlayout implements PlayoutSink {
     }
     this.live = [];
     this.cursor = 0;
+    this.level = 0;
     this.chain = Promise.resolve();
   }
 
   private schedule(buffer: PlayoutBuffer): number {
     const source = this.ctx.createBufferSource();
     source.buffer = buffer;
-    source.connect(this.ctx.destination);
+    source.connect(this.analyser);
     // The whole point: continue the timeline when audio is still queued, and
     // only fall back to the clock when the queue has actually run dry.
     const startAt = Math.max(this.cursor, this.ctx.currentTime + this.lead);

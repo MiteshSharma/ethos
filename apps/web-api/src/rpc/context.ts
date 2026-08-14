@@ -10,6 +10,7 @@ import type { ApiKeysService } from '../services/api-keys.service';
 import type { ApprovalsService } from '../services/approvals.service';
 import type { ConfigService } from '../services/config.service';
 import type { CronService } from '../services/cron.service';
+import type { DeliveriesService } from '../services/deliveries.service';
 import type { DigestService } from '../services/digest.service';
 import type { DocumentsService } from '../services/documents.service';
 import type { EvolverService } from '../services/evolver.service';
@@ -28,6 +29,9 @@ import type { SkillsService } from '../services/skills.service';
 import type { TasksService } from '../services/tasks.service';
 import type { ToolSettingsService } from '../services/tool-settings.service';
 import type { VoiceService } from '../services/voice.service';
+import type { VoiceLaneModeService } from '../services/voice-lane-mode.service';
+import type { WakeRoutesService } from '../services/wake-routes.service';
+import type { SatelliteRegistry } from '../voice/satellite-registry';
 
 // Shared context type for every oRPC handler in the web-api. Each namespace
 // file imports `os` from here (not from `@orpc/server` directly) so TypeScript
@@ -72,6 +76,19 @@ export interface RpcContext {
   pluginLoader?: PluginLoader;
   agentLoop?: AgentLoop;
   voice?: VoiceService;
+  /** Durable per-conversation voice mode, shared with the gateway's lanes.
+   *  Not optional: it needs no provider, only Storage. */
+  voiceLaneMode: VoiceLaneModeService;
+  /** Read-only delivery-obligation ledger view. Not optional: it degrades to
+   *  zeros when the gateway has never run. */
+  deliveries: DeliveriesService;
+  /** Connected wake satellites + the pushed routing table. Absent in
+   *  deployments with no satellite lane — the RPCs then report an empty house
+   *  rather than throwing at a Settings page. */
+  satellites?: SatelliteRegistry;
+  /** Read / replace the wake-phrase → personality table. Not optional: the
+   *  editor must render (empty) even where no satellite lane is mounted. */
+  wakeRoutes: WakeRoutesService;
   /** A2A peering service (from `@ethosagent/wiring`) — shared with the live
    *  `/a2a` handshake so the admin RPC and the trust decisions are one source
    *  of truth (plan §12). Absent in non-serve contexts. */

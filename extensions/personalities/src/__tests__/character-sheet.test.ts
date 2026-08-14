@@ -536,6 +536,24 @@ describe('voice block', () => {
     expect(sheet).toContain('- TTS voice: (global default)');
     expect(sheet).toContain('- Fast-lane model: fast');
   });
+
+  it('prints the declared call look', () => {
+    const sheet = renderCharacterSheet({ ...base, voice: { call_style: 'rings' } }, '');
+    expect(sheet).toContain('- Call look: rings');
+  });
+
+  it('prints the DERIVED call look when undeclared — there is no "(default)" to name', () => {
+    // A personality that declares nothing still draws a specific shape. The
+    // sheet's job is to say which, not to say "unset".
+    const sheet = renderCharacterSheet({ ...base, voice: { tts_voice: 'af_bella' } }, '');
+    expect(sheet).toContain('- Call look: orb (derived from id)');
+    // …and it follows the ID, so two personalities do not have to look alike.
+    const other = renderCharacterSheet(
+      { id: 'reviewer', name: 'Reviewer', voice: { tts_voice: 'af_bella' } },
+      '',
+    );
+    expect(other).toContain('- Call look: rings (derived from id)');
+  });
 });
 
 // §4.7 — the register-status section. The register (published in

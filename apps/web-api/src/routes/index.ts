@@ -98,6 +98,15 @@ export interface ServiceContainer {
   namedSecrets: import('../services/named-secrets.service').NamedSecretsService;
   toolSettings: import('../services/tool-settings.service').ToolSettingsService;
   voice?: import('../services/voice.service').VoiceService;
+  /** Durable per-conversation voice mode, shared with the gateway's lanes. */
+  voiceLaneMode: import('../services/voice-lane-mode.service').VoiceLaneModeService;
+  /** Read-only delivery-obligation ledger view. */
+  deliveries: import('../services/deliveries.service').DeliveriesService;
+  /** Connected wake satellites + the pushed routing table. Absent when this
+   *  deployment mounts no satellite lane. */
+  satellites?: import('../voice/satellite-registry').SatelliteRegistry;
+  /** Read / replace the wake-phrase → personality table. */
+  wakeRoutes: import('../services/wake-routes.service').WakeRoutesService;
   toolRegistry?: import('@ethosagent/types').ToolRegistry;
   dashboards?: import('@ethosagent/dashboard').DashboardsService;
   pluginLoader?: import('@ethosagent/plugin-loader').PluginLoader;

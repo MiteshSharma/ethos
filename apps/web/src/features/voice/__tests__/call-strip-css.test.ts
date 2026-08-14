@@ -32,21 +32,43 @@ describe('CallStrip stylesheet — accessibility & responsive (DR5)', () => {
     expect(rule).toContain('.talk-link-pulse');
     expect(rule).toContain('.talk-indicator-flash');
     expect(rule).toContain('animation: none');
-    // The red AudioBars meter animates via a transition, not a keyframe.
+    // The red AudioBars meter's SMOOTHING is a transition, not a keyframe.
     expect(rule).toContain('.composer-voice-bar');
+    // Its MOTION is neither: the bar heights are rewritten from JS on every
+    // animation frame, so nothing in this file can stop them and no assertion
+    // here can prove they stopped. That belongs to `mic-meter.test.ts`.
   });
 
-  it('at 375px the mark, state and controls persist; the mono detail collapses', () => {
+  it('at 375px the mark, state, caption and controls persist; the mono detail collapses', () => {
     const start = css.indexOf('@media (max-width: 420px)');
     expect(start).toBeGreaterThan(-1);
     const rule = css.slice(start, css.indexOf('/* Every pulse stops', start));
-    // Collapsed behind the toggle's tap target.
-    expect(rule).toContain('.talk-detail-btn .talk-mono:not(.talk-latency)');
+    // ALL of the mono detail collapses behind the toggle's tap target — the
+    // latency reading included. The plan says "mono latency/tier detail
+    // collapses behind a tap"; the old `:not(.talk-latency)` exemption pinned
+    // the opposite, and put the widest text back on the narrowest row.
+    expect(rule).toContain('.talk-detail-btn .talk-mono');
+    expect(rule).not.toContain(':not(.talk-latency)');
     expect(rule).toContain('display: none');
     // The indicator narrows but stays; nothing hides the controls.
     expect(rule).toContain('.talk-indicator');
     expect(rule).not.toContain('.talk-call-actions');
     expect(rule).not.toContain('.talk-status-label');
+    // Captions are the a11y story, so the phone keeps them — on their own
+    // full-width line rather than not at all.
+    const caption = rule.slice(rule.indexOf('.talk-caption'));
+    expect(caption.slice(0, caption.indexOf('}'))).not.toContain('display: none');
+    expect(rule).toContain('flex-basis: 100%');
+  });
+
+  it('the strip row cannot push its widest state past the viewport', () => {
+    // The structural half of the 375px contract; `call-strip-layout.test.ts`
+    // does the arithmetic that says why this rule has to be here.
+    expect(block('.talk-call-row')).toContain('flex-wrap: wrap');
+    // The one item wrapping cannot rescue is an item wider than the row, and
+    // the state word doubles as the recoverable-error slot.
+    expect(block('.talk-status-label')).not.toContain('flex-shrink: 0');
+    expect(block('.talk-status-label')).toContain('min-width: 0');
   });
 
   it('the agent dot is 10px accent and the link dot is the amber warning token', () => {

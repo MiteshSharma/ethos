@@ -144,6 +144,13 @@ export class FakePlayout implements PlayoutSink {
     return this.clock;
   }
 
+  /** Whatever a test wants the overlay to see. Zero unless it says otherwise. */
+  level = 0;
+
+  outputLevel(): number {
+    return this.level;
+  }
+
   whenIdle(): Promise<void> {
     if (this.cursor <= this.clock) return Promise.resolve();
     return new Promise<void>((resolve) => {

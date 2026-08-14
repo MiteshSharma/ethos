@@ -72,7 +72,17 @@ describe('Orchestrator guardrails', () => {
     // `messages` rows, so every path that persisted a message has to flush or
     // the cache silently under-reports. The accumulate/flush logic itself lives
     // in agent-loop/stages/turn-finalizer.ts.
-    expect(lineCount).toBeLessThanOrEqual(916);
+    // Bumped 903 -> 913 (voice V1b): `addSessionCost`. The realtime tier's
+    // per-audio-minute accrual is spend the loop did not incur, on the lane key
+    // `agent_consult` runs its turns on, so it has to reach the SAME
+    // `sessionCosts` map `budgetCapUsd` reads — two statements and their doc.
+    // The metering, the cap and the spoken wind-down all live in
+    // apps/web-api/src/voice/realtime-control-lane.ts.
+    // Merge (analytics A1 + voice V1b): both landed in this file, so the
+    // ceiling is base + both deltas, not either one alone. Measured at 926
+    // (`split('\n').length`, which is one more than `wc -l` on a file with a
+    // trailing newline — measure with the same instrument the check uses).
+    expect(lineCount).toBeLessThanOrEqual(926);
   });
 
   it('no stage file exceeds 700 lines', () => {

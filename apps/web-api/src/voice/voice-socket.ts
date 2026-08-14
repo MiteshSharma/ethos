@@ -9,19 +9,38 @@ import {
 } from '@ethosagent/web-contracts';
 import { type WebSocket, WebSocketServer } from 'ws';
 import type { VoiceService } from '../services/voice.service';
+import type { RealtimeControlLaneDeps } from './realtime-control-lane';
+import { RealtimeControlLane } from './realtime-control-lane';
+import { refuseUpgrade, registerUpgradeRoute, type UpgradableServer } from './upgrade-router';
 import { VoiceLane, type VoiceLaneLimits } from './voice-lane';
 
 // The `ws` half of the browser voice lane. Same upgrade posture as the ACP
 // server (`apps/acp-server/src/index.ts`): `noServer: true` plus an explicit
 // `upgrade` handler, so path, Origin and credentials are all checked before a
-// socket is ever handed to application code.
+// socket is ever handed to application code. The path half of that check lives
+// in `./upgrade-router` — one listener dispatching to every mounted lane —
+// because this is no longer the only WebSocket lane on the server.
 //
 // This file owns the socket; `VoiceLane` owns the conversation. Each accepted
 // connection gets its OWN lane — the only shared object is the `VoiceService`
 // that resolves providers, which holds no per-call state.
+//
+// A connection carries EITHER tier. On the pipeline tier the frames are audio
+// and `VoiceLane` handles them. On the realtime tier the audio has gone
+// straight to the provider and this socket is the CONTROL channel:
+// `realtime_*` frames route to a `RealtimeControlLane` instead — the agent, the
+// talk-session lane, the transcript and the approval surface. Both lanes exist
+// per connection and neither observes the other; which one does work is decided
+// by the frames the browser actually sends.
 
 export interface VoiceSocketOptions {
   voice: VoiceService;
+  /**
+   * Per-connection realtime control deps. Absent → `realtime_*` frames are
+   * ignored, which is the honest behaviour for a deployment with no agent
+   * wired: the pipeline tier still works and nothing pretends to consult.
+   */
+  realtime?: (laneId: string) => RealtimeControlLaneDeps;
   /** Credential check for the upgrade request. Rejected → 401, no socket. */
   authenticate(req: IncomingMessage): Promise<boolean>;
   /** Extra Origins allowed beyond loopback. Same rule as the HTTP surface. */
@@ -31,20 +50,10 @@ export interface VoiceSocketOptions {
   logger?: Logger;
 }
 
-/**
- * What `attach` needs: anything that emits `upgrade`. Typed structurally
- * because `@hono/node-server` returns an http/http2 union, not a plain
- * `http.Server`.
- */
-export interface UpgradableServer {
-  on(
-    event: 'upgrade',
-    listener: (req: IncomingMessage, socket: Duplex, head: Buffer) => void,
-  ): unknown;
-}
+export type { UpgradableServer } from './upgrade-router';
 
 export interface VoiceSocket {
-  /** Take over `upgrade` on a listening server. */
+  /** Serve this lane's path on a listening server's upgrade router. */
   attach(server: UpgradableServer): void;
   /** Live lane count — one per connected talk-mode client. */
   readonly laneCount: number;
@@ -55,6 +64,7 @@ export function createVoiceSocket(opts: VoiceSocketOptions): VoiceSocket {
   const path = opts.path ?? VOICE_SOCKET_PATH;
   const wss = new WebSocketServer({ noServer: true });
   const lanes = new Map<WebSocket, VoiceLane>();
+  const controls = new Map<WebSocket, RealtimeControlLane>();
   let laneSeq = 0;
 
   const onConnection = (socket: WebSocket): void => {
@@ -79,6 +89,11 @@ export function createVoiceSocket(opts: VoiceSocketOptions): VoiceSocket {
       },
     });
     lanes.set(socket, lane);
+    const realtimeDeps = opts.realtime?.(laneId);
+    const control = realtimeDeps
+      ? new RealtimeControlLane({ deps: realtimeDeps, send: (frame) => send(frame) })
+      : null;
+    if (control) controls.set(socket, control);
 
     socket.on('message', (data: unknown, isBinary: boolean) => {
       if (!isBinary) return;
@@ -89,12 +104,18 @@ export function createVoiceSocket(opts: VoiceSocketOptions): VoiceSocket {
         send({ t: 'error', code: 'bad_frame', message: 'Unrecognized voice frame — ignored.' });
         return;
       }
+      if (frame.header.t.startsWith('realtime_')) {
+        control?.handle(frame.header);
+        return;
+      }
       lane.handle(frame.header, frame.payload);
     });
 
     const teardown = (): void => {
       lane.close();
+      control?.close();
       lanes.delete(socket);
+      controls.delete(socket);
     };
     socket.on('close', teardown);
     socket.on('error', teardown);
@@ -102,49 +123,48 @@ export function createVoiceSocket(opts: VoiceSocketOptions): VoiceSocket {
 
   wss.on('connection', onConnection);
 
+  // Path matching is the router's job now; this handler only sees requests for
+  // `path` and owns the Origin + credential policy.
   const handleUpgrade = (req: IncomingMessage, socket: Duplex, head: Buffer): void => {
-    const url = req.url ?? '';
-    if (url.split('?')[0] !== path) {
-      refuse(socket, 404, 'Not Found');
-      return;
-    }
     if (!originAllowed(req.headers.origin, opts.allowedOrigins)) {
-      refuse(socket, 403, 'Forbidden');
+      refuseUpgrade(socket, 403, 'Forbidden');
       return;
     }
     opts
       .authenticate(req)
       .then((ok) => {
         if (!ok) {
-          refuse(socket, 401, 'Unauthorized');
+          refuseUpgrade(socket, 401, 'Unauthorized');
           return;
         }
         wss.handleUpgrade(req, socket, head, (ws) => wss.emit('connection', ws, req));
       })
-      .catch(() => refuse(socket, 401, 'Unauthorized'));
+      .catch(() => refuseUpgrade(socket, 401, 'Unauthorized'));
   };
+
+  let detach: (() => void) | null = null;
 
   return {
     attach(server: UpgradableServer): void {
-      server.on('upgrade', handleUpgrade);
+      detach?.();
+      detach = registerUpgradeRoute(server, path, handleUpgrade);
     },
     get laneCount(): number {
       return lanes.size;
     },
     close(): Promise<void> {
+      detach?.();
+      detach = null;
       for (const [socket, lane] of lanes) {
         lane.close();
+        controls.get(socket)?.close();
         socket.close();
       }
       lanes.clear();
+      controls.clear();
       return new Promise((resolve) => wss.close(() => resolve()));
     },
   };
-}
-
-function refuse(socket: Duplex, status: number, text: string): void {
-  socket.write(`HTTP/1.1 ${status} ${text}\r\n\r\n`);
-  socket.destroy();
 }
 
 /**

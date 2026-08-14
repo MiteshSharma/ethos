@@ -4,7 +4,7 @@ description: "Error catalogue for Ethos — common failure modes by symptom, wit
 kind: reference
 audience: shared
 slug: troubleshooting
-updated: 2026-08-12
+updated: 2026-08-14
 ---
 
 When something goes wrong, the CLI prints a three-line block: a code, a one-line cause, and a one-line action. Search this page for the code or the symptom you saw. Each entry follows the same shape: **Cause**, **Fix**, **Prevent** (when applicable).
@@ -231,6 +231,49 @@ Fix · Re-run `ethos setup messaging` and paste a fresh token. Check `~/.ethos/l
 Cause · `team.yaml` failed to parse or failed schema validation. The offending field is named in the cause.
 
 Fix · Fix the named field in `team.yaml` and re-run `ethos team start`.
+
+### `ffmpeg not found` at gateway startup {#ffmpeg-not-found}
+
+Cause · `ffmpeg` is not on the gateway's `PATH`. It is an optional runtime dependency: the gateway starts and runs without it, but it can only deliver a voice note whose container the TTS provider already produces, and it can only hand speech-to-text the platform's raw bytes.
+
+Fix ·
+1. Install it: `brew install ffmpeg`, `sudo apt-get install -y ffmpeg`, or `sudo dnf install -y ffmpeg`.
+2. Confirm with `ffmpeg -version`.
+3. If it is installed somewhere the gateway's `PATH` does not reach, set `voice.transcode.ffmpegPath` to the absolute path in `~/.ethos/config.yaml`.
+4. Restart the gateway. The notice disappears.
+
+Prevent · Add `ffmpeg` to the host's provisioning. The shipped Docker image does not include it — see [Run Ethos in Docker](using/how-to/run-in-docker.md#prerequisites).
+
+### Text reply arrives but the voice note does not {#voice-note-missing}
+
+Cause · The reply was skipped, not lost, and the gateway recorded why. The four usual reasons: the platform was silenced with `voice.channels.<platform>.ttsOut: false`; the adapter declares no voice caps; the synthesized format is not one the adapter accepts and there is no `ffmpeg` to convert it; or the audio exceeded the platform's `maxBytes`.
+
+Fix ·
+1. Check `voice.channels.<platform>.ttsOut` — an explicit `false` outranks `/voice all`.
+2. Check the channel supports voice out at all in the [capability matrix](platforms/capability-matrix.md#voice-caps).
+3. Install `ffmpeg` (above).
+4. Check the conversation's mode with `/voice`.
+
+Prevent · Run `ethos doctor` after changing voice providers; it reports which STT and TTS actually resolved.
+
+### A voice note arrives twice, or long after the fact {#voice-note-redelivered}
+
+Cause · Voice delivery is at-least-once. A synthesized reply whose send was never confirmed stays as a `pending` obligation in the delivery ledger and is re-sent at the next gateway start, bypassing the dedup cache on purpose.
+
+Fix · Nothing, if it arrived. If pending obligations are accumulating, the underlying sends are failing — check the gateway log and the delivery readout in **Settings → Voice**.
+
+Prevent · Bound the backlog with [`voice.artifacts.abandonAfterDays`](using/reference/config-yaml.md#voice-artifacts) and `voice.artifacts.maxTotalMb`. See [Why does a redelivered voice note re-send the recording?](building/explanation/why-voice-replies-redeliver.md).
+
+### A voice memo is answered as if it were empty {#voice-in-empty}
+
+Cause · The turn ran but carried no transcript, so it degraded to `(voice message)` rather than being dropped. Either no speech-to-text provider resolved, or the provider returned nothing usable, or the upload was never classified as audio in the first place.
+
+Fix ·
+1. Run `ethos doctor` and read its Voice section — it names the STT provider that actually resolved.
+2. Check the recording's container. A `.webm` upload is treated as video on Slack and Discord and never reaches transcription; re-record as `.ogg`, `.m4a`, or `.mp3`.
+3. Install `ffmpeg` (above) so the audio is normalized into a container the provider accepts.
+
+Prevent · Check the [capability matrix](platforms/capability-matrix.md#matrix) before assuming symmetry — voice in and voice out are separate capabilities.
 
 ## Cron and jobs {#cron-and-jobs}
 

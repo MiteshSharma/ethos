@@ -3,12 +3,14 @@
 // implementation, tested there. What remains is the gateway's own glue between
 // audio attachments and the transcript text handed to the loop.
 
-import type { Attachment, SttAudio, SttProvider } from '@ethosagent/types';
-import { STT_CONTRACT_VERSION } from '@ethosagent/types';
+import type { Attachment, SttAudio, SttProvider, VoiceAudioFormat } from '@ethosagent/types';
+import { STT_CONTRACT_VERSION, voiceAudioMimeType } from '@ethosagent/types';
 import { describe, expect, it, vi } from 'vitest';
+import type { TranscodeRequest, Transcoder } from '../transcode';
 import {
   buildTranscriptText,
   hasAudioAttachments,
+  type TranscribeStageEvent,
   transcribeAudioAttachments,
 } from '../voice-pipeline';
 
@@ -27,6 +29,37 @@ describe('hasAudioAttachments', () => {
     expect(
       hasAudioAttachments([{ type: 'audio', ref: 'a', url: 'file://a', mimeType: 'audio/ogg' }]),
     ).toBe(true);
+  });
+
+  // The shapes the four adapters actually emit for a voice memo. WhatsApp and
+  // Discord used to hand over `type: 'file'` here, which is exactly why their
+  // voice memos never reached STT.
+  it('returns true for the voice-memo shape each adapter emits', () => {
+    const memos: Attachment[] = [
+      // Telegram `msg.voice`
+      { type: 'audio', ref: 'tg', url: 'file://tg.ogg', mimeType: 'audio/ogg' },
+      // Slack audio upload
+      { type: 'audio', ref: 'sl', url: 'file://sl.m4a', mimeType: 'audio/mp4', filename: 'a.m4a' },
+      // Discord voice message
+      {
+        type: 'audio',
+        ref: 'dc',
+        url: 'file://dc.ogg',
+        mimeType: 'audio/ogg',
+        filename: 'voice-message.ogg',
+      },
+      // WhatsApp push-to-talk
+      {
+        type: 'audio',
+        ref: 'wa',
+        url: 'file://wa.ogg',
+        mimeType: 'audio/ogg; codecs=opus',
+        filename: 'audio.ogg',
+      },
+    ];
+    for (const memo of memos) {
+      expect(hasAudioAttachments([memo])).toBe(true);
+    }
   });
 });
 
@@ -135,5 +168,202 @@ describe('transcribeAudioAttachments', () => {
       Uint8Array.from([1]),
     );
     expect(results).toEqual([{ transcript: null, attachmentIndex: 0 }]);
+  });
+
+  it('sends the raw platform bytes when no transcoder is wired', async () => {
+    // A host without ffmpeg keeps the pre-normalization behaviour exactly.
+    const { stt, seen } = provider('unchanged');
+    await transcribeAudioAttachments([audioAttachment], stt, async () => Uint8Array.from([9]));
+    expect(Array.from(seen[0]?.data ?? [])).toEqual([9]);
+    expect(seen[0]?.mimeType).toBe('audio/ogg');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Inbound normalization (voice V2)
+//
+// Handing raw webm / SILK / AMR to a strict STT backend is one of the top
+// competitor failures, so every utterance is converted to a format the provider
+// declared it eats — and when that still fails, retried once as wav. The retry
+// fires on ANY failure, not just a 400: a 5xx behind a proxy and a silently
+// empty response are the same bug wearing a different status code.
+// ---------------------------------------------------------------------------
+
+describe('transcribeAudioAttachments — normalization and retry', () => {
+  const audioAttachment: Attachment = {
+    type: 'audio',
+    ref: 'a',
+    url: 'file:///cache/a.webm',
+    mimeType: 'audio/webm',
+  };
+
+  /** Records every request; converts by relabelling, which is all we assert on. */
+  function fakeTranscoder(opts: { failOn?: VoiceAudioFormat[] } = {}): {
+    transcoder: Transcoder;
+    requests: TranscodeRequest[];
+  } {
+    const requests: TranscodeRequest[] = [];
+    const failOn = new Set(opts.failOn ?? []);
+    return {
+      requests,
+      transcoder: {
+        available: async () => true,
+        transcode: async (req) => {
+          requests.push(req);
+          const target = req.targets[0];
+          if (target === undefined || failOn.has(target)) {
+            return { ok: false, code: 'failed', error: `cannot produce ${target}` };
+          }
+          return {
+            ok: true,
+            data: Uint8Array.from([...req.data, 0xff]),
+            format: target,
+            mimeType: voiceAudioMimeType(target),
+            transcoded: true,
+          };
+        },
+      },
+    };
+  }
+
+  function provider(
+    script: Array<string | Error>,
+    formats: Array<'opus' | 'mp3' | 'wav' | 'pcm'> = ['wav'],
+  ): { stt: SttProvider; seen: SttAudio[] } {
+    const seen: SttAudio[] = [];
+    let call = 0;
+    return {
+      seen,
+      stt: {
+        name: 'test-stt',
+        caps: { kind: 'stt', formats, contractVersion: STT_CONTRACT_VERSION },
+        transcribeBuffer: async (audio) => {
+          seen.push(audio);
+          const next = script[call++] ?? '';
+          if (next instanceof Error) throw next;
+          return next;
+        },
+      },
+    };
+  }
+
+  it('normalizes to wav when the provider accepts it', async () => {
+    const { stt, seen } = provider(['spoken']);
+    const { transcoder, requests } = fakeTranscoder();
+
+    const results = await transcribeAudioAttachments(
+      [audioAttachment],
+      stt,
+      async () => Uint8Array.from([1, 2]),
+      { transcoder },
+    );
+
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.targets).toEqual(['wav']);
+    expect(requests[0]?.sourceMimeType).toBe('audio/webm');
+    // The provider saw the CONVERTED bytes, not the platform's raw container.
+    expect(Array.from(seen[0]?.data ?? [])).toEqual([1, 2, 0xff]);
+    expect(seen[0]?.mimeType).toBe('audio/wav');
+    expect(results).toEqual([{ transcript: 'spoken', attachmentIndex: 0 }]);
+  });
+
+  it("normalizes to the provider's own first format when it does not take wav", async () => {
+    const { stt } = provider(['spoken'], ['opus', 'mp3']);
+    const { transcoder, requests } = fakeTranscoder();
+
+    await transcribeAudioAttachments([audioAttachment], stt, async () => Uint8Array.from([1]), {
+      transcoder,
+    });
+
+    expect(requests[0]?.targets).toEqual(['opus']);
+  });
+
+  it('retries once as wav when the provider throws, then succeeds', async () => {
+    const { stt, seen } = provider(
+      [new Error('415 unsupported media type'), 'second time lucky'],
+      ['opus'],
+    );
+    const { transcoder, requests } = fakeTranscoder();
+
+    const results = await transcribeAudioAttachments(
+      [audioAttachment],
+      stt,
+      async () => Uint8Array.from([1]),
+      { transcoder },
+    );
+
+    expect(requests.map((r) => r.targets)).toEqual([['opus'], ['wav']]);
+    // Re-encoded from the ORIGINAL bytes, not from the failed opus conversion:
+    // a second lossy hop off a bad conversion is a worse input than the source.
+    expect(Array.from(seen[1]?.data ?? [])).toEqual([1, 0xff]);
+    expect(results).toEqual([{ transcript: 'second time lucky', attachmentIndex: 0 }]);
+  });
+
+  it('retries on an EMPTY transcript, not only on a throw', async () => {
+    const { stt } = provider(['', 'actually said this'], ['opus']);
+    const { transcoder, requests } = fakeTranscoder();
+
+    const results = await transcribeAudioAttachments(
+      [audioAttachment],
+      stt,
+      async () => Uint8Array.from([1]),
+      { transcoder },
+    );
+
+    expect(requests).toHaveLength(2);
+    expect(results).toEqual([{ transcript: 'actually said this', attachmentIndex: 0 }]);
+  });
+
+  it('does not retry when wav was already what was sent', async () => {
+    const { stt } = provider([new Error('stt is down')]);
+    const { transcoder, requests } = fakeTranscoder();
+
+    const results = await transcribeAudioAttachments(
+      [audioAttachment],
+      stt,
+      async () => Uint8Array.from([1]),
+      { transcoder },
+    );
+
+    expect(requests.map((r) => r.targets)).toEqual([['wav']]);
+    expect(results).toEqual([{ transcript: null, attachmentIndex: 0 }]);
+  });
+
+  it('degrades to the original bytes when the transcode itself fails', async () => {
+    // ffmpeg missing or unable to produce the target must not lose the turn —
+    // the provider still gets the platform's bytes, which is today's behaviour.
+    const { stt, seen } = provider(['spoken']);
+    const { transcoder } = fakeTranscoder({ failOn: ['wav'] });
+
+    const results = await transcribeAudioAttachments(
+      [audioAttachment],
+      stt,
+      async () => Uint8Array.from([4, 5]),
+      { transcoder },
+    );
+
+    expect(Array.from(seen[0]?.data ?? [])).toEqual([4, 5]);
+    expect(results).toEqual([{ transcript: 'spoken', attachmentIndex: 0 }]);
+  });
+
+  it('degrades to a null transcript when both attempts fail, and reports each stage', async () => {
+    const stages: TranscribeStageEvent[] = [];
+    const { stt } = provider([new Error('first'), new Error('second')], ['opus']);
+    const { transcoder } = fakeTranscoder();
+
+    const results = await transcribeAudioAttachments(
+      [audioAttachment],
+      stt,
+      async () => Uint8Array.from([1]),
+      { transcoder, onStage: (e) => void stages.push(e) },
+    );
+
+    expect(results).toEqual([{ transcript: null, attachmentIndex: 0 }]);
+    expect(stages).toEqual([
+      { stage: 'normalize', ok: true },
+      { stage: 'transcribe', ok: false, error: 'first' },
+      { stage: 'normalize', ok: true },
+      { stage: 'transcribe', ok: false, error: 'second' },
+    ]);
   });
 });

@@ -14,7 +14,9 @@
     "build": "tsup src/index.ts --format esm --dts"
   },
   "dependencies": {
+    "@ethosagent/core": "workspace:*",
     "@ethosagent/platform-voice": "workspace:*",
-    "@ethosagent/types": "workspace:*"
+    "@ethosagent/types": "workspace:*",
+    "@ethosagent/voice-text": "workspace:*"
   }
 }
