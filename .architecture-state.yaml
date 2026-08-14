@@ -266,6 +266,8 @@ register_anchors:
     - { path: extensions/observability-sqlite/src/store.ts, line: 156, contains: "redactJson(span.attrs, extraRedactPatterns)" }
     - { path: extensions/observability-sqlite/src/store.ts, line: 193, contains: "redactJson(attrs, extraRedactPatterns)" }
     - { path: extensions/observability-sqlite/src/store.ts, line: 234, contains: "redactJson(event.details, extraRedactPatterns)" }
+    - { path: extensions/platform-slack/src/blocks/approval.ts, line: 118, contains: "function formatArgs" }
+    - { path: extensions/platform-discord/src/blocks/approval.ts, line: 77, contains: "function formatArgs" }
 
   G-APP:
     - { path: packages/wiring/src/danger-predicate.ts, line: 274, contains: "mode === 'smart' && opts.smartApprove" }

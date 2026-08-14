@@ -27,6 +27,7 @@
   "dependencies": {
     "@ethosagent/core": "workspace:*",
     "@ethosagent/logger": "workspace:*",
+    "@ethosagent/safety-redact": "workspace:*",
     "@ethosagent/types": "workspace:*",
     "@slack/bolt": "^3.21.0",
     "zod": "^4.3.6"

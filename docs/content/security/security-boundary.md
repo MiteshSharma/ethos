@@ -4,7 +4,7 @@ description: The three security tiers, the twelve published guarantees with thei
 kind: explanation
 audience: shared
 slug: security-boundary
-updated: 2026-08-12
+updated: 2026-08-13
 ---
 
 You are about to deploy an agent that reads your filesystem, makes network calls, runs commands, and speaks on channels your users can see. Before you do, you need one thing this page exists to give you: a list of what the framework promises to be correct about, so you know what is left for you to add.
@@ -129,10 +129,10 @@ Twelve guarantees. Each carries five fields, and all five are required: a **clai
 
 ### G-RED — Credential redaction {#g-red}
 
-- **Claim.** Values matching the known credential pattern set are replaced before they reach `observability.db`.
-- **Enforced at.** [`redact/index.ts:39`](https://github.com/ethosagent/ethos/blob/main/packages/safety/redact/src/index.ts#L39) (`detectSecrets`), [`:51`](https://github.com/ethosagent/ethos/blob/main/packages/safety/redact/src/index.ts#L51) (`redactString`), [`:68`](https://github.com/ethosagent/ethos/blob/main/packages/safety/redact/src/index.ts#L68) (`redactJson`), applied on the write path at [`store.ts:114`](https://github.com/ethosagent/ethos/blob/main/extensions/observability-sqlite/src/store.ts#L114), [`:156`](https://github.com/ethosagent/ethos/blob/main/extensions/observability-sqlite/src/store.ts#L156), [`:193`](https://github.com/ethosagent/ethos/blob/main/extensions/observability-sqlite/src/store.ts#L193), and [`:234`](https://github.com/ethosagent/ethos/blob/main/extensions/observability-sqlite/src/store.ts#L234).
-- **Explicitly not covered.** Say it plainly: **this is a leak-reducer, not a containment boundary.** A credential in a format the pattern set does not know is not redacted. The set covers Anthropic and OpenAI key shapes, generic bearer tokens, and AWS access keys; your internal token format is not in it unless you add it.
-- **Verify it yourself.** `packages/safety/redact/src/__tests__/`; or write a known key shape into a tool error and read the row back out of `observability.db`.
+- **Claim.** Values matching the known credential pattern set are replaced before they reach `observability.db`, and before the Slack and Discord **approval cards** render tool args into a channel.
+- **Enforced at.** [`redact/index.ts:39`](https://github.com/ethosagent/ethos/blob/main/packages/safety/redact/src/index.ts#L39) (`detectSecrets`), [`:51`](https://github.com/ethosagent/ethos/blob/main/packages/safety/redact/src/index.ts#L51) (`redactString`), [`:68`](https://github.com/ethosagent/ethos/blob/main/packages/safety/redact/src/index.ts#L68) (`redactJson`), applied on the write path at [`store.ts:114`](https://github.com/ethosagent/ethos/blob/main/extensions/observability-sqlite/src/store.ts#L114), [`:156`](https://github.com/ethosagent/ethos/blob/main/extensions/observability-sqlite/src/store.ts#L156), [`:193`](https://github.com/ethosagent/ethos/blob/main/extensions/observability-sqlite/src/store.ts#L193), and [`:234`](https://github.com/ethosagent/ethos/blob/main/extensions/observability-sqlite/src/store.ts#L234); and on the approval surface at [`platform-slack/blocks/approval.ts:118`](https://github.com/ethosagent/ethos/blob/main/extensions/platform-slack/src/blocks/approval.ts#L118) and [`platform-discord/blocks/approval.ts:77`](https://github.com/ethosagent/ethos/blob/main/extensions/platform-discord/src/blocks/approval.ts#L77) (`formatArgs` in each).
+- **Explicitly not covered.** Say it plainly: **this is a leak-reducer, not a containment boundary.** A credential in a format the pattern set does not know is not redacted. The set covers Anthropic and OpenAI key shapes, generic bearer tokens, and AWS access keys; your internal token format is not in it unless you add it. And the channel coverage is the **approval card's tool args only** — not the model's own message text, tool results, or error strings, which reach a channel unredacted. An adapter surface is covered when it is named above and not otherwise.
+- **Verify it yourself.** `packages/safety/redact/src/__tests__/`; or write a known key shape into a tool error and read the row back out of `observability.db`. For the approval surface, `extensions/platform-slack/src/__tests__/approval.test.ts` and `extensions/platform-discord/src/__tests__/approval.test.ts`.
 - **If you need more.** Add your own patterns through the extra-patterns seam the store already threads, and treat `observability.db` as credential-adjacent storage regardless.
 
 ### G-APP — Approval gating {#g-app}

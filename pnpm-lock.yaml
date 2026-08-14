@@ -1351,6 +1351,9 @@ importers:
       '@ethosagent/core':
         specifier: workspace:*
         version: link:../../packages/core
+      '@ethosagent/safety-redact':
+        specifier: workspace:*
+        version: link:../../packages/safety/redact
       '@ethosagent/types':
         specifier: workspace:*
         version: link:../../packages/types
@@ -1394,6 +1397,9 @@ importers:
       '@ethosagent/logger':
         specifier: workspace:*
         version: link:../../packages/logger
+      '@ethosagent/safety-redact':
+        specifier: workspace:*
+        version: link:../../packages/safety/redact
       '@ethosagent/types':
         specifier: workspace:*
         version: link:../../packages/types

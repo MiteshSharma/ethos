@@ -76,4 +76,79 @@ describe('blocks/approval', () => {
     // The triple backticks in args should not close the code fence
     expect(embed.description).not.toContain('```malicious```');
   });
+
+  it('redacts credential-shaped values inside object args', () => {
+    // CHS-003. The embed renders args in full into a guild channel every
+    // member can read. Every shape below is in `@ethosagent/safety-redact`'s
+    // pattern set (github-pat, aws-key, slack-token, generic-secret).
+    const embed = approvalPendingEmbed({
+      approvalId: 'abc123',
+      toolName: 'terminal',
+      reason: 'network call with credentials',
+      args: {
+        githubToken: 'ghp_0123456789abcdefghijABCDEFGHIJ012345',
+        awsKey: 'AKIA0123456789ABCDEF',
+        slackToken: 'xoxb-1234567890-1234567890-abcdefghijklmnopqrstuvwx',
+        command: 'psql --dsn password=abcdefghijklmnopqrstuvwxyz',
+      },
+    });
+    const desc = embed.description ?? '';
+    expect(desc).not.toContain('ghp_0123456789abcdefghijABCDEFGHIJ012345');
+    expect(desc).not.toContain('AKIA0123456789ABCDEF');
+    expect(desc).not.toContain('xoxb-1234567890-1234567890-abcdefghijklmnopqrstuvwx');
+    expect(desc).not.toContain('password=abcdefghijklmnopqrstuvwxyz');
+    expect(desc).toContain('[REDACTED:github-pat]');
+    expect(desc).toContain('[REDACTED:aws-key]');
+    expect(desc).toContain('[REDACTED:slack-token]');
+    expect(desc).toContain('[REDACTED:generic-secret]');
+    // The surrounding args still render — redaction replaces the value, not
+    // the key or the rest of the command.
+    expect(desc).toContain('githubToken');
+    expect(desc).toContain('psql --dsn');
+  });
+
+  it('redacts a credential when args are a bare string', () => {
+    const embed = approvalPendingEmbed({
+      approvalId: 'abc123',
+      toolName: 'web_fetch',
+      reason: null,
+      args: 'curl -H "Authorization: ghp_0123456789abcdefghijABCDEFGHIJ012345" https://x.test',
+    });
+    const desc = embed.description ?? '';
+    expect(desc).not.toContain('ghp_0123456789abcdefghijABCDEFGHIJ012345');
+    expect(desc).toContain('[REDACTED:github-pat]');
+    expect(desc).toContain('https://x.test');
+  });
+
+  it('redacts and still neutralizes a code fence in the same args', () => {
+    // The two defenses are independent and must compose: redaction must not
+    // reintroduce a fence, and fence-breaking must not un-redact anything.
+    const embed = approvalPendingEmbed({
+      approvalId: 'abc123',
+      toolName: 'terminal',
+      reason: null,
+      args: '```export KEY=ghp_0123456789abcdefghijABCDEFGHIJ012345```',
+    });
+    const desc = embed.description ?? '';
+    expect(desc).not.toContain('```export');
+    expect(desc).not.toContain('ghp_0123456789abcdefghijABCDEFGHIJ012345');
+    expect(desc).toContain('[REDACTED:github-pat]');
+  });
+
+  it('leaves benign args untouched — redaction must not gut the card', () => {
+    // The card exists so a human can read what they are approving. An
+    // over-broad redactor would make it useless.
+    const embed = approvalPendingEmbed({
+      approvalId: 'abc123',
+      toolName: 'terminal',
+      reason: 'writes to disk',
+      args: { command: 'ls -la /tmp/reports', cwd: '/home/agent', retries: 3, dryRun: false },
+    });
+    const desc = embed.description ?? '';
+    expect(desc).toContain('ls -la /tmp/reports');
+    expect(desc).toContain('/home/agent');
+    expect(desc).toContain('3');
+    expect(desc).toContain('false');
+    expect(desc).not.toContain('REDACTED');
+  });
 });
