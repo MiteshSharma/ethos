@@ -190,4 +190,11 @@ export { applyTemporalDecay, parseTemporalBound, toJournalKey } from './temporal
 export { DefaultToolResultReducerRegistry } from './tool-reducer-registry';
 export { DefaultToolRegistry } from './tool-registry';
 export { SsrfError, type ValidateUrlOptions, validateUrl } from './url-validator';
+// Voice V2 Lane 6a — the durable per-lane `/voice` mode, shared by the gateway
+// and web-api so a mode set on one surface is the same fact on the other.
+export {
+  LaneVoiceModeStore,
+  type LaneVoiceModeStoreOptions,
+  laneVoiceModePath,
+} from './voice/lane-voice-mode';
 export { buildVoiceOriginAnnotation, VOICE_ORIGIN_TAG } from './voice-origin';

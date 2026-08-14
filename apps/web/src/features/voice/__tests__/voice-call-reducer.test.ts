@@ -312,7 +312,15 @@ describe('voiceTranscriptToMessages', () => {
       { id: 'voice-0', role: 'user', text: 'hi' },
       { id: 'voice-1', role: 'agent', text: 'hello', open: false },
     ]);
-    expect(messages[0]).toEqual({ id: 'voice-0', role: 'user', content: 'hi', timestamp: 0 });
+    // A realtime transcript line was SPOKEN — there is no other way into one —
+    // so the bubble carries the voice marker beside the words it transcribed.
+    expect(messages[0]).toEqual({
+      id: 'voice-0',
+      role: 'user',
+      content: 'hi',
+      timestamp: 0,
+      origin: 'voice',
+    });
     expect(messages[1]).toEqual({
       id: 'voice-1',
       role: 'assistant',
@@ -370,6 +378,7 @@ describe('chatMessagesWithVoice — DR5 persistent transcript', () => {
       role: 'user',
       content: 'what did we decide?',
       timestamp: 0,
+      origin: 'voice',
     });
     expect(messages[2]?.role === 'assistant' && messages[2].blocks).toEqual([
       { kind: 'text', content: 'Friday.' },

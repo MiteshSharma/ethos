@@ -32,7 +32,7 @@ import { InMemorySessionStore } from '../defaults/in-memory-session';
 import { DefaultPersonalityRegistry } from '../defaults/noop-personality';
 import { DefaultHookRegistry } from '../hook-registry';
 import { DefaultToolRegistry } from '../tool-registry';
-import { VOICE_ORIGIN_TAG } from '../voice-origin';
+import { buildVoiceOriginAnnotation, VOICE_ORIGIN_TAG } from '../voice-origin';
 import { createTestSafety } from './helpers/test-safety';
 
 interface Captured {
@@ -215,6 +215,43 @@ describe('voice-origin annotation', () => {
     const user = stored.find((m) => m.role === 'user');
     expect(user?.content).toContain(`<${VOICE_ORIGIN_TAG}`);
   });
+});
+
+// The annotation is baked into the stored user message, so the web chat has to
+// take it back OUT before rendering the bubble (`parseUserContent` in
+// `apps/web/src/lib/chat-reducer.ts`). That consumer matches on a fixed shape:
+// the self-closing tag alone on the first line, then exactly ONE instruction
+// line with no internal newline. These tests are the producer's half of that
+// agreement — if the annotation grows a second line, the web strips half of it
+// and the rest leaks into the bubble.
+describe('voice-origin annotation — shape the web consumer strips', () => {
+  // Mirrors the block matcher in `apps/web/src/lib/chat-reducer.ts`. Duplicated
+  // on purpose: core cannot import the web, and the point is to fail HERE when
+  // the producer moves.
+  const CONSUMER_BLOCK = new RegExp(
+    `(^|\\n\\n)<${VOICE_ORIGIN_TAG}(?:\\s[^\\n>]*)?/>\\n[^\\n]*(\\n\\n|$)`,
+  );
+
+  const VARIANTS: Array<[string, VoiceTurnOrigin]> = [
+    ['minimal', { transport: 'browser-talk-mode', speaker: 'owner' }],
+    ['with stt + language', { ...SPOKEN, language: 'en-US' }],
+    ['far end', { transport: 'sip-inbound', speaker: 'far_end' }],
+  ];
+
+  for (const [label, origin] of VARIANTS) {
+    it(`is a tag line plus one instruction line (${label})`, () => {
+      const lines = buildVoiceOriginAnnotation(origin).split('\n');
+      expect(lines).toHaveLength(2);
+      expect(lines[0]).toMatch(new RegExp(`^<${VOICE_ORIGIN_TAG}(?: [^\\n>]*)?/>$`));
+      expect(lines[1]).not.toBe('');
+    });
+
+    it(`is stripped whole by the web's matcher (${label})`, () => {
+      const stored = `${buildVoiceOriginAnnotation(origin)}\n\nwhat is on my calendar`;
+      expect(CONSUMER_BLOCK.test(stored)).toBe(true);
+      expect(stored.replace(CONSUMER_BLOCK, '')).toBe('what is on my calendar');
+    });
+  }
 });
 
 describe('voice-origin annotation — static prefix stability', () => {

@@ -5,5 +5,4 @@ export const personalityKeys = {
   characterSheet: (id: string) => [...personalityKeys.all(), 'characterSheet', id] as const,
   skills: (personalityId: string) => [...personalityKeys.all(), 'skills', personalityId] as const,
   renderers: (id: string) => [...personalityKeys.all(), 'renderers', id] as const,
-  palette: () => ['palette', 'personalities'] as const,
 };

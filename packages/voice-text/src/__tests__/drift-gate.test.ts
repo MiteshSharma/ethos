@@ -25,8 +25,18 @@ const OWNER = 'packages/voice-text/';
 
 const SKIP_DIRS = new Set(['node_modules', 'dist', 'build', '.vite', 'coverage']);
 
+// The ONLY dependency this package may take, and it is exhaustive: contracts
+// are the floor every layer stands on (ARCHITECTURE.md §II), so importing them
+// costs no portability and creates no coupling to an implementation. `VoiceMode`
+// moved down there when `LaneVoiceModeStore` (packages/core) had to persist the
+// mode — core depends on contracts only, so the shared value type could not stay
+// here. Widening this map to anything that is not the contracts package
+// re-opens the drift this gate exists to prevent.
+const ALLOWED_DEPS = { '@ethosagent/types': 'workspace:*' };
+
 /** Names that must have exactly one definition, in `packages/voice-text/`. */
 const OWNED_NAMES = [
+  'detectLanguage',
   'isHallucination',
   'splitSentences',
   'sanitizeForSpeech',
@@ -98,21 +108,21 @@ describe('voice-text drift gate', () => {
     ).toEqual([]);
   });
 
-  it('stays zero-dependency', () => {
+  it('depends on nothing but contracts', () => {
     const pkg = JSON.parse(
       readFileSync(join(ROOT, 'packages/voice-text/package.json'), 'utf-8'),
     ) as Record<string, unknown>;
-    expect(pkg.dependencies).toBeUndefined();
+    expect(pkg.dependencies).toEqual(ALLOWED_DEPS);
     expect(pkg.peerDependencies).toBeUndefined();
   });
 
-  it('imports nothing outside itself', () => {
+  it('imports nothing outside itself but contracts', () => {
     const imports = new Set<string>();
     for (const file of walkSources(join(ROOT, 'packages/voice-text/src'))) {
       if (file.includes('__tests__')) continue;
       for (const match of readFileSync(file, 'utf-8').matchAll(/from\s+['"]([^'"]+)['"]/g)) {
         const spec = match[1] ?? '';
-        if (!spec.startsWith('.')) imports.add(spec);
+        if (!spec.startsWith('.') && !(spec in ALLOWED_DEPS)) imports.add(spec);
       }
     }
     expect([...imports]).toEqual([]);

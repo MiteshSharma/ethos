@@ -608,11 +608,12 @@ export interface CreatePersonalityInput {
   dreaming?: import('@ethosagent/types').DreamingConfig;
   evolution_approval_mode?: 'auto' | 'user';
   nightly?: import('@ethosagent/types').PersonalityConfig['nightly'];
-  /** How this personality sounds and listens. `tts_provider` / `stt_provider` /
-   *  `realtime_provider` name entries in the deployment's `voice.tts.providers.*` /
-   *  `voice.stt.providers.*` / `voice.realtime.providers.*` rosters; `tts_voice`
-   *  is the TTS provider's voice id. Empty strings are dropped, so an editor can
-   *  send blanks for "unset". */
+  /** How this personality sounds, listens, and looks on a call. `tts_provider` /
+   *  `stt_provider` / `realtime_provider` name entries in the deployment's
+   *  `voice.tts.providers.*` / `voice.stt.providers.*` /
+   *  `voice.realtime.providers.*` rosters; `tts_voice` is the TTS provider's
+   *  voice id; `call_style` is the Call Stage treatment. Empty strings are
+   *  dropped, so an editor can send blanks for "unset". */
   voice?: EditableVoiceConfig;
 }
 
@@ -628,9 +629,13 @@ export interface EditableVoiceConfig {
   stt_provider?: string;
   realtime_provider?: string;
   tts_voice?: string;
+  /** How the Call Stage draws this personality. `''` clears it. */
+  call_style?: import('@ethosagent/types').CallTreatment | '';
 }
 
-/** The editable sub-keys, in one place — the merge walks exactly this list. */
+/** The editable STRING sub-keys, in one place — the merge walks exactly this
+ *  list. `call_style` is merged separately: it is an enum, and a loop that
+ *  assigns across a union of value types does not typecheck. */
 const EDITABLE_VOICE_KEYS = [
   'tts_provider',
   'stt_provider',
@@ -698,6 +703,10 @@ function mergeVoiceConfig(
     if (value === undefined) continue;
     if (value === '') delete next[key];
     else next[key] = value;
+  }
+  if (patch.call_style !== undefined) {
+    if (patch.call_style === '') delete next.call_style;
+    else next.call_style = patch.call_style;
   }
   return Object.keys(next).length > 0 ? next : undefined;
 }
@@ -1763,6 +1772,7 @@ function buildMemoryConfig(
  *   voice.tts_voice: af_bella
  *   voice.tier: pipeline
  *   voice.model: claude-haiku-4-5
+ *   voice.call_style: rings
  *   voice.languages.es: ef_dora
  *
  * `voice.tts_provider` / `voice.stt_provider` / `voice.realtime_provider` name
@@ -1777,8 +1787,9 @@ function buildMemoryConfig(
  * key wins; the renderer only ever writes the new one, so a personality
  * re-saved from either spelling carries one key, not two.
  *
- * An unknown `voice.tier` is dropped rather than thrown on: a bad voice id
- * should not make a personality unloadable — it falls back to the global voice.
+ * An unknown `voice.tier` or `voice.call_style` is dropped rather than thrown
+ * on: a bad voice id should not make a personality unloadable — it falls back
+ * to the global voice, and to the operator/derived call treatment.
  */
 function buildVoiceConfig(
   cfg: Record<string, string>,
@@ -1789,6 +1800,7 @@ function buildVoiceConfig(
   const ttsVoice = cfg['voice.tts_voice'];
   const tier = cfg['voice.tier'];
   const model = cfg['voice.model'];
+  const callStyle = cfg['voice.call_style'];
   const languages: Record<string, string> = {};
   for (const [key, value] of Object.entries(cfg)) {
     if (!key.startsWith('voice.languages.')) continue;
@@ -1802,6 +1814,9 @@ function buildVoiceConfig(
     ...(ttsVoice ? { tts_voice: ttsVoice } : {}),
     ...(tier === 'pipeline' || tier === 'realtime' ? { tier } : {}),
     ...(model ? { model } : {}),
+    ...(callStyle === 'liquid' || callStyle === 'orb' || callStyle === 'rings'
+      ? { call_style: callStyle }
+      : {}),
     ...(Object.keys(languages).length > 0 ? { languages } : {}),
   };
   return Object.keys(out).length > 0 ? out : undefined;
@@ -2236,6 +2251,7 @@ function renderConfigYaml(input: RenderConfigInput): string {
     if (v.tts_voice !== undefined) lines.push(`voice.tts_voice: ${yamlScalar(v.tts_voice)}`);
     if (v.tier !== undefined) lines.push(`voice.tier: ${v.tier}`);
     if (v.model !== undefined) lines.push(`voice.model: ${yamlScalar(v.model)}`);
+    if (v.call_style !== undefined) lines.push(`voice.call_style: ${v.call_style}`);
     for (const [tag, id] of Object.entries(v.languages ?? {})) {
       lines.push(`voice.languages.${tag}: ${yamlScalar(id)}`);
     }

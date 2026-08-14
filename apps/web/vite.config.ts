@@ -25,6 +25,11 @@ export default defineConfig({
     alias: {
       '@ethosagent/web-contracts': resolve(root, 'packages/web-contracts/src'),
       '@ethosagent/ui-components': resolve(root, 'packages/ui-components/src'),
+      // Contracts. Mostly `import type` here, but the call-treatment
+      // derivation is a VALUE the Call Stage calls at render time, and the
+      // character sheet calls the same function server-side — one precedence
+      // rule, so the alias has to resolve for real, not just for tsc.
+      '@ethosagent/types': resolve(root, 'packages/types/src'),
       // The realtime tier's frame mapping, shared with the server-side
       // providers. Carries no transport, so nothing node-only rides along —
       // `packages/voice-realtime-protocol/src/__tests__/browser-safety.test.ts`

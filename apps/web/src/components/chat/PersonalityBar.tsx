@@ -2,21 +2,22 @@ import { personalityAccent } from '@ethosagent/design-tokens';
 import { Input } from 'antd';
 import { type ReactNode, useState } from 'react';
 import { PersonalityRingAvatar } from '../ui/PersonalityRingAvatar';
-import { PersonalitySwitcher } from './PersonalitySwitcher';
 
 // The chat tab's identity affordance — DESIGN.md memorable thing made
 // concrete. A 3-4px accent stripe at the top edge claims the surface
 // for the active personality; the mark + name + model below it tells
 // you who you're talking to without you having to read the page header.
+//
+// Identity here is READ-ONLY: a session belongs to the personality it
+// started with, so the bar shows who you are talking to and offers no way
+// to change it. Talking to someone else is a new session — the picker on
+// the `+` control.
 
 export interface PersonalityBarProps {
   personalityId: string;
   /** Display name. Falls back to the id if no friendly name is provided. */
   name?: string;
   model: string;
-  /** Called when the user picks a different personality from the
-   *  switcher. Caller decides whether to fork the session. */
-  onSwitchPersonality: (personalityId: string) => void;
   /** Called when the user wants to start a fresh session. Caller wipes
    *  reducer state, URL `?session=` param, and localStorage. */
   onNewSession: () => void;
@@ -33,7 +34,6 @@ export function PersonalityBar({
   personalityId,
   name,
   model,
-  onSwitchPersonality,
   onNewSession,
   sessionTitle,
   onRenameSession,
@@ -116,7 +116,6 @@ export function PersonalityBar({
           >
             <PlusIcon />
           </button>
-          <PersonalitySwitcher current={personalityId} onSelect={onSwitchPersonality} />
         </div>
       </div>
     </div>

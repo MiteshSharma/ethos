@@ -244,6 +244,42 @@ export interface TtsProviderRegistry {
 export type VoiceSpeaker = 'owner' | 'far_end';
 
 /**
+ * Every per-lane voice mode, in declaration order.
+ *
+ * The runtime list is the source and {@link VoiceMode} is derived from it, so
+ * a validator that parses a hand-edited document cannot drift from the union
+ * it validates against.
+ */
+export const VOICE_MODES = ['off', 'mirror_inbound', 'all'] as const;
+
+/**
+ * Per-lane voice mode. Persisted by the caller; `/voice <mode>` mutates it.
+ *
+ * A value type in contracts rather than in `@ethosagent/voice-text` because
+ * every layer names it: the decision function in voice-text, the durable
+ * store in core (`LaneVoiceModeStore`), the gateway lane commands, and the
+ * browser chat header. `@ethosagent/voice-text` re-exports it so its own
+ * importers are unaffected.
+ */
+export type VoiceMode = (typeof VOICE_MODES)[number];
+
+/** Mode a lane starts in: speak back when spoken to, stay quiet otherwise. */
+export const DEFAULT_VOICE_MODE: VoiceMode = 'mirror_inbound';
+
+/**
+ * Marker tag name for the voice-origin annotation — the stable string that
+ * both the producer and every consumer match on.
+ *
+ * In contracts rather than in `@ethosagent/core` (which re-exports it, so
+ * core's public surface is unchanged) because the browser bundle cannot import
+ * core: the web chat has to strip this annotation back off a stored user
+ * message before rendering it, and a second spelling of the tag in `apps/web`
+ * is exactly the drift that would rot. Same move already made for
+ * {@link VoiceMode}, for the same reason.
+ */
+export const VOICE_ORIGIN_TAG = 'voice-origin';
+
+/**
  * "This turn arrived as speech."
  *
  * A MESSAGE-LEVEL fact, not a system-prompt fact (eng-review D16). One session

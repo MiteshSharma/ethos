@@ -51,4 +51,15 @@ export const voiceRouter = {
       ...(input.personalityId ? { personalityId: input.personalityId } : {}),
     });
   }),
+  // Lane mode is NOT gated on `context.voice`: the mode is a conversation
+  // setting the operator can hold whether or not a provider is configured
+  // today, and it is read by the gateway too.
+  laneMode: {
+    get: os.voice.laneMode.get.handler(({ input, context }) =>
+      context.voiceLaneMode.get(input.sessionId),
+    ),
+    set: os.voice.laneMode.set.handler(({ input, context }) =>
+      context.voiceLaneMode.set(input.sessionId, input.mode),
+    ),
+  },
 };

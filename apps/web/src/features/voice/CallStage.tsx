@@ -1,5 +1,5 @@
 import type { ClarifyRequestEvent } from '@ethosagent/web-contracts';
-import { type CSSProperties, useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { ClarifyCard } from '../../components/chat/ClarifyCard';
 import { watchReducedMotion } from '../../lib/reduced-motion';
 import {
@@ -249,16 +249,10 @@ export function CallStage({
     .join(' · ');
 
   return (
-    <section
-      className="call-stage"
-      aria-label={`Call with ${personalityName}`}
-      // The stage carries the call's accent itself. The PersonalityBar — the
-      // other place identity showed — is deliberately not on screen in this
-      // mode, so the stage's own `var(--accent, …)` rules (the live turn label,
-      // the focus ring) resolve to the personality holding the floor rather
-      // than to the generic info blue.
-      style={{ '--accent': accent } as CSSProperties}
-    >
+    // `--accent` is NOT set here: the chat subtree defines it once, on the
+    // element `Chat` wraps this in, from the same value passed as `accent`.
+    // Two definitions of one variable is how they drift apart.
+    <section className="call-stage" aria-label={`Call with ${personalityName}`}>
       <div className="call-stage-main">
         <canvas
           ref={canvasRef}

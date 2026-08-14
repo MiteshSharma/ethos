@@ -1,3 +1,10 @@
+// The ONE runtime import from `@ethosagent/types` this contract takes: the
+// voice-mode list is a closed enum every layer names (the decision function in
+// voice-text, `LaneVoiceModeStore` in core, the gateway's `/voice` command, and
+// the chat header), and a second spelling here is exactly the drift the shared
+// constant exists to prevent. `@ethosagent/types` is zero-dep, so importing it
+// costs the published contract nothing.
+import { VOICE_MODES } from '@ethosagent/types';
 import { oc } from '@orpc/contract';
 import { z } from 'zod';
 import { SessionCardSchema } from './cards';
@@ -299,6 +306,10 @@ const PersonalityNightlyInput = z
  * is the TTS provider's voice id. `''` clears the key, so "Default" is
  * expressible.
  *
+ * `call_style` is how the personality LOOKS on a call — the visual sibling of
+ * `tts_voice`, and editable for the same reason. `''` clears it, which hands
+ * the choice back to `display.call_style` and then to the id derivation.
+ *
  * `tier`, `model` and `languages` are deliberately absent: they round-trip
  * through config.yaml but nothing consumes them yet, and a form field is a
  * promise that it works.
@@ -309,6 +320,7 @@ const PersonalityVoiceInput = z
     stt_provider: z.string().optional(),
     realtime_provider: z.string().optional(),
     tts_voice: z.string().optional(),
+    call_style: z.enum(['liquid', 'orb', 'rings', '']).optional(),
   })
   .optional();
 
@@ -997,8 +1009,9 @@ const ConfigGetOutput = z.object({
   adminEnabled: z.boolean(),
   /** Channel streaming draft edits (display.streaming_edits). */
   streamingEdits: z.enum(['off', 'dms', 'all']),
-  /** In-call overlay treatment (display.call_style). */
-  callStyle: z.enum(['liquid', 'orb', 'rings']),
+  /** Call Stage treatment (display.call_style). `personality` — the default —
+   *  lets each personality draw its own, declared or derived from its id. */
+  callStyle: z.enum(['liquid', 'orb', 'rings', 'personality']),
   /** In-call overlay color (display.call_accent): `personality` or `#RRGGBB`. */
   callAccent: z.string(),
   /** Auto-compact long sessions near the model window (compaction.autoCompact). */
@@ -1049,6 +1062,22 @@ const ConfigGetOutput = z.object({
   voiceTrustedPlugins: z.array(z.string()).nullable(),
   /** `voice.defaultMode` — where a new channel lane starts. */
   voiceDefaultMode: z.enum(['off', 'mirror_inbound', 'all']).nullable(),
+  /** `voice.channels.<platform>.ttsOut` — which channels speak their replies
+   *  without being asked, keyed by platform id. A platform ABSENT from the map
+   *  has no override and inherits `voiceDefaultMode`; an explicit `false` means
+   *  "never speak here" and outranks a lane's own mode. */
+  voiceChannelTtsOut: z.record(z.string(), z.boolean()),
+  /** `voice.transcode.ffmpegPath` — null = `ffmpeg` on PATH. */
+  voiceTranscodeFfmpegPath: z.string().nullable(),
+  /** `voice.transcode.bitrateKbps` — null = the built-in 32 kbps. */
+  voiceTranscodeBitrateKbps: z.number().nullable(),
+  /** `voice.transcode.timeout`, SECONDS (the unit ffmpeg's budget is set in);
+   *  null = the built-in 30s. */
+  voiceTranscodeTimeoutSec: z.number().nullable(),
+  /** `voice.artifacts.abandonAfterDays` — null = the built-in 7 days. */
+  voiceArtifactAbandonAfterDays: z.number().nullable(),
+  /** `voice.artifacts.maxTotalMb` — null = the built-in 512 MiB. */
+  voiceArtifactMaxTotalMb: z.number().nullable(),
   /** `voice.tts.providers.<name>.*` — the named TTS roster, keyed by the
    *  operator's label. `auxiliary.tts` (the `voiceTts*` fields above) stays the
    *  DEFAULT entry and is NOT repeated here. Empty object = no roster.
@@ -1277,7 +1306,7 @@ const ConfigUpdateInput = z.object({
   debugPanelModel: z.string().nullable().optional(),
   adminEnabled: z.boolean().optional(),
   streamingEdits: z.enum(['off', 'dms', 'all']).optional(),
-  callStyle: z.enum(['liquid', 'orb', 'rings']).optional(),
+  callStyle: z.enum(['liquid', 'orb', 'rings', 'personality']).optional(),
   /** `personality` or `#RRGGBB`; anything else resolves to `personality`. */
   callAccent: z.string().optional(),
   autoCompact: z.boolean().optional(),
@@ -1317,6 +1346,22 @@ const ConfigUpdateInput = z.object({
   voiceTrustedPlugins: z.array(z.string()).nullable().optional(),
   /** `voice.defaultMode`; null clears the key (back to `mirror_inbound`). */
   voiceDefaultMode: z.enum(['off', 'mirror_inbound', 'all']).nullable().optional(),
+  /** `voice.channels.<platform>.ttsOut`. Present = REPLACE the whole map (every
+   *  `voice.channels.` key is dropped, then these are written), so an omitted
+   *  platform loses its override. Keys are validated against the platform ids
+   *  `@ethosagent/config` accepts; an unknown one is REFUSED here rather than
+   *  dropped, because at an RPC boundary there is a caller to tell. */
+  voiceChannelTtsOut: z.record(z.string(), z.boolean()).optional(),
+  /** `voice.transcode.ffmpegPath`; null clears the key. */
+  voiceTranscodeFfmpegPath: z.string().nullable().optional(),
+  /** `voice.transcode.bitrateKbps`, 8–320; null clears the key. */
+  voiceTranscodeBitrateKbps: z.number().int().min(8).max(320).nullable().optional(),
+  /** `voice.transcode.timeout`, SECONDS, 1–600; null clears the key. */
+  voiceTranscodeTimeoutSec: z.number().int().min(1).max(600).nullable().optional(),
+  /** `voice.artifacts.abandonAfterDays`, 1–365; null clears the key. */
+  voiceArtifactAbandonAfterDays: z.number().int().min(1).max(365).nullable().optional(),
+  /** `voice.artifacts.maxTotalMb`, 1–102400; null clears the key. */
+  voiceArtifactMaxTotalMb: z.number().int().min(1).max(102_400).nullable().optional(),
   /** `voice.tts.providers.*` — the named TTS roster. Present = REPLACE the whole
    *  roster (every `voice.tts.providers.` key — and every legacy
    *  `voice.providers.` key — is dropped, then these are written), so an omitted
@@ -2920,6 +2965,28 @@ const VoiceRealtimeTokenOutput = z.discriminatedUnion('ok', [
   }),
 ]);
 
+/**
+ * Per-conversation voice mode for the browser chat header.
+ *
+ * The mode is durable (`LaneVoiceModeStore`) and SHARED with the gateway's
+ * channel lanes, so a mode set here is the same fact the gateway reads. The
+ * `default` on the read is the deployment's `voice.defaultMode`: a lane with no
+ * override is INHERITING, and the header says so rather than pretending the
+ * inherited value was chosen.
+ */
+const VoiceLaneModeGetInput = z.object({ sessionId: z.string().min(1) });
+const VoiceLaneModeGetOutput = z.object({
+  /** The lane's effective mode — its override, or `default` when it has none. */
+  mode: z.enum(VOICE_MODES),
+  /** `voice.defaultMode` — what an unset lane inherits. */
+  default: z.enum(VOICE_MODES),
+});
+const VoiceLaneModeSetInput = z.object({
+  sessionId: z.string().min(1),
+  mode: z.enum(VOICE_MODES),
+});
+const VoiceLaneModeSetOutput = z.object({ mode: z.enum(VOICE_MODES) });
+
 /** @experimental */
 const voice = {
   transcribe: oc.input(VoiceTranscribeInput).output(VoiceTranscribeOutput),
@@ -2933,6 +3000,75 @@ const voice = {
   realtimeEntries: oc.output(VoiceRealtimeEntriesOutput),
   /** Mint a browser-direct realtime credential, or say why not. */
   realtimeToken: oc.input(VoiceRealtimeTokenInput).output(VoiceRealtimeTokenOutput),
+  /** Read / write ONE conversation's durable voice mode. */
+  laneMode: {
+    get: oc.input(VoiceLaneModeGetInput).output(VoiceLaneModeGetOutput),
+    set: oc.input(VoiceLaneModeSetInput).output(VoiceLaneModeSetOutput),
+  },
+};
+
+// ---------------------------------------------------------------------------
+// Deliveries — read-only view of the durable delivery-obligation ledger
+//
+// The gateway writes a `pending` obligation before every covered outbound send
+// and flips it to `delivered` only on a confirmed platform ack. This namespace
+// is the operator's window onto that: how many replies are owed, how many were
+// abandoned, and — for a voice deployment — the same counts for voice notes,
+// whose payload is an artifact on disk.
+//
+// Read-only by construction: there is no RPC that records, claims, delivers or
+// prunes. Redelivery is the gateway's decision, made against its own botKeys;
+// a settings page must not be able to re-send someone's message.
+// ---------------------------------------------------------------------------
+
+const DeliveryStatusCountsSchema = z.object({
+  pending: z.number(),
+  redelivering: z.number(),
+  delivered: z.number(),
+  abandoned: z.number(),
+});
+
+const DeliveryStatsSchema = DeliveryStatusCountsSchema.extend({
+  /** The same counts restricted to `kind = 'voice'`, so a voice deployment can
+   *  see whether the loss it is looking at is specific to voice notes. */
+  voice: DeliveryStatusCountsSchema,
+});
+
+const DeliveryObligationSchema = z.object({
+  id: z.string(),
+  platform: z.string(),
+  chatId: z.string(),
+  /** Null for the root chat — a thread is a distinct conversation. */
+  threadId: z.string().nullable(),
+  status: z.enum(['pending', 'redelivering', 'delivered', 'abandoned']),
+  kind: z.enum(['text', 'voice']),
+  /**
+   * The reply text — for a voice obligation, the SPOKEN text — truncated to 200
+   * characters. Nothing here is redacted: the operator owns this text and it is
+   * their own agent's outbound reply. It is truncated because a settings page
+   * asking "what is still owed" must not become a way to read whole
+   * conversations out of the ledger, on screen or in a browser network log.
+   */
+  content: z.string(),
+  /** Container of the stored artifact for a voice obligation; null for text. */
+  mediaFormat: z.string().nullable(),
+  /** Epoch milliseconds. */
+  createdAt: z.number(),
+});
+
+const DeliveriesSummaryInput = z.object({
+  /** Rows to return, newest first. Clamped to 1–200 by the ledger. */
+  limit: z.number().int().min(1).max(200).optional(),
+});
+
+const DeliveriesSummaryOutput = z.object({
+  stats: DeliveryStatsSchema,
+  recent: z.array(DeliveryObligationSchema),
+});
+
+/** @experimental */
+const deliveries = {
+  summary: oc.input(DeliveriesSummaryInput).output(DeliveriesSummaryOutput),
 };
 
 // ---------------------------------------------------------------------------
@@ -3183,6 +3319,7 @@ export const contract = {
   tasks,
   digest,
   voice,
+  deliveries,
   a2a,
   namedSecrets,
   toolSettings,

@@ -470,7 +470,10 @@ export { markInterrupted };
 export function voiceTranscriptToMessages(transcript: VoiceTranscriptLine[]): ChatMessage[] {
   return transcript.map((l) => {
     if (l.role === 'user') {
-      return { id: l.id, role: 'user', content: l.text, timestamp: 0 };
+      // Every line here was SPOKEN — that is the only way into a realtime
+      // transcript — so the bubble carries the same voice marker the pipeline
+      // tier's turns get through `sendMessage`.
+      return { id: l.id, role: 'user', content: l.text, timestamp: 0, origin: 'voice' };
     }
     const content = l.interrupted ? markInterrupted(l.text) : l.text;
     return {

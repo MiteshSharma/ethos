@@ -761,7 +761,8 @@ function toWire(d: DescribedPersonality): Personality {
     ...(c.voice?.tts_provider !== undefined ||
     c.voice?.stt_provider !== undefined ||
     c.voice?.realtime_provider !== undefined ||
-    c.voice?.tts_voice !== undefined
+    c.voice?.tts_voice !== undefined ||
+    c.voice?.call_style !== undefined
       ? {
           voice: {
             ...(c.voice.tts_provider !== undefined ? { tts_provider: c.voice.tts_provider } : {}),
@@ -770,6 +771,7 @@ function toWire(d: DescribedPersonality): Personality {
               ? { realtime_provider: c.voice.realtime_provider }
               : {}),
             ...(c.voice.tts_voice !== undefined ? { tts_voice: c.voice.tts_voice } : {}),
+            ...(c.voice.call_style !== undefined ? { call_style: c.voice.call_style } : {}),
           },
         }
       : {}),

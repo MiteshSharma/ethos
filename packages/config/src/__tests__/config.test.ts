@@ -462,7 +462,12 @@ describe('parseConfigYaml — display.call_style / display.call_accent', () => {
     }
   });
 
-  it('leaves both undefined when absent (liquid + personality applied by the surface)', async () => {
+  it('parses `personality` — the default, and the only non-pinning value', async () => {
+    const cfg = await loadYaml([...base, 'display.call_style: personality'].join('\n'));
+    expect(cfg.displayCallStyle).toBe('personality');
+  });
+
+  it('leaves both undefined when absent (personality applied by the surface)', async () => {
     const cfg = await loadYaml(base.join('\n'));
     expect(cfg.displayCallStyle).toBeUndefined();
     expect(cfg.displayCallAccent).toBeUndefined();
@@ -508,5 +513,105 @@ describe('parseConfigYaml — display.call_style / display.call_accent', () => {
     const roundTripped = await readRawConfig(storage);
     expect(roundTripped?.displayCallStyle).toBe('orb');
     expect(roundTripped?.displayCallAccent).toBe('#E879F9');
+  });
+});
+
+describe('parseConfigYaml — voice.channels / voice.transcode / voice.artifacts', () => {
+  const base = [
+    'provider: anthropic',
+    'model: claude-opus-4-7',
+    'apiKey: sk',
+    'personality: researcher',
+  ];
+
+  it('parses each new key to its typed value', async () => {
+    const cfg = await loadYaml(
+      [
+        ...base,
+        'voice.channels.telegram.ttsOut: true',
+        'voice.channels.slack.ttsOut: false',
+        'voice.transcode.ffmpegPath: /opt/homebrew/bin/ffmpeg',
+        'voice.transcode.bitrateKbps: 48',
+        'voice.transcode.timeout: 45',
+        'voice.artifacts.abandonAfterDays: 14',
+        'voice.artifacts.maxTotalMb: 1024',
+      ].join('\n'),
+    );
+    expect(cfg.voice?.channels).toEqual({
+      telegram: { ttsOut: true },
+      slack: { ttsOut: false },
+    });
+    expect(cfg.voice?.transcode).toEqual({
+      ffmpegPath: '/opt/homebrew/bin/ffmpeg',
+      bitrateKbps: 48,
+      timeout: 45,
+    });
+    expect(cfg.voice?.artifacts).toEqual({ abandonAfterDays: 14, maxTotalMb: 1024 });
+  });
+
+  it('leaves voice undefined for a config with no voice keys at all', async () => {
+    const cfg = await loadYaml(base.join('\n'));
+    expect(cfg.voice).toBeUndefined();
+  });
+
+  it('ignores an unknown platform id', async () => {
+    const cfg = await loadYaml(
+      [...base, 'voice.channels.matrix.ttsOut: true', 'voice.channels.discord.ttsOut: true'].join(
+        '\n',
+      ),
+    );
+    expect(cfg.voice?.channels).toEqual({ discord: { ttsOut: true } });
+  });
+
+  it('ignores a non-boolean ttsOut, leaving the section absent rather than throwing', async () => {
+    const cfg = await loadYaml([...base, 'voice.channels.slack.ttsOut: yes'].join('\n'));
+    expect(cfg.voice).toBeUndefined();
+    expect(cfg.apiKey).toBe('sk');
+  });
+
+  it('ignores out-of-range and non-numeric values, and still loads the rest', async () => {
+    const cfg = await loadYaml(
+      [
+        ...base,
+        'voice.transcode.bitrateKbps: 4',
+        'voice.transcode.timeout: 601',
+        'voice.artifacts.abandonAfterDays: soon',
+        'voice.artifacts.maxTotalMb: 512',
+      ].join('\n'),
+    );
+    expect(cfg.voice?.transcode).toBeUndefined();
+    expect(cfg.voice?.artifacts).toEqual({ maxTotalMb: 512 });
+    expect(cfg.personality).toBe('researcher');
+  });
+
+  it('round-trips through writeConfig and back', async () => {
+    const storage = new InMemoryStorage();
+    await storage.mkdir(ethosDir());
+    const voice: NonNullable<EthosConfig['voice']> = {
+      bots: [],
+      channels: { telegram: { ttsOut: true }, whatsapp: { ttsOut: false } },
+      transcode: { ffmpegPath: '/usr/bin/ffmpeg', bitrateKbps: 32, timeout: 30 },
+      artifacts: { abandonAfterDays: 7, maxTotalMb: 512 },
+    };
+    const original: EthosConfig = {
+      provider: 'anthropic',
+      model: 'claude-opus-4-7',
+      apiKey: 'sk',
+      personality: 'researcher',
+      voice,
+    };
+    await writeConfig(storage, original, new InMemorySecretsResolver());
+
+    const raw = await storage.read(join(ethosDir(), 'config.yaml'));
+    expect(raw).toContain('voice.channels.telegram.ttsOut: true');
+    expect(raw).toContain('voice.channels.whatsapp.ttsOut: false');
+    expect(raw).toContain('voice.transcode.ffmpegPath: /usr/bin/ffmpeg');
+    expect(raw).toContain('voice.transcode.bitrateKbps: 32');
+    expect(raw).toContain('voice.transcode.timeout: 30');
+    expect(raw).toContain('voice.artifacts.abandonAfterDays: 7');
+    expect(raw).toContain('voice.artifacts.maxTotalMb: 512');
+
+    const roundTripped = await readRawConfig(storage);
+    expect(roundTripped?.voice).toEqual(voice);
   });
 });

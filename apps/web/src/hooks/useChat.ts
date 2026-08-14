@@ -203,6 +203,10 @@ export function useChat(opts: UseChatOptions): UseChatResult {
           text: trimmed,
           timestamp: Date.now(),
           ...(attachments?.length ? { attachments: attachments.map(toMessageAttachment) } : {}),
+          // The bubble carries the same "this arrived as speech" fact the
+          // server is told below — the transcript is shown BESIDE the marker,
+          // never instead of it.
+          ...(opts?.origin === 'voice' ? { origin: 'voice' as const } : {}),
         },
       });
 

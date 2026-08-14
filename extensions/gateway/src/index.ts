@@ -3,12 +3,13 @@ import type { AgentLoop } from '@ethosagent/core';
 import {
   buildLaneKey,
   deriveBotKey,
+  LaneVoiceModeStore,
   resolveSttProvider as resolveSharedStt,
   resolveTtsProvider as resolveSharedTts,
   resolveVoicePreferences,
   stripAnsiEscapes,
 } from '@ethosagent/core';
-import type { DeliveryLedger } from '@ethosagent/delivery-ledger';
+import type { DeliveryLedger, DeliveryObligation } from '@ethosagent/delivery-ledger';
 import type { ChannelFilterConfig } from '@ethosagent/safety-channel';
 import {
   checkMessage,
@@ -40,10 +41,13 @@ import type {
   SttProviderRegistry,
   TtsProvider,
   TtsProviderRegistry,
+  VoiceAudioFormat,
   VoiceTurnOrigin,
 } from '@ethosagent/types';
+import { isVoiceOutboundAdapter, voiceAudioExtension, voiceAudioMimeType } from '@ethosagent/types';
 import {
   DEFAULT_VOICE_MODE,
+  detectLanguage,
   sanitizeForSpeech,
   shouldReplyWithVoice,
   truncateAtSentenceBoundary,
@@ -57,6 +61,8 @@ import {
   type OutboundMediaCaps,
 } from './media';
 import { DraftStreamer } from './streaming';
+import type { TranscodeResult, Transcoder } from './transcode';
+import type { VoiceArtifactStore } from './voice-artifacts';
 import {
   buildTranscriptText,
   hasAudioAttachments,
@@ -81,6 +87,19 @@ export {
   parseRetryAfterSeconds,
   type StreamAdapter,
 } from './streaming';
+export {
+  createFfmpegTranscoder,
+  type FfmpegTranscoderOptions,
+  type TranscodeRequest,
+  type TranscodeResult,
+  type Transcoder,
+  type TranscodeStageEvent,
+} from './transcode';
+export {
+  createVoiceArtifactStore,
+  type VoiceArtifactStore,
+  type VoiceArtifactStoreOptions,
+} from './voice-artifacts';
 export { type CapturingAdapter, createCapturingAdapter } from './webhook-adapter';
 
 const noopLogger: Logger = {
@@ -463,6 +482,32 @@ export interface GatewayConfig {
   voiceSecretsResolver?: import('@ethosagent/types').SecretsResolver;
   /** Default voice mode: 'off' | 'mirror_inbound' | 'all'. Default 'mirror_inbound'. */
   defaultVoiceMode?: VoiceMode;
+  /**
+   * Persisted per-lane voice mode. Absent → an in-memory store seeded with
+   * `defaultVoiceMode`, which is exactly the behaviour of the Map this
+   * replaced: modes live for the life of the process and no further.
+   */
+  voiceModeStore?: LaneVoiceModeStore;
+  /**
+   * Synthesized-audio store. Absent → artifacts are not persisted and a failed
+   * voice send cannot be redelivered (the obligation still records, so the loss
+   * is visible rather than silent).
+   */
+  voiceArtifacts?: VoiceArtifactStore;
+  /**
+   * ffmpeg stage. Absent → no transcode: a synthesized format the adapter does
+   * not accept is SKIPPED rather than sent wrong. Sending mp3 bytes to a sink
+   * that declared opus is how audio arrives as an undownloadable document.
+   */
+  transcoder?: Transcoder;
+  /**
+   * `voice.channels.<platform>.ttsOut`. An explicit `false` silences that
+   * platform regardless of lane mode — an operator decision outranks a
+   * conversational one. A platform absent here inherits the lane's mode.
+   */
+  channelVoiceOut?: Readonly<Record<string, boolean>>;
+  /** Transcode bitrate (`voice.transcode.bitrateKbps`). */
+  voiceBitrateKbps?: number;
   /** Adapter lookup for agent-initiated outbound sends (send_message tool). */
   adapters?: Map<string, PlatformAdapter>;
   /** Plugin-contributed adapter factories. The gateway instantiates and starts
@@ -690,10 +735,20 @@ export class Gateway {
   private readonly ttsProviderConfig: Record<string, unknown>;
   /** Secrets resolver for voice provider factories. */
   private readonly voiceSecretsResolver: import('@ethosagent/types').SecretsResolver | undefined;
-  /** Per-lane voice mode. */
-  private readonly voiceModes = new Map<string, VoiceMode>();
-  /** Default voice mode for new lanes. */
-  private readonly defaultVoiceMode: VoiceMode;
+  /**
+   * Per-lane voice mode, and the only place the default now lives — the store
+   * owns it, so there is no second copy on the Gateway to drift from it.
+   * Durable when a storage-backed store was injected.
+   */
+  private readonly voiceModeStore: LaneVoiceModeStore;
+  /** Synthesized-audio store backing voice redelivery. Absent → no artifacts. */
+  private readonly voiceArtifacts: VoiceArtifactStore | undefined;
+  /** ffmpeg stage. Absent → only already-accepted formats are sent. */
+  private readonly transcoder: Transcoder | undefined;
+  /** Per-platform TTS-out overrides from `voice.channels.<platform>.ttsOut`. */
+  private readonly channelVoiceOut: Readonly<Record<string, boolean>> | undefined;
+  /** Transcode bitrate in kbps; undefined leaves the transcoder's own default. */
+  private readonly voiceBitrateKbps: number | undefined;
   /** Tracks whether the most recent inbound message per lane had audio. */
   private readonly lastInboundHadAudio = new Map<string, boolean>();
   /** Adapter lookup for agent-initiated outbound sends (send_message tool). */
@@ -826,7 +881,19 @@ export class Gateway {
     this.sttProviderConfig = config.sttProviderConfig ?? {};
     this.ttsProviderConfig = config.ttsProviderConfig ?? {};
     this.voiceSecretsResolver = config.voiceSecretsResolver;
-    this.defaultVoiceMode = config.defaultVoiceMode ?? DEFAULT_VOICE_MODE;
+    // No store injected → an in-memory one. `LaneVoiceModeStore` with no
+    // `storage` is exactly the Map this replaced, so a standalone/test gateway
+    // behaves as it always did while a wired one persists across restarts. An
+    // injected store carries its OWN default (the wiring builds it from
+    // `voice.defaultMode`), so `config.defaultVoiceMode` seeds only the
+    // fallback — one default, in one place, either way.
+    this.voiceModeStore =
+      config.voiceModeStore ??
+      new LaneVoiceModeStore({ defaultMode: config.defaultVoiceMode ?? DEFAULT_VOICE_MODE });
+    this.voiceArtifacts = config.voiceArtifacts;
+    this.transcoder = config.transcoder;
+    this.channelVoiceOut = config.channelVoiceOut;
+    this.voiceBitrateKbps = config.voiceBitrateKbps;
     this.trustedVoicePlugins = config.trustedVoicePlugins;
     this.adapterRegistry = config.adapters ?? new Map();
     this.resolveUserIdFn = config.resolveUserId;
@@ -1166,7 +1233,10 @@ export class Gateway {
       this.sessionKeys.set(laneKey, fresh);
       this.usageStore.delete(laneKey);
       this.personalityIds.delete(laneKey); // reset to default personality
-      this.voiceModes.delete(laneKey);
+      // Voice mode deliberately SURVIVES /new: it is a durable per-lane
+      // preference ("talk to me out loud in this chat"), not session state, and
+      // a preference a /new wipes is not durable in any sense the user would
+      // recognise. `lastInboundHadAudio` IS per-turn state and still clears.
       this.lastInboundHadAudio.delete(laneKey);
       await adapter.send(message.chatId, { text: '✓ New session started.' }).catch(() => {});
       return;
@@ -1573,12 +1643,12 @@ export class Gateway {
       const arg = text.split(/\s+/).slice(1).join(' ').trim().toLowerCase();
       const validModes: VoiceMode[] = ['off', 'mirror_inbound', 'all'];
       if (arg && validModes.includes(arg as VoiceMode)) {
-        this.voiceModes.set(laneKey, arg as VoiceMode);
+        await this.voiceModeStore.set(laneKey, arg as VoiceMode);
         await adapter
           .send(message.chatId, { text: `✓ Voice mode: ${arg}`, threadId })
           .catch(() => {});
       } else if (!arg) {
-        const current = this.voiceModes.get(laneKey) ?? this.defaultVoiceMode;
+        const current = await this.voiceModeStore.get(laneKey);
         await adapter
           .send(message.chatId, {
             text: `Voice mode: ${current}\nUsage: /voice off|mirror_inbound|all`,
@@ -1730,7 +1800,7 @@ export class Gateway {
           // gate, then the ledger-wrapped adapter send.
           const claimSessionKey = this.sessionKeys.get(laneKey) ?? laneKey;
           if (this.outboundDedup.shouldSend(claimSessionKey, reply)) {
-            await this.sendTracked(
+            const claimDelivered = await this.sendTracked(
               {
                 adapter,
                 botKey: bot.botKey,
@@ -1740,6 +1810,33 @@ export class Gateway {
               },
               { text: reply, threadId },
             );
+            // A claimed reply is still a reply, so it goes through the SAME
+            // voice decision the agent path does — otherwise a lane in `all`
+            // mode falls silent the moment a hook answers for the agent, which
+            // is exactly the "voice-in gets text-out" drift this lane closes.
+            // The claim runs BEFORE transcription, so the audio signal is the
+            // raw attachment list and there is no transcript to detect a
+            // language from.
+            if (
+              claimDelivered &&
+              shouldReplyWithVoice({
+                mode: await this.voiceModeStore.get(laneKey),
+                inboundHadAudio: hasAudioAttachments(message.attachments),
+              })
+            ) {
+              await this.deliverVoiceReply({
+                adapter,
+                botKey: bot.botKey,
+                platform: message.platform,
+                chatId: message.chatId,
+                threadId,
+                sessionKey: claimSessionKey,
+                text: reply,
+                personalityId:
+                  bot.binding.type === 'team' ? undefined : this.activePersonalityFor(laneKey, bot),
+                language: undefined,
+              });
+            }
           }
         }
         return;
@@ -1913,14 +2010,40 @@ export class Gateway {
       // system prompt, so a lane that mixes typed and spoken messages keeps a
       // byte-identical static prefix.
       let voiceOrigin: VoiceTurnOrigin | undefined;
+      // BCP-47 tag of the inbound utterance, when the personality declares a
+      // voice for it. Carried to the reply so a Spanish voice note comes back
+      // in the Spanish voice.
+      let voiceLanguage: string | undefined;
       if (hasAudioAttachments(message.attachments) && attachmentCache && storage) {
         const provider = await this.resolveSttProvider();
         const results = await transcribeAudioAttachments(
           message.attachments ?? [],
           provider,
           (url) => storage.readBytes(attachmentCache.resolveLocalPath(url)),
+          {
+            // Normalize before STT and retry once as wav. Absent transcoder →
+            // the provider gets the platform's raw bytes, as it always did.
+            ...(this.transcoder ? { transcoder: this.transcoder } : {}),
+            onStage: (event) => {
+              if (event.ok) return;
+              this.observability?.recordSafetyBlock({
+                code: `gateway.voice_stt_${event.stage}_failed`,
+                cause: event.error,
+                details: { platform: message.platform, chatId: message.chatId },
+              });
+            },
+          },
         );
         text = buildTranscriptText(text, results);
+        // Detected against the personality's OWN language keys, never against
+        // the world: `detectLanguage` only ever decides between candidates, so
+        // a personality with no language map produces no guess and the default
+        // voice stands — the behaviour that existed before this did.
+        const personalityVoice = personalityId
+          ? this.personalityDirectory?.voice?.(personalityId)
+          : undefined;
+        const candidates = Object.keys(personalityVoice?.languages ?? {});
+        voiceLanguage = candidates.length > 0 ? detectLanguage(text, { candidates }) : undefined;
         // A channel voice note is the account owner's own message on their own
         // lane — channel ingress is already sender-gated. A far-end caller
         // arrives over telephony (V4), never here.
@@ -1928,6 +2051,7 @@ export class Gateway {
           transport: `${message.platform}-voice-note`,
           speaker: 'owner',
           ...(this.resolvedSttProviderId ? { sttProvider: this.resolvedSttProviderId } : {}),
+          ...(voiceLanguage ? { language: voiceLanguage } : {}),
         };
       }
 
@@ -2093,77 +2217,25 @@ export class Gateway {
 
         if (delivered) {
           // --- Voice pipeline: post-turn TTS synthesis ---
-          const voiceMode = this.voiceModes.get(laneKey) ?? this.defaultVoiceMode;
-          const hadAudio = this.lastInboundHadAudio.get(laneKey) ?? false;
+          // `shouldReplyWithVoice` is the ONE decision function (voice V1a
+          // eng-review D3, drift-gated). Everything downstream of it is
+          // delivery mechanics, which is why they live in their own method.
           const shouldSynth = shouldReplyWithVoice({
-            mode: voiceMode,
-            inboundHadAudio: hadAudio,
+            mode: await this.voiceModeStore.get(laneKey),
+            inboundHadAudio: this.lastInboundHadAudio.get(laneKey) ?? false,
           });
-
           if (shouldSynth) {
-            const tts = await this.resolveTtsProvider();
-            if (tts) {
-              try {
-                let synthText = sanitizeForSpeech(sanitized);
-                const maxChars = tts.caps.maxInputChars;
-                if (maxChars && synthText.length > maxChars) {
-                  synthText = truncateAtSentenceBoundary(synthText, maxChars);
-                }
-                if (synthText.length > 0) {
-                  // Per-personality voice on the CHANNEL path (voice V1a §4).
-                  // Same resolution function the VoiceSession stack uses, so
-                  // "which voice served this reply" has one answer across
-                  // surfaces: language-specific > personality > global config.
-                  // (The gateway has no per-turn language signal today, so the
-                  // language rung is unused here and the personality's default
-                  // voice wins; `resolveVoicePreferences` owns the ordering
-                  // either way.)
-                  const personalityVoice = personalityId
-                    ? this.personalityDirectory?.voice?.(personalityId)
-                    : undefined;
-                  const globalTtsVoice =
-                    typeof this.ttsProviderConfig.voice === 'string'
-                      ? this.ttsProviderConfig.voice
-                      : undefined;
-                  const voicePrefs = resolveVoicePreferences({
-                    ...(personalityVoice ? { personality: personalityVoice } : {}),
-                    ...(globalTtsVoice ? { globalTtsVoice } : {}),
-                  });
-                  const result = await tts.synthesize(
-                    synthText,
-                    voicePrefs.ttsVoice ? { voice: voicePrefs.ttsVoice } : undefined,
-                  );
-                  if (result.format === 'opus' && 'sendVoice' in adapter) {
-                    const voiceAdapter = adapter as {
-                      sendVoice(
-                        chatId: string,
-                        audio: Uint8Array,
-                        opts?: { threadId?: string },
-                      ): Promise<unknown>;
-                    };
-                    await voiceAdapter.sendVoice(message.chatId, result.audio, {
-                      threadId,
-                    });
-                  } else if ('sendAudio' in adapter) {
-                    const audioAdapter = adapter as {
-                      sendAudio(
-                        chatId: string,
-                        audio: Uint8Array,
-                        filename: string,
-                        opts?: { threadId?: string },
-                      ): Promise<unknown>;
-                    };
-                    const ext =
-                      result.format === 'mp3' ? 'mp3' : result.format === 'wav' ? 'wav' : 'audio';
-                    await audioAdapter.sendAudio(message.chatId, result.audio, `reply.${ext}`, {
-                      threadId,
-                    });
-                  }
-                }
-              } catch {
-                // TTS synthesis failed — text already sent, degrade silently
-              }
-            }
+            await this.deliverVoiceReply({
+              adapter,
+              botKey: bot.botKey,
+              platform: message.platform,
+              chatId: message.chatId,
+              threadId,
+              sessionKey,
+              text: sanitized,
+              personalityId,
+              language: voiceLanguage,
+            });
           }
         }
       }
@@ -2192,6 +2264,215 @@ export class Gateway {
       // were deferred because a turn was running.
       void this.flushWakes(laneKey);
     }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Voice replies (voice V2)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Speak one already-delivered reply.
+   *
+   * The caller has already asked `shouldReplyWithVoice()` — that decision has
+   * exactly one implementation and does not live here. What lives here is
+   * everything between "yes, speak" and bytes on the platform: caps, synthesis,
+   * transcode, the byte cap, the artifact, and the delivery obligation.
+   *
+   * ONE voice note per reply, whatever its length. Sentence-chunking belongs to
+   * live surfaces, where a listener is waiting on the first sentence; on a
+   * channel it is eight notifications for one answer.
+   *
+   * Every early return records an event. A voice reply that silently does not
+   * arrive is the failure mode this whole lane exists to close, so "nothing
+   * happened and nobody knows why" is not an acceptable outcome of any branch.
+   */
+  private async deliverVoiceReply(input: {
+    adapter: PlatformAdapter;
+    botKey: string;
+    platform: string;
+    chatId: string;
+    threadId: string | undefined;
+    sessionKey: string;
+    text: string;
+    personalityId: string | undefined;
+    language: string | undefined;
+  }): Promise<void> {
+    // `recordSafetyBlock` is this file's generic event sink — `dedup_drop` and
+    // `delivery_redelivered` already ride it — not a claim that a skipped voice
+    // note is a safety violation.
+    const event = (code: string, details: Record<string, unknown> = {}, cause?: string): void => {
+      this.observability?.recordSafetyBlock({
+        code,
+        ...(cause ? { cause } : {}),
+        details: {
+          platform: input.platform,
+          botKey: input.botKey,
+          chatId: input.chatId,
+          ...details,
+        },
+      });
+    };
+
+    // 1. Operator override. `voice.channels.<platform>.ttsOut: false` outranks
+    //    the lane's mode — a deployment decision beats a conversational one.
+    if (this.channelVoiceOut?.[input.platform] === false) {
+      event('gateway.voice_channel_disabled');
+      return;
+    }
+
+    // 2. DECLARED caps, not `'sendVoice' in adapter`. The duck-type could not
+    //    tell a voice bubble from a file attachment, could not name an accepted
+    //    container, and gave every new adapter a silent no-op by default.
+    if (!isVoiceOutboundAdapter(input.adapter)) {
+      event('gateway.voice_no_caps');
+      return;
+    }
+    const sink = input.adapter;
+
+    // 3. Provider.
+    const tts = await this.resolveTtsProvider();
+    if (!tts) {
+      event(
+        'gateway.voice_no_provider',
+        this.voiceProviderErrors.tts ? { error: this.voiceProviderErrors.tts } : {},
+      );
+      return;
+    }
+
+    // 4. Speakable text — markdown, emoji and code fences are not speech.
+    let synthText = sanitizeForSpeech(input.text);
+    const maxChars = tts.caps.maxInputChars;
+    if (maxChars && synthText.length > maxChars) {
+      synthText = truncateAtSentenceBoundary(synthText, maxChars);
+    }
+    if (synthText.length === 0) return;
+
+    // 5. Which voice. Same resolution function the VoiceSession stack uses, so
+    //    "which voice served this reply" has one answer across surfaces:
+    //    language-specific > personality default > global config.
+    const personalityVoice = input.personalityId
+      ? this.personalityDirectory?.voice?.(input.personalityId)
+      : undefined;
+    const globalTtsVoice =
+      typeof this.ttsProviderConfig.voice === 'string' ? this.ttsProviderConfig.voice : undefined;
+    const voicePrefs = resolveVoicePreferences({
+      ...(personalityVoice ? { personality: personalityVoice } : {}),
+      ...(globalTtsVoice ? { globalTtsVoice } : {}),
+      ...(input.language ? { language: input.language } : {}),
+    });
+
+    // 6. Synthesis.
+    const synthStarted = Date.now();
+    let synthesized: Awaited<ReturnType<TtsProvider['synthesize']>>;
+    try {
+      synthesized = await tts.synthesize(
+        synthText,
+        voicePrefs.ttsVoice ? { voice: voicePrefs.ttsVoice } : undefined,
+      );
+    } catch (err) {
+      event('gateway.voice_synth_failed', {}, err instanceof Error ? err.message : String(err));
+      return;
+    }
+    event('gateway.voice_synth', {
+      format: synthesized.format,
+      bytes: synthesized.audio.length,
+      durationMs: Date.now() - synthStarted,
+      ...(voicePrefs.ttsVoice ? { voice: voicePrefs.ttsVoice } : {}),
+    });
+
+    // 7. Transcode into a container the sink actually declared.
+    const targets = sink.voiceCaps.outbound.formats;
+    let bytes = synthesized.audio;
+    let finalFormat: VoiceAudioFormat = synthesized.format;
+    if (this.transcoder) {
+      // `Transcoder` promises a typed result, but the shipped ffmpeg one writes
+      // a scratch file first — a full or read-only tmpdir throws before any of
+      // its own error handling runs. The text reply has already gone out, so
+      // that must degrade to "no voice note, and here is why", never to a
+      // rejected turn.
+      const transcoded = await this.transcoder
+        .transcode({
+          data: synthesized.audio,
+          sourceMimeType: voiceAudioMimeType(synthesized.format),
+          targets,
+          ...(this.voiceBitrateKbps ? { bitrateKbps: this.voiceBitrateKbps } : {}),
+        })
+        .catch(
+          (err: unknown): TranscodeResult => ({
+            ok: false,
+            code: 'failed',
+            error: err instanceof Error ? err.message : String(err),
+          }),
+        );
+      if (!transcoded.ok) {
+        event('gateway.voice_transcode_failed', { code: transcoded.code }, transcoded.error);
+        return;
+      }
+      bytes = transcoded.data;
+      finalFormat = transcoded.format;
+    } else if (!targets.includes(synthesized.format)) {
+      // No ffmpeg on this host. Sending mp3 bytes to a sink that declared opus
+      // produces an undownloadable document, not a voice note — so skip and say
+      // so, rather than deliver something that looks like a bug to the user.
+      event('gateway.voice_format_unsupported', { format: synthesized.format, accepted: targets });
+      return;
+    }
+
+    // 8. Platform byte cap.
+    const maxBytes = sink.voiceCaps.outbound.maxBytes;
+    if (maxBytes !== undefined && bytes.length > maxBytes) {
+      event('gateway.voice_too_large', { bytes: bytes.length, maxBytes });
+      return;
+    }
+
+    // 9. Persist the artifact BEFORE the send, so a failed send has something
+    //    to redeliver. A store that is absent or failing returns null: the
+    //    obligation is still recorded, which makes the loss visible even though
+    //    it cannot then be repaired.
+    const ref = (await this.voiceArtifacts?.put(bytes, finalFormat)) ?? null;
+
+    // 10. Ledger, four-path contract: pending BEFORE the platform call.
+    //     `content` is the SPOKEN TEXT — a voice row stays readable, hashes to
+    //     a comparable value, and is diagnosable when its artifact is gone.
+    const binding = this.deliveryBinding(input.botKey, input.platform);
+    const obligationId = await beginDelivery(binding, {
+      chatId: input.chatId,
+      sessionId: input.sessionKey,
+      threadId: input.threadId,
+      content: synthText,
+      kind: 'voice',
+      ...(ref ? { artifactRef: ref } : {}),
+      mediaFormat: finalFormat,
+    });
+
+    // 11. Send. A throw folds into `{ ok: false }` exactly as in `sendTracked`.
+    const result = await sink
+      .sendVoiceNote(input.chatId, bytes, {
+        format: finalFormat,
+        mimeType: voiceAudioMimeType(finalFormat),
+        filename: `reply.${voiceAudioExtension(finalFormat)}`,
+        ...(input.threadId ? { threadId: input.threadId } : {}),
+      })
+      .catch(
+        (err: unknown): DeliveryResult => ({
+          ok: false,
+          error: err instanceof Error ? err.message : String(err),
+        }),
+      );
+
+    // 12. Confirmed → the obligation is discharged and its artifact is released
+    //     (retention D9: delivering deletes). Otherwise the row stays `pending`
+    //     and the artifact stays on disk for the sweep to re-send.
+    if (result?.ok === true) {
+      await confirmDelivery(binding, obligationId);
+      if (ref) await this.voiceArtifacts?.remove(ref);
+      return;
+    }
+    event(
+      'gateway.delivery_unconfirmed',
+      { kind: 'voice', error: result?.error, durable: obligationId !== null },
+      'adapter did not confirm voice delivery',
+    );
   }
 
   // ---------------------------------------------------------------------------
@@ -2556,6 +2837,14 @@ export class Gateway {
           failed++;
           continue;
         }
+        if (row.kind === 'voice') {
+          // A voice obligation owes BYTES, not a string, so it takes its own
+          // path — one that re-sends the stored artifact and never
+          // re-synthesizes (a second TTS pass is a different recording).
+          if (await this.redeliverVoiceObligation(row, adapter, ledger)) redelivered++;
+          else failed++;
+          continue;
+        }
         // The row carries its thread, so a redelivered reply returns to the
         // sub-conversation it belonged to instead of the root chat. `threadId`
         // is `undefined` for an unthreaded row — never '' or the string 'null',
@@ -2597,6 +2886,149 @@ export class Gateway {
       }
     }
     return { redelivered, failed };
+  }
+
+  /**
+   * Redeliver one claimed `voice` obligation by re-sending its stored artifact.
+   *
+   * It never re-synthesizes. A second TTS pass is a different recording — the
+   * engine is not deterministic and the personality's voice may have changed
+   * since — so the user would receive an answer they can hear is not the one
+   * that was lost. The artifact IS the obligation's payload.
+   *
+   * Returns whether the platform confirmed. Every failure hands the row back to
+   * the pending pool rather than burning it.
+   */
+  private async redeliverVoiceObligation(
+    row: DeliveryObligation,
+    adapter: PlatformAdapter,
+    ledger: DeliveryLedger,
+  ): Promise<boolean> {
+    const giveBack = async (code: string, details: Record<string, unknown> = {}) => {
+      await ledger.release(row.id);
+      this.observability?.recordSafetyBlock({
+        code,
+        details: { platform: row.platform, botKey: row.botKey, chatId: row.chatId, ...details },
+      });
+      return false;
+    };
+
+    const ref = row.artifactRef;
+    const bytes = ref ? await this.voiceArtifacts?.read(ref) : undefined;
+    if (!bytes) {
+      // Deliberately NOT a text fallback on `row.content`. The written reply
+      // for this turn already went out under its own obligation, so sending
+      // the spoken text as a message here would deliver the same answer twice.
+      // A missing voice note is the smaller failure, and the event names it.
+      return giveBack('gateway.voice_artifact_missing', { artifactRef: ref ?? null });
+    }
+    if (!isVoiceOutboundAdapter(adapter)) {
+      return giveBack('gateway.voice_no_caps');
+    }
+
+    const declared = adapter.voiceCaps.outbound.formats;
+    // The row's own format is authoritative: the artifact holds exactly those
+    // bytes, and re-labelling them would hand the platform a mislabelled
+    // container. It is matched against the adapter's declared list because that
+    // is the only typed source of `VoiceAudioFormat` values here — a stored
+    // format the adapter no longer accepts (a caps change between the send and
+    // the sweep) is refused rather than mislabelled. A null column is a pre-v3
+    // row or a store that lost it; the sink's preferred format is the best
+    // available guess.
+    const format = row.mediaFormat ? declared.find((f) => f === row.mediaFormat) : declared[0];
+    if (!format) {
+      return giveBack('gateway.voice_format_unsupported', {
+        format: row.mediaFormat,
+        accepted: declared,
+      });
+    }
+
+    const result = await adapter
+      .sendVoiceNote(row.chatId, bytes, {
+        format,
+        mimeType: voiceAudioMimeType(format),
+        filename: `reply.${voiceAudioExtension(format)}`,
+        ...(row.threadId ? { threadId: row.threadId } : {}),
+      })
+      .catch(
+        (err: unknown): DeliveryResult => ({
+          ok: false,
+          error: err instanceof Error ? err.message : String(err),
+        }),
+      );
+    if (result?.ok !== true) {
+      return giveBack('gateway.delivery_unconfirmed', { kind: 'voice', error: result?.error });
+    }
+
+    await ledger.markDelivered(row.id);
+    // Redelivery bypassed `shouldSend()` — a warm cache must not swallow what
+    // the user never received — so record the key afterwards, exactly as the
+    // text path does, and release the artifact now that it is discharged.
+    this.outboundDedup.record(row.sessionId, row.content);
+    if (ref) await this.voiceArtifacts?.remove(ref);
+    this.observability?.recordSafetyBlock({
+      code: 'gateway.delivery_redelivered',
+      details: {
+        kind: 'voice',
+        platform: row.platform,
+        botKey: row.botKey,
+        chatId: row.chatId,
+        contentHash: row.contentHash,
+        createdAt: row.createdAt,
+      },
+    });
+    return true;
+  }
+
+  /**
+   * Retention pass for synthesized voice artifacts.
+   *
+   * Three mechanisms, in the order they should fire: an obligation that was
+   * DELIVERED released its artifact at confirm time (in `deliverVoiceReply`);
+   * one that was never delivered is abandoned here after `abandonAfterDays` and
+   * its artifact deleted with it; and the total-size cap is the backstop for
+   * everything neither of those caught — an artifact whose row vanished, or a
+   * burst that outran the abandon window.
+   *
+   * Never throws, and never runs without both a ledger and a store: abandoning
+   * rows whose artifacts nothing can delete, or deleting artifacts whose rows
+   * nothing abandoned, would leave the two halves permanently out of step.
+   */
+  async pruneVoiceArtifacts(opts: {
+    abandonAfterDays: number;
+    maxTotalMb: number;
+  }): Promise<{ abandoned: number; bytesFreed: number }> {
+    const ledger = this.deliveryLedger;
+    const artifacts = this.voiceArtifacts;
+    if (!ledger || !artifacts) return { abandoned: 0, bytesFreed: 0 };
+
+    let abandoned = 0;
+    try {
+      const cutoff = Date.now() - opts.abandonAfterDays * 86_400_000;
+      // Ownership-filtered inside the ledger: a shared ledger file must never
+      // let this deployment abandon a live peer's obligation.
+      const rows = await ledger.abandonStale([...this.bots.keys()], cutoff);
+      abandoned = rows.length;
+      for (const row of rows) {
+        if (row.artifactRef) await artifacts.remove(row.artifactRef);
+      }
+    } catch (err) {
+      this.observability?.recordSafetyBlock({
+        code: 'gateway.voice_abandon_failed',
+        cause: err instanceof Error ? err.message : String(err),
+      });
+    }
+
+    let bytesFreed = 0;
+    try {
+      bytesFreed = await artifacts.enforceSizeCap(opts.maxTotalMb * 1024 * 1024);
+    } catch (err) {
+      this.observability?.recordSafetyBlock({
+        code: 'gateway.voice_size_cap_failed',
+        cause: err instanceof Error ? err.message : String(err),
+      });
+    }
+    return { abandoned, bytesFreed };
   }
 
   // ---------------------------------------------------------------------------
@@ -2812,7 +3244,10 @@ export class Gateway {
       this.sessionKeys.delete(evictedKey);
       this.personalityIds.delete(evictedKey);
       this.usageStore.delete(evictedKey);
-      this.voiceModes.delete(evictedKey);
+      // Voice mode is NOT evicted with the lane. Eviction is a memory-pressure
+      // decision about in-process state; the mode is a persisted preference,
+      // and dropping it here would silently un-set what the user typed the
+      // moment a busy deployment crossed `maxChats`.
       this.lastInboundHadAudio.delete(evictedKey);
     }
   }

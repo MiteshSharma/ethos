@@ -15,12 +15,19 @@ import {
   type WhatsAppConfig,
   writeConfig,
 } from '@ethosagent/config';
-import { type AgentLoop, deriveBotKey as deriveBotKeyFromSeed } from '@ethosagent/core';
+import {
+  type AgentLoop,
+  deriveBotKey as deriveBotKeyFromSeed,
+  LaneVoiceModeStore,
+  laneVoiceModePath,
+} from '@ethosagent/core';
 import { CronScheduler, runScriptFile } from '@ethosagent/cron';
 import { SQLiteDeliveryLedger } from '@ethosagent/delivery-ledger';
 import { LocalExecutionBackend } from '@ethosagent/execution-local';
 import {
   createCapturingAdapter,
+  createFfmpegTranscoder,
+  createVoiceArtifactStore,
   DreamExecutor,
   Gateway,
   type GatewayBotConfig,
@@ -285,6 +292,26 @@ export interface GatewayStartOptions {
    *  three-way close (W2.5) to print the `t.me` deep-link success block after
    *  the "Starting the Telegram bot…" line. */
   onReady?: () => void;
+}
+
+/**
+ * `voice.channels.<platform>.ttsOut` → the Gateway's `channelVoiceOut` gate.
+ *
+ * Only an EXPLICIT boolean is an operator decision. A platform whose entry
+ * omits `ttsOut` inherits the lane's mode, so it must NOT appear in the map —
+ * an entry present with `undefined` would read as "declared" downstream.
+ * Returns `undefined` when nothing was declared, so the option is omitted
+ * entirely rather than passed as an empty object.
+ */
+export function deriveChannelVoiceOut(
+  channels: Readonly<Record<string, { ttsOut?: boolean }>> | undefined,
+): Record<string, boolean> | undefined {
+  if (!channels) return undefined;
+  const out: Record<string, boolean> = {};
+  for (const [platform, entry] of Object.entries(channels)) {
+    if (typeof entry?.ttsOut === 'boolean') out[platform] = entry.ttsOut;
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
 }
 
 export async function runGatewayStart(opts: GatewayStartOptions = {}): Promise<void> {
@@ -844,6 +871,41 @@ export async function runGatewayStart(opts: GatewayStartOptions = {}): Promise<v
     }
   }
 
+  // Voice-note machinery. Built ONCE and handed to whichever Gateway the
+  // branch below constructs — a second store would mean two caches over the
+  // same file and two artifact dirs over the same bytes.
+  //
+  // The store carries the deployment default, so `defaultVoiceMode` is not also
+  // passed: an injected store's own default is the one the Gateway reads.
+  const voiceModeStore = new LaneVoiceModeStore({
+    storage,
+    path: laneVoiceModePath(ethosDir()),
+    ...(config.voice?.defaultMode ? { defaultMode: config.voice.defaultMode } : {}),
+    onError: (err) => {
+      new ConsoleLogger().warn(`voice lane-mode persist failed: ${err}`);
+    },
+  });
+  // ffmpeg stage. Optional at runtime: an unavailable binary degrades to
+  // pass-through, and the startup probe below says so once.
+  const transcoder = createFfmpegTranscoder({
+    ...(config.voice?.transcode?.ffmpegPath
+      ? { ffmpegPath: config.voice.transcode.ffmpegPath }
+      : {}),
+    // `voice.transcode.timeout` is SECONDS; the option is milliseconds.
+    timeoutMs: (config.voice?.transcode?.timeout ?? 30) * 1000,
+  });
+  // Synthesized audio has to outlive a failed send: redelivery re-sends THOSE
+  // bytes rather than re-synthesizing, which would be a different take.
+  const voiceArtifacts = createVoiceArtifactStore({
+    storage,
+    dir: join(ethosDir(), 'voice', 'artifacts'),
+    onError: (op, err) => {
+      new ConsoleLogger().warn(`voice artifact ${op} failed: ${err}`);
+    },
+  });
+  const channelVoiceOut = deriveChannelVoiceOut(config.voice?.channels);
+  const voiceBitrateKbps = config.voice?.transcode?.bitrateKbps;
+
   const gateway: Gateway =
     bots.length === 0
       ? // No platform configured — idle gateway. Every configured platform
@@ -870,8 +932,13 @@ export async function runGatewayStart(opts: GatewayStartOptions = {}): Promise<v
           ...(voiceConfig.trustedVoicePlugins
             ? { trustedVoicePlugins: voiceConfig.trustedVoicePlugins }
             : {}),
-          // Where a NEW lane starts (`voice.defaultMode`); `/voice` still wins per lane.
-          ...(config.voice?.defaultMode ? { defaultVoiceMode: config.voice.defaultMode } : {}),
+          // Where a NEW lane starts (`voice.defaultMode`); `/voice` still wins
+          // per lane, and the store persists that choice across restarts.
+          voiceModeStore,
+          voiceArtifacts,
+          transcoder,
+          ...(channelVoiceOut ? { channelVoiceOut } : {}),
+          ...(voiceBitrateKbps !== undefined ? { voiceBitrateKbps } : {}),
           personalityDirectory,
           onTurnComplete,
           onUserTurn,
@@ -904,8 +971,13 @@ export async function runGatewayStart(opts: GatewayStartOptions = {}): Promise<v
           ...(voiceConfig.trustedVoicePlugins
             ? { trustedVoicePlugins: voiceConfig.trustedVoicePlugins }
             : {}),
-          // Where a NEW lane starts (`voice.defaultMode`); `/voice` still wins per lane.
-          ...(config.voice?.defaultMode ? { defaultVoiceMode: config.voice.defaultMode } : {}),
+          // Where a NEW lane starts (`voice.defaultMode`); `/voice` still wins
+          // per lane, and the store persists that choice across restarts.
+          voiceModeStore,
+          voiceArtifacts,
+          transcoder,
+          ...(channelVoiceOut ? { channelVoiceOut } : {}),
+          ...(voiceBitrateKbps !== undefined ? { voiceBitrateKbps } : {}),
           personalityDirectory,
           onTurnComplete,
           onUserTurn,
@@ -1122,9 +1194,41 @@ export async function runGatewayStart(opts: GatewayStartOptions = {}): Promise<v
       new ConsoleLogger().warn(`delivery ledger retention prune failed: ${String(err)}`);
     });
   };
+  // Voice artifacts ride the same schedule: abandon obligations nothing ever
+  // delivered, then enforce the total-size cap oldest-first. `void`-ed so a
+  // retention failure is a log line, never a dead gateway.
+  const pruneVoiceArtifacts = () => {
+    void gateway
+      .pruneVoiceArtifacts({
+        abandonAfterDays: config.voice?.artifacts?.abandonAfterDays ?? 7,
+        maxTotalMb: config.voice?.artifacts?.maxTotalMb ?? 512,
+      })
+      .catch((err) => {
+        new ConsoleLogger().warn(`voice artifact retention prune failed: ${String(err)}`);
+      });
+  };
   pruneDeliveryLedger();
-  const deliveryPruneTimer = setInterval(pruneDeliveryLedger, 3_600_000);
-  deliveryPruneTimer.unref?.();
+  pruneVoiceArtifacts();
+  const retentionPruneTimer = setInterval(() => {
+    pruneDeliveryLedger();
+    pruneVoiceArtifacts();
+  }, 3_600_000);
+  retentionPruneTimer.unref?.();
+
+  // ffmpeg is optional. Without it the gateway still speaks — it sends the
+  // formats the TTS provider already produces and SKIPS the rest rather than
+  // handing an adapter a container it declared it cannot play. Say so once, as
+  // a notice: a missing optional binary must not read as a failed boot.
+  void transcoder
+    .available()
+    .then((ok) => {
+      if (!ok) {
+        console.log(
+          `${c.yellow}⚠ ffmpeg not found${c.reset} ${c.dim}— voice notes will be delivered only in the formats the TTS provider already produces. Install ffmpeg to enable the rest.${c.reset}`,
+        );
+      }
+    })
+    .catch(() => {});
 
   // Plugins finished loading inside createAgentLoop above; now that the
   // adapters are constructed and started, push plugin slash commands to each
@@ -1248,7 +1352,7 @@ export async function runGatewayStart(opts: GatewayStartOptions = {}): Promise<v
     webhookServer?.close();
     clearInterval(pruneTimer);
     clearInterval(heartbeatTimer);
-    clearInterval(deliveryPruneTimer);
+    clearInterval(retentionPruneTimer);
     scheduler.stop();
     dreamExecutor.stop();
     await storage.remove(gatewayHealthPath()).catch(() => {});

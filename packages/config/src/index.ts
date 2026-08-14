@@ -983,6 +983,54 @@ export interface EthosConfig {
    * ignored, the same way an unknown `defaultMode` is.
    */
   voice?: {
+    /**
+     * Per-channel TTS-out default: which platforms speak their replies without
+     * being asked. Keyed by platform id (`telegram`, `slack`, `discord`,
+     * `whatsapp`, `email` — see `VOICE_CHANNEL_PLATFORMS`), value
+     * `true`/`false`.
+     *
+     *   voice.channels.slack.ttsOut: false
+     *
+     * A platform absent here inherits `voice.defaultMode`. An explicit `false`
+     * means "never speak on this channel", and outranks a lane's mode — an
+     * operator turning a channel off is a deployment decision, not a
+     * conversational one. `/voice all` in a Slack lane with
+     * `voice.channels.slack.ttsOut: false` stays silent. An unknown platform id
+     * or a non-boolean value is ignored, the same way an unknown `tier` is.
+     */
+    channels?: Record<string, { ttsOut?: boolean }>;
+    /**
+     * ffmpeg transcode stage. Present because voice notes only render as voice
+     * bubbles in the container each platform wants, and the host binary is the
+     * one new runtime dependency this feature has. Out-of-range numbers are
+     * dropped, not clamped.
+     */
+    transcode?: {
+      /** Path or name of the ffmpeg binary. Default: `ffmpeg` on PATH. */
+      ffmpegPath?: string;
+      /** Target bitrate for compressed containers, kbps. 8–320. Default 32 (voice). */
+      bitrateKbps?: number;
+      /** Budget for one ffmpeg invocation, seconds. 1–600. Default 30. */
+      timeout?: number;
+    };
+    /**
+     * Retention for synthesized voice artifacts. An artifact is deleted the
+     * moment its delivery obligation is confirmed; these two keys bound what
+     * happens to the ones that are never confirmed.
+     */
+    artifacts?: {
+      /**
+       * Give up on an undelivered obligation after this many days and delete
+       * its artifact. 1–365. Default 7.
+       */
+      abandonAfterDays?: number;
+      /**
+       * Total on-disk cap for the artifact directory, MiB. Oldest-first
+       * eviction once exceeded — the backstop for runaway accumulation when
+       * neither delivery nor abandonment has fired. 1–102400. Default 512.
+       */
+      maxTotalMb?: number;
+    };
     bots: VoiceBotConfig[];
     livekit?: VoiceLiveKitConfig;
     trunk?: VoiceTrunkConfig;
@@ -1140,9 +1188,15 @@ export interface EthosConfig {
   displayStreamingEdits?: 'off' | 'dms' | 'all';
   /**
    * Which treatment the Call Stage draws (DESIGN.md § "Call Stage").
-   * Config key: `display.call_style`. Unset = `liquid`.
+   * Config key: `display.call_style`.
+   *   `'personality'` (default) — each personality draws its own treatment:
+   *     its `voice.call_style` if it declares one, otherwise a shape derived
+   *     from its id.
+   *   `'liquid' | 'orb' | 'rings'` — pin one treatment for every personality
+   *     that has not declared its own.
+   * Unset = `personality`.
    */
-  displayCallStyle?: 'liquid' | 'orb' | 'rings';
+  displayCallStyle?: 'liquid' | 'orb' | 'rings' | 'personality';
   /**
    * What color the Call Stage draws in. Config key: `display.call_accent`.
    *   `'personality'` (default) — follow the active personality's `--accent`
@@ -1812,6 +1866,25 @@ export async function writeConfig(
     if (config.voice.tier) {
       lines.push(`voice.tier: ${config.voice.tier}`);
     }
+    for (const [platform, entry] of Object.entries(config.voice.channels ?? {})) {
+      if (entry.ttsOut !== undefined) {
+        lines.push(`voice.channels.${platform}.ttsOut: ${entry.ttsOut}`);
+      }
+    }
+    if (config.voice.transcode) {
+      const tc = config.voice.transcode;
+      if (tc.ffmpegPath) lines.push(`voice.transcode.ffmpegPath: ${tc.ffmpegPath}`);
+      if (tc.bitrateKbps !== undefined)
+        lines.push(`voice.transcode.bitrateKbps: ${tc.bitrateKbps}`);
+      if (tc.timeout !== undefined) lines.push(`voice.transcode.timeout: ${tc.timeout}`);
+    }
+    if (config.voice.artifacts) {
+      const ar = config.voice.artifacts;
+      if (ar.abandonAfterDays !== undefined) {
+        lines.push(`voice.artifacts.abandonAfterDays: ${ar.abandonAfterDays}`);
+      }
+      if (ar.maxTotalMb !== undefined) lines.push(`voice.artifacts.maxTotalMb: ${ar.maxTotalMb}`);
+    }
     // Always the NEW spelling, whichever one was read. A config parsed from
     // `voice.providers.*` re-serializes as `voice.tts.providers.*` and never
     // carries both.
@@ -2229,6 +2302,12 @@ function parseConfigYaml(src: string): EthosConfig {
   let voiceRealtimeDefault: string | undefined;
   /** `voice.realtime.sessionBudgetUsd` — USD cap on one session's accrued cost. */
   let voiceRealtimeSessionBudgetUsd: number | undefined;
+  /** `voice.channels.<platform>.ttsOut` — per-channel TTS-out overrides. */
+  const voiceChannelsKv: Record<string, { ttsOut?: boolean }> = {};
+  /** `voice.transcode.<field>` — ffmpeg stage knobs, range-checked on the way in. */
+  const voiceTranscodeKv: { ffmpegPath?: string; bitrateKbps?: number; timeout?: number } = {};
+  /** `voice.artifacts.<field>` — retention bounds, range-checked on the way in. */
+  const voiceArtifactsKv: { abandonAfterDays?: number; maxTotalMb?: number } = {};
   const teamsKv: Record<string, Record<string, string>> = {};
   const webhooksKv: Record<string, Record<string, string>> = {};
   // FW-16 — quick_commands.<name>.<field>: <value>
@@ -2385,6 +2464,48 @@ function parseConfigYaml(src: string): EthosConfig {
     if (vtier) {
       const tier = vtier[1].trim().replace(/^["']|["']$/g, '');
       if (tier === 'pipeline' || tier === 'realtime') voiceTier = tier;
+      continue;
+    }
+    // voice.channels.<platform>.ttsOut: true | false — which channels speak
+    // their replies without being asked. Only the platforms in
+    // VOICE_CHANNEL_PLATFORMS are accepted; an unknown id or a non-boolean is
+    // dropped, so a typo cannot invent a channel entry no adapter will read.
+    const vch = line.match(/^voice\.channels\.([A-Za-z0-9_-]+)\.ttsOut:\s*(.+)$/);
+    if (vch) {
+      const platform = vch[1];
+      const value = vch[2].trim().replace(/^["']|["']$/g, '');
+      if (isVoiceChannelPlatform(platform) && (value === 'true' || value === 'false')) {
+        voiceChannelsKv[platform] = { ttsOut: value === 'true' };
+      }
+      continue;
+    }
+    // voice.transcode.<field> — ffmpeg stage. Out-of-range or non-numeric
+    // values are ignored, same rule as the mode and tier above.
+    const vtc = line.match(/^voice\.transcode\.(\w+):\s*(.+)$/);
+    if (vtc) {
+      const value = vtc[2].trim().replace(/^["']|["']$/g, '');
+      if (vtc[1] === 'ffmpegPath') {
+        if (value) voiceTranscodeKv.ffmpegPath = value;
+      } else if (vtc[1] === 'bitrateKbps') {
+        const n = parseBoundedInt(value, 8, 320);
+        if (n !== undefined) voiceTranscodeKv.bitrateKbps = n;
+      } else if (vtc[1] === 'timeout') {
+        const n = parseBoundedInt(value, 1, 600);
+        if (n !== undefined) voiceTranscodeKv.timeout = n;
+      }
+      continue;
+    }
+    // voice.artifacts.<field> — retention for synthesized voice artifacts.
+    const vart = line.match(/^voice\.artifacts\.(\w+):\s*(.+)$/);
+    if (vart) {
+      const value = vart[2].trim().replace(/^["']|["']$/g, '');
+      if (vart[1] === 'abandonAfterDays') {
+        const n = parseBoundedInt(value, 1, 365);
+        if (n !== undefined) voiceArtifactsKv.abandonAfterDays = n;
+      } else if (vart[1] === 'maxTotalMb') {
+        const n = parseBoundedInt(value, 1, 102400);
+        if (n !== undefined) voiceArtifactsKv.maxTotalMb = n;
+      }
       continue;
     }
     // teams.<name>.<field>: <value>
@@ -2833,6 +2954,11 @@ function parseConfigYaml(src: string): EthosConfig {
             : {}),
         }
       : undefined;
+  // Each of the three V2 sub-sections stands on its own: an operator can cap
+  // artifact disk before naming an ffmpeg path, and vice versa.
+  const voiceChannels = Object.keys(voiceChannelsKv).length > 0 ? voiceChannelsKv : undefined;
+  const voiceTranscode = Object.keys(voiceTranscodeKv).length > 0 ? voiceTranscodeKv : undefined;
+  const voiceArtifacts = Object.keys(voiceArtifactsKv).length > 0 ? voiceArtifactsKv : undefined;
   const voiceSection =
     voiceResult.bots.length > 0 ||
     voiceLiveKitResult.livekit ||
@@ -2842,7 +2968,10 @@ function parseConfigYaml(src: string): EthosConfig {
     voiceTier !== undefined ||
     voiceTtsProviders !== undefined ||
     voiceSttProviders !== undefined ||
-    voiceRealtime !== undefined
+    voiceRealtime !== undefined ||
+    voiceChannels !== undefined ||
+    voiceTranscode !== undefined ||
+    voiceArtifacts !== undefined
       ? {
           bots: voiceResult.bots,
           ...(voiceLiveKitResult.livekit ? { livekit: voiceLiveKitResult.livekit } : {}),
@@ -2855,6 +2984,9 @@ function parseConfigYaml(src: string): EthosConfig {
           ...(voiceTtsProviders ? { tts: { providers: voiceTtsProviders } } : {}),
           ...(voiceSttProviders ? { stt: { providers: voiceSttProviders } } : {}),
           ...(voiceRealtime ? { realtime: voiceRealtime } : {}),
+          ...(voiceChannels ? { channels: voiceChannels } : {}),
+          ...(voiceTranscode ? { transcode: voiceTranscode } : {}),
+          ...(voiceArtifacts ? { artifacts: voiceArtifacts } : {}),
         }
       : undefined;
   const teams = buildTeamsConfig(teamsKv);
@@ -3218,7 +3350,7 @@ function parseStreamingEdits(v: string | undefined): EthosConfig['displayStreami
 }
 
 function parseCallStyle(v: string | undefined): EthosConfig['displayCallStyle'] {
-  return v === 'liquid' || v === 'orb' || v === 'rings' ? v : undefined;
+  return v === 'liquid' || v === 'orb' || v === 'rings' || v === 'personality' ? v : undefined;
 }
 
 /** `personality` or a 6-digit hex. Anything else is dropped, not coerced. */
@@ -3232,6 +3364,31 @@ function parseToolPreviewLength(v: string | undefined): number | undefined {
   const n = Number(v);
   if (!Number.isFinite(n) || n < 0 || !Number.isInteger(n)) return undefined;
   return n;
+}
+
+/**
+ * Platform ids that may carry a `voice.channels.<platform>.ttsOut` override —
+ * the channels that have an adapter able to act on it. Anything else is
+ * ignored on read.
+ */
+export const VOICE_CHANNEL_PLATFORMS = [
+  'telegram',
+  'slack',
+  'discord',
+  'whatsapp',
+  'email',
+] as const;
+
+/** Exported so the RPC boundary (web-api's ConfigService) can REFUSE a platform
+ *  id this parser would silently drop, rather than keeping a second list. */
+export function isVoiceChannelPlatform(v: string): boolean {
+  return (VOICE_CHANNEL_PLATFORMS as readonly string[]).includes(v);
+}
+
+/** An integer inside [min, max], or `undefined` — never a clamped near-miss. */
+function parseBoundedInt(v: string, min: number, max: number): number | undefined {
+  const n = Number(v);
+  return Number.isInteger(n) && n >= min && n <= max ? n : undefined;
 }
 
 function isAudioFormat(v: string | undefined): v is 'opus' | 'mp3' | 'wav' | 'pcm' {

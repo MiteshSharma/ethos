@@ -7,8 +7,7 @@ export interface PickerPersonality {
   description?: string | null;
 }
 
-// Mirrors the chat switcher's hidden set (PersonalitySwitcher.tsx). Kept
-// local — these ids are meta-personalities that should never start a chat.
+// Meta-personalities that should never start a chat.
 export const HIDDEN_FROM_CHAT = new Set(['personality-architect', 'team-architect']);
 
 /**
@@ -62,8 +61,9 @@ export function moveSelection<T extends PickerPersonality>(
 /**
  * The "new session" navigation contract: selecting a personality must start
  * a FRESH session under it. The `new=1` flag is what Chat.tsx keys on to
- * reset the active session (vs a plain `?personality=` deep-link which only
- * sets the per-session override).
+ * reset the active session — and it is required, because a session belongs
+ * to the personality it started with, so a personality deep-link without it
+ * is ignored rather than applied to a conversation already under way.
  */
 export function buildNewSessionPath(id: string): string {
   return `/chat?personality=${encodeURIComponent(id)}&new=1`;

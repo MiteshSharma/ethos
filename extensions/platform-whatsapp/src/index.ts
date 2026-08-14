@@ -1,10 +1,13 @@
 import type {
   AdapterCapabilities,
+  AdapterVoiceCaps,
   AttachmentCache,
   DeliveryResult,
   InboundMessage,
   OutboundMessage,
   PlatformAdapter,
+  SendVoiceNoteOptions,
+  VoiceOutboundAdapter,
 } from '@ethosagent/types';
 import { downloadMedia } from './media';
 import { hasMedia, parseInboundMessage, type RawWhatsAppMessage } from './message-parser';
@@ -32,7 +35,7 @@ export interface WhatsAppAdapterConfig {
   onPairingCode?: (code: string | null) => void;
 }
 
-export class WhatsAppAdapter implements PlatformAdapter {
+export class WhatsAppAdapter implements PlatformAdapter, VoiceOutboundAdapter {
   readonly id: string;
   readonly displayName = 'WhatsApp';
   readonly canSendTyping = false;
@@ -43,6 +46,21 @@ export class WhatsAppAdapter implements PlatformAdapter {
   readonly capabilities: AdapterCapabilities = {
     platform: 'whatsapp',
     channelModes: true,
+  };
+
+  /**
+   * Declared voice capabilities. `ptt: true` is the flag that turns an audio
+   * message into a push-to-talk voice bubble rather than an audio file
+   * attachment — WhatsApp has no other way to express the difference.
+   */
+  readonly voiceCaps: AdapterVoiceCaps = {
+    inbound: ['ogg', 'opus', 'm4a', 'amr'],
+    outbound: {
+      formats: ['opus', 'ogg'],
+      kind: 'voice_note',
+      flags: { ptt: true },
+      maxBytes: 16 * 1024 * 1024,
+    },
   };
 
   readonly botKey: string;
@@ -317,6 +335,42 @@ export class WhatsAppAdapter implements PlatformAdapter {
     }
 
     return { ok: true, messageId: firstId };
+  }
+
+  /**
+   * The declared voice sink. `ptt: true` is what makes WhatsApp render a
+   * push-to-talk voice bubble instead of an audio-file attachment — it mirrors
+   * `voiceCaps.outbound.flags`. Never throws: `{ok:true}` is the delivery
+   * ledger's only proof of delivery.
+   *
+   * `opts.threadId` is ignored — WhatsApp has no thread concept, which is why
+   * `send()` uses `replyToId` as a quote and nothing else.
+   */
+  async sendVoiceNote(
+    chatId: string,
+    audio: Uint8Array,
+    opts: SendVoiceNoteOptions,
+  ): Promise<DeliveryResult> {
+    if (!this.sock) return { ok: false, error: 'Not connected' };
+
+    const sock = this.sock as {
+      sendMessage: (
+        jid: string,
+        content: unknown,
+        opts?: unknown,
+      ) => Promise<{ key: { id?: string } }>;
+    };
+
+    try {
+      const sent = await sock.sendMessage(chatId, {
+        audio: Buffer.from(audio),
+        mimetype: opts.mimeType,
+        ptt: true,
+      });
+      return { ok: true, messageId: sent.key.id };
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
   }
 
   onMessage(handler: (message: InboundMessage) => void): void {

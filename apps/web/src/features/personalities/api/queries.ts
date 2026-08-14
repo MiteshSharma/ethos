@@ -52,19 +52,3 @@ export function useActiveRenderers(personalityId: string): { renderers: string[]
   });
   return { renderers: query.data?.renderers ?? [] };
 }
-
-export function usePalettePersonalities(enabled: boolean) {
-  return useQuery({
-    queryKey: personalityKeys.palette(),
-    queryFn: () => rpc.personalities.list({}),
-    enabled,
-  });
-}
-
-/** Variant used by PersonalitySwitcher — uses the short key without 'list' */
-export function usePersonalitiesShort() {
-  return useQuery({
-    queryKey: ['personalities'],
-    queryFn: () => rpc.personalities.list({}),
-  });
-}

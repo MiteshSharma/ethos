@@ -71,6 +71,14 @@
 //                                 and follows symlinks, so symlink-refusal on an
 //                                 arbitrary path needs raw lstat.
 //
+//   extensions/gateway/          ffmpeg transcodes FILES, not buffers: the stage
+//   src/transcode.ts             writes the source bytes to a scratch path, runs
+//                                 the binary, and reads the output back. Those
+//                                 paths live in `os.tmpdir()`, never `~/.ethos/`
+//                                 — same carve-out as command-tts in
+//                                 extensions/voice-providers/, which shells out
+//                                 the same way for the same reason.
+//
 //   extensions/tools-code/       Textual false positive: the `node:fs` import sits
 //   src/shim/js-shim.ts          inside a String.raw literal — it is the
 //                                 CONTAINER-side shim client source delivered at
@@ -120,6 +128,7 @@ const ALLOWED_FILES = new Set([
   'extensions/skills/src/skill-compat.ts',
   'extensions/skills/src/file-context-injector.ts',
   'extensions/gateway/src/media.ts',
+  'extensions/gateway/src/transcode.ts',
   'extensions/skills/src/env-resolver.ts',
   'extensions/execution-docker/src/index.ts',
   'extensions/goal-store/src/index.ts',

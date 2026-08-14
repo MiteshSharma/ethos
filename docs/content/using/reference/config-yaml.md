@@ -1,10 +1,10 @@
 ---
 title: "config.yaml reference"
-description: "Every field in ~/.ethos/config.yaml — provider, model, channel tokens, retention TTLs, provider chain, voice tier and realtime roster."
+description: "Every field in ~/.ethos/config.yaml — provider, model, channel tokens, retention TTLs, provider chain, voice tier, channels, transcode and artifacts."
 kind: reference
 audience: user
 slug: config-yaml
-updated: 2026-08-13
+updated: 2026-08-14
 ---
 
 `~/.ethos/config.yaml` is a flat `key: value` file. Dotted keys (e.g. `retention.messages`, `providers.0.provider`) are how nested structures appear on disk — there is no indentation-based nesting. The parser ignores quotes around values.
@@ -479,7 +479,79 @@ Notes:
 
 Type: `off` | `mirror_inbound` | `all` · Default: `mirror_inbound`
 
-Where a new channel lane starts on spoken replies (`voice.defaultMode: all`). `off` — never speak. `mirror_inbound` — speak back when spoken to (default). `all` — speak every reply. An unrecognised value is ignored. Change it per-lane in chat with `/voice off|mirror_inbound|all`. Telegram is the only adapter that sends audio today.
+Where a conversation starts on spoken replies, on any channel whose adapter declares voice output — Telegram, Slack, Discord, and WhatsApp today.
+
+- `off` — never speak.
+- `mirror_inbound` — speak back when spoken to (default).
+- `all` — speak every reply.
+
+An unrecognised value is ignored. Change it per conversation in chat with `/voice off|mirror_inbound|all`; that choice is written to `~/.ethos/voice/lane-modes.json` and outlives both `/new` and a gateway restart. A channel switched off with [`voice.channels.<platform>.ttsOut: false`](#voice-channels-tts-out) stays silent even in `all`. See [Send and receive voice notes on a channel](../how-to/voice-notes-on-channels.md).
+
+```yaml
+voice.defaultMode: all
+```
+
+## voice.channels.\<platform\>.ttsOut {#voice-channels-tts-out}
+
+Type: boolean, keyed by platform id · Default: unset (the platform follows [`voice.defaultMode`](#voice-default-mode))
+
+Which channels may speak their replies. Accepted platform ids are `telegram`, `slack`, `discord`, `whatsapp`, and `email` (`VOICE_CHANNEL_PLATFORMS` in [`packages/config/src/index.ts`](https://github.com/ethosagent/ethos/blob/main/packages/config/src/index.ts)); an unknown id or a non-boolean value is dropped on read, so a typo cannot invent a channel entry no adapter will act on.
+
+An explicit `false` is an operator decision and outranks the conversation's mode — `/voice all` in a silenced Slack channel still produces text only. An explicit `true` changes nothing on its own; the conversation's mode still decides when to speak.
+
+```yaml
+voice.channels.slack.ttsOut: false
+voice.channels.whatsapp.ttsOut: true
+```
+
+Notes:
+
+- `email` is accepted by the parser but has no voice sink — the email adapter declares no voice caps, so the value is inert.
+- Editable in **Settings → Voice**, one switch per channel.
+
+## voice.transcode.\<field\> {#voice-transcode}
+
+Type: dotted group · Default: the per-field defaults below
+
+The ffmpeg stage that normalizes inbound audio before speech-to-text and converts synthesized replies into the container each adapter declared. `ffmpeg` is an **optional** runtime dependency of `ethos gateway start`: without it, audio already in an accepted format still passes through untouched, everything else is skipped rather than delivered unplayable, and the gateway prints `⚠ ffmpeg not found` once at startup.
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `ffmpegPath` | string | `ffmpeg` (resolved on `PATH`) | Path or name of the binary. Set it when ffmpeg is installed somewhere the gateway's `PATH` does not reach. |
+| `bitrateKbps` | integer | `32` | Target bitrate for compressed containers (opus, mp3, aac). Must be an integer in `8`–`320`; a value outside that range, or a non-integer, is **dropped, not clamped**, and the default stands. 32 kbps is a speech setting — raise it only if you are shipping music. |
+| `timeout` | integer (**seconds**) | `30` | Budget for one ffmpeg invocation. Must be an integer in `1`–`600`; out-of-range values are dropped. Note the unit: the key is seconds, the internal option is milliseconds. |
+
+```yaml
+voice.transcode.ffmpegPath: /opt/homebrew/bin/ffmpeg
+voice.transcode.bitrateKbps: 48
+voice.transcode.timeout: 45
+```
+
+Notes:
+
+- Only the outbound leg reads `bitrateKbps`. Inbound normalization targets the STT provider's preferred container, which is `wav` wherever the provider accepts it.
+- Editable under **Settings → Voice → Advanced**.
+
+## voice.artifacts.\<field\> {#voice-artifacts}
+
+Type: dotted group · Default: the per-field defaults below
+
+Retention for synthesized voice notes held on disk under `~/.ethos/voice/artifacts/`. An artifact is written before the send and deleted the moment its delivery obligation is confirmed, so in a healthy deployment this directory is empty; these two keys bound what happens to the recordings whose delivery is never confirmed. Both are enforced by `Gateway.pruneVoiceArtifacts()`, which runs at boot and hourly.
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `abandonAfterDays` | integer (days) | `7` | Give up on an undelivered obligation after this long and delete its recording. Must be an integer in `1`–`365`; out-of-range values are dropped, not clamped. |
+| `maxTotalMb` | integer (MiB) | `512` | Total on-disk cap for the artifact directory, evicting oldest-first once exceeded. The backstop for runaway accumulation when neither delivery nor abandonment has fired. Must be an integer in `1`–`102400`; out-of-range values are dropped. |
+
+```yaml
+voice.artifacts.abandonAfterDays: 3
+voice.artifacts.maxTotalMb: 128
+```
+
+Notes:
+
+- Redelivery re-sends the stored recording rather than synthesizing a second one — see [Why does a redelivered voice note re-send the recording?](../../building/explanation/why-voice-replies-redeliver.md). Shortening `abandonAfterDays` shortens the window in which that repair is still possible.
+- Editable under **Settings → Voice → Advanced**.
 
 ## activeContext {#active-context}
 
@@ -501,4 +573,5 @@ The directory can be relocated with the `ETHOS_DIR` env var.
 - [Run multiple Telegram bots from one process](../how-to/run-multi-bot-telegram.md) — `telegram.bots` list shape in practice
 - [Connect a Telegram bot to a team](../how-to/connect-telegram-to-team.md) — `bind.type: team` and `teams.*` knobs in practice
 - [Local voice: Kokoro TTS + Whisper large v3 STT](../how-to/local-voice.md) — the `auxiliary.asr.*` / `auxiliary.tts.*` pipeline keys and the egress gate in practice
+- [Send and receive voice notes on a channel](../how-to/voice-notes-on-channels.md) — the `voice.defaultMode` / `voice.channels.*` / `voice.transcode.*` keys in practice, plus the `/voice` command
 - [Glossary: personality](../../getting-started/glossary.md#personality) — what the term means everywhere else in the docs

@@ -13,8 +13,9 @@ import type { VoiceCallStatus } from './voice-call-reducer';
 
 /**
  * The six tuning constants, fixed by the motion lab the user approved. NOT
- * configurable — `display.call_style` and `display.call_accent` are the only
- * two user choices (DESIGN.md § "Call Stage").
+ * configurable — the treatment (`voice.call_style` / `display.call_style`) and
+ * the colour (`display.call_accent`) are the only choices (DESIGN.md § "Call
+ * Stage").
  */
 export const CALL_MOTION = {
   /** Amplitude low-pass. Applied exactly once per signal — see `callDrive`. */
@@ -31,8 +32,13 @@ export const CALL_MOTION = {
   thinkOrbit: 1.0,
 } as const;
 
-/** The three treatments a user can pick (`display.call_style`). */
-export type CallTreatment = 'liquid' | 'orb' | 'rings';
+/**
+ * The three treatments. Defined in contracts, not here: a personality declares
+ * one (`voice.call_style`), an operator pins one (`display.call_style`), and
+ * `resolveCallTreatment` picks between them for every surface — so the union
+ * has to be readable from below the web app.
+ */
+export type { CallTreatment } from '@ethosagent/types';
 
 /** What the stage draws. Three states, not nine — the strip owns the rest. */
 export type CallVisualState = 'listening' | 'thinking' | 'speaking';

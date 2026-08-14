@@ -448,6 +448,9 @@ importers:
       '@ethosagent/sdk':
         specifier: workspace:*
         version: link:../../packages/sdk
+      '@ethosagent/types':
+        specifier: workspace:*
+        version: link:../../packages/types
       '@ethosagent/ui-components':
         specifier: workspace:*
         version: link:../../packages/ui-components
@@ -530,6 +533,9 @@ importers:
       '@ethosagent/dashboard':
         specifier: workspace:*
         version: link:../../extensions/dashboard
+      '@ethosagent/delivery-ledger':
+        specifier: workspace:*
+        version: link:../../extensions/delivery-ledger
       '@ethosagent/digest':
         specifier: workspace:*
         version: link:../../extensions/digest
@@ -2165,10 +2171,17 @@ importers:
         specifier: workspace:*
         version: link:../types
 
-  packages/voice-text: {}
+  packages/voice-text:
+    dependencies:
+      '@ethosagent/types':
+        specifier: workspace:*
+        version: link:../types
 
   packages/web-contracts:
     dependencies:
+      '@ethosagent/types':
+        specifier: workspace:*
+        version: link:../types
       '@orpc/contract':
         specifier: ^1.14.3
         version: 1.14.14

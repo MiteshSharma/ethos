@@ -13,6 +13,7 @@
     "@ant-design/icons": "^5.6.1",
     "@ethosagent/design-tokens": "workspace:*",
     "@ethosagent/sdk": "workspace:*",
+    "@ethosagent/types": "workspace:*",
     "@ethosagent/ui-components": "workspace:*",
     "@ethosagent/voice-realtime-protocol": "workspace:*",
     "@ethosagent/voice-text": "workspace:*",

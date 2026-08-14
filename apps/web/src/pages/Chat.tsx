@@ -1,3 +1,4 @@
+import { resolveCallTreatment } from '@ethosagent/types';
 import { TurnStatusBar } from '@ethosagent/ui-components';
 import { useQueryClient } from '@tanstack/react-query';
 import { App as AntApp, ConfigProvider } from 'antd';
@@ -33,6 +34,7 @@ import {
 } from '../features/voice/TalkMode';
 import { createTalkModeClient, type RealtimeTokenAnswer } from '../features/voice/talk-mode-client';
 import { useVoiceCall, type VoiceCallClientHooks } from '../features/voice/useVoiceCall';
+import { VoiceModeToggle } from '../features/voice/VoiceModeToggle';
 import type { VoiceCallClient } from '../features/voice/voice-call-client';
 import {
   callStripVisible,
@@ -44,7 +46,7 @@ import { useChat } from '../hooks/useChat';
 import { useNewSessionModal } from '../hooks/useNewSessionModal';
 import { type AttachmentPreview, placeholderPreview, readPreviewData } from '../lib/attachments';
 import { clearLastSessionId, getLastSessionId, setLastSessionId } from '../lib/lastSession';
-import { personalityTheme } from '../lib/theme';
+import { accentVars, personalityAccent, personalityTheme } from '../lib/theme';
 import { rpc } from '../rpc';
 
 // The chat surface — daily-driver tab in v0. Composition:
@@ -63,10 +65,12 @@ import { rpc } from '../rpc';
 // While a call is carrying audio the page renders the Call Stage INSTEAD of
 // that composition — a mode, not a layer over it (DESIGN.md § "Call Stage").
 //
-// The whole subtree is wrapped in a per-personality `<ConfigProvider>`
-// so Antd primitives inherit the active accent (Send button background,
-// caret, focus ring, link colors). The base theme + AntApp wrap higher
-// up in `main.tsx`.
+// The whole subtree is wrapped in a per-personality `<ConfigProvider>` so Antd
+// primitives inherit the active accent, and the wrapper element carries the
+// same accent as `--accent` so the raw CSS that reads it (send button, caret,
+// focus rings, tool chips) tints with it too. A ConfigProvider renders no DOM
+// node, which is why the variable rides on the div rather than the provider.
+// The base theme + AntApp wrap higher up in `main.tsx`.
 //
 // `?session=<id>` in the URL is the deep-link handle — opening a session
 // from the Sessions tab (W4) navigates here with the param set; sending
@@ -162,21 +166,19 @@ export function Chat() {
     if (stored) setOverride(stored);
   }, [sessionQuery.data?.session.personalityId]);
 
-  // Consume `?personality=<id>` deep-links from the command palette.
-  // Sets the per-session override and strips the param so Back doesn't
-  // re-trigger the switch. The override state owns this flow — we
-  // intentionally don't fork the session here because the user picked
-  // the personality from the palette before sending anything; if they
-  // *had* an active conversation, the bar's switcher is the right path
-  // (it forks). Treat the deep-link as a "configure-then-chat" intent.
+  // Consume `?personality=<id>&new=1` deep-links from the New Session picker.
+  // A session belongs to the personality it started with, so a personality
+  // deep-link can only mean "start a fresh session under this one": it is
+  // honoured with `new=1` and ignored without it, which is what keeps a URL
+  // from re-personalising a conversation that is already under way. Either
+  // way the params are stripped so Back doesn't re-trigger it.
   const personalityParam = searchParams.get('personality');
   const newSessionParam = searchParams.get('new');
   // biome-ignore lint/correctness/useExhaustiveDependencies: resetSession/clearLastSessionId are stable; deps intentionally key on the params only
   useEffect(() => {
     if (!personalityParam) return;
-    setOverride(personalityParam);
     if (newSessionParam === '1') {
-      // New Session flow: start fresh under the chosen personality.
+      setOverride(personalityParam);
       resetSession();
       clearLastSessionId();
     }
@@ -487,6 +489,16 @@ export function Chat() {
   }, [inCall]);
   const callVisual = callStageVisual(voice.status);
   const callAccent = resolveCallAccent(configQuery.data?.callAccent, personalityId);
+  // Which shape the stage draws. One precedence rule, in contracts, shared with
+  // the character sheet: the personality's own `voice.call_style` first, then a
+  // concrete `display.call_style` pin, then a treatment derived from the id.
+  const callTreatment = resolveCallTreatment({
+    personalityId,
+    ...(personalityQuery.data?.personality.voice?.call_style
+      ? { personalityCallStyle: personalityQuery.data.personality.voice.call_style }
+      : {}),
+    ...(configQuery.data?.callStyle ? { operatorCallStyle: configQuery.data.callStyle } : {}),
+  });
   const callProviderLabel = providerSummary({
     status: voice.status,
     sttProvider: voice.sttProvider ?? configQuery.data?.voiceProvider ?? null,
@@ -626,59 +638,28 @@ export function Chat() {
     return () => controller.abort();
   }, [pendingClarify, inCall, askByVoice]);
 
-  const handleSwitchPersonality = async (newId: string) => {
-    // No-op: same personality clicked.
-    if (newId === personalityId) return;
-
-    // Empty session — no fork needed; the next chat.send creates a fresh
-    // session under the new personality.
-    if (!currentSessionId || state.messages.length === 0) {
-      setOverride(newId);
-      return;
-    }
-
-    // Active conversation — auto-fork per DESIGN.md to avoid tool-history
-    // mismatch when the new personality's toolset doesn't cover the prior
-    // calls. Old session stays available in Sessions tab; fork starts
-    // clean (well, with the same history copied) under the new accent.
-    try {
-      const result = await rpc.sessions.fork({ id: currentSessionId, personalityId: newId });
-      switchSession(result.session.id);
-      setSearchParams({ session: result.session.id }, { replace: true });
-      setLastSessionId(result.session.id);
-      setOverride(newId);
-      notification.info({
-        message: `Forked to ${capitalize(newId)}`,
-        description: 'Previous conversation is in the Sessions tab.',
-        placement: 'topRight',
-      });
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      notification.error({
-        message: 'Could not fork session',
-        description: message,
-        placement: 'topRight',
-      });
-    }
-  };
-
   const handleNewSession = () => {
     openNewSessionModal();
   };
 
   // Call Stage is a MODE: while it is up it IS the chat surface, so the normal
   // chat chrome (personality bar, message list, composer) is not also on screen
-  // behind it — including the PersonalityBar, whose rename/fork/new-session are
-  // the wrong things to offer mid-call. The way back to text is the stage's own
+  // behind it — including the PersonalityBar, whose rename/new-session are the
+  // wrong things to offer mid-call. The way back to text is the stage's own
   // "Back to chat" control, which collapses the mode WITHOUT ending the call and
   // hands over to the strip.
   if (stageVisible) {
     return (
       <ConfigProvider theme={personalityTheme(personalityId)}>
-        <div className="chat-tab chat-tab-call">
+        {/* `--accent` for the mode is the CALL's accent, which is the
+            personality's unless the operator pinned an explicit hex. The stage
+            used to stamp it on itself; defining it here instead keeps one
+            definition per subtree and lets the strip-era rules (turn label,
+            focus rings) resolve to the same colour the canvas is drawn in. */}
+        <div className="chat-tab chat-tab-call" style={accentVars(callAccent)}>
           <CallStage
             state={callVisual}
-            treatment={configQuery.data?.callStyle ?? 'liquid'}
+            treatment={callTreatment}
             accent={callAccent}
             personalityId={personalityId}
             personalityName={capitalize(personalityId)}
@@ -706,21 +687,26 @@ export function Chat() {
 
   return (
     <ConfigProvider theme={personalityTheme(personalityId)}>
-      <div className="chat-tab">
+      <div className="chat-tab" style={accentVars(personalityAccent(personalityId))}>
         <PersonalityBar
           personalityId={personalityId}
           model={isLoading ? '' : model}
-          onSwitchPersonality={(id) => void handleSwitchPersonality(id)}
           onNewSession={handleNewSession}
           sessionTitle={sessionTitle}
           onRenameSession={handleRenameSession}
           actionsSlot={
-            <TalkModeToggle
-              canTalk={canTalk}
-              personalityName={capitalize(personalityId)}
-              inCall={inCall}
-              onToggle={handleTalkToggle}
-            />
+            <>
+              {/* Whether replies are SPOKEN in this conversation, and whether
+                  the phone is up, are two different questions — so they are two
+                  controls, side by side, not one overloaded affordance. */}
+              <VoiceModeToggle sessionId={currentSessionId} />
+              <TalkModeToggle
+                canTalk={canTalk}
+                personalityName={capitalize(personalityId)}
+                inCall={inCall}
+                onToggle={handleTalkToggle}
+              />
+            </>
           }
         />
         {/* Not `inCall`: a finished call can still be the only thing on screen

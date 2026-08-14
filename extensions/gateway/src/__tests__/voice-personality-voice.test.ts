@@ -12,11 +12,13 @@
 import type { AgentLoop } from '@ethosagent/core';
 import { DefaultHookRegistry, DefaultTtsProviderRegistry } from '@ethosagent/core';
 import type {
+  AdapterVoiceCaps,
   DeliveryResult,
   InboundMessage,
   PersonalityVoiceConfig,
   PlatformAdapter,
   TtsProvider,
+  VoiceOutboundAdapter,
 } from '@ethosagent/types';
 import { describe, expect, it, vi } from 'vitest';
 import { Gateway } from '../index';
@@ -48,7 +50,19 @@ function stubLoop(): AgentLoop {
   } as unknown as AgentLoop;
 }
 
-function adapter(): PlatformAdapter {
+/**
+ * The gateway consults DECLARED voice caps before it synthesizes anything, so
+ * an adapter with no caps never reaches the TTS provider at all. Declaring
+ * `wav` — the format this fake provider emits — keeps the reply on the
+ * pass-through path, which is what leaves the voice id as the only variable
+ * under test.
+ */
+const WAV_CAPS: AdapterVoiceCaps = {
+  inbound: ['wav'],
+  outbound: { formats: ['wav'], kind: 'voice_note' },
+};
+
+function adapter(): PlatformAdapter & VoiceOutboundAdapter {
   return {
     id: 'telegram:bot-1',
     displayName: 'Telegram',
@@ -58,6 +72,10 @@ function adapter(): PlatformAdapter {
     canReact: false,
     canSendFiles: false,
     maxMessageLength: 4096,
+    voiceCaps: WAV_CAPS,
+    async sendVoiceNote(): Promise<DeliveryResult> {
+      return { ok: true, messageId: 'v1' };
+    },
     async start() {},
     async stop() {},
     async send(): Promise<DeliveryResult> {
@@ -148,8 +166,10 @@ describe('gateway channel TTS — personality voice', () => {
   });
 
   it('a personality with only a language map still falls back to global', async () => {
-    // The gateway has no per-turn language signal today, so a language-only
-    // block cannot select — and must not silently blank the global voice.
+    // A TYPED message carries no language signal — detection runs on a
+    // transcript, and there is none here — so a language-only block cannot
+    // select, and must not silently blank the global voice. (The spoken case is
+    // covered in voice-language.test.ts.)
     const voices = await spokenVoices({
       personalityVoice: { languages: { es: 'ef_dora' } },
       globalTtsVoice: 'am_michael',

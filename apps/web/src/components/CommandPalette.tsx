@@ -2,7 +2,6 @@ import { useQuery } from '@tanstack/react-query';
 import { Input, Modal } from 'antd';
 import { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { usePalettePersonalities } from '../features/personalities/api/queries';
 import { useNewSessionModal } from '../hooks/useNewSessionModal';
 import { setLastSessionId } from '../lib/lastSession';
 import { rpc } from '../rpc';
@@ -15,7 +14,11 @@ import { rpc } from '../rpc';
 //                    (so users can see where future tabs will live).
 //   2. Sessions    — most recent N from the same SessionStore the
 //                    Sessions tab paginates over.
-//   3. Actions     — verbs: new chat, toggle drawer, switch personality.
+//   3. Actions     — verbs: new chat, toggle drawer.
+//
+// There is no "switch personality" verb: a session belongs to the personality
+// it started with. Choosing an agent is part of starting a session, so it
+// lives in the New Session picker the "New chat session" action opens.
 //
 // Keyboard:
 //   ⌘K / Ctrl-K  → open
@@ -63,15 +66,13 @@ export function CommandPalette({ open, onClose, onToggleDrawer }: CommandPalette
     }
   }, [open]);
 
-  // Sessions + personalities feed the dynamic items. We only fetch when
-  // the palette is open so closed-state users don't pay the network cost
-  // every render.
+  // Recent sessions feed the dynamic items. We only fetch when the palette is
+  // open so closed-state users don't pay the network cost every render.
   const sessionsQuery = useQuery({
     queryKey: ['palette', 'sessions'],
     queryFn: () => rpc.sessions.list({ limit: RECENT_SESSION_COUNT }),
     enabled: open,
   });
-  const personalitiesQuery = usePalettePersonalities(open);
 
   const items = useMemo<CommandItem[]>(() => {
     const closeAfter = (fn: () => void) => () => {
@@ -124,21 +125,6 @@ export function CommandPalette({ open, onClose, onToggleDrawer }: CommandPalette
         keywords: ['stream', 'notifications', 'tools'],
         run: closeAfter(() => onToggleDrawer()),
       },
-      ...(personalitiesQuery.data?.items ?? []).map<CommandItem>((p) => ({
-        id: `action:personality:${p.id}`,
-        group: 'Actions',
-        label: `Switch personality → ${p.name}`,
-        hint: p.id,
-        keywords: ['personality', 'switch', p.id, ...(p.capabilities ?? [])],
-        run: closeAfter(() => {
-          // Switching mid-conversation forks the session, so we can't fire
-          // that flow from here without owning the chat hook. Cleanest
-          // path: navigate to /chat with a query param the page picks up
-          // and triggers its own switcher logic. We deep-link with
-          // `?personality=<id>` and let Chat consume + clear it.
-          navigate(`/chat?personality=${encodeURIComponent(p.id)}`);
-        }),
-      })),
     ];
 
     return [...pages, ...sessions, ...actions];
@@ -164,14 +150,7 @@ export function CommandPalette({ open, onClose, onToggleDrawer }: CommandPalette
         run: () => {},
       };
     }
-  }, [
-    navigate,
-    onClose,
-    onToggleDrawer,
-    openNewSessionModal,
-    sessionsQuery.data,
-    personalitiesQuery.data,
-  ]);
+  }, [navigate, onClose, onToggleDrawer, openNewSessionModal, sessionsQuery.data]);
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();

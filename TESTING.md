@@ -32,7 +32,7 @@ Where something could not be verified from inside the repo, it says so.
 | Local binary STT | `whisper-cli` (or any CLI transcriber) on `PATH` |
 | Browser talk-mode | A built SPA (`make web`) and a personality whose toolset lists `voice_session` |
 | Browser realtime tier | An OpenAI key with Realtime access and a `voice.realtime.providers.<name>` entry. `gemini-live` is contract-only and cannot serve a browser call — see [4b. The realtime tier](#4b-the-realtime-tier) |
-| Voice notes over Telegram | A Telegram bot token in `~/.ethos/config.yaml` |
+| Voice notes over channels | A bot token for the channel in `~/.ethos/config.yaml`, plus `ffmpeg` on `PATH` for anything the TTS provider does not already emit in a declared format |
 | Telephony, LiveKit transport | Native bindings, a LiveKit server, a SIP trunk, a rented number — none are repo dependencies |
 
 **How do I just hear it talk?** Configure `auxiliary.tts` (30 seconds — see
@@ -333,22 +333,43 @@ one-for-one). It does **not** expose `command`, so `command-stt` / `command-tts`
 be configured by hand in `config.yaml`. There is also a **Test TTS** button there
 that synthesizes a fixed phrase — a one-click check that the provider works.
 
-#### Telegram — voice note in, voice note out
+#### Channels — voice note in, voice note out
 
-With a bot token configured, run `ethos gateway`.
+With a bot token configured, run `ethos gateway start`.
 
-- **In:** send a voice note. `transcribeAudioAttachments` reads the cached bytes and
-  calls `transcribeBuffer`; the transcript is appended to the turn text. A failed or
-  hallucinated transcript degrades to `(voice message)` rather than failing the turn.
+- **In:** send a voice note. `transcribeAudioAttachments` normalizes the cached bytes
+  to the STT provider's preferred container (ffmpeg, `wav` when the provider takes it)
+  and calls `transcribeBuffer`; the transcript is appended to the turn text. Any
+  failure — a throw, a typed error, or an empty string — retries once re-encoded from
+  the original bytes as `wav`. A failed or hallucinated transcript degrades to
+  `(voice message)` rather than failing the turn. **All four channel adapters** classify
+  inbound audio as `type: 'audio'` and therefore reach STT — Telegram from `msg.voice`
+  and `msg.audio`, Slack and Discord from the upload's extension or content type,
+  WhatsApp from `audioMessage` (with the filename extension derived from the mimetype,
+  so a push-to-talk opus memo and a forwarded mp3 both land in the right container).
+  `.webm` stays classified as video on Slack and Discord and is not transcribed.
 - **Out:** after the text reply is delivered, `shouldReplyWithVoice()` decides. The
   per-lane default is `mirror_inbound` — it speaks back when you spoke to it. Change
-  it in-chat with `/voice off|mirror_inbound|all`.
+  it in-chat with `/voice off|mirror_inbound|all`; the mode is persisted by
+  `LaneVoiceModeStore` (`packages/core`) to `~/.ethos/voice/lane-modes.json`, so it
+  survives both `/new` and a gateway restart.
 - The reply text is run through `sanitizeForSpeech`, truncated at a sentence boundary
-  if the provider declares `maxInputChars`, then synthesized. Format `opus` goes out
-  via `sendVoice`; `mp3` / `wav` go via `sendAudio` as `reply.<ext>`. **Telegram is
-  the only adapter with `sendVoice` / `sendAudio`** — every other channel is text-only
-  today.
-- TTS failure is swallowed on purpose: the text was already delivered.
+  if the provider declares `maxInputChars`, then synthesized. **Which channels can
+  speak is declared, not sniffed:** an adapter implements `sendVoiceNote` and declares
+  `voiceCaps` (`packages/types/src/platform.ts`), and the gateway routes through
+  `isVoiceOutboundAdapter`. All four of `platform-telegram`, `platform-slack`,
+  `platform-discord` and `platform-whatsapp` declare caps today; a new adapter gets
+  TTS-out by declaring them. The gateway transcodes the synthesized audio into the
+  first format the sink declared — Telegram opus → `sendVoice` voice bubble, WhatsApp
+  opus with `{ ptt: true }`, Discord an attached audio file, Slack a `files.uploadV2`
+  with an inline player.
+- **ffmpeg is optional.** Without it, a reply already in a declared format passes
+  through and everything else is skipped with a `gateway.voice_format_unsupported`
+  event rather than delivered as an unplayable blob. The gateway prints a one-line
+  `⚠ ffmpeg not found` notice at startup.
+- TTS failure is swallowed on purpose: the text was already delivered. A voice note
+  that *was* synthesized but not confirmed is not lost — it is a `kind: 'voice'`
+  obligation in the delivery ledger, and the sweep re-sends the stored artifact.
 
 ---
 
@@ -462,8 +483,12 @@ no `voice` block.
 > - **Channel voice notes / replies** — the gateway reads the personality's
 >   `voice` block through the optional `personalityDirectory.voice(id)` seam
 >   (wired in `apps/ethos/src/commands/gateway.ts`) and passes the resolved
->   voice to `tts.synthesize`. The gateway has no per-turn language signal, so
->   the language rung is unused there and the personality's default voice wins.
+>   voice to `tts.synthesize`. The language rung is live here too:
+>   `detectLanguage()` (`@ethosagent/voice-text`) reads the transcript and is
+>   constrained to the tags the personality declares in `voice.languages`, so a
+>   Spanish voice note comes back in the Spanish voice. A personality that
+>   declares no language map supplies no candidates, no guess is made, and the
+>   default voice wins — the behaviour that existed before detection did.
 > - **Browser talk-mode and the Play button** — the client sends `personalityId`
 >   (and, where known, `language`) alongside the global voice it read from
 >   Settings; `VoiceService` applies the precedence server-side. The global
@@ -609,7 +634,7 @@ and playout legs sit outside it and are simply not measured.
 | Browser realtime tier (`gemini-live`) | Nothing will make this work in a browser | Not possible — `caps.ephemeralToken: false`, so the mint refuses `no_browser_token` and the call falls back to the pipeline with a visible notice. Deliberate; see [§4b](#4b-the-realtime-tier) | The refusal itself is pinned, on both the server and browser sides |
 | LiveKit transport | `@livekit/rtc-node` + `livekit-server-sdk` (**not repo dependencies**), a LiveKit server, and app-layer `LiveKitBindings` | Manual only — see `extensions/platform-voice/README.md` | `extensions/platform-voice/src/__tests__/` against fake room clients |
 | Telephony (`call`, inbound SIP) | A SIP trunk, a rented E.164 number, a `SipTrunkClient` implementation | Manual only | `extensions/tools-voice/src/__tests__/call.test.ts`; `call` self-reports unavailable with no trunk, and is in `APPROVAL_SURFACE_ALWAYS_ASK` so it always prompts |
-| Telegram voice notes | A bot token | Send a voice note to the bot with `ethos gateway` running | `extensions/gateway/src/__tests__/voice-pipeline.test.ts` |
+| Channel voice notes | A bot token, and `ffmpeg` on `PATH` for real container conversion | Send a voice note to the bot with `ethos gateway` running (all four declared adapters, in both directions) | `extensions/gateway/src/__tests__/voice-pipeline.test.ts`, `transcode.test.ts`, `voice-caps-sink.test.ts`, `voice-ledger-e2e.test.ts` — every ffmpeg invocation is a fake runner, no binary is ever spawned |
 
 Manual-verification list, condensed: **LiveKit native bindings, a SIP trunk plus a
 rented number, real cloud STT/TTS keys, a real OpenAI Realtime key, real
@@ -723,8 +748,12 @@ new state word:
   control that takes the call to the pipeline deliberately.
 
 Settings → Voice now edits every voice key the plans introduced, including
-`voice.trustedPlugins`, `voice.defaultMode`, and the `auxiliary.*` timeouts and
-output format. One edge stays config-file only: an allowlist that is **declared
+`voice.trustedPlugins`, `voice.defaultMode`, the per-channel
+`voice.channels.<platform>.ttsOut` switches, the advanced `voice.transcode.*` and
+`voice.artifacts.*` fields, and the `auxiliary.*` timeouts and
+output format. It also carries a read-only delivery-status readout over the
+`deliveries.summary` RPC — pending / redelivering / delivered / abandoned counts,
+with the same counts restricted to `kind = 'voice'`. One edge stays config-file only: an allowlist that is **declared
 but empty** (`voice.trustedPlugins:` with no value) arms the gate with nothing
 trusted. Settings treats an empty list as "gate off" because the web config
 writer cannot round-trip an empty value; write that line by hand if you want it.
@@ -760,9 +789,14 @@ plus the spoken-style injector measure ~2.3k chars / ~580 tokens today, so
 there is headroom, and the test is what stops it being spent silently.
 
 ### 7. Not built at all
-Channel TTS-out beyond Telegram and the ffmpeg transcode stage; the wake-word
-satellite; telephony beyond the typed seams. `shouldReplyWithVoice` accepts a
-`wakeTriggered` flag that nothing sets yet.
+The wake-word satellite; telephony beyond the typed seams.
+`shouldReplyWithVoice` accepts a `wakeTriggered` flag that nothing sets yet.
+
+Channel TTS-out and the ffmpeg transcode stage used to be listed here. Both
+shipped — see [§ Channels](#channels) for the declared-caps model that carries
+TTS-out to all four adapters, and `extensions/gateway/src/transcode.ts` for the
+stage. ffmpeg itself remains an optional host binary: without it the gateway
+sends only formats the TTS provider already produces.
 
 The realtime tier itself shipped ([§4b](#4b-the-realtime-tier)). Two things inside
 it did not: a **server-relay path**, so `gemini-live` is contract-only and cannot

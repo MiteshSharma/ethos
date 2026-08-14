@@ -59,13 +59,29 @@ Dark mode is **primary**. Light mode is **supported but not optimized** (used by
 
 ### Per-personality accent (the load-bearing identity affordance)
 
-The chat tab swaps `--accent` per active personality via a second `<ConfigProvider>` wrapper. Accent flows through:
-- Personality bar accent stripe (3-4px tall)
-- Composer caret color (`caret-color: var(--accent)`)
-- Send button background
-- Focus ring (`outline: 2px solid var(--accent); outline-offset: 1px`)
-- Link color in agent text
-- Active sidebar item left-border (when chat tab is active)
+The chat tab swaps the accent per active personality two ways at once, from one
+resolver (`personalityAccent` in `apps/web/src/lib/theme.ts`): a second
+`<ConfigProvider>` carries it as Antd's `colorPrimary`, and the element that
+provider wraps carries it as `--accent`. Both are needed — a `ConfigProvider`
+renders no DOM node, so raw CSS cannot read a variable off it. In Call Stage the
+same element carries the call's accent instead, which is the personality's unless
+`display.call_accent` pins a hex.
+
+Accent flows through:
+
+| Flow | Where it lives |
+|---|---|
+| Personality bar accent stripe (3px tall) | `PersonalityBar.tsx`, inline `background` |
+| Composer caret color | `input, textarea { caret-color: var(--accent, …) }` |
+| Send button background (and its hover, which brightens the accent rather than naming a second blue) | `.composer-send-btn` |
+| Focus ring (`outline: 2px solid var(--accent); outline-offset: 1px`) | 17 `:focus-visible` rules in `styles.css` |
+| Link color in agent text | `.message-assistant a` |
+
+**The sidebar is chrome, not identity.** The active nav item's left-border stays
+`--ethos-info`: the rail is outside the personality subtree, it is up while every
+tab is up, and tinting global navigation by whoever last spoke in Chat makes the
+app's furniture move with the conversation. Identity is carried inside the
+surface that has one.
 
 | Personality | Hex | Reasoning |
 |---|---|---|
@@ -156,6 +172,17 @@ Three-state dot (8px circle, `border-radius: 9999px`):
 Web surface: rendered in TopBar right-hand side alongside `{provider} · {model}` mono label.
 Desktop surface: rendered in sidebar bottom as an 8px dot inside a 20px glow ring (`border: 1.5px solid rgba(74,222,128,0.4)`).
 
+### Personality bar
+
+The bar at the top of the chat tab is **identity, read-only**: accent stripe,
+mark, name, model. It carries no control that changes which personality the
+conversation is with, because a session belongs to the personality it started
+with. The two controls it does carry act on the session, not on identity —
+rename, and `+` to start a new one (which is where a personality gets chosen,
+via the New Session picker). The same rule holds everywhere in the web UI: the
+command palette offers no "switch personality" verb, and a `?personality=`
+deep-link is honoured only alongside `new=1`.
+
 ### Call Stage
 
 Talk-mode's primary surface is a **mode, not a dialog**. Starting a call switches
@@ -178,7 +205,7 @@ exactly what a call cannot afford. The only column worth looking away to is the
 one that says what is happening in *this* call. Nothing else earns a column.
 
 The PersonalityBar is **not** rendered in this mode either, for the same reason:
-rename, fork and new-session are the wrong things to offer someone who is
+rename and new-session are the wrong things to offer someone who is
 talking. Identity is carried by the stage itself — the accent-coloured shape
 holding the personality's initial, and the name beneath it.
 
@@ -213,18 +240,33 @@ Off-call the clarify card is unchanged: it still floats over Chat as an
 `clarify.respond` / `clarify.resolved` path — in the slot it is a labelled
 region, not an alert, because nothing was interrupted by its arrival.
 
-Three user-selectable treatments, all driven by the same amplitude signal:
+Three treatments, all driven by the same amplitude signal:
 
-| Treatment | `display.call_style` | What it is |
+| Treatment | Value | What it is |
 |---|---|---|
-| Liquid (default) | `liquid` | The personality circle fills like a vessel; the surface is two summed sines, so it reads as liquid rather than a progress bar. |
+| Liquid | `liquid` | The personality circle fills like a vessel; the surface is two summed sines, so it reads as liquid rather than a progress bar. |
 | Orb | `orb` | A radial-gradient body whose rim deforms with amplitude. |
 | Rings | `rings` | Three concentric rings breathing outward from a solid core. |
 
+**Which one a call draws is the personality's, not the app's.** The shape is
+identity — the same argument the accent already won — so a personality declares
+it as `voice.call_style`, edited in its Identity step next to the voice fields.
+It is optional and there is no "unset" look: an undeclared personality gets a
+treatment derived from its id, deterministically, so a fresh install already
+shows five agents that do not look alike. `display.call_style` sits between the
+two for operators who want one shape everywhere; its default, `personality`, is
+not a pin. The order is one function — `resolveCallTreatment` in
+`packages/types/src/personality.ts`:
+
+1. the personality's `voice.call_style`
+2. `display.call_style`, when it names a concrete treatment
+3. derived from the personality id
+
 Color is `display.call_accent`: `personality` (default — follows the active
-personality's `--accent`, so the shape says *which* agent holds the floor) or an
-explicit hex. Both keys are edited in Settings → Voice → Call appearance. Nothing
-else about the stage is user-configurable.
+personality's accent, so the shape says *which* agent holds the floor) or an
+explicit hex. `display.call_style` and `display.call_accent` are edited in
+Settings → Voice → Call appearance. Nothing else about the stage is
+configurable — the motion constants are fixed in code.
 
 #### Motion class: continuous amplitude-driven motion
 
@@ -459,3 +501,5 @@ The web UI specifically must avoid these patterns. Code review checks for them.
 | 2026-08-12 | CallStrip added to the component inventory (voice V1a, DR3) | Talk-mode's nine states needed one home. A slim strip of ROWS on Chat, not a new surface and not a `Card`; the thinking state is the existing accent dot held steady, connecting/reconnecting borrows the amber connection dot, and provider + latency reuse the `{provider} · {model}` mono label rather than a badge or debug panel. |
 | 2026-08-13 | Call overlay supersedes the 2026-07-19 "In-call speaking indicator" entry | A 10px pulsing dot cannot express three continuously-changing states, so the call gets a non-blocking centered overlay (three treatments, amplitude-driven) that minimizes to the strip rather than ending the call. Adds one new motion class — continuous amplitude-driven motion — because the 80/180/240ms transition scale has no way to express a duplex call's need for continuous feedback. The strip keeps every state that is not carrying audio. |
 | 2026-08-14 | Call Stage supersedes the 2026-08-13 "Call overlay" entry | The user rejected the centered dialog: things appearing and disappearing mid-call read as instability. A call is now a MODE — Chat switches into a **two-column** stage (shape, this call's transcript) and returns to normal chat when the call ends. There is no left rail and no PersonalityBar: a navigation column mid-call invites wandering around the UI mid-sentence, and rename/fork/new-session are the wrong controls to offer someone who is talking. The one way back to the composer without hanging up is a single small **Back to chat** text button in the transcript header — the same collapse the strip's restore control reverses. The clarify question gets a reserved slot in the transcript column that is always on screen and fills in place, instead of a card that arrives over the conversation. Everything the overlay entry decided about the SHAPE — three treatments, the amplitude motion class, the per-state colour rules, mounting by the call rather than the state — carries over unchanged; only the container was wrong. |
+| 2026-08-14 | `--accent` is defined, and the call treatment is the personality's | Two halves of one correction. (1) `--accent` was READ 19 times across `styles.css` and defined NOWHERE, so every per-personality colour in raw CSS silently rendered the generic info blue — Antd primitives tinted, the CSS around them did not. It is now stamped on the chat subtree's own element from the same resolver `personalityTheme` uses, and `CallStage`'s local copy was removed so there is exactly one definition. (2) The call treatment moved from an app-wide `display.call_style` to `voice.call_style` on the personality, defaulting to a shape DERIVED from the personality id — every agent looks distinct with nothing configured, and the operator key becomes a pin rather than the source. Owner's doctrine: a personality is not just its tools and plugins, it is also how it looks and feels. |
+| 2026-08-14 | A session is bound to the personality it started with; the in-chat switcher is removed | Owner's call: "A session belongs to a personality that joined this when session started. Then you can't switch." The dropdown in the personality bar is gone, along with the auto-fork-on-switch behaviour it needed and the command palette's "Switch personality →" verb. Identity stays fully visible — stripe, mark, name, model — it just isn't a control any more. Choosing an agent is part of STARTING a session: the New Session picker (`+` in the bar, "New chat session" in the palette) is the one entry point, and a `?personality=` deep-link now applies only with `new=1`. Forking a session is still offered where it belongs, in the Sessions tab. |

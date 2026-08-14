@@ -1,20 +1,26 @@
+import type { CallTreatment } from '@ethosagent/types';
 import { useQuery } from '@tanstack/react-query';
 import { Button, Form, Input, Select, Space, Typography } from 'antd';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { rpc } from '../../rpc';
 
-// How a personality sounds — the identity fields that sit beside its name and
-// its mark, not a config knob — plus the one technical override that belongs
-// with them: which engine hears it.
+// How a personality sounds and looks — the identity fields that sit beside its
+// name and its mark, not config knobs — plus the one technical override that
+// belongs with them: which engine hears it.
 //
-// Four controls: which TTS provider (a `voice.tts.providers.<name>` roster
-// label, or the default entry), which voice, which STT provider (a
-// `voice.stt.providers.<name>` label, or the default), and which REALTIME
-// provider (a `voice.realtime.providers.<name>` label, or none). `voice.tier`,
+// Five controls: which TTS provider (a `voice.tts.providers.<name>` roster
+// label, or the default entry), which voice, how its call is DRAWN
+// (`voice.call_style`), which STT provider (a `voice.stt.providers.<name>`
+// label, or the default), and which REALTIME provider (a
+// `voice.realtime.providers.<name>` label, or none). `voice.tier`,
 // `voice.model` and the per-language map are deliberately absent — they
 // persist, but nothing routes on them yet, and a form field is a promise that
 // it works.
+//
+// The call look sits with the voice because it is the same question asked of a
+// different sense: a personality is not only what it says and how it sounds,
+// but how it presents itself while it holds the floor.
 //
 // The realtime select is here BECAUSE it routes: `voice.realtime_provider`
 // picks the roster entry the ephemeral-token mint resolves and the entry whose
@@ -44,7 +50,18 @@ export interface PersonalityVoice {
   sttProvider: string;
   /** Realtime roster entry name; `''` = whatever `voice.realtime.default` names. */
   realtimeProvider: string;
+  /** Call Stage treatment; `''` = fall through to `display.call_style`, then
+   *  to the treatment derived from this personality's id. */
+  callStyle: CallTreatment | '';
 }
+
+/** The three treatments, plus the "not declared" row that clears the key. */
+const CALL_STYLE_OPTIONS: ReadonlyArray<{ value: CallTreatment | ''; label: string }> = [
+  { value: '', label: 'Derived from this personality' },
+  { value: 'liquid', label: 'Liquid — the circle fills as it speaks' },
+  { value: 'orb', label: 'Orb — a body that deforms with the voice' },
+  { value: 'rings', label: 'Rings — concentric rings breathing outward' },
+];
 
 export function PersonalityVoiceFields({
   value,
@@ -158,6 +175,16 @@ export function PersonalityVoiceFields({
             onChange={(e) => onChange({ ...value, ttsVoice: e.target.value })}
           />
         )}
+      </Form.Item>
+      <Form.Item
+        label="Call look"
+        help="The shape the Call Stage draws while this personality holds the floor. Left as derived, it gets a stable shape from its own name — no two personalities have to look alike. A treatment pinned in Settings → Voice applies only to personalities that have not chosen one here."
+      >
+        <Select
+          value={value.callStyle}
+          onChange={(next: CallTreatment | '') => onChange({ ...value, callStyle: next })}
+          options={[...CALL_STYLE_OPTIONS]}
+        />
       </Form.Item>
       <Form.Item
         label="Speech-to-text provider"

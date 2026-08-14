@@ -5,7 +5,7 @@ kind: how-to
 audience: user
 slug: run-in-docker
 time: 10 min
-updated: 2026-07-16
+updated: 2026-08-14
 ---
 
 Run Ethos via Docker Compose. Set one provider API key, run one command, and get a web UI you can talk to. Config is provisioned by the CLI (`ethos setup --from-env`), which validates your key before writing it — no interactive setup, no hand-edited YAML.
@@ -22,6 +22,8 @@ Web UI at `http://localhost:3000` that opens directly in chat, config validated 
 
 - Docker 24+ with Compose v2 (`docker compose` subcommand, not the legacy `docker-compose` binary).
 - At least one provider API key (Anthropic, OpenAI, OpenRouter, Google, or Azure).
+
+The shipped image does **not** include `ffmpeg`. Everything except spoken replies on channels works without it; to get those, add `ffmpeg` to the runtime stage of `docker/Dockerfile` (`apt-get install -y --no-install-recommends ffmpeg`) and rebuild. Without it the gateway still starts, prints a `⚠ ffmpeg not found` notice, and delivers voice notes only in formats the TTS provider already emits — see [Send and receive voice notes on a channel](voice-notes-on-channels.md).
 
 ## Quick start (single service)
 

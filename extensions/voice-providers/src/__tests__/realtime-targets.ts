@@ -66,7 +66,8 @@ export const REALTIME_CONFORMANCE_TARGETS: Record<string, RealtimeConformanceTar
       if (create.item?.type !== 'function_call_output') {
         errors.push(`item type was "${create.item?.type}"`);
       }
-      if (create.item?.call_id !== callId) errors.push(`item call_id was "${create.item?.call_id}"`);
+      if (create.item?.call_id !== callId)
+        errors.push(`item call_id was "${create.item?.call_id}"`);
       if (create.item?.output !== output) errors.push(`item output was "${create.item?.output}"`);
       if ((sent[1] as { type?: string }).type !== 'response.create') {
         errors.push('sendToolResult did not ask the model to resume');
@@ -82,7 +83,8 @@ export const REALTIME_CONFORMANCE_TARGETS: Record<string, RealtimeConformanceTar
 
   'gemini-live': {
     label: 'gemini-live',
-    createProvider: (socketFactory) => new GeminiLiveProvider({ apiKey: 'test-key', socketFactory }),
+    createProvider: (socketFactory) =>
+      new GeminiLiveProvider({ apiKey: 'test-key', socketFactory }),
     confirmSession: [{ setupComplete: {} }],
     audioDelta: (pcmBase64) => ({
       serverContent: {

@@ -161,6 +161,14 @@ The runtime layer between channel adapters and `AgentLoop`. Routes inbound messa
 
 A configuration mode where the desktop app connects to an Ethos server running on another machine rather than starting a local backend. Configured via the Connection settings tab.
 
+### Voice mode {#voice-mode}
+
+Whether a conversation gets spoken replies: `off`, `mirror_inbound` (speak back when spoken to — the default), or `all`. Set per conversation with `/voice`, persisted to `~/.ethos/voice/lane-modes.json` so it outlives `/new` and a gateway restart, and overridden downward by an operator's `voice.channels.<platform>.ttsOut: false`. See [Send and receive voice notes on a channel](../using/how-to/voice-notes-on-channels.md).
+
+### Delivery obligation {#delivery-obligation}
+
+One row in the delivery ledger recording that a reply is owed to a chat. Written `pending` before the platform call and marked `delivered` only on a confirmed ack; whatever is still pending at the next gateway start is re-sent. A `kind: 'voice'` obligation carries the synthesized recording as a file on disk, so a retry re-sends those bytes rather than synthesizing again. See [Why does a redelivered voice note re-send the recording?](../building/explanation/why-voice-replies-redeliver.md).
+
 ## Web surfaces {#web-surfaces}
 
 ### Admin panel {#admin-panel}

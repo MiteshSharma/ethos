@@ -14,7 +14,31 @@ const DISCORD_CDN_HOSTS = new Set(['cdn.discordapp.com', 'media.discordapp.net']
 
 const IMAGE_CONTENT_TYPES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
 const IMAGE_EXTS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp']);
+/**
+ * Audio uploads are classified as `type: 'audio'` so channel STT transcribes
+ * them — a Discord voice message arrives as `audio/ogg` / `.ogg`. `webm` is
+ * deliberately absent: it carries either audio or video and is overwhelmingly
+ * video on Discord, the same call the Slack adapter made.
+ */
+const AUDIO_CONTENT_TYPES = new Set([
+  'audio/ogg',
+  'audio/opus',
+  'audio/mpeg',
+  'audio/mp4',
+  'audio/wav',
+  'audio/x-wav',
+  'audio/flac',
+  'audio/aac',
+]);
+const AUDIO_EXTS = new Set(['ogg', 'mp3', 'm4a', 'wav', 'flac', 'aac', 'opus']);
 const SKIP_EXTS = new Set(['exe', 'dll', 'so', 'dylib']);
+
+/** Turn text used when an attachment arrives with no message body. */
+const MEDIA_PLACEHOLDER: Record<Attachment['type'], string> = {
+  image: '(attached image)',
+  file: '(attached file)',
+  audio: '(voice message)',
+};
 
 /** Debounce window for edit events (ms). */
 const EDIT_DEBOUNCE_MS = 200;
@@ -69,7 +93,7 @@ export function registerMessageHandler(ctx: MessageContext): void {
     if (attachments.length > 0) {
       envelope.attachments = attachments;
       if (!envelope.text) {
-        envelope.text = attachments[0].type === 'image' ? '(attached image)' : '(attached file)';
+        envelope.text = MEDIA_PLACEHOLDER[attachments[0].type];
       }
     }
     ctx.onMessage(envelope);
@@ -188,15 +212,18 @@ async function buildMessageEnvelope(
   return envelope;
 }
 
-function classifyAttachmentType(
+/** Exported for testing — the classification the STT gate depends on. */
+export function classifyAttachmentType(
   contentType: string | null,
   filename: string | undefined,
-): 'image' | 'file' {
+): Attachment['type'] {
   // Trust contentType first when available
   if (contentType && IMAGE_CONTENT_TYPES.has(contentType)) return 'image';
+  if (contentType && AUDIO_CONTENT_TYPES.has(contentType)) return 'audio';
   // Fall back to extension
   const ext = filename?.split('.').pop()?.toLowerCase() ?? '';
   if (IMAGE_EXTS.has(ext)) return 'image';
+  if (AUDIO_EXTS.has(ext)) return 'audio';
   return 'file';
 }
 

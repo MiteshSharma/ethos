@@ -1,5 +1,9 @@
 import { randomBytes } from 'node:crypto';
-import { secretRefFromValue } from '@ethosagent/config';
+import {
+  isVoiceChannelPlatform,
+  secretRefFromValue,
+  VOICE_CHANNEL_PLATFORMS,
+} from '@ethosagent/config';
 import { EthosError, type SecretsResolver } from '@ethosagent/types';
 import {
   type ConfigRepository,
@@ -454,6 +458,24 @@ async function parseVoiceRealtimeProviders(
   return out;
 }
 
+/**
+ * `voice.channels.<platform>.ttsOut` → a flat platform→boolean map.
+ *
+ * Unknown platforms and non-boolean values are dropped, matching what the
+ * yaml parser in `@ethosagent/config` already did to them on load — the read
+ * path reports what the deployment ACTUALLY has, not what someone typed. The
+ * write path is stricter; see `validateSettingsPatch`.
+ */
+function parseVoiceChannelTtsOut(p: Record<string, string>): Record<string, boolean> {
+  const out: Record<string, boolean> = {};
+  for (const [key, value] of Object.entries(p)) {
+    const platform = key.match(/^voice\.channels\.([^.]+)\.ttsOut$/)?.[1];
+    if (!platform || !isVoiceChannelPlatform(platform)) continue;
+    if (value === 'true' || value === 'false') out[platform] = value === 'true';
+  }
+  return out;
+}
+
 function parseChannelToolsets(p: Record<string, string>): Record<string, string[]> {
   const out: Record<string, string[]> = {};
   for (const [key, value] of Object.entries(p)) {
@@ -488,6 +510,7 @@ const SETTINGS_PATCH_KEYS = [
   'voiceTtsProviders',
   'voiceSttProviders',
   'voiceRealtimeProviders',
+  'voiceChannelTtsOut',
   'nightlyPass',
   'weeklyDigest',
   'modelCatalog',
@@ -674,6 +697,27 @@ function validateSettingsPatch(patch: ConfigUpdateInput): void {
     }
   }
   checkPositive('voiceRealtimeSessionBudgetUsd', patch.voiceRealtimeSessionBudgetUsd);
+  if (patch.voiceChannelTtsOut) {
+    for (const platform of Object.keys(patch.voiceChannelTtsOut)) {
+      // REFUSED, not dropped — the opposite of what the yaml parser does with
+      // the same typo. There a bad hand-edit must not make the config
+      // unloadable, so an unknown platform is ignored; here there is a caller
+      // waiting on a response, and silently discarding their toggle would leave
+      // the Settings page showing a switch that never took.
+      if (!isVoiceChannelPlatform(platform)) {
+        invalidValue(
+          `voiceChannelTtsOut.${platform}`,
+          `is not a voice channel platform (${VOICE_CHANNEL_PLATFORMS.join(', ')})`,
+        );
+      }
+    }
+  }
+  // Bounds mirror the `parseBoundedInt` ranges in packages/config, which DROPS
+  // an out-of-range value; a direct (non-RPC) caller hears about it instead.
+  checkInt('voiceTranscodeBitrateKbps', patch.voiceTranscodeBitrateKbps, 8, 320);
+  checkInt('voiceTranscodeTimeoutSec', patch.voiceTranscodeTimeoutSec, 1, 600);
+  checkInt('voiceArtifactAbandonAfterDays', patch.voiceArtifactAbandonAfterDays, 1, 365);
+  checkInt('voiceArtifactMaxTotalMb', patch.voiceArtifactMaxTotalMb, 1, 102_400);
   if (patch.webhooks) {
     for (const [hookId, hook] of Object.entries(patch.webhooks)) {
       checkRecordKey(`webhooks.${hookId}`, hookId);
@@ -739,8 +783,8 @@ export interface ConfigGetResult {
   debugPanelModel: string | null;
   adminEnabled: boolean;
   streamingEdits: 'off' | 'dms' | 'all';
-  /** In-call overlay treatment (display.call_style). */
-  callStyle: 'liquid' | 'orb' | 'rings';
+  /** Call Stage treatment (display.call_style): `personality` or a pinned one. */
+  callStyle: 'liquid' | 'orb' | 'rings' | 'personality';
   /** In-call overlay color (display.call_accent): `personality` or a hex. */
   callAccent: string;
   autoCompact: boolean;
@@ -774,6 +818,14 @@ export interface ConfigGetResult {
   /** `null` = the key is absent = the local-only egress gate is OFF. */
   voiceTrustedPlugins: string[] | null;
   voiceDefaultMode: 'off' | 'mirror_inbound' | 'all' | null;
+  /** `voice.channels.<platform>.ttsOut` — an absent platform has no override. */
+  voiceChannelTtsOut: Record<string, boolean>;
+  voiceTranscodeFfmpegPath: string | null;
+  voiceTranscodeBitrateKbps: number | null;
+  /** `voice.transcode.timeout`, SECONDS. */
+  voiceTranscodeTimeoutSec: number | null;
+  voiceArtifactAbandonAfterDays: number | null;
+  voiceArtifactMaxTotalMb: number | null;
   // Settings-page additions — see the passthrough-groups comment above.
   apiVersion: string | null;
   verbose: boolean;
@@ -887,7 +939,7 @@ export interface ConfigUpdateInput {
   debugPanelModel?: string | null;
   adminEnabled?: boolean;
   streamingEdits?: 'off' | 'dms' | 'all';
-  callStyle?: 'liquid' | 'orb' | 'rings';
+  callStyle?: 'liquid' | 'orb' | 'rings' | 'personality';
   callAccent?: string;
   autoCompact?: boolean;
   memoryConsolidationEnabled?: boolean;
@@ -917,6 +969,20 @@ export interface ConfigUpdateInput {
   voiceSttTimeoutMs?: number | null;
   voiceTrustedPlugins?: string[] | null;
   voiceDefaultMode?: 'off' | 'mirror_inbound' | 'all' | null;
+  /** `voice.channels.<platform>.ttsOut`. Present REPLACES the whole map — an
+   *  omitted platform loses its override and inherits `voice.defaultMode`
+   *  again. An unrecognized platform id is refused, not dropped. */
+  voiceChannelTtsOut?: Record<string, boolean>;
+  /** `voice.transcode.ffmpegPath`; null clears the key. */
+  voiceTranscodeFfmpegPath?: string | null;
+  /** `voice.transcode.bitrateKbps`, 8–320; null clears the key. */
+  voiceTranscodeBitrateKbps?: number | null;
+  /** `voice.transcode.timeout`, SECONDS, 1–600; null clears the key. */
+  voiceTranscodeTimeoutSec?: number | null;
+  /** `voice.artifacts.abandonAfterDays`, 1–365; null clears the key. */
+  voiceArtifactAbandonAfterDays?: number | null;
+  /** `voice.artifacts.maxTotalMb`, 1–102400; null clears the key. */
+  voiceArtifactMaxTotalMb?: number | null;
   /** `voice.tts.providers.*`. Present REPLACES the whole roster — an omitted
    *  entry is a deletion, and its vault key is dropped with it. */
   voiceTtsProviders?: Record<string, VoiceProviderUpdateInput>;
@@ -1116,6 +1182,12 @@ export class ConfigService {
       voiceTrustedPlugins:
         p['voice.trustedPlugins'] === undefined ? null : splitList(p['voice.trustedPlugins']),
       voiceDefaultMode: pickEnumOrNull(p['voice.defaultMode'], ['off', 'mirror_inbound', 'all']),
+      voiceChannelTtsOut: parseVoiceChannelTtsOut(p),
+      voiceTranscodeFfmpegPath: passStr(p, 'voice.transcode.ffmpegPath'),
+      voiceTranscodeBitrateKbps: passNumOrNull(p, 'voice.transcode.bitrateKbps'),
+      voiceTranscodeTimeoutSec: passNumOrNull(p, 'voice.transcode.timeout'),
+      voiceArtifactAbandonAfterDays: passNumOrNull(p, 'voice.artifacts.abandonAfterDays'),
+      voiceArtifactMaxTotalMb: passNumOrNull(p, 'voice.artifacts.maxTotalMb'),
       voiceRealtimeDefault: passStr(p, 'voice.realtime.default'),
       voiceTier: pickEnumOrNull(p['voice.tier'], ['pipeline', 'realtime']),
       voiceRealtimeSessionBudgetUsd: passNumOrNull(p, 'voice.realtime.sessionBudgetUsd'),
@@ -1470,6 +1542,13 @@ export class ConfigService {
     set('auxiliary.tts.maxTextLength', patch.voiceTtsMaxTextLength);
     set('auxiliary.asr.timeout', patch.voiceSttTimeoutMs);
     set('voice.defaultMode', patch.voiceDefaultMode);
+    set('voice.transcode.ffmpegPath', patch.voiceTranscodeFfmpegPath);
+    set('voice.transcode.bitrateKbps', patch.voiceTranscodeBitrateKbps);
+    // The yaml key is `timeout`; the field says `Sec` because the unit is the
+    // one thing a bare `timeout` next to five `*Ms` neighbours cannot convey.
+    set('voice.transcode.timeout', patch.voiceTranscodeTimeoutSec);
+    set('voice.artifacts.abandonAfterDays', patch.voiceArtifactAbandonAfterDays);
+    set('voice.artifacts.maxTotalMb', patch.voiceArtifactMaxTotalMb);
     set('voice.tier', patch.voiceTier);
     set('voice.realtime.default', patch.voiceRealtimeDefault);
     set('voice.realtime.sessionBudgetUsd', patch.voiceRealtimeSessionBudgetUsd);
@@ -1492,7 +1571,8 @@ export class ConfigService {
       patch.channelToolsets !== undefined ||
       patch.voiceTtsProviders !== undefined ||
       patch.voiceSttProviders !== undefined ||
-      patch.voiceRealtimeProviders !== undefined;
+      patch.voiceRealtimeProviders !== undefined ||
+      patch.voiceChannelTtsOut !== undefined;
     const currentPassthrough = replacesRecords
       ? ((await this.opts.config.read())?.passthrough ?? {})
       : {};
@@ -1516,6 +1596,15 @@ export class ConfigService {
         for (const [sub, dur] of Object.entries(map)) {
           set(`personalities.${pid}.retention.${sub}`, dur);
         }
+      }
+    }
+    if (patch.voiceChannelTtsOut !== undefined) {
+      // Full replacement, same rule as the rosters: an omitted platform is not
+      // "unchanged", it is "no override" — which is a different deployment
+      // decision from `false` and has to be expressible.
+      deletePrefix('voice.channels.');
+      for (const [platform, ttsOut] of Object.entries(patch.voiceChannelTtsOut)) {
+        set(`voice.channels.${platform}.ttsOut`, ttsOut);
       }
     }
     if (patch.channelToolsets !== undefined) {
@@ -1668,6 +1757,11 @@ export class ConfigService {
     delete cleaned.voiceSttTimeoutMs;
     delete cleaned.voiceTrustedPlugins;
     delete cleaned.voiceDefaultMode;
+    delete cleaned.voiceTranscodeFfmpegPath;
+    delete cleaned.voiceTranscodeBitrateKbps;
+    delete cleaned.voiceTranscodeTimeoutSec;
+    delete cleaned.voiceArtifactAbandonAfterDays;
+    delete cleaned.voiceArtifactMaxTotalMb;
     delete cleaned.voiceTier;
     delete cleaned.voiceRealtimeDefault;
     delete cleaned.voiceRealtimeSessionBudgetUsd;
@@ -1761,9 +1855,10 @@ function parseStreamingEdits(value: string | undefined): 'off' | 'dms' | 'all' {
   return value === 'off' || value === 'all' ? value : 'dms';
 }
 
-/** `display.call_style` — the in-call overlay treatment. Unset = liquid. */
-function parseCallStyle(value: string | undefined): 'liquid' | 'orb' | 'rings' {
-  return value === 'orb' || value === 'rings' ? value : 'liquid';
+/** `display.call_style` — the Call Stage treatment. Unset = `personality`,
+ *  which lets each personality draw its own (declared or derived). */
+function parseCallStyle(value: string | undefined): 'liquid' | 'orb' | 'rings' | 'personality' {
+  return value === 'orb' || value === 'rings' || value === 'liquid' ? value : 'personality';
 }
 
 /**

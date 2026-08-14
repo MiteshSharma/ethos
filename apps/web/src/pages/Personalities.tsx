@@ -1,4 +1,5 @@
 import { InfoCircleOutlined } from '@ant-design/icons';
+import type { CallTreatment } from '@ethosagent/types';
 import type {
   McpPolicy,
   ModelTierConfigWire,
@@ -391,6 +392,8 @@ interface WizardState {
   voiceSttProvider: string;
   /** `voice.realtime_provider` — a `voice.realtime.providers.*` roster name; '' = deployment default. */
   voiceRealtimeProvider: string;
+  /** `voice.call_style` — the Call Stage treatment; '' = derived from the id. */
+  voiceCallStyle: CallTreatment | '';
 }
 
 const SOUL_TEMPLATE = `# About me\n\nI am a {role}. I {what I do}. I {how I work}.\n\n## How I respond\n\n- {tone / shape}\n- {tone / shape}\n- {tone / shape}\n`;
@@ -424,6 +427,7 @@ function CreateWizard({ existingIds, onClose }: { existingIds: Set<string>; onCl
     voiceTtsVoice: '',
     voiceSttProvider: '',
     voiceRealtimeProvider: '',
+    voiceCallStyle: '',
   });
 
   const createMut = useMutation({
@@ -470,7 +474,8 @@ function CreateWizard({ existingIds, onClose }: { existingIds: Set<string>; onCl
         ...(state.voiceTtsProvider ||
         state.voiceTtsVoice ||
         state.voiceSttProvider ||
-        state.voiceRealtimeProvider
+        state.voiceRealtimeProvider ||
+        state.voiceCallStyle
           ? {
               voice: {
                 ...(state.voiceTtsProvider ? { tts_provider: state.voiceTtsProvider } : {}),
@@ -479,6 +484,7 @@ function CreateWizard({ existingIds, onClose }: { existingIds: Set<string>; onCl
                 ...(state.voiceRealtimeProvider
                   ? { realtime_provider: state.voiceRealtimeProvider }
                   : {}),
+                ...(state.voiceCallStyle ? { call_style: state.voiceCallStyle } : {}),
               },
             }
           : {}),
@@ -641,6 +647,7 @@ function IdentityStep({
           ttsVoice: state.voiceTtsVoice,
           sttProvider: state.voiceSttProvider,
           realtimeProvider: state.voiceRealtimeProvider,
+          callStyle: state.voiceCallStyle,
         }}
         onChange={(next) =>
           setState((s) => ({
@@ -649,6 +656,7 @@ function IdentityStep({
             voiceTtsVoice: next.ttsVoice,
             voiceSttProvider: next.sttProvider,
             voiceRealtimeProvider: next.realtimeProvider,
+            voiceCallStyle: next.callStyle,
           }))
         }
       />
@@ -1729,6 +1737,7 @@ export function ConfigEditor({ id, personality }: { id: string; personality: Per
     ttsVoice: '',
     sttProvider: '',
     realtimeProvider: '',
+    callStyle: '',
   });
   const catalogQuery = useQuery({
     queryKey: ['models', 'catalog'],
@@ -1779,6 +1788,7 @@ export function ConfigEditor({ id, personality }: { id: string; personality: Per
       ttsVoice: personality.voice?.tts_voice ?? '',
       sttProvider: personality.voice?.stt_provider ?? '',
       realtimeProvider: personality.voice?.realtime_provider ?? '',
+      callStyle: personality.voice?.call_style ?? '',
     });
   }, [personality, form]);
 
@@ -1863,6 +1873,7 @@ export function ConfigEditor({ id, personality }: { id: string; personality: Per
           tts_voice: voice.ttsVoice,
           stt_provider: voice.sttProvider,
           realtime_provider: voice.realtimeProvider,
+          call_style: voice.callStyle,
         },
         nightly: {
           enabled: values.nightlyEnabled,

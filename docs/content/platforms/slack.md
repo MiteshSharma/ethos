@@ -233,5 +233,6 @@ Slack rotates the WebSocket; Bolt reconnects automatically. Persistent flapping 
 
 - [Telegram adapter](telegram.md) — long-polling adapter sharing the same gateway boundary.
 - [Discord adapter](discord.md) — guild and DM routing.
+- [Send and receive voice notes on a channel](../using/how-to/voice-notes-on-channels.md) — Slack transcribes audio uploads and can reply with a spoken file.
 - [Run Ethos as a daemon](../using/how-to/run-as-daemon.md) — `launchd`, `systemd`, `pm2`.
 - [Glossary](../getting-started/glossary.md) — [`gateway`](../getting-started/glossary.md#gateway), [`session`](../getting-started/glossary.md#session), [`audience boundary`](../getting-started/glossary.md#audience-boundary).

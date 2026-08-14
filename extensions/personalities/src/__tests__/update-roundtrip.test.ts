@@ -940,6 +940,60 @@ describe('voice round-trip', () => {
     expect(fresh.get('voice-legacy')?.voice?.tts_provider).toBe('studio');
   });
 
+  // `voice.call_style` is how a personality LOOKS on a call — the visual
+  // sibling of `tts_voice`, and a SUB-KEY of the same block, so the top-level
+  // field count is untouched by it as well.
+  it('parses voice.call_style and round-trips it through an update', async () => {
+    await seedPersonality(
+      'voice-look',
+      'name: VoiceLook\nvoice.tts_voice: alloy\nvoice.call_style: rings\n',
+    );
+    const registry = makeRegistry();
+    await registry.loadFromDirectory(join(testDir, 'personalities'));
+    expect(registry.get('voice-look')?.voice).toEqual({
+      tts_voice: 'alloy',
+      call_style: 'rings',
+    });
+
+    await registry.update('voice-look', { voice: { call_style: 'orb' } });
+    const raw = await readFile(
+      join(testDir, 'personalities', 'voice-look', 'config.yaml'),
+      'utf-8',
+    );
+    expect(raw).toContain('voice.call_style: orb');
+    // A patch naming only the look leaves the voice alone.
+    expect(raw).toContain('voice.tts_voice: alloy');
+
+    const fresh = makeRegistry();
+    await fresh.loadFromDirectory(join(testDir, 'personalities'));
+    expect(fresh.get('voice-look')?.voice?.call_style).toBe('orb');
+  });
+
+  it("clears voice.call_style on '' — the only way to say 'back to derived'", async () => {
+    await seedPersonality('voice-unlook', 'name: VoiceUnlook\nvoice.call_style: liquid\n');
+    const registry = makeRegistry();
+    await registry.loadFromDirectory(join(testDir, 'personalities'));
+
+    await registry.update('voice-unlook', { voice: { call_style: '' } });
+    const raw = await readFile(
+      join(testDir, 'personalities', 'voice-unlook', 'config.yaml'),
+      'utf-8',
+    );
+    expect(raw).not.toMatch(/^voice\.call_style:/m);
+
+    const fresh = makeRegistry();
+    await fresh.loadFromDirectory(join(testDir, 'personalities'));
+    expect(fresh.get('voice-unlook')?.voice?.call_style).toBeUndefined();
+  });
+
+  it('drops an unrecognised voice.call_style rather than failing the load', async () => {
+    await seedPersonality('voice-bad-look', 'name: VoiceBadLook\nvoice.call_style: sparkles\n');
+    const registry = makeRegistry();
+    await registry.loadFromDirectory(join(testDir, 'personalities'));
+    expect(registry.get('voice-bad-look')?.name).toBe('VoiceBadLook');
+    expect(registry.get('voice-bad-look')?.voice).toBeUndefined();
+  });
+
   it('prefers the new spelling when a config somehow carries both', async () => {
     await seedPersonality(
       'voice-both',

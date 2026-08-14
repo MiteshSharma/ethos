@@ -1037,6 +1037,9 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
     ...(voiceConfig?.realtimeRoster ? { realtimeRoster: voiceConfig.realtimeRoster } : {}),
     ...(voiceConfig?.realtimeDefault ? { realtimeDefault: voiceConfig.realtimeDefault } : {}),
     ...(voiceConfig?.tier ? { voiceTier: voiceConfig.tier } : {}),
+    // Where a conversation with no explicit `/voice` mode starts, the same
+    // `voice.defaultMode` the gateway reads for its channel lanes.
+    ...(config.voice?.defaultMode ? { voiceDefaultMode: config.voice.defaultMode } : {}),
     // The typed per-call cap. Live Settings config still wins; this is the
     // route that exists whether or not the live read does.
     ...(voiceConfig?.realtimeSessionBudgetUsd !== undefined

@@ -572,8 +572,8 @@ interface FormShape {
   memoryNotices: boolean;
   voiceEnabled: boolean;
   voiceChime: boolean;
-  /** In-call overlay treatment (display.call_style). */
-  callStyle: 'liquid' | 'orb' | 'rings';
+  /** Call Stage treatment (display.call_style). `personality` = per-agent. */
+  callStyle: 'liquid' | 'orb' | 'rings' | 'personality';
   /** `personality`, one of the preset hexes, or `custom`. */
   callAccent: string;
   /** The hex behind `callAccent: 'custom'`. Ignored otherwise. */
@@ -603,6 +603,16 @@ interface FormShape {
   voiceEgressGate: boolean;
   voiceTrustedPlugins: string[];
   voiceDefaultMode: string;
+  /** `voice.channels.<platform>.ttsOut`, one entry per known channel. On = the
+   *  channel follows the conversation's mode; off = it never speaks. */
+  voiceChannelTtsOut: Record<string, boolean>;
+  /** `voice.transcode.*` — '' / null mean "use the built-in default". */
+  voiceTranscodeFfmpegPath: string;
+  voiceTranscodeBitrateKbps: number | null;
+  voiceTranscodeTimeoutSec: number | null;
+  /** `voice.artifacts.*` — the bound on artifacts whose delivery never confirmed. */
+  voiceArtifactAbandonAfterDays: number | null;
+  voiceArtifactMaxTotalMb: number | null;
   /** `voice.tier` — '' = unset, so the surface picks. */
   voiceTier: string;
   /** `voice.realtime.default` — a realtime roster label, '' = unset. */
@@ -701,6 +711,7 @@ function isCallAccentPreset(value: string): boolean {
 }
 
 const CALL_STYLE_OPTIONS = [
+  { value: 'personality', label: 'Personality — each agent draws its own shape' },
   { value: 'liquid', label: 'Liquid — the circle fills as it speaks' },
   { value: 'orb', label: 'Orb — a body that deforms with the voice' },
   { value: 'rings', label: 'Rings — concentric rings breathing outward' },
@@ -709,6 +720,174 @@ const CALL_STYLE_OPTIONS = [
 const AUDIO_FORMATS = ['opus', 'mp3', 'wav', 'pcm'] as const;
 const VOICE_MODES = ['off', 'mirror_inbound', 'all'] as const;
 const VOICE_TIERS = ['pipeline', 'realtime'] as const;
+
+/**
+ * Channels that can carry a `voice.channels.<platform>.ttsOut` override — the
+ * ones with an adapter able to act on it. Mirrors `VOICE_CHANNEL_PLATFORMS` in
+ * `@ethosagent/config`, which the browser cannot import (node-only package);
+ * an id outside the list is dropped server-side either way.
+ */
+const VOICE_CHANNELS = ['telegram', 'slack', 'discord', 'whatsapp', 'email'] as const;
+
+const VOICE_CHANNEL_LABELS: Record<(typeof VOICE_CHANNELS)[number], string> = {
+  telegram: 'Telegram',
+  slack: 'Slack',
+  discord: 'Discord',
+  whatsapp: 'WhatsApp',
+  email: 'Email',
+};
+
+/**
+ * Per-channel TTS-out, hydrated for the switch row.
+ *
+ * Only `false` is load-bearing in the gateway (`channelVoiceOut[platform] ===
+ * false` silences the channel outright); `true` and "absent" behave the same,
+ * which is what lets a binary switch stand in for a tri-state key. On = the
+ * channel follows the conversation's own mode.
+ */
+export function voiceChannelTtsOutFromConfig(
+  map: Record<string, boolean>,
+): Record<string, boolean> {
+  return Object.fromEntries(VOICE_CHANNELS.map((c) => [c, map[c] !== false]));
+}
+
+/**
+ * The inverse. Only the silenced channels are written, so a channel switched
+ * back on returns to inheriting rather than carrying a redundant `true` in
+ * config.yaml. `config.update` replaces the whole map, so omission IS the
+ * clear.
+ */
+export function voiceChannelTtsOutPatch(form: Record<string, boolean>): Record<string, boolean> {
+  return Object.fromEntries(VOICE_CHANNELS.filter((c) => form[c] === false).map((c) => [c, false]));
+}
+
+// ---------------------------------------------------------------------------
+// Delivery status — the operator's window onto the delivery-obligation ledger.
+//
+// It lives in the Voice card because the voice split is what makes it
+// actionable here: an artifact-backed reply is the one whose loss is invisible
+// otherwise. Read-only by construction — there is no RPC that re-sends, and a
+// settings page must not be able to re-send someone's message.
+// ---------------------------------------------------------------------------
+
+type DeliverySummary = Awaited<ReturnType<typeof rpc.deliveries.summary>>;
+type DeliveryObligation = DeliverySummary['recent'][number];
+
+const DELIVERY_STATUSES = ['pending', 'redelivering', 'delivered', 'abandoned'] as const;
+
+/**
+ * `redelivering` is the ledger's word for a claimed obligation mid-sweep. The
+ * plan's state table calls what the user sees `redelivered`, because by the
+ * time it is on screen the sweep is what happened to it.
+ */
+const DELIVERY_STATUS_LABELS: Record<(typeof DELIVERY_STATUSES)[number], string> = {
+  pending: 'pending',
+  redelivering: 'redelivered',
+  delivered: 'delivered',
+  abandoned: 'abandoned',
+};
+
+/** Coarse age — the question is "how stale", never "exactly when". */
+export function deliveryAge(createdAt: number, now: number): string {
+  const seconds = Math.max(0, Math.round((now - createdAt) / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h`;
+  return `${Math.floor(hours / 24)}d`;
+}
+
+const DELIVERY_COLUMNS: ColumnsType<DeliveryObligation> = [
+  {
+    title: 'Platform',
+    dataIndex: 'platform',
+    render: (platform: string) => <span className="voice-delivery-mono">{platform}</span>,
+  },
+  {
+    title: 'Kind',
+    key: 'kind',
+    render: (_: unknown, row: DeliveryObligation) => (
+      <span className="voice-delivery-mono">
+        {row.mediaFormat ? `${row.kind} · ${row.mediaFormat}` : row.kind}
+      </span>
+    ),
+  },
+  {
+    title: 'Status',
+    dataIndex: 'status',
+    render: (status: DeliveryObligation['status']) => (
+      <span className="voice-delivery-mono">{DELIVERY_STATUS_LABELS[status]}</span>
+    ),
+  },
+  {
+    title: 'Age',
+    dataIndex: 'createdAt',
+    render: (createdAt: number) => (
+      <span className="voice-delivery-mono">{deliveryAge(createdAt, Date.now())}</span>
+    ),
+  },
+  { title: 'Reply', dataIndex: 'content', ellipsis: true },
+];
+
+function VoiceDeliveryStatus() {
+  const summaryQuery = useQuery({
+    queryKey: ['deliveries', 'summary'],
+    queryFn: () => rpc.deliveries.summary({ limit: 20 }),
+  });
+
+  if (summaryQuery.isLoading) {
+    return (
+      <div style={{ display: 'grid', placeItems: 'center', height: 60 }}>
+        <Spin />
+      </div>
+    );
+  }
+  const data = summaryQuery.data;
+  if (!data) {
+    return (
+      <Typography.Text type="secondary">
+        Delivery ledger unreadable — {(summaryQuery.error as Error | null)?.message ?? 'no data'}.
+      </Typography.Text>
+    );
+  }
+
+  const total = DELIVERY_STATUSES.reduce((sum, s) => sum + data.stats[s], 0);
+  if (total === 0 && data.recent.length === 0) {
+    return (
+      <Typography.Text type="secondary">
+        No outbound obligations recorded. The ledger fills as the gateway sends channel replies —
+        messages in this web chat are not obligations, so they never appear here.
+      </Typography.Text>
+    );
+  }
+
+  return (
+    <>
+      <div className="voice-delivery-stats">
+        {DELIVERY_STATUSES.map((status) => (
+          <div key={status} className="voice-delivery-stat">
+            <span className="voice-delivery-mono">{DELIVERY_STATUS_LABELS[status]}</span>
+            <span className="voice-delivery-count">{data.stats[status]}</span>
+            <span className="voice-delivery-mono voice-delivery-split">
+              voice {data.stats.voice[status]}
+            </span>
+          </div>
+        ))}
+      </div>
+      {data.recent.length > 0 ? (
+        <Table<DeliveryObligation>
+          size="small"
+          rowKey="id"
+          pagination={false}
+          columns={DELIVERY_COLUMNS}
+          dataSource={data.recent}
+          style={{ marginTop: 12 }}
+        />
+      ) : null}
+    </>
+  );
+}
 
 /** The provider menus, shared by each kind's Default entry and its roster rows. */
 const STT_PROVIDER_OPTIONS = [
@@ -1106,6 +1285,12 @@ export function Settings() {
         voiceEgressGate: configQuery.data.voiceTrustedPlugins !== null,
         voiceTrustedPlugins: configQuery.data.voiceTrustedPlugins ?? [],
         voiceDefaultMode: configQuery.data.voiceDefaultMode ?? '',
+        voiceChannelTtsOut: voiceChannelTtsOutFromConfig(configQuery.data.voiceChannelTtsOut),
+        voiceTranscodeFfmpegPath: configQuery.data.voiceTranscodeFfmpegPath ?? '',
+        voiceTranscodeBitrateKbps: configQuery.data.voiceTranscodeBitrateKbps,
+        voiceTranscodeTimeoutSec: configQuery.data.voiceTranscodeTimeoutSec,
+        voiceArtifactAbandonAfterDays: configQuery.data.voiceArtifactAbandonAfterDays,
+        voiceArtifactMaxTotalMb: configQuery.data.voiceArtifactMaxTotalMb,
         voiceTier: configQuery.data.voiceTier ?? '',
         voiceRealtimeDefault: configQuery.data.voiceRealtimeDefault ?? '',
         voiceRealtimeSessionBudgetUsd: configQuery.data.voiceRealtimeSessionBudgetUsd,
@@ -1442,6 +1627,12 @@ export function Settings() {
       // Off = drop the key entirely, which is what turns the gate off.
       voiceTrustedPlugins: values.voiceEgressGate ? values.voiceTrustedPlugins : null,
       voiceDefaultMode: voiceModeOrNull(values.voiceDefaultMode),
+      voiceChannelTtsOut: voiceChannelTtsOutPatch(values.voiceChannelTtsOut),
+      voiceTranscodeFfmpegPath: values.voiceTranscodeFfmpegPath || null,
+      voiceTranscodeBitrateKbps: values.voiceTranscodeBitrateKbps ?? null,
+      voiceTranscodeTimeoutSec: values.voiceTranscodeTimeoutSec ?? null,
+      voiceArtifactAbandonAfterDays: values.voiceArtifactAbandonAfterDays ?? null,
+      voiceArtifactMaxTotalMb: values.voiceArtifactMaxTotalMb ?? null,
       voiceTier: voiceTierOrNull(values.voiceTier),
       voiceRealtimeDefault: realtimeDefault || null,
       voiceRealtimeSessionBudgetUsd: values.voiceRealtimeSessionBudgetUsd ?? null,
@@ -2265,7 +2456,7 @@ export function Settings() {
           <Form.Item
             name="callStyle"
             label="Treatment"
-            extra="How the Call Stage draws the agent. All three follow the same voice level; only the shape differs."
+            extra="How the Call Stage draws the agent. All three follow the same voice level; only the shape differs. Personality lets each agent use the shape it declares, or one derived from its name — picking a treatment here pins it for every agent that has not chosen one."
           >
             <Select options={CALL_STYLE_OPTIONS} />
           </Form.Item>
@@ -2335,6 +2526,49 @@ export function Settings() {
                     >
                       Reset to defaults
                     </Button>
+                  </>
+                ),
+              },
+              {
+                key: 'voice-notes',
+                label: 'Advanced voice-note delivery',
+                children: (
+                  <>
+                    <Form.Item
+                      name="voiceTranscodeFfmpegPath"
+                      label="ffmpeg path"
+                      extra="ffmpeg is what re-containers a synthesized reply into the format each platform renders as a voice bubble instead of a file attachment. Without it Ethos can only send the formats the TTS provider already produces. Blank = whatever `ffmpeg` resolves to on PATH."
+                    >
+                      <Input placeholder="ffmpeg" />
+                    </Form.Item>
+                    <Form.Item
+                      name="voiceTranscodeBitrateKbps"
+                      label="Bitrate (kbps)"
+                      extra="Target bitrate for the transcoded voice note. Blank = 32, which is speech-grade."
+                    >
+                      <InputNumber min={8} max={320} step={8} placeholder="32" />
+                    </Form.Item>
+                    <Form.Item
+                      name="voiceTranscodeTimeoutSec"
+                      label="Transcode timeout (seconds)"
+                      extra="Budget for one ffmpeg run. Blank = 30."
+                    >
+                      <InputNumber min={1} max={600} placeholder="30" />
+                    </Form.Item>
+                    <Form.Item
+                      name="voiceArtifactAbandonAfterDays"
+                      label="Abandon after (days)"
+                      extra="An artifact is deleted the moment its delivery is confirmed. This bounds the ones that never are: give up on an undelivered voice note after this long and delete it. Blank = 7."
+                    >
+                      <InputNumber min={1} max={365} placeholder="7" />
+                    </Form.Item>
+                    <Form.Item
+                      name="voiceArtifactMaxTotalMb"
+                      label="Artifact directory cap (MiB)"
+                      extra="Oldest-first eviction once the stored artifacts exceed this — the backstop for when neither delivery nor abandonment has fired. Blank = 512."
+                    >
+                      <InputNumber min={1} max={102400} placeholder="512" />
+                    </Form.Item>
                   </>
                 ),
               },
@@ -2637,6 +2871,24 @@ export function Settings() {
               ]}
             />
           </Form.Item>
+          <VoiceSectionLabel>Channels that speak</VoiceSectionLabel>
+          <Typography.Paragraph type="secondary" style={{ marginTop: 0, fontSize: 13 }}>
+            A channel switched off never speaks, whatever mode the conversation is in — turning a
+            channel off is a deployment decision and outranks <code>/voice all</code> in one of its
+            lanes. A channel left on inherits the default above.
+          </Typography.Paragraph>
+          {VOICE_CHANNELS.map((channel) => (
+            <Form.Item
+              key={channel}
+              name={['voiceChannelTtsOut', channel]}
+              valuePropName="checked"
+              label={VOICE_CHANNEL_LABELS[channel]}
+            >
+              <Switch />
+            </Form.Item>
+          ))}
+          <VoiceSectionLabel>Delivery status</VoiceSectionLabel>
+          <VoiceDeliveryStatus />
           <Form.Item
             name="voiceEgressGate"
             valuePropName="checked"

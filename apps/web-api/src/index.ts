@@ -60,6 +60,7 @@ import { createWebApprovalHook, type DangerPredicate } from './services/approval
 import { type ApprovalObservability, ApprovalsService } from './services/approvals.service';
 import { ConfigService } from './services/config.service';
 import { CronService } from './services/cron.service';
+import { DeliveriesService } from './services/deliveries.service';
 import { DigestService } from './services/digest.service';
 import { DocumentsService } from './services/documents.service';
 import { EvolverService } from './services/evolver.service';
@@ -79,6 +80,7 @@ import { SystemEventBus } from './services/system-event-bus';
 import { TasksService } from './services/tasks.service';
 import { ToolSettingsService } from './services/tool-settings.service';
 import { VoiceService } from './services/voice.service';
+import { VoiceLaneModeService } from './services/voice-lane-mode.service';
 import { createRealtimeControlDeps } from './voice/realtime-control-deps';
 import { createRealtimeSurface } from './voice/realtime-surface';
 import { createVoiceSocket, readCookie, type VoiceSocket } from './voice/voice-socket';
@@ -197,6 +199,13 @@ export interface CreateWebApiOptions {
   realtimeDefault?: string;
   /** Boot snapshot of `voice.tier`. */
   voiceTier?: 'pipeline' | 'realtime';
+  /**
+   * Boot snapshot of `voice.defaultMode` — where a conversation with no
+   * explicit mode starts. Reported by `voice.laneMode.get` as `default` so the
+   * chat header can say "inheriting" rather than showing an invented choice.
+   * Absent → `mirror_inbound`, the same fallback the gateway takes.
+   */
+  voiceDefaultMode?: import('@ethosagent/types').VoiceMode;
   /**
    * Boot snapshot of `voice.realtime.sessionBudgetUsd` — the cap on ONE
    * realtime call. Live config still wins; this is what keeps the cap alive on
@@ -582,6 +591,17 @@ export function createWebApi(opts: CreateWebApiOptions): CreateWebApiResult {
     // edited on disk takes effect on the next listing, without a restart.
     refresh: () => opts.personalities.loadFromDirectory(join(opts.dataDir, 'personalities')),
   });
+  // Durable per-conversation voice mode. Constructed once (the store caches the
+  // parsed document) and shares `<dataDir>/voice/lane-modes.json` with the
+  // gateway's channel lanes, so a mode is one fact across surfaces.
+  const voiceLaneModeService = new VoiceLaneModeService({
+    storage,
+    dataDir: opts.dataDir,
+    ...(opts.voiceDefaultMode ? { defaultMode: opts.voiceDefaultMode } : {}),
+  });
+  // Read-only ledger view. Opens nothing until first asked, and nothing at all
+  // when the gateway has never run here.
+  const deliveriesService = new DeliveriesService({ dataDir: opts.dataDir, storage });
   const voiceService = new VoiceService({
     sttRegistry: opts.sttProviderRegistry,
     providerName: opts.sttProviderName,
@@ -941,6 +961,8 @@ export function createWebApi(opts: CreateWebApiOptions): CreateWebApiResult {
       namedSecrets: namedSecretsService,
       toolSettings: toolSettingsService,
       voice: voiceService,
+      voiceLaneMode: voiceLaneModeService,
+      deliveries: deliveriesService,
       toolRegistry: opts.toolRegistry,
       dashboards: dashboardsService,
       pluginLoader: opts.pluginLoader,

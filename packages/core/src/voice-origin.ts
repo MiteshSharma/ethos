@@ -1,4 +1,4 @@
-import type { VoiceTurnOrigin } from '@ethosagent/types';
+import { VOICE_ORIGIN_TAG, type VoiceTurnOrigin } from '@ethosagent/types';
 
 // The "this turn arrived as speech" marker, rendered as a MESSAGE-LEVEL
 // annotation on the transcribed user turn (voice V1a, eng-review D16).
@@ -27,8 +27,11 @@ function escapeXmlAttr(s: string): string {
     .replace(/>/g, '&gt;');
 }
 
-/** Marker tag name — the stable string tests and surfaces match on. */
-export const VOICE_ORIGIN_TAG = 'voice-origin';
+// The tag name itself lives in `@ethosagent/types` so the browser can match on
+// it without importing core (the web chat strips this annotation back off a
+// stored user message before rendering it). Re-exported here so core's public
+// surface and every existing importer are unchanged.
+export { VOICE_ORIGIN_TAG };
 
 /**
  * Render the voice-origin annotation for one transcribed turn.

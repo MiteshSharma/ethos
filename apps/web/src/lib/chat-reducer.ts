@@ -1,3 +1,4 @@
+import { VOICE_ORIGIN_TAG } from '@ethosagent/types';
 import {
   type ApprovalRequest,
   type CardEnvelope,
@@ -30,6 +31,20 @@ export interface UserMessage {
   /** Optimistically-rendered attachments shown as chips in the user bubble.
    *  Carries no base64 data — render-only metadata. */
   attachments?: MessageAttachment[];
+  /**
+   * How the turn ARRIVED. `'voice'` means the user spoke it; absent means they
+   * typed it.
+   *
+   * The transcript never overwrites the audio marker (voice-V2's hard
+   * invariant): `content` holds what was said and this holds the fact that it
+   * was SAID, so the bubble can show both. Recording it here rather than
+   * folding it into `content` is what keeps the two separable.
+   *
+   * `StoredMessage` carries no origin field, so a turn re-read from history
+   * recovers this by detecting the voice-origin annotation the agent loop baked
+   * into `content` — see `parseUserContent`.
+   */
+  origin?: 'voice';
 }
 
 export interface TextBlock {
@@ -161,14 +176,16 @@ export type ChatAction =
       text: string;
       timestamp: number;
       attachments?: MessageAttachment[];
+      /** `'voice'` when the turn was spoken. Typed sends omit it. */
+      origin?: 'voice';
     }
   | { type: 'steer-user-message'; id: string; text: string; timestamp: number }
   | { type: 'history-loaded'; messages: StoredMessage[]; cards?: SessionCard[] }
   | { type: 'send-failed'; userMessageId: string; error: string }
   | { type: 'clear-error' }
   /**
-   * Wipe state for a session change — used by the personality switcher
-   * after fork. Without this, the new session would briefly render with
+   * Wipe state for a session change — starting a new session, or opening a
+   * different one. Without this, the new session would briefly render with
    * the old session's messages until the history fetch completes.
    */
   | { type: 'reset' }
@@ -474,6 +491,7 @@ export function applyAction(state: ChatState, action: ChatAction): ChatState {
         content: action.text,
         timestamp: action.timestamp,
         ...(action.attachments?.length ? { attachments: action.attachments } : {}),
+        ...(action.origin === 'voice' ? { origin: 'voice' as const } : {}),
       };
       return {
         ...state,
@@ -686,6 +704,48 @@ function turnsMatch(a: AssistantTurn, b: AssistantTurn): boolean {
 }
 
 /**
+ * The voice-origin annotation as the agent loop persists it, matched as a whole
+ * block: the self-closing tag on its own line, the single instruction line that
+ * follows it, and the blank line separating it from whatever comes next.
+ *
+ * Producer: `buildVoiceOriginAnnotation` in `packages/core/src/voice-origin.ts`
+ * (baked into `content` by `stages/context-assembly.ts`). The instruction is
+ * one line with no internal newline, which is what lets `[^\n]*` bound it;
+ * `packages/core/src/__tests__/voice-origin-annotation.test.ts` pins that shape
+ * so the producer cannot drift away from this matcher.
+ *
+ * Anchored to a block boundary (start of string, or a blank line) so prose that
+ * merely mentions the tag is left alone.
+ */
+const VOICE_ORIGIN_BLOCK = new RegExp(
+  `(^|\\n\\n)<${VOICE_ORIGIN_TAG}(?:\\s[^\\n>]*)?/>\\n[^\\n]*(\\n\\n|$)`,
+);
+
+/**
+ * Split a stored user message into its displayable text and whether it was
+ * spoken.
+ *
+ * History replays `content` exactly as the agent loop persisted it, annotations
+ * and all. The voice-origin block is plumbing for the model, not something the
+ * user typed, so it comes out of the bubble — but the FACT it carried does not
+ * get thrown away with it: it comes back as `origin`, which is what the mono
+ * `voice` marker renders from. That is the invariant the whole feature rests
+ * on — the transcript never erases the audio marker.
+ *
+ * The `<attachments>` annotation leaks the same way and is deliberately left
+ * alone: it is W3.2's contract, not this change's, and stripping it here would
+ * be a silent second decision.
+ */
+export function parseUserContent(content: string): { text: string; origin?: 'voice' } {
+  const match = VOICE_ORIGIN_BLOCK.exec(content);
+  if (!match) return { text: content };
+  // Removing a middle block would fuse its neighbours; keep one separator.
+  // At either end there is no neighbour, so the separator goes too.
+  const joiner = match[1] && match[2] ? '\n\n' : '';
+  return { text: content.replace(VOICE_ORIGIN_BLOCK, joiner), origin: 'voice' };
+}
+
+/**
  * Reconstruct an interleaved history from the server's flat StoredMessage
  * stream. The agent loop persists each LLM iteration as a separate
  * assistant row (with its tool_use blocks attached) followed by the
@@ -708,17 +768,21 @@ function parseHistory(stored: StoredMessage[], cards: SessionCard[] = []): ChatM
   for (const m of stored) {
     if (m.role === 'user') {
       flush();
+      const { text, origin } = parseUserContent(m.content);
       ui.push({
         id: m.id,
         role: 'user',
-        content: m.content,
+        content: text,
         timestamp: new Date(m.timestamp).getTime(),
+        ...(origin ? { origin } : {}),
       });
       continue;
     }
 
     if (m.role === 'user_steer') {
       flush();
+      // No parseUserContent here: a steer is persisted as the raw steer text
+      // (`stages/tool-processing.ts`) and never carries an annotation.
       ui.push({
         id: m.id,
         role: 'user',
