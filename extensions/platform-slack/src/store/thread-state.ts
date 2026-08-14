@@ -34,8 +34,14 @@ export class ThreadStateStore {
       for (const line of raw.split('\n')) {
         const trimmed = line.trim();
         if (!trimmed) continue;
-        const parsed = RecordSchema.safeParse(JSON.parse(trimmed));
-        if (parsed.success) this.seen.add(this.key(parsed.data.channel, parsed.data.threadTs));
+        try {
+          const parsed = RecordSchema.safeParse(JSON.parse(trimmed));
+          if (parsed.success) this.seen.add(this.key(parsed.data.channel, parsed.data.threadTs));
+        } catch {
+          // Skip malformed lines — partial writes or manual edits. `safeParse`
+          // guards the SCHEMA, not the parse: without this one truncated line
+          // throws here and permanently blocks adapter startup.
+        }
       }
     }
     this.loaded = true;

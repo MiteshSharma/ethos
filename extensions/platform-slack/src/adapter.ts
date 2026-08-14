@@ -100,6 +100,30 @@ function normalizeWebUiBaseUrl(raw: string | undefined): string | undefined {
 /** Maximum file size in bytes that we'll download into memory. */
 const MAX_FILE_SIZE = 25 * 1024 * 1024; // 25 MB
 
+/**
+ * CHS-006 — hosts a token-bearing file download may target.
+ *
+ * `url_private_download` comes off an event payload, and the download sends
+ * the workspace bot token in an `Authorization` header. Confining the host is
+ * what stops a forged or tampered event from pointing that header at an
+ * attacker's server; the caller pairs this with `redirect: 'error'`, because a
+ * 302 off an allowed host would otherwise carry the token anywhere.
+ *
+ * Suffix match on a leading dot (plus the bare apex) so `slack.com` and
+ * `files.slack.com` pass while `slack.com.evil.test` and `notslack.com` do not.
+ */
+export function isSlackDownloadUrl(rawUrl: string): boolean {
+  let parsed: URL;
+  try {
+    parsed = new URL(rawUrl);
+  } catch {
+    return false;
+  }
+  if (parsed.protocol !== 'https:') return false;
+  const host = parsed.hostname.toLowerCase();
+  return host === 'slack.com' || host.endsWith('.slack.com');
+}
+
 const IMAGE_EXTS = new Set(['jpg', 'jpeg', 'png', 'gif', 'webp', 'heic', 'bmp', 'svg', 'tiff']);
 const SKIP_EXTS = new Set([
   'mp3',
@@ -120,7 +144,16 @@ export interface SlackAdapterConfig {
   botToken: string;
   /** App-level token for socket mode (xapp-...). */
   appToken: string;
-  /** Signing secret from Slack app config */
+  /**
+   * Signing secret from Slack app config.
+   *
+   * CHS-010 — retained but UNUSED under Socket Mode, which is the only mode
+   * this adapter runs. Request signatures authenticate inbound HTTP posts to a
+   * public Events API endpoint; a socket connection is already authenticated by
+   * `appToken` and receives no HTTP requests to verify. It stays on the config
+   * so a future non-socket receiver needs no config migration — do not read it
+   * as evidence that inbound requests are signature-checked today.
+   */
   signingSecret: string;
   /** Stable bot identity, computed once in wiring (`deriveBotKey`). Required —
    *  the adapter no longer derives its own key; routing is stamped from this. */
@@ -701,6 +734,9 @@ export class SlackAdapter implements PlatformAdapter, ApprovalCapableAdapter {
             text: chunk,
             ...(threadTs ? { thread_ts: threadTs } : {}),
             mrkdwn: true,
+            // CHS-004 defence in depth: never auto-linkify @name/#channel from
+            // message text, so text that bypasses toNativeMarkdown still cannot ping.
+            link_names: false,
           });
           const ts = result.ts as string | undefined;
           if (ts) ids.push(ts);
@@ -813,6 +849,9 @@ export class SlackAdapter implements PlatformAdapter, ApprovalCapableAdapter {
       text: leadMessage(rendered, this.maxMessageLength),
       ...(threadTs ? { thread_ts: threadTs } : {}),
       mrkdwn: true,
+      // CHS-004 defence in depth: never auto-linkify @name/#channel from
+      // message text, so text that bypasses toNativeMarkdown still cannot ping.
+      link_names: false,
     });
     const leadTs = lead.ts as string | undefined;
     if (!leadTs) return undefined;
@@ -837,7 +876,14 @@ export class SlackAdapter implements PlatformAdapter, ApprovalCapableAdapter {
   } {
     return {
       edit: async (ts, chunk) => {
-        await this.client.chat.update({ channel: chatId, ts, text: chunk });
+        // CHS-004 — the streaming terminal edit rewrites message text, so it
+        // needs the same mention suppression as the send paths.
+        await this.client.chat.update({
+          channel: chatId,
+          ts,
+          text: chunk,
+          link_names: false,
+        });
         return ts;
       },
       append: async (chunk) => {
@@ -846,6 +892,9 @@ export class SlackAdapter implements PlatformAdapter, ApprovalCapableAdapter {
           text: chunk,
           ...(threadTs ? { thread_ts: threadTs } : {}),
           mrkdwn: true,
+          // CHS-004 defence in depth: never auto-linkify @name/#channel from
+          // message text, so text that bypasses toNativeMarkdown still cannot ping.
+          link_names: false,
         });
         return (result.ts as string | undefined) ?? '';
       },
@@ -1141,12 +1190,18 @@ export class SlackAdapter implements PlatformAdapter, ApprovalCapableAdapter {
       if (SKIP_EXTS.has(ext)) continue;
       if ((file.size ?? 0) > MAX_FILE_SIZE) continue;
       if (!file.url_private_download) continue;
+      // CHS-006 — the URL arrives on an event payload, and the request carries
+      // the bot token. Confine it to Slack's own hosts and refuse redirects:
+      // otherwise an attacker-controlled `url_private_download` (or a redirect
+      // off one) exfiltrates the workspace token in an Authorization header.
+      if (!isSlackDownloadUrl(file.url_private_download)) continue;
 
       const type = IMAGE_EXTS.has(ext) ? ('image' as const) : ('file' as const);
 
       try {
         const res = await fetch(file.url_private_download, {
           headers: { Authorization: `Bearer ${this.botToken}` },
+          redirect: 'error',
         });
         if (!res.ok) continue;
         const contentLength = Number(res.headers.get('content-length') ?? 0);

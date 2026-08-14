@@ -142,7 +142,10 @@ describe('SlackAdapter long-answer fallback — non-streaming send', () => {
     // The lead promised an attachment...
     expect(posts[0]?.text as string).toContain('*full answer attached*');
     // ...so it is edited into the first real chunk and the rest are appended.
-    expect(updates).toEqual([{ channel: 'C1', ts: '170000000.0001', text: LONG.slice(0, 3000) }]);
+    expect(updates).toEqual([
+      // `link_names: false` — CHS-004 mention suppression on the edit path.
+      { channel: 'C1', ts: '170000000.0001', text: LONG.slice(0, 3000), link_names: false },
+    ]);
     expect(posts).toHaveLength(4);
     // Every character of the answer is on screen — no broken promise left.
     expect([updates[0]?.text, ...posts.slice(1).map((p) => p.text)].join('')).toBe(LONG);
