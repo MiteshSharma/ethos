@@ -107,6 +107,11 @@ const ENCODER_ARGS: Record<VoiceAudioFormat, (bitrateKbps: number) => string[] |
   wav: () => ['-c:a', 'pcm_s16le', '-ac', '1', '-ar', '16000', '-f', 'wav'],
   m4a: (b) => ['-c:a', 'aac', '-b:a', `${b}k`, '-ac', '1', '-f', 'ipod'],
   aac: (b) => ['-c:a', 'aac', '-b:a', `${b}k`, '-ac', '1', '-f', 'adts'],
+  // `libopencore_amrnb` is an EXTERNAL encoder, absent from many ffmpeg builds
+  // (stock Homebrew and the common static builds among them). When it is
+  // missing the stage fails honestly with ffmpeg's own "Unknown encoder"
+  // error rather than emitting a mislabelled container, and the retry walks on
+  // to the next target — so a caps list ending in amr degrades, it does not die.
   amr: () => ['-c:a', 'libopencore_amrnb', '-b:a', '12.2k', '-ac', '1', '-ar', '8000', '-f', 'amr'],
   flac: () => ['-c:a', 'flac', '-ac', '1', '-f', 'flac'],
   webm: (b) => ['-c:a', 'libopus', '-b:a', `${b}k`, '-ac', '1', '-f', 'webm'],
