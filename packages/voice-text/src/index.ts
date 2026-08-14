@@ -32,4 +32,5 @@ export {
   stripWakePhrase,
   type WakePhrase,
   type WakePhraseMatch,
+  wakePhraseKey,
 } from './wake-match';

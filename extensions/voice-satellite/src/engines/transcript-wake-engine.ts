@@ -42,7 +42,7 @@ import type {
 // before a route is saved, and an app may not import an extension
 // (ARCHITECTURE.md §III Law 5). Re-exported here so this module stays the
 // satellite's single import site for it.
-export { boundedLevenshtein, normalizeUtterance } from '@ethosagent/voice-text';
+export { boundedLevenshtein, normalizeUtterance, wakePhraseKey } from '@ethosagent/voice-text';
 
 class TranscriptWakeEngine implements WakeEngine {
   readonly name = 'transcript';

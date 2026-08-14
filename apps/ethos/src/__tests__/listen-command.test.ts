@@ -173,7 +173,7 @@ describe('the daemon refuses to start deaf', () => {
   });
 
   it('zero configured routes does NOT block the daemon, and claims nothing false', async () => {
-    // The server synthesizes `hey <name>` per unprivileged personality, so an
+    // The server synthesizes a bare-name route per unprivileged personality, so an
     // empty local table is the normal deployment, not a dead end. The daemon
     // starts and resolves its route against what the server pushes.
     const d = deps(preflight({ routes: [] }));
@@ -249,8 +249,9 @@ describe('the daemon refuses to start deaf', () => {
 // so the route table it routes against is a real pushed `routes` frame.
 // ---------------------------------------------------------------------------
 
+/** A synthesized route as the server now mints it: the phrase IS the name. */
 function wakeRoute(id: string, personalityId = id): WakeRoute {
-  return { id, phrase: `hey ${personalityId}`, personalityId, privileged: false, enabled: true };
+  return { id, phrase: personalityId, personalityId, privileged: false, enabled: true };
 }
 
 function routesFrame(routes: WakeRoute[]): SatelliteServerFrame {
@@ -440,8 +441,28 @@ describe('the daemon is an open mic addressed by phrase', () => {
     const out = logs.join('\n');
     expect(process.exitCode).toBeUndefined();
     expect(out).toContain('Addressable here');
-    expect(out).toContain('hey engineer');
-    expect(out).toContain('hey writer');
+    expect(out).toContain('"engineer"');
+    expect(out).toContain('"writer"');
+    // The phrase IS the personality's name, so the arrow would say the same
+    // word twice. What the line teaches instead is that the greeting is spare.
+    expect(out).not.toContain('"engineer"\u001b[0m\u001b[2m →');
+    expect(out).toContain('A greeting in front of it ("hey …") is optional');
+  });
+
+  it('keeps the arrow for a custom phrase, where who answers is not obvious', async () => {
+    const { ready } = await runDaemon([
+      {
+        id: 'kitchen',
+        phrase: 'hey chief',
+        personalityId: 'engineer',
+        privileged: false,
+        enabled: true,
+      },
+    ]);
+    await ready;
+    const out = logs.join('\n');
+    expect(out).toContain('"hey chief"');
+    expect(out).toContain('engineer');
   });
 
   it('states the model in one sentence: transcribed always, answered only when addressed', async () => {
@@ -452,7 +473,7 @@ describe('the daemon is an open mic addressed by phrase', () => {
     // including the follow-up window, in the server's own seconds (8000ms in
     // `routesFrame`, not this machine's config).
     expect(out).toContain('EVERYTHING heard here is transcribed');
-    expect(out).toContain('OPENS with a wake phrase');
+    expect(out).toContain("OPENS with a personality's NAME");
     expect(out).toContain('follow-ups within 8s');
     expect(out).toContain('heard and discarded');
     // …and no claim of a button that does not exist.
@@ -467,11 +488,11 @@ describe('the daemon is an open mic addressed by phrase', () => {
     await ready;
     const out = logs.join('\n');
     expect(out).toContain('Pinned by --route');
-    expect(out).toContain('hey engineer');
+    expect(out).toContain('"engineer"');
     // The pin narrows; it does not exempt. The other route is excluded, and
     // the pinned phrase is still required.
     expect(out).toContain('Other phrases are heard and discarded');
-    expect(out).not.toContain('hey writer');
+    expect(out).not.toContain('writer');
   });
 
   it('a --route the server never pushed fails against the PUSHED list', async () => {
@@ -531,7 +552,7 @@ describe('the daemon narrates the turn', () => {
     expect(out).toContain('pass the salt');
     // …and why nothing happened, in words that blame nobody.
     expect(out).toContain('not addressed to anyone');
-    expect(out).toContain('Open with a wake phrase');
+    expect(out).toContain("Open with a personality's name");
     expect(out).not.toContain('turn complete');
     expect(out).not.toContain('error');
     expect(out).not.toContain('failed');
@@ -545,9 +566,65 @@ describe('the daemon narrates the turn', () => {
     const out = outLines.join('\n');
     expect(out).toContain('no speech in that audio');
     // Nothing was said, so nothing was left unaddressed — claiming otherwise
-    // would tell the operator to say a wake phrase to a door that closed.
+    // would tell the operator to say a wake phrase to a door that closed. Nor
+    // was anything refused: silence is its own outcome, with its own remedy.
     expect(out).not.toContain('not addressed to anyone');
+    expect(out).not.toContain('the error above says why');
     expect(out).toContain('listening again');
+  });
+
+  it('a REFUSED route does not close with "not addressed to anyone"', async () => {
+    // What a real operator hit: the phrase matched a real route, the server
+    // declined it on privilege, and the closing line under that error told them
+    // they had addressed nobody and should open with a wake phrase — which is
+    // exactly what they had just done. The lane sends `error` then `turn_end`,
+    // so the outcome is known by the time the turn closes.
+    const { ready, push } = await runDaemon([wakeRoute('auto:engineer', 'engineer')]);
+    await ready;
+    push({ t: 'transcript', utteranceId: 'u1', text: 'Hello engineer, how are you?', final: true });
+    push({
+      t: 'error',
+      code: 'privileged_route',
+      message:
+        '"engineer" is privileged; set voice.wake.routes.hello-engineer.privileged: true to reach it by voice.',
+      utteranceId: 'u1',
+    });
+    push({ t: 'turn_end', utteranceId: 'u1' });
+    const out = outLines.join('\n');
+    // The reason still prints, and the closing line now agrees with it.
+    expect(out).toContain('privileged_route');
+    expect(out).toContain('no agent was called — the error above says why');
+    expect(out).not.toContain('not addressed to anyone');
+    expect(out).not.toContain("Open with a personality's name");
+    expect(out).toContain('Listening again');
+  });
+
+  it('an error for ANOTHER utterance does not colour this one’s closing line', async () => {
+    // The record is keyed by utterance, not a bare "an error happened" flag: a
+    // refusal that belonged to a previous turn must not make the next
+    // unaddressed sentence look like a refusal.
+    const { ready, push } = await runDaemon([wakeRoute('auto:engineer', 'engineer')]);
+    await ready;
+    push({ t: 'error', code: 'privileged_route', message: 'nope', utteranceId: 'u1' });
+    push({ t: 'turn_end', utteranceId: 'u1' });
+    push({ t: 'transcript', utteranceId: 'u2', text: 'pass the salt', final: true });
+    push({ t: 'turn_end', utteranceId: 'u2' });
+    const out = outLines.join('\n');
+    expect(occurrences(out, 'no agent was called — the error above says why')).toBe(1);
+    expect(occurrences(out, 'not addressed to anyone')).toBe(1);
+  });
+
+  it('a turn that FAILED after an agent was reached does not claim it completed', async () => {
+    // The same collapse on the other branch: `turn_failed` arrives with a
+    // personality — an agent WAS called — so the closing line used to say
+    // "turn complete" directly under the error that says it did not.
+    const { ready, push } = await runDaemon([wakeRoute('auto:engineer', 'engineer')]);
+    await ready;
+    push({ t: 'error', code: 'turn_failed', message: 'the model call failed', utteranceId: 'u1' });
+    push({ t: 'turn_end', utteranceId: 'u1', personalityId: 'engineer' });
+    const out = outLines.join('\n');
+    expect(out).toContain('the turn did not finish — the error above says why');
+    expect(out).not.toContain('turn complete');
   });
 
   it('a reply_text frame is printed as the personality’s answer', async () => {
@@ -620,6 +697,11 @@ describe('the daemon narrates the turn', () => {
     push({ t: 'transcript', utteranceId: 'u1', text: 'hello there', final: true });
     push({ t: 'reply_text', utteranceId: 'u1', personalityId: 'engineer', text: 'hello yourself' });
     push({ t: 'transcript', utteranceId: 'u2', text: '', final: true });
+    // Every closing line, including the two that quote an error: a refusal
+    // narrates as much as a turn does, and none of it may reach stdout.
+    push({ t: 'turn_end', utteranceId: 'u2' });
+    push({ t: 'error', code: 'privileged_route', message: 'nope', utteranceId: 'u3' });
+    push({ t: 'turn_end', utteranceId: 'u3' });
     // Ordered: the blip needs a live microphone, so it goes before the mute.
     blip(capture);
     push({ t: 'set_wake_enabled', enabled: false });
@@ -627,6 +709,7 @@ describe('the daemon narrates the turn', () => {
     expect(err).toContain('hello there');
     expect(err).toContain('hello yourself');
     expect(err).toContain('no speech in that audio');
+    expect(err).toContain('no agent was called — the error above says why');
     expect(err).toContain('discarded utterance');
     expect(err).toContain('muted');
     expect(outLines).toHaveLength(0);

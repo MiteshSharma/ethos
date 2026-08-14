@@ -13,7 +13,7 @@ Put a microphone in a room and you have added an entry point with no login scree
 
 So the question a wake route has to answer is not "is this the owner?" — nothing on this path can tell. It is: *given that anyone within earshot can trigger this, which agents may it reach?*
 
-Ethos answers by narrowing the default surface. Every unprivileged [personality](../../getting-started/glossary.md#personality) (a directory of files that decides the agent's tools, memory, and model) answers to `hey <name>` with no configuration at all. A **privileged** personality gets no such default, and a [wake route](../../getting-started/glossary.md#wake-route) (one `phrase → personality` mapping the server owns) pointed at one is refused unless it opts in out loud:
+Ethos answers by narrowing the default surface. Every unprivileged [personality](../../getting-started/glossary.md#personality) (a directory of files that decides the agent's tools, memory, and model) answers to its own name with no configuration at all — a greeting in front of it is optional, so `researcher` and `hey researcher` are the same address. A **privileged** personality gets no such default, and a [wake route](../../getting-started/glossary.md#wake-route) (one `phrase → personality` mapping the server owns) pointed at one is refused unless it opts in out loud:
 
 ```
 "engineer" is privileged; set voice.wake.routes.kitchen.privileged: true to reach it by voice.
@@ -75,7 +75,7 @@ What the window does change is the blast radius of a single successful wake: for
 
 **Gating is not the same as not listening.** On a host that matches server-side, refusing to run a turn happens *after* speech-to-text, so an utterance addressed to nobody has still been transcribed on the server. The gate protects the agent, not the microphone. A deployment that needs the audio never to leave unrecognized needs an acoustic engine, which today means `sherpa` and its models.
 
-**Privilege is toolset-shaped, so it can surprise you.** Adding `write_file` to a personality's toolset silently withdraws its `hey <name>` default, and the symptom is a phrase that stops working rather than an error at the moment the toolset changed. The Settings → Voice route table shows the effective set, which is where to look when a personality stops answering. On a satellite the same absence arrives as `ethos listen --route auto:<id>` refusing an id the pushed table does not hold; that refusal restates this rule, because a table listing only what is present reads like a bug.
+**Privilege is toolset-shaped, so it can surprise you.** Adding `write_file` to a personality's toolset silently withdraws its bare-name default, and the symptom is a phrase that stops working rather than an error at the moment the toolset changed. The Settings → Voice route table shows the effective set, which is where to look when a personality stops answering. On a satellite the same absence arrives as `ethos listen --route auto:<id>` refusing an id the pushed table does not hold; that refusal restates this rule, because a table listing only what is present reads like a bug.
 
 **A narrow toolset is not a safe one.** The lists cover irreversible *local* actions. A personality with only `web_search` and `send_message` is unprivileged by this definition and can still be told to message someone on the operator's behalf. The check bounds the blast radius; it does not make an ambient agent harmless.
 

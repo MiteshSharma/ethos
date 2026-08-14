@@ -167,11 +167,11 @@ Whether a conversation gets spoken replies: `off`, `mirror_inbound` (speak back 
 
 ### Wake satellite {#wake-satellite}
 
-A separate process that owns a microphone and connects to the Ethos server over `GET /satellite/ws`, streaming captured speech up and receiving synthesized replies back. Two hosts ship: the `ethos listen` daemon (capture is raw PCM on stdin; it matches no phrase itself, so the server transcribes everything and matches the wake phrase there) and the Electron main process (which has no capture device today and reports `degraded`). Each satellite has a stable `nodeId` that survives restarts, so the conversation it was having is still there after a reboot. See [Run a wake satellite](../using/how-to/run-a-wake-satellite.md).
+A separate process that owns a microphone and connects to the Ethos server over `GET /satellite/ws`, streaming captured speech up and receiving synthesized replies back. Two hosts ship: the `ethos listen` daemon (capture is raw PCM on stdin; it matches no phrase itself, so the server transcribes everything and matches the personality's name there) and the Electron main process (which has no capture device today and reports `degraded`). Each satellite has a stable `nodeId` that survives restarts, so the conversation it was having is still there after a reboot. See [Run a wake satellite](../using/how-to/run-a-wake-satellite.md).
 
 ### Wake route {#wake-route}
 
-One `phrase → personality` mapping the server owns: `voice.wake.routes.<id>` in `~/.ethos/config.yaml`, edited in **Settings → Voice → Wake routes** and pushed to every connected [wake satellite](#wake-satellite) on save. Routing is a deployment fact, not a [personality](#personality) field — two deployments of the same personality can reasonably answer to different phrases. Every unprivileged personality also answers to `hey <name>` with no configuration at all; those synthesized routes carry the id `auto:<personalityId>`.
+One `phrase → personality` mapping the server owns: `voice.wake.routes.<id>` in `~/.ethos/config.yaml`, edited in **Settings → Voice → Wake routes** and pushed to every connected [wake satellite](#wake-satellite) on save. Routing is a deployment fact, not a [personality](#personality) field — two deployments of the same personality can reasonably answer to different phrases. Every unprivileged personality also answers to its own bare name with no configuration at all; those synthesized routes carry the id `auto:<personalityId>`. A greeting in front of a phrase — `hey`, `hi`, `hello`, `ok`, `okay`, `yo`, `hey there` — is optional in both directions, so `researcher` and `hey researcher` are one trigger.
 
 ### Delivery obligation {#delivery-obligation}
 

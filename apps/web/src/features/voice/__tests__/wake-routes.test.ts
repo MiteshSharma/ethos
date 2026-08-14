@@ -55,7 +55,7 @@ describe('wake route hydrate / serialize', () => {
     );
   });
 
-  it('never hydrates a synthesized `hey <name>` route into an editable row', () => {
+  it('never hydrates a synthesized bare-name route into an editable row', () => {
     // Hydrating one would have the next save try to write `auto:researcher`
     // into config.yaml, materializing a default that is supposed to follow the
     // personality registry.
@@ -252,7 +252,7 @@ describe('wakeTestMatch against the effective table (DR2, implicit routes)', () 
     wire({ id: 'auto:coach', phrase: 'hey coach', personalityId: 'coach' }),
   ];
 
-  it('lights a synthesized `hey <name>` route — it answers in the room, so it answers here', () => {
+  it('lights a synthesized bare-name route — it answers in the room, so it answers here', () => {
     // The gap this closes: the phrase works with zero config, and the tester
     // used to stay dark for it because implicit rows are filtered out of the
     // editable drafts.
@@ -276,10 +276,16 @@ describe('wakeTestMatch against the effective table (DR2, implicit routes)', () 
     ];
     const candidates = wakeTestCandidates(configured, implicit);
     expect(candidates.map((c) => c.key)).toEqual(['k-res', 'auto:coach']);
-    expect(wakeTestMatch(configured, implicit, 'hey researcher what did you find', 0.5)).toBeNull();
+    // One row, reached either way: the greeting is optional on both sides, so
+    // "yo researcher" and "hey researcher" are the same trigger and the
+    // operator's row is the only thing that can light up for it.
+    expect(wakeTestMatch(configured, implicit, 'hey researcher what did you find', 0.5)).toBe(
+      'k-res',
+    );
     expect(wakeTestMatch(configured, implicit, 'yo researcher what did you find', 0.5)).toBe(
       'k-res',
     );
+    expect(wakeTestMatch(configured, implicit, 'researcher what did you find', 0.5)).toBe('k-res');
   });
 
   it('lets a disabled row suppress the default too, exactly as the server does', () => {
@@ -318,7 +324,7 @@ describe('wakeTestMatch against the effective table (DR2, implicit routes)', () 
 describe('empty-state copy', () => {
   it('renders DR1 exactly — a route table with nothing in it still works', () => {
     expect(WAKE_ROUTES_EMPTY_COPY).toBe(
-      "No wake routes yet — every personality answers to 'hey <name>'. Add a custom phrase.",
+      'No wake routes yet — say a personality\u2019s name to reach it. Add a custom phrase.',
     );
   });
 

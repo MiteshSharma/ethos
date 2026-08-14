@@ -34,7 +34,7 @@ import type {
   WakeMatch,
   WakeRoute,
 } from '../wake-engine';
-import { normalizeUtterance } from './transcript-wake-engine';
+import { wakePhraseKey } from './transcript-wake-engine';
 
 /** The npm package name, resolved at runtime and never bundled. */
 const SHERPA_PACKAGE = 'sherpa-onnx-node';
@@ -175,7 +175,12 @@ class SherpaWakeEngine implements WakeEngine {
     const lines: string[] = [];
     for (const route of routes) {
       if (route.enabled !== true) continue;
-      const keyword = tokenize(normalizeUtterance(route.phrase));
+      // `wakePhraseKey`, not `normalizeUtterance`: the transcript engine treats
+      // the leading greeting as optional, and a keyword spotter that insisted
+      // on "hey engineer" acoustically would be the two engines disagreeing
+      // about what the house answers to. The key is the name, which the spotter
+      // still finds inside "hey engineer".
+      const keyword = tokenize(wakePhraseKey(route.phrase));
       if (keyword.length === 0) continue;
       this.byKeyword.set(keyword, {
         id: route.id,

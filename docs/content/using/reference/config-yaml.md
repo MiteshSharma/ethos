@@ -598,13 +598,13 @@ The phrase → personality table. The route id is yours to choose and must match
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `phrase` | string | — | The spoken trigger, e.g. `hey engineer`. Required. |
+| `phrase` | string | — | The spoken trigger, e.g. `engineer`. Required. Matched with an optional leading greeting on either side — `hey`, `hi`, `hello`, `ok`, `okay`, `yo`, `hey there` — so a phrase written `engineer` also answers to "hey engineer", and one written `hey engineer` also answers to "engineer". Write it without the greeting; the two spellings are one trigger, so two routes differing only by a greeting can never both fire — the first in the table wins. |
 | `personality` | string | — | Personality id this phrase wakes. Required. Resolved against the live registry at wake time, so a route naming a deleted or renamed personality is refused rather than silently defaulted. |
 | `privileged` | boolean | `false` | Opt-in required before a **privileged** personality is reachable by voice — one whose toolset can reach a tool the approval layer would stop and ask about. See [Why can't a voice in the room reach a privileged personality?](../explanation/wake-privilege.md). |
 | `enabled` | boolean | `true` | Switch a route off without deleting it. |
 
 ```yaml
-voice.wake.routes.kitchen.phrase: hey engineer
+voice.wake.routes.kitchen.phrase: engineer
 voice.wake.routes.kitchen.personality: engineer
 voice.wake.routes.kitchen.privileged: true
 ```
@@ -612,8 +612,8 @@ voice.wake.routes.kitchen.privileged: true
 Notes:
 
 - A route missing `phrase` **or** `personality` is dropped entirely rather than half-built — a half-route would look configured in the Settings table and never fire.
-- **The phrase must open the utterance.** Matching is head-anchored and word-aligned, so "so I said hey engineer to nobody" does not fire. The longest matching phrase wins, and the matched words are stripped before the turn runs — `hey engineer, did CI pass` reaches the agent as `did CI pass`.
-- **Implicit routes.** Every unprivileged personality also answers to `hey <name>`, synthesized server-side and never written to this file. Those carry the id `auto:<personalityId>` — outside the charset above, so they can never collide with one of yours. A configured route naming a personality suppresses that personality's implicit route, including a route you set to `enabled: false`.
+- **The phrase must open the utterance.** Matching is head-anchored and word-aligned, so "so I said hey engineer to nobody" does not fire. The longest matching phrase wins, and the matched words — the greeting included — are stripped before the turn runs, so `engineer, did CI pass` and `hey engineer, did CI pass` both reach the agent as `did CI pass`.
+- **Implicit routes.** Every unprivileged personality also answers to its own name, synthesized server-side and never written to this file. Those carry the id `auto:<personalityId>` — outside the charset above, so they can never collide with one of yours. A configured route naming a personality suppresses that personality's implicit route, including a route you set to `enabled: false`.
 - Saving the table in **Settings → Voice → Wake routes** pushes it to every connected satellite. Hand-editing this file applies on the next satellite reconnect or server restart; nothing watches the file.
 - Implicit routes are shown in the Settings editor and cannot be saved back — they are not entries in this file.
 

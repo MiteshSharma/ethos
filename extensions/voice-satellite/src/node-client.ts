@@ -53,6 +53,22 @@ export type SatellitePlayoutEvent =
   /** `personalityId` absent → nobody answered: the utterance was not addressed. */
   | { type: 'turn_end'; utteranceId: string; personalityId?: string };
 
+/**
+ * The `error` frame's own fields, handed to the host beside the rendered line.
+ *
+ * Its ABSENCE is the useful half: a report with no detail did not come from the
+ * server at all — it is this client saying a send failed, a frame would not
+ * decode, or a host callback threw. A host that narrates per-utterance outcomes
+ * must not attribute those to the utterance in flight, and the message string
+ * alone cannot tell it which kind it is holding.
+ */
+export interface SatelliteErrorDetail {
+  code: string;
+  /** Which utterance the server refused. Absent on lane-wide failures. */
+  utteranceId?: string;
+  wakeId?: string;
+}
+
 type RoutesFrame = Extract<SatelliteServerFrame, { t: 'routes' }>;
 type ReadyFrame = Extract<SatelliteServerFrame, { t: 'ready' }>;
 type ServerTranscriptFrame = Extract<SatelliteServerFrame, { t: 'transcript' }>;
@@ -125,7 +141,8 @@ export interface SatelliteClientOptions {
    */
   onReplyText?(frame: ServerReplyTextFrame): void;
   onSetWakeEnabled(enabled: boolean): void;
-  onError(message: string): void;
+  /** `detail` is present only for a server `error` frame — see the type. */
+  onError(message: string, detail?: SatelliteErrorDetail): void;
   /** Reconnect backoff floor. Default 500ms. */
   reconnectBaseMs?: number;
   /** Reconnect backoff ceiling. Default 30s. */
@@ -196,9 +213,9 @@ export function createSatelliteClient(options: SatelliteClientOptions): Satellit
   let inFlight: InFlightUtterance | null = null;
 
   /** Report and never rethrow: an error path that throws is a crash path. */
-  function report(message: string): void {
+  function report(message: string, detail?: SatelliteErrorDetail): void {
     try {
-      options.onError(message);
+      options.onError(message, detail);
     } catch {
       // The host's own error handler failed. There is nowhere left to report
       // to, and library code does not write to the console.
@@ -307,7 +324,14 @@ export function createSatelliteClient(options: SatelliteClientOptions): Satellit
         return;
       case 'error': {
         const err: ServerErrorFrame = frame;
-        report(`server error [${err.code}]: ${err.message}`);
+        // The ids travel with the line. They are already on the wire, and a
+        // host that has to guess which utterance a refusal belonged to guesses
+        // wrong exactly when it matters — while one is in flight.
+        report(`server error [${err.code}]: ${err.message}`, {
+          code: err.code,
+          ...(err.utteranceId === undefined ? {} : { utteranceId: err.utteranceId }),
+          ...(err.wakeId === undefined ? {} : { wakeId: err.wakeId }),
+        });
         return;
       }
     }

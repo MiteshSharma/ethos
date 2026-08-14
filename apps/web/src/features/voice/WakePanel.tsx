@@ -51,7 +51,7 @@ const TEST_CAP_MS = 4_000;
 
 interface WakeTesterProps {
   drafts: readonly WakeRouteDraft[];
-  /** The synthesized `hey <name>` defaults — matchable, though not editable. */
+  /** The synthesized bare-name defaults — matchable, though not editable. */
   implicit: readonly WakeRouteWire[];
   sensitivity: number;
   onMatch: (key: string | null, transcript: string) => void;
@@ -68,7 +68,7 @@ interface WakeTesterProps {
  * tells confidently.
  *
  * It matches the EFFECTIVE table — the editor's rows plus the implicit
- * `hey <name>` defaults — because those defaults answer in the room, and a
+ * bare-name defaults — because those defaults answer in the room, and a
  * tester that could only prove the configured half would be quietly narrower
  * than the thing it is testing.
  *
@@ -220,7 +220,7 @@ export function WakePanel() {
   const rows = drafts ?? [];
   const settings = routesQuery.data?.settings;
   // Not editable and not saved back — the server derives them from the
-  // personality registry. Shown so "every personality answers to 'hey <name>'"
+  // personality registry. Shown so "every personality answers to its own name"
   // is something the operator can read off the page rather than take on trust,
   // and handed to the tester so speaking one of them lights it up. Memoized
   // because the tester closes over it.

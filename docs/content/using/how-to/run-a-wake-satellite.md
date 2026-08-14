@@ -1,6 +1,6 @@
 ---
 title: "Run a wake satellite"
-description: "Run ethos listen on a spare machine so 'hey engineer' there reaches that personality, and edit the phrase-to-personality table from Settings."
+description: "Run ethos listen on a spare machine so saying a personality's name there reaches it, and edit the name-to-personality table from Settings."
 kind: how-to
 audience: user
 slug: run-a-wake-satellite
@@ -10,13 +10,13 @@ updated: 2026-08-14
 
 ## Task
 
-Put a microphone in another room — a Pi, a spare laptop, the machine under the desk — say `hey engineer` into it, and have the named [personality](../../getting-started/glossary.md#personality) (a directory of files that decides the agent's tools, memory, and model) answer with its toolset and memory scope intact.
+Put a microphone in another room — a Pi, a spare laptop, the machine under the desk — say `engineer` into it, and have the named [personality](../../getting-started/glossary.md#personality) (a directory of files that decides the agent's tools, memory, and model) answer with its toolset and memory scope intact.
 
 ## Result
 
 - A [wake satellite](../../getting-started/glossary.md#wake-satellite) (a separate process that owns a microphone and streams speech to the Ethos server) connects to `ethos serve` and appears as a live row under **Settings → Voice → Wake routes**.
-- An utterance that **opens with a wake phrase** runs a turn as the personality that phrase names; the phrase itself is stripped, so `hey engineer, did CI pass` reaches the agent as `did CI pass`.
-- Follow-ups within `voice.wake.idleTimeout` continue with the same personality, with no phrase — you do not re-address somebody you are already talking to.
+- An utterance that **opens with a personality's name** runs a turn as that personality. A greeting in front of the name (`hey`, `hi`, `hello`, `ok`, `okay`, `yo`, `hey there`) is optional, and the whole address is stripped — `engineer, did CI pass` and `hey engineer, did CI pass` both reach the agent as `did CI pass`.
+- Follow-ups within `voice.wake.idleTimeout` continue with the same personality, with no name — you do not re-address somebody you are already talking to.
 - Everything else is transcribed and discarded: no turn, no model call, no reply.
 - Each personality keeps its own conversation on that node, so re-waking one resumes where it left off and waking another does not continue somebody else's thread.
 - Editing the route table in Settings reaches connected microphones without a restart.
@@ -46,16 +46,16 @@ Read this before you buy hardware.
 
 ## 1. Add a wake route
 
-Every unprivileged personality already answers to `hey <name>`, with no configuration: the server synthesizes an `auto:<personality-id>` route for each one, pushes the merged table to every satellite on connect, and matches transcripts against it. A deployment that has configured nothing still answers to every personality by name. Write your own route when you want a chosen phrase, a stable id, or a personality the defaults exclude — the rest of this page uses one.
+Every unprivileged personality already answers to its own name, with no configuration: the server synthesizes an `auto:<personality-id>` route for each one, pushes the merged table to every satellite on connect, and matches transcripts against it. A deployment that has configured nothing still answers to every personality by name. Write your own route when you want a chosen phrase, a stable id, or a personality the defaults exclude — the rest of this page uses one.
 
 Open **Settings → Voice → Wake routes**, or write it by hand in `~/.ethos/config.yaml`:
 
 ```yaml
-voice.wake.routes.kitchen.phrase: hey engineer
+voice.wake.routes.kitchen.phrase: chief
 voice.wake.routes.kitchen.personality: engineer
 ```
 
-The route id (`kitchen`) is yours to choose and must match `[A-Za-z0-9_-]+`. A route missing either `phrase` or `personality` is dropped on read rather than half-built.
+The route id (`kitchen`) is yours to choose and must match `[A-Za-z0-9_-]+`. A route missing either `phrase` or `personality` is dropped on read rather than half-built. Write the phrase without a greeting — `chief`, not `hey chief`. The matcher accepts one either way, so the two spellings are the same trigger, and the shorter one is what the table shows people to say.
 
 A route saved in Settings is pushed to every connected satellite immediately. A route you hand-edit applies on the next satellite reconnect or server restart — nothing watches the file.
 
@@ -76,7 +76,7 @@ ethos listen doctor  wake satellite preflight
   ⚠  satellite-lane         ws://127.0.0.1:3000/satellite/ws: connection refused (ECONNREFUSED) — nothing is listening there, so the server is not running. Start it with `ethos serve`.
   ✓  node id                pi-kitchen-f089dce2 (~/.ethos/listen-node-id)
   ✓  satellite url          ws://127.0.0.1:3000/satellite/ws
-  –  route                  configured here: kitchen ("hey engineer" → engineer). The effective table is the server's: it adds a "hey <name>" route (auto:<personalityId>) for every unprivileged personality, pushes the merged table on connect, and MATCHES transcripts against it — so what this host can be addressed by is only knowable once it has connected. Without --route, every phrase in that table can address this host.
+  –  route                  configured here: kitchen ("chief" → engineer). The effective table is the server's: it adds a bare-NAME route (auto:<personalityId>) for every unprivileged personality, pushes the merged table on connect, and MATCHES transcripts against it — so what this host can be addressed by is only knowable once it has connected. Without --route, every phrase in that table can address this host.
 
 ⚠ Nothing is broken on this host, but it cannot listen right now.
 ```
@@ -117,8 +117,8 @@ The preflight rows print first, then the line that names the lane it is dialling
 
 ```
 Connecting to ws://127.0.0.1:3000/satellite/ws for the wake route table...
-Open mic: EVERYTHING heard here is transcribed by the server. An utterance reaches an agent only when it OPENS with a wake phrase — that phrase picks the personality — and follow-ups within 30s continue with the same one. Anything else is heard and discarded.
-Addressable here: "hey engineer" → engineer, "hey researcher" → researcher
+Open mic: EVERYTHING heard here is transcribed by the server. An utterance reaches an agent only when it OPENS with a personality's NAME — that name picks the personality, and a greeting in front of it is optional — and follow-ups within 30s continue with the same one. Anything else is heard and discarded.
+Addressable here — say one of these: "chief" → engineer, "researcher". A greeting in front of it ("hey …") is optional.
 Listening on raw s16le mono PCM on stdin @ 16000 Hz. Press Ctrl+C to stop; close the pipe to stop talking.
 ```
 
@@ -128,7 +128,7 @@ From a clone, `make listen` prints both pipelines and then runs the daemon, and 
 
 ### Dedicate one microphone to one agent
 
-`--route <id>` **pins** the host: only that route may address it. The garage mic answers `hey mechanic` and ignores `hey engineer`, even though both are live in the house's table.
+`--route <id>` **pins** the host: only that route may address it. The garage mic answers `mechanic` and ignores `engineer`, even though both are live in the house's table.
 
 ```bash
 arecord -q -f S16_LE -r 16000 -c 1 -t raw | ethos listen --route kitchen
@@ -136,10 +136,10 @@ arecord -q -f S16_LE -r 16000 -c 1 -t raw | ethos listen --route kitchen
 
 ```
 Connecting to ws://127.0.0.1:3000/satellite/ws for the wake route table (pinning to route kitchen)...
-Pinned by --route: only "hey researcher" → researcher (route kitchen, from voice.wake.routes) can address this microphone. Other phrases are heard and discarded.
+Pinned by --route: only "chief" → engineer (route kitchen, from voice.wake.routes) can address this microphone. Other phrases are heard and discarded.
 ```
 
-Pinning narrows the wake surface; it does not exempt the host from needing a phrase. The pinned phrase is still required, and another agent's phrase is discarded rather than treated as a follow-up — so `hey engineer` at a pinned mic never lands in the researcher's conversation. `--route auto:<personality-id>` pins to a synthesized route with no config at all. Without the flag, every enabled route can address this host, which is the usual choice.
+Pinning narrows the wake surface; it does not exempt the host from needing an address. The pinned phrase is still required, and another agent's name is discarded rather than treated as a follow-up — so `researcher` at a mic pinned to the engineer never lands in the researcher's conversation. `--route auto:<personality-id>` pins to a synthesized route with no config at all. Without the flag, every enabled route can address this host, which is the usual choice.
 
 ## 4. Watch it from Settings
 
@@ -155,7 +155,7 @@ The scalar knobs below the table — engine, sensitivity, confirmation frames, e
 
 ## 5. Reach a privileged personality
 
-A personality whose toolset can reach a tool the approval layer would stop and ask about gets no `hey <name>` default, and a plain route pointed at it is refused:
+A personality whose toolset can reach a tool the approval layer would stop and ask about gets no bare-name default, and a plain route pointed at it is refused:
 
 ```
 "engineer" is privileged; set voice.wake.routes.kitchen.privileged: true to reach it by voice.
@@ -180,7 +180,7 @@ ethos listen doctor
 ```
   ✓  satellite-lane         ws://127.0.0.1:3000/satellite/ws is mounted — answered 401 to a probe sent with no auth cookie, which is the expected refusal
   ✓  satellite url          ws://127.0.0.1:3000/satellite/ws
-  –  route                  configured here: kitchen ("hey engineer" → engineer). The effective table is the server's: it adds a "hey <name>" route (auto:<personalityId>) for every unprivileged personality, pushes the merged table on connect, and MATCHES transcripts against it — so what this host can be addressed by is only knowable once it has connected. Without --route, every phrase in that table can address this host.
+  –  route                  configured here: kitchen ("chief" → engineer). The effective table is the server's: it adds a bare-NAME route (auto:<personalityId>) for every unprivileged personality, pushes the merged table on connect, and MATCHES transcripts against it — so what this host can be addressed by is only knowable once it has connected. Without --route, every phrase in that table can address this host.
 
 ✓ Preflight clean. Start with ethos listen.
 ```
@@ -201,7 +201,7 @@ Finally, confirm the personality really answered as itself: ask it for something
 
 ```
 ● speech — utterance u1-mst43nas open
-  › you: hey researcher, what is on my calendar
+  › you: researcher, what is on my calendar
   ‹ researcher: Two meetings, both after lunch.
   ↩ turn complete. Listening again.
 ```
@@ -212,12 +212,12 @@ Now say something that names nobody. The room's ordinary traffic looks like this
 
 ```
   › you: could you pass the salt
-  ↩ not addressed to anyone — no agent was called. Open with a wake phrase to reach one. Listening again.
+  ↩ not addressed to anyone — no agent was called. Open with a personality's name to reach one. Listening again.
 ```
 
 Heard, transcribed, discarded. No turn ran and no tokens were spent.
 
-Then prove the conversation continues without the phrase. Say `hey researcher, what can you do`, and within `voice.wake.idleTimeout` say `tell me more` — the second reaches the researcher too, and the `‹` line names it. Wait out the window and say `tell me more` again: that one is not addressed to anyone. The window is per-connection and dies when the daemon restarts; the conversation itself does not, so re-waking the researcher after a reboot resumes the same history.
+Then prove the conversation continues without the name. Say `researcher, what can you do`, and within `voice.wake.idleTimeout` say `tell me more` — the second reaches the researcher too, and the `‹` line names it. Wait out the window and say `tell me more` again: that one is not addressed to anyone. The window is per-connection and dies when the daemon restarts; the conversation itself does not, so re-waking the researcher after a reboot resumes the same history.
 
 ## Troubleshoot
 
@@ -226,8 +226,8 @@ Then prove the conversation continues without the phrase. Say `hey researcher, w
 - **`⚠ degraded engine:sherpa: sherpa-onnx-node is not installed`** — the acoustic engine is unavailable and the daemon continues as an open mic. Install the peer on that host, or set `voice.wake.engine: fallback`.
 - **`✗ the server's wake route table has no enabled route '<id>'`** — the id after `--route` is not in the table the server pushed, or it is disabled. The message lists every id that was pushed, synthesized `auto:<personality-id>` ones included, then states the rule for the ones it did not.
 - **The personality you wanted is not in that list at all.** It is privileged, so it gets no `auto:<personality-id>` default — its toolset can reach a tool the approval layer would stop and ask about, and a personality with no `toolset.yaml` gets every tool and counts too. Nothing is broken; give it a route and opt it in, as in *Reach a privileged personality* above. The satellite is never told which personalities were withheld, so the message states the rule rather than naming names.
-- **`⚠ routes the server pushed an EMPTY wake route table`** — same cause, every personality. Every unprivileged one would have been synthesized into that table, so an empty table means this deployment has none. The daemon keeps running: a Settings save reaches it without a restart. Opt a personality in rather than widening a toolset to get a default back.
-- **Every utterance says `not addressed to anyone`.** The transcript is not opening with a phrase the server holds. Check what the `› you:` line actually says — speech-to-text may be hearing `hey engine ear` — then raise `voice.wake.sensitivity`, or add a route with the phrase as it is being transcribed. The phrase must be at the **head** of the utterance: "so I said hey engineer to nobody" is talking *about* the agent, not to it.
+- **`⚠ routes the server pushed an EMPTY wake route table`** — same cause, every personality. Every unprivileged one would have been synthesized into that table under its own name, so an empty table means this deployment has none. The daemon keeps running: a Settings save reaches it without a restart. Opt a personality in rather than widening a toolset to get a default back.
+- **Every utterance says `not addressed to anyone`.** The transcript is not opening with a phrase the server holds. Check what the `› you:` line actually says — speech-to-text may be hearing `engine ear` — then raise `voice.wake.sensitivity`, or add a route with the phrase as it is being transcribed. Do not add a route for the greeting: `hey`, `hi`, `hello`, `ok`, `okay`, `yo` and `hey there` are already stripped before matching. The name must be at the **head** of the utterance: "so I said hey engineer to nobody" is talking *about* the agent, not to it.
 - **A sentence you did not address reached an agent anyway.** The idle window was still open from the previous turn, which is the intended behaviour — the row in Settings shows `follow-ups reach <personality>` while it is. Shorten `voice.wake.idleTimeout` if the room talks past the agent often.
 - **`No wake route matches "<phrase>"`** from the server — only a host that matches phrases itself (the desktop satellite) can produce this: its pushed table is stale, or the route was deleted. It refreshes on reconnect.
 - **`⚠ playout the server is sending synthesized audio, and this host has no output device`** — the server is an older build: a current one skips synthesis for a `playback: false` node. The audio is discarded. The reply text still prints.

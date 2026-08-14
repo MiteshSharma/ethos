@@ -35,11 +35,13 @@ export {
   normalizeUtterance,
   type TranscriptWakeEngine,
   transcriptWakeEngineFactory,
+  wakePhraseKey,
 } from './engines/transcript-wake-engine';
 export {
   createSatelliteClient,
   type SatelliteClient,
   type SatelliteClientOptions,
+  type SatelliteErrorDetail,
   type SatellitePlayoutEvent,
   type SatelliteSocket,
   type SatelliteSocketFactory,

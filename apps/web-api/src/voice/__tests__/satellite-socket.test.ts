@@ -831,6 +831,25 @@ describe('satellite socket', () => {
     client.ws.close();
   });
 
+  it('answers to the bare name as well — the greeting is optional, not required', async () => {
+    // The configured route above is spelled "hey researcher", and nothing was
+    // added to the table for this: `matchWakePhrase` treats a leading greeting
+    // as optional on BOTH sides. Same personality, same stripped words as the
+    // test above — which is the whole point, since "hey" is the half a
+    // recogniser renders as "hay", as "a", or not at all.
+    const client = await connectGated();
+    await speakGated(client, 'u1', 'researcher, what is the weather');
+
+    expect(turns).toEqual([
+      {
+        text: 'what is the weather',
+        sessionKey: 'voice:web:satellite:kitchen:researcher',
+        personalityId: 'researcher',
+      },
+    ]);
+    client.ws.close();
+  });
+
   it('runs no turn, calls no model, and stays calm when nobody was addressed', async () => {
     const client = await connectGated();
     await speakGated(client, 'u1', 'could you pass the salt');

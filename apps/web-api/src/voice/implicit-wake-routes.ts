@@ -1,8 +1,9 @@
 import type { PersonalityConfig } from '@ethosagent/types';
+import { wakePhraseKey } from '@ethosagent/voice-text';
 import type { WakeRoute, WakeRoutingTable } from '../repositories/config.repository';
 import { isPrivilegedPersonality } from './wake-privilege';
 
-// "hey <name>" — the default trigger every personality answers to.
+// The NAME — the default trigger every personality answers to.
 //
 // This is the plan's headline behaviour, and it is SYNTHESIZED rather than
 // written to `config.yaml`: a deployment that has configured nothing can still
@@ -28,14 +29,24 @@ import { isPrivilegedPersonality } from './wake-privilege';
  */
 export const IMPLICIT_ROUTE_ID_PREFIX = 'auto:';
 
-/** The default trigger for a display name. Lowercased, internal runs of
- *  whitespace collapsed, so "Swing  Trader" and "swing trader" are one phrase. */
+/**
+ * The default trigger for a display name: the BARE NAME. Lowercased, internal
+ * runs of whitespace collapsed, so "Swing  Trader" and "swing trader" are one
+ * phrase.
+ *
+ * It used to be "hey <name>", and the "hey" was the half that failed in a real
+ * room: speech-to-text renders it as "hay", as "a", as "eh", or drops it, and
+ * an agent that will not answer to its own name is an agent people stop
+ * addressing. The greeting did not have to be dropped to fix that — the matcher
+ * now treats a leading greeting as optional on BOTH sides (`wakePhraseKey`), so
+ * "hey researcher" still reaches the researcher and "researcher" now does too.
+ */
 export function implicitWakePhrase(name: string): string {
-  return `hey ${name.trim().toLowerCase().replace(/\s+/g, ' ')}`;
+  return name.trim().toLowerCase().replace(/\s+/g, ' ');
 }
 
 /**
- * The configured table plus one `hey <name>` route per reachable personality.
+ * The configured table plus one bare-name route per reachable personality.
  *
  * Rules, in the order they are applied:
  *
@@ -48,10 +59,13 @@ export function implicitWakePhrase(name: string): string {
  *    personality suppresses that personality's implicit route, including a
  *    DISABLED one: an operator who switched a personality's wake off did not ask
  *    for a fresh enabled route to appear beside it.
- * 3. **A phrase is claimed once.** If the file already answers to "hey engineer"
- *    — even pointing somewhere else — no implicit route duplicates it. Two
- *    routes with one phrase would make `SatelliteLane`'s phrase lookup an
- *    arbitrary choice.
+ * 3. **A phrase is claimed once.** If the file already answers to "engineer" —
+ *    even pointing somewhere else — no implicit route duplicates it. Two routes
+ *    with one phrase would make `SatelliteLane`'s phrase lookup an arbitrary
+ *    choice. Compared on `wakePhraseKey`, not on the raw string, because the
+ *    greeting is optional at match time: a config route "hey engineer" and a
+ *    synthesized route "engineer" are ONE trigger, and letting both into the
+ *    table is exactly the coin toss this rule exists to prevent.
  * 4. **Ties break by personality id, ascending.** Two personalities whose names
  *    lowercase to the same string are a real possibility ("Engineer" and
  *    "engineer"); the first by sorted id takes the phrase and the other gets no
@@ -66,7 +80,7 @@ export function withImplicitWakeRoutes(
   personalities: readonly PersonalityConfig[],
 ): WakeRoutingTable {
   const routedPersonalities = new Set(table.routes.map((r) => r.personalityId));
-  const claimedPhrases = new Set(table.routes.map((r) => r.phrase.trim().toLowerCase()));
+  const claimedPhrases = new Set(table.routes.map((r) => wakePhraseKey(r.phrase)));
   const implicit: WakeRoute[] = [];
 
   for (const personality of [...personalities].sort((a, b) => (a.id < b.id ? -1 : 1))) {
@@ -74,8 +88,13 @@ export function withImplicitWakeRoutes(
     if (isPrivilegedPersonality(personality)) continue;
     if (personality.name.trim().length === 0) continue;
     const phrase = implicitWakePhrase(personality.name);
-    if (claimedPhrases.has(phrase)) continue;
-    claimedPhrases.add(phrase);
+    const key = wakePhraseKey(phrase);
+    // A name that survives trimming but normalizes to nothing — punctuation
+    // only — has no trigger to synthesize, and an empty key would collide with
+    // every other such name.
+    if (key.length === 0) continue;
+    if (claimedPhrases.has(key)) continue;
+    claimedPhrases.add(key);
     implicit.push({
       id: `${IMPLICIT_ROUTE_ID_PREFIX}${personality.id}`,
       phrase,

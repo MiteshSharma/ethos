@@ -1,4 +1,4 @@
-import { matchWakePhrase } from '@ethosagent/voice-text';
+import { matchWakePhrase, wakePhraseKey } from '@ethosagent/voice-text';
 import type { rpc } from '../../rpc';
 
 // Settings → Voice, wake-route manager: everything that is a decision rather
@@ -19,7 +19,7 @@ import type { rpc } from '../../rpc';
 type WakeRoutesData = Awaited<ReturnType<typeof rpc.voice.wakeRoutes.get>>;
 export type WakeRouteWire = WakeRoutesData['routes'][number];
 /** What `set` accepts — narrower than what `get` returns, because an implicit
- *  `hey <name>` route is synthesized server-side and cannot be written back. */
+ *  bare-name route is synthesized server-side and cannot be written back. */
 export type WakeRouteInput = Parameters<typeof rpc.voice.wakeRoutes.set>[0]['routes'][number];
 export type WakeSettings = WakeRoutesData['settings'];
 
@@ -43,9 +43,10 @@ export interface WakeRouteDraft {
 
 /** DR1's exact copy. A route table with nothing in it still works — every
  *  personality answers to its own name — so the empty state says that rather
- *  than implying voice is switched off. */
+ *  than implying voice is switched off. It says the NAME, because that is the
+ *  whole trigger: a greeting in front of it is allowed, not required. */
 export const WAKE_ROUTES_EMPTY_COPY =
-  "No wake routes yet — every personality answers to 'hey <name>'. Add a custom phrase.";
+  'No wake routes yet — say a personality’s name to reach it. Add a custom phrase.';
 
 export const SATELLITES_EMPTY_COPY =
   'No satellites connected. Run `ethos listen` on the machine with the microphone — a Pi, a spare laptop, or this one — and it appears here. `ethos listen doctor` checks the wake stack before you start.';
@@ -60,7 +61,7 @@ function nextKey(): string {
  * The editable rows in a server table — the CONFIGURED routes only.
  *
  * The read carries the effective table, which includes the implicit
- * `hey <name>` route every unprivileged personality answers to. Those are not
+ * bare-name route every unprivileged personality answers to. Those are not
  * drafts: they exist because a personality exists, they are not in
  * `config.yaml`, and hydrating them here would have the next save try to write
  * them into it. Filtered inside this function rather than at the call sites so
@@ -80,11 +81,11 @@ export function wakeRouteDraftsFromServer(routes: readonly WakeRouteWire[]): Wak
 }
 
 /**
- * The other half of the same table: the `hey <name>` routes the server
+ * The other half of the same table: the bare-name routes the server
  * synthesized from the personality registry.
  *
  * Rendered read-only next to the editor rather than hidden, because "every
- * personality answers to 'hey <name>'" is a claim the empty state makes and
+ * personality answers to its own name" is a claim the empty state makes and
  * this is the evidence for it — including which personalities are MISSING from
  * it, since a privileged one is deliberately not wake-reachable by default.
  *
@@ -214,10 +215,10 @@ export interface WakeCandidate {
 
 /**
  * The EFFECTIVE table the tester matches against: the editor's rows plus the
- * implicit `hey <name>` routes.
+ * implicit bare-name routes.
  *
  * Matching drafts alone made the tester prove LESS than the system does —
- * "hey engineer" wakes the engineer in the room with no config at all, and the
+ * "engineer" wakes the engineer in the room with no config at all, and the
  * tester lit nothing, which is the opposite of "the route is proven, not
  * assumed". This is a read-side union only; `wakeRouteDraftsFromServer` still
  * filters implicit rows out of the editor, so nothing here becomes saveable.
@@ -240,15 +241,17 @@ export function wakeTestCandidates(
   implicit: readonly WakeRouteWire[],
 ): WakeCandidate[] {
   const routed = new Set(drafts.map((d) => d.personalityId).filter((id) => id.length > 0));
-  const claimed = new Set(
-    drafts.map((d) => d.phrase.trim().toLowerCase()).filter((p) => p.length > 0),
-  );
+  // Keyed on `wakePhraseKey` — the server's own rule. The greeting is optional
+  // at match time, so a draft "hey engineer" and the default "engineer" are ONE
+  // trigger, and a tester that lit both would be proving something the room
+  // will not do.
+  const claimed = new Set(drafts.map((d) => wakePhraseKey(d.phrase)).filter((p) => p.length > 0));
   return [
     ...drafts
       .filter((d) => d.enabled && d.phrase.trim().length > 0)
       .map((d) => ({ key: d.key, phrase: d.phrase.trim(), personalityId: d.personalityId })),
     ...implicit
-      .filter((r) => !routed.has(r.personalityId) && !claimed.has(r.phrase.trim().toLowerCase()))
+      .filter((r) => !routed.has(r.personalityId) && !claimed.has(wakePhraseKey(r.phrase)))
       .map((r) => ({ key: r.id, phrase: r.phrase, personalityId: r.personalityId })),
   ];
 }

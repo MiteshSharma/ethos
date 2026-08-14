@@ -62,7 +62,7 @@ export function WakeRouteRow({
           className="wake-route-phrase"
           value={draft.phrase}
           disabled={disabled}
-          placeholder="hey swing trader"
+          placeholder="swing trader"
           aria-label="Wake phrase"
           onChange={(e) => onChange({ phrase: e.target.value })}
         />
@@ -126,18 +126,18 @@ export function WakeRouteRow({
 }
 
 export interface WakeImplicitRoutesProps {
-  /** The synthesized `hey <name>` routes, straight off the read. */
+  /** The synthesized bare-name routes, straight off the read. */
   routes: readonly WakeRouteWire[];
   /** The tester's matched key — a synthesized route's key is its wire id. */
   matchedKey: string | null;
 }
 
 /**
- * The other half of the effective table: the `hey <name>` defaults, read-only.
+ * The other half of the effective table: the bare-name defaults, read-only.
  *
  * Not editable, so not rows — a secondary line under the editor, which is what
  * a fact you cannot act on deserves. But it IS matchable, so each default has
- * to be able to light up: speaking "hey researcher" wakes the researcher in the
+ * to be able to light up: speaking "researcher" wakes the researcher in the
  * room whether or not anyone configured it, and a tester that stayed dark for
  * the phrase that actually works proves less than the system does.
  *

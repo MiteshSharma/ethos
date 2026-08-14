@@ -51,6 +51,12 @@ const OWNED_NAMES = [
   'normalizeUtterance',
   'boundedLevenshtein',
   'matchWakePhrase',
+  // The greeting rule. "hey" is optional in front of a name, on the route side
+  // and the utterance side alike, and the two sides only stay symmetric while
+  // one function decides what a greeting is. A second filler list is how "hey
+  // there" ends up working at the microphone and not in the tester.
+  'stripLeadingFiller',
+  'wakePhraseKey',
   // The counterpart of the matcher: which prefix of the utterance was the
   // address. It counts words the way `normalizeUtterance` does, so a copy would
   // silently start cutting in a different place the day that changes.

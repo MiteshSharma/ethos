@@ -7,10 +7,15 @@ import {
 } from '../../repositories/config.repository';
 import { IMPLICIT_ROUTE_ID_PREFIX, withImplicitWakeRoutes } from '../implicit-wake-routes';
 
-// "hey <name>" — the plan's headline behaviour. What is pinned here is that a
+// The BARE NAME — the plan's headline behaviour. What is pinned here is that a
 // deployment which has configured NOTHING can still wake its personalities by
 // name, and that the one thing this default must never do is hand an
 // unauthenticated voice in the room a privileged agent.
+//
+// The phrase is the name alone because "hey" was the half that failed in a real
+// room. It is not a narrowing: `matchWakePhrase` treats a leading greeting as
+// optional on both sides, so "hey researcher" reaches a `researcher` route and
+// always will — the cases for that live in packages/voice-text.
 
 /** Unprivileged by default: a read-only toolset reaches no consequential tool. */
 function p(id: string, name: string, toolset: string[] = ['read_file', 'web_search']) {
@@ -39,7 +44,7 @@ describe('withImplicitWakeRoutes', () => {
     expect(merged.routes).toEqual([
       {
         id: 'auto:engineer',
-        phrase: 'hey engineer',
+        phrase: 'engineer',
         personalityId: 'engineer',
         privileged: false,
         enabled: true,
@@ -86,12 +91,31 @@ describe('withImplicitWakeRoutes', () => {
 
   it('does not duplicate a phrase the config already claims', () => {
     // The file answers to "hey engineer" but sends it somewhere else. A second
-    // route with the same phrase would make the lane's lookup a coin toss.
+    // route with the same phrase would make the lane's lookup a coin toss —
+    // and "hey engineer" and "engineer" ARE the same phrase to the matcher, so
+    // the claim is compared on the greeting-stripped key.
     const merged = withImplicitWakeRoutes(
       table([route({ id: 'decoy', phrase: 'Hey Engineer', personalityId: 'researcher' })]),
       [p('engineer', 'Engineer')],
     );
     expect(merged.routes.map((r) => r.id)).toEqual(['decoy']);
+  });
+
+  it('claims across the greeting in the other direction too', () => {
+    // A config route spelled without the greeting suppresses the default just
+    // as one spelled with it does. Either way the room has one answer.
+    const merged = withImplicitWakeRoutes(
+      table([route({ id: 'decoy', phrase: 'engineer', personalityId: 'researcher' })]),
+      [p('engineer', 'Engineer')],
+    );
+    expect(merged.routes.map((r) => r.id)).toEqual(['decoy']);
+  });
+
+  it('skips a name that normalises to nothing rather than minting an empty trigger', () => {
+    // A phrase with no letters or digits in it cannot be said, and two such
+    // names would claim the same empty key.
+    const merged = withImplicitWakeRoutes(table(), [p('punct', '!!!'), p('real', 'Coach')]);
+    expect(merged.routes.map((r) => r.phrase)).toEqual(['coach']);
   });
 
   it('breaks a lowercased-name tie by personality id, ascending', () => {
@@ -121,7 +145,7 @@ describe('withImplicitWakeRoutes', () => {
       p('blank', '   '),
       p('trader', '  Swing   Trader '),
     ]);
-    expect(merged.routes.map((r) => r.phrase)).toEqual(['hey swing trader']);
+    expect(merged.routes.map((r) => r.phrase)).toEqual(['swing trader']);
   });
 
   it('returns the same table object when there is nothing to add', () => {

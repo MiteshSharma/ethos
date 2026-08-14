@@ -59,8 +59,8 @@
 // Settings → Voice row for every host, not just this one.
 //
 // THE ROUTE TABLE BELONGS TO THE SERVER. `voice.wake.routes` in this machine's
-// config is a HINT, not the answer: the web-api synthesizes a "hey <name>"
-// route (`auto:<personalityId>`) for every UNPRIVILEGED personality and pushes
+// config is a HINT, not the answer: the web-api synthesizes a bare-NAME route
+// (`auto:<personalityId>`) for every UNPRIVILEGED personality and pushes
 // the merged table down the lane immediately after `register`. This daemon
 // never picks a personality — the phrase does — so `--route` is optional and
 // means something narrower than it used to: a PIN, restricting which single
@@ -91,6 +91,7 @@ import {
   type WakeEngine,
   type WakeEngineFactory,
   type WakeRoute,
+  wakePhraseKey,
 } from '@ethosagent/voice-satellite';
 import { SATELLITE_SOCKET_PATH } from '@ethosagent/web-contracts';
 import { createStdinPcmDevice, STDIN_DEVICE_ID } from '../lib/stdin-pcm-device';
@@ -135,7 +136,8 @@ daemon's output mid-word. A real failure still prints.
 
 Open mic, server-side addressing. Nothing is acoustically wake-matched here:
 EVERY utterance on the pipe is transcribed by the server. It runs a turn only
-when the words open with a wake phrase — that phrase picks the personality —
+when the words open with a personality's name — that name picks the personality,
+and a greeting in front of it is optional —
 or when they follow one within voice.wake.idleTimeout. Anything else is heard
 and discarded.
 
@@ -256,7 +258,7 @@ const START_THE_SERVER = 'Start it with `ethos serve`.';
  * daemon's banner cannot drift into three different claims.
  */
 const ROUTES_ARE_THE_SERVERS =
-  'The effective table is the server\'s: it adds a "hey <name>" route ' +
+  "The effective table is the server's: it adds a bare-NAME route " +
   '(auto:<personalityId>) for every unprivileged personality, pushes the merged ' +
   'table on connect, and MATCHES transcripts against it — so what this host can ' +
   'be addressed by is only knowable once it has connected.';
@@ -963,6 +965,29 @@ const WHY_A_PERSONALITY_IS_ABSENT =
   '.privileged: true.';
 
 /**
+ * One entry in the `Addressable here` line.
+ *
+ * A default route's phrase IS the personality's name, so printing
+ * `"researcher" → researcher` says the same word twice and teaches nothing. The
+ * arrow earns its place only when the phrase and the personality differ — a
+ * custom route, where knowing who answers is the whole point. What is left is a
+ * list of things to SAY, which is what somebody standing in front of the
+ * microphone actually needs.
+ *
+ * Compared on `wakePhraseKey` so a route written `hey researcher` counts as the
+ * name too: that phrase and the bare name are one trigger to the matcher, and a
+ * banner that drew an arrow for one and not the other would be describing a
+ * distinction the room does not have.
+ */
+export function addressableEntry(route: WakeRoute): string {
+  const bare = wakePhraseKey(route.phrase) === route.personalityId.toLowerCase();
+  return (
+    `${c.bold}"${route.phrase}"${c.reset}` +
+    (bare ? '' : `${c.dim} →${c.reset} ${c.cyan}${route.personalityId}${c.reset}`)
+  );
+}
+
+/**
  * Resolve `--route` — the PIN — against the table the SERVER pushed, never
  * against the local config, which is one contributor to that table and not the
  * table itself.
@@ -1017,7 +1042,7 @@ export function resolveRoutePin(
 export const EMPTY_TABLE_WARNING =
   'the server pushed an EMPTY wake route table — no phrase can address this deployment ' +
   'yet, so every utterance will be transcribed and discarded. Every unprivileged ' +
-  'personality gets a synthesized "hey <name>" route automatically, so an empty table ' +
+  'personality gets a synthesized route for its own NAME automatically, so an empty table ' +
   `means there are none. ${WHY_A_PERSONALITY_IS_ABSENT} ` +
   'A Settings save reaches this daemon without a restart.';
 
@@ -1418,13 +1443,25 @@ export async function startListenDaemon(
   /** Whether the pinned route's absence has already been said; see `onRoutes`. */
   let routeMissingWarned = false;
   /**
-   * The utterance the server reported no speech in.
+   * WHAT ALREADY HAPPENED to the utterance whose turn has not closed yet.
    *
-   * Kept so the `turn_end` behind it is narrated as a plain re-arm rather than
-   * as "not addressed to anyone" — both arrive with no personality, and only
-   * this remembers which of the two happened.
+   * `turn_end` is not enough to close an utterance honestly. It says who
+   * answered, and nothing about the three ways nobody did: the server heard no
+   * speech, the server REFUSED the route somebody named, or the words were
+   * addressed to no one. The last is the only one the closing line used to
+   * describe, so a refusal — privileged personality, disabled route, unknown
+   * personality — printed "not addressed to anyone … open with a personality's
+   * name" directly under an error saying the name they used is the problem.
+   * Two contradicting lines, and the false one is the one that says what to do
+   * next.
+   *
+   * So the frames that DO know are remembered here, keyed by the utterance they
+   * described, and `turn_end` reads the record rather than inferring from
+   * itself. Keyed rather than a bare flag because an error can arrive with no
+   * utterance in flight (a socket that would not open, a frame that would not
+   * decode), and that must not colour the next turn's closing line.
    */
-  let unspokenUtteranceId: string | null = null;
+  let outcome: { utteranceId: string; kind: 'refused' | 'no-speech' } | null = null;
   /**
    * The addressing window the SERVER is enforcing, from the pushed settings.
    *
@@ -1507,7 +1544,7 @@ export async function startListenDaemon(
       // words, with `onReplyText` below printing the answer to them.
       if (!frame.final) return;
       if (frame.text.trim() === '') {
-        unspokenUtteranceId = frame.utteranceId;
+        outcome = { utteranceId: frame.utteranceId, kind: 'no-speech' };
         // A FINAL TRANSCRIPT WITH NO TEXT IS THE SERVER SAYING IT HEARD NO
         // SPEECH — the recognizer's own "nothing was said", which on an open
         // pipe in a room is ordinary traffic and not a fault. It arrives with a
@@ -1547,23 +1584,46 @@ export async function startListenDaemon(
         // synthesizes nothing for it and the count was always zero. The answer
         // itself was printed by `onReplyText`; this line only closes the cycle.
         //
-        // THREE WAYS A TURN ENDS, and the operator is owed the difference. A
-        // `personalityId` means somebody answered. Its absence after an empty
-        // transcript means there was no speech in the audio — already said
-        // above, so this only re-arms. Its absence otherwise means the words
-        // were heard and addressed to nobody, which is the COMMON case in a
-        // room and gets one quiet line, not a warning.
+        // FOUR WAYS A TURN ENDS, and the operator is owed the difference —
+        // because the next thing they should do differs in every one. Two
+        // questions decide it, and neither can be answered by this frame alone:
+        // was an agent called (`personalityId`), and did the server already say
+        // something went wrong with this utterance (`outcome`).
+        //
+        // Ordered so the error-carrying branches come first within each half: a
+        // line that closes a turn while contradicting the error above it is the
+        // defect this shape exists to make impossible.
+        const known = outcome?.utteranceId === event.utteranceId ? outcome.kind : null;
+        outcome = null;
         if (event.personalityId !== undefined) {
-          say(`${c.dim}  ↩ turn complete. Listening again.${c.reset}`);
-        } else if (unspokenUtteranceId === event.utteranceId) {
+          say(
+            known === 'refused'
+              ? `${c.dim}  ↩ the turn did not finish — the error above says why. ` +
+                  `Listening again.${c.reset}`
+              : `${c.dim}  ↩ turn complete. Listening again.${c.reset}`,
+          );
+        } else if (known === 'refused') {
+          // A phrase MATCHED and the server declined it. Saying "not addressed
+          // to anyone" here is false — they addressed someone, by a name the
+          // server holds — and "open with a personality's name" sends them to
+          // repeat the thing that just worked instead of to the route setting
+          // the error names.
+          say(
+            `${c.dim}  ↩ no agent was called — the error above says why. ` +
+              `Listening again.${c.reset}`,
+          );
+        } else if (known === 'no-speech') {
+          // Nothing was said, so nothing was left unaddressed. `onTranscript`
+          // has already printed what was heard; this only re-arms.
           say(`${c.dim}  ↩ listening again.${c.reset}`);
         } else {
+          // Heard, transcribed, addressed to nobody — the COMMON case in a
+          // room, and the only one where the remedy really is a wake phrase.
           say(
             `${c.dim}  ↩ not addressed to anyone — no agent was called. ` +
-              `Open with a wake phrase to reach one. Listening again.${c.reset}`,
+              `Open with a personality's name to reach one. Listening again.${c.reset}`,
           );
         }
-        unspokenUtteranceId = null;
         // Re-arm. `playback_done` is the honest frame even with nothing played:
         // it means "the speaker has gone quiet and I am listening again", and
         // a host with no speaker satisfies the first half trivially.
@@ -1589,7 +1649,16 @@ export async function startListenDaemon(
               `and speech on the pipe is ignored until it is re-enabled.${c.reset}`,
       );
     },
-    onError: (message) => say(`${c.yellow}⚠ satellite${c.reset} ${c.dim}${message}${c.reset}`),
+    onError: (message, detail) => {
+      say(`${c.yellow}⚠ satellite${c.reset} ${c.dim}${message}${c.reset}`);
+      // Only a server `error` frame naming an utterance changes how that
+      // utterance's turn closes. A transport report carries no detail, and a
+      // lane-wide refusal names no utterance — neither is evidence about the
+      // one in flight, and guessing would put "the error above says why" under
+      // a turn the error above had nothing to do with.
+      const refused = detail?.utteranceId;
+      if (refused !== undefined) outcome = { utteranceId: refused, kind: 'refused' };
+    },
   });
 
   // Both are assigned further down, but the signal handlers below are installed
@@ -1825,22 +1894,19 @@ export async function startListenDaemon(
   // second is the whole interaction model.
   say(
     `${c.dim}Open mic: EVERYTHING heard here is transcribed by the server. An utterance ` +
-      `reaches an agent only when it OPENS with a wake phrase — that phrase picks the ` +
-      `personality — and follow-ups within ${Math.round(idleWindowMs / 1000)}s ` +
+      `reaches an agent only when it OPENS with a personality's NAME — that name picks the ` +
+      `personality, and a greeting in front of it is optional — and follow-ups within ` +
+      `${Math.round(idleWindowMs / 1000)}s ` +
       `continue with the same one. Anything else is heard and discarded.${c.reset}`,
   );
   if (pinnedRoute === null) {
     const addressable = pushed.filter((r) => r.enabled);
     say(
-      `${c.dim}Addressable here:${c.reset} ` +
+      `${c.dim}Addressable here — say one of these:${c.reset} ` +
         (addressable.length === 0
           ? `${c.dim}nothing yet — the server pushed an empty table.${c.reset}`
-          : addressable
-              .map(
-                (r) =>
-                  `${c.bold}"${r.phrase}"${c.reset}${c.dim} →${c.reset} ${c.cyan}${r.personalityId}${c.reset}`,
-              )
-              .join(`${c.dim},${c.reset} `)),
+          : `${addressable.map(addressableEntry).join(`${c.dim},${c.reset} `)}` +
+            `${c.dim}. A greeting in front of it ("hey …") is optional.${c.reset}`),
     );
   } else {
     say(
