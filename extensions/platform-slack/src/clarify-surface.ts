@@ -61,6 +61,14 @@ export interface SlackClarifySurfaceConfig {
   bridge: ClarifyBridge;
   store: ClarifyStore;
   getSessionRouting: SessionRoutingResolver;
+  /** CHS-005 — optional sink for the cross-tenant gate's denials. */
+  observability?: {
+    recordSafetyBlock(opts: {
+      code?: string;
+      cause?: string;
+      details?: Record<string, unknown>;
+    }): void;
+  };
 }
 
 export class SlackClarifySurface {
@@ -74,12 +82,14 @@ export class SlackClarifySurface {
    *  side-channel. Drained on `onResolved`. Bounded — entries with no matching
    *  resolution are evicted lazily when the map grows past a soft cap. */
   private readonly responderById = new Map<string, string>();
+  private readonly observability: SlackClarifySurfaceConfig['observability'];
 
   constructor(cfg: SlackClarifySurfaceConfig) {
     this.adapter = cfg.adapter;
     this.bridge = cfg.bridge;
     this.store = cfg.store;
     this.getSessionRouting = cfg.getSessionRouting;
+    this.observability = cfg.observability;
 
     this.bridge.setPresenter((row) => this.present(row));
     this.bridge.onResolved((row, resp) => {
@@ -139,6 +149,27 @@ export class SlackClarifySurface {
   // Button taps
   // -------------------------------------------------------------------------
 
+  /**
+   * CHS-005 — record a clarify gate refusal.
+   *
+   * The click is dropped silently either way; this only adds the audit row.
+   * The card's `requestId` is deliberately included and its content is not:
+   * the operator needs to correlate the refusal with a request, not read what
+   * was being asked.
+   */
+  private denied(cause: string, evt: ClarifyActionEvent): void {
+    this.observability?.recordSafetyBlock({
+      code: 'slack.clarify.gate_denied',
+      cause,
+      details: {
+        requestId: evt.requestId,
+        userId: evt.userId,
+        channelId: evt.channelId,
+        fromHome: evt.fromHome,
+      },
+    });
+  }
+
   private async handleAction(evt: ClarifyActionEvent): Promise<void> {
     const row = await this.store.get(evt.requestId);
     if (!row || row.surfaceType !== SURFACE) {
@@ -155,16 +186,26 @@ export class SlackClarifySurface {
     // message-coordinate match. The opaque random `requestId` plus
     // `gateAnswerer` still prevent a Home click from resolving a row the
     // user shouldn't be answering.
-    if (row.surfaceContext.botKey !== this.adapter.botKey) return;
+    // CHS-005 — each of these three is a security decision. Recording them is
+    // what turns "the button did nothing" into an investigable event; the
+    // behaviour (a silent no-op to the clicker) is unchanged.
+    if (row.surfaceContext.botKey !== this.adapter.botKey) {
+      this.denied('bot key mismatch', evt);
+      return;
+    }
     if (!evt.fromHome) {
       if (
         row.surfaceContext.chatId !== evt.channelId ||
         row.surfaceContext.messageTs !== evt.messageTs
       ) {
+        this.denied('message coordinates do not match the stored row', evt);
         return;
       }
     }
-    if (!gateAnswerer(row, evt.userId)) return;
+    if (!gateAnswerer(row, evt.userId)) {
+      this.denied('user is not the designated answerer', evt);
+      return;
+    }
 
     if (evt.kind === 'open-modal') {
       await this.adapter.openClarifyModal({

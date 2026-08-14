@@ -139,6 +139,22 @@ const SKIP_EXTS = new Set([
   'mkv',
 ]);
 
+/**
+ * CHS-005 — minimal structural view of the observability sink.
+ *
+ * Declared here rather than imported so the adapter takes no dependency on
+ * `observability-sqlite`; the gateway supplies anything of this shape, exactly
+ * as it does for `ApprovalObservability`. Optional throughout: an adapter
+ * constructed without one records nothing and behaves identically.
+ */
+export interface AdapterObservability {
+  recordSafetyBlock(opts: {
+    code?: string;
+    cause?: string;
+    details?: Record<string, unknown>;
+  }): void;
+}
+
 export interface SlackAdapterConfig {
   /** Bot token (xoxb-...). */
   botToken: string;
@@ -180,6 +196,13 @@ export interface SlackAdapterConfig {
    * wire it from the same trust source the message surface uses.
    */
   allowedUsers?: string[];
+  /**
+   * CHS-005 — sink for security decisions this adapter makes alone. Slash
+   * refusals and clarify gate denials never reach the gateway's `checkMessage`,
+   * so without this every one of them is silent and an operator investigating
+   * an incident has nothing to read.
+   */
+  observability?: AdapterObservability;
   /** Storage instance rooted at `~/.ethos`. When provided, the adapter
    *  persists per-channel mode overrides and thread-participation state
    *  under `~/.ethos/slack/<botKey>/`. */
@@ -294,6 +317,8 @@ export class SlackAdapter implements PlatformAdapter, ApprovalCapableAdapter {
   private readonly allowedBotIds: string[] | undefined;
   /** Slash-command / App Home allowlist. Undefined denies every user. */
   private readonly allowedUsers: string[] | undefined;
+  /** CHS-005 — optional sink for adapter-local security decisions. */
+  private readonly observability: AdapterObservability | undefined;
   /** `users.info` display-name resolver, cached (24 h TTL, ≤1024 entries). */
   private readonly users: UsernameResolver;
   private readonly app: App;
@@ -369,6 +394,7 @@ export class SlackAdapter implements PlatformAdapter, ApprovalCapableAdapter {
     this.defaultChannelMode = config.defaultChannelMode ?? DEFAULT_CHANNEL_MODE;
     this.allowedBotIds = config.allowedBotIds;
     this.allowedUsers = config.allowedUsers;
+    this.observability = config.observability;
     this.storage = config.storage;
     this.memory = config.memory;
     this.kanban = config.kanban;
@@ -486,6 +512,7 @@ export class SlackAdapter implements PlatformAdapter, ApprovalCapableAdapter {
         storage: this.storage,
         submitAgentTurn: this.makeAskSubmitter(),
         allowedUsers: this.allowedUsers,
+        observability: this.observability,
       });
       try {
         await respond({

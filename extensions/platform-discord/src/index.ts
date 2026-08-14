@@ -64,6 +64,21 @@ interface DiscordAdapterConfig {
    */
   approvalPolicy?: 'role_gate' | 'allow_any';
   /**
+   * CHS-005 — sink for security decisions this adapter makes alone. An
+   * approval-button refusal never reaches the gateway, so without this it is
+   * visible only as an ephemeral reply to the person who was refused.
+   *
+   * Declared structurally so the adapter takes no dependency on the
+   * observability implementation; the gateway supplies it.
+   */
+  observability?: {
+    recordSafetyBlock(opts: {
+      code?: string;
+      cause?: string;
+      details?: Record<string, unknown>;
+    }): void;
+  };
+  /**
    * When enabled, `sendTyping()` posts a short "Thinking..." placeholder
    * message that is deleted when the real response is sent. Default: false.
    */
@@ -106,6 +121,8 @@ export class DiscordAdapter implements PlatformAdapter, ApprovalCapableAdapter {
   private readonly binding: Binding;
   private readonly defaultChannelMode: ChannelMode;
   private readonly approvalRoleIds: string[];
+  /** CHS-005 — optional sink for adapter-local security decisions. */
+  private readonly observability: DiscordAdapterConfig['observability'];
   private readonly approvalPolicy: 'role_gate' | 'allow_any';
   private readonly postThinkingPlaceholder: boolean;
 
@@ -139,6 +156,7 @@ export class DiscordAdapter implements PlatformAdapter, ApprovalCapableAdapter {
     this.binding = config.binding ?? { type: 'personality', name: 'default' };
     this.approvalRoleIds = config.approvalRoleIds ?? [];
     this.approvalPolicy = config.approvalPolicy ?? 'role_gate';
+    this.observability = config.observability;
     this.postThinkingPlaceholder = config.postThinkingPlaceholder ?? false;
 
     // Gap 9: derive defaultChannelMode from deprecated mentionOnly when
@@ -537,6 +555,13 @@ export class DiscordAdapter implements PlatformAdapter, ApprovalCapableAdapter {
       if (this.approvalRoleIds.length === 0) {
         // No roles configured → no one can approve. This is intentional:
         // the operator must explicitly configure approvalRoleIds or opt into 'allow_any'.
+        // CHS-005 — recorded because a misconfiguration that silently blocks
+        // every approval looks identical to "nobody clicked" from outside.
+        this.observability?.recordSafetyBlock({
+          code: 'discord.approval.role_denied',
+          cause: 'approvalRoleIds is empty under role_gate',
+          details: { approvalId, userId, channelId: interaction.channelId ?? '' },
+        });
         interaction
           .reply({ content: 'Approval roles not configured. No one can approve.', ephemeral: true })
           .catch(() => {});
@@ -549,6 +574,13 @@ export class DiscordAdapter implements PlatformAdapter, ApprovalCapableAdapter {
           : null;
       const hasRole = memberRoles ? this.approvalRoleIds.some((id) => memberRoles.has(id)) : false;
       if (!hasRole) {
+        // CHS-005 — a refused approval click is a security decision, and the
+        // ephemeral reply is seen only by the person refused.
+        this.observability?.recordSafetyBlock({
+          code: 'discord.approval.role_denied',
+          cause: 'user holds none of the approval roles',
+          details: { approvalId, userId, channelId: interaction.channelId ?? '' },
+        });
         interaction
           .reply({ content: 'You do not have permission to approve/deny.', ephemeral: true })
           .catch(() => {});

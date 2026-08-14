@@ -46,6 +46,14 @@ export interface SlashContext {
    * not a compatibility affordance.
    */
   allowedUsers?: string[];
+  /** CHS-005 — optional sink so a refusal is recorded, not just displayed. */
+  observability?: {
+    recordSafetyBlock(opts: {
+      code?: string;
+      cause?: string;
+      details?: Record<string, unknown>;
+    }): void;
+  };
 }
 
 export interface SlashResponse {
@@ -78,6 +86,13 @@ export async function dispatch(
   // either reads bot-private state or mutates it, so the gate is the whole
   // surface, not a per-subcommand decision.
   if (!isUserAuthorized(payload.user_id, ctx.allowedUsers)) {
+    // CHS-005 — the refusal is the whole security control for this surface, so
+    // it lands in the audit trail rather than only on the caller's screen.
+    ctx.observability?.recordSafetyBlock({
+      code: 'slack.slash.unauthorized',
+      cause: 'user not in allowedUsers',
+      details: { userId: payload.user_id, channelId: payload.channel_id },
+    });
     const blocks = [section(SLASH_DENIED_TEXT)];
     return { blocks, text: SLASH_DENIED_TEXT, responseType: 'ephemeral' };
   }
