@@ -219,6 +219,14 @@ gateway:
 # was written for). So a bare `make listen` on a TTY refuses to start, by design,
 # and the target prints the pipe rather than letting you find that out the hard
 # way. The daemon's own banner carries the rest.
+#
+# `-nostats -loglevel error` is not decoration. Both processes share the
+# terminal, and ffmpeg writes a carriage-returned progress line to stderr that
+# overwrites the daemon's own output mid-line ("› you: hello7.9kbits/s speed=
+# 1x"). `-loglevel error` drops the banner and the meter; `-nostats` is what
+# keeps the meter gone on builds that print it regardless of log level. Real
+# errors — bad device index, no permission — still print. arecord's `-q` does
+# the same for its one banner line; it has no meter to silence.
 
 # `ethos listen doctor` reuses the repo's three-way exit contract verbatim (see
 # `computeDoctorExit` in apps/ethos/src/commands/doctor.ts, and ListenFailFlags
@@ -242,8 +250,8 @@ listen-doctor:
 
 listen:
 	@echo "ethos listen reads raw PCM from stdin. Pipe a microphone into it:"
-	@echo "  macOS:  ffmpeg -f avfoundation -i :0 -ar 16000 -ac 1 -f s16le - | make listen"
-	@echo "  Linux:  arecord -f S16_LE -r 16000 -c 1 -t raw | make listen"
+	@echo "  macOS:  ffmpeg -nostats -loglevel error -f avfoundation -i :0 -ar 16000 -ac 1 -f s16le - | make listen"
+	@echo "  Linux:  arecord -q -f S16_LE -r 16000 -c 1 -t raw | make listen"
 	@echo ""
 	@$(NVM_EXEC) pnpm exec tsx apps/ethos/src/index.ts listen $(ARGS)
 

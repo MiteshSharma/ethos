@@ -8,6 +8,7 @@ import type {
   CaptureDevice,
   SatelliteSocketFactory,
   SatelliteSocketHandlers,
+  WakeFrame,
   WakeRoute,
 } from '@ethosagent/voice-satellite';
 import { encodeSatelliteFrame, type SatelliteServerFrame } from '@ethosagent/web-contracts';
@@ -285,11 +286,50 @@ function fakeTransport(): {
   };
 }
 
-const fakeDevice: CaptureDevice = {
-  start: async () => {},
-  stop: async () => {},
-  list: async () => [{ id: 'stdin', label: 'stdin' }],
-};
+/** A `CaptureDevice` a test can push captured frames into. */
+function fakeDevice(): { device: CaptureDevice; push(frame: WakeFrame): void } {
+  let sink: ((frame: WakeFrame) => void) | null = null;
+  return {
+    device: {
+      start: async (onFrame) => {
+        sink = onFrame;
+      },
+      stop: async () => {},
+      list: async () => [{ id: 'stdin', label: 'stdin' }],
+    },
+    push: (frame) => sink?.(frame),
+  };
+}
+
+/** 20ms of frame at the daemon's declared rate. */
+const FRAME_SAMPLES = 320;
+
+/** Above `EnergyVad`'s 0.02 RMS threshold — the pipe carries something. */
+function loudFrame(): WakeFrame {
+  return { samples: new Int16Array(FRAME_SAMPLES).fill(8000), sampleRate: 16_000 };
+}
+
+function quietFrame(): WakeFrame {
+  return { samples: new Int16Array(FRAME_SAMPLES), sampleRate: 16_000 };
+}
+
+/**
+ * One noise blip: loud enough to open an utterance, far too short to send.
+ *
+ * Two loud frames plus the VAD's three hangover frames is ~80ms of speech,
+ * under `CaptureMachine`'s 400ms floor, and 30 quiet frames is past its
+ * 20-frame endpointer — so this is a `● speech` line followed by a local
+ * discard, which is exactly what a chair scrape looks like.
+ */
+function blip(push: (frame: WakeFrame) => void): void {
+  push(loudFrame());
+  push(loudFrame());
+  for (let i = 0; i < 30; i++) push(quietFrame());
+}
+
+function occurrences(haystack: string, needle: string): number {
+  return haystack.split(needle).length - 1;
+}
 
 /** Signal handlers the daemon installs must not leak between tests. */
 const signalsBefore = {
@@ -318,8 +358,10 @@ async function runDaemon(
   done: Promise<void>;
   ready: Promise<void>;
   push(frame: SatelliteServerFrame): void;
+  capture(frame: WakeFrame): void;
 }> {
   const transport = fakeTransport();
+  const device = fakeDevice();
   let markReady: (() => void) | null = null;
   const ready = new Promise<void>((resolve) => {
     markReady = resolve;
@@ -329,14 +371,14 @@ async function runDaemon(
     { json: flags.json === true, positional: [], ...(flags.route ? { route: flags.route } : {}) },
     {
       storage: new InMemoryStorage(),
-      device: fakeDevice,
+      device: device.device,
       createSocket: transport.factory,
       onReady: () => markReady?.(),
     },
   );
   await transport.opened;
   transport.push(routesFrame(routes));
-  return { done, ready, push: transport.push };
+  return { done, ready, push: transport.push, capture: device.push };
 }
 
 describe('the daemon routes against the table the server pushed', () => {
@@ -388,7 +430,25 @@ describe('the daemon narrates the turn', () => {
     const { ready, push } = await runDaemon([wakeRoute('auto:engineer', 'engineer')]);
     await ready;
     push({ t: 'transcript', utteranceId: 'u1', text: 'what is on my calendar', final: true });
-    expect(outLines.join('\n')).toContain('what is on my calendar');
+    const out = outLines.join('\n');
+    expect(out).toContain('› you:');
+    expect(out).toContain('what is on my calendar');
+  });
+
+  it('an empty final transcript says the server heard nothing, not a blank `› you:`', async () => {
+    // The lane's answer to "there was no speech in that audio" is a final
+    // transcript with an empty string, followed by `turn_end` — not an error.
+    // Rendering it through the normal branch printed a bare `› you:`.
+    const { ready, push } = await runDaemon([wakeRoute('auto:engineer', 'engineer')]);
+    await ready;
+    push({ t: 'transcript', utteranceId: 'u1', text: '', final: true });
+    push({ t: 'turn_end', utteranceId: 'u1', personalityId: 'engineer' });
+    const out = outLines.join('\n');
+    expect(out).toContain('no speech in that audio');
+    expect(out).not.toContain('› you:');
+    // And nothing in it reads as a fault the operator caused.
+    expect(out).not.toContain('failed');
+    expect(out).not.toContain('error');
   });
 
   it('a reply_text frame is printed as the personality’s answer', async () => {
@@ -428,17 +488,73 @@ describe('the daemon narrates the turn', () => {
     expect(out).toContain('audio is being discarded');
   });
 
+  it('a locally discarded utterance closes the `● speech` line it opened', async () => {
+    const { ready, capture } = await runDaemon([wakeRoute('auto:engineer', 'engineer')]);
+    await ready;
+    blip(capture);
+    const out = outLines.join('\n');
+    // The failure this fixes: an operator watching `●` lines appear with
+    // nothing after them.
+    expect(occurrences(out, '● speech')).toBe(1);
+    expect(out).toContain('discarded utterance');
+    expect(out).toContain('under the 400ms minimum');
+  });
+
+  it('the discard notice is paired to its open marker — one line each, never a stray', async () => {
+    const { ready, capture } = await runDaemon([wakeRoute('auto:engineer', 'engineer')]);
+    await ready;
+    blip(capture);
+    blip(capture);
+    // Quiet after the second discard: the machine re-arms through `listening`
+    // and must not narrate a third time with no `●` to close.
+    for (let i = 0; i < 40; i++) capture(quietFrame());
+    const out = outLines.join('\n');
+    expect(occurrences(out, '● speech')).toBe(2);
+    expect(occurrences(out, 'discarded utterance')).toBe(2);
+  });
+
   it('under --json nothing the daemon narrates reaches stdout', async () => {
-    const { ready, push } = await runDaemon([wakeRoute('auto:engineer', 'engineer')], {
+    const { ready, push, capture } = await runDaemon([wakeRoute('auto:engineer', 'engineer')], {
       json: true,
     });
     await ready;
     push({ t: 'transcript', utteranceId: 'u1', text: 'hello there', final: true });
     push({ t: 'reply_text', utteranceId: 'u1', personalityId: 'engineer', text: 'hello yourself' });
+    push({ t: 'transcript', utteranceId: 'u2', text: '', final: true });
+    // Ordered: the blip needs a live microphone, so it goes before the mute.
+    blip(capture);
+    push({ t: 'set_wake_enabled', enabled: false });
     const err = errLines.join('\n');
     expect(err).toContain('hello there');
     expect(err).toContain('hello yourself');
+    expect(err).toContain('no speech in that audio');
+    expect(err).toContain('discarded utterance');
+    expect(err).toContain('muted');
     expect(outLines).toHaveLength(0);
     expect(stdout).toHaveLength(0);
+  });
+
+  it('a route that vanishes is warned about once, and its return is narrated', async () => {
+    const { ready, push } = await runDaemon([wakeRoute('auto:engineer', 'engineer')]);
+    await ready;
+    // Every reconnect and Settings save re-pushes the table.
+    push(routesFrame([wakeRoute('auto:writer', 'writer')]));
+    push(routesFrame([wakeRoute('auto:writer', 'writer')]));
+    push(routesFrame([wakeRoute('auto:engineer', 'engineer')]));
+    const out = outLines.join('\n');
+    expect(occurrences(out, 'no longer has an enabled route')).toBe(1);
+    expect(out).toContain("route 'auto:engineer' is back");
+  });
+
+  it('a server-side mute is narrated — a deaf satellite never looks like a live one', async () => {
+    const { ready, push } = await runDaemon([wakeRoute('auto:engineer', 'engineer')]);
+    await ready;
+    push({ t: 'set_wake_enabled', enabled: false });
+    push({ t: 'set_wake_enabled', enabled: false });
+    push({ t: 'set_wake_enabled', enabled: true });
+    const out = outLines.join('\n');
+    // Once per CHANGE: a repeated toggle of the same value says nothing new.
+    expect(occurrences(out, 'this node is muted')).toBe(1);
+    expect(occurrences(out, 'wake re-enabled')).toBe(1);
   });
 });

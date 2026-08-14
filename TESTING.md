@@ -465,10 +465,15 @@ So speech onset on the pipe opens an utterance attributed to the route named by
 
 ```bash
 # macOS
-ffmpeg -f avfoundation -i :0 -ar 16000 -ac 1 -f s16le - | ethos listen --route kitchen
+ffmpeg -nostats -loglevel error -f avfoundation -i :0 -ar 16000 -ac 1 -f s16le - | ethos listen --route kitchen
 # Linux
-arecord -f S16_LE -r 16000 -c 1 -t raw | ethos listen --route kitchen
+arecord -q -f S16_LE -r 16000 -c 1 -t raw | ethos listen --route kitchen
 ```
+
+Keep the quiet flags. Both processes share the terminal, and ffmpeg's
+carriage-returned progress meter overwrites the daemon's own lines mid-word
+(`› you: hello7.9kbits/s speed= 1x`). `-nostats -loglevel error` drops the
+banner and the meter and nothing else — a bad device index still prints.
 
 `make listen` prints the same two pipelines and then runs the daemon, so a bare
 `make listen` on a TTY refuses to start — by design, and it says why.

@@ -10,8 +10,8 @@
 //
 // So the operator supplies the samples and the pipe is the device:
 //
-//   ffmpeg -f avfoundation -i :0 -ar 16000 -ac 1 -f s16le - | ethos listen
-//   arecord -f S16_LE -r 16000 -c 1 -t raw            | ethos listen   (Linux)
+//   ffmpeg -nostats -loglevel error -f avfoundation -i :0 -ar 16000 -ac 1 -f s16le - | ethos listen
+//   arecord -q -f S16_LE -r 16000 -c 1 -t raw                                        | ethos listen   (Linux)
 //
 // That works today, on every platform, with nothing installed that is not
 // already installed. A native binding is a later change behind the same
@@ -22,6 +22,13 @@
 // that the operator piped 44.1 kHz stereo instead; the rate we declare to the
 // server is the rate we were told, which is why the banner prints the exact
 // ffmpeg flags rather than leaving them to be guessed.
+//
+// THE QUIET FLAGS ARE NOT DECORATION. The capture process and the daemon share
+// one terminal, and ffmpeg's progress meter is a carriage-returned line that
+// overwrites this daemon's narration mid-word ("› you: hello7.9kbits/s speed=
+// 1x"). `-loglevel error` drops the banner and `-nostats` the meter — both are
+// needed; a real failure such as a device index that does not exist still
+// prints. `arecord -q` does the same for its one banner line.
 
 import type { AudioDeviceInfo, CaptureDevice, WakeFrame } from '@ethosagent/voice-satellite';
 

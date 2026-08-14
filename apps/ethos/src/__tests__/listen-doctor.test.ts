@@ -333,6 +333,9 @@ describe('chooseRoute against the pushed table', () => {
     expect(chosen.problem).toContain('privileged');
     expect(chosen.problem).toContain('by design');
     expect(chosen.problem).not.toContain('the convention is');
+    // …and the way out, in the same breath. An all-privileged deployment is
+    // the case that most needs the remedy spelled out.
+    expect(chosen.problem).toContain('voice.wake.routes.<id>.phrase / .personality / .privileged');
   });
 
   it('accepts a synthesized auto:<personalityId> id — the config charset never applies', () => {
@@ -342,10 +345,56 @@ describe('chooseRoute against the pushed table', () => {
 
   it('a typo still fails loudly — against the pushed table, not the config file', () => {
     const chosen = chooseRoute([route({ id: 'auto:engineer' })], 'auto:enginer');
+    const problem = chosen.problem ?? '';
     expect(chosen.route).toBeNull();
-    expect(chosen.problem).toContain("no enabled route 'auto:enginer'");
-    expect(chosen.problem).toContain('auto:engineer');
-    expect(chosen.problem).not.toContain('voice.wake.routes');
+    expect(problem).toContain("no enabled route 'auto:enginer'");
+    expect(problem).toContain('auto:engineer');
+    // The DIAGNOSIS is still the pushed table. The config key appears only in
+    // the trailing opt-in remedy, after the list — never as the thing the id
+    // should have been matched against.
+    expect(problem.indexOf('it pushed')).toBeLessThan(problem.indexOf('voice.wake.routes'));
+  });
+
+  it('a --route miss explains the privileged exclusion and the opt-in', () => {
+    // The reported defect: the message said what WAS pushed and nothing about
+    // why the personality the operator wanted was not, so a correct security
+    // decision read as a bug.
+    const problem = chooseRoute([route({ id: 'auto:debug' })], 'auto:engineer').problem ?? '';
+    expect(problem).toContain('privileged');
+    expect(problem).toContain('the approval layer would stop and ask about');
+    expect(problem).toContain('by design');
+    expect(problem).toContain('.privileged: true');
+  });
+
+  it('a --route miss against an empty table carries the same explanation', () => {
+    const problem = chooseRoute([], 'auto:engineer').problem ?? '';
+    expect(problem).toContain("no enabled route 'auto:engineer'");
+    expect(problem).toContain('it pushed an empty table');
+    expect(problem).toContain('privileged');
+    expect(problem).toContain('.privileged: true');
+  });
+
+  it('both refusals carry the SAME explanation — one constant, not two phrasings', () => {
+    const clause = 'A personality is absent from this table when it is privileged';
+    const miss = chooseRoute([route({ id: 'auto:debug' })], 'auto:engineer').problem ?? '';
+    const empty = chooseRoute([], undefined).problem ?? '';
+    expect(miss).toContain(clause);
+    expect(empty).toContain(clause);
+    // The clause runs to the end of both, so comparing the tails catches drift
+    // in every word of it, not just the sentence opener.
+    expect(miss.slice(miss.indexOf(clause))).toEqual(empty.slice(empty.indexOf(clause)));
+  });
+
+  it('never claims to know WHICH personalities the server withheld', () => {
+    // The client is not told, and the wake surface deliberately does not
+    // enumerate privileged personalities. The message states the rule; naming
+    // a name would mean inventing one — or making the server leak the list.
+    const pushed = route({ id: 'auto:debug', phrase: 'hey debug', personalityId: 'debug' });
+    const problem = chooseRoute([pushed], 'auto:engineer').problem ?? '';
+    expect(problem).toContain('A personality is absent');
+    // Every personality it names came from the table it was handed.
+    expect(problem.match(/→ [a-z0-9-]+/g)).toEqual(['→ debug']);
+    expect(problem).not.toMatch(/excluded:|withheld|hidden (route|personalit)/i);
   });
 
   it('a disabled route in the pushed table is not selectable', () => {

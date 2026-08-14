@@ -63,16 +63,52 @@ export interface CaptureMachineConfig {
    * the microphone with it".
    */
   playbackWatchdogMs?: number;
+  /**
+   * How much SPEECH an utterance must accumulate before it is worth sending.
+   * Below it the utterance is discarded locally — see `endUtterance`.
+   */
+  minSpeechMs?: number;
 }
 
 const DEFAULT_SILENCE_FRAMES = 20;
 const DEFAULT_IDLE_TIMEOUT_MS = 300_000;
 const DEFAULT_PLAYBACK_WATCHDOG_MS = 120_000;
+/**
+ * 400 ms of VAD-marked speech.
+ *
+ * A satellite watches an always-open pipe in a room, so the VAD firing on a
+ * chair scrape, a cough, a door, or a keystroke burst is its STEADY STATE, not
+ * an edge case. Those are impulses: one to five frames, 20–100 ms. The shortest
+ * thing a person deliberately says to an agent ("stop", "yes") is voiced for
+ * roughly 300 ms and usually more. 400 ms sits in the gap — above every impulse,
+ * below every real request — and the two failure costs are asymmetric in its
+ * favour: a discarded blip costs nothing, while a shipped blip costs an STT
+ * call, a provider round trip, and a "could not transcribe" the user reads as
+ * their own fault. Tune it with `minSpeechMs` if a deployment's one-word
+ * commands land under the line.
+ */
+const DEFAULT_MIN_SPEECH_MS = 400;
 
 export class CaptureMachine {
   private state: CaptureState = 'idle';
   private muted = false;
   private silentRun = 0;
+  /**
+   * Speech in the CURRENT utterance, in milliseconds.
+   *
+   * `silentRun` cannot answer this. It is a RUN counter — reset to zero by
+   * every speech frame — so it measures the pause that ends an utterance and
+   * says nothing about how much was said before it. Accumulated in ms rather
+   * than frames because a frame is only a duration if you already know the
+   * device's frame size, and the frames say so themselves.
+   */
+  private speechMs = 0;
+  /**
+   * Whether this utterance has cleared `minSpeechMs`. Until it does its frames
+   * are HELD, not sent — see `emitAudio`.
+   */
+  private qualified = false;
+  private held: WakeFrame[] = [];
   private idleTimer: unknown = null;
   private watchdogTimer: unknown = null;
   private lastWakeAt: number | null = null;
@@ -80,6 +116,7 @@ export class CaptureMachine {
   private readonly silenceFrames: number;
   private readonly idleTimeoutMs: number;
   private readonly playbackWatchdogMs: number;
+  private readonly minSpeechMs: number;
 
   constructor(
     private readonly deps: CaptureMachineDeps,
@@ -88,6 +125,7 @@ export class CaptureMachine {
     this.silenceFrames = config.silenceFrames ?? DEFAULT_SILENCE_FRAMES;
     this.idleTimeoutMs = config.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS;
     this.playbackWatchdogMs = config.playbackWatchdogMs ?? DEFAULT_PLAYBACK_WATCHDOG_MS;
+    this.minSpeechMs = config.minSpeechMs ?? DEFAULT_MIN_SPEECH_MS;
   }
 
   /** Current state. Read by the host to fill the `state` protocol frame. */
@@ -113,7 +151,7 @@ export class CaptureMachine {
   stop(): void {
     this.clearIdleTimer();
     this.clearWatchdog();
-    this.silentRun = 0;
+    this.resetCapture();
     this.transition('idle');
   }
 
@@ -144,13 +182,15 @@ export class CaptureMachine {
         return;
       }
       case 'capturing': {
-        this.deps.onAudio(frame);
-        if (this.deps.vad.push(frame)) {
+        const speech = this.deps.vad.push(frame);
+        if (speech) {
+          this.speechMs += frameMs(frame);
           this.silentRun = 0;
         } else {
           this.silentRun++;
-          if (this.silentRun >= this.silenceFrames) this.endUtterance();
         }
+        this.emitAudio(frame);
+        if (!speech && this.silentRun >= this.silenceFrames) this.endUtterance();
         return;
       }
     }
@@ -163,7 +203,7 @@ export class CaptureMachine {
   beginPlayback(): void {
     if (this.muted) return;
     this.clearIdleTimer();
-    this.silentRun = 0;
+    this.resetCapture();
     this.transition('speaking');
     this.clearWatchdog();
     this.watchdogTimer = this.deps.setTimer(() => {
@@ -198,7 +238,7 @@ export class CaptureMachine {
     if (muted) {
       this.clearIdleTimer();
       this.clearWatchdog();
-      this.silentRun = 0;
+      this.resetCapture();
       this.deps.engine.reset();
       this.transition('muted');
       return;
@@ -209,11 +249,11 @@ export class CaptureMachine {
   // --- internals -------------------------------------------------------------
 
   /** Re-arm: forget engine state, clear the watchdog, start the idle clock. */
-  private armListening(): void {
+  private armListening(detail?: string): void {
     this.clearWatchdog();
-    this.silentRun = 0;
+    this.resetCapture();
     this.deps.engine.reset();
-    this.transition('listening');
+    this.transition('listening', detail);
     this.clearIdleTimer();
     this.idleTimer = this.deps.setTimer(() => {
       this.idleTimer = null;
@@ -226,15 +266,74 @@ export class CaptureMachine {
     this.clearIdleTimer();
     this.lastWakeAt = this.deps.now();
     this.deps.engine.reset();
-    this.silentRun = 0;
+    this.resetCapture();
     this.transition('capturing');
     this.deps.onWake(match);
   }
 
+  /**
+   * Forward one captured frame — or HOLD it until the utterance has earned it.
+   *
+   * Held rather than dropped: the leading frames are where the first word is,
+   * and an utterance that qualifies half a second in must still be transcribed
+   * from its beginning. The flush replays them in order, so a host that streams
+   * upstream sees exactly the frames it would have seen, one threshold late.
+   *
+   * The hold is bounded by the endpointer, not by hope: every non-speech frame
+   * advances `silentRun`, so an utterance that never reaches `minSpeechMs` ends
+   * after at most `silenceFrames` consecutive quiet frames per speech frame it
+   * did contain — tens of kilobytes, then discarded.
+   */
+  private emitAudio(frame: WakeFrame): void {
+    if (this.qualified) {
+      this.deps.onAudio(frame);
+      return;
+    }
+    this.held.push(frame);
+    if (this.speechMs < this.minSpeechMs) return;
+    this.qualified = true;
+    const held = this.held;
+    this.held = [];
+    for (const pending of held) this.deps.onAudio(pending);
+  }
+
+  /**
+   * The endpointer fired. Either the utterance goes upstream, or it never
+   * happened.
+   *
+   * THE DISCARD IS THE POINT. An energy VAD watching a room triggers on noise
+   * indefinitely; shipping each of those blips costs an STT call and comes back
+   * as "could not transcribe audio — try again", which reads to the user as
+   * something they did wrong when they did not speak at all. So an utterance
+   * that never accumulated `minSpeechMs` of speech is dropped HERE — no
+   * `onAudio` was ever called for it (the frames were held), no
+   * `onUtteranceEnd` is called now, and nothing upstream learns it existed.
+   *
+   * It re-arms through `armListening`, the same transition a completed turn
+   * takes, so a discard can never wedge the machine — and it carries a detail
+   * the host may narrate, which is why the discard rides `onStateChange`
+   * rather than a callback of its own.
+   */
   private endUtterance(): void {
-    this.silentRun = 0;
+    if (!this.qualified) {
+      const speech = Math.round(this.speechMs);
+      this.armListening(
+        `discarded utterance: ${speech}ms of speech, under the ${this.minSpeechMs}ms minimum — ` +
+          `room noise rather than a request, so nothing was sent`,
+      );
+      return;
+    }
+    this.resetCapture();
     this.transition('thinking');
     this.deps.onUtteranceEnd();
+  }
+
+  /** Forget the in-flight utterance: its endpointing, its speech, its frames. */
+  private resetCapture(): void {
+    this.silentRun = 0;
+    this.speechMs = 0;
+    this.qualified = false;
+    this.held = [];
   }
 
   private clearIdleTimer(): void {
@@ -259,4 +358,15 @@ export class CaptureMachine {
     this.state = state;
     this.deps.onStateChange(state, detail);
   }
+}
+
+/**
+ * How long one frame lasts. Read off the frame, never assumed from a config —
+ * the device decides its own frame size, and a machine that guessed would
+ * mis-measure speech on every host but the one it was tuned on. The zero check
+ * is for the accumulator: `0 / 0` is NaN, and NaN in `speechMs` makes every
+ * comparison false, which is a microphone that discards everything forever.
+ */
+function frameMs(frame: WakeFrame): number {
+  return frame.sampleRate > 0 ? (frame.samples.length / frame.sampleRate) * 1000 : 0;
 }

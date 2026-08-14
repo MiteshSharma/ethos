@@ -15,7 +15,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import WebSocket from 'ws';
 import type { WakeRoutingTable } from '../../repositories/config.repository';
 import type { VoiceService } from '../../services/voice.service';
-import type { SatelliteLaneDeps } from '../satellite-lane';
+import { NoSpeechError } from '../no-speech';
+import type { SatelliteLaneDeps, SatelliteLaneLimits } from '../satellite-lane';
 import { SatelliteRegistry } from '../satellite-registry';
 import { createSatelliteSocket, type SatelliteSocket } from '../satellite-socket';
 import { createVoiceSocket, readCookie, type VoiceSocket } from '../voice-socket';
@@ -98,6 +99,8 @@ describe('satellite socket', () => {
   /** Stand-in session store: lane key → the turns filed under it. */
   let sessions: Map<string, string[]>;
   let transcribeCalls: number;
+  /** What STT does next. Reassigned by the tests that need it to refuse. */
+  let transcribeResult: () => Promise<{ text: string; provider: string }>;
   /** TTS calls. The whole point of the playback gate is that this stays 0. */
   let synthesizeCalls: number;
   /** The exact text each `synthesize` call received, in order. */
@@ -115,12 +118,26 @@ describe('satellite socket', () => {
   let mode: VoiceMode;
   /** Personalities the deployment has, and whether each is privileged. */
   let privileged: Set<string>;
+  /**
+   * What the fake loop does instead of streaming. Set by the failure tests —
+   * `throws` from inside the drained generator, `hold` to park a turn mid-flight
+   * so the socket can be pulled out from under it.
+   */
+  let turnThrows: Error | null;
+  let turnHold: Promise<void> | null;
+  /** Makes `voiceMode` reject — a step the turn awaits OUTSIDE its own try. */
+  let voiceModeError: Error | null;
+  /**
+   * Read fresh per connection by `SatelliteLane`'s constructor, so a test can
+   * shrink the capture cap before it connects.
+   */
+  let laneLimits: Partial<SatelliteLaneLimits>;
 
   function deps(): SatelliteLaneDeps {
     return {
       transcribe: () => {
         transcribeCalls += 1;
-        return Promise.resolve({ text: 'how are my positions', provider: 'fake-stt' });
+        return transcribeResult();
       },
       synthesize: async function* (text: string) {
         synthesizeCalls += 1;
@@ -138,6 +155,8 @@ describe('satellite socket', () => {
         turns.push({ text, sessionKey, personalityId });
         sessions.set(sessionKey, [...(sessions.get(sessionKey) ?? []), text]);
         return (async function* () {
+          if (turnHold) await turnHold;
+          if (turnThrows) throw turnThrows;
           // Deliberately marked up: both `reply_text` AND the synthesized audio
           // carry the SPEAKABLE form, so a delta with markdown in it is what
           // proves the sanitizer ran rather than the raw reply being forwarded.
@@ -153,7 +172,7 @@ describe('satellite socket', () => {
           yield { type: 'done' as const, text: replyDeltas.join(''), turnCount: 1 };
         })();
       },
-      voiceMode: () => Promise.resolve(mode),
+      voiceMode: () => (voiceModeError ? Promise.reject(voiceModeError) : Promise.resolve(mode)),
       // The REAL builder, so the encoding guarantee is what this suite
       // exercises rather than a template string that happens to agree.
       laneKey: (nodeId, personalityId) => satelliteLaneKey('web', nodeId, personalityId),
@@ -165,6 +184,8 @@ describe('satellite socket', () => {
     turns = [];
     sessions = new Map();
     transcribeCalls = 0;
+    transcribeResult = () =>
+      Promise.resolve({ text: 'how are my positions', provider: 'fake-stt' });
     synthesizeCalls = 0;
     synthesized = [];
     replyDeltas = ['**All good.** '];
@@ -173,12 +194,16 @@ describe('satellite socket', () => {
     currentTable = table();
     mode = 'mirror_inbound';
     privileged = new Set(['admin']);
+    turnThrows = null;
+    turnHold = null;
+    voiceModeError = null;
+    laneLimits = {};
     registry = new SatelliteRegistry({ readTable: () => Promise.resolve(currentTable) });
 
     server = createServer((_req, res) => res.end('ok'));
     const authenticate = (req: { headers: { cookie?: string } }) =>
       Promise.resolve(readCookie(req.headers.cookie, 'ethos_auth') === 'good-token');
-    satellite = createSatelliteSocket({ registry, deps, authenticate });
+    satellite = createSatelliteSocket({ registry, deps, authenticate, limits: laneLimits });
     voice = createVoiceSocket({ voice: fakeVoiceService(), authenticate });
     // Deliberately attached in the order that used to break: the voice lane's
     // handler was the only `upgrade` listener and 404'd everything else.
@@ -363,6 +388,9 @@ describe('satellite socket', () => {
       utteranceId,
       personalityId: 'engineer',
     });
+    // ONE, not two. Every terminal path now routes through a single emit point,
+    // and the flag behind it is what stops the happy path emitting twice.
+    expect(turnEnds(client.frames)).toHaveLength(1);
     // Regression guard for the playback gate below: a node that CAN play still
     // pays for TTS exactly as before.
     expect(synthesizeCalls).toBe(1);
@@ -521,6 +549,201 @@ describe('satellite socket', () => {
     // cause. `off` is the reason, and it is the user's own.
     expect(observed).toEqual([]);
     client.ws.close();
+  });
+
+  it('answers an utterance with no speech in it calmly, and re-arms the node', async () => {
+    // What a room-scale microphone produces all day: the VAD opened on a noise,
+    // the audio reached STT, and STT correctly heard nothing.
+    transcribeResult = () => Promise.reject(new NoSpeechError('Could not transcribe audio'));
+    const client = await connect();
+    const utteranceId = await speak(client, 'w1', 'hey engineer', 'eng', 'engineer');
+
+    // Not an error frame. The user did nothing wrong, and "try again" invites
+    // repeating a thing that cannot work.
+    expect(client.frames.some((f) => f.t === 'error')).toBe(false);
+    // The two frames that already say it: heard nothing, turn over.
+    expect(client.frames.find((f) => f.t === 'transcript')).toEqual({
+      t: 'transcript',
+      utteranceId,
+      text: '',
+      final: true,
+    });
+    expect(client.frames.at(-1)).toMatchObject({ t: 'turn_end', utteranceId });
+    // Once. This path used to send its own `turn_end`; it now falls through to
+    // the shared emit point, and the flag is what keeps that from doubling up.
+    expect(turnEnds(client.frames)).toHaveLength(1);
+    // No turn ran on an utterance nobody spoke.
+    expect(turns).toEqual([]);
+    expect(synthesizeCalls).toBe(0);
+    // Quiet on the wire, attributable in the audit trail.
+    expect(observed).toEqual([
+      {
+        code: 'satellite.no_speech',
+        details: { nodeId: 'kitchen', personalityId: 'engineer', utteranceId },
+      },
+    ]);
+    client.ws.close();
+  });
+
+  // --- ending the turn ------------------------------------------------------
+  //
+  // A satellite is DEAF from `utterance_end` until `turn_end`: its
+  // `CaptureMachine` models that interval as playback so the agent cannot wake
+  // itself with its own voice, and the only other way out is a 120 s watchdog.
+  // A terminal path that sends an `error` and stops therefore costs the room
+  // two minutes of dead microphone. These pin `… → error → turn_end` on every
+  // way a turn can end, and — the other half of the guarantee — exactly ONE
+  // `turn_end` on the paths that already worked.
+
+  /** Every `turn_end` this client saw. The count is the regression, not the presence. */
+  function turnEnds(frames: SatelliteServerFrame[]): SatelliteServerFrame[] {
+    return frames.filter((f) => f.t === 'turn_end');
+  }
+
+  it('still reports a genuine STT failure as an error, and ends the turn behind it', async () => {
+    transcribeResult = () => Promise.reject(new Error('whisper endpoint returned 503'));
+    const client = await connect();
+    // `speak` waits for `turn_end` — which for this path is the fix: it used to
+    // never arrive, and the node sat suppressed until its playback watchdog.
+    const utteranceId = await speak(client, 'w1', 'hey engineer', 'eng', 'engineer');
+
+    expect(client.frames.find((f) => f.t === 'error')).toMatchObject({
+      code: 'transcribe_failed',
+      message: 'whisper endpoint returned 503',
+      utteranceId,
+    });
+    // The reason first, so the operator still gets it; then the cue that gives
+    // the microphone back.
+    expect(client.frames.findIndex((f) => f.t === 'error')).toBeLessThan(
+      client.frames.findIndex((f) => f.t === 'turn_end'),
+    );
+    expect(turnEnds(client.frames)).toEqual([
+      { t: 'turn_end', utteranceId, personalityId: 'engineer' },
+    ]);
+    // The provider broke; nothing pretends the turn happened.
+    expect(client.frames.some((f) => f.t === 'transcript')).toBe(false);
+    expect(turns).toEqual([]);
+    expect(observed).toEqual([]);
+    client.ws.close();
+  });
+
+  it('ends the turn when the turn itself throws', async () => {
+    turnThrows = new Error('the agent loop blew up');
+    const client = await connect();
+    const utteranceId = await speak(client, 'w1', 'hey engineer', 'eng', 'engineer');
+
+    expect(client.frames.find((f) => f.t === 'error')).toMatchObject({
+      code: 'turn_failed',
+      message: 'the agent loop blew up',
+      utteranceId,
+    });
+    expect(client.frames.findIndex((f) => f.t === 'error')).toBeLessThan(
+      client.frames.findIndex((f) => f.t === 'turn_end'),
+    );
+    expect(turnEnds(client.frames)).toHaveLength(1);
+    expect(client.frames.at(-1)).toMatchObject({ t: 'turn_end', utteranceId });
+    client.ws.close();
+  });
+
+  it('ends the turn when a step outside the drained loop throws', async () => {
+    // `voiceMode` is awaited before the turn's own try block, so this used to
+    // escape all the way to the frame guard: a `lane_error` frame, a degraded
+    // row, and no `turn_end` at all. The wrapper is what makes the class of
+    // failure irrelevant to whether the microphone comes back.
+    voiceModeError = new Error('config read failed');
+    const client = await connect();
+    const utteranceId = await speak(client, 'w1', 'hey engineer', 'eng', 'engineer');
+
+    expect(client.frames.find((f) => f.t === 'error')).toMatchObject({
+      code: 'lane_error',
+      message: 'config read failed',
+      utteranceId,
+    });
+    expect(client.frames.findIndex((f) => f.t === 'error')).toBeLessThan(
+      client.frames.findIndex((f) => f.t === 'turn_end'),
+    );
+    expect(turnEnds(client.frames)).toHaveLength(1);
+    // Still degraded: an unexpected throw is a lane bug, and the Settings row
+    // says so. Ending the turn is recovery, not absolution.
+    expect(registry.list()[0]).toMatchObject({ state: 'degraded' });
+    client.ws.close();
+  });
+
+  it('ends the turn for an utterance discarded at the capture limit', async () => {
+    laneLimits.maxUtteranceBytes = 4;
+    const client = await connect();
+    client.send({
+      t: 'wake',
+      wakeId: 'w1',
+      phrase: 'hey engineer',
+      routeId: 'eng',
+      personalityId: 'engineer',
+    });
+    client.send({ t: 'utterance_start', wakeId: 'w1', utteranceId: 'u1', sampleRate: 16_000 });
+    client.send(
+      { t: 'audio', utteranceId: 'u1', seq: 0 },
+      pcm16ToBytes(Int16Array.from([1, 2, 3, 4, 5])),
+    );
+    // The node has no idea it was cut off and sends this anyway, which is the
+    // frame that starts its suppression window.
+    client.send({ t: 'utterance_end', utteranceId: 'u1' });
+
+    await vi.waitFor(() => expect(client.frames.some((f) => f.t === 'turn_end')).toBe(true));
+    expect(client.frames.find((f) => f.t === 'error')).toMatchObject({
+      code: 'utterance_too_long',
+      utteranceId: 'u1',
+    });
+    expect(client.frames.findIndex((f) => f.t === 'error')).toBeLessThan(
+      client.frames.findIndex((f) => f.t === 'turn_end'),
+    );
+    // The discarded utterance never became a turn — it just stopped being one
+    // the node has to wait out.
+    expect(turnEnds(client.frames)).toHaveLength(1);
+    expect(turns).toEqual([]);
+    client.ws.close();
+  });
+
+  it('does not write to a socket that closed mid-turn', async () => {
+    // The other half of "every path ends the turn": a lane whose node has gone
+    // must NOT end it. There is nothing to write to, and the node rebuilds its
+    // capture state from scratch when it reconnects and re-registers — so the
+    // frame is not merely undeliverable, it is unnecessary.
+    const rejections: unknown[] = [];
+    const onRejection = (err: unknown): void => void rejections.push(err);
+    process.on('unhandledRejection', onRejection);
+    try {
+      let release = (): void => {};
+      turnHold = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const client = await connect();
+      client.send({
+        t: 'wake',
+        wakeId: 'w1',
+        phrase: 'hey engineer',
+        routeId: 'eng',
+        personalityId: 'engineer',
+      });
+      client.send({ t: 'utterance_start', wakeId: 'w1', utteranceId: 'u1', sampleRate: 16_000 });
+      client.send(
+        { t: 'audio', utteranceId: 'u1', seq: 0 },
+        pcm16ToBytes(Int16Array.from([1, 2, 3])),
+      );
+      client.send({ t: 'utterance_end', utteranceId: 'u1' });
+      await vi.waitFor(() => expect(turns).toHaveLength(1));
+
+      client.ws.terminate();
+      await vi.waitFor(() => expect(registry.list()).toEqual([]));
+      release();
+
+      // Let the parked turn resume and run to completion against a dead lane.
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(rejections).toEqual([]);
+      expect(satellite.laneCount).toBe(0);
+      expect(client.frames.some((f) => f.t === 'turn_end')).toBe(false);
+    } finally {
+      process.off('unhandledRejection', onRejection);
+    }
   });
 
   it('resumes a personality lane and switches lanes for another (D15)', async () => {

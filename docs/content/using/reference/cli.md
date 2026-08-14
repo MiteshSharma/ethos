@@ -148,8 +148,8 @@ Synopsis: `ethos listen [doctor] [--url <ws url>] [--route <id>] [--device <id>]
 Capture is a pipe — the daemon reads raw signed 16-bit little-endian **mono** PCM at **16 kHz** from stdin, and there is no microphone binding.
 
 ```bash
-ffmpeg -f avfoundation -i :0 -ar 16000 -ac 1 -f s16le - | ethos listen --route kitchen   # macOS
-arecord -f S16_LE -r 16000 -c 1 -t raw | ethos listen --route kitchen                    # Linux
+ffmpeg -nostats -loglevel error -f avfoundation -i :0 -ar 16000 -ac 1 -f s16le - | ethos listen --route kitchen   # macOS
+arecord -q -f S16_LE -r 16000 -c 1 -t raw | ethos listen --route kitchen                                          # Linux
 ```
 
 It is **push-to-talk, not acoustic wake**: nothing here matches a phrase against sound, and `--json` reports `engine.daemonMode: "push-to-talk"` so a script cannot infer otherwise from the engine name. Acoustic wake needs the `sherpa` engine and its models — see [`voice.wake.engine`](./config-yaml.md#voice-wake) and [Run a wake satellite](../how-to/run-a-wake-satellite.md).

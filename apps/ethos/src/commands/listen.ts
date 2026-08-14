@@ -22,7 +22,7 @@
 // add one: a native microphone module is a per-architecture binary, and this is
 // the daemon that has to run on the Pi where such a binary is broken. So the
 // operator supplies samples on stdin and the pipe is the device —
-// `ffmpeg -f avfoundation -i :0 -ar 16000 -ac 1 -f s16le - | ethos listen`
+// `ffmpeg -nostats -loglevel error -f avfoundation -i :0 -ar 16000 -ac 1 -f s16le - | ethos listen`
 // works today with nothing installed that is not installed already. See
 // `../lib/stdin-pcm-device`.
 //
@@ -107,8 +107,12 @@ Options:
 Capture is a pipe. This daemon reads raw signed-16-bit little-endian MONO PCM
 from stdin, so a microphone is whatever can write that:
 
-  ffmpeg -f avfoundation -i :0 -ar 16000 -ac 1 -f s16le - | ethos listen
-  arecord -f S16_LE -r 16000 -c 1 -t raw                 | ethos listen
+  ffmpeg -nostats -loglevel error -f avfoundation -i :0 -ar 16000 -ac 1 -f s16le - | ethos listen
+  arecord -q -f S16_LE -r 16000 -c 1 -t raw                                        | ethos listen
+
+Keep the quiet flags. The capture process and this daemon share one terminal,
+and ffmpeg's progress meter is a carriage-returned line that overwrites this
+daemon's output mid-word. A real failure still prints.
 
 Push-to-talk: nothing is acoustically wake-matched here. Every utterance the
 pipe carries is sent as one route from the server's effective table — the one
@@ -624,7 +628,7 @@ async function listenDaemonCommand(flags: ListenFlags, deps: ListenCommandDeps):
   say(`${c.bold}ethos listen${c.reset}  ${c.dim}starting...${c.reset}`);
   say(
     `${c.dim}Runs in the foreground. Capture is a pipe: ${c.reset}` +
-      `${c.bold}ffmpeg -f avfoundation -i :0 -ar ${CAPTURE_SAMPLE_RATE} -ac 1 -f s16le - | ethos listen${c.reset}`,
+      `${c.bold}ffmpeg -nostats -loglevel error -f avfoundation -i :0 -ar ${CAPTURE_SAMPLE_RATE} -ac 1 -f s16le - | ethos listen${c.reset}`,
   );
 
   // Preflight FIRST, always. Refusing to start deaf is only possible if we
@@ -661,8 +665,8 @@ async function listenDaemonCommand(flags: ListenFlags, deps: ListenCommandDeps):
     console.error(
       `${c.red}✗ Nothing is piped to stdin — not starting.${c.reset}\n` +
         `  This daemon captures raw s16le mono PCM at ${CAPTURE_SAMPLE_RATE} Hz from a pipe:\n` +
-        `    ${c.bold}ffmpeg -f avfoundation -i :0 -ar ${CAPTURE_SAMPLE_RATE} -ac 1 -f s16le - | ethos listen${c.reset}\n` +
-        `    ${c.bold}arecord -f S16_LE -r ${CAPTURE_SAMPLE_RATE} -c 1 -t raw | ethos listen${c.reset}`,
+        `    ${c.bold}ffmpeg -nostats -loglevel error -f avfoundation -i :0 -ar ${CAPTURE_SAMPLE_RATE} -ac 1 -f s16le - | ethos listen${c.reset}\n` +
+        `    ${c.bold}arecord -q -f S16_LE -r ${CAPTURE_SAMPLE_RATE} -c 1 -t raw | ethos listen${c.reset}`,
     );
     process.exitCode = 1;
     return;
@@ -841,6 +845,26 @@ function readWakeRoutes(raw: Record<string, WakeRouteConfig> | undefined): WakeR
 }
 
 /**
+ * Why the personality the operator was looking for is not in the pushed table.
+ *
+ * Said the SAME WAY wherever a route cannot be resolved, because the two
+ * refusals — a `--route` that matched nothing, and a table with nothing in it —
+ * have the same cause and drifting into two phrasings of it is how one of them
+ * ends up stale.
+ *
+ * It states the RULE, never which personalities were withheld: the client is
+ * not told, the wake surface deliberately does not enumerate privileged
+ * personalities, and a message that guessed would be accusing a table it cannot
+ * see. Do not make the server send the excluded list to improve this string.
+ */
+const WHY_A_PERSONALITY_IS_ABSENT =
+  'A personality is absent from this table when it is privileged — its toolset can reach a ' +
+  'tool the approval layer would stop and ask about, and the default wake surface excludes ' +
+  'those by design (no toolset.yaml means every tool, so that counts). Opt one in with an ' +
+  'explicit route in ~/.ethos/config.yaml: voice.wake.routes.<id>.phrase / .personality / ' +
+  '.privileged: true.';
+
+/**
  * Which route a piped utterance is sent as, decided against the table the
  * SERVER pushed — never against the local config, which is one contributor to
  * that table and not the table itself.
@@ -868,8 +892,9 @@ export function chooseRoute(
       problem:
         `the server's wake route table has no enabled route '${requested}' — ` +
         (routes.length > 0
-          ? `it pushed: ${listed()}. A synthesized route is named auto:<personalityId>.`
-          : 'it pushed an empty table.'),
+          ? `it pushed: ${listed()}. A synthesized route is named auto:<personalityId>. `
+          : 'it pushed an empty table. ') +
+        WHY_A_PERSONALITY_IS_ABSENT,
     };
   }
   if (routes.length === 1 && routes[0]) return { route: routes[0] };
@@ -879,10 +904,8 @@ export function chooseRoute(
       problem:
         'the server pushed an EMPTY wake route table — this deployment has no personality ' +
         'the wake surface can reach. Every unprivileged personality gets a synthesized ' +
-        '"hey <name>" route automatically, so an empty table means there are none: ' +
-        'privileged personalities are excluded from the default wake surface by design. ' +
-        'Add voice.wake.routes.<id>.phrase / .personality / .privileged to ~/.ethos/config.yaml ' +
-        'to reach one on purpose, or create an unprivileged personality.',
+        '"hey <name>" route automatically, so an empty table means there are none. ' +
+        WHY_A_PERSONALITY_IS_ABSENT,
     };
   }
   return {
@@ -1258,6 +1281,10 @@ export async function startListenDaemon(
   let currentUtteranceId: string | null = null;
   let audioSeq = 0;
   let playoutWarned = false;
+  /** What was last REGISTERED with the server; see `onSetWakeEnabled`. */
+  let wakeEnabled = true;
+  /** Whether the active route's absence has already been said; see `onRoutes`. */
+  let routeMissingWarned = false;
 
   let deliverTable: ((routes: WakeRoute[]) => void) | null = null;
   const firstTable = new Promise<WakeRoute[]>((resolve) => {
@@ -1298,10 +1325,27 @@ export async function startListenDaemon(
       // A later push is a Settings save or a reconnect; this node only needs to
       // know whether the route it is running is still there.
       const active = route;
-      if (active && !table.some((r) => r.id === active.id && r.enabled)) {
+      if (active === null) return;
+      const present = table.some((r) => r.id === active.id && r.enabled);
+      // NARRATED ON THE EDGE, BOTH WAYS. Every reconnect and every Settings
+      // save re-pushes the table, so warning on each push repeated one line per
+      // push for a condition that had not changed — and saying nothing when the
+      // route came back left "utterances will be refused until it comes back"
+      // standing as the operator's last word on a satellite that was working
+      // again.
+      if (!present && !routeMissingWarned) {
+        routeMissingWarned = true;
         say(
           `${c.yellow}⚠ route${c.reset} ${c.dim}the server no longer has an enabled route ` +
             `'${active.id}' — utterances will be refused until it comes back.${c.reset}`,
+        );
+        return;
+      }
+      if (present && routeMissingWarned) {
+        routeMissingWarned = false;
+        say(
+          `${c.dim}  ↩ route '${active.id}' is back in the server's table — ` +
+            `utterances are accepted again.${c.reset}`,
         );
       }
     },
@@ -1309,6 +1353,20 @@ export async function startListenDaemon(
       // What the server HEARD, echoed back — printed as the operator's own
       // words, with `onReplyText` below printing the answer to them.
       if (!frame.final) return;
+      if (frame.text.trim() === '') {
+        // A FINAL TRANSCRIPT WITH NO TEXT IS THE SERVER SAYING IT HEARD NO
+        // SPEECH — the recognizer's own "nothing was said", which on an open
+        // pipe in a room is ordinary traffic and not a fault. It arrives with a
+        // `turn_end` behind it, so the re-arm is already narrated below and
+        // this line only has to say what was heard. Rendering it through the
+        // normal branch printed a bare `› you:` with nothing after it, which
+        // reads as a bug; any word stronger than these blames the operator for
+        // a door closing.
+        say(
+          `${c.dim}  › no speech in that audio — the server heard nothing to transcribe.${c.reset}`,
+        );
+        return;
+      }
       say(`${c.dim}  › you:${c.reset} ${frame.text}`);
     },
     onReplyText: (frame) => {
@@ -1343,7 +1401,23 @@ export async function startListenDaemon(
         machine?.endPlayback();
       }
     },
-    onSetWakeEnabled: (enabled) => machine?.setMuted(!enabled),
+    onSetWakeEnabled: (enabled) => {
+      machine?.setMuted(!enabled);
+      // A MUTED SATELLITE IS A DEAF ONE, and rule 1 of this file says it may
+      // never look otherwise. The mute arrives from the Settings UI on another
+      // machine, and `onStateChange` deliberately narrates nothing for `muted`
+      // (it is a legitimate state, not a fault) — so without this line the pipe
+      // keeps flowing, `●` never appears again, and the terminal that said
+      // "Listening on ..." is the last thing the operator was told.
+      if (enabled === wakeEnabled) return;
+      wakeEnabled = enabled;
+      say(
+        enabled
+          ? `${c.dim}  ↩ wake re-enabled from the server. Listening again.${c.reset}`
+          : `${c.yellow}⚠ wake${c.reset} ${c.dim}disabled from the server — this node is muted, ` +
+              `and speech on the pipe is ignored until it is re-enabled.${c.reset}`,
+      );
+    },
     onError: (message) => say(`${c.yellow}⚠ satellite${c.reset} ${c.dim}${message}${c.reset}`),
   });
 
@@ -1439,6 +1513,29 @@ export async function startListenDaemon(
         client.sendState(protocolState(state), detail);
         if (state === 'degraded' && detail) {
           say(`${c.yellow}⚠ capture${c.reset} ${c.dim}${detail}${c.reset}`);
+          return;
+        }
+        // A `listening` transition CARRYING A DETAIL is `CaptureMachine`
+        // discarding an utterance under its minimum-speech floor — the only
+        // detailed re-arm it has (the watchdog's re-arm reports itself as
+        // `degraded` first, and passes none).
+        //
+        // THE REPETITION RULE IS PAIRING: narrate it only while an utterance
+        // this daemon already printed a `● speech` line for is unresolved, and
+        // resolve it here. That gives exactly one discard line per `●`, never
+        // one without a `●`, so the dangling open marker this fixes cannot come
+        // back — and in a room full of chair scrapes it adds no NEW class of
+        // noise, because every discard had already cost a `●` line and this one
+        // closes it rather than adding an unrelated one. Suppressing
+        // consecutive duplicates instead would leave that dangling `●` standing
+        // in exactly the noisy case it was meant to help: the details differ by
+        // their millisecond count, so consecutive discards are rarely identical.
+        if (state === 'listening' && detail !== undefined && currentUtteranceId !== null) {
+          say(`${c.dim}  ↩ ${detail}${c.reset}`);
+          // Nothing about this utterance went upstream — no audio was sent, no
+          // `utterance_end` follows, and there is no turn to close. Clearing it
+          // is what makes the next `●` the only open one.
+          currentUtteranceId = null;
         }
       },
     },

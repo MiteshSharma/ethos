@@ -25,6 +25,7 @@ import {
   type TtsProviderRegistry,
 } from '@ethosagent/types';
 import { isHallucination, truncateAtSentenceBoundary } from '@ethosagent/voice-text';
+import { NoSpeechError } from '../voice/no-speech';
 
 /**
  * Just enough of a personality registry to answer "how does this one sound".
@@ -928,12 +929,17 @@ export class VoiceService {
         ...(signal ? { signal } : {}),
       },
     );
+    // Both of these are the SAME event — the provider heard no speech — and a
+    // `NoSpeechError` is how a caller tells that apart from the provider
+    // failing. A hallucination is the empty case wearing a phrase: whisper
+    // answers silence with "Thank you." or "[BLANK_AUDIO]", which is not
+    // something anybody said.
     if (isHallucination(raw)) {
-      throw new Error('Could not transcribe audio — try again');
+      throw new NoSpeechError('Could not transcribe audio — try again');
     }
     const trimmed = raw.trim();
     if (!trimmed) {
-      throw new Error('Could not transcribe audio — try again');
+      throw new NoSpeechError('Could not transcribe audio — try again');
     }
     return { text: trimmed, provider: resolution.providerId };
   }

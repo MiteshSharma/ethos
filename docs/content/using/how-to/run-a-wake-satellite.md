@@ -95,13 +95,15 @@ A bare origin gets the lane path appended for you.
 
 ```bash
 # macOS
-ffmpeg -f avfoundation -i :0 -ar 16000 -ac 1 -f s16le - | ethos listen --route kitchen
+ffmpeg -nostats -loglevel error -f avfoundation -i :0 -ar 16000 -ac 1 -f s16le - | ethos listen --route kitchen
 ```
 
 ```bash
 # Linux
-arecord -f S16_LE -r 16000 -c 1 -t raw | ethos listen --route kitchen
+arecord -q -f S16_LE -r 16000 -c 1 -t raw | ethos listen --route kitchen
 ```
+
+Keep the quiet flags. The capture process and the daemon share one terminal, and ffmpeg's progress meter is a carriage-returned line that overwrites the daemon's output mid-word — `› you: hello7.9kbits/s speed= 1x`. `-nostats -loglevel error` drops the banner and the meter; a real failure, such as a device index that does not exist, still prints. `arecord -q` does the same for its one banner line.
 
 The preflight rows print first, then the line that names the lane it is dialling for its route table, then the two that say what this daemon is:
 
@@ -187,10 +189,14 @@ The `‹` line is the whole answer on this host — there is no loudspeaker to s
 - **`✗ Nothing is piped to stdin — not starting.`** You ran `ethos listen` from a shell with no pipe. Enumerating a device that will never produce a sample is the false-available failure this preflight exists to refuse. Pipe `ffmpeg` or `arecord` in.
 - **`✗ No usable wake engine on this host — not starting.`** Every engine probe failed, including the dependency-free one. Read the `engine:` rows above the message.
 - **`⚠ degraded engine:sherpa: sherpa-onnx-node is not installed`** — the acoustic engine is unavailable and the daemon continues on push-to-talk. Install the peer on that host, or set `voice.wake.engine: fallback`.
-- **`✗ the server's wake route table has no enabled route '<id>'`** — the id after `--route` is not in the table the server pushed, or it is disabled. The message lists every id that was pushed, synthesized `auto:<personality-id>` ones included.
+- **`✗ the server's wake route table has no enabled route '<id>'`** — the id after `--route` is not in the table the server pushed, or it is disabled. The message lists every id that was pushed, synthesized `auto:<personality-id>` ones included, then states the rule for the ones it did not.
+- **The personality you wanted is not in that list at all.** It is privileged, so it gets no `auto:<personality-id>` default — its toolset can reach a tool the approval layer would stop and ask about, and a personality with no `toolset.yaml` gets every tool and counts too. Nothing is broken; give it a route and opt it in, as in *Reach a privileged personality* above. The satellite is never told which personalities were withheld, so the message states the rule rather than naming names.
+- **`✗ the server pushed an EMPTY wake route table`** — same cause, every personality. Every unprivileged one would have been synthesized into that table, so an empty table means this deployment has none. Opt one in rather than widening a toolset to get a default back.
 - **`No wake route matches "<phrase>"`** from the server — the satellite's pushed table is stale, or the route was deleted. It refreshes on reconnect.
 - **`⚠ playout the server is sending synthesized audio, and this host has no output device`** — the server is an older build: a current one skips synthesis for a `playback: false` node. The audio is discarded. The reply text still prints.
 - **`⚠ edge stt`** — `voice.wake.edgeStt` is on, but neither shipped host has an on-device recognizer. Audio *will* be streamed to the server, and the "no audio leaves the machine" guarantee does not hold there.
+- **`● speech` prints and nothing follows it.** The utterance held less than 400 ms of speech, so the satellite discarded it locally instead of sending room noise to speech-to-text. No turn ran, and the microphone re-armed immediately. A pipe that does this constantly is a microphone with too much gain.
+- **An empty `› you:` line, then the re-arm.** The audio reached the server and the speech-to-text provider heard nothing in it. That is a report, not a failure — no turn ran, and nothing needs repeating.
 - **The row says `degraded` after a reply.** The playback watchdog fired: the host never reported playback finishing, so the machine re-armed the microphone without a receipt rather than leaving it parked. The detail on the row names the timeout.
 
 ## See also

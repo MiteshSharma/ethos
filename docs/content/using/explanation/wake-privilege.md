@@ -61,7 +61,7 @@ That is what makes the privilege check enforceable rather than cosmetic. A satel
 
 **Once opted in, there is no second check.** `privileged: true` makes that personality reachable by *any* voice in earshot, including a voice on a television. Speaker verification is an explicit follow-up and is not built. Until it lands, route-level opt-in is the wake surface's entire access control, and the wake phrase is not a secret.
 
-**Privilege is toolset-shaped, so it can surprise you.** Adding `write_file` to a personality's toolset silently withdraws its `hey <name>` default, and the symptom is a phrase that stops working rather than an error at the moment the toolset changed. The Settings → Voice route table shows the effective set, which is where to look when a personality stops answering.
+**Privilege is toolset-shaped, so it can surprise you.** Adding `write_file` to a personality's toolset silently withdraws its `hey <name>` default, and the symptom is a phrase that stops working rather than an error at the moment the toolset changed. The Settings → Voice route table shows the effective set, which is where to look when a personality stops answering. On a satellite the same absence arrives as `ethos listen --route auto:<id>` refusing an id the pushed table does not hold; that refusal restates this rule, because a table listing only what is present reads like a bug.
 
 **A narrow toolset is not a safe one.** The lists cover irreversible *local* actions. A personality with only `web_search` and `send_message` is unprivileged by this definition and can still be told to message someone on the operator's behalf. The check bounds the blast radius; it does not make an ambient agent harmless.
 

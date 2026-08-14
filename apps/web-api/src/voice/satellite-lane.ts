@@ -7,6 +7,7 @@ import {
   type SatelliteClientFrame,
   type SatelliteServerFrame,
 } from '@ethosagent/web-contracts';
+import { isNoSpeechError } from './no-speech';
 import type { SatelliteNode, SatelliteRegistry } from './satellite-registry';
 import { MIME_BY_FORMAT } from './voice-lane';
 
@@ -128,6 +129,13 @@ interface UtteranceState {
    * refused instead of quietly running the turn twice.
    */
   input: 'audio' | 'edge' | null;
+  /**
+   * Whether this utterance's `turn_end` has been accounted for — either sent,
+   * or deliberately withheld because a newer utterance took the floor. See
+   * {@link SatelliteLane.endTurn}; this flag is what makes the emit point
+   * single and the emission exactly-once.
+   */
+  ended: boolean;
   /** Serializes this utterance's synthesis so reply segments stay in order. */
   synthChain: Promise<void>;
 }
@@ -210,12 +218,18 @@ export class SatelliteLane {
         return;
       // The two turn entry points DETACH: everything before them had to be in
       // order, everything after them is a conversation that may run for a
-      // minute, and blocking the frame chain on it would deafen the node.
+      // minute, and blocking the frame chain on it would deafen the node. Both
+      // go through `withTurnEnd`, which is what guarantees the node gets its
+      // microphone back however the turn finishes.
       case 'utterance_end':
-        void this.guard(() => this.finishUtterance(frame.utteranceId));
+        void this.guard(() =>
+          this.withTurnEnd(frame.utteranceId, (state) => this.finishUtterance(state)),
+        );
         return;
       case 'transcript':
-        void this.guard(() => this.onEdgeTranscript(frame.utteranceId, frame.text));
+        void this.guard(() =>
+          this.withTurnEnd(frame.utteranceId, (state) => this.onEdgeTranscript(state, frame.text)),
+        );
         return;
       case 'playback_done':
         this.patchNode({ state: 'listening', stateDetail: undefined });
@@ -334,12 +348,10 @@ export class SatelliteLane {
       this.fail('no_wake', 'No authorized wake for this utterance.', { utteranceId: id });
       return;
     }
-    // A new utterance supersedes every older one: the speaker moved on, and a
-    // reply still in flight for a previous utterance must not reach the room.
-    for (const previous of this.utterances.keys()) {
-      if (previous !== id) this.supersede(previous);
-    }
-    this.utterances.get(id)?.controller.abort();
+    // A new utterance supersedes every older one — including a restart under
+    // the same id: the speaker moved on, and a reply still in flight for a
+    // previous utterance must not reach the room.
+    for (const previous of this.utterances.keys()) this.supersede(previous);
     this.utterances.set(id, {
       id,
       personalityId: wake.personalityId,
@@ -349,6 +361,7 @@ export class SatelliteLane {
       controller: new AbortController(),
       superseded: false,
       input: null,
+      ended: false,
       synthChain: Promise.resolve(),
     });
     this.evictOverflow();
@@ -365,19 +378,24 @@ export class SatelliteLane {
     }
     state.input = 'audio';
     if (state.bytes + payload.length > this.limits.maxUtteranceBytes) {
-      this.supersede(id);
       this.fail('utterance_too_long', 'Utterance exceeded the capture limit and was discarded.', {
         utteranceId: id,
       });
+      // Ended here, before the discard: the node is still capturing and will
+      // send `utterance_end` next, which suppresses its microphone until a
+      // `turn_end` that `finishUtterance` will never send for an utterance it
+      // finds already superseded. `endTurn` before `supersede`, so the order on
+      // the wire is `error` → `turn_end`.
+      this.endTurn(state);
+      this.supersede(id);
       return;
     }
     state.bytes += payload.length;
     state.chunks.push({ data: pcm16FromBytes(payload), sampleRate: state.sampleRate });
   }
 
-  private async finishUtterance(id: string): Promise<void> {
-    const state = this.utterances.get(id);
-    if (!state || state.superseded) return;
+  private async finishUtterance(state: UtteranceState): Promise<void> {
+    const id = state.id;
     const chunks = state.chunks;
     // The captured PCM is not needed once it has been handed to STT; holding it
     // would keep raw voice from someone's kitchen in memory for no reason.
@@ -393,6 +411,30 @@ export class SatelliteLane {
       provider = result.provider;
     } catch (err) {
       if (this.isStale(state)) return;
+      // NOTHING WAS SAID IS NOT A FAILURE, and it must not be dressed as one.
+      // A satellite watches an open microphone in a room, so an utterance that
+      // turns out to be a door closing is ordinary traffic — the node's own
+      // minimum-speech guard drops most of them before they ever get here, and
+      // the ones that survive it are the provider agreeing there was no speech.
+      // An `error` frame for that tells the user something broke and invites
+      // them to repeat a thing they never said.
+      //
+      // NO NEW FRAME TYPE. The two frames that already say it are `transcript`
+      // — what the server HEARD, which is nothing — and `turn_end`, the cue the
+      // node re-arms on. The `turn_end` is not sent here: `withTurnEnd` sends it
+      // for EVERY way out of this function, which is what makes this path no
+      // longer special (`error` alone used to leave the node parked in
+      // `speaking` until its playback watchdog fired, minutes later — and so
+      // did the genuine-failure path below).
+      if (isNoSpeechError(err)) {
+        this.opts.deps.observe?.('satellite.no_speech', {
+          nodeId: this.nodeId,
+          personalityId: state.personalityId,
+          utteranceId: id,
+        });
+        this.opts.send({ t: 'transcript', utteranceId: id, text: '', final: true });
+        return;
+      }
       this.fail('transcribe_failed', errorMessage(err, 'Could not transcribe audio'), {
         utteranceId: id,
       });
@@ -409,12 +451,14 @@ export class SatelliteLane {
    * The turn starts here and `utterance_end` never comes: on an edge node the
    * transcript IS the end of the utterance.
    */
-  private async onEdgeTranscript(id: string, text: string): Promise<void> {
-    const state = this.utterances.get(id);
-    if (!state || state.superseded) return;
+  private async onEdgeTranscript(state: UtteranceState, text: string): Promise<void> {
     if (state.input === 'audio') {
+      // Refused, and the turn ends with it. A node that streams audio AND a
+      // transcript for one utterance is breaking the wire contract, so there
+      // is no correct moment to re-arm it; ending here at least bounds the
+      // damage to "re-armed early" instead of "deaf for two minutes".
       this.fail('duplicate_input', 'This utterance already streamed audio upstream.', {
-        utteranceId: id,
+        utteranceId: state.id,
       });
       return;
     }
@@ -550,14 +594,9 @@ export class SatelliteLane {
       });
     }
     // Every queued segment must be on the wire before `turn_end`, which is the
-    // node's cue that nothing further will be spoken.
+    // node's cue that nothing further will be spoken — so this await is what
+    // holds the turn open, and `withTurnEnd` sends the frame once it returns.
     await state.synthChain;
-    if (this.isStale(state)) return;
-    this.opts.send({
-      t: 'turn_end',
-      utteranceId: state.id,
-      personalityId: state.personalityId,
-    });
   }
 
   /**
@@ -622,10 +661,79 @@ export class SatelliteLane {
     try {
       await fn();
     } catch (err) {
-      const message = errorMessage(err, 'Satellite lane error');
-      this.patchNode({ state: 'degraded', stateDetail: message });
-      this.opts.send({ t: 'error', code: 'lane_error', message });
+      this.laneError(err);
     }
+  }
+
+  /**
+   * Run one turn's work to completion and END THE TURN, whatever happens.
+   *
+   * THE INVARIANT THIS EXISTS FOR: a satellite that has started an utterance is
+   * DEAF until it sees `turn_end`. Its `CaptureMachine` models the
+   * `utterance_end` → `turn_end` interval as playback — that is the window in
+   * which a reply is being produced, and the microphone must not wake the agent
+   * with its own voice — and the only other way out of that window is a 120 s
+   * playback watchdog. So a terminal path that sends an `error` and stops does
+   * not merely fail the turn; it costs the room two minutes of dead microphone
+   * for a failure it could have recovered from at once.
+   *
+   * Which is why the two turn entry points are wrapped HERE rather than each
+   * terminal site remembering to send the frame for itself. Remembering is what
+   * failed: the happy path and the no-speech path each sent their own
+   * `turn_end`, and the failure paths beside them did not. A terminal path
+   * added inside `work` later — another provider, another refusal, a throw
+   * nobody predicted — is now covered by construction rather than by review.
+   *
+   * The unexpected-throw error frame is emitted here rather than left to
+   * `guard`, because the ordering the node sees must always be
+   * `… → error → turn_end`: the reason first, so the operator still gets it,
+   * then the cue that gives the microphone back.
+   */
+  private async withTurnEnd(
+    id: string,
+    work: (state: UtteranceState) => Promise<void>,
+  ): Promise<void> {
+    const state = this.utterances.get(id);
+    if (!state || state.superseded) return;
+    try {
+      await work(state);
+    } catch (err) {
+      if (!this.isStale(state)) this.laneError(err, id);
+    } finally {
+      this.endTurn(state);
+    }
+  }
+
+  /**
+   * Send this utterance's `turn_end` — the ONE place it is sent, at most once
+   * per utterance. See {@link withTurnEnd} for why the frame is load-bearing.
+   *
+   * Two cases deliberately send nothing:
+   *
+   * - The lane is CLOSED. There is no socket to write to, and a node that
+   *   reconnects re-registers and rebuilds its own capture state from scratch,
+   *   so it needs no cue from the connection that went away.
+   * - The utterance was RETIRED by `supersede` because a newer one took the
+   *   floor. `endPlayback()` on the node re-arms unconditionally and resets the
+   *   capture buffer with it, so a stale `turn_end` would abort the utterance
+   *   that replaced this one. The newer utterance ends its own turn.
+   */
+  private endTurn(state: UtteranceState): void {
+    if (state.ended) return;
+    state.ended = true;
+    if (this.closed) return;
+    this.opts.send({
+      t: 'turn_end',
+      utteranceId: state.id,
+      personalityId: state.personalityId,
+    });
+  }
+
+  /** An unexpected throw: name it to the node, and mark the row degraded. */
+  private laneError(err: unknown, utteranceId?: string): void {
+    const message = errorMessage(err, 'Satellite lane error');
+    this.patchNode({ state: 'degraded', stateDetail: message });
+    this.fail('lane_error', message, utteranceId ? { utteranceId } : {});
   }
 
   private fail(
@@ -651,6 +759,11 @@ export class SatelliteLane {
     const state = this.utterances.get(id);
     if (!state || state.superseded) return;
     state.superseded = true;
+    // RETIRED: whatever ends this utterance, it is not a `turn_end` of ours.
+    // Either the newer utterance that displaced it will send its own — and a
+    // stale one would reset the capture that replaced this — or the caller has
+    // already ended the turn itself (see `appendAudio`'s capture-limit path).
+    state.ended = true;
     state.chunks = [];
     state.controller.abort();
   }

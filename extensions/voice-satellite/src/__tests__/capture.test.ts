@@ -56,6 +56,11 @@ const CONFIG: CaptureMachineConfig = {
   silenceFrames: 3,
   idleTimeoutMs: 60_000,
   playbackWatchdogMs: 10_000,
+  // One 20 ms frame of speech is enough to qualify. The suites below this line
+  // are about ENDPOINTING and re-arming, and they say what they mean in two or
+  // three frames; the minimum-speech guard gets its own config where it is the
+  // subject rather than a tax on every other test.
+  minSpeechMs: 20,
 };
 
 function harness(config: CaptureMachineConfig = CONFIG): Harness {
@@ -168,12 +173,107 @@ describe('CaptureMachine — arming and capture', () => {
   });
 });
 
+describe('CaptureMachine — minimum speech', () => {
+  // 100 ms = five 20 ms frames, so "enough" and "not enough" are both a couple
+  // of pushes apart and the assertions stay readable.
+  const GUARDED: CaptureMachineConfig = { ...CONFIG, minSpeechMs: 100 };
+
+  /** Open an utterance without spending any speech on it. */
+  function wake(h: Harness): void {
+    h.armWake();
+    h.machine.pushFrame(frame());
+  }
+
+  it('discards an utterance with too little speech and sends nothing upstream', () => {
+    const h = harness(GUARDED);
+    h.machine.start();
+    wake(h);
+
+    h.speech(2); // 40 ms — a cough, not a request.
+    h.silence(3);
+
+    // Nothing upstream: not the audio (it was held, never forwarded), and not
+    // the end-of-utterance that would have started a turn.
+    expect(h.audio).toHaveLength(0);
+    expect(h.utteranceEnds).toBe(0);
+    // Reported, and re-armed exactly as a completed turn re-arms.
+    expect(h.machine.getState()).toBe('listening');
+    const last = h.states[h.states.length - 1];
+    expect(last?.state).toBe('listening');
+    expect(last?.detail).toMatch(/discarded utterance: 40ms of speech, under the 100ms minimum/);
+  });
+
+  it('wakes again immediately after a discard', () => {
+    const h = harness(GUARDED);
+    h.machine.start();
+    wake(h);
+    h.speech(1);
+    h.silence(3);
+    expect(h.machine.getState()).toBe('listening');
+
+    wake(h);
+    expect(h.machine.getState()).toBe('capturing');
+    expect(h.wakes).toHaveLength(2);
+    h.speech(5);
+    h.silence(3);
+    expect(h.utteranceEnds).toBe(1);
+  });
+
+  it('leaves an utterance above the threshold untouched, leading frames included', () => {
+    const h = harness(GUARDED);
+    h.machine.start();
+    wake(h);
+
+    // Two silent frames of lead-in, then the speech that qualifies it. The
+    // lead-in must still arrive: it is where the first word starts.
+    h.silence(2);
+    h.speech(5);
+    expect(h.audio).toHaveLength(7);
+    h.silence(3);
+
+    expect(h.machine.getState()).toBe('thinking');
+    expect(h.utteranceEnds).toBe(1);
+    expect(h.audio).toHaveLength(10);
+  });
+
+  it('does not carry speech across utterances', () => {
+    const h = harness(GUARDED);
+    h.machine.start();
+    // Four sub-threshold utterances in a row do not add up to a fifth that
+    // qualifies — a room full of noise must never accumulate into a turn.
+    for (let i = 0; i < 4; i++) {
+      wake(h);
+      h.speech(2);
+      h.silence(3);
+    }
+    expect(h.utteranceEnds).toBe(0);
+    expect(h.audio).toHaveLength(0);
+  });
+
+  it('defaults to a threshold that a blip cannot clear', () => {
+    // No `minSpeechMs` — the shipped default is what a real satellite runs.
+    const h = harness({ silenceFrames: 3, idleTimeoutMs: 60_000, playbackWatchdogMs: 10_000 });
+    h.machine.start();
+    wake(h);
+    h.speech(5); // 100 ms.
+    h.silence(3);
+    expect(h.utteranceEnds).toBe(0);
+    expect(h.machine.getState()).toBe('listening');
+
+    wake(h);
+    h.speech(20); // 400 ms.
+    h.silence(3);
+    expect(h.utteranceEnds).toBe(1);
+  });
+});
+
 describe('CaptureMachine — self-wake suppression', () => {
   it('never feeds the engine while the satellite is speaking', () => {
     const h = harness();
     h.machine.start();
     h.armWake();
     h.machine.pushFrame(frame());
+    h.speech(1);
     h.silence(3);
 
     h.machine.beginPlayback();
@@ -195,6 +295,7 @@ describe('CaptureMachine — self-wake suppression', () => {
     h.machine.start();
     h.armWake();
     h.machine.pushFrame(frame());
+    h.speech(1);
     h.silence(3);
     expect(h.machine.getState()).toBe('thinking');
 
@@ -217,15 +318,26 @@ describe('CaptureMachine — self-wake suppression', () => {
 
 describe('CaptureMachine — verified re-arm', () => {
   it('survives five consecutive wake → capture → speak → re-arm cycles', () => {
-    const h = harness();
+    // 60 ms minimum, so a two-frame utterance is real and a one-frame one is
+    // noise — the discard below has to be a genuine sub-threshold utterance.
+    const h = harness({ ...CONFIG, minSpeechMs: 60 });
     h.machine.start();
 
     for (let cycle = 0; cycle < 5; cycle++) {
       expect(h.machine.getState()).toBe('listening');
+      // A blip of room noise between turns must not consume the cycle: it is
+      // discarded, and the machine is back in `listening` for the real one.
+      if (cycle === 2) {
+        h.armWake();
+        h.machine.pushFrame(frame());
+        h.speech(1);
+        h.silence(3);
+        expect(h.machine.getState()).toBe('listening');
+      }
       h.armWake();
       h.machine.pushFrame(frame());
       expect(h.machine.getState()).toBe('capturing');
-      h.speech(2);
+      h.speech(3);
       h.silence(3);
       expect(h.machine.getState()).toBe('thinking');
       h.machine.beginPlayback();
@@ -233,13 +345,14 @@ describe('CaptureMachine — verified re-arm', () => {
       h.machine.endPlayback();
     }
 
-    expect(h.wakes).toHaveLength(5);
+    // Six wakes, five turns: the discarded one woke and went nowhere.
+    expect(h.wakes).toHaveLength(6);
     expect(h.utteranceEnds).toBe(5);
     expect(h.machine.getState()).toBe('listening');
-    // And it is genuinely armed, not merely labelled: a sixth wake fires.
+    // And it is genuinely armed, not merely labelled: another wake fires.
     h.armWake();
     h.machine.pushFrame(frame());
-    expect(h.wakes).toHaveLength(6);
+    expect(h.wakes).toHaveLength(7);
   });
 });
 
