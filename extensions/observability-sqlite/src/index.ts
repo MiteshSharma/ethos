@@ -15,5 +15,6 @@ export {
   pruneObservabilityByPath,
 } from './retention';
 export { ObservabilityService } from './service';
+export type { SkillUsageRow, ToolUsageRow, TurnOutcomeCounts } from './store';
 export { SQLiteObservabilityStore } from './store';
 export { createTarGz, readTarGz } from './tar-bundle';

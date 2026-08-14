@@ -29,6 +29,17 @@ export {
 } from './session-key-migration';
 export { SqliteKeyValueStore };
 
+/** One grouped row from {@link SQLiteSessionStore.usageAggregate}. */
+export interface UsageAggregateRow {
+  key: string;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheCreationTokens: number;
+  estimatedCostUsd: number;
+  messages: number;
+}
+
 /** Outcome of {@link SQLiteSessionStore.recomputeMessageCosts}. */
 export interface RecomputeCostsResult {
   /** Message rows carrying token counts, i.e. rows a cost can be derived for. */
@@ -794,6 +805,55 @@ export class SQLiteSessionStore implements SessionStore {
 
   async vacuum(): Promise<void> {
     this.db.exec('VACUUM');
+  }
+
+  /**
+   * AN-D1 — spend and token aggregates over a window, for `ethos usage`.
+   *
+   * Reads the `messages` rows rather than the per-session rollup: the rollup is
+   * a derived cache keyed to whole sessions, so a session straddling the window
+   * boundary would contribute all of its spend to whichever side it started on.
+   * Messages carry their own timestamp, so the window is exact.
+   *
+   * `dimension` picks the grouping key. `session`/`personality`/`channel`/
+   * `model` join to `sessions`; `day` groups by UTC date. Half-open window
+   * [since, until).
+   */
+  async usageAggregate(opts: {
+    since: Date;
+    until: Date;
+    dimension: 'day' | 'model' | 'personality' | 'channel' | 'session';
+  }): Promise<UsageAggregateRow[]> {
+    const keyExpr = {
+      // `substr(timestamp, 1, 10)` over an ISO-8601 string is the UTC date, and
+      // it stays sargable against idx_messages_session's timestamp component.
+      day: 'substr(m.timestamp, 1, 10)',
+      model: 's.model',
+      personality: "COALESCE(s.personality_id, 'unknown')",
+      channel: 's.platform',
+      session: 'm.session_id',
+    }[opts.dimension];
+
+    return this.db
+      .prepare(
+        `SELECT ${keyExpr} AS key,
+                COALESCE(SUM(m.input_tokens), 0)          AS inputTokens,
+                COALESCE(SUM(m.output_tokens), 0)         AS outputTokens,
+                COALESCE(SUM(m.cache_read_tokens), 0)     AS cacheReadTokens,
+                COALESCE(SUM(m.cache_creation_tokens), 0) AS cacheCreationTokens,
+                COALESCE(SUM(m.estimated_cost_usd), 0)    AS estimatedCostUsd,
+                COUNT(*)                                  AS messages
+           FROM messages m
+           JOIN sessions s ON s.id = m.session_id
+          WHERE m.timestamp >= ? AND m.timestamp < ?
+            AND m.input_tokens IS NOT NULL
+          -- Group by the EXPRESSION, never the \`key\` alias: \`sessions.key\` is a
+          -- real column, so \`GROUP BY key\` silently resolves to it and every
+          -- dimension collapses to per-session grouping.
+          GROUP BY ${keyExpr}
+          ORDER BY estimatedCostUsd DESC`,
+      )
+      .all(opts.since.toISOString(), opts.until.toISOString()) as UsageAggregateRow[];
   }
 
   /** Close the database connection (useful in tests). */

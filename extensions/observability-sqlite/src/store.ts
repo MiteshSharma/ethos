@@ -364,12 +364,104 @@ export class SQLiteObservabilityStore implements ObservabilityStore {
   }
 
   // ---------------------------------------------------------------------------
+  // Aggregates (AN-D1) — `ethos usage` reads these instead of pulling rows
+  // into the CLI and reducing there. Each is one indexed pass; the window is
+  // half-open [since, until) so adjacent windows neither overlap nor gap.
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Turn outcomes, in the taxonomy `ethos usage` reports.
+   *
+   * `traces.status` is the authority: `ok` completed, `error` errored,
+   * `aborted` halted (a budget or watcher stop). A trace with a NULL status is
+   * still open — counted as `running` rather than silently folded into
+   * `completed`, because "in flight" and "finished cleanly" are different
+   * answers to "did my agent work last night".
+   */
+  outcomeCounts(since: number, until: number): TurnOutcomeCounts {
+    const rows = this.db
+      .prepare(
+        `SELECT status, COUNT(*) AS n FROM traces
+          WHERE kind = 'turn' AND start_ts >= ? AND start_ts < ?
+          GROUP BY status`,
+      )
+      .all(since, until) as Array<{ status: string | null; n: number }>;
+    const out: TurnOutcomeCounts = { completed: 0, errored: 0, halted: 0, running: 0 };
+    for (const r of rows) {
+      if (r.status === 'ok') out.completed += r.n;
+      else if (r.status === 'error') out.errored += r.n;
+      else if (r.status === 'aborted') out.halted += r.n;
+      else out.running += r.n;
+    }
+    return out;
+  }
+
+  /** Per-tool call counts and failures, from `tool_call` spans. */
+  toolCounts(since: number, until: number): ToolUsageRow[] {
+    return this.db
+      .prepare(
+        `SELECT name AS tool,
+                COUNT(*) AS calls,
+                SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END) AS errors
+           FROM spans
+          WHERE kind = 'tool_call' AND start_ts >= ? AND start_ts < ?
+          GROUP BY name
+          ORDER BY calls DESC`,
+      )
+      .all(since, until) as ToolUsageRow[];
+  }
+
+  /**
+   * Per-skill invocations and exposures (AN-C1/AN-C2).
+   *
+   * Two columns, never summed: an exposure is a token bill paid every turn
+   * whether the skill was used or not, an invocation is a deliberate
+   * `get_skill` call. A skill with high exposure and zero invocations is the
+   * signal worth acting on, and a combined total would hide it.
+   */
+  skillCounts(since: number, until: number): SkillUsageRow[] {
+    return this.db
+      .prepare(
+        `SELECT json_extract(details, '$.skill') AS skill,
+                SUM(CASE WHEN category = 'skill.invoked' THEN 1 ELSE 0 END) AS invoked,
+                SUM(CASE WHEN category = 'skill.exposed' THEN 1 ELSE 0 END) AS exposed
+           FROM events
+          WHERE category IN ('skill.invoked', 'skill.exposed')
+            AND ts >= ? AND ts < ?
+            AND json_extract(details, '$.skill') IS NOT NULL
+          GROUP BY skill
+          ORDER BY exposed DESC, invoked DESC`,
+      )
+      .all(since, until) as SkillUsageRow[];
+  }
+
+  // ---------------------------------------------------------------------------
   // Lifecycle
   // ---------------------------------------------------------------------------
 
   close(): void {
     this.db.close();
   }
+}
+
+/** Turn outcomes over a window. See {@link SQLiteObservabilityStore.outcomeCounts}. */
+export interface TurnOutcomeCounts {
+  completed: number;
+  errored: number;
+  halted: number;
+  running: number;
+}
+
+export interface ToolUsageRow {
+  tool: string;
+  calls: number;
+  errors: number;
+}
+
+export interface SkillUsageRow {
+  skill: string;
+  invoked: number;
+  exposed: number;
 }
 
 // ---------------------------------------------------------------------------
