@@ -15,6 +15,7 @@ export const builtInCliNames = new Set([
   'plugins',
   'memory',
   'gateway',
+  'listen',
   'cron',
   'acp',
   'serve',

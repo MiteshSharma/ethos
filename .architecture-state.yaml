@@ -917,6 +917,11 @@ tiers:
     tier: 2
     assigned: 2026-08-12
 
+  extensions/voice-satellite:
+    package: "@ethosagent/voice-satellite"
+    tier: 2
+    assigned: 2026-08-14
+
   extensions/voice-session:
     package: "@ethosagent/voice-session"
     tier: 2

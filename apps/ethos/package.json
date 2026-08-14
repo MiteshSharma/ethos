@@ -115,6 +115,7 @@
     "@ethosagent/team-supervisor": "workspace:*",
     "@ethosagent/tools-a2a": "workspace:*",
     "@ethosagent/tools-process": "workspace:*",
+    "@ethosagent/voice-satellite": "workspace:*",
     "@ethosagent/watchers": "workspace:*",
     "@ethosagent/web-api": "workspace:*",
     "@ethosagent/web-contracts": "workspace:*",

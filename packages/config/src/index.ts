@@ -475,6 +475,32 @@ export interface VoiceTrunkConfig {
   password?: string;
 }
 
+/**
+ * One wake-phrase → personality route (`voice.wake.routes.<id>`).
+ *
+ * Lives here, next to `VoiceBotConfig` / `VoiceTrunkConfig`, rather than in
+ * `@ethosagent/types`: a wake route is a DEPLOYMENT routing fact the operator
+ * writes in `config.yaml`, not a runtime contract the kernel resolves. Nothing
+ * in `packages/core` reads it — which is exactly why `TtsProviderEntry` had to
+ * live in contracts and this does not.
+ */
+export interface WakeRouteConfig {
+  /** The spoken trigger, e.g. `hey engineer`. */
+  phrase: string;
+  /** Personality id this phrase wakes. Validated against the registry at dispatch. */
+  personality: string;
+  /**
+   * Opt-in for a PRIVILEGED personality (eng-review D13). The default wake
+   * surface exposes only unprivileged personalities: anyone within earshot can
+   * trigger a wake, so a personality with consequential tools must be named
+   * explicitly here before a voice from across the room can reach it. Absent =
+   * false = not wake-reachable if the personality is privileged.
+   */
+  privileged?: boolean;
+  /** Route off without deleting it. Absent = enabled. */
+  enabled?: boolean;
+}
+
 export interface ProviderConfig {
   provider: string;
   apiKey: string;
@@ -1030,6 +1056,42 @@ export interface EthosConfig {
        * neither delivery nor abandonment has fired. 1–102400. Default 512.
        */
       maxTotalMb?: number;
+    };
+    /**
+     * Wake-word satellites: "hey engineer" from across the room wakes THAT
+     * personality, with its toolset, memory scope and model routing intact.
+     *
+     * Routing is a DEPLOYMENT concern and deliberately not a PersonalityConfig
+     * field: which phrase reaches which personality depends on the room and the
+     * people in it, and two deployments of one personality can reasonably
+     * disagree. Voice IDENTITY — the TTS voice, language map, tier, fast-lane
+     * model — is on `PersonalityConfig.voice` and stays there.
+     *
+     * Out-of-range numbers and unknown engine ids are ignored rather than
+     * clamped, and a route id outside `[A-Za-z0-9_-]+` is dropped: a typo here
+     * must not make the whole config unloadable.
+     */
+    wake?: {
+      /** Master switch. Absent → satellites decide from their own persisted state. */
+      enabled?: boolean;
+      /** Wake matcher: `fallback` (built-in, no native deps) | `sherpa` | `openwakeword`. */
+      engine?: 'fallback' | 'sherpa' | 'openwakeword';
+      /** Match threshold, 0..1. Higher = fewer false accepts, more misses. */
+      sensitivity?: number;
+      /** Consecutive matching frames before a wake fires — the false-accept damper. */
+      confirmationFrames?: number;
+      /** Transcribe on the satellite instead of shipping audio upstream. */
+      edgeStt?: boolean;
+      /**
+       * Seconds of silence that end the LISTENING state. Ends listening ONLY —
+       * never the session (eng-review D15). A post-timeout re-wake resumes the
+       * same conversation.
+       */
+      idleTimeout?: number;
+      /** Phrase → personality. Key is an operator-chosen route id. */
+      routes?: Record<string, WakeRouteConfig>;
+      /** Per-satellite overrides, keyed by the node's stable id. */
+      nodes?: Record<string, { inputDevice?: string; enabled?: boolean }>;
     };
     bots: VoiceBotConfig[];
     livekit?: VoiceLiveKitConfig;
@@ -1885,6 +1947,37 @@ export async function writeConfig(
       }
       if (ar.maxTotalMb !== undefined) lines.push(`voice.artifacts.maxTotalMb: ${ar.maxTotalMb}`);
     }
+    if (config.voice.wake) {
+      const wk = config.voice.wake;
+      if (wk.enabled !== undefined) lines.push(`voice.wake.enabled: ${wk.enabled}`);
+      if (wk.engine) lines.push(`voice.wake.engine: ${wk.engine}`);
+      if (wk.sensitivity !== undefined) lines.push(`voice.wake.sensitivity: ${wk.sensitivity}`);
+      if (wk.confirmationFrames !== undefined) {
+        lines.push(`voice.wake.confirmationFrames: ${wk.confirmationFrames}`);
+      }
+      if (wk.edgeStt !== undefined) lines.push(`voice.wake.edgeStt: ${wk.edgeStt}`);
+      if (wk.idleTimeout !== undefined) lines.push(`voice.wake.idleTimeout: ${wk.idleTimeout}`);
+      // `phrase` and `personality` are unconditional — a route is only ever
+      // built with both, and a half-written route would round-trip to nothing.
+      for (const [id, route] of Object.entries(wk.routes ?? {})) {
+        lines.push(`voice.wake.routes.${id}.phrase: ${route.phrase}`);
+        lines.push(`voice.wake.routes.${id}.personality: ${route.personality}`);
+        if (route.privileged !== undefined) {
+          lines.push(`voice.wake.routes.${id}.privileged: ${route.privileged}`);
+        }
+        if (route.enabled !== undefined) {
+          lines.push(`voice.wake.routes.${id}.enabled: ${route.enabled}`);
+        }
+      }
+      for (const [id, node] of Object.entries(wk.nodes ?? {})) {
+        if (node.inputDevice) {
+          lines.push(`voice.wake.nodes.${id}.inputDevice: ${node.inputDevice}`);
+        }
+        if (node.enabled !== undefined) {
+          lines.push(`voice.wake.nodes.${id}.enabled: ${node.enabled}`);
+        }
+      }
+    }
     // Always the NEW spelling, whichever one was read. A config parsed from
     // `voice.providers.*` re-serializes as `voice.tts.providers.*` and never
     // carries both.
@@ -2308,6 +2401,19 @@ function parseConfigYaml(src: string): EthosConfig {
   const voiceTranscodeKv: { ffmpegPath?: string; bitrateKbps?: number; timeout?: number } = {};
   /** `voice.artifacts.<field>` — retention bounds, range-checked on the way in. */
   const voiceArtifactsKv: { abandonAfterDays?: number; maxTotalMb?: number } = {};
+  /** `voice.wake.<field>` — satellite wake knobs, range-checked on the way in. */
+  const voiceWakeKv: {
+    enabled?: boolean;
+    engine?: 'fallback' | 'sherpa' | 'openwakeword';
+    sensitivity?: number;
+    confirmationFrames?: number;
+    edgeStt?: boolean;
+    idleTimeout?: number;
+  } = {};
+  /** `voice.wake.routes.<id>.<field>` — raw route fields, keyed by route id. */
+  const voiceWakeRoutesKv: Record<string, Record<string, string>> = {};
+  /** `voice.wake.nodes.<id>.<field>` — per-satellite overrides, keyed by node id. */
+  const voiceWakeNodesKv: Record<string, Record<string, string>> = {};
   const teamsKv: Record<string, Record<string, string>> = {};
   const webhooksKv: Record<string, Record<string, string>> = {};
   // FW-16 — quick_commands.<name>.<field>: <value>
@@ -2505,6 +2611,47 @@ function parseConfigYaml(src: string): EthosConfig {
       } else if (vart[1] === 'maxTotalMb') {
         const n = parseBoundedInt(value, 1, 102400);
         if (n !== undefined) voiceArtifactsKv.maxTotalMb = n;
+      }
+      continue;
+    }
+    // voice.wake.routes.<id>.<field> / voice.wake.nodes.<id>.<field> — the two
+    // record-valued wake sub-blocks. One regex serves both so they cannot
+    // acquire different id rules, and the id is anchored to the identifier
+    // charset exactly like a provider roster name: a key the serializer could
+    // not round-trip is dropped here rather than corrupting the file later.
+    // Matched BEFORE the scalar `voice.wake.<field>` line below.
+    const vwrec = line.match(/^voice\.wake\.(routes|nodes)\.([A-Za-z0-9_-]+)\.(\w+):\s*(.+)$/);
+    if (vwrec) {
+      const bag = vwrec[1] === 'routes' ? voiceWakeRoutesKv : voiceWakeNodesKv;
+      const id = vwrec[2];
+      bag[id] ??= {};
+      bag[id][vwrec[3]] = vwrec[4].trim().replace(/^["']|["']$/g, '');
+      continue;
+    }
+    // voice.wake.<field> — the scalar satellite knobs. An unknown engine and an
+    // out-of-range number are ignored rather than clamped or thrown on, same
+    // rule as the mode and tier above.
+    const vwk = line.match(/^voice\.wake\.(\w+):\s*(.+)$/);
+    if (vwk) {
+      const field = vwk[1];
+      const value = vwk[2].trim().replace(/^["']|["']$/g, '');
+      if (field === 'enabled') {
+        if (value === 'true' || value === 'false') voiceWakeKv.enabled = value === 'true';
+      } else if (field === 'edgeStt') {
+        if (value === 'true' || value === 'false') voiceWakeKv.edgeStt = value === 'true';
+      } else if (field === 'engine') {
+        if (value === 'fallback' || value === 'sherpa' || value === 'openwakeword') {
+          voiceWakeKv.engine = value;
+        }
+      } else if (field === 'sensitivity') {
+        const n = parseBoundedFloat(value, 0, 1);
+        if (n !== undefined) voiceWakeKv.sensitivity = n;
+      } else if (field === 'confirmationFrames') {
+        const n = parseBoundedInt(value, 1, 10);
+        if (n !== undefined) voiceWakeKv.confirmationFrames = n;
+      } else if (field === 'idleTimeout') {
+        const n = parseBoundedInt(value, 5, 600);
+        if (n !== undefined) voiceWakeKv.idleTimeout = n;
       }
       continue;
     }
@@ -2959,6 +3106,20 @@ function parseConfigYaml(src: string): EthosConfig {
   const voiceChannels = Object.keys(voiceChannelsKv).length > 0 ? voiceChannelsKv : undefined;
   const voiceTranscode = Object.keys(voiceTranscodeKv).length > 0 ? voiceTranscodeKv : undefined;
   const voiceArtifacts = Object.keys(voiceArtifactsKv).length > 0 ? voiceArtifactsKv : undefined;
+  // The wake block stands on its own too: an operator can set the engine before
+  // typing a single route, and a routes-only config is the common first edit.
+  const voiceWakeRoutes = buildWakeRoutes(voiceWakeRoutesKv);
+  const voiceWakeNodes = buildWakeNodes(voiceWakeNodesKv);
+  const voiceWake =
+    Object.keys(voiceWakeKv).length > 0 ||
+    voiceWakeRoutes !== undefined ||
+    voiceWakeNodes !== undefined
+      ? {
+          ...voiceWakeKv,
+          ...(voiceWakeRoutes ? { routes: voiceWakeRoutes } : {}),
+          ...(voiceWakeNodes ? { nodes: voiceWakeNodes } : {}),
+        }
+      : undefined;
   const voiceSection =
     voiceResult.bots.length > 0 ||
     voiceLiveKitResult.livekit ||
@@ -2971,7 +3132,8 @@ function parseConfigYaml(src: string): EthosConfig {
     voiceRealtime !== undefined ||
     voiceChannels !== undefined ||
     voiceTranscode !== undefined ||
-    voiceArtifacts !== undefined
+    voiceArtifacts !== undefined ||
+    voiceWake !== undefined
       ? {
           bots: voiceResult.bots,
           ...(voiceLiveKitResult.livekit ? { livekit: voiceLiveKitResult.livekit } : {}),
@@ -2987,6 +3149,7 @@ function parseConfigYaml(src: string): EthosConfig {
           ...(voiceChannels ? { channels: voiceChannels } : {}),
           ...(voiceTranscode ? { transcode: voiceTranscode } : {}),
           ...(voiceArtifacts ? { artifacts: voiceArtifacts } : {}),
+          ...(voiceWake ? { wake: voiceWake } : {}),
         }
       : undefined;
   const teams = buildTeamsConfig(teamsKv);
@@ -3389,6 +3552,72 @@ export function isVoiceChannelPlatform(v: string): boolean {
 function parseBoundedInt(v: string, min: number, max: number): number | undefined {
   const n = Number(v);
   return Number.isInteger(n) && n >= min && n <= max ? n : undefined;
+}
+
+/**
+ * A finite number inside [min, max], or `undefined` — the float sibling of
+ * `parseBoundedInt`, for the one wake bound (`sensitivity`) that is a fraction
+ * rather than a count. Same contract: never a clamped near-miss.
+ */
+function parseBoundedFloat(v: string, min: number, max: number): number | undefined {
+  const n = Number(v);
+  return Number.isFinite(n) && n >= min && n <= max ? n : undefined;
+}
+
+/**
+ * `voice.wake.routes.<id>` — phrase → personality.
+ *
+ * A route missing `phrase` OR `personality` is DROPPED entirely rather than
+ * half-built: a phrase-less route can never fire and a personality-less one
+ * would wake nothing, so keeping the remnant would hide the typo behind an
+ * entry that looks configured in the Settings UI.
+ */
+function buildWakeRoutes(
+  kv: Record<string, Record<string, string>>,
+): Record<string, WakeRouteConfig> | undefined {
+  const out: Record<string, WakeRouteConfig> = {};
+  for (const [id, fields] of Object.entries(kv)) {
+    const phrase = fields.phrase;
+    const personality = fields.personality;
+    if (!phrase || !personality) continue;
+    // `privileged` and `enabled` stay ABSENT unless written: the consumer must
+    // be able to tell "operator said no" from "operator never said".
+    out[id] = {
+      phrase,
+      personality,
+      ...(fields.privileged === 'true'
+        ? { privileged: true }
+        : fields.privileged === 'false'
+          ? { privileged: false }
+          : {}),
+      ...(fields.enabled === 'true'
+        ? { enabled: true }
+        : fields.enabled === 'false'
+          ? { enabled: false }
+          : {}),
+    };
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+/** `voice.wake.nodes.<id>` — per-satellite overrides. An entry with no
+ *  recognised field is dropped rather than kept as an empty object. */
+function buildWakeNodes(
+  kv: Record<string, Record<string, string>>,
+): Record<string, { inputDevice?: string; enabled?: boolean }> | undefined {
+  const out: Record<string, { inputDevice?: string; enabled?: boolean }> = {};
+  for (const [id, fields] of Object.entries(kv)) {
+    const entry = {
+      ...(fields.inputDevice ? { inputDevice: fields.inputDevice } : {}),
+      ...(fields.enabled === 'true'
+        ? { enabled: true }
+        : fields.enabled === 'false'
+          ? { enabled: false }
+          : {}),
+    };
+    if (Object.keys(entry).length > 0) out[id] = entry;
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
 }
 
 function isAudioFormat(v: string | undefined): v is 'opus' | 'mp3' | 'wav' | 'pcm' {

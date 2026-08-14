@@ -63,7 +63,9 @@ export type VoiceLaneEvent =
   | { type: 'transcribed'; utteranceId: string; provider: string; ms: number }
   | { type: 'synthesized'; utteranceId: string; segmentId: string; provider: string; ms: number };
 
-const MIME_BY_FORMAT: Record<string, string> = {
+/** Provider audio format → the MIME type the wire frame carries. Shared with
+ *  the satellite lane so the two lanes cannot drift on what `opus` means. */
+export const MIME_BY_FORMAT: Record<string, string> = {
   opus: 'audio/ogg;codecs=opus',
   mp3: 'audio/mpeg',
   wav: 'audio/wav',

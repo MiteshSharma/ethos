@@ -1,0 +1,341 @@
+import { describe, expect, it, vi } from 'vitest';
+import { CaptureMachine, type CaptureMachineConfig, type CaptureState } from '../capture';
+import type { WakeEngine, WakeFrame, WakeMatch } from '../wake-engine';
+
+const MATCH: WakeMatch = { routeId: 'r-eng', phrase: 'hey engineer', confidence: 1 };
+
+function frame(): WakeFrame {
+  return { samples: new Int16Array(320), sampleRate: 16000 };
+}
+
+/** A hand-driven clock: tests fire timers by name, never by waiting. */
+class FakeTimers {
+  private next = 1;
+  readonly pending = new Map<number, { fn: () => void; ms: number }>();
+
+  set = (fn: () => void, ms: number): unknown => {
+    const id = this.next++;
+    this.pending.set(id, { fn, ms });
+    return id;
+  };
+
+  clear = (handle: unknown): void => {
+    if (typeof handle === 'number') this.pending.delete(handle);
+  };
+
+  /** Fire the single pending timer scheduled for exactly `ms`. */
+  fire(ms: number): void {
+    for (const [id, entry] of this.pending) {
+      if (entry.ms !== ms) continue;
+      this.pending.delete(id);
+      entry.fn();
+      return;
+    }
+    throw new Error(
+      `no pending timer for ${ms}ms (have: ${[...this.pending.values()].map((e) => e.ms).join(', ')})`,
+    );
+  }
+}
+
+interface Harness {
+  machine: CaptureMachine;
+  timers: FakeTimers;
+  engine: WakeEngine & { pushSpy: ReturnType<typeof vi.fn>; resetSpy: ReturnType<typeof vi.fn> };
+  states: Array<{ state: CaptureState; detail?: string }>;
+  audio: WakeFrame[];
+  wakes: WakeMatch[];
+  utteranceEnds: number;
+  /** Next N `engine.push()` calls report a wake. */
+  armWake(): void;
+  /** Push `count` frames the VAD reads as silence. */
+  silence(count: number): void;
+  speech(count?: number): void;
+}
+
+const CONFIG: CaptureMachineConfig = {
+  silenceFrames: 3,
+  idleTimeoutMs: 60_000,
+  playbackWatchdogMs: 10_000,
+};
+
+function harness(config: CaptureMachineConfig = CONFIG): Harness {
+  const timers = new FakeTimers();
+  const states: Array<{ state: CaptureState; detail?: string }> = [];
+  const audio: WakeFrame[] = [];
+  const wakes: WakeMatch[] = [];
+  let utteranceEnds = 0;
+  let wakeArmed = false;
+  let speechNow = true;
+
+  const pushSpy = vi.fn((_frame: WakeFrame) => {
+    if (!wakeArmed) return null;
+    wakeArmed = false;
+    return MATCH;
+  });
+  const resetSpy = vi.fn();
+
+  const engine = {
+    name: 'fake',
+    init: async () => {},
+    push: pushSpy,
+    reset: resetSpy,
+    dispose: async () => {},
+    pushSpy,
+    resetSpy,
+  };
+
+  const machine = new CaptureMachine(
+    {
+      engine,
+      vad: { push: () => speechNow },
+      now: () => 1_700_000_000_000,
+      setTimer: timers.set,
+      clearTimer: timers.clear,
+      onWake: (m) => wakes.push(m),
+      onAudio: (f) => audio.push(f),
+      onUtteranceEnd: () => {
+        utteranceEnds++;
+      },
+      onStateChange: (state, detail) => states.push({ state, detail }),
+    },
+    config,
+  );
+
+  const h: Harness = {
+    machine,
+    timers,
+    engine,
+    states,
+    audio,
+    wakes,
+    get utteranceEnds() {
+      return utteranceEnds;
+    },
+    armWake: () => {
+      wakeArmed = true;
+    },
+    silence: (count: number) => {
+      speechNow = false;
+      for (let i = 0; i < count; i++) machine.pushFrame(frame());
+    },
+    speech: (count = 1) => {
+      speechNow = true;
+      for (let i = 0; i < count; i++) machine.pushFrame(frame());
+    },
+  };
+  return h;
+}
+
+describe('CaptureMachine — arming and capture', () => {
+  it('starts idle and arms into listening', () => {
+    const h = harness();
+    expect(h.machine.getState()).toBe('idle');
+    h.machine.start();
+    expect(h.machine.getState()).toBe('listening');
+  });
+
+  it('captures audio after a wake and ends the utterance on sustained silence', () => {
+    const h = harness();
+    h.machine.start();
+    h.armWake();
+    h.machine.pushFrame(frame());
+
+    expect(h.wakes).toEqual([MATCH]);
+    expect(h.machine.getState()).toBe('capturing');
+    // The waking frame itself is not forwarded as utterance audio.
+    expect(h.audio).toHaveLength(0);
+
+    h.speech(2);
+    expect(h.audio).toHaveLength(2);
+    h.silence(2);
+    expect(h.machine.getState()).toBe('capturing');
+    h.silence(1);
+    expect(h.machine.getState()).toBe('thinking');
+    expect(h.utteranceEnds).toBe(1);
+  });
+
+  it('resets the silence run when speech resumes mid-utterance', () => {
+    const h = harness();
+    h.machine.start();
+    h.armWake();
+    h.machine.pushFrame(frame());
+    h.silence(2);
+    h.speech(1);
+    h.silence(2);
+    expect(h.machine.getState()).toBe('capturing');
+    h.silence(1);
+    expect(h.machine.getState()).toBe('thinking');
+  });
+});
+
+describe('CaptureMachine — self-wake suppression', () => {
+  it('never feeds the engine while the satellite is speaking', () => {
+    const h = harness();
+    h.machine.start();
+    h.armWake();
+    h.machine.pushFrame(frame());
+    h.silence(3);
+
+    h.machine.beginPlayback();
+    expect(h.machine.getState()).toBe('speaking');
+
+    const before = h.engine.pushSpy.mock.calls.length;
+    // The room now contains the agent's own voice. Arm a wake to prove the
+    // engine is not merely being ignored — it is not being called at all.
+    h.armWake();
+    for (let i = 0; i < 10; i++) h.machine.pushFrame(frame());
+
+    expect(h.engine.pushSpy.mock.calls.length).toBe(before);
+    expect(h.wakes).toHaveLength(1);
+    expect(h.machine.getState()).toBe('speaking');
+  });
+
+  it('drops frames while thinking, so a server-side pause cannot self-wake either', () => {
+    const h = harness();
+    h.machine.start();
+    h.armWake();
+    h.machine.pushFrame(frame());
+    h.silence(3);
+    expect(h.machine.getState()).toBe('thinking');
+
+    const before = h.engine.pushSpy.mock.calls.length;
+    h.armWake();
+    h.machine.pushFrame(frame());
+    expect(h.engine.pushSpy.mock.calls.length).toBe(before);
+  });
+
+  it('re-arms and resets the engine on endPlayback', () => {
+    const h = harness();
+    h.machine.start();
+    h.machine.beginPlayback();
+    const resetsBefore = h.engine.resetSpy.mock.calls.length;
+    h.machine.endPlayback();
+    expect(h.machine.getState()).toBe('listening');
+    expect(h.engine.resetSpy.mock.calls.length).toBeGreaterThan(resetsBefore);
+  });
+});
+
+describe('CaptureMachine — verified re-arm', () => {
+  it('survives five consecutive wake → capture → speak → re-arm cycles', () => {
+    const h = harness();
+    h.machine.start();
+
+    for (let cycle = 0; cycle < 5; cycle++) {
+      expect(h.machine.getState()).toBe('listening');
+      h.armWake();
+      h.machine.pushFrame(frame());
+      expect(h.machine.getState()).toBe('capturing');
+      h.speech(2);
+      h.silence(3);
+      expect(h.machine.getState()).toBe('thinking');
+      h.machine.beginPlayback();
+      expect(h.machine.getState()).toBe('speaking');
+      h.machine.endPlayback();
+    }
+
+    expect(h.wakes).toHaveLength(5);
+    expect(h.utteranceEnds).toBe(5);
+    expect(h.machine.getState()).toBe('listening');
+    // And it is genuinely armed, not merely labelled: a sixth wake fires.
+    h.armWake();
+    h.machine.pushFrame(frame());
+    expect(h.wakes).toHaveLength(6);
+  });
+});
+
+describe('CaptureMachine — watchdog', () => {
+  it('force-re-arms and reports degraded when playback never finishes', () => {
+    const h = harness();
+    h.machine.start();
+    h.machine.beginPlayback();
+    h.states.length = 0;
+
+    h.timers.fire(10_000);
+
+    expect(h.states.map((s) => s.state)).toEqual(['degraded', 'listening']);
+    expect(h.states[0]?.detail).toMatch(/watchdog/i);
+    expect(h.machine.getState()).toBe('listening');
+
+    h.armWake();
+    h.machine.pushFrame(frame());
+    expect(h.wakes).toHaveLength(1);
+  });
+
+  it('cancels the watchdog when playback finishes normally', () => {
+    const h = harness();
+    h.machine.start();
+    h.machine.beginPlayback();
+    h.machine.endPlayback();
+    expect([...h.timers.pending.values()].some((t) => t.ms === 10_000)).toBe(false);
+  });
+});
+
+describe('CaptureMachine — idle timeout', () => {
+  it('ends LISTENING only, and the microphone stays armed', () => {
+    const h = harness();
+    h.machine.start();
+    h.timers.fire(60_000);
+
+    expect(h.machine.getState()).toBe('idle');
+    // No session callback exists on this machine to have been called: the
+    // criterion is satisfied structurally, and the mic is still live.
+    h.armWake();
+    h.machine.pushFrame(frame());
+    expect(h.wakes).toEqual([MATCH]);
+    expect(h.machine.getState()).toBe('capturing');
+  });
+
+  it('does not fire while an utterance is being captured', () => {
+    const h = harness();
+    h.machine.start();
+    h.armWake();
+    h.machine.pushFrame(frame());
+    expect([...h.timers.pending.values()].some((t) => t.ms === 60_000)).toBe(false);
+  });
+});
+
+describe('CaptureMachine — mute', () => {
+  it('drops frames, resets the engine, and re-arms on un-mute', () => {
+    const h = harness();
+    h.machine.start();
+
+    h.machine.setMuted(true);
+    expect(h.machine.getState()).toBe('muted');
+    const before = h.engine.pushSpy.mock.calls.length;
+    h.armWake();
+    h.machine.pushFrame(frame());
+    expect(h.engine.pushSpy.mock.calls.length).toBe(before);
+    expect(h.wakes).toHaveLength(0);
+
+    const resetsBefore = h.engine.resetSpy.mock.calls.length;
+    h.machine.setMuted(false);
+    expect(h.machine.getState()).toBe('listening');
+    expect(h.engine.resetSpy.mock.calls.length).toBeGreaterThan(resetsBefore);
+    h.machine.pushFrame(frame());
+    expect(h.wakes).toHaveLength(1);
+  });
+
+  it('stays muted across a playback cycle', () => {
+    const h = harness();
+    h.machine.start();
+    h.machine.setMuted(true);
+    h.machine.beginPlayback();
+    expect(h.machine.getState()).toBe('muted');
+    h.machine.endPlayback();
+    expect(h.machine.getState()).toBe('muted');
+  });
+});
+
+describe('CaptureMachine — isolation', () => {
+  it('keeps two machines in one process independent', () => {
+    const a = harness();
+    const b = harness();
+    a.machine.start();
+    b.machine.start();
+    a.armWake();
+    a.machine.pushFrame(frame());
+    expect(a.machine.getState()).toBe('capturing');
+    expect(b.machine.getState()).toBe('listening');
+    expect(b.wakes).toHaveLength(0);
+  });
+});

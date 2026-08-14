@@ -1,6 +1,6 @@
 ---
 title: "config.yaml reference"
-description: "Every field in ~/.ethos/config.yaml — provider, model, channel tokens, retention TTLs, provider chain, voice tier, channels, transcode and artifacts."
+description: "Every field in ~/.ethos/config.yaml — provider, model, channel tokens, retention TTLs, provider chain, voice tier, channels, transcode, artifacts, wake."
 kind: reference
 audience: user
 slug: config-yaml
@@ -553,6 +553,88 @@ Notes:
 - Redelivery re-sends the stored recording rather than synthesizing a second one — see [Why does a redelivered voice note re-send the recording?](../../building/explanation/why-voice-replies-redeliver.md). Shortening `abandonAfterDays` shortens the window in which that repair is still possible.
 - Editable under **Settings → Voice → Advanced**.
 
+## voice.wake.\<field\> {#voice-wake}
+
+Type: dotted group · Default: the per-field defaults below
+
+Deployment-wide settings for [wake satellites](../../getting-started/glossary.md#wake-satellite) — separate processes that own a microphone and connect to the web API at `GET /satellite/ws`. The whole group is pushed to every connected satellite in a `routes` frame on connect, and again whenever Settings is saved.
+
+Out-of-range numbers and unrecognised engine ids are **ignored, not clamped** — the default stands and the rest of the file still loads, so one typo cannot make a deployment unconfigurable.
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `enabled` | boolean | `true` | Master switch for the whole fleet. Only an explicit `false` turns wake off; the key's absence means the operator never disabled it, not that they disabled it. ANDed with the per-node `voice.wake.nodes.<id>.enabled` — either one saying no means no. |
+| `engine` | enum | `fallback` | Which matcher a satellite runs. Any other value is ignored. Per-value meanings below. |
+| `sensitivity` | number | `0.5` | Match threshold, `0`–`1`. Higher tolerates more transcription slip and produces more false accepts; `0` demands an exact match. A value outside the range is dropped. |
+| `confirmationFrames` | integer | `2` | Consecutive agreeing frames before an acoustic spot counts — the false-accept damper. Must be an integer in `1`–`10`. Ignored by the `fallback` engine, which decides a transcript once and has nothing to confirm. |
+| `edgeStt` | boolean | `false` | Ask satellites to transcribe on-device and send text instead of audio. The node's probed capability is the veto: neither shipped host has an on-device recognizer, so both report `edgeStt: false` and the server ANDs this down to false. |
+| `idleTimeout` | integer (**seconds**) | `30` | Silence that ends the LISTENING state. Must be an integer in `5`–`600`. It ends listening **only** — never the session, so a re-wake an hour later resumes the same conversation. |
+
+`engine` values:
+
+- `fallback` — the built-in transcript matcher (it names itself `transcript` in `ethos listen doctor` rows). Matches wake phrases against recognized text *after* speech-to-text, so it loads no native binding and no model file. The default.
+- `sherpa` — sherpa-onnx keyword spotting in the acoustic stream, *before* recognition. Requires the optional peer `sherpa-onnx-node` (a per-architecture native binary, roughly 33 MB, deliberately not a repo dependency) plus `encoder.onnx`, `decoder.onnx`, `joiner.onnx` and `tokens.txt` in `~/.ethos/models/wake/`. The adapter is written against sherpa's documented `KeywordSpotter` surface and has not been run against a real binary in this repository.
+- `openwakeword` — accepted by the parser; **no such engine ships**. `ethos listen doctor` reports it unavailable by name rather than falling through to another engine.
+
+```yaml
+voice.wake.engine: fallback
+voice.wake.sensitivity: 0.6
+voice.wake.confirmationFrames: 3
+voice.wake.idleTimeout: 45
+```
+
+Notes:
+
+- **Which host reads what.** The desktop satellite applies `sensitivity`, `confirmationFrames`, `idleTimeout` and `enabled` from the pushed frame each time it arms capture. `ethos listen` ignores the pushed scalars — it is push-to-talk, so it has no threshold to set — and reads `idleTimeout` from its own `config.yaml`. With the key absent there, the capture machine's own 300-second default applies rather than the 30 seconds the server reports.
+- **Read-only in the UI.** Settings → Voice shows these values and does not write them; the route table below is what the web editor edits. Change the scalars in this file.
+- The `~/.ethos/models/wake/` directory is probed on every `ethos listen doctor` run. A missing directory is a warning for a `fallback` host and a hard failure for a `sherpa` one.
+
+## voice.wake.routes.\<id\>.\<field\> {#voice-wake-routes}
+
+Type: dotted group, keyed by route id · Default: no routes
+
+The phrase → personality table. The route id is yours to choose and must match `[A-Za-z0-9_-]+`; an id outside that charset is dropped, because a key the serializer could not write back would corrupt the file later.
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `phrase` | string | — | The spoken trigger, e.g. `hey engineer`. Required. |
+| `personality` | string | — | Personality id this phrase wakes. Required. Re-resolved against the live registry at wake time, so a route naming a deleted or renamed personality is refused rather than silently defaulted. |
+| `privileged` | boolean | `false` | Opt-in required before a **privileged** personality is reachable by voice — one whose toolset can reach a tool the approval layer would stop and ask about. See [Why can't a voice in the room reach a privileged personality?](../explanation/wake-privilege.md). |
+| `enabled` | boolean | `true` | Switch a route off without deleting it. |
+
+```yaml
+voice.wake.routes.kitchen.phrase: hey engineer
+voice.wake.routes.kitchen.personality: engineer
+voice.wake.routes.kitchen.privileged: true
+```
+
+Notes:
+
+- A route missing `phrase` **or** `personality` is dropped entirely rather than half-built — a half-route would look configured in the Settings table and never fire.
+- **Implicit routes.** Every unprivileged personality also answers to `hey <name>`, synthesized server-side and never written to this file. Those carry the id `auto:<personalityId>` — outside the charset above, so they can never collide with one of yours. A configured route naming a personality suppresses that personality's implicit route, including a route you set to `enabled: false`.
+- Saving the table in **Settings → Voice → Wake routes** pushes it to every connected satellite. Hand-editing this file applies on the next satellite reconnect or server restart; nothing watches the file.
+- Implicit routes are shown in the Settings editor and cannot be saved back — they are not entries in this file.
+
+## voice.wake.nodes.\<id\>.\<field\> {#voice-wake-nodes}
+
+Type: dotted group, keyed by node id · Default: no overrides
+
+Per-satellite overrides. The key is the node's own stable id, which it generates once and persists in `~/.ethos/listen-node-id` on that machine — `ethos listen doctor` prints it on the `node id` row.
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `inputDevice` | string | unset | Host-specific capture device id. **Pushed on the wire and read by no shipped host today** — `ethos listen` enumerates only its stdin pipe, and the desktop host has no capture device at all. |
+| `enabled` | boolean | `true` | Switch one microphone off without touching the others. ANDed with the fleet-wide `voice.wake.enabled`. |
+
+```yaml
+voice.wake.nodes.pi-kitchen-f089dce2.enabled: false
+```
+
+Notes:
+
+- An entry with no recognised field is dropped rather than kept as an empty object.
+- A node muted from its Settings row is muted over the wire instead, and the satellite persists that choice across restarts — that path does not write this key.
+
 ## activeContext {#active-context}
 
 Type: managed · Required: no
@@ -574,4 +656,5 @@ The directory can be relocated with the `ETHOS_DIR` env var.
 - [Connect a Telegram bot to a team](../how-to/connect-telegram-to-team.md) — `bind.type: team` and `teams.*` knobs in practice
 - [Local voice: Kokoro TTS + Whisper large v3 STT](../how-to/local-voice.md) — the `auxiliary.asr.*` / `auxiliary.tts.*` pipeline keys and the egress gate in practice
 - [Send and receive voice notes on a channel](../how-to/voice-notes-on-channels.md) — the `voice.defaultMode` / `voice.channels.*` / `voice.transcode.*` keys in practice, plus the `/voice` command
+- [Run a wake satellite](../how-to/run-a-wake-satellite.md) — the `voice.wake.*` keys in practice, and what `ethos listen` can and cannot do
 - [Glossary: personality](../../getting-started/glossary.md#personality) — what the term means everywhere else in the docs

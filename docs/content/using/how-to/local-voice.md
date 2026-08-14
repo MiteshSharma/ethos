@@ -175,6 +175,7 @@ STT model names vary by server: some accept `whisper-large-v3`, others want the 
 ## See also
 
 - [Send and receive voice notes on a channel](voice-notes-on-channels.md) — put these providers to work on Telegram, Slack, Discord, and WhatsApp.
+- [Run a wake satellite](run-a-wake-satellite.md) — put a microphone in another room; the server transcribes what it captures with the STT provider wired here.
 - [Qualify a local model](qualify-a-local-model) — score a local text model before trusting it with work.
 - [Configure providers](configure-providers) — wire the main LLM provider, including local OpenAI-compatible endpoints.
 - [`config.yaml` reference: voice](../reference/config-yaml.md#voice-tier) — every `voice.*` key, including the hosted realtime roster and the per-session spend cap.

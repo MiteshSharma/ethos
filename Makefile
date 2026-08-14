@@ -40,6 +40,8 @@ help:
 	@echo "  web                   - Build SPA + run ethos serve with mounted static (single port :3000)"
 	@echo "  gateway-setup         - Configure Telegram bot token"
 	@echo "  gateway               - Start the Telegram gateway in foreground (dev)"
+	@echo "  listen                - Start the wake-word satellite in foreground (needs a mic pipe; see below)"
+	@echo "  listen-doctor         - Preflight the wake stack (engine, models, mic, server)"
 	@echo "  cron                  - Manage cron jobs (list|create|pause|resume|delete|run)"
 	@echo "  personality           - Manage personalities (list | set <id>)"
 	@echo "  memory                - View or clear memory (show | clear)"
@@ -208,6 +210,25 @@ gateway-setup:
 
 gateway:
 	@$(NVM_EXEC) pnpm exec tsx apps/ethos/src/index.ts gateway start
+
+# ---------- wake satellite ----------
+#
+# `ethos listen` reads raw s16le mono 16 kHz PCM from STDIN — there is no native
+# microphone binding, deliberately (apps/ethos/src/lib/stdin-pcm-device.ts: a
+# per-arch native module would break the daemon on exactly the Pi/server hosts it
+# was written for). So a bare `make listen` on a TTY refuses to start, by design,
+# and the target prints the pipe rather than letting you find that out the hard
+# way. The daemon's own banner carries the rest.
+
+listen-doctor:
+	@$(NVM_EXEC) pnpm exec tsx apps/ethos/src/index.ts listen doctor $(ARGS)
+
+listen:
+	@echo "ethos listen reads raw PCM from stdin. Pipe a microphone into it:"
+	@echo "  macOS:  ffmpeg -f avfoundation -i :0 -ar 16000 -ac 1 -f s16le - | make listen"
+	@echo "  Linux:  arecord -f S16_LE -r 16000 -c 1 -t raw | make listen"
+	@echo ""
+	@$(NVM_EXEC) pnpm exec tsx apps/ethos/src/index.ts listen $(ARGS)
 
 cron:
 	@$(NVM_EXEC) pnpm exec tsx apps/ethos/src/index.ts cron $(ARGS)
@@ -514,7 +535,8 @@ clean:
 	@echo "Clean complete."
 
 .PHONY: help setup setup-nvm setup-node setup-pnpm setup-gstack prepare \
-        dev tui web web-dev web-build gateway-setup gateway cron personality memory keys \
+        dev tui web web-dev web-build gateway-setup gateway listen listen-doctor \
+        cron personality memory keys \
         start-gateway-daemon stop-gateway-daemon delete-gateway-daemon status-gateway-daemon \
         docs docs-build \
         test typecheck lint version-sync format check \

@@ -33,6 +33,8 @@ Where something could not be verified from inside the repo, it says so.
 | Browser talk-mode | A built SPA (`make web`) and a personality whose toolset lists `voice_session` |
 | Browser realtime tier | An OpenAI key with Realtime access and a `voice.realtime.providers.<name>` entry. `gemini-live` is contract-only and cannot serve a browser call — see [4b. The realtime tier](#4b-the-realtime-tier) |
 | Voice notes over channels | A bot token for the channel in `~/.ethos/config.yaml`, plus `ffmpeg` on `PATH` for anything the TTS provider does not already emit in a declared format |
+| Wake satellite (`ethos listen`) | `ethos serve` running, one `voice.wake.routes` entry, and a PCM pipe — `ffmpeg` or `arecord`. **Push-to-talk, not acoustic wake** — see [The flows to try](#the-flows-to-try) |
+| Acoustic wake (`sherpa`) | `sherpa-onnx-node` installed by hand (**not a repo dependency**) plus four model files in `~/.ethos/models/wake/`. No host in this repo has ever run it |
 | Telephony, LiveKit transport | Native bindings, a LiveKit server, a SIP trunk, a rented number — none are repo dependencies |
 
 **How do I just hear it talk?** Configure `auxiliary.tts` (30 seconds — see
@@ -124,6 +126,31 @@ Verified: 22 files, 292 tests, ~11s. What each defends is in
 [4b. The realtime tier](#4b-the-realtime-tier); every one of them runs against
 fakes, with no credential and no socket.
 
+The wake stack — satellite package, node protocol, the `/satellite/ws` lane,
+`ethos listen`, the desktop host, and the Settings surfaces:
+
+```bash
+pnpm vitest run \
+  extensions/voice-satellite/src \
+  packages/web-contracts/src/__tests__/satellite-socket.test.ts \
+  packages/core/src/__tests__/lane-key.test.ts \
+  apps/web-api/src/voice/__tests__/satellite-socket.test.ts \
+  apps/web-api/src/voice/__tests__/implicit-wake-routes.test.ts \
+  apps/web-api/src/voice/__tests__/wake-privilege.test.ts \
+  apps/web-api/src/__tests__/services/config-wake-routes.test.ts \
+  apps/ethos/src/__tests__/listen-command.test.ts \
+  apps/ethos/src/__tests__/listen-doctor.test.ts \
+  apps/ethos/src/__tests__/listen-node-id.test.ts \
+  apps/ethos/src/__tests__/listen-capture-device.test.ts \
+  apps/desktop/src/main/__tests__/satellite.test.ts \
+  apps/web/src/features/voice/__tests__/wake-routes.test.ts \
+  apps/web/src/features/voice/__tests__/wake-route-row.test.ts \
+  apps/web/src/features/voice/__tests__/satellite-rows.test.ts
+```
+
+Verified: 18 files, 248 tests, ~3.2s. No microphone, no model file, no native
+binding — every device and socket is injected.
+
 What each one is defending:
 
 | Suite | Pins |
@@ -148,6 +175,16 @@ What each one is defending:
 | `packages/core/src/__tests__/spoken-style-injector.test.ts` | That the spoken-style block is personality-gated, static, and does not move the prompt prefix between turns |
 | `packages/wiring/src/__tests__/spoken-confirmation.test.ts` | The spoken-confirmation gate — including that a far-end caller's voice can never satisfy an owner confirmation, even with a recorded confirmation on the same call id |
 | `extensions/gateway/src/__tests__/voice-personality-voice.test.ts` · `apps/web-api/src/services/__tests__/voice-personality-voice.test.ts` | That the personality's voice reaches the TTS provider on the channel and browser paths, asserted on the provider's argument |
+| `extensions/voice-satellite/src/__tests__/capture.test.ts` | The supervised capture machine: five consecutive wake → capture → speak → re-arm cycles, self-wake suppression (frames never reach the engine while speaking or thinking), the playback watchdog force-re-arming and reporting `degraded`, the idle timeout ending LISTENING **only**, and two machines in one process staying independent |
+| `extensions/voice-satellite/src/__tests__/doctor.test.ts` | That `runSatelliteDoctor` never throws — a throwing engine probe becomes a row, a missing model directory is named, an unrun probe is `skipped` rather than passed on a guess, and the absent `sherpa-onnx-node` peer is reported unavailable with the reason |
+| `extensions/voice-satellite/src/__tests__/transcript-wake-engine.test.ts` | The transcript matcher: phrase at the **head** of the utterance, one-character tolerance that widens with sensitivity, longest-phrase-wins, disabled routes never matching, `privileged` never inferred, and `push()` on raw PCM always returning null |
+| `extensions/voice-satellite/src/__tests__/node-client.test.ts` | The node protocol client: register under the stable `nodeId`, capped jittered reconnect backoff, re-register on reconnect, malformed server frames dropped rather than thrown on, and the audio/`transcript` alternation refused if a node tries both for one utterance |
+| `apps/web-api/src/voice/__tests__/satellite-socket.test.ts` | The `/satellite/ws` upgrade policy (path, Origin, `ethos_auth` cookie, no-Origin daemons allowed) and one real `ws` round trip |
+| `apps/web-api/src/voice/__tests__/implicit-wake-routes.test.ts` | The synthesized `hey <name>` table: privileged personalities get nothing, a configured route (even a disabled one) suppresses the implicit one, a phrase is claimed once, and ties break by personality id |
+| `apps/web-api/src/voice/__tests__/wake-privilege.test.ts` | That privilege is derived from the approval layer's own consequential-tool lists, and an **absent** toolset is privileged (fail-closed) |
+| `apps/ethos/src/__tests__/listen-doctor.test.ts` | The 0 / 1 / 2 exit matrix, probe→flag derivation, URL derivation, and the false-available case (eng-review D10): a missing model reports unavailable, the host degrades, nothing crashes |
+| `apps/ethos/src/__tests__/listen-command.test.ts` | That the daemon refuses to start deaf — no pipe, no route, or no usable engine each stop the boot rather than printing "listening" — and the `--json` shape including `daemonMode: "push-to-talk"` |
+| `apps/desktop/src/main/__tests__/satellite.test.ts` | The doctor gate (no capture device → `degraded`, nothing starts), that no entry point throws, the routes-push arming path, and wake-off surviving a restart (Hermes #81531) |
 
 ---
 
@@ -370,6 +407,74 @@ With a bot token configured, run `ethos gateway start`.
 - TTS failure is swallowed on purpose: the text was already delivered. A voice note
   that *was* synthesized but not confirmed is not lost — it is a `kind: 'voice'`
   obligation in the delivery ledger, and the sweep re-sends the stored artifact.
+
+#### Wake satellite — `ethos listen`
+
+`ethos serve` hosts the satellite lane at `GET /satellite/ws` (**not** the gateway —
+web-api owns the WS server, the auth cookie, the AgentLoop and the personality
+refresh, so a Settings save pushes routes in-process). Preflight first:
+
+```bash
+make listen-doctor
+```
+
+```
+ethos listen doctor  wake satellite preflight
+
+  ✓  engine:transcript      no native bindings and no model files — matches wake phrases against STT output
+  ⚠  models                 not required by the 'transcript' engine — model directory missing — ~/.ethos/models/wake
+  ✓  microphone             1 input device(s): raw s16le mono PCM on stdin @ 16000 Hz
+  ⚠  gateway                http://127.0.0.1:3000/healthz answered 503
+  ✓  node id                pi-kitchen-f089dce2 (~/.ethos/listen-node-id)
+  ✓  satellite url          ws://127.0.0.1:3000/satellite/ws
+  ✓  route                  kitchen: "hey engineer" → engineer
+
+⚠ Nothing is broken on this host, but it cannot listen right now.
+```
+
+Exit `0` clean, `1` hard (no config, no usable engine, missing models for a
+`sherpa` host), `2` warn (no pipe attached yet, server not up yet — both true
+*right now* and possibly not in a minute). `--json` adds a machine-readable
+object whose `engine.daemonMode` is the honest label: `"push-to-talk"`.
+
+**Capture is a pipe, and this daemon does not acoustically wake.** `apps/ethos`
+ships no microphone binding, and the only always-available engine (`transcript`)
+matches wake phrases against *recognized text*, which this host does not produce.
+So speech onset on the pipe opens an utterance attributed to the route named by
+`--route`. The human is the wake word.
+
+```bash
+# macOS
+ffmpeg -f avfoundation -i :0 -ar 16000 -ac 1 -f s16le - | ethos listen --route kitchen
+# Linux
+arecord -f S16_LE -r 16000 -c 1 -t raw | ethos listen --route kitchen
+```
+
+`make listen` prints the same two pipelines and then runs the daemon, so a bare
+`make listen` on a TTY refuses to start — by design, and it says why.
+
+What is manual-only here, because no fake can stand in:
+
+- **A real pipe and a real room.** Sample-rate correctness is unverifiable by
+  construction: raw PCM carries no header, so piping 44.1 kHz stereo produces
+  garbage that nothing detects.
+- **Acoustic wake.** It needs `sherpa-onnx-node` (a ~33 MB per-arch native binary,
+  deliberately **not** a repo dependency) plus four model files. The adapter in
+  `extensions/voice-satellite/src/engines/sherpa-wake-engine.ts` is written against
+  sherpa's documented `KeywordSpotter` surface and **has never been executed
+  against a real binary in this repo** — its own header says so.
+- **Wake quality.** The plan's false-accept ≤ 1/hour and false-reject ≤ 10 % at 3 m
+  criteria are **unmeasured**: no test corpus exists, and nothing in this repo
+  produces those numbers.
+- **Playout on a satellite.** `ethos listen` registers `playback: false` — there is
+  no output device behind a pipe. The lane does **not** consult that flag: a wake
+  turn is voice-origin, so unless the lane's voice mode is `off` the server
+  synthesizes and streams anyway, and the daemon discards the audio with a one-time
+  `⚠ playout` warning. Read the reply in the web UI, or set the lane to `off`.
+- **The desktop host.** It cannot listen: the Electron main process ships no
+  microphone binding, so `probeSatellite` adds a failing `capture-device` row, the
+  host reports `degraded`, and nothing starts. Everything downstream of the device
+  is wired and covered by tests through an injected device and socket.
 
 ---
 
@@ -635,11 +740,17 @@ and playout legs sit outside it and are simply not measured.
 | LiveKit transport | `@livekit/rtc-node` + `livekit-server-sdk` (**not repo dependencies**), a LiveKit server, and app-layer `LiveKitBindings` | Manual only — see `extensions/platform-voice/README.md` | `extensions/platform-voice/src/__tests__/` against fake room clients |
 | Telephony (`call`, inbound SIP) | A SIP trunk, a rented E.164 number, a `SipTrunkClient` implementation | Manual only | `extensions/tools-voice/src/__tests__/call.test.ts`; `call` self-reports unavailable with no trunk, and is in `APPROVAL_SURFACE_ALWAYS_ASK` so it always prompts |
 | Channel voice notes | A bot token, and `ffmpeg` on `PATH` for real container conversion | Send a voice note to the bot with `ethos gateway` running (all four declared adapters, in both directions) | `extensions/gateway/src/__tests__/voice-pipeline.test.ts`, `transcode.test.ts`, `voice-caps-sink.test.ts`, `voice-ledger-e2e.test.ts` — every ffmpeg invocation is a fake runner, no binary is ever spawned |
+| Wake satellite, push-to-talk (`ethos listen`) | `ethos serve` running, one `voice.wake.routes` entry, and a real PCM pipe (`ffmpeg` / `arecord`) | `make listen-doctor` for the preflight, then pipe a mic in and speak — the row appears under **Settings → Voice → Wake routes** | `apps/ethos/src/__tests__/listen-*.test.ts`, `apps/web-api/src/voice/__tests__/satellite-socket.test.ts`, `extensions/voice-satellite/src` — the device and the socket are always injected; no microphone is ever opened |
+| Acoustic wake (`voice.wake.engine: sherpa`) | `sherpa-onnx-node` installed by hand (**not a repo dependency**, ~33 MB per-arch native binary) and four model files in `~/.ethos/models/wake/` | Manual only, on a host with a real microphone | Only the *absence* path: `extensions/voice-satellite/src/__tests__/doctor.test.ts` pins that the missing peer and the missing model file are each reported with their own diagnosable message. The spotter mapping itself has **never run against a real binary** |
+| Wake quality (false-accept / false-reject) | A recorded ambient corpus and a 3 m test rig | Manual only | **Nothing.** The plan's ≤ 1 false accept/hour and ≤ 10 % false reject at 3 m are unmeasured — no corpus exists in this repo |
+| Satellite playout | A satellite host with an output device. Neither shipped host has one — `ethos listen` registers `playback: false`, and the Electron main process has no audio binding either. The lane ignores that flag and synthesizes anyway; the daemon discards the bytes and warns once | Manual only, on a host you wire a `CaptureDevice` and a speaker into | `extensions/voice-satellite/src/__tests__/node-client.test.ts` covers the playout *events*; no audio is ever played |
 
 Manual-verification list, condensed: **LiveKit native bindings, a SIP trunk plus a
 rented number, real cloud STT/TTS keys, a real OpenAI Realtime key, real
-`command-*` binaries, and a real batch STT server consuming the generated WAV.**
-Nothing in CI touches any of these.
+`command-*` binaries, a real batch STT server consuming the generated WAV, a real
+PCM pipe into `ethos listen`, a hand-installed `sherpa-onnx-node` with wake models,
+satellite playout on a host with a speaker, and any wake-quality measurement at
+all.** Nothing in CI touches any of these.
 
 ---
 
@@ -789,8 +900,26 @@ plus the spoken-style injector measure ~2.3k chars / ~580 tokens today, so
 there is headroom, and the test is what stops it being spent silently.
 
 ### 7. Not built at all
-The wake-word satellite; telephony beyond the typed seams.
-`shouldReplyWithVoice` accepts a `wakeTriggered` flag that nothing sets yet.
+Telephony beyond the typed seams.
+
+The wake-word satellite used to be listed here in full. It shipped — the shared
+`extensions/voice-satellite` package, the `/satellite/ws` lane on **web-api**,
+`ethos listen` / `ethos listen doctor`, the desktop main-process host, and the
+Settings → Voice wake-route manager. `shouldReplyWithVoice`'s `wakeTriggered` flag
+now has a caller: `SatelliteLane.runTurn`. Four things inside it did **not** ship,
+and they are the reasons not to plan an ambient deployment around it yet:
+
+- **Acoustic wake on any host.** `ethos listen` is push-to-talk; the sherpa adapter
+  has never run against a real binary, and `sherpa-onnx-node` is not installed.
+- **A microphone on the desktop host.** It reports `degraded` with "no capture
+  device configured" and declines to start.
+- **Wake-quality numbers.** No corpus, no measurement.
+- **Edge STT on a shipped host.** The wire protocol and the lane both support the
+  `transcript` frame, and `voice.wake.edgeStt: true` is parsed — but neither host
+  ships an on-device recognizer, so both register `capabilities.edgeStt: false` and
+  the server ANDs the operator's intent down to false. `listen doctor` warns in
+  words that audio *will* be streamed and the "no audio leaves the machine"
+  guarantee does not hold there.
 
 Channel TTS-out and the ffmpeg transcode stage used to be listed here. Both
 shipped — see [§ Channels](#channels) for the declared-caps model that carries

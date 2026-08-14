@@ -2987,6 +2987,110 @@ const VoiceLaneModeSetInput = z.object({
 });
 const VoiceLaneModeSetOutput = z.object({ mode: z.enum(VOICE_MODES) });
 
+// --- Wake satellites (voice V3) ---------------------------------------------
+
+/**
+ * One connected wake satellite, as Settings → Voice renders it.
+ *
+ * Everything here is what the NODE reported, not what the server inferred. A
+ * microphone in a room that misreports whether it is listening is a privacy
+ * defect, so `state` comes from the only component that can see the capture
+ * loop, `probes` carries `ethos listen doctor`'s findings so the row can name
+ * the failing dependency inline, and `lastWake` is the receipt that a phrase
+ * actually reached a personality.
+ */
+const SatelliteNodeSchema = z.object({
+  nodeId: z.string(),
+  laneId: z.string(),
+  displayName: z.string().nullable(),
+  capabilities: z.object({
+    edgeStt: z.boolean(),
+    playback: z.boolean(),
+    captureSampleRate: z.number(),
+  }),
+  state: z.enum(['listening', 'muted', 'wake_off', 'speaking', 'degraded']),
+  /** Which probe failed, which device disappeared. Renders inline on the row. */
+  stateDetail: z.string().nullable(),
+  wakeEnabled: z.boolean(),
+  probes: z.array(z.object({ name: z.string(), ok: z.boolean(), detail: z.string().nullable() })),
+  lastWake: z.object({ phrase: z.string(), personalityId: z.string(), at: z.number() }).nullable(),
+  connectedAt: z.number(),
+});
+
+const SatellitesListOutput = z.object({ nodes: z.array(SatelliteNodeSchema) });
+
+const SatelliteSetWakeEnabledInput = z.object({
+  nodeId: z.string().min(1),
+  enabled: z.boolean(),
+});
+/** `false` = no such node is connected. The row says "not reachable" rather
+ *  than reporting a mute that never left the process. */
+const SatelliteSetWakeEnabledOutput = z.object({ ok: z.boolean() });
+
+/** One editable wake route. `id` is the yaml key, so it carries the same
+ *  charset the config parser will match on the way back in. */
+const WakeRouteSchema = z.object({
+  id: z.string().regex(/^[A-Za-z0-9_-]+$/),
+  phrase: z.string().min(1),
+  personalityId: z.string().min(1),
+  /** Route-level opt-in for a privileged personality (eng-review D13). */
+  privileged: z.boolean(),
+  enabled: z.boolean(),
+});
+
+/**
+ * One route as READ — the effective table, which is wider than the file.
+ *
+ * Every unprivileged personality answers to `hey <name>` without any config, so
+ * the read carries those synthesized routes alongside the configured ones and
+ * `implicit` is how the editor tells them apart: configured rows are editable,
+ * implicit rows are shown and not saved back. The id is only `min(1)` here
+ * because a synthesized id is `auto:<personalityId>`, deliberately outside the
+ * charset a config key may use — which is also why the WRITE schema above stays
+ * strict and carries no `implicit` field. An implicit route is not something the
+ * editor can send back.
+ */
+const WakeRouteViewSchema = z.object({
+  id: z.string().min(1),
+  phrase: z.string().min(1),
+  personalityId: z.string().min(1),
+  privileged: z.boolean(),
+  enabled: z.boolean(),
+  /** True for a `hey <name>` default; false for a `voice.wake.routes` entry. */
+  implicit: z.boolean(),
+});
+
+/**
+ * Deployment-wide satellite knobs, defaults already applied.
+ *
+ * Read-only through this namespace: the routing TABLE is what the wake-route
+ * manager edits, and these scalars are a separate Settings surface. Returned on
+ * the read so the manager can show what the routes will run under.
+ */
+const WakeSettingsSchema = z.object({
+  engine: z.enum(['fallback', 'sherpa', 'openwakeword']),
+  sensitivity: z.number(),
+  confirmationFrames: z.number(),
+  edgeStt: z.boolean(),
+  idleTimeoutMs: z.number(),
+  wakeEnabled: z.boolean(),
+});
+
+const WakeRoutesGetOutput = z.object({
+  routes: z.array(WakeRouteViewSchema),
+  settings: WakeSettingsSchema,
+});
+
+/**
+ * Replace the whole route table.
+ *
+ * Wholesale, not a merge: a route the operator deleted has to actually stop
+ * answering the door. The write round-trips through `config.yaml` and then
+ * pushes to every connected satellite, so a save takes effect without a
+ * restart (eng-review D5).
+ */
+const WakeRoutesSetInput = z.object({ routes: z.array(WakeRouteSchema) });
+
 /** @experimental */
 const voice = {
   transcribe: oc.input(VoiceTranscribeInput).output(VoiceTranscribeOutput),
@@ -3004,6 +3108,17 @@ const voice = {
   laneMode: {
     get: oc.input(VoiceLaneModeGetInput).output(VoiceLaneModeGetOutput),
     set: oc.input(VoiceLaneModeSetInput).output(VoiceLaneModeSetOutput),
+  },
+  /** Connected wake satellites — the Settings → Voice liveness rows. */
+  satellites: {
+    list: oc.output(SatellitesListOutput),
+    /** Mute / unmute ONE node. The node persists it across restarts. */
+    setWakeEnabled: oc.input(SatelliteSetWakeEnabledInput).output(SatelliteSetWakeEnabledOutput),
+  },
+  /** The wake-phrase → personality table. */
+  wakeRoutes: {
+    get: oc.output(WakeRoutesGetOutput),
+    set: oc.input(WakeRoutesSetInput).output(WakeRoutesGetOutput),
   },
 };
 

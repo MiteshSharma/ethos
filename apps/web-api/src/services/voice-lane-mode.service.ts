@@ -61,6 +61,22 @@ export class VoiceLaneModeService {
     };
   }
 
+  /**
+   * The mode for an ALREADY-NAMESPACED lane key — one built by `voiceLaneKey`
+   * or `satelliteLaneKey`, which start with `voice:`.
+   *
+   * No `web:` prefix, deliberately. That prefix exists because a browser
+   * session id is an arbitrary operator-chosen string that could be named to
+   * collide with a channel lane. A `voice:` key is not arbitrary: it is built
+   * segment-encoded by the one lane-key encoder, and the gateway's own voice
+   * lanes live under it in this same document. Prefixing would put a satellite
+   * in a different key space than every other voice conversation, which is the
+   * opposite of the "a mode is one fact" property this store exists for.
+   */
+  async getForLane(laneKey: string): Promise<VoiceMode> {
+    return this.store.get(laneKey);
+  }
+
   /** Persist this conversation's mode. */
   async set(sessionId: string, mode: VoiceMode): Promise<{ mode: VoiceMode }> {
     await this.store.set(webLaneKey(sessionId), mode);

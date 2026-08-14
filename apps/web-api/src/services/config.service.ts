@@ -511,6 +511,7 @@ const SETTINGS_PATCH_KEYS = [
   'voiceSttProviders',
   'voiceRealtimeProviders',
   'voiceChannelTtsOut',
+  'wakeRoutes',
   'nightlyPass',
   'weeklyDigest',
   'modelCatalog',
@@ -694,6 +695,18 @@ function validateSettingsPatch(patch: ConfigUpdateInput): void {
       // not `checkInt`. The CLI's parser drops a non-positive rate; refusing it
       // here means the operator hears about it instead of it vanishing.
       checkPositive(`voiceRealtimeProviders.${name}.costPerMinuteUsd`, entry.costPerMinuteUsd);
+    }
+  }
+  if (patch.wakeRoutes) {
+    for (const [id, route] of Object.entries(patch.wakeRoutes)) {
+      // The id becomes a `voice.wake.routes.<id>.<field>` line; outside this
+      // charset neither parser would match it and the route would vanish on
+      // the next read — a wake phrase that silently stops existing.
+      checkRecordKey(`wakeRoutes.${id}`, id);
+      if (!route?.phrase?.trim()) invalidValue(`wakeRoutes.${id}.phrase`, 'is required');
+      if (!route?.personality?.trim()) {
+        invalidValue(`wakeRoutes.${id}.personality`, 'is required');
+      }
     }
   }
   checkPositive('voiceRealtimeSessionBudgetUsd', patch.voiceRealtimeSessionBudgetUsd);
@@ -1060,6 +1073,16 @@ export interface ConfigUpdateInput {
   webhooks?: Record<string, WebhookUpdateInput>;
   quickCommands?: Record<string, QuickCommandUpdateInput>;
   channelToolsets?: Record<string, string[]>;
+  /**
+   * `voice.wake.routes.<id>` — the wake-phrase → personality table, replaced
+   * wholesale (a present key drops every existing route first, like the voice
+   * rosters above). A route the operator deleted in the UI must actually stop
+   * answering the door, so a merge would be the wrong semantics here.
+   */
+  wakeRoutes?: Record<
+    string,
+    { phrase: string; personality: string; privileged?: boolean; enabled?: boolean }
+  >;
   nightlyPass?: { enabled?: boolean | null; cron?: string | null };
   weeklyDigest?: { enabled?: boolean | null; cron?: string | null; recipients?: string[] | null };
   modelCatalog?: { enabled?: boolean | null; url?: string | null; ttlHours?: number | null };
@@ -1081,6 +1104,17 @@ export interface ConfigServiceOptions {
    *  resolve to '' so checks fail honestly instead of probing with the
    *  literal reference string. */
   secrets?: SecretsResolver;
+  /**
+   * Fired after a successful `update()` write lands.
+   *
+   * A seam, not a dependency: this service must not know that wake satellites
+   * exist, but a Settings save is the one moment the pushed routing table can
+   * change, and eng-review D5 makes that save the trigger for the push. The
+   * composition root closes over whatever needs telling. Awaited so a caller
+   * that reads back immediately sees the effect, but a listener that throws
+   * must not fail the config write that already landed.
+   */
+  onUpdated?: () => void | Promise<void>;
 }
 
 export class ConfigService {
@@ -1572,7 +1606,8 @@ export class ConfigService {
       patch.voiceTtsProviders !== undefined ||
       patch.voiceSttProviders !== undefined ||
       patch.voiceRealtimeProviders !== undefined ||
-      patch.voiceChannelTtsOut !== undefined;
+      patch.voiceChannelTtsOut !== undefined ||
+      patch.wakeRoutes !== undefined;
     const currentPassthrough = replacesRecords
       ? ((await this.opts.config.read())?.passthrough ?? {})
       : {};
@@ -1684,6 +1719,23 @@ export class ConfigService {
         set(`voice.realtime.providers.${name}.baseUrl`, entry.baseUrl);
         set(`voice.realtime.providers.${name}.voice`, entry.voice);
         set(`voice.realtime.providers.${name}.costPerMinuteUsd`, entry.costPerMinuteUsd);
+      }
+    }
+    if (patch.wakeRoutes !== undefined) {
+      // Wholesale replacement — see the field's docs. `privileged` and
+      // `enabled` are written only when explicitly false/true so a hand-written
+      // config that never said either keeps saying nothing.
+      deletePrefix('voice.wake.routes.');
+      for (const [id, route] of Object.entries(patch.wakeRoutes)) {
+        if (!route) continue;
+        set(`voice.wake.routes.${id}.phrase`, route.phrase);
+        set(`voice.wake.routes.${id}.personality`, route.personality);
+        if (route.privileged !== undefined) {
+          set(`voice.wake.routes.${id}.privileged`, route.privileged);
+        }
+        if (route.enabled !== undefined) {
+          set(`voice.wake.routes.${id}.enabled`, route.enabled);
+        }
       }
     }
     if (patch.webhooks !== undefined) {
@@ -1808,6 +1860,11 @@ export class ConfigService {
     });
 
     await this.deleteOrphanedSecrets(droppedSecretRefs);
+    try {
+      await this.opts.onUpdated?.();
+    } catch {
+      // The write landed; a broken listener is not the caller's problem.
+    }
   }
 
   /**

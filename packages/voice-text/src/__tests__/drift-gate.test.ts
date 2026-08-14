@@ -44,6 +44,13 @@ const OWNED_NAMES = [
   'truncateAtSentenceBoundary',
   'SentenceChunker',
   'stripMarkdown',
+  // The wake matcher (V3). Three callers — the satellite's transcript engine,
+  // the acoustic engine's phrase normalizer, and the browser's pre-save phrase
+  // tester — and a copy that drifts would mean the tester and the microphone
+  // disagreeing about which phrase wakes which personality.
+  'normalizeUtterance',
+  'boundedLevenshtein',
+  'matchWakePhrase',
 ];
 
 // `function foo(`, `const foo = (`, `class Foo {`, and the method-shorthand and

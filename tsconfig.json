@@ -180,6 +180,7 @@
       "@ethosagent/tools-voice": ["./extensions/tools-voice/src"],
       "@ethosagent/tools-meeting": ["./extensions/tools-meeting/src"],
       "@ethosagent/voice-providers": ["./extensions/voice-providers/src"],
+      "@ethosagent/voice-satellite": ["./extensions/voice-satellite/src"],
       "@ethosagent/voice-session": ["./extensions/voice-session/src"],
       "@ethosagent/voice-realtime-protocol": ["./packages/voice-realtime-protocol/src"],
       "@ethosagent/voice-text": ["./packages/voice-text/src"],

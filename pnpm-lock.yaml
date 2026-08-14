@@ -99,9 +99,15 @@ importers:
       '@ethosagent/storage-fs':
         specifier: workspace:*
         version: link:../../packages/storage-fs
+      '@ethosagent/types':
+        specifier: workspace:*
+        version: link:../../packages/types
       '@ethosagent/ui-components':
         specifier: workspace:*
         version: link:../../packages/ui-components
+      '@ethosagent/voice-satellite':
+        specifier: workspace:*
+        version: link:../../extensions/voice-satellite
       '@ethosagent/web-api':
         specifier: workspace:*
         version: link:../web-api
@@ -338,6 +344,9 @@ importers:
       '@ethosagent/tools-process':
         specifier: workspace:*
         version: link:../../extensions/tools-process
+      '@ethosagent/voice-satellite':
+        specifier: workspace:*
+        version: link:../../extensions/voice-satellite
       '@ethosagent/watchers':
         specifier: workspace:*
         version: link:../../extensions/watchers
@@ -1950,6 +1959,28 @@ importers:
       ws:
         specifier: ^8.20.0
         version: 8.21.0
+
+  extensions/voice-satellite:
+    dependencies:
+      '@ethosagent/types':
+        specifier: workspace:*
+        version: link:../../packages/types
+      '@ethosagent/voice-session':
+        specifier: workspace:*
+        version: link:../voice-session
+      '@ethosagent/voice-text':
+        specifier: workspace:*
+        version: link:../../packages/voice-text
+      '@ethosagent/web-contracts':
+        specifier: workspace:*
+        version: link:../../packages/web-contracts
+      ws:
+        specifier: ^8.20.0
+        version: 8.21.0
+    devDependencies:
+      '@ethosagent/storage-fs':
+        specifier: workspace:*
+        version: link:../../packages/storage-fs
 
   extensions/voice-session:
     dependencies:

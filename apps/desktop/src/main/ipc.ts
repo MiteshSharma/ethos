@@ -12,6 +12,13 @@ import { getKeychainValue, setKeychainValue } from './keychain';
 import { getLoginItem, setLoginItem } from './login-item';
 import { testDiscord, testImap, testSmtp, testTelegram } from './platform-validator';
 import { syncRemoteAuth } from './remote-auth';
+import {
+  getSatelliteStatus,
+  probeSatellite,
+  setWakeEnabled,
+  startSatellite,
+  stopSatellite,
+} from './satellite';
 import { store } from './store';
 
 const PROVIDER_MODELS: Record<string, string[]> = {
@@ -1004,4 +1011,51 @@ export function registerIpcHandlers(): void {
   ipcMain.handle(IPC_CHANNELS['gateway:logPath'], () => {
     return { path: getGatewayLogPath() };
   });
+
+  // -------------------------------------------------------------------------
+  // Wake-satellite IPC handlers
+  //
+  // Same never-throw convention as the gateway block above: an action answers
+  // {ok} and the status read answers whatever the host currently believes. The
+  // host itself never throws, so the try/catch here is belt-and-braces around
+  // the IPC boundary rather than the host's error handling.
+  // -------------------------------------------------------------------------
+
+  ipcMain.handle(IPC_CHANNELS['satellite:status'], () => {
+    return getSatelliteStatus();
+  });
+
+  ipcMain.handle(IPC_CHANNELS['satellite:start'], async () => {
+    try {
+      await startSatellite();
+      return { ok: true };
+    } catch {
+      return { ok: false };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS['satellite:stop'], async () => {
+    try {
+      await stopSatellite();
+      return { ok: true };
+    } catch {
+      return { ok: false };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS['satellite:doctor'], async () => {
+    return probeSatellite();
+  });
+
+  ipcMain.handle(
+    IPC_CHANNELS['satellite:setWakeEnabled'],
+    async (_event, req: { enabled: boolean }) => {
+      try {
+        await setWakeEnabled(req.enabled);
+        return { ok: true };
+      } catch {
+        return { ok: false };
+      }
+    },
+  );
 }

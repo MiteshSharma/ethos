@@ -125,6 +125,18 @@ export class PersonalitiesService {
     };
   }
 
+  /**
+   * Does this id resolve, after a disk refresh?
+   *
+   * For validating a reference to a personality where the caller does not want
+   * the personality itself — the wake-route editor, which must refuse a route
+   * naming nothing rather than let it fail silently in a room later.
+   */
+  async exists(id: string): Promise<boolean> {
+    await this.opts.refresh?.();
+    return this.opts.personalities.describe(id) !== null;
+  }
+
   async get(
     id: string,
   ): Promise<{ personality: Personality; soulMd: string; mcpPolicy: McpPolicy | null }> {

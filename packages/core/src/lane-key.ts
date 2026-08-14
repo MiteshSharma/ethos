@@ -42,7 +42,16 @@ export type VoiceLaneClientKind =
   /** A LiveKit room participant. */
   | 'livekit'
   /** An inbound/outbound PSTN leg through the SIP trunk (V4). */
-  | 'sip';
+  | 'sip'
+  /**
+   * A wake-word satellite: a microphone in a room, woken by a phrase (V3).
+   *
+   * Unlike the other three, a satellite lane is keyed by TWO facts — the node
+   * AND the personality the phrase woke — so it is built by
+   * {@link satelliteLaneKey} rather than by handing this kind an `id`. See that
+   * function for why a composite id cannot express it.
+   */
+  | 'satellite';
 
 export interface VoiceLaneClient {
   kind: VoiceLaneClientKind;
@@ -64,4 +73,28 @@ export interface VoiceLaneClient {
  */
 export function voiceLaneKey(botKey: string, client: VoiceLaneClient): string {
   return buildLaneKey('voice', botKey, client.kind, client.id);
+}
+
+/**
+ * The lane key for one wake-satellite conversation:
+ * `voice:<botKey>:satellite:<nodeId>:<personalityId>`.
+ *
+ * Per-node AND per-personality by design (voice V3, eng-review D15): re-waking
+ * a personality on the kitchen Pi resumes ITS conversation with its history,
+ * and waking a different personality from the same microphone switches to a
+ * different lane rather than continuing someone else's thread. The idle timeout
+ * ends the LISTENING state, never the session, so a re-wake an hour later lands
+ * on this same key.
+ *
+ * A dedicated builder rather than `voiceLaneKey(botKey, { kind: 'satellite',
+ * id: `${nodeId}:${personalityId}` })`, because a composite id ALIASES.
+ * `buildLaneKey` encodes each segment it is given, so a joining `:` inside one
+ * id becomes `%3A` — exactly what a `:` inside `nodeId` becomes. Node
+ * `kitchen:engineer` + personality `x` and node `kitchen` + personality
+ * `engineer:x` would then produce the identical key, which is the one thing
+ * this module exists to make unconstructible. Passing the two as SEPARATE
+ * segments keeps them separately encoded, and separately distinguishable.
+ */
+export function satelliteLaneKey(botKey: string, nodeId: string, personalityId: string): string {
+  return buildLaneKey('voice', botKey, 'satellite', nodeId, personalityId);
 }

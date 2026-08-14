@@ -11,12 +11,15 @@ import { type WebSocket, WebSocketServer } from 'ws';
 import type { VoiceService } from '../services/voice.service';
 import type { RealtimeControlLaneDeps } from './realtime-control-lane';
 import { RealtimeControlLane } from './realtime-control-lane';
+import { refuseUpgrade, registerUpgradeRoute, type UpgradableServer } from './upgrade-router';
 import { VoiceLane, type VoiceLaneLimits } from './voice-lane';
 
 // The `ws` half of the browser voice lane. Same upgrade posture as the ACP
 // server (`apps/acp-server/src/index.ts`): `noServer: true` plus an explicit
 // `upgrade` handler, so path, Origin and credentials are all checked before a
-// socket is ever handed to application code.
+// socket is ever handed to application code. The path half of that check lives
+// in `./upgrade-router` — one listener dispatching to every mounted lane —
+// because this is no longer the only WebSocket lane on the server.
 //
 // This file owns the socket; `VoiceLane` owns the conversation. Each accepted
 // connection gets its OWN lane — the only shared object is the `VoiceService`
@@ -47,20 +50,10 @@ export interface VoiceSocketOptions {
   logger?: Logger;
 }
 
-/**
- * What `attach` needs: anything that emits `upgrade`. Typed structurally
- * because `@hono/node-server` returns an http/http2 union, not a plain
- * `http.Server`.
- */
-export interface UpgradableServer {
-  on(
-    event: 'upgrade',
-    listener: (req: IncomingMessage, socket: Duplex, head: Buffer) => void,
-  ): unknown;
-}
+export type { UpgradableServer } from './upgrade-router';
 
 export interface VoiceSocket {
-  /** Take over `upgrade` on a listening server. */
+  /** Serve this lane's path on a listening server's upgrade router. */
   attach(server: UpgradableServer): void;
   /** Live lane count — one per connected talk-mode client. */
   readonly laneCount: number;
@@ -130,36 +123,38 @@ export function createVoiceSocket(opts: VoiceSocketOptions): VoiceSocket {
 
   wss.on('connection', onConnection);
 
+  // Path matching is the router's job now; this handler only sees requests for
+  // `path` and owns the Origin + credential policy.
   const handleUpgrade = (req: IncomingMessage, socket: Duplex, head: Buffer): void => {
-    const url = req.url ?? '';
-    if (url.split('?')[0] !== path) {
-      refuse(socket, 404, 'Not Found');
-      return;
-    }
     if (!originAllowed(req.headers.origin, opts.allowedOrigins)) {
-      refuse(socket, 403, 'Forbidden');
+      refuseUpgrade(socket, 403, 'Forbidden');
       return;
     }
     opts
       .authenticate(req)
       .then((ok) => {
         if (!ok) {
-          refuse(socket, 401, 'Unauthorized');
+          refuseUpgrade(socket, 401, 'Unauthorized');
           return;
         }
         wss.handleUpgrade(req, socket, head, (ws) => wss.emit('connection', ws, req));
       })
-      .catch(() => refuse(socket, 401, 'Unauthorized'));
+      .catch(() => refuseUpgrade(socket, 401, 'Unauthorized'));
   };
+
+  let detach: (() => void) | null = null;
 
   return {
     attach(server: UpgradableServer): void {
-      server.on('upgrade', handleUpgrade);
+      detach?.();
+      detach = registerUpgradeRoute(server, path, handleUpgrade);
     },
     get laneCount(): number {
       return lanes.size;
     },
     close(): Promise<void> {
+      detach?.();
+      detach = null;
       for (const [socket, lane] of lanes) {
         lane.close();
         controls.get(socket)?.close();
@@ -170,11 +165,6 @@ export function createVoiceSocket(opts: VoiceSocketOptions): VoiceSocket {
       return new Promise((resolve) => wss.close(() => resolve()));
     },
   };
-}
-
-function refuse(socket: Duplex, status: number, text: string): void {
-  socket.write(`HTTP/1.1 ${status} ${text}\r\n\r\n`);
-  socket.destroy();
 }
 
 /**

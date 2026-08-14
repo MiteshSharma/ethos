@@ -2,7 +2,7 @@ import { join } from 'node:path';
 import { SessionStreamBuffer } from '@ethosagent/agent-bridge';
 import { AgentMesh, defaultRegistryPath } from '@ethosagent/agent-mesh';
 import { resolveSecretRef } from '@ethosagent/config';
-import type { AgentLoop } from '@ethosagent/core';
+import { type AgentLoop, satelliteLaneKey } from '@ethosagent/core';
 import type { CronScheduler } from '@ethosagent/cron';
 import {
   DashboardRefreshScheduler,
@@ -48,6 +48,7 @@ import {
   parseRealtimeRoster,
   parseSttRoster,
   parseTtsRoster,
+  parseWakeRouting,
 } from './repositories/config.repository';
 import { EvolverRepository } from './repositories/evolver.repository';
 import { PlatformsRepository } from './repositories/platforms.repository';
@@ -81,9 +82,15 @@ import { TasksService } from './services/tasks.service';
 import { ToolSettingsService } from './services/tool-settings.service';
 import { VoiceService } from './services/voice.service';
 import { VoiceLaneModeService } from './services/voice-lane-mode.service';
+import { WakeRoutesService } from './services/wake-routes.service';
+import { withImplicitWakeRoutes } from './voice/implicit-wake-routes';
 import { createRealtimeControlDeps } from './voice/realtime-control-deps';
 import { createRealtimeSurface } from './voice/realtime-surface';
+import type { SatelliteObservability } from './voice/satellite-lane';
+import { SatelliteRegistry } from './voice/satellite-registry';
+import { createSatelliteSocket, type SatelliteSocket } from './voice/satellite-socket';
 import { createVoiceSocket, readCookie, type VoiceSocket } from './voice/voice-socket';
+import { isPrivilegedPersonality } from './voice/wake-privilege';
 
 // Public entry for `@ethosagent/web-api`. Boot code (`apps/ethos/src/commands/
 // serve.ts`) builds the dependencies it has lying around — a `SessionStore`,
@@ -169,6 +176,12 @@ export interface CreateWebApiOptions {
    * code passes wiring's `EthosObservability`. Omitted (tests) → no rows.
    */
   approvalObservability?: ApprovalObservability;
+  /**
+   * Sink for wake-satellite lane events (`satellite.*`) — today, the turn that
+   * ran without speaking because the node declared no loudspeaker. Boot code
+   * passes wiring's `EthosObservability`. Omitted (tests) → no rows.
+   */
+  satelliteObservability?: SatelliteObservability;
   /**
    * Absolute path to the built `apps/web/dist` SPA. When set, the same
    * Hono app serves the client at `/*`. Omit in dev — Vite handles
@@ -434,6 +447,13 @@ export interface CreateWebApiResult {
    * talk-mode falls back to the batch RPC path.
    */
   voiceSocket: VoiceSocket;
+  /**
+   * The wake-satellite lane. Boot code calls `satelliteSocket.attach(server)`
+   * on the same listening server the voice lane is attached to — the two share
+   * one upgrade router, so the order does not matter. Skipping the call leaves
+   * `GET /satellite/ws` unmounted and no satellite can connect.
+   */
+  satelliteSocket: SatelliteSocket;
 }
 
 export function createWebApi(opts: CreateWebApiOptions): CreateWebApiResult {
@@ -522,7 +542,29 @@ export function createWebApi(opts: CreateWebApiOptions): CreateWebApiResult {
     ...(opts.scriptSurface ? { scriptSurface: opts.scriptSurface } : {}),
     ...(opts.boundary ? { boundary: opts.boundary } : {}),
   });
-  const configService = new ConfigService({ config: configRepo, secrets });
+  // Connected wake satellites. Constructed BEFORE `ConfigService` because the
+  // Settings write path pushes to it: eng-review D5 makes a Settings save the
+  // moment a route change reaches the microphones in the house. A hand-edited
+  // `config.yaml` applies on the next satellite reconnect or restart instead —
+  // nothing watches the file, which is documented behaviour, not a bug.
+  //
+  // The table is the CONFIGURED routes plus the implicit `hey <name>` default
+  // every unprivileged personality answers to. Assembled here, once, so the
+  // pushed `routes` frame, the lane's wake re-resolution and the Settings editor
+  // cannot disagree — and the personality registry is reloaded first so a
+  // personality dropped on disk gets its name back on the next table read.
+  const satelliteRegistry = new SatelliteRegistry({
+    readTable: async () => {
+      const table = parseWakeRouting((await configRepo.read())?.passthrough ?? {});
+      await opts.personalities.loadFromDirectory(join(opts.dataDir, 'personalities'));
+      return withImplicitWakeRoutes(table, opts.personalities.list());
+    },
+  });
+  const configService = new ConfigService({
+    config: configRepo,
+    secrets,
+    onUpdated: () => satelliteRegistry.refreshRoutes(),
+  });
   const onboardingService = new OnboardingService({
     config: configRepo,
     personalities: opts.personalities,
@@ -734,6 +776,71 @@ export function createWebApi(opts: CreateWebApiOptions): CreateWebApiResult {
       return cookie ? tokens.matches(cookie) : false;
     },
     ...(opts.allowedOrigins ? { allowedOrigins: opts.allowedOrigins } : {}),
+  });
+  // The wake-satellite lane (`GET /satellite/ws`). Same process, same cookie,
+  // same VoiceService and same AgentLoop as the browser lane — which is why it
+  // is mounted here rather than on the gateway: pushing a routing table to a
+  // connected microphone is then an in-process call.
+  //
+  // Hoisted so the per-lane deps factory closes over a narrowed value rather
+  // than re-reading an optional field on every socket.
+  const satelliteObservability = opts.satelliteObservability;
+  const satelliteSocket = createSatelliteSocket({
+    registry: satelliteRegistry,
+    deps: () => ({
+      transcribe: (audio, transcribeOpts) =>
+        voiceService.transcribeBytes(
+          audio.data,
+          audio.mimeType,
+          transcribeOpts.signal,
+          transcribeOpts.personalityId ? { personalityId: transcribeOpts.personalityId } : {},
+        ),
+      synthesize: (text, synthOpts) => voiceService.synthesizeStream(text, synthOpts),
+      resolvePersonality: async (id) => {
+        // Refresh BOTH registries before resolving: the loop's (which decides
+        // the turn) and this process's (which the sheet/editor reads). A route
+        // naming a personality deleted since the last push must be refused
+        // against what is on disk now, not against a boot snapshot.
+        await opts.refreshPersonalities?.();
+        await opts.personalities.loadFromDirectory(join(opts.dataDir, 'personalities'));
+        const config = opts.personalities.get(id);
+        // Unknown resolves privileged as well as absent — nothing downstream
+        // should ever read `privileged: false` off a personality that is not
+        // there.
+        if (!config) return { exists: false, privileged: true };
+        return { exists: true, privileged: isPrivilegedPersonality(config) };
+      },
+      runTurn: ({ text, sessionKey, personalityId, signal }) =>
+        agentLoop.run(text, {
+          sessionKey,
+          personalityId,
+          abortSignal: signal,
+          // A wake turn IS a spoken turn even though the transcript is text by
+          // the time the loop sees it — the annotation is what the approval
+          // gate reads to tell a spoken request from a typed one.
+          voiceOrigin: { transport: 'satellite-wake', speaker: 'owner' },
+        }),
+      voiceMode: (laneKey) => voiceLaneModeService.getForLane(laneKey),
+      // One bot identity per web-api, the same single value the browser
+      // realtime lane assumes (`createRealtimeControlDeps`).
+      laneKey: (nodeId, personalityId) => satelliteLaneKey('web', nodeId, personalityId),
+      ...(satelliteObservability
+        ? {
+            observe: (code: string, details: Record<string, unknown>) =>
+              satelliteObservability.recordSafetyBlock({ code, details }),
+          }
+        : {}),
+    }),
+    authenticate: async (req) => {
+      const cookie = readCookie(req.headers.cookie, AUTH_COOKIE);
+      return cookie ? tokens.matches(cookie) : false;
+    },
+    ...(opts.allowedOrigins ? { allowedOrigins: opts.allowedOrigins } : {}),
+  });
+  const wakeRoutesService = new WakeRoutesService({
+    config: configService,
+    personalities: personalitiesService,
+    registry: satelliteRegistry,
   });
   const debugService = new DebugService({ sessionStore: opts.sessionStore, agentLoop });
   // Project-level plugins (`<cwd>/.ethos/plugins/`) are out of scope
@@ -962,6 +1069,8 @@ export function createWebApi(opts: CreateWebApiOptions): CreateWebApiResult {
       toolSettings: toolSettingsService,
       voice: voiceService,
       voiceLaneMode: voiceLaneModeService,
+      satellites: satelliteRegistry,
+      wakeRoutes: wakeRoutesService,
       deliveries: deliveriesService,
       toolRegistry: opts.toolRegistry,
       dashboards: dashboardsService,
@@ -1010,7 +1119,7 @@ export function createWebApi(opts: CreateWebApiOptions): CreateWebApiResult {
     }).start();
   }
 
-  return { app, chatService, systemBus, voiceSocket };
+  return { app, chatService, systemBus, voiceSocket, satelliteSocket };
 }
 
 /**

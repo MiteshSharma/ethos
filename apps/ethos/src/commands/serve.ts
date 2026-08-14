@@ -1004,6 +1004,20 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
     approvalObservability: {
       recordSafetyApproval: (o) => getEthosObservability().recordSafetyApproval(o),
     },
+    // Wake-satellite lane events (`satellite.*`) — today, the turn that ran
+    // without speaking because the node declared no loudspeaker. Same
+    // observability instance as the approval trail above; fail-open like every
+    // other audit call in this file, so a store that will not initialise costs
+    // a row and never a turn.
+    satelliteObservability: {
+      recordSafetyBlock: (o) => {
+        try {
+          getEthosObservability().recordSafetyBlock(o);
+        } catch {
+          // observability unavailable — audit is fail-open
+        }
+      },
+    },
     ...(skillsCatalogDir ? { catalogDir: skillsCatalogDir } : {}),
     ...(cronScheduler ? { cronScheduler } : {}),
     ...(toolRegistry ? { toolRegistry } : {}),
@@ -1085,6 +1099,10 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
   // Talk-mode's persistent binary lane (`GET /voice/ws`). Same server, same
   // auth cookie; unattached it simply 404s and the browser uses the batch RPCs.
   created.voiceSocket.attach(server);
+  // The wake-satellite lane (`GET /satellite/ws`). Shares the upgrade router
+  // with the voice lane above, so attach order does not matter and neither
+  // path can swallow the other's upgrade.
+  created.satelliteSocket.attach(server);
   console.log('');
   const displayHost = webHost === '0.0.0.0' ? 'localhost' : webHost;
   console.log(`ethos web UI listening on http://${displayHost}:${port}`);
@@ -1105,7 +1123,7 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
   const exposureWarning = formatNonLoopbackWarning(webHost, port);
   if (exposureWarning) console.warn(`\n${exposureWarning}`);
   webShutdown = () =>
-    created.voiceSocket.close().then(
+    Promise.all([created.voiceSocket.close(), created.satelliteSocket.close()]).then(
       () =>
         new Promise<void>((resolve) => {
           server.close(() => resolve());

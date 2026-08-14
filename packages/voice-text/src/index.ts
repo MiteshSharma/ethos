@@ -24,3 +24,11 @@ export {
   type VoiceMode,
   type VoiceReplyDecisionInput,
 } from './voice-mode';
+export {
+  boundedLevenshtein,
+  DEFAULT_WAKE_SENSITIVITY,
+  matchWakePhrase,
+  normalizeUtterance,
+  type WakePhrase,
+  type WakePhraseMatch,
+} from './wake-match';

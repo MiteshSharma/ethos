@@ -4,7 +4,7 @@ description: "Every Ethos domain term in one place: personality, skill, tool, ho
 kind: reference
 audience: shared
 slug: glossary
-updated: 2026-08-08
+updated: 2026-08-14
 ---
 
 Every domain term used elsewhere in the docs has one canonical entry here. Pages link to the entry on first use. The list is alphabetical inside each cluster; clusters are ordered by how often a newcomer hits them.
@@ -164,6 +164,14 @@ A configuration mode where the desktop app connects to an Ethos server running o
 ### Voice mode {#voice-mode}
 
 Whether a conversation gets spoken replies: `off`, `mirror_inbound` (speak back when spoken to — the default), or `all`. Set per conversation with `/voice`, persisted to `~/.ethos/voice/lane-modes.json` so it outlives `/new` and a gateway restart, and overridden downward by an operator's `voice.channels.<platform>.ttsOut: false`. See [Send and receive voice notes on a channel](../using/how-to/voice-notes-on-channels.md).
+
+### Wake satellite {#wake-satellite}
+
+A separate process that owns a microphone and connects to the Ethos server over `GET /satellite/ws`, streaming captured speech up and receiving synthesized replies back. Two hosts ship: the `ethos listen` daemon (capture is raw PCM on stdin, and it is push-to-talk rather than acoustic wake) and the Electron main process (which has no capture device today and reports `degraded`). Each satellite has a stable `nodeId` that survives restarts, so the conversation it was having is still there after a reboot. See [Run a wake satellite](../using/how-to/run-a-wake-satellite.md).
+
+### Wake route {#wake-route}
+
+One `phrase → personality` mapping the server owns: `voice.wake.routes.<id>` in `~/.ethos/config.yaml`, edited in **Settings → Voice → Wake routes** and pushed to every connected [wake satellite](#wake-satellite) on save. Routing is a deployment fact, not a [personality](#personality) field — two deployments of the same personality can reasonably answer to different phrases. Every unprivileged personality also answers to `hey <name>` with no configuration at all; those synthesized routes carry the id `auto:<personalityId>`.
 
 ### Delivery obligation {#delivery-obligation}
 

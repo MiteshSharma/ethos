@@ -172,6 +172,24 @@ Three-state dot (8px circle, `border-radius: 9999px`):
 Web surface: rendered in TopBar right-hand side alongside `{provider} · {model}` mono label.
 Desktop surface: rendered in sidebar bottom as an 8px dot inside a 20px glow ring (`border: 1.5px solid rgba(74,222,128,0.4)`).
 
+**Extended for a microphone (SatelliteRow, voice V3).** A wake satellite has
+states a websocket does not, so the same `.sb-dot` base gains three modifiers
+rather than a second dot being drawn:
+
+- **Listening**: `#4ADE80` (solid) + three CSS liveness bars. The bars are a
+  cue, not a meter — the node protocol carries no amplitude, and inventing
+  levels would be the dishonest version of "the mic is armed".
+- **Speaking**: `var(--accent)` (pulsing) — the same "the agent has the floor"
+  vocabulary as the CallStrip.
+- **Muted**: `--text-tertiary` (solid).
+- **Wake off**: **hollow** — transparent fill, 1.5px `--text-tertiary` ring.
+  Hollow rather than a second grey because wake-off is *persisted* and muted is
+  momentary, and the indicator-honesty rule is worthless if the two look alike.
+- **Degraded**: `#F87171` (solid), with the failing probe named inline.
+
+`prefers-reduced-motion` stops the pulse and the bars; the bars hold their
+tallest height so the row still reads as armed.
+
 ### Personality bar
 
 The bar at the top of the chat tab is **identity, read-only**: accent stripe,
@@ -502,4 +520,5 @@ The web UI specifically must avoid these patterns. Code review checks for them.
 | 2026-08-13 | Call overlay supersedes the 2026-07-19 "In-call speaking indicator" entry | A 10px pulsing dot cannot express three continuously-changing states, so the call gets a non-blocking centered overlay (three treatments, amplitude-driven) that minimizes to the strip rather than ending the call. Adds one new motion class — continuous amplitude-driven motion — because the 80/180/240ms transition scale has no way to express a duplex call's need for continuous feedback. The strip keeps every state that is not carrying audio. |
 | 2026-08-14 | Call Stage supersedes the 2026-08-13 "Call overlay" entry | The user rejected the centered dialog: things appearing and disappearing mid-call read as instability. A call is now a MODE — Chat switches into a **two-column** stage (shape, this call's transcript) and returns to normal chat when the call ends. There is no left rail and no PersonalityBar: a navigation column mid-call invites wandering around the UI mid-sentence, and rename/fork/new-session are the wrong controls to offer someone who is talking. The one way back to the composer without hanging up is a single small **Back to chat** text button in the transcript header — the same collapse the strip's restore control reverses. The clarify question gets a reserved slot in the transcript column that is always on screen and fills in place, instead of a card that arrives over the conversation. Everything the overlay entry decided about the SHAPE — three treatments, the amplitude motion class, the per-state colour rules, mounting by the call rather than the state — carries over unchanged; only the container was wrong. |
 | 2026-08-14 | `--accent` is defined, and the call treatment is the personality's | Two halves of one correction. (1) `--accent` was READ 19 times across `styles.css` and defined NOWHERE, so every per-personality colour in raw CSS silently rendered the generic info blue — Antd primitives tinted, the CSS around them did not. It is now stamped on the chat subtree's own element from the same resolver `personalityTheme` uses, and `CallStage`'s local copy was removed so there is exactly one definition. (2) The call treatment moved from an app-wide `display.call_style` to `voice.call_style` on the personality, defaulting to a shape DERIVED from the personality id — every agent looks distinct with nothing configured, and the operator key becomes a pin rather than the source. Owner's doctrine: a personality is not just its tools and plugins, it is also how it looks and feels. |
+| 2026-08-14 | `WakeRouteRow` and `SatelliteRow` added to the component inventory (voice V3, DR3) | Wake routing needed two list surfaces and neither earns a `Card`: a routing table and a fleet of microphones are both things you scan for the one entry that is wrong, and a bordered box per entry turns scanning into reading. Both are dense rows in Settings → Voice (DR4 — no new sidebar item). Satellite liveness extends the existing connection dot rather than drawing a new one, adding listening / speaking / muted / **hollow** wake-off / degraded. Phrases, state words, node ids, capabilities and ages are Geist Mono, because every one of them is a literal the operator also sees in `ethos listen doctor` output or in `config.yaml`. The route editor's live phrase tester lights the matching row in that **personality's own accent** — the identity affordance is the proof, so you recognize the agent that answered rather than reading a generic highlight. |
 | 2026-08-14 | A session is bound to the personality it started with; the in-chat switcher is removed | Owner's call: "A session belongs to a personality that joined this when session started. Then you can't switch." The dropdown in the personality bar is gone, along with the auto-fork-on-switch behaviour it needed and the command palette's "Switch personality →" verb. Identity stays fully visible — stripe, mark, name, model — it just isn't a control any more. Choosing an agent is part of STARTING a session: the New Session picker (`+` in the bar, "New chat session" in the palette) is the one entry point, and a `?personality=` deep-link now applies only with `new=1`. Forking a session is still offered where it belongs, in the Sessions tab. |

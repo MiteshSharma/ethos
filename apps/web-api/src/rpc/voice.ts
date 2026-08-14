@@ -62,4 +62,29 @@ export const voiceRouter = {
       context.voiceLaneMode.set(input.sessionId, input.mode),
     ),
   },
+  satellites: {
+    list: os.voice.satellites.list.handler(({ context }) => ({
+      nodes: (context.satellites?.list() ?? []).map((n) => ({
+        nodeId: n.nodeId,
+        laneId: n.laneId,
+        displayName: n.displayName ?? null,
+        capabilities: n.capabilities,
+        state: n.state,
+        stateDetail: n.stateDetail ?? null,
+        wakeEnabled: n.wakeEnabled,
+        probes: n.probes.map((p) => ({ name: p.name, ok: p.ok, detail: p.detail ?? null })),
+        lastWake: n.lastWake ?? null,
+        connectedAt: n.connectedAt,
+      })),
+    })),
+    setWakeEnabled: os.voice.satellites.setWakeEnabled.handler(({ input, context }) => ({
+      ok: context.satellites?.setWakeEnabled(input.nodeId, input.enabled) ?? false,
+    })),
+  },
+  wakeRoutes: {
+    get: os.voice.wakeRoutes.get.handler(({ context }) => context.wakeRoutes.get()),
+    set: os.voice.wakeRoutes.set.handler(({ input, context }) =>
+      context.wakeRoutes.set(input.routes),
+    ),
+  },
 };

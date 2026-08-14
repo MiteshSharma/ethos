@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { encodeFrame, splitFrame } from './frame-codec';
 
 // Wire format for the browser ↔ web-api voice lane: ONE persistent WebSocket
 // carrying binary frames both directions (mic PCM up, synthesized audio down).
@@ -16,6 +17,10 @@ import { z } from 'zod';
 // `headerLen` is big-endian. There are no text frames: a control message is a
 // frame with an empty payload, so both sides have exactly one decode path.
 //
+// The layout itself lives in `frame-codec.ts` — the wake-satellite lane speaks
+// the same one, and a wire contract that exists in two files drifts. This file
+// owns what the HEADERS are allowed to say; the codec owns how bytes are cut.
+//
 // Why the header is self-describing rather than "audio bytes belong to
 // whatever utterance is current": an in-flight result whose utterance was
 // superseded by barge-in or by a newer utterance MUST be droppable, and that
@@ -31,7 +36,9 @@ export const VOICE_SOCKET_VERSION = 1;
 /** MIME the mic lane sends: signed 16-bit little-endian PCM, mono. */
 export const VOICE_PCM_MIME = 'audio/pcm;codec=s16le';
 
-const HEADER_OFFSET = 3;
+// Re-exported from their new home so every existing importer of the voice lane
+// keeps resolving. Both lanes carry PCM, so the helpers moved to the codec.
+export { pcm16FromBytes, pcm16ToBytes } from './frame-codec';
 
 // --- client → server -------------------------------------------------------
 
@@ -321,43 +328,12 @@ export interface DecodedVoiceFrame<T> {
   payload: Uint8Array;
 }
 
-const encoder = new TextEncoder();
-const decoder = new TextDecoder();
-
 /** Encode one frame. `payload` is empty for control frames. */
 export function encodeVoiceFrame(
   header: VoiceClientFrame | VoiceServerFrame,
   payload?: Uint8Array,
 ): Uint8Array {
-  const headerBytes = encoder.encode(JSON.stringify(header));
-  if (headerBytes.length > 0xffff) {
-    throw new Error('Voice frame header exceeds 64 KiB');
-  }
-  const body = payload ?? EMPTY;
-  const out = new Uint8Array(HEADER_OFFSET + headerBytes.length + body.length);
-  out[0] = VOICE_SOCKET_VERSION;
-  out[1] = (headerBytes.length >> 8) & 0xff;
-  out[2] = headerBytes.length & 0xff;
-  out.set(headerBytes, HEADER_OFFSET);
-  out.set(body, HEADER_OFFSET + headerBytes.length);
-  return out;
-}
-
-const EMPTY = new Uint8Array(0);
-
-function splitFrame(bytes: Uint8Array): { header: unknown; payload: Uint8Array } | null {
-  if (bytes.length < HEADER_OFFSET) return null;
-  if (bytes[0] !== VOICE_SOCKET_VERSION) return null;
-  const headerLen = ((bytes[1] ?? 0) << 8) | (bytes[2] ?? 0);
-  const headerEnd = HEADER_OFFSET + headerLen;
-  if (bytes.length < headerEnd) return null;
-  let header: unknown;
-  try {
-    header = JSON.parse(decoder.decode(bytes.subarray(HEADER_OFFSET, headerEnd)));
-  } catch {
-    return null;
-  }
-  return { header, payload: bytes.subarray(headerEnd) };
+  return encodeFrame(VOICE_SOCKET_VERSION, header, payload);
 }
 
 /**
@@ -368,7 +344,7 @@ function splitFrame(bytes: Uint8Array): { header: unknown; payload: Uint8Array }
 export function decodeVoiceClientFrame(
   bytes: Uint8Array,
 ): DecodedVoiceFrame<VoiceClientFrame> | null {
-  const split = splitFrame(bytes);
+  const split = splitFrame(VOICE_SOCKET_VERSION, bytes);
   if (!split) return null;
   const parsed = VoiceClientFrameSchema.safeParse(split.header);
   return parsed.success ? { header: parsed.data, payload: split.payload } : null;
@@ -378,33 +354,8 @@ export function decodeVoiceClientFrame(
 export function decodeVoiceServerFrame(
   bytes: Uint8Array,
 ): DecodedVoiceFrame<VoiceServerFrame> | null {
-  const split = splitFrame(bytes);
+  const split = splitFrame(VOICE_SOCKET_VERSION, bytes);
   if (!split) return null;
   const parsed = VoiceServerFrameSchema.safeParse(split.header);
   return parsed.success ? { header: parsed.data, payload: split.payload } : null;
-}
-
-/**
- * Read a PCM payload as 16-bit samples. Copies: a WebSocket payload can land
- * at any byte offset in its backing buffer, and `new Int16Array(buf, offset)`
- * throws on an odd one. A trailing odd byte is dropped rather than throwing —
- * a truncated frame must not kill a live call.
- */
-export function pcm16FromBytes(bytes: Uint8Array): Int16Array {
-  const samples = new Int16Array(bytes.length >> 1);
-  for (let i = 0; i < samples.length; i++) {
-    samples[i] = (((bytes[i * 2] ?? 0) | ((bytes[i * 2 + 1] ?? 0) << 8)) << 16) >> 16;
-  }
-  return samples;
-}
-
-/** Serialize 16-bit samples as little-endian payload bytes. */
-export function pcm16ToBytes(samples: Int16Array): Uint8Array {
-  const out = new Uint8Array(samples.length * 2);
-  for (let i = 0; i < samples.length; i++) {
-    const value = samples[i] ?? 0;
-    out[i * 2] = value & 0xff;
-    out[i * 2 + 1] = (value >> 8) & 0xff;
-  }
-  return out;
 }

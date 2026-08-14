@@ -174,3 +174,4 @@ Usage: /voice off|mirror_inbound|all
 - [Channel capability matrix](../../platforms/capability-matrix.md#voice-caps) — which formats each platform accepts and how each renders a voice note
 - [Local voice: Kokoro TTS + Whisper large v3 STT](local-voice.md) — wire STT and TTS to servers on your own machine
 - [Why does a redelivered voice note re-send the recording?](../../building/explanation/why-voice-replies-redeliver.md) — what happens to a voice note whose delivery is never confirmed
+- [Run a wake satellite](./run-a-wake-satellite.md) — the other voice surface: a microphone in a room, routed to one personality

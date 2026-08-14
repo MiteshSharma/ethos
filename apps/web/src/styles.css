@@ -3064,6 +3064,319 @@ textarea {
   }
 }
 
+/* ---------------------------------------------------------------------------
+   Wake routes + satellites (voice V3, DR3)
+
+   Dense LIST ROWS, not the Card primitive — "cards earn existence" reserves
+   that for skill rows, cron rows and task tiles. A routing table and a fleet
+   of microphones are both things you scan for the one that is wrong, and a
+   bordered box per entry turns scanning into reading.
+   --------------------------------------------------------------------------- */
+
+.wake-route-mono,
+.sat-mono,
+.wake-route-phrase {
+  font-family: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
+.wake-route-list {
+  display: flex;
+  flex-direction: column;
+}
+
+.wake-route-row {
+  padding: 8px 0;
+  border-bottom: 1px solid var(--ethos-border);
+  transition: background-color var(--motion-fast, 80ms) var(--ease, ease);
+}
+
+.wake-route-row:last-child {
+  border-bottom: none;
+}
+
+/* The tester lit this row: a 2px ring in the personality's OWN accent, which
+   the row already carries as `--accent` from its selected personality. The
+   ring is the existing accent vocabulary (the same `2px solid var(--accent)`
+   the focus rings use) rather than a colored left border, which the anti-slop
+   table names as the "we have to differentiate rows somehow" pattern. Inset
+   offset so it does not overlap the row above. Identity is the proof — you
+   recognize the agent that answered, not a generic highlight. */
+.wake-route-row--matched {
+  background: var(--ethos-surface-tint);
+  outline: 2px solid var(--accent, var(--ethos-info));
+  outline-offset: -2px;
+}
+
+/* Same shape, semantic color. Never color alone: the row also carries the
+   server's sentence underneath it. */
+.wake-route-row--error {
+  outline: 2px solid var(--ethos-error);
+  outline-offset: -2px;
+}
+
+.wake-route-main {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.wake-route-phrase {
+  flex: 1 1 200px;
+  min-width: 160px;
+}
+
+.wake-route-arrow,
+.sat-row-arrow {
+  color: var(--ethos-text-tertiary);
+  flex-shrink: 0;
+}
+
+/* Reserves the mark's width before a personality is picked, so choosing one
+   does not shove the rest of the row sideways. */
+.wake-route-mark-slot {
+  display: inline-block;
+  width: 20px;
+  height: 20px;
+  flex-shrink: 0;
+}
+
+.wake-route-personality {
+  flex: 0 1 180px;
+  min-width: 140px;
+}
+
+.wake-route-flag {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.wake-route-flag-label,
+.sat-wake-label {
+  font-size: 12px;
+  color: var(--ethos-text-secondary);
+}
+
+.wake-route-note {
+  display: block;
+  margin-top: 4px;
+  font-size: 12px;
+}
+
+/* The synthesized `hey <name>` defaults, inline in the secondary note. Not
+   rows — they are read-only — but each one carries its personality's mark, so
+   the claim "every personality answers to 'hey <name>'" names WHICH agent
+   answers rather than listing bare strings. */
+.wake-implicit-list {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
+  vertical-align: middle;
+  margin-right: 6px;
+}
+
+.wake-implicit-route {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  /* Matched adds a 2px ring; the padding is here unconditionally so lighting
+     one up moves nothing beside it. */
+  padding: 2px 5px;
+  border-radius: var(--radius-sm, 4px);
+  transition: background-color var(--motion-fast, 80ms) var(--ease, ease);
+}
+
+/* The tester heard this default. Identical vocabulary to `.wake-route-row--matched`
+   — same tint, same 2px inset ring in the personality's OWN accent — because
+   "matched" is one fact and a read-only route earning a second highlight
+   treatment would make the operator learn it twice. */
+.wake-implicit-route--matched {
+  background: var(--ethos-surface-tint);
+  outline: 2px solid var(--accent, var(--ethos-info));
+  outline-offset: -2px;
+}
+
+.wake-settings-readout {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.wake-settings-fact {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.wake-settings-label {
+  font-size: 13px;
+  color: var(--ethos-text-secondary);
+  min-width: 160px;
+}
+
+.wake-settings-key {
+  color: var(--ethos-text-tertiary);
+  margin-left: auto;
+}
+
+.wake-satellites {
+  display: flex;
+  flex-direction: column;
+  margin-top: 8px;
+}
+
+.sat-row {
+  padding: 8px 0;
+  border-bottom: 1px solid var(--ethos-border);
+}
+
+.sat-row:last-child {
+  border-bottom: none;
+}
+
+.sat-row-main {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.sat-name {
+  font-size: 14px;
+  color: var(--ethos-text);
+}
+
+.sat-state {
+  color: var(--ethos-text-secondary);
+}
+
+.sat-caps,
+.sat-wake-age,
+.sat-wake-none {
+  color: var(--ethos-text-tertiary);
+}
+
+.sat-wake-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+.sat-row-wake {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+  flex-wrap: wrap;
+}
+
+.sat-wake-phrase {
+  color: var(--ethos-text-secondary);
+}
+
+.sat-row-detail {
+  display: block;
+  margin-top: 4px;
+  font-size: 12px;
+}
+
+/* The connection dot's extra states (DESIGN.md § "Connection status
+   indicator", extended for a microphone). Same `.sb-dot` base, same
+   `status-dot-pulse` keyframe — a satellite's liveness is the same question
+   the sidebar dot already answers, with two states a websocket does not have:
+   a mic that is armed, and a mic the user switched off on purpose. */
+.sb-dot--listening {
+  background: var(--ethos-success);
+}
+
+.sb-dot--speaking {
+  background: var(--accent, var(--ethos-info));
+}
+
+.sb-dot--muted {
+  background: var(--ethos-text-tertiary);
+}
+
+/* Hollow, not grey: wake-off is PERSISTED and muted is momentary, and the
+   whole point of the indicator-honesty rule is that those two do not look
+   alike. */
+.sb-dot--wake-off {
+  background: transparent;
+  border: 1.5px solid var(--ethos-text-tertiary);
+}
+
+.sb-dot--degraded {
+  background: var(--ethos-error);
+}
+
+.sb-dot--pulse {
+  animation: status-dot-pulse 1.2s ease-in-out infinite;
+}
+
+/* A liveness cue, NOT a meter. The node protocol carries no amplitude, so
+   these bars say "the capture loop is running", which is the only thing the
+   row actually knows. Drawing invented levels would be the dishonest version
+   of the same reassurance. */
+.sat-bars {
+  display: inline-flex;
+  align-items: flex-end;
+  gap: 2px;
+  height: 12px;
+  flex-shrink: 0;
+}
+
+.sat-bar {
+  width: 2px;
+  height: 4px;
+  border-radius: 1px;
+  background: var(--ethos-success);
+  animation: sat-bar-breathe 1.1s ease-in-out infinite;
+}
+
+.sat-bar:nth-child(2) {
+  animation-delay: 0.18s;
+}
+
+.sat-bar:nth-child(3) {
+  animation-delay: 0.36s;
+}
+
+@keyframes sat-bar-breathe {
+  0%,
+  100% {
+    height: 4px;
+  }
+  50% {
+    height: 12px;
+  }
+}
+
+/* DR5: every pulse stops. The liveness bars hold their tallest height so the
+   row still reads as armed without a frame of motion, and the speaking dot
+   stays solid accent — colour and the mono state word carry the state, exactly
+   as they do on the Call Stage. */
+@media (prefers-reduced-motion: reduce) {
+  .sat-bar,
+  .sb-dot--pulse {
+    animation: none;
+  }
+
+  .sat-bar {
+    height: 12px;
+  }
+
+  .wake-route-row {
+    transition: none;
+  }
+}
+
 .composer-actions {
   display: flex;
   align-items: center;

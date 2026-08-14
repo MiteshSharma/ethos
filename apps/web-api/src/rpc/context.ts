@@ -30,6 +30,8 @@ import type { TasksService } from '../services/tasks.service';
 import type { ToolSettingsService } from '../services/tool-settings.service';
 import type { VoiceService } from '../services/voice.service';
 import type { VoiceLaneModeService } from '../services/voice-lane-mode.service';
+import type { WakeRoutesService } from '../services/wake-routes.service';
+import type { SatelliteRegistry } from '../voice/satellite-registry';
 
 // Shared context type for every oRPC handler in the web-api. Each namespace
 // file imports `os` from here (not from `@orpc/server` directly) so TypeScript
@@ -80,6 +82,13 @@ export interface RpcContext {
   /** Read-only delivery-obligation ledger view. Not optional: it degrades to
    *  zeros when the gateway has never run. */
   deliveries: DeliveriesService;
+  /** Connected wake satellites + the pushed routing table. Absent in
+   *  deployments with no satellite lane — the RPCs then report an empty house
+   *  rather than throwing at a Settings page. */
+  satellites?: SatelliteRegistry;
+  /** Read / replace the wake-phrase → personality table. Not optional: the
+   *  editor must render (empty) even where no satellite lane is mounted. */
+  wakeRoutes: WakeRoutesService;
   /** A2A peering service (from `@ethosagent/wiring`) — shared with the live
    *  `/a2a` handshake so the admin RPC and the trust decisions are one source
    *  of truth (plan §12). Absent in non-serve contexts. */

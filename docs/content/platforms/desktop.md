@@ -4,7 +4,7 @@ description: "The Ethos desktop app (Electron): native Mac, Windows, and Linux i
 kind: reference
 audience: shared
 slug: platform-desktop
-updated: 2026-08-08
+updated: 2026-08-14
 ---
 
 The Ethos desktop app is an Electron shell that provides a native Mac, Windows, and Linux interface with the same [agent](../getting-started/glossary.md#agent) capabilities as the CLI and web dashboard. It runs in local mode (embedded server) or remote mode (connected to an external Ethos instance).
@@ -14,6 +14,7 @@ The Ethos desktop app is an Electron shell that provides a native Mac, Windows, 
 - `apps/desktop/src/main/index.ts` — Electron main process: window lifecycle and startup mode
 - `apps/desktop/src/main/serve.ts` — embedded `web-api` process for local mode
 - `apps/desktop/src/main/keychain.ts` — auth token storage via Electron `safeStorage`
+- `apps/desktop/src/main/satellite.ts` — main-process wake-satellite host (see [Wake satellite](#wake-satellite))
 - `apps/desktop/src/renderer/` — the web UI rendered inside the native window
 
 ## Synopsis {#synopsis}
@@ -102,6 +103,22 @@ The status bar shows the current connection state.
 | Green dot — "Local" | Running the embedded `web-api` process |
 | Blue dot — "Remote: *hostname*" | Connected to a remote server |
 | Red dot — "Disconnected" | Connection lost; the app is attempting to reconnect |
+
+## Wake satellite {#wake-satellite}
+
+The Electron main process hosts a [wake satellite](../getting-started/glossary.md#wake-satellite) against the app's own embedded backend, with a tray indicator and a wake-enabled state persisted across restarts.
+
+**It cannot listen or speak today.** The main process ships no microphone binding, so the satellite's preflight adds a failing `capture-device` probe, the host reports `degraded`, and nothing starts:
+
+```
+no capture device configured — the Electron main process ships no microphone binding,
+so this host cannot listen. Run `ethos listen` on a machine with one, or inject a
+CaptureDevice into startSatellite().
+```
+
+That refusal is deliberate. Connecting the lane and showing a green dot over a microphone that never produces a frame is the indicator lie the whole satellite lane exists to prevent.
+
+Everything downstream of the device is wired: the doctor-gated start, the supervised capture machine, the node protocol, wake → utterance uplink, and re-arm on `turn_end`. A capture module becomes one argument to `startSatellite`, not a rewrite. To run a satellite today, use [`ethos listen`](../using/how-to/run-a-wake-satellite.md) on a machine where you can pipe a microphone in.
 
 ## Switching between local and remote {#switching-modes}
 

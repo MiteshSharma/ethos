@@ -1,0 +1,444 @@
+// `ethos listen` sub-router — routing and the `--json` contract.
+//
+// Driven entirely through the injected `ListenCommandDeps`, so nothing here
+// loads a config, opens a socket, or touches stdin.
+
+import { InMemoryStorage } from '@ethosagent/storage-fs';
+import type {
+  CaptureDevice,
+  SatelliteSocketFactory,
+  SatelliteSocketHandlers,
+  WakeRoute,
+} from '@ethosagent/voice-satellite';
+import { encodeSatelliteFrame, type SatelliteServerFrame } from '@ethosagent/web-contracts';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import {
+  type ListenCommandDeps,
+  type ListenPreflight,
+  runListenCommand,
+  startListenDaemon,
+  USAGE,
+} from '../commands/listen';
+
+function preflight(overrides: Partial<ListenPreflight> = {}): ListenPreflight {
+  return {
+    probes: [
+      { name: 'engine:transcript', ok: true, detail: 'no native bindings' },
+      { name: 'models', ok: false, detail: 'model directory missing — /m' },
+      { name: 'microphone', ok: true, detail: '1 input device(s): stdin' },
+      { name: 'gateway', ok: true, detail: 'answered 200' },
+    ],
+    configuredEngine: 'transcript',
+    transcriptEngineOk: true,
+    modelsRequired: false,
+    url: 'ws://127.0.0.1:3000/satellite/ws',
+    healthUrl: 'http://127.0.0.1:3000/healthz',
+    nodeId: 'kitchen-pi-1a2b3c4d',
+    routes: [
+      {
+        id: 'eng',
+        phrase: 'hey engineer',
+        personalityId: 'engineer',
+        privileged: false,
+        enabled: true,
+      },
+    ],
+    edgeSttRequested: false,
+    device: { id: 'stdin', label: 'raw s16le mono PCM on stdin @ 16000 Hz', isDefault: true },
+    sampleRate: 16_000,
+    errors: [],
+    deprecations: [],
+    ...overrides,
+  };
+}
+
+function deps(pre: ListenPreflight = preflight()): ListenCommandDeps & {
+  started: ListenPreflight[];
+} {
+  const started: ListenPreflight[] = [];
+  return {
+    started,
+    preflight: async () => pre,
+    start: async (p) => {
+      started.push(p);
+    },
+  };
+}
+
+let logs: string[];
+let outLines: string[];
+let errLines: string[];
+let stdout: string[];
+
+beforeEach(() => {
+  logs = [];
+  outLines = [];
+  errLines = [];
+  stdout = [];
+  vi.spyOn(console, 'log').mockImplementation((...a: unknown[]) => {
+    logs.push(a.join(' '));
+    outLines.push(a.join(' '));
+  });
+  vi.spyOn(console, 'error').mockImplementation((...a: unknown[]) => {
+    logs.push(a.join(' '));
+    errLines.push(a.join(' '));
+  });
+  vi.spyOn(process.stdout, 'write').mockImplementation((chunk: unknown) => {
+    stdout.push(String(chunk));
+    return true;
+  });
+  process.exitCode = undefined;
+});
+
+afterEach(() => {
+  vi.restoreAllMocks();
+  process.exitCode = undefined;
+});
+
+describe('runListenCommand routing', () => {
+  it('no subcommand starts the daemon', async () => {
+    const d = deps();
+    await runListenCommand([], d);
+    expect(d.started).toHaveLength(1);
+    expect(process.exitCode).toBeUndefined();
+  });
+
+  it('flags before the subcommand do not become the subcommand', async () => {
+    const d = deps();
+    await runListenCommand(['--route', 'eng'], d);
+    expect(d.started).toHaveLength(1);
+  });
+
+  it('`doctor` runs the preflight and does not start the daemon', async () => {
+    const d = deps();
+    await runListenCommand(['doctor'], d);
+    expect(d.started).toHaveLength(0);
+    expect(logs.join('\n')).toContain('wake satellite preflight');
+  });
+
+  it('an unknown subcommand prints usage and exits non-zero', async () => {
+    const d = deps();
+    await runListenCommand(['wat'], d);
+    expect(d.started).toHaveLength(0);
+    expect(logs.join('\n')).toContain(USAGE);
+    expect(process.exitCode).toBe(1);
+  });
+});
+
+describe('runListenCommand --json', () => {
+  it('emits one parseable object carrying an exit field', async () => {
+    await runListenCommand(['doctor', '--json'], deps());
+    expect(stdout).toHaveLength(1);
+    const parsed = JSON.parse(stdout[0] ?? '');
+    expect(parsed.exit).toBe(0);
+    expect(Array.isArray(parsed.probes)).toBe(true);
+    expect(parsed.probes.map((p: { name: string }) => p.name)).toContain('engine:transcript');
+    expect(parsed.nodeId).toBe('kitchen-pi-1a2b3c4d');
+    // The daemon never acoustically matches, so the JSON says so rather than
+    // letting a reader infer wake capability from the engine name.
+    expect(parsed.engine.daemonMode).toBe('push-to-talk');
+    expect(process.exitCode).toBeUndefined();
+  });
+
+  it('carries the non-zero exit in the object AND in process.exitCode', async () => {
+    const pre = preflight({
+      probes: [
+        { name: 'engine:transcript', ok: true },
+        { name: 'models', ok: true },
+        { name: 'microphone', ok: false, detail: 'no input devices' },
+        { name: 'gateway', ok: true },
+      ],
+    });
+    await runListenCommand(['doctor', '--json'], deps(pre));
+    const parsed = JSON.parse(stdout[0] ?? '');
+    expect(parsed.exit).toBe(2);
+    expect(process.exitCode).toBe(2);
+  });
+});
+
+describe('the daemon refuses to start deaf', () => {
+  it('refuses when nothing is piped to stdin', async () => {
+    const d = deps(preflight({ device: null }));
+    await runListenCommand([], d);
+    expect(d.started).toHaveLength(0);
+    expect(process.exitCode).toBe(1);
+    expect(logs.join('\n')).toContain('Nothing is piped to stdin');
+  });
+
+  it('zero configured routes does NOT block the daemon, and claims nothing false', async () => {
+    // The server synthesizes `hey <name>` per unprivileged personality, so an
+    // empty local table is the normal deployment, not a dead end. The daemon
+    // starts and resolves its route against what the server pushes.
+    const d = deps(preflight({ routes: [] }));
+    await runListenCommand([], d);
+    expect(d.started).toHaveLength(1);
+    expect(process.exitCode).toBeUndefined();
+    const out = logs.join('\n');
+    expect(out).not.toContain('so nothing can be sent');
+    expect(out).toContain('none configured here, which is normal');
+    expect(out).toContain('auto:<personalityId>');
+  });
+
+  it('--route auto:<id> is passed through, not rejected by an id charset', async () => {
+    const d = deps(preflight({ routes: [], requestedRoute: 'auto:engineer' }));
+    await runListenCommand(['--route', 'auto:engineer'], d);
+    expect(d.started).toHaveLength(1);
+    expect(process.exitCode).toBeUndefined();
+  });
+
+  it('refuses when no usable wake engine remains', async () => {
+    const d = deps(
+      preflight({
+        transcriptEngineOk: false,
+        probes: [{ name: 'engine:transcript', ok: false, detail: 'boom' }],
+      }),
+    );
+    await runListenCommand([], d);
+    expect(d.started).toHaveLength(0);
+    expect(process.exitCode).toBe(1);
+    expect(logs.join('\n')).toContain('No usable wake engine');
+  });
+
+  it('starts in an announced degraded state when a usable engine remains', async () => {
+    const d = deps(
+      preflight({
+        configuredEngine: 'sherpa',
+        modelsRequired: true,
+        probes: [
+          { name: 'engine:transcript', ok: true },
+          { name: 'engine:sherpa', ok: false, detail: 'wake model file missing — /m/encoder.onnx' },
+          { name: 'models', ok: false, detail: 'model directory missing — /m' },
+          { name: 'microphone', ok: true },
+          { name: 'gateway', ok: true },
+        ],
+      }),
+    );
+    await runListenCommand([], d);
+    expect(d.started).toHaveLength(1);
+    const out = logs.join('\n');
+    expect(out).toContain('degraded');
+    expect(out).toContain('wake model file missing');
+  });
+
+  it('starts with the server down — the client reconnects with backoff', async () => {
+    const d = deps(
+      preflight({
+        probes: [
+          { name: 'engine:transcript', ok: true },
+          { name: 'models', ok: true },
+          { name: 'microphone', ok: true },
+          { name: 'gateway', ok: false, detail: 'ECONNREFUSED' },
+        ],
+      }),
+    );
+    await runListenCommand([], d);
+    expect(d.started).toHaveLength(1);
+    expect(logs.join('\n')).toContain('not answering yet');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The daemon — driven through the real satellite client with a fake transport,
+// so the route table it routes against is a real pushed `routes` frame.
+// ---------------------------------------------------------------------------
+
+function wakeRoute(id: string, personalityId = id): WakeRoute {
+  return { id, phrase: `hey ${personalityId}`, personalityId, privileged: false, enabled: true };
+}
+
+function routesFrame(routes: WakeRoute[]): SatelliteServerFrame {
+  return {
+    t: 'routes',
+    routes,
+    settings: {
+      engine: 'transcript',
+      sensitivity: 0.5,
+      confirmationFrames: 1,
+      edgeStt: false,
+      idleTimeoutMs: 8000,
+      wakeEnabled: true,
+    },
+  };
+}
+
+/** A `SatelliteSocketFactory` a test can push server frames through. */
+function fakeTransport(): {
+  factory: SatelliteSocketFactory;
+  opened: Promise<void>;
+  push(frame: SatelliteServerFrame): void;
+} {
+  let handlers: SatelliteSocketHandlers | null = null;
+  let markOpen: (() => void) | null = null;
+  const opened = new Promise<void>((resolve) => {
+    markOpen = resolve;
+  });
+  const factory: SatelliteSocketFactory = (_url, _init, h) => {
+    handlers = h;
+    h.onOpen();
+    markOpen?.();
+    return { send: () => {}, close: () => {} };
+  };
+  return {
+    factory,
+    opened,
+    push: (frame) => handlers?.onMessage(Buffer.from(encodeSatelliteFrame(frame)), true),
+  };
+}
+
+const fakeDevice: CaptureDevice = {
+  start: async () => {},
+  stop: async () => {},
+  list: async () => [{ id: 'stdin', label: 'stdin' }],
+};
+
+/** Signal handlers the daemon installs must not leak between tests. */
+const signalsBefore = {
+  SIGINT: process.listeners('SIGINT'),
+  SIGTERM: process.listeners('SIGTERM'),
+};
+
+afterEach(() => {
+  for (const signal of ['SIGINT', 'SIGTERM'] as const) {
+    for (const listener of process.listeners(signal)) {
+      if (!signalsBefore[signal].includes(listener)) process.removeListener(signal, listener);
+    }
+  }
+});
+
+/**
+ * Start the daemon on a fake transport and hand back the pushed-table lever.
+ *
+ * The success path never resolves (the daemon awaits a keep-alive), so the
+ * returned promise is only awaited by the refusal cases.
+ */
+async function runDaemon(
+  routes: WakeRoute[],
+  flags: { route?: string; json?: boolean } = {},
+): Promise<{
+  done: Promise<void>;
+  ready: Promise<void>;
+  push(frame: SatelliteServerFrame): void;
+}> {
+  const transport = fakeTransport();
+  let markReady: (() => void) | null = null;
+  const ready = new Promise<void>((resolve) => {
+    markReady = resolve;
+  });
+  const done = startListenDaemon(
+    preflight({ ...(flags.route === undefined ? {} : { requestedRoute: flags.route }) }),
+    { json: flags.json === true, positional: [], ...(flags.route ? { route: flags.route } : {}) },
+    {
+      storage: new InMemoryStorage(),
+      device: fakeDevice,
+      createSocket: transport.factory,
+      onReady: () => markReady?.(),
+    },
+  );
+  await transport.opened;
+  transport.push(routesFrame(routes));
+  return { done, ready, push: transport.push };
+}
+
+describe('the daemon routes against the table the server pushed', () => {
+  it('a pushed table with exactly one route is used without --route', async () => {
+    const { ready } = await runDaemon([wakeRoute('auto:engineer', 'engineer')]);
+    await ready;
+    const out = logs.join('\n');
+    expect(out).toContain('auto:engineer');
+    expect(out).toContain('synthesized by the server');
+  });
+
+  it('several pushed routes require --route, and the daemon lists them', async () => {
+    const { done } = await runDaemon([wakeRoute('auto:engineer'), wakeRoute('auto:writer')]);
+    await done;
+    expect(process.exitCode).toBe(1);
+    const out = logs.join('\n');
+    expect(out).toContain('--route');
+    expect(out).toContain('auto:writer');
+  });
+
+  it('--route auto:<id> selects from the pushed table', async () => {
+    const { ready } = await runDaemon(
+      [wakeRoute('auto:engineer', 'engineer'), wakeRoute('auto:writer', 'writer')],
+      { route: 'auto:engineer' },
+    );
+    await ready;
+    expect(logs.join('\n')).toContain('route auto:engineer');
+  });
+
+  it('a --route the server never pushed fails against the PUSHED list', async () => {
+    const { done } = await runDaemon([wakeRoute('auto:engineer')], { route: 'auto:enginer' });
+    await done;
+    expect(process.exitCode).toBe(1);
+    expect(logs.join('\n')).toContain("no enabled route 'auto:enginer'");
+  });
+
+  it('an empty pushed table refuses, naming the privileged exclusion', async () => {
+    const { done } = await runDaemon([]);
+    await done;
+    expect(process.exitCode).toBe(1);
+    const out = logs.join('\n');
+    expect(out).toContain('privileged');
+    expect(out).toContain('by design');
+  });
+});
+
+describe('the daemon narrates the turn', () => {
+  it('a transcript frame is printed as the operator’s own words', async () => {
+    const { ready, push } = await runDaemon([wakeRoute('auto:engineer', 'engineer')]);
+    await ready;
+    push({ t: 'transcript', utteranceId: 'u1', text: 'what is on my calendar', final: true });
+    expect(outLines.join('\n')).toContain('what is on my calendar');
+  });
+
+  it('a reply_text frame is printed as the personality’s answer', async () => {
+    const { ready, push } = await runDaemon([wakeRoute('auto:engineer', 'engineer')]);
+    await ready;
+    push({
+      t: 'reply_text',
+      utteranceId: 'u1',
+      personalityId: 'engineer',
+      text: 'Two meetings, both after lunch.',
+    });
+    const out = outLines.join('\n');
+    // This host has no loudspeaker, so this line is the whole answer: it must
+    // name who spoke as well as what was said.
+    expect(out).toContain('Two meetings, both after lunch.');
+    expect(out).toContain('engineer');
+  });
+
+  it('turn_end closes the cycle without claiming a segment count', async () => {
+    const { ready, push } = await runDaemon([wakeRoute('auto:engineer', 'engineer')]);
+    await ready;
+    push({
+      t: 'speak_start',
+      utteranceId: 'u1',
+      segmentId: 's1',
+      codec: 'pcm_s16le',
+      mimeType: 'audio/pcm',
+    });
+    push({ t: 'turn_end', utteranceId: 'u1', personalityId: 'engineer' });
+    const out = logs.join('\n');
+    expect(out).toContain('turn complete');
+    expect(out).toContain('Listening again');
+    // The server skips synthesis for a playback: false node, so the count this
+    // line used to print was always zero. Audio arriving at all is the anomaly,
+    // and it gets its own warning rather than a running tally.
+    expect(out).not.toContain('reply segment(s)');
+    expect(out).toContain('audio is being discarded');
+  });
+
+  it('under --json nothing the daemon narrates reaches stdout', async () => {
+    const { ready, push } = await runDaemon([wakeRoute('auto:engineer', 'engineer')], {
+      json: true,
+    });
+    await ready;
+    push({ t: 'transcript', utteranceId: 'u1', text: 'hello there', final: true });
+    push({ t: 'reply_text', utteranceId: 'u1', personalityId: 'engineer', text: 'hello yourself' });
+    const err = errLines.join('\n');
+    expect(err).toContain('hello there');
+    expect(err).toContain('hello yourself');
+    expect(outLines).toHaveLength(0);
+    expect(stdout).toHaveLength(0);
+  });
+});

@@ -40,6 +40,7 @@ import {
   useToolSettingsSchemas,
 } from '../features/settings/api/queries';
 import { DEFAULT_VOICE_TUNING } from '../features/voice/batch-voice-call-client';
+import { WakePanel, WakeSettingsReadout } from '../features/voice/WakePanel';
 import { useVoiceRecorder } from '../hooks/useVoiceRecorder';
 import { isDesktop } from '../lib/desktop';
 import {
@@ -2530,6 +2531,11 @@ export function Settings() {
                 ),
               },
               {
+                key: 'voice-wake',
+                label: 'Advanced wake tuning',
+                children: <WakeSettingsReadout />,
+              },
+              {
                 key: 'voice-notes',
                 label: 'Advanced voice-note delivery',
                 children: (
@@ -2887,6 +2893,13 @@ export function Settings() {
               <Switch />
             </Form.Item>
           ))}
+          <VoiceSectionLabel>Wake routes</VoiceSectionLabel>
+          <Typography.Paragraph type="secondary" style={{ marginTop: 0, fontSize: 13 }}>
+            Which phrase wakes which personality, on every connected satellite. Saving pushes the
+            table to them without a restart. Below the routes: the microphones themselves, and
+            whether each is actually listening.
+          </Typography.Paragraph>
+          <WakePanel />
           <VoiceSectionLabel>Delivery status</VoiceSectionLabel>
           <VoiceDeliveryStatus />
           <Form.Item
