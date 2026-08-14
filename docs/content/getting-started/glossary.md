@@ -167,7 +167,7 @@ Whether a conversation gets spoken replies: `off`, `mirror_inbound` (speak back 
 
 ### Wake satellite {#wake-satellite}
 
-A separate process that owns a microphone and connects to the Ethos server over `GET /satellite/ws`, streaming captured speech up and receiving synthesized replies back. Two hosts ship: the `ethos listen` daemon (capture is raw PCM on stdin, and it is push-to-talk rather than acoustic wake) and the Electron main process (which has no capture device today and reports `degraded`). Each satellite has a stable `nodeId` that survives restarts, so the conversation it was having is still there after a reboot. See [Run a wake satellite](../using/how-to/run-a-wake-satellite.md).
+A separate process that owns a microphone and connects to the Ethos server over `GET /satellite/ws`, streaming captured speech up and receiving synthesized replies back. Two hosts ship: the `ethos listen` daemon (capture is raw PCM on stdin; it matches no phrase itself, so the server transcribes everything and matches the wake phrase there) and the Electron main process (which has no capture device today and reports `degraded`). Each satellite has a stable `nodeId` that survives restarts, so the conversation it was having is still there after a reboot. See [Run a wake satellite](../using/how-to/run-a-wake-satellite.md).
 
 ### Wake route {#wake-route}
 

@@ -27,12 +27,32 @@ export interface SatelliteNode {
   nodeId: string;
   laneId: string;
   displayName?: string;
-  capabilities: { edgeStt: boolean; playback: boolean; captureSampleRate: number };
+  capabilities: {
+    edgeStt: boolean;
+    playback: boolean;
+    captureSampleRate: number;
+    /** False → the SERVER matches this node's wake phrases, from the transcript. */
+    phraseMatch: boolean;
+  };
   state: 'listening' | 'muted' | 'wake_off' | 'speaking' | 'degraded';
   stateDetail?: string;
   wakeEnabled: boolean;
   probes: Array<{ name: string; ok: boolean; detail?: string }>;
   lastWake?: { phrase: string; personalityId: string; at: number };
+  /**
+   * Who this microphone is mid-conversation with, and until when.
+   *
+   * The addressing window, mirrored from the lane that owns it. A satellite
+   * that will answer "tell me more" as the researcher is in a materially
+   * different state from one that needs to hear a phrase first, and a row that
+   * cannot say which leaves the operator guessing why an unaddressed sentence
+   * did — or did not — reach an agent. Absent means the next utterance must
+   * open with a wake phrase.
+   *
+   * `until` is an instant, not a countdown, so a reader that has not refreshed
+   * shows an expired window as closed rather than as still open.
+   */
+  conversation?: { personalityId: string; until: number };
   connectedAt: number;
 }
 

@@ -22,8 +22,16 @@ export interface WakeFrame {
 }
 
 export interface WakeMatch {
-  routeId: string;
-  phrase: string;
+  /**
+   * The route that matched. Absent when the engine matched SOUND rather than
+   * words — an open-mic host has heard speech start and has no phrase to name,
+   * so the server does the matching from the transcript. An engine that DID
+   * match a phrase always names its route: the server re-resolves it, and it
+   * cannot re-resolve what was never claimed.
+   */
+  routeId?: string;
+  /** The phrase, as matched. Absent for the same reason as `routeId`. */
+  phrase?: string;
   /** 0..1. The engine's own confidence, not a normalized score across engines. */
   confidence: number;
 }

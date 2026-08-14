@@ -141,18 +141,18 @@ Synopsis: `ethos listen [doctor] [--url <ws url>] [--route <id>] [--device <id>]
 |---|---|---|---|
 | `doctor` | subcommand | — | Preflight only: engine, model files, capture device, server reachability. Exits without starting anything. |
 | `--url <ws url>` | string | derived from `webBaseUrl`, else `http://127.0.0.1:3000` | Satellite lane URL. A bare origin gets `/satellite/ws` appended; a URL with a path is taken as given. |
-| `--route <id>` | string | the only enabled route, if there is exactly one | The route every captured utterance is attributed to, resolved against the table the server pushes on connect — a `voice.wake.routes` id, or a synthesized `auto:<personality-id>` one. Required when two or more routes are enabled — the daemon refuses rather than guessing which personality answers. |
+| `--route <id>` | string | unpinned — every enabled route may address this host | **Pins** the microphone to one route: only that phrase may address it, and another agent's phrase is discarded rather than answered. Resolved against the table the server pushes on connect — a `voice.wake.routes` id, or a synthesized `auto:<personality-id>` one. A pin that names no enabled route is a hard failure; the flag never exempts the host from needing a phrase. |
 | `--device <id>` | string | the enumerated default | Capture device. This build enumerates `stdin` only. |
 | `--json` | flag | off | `doctor` only. One JSON object on stdout — probes, `configuredRoutes` and `requestedRoute` (never a resolved route: this command does not connect), node id, lane URL, and `exit` — then exits. |
 
 Capture is a pipe — the daemon reads raw signed 16-bit little-endian **mono** PCM at **16 kHz** from stdin, and there is no microphone binding.
 
 ```bash
-ffmpeg -nostats -loglevel error -f avfoundation -i :0 -ar 16000 -ac 1 -f s16le - | ethos listen --route kitchen   # macOS
-arecord -q -f S16_LE -r 16000 -c 1 -t raw | ethos listen --route kitchen                                          # Linux
+ffmpeg -nostats -loglevel error -f avfoundation -i :0 -ar 16000 -ac 1 -f s16le - | ethos listen   # macOS
+arecord -q -f S16_LE -r 16000 -c 1 -t raw | ethos listen                                          # Linux
 ```
 
-It is **push-to-talk, not acoustic wake**: nothing here matches a phrase against sound, and `--json` reports `engine.daemonMode: "push-to-talk"` so a script cannot infer otherwise from the engine name. Acoustic wake needs the `sherpa` engine and its models — see [`voice.wake.engine`](./config-yaml.md#voice-wake) and [Run a wake satellite](../how-to/run-a-wake-satellite.md).
+The mic is **open** and the server decides who was addressed. Nothing here matches a phrase against sound: every captured utterance is transcribed server-side, and a turn runs only when the transcript opens with a wake phrase — which picks the personality and is stripped from the text — or follows one within [`voice.wake.idleTimeout`](./config-yaml.md#voice-wake). Anything else is transcribed and discarded. The room is therefore transcribed even when no agent answers. `--json` reports `engine.daemonMode: "open-mic"` and `engine.phraseMatch: false`, so a script cannot infer an acoustic gate from the engine name. Acoustic wake needs the `sherpa` engine and its models — see [`voice.wake.engine`](./config-yaml.md#voice-wake) and [Run a wake satellite](../how-to/run-a-wake-satellite.md).
 
 Exit codes:
 
@@ -160,7 +160,7 @@ Exit codes:
 |---|---|
 | `0` | Preflight clean. |
 | `1` | Hard failure — this host will never hear you until it is fixed: no config, a bad `--url` or `--device`, a configured engine that will not load, or missing models for a `sherpa` host. |
-| `2` | Warning — true right now and possibly not in a minute: nothing piped to stdin yet, or the server not answering yet. The daemon still refuses to start with no pipe, no resolvable route, or no usable engine. |
+| `2` | Warning — true right now and possibly not in a minute: nothing piped to stdin yet, or the server not answering yet. The daemon still refuses to start with no pipe, no usable engine, or a `--route` pin the server's table does not hold. An empty pushed table is a warning, not a refusal — a Settings save reaches the daemon without a restart. |
 
 State on disk: the node's stable id in `~/.ethos/listen-node-id`, and a heartbeat written every 10 seconds to `~/.ethos/listen-health.json` (the `gateway-health.json` shape plus `captureState`), removed on clean shutdown. `make listen` and `make listen-doctor` wrap both commands from a clone.
 

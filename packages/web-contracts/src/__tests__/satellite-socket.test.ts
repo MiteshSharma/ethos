@@ -29,7 +29,7 @@ const CLIENT_FRAMES: SatelliteClientFrame[] = [
     nodeId: 'kitchen-pi',
     displayName: 'Kitchen Pi',
     protocolVersion: SATELLITE_SOCKET_VERSION,
-    capabilities: { edgeStt: true, playback: true, captureSampleRate: 16_000 },
+    capabilities: { edgeStt: true, playback: true, captureSampleRate: 16_000, phraseMatch: true },
     wakeEnabled: true,
   },
   { t: 'state', state: 'listening' },
@@ -49,6 +49,13 @@ const CLIENT_FRAMES: SatelliteClientFrame[] = [
     personalityId: 'swing-trader',
     confidence: 0.91,
   },
+  // The gating shape: a node that heard SOUND names no phrase and no
+  // personality, because it has matched neither.
+  { t: 'wake', wakeId: 'w2', confidence: 1 },
+  // …and the same node, pinned by `ethos listen --route`: `routeId` alone,
+  // which on a `phraseMatch: false` node means "only this route may address
+  // me" rather than "this is what I matched".
+  { t: 'wake', wakeId: 'w3', routeId: 'r-trader', confidence: 1 },
   { t: 'utterance_start', wakeId: 'w1', utteranceId: 'u1', sampleRate: 16_000 },
   { t: 'audio', utteranceId: 'u1', seq: 0 },
   { t: 'utterance_end', utteranceId: 'u1' },
@@ -111,6 +118,8 @@ const SERVER_FRAMES: SatelliteServerFrame[] = [
     text: 'You are up two percent on the week.',
   },
   { t: 'turn_end', utteranceId: 'u1', personalityId: 'swing-trader' },
+  // No personality: nobody answered, because nobody was addressed.
+  { t: 'turn_end', utteranceId: 'u2' },
   {
     t: 'transcript',
     utteranceId: 'u1',
@@ -214,6 +223,29 @@ describe('satellite socket framing', () => {
       text: 'You are up two percent on the week.',
     });
     expect(decodeSatelliteClientFrame(replyText)).toBeNull();
+  });
+
+  it('registers a satellite that predates phraseMatch, and gates it', () => {
+    // The compatibility claim behind not bumping `SATELLITE_SOCKET_VERSION`:
+    // an installed satellite on somebody's Pi that has never heard of this
+    // field must still be able to connect. It lands on `false`, which is the
+    // half where the SERVER matches — a node that does not say it matches
+    // phrases does not get trusted to have matched one.
+    const old = rawFrame(
+      SATELLITE_SOCKET_VERSION,
+      JSON.stringify({
+        t: 'register',
+        nodeId: 'kitchen-pi',
+        protocolVersion: 1,
+        capabilities: { edgeStt: false, playback: true, captureSampleRate: 16_000 },
+        wakeEnabled: true,
+      }),
+    );
+    const decoded = decodeSatelliteClientFrame(old);
+    expect(decoded?.header).toMatchObject({ t: 'register' });
+    expect(
+      decoded?.header.t === 'register' ? decoded.header.capabilities.phraseMatch : 'not-a-register',
+    ).toBe(false);
   });
 
   it('lets an older satellite ignore reply_text instead of breaking on it', () => {

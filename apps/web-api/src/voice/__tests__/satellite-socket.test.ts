@@ -239,7 +239,12 @@ describe('satellite socket', () => {
     return { ws, frames, payloads, send };
   }
 
-  async function connect(nodeId = 'kitchen', edgeStt = false, playback = true) {
+  /**
+   * Connect a node that matches wake phrases ITSELF — the trusted path, and
+   * what every case in this suite assumed before the server-side gate existed.
+   * `connectGated` below is the other half.
+   */
+  async function connect(nodeId = 'kitchen', edgeStt = false, playback = true, phraseMatch = true) {
     const client = open();
     await new Promise<void>((resolve) => client.ws.on('open', () => resolve()));
     client.send({
@@ -247,7 +252,7 @@ describe('satellite socket', () => {
       nodeId,
       displayName: 'Kitchen Pi',
       protocolVersion: 1,
-      capabilities: { edgeStt, playback, captureSampleRate: 16_000 },
+      capabilities: { edgeStt, playback, captureSampleRate: 16_000, phraseMatch },
       wakeEnabled: true,
     });
     await vi.waitFor(() => expect(client.frames.some((f) => f.t === 'routes')).toBe(true));
@@ -759,6 +764,296 @@ describe('satellite socket', () => {
     // …and the other personality keeps its own history.
     expect(sessions.get(researcherLane)).toHaveLength(1);
     expect([...sessions.keys()]).toEqual([engineerLane, researcherLane]);
+    client.ws.close();
+  });
+
+  // --- the server-side phrase gate ------------------------------------------
+  //
+  // A `phraseMatch: false` node heard SOUND. Every utterance from it is
+  // transcribed and matched HERE, against the effective table, because here is
+  // where the transcript is. These pin the headline behaviour of the plan: the
+  // phrase picks the personality, an unaddressed utterance costs nothing, and
+  // a conversation continues without being re-addressed every sentence.
+
+  /** A node that matches nothing itself — the gated path. */
+  function connectGated(nodeId = 'kitchen', playback = true) {
+    return connect(nodeId, false, playback, false);
+  }
+
+  /**
+   * Speak on a gated node: it names no phrase and no personality, because it
+   * has heard neither. `transcribeResult` decides what the room said.
+   */
+  async function speakGated(
+    client: Awaited<ReturnType<typeof connect>>,
+    utteranceId: string,
+    heard: string,
+    pin?: string,
+  ) {
+    transcribeResult = () => Promise.resolve({ text: heard, provider: 'fake-stt' });
+    const wakeId = `w-${utteranceId}`;
+    client.send({ t: 'wake', wakeId, ...(pin === undefined ? {} : { routeId: pin }) });
+    client.send({ t: 'utterance_start', wakeId, utteranceId, sampleRate: 16_000 });
+    client.send({ t: 'audio', utteranceId, seq: 0 }, pcm16ToBytes(Int16Array.from([1, 2, 3])));
+    client.send({ t: 'utterance_end', utteranceId });
+    await vi.waitFor(() =>
+      expect(client.frames.some((f) => f.t === 'turn_end' && f.utteranceId === utteranceId)).toBe(
+        true,
+      ),
+    );
+    return utteranceId;
+  }
+
+  it('runs the turn on the MATCHED personality, not the one the wake frame named', async () => {
+    const client = await connectGated();
+    await speakGated(client, 'u1', 'hey researcher, what is the weather');
+
+    expect(turns).toEqual([
+      {
+        // The phrase is ADDRESSING, not content — stripped, punctuation and
+        // all, so the agent is asked about the weather rather than about its
+        // own name.
+        text: 'what is the weather',
+        sessionKey: 'voice:web:satellite:kitchen:researcher',
+        personalityId: 'researcher',
+      },
+    ]);
+    expect(client.frames.at(-1)).toMatchObject({
+      t: 'turn_end',
+      utteranceId: 'u1',
+      personalityId: 'researcher',
+    });
+    // The row's "last wake event" comes from the MATCH, not from a claim.
+    expect(registry.list()[0]?.lastWake).toMatchObject({
+      phrase: 'hey researcher',
+      personalityId: 'researcher',
+    });
+    client.ws.close();
+  });
+
+  it('runs no turn, calls no model, and stays calm when nobody was addressed', async () => {
+    const client = await connectGated();
+    await speakGated(client, 'u1', 'could you pass the salt');
+
+    // The whole point: an unaddressed sentence in a room costs no tokens.
+    expect(turns).toEqual([]);
+    expect(synthesizeCalls).toBe(0);
+    // Not an error. The user did nothing wrong.
+    expect(client.frames.some((f) => f.t === 'error')).toBe(false);
+    // What was heard, so the operator can see it…
+    expect(client.frames.find((f) => f.t === 'transcript')).toMatchObject({
+      text: 'could you pass the salt',
+      final: true,
+    });
+    // …then the re-arm cue, carrying NO personality, which is how the node
+    // knows nobody answered. This frame is also the stranding fix: a refusal
+    // used to be unable to send one at all.
+    expect(client.frames.at(-1)).toEqual({ t: 'turn_end', utteranceId: 'u1' });
+    expect(turnEnds(client.frames)).toHaveLength(1);
+    expect(observed).toEqual([
+      {
+        code: 'satellite.no_match',
+        // Length, never the words: an audit sink is not a place to keep a
+        // recording of somebody's kitchen.
+        details: { nodeId: 'kitchen', utteranceId: 'u1', chars: 'could you pass the salt'.length },
+      },
+    ]);
+    client.ws.close();
+  });
+
+  it('does NOT gate a node that matches phrases itself', async () => {
+    // Its transcript renders nothing like its wake phrase, and it still runs:
+    // the spotter already decided, and a second gate here would refuse the
+    // utterance the node correctly woke on.
+    transcribeResult = () => Promise.resolve({ text: 'how are my positions', provider: 'f' });
+    const client = await connect();
+    await speak(client, 'w1', 'hey engineer', 'eng', 'engineer');
+
+    expect(turns).toMatchObject([{ text: 'how are my positions', personalityId: 'engineer' }]);
+    client.ws.close();
+  });
+
+  it('refuses a matched privileged personality whose route did not opt in', async () => {
+    const client = await connectGated();
+    await speakGated(client, 'u1', 'hey root, wipe the disk');
+
+    // One authorization rule, reached from the gate as well as from a trusted
+    // wake — the refusal is identical because the function is.
+    expect(client.frames.find((f) => f.t === 'error')).toMatchObject({
+      code: 'privileged_route',
+      utteranceId: 'u1',
+    });
+    expect(turns).toEqual([]);
+    // Still ended, so the microphone comes back.
+    expect(client.frames.at(-1)).toEqual({ t: 'turn_end', utteranceId: 'u1' });
+    client.ws.close();
+  });
+
+  it('runs a bare wake phrase on the full text rather than an empty turn', async () => {
+    const client = await connectGated();
+    await speakGated(client, 'u1', 'hey researcher');
+
+    // Somebody who says only the phrase is asking for attention. Stripping it
+    // to nothing and sending an empty turn would answer them with silence.
+    expect(turns).toMatchObject([{ text: 'hey researcher', personalityId: 'researcher' }]);
+    client.ws.close();
+  });
+
+  it('honours a --route pin: only that route may address the microphone', async () => {
+    const client = await connectGated();
+    // The pinned phrase reaches its personality…
+    await speakGated(client, 'u1', 'hey engineer, did CI pass', 'eng');
+    expect(turns).toMatchObject([{ text: 'did CI pass', personalityId: 'engineer' }]);
+
+    // …and another agent's phrase, live in the same table, does not. Pinning
+    // NARROWS the wake surface; it never exempts a host from needing one.
+    //
+    // The discriminating detail: the window the first turn opened is still
+    // open, so a gate that narrowed its candidates before matching would see
+    // "no phrase" here and hand the researcher's sentence to the engineer.
+    // Matching the whole table first is what tells "addressed to somebody
+    // else" from "addressed to nobody".
+    await speakGated(client, 'u2', 'hey researcher, what is the weather', 'eng');
+    expect(turns).toHaveLength(1);
+    expect(client.frames.filter((f) => f.t === 'turn_end').at(-1)).toEqual({
+      t: 'turn_end',
+      utteranceId: 'u2',
+    });
+    expect(observed.at(-1)).toEqual({
+      code: 'satellite.not_pinned',
+      details: { nodeId: 'kitchen', utteranceId: 'u2', routeId: 'res', pinnedRouteId: 'eng' },
+    });
+    client.ws.close();
+  });
+
+  // --- the addressing window ------------------------------------------------
+
+  it('continues a conversation: a follow-up with no phrase reaches the same personality', async () => {
+    const client = await connectGated();
+    await speakGated(client, 'u1', 'hey researcher, what can you do');
+    await speakGated(client, 'u2', 'tell me more');
+
+    // Nobody re-addresses a person they are already talking to.
+    expect(turns).toMatchObject([
+      { text: 'what can you do', personalityId: 'researcher' },
+      // Nothing stripped — there was no phrase in front of it.
+      { text: 'tell me more', personalityId: 'researcher' },
+    ]);
+    // Both land in ONE conversation.
+    expect(sessions.get('voice:web:satellite:kitchen:researcher')).toEqual([
+      'what can you do',
+      'tell me more',
+    ]);
+    expect(observed).toContainEqual({
+      code: 'satellite.follow_up',
+      details: { nodeId: 'kitchen', personalityId: 'researcher', utteranceId: 'u2' },
+    });
+    client.ws.close();
+  });
+
+  it('closes the window after the idle timeout, and ignores the follow-up then', async () => {
+    currentTable = table({ settings: { ...table().settings, idleTimeoutMs: 0 } });
+    const client = await connectGated();
+    await speakGated(client, 'u1', 'hey researcher, what can you do');
+    // A zero-length window is shut by the time the next utterance is read, so
+    // no fake clock is needed to prove the rule.
+    await speakGated(client, 'u2', 'tell me more');
+
+    expect(turns).toHaveLength(1);
+    expect(client.frames.filter((f) => f.t === 'turn_end').at(-1)).toEqual({
+      t: 'turn_end',
+      utteranceId: 'u2',
+    });
+    expect(registry.list()[0]?.conversation).toBeUndefined();
+    client.ws.close();
+  });
+
+  it('switches personality AND lane mid-window, and each keeps its own history (D15)', async () => {
+    const client = await connectGated();
+    await speakGated(client, 'u1', 'hey researcher, what can you do');
+    await speakGated(client, 'u2', 'tell me more');
+    // A different phrase, inside the still-open window: the phrase wins, and
+    // the window now belongs to the engineer.
+    await speakGated(client, 'u3', 'hey engineer, did CI pass');
+    await speakGated(client, 'u4', 'and the deploy');
+    // Back again — the researcher's session must still hold both its turns.
+    await speakGated(client, 'u5', 'hey researcher, where were we');
+
+    expect(sessions.get('voice:web:satellite:kitchen:researcher')).toEqual([
+      'what can you do',
+      'tell me more',
+      'where were we',
+    ]);
+    expect(sessions.get('voice:web:satellite:kitchen:engineer')).toEqual([
+      'did CI pass',
+      'and the deploy',
+    ]);
+    expect(registry.list()[0]?.conversation).toMatchObject({ personalityId: 'researcher' });
+    client.ws.close();
+  });
+
+  it('drops the window on disconnect and keeps the session (D15)', async () => {
+    const first = await connectGated();
+    await speakGated(first, 'u1', 'hey researcher, what can you do');
+    first.ws.terminate();
+    await vi.waitFor(() => expect(registry.list()).toEqual([]));
+
+    // A reconnect is a fresh start for ADDRESSING — an operator who restarted
+    // the Pi did not leave a conversation running in the room…
+    const second = await connectGated();
+    await speakGated(second, 'u2', 'tell me more');
+    expect(turns).toHaveLength(1);
+
+    // …and no start at all for the SESSION, which is filed under the stable
+    // node id. Re-waking resumes it word for word.
+    await speakGated(second, 'u3', 'hey researcher, where were we');
+    expect(sessions.get('voice:web:satellite:kitchen:researcher')).toEqual([
+      'what can you do',
+      'where were we',
+    ]);
+    second.ws.close();
+  });
+
+  it('keeps the window open across a turn that failed', async () => {
+    turnThrows = new Error('the agent loop blew up');
+    const client = await connectGated();
+    await speakGated(client, 'u1', 'hey researcher, what can you do');
+    expect(client.frames.find((f) => f.t === 'error')).toMatchObject({ code: 'turn_failed' });
+
+    // The user is still talking to the researcher. Making them say the phrase
+    // again to hear why it broke would be the machine punishing them for its
+    // own fault.
+    turnThrows = null;
+    await speakGated(client, 'u2', 'try that again');
+    expect(turns).toMatchObject([
+      { text: 'what can you do', personalityId: 'researcher' },
+      { text: 'try that again', personalityId: 'researcher' },
+    ]);
+    client.ws.close();
+  });
+
+  it('shows the open window on the node row, so Settings can say who follow-ups reach', async () => {
+    const client = await connectGated();
+    await speakGated(client, 'u1', 'hey researcher, what can you do');
+    const row = registry.list()[0];
+    expect(row?.conversation?.personalityId).toBe('researcher');
+    // An instant, not a countdown: a reader that has not refreshed renders an
+    // expired window as closed rather than as still open.
+    expect(row?.conversation?.until).toBeGreaterThan(Date.now());
+    client.ws.close();
+  });
+
+  it('runs an edge-mode gated turn without echoing a transcript it did not produce', async () => {
+    const client = await connect('office', true, true, false);
+    client.send({ t: 'wake', wakeId: 'w1' });
+    client.send({ t: 'utterance_start', wakeId: 'w1', utteranceId: 'u1', sampleRate: 16_000 });
+    client.send({ t: 'transcript', utteranceId: 'u1', text: 'hey engineer, did CI pass' });
+    await vi.waitFor(() => expect(client.frames.some((f) => f.t === 'turn_end')).toBe(true));
+
+    expect(transcribeCalls).toBe(0);
+    expect(turns).toMatchObject([{ text: 'did CI pass', personalityId: 'engineer' }]);
+    // The node produced these words and already has them.
+    expect(client.frames.some((f) => f.t === 'transcript')).toBe(false);
     client.ws.close();
   });
 

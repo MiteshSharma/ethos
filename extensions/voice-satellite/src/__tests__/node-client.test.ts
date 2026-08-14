@@ -72,7 +72,7 @@ function setup(over: Partial<SatelliteClientOptions> = {}): Setup {
     url: 'ws://gateway.local/satellite/ws',
     nodeId: 'kitchen-pi',
     displayName: 'Kitchen Pi',
-    capabilities: { edgeStt: false, playback: true, captureSampleRate: 16000 },
+    capabilities: { edgeStt: false, playback: true, captureSampleRate: 16000, phraseMatch: true },
     wakeEnabled: true,
     createSocket: (url, init, handlers) => {
       const socket = new FakeSocket(url, init, handlers);

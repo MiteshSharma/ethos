@@ -50,7 +50,8 @@ export type SatellitePlayoutEvent =
     }
   | { type: 'audio'; utteranceId: string; segmentId: string; seq: number; payload: Uint8Array }
   | { type: 'segment_end'; utteranceId: string; segmentId: string }
-  | { type: 'turn_end'; utteranceId: string; personalityId: string };
+  /** `personalityId` absent → nobody answered: the utterance was not addressed. */
+  | { type: 'turn_end'; utteranceId: string; personalityId?: string };
 
 type RoutesFrame = Extract<SatelliteServerFrame, { t: 'routes' }>;
 type ReadyFrame = Extract<SatelliteServerFrame, { t: 'ready' }>;
@@ -96,6 +97,13 @@ export interface SatelliteClientOptions {
     edgeStt: boolean;
     playback: boolean;
     captureSampleRate: number;
+    /**
+     * Whether this host matches wake phrases itself. False hands the gate to
+     * the server, which matches the transcript — see the `register` frame.
+     * Required here even though the wire defaults it: a host in this repo has
+     * no excuse for leaving the question to a default.
+     */
+    phraseMatch: boolean;
   };
   /** Persisted wake-enabled state, restored from disk before connecting. */
   wakeEnabled: boolean;
@@ -280,7 +288,7 @@ export function createSatelliteClient(options: SatelliteClientOptions): Satellit
           options.onSpeak({
             type: 'turn_end',
             utteranceId: frame.utteranceId,
-            personalityId: frame.personalityId,
+            ...(frame.personalityId === undefined ? {} : { personalityId: frame.personalityId }),
           }),
         );
         return;

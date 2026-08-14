@@ -33,7 +33,7 @@ Where something could not be verified from inside the repo, it says so.
 | Browser talk-mode | A built SPA (`make web`) and a personality whose toolset lists `voice_session` |
 | Browser realtime tier | An OpenAI key with Realtime access and a `voice.realtime.providers.<name>` entry. `gemini-live` is contract-only and cannot serve a browser call — see [4b. The realtime tier](#4b-the-realtime-tier) |
 | Voice notes over channels | A bot token for the channel in `~/.ethos/config.yaml`, plus `ffmpeg` on `PATH` for anything the TTS provider does not already emit in a declared format |
-| Wake satellite (`ethos listen`) | `ethos serve` running and a PCM pipe — `ffmpeg` or `arecord`. No `voice.wake.routes` entry needed; the server synthesizes one per unprivileged personality. **Push-to-talk, not acoustic wake** — see [The flows to try](#the-flows-to-try) |
+| Wake satellite (`ethos listen`) | `ethos serve` running and a PCM pipe — `ffmpeg` or `arecord`. No `voice.wake.routes` entry needed; the server synthesizes one per unprivileged personality. **Open mic: the server transcribes everything and matches the wake phrase there** — see [The flows to try](#the-flows-to-try) |
 | Acoustic wake (`sherpa`) | `sherpa-onnx-node` installed by hand (**not a repo dependency**) plus four model files in `~/.ethos/models/wake/`. No host in this repo has ever run it |
 | Telephony, LiveKit transport | Native bindings, a LiveKit server, a SIP trunk, a rented number — none are repo dependencies |
 
@@ -179,11 +179,11 @@ What each one is defending:
 | `extensions/voice-satellite/src/__tests__/doctor.test.ts` | That `runSatelliteDoctor` never throws — a throwing engine probe becomes a row, a missing model directory is named, an unrun probe is `skipped` rather than passed on a guess, and the absent `sherpa-onnx-node` peer is reported unavailable with the reason |
 | `extensions/voice-satellite/src/__tests__/transcript-wake-engine.test.ts` | The transcript matcher: phrase at the **head** of the utterance, one-character tolerance that widens with sensitivity, longest-phrase-wins, disabled routes never matching, `privileged` never inferred, and `push()` on raw PCM always returning null |
 | `extensions/voice-satellite/src/__tests__/node-client.test.ts` | The node protocol client: register under the stable `nodeId`, capped jittered reconnect backoff, re-register on reconnect, malformed server frames dropped rather than thrown on, and the audio/`transcript` alternation refused if a node tries both for one utterance |
-| `apps/web-api/src/voice/__tests__/satellite-socket.test.ts` | The `/satellite/ws` upgrade policy (path, Origin, `ethos_auth` cookie, no-Origin daemons allowed) and one real `ws` round trip |
+| `apps/web-api/src/voice/__tests__/satellite-socket.test.ts` | The `/satellite/ws` upgrade policy (path, Origin, `ethos_auth` cookie, no-Origin daemons allowed), one real `ws` round trip, and the **server-side phrase gate**: a matched transcript runs on the MATCHED personality with the phrase stripped, an unmatched one runs no turn and calls no model, a `phraseMatch: true` node is not double-gated, a matched privileged personality without opt-in is refused, follow-ups inside the addressing window continue without a phrase and stop outside it, a different phrase switches personality and lane while each keeps its history (D15), and a reconnect drops the window but not the session |
 | `apps/web-api/src/voice/__tests__/implicit-wake-routes.test.ts` | The synthesized `hey <name>` table: privileged personalities get nothing, a configured route (even a disabled one) suppresses the implicit one, a phrase is claimed once, and ties break by personality id |
 | `apps/web-api/src/voice/__tests__/wake-privilege.test.ts` | That privilege is derived from the approval layer's own consequential-tool lists, and an **absent** toolset is privileged (fail-closed) |
 | `apps/ethos/src/__tests__/listen-doctor.test.ts` | The 0 / 1 / 2 exit matrix, probe→flag derivation, URL derivation, and the false-available case (eng-review D10): a missing model reports unavailable, the host degrades, nothing crashes |
-| `apps/ethos/src/__tests__/listen-command.test.ts` | That the daemon refuses to start deaf — no pipe, no route, or no usable engine each stop the boot rather than printing "listening" — and the `--json` shape including `daemonMode: "push-to-talk"` |
+| `apps/ethos/src/__tests__/listen-command.test.ts` | That the daemon refuses to start deaf — no pipe, an unresolvable `--route` pin, or no usable engine each stop the boot rather than printing "listening" — the open-mic banner (everything transcribed, only a wake phrase reaches an agent, follow-ups inside the window), the `not addressed to anyone` narration, and the `--json` shape including `daemonMode: "open-mic"` |
 | `apps/desktop/src/main/__tests__/satellite.test.ts` | The doctor gate (no capture device → `degraded`, nothing starts), that no entry point throws, the routes-push arming path, and wake-off surviving a restart (Hermes #81531) |
 
 ---
@@ -447,28 +447,36 @@ the remedy, as above, rather than undici's `fetch failed`.
 `route` is a dim `–`, never a verdict — this command never connects, so it has
 nothing to say about routing. **No `voice.wake.routes` entry is required to listen.**
 The effective table is the server's, which synthesizes an `auto:<personalityId>`
-route for every unprivileged personality and pushes the merged table on connect;
-`--route <id>` is checked against that table when `ethos listen` connects, not here.
+route for every unprivileged personality, pushes the merged table on connect, and
+matches transcripts against it; `--route <id>` is a PIN checked against that table
+when `ethos listen` connects, not here.
 
 Exit `0` clean, `1` hard (no config, no usable engine, missing models for a
 `sherpa` host), `2` warn (no pipe attached yet, server not up yet — both true
 *right now* and possibly not in a minute). `make listen-doctor` translates the warn
 code to **0** so a recoverable run does not fail the build; exit `1` still does.
 `--json` adds a machine-readable object whose `engine.daemonMode` is the honest
-label: `"push-to-talk"`.
+label: `"open-mic"`, alongside `engine.phraseMatch: false`.
 
-**Capture is a pipe, and this daemon does not acoustically wake.** `apps/ethos`
-ships no microphone binding, and the only always-available engine (`transcript`)
-matches wake phrases against *recognized text*, which this host does not produce.
-So speech onset on the pipe opens an utterance attributed to the route named by
-`--route`. The human is the wake word.
+**Capture is a pipe, and the gate is server-side.** `apps/ethos` ships no
+microphone binding, and the only always-available engine (`transcript`) matches
+wake phrases against *recognized text*, which this host does not produce. So the
+daemon registers `phraseMatch: false`, speech onset on the pipe opens an utterance,
+and the SERVER matches the transcript: an utterance that opens with a wake phrase
+runs a turn as the personality that phrase names (the phrase is stripped), a
+follow-up within `voice.wake.idleTimeout` continues with that personality, and
+everything else is transcribed and discarded. **The room is transcribed either
+way** — the gate protects the agent, not the microphone.
 
 ```bash
 # macOS
-ffmpeg -nostats -loglevel error -f avfoundation -i :0 -ar 16000 -ac 1 -f s16le - | ethos listen --route kitchen
+ffmpeg -nostats -loglevel error -f avfoundation -i :0 -ar 16000 -ac 1 -f s16le - | ethos listen
 # Linux
-arecord -q -f S16_LE -r 16000 -c 1 -t raw | ethos listen --route kitchen
+arecord -q -f S16_LE -r 16000 -c 1 -t raw | ethos listen
 ```
+
+`--route <id>` is optional and PINS the microphone to one route: only that phrase
+may address it, and another agent's phrase is discarded rather than answered.
 
 Keep the quiet flags. Both processes share the terminal, and ffmpeg's
 carriage-returned progress meter overwrites the daemon's own lines mid-word
@@ -768,7 +776,7 @@ and playout legs sit outside it and are simply not measured.
 | LiveKit transport | `@livekit/rtc-node` + `livekit-server-sdk` (**not repo dependencies**), a LiveKit server, and app-layer `LiveKitBindings` | Manual only — see `extensions/platform-voice/README.md` | `extensions/platform-voice/src/__tests__/` against fake room clients |
 | Telephony (`call`, inbound SIP) | A SIP trunk, a rented E.164 number, a `SipTrunkClient` implementation | Manual only | `extensions/tools-voice/src/__tests__/call.test.ts`; `call` self-reports unavailable with no trunk, and is in `APPROVAL_SURFACE_ALWAYS_ASK` so it always prompts |
 | Channel voice notes | A bot token, and `ffmpeg` on `PATH` for real container conversion | Send a voice note to the bot with `ethos gateway` running (all four declared adapters, in both directions) | `extensions/gateway/src/__tests__/voice-pipeline.test.ts`, `transcode.test.ts`, `voice-caps-sink.test.ts`, `voice-ledger-e2e.test.ts` — every ffmpeg invocation is a fake runner, no binary is ever spawned |
-| Wake satellite, push-to-talk (`ethos listen`) | `ethos serve` running and a real PCM pipe (`ffmpeg` / `arecord`) — no `voice.wake.routes` entry required | `make listen-doctor` for the preflight (warn-only runs exit 0), then pipe a mic in and speak — the row appears under **Settings → Voice → Wake routes**, and the daemon prints `● speech` / `› you:` / `‹ <personality>:` / `↩ turn complete` per turn | `apps/ethos/src/__tests__/listen-*.test.ts`, `apps/web-api/src/voice/__tests__/satellite-socket.test.ts`, `extensions/voice-satellite/src` — the device and the socket are always injected; no microphone is ever opened |
+| Wake satellite, open mic (`ethos listen`) | `ethos serve` running and a real PCM pipe (`ffmpeg` / `arecord`) — no `voice.wake.routes` entry required | `make listen-doctor` for the preflight (warn-only runs exit 0), then pipe a mic in and say `hey <personality>, …` — the row appears under **Settings → Voice → Wake routes**, and the daemon prints `● speech` / `› you:` / `‹ <personality>:` / `↩ turn complete` per addressed turn, and `↩ not addressed to anyone` for everything else | `apps/ethos/src/__tests__/listen-*.test.ts`, `apps/web-api/src/voice/__tests__/satellite-socket.test.ts`, `extensions/voice-satellite/src` — the device and the socket are always injected; no microphone is ever opened |
 | Acoustic wake (`voice.wake.engine: sherpa`) | `sherpa-onnx-node` installed by hand (**not a repo dependency**, ~33 MB per-arch native binary) and four model files in `~/.ethos/models/wake/` | Manual only, on a host with a real microphone | Only the *absence* path: `extensions/voice-satellite/src/__tests__/doctor.test.ts` pins that the missing peer and the missing model file are each reported with their own diagnosable message. The spotter mapping itself has **never run against a real binary** |
 | Wake quality (false-accept / false-reject) | A recorded ambient corpus and a 3 m test rig | Manual only | **Nothing.** The plan's ≤ 1 false accept/hour and ≤ 10 % false reject at 3 m are unmeasured — no corpus exists in this repo |
 | Satellite playout | A satellite host with an output device. Neither shipped host has one — `ethos listen` registers `playback: false`, and the Electron main process has no audio binding either. The lane gates the send on that flag, so nothing is synthesized and the reply arrives as text only | Manual only, on a host you wire a `CaptureDevice` and a speaker into | `extensions/voice-satellite/src/__tests__/node-client.test.ts` covers the playout *events*; no audio is ever played |
@@ -937,7 +945,8 @@ Settings → Voice wake-route manager. `shouldReplyWithVoice`'s `wakeTriggered` 
 now has a caller: `SatelliteLane.runTurn`. Four things inside it did **not** ship,
 and they are the reasons not to plan an ambient deployment around it yet:
 
-- **Acoustic wake on any host.** `ethos listen` is push-to-talk; the sherpa adapter
+- **Acoustic wake on any host.** `ethos listen` runs an open mic gated on the
+  server's transcript, not on sound; the sherpa adapter
   has never run against a real binary, and `sherpa-onnx-node` is not installed.
 - **A microphone on the desktop host.** It reports `degraded` with "no capture
   device configured" and declines to start.

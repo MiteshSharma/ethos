@@ -270,13 +270,16 @@ async function readAuthCookie(): Promise<string> {
 }
 
 function onWake(match: WakeMatch): void {
-  const route = routes.find((r) => r.id === match.routeId);
+  const routeId = match.routeId;
+  const route = routeId === undefined ? undefined : routes.find((r) => r.id === routeId);
   if (route === undefined) {
-    // The engine matched a phrase the pushed table no longer has. The server
-    // re-resolves anyway, but `personalityId` is a required field and inventing
-    // one would be guessing at which agent the room just addressed.
+    // The engine matched a phrase the pushed table no longer has — or, on an
+    // engine that names no route at all, nothing this host can attribute. This
+    // host declares `phraseMatch: true`, so the server trusts what it sends and
+    // does no matching of its own; inventing a personality here would be
+    // guessing at which agent the room just addressed.
     logSatelliteError(
-      `[ethos-satellite] wake matched route ${match.routeId}, which is not in the pushed table\n`,
+      `[ethos-satellite] wake matched ${routeId ?? 'no route'}, which is not in the pushed table\n`,
     );
     return;
   }
@@ -442,6 +445,10 @@ async function start(deps: SatelliteHostDeps): Promise<SatelliteStatus> {
       edgeStt: false,
       playback: false,
       captureSampleRate: CAPTURE_SAMPLE_RATE,
+      // This host runs an ACOUSTIC spotter against the pushed table (see
+      // `onWake`), so the phrase is matched here and the server re-resolves the
+      // route rather than matching the transcript a second time.
+      phraseMatch: true,
     },
     wakeEnabled,
     authCookie,

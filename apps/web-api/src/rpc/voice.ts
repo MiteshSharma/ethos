@@ -74,6 +74,7 @@ export const voiceRouter = {
         wakeEnabled: n.wakeEnabled,
         probes: n.probes.map((p) => ({ name: p.name, ok: p.ok, detail: p.detail ?? null })),
         lastWake: n.lastWake ?? null,
+        conversation: n.conversation ?? null,
         connectedAt: n.connectedAt,
       })),
     })),

@@ -136,8 +136,10 @@ describe('runListenCommand --json', () => {
     expect(parsed.probes.map((p: { name: string }) => p.name)).toContain('engine:transcript');
     expect(parsed.nodeId).toBe('kitchen-pi-1a2b3c4d');
     // The daemon never acoustically matches, so the JSON says so rather than
-    // letting a reader infer wake capability from the engine name.
-    expect(parsed.engine.daemonMode).toBe('push-to-talk');
+    // letting a reader infer wake capability from the engine name — and it
+    // says it in the two ways a script might ask.
+    expect(parsed.engine.daemonMode).toBe('open-mic');
+    expect(parsed.engine.phraseMatch).toBe(false);
     expect(process.exitCode).toBeUndefined();
   });
 
@@ -381,31 +383,51 @@ async function runDaemon(
   return { done, ready, push: transport.push, capture: device.push };
 }
 
-describe('the daemon routes against the table the server pushed', () => {
-  it('a pushed table with exactly one route is used without --route', async () => {
+describe('the daemon is an open mic addressed by phrase', () => {
+  it('starts with several routes and no --route, naming every phrase that can address it', async () => {
+    // The behaviour this replaces: two routes used to be a startup REFUSAL,
+    // because the daemon had to pick a personality up front. The phrase picks
+    // it now, so several routes is the ordinary case and all of them are live.
+    const { ready } = await runDaemon([
+      wakeRoute('auto:engineer', 'engineer'),
+      wakeRoute('auto:writer', 'writer'),
+    ]);
+    await ready;
+    const out = logs.join('\n');
+    expect(process.exitCode).toBeUndefined();
+    expect(out).toContain('Addressable here');
+    expect(out).toContain('hey engineer');
+    expect(out).toContain('hey writer');
+  });
+
+  it('states the model in one sentence: transcribed always, answered only when addressed', async () => {
     const { ready } = await runDaemon([wakeRoute('auto:engineer', 'engineer')]);
     await ready;
     const out = logs.join('\n');
-    expect(out).toContain('auto:engineer');
-    expect(out).toContain('synthesized by the server');
+    // The privacy half — the room IS transcribed — and the interaction half,
+    // including the follow-up window, in the server's own seconds (8000ms in
+    // `routesFrame`, not this machine's config).
+    expect(out).toContain('EVERYTHING heard here is transcribed');
+    expect(out).toContain('OPENS with a wake phrase');
+    expect(out).toContain('follow-ups within 8s');
+    expect(out).toContain('heard and discarded');
+    // …and no claim of a button that does not exist.
+    expect(out).not.toContain('Push-to-talk');
   });
 
-  it('several pushed routes require --route, and the daemon lists them', async () => {
-    const { done } = await runDaemon([wakeRoute('auto:engineer'), wakeRoute('auto:writer')]);
-    await done;
-    expect(process.exitCode).toBe(1);
-    const out = logs.join('\n');
-    expect(out).toContain('--route');
-    expect(out).toContain('auto:writer');
-  });
-
-  it('--route auto:<id> selects from the pushed table', async () => {
+  it('--route PINS the host to one route rather than bypassing the phrase', async () => {
     const { ready } = await runDaemon(
       [wakeRoute('auto:engineer', 'engineer'), wakeRoute('auto:writer', 'writer')],
       { route: 'auto:engineer' },
     );
     await ready;
-    expect(logs.join('\n')).toContain('route auto:engineer');
+    const out = logs.join('\n');
+    expect(out).toContain('Pinned by --route');
+    expect(out).toContain('hey engineer');
+    // The pin narrows; it does not exempt. The other route is excluded, and
+    // the pinned phrase is still required.
+    expect(out).toContain('Other phrases are heard and discarded');
+    expect(out).not.toContain('hey writer');
   });
 
   it('a --route the server never pushed fails against the PUSHED list', async () => {
@@ -415,13 +437,14 @@ describe('the daemon routes against the table the server pushed', () => {
     expect(logs.join('\n')).toContain("no enabled route 'auto:enginer'");
   });
 
-  it('an empty pushed table refuses, naming the privileged exclusion', async () => {
-    const { done } = await runDaemon([]);
-    await done;
-    expect(process.exitCode).toBe(1);
+  it('an empty pushed table WARNS and keeps running — a Settings save can fix it live', async () => {
+    const { ready } = await runDaemon([]);
+    await ready;
     const out = logs.join('\n');
+    expect(process.exitCode).toBeUndefined();
+    expect(out).toContain('EMPTY wake route table');
     expect(out).toContain('privileged');
-    expect(out).toContain('by design');
+    expect(out).toContain('without a restart');
   });
 });
 
@@ -449,6 +472,38 @@ describe('the daemon narrates the turn', () => {
     // And nothing in it reads as a fault the operator caused.
     expect(out).not.toContain('failed');
     expect(out).not.toContain('error');
+  });
+
+  it('an unaddressed utterance is narrated calmly — heard, written down, no agent called', async () => {
+    // The COMMON case in a room, and the one the daemon could not describe
+    // before: `turn_end` with no personality means the server matched no wake
+    // phrase and ran no turn.
+    const { ready, push } = await runDaemon([wakeRoute('auto:engineer', 'engineer')]);
+    await ready;
+    push({ t: 'transcript', utteranceId: 'u1', text: 'pass the salt', final: true });
+    push({ t: 'turn_end', utteranceId: 'u1' });
+    const out = outLines.join('\n');
+    // The operator still sees what the room said…
+    expect(out).toContain('pass the salt');
+    // …and why nothing happened, in words that blame nobody.
+    expect(out).toContain('not addressed to anyone');
+    expect(out).toContain('Open with a wake phrase');
+    expect(out).not.toContain('turn complete');
+    expect(out).not.toContain('error');
+    expect(out).not.toContain('failed');
+  });
+
+  it('tells "no speech" apart from "not addressed" — both arrive with no personality', async () => {
+    const { ready, push } = await runDaemon([wakeRoute('auto:engineer', 'engineer')]);
+    await ready;
+    push({ t: 'transcript', utteranceId: 'u1', text: '', final: true });
+    push({ t: 'turn_end', utteranceId: 'u1' });
+    const out = outLines.join('\n');
+    expect(out).toContain('no speech in that audio');
+    // Nothing was said, so nothing was left unaddressed — claiming otherwise
+    // would tell the operator to say a wake phrase to a door that closed.
+    expect(out).not.toContain('not addressed to anyone');
+    expect(out).toContain('listening again');
   });
 
   it('a reply_text frame is printed as the personality’s answer', async () => {
@@ -534,8 +589,12 @@ describe('the daemon narrates the turn', () => {
     expect(stdout).toHaveLength(0);
   });
 
-  it('a route that vanishes is warned about once, and its return is narrated', async () => {
-    const { ready, push } = await runDaemon([wakeRoute('auto:engineer', 'engineer')]);
+  it('a PINNED route that vanishes is warned about once, and its return is narrated', async () => {
+    // Only a pinned host has a route to lose. Unpinned, the server matches
+    // against whatever table it holds and this daemon has no opinion to stale.
+    const { ready, push } = await runDaemon([wakeRoute('auto:engineer', 'engineer')], {
+      route: 'auto:engineer',
+    });
     await ready;
     // Every reconnect and Settings save re-pushes the table.
     push(routesFrame([wakeRoute('auto:writer', 'writer')]));

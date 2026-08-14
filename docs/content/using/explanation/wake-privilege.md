@@ -49,17 +49,31 @@ When a wake resolves to a privileged personality without an opt-in, the server s
 
 Silently answering as somebody else would be worse than not answering: the speaker gets a reply, believes they reached the engineer, and acts on what a different agent said. A room has no visible personality bar to correct that impression. The same rule governs a route naming a personality that has been deleted or renamed — refused, not defaulted.
 
-### The server re-resolves; the satellite's opinion is advisory
+### The gate is server-side, so the satellite has nothing to be trusted about
 
-A satellite holds a pushed copy of the routing table and matches against it locally, so the `wake` frame it sends already names a personality. The server ignores that name and resolves the route again against its own table and the hot-reloaded personality registry.
+A satellite declares in its `register` frame whether it matches wake phrases itself. `ethos listen` declares `false`: it hears sound, not words, and its `wake` frame names no phrase and no personality. The server transcribes, matches the transcript against its own effective table, and runs the turn on the personality the **match** names.
 
-That is what makes the privilege check enforceable rather than cosmetic. A satellite's table can be one push stale, and a satellite is software installed on someone else's machine — it can be old, patched, or lying. Access control decided on the client is access control an attacker configures.
+A host with an acoustic keyword spotter — the desktop satellite — declares `true`, and its `wake` frame does name a route. The server still resolves that route again, against its own table and the hot-reloaded personality registry, and refuses one that names a deleted, renamed, or privileged personality.
+
+Both paths run the same authorization function, deliberately: two copies of an access-control rule is one copy that eventually says yes where the other says no. And in both directions the client's claim is at most a pointer, never a grant. A satellite's table can be one push stale, and a satellite is software installed on someone else's machine — it can be old, patched, or lying. Access control decided on the client is access control an attacker configures.
+
+A satellite that predates the `phraseMatch` field lands on `false` and is gated, which is the conservative half. The field defaults that way for exactly this reason: a node that does not say it matches phrases is not trusted to have matched one.
+
+### The addressing window is scoped to a personality, not to the surface
+
+Once a phrase reaches a personality, follow-ups within `voice.wake.idleTimeout` reach that same personality with no phrase — otherwise a conversation would mean re-addressing every sentence, which nobody does with a person.
+
+That window inherits the decision the phrase made; it never widens it. It belongs to one personality, so it can only ever continue an exchange that was already authorized. A privileged personality that was refused opens no window, and a phrase naming a different agent switches the window rather than sliding into it — including at a microphone pinned with `ethos listen --route`, where another agent's phrase is discarded rather than handed to the pinned one.
+
+What the window does change is the blast radius of a single successful wake: for its duration, anyone in earshot can continue the conversation without saying anything that sounds like an address. Shorten `voice.wake.idleTimeout` where that matters.
 
 ## Trade-offs
 
 **The useful personalities are the excluded ones.** The agent you most want to reach hands-free from the kitchen — the one that can run a command, edit a file, place a call — is exactly the one the default surface refuses. Every ambient deployment worth having will therefore write at least one `privileged: true` line. The flag is not a wall; it is a place where the decision is recorded and reviewable.
 
-**Once opted in, there is no second check.** `privileged: true` makes that personality reachable by *any* voice in earshot, including a voice on a television. Speaker verification is an explicit follow-up and is not built. Until it lands, route-level opt-in is the wake surface's entire access control, and the wake phrase is not a secret.
+**Once opted in, there is no second check.** `privileged: true` makes that personality reachable by *any* voice in earshot, including a voice on a television — and, for the length of the idle window, by any voice that simply keeps talking after someone else woke it. Speaker verification is an explicit follow-up and is not built. Until it lands, route-level opt-in is the wake surface's entire access control, and the wake phrase is not a secret.
+
+**Gating is not the same as not listening.** On a host that matches server-side, refusing to run a turn happens *after* speech-to-text, so an utterance addressed to nobody has still been transcribed on the server. The gate protects the agent, not the microphone. A deployment that needs the audio never to leave unrecognized needs an acoustic engine, which today means `sherpa` and its models.
 
 **Privilege is toolset-shaped, so it can surprise you.** Adding `write_file` to a personality's toolset silently withdraws its `hey <name>` default, and the symptom is a phrase that stops working rather than an error at the moment the toolset changed. The Settings → Voice route table shows the effective set, which is where to look when a personality stops answering. On a satellite the same absence arrives as `ethos listen --route auto:<id>` refusing an id the pushed table does not hold; that refusal restates this rule, because a table listing only what is present reads like a bug.
 

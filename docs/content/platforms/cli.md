@@ -28,7 +28,7 @@ The CLI is also what you pipe into for scripted runs and what every other surfac
 | `ethos setup` | Run the first-launch wizard (auth, model, personality, messaging, memory). |
 | `ethos serve` | Serve the web UI for one [personality](../getting-started/glossary.md#personality). |
 | `ethos gateway start` | Run the channel [gateway](../getting-started/glossary.md#gateway) (Telegram, Discord, Slack, email). |
-| `ethos listen [doctor]` | Run a [wake satellite](../getting-started/glossary.md#wake-satellite) against `ethos serve`, or preflight one. Capture is raw PCM piped into stdin, and it is push-to-talk — see [Run a wake satellite](../using/how-to/run-a-wake-satellite.md). |
+| `ethos listen [doctor]` | Run a [wake satellite](../getting-started/glossary.md#wake-satellite) against `ethos serve`, or preflight one. Capture is raw PCM piped into stdin, the mic is open, and the server decides who was addressed from the transcript — see [Run a wake satellite](../using/how-to/run-a-wake-satellite.md). |
 | `ethos personality [list \| set <id> \| duplicate <src> <dst>]` | Inspect or change the default personality. |
 | `ethos memory [show \| add "<text>" \| clear]` | Read or edit `~/.ethos/MEMORY.md`. |
 | `ethos skills` | List, install, and inspect skills. |

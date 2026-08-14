@@ -139,5 +139,23 @@ export function satelliteCapabilityLabel(node: SatelliteNode): string {
     parts.push(`${node.capabilities.captureSampleRate} Hz`);
   }
   if (node.capabilities.playback) parts.push('playback');
+  // Which end matched the phrase is not trivia on this row: it is the
+  // difference between "this node decides who it woke" and "the server reads
+  // every transcript this microphone produces and decides".
+  parts.push(node.capabilities.phraseMatch ? 'matches phrases' : 'server matches');
   return parts.join(' · ');
+}
+
+/**
+ * How much of the addressing window is left, or null when there is none.
+ *
+ * Null when the stored instant has passed, so a row that has not refreshed
+ * since the window closed says nothing rather than claiming a conversation the
+ * server would no longer honour.
+ */
+export function conversationLeft(until: number, now: number): string | null {
+  const seconds = Math.round((until - now) / 1000);
+  if (seconds <= 0) return null;
+  if (seconds < 60) return `${seconds}s left`;
+  return `${Math.floor(seconds / 60)}m left`;
 }

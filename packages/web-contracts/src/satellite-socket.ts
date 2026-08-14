@@ -76,6 +76,32 @@ const RegisterSchema = z.object({
     playback: z.boolean(),
     /** Sample rate the mic actually captures at, not the one requested. */
     captureSampleRate: z.number().int().positive(),
+    /**
+     * "I MATCH WAKE PHRASES MYSELF." The field that decides who gates the turn.
+     *
+     * `true` — an acoustic spotter or an edge-STT node compared the room's
+     * sound against the pushed table before it sent anything, so its `wake`
+     * frame names a route the server can re-resolve and trust. The server does
+     * NOT match again: double-gating would refuse every utterance whose
+     * transcript renders the phrase differently from the way the spotter heard
+     * it.
+     *
+     * `false` — this node heard SOUND. Its "wake" is speech onset, its `wake`
+     * frame names no phrase and no personality, and the server is the only
+     * party that can decide who was addressed, because the server is where the
+     * transcript is. Everything the node captures is transcribed; only an
+     * utterance that opens with a wake phrase (or follows one inside the
+     * addressing window) reaches an agent.
+     *
+     * DEFAULTS TO FALSE, and the default is the whole safety property: a node
+     * that does not say it matches, does not match, and the server gates. It is
+     * a default rather than a required field on purpose — satellites are
+     * installed software on other people's machines and update on their own
+     * schedule, so a build that predates this field must still be able to
+     * register (`SATELLITE_SOCKET_VERSION` deliberately did not move). An old
+     * node lands on the gated path, which is the conservative half.
+     */
+    phraseMatch: z.boolean().default(false),
   }),
   /** Persisted wake-enabled state, restored from disk before connecting. */
   wakeEnabled: z.boolean(),
@@ -125,33 +151,43 @@ const DoctorSchema = z.object({
 });
 
 /**
- * A wake phrase matched. An utterance is about to follow.
+ * Something woke this node. An utterance is about to follow.
  *
  * Separate from `utterance_start` because the wake decision and the speech are
  * separate events with separate consumers: the wake is what the Settings UI
  * shows as "last wake event" and what the live phrase-tester lights up on, and
  * it happens even when the utterance that follows turns out to be silence.
  *
- * `personalityId` is on the frame alongside `routeId` because the satellite
- * holds the pushed routing table and already resolved the match — but the
- * server RE-RESOLVES rather than trusting it. The satellite's table can be one
- * push stale, and the personality is the thing that decides toolset and memory
- * scope; a route naming a personality that has since been deleted, renamed, or
- * marked privileged must be refused against the hot-reloaded registry, never
- * silently honoured or silently defaulted. `routeId` is absent when the match
- * came from a personality's implicit "hey <name>" default rather than a
- * configured route.
+ * WHAT "SOMETHING" MEANS DEPENDS ON `capabilities.phraseMatch`, and that is why
+ * three fields here are optional:
+ *
+ *   phraseMatch: true  — a phrase matched. `phrase` and `personalityId` say
+ *     which, and `routeId` names the configured route (absent when the match
+ *     came from a personality's implicit "hey <name>" default). All three are
+ *     ADVISORY: the server re-resolves against its own table and the
+ *     hot-reloaded registry, because the satellite's copy can be one push
+ *     stale and the personality is what decides toolset and memory scope. A
+ *     route naming a personality since deleted, renamed, or marked privileged
+ *     is refused, never silently honoured or defaulted.
+ *
+ *   phraseMatch: false — SPEECH STARTED. Nothing has been matched, so there is
+ *     no phrase to report and no personality to name; requiring either would
+ *     force the node to invent one, and an invented personality on the wire is
+ *     indistinguishable from a resolved one. The server matches the transcript
+ *     itself. `routeId` from such a node means something different and
+ *     narrower: a PIN — "only this route may match on this microphone" — which
+ *     is how `ethos listen --route` dedicates one host to one agent.
  */
 const WakeSchema = z.object({
   t: z.literal('wake'),
   /** Groups the wake with the utterance it triggered. */
   wakeId: z.string().min(1),
-  /** The phrase as matched, for the "last wake event" row. */
-  phrase: z.string().min(1),
-  /** Configured route that matched; absent for the implicit "hey <name>". */
+  /** The phrase as matched. Absent from a node that matched sound, not words. */
+  phrase: z.string().min(1).optional(),
+  /** The matched route, or — from a gating node — the route it is pinned to. */
   routeId: z.string().optional(),
-  /** The satellite's resolution. Advisory — the server re-resolves it. */
-  personalityId: z.string().min(1),
+  /** The satellite's resolution. Advisory, and absent when it has none. */
+  personalityId: z.string().min(1).optional(),
   /** Wake-engine score, for tuning sensitivity. Telemetry only. */
   confidence: z.number().optional(),
 });
@@ -290,7 +326,18 @@ const RoutesSchema = z.object({
     confirmationFrames: z.number().int().nonnegative(),
     /** Operator's intent; the node's `capabilities.edgeStt` is the veto. */
     edgeStt: z.boolean(),
-    /** Ends the LISTENING state only. It never ends or resets the session. */
+    /**
+     * How long a conversation stays open, in two places that mean one thing.
+     *
+     * On the NODE it ends the LISTENING state. On the SERVER it bounds the
+     * addressing window: after a wake phrase picks a personality, further
+     * utterances within this long reach that same personality with no phrase,
+     * because nobody re-addresses a person they are already talking to.
+     *
+     * It never ends or resets the SESSION (eng-review D15). Re-waking after the
+     * window has closed resumes the same history — the window decides who the
+     * room is talking to, not what has been said.
+     */
     idleTimeoutMs: z.number().int().nonnegative(),
     inputDevice: z.string().optional(),
     wakeEnabled: z.boolean(),
@@ -378,14 +425,26 @@ const ReplyTextSchema = z.object({
  *
  * This is the satellite's signal to re-arm once its buffers drain, and it is
  * NOT the same moment as `playback_done` (see that frame for why the gap
- * matters). `personalityId` rides along so the node can show who answered, and
- * so a tray or row that swapped to the woken personality's accent knows which
- * identity the turn belonged to.
+ * matters). `personalityId` says who answered, so a tray or row that swapped to
+ * the woken personality's accent knows which identity the turn belonged to.
+ *
+ * ITS ABSENCE IS A STATEMENT: no personality answered, because none was
+ * addressed. That is the ordinary outcome on a gating node — an utterance in a
+ * room that opened with no wake phrase was heard, transcribed, and discarded —
+ * and the node renders it as "not addressed" rather than "turn complete".
+ *
+ * The field being optional is also what makes every refusal able to end its
+ * turn at all. A satellite is DEAF from `utterance_end` until this frame; while
+ * `personalityId` was required, a refusal that had no personality (the
+ * transcript matched nothing, the wake was rejected) could not send one, and
+ * the node stayed in playback suppression until its 120 s watchdog fired. The
+ * cue now costs nothing to send on every path.
  */
 const TurnEndSchema = z.object({
   t: z.literal('turn_end'),
   utteranceId: z.string().min(1),
-  personalityId: z.string().min(1),
+  /** Who answered. Absent when nobody did — see above. */
+  personalityId: z.string().min(1).optional(),
 });
 
 /**

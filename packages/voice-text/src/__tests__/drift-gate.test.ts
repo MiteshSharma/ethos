@@ -51,6 +51,10 @@ const OWNED_NAMES = [
   'normalizeUtterance',
   'boundedLevenshtein',
   'matchWakePhrase',
+  // The counterpart of the matcher: which prefix of the utterance was the
+  // address. It counts words the way `normalizeUtterance` does, so a copy would
+  // silently start cutting in a different place the day that changes.
+  'stripWakePhrase',
 ];
 
 // `function foo(`, `const foo = (`, `class Foo {`, and the method-shorthand and

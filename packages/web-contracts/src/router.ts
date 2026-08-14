@@ -3007,6 +3007,8 @@ const SatelliteNodeSchema = z.object({
     edgeStt: z.boolean(),
     playback: z.boolean(),
     captureSampleRate: z.number(),
+    /** False → the SERVER matches wake phrases for this node, from the transcript. */
+    phraseMatch: z.boolean(),
   }),
   state: z.enum(['listening', 'muted', 'wake_off', 'speaking', 'degraded']),
   /** Which probe failed, which device disappeared. Renders inline on the row. */
@@ -3014,6 +3016,11 @@ const SatelliteNodeSchema = z.object({
   wakeEnabled: z.boolean(),
   probes: z.array(z.object({ name: z.string(), ok: z.boolean(), detail: z.string().nullable() })),
   lastWake: z.object({ phrase: z.string(), personalityId: z.string(), at: z.number() }).nullable(),
+  /**
+   * The open addressing window: who a follow-up with no wake phrase reaches,
+   * and until when. Null means the next utterance has to name somebody.
+   */
+  conversation: z.object({ personalityId: z.string(), until: z.number() }).nullable(),
   connectedAt: z.number(),
 });
 

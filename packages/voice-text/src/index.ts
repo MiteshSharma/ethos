@@ -29,6 +29,7 @@ export {
   DEFAULT_WAKE_SENSITIVITY,
   matchWakePhrase,
   normalizeUtterance,
+  stripWakePhrase,
   type WakePhrase,
   type WakePhraseMatch,
 } from './wake-match';

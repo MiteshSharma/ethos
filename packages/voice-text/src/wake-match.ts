@@ -180,3 +180,43 @@ export function matchWakePhrase(
   }
   return best?.match ?? null;
 }
+
+/**
+ * The utterance with its wake phrase removed — what the agent should hear.
+ *
+ * "hey researcher, what's the weather" is one phrase of ADDRESSING followed by
+ * one sentence of content, and only the second half is a question anybody
+ * asked. Handing the agent the whole string makes its own name part of every
+ * prompt.
+ *
+ * It lives HERE, beside the matcher, because the count it needs is the
+ * matcher's own: `phraseDistance` aligns word-for-word from the head, so the
+ * number of utterance words consumed is exactly the number of words in the
+ * NORMALIZED phrase. Deriving that anywhere else means a second module that has
+ * to agree with `normalizeUtterance` about what a word is — and the day the
+ * character class changes, the copy keeps compiling and starts cutting in the
+ * wrong place. Nothing is re-matched: the match is an input.
+ *
+ * Returns the empty string when the phrase was the whole utterance ("hey
+ * researcher" said to get attention). The CALLER decides what that means —
+ * on the satellite lane it means "run the turn on the full text", because an
+ * empty turn is worse than a redundant one.
+ */
+export function stripWakePhrase(text: string, match: WakePhraseMatch): string {
+  const normalized = normalizeUtterance(match.phrase);
+  if (normalized.length === 0) return text.trim();
+  const words = normalized.split(' ').length;
+  // The same character class `normalizeUtterance` collapses on, so the Nth run
+  // here is the Nth word there.
+  const runs = /[\p{L}\p{N}]+/gu;
+  let end = 0;
+  for (let i = 0; i < words; i++) {
+    const run = runs.exec(text);
+    if (run === null) return '';
+    end = run.index + run[0].length;
+  }
+  return text
+    .slice(end)
+    .replace(/^[^\p{L}\p{N}]+/u, '')
+    .trim();
+}

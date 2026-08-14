@@ -5,6 +5,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
 import { SatelliteRow } from '../SatelliteRow';
 import {
+  conversationLeft,
   type SatelliteNode,
   type SatelliteState,
   satelliteCapabilityLabel,
@@ -21,12 +22,13 @@ function node(over: Partial<SatelliteNode> = {}): SatelliteNode {
     nodeId: 'pi-kitchen',
     laneId: 'voice:pi-kitchen:engineer',
     displayName: 'Kitchen Pi',
-    capabilities: { edgeStt: true, playback: true, captureSampleRate: 16000 },
+    capabilities: { edgeStt: true, playback: true, captureSampleRate: 16000, phraseMatch: true },
     state: 'listening',
     stateDetail: null,
     wakeEnabled: true,
     probes: [{ name: 'wake model', ok: true, detail: null }],
     lastWake: null,
+    conversation: null,
     connectedAt: 0,
     ...over,
   };
@@ -152,14 +154,54 @@ describe('wakeAge', () => {
   });
 });
 
+describe('the open addressing window', () => {
+  const now = 10_000_000_000;
+
+  it('says who a follow-up with no wake phrase would reach', () => {
+    // A microphone that will answer "tell me more" as the researcher is in a
+    // materially different state from one that needs a phrase first, and the
+    // row is where an operator finds out which.
+    const html = markup({ conversation: { personalityId: 'researcher', until: now + 24_000 } });
+    expect(html).toContain('follow-ups reach');
+    expect(html).toContain('researcher');
+    expect(html).toContain('24s left');
+  });
+
+  it('says nothing once the window has closed, even on a row that never refreshed', () => {
+    // `until` is an instant, so a stale row renders it as expired rather than
+    // claiming a conversation the server would no longer honour.
+    expect(markup({ conversation: { personalityId: 'researcher', until: now - 1 } })).not.toContain(
+      'follow-ups reach',
+    );
+    expect(markup()).not.toContain('follow-ups reach');
+  });
+
+  it('counts down in seconds, then in minutes', () => {
+    expect(conversationLeft(now + 45_000, now)).toBe('45s left');
+    expect(conversationLeft(now + 150_000, now)).toBe('2m left');
+    expect(conversationLeft(now, now)).toBeNull();
+  });
+});
+
 describe('satelliteCapabilityLabel', () => {
   it('says which side transcribes, because that is the privacy fact', () => {
-    expect(satelliteCapabilityLabel(node())).toBe('edge STT · 16000 Hz · playback');
+    expect(satelliteCapabilityLabel(node())).toBe(
+      'edge STT · 16000 Hz · playback · matches phrases',
+    );
     expect(
       satelliteCapabilityLabel(
-        node({ capabilities: { edgeStt: false, playback: false, captureSampleRate: 0 } }),
+        node({
+          capabilities: {
+            edgeStt: false,
+            playback: false,
+            captureSampleRate: 0,
+            phraseMatch: false,
+          },
+        }),
       ),
-    ).toBe('gateway STT');
+      // …and which side MATCHES, which is the other privacy fact: a node the
+      // server matches for is a node whose every utterance the server reads.
+    ).toBe('gateway STT · server matches');
   });
 });
 

@@ -13,15 +13,16 @@ import type { WakeEngine, WakeEngineFactory, WakeRoute } from '@ethosagent/voice
 import { runSatelliteDoctor, transcriptWakeEngineFactory } from '@ethosagent/voice-satellite';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
-  chooseRoute,
   computeListenExit,
   deriveListenFailFlags,
   deriveListenUrls,
+  EMPTY_TABLE_WARNING,
   LANE_PROBE_NAME,
   type ListenCommandDeps,
   type ListenPreflight,
   probeHealthz,
   probeSatelliteLane,
+  resolveRoutePin,
   runListenCommand,
   withLaneProbeName,
 } from '../commands/listen';
@@ -311,40 +312,36 @@ function route(overrides: Partial<WakeRoute> & { id: string }): WakeRoute {
   };
 }
 
-describe('chooseRoute against the pushed table', () => {
-  it('one pushed route needs no --route', () => {
-    const only = route({ id: 'auto:engineer', phrase: 'hey engineer', personalityId: 'engineer' });
-    expect(chooseRoute([only], undefined).route).toEqual(only);
+describe('resolveRoutePin against the pushed table', () => {
+  it('no --route is no pin, and no problem — the phrase picks the personality', () => {
+    // The behaviour change: the daemon no longer needs to be told which
+    // personality it belongs to, so the absence of the flag is the normal case
+    // rather than something to be resolved.
+    const pin = resolveRoutePin([route({ id: 'auto:engineer' }), route({ id: 'eng' })], undefined);
+    expect(pin.route).toBeNull();
+    expect(pin.problem).toBeUndefined();
   });
 
-  it('several pushed routes refuse to be guessed between, and are listed', () => {
-    const chosen = chooseRoute([route({ id: 'auto:engineer' }), route({ id: 'eng' })], undefined);
-    expect(chosen.route).toBeNull();
-    expect(chosen.problem).toContain('--route');
-    expect(chosen.problem).toContain('auto:engineer');
-    expect(chosen.problem).toContain('eng');
+  it('several pushed routes no longer refuse — every phrase can address the host', () => {
+    const many = [route({ id: 'auto:engineer' }), route({ id: 'auto:writer' }), route({ id: 'x' })];
+    expect(resolveRoutePin(many, undefined)).toEqual({ route: null });
   });
 
-  it('an EMPTY pushed table is the real dead end, and says why', () => {
-    const chosen = chooseRoute([], undefined);
-    expect(chosen.route).toBeNull();
-    // The honest diagnosis: not "you configured nothing" but "there is nothing
-    // reachable", because every unprivileged personality would have been there.
-    expect(chosen.problem).toContain('privileged');
-    expect(chosen.problem).toContain('by design');
-    expect(chosen.problem).not.toContain('the convention is');
-    // …and the way out, in the same breath. An all-privileged deployment is
-    // the case that most needs the remedy spelled out.
-    expect(chosen.problem).toContain('voice.wake.routes.<id>.phrase / .personality / .privileged');
+  it('an empty pushed table is not a startup refusal either', () => {
+    // A Settings save pushes a new table down the open socket, so refusing to
+    // boot would mean walking to the Pi to fix a config edit.
+    expect(resolveRoutePin([], undefined)).toEqual({ route: null });
   });
 
   it('accepts a synthesized auto:<personalityId> id — the config charset never applies', () => {
     const auto = route({ id: 'auto:engineer', phrase: 'hey engineer', personalityId: 'engineer' });
-    expect(chooseRoute([auto, route({ id: 'auto:writer' })], 'auto:engineer').route).toEqual(auto);
+    expect(resolveRoutePin([auto, route({ id: 'auto:writer' })], 'auto:engineer').route).toEqual(
+      auto,
+    );
   });
 
   it('a typo still fails loudly — against the pushed table, not the config file', () => {
-    const chosen = chooseRoute([route({ id: 'auto:engineer' })], 'auto:enginer');
+    const chosen = resolveRoutePin([route({ id: 'auto:engineer' })], 'auto:enginer');
     const problem = chosen.problem ?? '';
     expect(chosen.route).toBeNull();
     expect(problem).toContain("no enabled route 'auto:enginer'");
@@ -359,7 +356,7 @@ describe('chooseRoute against the pushed table', () => {
     // The reported defect: the message said what WAS pushed and nothing about
     // why the personality the operator wanted was not, so a correct security
     // decision read as a bug.
-    const problem = chooseRoute([route({ id: 'auto:debug' })], 'auto:engineer').problem ?? '';
+    const problem = resolveRoutePin([route({ id: 'auto:debug' })], 'auto:engineer').problem ?? '';
     expect(problem).toContain('privileged');
     expect(problem).toContain('the approval layer would stop and ask about');
     expect(problem).toContain('by design');
@@ -367,22 +364,20 @@ describe('chooseRoute against the pushed table', () => {
   });
 
   it('a --route miss against an empty table carries the same explanation', () => {
-    const problem = chooseRoute([], 'auto:engineer').problem ?? '';
+    const problem = resolveRoutePin([], 'auto:engineer').problem ?? '';
     expect(problem).toContain("no enabled route 'auto:engineer'");
     expect(problem).toContain('it pushed an empty table');
     expect(problem).toContain('privileged');
     expect(problem).toContain('.privileged: true');
   });
 
-  it('both refusals carry the SAME explanation — one constant, not two phrasings', () => {
+  it('the pin refusal and the empty-table warning share ONE explanation', () => {
+    // Two surfaces, one constant. The empty table stopped being a refusal and
+    // became a warning; the clause it carries must not fork in the move.
     const clause = 'A personality is absent from this table when it is privileged';
-    const miss = chooseRoute([route({ id: 'auto:debug' })], 'auto:engineer').problem ?? '';
-    const empty = chooseRoute([], undefined).problem ?? '';
+    const miss = resolveRoutePin([route({ id: 'auto:debug' })], 'auto:engineer').problem ?? '';
     expect(miss).toContain(clause);
-    expect(empty).toContain(clause);
-    // The clause runs to the end of both, so comparing the tails catches drift
-    // in every word of it, not just the sentence opener.
-    expect(miss.slice(miss.indexOf(clause))).toEqual(empty.slice(empty.indexOf(clause)));
+    expect(EMPTY_TABLE_WARNING).toContain(clause);
   });
 
   it('never claims to know WHICH personalities the server withheld', () => {
@@ -390,17 +385,17 @@ describe('chooseRoute against the pushed table', () => {
     // enumerate privileged personalities. The message states the rule; naming
     // a name would mean inventing one — or making the server leak the list.
     const pushed = route({ id: 'auto:debug', phrase: 'hey debug', personalityId: 'debug' });
-    const problem = chooseRoute([pushed], 'auto:engineer').problem ?? '';
+    const problem = resolveRoutePin([pushed], 'auto:engineer').problem ?? '';
     expect(problem).toContain('A personality is absent');
     // Every personality it names came from the table it was handed.
     expect(problem.match(/→ [a-z0-9-]+/g)).toEqual(['→ debug']);
     expect(problem).not.toMatch(/excluded:|withheld|hidden (route|personalit)/i);
   });
 
-  it('a disabled route in the pushed table is not selectable', () => {
+  it('a disabled route cannot be pinned to', () => {
     const off = route({ id: 'eng', enabled: false });
-    expect(chooseRoute([off], undefined).route).toBeNull();
-    expect(chooseRoute([off], 'eng').route).toBeNull();
+    expect(resolveRoutePin([off], 'eng').route).toBeNull();
+    expect(resolveRoutePin([off], 'eng').problem).toContain("no enabled route 'eng'");
   });
 });
 

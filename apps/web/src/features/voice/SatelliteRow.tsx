@@ -1,6 +1,7 @@
 import { Switch, Tooltip, Typography } from 'antd';
 import { PersonalityMark } from '../../components/ui/PersonalityMark';
 import {
+  conversationLeft,
   type SatelliteNode,
   type SatelliteRowView,
   satelliteCapabilityLabel,
@@ -41,6 +42,9 @@ function LivenessBars() {
 }
 
 export function SatelliteRow({ node, view, now, busy, onToggleWake }: SatelliteRowProps) {
+  // Computed here rather than trusted from the row: `until` is an instant, and
+  // a window that has quietly expired must stop claiming follow-ups will land.
+  const followUps = node.conversation ? conversationLeft(node.conversation.until, now) : null;
   return (
     <div className="sat-row">
       <div className="sat-row-main">
@@ -89,6 +93,15 @@ export function SatelliteRow({ node, view, now, busy, onToggleWake }: SatelliteR
           <span className="sat-mono sat-wake-none">no wake yet</span>
         </div>
       )}
+
+      {followUps && node.conversation ? (
+        <div className="sat-row-wake">
+          <span className="sat-mono sat-wake-none">follow-ups reach</span>
+          <PersonalityMark personalityId={node.conversation.personalityId} size={16} />
+          <span className="sat-mono">{node.conversation.personalityId}</span>
+          <span className="sat-mono sat-wake-age">{followUps}</span>
+        </div>
+      ) : null}
 
       {view.detail ? (
         <Typography.Text type="danger" className="sat-row-detail sat-mono">

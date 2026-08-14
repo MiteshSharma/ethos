@@ -26,31 +26,40 @@
 // works today with nothing installed that is not installed already. See
 // `../lib/stdin-pcm-device`.
 //
-// THE DAEMON IS PUSH-TO-TALK, AND SAYS SO. The always-available wake engine is
-// `transcript`, which matches wake phrases against RECOGNIZED TEXT — it needs a
-// transcript to match on, and this host ships no on-device recognizer. With
-// `edgeStt` off the satellite streams PCM and the SERVER transcribes, which
-// arrives far too late to be a wake decision. That leaves exactly two honest
-// options, edge STT or push-to-talk, and only one of them is buildable without
-// a native dependency. So `ethos listen` does not acoustically wake at all:
-// speech detected on the pipe opens an utterance, attributed to one route from
-// the server's table (see below) — the one named with `--route`, or the only
-// one there is. The human is the wake word, and the banner says that in words
-// rather than printing a phrase it never listens for.
+// THE MIC IS OPEN, AND THE SERVER DECIDES WHO WAS ADDRESSED. This host matches
+// no phrase against sound: an acoustic keyword spotter is a per-architecture
+// native binary, and this is the daemon that has to run on the Pi where such a
+// binary is broken. The always-available `transcript` engine matches RECOGNIZED
+// TEXT, and this host ships no on-device recognizer — the SERVER transcribes,
+// which is far too late to be a client-side wake decision.
+//
+// So the daemon registers `phraseMatch: false` and the gate moves to where the
+// transcript already is. Speech detected on the pipe opens an utterance; every
+// utterance is transcribed; and the server runs a turn only when the words open
+// with a wake phrase from the effective route table, or when they follow one
+// inside the addressing window. Everything else is heard, written down, and
+// discarded without reaching a model.
+//
+// That is worth being blunt about, because it is a privacy fact: THE ROOM IS
+// TRANSCRIBED. Not every utterance reaches an agent, but every utterance
+// reaches speech recognition. A host that implied otherwise would be claiming
+// an acoustic gate it does not have.
 //
 // Acoustic wake (sherpa keyword spotting) belongs to the desktop host, which
-// has the prebuilt binaries and a real microphone. `listen doctor` still probes
-// it honestly when it is configured — those rows feed the Settings → Voice row
-// for every host, not just this one.
+// has the prebuilt binaries and a real microphone, and which therefore
+// registers `phraseMatch: true` and is not gated server-side. `listen doctor`
+// still probes sherpa honestly when it is configured — those rows feed the
+// Settings → Voice row for every host, not just this one.
 //
 // THE ROUTE TABLE BELONGS TO THE SERVER. `voice.wake.routes` in this machine's
 // config is a HINT, not the answer: the web-api synthesizes a "hey <name>"
 // route (`auto:<personalityId>`) for every UNPRIVILEGED personality and pushes
-// the merged table down the lane immediately after `register`. So this daemon
-// picks its route AFTER connecting, against what was pushed — an empty local
-// `voice.wake.routes` is the normal case, not a dead end — and `listen doctor`,
-// which never connects, reports the local table as a hint and says out loud
-// that the effective one is only knowable once connected.
+// the merged table down the lane immediately after `register`. This daemon
+// never picks a personality — the phrase does — so `--route` is optional and
+// means something narrower than it used to: a PIN, restricting which single
+// route this microphone may be addressed by. `listen doctor`, which never
+// connects, reports the local table as a hint and says out loud that the
+// effective one is only knowable once connected.
 
 import { randomBytes, randomUUID } from 'node:crypto';
 import { connect as netConnect, type Socket } from 'node:net';
@@ -98,9 +107,11 @@ export const USAGE = `Usage: ethos listen [doctor] [options]
 
 Options:
   --url <ws url>    satellite lane URL (default: derived from webBaseUrl)
-  --route <id>      which route every utterance is sent as, checked against the
-                    table the server pushes on connect — a voice.wake.routes id
-                    or a synthesized 'auto:<personalityId>' one
+  --route <id>      PIN this microphone to one route: only that phrase may
+                    address it. Checked against the table the server pushes on
+                    connect — a voice.wake.routes id or a synthesized
+                    'auto:<personalityId>' one. Optional; without it every
+                    phrase in the table can address this host
   --device <id>     capture device (this build ships '${STDIN_DEVICE_ID}' only)
   --json            doctor only — one JSON object with a probes array and exit
 
@@ -114,9 +125,11 @@ Keep the quiet flags. The capture process and this daemon share one terminal,
 and ffmpeg's progress meter is a carriage-returned line that overwrites this
 daemon's output mid-word. A real failure still prints.
 
-Push-to-talk: nothing is acoustically wake-matched here. Every utterance the
-pipe carries is sent as one route from the server's effective table — the one
-named with --route, or the only one there is. Stop the pipe to stop talking.`;
+Open mic, server-side addressing. Nothing is acoustically wake-matched here:
+EVERY utterance on the pipe is transcribed by the server. It runs a turn only
+when the words open with a wake phrase — that phrase picks the personality —
+or when they follow one within voice.wake.idleTimeout. Anything else is heard
+and discarded. Stop the pipe to stop talking.`;
 
 /**
  * Rate the wake engines, the VAD, and the server-side recognizers all assume.
@@ -131,6 +144,14 @@ const CAPTURE_FRAME_MS = 20;
 
 /** Same cadence as the gateway heartbeat — the readers are the same readers. */
 const HEARTBEAT_INTERVAL_MS = 10_000;
+
+/**
+ * Fallback for the addressing window in the banner, matching the server's own
+ * `WAKE_SETTINGS_DEFAULTS.idleTimeoutMs`. Only ever printed before the first
+ * `routes` frame lands — after that the SERVER's number is used, because the
+ * server is the one enforcing it.
+ */
+const DEFAULT_IDLE_WINDOW_MS = 30_000;
 
 /** `ethos serve --web-port` default. Mirrors WEB_PORT_DEFAULT in serve.ts. */
 const DEFAULT_WEB_PORT = 3000;
@@ -168,9 +189,9 @@ const START_THE_SERVER = 'Start it with `ethos serve`.';
  */
 const ROUTES_ARE_THE_SERVERS =
   'The effective table is the server\'s: it adds a "hey <name>" route ' +
-  '(auto:<personalityId>) for every unprivileged personality and pushes the ' +
-  'merged table on connect, so what this host can reach is only knowable once ' +
-  'it has connected.';
+  '(auto:<personalityId>) for every unprivileged personality, pushes the merged ' +
+  'table on connect, and MATCHES transcripts against it — so what this host can ' +
+  'be addressed by is only knowable once it has connected.';
 
 /** Where wake / edge-STT models are expected, per the satellite doctor's own tests. */
 function wakeModelDir(): string {
@@ -237,9 +258,14 @@ export interface ListenPreflight {
   /** `voice.wake.engine`, normalized to the engine's own name. */
   configuredEngine: string;
   /**
-   * True when `transcriptWakeEngineFactory` probed OK. It is the engine the
-   * daemon actually runs behind push-to-talk, so its failure is the one that
-   * leaves no usable engine at all.
+   * True when `transcriptWakeEngineFactory` probed OK — the dependency-free
+   * engine every build is supposed to have.
+   *
+   * The daemon does not run it (it runs the open-mic engine and the SERVER
+   * matches phrases), but its probe is the floor: it loads no binding and no
+   * model, so a failure there means the satellite package itself is broken on
+   * this host and nothing about the wake stack can be believed. That is the
+   * one failure this command refuses to start through.
    */
   transcriptEngineOk: boolean;
   /**
@@ -277,7 +303,7 @@ export interface ListenPreflight {
    * their own file contributes.
    */
   routes: WakeRoute[];
-  /** `--route`, unresolved: only the pushed table can validate it. */
+  /** `--route`, unresolved: only the pushed table can validate the pin. */
   requestedRoute?: string;
   /** `voice.wake.edgeStt` is on but this host ships no on-device recognizer. */
   edgeSttRequested: boolean;
@@ -502,8 +528,10 @@ async function listenDoctorCommand(flags: ListenFlags, deps: ListenCommandDeps):
           configured: pre.configuredEngine,
           modelsRequired: pre.modelsRequired,
           // The daemon does not acoustically match; a consumer reading this
-          // must not infer wake capability from the engine name alone.
-          daemonMode: 'push-to-talk',
+          // must not infer wake capability from the engine name alone. The
+          // room IS transcribed — the phrase gate runs on the server.
+          daemonMode: 'open-mic',
+          phraseMatch: false,
         },
         captureDevice: pre.device,
         sampleRate: pre.sampleRate,
@@ -511,6 +539,7 @@ async function listenDoctorCommand(flags: ListenFlags, deps: ListenCommandDeps):
         // the effective table is the server's. A consumer that needs to know
         // what the house answers to must ask the server, not this object.
         configuredRoutes: pre.routes,
+        /** The `--route` PIN, unvalidated. Null means every phrase may address. */
         requestedRoute: pre.requestedRoute ?? null,
         routesNote: ROUTES_ARE_THE_SERVERS,
         edgeSttRequested: pre.edgeSttRequested,
@@ -605,8 +634,8 @@ function printPreflightRows(pre: ListenPreflight, say: (line: string) => void = 
       : 'none configured here, which is normal. ') +
       ROUTES_ARE_THE_SERVERS +
       (pre.requestedRoute === undefined
-        ? ''
-        : ` --route ${pre.requestedRoute} is checked against that table when \`ethos listen\` connects, not here.`),
+        ? ' Without --route, every phrase in that table can address this host.'
+        : ` --route ${pre.requestedRoute} pins this host to that one route; it is checked against the pushed table when \`ethos listen\` connects, not here.`),
   );
   if (pre.edgeSttRequested) {
     printRow(
@@ -709,8 +738,8 @@ function unimplementedEngineFactory(name: string): WakeEngineFactory {
       };
     },
     create() {
-      // Unreachable today — the doctor only probes and the daemon runs
-      // push-to-talk — but it refuses rather than quietly handing back some
+      // Unreachable today — the doctor only probes, and the daemon runs the
+      // open-mic engine — but it refuses rather than quietly handing back some
       // other engine, which is the same false-available failure wearing the
       // opposite sign.
       return {
@@ -865,56 +894,63 @@ const WHY_A_PERSONALITY_IS_ABSENT =
   '.privileged: true.';
 
 /**
- * Which route a piped utterance is sent as, decided against the table the
- * SERVER pushed — never against the local config, which is one contributor to
- * that table and not the table itself.
+ * Resolve `--route` — the PIN — against the table the SERVER pushed, never
+ * against the local config, which is one contributor to that table and not the
+ * table itself.
  *
- * Push-to-talk has no voice to pick with, so the choice is made here and it is
- * made explicitly. A host that guessed between two routes would answer as the
- * wrong personality, which is worse than not answering.
+ * WHAT `--route` MEANS NOW. It used to be compulsory and it used to mean "send
+ * every utterance as this personality", because the daemon had no way to tell
+ * one addressee from another. The server matches phrases now, so the phrase
+ * picks the personality and the flag is optional. What is left for it is the
+ * one thing a phrase cannot say: WHICH PHRASES THIS MICROPHONE ANSWERS TO. A
+ * pinned host is dedicated to one route — say the pinned phrase and it answers,
+ * say another agent's and it does not.
+ *
+ * It is NOT a way to skip the gate. Pinning that also meant "and no phrase
+ * needed" would make one flag quietly re-open the hole the gate closed, on the
+ * host most likely to be left running in a room unattended.
+ *
+ * No pin resolves to `{ route: null }` with no problem: that is the ordinary
+ * case, and it means every enabled route may address this host.
  */
-export function chooseRoute(
+export function resolveRoutePin(
   pushed: readonly WakeRoute[],
   requested: string | undefined,
 ): { route: WakeRoute | null; problem?: string } {
+  if (requested === undefined) return { route: null };
   const routes = pushed.filter((r) => r.enabled);
-  const listed = (): string =>
-    routes.map((r) => `${r.id} ("${r.phrase}" → ${r.personalityId})`).join(', ');
-
-  if (requested !== undefined) {
-    // Matched by whole id and nothing else: a synthesized id is
-    // `auto:<personalityId>`, and `:` is outside the charset a config id may
-    // use, so there is never an ambiguity between the two kinds.
-    const found = routes.find((r) => r.id === requested);
-    if (found) return { route: found };
-    return {
-      route: null,
-      problem:
-        `the server's wake route table has no enabled route '${requested}' — ` +
-        (routes.length > 0
-          ? `it pushed: ${listed()}. A synthesized route is named auto:<personalityId>. `
-          : 'it pushed an empty table. ') +
-        WHY_A_PERSONALITY_IS_ABSENT,
-    };
-  }
-  if (routes.length === 1 && routes[0]) return { route: routes[0] };
-  if (routes.length === 0) {
-    return {
-      route: null,
-      problem:
-        'the server pushed an EMPTY wake route table — this deployment has no personality ' +
-        'the wake surface can reach. Every unprivileged personality gets a synthesized ' +
-        '"hey <name>" route automatically, so an empty table means there are none. ' +
-        WHY_A_PERSONALITY_IS_ABSENT,
-    };
-  }
+  // Matched by whole id and nothing else: a synthesized id is
+  // `auto:<personalityId>`, and `:` is outside the charset a config id may
+  // use, so there is never an ambiguity between the two kinds.
+  const found = routes.find((r) => r.id === requested);
+  if (found) return { route: found };
   return {
     route: null,
     problem:
-      `the server pushed ${routes.length} enabled wake routes — push-to-talk cannot pick ` +
-      `between them. Name one with --route <id>: ${listed()}`,
+      `the server's wake route table has no enabled route '${requested}' — ` +
+      (routes.length > 0
+        ? `it pushed: ${routes.map((r) => `${r.id} ("${r.phrase}" → ${r.personalityId})`).join(', ')}. ` +
+          'A synthesized route is named auto:<personalityId>. '
+        : 'it pushed an empty table. ') +
+      WHY_A_PERSONALITY_IS_ABSENT,
   };
 }
+
+/**
+ * Why an empty pushed table is a warning and no longer a refusal.
+ *
+ * It used to stop the boot: the daemon had to pick one route up front, and
+ * there was none to pick. Now the daemon picks nothing — the server matches
+ * each transcript against whatever table it holds at that moment — and a
+ * Settings save pushes a new one down the open socket. Refusing to start would
+ * mean an operator who fixes their config still has to walk to the Pi.
+ */
+export const EMPTY_TABLE_WARNING =
+  'the server pushed an EMPTY wake route table — no phrase can address this deployment ' +
+  'yet, so every utterance will be transcribed and discarded. Every unprivileged ' +
+  'personality gets a synthesized "hey <name>" route automatically, so an empty table ' +
+  `means there are none. ${WHY_A_PERSONALITY_IS_ABSENT} ` +
+  'A Settings save reaches this daemon without a restart.';
 
 export interface SatelliteLaneProbe {
   ok: boolean;
@@ -1229,25 +1265,33 @@ interface ListenDaemonContext extends ListenStartOptions {
 }
 
 /**
- * The push-to-talk "wake engine": the pipe is the button.
+ * The OPEN-MIC engine: it opens an utterance on speech, and matches nothing.
+ *
+ * NOT "push-to-talk", which is what this was called and was never true — there
+ * is no button, and there never was. The pipe carries whatever the room says;
+ * a VAD decides where one utterance stops and the next begins; and who was
+ * addressed is settled downstream, by the server, from the transcript. Calling
+ * it push-to-talk implied a human hand in the loop that does not exist, on the
+ * exact host most likely to be left running unattended in a room.
  *
  * It sits behind the same `WakeEngine` seam an acoustic spotter would, so the
  * whole of `CaptureMachine` — the watchdog, the verified re-arm, the self-wake
- * suppression — applies unchanged. What it matches on is speech onset rather
- * than a phrase, which is the honest thing to do when the only always-available
- * engine matches TEXT and this host produces none.
+ * suppression — applies unchanged. It reports no route and no phrase, because
+ * it matched neither: this host registers `phraseMatch: false` and the wire
+ * contract makes both fields optional for exactly that reason.
  */
-function createPushToTalkEngine(route: WakeRoute): WakeEngine {
+function createOpenMicEngine(): WakeEngine {
   let vad = createEnergyFrameVad();
   return {
-    name: 'push-to-talk',
+    name: 'open-mic',
     async init(): Promise<void> {},
     push(frame) {
       if (!vad.push(frame)) return null;
-      // No score to report: the operator decided, not a model. `confidence` is
-      // documented as the engine's own scale, so certainty is the true value
-      // rather than a number invented to look like a probability.
-      return { routeId: route.id, phrase: route.phrase, confidence: 1 };
+      // No score to report: a VAD found energy, not a phrase. `confidence` is
+      // documented as the engine's own scale, so certainty that SPEECH started
+      // is the true value rather than a number invented to look like a
+      // phrase-match probability.
+      return { confidence: 1 };
     },
     reset(): void {
       // A fresh detector rather than a flag: `EnergyVad` carries hangover
@@ -1271,8 +1315,10 @@ export async function startListenDaemon(
   // Every line this daemon narrates goes through here — see `writerFor`.
   const say = writerFor(flags);
 
-  // Resolved from the table the server pushes, not from the local config —
-  // which is why it is a `let` assigned after connect rather than a parameter.
+  // The `--route` PIN, resolved against the table the server pushes rather than
+  // the local config — which is why it is a `let` assigned after connect. Null
+  // is the ordinary case: unpinned, every phrase in the table may address this
+  // microphone.
   let route: WakeRoute | null = null;
   let machine: CaptureMachine | null = null;
   let captureState: CaptureState = 'idle';
@@ -1283,8 +1329,24 @@ export async function startListenDaemon(
   let playoutWarned = false;
   /** What was last REGISTERED with the server; see `onSetWakeEnabled`. */
   let wakeEnabled = true;
-  /** Whether the active route's absence has already been said; see `onRoutes`. */
+  /** Whether the pinned route's absence has already been said; see `onRoutes`. */
   let routeMissingWarned = false;
+  /**
+   * The utterance the server reported no speech in.
+   *
+   * Kept so the `turn_end` behind it is narrated as a plain re-arm rather than
+   * as "not addressed to anyone" — both arrive with no personality, and only
+   * this remembers which of the two happened.
+   */
+  let unspokenUtteranceId: string | null = null;
+  /**
+   * The addressing window the SERVER is enforcing, from the pushed settings.
+   *
+   * Read off the wire rather than off this machine's `config.yaml`: the gate
+   * runs on the server, so the server's number is the one a banner may quote.
+   * The local value is only a placeholder until the first push lands.
+   */
+  let idleWindowMs = pre.idleTimeoutMs ?? DEFAULT_IDLE_WINDOW_MS;
 
   let deliverTable: ((routes: WakeRoute[]) => void) | null = null;
   const firstTable = new Promise<WakeRoute[]>((resolve) => {
@@ -1303,17 +1365,20 @@ export async function startListenDaemon(
     nodeId: pre.nodeId,
     displayName: pre.nodeId,
     capabilities: {
-      // Both probed, not declared: no on-device recognizer ships here, and
-      // there is no output device behind a pipe.
+      // All three probed, not declared: no on-device recognizer ships here,
+      // there is no output device behind a pipe, and nothing on this host
+      // compares sound to a phrase — so the SERVER gates, from the transcript.
       edgeStt: false,
       playback: false,
       captureSampleRate: pre.sampleRate,
+      phraseMatch: false,
     },
     wakeEnabled: true,
     ...auth,
     ...(transport === undefined ? {} : { createSocket: transport }),
     onRoutes: (frame) => {
       const table: WakeRoute[] = frame.routes.map((r) => ({ ...r }));
+      idleWindowMs = frame.settings.idleTimeoutMs;
       const deliver = deliverTable;
       if (deliver !== null) {
         // The FIRST table is the one the route is chosen from — it is the only
@@ -1322,8 +1387,9 @@ export async function startListenDaemon(
         deliver(table);
         return;
       }
-      // A later push is a Settings save or a reconnect; this node only needs to
-      // know whether the route it is running is still there.
+      // A later push is a Settings save or a reconnect. Unpinned, there is
+      // nothing to check: the server matches every transcript against whatever
+      // table it holds, and this host does not have an opinion to go stale.
       const active = route;
       if (active === null) return;
       const present = table.some((r) => r.id === active.id && r.enabled);
@@ -1337,7 +1403,8 @@ export async function startListenDaemon(
         routeMissingWarned = true;
         say(
           `${c.yellow}⚠ route${c.reset} ${c.dim}the server no longer has an enabled route ` +
-            `'${active.id}' — utterances will be refused until it comes back.${c.reset}`,
+            `'${active.id}' — this host is pinned to it, so nothing said here can reach ` +
+            `an agent until it comes back.${c.reset}`,
         );
         return;
       }
@@ -1345,7 +1412,7 @@ export async function startListenDaemon(
         routeMissingWarned = false;
         say(
           `${c.dim}  ↩ route '${active.id}' is back in the server's table — ` +
-            `utterances are accepted again.${c.reset}`,
+            `"${active.phrase}" reaches ${active.personalityId} again.${c.reset}`,
         );
       }
     },
@@ -1354,6 +1421,7 @@ export async function startListenDaemon(
       // words, with `onReplyText` below printing the answer to them.
       if (!frame.final) return;
       if (frame.text.trim() === '') {
+        unspokenUtteranceId = frame.utteranceId;
         // A FINAL TRANSCRIPT WITH NO TEXT IS THE SERVER SAYING IT HEARD NO
         // SPEECH — the recognizer's own "nothing was said", which on an open
         // pipe in a room is ordinary traffic and not a fault. It arrives with a
@@ -1392,7 +1460,24 @@ export async function startListenDaemon(
         // No segment count: this host declares playback: false, so the server
         // synthesizes nothing for it and the count was always zero. The answer
         // itself was printed by `onReplyText`; this line only closes the cycle.
-        say(`${c.dim}  ↩ turn complete. Listening again.${c.reset}`);
+        //
+        // THREE WAYS A TURN ENDS, and the operator is owed the difference. A
+        // `personalityId` means somebody answered. Its absence after an empty
+        // transcript means there was no speech in the audio — already said
+        // above, so this only re-arms. Its absence otherwise means the words
+        // were heard and addressed to nobody, which is the COMMON case in a
+        // room and gets one quiet line, not a warning.
+        if (event.personalityId !== undefined) {
+          say(`${c.dim}  ↩ turn complete. Listening again.${c.reset}`);
+        } else if (unspokenUtteranceId === event.utteranceId) {
+          say(`${c.dim}  ↩ listening again.${c.reset}`);
+        } else {
+          say(
+            `${c.dim}  ↩ not addressed to anyone — no agent was called. ` +
+              `Open with a wake phrase to reach one. Listening again.${c.reset}`,
+          );
+        }
+        unspokenUtteranceId = null;
         // Re-arm. `playback_done` is the honest frame even with nothing played:
         // it means "the speaker has gone quiet and I am listening again", and
         // a host with no speaker satisfies the first half trivially.
@@ -1442,7 +1527,7 @@ export async function startListenDaemon(
   client.connect();
   say(
     `${c.dim}Connecting to ${pre.url} for the wake route table` +
-      `${pre.requestedRoute === undefined ? '' : ` (want route ${pre.requestedRoute})`}...${c.reset}`,
+      `${pre.requestedRoute === undefined ? '' : ` (pinning to route ${pre.requestedRoute})`}...${c.reset}`,
   );
 
   // READY MEANS "UP AND CONNECTING", not "capturing". A satellite booted before
@@ -1452,19 +1537,29 @@ export async function startListenDaemon(
   notifyReady();
   stopWatchdog = startWatchdog();
 
-  const chosen = chooseRoute(await firstTable, flags.route);
-  if (chosen.route === null) {
-    console.error(`${c.red}✗ ${chosen.problem}${c.reset}`);
+  const pushed = await firstTable;
+  const pin = resolveRoutePin(pushed, flags.route);
+  // Only a pin that names nothing is fatal — the operator asked for a specific
+  // route and did not get it, and starting anyway would leave the microphone
+  // answering to phrases they meant to exclude.
+  if (pin.problem !== undefined) {
+    console.error(`${c.red}✗ ${pin.problem}${c.reset}`);
     if (stopWatchdog) stopWatchdog();
     client.close();
     process.exitCode = 1;
     return;
   }
-  const activeRoute = chosen.route;
-  route = activeRoute;
+  const pinnedRoute = pin.route;
+  route = pinnedRoute;
+  if (pushed.filter((r) => r.enabled).length === 0) {
+    say(`${c.yellow}⚠ routes${c.reset} ${c.dim}${EMPTY_TABLE_WARNING}${c.reset}`);
+  }
 
-  const engine = createPushToTalkEngine(activeRoute);
-  await engine.init([activeRoute], { sensitivity: 0.5, confirmationFrames: 1 });
+  const engine = createOpenMicEngine();
+  // The engine matches nothing, so the routes and the sensitivity it is handed
+  // decide nothing either — they are the seam's shape, not this host's policy.
+  // The table that matters is the server's, applied to the transcript.
+  await engine.init([], { sensitivity: 0.5, confirmationFrames: 1 });
 
   const capture = new CaptureMachine(
     {
@@ -1479,15 +1574,20 @@ export async function startListenDaemon(
         const utteranceId = `u${++utteranceSeq}-${stamp}`;
         currentUtteranceId = utteranceId;
         audioSeq = 0;
+        // No personality on this line, because none has been chosen: the words
+        // decide, and nobody has heard them yet. Claiming one here is what the
+        // old push-to-talk banner did, and it was wrong the moment two
+        // personalities shared a microphone.
         say(
-          `${c.dim}● speech — utterance ${utteranceId} open as${c.reset} ` +
-            `${c.cyan}${activeRoute.personalityId}${c.reset}${c.dim} (route ${activeRoute.id}).${c.reset}`,
+          `${c.dim}● speech — utterance ${utteranceId} open${c.reset}` +
+            `${pinnedRoute === null ? '' : `${c.dim} (pinned to route ${pinnedRoute.id}).${c.reset}`}`,
         );
         client.sendWake({
           wakeId,
-          phrase: match.phrase,
-          routeId: match.routeId,
-          personalityId: activeRoute.personalityId,
+          // No phrase and no personality: this engine matched SOUND. `routeId`
+          // from a `phraseMatch: false` node is the PIN — "only this route may
+          // address me" — not a claim that it matched.
+          ...(pinnedRoute === null ? {} : { routeId: pinnedRoute.id }),
           confidence: match.confidence,
         });
         client.sendUtteranceStart({ wakeId, utteranceId, sampleRate: pre.sampleRate });
@@ -1546,13 +1646,38 @@ export async function startListenDaemon(
   await device.start((frame) => capture.pushFrame(frame));
   capture.start();
 
+  // THE ONE SENTENCE A PERSON NEEDS, and the one this host could not give
+  // before: what happens to everything it hears, and what makes an agent
+  // answer. Both halves are load-bearing — the first is a privacy fact, the
+  // second is the whole interaction model.
   say(
-    `${c.dim}Push-to-talk: nothing is acoustically wake-matched here. Every utterance on the ` +
-      `pipe is sent as${c.reset} ${c.bold}"${activeRoute.phrase}"${c.reset} ${c.dim}→${c.reset} ` +
-      `${c.cyan}${activeRoute.personalityId}${c.reset}${c.dim} (route ${activeRoute.id}, ` +
-      `${activeRoute.id.startsWith('auto:') ? 'synthesized by the server for this personality' : 'from voice.wake.routes'}` +
-      `).${c.reset}`,
+    `${c.dim}Open mic: EVERYTHING heard here is transcribed by the server. An utterance ` +
+      `reaches an agent only when it OPENS with a wake phrase — that phrase picks the ` +
+      `personality — and follow-ups within ${Math.round(idleWindowMs / 1000)}s ` +
+      `continue with the same one. Anything else is heard and discarded.${c.reset}`,
   );
+  if (pinnedRoute === null) {
+    const addressable = pushed.filter((r) => r.enabled);
+    say(
+      `${c.dim}Addressable here:${c.reset} ` +
+        (addressable.length === 0
+          ? `${c.dim}nothing yet — the server pushed an empty table.${c.reset}`
+          : addressable
+              .map(
+                (r) =>
+                  `${c.bold}"${r.phrase}"${c.reset}${c.dim} →${c.reset} ${c.cyan}${r.personalityId}${c.reset}`,
+              )
+              .join(`${c.dim},${c.reset} `)),
+    );
+  } else {
+    say(
+      `${c.dim}Pinned by --route: only${c.reset} ${c.bold}"${pinnedRoute.phrase}"${c.reset} ` +
+        `${c.dim}→${c.reset} ${c.cyan}${pinnedRoute.personalityId}${c.reset}${c.dim} ` +
+        `(route ${pinnedRoute.id}, ` +
+        `${pinnedRoute.id.startsWith('auto:') ? 'synthesized by the server for this personality' : 'from voice.wake.routes'}` +
+        `) can address this microphone. Other phrases are heard and discarded.${c.reset}`,
+    );
+  }
   say(
     `${c.dim}Listening on ${deviceInfo.label}. Press Ctrl+C to stop; close the pipe to stop talking.${c.reset}\n`,
   );

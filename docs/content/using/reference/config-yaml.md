@@ -568,7 +568,7 @@ Out-of-range numbers and unrecognised engine ids are **ignored, not clamped** �
 | `sensitivity` | number | `0.5` | Match threshold, `0`–`1`. Higher tolerates more transcription slip and produces more false accepts; `0` demands an exact match. A value outside the range is dropped. |
 | `confirmationFrames` | integer | `2` | Consecutive agreeing frames before an acoustic spot counts — the false-accept damper. Must be an integer in `1`–`10`. Ignored by the `fallback` engine, which decides a transcript once and has nothing to confirm. |
 | `edgeStt` | boolean | `false` | Ask satellites to transcribe on-device and send text instead of audio. The node's probed capability is the veto: neither shipped host has an on-device recognizer, so both report `edgeStt: false` and the server ANDs this down to false. |
-| `idleTimeout` | integer (**seconds**) | `30` | Silence that ends the LISTENING state. Must be an integer in `5`–`600`. It ends listening **only** — never the session, so a re-wake an hour later resumes the same conversation. |
+| `idleTimeout` | integer (**seconds**) | `30` | How long a conversation stays open, in two places. On a satellite it ends the LISTENING state. On the server it bounds the **addressing window**: after a wake phrase picks a personality, further utterances within this long reach that same personality with no phrase. Must be an integer in `5`–`600`. It ends listening and addressing **only** — never the session, so a re-wake an hour later resumes the same conversation with its history. |
 
 `engine` values:
 
@@ -585,7 +585,8 @@ voice.wake.idleTimeout: 45
 
 Notes:
 
-- **Which host reads what.** The desktop satellite applies `sensitivity`, `confirmationFrames`, `idleTimeout` and `enabled` from the pushed frame each time it arms capture. `ethos listen` ignores the pushed scalars — it is push-to-talk, so it has no threshold to set — and reads `idleTimeout` from its own `config.yaml`. With the key absent there, the capture machine's own 300-second default applies rather than the 30 seconds the server reports.
+- **Which host reads what.** The desktop satellite matches phrases itself, so it applies `sensitivity`, `confirmationFrames`, `idleTimeout` and `enabled` from the pushed frame each time it arms capture. `ethos listen` matches nothing, so it ignores the pushed `sensitivity` and `confirmationFrames` and reads `idleTimeout` for its capture machine from its own `config.yaml`; with the key absent there, the capture machine's own 300-second default applies rather than the 30 seconds the server reports.
+- **`sensitivity` and `idleTimeout` are also server-side.** For a satellite that does not match phrases itself — `ethos listen` — the server runs the match, so `sensitivity` governs how much transcription slip a phrase tolerates and `idleTimeout` governs the addressing window. Both are read from this file on the server, not from the satellite's.
 - **Read-only in the UI.** Settings → Voice shows these values and does not write them; the route table below is what the web editor edits. Change the scalars in this file.
 - The `~/.ethos/models/wake/` directory is probed on every `ethos listen doctor` run. A missing directory is a warning for a `fallback` host and a hard failure for a `sherpa` one.
 
@@ -598,7 +599,7 @@ The phrase → personality table. The route id is yours to choose and must match
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `phrase` | string | — | The spoken trigger, e.g. `hey engineer`. Required. |
-| `personality` | string | — | Personality id this phrase wakes. Required. Re-resolved against the live registry at wake time, so a route naming a deleted or renamed personality is refused rather than silently defaulted. |
+| `personality` | string | — | Personality id this phrase wakes. Required. Resolved against the live registry at wake time, so a route naming a deleted or renamed personality is refused rather than silently defaulted. |
 | `privileged` | boolean | `false` | Opt-in required before a **privileged** personality is reachable by voice — one whose toolset can reach a tool the approval layer would stop and ask about. See [Why can't a voice in the room reach a privileged personality?](../explanation/wake-privilege.md). |
 | `enabled` | boolean | `true` | Switch a route off without deleting it. |
 
@@ -611,6 +612,7 @@ voice.wake.routes.kitchen.privileged: true
 Notes:
 
 - A route missing `phrase` **or** `personality` is dropped entirely rather than half-built — a half-route would look configured in the Settings table and never fire.
+- **The phrase must open the utterance.** Matching is head-anchored and word-aligned, so "so I said hey engineer to nobody" does not fire. The longest matching phrase wins, and the matched words are stripped before the turn runs — `hey engineer, did CI pass` reaches the agent as `did CI pass`.
 - **Implicit routes.** Every unprivileged personality also answers to `hey <name>`, synthesized server-side and never written to this file. Those carry the id `auto:<personalityId>` — outside the charset above, so they can never collide with one of yours. A configured route naming a personality suppresses that personality's implicit route, including a route you set to `enabled: false`.
 - Saving the table in **Settings → Voice → Wake routes** pushes it to every connected satellite. Hand-editing this file applies on the next satellite reconnect or server restart; nothing watches the file.
 - Implicit routes are shown in the Settings editor and cannot be saved back — they are not entries in this file.
