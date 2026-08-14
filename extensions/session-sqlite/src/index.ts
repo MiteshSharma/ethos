@@ -171,6 +171,13 @@ export class SQLiteSessionStore implements SessionStore {
       this.db.exec('ALTER TABLE messages ADD COLUMN trace_id TEXT');
     }
 
+    // Additive migration: inline vision/document blocks for natively-sent
+    // attachments. Held apart from `content` so the FTS5 external-content
+    // index never sees base64 payloads — see StoredMessage.contentBlocks.
+    if (!cols.some((c) => c.name === 'content_blocks')) {
+      this.db.exec('ALTER TABLE messages ADD COLUMN content_blocks TEXT');
+    }
+
     // Additive migration (context_compression Q2): per-session turn counter
     // and the turn of the last compaction, used by the anti-thrashing cooldown.
     const sessCols = this.db.pragma('table_info(sessions)') as Array<{ name: string }>;
@@ -360,9 +367,9 @@ export class SQLiteSessionStore implements SessionStore {
       .prepare(
         `INSERT INTO messages
          (id, session_id, role, content, tool_call_id, tool_name, tool_calls,
-          input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
-          estimated_cost_usd, trace_id, timestamp)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+          content_blocks, input_tokens, output_tokens, cache_read_tokens,
+          cache_creation_tokens, estimated_cost_usd, trace_id, timestamp)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       )
       .run(
         id,
@@ -372,6 +379,7 @@ export class SQLiteSessionStore implements SessionStore {
         data.toolCallId ?? null,
         data.toolName ?? null,
         data.toolCalls ? JSON.stringify(data.toolCalls) : null,
+        data.contentBlocks ? JSON.stringify(data.contentBlocks) : null,
         data.usage?.inputTokens ?? null,
         data.usage?.outputTokens ?? null,
         data.usage?.cacheReadTokens ?? null,
@@ -829,6 +837,7 @@ interface MessageRow {
   tool_call_id: string | null;
   tool_name: string | null;
   tool_calls: string | null;
+  content_blocks: string | null;
   input_tokens: number | null;
   output_tokens: number | null;
   cache_read_tokens: number | null;
@@ -897,6 +906,9 @@ function rowToMessage(r: MessageRow): StoredMessage {
     toolCallId: r.tool_call_id ?? undefined,
     toolName: r.tool_name ?? undefined,
     toolCalls: r.tool_calls ? (JSON.parse(r.tool_calls) as StoredMessage['toolCalls']) : undefined,
+    contentBlocks: r.content_blocks
+      ? (JSON.parse(r.content_blocks) as StoredMessage['contentBlocks'])
+      : undefined,
     usage:
       r.input_tokens != null
         ? {

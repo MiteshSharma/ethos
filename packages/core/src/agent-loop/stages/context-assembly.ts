@@ -1,5 +1,6 @@
 import type { AgentEvent, Attachment, MemoryContext, PromptContext } from '@ethosagent/types';
 import { buildAttachmentAnnotation } from '../../attachment-annotation';
+import { canInlineNatively, encodeNativeBlocks } from '../../attachment-blocks';
 import { classifyAttachment, unsupportedTypeError } from '../../attachment-classifier';
 import {
   formatInlinedAttachment,
@@ -26,6 +27,7 @@ import {
   DEFAULT_AGING_STATE,
 } from '../tool-result-aging';
 import type { AssembledContext, LoopDeps, TurnSetup } from '../turn-context';
+import { ageVisionBlocks } from '../vision-aging';
 
 // Phase 1a — aging state is persisted per session so the batched-at-crossings
 // invariant survives across turns. Best-effort: any storage error degrades to
@@ -139,12 +141,36 @@ export async function* assembleContext(
   const annotatedAttachments: Attachment[] = [];
   const attachmentErrors: string[] = [];
 
+  // C1 -- which native media, if any, this turn may send as inline blocks.
+  //
+  // The gate is the TURN's model, not the provider default: `turn-setup`
+  // already resolved the tier, and a `trivial`-tier route can land on a model
+  // with no vision at all. Capabilities are declared per provider CLASS rather
+  // than per model (openai-compat advertises `visionImages: true` whatever
+  // model it was constructed with), so a resolved override is a model whose
+  // capabilities we cannot actually verify -- and we degrade to annotation
+  // instead of guessing. That is not a temporary shortfall: the plan names
+  // tier downgrades as a permanent reason for this fallback, alongside local
+  // models.
+  const caps = setup.modelOverride ? undefined : deps.llm.capabilities;
+  const nativeVision = {
+    images: caps?.visionImages === true,
+    documents: caps?.visionDocuments === true,
+  };
+  const nativeCandidates: Attachment[] = [];
+
   for (const att of rawAttachments) {
     const cls = classifyAttachment(att);
     switch (cls) {
       case 'native':
-        // Class A -- keep for annotation, existing vision path handles these
+        // Class A -- always annotated (the annotation carries filenames and
+        // sizes the pixels do not, and block aging degrades back to it). When
+        // the turn's model can take them natively, the bytes ALSO go inline as
+        // blocks; `nativeCandidates` is that second pass, run below once the
+        // whole attachment list is classified so the per-turn block cap can be
+        // applied to the set rather than to each file in isolation.
         annotatedAttachments.push(att);
+        if (canInlineNatively(att, nativeVision)) nativeCandidates.push(att);
         break;
       case 'text': {
         // Class B-text -- read, decode, inline
@@ -209,6 +235,14 @@ export async function* assembleContext(
     }
   }
 
+  // C1 -- encode the native candidates once the whole list is classified, so
+  // the per-turn block cap applies to the set rather than to each file alone.
+  const native = await encodeNativeBlocks(nativeCandidates, {
+    storage: deps.storage,
+    attachmentCache: deps.attachmentCache,
+  });
+  attachmentErrors.push(...native.errors);
+
   // Build annotation only for Class A + Class B-extract attachments
   const attachmentAnnotation = buildAttachmentAnnotation(annotatedAttachments);
 
@@ -254,6 +288,9 @@ export async function* assembleContext(
     sessionId,
     role: 'user',
     content: annotatedText,
+    // Persisted so a resumed session re-sends the same blocks rather than
+    // silently degrading to the annotation. Absent when nothing went inline.
+    ...(native.blocks.length > 0 ? { contentBlocks: native.blocks } : {}),
     traceId,
   });
 
@@ -508,6 +545,12 @@ export async function* assembleContext(
   // LLM-facing history, so re-reads of the same file don't burn tokens.
   // `replayHistory` carries any active compaction watermark (summary + tail).
   let llmMessages = toLLMMessages(dedupHistory(replayHistory, ghostOpts));
+  // C3 — age out image/document blocks past the recency window. Runs on the
+  // unconditional path, ahead of the pressure-gated aging below, because this
+  // one is about RECENCY: a session that never nears its context window would
+  // otherwise re-send every screenshot on every request for the rest of its
+  // life. No-op (and no allocation) when nothing aged.
+  llmMessages = ageVisionBlocks(llmMessages);
   // Phase 1c — actuals-first gate signal. The most recent assistant turn's
   // real input tokens (+ measured static sections system+tools) were persisted
   // by Phase 0; prefer them over the chars/4 estimate. Absent on the first

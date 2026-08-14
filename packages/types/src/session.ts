@@ -1,4 +1,4 @@
-import type { TokenUsage } from './llm';
+import type { MessageContent, TokenUsage } from './llm';
 
 export interface Session {
   id: string;
@@ -44,6 +44,21 @@ export interface StoredMessage {
   toolCallId?: string;
   toolName?: string;
   toolCalls?: Array<{ id: string; name: string; input: unknown }>;
+  /**
+   * Inline image/document blocks for a `user` row whose attachments were sent
+   * natively to a vision-capable model, so a resumed session re-sends the same
+   * blocks instead of degrading to the annotation.
+   *
+   * Deliberately a SEPARATE field rather than widening `content` to
+   * `string | MessageContent[]`, for the same reason `toolCalls` is separate:
+   * `content` backs the FTS5 external-content index, and base64 payloads in
+   * that column would bloat the index and pollute `session_search` results.
+   * `content` therefore keeps the human-readable `<attachments>` annotation,
+   * which is also the residue block-aging falls back to.
+   *
+   * Absent on every row that has no inline blocks, which is almost all of them.
+   */
+  contentBlocks?: MessageContent[];
   timestamp: Date;
   usage?: TokenUsage;
   /**

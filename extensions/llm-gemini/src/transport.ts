@@ -91,7 +91,12 @@ function convertPart(c: { type: string; [key: string]: unknown }): Record<string
       return { functionCall: { name: c.name, args: c.input } };
     case 'tool_result':
       return { functionResponse: { name: c.tool_use_id, response: { result: c.content } } };
+    // Gemini takes images and PDFs through the same `inlineData` part, keyed
+    // by mime type. `document` shares the case: without it a PDF fell to the
+    // default branch and reached the model as the literal text "undefined",
+    // while the provider advertised `visionDocuments: true`.
     case 'image':
+    case 'document':
       return { inlineData: { mimeType: c.mediaType, data: c.data } };
     default:
       return { text: String(c.text ?? '') };

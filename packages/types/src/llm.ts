@@ -48,8 +48,18 @@ export type MessageContent =
       type: 'image';
       mediaType: 'image/png' | 'image/jpeg' | 'image/gif' | 'image/webp';
       data: string;
+      /** Source filename. Carried so block aging can name what it removed
+       *  (`[image aged out: shot.png]`) — providers build their payload from
+       *  `mediaType`/`data` and never send this. */
+      filename?: string;
     }
-  | { type: 'document'; mediaType: 'application/pdf'; data: string };
+  | {
+      type: 'document';
+      mediaType: 'application/pdf';
+      data: string;
+      /** Source filename — see the `image` variant. */
+      filename?: string;
+    };
 
 export interface CompletionOptions {
   system?: string;
