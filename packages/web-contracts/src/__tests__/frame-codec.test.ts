@@ -24,7 +24,7 @@ describe('frame codec', () => {
     const headerLen = ((bytes[1] ?? 0) << 8) | (bytes[2] ?? 0);
     expect(headerLen).toBeGreaterThan(0xff);
     expect(bytes[1]).toBe((headerLen >> 8) & 0xff);
-    expect(splitFrame(1, bytes)).not.toBeNull();
+    expect(splitFrame(1, bytes).ok).toBe(true);
   });
 
   it('still throws when a header exceeds the u16 length field', () => {
@@ -43,21 +43,31 @@ describe('frame codec', () => {
   it('stamps the caller-supplied version, and refuses any other on decode', () => {
     const bytes = encodeVoiceFrame({ t: 'utterance_end', utteranceId: 'u1' });
     expect(bytes[0]).toBe(VOICE_SOCKET_VERSION);
-    expect(splitFrame(VOICE_SOCKET_VERSION, bytes)).not.toBeNull();
-    expect(splitFrame(VOICE_SOCKET_VERSION + 1, bytes)).toBeNull();
+    expect(splitFrame(VOICE_SOCKET_VERSION, bytes).ok).toBe(true);
+    expect(splitFrame(VOICE_SOCKET_VERSION + 1, bytes).ok).toBe(false);
   });
 
-  it('returns null rather than throwing on every malformed input', () => {
-    expect(splitFrame(1, new Uint8Array([]))).toBeNull();
-    expect(splitFrame(1, new Uint8Array([1, 0]))).toBeNull();
-    expect(splitFrame(1, new Uint8Array([1, 0, 40]))).toBeNull();
+  it('names the framing fault rather than throwing, on every malformed input', () => {
+    // Each of these is a DIFFERENT bug on the far side — a sender writing text
+    // frames, a proxy truncating a message, a build on another framing version
+    // — and a codec that answered `null` to all four made them one bug report.
+    const reasonFor = (bytes: Uint8Array): string => {
+      const split = splitFrame(1, bytes);
+      return split.ok ? 'decoded' : split.reason;
+    };
+    expect(reasonFor(new Uint8Array([]))).toBe('frame is 0 bytes, shorter than the 3-byte prefix');
+    expect(reasonFor(new Uint8Array([1, 0]))).toBe(
+      'frame is 2 bytes, shorter than the 3-byte prefix',
+    );
+    expect(reasonFor(new Uint8Array([1, 0, 40]))).toBe('header claims 40 bytes but only 0 arrived');
     // Header bytes present, but not JSON.
-    expect(splitFrame(1, new Uint8Array([1, 0, 2, 0x7b, 0x74]))).toBeNull();
+    expect(reasonFor(new Uint8Array([1, 0, 2, 0x7b, 0x74]))).toBe('the 2-byte header is not JSON');
+    expect(reasonFor(new Uint8Array([9, 0, 0]))).toBe('framing version 9, and this lane speaks 1');
   });
 
   it('hands the header back as an unparsed value, leaving schema work to the lane', () => {
     const split = splitFrame(1, encodeFrame(1, { anything: true }));
-    expect(split?.header).toEqual({ anything: true });
-    expect(split?.payload.length).toBe(0);
+    expect(split.ok && split.header).toEqual({ anything: true });
+    expect(split.ok && split.payload.length).toBe(0);
   });
 });

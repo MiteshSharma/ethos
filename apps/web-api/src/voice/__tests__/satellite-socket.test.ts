@@ -229,7 +229,7 @@ describe('satellite socket', () => {
     const payloads: Uint8Array[] = [];
     ws.on('message', (data: Buffer) => {
       const decoded = decodeSatelliteServerFrame(new Uint8Array(data));
-      if (decoded) {
+      if (decoded.ok) {
         frames.push(decoded.header);
         payloads.push(decoded.payload);
       }

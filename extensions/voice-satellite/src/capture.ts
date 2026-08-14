@@ -40,6 +40,27 @@ export interface CaptureMachineDeps {
   /** Injected so tests drive time; never a bare setTimeout in the machine. */
   setTimer(fn: () => void, ms: number): unknown;
   clearTimer(handle: unknown): void;
+  /**
+   * SPEECH STARTED HERE, and nothing has been sent about it yet.
+   *
+   * Local narration only — "the microphone heard something". Fires on every
+   * VAD onset, including the chair scrapes that will be discarded a few
+   * hundred milliseconds later, so a host may render it but MUST NOT put it on
+   * a wire: that is what {@link onWake} is for, and the whole point of the two
+   * being separate callbacks is that one of them is cheap and the other is not.
+   *
+   * Optional because a host with no indicator has nothing to do at onset —
+   * omitting it means the utterance simply becomes visible at {@link onWake}.
+   */
+  onSpeechStart?(): void;
+  /**
+   * THIS UTTERANCE IS WORTH SENDING. Fires once the utterance has cleared
+   * `minSpeechMs`, immediately before the held frames are flushed through
+   * {@link onAudio} — so a host that opens a server-side utterance here is
+   * opening one that has audio behind it and an end in front of it.
+   *
+   * Deliberately NOT fired at speech onset. See {@link CaptureMachine.wake}.
+   */
   onWake(match: WakeMatch): void;
   onAudio(frame: WakeFrame): void;
   onUtteranceEnd(): void;
@@ -109,6 +130,12 @@ export class CaptureMachine {
    */
   private qualified = false;
   private held: WakeFrame[] = [];
+  /**
+   * The match that opened the CURRENT utterance, waiting for that utterance to
+   * earn it. Null outside `capturing`, and null again the moment it is
+   * released — see {@link emitAudio}.
+   */
+  private pendingWake: WakeMatch | null = null;
   private idleTimer: unknown = null;
   private watchdogTimer: unknown = null;
   private lastWakeAt: number | null = null;
@@ -262,13 +289,34 @@ export class CaptureMachine {
     }, this.idleTimeoutMs);
   }
 
+  /**
+   * Speech started. The utterance opens LOCALLY and nothing goes upstream yet.
+   *
+   * WHY THE WAKE IS HELD. It used to fire here, and the argument for that was
+   * latency: tell the server the moment the room makes a noise and the turn is
+   * already in flight by the time the words arrive. That argument died with the
+   * `minSpeechMs` floor. An energy VAD on an always-open microphone fires on
+   * chair scrapes, coughs, doors and keystrokes as its STEADY STATE, and the
+   * floor discards those LOCALLY — so every one of them was announcing a wake
+   * and opening a server-side utterance that no `audio` and no `utterance_end`
+   * would ever follow. The lane held each one until a later utterance
+   * superseded it or the connection dropped; nothing ever closed them, and each
+   * cost a `wake` frame, an `utterance_start`, a routing-table read and a row
+   * on somebody's Settings page for a door closing.
+   *
+   * Nothing is bought by the early send either: the frames are held anyway
+   * (`emitAudio`), so the server has no audio to work on until qualification
+   * regardless. Holding the wake to the same instant costs the turn nothing and
+   * makes an unqualified utterance completely invisible upstream — which is
+   * what "discarded locally" was always supposed to mean.
+   */
   private wake(match: WakeMatch): void {
     this.clearIdleTimer();
-    this.lastWakeAt = this.deps.now();
     this.deps.engine.reset();
     this.resetCapture();
+    this.pendingWake = match;
     this.transition('capturing');
-    this.deps.onWake(match);
+    this.deps.onSpeechStart?.();
   }
 
   /**
@@ -283,6 +331,11 @@ export class CaptureMachine {
    * advances `silentRun`, so an utterance that never reaches `minSpeechMs` ends
    * after at most `silenceFrames` consecutive quiet frames per speech frame it
    * did contain — tens of kilobytes, then discarded.
+   *
+   * THIS IS ALSO WHERE THE WAKE IS RELEASED, in front of the flush and in the
+   * same turn of the loop. The order is load-bearing: a host sends `wake` and
+   * `utterance_start` from `onWake` and the PCM from `onAudio`, and audio for
+   * an utterance the server has not been told about is audio the server drops.
    */
   private emitAudio(frame: WakeFrame): void {
     if (this.qualified) {
@@ -292,6 +345,16 @@ export class CaptureMachine {
     this.held.push(frame);
     if (this.speechMs < this.minSpeechMs) return;
     this.qualified = true;
+    const match = this.pendingWake;
+    this.pendingWake = null;
+    if (match !== null) {
+      // Recorded at RELEASE, not at onset. `lastWakeAt` feeds a "last wake
+      // event" row, and an onset the floor discarded is not an event — dating
+      // the row from one would have the Settings page report a wake for every
+      // chair scrape in the room.
+      this.lastWakeAt = this.deps.now();
+      this.deps.onWake(match);
+    }
     const held = this.held;
     this.held = [];
     for (const pending of held) this.deps.onAudio(pending);
@@ -306,8 +369,9 @@ export class CaptureMachine {
    * as "could not transcribe audio — try again", which reads to the user as
    * something they did wrong when they did not speak at all. So an utterance
    * that never accumulated `minSpeechMs` of speech is dropped HERE — no
-   * `onAudio` was ever called for it (the frames were held), no
-   * `onUtteranceEnd` is called now, and nothing upstream learns it existed.
+   * `onWake` and no `onAudio` were ever called for it (both are held until
+   * qualification), no `onUtteranceEnd` is called now, and nothing upstream
+   * learns it existed. "Nothing upstream" is literal: not even a wake.
    *
    * It re-arms through `armListening`, the same transition a completed turn
    * takes, so a discard can never wedge the machine — and it carries a detail
@@ -334,6 +398,10 @@ export class CaptureMachine {
     this.speechMs = 0;
     this.qualified = false;
     this.held = [];
+    // The unreleased wake goes with them. It belongs to the utterance being
+    // forgotten, and a wake that outlived its utterance would be announced
+    // against the next one.
+    this.pendingWake = null;
   }
 
   private clearIdleTimer(): void {

@@ -11,7 +11,7 @@
 // `init()`. That is what lets the gateway — which must never open an audio
 // device — share this package's contracts without inheriting its dependencies.
 
-export type { AudioDeviceInfo, CaptureDevice } from './audio-device';
+export type { AudioDeviceInfo, CaptureDevice, CaptureEnd } from './audio-device';
 export {
   CaptureMachine,
   type CaptureMachineConfig,

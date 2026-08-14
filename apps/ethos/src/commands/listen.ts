@@ -11,6 +11,13 @@
 //    prints "listening" and hears nothing is worse than one that exits: nobody
 //    walks over to a machine that looks fine.
 //
+//    THE RULE OUTLIVES STARTUP. A preflight only covers the moment it ran, and
+//    the loudest version of this failure happens a second later: the capture
+//    command exits, its end of the pipe closes, and the banner keeps claiming a
+//    microphone that is gone. So the device reports the end (`CaptureEnd` on the
+//    `CaptureDevice` seam) and this daemon leaves non-zero — see
+//    `onCaptureEnded`. stdin cannot be reopened; there is nothing to recover.
+//
 // 2. AVAILABILITY ONLY AFTER A REAL PROBE. The rows come from
 //    `runSatelliteDoctor`, which asks the engine factory to load what it would
 //    load and the device to enumerate what it would open. Nothing here reads a
@@ -71,6 +78,7 @@ import { EthosError, type Storage } from '@ethosagent/types';
 import {
   type AudioDeviceInfo,
   type CaptureDevice,
+  type CaptureEnd,
   CaptureMachine,
   type CaptureState,
   createEnergyFrameVad,
@@ -129,7 +137,11 @@ Open mic, server-side addressing. Nothing is acoustically wake-matched here:
 EVERY utterance on the pipe is transcribed by the server. It runs a turn only
 when the words open with a wake phrase — that phrase picks the personality —
 or when they follow one within voice.wake.idleTimeout. Anything else is heard
-and discarded. Stop the pipe to stop talking.`;
+and discarded.
+
+Closing the pipe stops the satellite. stdin cannot be reopened, so a capture
+command that exits — a bad device index, a denied permission, an ordinary end
+of stream — ends this process non-zero rather than leaving it looking alive.`;
 
 /**
  * Rate the wake engines, the VAD, and the server-side recognizers all assume.
@@ -144,6 +156,28 @@ const CAPTURE_FRAME_MS = 20;
 
 /** Same cadence as the gateway heartbeat — the readers are the same readers. */
 const HEARTBEAT_INTERVAL_MS = 10_000;
+
+/**
+ * How the daemon leaves when its capture pipe closes under it.
+ *
+ * The SAME code as "nothing is piped to stdin — not starting", because it is
+ * the same condition found a few seconds later, and a satellite that cannot
+ * hear has failed whichever moment it discovers that in. Non-zero is the
+ * load-bearing part: a supervisor restarting `ffmpeg | ethos listen` on failure
+ * is exactly the right response, and exit 0 would tell it the work is done.
+ */
+const CAPTURE_ENDED_EXIT = 1;
+
+/**
+ * How to enumerate input devices on this host, named when a pipe closed before
+ * it ever carried a frame — the case where the capture command's own arguments
+ * are the overwhelmingly likely fault.
+ */
+function listDevicesHint(): string {
+  return process.platform === 'darwin'
+    ? 'ffmpeg -f avfoundation -list_devices true -i ""'
+    : 'arecord -l';
+}
 
 /**
  * Fallback for the addressing window in the banner, matching the server's own
@@ -176,6 +210,40 @@ const SHARED_DOCTOR_LANE_PROBE_NAME = 'gateway';
 export function withLaneProbeName(probes: readonly DoctorProbeRow[]): DoctorProbeRow[] {
   return probes.map((p) =>
     p.name === SHARED_DOCTOR_LANE_PROBE_NAME ? { ...p, name: LANE_PROBE_NAME } : p,
+  );
+}
+
+/**
+ * What a passing `microphone` row on a pipe-fed host does NOT prove.
+ *
+ * The probe asks the device to enumerate, and this device enumerates on one
+ * fact: stdin is not a TTY. That is true and nearly useless — a pipe with a
+ * healthy `ffmpeg` behind it and a pipe whose `ffmpeg` died on a bad `-i :2`
+ * are byte-identical from here, and only consuming bytes could tell them apart,
+ * which a preflight must not do to audio the daemon is about to need. So the
+ * row keeps its ✓ (a working pipeline is genuinely fine) and says what it
+ * cannot see, rather than letting `1 input device(s)` read as proven capture.
+ */
+const PIPE_PROVES_ONLY_A_PIPE =
+  'stdin is a pipe, which is ALL this proves: whether anything is WRITING to it ' +
+  'cannot be known without consuming the audio, so a capture command that died on ' +
+  'startup looks identical here. `ethos listen` reports it the moment the pipe closes.';
+
+/**
+ * The `microphone` row with the caveat this host — and only this host — can add.
+ *
+ * Applied here rather than in the shared doctor because the caveat is a fact
+ * about THIS device: a desktop enumerating real inputs through a real binding
+ * has genuinely proven something, and would be made to apologize for it.
+ */
+export function withPipeCaveat(probes: readonly DoctorProbeRow[]): DoctorProbeRow[] {
+  return probes.map((p) =>
+    p.name === 'microphone' && p.ok && p.skipped !== true
+      ? {
+          ...p,
+          detail: `${p.detail === undefined ? '' : `${p.detail} — `}${PIPE_PROVES_ONLY_A_PIPE}`,
+        }
+      : p,
   );
 }
 
@@ -838,8 +906,9 @@ async function realPreflight(
 
   return {
     // Renamed exactly here, once, so the row, the fail flags and the JSON
-    // cannot disagree about what the reachability probe is called.
-    probes: withLaneProbeName(doctor.probes),
+    // cannot disagree about what the reachability probe is called; and the
+    // pipe caveat applied in the same place, for the same reason.
+    probes: withPipeCaveat(withLaneProbeName(doctor.probes)),
     configuredEngine,
     transcriptEngineOk: doctor.probes.some((p) => p.name === 'engine:transcript' && p.ok),
     modelsRequired: configuredEngine === 'sherpa',
@@ -1262,6 +1331,11 @@ export interface ListenHeartbeat {
 interface ListenDaemonContext extends ListenStartOptions {
   storage: Storage;
   device: CaptureDevice;
+  /**
+   * How the process leaves, once the shutdown path has run. Test seam — a test
+   * that drove the real `process.exit` would take the runner down with it.
+   */
+  exit?: (code: number) => void;
 }
 
 /**
@@ -1324,6 +1398,18 @@ export async function startListenDaemon(
   let captureState: CaptureState = 'idle';
   let wakeSeq = 0;
   let utteranceSeq = 0;
+  /**
+   * The utterance this daemon has printed a `●` for and NOT yet resolved.
+   *
+   * Local only. Set at speech onset, which is now earlier than the wake — the
+   * `CaptureMachine` holds the wake until the utterance clears its
+   * minimum-speech floor, so between onset and qualification there is an
+   * utterance this terminal has named and the server has never heard of. This
+   * is what the discard notice pairs against; `currentUtteranceId` below cannot,
+   * because for a discarded utterance it is never set at all.
+   */
+  let openUtteranceId: string | null = null;
+  /** The utterance the SERVER knows about. Null until the wake is released. */
   let currentUtteranceId: string | null = null;
   let audioSeq = 0;
   let playoutWarned = false;
@@ -1511,7 +1597,22 @@ export async function startListenDaemon(
   // the process rather than being ignored until capture starts.
   let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   let stopWatchdog: (() => void) | null = null;
-  const shutdown = async (): Promise<void> => {
+  let shuttingDown = false;
+  const leave = ctx.exit ?? ((code: number): void => process.exit(code));
+  /**
+   * The ONE way this daemon leaves, whatever asked it to.
+   *
+   * `code` is the whole difference between a deliberate Ctrl+C and a capture
+   * device that died: the teardown — health file removed, socket closed,
+   * watchdog stopped — is identical and must not be skipped by either, which is
+   * why the pipe-closed path comes through here rather than calling
+   * `process.exit` where it noticed.
+   */
+  const shutdown = async (code: number): Promise<void> => {
+    // A Ctrl+C landing on top of a capture end (or a SIGTERM on top of a
+    // SIGINT) must not run the teardown twice.
+    if (shuttingDown) return;
+    shuttingDown = true;
     say(`\n${c.dim}Shutting down...${c.reset}`);
     if (stopWatchdog) stopWatchdog();
     if (heartbeatTimer) clearInterval(heartbeatTimer);
@@ -1519,10 +1620,10 @@ export async function startListenDaemon(
     client.close();
     machine?.stop();
     await device.stop().catch(() => {});
-    process.exit(0);
+    leave(code);
   };
-  process.on('SIGINT', () => void shutdown());
-  process.on('SIGTERM', () => void shutdown());
+  process.on('SIGINT', () => void shutdown(0));
+  process.on('SIGTERM', () => void shutdown(0));
 
   client.connect();
   say(
@@ -1568,20 +1669,35 @@ export async function startListenDaemon(
       now: () => Date.now(),
       setTimer: (fn, ms) => setTimeout(fn, ms),
       clearTimer: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
-      onWake: (match) => {
-        const stamp = Date.now().toString(36);
-        const wakeId = `w${++wakeSeq}-${stamp}`;
-        const utteranceId = `u${++utteranceSeq}-${stamp}`;
-        currentUtteranceId = utteranceId;
-        audioSeq = 0;
+      // SPEECH ONSET IS A TERMINAL EVENT, NOT A WIRE EVENT. The `●` is what
+      // tells an operator the pipe is alive and the microphone is hearing the
+      // room, so it stays where it always was — at onset, before anything is
+      // known about whether the noise was a request. Nothing is sent from here:
+      // the machine holds the wake until the utterance clears its
+      // minimum-speech floor, which is what stops every chair scrape from
+      // opening a server-side utterance that nothing ever closes.
+      onSpeechStart: () => {
+        openUtteranceId = `u${++utteranceSeq}-${Date.now().toString(36)}`;
         // No personality on this line, because none has been chosen: the words
         // decide, and nobody has heard them yet. Claiming one here is what the
         // old push-to-talk banner did, and it was wrong the moment two
         // personalities shared a microphone.
         say(
-          `${c.dim}● speech — utterance ${utteranceId} open${c.reset}` +
+          `${c.dim}● speech — utterance ${openUtteranceId} open${c.reset}` +
             `${pinnedRoute === null ? '' : `${c.dim} (pinned to route ${pinnedRoute.id}).${c.reset}`}`,
         );
+      },
+      // The utterance earned its keep. NOW the server hears about it, and the
+      // held frames follow immediately behind on `onAudio`.
+      onWake: (match) => {
+        const stamp = Date.now().toString(36);
+        const wakeId = `w${++wakeSeq}-${stamp}`;
+        // The id the `●` line already printed. Only minted here if speech onset
+        // somehow did not run — the two must never name the same utterance
+        // differently in the same terminal.
+        const utteranceId = openUtteranceId ?? `u${++utteranceSeq}-${stamp}`;
+        currentUtteranceId = utteranceId;
+        audioSeq = 0;
         client.sendWake({
           wakeId,
           // No phrase and no personality: this engine matched SOUND. `routeId`
@@ -1597,6 +1713,7 @@ export async function startListenDaemon(
         client.sendAudio(currentUtteranceId, audioSeq++, frame.samples);
       },
       onUtteranceEnd: () => {
+        openUtteranceId = null;
         if (currentUtteranceId === null) return;
         client.sendUtteranceEnd(currentUtteranceId);
         // The machine has no "waiting for the server" state, and `thinking` has
@@ -1630,11 +1747,17 @@ export async function startListenDaemon(
         // consecutive duplicates instead would leave that dangling `●` standing
         // in exactly the noisy case it was meant to help: the details differ by
         // their millisecond count, so consecutive discards are rarely identical.
-        if (state === 'listening' && detail !== undefined && currentUtteranceId !== null) {
+        //
+        // Paired against the LOCALLY open utterance, not the one the server
+        // knows about: a discarded utterance never had a wake released for it,
+        // so `currentUtteranceId` is null on exactly the path this line exists
+        // to narrate.
+        if (state === 'listening' && detail !== undefined && openUtteranceId !== null) {
           say(`${c.dim}  ↩ ${detail}${c.reset}`);
-          // Nothing about this utterance went upstream — no audio was sent, no
-          // `utterance_end` follows, and there is no turn to close. Clearing it
-          // is what makes the next `●` the only open one.
+          // Nothing about this utterance went upstream — no wake, no audio, no
+          // `utterance_end`, and there is no turn to close. Clearing it is what
+          // makes the next `●` the only open one.
+          openUtteranceId = null;
           currentUtteranceId = null;
         }
       },
@@ -1643,7 +1766,57 @@ export async function startListenDaemon(
   );
   machine = capture;
 
-  await device.start((frame) => capture.pushFrame(frame));
+  /**
+   * Frames the device has handed over since it opened.
+   *
+   * Only ever read to choose the diagnosis below, and the distinction is the
+   * whole value of it: zero frames means the capture command never produced a
+   * sample, which points at the command line; any frames means it worked and
+   * then stopped, which does not.
+   */
+  let framesCaptured = 0;
+
+  /**
+   * The device is gone, and this daemon does not get to keep saying otherwise.
+   *
+   * THE LIE THIS FIXES: `ffmpeg` exits on a bad `-i :2`, its end of the pipe
+   * closes, and the daemon sits under a "Listening on ..." banner forever while
+   * the operator works out for themselves that nothing is happening. stdin
+   * cannot be reopened — there is no recovery to attempt, no backoff that could
+   * help, and staying up IS the false-available failure rule 1 of this file
+   * forbids. So it says what happened, names the likely cause when the frame
+   * count knows it, and leaves non-zero through the ordinary shutdown.
+   */
+  async function onCaptureEnded(end: CaptureEnd): Promise<void> {
+    if (shuttingDown) return;
+    // stderr for both branches: this is a process explaining why it is dying,
+    // and under `--json` stdout belongs to the doctor's object alone.
+    if (framesCaptured === 0) {
+      console.error(
+        `\n${c.red}✗ capture${c.reset} ${end.reason} before a single audio frame arrived — ` +
+          `nothing was ever heard on this satellite.\n` +
+          `  The capture command almost certainly failed to start: a device index that does not ` +
+          `exist, or a denied microphone permission, exits immediately and closes the pipe.\n` +
+          `  List this host's input devices with ${c.bold}${listDevicesHint()}${c.reset} and ` +
+          `re-run the pipeline with the index it reports.`,
+      );
+    } else {
+      console.error(
+        `\n${c.yellow}⚠ capture${c.reset} ${end.reason} after ${framesCaptured} frame(s) — ` +
+          `the capture command ended. Nothing more can be heard.`,
+      );
+    }
+    console.error('  The pipe cannot be reopened, so this satellite is stopping.');
+    await shutdown(CAPTURE_ENDED_EXIT);
+  }
+
+  await device.start(
+    (frame) => {
+      framesCaptured++;
+      capture.pushFrame(frame);
+    },
+    (end) => void onCaptureEnded(end),
+  );
   capture.start();
 
   // THE ONE SENTENCE A PERSON NEEDS, and the one this host could not give
@@ -1678,8 +1851,12 @@ export async function startListenDaemon(
         `) can address this microphone. Other phrases are heard and discarded.${c.reset}`,
     );
   }
+  // "close the pipe to stop talking" used to be a half-truth: the pipe closed
+  // and this line stayed on screen over a daemon that could no longer hear.
+  // Closing it now ENDS the satellite, and the sentence says which.
   say(
-    `${c.dim}Listening on ${deviceInfo.label}. Press Ctrl+C to stop; close the pipe to stop talking.${c.reset}\n`,
+    `${c.dim}Listening on ${deviceInfo.label}. Press Ctrl+C to stop; closing the pipe ` +
+      `stops this satellite (stdin cannot be reopened).${c.reset}\n`,
   );
 
   const startedAt = new Date().toISOString();

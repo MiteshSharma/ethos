@@ -1172,7 +1172,14 @@ function createPassiveMcpManager(): McpManager {
 
 export { type ChatDefaults, ChatService } from './features/chat/service';
 // Re-exports so boot code can read tokens / inspect contract surfaces directly.
+export type { WakeRoute, WakeRoutingTable } from './repositories/config.repository';
 export { WebTokenRepository } from './repositories/web-token.repository';
 export type { RouteModule } from './routes/route-module';
 export { setWhatsAppPairingCode, setWhatsAppQr } from './routes/setup-whatsapp';
 export type { DangerPredicate, DangerReason } from './services/approval-hook';
+// The satellite lane, exported so a host that OWNS a satellite client can be
+// tested against the code that actually receives its frames rather than
+// against a fixture — see `apps/ethos/src/__tests__/listen-satellite-e2e.test.ts`.
+export type { SatelliteLaneDeps, SatelliteLaneLimits } from './voice/satellite-lane';
+export { SatelliteRegistry } from './voice/satellite-registry';
+export { createSatelliteSocket, type SatelliteSocket } from './voice/satellite-socket';

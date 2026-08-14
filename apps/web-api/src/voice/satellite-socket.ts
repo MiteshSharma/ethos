@@ -70,13 +70,23 @@ export function createSatelliteSocket(opts: SatelliteSocketOptions): SatelliteSo
       const bytes = toBytes(data);
       if (!bytes) return;
       const frame = decodeSatelliteClientFrame(bytes);
-      if (!frame) {
+      if (!frame.ok) {
         // A malformed frame is a bug in one satellite build, not a reason to
         // take the microphone offline — say so and keep the socket.
+        //
+        // SAY WHICH FRAME AND WHICH FIELD. The refusal used to read
+        // "Unrecognized satellite frame — ignored.", which is the same sentence
+        // for a truncated audio frame, a satellite built against a newer
+        // framing version, and a `wake` missing a required field — so the only
+        // way to tell them apart was to bisect the satellite build. The decoder
+        // knows; it just used to throw the answer away. Payload bytes and
+        // header text never reach this line — see `describeIssues`.
         send({
           t: 'error',
           code: 'bad_frame',
-          message: 'Unrecognized satellite frame — ignored.',
+          message:
+            `Rejected ${frame.frameType === undefined ? 'a satellite frame' : `a '${frame.frameType}' frame`}` +
+            ` — ${frame.reason}. Ignored.`,
         });
         return;
       }

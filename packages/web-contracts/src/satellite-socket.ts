@@ -504,6 +504,32 @@ export interface DecodedSatelliteFrame<T> {
   payload: Uint8Array;
 }
 
+/**
+ * The outcome of decoding one frame — and, when it failed, WHY.
+ *
+ * A DISCRIMINATED RESULT rather than `T | null`, because `null` throws away the
+ * only thing anyone debugging this lane needs. The refusal it produced on the
+ * wire was "Unrecognized satellite frame — ignored.", which names no frame, no
+ * field, and no rule: an operator reading it has to bisect their own satellite
+ * build to learn which of nine frame types the server would not take. Zod
+ * already computed the answer inside `safeParse`; discarding it is the whole
+ * defect.
+ *
+ * `reason` is BOUNDED AND SANITIZED (see `describeIssues`): issue paths and
+ * codes only, never a received value. The header on this lane can carry a
+ * transcript of somebody's kitchen, so a decoder that echoed the input into a
+ * log line would turn a diagnostic into a recording.
+ */
+export type SatelliteFrameDecode<T> =
+  | ({ ok: true } & DecodedSatelliteFrame<T>)
+  | {
+      ok: false;
+      /** One line, safe to log: no header text, no payload bytes. */
+      reason: string;
+      /** The header's `t`, when the JSON parsed and carried a string one. */
+      frameType?: string;
+    };
+
 /** Encode one frame. `payload` is empty for control frames. */
 export function encodeSatelliteFrame(
   header: SatelliteClientFrame | SatelliteServerFrame,
@@ -513,25 +539,56 @@ export function encodeSatelliteFrame(
 }
 
 /**
- * Decode a frame sent by a satellite. Returns null for anything that does not
- * match the contract — the header arrives off a socket from a device on the
- * operator's LAN, so it is parsed with Zod, never cast.
+ * Decode a frame sent by a satellite — the header arrives off a socket from a
+ * device on the operator's LAN, so it is parsed with Zod, never cast.
  */
 export function decodeSatelliteClientFrame(
   bytes: Uint8Array,
-): DecodedSatelliteFrame<SatelliteClientFrame> | null {
-  const split = splitFrame(SATELLITE_SOCKET_VERSION, bytes);
-  if (!split) return null;
-  const parsed = SatelliteClientFrameSchema.safeParse(split.header);
-  return parsed.success ? { header: parsed.data, payload: split.payload } : null;
+): SatelliteFrameDecode<SatelliteClientFrame> {
+  return decodeWith(SatelliteClientFrameSchema, bytes);
 }
 
 /** Decode a frame sent by the server. Same untrusted-input posture. */
 export function decodeSatelliteServerFrame(
   bytes: Uint8Array,
-): DecodedSatelliteFrame<SatelliteServerFrame> | null {
+): SatelliteFrameDecode<SatelliteServerFrame> {
+  return decodeWith(SatelliteServerFrameSchema, bytes);
+}
+
+function decodeWith<T>(schema: z.ZodType<T>, bytes: Uint8Array): SatelliteFrameDecode<T> {
   const split = splitFrame(SATELLITE_SOCKET_VERSION, bytes);
-  if (!split) return null;
-  const parsed = SatelliteServerFrameSchema.safeParse(split.header);
-  return parsed.success ? { header: parsed.data, payload: split.payload } : null;
+  if (!split.ok) return { ok: false, reason: split.reason };
+  const parsed = schema.safeParse(split.header);
+  if (parsed.success) return { ok: true, header: parsed.data, payload: split.payload };
+  const frameType = frameTypeOf(split.header);
+  return {
+    ok: false,
+    reason: describeIssues(parsed.error.issues),
+    ...(frameType === null ? {} : { frameType }),
+  };
+}
+
+/** The header's `t`, if it has a plausible one. Bounded — it is untrusted. */
+function frameTypeOf(header: unknown): string | null {
+  if (typeof header !== 'object' || header === null) return null;
+  const t = (header as { t?: unknown }).t;
+  return typeof t === 'string' && t.length > 0 && t.length <= 32 ? t : null;
+}
+
+/**
+ * Zod's complaint, as one bounded line.
+ *
+ * PATH AND CODE ONLY. Zod's own `message` is tempting and is not safe here: for
+ * several issue codes it interpolates the RECEIVED value, and on this lane a
+ * received value can be a transcript or a slab of PCM read as text. The path
+ * and the code are enough to fix a satellite build — they name the field and
+ * the rule it broke — and they are structural, so they cannot leak content.
+ */
+function describeIssues(issues: readonly { path: PropertyKey[]; code: string }[]): string {
+  const shown = issues.slice(0, 3).map((issue) => {
+    const path = issue.path.map((part) => String(part)).join('.');
+    return `${path === '' ? '(root)' : path}: ${issue.code}`;
+  });
+  const rest = issues.length - shown.length;
+  return `${shown.join('; ')}${rest > 0 ? ` (+${rest} more)` : ''}`;
 }

@@ -37,13 +37,16 @@ class FakeSocket {
     const out: SatelliteClientFrame[] = [];
     for (const bytes of this.sent) {
       const decoded = decodeSatelliteClientFrame(bytes);
-      if (decoded !== null) out.push(decoded.header);
+      if (decoded.ok) out.push(decoded.header);
     }
     return out;
   }
 
   payloads(): Uint8Array[] {
-    return this.sent.map((b) => decodeSatelliteClientFrame(b)?.payload ?? new Uint8Array(0));
+    return this.sent.map((b) => {
+      const decoded = decodeSatelliteClientFrame(b);
+      return decoded.ok ? decoded.payload : new Uint8Array(0);
+    });
   }
 
   deliver(header: SatelliteServerFrame, payload?: Uint8Array): void {

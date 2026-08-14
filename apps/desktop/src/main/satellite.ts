@@ -379,7 +379,15 @@ async function armCapture(settings: {
   );
   machine = captureMachine;
 
-  await captureDevice.start((frame) => captureMachine.pushFrame(frame));
+  await captureDevice.start(
+    (frame) => captureMachine.pushFrame(frame),
+    // A device can be lost while it is open — the USB microphone is unplugged,
+    // the renderer's MediaStream track ends. Nothing else tells this host, so
+    // without this the row goes on saying `running` at a microphone that is
+    // gone. Unlike `ethos listen`'s pipe, this one can come back: a later
+    // routes push re-arms, so the node degrades rather than exiting.
+    (end) => degrade(`capture ended — ${end.reason}`),
+  );
   captureMachine.start();
   publish({ state: 'running', reason: undefined });
 }

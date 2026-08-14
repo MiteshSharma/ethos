@@ -43,7 +43,10 @@ interface Harness {
   engine: WakeEngine & { pushSpy: ReturnType<typeof vi.fn>; resetSpy: ReturnType<typeof vi.fn> };
   states: Array<{ state: CaptureState; detail?: string }>;
   audio: WakeFrame[];
+  /** Wakes RELEASED upstream — the utterances that earned a server-side turn. */
   wakes: WakeMatch[];
+  /** Speech onsets, which every blip produces and no blip sends. */
+  speechStarts: number;
   utteranceEnds: number;
   /** Next N `engine.push()` calls report a wake. */
   armWake(): void;
@@ -69,6 +72,7 @@ function harness(config: CaptureMachineConfig = CONFIG): Harness {
   const audio: WakeFrame[] = [];
   const wakes: WakeMatch[] = [];
   let utteranceEnds = 0;
+  let speechStarts = 0;
   let wakeArmed = false;
   let speechNow = true;
 
@@ -96,6 +100,9 @@ function harness(config: CaptureMachineConfig = CONFIG): Harness {
       now: () => 1_700_000_000_000,
       setTimer: timers.set,
       clearTimer: timers.clear,
+      onSpeechStart: () => {
+        speechStarts++;
+      },
       onWake: (m) => wakes.push(m),
       onAudio: (f) => audio.push(f),
       onUtteranceEnd: () => {
@@ -113,6 +120,9 @@ function harness(config: CaptureMachineConfig = CONFIG): Harness {
     states,
     audio,
     wakes,
+    get speechStarts() {
+      return speechStarts;
+    },
     get utteranceEnds() {
       return utteranceEnds;
     },
@@ -145,12 +155,18 @@ describe('CaptureMachine — arming and capture', () => {
     h.armWake();
     h.machine.pushFrame(frame());
 
-    expect(h.wakes).toEqual([MATCH]);
+    // Speech onset opens the utterance LOCALLY. The wake is held — nothing has
+    // gone upstream yet, because nothing has earned it.
+    expect(h.speechStarts).toBe(1);
+    expect(h.wakes).toHaveLength(0);
     expect(h.machine.getState()).toBe('capturing');
     // The waking frame itself is not forwarded as utterance audio.
     expect(h.audio).toHaveLength(0);
 
     h.speech(2);
+    // One 20 ms frame clears this config's floor, so the wake is released with
+    // the held frames behind it — never after them.
+    expect(h.wakes).toEqual([MATCH]);
     expect(h.audio).toHaveLength(2);
     h.silence(2);
     expect(h.machine.getState()).toBe('capturing');
@@ -192,8 +208,11 @@ describe('CaptureMachine — minimum speech', () => {
     h.speech(2); // 40 ms — a cough, not a request.
     h.silence(3);
 
-    // Nothing upstream: not the audio (it was held, never forwarded), and not
-    // the end-of-utterance that would have started a turn.
+    // Nothing upstream AT ALL: not the wake (it was held), not the audio (also
+    // held, never forwarded), and not the end-of-utterance that would have
+    // started a turn. The onset happened and only this machine knows.
+    expect(h.speechStarts).toBe(1);
+    expect(h.wakes).toHaveLength(0);
     expect(h.audio).toHaveLength(0);
     expect(h.utteranceEnds).toBe(0);
     // Reported, and re-armed exactly as a completed turn re-arms.
@@ -213,9 +232,14 @@ describe('CaptureMachine — minimum speech', () => {
 
     wake(h);
     expect(h.machine.getState()).toBe('capturing');
-    expect(h.wakes).toHaveLength(2);
+    // Two onsets, and still nothing released: the first was discarded and the
+    // second has not qualified yet.
+    expect(h.speechStarts).toBe(2);
+    expect(h.wakes).toHaveLength(0);
     h.speech(5);
     h.silence(3);
+    // One wake for two onsets — the room noise cost the server nothing.
+    expect(h.wakes).toHaveLength(1);
     expect(h.utteranceEnds).toBe(1);
   });
 
@@ -248,6 +272,34 @@ describe('CaptureMachine — minimum speech', () => {
     }
     expect(h.utteranceEnds).toBe(0);
     expect(h.audio).toHaveLength(0);
+    // Four chair scrapes, four onsets, and not one server-side utterance. This
+    // is the whole point of holding the wake: an open microphone in a room is
+    // free until somebody actually says something to it.
+    expect(h.speechStarts).toBe(4);
+    expect(h.wakes).toHaveLength(0);
+  });
+
+  it('releases the wake in front of the flush, never behind it', () => {
+    // ORDER IS THE CONTRACT. A host sends `wake` + `utterance_start` from
+    // `onWake` and PCM from `onAudio`; audio for an utterance the server has
+    // not been told about is audio the server drops on arrival.
+    const order: string[] = [];
+    const h = harness(GUARDED);
+    const spyWake = h.wakes;
+    const spyAudio = h.audio;
+    // Recorded through the arrays the harness already fills, by length: the
+    // first `onAudio` must land after the array of wakes is non-empty.
+    h.machine.start();
+    wake(h);
+    h.silence(2);
+    for (let i = 0; i < 5; i++) {
+      const before = spyAudio.length;
+      h.speech(1);
+      if (spyAudio.length > before && order.length === 0) {
+        order.push(spyWake.length > 0 ? 'wake-first' : 'audio-first');
+      }
+    }
+    expect(order).toEqual(['wake-first']);
   });
 
   it('defaults to a threshold that a blip cannot clear', () => {
@@ -345,14 +397,19 @@ describe('CaptureMachine — verified re-arm', () => {
       h.machine.endPlayback();
     }
 
-    // Six wakes, five turns: the discarded one woke and went nowhere.
-    expect(h.wakes).toHaveLength(6);
+    // Six ONSETS, five wakes, five turns: the discarded one opened an utterance
+    // locally and never reached the wire.
+    expect(h.speechStarts).toBe(6);
+    expect(h.wakes).toHaveLength(5);
     expect(h.utteranceEnds).toBe(5);
     expect(h.machine.getState()).toBe('listening');
-    // And it is genuinely armed, not merely labelled: another wake fires.
+    // And it is genuinely armed, not merely labelled: another utterance opens
+    // and, once it has said enough, reaches the wire.
     h.armWake();
     h.machine.pushFrame(frame());
-    expect(h.wakes).toHaveLength(7);
+    expect(h.machine.getState()).toBe('capturing');
+    h.speech(3);
+    expect(h.wakes).toHaveLength(6);
   });
 });
 
@@ -371,6 +428,7 @@ describe('CaptureMachine — watchdog', () => {
 
     h.armWake();
     h.machine.pushFrame(frame());
+    h.speech(1);
     expect(h.wakes).toHaveLength(1);
   });
 
@@ -394,8 +452,9 @@ describe('CaptureMachine — idle timeout', () => {
     // criterion is satisfied structurally, and the mic is still live.
     h.armWake();
     h.machine.pushFrame(frame());
-    expect(h.wakes).toEqual([MATCH]);
     expect(h.machine.getState()).toBe('capturing');
+    h.speech(1);
+    expect(h.wakes).toEqual([MATCH]);
   });
 
   it('does not fire while an utterance is being captured', () => {
@@ -425,6 +484,7 @@ describe('CaptureMachine — mute', () => {
     expect(h.machine.getState()).toBe('listening');
     expect(h.engine.resetSpy.mock.calls.length).toBeGreaterThan(resetsBefore);
     h.machine.pushFrame(frame());
+    h.speech(1);
     expect(h.wakes).toHaveLength(1);
   });
 

@@ -24,15 +24,35 @@ export interface AudioDeviceInfo {
 }
 
 /**
+ * Capture stopped without the host asking it to.
+ *
+ * A device can be lost while it is open — the pipe feeding stdin closes, a USB
+ * microphone is unplugged, a renderer's MediaStream track ends — and nothing
+ * else on this seam can say so. A frame callback that simply goes quiet is
+ * indistinguishable from a silent room, which is how a satellite ends up
+ * claiming to listen at a device that is gone.
+ */
+export interface CaptureEnd {
+  /** Why capture ended, in the device's own words. Rendered to the operator. */
+  reason: string;
+}
+
+/**
  * A microphone as the satellite uses one: start it, get frames, stop it.
  *
  * `list()` is on the device rather than a free function because enumeration and
  * capture are the same binding — a host that can name its inputs is a host that
  * has loaded the thing that opens them, and doctor's device probe is only worth
  * anything if it asks the code that would actually do the opening.
+ *
+ * `onEnd` IS REQUIRED, not optional. An optional end callback is the same gap
+ * wearing a nicer name: a host that forgets it goes deaf silently, which is the
+ * exact failure this parameter exists to make impossible. The device must call
+ * it at most once, and never after `stop()` — a stop the host asked for is not
+ * an end the host needs telling about.
  */
 export interface CaptureDevice {
-  start(onFrame: (frame: WakeFrame) => void): Promise<void>;
+  start(onFrame: (frame: WakeFrame) => void, onEnd: (end: CaptureEnd) => void): Promise<void>;
   stop(): Promise<void>;
   list(): Promise<AudioDeviceInfo[]>;
 }

@@ -354,8 +354,16 @@ export function createSatelliteClient(options: SatelliteClientOptions): Satellit
         const bytes = toBytes(data);
         if (bytes === null) return;
         const decoded = decodeSatelliteServerFrame(bytes);
-        // Malformed, wrong version, or not in the union: dropped, not thrown.
-        if (decoded === null) return;
+        // Malformed, wrong version, or not in the union: dropped, not thrown —
+        // but SAID, because a satellite that silently ignores half of what its
+        // gateway sends looks exactly like a gateway that is sending nothing.
+        if (!decoded.ok) {
+          report(
+            `dropped an undecodable server frame` +
+              `${decoded.frameType === undefined ? '' : ` ('${decoded.frameType}')`} — ${decoded.reason}`,
+          );
+          return;
+        }
         handleServerFrame(decoded.header, decoded.payload);
       },
       onError: (err: Error) => {

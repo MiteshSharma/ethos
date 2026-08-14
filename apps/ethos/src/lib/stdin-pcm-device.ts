@@ -30,7 +30,12 @@
 // needed; a real failure such as a device index that does not exist still
 // prints. `arecord -q` does the same for its one banner line.
 
-import type { AudioDeviceInfo, CaptureDevice, WakeFrame } from '@ethosagent/voice-satellite';
+import type {
+  AudioDeviceInfo,
+  CaptureDevice,
+  CaptureEnd,
+  WakeFrame,
+} from '@ethosagent/voice-satellite';
 
 export interface StdinPcmDeviceOptions {
   /** Injected so a test drives frames through a plain PassThrough. */
@@ -60,11 +65,46 @@ export function createStdinPcmDevice(opts: StdinPcmDeviceOptions): CaptureDevice
   const bytesPerFrame = Math.max(2, Math.round((opts.sampleRate * opts.frameMs) / 1000) * 2);
   let carry: Buffer = Buffer.alloc(0);
   let onData: ((chunk: Buffer) => void) | null = null;
+  /** Set for the lifetime of one `start()`; the sole gate on reporting an end. */
+  let onEnded: ((end: CaptureEnd) => void) | null = null;
+  let onEnd: (() => void) | null = null;
+  let onStreamError: ((err: Error) => void) | null = null;
+
+  /**
+   * Drop every listener and forget the run. Shared by `stop()` and the end
+   * path so a device that ended is in exactly the state a stopped one is.
+   */
+  function detach(): void {
+    if (onData !== null) opts.stdin.off('data', onData);
+    if (onEnd !== null) {
+      // Both fire on a closed pipe, in that order, and either can arrive
+      // first on a destroyed one — so the listeners come off together and
+      // `onEnded` is nulled before the host is called. That is what makes
+      // the report exactly-once rather than twice.
+      opts.stdin.off('end', onEnd);
+      opts.stdin.off('close', onEnd);
+    }
+    if (onStreamError !== null) opts.stdin.off('error', onStreamError);
+    onData = null;
+    onEnd = null;
+    onStreamError = null;
+    carry = Buffer.alloc(0);
+  }
+
+  /** Report an unsolicited end, once. A no-op once `stop()` has detached. */
+  function reportEnd(reason: string): void {
+    const notify = onEnded;
+    if (notify === null) return;
+    onEnded = null;
+    detach();
+    notify({ reason });
+  }
 
   return {
-    async start(onFrame: (frame: WakeFrame) => void): Promise<void> {
+    async start(onFrame: (frame: WakeFrame) => void, onCaptureEnd): Promise<void> {
       if (onData !== null) return;
       carry = Buffer.alloc(0);
+      onEnded = onCaptureEnd;
       onData = (chunk: Buffer): void => {
         // A pipe delivers arbitrary byte counts, never whole frames. The
         // remainder is carried rather than dropped: a truncated sample at every
@@ -82,7 +122,19 @@ export function createStdinPcmDevice(opts: StdinPcmDeviceOptions): CaptureDevice
         }
         carry = buf;
       };
+      // THE WRITER'S END CLOSING IS THE DEVICE BEING LOST. `ffmpeg` exiting on
+      // a bad device index — the wrong `-i :2` after a USB headset shifted the
+      // indices — closes this pipe within milliseconds of the daemon starting,
+      // and without these listeners nothing downstream can tell that from a
+      // quiet room. The daemon then claims to be listening at a pipe that has
+      // no writer, forever.
+      onEnd = (): void => reportEnd('the capture pipe on stdin closed');
+      onStreamError = (err: Error): void =>
+        reportEnd(`the capture pipe on stdin failed: ${err.message}`);
       opts.stdin.on('data', onData);
+      opts.stdin.on('end', onEnd);
+      opts.stdin.on('close', onEnd);
+      opts.stdin.on('error', onStreamError);
       if (typeof (opts.stdin as { resume?: () => void }).resume === 'function') {
         (opts.stdin as { resume: () => void }).resume();
       }
@@ -90,9 +142,11 @@ export function createStdinPcmDevice(opts: StdinPcmDeviceOptions): CaptureDevice
 
     async stop(): Promise<void> {
       if (onData === null) return;
-      opts.stdin.off('data', onData);
-      onData = null;
-      carry = Buffer.alloc(0);
+      // Nulled BEFORE detaching: a `close` emitted synchronously by the pause
+      // below is the host's own stop coming back around, not an end it needs
+      // to be told about.
+      onEnded = null;
+      detach();
       if (typeof (opts.stdin as { pause?: () => void }).pause === 'function') {
         (opts.stdin as { pause: () => void }).pause();
       }

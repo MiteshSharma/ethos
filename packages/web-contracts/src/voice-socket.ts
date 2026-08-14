@@ -345,7 +345,7 @@ export function decodeVoiceClientFrame(
   bytes: Uint8Array,
 ): DecodedVoiceFrame<VoiceClientFrame> | null {
   const split = splitFrame(VOICE_SOCKET_VERSION, bytes);
-  if (!split) return null;
+  if (!split.ok) return null;
   const parsed = VoiceClientFrameSchema.safeParse(split.header);
   return parsed.success ? { header: parsed.data, payload: split.payload } : null;
 }
@@ -355,7 +355,7 @@ export function decodeVoiceServerFrame(
   bytes: Uint8Array,
 ): DecodedVoiceFrame<VoiceServerFrame> | null {
   const split = splitFrame(VOICE_SOCKET_VERSION, bytes);
-  if (!split) return null;
+  if (!split.ok) return null;
   const parsed = VoiceServerFrameSchema.safeParse(split.header);
   return parsed.success ? { header: parsed.data, payload: split.payload } : null;
 }

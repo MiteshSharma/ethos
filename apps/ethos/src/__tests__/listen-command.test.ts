@@ -3,9 +3,12 @@
 // Driven entirely through the injected `ListenCommandDeps`, so nothing here
 // loads a config, opens a socket, or touches stdin.
 
+import { join } from 'node:path';
+import { ethosDir } from '@ethosagent/config';
 import { InMemoryStorage } from '@ethosagent/storage-fs';
 import type {
   CaptureDevice,
+  CaptureEnd,
   SatelliteSocketFactory,
   SatelliteSocketHandlers,
   WakeFrame,
@@ -19,6 +22,7 @@ import {
   runListenCommand,
   startListenDaemon,
   USAGE,
+  withPipeCaveat,
 } from '../commands/listen';
 
 function preflight(overrides: Partial<ListenPreflight> = {}): ListenPreflight {
@@ -288,18 +292,25 @@ function fakeTransport(): {
   };
 }
 
-/** A `CaptureDevice` a test can push captured frames into. */
-function fakeDevice(): { device: CaptureDevice; push(frame: WakeFrame): void } {
+/** A `CaptureDevice` a test can push captured frames into, and end. */
+function fakeDevice(): {
+  device: CaptureDevice;
+  push(frame: WakeFrame): void;
+  end(reason: string): void;
+} {
   let sink: ((frame: WakeFrame) => void) | null = null;
+  let ended: ((end: CaptureEnd) => void) | null = null;
   return {
     device: {
-      start: async (onFrame) => {
+      start: async (onFrame, onEnd) => {
         sink = onFrame;
+        ended = onEnd;
       },
       stop: async () => {},
       list: async () => [{ id: 'stdin', label: 'stdin' }],
     },
     push: (frame) => sink?.(frame),
+    end: (reason) => ended?.({ reason }),
   };
 }
 
@@ -361,9 +372,26 @@ async function runDaemon(
   ready: Promise<void>;
   push(frame: SatelliteServerFrame): void;
   capture(frame: WakeFrame): void;
+  /** The device losing its input, the way a closed pipe reaches the daemon. */
+  endCapture(reason: string): void;
+  /** How the daemon left. `process.exit` would take the runner with it. */
+  exit: ReturnType<typeof vi.fn<(code: number) => void>>;
+  storage: InMemoryStorage;
+  /** The handlers the daemon installed, so Ctrl+C can be driven without a signal. */
+  signal(name: 'SIGINT' | 'SIGTERM'): void;
 }> {
   const transport = fakeTransport();
   const device = fakeDevice();
+  const storage = new InMemoryStorage();
+  // The heartbeat's write is best-effort and swallows its own failure, so
+  // without the data dir the health file silently never appears and the test
+  // that asserts it is REMOVED would pass against a daemon that never wrote it.
+  await storage.mkdir(ethosDir());
+  const exit = vi.fn<(code: number) => void>();
+  const before = {
+    SIGINT: process.listeners('SIGINT'),
+    SIGTERM: process.listeners('SIGTERM'),
+  };
   let markReady: (() => void) | null = null;
   const ready = new Promise<void>((resolve) => {
     markReady = resolve;
@@ -372,15 +400,31 @@ async function runDaemon(
     preflight({ ...(flags.route === undefined ? {} : { requestedRoute: flags.route }) }),
     { json: flags.json === true, positional: [], ...(flags.route ? { route: flags.route } : {}) },
     {
-      storage: new InMemoryStorage(),
+      storage,
       device: device.device,
       createSocket: transport.factory,
       onReady: () => markReady?.(),
+      exit,
     },
   );
   await transport.opened;
   transport.push(routesFrame(routes));
-  return { done, ready, push: transport.push, capture: device.push };
+  return {
+    done,
+    ready,
+    push: transport.push,
+    capture: device.push,
+    endCapture: device.end,
+    exit,
+    storage,
+    // Calling the listener directly rather than `process.emit`: emitting a real
+    // SIGINT here would also reach vitest's own handler and end the run.
+    signal: (name) => {
+      for (const listener of process.listeners(name)) {
+        if (!before[name].includes(listener)) (listener as NodeJS.SignalsListener)(name);
+      }
+    },
+  };
 }
 
 describe('the daemon is an open mic addressed by phrase', () => {
@@ -615,5 +659,113 @@ describe('the daemon narrates the turn', () => {
     // Once per CHANGE: a repeated toggle of the same value says nothing new.
     expect(occurrences(out, 'this node is muted')).toBe(1);
     expect(occurrences(out, 'wake re-enabled')).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The capture pipe closing — the failure that used to be a daemon claiming to
+// listen at a pipe with no writer, forever.
+// ---------------------------------------------------------------------------
+
+describe('the daemon stops when its capture device does', () => {
+  it('a pipe that closed before ANY frame is diagnosed as a capture command that never started', async () => {
+    // What a real operator hit: `ffmpeg -i :2` with a stale device index exits
+    // in milliseconds, and every frame count downstream stays zero.
+    const { ready, endCapture, exit } = await runDaemon([wakeRoute('auto:engineer', 'engineer')]);
+    await ready;
+    endCapture('the capture pipe on stdin closed');
+
+    await vi.waitFor(() => expect(exit).toHaveBeenCalledWith(1));
+    const err = errLines.join('\n');
+    expect(err).toContain('before a single audio frame arrived');
+    expect(err).toContain('failed to start');
+    expect(err).toContain('device index that does not exist');
+    // …and where to go next, not just what broke.
+    expect(err).toMatch(/list_devices|arecord -l/);
+    expect(err).toContain('cannot be reopened');
+  });
+
+  it('a pipe that closed AFTER frames is an ordinary end of stream, and still non-zero', async () => {
+    const { ready, capture, endCapture, exit } = await runDaemon([
+      wakeRoute('auto:engineer', 'engineer'),
+    ]);
+    await ready;
+    capture(quietFrame());
+    capture(quietFrame());
+    endCapture('the capture pipe on stdin closed');
+
+    await vi.waitFor(() => expect(exit).toHaveBeenCalledWith(1));
+    const err = errLines.join('\n');
+    expect(err).toContain('after 2 frame(s)');
+    expect(err).toContain('the capture command ended');
+    // Nothing arrived to blame the command line for, so nothing does.
+    expect(err).not.toContain('failed to start');
+    expect(err).not.toContain('before a single audio frame');
+  });
+
+  it('runs the ordinary shutdown — the health file does not outlive the daemon', async () => {
+    const { ready, endCapture, exit, storage } = await runDaemon([
+      wakeRoute('auto:engineer', 'engineer'),
+    ]);
+    await ready;
+    const healthPath = join(ethosDir(), 'listen-health.json');
+    await vi.waitFor(async () => expect(await storage.exists(healthPath)).toBe(true));
+
+    endCapture('the capture pipe on stdin closed');
+
+    await vi.waitFor(() => expect(exit).toHaveBeenCalledWith(1));
+    expect(await storage.exists(healthPath)).toBe(false);
+  });
+
+  it('Ctrl+C is still a clean exit, and says nothing about a pipe', async () => {
+    const { ready, exit, signal } = await runDaemon([wakeRoute('auto:engineer', 'engineer')]);
+    await ready;
+    signal('SIGINT');
+
+    await vi.waitFor(() => expect(exit).toHaveBeenCalledWith(0));
+    const all = logs.join('\n');
+    expect(all).toContain('Shutting down');
+    // The banner mentions the pipe, so the assertion is on the DIAGNOSIS: a
+    // deliberate stop must not accuse a capture command of anything.
+    expect(all).not.toContain('✗ capture');
+    expect(all).not.toContain('⚠ capture');
+    expect(all).not.toContain('failed to start');
+    expect(all).not.toContain('this satellite is stopping');
+  });
+
+  it('a Ctrl+C landing on top of a closed pipe does not tear down twice', async () => {
+    const { ready, endCapture, exit, signal } = await runDaemon([
+      wakeRoute('auto:engineer', 'engineer'),
+    ]);
+    await ready;
+    endCapture('the capture pipe on stdin closed');
+    signal('SIGINT');
+
+    await vi.waitFor(() => expect(exit).toHaveBeenCalledTimes(1));
+    expect(exit).toHaveBeenCalledWith(1);
+    expect(occurrences(logs.join('\n'), 'Shutting down')).toBe(1);
+  });
+});
+
+describe('the microphone row does not overclaim on a pipe', () => {
+  it('keeps its tick and says what a non-TTY stdin cannot prove', async () => {
+    const rows = withPipeCaveat([
+      { name: 'microphone', ok: true, detail: '1 input device(s): stdin' },
+    ]);
+    expect(rows[0]?.ok).toBe(true);
+    expect(rows[0]?.detail).toContain('1 input device(s)');
+    expect(rows[0]?.detail).toContain('ALL this proves');
+    expect(rows[0]?.detail).toContain('died on startup looks identical here');
+  });
+
+  it('leaves a failing row, a skipped row, and every other probe alone', async () => {
+    const rows = withPipeCaveat([
+      { name: 'microphone', ok: false, detail: 'no input devices' },
+      { name: 'microphone', ok: true, skipped: true, detail: 'skipped — nothing wired' },
+      { name: 'models', ok: true, detail: '4 file(s)' },
+    ]);
+    expect(rows[0]?.detail).toBe('no input devices');
+    expect(rows[1]?.detail).toBe('skipped — nothing wired');
+    expect(rows[2]?.detail).toBe('4 file(s)');
   });
 });

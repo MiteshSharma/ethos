@@ -59,8 +59,21 @@ export function encodeFrame(version: number, header: unknown, payload?: Uint8Arr
 }
 
 /**
- * Split a frame into its raw header value and payload. Null on any malformed
- * input — too short to hold a prefix, a version byte this lane does not speak,
+ * The outcome of splitting one frame. A DISCRIMINATED RESULT rather than
+ * `T | null`, because the four ways framing fails are four different bugs — a
+ * satellite built against another framing version, a proxy that truncated a
+ * message, a sender that wrote text where bytes were expected — and a lane that
+ * can only say "malformed" sends whoever is holding the pager to read all of
+ * them. `reason` is derived from the LENGTHS and the version byte only: no
+ * header text and no payload bytes ever reach it, so it is safe to log.
+ */
+export type FrameSplit =
+  | { ok: true; header: unknown; payload: Uint8Array }
+  | { ok: false; reason: string };
+
+/**
+ * Split a frame into its raw header value and payload, or say why it is not a
+ * frame — too short to hold a prefix, a version byte this lane does not speak,
  * a length that claims more bytes than arrived, or a header that is not JSON.
  *
  * The header comes back as `unknown` on purpose. Framing can only tell you that
@@ -68,22 +81,34 @@ export function encodeFrame(version: number, header: unknown, payload?: Uint8Arr
  * lane's question, answered by its own Zod union. Returning a typed value here
  * would be a cast wearing a helpful face.
  */
-export function splitFrame(
-  version: number,
-  bytes: Uint8Array,
-): { header: unknown; payload: Uint8Array } | null {
-  if (bytes.length < FRAME_HEADER_OFFSET) return null;
-  if (bytes[0] !== version) return null;
+export function splitFrame(version: number, bytes: Uint8Array): FrameSplit {
+  if (bytes.length < FRAME_HEADER_OFFSET) {
+    return {
+      ok: false,
+      reason: `frame is ${bytes.length} bytes, shorter than the ${FRAME_HEADER_OFFSET}-byte prefix`,
+    };
+  }
+  if (bytes[0] !== version) {
+    return {
+      ok: false,
+      reason: `framing version ${bytes[0]}, and this lane speaks ${version}`,
+    };
+  }
   const headerLen = ((bytes[1] ?? 0) << 8) | (bytes[2] ?? 0);
   const headerEnd = FRAME_HEADER_OFFSET + headerLen;
-  if (bytes.length < headerEnd) return null;
+  if (bytes.length < headerEnd) {
+    return {
+      ok: false,
+      reason: `header claims ${headerLen} bytes but only ${bytes.length - FRAME_HEADER_OFFSET} arrived`,
+    };
+  }
   let header: unknown;
   try {
     header = JSON.parse(decoder.decode(bytes.subarray(FRAME_HEADER_OFFSET, headerEnd)));
   } catch {
-    return null;
+    return { ok: false, reason: `the ${headerLen}-byte header is not JSON` };
   }
-  return { header, payload: bytes.subarray(headerEnd) };
+  return { ok: true, header, payload: bytes.subarray(headerEnd) };
 }
 
 /**
