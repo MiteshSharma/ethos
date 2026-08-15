@@ -1,18 +1,22 @@
-// Chat & context — display and context. Two cards, moved verbatim from
-// `Settings.tsx` (§4.2 rows 6, 7).
+// Chat & context — display and context. Off `Card`, onto `SettingRow`
+// (§4.2 rows 6, 7; plan Phase 3).
 
-import { Card, Checkbox, Form, InputNumber, Select, Switch } from 'antd';
+import { Checkbox, Form, InputNumber, Select, Switch } from 'antd';
 import { AdvancedBlock } from '../components/advanced';
+import { SectionHeading } from '../components/section-heading';
+import { SettingRow } from '../components/setting-row';
 
 export function ChatPane() {
   return (
     <>
-      <Card title="Chat display" size="small" style={{ marginBottom: 16 }}>
-        <Form.Item
-          label="Response length"
-          name="verbosity"
-          extra="How long the agent's prose runs (verbosity)."
-        >
+      <SectionHeading id="display">display</SectionHeading>
+
+      <SettingRow
+        label="Response length"
+        formName="verbosity"
+        help="How long the agent's prose runs."
+      >
+        <Form.Item name="verbosity" style={{ marginBottom: 0 }}>
           <Select
             options={[
               { value: 'concise', label: 'Concise' },
@@ -21,12 +25,14 @@ export function ChatPane() {
             ]}
           />
         </Form.Item>
+      </SettingRow>
 
-        <Form.Item
-          label="Stream draft edits"
-          name="streamingEdits"
-          extra="Whether channel replies (Telegram, Slack) grow in place as they're written. DMs only, everywhere, or off."
-        >
+      <SettingRow
+        label="Stream draft edits"
+        formName="streamingEdits"
+        help="Whether channel replies (Telegram, Slack) grow in place as they're written. DMs only, everywhere, or off."
+      >
+        <Form.Item name="streamingEdits" style={{ marginBottom: 0 }}>
           <Select
             options={[
               { value: 'dms', label: 'Direct messages only' },
@@ -35,12 +41,14 @@ export function ChatPane() {
             ]}
           />
         </Form.Item>
+      </SettingRow>
 
-        <Form.Item
-          label="Interface detail"
-          name="displayVerbosity"
-          extra="How much tool and status chrome chat surfaces render (display.verbosity). Does not change what the agent writes."
-        >
+      <SettingRow
+        label="Interface detail"
+        formName="displayVerbosity"
+        help="How much tool and status chrome chat surfaces render. Does not change what the agent writes."
+      >
+        <Form.Item name="displayVerbosity" style={{ marginBottom: 0 }}>
           <Select
             options={[
               { value: 'quiet', label: 'Quiet' },
@@ -50,12 +58,14 @@ export function ChatPane() {
             ]}
           />
         </Form.Item>
+      </SettingRow>
 
-        <Form.Item
-          label="Enter while busy"
-          name="displayBusyInputMode"
-          extra="What pressing Enter mid-turn does (display.busy_input_mode)."
-        >
+      <SettingRow
+        label="Enter while busy"
+        formName="displayBusyInputMode"
+        help="What pressing Enter mid-turn does."
+      >
+        <Form.Item name="displayBusyInputMode" style={{ marginBottom: 0 }}>
           <Select
             options={[
               { value: 'interrupt', label: 'Interrupt the turn' },
@@ -64,65 +74,80 @@ export function ChatPane() {
             ]}
           />
         </Form.Item>
+      </SettingRow>
 
-        <AdvancedBlock>
-          <Form.Item
-            label="Tool preview length"
-            name="displayToolPreviewLength"
-            extra="Truncate tool arguments in the feed to this many characters; 0 = no truncation (display.tool_preview_length)."
-          >
+      <AdvancedBlock>
+        <SettingRow
+          label="Tool preview length"
+          formName="displayToolPreviewLength"
+          help="Truncate tool arguments in the feed to this many characters; 0 = no truncation."
+        >
+          <Form.Item name="displayToolPreviewLength" style={{ marginBottom: 0 }}>
             <InputNumber min={0} precision={0} style={{ width: '100%' }} />
           </Form.Item>
-          <Form.Item
-            label="Resume hint"
-            name="displayResumeHint"
-            valuePropName="checked"
-            extra="Show the resume hint when leaving CLI chat (display.resume_hint, default on)."
-          >
+        </SettingRow>
+        <SettingRow
+          label="Resume hint"
+          formName="displayResumeHint"
+          help="Show the resume hint when leaving CLI chat (default on)."
+        >
+          <Form.Item name="displayResumeHint" valuePropName="checked" style={{ marginBottom: 0 }}>
             <Switch />
           </Form.Item>
-          <Form.Item
-            label="Resume recap turns"
-            name="displayResumeRecapTurns"
-            extra="Turn pairs recapped when resuming a session; 0 disables (display.resume_recap_turns, default 3)."
-          >
+        </SettingRow>
+        <SettingRow
+          label="Resume recap turns"
+          formName="displayResumeRecapTurns"
+          help="Turn pairs recapped when resuming a session; 0 disables (default 3)."
+        >
+          <Form.Item name="displayResumeRecapTurns" style={{ marginBottom: 0 }}>
             <InputNumber min={0} max={10} precision={0} style={{ width: '100%' }} />
           </Form.Item>
+        </SettingRow>
+        <SettingRow
+          label="Bell on completion"
+          formName="displayBellOnComplete"
+          help="Ring the terminal bell when a background task finishes (default off)."
+        >
           <Form.Item
-            label="Bell on completion"
             name="displayBellOnComplete"
             valuePropName="checked"
-            extra="Ring the terminal bell when a background task finishes (display.bell_on_complete, default off)."
+            style={{ marginBottom: 0 }}
           >
             <Switch />
           </Form.Item>
-        </AdvancedBlock>
-      </Card>
+        </SettingRow>
+      </AdvancedBlock>
 
-      <Card title="Context" size="small" style={{ marginBottom: 16 }}>
-        <Form.Item
-          name="contextLayering"
-          valuePropName="checked"
-          extra="Include previous session summaries for deeper context across conversations."
-        >
-          <Checkbox>Enable context layering</Checkbox>
+      <SectionHeading id="context">context</SectionHeading>
+
+      <SettingRow
+        label="Enable context layering"
+        formName="contextLayering"
+        help="Include previous session summaries for deeper context across conversations."
+      >
+        <Form.Item name="contextLayering" valuePropName="checked" style={{ marginBottom: 0 }}>
+          <Checkbox />
         </Form.Item>
+      </SettingRow>
 
-        <Form.Item
-          label="Auto-compaction"
-          name="autoCompact"
-          valuePropName="checked"
-          extra="Compact long sessions automatically near ~80% of the model's context window (default on)."
-        >
+      <SettingRow
+        label="Auto-compaction"
+        formName="autoCompact"
+        help="Compact long sessions automatically near ~80% of the model's context window (default on)."
+      >
+        <Form.Item name="autoCompact" valuePropName="checked" style={{ marginBottom: 0 }}>
           <Switch />
         </Form.Item>
+      </SettingRow>
 
-        <AdvancedBlock>
-          <Form.Item
-            label="Compaction pressure"
-            name={['compaction', 'pressure']}
-            extra="Context-window fraction that triggers compaction (compaction.pressure, default 0.8). Blank = default."
-          >
+      <AdvancedBlock>
+        <SettingRow
+          label="Compaction pressure"
+          formName="compaction.pressure"
+          help="Context-window fraction that triggers compaction (default 0.8). Blank = default."
+        >
+          <Form.Item name={['compaction', 'pressure']} style={{ marginBottom: 0 }}>
             <InputNumber
               min={0.01}
               max={1}
@@ -131,11 +156,13 @@ export function ChatPane() {
               placeholder="0.8"
             />
           </Form.Item>
-          <Form.Item
-            label="Compaction target"
-            name={['compaction', 'target']}
-            extra="Fraction the session is shrunk down to (compaction.target, default 0.7). Blank = default."
-          >
+        </SettingRow>
+        <SettingRow
+          label="Compaction target"
+          formName="compaction.target"
+          help="Fraction the session is shrunk down to (default 0.7). Blank = default."
+        >
+          <Form.Item name={['compaction', 'target']} style={{ marginBottom: 0 }}>
             <InputNumber
               min={0.01}
               max={1}
@@ -144,26 +171,35 @@ export function ChatPane() {
               placeholder="0.7"
             />
           </Form.Item>
-          <Form.Item
-            label="Gate delta (tokens)"
-            name={['compaction', 'gateDelta']}
-            extra="Extra token headroom before the compaction gate fires (compaction.gateDelta). Blank = unset."
-          >
+        </SettingRow>
+        <SettingRow
+          label="Gate delta (tokens)"
+          formName="compaction.gateDelta"
+          help="Extra token headroom before the compaction gate fires. Blank = unset."
+        >
+          <Form.Item name={['compaction', 'gateDelta']} style={{ marginBottom: 0 }}>
             <InputNumber min={0} precision={0} style={{ width: '100%' }} />
           </Form.Item>
+        </SettingRow>
+        <SettingRow
+          label="Retry on overflow"
+          formName="compaction.retryOnOverflow"
+          help="Compact and retry once when a request overflows the window (default on)."
+        >
           <Form.Item
-            label="Retry on overflow"
             name={['compaction', 'retryOnOverflow']}
             valuePropName="checked"
-            extra="Compact and retry once when a request overflows the window (compaction.retryOnOverflow, default on)."
+            style={{ marginBottom: 0 }}
           >
             <Switch />
           </Form.Item>
-          <Form.Item
-            label="Small-window mode"
-            name={['compaction', 'smallWindow']}
-            extra="Force small-window handling for local models (compaction.smallWindow, default auto)."
-          >
+        </SettingRow>
+        <SettingRow
+          label="Small-window mode"
+          formName="compaction.smallWindow"
+          help="Force small-window handling for local models (default auto)."
+        >
+          <Form.Item name={['compaction', 'smallWindow']} style={{ marginBottom: 0 }}>
             <Select
               options={[
                 { value: 'auto', label: 'Auto' },
@@ -172,8 +208,8 @@ export function ChatPane() {
               ]}
             />
           </Form.Item>
-        </AdvancedBlock>
-      </Card>
+        </SettingRow>
+      </AdvancedBlock>
     </>
   );
 }

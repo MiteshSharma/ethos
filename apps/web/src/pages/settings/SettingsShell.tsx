@@ -46,7 +46,7 @@ import {
 } from './lib/rows';
 import { useShowAdvanced } from './lib/settings-advanced';
 import { computeDirty, type DirtySnapshot } from './lib/settings-dirty';
-import { visibleCategories } from './lib/taxonomy';
+import { findCategory, visibleCategories } from './lib/taxonomy';
 import { type VoiceBotRow, voiceBotRowsFromConfig } from './lib/voice-bots';
 import {
   CALL_ACCENT_CUSTOM,
@@ -62,6 +62,7 @@ import {
 import { voiceBargeInFromConfig } from './lib/voice-telephony';
 import type { SettingsPaneContext } from './pane-context';
 import { SaveBar } from './SaveBar';
+import { SectionNav } from './SectionNav';
 
 export function SettingsShell() {
   const qc = useQueryClient();
@@ -442,6 +443,10 @@ export function SettingsShell() {
           dirtyCategories={dirty.categories}
         />
         <div className="settings__detail">
+          <SectionNav
+            category={findCategory(resolved.category, categories)}
+            activeSection={resolved.section}
+          />
           {/*
             `component={false}` renders NO `<form>` node (D2). Two live defects
             without it: the self-saving sections (named secrets, API keys,

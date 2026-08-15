@@ -1048,3 +1048,15 @@ export function categoryForFormName(
 ): string | null {
   return index.find((e) => e.formName === formName)?.category ?? null;
 }
+
+/**
+ * The `config.yaml` key a form field writes — what `SettingRow` renders as its
+ * Geist Mono key line. A pane resolves this instead of hand-typing the key
+ * string, so the row and the search index cannot drift apart (D8).
+ */
+export function keyForFormName(
+  formName: string,
+  index: readonly SettingEntry[] = SETTINGS_INDEX,
+): string | null {
+  return index.find((e) => e.formName === formName)?.key ?? null;
+}

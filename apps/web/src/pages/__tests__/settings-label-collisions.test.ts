@@ -27,17 +27,38 @@ const desktop = readFileSync(
   'utf8',
 );
 
-/** The `<Form.Item>` block for a named field, up to its closing tag. */
-function formItem(name: string): string {
+/**
+ * The block that carries a named field's label, up to its closing tag.
+ *
+ * Plan Phase 3 (settings-navigation.md §6.2) moves the label off `Form.Item`
+ * and onto the enclosing `SettingRow` as panes convert off `Card` — so the
+ * label site is whichever of the two opens closer to the `name=` attribute:
+ * `SettingRow` in a converted pane, `Form.Item` in one Phase 3 has not reached
+ * yet. Checking both keeps this guard live across the whole rebuild instead of
+ * only until the next pane converts.
+ */
+function fieldBlock(name: string): string {
   const at = page.indexOf(`name="${name}"`);
   expect(at, `missing form field: ${name}`).toBeGreaterThan(-1);
-  return page.slice(page.lastIndexOf('<Form.Item', at), page.indexOf('</Form.Item>', at));
+  const itemStart = page.lastIndexOf('<Form.Item', at);
+  const rowStart = page.lastIndexOf('<SettingRow', at);
+  // `rowStart` truly encloses this field only if it opens before the
+  // `Form.Item` AND has not already closed before reaching it — otherwise it
+  // is some earlier, unrelated `SettingRow` a blind backward search picked up.
+  const enclosed =
+    rowStart !== -1 &&
+    rowStart < itemStart &&
+    !page.slice(rowStart, itemStart).includes('</SettingRow>');
+  if (enclosed) {
+    return page.slice(rowStart, page.indexOf('</SettingRow>', at));
+  }
+  return page.slice(itemStart, page.indexOf('</Form.Item>', at));
 }
 
 describe('settings label collisions', () => {
   it('the two verbosity controls no longer share a name', () => {
-    expect(formItem('verbosity')).toContain('label="Response length"');
-    expect(formItem('displayVerbosity')).toContain('label="Interface detail"');
+    expect(fieldBlock('verbosity')).toContain('label="Response length"');
+    expect(fieldBlock('displayVerbosity')).toContain('label="Interface detail"');
     expect(page).not.toContain('label="Verbosity"');
     expect(page).not.toContain('label="Surface verbosity"');
   });
@@ -50,7 +71,7 @@ describe('settings label collisions', () => {
   });
 
   it('each web-search control names the other one', () => {
-    expect(formItem('webSearchBackend')).toContain('Web-search defaults');
+    expect(fieldBlock('webSearchBackend')).toContain('Web-search defaults');
 
     const card = page.slice(page.indexOf('<Card title="Web-search defaults"'));
     const prose = card.slice(0, card.indexOf('</Typography.Paragraph>')).replace(/\s+/g, ' ');

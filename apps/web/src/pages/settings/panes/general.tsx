@@ -1,9 +1,14 @@
 // General — basics (default personality, appearance) and onboarding.
-// Cards moved verbatim from `Settings.tsx` (§4.2 rows 2, 3, 12).
+// Off `Card`, onto `SettingRow` (§4.2 rows 2, 3, 12; plan Phase 3).
+//
+// `Appearance` (`skin`) stays here, not in Chat & context — O1: it is a global
+// display token every surface reads, not a chat-pane preference.
 
 import { BUILTIN_SKIN_NAMES, BUILTIN_SKINS } from '@ethosagent/design-tokens';
-import { Button, Card, Form, Select, Typography } from 'antd';
+import { Button, Form, Select } from 'antd';
 import { useNavigate } from 'react-router-dom';
+import { SectionHeading } from '../components/section-heading';
+import { SettingRow } from '../components/setting-row';
 import { useSettingsPane } from '../pane-context';
 
 export function GeneralPane() {
@@ -12,12 +17,17 @@ export function GeneralPane() {
 
   return (
     <>
-      <Card title="Default personality" size="small" style={{ marginBottom: 16 }}>
+      <SectionHeading id="basics">basics</SectionHeading>
+
+      <SettingRow
+        label="Personality"
+        formName="personality"
+        help="Used when chat doesn't override per-session."
+      >
         <Form.Item
-          label="Personality"
           name="personality"
           rules={[{ required: true, message: 'Required' }]}
-          extra="Used when chat doesn't override per-session."
+          style={{ marginBottom: 0 }}
         >
           <Select
             loading={personalitiesLoading}
@@ -29,14 +39,14 @@ export function GeneralPane() {
             optionFilterProp="label"
           />
         </Form.Item>
-      </Card>
+      </SettingRow>
 
-      <Card title="Appearance" size="small" style={{ marginBottom: 16 }}>
-        <Form.Item
-          label="Skin"
-          name="skin"
-          extra="DESIGN.md baseline plus named overrides. Applies across all surfaces (Web, TUI)."
-        >
+      <SettingRow
+        label="Skin"
+        formName="skin"
+        help="DESIGN.md baseline plus named overrides. Applies across all surfaces (Web, TUI)."
+      >
+        <Form.Item name="skin" style={{ marginBottom: 0 }}>
           <Select
             options={BUILTIN_SKIN_NAMES.map((name) => ({
               value: name,
@@ -44,15 +54,22 @@ export function GeneralPane() {
             }))}
           />
         </Form.Item>
-      </Card>
+      </SettingRow>
 
-      <Card title="Setup wizard" size="small" style={{ maxWidth: 640, marginTop: 8 }}>
-        <Typography.Paragraph type="secondary" style={{ marginTop: 0, marginBottom: 12 }}>
-          Re-run the guided setup to change your provider, model, personality, or messaging
-          credentials.
-        </Typography.Paragraph>
-        <Button onClick={() => navigate('/onboarding')}>Run setup wizard</Button>
-      </Card>
+      <SectionHeading id="onboarding">onboarding</SectionHeading>
+
+      <div className="settings-row">
+        <div className="settings-row-info">
+          <div className="settings-row-label">Setup wizard</div>
+          <div className="settings-row-help">
+            Re-run the guided setup to change your provider, model, personality, or messaging
+            credentials.
+          </div>
+        </div>
+        <div className="settings-row-control">
+          <Button onClick={() => navigate('/onboarding')}>Run setup wizard</Button>
+        </div>
+      </div>
     </>
   );
 }
