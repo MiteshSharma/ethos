@@ -27,7 +27,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Outlet, useLocation } from 'react-router-dom';
 import { isDesktop } from '../../lib/desktop';
 import { rpc } from '../../rpc';
-import { AdvancedToggle } from './AdvancedToggle';
 import { CategoryRail } from './CategoryRail';
 import { buildConfigPatch, type SettingsRows } from './lib/build-config-patch';
 import type { ConfigUpdatePatch } from './lib/config-types';
@@ -46,7 +45,6 @@ import {
   rowsFromConfig,
 } from './lib/rows';
 import { type SectionRoute, shouldScrollToSection } from './lib/section-scroll';
-import { useShowAdvanced } from './lib/settings-advanced';
 import { computeDirty, type DirtySnapshot } from './lib/settings-dirty';
 import { visibleCategories } from './lib/taxonomy';
 import { type VoiceBotRow, voiceBotRowsFromConfig } from './lib/voice-bots';
@@ -69,7 +67,6 @@ export function SettingsShell() {
   const qc = useQueryClient();
   const { notification } = AntApp.useApp();
   const { pathname } = useLocation();
-  const { showAdvanced, setShowAdvanced } = useShowAdvanced();
   const [form] = Form.useForm<FormShape>();
   const [providerRows, setProviderRows] = useState<ProviderRow[]>([emptyRow()]);
   const [quickCommandRows, setQuickCommandRows] = useState<QuickCommandRow[]>([]);
@@ -403,9 +400,9 @@ export function SettingsShell() {
     //
     // It is worth naming what is NO LONGER a reason: advanced controls used to
     // unmount behind `{showAdvanced && …}`, and that was the original argument
-    // for `getFieldsValue(true)`. They dim now and stay mounted (D10), so that
-    // argument is gone and routing is the whole of it. The call does not change
-    // — routing unmounts far more than the advanced blocks ever did.
+    // for `getFieldsValue(true)`. They always render now and stay mounted, so
+    // that argument is gone and routing is the whole of it. The call does not
+    // change — routing unmounts far more than the advanced blocks ever did.
     const values: FormShape = form.getFieldsValue(true);
     const built = buildConfigPatch(
       values,
@@ -433,7 +430,6 @@ export function SettingsShell() {
     config: configQuery.data,
     personalities,
     personalitiesLoading: personalitiesQuery.isLoading,
-    showAdvanced,
     providerRows,
     addProviderRow,
     updateProviderRow,
@@ -461,7 +457,6 @@ export function SettingsShell() {
         <Typography.Title level={4} style={{ margin: 0 }}>
           Settings
         </Typography.Title>
-        <AdvancedToggle showAdvanced={showAdvanced} onChange={setShowAdvanced} />
       </header>
 
       <div className="settings">

@@ -1,34 +1,16 @@
-// Advanced controls DIM. They never unmount (plan/phases/settings-navigation.md
-// D10).
+// Advanced controls always render normally now — no dim, no toggle
+// (plan/phases/settings-navigation.md D10 superseded).
 //
-// Every one of these blocks used to be `{showAdvanced && …}`, which had two
-// costs. The small one: an unmounted `Form.Item` leaves its value in the store
-// only because `preserve` is on, so the page leaned on that mechanism for
-// something layout could do instead. The large one: two whole categories —
-// Background jobs and Data & retention — are advanced end to end, so with the
-// toggle off they rendered an EMPTY pane. A category you can navigate to and
-// find blank is worse than one you cannot navigate to at all.
-//
-// Dim, and still interactive: a control you can see and cannot touch is a trap,
-// not a hint. So no `disabled`, no `pointer-events: none`, no `inert` — the
-// treatment is opacity and nothing else, and T8
-// (`__tests__/settings-advanced-dims.test.ts`) fails if a `disabled` or a
-// re-introduced unmount creeps back.
+// This used to gate on `showAdvanced` and apply an opacity dim (D10), which was
+// itself a fix for an even older behavior where these blocks were literally
+// `{showAdvanced && …}` and unmounted from the DOM when off. Unmounting broke
+// two whole categories — Background jobs and Data & retention, which are
+// advanced end to end — rendering them completely empty. The toggle and its
+// dim treatment are gone; every control just always renders, mounted and at
+// full opacity.
 
 import type { ReactNode } from 'react';
-import { useSettingsPane } from '../pane-context';
-
-/** The one class the dim treatment lives behind. See `styles.css`. */
-export const ADVANCED_DIM_CLASS = 'settings-advanced-dim';
 
 export function AdvancedBlock({ children }: { children: ReactNode }) {
-  const { showAdvanced } = useSettingsPane();
-  return (
-    <div
-      className={showAdvanced ? 'settings-advanced' : `settings-advanced ${ADVANCED_DIM_CLASS}`}
-      data-advanced="true"
-    >
-      {children}
-    </div>
-  );
+  return <div className="settings-advanced">{children}</div>;
 }

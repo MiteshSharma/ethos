@@ -27,7 +27,6 @@ export interface SettingsPaneContext {
   config: ConfigGetData | undefined;
   personalities: PersonalityListItem[];
   personalitiesLoading: boolean;
-  showAdvanced: boolean;
 
   providerRows: ProviderRow[];
   addProviderRow: () => void;

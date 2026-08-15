@@ -75,7 +75,6 @@ function Harness() {
     config: undefined,
     personalities: [],
     personalitiesLoading: false,
-    showAdvanced: true,
     providerRows: [],
     addProviderRow: noop,
     updateProviderRow: noop,

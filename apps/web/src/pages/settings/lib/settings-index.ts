@@ -1030,11 +1030,6 @@ export function countByCategory(
   return counts;
 }
 
-/** The `N advanced` figure on the toggle. Derived, for the same reason. */
-export function advancedCount(index: readonly SettingEntry[] = SETTINGS_INDEX): number {
-  return index.filter((e) => e.advanced).length;
-}
-
 /**
  * Search: label OR config key, case-insensitively, on the whole table.
  *

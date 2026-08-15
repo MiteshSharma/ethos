@@ -1,6 +1,5 @@
 import { describe, expect, it } from 'vitest';
 import {
-  advancedCount,
   countByCategory,
   EXPECTED_EMPTY_SECTIONS,
   isExpectedEmptySection,
@@ -44,17 +43,6 @@ describe('rail counts', () => {
         `${entry.label} → ${entry.category}/${entry.section}`,
       ).toContain(entry.section);
     }
-  });
-});
-
-describe('the advanced figure', () => {
-  it('is the number of advanced entries', () => {
-    expect(advancedCount()).toBe(SETTINGS_INDEX.filter((e) => e.advanced).length);
-  });
-
-  it('is neither everything nor nothing, so the toggle is saying something', () => {
-    expect(advancedCount()).toBeGreaterThan(0);
-    expect(advancedCount()).toBeLessThan(SETTINGS_INDEX.length);
   });
 });
 
