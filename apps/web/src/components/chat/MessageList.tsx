@@ -113,6 +113,7 @@ export function MessageList({
               turn={m}
               fenceRenderers={fenceRenderers}
               onSuggestPrompt={onSuggestPrompt}
+              {...(personalityId ? { personalityId } : {})}
             />
           </SaveToDashboardContextMenu>
         ),
@@ -123,6 +124,7 @@ export function MessageList({
           streaming
           fenceRenderers={fenceRenderers}
           onSuggestPrompt={onSuggestPrompt}
+          {...(personalityId ? { personalityId } : {})}
         />
       ) : null}
       {isThinking ? <ThinkingBubble /> : null}

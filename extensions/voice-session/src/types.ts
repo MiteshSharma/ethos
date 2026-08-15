@@ -22,7 +22,19 @@ export const DEFAULT_VOICE_FILLER_TEXT = 'One moment.';
  * a hard core dependency and lets tests/harnesses inject a fake.
  */
 export interface AgentTurnRunner {
-  run(text: string, opts?: { abortSignal?: AbortSignal }): AsyncGenerator<AgentEvent>;
+  run(
+    text: string,
+    opts?: {
+      abortSignal?: AbortSignal;
+      /**
+       * Route this turn to a named model. The voice stack pins the speaking
+       * personality's fast-lane model here (latency decision L5) so a spoken
+       * turn never runs on the agentic default. Absent → the runner routes as
+       * it normally would.
+       */
+      modelOverride?: string;
+    },
+  ): AsyncGenerator<AgentEvent>;
 }
 
 /** Voice-activity detector: classifies a single audio frame as speech or not. */

@@ -175,6 +175,7 @@ extensions/session-sqlite/, extensions/memory-vector/ — SQLite via @ethosagent
 extensions/job-store/ — SQLiteJobStore opens a raw path via @ethosagent/sqlite and mkdirSync's the db's parent dir (same rationale as session-sqlite/memory-vector)
 extensions/delivery-ledger/ — SQLiteDeliveryLedger opens a raw path via @ethosagent/sqlite and mkdirSync's the db's parent dir; its atomic redelivery claim is a conditional UPDATE inside a transaction, which no Storage interface can express
 extensions/session-cards/ — SQLiteCardStore opens a raw path via @ethosagent/sqlite and mkdirSync's the db's parent dir; its per-session `seq` derivation is a MAX()+1 read inside the insert's transaction, which no Storage interface can express (same rationale as job-store/delivery-ledger)
+extensions/call-log/ — SQLiteCallLog opens a raw path via @ethosagent/sqlite and mkdirSync's the db's parent dir (same rationale as job-store/delivery-ledger/session-cards)
 apps/ethos/src/error-log.ts — sync crash logger; must flush before process exit
 apps/ethos/tsup.config.ts and other build-time tooling
 extensions/skills/src/skill-compat.ts statSync — walks $PATH, not ~/.ethos/

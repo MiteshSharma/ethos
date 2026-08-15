@@ -3377,6 +3377,230 @@ textarea {
   }
 }
 
+/* ---------------------------------------------------------------------------
+   Calls (voice V4, DR1/DR3)
+
+   Dense LIST ROWS, not the Card primitive — same rule the wake routes and the
+   satellite fleet follow. A call history is scanned for the one call that was
+   refused or the one still ringing; a bordered box per call turns scanning
+   into reading.
+   --------------------------------------------------------------------------- */
+
+/* Its own rule rather than joining the `.sat-mono` group so the stylesheet
+   test can find it, and so a future change to call typography cannot silently
+   move the satellite rows with it. Same three declarations on purpose: a phone
+   number and a node id are both literals the operator sees elsewhere verbatim. */
+.call-mono {
+  font-family: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
+.calls-panel {
+  display: flex;
+  flex-direction: column;
+}
+
+.call-list {
+  display: flex;
+  flex-direction: column;
+  margin-bottom: 8px;
+}
+
+.call-row {
+  padding: 8px 0;
+  border-bottom: 1px solid var(--ethos-border);
+}
+
+.call-row:last-child {
+  border-bottom: none;
+}
+
+.call-row-main {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.call-arrow {
+  color: var(--ethos-text-tertiary);
+  flex-shrink: 0;
+}
+
+.call-number {
+  color: var(--ethos-text);
+  flex: 0 1 auto;
+}
+
+.call-personality {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--ethos-text-secondary);
+}
+
+/* A chip, so `sm` (4px) — DESIGN.md's radius scale reserves that for chips and
+   tight UI chrome. Which tier answered is the difference between a hosted
+   speech-to-speech session and a local pipeline, and it shows up on the bill. */
+.call-tier {
+  padding: 1px 6px;
+  border: 1px solid var(--ethos-border);
+  border-radius: 4px;
+  color: var(--ethos-text-secondary);
+  flex-shrink: 0;
+}
+
+.call-duration {
+  color: var(--ethos-text-secondary);
+  flex-shrink: 0;
+}
+
+.call-dim {
+  color: var(--ethos-text-tertiary);
+}
+
+.call-state {
+  color: var(--ethos-text-secondary);
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+/* DR1's "grey row": a screened or refused call never reached the owner, so it
+   is history rather than activity. Drawn back, never hidden — the whole point
+   of logging a refusal is that somebody can read it. Declared AFTER the two
+   rules it overrides, so specificity ascends down the file. */
+.call-row--muted .call-number,
+.call-row--muted .call-state {
+  color: var(--ethos-text-tertiary);
+}
+
+.call-row-detail {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 4px;
+  flex-wrap: wrap;
+}
+
+.call-reason {
+  color: var(--ethos-text-tertiary);
+}
+
+.call-summary {
+  font-size: 13px;
+}
+
+.call-transcript-link {
+  padding: 0;
+  height: auto;
+}
+
+.call-transcript {
+  font-family: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 13px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 60vh;
+  overflow-y: auto;
+  margin: 0;
+}
+
+.call-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 24px 0;
+}
+
+/* The chip shape Activity already established. Same tokens, same 12px/4px
+   geometry — a filter chip that looked different on two tabs would be two
+   things to learn. */
+.call-filter-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+
+.call-filter-label {
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  opacity: 0.6;
+  margin-right: 2px;
+}
+
+.call-filter-label:not(:first-child) {
+  margin-left: 12px;
+}
+
+.call-filter-chip {
+  font-size: 12px;
+  padding: 4px 12px;
+  border: 1px solid var(--ethos-border);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--ethos-text-dim);
+  cursor: pointer;
+  transition: all var(--motion-fast, 80ms) var(--ease, ease);
+  font-family: inherit;
+}
+
+.call-filter-chip:hover {
+  border-color: var(--ethos-text-dim);
+  color: var(--ethos-text);
+}
+
+.call-filter-chip.active {
+  background: var(--ethos-info);
+  border-color: var(--ethos-info);
+  color: #fff;
+}
+
+/* The guided first-call moment (DR2). Emphasis by TYPOGRAPHY — a big mono
+   number — rather than by a tinted callout box, because a bordered panel here
+   would be the Card primitive wearing a different name. */
+.call-invite {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 16px;
+}
+
+.call-invite-number {
+  font-size: 20px;
+  color: var(--accent, var(--ethos-info));
+}
+
+/* The connection dot's ONE new state (DESIGN.md § "Connection status
+   indicator", extended a second time). Accent because a live call belongs to
+   the personality answering it, and a 2px accent ring — the same device
+   `.wake-route-row--matched` uses — so it cannot be mistaken for a satellite's
+   `--speaking` accent dot in a list that can show both. */
+.sb-dot--call-live {
+  background: var(--accent, var(--ethos-info));
+  outline: 1.5px solid var(--accent, var(--ethos-info));
+  outline-offset: 2px;
+  animation: status-dot-pulse 1.2s ease-in-out infinite;
+}
+
+/* The pulse stops; the ring stays, so the row still reads as live without a
+   frame of motion. The ticking duration is NOT stopped here and must not be —
+   it is data, and a frozen clock on an open call is a lie, not a courtesy. */
+@media (prefers-reduced-motion: reduce) {
+  .sb-dot--call-live {
+    animation: none;
+  }
+
+  .call-filter-chip {
+    transition: none;
+  }
+}
+
 .composer-actions {
   display: flex;
   align-items: center;

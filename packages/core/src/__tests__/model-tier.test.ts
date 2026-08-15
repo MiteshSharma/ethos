@@ -206,3 +206,97 @@ describe('Model tier resolution', () => {
     expect(runStart.source).toBe('personality');
   });
 });
+
+// L5 — the routing ladder, pinned end to end. Every case asserts the model the
+// PROVIDER was actually asked to serve (`modelOverride ?? llm.model`, which is
+// exactly what every provider implementation resolves), not an internal
+// variable: a precedence rule verified against a private field is a rule that
+// drifts the first time the plumbing moves.
+describe('model routing precedence', () => {
+  /** The model this turn really ran on, from the provider's point of view. */
+  function servedModel(onComplete: ReturnType<typeof vi.fn>, llm: LLMProvider): string {
+    const opts = onComplete.mock.calls[0]?.[0] as CompletionOptions | undefined;
+    return opts?.modelOverride ?? llm.model;
+  }
+
+  function tieredLoop(onComplete: (opts: CompletionOptions) => void): {
+    loop: AgentLoop;
+    llm: LLMProvider;
+  } {
+    const llm = makeMockLLM(onComplete);
+    const loop = new AgentLoop({ llm, safety: createTestSafety() });
+    // biome-ignore lint/complexity/useLiteralKeys: `personalities` is private; bracket-string is the TS escape hatch for test access
+    loop['personalities'].define({
+      id: 'tiered',
+      name: 'Tiered',
+      provider: 'mock',
+      model: { default: 'sonnet', deep: 'opus' },
+    });
+    return { loop, llm };
+  }
+
+  it('rung 1: an explicit modelOverride beats tierOverride, personality model, and the default', async () => {
+    const onComplete = vi.fn();
+    const { loop, llm } = tieredLoop(onComplete);
+
+    await collect(
+      loop.run('hi', { personalityId: 'tiered', tierOverride: 'deep', modelOverride: 'haiku' }),
+    );
+
+    expect(servedModel(onComplete, llm)).toBe('haiku');
+  });
+
+  it('rung 2: tierOverride beats the personality model and the default', async () => {
+    const onComplete = vi.fn();
+    const { loop, llm } = tieredLoop(onComplete);
+
+    await collect(loop.run('hi', { personalityId: 'tiered', tierOverride: 'deep' }));
+
+    expect(servedModel(onComplete, llm)).toBe('opus');
+  });
+
+  it('rung 3: the personality model beats the deployment default', async () => {
+    const onComplete = vi.fn();
+    const { loop, llm } = tieredLoop(onComplete);
+
+    await collect(loop.run('hi', { personalityId: 'tiered' }));
+
+    expect(servedModel(onComplete, llm)).toBe('sonnet');
+  });
+
+  it('rung 4: nothing declared -> the deployment default serves the turn', async () => {
+    const onComplete = vi.fn();
+    const llm = makeMockLLM(onComplete);
+    const loop = new AgentLoop({ llm, safety: createTestSafety() });
+
+    await collect(loop.run('hi'));
+
+    expect(servedModel(onComplete, llm)).toBe('base-model');
+  });
+
+  it('a pin is per-run: the next turn without one routes normally again', async () => {
+    const onComplete = vi.fn();
+    const { loop, llm } = tieredLoop(onComplete);
+
+    await collect(loop.run('first', { personalityId: 'tiered', modelOverride: 'haiku' }));
+    expect(servedModel(onComplete, llm)).toBe('haiku');
+
+    onComplete.mockClear();
+    await collect(loop.run('second', { personalityId: 'tiered' }));
+    expect(servedModel(onComplete, llm)).toBe('sonnet');
+  });
+
+  it('run_start names the pinned model, so telemetry cannot claim the default answered', async () => {
+    const llm = makeMockLLM();
+    const loop = new AgentLoop({ llm, safety: createTestSafety() });
+
+    const events = await collect(loop.run('hi', { modelOverride: 'haiku' }));
+    const runStart = events.find((e) => e.type === 'run_start') as Extract<
+      AgentEvent,
+      { type: 'run_start' }
+    >;
+
+    expect(runStart.model).toBe('haiku');
+    expect(runStart.source).toBe('personality');
+  });
+});

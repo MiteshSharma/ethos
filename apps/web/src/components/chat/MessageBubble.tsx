@@ -70,6 +70,7 @@ export function AssistantBubble({
   streaming,
   fenceRenderers,
   onSuggestPrompt,
+  personalityId,
 }: {
   turn: AssistantTurn;
   streaming?: boolean;
@@ -77,6 +78,9 @@ export function AssistantBubble({
   fenceRenderers?: FenceRendererResolver;
   /** Puts a `recommend_actions` prompt in the composer. */
   onSuggestPrompt?: (prompt: string) => void;
+  /** Who is speaking — carried to the Play button so click-to-hear uses this
+   *  personality's voice rather than the deployment default. */
+  personalityId?: string;
 }) {
   const lastBlock = turn.blocks[turn.blocks.length - 1];
   const cursorAfter = streaming && lastBlock?.kind === 'text';
@@ -105,7 +109,9 @@ export function AssistantBubble({
         {streaming && !cursorAfter && lastBlock?.kind === 'tool' ? (
           <span className="streaming-cursor streaming-cursor-trailing" aria-hidden="true" />
         ) : null}
-        {!streaming && fullText && ttsEnabled ? <PlayButton text={fullText} /> : null}
+        {!streaming && fullText && ttsEnabled ? (
+          <PlayButton text={fullText} {...(personalityId ? { personalityId } : {})} />
+        ) : null}
       </div>
     </div>
   );

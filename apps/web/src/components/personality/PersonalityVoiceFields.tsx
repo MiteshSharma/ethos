@@ -1,7 +1,7 @@
 import type { CallTreatment } from '@ethosagent/types';
 import { useQuery } from '@tanstack/react-query';
 import { Button, Form, Input, Select, Space, Typography } from 'antd';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { type CSSProperties, useCallback, useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { rpc } from '../../rpc';
 
@@ -9,14 +9,13 @@ import { rpc } from '../../rpc';
 // name and its mark, not config knobs — plus the one technical override that
 // belongs with them: which engine hears it.
 //
-// Five controls: which TTS provider (a `voice.tts.providers.<name>` roster
-// label, or the default entry), which voice, how its call is DRAWN
-// (`voice.call_style`), which STT provider (a `voice.stt.providers.<name>`
-// label, or the default), and which REALTIME provider (a
-// `voice.realtime.providers.<name>` label, or none). `voice.tier`,
-// `voice.model` and the per-language map are deliberately absent — they
-// persist, but nothing routes on them yet, and a form field is a promise that
-// it works.
+// Every sub-key of the personality's `voice` block: which TTS provider (a
+// `voice.tts.providers.<name>` roster label, or the default entry), which
+// voice, how its call is DRAWN (`voice.call_style`), which STT provider, which
+// REALTIME provider, which TIER serves it, which fast-lane MODEL it routes to,
+// and the per-language voice map. A sub-key reachable only by hand-editing
+// config.yaml is a sub-key the web editor erases the next time you save, so the
+// set is closed rather than curated.
 //
 // The call look sits with the voice because it is the same question asked of a
 // different sense: a personality is not only what it says and how it sounds,
@@ -53,6 +52,116 @@ export interface PersonalityVoice {
   /** Call Stage treatment; `''` = fall through to `display.call_style`, then
    *  to the treatment derived from this personality's id. */
   callStyle: CallTreatment | '';
+  /** Which voice stack serves this personality; `''` = the deployment's own. */
+  tier: 'pipeline' | 'realtime' | '';
+  /** Fast-lane model for spoken turns; `''` = the personality's normal model. */
+  model: string;
+  /** `voice.languages.<tag>` as an ordered row list — a Record cannot hold a
+   *  half-typed tag while the operator is still typing it. */
+  languages: VoiceLanguageRow[];
+}
+
+/** One `voice.languages.<tag>: <voice id>` row, mid-edit. */
+export interface VoiceLanguageRow {
+  /** Stable React key. Not persisted — the tag is what config.yaml carries. */
+  rowId: number;
+  /** BCP-47 tag (`es`, `pt-BR`). */
+  tag: string;
+  /** Voice id for that language, in the personality's TTS provider. */
+  voice: string;
+}
+
+/** BCP-47 tags become `voice.languages.<tag>` keys, so the charset is closed. */
+const LANGUAGE_TAG_RE = /^[A-Za-z0-9-]+$/;
+
+let nextLanguageRowId = 1;
+
+/** Hydrate the row editor from a stored map. Exported for the edit form. */
+export function voiceLanguageRows(map: Record<string, string> | undefined): VoiceLanguageRow[] {
+  return Object.entries(map ?? {})
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([tag, voice]) => ({ rowId: nextLanguageRowId++, tag, voice }));
+}
+
+/**
+ * Collapse the row editor back to the map the API takes.
+ *
+ * Blank and malformed rows are dropped rather than sent: a half-typed tag is a
+ * row the operator is still writing, not a key to put in config.yaml. Exported
+ * so both the create wizard and the edit form send exactly the same shape.
+ */
+export function voiceLanguageMap(rows: VoiceLanguageRow[]): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const row of rows) {
+    const tag = row.tag.trim();
+    const voice = row.voice.trim();
+    if (!tag || !voice || !LANGUAGE_TAG_RE.test(tag)) continue;
+    out[tag] = voice;
+  }
+  return out;
+}
+
+/** The `voice` block as the personality RPCs take it. */
+interface VoiceBlockInput {
+  tts_provider?: string;
+  tts_voice?: string;
+  stt_provider?: string;
+  realtime_provider?: string;
+  call_style?: CallTreatment;
+  tier?: 'pipeline' | 'realtime';
+  model?: string;
+  languages?: Record<string, string>;
+}
+
+/**
+ * The `voice` block for `personalities.create`.
+ *
+ * Unset sub-keys are omitted and an all-blank form produces no block at all, so
+ * a personality created without touching this section carries no `voice:` lines.
+ */
+export function voiceCreateInput(voice: PersonalityVoice): { voice?: VoiceBlockInput } {
+  const languages = voiceLanguageMap(voice.languages);
+  const block: VoiceBlockInput = {
+    ...(voice.ttsProvider ? { tts_provider: voice.ttsProvider } : {}),
+    ...(voice.ttsVoice ? { tts_voice: voice.ttsVoice } : {}),
+    ...(voice.sttProvider ? { stt_provider: voice.sttProvider } : {}),
+    ...(voice.realtimeProvider ? { realtime_provider: voice.realtimeProvider } : {}),
+    ...(voice.callStyle ? { call_style: voice.callStyle } : {}),
+    ...(voice.tier ? { tier: voice.tier } : {}),
+    ...(voice.model ? { model: voice.model } : {}),
+    ...(Object.keys(languages).length > 0 ? { languages } : {}),
+  };
+  return Object.keys(block).length > 0 ? { voice: block } : {};
+}
+
+/**
+ * The `voice` patch for `personalities.update`.
+ *
+ * EVERY sub-key, always, empty string included: the registry shallow-merges the
+ * block, so omitting one would preserve the stored value and make "back to the
+ * default" unexpressible. `languages` replaces the stored map wholesale for the
+ * same reason — an omitted tag has to be a deleted tag.
+ */
+export function voiceUpdateInput(voice: PersonalityVoice): {
+  tts_provider: string;
+  tts_voice: string;
+  stt_provider: string;
+  realtime_provider: string;
+  call_style: CallTreatment | '';
+  tier: 'pipeline' | 'realtime' | '';
+  model: string;
+  languages: Record<string, string>;
+} {
+  return {
+    tts_provider: voice.ttsProvider,
+    tts_voice: voice.ttsVoice,
+    stt_provider: voice.sttProvider,
+    realtime_provider: voice.realtimeProvider,
+    call_style: voice.callStyle,
+    tier: voice.tier,
+    model: voice.model,
+    languages: voiceLanguageMap(voice.languages),
+  };
 }
 
 /** The three treatments, plus the "not declared" row that clears the key. */
@@ -62,6 +171,21 @@ const CALL_STYLE_OPTIONS: ReadonlyArray<{ value: CallTreatment | ''; label: stri
   { value: 'orb', label: 'Orb — a body that deforms with the voice' },
   { value: 'rings', label: 'Rings — concentric rings breathing outward' },
 ];
+
+/** Tier, plus the "not declared" row that defers to the deployment's `voice.tier`. */
+const TIER_OPTIONS: ReadonlyArray<{ value: 'pipeline' | 'realtime' | ''; label: string }> = [
+  { value: '', label: 'Deployment default' },
+  { value: 'pipeline', label: 'Pipeline — speech to text, agent, text to speech' },
+  { value: 'realtime', label: 'Realtime — hosted speech to speech' },
+];
+
+/** A dense row, not a Card — DESIGN.md "cards earn existence". */
+const LANGUAGE_ROW_STYLE: CSSProperties = {
+  display: 'flex',
+  gap: 8,
+  alignItems: 'flex-start',
+  marginBottom: 8,
+};
 
 export function PersonalityVoiceFields({
   value,
@@ -176,6 +300,10 @@ export function PersonalityVoiceFields({
           />
         )}
       </Form.Item>
+      <VoiceLanguageRows
+        rows={value.languages}
+        onChange={(languages) => onChange({ ...value, languages })}
+      />
       <Form.Item
         label="Call look"
         help="The shape the Call Stage draws while this personality holds the floor. Left as derived, it gets a stable shape from its own name — no two personalities have to look alike. A treatment pinned in Settings → Voice applies only to personalities that have not chosen one here."
@@ -244,6 +372,26 @@ export function PersonalityVoiceFields({
           ]}
         />
       </Form.Item>
+      <Form.Item
+        label="Voice tier"
+        help="Which stack serves this personality when it talks. Pipeline transcribes, runs the agent, then speaks; realtime hands the whole turn to a hosted speech-to-speech provider. Left as the deployment default, it follows Settings → Voice — and a deployment with no realtime provider serves pipeline either way."
+      >
+        <Select
+          value={value.tier}
+          onChange={(next: 'pipeline' | 'realtime' | '') => onChange({ ...value, tier: next })}
+          options={[...TIER_OPTIONS]}
+        />
+      </Form.Item>
+      <Form.Item
+        label="Fast-lane model"
+        help="The model the voice lane routes to. Conversational latency and agentic depth want different models; this is how a personality says which one talks. Blank uses its normal model. It is stored and resolved today, but fast-lane routing for spoken pipeline turns has not landed — setting it does not yet change which model answers."
+      >
+        <Input
+          placeholder="claude-haiku-4-5"
+          value={value.model}
+          onChange={(e) => onChange({ ...value, model: e.target.value })}
+        />
+      </Form.Item>
       {configured ? (
         <VoicePreview provider={value.ttsProvider} ttsVoice={value.ttsVoice} />
       ) : (
@@ -254,6 +402,80 @@ export function PersonalityVoiceFields({
         </Typography.Paragraph>
       )}
     </>
+  );
+}
+
+/**
+ * `voice.languages.<tag>` — which voice speaks this personality in which
+ * language.
+ *
+ * Rows, not a Card: DESIGN.md reserves the Card primitive for skill rows, cron
+ * rows and task tiles, and a two-field pair does not earn one. The shape is the
+ * dense-row idiom Settings → Voice already uses for its provider rosters — a
+ * label above each field, small controls, one Remove per row, one Add beneath.
+ *
+ * A tag with no voice (or a voice with no tag) is a row mid-typing and is
+ * simply not sent; a malformed tag says so rather than being dropped in
+ * silence, because a tag that vanishes on save looks like a bug in the editor.
+ */
+function VoiceLanguageRows({
+  rows,
+  onChange,
+}: {
+  rows: VoiceLanguageRow[];
+  onChange: (next: VoiceLanguageRow[]) => void;
+}) {
+  const update = (rowId: number, patch: Partial<VoiceLanguageRow>) =>
+    onChange(rows.map((row) => (row.rowId === rowId ? { ...row, ...patch } : row)));
+
+  return (
+    <Form.Item
+      label="Voices by language"
+      help="A voice per language this personality speaks. When a turn's language is known, the entry for it wins over the voice above — a personality that declares a Spanish voice means it in Spanish. Channel voice notes detect the language against exactly these tags."
+    >
+      {rows.map((row) => {
+        const tagValid = row.tag === '' || LANGUAGE_TAG_RE.test(row.tag);
+        return (
+          <div key={row.rowId} style={LANGUAGE_ROW_STYLE}>
+            <div style={{ width: 140 }}>
+              <Input
+                size="small"
+                status={tagValid ? undefined : 'error'}
+                placeholder="es"
+                aria-label="Language tag"
+                value={row.tag}
+                onChange={(e) => update(row.rowId, { tag: e.target.value })}
+              />
+              {tagValid ? null : (
+                <Typography.Text type="danger" style={{ fontSize: 11 }}>
+                  Letters, digits and hyphens only — a BCP-47 tag like es or pt-BR.
+                </Typography.Text>
+              )}
+            </div>
+            <Input
+              size="small"
+              placeholder="ef_dora"
+              aria-label="Voice for this language"
+              value={row.voice}
+              onChange={(e) => update(row.rowId, { voice: e.target.value })}
+            />
+            <Button
+              size="small"
+              danger
+              onClick={() => onChange(rows.filter((r) => r.rowId !== row.rowId))}
+            >
+              Remove
+            </Button>
+          </div>
+        );
+      })}
+      <Button
+        size="small"
+        onClick={() => onChange([...rows, { rowId: nextLanguageRowId++, tag: '', voice: '' }])}
+      >
+        Add language
+      </Button>
+    </Form.Item>
   );
 }
 

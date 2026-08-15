@@ -1,5 +1,4 @@
 import { InfoCircleOutlined } from '@ant-design/icons';
-import type { CallTreatment } from '@ethosagent/types';
 import type {
   McpPolicy,
   ModelTierConfigWire,
@@ -42,6 +41,9 @@ import { ExecutionTab } from '../components/personality/ExecutionTab';
 import {
   type PersonalityVoice,
   PersonalityVoiceFields,
+  voiceCreateInput,
+  voiceLanguageRows,
+  voiceUpdateInput,
 } from '../components/personality/PersonalityVoiceFields';
 import { PersonalityRingAvatar } from '../components/ui/PersonalityRingAvatar';
 import { toolAffordance } from '../lib/execution-posture';
@@ -384,17 +386,23 @@ interface WizardState {
   skillEvolutionMinToolCalls: number;
   skillEvolutionCooldownMinutes: number;
   evolutionApprovalMode: 'auto' | 'user';
-  /** `voice.tts_provider` — a `voice.tts.providers.*` roster name; '' = default. */
-  voiceTtsProvider: string;
-  /** `voice.tts_voice`. */
-  voiceTtsVoice: string;
-  /** `voice.stt_provider` — a `voice.stt.providers.*` roster name; '' = default. */
-  voiceSttProvider: string;
-  /** `voice.realtime_provider` — a `voice.realtime.providers.*` roster name; '' = deployment default. */
-  voiceRealtimeProvider: string;
-  /** `voice.call_style` — the Call Stage treatment; '' = derived from the id. */
-  voiceCallStyle: CallTreatment | '';
+  /** The whole `voice` block as the editor holds it. One object rather than a
+   *  field per sub-key: the language map is a list, and flattening a list into
+   *  wizard state buys nothing. */
+  voice: PersonalityVoice;
 }
+
+/** No `voice` block at all — every sub-key unset. */
+const BLANK_VOICE: PersonalityVoice = {
+  ttsProvider: '',
+  ttsVoice: '',
+  sttProvider: '',
+  realtimeProvider: '',
+  callStyle: '',
+  tier: '',
+  model: '',
+  languages: [],
+};
 
 const SOUL_TEMPLATE = `# About me\n\nI am a {role}. I {what I do}. I {how I work}.\n\n## How I respond\n\n- {tone / shape}\n- {tone / shape}\n- {tone / shape}\n`;
 
@@ -423,11 +431,7 @@ function CreateWizard({ existingIds, onClose }: { existingIds: Set<string>; onCl
     skillEvolutionMinToolCalls: 3,
     skillEvolutionCooldownMinutes: 30,
     evolutionApprovalMode: 'user',
-    voiceTtsProvider: '',
-    voiceTtsVoice: '',
-    voiceSttProvider: '',
-    voiceRealtimeProvider: '',
-    voiceCallStyle: '',
+    voice: BLANK_VOICE,
   });
 
   const createMut = useMutation({
@@ -471,23 +475,7 @@ function CreateWizard({ existingIds, onClose }: { existingIds: Set<string>; onCl
         evolution_approval_mode: state.evolutionApprovalMode,
         // Omitted entirely when none is set, so a personality created without
         // touching these carries no `voice` block at all.
-        ...(state.voiceTtsProvider ||
-        state.voiceTtsVoice ||
-        state.voiceSttProvider ||
-        state.voiceRealtimeProvider ||
-        state.voiceCallStyle
-          ? {
-              voice: {
-                ...(state.voiceTtsProvider ? { tts_provider: state.voiceTtsProvider } : {}),
-                ...(state.voiceTtsVoice ? { tts_voice: state.voiceTtsVoice } : {}),
-                ...(state.voiceSttProvider ? { stt_provider: state.voiceSttProvider } : {}),
-                ...(state.voiceRealtimeProvider
-                  ? { realtime_provider: state.voiceRealtimeProvider }
-                  : {}),
-                ...(state.voiceCallStyle ? { call_style: state.voiceCallStyle } : {}),
-              },
-            }
-          : {}),
+        ...voiceCreateInput(state.voice),
       }),
     onSuccess: async () => {
       if (state.skills.length > 0) {
@@ -642,23 +630,8 @@ function IdentityStep({
         />
       </Form.Item>
       <PersonalityVoiceFields
-        value={{
-          ttsProvider: state.voiceTtsProvider,
-          ttsVoice: state.voiceTtsVoice,
-          sttProvider: state.voiceSttProvider,
-          realtimeProvider: state.voiceRealtimeProvider,
-          callStyle: state.voiceCallStyle,
-        }}
-        onChange={(next) =>
-          setState((s) => ({
-            ...s,
-            voiceTtsProvider: next.ttsProvider,
-            voiceTtsVoice: next.ttsVoice,
-            voiceSttProvider: next.sttProvider,
-            voiceRealtimeProvider: next.realtimeProvider,
-            voiceCallStyle: next.callStyle,
-          }))
-        }
+        value={state.voice}
+        onChange={(voice) => setState((s) => ({ ...s, voice }))}
       />
     </Form>
   );
@@ -1732,13 +1705,7 @@ export function ConfigEditor({ id, personality }: { id: string; personality: Per
   // pair (the voice control switches between a select and free text as the
   // provider changes), and threading that through registered Form.Items buys
   // nothing but indirection.
-  const [voice, setVoice] = useState<PersonalityVoice>({
-    ttsProvider: '',
-    ttsVoice: '',
-    sttProvider: '',
-    realtimeProvider: '',
-    callStyle: '',
-  });
+  const [voice, setVoice] = useState<PersonalityVoice>(BLANK_VOICE);
   const catalogQuery = useQuery({
     queryKey: ['models', 'catalog'],
     queryFn: () => rpc.models.catalog(),
@@ -1789,6 +1756,9 @@ export function ConfigEditor({ id, personality }: { id: string; personality: Per
       sttProvider: personality.voice?.stt_provider ?? '',
       realtimeProvider: personality.voice?.realtime_provider ?? '',
       callStyle: personality.voice?.call_style ?? '',
+      tier: personality.voice?.tier ?? '',
+      model: personality.voice?.model ?? '',
+      languages: voiceLanguageRows(personality.voice?.languages),
     });
   }, [personality, form]);
 
@@ -1868,13 +1838,7 @@ export function ConfigEditor({ id, personality }: { id: string; personality: Per
         // Every sub-key always sent, empty string included: the registry
         // shallow-merges the voice block, so omitting one would preserve the
         // stored value and make "back to the default provider" unexpressible.
-        voice: {
-          tts_provider: voice.ttsProvider,
-          tts_voice: voice.ttsVoice,
-          stt_provider: voice.sttProvider,
-          realtime_provider: voice.realtimeProvider,
-          call_style: voice.callStyle,
-        },
+        voice: voiceUpdateInput(voice),
         nightly: {
           enabled: values.nightlyEnabled,
           judge: {

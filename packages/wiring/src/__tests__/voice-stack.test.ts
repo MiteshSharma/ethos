@@ -1,13 +1,22 @@
-import { DefaultSttProviderRegistry, DefaultTtsProviderRegistry } from '@ethosagent/core';
+import type { VoiceBargeInConfig } from '@ethosagent/config';
+import {
+  AgentLoop,
+  DefaultSttProviderRegistry,
+  DefaultTtsProviderRegistry,
+} from '@ethosagent/core';
+import type { LiveKitRoomClient } from '@ethosagent/platform-voice';
 import type {
   AgentEvent,
+  LLMProvider,
   Logger,
   PersonalityConfig,
   SttProvider,
   TtsProvider,
 } from '@ethosagent/types';
 import { STT_CONTRACT_VERSION } from '@ethosagent/types';
+import type { AgentTurnRunner, VoiceSessionConfig } from '@ethosagent/voice-session';
 import { describe, expect, it } from 'vitest';
+import { createTestSafety } from '../../../core/src/__tests__/helpers/test-safety';
 import type { WiringConfig } from '../index';
 import { buildVoiceStack } from '../voice-stack';
 
@@ -69,6 +78,20 @@ function personalityWithVoice(voice: PersonalityConfig['voice']): PersonalityCon
   return { id: 'v', name: 'V', ...(voice ? { voice } : {}) };
 }
 
+/** A room client that connects to nothing — enough to build an adapter. */
+function fakeRoomClient(): LiveKitRoomClient {
+  return {
+    connect: async () => {},
+    disconnect: async () => {},
+    onRemoteAudio: () => () => {},
+    publishAudio: () => {},
+    remoteIdentity: () => 'caller',
+  };
+}
+
+/** What `LiveKitRoomClient.onRemoteAudio` hands back: one inbound PCM frame. */
+type RemoteAudioHandler = (frame: { samples: Int16Array; sampleRate: number }) => void;
+
 /** A runner that closes the turn immediately — these tests exercise wiring, not turns. */
 const runner = {
   async *run(): AsyncGenerator<AgentEvent> {
@@ -94,7 +117,7 @@ describe('buildVoiceStack', () => {
     expect(stack?.ttsProviderId).toBe('local-tts');
     expect(stack?.providerError).toBeUndefined();
 
-    const session = stack?.createSession({ laneKey: 'voice:bot:+15551230000', runner });
+    const session = await stack?.createSession({ laneKey: 'voice:bot:+15551230000', runner });
     expect(session?.getState()).toBe('idle');
     await stack?.close();
   });
@@ -183,7 +206,7 @@ describe('buildVoiceStack', () => {
       sttProviders,
       ttsProviders,
     });
-    const session = stack?.createSession({
+    const session = await stack?.createSession({
       laneKey: 'voice:bot:caller one',
       runner,
       sessionConfig: { endpointSilenceMs: 0 },
@@ -248,7 +271,7 @@ describe('buildVoiceStack', () => {
       ['voice:bot:a:b', 8_000],
       ['voice:bot:a_b', 12_000],
     ] as const) {
-      const session = stack.createSession({
+      const session = await stack.createSession({
         laneKey,
         runner,
         sessionConfig: { endpointSilenceMs: 0 },
@@ -300,7 +323,7 @@ describe('buildVoiceStack', () => {
         ),
       );
       expect(stack?.providerError).toContain('refusing to send audio off this machine');
-      expect(() => stack?.createSession({ laneKey: 'voice:b:c', runner })).toThrow(
+      await expect(stack?.createSession({ laneKey: 'voice:b:c', runner })).rejects.toThrow(
         /not local and is not in voice.trustedPlugins/,
       );
       await stack?.close();
@@ -317,7 +340,7 @@ describe('buildVoiceStack', () => {
         ),
       );
       expect(stack?.providerError).toBeUndefined();
-      expect(stack?.createSession({ laneKey: 'voice:b:c', runner })).toBeDefined();
+      expect(await stack?.createSession({ laneKey: 'voice:b:c', runner })).toBeDefined();
       await stack?.close();
     });
   });
@@ -326,11 +349,12 @@ describe('buildVoiceStack', () => {
     it('does not build LiveKit or SIP when they are not configured', async () => {
       const stack = await buildVoiceStack(deps(config({ voice: { bots: [] } })));
       expect(stack?.createLiveKitAdapter).toBeUndefined();
+      expect(stack?.createSipAdapter).toBeUndefined();
       expect(stack?.sipTrunk).toBeUndefined();
       await stack?.close();
     });
 
-    it('warns instead of throwing when LiveKit is configured with no native binding', async () => {
+    it('warns instead of throwing when LiveKit is configured with no media binding', async () => {
       warnings.length = 0;
       const stack = await buildVoiceStack(
         deps(
@@ -343,11 +367,55 @@ describe('buildVoiceStack', () => {
         ),
       );
       expect(stack?.createLiveKitAdapter).toBeUndefined();
-      expect(warnings.some((w) => w.includes('LiveKit transport is unavailable'))).toBe(true);
+      expect(stack?.createSipAdapter).toBeUndefined();
+      expect(warnings.some((w) => w.includes('media transports are unavailable'))).toBe(true);
       await stack?.close();
     });
 
-    it('warns instead of throwing when a SIP trunk is configured with no client', async () => {
+    // E2: `VoiceStack.sipTrunk` used to be undefined in EVERY shipped
+    // deployment, because the only way to get one was an app that passed a
+    // client and no in-repo app did. The control plane is signed-JWT + HTTPS,
+    // so it now builds itself from the credentials already in config.
+    it('derives the SIP trunk from voice.trunk + voice.livekit with no app binding', async () => {
+      warnings.length = 0;
+      const stack = await buildVoiceStack(
+        deps(
+          config({
+            voice: {
+              bots: [],
+              livekit: { url: 'wss://lk.example', apiKey: 'k', apiSecret: 's' },
+              trunk: { provider: 'livekit', trunkId: 'T1', fromNumber: '+15550001111' },
+            },
+          }),
+        ),
+      );
+      expect(stack?.sipTrunk).toBeDefined();
+      expect(stack?.fromNumber).toBe('+15550001111');
+      expect(warnings.some((w) => w.includes('telephony is unavailable'))).toBe(false);
+      await stack?.close();
+    });
+
+    it('an explicitly supplied trunk wins over the derived one', async () => {
+      const injected = {
+        createOutboundCall: async () => ({ callId: 'c', toNumber: '', roomName: '' }),
+      };
+      const stack = await buildVoiceStack({
+        ...deps(
+          config({
+            voice: {
+              bots: [],
+              livekit: { url: 'wss://lk.example', apiKey: 'k', apiSecret: 's' },
+              trunk: { provider: 'livekit', trunkId: 'T1' },
+            },
+          }),
+        ),
+        trunk: injected,
+      });
+      expect(stack?.sipTrunk).toBe(injected);
+      await stack?.close();
+    });
+
+    it('warns when a trunk is configured without the LiveKit credentials it signs with', async () => {
       warnings.length = 0;
       const stack = await buildVoiceStack(
         deps(
@@ -361,6 +429,165 @@ describe('buildVoiceStack', () => {
       expect(warnings.some((w) => w.includes('telephony is unavailable'))).toBe(true);
       await stack?.close();
     });
+
+    // The media binding is app-supplied; the TOKEN MINTER is not. Before this,
+    // `voice.livekit.apiKey`/`apiSecret` were parsed and never read.
+    it('builds both adapter factories from a media binding alone — no app token minter', async () => {
+      const stack = await buildVoiceStack({
+        ...deps(
+          config({
+            voice: {
+              bots: [
+                { id: 'reception', match: '+1555*', bind: { type: 'personality', name: 'r' } },
+              ],
+              livekit: { url: 'wss://lk.example', apiKey: 'k', apiSecret: 's' },
+            },
+          }),
+        ),
+        livekit: { createClient: () => fakeRoomClient() },
+      });
+      expect(stack?.createLiveKitAdapter).toBeDefined();
+      expect(stack?.createSipAdapter).toBeDefined();
+      await stack?.close();
+    });
+
+    // The lane-key segment is the whole point of a separate SIP factory: a
+    // phone leg and the same person's browser session are different
+    // conversations and must not share a session row.
+    it('stamps laneKind sip on the SIP adapter and livekit on the room adapter', async () => {
+      const stack = await buildVoiceStack({
+        ...deps(
+          config({
+            voice: {
+              bots: [],
+              livekit: { url: 'wss://lk.example', apiKey: 'k', apiSecret: 's' },
+            },
+          }),
+        ),
+        livekit: { createClient: () => fakeRoomClient() },
+      });
+      const opts = {
+        bot: { id: 'reception', match: '+1555*' },
+        roomName: 'call-1',
+        callerId: '+15551230000',
+        runner,
+      };
+      const sip = await stack?.createSipAdapter?.(opts);
+      const room = await stack?.createLiveKitAdapter?.(opts);
+      expect(sip?.laneKey).toBe('voice:reception:sip:%2B15551230000');
+      expect(room?.laneKey).toBe('voice:reception:livekit:%2B15551230000');
+      await stack?.close();
+    });
+  });
+
+  // The gates are deployment-wide STATE — one limiter, one window, one budget.
+  // A second instance is a second cap.
+  describe('inbound hardening gates', () => {
+    it('defaults to a concurrency cap of 2 and an unlimited budget', async () => {
+      const stack = await buildVoiceStack(deps(config({ voice: { bots: [] } })));
+      const gates = stack?.inbound;
+      expect(gates?.prewarm).toBe('allowlisted');
+      expect(gates?.rateLimit).toBeUndefined();
+      expect(gates?.budget.exceeded()).toBe(false);
+      expect(gates?.concurrency.tryAcquire('c1')).toBe(true);
+      expect(gates?.concurrency.tryAcquire('c2')).toBe(true);
+      expect(gates?.concurrency.tryAcquire('c3')).toBe(false);
+      await stack?.close();
+    });
+
+    it('builds each gate from voice.inbound.* — one instance per deployment', async () => {
+      const stack = await buildVoiceStack(
+        deps(
+          config({
+            voice: {
+              bots: [],
+              inbound: {
+                allowlist: ['+1555*'],
+                receptionist: 'reception',
+                concurrencyCap: 1,
+                perCallerPerHour: 1,
+                dailyBudgetUsd: 5,
+                prewarm: 'none',
+                owner: { platform: 'telegram', chatId: 'C1' },
+              },
+            },
+          }),
+        ),
+      );
+      const gates = stack?.inbound;
+      expect(gates?.allowlist).toEqual(['+1555*']);
+      expect(gates?.receptionist).toBe('reception');
+      expect(gates?.prewarm).toBe('none');
+      expect(gates?.owner).toEqual({ platform: 'telegram', chatId: 'C1' });
+      expect(gates?.concurrency.tryAcquire('a')).toBe(true);
+      expect(gates?.concurrency.tryAcquire('b')).toBe(false);
+      expect(gates?.rateLimit?.tryConsume('+15551230000')).toBe(true);
+      expect(gates?.rateLimit?.tryConsume('+15551230000')).toBe(false);
+      gates?.budget.record(5);
+      expect(gates?.budget.exceeded()).toBe(true);
+      await stack?.close();
+    });
+  });
+
+  // A21 — the provider, not just the voice id, follows the personality.
+  describe('per-personality provider roster', () => {
+    it('two personalities naming different roster entries get different providers', async () => {
+      const stack = await buildVoiceStack(
+        deps(
+          config({
+            voice: {
+              bots: [],
+              tts: { providers: { studio: { provider: 'cloud-tts' } } },
+              stt: { providers: { studio: { provider: 'cloud-stt' } } },
+            },
+          }),
+        ),
+      );
+      if (!stack) throw new Error('expected a voice stack');
+      const spoken = await stack.createSession({
+        laneKey: 'voice:b:a',
+        runner,
+        personality: {
+          id: 'p2',
+          name: 'P2',
+          voice: { tts_provider: 'studio', stt_provider: 'studio' },
+        },
+      });
+      const plain = await stack.createSession({ laneKey: 'voice:b:b', runner });
+      // The session stamps its providers' own names into every span it writes.
+      expect(spoken.getState()).toBe('idle');
+      expect(plain.getState()).toBe('idle');
+      expect(stack.ttsProviderId).toBe('local-tts');
+      await stack.close();
+    });
+
+    // The adversarial shape: the roster KEY is a label the operator typed. The
+    // gate keys on the entry's underlying provider and the constructed
+    // provider's caps, so a cloud entry called `local-*` is still refused.
+    it('refuses a roster entry named local-* backed by a non-local provider', async () => {
+      const stack = await buildVoiceStack(
+        deps(
+          config({
+            voice: {
+              bots: [],
+              trustedPlugins: [],
+              tts: { providers: { 'local-studio': { provider: 'cloud-tts' } } },
+            },
+          }),
+        ),
+      );
+      if (!stack) throw new Error('expected a voice stack');
+      await expect(
+        stack.createSession({
+          laneKey: 'voice:b:a',
+          runner,
+          personality: { id: 'p', name: 'P', voice: { tts_provider: 'local-studio' } },
+        }),
+      ).rejects.toThrow(/cloud-tts/);
+      // ...while the default entry, which really is local, still serves.
+      expect(await stack.createSession({ laneKey: 'voice:b:b', runner })).toBeDefined();
+      await stack.close();
+    });
   });
 
   it('warns but still builds when a configured provider is unknown', async () => {
@@ -370,7 +597,9 @@ describe('buildVoiceStack', () => {
     );
     expect(stack).not.toBeNull();
     expect(stack?.providerError).toContain('nope-stt');
-    expect(() => stack?.createSession({ laneKey: 'voice:b:c', runner })).toThrow(/nope-stt/);
+    await expect(stack?.createSession({ laneKey: 'voice:b:c', runner })).rejects.toThrow(
+      /nope-stt/,
+    );
     await stack?.close();
   });
 
@@ -410,7 +639,7 @@ describe('buildVoiceStack', () => {
       });
       if (!stack) throw new Error('expected a voice stack');
 
-      const session = stack.createSession({
+      const session = await stack.createSession({
         laneKey: 'voice:bot:caller',
         runner: {
           async *run(): AsyncGenerator<AgentEvent> {
@@ -468,6 +697,92 @@ describe('buildVoiceStack', () => {
       ).resolves.toBe('ef_dora');
     });
 
+    // L5 — `voice.model` used to be a knob nothing read. These drive a real
+    // `AgentLoop` from real audio and assert on the model string the LLM
+    // PROVIDER was asked for, so the whole hop (lane -> pinned runner -> turn
+    // setup -> CompletionOptions) has to be live for them to pass.
+    describe('fast-lane model', () => {
+      /** The model the provider served for one spoken turn on this lane. */
+      async function modelUsedFor(personality?: PersonalityConfig): Promise<string> {
+        const served: string[] = [];
+        const llm: LLMProvider = {
+          name: 'mock',
+          model: 'deployment-default',
+          maxContextTokens: 200_000,
+          supportsCaching: false,
+          supportsThinking: false,
+          async *complete(_messages, _tools, completionOpts) {
+            served.push(completionOpts.modelOverride ?? 'deployment-default');
+            yield { type: 'text_delta', text: 'Hello there.' };
+            yield { type: 'done', finishReason: 'end_turn' };
+          },
+          async countTokens() {
+            return 10;
+          },
+        };
+        const loop = new AgentLoop({ llm, safety: createTestSafety() });
+
+        const stack = await buildVoiceStack(deps(config({ voice: { bots: [] } })));
+        if (!stack) throw new Error('expected a voice stack');
+        const session = await stack.createSession({
+          laneKey: 'voice:bot:caller',
+          runner: loop,
+          ...(personality ? { personality } : {}),
+          sessionConfig: { endpointSilenceMs: 0 },
+        });
+        for (let i = 0; i < 5; i++) {
+          session.pushAudio({ data: new Int16Array(320).fill(12_000), sampleRate: 16_000 });
+        }
+        for (let i = 0; i < 6; i++) {
+          session.pushAudio({ data: new Int16Array(320), sampleRate: 16_000 });
+        }
+        await session.idle();
+        await stack.close();
+        const first = served[0];
+        if (!first) throw new Error('the turn never reached the provider');
+        return first;
+      }
+
+      it('sends the model the personality declares in voice.model', async () => {
+        await expect(modelUsedFor(personalityWithVoice({ model: 'fast-haiku' }))).resolves.toBe(
+          'fast-haiku',
+        );
+      });
+
+      it('sends the deployment default when the personality declares no voice.model', async () => {
+        await expect(modelUsedFor(personalityWithVoice({ tts_voice: 'af_mine' }))).resolves.toBe(
+          'deployment-default',
+        );
+      });
+
+      // The interface exists so voice-session never imports core. If AgentLoop
+      // stops fitting it, the production runner stops being injectable — which
+      // is a compile error here and a runtime drive below.
+      it('AgentLoop satisfies AgentTurnRunner', async () => {
+        const llm: LLMProvider = {
+          name: 'mock',
+          model: 'deployment-default',
+          maxContextTokens: 200_000,
+          supportsCaching: false,
+          supportsThinking: false,
+          async *complete() {
+            yield { type: 'text_delta', text: 'hi' };
+            yield { type: 'done', finishReason: 'end_turn' };
+          },
+          async countTokens() {
+            return 1;
+          },
+        };
+        const asRunner: AgentTurnRunner = new AgentLoop({ llm, safety: createTestSafety() });
+
+        const types: string[] = [];
+        for await (const event of asRunner.run('hi', { modelOverride: 'fast-haiku' })) {
+          types.push(event.type);
+        }
+        expect(types).toContain('done');
+      });
+    });
+
     it('falls back to the personality default for an unmapped language', async () => {
       await expect(
         voiceUsedFor({
@@ -479,6 +794,166 @@ describe('buildVoiceStack', () => {
           language: 'de',
         }),
       ).resolves.toBe('af_mine');
+    });
+  });
+
+  // `voice.bargeIn.<surface>` parsed, validated, round-tripped through the web
+  // Settings page — and was read by NOTHING. An operator could tune a phone
+  // line's cough filter and change no behaviour at all. These drive real PCM
+  // through the real SIP adapter, so the numbers have to land on the VAD and
+  // the endpoint detector for any of them to pass.
+  describe('voice.bargeIn tuning reaches the lane it names', () => {
+    /**
+     * Open one adapter under `bargeIn`, speak, go quiet, and report whether the
+     * utterance ever reached the recognizer.
+     *
+     * The recognizer is the probe because it sits on the far side of BOTH knobs
+     * this block wires: audio that the VAD refused to call speech never becomes
+     * an utterance, and an utterance the endpoint detector never closes is never
+     * transcribed. Frames are pushed in a tight loop, so wall-clock silence is
+     * ~0 ms — which is exactly why an untuned lane (400 ms default) commits
+     * nothing and a lane tuned to `silenceMs: 0` commits.
+     */
+    async function transcribedAfterSpeaking(opts: {
+      bargeIn?: VoiceBargeInConfig;
+      /** Frame amplitude; 12_000 is RMS 0.366, well over the 0.02 default. */
+      amplitude?: number;
+      speechFrames?: number;
+      sessionConfig?: VoiceSessionConfig;
+      adapter?: 'sip' | 'livekit';
+    }): Promise<boolean> {
+      let transcribed = false;
+      const sttProviders = new DefaultSttProviderRegistry();
+      sttProviders.register('local-stt', () => ({
+        name: 'local-stt',
+        caps: {
+          kind: 'stt' as const,
+          formats: ['wav' as const],
+          local: true,
+          contractVersion: STT_CONTRACT_VERSION,
+        },
+        transcribeBuffer: async () => {
+          transcribed = true;
+          return '';
+        },
+      }));
+      const ttsProviders = new DefaultTtsProviderRegistry();
+      ttsProviders.register('local-tts', () => batchTts('local-tts', true));
+
+      // Collected rather than assigned to a `let`: the subscription happens
+      // inside `onRemoteAudio`, which control-flow analysis cannot see, so a
+      // nullable local would still read as `null` at the call sites below.
+      const subscribers: RemoteAudioHandler[] = [];
+      const client: LiveKitRoomClient = {
+        connect: async () => {},
+        disconnect: async () => {},
+        onRemoteAudio: (handler) => {
+          subscribers.push(handler);
+          return () => {};
+        },
+        publishAudio: () => {},
+        remoteIdentity: () => 'caller',
+      };
+
+      const stack = await buildVoiceStack({
+        config: config({
+          voice: {
+            bots: [],
+            livekit: { url: 'wss://lk.example', apiKey: 'k', apiSecret: 's' },
+            ...(opts.bargeIn ? { bargeIn: opts.bargeIn } : {}),
+          },
+        }),
+        logger,
+        sttProviders,
+        ttsProviders,
+        livekit: { createClient: () => client },
+      });
+      if (!stack) throw new Error('expected a voice stack');
+      const build =
+        opts.adapter === 'livekit' ? stack.createLiveKitAdapter : stack.createSipAdapter;
+      if (!build) throw new Error('expected an adapter factory');
+      const adapter = await build({
+        bot: { id: 'reception', match: '+1555*' },
+        roomName: 'call-1',
+        callerId: '+15551230000',
+        runner,
+        ...(opts.sessionConfig ? { sessionConfig: opts.sessionConfig } : {}),
+      });
+      await adapter.start();
+      const push = subscribers[0];
+      if (!push) throw new Error('the transport never subscribed to remote audio');
+      for (let i = 0; i < (opts.speechFrames ?? 10); i++) {
+        push({ samples: new Int16Array(320).fill(opts.amplitude ?? 12_000), sampleRate: 16_000 });
+      }
+      for (let i = 0; i < 6; i++) push({ samples: new Int16Array(320), sampleRate: 16_000 });
+      // Every stub resolves immediately; one macrotask is enough for the turn
+      // this harness cares about to have run or provably not run.
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      await adapter.stop();
+      await stack.close();
+      return transcribed;
+    }
+
+    const call = (tuning: VoiceBargeInConfig['call']): VoiceBargeInConfig => ({ call: tuning });
+
+    it('leaves the built-in defaults alone when no bargeIn block is configured', async () => {
+      // Nothing commits inside 0 ms of silence — the 400 ms endpoint default.
+      await expect(transcribedAfterSpeaking({})).resolves.toBe(false);
+      // ...and the energy/attack defaults still pass ordinary speech through,
+      // which is what makes the negative above an endpoint result and not a
+      // VAD that stopped hearing anything.
+      await expect(
+        transcribedAfterSpeaking({ sessionConfig: { endpointSilenceMs: 0 } }),
+      ).resolves.toBe(true);
+    });
+
+    it('applies voice.bargeIn.call.silenceMs to the call lane endpoint detector', async () => {
+      await expect(transcribedAfterSpeaking({ bargeIn: call({ silenceMs: 0 }) })).resolves.toBe(
+        true,
+      );
+    });
+
+    it('applies voice.bargeIn.call.energyThreshold to the call lane VAD', async () => {
+      // RMS 0.366 is under a 0.9 floor: loud, and not speech.
+      await expect(
+        transcribedAfterSpeaking({ bargeIn: call({ silenceMs: 0, energyThreshold: 0.9 }) }),
+      ).resolves.toBe(false);
+    });
+
+    it('applies voice.bargeIn.call.minSpeechMs as the call lane attack filter', async () => {
+      // 10 frames × 20 ms = 200 ms of energy. Under a 400 ms floor it is a
+      // cough; over a 100 ms one it is a voice.
+      await expect(
+        transcribedAfterSpeaking({ bargeIn: call({ silenceMs: 0, minSpeechMs: 400 }) }),
+      ).resolves.toBe(false);
+      await expect(
+        transcribedAfterSpeaking({ bargeIn: call({ silenceMs: 0, minSpeechMs: 100 }) }),
+      ).resolves.toBe(true);
+    });
+
+    it('does not let another surface tune the call lane', async () => {
+      await expect(
+        transcribedAfterSpeaking({ bargeIn: { satellite: { silenceMs: 0 } } }),
+      ).resolves.toBe(false);
+    });
+
+    it('lets an explicit per-lane sessionConfig win over the surface tuning', async () => {
+      await expect(
+        transcribedAfterSpeaking({
+          bargeIn: call({ silenceMs: 5_000 }),
+          sessionConfig: { endpointSilenceMs: 0 },
+        }),
+      ).resolves.toBe(true);
+    });
+
+    // The room adapter is deliberately unmapped: `voice.bargeIn` names `call`
+    // and `satellite`, and a LiveKit room participant is a lane kind of its
+    // own. Pinned so a later "obvious" mapping is a decision someone makes
+    // rather than one that leaks in.
+    it('does not apply the call tuning to the LiveKit room lane', async () => {
+      await expect(
+        transcribedAfterSpeaking({ bargeIn: call({ silenceMs: 0 }), adapter: 'livekit' }),
+      ).resolves.toBe(false);
     });
   });
 });

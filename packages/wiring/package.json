@@ -35,6 +35,7 @@
   },
   "dependencies": {
     "@ethosagent/a2a": "workspace:*",
+    "@ethosagent/call-log": "workspace:*",
     "@ethosagent/config": "workspace:*",
     "@ethosagent/constitution": "workspace:*",
     "@ethosagent/core": "workspace:*",

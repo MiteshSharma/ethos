@@ -90,6 +90,7 @@ import { fetchManifest, loadModelCatalog, manifestToEntries } from './model-cata
 import { resolveExecutionPosture } from './resolve-execution-posture';
 import { applySkillPassthrough, deriveSkillPassthrough } from './skill-passthrough';
 import type { WiringContext } from './types';
+import { resolveSipTrunkClient } from './voice-stack';
 
 // ---------------------------------------------------------------------------
 // WEB_PROMPT — kept here since platformPrompts is also assembled here
@@ -743,15 +744,27 @@ export async function composeAllTools(
 
   // Voice tools — `voice_session` is the always-available capability marker that
   // makes a personality selectable for real-time voice (browser talk-mode /
-  // telephony); the web talk-mode gate keys off its presence in the toolset. The
-  // outbound `call` tool self-reports unavailable until a SIP trunk is wired
-  // (the live LiveKit/SIP binding is app-layer/manual, not wired here) — but its
-  // caller-ID comes from `voice.trunk.fromNumber` so the config is consumed in
-  // one place. `call` is in APPROVAL_SURFACE_ALWAYS_ASK, so the approval gate is
-  // in place before the capability ever goes live.
-  for (const tool of createVoiceTools(
-    config.voice?.trunk?.fromNumber ? { fromNumber: config.voice.trunk.fromNumber } : {},
-  ))
+  // telephony); the web talk-mode gate keys off its presence in the toolset.
+  //
+  // The outbound `call` tool goes live exactly when a trunk is configured:
+  // `resolveSipTrunkClient` is the SAME derivation `buildVoiceStack` uses
+  // (`voice.trunk.*` + `voice.livekit.*`), so "the tool is advertised" and "the
+  // deployment can dial" are one fact rather than two that can disagree. With
+  // neither block configured it returns undefined and `call.isAvailable()` stays
+  // false with its existing error. `call` is in APPROVAL_SURFACE_ALWAYS_ASK
+  // (see `./danger-predicate`), so the approval gate was in place before the
+  // capability went live.
+  //
+  // The call log is threaded through so an agent-PLACED call leaves a row, the
+  // way an inbound one always has. Optional: a surface that wires none (chat,
+  // one-shot CLI) dials exactly as before and writes nothing.
+  const sipTrunk = resolveSipTrunkClient(config);
+  for (const tool of createVoiceTools({
+    ...(sipTrunk ? { trunk: sipTrunk } : {}),
+    ...(config.voice?.trunk?.fromNumber ? { fromNumber: config.voice.trunk.fromNumber } : {}),
+    ...(opts.callLog ? { callLog: opts.callLog } : {}),
+    onError: (message) => log.warn(`voice: ${message}`),
+  }))
     tools.register(tool);
 
   // Meeting tool — `meet_join` self-reports unavailable until a MeetingClient is

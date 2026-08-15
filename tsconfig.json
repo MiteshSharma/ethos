@@ -34,6 +34,7 @@
       "@ethosagent/job-runner": ["./extensions/job-runner/src"],
       "@ethosagent/delivery-ledger": ["./extensions/delivery-ledger/src"],
       "@ethosagent/session-cards": ["./extensions/session-cards/src"],
+      "@ethosagent/call-log": ["./extensions/call-log/src"],
       "@ethosagent/kanban-store": ["./extensions/kanban-store/src"],
       "@ethosagent/dashboard": ["./extensions/dashboard/src"],
       "@ethosagent/tools-kanban": ["./extensions/tools-kanban/src"],

@@ -59,6 +59,7 @@ import type { RouteModule } from './routes/route-module';
 import { ApiKeysService } from './services/api-keys.service';
 import { createWebApprovalHook, type DangerPredicate } from './services/approval-hook';
 import { type ApprovalObservability, ApprovalsService } from './services/approvals.service';
+import { CallsService } from './services/calls.service';
 import { ConfigService } from './services/config.service';
 import { CronService } from './services/cron.service';
 import { DeliveriesService } from './services/deliveries.service';
@@ -563,6 +564,9 @@ export function createWebApi(opts: CreateWebApiOptions): CreateWebApiResult {
   const configService = new ConfigService({
     config: configRepo,
     secrets,
+    // Only used to refuse a `voice.bots[]` entry bound to a personality that
+    // does not exist — a phone number that rings through to nothing.
+    personalities: personalitiesService,
     onUpdated: () => satelliteRegistry.refreshRoutes(),
   });
   const onboardingService = new OnboardingService({
@@ -644,6 +648,10 @@ export function createWebApi(opts: CreateWebApiOptions): CreateWebApiResult {
   // Read-only ledger view. Opens nothing until first asked, and nothing at all
   // when the gateway has never run here.
   const deliveriesService = new DeliveriesService({ dataDir: opts.dataDir, storage });
+  // Read-only telephony call history, `<dataDir>/calls.db` — the same file the
+  // gateway writes. Same lazy-open rule as the ledger above: a deployment with
+  // no telephony never grows the database by opening a Settings page.
+  const callsService = new CallsService({ dataDir: opts.dataDir, storage });
   const voiceService = new VoiceService({
     sttRegistry: opts.sttProviderRegistry,
     providerName: opts.sttProviderName,
@@ -1072,6 +1080,7 @@ export function createWebApi(opts: CreateWebApiOptions): CreateWebApiResult {
       satellites: satelliteRegistry,
       wakeRoutes: wakeRoutesService,
       deliveries: deliveriesService,
+      calls: callsService,
       toolRegistry: opts.toolRegistry,
       dashboards: dashboardsService,
       pluginLoader: opts.pluginLoader,

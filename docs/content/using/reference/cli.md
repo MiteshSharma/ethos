@@ -135,17 +135,18 @@ Synopsis: `ethos gateway [setup | start]`
 
 Run a [wake satellite](../../getting-started/glossary.md#wake-satellite) — a process that owns a microphone and streams captured speech to the web API's satellite lane at `GET /satellite/ws`. Long-running in the foreground.
 
-Synopsis: `ethos listen [doctor] [--url <ws url>] [--route <id>] [--device <id>] [--json]`
+Synopsis: `ethos listen [doctor] [--url <ws url>] [--route <id>] [--device <id>] [--play <command>] [--json]`
 
 | Arg / flag | Type | Default | Description |
 |---|---|---|---|
-| `doctor` | subcommand | — | Preflight only: engine, model files, capture device, server reachability. Exits without starting anything. |
+| `doctor` | subcommand | — | Preflight only: engine, model files, capture device, server reachability, player. Exits without starting anything. |
 | `--url <ws url>` | string | derived from `webBaseUrl`, else `http://127.0.0.1:3000` | Satellite lane URL. A bare origin gets `/satellite/ws` appended; a URL with a path is taken as given. |
 | `--route <id>` | string | unpinned — every enabled route may address this host | **Pins** the microphone to one route: only that phrase may address it, and another agent's phrase is discarded rather than answered. Resolved against the table the server pushes on connect — a `voice.wake.routes` id, or a synthesized `auto:<personality-id>` one. A pin that names no enabled route is a hard failure; the flag never exempts the host from needing a phrase. |
 | `--device <id>` | string | the enumerated default | Capture device. This build enumerates `stdin` only. |
+| `--play <command>` | string | the first of `ffplay`, `aplay`, `play` found on `PATH` | Command the reply's audio is written into, on that process's stdin. `{rate}` and `{channels}` are substituted, and the template runs through `sh -c`, so quoting and pipelines survive. Taken at face value — a supplied command is never second-guessed by a probe. With no flag and none of the three on `PATH`, the host registers `playback: false`, the server skips synthesis for it, and replies arrive as text. There is deliberately no config key: which command drives a sound card is a per-machine fact, like the capture pipe. |
 | `--json` | flag | off | `doctor` only. One JSON object on stdout — probes, `configuredRoutes` and `requestedRoute` (never a resolved route: this command does not connect), node id, lane URL, and `exit` — then exits. |
 
-Capture is a pipe — the daemon reads raw signed 16-bit little-endian **mono** PCM at **16 kHz** from stdin, and there is no microphone binding.
+Capture is a pipe — the daemon reads raw signed 16-bit little-endian **mono** PCM at **16 kHz** from stdin, and there is no microphone binding. Playout is a pipe for the same reason.
 
 ```bash
 ffmpeg -nostats -loglevel error -f avfoundation -i :0 -ar 16000 -ac 1 -f s16le - | ethos listen   # macOS
@@ -161,6 +162,10 @@ Exit codes:
 | `0` | Preflight clean. |
 | `1` | Hard failure — this host will never hear you until it is fixed: no config, a bad `--url` or `--device`, a configured engine that will not load, or missing models for a `sherpa` host. |
 | `2` | Warning — true right now and possibly not in a minute: nothing piped to stdin yet, or the server not answering yet. The daemon still refuses to start with no pipe, no usable engine, or a `--route` pin the server's table does not hold. An empty pushed table is a warning, not a refusal — a Settings save reaches the daemon without a restart. |
+
+`ffplay` is probed first because it is the only one of the three that can open an encoded reply — `aplay` and `play` take raw samples only, and an opus or mp3 playout to either is refused rather than played as noise. Raw PCM plays at 24 kHz unless the lane declares a rate, which no first-party provider does today: `TtsProvider.synthesize` reports no sample rate. A reply that sounds fast or slow is that assumption, and `--play` with an explicit `-ar` is the override.
+
+The microphone is suppressed for the whole reply, so the agent cannot wake itself. `playback_done` — the frame re-arming it — is sent when the player process **exits**, not when the words are known; a player that never exits trips a 90-second watchdog that re-arms anyway and says so.
 
 State on disk: the node's stable id in `~/.ethos/listen-node-id`, and a heartbeat written every 10 seconds to `~/.ethos/listen-health.json` (the `gateway-health.json` shape plus `captureState`), removed on clean shutdown. `make listen` and `make listen-doctor` wrap both commands from a clone.
 

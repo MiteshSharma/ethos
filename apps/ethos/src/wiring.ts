@@ -253,6 +253,13 @@ export async function createAgentLoop(
      */
     watcherManager?: import('@ethosagent/watchers').WatcherManager;
     /**
+     * Shared call log so the outbound `call` tool records the calls this loop
+     * places. Gateway only — it is the surface that opens `~/.ethos/calls.db`
+     * for inbound dispatch, and both directions belong in the one file. Omit
+     * and `call` dials without writing a row.
+     */
+    callLog?: import('@ethosagent/call-log').CallLog;
+    /**
      * App-layer slash command registry (chat REPL). Threaded through to
      * plugin loading so plugin-registered slash commands show up in
      * autocomplete and /help.
@@ -275,6 +282,13 @@ export async function createAgentLoop(
      * gateway startup leave it unset and ride the cache.
      */
     probeWindowRefresh?: boolean;
+    /**
+     * Native LiveKit MEDIA binding from `resolveLiveKitMedia()` — the thing
+     * that lets `voiceStack.createSipAdapter` exist and a phone call carry
+     * audio. Gateway only, and only when `voice.trunk`/`voice.livekit` is
+     * configured; every other caller omits it and gets today's behaviour.
+     */
+    livekit?: import('@ethosagent/wiring').LiveKitBindings;
   } = {},
 ): Promise<CreateAgentLoopResult> {
   const rotated = await withRotation(config);
@@ -317,10 +331,12 @@ export async function createAgentLoop(
     observability: getEthosObservability(),
     ...(opts.cronScheduler ? { cronScheduler: opts.cronScheduler } : {}),
     ...(opts.watcherManager ? { watcherManager: opts.watcherManager } : {}),
+    ...(opts.callLog ? { callLog: opts.callLog } : {}),
     ...(opts.slashRegistry ? { slashRegistry: opts.slashRegistry } : {}),
     ...(opts.originBotKey ? { originBotKey: opts.originBotKey } : {}),
     ...(opts.resolveOriginThreadId ? { resolveOriginThreadId: opts.resolveOriginThreadId } : {}),
     ...(opts.probeWindowRefresh === true ? { probeWindowRefresh: true } : {}),
+    ...(opts.livekit ? { livekit: opts.livekit } : {}),
   });
 
   return result;

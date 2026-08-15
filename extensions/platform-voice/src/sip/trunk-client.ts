@@ -9,13 +9,13 @@
 // layer only adds trunk/dispatch (inbound number -> room/identity) and the
 // outbound `createOutboundCall`.
 //
-// The production binding wraps `livekit-server-sdk`'s SIP API (`SipClient`:
-// `createSIPParticipant` for outbound, inbound-trunk/dispatch-rule config for
-// inbound). That package is NOT installed in-repo (same rationale as
-// `@livekit/rtc-node` in room-client.ts — an unverifiable server binding); code
-// here binds ONLY to the interface below, so it typechecks and unit-tests
-// against a `FakeSipTrunkClient`. Wiring the real SDK is a documented MANUAL
-// step (see README.md "Telephony (SIP) manual verification checklist").
+// The production binding is `createLiveKitSipTrunkClient` in
+// `./trunk-client-livekit.ts`: LiveKit's SIP control plane is a JSON POST
+// authorized by a signed JWT, so it needs no SDK and adds no dependency (unlike
+// the room MEDIA leg, which still binds `@livekit/rtc-node` at the app layer —
+// see room-client.ts). The interface below stays the contract every caller
+// depends on, so dispatch and the outbound tool still unit-test against
+// `FakeSipTrunkClient` and a deployment can substitute a non-LiveKit trunk.
 
 /** Request to place an outbound PSTN call and bridge it into a LiveKit room. */
 export interface OutboundCallRequest {

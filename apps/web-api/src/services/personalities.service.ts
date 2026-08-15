@@ -767,14 +767,9 @@ function toWire(d: DescribedPersonality): Personality {
       : {}),
     ...(c.memory?.provider !== undefined ? { memory: { provider: c.memory.provider } } : {}),
     ...(c.nightly !== undefined ? { nightly: c.nightly } : {}),
-    // Only the sub-keys the editor writes. `tier` / `model` / `languages` stay
-    // on disk: echoing them here would invite a form field for a knob nothing
-    // routes on yet.
-    ...(c.voice?.tts_provider !== undefined ||
-    c.voice?.stt_provider !== undefined ||
-    c.voice?.realtime_provider !== undefined ||
-    c.voice?.tts_voice !== undefined ||
-    c.voice?.call_style !== undefined
+    // Every sub-key the editor writes, echoed back so it can populate its form.
+    // A sub-key the editor can WRITE but not READ is one a save wipes.
+    ...(c.voice !== undefined && Object.keys(c.voice).length > 0
       ? {
           voice: {
             ...(c.voice.tts_provider !== undefined ? { tts_provider: c.voice.tts_provider } : {}),
@@ -784,6 +779,9 @@ function toWire(d: DescribedPersonality): Personality {
               : {}),
             ...(c.voice.tts_voice !== undefined ? { tts_voice: c.voice.tts_voice } : {}),
             ...(c.voice.call_style !== undefined ? { call_style: c.voice.call_style } : {}),
+            ...(c.voice.tier !== undefined ? { tier: c.voice.tier } : {}),
+            ...(c.voice.model !== undefined ? { model: c.voice.model } : {}),
+            ...(c.voice.languages !== undefined ? { languages: c.voice.languages } : {}),
           },
         }
       : {}),

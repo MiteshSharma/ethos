@@ -434,6 +434,17 @@ export interface CreateAgentLoopOptions {
    */
   watcherManager?: import('@ethosagent/watchers').WatcherManager;
   /**
+   * Shared call history for the outbound `call` tool. When provided, a call the
+   * agent places opens a row the same way an inbound one does, so the
+   * Communications call list is the whole story rather than the inbound half of
+   * it. Pass the SAME instance the surface's inbound dispatch writes to — a
+   * second `SQLiteCallLog` on the same file is a second connection for no gain.
+   *
+   * Absent (chat, one-shot CLI, tests) and `call` dials exactly as before,
+   * writing nothing: the log is a seam, never a precondition for dialling.
+   */
+  callLog?: import('@ethosagent/call-log').CallLog;
+  /**
    * App-layer slash command registry. When provided, plugins that call
    * `registerSlashCommand` during loading land their commands here so the
    * CLI's autocomplete and /help can surface them. Omit for surfaces with
@@ -473,6 +484,17 @@ export interface CreateAgentLoopOptions {
    * context`); chat and gateway startup leave it unset and ride the cache.
    */
   probeWindowRefresh?: boolean;
+  /**
+   * Native LiveKit MEDIA binding, forwarded to `buildVoiceStack`.
+   *
+   * `@livekit/rtc-node` ships a per-arch native binary and is deliberately NOT
+   * a repo dependency (see `extensions/platform-voice/src/livekit/room-client.ts`),
+   * so the app layer loads it optionally and passes the binding down. Absent —
+   * which is every deployment that does not do telephony, and every test — the
+   * voice stack builds exactly as it did before and the LiveKit/SIP media
+   * transports report themselves unavailable.
+   */
+  livekit?: import('./voice-stack').LiveKitBindings;
 }
 
 // ---------------------------------------------------------------------------
@@ -1343,13 +1365,21 @@ export {
 // Real-time voice stack (config.voice.* → VoiceSession / transports)
 // ---------------------------------------------------------------------------
 
+export {
+  createFarEndConsultTool,
+  FAR_END_VOICE_ORIGIN,
+  type FarEndConsultOptions,
+} from './far-end-consult';
 export { createBuiltinVoiceRegistries } from './voice-registries';
 export {
   type BuildVoiceStackDeps,
   buildVoiceStack,
+  type CreateVoiceAdapterOptions,
   type CreateVoiceSessionOptions,
   createObservabilitySpanSink,
   type LiveKitBindings,
+  resolveSipTrunkClient,
+  type VoiceInboundGates,
   type VoiceStack,
 } from './voice-stack';
 

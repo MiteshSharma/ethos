@@ -476,6 +476,122 @@ function parseVoiceChannelTtsOut(p: Record<string, string>): Record<string, bool
   return out;
 }
 
+// ---------------------------------------------------------------------------
+// Telephony (`voice.trunk` / `voice.livekit` / `voice.inbound` /
+// `voice.bargeIn` / `voice.bots`)
+//
+// All five families are passthrough keys — the repository round-trips them
+// verbatim and the CLI's own parser is the one that gives them meaning. What
+// this layer adds is redaction (the trunk password, the webhook secret and the
+// LiveKit credentials never leave here in the clear) and refusal of values the
+// CLI parser would reject, so a bad save is a response the operator sees rather
+// than a parse error on the agent's next boot.
+// ---------------------------------------------------------------------------
+
+/** The audio surfaces `voice.bargeIn.<surface>` accepts. Mirrors
+ *  `VOICE_BARGE_IN_SURFACES` in packages/config — web-api has no dependency on
+ *  it, the same precedent as VOICE_TUNING above. No `browser`: the browser talk
+ *  lane endpoints in the browser, from the `display.voice_*` keys at the top of
+ *  this file. */
+export const VOICE_BARGE_IN_SURFACES = ['call', 'satellite'] as const;
+
+export type VoiceBargeInSurface = (typeof VOICE_BARGE_IN_SURFACES)[number];
+
+const VOICE_TRUNK_PROVIDERS = ['twilio', 'telnyx', 'generic', 'livekit'] as const;
+const VOICE_TRUNK_CODECS = ['opus', 'g711'] as const;
+const VOICE_INBOUND_PREWARM_MODES = ['allowlisted', 'none', 'all'] as const;
+
+/** The three `voice.livekit.*` keys the CLI parser requires together — a block
+ *  missing any one of them is a parse error, not a partial config. */
+const VOICE_LIVEKIT_KEYS = [
+  'voice.livekit.url',
+  'voice.livekit.apiKey',
+  'voice.livekit.apiSecret',
+] as const;
+
+export interface VoiceBargeInTuningResult {
+  energyThreshold: number | null;
+  minSpeechMs: number | null;
+  silenceMs: number | null;
+}
+
+export interface VoiceBargeInTuningUpdate {
+  energyThreshold?: number;
+  minSpeechMs?: number;
+  silenceMs?: number;
+}
+
+export interface VoiceBotGetResult {
+  id: string | null;
+  match: string;
+  bind: { type: 'personality' | 'team'; name: string; allowSlashSwitch: boolean };
+}
+
+export interface VoiceBotUpdateInput {
+  id?: string;
+  match: string;
+  bind: { type: 'personality' | 'team'; name: string; allowSlashSwitch?: boolean };
+}
+
+/**
+ * `voice.bargeIn.<surface>.<field>` → a surface → thresholds map.
+ *
+ * Unknown surfaces and fields are dropped on READ, matching what the CLI's
+ * parser reports for a file it refused to build a tuning from — the read path
+ * describes what the deployment actually has. The write path refuses them; see
+ * `validateSettingsPatch`.
+ */
+function parseVoiceBargeIn(p: Record<string, string>): Record<string, VoiceBargeInTuningResult> {
+  const out: Record<string, VoiceBargeInTuningResult> = {};
+  for (const key of Object.keys(p)) {
+    const surface = key.match(/^voice\.bargeIn\.([^.]+)\.[^.]+$/)?.[1];
+    if (!surface || !(VOICE_BARGE_IN_SURFACES as readonly string[]).includes(surface)) continue;
+    out[surface] ??= { energyThreshold: null, minSpeechMs: null, silenceMs: null };
+  }
+  for (const surface of Object.keys(out)) {
+    out[surface] = {
+      energyThreshold: passNumOrNull(p, `voice.bargeIn.${surface}.energyThreshold`),
+      minSpeechMs: passNumOrNull(p, `voice.bargeIn.${surface}.minSpeechMs`),
+      silenceMs: passNumOrNull(p, `voice.bargeIn.${surface}.silenceMs`),
+    };
+  }
+  return out;
+}
+
+/**
+ * `voice.bots.<n>.*` → the routing table, in file order.
+ *
+ * Indexes are sorted NUMERICALLY, not lexicographically: `Object.keys` on the
+ * flat map yields strings, and the default sort would put bot 10 before bot 2 —
+ * a table that reorders itself the moment a deployment has ten numbers.
+ * Entries missing `match` or a complete `bind` are dropped, exactly as the CLI
+ * parser drops them.
+ */
+function parseVoiceBots(p: Record<string, string>): VoiceBotGetResult[] {
+  const indexes = new Set<number>();
+  for (const key of Object.keys(p)) {
+    const idx = key.match(/^voice\.bots\.(\d+)\./)?.[1];
+    if (idx !== undefined) indexes.add(Number(idx));
+  }
+  const bots: VoiceBotGetResult[] = [];
+  for (const idx of [...indexes].sort((a, b) => a - b)) {
+    const match = p[`voice.bots.${idx}.match`];
+    const type = p[`voice.bots.${idx}.bind.type`];
+    const name = p[`voice.bots.${idx}.bind.name`];
+    if (!match || !name || (type !== 'personality' && type !== 'team')) continue;
+    bots.push({
+      id: passStr(p, `voice.bots.${idx}.id`),
+      match,
+      bind: {
+        type,
+        name,
+        allowSlashSwitch: p[`voice.bots.${idx}.bind.allowSlashSwitch`] === 'true',
+      },
+    });
+  }
+  return bots;
+}
+
 function parseChannelToolsets(p: Record<string, string>): Record<string, string[]> {
   const out: Record<string, string[]> = {};
   for (const [key, value] of Object.entries(p)) {
@@ -484,6 +600,45 @@ function parseChannelToolsets(p: Record<string, string>): Record<string, string[
   }
   return out;
 }
+
+/** `voice.trunk.*` update fields. Listed rather than derived so the "did the
+ *  operator touch the trunk at all" question has one answer. */
+const TRUNK_PATCH_KEYS = [
+  'voiceTrunkProvider',
+  'voiceTrunkId',
+  'voiceTrunkFromNumber',
+  'voiceTrunkUsername',
+  'voiceTrunkPassword',
+  'voiceTrunkWebhookSecret',
+  'voiceTrunkWebhookPath',
+  'voiceTrunkCodec',
+] as const;
+
+const LIVEKIT_PATCH_KEYS = [
+  'voiceLivekitUrl',
+  'voiceLivekitApiKey',
+  'voiceLivekitApiSecret',
+] as const;
+
+/** Every telephony update field, in one list: it decides whether `update` has
+ *  to read the current config back (for secret carry-over and the
+ *  required-together checks) and it is spliced into SETTINGS_PATCH_KEYS so none
+ *  of these ever reaches the repository's typed patch. */
+const TELEPHONY_PATCH_KEYS = [
+  ...TRUNK_PATCH_KEYS,
+  ...LIVEKIT_PATCH_KEYS,
+  'voiceInboundAllowlist',
+  'voiceInboundReceptionist',
+  'voiceInboundConcurrencyCap',
+  'voiceInboundPerCallerPerHour',
+  'voiceInboundDailyBudgetUsd',
+  'voiceInboundPrewarm',
+  'voiceInboundOwnerPlatform',
+  'voiceInboundOwnerChatId',
+  'voiceInboundOwnerBotKey',
+  'voiceBargeIn',
+  'voiceBots',
+] as const;
 
 /** ConfigUpdateInput fields handled via passthrough writes — stripped from the
  *  repository patch (the repo only knows its typed RawConfig fields). */
@@ -524,6 +679,7 @@ const SETTINGS_PATCH_KEYS = [
   'a2aEnabled',
   'pluginsAutoInstall',
   'webBaseUrl',
+  ...TELEPHONY_PATCH_KEYS,
 ] as const;
 
 // -- update-patch validation -------------------------------------------------
@@ -710,6 +866,69 @@ function validateSettingsPatch(patch: ConfigUpdateInput): void {
     }
   }
   checkPositive('voiceRealtimeSessionBudgetUsd', patch.voiceRealtimeSessionBudgetUsd);
+  // Telephony. Bounds mirror packages/config, which makes these PARSE ERRORS
+  // rather than dropping them — a budget or concurrency cap that silently
+  // vanished is real money on a surface strangers can dial.
+  if (
+    patch.voiceTrunkProvider !== undefined &&
+    patch.voiceTrunkProvider !== null &&
+    !(VOICE_TRUNK_PROVIDERS as readonly string[]).includes(patch.voiceTrunkProvider)
+  ) {
+    invalidValue('voiceTrunkProvider', `must be one of ${VOICE_TRUNK_PROVIDERS.join(', ')}`);
+  }
+  if (
+    patch.voiceTrunkCodec !== undefined &&
+    patch.voiceTrunkCodec !== null &&
+    !(VOICE_TRUNK_CODECS as readonly string[]).includes(patch.voiceTrunkCodec)
+  ) {
+    invalidValue('voiceTrunkCodec', `must be one of ${VOICE_TRUNK_CODECS.join(', ')}`);
+  }
+  if (patch.voiceTrunkWebhookPath && !patch.voiceTrunkWebhookPath.startsWith('/')) {
+    invalidValue('voiceTrunkWebhookPath', "must start with '/'");
+  }
+  if (
+    patch.voiceInboundPrewarm !== undefined &&
+    patch.voiceInboundPrewarm !== null &&
+    !(VOICE_INBOUND_PREWARM_MODES as readonly string[]).includes(patch.voiceInboundPrewarm)
+  ) {
+    invalidValue('voiceInboundPrewarm', `must be one of ${VOICE_INBOUND_PREWARM_MODES.join(', ')}`);
+  }
+  checkInt('voiceInboundConcurrencyCap', patch.voiceInboundConcurrencyCap, 1);
+  checkInt('voiceInboundPerCallerPerHour', patch.voiceInboundPerCallerPerHour, 1);
+  checkPositive('voiceInboundDailyBudgetUsd', patch.voiceInboundDailyBudgetUsd);
+  if (patch.voiceBargeIn) {
+    for (const [surface, tuning] of Object.entries(patch.voiceBargeIn)) {
+      // REFUSED, not dropped: a threshold typed against a misspelled surface is
+      // not a slightly different setting, it is no tuning at all — and here
+      // there is a caller waiting to be told.
+      if (!(VOICE_BARGE_IN_SURFACES as readonly string[]).includes(surface)) {
+        invalidValue(
+          `voiceBargeIn.${surface}`,
+          `is not a barge-in surface (${VOICE_BARGE_IN_SURFACES.join(', ')})`,
+        );
+      }
+      if (!tuning) continue;
+      const energy = tuning.energyThreshold;
+      if (energy !== undefined && (!Number.isFinite(energy) || energy <= 0 || energy > 1)) {
+        invalidValue(`voiceBargeIn.${surface}.energyThreshold`, 'must be a number in (0, 1]');
+      }
+      checkInt(`voiceBargeIn.${surface}.minSpeechMs`, tuning.minSpeechMs, 1);
+      checkInt(`voiceBargeIn.${surface}.silenceMs`, tuning.silenceMs, 1);
+    }
+  }
+  if (patch.voiceBots) {
+    for (const [index, bot] of patch.voiceBots.entries()) {
+      if (!bot?.match?.trim()) invalidValue(`voiceBots.${index}.match`, 'is required');
+      // The id becomes part of a `voice.bots.<n>.id` line and is read back as a
+      // lane-key component; outside this charset it would not survive the round
+      // trip.
+      if (bot.id !== undefined) checkRecordKey(`voiceBots.${index}.id`, bot.id);
+      if (bot.bind?.type !== 'personality' && bot.bind?.type !== 'team') {
+        invalidValue(`voiceBots.${index}.bind.type`, "must be 'personality' or 'team'");
+      }
+      if (!bot.bind?.name?.trim()) invalidValue(`voiceBots.${index}.bind.name`, 'is required');
+    }
+  }
   if (patch.voiceChannelTtsOut) {
     for (const platform of Object.keys(patch.voiceChannelTtsOut)) {
       // REFUSED, not dropped — the opposite of what the yaml parser does with
@@ -915,6 +1134,37 @@ export interface ConfigGetResult {
   voiceTier: 'pipeline' | 'realtime' | null;
   /** `voice.realtime.sessionBudgetUsd` — USD cap on one session. */
   voiceRealtimeSessionBudgetUsd: number | null;
+  // -- Telephony (`voice.trunk` / `voice.livekit` / `voice.inbound` /
+  //    `voice.bargeIn` / `voice.bots`) ---------------------------------------
+  voiceTrunkProvider: (typeof VOICE_TRUNK_PROVIDERS)[number] | null;
+  voiceTrunkId: string | null;
+  voiceTrunkFromNumber: string | null;
+  voiceTrunkUsername: string | null;
+  /** REDACTED. The raw password never leaves this layer. */
+  voiceTrunkPasswordPreview: string | null;
+  /** REDACTED. The raw webhook secret never leaves this layer. */
+  voiceTrunkWebhookSecretPreview: string | null;
+  voiceTrunkWebhookPath: string | null;
+  voiceTrunkCodec: (typeof VOICE_TRUNK_CODECS)[number] | null;
+  voiceLivekitUrl: string | null;
+  /** REDACTED. */
+  voiceLivekitApiKeyPreview: string | null;
+  /** REDACTED. */
+  voiceLivekitApiSecretPreview: string | null;
+  /** Null = key absent = "screen everyone"; an empty list is not expressible
+   *  on disk (a flat `key:` line with no value does not parse). */
+  voiceInboundAllowlist: string[] | null;
+  voiceInboundReceptionist: string | null;
+  voiceInboundConcurrencyCap: number | null;
+  voiceInboundPerCallerPerHour: number | null;
+  voiceInboundDailyBudgetUsd: number | null;
+  voiceInboundPrewarm: (typeof VOICE_INBOUND_PREWARM_MODES)[number] | null;
+  voiceInboundOwnerPlatform: string | null;
+  voiceInboundOwnerChatId: string | null;
+  voiceInboundOwnerBotKey: string | null;
+  /** Keyed by surface; an absent surface was never tuned. */
+  voiceBargeIn: Record<string, VoiceBargeInTuningResult>;
+  voiceBots: VoiceBotGetResult[];
   nightlyPass: { enabled: boolean; cron: string };
   weeklyDigest: { enabled: boolean; cron: string; recipients: string[] };
   modelCatalog: { enabled: boolean; url: string | null; ttlHours: number };
@@ -1009,6 +1259,52 @@ export interface ConfigUpdateInput {
   voiceTier?: 'pipeline' | 'realtime' | null;
   /** `voice.realtime.sessionBudgetUsd`; null clears the cap. */
   voiceRealtimeSessionBudgetUsd?: number | null;
+  // -- Telephony -------------------------------------------------------------
+  // The four secrets are WRITE-ONLY and never echoed back, so a blank or
+  // omitted value KEEPS the stored one — the browser only ever saw a preview,
+  // and treating blank as "erase" would delete a credential on every unrelated
+  // save. `null` clears one.
+  //
+  // `voiceTrunkProvider: null` drops the whole `voice.trunk.*` block and
+  // `voiceLivekitUrl: null` the whole `voice.livekit.*` block (secrets
+  // included): the CLI parser needs provider+trunkId and url+apiKey+apiSecret
+  // together, so a block that lost its anchor would not load.
+  /** `voice.trunk.provider`; null clears the whole trunk block. */
+  voiceTrunkProvider?: (typeof VOICE_TRUNK_PROVIDERS)[number] | null;
+  voiceTrunkId?: string | null;
+  voiceTrunkFromNumber?: string | null;
+  voiceTrunkUsername?: string | null;
+  /** Write-only; blank keeps the stored secret, null clears it. */
+  voiceTrunkPassword?: string | null;
+  /** Write-only; blank keeps the stored secret, null clears it. */
+  voiceTrunkWebhookSecret?: string | null;
+  /** Must start with `/`. */
+  voiceTrunkWebhookPath?: string | null;
+  voiceTrunkCodec?: (typeof VOICE_TRUNK_CODECS)[number] | null;
+  /** `voice.livekit.url`; null clears the whole LiveKit block. */
+  voiceLivekitUrl?: string | null;
+  /** Write-only; blank keeps, null clears. */
+  voiceLivekitApiKey?: string | null;
+  /** Write-only; blank keeps, null clears. */
+  voiceLivekitApiSecret?: string | null;
+  /** Null or an empty list clears the key. */
+  voiceInboundAllowlist?: string[] | null;
+  voiceInboundReceptionist?: string | null;
+  voiceInboundConcurrencyCap?: number | null;
+  voiceInboundPerCallerPerHour?: number | null;
+  voiceInboundDailyBudgetUsd?: number | null;
+  voiceInboundPrewarm?: (typeof VOICE_INBOUND_PREWARM_MODES)[number] | null;
+  /** Null clears the whole `voice.inbound.owner.*` block — platform and chatId
+   *  are required together. */
+  voiceInboundOwnerPlatform?: string | null;
+  voiceInboundOwnerChatId?: string | null;
+  voiceInboundOwnerBotKey?: string | null;
+  /** `voice.bargeIn.*`. Present = REPLACE the whole block; an omitted surface
+   *  loses its tuning. An unknown surface is refused, not dropped. */
+  voiceBargeIn?: Record<string, VoiceBargeInTuningUpdate>;
+  /** `voice.bots[]`. Present = REPLACE the whole list, renumbered from 0; a
+   *  removed row is a deletion. */
+  voiceBots?: VoiceBotUpdateInput[];
   // Settings-page additions. For every scalar below, `null` (or '') deletes
   // the config.yaml key so the built-in default applies again; `undefined`
   // leaves it unchanged. Record fields are full replacements.
@@ -1104,6 +1400,16 @@ export interface ConfigServiceOptions {
    *  resolve to '' so checks fail honestly instead of probing with the
    *  literal reference string. */
   secrets?: SecretsResolver;
+  /**
+   * Validates the personality a `voice.bots[]` entry binds to.
+   *
+   * A seam, not a dependency on the whole service: the only question asked is
+   * "does this id exist", and the answer has to come from the registry the
+   * gateway will resolve against. Optional because a deployment (or a test)
+   * without it still has a working config writer — the check is then skipped,
+   * the same way `secrets` degrades.
+   */
+  personalities?: { exists(id: string): Promise<boolean> };
   /**
    * Fired after a successful `update()` write lands.
    *
@@ -1225,6 +1531,32 @@ export class ConfigService {
       voiceRealtimeDefault: passStr(p, 'voice.realtime.default'),
       voiceTier: pickEnumOrNull(p['voice.tier'], ['pipeline', 'realtime']),
       voiceRealtimeSessionBudgetUsd: passNumOrNull(p, 'voice.realtime.sessionBudgetUsd'),
+      voiceTrunkProvider: pickEnumOrNull(p['voice.trunk.provider'], VOICE_TRUNK_PROVIDERS),
+      voiceTrunkId: passStr(p, 'voice.trunk.trunkId'),
+      voiceTrunkFromNumber: passStr(p, 'voice.trunk.fromNumber'),
+      voiceTrunkUsername: passStr(p, 'voice.trunk.username'),
+      voiceTrunkPasswordPreview: await this.keyPreview(p['voice.trunk.password']),
+      voiceTrunkWebhookSecretPreview: await this.keyPreview(p['voice.trunk.webhookSecret']),
+      voiceTrunkWebhookPath: passStr(p, 'voice.trunk.webhookPath'),
+      voiceTrunkCodec: pickEnumOrNull(p['voice.trunk.codec'], VOICE_TRUNK_CODECS),
+      voiceLivekitUrl: passStr(p, 'voice.livekit.url'),
+      voiceLivekitApiKeyPreview: await this.keyPreview(p['voice.livekit.apiKey']),
+      voiceLivekitApiSecretPreview: await this.keyPreview(p['voice.livekit.apiSecret']),
+      // Absent key = no allowlist = "screen everyone", which is NOT the same as
+      // an allowlist that happens to be empty (same distinction the
+      // `voice.trustedPlugins` read above draws).
+      voiceInboundAllowlist:
+        p['voice.inbound.allowlist'] === undefined ? null : splitList(p['voice.inbound.allowlist']),
+      voiceInboundReceptionist: passStr(p, 'voice.inbound.receptionist'),
+      voiceInboundConcurrencyCap: passNumOrNull(p, 'voice.inbound.concurrencyCap'),
+      voiceInboundPerCallerPerHour: passNumOrNull(p, 'voice.inbound.perCallerPerHour'),
+      voiceInboundDailyBudgetUsd: passNumOrNull(p, 'voice.inbound.dailyBudgetUsd'),
+      voiceInboundPrewarm: pickEnumOrNull(p['voice.inbound.prewarm'], VOICE_INBOUND_PREWARM_MODES),
+      voiceInboundOwnerPlatform: passStr(p, 'voice.inbound.owner.platform'),
+      voiceInboundOwnerChatId: passStr(p, 'voice.inbound.owner.chatId'),
+      voiceInboundOwnerBotKey: passStr(p, 'voice.inbound.owner.botKey'),
+      voiceBargeIn: parseVoiceBargeIn(p),
+      voiceBots: parseVoiceBots(p),
       apiVersion: passStr(p, 'apiVersion'),
       verbose: passBool(p, 'verbose', false),
       displayVerbosity: pickEnum(
@@ -1607,10 +1939,17 @@ export class ConfigService {
       patch.voiceSttProviders !== undefined ||
       patch.voiceRealtimeProviders !== undefined ||
       patch.voiceChannelTtsOut !== undefined ||
-      patch.wakeRoutes !== undefined;
-    const currentPassthrough = replacesRecords
-      ? ((await this.opts.config.read())?.passthrough ?? {})
-      : {};
+      patch.wakeRoutes !== undefined ||
+      patch.voiceBargeIn !== undefined ||
+      patch.voiceBots !== undefined;
+    // The telephony blocks need the same read for two more reasons: a write-only
+    // secret has to re-write the value already on disk, and the required-field
+    // check below asks what the block looks like AFTER the patch lands.
+    const touchesTelephony = TELEPHONY_PATCH_KEYS.some((key) => patch[key] !== undefined);
+    const currentPassthrough =
+      replacesRecords || touchesTelephony
+        ? ((await this.opts.config.read())?.passthrough ?? {})
+        : {};
     const deletePrefix = (prefix: string): void => {
       for (const key of Object.keys(currentPassthrough)) {
         if (key.startsWith(prefix)) deleteKeys.push(key);
@@ -1738,6 +2077,84 @@ export class ConfigService {
         }
       }
     }
+    // -- Telephony ------------------------------------------------------------
+    // Write-only credential, same rule the rosters use: a provided value wins,
+    // otherwise the stored `${secrets:…}` reference is re-written so a form that
+    // only ever saw a preview cannot erase the key. `null` is the explicit
+    // "clear it", which is the one thing a blank field must NOT mean here.
+    const carrySecret = (key: string, provided: string | null | undefined): void => {
+      if (provided === null) {
+        deleteKeys.push(key);
+        return;
+      }
+      const value = provided || currentPassthrough[key];
+      if (value) passthroughPatch[key] = value;
+    };
+    // The trunk and LiveKit blocks are ANCHORED: the CLI parser requires
+    // provider+trunkId (and url+apiKey+apiSecret) together, so clearing the
+    // anchor has to take the whole family — including the vault-backed secrets —
+    // rather than leaving a half block that fails to load.
+    if (patch.voiceTrunkProvider === null) {
+      deletePrefix('voice.trunk.');
+    } else if (TRUNK_PATCH_KEYS.some((key) => patch[key] !== undefined)) {
+      set('voice.trunk.provider', patch.voiceTrunkProvider);
+      set('voice.trunk.trunkId', patch.voiceTrunkId);
+      set('voice.trunk.fromNumber', patch.voiceTrunkFromNumber);
+      set('voice.trunk.username', patch.voiceTrunkUsername);
+      set('voice.trunk.webhookPath', patch.voiceTrunkWebhookPath);
+      set('voice.trunk.codec', patch.voiceTrunkCodec);
+      carrySecret('voice.trunk.password', patch.voiceTrunkPassword);
+      carrySecret('voice.trunk.webhookSecret', patch.voiceTrunkWebhookSecret);
+    }
+    if (patch.voiceLivekitUrl === null) {
+      deletePrefix('voice.livekit.');
+    } else if (LIVEKIT_PATCH_KEYS.some((key) => patch[key] !== undefined)) {
+      set('voice.livekit.url', patch.voiceLivekitUrl);
+      carrySecret('voice.livekit.apiKey', patch.voiceLivekitApiKey);
+      carrySecret('voice.livekit.apiSecret', patch.voiceLivekitApiSecret);
+    }
+    // ', ' matches the separator packages/config's writeConfig serializes with.
+    setList('voice.inbound.allowlist', patch.voiceInboundAllowlist, ', ');
+    set('voice.inbound.receptionist', patch.voiceInboundReceptionist);
+    set('voice.inbound.concurrencyCap', patch.voiceInboundConcurrencyCap);
+    set('voice.inbound.perCallerPerHour', patch.voiceInboundPerCallerPerHour);
+    set('voice.inbound.dailyBudgetUsd', patch.voiceInboundDailyBudgetUsd);
+    set('voice.inbound.prewarm', patch.voiceInboundPrewarm);
+    // The owner destination is anchored the same way: platform and chatId are
+    // required together, and half a route silently drops the one notification
+    // the block was configured to deliver.
+    if (patch.voiceInboundOwnerPlatform === null) {
+      deletePrefix('voice.inbound.owner.');
+    } else {
+      set('voice.inbound.owner.platform', patch.voiceInboundOwnerPlatform);
+      set('voice.inbound.owner.chatId', patch.voiceInboundOwnerChatId);
+      set('voice.inbound.owner.botKey', patch.voiceInboundOwnerBotKey);
+    }
+    if (patch.voiceBargeIn !== undefined) {
+      deletePrefix('voice.bargeIn.');
+      for (const [surface, tuning] of Object.entries(patch.voiceBargeIn)) {
+        if (!tuning) continue;
+        set(`voice.bargeIn.${surface}.energyThreshold`, tuning.energyThreshold);
+        set(`voice.bargeIn.${surface}.minSpeechMs`, tuning.minSpeechMs);
+        set(`voice.bargeIn.${surface}.silenceMs`, tuning.silenceMs);
+      }
+    }
+    if (patch.voiceBots !== undefined) {
+      // Renumbered from 0 on every save: the index is positional, not an
+      // identity (that is what `id` is for), and leaving gaps would make the
+      // next save's ordering depend on which row was deleted.
+      deletePrefix('voice.bots.');
+      for (const [index, bot] of patch.voiceBots.entries()) {
+        if (!bot) continue;
+        if (bot.id) set(`voice.bots.${index}.id`, bot.id);
+        set(`voice.bots.${index}.match`, bot.match);
+        set(`voice.bots.${index}.bind.type`, bot.bind.type);
+        set(`voice.bots.${index}.bind.name`, bot.bind.name);
+        // Written only when true, matching writeConfig — a config that never
+        // said `allowSlashSwitch` keeps saying nothing.
+        if (bot.bind.allowSlashSwitch) set(`voice.bots.${index}.bind.allowSlashSwitch`, true);
+      }
+    }
     if (patch.webhooks !== undefined) {
       deletePrefix('webhooks.');
       for (const [hookId, hook] of Object.entries(patch.webhooks)) {
@@ -1758,6 +2175,52 @@ export class ConfigService {
         if (hook.mode) set(`webhooks.${hookId}.mode`, hook.mode);
       }
     }
+    // Required-together checks, run against the block as it will be ON DISK
+    // rather than against the patch: a form that sends only `trunkId` leaves a
+    // provider already in the file perfectly valid, and a form that clears the
+    // provider while leaving a password behind does not. Only the merged view
+    // can tell those apart.
+    const keysAfterWrite = (prefix: string): Set<string> => {
+      const keys = new Set(Object.keys(currentPassthrough).filter((k) => k.startsWith(prefix)));
+      for (const key of deleteKeys) if (key.startsWith(prefix)) keys.delete(key);
+      for (const key of Object.keys(passthroughPatch)) if (key.startsWith(prefix)) keys.add(key);
+      return keys;
+    };
+    const requireTogether = (prefix: string, required: readonly string[]): void => {
+      const keys = keysAfterWrite(prefix);
+      if (keys.size === 0) return;
+      for (const key of required) {
+        if (!keys.has(key)) {
+          invalidValue(key, `is required whenever any ${prefix}* key is set`);
+        }
+      }
+    };
+    if (touchesTelephony) {
+      requireTogether('voice.trunk.', ['voice.trunk.provider', 'voice.trunk.trunkId']);
+      requireTogether('voice.livekit.', VOICE_LIVEKIT_KEYS);
+      requireTogether('voice.inbound.owner.', [
+        'voice.inbound.owner.platform',
+        'voice.inbound.owner.chatId',
+      ]);
+    }
+    // A bot bound to a personality that does not exist fails SILENTLY on a
+    // ringing phone — the call connects to nothing. The editor is the last place
+    // the operator can still see the typo, so it is refused here, the same check
+    // `WakeRoutesService` makes for a wake phrase. Team binds are not checked:
+    // a team is not in the personality registry.
+    const personalities = this.opts.personalities;
+    if (personalities && patch.voiceBots) {
+      for (const [index, bot] of patch.voiceBots.entries()) {
+        if (bot?.bind.type !== 'personality') continue;
+        if (!(await personalities.exists(bot.bind.name))) {
+          invalidValue(
+            `voiceBots.${index}.bind.name`,
+            `names unknown personality '${bot.bind.name}'`,
+          );
+        }
+      }
+    }
+
     for (const key of SETTINGS_PATCH_KEYS) delete cleaned[key];
 
     // A key both deleted (prefix replacement) and re-set in the same patch
@@ -1781,7 +2244,13 @@ export class ConfigService {
       .filter(
         (k) =>
           /^webhooks\.[^.]+\.secret$/.test(k) ||
-          /^voice\.(?:(?:tts|stt|realtime)\.)?providers\.[^.]+\.apiKey$/.test(k),
+          /^voice\.(?:(?:tts|stt|realtime)\.)?providers\.[^.]+\.apiKey$/.test(k) ||
+          // Telephony credentials. Reachable from the UI for the first time in
+          // this phase, and both are cleared by dropping their whole block
+          // (`voiceTrunkProvider: null`, `voiceLivekitUrl: null`), which deletes
+          // the only config key pointing at the vault entry.
+          /^voice\.trunk\.(?:password|webhookSecret)$/.test(k) ||
+          /^voice\.livekit\.(?:apiKey|apiSecret)$/.test(k),
       )
       .map((k) => secretRefFromValue(currentPassthrough[k] ?? ''))
       .filter((ref): ref is string => ref !== null && !survivingRefs.has(ref));

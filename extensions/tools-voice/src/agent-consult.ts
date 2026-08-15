@@ -175,6 +175,24 @@ export interface AgentConsultOptions {
    * forgetting, and `owner` is not a safe default to forget your way into.
    */
   voiceOrigin: VoiceTurnOrigin;
+  /**
+   * Pin the consulted turn to a specific personality, ignoring
+   * `ToolContext.personalityId`.
+   *
+   * This is how the RESTRICTED RECEPTIONIST SCOPE is expressed (voice V4,
+   * eng-review D12), and it deliberately reuses the mechanisms this repo
+   * already has rather than inventing a parallel restriction system: a turn's
+   * memory scope is `personality:<id>` and its tool allowlist is that
+   * personality's `toolset` (both resolved in
+   * `packages/core/.../stages/turn-setup.ts`), so running a non-allowlisted
+   * caller's consult AS the receptionist personality is what makes owner memory
+   * and privileged tools unreachable — not a flag anyone has to remember to
+   * check.
+   *
+   * Absent → the caller's own personality, which is what the owner's browser
+   * talk-mode consult wants.
+   */
+  personalityId?: string;
 }
 
 /**
@@ -230,7 +248,7 @@ export function createAgentConsultTool(loop: AgentLoop, opts: AgentConsultOption
         };
       }
       try {
-        return { ok: true, value: await runConsult(loop, prompt, ctx, opts.voiceOrigin) };
+        return { ok: true, value: await runConsult(loop, prompt, ctx, opts) };
       } catch (err) {
         return {
           ok: false,
@@ -250,18 +268,22 @@ async function runConsult(
   loop: AgentLoop,
   prompt: string,
   ctx: ToolContext,
-  voiceOrigin: VoiceTurnOrigin,
+  opts: AgentConsultOptions,
 ): Promise<string> {
+  // The pin wins over the context. A receptionist consult that fell back to the
+  // caller's context personality on a missing id would be the owner's scope,
+  // which is the one outcome this must never produce.
+  const personalityId = opts.personalityId ?? ctx.personalityId;
   let output = '';
   for await (const event of loop.run(prompt, {
     // The consult runs on the CALLER's session key — the talk-session lane. A
     // fresh key per consult would give the agent amnesia between one spoken
     // question and the next, which is the opposite of what a conversation is.
     sessionKey: ctx.sessionKey,
-    ...(ctx.personalityId ? { personalityId: ctx.personalityId } : {}),
+    ...(personalityId ? { personalityId } : {}),
     abortSignal: ctx.abortSignal,
     agentId: CONSULT_AGENT_ID,
-    voiceOrigin,
+    voiceOrigin: opts.voiceOrigin,
   })) {
     if (event.type === 'text_delta') output += event.text;
     if (event.type === 'error') throw new Error(event.error);

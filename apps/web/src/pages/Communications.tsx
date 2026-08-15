@@ -14,6 +14,7 @@ import {
   Divider,
   Form,
   Input,
+  Modal,
   Popconfirm,
   Segmented,
   Select,
@@ -26,6 +27,23 @@ import {
   Typography,
 } from 'antd';
 import { useCallback, useEffect, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
+import {
+  useActiveCalls,
+  useCallDetail,
+  useCallsList,
+} from '../features/communications/api/queries';
+import { CallRow } from '../features/voice/CallRow';
+import {
+  CALL_DIRECTION_FILTERS,
+  CALL_STATUS_FILTERS,
+  CALLS_EMPTY_COPY,
+  CALLS_EMPTY_FILTERED_COPY,
+  type CallFilter,
+  callRowView,
+  DEFAULT_CALL_FILTER,
+  withoutActive,
+} from '../features/voice/call-rows';
 import { bridge, isDesktop } from '../lib/desktop';
 import { rpc } from '../rpc';
 
@@ -1190,6 +1208,192 @@ function GatewayControl() {
 }
 
 // ---------------------------------------------------------------------------
+// Calls (voice V4, DR1/DR3/DR4)
+//
+// Call history lives HERE — under Communications, behind a filter chip — and
+// not behind a new sidebar item, because a phone call is one more channel the
+// agent answers on, alongside Telegram and Slack. The trunk credentials, the
+// number→bot table and the inbound guards live in Settings → Voice; this tab is
+// the record of what actually happened.
+// ---------------------------------------------------------------------------
+
+/** One second, because the ticking duration is read as a clock. It keeps
+ *  ticking under `prefers-reduced-motion`: a duration is DATA, not motion, and
+ *  freezing it would make a live call look hung. Only the dot's pulse stops,
+ *  and the stylesheet does that. */
+const LIVE_TICK_MS = 1_000;
+
+/** A clock that only runs while something on screen needs it. With no call in
+ *  progress there is nothing to re-render every second, so nothing does. */
+function useTickingNow(active: boolean): number {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!active) return;
+    setNow(Date.now());
+    const id = setInterval(() => setNow(Date.now()), LIVE_TICK_MS);
+    return () => clearInterval(id);
+  }, [active]);
+  return now;
+}
+
+function CallFilterChips({
+  filter,
+  onChange,
+}: {
+  filter: CallFilter;
+  onChange: (next: CallFilter) => void;
+}) {
+  return (
+    <div className="call-filter-bar">
+      <span className="call-filter-label">Direction</span>
+      {CALL_DIRECTION_FILTERS.map((f) => (
+        <button
+          key={f.value}
+          type="button"
+          aria-pressed={filter.direction === f.value}
+          className={`call-filter-chip${filter.direction === f.value ? ' active' : ''}`}
+          onClick={() => onChange({ ...filter, direction: f.value })}
+        >
+          {f.label}
+        </button>
+      ))}
+      <span className="call-filter-label">State</span>
+      {CALL_STATUS_FILTERS.map((f) => (
+        <button
+          key={f.value}
+          type="button"
+          aria-pressed={filter.status === f.value}
+          className={`call-filter-chip${filter.status === f.value ? ' active' : ''}`}
+          onClick={() => onChange({ ...filter, status: f.value })}
+        >
+          {f.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+/** The text the list deliberately withholds, fetched only when a row is opened. */
+function CallTranscriptModal({ id, onClose }: { id: string | null; onClose: () => void }) {
+  const detailQuery = useCallDetail(id);
+  const call = detailQuery.data?.call ?? null;
+  return (
+    <Modal
+      open={id !== null}
+      onCancel={onClose}
+      footer={null}
+      width={720}
+      title={id ? <span className="call-mono">{id}</span> : null}
+    >
+      {detailQuery.isLoading ? (
+        <div style={{ display: 'grid', placeItems: 'center', height: 120 }}>
+          <Spin />
+        </div>
+      ) : detailQuery.error ? (
+        <Typography.Text type="danger">
+          Transcript unreadable — {(detailQuery.error as Error).message}
+        </Typography.Text>
+      ) : call === null ? (
+        // A pruned id is an empty pane, not an error: retention is allowed to
+        // have removed it, and saying so is more use than "not found".
+        <Typography.Text type="secondary">
+          That call is no longer in the log — retention may have removed it.
+        </Typography.Text>
+      ) : (
+        <>
+          {call.summary ? (
+            <Typography.Paragraph style={{ marginTop: 0 }}>{call.summary}</Typography.Paragraph>
+          ) : null}
+          {call.transcript ? (
+            <pre className="call-transcript">{call.transcript}</pre>
+          ) : (
+            <Typography.Text type="secondary">This call kept no transcript.</Typography.Text>
+          )}
+        </>
+      )}
+    </Modal>
+  );
+}
+
+function CallsPanel() {
+  const navigate = useNavigate();
+  const [filter, setFilter] = useState<CallFilter>(DEFAULT_CALL_FILTER);
+  const [transcriptId, setTranscriptId] = useState<string | null>(null);
+
+  const listQuery = useCallsList(filter);
+  const activeQuery = useActiveCalls();
+
+  const active = activeQuery.data?.calls ?? [];
+  const now = useTickingNow(active.length > 0);
+  const history = withoutActive(listQuery.data?.calls ?? [], active);
+  const filtered = filter.direction !== 'all' || filter.status !== 'all';
+
+  return (
+    <div className="calls-panel">
+      {active.length > 0 ? (
+        <>
+          <Typography.Text strong style={{ fontSize: 13 }}>
+            In progress
+          </Typography.Text>
+          <div className="call-list">
+            {active.map((call) => (
+              <CallRow
+                key={call.id}
+                call={call}
+                view={callRowView(call, now)}
+                onOpenTranscript={setTranscriptId}
+              />
+            ))}
+          </div>
+        </>
+      ) : null}
+
+      <CallFilterChips filter={filter} onChange={setFilter} />
+
+      {listQuery.isLoading ? (
+        <div style={{ display: 'grid', placeItems: 'center', height: 120 }}>
+          <Spin />
+        </div>
+      ) : listQuery.error ? (
+        // Never the empty state on a failed read: "no calls yet" and "we could
+        // not read the log" are different facts, and the first one sends the
+        // operator off to re-check a trunk that is working fine.
+        <Typography.Text type="danger">
+          Call history unreadable — {(listQuery.error as Error).message}
+        </Typography.Text>
+      ) : history.length > 0 ? (
+        <div className="call-list">
+          {history.map((call) => (
+            <CallRow
+              key={call.id}
+              call={call}
+              view={callRowView(call, now)}
+              onOpenTranscript={setTranscriptId}
+            />
+          ))}
+        </div>
+      ) : filtered ? (
+        <div className="call-empty">
+          <Typography.Text type="secondary">{CALLS_EMPTY_FILTERED_COPY}</Typography.Text>
+          <Button size="small" onClick={() => setFilter(DEFAULT_CALL_FILTER)}>
+            Clear filters
+          </Button>
+        </div>
+      ) : active.length > 0 ? null : (
+        <div className="call-empty">
+          <Typography.Text type="secondary">{CALLS_EMPTY_COPY}</Typography.Text>
+          <Button type="primary" onClick={() => navigate('/settings')}>
+            Configure a trunk
+          </Button>
+        </div>
+      )}
+
+      <CallTranscriptModal id={transcriptId} onClose={() => setTranscriptId(null)} />
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Root Communications component
 // ---------------------------------------------------------------------------
 
@@ -1225,6 +1429,7 @@ export function Communications() {
           { key: 'telegram', label: 'Telegram', children: <TelegramPanel /> },
           { key: 'slack', label: 'Slack', children: <SlackPanel /> },
           { key: 'whatsapp', label: 'WhatsApp', children: <WhatsAppPanel /> },
+          { key: 'calls', label: 'Calls', children: <CallsPanel /> },
           ...LEGACY_PLATFORMS.map((shape) => {
             const status = statusById.get(shape.id);
             return {

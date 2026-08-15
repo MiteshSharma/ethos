@@ -35,7 +35,8 @@ Where something could not be verified from inside the repo, it says so.
 | Voice notes over channels | A bot token for the channel in `~/.ethos/config.yaml`, plus `ffmpeg` on `PATH` for anything the TTS provider does not already emit in a declared format |
 | Wake satellite (`ethos listen`) | `ethos serve` running and a PCM pipe — `ffmpeg` or `arecord`. No `voice.wake.routes` entry needed; the server synthesizes one per unprivileged personality. **Open mic: the server transcribes everything and matches the wake phrase there** — see [The flows to try](#the-flows-to-try) |
 | Acoustic wake (`sherpa`) | `sherpa-onnx-node` installed by hand (**not a repo dependency**) plus four model files in `~/.ethos/models/wake/`. No host in this repo has ever run it |
-| Telephony, LiveKit transport | Native bindings, a LiveKit server, a SIP trunk, a rented number — none are repo dependencies |
+| Telephony (inbound + outbound calls) | A LiveKit server with SIP, a trunk, a rented number, and a public URL for the webhook. The decision path — verify, gate, screen, log, summarise — runs against fakes with none of them; see [4c. Telephony](#4c-telephony) |
+| Audio on a call | `@livekit/rtc-node` installed on the gateway host (**not a repo dependency** — a per-arch native binary). Without it a call is answered, gated, logged and summarised, and carries no voice |
 
 **How do I just hear it talk?** Configure `auxiliary.tts` (30 seconds — see
 [Cheapest smoke test](#cheapest-smoke-test-macos-say)), run `make web`, open
@@ -589,7 +590,9 @@ voice.languages.ja: jf_alpha
   whatever your server calls it.
 - `voice.tier` — `pipeline` or `realtime`. An unknown value is **dropped**, not
   thrown on: a bad voice id must not make a personality unloadable.
-- `voice.model` — a fast-lane model for spoken turns.
+- `voice.model` — a fast-lane model for spoken turns. Live on the pipeline tier:
+  `buildVoiceStack.createSession` pins it onto the lane's runner, so every turn
+  on that lane routes to it (latency decision L5).
 - `voice.languages.<BCP-47 tag>` — per-language voice override.
 
 Precedence (`resolveVoicePreferences`, `packages/core/src/providers/voice-resolution.ts`):
@@ -646,10 +649,11 @@ no `voice` block.
 >   apps/web/src/features/voice/__tests__/streaming-voice-call-client.test.ts
 > ```
 >
-> Still on the global voice: the **`Play` button** on an assistant bubble
-> (`apps/web/src/components/chat/PlayButton.tsx` calls
-> `rpc.voice.synthesize({ text })` with no `personalityId`). The RPC accepts the
-> field; the button does not yet pass it.
+> The **`Play` button** on an assistant bubble passes it too:
+> `apps/web/src/components/chat/PlayButton.tsx` builds its `voice.synthesize`
+> input through `playbackRequest(text, personalityId)`, threaded down from the
+> message list. Only the id crosses — the voice, the provider and the egress gate
+> are resolved server-side, on the one precedence path above.
 
 ---
 
@@ -762,6 +766,143 @@ and playout legs sit outside it and are simply not measured.
 
 ---
 
+## 4c. Telephony
+
+A phone number is the one voice surface with a stranger on the other end, and it is
+also the one whose end-to-end path **has never been run against a live trunk**. What
+follows separates the two halves honestly: almost all of the decision-making is
+exercisable with no credentials at all, and only the audio and the real provider
+payloads need something you supply.
+
+### What works with zero credentials
+
+The whole inbound path *except the audio* runs against fakes: signature
+verification for all four schemes, payload parsing, bot resolution, the four gates,
+the receptionist decision, the call-log row transitions, and the owner notification
+riding the delivery ledger.
+
+```bash
+pnpm vitest run --maxWorkers=4 \
+  extensions/call-log \
+  extensions/platform-voice/src/__tests__/sip-webhook.test.ts \
+  extensions/platform-voice/src/__tests__/inbound-gate.test.ts \
+  extensions/platform-voice/src/__tests__/sip-trunk-livekit.test.ts \
+  extensions/platform-voice/src/__tests__/livekit-token.test.ts \
+  extensions/platform-voice/src/__tests__/g711.test.ts \
+  extensions/platform-voice/src/__tests__/frame-pacer.test.ts \
+  extensions/platform-voice/src/__tests__/realtime-bridge.test.ts \
+  apps/ethos/src/__tests__/sip-webhook-server.test.ts \
+  apps/ethos/src/__tests__/sip-inbound-dispatch.test.ts \
+  apps/ethos/src/__tests__/livekit-media.test.ts \
+  packages/wiring/src/__tests__/far-end-consult.test.ts \
+  packages/wiring/src/__tests__/voice-stack.test.ts \
+  packages/config/src/__tests__/config-voice-telephony.test.ts \
+  apps/web-api/src/__tests__/services/calls.service.test.ts \
+  apps/web-api/src/__tests__/services/config-voice-telephony.test.ts \
+  packages/web-contracts/src/__tests__/voice-calls.test.ts \
+  apps/web/src/features/voice/__tests__/call-row.test.ts \
+  apps/web/src/features/voice/__tests__/call-rows.test.ts \
+  apps/web/src/features/voice/__tests__/call-row-css.test.ts \
+  apps/web/src/pages/__tests__/voice-telephony.test.ts \
+  extensions/gateway/src/__tests__/notify-tracked.test.ts
+```
+
+```
+ Test Files  22 passed (22)
+      Tests  335 passed (335)
+```
+
+| Suite | Pins |
+|---|---|
+| `sip-webhook.test.ts` | All four signature schemes, each failing closed with its own distinct reason; Twilio's `bodySHA256` commitment; LiveKit's missing-`exp` treated as expired; Telnyx's raw-vs-PEM Ed25519 key; and the parsers refusing a non-call payload rather than throwing |
+| `inbound-gate.test.ts` | Gate order (budget → rate → concurrency → allowlist), a refusal releasing every resource it took, the sliding hour window, the UTC budget rollover, and `prewarm` policy resolution |
+| `sip-webhook-server.test.ts` | The listener's status codes — `202` verified, `401` generic-bodied, `200 {ignored}` for a non-call event, `404` for the wrong method or path — and that the handler never blocks on dispatch |
+| `sip-inbound-dispatch.test.ts` | The whole ring: unrouted number → `screened` + owner notice, each refusal reason → its status, the receptionist pin, the `ringing`→`live`→`completed` row, and the concurrency slot released on a setup that never reached `live` |
+| `extensions/call-log` | `SQLiteCallLog` / `InMemoryCallLog` agreeing, the same-millisecond rowid tie-break, a duplicate id rejected rather than overwriting, and `pruneEnded` never touching a `ringing` or `live` row at any age |
+| `far-end-consult.test.ts` | That a call's consult pins `speaker: 'far_end'` and the receptionist personality — the field the spoken-confirmation gate refuses on |
+| `livekit-media.test.ts` | The optional-dependency loader: "not installed" and "installed but will not load" as distinct reasons, and a module missing any required export refused at boot rather than mid-call |
+| `sip-trunk-livekit.test.ts` · `livekit-token.test.ts` | The Twirp request the SIP control plane receives, the signed JWT's grants, and credentials redacted out of a provider's error body before it can reach a log |
+| `g711.test.ts` · `frame-pacer.test.ts` | μ-law/A-law round-trips, and absolute-time pacing that does not drift over a long call |
+| `realtime-bridge.test.ts` | The SIP↔provider bridge — built and covered, and with **no production caller** (see below) |
+| `config-voice-telephony.test.ts` (×2) | Every `voice.trunk` / `voice.inbound` / `voice.bargeIn` key parsing, refusing, and round-tripping through both the CLI loader and the web config service |
+| `calls.service.test.ts` · `voice-calls.test.ts` · `call-row*.test.ts` | The `voice.calls.{list,active,get}` contract, the direction/state filters, and the CallRow's reduced-motion and live-state rendering |
+
+You can also read the whole configured surface without a trunk. `ethos doctor`
+prints its telephony rows inside the existing `Voice` section, and the one thing it
+actually *runs* is the media resolution:
+
+```bash
+ethos doctor
+```
+
+With no `voice.*` block at all it prints one line and does not pay for a native
+import:
+
+```
+  –  Telephony not configured (no voice.*).
+```
+
+### What each credential unlocks
+
+| You supply | What becomes real | What stays fake |
+|---|---|---|
+| `voice.livekit.{url,apiKey,apiSecret}` | The SIP control plane: outbound dialling via `call`, and room access-token minting. Both are plain HTTPS with a signed JWT — no SDK, no native binary | Nothing dials during tests; `ethos doctor` reports the client "constructible — not dialled from here" |
+| `voice.trunk.webhookSecret` | The inbound listener starts at all. Without it the gateway prints a warning and leaves it off, because an unsigned webhook is an open line | Real provider payload shapes — the parsers are written against published docs, not captured requests |
+| `@livekit/rtc-node` installed on the host | Audio. `resolveLiveKitMedia()` loads it at gateway startup and `voiceStack.createSipAdapter` comes into existence | The adapter's assumptions about the SDK's room/track/frame API. Every one is marked `ASSUMPTION:` in `apps/ethos/src/livekit-media.ts` and none has been executed |
+| A realtime provider key | Nothing on the call path today. The bridge tier is not constructible from the gateway — see the gap below | The entire sub-second call tier |
+
+Without the media binding a call is still **verified, gated, screened or answered,
+logged, and summarised to the owner**. It simply carries no voice, and both the
+startup banner and `ethos doctor` say so in those words.
+
+### The three inert knobs
+
+Named here so nobody tunes them and waits for an effect:
+
+- **`voice.inbound.prewarm`** — the decision is computed on every ring and returned
+  in the dispatch outcome, and nothing opens a socket, because
+  `createSipRealtimeBridge` has no caller outside its own tests.
+- **`voice.inbound.dailyBudgetUsd`** — checked first on every call, and no code path
+  calls `VoiceDailyBudget.record()`, so the running total never leaves zero.
+- **`voice.bargeIn.satellite.silenceMs`** — parsed, validated, editable in Settings,
+  and read by nothing. The satellite `CaptureMachine` ends an utterance on a count
+  of silent audio *frames*, and a frame is only a duration once the capture device
+  reports its frame size, so there is no honest conversion for the config layer to
+  make. The surface's other two fields are wired
+  (`readSatelliteVadTuning` in `apps/ethos/src/commands/listen.ts`), as is all of
+  `voice.bargeIn.call.*` (`packages/wiring/src/voice-stack.ts`).
+
+  `voice.bargeIn.browser.*` used to sit in this list. It is gone from the union:
+  the browser talk lane endpoints in the browser, from `display.voice_*`, and the
+  key is now a parse error that names that path.
+
+Two more honest gaps in the same family: **outbound calls write no call-log row**
+(every row is `direction: 'inbound'`), and **nothing joins the room on an outbound
+call**, so `call` places the trunk leg and the callee hears silence.
+
+### Manual verification required
+
+Nothing in CI dials a number, and the plan says so explicitly — live-call
+verification is manual by design.
+
+- **A real inbound call** on a rented number, end to end: ring → verified → gated →
+  answered → `completed` row → summary on the owner's channel.
+- **Each provider's real webhook payload.** Twilio form-encoded, Telnyx `call.*`
+  events, LiveKit participant attributes — one captured request per provider would
+  retire the largest single assumption here.
+- **Twilio behind a real TLS terminator.** Its HMAC commits to the public URL, so
+  the proxy's `X-Forwarded-Proto` / `X-Forwarded-Host` are load-bearing, and getting
+  them wrong is a `401` that looks like a bad secret. Note also that Twilio's scheme
+  carries **no timestamp**, so no replay window is enforced for it — the other three
+  get one.
+- **`@livekit/rtc-node` against a running `livekit-server`.** The first live call is
+  what proves or breaks every `ASSUMPTION:` marker in the adapter.
+- **A spoken confirmation on a live call** — that a caller's "yes" really cannot
+  satisfy an owner-level approval in practice, not only in the ordering test.
+- **The concurrency cap under real simultaneous calls**, with frame pacing intact.
+
+---
+
 ## 5. What needs credentials or hardware you supply
 
 | Capability | You must provide | How to verify | Already proven against fakes |
@@ -773,20 +914,24 @@ and playout legs sit outside it and are simply not measured.
 | Batch STT over a generated WAV | A real batch STT server that accepts the utterance-buffered WAV | Talk-mode against a batch-only provider | `extensions/voice-session/src/__tests__/wav.test.ts`, `buffered-stt.test.ts` — encoder correctness only, no server ever consumes the bytes |
 | Browser realtime tier (`openai-realtime`) | An OpenAI key with Realtime access, a `voice.realtime.providers.<name>` entry, and a place in `voice.trustedPlugins` if the gate is armed | Start talk-mode; the strip's detail row names the realtime provider and model that served the call | Mint, refusals, control lane, cost and the browser link are all tested against fakes ([§4b](#4b-the-realtime-tier)); no socket is ever opened |
 | Browser realtime tier (`gemini-live`) | Nothing will make this work in a browser | Not possible — `caps.ephemeralToken: false`, so the mint refuses `no_browser_token` and the call falls back to the pipeline with a visible notice. Deliberate; see [§4b](#4b-the-realtime-tier) | The refusal itself is pinned, on both the server and browser sides |
-| LiveKit transport | `@livekit/rtc-node` + `livekit-server-sdk` (**not repo dependencies**), a LiveKit server, and app-layer `LiveKitBindings` | Manual only — see `extensions/platform-voice/README.md` | `extensions/platform-voice/src/__tests__/` against fake room clients |
-| Telephony (`call`, inbound SIP) | A SIP trunk, a rented E.164 number, a `SipTrunkClient` implementation | Manual only | `extensions/tools-voice/src/__tests__/call.test.ts`; `call` self-reports unavailable with no trunk, and is in `APPROVAL_SURFACE_ALWAYS_ASK` so it always prompts |
+| LiveKit media | `@livekit/rtc-node` installed on the host (**not a repo dependency**) and `voice.livekit.*`. `livekit-server-sdk` is *not* needed — the SIP control plane is plain HTTPS with a signed JWT. `LiveKitBindings` are no longer app-layer manual either: `resolveLiveKitMedia()` loads the SDK at gateway startup and the gateway passes them through | `ethos doctor` → the `LiveKit media` row, which is the one probe it actually runs | `apps/ethos/src/__tests__/livekit-media.test.ts` for the loader; `extensions/platform-voice/src/__tests__/` against fake room clients. The adapter's SDK assumptions are unexecuted |
+| Telephony (inbound SIP) | A SIP trunk, a rented E.164 number, `voice.trunk.webhookSecret`, and a public URL. **No `SipTrunkClient` implementation** — it is derived from `voice.trunk.*` + `voice.livekit.*` by one shared function | Manual only — call the number and read **Communications → Calls** | 22 suites / 335 tests cover verify → gate → dispatch → call log → owner notice against fakes ([§4c](#4c-telephony)) |
+| Telephony (outbound `call`) | The same trunk and LiveKit credentials | Manual only. Note two limits: nothing joins the room on the Ethos side, so the callee hears silence, and outbound calls write no call-log row | `extensions/tools-voice/src/__tests__/call.test.ts`; `call` self-reports unavailable with no trunk, and is in `APPROVAL_SURFACE_ALWAYS_ASK` so it always prompts |
 | Channel voice notes | A bot token, and `ffmpeg` on `PATH` for real container conversion | Send a voice note to the bot with `ethos gateway` running (all four declared adapters, in both directions) | `extensions/gateway/src/__tests__/voice-pipeline.test.ts`, `transcode.test.ts`, `voice-caps-sink.test.ts`, `voice-ledger-e2e.test.ts` — every ffmpeg invocation is a fake runner, no binary is ever spawned |
 | Wake satellite, open mic (`ethos listen`) | `ethos serve` running and a real PCM pipe (`ffmpeg` / `arecord`) — no `voice.wake.routes` entry required | `make listen-doctor` for the preflight (warn-only runs exit 0), then pipe a mic in and say `<personality>, …` (a `hey` in front is optional) — the row appears under **Settings → Voice → Wake routes**, and the daemon prints `● speech` / `› you:` / `‹ <personality>:` / `↩ turn complete` per addressed turn, and `↩ not addressed to anyone` for everything else | `apps/ethos/src/__tests__/listen-*.test.ts`, `apps/web-api/src/voice/__tests__/satellite-socket.test.ts`, `extensions/voice-satellite/src` — the device and the socket are always injected; no microphone is ever opened |
 | Acoustic wake (`voice.wake.engine: sherpa`) | `sherpa-onnx-node` installed by hand (**not a repo dependency**, ~33 MB per-arch native binary) and four model files in `~/.ethos/models/wake/` | Manual only, on a host with a real microphone | Only the *absence* path: `extensions/voice-satellite/src/__tests__/doctor.test.ts` pins that the missing peer and the missing model file are each reported with their own diagnosable message. The spotter mapping itself has **never run against a real binary** |
 | Wake quality (false-accept / false-reject) | A recorded ambient corpus and a 3 m test rig | Manual only | **Nothing.** The plan's ≤ 1 false accept/hour and ≤ 10 % false reject at 3 m are unmeasured — no corpus exists in this repo |
-| Satellite playout | A satellite host with an output device. Neither shipped host has one — `ethos listen` registers `playback: false`, and the Electron main process has no audio binding either. The lane gates the send on that flag, so nothing is synthesized and the reply arrives as text only | Manual only, on a host you wire a `CaptureDevice` and a speaker into | `extensions/voice-satellite/src/__tests__/node-client.test.ts` covers the playout *events*; no audio is ever played |
+| Satellite playout | A player on the satellite's `PATH`. `ethos listen` probes `ffplay`, then `aplay`, then `play`, or takes your own with `--play "<command>"`, and registers `playback: true` when it finds one. Finding none it registers `playback: false`, the lane skips synthesis for that node, and the reply arrives as text. `aplay` and `play` take raw PCM only, so an opus or mp3 reply to either is refused rather than played as noise. The Electron host still has no audio binding | `make listen-doctor` → the `speaker` row names the command it would spawn; then pipe a mic in and listen | `extensions/voice-satellite/src/__tests__/playout.test.ts` (drain receipt, the 90 s watchdog), `apps/ethos/src/__tests__/listen-playback.test.ts` (player resolution, `--play`, `playback_done`). No audio is ever played and no process is spawned |
+| Satellite raw-PCM sample rate | Nothing — but know the assumption. `TtsProvider.synthesize` reports no sample rate and the lane never populates the optional wire field, so raw PCM plays at a hardcoded 24 kHz. A reply that sounds fast or slow is that guess; pin it with `--play` and your own `-ar` | Listen to one reply | `playout.test.ts` covers the lane-supplied path, which no production sender reaches |
+| Satellite edge STT | A **local** recognizer (`local-stt` or `command-stt`) plus `voice.wake.edgeStt: true`. `ethos listen` resolves it through the same provider path every surface uses and sends only the words upstream | `ethos listen doctor` → the `edge-stt` row constructs the provider and reads its real `caps.local` | `apps/ethos/src/__tests__/listen-edge-stt.test.ts` — edge on sends words and **zero** audio frames; a non-local provider is refused by name, never relabelled |
 
-Manual-verification list, condensed: **LiveKit native bindings, a SIP trunk plus a
-rented number, real cloud STT/TTS keys, a real OpenAI Realtime key, real
-`command-*` binaries, a real batch STT server consuming the generated WAV, a real
-PCM pipe into `ethos listen`, a hand-installed `sherpa-onnx-node` with wake models,
-satellite playout on a host with a speaker, and any wake-quality measurement at
-all.** Nothing in CI touches any of these.
+Manual-verification list, condensed: **`@livekit/rtc-node` against a running
+LiveKit server, a live inbound call on a rented number (and one captured webhook
+payload per trunk provider), real cloud STT/TTS keys, a real OpenAI Realtime key,
+real `command-*` binaries, a real batch STT server consuming the generated WAV, a
+real PCM pipe into `ethos listen`, a hand-installed `sherpa-onnx-node` with wake
+models, a real player on a satellite, and any wake-quality measurement at all.**
+Nothing in CI touches any of these.
 
 ---
 
@@ -794,17 +939,23 @@ all.** Nothing in CI touches any of these.
 
 Do not go hunting for these. They do not exist on this branch.
 
-### 1. Streaming TTS on the browser surface
-`local-tts` and `openai-tts` now implement `synthesizeStream` and declare
+### 1. Streaming TTS — wired, including the browser
+`local-tts` and `openai-tts` implement `synthesizeStream` and declare
 `caps.streaming`, and `VoiceSession` uses it: audio is emitted chunk-by-chunk as the
 `/v1/audio/speech` response streams, and sentence N+1 is synthesized while N is
 still playing (`extensions/voice-session/src/playout-queue.ts`). A provider without
 `caps.streaming` still takes the batch path unchanged.
 
-What is NOT wired: **browser talk-mode does not use it.** Talk-mode calls the
-`voice.synthesize` RPC, which returns one base64 blob per sentence — the streaming
-path only runs on the `VoiceSession` stack. `command-tts`, `openai-stt`, `groq-stt`,
-`local-stt` and `command-stt` remain batch-only.
+Browser talk-mode uses it too, over the binary WS lane described in §2:
+`VoiceService.synthesizeStream` (`apps/web-api/src/services/voice.service.ts:863`)
+yields the provider's chunks when `isStreamingTtsProvider` holds and falls back to
+one `synthesize` call when it does not, and `createVoiceSocket` wires exactly that
+into the lane (`apps/web-api/src/voice/voice-socket.ts:88`). The batch
+`voice.synthesize` RPC is still there — it is what the Play button and the
+personality-editor Preview call, and what the WS-less fallback path uses.
+
+Still batch-only: `command-tts`, and every STT provider (`openai-stt`, `groq-stt`,
+`local-stt`, `command-stt`).
 
 ### 2. Binary-PCM WebSocket + WebAudio playout — now the default
 Browser talk-mode opens **one persistent WebSocket** at `GET /voice/ws` and carries
@@ -835,7 +986,7 @@ Manual verification still needed (nothing in CI drives real audio): a real mic i
 real browser, a real STT/TTS server behind it, and the reconnect + wake-lock paths
 on a phone.
 
-### 3. Personality voice — wired everywhere except the Play button
+### 3. Personality voice — wired on every surface that speaks
 `resolveVoicePreferences` used to have exactly one consumer
 (`packages/wiring/src/voice-stack.ts`), so a personality's `voice.tts_voice`
 changed its character sheet and nothing you could hear on the two surfaces most
@@ -850,10 +1001,19 @@ people reach first. It now has three:
 Precedence is the same everywhere because it is the same function:
 `voice.languages.<tag>` > `voice.tts_voice` > global `auxiliary.tts.voice`.
 
-What remains: the **Play button** does not send `personalityId`, so a
-click-to-hear on an assistant bubble still uses the global voice. The gateway
-has no per-turn language detection, so `voice.languages.*` cannot select there
-yet — the personality's default voice is used instead of a wrong-language one.
+The **Play button** on an assistant bubble sends `personalityId` too
+(`apps/web/src/components/chat/PlayButton.tsx`), so click-to-hear speaks in the
+personality's own voice rather than the deployment default. Only the id travels —
+the voice, the provider and the local-only egress gate are all resolved
+server-side.
+
+The gateway does detect the language of an inbound voice note, but only against
+the personality's OWN `voice.languages` keys
+(`extensions/gateway/src/index.ts:2069`, tested in
+`extensions/gateway/src/__tests__/voice-language.test.ts`): a personality with no
+language map produces no guess and its default voice stands, which is the
+behaviour that existed before. Detection is on the voice-note path only — a typed
+turn is not sniffed for language.
 
 Two related caveats on the `VoiceSession` stack itself, both from the source:
 the LiveKit and SIP transports additionally require app-supplied native
@@ -875,7 +1035,7 @@ Both are lists, and the flat `key: value` parser has no list encoding for them; 
 only populate advisory `caps.voices` / `caps.languages`, which nothing in the repo
 enforces. They are documented nowhere — do not write them expecting an effect.
 
-### 5. CallStrip shipped; per-personality voice editor still config-file only
+### 5. CallStrip and the per-personality voice editor — both shipped
 The talk-mode UI is the CallStrip (`apps/web/src/features/voice/TalkMode.tsx`):
 nine states — connecting, listening, thinking/consulting, speaking, barge-in,
 reconnecting, degraded-to-text, mic-permission-denied, plus the idle entry points
@@ -905,9 +1065,13 @@ but empty** (`voice.trustedPlugins:` with no value) arms the gate with nothing
 trusted. Settings treats an empty list as "gate off" because the web config
 writer cannot round-trip an empty value; write that line by hand if you want it.
 
-A personality's own `voice.*` block (`tts_voice`, `languages`, `tier`, `model`)
-is still edited in the personality's `config.yaml` and rendered read-only in the
-character sheet — there is no web editor for it.
+A personality's own `voice.*` block is edited in the Personalities tab
+(`apps/web/src/components/personality/PersonalityVoiceFields.tsx`). All eight
+sub-keys are there — `tts_provider`, `tts_voice`, `stt_provider`,
+`realtime_provider`, `call_style`, `tier`, `model`, and the
+`languages.<tag>` map as a dense row editor. The block stays FROZEN as a schema:
+these are sub-keys of the existing `voice` object, so `.personality-field-count`
+is untouched at 28. The character sheet still renders the block read-only.
 
 `voice.tier` now has a consumer: `VoiceService.mintRealtimeToken`
 (`apps/web-api/src/services/voice.service.ts`) runs it through
@@ -915,12 +1079,38 @@ character sheet — there is no web editor for it.
 `pipeline` refuses the mint with `pipeline_preferred`. Absent from both means
 "try realtime". The global default is editable in Settings → Voice.
 
-`voice.model` — the fast-lane model for spoken turns — still has **no consumer**.
-`resolveVoicePreferences` resolves and returns it, and nothing reads the result;
-no caller even passes the `globalModel` option. The realtime tier does not use it:
-a realtime call's model comes from the roster entry (`selection.entry.model` in
-`mintRealtimeToken`), not from the personality's `voice.model`. Fast-lane routing
-for pipeline turns has not landed.
+`voice.model` — the fast-lane model for spoken turns — now has a consumer on the
+**pipeline tier**. `buildVoiceStack.createSession` (`packages/wiring/src/voice-stack.ts`)
+resolves it through `resolveVoicePreferences` and wraps the supplied runner, so
+every turn on that lane carries `RunOptions.modelOverride` without each host
+having to remember it. `AgentLoop` consumes the field in its turn-setup stage and
+it lands on `CompletionOptions.modelOverride`; `run_start` and the `llm_call`
+span name the pinned model, so telemetry cannot claim the default answered.
+
+The routing ladder, pinned by `packages/core/src/__tests__/model-tier.test.ts`
+(`model routing precedence`) on what the LLM provider was actually asked for:
+
+```
+RunOptions.modelOverride  >  tierOverride  >  personality model  >  deployment default
+```
+
+No deployment-level fast-lane default is passed as `globalModel`: `config.voice.*`
+has no such key, and `config.model` is the agentic default — the one model L5
+exists to keep off the spoken lane. The fast-lane model resolves from the
+personality alone.
+
+Two gaps remain. The **realtime tier** does not use it: a realtime call's model
+comes from the roster entry (`selection.entry.model` in `mintRealtimeToken`), not
+from the personality's `voice.model`. And a personality whose toolset carries
+`think_deeper` can still escalate off the pinned model mid-turn — the escalation
+in `agent-loop/stages/stream-step.ts` outranks the pin. The built-in `voice`
+personality carries no such tool, so nothing shipped hits it.
+
+```bash
+pnpm vitest run \
+  packages/core/src/__tests__/model-tier.test.ts \
+  packages/wiring/src/__tests__/voice-stack.test.ts
+```
 
 ### 6. Built-in `voice` personality — shipped
 `extensions/personalities/data/voice/` is the first built-in that lists
@@ -936,7 +1126,27 @@ plus the spoken-style injector measure ~2.3k chars / ~580 tokens today, so
 there is headroom, and the test is what stops it being spent silently.
 
 ### 7. Not built at all
-Telephony beyond the typed seams.
+
+Telephony used to be listed here as "beyond the typed seams". It shipped — the
+inbound webhook listener on the gateway command, the four signature schemes, the
+hardening gates, the receptionist scope, the SQLite call log, the owner summary
+through the delivery ledger, `voice.calls.*` and the Communications → Calls tab, and
+an optional-dependency loader that gives a call audio once an operator installs
+`@livekit/rtc-node`. See [§4c](#4c-telephony). Four things inside it did **not**
+ship:
+
+- **The SIP↔realtime bridge tier.** `createSipRealtimeBridge` is built and tested
+  and has no caller outside its own suite, because `VoiceStack` exposes no
+  `RealtimeVoiceProvider` or `VoiceTransport` for the gateway to construct one
+  from. `voice.inbound.prewarm` therefore decides something nothing acts on.
+- **Voicemail / answering-machine detection.** Explicitly deferred by the plan,
+  recorded as a decision rather than an omission.
+- **Outbound as a conversation.** `call` dials through the trunk under an approval,
+  and nothing joins the room on the Ethos side, so the callee hears silence. No
+  call-log row is written for an outbound call either.
+- **Any live-call verification.** Every payload parser and every signature scheme is
+  written against published documentation. No captured request from any provider
+  has ever been replayed through them.
 
 The wake-word satellite used to be listed here in full. It shipped — the shared
 `extensions/voice-satellite` package, the `/satellite/ws` lane on **web-api**,
@@ -951,12 +1161,13 @@ and they are the reasons not to plan an ambient deployment around it yet:
 - **A microphone on the desktop host.** It reports `degraded` with "no capture
   device configured" and declines to start.
 - **Wake-quality numbers.** No corpus, no measurement.
-- **Edge STT on a shipped host.** The wire protocol and the lane both support the
-  `transcript` frame, and `voice.wake.edgeStt: true` is parsed — but neither host
-  ships an on-device recognizer, so both register `capabilities.edgeStt: false` and
-  the server ANDs the operator's intent down to false. `listen doctor` warns in
-  words that audio *will* be streamed and the "no audio leaves the machine"
-  guarantee does not hold there.
+Edge STT used to be listed here too. It shipped on `ethos listen`:
+`voice.wake.edgeStt: true` plus a **local** recognizer makes the daemon transcribe
+on the satellite and send only the words upstream — no `audio` frames at all — and a
+non-local recognizer is refused by name rather than relabelled, because declaring
+"at the edge" for a cloud transcriber would make the guarantee false in exactly the
+deployment that asked for it. The Electron host still ships no recognizer and no
+capture device. Satellite **playout** also shipped; see [§5](#5-what-needs-credentials-or-hardware-you-supply).
 
 Channel TTS-out and the ffmpeg transcode stage used to be listed here. Both
 shipped — see [§ Channels](#channels) for the declared-caps model that carries
@@ -964,10 +1175,11 @@ TTS-out to all four adapters, and `extensions/gateway/src/transcode.ts` for the
 stage. ffmpeg itself remains an optional host binary: without it the gateway
 sends only formats the TTS provider already produces.
 
-The realtime tier itself shipped ([§4b](#4b-the-realtime-tier)). Two things inside
+The realtime tier itself shipped ([§4b](#4b-the-realtime-tier)). One thing inside
 it did not: a **server-relay path**, so `gemini-live` is contract-only and cannot
-serve a browser call; and a **fast-lane model** for spoken pipeline turns, so
-`voice.model` on a personality still resolves to nothing.
+serve a browser call. The **fast-lane model** used to be listed here too — it
+shipped for pipeline turns, and a realtime call still routes from the roster
+entry rather than `voice.model`.
 
 ---
 

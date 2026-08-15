@@ -5,12 +5,20 @@
 // session `reply_audio` events -> the transport outbound sink. It stamps a
 // stable botKey (deriveBotKey, the canonical `@ethosagent/core` primitive every
 // adapter reuses) and builds the per-caller lane key through `voiceLaneKey`
-// (`voice:<botKey>:livekit:<callerId>`) so each caller gets their own session
+// (`voice:<botKey>:<kind>:<callerId>`) so each caller gets their own session
 // and, through the normal SessionStore path, cross-call memory
 // (plan/phases/gap-voice-realtime.md §3(b)). `voiceLaneKey` is shared with the
 // wiring-built VoiceSession stack and the browser realtime control lane: the
-// `livekit` kind segment is what makes a phone leg and a browser talk session
+// kind segment is what makes a phone leg and a browser talk session
 // structurally unable to collide on one conversation.
+//
+// The kind DEFAULTS to `livekit` and V4 now also produces `sip`. Both literal
+// shapes are pinned in `__tests__/adapter.test.ts`. The default stays `livekit`
+// rather than moving to `sip` because the default is what a room participant
+// gets — a browser or agent joining a LiveKit room is not a phone leg, and the
+// pinned literal is the contract that says so. A PSTN leg is the caller that
+// passes `laneKind: 'sip'` explicitly; it is a different conversation from the
+// same person's browser session, and the segment is what keeps them apart.
 //
 // NO MIGRATION FROM THE PRE-`kind` SHAPE, AND NONE IS NEEDED. This key used to
 // read `voice:<botKey>:<callerId>`, and that shape never reached durable
@@ -31,6 +39,7 @@
 // production is the gateway's single deduped send path. The adapter never rolls
 // its own dedup.
 
+import type { VoiceLaneClientKind } from '@ethosagent/core';
 import { deriveBotKey, voiceLaneKey } from '@ethosagent/core';
 import type { VoiceSession, VoiceSessionEvent } from '@ethosagent/voice-session';
 import type { VoiceTransport } from './transport';
@@ -67,6 +76,19 @@ export interface VoiceChannelAdapterDeps {
    * paired text channel to post summaries/transcripts to.
    */
   sendArtifact?: (artifact: VoiceArtifact) => void | Promise<void>;
+  /**
+   * Which kind of voice client this adapter serves — the lane-key segment.
+   * Defaults to `'livekit'` (a room participant). A PSTN leg passes `'sip'`.
+   */
+  laneKind?: VoiceLaneClientKind;
+  /**
+   * Fired EXACTLY ONCE when the call ends, by `stop()` or by the transport
+   * closing under us (remote hang-up). This is the call-end trigger
+   * `createPostCallSummary` has never had: without it a summary could only be
+   * produced by whoever happened to call `stop()`, so a caller who simply hung
+   * up got none.
+   */
+  onEnded?: (adapter: VoiceChannelAdapter) => void | Promise<void>;
 }
 
 export class VoiceChannelAdapter {
@@ -77,16 +99,23 @@ export class VoiceChannelAdapter {
   private readonly transport: VoiceTransport;
   private readonly session: VoiceSession;
   private readonly sendArtifact?: (artifact: VoiceArtifact) => void | Promise<void>;
+  private readonly onEnded?: (adapter: VoiceChannelAdapter) => void | Promise<void>;
   private unsubscribeAudio: (() => void) | null = null;
   private unsubscribeEvents: (() => void) | null = null;
+  private unsubscribeClosed: (() => void) | null = null;
+  private ended = false;
 
   constructor(deps: VoiceChannelAdapterDeps) {
     this.transport = deps.transport;
     this.session = deps.session;
     this.sendArtifact = deps.sendArtifact;
+    this.onEnded = deps.onEnded;
     this.botKey = deps.bot.id ?? deriveBotKey(deps.bot.match);
     this.callerId = deps.transport.callerId;
-    this.laneKey = voiceLaneKey(this.botKey, { kind: 'livekit', id: this.callerId });
+    this.laneKey = voiceLaneKey(this.botKey, {
+      kind: deps.laneKind ?? 'livekit',
+      id: this.callerId,
+    });
   }
 
   /** Connect the transport and wire the bidirectional audio bridge. */
@@ -94,15 +123,17 @@ export class VoiceChannelAdapter {
     await this.transport.connect();
     this.unsubscribeEvents = this.session.on((event) => this.onSessionEvent(event));
     this.unsubscribeAudio = this.transport.onAudio((chunk) => this.session.pushAudio(chunk));
+    this.unsubscribeClosed =
+      this.transport.onClosed?.(() => {
+        void this.onTransportClosed();
+      }) ?? null;
   }
 
   /** Unwire the bridge and disconnect the transport. */
   async stop(): Promise<void> {
-    this.unsubscribeAudio?.();
-    this.unsubscribeAudio = null;
-    this.unsubscribeEvents?.();
-    this.unsubscribeEvents = null;
+    this.unwire();
     await this.transport.disconnect();
+    await this.fireEnded();
   }
 
   /**
@@ -121,6 +152,39 @@ export class VoiceChannelAdapter {
   async sendArtifactMessage(content: string): Promise<void> {
     if (!this.sendArtifact) return;
     await this.sendArtifact({ sessionId: this.laneKey, content });
+  }
+
+  private unwire(): void {
+    this.unsubscribeAudio?.();
+    this.unsubscribeAudio = null;
+    this.unsubscribeEvents?.();
+    this.unsubscribeEvents = null;
+    this.unsubscribeClosed?.();
+    this.unsubscribeClosed = null;
+  }
+
+  /**
+   * Remote hang-up. The transport is already gone, so there is nothing to
+   * disconnect — just unwire and end the call once.
+   */
+  private async onTransportClosed(): Promise<void> {
+    this.unwire();
+    try {
+      await this.fireEnded();
+    } catch {
+      // Nowhere to propagate to: this runs on the transport's callback, not a
+      // caller's stack. The in-repo handler (`createPostCallSummary`) already
+      // routes its own failures to its `onError` sink, so swallowing here loses
+      // nothing an app can act on — and a failed summary must never take down
+      // the hang-up path.
+    }
+  }
+
+  /** Idempotent: `stop()` after a remote close (or the reverse) fires nothing. */
+  private async fireEnded(): Promise<void> {
+    if (this.ended) return;
+    this.ended = true;
+    await this.onEnded?.(this);
   }
 
   private onSessionEvent(event: VoiceSessionEvent): void {

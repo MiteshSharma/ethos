@@ -266,6 +266,17 @@ export interface RunOptions {
    * Consumed once; does not persist across runs.
    */
   tierOverride?: import('@ethosagent/types').ModelTierName;
+  /**
+   * Route THIS run to a named model, whatever the personality and the tiers
+   * resolve to. Top rung of the routing ladder: explicit override >
+   * `tierOverride` > the personality's configured model > deployment default.
+   *
+   * Generic on purpose — core never learns WHY a surface pinned the model. The
+   * voice stack sets it so a spoken lane answers on a fast model instead of the
+   * agentic default (latency decision L5), but the field says nothing about
+   * voice and any surface needing one turn on a specific model may use it.
+   */
+  modelOverride?: string;
   /** Opaque user id (from IdentityMap). When present, USER.md is read from `user:<userId>` scope. */
   userId?: string;
   dryRun?: boolean;

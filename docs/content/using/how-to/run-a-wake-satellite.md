@@ -5,7 +5,7 @@ kind: how-to
 audience: user
 slug: run-a-wake-satellite
 time: "20 min"
-updated: 2026-08-14
+updated: 2026-08-15
 ---
 
 ## Task
@@ -15,6 +15,7 @@ Put a microphone in another room — a Pi, a spare laptop, the machine under the
 ## Result
 
 - A [wake satellite](../../getting-started/glossary.md#wake-satellite) (a separate process that owns a microphone and streams speech to the Ethos server) connects to `ethos serve` and appears as a live row under **Settings → Voice → Wake routes**.
+- The named personality **answers out loud** in that room, through a player the satellite found on PATH or one you named with `--play`. Find no player and the reply is text only — nothing crashes.
 - An utterance that **opens with a personality's name** runs a turn as that personality. A greeting in front of the name (`hey`, `hi`, `hello`, `ok`, `okay`, `yo`, `hey there`) is optional, and the whole address is stripped — `engineer, did CI pass` and `hey engineer, did CI pass` both reach the agent as `did CI pass`.
 - Follow-ups within `voice.wake.idleTimeout` continue with the same personality, with no name — you do not re-address somebody you are already talking to.
 - Everything else is transcribed and discarded: no turn, no model call, no reply.
@@ -23,9 +24,9 @@ Put a microphone in another room — a Pi, a spare laptop, the machine under the
 
 ## The model, in one paragraph
 
-The microphone is **open**, and the server decides who was addressed. Every utterance the satellite captures is sent up and transcribed. The server matches the transcript against the effective route table: a match picks the personality and runs the turn, a follow-up inside the idle window continues with that same personality, and anything else is dropped without reaching a model. `ethos listen` matches nothing itself — it registers `phraseMatch: false` and the gate runs where the transcript already is.
+The microphone is **open**, and the server decides who was addressed. Every utterance the satellite captures is transcribed, and the server matches that transcript against the effective route table: a match picks the personality and runs the turn, a follow-up inside the idle window continues with that same personality, and anything else is dropped without reaching a model. `ethos listen` matches nothing itself — it registers `phraseMatch: false` and the gate runs where the transcript already is.
 
-That has a privacy consequence worth stating plainly: **the room is transcribed.** Not every utterance reaches an agent, but every utterance reaches speech-to-text. If that is not acceptable, do not run this host in that room — an acoustic gate that decides before recognition is the `sherpa` engine, and it is not installed (see below).
+That has a privacy consequence worth stating plainly: **the room is transcribed.** Not every utterance reaches an agent, but every utterance reaches speech-to-text. What you get to choose is *where* — by default the audio is streamed to the server and transcribed there; with `voice.wake.edgeStt` and a **local** provider it is transcribed on the satellite itself and only the words go up. See [Keep the audio on the machine](#5-keep-the-audio-on-the-machine). An acoustic gate that decides before recognition is the `sherpa` engine, and it is not installed (see below).
 
 ## What this does not do yet
 
@@ -35,13 +36,15 @@ Read this before you buy hardware.
 - **Acoustic wake needs a part that is not installed.** The `sherpa` engine is an optional native peer (`sherpa-onnx-node`, a per-architecture binary of roughly 33 MB) plus four model files. Its adapter is written against sherpa's documented keyword-spotter surface and has never been run against a real binary in this repository.
 - **The desktop app cannot listen.** The Electron main process ships no microphone binding, so its satellite host fails its own `capture-device` probe, reports `degraded`, and declines to start. That refusal is deliberate: a green dot over a microphone that produces nothing is worse than no dot.
 - **Wake quality is unmeasured.** There are no false-accept or false-reject numbers for any engine here, because no test corpus exists.
-- **A satellite cannot speak.** `ethos listen` has no output device, so it registers `playback: false` and the server skips synthesis for that node. The answer comes back as text and the daemon prints it (`‹ engineer: …`) under the transcript of what you said. Nothing is spoken in that room.
+- **Speaking needs a player on the satellite.** `ethos listen` ships no audio binding, so it spawns a command (`ffplay`, `aplay`, `play`, or your `--play`) and writes the reply's audio into it. A machine with none of those registers `playback: false`, the server skips synthesis for that node, and the answer comes back as text only — printed as `‹ engineer: …` under the transcript of what you said.
+- **`aplay` and `play` take raw PCM only.** Most speech-to-text providers synthesize opus or mp3, which those two cannot open — a reply arrives, the row says so, and it stays text. Install `ffmpeg` (for `ffplay`), or set `auxiliary.tts.outputFormat: pcm`.
+- **The reply's sample rate is a guess for raw PCM.** No `TtsProvider` reports the rate of the bytes it produced and the wire field is optional, so the satellite falls back to 24 kHz. If a spoken reply sounds fast or slow, pin it with `--play` and your own `-ar`.
 
 ## Prereqs
 
 - `ethos serve` running and reachable from the satellite machine. The lane is hosted by the web API at `GET /satellite/ws`, not by `ethos gateway`.
 - A speech-to-text provider configured, because the server transcribes what the satellite sends. Any route in [Local voice](./local-voice.md) works.
-- `ffmpeg` (macOS) or `arecord` (Linux) on the satellite machine. `ffmpeg` is already documented for [voice notes on channels](./voice-notes-on-channels.md); here it doubles as the capture source.
+- `ffmpeg` (macOS) or `arecord` (Linux) on the satellite machine. `ffmpeg` is already documented for [voice notes on channels](./voice-notes-on-channels.md); here it doubles as the capture source — and its `ffplay` is what the satellite spawns to speak the reply.
 - No new runtime dependency. The daemon's open-mic capture and the server's phrase matching both load no native binding and no model file.
 
 ## 1. Add a wake route
@@ -74,6 +77,8 @@ ethos listen doctor  wake satellite preflight
   ⚠  models                 not required by the 'transcript' engine — model directory missing — ~/.ethos/models/wake
   ✓  microphone             1 input device(s): raw s16le mono PCM on stdin @ 16000 Hz
   ⚠  satellite-lane         ws://127.0.0.1:3000/satellite/ws: connection refused (ECONNREFUSED) — nothing is listening there, so the server is not running. Start it with `ethos serve`.
+  ✓  speaker                ffplay on PATH — ffplay -nodisp -autoexit -loglevel error -f s16le -ar {rate} -ac {channels} -i -
+  –  edge-stt               skipped — voice.wake.edgeStt is off, so every utterance is transcribed by the server: audio WILL be streamed to the server, which transcribes it there — the "no audio leaves the machine" guarantee does not hold on this host.
   ✓  node id                pi-kitchen-f089dce2 (~/.ethos/listen-node-id)
   ✓  satellite url          ws://127.0.0.1:3000/satellite/ws
   –  route                  configured here: kitchen ("chief" → engineer). The effective table is the server's: it adds a bare-NAME route (auto:<personalityId>) for every unprivileged personality, pushes the merged table on connect, and MATCHES transcripts against it — so what this host can be addressed by is only knowable once it has connected. Without --route, every phrase in that table can address this host.
@@ -82,6 +87,8 @@ ethos listen doctor  wake satellite preflight
 ```
 
 The `route` row is a dash rather than a verdict. This command never connects, so it has none to give: it reports what your own `config.yaml` contributes and names the server as the authority for the rest.
+
+The `speaker` and `edge-stt` rows are probes, not config reads: the first asks PATH what is installed, and the second **constructs** the speech-to-text provider and reads its real `caps.local`. Neither one moves the exit code — a satellite with no loudspeaker, or one whose audio is transcribed by the server, is still a working satellite. The rows exist so that is a choice rather than a surprise. `edge-stt` reads `–` (skipped) rather than `✓` when `voice.wake.edgeStt` is unset, because a tick there would read as "your audio stays here", which is the opposite of what it means.
 
 Exit codes are `0` clean, `1` for a host that will never hear you (no config, no usable engine, missing models for a `sherpa` host), and `2` for something true right now that may not be in a minute — no pipe attached, or the server not started. Add `--json` for one machine-readable object; its `engine.daemonMode` reads `"open-mic"` and `engine.phraseMatch` reads `false`, so a script cannot infer acoustic wake from the engine name.
 
@@ -118,6 +125,7 @@ The preflight rows print first, then the line that names the lane it is dialling
 ```
 Connecting to ws://127.0.0.1:3000/satellite/ws for the wake route table...
 Open mic: EVERYTHING heard here is transcribed by the server. An utterance reaches an agent only when it OPENS with a personality's NAME — that name picks the personality, and a greeting in front of it is optional — and follow-ups within 30s continue with the same one. Anything else is heard and discarded.
+Replies are spoken through ffplay; the text prints too.
 Addressable here — say one of these: "chief" → engineer, "researcher". A greeting in front of it ("hey …") is optional.
 Listening on raw s16le mono PCM on stdin @ 16000 Hz. Press Ctrl+C to stop; close the pipe to stop talking.
 ```
@@ -141,7 +149,77 @@ Pinned by --route: only "chief" → engineer (route kitchen, from voice.wake.rou
 
 Pinning narrows the wake surface; it does not exempt the host from needing an address. The pinned phrase is still required, and another agent's name is discarded rather than treated as a follow-up — so `researcher` at a mic pinned to the engineer never lands in the researcher's conversation. `--route auto:<personality-id>` pins to a synthesized route with no config at all. Without the flag, every enabled route can address this host, which is the usual choice.
 
-## 4. Watch it from Settings
+## 4. Let it answer out loud
+
+Playout is a pipe, the same way capture is. The daemon spawns a player and writes the reply's audio into its stdin — no audio binding, nothing to compile on the Pi.
+
+Without a flag it probes PATH for `ffplay`, then `aplay`, then `play`, and uses the first one it finds. Install `ffmpeg` on the satellite and there is nothing else to do:
+
+```
+  ✓  speaker                ffplay on PATH — ffplay -nodisp -autoexit -loglevel error -f s16le -ar {rate} -ac {channels} -i -
+```
+
+The startup banner says which one it will use, before you have waited for a reply to find out:
+
+```
+Replies are spoken through ffplay; the text prints too.
+```
+
+`ffplay` is probed first because it is the only one of the three that can open what the server usually sends. Every first-party speech provider except a `pcm`-mode `command-tts` synthesizes opus or mp3; `aplay` and `play` take raw samples only, and handed an opus stream they would play the container header as noise. The satellite refuses that rather than making the noise, and says which of the two ends to change.
+
+Name your own player when the defaults do not fit the machine — a specific ALSA device, a Bluetooth sink, a volume filter. `{rate}` and `{channels}` are substituted, and the template runs through `sh -c`, so quoting and pipelines survive:
+
+```bash
+ffmpeg -nostats -loglevel error -f alsa -i default -ar 16000 -ac 1 -f s16le - \
+  | ethos listen --play "aplay -q -D plughw:1,0 -f S16_LE -r {rate} -c {channels} -t raw"
+```
+
+There is deliberately **no config key** for this. Which command drives this machine's sound card is a per-machine operator fact — exactly like the `ffmpeg` input pipe — so it lives on the command line next to it rather than in a file that travels between deployments.
+
+A machine with no player is not broken. It registers `playback: false`, the server skips synthesis for it entirely (no TTS latency, no provider spend on audio nobody will hear), and the reply arrives as text:
+
+```
+⚠ speaker replies here are TEXT ONLY — none of ffplay, aplay or play is on PATH, so nothing here can make a sound…
+```
+
+### What "listening again" now means
+
+`playback_done` — the frame that tells the server this microphone is live again — is sent when the **player exits**, not when the words are known. The satellite's microphone is suppressed for the whole reply, so an agent cannot hear itself say its own name and wake itself up. If the player never exits, a watchdog re-arms the microphone anyway after 90 seconds and says so; a satellite that is noisily imperfect beats one that has gone silently deaf.
+
+## 5. Keep the audio on the machine
+
+By default the satellite streams captured audio to the server, which transcribes it. Turn that around by running the recognizer on the satellite itself:
+
+```yaml
+voice.wake.edgeStt: true
+auxiliary.asr.provider: local-stt
+```
+
+Any recognizer from [Local voice](./local-voice.md) works — `local-stt` or `command-stt` (whisper.cpp behind a command template). The satellite resolves it through the same provider path every other surface uses, so `voice.trustedPlugins` applies here exactly as it does everywhere else.
+
+```
+  ✓  edge-stt               on-device: local-stt (caps.local) — this node transcribes the utterance itself and sends only the WORDS upstream. No captured audio leaves this machine.
+```
+
+Then the banner says it too:
+
+```
+Open mic: EVERYTHING heard here is transcribed ON THIS MACHINE by local-stt — no captured audio leaves it. …
+```
+
+**A non-local recognizer is refused, not relabelled.** Point `voice.wake.edgeStt` at `openai-stt` and the satellite declines to declare edge STT, names the provider, and falls back to streaming the audio:
+
+```
+  ✗  edge-stt               voice.wake.edgeStt is on, but the recognizer it resolved — "openai-stt" — is not local (caps.local is not true). Running it "at the edge" would upload this room anyway, so edge STT is REFUSED rather than relabelled…
+```
+
+That refusal is the whole point of the feature. Declaring `edgeStt: true` for a cloud recognizer would make the server stop sending audio while the audio went to a vendor anyway — the guarantee would be false in exactly the deployment that asked for it. The check reads the constructed provider's `caps.local`, never the name you gave it, so a roster entry called `local-whisper` backed by a hosted transcriber is refused too.
+
+On the wire, an edge node sends `wake`, `utterance_start`, and a `transcript` — and **no `audio` frames at all**. The two are alternatives, and the client refuses to send both for one utterance.
+
+If the local recognizer fails mid-turn, the utterance is discarded and the microphone re-arms. It does **not** fall back to uploading the audio; that would be the worst possible response to a local failure.
+
+## 6. Watch it from Settings
 
 Open **Settings → Voice → Wake routes**. The connected satellite appears as a row carrying what the node itself reported: its state (`listening`, `muted`, `speaking`, `wake off`, `degraded`), its capabilities, its last wake event, and any failing preflight probe inline. The state is never inferred from "the socket is open" — a microphone that misreports whether it is listening is a privacy defect, not a cosmetic one.
 
@@ -149,11 +227,11 @@ Two things on the row come from the gate. The capability label ends in `server m
 
 The **Say a phrase** tester in the same panel proves a route before you save it: speak, and the row that would answer lights up in that personality's accent. It uses this browser's microphone and the transcript matcher, so it needs the same speech-to-text provider the server uses.
 
-Mute one node from its row. The daemon persists that choice, so a muted microphone comes back muted after a restart.
+Mute one node from its row. `ethos listen` holds that choice in memory only, so a muted microphone comes back **listening** after the daemon restarts — re-mute it from the row. (The Electron host does persist its wake-off state, but it has no capture device, so nothing there is listening to mute.)
 
 The scalar knobs below the table — engine, sensitivity, confirmation frames, edge speech-to-text, idle timeout — are shown read-only. Change them in `config.yaml`; see the [`voice.wake.*` reference](../reference/config-yaml.md#voice-wake).
 
-## 5. Reach a privileged personality
+## 7. Reach a privileged personality
 
 A personality whose toolset can reach a tool the approval layer would stop and ask about gets no bare-name default, and a plain route pointed at it is refused:
 
@@ -179,13 +257,15 @@ ethos listen doctor
 
 ```
   ✓  satellite-lane         ws://127.0.0.1:3000/satellite/ws is mounted — answered 401 to a probe sent with no auth cookie, which is the expected refusal
+  ✓  speaker                ffplay on PATH — ffplay -nodisp -autoexit -loglevel error -f s16le -ar {rate} -ac {channels} -i -
+  ✓  edge-stt               on-device: local-stt (caps.local) — this node transcribes the utterance itself and sends only the WORDS upstream. No captured audio leaves this machine.
   ✓  satellite url          ws://127.0.0.1:3000/satellite/ws
   –  route                  configured here: kitchen ("chief" → engineer). The effective table is the server's: it adds a bare-NAME route (auto:<personalityId>) for every unprivileged personality, pushes the merged table on connect, and MATCHES transcripts against it — so what this host can be addressed by is only knowable once it has connected. Without --route, every phrase in that table can address this host.
 
 ✓ Preflight clean. Start with ethos listen.
 ```
 
-That exits `0`: the engine loaded, a device enumerated, and the satellite lane answered. Routing is the one thing it does not settle — the server matches each transcript against the table it holds at that moment, and validates a `--route` pin when `ethos listen` connects.
+That exits `0`: the engine loaded, a device enumerated, a player was found, and the satellite lane answered. Routing is the one thing it does not settle — the server matches each transcript against the table it holds at that moment, and validates a `--route` pin when `ethos listen` connects.
 
 The daemon also writes a heartbeat every 10 seconds:
 
@@ -206,7 +286,7 @@ Finally, confirm the personality really answered as itself: ask it for something
   ↩ turn complete. Listening again.
 ```
 
-The `●` line names no personality, because none has been chosen yet: the words decide, and nobody has heard them. The `‹` line is the whole answer on this host — there is no loudspeaker to say it — and the name on it is the personality the server matched. The woken personality arrives with its own tools, memory scope, and model routing; that is the point of routing to a personality rather than to a prompt.
+The `●` line names no personality, because none has been chosen yet: the words decide, and nobody has heard them. The `‹` line is the answer in text, and the name on it is the personality the server matched — on a host with a player the room heard the same words spoken, and the `↩` line arrives only once the speaker has gone quiet. The woken personality arrives with its own tools, memory scope, and model routing; that is the point of routing to a personality rather than to a prompt.
 
 Now say something that names nobody. The room's ordinary traffic looks like this:
 
@@ -230,8 +310,10 @@ Then prove the conversation continues without the name. Say `researcher, what ca
 - **Every utterance says `not addressed to anyone`.** The transcript is not opening with a phrase the server holds. Check what the `› you:` line actually says — speech-to-text may be hearing `engine ear` — then raise `voice.wake.sensitivity`, or add a route with the phrase as it is being transcribed. Do not add a route for the greeting: `hey`, `hi`, `hello`, `ok`, `okay`, `yo` and `hey there` are already stripped before matching. The name must be at the **head** of the utterance: "so I said hey engineer to nobody" is talking *about* the agent, not to it.
 - **A sentence you did not address reached an agent anyway.** The idle window was still open from the previous turn, which is the intended behaviour — the row in Settings shows `follow-ups reach <personality>` while it is. Shorten `voice.wake.idleTimeout` if the room talks past the agent often.
 - **`No wake route matches "<phrase>"`** from the server — only a host that matches phrases itself (the desktop satellite) can produce this: its pushed table is stale, or the route was deleted. It refreshes on reconnect.
-- **`⚠ playout the server is sending synthesized audio, and this host has no output device`** — the server is an older build: a current one skips synthesis for a `playback: false` node. The audio is discarded. The reply text still prints.
-- **`⚠ edge stt`** — `voice.wake.edgeStt` is on, but neither shipped host has an on-device recognizer. Audio *will* be streamed to the server, and the "no audio leaves the machine" guarantee does not hold there.
+- **Replies print but nothing is spoken.** Read the `speaker` row. Either no player was found (install `ffmpeg`, or name one with `--play`), or the one you have takes raw PCM and the server is sending opus — the `⚠ playout` line says which, once, rather than once per turn.
+- **`⚠ playout the player never reported the speaker draining`** — the player process did not exit within 90 seconds of the reply finishing. The microphone was re-armed anyway rather than left shut, so the satellite keeps working; check whether the command you passed to `--play` exits at end-of-input (`ffplay` needs `-autoexit`).
+- **`⚠ edge stt … is not local`** — `voice.wake.edgeStt` is on, but the recognizer it resolved is a cloud provider. Edge STT is refused rather than relabelled, so audio *is* being streamed to the server. Point `auxiliary.asr.provider` at a local recognizer — see [Local voice](./local-voice.md).
+- **`⚠ edge stt on-device transcription failed`** — the local recognizer threw. That utterance was discarded and the microphone re-armed; nothing was uploaded as a fallback, deliberately. Fix the recognizer (`ethos doctor` reports it) rather than expecting a retry.
 - **`● speech` prints and nothing follows it.** The utterance held less than 400 ms of speech, so the satellite discarded it locally instead of sending room noise to speech-to-text. No turn ran, and the microphone re-armed immediately. A pipe that does this constantly is a microphone with too much gain.
 - **An empty `› you:` line, then the re-arm.** The audio reached the server and the speech-to-text provider heard nothing in it. That is a report, not a failure — no turn ran, and nothing needs repeating.
 - **The row says `degraded` after a reply.** The playback watchdog fired: the host never reported playback finishing, so the machine re-armed the microphone without a receipt rather than leaving it parked. The detail on the row names the timeout.

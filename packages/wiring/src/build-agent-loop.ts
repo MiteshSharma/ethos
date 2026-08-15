@@ -766,12 +766,16 @@ export async function buildAgentLoop(
   // produce a session that offers nothing and a model that stops asking.
   //
   // The voice origin is fixed to browser talk-mode because that is the only
-  // surface that can open a realtime session in this repo today — `voice.realtimeToken`
-  // mints behind the web-api session cookie, which is the operator's own browser.
-  // V4's call path introduces a `far_end` speaker, and it MUST construct its own
-  // consult tool with that origin rather than reuse this one: the spoken-confirmation
-  // gate refuses a far-end caller BEFORE consulting any confirmation record, and
-  // that refusal keys on exactly this field.
+  // surface whose realtime session opens behind the operator's own credentials —
+  // `voice.realtimeToken` mints behind the web-api session cookie.
+  //
+  // A PHONE CALL MUST NOT USE THIS INSTANCE. V4's call path builds its own via
+  // `createFarEndConsultTool` (`./far-end-consult`), which pins
+  // `speaker: 'far_end'` and, for a screened caller, the receptionist
+  // personality. The spoken-confirmation gate refuses a far-end caller BEFORE
+  // consulting any confirmation record, and that refusal keys on exactly this
+  // field — so reusing the owner's instance on a call would promote every
+  // stranger to the operator.
   tools.register(
     createAgentConsultTool(loop, {
       voiceOrigin: { transport: 'browser-talk-mode', speaker: 'owner' },
@@ -993,8 +997,12 @@ export async function buildAgentLoop(
   }
 
   // Real-time voice stack. Null (a clean no-op) unless `config.voice.*` is
-  // configured; LiveKit/SIP transports additionally need their app-supplied
-  // native bindings, which no in-repo caller passes yet.
+  // configured. The SIP trunk and the LiveKit token minter now build themselves
+  // from config inside `buildVoiceStack`; what still needs an app-supplied
+  // binding is the room MEDIA client (`@livekit/rtc-node`), which callers pass
+  // as `livekit.createClient` — absent, the transports degrade to unavailable
+  // and everything else in the stack still works. `apps/ethos` supplies it from
+  // `resolveLiveKitMedia()` when telephony is configured; nothing else does.
   const voiceStack = await buildVoiceStack({
     config,
     sttProviders: infra.sttProviders,
@@ -1002,6 +1010,7 @@ export async function buildAgentLoop(
     ...(config.secretsResolver ? { secrets: config.secretsResolver } : {}),
     logger: log,
     ...(opts.observability ? { observability: opts.observability } : {}),
+    ...(opts.livekit ? { livekit: opts.livekit } : {}),
   });
 
   return {

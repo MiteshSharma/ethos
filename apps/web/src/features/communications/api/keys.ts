@@ -4,3 +4,15 @@ export const platformKeys = {
   bots: (platform: string) => [...platformKeys.all(), 'bots', platform] as const,
   channelFilter: (platform: string) => [...platformKeys.all(), 'channelFilter', platform] as const,
 };
+
+/** Telephony call history (voice V4). The filter is part of the LIST key, so
+ *  flipping a chip is a different cache entry rather than a refetch that
+ *  overwrites the unfiltered history — going back to "All" is then instant and
+ *  shows what it showed before. */
+export const callKeys = {
+  all: () => ['voice', 'calls'] as const,
+  list: (filter: { direction: string; status: string }) =>
+    [...callKeys.all(), 'list', filter.direction, filter.status] as const,
+  active: () => [...callKeys.all(), 'active'] as const,
+  detail: (id: string) => [...callKeys.all(), 'detail', id] as const,
+};

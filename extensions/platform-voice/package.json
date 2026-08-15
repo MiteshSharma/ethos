@@ -12,5 +12,8 @@
     "@ethosagent/core": "workspace:*",
     "@ethosagent/types": "workspace:*",
     "@ethosagent/voice-session": "workspace:*"
+  },
+  "devDependencies": {
+    "@ethosagent/voice-providers": "workspace:*"
   }
 }

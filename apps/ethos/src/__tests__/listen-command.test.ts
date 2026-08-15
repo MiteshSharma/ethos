@@ -48,7 +48,10 @@ function preflight(overrides: Partial<ListenPreflight> = {}): ListenPreflight {
         enabled: true,
       },
     ],
-    edgeSttRequested: false,
+    // The shipped default on a host with nothing installed: no on-device
+    // recognizer and no player. The suites that exercise either override it.
+    edgeStt: { requested: false, enabled: false, detail: 'voice.wake.edgeStt is off' },
+    player: { player: null, detail: 'none of ffplay, aplay or play is on PATH' },
     device: { id: 'stdin', label: 'raw s16le mono PCM on stdin @ 16000 Hz', isDefault: true },
     sampleRate: 16_000,
     errors: [],

@@ -79,6 +79,83 @@ describe('VoiceChannelAdapter', () => {
     expect(adapter.laneKey).toBe('voice:reception:livekit:%2B15551234567');
   });
 
+  // The second durable shape. A PSTN leg passes `laneKind: 'sip'`, and the same
+  // person's browser session keeps `livekit` — the segment is what stops one
+  // caller id from merging two conversations into one history.
+  it('pins the literal sip lane-key shape', () => {
+    const transport = new FakeVoiceTransport('+15551234567');
+    const session = makeSession(makeClock(), scriptedRunner([]));
+    const adapter = new VoiceChannelAdapter({
+      transport,
+      session,
+      bot: { id: 'reception', match: '+1*' },
+      laneKind: 'sip',
+    });
+
+    expect(adapter.laneKey).toBe('voice:reception:sip:%2B15551234567');
+  });
+
+  describe('onEnded', () => {
+    function makeAdapter(onEnded: () => void): {
+      adapter: VoiceChannelAdapter;
+      transport: FakeVoiceTransport;
+    } {
+      const transport = new FakeVoiceTransport('+1555');
+      const adapter = new VoiceChannelAdapter({
+        transport,
+        session: makeSession(makeClock(), scriptedRunner([])),
+        bot: { match: '+1*' },
+        onEnded,
+      });
+      return { adapter, transport };
+    }
+
+    it('fires once on stop()', async () => {
+      let calls = 0;
+      const { adapter } = makeAdapter(() => {
+        calls += 1;
+      });
+      await adapter.start();
+      await adapter.stop();
+      expect(calls).toBe(1);
+    });
+
+    it('fires once when the transport closes under us (remote hang-up)', async () => {
+      let calls = 0;
+      const { adapter, transport } = makeAdapter(() => {
+        calls += 1;
+      });
+      await adapter.start();
+      transport.close();
+      await tick();
+      expect(calls).toBe(1);
+    });
+
+    it('does not fire twice when a remote close is followed by stop()', async () => {
+      let calls = 0;
+      const { adapter, transport } = makeAdapter(() => {
+        calls += 1;
+      });
+      await adapter.start();
+      transport.close();
+      await tick();
+      await adapter.stop();
+      expect(calls).toBe(1);
+    });
+
+    it('does not fire a stale handler after stop() unsubscribed the transport', async () => {
+      let calls = 0;
+      const { adapter, transport } = makeAdapter(() => {
+        calls += 1;
+      });
+      await adapter.start();
+      await adapter.stop();
+      transport.close();
+      await tick();
+      expect(calls).toBe(1);
+    });
+  });
+
   it('bridges a full call: inbound frames -> reply audio on the outbound sink', async () => {
     const clock = makeClock();
     const transport = new FakeVoiceTransport('+15551234567');

@@ -1,5 +1,8 @@
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
+import { type AgentLoop, DefaultToolRegistry, InMemorySessionStore } from '@ethosagent/core';
+import { AGENT_CONSULT_TOOL, createAgentConsultTool } from '@ethosagent/tools-voice';
+import type { AgentEvent } from '@ethosagent/types';
 import {
   decodeVoiceServerFrame,
   encodeVoiceFrame,
@@ -11,6 +14,8 @@ import {
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import WebSocket from 'ws';
 import type { VoiceService } from '../../services/voice.service';
+import { createRealtimeControlDeps } from '../realtime-control-deps';
+import { RealtimeControlLane } from '../realtime-control-lane';
 import { createVoiceSocket, originAllowed, readCookie, type VoiceSocket } from '../voice-socket';
 
 // The socket half: upgrade policy (path, Origin, credentials) and the round
@@ -27,6 +32,29 @@ function fakeVoiceService(): VoiceService {
       yield { audio: new Uint8Array([7, 8, 9]), format: 'opus' as const, provider: 'fake-tts' };
     },
   } as unknown as VoiceService;
+}
+
+/**
+ * One connected client, frames decoded through the REAL codec both ways.
+ *
+ * Module-level so the realtime describe below drives the same wire the pipeline
+ * one does — a realtime frame that only ever travelled a hand-built object
+ * would prove nothing about the socket.
+ */
+function openClient(url: string, headers: Record<string, string>, path: string) {
+  const ws = new WebSocket(`${url}${path}`, { headers });
+  const frames: VoiceServerFrame[] = [];
+  const payloads: Uint8Array[] = [];
+  ws.on('message', (data: Buffer) => {
+    const decoded = decodeVoiceServerFrame(new Uint8Array(data));
+    if (decoded) {
+      frames.push(decoded.header);
+      payloads.push(decoded.payload);
+    }
+  });
+  const send = (frame: VoiceClientFrame, payload?: Uint8Array) =>
+    ws.send(encodeVoiceFrame(frame, payload));
+  return { ws, frames, payloads, send };
 }
 
 describe('voice socket', () => {
@@ -53,19 +81,7 @@ describe('voice socket', () => {
   });
 
   function open(headers: Record<string, string> = { cookie: COOKIE }, path = VOICE_SOCKET_PATH) {
-    const ws = new WebSocket(`${url}${path}`, { headers });
-    const frames: VoiceServerFrame[] = [];
-    const payloads: Uint8Array[] = [];
-    ws.on('message', (data: Buffer) => {
-      const decoded = decodeVoiceServerFrame(new Uint8Array(data));
-      if (decoded) {
-        frames.push(decoded.header);
-        payloads.push(decoded.payload);
-      }
-    });
-    const send = (frame: VoiceClientFrame, payload?: Uint8Array) =>
-      ws.send(encodeVoiceFrame(frame, payload));
-    return { ws, frames, payloads, send };
+    return openClient(url, headers, path);
   }
 
   it('refuses an upgrade without the auth cookie', async () => {
@@ -132,6 +148,24 @@ describe('voice socket', () => {
     client.ws.close();
   });
 
+  it('drops realtime frames when no control deps are wired, without opening a lane', async () => {
+    // The honest behaviour for a deployment with no agent behind the socket:
+    // the pipeline tier still works and nothing pretends to consult. A
+    // `realtime_*` frame is neither serviced nor an error — it goes nowhere.
+    const client = open();
+    await new Promise<void>((resolve) => client.ws.on('open', () => resolve()));
+    client.send({ t: 'realtime_start', canSay: true, sessionId: 'chat-9' });
+    client.send({ t: 'realtime_tool_call', callId: 'c1', name: AGENT_CONSULT_TOOL, args: {} });
+    // `hello` is the barrier: once its `ready` is back, anything the realtime
+    // frames were going to produce would already have been written.
+    client.send({ t: 'hello', sessionId: 'cli:test' });
+    await vi.waitFor(() => expect(client.frames.some((f) => f.t === 'ready')).toBe(true));
+
+    expect(client.frames.map((f) => f.t)).toEqual(['ready']);
+    expect(client.ws.readyState).toBe(WebSocket.OPEN);
+    client.ws.close();
+  });
+
   it('releases the lane when the client goes away mid-utterance', async () => {
     const client = open();
     await new Promise<void>((resolve) => client.ws.on('open', () => resolve()));
@@ -143,6 +177,217 @@ describe('voice socket', () => {
     // The half-captured utterance dies with the lane — no server-side state
     // survives to be resumed, which is exactly the defined WS-drop behavior.
     await vi.waitFor(() => expect(socketLane.laneCount).toBe(0));
+  });
+});
+
+// The realtime tier, driven over the same real socket and the same real codec.
+//
+// `realtime-control-lane.test.ts` proves the lane's own behaviour against a
+// FAKE tool host; this file proves the seam under it — that a `realtime_*`
+// frame off the wire reaches a lane at all, that the lane it reaches is the
+// connection's own, and that an `agent_consult` frame comes back as a serviced,
+// speakable answer. The chain is real end to end: the Zod codec, the socket's
+// dispatch, `createRealtimeControlDeps`, a real `DefaultToolRegistry` holding a
+// real `agent_consult`, a real `InMemorySessionStore`. The one stub is the
+// AgentLoop the consult runs — nothing short of a live model replaces it.
+
+const CONSULT_ANSWER = '**Ship it.** The migration notes agree.';
+/** What the listener actually hears: `sanitizeForSpeech` has been through it. */
+const SPOKEN_ANSWER = 'Ship it. The migration notes agree.';
+
+interface ConsultCall {
+  prompt: string;
+  sessionKey?: string;
+}
+
+function fakeConsultLoop(calls: ConsultCall[]): AgentLoop {
+  return {
+    run: async function* (
+      prompt: string,
+      opts?: { sessionKey?: string },
+    ): AsyncGenerator<AgentEvent> {
+      calls.push({ prompt, ...(opts?.sessionKey ? { sessionKey: opts.sessionKey } : {}) });
+      yield { type: 'text_delta', text: CONSULT_ANSWER };
+      yield { type: 'done', text: CONSULT_ANSWER, turnCount: 1 };
+    },
+  } as unknown as AgentLoop;
+}
+
+describe('voice socket — the realtime control channel', () => {
+  let server: Server;
+  let socketLane: VoiceSocket;
+  let url: string;
+  let sessions: InMemorySessionStore;
+  let consults: ConsultCall[];
+  /** Every lane id the socket asked for control deps with. One per connection. */
+  let depsFor: string[];
+
+  beforeEach(async () => {
+    sessions = new InMemorySessionStore();
+    consults = [];
+    depsFor = [];
+    const registry = new DefaultToolRegistry();
+    registry.register(
+      createAgentConsultTool(fakeConsultLoop(consults), {
+        voiceOrigin: { transport: 'browser-talk-mode', speaker: 'owner' },
+      }),
+    );
+    server = createServer((_req, res) => res.end('ok'));
+    socketLane = createVoiceSocket({
+      voice: fakeVoiceService(),
+      authenticate: (req) =>
+        Promise.resolve(readCookie(req.headers.cookie, 'ethos_auth') === 'good-token'),
+      realtime: (laneId) => {
+        depsFor.push(laneId);
+        return createRealtimeControlDeps(
+          {
+            toolRegistry: registry,
+            sessions,
+            personalities: { get: () => undefined },
+            defaults: { model: 'm', provider: 'p', workingDir: '/tmp' },
+          },
+          laneId,
+        );
+      },
+    });
+    socketLane.attach(server);
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const { port } = server.address() as AddressInfo;
+    url = `ws://127.0.0.1:${port}`;
+  });
+
+  afterEach(async () => {
+    await socketLane.close();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  });
+
+  async function connect() {
+    const client = openClient(url, { cookie: COOKIE }, VOICE_SOCKET_PATH);
+    await new Promise<void>((resolve) => client.ws.on('open', () => resolve()));
+    return client;
+  }
+
+  it('opens one control lane per connection, however many times the browser starts', async () => {
+    const client = await connect();
+    client.send({ t: 'realtime_start', canSay: true, sessionId: 'chat-9' });
+    await vi.waitFor(() => expect(client.frames.some((f) => f.t === 'realtime_ready')).toBe(true));
+
+    // A reconnecting page re-sends `realtime_start`. It must not mint a second
+    // conversation on a socket that already has one.
+    client.send({ t: 'realtime_start', canSay: true, sessionId: 'chat-9' });
+    client.send({ t: 'hello', sessionId: 'cli:test' });
+    await vi.waitFor(() => expect(client.frames.some((f) => f.t === 'ready')).toBe(true));
+
+    expect(client.frames.filter((f) => f.t === 'realtime_ready')).toEqual([
+      { t: 'realtime_ready', laneKey: 'voice:web:browser:chat-9', tools: [AGENT_CONSULT_TOOL] },
+    ]);
+    expect(depsFor).toHaveLength(1);
+    client.ws.close();
+  });
+
+  it('services an agent_consult call end to end: frame in, spoken answer out', async () => {
+    const client = await connect();
+    client.send({ t: 'realtime_start', canSay: true, sessionId: 'chat-9' });
+    await vi.waitFor(() => expect(client.frames.some((f) => f.t === 'realtime_ready')).toBe(true));
+
+    client.send({
+      t: 'realtime_tool_call',
+      callId: 'call-1',
+      name: AGENT_CONSULT_TOOL,
+      args: { prompt: 'What did we decide about the migration?' },
+    });
+    await vi.waitFor(() =>
+      expect(client.frames.some((f) => f.t === 'realtime_tool_result')).toBe(true),
+    );
+
+    // The consult ran on the TALK session's lane key, not the typed chat's.
+    expect(consults).toEqual([
+      {
+        prompt: 'What did we decide about the migration?',
+        sessionKey: 'voice:web:browser:chat-9',
+      },
+    ]);
+    // "Checking." is dispatched BEFORE the turn, not after it turns out slow.
+    const ackAt = client.frames.findIndex((f) => f.t === 'realtime_speak');
+    const resultAt = client.frames.findIndex((f) => f.t === 'realtime_tool_result');
+    expect(ackAt).toBeGreaterThanOrEqual(0);
+    expect(ackAt).toBeLessThan(resultAt);
+    expect(client.frames[ackAt]).toMatchObject({ kind: 'ack' });
+    // And the answer went back sanitized — the markdown never reaches a speaker.
+    expect(client.frames[resultAt]).toEqual({
+      t: 'realtime_tool_result',
+      callId: 'call-1',
+      ok: true,
+      output: SPOKEN_ANSWER,
+    });
+    client.ws.close();
+  });
+
+  it('drops a realtime frame that arrives after the call ended, without answering it', async () => {
+    const client = await connect();
+    client.send({ t: 'realtime_start', canSay: true, sessionId: 'chat-9' });
+    await vi.waitFor(() => expect(client.frames.some((f) => f.t === 'realtime_ready')).toBe(true));
+    client.send({ t: 'realtime_end' });
+    client.send({
+      t: 'realtime_tool_call',
+      callId: 'call-late',
+      name: AGENT_CONSULT_TOOL,
+      args: { prompt: 'anyone there?' },
+    });
+    client.send({ t: 'hello', sessionId: 'cli:test' });
+    await vi.waitFor(() => expect(client.frames.some((f) => f.t === 'ready')).toBe(true));
+
+    expect(client.frames.some((f) => f.t === 'realtime_tool_result')).toBe(false);
+    expect(consults).toEqual([]);
+    expect(client.ws.readyState).toBe(WebSocket.OPEN);
+    client.ws.close();
+  });
+
+  it('tears the control lane down exactly once when the socket closes', async () => {
+    const closed = vi.spyOn(RealtimeControlLane.prototype, 'close');
+    try {
+      const client = await connect();
+      client.send({ t: 'realtime_start', canSay: true, sessionId: 'chat-9' });
+      await vi.waitFor(() =>
+        expect(client.frames.some((f) => f.t === 'realtime_ready')).toBe(true),
+      );
+
+      client.ws.close();
+      await vi.waitFor(() => expect(socketLane.laneCount).toBe(0));
+      expect(closed).toHaveBeenCalledTimes(1);
+
+      // The server shutting down must not close it a second time — the socket's
+      // teardown is what removes it from the map, and forgetting that is how a
+      // lane gets closed twice.
+      await socketLane.close();
+      expect(closed).toHaveBeenCalledTimes(1);
+    } finally {
+      closed.mockRestore();
+    }
+  });
+
+  it('persists a realtime transcript to the talk session, on the lane key', async () => {
+    const client = await connect();
+    client.send({ t: 'realtime_start', canSay: true, sessionId: 'chat-9' });
+    await vi.waitFor(() => expect(client.frames.some((f) => f.t === 'realtime_ready')).toBe(true));
+
+    client.send({ t: 'realtime_transcript', role: 'user', text: 'spoken question' });
+    client.send({ t: 'realtime_transcript', role: 'assistant', text: 'spoken answer' });
+
+    const row = await vi.waitFor(async () => {
+      const found = await sessions.getSessionByKey('voice:web:browser:chat-9');
+      expect(found).toBeTruthy();
+      const messages = await sessions.getMessages(found?.id ?? '');
+      expect(messages).toHaveLength(2);
+      return found;
+    });
+
+    const messages = await sessions.getMessages(row?.id ?? '');
+    expect(messages.map((m) => [m.role, m.content])).toEqual([
+      ['user', 'spoken question'],
+      ['assistant', 'spoken answer'],
+    ]);
+    client.ws.close();
   });
 });
 

@@ -82,7 +82,12 @@ describe('Orchestrator guardrails', () => {
     // ceiling is base + both deltas, not either one alone. Measured at 926
     // (`split('\n').length`, which is one more than `wc -l` on a file with a
     // trailing newline — measure with the same instrument the check uses).
-    expect(lineCount).toBeLessThanOrEqual(926);
+    // Bumped 926 -> 937 (voice L5): the `modelOverride` RunOptions field — a
+    // declaration and its doc. Pass-through only: `run()` forwards the whole
+    // `opts` object it already forwards, and the precedence
+    // (pin > tierOverride > personality model > deployment default) is resolved
+    // in agent-loop/stages/turn-setup.ts.
+    expect(lineCount).toBeLessThanOrEqual(937);
   });
 
   it('no stage file exceeds 700 lines', () => {

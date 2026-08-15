@@ -13,6 +13,7 @@ import type { WakeEngine, WakeEngineFactory, WakeRoute } from '@ethosagent/voice
 import { runSatelliteDoctor, transcriptWakeEngineFactory } from '@ethosagent/voice-satellite';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
+  capabilityRows,
   computeListenExit,
   deriveListenFailFlags,
   deriveListenUrls,
@@ -76,7 +77,8 @@ function preflightFrom(
     healthUrl: 'http://127.0.0.1:3000/healthz',
     nodeId: 'pi-1',
     routes: [],
-    edgeSttRequested: false,
+    edgeStt: { requested: false, enabled: false, detail: 'voice.wake.edgeStt is off' },
+    player: { player: null, detail: 'no player on PATH' },
     device: null,
     sampleRate: 16_000,
     errors: [],
@@ -755,5 +757,156 @@ describe('deriveListenUrls', () => {
     expect(deriveListenUrls(undefined, 'ws://pi.local:3000/edge/ws').socket).toBe(
       'ws://pi.local:3000/edge/ws',
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The two capability rows — what this host can do with a turn once it has one
+// ---------------------------------------------------------------------------
+
+describe('capabilityRows', () => {
+  it('names the player it found', () => {
+    const rows = capabilityRows(
+      { player: { kind: 'ffplay', command: 'ffplay -nodisp …' }, detail: 'ffplay on PATH' },
+      { requested: false, enabled: false, detail: 'voice.wake.edgeStt is off' },
+    );
+    const speaker = rows.find((r) => r.name === 'speaker');
+    expect(speaker?.ok).toBe(true);
+    expect(speaker?.detail).toContain('ffplay on PATH');
+  });
+
+  it('gives the REAL reason when there is no player, not "no output device"', () => {
+    const rows = capabilityRows(
+      { player: null, detail: 'none of ffplay, aplay or play is on PATH — install ffmpeg' },
+      { requested: false, enabled: false, detail: 'voice.wake.edgeStt is off' },
+    );
+    const speaker = rows.find((r) => r.name === 'speaker');
+    expect(speaker?.ok).toBe(false);
+    expect(speaker?.detail).toContain('install ffmpeg');
+  });
+
+  it('names the recognizer that resolved', () => {
+    const rows = capabilityRows(
+      { player: null, detail: 'no player' },
+      {
+        requested: true,
+        enabled: true,
+        providerId: 'local-stt',
+        detail: 'on-device: local-stt (caps.local)',
+      },
+    );
+    const edge = rows.find((r) => r.name === 'edge-stt');
+    expect(edge?.ok).toBe(true);
+    expect(edge?.skipped).toBeUndefined();
+    expect(edge?.detail).toContain('local-stt');
+  });
+
+  it('fails the row with the specific reason when the recognizer was refused', () => {
+    const rows = capabilityRows(
+      { player: null, detail: 'no player' },
+      {
+        requested: true,
+        enabled: false,
+        providerId: 'openai-stt',
+        detail: '…the recognizer it resolved — "openai-stt" — is not local',
+      },
+    );
+    const edge = rows.find((r) => r.name === 'edge-stt');
+    expect(edge?.ok).toBe(false);
+    expect(edge?.detail).toContain('openai-stt');
+  });
+
+  it('reports SKIPPED, never passed, when edge STT was never asked for', () => {
+    // A green tick here would read as "your audio stays on this machine",
+    // which is the opposite of what an unset voice.wake.edgeStt means.
+    const rows = capabilityRows(
+      { player: null, detail: 'no player' },
+      { requested: false, enabled: false, detail: 'voice.wake.edgeStt is off, so the server…' },
+    );
+    const edge = rows.find((r) => r.name === 'edge-stt');
+    expect(edge?.skipped).toBe(true);
+    expect(edge?.detail).toContain('skipped —');
+  });
+
+  it('neither row moves the exit code', () => {
+    const rows = capabilityRows(
+      { player: null, detail: 'no player' },
+      { requested: true, enabled: false, detail: 'refused' },
+    );
+    const pre = preflightFrom([{ name: 'engine:transcript', ok: true }, ...rows]);
+    expect(computeListenExit(deriveListenFailFlags(pre))).toBe(0);
+  });
+});
+
+describe('the doctor renders and reports both capabilities', () => {
+  let logs: string[];
+  let stdout: string[];
+
+  beforeEach(() => {
+    logs = [];
+    stdout = [];
+    vi.spyOn(console, 'log').mockImplementation((...a: unknown[]) => {
+      logs.push(a.join(' '));
+    });
+    vi.spyOn(console, 'error').mockImplementation((...a: unknown[]) => {
+      logs.push(a.join(' '));
+    });
+    vi.spyOn(process.stdout, 'write').mockImplementation((chunk: unknown) => {
+      stdout.push(String(chunk));
+      return true;
+    });
+    process.exitCode = undefined;
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    process.exitCode = undefined;
+  });
+
+  it('prints the rows and carries them in --json', async () => {
+    const rows = capabilityRows(
+      { player: { kind: 'aplay', command: 'aplay -q …' }, detail: 'aplay on PATH — Raw PCM only' },
+      {
+        requested: true,
+        enabled: false,
+        providerId: 'openai-stt',
+        detail: 'the recognizer it resolved — "openai-stt" — is not local',
+      },
+    );
+    const pre = preflightFrom([{ name: 'engine:transcript', ok: true }, ...rows], {
+      player: { player: { kind: 'aplay', command: 'aplay -q …' }, detail: 'aplay on PATH' },
+      edgeStt: {
+        requested: true,
+        enabled: false,
+        providerId: 'openai-stt',
+        detail: 'the recognizer it resolved — "openai-stt" — is not local',
+      },
+    });
+    const deps: ListenCommandDeps = { preflight: async () => pre, start: async () => {} };
+
+    await runListenCommand(['doctor'], deps);
+    const printed = logs.join('\n');
+    expect(printed).toContain('speaker');
+    expect(printed).toContain('aplay on PATH');
+    expect(printed).toContain('edge-stt');
+    expect(printed).toContain('openai-stt');
+
+    await runListenCommand(['doctor', '--json'], deps);
+    const parsed = JSON.parse(stdout[0] ?? '') as {
+      playback: { available: boolean; kind: string | null; detail: string };
+      edgeStt: { requested: boolean; enabled: boolean; provider: string | null };
+      edgeSttRequested: boolean;
+    };
+    expect(parsed.playback).toEqual({
+      available: true,
+      kind: 'aplay',
+      command: 'aplay -q …',
+      detail: 'aplay on PATH',
+    });
+    expect(parsed.edgeStt.enabled).toBe(false);
+    expect(parsed.edgeStt.provider).toBe('openai-stt');
+    // The old top-level boolean still means what it always meant: the operator
+    // ASKED. Scripts branch on it.
+    expect(parsed.edgeSttRequested).toBe(true);
   });
 });

@@ -1,3 +1,4 @@
+import { callsRouter } from './calls';
 import { os } from './context';
 
 export const voiceRouter = {
@@ -88,4 +89,5 @@ export const voiceRouter = {
       context.wakeRoutes.set(input.routes),
     ),
   },
+  calls: callsRouter,
 };

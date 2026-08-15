@@ -45,6 +45,14 @@ and the two call tiers behind them. Shipped by
   priority: Space is a character before it is a control.
 - **`TalkMode.tsx`** — the toggle + the CallStrip (in-call control bar, speaking
   indicator, caption, mono detail row).
+- **`call-rows.ts` + `CallRow.tsx`** — the TELEPHONY call list (voice V4), which
+  renders in Communications → Calls rather than on Chat. Dense rows, not Cards;
+  the status→dot mapping, the duration arithmetic and the filter-chip→query
+  translation all live in the pure module so they are testable without a DOM.
+  A live row's duration ticks from a 1s clock in the page, and — unlike every
+  pulse in this directory — it must NOT stop under `prefers-reduced-motion`: a
+  duration is data, and a frozen clock on an open call reads as a hung call.
+  Only the dot's pulse stops, which the stylesheet does.
 
 ### The CallStrip's accessibility contract (DR5)
 

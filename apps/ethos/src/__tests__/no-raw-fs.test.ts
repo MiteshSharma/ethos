@@ -27,9 +27,9 @@
 //   extensions/session-sqlite/   @ethosagent/sqlite opens raw paths. WAL, FTS5, and
 //   extensions/memory-vector/    atomic transactions don't fit a generic Storage
 //   extensions/job-store/         interface without losing ACID guarantees.
-//   extensions/delivery-ledger/   (job-store, delivery-ledger and session-cards
-//   extensions/session-cards/     also mkdirSync the db's parent dir.
-//                                 delivery-ledger's atomic redelivery claim is a
+//   extensions/delivery-ledger/   (job-store, delivery-ledger, session-cards and
+//   extensions/session-cards/     call-log also mkdirSync the db's parent dir.
+//   extensions/call-log/          delivery-ledger's atomic redelivery claim is a
 //                                 conditional UPDATE and session-cards derives its
 //                                 per-session `seq` with MAX()+1 inside the insert
 //                                 — both need a real transaction, not file IO.)
@@ -111,6 +111,7 @@ const ALLOWED_PREFIXES = [
   'extensions/job-store/',
   'extensions/delivery-ledger/',
   'extensions/session-cards/',
+  'extensions/call-log/',
   'extensions/voice-providers/',
   'extensions/agent-mesh/',
   'extensions/llm-codex/',

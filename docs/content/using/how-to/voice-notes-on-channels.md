@@ -175,3 +175,4 @@ Usage: /voice off|mirror_inbound|all
 - [Local voice: Kokoro TTS + Whisper large v3 STT](local-voice.md) — wire STT and TTS to servers on your own machine
 - [Why does a redelivered voice note re-send the recording?](../../building/explanation/why-voice-replies-redeliver.md) — what happens to a voice note whose delivery is never confirmed
 - [Run a wake satellite](./run-a-wake-satellite.md) — the other voice surface: a microphone in a room, routed to one personality
+- [Give an agent a phone number](./answer-phone-calls.md) — the third: a rented number that rings a personality

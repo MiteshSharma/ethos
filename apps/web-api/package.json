@@ -20,6 +20,7 @@
     "@ethosagent/core": "workspace:*",
     "@ethosagent/digest": "workspace:*",
     "@ethosagent/batch-runner": "workspace:*",
+    "@ethosagent/call-log": "workspace:*",
     "@ethosagent/cron": "workspace:*",
     "@ethosagent/dashboard": "workspace:*",
     "@ethosagent/delivery-ledger": "workspace:*",

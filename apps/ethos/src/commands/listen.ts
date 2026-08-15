@@ -33,24 +33,39 @@
 // works today with nothing installed that is not installed already. See
 // `../lib/stdin-pcm-device`.
 //
-// THE MIC IS OPEN, AND THE SERVER DECIDES WHO WAS ADDRESSED. This host matches
-// no phrase against sound: an acoustic keyword spotter is a per-architecture
-// native binary, and this is the daemon that has to run on the Pi where such a
-// binary is broken. The always-available `transcript` engine matches RECOGNIZED
-// TEXT, and this host ships no on-device recognizer — the SERVER transcribes,
-// which is far too late to be a client-side wake decision.
+// PLAYOUT IS A PIPE TOO, and for exactly the same reason. `--play` names a
+// command this daemon spawns and writes the reply's audio into — the mirror
+// image of the capture pipe, on the same argument: a speaker binding is the
+// same per-architecture native module the microphone binding is. Absent the
+// flag, the host probes `ffplay` / `aplay` / `play` on PATH and uses whichever
+// it actually finds. NOT A CONFIG KEY, deliberately: which command drives THIS
+// machine's sound card is a per-machine operator fact, exactly like the ffmpeg
+// input pipe, and it belongs on the command line next to it rather than in a
+// file a personality or a deployment could be tempted to carry around.
+// `capabilities.playback` reports what was found and never what was hoped for;
+// finding nothing degrades the turn to text, which is the rule that outranks
+// every feature in this file.
 //
-// So the daemon registers `phraseMatch: false` and the gate moves to where the
-// transcript already is. Speech detected on the pipe opens an utterance; every
-// utterance is transcribed; and the server runs a turn only when the words open
-// with a wake phrase from the effective route table, or when they follow one
-// inside the addressing window. Everything else is heard, written down, and
-// discarded without reaching a model.
+// THE MIC IS OPEN, AND THE SERVER USUALLY DECIDES WHO WAS ADDRESSED. This host
+// matches no phrase against SOUND: an acoustic keyword spotter is a
+// per-architecture native binary, and this is the daemon that has to run on the
+// Pi where such a binary is broken. So the daemon registers `phraseMatch: false`
+// and the gate moves to where the transcript is. Speech detected on the pipe
+// opens an utterance; every utterance is transcribed; and a turn runs only when
+// the words open with a wake phrase from the effective route table, or when
+// they follow one inside the addressing window. Everything else is heard,
+// written down, and discarded without reaching a model.
 //
-// That is worth being blunt about, because it is a privacy fact: THE ROOM IS
-// TRANSCRIBED. Not every utterance reaches an agent, but every utterance
-// reaches speech recognition. A host that implied otherwise would be claiming
-// an acoustic gate it does not have.
+// WHERE THE TRANSCRIBING HAPPENS IS THE PRIVACY FACT, and it has two answers.
+// By default the SERVER transcribes, which means THE ROOM'S AUDIO LEAVES THIS
+// MACHINE — not every utterance reaches an agent, but every utterance reaches
+// the deployment's recognizer. With `voice.wake.edgeStt` on AND a recognizer
+// whose `caps.local` is true, the recognizer runs HERE: the utterance is
+// transcribed on this box and only the words go up. The daemon refuses to
+// declare edge STT for a non-local recognizer, because "on-device" for a cloud
+// transcriber is the same audio egress wearing a better word — see
+// `resolveEdgeSttFrom`. Either way the room is transcribed; the doctor's
+// `edge-stt` row says by whom.
 //
 // Acoustic wake (sherpa keyword spotting) belongs to the desktop host, which
 // has the prebuilt binaries and a real microphone, and which therefore
@@ -68,13 +83,22 @@
 // connects, reports the local table as a hint and says out loud that the
 // effective one is only knowable once connected.
 
+import { spawn, spawnSync } from 'node:child_process';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { connect as netConnect, type Socket } from 'node:net';
 import { hostname } from 'node:os';
 import { dirname, join } from 'node:path';
 import { connect as tlsConnect } from 'node:tls';
 import { ethosDir, loadConfigStrict, type WakeRouteConfig } from '@ethosagent/config';
-import { EthosError, type Storage } from '@ethosagent/types';
+import { resolveSttProvider } from '@ethosagent/core';
+import {
+  EthosError,
+  type SecretsResolver,
+  type Storage,
+  type SttProvider,
+  type SttProviderEntry,
+  type SttProviderRegistry,
+} from '@ethosagent/types';
 import {
   type AudioDeviceInfo,
   type CaptureDevice,
@@ -85,11 +109,16 @@ import {
   createSatelliteClient,
   createSherpaWakeEngineFactory,
   type DoctorProbeRow,
+  encodeUtteranceWav,
+  type PlaybackDevice,
+  type PlaybackFormat,
   runSatelliteDoctor,
+  SatellitePlayout,
   type SatelliteSocketFactory,
   transcriptWakeEngineFactory,
   type WakeEngine,
   type WakeEngineFactory,
+  type WakeFrame,
   type WakeRoute,
   wakePhraseKey,
 } from '@ethosagent/voice-satellite';
@@ -122,6 +151,10 @@ Options:
                     'auto:<personalityId>' one. Optional; without it every
                     phrase in the table can address this host
   --device <id>     capture device (this build ships '${STDIN_DEVICE_ID}' only)
+  --play <command>  command to play the reply through. Audio is written to its
+                    stdin; {rate} and {channels} are substituted. Without it
+                    this host probes ffplay, then aplay, then play on PATH —
+                    and answers as TEXT ONLY if it finds none
   --json            doctor only — one JSON object with a probes array and exit
 
 Capture is a pipe. This daemon reads raw signed-16-bit little-endian MONO PCM
@@ -135,11 +168,16 @@ and ffmpeg's progress meter is a carriage-returned line that overwrites this
 daemon's output mid-word. A real failure still prints.
 
 Open mic, server-side addressing. Nothing is acoustically wake-matched here:
-EVERY utterance on the pipe is transcribed by the server. It runs a turn only
-when the words open with a personality's name — that name picks the personality,
-and a greeting in front of it is optional —
-or when they follow one within voice.wake.idleTimeout. Anything else is heard
-and discarded.
+EVERY utterance on the pipe is transcribed. It reaches an agent only when the
+words open with a personality's name — that name picks the personality, and a
+greeting in front of it is optional — or when they follow one within
+voice.wake.idleTimeout. Anything else is heard and discarded.
+
+Who transcribes decides whether the audio leaves this machine. By default the
+server does. Set voice.wake.edgeStt: true with a LOCAL speech-to-text provider
+(auxiliary.asr → local-stt / command-stt) and the recognizer runs here instead:
+only the words go up. A non-local provider is refused rather than relabelled;
+ethos listen doctor names which recognizer resolved, and why.
 
 Closing the pipe stops the satellite. stdin cannot be reopened, so a capture
 command that exits — a bad device index, a denied permission, an ordinary end
@@ -302,6 +340,8 @@ export interface ListenFlags {
   url?: string;
   route?: string;
   device?: string;
+  /** `--play` — the command the reply's audio is written into. See `resolvePlayer`. */
+  play?: string;
   positional: string[];
 }
 
@@ -313,9 +353,493 @@ export function parseListenFlags(args: string[]): ListenFlags {
     else if (a === '--url') flags.url = args[++i];
     else if (a === '--route') flags.route = args[++i];
     else if (a === '--device') flags.device = args[++i];
+    else if (a === '--play') flags.play = args[++i];
     else if (a !== undefined) flags.positional.push(a);
   }
   return flags;
+}
+
+// ---------------------------------------------------------------------------
+// Audio OUT — the loudspeaker this host used to declare it did not have
+// ---------------------------------------------------------------------------
+
+/**
+ * Which player this host will spawn.
+ *
+ * `custom` is an operator's own `--play` template, run through `sh -c` so their
+ * quoting and pipelines survive (the same contract `command-tts` gives its
+ * template). The other three are argv this file builds itself, which is what
+ * lets it vary the flags by codec — see {@link playerArgv}.
+ */
+export type PlayerKind = 'ffplay' | 'aplay' | 'play' | 'custom';
+
+export interface PlayerReport {
+  kind: PlayerKind;
+  /** The command as the operator sees it, `{rate}` / `{channels}` intact. */
+  command: string;
+}
+
+export interface PlayerResolution {
+  /** What will be spawned, or null when this host cannot make a sound. */
+  player: PlayerReport | null;
+  /**
+   * Which player was found, or the REAL reason there is none. Never empty —
+   * "no output device" was the old answer and it taught an operator nothing
+   * about which command to install.
+   */
+  detail: string;
+}
+
+/**
+ * PATH probe order, and the command each one gets.
+ *
+ * `ffplay` first because it is the only one of the three that can play what the
+ * server usually sends: every first-party TTS provider except a `pcm`-mode
+ * `command-tts` synthesizes opus or mp3, which reaches this node as
+ * `codec: 'encoded'` and needs a demuxer. `aplay` and `play` take raw samples
+ * only — they are still worth probing (a deployment wired to local PCM has
+ * them and not ffmpeg), but a node holding one of them refuses an encoded
+ * playout rather than blasting an ogg header at a speaker.
+ */
+const PLAYER_PROBES: ReadonlyArray<{ kind: Exclude<PlayerKind, 'custom'>; command: string }> = [
+  {
+    kind: 'ffplay',
+    command: 'ffplay -nodisp -autoexit -loglevel error -f s16le -ar {rate} -ac {channels} -i -',
+  },
+  { kind: 'aplay', command: 'aplay -q -f S16_LE -r {rate} -c {channels} -t raw' },
+  { kind: 'play', command: 'play -q -t raw -r {rate} -e signed -b 16 -c {channels} -' },
+];
+
+/** Is this binary runnable from here? The same probe `ethos doctor` uses. */
+function isOnPath(bin: string): boolean {
+  return spawnSync('which', [bin], { stdio: 'ignore' }).status === 0;
+}
+
+/**
+ * Decide how this host will make a sound — by ASKING, never by assuming.
+ *
+ * The flag wins and is taken at face value: an operator who typed a command
+ * knows their machine better than a probe does, and second-guessing it would
+ * mean refusing to start a player that works. Absent the flag, PATH is probed
+ * in {@link PLAYER_PROBES} order and the first hit is used; finding nothing
+ * returns a null player and the sentence that says which three commands were
+ * looked for, because "install one of these" is the actionable half.
+ */
+export function resolvePlayer(
+  flag: string | undefined,
+  onPath: (bin: string) => boolean = isOnPath,
+): PlayerResolution {
+  const requested = flag?.trim();
+  if (requested !== undefined && requested !== '') {
+    return {
+      player: { kind: 'custom', command: requested },
+      detail: `--play: ${requested} (run through \`sh -c\`; reply audio is written to its stdin)`,
+    };
+  }
+  for (const candidate of PLAYER_PROBES) {
+    if (!onPath(candidate.kind)) continue;
+    return {
+      player: { kind: candidate.kind, command: candidate.command },
+      detail:
+        `${candidate.kind} on PATH — ${candidate.command}` +
+        (candidate.kind === 'ffplay'
+          ? ''
+          : `. Raw PCM only: an encoded reply (opus/mp3, what most TTS providers ` +
+            `synthesize) cannot be played by this command. Install ffmpeg for ffplay, or set ` +
+            `auxiliary.tts.outputFormat: pcm`),
+    };
+  }
+  return {
+    player: null,
+    detail:
+      'none of ffplay, aplay or play is on PATH, so nothing here can make a sound — ' +
+      'wake turns answer as TEXT ONLY (the ‹ line). Install ffmpeg (for ffplay), ' +
+      'alsa-utils (aplay) or sox (play), or name your own with --play "<command>".',
+  };
+}
+
+/**
+ * The argv for one playout, or the refusal that names what this player cannot open.
+ *
+ * A REFUSAL IS NOT A FAILURE TO REPORT LATER. `aplay` handed an ogg stream does
+ * not error — it plays the container bytes as samples, which is a burst of
+ * noise in somebody's kitchen at whatever hour the agent answered. So the
+ * codec is checked before a process is spawned and the turn degrades to text
+ * with a sentence saying which of the two ends to change.
+ */
+export function playerArgv(
+  player: PlayerReport,
+  format: PlaybackFormat,
+): { argv: string[]; refusal?: undefined } | { argv?: undefined; refusal: string } {
+  const rate = String(format.sampleRate);
+  const channels = String(format.channels);
+  const substitute = (template: string): string =>
+    template.replace(/\{rate\}/g, rate).replace(/\{channels\}/g, channels);
+
+  if (player.kind === 'custom') {
+    // `sh -c` rather than a hand-rolled tokenizer: the operator's template may
+    // hold quoting, a pipeline, or an environment variable, and the same
+    // contract already governs `command-tts`.
+    return { argv: ['sh', '-c', substitute(player.command)] };
+  }
+  if (player.kind === 'ffplay') {
+    // Raw needs the format spelled out (PCM carries no header); encoded carries
+    // its own and ffplay's demuxer must be left to find it.
+    return {
+      argv:
+        format.codec === 'pcm_s16le'
+          ? [
+              'ffplay',
+              '-nodisp',
+              '-autoexit',
+              '-loglevel',
+              'error',
+              '-f',
+              's16le',
+              '-ar',
+              rate,
+              '-ac',
+              channels,
+              '-i',
+              '-',
+            ]
+          : ['ffplay', '-nodisp', '-autoexit', '-loglevel', 'error', '-i', '-'],
+    };
+  }
+  if (format.codec !== 'pcm_s16le') {
+    return {
+      refusal:
+        `${player.kind} plays RAW PCM only and the server sent ${format.mimeType} — ` +
+        'playing the container bytes as samples would be noise, so this reply stays text.',
+    };
+  }
+  return {
+    argv:
+      player.kind === 'aplay'
+        ? ['aplay', '-q', '-f', 'S16_LE', '-r', rate, '-c', channels, '-t', 'raw']
+        : ['play', '-q', '-t', 'raw', '-r', rate, '-e', 'signed', '-b', '16', '-c', channels, '-'],
+  };
+}
+
+/**
+ * The slice of a spawned player this device uses.
+ *
+ * Narrow on purpose: a test drives a fake with three methods and no process,
+ * and the device's staleness discipline is then testable without a sound card.
+ */
+export interface PlayerProcess {
+  /** Feed the player. Must not throw — a player that died is a `end()` problem. */
+  write(chunk: Uint8Array): void;
+  /** Close stdin and resolve once the process has actually exited. */
+  end(): Promise<void>;
+  /** Kill it now, mid-sentence. */
+  kill(): void;
+}
+
+/**
+ * Spawn one player and wrap it.
+ *
+ * `end()` waits for EXIT, not for the write to flush, and that is the whole
+ * point of this device: a player's stdin drains in milliseconds while the sound
+ * it describes takes seconds to leave the speaker. Only the process ending says
+ * the room went quiet — which is what `playback_done` claims and what the
+ * microphone's re-arm depends on.
+ */
+function spawnPlayerProcess(argv: string[]): PlayerProcess {
+  const [bin, ...args] = argv;
+  const child = spawn(bin ?? '', args, { stdio: ['pipe', 'ignore', 'ignore'] });
+  let failure: Error | null = null;
+  let exited = false;
+  child.once('error', (err: Error) => {
+    failure = err;
+    exited = true;
+  });
+  child.once('close', () => {
+    exited = true;
+  });
+  // A player that exits early (a wrong format, a busy sound card) turns the
+  // next write into an EPIPE the host has no way to handle. Swallowed here and
+  // surfaced by `end()`, which is the one place a playout failure can still be
+  // narrated without dropping the re-arm.
+  child.stdin?.on('error', (err: Error) => {
+    failure ??= err;
+  });
+  return {
+    write(chunk: Uint8Array): void {
+      if (exited) return;
+      child.stdin?.write(chunk);
+    },
+    async end(): Promise<void> {
+      child.stdin?.end();
+      if (!exited) {
+        await new Promise<void>((resolve) => {
+          child.once('close', () => resolve());
+          child.once('error', () => resolve());
+        });
+      }
+      const err = failure;
+      if (err !== null) throw err;
+    },
+    kill(): void {
+      if (exited) return;
+      child.kill();
+    },
+  };
+}
+
+export interface CommandPlaybackDeviceOptions {
+  player: PlayerReport;
+  /** Injected so tests drive a fake process. Production leaves it unset. */
+  spawnPlayer?: (argv: string[]) => PlayerProcess;
+}
+
+/**
+ * A `PlaybackDevice` that is one spawned command per utterance.
+ *
+ * ONE PROCESS PER UTTERANCE, not one long-lived player. A player fed a
+ * continuous stream has no way to say "this utterance finished" — its stdin
+ * never closes, so nothing ever reports the speaker draining and the re-arm
+ * would be back to guessing. Exiting at EOF is the receipt.
+ *
+ * Every method checks the utterance id first. Audio for anything but the
+ * playout in flight is DROPPED: by the time a stale chunk arrives the room has
+ * moved on, and playing it would answer a question nobody is still asking.
+ */
+export function createCommandPlaybackDevice(opts: CommandPlaybackDeviceOptions): PlaybackDevice {
+  const spawnPlayer = opts.spawnPlayer ?? spawnPlayerProcess;
+  let active: { utteranceId: string; proc: PlayerProcess } | null = null;
+
+  return {
+    async start(utteranceId: string, format: PlaybackFormat): Promise<void> {
+      // A playout still running here means the lane moved on without a
+      // `turn_end`; killing it is cheaper than two players over one sound card.
+      const previous = active;
+      active = null;
+      previous?.proc.kill();
+      const built = playerArgv(opts.player, format);
+      if (built.refusal !== undefined) {
+        throw new EthosError({
+          code: 'CONFIG_INVALID',
+          cause: built.refusal,
+          action:
+            'Install ffmpeg — its ffplay demuxes opus and mp3 — or set ' +
+            'auxiliary.tts.outputFormat: pcm so the server synthesizes raw samples, ' +
+            'or name a player that can with `ethos listen --play "<command>"`.',
+        });
+      }
+      active = { utteranceId, proc: spawnPlayer(built.argv) };
+    },
+
+    write(utteranceId: string, pcm: Uint8Array): void {
+      const current = active;
+      if (current === null || current.utteranceId !== utteranceId) return;
+      current.proc.write(pcm);
+    },
+
+    async end(utteranceId: string): Promise<void> {
+      const current = active;
+      if (current === null || current.utteranceId !== utteranceId) return;
+      active = null;
+      await current.proc.end();
+    },
+
+    cancel(utteranceId: string): void {
+      const current = active;
+      if (current === null || current.utteranceId !== utteranceId) return;
+      active = null;
+      current.proc.kill();
+    },
+
+    async list(): Promise<AudioDeviceInfo[]> {
+      return [{ id: opts.player.kind, label: opts.player.command, isDefault: true }];
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Edge STT — the recognizer that keeps the room's audio on the machine
+// ---------------------------------------------------------------------------
+
+/** What `voice.wake.edgeStt` actually got, once something tried to build it. */
+export interface EdgeSttResolution {
+  /** The recognizer that will run HERE, or null when there is none. */
+  provider: SttProvider | null;
+  /** Registered provider id, whenever a name resolved — refused ones included. */
+  providerId?: string;
+  /** Why there is no on-device recognizer. Absent when there is one. */
+  reason?: string;
+}
+
+/** The serializable half, for the doctor row and the `--json` object. */
+export interface EdgeSttReport {
+  /** `voice.wake.edgeStt` is set. */
+  requested: boolean;
+  /** A LOCAL recognizer resolved: this node transcribes and sends only words. */
+  enabled: boolean;
+  providerId?: string;
+  /** Which recognizer resolved, or the specific reason none did. Never empty. */
+  detail: string;
+}
+
+/** Said the same way wherever the audio path is described, so it cannot drift. */
+const AUDIO_GOES_UP =
+  'audio WILL be streamed to the server, which transcribes it there — the ' +
+  '"no audio leaves the machine" guarantee does not hold on this host.';
+
+/**
+ * Resolve the on-device recognizer from an already-built registry.
+ *
+ * ONE RESOLUTION PATH. It is `resolveSttProvider` from `@ethosagent/core` —
+ * the same function the gateway, the web-api and the voice stack call — so the
+ * `trustedVoicePlugins` egress gate inside it applies to a satellite exactly as
+ * it applies to everything else, and the id this row prints is the id that
+ * actually ran. A second resolution here would be a second place for the gate
+ * to have a hole.
+ *
+ * AND THE LINE THIS FUNCTION EXISTS TO HOLD: a recognizer whose `caps.local`
+ * is not true is REFUSED, however the operator configured it. "Edge STT" backed
+ * by a cloud transcriber still uploads the room; declaring `edgeStt: true` for
+ * it would make the server stop sending audio while the audio went anyway, and
+ * the one privacy claim this whole lane makes would be false in exactly the
+ * deployment that asked for it. The fallback is gateway-side STT — which works,
+ * and is honest about what it does.
+ */
+export async function resolveEdgeSttFrom(
+  registry: SttProviderRegistry,
+  input: {
+    /** `auxiliary.asr` — provider name plus its factory config. */
+    asr: SttProviderEntry | undefined;
+    /** `voice.trustedPlugins`, as the gate wants it. */
+    trustedVoicePlugins?: ReadonlySet<string>;
+    secrets?: SecretsResolver;
+  },
+): Promise<EdgeSttResolution> {
+  const resolution = await resolveSttProvider({
+    registry,
+    providerName: input.asr?.provider,
+    providerConfig: { ...input.asr },
+    ...(input.secrets ? { secrets: input.secrets } : {}),
+    ...(input.trustedVoicePlugins ? { trustedVoicePlugins: input.trustedVoicePlugins } : {}),
+  });
+  if (!resolution.ok) {
+    return {
+      provider: null,
+      ...(resolution.providerId === undefined ? {} : { providerId: resolution.providerId }),
+      reason:
+        resolution.code === 'not_configured'
+          ? `voice.wake.edgeStt is on, but no speech-to-text provider is configured ` +
+            `(auxiliary.asr.provider) — there is nothing to run on this machine, so ${AUDIO_GOES_UP}`
+          : `voice.wake.edgeStt is on, but ${resolution.error}. Falling back: ${AUDIO_GOES_UP}`,
+    };
+  }
+  if (resolution.provider.caps.local !== true) {
+    return {
+      provider: null,
+      providerId: resolution.providerId,
+      reason:
+        `voice.wake.edgeStt is on, but the recognizer it resolved — "${resolution.providerId}" — ` +
+        'is not local (caps.local is not true). Running it "at the edge" would upload this ' +
+        'room anyway, so edge STT is REFUSED rather than relabelled, and ' +
+        `${AUDIO_GOES_UP} Configure a local recognizer (auxiliary.asr.provider: local-stt or ` +
+        'command-stt) to keep the audio here.',
+    };
+  }
+  return { provider: resolution.provider, providerId: resolution.providerId };
+}
+
+/**
+ * How much of one utterance is held in memory for on-device transcription.
+ *
+ * The audio path never needed a cap — frames go out as they arrive — but the
+ * edge path ACCUMULATES, and an appliance in a room full of continuous talk
+ * would otherwise grow a buffer until the Pi ran out. The number is the lane's
+ * own `maxUtteranceBytes`, so an utterance too long to transcribe here is
+ * exactly an utterance too long to transcribe there: one limit, one behaviour,
+ * whichever end is doing the work.
+ */
+const EDGE_UTTERANCE_MAX_BYTES = 8 * 1024 * 1024;
+
+/** `voice.wake.edgeStt` is off. Not a fault — just the other audio path. */
+const EDGE_STT_OFF = `voice.wake.edgeStt is off, so every utterance is transcribed by the server: ${AUDIO_GOES_UP}`;
+
+/**
+ * The production resolver: gate on the config flag, then build the registry.
+ *
+ * The registry import is LAZY and only happens when edge STT was actually
+ * asked for — `@ethosagent/wiring` drags in the whole provider graph, and
+ * `listen doctor` on a host that wants none of it should not pay for it.
+ */
+async function resolveEdgeStt(input: {
+  requested: boolean;
+  asr: SttProviderEntry | undefined;
+  trustedVoicePlugins?: ReadonlySet<string>;
+  secrets?: SecretsResolver;
+}): Promise<EdgeSttResolution> {
+  if (!input.requested) return { provider: null, reason: EDGE_STT_OFF };
+  let registry: SttProviderRegistry;
+  try {
+    const { createBuiltinVoiceRegistries } = await import('@ethosagent/wiring');
+    registry = createBuiltinVoiceRegistries().sttProviders;
+  } catch (err) {
+    return {
+      provider: null,
+      reason:
+        `voice.wake.edgeStt is on, but the voice provider registry would not load: ` +
+        `${err instanceof Error ? err.message : String(err)}. Falling back: ${AUDIO_GOES_UP}`,
+    };
+  }
+  return resolveEdgeSttFrom(registry, {
+    asr: input.asr,
+    ...(input.trustedVoicePlugins ? { trustedVoicePlugins: input.trustedVoicePlugins } : {}),
+    ...(input.secrets ? { secrets: input.secrets } : {}),
+  });
+}
+
+/**
+ * The two rows that say what this host can DO with a turn: make a sound, and
+ * keep the audio at home.
+ *
+ * NEITHER MOVES THE EXIT CODE — `deriveListenFailFlags` names the rows it
+ * reads, and these are not among them. A host with no loudspeaker and a host
+ * whose audio is transcribed by the server are both fully working satellites;
+ * they just do less than the operator may have assumed, and a preflight that
+ * failed over it would be refusing to start the deployment that shipped for
+ * months. The rows are where the assumption gets corrected, not where the boot
+ * gets blocked.
+ *
+ * The `edge-stt` row is SKIPPED rather than ticked when nothing was asked for.
+ * A green tick there would read as "your audio stays here", which is the
+ * opposite of what an unset `voice.wake.edgeStt` means — and the doctor's rule
+ * is that an unrun probe reports skipped, never passed.
+ */
+export function capabilityRows(player: PlayerResolution, edgeStt: EdgeSttReport): DoctorProbeRow[] {
+  return [
+    { name: 'speaker', ok: player.player !== null, detail: player.detail },
+    edgeStt.requested
+      ? { name: 'edge-stt', ok: edgeStt.enabled, detail: edgeStt.detail }
+      : { name: 'edge-stt', ok: true, skipped: true, detail: `skipped — ${edgeStt.detail}` },
+  ];
+}
+
+/** The resolution as the doctor and the JSON see it. */
+export function edgeSttReport(requested: boolean, resolution: EdgeSttResolution): EdgeSttReport {
+  if (resolution.provider !== null) {
+    return {
+      requested,
+      enabled: true,
+      ...(resolution.providerId === undefined ? {} : { providerId: resolution.providerId }),
+      detail:
+        `on-device: ${resolution.providerId ?? 'unnamed'} (caps.local) — this node transcribes ` +
+        'the utterance itself and sends only the WORDS upstream. No captured audio leaves ' +
+        'this machine.',
+    };
+  }
+  return {
+    requested,
+    enabled: false,
+    ...(resolution.providerId === undefined ? {} : { providerId: resolution.providerId }),
+    detail: resolution.reason ?? EDGE_STT_OFF,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -375,8 +899,14 @@ export interface ListenPreflight {
   routes: WakeRoute[];
   /** `--route`, unresolved: only the pushed table can validate the pin. */
   requestedRoute?: string;
-  /** `voice.wake.edgeStt` is on but this host ships no on-device recognizer. */
-  edgeSttRequested: boolean;
+  /**
+   * Whether an on-device recognizer resolved, and which one — the answer to
+   * "does this room's audio leave the machine?". Probed, never read off the
+   * config flag: `voice.wake.edgeStt` is an intent and this is the outcome.
+   */
+  edgeStt: EdgeSttReport;
+  /** The player that would be spawned for a reply, or the reason there is none. */
+  player: PlayerResolution;
   /** The capture device that would be opened, or null when there is none. */
   device: AudioDeviceInfo | null;
   sampleRate: number;
@@ -385,6 +915,16 @@ export interface ListenPreflight {
    * Absent when the operator set none — `CaptureMachine` owns that default.
    */
   idleTimeoutMs?: number;
+  /**
+   * `voice.bargeIn.satellite`, in the shape `EnergyVad` takes.
+   *
+   * Absent when the operator tuned nothing — the VAD owns its own defaults, so
+   * an untuned host behaves exactly as it did before this field existed. Only
+   * the two fields the detector HAS are carried: `silenceMs` has no counterpart
+   * here, because `CaptureMachine` ends an utterance on a count of silent
+   * FRAMES and a frame is only a duration once the device says how long it is.
+   */
+  vadTuning?: { threshold?: number; minSpeechMs?: number };
   /** Setup failures that are not probes: no config, bad `--url`, unknown `--device`. */
   errors: string[];
   /** Config deprecations, surfaced before anything else runs. */
@@ -556,9 +1096,24 @@ function buildRealDeps(opts: ListenStartOptions): ListenCommandDeps {
     sampleRate: CAPTURE_SAMPLE_RATE,
     frameMs: CAPTURE_FRAME_MS,
   });
+  /**
+   * The recognizer the PREFLIGHT constructed, handed to the daemon unchanged.
+   *
+   * Resolving twice would let the doctor row describe one provider and the
+   * daemon run another — the exact "reads a flag and calls it capability"
+   * failure the preflight exists to refuse, one indirection out. So the probe
+   * IS the construction, and this box carries its result across.
+   */
+  const probed: { edge: EdgeSttResolution | null } = { edge: null };
   return {
-    preflight: (flags) => realPreflight(flags, storage, device),
-    start: (pre, flags) => startListenDaemon(pre, flags, { storage, device, ...opts }),
+    preflight: (flags) => realPreflight(flags, storage, device, probed),
+    start: (pre, flags) =>
+      startListenDaemon(pre, flags, {
+        storage,
+        device,
+        ...(probed.edge?.provider ? { edgeSttProvider: probed.edge.provider } : {}),
+        ...opts,
+      }),
   };
 }
 
@@ -612,7 +1167,22 @@ async function listenDoctorCommand(flags: ListenFlags, deps: ListenCommandDeps):
         /** The `--route` PIN, unvalidated. Null means every phrase may address. */
         requestedRoute: pre.requestedRoute ?? null,
         routesNote: ROUTES_ARE_THE_SERVERS,
-        edgeSttRequested: pre.edgeSttRequested,
+        // Kept as a top-level boolean because scripts already branch on it,
+        // and it means what it always meant: the operator ASKED. `edgeStt`
+        // beside it is what they got.
+        edgeSttRequested: pre.edgeStt.requested,
+        edgeStt: {
+          requested: pre.edgeStt.requested,
+          enabled: pre.edgeStt.enabled,
+          provider: pre.edgeStt.providerId ?? null,
+          detail: pre.edgeStt.detail,
+        },
+        playback: {
+          available: pre.player.player !== null,
+          kind: pre.player.player?.kind ?? null,
+          command: pre.player.player?.command ?? null,
+          detail: pre.player.detail,
+        },
         probes: pre.probes.map((p) => ({
           name: p.name,
           ok: p.ok,
@@ -707,15 +1277,6 @@ function printPreflightRows(pre: ListenPreflight, say: (line: string) => void = 
         ? ' Without --route, every phrase in that table can address this host.'
         : ` --route ${pre.requestedRoute} pins this host to that one route; it is checked against the pushed table when \`ethos listen\` connects, not here.`),
   );
-  if (pre.edgeSttRequested) {
-    printRow(
-      'edge stt',
-      `${c.yellow}⚠${c.reset}`,
-      'voice.wake.edgeStt is on, but this host ships no on-device recognizer — ' +
-        'audio WILL be streamed to the server. The "no audio leaves the machine" ' +
-        'guarantee does not hold here.',
-    );
-  }
 }
 
 // ---------------------------------------------------------------------------
@@ -833,12 +1394,14 @@ async function realPreflight(
   flags: ListenFlags,
   storage: Storage,
   device: CaptureDevice,
+  probed: { edge: EdgeSttResolution | null },
 ): Promise<ListenPreflight> {
   const errors: string[] = [];
 
+  const secrets = await getSecretsResolver();
   let config: Awaited<ReturnType<typeof loadConfigStrict>> = null;
   try {
-    config = await loadConfigStrict(storage, await getSecretsResolver());
+    config = await loadConfigStrict(storage, secrets);
   } catch (err) {
     errors.push(`config could not be loaded: ${err instanceof Error ? err.message : String(err)}`);
   }
@@ -906,11 +1469,32 @@ async function realPreflight(
 
   const routes = readWakeRoutes(wake?.routes);
 
+  // BOTH OF THESE ARE PROBES, not config reads — which is why they run here
+  // beside the engine and device probes rather than being inferred later. The
+  // player probe asks PATH what is installed; the recognizer probe CONSTRUCTS
+  // the provider (through the one resolution path, so the egress gate applies)
+  // and reads its real `caps.local`. A row that reported either from a config
+  // key would be the false-available failure this command exists to refuse.
+  const player = resolvePlayer(flags.play);
+  const trustedPlugins = config?.config.voice?.trustedPlugins;
+  const edge = await resolveEdgeStt({
+    requested: wake?.edgeStt === true,
+    asr: config?.config.auxiliary?.asr,
+    ...(trustedPlugins ? { trustedVoicePlugins: new Set(trustedPlugins) } : {}),
+    secrets,
+  });
+  probed.edge = edge;
+  const edgeStt = edgeSttReport(wake?.edgeStt === true, edge);
+  const vadTuning = readSatelliteVadTuning(config?.config.voice?.bargeIn?.satellite);
+
   return {
     // Renamed exactly here, once, so the row, the fail flags and the JSON
     // cannot disagree about what the reachability probe is called; and the
     // pipe caveat applied in the same place, for the same reason.
-    probes: withPipeCaveat(withLaneProbeName(doctor.probes)),
+    probes: [
+      ...withPipeCaveat(withLaneProbeName(doctor.probes)),
+      ...capabilityRows(player, edgeStt),
+    ],
     configuredEngine,
     transcriptEngineOk: doctor.probes.some((p) => p.name === 'engine:transcript' && p.ok),
     modelsRequired: configuredEngine === 'sherpa',
@@ -920,12 +1504,32 @@ async function realPreflight(
     nodeId: await resolveListenNodeId(storage, listenNodeIdPath()),
     routes,
     ...(flags.route === undefined ? {} : { requestedRoute: flags.route }),
-    edgeSttRequested: wake?.edgeStt === true,
+    edgeStt,
+    player,
     device: selected,
     sampleRate: CAPTURE_SAMPLE_RATE,
     ...(wake?.idleTimeout === undefined ? {} : { idleTimeoutMs: wake.idleTimeout * 1000 }),
+    ...(vadTuning === undefined ? {} : { vadTuning }),
     errors,
     deprecations: config?.deprecations ?? [],
+  };
+}
+
+/**
+ * `voice.bargeIn.satellite` as `EnergyVad` wants it — or nothing at all.
+ *
+ * Returns undefined rather than an empty object when the operator tuned neither
+ * field, so the preflight carries no key and the daemon hands the detector no
+ * config: "not tuned" and "tuned to the default" stay distinguishable all the
+ * way down.
+ */
+export function readSatelliteVadTuning(
+  tuning: { energyThreshold?: number; minSpeechMs?: number } | undefined,
+): ListenPreflight['vadTuning'] {
+  if (tuning?.energyThreshold === undefined && tuning?.minSpeechMs === undefined) return undefined;
+  return {
+    ...(tuning.energyThreshold === undefined ? {} : { threshold: tuning.energyThreshold }),
+    ...(tuning.minSpeechMs === undefined ? {} : { minSpeechMs: tuning.minSpeechMs }),
   };
 }
 
@@ -1357,6 +1961,19 @@ interface ListenDaemonContext extends ListenStartOptions {
   storage: Storage;
   device: CaptureDevice;
   /**
+   * Where the reply is played. Unset is the ORDINARY case, not a test-only one:
+   * the daemon builds a command player from `pre.player` when there is one, and
+   * a host with neither declares `playback: false` and answers as text.
+   */
+  playbackDevice?: PlaybackDevice;
+  /**
+   * The on-device recognizer the preflight constructed. Used only when
+   * `pre.edgeStt.enabled` — the two are set from the same resolution, and a
+   * daemon that had one without the other would be declaring a capability it
+   * cannot perform.
+   */
+  edgeSttProvider?: SttProvider;
+  /**
    * How the process leaves, once the shutdown path has run. Test seam — a test
    * that drove the real `process.exit` would take the runner down with it.
    */
@@ -1379,8 +1996,8 @@ interface ListenDaemonContext extends ListenStartOptions {
  * it matched neither: this host registers `phraseMatch: false` and the wire
  * contract makes both fields optional for exactly that reason.
  */
-function createOpenMicEngine(): WakeEngine {
-  let vad = createEnergyFrameVad();
+function createOpenMicEngine(vadTuning: ListenPreflight['vadTuning']): WakeEngine {
+  let vad = createEnergyFrameVad(vadTuning);
   return {
     name: 'open-mic',
     async init(): Promise<void> {},
@@ -1396,7 +2013,7 @@ function createOpenMicEngine(): WakeEngine {
       // A fresh detector rather than a flag: `EnergyVad` carries hangover
       // frames, and a re-arm that inherited them would fire on the tail of the
       // utterance that just ended.
-      vad = createEnergyFrameVad();
+      vad = createEnergyFrameVad(vadTuning);
     },
     async dispose(): Promise<void> {},
   };
@@ -1420,6 +2037,12 @@ export async function startListenDaemon(
   // microphone.
   let route: WakeRoute | null = null;
   let machine: CaptureMachine | null = null;
+  /**
+   * Drives the loudspeaker and owns the re-arm receipt. Null on a host with no
+   * player. Assigned just below the client for the same reason `machine` is
+   * assigned late: the playout sends frames and the client feeds the playout.
+   */
+  let playout: SatellitePlayout | null = null;
   let captureState: CaptureState = 'idle';
   let wakeSeq = 0;
   let utteranceSeq = 0;
@@ -1437,7 +2060,33 @@ export async function startListenDaemon(
   /** The utterance the SERVER knows about. Null until the wake is released. */
   let currentUtteranceId: string | null = null;
   let audioSeq = 0;
+  /** The no-loudspeaker notice, said once per process and never again. */
   let playoutWarned = false;
+  /**
+   * The player-refused-this-reply notice, also once.
+   *
+   * Separate from `playoutWarned` because they are different facts with
+   * different remedies — "you have no player" and "your player cannot open what
+   * the server sends" — and collapsing them would print the wrong instruction
+   * on whichever host hit the other one.
+   */
+  let playoutProblemWarned = false;
+  /**
+   * Frames HELD for on-device transcription, and how many bytes of them.
+   *
+   * Only ever non-empty on the edge path: on the audio path a frame is on the
+   * wire before the next one arrives, and holding it would be latency bought
+   * for nothing.
+   */
+  let edgeFrames: WakeFrame[] = [];
+  let edgeBytes = 0;
+  /** This utterance hit `EDGE_UTTERANCE_MAX_BYTES` and is missing its tail. */
+  let edgeTruncated = false;
+  /**
+   * The turn's closing line, waiting for the speaker to stop. See `closingLine`.
+   * Always null on a host with no playout, which prints it inline.
+   */
+  let pendingClose: string | null = null;
   /** What was last REGISTERED with the server; see `onSetWakeEnabled`. */
   let wakeEnabled = true;
   /** Whether the pinned route's absence has already been said; see `onRoutes`. */
@@ -1476,6 +2125,26 @@ export async function startListenDaemon(
     deliverTable = resolve;
   });
 
+  /**
+   * The loudspeaker, or null. PROBED, NOT DECLARED — `pre.player` is the answer
+   * `resolvePlayer` got from PATH (or the operator's own `--play`), and a null
+   * here is what makes `capabilities.playback: false` a fact rather than a
+   * historical constant.
+   */
+  const playbackDevice: PlaybackDevice | null =
+    ctx.playbackDevice ??
+    (pre.player.player === null
+      ? null
+      : createCommandPlaybackDevice({ player: pre.player.player }));
+
+  /**
+   * The recognizer that runs HERE, or null. Gated on the preflight's verdict
+   * and not on the config flag, so a provider that resolved but was refused for
+   * not being local cannot slip through as "edge STT" on the wire.
+   */
+  const edgeSttProvider: SttProvider | null =
+    pre.edgeStt.enabled && ctx.edgeSttProvider !== undefined ? ctx.edgeSttProvider : null;
+
   // The client's callbacks reach `machine`, which is constructed after the
   // route table lands. They are null-guarded rather than ordered: the socket
   // genuinely is open before the machine exists, and the two are mutually
@@ -1488,11 +2157,16 @@ export async function startListenDaemon(
     nodeId: pre.nodeId,
     displayName: pre.nodeId,
     capabilities: {
-      // All three probed, not declared: no on-device recognizer ships here,
-      // there is no output device behind a pipe, and nothing on this host
-      // compares sound to a phrase — so the SERVER gates, from the transcript.
-      edgeStt: false,
-      playback: false,
+      // ALL FOUR ARE OUTCOMES, NOT INTENTIONS. `edgeStt` is true only when a
+      // recognizer with `caps.local` actually constructed on this machine;
+      // `playback` only when a player was actually found. Declaring either
+      // optimistically is worse than declaring it false: the server STOPS
+      // sending audio to an edge node and STARTS spending TTS on a playback
+      // one, so an optimistic claim buys silence at one end or a wasted
+      // provider call at the other. `phraseMatch` stays false — nothing here
+      // compares sound to a phrase, so the SERVER gates, from the transcript.
+      edgeStt: edgeSttProvider !== null,
+      playback: playbackDevice !== null,
       captureSampleRate: pre.sampleRate,
       phraseMatch: false,
     },
@@ -1561,76 +2235,49 @@ export async function startListenDaemon(
       say(`${c.dim}  › you:${c.reset} ${frame.text}`);
     },
     onReplyText: (frame) => {
-      // The other half of the exchange. This host has no loudspeaker, so this
-      // frame is the ONLY way the answer reaches the operator — the reply audio
-      // is never even synthesized for a node that declared playback: false.
+      // The other half of the exchange, printed WHETHER OR NOT it is also
+      // spoken. On a host with no loudspeaker this line is the only way the
+      // answer arrives at all; on one with a player it is still the transcript
+      // of what the room just heard, which is what makes a mis-synthesized or
+      // half-drained reply diagnosable instead of merely disappointing.
       say(
         `${c.dim}  ‹ ${c.reset}${c.cyan}${frame.personalityId}${c.reset}${c.dim}:${c.reset} ${frame.text}`,
       );
     },
     onSpeak: (event) => {
-      if (event.type === 'speak_start') {
-        if (!playoutWarned) {
-          playoutWarned = true;
-          say(
-            `${c.yellow}⚠ playout${c.reset} ${c.dim}the server is sending synthesized audio, ` +
-              `and this host has no output device (capabilities.playback: false). ` +
-              `The audio is being discarded — the reply text still prints below.${c.reset}`,
-          );
-        }
+      if (event.type === 'speak_start' && playbackDevice === null && !playoutWarned) {
+        playoutWarned = true;
+        say(
+          `${c.yellow}⚠ playout${c.reset} ${c.dim}the server is sending synthesized audio, ` +
+            `and this host has no player (capabilities.playback: false). ` +
+            `The audio is being discarded — the reply text still prints below. ` +
+            `${pre.player.detail}${c.reset}`,
+        );
       }
       if (event.type === 'turn_end') {
-        // No segment count: this host declares playback: false, so the server
-        // synthesizes nothing for it and the count was always zero. The answer
-        // itself was printed by `onReplyText`; this line only closes the cycle.
-        //
-        // FOUR WAYS A TURN ENDS, and the operator is owed the difference —
-        // because the next thing they should do differs in every one. Two
-        // questions decide it, and neither can be answered by this frame alone:
-        // was an agent called (`personalityId`), and did the server already say
-        // something went wrong with this utterance (`outcome`).
-        //
-        // Ordered so the error-carrying branches come first within each half: a
-        // line that closes a turn while contradicting the error above it is the
-        // defect this shape exists to make impossible.
-        const known = outcome?.utteranceId === event.utteranceId ? outcome.kind : null;
-        outcome = null;
-        if (event.personalityId !== undefined) {
-          say(
-            known === 'refused'
-              ? `${c.dim}  ↩ the turn did not finish — the error above says why. ` +
-                  `Listening again.${c.reset}`
-              : `${c.dim}  ↩ turn complete. Listening again.${c.reset}`,
-          );
-        } else if (known === 'refused') {
-          // A phrase MATCHED and the server declined it. Saying "not addressed
-          // to anyone" here is false — they addressed someone, by a name the
-          // server holds — and "open with a personality's name" sends them to
-          // repeat the thing that just worked instead of to the route setting
-          // the error names.
-          say(
-            `${c.dim}  ↩ no agent was called — the error above says why. ` +
-              `Listening again.${c.reset}`,
-          );
-        } else if (known === 'no-speech') {
-          // Nothing was said, so nothing was left unaddressed. `onTranscript`
-          // has already printed what was heard; this only re-arms.
-          say(`${c.dim}  ↩ listening again.${c.reset}`);
-        } else {
-          // Heard, transcribed, addressed to nobody — the COMMON case in a
-          // room, and the only one where the remedy really is a wake phrase.
-          say(
-            `${c.dim}  ↩ not addressed to anyone — no agent was called. ` +
-              `Open with a personality's name to reach one. Listening again.${c.reset}`,
-          );
-        }
-        // Re-arm. `playback_done` is the honest frame even with nothing played:
-        // it means "the speaker has gone quiet and I am listening again", and
-        // a host with no speaker satisfies the first half trivially.
-        client.sendPlaybackDone(event.utteranceId);
+        const line = closingLine(event.utteranceId, event.personalityId);
         currentUtteranceId = null;
-        machine?.endPlayback();
+        // EVERY ONE OF THOSE LINES ENDS IN "listening again", so on a host that
+        // is about to play four seconds of audio none of them is true yet.
+        // Held and said by `finishPlayout`, at the moment it becomes true. A
+        // host with no playout prints it here exactly as it always did.
+        if (playout === null) say(line);
+        else pendingClose = line;
       }
+      // THE RE-ARM MOVED BEHIND THE SPEAKER. `playback_done` means "the speaker
+      // has gone quiet and I am listening again", and it used to be sent from
+      // the branch above — honest on a host with no loudspeaker, and a lie the
+      // moment one exists: re-arming into the agent's own voice is the
+      // self-wake the suppression window exists to stop. So the playout owns
+      // the receipt now (it fires `onDone` when the device's `end()` resolves,
+      // or when its drain watchdog gives up), and a host with no playout keeps
+      // the immediate path because it satisfies "the speaker is quiet"
+      // trivially.
+      if (playout !== null) {
+        playout.handle(event);
+        return;
+      }
+      if (event.type === 'turn_end') finishPlayout(event.utteranceId, false);
     },
     onSetWakeEnabled: (enabled) => {
       machine?.setMuted(!enabled);
@@ -1661,6 +2308,148 @@ export async function startListenDaemon(
     },
   });
 
+  /**
+   * HOW A TURN CLOSES, in one line the operator can act on.
+   *
+   * FOUR WAYS A TURN ENDS, and the operator is owed the difference — because
+   * the next thing they should do differs in every one. Two questions decide
+   * it, and neither can be answered by the `turn_end` frame alone: was an agent
+   * called (`personalityId`), and did the server already say something went
+   * wrong with this utterance (`outcome`).
+   *
+   * Ordered so the error-carrying branches come first within each half: a line
+   * that closes a turn while contradicting the error above it is the defect
+   * this shape exists to make impossible.
+   *
+   * Returns the line rather than printing it, because WHEN it is printed now
+   * depends on the speaker — see the `turn_end` branch in `onSpeak`.
+   */
+  function closingLine(utteranceId: string, personalityId: string | undefined): string {
+    const known = outcome?.utteranceId === utteranceId ? outcome.kind : null;
+    outcome = null;
+    if (personalityId !== undefined) {
+      return known === 'refused'
+        ? `${c.dim}  ↩ the turn did not finish — the error above says why. Listening again.${c.reset}`
+        : `${c.dim}  ↩ turn complete. Listening again.${c.reset}`;
+    }
+    if (known === 'refused') {
+      // A phrase MATCHED and the server declined it. Saying "not addressed to
+      // anyone" here is false — they addressed someone, by a name the server
+      // holds — and "open with a personality's name" sends them to repeat the
+      // thing that just worked instead of to the route setting the error names.
+      return (
+        `${c.dim}  ↩ no agent was called — the error above says why. ` +
+        `Listening again.${c.reset}`
+      );
+    }
+    if (known === 'no-speech') {
+      // Nothing was said, so nothing was left unaddressed. `onTranscript` has
+      // already printed what was heard; this only re-arms.
+      return `${c.dim}  ↩ listening again.${c.reset}`;
+    }
+    // Heard, transcribed, addressed to nobody — the COMMON case in a room, and
+    // the only one where the remedy really is a wake phrase.
+    return (
+      `${c.dim}  ↩ not addressed to anyone — no agent was called. ` +
+      `Open with a personality's name to reach one. Listening again.${c.reset}`
+    );
+  }
+
+  /**
+   * The microphone comes back. ONE function, whichever end decided it was time
+   * — the playout draining, the drain watchdog giving up, or a host with no
+   * loudspeaker for which the speaker was never busy.
+   *
+   * `timedOut` is not a different code path, only a different sentence: the
+   * re-arm happens either way, because a satellite that stayed deaf because its
+   * player wedged is the failure this lane refuses above all others. It is said
+   * BEFORE the closing line, so the "Listening again" the operator reads has
+   * the caveat directly above it rather than trailing behind.
+   */
+  function finishPlayout(utteranceId: string, timedOut: boolean): void {
+    if (timedOut) {
+      say(
+        `${c.yellow}⚠ playout${c.reset} ${c.dim}the player never reported the speaker draining ` +
+          `for utterance ${utteranceId} — listening again anyway, without a drained-playout ` +
+          `receipt. A reply may still be audible while this microphone is live.${c.reset}`,
+      );
+    }
+    const line = pendingClose;
+    pendingClose = null;
+    if (line !== null) say(line);
+    client.sendPlaybackDone(utteranceId);
+    machine?.endPlayback();
+  }
+
+  /**
+   * Transcribe one utterance HERE and send the words, never the samples.
+   *
+   * WHAT HAPPENS WHEN THE RECOGNIZER FAILS is the interesting half, and there
+   * is exactly one acceptable answer. Falling back to the audio path would
+   * upload the room the operator asked to keep private — the worst possible
+   * response to a local failure — and sending nothing would leave the server
+   * holding an utterance it will never close, which parks this microphone in
+   * `speaking` until the capture watchdog fires minutes later. So the utterance
+   * closes as an EMPTY transcript: the server matches it against nobody, sends
+   * `turn_end`, and this node re-arms. Loudly, because an operator whose
+   * recognizer is broken must not read the silence as a quiet room.
+   *
+   * The staleness check is the same discipline the audio path has: a transcript
+   * for an utterance that has already been superseded is dropped rather than
+   * attached to whatever is in flight now.
+   */
+  async function transcribeOnDevice(
+    provider: SttProvider,
+    utteranceId: string,
+    frames: WakeFrame[],
+    truncated: boolean,
+  ): Promise<void> {
+    let text: string;
+    try {
+      text = await provider.transcribeBuffer({
+        data: encodeUtteranceWav(frames, pre.sampleRate),
+        mimeType: 'audio/wav',
+      });
+    } catch (err) {
+      say(
+        `${c.yellow}⚠ edge stt${c.reset} ${c.dim}on-device transcription failed: ` +
+          `${err instanceof Error ? err.message : String(err)}. The utterance was discarded ` +
+          `and NO audio was sent upstream — edge mode does not fall back to uploading the ` +
+          `room. Listening again.${c.reset}`,
+      );
+      text = '';
+    }
+    if (currentUtteranceId !== utteranceId) return;
+    if (truncated) {
+      say(
+        `${c.yellow}⚠ edge stt${c.reset} ${c.dim}utterance ${utteranceId} exceeded ` +
+          `${EDGE_UTTERANCE_MAX_BYTES} bytes and was transcribed without its tail.${c.reset}`,
+      );
+    }
+    client.sendTranscript(utteranceId, text);
+  }
+
+  if (playbackDevice !== null) {
+    playout = new SatellitePlayout({
+      device: playbackDevice,
+      setTimer: (fn, ms) => setTimeout(fn, ms),
+      clearTimer: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
+      onDone: ({ utteranceId, timedOut }) => finishPlayout(utteranceId, timedOut),
+      onProblem: (problem) => {
+        // The watchdog says its own piece in `finishPlayout`, next to the
+        // re-arm it caused; repeating it here would print the same failure
+        // twice under two different headings.
+        if (problem.kind === 'watchdog') return;
+        if (playoutProblemWarned) return;
+        playoutProblemWarned = true;
+        say(
+          `${c.yellow}⚠ playout${c.reset} ${c.dim}${problem.reason} The reply text still ` +
+            `prints; said once, not once per turn.${c.reset}`,
+        );
+      },
+    });
+  }
+
   // Both are assigned further down, but the signal handlers below are installed
   // FIRST: Ctrl+C during the wait for the server's route table must still stop
   // the process rather than being ignored until capture starts.
@@ -1687,6 +2476,9 @@ export async function startListenDaemon(
     if (heartbeatTimer) clearInterval(heartbeatTimer);
     await storage.remove(listenHealthPath()).catch(() => {});
     client.close();
+    // `cancel`, not a drain: a Ctrl+C that waited politely for the agent to
+    // finish its sentence would be a daemon that ignores Ctrl+C.
+    playout?.cancel();
     machine?.stop();
     await device.stop().catch(() => {});
     leave(code);
@@ -1725,7 +2517,7 @@ export async function startListenDaemon(
     say(`${c.yellow}⚠ routes${c.reset} ${c.dim}${EMPTY_TABLE_WARNING}${c.reset}`);
   }
 
-  const engine = createOpenMicEngine();
+  const engine = createOpenMicEngine(pre.vadTuning);
   // The engine matches nothing, so the routes and the sensitivity it is handed
   // decide nothing either — they are the seam's shape, not this host's policy.
   // The table that matters is the server's, applied to the transcript.
@@ -1734,7 +2526,7 @@ export async function startListenDaemon(
   const capture = new CaptureMachine(
     {
       engine,
-      vad: createEnergyFrameVad(),
+      vad: createEnergyFrameVad(pre.vadTuning),
       now: () => Date.now(),
       setTimer: (fn, ms) => setTimeout(fn, ms),
       clearTimer: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
@@ -1767,6 +2559,13 @@ export async function startListenDaemon(
         const utteranceId = openUtteranceId ?? `u${++utteranceSeq}-${stamp}`;
         currentUtteranceId = utteranceId;
         audioSeq = 0;
+        // Whatever the last utterance left behind goes with it. On the edge
+        // path a re-arm through the watchdog can strand held frames, and
+        // transcribing THOSE against this utterance would put the previous
+        // room's words in front of a personality that was never told them.
+        edgeFrames = [];
+        edgeBytes = 0;
+        edgeTruncated = false;
         client.sendWake({
           wakeId,
           // No phrase and no personality: this engine matched SOUND. `routeId`
@@ -1778,13 +2577,44 @@ export async function startListenDaemon(
         client.sendUtteranceStart({ wakeId, utteranceId, sampleRate: pre.sampleRate });
       },
       onAudio: (frame) => {
-        if (currentUtteranceId === null) return;
-        client.sendAudio(currentUtteranceId, audioSeq++, frame.samples);
+        const utteranceId = currentUtteranceId;
+        if (utteranceId === null) return;
+        if (edgeSttProvider !== null) {
+          // HELD, NOT SENT — and this is the entire privacy claim, expressed as
+          // a branch that has no `client.sendAudio` in it. The recognizer runs
+          // on this box at `onUtteranceEnd`; nothing on this path can put a
+          // sample on the wire, which is a stronger guarantee than a flag the
+          // server is trusted to honour.
+          const bytes = frame.samples.length * 2;
+          if (edgeBytes + bytes > EDGE_UTTERANCE_MAX_BYTES) {
+            edgeTruncated = true;
+            return;
+          }
+          edgeBytes += bytes;
+          edgeFrames.push(frame);
+          return;
+        }
+        client.sendAudio(utteranceId, audioSeq++, frame.samples);
       },
       onUtteranceEnd: () => {
         openUtteranceId = null;
         if (currentUtteranceId === null) return;
-        client.sendUtteranceEnd(currentUtteranceId);
+        if (edgeSttProvider === null) {
+          client.sendUtteranceEnd(currentUtteranceId);
+        } else {
+          // The transcript IS the end of the utterance on an edge node — the
+          // wire contract makes `transcript` and `audio`/`utterance_end`
+          // alternatives, and the client refuses the second kind for an
+          // utterance that already sent the first. Detached, because
+          // recognition takes as long as it takes and the frame handlers
+          // (`state`, the next wake) must not queue behind it.
+          const frames = edgeFrames;
+          const truncated = edgeTruncated;
+          edgeFrames = [];
+          edgeBytes = 0;
+          edgeTruncated = false;
+          void transcribeOnDevice(edgeSttProvider, currentUtteranceId, frames, truncated);
+        }
         // The machine has no "waiting for the server" state, and `thinking` has
         // no watchdog — so the window between utterance_end and turn_end is
         // modelled as playback. It is the interval in which the reply is being
@@ -1893,11 +2723,24 @@ export async function startListenDaemon(
   // answer. Both halves are load-bearing — the first is a privacy fact, the
   // second is the whole interaction model.
   say(
-    `${c.dim}Open mic: EVERYTHING heard here is transcribed by the server. An utterance ` +
+    `${c.dim}Open mic: EVERYTHING heard here is transcribed ` +
+      `${
+        edgeSttProvider === null
+          ? 'by the server'
+          : `ON THIS MACHINE by ${pre.edgeStt.providerId ?? 'the local recognizer'} — no captured audio leaves it`
+      }. An utterance ` +
       `reaches an agent only when it OPENS with a personality's NAME — that name picks the ` +
       `personality, and a greeting in front of it is optional — and follow-ups within ` +
       `${Math.round(idleWindowMs / 1000)}s ` +
       `continue with the same one. Anything else is heard and discarded.${c.reset}`,
+  );
+  // Said at startup rather than at the first reply, because "will this thing
+  // talk back?" is a question the operator has while they are still standing in
+  // front of it — not one they should discover from the absence of a sound.
+  say(
+    playbackDevice === null
+      ? `${c.yellow}⚠ speaker${c.reset} ${c.dim}replies here are TEXT ONLY — ${pre.player.detail}${c.reset}`
+      : `${c.dim}Replies are spoken through ${c.reset}${c.bold}${pre.player.player?.kind ?? 'the configured player'}${c.reset}${c.dim}; the text prints too.${c.reset}`,
   );
   if (pinnedRoute === null) {
     const addressable = pushed.filter((r) => r.enabled);

@@ -14,6 +14,7 @@ const srcAliases = {
   '@ethosagent/plugin-sdk/testing': resolve('./packages/plugin-sdk/src/testing.ts'),
   '@ethosagent/plugin-contract': resolve('./packages/plugin-contract/src'),
   '@ethosagent/batch-runner': resolve('./extensions/batch-runner/src'),
+  '@ethosagent/call-log': resolve('./extensions/call-log/src'),
   '@ethosagent/eval-harness': resolve('./extensions/eval-harness/src'),
   '@ethosagent/skill-evolver': resolve('./extensions/skill-evolver/src'),
   '@ethosagent/memory-vector': resolve('./extensions/memory-vector/src'),

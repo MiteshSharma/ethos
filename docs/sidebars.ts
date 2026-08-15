@@ -43,6 +43,7 @@ const sidebars: SidebarsConfig = {
             'using/how-to/local-voice',
             'using/how-to/voice-notes-on-channels',
             'using/how-to/run-a-wake-satellite',
+            'using/how-to/answer-phone-calls',
             'using/how-to/deploy-in-production',
             'using/how-to/deploy-on-ec2',
             'using/how-to/run-multiple-bots',

@@ -464,7 +464,12 @@ function configWithEveryCredential(): EthosConfig {
     voice: {
       bots: [{ match: 'room-*', bind: { type: 'personality', name: 'researcher' } }],
       livekit: { url: 'wss://live.example.com', apiKey: 'PLAIN-lk-key', apiSecret: 'PLAIN-lk-sec' },
-      trunk: { provider: 'twilio', trunkId: 'ST_1', password: 'PLAIN-sip' },
+      trunk: {
+        provider: 'twilio',
+        trunkId: 'ST_1',
+        password: 'PLAIN-sip',
+        webhookSecret: 'PLAIN-sip-webhook',
+      },
     },
     auxiliary: {
       compression: { model: 'm', apiKey: 'PLAIN-aux-compression' },
@@ -543,6 +548,7 @@ describe('writeConfig externalizes every credential field', () => {
         'voice/livekit/apiKey',
         'voice/livekit/apiSecret',
         'voice/trunk/password',
+        'voice/trunk/webhookSecret',
         'webhooks/hook1/secret',
       ].sort(),
     );

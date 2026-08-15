@@ -149,6 +149,7 @@ type QuickCommandPatch = NonNullable<ConfigUpdatePatch['quickCommands']>[string]
 type VoiceTtsProviderPatch = NonNullable<ConfigUpdatePatch['voiceTtsProviders']>[string];
 type VoiceSttProviderPatch = NonNullable<ConfigUpdatePatch['voiceSttProviders']>[string];
 type VoiceRealtimeProviderPatch = NonNullable<ConfigUpdatePatch['voiceRealtimeProviders']>[string];
+type VoiceBargeInPatch = NonNullable<ConfigUpdatePatch['voiceBargeIn']>[string];
 type RetentionSubkey = keyof ConfigGetData['retention'];
 
 /** Mirrors ConfigRecordKeySchema in @ethosagent/web-contracts. */
@@ -445,6 +446,349 @@ function auxPatchFromForm(a: AuxModelFormShape): NonNullable<ConfigUpdatePatch['
   };
 }
 
+// ---------------------------------------------------------------------------
+// Telephony (voice V4) — `voice.trunk.*`, `voice.livekit.*`, `voice.inbound.*`,
+// `voice.bargeIn.*`, `voice.bots[]`.
+//
+// Every one of these keys was previously reachable only by hand-editing
+// config.yaml. A phone number is the surface strangers can dial, so its
+// allowlist, its budget and the personality that answers it have to be visible
+// where the deployment is managed — a yaml-only telephony key is a guard nobody
+// can see.
+//
+// The patch builder is at module scope, pure, and exported: THREE of these keys
+// come in blocks the CLI parser will not load half of (provider+trunkId,
+// url+apiKey+apiSecret, platform+chatId), so "can this form save half a block"
+// is a question that has to be answerable without mounting the form.
+// ---------------------------------------------------------------------------
+
+const TRUNK_PROVIDERS = ['twilio', 'telnyx', 'generic', 'livekit'] as const;
+const TRUNK_CODECS = ['opus', 'g711'] as const;
+const INBOUND_PREWARMS = ['allowlisted', 'none', 'all'] as const;
+/** The surfaces `voice.bargeIn.<surface>` accepts. Browser talk-mode is not one
+ *  of them — it endpoints in the browser, off the `display.voice_*` sliders in
+ *  "Advanced voice tuning" higher up this same card. */
+const BARGE_IN_SURFACES = ['call', 'satellite'] as const;
+type BargeInSurface = (typeof BARGE_IN_SURFACES)[number];
+
+const BARGE_IN_SURFACE_LABELS: Record<BargeInSurface, string> = {
+  call: 'Phone call',
+  satellite: 'Wake satellite',
+};
+
+function trunkProviderOrNull(value: string): (typeof TRUNK_PROVIDERS)[number] | null {
+  return TRUNK_PROVIDERS.find((p) => p === value) ?? null;
+}
+
+function trunkCodecOrNull(value: string): (typeof TRUNK_CODECS)[number] | null {
+  return TRUNK_CODECS.find((c) => c === value) ?? null;
+}
+
+function inboundPrewarmOrNull(value: string): (typeof INBOUND_PREWARMS)[number] | null {
+  return INBOUND_PREWARMS.find((p) => p === value) ?? null;
+}
+
+export interface VoiceBargeInForm {
+  energyThreshold: number | null;
+  minSpeechMs: number | null;
+  silenceMs: number | null;
+}
+
+/** Every surface gets a slot, tuned or not, so the form always has a row per
+ *  surface to render. An untuned surface is all-null and the patch builder drops
+ *  it again — round-tripping "never tuned" rather than writing defaults over it. */
+export function voiceBargeInFromConfig(
+  map: ConfigGetData['voiceBargeIn'],
+): Record<string, VoiceBargeInForm> {
+  const out: Record<string, VoiceBargeInForm> = {};
+  for (const surface of BARGE_IN_SURFACES) {
+    const entry = map[surface];
+    out[surface] = {
+      energyThreshold: entry?.energyThreshold ?? null,
+      minSpeechMs: entry?.minSpeechMs ?? null,
+      silenceMs: entry?.silenceMs ?? null,
+    };
+  }
+  return out;
+}
+
+export interface VoiceTelephonyFormValues {
+  voiceTrunkProvider: string;
+  voiceTrunkId: string;
+  voiceTrunkFromNumber: string;
+  voiceTrunkUsername: string;
+  /** Write-only. Blank KEEPS the stored secret — the browser only ever saw a
+   *  preview, so it has nothing to type back. */
+  voiceTrunkPassword: string;
+  voiceTrunkWebhookSecret: string;
+  voiceTrunkWebhookPath: string;
+  voiceTrunkCodec: string;
+  voiceLivekitUrl: string;
+  voiceLivekitApiKey: string;
+  voiceLivekitApiSecret: string;
+  voiceInboundAllowlist: string[];
+  voiceInboundReceptionist: string;
+  voiceInboundConcurrencyCap: number | null;
+  voiceInboundPerCallerPerHour: number | null;
+  voiceInboundDailyBudgetUsd: number | null;
+  voiceInboundPrewarm: string;
+  voiceInboundOwnerPlatform: string;
+  voiceInboundOwnerChatId: string;
+  voiceInboundOwnerBotKey: string;
+  voiceBargeIn: Record<string, VoiceBargeInForm>;
+}
+
+/** What `config.get` said is already on disk. Only the redacted previews are
+ *  needed: they are how the builder knows a secret EXISTS without having it. */
+export interface VoiceTelephonyStoredSecrets {
+  voiceTrunkPasswordPreview: string | null;
+  voiceTrunkWebhookSecretPreview: string | null;
+  voiceLivekitApiKeyPreview: string | null;
+  voiceLivekitApiSecretPreview: string | null;
+}
+
+export type VoiceTelephonyPatch = Pick<
+  ConfigUpdatePatch,
+  | 'voiceTrunkProvider'
+  | 'voiceTrunkId'
+  | 'voiceTrunkFromNumber'
+  | 'voiceTrunkUsername'
+  | 'voiceTrunkPassword'
+  | 'voiceTrunkWebhookSecret'
+  | 'voiceTrunkWebhookPath'
+  | 'voiceTrunkCodec'
+  | 'voiceLivekitUrl'
+  | 'voiceLivekitApiKey'
+  | 'voiceLivekitApiSecret'
+  | 'voiceInboundAllowlist'
+  | 'voiceInboundReceptionist'
+  | 'voiceInboundConcurrencyCap'
+  | 'voiceInboundPerCallerPerHour'
+  | 'voiceInboundDailyBudgetUsd'
+  | 'voiceInboundPrewarm'
+  | 'voiceInboundOwnerPlatform'
+  | 'voiceInboundOwnerChatId'
+  | 'voiceInboundOwnerBotKey'
+  | 'voiceBargeIn'
+>;
+
+export type VoiceTelephonyPatchResult =
+  | { ok: true; patch: VoiceTelephonyPatch }
+  | { ok: false; error: string };
+
+/**
+ * Form values → the telephony half of a `config.update` patch.
+ *
+ * Three invariants, each of which the CLI parser turns into a load failure
+ * rather than a warning if the form gets it wrong:
+ *
+ *  1. **A block is all or nothing.** `voice.trunk.*` needs provider AND
+ *     trunkId; `voice.livekit.*` needs url AND apiKey AND apiSecret;
+ *     `voice.inbound.owner.*` needs platform AND chatId. Clearing the ANCHOR
+ *     (provider / url / platform) clears the whole block and the rest of the
+ *     fields are not sent — half a block on disk is a parse error, so "clear
+ *     the trunk" has to mean the block. Filling the anchor without its partner
+ *     is refused HERE, with a sentence, rather than saved and discovered on a
+ *     ringing phone.
+ *  2. **A blank secret keeps the stored one.** The browser is handed a preview,
+ *     never a credential, so blank cannot mean "erase" — it would delete a
+ *     password every time somebody saved an unrelated field. LiveKit's
+ *     all-or-nothing check therefore counts a STORED secret as present.
+ *  3. **An empty allowlist clears the key.** `voice.inbound.allowlist: []` is
+ *     not expressible in the flat config format, and the policy it would mean
+ *     ("nobody is trusted") is spelled `voice.inbound.receptionist`.
+ */
+export function voiceTelephonyPatch(
+  values: VoiceTelephonyFormValues,
+  stored: VoiceTelephonyStoredSecrets,
+): VoiceTelephonyPatchResult {
+  const trunkProvider = trunkProviderOrNull(values.voiceTrunkProvider);
+  const trunkId = values.voiceTrunkId.trim();
+  const webhookPath = values.voiceTrunkWebhookPath.trim();
+
+  let trunk: VoiceTelephonyPatch;
+  if (trunkProvider === null) {
+    trunk = { voiceTrunkProvider: null };
+  } else if (!trunkId) {
+    return {
+      ok: false,
+      error:
+        'Telephony: a trunk needs both a provider and a trunk id. Add the trunk id, or clear the provider to remove telephony entirely.',
+    };
+  } else if (webhookPath && !webhookPath.startsWith('/')) {
+    return { ok: false, error: 'Telephony: the webhook path must start with “/”.' };
+  } else {
+    trunk = {
+      voiceTrunkProvider: trunkProvider,
+      voiceTrunkId: trunkId,
+      voiceTrunkFromNumber: values.voiceTrunkFromNumber.trim() || null,
+      voiceTrunkUsername: values.voiceTrunkUsername.trim() || null,
+      voiceTrunkWebhookPath: webhookPath || null,
+      voiceTrunkCodec: trunkCodecOrNull(values.voiceTrunkCodec),
+      ...(values.voiceTrunkPassword ? { voiceTrunkPassword: values.voiceTrunkPassword } : {}),
+      ...(values.voiceTrunkWebhookSecret
+        ? { voiceTrunkWebhookSecret: values.voiceTrunkWebhookSecret }
+        : {}),
+    };
+  }
+
+  const livekitUrl = values.voiceLivekitUrl.trim();
+  let livekit: VoiceTelephonyPatch;
+  if (!livekitUrl) {
+    livekit = { voiceLivekitUrl: null };
+  } else {
+    const hasKey = Boolean(values.voiceLivekitApiKey || stored.voiceLivekitApiKeyPreview);
+    const hasSecret = Boolean(values.voiceLivekitApiSecret || stored.voiceLivekitApiSecretPreview);
+    if (!hasKey || !hasSecret) {
+      return {
+        ok: false,
+        error:
+          'LiveKit: the server URL needs an API key and an API secret with it. Add both, or clear the URL to remove the LiveKit block.',
+      };
+    }
+    livekit = {
+      voiceLivekitUrl: livekitUrl,
+      ...(values.voiceLivekitApiKey ? { voiceLivekitApiKey: values.voiceLivekitApiKey } : {}),
+      ...(values.voiceLivekitApiSecret
+        ? { voiceLivekitApiSecret: values.voiceLivekitApiSecret }
+        : {}),
+    };
+  }
+
+  const ownerPlatform = values.voiceInboundOwnerPlatform.trim();
+  const ownerChatId = values.voiceInboundOwnerChatId.trim();
+  let owner: VoiceTelephonyPatch;
+  if (!ownerPlatform) {
+    owner = { voiceInboundOwnerPlatform: null };
+  } else if (!ownerChatId) {
+    return {
+      ok: false,
+      error:
+        'Call notices: a destination needs both a platform and a chat id. Add the chat id, or clear the platform to stop delivering call summaries.',
+    };
+  } else {
+    owner = {
+      voiceInboundOwnerPlatform: ownerPlatform,
+      voiceInboundOwnerChatId: ownerChatId,
+      voiceInboundOwnerBotKey: values.voiceInboundOwnerBotKey.trim() || null,
+    };
+  }
+
+  const allowlist = values.voiceInboundAllowlist.map((n) => n.trim()).filter((n) => n.length > 0);
+
+  const bargeIn: Record<string, VoiceBargeInPatch> = {};
+  for (const surface of BARGE_IN_SURFACES) {
+    const tuning = values.voiceBargeIn[surface];
+    if (!tuning) continue;
+    const entry: VoiceBargeInPatch = {
+      ...(tuning.energyThreshold === null ? {} : { energyThreshold: tuning.energyThreshold }),
+      ...(tuning.minSpeechMs === null ? {} : { minSpeechMs: tuning.minSpeechMs }),
+      ...(tuning.silenceMs === null ? {} : { silenceMs: tuning.silenceMs }),
+    };
+    // A surface with nothing set was never tuned, which is a different fact
+    // from "tuned to the defaults" — so it is omitted, not written empty.
+    if (Object.keys(entry).length > 0) bargeIn[surface] = entry;
+  }
+
+  return {
+    ok: true,
+    patch: {
+      ...trunk,
+      ...livekit,
+      ...owner,
+      voiceInboundAllowlist: allowlist.length > 0 ? allowlist : null,
+      voiceInboundReceptionist: values.voiceInboundReceptionist.trim() || null,
+      voiceInboundConcurrencyCap: values.voiceInboundConcurrencyCap ?? null,
+      voiceInboundPerCallerPerHour: values.voiceInboundPerCallerPerHour ?? null,
+      voiceInboundDailyBudgetUsd: values.voiceInboundDailyBudgetUsd ?? null,
+      voiceInboundPrewarm: inboundPrewarmOrNull(values.voiceInboundPrewarm),
+      voiceBargeIn: bargeIn,
+    },
+  };
+}
+
+/** One `voice.bots[]` row: which number reaches which agent. */
+export interface VoiceBotRow {
+  _id: number;
+  /** '' = let the loader derive one from `match`. */
+  id: string;
+  match: string;
+  bindType: 'personality' | 'team';
+  bindName: string;
+  allowSlashSwitch: boolean;
+}
+
+export function voiceBotRowsFromConfig(bots: ConfigGetData['voiceBots']): VoiceBotRow[] {
+  return bots.map((bot) => ({
+    _id: nextRowId++,
+    id: bot.id ?? '',
+    match: bot.match,
+    bindType: bot.bind.type,
+    bindName: bot.bind.name,
+    allowSlashSwitch: bot.bind.allowSlashSwitch,
+  }));
+}
+
+export type VoiceBotsPatchResult =
+  | { ok: true; bots: NonNullable<ConfigUpdatePatch['voiceBots']> }
+  | { ok: false; error: string };
+
+/** Rows → the full-replacement `voice.bots[]` list. A removed row IS a
+ *  deletion, so the table is validated before it can delete anything. */
+export function voiceBotsPatchFromRows(rows: VoiceBotRow[]): VoiceBotsPatchResult {
+  const bots: NonNullable<ConfigUpdatePatch['voiceBots']> = [];
+  const seenIds = new Set<string>();
+  for (const row of rows) {
+    const match = row.match.trim();
+    const bindName = row.bindName.trim();
+    const id = row.id.trim();
+    if (!match) return { ok: false, error: 'Numbers: every row needs a number or room to match.' };
+    if (!bindName) {
+      return { ok: false, error: `Numbers: "${match}" needs a personality or team to answer it.` };
+    }
+    if (id && !RECORD_KEY_RE.test(id)) {
+      return {
+        ok: false,
+        error: `Numbers: the bot id "${id}" becomes a config.yaml key — letters, digits, hyphens and underscores only.`,
+      };
+    }
+    if (id && seenIds.has(id)) return { ok: false, error: `Numbers: duplicate bot id "${id}".` };
+    if (id) seenIds.add(id);
+    bots.push({
+      ...(id ? { id } : {}),
+      match,
+      bind: {
+        type: row.bindType,
+        name: bindName,
+        ...(row.allowSlashSwitch ? { allowSlashSwitch: true } : {}),
+      },
+    });
+  }
+  return { ok: true, bots };
+}
+
+/**
+ * The guided first-call moment (DR2) — the last step of the first-run journey.
+ *
+ * Read off the SAVED config, never the live form: you can only dial a number
+ * that is actually on disk, and an invitation to call an unsaved draft is an
+ * invitation to hear a busy tone. Returns null when there is no trunk yet —
+ * there is nothing to invite anyone to.
+ */
+export function firstCallInvitation(
+  config: Pick<ConfigGetData, 'voiceTrunkProvider' | 'voiceTrunkId' | 'voiceTrunkFromNumber'> & {
+    voiceBots: ConfigGetData['voiceBots'];
+  },
+): { number: string; answeredBy: string | null } | null {
+  if (!config.voiceTrunkProvider || !config.voiceTrunkId) return null;
+  // A wildcard row matches numbers; it is not one you can dial. The trunk's own
+  // caller ID is the fallback, because on most trunks it is also the DID.
+  const dialable = config.voiceBots.find((bot) => !bot.match.includes('*') && bot.match.trim());
+  const number = dialable?.match.trim() ?? config.voiceTrunkFromNumber?.trim() ?? '';
+  if (!number) return null;
+  return { number, answeredBy: dialable?.bind.name ?? null };
+}
+
 /** Same bordered-box style the provider-chain rows use. */
 const ROW_BOX_STYLE: CSSProperties = {
   border: '1px solid var(--ethos-border, #d9d9d9)',
@@ -554,7 +898,9 @@ function RowTestButton({
 // in the provider chain state)
 // ---------------------------------------------------------------------------
 
-interface FormShape {
+// Extends rather than restates the telephony fields: the patch builder and the
+// form must agree on them exactly, and a duplicated list is a list that drifts.
+interface FormShape extends VoiceTelephonyFormValues {
   personality: string;
   memory: 'markdown' | 'vector' | 'vault';
   skin: string;
@@ -1220,6 +1566,7 @@ export function Settings() {
     [],
   );
   const [retentionRows, setRetentionRows] = useState<RetentionRow[]>([]);
+  const [voiceBotRows, setVoiceBotRows] = useState<VoiceBotRow[]>([]);
   const hydratedRef = useRef(false);
 
   const configQuery = useQuery({
@@ -1295,6 +1642,29 @@ export function Settings() {
         voiceTier: configQuery.data.voiceTier ?? '',
         voiceRealtimeDefault: configQuery.data.voiceRealtimeDefault ?? '',
         voiceRealtimeSessionBudgetUsd: configQuery.data.voiceRealtimeSessionBudgetUsd,
+        // Telephony. The four secret fields hydrate BLANK on purpose — blank
+        // means "keep what is stored", and the previews are shown beside them.
+        voiceTrunkProvider: configQuery.data.voiceTrunkProvider ?? '',
+        voiceTrunkId: configQuery.data.voiceTrunkId ?? '',
+        voiceTrunkFromNumber: configQuery.data.voiceTrunkFromNumber ?? '',
+        voiceTrunkUsername: configQuery.data.voiceTrunkUsername ?? '',
+        voiceTrunkPassword: '',
+        voiceTrunkWebhookSecret: '',
+        voiceTrunkWebhookPath: configQuery.data.voiceTrunkWebhookPath ?? '',
+        voiceTrunkCodec: configQuery.data.voiceTrunkCodec ?? '',
+        voiceLivekitUrl: configQuery.data.voiceLivekitUrl ?? '',
+        voiceLivekitApiKey: '',
+        voiceLivekitApiSecret: '',
+        voiceInboundAllowlist: configQuery.data.voiceInboundAllowlist ?? [],
+        voiceInboundReceptionist: configQuery.data.voiceInboundReceptionist ?? '',
+        voiceInboundConcurrencyCap: configQuery.data.voiceInboundConcurrencyCap,
+        voiceInboundPerCallerPerHour: configQuery.data.voiceInboundPerCallerPerHour,
+        voiceInboundDailyBudgetUsd: configQuery.data.voiceInboundDailyBudgetUsd,
+        voiceInboundPrewarm: configQuery.data.voiceInboundPrewarm ?? '',
+        voiceInboundOwnerPlatform: configQuery.data.voiceInboundOwnerPlatform ?? '',
+        voiceInboundOwnerChatId: configQuery.data.voiceInboundOwnerChatId ?? '',
+        voiceInboundOwnerBotKey: configQuery.data.voiceInboundOwnerBotKey ?? '',
+        voiceBargeIn: voiceBargeInFromConfig(configQuery.data.voiceBargeIn),
         displayVerbosity: configQuery.data.displayVerbosity,
         displayBusyInputMode: configQuery.data.displayBusyInputMode,
         displayToolPreviewLength: configQuery.data.displayToolPreviewLength,
@@ -1365,6 +1735,7 @@ export function Settings() {
             configQuery.data.personalityRetention,
           ),
         );
+        setVoiceBotRows(voiceBotRowsFromConfig(configQuery.data.voiceBots));
         hydratedRef.current = true;
       }
     }
@@ -1550,6 +1921,19 @@ export function Settings() {
       voiceRealtimeProviders[name] = voiceRealtimeProviderPatchFromRow(row);
     }
 
+    // Telephony blocks are all-or-nothing on disk, so a half-filled block is
+    // refused here with the sentence that says which half is missing — before
+    // anything is written, and never as a half-block the CLI cannot load.
+    const telephony = voiceTelephonyPatch(values, {
+      voiceTrunkPasswordPreview: configQuery.data?.voiceTrunkPasswordPreview ?? null,
+      voiceTrunkWebhookSecretPreview: configQuery.data?.voiceTrunkWebhookSecretPreview ?? null,
+      voiceLivekitApiKeyPreview: configQuery.data?.voiceLivekitApiKeyPreview ?? null,
+      voiceLivekitApiSecretPreview: configQuery.data?.voiceLivekitApiSecretPreview ?? null,
+    });
+    if (!telephony.ok) return fail(telephony.error);
+    const voiceBots = voiceBotsPatchFromRows(voiceBotRows);
+    if (!voiceBots.ok) return fail(voiceBots.error);
+
     const retention: Partial<Record<RetentionSubkey, string>> = {};
     const personalityRetention: Record<string, Partial<Record<RetentionSubkey, string>>> = {};
     for (const row of retentionRows) {
@@ -1637,6 +2021,8 @@ export function Settings() {
       voiceTier: voiceTierOrNull(values.voiceTier),
       voiceRealtimeDefault: realtimeDefault || null,
       voiceRealtimeSessionBudgetUsd: values.voiceRealtimeSessionBudgetUsd ?? null,
+      ...telephony.patch,
+      voiceBots: voiceBots.bots,
       ...(!values.voiceEnabled
         ? configQuery.data?.voiceProvider || configQuery.data?.voiceTtsProvider
           ? { voiceProvider: '', voiceTtsProvider: '' }
@@ -2893,6 +3279,14 @@ export function Settings() {
               <Switch />
             </Form.Item>
           ))}
+          {configQuery.data ? (
+            <VoiceTelephonySections
+              config={configQuery.data}
+              personalities={personalities}
+              botRows={voiceBotRows}
+              setBotRows={setVoiceBotRows}
+            />
+          ) : null}
           <VoiceSectionLabel>Wake routes</VoiceSectionLabel>
           <Typography.Paragraph type="secondary" style={{ marginTop: 0, fontSize: 13 }}>
             Which phrase wakes which personality, on every connected satellite. Saving pushes the
@@ -3261,6 +3655,476 @@ function VoiceProviderRoster({
         {spec.addLabel}
       </Button>
     </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Telephony panels (voice V4) — inside the existing Voice card, split by
+// section labels. No new Card: "cards earn existence", and a phone number is
+// part of the same subject as the microphone and the voice that answers it.
+// ---------------------------------------------------------------------------
+
+/**
+ * The guided first-call moment (DR2) — the last step of the first-run journey.
+ *
+ * An invitation, not a status line. Everything above it is configuration; this
+ * is the sentence that says the configuration is finished and what to do with
+ * it. It appears only once a trunk is actually saved, so it never invites
+ * anyone to dial a draft.
+ */
+function FirstCallInvitation({ config }: { config: ConfigGetData }) {
+  const invitation = firstCallInvitation(config);
+  if (!config.voiceTrunkProvider || !config.voiceTrunkId) return null;
+  if (!invitation) {
+    // A trunk with no dialable number is the one honest gap in the journey:
+    // say what is missing rather than inviting a call to nowhere.
+    return (
+      <Typography.Paragraph type="secondary" style={{ marginTop: 0, fontSize: 13 }}>
+        Your trunk is connected. Add the number it answers under <strong>Numbers</strong> below, and
+        this turns into an invitation to call it.
+      </Typography.Paragraph>
+    );
+  }
+  return (
+    <div className="call-invite">
+      <Typography.Text strong>Call your number to try it</Typography.Text>
+      <span className="call-mono call-invite-number">{invitation.number}</span>
+      <Typography.Text type="secondary" style={{ fontSize: 13 }}>
+        {invitation.answeredBy
+          ? `Ring it from any phone and ${invitation.answeredBy} picks up. The call lands in Communications → Calls while it is still going.`
+          : 'Ring it from any phone. The call lands in Communications → Calls while it is still going.'}
+      </Typography.Text>
+    </div>
+  );
+}
+
+/** The `voice.bots[]` editor: which number reaches which agent. Add/remove
+ *  dense rows, full replacement on save — the same contract the provider
+ *  rosters have, for the same reason (a removed row IS a deletion). */
+function VoiceBotRoster({
+  rows,
+  setRows,
+  personalities,
+}: {
+  rows: VoiceBotRow[];
+  setRows: Dispatch<SetStateAction<VoiceBotRow[]>>;
+  personalities: PersonalityOption[];
+}) {
+  const update = (index: number, patch: Partial<VoiceBotRow>) =>
+    setRows((prev) => prev.map((r, i) => (i === index ? { ...r, ...patch } : r)));
+  const remove = (index: number) => setRows((prev) => prev.filter((_, i) => i !== index));
+  const add = () =>
+    setRows((prev) => [
+      ...prev,
+      {
+        _id: nextRowId++,
+        id: '',
+        match: '',
+        bindType: 'personality',
+        bindName: '',
+        allowSlashSwitch: false,
+      },
+    ]);
+
+  return (
+    <div style={{ marginBottom: 16 }}>
+      <Typography.Paragraph type="secondary" style={{ marginTop: 0, fontSize: 13 }}>
+        Which number or LiveKit room each agent answers. <code>*</code> wildcards are allowed, so{' '}
+        <code>+1555*</code> catches a whole range. Saving replaces the whole list, and the rows are
+        renumbered — a removed row is a deleted bot.
+      </Typography.Paragraph>
+      {rows.map((row, idx) => (
+        <div key={row._id} style={ROW_BOX_STYLE}>
+          <div
+            style={{
+              display: 'flex',
+              justifyContent: 'space-between',
+              alignItems: 'center',
+              marginBottom: 8,
+            }}
+          >
+            <Typography.Text style={{ fontFamily: 'Geist Mono, monospace', fontSize: 12 }}>
+              {row.match || '<number>'}
+            </Typography.Text>
+            <Button size="small" danger onClick={() => remove(idx)}>
+              Remove
+            </Button>
+          </div>
+          <div style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
+            <div style={{ flex: 1 }}>
+              <RowLabel>Number or room</RowLabel>
+              <Input
+                size="small"
+                style={{ fontFamily: 'Geist Mono, monospace' }}
+                placeholder="+15551234567"
+                value={row.match}
+                onChange={(e) => update(idx, { match: e.target.value })}
+              />
+            </div>
+            <div style={{ width: 140 }}>
+              <RowLabel>Answers as</RowLabel>
+              <Select
+                size="small"
+                style={{ width: '100%' }}
+                value={row.bindType}
+                onChange={(v: 'personality' | 'team') => update(idx, { bindType: v, bindName: '' })}
+                options={[
+                  { value: 'personality', label: 'Personality' },
+                  { value: 'team', label: 'Team' },
+                ]}
+              />
+            </div>
+          </div>
+          <div style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
+            <div style={{ flex: 1 }}>
+              <RowLabel>{row.bindType === 'team' ? 'Team name' : 'Personality'}</RowLabel>
+              {row.bindType === 'team' ? (
+                <Input
+                  size="small"
+                  placeholder="support"
+                  value={row.bindName}
+                  onChange={(e) => update(idx, { bindName: e.target.value })}
+                />
+              ) : (
+                <Select
+                  size="small"
+                  showSearch
+                  style={{ width: '100%' }}
+                  placeholder="Who picks up"
+                  value={row.bindName || undefined}
+                  onChange={(v: string) => update(idx, { bindName: v })}
+                  options={personalities.map((p) => ({ value: p.id, label: p.name }))}
+                />
+              )}
+            </div>
+            <div style={{ width: 200 }}>
+              <RowLabel>Bot id (optional)</RowLabel>
+              <Input
+                size="small"
+                style={{ fontFamily: 'Geist Mono, monospace' }}
+                placeholder="derived from the number"
+                value={row.id}
+                onChange={(e) => update(idx, { id: e.target.value })}
+              />
+            </div>
+          </div>
+          <Tooltip title="Let a caller say /personality mid-call to reach a different agent on this number.">
+            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+              <Switch
+                size="small"
+                checked={row.allowSlashSwitch}
+                onChange={(v) => update(idx, { allowSlashSwitch: v })}
+              />
+              <RowLabel>Allow switching agent mid-call</RowLabel>
+            </span>
+          </Tooltip>
+        </div>
+      ))}
+      <Button type="dashed" size="small" onClick={add} style={{ width: '100%' }}>
+        Add number
+      </Button>
+    </div>
+  );
+}
+
+function VoiceTelephonySections({
+  config,
+  personalities,
+  botRows,
+  setBotRows,
+}: {
+  config: ConfigGetData;
+  personalities: PersonalityOption[];
+  botRows: VoiceBotRow[];
+  setBotRows: Dispatch<SetStateAction<VoiceBotRow[]>>;
+}) {
+  return (
+    <>
+      <VoiceSectionLabel>Telephony</VoiceSectionLabel>
+      <FirstCallInvitation config={config} />
+      <Typography.Paragraph type="secondary" style={{ marginTop: 0, fontSize: 13 }}>
+        The SIP trunk your number is attached to. Clearing the provider removes the whole trunk
+        block — a trunk with a provider but no trunk id will not load, so the two are saved together
+        or not at all.
+      </Typography.Paragraph>
+      <Form.Item
+        name="voiceTrunkProvider"
+        label="Trunk provider"
+        extra="Selects the inbound webhook signature scheme. Clear it to turn telephony off."
+      >
+        <Select
+          allowClear
+          placeholder="No trunk — telephony off"
+          options={TRUNK_PROVIDERS.map((p) => ({ value: p, label: p }))}
+        />
+      </Form.Item>
+      <Form.Item
+        noStyle
+        shouldUpdate={(prev, cur) => prev.voiceTrunkProvider !== cur.voiceTrunkProvider}
+      >
+        {({ getFieldValue }) =>
+          getFieldValue('voiceTrunkProvider') ? (
+            <>
+              <Form.Item
+                name="voiceTrunkId"
+                label="Trunk id"
+                extra="The SIP trunk the number is attached to. Required whenever a provider is set."
+              >
+                <Input placeholder="ST_abc123" />
+              </Form.Item>
+              <Form.Item
+                name="voiceTrunkFromNumber"
+                label="Caller ID (outbound)"
+                extra="E.164 number presented when the agent places a call."
+              >
+                <Input placeholder="+15551234567" />
+              </Form.Item>
+              <Form.Item
+                name="voiceTrunkUsername"
+                label="SIP username"
+                extra="Registrar / auth username, if your trunk uses one."
+              >
+                <Input placeholder="Optional" />
+              </Form.Item>
+              <Form.Item
+                name="voiceTrunkPassword"
+                label="SIP password"
+                extra={
+                  config.voiceTrunkPasswordPreview
+                    ? `Current: ${config.voiceTrunkPasswordPreview}. Leave blank to keep it.`
+                    : 'Stored write-only — it is never sent back to this page.'
+                }
+              >
+                <Input.Password
+                  placeholder={
+                    config.voiceTrunkPasswordPreview ? 'Leave blank to keep' : 'Enter password...'
+                  }
+                />
+              </Form.Item>
+              <Form.Item
+                name="voiceTrunkWebhookSecret"
+                label="Webhook secret"
+                extra={
+                  config.voiceTrunkWebhookSecretPreview
+                    ? `Current: ${config.voiceTrunkWebhookSecretPreview}. Leave blank to keep it. This one authenticates the TRUNK to us on an inbound call, so it rotates on its own schedule.`
+                    : 'Authenticates the trunk to us on an inbound call — it rotates independently of the SIP password.'
+                }
+              >
+                <Input.Password
+                  placeholder={
+                    config.voiceTrunkWebhookSecretPreview
+                      ? 'Leave blank to keep'
+                      : 'Enter secret...'
+                  }
+                />
+              </Form.Item>
+              <Form.Item
+                name="voiceTrunkWebhookPath"
+                label="Webhook path"
+                extra="Where the inbound listener mounts. Must start with “/”. Blank = the listener's own default."
+                rules={[{ pattern: /^\//, message: 'Must start with /.' }]}
+              >
+                <Input placeholder="/voice/inbound" />
+              </Form.Item>
+              <Form.Item
+                name="voiceTrunkCodec"
+                label="Codec"
+                extra="Blank leaves the choice to the bridge's negotiation. G.711 is the phone network's own; Opus is better where the trunk offers it."
+              >
+                <Select
+                  allowClear
+                  placeholder="Negotiate"
+                  options={TRUNK_CODECS.map((c) => ({ value: c, label: c }))}
+                />
+              </Form.Item>
+            </>
+          ) : null
+        }
+      </Form.Item>
+
+      <VoiceSectionLabel>LiveKit</VoiceSectionLabel>
+      <Typography.Paragraph type="secondary" style={{ marginTop: 0, fontSize: 13 }}>
+        The media server the SIP leg bridges into. All three fields belong together — clearing the
+        URL removes the whole block, including the stored key and secret.
+      </Typography.Paragraph>
+      <Form.Item name="voiceLivekitUrl" label="Server URL">
+        <Input placeholder="wss://your-project.livekit.cloud" />
+      </Form.Item>
+      <Form.Item
+        name="voiceLivekitApiKey"
+        label="API key"
+        extra={
+          config.voiceLivekitApiKeyPreview
+            ? `Current: ${config.voiceLivekitApiKeyPreview}. Leave blank to keep it.`
+            : 'Required whenever a server URL is set.'
+        }
+      >
+        <Input.Password
+          placeholder={
+            config.voiceLivekitApiKeyPreview ? 'Leave blank to keep' : 'Enter API key...'
+          }
+        />
+      </Form.Item>
+      <Form.Item
+        name="voiceLivekitApiSecret"
+        label="API secret"
+        extra={
+          config.voiceLivekitApiSecretPreview
+            ? `Current: ${config.voiceLivekitApiSecretPreview}. Leave blank to keep it.`
+            : 'Required whenever a server URL is set.'
+        }
+      >
+        <Input.Password
+          placeholder={
+            config.voiceLivekitApiSecretPreview ? 'Leave blank to keep' : 'Enter API secret...'
+          }
+        />
+      </Form.Item>
+
+      <VoiceSectionLabel>Numbers</VoiceSectionLabel>
+      <VoiceBotRoster rows={botRows} setRows={setBotRows} personalities={personalities} />
+
+      <VoiceSectionLabel>Inbound hardening</VoiceSectionLabel>
+      <Typography.Paragraph type="secondary" style={{ marginTop: 0, fontSize: 13 }}>
+        A phone number is the one surface a stranger can reach without being invited. These are the
+        guards on it, and every refusal they cause is written to Communications → Calls with its
+        reason.
+      </Typography.Paragraph>
+      <Form.Item
+        name="voiceInboundAllowlist"
+        label="Caller allowlist"
+        extra="Numbers that reach your own personality directly. An EMPTY list clears the key — “trust nobody” is not a list, it is a receptionist, so set one below instead."
+      >
+        <Select mode="tags" tokenSeparators={[',']} placeholder="+15551234567" />
+      </Form.Item>
+      <Form.Item
+        name="voiceInboundReceptionist"
+        label="Receptionist"
+        extra="Who answers everyone not on the allowlist, in a restricted scope. Blank = nobody does, and unlisted callers are turned away."
+      >
+        <Select
+          allowClear
+          showSearch
+          placeholder="No receptionist"
+          options={personalities.map((p) => ({ value: p.id, label: p.name }))}
+        />
+      </Form.Item>
+      <Form.Item
+        name="voiceInboundConcurrencyCap"
+        label="Concurrent calls"
+        extra="Ceiling on calls in progress at once. Blank = the built-in default."
+      >
+        <InputNumber min={1} max={1000} placeholder="Default" />
+      </Form.Item>
+      <Form.Item
+        name="voiceInboundPerCallerPerHour"
+        label="Calls per caller per hour"
+        extra="Rolling-hour ceiling for one number. Blank = the built-in default."
+      >
+        <InputNumber min={1} max={1000} placeholder="Default" />
+      </Form.Item>
+      <Form.Item
+        name="voiceInboundDailyBudgetUsd"
+        label="Daily inbound budget (USD)"
+        extra="Spend ceiling across every inbound call in a day. Blank = no ceiling."
+      >
+        <InputNumber min={0.01} max={100000} step={1} placeholder="No limit" />
+      </Form.Item>
+      <Form.Item
+        name="voiceInboundPrewarm"
+        label="Pre-warm on ring"
+        extra="Which callers get the realtime socket opened while the phone is still ringing. Faster first word, at the cost of a session opened for a call that may not connect."
+      >
+        <Select
+          allowClear
+          placeholder="Default"
+          options={[
+            { value: 'allowlisted', label: 'Allowlisted callers only' },
+            { value: 'none', label: 'Nobody — open on answer' },
+            { value: 'all', label: 'Everyone who rings' },
+          ]}
+        />
+      </Form.Item>
+      <Typography.Paragraph type="secondary" style={{ marginTop: 0, fontSize: 13 }}>
+        Where call summaries and refusal notices are delivered. The platform and the chat id are
+        saved together — half a destination will not load, so clearing the platform removes the
+        whole notice route.
+      </Typography.Paragraph>
+      <Form.Item name="voiceInboundOwnerPlatform" label="Notify on">
+        <Input placeholder="telegram" />
+      </Form.Item>
+      <Form.Item
+        name="voiceInboundOwnerChatId"
+        label="Chat id"
+        extra="Required whenever a platform is set."
+      >
+        <Input placeholder="123456789" />
+      </Form.Item>
+      <Form.Item
+        name="voiceInboundOwnerBotKey"
+        label="Bot key"
+        extra="Which bot delivers the notice in a multi-bot deployment. Blank = the default bot."
+      >
+        <Input placeholder="Default bot" />
+      </Form.Item>
+
+      <VoiceSectionLabel>Barge-in sensitivity</VoiceSectionLabel>
+      <Typography.Paragraph type="secondary" style={{ marginTop: 0, fontSize: 13 }}>
+        When interrupting the agent counts as interrupting it. A phone line and a satellite across a
+        room hear very different noise floors, so each is tuned on its own — and a surface left
+        blank is untuned, which is not the same as tuned to the defaults. Talk-mode in this browser
+        endpoints in the browser: tune it under Advanced voice tuning above. A satellite ends an
+        utterance on a count of silent frames, not a duration, so its Silence (ms) is not read.
+      </Typography.Paragraph>
+      {BARGE_IN_SURFACES.map((surface) => (
+        <div key={surface} style={ROW_BOX_STYLE}>
+          <Typography.Text strong style={{ fontSize: 13 }}>
+            {BARGE_IN_SURFACE_LABELS[surface]}
+          </Typography.Text>
+          <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+            <div style={{ flex: 1 }}>
+              <RowLabel>Energy threshold</RowLabel>
+              <Form.Item name={['voiceBargeIn', surface, 'energyThreshold']} noStyle>
+                <InputNumber
+                  size="small"
+                  style={{ width: '100%' }}
+                  min={0.001}
+                  max={1}
+                  step={0.01}
+                  placeholder="Untuned"
+                />
+              </Form.Item>
+            </div>
+            <div style={{ flex: 1 }}>
+              <RowLabel>Min speech (ms)</RowLabel>
+              <Form.Item name={['voiceBargeIn', surface, 'minSpeechMs']} noStyle>
+                <InputNumber
+                  size="small"
+                  style={{ width: '100%' }}
+                  min={1}
+                  max={10000}
+                  step={10}
+                  placeholder="Untuned"
+                />
+              </Form.Item>
+            </div>
+            <div style={{ flex: 1 }}>
+              <RowLabel>Silence (ms)</RowLabel>
+              <Form.Item name={['voiceBargeIn', surface, 'silenceMs']} noStyle>
+                <InputNumber
+                  size="small"
+                  style={{ width: '100%' }}
+                  min={1}
+                  max={10000}
+                  step={10}
+                  placeholder="Untuned"
+                />
+              </Form.Item>
+            </div>
+          </div>
+        </div>
+      ))}
+    </>
   );
 }
 

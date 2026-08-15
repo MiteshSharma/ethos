@@ -481,9 +481,11 @@ export interface VoiceLiveKitConfig {
  * (`livekit-server-sdk` SIP API) is supplied at the app layer, not committed.
  */
 export interface VoiceTrunkConfig {
-  /** Telephony trunk provider bridged into LiveKit SIP. Informational — the
-   *  app-layer binding selects the concrete SDK/credentials shape. */
-  provider: 'twilio' | 'telnyx' | 'generic';
+  /** Telephony trunk provider bridged into LiveKit SIP. Selects which inbound
+   *  webhook signature scheme the listener verifies with — the providers do not
+   *  agree on how a request is signed, so this is the one fact the verifier
+   *  cannot infer from the payload. */
+  provider: 'twilio' | 'telnyx' | 'generic' | 'livekit';
   /** LiveKit SIP trunk id the number is attached to (inbound + outbound). */
   trunkId: string;
   /** Caller-ID number presented on outbound `call` (E.164). Optional. */
@@ -492,7 +494,110 @@ export interface VoiceTrunkConfig {
   username?: string;
   /** SIP auth password/token. Optional; read as a literal (like apiSecret). */
   password?: string;
+  /**
+   * Shared secret the inbound-webhook listener verifies the trunk's signature
+   * against. Separate from `password`: that one authenticates US to the trunk
+   * on an outbound leg, this one authenticates the TRUNK to us on an inbound
+   * one, and a deployment that rotates one must not be forced to rotate the
+   * other. Externalized to the vault exactly like `password`.
+   */
+  webhookSecret?: string;
+  /**
+   * HTTP path the gateway's inbound listener mounts the trunk webhook at, e.g.
+   * `/voice/inbound`. Must start with `/`. Left undefined when absent — the
+   * default belongs to the listener that serves the route, not to the parser
+   * that reads the file.
+   */
+  webhookPath?: string;
+  /**
+   * Preferred call codec. `opus` where the trunk carries it (wideband, the
+   * better ear), `g711` for the narrowband PSTN fallback every trunk speaks.
+   * Absent leaves the choice to the bridge's own negotiation.
+   */
+  codec?: 'opus' | 'g711';
 }
+
+/**
+ * Inbound-call policy: who gets through, what it may cost, and who hears about
+ * it (plan/phases/voice-v4-telephony.md — inbound hardening).
+ *
+ * A phone number is the one surface strangers can reach without being invited,
+ * so the answering rules are DEPLOYMENT facts, not personality identity: the
+ * same receptionist personality behind a personal line and behind a business
+ * line should reasonably disagree about allowlists, budgets and who to notify.
+ */
+export interface VoiceInboundConfig {
+  /**
+   * Caller numbers that reach the owner's own personality with pre-warm on
+   * ring. E.164 patterns using the same `*` wildcard grammar as
+   * `voice.bots[].match` (`matchesVoicePattern`), so one grammar governs every
+   * number match in the system.
+   *
+   * Absent = no allowlist configured, which the consumer reads as "screen
+   * everyone through the receptionist". An operator wanting an explicitly
+   * EMPTY allowlist cannot express it here: a flat `key: value` line with no
+   * value does not parse, so absent and empty are the same file. Say
+   * `voice.inbound.receptionist` instead — that IS the empty-allowlist policy.
+   */
+  allowlist?: string[];
+  /** Personality id answering callers that are not on the allowlist. Runs in a
+   *  restricted scope — no owner memory, no privileged tools. */
+  receptionist?: string;
+  /** Ceiling on concurrent inbound calls; over-cap callers get busy handling.
+   *  Positive integer. Absent = the consumer's default (2). */
+  concurrencyCap?: number;
+  /** Per-caller call ceiling inside a rolling hour — the anti-hammering knob.
+   *  Positive integer. */
+  perCallerPerHour?: number;
+  /** Daily spend ceiling in USD across all inbound calls. Positive number. */
+  dailyBudgetUsd?: number;
+  /**
+   * Which callers get the realtime provider socket opened during ring.
+   * `allowlisted` (known callers only — pre-warm where the call is almost
+   * certainly worth answering), `none` (always warm on answer), `all` (warm
+   * every ring, and pay for the ones that get screened).
+   */
+  prewarm?: 'allowlisted' | 'none' | 'all';
+  /**
+   * Where call summaries and capacity/refusal notices are delivered. `platform`
+   * and `chatId` are required together — a destination missing either half is a
+   * parse error rather than a half-built route that silently drops the one
+   * notification the operator configured this block to receive.
+   */
+  owner?: { platform: string; chatId: string; botKey?: string };
+}
+
+/**
+ * The audio surfaces whose barge-in sensitivity tunes separately.
+ *
+ * Two, not three: the browser talk lane endpoints IN the browser and is tuned by
+ * the `display.voice_*` keys, which are a complete, shipped path with five knobs
+ * that do not map onto these three. A `browser` member here would be a control
+ * that reads back what an operator typed and changes nothing.
+ */
+export type VoiceBargeInSurface = 'call' | 'satellite';
+
+/** Barge-in / VAD thresholds for one surface. Every field optional — an
+ *  operator tunes the one knob a room is wrong about, not all three. */
+export interface VoiceBargeInTuning {
+  /** Input energy above which the caller counts as speaking, 0 < x <= 1. */
+  energyThreshold?: number;
+  /** Milliseconds of speech before a barge-in is believed. Positive integer. */
+  minSpeechMs?: number;
+  /** Milliseconds of silence that end an utterance. Positive integer. */
+  silenceMs?: number;
+}
+
+/**
+ * Per-surface barge-in sensitivity. A phone line is noisier than a room and a
+ * satellite sits across that room, so one global threshold is wrong on at least
+ * one of the two — this is the config that lets each be right.
+ *
+ * Partial on purpose: only the surfaces the operator declared are present, so a
+ * consumer can tell "tuned to this" from "never tuned" and apply its own
+ * default to the rest.
+ */
+export type VoiceBargeInConfig = Partial<Record<VoiceBargeInSurface, VoiceBargeInTuning>>;
 
 /**
  * One wake-phrase → personality route (`voice.wake.routes.<id>`).
@@ -1115,6 +1220,11 @@ export interface EthosConfig {
     bots: VoiceBotConfig[];
     livekit?: VoiceLiveKitConfig;
     trunk?: VoiceTrunkConfig;
+    /** Who may reach the number, what answering costs, and where the summary
+     *  goes. See `VoiceInboundConfig`. */
+    inbound?: VoiceInboundConfig;
+    /** Per-surface barge-in sensitivity. See `VoiceBargeInConfig`. */
+    bargeIn?: VoiceBargeInConfig;
     trustedPlugins?: string[];
     defaultMode?: 'off' | 'mirror_inbound' | 'all';
     tier?: 'pipeline' | 'realtime';
@@ -1598,13 +1708,34 @@ async function externalizeConfigSecrets(
       },
     };
   }
-  if (r.voice?.trunk?.password) {
+  if (r.voice?.trunk) {
+    // Both trunk credentials take the same path: `password` authenticates us to
+    // the trunk outbound, `webhookSecret` authenticates the trunk to us inbound.
+    // Spread conditionally so a block carrying only one does not gain an
+    // `undefined` key the serializer would then have to think about.
     const trunk = r.voice.trunk;
     r.voice = {
       ...r.voice,
       trunk: {
         ...trunk,
-        password: await externalizeSecret(trunk.password, ref('voice.trunk.password'), secrets),
+        ...(trunk.password
+          ? {
+              password: await externalizeSecret(
+                trunk.password,
+                ref('voice.trunk.password'),
+                secrets,
+              ),
+            }
+          : {}),
+        ...(trunk.webhookSecret
+          ? {
+              webhookSecret: await externalizeSecret(
+                trunk.webhookSecret,
+                ref('voice.trunk.webhookSecret'),
+                secrets,
+              ),
+            }
+          : {}),
       },
     };
   }
@@ -1950,6 +2081,42 @@ export async function writeConfig(
       if (t.fromNumber) lines.push(`voice.trunk.fromNumber: ${t.fromNumber}`);
       if (t.username) lines.push(`voice.trunk.username: ${t.username}`);
       if (t.password) lines.push(`voice.trunk.password: ${t.password}`);
+      if (t.webhookSecret) lines.push(`voice.trunk.webhookSecret: ${t.webhookSecret}`);
+      if (t.webhookPath) lines.push(`voice.trunk.webhookPath: ${t.webhookPath}`);
+      if (t.codec) lines.push(`voice.trunk.codec: ${t.codec}`);
+    }
+    if (config.voice.inbound) {
+      const ib = config.voice.inbound;
+      if (ib.allowlist?.length) lines.push(`voice.inbound.allowlist: ${ib.allowlist.join(', ')}`);
+      if (ib.receptionist) lines.push(`voice.inbound.receptionist: ${ib.receptionist}`);
+      if (ib.concurrencyCap !== undefined) {
+        lines.push(`voice.inbound.concurrencyCap: ${ib.concurrencyCap}`);
+      }
+      if (ib.perCallerPerHour !== undefined) {
+        lines.push(`voice.inbound.perCallerPerHour: ${ib.perCallerPerHour}`);
+      }
+      if (ib.dailyBudgetUsd !== undefined) {
+        lines.push(`voice.inbound.dailyBudgetUsd: ${ib.dailyBudgetUsd}`);
+      }
+      if (ib.prewarm) lines.push(`voice.inbound.prewarm: ${ib.prewarm}`);
+      // `platform` and `chatId` are unconditional — an owner is only ever built
+      // with both, and a half-written destination would round-trip to nothing.
+      if (ib.owner) {
+        lines.push(`voice.inbound.owner.platform: ${ib.owner.platform}`);
+        lines.push(`voice.inbound.owner.chatId: ${ib.owner.chatId}`);
+        if (ib.owner.botKey) lines.push(`voice.inbound.owner.botKey: ${ib.owner.botKey}`);
+      }
+    }
+    for (const [surface, tuning] of Object.entries(config.voice.bargeIn ?? {})) {
+      if (tuning.energyThreshold !== undefined) {
+        lines.push(`voice.bargeIn.${surface}.energyThreshold: ${tuning.energyThreshold}`);
+      }
+      if (tuning.minSpeechMs !== undefined) {
+        lines.push(`voice.bargeIn.${surface}.minSpeechMs: ${tuning.minSpeechMs}`);
+      }
+      if (tuning.silenceMs !== undefined) {
+        lines.push(`voice.bargeIn.${surface}.silenceMs: ${tuning.silenceMs}`);
+      }
     }
     // Serialized whenever present, INCLUDING the empty list — an empty
     // allowlist is "trust nothing non-local", not "no opinion".
@@ -2324,12 +2491,16 @@ export async function resolveConfigSecrets(
       },
     };
   }
-  if (r.voice?.trunk?.password) {
+  if (r.voice?.trunk) {
+    const trunk = r.voice.trunk;
     r.voice = {
       ...r.voice,
       trunk: {
-        ...r.voice.trunk,
-        password: await resolveSecretValue(r.voice.trunk.password, secrets),
+        ...trunk,
+        ...(trunk.password ? { password: await resolveSecretValue(trunk.password, secrets) } : {}),
+        ...(trunk.webhookSecret
+          ? { webhookSecret: await resolveSecretValue(trunk.webhookSecret, secrets) }
+          : {}),
       },
     };
   }
@@ -2411,6 +2582,12 @@ function parseConfigYaml(src: string): EthosConfig {
   const voiceBotsKv: Record<number, Record<string, string>> = {};
   const voiceLiveKitKv: Record<string, string> = {};
   const voiceTrunkKv: Record<string, string> = {};
+  /** `voice.inbound.<field>` — the scalar inbound-call policy knobs. */
+  const voiceInboundKv: Record<string, string> = {};
+  /** `voice.inbound.owner.<field>` — the notification destination, one level down. */
+  const voiceInboundOwnerKv: Record<string, string> = {};
+  /** `voice.bargeIn.<surface>.<field>` — VAD thresholds, keyed by surface. */
+  const voiceBargeInKv: Record<string, Record<string, string>> = {};
   /** `voice.tts.providers.<name>.<field>` — the named TTS roster, keyed by name. */
   const voiceTtsProvidersKv: Record<string, Record<string, string>> = {};
   /** The older `voice.providers.<name>.<field>` spelling, merged under the above. */
@@ -2578,6 +2755,31 @@ function parseConfigYaml(src: string): EthosConfig {
     const vtr = line.match(/^voice\.trunk\.(\w+):\s*(.+)$/);
     if (vtr) {
       voiceTrunkKv[vtr[1]] = vtr[2].trim().replace(/^["']|["']$/g, '');
+      continue;
+    }
+    // voice.inbound.owner.<field>: <value> — matched BEFORE the scalar line
+    // below, which the `\w+` in its key position could not have swallowed
+    // anyway; the order is what makes that safe to read rather than to prove.
+    const vino = line.match(/^voice\.inbound\.owner\.(\w+):\s*(.+)$/);
+    if (vino) {
+      voiceInboundOwnerKv[vino[1]] = vino[2].trim().replace(/^["']|["']$/g, '');
+      continue;
+    }
+    // voice.inbound.<field>: <value>
+    const vin = line.match(/^voice\.inbound\.(\w+):\s*(.+)$/);
+    if (vin) {
+      voiceInboundKv[vin[1]] = vin[2].trim().replace(/^["']|["']$/g, '');
+      continue;
+    }
+    // voice.bargeIn.<surface>.<field>: <value>. The surface is anchored to the
+    // identifier charset and validated by name in the builder — an unknown
+    // surface is a parse error, not a dropped line, because a threshold typed
+    // against a surface nothing reads is silently no tuning at all.
+    const vbi = line.match(/^voice\.bargeIn\.([A-Za-z0-9_-]+)\.(\w+):\s*(.+)$/);
+    if (vbi) {
+      const surface = vbi[1];
+      voiceBargeInKv[surface] ??= {};
+      voiceBargeInKv[surface][vbi[2]] = vbi[3].trim().replace(/^["']|["']$/g, '');
       continue;
     }
     // voice.trustedPlugins: <comma-separated provider ids>. Declaring the key
@@ -3098,6 +3300,8 @@ function parseConfigYaml(src: string): EthosConfig {
   const voiceResult = buildVoiceBots(voiceBotsKv);
   const voiceLiveKitResult = buildVoiceLiveKit(voiceLiveKitKv);
   const voiceTrunkResult = buildVoiceTrunk(voiceTrunkKv);
+  const voiceInboundResult = buildVoiceInbound(voiceInboundKv, voiceInboundOwnerKv);
+  const voiceBargeInResult = buildVoiceBargeIn(voiceBargeInKv);
   // Legacy `voice.providers.*` entries merge UNDER the new spelling, per name
   // and per field, so a file mid-migration keeps whichever fields it has
   // already moved and the new key always wins.
@@ -3158,6 +3362,8 @@ function parseConfigYaml(src: string): EthosConfig {
     voiceResult.bots.length > 0 ||
     voiceLiveKitResult.livekit ||
     voiceTrunkResult.trunk ||
+    voiceInboundResult.inbound ||
+    voiceBargeInResult.bargeIn ||
     voiceTrustedPluginsRaw !== undefined ||
     voiceDefaultMode !== undefined ||
     voiceTier !== undefined ||
@@ -3172,6 +3378,8 @@ function parseConfigYaml(src: string): EthosConfig {
           bots: voiceResult.bots,
           ...(voiceLiveKitResult.livekit ? { livekit: voiceLiveKitResult.livekit } : {}),
           ...(voiceTrunkResult.trunk ? { trunk: voiceTrunkResult.trunk } : {}),
+          ...(voiceInboundResult.inbound ? { inbound: voiceInboundResult.inbound } : {}),
+          ...(voiceBargeInResult.bargeIn ? { bargeIn: voiceBargeInResult.bargeIn } : {}),
           ...(voiceTrustedPluginsRaw !== undefined
             ? { trustedPlugins: splitList(voiceTrustedPluginsRaw) }
             : {}),
@@ -3198,6 +3406,8 @@ function parseConfigYaml(src: string): EthosConfig {
     ...voiceResult.errors,
     ...voiceLiveKitResult.errors,
     ...voiceTrunkResult.errors,
+    ...voiceInboundResult.errors,
+    ...voiceBargeInResult.errors,
     ...webhooksResult.errors,
   ];
 
@@ -3450,6 +3660,7 @@ const SECRET_FIELD_NAMES = new Set([
   'appToken',
   'signingSecret',
   'password',
+  'webhookSecret',
   'emailPassword',
   'discordToken',
   'slackBotToken',
@@ -4154,7 +4365,9 @@ function buildVoiceLiveKit(kv: Record<string, string>): {
   return { livekit: { url, apiKey, apiSecret }, errors: [] };
 }
 
-const VOICE_TRUNK_PROVIDERS = ['twilio', 'telnyx', 'generic'] as const;
+const VOICE_TRUNK_PROVIDERS = ['twilio', 'telnyx', 'generic', 'livekit'] as const;
+
+const VOICE_TRUNK_CODECS = ['opus', 'g711'] as const;
 
 function buildVoiceTrunk(kv: Record<string, string>): {
   trunk?: VoiceTrunkConfig;
@@ -4163,7 +4376,8 @@ function buildVoiceTrunk(kv: Record<string, string>): {
   // Absent block is valid — SIP trunk keys are optional.
   if (Object.keys(kv).length === 0) return { errors: [] };
   const errors: string[] = [];
-  const { provider, trunkId, fromNumber, username, password } = kv;
+  const { provider, trunkId, fromNumber, username, password, webhookSecret, webhookPath, codec } =
+    kv;
   if (!provider) errors.push("voice.trunk: missing required field 'provider'.");
   else if (!(VOICE_TRUNK_PROVIDERS as readonly string[]).includes(provider)) {
     errors.push(
@@ -4171,6 +4385,14 @@ function buildVoiceTrunk(kv: Record<string, string>): {
     );
   }
   if (!trunkId) errors.push("voice.trunk: missing required field 'trunkId'.");
+  if (webhookPath !== undefined && !webhookPath.startsWith('/')) {
+    errors.push(`voice.trunk.webhookPath: must start with '/' (got '${webhookPath}').`);
+  }
+  if (codec !== undefined && !(VOICE_TRUNK_CODECS as readonly string[]).includes(codec)) {
+    errors.push(
+      `voice.trunk.codec: invalid codec '${codec}' (expected one of: ${VOICE_TRUNK_CODECS.join(', ')}).`,
+    );
+  }
   if (errors.length > 0) return { errors };
   return {
     trunk: {
@@ -4179,9 +4401,164 @@ function buildVoiceTrunk(kv: Record<string, string>): {
       ...(fromNumber ? { fromNumber } : {}),
       ...(username ? { username } : {}),
       ...(password ? { password } : {}),
+      ...(webhookSecret ? { webhookSecret } : {}),
+      ...(webhookPath ? { webhookPath } : {}),
+      ...(codec ? { codec: codec as VoiceTrunkConfig['codec'] } : {}),
     },
     errors: [],
   };
+}
+
+const VOICE_PREWARM_MODES = ['allowlisted', 'none', 'all'] as const;
+const VOICE_INBOUND_FIELDS = [
+  'allowlist',
+  'receptionist',
+  'concurrencyCap',
+  'perCallerPerHour',
+  'dailyBudgetUsd',
+  'prewarm',
+] as const;
+const VOICE_INBOUND_OWNER_FIELDS = ['platform', 'chatId', 'botKey'] as const;
+
+/**
+ * `voice.inbound.*` — who reaches the number and what answering may cost.
+ *
+ * Loud rather than lenient, unlike the `voice.wake.*` knobs above: a dropped
+ * wake threshold costs a slightly worse match, while a dropped budget or
+ * concurrency cap costs real money on a surface strangers can dial. Every
+ * malformed value is a parse error naming its own key.
+ */
+function buildVoiceInbound(
+  kv: Record<string, string>,
+  ownerKv: Record<string, string>,
+): { inbound?: VoiceInboundConfig; errors: string[] } {
+  if (Object.keys(kv).length === 0 && Object.keys(ownerKv).length === 0) return { errors: [] };
+  const errors: string[] = [];
+  for (const field of Object.keys(kv)) {
+    if (!(VOICE_INBOUND_FIELDS as readonly string[]).includes(field)) {
+      errors.push(
+        `voice.inbound.${field}: unknown field (expected one of: ${VOICE_INBOUND_FIELDS.join(', ')}).`,
+      );
+    }
+  }
+  for (const field of Object.keys(ownerKv)) {
+    if (!(VOICE_INBOUND_OWNER_FIELDS as readonly string[]).includes(field)) {
+      errors.push(
+        `voice.inbound.owner.${field}: unknown field (expected one of: ${VOICE_INBOUND_OWNER_FIELDS.join(', ')}).`,
+      );
+    }
+  }
+  /** A count is a positive integer; zero and fractions are refusals, not caps. */
+  const positiveInt = (field: string): number | undefined => {
+    const raw = kv[field];
+    if (raw === undefined) return undefined;
+    const n = Number(raw);
+    if (!Number.isInteger(n) || n < 1) {
+      errors.push(`voice.inbound.${field}: must be a positive integer (got '${raw}').`);
+      return undefined;
+    }
+    return n;
+  };
+  const concurrencyCap = positiveInt('concurrencyCap');
+  const perCallerPerHour = positiveInt('perCallerPerHour');
+  let dailyBudgetUsd: number | undefined;
+  if (kv.dailyBudgetUsd !== undefined) {
+    const n = Number(kv.dailyBudgetUsd);
+    if (!Number.isFinite(n) || n <= 0) {
+      errors.push(
+        `voice.inbound.dailyBudgetUsd: must be a positive number (got '${kv.dailyBudgetUsd}').`,
+      );
+    } else {
+      dailyBudgetUsd = n;
+    }
+  }
+  if (
+    kv.prewarm !== undefined &&
+    !(VOICE_PREWARM_MODES as readonly string[]).includes(kv.prewarm)
+  ) {
+    errors.push(
+      `voice.inbound.prewarm: invalid value '${kv.prewarm}' (expected one of: ${VOICE_PREWARM_MODES.join(', ')}).`,
+    );
+  }
+  const { platform, chatId, botKey } = ownerKv;
+  if (Object.keys(ownerKv).length > 0) {
+    if (!platform) errors.push("voice.inbound.owner: missing required field 'platform'.");
+    if (!chatId) errors.push("voice.inbound.owner: missing required field 'chatId'.");
+  }
+  if (errors.length > 0) return { errors };
+  const allowlist = splitList(kv.allowlist);
+  return {
+    inbound: {
+      ...(allowlist.length > 0 ? { allowlist } : {}),
+      ...(kv.receptionist ? { receptionist: kv.receptionist } : {}),
+      ...(concurrencyCap !== undefined ? { concurrencyCap } : {}),
+      ...(perCallerPerHour !== undefined ? { perCallerPerHour } : {}),
+      ...(dailyBudgetUsd !== undefined ? { dailyBudgetUsd } : {}),
+      ...(kv.prewarm ? { prewarm: kv.prewarm as VoiceInboundConfig['prewarm'] } : {}),
+      ...(platform && chatId ? { owner: { platform, chatId, ...(botKey ? { botKey } : {}) } } : {}),
+    },
+    errors: [],
+  };
+}
+
+const VOICE_BARGE_IN_SURFACES = ['call', 'satellite'] as const;
+const VOICE_BARGE_IN_FIELDS = ['energyThreshold', 'minSpeechMs', 'silenceMs'] as const;
+
+/**
+ * `voice.bargeIn.<surface>.<field>` — VAD thresholds per audio surface.
+ *
+ * Loud for the same reason `voice.inbound` is: a threshold typed against a
+ * misspelled surface or field is not "a slightly different setting", it is no
+ * setting at all, and the operator would only find out from a line the agent
+ * kept talking over.
+ */
+function buildVoiceBargeIn(kv: Record<string, Record<string, string>>): {
+  bargeIn?: VoiceBargeInConfig;
+  errors: string[];
+} {
+  if (Object.keys(kv).length === 0) return { errors: [] };
+  const errors: string[] = [];
+  const out: VoiceBargeInConfig = {};
+  for (const [surface, fields] of Object.entries(kv)) {
+    if (!(VOICE_BARGE_IN_SURFACES as readonly string[]).includes(surface)) {
+      errors.push(
+        surface === 'browser'
+          ? // Named on its own: `browser` used to parse here and reach nothing.
+            // An operator carrying it forward is not making a typo, they are
+            // reading a file that predates the removal, and the useful answer
+            // is where the tuning actually lives.
+            'voice.bargeIn.browser: the browser talk lane endpoints in the browser — tune it with the display.voice_* keys (Settings → Voice → Advanced voice tuning).'
+          : `voice.bargeIn.${surface}: unknown surface (expected one of: ${VOICE_BARGE_IN_SURFACES.join(', ')}).`,
+      );
+      continue;
+    }
+    const tuning: VoiceBargeInTuning = {};
+    for (const [field, raw] of Object.entries(fields)) {
+      const key = `voice.bargeIn.${surface}.${field}`;
+      if (field === 'energyThreshold') {
+        const n = Number(raw);
+        if (!Number.isFinite(n) || n <= 0 || n > 1) {
+          errors.push(`${key}: must be a number in (0, 1] (got '${raw}').`);
+        } else {
+          tuning.energyThreshold = n;
+        }
+      } else if (field === 'minSpeechMs' || field === 'silenceMs') {
+        const n = Number(raw);
+        if (!Number.isInteger(n) || n < 1) {
+          errors.push(`${key}: must be a positive integer (got '${raw}').`);
+        } else {
+          tuning[field] = n;
+        }
+      } else {
+        errors.push(
+          `${key}: unknown field (expected one of: ${VOICE_BARGE_IN_FIELDS.join(', ')}).`,
+        );
+      }
+    }
+    out[surface as VoiceBargeInSurface] = tuning;
+  }
+  if (errors.length > 0) return { errors };
+  return { bargeIn: out, errors: [] };
 }
 
 function buildTeamsConfig(

@@ -8,6 +8,7 @@
 // audio, and maps connect/disconnect lifecycle. `callerId` is the LiveKit
 // participant identity.
 
+import type { VoiceLaneClientKind } from '@ethosagent/core';
 import type { PcmChunk } from '@ethosagent/types';
 import type { VoiceSession } from '@ethosagent/voice-session';
 import type { VoiceArtifact, VoiceBotIdentity } from '../adapter';
@@ -82,7 +83,9 @@ export class LiveKitVoiceTransport implements VoiceTransport {
   private readonly inboundRate: number;
   private readonly outboundRate: number;
   private handlers: Array<(chunk: PcmChunk) => void> = [];
+  private closedHandlers: Array<() => void> = [];
   private unsubscribeRemote: (() => void) | null = null;
+  private unsubscribeDisconnected: (() => void) | null = null;
 
   constructor(deps: LiveKitVoiceTransportDeps) {
     this.client = deps.client;
@@ -101,12 +104,16 @@ export class LiveKitVoiceTransport implements VoiceTransport {
       identity: this.config.agentIdentity,
     });
     this.unsubscribeRemote = this.client.onRemoteAudio((frame) => this.onRemoteFrame(frame));
+    this.unsubscribeDisconnected = this.client.onDisconnected?.(() => this.onRoomClosed()) ?? null;
   }
 
   async disconnect(): Promise<void> {
     this.unsubscribeRemote?.();
     this.unsubscribeRemote = null;
+    this.unsubscribeDisconnected?.();
+    this.unsubscribeDisconnected = null;
     this.handlers = [];
+    this.closedHandlers = [];
     await this.client.disconnect();
   }
 
@@ -114,6 +121,19 @@ export class LiveKitVoiceTransport implements VoiceTransport {
     this.handlers.push(handler);
     return () => {
       this.handlers = this.handlers.filter((h) => h !== handler);
+    };
+  }
+
+  /**
+   * Remote teardown only. A LOCAL `disconnect()` deliberately does NOT fire
+   * this: the caller that tore the transport down already knows, and the
+   * adapter's own `stop()` path ends the call. This handler is for the case
+   * nobody on this side asked for — the caller hung up.
+   */
+  onClosed(handler: () => void): () => void {
+    this.closedHandlers.push(handler);
+    return () => {
+      this.closedHandlers = this.closedHandlers.filter((h) => h !== handler);
     };
   }
 
@@ -126,6 +146,12 @@ export class LiveKitVoiceTransport implements VoiceTransport {
     if (frame.format !== 'pcm') return;
     const samples = pcmBytesToSamples(frame.audio);
     this.client.publishAudio({ samples, sampleRate: this.outboundRate });
+  }
+
+  private onRoomClosed(): void {
+    // Snapshot: a handler that unsubscribes itself must not mutate the list we
+    // are walking.
+    for (const handler of [...this.closedHandlers]) handler();
   }
 
   private onRemoteFrame(frame: LiveKitAudioFrame): void {
@@ -170,6 +196,20 @@ export interface LiveKitTransportFactoryDeps {
   createSession: (callerId: string) => VoiceSession;
   /** Optional deduped artifact sink (call summaries/transcripts). */
   sendArtifact?: (artifact: VoiceArtifact) => void | Promise<void>;
+  /**
+   * Lane-key segment for the adapters this factory builds. Defaults to the
+   * adapter's own `'livekit'`. A PSTN leg passes `'sip'` — forwarded rather than
+   * left out, because a factory that silently produced `livekit`-kinded lanes
+   * for phone calls would put a call and the same person's browser session in
+   * one conversation.
+   */
+  laneKind?: VoiceLaneClientKind;
+  /**
+   * Call-end trigger, forwarded to every adapter this factory builds. Without
+   * the passthrough a factory-built call has no hang-up hook at all, so a caller
+   * who simply hung up would produce no post-call summary.
+   */
+  onEnded?: (adapter: VoiceChannelAdapter) => void | Promise<void>;
   inboundSampleRate?: number;
   outboundSampleRate?: number;
 }
@@ -204,6 +244,8 @@ export function createLiveKitTransport(
       session: deps.createSession(callerId),
       bot: deps.bot,
       ...(deps.sendArtifact ? { sendArtifact: deps.sendArtifact } : {}),
+      ...(deps.laneKind ? { laneKind: deps.laneKind } : {}),
+      ...(deps.onEnded ? { onEnded: deps.onEnded } : {}),
     });
   };
 }

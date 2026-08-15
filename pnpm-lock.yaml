@@ -533,6 +533,9 @@ importers:
       '@ethosagent/batch-runner':
         specifier: workspace:*
         version: link:../../extensions/batch-runner
+      '@ethosagent/call-log':
+        specifier: workspace:*
+        version: link:../../extensions/call-log
       '@ethosagent/config':
         specifier: workspace:*
         version: link:../../packages/config
@@ -846,6 +849,12 @@ importers:
       '@ethosagent/types':
         specifier: workspace:*
         version: link:../../packages/types
+
+  extensions/call-log:
+    dependencies:
+      '@ethosagent/sqlite':
+        specifier: workspace:*
+        version: link:../../packages/sqlite
 
   extensions/claw-migrate:
     dependencies:
@@ -1460,6 +1469,10 @@ importers:
       '@ethosagent/voice-session':
         specifier: workspace:*
         version: link:../voice-session
+    devDependencies:
+      '@ethosagent/voice-providers':
+        specifier: workspace:*
+        version: link:../voice-providers
 
   extensions/platform-whatsapp:
     dependencies:
@@ -1944,6 +1957,9 @@ importers:
 
   extensions/tools-voice:
     dependencies:
+      '@ethosagent/call-log':
+        specifier: workspace:*
+        version: link:../call-log
       '@ethosagent/core':
         specifier: workspace:*
         version: link:../../packages/core
@@ -2258,6 +2274,9 @@ importers:
       '@ethosagent/a2a':
         specifier: workspace:*
         version: link:../a2a
+      '@ethosagent/call-log':
+        specifier: workspace:*
+        version: link:../../extensions/call-log
       '@ethosagent/config':
         specifier: workspace:*
         version: link:../config

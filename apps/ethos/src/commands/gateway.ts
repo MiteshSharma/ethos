@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { StorageA2aAllowlist } from '@ethosagent/a2a';
+import { type CallLog, SQLiteCallLog } from '@ethosagent/call-log';
 import {
   applyPlatformShim,
   deriveBotKey,
@@ -76,6 +77,7 @@ import {
   createSessionStore,
   IdentityMap,
   initPairingDb,
+  type LiveKitBindings,
   type MessagingSendFn,
   resolveKanbanDbPath,
   sanitize,
@@ -88,9 +90,12 @@ import {
 } from '../approval-coordinator';
 import { createHealthServer } from '../health-server';
 import { formatQuickCommandOutput, runQuickCommand } from '../lib/quick-command-runner';
+import { resolveLiveKitMedia } from '../livekit-media';
 import { emitReady } from '../logger';
 import { migrateSessionKeysIfNeeded } from '../migrations/session-keys-multi-bot';
 import { notifyReady, startWatchdog } from '../sd-notify';
+import { createSipInboundHandler } from '../sip-inbound-dispatch';
+import { createSipWebhookServer } from '../sip-webhook-server';
 import { createWebhookServer, type PrefilterRunner } from '../webhook-server';
 import {
   buildSystemTaskHandlers,
@@ -119,6 +124,10 @@ const HEALTH_TIMEOUT_MS = 5_000;
  *  rows hold message bodies, so an unbounded ledger is a privacy and disk
  *  problem. Hard-coded on purpose — no config knob until someone needs one. */
 const DELIVERY_LEDGER_RETENTION_MS = 7 * 86_400_000;
+/** How long an ENDED call row is kept. Longer than the delivery ledger's week
+ *  because a call row is history an operator reads (who rang, what was said),
+ *  not an in-flight obligation — but still bounded: the rows hold transcripts. */
+const CALL_LOG_RETENTION_MS = 30 * 86_400_000;
 
 export interface GatewayHeartbeat {
   pid: number;
@@ -318,6 +327,58 @@ export function deriveChannelVoiceOut(
   return Object.keys(out).length > 0 ? out : undefined;
 }
 
+/** What {@link resolveTelephonyMedia} decided, plus the banner lines saying so. */
+export interface TelephonyMediaOutcome {
+  /** Forwarded to `createAgentLoop` → `buildVoiceStack`. Absent = no media path. */
+  livekit?: LiveKitBindings;
+  /** Startup-banner lines, already coloured. Empty when nothing was configured. */
+  lines: string[];
+}
+
+/**
+ * Resolve the native LiveKit media binding for this deployment, ONCE at startup.
+ *
+ * Gated on config, not attempted unconditionally: `resolveLiveKitMedia()` does a
+ * dynamic import of a native package, and a deployment with no `voice.trunk` and
+ * no `voice.livekit` has no reason to pay for it or to hear about it.
+ *
+ * When telephony IS configured and the media SDK is not usable, this says so in
+ * plain words at boot. That is the whole point of the gate: without it, an
+ * operator who rented a phone number learns that calls cannot carry audio from a
+ * `failed` row in `calls.db` after a real person rang and got silence.
+ */
+export async function resolveTelephonyMedia(
+  voice: EthosConfig['voice'],
+  opts: { importModule?: (specifier: string) => Promise<unknown> } = {},
+): Promise<TelephonyMediaOutcome> {
+  if (!voice?.trunk && !voice?.livekit) return { lines: [] };
+
+  const media = await resolveLiveKitMedia({
+    ...(opts.importModule ? { importModule: opts.importModule } : {}),
+    onError: (message) => new ConsoleLogger().warn(message),
+  });
+
+  if (media.ok) {
+    const version = media.version ? ` ${media.version}` : '';
+    return {
+      livekit: { createClient: media.createClient },
+      lines: [
+        `  ${c.green}✓${c.reset} voice media: ${c.cyan}@livekit/rtc-node${version}${c.reset} ${c.dim}— calls can carry audio.${c.reset}`,
+      ],
+    };
+  }
+
+  const lines = [
+    `${c.yellow}⚠ voice media unavailable${c.reset} ${c.dim}(${media.reason})${c.reset}`,
+  ];
+  if (voice.trunk) {
+    lines.push(
+      `${c.dim}  A call will be answered, screened and logged, but ${c.reset}${c.bold}cannot carry audio${c.reset}${c.dim} until the media SDK loads. Fix: ${c.reset}${c.cyan}pnpm add @livekit/rtc-node${c.reset}${c.dim}, then restart the gateway.${c.reset}`,
+    );
+  }
+  return { lines };
+}
+
 export async function runGatewayStart(opts: GatewayStartOptions = {}): Promise<void> {
   // Load config through the strict path so parse-time errors (typos in
   // bind.type, missing bot tokens) surface here instead of silently
@@ -487,6 +548,21 @@ export async function runGatewayStart(opts: GatewayStartOptions = {}): Promise<v
   // config above). Backing jobs are seeded by `watcherManager.start()` later.
   watcherManager.attachScheduler(scheduler);
 
+  // Durable call history (voice V4). Same `~/.ethos/<name>.db` shape as
+  // jobs.db / delivery-ledger.db / cards.db, and the SAME file `ethos serve`
+  // reads the Communications call list from. Opened only when a trunk is
+  // configured: a deployment with no phone number has no calls, and an empty
+  // SQLite file it never reads is still a file it has to back up.
+  //
+  // Opened HERE, ahead of every loop, because the outbound `call` tool writes to
+  // it too — one instance shared by the inbound dispatcher below and by every
+  // bot's `call` tool, so both directions land in one file through one
+  // connection.
+  const sipTrunkConfig = config.voice?.trunk;
+  const callLog = sipTrunkConfig
+    ? new SQLiteCallLog({ path: join(ethosDir(), 'calls.db') })
+    : undefined;
+
   // Build one AgentLoop per configured bot. Personality bots use
   // `createAgentLoop`; team bots use `createTeamAgentLoop`. Each loop
   // receives the shared `scheduler` so its `cron` tool lands in the
@@ -504,8 +580,12 @@ export async function runGatewayStart(opts: GatewayStartOptions = {}): Promise<v
     notificationRouters: botNotificationRouters,
     toolRegistries: botToolRegistries,
     refreshers: botPersonalityRefreshers,
-  } = await buildGatewayBots(config, scheduler, watcherManager, (sessionKey) =>
-    gatewayRef?.originThreadIdFor(sessionKey),
+  } = await buildGatewayBots(
+    config,
+    scheduler,
+    watcherManager,
+    (sessionKey) => gatewayRef?.originThreadIdFor(sessionKey),
+    callLog,
   );
 
   // Phase 3: for each team-bound bot, ensure the supervisor is running.
@@ -531,6 +611,14 @@ export async function runGatewayStart(opts: GatewayStartOptions = {}): Promise<v
       );
     }
   }
+  // Native LiveKit media, resolved ONCE and only when telephony/LiveKit is
+  // configured. The binding is threaded into the SYSTEM loop alone: that is the
+  // loop whose `voiceStack` the SIP dispatcher below uses, and a per-bot loop's
+  // stack is never asked for a media transport. One import, one stack that can
+  // actually answer.
+  const telephonyMedia = await resolveTelephonyMedia(config.voice);
+  for (const line of telephonyMedia.lines) console.log(line);
+
   // System loop used by cron — not bot-bound. Cron jobs route through
   // their own `job.personalityId` field, not through the platform bot
   // routing table. The scheduler is passed in so agent-callable cron
@@ -545,8 +633,16 @@ export async function runGatewayStart(opts: GatewayStartOptions = {}): Promise<v
     sttProviders,
     ttsProviders,
     voiceConfig,
+    // Telephony (voice V4 E1). Absent unless `config.voice.*` is configured —
+    // the whole SIP block below is a clean no-op without it.
+    voiceStack,
     refreshPersonalities: refreshSystemPersonalities,
-  } = await createAgentLoop(config, { cronScheduler: scheduler, watcherManager });
+  } = await createAgentLoop(config, {
+    cronScheduler: scheduler,
+    watcherManager,
+    ...(callLog ? { callLog } : {}),
+    ...(telephonyMedia.livekit ? { livekit: telephonyMedia.livekit } : {}),
+  });
   systemLoop = systemLoopReady;
 
   // Personality-directory seam for hot-reload. `refresh()` reloads every loop
@@ -931,6 +1027,13 @@ export async function runGatewayStart(opts: GatewayStartOptions = {}): Promise<v
           ttsProviderRegistry: ttsProviders,
           ttsProviderName: voiceConfig.ttsProviderName,
           ttsProviderConfig: voiceConfig.ttsProviderConfig,
+          // The named rosters (`voice.stt.providers.*` / `voice.tts.providers.*`)
+          // a personality's `voice.stt_provider` / `voice.tts_provider` selects
+          // from. Without them the gateway resolves every lane onto the default
+          // entry, so per-personality voice would be live in `buildVoiceStack`
+          // and silently inert on every channel.
+          ...(voiceConfig.sttRoster ? { sttProviderRoster: voiceConfig.sttRoster } : {}),
+          ...(voiceConfig.ttsRoster ? { ttsProviderRoster: voiceConfig.ttsRoster } : {}),
           voiceSecretsResolver: voiceConfig.secretsResolver,
           // Local-only voice-egress gate (`voice.trustedPlugins`); undefined = off.
           ...(voiceConfig.trustedVoicePlugins
@@ -970,6 +1073,13 @@ export async function runGatewayStart(opts: GatewayStartOptions = {}): Promise<v
           ttsProviderRegistry: ttsProviders,
           ttsProviderName: voiceConfig.ttsProviderName,
           ttsProviderConfig: voiceConfig.ttsProviderConfig,
+          // The named rosters (`voice.stt.providers.*` / `voice.tts.providers.*`)
+          // a personality's `voice.stt_provider` / `voice.tts_provider` selects
+          // from. Without them the gateway resolves every lane onto the default
+          // entry, so per-personality voice would be live in `buildVoiceStack`
+          // and silently inert on every channel.
+          ...(voiceConfig.sttRoster ? { sttProviderRoster: voiceConfig.sttRoster } : {}),
+          ...(voiceConfig.ttsRoster ? { ttsProviderRoster: voiceConfig.ttsRoster } : {}),
           voiceSecretsResolver: voiceConfig.secretsResolver,
           // Local-only voice-egress gate (`voice.trustedPlugins`); undefined = off.
           ...(voiceConfig.trustedVoicePlugins
@@ -1211,11 +1321,21 @@ export async function runGatewayStart(opts: GatewayStartOptions = {}): Promise<v
         new ConsoleLogger().warn(`voice artifact retention prune failed: ${String(err)}`);
       });
   };
+  // Ended call rows carry whole transcripts, so they age out too. `ringing` and
+  // `live` rows are never pruned at any age — they are live state, and a ringing
+  // row stuck past the cutoff is a lost hang-up worth seeing, not a row to drop.
+  const pruneCallLog = () => {
+    void callLog?.pruneEnded(Date.now() - CALL_LOG_RETENTION_MS).catch((err) => {
+      new ConsoleLogger().warn(`call log retention prune failed: ${String(err)}`);
+    });
+  };
   pruneDeliveryLedger();
   pruneVoiceArtifacts();
+  pruneCallLog();
   const retentionPruneTimer = setInterval(() => {
     pruneDeliveryLedger();
     pruneVoiceArtifacts();
+    pruneCallLog();
   }, 3_600_000);
   retentionPruneTimer.unref?.();
 
@@ -1327,6 +1447,89 @@ export async function runGatewayStart(opts: GatewayStartOptions = {}): Promise<v
     }
   }
 
+  // ---------------------------------------------------------------------------
+  // Telephony — inbound SIP webhook (plan/phases/voice-v4-telephony.md E1/E4)
+  // ---------------------------------------------------------------------------
+  //
+  // NO PLATFORM ADAPTER IS REGISTERED FOR SIP, AND NONE SHOULD BE. The next
+  // person to read this will want to push a "sip" entry into `adapters[]` so a
+  // call looks like every other channel. Two reasons not to: the `channel_filter`
+  // gate above is FATAL for anything in that array, and a phone number has no
+  // `ownerUserId` to filter on — the caller is a stranger by definition, which is
+  // what the inbound hardening gate exists for instead. And a call is not a chat:
+  // it runs on the `VoiceStack` media path with its own lane
+  // (`voice:<botKey>:sip:<callerId>`), and the only thing it sends through the
+  // channel layer is its post-call summary, which goes out via
+  // `gateway.notifyTracked` so it rides the delivery ledger.
+  const sipWebhookSecret = sipTrunkConfig?.webhookSecret;
+  const sipWebhookPath = sipTrunkConfig?.webhookPath ?? '/sip/inbound';
+  // 3002 gateway health, 3003 gateway webhook, 3004 is `ethos run-all`'s health
+  // endpoint (ETHOS_RUNALL_HEALTH_PORT) — and run-all SPAWNS this process, so
+  // 3004 here would EADDRINUSE on the most common supervised deployment. 3005 is
+  // the next free one.
+  const sipWebhookPort = Number(process.env.ETHOS_SIP_WEBHOOK_PORT) || 3005;
+  const sipWebhookHost = process.env.ETHOS_SERVE_HOST ?? '127.0.0.1';
+  let sipWebhookServer: import('node:http').Server | undefined;
+  if (sipTrunkConfig && sipWebhookSecret && voiceStack && callLog) {
+    const owner = voiceStack.inbound.owner;
+    if (!owner) {
+      // Said ONCE at startup rather than per call: the operator configured a
+      // trunk but nowhere to hear about it, and a summary with no destination is
+      // exactly the failure this plan set out to fix. Not fatal — the agent can
+      // still answer the phone.
+      console.log(
+        `${c.yellow}⚠ voice.inbound.owner is not set${c.reset} ${c.dim}— call summaries and refusal notices have nowhere to go. Set voice.inbound.owner.platform / .chatId to receive them.${c.reset}`,
+      );
+    }
+    // Number → personality: the bot's `bind` IS that mapping (no second
+    // structure). Team-bound voice bots have no single personality to pin, so
+    // they fall through to the loop's default.
+    const voiceBotBindings = new Map(
+      (config.voice?.bots ?? []).map((bot) => [
+        bot.id ?? deriveBotKeyFromSeed(bot.match),
+        bot.bind.type === 'personality' ? bot.bind.name : undefined,
+      ]),
+    );
+    const onSipCall = createSipInboundHandler({
+      voiceStack,
+      callLog,
+      loop: systemLoop,
+      botPersonalityId: (bot) => voiceBotBindings.get(bot.id ?? deriveBotKeyFromSeed(bot.match)),
+      personality: (id) => seamPersonalities.get(id),
+      // Through `notifyTracked`, so the notice becomes a durable obligation
+      // BEFORE the platform call and the existing boot sweep redelivers it if it
+      // failed. Not a second delivery path — the same one every channel reply
+      // uses. No owner configured → nothing to deliver to, reported once above.
+      notifyOwner: async (text) =>
+        owner
+          ? gateway.notifyTracked(
+              {
+                platform: owner.platform,
+                chatId: owner.chatId,
+                ...(owner.botKey ? { botKey: owner.botKey } : {}),
+              },
+              text,
+            )
+          : false,
+      onError: (message) => new ConsoleLogger().warn(`sip: ${message}`),
+    });
+    sipWebhookServer = createSipWebhookServer({
+      port: sipWebhookPort,
+      host: sipWebhookHost,
+      path: sipWebhookPath,
+      provider: sipTrunkConfig.provider,
+      secret: sipWebhookSecret,
+      onCall: async (call, raw) => {
+        await onSipCall(call, raw);
+      },
+    });
+    console.log(`  sip: http://${sipWebhookHost}:${sipWebhookPort}${sipWebhookPath}`);
+  } else if (sipTrunkConfig && !sipWebhookSecret) {
+    console.log(
+      `${c.yellow}⚠ voice.trunk is configured without voice.trunk.webhookSecret${c.reset} ${c.dim}— the inbound call listener stays off. An unsigned webhook is an open line anyone who learns the URL can ring.${c.reset}`,
+    );
+  }
+
   console.log(`${c.dim}Listening for messages. Press Ctrl+C to stop.${c.reset}\n`);
   let heartbeatInFlight = false;
   const writeHeartbeat = async () => {
@@ -1354,6 +1557,7 @@ export async function runGatewayStart(opts: GatewayStartOptions = {}): Promise<v
     if (stopWatchdog) stopWatchdog();
     healthServer.close();
     webhookServer?.close();
+    sipWebhookServer?.close();
     clearInterval(pruneTimer);
     clearInterval(heartbeatTimer);
     clearInterval(retentionPruneTimer);
@@ -1366,6 +1570,7 @@ export async function runGatewayStart(opts: GatewayStartOptions = {}): Promise<v
     });
     await Promise.allSettled(adapters.map((a) => a.stop()));
     deliveryLedger.close();
+    callLog?.close();
     stopTeamSupervisors(bots, config.teams ?? {}, supervisorDeps);
     process.exit(0);
   };
@@ -1450,11 +1655,19 @@ async function buildGatewayBots(
   scheduler: CronScheduler,
   watcherManager: WatcherManager,
   resolveOriginThreadId: (sessionKey: string) => string | undefined,
+  callLog?: CallLog,
 ): Promise<BuildGatewayBotsResult> {
   // Every personality loop gets the same scheduler + watcher manager so
   // agent-callable cron/watcher tools land in the shared stores. The thread
-  // resolver rides along so background jobs record their full origin lane.
-  const loopOpts = { cronScheduler: scheduler, watcherManager, resolveOriginThreadId };
+  // resolver rides along so background jobs record their full origin lane, and
+  // the call log so a phone call one of these bots PLACES is recorded beside
+  // the inbound ones rather than vanishing.
+  const loopOpts = {
+    cronScheduler: scheduler,
+    watcherManager,
+    resolveOriginThreadId,
+    ...(callLog ? { callLog } : {}),
+  };
   const out: GatewayBotConfig[] = [];
   const setters: Array<(fn: MessagingSendFn) => void> = [];
   const routers: NotificationRouter[] = [];

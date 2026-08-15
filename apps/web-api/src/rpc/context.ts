@@ -8,6 +8,7 @@ import type { DebugService } from '../features/debug/service';
 import type { SessionsService } from '../features/sessions/service';
 import type { ApiKeysService } from '../services/api-keys.service';
 import type { ApprovalsService } from '../services/approvals.service';
+import type { CallsService } from '../services/calls.service';
 import type { ConfigService } from '../services/config.service';
 import type { CronService } from '../services/cron.service';
 import type { DeliveriesService } from '../services/deliveries.service';
@@ -86,6 +87,10 @@ export interface RpcContext {
    *  deployments with no satellite lane — the RPCs then report an empty house
    *  rather than throwing at a Settings page. */
   satellites?: SatelliteRegistry;
+  /** Read-only telephony call history. Absent in deployments with no call log —
+   *  `voice.calls.*` then reports an empty list, which the UI renders as an
+   *  empty state rather than an error. */
+  calls?: CallsService;
   /** Read / replace the wake-phrase → personality table. Not optional: the
    *  editor must render (empty) even where no satellite lane is mounted. */
   wakeRoutes: WakeRoutesService;

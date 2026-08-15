@@ -620,9 +620,9 @@ export interface CreatePersonalityInput {
 /**
  * The sub-keys of `PersonalityVoiceConfig` an editor may write.
  *
- * `tier`, `model` and `languages` are excluded on purpose: they parse and
- * serialize, but nothing routes on them yet, so exposing them through a create
- * or update API would be advertising a control that does nothing.
+ * Every sub-key of the frozen `voice` block is here — the block is what a
+ * personality declares about how it sounds, and a sub-key only config.yaml can
+ * reach is a sub-key the editor silently erases on the next save.
  */
 export interface EditableVoiceConfig {
   tts_provider?: string;
@@ -631,16 +631,23 @@ export interface EditableVoiceConfig {
   tts_voice?: string;
   /** How the Call Stage draws this personality. `''` clears it. */
   call_style?: import('@ethosagent/types').CallTreatment | '';
+  /** Which voice stack serves this personality. `''` clears it. */
+  tier?: 'pipeline' | 'realtime' | '';
+  /** Fast-lane model for spoken turns. `''` clears it. */
+  model?: string;
+  /** BCP-47 tag → voice id. REPLACES the stored map; `{}` clears it. */
+  languages?: Record<string, string>;
 }
 
 /** The editable STRING sub-keys, in one place — the merge walks exactly this
- *  list. `call_style` is merged separately: it is an enum, and a loop that
- *  assigns across a union of value types does not typecheck. */
+ *  list. `call_style` and `tier` are merged separately: they are enums, and a
+ *  loop that assigns across a union of value types does not typecheck. */
 const EDITABLE_VOICE_KEYS = [
   'tts_provider',
   'stt_provider',
   'realtime_provider',
   'tts_voice',
+  'model',
 ] as const;
 
 export interface UpdatePersonalityPatch {
@@ -688,9 +695,10 @@ export interface UpdatePersonalityPatch {
 /**
  * Apply an editable voice patch to the stored `voice` block.
  *
- * `''` clears a sub-key, `undefined` leaves it, anything else sets it. Sub-keys
- * the editor cannot write (`tier`, `model`, `languages`) ride through
- * untouched, so hand-authored config survives a save from the web.
+ * `''` clears a scalar sub-key, `undefined` leaves it, anything else sets it.
+ * `languages` is the one non-scalar: a patch that carries it REPLACES the
+ * stored map, because merging per tag would leave no way to delete one — and a
+ * patch that omits it still leaves a hand-written map alone.
  * A block left with nothing in it is dropped rather than written empty.
  */
 function mergeVoiceConfig(
@@ -707,6 +715,15 @@ function mergeVoiceConfig(
   if (patch.call_style !== undefined) {
     if (patch.call_style === '') delete next.call_style;
     else next.call_style = patch.call_style;
+  }
+  if (patch.tier !== undefined) {
+    if (patch.tier === '') delete next.tier;
+    else next.tier = patch.tier;
+  }
+  if (patch.languages !== undefined) {
+    const languages = patch.languages;
+    if (Object.keys(languages).length === 0) delete next.languages;
+    else next.languages = { ...languages };
   }
   return Object.keys(next).length > 0 ? next : undefined;
 }

@@ -21,6 +21,7 @@ export async function* setupTurn(
     personalityId?: string;
     abortSignal?: AbortSignal;
     tierOverride?: ModelTierName;
+    modelOverride?: string;
     toolsetOverride?: string[];
     toolsetNarrow?: string[];
     toolsetExclude?: string[];
@@ -163,13 +164,24 @@ export async function* setupTurn(
   }
 
   const activeTier = turnTierOverride ?? 'default';
-  const { model: effectiveModel, source: modelSource } = resolveModelWithTier(
+  const tierResolved = resolveModelWithTier(
     personality,
     activeTier,
     deps.modelRouting,
     deps.llm.name,
     deps.llm.model,
   );
+  // An explicit per-run model pin is the TOP rung: it outranks the tier
+  // resolution above and therefore the personality's configured model and the
+  // deployment default too. A caller naming a model for one turn knows
+  // something no static declaration does.
+  //
+  // `source` reports 'personality' for a pin because the frozen `run_start`
+  // union has no per-run variant and the caller's knowledge is always about WHO
+  // is running (today: a personality's fast-lane voice model). Reporting the
+  // tier source instead would name the model this turn did NOT use.
+  const effectiveModel = opts.modelOverride ?? tierResolved.model;
+  const modelSource = opts.modelOverride ? 'personality' : tierResolved.source;
   const modelOverride = effectiveModel !== deps.llm.model ? effectiveModel : undefined;
 
   // Phase 5: emit run_start trace so consumers (TUI, CLI verbose, telemetry)

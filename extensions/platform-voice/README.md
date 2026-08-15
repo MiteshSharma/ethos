@@ -66,22 +66,29 @@ The concrete LiveKit transport lives in `src/livekit/`:
   `VoiceSession` factory, it composes transport → adapter → `VoiceSession` per
   participant.
 
-### Why the native LiveKit deps are NOT committed
+- **`token.ts`** — `createLiveKitTokenMinter` / `createLiveKitSipJwt`: the real
+  token minter, an HS256 JWT signed with `node:crypto` and **no dependency**.
+  This is what finally makes `voice.livekit.apiKey` / `apiSecret` reachable —
+  before V4 they were parsed by `@ethosagent/config` and read by nothing.
 
-`@livekit/rtc-node` (WebRTC media) ships a **native binary**, and
-`livekit-server-sdk` (JWT tokens) is its server-side companion. Neither is added
-to this repo's dependency graph, deliberately:
+### Why the native media dep is NOT committed (and why the control plane needs none)
 
-- The native media binding cannot be verified in CI here without a running
-  `livekit-server` — committing an unverifiable native dependency risks breaking
-  the whole monorepo install.
-- Everything in `src/livekit/` binds ONLY to the `LiveKitRoomClient` /
-  `LiveKitTokenMinter` interfaces, so it typechecks and unit-tests against fakes
-  (`src/livekit/__tests__/livekit-fakes.ts`). The real SDKs are a **runtime
-  binding supplied at the app layer** — the app-level factory implements
-  `LiveKitRoomClient` by wrapping `@livekit/rtc-node` and `LiveKitTokenMinter` by
-  wrapping `livekit-server-sdk`'s `AccessToken`, then injects them into
-  `createLiveKitTransport`.
+The line is MEDIA vs CONTROL:
+
+- **Media needs a native binding.** `@livekit/rtc-node` (WebRTC) ships a native
+  binary that cannot be verified in CI here without a running `livekit-server` —
+  committing an unverifiable native dependency risks breaking the whole monorepo
+  install. `src/livekit/transport.ts` binds ONLY to the `LiveKitRoomClient`
+  interface, so it typechecks and unit-tests against fakes
+  (`src/livekit/__tests__/livekit-fakes.ts`); the app layer implements the
+  interface by wrapping the SDK and injects it into `createLiveKitTransport`.
+- **Control needs no SDK at all.** A LiveKit access token is an HS256 JWT, and
+  the SIP API is a JSON POST authorized by one. `livekit-server-sdk` would
+  contribute a signer and a request builder, so V4 writes them here instead:
+  `src/livekit/token.ts` mints tokens and `src/sip/trunk-client-livekit.ts`
+  places real outbound calls, both over `node:crypto` + global `fetch`, both
+  fully unit-tested. `LiveKitTokenMinter` remains an interface so a deployment
+  can substitute an external signing service.
 
 ### Manual verification checklist (real bindings + running server)
 
@@ -124,11 +131,31 @@ outbound-call layer *around* that stack — it does not fork it.
 
 - **`sip/trunk-client.ts`** — `SipTrunkClient`: the isolated boundary for
   `createOutboundCall({ toNumber, roomName, … })` plus the `InboundSipCall`
-  shape. The production binding wraps `livekit-server-sdk`'s SIP API (`SipClient`
-  — `createSIPParticipant` for outbound, inbound trunk + dispatch rules for
-  inbound). **`livekit-server-sdk` is NOT installed in-repo** (same rationale as
-  `@livekit/rtc-node` — an unverifiable server binding); everything here binds
-  only to the interface, so it unit-tests against `FakeSipTrunkClient`.
+  shape. Callers depend on the interface, so dispatch and the outbound tool
+  unit-test against `FakeSipTrunkClient` and a deployment can substitute a
+  non-LiveKit trunk.
+- **`sip/trunk-client-livekit.ts`** — `createLiveKitSipTrunkClient`: the
+  production binding. A JSON POST to
+  `/twirp/livekit.SIP/CreateSIPParticipant` authorized by a JWT carrying the
+  `sip: { call: true }` grant — no SDK, no new dependency. A non-2xx response
+  throws with the status and a **redacted, truncated** body: a provider refusal
+  must never echo the bearer token (minted from the apiSecret) into a log.
+- **`sip/webhook.ts`** — `verifySipWebhook` / `parseInboundSipCall`: the inbound
+  door. Four verification schemes (`livekit` JWT + body hash, `twilio`
+  HMAC-SHA1 over url + sorted params, `telnyx` Ed25519 over `timestamp|body`,
+  `generic` HMAC-SHA256 over `timestamp.body`), every comparison length-guarded
+  then `timingSafeEqual`, every failure a DISTINCT reason that never contains
+  the secret. `parseInboundSipCall` maps a verified payload to an
+  `InboundSipCall` (or `null` — it never throws), falling back to a
+  deterministic `call-<to>-<from>` room name when the provider supplies none.
+  **Twilio's scheme carries no timestamp, so no replay window is enforceable
+  for it** — that gap is pinned by a test rather than papered over.
+- **`sip/inbound-gate.ts`** — `decideInboundCall` plus the three limiters
+  (`createCallConcurrencyLimiter`, `createPerCallerRateLimiter`,
+  `createVoiceDailyBudget`) and `isAllowlistedCaller`. Order is load-bearing:
+  budget → rate limit → concurrency → allowlist, and a refusal never keeps a
+  concurrency slot. An absent allowlist means NOBODY is allowlisted (write `'*'`
+  to mean everyone) — a mis-parsed key must fail closed.
 - **`sip/inbound-dispatch.ts`** — `createInboundDispatcher`: resolves an inbound
   call's dialed DID (`toNumber`) against the `voice.bots[]` patterns
   (`resolveVoiceBot` / `matchesVoicePattern`) to pick the bound personality, then
@@ -139,7 +166,11 @@ outbound-call layer *around* that stack — it does not fork it.
 - **`sip/post-call-summary.ts`** — `createPostCallSummary`: on call end, builds a
   summary from the adapter's honest transcript (`lastReplyText()`) and posts it via
   `adapter.sendArtifactMessage()` → the gateway's deduped `send()` gate. Same
-  dedup path as every outbound message — never a new dedup layer.
+  dedup path as every outbound message — never a new dedup layer. Supply
+  `deliver` instead to route it through the delivery ledger: dedup stops a
+  DOUBLE send, the ledger stops a LOST one, and the summary is the only durable
+  record of a call the operator did not hear. Wire it as the adapter's
+  `onEnded` so a caller who simply hangs up still gets one.
 
 The outbound `call` **tool** lives in `@ethosagent/tools-voice`. It is marked
 `requiresApproval: true`, so AgentLoop gates it on the approval surface before a

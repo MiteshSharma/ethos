@@ -18,6 +18,7 @@ export class FakeVoiceTransport implements VoiceTransport {
   connected = false;
   readonly sentAudio: OutboundAudioFrame[] = [];
   private handlers: Array<(chunk: PcmChunk) => void> = [];
+  private closedHandlers: Array<() => void> = [];
 
   constructor(callerId: string) {
     this.callerId = callerId;
@@ -42,9 +43,22 @@ export class FakeVoiceTransport implements VoiceTransport {
     this.sentAudio.push(frame);
   }
 
+  onClosed(handler: () => void): () => void {
+    this.closedHandlers.push(handler);
+    return () => {
+      this.closedHandlers = this.closedHandlers.filter((h) => h !== handler);
+    };
+  }
+
   /** Test driver: simulate one inbound audio frame from the participant. */
   emit(chunk: PcmChunk): void {
     for (const handler of this.handlers) handler(chunk);
+  }
+
+  /** Test driver: simulate the remote party hanging up. */
+  close(): void {
+    this.connected = false;
+    for (const handler of this.closedHandlers) handler();
   }
 }
 
@@ -86,6 +100,61 @@ export function makeClock(): { now: () => number; advance: (ms: number) => void 
 }
 
 export const tick = (): Promise<void> => new Promise((r) => setImmediate(r));
+
+/** Let the fake realtime provider's own (real) timers and the event pump run. */
+export async function settle(rounds = 4): Promise<void> {
+  for (let i = 0; i < rounds; i++) await new Promise((r) => setTimeout(r, 1));
+}
+
+/**
+ * A clock plus a scheduler that can land LATE. The lateness is the point: every
+ * real wake-up is, and a pacer that adds `frameMs` to "now" instead of to an
+ * absolute anchor turns that lateness into permanent drift. The FramePacer only
+ * ever holds one pending timer, so one slot is enough.
+ */
+export interface FakeScheduler {
+  now(): number;
+  setTimer(fn: () => void, ms: number): { cancel(): void };
+  /** Clock readings at which a timer was cancelled. */
+  readonly cancelledAt: number[];
+  /** The absolute deadline currently asked for, or null when idle. */
+  scheduledAt(): number | null;
+  advance(ms: number): void;
+  /** Run the pending timer, arriving `jitter` ms after its deadline. */
+  fire(jitter?: number): boolean;
+}
+
+export function makeTimerScheduler(): FakeScheduler {
+  let time = 0;
+  let pending: { fn: () => void; at: number } | null = null;
+  const cancelledAt: number[] = [];
+  return {
+    now: () => time,
+    setTimer: (fn: () => void, ms: number) => {
+      const entry = { fn, at: time + ms };
+      pending = entry;
+      return {
+        cancel: () => {
+          if (pending === entry) pending = null;
+          cancelledAt.push(time);
+        },
+      };
+    },
+    cancelledAt,
+    scheduledAt: () => pending?.at ?? null,
+    advance: (ms: number) => {
+      time += ms;
+    },
+    fire: (jitter = 0) => {
+      const entry = pending;
+      if (!entry) return false;
+      pending = null;
+      time = entry.at + jitter;
+      entry.fn();
+      return true;
+    },
+  };
+}
 
 export function streamingStt(text: string): StreamingSttProvider {
   return {

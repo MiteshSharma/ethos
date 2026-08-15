@@ -11,7 +11,13 @@
 // `init()`. That is what lets the gateway — which must never open an audio
 // device — share this package's contracts without inheriting its dependencies.
 
-export type { AudioDeviceInfo, CaptureDevice, CaptureEnd } from './audio-device';
+export type {
+  AudioDeviceInfo,
+  CaptureDevice,
+  CaptureEnd,
+  PlaybackDevice,
+  PlaybackFormat,
+} from './audio-device';
 export {
   CaptureMachine,
   type CaptureMachineConfig,
@@ -47,6 +53,14 @@ export {
   type SatelliteSocketFactory,
   type SatelliteSocketHandlers,
 } from './node-client';
+export {
+  DEFAULT_PLAYOUT_DRAIN_WATCHDOG_MS,
+  DEFAULT_PLAYOUT_SAMPLE_RATE,
+  type PlayoutProblem,
+  SatellitePlayout,
+  type SatellitePlayoutDeps,
+} from './playout';
+export { encodeUtteranceWav } from './utterance-audio';
 export { createEnergyFrameVad, type FrameVad } from './vad-adapter';
 export type {
   WakeEngine,

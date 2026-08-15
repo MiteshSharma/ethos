@@ -105,6 +105,9 @@ export interface ServiceContainer {
   /** Connected wake satellites + the pushed routing table. Absent when this
    *  deployment mounts no satellite lane. */
   satellites?: import('../voice/satellite-registry').SatelliteRegistry;
+  /** Read-only telephony call history. Absent when this deployment has no
+   *  call log. */
+  calls?: import('../services/calls.service').CallsService;
   /** Read / replace the wake-phrase → personality table. */
   wakeRoutes: import('../services/wake-routes.service').WakeRoutesService;
   toolRegistry?: import('@ethosagent/types').ToolRegistry;

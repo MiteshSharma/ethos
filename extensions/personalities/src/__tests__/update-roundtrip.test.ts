@@ -1067,13 +1067,75 @@ describe('voice round-trip', () => {
 
     const fresh = makeRegistry();
     await fresh.loadFromDirectory(join(testDir, 'personalities'));
-    // The hand-written language map is not something the web form can express,
-    // so a save from it must not be able to delete one.
+    // A patch that does not NAME the language map leaves it alone — the map is
+    // replaced only by a patch that carries one.
     expect(fresh.get('voice-patch')?.voice).toEqual({
       tts_provider: 'studio',
       tts_voice: 'nova',
       languages: { es: 'ef_dora' },
     });
+  });
+
+  // `tier`, `model` and `languages` are the three sub-keys the web editor could
+  // not reach until V1a's Settings-parity pass. They are SUB-KEYS of the same
+  // frozen `voice` block, so exposing them moves no top-level field count.
+  it('edits voice.tier and voice.model, and clears the tier on an empty string', async () => {
+    await seedPersonality(
+      'voice-lane',
+      'name: VoiceLane\nvoice.tts_voice: alloy\nvoice.tier: pipeline\nvoice.model: old-model\n',
+    );
+    const registry = makeRegistry();
+    await registry.loadFromDirectory(join(testDir, 'personalities'));
+
+    await registry.update('voice-lane', { voice: { tier: 'realtime', model: 'fast-model' } });
+    let raw = await readFile(join(testDir, 'personalities', 'voice-lane', 'config.yaml'), 'utf-8');
+    expect(raw).toContain('voice.tier: realtime');
+    expect(raw).toContain('voice.model: fast-model');
+    expect(raw).toContain('voice.tts_voice: alloy');
+
+    await registry.update('voice-lane', { voice: { tier: '', model: '' } });
+    raw = await readFile(join(testDir, 'personalities', 'voice-lane', 'config.yaml'), 'utf-8');
+    expect(raw).not.toMatch(/^voice\.tier:/m);
+    expect(raw).not.toMatch(/^voice\.model:/m);
+
+    const fresh = makeRegistry();
+    await fresh.loadFromDirectory(join(testDir, 'personalities'));
+    expect(fresh.get('voice-lane')?.voice).toEqual({ tts_voice: 'alloy' });
+  });
+
+  it('REPLACES the language map when a patch carries one, so a tag can be deleted', async () => {
+    // Merging per tag would leave no way to remove one: the editor sends the
+    // map it holds, and a tag it no longer holds is a tag the operator deleted.
+    await seedPersonality(
+      'voice-langs',
+      'name: VoiceLangs\nvoice.languages.es: ef_dora\nvoice.languages.ja: jf_alpha\n',
+    );
+    const registry = makeRegistry();
+    await registry.loadFromDirectory(join(testDir, 'personalities'));
+
+    await registry.update('voice-langs', { voice: { languages: { es: 'ef_nueva' } } });
+    const raw = await readFile(
+      join(testDir, 'personalities', 'voice-langs', 'config.yaml'),
+      'utf-8',
+    );
+    expect(raw).toContain('voice.languages.es: ef_nueva');
+    expect(raw).not.toContain('voice.languages.ja');
+
+    const fresh = makeRegistry();
+    await fresh.loadFromDirectory(join(testDir, 'personalities'));
+    expect(fresh.get('voice-langs')?.voice).toEqual({ languages: { es: 'ef_nueva' } });
+  });
+
+  it('clears the language map on an empty object', async () => {
+    await seedPersonality('voice-nolangs', 'name: VoiceNoLangs\nvoice.languages.es: ef_dora\n');
+    const registry = makeRegistry();
+    await registry.loadFromDirectory(join(testDir, 'personalities'));
+
+    await registry.update('voice-nolangs', { voice: { languages: {} } });
+
+    const fresh = makeRegistry();
+    await fresh.loadFromDirectory(join(testDir, 'personalities'));
+    expect(fresh.get('voice-nolangs')?.voice).toBeUndefined();
   });
 
   it('an empty provider clears the key, putting it back on the default entry', async () => {

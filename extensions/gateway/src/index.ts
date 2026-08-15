@@ -4,10 +4,14 @@ import {
   buildLaneKey,
   deriveBotKey,
   LaneVoiceModeStore,
-  resolveSttProvider as resolveSharedStt,
-  resolveTtsProvider as resolveSharedTts,
+  resolveSttProviderForPersonality,
+  resolveTtsProviderForPersonality,
   resolveVoicePreferences,
+  type SttProviderForPersonality,
+  selectSttEntry,
+  selectTtsEntry,
   stripAnsiEscapes,
+  type TtsProviderForPersonality,
 } from '@ethosagent/core';
 import type { DeliveryLedger, DeliveryObligation } from '@ethosagent/delivery-ledger';
 import type { ChannelFilterConfig } from '@ethosagent/safety-channel';
@@ -38,8 +42,10 @@ import type {
   SteerSink,
   Storage,
   SttProvider,
+  SttProviderEntry,
   SttProviderRegistry,
   TtsProvider,
+  TtsProviderEntry,
   TtsProviderRegistry,
   VoiceAudioFormat,
   VoiceTurnOrigin,
@@ -159,6 +165,13 @@ const BACKGROUND_MAX_JOBS_PER_ROOT = 3;
  * `jobs.delivered_at` claim is what actually enforces exactly-once.
  */
 const DELIVERED_WAKES_MAX = 4_096;
+
+/**
+ * Memo key for "the default voice entry" — `auxiliary.asr` / `auxiliary.tts`,
+ * which have no roster name of their own. The leading space keeps it out of the
+ * space of names an operator can type as a roster key.
+ */
+const DEFAULT_VOICE_ENTRY_KEY = ' default';
 
 /**
  * Tools that render typed UI cards on the web surface. Channel adapters get
@@ -478,6 +491,20 @@ export interface GatewayConfig {
   sttProviderConfig?: Record<string, unknown>;
   /** Config dict passed to TTS provider factory (apiKey, model, voice, etc.). */
   ttsProviderConfig?: Record<string, unknown>;
+  /**
+   * `voice.stt.providers.*` / `voice.tts.providers.*` — the NAMED rosters a
+   * personality's `voice.stt_provider` / `voice.tts_provider` picks from.
+   *
+   * Absent → every personality gets the single `sttProviderName` /
+   * `ttsProviderName` default, which is what every deployment did before
+   * per-personality providers reached channel replies. The roster KEY is a
+   * label the operator typed and is never what the egress gate keys on: the
+   * shared resolver gates on the selected entry's `provider` and the
+   * constructed provider's `caps.local`, so naming a cloud entry
+   * `local-anything` cannot walk it past a local-only gate.
+   */
+  sttProviderRoster?: Readonly<Record<string, SttProviderEntry>>;
+  ttsProviderRoster?: Readonly<Record<string, TtsProviderEntry>>;
   /** Secrets resolver for voice provider factories. */
   voiceSecretsResolver?: import('@ethosagent/types').SecretsResolver;
   /** Default voice mode: 'off' | 'mirror_inbound' | 'all'. Default 'mirror_inbound'. */
@@ -717,22 +744,31 @@ export class Gateway {
   private readonly sttProviderRegistry: SttProviderRegistry | undefined;
   /** Name of the STT provider to use (from auxiliary.asr.provider in config). */
   private readonly sttProviderName: string | undefined;
-  /** Lazily resolved STT provider instance. */
-  private sttProvider: SttProvider | null = null;
-  /** Whether `resolveSttProvider` has been called at least once. */
-  private sttProviderResolved = false;
+  /**
+   * Resolved STT providers, ONE PER ROSTER ENTRY — not one per gateway.
+   *
+   * A single memoized provider is what made `voice.stt_provider` a
+   * browser-talk-mode-only setting: whichever personality spoke first bound the
+   * whole process. The key is the selected roster entry (or the default
+   * entry), so two personalities naming the same entry still share one
+   * constructed provider, and the promise is memoized rather than the settled
+   * value so two concurrent turns cannot race into two factory calls.
+   */
+  private readonly sttProviders = new Map<string, Promise<SttProviderForPersonality>>();
   /** TTS provider registry for resolving voice synthesis providers by name. */
   private readonly ttsProviderRegistry: TtsProviderRegistry | undefined;
   /** Name of the TTS provider to use (from auxiliary.tts.provider in config). */
   private readonly ttsProviderName: string | undefined;
-  /** Lazily resolved TTS provider instance. */
-  private ttsProvider: TtsProvider | null = null;
-  /** Whether `resolveTtsProvider` has been called at least once. */
-  private ttsProviderResolved = false;
+  /** Resolved TTS providers, one per roster entry. See {@link sttProviders}. */
+  private readonly ttsProviders = new Map<string, Promise<TtsProviderForPersonality>>();
   /** Config dict passed to STT provider factory. */
   private readonly sttProviderConfig: Record<string, unknown>;
   /** Config dict passed to TTS provider factory. */
   private readonly ttsProviderConfig: Record<string, unknown>;
+  /** `voice.stt.providers.*` — the named roster a personality can pick from. */
+  private readonly sttProviderRoster: Readonly<Record<string, SttProviderEntry>> | undefined;
+  /** `voice.tts.providers.*` — the named roster a personality can pick from. */
+  private readonly ttsProviderRoster: Readonly<Record<string, TtsProviderEntry>> | undefined;
   /** Secrets resolver for voice provider factories. */
   private readonly voiceSecretsResolver: import('@ethosagent/types').SecretsResolver | undefined;
   /**
@@ -757,9 +793,12 @@ export class Gateway {
     | ((platform: string, platformUserId: string, displayLabel?: string) => Promise<string>)
     | undefined;
   private readonly trustedVoicePlugins: ReadonlySet<string> | undefined;
-  /** Provider ids that actually resolved — answerable after the fact. */
-  private resolvedSttProviderId: string | undefined;
-  private resolvedTtsProviderId: string | undefined;
+  // NO `resolvedSttProviderId` / `resolvedTtsProviderId` fields. They used to
+  // hold "the" provider id, which was honest only while one provider served the
+  // whole process. With per-personality resolution a remembered id is a
+  // last-writer-wins global, and a turn stamping it into its own telemetry
+  // would name whichever personality spoke most recently. Each resolution now
+  // returns its id and the caller stamps THAT.
   /** Why a configured provider did not resolve (refusal, unknown, init fail). */
   private readonly voiceProviderErrors: { stt?: string; tts?: string } = {};
   private readonly pluginLoader: GatewayConfig['pluginLoader'];
@@ -880,6 +919,8 @@ export class Gateway {
     this.ttsProviderName = config.ttsProviderName;
     this.sttProviderConfig = config.sttProviderConfig ?? {};
     this.ttsProviderConfig = config.ttsProviderConfig ?? {};
+    this.sttProviderRoster = config.sttProviderRoster;
+    this.ttsProviderRoster = config.ttsProviderRoster;
     this.voiceSecretsResolver = config.voiceSecretsResolver;
     // No store injected → an in-memory one. `LaneVoiceModeStore` with no
     // `storage` is exactly the Map this replaced, so a standalone/test gateway
@@ -986,60 +1027,116 @@ export class Gateway {
 
   // Both resolvers delegate to the SHARED resolution path in
   // `@ethosagent/core` — the same one web-api and the wiring-built
-  // VoiceSession stack use. Nothing here re-implements provider lookup or the
-  // local-only egress gate; a second implementation is exactly how "config
-  // says one provider, the pipeline used another" happens. The resolved id is
-  // remembered so callers can report which provider actually ran.
-  private async resolveSttProvider(): Promise<SttProvider | null> {
-    if (this.sttProviderResolved) return this.sttProvider;
-    this.sttProviderResolved = true;
-    const resolution = await resolveSharedStt({
+  // VoiceSession stack use. Nothing here re-implements provider lookup, roster
+  // selection or the local-only egress gate; a second implementation is exactly
+  // how "config says one provider, the pipeline used another" happens, and the
+  // gate lives INSIDE that shared resolver so there is one door, not two.
+  //
+  // Resolution is per-PERSONALITY. The memo key is the selected roster entry,
+  // computed by the pure `select*Entry` BEFORE the async factory call — so an
+  // unknown roster name collapses onto the default entry's cached provider,
+  // which is where the shared resolver would send it anyway. The returned
+  // `providerId` is what the caller stamps into its telemetry, so "which
+  // provider served this reply" stays answerable per turn rather than per boot.
+  private resolveSttFor(
+    personalityVoice: PersonalityVoiceConfig | undefined,
+  ): Promise<SttProviderForPersonality> {
+    const key =
+      selectSttEntry({
+        ...(personalityVoice?.stt_provider ? { requestedName: personalityVoice.stt_provider } : {}),
+        ...(this.sttProviderRoster ? { roster: this.sttProviderRoster } : {}),
+      }).entryName ?? DEFAULT_VOICE_ENTRY_KEY;
+    const cached = this.sttProviders.get(key);
+    if (cached) return cached;
+    const pending = resolveSttProviderForPersonality({
       registry: this.sttProviderRegistry,
-      providerName: this.sttProviderName,
-      providerConfig: this.sttProviderConfig,
+      ...(personalityVoice ? { personality: personalityVoice } : {}),
+      ...(this.sttProviderRoster ? { roster: this.sttProviderRoster } : {}),
+      ...(this.sttProviderName ? { defaultProviderName: this.sttProviderName } : {}),
+      defaultProviderConfig: this.sttProviderConfig,
       ...(this.voiceSecretsResolver ? { secrets: this.voiceSecretsResolver } : {}),
       logger: noopLogger,
       ...(this.trustedVoicePlugins ? { trustedVoicePlugins: this.trustedVoicePlugins } : {}),
     });
-    if (resolution.ok) {
-      this.sttProvider = resolution.provider;
-      this.resolvedSttProviderId = resolution.providerId;
-    } else if (resolution.code !== 'not_configured') {
-      // Transcription falls back to the placeholder path. The reason is kept
-      // (not swallowed) so a refused provider is reportable rather than
-      // looking like "voice just doesn't work here".
-      this.voiceProviderErrors.stt = resolution.error;
-    }
-    return this.sttProvider;
+    this.sttProviders.set(key, pending);
+    return pending;
   }
 
-  private async resolveTtsProvider(): Promise<TtsProvider | null> {
-    if (this.ttsProviderResolved) return this.ttsProvider;
-    this.ttsProviderResolved = true;
-    const resolution = await resolveSharedTts({
+  private resolveTtsFor(
+    personalityVoice: PersonalityVoiceConfig | undefined,
+  ): Promise<TtsProviderForPersonality> {
+    const key =
+      selectTtsEntry({
+        ...(personalityVoice?.tts_provider ? { requestedName: personalityVoice.tts_provider } : {}),
+        ...(this.ttsProviderRoster ? { roster: this.ttsProviderRoster } : {}),
+      }).entryName ?? DEFAULT_VOICE_ENTRY_KEY;
+    const cached = this.ttsProviders.get(key);
+    if (cached) return cached;
+    const pending = resolveTtsProviderForPersonality({
       registry: this.ttsProviderRegistry,
-      providerName: this.ttsProviderName,
-      providerConfig: this.ttsProviderConfig,
+      ...(personalityVoice ? { personality: personalityVoice } : {}),
+      ...(this.ttsProviderRoster ? { roster: this.ttsProviderRoster } : {}),
+      ...(this.ttsProviderName ? { defaultProviderName: this.ttsProviderName } : {}),
+      defaultProviderConfig: this.ttsProviderConfig,
       ...(this.voiceSecretsResolver ? { secrets: this.voiceSecretsResolver } : {}),
       logger: noopLogger,
       ...(this.trustedVoicePlugins ? { trustedVoicePlugins: this.trustedVoicePlugins } : {}),
     });
+    this.ttsProviders.set(key, pending);
+    return pending;
+  }
+
+  /**
+   * The STT provider serving one personality's inbound audio, or null when none
+   * resolved. Records the failure reason (unless "not configured", which is not
+   * a failure) so a refused provider is reportable rather than looking like
+   * "voice just doesn't work here".
+   */
+  private async resolveSttProvider(personalityId?: string): Promise<{
+    provider: SttProvider | null;
+    providerId: string | undefined;
+  }> {
+    const { resolution } = await this.resolveSttFor(this.personalityVoice(personalityId));
     if (resolution.ok) {
-      this.ttsProvider = resolution.provider;
-      this.resolvedTtsProviderId = resolution.providerId;
-    } else if (resolution.code !== 'not_configured') {
-      // Voice replies stay disabled; keep the reason for the same purpose.
-      this.voiceProviderErrors.tts = resolution.error;
+      return { provider: resolution.provider, providerId: resolution.providerId };
     }
-    return this.ttsProvider;
+    if (resolution.code !== 'not_configured') this.voiceProviderErrors.stt = resolution.error;
+    return { provider: null, providerId: undefined };
+  }
+
+  /** The TTS provider serving one personality's replies. Mirrors the STT half. */
+  private async resolveTtsProvider(personalityId?: string): Promise<{
+    provider: TtsProvider | null;
+    providerId: string | undefined;
+    /** The chosen entry's own voice id — the lowest rung of voice precedence. */
+    entryVoice: string | undefined;
+  }> {
+    const { resolution, globalTtsVoice } = await this.resolveTtsFor(
+      this.personalityVoice(personalityId),
+    );
+    if (resolution.ok) {
+      return {
+        provider: resolution.provider,
+        providerId: resolution.providerId,
+        entryVoice: globalTtsVoice,
+      };
+    }
+    if (resolution.code !== 'not_configured') this.voiceProviderErrors.tts = resolution.error;
+    return { provider: null, providerId: undefined, entryVoice: undefined };
+  }
+
+  /** This personality's `voice` block, when the directory seam exposes one. */
+  private personalityVoice(personalityId?: string): PersonalityVoiceConfig | undefined {
+    return personalityId ? this.personalityDirectory?.voice?.(personalityId) : undefined;
   }
 
   /**
    * What voice resolution actually does here: the provider ids that serve this
-   * gateway, plus the reason either one is missing (unknown provider, failed
-   * init, or refused by the local-only egress gate). Resolution is memoized,
-   * so calling this is equivalent to what the first voice message triggers —
-   * which is exactly why it can answer "which provider ran".
+   * gateway's DEFAULT entries, plus the reason either one is missing (unknown
+   * provider, failed init, or refused by the local-only egress gate). Resolution
+   * is memoized, so calling this is equivalent to what the first voice message
+   * on a personality with no roster pick triggers — which is exactly why it can
+   * answer "which provider ran".
    */
   async voiceProviderStatus(): Promise<{
     stt: string | undefined;
@@ -1047,11 +1144,11 @@ export class Gateway {
     sttError: string | undefined;
     ttsError: string | undefined;
   }> {
-    await this.resolveSttProvider();
-    await this.resolveTtsProvider();
+    const stt = await this.resolveSttProvider();
+    const tts = await this.resolveTtsProvider();
     return {
-      stt: this.resolvedSttProviderId,
-      tts: this.resolvedTtsProviderId,
+      stt: stt.providerId,
+      tts: tts.providerId,
       sttError: this.voiceProviderErrors.stt,
       ttsError: this.voiceProviderErrors.tts,
     };
@@ -2038,10 +2135,13 @@ export class Gateway {
       // in the Spanish voice.
       let voiceLanguage: string | undefined;
       if (hasAudioAttachments(message.attachments) && attachmentCache && storage) {
-        const provider = await this.resolveSttProvider();
+        // Resolved for THIS personality: a personality naming `voice.stt_provider`
+        // is transcribed by that provider on a channel voice note, not only in
+        // browser talk mode.
+        const stt = await this.resolveSttProvider(personalityId);
         const results = await transcribeAudioAttachments(
           message.attachments ?? [],
-          provider,
+          stt.provider,
           (url) => storage.readBytes(attachmentCache.resolveLocalPath(url)),
           {
             // Normalize before STT and retry once as wav. Absent transcoder →
@@ -2062,18 +2162,18 @@ export class Gateway {
         // the world: `detectLanguage` only ever decides between candidates, so
         // a personality with no language map produces no guess and the default
         // voice stands — the behaviour that existed before this did.
-        const personalityVoice = personalityId
-          ? this.personalityDirectory?.voice?.(personalityId)
-          : undefined;
-        const candidates = Object.keys(personalityVoice?.languages ?? {});
+        const candidates = Object.keys(this.personalityVoice(personalityId)?.languages ?? {});
         voiceLanguage = candidates.length > 0 ? detectLanguage(text, { candidates }) : undefined;
         // A channel voice note is the account owner's own message on their own
         // lane — channel ingress is already sender-gated. A far-end caller
         // arrives over telephony (V4), never here.
+        //
+        // The stamped id is THIS turn's resolution, not a remembered global:
+        // per-personality resolution makes "which provider ran" a per-turn fact.
         voiceOrigin = {
           transport: `${message.platform}-voice-note`,
           speaker: 'owner',
-          ...(this.resolvedSttProviderId ? { sttProvider: this.resolvedSttProviderId } : {}),
+          ...(stt.providerId ? { sttProvider: stt.providerId } : {}),
           ...(voiceLanguage ? { language: voiceLanguage } : {}),
         };
       }
@@ -2352,9 +2452,14 @@ export class Gateway {
     }
     const sink = input.adapter;
 
-    // 3. Provider.
-    const tts = await this.resolveTtsProvider();
-    if (!tts) {
+    // 3. Provider — resolved for THIS personality. A personality naming
+    //    `voice.tts_provider` speaks through that provider on a channel reply,
+    //    not only in browser talk mode. The refusal path is unchanged: a
+    //    roster entry the egress gate rejects yields no provider and no
+    //    synthesize call, whatever the entry was labelled.
+    const tts = await this.resolveTtsProvider(input.personalityId);
+    const speech = tts.provider;
+    if (!speech) {
       event(
         'gateway.voice_no_provider',
         this.voiceProviderErrors.tts ? { error: this.voiceProviderErrors.tts } : {},
@@ -2364,7 +2469,7 @@ export class Gateway {
 
     // 4. Speakable text — markdown, emoji and code fences are not speech.
     let synthText = sanitizeForSpeech(input.text);
-    const maxChars = tts.caps.maxInputChars;
+    const maxChars = speech.caps.maxInputChars;
     if (maxChars && synthText.length > maxChars) {
       synthText = truncateAtSentenceBoundary(synthText, maxChars);
     }
@@ -2372,15 +2477,12 @@ export class Gateway {
 
     // 5. Which voice. Same resolution function the VoiceSession stack uses, so
     //    "which voice served this reply" has one answer across surfaces:
-    //    language-specific > personality default > global config.
-    const personalityVoice = input.personalityId
-      ? this.personalityDirectory?.voice?.(input.personalityId)
-      : undefined;
-    const globalTtsVoice =
-      typeof this.ttsProviderConfig.voice === 'string' ? this.ttsProviderConfig.voice : undefined;
+    //    language-specific > personality default > the CHOSEN entry's own voice
+    //    (which is `auxiliary.tts.voice` when the default entry served).
+    const personalityVoice = this.personalityVoice(input.personalityId);
     const voicePrefs = resolveVoicePreferences({
       ...(personalityVoice ? { personality: personalityVoice } : {}),
-      ...(globalTtsVoice ? { globalTtsVoice } : {}),
+      ...(tts.entryVoice ? { globalTtsVoice: tts.entryVoice } : {}),
       ...(input.language ? { language: input.language } : {}),
     });
 
@@ -2388,7 +2490,7 @@ export class Gateway {
     const synthStarted = Date.now();
     let synthesized: Awaited<ReturnType<TtsProvider['synthesize']>>;
     try {
-      synthesized = await tts.synthesize(
+      synthesized = await speech.synthesize(
         synthText,
         voicePrefs.ttsVoice ? { voice: voicePrefs.ttsVoice } : undefined,
       );
@@ -2400,6 +2502,8 @@ export class Gateway {
       format: synthesized.format,
       bytes: synthesized.audio.length,
       durationMs: Date.now() - synthStarted,
+      // The id that actually ran this turn, not a remembered global.
+      ...(tts.providerId ? { ttsProvider: tts.providerId } : {}),
       ...(voicePrefs.ttsVoice ? { voice: voicePrefs.ttsVoice } : {}),
     });
 
@@ -2810,6 +2914,74 @@ export class Gateway {
       },
     });
     return false;
+  }
+
+  /**
+   * Send an agent- or subsystem-initiated notification through the DURABLE
+   * outbound path — the public door onto `sendTracked`.
+   *
+   * `sendTo()` is the other public send and records no obligation: it is the
+   * `send_message` tool's path, where the agent is told immediately whether the
+   * send worked and can react. This one is for messages nobody is waiting on —
+   * a post-call summary, an owner notice that a call was refused for capacity —
+   * where "silently lost" is the failure mode and a `pending` row that the boot
+   * sweep redelivers is the fix. Same ledger, same `DeliveryResult.ok === true`
+   * definition of confirmed, same observability event on an unconfirmed send;
+   * there is deliberately no second ledger path.
+   *
+   * Returns whether the platform CONFIRMED. `false` with a ledger wired means
+   * the obligation is still `pending` and will be retried by
+   * {@link sweepPendingDeliveries}.
+   *
+   * Refuses (returning false, and recording the same unconfirmed event) when
+   * the platform has no registered adapter, or when the bot cannot be named: an
+   * obligation filed under a botKey this process does not own is one the sweep
+   * will never pick up, which is a lost message wearing a durable row. In
+   * multi-bot deployments `botKey` is therefore required — `voice.inbound.owner`
+   * carries one for exactly this reason.
+   */
+  async notifyTracked(
+    target: {
+      platform: string;
+      chatId: string;
+      botKey?: string;
+      /** Ledger session id. Defaults to `<platform>:<chatId>`. */
+      sessionKey?: string;
+      threadId?: string;
+    },
+    text: string,
+  ): Promise<boolean> {
+    const refuse = (cause: string): false => {
+      this.observability?.recordSafetyBlock({
+        code: 'gateway.delivery_unconfirmed',
+        cause,
+        details: {
+          platform: target.platform,
+          ...(target.botKey ? { botKey: target.botKey } : {}),
+          chatId: target.chatId,
+          durable: false,
+        },
+      });
+      return false;
+    };
+
+    const adapter = this.adapterRegistry.get(target.platform);
+    if (!adapter) return refuse(`no adapter registered for platform "${target.platform}"`);
+
+    const botKey = target.botKey ?? this.defaultBotKey;
+    if (!botKey) return refuse('no botKey given and this deployment has no single default bot');
+    if (!this.bots.has(botKey)) return refuse(`botKey "${botKey}" is not served by this process`);
+
+    return this.sendTracked(
+      {
+        adapter,
+        botKey,
+        platform: target.platform,
+        chatId: target.chatId,
+        sessionKey: target.sessionKey ?? `${target.platform}:${target.chatId}`,
+      },
+      { text, ...(target.threadId ? { threadId: target.threadId } : {}) },
+    );
   }
 
   /**

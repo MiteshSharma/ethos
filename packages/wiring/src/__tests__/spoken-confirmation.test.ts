@@ -2,10 +2,12 @@
 // a far-end caller's voice can NEVER satisfy an owner-level confirmation
 // (voice V1a, eng-review D13).
 //
-// Telephony does not exist yet, so nothing in the repo can currently construct
-// a `far_end` origin. That is the point of testing it now: the gate has to be
-// correct BEFORE the capability it gates ships, because the alternative is
-// remembering to add it while wiring a SIP trunk.
+// The gate shipped ahead of telephony on purpose. Now that telephony wiring
+// DOES construct a far-end origin — `FAR_END_VOICE_ORIGIN` in
+// `./far-end-consult`, `transport: 'sip'` — the far-end suite runs over that
+// real origin as well as the hand-written literal it was written against. Same
+// assertions, two transports, because the rule keys on the SPEAKER and must not
+// have quietly grown a dependence on the transport string.
 
 import { DefaultHookRegistry, DefaultPersonalityRegistry } from '@ethosagent/core';
 import type { BeforeToolCallPayload, VoiceTurnOrigin } from '@ethosagent/types';
@@ -13,6 +15,7 @@ import { describe, expect, it } from 'vitest';
 import { createApprovalDangerPredicate } from '../approval-seams';
 import type { DangerPredicate } from '../danger-predicate';
 import { APPROVAL_SURFACE_ALWAYS_ASK } from '../danger-predicate';
+import { FAR_END_VOICE_ORIGIN } from '../far-end-consult';
 import {
   farEndRefusalReason,
   SPOKEN_CONFIRMATION_TOOLS,
@@ -37,42 +40,50 @@ function call(
 }
 
 const OWNER: VoiceTurnOrigin = { transport: 'browser-talk-mode', speaker: 'owner' };
-const FAR_END: VoiceTurnOrigin = { transport: 'sip-inbound', speaker: 'far_end' };
+/** The hand-written literal, and the origin V4's wiring actually constructs. */
+const FAR_END_ORIGINS: VoiceTurnOrigin[] = [
+  { transport: 'sip-inbound', speaker: 'far_end' },
+  FAR_END_VOICE_ORIGIN,
+];
+const FAR_END: VoiceTurnOrigin = FAR_END_VOICE_ORIGIN;
 
-describe('withSpokenConfirmation — the far-end rule', () => {
-  it('refuses a far-end caller on every gated tool', async () => {
-    const gate = withSpokenConfirmation(allow);
-    for (const tool of SPOKEN_CONFIRMATION_TOOLS) {
-      expect(await gate(call(tool, FAR_END))).toBe(farEndRefusalReason(tool));
-    }
-  });
-
-  // The load-bearing assertion. A recorded confirmation is the mechanism an
-  // owner uses to satisfy the gate; a far-end caller must not be able to reach
-  // it, whatever confirmation state happens to exist for that call id.
-  it('a recorded confirmation does NOT let a far-end caller through', async () => {
-    const gate = withSpokenConfirmation(allow, {
-      confirmations: { has: () => true },
+describe.each(FAR_END_ORIGINS)(
+  'withSpokenConfirmation — the far-end rule (transport: $transport)',
+  (farEnd) => {
+    it('refuses a far-end caller on every gated tool', async () => {
+      const gate = withSpokenConfirmation(allow);
+      for (const tool of SPOKEN_CONFIRMATION_TOOLS) {
+        expect(await gate(call(tool, farEnd))).toBe(farEndRefusalReason(tool));
+      }
     });
-    const reason = await gate(call('terminal', FAR_END));
-    expect(reason).toBe(farEndRefusalReason('terminal'));
-    expect(reason).toMatch(/cannot authorize/i);
-    // And it says where the confirmation has to happen instead.
-    expect(reason).toMatch(/owner's own channel/i);
-  });
 
-  it('refuses a far-end caller even when the owner confirmed the SAME call id', async () => {
-    const confirmed = new Set(['tc-42']);
-    const gate = withSpokenConfirmation(allow, {
-      confirmations: { has: (id) => confirmed.has(id) },
+    // The load-bearing assertion. A recorded confirmation is the mechanism an
+    // owner uses to satisfy the gate; a far-end caller must not be able to reach
+    // it, whatever confirmation state happens to exist for that call id.
+    it('a recorded confirmation does NOT let a far-end caller through', async () => {
+      const gate = withSpokenConfirmation(allow, {
+        confirmations: { has: () => true },
+      });
+      const reason = await gate(call('terminal', farEnd));
+      expect(reason).toBe(farEndRefusalReason('terminal'));
+      expect(reason).toMatch(/cannot authorize/i);
+      // And it says where the confirmation has to happen instead.
+      expect(reason).toMatch(/owner's own channel/i);
     });
-    // Same id the owner confirmed, arriving from the far end.
-    expect(await gate(call('call', FAR_END, 'tc-42'))).toBe(farEndRefusalReason('call'));
-    // The owner's own request on that id still goes through — proving the
-    // refusal above is about the SPEAKER, not about a broken confirmation.
-    expect(await gate(call('call', OWNER, 'tc-42'))).toBeNull();
-  });
-});
+
+    it('refuses a far-end caller even when the owner confirmed the SAME call id', async () => {
+      const confirmed = new Set(['tc-42']);
+      const gate = withSpokenConfirmation(allow, {
+        confirmations: { has: (id) => confirmed.has(id) },
+      });
+      // Same id the owner confirmed, arriving from the far end.
+      expect(await gate(call('call', farEnd, 'tc-42'))).toBe(farEndRefusalReason('call'));
+      // The owner's own request on that id still goes through — proving the
+      // refusal above is about the SPEAKER, not about a broken confirmation.
+      expect(await gate(call('call', OWNER, 'tc-42'))).toBeNull();
+    });
+  },
+);
 
 describe('withSpokenConfirmation — the owner path', () => {
   it('asks the owner to re-confirm a high-impact spoken request', async () => {

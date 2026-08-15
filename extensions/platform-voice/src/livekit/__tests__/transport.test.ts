@@ -18,6 +18,7 @@ import { createLiveKitTransport, LiveKitVoiceTransport, resamplePcm } from '../t
 import {
   FakeLiveKitRoomClient,
   FakeTokenMinter,
+  legacyRoomClient,
   remoteSilenceFrame,
   remoteSpeechFrame,
   samplesToPcmBytes,
@@ -169,6 +170,92 @@ describe('LiveKitVoiceTransport', () => {
     client.emitRemote(remoteSpeechFrame());
     expect(chunks).toHaveLength(0);
   });
+
+  it('forwards a room disconnect through onClosed (the remote hang-up path)', async () => {
+    const client = new FakeLiveKitRoomClient();
+    const transport = transportWith(client, 'c');
+    let closed = 0;
+    transport.onClosed(() => {
+      closed += 1;
+    });
+    await transport.connect();
+
+    client.emitDisconnected();
+
+    expect(closed).toBe(1);
+  });
+
+  it('does NOT fire onClosed on a local disconnect', async () => {
+    const client = new FakeLiveKitRoomClient();
+    const transport = transportWith(client, 'c');
+    let closed = 0;
+    transport.onClosed(() => {
+      closed += 1;
+    });
+    await transport.connect();
+
+    await transport.disconnect();
+
+    // The caller that tore this down already knows. `onClosed` is for the
+    // teardown nobody on this side asked for.
+    expect(closed).toBe(0);
+  });
+
+  it('unsubscribing stops the handler firing', async () => {
+    const client = new FakeLiveKitRoomClient();
+    const transport = transportWith(client, 'c');
+    let closed = 0;
+    const off = transport.onClosed(() => {
+      closed += 1;
+    });
+    await transport.connect();
+    off();
+
+    client.emitDisconnected();
+
+    expect(closed).toBe(0);
+  });
+
+  it('tolerates a room client with no disconnect surface', async () => {
+    const transport = new LiveKitVoiceTransport({
+      client: legacyRoomClient(),
+      tokenMinter: new FakeTokenMinter(),
+      config: { url: 'wss://lk', roomName: 'r', agentIdentity: 'a', callerId: 'c' },
+    });
+    transport.onClosed(() => {});
+
+    // Connecting must not throw just because the binding predates the seam;
+    // such a transport simply never fires the remote hang-up path.
+    await expect(transport.connect()).resolves.toBeUndefined();
+    await transport.disconnect();
+  });
+});
+
+describe('LiveKitVoiceTransport -> VoiceChannelAdapter remote hang-up', () => {
+  it('a room disconnect ends the call once, with no stop() call', async () => {
+    const client = new FakeLiveKitRoomClient('+15550001111');
+    const transport = transportWith(client, '+15550001111');
+    const ended: string[] = [];
+    const adapter = new VoiceChannelAdapter({
+      transport,
+      session: makeSession(makeClock(), scriptedRunner([])),
+      bot: { match: '+1*' },
+      onEnded: (a) => {
+        ended.push(a.callerId);
+      },
+    });
+    await adapter.start();
+
+    client.emitDisconnected();
+    await tick();
+
+    // This is the path a post-call summary depends on: before `onDisconnected`
+    // existed on the room-client boundary, a caller who simply hung up produced
+    // no `onEnded` at all on a real LiveKit leg.
+    expect(ended).toEqual(['+15550001111']);
+    await adapter.stop();
+    expect(ended).toEqual(['+15550001111']);
+  });
 });
 
 describe('LiveKitVoiceTransport <-> VoiceChannelAdapter <-> VoiceSession', () => {
@@ -299,5 +386,44 @@ describe('createLiveKitTransport (wiring seam)', () => {
     await a1.start();
     expect(clients[0].connected).toBe(true);
     expect(clients[1].connected).toBe(false);
+  });
+
+  it('forwards laneKind so a PSTN leg gets a sip lane, not a livekit one', async () => {
+    // Without the passthrough the factory silently produces `livekit`-kinded
+    // lanes for phone calls, which puts a call and the same person's browser
+    // talk session in one conversation.
+    const makeAdapter = createLiveKitTransport({
+      createClient: () => new FakeLiveKitRoomClient(),
+      tokenMinter: new FakeTokenMinter(),
+      room: { url: 'wss://lk', roomName: 'call-1', agentIdentity: 'agent' },
+      bot: { id: 'reception', match: '+1555*' },
+      createSession: () => makeSession(makeClock(), scriptedRunner([])),
+      laneKind: 'sip',
+    });
+
+    expect(makeAdapter('+15550001111').laneKey).toBe(
+      voiceLaneKey('reception', { kind: 'sip', id: '+15550001111' }),
+    );
+  });
+
+  it('forwards onEnded so a hang-up still produces a call end', async () => {
+    const ended: string[] = [];
+    const client = new FakeLiveKitRoomClient();
+    const makeAdapter = createLiveKitTransport({
+      createClient: () => client,
+      tokenMinter: new FakeTokenMinter(),
+      room: { url: 'wss://lk', roomName: 'call-1', agentIdentity: 'agent' },
+      bot: { id: 'reception', match: '+1555*' },
+      createSession: () => makeSession(makeClock(), scriptedRunner([])),
+      onEnded: (adapter) => {
+        ended.push(adapter.callerId);
+      },
+    });
+
+    const adapter = makeAdapter('+15550001111');
+    await adapter.start();
+    await adapter.stop();
+
+    expect(ended).toEqual(['+15550001111']);
   });
 });
