@@ -553,7 +553,7 @@ function pinRunnerModel(runner: AgentTurnRunner, modelOverride: string): AgentTu
 }
 
 /** Memo key for "the default entry", which has no roster name of its own. */
-const DEFAULT_ENTRY_MEMO_KEY = ' default';
+const DEFAULT_ENTRY_MEMO_KEY = '\x00default';
 
 function entryMemoKey(entryName: string | undefined): string {
   return entryName ?? DEFAULT_ENTRY_MEMO_KEY;

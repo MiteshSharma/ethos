@@ -45,6 +45,21 @@ describe('InMemoryA2aTaskStore', () => {
     expect(await store.findByIdempotencyKey('fp-a', 'other')).toBeNull();
   });
 
+  // The index key is `peerFingerprint \x00 idempotencyKey`. The NUL separator is
+  // load-bearing: concatenated without it, `fp` + `a-b` and `fpa` + `-b` are the
+  // same key, so one peer's task would answer another peer's replay — a
+  // cross-peer idempotency collision.
+  it('keys peer and idempotency key separately, so a shifted boundary does not collide', async () => {
+    const store = new InMemoryA2aTaskStore();
+    const a = seed({ peerFingerprint: 'fp', idempotencyKey: 'a-b' });
+    const b = seed({ peerFingerprint: 'fpa', idempotencyKey: '-b' });
+    await store.create(a);
+    await store.create(b);
+
+    expect((await store.findByIdempotencyKey('fp', 'a-b'))?.id).toBe(a.id);
+    expect((await store.findByIdempotencyKey('fpa', '-b'))?.id).toBe(b.id);
+  });
+
   it('notifies subscribers on update until unsubscribed', async () => {
     const store = new InMemoryA2aTaskStore();
     const task = seed();

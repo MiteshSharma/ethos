@@ -478,7 +478,7 @@ export class VoiceService {
     // while the same entry serves, and the key carries the entry's FIELDS, not
     // just its name: the roster is editable from Settings, so `studio` after an
     // edit is a different provider than `studio` before it.
-    const entryKey = `${selection.entryName ?? ''} ${JSON.stringify(selection.entry ?? null)}`;
+    const entryKey = `${selection.entryName ?? ''}\x00${JSON.stringify(selection.entry ?? null)}`;
     const cachedId = this.resolvedTtsName;
     if (
       this.ttsProvider &&
