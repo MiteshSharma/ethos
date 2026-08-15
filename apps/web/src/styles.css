@@ -4653,34 +4653,6 @@ textarea {
   color: var(--text-primary);
 }
 
-/* Sticky section tabs across the top of the detail column (plan §6.1). Sits
-   outside the `<Form>`, beside the `<Outlet/>` it does not wrap. */
-.settings-section-nav {
-  position: sticky;
-  top: 0;
-  z-index: 1;
-  display: flex;
-  gap: 24px;
-  padding-bottom: 8px;
-  margin-bottom: 16px;
-  border-bottom: 1px solid var(--border-subtle);
-  background: var(--bg-base);
-}
-
-.settings-section-nav-tab {
-  font-size: 13px;
-  color: var(--text-primary);
-  text-decoration: none;
-  padding-bottom: 4px;
-  border-bottom: 2px solid transparent;
-}
-
-.settings-section-nav-tab.active {
-  color: var(--text-primary);
-  font-weight: 500;
-  border-bottom-color: var(--accent, var(--ethos-info));
-}
-
 /* SectionHeading — DESIGN.md "micro / section labels" (plan §6.2). */
 .settings-section-heading {
   font-size: 11px;

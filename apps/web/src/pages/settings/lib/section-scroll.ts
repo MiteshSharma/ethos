@@ -1,9 +1,9 @@
 // Whether a `resolved.category`/`resolved.section` change should scroll the
-// new section's heading into view (plan §6.1 follow-up: SectionNav's tabs
-// changed the URL and highlighted the active tab, but nothing ever moved the
-// viewport — for a short pane like General both sections were already on
-// screen, and for a long one like Voice the target was scrolled out of view
-// with no way to reach it).
+// new section's heading into view. A same-category, different-section link —
+// e.g. a RailSearch result for a specific control — changes the URL without
+// otherwise moving the viewport: for a short pane like General the target was
+// already on screen, and for a long one like Voice it could be scrolled out
+// of view with no way to reach it.
 //
 // Pulled out as a pure function so the "when" is testable without a DOM
 // (D5/D8/D9 pattern, same rationale as `parseSettingsPath`): the caller does
@@ -21,7 +21,7 @@ export interface SectionRoute {
  * | `undefined` (first mount) | any | no — don't jump on ordinary page load |
  * | different category | any section | no — a category switch is a fresh pane, not a tab click |
  * | same category, same section | — | no — nothing moved |
- * | same category, different section | — | yes — this is the SectionNav tab click |
+ * | same category, different section | — | yes — e.g. a RailSearch result linking to a different section of the same category |
  */
 export function shouldScrollToSection(prev: SectionRoute | undefined, next: SectionRoute): boolean {
   if (!prev) return false;
