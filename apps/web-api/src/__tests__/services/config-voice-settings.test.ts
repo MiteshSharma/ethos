@@ -42,27 +42,27 @@ describe('Settings → Voice config keys', () => {
   it('reads the provider knobs that used to be yaml-only', async () => {
     await seed([
       'auxiliary.tts.outputFormat: wav',
-      'auxiliary.tts.timeout: 45000',
+      'auxiliary.tts.timeout: 45',
       'auxiliary.tts.maxTextLength: 2048',
-      'auxiliary.asr.timeout: 20000',
+      'auxiliary.asr.timeout: 20',
     ]);
     const config = await service.get();
     expect(config.voiceTtsOutputFormat).toBe('wav');
-    expect(config.voiceTtsTimeoutMs).toBe(45_000);
+    expect(config.voiceTtsTimeoutMs).toBe(45);
     expect(config.voiceTtsMaxTextLength).toBe(2048);
-    expect(config.voiceSttTimeoutMs).toBe(20_000);
+    expect(config.voiceSttTimeoutMs).toBe(20);
   });
 
   it('writes the provider knobs, and null clears them again', async () => {
     await seed([]);
     await service.update({
       voiceTtsOutputFormat: 'opus',
-      voiceTtsTimeoutMs: 30_000,
+      voiceTtsTimeoutMs: 30,
       voiceTtsMaxTextLength: 4096,
-      voiceSttTimeoutMs: 15_000,
+      voiceSttTimeoutMs: 15,
     });
     expect(await yaml()).toContain('auxiliary.tts.outputFormat: opus');
-    expect((await service.get()).voiceTtsTimeoutMs).toBe(30_000);
+    expect((await service.get()).voiceTtsTimeoutMs).toBe(30);
 
     await service.update({
       voiceTtsOutputFormat: null,
@@ -153,11 +153,11 @@ describe('Settings → Voice config keys', () => {
   });
 
   it('leaves an untouched voice key alone when a sibling is updated', async () => {
-    await seed(['voice.defaultMode: all', 'auxiliary.tts.timeout: 45000']);
-    await service.update({ voiceSttTimeoutMs: 9_000 });
+    await seed(['voice.defaultMode: all', 'auxiliary.tts.timeout: 45']);
+    await service.update({ voiceSttTimeoutMs: 9 });
     const config = await service.get();
     expect(config.voiceDefaultMode).toBe('all');
-    expect(config.voiceTtsTimeoutMs).toBe(45_000);
-    expect(config.voiceSttTimeoutMs).toBe(9_000);
+    expect(config.voiceTtsTimeoutMs).toBe(45);
+    expect(config.voiceSttTimeoutMs).toBe(9);
   });
 });

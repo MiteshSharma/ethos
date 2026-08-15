@@ -3222,9 +3222,21 @@ function parseConfigYaml(src: string): EthosConfig {
       }
     : undefined;
   // The default entries go through the SAME builder as their rosters, so a
-  // field the default supports is a field the roster supports.
-  const auxiliaryAsr = buildVoiceProviderEntry<SttProviderEntry>(auxiliaryAsrKv, STT_ENTRY_FIELDS);
-  const auxiliaryTts = buildVoiceProviderEntry<TtsProviderEntry>(auxiliaryTtsKv, TTS_ENTRY_FIELDS);
+  // field the default supports is a field the roster supports. The timeout
+  // shim wraps the two DEFAULT entries here rather than living inside the
+  // builder, because the builder also builds roster entries — whose `timeout`
+  // was always seconds on every surface and must not be rewritten.
+  const auxTimeoutWarnings: string[] = [];
+  const auxiliaryAsr = normalizeAuxEntryTimeout(
+    buildVoiceProviderEntry<SttProviderEntry>(auxiliaryAsrKv, STT_ENTRY_FIELDS),
+    'auxiliary.asr.timeout',
+    auxTimeoutWarnings,
+  );
+  const auxiliaryTts = normalizeAuxEntryTimeout(
+    buildVoiceProviderEntry<TtsProviderEntry>(auxiliaryTtsKv, TTS_ENTRY_FIELDS),
+    'auxiliary.tts.timeout',
+    auxTimeoutWarnings,
+  );
   const webConfig: WebConfig | undefined =
     webKv.search_backend || webKv.extract_backend
       ? {
@@ -3611,6 +3623,7 @@ function parseConfigYaml(src: string): EthosConfig {
   // readRawConfig (used by CLI commands that don't gateway-boot) ignores them
   // and continues with whatever entries did parse.
   parseErrorsByConfig.set(config, parseErrors);
+  parseWarningsByConfig.set(config, auxTimeoutWarnings);
   return config;
 }
 
@@ -3619,11 +3632,31 @@ function parseConfigYaml(src: string): EthosConfig {
 // have to remember to ignore.
 const parseErrorsByConfig = new WeakMap<EthosConfig, string[]>();
 
+// The NON-fatal sibling: notices the parse can emit without the config being
+// wrong. Kept out of `parseErrors` because the gateway exits non-zero on any
+// entry there, and a boot warning that boots nothing is worse than the thing
+// it warns about.
+const parseWarningsByConfig = new WeakMap<EthosConfig, string[]>();
+
+/**
+ * Parse-time notices for a config returned by {@link readRawConfig} — the read
+ * side of the two side-tables, for commands that read the raw config instead of
+ * going through {@link loadConfigStrict} (`ethos doctor`).
+ */
+export function configParseNotices(config: EthosConfig): { errors: string[]; warnings: string[] } {
+  return {
+    errors: parseErrorsByConfig.get(config) ?? [],
+    warnings: parseWarningsByConfig.get(config) ?? [],
+  };
+}
+
 /**
  * Strict loader used by the gateway boot path. Returns the parsed config
- * along with any deprecation messages from the legacy → list-shape shim
- * AND any parse-time errors for malformed bot entries. Boot prints both
- * and exits non-zero on errors so a typo never silently boots zero bots.
+ * along with any deprecation messages — from the legacy → list-shape shim and
+ * from the parse itself — AND any parse-time errors for malformed bot entries.
+ * Boot prints both and exits non-zero on errors so a typo never silently boots
+ * zero bots. A deprecation is never fatal; a parse error always is, which is
+ * why a value the parse quietly repaired belongs in `deprecations`.
  */
 export interface LoadedConfig {
   config: EthosConfig;
@@ -3639,9 +3672,10 @@ export async function loadConfigStrict(
   if (!parsed) return null;
   if (secrets) validateNoPlaintextSecrets(parsed);
   const parseErrors = parseErrorsByConfig.get(parsed) ?? [];
+  const parseWarnings = parseWarningsByConfig.get(parsed) ?? [];
   const resolved = secrets ? await resolveConfigSecrets(parsed, secrets) : parsed;
   const { config, deprecations } = applyPlatformShim(resolved);
-  return { config, parseErrors, deprecations };
+  return { config, parseErrors, deprecations: [...parseWarnings, ...deprecations] };
 }
 
 // ---------------------------------------------------------------------------
@@ -3955,6 +3989,50 @@ function buildVoiceProviderEntry<E extends { provider: string }>(
     }
   }
   return out as E;
+}
+
+/** The largest `timeout` a *correct* config can express: the roster field's own
+ *  declared ceiling (`min(1).max(3600)` in `@ethosagent/web-contracts`). */
+const AUX_TIMEOUT_MAX_SECONDS = 3600;
+
+/**
+ * SHIM — `auxiliary.{asr,tts}.timeout` is SECONDS (the `command-stt` /
+ * `command-tts` providers multiply it by 1000), but the web UI shipped the
+ * field labelled and bounded in milliseconds, so existing configs carry values
+ * like `30000` — an 8h20m budget, i.e. a timeout that never fires.
+ *
+ * A value above {@link AUX_TIMEOUT_MAX_SECONDS} is therefore read as
+ * milliseconds. That threshold is above the maximum a correct config can
+ * express, so there is no legitimate value in the misfire range — no single
+ * speech request has a multi-hour budget.
+ *
+ * Removed in the minor release after the one that ships the seconds label —
+ * tracked as `aux-timeout-shim-removal` in `plan/uncompleted-tasks.md`.
+ */
+export function normalizeAuxTimeoutSeconds(raw: number): { seconds: number; coerced: boolean } {
+  if (raw <= AUX_TIMEOUT_MAX_SECONDS) return { seconds: raw, coerced: false };
+  return {
+    seconds: Math.min(AUX_TIMEOUT_MAX_SECONDS, Math.max(1, Math.round(raw / 1000))),
+    coerced: true,
+  };
+}
+
+/** {@link normalizeAuxTimeoutSeconds} over one default entry, appending the
+ *  one-per-load warning to `warnings` when it coerces. */
+function normalizeAuxEntryTimeout<E extends { timeout?: number }>(
+  entry: E | undefined,
+  key: string,
+  warnings: string[],
+): E | undefined {
+  if (!entry || entry.timeout === undefined) return entry;
+  const { seconds, coerced } = normalizeAuxTimeoutSeconds(entry.timeout);
+  if (!coerced) return entry;
+  warnings.push(
+    `${key}: ${entry.timeout} looks like milliseconds — this field is seconds. ` +
+      `Reading it as ${seconds}s. Set it to ${seconds} in ~/.ethos/config.yaml to make it ` +
+      'explicit; this shim is removed in the next minor.',
+  );
+  return { ...entry, timeout: seconds };
 }
 
 /**

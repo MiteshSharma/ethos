@@ -1,6 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import {
   isVoiceChannelPlatform,
+  normalizeAuxTimeoutSeconds,
   secretRefFromValue,
   VOICE_CHANNEL_PLATFORMS,
 } from '@ethosagent/config';
@@ -262,6 +263,20 @@ function passNumOrNull(p: Record<string, string>, key: string): number | null {
   if (raw === undefined || raw === '') return null;
   const n = Number(raw);
   return Number.isFinite(n) ? n : null;
+}
+
+/**
+ * SHIM — `auxiliary.{asr,tts}.timeout` is seconds, but the Settings page
+ * shipped it labelled and bounded in milliseconds, so a stored value may be ms.
+ * The parse-site shim in `@ethosagent/config` does NOT reach here: this reads
+ * the raw passthrough map, not the typed `EthosConfig.auxiliary`. Same helper,
+ * second read path — so the page shows what the runtime is actually using, and
+ * the operator's next Save writes it back in seconds.
+ *
+ * Removed with the parse-site shim (`aux-timeout-shim-removal`).
+ */
+function auxTimeoutSeconds(raw: number | null): number | null {
+  return raw === null ? null : normalizeAuxTimeoutSeconds(raw).seconds;
 }
 
 /** `fallback` when unset; otherwise strict `'true'` comparison. */
@@ -1514,9 +1529,9 @@ export class ConfigService {
         'wav',
         'pcm',
       ]),
-      voiceTtsTimeoutMs: passNumOrNull(p, 'auxiliary.tts.timeout'),
+      voiceTtsTimeoutMs: auxTimeoutSeconds(passNumOrNull(p, 'auxiliary.tts.timeout')),
       voiceTtsMaxTextLength: passNumOrNull(p, 'auxiliary.tts.maxTextLength'),
-      voiceSttTimeoutMs: passNumOrNull(p, 'auxiliary.asr.timeout'),
+      voiceSttTimeoutMs: auxTimeoutSeconds(passNumOrNull(p, 'auxiliary.asr.timeout')),
       // An absent key = the gate is off, which is NOT the same as an allowlist
       // that happens to be empty.
       voiceTrustedPlugins:

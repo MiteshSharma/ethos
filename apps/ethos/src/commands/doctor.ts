@@ -17,7 +17,13 @@
 import { spawnSync } from 'node:child_process';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { type EthosConfig, ethosDir, readConfig, readRawConfig } from '@ethosagent/config';
+import {
+  configParseNotices,
+  type EthosConfig,
+  ethosDir,
+  readConfig,
+  readRawConfig,
+} from '@ethosagent/config';
 import { resolveSttProvider, resolveTtsProvider } from '@ethosagent/core';
 import { bundledSkillsSource, UniversalScanner } from '@ethosagent/skills';
 import type { Skill } from '@ethosagent/types';
@@ -548,6 +554,12 @@ export async function runDoctor(args: string[] = [], options?: DoctorOptions): P
     console.log(`     provider:    ${config.provider ?? '(not set)'}`);
     console.log(`     model:       ${config.model ?? '(not set)'}`);
     console.log(`     personality: ${config.personality ?? '(default)'}`);
+    // `ethos gateway` and `ethos listen` surface these at boot; an operator
+    // running `ethos serve` and driving the web UI would otherwise never see
+    // them, and this is the command whose job is "what is wrong with my config".
+    const notices = configParseNotices(config);
+    for (const err of notices.errors) console.log(`  ${c.red}✗${c.reset}  ${err}`);
+    for (const warn of notices.warnings) console.log(`  ${c.yellow}⚠${c.reset}  ${warn}`);
   }
   console.log('');
 
