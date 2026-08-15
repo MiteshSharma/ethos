@@ -374,19 +374,26 @@ export function DesktopSettings() {
           <Space>
             <Typography.Text>Retention days:</Typography.Text>
             <InputNumber
-              min={1}
+              min={7}
+              max={365}
               value={retentionDays}
               onChange={(v) => setRetentionDays(v ?? 90)}
             />
           </Space>
           <Space>
             <Typography.Text>Trace log days:</Typography.Text>
-            <InputNumber min={1} value={traceLogDays} onChange={(v) => setTraceLogDays(v ?? 30)} />
+            <InputNumber
+              min={1}
+              max={90}
+              value={traceLogDays}
+              onChange={(v) => setTraceLogDays(v ?? 30)}
+            />
           </Space>
           <Space>
             <Typography.Text>Observability days:</Typography.Text>
             <InputNumber
               min={1}
+              max={30}
               value={observabilityDays}
               onChange={(v) => setObservabilityDays(v ?? 7)}
             />
