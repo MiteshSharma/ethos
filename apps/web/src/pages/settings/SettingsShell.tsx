@@ -22,13 +22,14 @@
 // `__tests__/settings-patch-completeness.test.ts` (behaviour).
 
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { App as AntApp, Form, Spin, Switch, Typography } from 'antd';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { App as AntApp, Form, Spin, Typography } from 'antd';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Outlet, useLocation } from 'react-router-dom';
 import { isDesktop } from '../../lib/desktop';
 import { rpc } from '../../rpc';
+import { AdvancedToggle } from './AdvancedToggle';
 import { CategoryRail } from './CategoryRail';
-import { buildConfigPatch } from './lib/build-config-patch';
+import { buildConfigPatch, type SettingsRows } from './lib/build-config-patch';
 import type { ConfigUpdatePatch } from './lib/config-types';
 import { auxFormFromConfig, type FormShape } from './lib/form-shape';
 import { resolveSettingsRoute } from './lib/resolve-settings-route';
@@ -43,6 +44,8 @@ import {
   retentionRowsFromConfig,
   rowsFromConfig,
 } from './lib/rows';
+import { useShowAdvanced } from './lib/settings-advanced';
+import { computeDirty, type DirtySnapshot } from './lib/settings-dirty';
 import { visibleCategories } from './lib/taxonomy';
 import { type VoiceBotRow, voiceBotRowsFromConfig } from './lib/voice-bots';
 import {
@@ -64,7 +67,7 @@ export function SettingsShell() {
   const qc = useQueryClient();
   const { notification } = AntApp.useApp();
   const { pathname } = useLocation();
-  const [showAdvanced, setShowAdvanced] = useState(false);
+  const { showAdvanced, setShowAdvanced } = useShowAdvanced();
   const [form] = Form.useForm<FormShape>();
   const [providerRows, setProviderRows] = useState<ProviderRow[]>([emptyRow()]);
   const [quickCommandRows, setQuickCommandRows] = useState<QuickCommandRow[]>([]);
@@ -77,6 +80,11 @@ export function SettingsShell() {
   const [retentionRows, setRetentionRows] = useState<RetentionRow[]>([]);
   const [voiceBotRows, setVoiceBotRows] = useState<VoiceBotRow[]>([]);
   const hydratedRef = useRef(false);
+  // What hydration last wrote — the left-hand side of the dirty diff (D9).
+  const [saved, setSaved] = useState<DirtySnapshot | null>(null);
+  // The form store mutates outside React, so nothing re-renders when a field
+  // changes. This counter is what makes the derived dirty count live.
+  const [storeRevision, setStoreRevision] = useState(0);
 
   const configQuery = useQuery({
     queryKey: ['config'],
@@ -91,7 +99,7 @@ export function SettingsShell() {
   // Hydrate form + provider rows whenever config data arrives or refreshes.
   useEffect(() => {
     if (configQuery.data) {
-      form.setFieldsValue({
+      const hydrated: FormShape = {
         personality: configQuery.data.personality,
         memory: configQuery.data.memory,
         skin: configQuery.data.skin,
@@ -219,33 +227,45 @@ export function SettingsShell() {
               ? 'on'
               : 'off',
         webBaseUrl: configQuery.data.webBaseUrl ?? '',
-      });
+      };
+      form.setFieldsValue(hydrated);
       // Only hydrate provider rows on first load or when data changes identity
       if (!hydratedRef.current) {
-        setProviderRows(
-          rowsFromConfig(
+        const hydratedRows: SettingsRows = {
+          providerRows: rowsFromConfig(
             configQuery.data.providers,
             configQuery.data.provider,
             configQuery.data.model,
             configQuery.data.apiKeyPreview,
             configQuery.data.baseUrl,
           ),
-        );
-        setQuickCommandRows(quickCommandRowsFromConfig(configQuery.data.quickCommands));
-        setChannelToolsetRows(channelToolsetRowsFromConfig(configQuery.data.channelToolsets));
-        setVoiceTtsProviderRows(voiceTtsProviderRowsFromConfig(configQuery.data.voiceTtsProviders));
-        setVoiceSttProviderRows(voiceSttProviderRowsFromConfig(configQuery.data.voiceSttProviders));
-        setVoiceRealtimeProviderRows(
-          voiceRealtimeProviderRowsFromConfig(configQuery.data.voiceRealtimeProviders),
-        );
-        setRetentionRows(
-          retentionRowsFromConfig(
+          quickCommandRows: quickCommandRowsFromConfig(configQuery.data.quickCommands),
+          channelToolsetRows: channelToolsetRowsFromConfig(configQuery.data.channelToolsets),
+          voiceTtsProviderRows: voiceTtsProviderRowsFromConfig(configQuery.data.voiceTtsProviders),
+          voiceSttProviderRows: voiceSttProviderRowsFromConfig(configQuery.data.voiceSttProviders),
+          voiceRealtimeProviderRows: voiceRealtimeProviderRowsFromConfig(
+            configQuery.data.voiceRealtimeProviders,
+          ),
+          retentionRows: retentionRowsFromConfig(
             configQuery.data.retention,
             configQuery.data.personalityRetention,
           ),
-        );
-        setVoiceBotRows(voiceBotRowsFromConfig(configQuery.data.voiceBots));
+          voiceBotRows: voiceBotRowsFromConfig(configQuery.data.voiceBots),
+        };
+        setProviderRows(hydratedRows.providerRows);
+        setQuickCommandRows(hydratedRows.quickCommandRows);
+        setChannelToolsetRows(hydratedRows.channelToolsetRows);
+        setVoiceTtsProviderRows(hydratedRows.voiceTtsProviderRows);
+        setVoiceSttProviderRows(hydratedRows.voiceSttProviderRows);
+        setVoiceRealtimeProviderRows(hydratedRows.voiceRealtimeProviderRows);
+        setRetentionRows(hydratedRows.retentionRows);
+        setVoiceBotRows(hydratedRows.voiceBotRows);
         hydratedRef.current = true;
+        // The snapshot the dirty diff reads from. Set with the rows rather than
+        // on every payload, so the two halves it compares always come from the
+        // same `config.get` — a values-only refresh would make a row edit made
+        // since the last save read as saved.
+        setSaved({ values: hydrated, rows: hydratedRows });
       }
     }
   }, [configQuery.data, form]);
@@ -288,6 +308,38 @@ export function SettingsShell() {
     setProviderRows((prev) => [...prev, emptyRow()]);
   }, []);
 
+  // Above the early returns, because it is a hook. Recomputed whenever a field
+  // or a row set moves: `storeRevision` is the dependency that makes a keystroke
+  // count, since the form store mutates outside React and nothing else here
+  // would notice.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: storeRevision is the change signal for `form`'s external store.
+  const dirty = useMemo(
+    () =>
+      computeDirty(saved, form.getFieldsValue(true), {
+        providerRows,
+        quickCommandRows,
+        channelToolsetRows,
+        voiceTtsProviderRows,
+        voiceSttProviderRows,
+        voiceRealtimeProviderRows,
+        retentionRows,
+        voiceBotRows,
+      }),
+    [
+      saved,
+      form,
+      storeRevision,
+      providerRows,
+      quickCommandRows,
+      channelToolsetRows,
+      voiceTtsProviderRows,
+      voiceSttProviderRows,
+      voiceRealtimeProviderRows,
+      retentionRows,
+      voiceBotRows,
+    ],
+  );
+
   if (configQuery.isLoading) {
     return (
       <div style={{ display: 'grid', placeItems: 'center', height: 200 }}>
@@ -306,11 +358,18 @@ export function SettingsShell() {
   const personalities = personalitiesQuery.data?.items ?? [];
 
   const onFinish = () => {
-    // The panes mount and unmount as you navigate, so at submit time most of the
-    // 128 fields have no mounted `Form.Item`. `getFieldsValue(true)` reads the
-    // WHOLE store rather than the registered-field subset, and `preserve`
-    // (unset, therefore true) is what left the unmounted values in it. Both
-    // halves are load-bearing — see the invariant at the top of this file.
+    // PANE ROUTING is why this reads the whole store. The panes mount and
+    // unmount as you navigate, so at submit time most of the 128 fields have no
+    // mounted `Form.Item`; `getFieldsValue(true)` reads the WHOLE store rather
+    // than the registered-field subset, and `preserve` (unset, therefore true)
+    // is what left the unmounted values in it. Both halves are load-bearing —
+    // see the invariant at the top of this file.
+    //
+    // It is worth naming what is NO LONGER a reason: advanced controls used to
+    // unmount behind `{showAdvanced && …}`, and that was the original argument
+    // for `getFieldsValue(true)`. They dim now and stay mounted (D10), so that
+    // argument is gone and routing is the whole of it. The call does not change
+    // — routing unmounts far more than the advanced blocks ever did.
     const values: FormShape = form.getFieldsValue(true);
     const built = buildConfigPatch(
       values,
@@ -373,14 +432,15 @@ export function SettingsShell() {
         <Typography.Title level={4} style={{ margin: 0 }}>
           Settings
         </Typography.Title>
-        <span className="settings-advanced-toggle">
-          <span className="settings-advanced-label">Show advanced</span>
-          <Switch checked={showAdvanced} onChange={setShowAdvanced} />
-        </span>
+        <AdvancedToggle showAdvanced={showAdvanced} onChange={setShowAdvanced} />
       </header>
 
       <div className="settings">
-        <CategoryRail categories={categories} activeCategory={resolved.category} />
+        <CategoryRail
+          categories={categories}
+          activeCategory={resolved.category}
+          dirtyCategories={dirty.categories}
+        />
         <div className="settings__detail">
           {/*
             `component={false}` renders NO `<form>` node (D2). Two live defects
@@ -391,10 +451,21 @@ export function SettingsShell() {
             modal-local `Form.useForm`, which would nest forms. Save is an
             explicit `form.submit()` from the save bar instead.
           */}
-          <Form<FormShape> form={form} layout="vertical" component={false} onFinish={onFinish}>
+          <Form<FormShape>
+            form={form}
+            layout="vertical"
+            component={false}
+            onFinish={onFinish}
+            onValuesChange={() => setStoreRevision((r) => r + 1)}
+          >
             <Outlet context={paneContext} />
           </Form>
-          <SaveBar loading={updateMut.isPending} onSave={() => form.submit()} />
+          <SaveBar
+            loading={updateMut.isPending}
+            onSave={() => form.submit()}
+            dirty={dirty}
+            categories={categories}
+          />
         </div>
       </div>
     </div>

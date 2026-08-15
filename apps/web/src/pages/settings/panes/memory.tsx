@@ -6,10 +6,11 @@
 // Security & access, and the two never merge.
 
 import { Card, Form, Input, InputNumber, Radio, Select, Switch } from 'antd';
+import { AdvancedBlock } from '../components/advanced';
 import { useSettingsPane } from '../pane-context';
 
 export function MemoryPane() {
-  const { config: configData, showAdvanced } = useSettingsPane();
+  const { config: configData } = useSettingsPane();
 
   return (
     <Card title="Memory" size="small" style={{ marginBottom: 16 }}>
@@ -104,24 +105,22 @@ export function MemoryPane() {
         </Radio.Group>
       </Form.Item>
 
-      {showAdvanced && (
-        <>
-          <Form.Item
-            label="Pending queue cap"
-            name={['memoryApproval', 'cap']}
-            extra="Max pending candidates per scope (memoryApproval.cap, default 200)."
-          >
-            <InputNumber min={1} precision={0} style={{ width: '100%' }} />
-          </Form.Item>
-          <Form.Item
-            label="Pending TTL (days)"
-            name={['memoryApproval', 'ttlDays']}
-            extra="Days before an unreviewed candidate expires (memoryApproval.ttlDays, default 30)."
-          >
-            <InputNumber min={1} precision={0} style={{ width: '100%' }} />
-          </Form.Item>
-        </>
-      )}
+      <AdvancedBlock>
+        <Form.Item
+          label="Pending queue cap"
+          name={['memoryApproval', 'cap']}
+          extra="Max pending candidates per scope (memoryApproval.cap, default 200)."
+        >
+          <InputNumber min={1} precision={0} style={{ width: '100%' }} />
+        </Form.Item>
+        <Form.Item
+          label="Pending TTL (days)"
+          name={['memoryApproval', 'ttlDays']}
+          extra="Days before an unreviewed candidate expires (memoryApproval.ttlDays, default 30)."
+        >
+          <InputNumber min={1} precision={0} style={{ width: '100%' }} />
+        </Form.Item>
+      </AdvancedBlock>
 
       <Form.Item
         label="Consolidate memory between turns"
@@ -132,67 +131,65 @@ export function MemoryPane() {
         <Switch />
       </Form.Item>
 
-      {showAdvanced && (
-        <>
-          <Form.Item
-            label="Flush threshold"
-            name={['memoryConsolidation', 'flushThreshold']}
-            extra="Context-window fraction that triggers the silent flush (memoryConsolidation.flushThreshold, default 0.7)."
-          >
-            <InputNumber min={0.01} max={1} step={0.05} style={{ width: '100%' }} />
-          </Form.Item>
-          <Form.Item
-            label="Flush timebox (ms)"
-            name={['memoryConsolidation', 'timeboxMs']}
-            extra="Max time the flush turn may run (memoryConsolidation.timeboxMs, default 30000)."
-          >
-            <InputNumber min={0} precision={0} style={{ width: '100%' }} />
-          </Form.Item>
-          <Form.Item
-            label="Flush token cap"
-            name={['memoryConsolidation', 'maxTokens']}
-            extra="Token budget for the flush turn (memoryConsolidation.maxTokens, default 1024)."
-          >
-            <InputNumber min={0} precision={0} style={{ width: '100%' }} />
-          </Form.Item>
-          <Form.Item
-            label="Max characters per flush"
-            name={['memoryConsolidation', 'maxDeltaChars']}
-            extra="Most characters one flush may write (memoryConsolidation.maxDeltaChars, default 4000)."
-          >
-            <InputNumber min={0} precision={0} style={{ width: '100%' }} />
-          </Form.Item>
-          <Form.Item
-            label="Messages between flushes"
-            name={['memoryConsolidation', 'minMessagesSinceFlush']}
-            extra="Minimum messages before another flush may run (memoryConsolidation.minMessagesSinceFlush, default 8)."
-          >
-            <InputNumber min={0} precision={0} style={{ width: '100%' }} />
-          </Form.Item>
-          <Form.Item
-            label="Decay half-life (days)"
-            name={['memoryConsolidation', 'halfLifeDays']}
-            extra="Recency half-life for memory decay (memoryConsolidation.halfLifeDays, default 30)."
-          >
-            <InputNumber min={0.1} style={{ width: '100%' }} />
-          </Form.Item>
-          <Form.Item
-            label="Decay archive threshold"
-            name={['memoryConsolidation', 'threshold']}
-            extra="Entries weighted below this get archived (memoryConsolidation.threshold, default 0.05)."
-          >
-            <InputNumber min={0} max={1} step={0.01} style={{ width: '100%' }} />
-          </Form.Item>
-          <Form.Item
-            label="Exempt USER.md from decay"
-            name={['memoryConsolidation', 'exemptUser']}
-            valuePropName="checked"
-            extra="Keep the persistent user profile out of decay (memoryConsolidation.exemptUser, default on)."
-          >
-            <Switch />
-          </Form.Item>
-        </>
-      )}
+      <AdvancedBlock>
+        <Form.Item
+          label="Flush threshold"
+          name={['memoryConsolidation', 'flushThreshold']}
+          extra="Context-window fraction that triggers the silent flush (memoryConsolidation.flushThreshold, default 0.7)."
+        >
+          <InputNumber min={0.01} max={1} step={0.05} style={{ width: '100%' }} />
+        </Form.Item>
+        <Form.Item
+          label="Flush timebox (ms)"
+          name={['memoryConsolidation', 'timeboxMs']}
+          extra="Max time the flush turn may run (memoryConsolidation.timeboxMs, default 30000)."
+        >
+          <InputNumber min={0} precision={0} style={{ width: '100%' }} />
+        </Form.Item>
+        <Form.Item
+          label="Flush token cap"
+          name={['memoryConsolidation', 'maxTokens']}
+          extra="Token budget for the flush turn (memoryConsolidation.maxTokens, default 1024)."
+        >
+          <InputNumber min={0} precision={0} style={{ width: '100%' }} />
+        </Form.Item>
+        <Form.Item
+          label="Max characters per flush"
+          name={['memoryConsolidation', 'maxDeltaChars']}
+          extra="Most characters one flush may write (memoryConsolidation.maxDeltaChars, default 4000)."
+        >
+          <InputNumber min={0} precision={0} style={{ width: '100%' }} />
+        </Form.Item>
+        <Form.Item
+          label="Messages between flushes"
+          name={['memoryConsolidation', 'minMessagesSinceFlush']}
+          extra="Minimum messages before another flush may run (memoryConsolidation.minMessagesSinceFlush, default 8)."
+        >
+          <InputNumber min={0} precision={0} style={{ width: '100%' }} />
+        </Form.Item>
+        <Form.Item
+          label="Decay half-life (days)"
+          name={['memoryConsolidation', 'halfLifeDays']}
+          extra="Recency half-life for memory decay (memoryConsolidation.halfLifeDays, default 30)."
+        >
+          <InputNumber min={0.1} style={{ width: '100%' }} />
+        </Form.Item>
+        <Form.Item
+          label="Decay archive threshold"
+          name={['memoryConsolidation', 'threshold']}
+          extra="Entries weighted below this get archived (memoryConsolidation.threshold, default 0.05)."
+        >
+          <InputNumber min={0} max={1} step={0.01} style={{ width: '100%' }} />
+        </Form.Item>
+        <Form.Item
+          label="Exempt USER.md from decay"
+          name={['memoryConsolidation', 'exemptUser']}
+          valuePropName="checked"
+          extra="Keep the persistent user profile out of decay (memoryConsolidation.exemptUser, default on)."
+        >
+          <Switch />
+        </Form.Item>
+      </AdvancedBlock>
 
       <Form.Item
         label="Capture facts proactively"
@@ -231,38 +228,36 @@ export function MemoryPane() {
               >
                 <InputNumber min={1} precision={0} style={{ width: '100%' }} />
               </Form.Item>
-              {showAdvanced && (
-                <>
-                  <Form.Item
-                    label="Capture provider"
-                    name={['memoryCapture', 'provider']}
-                    extra="Auxiliary provider for capture extraction (memoryCapture.provider). Blank = primary provider."
-                  >
-                    <Input placeholder="openrouter" />
-                  </Form.Item>
-                  <Form.Item
-                    label="Capture API key"
-                    name={['memoryCapture', 'apiKey']}
-                    extra={
-                      configData?.memoryCapture.apiKeyPreview
-                        ? `Current: ${configData.memoryCapture.apiKeyPreview} — sent only when you type a new key (memoryCapture.apiKey).`
-                        : 'Sent only when you type a key (memoryCapture.apiKey). Blank = primary key.'
-                    }
-                  >
-                    <Input.Password
-                      autoComplete="off"
-                      placeholder={configData?.memoryCapture.apiKeyPreview ?? 'paste new key'}
-                    />
-                  </Form.Item>
-                  <Form.Item
-                    label="Capture base URL"
-                    name={['memoryCapture', 'baseUrl']}
-                    extra="Endpoint for the capture model (memoryCapture.baseUrl). Blank = primary base URL."
-                  >
-                    <Input placeholder="https://openrouter.ai/api/v1" />
-                  </Form.Item>
-                </>
-              )}
+              <AdvancedBlock>
+                <Form.Item
+                  label="Capture provider"
+                  name={['memoryCapture', 'provider']}
+                  extra="Auxiliary provider for capture extraction (memoryCapture.provider). Blank = primary provider."
+                >
+                  <Input placeholder="openrouter" />
+                </Form.Item>
+                <Form.Item
+                  label="Capture API key"
+                  name={['memoryCapture', 'apiKey']}
+                  extra={
+                    configData?.memoryCapture.apiKeyPreview
+                      ? `Current: ${configData.memoryCapture.apiKeyPreview} — sent only when you type a new key (memoryCapture.apiKey).`
+                      : 'Sent only when you type a key (memoryCapture.apiKey). Blank = primary key.'
+                  }
+                >
+                  <Input.Password
+                    autoComplete="off"
+                    placeholder={configData?.memoryCapture.apiKeyPreview ?? 'paste new key'}
+                  />
+                </Form.Item>
+                <Form.Item
+                  label="Capture base URL"
+                  name={['memoryCapture', 'baseUrl']}
+                  extra="Endpoint for the capture model (memoryCapture.baseUrl). Blank = primary base URL."
+                >
+                  <Input placeholder="https://openrouter.ai/api/v1" />
+                </Form.Item>
+              </AdvancedBlock>
             </>
           ) : null
         }

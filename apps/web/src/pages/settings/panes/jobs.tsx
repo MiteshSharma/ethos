@@ -2,13 +2,18 @@
 // pool caps, moved verbatim from `Settings.tsx` (§4.2 row 14).
 
 import { Card, Form, InputNumber, Switch } from 'antd';
+import { AdvancedBlock } from '../components/advanced';
 import type { FormShape } from '../lib/form-shape';
-import { useSettingsPane } from '../pane-context';
 
 export function JobsPane() {
-  const { showAdvanced } = useSettingsPane();
-  if (!showAdvanced) return null;
-  return <BackgroundJobsCard />;
+  // The whole category is advanced-gated, so with the toggle off this pane used
+  // to render NOTHING — a rail row you could click into and find empty. It dims
+  // now (D10), which is what makes the row honest.
+  return (
+    <AdvancedBlock>
+      <BackgroundJobsCard />
+    </AdvancedBlock>
+  );
 }
 
 function BackgroundJobsCard() {

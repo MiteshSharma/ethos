@@ -48,6 +48,7 @@ import {
   useToolSettingsSchemas,
 } from '../../../features/settings/api/queries';
 import { rpc } from '../../../rpc';
+import { AdvancedBlock } from '../components/advanced';
 import { useSettingsPane } from '../pane-context';
 
 const WEB_SEARCH_PROVIDERS = ['exa', 'tavily', 'brave'] as const;
@@ -57,7 +58,7 @@ function isWebSearchProvider(v: string | undefined): v is WebSearchProvider {
 }
 
 export function SecurityPane() {
-  const { config: configData, showAdvanced } = useSettingsPane();
+  const { config: configData } = useSettingsPane();
   const navigate = useNavigate();
 
   return (
@@ -89,7 +90,7 @@ export function SecurityPane() {
         </Form.Item>
       </Card>
 
-      {showAdvanced && (
+      <AdvancedBlock>
         <Card title="Admin" size="small" style={{ marginBottom: 16 }}>
           <Form.Item
             name="adminEnabled"
@@ -103,7 +104,7 @@ export function SecurityPane() {
             <Button onClick={() => navigate('/admin')}>Open admin panel</Button>
           )}
         </Card>
-      )}
+      </AdvancedBlock>
 
       <NamedSecretsSection />
 

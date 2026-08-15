@@ -4459,6 +4459,35 @@ textarea {
   color: var(--ethos-text-dim);
 }
 
+/* The `N advanced` figure. Mono with tabular figures, like every other number
+   the operator also reads out of config.yaml (DESIGN.md "Typography"). */
+.settings-advanced-count {
+  font-family: var(--font-mono, "Geist Mono", monospace);
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
+  color: var(--text-tertiary);
+}
+
+/* Advanced-off treatment (D10). Opacity ONLY: the block stays in the flow, its
+   fields stay registered, and every control inside stays clickable. Adding
+   `pointer-events: none`, `inert` or a `disabled` here would turn a hint into a
+   trap, and `__tests__/settings-advanced-dims.test.ts` fails if one appears. */
+.settings-advanced-dim {
+  opacity: 0.45;
+  transition: opacity 120ms ease-out;
+}
+
+.settings-advanced-dim:hover,
+.settings-advanced-dim:focus-within {
+  opacity: 1;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .settings-advanced-dim {
+    transition: none;
+  }
+}
+
 /* Settings two-pane shape — a 240px category rail (DESIGN.md "Layout": the
    same width as the app sidebar) beside the detail column the panes render in.
    The detail column keeps the 640px measure the single-column form had. */
@@ -4499,13 +4528,94 @@ textarea {
   margin-bottom: 2px;
 }
 
+.settings-rail-search {
+  margin-bottom: 4px;
+}
+
 .settings-rail-row {
-  display: block;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
   padding: 6px 12px;
   border-radius: 4px;
   font-size: 14px;
   color: var(--text-secondary);
   text-decoration: none;
+}
+
+.settings-rail-row-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+/* Derived from SETTINGS_INDEX, never typed in. Mono + tabular so the column of
+   figures lines up and reads as data (DESIGN.md "Typography"). */
+.settings-rail-count {
+  font-family: var(--font-mono, "Geist Mono", monospace);
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
+  color: var(--text-tertiary);
+}
+
+/* Unsaved changes IN THAT CATEGORY — the visible half of category-blind dirty
+   state (D9). Same 6px accent dot vocabulary the sidebar already uses. */
+.settings-rail-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent, var(--ethos-info));
+  flex: none;
+}
+
+.settings-rail-results {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.settings-rail-result {
+  display: block;
+  padding: 6px 12px;
+  border-radius: 4px;
+  text-decoration: none;
+}
+
+.settings-rail-result:hover {
+  background: var(--ethos-hover);
+}
+
+.settings-rail-result-label {
+  display: block;
+  font-size: 13px;
+  color: var(--text-primary);
+}
+
+.settings-rail-result-where {
+  display: block;
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+}
+
+/* The key is half of what was searched, so it is shown verbatim, in the font
+   config.yaml is read in. */
+.settings-rail-result-key {
+  display: block;
+  font-family: var(--font-mono, "Geist Mono", monospace);
+  font-size: 12px;
+  color: var(--text-secondary);
+  overflow-wrap: anywhere;
+}
+
+.settings-rail-empty {
+  padding: 6px 12px;
+  font-size: 12px;
+  color: var(--text-tertiary);
 }
 
 .settings-rail-row:hover {
@@ -4524,11 +4634,23 @@ textarea {
   position: sticky;
   bottom: 0;
   display: flex;
+  align-items: center;
   justify-content: flex-start;
   gap: 8px;
   padding: 12px 0;
   background: var(--bg-base, transparent);
   border-top: 1px solid var(--border-subtle);
+}
+
+.settings-savebar-dirty {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.settings-savebar-count {
+  font-family: var(--font-mono, "Geist Mono", monospace);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-primary);
 }
 
 @media (max-width: 900px) {

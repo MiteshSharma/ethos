@@ -3,6 +3,7 @@
 
 import { Button, Card, Input, Select, Typography } from 'antd';
 import type { Dispatch, SetStateAction } from 'react';
+import { AdvancedBlock } from '../components/advanced';
 import { RowLabel } from '../components/primitives';
 import {
   type PersonalityOption,
@@ -14,10 +15,17 @@ import type { RetentionRow } from '../lib/rows';
 import { useSettingsPane } from '../pane-context';
 
 export function DataPane() {
-  const { showAdvanced, retentionRows, setRetentionRows, personalities } = useSettingsPane();
-  if (!showAdvanced) return null;
+  const { retentionRows, setRetentionRows, personalities } = useSettingsPane();
+  // Same as Background jobs: advanced end to end, so it used to render an empty
+  // pane with the toggle off. Dimmed, not unmounted (D10).
   return (
-    <RetentionCard rows={retentionRows} setRows={setRetentionRows} personalities={personalities} />
+    <AdvancedBlock>
+      <RetentionCard
+        rows={retentionRows}
+        setRows={setRetentionRows}
+        personalities={personalities}
+      />
+    </AdvancedBlock>
   );
 }
 

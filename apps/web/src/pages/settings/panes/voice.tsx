@@ -507,6 +507,9 @@ export function VoicePane() {
             label: 'Advanced voice tuning',
             children: (
               <>
+                {/* settings-index-group: voice-tuning — `name={c.name}` is
+                    opaque to the source scan, so the group id says which
+                    `SETTINGS_INDEX` entries this site renders (T6). */}
                 {VOICE_TUNING_CONTROLS.map((c) => (
                   <Form.Item key={c.name} name={c.name} label={c.label} extra={c.extra}>
                     <Slider

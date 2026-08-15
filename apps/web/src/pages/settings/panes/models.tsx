@@ -16,6 +16,7 @@ import {
   Typography,
 } from 'antd';
 import { rpc } from '../../../rpc';
+import { AdvancedBlock } from '../components/advanced';
 import { ROW_BOX_STYLE } from '../components/primitives';
 import type { ProviderRow } from '../lib/rows';
 import { useSettingsPane } from '../pane-context';
@@ -23,7 +24,6 @@ import { useSettingsPane } from '../pane-context';
 export function ModelsPane() {
   const {
     config: configData,
-    showAdvanced,
     providerRows,
     addProviderRow,
     updateProviderRow,
@@ -129,7 +129,7 @@ export function ModelsPane() {
                 )}
               </div>
 
-              {showAdvanced && (
+              <AdvancedBlock>
                 <div style={{ marginBottom: 8 }}>
                   <Typography.Text type="secondary" style={{ fontSize: 12 }}>
                     Base URL
@@ -141,7 +141,7 @@ export function ModelsPane() {
                     onChange={(e) => updateRow(idx, { baseUrl: e.target.value })}
                   />
                 </div>
-              )}
+              </AdvancedBlock>
 
               <RowTestButton
                 row={row}
@@ -157,7 +157,7 @@ export function ModelsPane() {
         </Button>
       </Card>
 
-      {showAdvanced && (
+      <AdvancedBlock>
         <ModelsBackendsCard
           auxPreviews={{
             compression: configData?.auxCompression.apiKeyPreview ?? null,
@@ -165,9 +165,9 @@ export function ModelsPane() {
             web: configData?.auxWeb.apiKeyPreview ?? null,
           }}
         />
-      )}
+      </AdvancedBlock>
 
-      {showAdvanced ? (
+      <AdvancedBlock>
         <Card title="Model routing" size="small" style={{ marginBottom: 16 }}>
           <Typography.Paragraph type="secondary" style={{ marginTop: 0 }}>
             Per-personality model overrides. Edit ~/.ethos/config.yaml directly to add entries —
@@ -175,7 +175,7 @@ export function ModelsPane() {
           </Typography.Paragraph>
           <ModelRoutingView routing={configData?.modelRouting ?? {}} />
         </Card>
-      ) : null}
+      </AdvancedBlock>
     </>
   );
 }

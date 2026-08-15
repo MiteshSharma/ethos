@@ -6,11 +6,9 @@
 // access (O2).
 
 import { Card, Checkbox, Form, Input, InputNumber, Select, Switch } from 'antd';
-import { useSettingsPane } from '../pane-context';
+import { AdvancedBlock } from '../components/advanced';
 
 export function DeveloperPane() {
-  const { showAdvanced } = useSettingsPane();
-
   return (
     <>
       <Card title="Developer" size="small" style={{ marginBottom: 16 }}>
@@ -38,7 +36,9 @@ export function DeveloperPane() {
         </Form.Item>
       </Card>
 
-      {showAdvanced && <AdvancedMiscCard />}
+      <AdvancedBlock>
+        <AdvancedMiscCard />
+      </AdvancedBlock>
     </>
   );
 }
