@@ -1132,11 +1132,11 @@ const ConfigGetOutput = z.object({
   voiceTtsCommand: z.string().nullable(),
   /** `auxiliary.tts.outputFormat` — container the TTS provider is asked for. */
   voiceTtsOutputFormat: z.enum(['opus', 'mp3', 'wav', 'pcm']).nullable(),
-  /** `auxiliary.tts.timeout`, ms. */
+  /** `auxiliary.tts.timeout`, seconds. */
   voiceTtsTimeoutMs: z.number().nullable(),
   /** `auxiliary.tts.maxTextLength` — chars per synthesis request. */
   voiceTtsMaxTextLength: z.number().nullable(),
-  /** `auxiliary.asr.timeout`, ms. */
+  /** `auxiliary.asr.timeout`, seconds. */
   voiceSttTimeoutMs: z.number().nullable(),
   /** `voice.trustedPlugins` — the local-only egress allowlist. `null` = key
    *  absent = gate OFF; a list arms it (providers with `caps.local` always pass). */
@@ -1478,12 +1478,12 @@ const ConfigUpdateInput = z.object({
   voiceTtsCommand: z.string().nullable().optional(),
   /** `auxiliary.tts.outputFormat`; null clears the key. */
   voiceTtsOutputFormat: z.enum(['opus', 'mp3', 'wav', 'pcm']).nullable().optional(),
-  /** `auxiliary.tts.timeout`, ms; null clears the key. */
-  voiceTtsTimeoutMs: z.number().int().min(1_000).max(600_000).nullable().optional(),
+  /** `auxiliary.tts.timeout`, seconds; null clears the key. */
+  voiceTtsTimeoutMs: z.number().int().min(1).max(3600).nullable().optional(),
   /** `auxiliary.tts.maxTextLength`, chars; null clears the key. */
   voiceTtsMaxTextLength: z.number().int().min(100).max(100_000).nullable().optional(),
-  /** `auxiliary.asr.timeout`, ms; null clears the key. */
-  voiceSttTimeoutMs: z.number().int().min(1_000).max(600_000).nullable().optional(),
+  /** `auxiliary.asr.timeout`, seconds; null clears the key. */
+  voiceSttTimeoutMs: z.number().int().min(1).max(3600).nullable().optional(),
   /** `voice.trustedPlugins`; null (or an empty list) clears the key, which
    *  turns the local-only egress gate OFF. */
   voiceTrustedPlugins: z.array(z.string()).nullable().optional(),

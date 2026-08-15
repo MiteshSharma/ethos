@@ -3052,10 +3052,10 @@ export function Settings() {
                   </Form.Item>
                   <Form.Item
                     name="voiceSttTimeoutMs"
-                    label="STT timeout (ms)"
+                    label="STT timeout (seconds)"
                     extra="How long one transcription may take. Blank = provider default."
                   >
-                    <InputNumber min={1000} max={600000} step={1000} placeholder="30000" />
+                    <InputNumber min={1} max={3600} step={1} placeholder="120" />
                   </Form.Item>
                   <Form.Item
                     noStyle
@@ -3165,10 +3165,10 @@ export function Settings() {
                           </Form.Item>
                           <Form.Item
                             name="voiceTtsTimeoutMs"
-                            label="TTS timeout (ms)"
+                            label="TTS timeout (seconds)"
                             extra="How long one synthesis request may take. Blank = provider default."
                           >
-                            <InputNumber min={1000} max={600000} step={1000} placeholder="30000" />
+                            <InputNumber min={1} max={3600} step={1} placeholder="120" />
                           </Form.Item>
                           <Form.Item
                             name="voiceTtsMaxTextLength"
