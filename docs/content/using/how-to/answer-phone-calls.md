@@ -103,8 +103,10 @@ Without it, telephony still runs and says so plainly:
 
 ```
 ⚠ voice media unavailable (@livekit/rtc-node is not installed — install it with pnpm add @livekit/rtc-node)
-  A call will be answered, screened and logged, but cannot carry audio until the media SDK loads.
+  A call will be answered, screened and logged, but cannot carry audio until the media SDK loads. Fix: pnpm add @livekit/rtc-node, then restart the gateway.
 ```
+
+The second line is scoped to `voice.trunk`. A deployment that configures `voice.livekit` without a trunk gets the warning line alone — no phone number rings it, so there is no call to explain, and the shorter message is the expected one.
 
 That is the honest state of the leg: verification, gating, the receptionist decision, the call-log row, and the owner summary all work without it. Only the voice does not.
 
@@ -160,7 +162,9 @@ The call *is* written to the call log, as `direction: 'outbound'`, and the row i
 
 Open **Communications → Calls**. Calls that are up appear first under **In progress** with the duration ticking; below them, history filtered by direction and state chips. A row opens its transcript and summary.
 
-The `tier` and cost columns stay empty: the inbound path writes neither, because the realtime bridge that would report them is not yet reachable from the gateway (see [Verify](#verify)).
+The `tier` column stays empty on every row: nothing writes it, because the realtime bridge that would report which stack served the call is not yet reachable from the gateway (see [Verify](#verify)).
+
+Cost is written, but only on an inbound row and only when the accrued figure is above zero — a call that ended before it drove an LLM turn shows nothing rather than a zero, so an empty cost on a short call is not a broken column. Outbound rows carry no cost at all: nothing joins the room, so no turn ever runs to meter. What the figure counts and what it leaves out is in [What is not verified](#what-is-not-verified).
 
 ## Verify
 
@@ -182,6 +186,8 @@ Voice
      Allowlist 1 pattern(s); receptionist receptionist; owner telegram:4242
      +15550000000 → sha256(+15550000000) → personality receptionist
 ```
+
+The middle token on the mapping row is the bot key. It reads `sha256(<match>)` for an entry with no `id:`, as above; set `voice.bots.0.id` and that row shows the id you chose instead.
 
 Then call the number from a phone. A `screened` or `completed` row should appear under **Communications → Calls**, and a summary should arrive on the owner's channel.
 
