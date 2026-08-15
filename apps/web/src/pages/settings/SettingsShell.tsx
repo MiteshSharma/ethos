@@ -45,6 +45,7 @@ import {
   retentionRowsFromConfig,
   rowsFromConfig,
 } from './lib/rows';
+import { type SectionRoute, shouldScrollToSection } from './lib/section-scroll';
 import { useShowAdvanced } from './lib/settings-advanced';
 import { computeDirty, type DirtySnapshot } from './lib/settings-dirty';
 import { findCategory, visibleCategories } from './lib/taxonomy';
@@ -342,6 +343,46 @@ export function SettingsShell() {
     ],
   );
 
+  // The rail's active row comes from the URL, not from the child route: a layout
+  // route's `useParams` only sees the params its OWN path declares, and
+  // `:category` belongs to the child. Computed above the early returns (and
+  // not just where it's consumed) because the scroll effect below needs it on
+  // every render, in the same hook order, regardless of loading/error state.
+  const { category, section } = parseSettingsPath(pathname);
+  const categories = visibleCategories(isDesktop);
+  const resolved = resolveSettingsRoute({ category, section }, categories);
+
+  // Scroll the active section's heading into view when SectionNav changes it —
+  // but only for an in-category tab click, never on mount or a category
+  // switch (`shouldScrollToSection`). `.app-main` is the page's actual scroll
+  // container (`overflow: auto` in styles.css); `.settings__detail` itself
+  // does not scroll. The sticky `.settings-section-nav` would otherwise cover
+  // the heading it just scrolled to, so its live bottom edge is measured and
+  // used as the floor rather than hard-coding its height — that pixel value
+  // isn't ours to assume here, and measuring stays correct if it changes.
+  const prevSectionRouteRef = useRef<SectionRoute | undefined>(undefined);
+  useEffect(() => {
+    const prev = prevSectionRouteRef.current;
+    const next: SectionRoute = { category: resolved.category, section: resolved.section };
+    const shouldScroll = shouldScrollToSection(prev, next);
+    prevSectionRouteRef.current = next;
+    if (!shouldScroll) return;
+
+    const target = document.getElementById(next.section);
+    const container = document.querySelector<HTMLElement>('.app-main');
+    if (!target || !container) return;
+
+    // The nav is `position: sticky; top: 0`, so its bottom edge IS the visible
+    // "floor" content must clear — using it directly sidesteps `.app-main`'s
+    // own top padding, which a container-top-relative offset would otherwise
+    // have to duplicate.
+    const nav = document.querySelector<HTMLElement>('.settings-section-nav');
+    const navBottom = nav?.getBoundingClientRect().bottom ?? container.getBoundingClientRect().top;
+    const delta = target.getBoundingClientRect().top - navBottom - 8;
+    const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    container.scrollBy({ top: delta, behavior: reducedMotion ? 'auto' : 'smooth' });
+  }, [resolved.category, resolved.section]);
+
   if (configQuery.isLoading) {
     return (
       <div style={{ display: 'grid', placeItems: 'center', height: 200 }}>
@@ -393,13 +434,6 @@ export function SettingsShell() {
     }
     updateMut.mutate(built.patch);
   };
-
-  // The rail's active row comes from the URL, not from the child route: a layout
-  // route's `useParams` only sees the params its OWN path declares, and
-  // `:category` belongs to the child.
-  const { category, section } = parseSettingsPath(pathname);
-  const categories = visibleCategories(isDesktop);
-  const resolved = resolveSettingsRoute({ category, section }, categories);
 
   const paneContext: SettingsPaneContext = {
     form,
