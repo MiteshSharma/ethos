@@ -2628,9 +2628,9 @@ export function Settings() {
 
         <Card title="Chat display" size="small" style={{ marginBottom: 16 }}>
           <Form.Item
-            label="Verbosity"
+            label="Response length"
             name="verbosity"
-            extra="How detailed the agent's responses should be."
+            extra="How long the agent's prose runs (verbosity)."
           >
             <Select
               options={[
@@ -2656,9 +2656,9 @@ export function Settings() {
           </Form.Item>
 
           <Form.Item
-            label="Surface verbosity"
+            label="Interface detail"
             name="displayVerbosity"
-            extra="How much tool and status detail chat surfaces render (display.verbosity)."
+            extra="How much tool and status chrome chat surfaces render (display.verbosity). Does not change what the agent writes."
           >
             <Select
               options={[
@@ -4481,7 +4481,7 @@ function BackgroundJobsCard() {
 }
 
 // ---------------------------------------------------------------------------
-// Data retention (advanced) — full-replacement editor for `retention.<subkey>`
+// Agent data retention (advanced) — full-replacement editor for `retention.<subkey>`
 // and `personalities.<id>.retention.<subkey>` TTLs.
 // ---------------------------------------------------------------------------
 
@@ -4504,7 +4504,7 @@ function RetentionCard({
     ]);
 
   return (
-    <Card title="Data retention" size="small" style={{ marginBottom: 16 }}>
+    <Card title="Agent data retention" size="small" style={{ marginBottom: 16 }}>
       <Typography.Paragraph type="secondary" style={{ marginTop: 0 }}>
         TTLs for stored data (retention.&lt;subkey&gt;, or
         personalities.&lt;id&gt;.retention.&lt;subkey&gt; to override for one personality). Duration
@@ -4637,7 +4637,7 @@ function ModelsBackendsCard({
       <Form.Item
         label="Web search backend"
         name="webSearchBackend"
-        extra="Force the web_search tool's backend (web.search_backend). Auto picks from available keys — key bindings live under Web-search defaults."
+        extra="Force the web_search tool's backend (web.search_backend). Auto picks from available keys. Saved with this page; the key each backend uses is bound in the Web-search defaults card, which saves on its own button."
       >
         <Select
           options={[
@@ -4990,7 +4990,9 @@ function WebSearchDefaultsSection() {
     <Card title="Web-search defaults" size="small" style={{ maxWidth: 640, marginTop: 32 }}>
       <Typography.Paragraph type="secondary" style={{ marginTop: 0 }}>
         The provider and key <Typography.Text code>web_search</Typography.Text> uses when a
-        personality doesn&apos;t bind its own. A personality&apos;s own setting always wins.
+        personality doesn&apos;t bind its own. A personality&apos;s own setting always wins. This
+        card saves on its own button, below — which backend the tool is forced to use is a separate
+        control, Web search backend, under Models &amp; backends, saved with the page.
       </Typography.Paragraph>
       <ToolSettingsForm
         schema={schema}

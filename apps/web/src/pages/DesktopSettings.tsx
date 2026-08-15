@@ -319,7 +319,7 @@ export function DesktopSettings() {
         </Space>
       </Card>
 
-      <Card title="Retention" size="small" style={{ marginBottom: 16 }}>
+      <Card title="Desktop cache retention" size="small" style={{ marginBottom: 16 }}>
         <Space direction="vertical" style={{ width: '100%' }}>
           <Space>
             <Typography.Text>Retention days:</Typography.Text>
