@@ -672,26 +672,16 @@ export function registerIpcHandlers(): void {
     return { ok: true };
   });
 
+  // Not implemented. Asking for a destination first would prompt for a file
+  // this handler will never write, so it answers before opening any dialog.
   ipcMain.handle(IPC_CHANNELS['export:data'], async () => {
-    try {
-      const result = await dialog.showSaveDialog({
-        defaultPath: `ethos-export-${Date.now()}.zip`,
-        filters: [{ name: 'ZIP Archive', extensions: ['zip'] }],
-      });
-
-      if (result.canceled || !result.filePath) {
-        return { ok: false, error: 'Cancelled' };
-      }
-
-      return { ok: false, error: 'Export not yet available' };
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      return { ok: false, error: message };
-    }
+    return { ok: false, error: 'Export is not implemented yet' };
   });
 
+  // Not implemented. Reporting `ok` with zero bytes freed is a success message
+  // for an operation that did not happen.
   ipcMain.handle(IPC_CHANNELS['retention:prune'], (_event, _req: RetentionValues) => {
-    return { ok: true, freedBytes: 0 };
+    return { ok: false, error: 'Pruning is not implemented yet' };
   });
 
   ipcMain.handle(

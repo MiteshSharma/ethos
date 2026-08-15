@@ -28,9 +28,6 @@ export function DesktopSettings() {
   const [dataDir, setDataDir] = useState('');
   const [restartNeeded, setRestartNeeded] = useState(false);
 
-  // Utilities
-  const [exportPath, setExportPath] = useState<string | null>(null);
-
   // Keychain
   const [keychainPreview, setKeychainPreview] = useState<string | null>(null);
   const [keychainValue, setKeychainValue] = useState('');
@@ -43,7 +40,6 @@ export function DesktopSettings() {
   const [retentionDays, setRetentionDays] = useState(90);
   const [traceLogDays, setTraceLogDays] = useState(30);
   const [observabilityDays, setObservabilityDays] = useState(7);
-  const [pruneResult, setPruneResult] = useState<string | null>(null);
 
   useEffect(() => {
     if (!bridge) return;
@@ -179,25 +175,6 @@ export function DesktopSettings() {
     }
   }
 
-  async function handleExportData() {
-    try {
-      const result = await b.settings.exportData();
-      if (result.ok && result.path) {
-        setExportPath(result.path);
-      } else {
-        notification.error({
-          message: 'Export failed',
-          description: result.error ?? 'Unknown error',
-        });
-      }
-    } catch (err) {
-      notification.error({
-        message: 'Export failed',
-        description: err instanceof Error ? err.message : String(err),
-      });
-    }
-  }
-
   async function handleUpdateKeychain() {
     try {
       const result = await b.keychain.set({ key: 'api-key', value: keychainValue });
@@ -252,31 +229,6 @@ export function DesktopSettings() {
     } catch (err) {
       notification.error({
         message: 'Failed to save retention settings',
-        description: err instanceof Error ? err.message : String(err),
-      });
-    }
-  }
-
-  async function handlePruneRetention() {
-    try {
-      setPruneResult(null);
-      const result = await b.settings.pruneRetention({
-        retentionDays,
-        traceLogDays,
-        observabilityDays,
-      });
-      if (result.ok) {
-        const freed = result.freedBytes ?? 0;
-        setPruneResult(`Freed ${(freed / 1024).toFixed(1)} KB`);
-      } else {
-        notification.error({
-          message: 'Prune failed',
-          description: result.error ?? 'Unknown error',
-        });
-      }
-    } catch (err) {
-      notification.error({
-        message: 'Prune failed',
         description: err instanceof Error ? err.message : String(err),
       });
     }
@@ -338,13 +290,11 @@ export function DesktopSettings() {
       <Card title="Utilities" size="small" style={{ marginBottom: 16 }}>
         <Space>
           <Button onClick={handleOpenConfigFolder}>Open Config Folder</Button>
-          <Button onClick={handleExportData}>Export Data</Button>
+          <Button disabled>Export Data</Button>
         </Space>
-        {exportPath && (
-          <Typography.Text style={{ display: 'block', marginTop: 8 }}>
-            Exported to: {exportPath}
-          </Typography.Text>
-        )}
+        <Typography.Text type="secondary" style={{ display: 'block', marginTop: 8 }}>
+          Exporting your data is not implemented yet.
+        </Typography.Text>
       </Card>
 
       <Card title="Keychain API key" size="small" style={{ marginBottom: 16 }}>
@@ -402,9 +352,9 @@ export function DesktopSettings() {
             <Button type="primary" onClick={handleSaveRetention}>
               Save
             </Button>
-            <Button onClick={handlePruneRetention}>Prune now</Button>
+            <Button disabled>Prune now</Button>
           </Space>
-          {pruneResult && <Typography.Text>{pruneResult}</Typography.Text>}
+          <Typography.Text type="secondary">Pruning is not implemented yet.</Typography.Text>
         </Space>
       </Card>
     </>
