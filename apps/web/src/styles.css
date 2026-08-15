@@ -4749,6 +4749,58 @@ textarea {
   margin-bottom: 0;
 }
 
+/* SettingTable — the roster/row-editor replacement for stacked row-boxes
+   (plan §6.2, §6.3, Phase 6). A real <thead>/<tbody>, not a Card. Header
+   treatment matches SectionHeading's micro scale; cells match settings-row's
+   body size. */
+.settings-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.settings-table-th {
+  text-align: left;
+  padding: 0 12px 8px 0;
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+  border-bottom: 1px solid var(--border-subtle);
+  vertical-align: bottom;
+}
+
+.settings-table-row {
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.settings-table-row:last-child {
+  border-bottom: none;
+}
+
+.settings-table-td {
+  padding: 12px 12px 12px 0;
+  vertical-align: top;
+  font-size: 13px;
+  color: var(--text-primary);
+}
+
+.settings-table-td-mono {
+  font-family: var(--font-mono, "Geist Mono", monospace);
+  font-variant-numeric: tabular-nums;
+}
+
+.settings-table-empty {
+  padding: 12px 0;
+  font-size: 13px;
+  color: var(--text-tertiary);
+}
+
+.settings-table-add {
+  width: 100%;
+  margin-top: 8px;
+}
+
 @media (max-width: 900px) {
   .settings {
     grid-template-columns: minmax(0, 1fr);

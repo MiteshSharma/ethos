@@ -6,23 +6,13 @@
 // two sections Phase 2 records as legitimately empty (`EXPECTED_EMPTY_SECTIONS`).
 // It renders a `SectionHeading` and the explanatory view, nothing forced in.
 
-import {
-  Button,
-  Form,
-  Input,
-  InputNumber,
-  Select,
-  Space,
-  Switch,
-  Tag,
-  Tooltip,
-  Typography,
-} from 'antd';
+import { Button, Form, Input, InputNumber, Select, Switch, Tag, Tooltip, Typography } from 'antd';
 import { rpc } from '../../../rpc';
 import { AdvancedBlock } from '../components/advanced';
 import { ROW_BOX_STYLE } from '../components/primitives';
 import { SectionHeading } from '../components/section-heading';
 import { SettingRow } from '../components/setting-row';
+import { SettingTable } from '../components/setting-table';
 import type { ProviderRow } from '../lib/rows';
 import { useSettingsPane } from '../pane-context';
 
@@ -43,123 +33,111 @@ export function ModelsPane() {
   return (
     <>
       <SectionHeading id="provider-chain">provider chain</SectionHeading>
-      {providerRows.map((row, idx) => {
-        const label = idx === 0 ? 'Primary' : `Fallback ${idx}`;
-        return (
-          <div
-            key={row._id}
-            style={{
-              border: '1px solid var(--ethos-border, #d9d9d9)',
-              borderRadius: 6,
-              padding: 12,
-              marginBottom: 12,
-            }}
-          >
-            <div
-              style={{
-                display: 'flex',
-                justifyContent: 'space-between',
-                alignItems: 'center',
-                marginBottom: 8,
-              }}
-            >
-              <Typography.Text strong style={{ fontSize: 13 }}>
-                {label}
-              </Typography.Text>
-              <Space size={4}>
-                {idx > 0 && (
-                  <Tooltip title="Move up">
-                    <Button size="small" onClick={() => moveRow(idx, -1)}>
-                      Up
-                    </Button>
-                  </Tooltip>
-                )}
-                {idx < providerRows.length - 1 && (
-                  <Tooltip title="Move down">
-                    <Button size="small" onClick={() => moveRow(idx, 1)}>
-                      Down
-                    </Button>
-                  </Tooltip>
-                )}
-                {idx > 0 && (
-                  <Tooltip title="Remove this fallback">
-                    <Button size="small" danger onClick={() => removeRow(idx)}>
-                      Remove
-                    </Button>
-                  </Tooltip>
-                )}
-              </Space>
-            </div>
-
-            <div style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
-              <div style={{ flex: 1 }}>
-                <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                  Provider
-                </Typography.Text>
-                <Input
-                  size="small"
-                  placeholder="anthropic | openrouter | openai-compat | ollama"
-                  value={row.provider}
-                  onChange={(e) => updateRow(idx, { provider: e.target.value })}
-                />
-              </div>
-              <div style={{ flex: 1 }}>
-                <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                  Model
-                </Typography.Text>
-                <Input
-                  size="small"
-                  placeholder="e.g. claude-opus-4-7"
-                  value={row.model}
-                  onChange={(e) => updateRow(idx, { model: e.target.value })}
-                />
-              </div>
-            </div>
-
-            <div style={{ marginBottom: 8 }}>
-              <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                API key
-              </Typography.Text>
-              <Input.Password
+      <SettingTable<ProviderRow>
+        rowKey={(row) => row._id}
+        rows={providerRows}
+        addLabel="Add fallback"
+        onAdd={addRow}
+        columns={[
+          {
+            key: 'provider',
+            header: 'Provider',
+            render: (row, idx) => (
+              <Input
                 size="small"
-                autoComplete="off"
-                placeholder={row.apiKeyPreview || 'paste new key'}
-                value={row.apiKey}
-                onChange={(e) => updateRow(idx, { apiKey: e.target.value, testStatus: 'idle' })}
+                placeholder="anthropic | openrouter | openai-compat | ollama"
+                value={row.provider}
+                onChange={(e) => updateRow(idx, { provider: e.target.value })}
               />
-              {row.apiKeyPreview && !row.apiKey && (
-                <Typography.Text type="secondary" style={{ fontSize: 11 }}>
-                  Active: {row.apiKeyPreview}
-                </Typography.Text>
-              )}
-            </div>
-
-            <AdvancedBlock>
-              <div style={{ marginBottom: 8 }}>
-                <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                  Base URL
-                </Typography.Text>
-                <Input
+            ),
+          },
+          {
+            key: 'model',
+            header: 'Model',
+            render: (row, idx) => (
+              <Input
+                size="small"
+                placeholder="e.g. claude-opus-4-7"
+                value={row.model}
+                onChange={(e) => updateRow(idx, { model: e.target.value })}
+              />
+            ),
+          },
+          {
+            key: 'key',
+            header: 'Key',
+            render: (row, idx) => (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                <Input.Password
                   size="small"
-                  placeholder="https://openrouter.ai/api/v1"
-                  value={row.baseUrl}
-                  onChange={(e) => updateRow(idx, { baseUrl: e.target.value })}
+                  autoComplete="off"
+                  placeholder={row.apiKeyPreview || 'paste new key'}
+                  value={row.apiKey}
+                  onChange={(e) => updateRow(idx, { apiKey: e.target.value, testStatus: 'idle' })}
+                />
+                {row.apiKeyPreview && !row.apiKey && (
+                  <Typography.Text type="secondary" style={{ fontSize: 11 }}>
+                    Active: {row.apiKeyPreview}
+                  </Typography.Text>
+                )}
+                <RowTestButton
+                  row={row}
+                  onStatusChange={(status, error) =>
+                    updateRow(idx, { testStatus: status, testError: error })
+                  }
                 />
               </div>
-            </AdvancedBlock>
-
-            <RowTestButton
-              row={row}
-              onStatusChange={(status, error) =>
-                updateRow(idx, { testStatus: status, testError: error })
-              }
-            />
-          </div>
-        );
-      })}
-      <Button type="dashed" size="small" onClick={addRow} style={{ width: '100%' }}>
-        Add fallback
-      </Button>
+            ),
+          },
+          {
+            key: 'order',
+            header: 'Order',
+            render: (_row, idx) => (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                <Typography.Text strong style={{ fontSize: 13 }}>
+                  {idx === 0 ? 'Primary' : `Fallback ${idx}`}
+                </Typography.Text>
+                <div style={{ display: 'flex', gap: 4 }}>
+                  {idx > 0 && (
+                    <Tooltip title="Move up">
+                      <Button size="small" onClick={() => moveRow(idx, -1)}>
+                        Up
+                      </Button>
+                    </Tooltip>
+                  )}
+                  {idx < providerRows.length - 1 && (
+                    <Tooltip title="Move down">
+                      <Button size="small" onClick={() => moveRow(idx, 1)}>
+                        Down
+                      </Button>
+                    </Tooltip>
+                  )}
+                  {idx > 0 && (
+                    <Tooltip title="Remove this fallback">
+                      <Button size="small" danger onClick={() => removeRow(idx)}>
+                        Remove
+                      </Button>
+                    </Tooltip>
+                  )}
+                </div>
+              </div>
+            ),
+          },
+          {
+            key: 'base-url',
+            header: 'Base URL',
+            advanced: true,
+            render: (row, idx) => (
+              <Input
+                size="small"
+                placeholder="https://openrouter.ai/api/v1"
+                value={row.baseUrl}
+                onChange={(e) => updateRow(idx, { baseUrl: e.target.value })}
+              />
+            ),
+          },
+        ]}
+      />
 
       <AdvancedBlock>
         <SectionHeading id="catalog-and-backends">catalog & backends</SectionHeading>

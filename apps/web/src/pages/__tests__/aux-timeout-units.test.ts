@@ -66,8 +66,12 @@ describe('auxiliary STT/TTS timeout units', () => {
   );
 
   it('the roster row it now matches is untouched — that field was always right', () => {
-    const at = page.indexOf('<RowLabel>Timeout (seconds)</RowLabel>');
-    expect(at, 'missing the roster timeout row').toBeGreaterThan(-1);
+    // Phase 6 (plan/phases/settings-navigation.md §9) moved the roster off
+    // stacked `<RowLabel>` rows onto a `SettingTable` column, so the field is
+    // now found by its column header rather than a `<RowLabel>` — the bounds
+    // and placeholder it guards are unchanged.
+    const at = page.indexOf("header: 'Timeout (seconds)'");
+    expect(at, 'missing the roster timeout column').toBeGreaterThan(-1);
     const input = page.slice(at, page.indexOf('/>', at));
     expect(input).toContain('min={1}');
     expect(input).toContain('max={3600}');

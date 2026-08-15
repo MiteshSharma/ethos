@@ -45,6 +45,7 @@ import { rpc } from '../../../rpc';
 import { ROW_BOX_STYLE, RowLabel } from '../components/primitives';
 import { SectionHeading } from '../components/section-heading';
 import { SettingRow } from '../components/setting-row';
+import { SettingTable } from '../components/setting-table';
 import { type ConfigGetData, type PersonalityOption, RECORD_KEY_RE } from '../lib/config-types';
 import { deliveryAge } from '../lib/deliveries';
 import type { FormShape } from '../lib/form-shape';
@@ -1096,56 +1097,78 @@ function VoiceProviderRoster({
         {spec.blurb} Each name becomes a {spec.configKey}.&lt;name&gt; key. Saving replaces the
         whole list.
       </Typography.Paragraph>
-      {rows.map((row, idx) => {
-        const nameValid = row.name === '' || RECORD_KEY_RE.test(row.name);
-        return (
-          <div key={row._id} style={ROW_BOX_STYLE}>
-            <div
-              style={{
-                display: 'flex',
-                justifyContent: 'space-between',
-                alignItems: 'center',
-                marginBottom: 8,
-              }}
-            >
-              <Typography.Text style={{ fontFamily: 'Geist Mono, monospace', fontSize: 12 }}>
-                {row.name || '<name>'}
-              </Typography.Text>
-              <Button size="small" danger onClick={() => remove(idx)}>
-                Remove
-              </Button>
-            </div>
-            <div style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
-              <div style={{ flex: 1 }}>
-                <RowLabel>Name</RowLabel>
+      <SettingTable<VoiceProviderRow>
+        rowKey={(row) => row._id}
+        rows={rows}
+        addLabel={spec.addLabel}
+        onAdd={add}
+        columns={[
+          {
+            key: 'name',
+            header: 'Name',
+            render: (row, idx) => {
+              const nameValid = row.name === '' || RECORD_KEY_RE.test(row.name);
+              return (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                  <Input
+                    size="small"
+                    status={nameValid ? undefined : 'error'}
+                    placeholder="studio"
+                    value={row.name}
+                    onChange={(e) => update(idx, { name: e.target.value })}
+                  />
+                  {nameValid ? null : (
+                    <Typography.Text type="danger" style={{ fontSize: 11 }}>
+                      This name becomes a {spec.configKey}.&lt;name&gt; key in config.yaml —
+                      letters, digits, hyphens and underscores only, or the loader will not see it.
+                    </Typography.Text>
+                  )}
+                </div>
+              );
+            },
+          },
+          {
+            key: 'provider',
+            header: 'Provider',
+            render: (row, idx) => (
+              <Select
+                size="small"
+                style={{ width: '100%' }}
+                value={row.provider}
+                onChange={(v: string) => update(idx, { provider: v })}
+                options={spec.providerOptions}
+              />
+            ),
+          },
+          {
+            key: 'model',
+            header: 'Model',
+            render: (row, idx) => (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
                 <Input
                   size="small"
-                  status={nameValid ? undefined : 'error'}
-                  placeholder="studio"
-                  value={row.name}
-                  onChange={(e) => update(idx, { name: e.target.value })}
+                  placeholder={spec.modelPlaceholder}
+                  value={row.model}
+                  onChange={(e) => update(idx, { model: e.target.value })}
                 />
-                {nameValid ? null : (
-                  <Typography.Text type="danger" style={{ fontSize: 11 }}>
-                    This name becomes a {spec.configKey}.&lt;name&gt; key in config.yaml — letters,
-                    digits, hyphens and underscores only, or the loader will not see it.
-                  </Typography.Text>
-                )}
+                {spec.audioOutputFields || spec.realtimeFields ? (
+                  <Input
+                    size="small"
+                    placeholder={
+                      spec.realtimeFields ? 'cedar (default voice)' : 'af_bella (default voice)'
+                    }
+                    value={row.voice}
+                    onChange={(e) => update(idx, { voice: e.target.value })}
+                  />
+                ) : null}
               </div>
-              <div style={{ width: 240 }}>
-                <RowLabel>Provider</RowLabel>
-                <Select
-                  size="small"
-                  style={{ width: '100%' }}
-                  value={row.provider}
-                  onChange={(v: string) => update(idx, { provider: v })}
-                  options={spec.providerOptions}
-                />
-              </div>
-            </div>
-            {row.provider === spec.commandProvider ? (
-              <div style={{ marginBottom: 8 }}>
-                <RowLabel>Command ({spec.commandPlaceholders})</RowLabel>
+            ),
+          },
+          {
+            key: 'base-url',
+            header: 'Base URL',
+            render: (row, idx) =>
+              row.provider === spec.commandProvider ? (
                 <Input
                   size="small"
                   style={{ fontFamily: 'Geist Mono, monospace' }}
@@ -1153,126 +1176,108 @@ function VoiceProviderRoster({
                   value={row.command}
                   onChange={(e) => update(idx, { command: e.target.value })}
                 />
-              </div>
-            ) : (
-              <div style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
-                <div style={{ flex: 1 }}>
-                  <RowLabel>Base URL</RowLabel>
+              ) : (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
                   <Input
                     size="small"
                     placeholder={spec.baseUrlPlaceholder}
                     value={row.baseUrl}
                     onChange={(e) => update(idx, { baseUrl: e.target.value })}
                   />
-                </div>
-                <div style={{ flex: 1 }}>
-                  <RowLabel>
-                    API key {row.apiKeyPreview ? `(current: ${row.apiKeyPreview})` : '(optional)'}
-                  </RowLabel>
                   <Input.Password
                     size="small"
-                    placeholder={row.apiKeyPreview ? 'Leave blank to keep' : 'Enter API key...'}
+                    placeholder={
+                      row.apiKeyPreview ? `Current: ${row.apiKeyPreview}` : 'API key (optional)'
+                    }
                     value={row.apiKey}
                     onChange={(e) => update(idx, { apiKey: e.target.value })}
                   />
                 </div>
-              </div>
-            )}
-            <div style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
-              <div style={{ flex: 1 }}>
-                <RowLabel>Model</RowLabel>
-                <Input
+              ),
+          },
+          {
+            key: 'timeout',
+            header: 'Timeout (seconds)',
+            render: (row, idx) =>
+              spec.timeoutField ? (
+                <InputNumber
                   size="small"
-                  placeholder={spec.modelPlaceholder}
-                  value={row.model}
-                  onChange={(e) => update(idx, { model: e.target.value })}
+                  style={{ width: '100%' }}
+                  min={1}
+                  max={3600}
+                  placeholder="120"
+                  value={row.timeout}
+                  onChange={(v) => update(idx, { timeout: v })}
                 />
-              </div>
-              {spec.audioOutputFields || spec.realtimeFields ? (
-                <div style={{ flex: 1 }}>
-                  <RowLabel>Default voice</RowLabel>
-                  <Input
-                    size="small"
-                    placeholder={spec.realtimeFields ? 'cedar' : 'af_bella'}
-                    value={row.voice}
-                    onChange={(e) => update(idx, { voice: e.target.value })}
-                  />
-                </div>
-              ) : null}
-            </div>
-            <div style={{ display: 'flex', gap: 8 }}>
-              {spec.audioOutputFields ? (
-                <div style={{ width: 140 }}>
-                  <RowLabel>Audio format</RowLabel>
-                  <Select
-                    size="small"
-                    allowClear
-                    style={{ width: '100%' }}
-                    placeholder="provider default"
-                    value={row.outputFormat || undefined}
-                    onChange={(v: string | undefined) => update(idx, { outputFormat: v ?? '' })}
-                    options={AUDIO_FORMATS.map((f) => ({ label: f, value: f }))}
-                  />
-                </div>
-              ) : null}
-              {spec.timeoutField ? (
-                <div style={{ width: 140 }}>
-                  <RowLabel>Timeout (seconds)</RowLabel>
-                  <InputNumber
-                    size="small"
-                    style={{ width: '100%' }}
-                    min={1}
-                    max={3600}
-                    placeholder="120"
-                    value={row.timeout}
-                    onChange={(v) => update(idx, { timeout: v })}
-                  />
-                </div>
-              ) : null}
-              {spec.realtimeFields ? (
-                <div style={{ width: 200 }}>
-                  <RowLabel>Rate (USD per minute)</RowLabel>
-                  <InputNumber
-                    size="small"
-                    style={{ width: '100%' }}
-                    min={0.001}
-                    max={100}
-                    step={0.01}
-                    placeholder="0.06"
-                    value={row.costPerMinuteUsd}
-                    onChange={(v) => update(idx, { costPerMinuteUsd: v })}
-                  />
-                  <Typography.Paragraph
-                    type="secondary"
-                    style={{ fontSize: 11, marginTop: 4, marginBottom: 0 }}
-                  >
-                    What this provider bills you per minute of audio. Ethos uses it to add up what a
-                    call has cost.
-                  </Typography.Paragraph>
-                </div>
-              ) : null}
-              {spec.audioOutputFields ? (
-                <div style={{ width: 160 }}>
-                  <RowLabel>Max text length</RowLabel>
-                  <InputNumber
-                    size="small"
-                    style={{ width: '100%' }}
-                    min={100}
-                    max={100000}
-                    step={100}
-                    placeholder="4096"
-                    value={row.maxTextLength}
-                    onChange={(v) => update(idx, { maxTextLength: v })}
-                  />
-                </div>
-              ) : null}
-            </div>
-          </div>
-        );
-      })}
-      <Button type="dashed" size="small" onClick={add} style={{ width: '100%' }}>
-        {spec.addLabel}
-      </Button>
+              ) : (
+                <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                  —
+                </Typography.Text>
+              ),
+          },
+          {
+            key: 'format-rate',
+            header: 'Format / rate',
+            render: (row, idx) => {
+              if (spec.audioOutputFields) {
+                return (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                    <Select
+                      size="small"
+                      allowClear
+                      style={{ width: '100%' }}
+                      placeholder="provider default"
+                      value={row.outputFormat || undefined}
+                      onChange={(v: string | undefined) => update(idx, { outputFormat: v ?? '' })}
+                      options={AUDIO_FORMATS.map((f) => ({ label: f, value: f }))}
+                    />
+                    <InputNumber
+                      size="small"
+                      style={{ width: '100%' }}
+                      min={100}
+                      max={100000}
+                      step={100}
+                      placeholder="4096 max chars"
+                      value={row.maxTextLength}
+                      onChange={(v) => update(idx, { maxTextLength: v })}
+                    />
+                  </div>
+                );
+              }
+              if (spec.realtimeFields) {
+                return (
+                  <Tooltip title="What this provider bills you per minute of audio. Ethos uses it to add up what a call has cost.">
+                    <InputNumber
+                      size="small"
+                      style={{ width: '100%' }}
+                      min={0.001}
+                      max={100}
+                      step={0.01}
+                      placeholder="0.06 USD/min"
+                      value={row.costPerMinuteUsd}
+                      onChange={(v) => update(idx, { costPerMinuteUsd: v })}
+                    />
+                  </Tooltip>
+                );
+              }
+              return (
+                <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                  —
+                </Typography.Text>
+              );
+            },
+          },
+          {
+            key: 'actions',
+            header: 'Actions',
+            render: (_row, idx) => (
+              <Button size="small" danger onClick={() => remove(idx)}>
+                Remove
+              </Button>
+            ),
+          },
+        ]}
+      />
     </div>
   );
 }
@@ -1352,26 +1357,16 @@ function VoiceBotRoster({
         <code>+1555*</code> catches a whole range. Saving replaces the whole list, and the rows are
         renumbered — a removed row is a deleted bot.
       </Typography.Paragraph>
-      {rows.map((row, idx) => (
-        <div key={row._id} style={ROW_BOX_STYLE}>
-          <div
-            style={{
-              display: 'flex',
-              justifyContent: 'space-between',
-              alignItems: 'center',
-              marginBottom: 8,
-            }}
-          >
-            <Typography.Text style={{ fontFamily: 'Geist Mono, monospace', fontSize: 12 }}>
-              {row.match || '<number>'}
-            </Typography.Text>
-            <Button size="small" danger onClick={() => remove(idx)}>
-              Remove
-            </Button>
-          </div>
-          <div style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
-            <div style={{ flex: 1 }}>
-              <RowLabel>Number or room</RowLabel>
+      <SettingTable<VoiceBotRow>
+        rowKey={(row) => row._id}
+        rows={rows}
+        addLabel="Add number"
+        onAdd={add}
+        columns={[
+          {
+            key: 'match',
+            header: 'Number or room',
+            render: (row, idx) => (
               <Input
                 size="small"
                 style={{ fontFamily: 'Geist Mono, monospace' }}
@@ -1379,9 +1374,12 @@ function VoiceBotRoster({
                 value={row.match}
                 onChange={(e) => update(idx, { match: e.target.value })}
               />
-            </div>
-            <div style={{ width: 140 }}>
-              <RowLabel>Answers as</RowLabel>
+            ),
+          },
+          {
+            key: 'bind-type',
+            header: 'Answers as',
+            render: (row, idx) => (
               <Select
                 size="small"
                 style={{ width: '100%' }}
@@ -1392,12 +1390,13 @@ function VoiceBotRoster({
                   { value: 'team', label: 'Team' },
                 ]}
               />
-            </div>
-          </div>
-          <div style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
-            <div style={{ flex: 1 }}>
-              <RowLabel>{row.bindType === 'team' ? 'Team name' : 'Personality'}</RowLabel>
-              {row.bindType === 'team' ? (
+            ),
+          },
+          {
+            key: 'bind-name',
+            header: 'Personality',
+            render: (row, idx) =>
+              row.bindType === 'team' ? (
                 <Input
                   size="small"
                   placeholder="support"
@@ -1414,10 +1413,12 @@ function VoiceBotRoster({
                   onChange={(v: string) => update(idx, { bindName: v })}
                   options={personalities.map((p) => ({ value: p.id, label: p.name }))}
                 />
-              )}
-            </div>
-            <div style={{ width: 200 }}>
-              <RowLabel>Bot id (optional)</RowLabel>
+              ),
+          },
+          {
+            key: 'id',
+            header: 'Bot id',
+            render: (row, idx) => (
               <Input
                 size="small"
                 style={{ fontFamily: 'Geist Mono, monospace' }}
@@ -1425,23 +1426,32 @@ function VoiceBotRoster({
                 value={row.id}
                 onChange={(e) => update(idx, { id: e.target.value })}
               />
-            </div>
-          </div>
-          <Tooltip title="Let a caller say /personality mid-call to reach a different agent on this number.">
-            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
-              <Switch
-                size="small"
-                checked={row.allowSlashSwitch}
-                onChange={(v) => update(idx, { allowSlashSwitch: v })}
-              />
-              <RowLabel>Allow switching agent mid-call</RowLabel>
-            </span>
-          </Tooltip>
-        </div>
-      ))}
-      <Button type="dashed" size="small" onClick={add} style={{ width: '100%' }}>
-        Add number
-      </Button>
+            ),
+          },
+          {
+            key: 'slash-switch',
+            header: 'Switch mid-call',
+            render: (row, idx) => (
+              <Tooltip title="Let a caller say /personality mid-call to reach a different agent on this number.">
+                <Switch
+                  size="small"
+                  checked={row.allowSlashSwitch}
+                  onChange={(v) => update(idx, { allowSlashSwitch: v })}
+                />
+              </Tooltip>
+            ),
+          },
+          {
+            key: 'actions',
+            header: 'Actions',
+            render: (_row, idx) => (
+              <Button size="small" danger onClick={() => remove(idx)}>
+                Remove
+              </Button>
+            ),
+          },
+        ]}
+      />
     </div>
   );
 }

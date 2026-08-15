@@ -9,8 +9,8 @@ import { RETENTION_DEFAULTS } from '@ethosagent/types';
 import { Button, Input, Select, Typography } from 'antd';
 import type { Dispatch, SetStateAction } from 'react';
 import { AdvancedBlock } from '../components/advanced';
-import { RowLabel } from '../components/primitives';
 import { SectionHeading } from '../components/section-heading';
+import { SettingTable } from '../components/setting-table';
 import {
   type PersonalityOption,
   RETENTION_SUBKEYS,
@@ -73,51 +73,65 @@ function RetentionEditor({
         is &quot;forever&quot; or a number plus d/w/m/y, e.g. 90d. Unlisted subkeys keep the
         built-in default; saving replaces the whole set.
       </Typography.Paragraph>
-      {rows.map((row, idx) => (
-        <div
-          key={row._id}
-          style={{ display: 'flex', gap: 8, marginBottom: 8, alignItems: 'flex-end' }}
-        >
-          <div style={{ flex: 1 }}>
-            <RowLabel>Scope</RowLabel>
-            <Select
-              size="small"
-              style={{ width: '100%' }}
-              value={row.personalityId}
-              onChange={(v: string) => update(idx, { personalityId: v })}
-              options={[
-                { value: '', label: 'Global' },
-                ...personalities.map((p) => ({ value: p.id, label: p.name })),
-              ]}
-            />
-          </div>
-          <div style={{ flex: 1 }}>
-            <RowLabel>Data</RowLabel>
-            <Select
-              size="small"
-              style={{ width: '100%' }}
-              value={row.subkey}
-              onChange={(v: RetentionSubkey) => update(idx, { subkey: v })}
-              options={RETENTION_SUBKEYS.map((s) => ({ value: s, label: s }))}
-            />
-          </div>
-          <div style={{ width: 110 }}>
-            <RowLabel>Duration</RowLabel>
-            <Input
-              size="small"
-              placeholder="90d"
-              value={row.duration}
-              onChange={(e) => update(idx, { duration: e.target.value })}
-            />
-          </div>
-          <Button size="small" danger onClick={() => remove(idx)}>
-            Remove
-          </Button>
-        </div>
-      ))}
-      <Button type="dashed" size="small" onClick={add} style={{ width: '100%' }}>
-        Add retention rule
-      </Button>
+      <SettingTable<RetentionRow>
+        rowKey={(row) => row._id}
+        rows={rows}
+        addLabel="Add retention rule"
+        onAdd={add}
+        emptyText="No retention rules yet."
+        columns={[
+          {
+            key: 'personality',
+            header: 'Personality',
+            render: (row, idx) => (
+              <Select
+                size="small"
+                style={{ width: '100%' }}
+                value={row.personalityId}
+                onChange={(v: string) => update(idx, { personalityId: v })}
+                options={[
+                  { value: '', label: 'Global' },
+                  ...personalities.map((p) => ({ value: p.id, label: p.name })),
+                ]}
+              />
+            ),
+          },
+          {
+            key: 'scope',
+            header: 'Scope',
+            render: (row, idx) => (
+              <Select
+                size="small"
+                style={{ width: '100%' }}
+                value={row.subkey}
+                onChange={(v: RetentionSubkey) => update(idx, { subkey: v })}
+                options={RETENTION_SUBKEYS.map((s) => ({ value: s, label: s }))}
+              />
+            ),
+          },
+          {
+            key: 'days',
+            header: 'Days',
+            render: (row, idx) => (
+              <Input
+                size="small"
+                placeholder="90d"
+                value={row.duration}
+                onChange={(e) => update(idx, { duration: e.target.value })}
+              />
+            ),
+          },
+          {
+            key: 'actions',
+            header: 'Actions',
+            render: (_row, idx) => (
+              <Button size="small" danger onClick={() => remove(idx)}>
+                Remove
+              </Button>
+            ),
+          },
+        ]}
+      />
     </>
   );
 }
