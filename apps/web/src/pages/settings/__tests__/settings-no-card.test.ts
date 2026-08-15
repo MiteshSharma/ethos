@@ -6,15 +6,16 @@ import { describe, expect, it } from 'vitest';
 // existence". The `Card` primitive is reserved for skill rows, cron rows and
 // task tiles — nothing in Settings qualifies.
 //
-// Scope widens phase by phase (3 → 4 → 5b) and is repo-final at Phase 7, when
-// it covers the rest of `settings/` and `DesktopSettings.tsx` too. Phase 3
-// only asserts the four Agent-group panes it converts, so this list is meant
-// to grow — later phases push their own files onto it rather than replacing
-// the technique. Phase 4 adds the Machine-group panes (`data.tsx`,
+// Scope widens phase by phase (3 → 4 → 5b → 8) and is repo-final at Phase 8,
+// when it covers the rest of `settings/` and `DesktopSettings.tsx` too. Phase
+// 3 only asserts the four Agent-group panes it converts, so this list is
+// meant to grow — later phases push their own files onto it rather than
+// replacing the technique. Phase 4 adds the Machine-group panes (`data.tsx`,
 // `security.tsx`, `developer.tsx`) and `DesktopSettings.tsx` — the latter is
 // NOT under `settings/panes/`; it is rendered by `panes/desktop.tsx` but its
 // controls still live at `pages/DesktopSettings.tsx` post-Phase-1, so it gets
-// its own describe block against its own path.
+// its own describe block against its own path. Phase 8 adds the remaining
+// two Channels-group panes, `automation.tsx` and `jobs.tsx`.
 //
 // Source-text technique, same as `settings-form-placement.test.ts` (T1) —
 // `apps/web` has no jsdom and this change deliberately does not add one.
@@ -33,6 +34,8 @@ const FILES = [
   'developer.tsx',
   'desktop.tsx',
   'voice.tsx',
+  'automation.tsx',
+  'jobs.tsx',
 ];
 
 describe('no <Card> in the converted panes', () => {

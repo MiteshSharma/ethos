@@ -1,13 +1,22 @@
 // Automation — quick commands, channel toolsets, scheduled passes. The
 // Automation card and the Latest digest section, moved verbatim from
-// `Settings.tsx` (§4.2 rows 13, 18).
+// `Settings.tsx` (§4.2 rows 13, 18), off `Card` onto `SectionHeading` (Phase 8).
+//
+// Quick commands and channel toolsets keep their existing per-row boxed
+// layout (`ROW_BOX_STYLE`) rather than moving to `SettingTable` — Phase 6's
+// table conversion already covered the rosters that needed it; this pass is
+// Card removal, not a second table pass. Latest digest is a read-only view
+// with its own "Generate now" action, not a form, so it renders in a raw
+// `<div>` instead of being forced into `SettingRow`'s shape (the same call
+// Phase 5a/5b made for non-form widgets). It stays under the
+// `scheduled-passes` heading, not a heading of its own — §4.2 row 18 places
+// it there, alongside the nightly/weekly schedule fields it is a readout of.
 
 import { ContentRenderer } from '@ethosagent/ui-components';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   App as AntApp,
   Button,
-  Card,
   Checkbox,
   Form,
   Input,
@@ -19,6 +28,8 @@ import {
 import type { Dispatch, SetStateAction } from 'react';
 import { rpc } from '../../../rpc';
 import { ROW_BOX_STYLE, RowLabel } from '../components/primitives';
+import { SectionHeading } from '../components/section-heading';
+import { SettingRow } from '../components/setting-row';
 import { nextRowId } from '../lib/row-id';
 import type { ChannelToolsetRow, QuickCommandRow } from '../lib/rows';
 import { useSettingsPane } from '../pane-context';
@@ -29,33 +40,31 @@ export function AutomationPane() {
 
   return (
     <>
-      <AutomationCard
-        qcRows={quickCommandRows}
-        setQcRows={setQuickCommandRows}
-        ctRows={channelToolsetRows}
-        setCtRows={setChannelToolsetRows}
-      />
+      <SectionHeading id="quick-commands">quick commands</SectionHeading>
+      <QuickCommandsEditor rows={quickCommandRows} setRows={setQuickCommandRows} />
+
+      <SectionHeading id="channel-toolsets">channel toolsets</SectionHeading>
+      <ChannelToolsetsEditor rows={channelToolsetRows} setRows={setChannelToolsetRows} />
+
+      <SectionHeading id="scheduled-passes">scheduled passes</SectionHeading>
+      <ScheduledPassesFields />
       <LatestDigestSection />
     </>
   );
 }
 
-function AutomationCard({
-  qcRows,
-  setQcRows,
-  ctRows,
-  setCtRows,
+function QuickCommandsEditor({
+  rows,
+  setRows,
 }: {
-  qcRows: QuickCommandRow[];
-  setQcRows: Dispatch<SetStateAction<QuickCommandRow[]>>;
-  ctRows: ChannelToolsetRow[];
-  setCtRows: Dispatch<SetStateAction<ChannelToolsetRow[]>>;
+  rows: QuickCommandRow[];
+  setRows: Dispatch<SetStateAction<QuickCommandRow[]>>;
 }) {
-  const updateQc = (index: number, patch: Partial<QuickCommandRow>) =>
-    setQcRows((prev) => prev.map((r, i) => (i === index ? { ...r, ...patch } : r)));
-  const removeQc = (index: number) => setQcRows((prev) => prev.filter((_, i) => i !== index));
-  const addQc = () =>
-    setQcRows((prev) => [
+  const update = (index: number, patch: Partial<QuickCommandRow>) =>
+    setRows((prev) => prev.map((r, i) => (i === index ? { ...r, ...patch } : r)));
+  const remove = (index: number) => setRows((prev) => prev.filter((_, i) => i !== index));
+  const add = () =>
+    setRows((prev) => [
       ...prev,
       {
         _id: nextRowId(),
@@ -68,22 +77,13 @@ function AutomationCard({
       },
     ]);
 
-  const updateCt = (index: number, patch: Partial<ChannelToolsetRow>) =>
-    setCtRows((prev) => prev.map((r, i) => (i === index ? { ...r, ...patch } : r)));
-  const removeCt = (index: number) => setCtRows((prev) => prev.filter((_, i) => i !== index));
-  const addCt = () =>
-    setCtRows((prev) => [...prev, { _id: nextRowId(), platform: '', toolsets: [] }]);
-
   return (
-    <Card title="Automation" size="small" style={{ marginBottom: 16 }}>
-      <Typography.Text strong style={{ fontSize: 13 }}>
-        Quick commands
-      </Typography.Text>
-      <Typography.Paragraph type="secondary" style={{ marginTop: 4 }}>
+    <>
+      <Typography.Paragraph type="secondary" style={{ marginTop: 0 }}>
         Deterministic /name shortcuts (quick_commands.&lt;name&gt;) answered without the LLM — a
         canned reply or an operator-authored shell command. Saving replaces the whole set.
       </Typography.Paragraph>
-      {qcRows.map((row, idx) => (
+      {rows.map((row, idx) => (
         <div key={row._id} style={ROW_BOX_STYLE}>
           <div
             style={{
@@ -96,7 +96,7 @@ function AutomationCard({
             <Typography.Text style={{ fontFamily: 'Geist Mono, monospace', fontSize: 12 }}>
               /{row.name || '<name>'}
             </Typography.Text>
-            <Button size="small" danger onClick={() => removeQc(idx)}>
+            <Button size="small" danger onClick={() => remove(idx)}>
               Remove
             </Button>
           </div>
@@ -108,7 +108,7 @@ function AutomationCard({
                 prefix="/"
                 placeholder="status"
                 value={row.name}
-                onChange={(e) => updateQc(idx, { name: e.target.value })}
+                onChange={(e) => update(idx, { name: e.target.value })}
               />
             </div>
             <div style={{ width: 180 }}>
@@ -117,7 +117,7 @@ function AutomationCard({
                 size="small"
                 style={{ width: '100%' }}
                 value={row.type}
-                onChange={(v: 'exec' | 'reply') => updateQc(idx, { type: v })}
+                onChange={(v: 'exec' | 'reply') => update(idx, { type: v })}
                 options={[
                   { value: 'reply', label: 'reply — canned text' },
                   { value: 'exec', label: 'exec — shell command' },
@@ -136,7 +136,7 @@ function AutomationCard({
                   style={{ fontFamily: 'Geist Mono, monospace' }}
                   placeholder="uptime"
                   value={row.command}
-                  onChange={(e) => updateQc(idx, { command: e.target.value })}
+                  onChange={(e) => update(idx, { command: e.target.value })}
                 />
               </>
             ) : (
@@ -146,7 +146,7 @@ function AutomationCard({
                   size="small"
                   placeholder="All systems nominal."
                   value={row.reply}
-                  onChange={(e) => updateQc(idx, { reply: e.target.value })}
+                  onChange={(e) => update(idx, { reply: e.target.value })}
                 />
               </>
             )}
@@ -155,7 +155,7 @@ function AutomationCard({
             <div>
               <Checkbox
                 checked={row.gateway}
-                onChange={(e) => updateQc(idx, { gateway: e.target.checked })}
+                onChange={(e) => update(idx, { gateway: e.target.checked })}
               >
                 <span style={{ fontSize: 12 }}>Expose on channels</span>
               </Checkbox>
@@ -171,30 +171,39 @@ function AutomationCard({
                 style={{ width: '100%' }}
                 placeholder="telegram, slack"
                 value={row.channels}
-                onChange={(v: string[]) => updateQc(idx, { channels: v })}
+                onChange={(v: string[]) => update(idx, { channels: v })}
                 disabled={!row.gateway}
               />
             </div>
           </div>
         </div>
       ))}
-      <Button
-        type="dashed"
-        size="small"
-        onClick={addQc}
-        style={{ width: '100%', marginBottom: 16 }}
-      >
+      <Button type="dashed" size="small" onClick={add} style={{ width: '100%', marginBottom: 16 }}>
         Add quick command
       </Button>
+    </>
+  );
+}
 
-      <Typography.Text strong style={{ fontSize: 13 }}>
-        Channel toolsets
-      </Typography.Text>
-      <Typography.Paragraph type="secondary" style={{ marginTop: 4 }}>
+function ChannelToolsetsEditor({
+  rows,
+  setRows,
+}: {
+  rows: ChannelToolsetRow[];
+  setRows: Dispatch<SetStateAction<ChannelToolsetRow[]>>;
+}) {
+  const update = (index: number, patch: Partial<ChannelToolsetRow>) =>
+    setRows((prev) => prev.map((r, i) => (i === index ? { ...r, ...patch } : r)));
+  const remove = (index: number) => setRows((prev) => prev.filter((_, i) => i !== index));
+  const add = () => setRows((prev) => [...prev, { _id: nextRowId(), platform: '', toolsets: [] }]);
+
+  return (
+    <>
+      <Typography.Paragraph type="secondary" style={{ marginTop: 0 }}>
         Per-platform toolset narrowing (channel_toolsets.&lt;platform&gt;). Messages from that
         platform see only the listed toolsets. Saving replaces the whole set.
       </Typography.Paragraph>
-      {ctRows.map((row, idx) => (
+      {rows.map((row, idx) => (
         <div
           key={row._id}
           style={{ display: 'flex', gap: 8, marginBottom: 8, alignItems: 'flex-end' }}
@@ -205,7 +214,7 @@ function AutomationCard({
               size="small"
               placeholder="telegram"
               value={row.platform}
-              onChange={(e) => updateCt(idx, { platform: e.target.value })}
+              onChange={(e) => update(idx, { platform: e.target.value })}
             />
           </div>
           <div style={{ flex: 1 }}>
@@ -219,56 +228,69 @@ function AutomationCard({
               style={{ width: '100%' }}
               placeholder="memory, web"
               value={row.toolsets}
-              onChange={(v: string[]) => updateCt(idx, { toolsets: v })}
+              onChange={(v: string[]) => update(idx, { toolsets: v })}
             />
           </div>
-          <Button size="small" danger onClick={() => removeCt(idx)}>
+          <Button size="small" danger onClick={() => remove(idx)}>
             Remove
           </Button>
         </div>
       ))}
-      <Button
-        type="dashed"
-        size="small"
-        onClick={addCt}
-        style={{ width: '100%', marginBottom: 16 }}
-      >
+      <Button type="dashed" size="small" onClick={add} style={{ width: '100%', marginBottom: 16 }}>
         Add platform
       </Button>
+    </>
+  );
+}
 
-      <Form.Item
+function ScheduledPassesFields() {
+  return (
+    <>
+      <SettingRow
         label="Nightly learning pass"
-        name={['nightlyPass', 'enabled']}
-        valuePropName="checked"
-        extra="Governed-learning pass that runs overnight (nightlyPass.enabled, default off)."
+        formName="nightlyPass.enabled"
+        help="Governed-learning pass that runs overnight (nightlyPass.enabled, default off)."
       >
-        <Switch />
-      </Form.Item>
+        <Form.Item
+          name={['nightlyPass', 'enabled']}
+          valuePropName="checked"
+          style={{ marginBottom: 0 }}
+        >
+          <Switch />
+        </Form.Item>
+      </SettingRow>
       <Form.Item
         noStyle
         shouldUpdate={(prev, cur) => prev.nightlyPass?.enabled !== cur.nightlyPass?.enabled}
       >
         {({ getFieldValue }) =>
           getFieldValue(['nightlyPass', 'enabled']) ? (
-            <Form.Item
+            <SettingRow
               label="Nightly pass schedule"
-              name={['nightlyPass', 'cron']}
-              extra="5-field cron (nightlyPass.cron). Blank = 0 3 * * *."
+              formName="nightlyPass.cron"
+              help="5-field cron (nightlyPass.cron). Blank = 0 3 * * *."
             >
-              <Input style={{ fontFamily: 'Geist Mono, monospace' }} placeholder="0 3 * * *" />
-            </Form.Item>
+              <Form.Item name={['nightlyPass', 'cron']} style={{ marginBottom: 0 }}>
+                <Input style={{ fontFamily: 'Geist Mono, monospace' }} placeholder="0 3 * * *" />
+              </Form.Item>
+            </SettingRow>
           ) : null
         }
       </Form.Item>
 
-      <Form.Item
+      <SettingRow
         label="Weekly digest"
-        name={['weeklyDigest', 'enabled']}
-        valuePropName="checked"
-        extra="Weekly governed-learning digest (weeklyDigest.enabled, default off)."
+        formName="weeklyDigest.enabled"
+        help="Weekly governed-learning digest (weeklyDigest.enabled, default off)."
       >
-        <Switch />
-      </Form.Item>
+        <Form.Item
+          name={['weeklyDigest', 'enabled']}
+          valuePropName="checked"
+          style={{ marginBottom: 0 }}
+        >
+          <Switch />
+        </Form.Item>
+      </SettingRow>
       <Form.Item
         noStyle
         shouldUpdate={(prev, cur) => prev.weeklyDigest?.enabled !== cur.weeklyDigest?.enabled}
@@ -276,38 +298,43 @@ function AutomationCard({
         {({ getFieldValue }) =>
           getFieldValue(['weeklyDigest', 'enabled']) ? (
             <>
-              <Form.Item
+              <SettingRow
                 label="Digest schedule"
-                name={['weeklyDigest', 'cron']}
-                extra="5-field cron (weeklyDigest.cron). Blank = 0 9 * * 1."
+                formName="weeklyDigest.cron"
+                help="5-field cron (weeklyDigest.cron). Blank = 0 9 * * 1."
               >
-                <Input style={{ fontFamily: 'Geist Mono, monospace' }} placeholder="0 9 * * 1" />
-              </Form.Item>
-              <Form.Item
+                <Form.Item name={['weeklyDigest', 'cron']} style={{ marginBottom: 0 }}>
+                  <Input style={{ fontFamily: 'Geist Mono, monospace' }} placeholder="0 9 * * 1" />
+                </Form.Item>
+              </SettingRow>
+              <SettingRow
                 label="Digest recipients"
-                name={['weeklyDigest', 'recipients']}
-                extra="Email allowlist for --email delivery (weeklyDigest.recipients). Press Enter after each address."
+                formName="weeklyDigest.recipients"
+                help="Email allowlist for --email delivery (weeklyDigest.recipients). Press Enter after each address."
               >
-                <Select
-                  mode="tags"
-                  open={false}
-                  suffixIcon={null}
-                  tokenSeparators={[',']}
-                  placeholder="you@example.com"
-                />
-              </Form.Item>
+                <Form.Item name={['weeklyDigest', 'recipients']} style={{ marginBottom: 0 }}>
+                  <Select
+                    mode="tags"
+                    open={false}
+                    suffixIcon={null}
+                    tokenSeparators={[',']}
+                    placeholder="you@example.com"
+                  />
+                </Form.Item>
+              </SettingRow>
             </>
           ) : null
         }
       </Form.Item>
-    </Card>
+    </>
   );
 }
 
 // ---------------------------------------------------------------------------
 // Latest digest — read-only view of the most recent weekly governed-learning
 // report. Generation runs out-of-band (weekly cron / `ethos digest run`); a
-// "generate now" action is deferred.
+// "generate now" action is deferred. Not a `SettingRow` — a read-only view
+// with its own action button, not a single labelled control.
 // ---------------------------------------------------------------------------
 
 function formatDigestDate(iso: string): string {
@@ -351,16 +378,22 @@ function LatestDigestSection() {
   });
 
   return (
-    <Card
-      title="Latest digest"
-      size="small"
-      style={{ maxWidth: 640, marginTop: 32 }}
-      extra={
+    <div style={{ maxWidth: 640, marginTop: 24 }}>
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          marginBottom: 8,
+        }}
+      >
+        <Typography.Text strong style={{ fontSize: 13 }}>
+          Latest digest
+        </Typography.Text>
         <Button size="small" loading={generateMut.isPending} onClick={() => generateMut.mutate()}>
           Generate now
         </Button>
-      }
-    >
+      </div>
       {digestQuery.isLoading ? (
         <div style={{ display: 'grid', placeItems: 'center', height: 80 }}>
           <Spin />
@@ -383,6 +416,6 @@ function LatestDigestSection() {
           <ContentRenderer content={digestQuery.data.markdown} format="markdown" />
         </div>
       )}
-    </Card>
+    </div>
   );
 }

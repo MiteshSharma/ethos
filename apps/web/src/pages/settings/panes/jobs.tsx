@@ -1,47 +1,75 @@
 // Background jobs — limits, budgets, lifecycle. The `background.*` sub-agent
-// pool caps, moved verbatim from `Settings.tsx` (§4.2 row 14).
+// pool caps, moved verbatim from `Settings.tsx` (§4.2 row 14), off `Card`
+// onto `SettingRow` / `SectionHeading` (Phase 8).
+//
+// All three sections are advanced end to end (`SETTINGS_INDEX`), so with the
+// toggle off this pane used to render one empty Card — a rail row you could
+// click into and find blank. Each heading stays visible; only the controls
+// dim (D10), the same treatment `data.tsx`'s "rules" section uses for a
+// section that is advanced from top to bottom.
 
-import { Card, Form, InputNumber, Switch } from 'antd';
+import { Form, InputNumber, Switch } from 'antd';
 import { AdvancedBlock } from '../components/advanced';
+import { SectionHeading } from '../components/section-heading';
+import { SettingRow } from '../components/setting-row';
 import type { FormShape } from '../lib/form-shape';
 
 export function JobsPane() {
-  // The whole category is advanced-gated, so with the toggle off this pane used
-  // to render NOTHING — a rail row you could click into and find empty. It dims
-  // now (D10), which is what makes the row honest.
   return (
-    <AdvancedBlock>
-      <BackgroundJobsCard />
-    </AdvancedBlock>
+    <>
+      <SectionHeading id="limits">limits</SectionHeading>
+      <AdvancedBlock>
+        <LimitsFields />
+      </AdvancedBlock>
+
+      <SectionHeading id="budgets">budgets</SectionHeading>
+      <AdvancedBlock>
+        <BudgetsFields />
+      </AdvancedBlock>
+
+      <SectionHeading id="lifecycle">lifecycle</SectionHeading>
+      <AdvancedBlock>
+        <LifecycleFields />
+      </AdvancedBlock>
+    </>
   );
 }
 
-function BackgroundJobsCard() {
-  const numberField = (
-    name: keyof FormShape['background'],
-    label: string,
-    extra: string,
-    opts: { min: number; integer?: boolean } = { min: 0, integer: true },
-  ) => (
-    <Form.Item label={label} name={['background', name]} extra={extra}>
-      <InputNumber
-        min={opts.min}
-        {...(opts.integer === false ? {} : { precision: 0 })}
-        style={{ width: '100%' }}
-      />
-    </Form.Item>
-  );
-
+function numberField(
+  name: keyof FormShape['background'],
+  label: string,
+  extra: string,
+  opts: { min: number; integer?: boolean } = { min: 0, integer: true },
+) {
   return (
-    <Card title="Background jobs" size="small" style={{ marginBottom: 16 }}>
-      <Form.Item
-        label="Enable background sub-agents"
-        name={['background', 'enabled']}
-        valuePropName="checked"
-        extra="Allow spawning background jobs (background.enabled, default off)."
-      >
-        <Switch />
+    <SettingRow label={label} formName={`background.${name}`} help={extra}>
+      <Form.Item name={['background', name]} style={{ marginBottom: 0 }}>
+        <InputNumber
+          min={opts.min}
+          {...(opts.integer === false ? {} : { precision: 0 })}
+          style={{ width: '100%' }}
+        />
       </Form.Item>
+    </SettingRow>
+  );
+}
+
+function LimitsFields() {
+  return (
+    <>
+      <SettingRow
+        label="Enable background sub-agents"
+        formName="background.enabled"
+        help="Allow spawning background jobs (background.enabled, default off)."
+      >
+        <Form.Item
+          name={['background', 'enabled']}
+          valuePropName="checked"
+          style={{ marginBottom: 0 }}
+        >
+          <Switch />
+        </Form.Item>
+      </SettingRow>
       {numberField(
         'maxConcurrentJobs',
         'Max concurrent jobs',
@@ -60,6 +88,13 @@ function BackgroundJobsCard() {
         'Cap per personality (background.max_jobs_per_personality, default 5).',
         { min: 1 },
       )}
+    </>
+  );
+}
+
+function BudgetsFields() {
+  return (
+    <>
       {numberField(
         'defaultMaxCostUsd',
         'Default job budget (USD)',
@@ -72,6 +107,13 @@ function BackgroundJobsCard() {
         'Total background spend per root session (background.max_root_background_usd, default 5).',
         { min: 0, integer: false },
       )}
+    </>
+  );
+}
+
+function LifecycleFields() {
+  return (
+    <>
       {numberField(
         'queuedTtlMs',
         'Queued TTL (ms)',
@@ -96,6 +138,6 @@ function BackgroundJobsCard() {
         'Days finished job records are kept (background.retention_days, default 30).',
         { min: 1 },
       )}
-    </Card>
+    </>
   );
 }
