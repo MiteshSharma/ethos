@@ -32,6 +32,7 @@ import { CategoryRail } from './CategoryRail';
 import { buildConfigPatch, type SettingsRows } from './lib/build-config-patch';
 import type { ConfigUpdatePatch } from './lib/config-types';
 import { auxFormFromConfig, type FormShape } from './lib/form-shape';
+import { parseSettingsPath } from './lib/parse-settings-path';
 import { resolveSettingsRoute } from './lib/resolve-settings-route';
 import {
   type ChannelToolsetRow,
@@ -396,7 +397,7 @@ export function SettingsShell() {
   // The rail's active row comes from the URL, not from the child route: a layout
   // route's `useParams` only sees the params its OWN path declares, and
   // `:category` belongs to the child.
-  const [, category, section] = pathname.split('/');
+  const { category, section } = parseSettingsPath(pathname);
   const categories = visibleCategories(isDesktop);
   const resolved = resolveSettingsRoute({ category, section }, categories);
 
