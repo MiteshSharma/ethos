@@ -1,11 +1,13 @@
 // Voice — how it talks, speech-to-text, text-to-speech, realtime, barge-in,
 // trunk, LiveKit, numbers, hardening, wake routes, channels that speak, voice
 // notes, call appearance. Moved verbatim from `Settings.tsx` (§4.2 row 9 plus
-// `VoiceTelephonySections` and `WakePanel`). Phase 5a (this change) converts
-// how it talks / speech-to-text / text-to-speech / realtime / barge-in / voice
-// notes / call appearance off `Card` onto `SettingRow` / `SectionHeading`;
-// trunk, LiveKit, numbers, hardening, wake routes and channels that speak are
-// Phase 5b's.
+// `VoiceTelephonySections` and `WakePanel`). Phase 5a converted how it talks /
+// speech-to-text / text-to-speech / realtime / barge-in / voice notes / call
+// appearance off `Card` onto `SettingRow` / `SectionHeading`; Phase 5b (this
+// change) converts trunk, LiveKit, numbers, hardening, wake routes and
+// channels that speak the same way, and moves the outbound egress gate
+// (`voiceEgressGate` / `voiceTrustedPlugins`) into Hardening — "Inbound
+// hardening" was a lie once an outbound control had to live there too.
 //
 // `voice.artifacts.*` belongs in Data & retention and deliberately stays here
 // for this change (D12) — the move is scheduled, not forgotten.
@@ -40,7 +42,7 @@ import {
   validateCommandTemplate,
 } from '../../../lib/voice-command-template';
 import { rpc } from '../../../rpc';
-import { ROW_BOX_STYLE, RowLabel, VoiceSectionLabel } from '../components/primitives';
+import { ROW_BOX_STYLE, RowLabel } from '../components/primitives';
 import { SectionHeading } from '../components/section-heading';
 import { SettingRow } from '../components/setting-row';
 import { type ConfigGetData, type PersonalityOption, RECORD_KEY_RE } from '../lib/config-types';
@@ -927,36 +929,43 @@ export function VoicePane() {
           Reset to defaults
         </Button>
       </div>
-      <Form.Item
-        name="voiceDefaultMode"
+      <SectionHeading id="channels-that-speak">channels that speak</SectionHeading>
+      <SettingRow
         label="Voice replies on channels"
-        extra="Where a new conversation starts. Off never speaks; Mirror inbound speaks when it was spoken to; All speaks every reply. `/voice <mode>` still overrides it per conversation."
+        formName="voiceDefaultMode"
+        help="Where a new conversation starts. Off never speaks; Mirror inbound speaks when it was spoken to; All speaks every reply. `/voice <mode>` still overrides it per conversation."
       >
-        <Select
-          allowClear
-          placeholder="Mirror inbound (default)"
-          options={[
-            { label: 'Off — never speak', value: 'off' },
-            { label: 'Mirror inbound — speak when spoken to', value: 'mirror_inbound' },
-            { label: 'All — speak every reply', value: 'all' },
-          ]}
-        />
-      </Form.Item>
-      <VoiceSectionLabel>Channels that speak</VoiceSectionLabel>
+        <Form.Item name="voiceDefaultMode" style={{ marginBottom: 0 }}>
+          <Select
+            allowClear
+            placeholder="Mirror inbound (default)"
+            options={[
+              { label: 'Off — never speak', value: 'off' },
+              { label: 'Mirror inbound — speak when spoken to', value: 'mirror_inbound' },
+              { label: 'All — speak every reply', value: 'all' },
+            ]}
+          />
+        </Form.Item>
+      </SettingRow>
       <Typography.Paragraph type="secondary" style={{ marginTop: 0, fontSize: 13 }}>
         A channel switched off never speaks, whatever mode the conversation is in — turning a
         channel off is a deployment decision and outranks <code>/voice all</code> in one of its
         lanes. A channel left on inherits the default above.
       </Typography.Paragraph>
       {VOICE_CHANNELS.map((channel) => (
-        <Form.Item
+        <SettingRow
           key={channel}
-          name={['voiceChannelTtsOut', channel]}
-          valuePropName="checked"
           label={VOICE_CHANNEL_LABELS[channel]}
+          formName={`voiceChannelTtsOut.${channel}`}
         >
-          <Switch />
-        </Form.Item>
+          <Form.Item
+            name={['voiceChannelTtsOut', channel]}
+            valuePropName="checked"
+            style={{ marginBottom: 0 }}
+          >
+            <Switch />
+          </Form.Item>
+        </SettingRow>
       ))}
       <SectionHeading id="voice-notes">voice notes</SectionHeading>
       <SettingRow
@@ -1015,43 +1024,13 @@ export function VoicePane() {
           setBotRows={setVoiceBotRows}
         />
       ) : null}
-      <VoiceSectionLabel>Wake routes</VoiceSectionLabel>
+      <SectionHeading id="wake-routes">wake routes</SectionHeading>
       <Typography.Paragraph type="secondary" style={{ marginTop: 0, fontSize: 13 }}>
         Which phrase wakes which personality, on every connected satellite. Saving pushes the table
         to them without a restart. Below the routes: the microphones themselves, and whether each is
         actually listening.
       </Typography.Paragraph>
       <WakePanel />
-      <Form.Item
-        name="voiceEgressGate"
-        valuePropName="checked"
-        label="Restrict voice egress"
-        extra="Only providers that run on this machine, plus the ones you list below, may receive audio. Off = any configured provider may."
-      >
-        <Switch />
-      </Form.Item>
-      <Form.Item noStyle shouldUpdate={(prev, cur) => prev.voiceEgressGate !== cur.voiceEgressGate}>
-        {({ getFieldValue }) =>
-          getFieldValue('voiceEgressGate') ? (
-            <Form.Item
-              name="voiceTrustedPlugins"
-              label="Trusted voice providers"
-              extra="Provider ids allowed to send audio off this machine (e.g. openai-tts, elevenlabs). Local providers always pass. Clearing the list turns the restriction off."
-            >
-              <Select
-                mode="tags"
-                tokenSeparators={[',']}
-                placeholder="openai-tts"
-                options={[
-                  { label: 'openai-tts', value: 'openai-tts' },
-                  { label: 'openai-stt', value: 'openai-stt' },
-                  { label: 'groq-stt', value: 'groq-stt' },
-                ]}
-              />
-            </Form.Item>
-          ) : null
-        }
-      </Form.Item>
     </>
   );
 }
@@ -1480,24 +1459,26 @@ function VoiceTelephonySections({
 }) {
   return (
     <>
-      <VoiceSectionLabel>Telephony</VoiceSectionLabel>
+      <SectionHeading id="trunk">trunk</SectionHeading>
       <FirstCallInvitation config={config} />
       <Typography.Paragraph type="secondary" style={{ marginTop: 0, fontSize: 13 }}>
         The SIP trunk your number is attached to. Clearing the provider removes the whole trunk
         block — a trunk with a provider but no trunk id will not load, so the two are saved together
         or not at all.
       </Typography.Paragraph>
-      <Form.Item
-        name="voiceTrunkProvider"
+      <SettingRow
         label="Trunk provider"
-        extra="Selects the inbound webhook signature scheme. Clear it to turn telephony off."
+        formName="voiceTrunkProvider"
+        help="Selects the inbound webhook signature scheme. Clear it to turn telephony off."
       >
-        <Select
-          allowClear
-          placeholder="No trunk — telephony off"
-          options={TRUNK_PROVIDERS.map((p) => ({ value: p, label: p }))}
-        />
-      </Form.Item>
+        <Form.Item name="voiceTrunkProvider" style={{ marginBottom: 0 }}>
+          <Select
+            allowClear
+            placeholder="No trunk — telephony off"
+            options={TRUNK_PROVIDERS.map((p) => ({ value: p, label: p }))}
+          />
+        </Form.Item>
+      </SettingRow>
       <Form.Item
         noStyle
         shouldUpdate={(prev, cur) => prev.voiceTrunkProvider !== cur.voiceTrunkProvider}
@@ -1505,207 +1486,281 @@ function VoiceTelephonySections({
         {({ getFieldValue }) =>
           getFieldValue('voiceTrunkProvider') ? (
             <>
-              <Form.Item
-                name="voiceTrunkId"
+              <SettingRow
                 label="Trunk id"
-                extra="The SIP trunk the number is attached to. Required whenever a provider is set."
+                formName="voiceTrunkId"
+                help="The SIP trunk the number is attached to. Required whenever a provider is set."
               >
-                <Input placeholder="ST_abc123" />
-              </Form.Item>
-              <Form.Item
-                name="voiceTrunkFromNumber"
+                <Form.Item name="voiceTrunkId" style={{ marginBottom: 0 }}>
+                  <Input placeholder="ST_abc123" />
+                </Form.Item>
+              </SettingRow>
+              <SettingRow
                 label="Caller ID (outbound)"
-                extra="E.164 number presented when the agent places a call."
+                formName="voiceTrunkFromNumber"
+                help="E.164 number presented when the agent places a call."
               >
-                <Input placeholder="+15551234567" />
-              </Form.Item>
-              <Form.Item
-                name="voiceTrunkUsername"
+                <Form.Item name="voiceTrunkFromNumber" style={{ marginBottom: 0 }}>
+                  <Input placeholder="+15551234567" />
+                </Form.Item>
+              </SettingRow>
+              <SettingRow
                 label="SIP username"
-                extra="Registrar / auth username, if your trunk uses one."
+                formName="voiceTrunkUsername"
+                help="Registrar / auth username, if your trunk uses one."
               >
-                <Input placeholder="Optional" />
-              </Form.Item>
-              <Form.Item
-                name="voiceTrunkPassword"
+                <Form.Item name="voiceTrunkUsername" style={{ marginBottom: 0 }}>
+                  <Input placeholder="Optional" />
+                </Form.Item>
+              </SettingRow>
+              <SettingRow
                 label="SIP password"
-                extra={
+                formName="voiceTrunkPassword"
+                help={
                   config.voiceTrunkPasswordPreview
                     ? `Current: ${config.voiceTrunkPasswordPreview}. Leave blank to keep it.`
                     : 'Stored write-only — it is never sent back to this page.'
                 }
               >
-                <Input.Password
-                  placeholder={
-                    config.voiceTrunkPasswordPreview ? 'Leave blank to keep' : 'Enter password...'
-                  }
-                />
-              </Form.Item>
-              <Form.Item
-                name="voiceTrunkWebhookSecret"
+                <Form.Item name="voiceTrunkPassword" style={{ marginBottom: 0 }}>
+                  <Input.Password
+                    placeholder={
+                      config.voiceTrunkPasswordPreview ? 'Leave blank to keep' : 'Enter password...'
+                    }
+                  />
+                </Form.Item>
+              </SettingRow>
+              <SettingRow
                 label="Webhook secret"
-                extra={
+                formName="voiceTrunkWebhookSecret"
+                help={
                   config.voiceTrunkWebhookSecretPreview
                     ? `Current: ${config.voiceTrunkWebhookSecretPreview}. Leave blank to keep it. This one authenticates the TRUNK to us on an inbound call, so it rotates on its own schedule.`
                     : 'Authenticates the trunk to us on an inbound call — it rotates independently of the SIP password.'
                 }
               >
-                <Input.Password
-                  placeholder={
-                    config.voiceTrunkWebhookSecretPreview
-                      ? 'Leave blank to keep'
-                      : 'Enter secret...'
-                  }
-                />
-              </Form.Item>
-              <Form.Item
-                name="voiceTrunkWebhookPath"
+                <Form.Item name="voiceTrunkWebhookSecret" style={{ marginBottom: 0 }}>
+                  <Input.Password
+                    placeholder={
+                      config.voiceTrunkWebhookSecretPreview
+                        ? 'Leave blank to keep'
+                        : 'Enter secret...'
+                    }
+                  />
+                </Form.Item>
+              </SettingRow>
+              <SettingRow
                 label="Webhook path"
-                extra="Where the inbound listener mounts. Must start with “/”. Blank = the listener's own default."
-                rules={[{ pattern: /^\//, message: 'Must start with /.' }]}
+                formName="voiceTrunkWebhookPath"
+                help="Where the inbound listener mounts. Must start with “/”. Blank = the listener's own default."
               >
-                <Input placeholder="/voice/inbound" />
-              </Form.Item>
-              <Form.Item
-                name="voiceTrunkCodec"
+                <Form.Item
+                  name="voiceTrunkWebhookPath"
+                  rules={[{ pattern: /^\//, message: 'Must start with /.' }]}
+                  style={{ marginBottom: 0 }}
+                >
+                  <Input placeholder="/voice/inbound" />
+                </Form.Item>
+              </SettingRow>
+              <SettingRow
                 label="Codec"
-                extra="Blank leaves the choice to the bridge's negotiation. G.711 is the phone network's own; Opus is better where the trunk offers it."
+                formName="voiceTrunkCodec"
+                help="Blank leaves the choice to the bridge's negotiation. G.711 is the phone network's own; Opus is better where the trunk offers it."
               >
-                <Select
-                  allowClear
-                  placeholder="Negotiate"
-                  options={TRUNK_CODECS.map((c) => ({ value: c, label: c }))}
-                />
-              </Form.Item>
+                <Form.Item name="voiceTrunkCodec" style={{ marginBottom: 0 }}>
+                  <Select
+                    allowClear
+                    placeholder="Negotiate"
+                    options={TRUNK_CODECS.map((c) => ({ value: c, label: c }))}
+                  />
+                </Form.Item>
+              </SettingRow>
             </>
           ) : null
         }
       </Form.Item>
 
-      <VoiceSectionLabel>LiveKit</VoiceSectionLabel>
+      <SectionHeading id="livekit">LiveKit</SectionHeading>
       <Typography.Paragraph type="secondary" style={{ marginTop: 0, fontSize: 13 }}>
         The media server the SIP leg bridges into. All three fields belong together — clearing the
         URL removes the whole block, including the stored key and secret.
       </Typography.Paragraph>
-      <Form.Item name="voiceLivekitUrl" label="Server URL">
-        <Input placeholder="wss://your-project.livekit.cloud" />
-      </Form.Item>
-      <Form.Item
-        name="voiceLivekitApiKey"
+      <SettingRow label="Server URL" formName="voiceLivekitUrl">
+        <Form.Item name="voiceLivekitUrl" style={{ marginBottom: 0 }}>
+          <Input placeholder="wss://your-project.livekit.cloud" />
+        </Form.Item>
+      </SettingRow>
+      <SettingRow
         label="API key"
-        extra={
+        formName="voiceLivekitApiKey"
+        help={
           config.voiceLivekitApiKeyPreview
             ? `Current: ${config.voiceLivekitApiKeyPreview}. Leave blank to keep it.`
             : 'Required whenever a server URL is set.'
         }
       >
-        <Input.Password
-          placeholder={
-            config.voiceLivekitApiKeyPreview ? 'Leave blank to keep' : 'Enter API key...'
-          }
-        />
-      </Form.Item>
-      <Form.Item
-        name="voiceLivekitApiSecret"
+        <Form.Item name="voiceLivekitApiKey" style={{ marginBottom: 0 }}>
+          <Input.Password
+            placeholder={
+              config.voiceLivekitApiKeyPreview ? 'Leave blank to keep' : 'Enter API key...'
+            }
+          />
+        </Form.Item>
+      </SettingRow>
+      <SettingRow
         label="API secret"
-        extra={
+        formName="voiceLivekitApiSecret"
+        help={
           config.voiceLivekitApiSecretPreview
             ? `Current: ${config.voiceLivekitApiSecretPreview}. Leave blank to keep it.`
             : 'Required whenever a server URL is set.'
         }
       >
-        <Input.Password
-          placeholder={
-            config.voiceLivekitApiSecretPreview ? 'Leave blank to keep' : 'Enter API secret...'
-          }
-        />
-      </Form.Item>
+        <Form.Item name="voiceLivekitApiSecret" style={{ marginBottom: 0 }}>
+          <Input.Password
+            placeholder={
+              config.voiceLivekitApiSecretPreview ? 'Leave blank to keep' : 'Enter API secret...'
+            }
+          />
+        </Form.Item>
+      </SettingRow>
 
-      <VoiceSectionLabel>Numbers</VoiceSectionLabel>
+      <SectionHeading id="numbers">numbers</SectionHeading>
       <VoiceBotRoster rows={botRows} setRows={setBotRows} personalities={personalities} />
 
-      <VoiceSectionLabel>Inbound hardening</VoiceSectionLabel>
+      <SectionHeading id="hardening">hardening</SectionHeading>
       <Typography.Paragraph type="secondary" style={{ marginTop: 0, fontSize: 13 }}>
         A phone number is the one surface a stranger can reach without being invited. These are the
         guards on it, and every refusal they cause is written to Communications → Calls with its
         reason.
       </Typography.Paragraph>
-      <Form.Item
-        name="voiceInboundAllowlist"
+      <SettingRow
         label="Caller allowlist"
-        extra="Numbers that reach your own personality directly. An EMPTY list clears the key — “trust nobody” is not a list, it is a receptionist, so set one below instead."
+        formName="voiceInboundAllowlist"
+        help="Numbers that reach your own personality directly. An EMPTY list clears the key — “trust nobody” is not a list, it is a receptionist, so set one below instead."
       >
-        <Select mode="tags" tokenSeparators={[',']} placeholder="+15551234567" />
-      </Form.Item>
-      <Form.Item
-        name="voiceInboundReceptionist"
+        <Form.Item name="voiceInboundAllowlist" style={{ marginBottom: 0 }}>
+          <Select mode="tags" tokenSeparators={[',']} placeholder="+15551234567" />
+        </Form.Item>
+      </SettingRow>
+      <SettingRow
         label="Receptionist"
-        extra="Who answers everyone not on the allowlist, in a restricted scope. Blank = nobody does, and unlisted callers are turned away."
+        formName="voiceInboundReceptionist"
+        help="Who answers everyone not on the allowlist, in a restricted scope. Blank = nobody does, and unlisted callers are turned away."
       >
-        <Select
-          allowClear
-          showSearch
-          placeholder="No receptionist"
-          options={personalities.map((p) => ({ value: p.id, label: p.name }))}
-        />
-      </Form.Item>
-      <Form.Item
-        name="voiceInboundConcurrencyCap"
+        <Form.Item name="voiceInboundReceptionist" style={{ marginBottom: 0 }}>
+          <Select
+            allowClear
+            showSearch
+            placeholder="No receptionist"
+            options={personalities.map((p) => ({ value: p.id, label: p.name }))}
+          />
+        </Form.Item>
+      </SettingRow>
+      <SettingRow
         label="Concurrent calls"
-        extra="Ceiling on calls in progress at once. Blank = the built-in default."
+        formName="voiceInboundConcurrencyCap"
+        help="Ceiling on calls in progress at once. Blank = the built-in default."
       >
-        <InputNumber min={1} max={1000} placeholder="Default" />
-      </Form.Item>
-      <Form.Item
-        name="voiceInboundPerCallerPerHour"
+        <Form.Item name="voiceInboundConcurrencyCap" style={{ marginBottom: 0 }}>
+          <InputNumber min={1} max={1000} placeholder="Default" />
+        </Form.Item>
+      </SettingRow>
+      <SettingRow
         label="Calls per caller per hour"
-        extra="Rolling-hour ceiling for one number. Blank = the built-in default."
+        formName="voiceInboundPerCallerPerHour"
+        help="Rolling-hour ceiling for one number. Blank = the built-in default."
       >
-        <InputNumber min={1} max={1000} placeholder="Default" />
-      </Form.Item>
-      <Form.Item
-        name="voiceInboundDailyBudgetUsd"
+        <Form.Item name="voiceInboundPerCallerPerHour" style={{ marginBottom: 0 }}>
+          <InputNumber min={1} max={1000} placeholder="Default" />
+        </Form.Item>
+      </SettingRow>
+      <SettingRow
         label="Daily inbound budget (USD)"
-        extra="Spend ceiling across every inbound call in a day. Blank = no ceiling."
+        formName="voiceInboundDailyBudgetUsd"
+        help="Spend ceiling across every inbound call in a day. Blank = no ceiling."
       >
-        <InputNumber min={0.01} max={100000} step={1} placeholder="No limit" />
-      </Form.Item>
-      <Form.Item
-        name="voiceInboundPrewarm"
+        <Form.Item name="voiceInboundDailyBudgetUsd" style={{ marginBottom: 0 }}>
+          <InputNumber min={0.01} max={100000} step={1} placeholder="No limit" />
+        </Form.Item>
+      </SettingRow>
+      <SettingRow
         label="Pre-warm on ring"
-        extra="Which callers get the realtime socket opened while the phone is still ringing. Faster first word, at the cost of a session opened for a call that may not connect."
+        formName="voiceInboundPrewarm"
+        help="Which callers get the realtime socket opened while the phone is still ringing. Faster first word, at the cost of a session opened for a call that may not connect."
       >
-        <Select
-          allowClear
-          placeholder="Default"
-          options={[
-            { value: 'allowlisted', label: 'Allowlisted callers only' },
-            { value: 'none', label: 'Nobody — open on answer' },
-            { value: 'all', label: 'Everyone who rings' },
-          ]}
-        />
-      </Form.Item>
+        <Form.Item name="voiceInboundPrewarm" style={{ marginBottom: 0 }}>
+          <Select
+            allowClear
+            placeholder="Default"
+            options={[
+              { value: 'allowlisted', label: 'Allowlisted callers only' },
+              { value: 'none', label: 'Nobody — open on answer' },
+              { value: 'all', label: 'Everyone who rings' },
+            ]}
+          />
+        </Form.Item>
+      </SettingRow>
       <Typography.Paragraph type="secondary" style={{ marginTop: 0, fontSize: 13 }}>
         Where call summaries and refusal notices are delivered. The platform and the chat id are
         saved together — half a destination will not load, so clearing the platform removes the
         whole notice route.
       </Typography.Paragraph>
-      <Form.Item name="voiceInboundOwnerPlatform" label="Notify on">
-        <Input placeholder="telegram" />
-      </Form.Item>
-      <Form.Item
-        name="voiceInboundOwnerChatId"
+      <SettingRow label="Notify on" formName="voiceInboundOwnerPlatform">
+        <Form.Item name="voiceInboundOwnerPlatform" style={{ marginBottom: 0 }}>
+          <Input placeholder="telegram" />
+        </Form.Item>
+      </SettingRow>
+      <SettingRow
         label="Chat id"
-        extra="Required whenever a platform is set."
+        formName="voiceInboundOwnerChatId"
+        help="Required whenever a platform is set."
       >
-        <Input placeholder="123456789" />
-      </Form.Item>
-      <Form.Item
-        name="voiceInboundOwnerBotKey"
+        <Form.Item name="voiceInboundOwnerChatId" style={{ marginBottom: 0 }}>
+          <Input placeholder="123456789" />
+        </Form.Item>
+      </SettingRow>
+      <SettingRow
         label="Bot key"
-        extra="Which bot delivers the notice in a multi-bot deployment. Blank = the default bot."
+        formName="voiceInboundOwnerBotKey"
+        help="Which bot delivers the notice in a multi-bot deployment. Blank = the default bot."
       >
-        <Input placeholder="Default bot" />
+        <Form.Item name="voiceInboundOwnerBotKey" style={{ marginBottom: 0 }}>
+          <Input placeholder="Default bot" />
+        </Form.Item>
+      </SettingRow>
+      <SettingRow
+        label="Restrict voice egress"
+        formName="voiceEgressGate"
+        help="Only providers that run on this machine, plus the ones you list below, may receive audio. Off = any configured provider may."
+      >
+        <Form.Item name="voiceEgressGate" valuePropName="checked" style={{ marginBottom: 0 }}>
+          <Switch />
+        </Form.Item>
+      </SettingRow>
+      <Form.Item noStyle shouldUpdate={(prev, cur) => prev.voiceEgressGate !== cur.voiceEgressGate}>
+        {({ getFieldValue }) =>
+          getFieldValue('voiceEgressGate') ? (
+            <SettingRow
+              label="Trusted voice providers"
+              formName="voiceTrustedPlugins"
+              help="Provider ids allowed to send audio off this machine (e.g. openai-tts, elevenlabs). Local providers always pass. Clearing the list turns the restriction off."
+            >
+              <Form.Item name="voiceTrustedPlugins" style={{ marginBottom: 0 }}>
+                <Select
+                  mode="tags"
+                  tokenSeparators={[',']}
+                  placeholder="openai-tts"
+                  options={[
+                    { label: 'openai-tts', value: 'openai-tts' },
+                    { label: 'openai-stt', value: 'openai-stt' },
+                    { label: 'groq-stt', value: 'groq-stt' },
+                  ]}
+                />
+              </Form.Item>
+            </SettingRow>
+          ) : null
+        }
       </Form.Item>
     </>
   );
