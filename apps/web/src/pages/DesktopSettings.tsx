@@ -234,6 +234,29 @@ export function DesktopSettings() {
     }
   }
 
+  async function handleSaveRetention() {
+    try {
+      const result = await b.settings.updateConfig({
+        retentionDays,
+        traceLogDays,
+        observabilityDays,
+      });
+      if (result.ok) {
+        notification.success({ message: 'Retention settings saved' });
+      } else {
+        notification.error({
+          message: 'Failed to save retention settings',
+          description: result.error ?? 'Unknown error',
+        });
+      }
+    } catch (err) {
+      notification.error({
+        message: 'Failed to save retention settings',
+        description: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
   async function handlePruneRetention() {
     try {
       setPruneResult(null);
@@ -368,7 +391,12 @@ export function DesktopSettings() {
               onChange={(v) => setObservabilityDays(v ?? 7)}
             />
           </Space>
-          <Button onClick={handlePruneRetention}>Prune now</Button>
+          <Space>
+            <Button type="primary" onClick={handleSaveRetention}>
+              Save
+            </Button>
+            <Button onClick={handlePruneRetention}>Prune now</Button>
+          </Space>
           {pruneResult && <Typography.Text>{pruneResult}</Typography.Text>}
         </Space>
       </Card>
