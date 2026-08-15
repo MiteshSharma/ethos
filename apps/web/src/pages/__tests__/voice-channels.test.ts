@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { deliveryAge, voiceChannelTtsOutFromConfig, voiceChannelTtsOutPatch } from '../Settings';
+import { deliveryAge } from '../settings/lib/deliveries';
+import {
+  voiceChannelTtsOutFromConfig,
+  voiceChannelTtsOutPatch,
+} from '../settings/lib/voice-options';
 
 // Settings → Voice: the per-channel TTS-out round trip, without mounting the
 // form — same seam as `voice-roster-rows.test.ts`.

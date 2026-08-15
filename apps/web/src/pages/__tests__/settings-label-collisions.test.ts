@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
@@ -12,7 +12,16 @@ import { describe, expect, it } from 'vitest';
 // technique as `aux-timeout-units.test.ts`; `apps/web` has no jsdom.
 
 const root = join(import.meta.dirname, '..', '..', '..', '..', '..');
-const page = readFileSync(join(root, 'apps', 'web', 'src', 'pages', 'Settings.tsx'), 'utf8');
+// The page is now eleven panes under `pages/settings/panes/`; the controls these
+// assertions are about moved there verbatim in Phase 1 of
+// plan/phases/settings-navigation.md. Concatenating the panes keeps every
+// assertion below exactly what it was against the single file.
+const panesDir = join(root, 'apps', 'web', 'src', 'pages', 'settings', 'panes');
+const page = readdirSync(panesDir)
+  .filter((f) => f.endsWith('.tsx'))
+  .sort()
+  .map((f) => readFileSync(join(panesDir, f), 'utf8'))
+  .join('\n');
 const desktop = readFileSync(
   join(root, 'apps', 'web', 'src', 'pages', 'DesktopSettings.tsx'),
   'utf8',

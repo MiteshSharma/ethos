@@ -226,7 +226,12 @@ export function Sidebar({ collapsed, onToggle }: SidebarProps) {
           )}
 
           <div className="sidebar-footer">
-            <NavRow path="/settings" icon="⚙️" label="Settings" active={pathname === '/settings'} />
+            <NavRow
+              path="/settings"
+              icon="⚙️"
+              label="Settings"
+              active={pathname === '/settings' || pathname.startsWith('/settings/')}
+            />
             <button
               type="button"
               className="sidebar-advanced-toggle-btn"
@@ -283,7 +288,12 @@ export function Sidebar({ collapsed, onToggle }: SidebarProps) {
           {config?.adminEnabled && (
             <NavRow path="/admin" icon="🛡️" label="Admin" active={pathname === '/admin'} />
           )}
-          <NavRow path="/settings" icon="⚙️" label="Settings" active={pathname === '/settings'} />
+          <NavRow
+            path="/settings"
+            icon="⚙️"
+            label="Settings"
+            active={pathname === '/settings' || pathname.startsWith('/settings/')}
+          />
         </div>
       )}
 

@@ -37,10 +37,11 @@ import { PersonalityDetail } from './pages/PersonalityDetail';
 import { PluginPage } from './pages/PluginPage';
 import { Plugins } from './pages/Plugins';
 import { Sessions } from './pages/Sessions';
-import { Settings } from './pages/Settings';
 import { SetupWhatsApp } from './pages/SetupWhatsApp';
 import { SigningIn } from './pages/SigningIn';
 import { Skills } from './pages/Skills';
+import { SettingsPaneRoute } from './pages/settings/SettingsPaneRoute';
+import { SettingsShell } from './pages/settings/SettingsShell';
 import { Tasks } from './pages/Tasks';
 import { TeamControlCenter } from './pages/TeamControlCenter';
 import { TeamCreate } from './pages/TeamCreate';
@@ -142,7 +143,15 @@ export function App() {
           <Route path="/teams" element={<Teams />} />
           <Route path="/teams/create" element={<TeamCreate />} />
           <Route path="/teams/:name" element={<TeamControlCenter />} />
-          <Route path="/settings" element={<Settings />} />
+          {/* The shell is the layout route: it owns the one <Form>, and the
+              panes mount inside it through its <Outlet/>. Every child renders
+              SettingsPaneRoute, which resolves the URL to a real
+              category/section and redirects (replace) when it has to. */}
+          <Route path="/settings" element={<SettingsShell />}>
+            <Route index element={<SettingsPaneRoute />} />
+            <Route path=":category" element={<SettingsPaneRoute />} />
+            <Route path=":category/:section" element={<SettingsPaneRoute />} />
+          </Route>
           <Route path="/memory" element={<Memory />} />
           <Route path="/documents" element={<Documents />} />
           <Route path="/plugins" element={<Plugins />} />

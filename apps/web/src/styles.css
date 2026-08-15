@@ -4459,6 +4459,90 @@ textarea {
   color: var(--ethos-text-dim);
 }
 
+/* Settings two-pane shape — a 240px category rail (DESIGN.md "Layout": the
+   same width as the app sidebar) beside the detail column the panes render in.
+   The detail column keeps the 640px measure the single-column form had. */
+
+.settings {
+  display: grid;
+  grid-template-columns: 240px minmax(0, 1fr);
+  gap: 24px;
+  align-items: start;
+}
+
+.settings__detail {
+  min-width: 0;
+  max-width: 640px;
+}
+
+.settings-rail {
+  position: sticky;
+  top: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.settings-rail-group {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+/* Structural hint, not a heading — same treatment the sidebar's group labels
+   use (DESIGN.md "Section dividers"). */
+.settings-rail-group-label {
+  font-size: 12px;
+  color: var(--text-secondary);
+  opacity: 0.35;
+  padding: 0 12px;
+  margin-bottom: 2px;
+}
+
+.settings-rail-row {
+  display: block;
+  padding: 6px 12px;
+  border-radius: 4px;
+  font-size: 14px;
+  color: var(--text-secondary);
+  text-decoration: none;
+}
+
+.settings-rail-row:hover {
+  background: var(--ethos-hover);
+  color: var(--text-primary);
+}
+
+.settings-rail-row.active {
+  background: rgba(74, 158, 255, 0.18);
+  border-left: 2px solid #4a9eff;
+  padding-left: 10px;
+  color: var(--text-primary);
+}
+
+.settings-savebar {
+  position: sticky;
+  bottom: 0;
+  display: flex;
+  justify-content: flex-start;
+  gap: 8px;
+  padding: 12px 0;
+  background: var(--bg-base, transparent);
+  border-top: 1px solid var(--border-subtle);
+}
+
+@media (max-width: 900px) {
+  .settings {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .settings-rail {
+    position: static;
+    flex-direction: row;
+    flex-wrap: wrap;
+  }
+}
+
 /* Skills tab + Mesh tab toolbars share the same flex shape as Cron's. */
 .skills-toolbar,
 .mesh-toolbar {

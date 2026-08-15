@@ -2,12 +2,14 @@ import { describe, expect, it } from 'vitest';
 import {
   firstCallInvitation,
   type VoiceBotRow,
+  voiceBotsPatchFromRows,
+} from '../settings/lib/voice-bots';
+import {
   type VoiceTelephonyFormValues,
   type VoiceTelephonyStoredSecrets,
   voiceBargeInFromConfig,
-  voiceBotsPatchFromRows,
   voiceTelephonyPatch,
-} from '../Settings';
+} from '../settings/lib/voice-telephony';
 
 // Settings → Voice → Telephony, without mounting the form.
 //

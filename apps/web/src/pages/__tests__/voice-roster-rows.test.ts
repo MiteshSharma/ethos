@@ -6,7 +6,7 @@ import {
   voiceSttProviderRowsFromConfig,
   voiceTtsProviderPatchFromRow,
   voiceTtsProviderRowsFromConfig,
-} from '../Settings';
+} from '../settings/lib/voice-roster';
 
 // Settings → Voice: the two halves of a roster round trip, without mounting the
 // form. `*RowsFromConfig` hydrates rows from what `config.get` returned;
