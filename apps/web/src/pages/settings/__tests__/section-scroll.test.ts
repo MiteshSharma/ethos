@@ -22,7 +22,7 @@ describe('shouldScrollToSection', () => {
     ).toBe(false);
   });
 
-  it('scrolls on an in-category section change — the SectionNav tab click', () => {
+  it('scrolls on an in-category section change — a RailSearch result link', () => {
     expect(
       shouldScrollToSection(
         { category: 'voice', section: 'basics' },

@@ -351,14 +351,11 @@ export function SettingsShell() {
   const categories = visibleCategories(isDesktop);
   const resolved = resolveSettingsRoute({ category, section }, categories);
 
-  // Scroll the active section's heading into view when SectionNav changes it —
-  // but only for an in-category tab click, never on mount or a category
-  // switch (`shouldScrollToSection`). `.app-main` is the page's actual scroll
-  // container (`overflow: auto` in styles.css); `.settings__detail` itself
-  // does not scroll. The sticky `.settings-section-nav` would otherwise cover
-  // the heading it just scrolled to, so its live bottom edge is measured and
-  // used as the floor rather than hard-coding its height — that pixel value
-  // isn't ours to assume here, and measuring stays correct if it changes.
+  // Scroll the active section's heading into view when the section changes
+  // via a same-category link (e.g. a RailSearch result) — but never on mount
+  // or a category switch (`shouldScrollToSection`). `.app-main` is the page's
+  // actual scroll container (`overflow: auto` in styles.css); `.settings__detail`
+  // itself does not scroll.
   const prevSectionRouteRef = useRef<SectionRoute | undefined>(undefined);
   useEffect(() => {
     const prev = prevSectionRouteRef.current;
@@ -371,13 +368,10 @@ export function SettingsShell() {
     const container = document.querySelector<HTMLElement>('.app-main');
     if (!target || !container) return;
 
-    // The nav is `position: sticky; top: 0`, so its bottom edge IS the visible
-    // "floor" content must clear — using it directly sidesteps `.app-main`'s
-    // own top padding, which a container-top-relative offset would otherwise
-    // have to duplicate.
-    const nav = document.querySelector<HTMLElement>('.settings-section-nav');
-    const navBottom = nav?.getBoundingClientRect().bottom ?? container.getBoundingClientRect().top;
-    const delta = target.getBoundingClientRect().top - navBottom - 8;
+    // There's no sticky nav to clear anymore, so the target heading just
+    // needs to land near the container's top edge.
+    const containerTop = container.getBoundingClientRect().top;
+    const delta = target.getBoundingClientRect().top - containerTop - 8;
     const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
     container.scrollBy({ top: delta, behavior: reducedMotion ? 'auto' : 'smooth' });
   }, [resolved.category, resolved.section]);
