@@ -26,11 +26,22 @@ const page = readdirSync(panesDir)
   .join('\n');
 const router = readFileSync(join(root, 'packages', 'web-contracts', 'src', 'router.ts'), 'utf8');
 
-/** The `<Form.Item>` block for a named field, up to its closing tag. */
+/**
+ * The block for a named field, up to its closing `</Form.Item>` tag. Starts
+ * from the enclosing `<SettingRow>` when the field is wrapped in one — Phase 5a
+ * (plan/phases/settings-navigation.md) moved `label=` off the `Form.Item` and
+ * onto `SettingRow` for the converted panes, same as Phases 3–4 — falling back
+ * to the bare `<Form.Item>` for panes that still inline the label.
+ */
 function formItem(name: string): string {
   const at = page.indexOf(`name="${name}"`);
   expect(at, `missing form field: ${name}`).toBeGreaterThan(-1);
-  return page.slice(at, page.indexOf('</Form.Item>', at));
+  const itemStart = page.lastIndexOf('<Form.Item', at);
+  const rowStart = page.lastIndexOf('<SettingRow', itemStart);
+  const closedBetween =
+    rowStart !== -1 && page.slice(rowStart, itemStart).includes('</SettingRow>');
+  const start = rowStart !== -1 && !closedBetween ? rowStart : itemStart;
+  return page.slice(start, page.indexOf('</Form.Item>', at));
 }
 
 describe('auxiliary STT/TTS timeout units', () => {

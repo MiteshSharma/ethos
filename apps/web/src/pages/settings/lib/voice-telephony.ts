@@ -20,8 +20,8 @@ export const TRUNK_PROVIDERS = ['twilio', 'telnyx', 'generic', 'livekit'] as con
 export const TRUNK_CODECS = ['opus', 'g711'] as const;
 const INBOUND_PREWARMS = ['allowlisted', 'none', 'all'] as const;
 /** The surfaces `voice.bargeIn.<surface>` accepts. Browser talk-mode is not one
- *  of them — it endpoints in the browser, off the `display.voice_*` sliders in
- *  "Advanced voice tuning" higher up this same card. */
+ *  of them — it renders as a third box alongside these two, backed by the five
+ *  `display.voice_*` sliders, but it writes no `voice.bargeIn.*` key. */
 export const BARGE_IN_SURFACES = ['call', 'satellite'] as const;
 type BargeInSurface = (typeof BARGE_IN_SURFACES)[number];
 

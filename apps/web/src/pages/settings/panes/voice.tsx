@@ -1,8 +1,11 @@
 // Voice — how it talks, speech-to-text, text-to-speech, realtime, barge-in,
 // trunk, LiveKit, numbers, hardening, wake routes, channels that speak, voice
-// notes, call appearance. One card today, moved verbatim from `Settings.tsx`
-// (§4.2 row 9 plus `VoiceTelephonySections` and `WakePanel`); the split into the
-// thirteen sections above is Phase 5.
+// notes, call appearance. Moved verbatim from `Settings.tsx` (§4.2 row 9 plus
+// `VoiceTelephonySections` and `WakePanel`). Phase 5a (this change) converts
+// how it talks / speech-to-text / text-to-speech / realtime / barge-in / voice
+// notes / call appearance off `Card` onto `SettingRow` / `SectionHeading`;
+// trunk, LiveKit, numbers, hardening, wake routes and channels that speak are
+// Phase 5b's.
 //
 // `voice.artifacts.*` belongs in Data & retention and deliberately stays here
 // for this change (D12) — the move is scheduled, not forgotten.
@@ -10,8 +13,6 @@
 import { useQuery } from '@tanstack/react-query';
 import {
   Button,
-  Card,
-  Collapse,
   Form,
   Input,
   InputNumber,
@@ -40,6 +41,8 @@ import {
 } from '../../../lib/voice-command-template';
 import { rpc } from '../../../rpc';
 import { ROW_BOX_STYLE, RowLabel, VoiceSectionLabel } from '../components/primitives';
+import { SectionHeading } from '../components/section-heading';
+import { SettingRow } from '../components/setting-row';
 import { type ConfigGetData, type PersonalityOption, RECORD_KEY_RE } from '../lib/config-types';
 import { deliveryAge } from '../lib/deliveries';
 import type { FormShape } from '../lib/form-shape';
@@ -445,187 +448,122 @@ export function VoicePane() {
   } = useSettingsPane();
 
   return (
-    <Card title="Voice" size="small" style={{ marginBottom: 16 }}>
-      <Form.Item
-        name="voiceEnabled"
-        valuePropName="checked"
-        extra="Enable the voice recording button in the chat bar."
+    <>
+      <SectionHeading id="call-appearance">call appearance</SectionHeading>
+      <SettingRow
+        label="Voice enabled"
+        formName="voiceEnabled"
+        help="Enable the voice recording button in the chat bar."
       >
-        <Switch checkedChildren="On" unCheckedChildren="Off" />
-      </Form.Item>
-      <Form.Item
+        <Form.Item name="voiceEnabled" valuePropName="checked" style={{ marginBottom: 0 }}>
+          <Switch checkedChildren="On" unCheckedChildren="Off" />
+        </Form.Item>
+      </SettingRow>
+      <SettingRow
         label="Processing chime"
-        name="voiceChime"
-        valuePropName="checked"
-        extra="Play a short sound while the agent is thinking (after you stop speaking)."
+        formName="voiceChime"
+        help="Play a short sound while the agent is thinking (after you stop speaking)."
       >
-        <Switch />
-      </Form.Item>
-      <VoiceSectionLabel>Call appearance</VoiceSectionLabel>
-      <Form.Item
-        name="callStyle"
+        <Form.Item name="voiceChime" valuePropName="checked" style={{ marginBottom: 0 }}>
+          <Switch />
+        </Form.Item>
+      </SettingRow>
+      <SettingRow
         label="Treatment"
-        extra="How the Call Stage draws the agent. All three follow the same voice level; only the shape differs. Personality lets each agent use the shape it declares, or one derived from its name — picking a treatment here pins it for every agent that has not chosen one."
+        formName="callStyle"
+        help="How the Call Stage draws the agent. All three follow the same voice level; only the shape differs. Personality lets each agent use the shape it declares, or one derived from its name — picking a treatment here pins it for every agent that has not chosen one."
       >
-        <Select options={CALL_STYLE_OPTIONS} />
-      </Form.Item>
-      <Form.Item
-        name="callAccent"
+        <Form.Item name="callStyle" style={{ marginBottom: 0 }}>
+          <Select options={CALL_STYLE_OPTIONS} />
+        </Form.Item>
+      </SettingRow>
+      <SettingRow
         label="Color"
-        extra="What the overlay is drawn in while the agent speaks. Listening is always the red mic color."
+        formName="callAccent"
+        help="What the overlay is drawn in while the agent speaks. Listening is always the red mic color."
       >
-        <Select
-          options={[...CALL_ACCENT_PRESETS, { value: CALL_ACCENT_CUSTOM, label: 'Custom hex…' }]}
-        />
-      </Form.Item>
+        <Form.Item name="callAccent" style={{ marginBottom: 0 }}>
+          <Select
+            options={[...CALL_ACCENT_PRESETS, { value: CALL_ACCENT_CUSTOM, label: 'Custom hex…' }]}
+          />
+        </Form.Item>
+      </SettingRow>
       <Form.Item noStyle shouldUpdate={(prev, cur) => prev.callAccent !== cur.callAccent}>
         {({ getFieldValue }) =>
           getFieldValue('callAccent') === CALL_ACCENT_CUSTOM ? (
-            <Form.Item
-              name="callAccentCustom"
+            <SettingRow
               label="Custom color"
-              rules={[
-                {
-                  pattern: /^#[0-9a-fA-F]{6}$/,
-                  message: 'Six-digit hex, e.g. #4ADE80.',
-                },
-              ]}
-              extra="Six-digit hex. Anything else falls back to the personality accent."
+              formName="callAccentCustom"
+              help="Six-digit hex. Anything else falls back to the personality accent."
             >
-              <Input placeholder="#4ADE80" />
-            </Form.Item>
+              <Form.Item
+                name="callAccentCustom"
+                rules={[
+                  {
+                    pattern: /^#[0-9a-fA-F]{6}$/,
+                    message: 'Six-digit hex, e.g. #4ADE80.',
+                  },
+                ]}
+                style={{ marginBottom: 0 }}
+              >
+                <Input placeholder="#4ADE80" />
+              </Form.Item>
+            </SettingRow>
           ) : null
         }
       </Form.Item>
-      <Collapse
-        ghost
-        size="small"
-        style={{ marginBottom: 16 }}
-        items={[
-          {
-            key: 'voice-tuning',
-            label: 'Advanced voice tuning',
-            children: (
-              <>
-                {/* settings-index-group: voice-tuning — `name={c.name}` is
-                    opaque to the source scan, so the group id says which
-                    `SETTINGS_INDEX` entries this site renders (T6). */}
-                {VOICE_TUNING_CONTROLS.map((c) => (
-                  <Form.Item key={c.name} name={c.name} label={c.label} extra={c.extra}>
-                    <Slider
-                      min={c.min}
-                      max={c.max}
-                      step={c.step}
-                      tooltip={{ formatter: (v) => `${v ?? ''}${c.unit}` }}
-                    />
-                  </Form.Item>
-                ))}
-                <Button
-                  size="small"
-                  onClick={() =>
-                    form.setFieldsValue(
-                      Object.fromEntries(
-                        VOICE_TUNING_CONTROLS.map((c) => [
-                          c.name,
-                          DEFAULT_VOICE_TUNING[c.defaultKey],
-                        ]),
-                      ),
-                    )
-                  }
-                >
-                  Reset to defaults
-                </Button>
-              </>
-            ),
-          },
-          {
-            key: 'voice-wake',
-            label: 'Advanced wake tuning',
-            children: <WakeSettingsReadout />,
-          },
-          {
-            key: 'voice-notes',
-            label: 'Advanced voice-note delivery',
-            children: (
-              <>
-                <Form.Item
-                  name="voiceTranscodeFfmpegPath"
-                  label="ffmpeg path"
-                  extra="ffmpeg is what re-containers a synthesized reply into the format each platform renders as a voice bubble instead of a file attachment. Without it Ethos can only send the formats the TTS provider already produces. Blank = whatever `ffmpeg` resolves to on PATH."
-                >
-                  <Input placeholder="ffmpeg" />
-                </Form.Item>
-                <Form.Item
-                  name="voiceTranscodeBitrateKbps"
-                  label="Bitrate (kbps)"
-                  extra="Target bitrate for the transcoded voice note. Blank = 32, which is speech-grade."
-                >
-                  <InputNumber min={8} max={320} step={8} placeholder="32" />
-                </Form.Item>
-                <Form.Item
-                  name="voiceTranscodeTimeoutSec"
-                  label="Transcode timeout (seconds)"
-                  extra="Budget for one ffmpeg run. Blank = 30."
-                >
-                  <InputNumber min={1} max={600} placeholder="30" />
-                </Form.Item>
-                <Form.Item
-                  name="voiceArtifactAbandonAfterDays"
-                  label="Abandon after (days)"
-                  extra="An artifact is deleted the moment its delivery is confirmed. This bounds the ones that never are: give up on an undelivered voice note after this long and delete it. Blank = 7."
-                >
-                  <InputNumber min={1} max={365} placeholder="7" />
-                </Form.Item>
-                <Form.Item
-                  name="voiceArtifactMaxTotalMb"
-                  label="Artifact directory cap (MiB)"
-                  extra="Oldest-first eviction once the stored artifacts exceed this — the backstop for when neither delivery nor abandonment has fired. Blank = 512."
-                >
-                  <InputNumber min={1} max={102400} placeholder="512" />
-                </Form.Item>
-              </>
-            ),
-          },
-        ]}
-      />
+      <div style={{ marginBottom: 16 }}>
+        <Typography.Text strong style={{ fontSize: 13 }}>
+          Advanced wake tuning
+        </Typography.Text>
+        <WakeSettingsReadout />
+      </div>
       <Form.Item noStyle shouldUpdate={(prev, cur) => prev.voiceEnabled !== cur.voiceEnabled}>
         {({ getFieldValue }) =>
           getFieldValue('voiceEnabled') ? (
             <>
-              <Form.Item
-                name="voiceTier"
+              <SectionHeading id="how-it-talks">how it talks</SectionHeading>
+              <SettingRow
                 label="How the agent talks"
-                extra="Pipeline transcribes you, thinks, then speaks — it can run entirely on this machine with local speech-to-text and text-to-speech, so no audio has to leave it. Realtime hands the whole conversation to one hosted session, which answers faster and can be interrupted mid-sentence, but needs an OpenAI Realtime or Gemini Live key below."
+                formName="voiceTier"
+                help="Pipeline transcribes you, thinks, then speaks — it can run entirely on this machine with local speech-to-text and text-to-speech, so no audio has to leave it. Realtime hands the whole conversation to one hosted session, which answers faster and can be interrupted mid-sentence, but needs an OpenAI Realtime or Gemini Live key below."
               >
-                <Select
-                  allowClear
-                  placeholder="Automatic — realtime when one is configured"
-                  options={[
-                    { label: 'Pipeline — private, works offline', value: 'pipeline' },
-                    { label: 'Realtime — fastest, hosted', value: 'realtime' },
-                  ]}
-                />
-              </Form.Item>
-              <VoiceSectionLabel>Speech-to-text</VoiceSectionLabel>
-              <Form.Item
-                name="voiceProvider"
-                label="Default provider"
-                extra="Speech-to-text engine for transcribing what you say. This is the default entry — a personality that names no engine of its own is transcribed through it."
-                rules={[{ required: true, message: 'Select a provider to enable voice' }]}
+                <Form.Item name="voiceTier" style={{ marginBottom: 0 }}>
+                  <Select
+                    allowClear
+                    placeholder="Automatic — realtime when one is configured"
+                    options={[
+                      { label: 'Pipeline — private, works offline', value: 'pipeline' },
+                      { label: 'Realtime — fastest, hosted', value: 'realtime' },
+                    ]}
+                  />
+                </Form.Item>
+              </SettingRow>
+              <SectionHeading id="speech-to-text">speech-to-text</SectionHeading>
+              <SettingRow
+                label="Default provider (STT)"
+                formName="voiceProvider"
+                help="Speech-to-text engine for transcribing what you say. This is the default entry — a personality that names no engine of its own is transcribed through it."
               >
-                <Select
-                  placeholder="Select a provider..."
-                  onChange={(value: string) => {
-                    const d = STT_PROVIDER_DEFAULTS[value];
-                    if (!d) return;
-                    const patch: Partial<FormShape> = {};
-                    if (!form.getFieldValue('voiceBaseUrl')) patch.voiceBaseUrl = d.baseUrl;
-                    if (!form.getFieldValue('voiceModel')) patch.voiceModel = d.model;
-                    if (Object.keys(patch).length > 0) form.setFieldsValue(patch);
-                  }}
-                  options={STT_PROVIDER_OPTIONS}
-                />
-              </Form.Item>
+                <Form.Item
+                  name="voiceProvider"
+                  rules={[{ required: true, message: 'Select a provider to enable voice' }]}
+                  style={{ marginBottom: 0 }}
+                >
+                  <Select
+                    placeholder="Select a provider..."
+                    onChange={(value: string) => {
+                      const d = STT_PROVIDER_DEFAULTS[value];
+                      if (!d) return;
+                      const patch: Partial<FormShape> = {};
+                      if (!form.getFieldValue('voiceBaseUrl')) patch.voiceBaseUrl = d.baseUrl;
+                      if (!form.getFieldValue('voiceModel')) patch.voiceModel = d.model;
+                      if (Object.keys(patch).length > 0) form.setFieldsValue(patch);
+                    }}
+                    options={STT_PROVIDER_OPTIONS}
+                  />
+                </Form.Item>
+              </SettingRow>
               <Form.Item
                 noStyle
                 shouldUpdate={(prev, cur) => prev.voiceProvider !== cur.voiceProvider}
@@ -633,52 +571,65 @@ export function VoicePane() {
                 {({ getFieldValue: getStt }) => (
                   <>
                     {getStt('voiceProvider') === 'local-stt' ? (
-                      <Form.Item
-                        name="voiceBaseUrl"
+                      <SettingRow
                         label="STT Base URL"
-                        extra="Endpoint for your local (OpenAI-compatible) server. Leave blank for the default."
+                        formName="voiceBaseUrl"
+                        help="Endpoint for your local (OpenAI-compatible) server. Leave blank for the default."
                       >
-                        <Input placeholder="http://localhost:8000/v1" />
-                      </Form.Item>
+                        <Form.Item name="voiceBaseUrl" style={{ marginBottom: 0 }}>
+                          <Input placeholder="http://localhost:8000/v1" />
+                        </Form.Item>
+                      </SettingRow>
                     ) : null}
                     {getStt('voiceProvider') === 'command-stt' ? (
-                      <Form.Item
-                        name="voiceSttCommand"
+                      <SettingRow
                         label="STT command"
-                        extra={`Shell template run once per utterance. Placeholders: ${COMMAND_STT_PLACEHOLDERS}. {input_path} and {output_path} are required.`}
-                        rules={[{ validator: commandTemplateValidator }]}
+                        formName="voiceSttCommand"
+                        help={`Shell template run once per utterance. Placeholders: ${COMMAND_STT_PLACEHOLDERS}. {input_path} and {output_path} are required.`}
                       >
-                        <Input placeholder={COMMAND_STT_EXAMPLE} />
-                      </Form.Item>
+                        <Form.Item
+                          name="voiceSttCommand"
+                          rules={[{ validator: commandTemplateValidator }]}
+                          style={{ marginBottom: 0 }}
+                        >
+                          <Input placeholder={COMMAND_STT_EXAMPLE} />
+                        </Form.Item>
+                      </SettingRow>
                     ) : null}
                   </>
                 )}
               </Form.Item>
-              <Form.Item
-                name="voiceModel"
+              <SettingRow
                 label="STT Model"
-                extra="Free-form — server-specific (e.g. Systran/faster-whisper-large-v3)."
+                formName="voiceModel"
+                help="Free-form — server-specific (e.g. Systran/faster-whisper-large-v3)."
               >
-                <Input placeholder="whisper-large-v3" />
-              </Form.Item>
-              <Form.Item
-                name="voiceApiKey"
+                <Form.Item name="voiceModel" style={{ marginBottom: 0 }}>
+                  <Input placeholder="whisper-large-v3" />
+                </Form.Item>
+              </SettingRow>
+              <SettingRow
                 label="STT API key (optional)"
-                extra={
+                formName="voiceApiKey"
+                help={
                   configData?.voiceApiKeyPreview
                     ? `Current: ${configData.voiceApiKeyPreview}`
                     : 'Optional — leave blank for local servers that need no key.'
                 }
               >
-                <Input.Password placeholder="Enter API key..." />
-              </Form.Item>
-              <Form.Item
-                name="voiceSttTimeoutMs"
+                <Form.Item name="voiceApiKey" style={{ marginBottom: 0 }}>
+                  <Input.Password placeholder="Enter API key..." />
+                </Form.Item>
+              </SettingRow>
+              <SettingRow
                 label="STT timeout (seconds)"
-                extra="How long one transcription may take. Blank = provider default."
+                formName="voiceSttTimeoutMs"
+                help="How long one transcription may take. Blank = provider default."
               >
-                <InputNumber min={1} max={3600} step={1} placeholder="120" />
-              </Form.Item>
+                <Form.Item name="voiceSttTimeoutMs" style={{ marginBottom: 0 }}>
+                  <InputNumber min={1} max={3600} step={1} placeholder="120" />
+                </Form.Item>
+              </SettingRow>
               <Form.Item
                 noStyle
                 shouldUpdate={(prev, cur) => STT_TEST_DIRTY_FIELDS.some((k) => prev[k] !== cur[k])}
@@ -699,27 +650,29 @@ export function VoicePane() {
                 rows={voiceSttProviderRows}
                 setRows={setVoiceSttProviderRows}
               />
-              <VoiceSectionLabel>Text-to-speech</VoiceSectionLabel>
-              <Form.Item
-                name="voiceTtsProvider"
-                label="Default provider"
-                extra="Text-to-speech provider for reading agent responses aloud. This is the default entry — a personality that names no provider of its own speaks through it."
+              <SectionHeading id="text-to-speech">text-to-speech</SectionHeading>
+              <SettingRow
+                label="Default provider (TTS)"
+                formName="voiceTtsProvider"
+                help="Text-to-speech provider for reading agent responses aloud. This is the default entry — a personality that names no provider of its own speaks through it."
               >
-                <Select
-                  allowClear
-                  placeholder="Select a TTS provider..."
-                  onChange={(value: string | undefined) => {
-                    if (!value) return;
-                    const d = TTS_PROVIDER_DEFAULTS[value];
-                    if (!d) return;
-                    const patch: Partial<FormShape> = {};
-                    if (!form.getFieldValue('voiceTtsBaseUrl')) patch.voiceTtsBaseUrl = d.baseUrl;
-                    if (!form.getFieldValue('voiceTtsModel')) patch.voiceTtsModel = d.model;
-                    if (Object.keys(patch).length > 0) form.setFieldsValue(patch);
-                  }}
-                  options={TTS_PROVIDER_OPTIONS}
-                />
-              </Form.Item>
+                <Form.Item name="voiceTtsProvider" style={{ marginBottom: 0 }}>
+                  <Select
+                    allowClear
+                    placeholder="Select a TTS provider..."
+                    onChange={(value: string | undefined) => {
+                      if (!value) return;
+                      const d = TTS_PROVIDER_DEFAULTS[value];
+                      if (!d) return;
+                      const patch: Partial<FormShape> = {};
+                      if (!form.getFieldValue('voiceTtsBaseUrl')) patch.voiceTtsBaseUrl = d.baseUrl;
+                      if (!form.getFieldValue('voiceTtsModel')) patch.voiceTtsModel = d.model;
+                      if (Object.keys(patch).length > 0) form.setFieldsValue(patch);
+                    }}
+                    options={TTS_PROVIDER_OPTIONS}
+                  />
+                </Form.Item>
+              </SettingRow>
               <Form.Item
                 noStyle
                 shouldUpdate={(prev, cur) => prev.voiceTtsProvider !== cur.voiceTtsProvider}
@@ -728,74 +681,93 @@ export function VoicePane() {
                   getTts('voiceTtsProvider') ? (
                     <>
                       {getTts('voiceTtsProvider') === 'local-tts' ? (
-                        <Form.Item
-                          name="voiceTtsBaseUrl"
+                        <SettingRow
                           label="TTS Base URL"
-                          extra="Endpoint for your local (OpenAI-compatible) server. Leave blank for the default."
+                          formName="voiceTtsBaseUrl"
+                          help="Endpoint for your local (OpenAI-compatible) server. Leave blank for the default."
                         >
-                          <Input placeholder="http://localhost:8880/v1" />
-                        </Form.Item>
+                          <Form.Item name="voiceTtsBaseUrl" style={{ marginBottom: 0 }}>
+                            <Input placeholder="http://localhost:8880/v1" />
+                          </Form.Item>
+                        </SettingRow>
                       ) : null}
                       {getTts('voiceTtsProvider') === 'command-tts' ? (
-                        <Form.Item
-                          name="voiceTtsCommand"
+                        <SettingRow
                           label="TTS command"
-                          extra={`Shell template run once per synthesis. Placeholders: ${COMMAND_TTS_PLACEHOLDERS}. {input_path} and {output_path} are required; set the audio format below to match what the command writes.`}
-                          rules={[{ validator: commandTemplateValidator }]}
+                          formName="voiceTtsCommand"
+                          help={`Shell template run once per synthesis. Placeholders: ${COMMAND_TTS_PLACEHOLDERS}. {input_path} and {output_path} are required; set the audio format below to match what the command writes.`}
                         >
-                          <Input placeholder={COMMAND_TTS_EXAMPLE} />
-                        </Form.Item>
+                          <Form.Item
+                            name="voiceTtsCommand"
+                            rules={[{ validator: commandTemplateValidator }]}
+                            style={{ marginBottom: 0 }}
+                          >
+                            <Input placeholder={COMMAND_TTS_EXAMPLE} />
+                          </Form.Item>
+                        </SettingRow>
                       ) : null}
-                      <Form.Item
-                        name="voiceTtsModel"
+                      <SettingRow
                         label="TTS Model"
-                        extra="Free-form — server-specific (e.g. kokoro, tts-1)."
+                        formName="voiceTtsModel"
+                        help="Free-form — server-specific (e.g. kokoro, tts-1)."
                       >
-                        <Input placeholder="kokoro" />
-                      </Form.Item>
-                      <Form.Item
-                        name="voiceTtsApiKey"
+                        <Form.Item name="voiceTtsModel" style={{ marginBottom: 0 }}>
+                          <Input placeholder="kokoro" />
+                        </Form.Item>
+                      </SettingRow>
+                      <SettingRow
                         label="TTS API key (optional)"
-                        extra={
+                        formName="voiceTtsApiKey"
+                        help={
                           configData?.voiceTtsApiKeyPreview
                             ? `Current: ${configData.voiceTtsApiKeyPreview}`
                             : 'Optional — leave blank for local servers that need no key.'
                         }
                       >
-                        <Input.Password placeholder="Enter API key..." />
-                      </Form.Item>
-                      <Form.Item
-                        name="voiceTtsVoice"
+                        <Form.Item name="voiceTtsApiKey" style={{ marginBottom: 0 }}>
+                          <Input.Password placeholder="Enter API key..." />
+                        </Form.Item>
+                      </SettingRow>
+                      <SettingRow
                         label="Voice ID"
-                        extra="Free-form — every server names voices differently (e.g. Kokoro af_bella, OpenAI nova)."
+                        formName="voiceTtsVoice"
+                        help="Free-form — every server names voices differently (e.g. Kokoro af_bella, OpenAI nova)."
                       >
-                        <Input placeholder="e.g. af_bella" />
-                      </Form.Item>
-                      <Form.Item
-                        name="voiceTtsOutputFormat"
+                        <Form.Item name="voiceTtsVoice" style={{ marginBottom: 0 }}>
+                          <Input placeholder="e.g. af_bella" />
+                        </Form.Item>
+                      </SettingRow>
+                      <SettingRow
                         label="TTS audio format"
-                        extra="Container the provider is asked for. Blank = the provider's own default."
+                        formName="voiceTtsOutputFormat"
+                        help="Container the provider is asked for. Blank = the provider's own default."
                       >
-                        <Select
-                          allowClear
-                          placeholder="Provider default"
-                          options={AUDIO_FORMATS.map((f) => ({ label: f, value: f }))}
-                        />
-                      </Form.Item>
-                      <Form.Item
-                        name="voiceTtsTimeoutMs"
+                        <Form.Item name="voiceTtsOutputFormat" style={{ marginBottom: 0 }}>
+                          <Select
+                            allowClear
+                            placeholder="Provider default"
+                            options={AUDIO_FORMATS.map((f) => ({ label: f, value: f }))}
+                          />
+                        </Form.Item>
+                      </SettingRow>
+                      <SettingRow
                         label="TTS timeout (seconds)"
-                        extra="How long one synthesis request may take. Blank = provider default."
+                        formName="voiceTtsTimeoutMs"
+                        help="How long one synthesis request may take. Blank = provider default."
                       >
-                        <InputNumber min={1} max={3600} step={1} placeholder="120" />
-                      </Form.Item>
-                      <Form.Item
-                        name="voiceTtsMaxTextLength"
+                        <Form.Item name="voiceTtsTimeoutMs" style={{ marginBottom: 0 }}>
+                          <InputNumber min={1} max={3600} step={1} placeholder="120" />
+                        </Form.Item>
+                      </SettingRow>
+                      <SettingRow
                         label="TTS max text length"
-                        extra="Characters per synthesis request; longer replies are split or refused by the provider."
+                        formName="voiceTtsMaxTextLength"
+                        help="Characters per synthesis request; longer replies are split or refused by the provider."
                       >
-                        <InputNumber min={100} max={100000} step={100} placeholder="4096" />
-                      </Form.Item>
+                        <Form.Item name="voiceTtsMaxTextLength" style={{ marginBottom: 0 }}>
+                          <InputNumber min={100} max={100000} step={100} placeholder="4096" />
+                        </Form.Item>
+                      </SettingRow>
                       <Form.Item
                         noStyle
                         shouldUpdate={(prev, cur) =>
@@ -826,45 +798,135 @@ export function VoicePane() {
                 rows={voiceTtsProviderRows}
                 setRows={setVoiceTtsProviderRows}
               />
-              <VoiceSectionLabel>Realtime (speech-to-speech)</VoiceSectionLabel>
-              <Form.Item
-                name="voiceRealtimeDefault"
-                label="Default provider"
-                extra={
+              <SectionHeading id="realtime">realtime</SectionHeading>
+              <SettingRow
+                label="Default provider (realtime)"
+                formName="voiceRealtimeDefault"
+                help={
                   voiceRealtimeProviderRows.length === 0
                     ? 'Add a realtime provider below, then choose which one everything uses by default.'
                     : 'Which of the providers below a personality gets when it names none of its own.'
                 }
               >
-                <Select
-                  allowClear
-                  disabled={voiceRealtimeProviderRows.length === 0}
-                  placeholder={
-                    voiceRealtimeProviderRows.length === 0
-                      ? 'No realtime providers yet'
-                      : 'Select a provider...'
-                  }
-                  options={voiceRealtimeProviderRows
-                    .filter((r) => r.name.trim())
-                    .map((r) => ({ label: r.name.trim(), value: r.name.trim() }))}
-                />
-              </Form.Item>
+                <Form.Item name="voiceRealtimeDefault" style={{ marginBottom: 0 }}>
+                  <Select
+                    allowClear
+                    disabled={voiceRealtimeProviderRows.length === 0}
+                    placeholder={
+                      voiceRealtimeProviderRows.length === 0
+                        ? 'No realtime providers yet'
+                        : 'Select a provider...'
+                    }
+                    options={voiceRealtimeProviderRows
+                      .filter((r) => r.name.trim())
+                      .map((r) => ({ label: r.name.trim(), value: r.name.trim() }))}
+                  />
+                </Form.Item>
+              </SettingRow>
               <VoiceProviderRoster
                 spec={REALTIME_ROSTER_SPEC}
                 rows={voiceRealtimeProviderRows}
                 setRows={setVoiceRealtimeProviderRows}
               />
-              <Form.Item
-                name="voiceRealtimeSessionBudgetUsd"
+              <SettingRow
                 label="Stop a call at (USD)"
-                extra="One realtime conversation ends once it has cost this much, using the per-minute rate on the provider above. Blank = no limit."
+                formName="voiceRealtimeSessionBudgetUsd"
+                help="One realtime conversation ends once it has cost this much, using the per-minute rate on the provider above. Blank = no limit."
               >
-                <InputNumber min={0.01} max={10000} step={0.5} placeholder="No limit" />
-              </Form.Item>
+                <Form.Item name="voiceRealtimeSessionBudgetUsd" style={{ marginBottom: 0 }}>
+                  <InputNumber min={0.01} max={10000} step={0.5} placeholder="No limit" />
+                </Form.Item>
+              </SettingRow>
             </>
           ) : null
         }
       </Form.Item>
+      <SectionHeading id="barge-in">barge-in</SectionHeading>
+      <Typography.Paragraph type="secondary" style={{ marginTop: 0, fontSize: 13 }}>
+        When interrupting the agent counts as interrupting it. A phone line, a satellite across a
+        room, and this browser hear very different noise floors, so each is tuned on its own — and a
+        surface left blank is untuned, which is not the same as tuned to the defaults. A satellite
+        ends an utterance on a count of silent frames, not a duration, so its Silence (ms) is not
+        read.
+      </Typography.Paragraph>
+      {BARGE_IN_SURFACES.map((surface) => (
+        <div key={surface} style={ROW_BOX_STYLE}>
+          <Typography.Text strong style={{ fontSize: 13 }}>
+            {BARGE_IN_SURFACE_LABELS[surface]}
+          </Typography.Text>
+          <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+            <div style={{ flex: 1 }}>
+              <RowLabel>Energy threshold</RowLabel>
+              <Form.Item name={['voiceBargeIn', surface, 'energyThreshold']} noStyle>
+                <InputNumber
+                  size="small"
+                  style={{ width: '100%' }}
+                  min={0.001}
+                  max={1}
+                  step={0.01}
+                  placeholder="Untuned"
+                />
+              </Form.Item>
+            </div>
+            <div style={{ flex: 1 }}>
+              <RowLabel>Min speech (ms)</RowLabel>
+              <Form.Item name={['voiceBargeIn', surface, 'minSpeechMs']} noStyle>
+                <InputNumber
+                  size="small"
+                  style={{ width: '100%' }}
+                  min={1}
+                  max={10000}
+                  step={10}
+                  placeholder="Untuned"
+                />
+              </Form.Item>
+            </div>
+            <div style={{ flex: 1 }}>
+              <RowLabel>Silence (ms)</RowLabel>
+              <Form.Item name={['voiceBargeIn', surface, 'silenceMs']} noStyle>
+                <InputNumber
+                  size="small"
+                  style={{ width: '100%' }}
+                  min={1}
+                  max={10000}
+                  step={10}
+                  placeholder="Untuned"
+                />
+              </Form.Item>
+            </div>
+          </div>
+        </div>
+      ))}
+      <div style={ROW_BOX_STYLE}>
+        <Typography.Text strong style={{ fontSize: 13 }}>
+          Browser (this device)
+        </Typography.Text>
+        {/* settings-index-group: voice-tuning — `name={c.name}` is
+            opaque to the source scan, so the group id says which
+            `SETTINGS_INDEX` entries this site renders (T6). */}
+        {VOICE_TUNING_CONTROLS.map((c) => (
+          <Form.Item key={c.name} name={c.name} label={c.label} extra={c.extra}>
+            <Slider
+              min={c.min}
+              max={c.max}
+              step={c.step}
+              tooltip={{ formatter: (v) => `${v ?? ''}${c.unit}` }}
+            />
+          </Form.Item>
+        ))}
+        <Button
+          size="small"
+          onClick={() =>
+            form.setFieldsValue(
+              Object.fromEntries(
+                VOICE_TUNING_CONTROLS.map((c) => [c.name, DEFAULT_VOICE_TUNING[c.defaultKey]]),
+              ),
+            )
+          }
+        >
+          Reset to defaults
+        </Button>
+      </div>
       <Form.Item
         name="voiceDefaultMode"
         label="Voice replies on channels"
@@ -896,6 +958,55 @@ export function VoicePane() {
           <Switch />
         </Form.Item>
       ))}
+      <SectionHeading id="voice-notes">voice notes</SectionHeading>
+      <SettingRow
+        label="ffmpeg path"
+        formName="voiceTranscodeFfmpegPath"
+        help="ffmpeg is what re-containers a synthesized reply into the format each platform renders as a voice bubble instead of a file attachment. Without it Ethos can only send the formats the TTS provider already produces. Blank = whatever `ffmpeg` resolves to on PATH."
+      >
+        <Form.Item name="voiceTranscodeFfmpegPath" style={{ marginBottom: 0 }}>
+          <Input placeholder="ffmpeg" />
+        </Form.Item>
+      </SettingRow>
+      <SettingRow
+        label="Bitrate (kbps)"
+        formName="voiceTranscodeBitrateKbps"
+        help="Target bitrate for the transcoded voice note. Blank = 32, which is speech-grade."
+      >
+        <Form.Item name="voiceTranscodeBitrateKbps" style={{ marginBottom: 0 }}>
+          <InputNumber min={8} max={320} step={8} placeholder="32" />
+        </Form.Item>
+      </SettingRow>
+      <SettingRow
+        label="Transcode timeout (seconds)"
+        formName="voiceTranscodeTimeoutSec"
+        help="Budget for one ffmpeg run. Blank = 30."
+      >
+        <Form.Item name="voiceTranscodeTimeoutSec" style={{ marginBottom: 0 }}>
+          <InputNumber min={1} max={600} placeholder="30" />
+        </Form.Item>
+      </SettingRow>
+      <SettingRow
+        label="Abandon after (days)"
+        formName="voiceArtifactAbandonAfterDays"
+        help="An artifact is deleted the moment its delivery is confirmed. This bounds the ones that never are: give up on an undelivered voice note after this long and delete it. Blank = 7."
+      >
+        <Form.Item name="voiceArtifactAbandonAfterDays" style={{ marginBottom: 0 }}>
+          <InputNumber min={1} max={365} placeholder="7" />
+        </Form.Item>
+      </SettingRow>
+      <SettingRow
+        label="Artifact directory cap (MiB)"
+        formName="voiceArtifactMaxTotalMb"
+        help="Oldest-first eviction once the stored artifacts exceed this — the backstop for when neither delivery nor abandonment has fired. Blank = 512."
+      >
+        <Form.Item name="voiceArtifactMaxTotalMb" style={{ marginBottom: 0 }}>
+          <InputNumber min={1} max={102400} placeholder="512" />
+        </Form.Item>
+      </SettingRow>
+      {/* OQ7 (plan §12): folded into voice notes, per the plan's own tentative
+          resolution — still an open owner question, not a settled decision. */}
+      <VoiceDeliveryStatus />
       {configData ? (
         <VoiceTelephonySections
           config={configData}
@@ -911,8 +1022,6 @@ export function VoicePane() {
         actually listening.
       </Typography.Paragraph>
       <WakePanel />
-      <VoiceSectionLabel>Delivery status</VoiceSectionLabel>
-      <VoiceDeliveryStatus />
       <Form.Item
         name="voiceEgressGate"
         valuePropName="checked"
@@ -943,7 +1052,7 @@ export function VoicePane() {
           ) : null
         }
       </Form.Item>
-    </Card>
+    </>
   );
 }
 
@@ -1598,63 +1707,6 @@ function VoiceTelephonySections({
       >
         <Input placeholder="Default bot" />
       </Form.Item>
-
-      <VoiceSectionLabel>Barge-in sensitivity</VoiceSectionLabel>
-      <Typography.Paragraph type="secondary" style={{ marginTop: 0, fontSize: 13 }}>
-        When interrupting the agent counts as interrupting it. A phone line and a satellite across a
-        room hear very different noise floors, so each is tuned on its own — and a surface left
-        blank is untuned, which is not the same as tuned to the defaults. Talk-mode in this browser
-        endpoints in the browser: tune it under Advanced voice tuning above. A satellite ends an
-        utterance on a count of silent frames, not a duration, so its Silence (ms) is not read.
-      </Typography.Paragraph>
-      {BARGE_IN_SURFACES.map((surface) => (
-        <div key={surface} style={ROW_BOX_STYLE}>
-          <Typography.Text strong style={{ fontSize: 13 }}>
-            {BARGE_IN_SURFACE_LABELS[surface]}
-          </Typography.Text>
-          <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
-            <div style={{ flex: 1 }}>
-              <RowLabel>Energy threshold</RowLabel>
-              <Form.Item name={['voiceBargeIn', surface, 'energyThreshold']} noStyle>
-                <InputNumber
-                  size="small"
-                  style={{ width: '100%' }}
-                  min={0.001}
-                  max={1}
-                  step={0.01}
-                  placeholder="Untuned"
-                />
-              </Form.Item>
-            </div>
-            <div style={{ flex: 1 }}>
-              <RowLabel>Min speech (ms)</RowLabel>
-              <Form.Item name={['voiceBargeIn', surface, 'minSpeechMs']} noStyle>
-                <InputNumber
-                  size="small"
-                  style={{ width: '100%' }}
-                  min={1}
-                  max={10000}
-                  step={10}
-                  placeholder="Untuned"
-                />
-              </Form.Item>
-            </div>
-            <div style={{ flex: 1 }}>
-              <RowLabel>Silence (ms)</RowLabel>
-              <Form.Item name={['voiceBargeIn', surface, 'silenceMs']} noStyle>
-                <InputNumber
-                  size="small"
-                  style={{ width: '100%' }}
-                  min={1}
-                  max={10000}
-                  step={10}
-                  placeholder="Untuned"
-                />
-              </Form.Item>
-            </div>
-          </div>
-        </div>
-      ))}
     </>
   );
 }

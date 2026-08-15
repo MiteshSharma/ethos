@@ -32,6 +32,7 @@ const FILES = [
   'security.tsx',
   'developer.tsx',
   'desktop.tsx',
+  'voice.tsx',
 ];
 
 describe('no <Card> in the converted panes', () => {
