@@ -4669,14 +4669,10 @@ textarea {
 
 .settings-section-nav-tab {
   font-size: 13px;
-  color: var(--text-secondary);
+  color: var(--text-primary);
   text-decoration: none;
   padding-bottom: 4px;
   border-bottom: 2px solid transparent;
-}
-
-.settings-section-nav-tab:hover {
-  color: var(--text-primary);
 }
 
 .settings-section-nav-tab.active {
