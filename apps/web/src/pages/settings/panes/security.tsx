@@ -1,6 +1,7 @@
 // Security & access — approval mode (with the admin gate), named secrets,
 // web-search defaults, API keys, A2A. Moved verbatim from `Settings.tsx`
-// (§4.2 rows 5, 11, 19, 20, 21 and the API-keys section).
+// (§4.2 rows 5, 11, 19, 20, 21 and the API-keys section), off `Card` onto
+// `SettingRow` / `SectionHeading` (Phase 4).
 //
 // Four of these five sections SAVE ON THEIR OWN and not with the page Save:
 // named secrets, API keys and A2A are mutations against separate stores, and
@@ -11,16 +12,23 @@
 // config keys as a side effect of typing.
 //
 // `Admin` is here, not in Developer: enabling a system-operations console is a
-// privilege decision (O2). The §8.g defect — the button follows the SAVED value,
-// so a freshly-ticked box shows no button until Save — is deliberately NOT fixed
-// here; it lands in Phase 4.
+// privilege decision (O2), and it lands as the LAST row of `approval mode` —
+// the section is already the privilege-decision section of this category — not
+// as a section of its own.
+//
+// §8.g, fixed HERE: the button used to follow the SAVED value for both its
+// visibility and its margin, while the checkbox wrote the FORM value — ticking
+// the box did nothing visible until Save + refetch. `AdminPanelGate` below is
+// the fix: the button still follows the SAVED value (the server gate,
+// `admin.service.ts:18` → `config.service.ts`, reads the config FILE, not the
+// browser's form store, so a live-value button would 403), but the LIVE value
+// is acknowledged immediately with an honest note instead of staying silent.
 
 import type { ApiKeyMetadata, ApiKeyScope } from '@ethosagent/web-contracts';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   App as AntApp,
   Button,
-  Card,
   Checkbox,
   Form,
   Input,
@@ -49,6 +57,8 @@ import {
 } from '../../../features/settings/api/queries';
 import { rpc } from '../../../rpc';
 import { AdvancedBlock } from '../components/advanced';
+import { SectionHeading } from '../components/section-heading';
+import { SettingRow } from '../components/setting-row';
 import { useSettingsPane } from '../pane-context';
 
 const WEB_SEARCH_PROVIDERS = ['exa', 'tavily', 'brave'] as const;
@@ -59,12 +69,13 @@ function isWebSearchProvider(v: string | undefined): v is WebSearchProvider {
 
 export function SecurityPane() {
   const { config: configData } = useSettingsPane();
-  const navigate = useNavigate();
 
   return (
     <>
-      <Card title="Approval Mode" size="small" style={{ marginBottom: 16 }}>
-        <Form.Item name="approvalMode">
+      <SectionHeading id="approval-mode">approval mode</SectionHeading>
+
+      <SettingRow label="Approval mode" formName="approvalMode">
+        <Form.Item name="approvalMode" style={{ marginBottom: 0 }}>
           <Radio.Group>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
               <Radio value="manual">
@@ -88,32 +99,73 @@ export function SecurityPane() {
             </div>
           </Radio.Group>
         </Form.Item>
-      </Card>
+      </SettingRow>
 
       <AdvancedBlock>
-        <Card title="Admin" size="small" style={{ marginBottom: 16 }}>
-          <Form.Item
-            name="adminEnabled"
-            valuePropName="checked"
-            extra="Enable the admin console for system-level operations. Takes effect on save."
-            style={{ marginBottom: configData?.adminEnabled ? 12 : 0 }}
-          >
-            <Checkbox>Enable admin panel</Checkbox>
+        <SettingRow
+          label="Enable admin panel"
+          formName="adminEnabled"
+          help="Enable the admin console for system-level operations. Takes effect on save."
+        >
+          <Form.Item name="adminEnabled" valuePropName="checked" style={{ marginBottom: 0 }}>
+            <Checkbox />
           </Form.Item>
-          {configData?.adminEnabled && (
-            <Button onClick={() => navigate('/admin')}>Open admin panel</Button>
-          )}
-        </Card>
+        </SettingRow>
+        <AdminPanelGate savedEnabled={configData?.adminEnabled} />
       </AdvancedBlock>
 
+      <SectionHeading id="named-secrets">named secrets</SectionHeading>
       <NamedSecretsSection />
 
+      <SectionHeading id="web-search-defaults">web-search defaults</SectionHeading>
       <WebSearchDefaultsSection />
 
+      <SectionHeading id="api-keys">API keys</SectionHeading>
       <ApiKeysSection />
 
+      <SectionHeading id="a2a">A2A</SectionHeading>
       <A2aSection />
     </>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Admin panel gate (§8.g). The button follows the SAVED value — the server
+// gate (`admin.service.ts:18` → `ConfigService.adminEnabled()` →
+// `config.service.ts:1672`–`:1674`) reads `admin.enabled` from the config FILE,
+// not the browser's form store, so a button driven by the live value would
+// navigate to a panel the server 403s. The note follows the LIVE value, so
+// ticking the box is acknowledged the instant it happens — honestly, without
+// promising a button pressing it would not honour. Exported for T16
+// (`__tests__/admin-panel-gate.test.ts`), which pins all three rendered states.
+// ---------------------------------------------------------------------------
+
+export function AdminPanelGate({ savedEnabled }: { savedEnabled: boolean | undefined }) {
+  const navigate = useNavigate();
+  return (
+    <Form.Item noStyle shouldUpdate={(prev, cur) => prev.adminEnabled !== cur.adminEnabled}>
+      {({ getFieldValue }) => {
+        const liveEnabled = Boolean(getFieldValue('adminEnabled'));
+        if (liveEnabled && savedEnabled) {
+          return <Button onClick={() => navigate('/admin')}>Open admin panel</Button>;
+        }
+        if (liveEnabled) {
+          return (
+            <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+              Save to enable, then open the admin panel.
+            </Typography.Text>
+          );
+        }
+        if (savedEnabled) {
+          return (
+            <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+              Still enabled until you save — the panel is reachable.
+            </Typography.Text>
+          );
+        }
+        return null;
+      }}
+    </Form.Item>
   );
 }
 
@@ -182,20 +234,16 @@ function NamedSecretsSection() {
   ];
 
   return (
-    <Card
-      title="Named secrets"
-      size="small"
-      style={{ maxWidth: 640, marginTop: 32 }}
-      extra={
+    <div style={{ maxWidth: 640, marginBottom: 16 }}>
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: 12, marginBottom: 8 }}>
+        <Typography.Paragraph type="secondary" style={{ margin: 0, flex: 1 }}>
+          Provider keys reusable across personalities. A personality references a secret by name;
+          the value stays here and is never shown again.
+        </Typography.Paragraph>
         <Button size="small" onClick={() => setAddOpen(true)}>
           Add secret
         </Button>
-      }
-    >
-      <Typography.Paragraph type="secondary" style={{ marginTop: 0 }}>
-        Provider keys reusable across personalities. A personality references a secret by name; the
-        value stays here and is never shown again.
-      </Typography.Paragraph>
+      </div>
       <Table
         size="small"
         rowKey={(r) => `${r.provider}/${r.name}`}
@@ -212,7 +260,7 @@ function NamedSecretsSection() {
           onCreated={() => setAddOpen(false)}
         />
       ) : null}
-    </Card>
+    </div>
   );
 }
 
@@ -265,12 +313,12 @@ function WebSearchDefaultsSection() {
   const canTest = isWebSearchProvider(values.provider) && !!values.secret;
 
   return (
-    <Card title="Web-search defaults" size="small" style={{ maxWidth: 640, marginTop: 32 }}>
+    <div style={{ maxWidth: 640, marginBottom: 16 }}>
       <Typography.Paragraph type="secondary" style={{ marginTop: 0 }}>
         The provider and key <Typography.Text code>web_search</Typography.Text> uses when a
         personality doesn&apos;t bind its own. A personality&apos;s own setting always wins. This
-        card saves on its own button, below — which backend the tool is forced to use is a separate
-        control, Web search backend, under Models &amp; backends, saved with the page.
+        section saves on its own button, below — which backend the tool is forced to use is a
+        separate control, Web search backend, under Models &amp; backends, saved with the page.
       </Typography.Paragraph>
       <ToolSettingsForm
         schema={schema}
@@ -303,7 +351,7 @@ function WebSearchDefaultsSection() {
         {testStatus === 'ok' && <Tag color="success">Key accepted</Tag>}
         {testStatus === 'error' && <Tag color="error">{testError ?? 'Failed'}</Tag>}
       </Space>
-    </Card>
+    </div>
   );
 }
 
@@ -353,7 +401,7 @@ function A2aSection() {
   const enabled = settingsQuery.data?.enabled ?? false;
 
   return (
-    <Card title="Agent-to-Agent (A2A)" size="small" style={{ maxWidth: 640, marginTop: 32 }}>
+    <div style={{ maxWidth: 640, marginBottom: 16 }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 8 }}>
         <Switch
           checked={enabled}
@@ -374,7 +422,7 @@ function A2aSection() {
             : 'Enabling exposes the A2A discovery and peering surface. Peers are still default-deny.'}
         </Typography.Text>
       )}
-    </Card>
+    </div>
   );
 }
 
@@ -576,19 +624,16 @@ function ApiKeysSection() {
   const keys = keysQuery.data?.items ?? [];
 
   return (
-    <div style={{ marginTop: 32 }}>
+    <div style={{ marginBottom: 16 }}>
       <div style={{ display: 'flex', alignItems: 'baseline', gap: 12, marginBottom: 8 }}>
-        <Typography.Title level={4} style={{ margin: 0 }}>
-          API Keys
-        </Typography.Title>
+        <Typography.Paragraph type="secondary" style={{ margin: 0, flex: 1 }}>
+          Bearer tokens for external Mission Controls. Each key is scoped to specific operations and
+          origins.
+        </Typography.Paragraph>
         <Button type="primary" size="small" onClick={() => setCreateOpen(true)}>
           Create API Key
         </Button>
       </div>
-      <Typography.Paragraph type="secondary" style={{ marginTop: 0, marginBottom: 16 }}>
-        Bearer tokens for external Mission Controls. Each key is scoped to specific operations and
-        origins.
-      </Typography.Paragraph>
 
       <Table<ApiKeyMetadata>
         columns={columns}

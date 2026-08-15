@@ -288,7 +288,7 @@ function CatalogAndBackendsFields() {
       <SettingRow
         label="Web search backend"
         formName="webSearchBackend"
-        help="Auto picks from available keys. Saved with this page; the key each backend uses is bound in the Web-search defaults card, which saves on its own button."
+        help="Auto picks from available keys. Saved with this page; the key each backend uses is bound in the Web-search defaults section, under Security & access, which saves on its own button."
       >
         <Form.Item name="webSearchBackend" style={{ marginBottom: 0 }}>
           <Select

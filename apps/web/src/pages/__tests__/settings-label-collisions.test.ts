@@ -64,19 +64,25 @@ describe('settings label collisions', () => {
   });
 
   it('the two retention cards say whose data they retain', () => {
-    expect(page).toContain('<Card title="Agent data retention"');
-    expect(desktop).toContain('<Card title="Desktop cache retention"');
-    expect(page).not.toContain('<Card title="Data retention"');
-    expect(desktop).not.toContain('<Card title="Retention"');
+    // Phase 4 (settings-navigation.md §9) removes both `Card`s. The
+    // distinguishing label survives as a strong text line at the top of each
+    // pane's retention block instead of a `<Card title>`.
+    expect(page).toContain('Agent data retention');
+    expect(desktop).toContain('Desktop cache retention');
   });
 
   it('each web-search control names the other one', () => {
     expect(fieldBlock('webSearchBackend')).toContain('Web-search defaults');
 
-    const card = page.slice(page.indexOf('<Card title="Web-search defaults"'));
-    const prose = card.slice(0, card.indexOf('</Typography.Paragraph>')).replace(/\s+/g, ' ');
-    expect(prose).toContain('Web search backend');
-    expect(prose).toContain('Models &amp; backends');
+    // Phase 4 removes the `Card`; the prose now lives in the
+    // `WebSearchDefaultsSection` component body rather than inline at the
+    // `SectionHeading` call site, so anchor on the function itself.
+    const start = page.indexOf('function WebSearchDefaultsSection()');
+    expect(start, 'missing WebSearchDefaultsSection').toBeGreaterThan(-1);
+    const next = page.indexOf('// ---', start);
+    const section = page.slice(start, next === -1 ? undefined : next).replace(/\s+/g, ' ');
+    expect(section).toContain('Web search backend');
+    expect(section).toContain('Models &amp; backends');
   });
 
   it('no two settings cards share a title', () => {
