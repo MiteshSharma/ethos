@@ -28,8 +28,12 @@
 /** Which Save writes this control: the page's Save bar, or the control itself. */
 export type SettingSaves = 'page' | 'self';
 
-/** `'unread'` = the key is written and stored but nothing reads it (§7). */
-export type SettingStatus = 'unread' | null;
+/**
+ * `'unread'` = the key is written and stored but nothing reads it (§7).
+ * `'broken'` = the control does not work at all. Neither is a bug this table
+ * fixes — it is the honesty marker `StatusCallout` renders (plan §6.2, Phase 7).
+ */
+export type SettingStatus = 'unread' | 'broken' | null;
 
 export interface SettingEntry {
   /** The `config.yaml` key this control writes, or `null` — see `keyUnresolved`. */
@@ -51,6 +55,13 @@ export interface SettingEntry {
   keyUnresolved?: string;
   /** Rendered by a `name={<expression>}` site that declares this group id. */
   dynamicGroup?: string;
+  /**
+   * The control writes no key OF ITS OWN — it derives from another field
+   * (§7: `Voice enabled`, `Restrict voice egress`). `SettingRow` renders the
+   * literal word `derived` where the key line normally goes instead of a
+   * plausible-looking key that does not exist.
+   */
+  derived?: true;
 }
 
 interface Row {
@@ -63,6 +74,7 @@ interface Row {
   stateBacked?: true;
   keyUnresolved?: string;
   dynamicGroup?: string;
+  derived?: true;
 }
 
 /** Hoists the category/section out of every row, and applies the defaults. */
@@ -593,6 +605,7 @@ export const SETTINGS_INDEX: readonly SettingEntry[] = [
       formName: 'voiceEgressGate',
       label: 'Restrict voice egress',
       keyUnresolved: 'Derived from `voice.trustedPlugins !== null`; writes that key or null.',
+      derived: true,
     },
   ]),
   ...group('voice', 'wake-routes', [
@@ -661,6 +674,7 @@ export const SETTINGS_INDEX: readonly SettingEntry[] = [
       label: 'Voice enabled',
       keyUnresolved:
         "Derived from `voiceProvider`; clearing it writes voiceProvider:'' and voiceTtsProvider:''.",
+      derived: true,
     },
   ]),
   ...group('automation', 'quick-commands', [
@@ -1059,4 +1073,27 @@ export function keyForFormName(
   index: readonly SettingEntry[] = SETTINGS_INDEX,
 ): string | null {
   return index.find((e) => e.formName === formName)?.key ?? null;
+}
+
+/**
+ * Whether a form field's key is derived rather than written directly.
+ * `SettingRow` renders the literal word `derived` in the key line's position
+ * for these instead of resolving `keyForFormName` (§7, Phase 7).
+ */
+export function isDerivedFormName(
+  formName: string,
+  index: readonly SettingEntry[] = SETTINGS_INDEX,
+): boolean {
+  return index.find((e) => e.formName === formName)?.derived === true;
+}
+
+/**
+ * The `SETTINGS_INDEX.status` for a form field — what `SettingRow` resolves to
+ * decide whether to render a `StatusCallout` (§7, Phase 7).
+ */
+export function statusForFormName(
+  formName: string,
+  index: readonly SettingEntry[] = SETTINGS_INDEX,
+): SettingStatus {
+  return index.find((e) => e.formName === formName)?.status ?? null;
 }

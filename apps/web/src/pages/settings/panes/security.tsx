@@ -58,6 +58,7 @@ import {
 import { rpc } from '../../../rpc';
 import { AdvancedBlock } from '../components/advanced';
 import { SectionHeading } from '../components/section-heading';
+import { SelfSaveMarker } from '../components/self-save-marker';
 import { SettingRow } from '../components/setting-row';
 import { useSettingsPane } from '../pane-context';
 
@@ -244,6 +245,7 @@ function NamedSecretsSection() {
           Add secret
         </Button>
       </div>
+      <SelfSaveMarker />
       <Table
         size="small"
         rowKey={(r) => `${r.provider}/${r.name}`}
@@ -351,6 +353,9 @@ function WebSearchDefaultsSection() {
         {testStatus === 'ok' && <Tag color="success">Key accepted</Tag>}
         {testStatus === 'error' && <Tag color="error">{testError ?? 'Failed'}</Tag>}
       </Space>
+      <div style={{ marginTop: 8 }}>
+        <SelfSaveMarker />
+      </div>
     </div>
   );
 }
@@ -410,6 +415,7 @@ function A2aSection() {
           onChange={(next) => setMut.mutate(next)}
         />
         <Typography.Text>{enabled ? 'Enabled' : 'Disabled'}</Typography.Text>
+        <SelfSaveMarker />
       </div>
       {loadError ? (
         <Typography.Text type="danger" style={{ fontSize: 12 }}>
@@ -634,6 +640,7 @@ function ApiKeysSection() {
           Create API Key
         </Button>
       </div>
+      <SelfSaveMarker />
 
       <Table<ApiKeyMetadata>
         columns={columns}

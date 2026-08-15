@@ -3,6 +3,7 @@ import { Button, Space, Spin, Typography } from 'antd';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { blobToBase64 } from '../../components/chat/VoiceButton';
 import { useVoiceRecorder } from '../../hooks/useVoiceRecorder';
+import { SelfSaveMarker } from '../../pages/settings/components/self-save-marker';
 import { rpc } from '../../rpc';
 import { usePersonalityList } from '../personalities/api/queries';
 import { SatelliteRow } from './SatelliteRow';
@@ -299,6 +300,7 @@ export function WakePanel() {
           Save routes
         </Button>
       </Space>
+      <SelfSaveMarker />
 
       <WakeTester
         drafts={rows}

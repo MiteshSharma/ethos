@@ -8,6 +8,7 @@ import { BUILTIN_SKIN_NAMES, BUILTIN_SKINS } from '@ethosagent/design-tokens';
 import { Button, Form, Select } from 'antd';
 import { useNavigate } from 'react-router-dom';
 import { SectionHeading } from '../components/section-heading';
+import { SelfSaveMarker } from '../components/self-save-marker';
 import { SettingRow } from '../components/setting-row';
 import { useSettingsPane } from '../pane-context';
 
@@ -65,6 +66,7 @@ export function GeneralPane() {
             Re-run the guided setup to change your provider, model, personality, or messaging
             credentials.
           </div>
+          <SelfSaveMarker />
         </div>
         <div className="settings-row-control">
           <Button onClick={() => navigate('/onboarding')}>Run setup wizard</Button>

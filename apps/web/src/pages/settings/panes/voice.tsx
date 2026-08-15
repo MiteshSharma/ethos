@@ -46,6 +46,7 @@ import { ROW_BOX_STYLE, RowLabel } from '../components/primitives';
 import { SectionHeading } from '../components/section-heading';
 import { SettingRow } from '../components/setting-row';
 import { SettingTable } from '../components/setting-table';
+import { StatusCallout } from '../components/status-callout';
 import { type ConfigGetData, type PersonalityOption, RECORD_KEY_RE } from '../lib/config-types';
 import { deliveryAge } from '../lib/deliveries';
 import type { FormShape } from '../lib/form-shape';
@@ -896,6 +897,11 @@ export function VoicePane() {
                   placeholder="Untuned"
                 />
               </Form.Item>
+              {/* A satellite ends an utterance on a count of silent frames, not
+                  a duration (see the paragraph above) — this is that fact's
+                  per-field marker, matching the other four `unread` keys'
+                  callout (§7). The `call` surface's Silence IS read. */}
+              {surface === 'satellite' ? <StatusCallout kind="unread" /> : null}
             </div>
           </div>
         </div>
@@ -1456,7 +1462,12 @@ function VoiceBotRoster({
   );
 }
 
-function VoiceTelephonySections({
+// Exported for `__tests__/settings-callouts.test.ts` (T11a), the same reason
+// `AdminPanelGate` is exported from `security.tsx` for T16: the trunk and
+// hardening sections it renders need a full `ConfigGetData` fixture to reach,
+// which is disproportionate to build for the whole `VoicePane` (its other
+// sections — call appearance, barge-in — render without one).
+export function VoiceTelephonySections({
   config,
   personalities,
   botRows,

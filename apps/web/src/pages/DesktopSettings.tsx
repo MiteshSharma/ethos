@@ -21,6 +21,7 @@ import { useEffect, useState } from 'react';
 import { bridge } from '../lib/desktop';
 import { ROW_BOX_STYLE } from './settings/components/primitives';
 import { SectionHeading } from './settings/components/section-heading';
+import { SelfSaveMarker } from './settings/components/self-save-marker';
 
 export function DesktopSettings() {
   const { notification } = AntApp.useApp();
@@ -247,6 +248,7 @@ export function DesktopSettings() {
   return (
     <>
       <SectionHeading id="connection">connection</SectionHeading>
+      <SelfSaveMarker />
 
       <div style={ROW_BOX_STYLE}>
         <Typography.Text strong style={{ fontSize: 13 }}>
@@ -296,6 +298,7 @@ export function DesktopSettings() {
       </div>
 
       <SectionHeading id="storage">storage</SectionHeading>
+      <SelfSaveMarker />
 
       <div style={ROW_BOX_STYLE}>
         <Typography.Text strong style={{ fontSize: 13 }}>
@@ -328,6 +331,7 @@ export function DesktopSettings() {
       </div>
 
       <SectionHeading id="retention">retention</SectionHeading>
+      <SelfSaveMarker />
 
       <div style={ROW_BOX_STYLE}>
         <Typography.Text strong style={{ fontSize: 13 }}>
@@ -372,6 +376,7 @@ export function DesktopSettings() {
       </div>
 
       <SectionHeading id="keychain-and-auth">keychain &amp; auth</SectionHeading>
+      <SelfSaveMarker />
 
       <div style={ROW_BOX_STYLE}>
         <Typography.Text strong style={{ fontSize: 13 }}>
