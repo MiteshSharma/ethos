@@ -152,7 +152,9 @@ Approve it and the trunk dials:
 Calling +15551234567 (call SCL_xxx, room call-15551234567).
 ```
 
-Two limits to know before you rely on this. **Nothing joins the room on the Ethos side for an outbound call** — the trunk connects the callee, but no agent participant is created, so the callee hears silence. And **outbound calls are not written to the call log**; every row it holds today is inbound. Outbound dialling is the trunk leg only.
+One limit to know before you rely on this. **Nothing joins the room on the Ethos side for an outbound call** — the trunk connects the callee, but no agent participant is created, so the callee hears silence. Outbound dialling is the trunk leg only.
+
+The call *is* written to the call log, as `direction: 'outbound'`, and the row is honest about how little it knows. It opens `ringing` before the dial. A trunk rejection closes it as `failed` with a real end time. A trunk-accepted dial closes it as `completed` with a reason string and **no end time** — nothing stays on the line, so whether the callee answered was never observed, and the row says exactly that rather than reading as "the call went fine". Expect no `personalityId`, `tier` or cost on the row, and a `fromNumber` of `unknown` when `voice.trunk.fromNumber` is unset. Rows are written only under `ethos gateway`; a call placed from `ethos serve`, `ethos chat` or the desktop app writes none.
 
 ## 6. Watch calls in the web UI
 
@@ -191,11 +193,12 @@ The end-to-end call path has **never been run against a live trunk**. Its verifi
 - Every provider's real webhook payload shape. The parsers are written against published documentation, not captured requests.
 - Whether a spoken confirmation actually holds on a live call.
 
-Three settings are configurable but inert today, and are named here rather than left for you to discover:
+Two settings are configurable but inert today, and are named here rather than left for you to discover:
 
 - **`voice.inbound.prewarm`** is parsed and the decision is computed per call, but nothing opens a provider socket on ring — the SIP↔realtime bridge is built and unit-tested and has no production caller.
-- **`voice.inbound.dailyBudgetUsd`** gates every call, but no code path records spend into it, so the running total stays at zero and it can never trip.
 - **`voice.trunk.codec`** is parsed and passed to nothing; the media leg does not negotiate from it.
+
+**`voice.inbound.dailyBudgetUsd`** is no longer among them: spend is now recorded per call and the cap really trips. Know what it counts before you rely on it. The recorded figure is **LLM token spend only**, at the provider's own estimate — STT, TTS, LiveKit media and PSTN minutes are not in it, because nothing in the process knows those prices and no rate was invented for them. The cap therefore trips on real spend, but trips *late* relative to a day's true cost. Browser talk-mode and channel voice notes do not route through the call dispatcher, so their spend never counts against it at all.
 
 `voice.bargeIn.call.*` is no longer among them: `energyThreshold` and `minSpeechMs` tune the SIP lane's VAD and `silenceMs` its endpoint detector, applied when the call adapter builds the session.
 

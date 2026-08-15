@@ -862,8 +862,12 @@ Named here so nobody tunes them and waits for an effect:
 - **`voice.inbound.prewarm`** — the decision is computed on every ring and returned
   in the dispatch outcome, and nothing opens a socket, because
   `createSipRealtimeBridge` has no caller outside its own tests.
-- **`voice.inbound.dailyBudgetUsd`** — checked first on every call, and no code path
-  calls `VoiceDailyBudget.record()`, so the running total never leaves zero.
+- **`voice.trunk.codec`** — parsed, validated and round-tripped through Settings,
+  and passed to nothing. Same root cause as `prewarm`: the only thing that
+  consumes a wire codec is that same bridge (`deps.codec` in
+  `extensions/platform-voice/src/sip/realtime-bridge.ts`), so with no production
+  caller the media leg never negotiates from this key. Nothing even maps the
+  config's `opus`/`g711` onto the bridge's `pcm`/`g711u`/`g711a`.
 - **`voice.bargeIn.satellite.silenceMs`** — parsed, validated, editable in Settings,
   and read by nothing. The satellite `CaptureMachine` ends an utterance on a count
   of silent audio *frames*, and a frame is only a duration once the capture device
@@ -876,9 +880,44 @@ Named here so nobody tunes them and waits for an effect:
   the browser talk lane endpoints in the browser, from `display.voice_*`, and the
   key is now a parse error that names that path.
 
-Two more honest gaps in the same family: **outbound calls write no call-log row**
-(every row is `direction: 'inbound'`), and **nothing joins the room on an outbound
-call**, so `call` places the trunk leg and the callee hears silence.
+**`voice.inbound.dailyBudgetUsd` used to sit here too, and no longer does.** The
+`meterSpend` wrapper in `apps/ethos/src/sip-inbound-dispatch.ts` reports each
+`usage` event's `estimatedCostUsd` as a call's turns stream, and the callback
+calls `gates.budget.record(usd)` (line 313) on the same `VoiceInboundGates`
+instance `decideInboundCall` consults. The cap genuinely trips.
+
+Know what it counts before you rely on it. The recorded figure is **LLM token
+spend only**, at the provider's own estimate. STT, TTS, LiveKit media and PSTN
+minutes are not in it — nothing in the process knows those prices, and no rate
+was invented for them — and on a voice call they are plausibly the larger half of
+the bill. So the cap trips on real spend, but trips **late** relative to a day's
+true cost. Under-counting is the safe direction for a gate whose job is refusing
+calls; a fabricated per-minute rate would not be.
+
+Two other tiers spend money and never touch this counter: the browser/realtime
+voice tier and channel voice notes do not route through this dispatcher, so their
+spend does not count against the cap at all.
+
+**Nothing joins the room on an outbound call**, so `call` places the trunk leg
+and the callee hears silence. That gap is unchanged.
+
+Outbound calls used to write no call-log row either. They now do —
+`extensions/tools-voice/src/index.ts:208` writes `direction: 'outbound'` — and
+what such a row does and does not assert is worth knowing before you read one:
+
+- It opens `ringing` before the dial. A trunk rejection patches it to `failed`
+  with a real `endedAt`.
+- A trunk-accepted dial patches it to `completed` with a reason string and **no
+  `endedAt`**. `completed` is an assertion this process never verified — the call
+  may have rung out unanswered, and nothing stayed on the line to find out. The
+  reason string on the row discloses that inline. With no `endedAt` the row
+  leaves `listLive()` and renders no duration, which is what "nobody timed this
+  call" looks like.
+- The row carries no `personalityId`, no `tier` and no `costUsd`.
+- `fromNumber` records as the literal `unknown` when `voice.trunk.fromNumber` is
+  unset, because the column is `NOT NULL`.
+- Only the **gateway** wires a `CallLog`. A call placed from `ethos serve`,
+  `ethos chat` or desktop writes no row at all.
 
 ### Manual verification required
 
@@ -916,7 +955,7 @@ verification is manual by design.
 | Browser realtime tier (`gemini-live`) | Nothing will make this work in a browser | Not possible — `caps.ephemeralToken: false`, so the mint refuses `no_browser_token` and the call falls back to the pipeline with a visible notice. Deliberate; see [§4b](#4b-the-realtime-tier) | The refusal itself is pinned, on both the server and browser sides |
 | LiveKit media | `@livekit/rtc-node` installed on the host (**not a repo dependency**) and `voice.livekit.*`. `livekit-server-sdk` is *not* needed — the SIP control plane is plain HTTPS with a signed JWT. `LiveKitBindings` are no longer app-layer manual either: `resolveLiveKitMedia()` loads the SDK at gateway startup and the gateway passes them through | `ethos doctor` → the `LiveKit media` row, which is the one probe it actually runs | `apps/ethos/src/__tests__/livekit-media.test.ts` for the loader; `extensions/platform-voice/src/__tests__/` against fake room clients. The adapter's SDK assumptions are unexecuted |
 | Telephony (inbound SIP) | A SIP trunk, a rented E.164 number, `voice.trunk.webhookSecret`, and a public URL. **No `SipTrunkClient` implementation** — it is derived from `voice.trunk.*` + `voice.livekit.*` by one shared function | Manual only — call the number and read **Communications → Calls** | 22 suites / 335 tests cover verify → gate → dispatch → call log → owner notice against fakes ([§4c](#4c-telephony)) |
-| Telephony (outbound `call`) | The same trunk and LiveKit credentials | Manual only. Note two limits: nothing joins the room on the Ethos side, so the callee hears silence, and outbound calls write no call-log row | `extensions/tools-voice/src/__tests__/call.test.ts`; `call` self-reports unavailable with no trunk, and is in `APPROVAL_SURFACE_ALWAYS_ASK` so it always prompts |
+| Telephony (outbound `call`) | The same trunk and LiveKit credentials | Manual only. Note the limit: nothing joins the room on the Ethos side, so the callee hears silence. A call-log row *is* written (`direction: 'outbound'`), but only under `ethos gateway`, and it closes as `completed` with no `endedAt` because nothing observed the call ending — see [§4c](#4c-telephony) | `extensions/tools-voice/src/__tests__/call.test.ts`; `call` self-reports unavailable with no trunk, and is in `APPROVAL_SURFACE_ALWAYS_ASK` so it always prompts |
 | Channel voice notes | A bot token, and `ffmpeg` on `PATH` for real container conversion | Send a voice note to the bot with `ethos gateway` running (all four declared adapters, in both directions) | `extensions/gateway/src/__tests__/voice-pipeline.test.ts`, `transcode.test.ts`, `voice-caps-sink.test.ts`, `voice-ledger-e2e.test.ts` — every ffmpeg invocation is a fake runner, no binary is ever spawned |
 | Wake satellite, open mic (`ethos listen`) | `ethos serve` running and a real PCM pipe (`ffmpeg` / `arecord`) — no `voice.wake.routes` entry required | `make listen-doctor` for the preflight (warn-only runs exit 0), then pipe a mic in and say `<personality>, …` (a `hey` in front is optional) — the row appears under **Settings → Voice → Wake routes**, and the daemon prints `● speech` / `› you:` / `‹ <personality>:` / `↩ turn complete` per addressed turn, and `↩ not addressed to anyone` for everything else | `apps/ethos/src/__tests__/listen-*.test.ts`, `apps/web-api/src/voice/__tests__/satellite-socket.test.ts`, `extensions/voice-satellite/src` — the device and the socket are always injected; no microphone is ever opened |
 | Acoustic wake (`voice.wake.engine: sherpa`) | `sherpa-onnx-node` installed by hand (**not a repo dependency**, ~33 MB per-arch native binary) and four model files in `~/.ethos/models/wake/` | Manual only, on a host with a real microphone | Only the *absence* path: `extensions/voice-satellite/src/__tests__/doctor.test.ts` pins that the missing peer and the missing model file are each reported with their own diagnosable message. The spotter mapping itself has **never run against a real binary** |
