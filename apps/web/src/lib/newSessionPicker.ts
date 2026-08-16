@@ -60,11 +60,14 @@ export function moveSelection<T extends PickerPersonality>(
 
 /**
  * The "new session" navigation contract: selecting a personality must start
- * a FRESH session under it. The `new=1` flag is what Chat.tsx keys on to
- * reset the active session — and it is required, because a session belongs
- * to the personality it started with, so a personality deep-link without it
- * is ignored rather than applied to a conversation already under way.
+ * a FRESH session under it. Routes straight to that personality's workspace
+ * (P2, plan/phases/personality-first-ui.md — the URL is Chat's source of
+ * truth for which agent is active, not a `?personality=` query param). The
+ * `new=1` flag is what Chat.tsx keys on to force a fresh session instead of
+ * restoring the target agent's last one — required because without it, a
+ * bare `/p/:id/chat` visit is indistinguishable from "just switched to this
+ * agent, resume where I left off".
  */
 export function buildNewSessionPath(id: string): string {
-  return `/chat?personality=${encodeURIComponent(id)}&new=1`;
+  return `/p/${encodeURIComponent(id)}/chat?new=1`;
 }

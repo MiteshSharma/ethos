@@ -1,7 +1,9 @@
 import { useEffect, useState } from 'react';
 import { Link, useLocation } from 'react-router-dom';
 import { useConfig } from '../features/config/api/queries';
+import { getLastPersonalityId } from '../lib/lastPersonality';
 import { getLastSessionId } from '../lib/lastSession';
+import { isChatPathname, resolveFallbackPersonalityId } from '../lib/workspaceRoutes';
 import { subscribeToSession } from '../sse';
 
 interface StatusBarProps {
@@ -44,8 +46,11 @@ function useSkillProposalCount(): number {
 export function StatusBar({ drawerOpen, onToggleDrawer }: StatusBarProps) {
   const { data, error, isLoading } = useConfig();
   const { pathname } = useLocation();
-  const isChat = pathname === '/chat';
+  const isChat = isChatPathname(pathname);
   const skillProposalCount = useSkillProposalCount();
+  // Cron moved under the workspace (P1a) — same fallback chain `/cron`'s
+  // redirect uses: last-visited agent, else the config default.
+  const cronPersonalityId = resolveFallbackPersonalityId(getLastPersonalityId(), data?.personality);
 
   const statusState: 'connected' | 'connecting' | 'offline' = isLoading
     ? 'connecting'
@@ -67,7 +72,7 @@ export function StatusBar({ drawerOpen, onToggleDrawer }: StatusBarProps) {
         Activity
       </Link>
       <span className="sb-sep" />
-      <Link to="/cron" className="sb-link">
+      <Link to={`/p/${cronPersonalityId}/schedule`} className="sb-link">
         Cron
       </Link>
       {skillProposalCount > 0 && (

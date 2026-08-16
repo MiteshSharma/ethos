@@ -46,6 +46,7 @@ import {
   voiceUpdateInput,
 } from '../components/personality/PersonalityVoiceFields';
 import { PersonalityRingAvatar } from '../components/ui/PersonalityRingAvatar';
+import { useCreateFlag } from '../hooks/useCreateFlag';
 import { toolAffordance } from '../lib/execution-posture';
 import {
   CATEGORY_META,
@@ -58,7 +59,7 @@ import { rpc } from '../rpc';
 // Shape of one suggestion entry returned by the models.catalog RPC.
 type CatalogModel = { id: string; label: string; contextWindow: number; default?: boolean };
 
-function modelOptionsForProvider(
+export function modelOptionsForProvider(
   catalog: { providers: Record<string, { models: CatalogModel[] }> } | undefined,
   provider: string | undefined,
 ): { value: string; label: string }[] {
@@ -69,7 +70,7 @@ function modelOptionsForProvider(
 
 // Case-insensitive substring match on the model id (option value) so typing
 // narrows the suggestion list. AutoComplete still accepts arbitrary input.
-const modelFilterOption = (input: string, option?: { value: string; label: string }) =>
+export const modelFilterOption = (input: string, option?: { value: string; label: string }) =>
   (option?.value ?? '').toLowerCase().includes(input.toLowerCase());
 
 // Personalities tab — v1.
@@ -94,6 +95,14 @@ export function Personalities() {
   const [createOpen, setCreateOpen] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [duplicatePrompt, setDuplicatePrompt] = useState<Personality | null>(null);
+
+  // P5 — StageHeader's "+ New Personality" action navigates here with
+  // `?create=1`; this opens the same create wizard the page's own button
+  // does.
+  const shouldCreate = useCreateFlag();
+  useEffect(() => {
+    if (shouldCreate) setCreateOpen(true);
+  }, [shouldCreate]);
 
   const listQuery = useQuery({
     queryKey: ['personalities', 'list'],
@@ -637,7 +646,7 @@ function IdentityStep({
   );
 }
 
-function slugify(name: string): string {
+export function slugify(name: string): string {
   return name
     .toLowerCase()
     .replace(/\s+/g, '-')
@@ -651,6 +660,28 @@ function ToolsetStep({
   state: WizardState;
   setState: React.Dispatch<React.SetStateAction<WizardState>>;
 }) {
+  const toggle = (name: string) => {
+    setState((s) => {
+      const has = s.toolset.includes(name);
+      return { ...s, toolset: has ? s.toolset.filter((t) => t !== name) : [...s.toolset, name] };
+    });
+  };
+
+  return <ToolsetPicker selected={state.toolset} onToggle={toggle} />;
+}
+
+// Category-grouped, checkable-tags toolset editor. Standalone and
+// state-agnostic — `ToolsetStep` (the create-wizard tab) and
+// `NewAgentDialog` (the rail-`+` fast path, P5) both wrap it around their
+// own selection state rather than each rendering the catalog fetch and
+// category layout themselves.
+export function ToolsetPicker({
+  selected,
+  onToggle,
+}: {
+  selected: string[];
+  onToggle: (tool: string) => void;
+}) {
   const catalogQuery = useQuery({
     queryKey: ['tools', 'catalog'],
     queryFn: () => rpc.tools.catalog({}),
@@ -659,13 +690,6 @@ function ToolsetStep({
     group: g.group,
     tools: g.tools.map((t) => t.name),
   }));
-
-  const toggle = (name: string) => {
-    setState((s) => {
-      const has = s.toolset.includes(name);
-      return { ...s, toolset: has ? s.toolset.filter((t) => t !== name) : [...s.toolset, name] };
-    });
-  };
 
   const descMap = useMemo(() => {
     const map = new Map<string, string>();
@@ -789,7 +813,7 @@ function ToolsetStep({
                     ) : null}
                     <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
                       {group.tools.map((tool) => {
-                        const enabled = state.toolset.includes(tool);
+                        const enabled = selected.includes(tool);
                         return (
                           <Tooltip
                             key={tool}
@@ -797,7 +821,7 @@ function ToolsetStep({
                           >
                             <Tag.CheckableTag
                               checked={enabled}
-                              onChange={() => toggle(tool)}
+                              onChange={() => onToggle(tool)}
                               style={{ padding: '4px 10px', fontSize: 12 }}
                             >
                               {tool}
@@ -1022,6 +1046,30 @@ function WizardSkillsStep({
   state: WizardState;
   setState: React.Dispatch<React.SetStateAction<WizardState>>;
 }) {
+  const toggle = (skillId: string) => {
+    setState((prev) => {
+      const next = new Set(prev.skills);
+      if (next.has(skillId)) next.delete(skillId);
+      else next.add(skillId);
+      return { ...prev, skills: [...next] };
+    });
+  };
+
+  return <SkillsPicker selected={state.skills} onToggle={toggle} />;
+}
+
+// System + user skill checklist, grouped and checkable. Standalone and
+// state-agnostic — `WizardSkillsStep` (the create-wizard tab) and
+// `NewAgentDialog` (the rail-`+` fast path, P5) both wrap it around their
+// own selection state rather than each rendering the catalog fetch and
+// grouping themselves.
+export function SkillsPicker({
+  selected,
+  onToggle,
+}: {
+  selected: string[];
+  onToggle: (skillId: string) => void;
+}) {
   const skillsQuery = useQuery({
     queryKey: ['skills', 'list'],
     queryFn: () => rpc.skills.list({}),
@@ -1048,21 +1096,10 @@ function WizardSkillsStep({
 
   const systemSkills = skills.filter((s) => s.source === 'system');
   const userSkills = skills.filter((s) => s.source !== 'system');
-  const selectedSet = new Set(state.skills);
+  const selectedSet = new Set(selected);
 
   const renderCheckbox = (s: Skill) => (
-    <Checkbox
-      key={s.id}
-      checked={selectedSet.has(s.id)}
-      onChange={(e) => {
-        setState((prev) => {
-          const next = new Set(prev.skills);
-          if (e.target.checked) next.add(s.id);
-          else next.delete(s.id);
-          return { ...prev, skills: [...next] };
-        });
-      }}
-    >
+    <Checkbox key={s.id} checked={selectedSet.has(s.id)} onChange={() => onToggle(s.id)}>
       <span style={{ fontWeight: 500 }}>{s.name}</span>
       {s.description ? (
         <Typography.Text type="secondary" style={{ marginLeft: 8, fontSize: 12 }}>
@@ -1419,7 +1456,28 @@ function WizardPluginsTab({
 // Edit modal — three tabs (Identity / Toolset / Config) + Skills sub-surface
 // ---------------------------------------------------------------------------
 
-export function EditModal({ id, onClose }: { id: string; onClose: () => void }) {
+/** Tab keys the Edit modal's `Tabs` renders — used to open on a specific tab
+ *  (e.g. Identity page's "Edit SOUL" fast path lands on `'identity'` instead
+ *  of the default `'characterSheet'`). */
+export type EditModalTabKey =
+  | 'characterSheet'
+  | 'identity'
+  | 'toolset'
+  | 'execution'
+  | 'config'
+  | 'soul'
+  | 'skills'
+  | 'plugins';
+
+export function EditModal({
+  id,
+  onClose,
+  initialTab = 'characterSheet',
+}: {
+  id: string;
+  onClose: () => void;
+  initialTab?: EditModalTabKey;
+}) {
   const { data, isLoading } = useQuery({
     queryKey: ['personalities', 'get', id],
     queryFn: () => rpc.personalities.get({ id }),
@@ -1433,7 +1491,7 @@ export function EditModal({ id, onClose }: { id: string; onClose: () => void }) 
         </div>
       ) : (
         <Tabs
-          defaultActiveKey="characterSheet"
+          defaultActiveKey={initialTab}
           items={[
             {
               key: 'characterSheet',
@@ -2562,7 +2620,7 @@ function ImportGlobalSkillsModal({
 // Duplicate modal — pick a new id, then open the editor on the copy
 // ---------------------------------------------------------------------------
 
-function DuplicateModal({
+export function DuplicateModal({
   source,
   existingIds,
   onClose,

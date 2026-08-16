@@ -2,7 +2,8 @@ import type { Session } from '@ethosagent/web-contracts';
 import type { MenuProps } from 'antd';
 import { Button, Dropdown, Input, Popconfirm, Spin, Table } from 'antd';
 import { useEffect, useMemo, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useParams } from 'react-router-dom';
+import { PersonalityMark } from '../components/ui/PersonalityMark';
 import {
   useSessionDelete,
   useSessionExport,
@@ -10,11 +11,12 @@ import {
   useSessionRename,
 } from '../features/sessions/api/mutations';
 import { useSessionList } from '../features/sessions/api/queries';
+import { buildWorkspaceChatPath, sessionOpenPath } from '../lib/workspaceRoutes';
 
 // Sessions tab — list, search, paginate, fork, delete. The chat tab uses
 // the URL `?session=<id>` deep link as the wire, so all the actions here
 // boil down to:
-//   • Open   → navigate to /chat?session=<id>
+//   • Open   → navigate to /p/:personalityId/chat?session=<id> (P1a)
 //   • Fork   → rpc.sessions.fork → navigate to the new id
 //   • Delete → rpc.sessions.delete → invalidate this list
 //
@@ -22,11 +24,23 @@ import { useSessionList } from '../features/sessions/api/queries';
 // `q` directly. Debouncing is local — 400ms after the last keystroke
 // before triggering a refetch — so typing fast doesn't fire a refetch
 // per character.
+//
+// Rendered at two addresses:
+//   • `/p/:personalityId/sessions` (P2, workspace) — scoped to that agent via
+//     `sessions.list({ personalityId })`. Every row shares the same agent, so
+//     the Personality column is redundant and doesn't render.
+//   • `/library/sessions` (P3, Library twin — "today's global Sessions page,
+//     kept intact, with the agent mark per row") — `personalityId` is
+//     undefined, `sessions.list({})` is unscoped, and the Personality column
+//     renders a small `PersonalityMark` per row.
+// The bare `/sessions` URL doesn't reach this component at all (P1a
+// permanently redirects it into a workspace).
 
 const SEARCH_DEBOUNCE_MS = 400;
 
 export function Sessions() {
   const navigate = useNavigate();
+  const { personalityId } = useParams<{ personalityId?: string }>();
 
   const [searchInput, setSearchInput] = useState('');
   const [debouncedSearch, setDebouncedSearch] = useState('');
@@ -41,7 +55,7 @@ export function Sessions() {
   }, [searchInput]);
 
   const { data, error, isLoading, isFetching, hasNextPage, fetchNextPage, isFetchingNextPage } =
-    useSessionList(debouncedSearch);
+    useSessionList(debouncedSearch, personalityId);
 
   const flat = useMemo(() => data?.pages.flatMap((p) => p.items) ?? [], [data]);
 
@@ -78,7 +92,11 @@ export function Sessions() {
           loading={isFetching && !isFetchingNextPage}
           style={{ maxWidth: 480 }}
         />
-        <Button type="primary" onClick={() => navigate('/chat')} style={{ marginLeft: 8 }}>
+        <Button
+          type="primary"
+          onClick={() => navigate(personalityId ? buildWorkspaceChatPath(personalityId) : '/chat')}
+          style={{ marginLeft: 8 }}
+        >
           New Session
         </Button>
         <span className="sessions-count">
@@ -108,7 +126,7 @@ export function Sessions() {
                 // Don't navigate when the click is on the action menu trigger.
                 const target = e.target as HTMLElement;
                 if (target.closest('.sessions-row-actions')) return;
-                navigate(`/chat?session=${record.id}`);
+                navigate(sessionOpenPath(record.id, record.personalityId));
               },
               style: { cursor: 'pointer' },
             })}
@@ -180,12 +198,30 @@ export function Sessions() {
                 width: 120,
                 render: (v: string) => <span className="sessions-mono">{v.slice(0, 8)}…</span>,
               },
-              {
-                title: 'Personality',
-                dataIndex: 'personalityId',
-                width: 140,
-                render: (v: string | null) => v ?? '—',
-              },
+              // Library twin only (`/library/sessions`, no `:personalityId`
+              // — P3): every row shares the same agent inside a workspace,
+              // so the column would be pure repetition there and doesn't
+              // render.
+              ...(personalityId
+                ? []
+                : [
+                    {
+                      title: 'Personality',
+                      dataIndex: 'personalityId',
+                      width: 140,
+                      render: (v: string | null) =>
+                        v ? (
+                          <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                            <PersonalityMark personalityId={v} size={16} />
+                            <span className="sessions-mono" style={{ fontSize: 12 }}>
+                              {v}
+                            </span>
+                          </span>
+                        ) : (
+                          '—'
+                        ),
+                    },
+                  ]),
               {
                 title: 'Model',
                 dataIndex: 'model',
@@ -223,7 +259,7 @@ export function Sessions() {
                 render: (_v, row) => (
                   <RowActions
                     id={row.id}
-                    onOpen={() => navigate(`/chat?session=${row.id}`)}
+                    onOpen={() => navigate(sessionOpenPath(row.id, row.personalityId))}
                     onRename={() => {
                       setEditingId(row.id);
                       setEditingValue(row.title ?? '');

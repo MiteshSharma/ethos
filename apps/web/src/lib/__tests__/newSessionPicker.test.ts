@@ -81,11 +81,11 @@ describe('moveSelection', () => {
 });
 
 describe('buildNewSessionPath', () => {
-  it('encodes the id and includes new=1', () => {
-    expect(buildNewSessionPath('coder')).toBe('/chat?personality=coder&new=1');
+  it('routes to the personality’s own workspace chat with new=1', () => {
+    expect(buildNewSessionPath('coder')).toBe('/p/coder/chat?new=1');
   });
 
-  it('url-encodes special characters', () => {
-    expect(buildNewSessionPath('team architect')).toBe('/chat?personality=team%20architect&new=1');
+  it('url-encodes special characters in the id', () => {
+    expect(buildNewSessionPath('team architect')).toBe('/p/team%20architect/chat?new=1');
   });
 });

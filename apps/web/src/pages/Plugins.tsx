@@ -9,15 +9,22 @@ import {
   Empty,
   Input,
   Skeleton,
+  Switch,
   Table,
+  Tooltip,
   Typography,
 } from 'antd';
-import { useMemo, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useEffect, useMemo, useState } from 'react';
+import { useNavigate, useParams } from 'react-router-dom';
 import {
   type PluginCredentialSchema,
   PluginSettingsDrawer,
 } from '../components/PluginSettingsDrawer';
+import { PersonalityMark } from '../components/ui/PersonalityMark';
+import { personalityKeys } from '../features/personalities/api/keys';
+import { usePersonalityGet } from '../features/personalities/api/queries';
+import { useCreateFlag } from '../hooks/useCreateFlag';
+import { splitByAttachment, usedByPersonalityIds } from '../lib/attachmentLists';
 import { client, rpc } from '../rpc';
 
 function InstallPluginSection() {
@@ -69,8 +76,19 @@ function InstallPluginSection() {
 //
 // Attachment toggles call personalities.update({ plugins: [...] })
 // optimistically per-personality per-plugin. Rollback on error.
+//
+// P2 (plan/phases/personality-first-ui.md): `/plugins` (Library, this whole
+// matrix, unchanged) and `/p/:personalityId/plugins` (workspace —
+// `personalities.get() → plugins[]`, just this agent's row) are two
+// different components sharing one route name, same split as Skills/MCP.
 
 export function Plugins() {
+  const { personalityId } = useParams<{ personalityId?: string }>();
+  if (personalityId) return <WorkspacePluginsPanel personalityId={personalityId} />;
+  return <LibraryPluginsPage />;
+}
+
+function LibraryPluginsPage() {
   const {
     data: pluginsData,
     isLoading: pluginsLoading,
@@ -81,13 +99,21 @@ export function Plugins() {
   });
 
   const { data: personalitiesData, isLoading: persLoading } = useQuery({
-    queryKey: ['personalities', 'list'],
+    queryKey: personalityKeys.list(),
     queryFn: () => rpc.personalities.list({}),
   });
 
   const isLoading = pluginsLoading || persLoading;
   const [installOpen, setInstallOpen] = useState(false);
   const [settingsPluginId, setSettingsPluginId] = useState<string | null>(null);
+
+  // P5 — StageHeader's "+ New Plugin" action navigates here with
+  // `?create=1`; this force-opens the same inline install section the
+  // page's own button toggles (never re-closes it, unlike the toggle).
+  const shouldCreate = useCreateFlag();
+  useEffect(() => {
+    if (shouldCreate) setInstallOpen(true);
+  }, [shouldCreate]);
 
   const settingsPlugin = settingsPluginId
     ? ((pluginsData?.plugins ?? []).find((p) => p.id === settingsPluginId) ?? null)
@@ -141,7 +167,7 @@ export function Plugins() {
   return (
     <div className="plugins-tab">
       <header className="page-header-row">
-        <h1 className="page-h1">Plugins</h1>
+        <h1 className="page-h1">All plugins</h1>
         <span className="page-subtitle">
           {plugins.length} {plugins.length === 1 ? 'plugin' : 'plugins'}
         </span>
@@ -171,6 +197,186 @@ export function Plugins() {
         />
       )}
     </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Workspace panel — P3: two lists, attached and installed-but-not-attached,
+// each row with a toggle. Both go through `personalities.update({ id,
+// plugins })` — the same RPC the Library matrix's `AttachCell` already uses,
+// just scoped to this one personality instead of iterating the whole roster.
+// ---------------------------------------------------------------------------
+
+function WorkspacePluginsPanel({ personalityId }: { personalityId: string }) {
+  const qc = useQueryClient();
+  const { notification } = AntApp.useApp();
+  const personalityQuery = usePersonalityGet(personalityId);
+  const { data: pluginsData, isLoading: pluginsLoading } = useQuery({
+    queryKey: ['plugins', 'list'],
+    queryFn: () => rpc.plugins.list(),
+  });
+
+  const attachedIds = personalityQuery.data?.personality.plugins ?? [];
+  const allPlugins = pluginsData?.plugins ?? [];
+  const { attached, notAttached } = splitByAttachment(
+    allPlugins,
+    new Set(attachedIds),
+    (p) => p.id,
+  );
+
+  // Shared query keys, not a dedicated round trip (P3's "Done when" bar):
+  // `personalityKeys.list()` feeds the ScopeNav fraction and the Library
+  // matrix/"Used by"; `personalityKeys.detail(id)` is this panel's own read.
+  const toggleMut = useMutation({
+    mutationFn: ({ pluginId, attach }: { pluginId: string; attach: boolean }) => {
+      const next = attach
+        ? [...attachedIds, pluginId]
+        : attachedIds.filter((id) => id !== pluginId);
+      return rpc.personalities.update({ id: personalityId, plugins: next });
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: personalityKeys.list() });
+      qc.invalidateQueries({ queryKey: personalityKeys.detail(personalityId) });
+    },
+    onError: (err) =>
+      notification.error({ message: 'Update failed', description: (err as Error).message }),
+  });
+
+  function toggle(pluginId: string, attach: boolean) {
+    toggleMut.mutate({ pluginId, attach });
+  }
+
+  if (personalityQuery.error) {
+    return (
+      <Typography.Text type="danger">
+        Failed to load this agent: {(personalityQuery.error as Error).message}
+      </Typography.Text>
+    );
+  }
+
+  const isLoading = personalityQuery.isLoading || pluginsLoading;
+
+  return (
+    <div className="plugins-tab">
+      <header className="page-header-row">
+        <h1 className="page-h1">Plugins</h1>
+        <span className="page-subtitle">
+          {attached.length} {attached.length === 1 ? 'plugin' : 'plugins'}
+        </span>
+      </header>
+      {isLoading ? (
+        <Skeleton active paragraph={{ rows: 5 }} />
+      ) : (
+        <>
+          <PluginsSectionLabel>Attached ({attached.length})</PluginsSectionLabel>
+          {attached.length === 0 ? (
+            <Empty
+              image={Empty.PRESENTED_IMAGE_SIMPLE}
+              description="No plugins attached to this agent. Attach one from the library below."
+            />
+          ) : (
+            <PluginsToggleTable
+              plugins={attached}
+              checked
+              pending={toggleMut.isPending ? toggleMut.variables?.pluginId : undefined}
+              onToggle={(id) => toggle(id, false)}
+            />
+          )}
+
+          <PluginsSectionLabel>Installed, not attached ({notAttached.length})</PluginsSectionLabel>
+          {notAttached.length === 0 ? (
+            <Typography.Text type="secondary">
+              Every installed plugin is already attached to this agent.
+            </Typography.Text>
+          ) : (
+            <PluginsToggleTable
+              plugins={notAttached}
+              checked={false}
+              pending={toggleMut.isPending ? toggleMut.variables?.pluginId : undefined}
+              onToggle={(id) => toggle(id, true)}
+            />
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+function PluginsSectionLabel({ children }: { children: React.ReactNode }) {
+  return (
+    <div
+      style={{
+        fontSize: 11,
+        fontWeight: 500,
+        color: 'var(--text-tertiary)',
+        textTransform: 'uppercase',
+        letterSpacing: '0.08em',
+        margin: '20px 0 10px',
+      }}
+    >
+      {children}
+    </div>
+  );
+}
+
+function PluginsToggleTable({
+  plugins,
+  checked,
+  pending,
+  onToggle,
+}: {
+  plugins: PluginInfo[];
+  checked: boolean;
+  pending: string | undefined;
+  onToggle: (pluginId: string) => void;
+}) {
+  return (
+    <Table<PluginInfo>
+      rowKey="id"
+      dataSource={plugins}
+      pagination={false}
+      size="small"
+      columns={[
+        {
+          title: 'Plugin',
+          key: 'plugin',
+          render: (_, p) => (
+            <div>
+              <div style={{ fontWeight: 500 }}>
+                {p.name}
+                <Typography.Text
+                  type="secondary"
+                  style={{ fontSize: 11, marginLeft: 6, fontWeight: 400 }}
+                >
+                  v{p.version}
+                </Typography.Text>
+              </div>
+              <Typography.Text
+                style={{ fontFamily: 'Geist Mono, monospace', fontSize: 12 }}
+                type="secondary"
+              >
+                {p.id}
+              </Typography.Text>
+            </div>
+          ),
+        },
+        {
+          title: '',
+          key: 'toggle',
+          width: 90,
+          align: 'right' as const,
+          render: (_, p) => (
+            <Switch
+              size="small"
+              checked={checked}
+              loading={pending === p.id}
+              onChange={() => onToggle(p.id)}
+              aria-label={`${checked ? 'Detach' : 'Attach'} ${p.name}`}
+            />
+          ),
+        },
+      ]}
+    />
   );
 }
 
@@ -263,6 +469,10 @@ function PluginsTable({
   onSettingsOpen: (pluginId: string) => void;
 }) {
   const navigate = useNavigate();
+  const attachments = useMemo(
+    () => personalities.map((p) => ({ personalityId: p.id, itemIds: p.plugins ?? [] })),
+    [personalities],
+  );
   const personalityCols = personalities.map((pers) => ({
     title: <span style={{ fontSize: 12 }}>{pers.name}</span>,
     key: pers.id,
@@ -302,6 +512,17 @@ function PluginsTable({
             </div>
           ),
         },
+        {
+          title: 'Used by',
+          key: 'usedBy',
+          width: 100,
+          render: (_: unknown, p: PluginInfo) => (
+            <PluginUsedByMarks
+              personalityIds={usedByPersonalityIds(p.id, attachments)}
+              personalities={personalities}
+            />
+          ),
+        },
         ...personalityCols,
         {
           title: '',
@@ -330,6 +551,35 @@ function PluginsTable({
         },
       ]}
     />
+  );
+}
+
+// P3 "Used by" — a compact marks summary of the same attachment state the
+// matrix's checkbox columns already carry (`attachments` is derived from the
+// same `personalities` prop, no extra fetch). Kept alongside the full matrix
+// rather than replacing it: the matrix is where attach/detach actually
+// happens; this is the at-a-glance answer for "who has this" without
+// scanning across every column.
+function PluginUsedByMarks({
+  personalityIds,
+  personalities,
+}: {
+  personalityIds: string[];
+  personalities: import('@ethosagent/web-contracts').Personality[];
+}) {
+  if (personalityIds.length === 0) {
+    return <Typography.Text type="secondary">none</Typography.Text>;
+  }
+  return (
+    <div style={{ display: 'flex', gap: 4 }}>
+      {personalityIds.map((id) => (
+        <Tooltip key={id} title={personalities.find((p) => p.id === id)?.name ?? id}>
+          <span style={{ display: 'inline-flex' }}>
+            <PersonalityMark personalityId={id} size={16} />
+          </span>
+        </Tooltip>
+      ))}
+    </div>
   );
 }
 

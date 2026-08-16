@@ -20,6 +20,7 @@ import {
 } from 'antd';
 import type { Dayjs } from 'dayjs';
 import { useEffect, useState } from 'react';
+import { useParams } from 'react-router-dom';
 import { PersonalitySelect } from '../components/personality/PersonalitySelect';
 import { useFavouritePersonality } from '../hooks/useFavouritePersonality';
 import { resolvePersonalityId } from '../lib/favouritePersonality';
@@ -31,9 +32,19 @@ type MemoryView = 'files' | 'timeline' | 'pending';
 export function Memory() {
   const [view, setView] = useState<MemoryView>('files');
   const [activeStore, setActiveStore] = useState<MemoryStoreId>('memory');
-  const [personalityId, setPersonalityId] = useState<string | null>(null);
+  const { personalityId: routePersonalityId } = useParams<{ personalityId?: string }>();
+  const [personalityId, setPersonalityId] = useState<string | null>(routePersonalityId ?? null);
   const [userId, setUserId] = useState<string | null>(null);
   const { favouriteId, toggleFavourite } = useFavouritePersonality();
+
+  // P2 (plan/phases/personality-first-ui.md): default to — and stay in sync
+  // with — the workspace route's personality rather than the independently-
+  // remembered favourite. `resolvePersonalityId` below still lets a manual
+  // pick win until the next navigation; switching agents (AltitudeRail) is
+  // what re-syncs it, same as every other workspace pane.
+  useEffect(() => {
+    if (routePersonalityId) setPersonalityId(routePersonalityId);
+  }, [routePersonalityId]);
 
   const personalitiesQuery = useQuery({
     queryKey: ['personalities', 'list'],

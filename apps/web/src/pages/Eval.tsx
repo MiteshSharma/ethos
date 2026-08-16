@@ -15,7 +15,8 @@ import {
   Tag,
   Typography,
 } from 'antd';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
+import { useCreateFlag } from '../hooks/useCreateFlag';
 import { rpc } from '../rpc';
 
 // Lab → Eval tab. v1.
@@ -29,6 +30,13 @@ const EXPECTED_PLACEHOLDER = `{"id": "q1", "expected": "4"}\n{"id": "q2", "expec
 
 export function Eval() {
   const [submitOpen, setSubmitOpen] = useState(false);
+
+  // P5 — StageHeader's "New eval" action navigates here with `?create=1`;
+  // this opens the same SubmitModal the page's own button does.
+  const shouldCreate = useCreateFlag();
+  useEffect(() => {
+    if (shouldCreate) setSubmitOpen(true);
+  }, [shouldCreate]);
 
   const listQuery = useQuery({
     queryKey: ['eval', 'list'],

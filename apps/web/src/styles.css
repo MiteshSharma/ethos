@@ -44,9 +44,15 @@
   --warning: var(--ethos-warning);
   --error: var(--ethos-error);
   --info: var(--ethos-info);
-  --sidebar-width: var(--layout-sidebar-expanded);
-  --sidebar-collapsed-width: var(--layout-sidebar-collapsed);
   --drawer-width: var(--layout-right-drawer);
+  /* P1b (plan/phases/personality-first-ui.md) — AltitudeRail + ScopeNav.
+     apps/web-only chrome dimensions, not routed through
+     @ethosagent/design-tokens' `--layout-sidebar-*` — that token still
+     exists for the package's cross-surface parity test, which pins
+     240/64 to DESIGN.md's current wording; renaming it is a bigger
+     amendment than this phase, now that `Sidebar.tsx` itself is gone (P6). */
+  --altitude-rail-width: 56px;
+  --scope-nav-width: 216px;
 }
 
 html,
@@ -63,33 +69,34 @@ body,
   box-sizing: border-box;
 }
 
+/* P1b — three fixed columns (rail / scope / stage) replace the old
+   two-column sidebar/main split. `rail` and `scope` repeat across the
+   header and main rows, which CSS Grid merges into one spanning area per
+   name — so AltitudeRail and ScopeNav run the full column height without
+   an explicit row-span. */
 .app-shell {
   display: grid;
-  grid-template-columns: var(--sidebar-width) 1fr;
-  grid-template-rows: 1fr 28px;
+  grid-template-columns: var(--altitude-rail-width) var(--scope-nav-width) 1fr;
+  grid-template-rows: auto 1fr 28px;
   grid-template-areas:
-    "sidebar main"
-    "statusbar statusbar";
+    "rail scope header"
+    "rail scope main"
+    "statusbar statusbar statusbar";
   height: 100vh;
 }
 
-.app-shell.collapsed {
-  grid-template-columns: var(--sidebar-collapsed-width) 1fr;
-}
-
-/* Drawer mode at desktop width: third grid column reserved for the
-   activity drawer. Below 1280px the drawer overlays the main area
-   instead of taking grid space (see media query at end of file) — this
-   keeps chat readable on tablet without forcing a sidebar collapse. */
+/* Drawer mode at desktop width: fourth grid column reserved for the
+   activity drawer, spanning both the header and main rows (same
+   single-name-merge as rail/scope) so it keeps its original full height.
+   Below 1280px the drawer overlays the main area instead of taking grid
+   space (see media query at end of file). */
 @media (min-width: 1280px) {
   .app-shell.drawer-open {
-    grid-template-columns: var(--sidebar-width) 1fr var(--drawer-width);
+    grid-template-columns: var(--altitude-rail-width) var(--scope-nav-width) 1fr var(--drawer-width);
     grid-template-areas:
-      "sidebar main drawer"
-      "statusbar statusbar statusbar";
-  }
-  .app-shell.drawer-open.collapsed {
-    grid-template-columns: var(--sidebar-collapsed-width) 1fr var(--drawer-width);
+      "rail scope header drawer"
+      "rail scope main drawer"
+      "statusbar statusbar statusbar statusbar";
   }
 }
 
@@ -148,30 +155,6 @@ body,
   flex: 1;
 }
 
-.sidebar {
-  grid-area: sidebar;
-  border-right: 1px solid var(--ethos-border);
-  background: var(--ethos-bg-elevated);
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-}
-
-.sidebar-header {
-  display: flex;
-  align-items: center;
-  height: 48px;
-  padding: 0 16px;
-  border-bottom: 1px solid var(--ethos-border);
-  cursor: pointer;
-  user-select: none;
-}
-
-.sidebar-header-title {
-  font-weight: 600;
-  margin-left: 8px;
-}
-
 .sidebar-nav {
   display: flex;
   flex-direction: column;
@@ -207,7 +190,11 @@ body,
 
 .sidebar-nav-item.active {
   background: rgba(74, 158, 255, 0.18);
-  border-left: 2px solid var(--ethos-info);
+  /* `--accent` is only ever defined inside the workspace wrapper
+     (App.tsx) — at the Library altitude, ScopeNav renders outside that
+     wrapper, so the fallback carries it back to the neutral
+     `--ethos-info` unchanged. */
+  border-left: 2px solid var(--accent, var(--ethos-info));
   padding-left: 10px;
   color: var(--ethos-text);
 }
@@ -220,7 +207,7 @@ body,
 }
 
 .sidebar-nav-item.active svg {
-  color: var(--ethos-info);
+  color: var(--accent, var(--ethos-info));
 }
 
 .sidebar-section-label {
@@ -230,18 +217,6 @@ body,
   padding: 8px 12px 4px;
   opacity: 0.5;
   font-weight: 500;
-}
-
-.app-shell.collapsed .sidebar-nav-label,
-.app-shell.collapsed .sidebar-nav-section,
-.app-shell.collapsed .sidebar-section-label,
-.app-shell.collapsed .sidebar-header-title {
-  display: none;
-}
-
-.app-shell.collapsed .sidebar-nav-item {
-  justify-content: center;
-  padding: 8px;
 }
 
 .nav-icon {
@@ -405,41 +380,189 @@ body,
 
 .sidebar-nav-hint {
   margin-left: auto;
+  font-family: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 10px;
+  font-variant-numeric: tabular-nums;
   color: var(--ethos-text-dim);
   opacity: 0.7;
 }
 
-.sidebar-footer {
-  margin-top: auto;
-  padding: 8px;
-  border-top: 1px solid var(--ethos-border);
+/* ─── P1b — AltitudeRail + ScopeNav ────────────────────────────────────
+   plan/phases/personality-first-ui.md. Replaces the deleted `Sidebar.tsx`
+   (removed P6); `.sidebar-*` classes above are reused verbatim inside
+   `.scope-nav` (nav rows, session list, search input, etc.) rather than
+   duplicated.
+   ─────────────────────────────────────────────────────────────────── */
+
+.altitude-rail {
+  grid-area: rail;
+  border-right: 1px solid var(--ethos-border);
+  background: var(--ethos-bg-elevated);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 12px 0;
+  gap: 8px;
+  overflow: hidden;
+}
+
+.altitude-rail-ethos-btn {
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  /* Reserved for the Ethos ring only — never reused from
+     `DEFAULT_TOKENS.accents` (packages/design-tokens). `researcher`
+     resolves to the literal same hex as `--ethos-info` (#4A9EFF), so
+     the old `color: var(--ethos-info)` here was indistinguishable from
+     that personality's mark. `--ethos-text` is off the accent palette
+     entirely and reads as the neutral/machine altitude. */
+  color: var(--ethos-text);
+  flex-shrink: 0;
+  transition: background-color 80ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.altitude-rail-ethos-btn:hover {
+  background: var(--ethos-surface-tint);
+}
+
+.altitude-rail-divider {
+  width: 32px;
+  height: 1px;
+  background: var(--ethos-border);
+  flex-shrink: 0;
+}
+
+.altitude-rail-marks {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  flex: 1;
+  overflow-y: auto;
+}
+
+.altitude-rail-mark-btn {
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  overflow: hidden;
+  border: 2px solid transparent;
+  padding: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  transition: border-color 80ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.altitude-rail-mark-btn:hover {
+  background: var(--ethos-surface-tint);
+}
+
+/* Rail stays global chrome forever — the active mark's ring is the fixed
+   `--ethos-info`, never `--accent`. Only the contextual column and the
+   stage carry the active scope's accent (DESIGN.md P0 amendment). */
+.altitude-rail-mark-btn.active {
+  border-color: var(--ethos-info);
+}
+
+.altitude-rail-new-btn {
+  width: 40px;
+  height: 40px;
+  border-radius: 10px;
+  border: 1px dashed var(--ethos-border);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--ethos-text-dim);
+  font-size: 18px;
+  flex-shrink: 0;
+  margin-top: 4px;
+  transition:
+    border-color 80ms cubic-bezier(0.16, 1, 0.3, 1),
+    color 80ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.altitude-rail-new-btn:hover {
+  border-color: var(--ethos-info);
+  color: var(--ethos-info);
+}
+
+.scope-nav {
+  grid-area: scope;
+  border-right: 1px solid var(--ethos-border);
+  background: var(--ethos-bg-elevated);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.scope-nav-identity {
   display: flex;
   align-items: center;
   gap: 8px;
+  height: 48px;
+  padding: 0 16px;
+  border-bottom: 1px solid var(--ethos-border);
+  font-weight: 600;
+  flex-shrink: 0;
 }
 
-.sidebar-footer .sidebar-nav-item {
-  flex: 1;
-}
-
-.sidebar-advanced-toggle-btn {
-  background: transparent;
-  border: 1px solid var(--ethos-border);
-  border-radius: 4px;
-  padding: 2px 8px;
-  font-size: 10px;
-  color: var(--ethos-text-dim);
+.scope-nav-advanced-toggle {
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: none;
   cursor: pointer;
-  transition: color 80ms cubic-bezier(0.16, 1, 0.3, 1);
+  font-family: inherit;
 }
 
-.sidebar-advanced-toggle-btn:hover {
+.scope-nav-advanced-toggle:hover {
   color: var(--ethos-text);
 }
 
-.sidebar-connected {
-  margin-left: auto;
+/* The workspace `<ConfigProvider>` + `--accent` wrapper (App.tsx) has to
+   sit between AltitudeRail and the rest of the shell in the tree so
+   ScopeNav/StageHeader/`.app-main` can read `--accent`, but it must NOT
+   become a grid item itself — `display: contents` unwraps it, leaving its
+   children to fill their own `grid-area` as if the wrapper weren't there. */
+.workspace-accent-scope {
+  display: contents;
+}
+
+.stage-header {
+  grid-area: header;
+  display: flex;
+  align-items: center;
+  height: 40px;
+  padding: 0 24px;
+  gap: 6px;
+  font-size: 12px;
+  background: var(--ethos-bg);
+  border-bottom: 1px solid var(--ethos-border);
+}
+
+.stage-header-ring {
+  color: var(--ethos-text-dim);
+}
+
+.stage-header-scope {
+  color: var(--accent, var(--ethos-info));
+  font-weight: 600;
+}
+
+.stage-header-sep {
+  color: var(--ethos-text-dim);
+  opacity: 0.5;
+}
+
+.stage-header-pane {
+  color: var(--ethos-text-dim);
 }
 
 .app-main {
@@ -4265,6 +4388,25 @@ textarea {
     z-index: 20;
     box-shadow: -8px 0 24px var(--ethos-shadow-overlay);
   }
+
+  /* P6 (plan/phases/personality-first-ui.md) — the 216px ScopeNav column
+     collapses below 1280px, reclaiming its width for the stage. The 56px
+     AltitudeRail stays put and stays the personality switcher — it does
+     not collapse (DESIGN.md: the rail is global chrome, forever visible).
+     Reached instead via the ⌘K palette (CommandPalette, P5) and the
+     Library twin pages once the column is gone. Overridden again by the
+     767.98px rule below, which drops the rail too. */
+  .app-shell {
+    grid-template-columns: var(--altitude-rail-width) 1fr;
+    grid-template-areas:
+      "rail header"
+      "rail main"
+      "statusbar statusbar";
+  }
+
+  .scope-nav {
+    display: none;
+  }
 }
 
 /* Command palette — see components/CommandPalette.tsx. Anchored top of
@@ -4844,7 +4986,9 @@ textarea {
       "statusbar"
       "tabbar";
   }
-  .sidebar {
+  .altitude-rail,
+  .scope-nav,
+  .stage-header {
     display: none;
   }
   .app-main {

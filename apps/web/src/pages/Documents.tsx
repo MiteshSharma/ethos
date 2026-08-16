@@ -1,6 +1,7 @@
 import { useQuery } from '@tanstack/react-query';
 import { Empty, Popconfirm, Spin, Table, Tag, Tooltip, Typography } from 'antd';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
+import { useParams } from 'react-router-dom';
 import { DocumentPreviewModal } from '../components/documents/DocumentPreviewModal';
 import { PersonalitySelect } from '../components/personality/PersonalitySelect';
 import { useDocumentDelete } from '../features/documents/api/mutations';
@@ -27,13 +28,21 @@ import { rpc } from '../rpc';
 // what the agent produced. It is rooted at the personality's declared
 // `fs_reach.workdir`; SOUL.md / config.yaml / mcp.yaml are not on this surface.
 //
-// The personality selection is OWNED HERE. `useActivePersonality`'s override
-// is component-local `useState`, not a shared store, so this page threads its
-// own id explicitly into every RPC call and into the download URL rather than
-// assuming a global.
+// The personality selection is OWNED HERE, as component-local `useState`, not
+// a shared store — this page threads its own id explicitly into every RPC
+// call and into the download URL rather than assuming a global. P2
+// (plan/phases/personality-first-ui.md): at `/p/:personalityId/documents` it
+// defaults to — and stays in sync with — the route's id rather than the
+// independently-remembered favourite; `documents.root`/`documents.list` take
+// an optional `personalityId` (omitted = config default), so this is still no
+// backend change.
 
 export function Documents() {
-  const [personalityId, setPersonalityId] = useState<string | null>(null);
+  const { personalityId: routePersonalityId } = useParams<{ personalityId?: string }>();
+  const [personalityId, setPersonalityId] = useState<string | null>(routePersonalityId ?? null);
+  useEffect(() => {
+    if (routePersonalityId) setPersonalityId(routePersonalityId);
+  }, [routePersonalityId]);
   const { favouriteId, toggleFavourite } = useFavouritePersonality();
 
   const personalitiesQuery = useQuery({

@@ -69,9 +69,8 @@ function formatTokens(n: number | null): string {
 // --- Component ------------------------------------------------------------
 
 export function GoalDetail() {
-  const { id } = useParams<{ id: string }>();
+  const { goalId = '' } = useParams<{ goalId: string }>();
   const navigate = useNavigate();
-  const goalId = id ?? '';
 
   const { data, isLoading, error } = useGoalDetail(goalId);
   const cancelMutation = useGoalCancel(goalId);
@@ -163,7 +162,7 @@ export function GoalDetail() {
           >
             <button
               type="button"
-              onClick={() => navigate('/goals')}
+              onClick={() => navigate(`/p/${goal.personalityId}/goals`)}
               style={{
                 background: 'none',
                 border: 'none',

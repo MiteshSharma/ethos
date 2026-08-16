@@ -1,17 +1,43 @@
 import { useQueryClient } from '@tanstack/react-query';
+import { ConfigProvider } from 'antd';
 import { useCallback, useEffect, useState } from 'react';
-import { Navigate, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
+import {
+  Navigate,
+  Route,
+  Routes,
+  useLocation,
+  useNavigate,
+  useParams,
+  useSearchParams,
+} from 'react-router-dom';
+import { AltitudeRail } from './components/AltitudeRail';
 import { CommandPalette } from './components/CommandPalette';
 import { MobileTabBar } from './components/MobileTabBar';
+import { NewAgentDialog } from './components/NewAgentDialog';
 import { PersonalityPickerModal } from './components/PersonalityPickerModal';
 import { RightDrawer } from './components/RightDrawer';
-import { Sidebar } from './components/Sidebar';
+import { ScopeNav } from './components/ScopeNav';
+import { StageHeader } from './components/StageHeader';
 import { StatusBar } from './components/StatusBar';
 import { useConfig, useOnboardingState } from './features/config/api/queries';
+import { useGoalDetail } from './features/goals/api/queries';
+import { useSessionGet } from './features/sessions/api/queries';
 import { useNewSessionModal } from './hooks/useNewSessionModal';
 import { usePushEventToasts } from './hooks/usePushEventToasts';
 import { useSessionTitleSync } from './hooks/useSessionTitleSync';
 import { bridge, isDesktop } from './lib/desktop';
+import { getLastPersonalityId, setLastPersonalityId } from './lib/lastPersonality';
+import { extractWorkspacePersonalityId } from './lib/scopeNav';
+import { accentVars, personalityAccent, personalityTheme } from './lib/theme';
+import {
+  buildIdentityRedirectPath,
+  buildWorkspaceRedirectPath,
+  isChatPathname,
+  resolveChatRedirectPath,
+  resolveFallbackPersonalityId,
+  resolveGoalRedirectPath,
+  sessionOpenPath,
+} from './lib/workspaceRoutes';
 import { Activity } from './pages/Activity';
 import { Admin } from './pages/Admin';
 import { Batch } from './pages/Batch';
@@ -46,7 +72,7 @@ import { Tasks } from './pages/Tasks';
 import { TeamControlCenter } from './pages/TeamControlCenter';
 import { TeamCreate } from './pages/TeamCreate';
 import { Teams } from './pages/Teams';
-import { reinitializeClient } from './rpc';
+import { reinitializeClient, rpc } from './rpc';
 
 // Top-level route map. v0 ships only Talk-group routes (Chat + Sessions)
 // plus the onboarding flow and the signing-in placeholder. v0.5 adds the
@@ -54,18 +80,21 @@ import { reinitializeClient } from './rpc';
 // — landing alongside this commit). Lab / System groups arrive in v1.
 
 const DRAWER_BREAKPOINT = 1280; // px — plan IA: drawer "default visible ≥1280px"
-const COMPACT_BREAKPOINT = 1280; // px — sidebar auto-collapses below this
-
-function initialCollapsed(): boolean {
-  return typeof window !== 'undefined' && window.innerWidth < COMPACT_BREAKPOINT;
-}
+// P1b's AltitudeRail + ScopeNav have no collapsed mode of their own — the
+// responsive collapse of the 216px column at this same breakpoint (rail
+// remains as personality switcher) is explicit P6 scope in the plan, not
+// this phase. The old Sidebar's collapse toggle is dropped along with it.
 
 export function App() {
-  const [collapsed, setCollapsed] = useState(initialCollapsed);
   const [drawerOpen, setDrawerOpen] = useState(() =>
     typeof window === 'undefined' ? false : window.innerWidth >= DRAWER_BREAKPOINT,
   );
   const [paletteOpen, setPaletteOpen] = useState(false);
+  // Rail `+`'s "Quick create" and the palette's "New agent" action open the
+  // SAME `NewAgentDialog` instance (P5 item 1 + item 3) — lifted here rather
+  // than owned by AltitudeRail, same reason `paletteOpen`/`drawerOpen` live
+  // at this level: both entry points are direct children of this shell.
+  const [quickCreateOpen, setQuickCreateOpen] = useState(false);
   useDesktopBootstrap();
   useDesktopNavigation();
   useDesktopOAuthCallback();
@@ -76,22 +105,28 @@ export function App() {
   const { data: config } = useConfig();
   const { open: newSessionOpen, closeNewSessionModal } = useNewSessionModal();
   const { pathname } = useLocation();
-  const isChat = pathname === '/chat';
+  const isChat = isChatPathname(pathname);
+  const workspacePersonalityId = extractWorkspacePersonalityId(pathname);
 
-  // Auto-collapse sidebar / hide drawer when crossing the compact
-  // breakpoint. We don't *force* state on every resize tick — just
-  // when crossing — so a user who manually expanded mid-session
+  // Remember the last personality workspace the user was inside — the `/`
+  // and `/chat` fallback chain's second link (P1a), after `?session=` and
+  // before the config default.
+  useEffect(() => {
+    if (workspacePersonalityId) setLastPersonalityId(workspacePersonalityId);
+  }, [workspacePersonalityId]);
+
+  // Hide the activity drawer when crossing below the breakpoint it needs
+  // grid space at. We don't *force* it open/closed on every resize tick —
+  // just when crossing — so a user who manually toggled it mid-session
   // keeps their preference until the next breakpoint flip.
   useEffect(() => {
-    let lastNarrow = initialCollapsed();
+    let lastNarrow = typeof window !== 'undefined' && window.innerWidth < DRAWER_BREAKPOINT;
     const onResize = () => {
       if (typeof window === 'undefined') return;
-      const narrow = window.innerWidth < COMPACT_BREAKPOINT;
+      const narrow = window.innerWidth < DRAWER_BREAKPOINT;
       if (narrow !== lastNarrow) {
         lastNarrow = narrow;
-        setCollapsed(narrow);
-        if (narrow) setDrawerOpen(false);
-        else setDrawerOpen(true);
+        setDrawerOpen(!narrow);
       }
     };
     window.addEventListener('resize', onResize);
@@ -124,20 +159,69 @@ export function App() {
     return () => window.removeEventListener('keydown', onKey);
   }, [toggleDrawer]);
 
-  const shellClass = ['app-shell', collapsed ? 'collapsed' : '', drawerOpen ? 'drawer-open' : '']
-    .filter(Boolean)
-    .join(' ');
+  const shellClass = ['app-shell', drawerOpen ? 'drawer-open' : ''].filter(Boolean).join(' ');
 
-  return (
-    <div className={shellClass}>
-      <Sidebar collapsed={collapsed} onToggle={() => setCollapsed((v) => !v)} />
+  // Per DESIGN.md's P0 amendment: global chrome (the rail) stays neutral
+  // forever; the contextual column and the stage carry the active scope's
+  // accent. The lift target used to be the chat tab (Chat.tsx's own
+  // `<ConfigProvider>` + `accentVars`) — it now wraps ScopeNav + StageHeader
+  // + the routed stage together, whenever a `/p/:personalityId/*` route is
+  // active. `display: contents` keeps the wrapper out of the `.app-shell`
+  // grid — ScopeNav and `.app-main` still get their own named grid areas.
+  const scopeAndStage = (
+    <>
+      <ScopeNav />
+      <StageHeader />
       <main className="app-main">
         <Routes>
-          <Route path="/" element={<Navigate to="/chat" replace />} />
-          <Route path="/chat" element={<Chat />} />
-          <Route path="/sessions" element={<Sessions />} />
-          <Route path="/cron" element={<Cron />} />
+          <Route path="/" element={<ChatRedirect />} />
+
+          {/* Workspace routes (P1a) — personality-scoped URLs for the eleven
+              pages below, plus Chat. These are new addresses for the same
+              page bodies; StatusBar/MobileTabBar are unchanged. (Sidebar
+              rendered this chrome at P1a time — P1b replaces it with
+              AltitudeRail + ScopeNav, see the shell's return below.) */}
+          <Route path="/p/:personalityId/chat" element={<ChatRoute />} />
+          <Route path="/p/:personalityId/sessions" element={<Sessions />} />
+          <Route path="/p/:personalityId/memory" element={<Memory />} />
+          <Route path="/p/:personalityId/documents" element={<Documents />} />
+          <Route path="/p/:personalityId/schedule" element={<Cron />} />
+          <Route path="/p/:personalityId/goals" element={<Goals />} />
+          <Route path="/p/:personalityId/goals/:goalId" element={<GoalDetail />} />
+          <Route path="/p/:personalityId/tasks" element={<Tasks />} />
+          <Route path="/p/:personalityId/skills" element={<Skills />} />
+          <Route path="/p/:personalityId/mcp" element={<Mcp />} />
+          <Route path="/p/:personalityId/plugins" element={<Plugins />} />
+          <Route path="/p/:personalityId/identity" element={<PersonalityDetail />} />
+
+          {/* Old URLs — permanent redirects to the workspace routes above. */}
+          <Route path="/chat" element={<ChatRedirect />} />
+          <Route path="/sessions" element={<WorkspaceRedirect suffix="sessions" />} />
+          <Route path="/cron" element={<WorkspaceRedirect suffix="schedule" />} />
+          {/* /skills, /mcp, /plugins keep serving their bare global-list URL
+              as the Library twin address — that decision was made in P1a/P2
+              and P3 (dual-altitude twins) doesn't move it, only fills in the
+              twin's content (attach/detach, "Used by" marks). Redirecting it
+              away would break the only page that currently answers "all
+              skills" with no replacement. The workspace-scoped route above
+              renders the same component as an additional path, not a
+              replacement. */}
           <Route path="/skills" element={<Skills />} />
+          {/* Library Advanced's "System cron" destination (P2): the SAME
+              <Cron/> component, rendered with no `:personalityId` so it
+              lists `source === 'system'` jobs — the old bare `/cron` above
+              always redirects into a workspace and can't be reused for
+              this, since P1a already claimed it as a legacy bookmark
+              redirect (Route map: old `/cron` → workspace `/schedule`). */}
+          <Route path="/library/cron" element={<Cron />} />
+          {/* P3's remaining Library twins. Sessions and Tasks had no
+              existing bare-URL twin the way Skills/MCP/Plugins did (P1a
+              claimed `/sessions` and `/tasks` as workspace-redirect legacy
+              bookmarks — Route map above), so both get a `/library/…`
+              address instead: the SAME component, rendered with no
+              `:personalityId`, same pattern as `/library/cron`. */}
+          <Route path="/library/sessions" element={<Sessions />} />
+          <Route path="/library/tasks" element={<Tasks />} />
           <Route path="/mesh" element={<Mesh />} />
           <Route path="/activity" element={<Activity />} />
           <Route path="/teams" element={<Teams />} />
@@ -152,20 +236,20 @@ export function App() {
             <Route path=":category" element={<SettingsPaneRoute />} />
             <Route path=":category/:section" element={<SettingsPaneRoute />} />
           </Route>
-          <Route path="/memory" element={<Memory />} />
-          <Route path="/documents" element={<Documents />} />
+          <Route path="/memory" element={<WorkspaceRedirect suffix="memory" />} />
+          <Route path="/documents" element={<WorkspaceRedirect suffix="documents" />} />
           <Route path="/plugins" element={<Plugins />} />
           <Route path="/mcp" element={<Mcp />} />
           <Route path="/plugins/:pluginId" element={<PluginPage />} />
           <Route path="/communications" element={<Communications />} />
           <Route path="/personalities" element={<Personalities />} />
-          <Route path="/personalities/:id" element={<PersonalityDetail />} />
+          <Route path="/personalities/:id" element={<IdentityRedirect />} />
           <Route path="/personality/create" element={<PersonalityCreate />} />
           <Route path="/batch" element={<Batch />} />
           <Route path="/eval" element={<Eval />} />
-          <Route path="/goals" element={<Goals />} />
-          <Route path="/goals/:id" element={<GoalDetail />} />
-          <Route path="/tasks" element={<Tasks />} />
+          <Route path="/goals" element={<WorkspaceRedirect suffix="goals" />} />
+          <Route path="/goals/:id" element={<GoalRedirect />} />
+          <Route path="/tasks" element={<WorkspaceRedirect suffix="tasks" />} />
           <Route path="/dashboards" element={<Dashboards />} />
           <Route path="/dashboards/create" element={<CreateDashboardFlow />} />
           <Route path="/dashboards/:id" element={<DashboardView />} />
@@ -186,6 +270,24 @@ export function App() {
           <Route path="*" element={<Navigate to="/chat" replace />} />
         </Routes>
       </main>
+    </>
+  );
+
+  return (
+    <div className={shellClass}>
+      <AltitudeRail onOpenQuickCreate={() => setQuickCreateOpen(true)} />
+      {workspacePersonalityId ? (
+        <ConfigProvider theme={personalityTheme(workspacePersonalityId)}>
+          <div
+            className="workspace-accent-scope"
+            style={accentVars(personalityAccent(workspacePersonalityId))}
+          >
+            {scopeAndStage}
+          </div>
+        </ConfigProvider>
+      ) : (
+        scopeAndStage
+      )}
       <StatusBar drawerOpen={drawerOpen} onToggleDrawer={() => setDrawerOpen((v) => !v)} />
       {isChat && (
         <RightDrawer
@@ -198,8 +300,10 @@ export function App() {
         open={paletteOpen}
         onClose={() => setPaletteOpen(false)}
         onToggleDrawer={toggleDrawer}
+        onOpenQuickCreateAgent={() => setQuickCreateOpen(true)}
       />
       <PersonalityPickerModal open={newSessionOpen} onClose={closeNewSessionModal} />
+      {quickCreateOpen ? <NewAgentDialog onClose={() => setQuickCreateOpen(false)} /> : null}
       <MobileTabBar />
     </div>
   );
@@ -231,7 +335,18 @@ function useDesktopNavigation(): void {
   useEffect(() => {
     if (!isDesktop || !bridge) return;
     return bridge.navigate.onSession((sessionId) => {
-      navigate(`/chat?session=${sessionId}`);
+      // The Electron menu only hands us a session id — fetch its personality
+      // so we can land directly on the new workspace URL instead of bouncing
+      // through the `/chat?session=` redirect. If the lookup fails, that
+      // redirect is still a correct fallback.
+      rpc.sessions
+        .get({ id: sessionId })
+        .then((result) => {
+          navigate(sessionOpenPath(sessionId, result.session.personalityId));
+        })
+        .catch(() => {
+          navigate(sessionOpenPath(sessionId, null));
+        });
     });
   }, [navigate]);
 }
@@ -285,4 +400,100 @@ function useOnboardingRedirect(): void {
       return;
     navigate('/onboarding', { replace: true });
   }, [data, isLoading, pathname, navigate]);
+}
+
+/**
+ * Forces `<Chat/>` to fully remount whenever the workspace route's
+ * `:personalityId` changes (P2, plan/phases/personality-first-ui.md).
+ * Without this, React Router reuses the same `<Chat/>` instance across
+ * `/p/engineer/chat` → `/p/researcher/chat` — same component type, same
+ * position in the tree, only the param differs — so none of its
+ * session/voice/attachment state resets on its own. Keying on the id is the
+ * standard React fix for "this subtree is tied to an id; give it a fresh
+ * instance when the id changes" (see AltitudeRail / `sessionOpenPath` /
+ * redirects — every path that lands here can change the id without
+ * unmounting the route).
+ */
+function ChatRoute() {
+  const { personalityId } = useParams<{ personalityId: string }>();
+  return <Chat key={personalityId} />;
+}
+
+// --- P1a permanent redirects — plan/phases/personality-first-ui.md ---------
+//
+// Every route below renders instead of a page body: it resolves a target
+// `/p/:personalityId/…` URL and hands off via `<Navigate replace>`, the same
+// pattern `/` → `/chat` already used. The resolution itself is the pure,
+// unit-tested logic in `lib/workspaceRoutes.ts`; these components only wire
+// hooks to it.
+
+/** `/` and `/chat`, with or without `?session=`. */
+function ChatRedirect() {
+  const location = useLocation();
+  const [searchParams] = useSearchParams();
+  const sessionId = searchParams.get('session');
+  const sessionQuery = useSessionGet(sessionId);
+  const { data: config } = useConfig();
+
+  const target = resolveChatRedirectPath({
+    sessionId,
+    sessionLoading: sessionQuery.isLoading,
+    sessionPersonalityId: sessionQuery.data?.session.personalityId,
+    fallbackPersonalityId: resolveFallbackPersonalityId(
+      getLastPersonalityId(),
+      config?.personality,
+    ),
+    search: location.search,
+  });
+
+  if (!target) return null;
+  return <Navigate to={target} replace />;
+}
+
+/** The flat old routes with no personality context of their own:
+ * `/sessions`, `/memory`, `/documents`, `/cron` (→ `schedule`), `/goals`,
+ * `/tasks`. */
+function WorkspaceRedirect({ suffix }: { suffix: string }) {
+  const location = useLocation();
+  const { data: config } = useConfig();
+  const fallbackPersonalityId = resolveFallbackPersonalityId(
+    getLastPersonalityId(),
+    config?.personality,
+  );
+  return (
+    <Navigate
+      to={buildWorkspaceRedirectPath(fallbackPersonalityId, suffix, location.search)}
+      replace
+    />
+  );
+}
+
+/** `/goals/:id` → `/p/:personalityId/goals/:goalId`. */
+function GoalRedirect() {
+  const { id } = useParams<{ id: string }>();
+  const location = useLocation();
+  const { data: config } = useConfig();
+  const goalId = id ?? '';
+  const goalQuery = useGoalDetail(goalId);
+
+  const target = resolveGoalRedirectPath({
+    goalId,
+    goalLoading: goalQuery.isLoading,
+    goalPersonalityId: goalQuery.data?.goal.personalityId,
+    fallbackPersonalityId: resolveFallbackPersonalityId(
+      getLastPersonalityId(),
+      config?.personality,
+    ),
+    search: location.search,
+  });
+
+  if (!target) return null;
+  return <Navigate to={target} replace />;
+}
+
+/** `/personalities/:id` → `/p/:personalityId/identity`. */
+function IdentityRedirect() {
+  const { id } = useParams<{ id: string }>();
+  const location = useLocation();
+  return <Navigate to={buildIdentityRedirectPath(id ?? '', location.search)} replace />;
 }

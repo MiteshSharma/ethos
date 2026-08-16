@@ -9,8 +9,10 @@
 //   2. 5×5 grid, mirror-symmetric — generate columns 0..2, mirror to 3..4.
 //   3. Each cell is filled based on a bit from the hash; opacity is
 //      drawn from {0.55, 0.68, 0.81, 0.93} via 2 hash bits.
-//   4. Background: rounded square (corner radius = size × 0.16),
-//      accent color at 0x22 alpha (~13%).
+//   4. Background: circular frame — accent color at 0x22 alpha (~13%) fill,
+//      plus a ring stroke around the circumference at ~0.55 opacity. Cells
+//      are clipped to the circle. The circle's radius is always size / 2,
+//      so it's not carried in the spec — only the ring opacity is.
 //   5. Filled cells: solid accent at the computed opacity.
 
 export interface PersonalityMarkCell {
@@ -25,10 +27,10 @@ export interface PersonalityMarkCell {
 export interface PersonalityMarkSpec {
   /** Filled cells, including their mirror reflections. */
   cells: PersonalityMarkCell[];
-  /** Background corner radius as a fraction of the mark's bounding size. */
-  bgRadius: number;
   /** Background fill alpha (0..1). */
   bgAlpha: number;
+  /** Accent ring stroke opacity (0..1) drawn around the circle's edge. */
+  ringAlpha: number;
 }
 
 const FNV_OFFSET_32 = 0x811c9dc5;
@@ -84,12 +86,12 @@ export function generatePersonalityMark(personalityId: string): PersonalityMarkS
 
   return {
     cells,
-    bgRadius: 0.16,
     bgAlpha: 0x22 / 0xff,
+    ringAlpha: 0.55,
   };
 }
 
 // Personality accent resolution moved to @ethosagent/design-tokens (the
 // single runtime source of truth for visual tokens). The marks algorithm
-// is identity-only — it produces cells/opacity/bgRadius. Surface code
+// is identity-only — it produces cells/opacity/ringAlpha. Surface code
 // applies the accent on top by reading from design-tokens.

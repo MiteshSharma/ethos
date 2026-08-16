@@ -7,21 +7,32 @@ import {
   Input,
   Modal,
   Popconfirm,
-  Segmented,
   Select,
   Spin,
   Switch,
   Typography,
 } from 'antd';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
+import { useParams } from 'react-router-dom';
+import { useCreateFlag } from '../hooks/useCreateFlag';
+import { filterCronJobsForLibrary, filterCronJobsForWorkspace } from '../lib/workspaceScope';
 import { rpc } from '../rpc';
 
-// Cron tab — proactive pillar of v0.5. Lists scheduled jobs, lets the
+// Cron — proactive pillar of v0.5. Lists scheduled jobs, lets the
 // user create / pause / resume / delete / run-now, and shows the head
 // of recent run history inline when a row is expanded.
 //
 // Server-side: serve.ts owns the actual scheduler tick loop. This UI
 // just calls into rpc.cron.* and lets the backend do the work.
+//
+// P2 (plan/phases/personality-first-ui.md) renders this component at two
+// addresses that both call the same `cron.list()` and split client-side —
+// there's no `source`/`personalityId` filter on the RPC input:
+//   • `/p/:personalityId/schedule` (workspace) — this agent's own jobs:
+//     `source === 'user' && personalityId === current`.
+//   • `/library/cron` (Library, via ScopeNav's Advanced disclosure) —
+//     machine-wide `source === 'system'` jobs (digest, watchers), seeded by
+//     operator config, not owned by any one agent, and not creatable here.
 
 const PRESET_SCHEDULES: Array<{ value: string; label: string }> = [
   { value: '*/5 * * * *', label: 'Every 5 minutes' },
@@ -32,18 +43,21 @@ const PRESET_SCHEDULES: Array<{ value: string; label: string }> = [
 ];
 
 export function Cron() {
+  const { personalityId: routePersonalityId } = useParams<{ personalityId?: string }>();
   const [createOpen, setCreateOpen] = useState(false);
-  const [filterPersonality, setFilterPersonality] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<'user' | 'system'>('user');
+
+  // P5 — StageHeader's "New job" action only exists for the workspace route
+  // (`/p/:personalityId/schedule`), same gating as the page's own "New job"
+  // button below: system cron (`/library/cron`, no routePersonalityId) has
+  // no create action.
+  const shouldCreate = useCreateFlag();
+  useEffect(() => {
+    if (shouldCreate && routePersonalityId) setCreateOpen(true);
+  }, [shouldCreate, routePersonalityId]);
 
   const { data, isLoading, error } = useQuery({
     queryKey: ['cron', 'list'],
     queryFn: () => rpc.cron.list(),
-  });
-
-  const personalitiesQuery = useQuery({
-    queryKey: ['personalities', 'list'],
-    queryFn: () => rpc.personalities.list({}),
   });
 
   if (isLoading) {
@@ -63,56 +77,32 @@ export function Cron() {
   }
 
   const allJobs = data?.jobs ?? [];
-  const tabJobs = allJobs.filter((j) => (j.source ?? 'user') === activeTab);
-  const jobs = filterPersonality
-    ? tabJobs.filter((j) => j.personalityId === filterPersonality)
-    : tabJobs;
+  const jobs = routePersonalityId
+    ? filterCronJobsForWorkspace(allJobs, routePersonalityId)
+    : filterCronJobsForLibrary(allJobs);
+  const noun = routePersonalityId ? 'job' : 'system job';
 
   return (
     <div className="cron-tab">
       <header className="cron-toolbar">
         <span className="sessions-count">
-          {jobs.length} {activeTab} {jobs.length === 1 ? 'job' : 'jobs'}
-          {filterPersonality ? ` · ${filterPersonality}` : ''}
+          {jobs.length} {noun}
+          {jobs.length === 1 ? '' : 's'}
         </span>
-        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-          <Segmented
-            value={activeTab}
-            onChange={(v) => setActiveTab(v as 'user' | 'system')}
-            options={[
-              { label: 'User', value: 'user' },
-              { label: 'System', value: 'system' },
-            ]}
-            size="small"
-          />
-          {activeTab === 'user' && (
-            <Select
-              allowClear
-              placeholder="All personalities"
-              size="small"
-              style={{ width: 180 }}
-              value={filterPersonality}
-              onChange={(v) => setFilterPersonality(v ?? null)}
-              loading={personalitiesQuery.isLoading}
-              options={(personalitiesQuery.data?.items ?? []).map((p) => ({
-                value: p.id,
-                label: p.name,
-              }))}
-            />
-          )}
-          {activeTab === 'user' && (
+        {routePersonalityId && (
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
             <Button type="primary" onClick={() => setCreateOpen(true)}>
               New job
             </Button>
-          )}
-        </div>
+          </div>
+        )}
       </header>
 
       {jobs.length === 0 ? (
         <div className="cron-card-empty">
-          {activeTab === 'system'
-            ? 'No system jobs. System jobs are seeded at startup and managed by operator config.'
-            : 'No cron jobs yet. Create one to schedule a recurring agent task.'}
+          {routePersonalityId
+            ? 'No cron jobs yet. Create one to schedule a recurring agent task.'
+            : 'No system jobs. System jobs are seeded at startup and managed by operator config.'}
         </div>
       ) : (
         <div className="cron-card-list">
@@ -122,7 +112,13 @@ export function Cron() {
         </div>
       )}
 
-      {createOpen ? <CreateJobModal open onClose={() => setCreateOpen(false)} /> : null}
+      {createOpen ? (
+        <CreateJobModal
+          open
+          onClose={() => setCreateOpen(false)}
+          defaultPersonalityId={routePersonalityId}
+        />
+      ) : null}
     </div>
   );
 }
@@ -303,7 +299,17 @@ interface CreateForm {
   notifyInApp: boolean;
 }
 
-function CreateJobModal({ open, onClose }: { open: boolean; onClose: () => void }) {
+function CreateJobModal({
+  open,
+  onClose,
+  defaultPersonalityId,
+}: {
+  open: boolean;
+  onClose: () => void;
+  /** Pre-selects the workspace's own agent — this modal only opens from the
+   *  workspace Schedule pane, never from Library. Still editable. */
+  defaultPersonalityId?: string;
+}) {
   const [form] = Form.useForm<CreateForm>();
   const queryClient = useQueryClient();
   const { notification } = AntApp.useApp();
@@ -344,6 +350,7 @@ function CreateJobModal({ open, onClose }: { open: boolean; onClose: () => void 
         form={form}
         layout="vertical"
         requiredMark={false}
+        initialValues={{ personalityId: defaultPersonalityId }}
         onFinish={(values) => create.mutate(values)}
       >
         <Form.Item

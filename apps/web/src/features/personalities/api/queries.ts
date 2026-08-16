@@ -25,10 +25,11 @@ export function useCharacterSheet(id: string) {
   });
 }
 
-export function usePersonalitySkillsList(personalityId: string) {
+export function usePersonalitySkillsList(personalityId: string, options?: { enabled?: boolean }) {
   return useQuery({
     queryKey: personalityKeys.skills(personalityId),
     queryFn: () => rpc.personalities.skillsList({ personalityId }),
+    ...options,
   });
 }
 

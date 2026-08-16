@@ -92,9 +92,9 @@ describe('generatePersonalityMark', () => {
     expect(unique.size).toBe(TEST_IDS.length);
   });
 
-  it('background radius and alpha match DESIGN.md (0.16 / ~13%)', () => {
+  it('background alpha and ring alpha match DESIGN.md (~13% fill / ~0.55 ring)', () => {
     const spec = generatePersonalityMark('engineer');
-    expect(spec.bgRadius).toBe(0.16);
     expect(spec.bgAlpha).toBeCloseTo(0x22 / 0xff, 6);
+    expect(spec.ringAlpha).toBeCloseTo(0.55, 2);
   });
 });

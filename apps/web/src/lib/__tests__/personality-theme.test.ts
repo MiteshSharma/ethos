@@ -3,11 +3,16 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { accentVars, personalityAccent, personalityTheme } from '../theme';
 
-// The chat tab's per-personality accent, on both of its paths: Antd primitives
-// read `colorPrimary` off the inner ConfigProvider, raw CSS reads `--accent`
-// off the element that provider wraps. Per-personality SKIN overrides were
-// removed in the personality-alignment phase; the accent is what still varies,
-// and it has to reach both consumers from one resolver.
+// The workspace subtree's per-personality accent, on both of its paths: Antd
+// primitives read `colorPrimary` off the inner ConfigProvider, raw CSS reads
+// `--accent` off the element that provider wraps. Per-personality SKIN
+// overrides were removed in the personality-alignment phase; the accent is
+// what still varies, and it has to reach both consumers from one resolver.
+//
+// P1b (plan/phases/personality-first-ui.md) lifted the wiring from the chat
+// tab to the workspace subtree (App.tsx) per DESIGN.md's P0 amendment: global
+// chrome (the altitude rail) stays neutral forever, the contextual column and
+// the stage carry the active scope's accent.
 
 const WEB_SRC = join(import.meta.dirname, '..', '..');
 const css = readFileSync(join(WEB_SRC, 'styles.css'), 'utf8');
@@ -45,12 +50,17 @@ describe('--accent', () => {
     // `--accent` was read nineteen times across the stylesheet and defined
     // nowhere, so every `var(--accent, var(--ethos-info))` silently rendered
     // the generic info blue and per-personality colour was decorative.
+    //
+    // Two definitions now, deliberately: the workspace subtree's (App.tsx,
+    // every `/p/:personalityId/*` route) and the call stage's own `callAccent`
+    // override (Chat.tsx) — see the file-level comment above.
+    const app = readFileSync(join(WEB_SRC, 'App.tsx'), 'utf8');
+    expect(app).toContain('accentVars(personalityAccent(workspacePersonalityId))');
     const chat = readFileSync(join(WEB_SRC, 'pages', 'Chat.tsx'), 'utf8');
-    expect(chat).toContain('accentVars(personalityAccent(personalityId))');
     expect(chat).toContain('accentVars(callAccent)');
   });
 
-  it('is defined in exactly ONE place — the chat subtree wrapper', () => {
+  it('is defined in exactly ONE place — the workspace subtree wrapper', () => {
     // The Call Stage used to stamp its own copy. Two definitions of one
     // variable is how the shape's colour and the label's colour drift apart.
     const stage = readFileSync(join(WEB_SRC, 'features', 'voice', 'CallStage.tsx'), 'utf8');

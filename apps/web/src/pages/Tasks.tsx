@@ -1,9 +1,15 @@
 import type { BackgroundJobEventWire, BackgroundJobStatusWire } from '@ethosagent/web-contracts';
 import { Drawer, Empty, Popconfirm, Select, Spin, Typography } from 'antd';
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
+import { useParams } from 'react-router-dom';
 import { useRecentSessions } from '../features/sessions/api/queries';
 import { useTaskCancel } from '../features/tasks/api/mutations';
 import { useTaskDetail, useTasksList } from '../features/tasks/api/queries';
+import {
+  filterSessionsByPersonality,
+  filterTasksForLibrary,
+  filterTasksForWorkspace,
+} from '../lib/workspaceScope';
 
 const STATUS_CONFIG: Record<BackgroundJobStatusWire, { color: string; label: string }> = {
   queued: { color: 'var(--info)', label: 'Queued' },
@@ -229,19 +235,48 @@ const preStyle: React.CSSProperties = {
 };
 
 export function Tasks() {
+  // P2/P3: background jobs have no global list (`JobStore` only supports
+  // `listByRoot` — see `TasksService.list`), so this pane is session-scoped,
+  // one root session at a time, at BOTH altitudes. Workspace (P2) narrows the
+  // session PICKER itself to this agent's sessions — so you can't
+  // accidentally browse another agent's tasks from here — and client-filters
+  // the returned jobs to `personalityId === current`. Library "All tasks"
+  // (P3, rendered at `/library/tasks` with no `:personalityId`) leaves the
+  // picker unscoped (every session, any agent) and instead filters jobs down
+  // to `personalityId === null` — the unscoped rows the workspace pane hides
+  // (`filterTasksForWorkspace` / `filterTasksForLibrary` in `workspaceScope.ts`).
+  const { personalityId } = useParams<{ personalityId?: string }>();
   const { data: sessionsData, isLoading: sessionsLoading } = useRecentSessions(50);
-  const sessions = useMemo(() => sessionsData?.items ?? [], [sessionsData]);
+  const allSessions = useMemo(() => sessionsData?.items ?? [], [sessionsData]);
+  const sessions = useMemo(
+    () => (personalityId ? filterSessionsByPersonality(allSessions, personalityId) : allSessions),
+    [allSessions, personalityId],
+  );
 
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
+  // A manually picked session belongs to whichever agent was active when it
+  // was picked — drop it on a workspace switch so a stale, foreign session
+  // key can't linger (AltitudeRail keeps you on this pane per P2, but with a
+  // fresh personality).
+  // biome-ignore lint/correctness/useExhaustiveDependencies: intentionally keyed on personalityId only — the effect body doesn't read it, it's the reset trigger
+  useEffect(() => {
+    setSelectedKey(null);
+  }, [personalityId]);
   const rootSessionKey = selectedKey ?? sessions[0]?.key ?? null;
 
-  const { data: jobs, isLoading } = useTasksList(rootSessionKey);
+  const { data: rawJobs, isLoading } = useTasksList(rootSessionKey);
+  const jobs = useMemo(
+    () =>
+      personalityId
+        ? filterTasksForWorkspace(rawJobs ?? [], personalityId)
+        : filterTasksForLibrary(rawJobs ?? []),
+    [rawJobs, personalityId],
+  );
   const cancelMut = useTaskCancel();
   const [detailId, setDetailId] = useState<string | null>(null);
 
   const sorted = useMemo(() => {
-    const list = jobs ?? [];
-    return [...list].sort((a, b) => {
+    return [...jobs].sort((a, b) => {
       const aActive = ACTIVE.has(a.status) ? 0 : 1;
       const bActive = ACTIVE.has(b.status) ? 0 : 1;
       if (aActive !== bActive) return aActive - bActive;
@@ -261,7 +296,7 @@ export function Tasks() {
         }}
       >
         <h1 style={{ fontSize: 24, fontWeight: 600, margin: 0, color: 'var(--text-primary)' }}>
-          Tasks
+          {personalityId ? 'Tasks' : 'All tasks'}
         </h1>
         <Select
           size="small"
@@ -278,7 +313,9 @@ export function Tasks() {
       </header>
 
       <p style={{ fontSize: 12, color: 'var(--text-tertiary)', marginTop: -12, marginBottom: 20 }}>
-        Background jobs are scoped to a single root session. Pick a session above to view its tasks.
+        {personalityId
+          ? 'Background jobs are scoped to a single root session. Pick a session above to view its tasks.'
+          : 'Unscoped background jobs — spawned outside any personality context — for a single root session. Pick a session above to view its tasks.'}
       </p>
 
       {isLoading || sessionsLoading ? (

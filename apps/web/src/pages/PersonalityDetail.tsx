@@ -26,9 +26,13 @@ import {
   useToolSettingsForPersonality,
   useToolSettingsSchemas,
 } from '../features/settings/api/queries';
+import { canRetirePersonality, retireConfirmCopy } from '../lib/personalityIdentityActions';
+import { buildIdentityRedirectPath } from '../lib/workspaceRoutes';
 import { rpc } from '../rpc';
 import {
+  DuplicateModal,
   EditModal,
+  type EditModalTabKey,
   initialSelectionFor,
   ServerToolChecklist,
   type ServerToolState,
@@ -777,15 +781,38 @@ function ToolSettingsSection({
 }
 
 export function PersonalityDetail() {
-  const { id = '' } = useParams<{ id: string }>();
+  const { personalityId: id = '' } = useParams<{ personalityId: string }>();
   const navigate = useNavigate();
   const qc = useQueryClient();
+  const { notification, modal } = AntApp.useApp();
   const [editModalOpen, setEditModalOpen] = useState(false);
+  const [editInitialTab, setEditInitialTab] = useState<EditModalTabKey>('characterSheet');
+  const [duplicateOpen, setDuplicateOpen] = useState(false);
 
   const { data, isLoading, error } = useQuery({
     queryKey: ['personalities', 'get', id],
     queryFn: () => rpc.personalities.get({ id }),
     enabled: id.length > 0,
+  });
+
+  // Only fetched once Duplicate is actually opened — the collision check is
+  // the only reason this page needs the full roster.
+  const listQuery = useQuery({
+    queryKey: ['personalities', 'list'],
+    queryFn: () => rpc.personalities.list({}),
+    enabled: duplicateOpen,
+  });
+
+  const deleteMut = useMutation({
+    mutationFn: () => rpc.personalities.delete({ id }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['personalities', 'list'] });
+      qc.invalidateQueries({ queryKey: ['palette', 'personalities'] });
+      notification.success({ message: `Retired ${data?.personality.name}`, placement: 'topRight' });
+      navigate('/personalities');
+    },
+    onError: (err) =>
+      notification.error({ message: 'Retire failed', description: (err as Error).message }),
   });
 
   if (!id) {
@@ -803,6 +830,12 @@ export function PersonalityDetail() {
   }
 
   const { personality } = data;
+  const existingIds = new Set((listQuery.data?.items ?? []).map((p) => p.id));
+
+  function openEdit(tab: EditModalTabKey) {
+    setEditInitialTab(tab);
+    setEditModalOpen(true);
+  }
 
   return (
     <div style={{ padding: 24, maxWidth: 960 }}>
@@ -829,7 +862,29 @@ export function PersonalityDetail() {
             </Typography.Text>
           </div>
           <div style={{ flex: 1 }} />
-          <Button onClick={() => setEditModalOpen(true)}>Edit personality</Button>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <Button onClick={() => openEdit('identity')}>Edit SOUL</Button>
+            <Button onClick={() => setDuplicateOpen(true)}>Duplicate</Button>
+            <Button onClick={() => openEdit('characterSheet')}>Edit personality</Button>
+            {canRetirePersonality(personality) ? (
+              <Button
+                danger
+                loading={deleteMut.isPending}
+                onClick={() => {
+                  const copy = retireConfirmCopy(personality.name);
+                  modal.confirm({
+                    title: copy.title,
+                    content: copy.content,
+                    okText: copy.okText,
+                    okButtonProps: { danger: true },
+                    onOk: () => deleteMut.mutate(),
+                  });
+                }}
+              >
+                Retire
+              </Button>
+            ) : null}
+          </div>
         </div>
 
         {personality.description ? (
@@ -850,9 +905,22 @@ export function PersonalityDetail() {
       {editModalOpen ? (
         <EditModal
           id={id}
+          initialTab={editInitialTab}
           onClose={() => {
             setEditModalOpen(false);
             qc.invalidateQueries({ queryKey: ['personalities', 'get', id] });
+          }}
+        />
+      ) : null}
+
+      {duplicateOpen ? (
+        <DuplicateModal
+          source={personality}
+          existingIds={existingIds}
+          onClose={() => setDuplicateOpen(false)}
+          onDone={(newId) => {
+            setDuplicateOpen(false);
+            navigate(buildIdentityRedirectPath(newId, ''));
           }}
         />
       ) : null}

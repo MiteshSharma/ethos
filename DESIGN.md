@@ -77,11 +77,16 @@ Accent flows through:
 | Focus ring (`outline: 2px solid var(--accent); outline-offset: 1px`) | 17 `:focus-visible` rules in `styles.css` |
 | Link color in agent text | `.message-assistant a` |
 
-**The sidebar is chrome, not identity.** The active nav item's left-border stays
-`--ethos-info`: the rail is outside the personality subtree, it is up while every
-tab is up, and tinting global navigation by whoever last spoke in Chat makes the
-app's furniture move with the conversation. Identity is carried inside the
-surface that has one.
+The rule survives; its premise does not. The previous statement of this rule held
+because "the rail is outside the personality subtree" — true only while a single
+flat sidebar was the entire chrome. The two-altitude IA (`◎` Library / per-agent
+Workspace) introduces a contextual column that **is** the personality subtree, so
+the rule is restated by scope rather than by widget:
+
+**Global chrome stays neutral; scoped chrome carries the scope's identity.** The
+altitude rail is global chrome and keeps `--ethos-info` forever. The contextual
+column and the stage carry the active scope's accent. The furniture moves only
+when you have walked into a different room.
 
 | Personality | Hex | Reasoning |
 |---|---|---|
@@ -434,6 +439,12 @@ Deterministic geometric marks per personality. Same algorithm runs at render tim
 4. Background: circular frame — a `<circle>` at accent color `0x22` alpha, plus a 1.5px accent ring stroke at ~0.55 opacity around the circumference (strokeWidth scales: `size * 0.04`, minimum 1). Cells are clipped to the circle via `<clipPath>`. Echoes the circular ring logo (`logo.svg` annulus).
 5. Filled cells: solid accent at the computed opacity
 
+**Altitude convention:** the Ethos annulus (`apps/desktop/assets/brand/ethos-mark.svg`)
+marks the machine altitude — the Library, not any single agent. Agents get generative
+marks (this algorithm, per personality); Ethos gets the ring. The two never trade
+places: a personality does not inherit the annulus, and the machine altitude does not
+generate a mark.
+
 Reference implementation in `apps/web/src/components/ui/PersonalityMark.tsx`. Same algorithm available as `packages/web-contracts/src/marks.ts` so server-side rendering and TUI ASCII fallback can use it.
 
 For TUI: render as a 4×4 unicode block-character grid using `▓▒░` characters with the personality's ANSI accent. Same hash, same symmetry, just lower fidelity.
@@ -488,7 +499,7 @@ The web UI specifically must avoid these patterns. Code review checks for them.
 
 ## Implementation notes
 
-- **Web:** All tokens applied via Antd `ConfigProvider` theme — `apps/web/src/lib/theme.ts`. Per-personality accent swap happens at the chat tab level via a second `<ConfigProvider>` wrapper.
+- **Web:** All tokens applied via Antd `ConfigProvider` theme — `apps/web/src/lib/theme.ts`. Per-personality accent swap happens at the workspace subtree level via a second `<ConfigProvider>` wrapper.
 - **TUI:** Tokens consumed via the existing Ink components — extend `apps/tui/src/components/StatusBar.tsx` to emit personality-accent ANSI codes when displaying the active personality.
 - **VS Code:** Uses the user's theme; only personality affordances get our accents. Webview CSS uses `var(--vscode-*)` for chrome; our `--accent` for chat-specific elements.
 
@@ -523,3 +534,5 @@ The web UI specifically must avoid these patterns. Code review checks for them.
 | 2026-08-14 | `WakeRouteRow` and `SatelliteRow` added to the component inventory (voice V3, DR3) | Wake routing needed two list surfaces and neither earns a `Card`: a routing table and a fleet of microphones are both things you scan for the one entry that is wrong, and a bordered box per entry turns scanning into reading. Both are dense rows in Settings → Voice (DR4 — no new sidebar item). Satellite liveness extends the existing connection dot rather than drawing a new one, adding listening / speaking / muted / **hollow** wake-off / degraded. Phrases, state words, node ids, capabilities and ages are Geist Mono, because every one of them is a literal the operator also sees in `ethos listen doctor` output or in `config.yaml`. The route editor's live phrase tester lights the matching row in that **personality's own accent** — the identity affordance is the proof, so you recognize the agent that answered rather than reading a generic highlight. |
 | 2026-08-14 | A session is bound to the personality it started with; the in-chat switcher is removed | Owner's call: "A session belongs to a personality that joined this when session started. Then you can't switch." The dropdown in the personality bar is gone, along with the auto-fork-on-switch behaviour it needed and the command palette's "Switch personality →" verb. Identity stays fully visible — stripe, mark, name, model — it just isn't a control any more. Choosing an agent is part of STARTING a session: the New Session picker (`+` in the bar, "New chat session" in the palette) is the one entry point, and a `?personality=` deep-link now applies only with `new=1`. Forking a session is still offered where it belongs, in the Sessions tab. |
 | 2026-08-15 | `CallRow` added to the component inventory (voice V4, DR3) | A call history is the purest case of the "cards earn existence" rule: you scan it for the one call that was refused or the one still ringing, and a bordered box per call turns scanning into reading. So calls are dense rows in Communications → Calls (DR4 — no new sidebar item), behind direction/state filter chips that narrow the SERVER query rather than a rendered array. A call in progress adds exactly ONE modifier to the connection dot — `--call-live`, accent because a live call belongs to the personality answering it, with a 2px accent ring (the `--matched` device) so it cannot be mistaken for a satellite's `--speaking` dot in a list that can show both; every other state reuses a modifier the vocabulary already has, and `refused` borrows **hollow** because a guard turning a caller away is a decision, not a fault. Numbers, durations, tiers, costs and state words are Geist Mono with `tabular-nums`, because each is a literal the operator also reads in `config.yaml`, the trunk console, or an invoice. The pulse stops under `prefers-reduced-motion`; the duration keeps ticking, because it is data, and a frozen clock on an open call is a lie rather than a courtesy. |
+| 2026-08-16 | Sidebar accent rule restated by scope, not widget; per-personality accent swap moves to the workspace subtree; annulus marks the machine altitude | Personality-first-ui refactor (P0) splits chrome into two altitudes — Library (machine, `◎` annulus) and Workspace (per-agent, contextual column + stage). The 2026-04/05 rule ("the rail is outside the personality subtree") was conditional on a single flat sidebar being the only chrome; under two altitudes the contextual column **is** the personality subtree, so the rule survives restated: global chrome (the altitude rail) stays `--ethos-info` forever, scoped chrome (contextual column + stage) carries the active scope's accent, and it moves only when you walk into a different room. The `<ConfigProvider>` accent swap lifts accordingly, from the chat tab to the workspace subtree. Also recorded: the Ethos annulus (`apps/desktop/assets/brand/ethos-mark.svg`) marks the machine altitude; agents keep their generative marks — Ethos gets the ring, agents don't inherit it. Blocking amendment, landed before any code (constitutional decision, not implementation detail). |
+| 2026-08-16 | Personality mark circular frame actually implemented; unknown-personality accents hash to a unique hue instead of bucketing into the 5 curated colors | Closes the gap between the 2026-06-11 circular-frame decision and the code, which still rendered a rounded square — `PersonalityMark.tsx` and `marks.ts` now draw a clipped circle with accent ring per spec. Also: `accentFor()` previously hashed unknown ids into the 5 curated `tokens.accents` values, guaranteeing collisions once a deployment has more than 5 personalities (this one has 9); it now derives a deterministic per-id hue (fixed S/L, shifted out of the purple/violet/indigo band) while the 5 curated built-ins keep their exact hex. |

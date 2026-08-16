@@ -2,19 +2,41 @@ import { useQuery } from '@tanstack/react-query';
 import { Input, Modal } from 'antd';
 import { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { useConfig } from '../features/config/api/queries';
+import { usePersonalityList } from '../features/personalities/api/queries';
 import { useNewSessionModal } from '../hooks/useNewSessionModal';
+import { getLastPersonalityId } from '../lib/lastPersonality';
 import { setLastSessionId } from '../lib/lastSession';
+import {
+  agentEntries,
+  createActionEntries,
+  libraryPageEntries,
+  type PaletteEntry,
+  workspacePageEntries,
+} from '../lib/paletteDestinations';
+import { capitalize } from '../lib/scopeNav';
+import { resolveFallbackPersonalityId } from '../lib/workspaceRoutes';
 import { rpc } from '../rpc';
 
 // ⌘K command palette — global keyboard nav surface that indexes every
 // reachable destination + the user's recent state.
 //
-// Three groups:
-//   1. Pages       — every active sidebar route + the disabled v1 hints
-//                    (so users can see where future tabs will live).
-//   2. Sessions    — most recent N from the same SessionStore the
+// Four groups, each a `kind` per P5 (plan/phases/personality-first-ui.md):
+//   1. Agents      — jump straight to an agent's Chat (its workspace home).
+//   2. Pages       — both altitudes' destinations. Library (machine-wide)
+//                    entries are context-free; the workspace entries that
+//                    have no Library twin (Schedule, Memory, Documents,
+//                    workspace Skills/MCP/Plugins, Goals, Tasks, Identity)
+//                    resolve to the SAME fallback personality `/` and `/chat`
+//                    use — last-visited agent, else config default — so
+//                    they're always present and searchable regardless of
+//                    which altitude you opened the palette from. The row's
+//                    hint names which agent a workspace entry lands you in.
+//   3. Sessions    — most recent N from the same SessionStore the
 //                    Sessions tab paginates over.
-//   3. Actions     — verbs: new chat, toggle drawer.
+//   4. Actions     — verbs: new chat, new agent, toggle drawer, and the
+//                    per-pane create actions from `../lib/createActions.ts`
+//                    (StageHeader's registry, P5 item 2).
 //
 // There is no "switch personality" verb: a session belongs to the personality
 // it started with. Choosing an agent is part of starting a session, so it
@@ -36,11 +58,14 @@ export interface CommandPaletteProps {
   open: boolean;
   onClose: () => void;
   onToggleDrawer: () => void;
+  /** Opens the rail `+`'s fast-path dialog (`NewAgentDialog`, P5 item 1) —
+   *  state lives in App.tsx, same lift as `onToggleDrawer`. */
+  onOpenQuickCreateAgent: () => void;
 }
 
 interface CommandItem {
   id: string;
-  group: 'Pages' | 'Sessions' | 'Actions';
+  group: 'Agents' | 'Pages' | 'Sessions' | 'Actions';
   /** Display label rendered as the row's primary line. */
   label: string;
   /** Subtle right-aligned hint (path, agent id, shortcut). */
@@ -52,7 +77,12 @@ interface CommandItem {
   run: () => void;
 }
 
-export function CommandPalette({ open, onClose, onToggleDrawer }: CommandPaletteProps) {
+export function CommandPalette({
+  open,
+  onClose,
+  onToggleDrawer,
+  onOpenQuickCreateAgent,
+}: CommandPaletteProps) {
   const navigate = useNavigate();
   const { openNewSessionModal } = useNewSessionModal();
   const [query, setQuery] = useState('');
@@ -73,6 +103,22 @@ export function CommandPalette({ open, onClose, onToggleDrawer }: CommandPalette
     queryFn: () => rpc.sessions.list({ limit: RECENT_SESSION_COUNT }),
     enabled: open,
   });
+  const personalitiesQuery = usePersonalityList({ enabled: open });
+  const { data: config } = useConfig();
+
+  const agents = personalitiesQuery.data?.items ?? [];
+  // The fallback chain `/` and `/chat` (and every P1a redirect) already use:
+  // last-visited agent, else the operator's config default. Workspace pages
+  // with no Library twin (Schedule, Memory, Documents, Goals, Tasks,
+  // Identity, workspace Skills/MCP/Plugins) resolve through it too, so
+  // they're reachable from the palette no matter which altitude it opened
+  // from — same reasoning as `WorkspaceRedirect` in App.tsx.
+  const fallbackPersonalityId = resolveFallbackPersonalityId(
+    getLastPersonalityId(),
+    config?.personality,
+  );
+  const fallbackPersonalityName =
+    agents.find((p) => p.id === fallbackPersonalityId)?.name ?? capitalize(fallbackPersonalityId);
 
   const items = useMemo<CommandItem[]>(() => {
     const closeAfter = (fn: () => void) => () => {
@@ -80,21 +126,27 @@ export function CommandPalette({ open, onClose, onToggleDrawer }: CommandPalette
       onClose();
     };
 
-    const pages: CommandItem[] = [
-      page('Chat', '/chat', ['talk', 'message', 'agent']),
-      page('Sessions', '/sessions', ['history', 'past', 'fts']),
-      page('Cron', '/cron', ['schedule', 'job']),
-      page('Skills', '/skills', ['library', 'evolver']),
-      page('Mesh', '/mesh', ['swarm', 'agents', 'route']),
-      page('Settings', '/settings', ['config', 'provider', 'model', 'key']),
-      page('Memory', '/memory', ['notes', 'context', 'user', 'remember']),
-      page('Documents', '/documents', ['files', 'workdir', 'download', 'output', 'artifacts']),
-      page('Plugins', '/plugins', ['mcp', 'install', 'tools']),
-      page('Communications', '/communications', ['telegram', 'slack', 'discord', 'email', 'comms']),
-      page('Personalities', '/personalities', ['agent', 'identity', 'wizard', 'duplicate']),
-      page('Batch', '/batch', ['lab', 'jsonl', 'tasks', 'bulk']),
-      page('Eval', '/eval', ['lab', 'score', 'expected', 'judge']),
-    ].map((p) => ({ ...p, run: closeAfter(p.run) }));
+    // The destination lists themselves are pure data from
+    // `../lib/paletteDestinations.ts` (unit-tested there); this just wraps
+    // each entry's `path` in a `navigate()` call and wires the group's
+    // fixed verbs on top.
+    const toCommandItem = (e: PaletteEntry): CommandItem => ({
+      id: e.id,
+      group: e.group,
+      label: e.label,
+      hint: e.hint,
+      keywords: e.keywords,
+      run: closeAfter(() => navigate(e.path)),
+    });
+
+    const agentItems = agentEntries(agents).map(toCommandItem);
+    const pages = [
+      ...libraryPageEntries(config?.adminEnabled ?? false),
+      ...workspacePageEntries(fallbackPersonalityId, fallbackPersonalityName),
+    ].map(toCommandItem);
+    const registryActions = createActionEntries(fallbackPersonalityId, fallbackPersonalityName).map(
+      toCommandItem,
+    );
 
     const sessions: CommandItem[] = (sessionsQuery.data?.items ?? []).map((s) => ({
       id: `session:${s.id}`,
@@ -118,6 +170,22 @@ export function CommandPalette({ open, onClose, onToggleDrawer }: CommandPalette
         run: closeAfter(() => openNewSessionModal()),
       },
       {
+        id: 'action:new-agent',
+        group: 'Actions',
+        label: 'New agent',
+        hint: 'quick create',
+        keywords: ['personality', 'create', 'fast path'],
+        run: closeAfter(() => onOpenQuickCreateAgent()),
+      },
+      {
+        id: 'action:new-agent-architect',
+        group: 'Actions',
+        label: 'Create with architect',
+        keywords: ['personality', 'new', 'agent', 'wizard', 'scaffold'],
+        run: closeAfter(() => navigate('/personality/create')),
+      },
+      ...registryActions,
+      {
         id: 'action:toggle-drawer',
         group: 'Actions',
         label: 'Toggle activity drawer',
@@ -127,30 +195,19 @@ export function CommandPalette({ open, onClose, onToggleDrawer }: CommandPalette
       },
     ];
 
-    return [...pages, ...sessions, ...actions];
-
-    function page(label: string, path: string, keywords: string[] = []): CommandItem {
-      return {
-        id: `page:${path}`,
-        group: 'Pages',
-        label,
-        hint: path,
-        keywords,
-        run: () => navigate(path),
-      };
-    }
-    function _pageDisabled(label: string, path: string, hint: string): CommandItem {
-      return {
-        id: `page:${path}`,
-        group: 'Pages',
-        label,
-        hint,
-        keywords: [],
-        disabled: true,
-        run: () => {},
-      };
-    }
-  }, [navigate, onClose, onToggleDrawer, openNewSessionModal, sessionsQuery.data]);
+    return [...agentItems, ...pages, ...sessions, ...actions];
+  }, [
+    navigate,
+    onClose,
+    onToggleDrawer,
+    onOpenQuickCreateAgent,
+    openNewSessionModal,
+    sessionsQuery.data,
+    agents,
+    config?.adminEnabled,
+    fallbackPersonalityId,
+    fallbackPersonalityName,
+  ]);
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();

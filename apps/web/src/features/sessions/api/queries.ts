@@ -4,13 +4,14 @@ import { sessionKeys } from './keys';
 
 const PAGE_SIZE = 50;
 
-export function useSessionList(debouncedSearch: string) {
+export function useSessionList(debouncedSearch: string, personalityId?: string) {
   return useInfiniteQuery({
-    queryKey: sessionKeys.list({ q: debouncedSearch }),
+    queryKey: sessionKeys.list({ q: debouncedSearch, personalityId }),
     queryFn: ({ pageParam }: { pageParam: string | null }) =>
       rpc.sessions.list({
         limit: PAGE_SIZE,
         ...(debouncedSearch ? { q: debouncedSearch } : {}),
+        ...(personalityId ? { personalityId } : {}),
         ...(pageParam ? { cursor: pageParam } : {}),
       }),
     initialPageParam: null as string | null,
