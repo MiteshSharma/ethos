@@ -291,7 +291,7 @@ register_anchors:
     - { path: packages/safety/watcher/src/rules.ts, line: 110, contains: "export function compoundingErrorRule" }
     - { path: packages/safety/watcher/src/rules.ts, line: 161, contains: "export function suspiciousSequenceRule" }
     - { path: packages/safety/watcher/src/rules.ts, line: 205, contains: "export function defaultRules" }
-    - { path: packages/wiring/src/build-agent-loop.ts, line: 260, contains: "defaultRules: watcherDefaultRules" }
+    - { path: packages/wiring/src/build-agent-loop.ts, line: 338, contains: "defaultRules: watcherDefaultRules" }
 
   G-CHAN:
     - { path: packages/safety/channel/src/channel-filter.ts, line: 111, contains: "export function checkMessage" }
@@ -767,6 +767,16 @@ tiers:
     tier: 2
     assigned: 2026-08-12
 
+  # Phase 1 detection spike (plan/phases/call-capture-extension.md): a local
+  # CoreAudio mic-state watcher with no channel adapter, no untrusted input,
+  # and nothing wired into a personality/tool yet — not an ingress surface
+  # like the Tier 1 platform-* group, so Tier 2 by the same test that put
+  # apps/* and other unwired extensions there.
+  extensions/platform-callcapture:
+    package: "@ethosagent/platform-callcapture"
+    tier: 2
+    assigned: 2026-08-17
+
   extensions/request-dump:
     package: "@ethosagent/request-dump"
     tier: 2
@@ -813,6 +823,18 @@ tiers:
     package: "@ethosagent/tools-browser"
     tier: 2
     assigned: 2026-08-12
+
+  # Phase 4 integration (plan/phases/call-capture-extension.md): wires the
+  # Phase 1-3 platform-callcapture capture pipeline into memory via
+  # `runCallCapture()`. Deliberately NOT registered by any wiring path — it is
+  # not a `Tool` at all, by design (round-1 security fix): the only caller is
+  # `CallCaptureDaemon`'s accept-gated `runCapture`, never an LLM tool call.
+  # Same tier tools-meeting (also a transcript tool writing untrusted
+  # participant speech to memory) already carries.
+  extensions/tools-callcapture:
+    package: "@ethosagent/tools-callcapture"
+    tier: 2
+    assigned: 2026-08-18
 
   extensions/tools-cron:
     package: "@ethosagent/tools-cron"

@@ -362,6 +362,15 @@ export interface TeamLoopInfo {
   /** Phase B — durable background engine handles (undefined when background is disabled). */
   jobStore?: import('@ethosagent/wiring').CreateAgentLoopResult['jobStore'];
   backgroundExecutor?: import('@ethosagent/wiring').CreateAgentLoopResult['backgroundExecutor'];
+  /**
+   * Round-3 Issue 2 — forwarded from the coordinator's own `createAgentLoop`
+   * call below. `isCallCaptureToolsEnabled` gates on darwin +
+   * `callCapture.personalityId` alone (not on which personality the loop
+   * itself is "for"), so the coordinator's loop produces an equivalent
+   * closure to any other loop's. Undefined on every deployment that hasn't
+   * configured call capture, same as the non-team `createAgentLoop` path.
+   */
+  runCallCapture?: import('@ethosagent/wiring').CreateAgentLoopResult['runCallCapture'];
 }
 
 /** Resolve a team manifest by name (local ./team.yaml or ~/.ethos/teams/<n>.yaml). */
@@ -418,6 +427,7 @@ export async function createTeamAgentLoop(
     pluginLoader,
     jobStore,
     backgroundExecutor,
+    runCallCapture,
   } = await createAgentLoop(
     {
       ...coordinatorConfig,
@@ -450,6 +460,7 @@ export async function createTeamAgentLoop(
     pluginLoader,
     ...(jobStore ? { jobStore } : {}),
     ...(backgroundExecutor ? { backgroundExecutor } : {}),
+    ...(runCallCapture ? { runCallCapture } : {}),
   };
 }
 

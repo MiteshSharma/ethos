@@ -5,6 +5,7 @@ import {
   AgentLoop,
   EagerPrefetchPolicy,
   parseSmallWindowToolset,
+  resolveSttProvider,
   SimpleCompletionImpl,
 } from '@ethosagent/core';
 import { registerBuiltinExtractors } from '@ethosagent/document-extractors';
@@ -19,8 +20,10 @@ import {
 } from '@ethosagent/memory-capture';
 import { withHistory } from '@ethosagent/memory-history';
 import { buildConsolidationUpdates, consolidateMemory } from '@ethosagent/nightly-loop';
+import { MicCapture, TapCapture } from '@ethosagent/platform-callcapture';
 import { sanitize } from '@ethosagent/safety-injection';
 import { FsStorage } from '@ethosagent/storage-fs';
+import { type CallCaptureToolsOptions, runCallCapture } from '@ethosagent/tools-callcapture';
 import {
   type BackgroundToolDeps,
   createDelegationTools,
@@ -73,6 +76,22 @@ export interface BuildAgentLoopDeps {
   pluginsResult: LoadPluginsResult;
   llm: LLMProvider;
   profile: WiringProfile;
+}
+
+/**
+ * Call-capture's registration gate (plan/phases/call-capture-extension.md —
+ * macOS-only, opt-in via `callCapture.personalityId`). Extracted as a pure
+ * function so the gate itself is unit-testable without invoking the full
+ * `buildAgentLoop` composition root (which opens SQLite stores, constructs an
+ * LLM provider, loads plugins, and reads `~/.ethos/` — impractical to
+ * construct in a focused test, per the same rationale
+ * `safety-conformance-wiring.test.ts` documents for `buildAgentLoop`).
+ */
+export function isCallCaptureToolsEnabled(
+  platform: NodeJS.Platform,
+  config: Pick<WiringConfig, 'callCapture'>,
+): boolean {
+  return platform === 'darwin' && Boolean(config.callCapture?.personalityId);
 }
 
 /**
@@ -251,6 +270,65 @@ export async function buildAgentLoop(
     },
   })) {
     tools.register(tool);
+  }
+
+  // -------------------------------------------------------------------------
+  // Call-capture (built here, not registered as a tool, because it needs
+  // `llm` and `memory` — the same reason the vision and web tools above
+  // construct here rather than in compose-tools.ts). macOS-only per
+  // plan/phases/call-capture-extension.md — a complete no-op (no
+  // construction, no behavior change) for every deployment that hasn't set
+  // `callCapture.personalityId`. `runCallCapture` is never registered as a
+  // `Tool` — it is not LLM-reachable from any chat turn; the only caller is
+  // `CallCaptureDaemon`'s accept-gated `runCapture`, bound below into
+  // `runCallCaptureFn` and threaded out through `CreateAgentLoopResult`
+  // (see `apps/ethos/src/commands/serve.ts`). Decision 7 of the plan requires
+  // an LLM content-summarization step over the finished transcript (not the
+  // plain participant/line-count roll-up `buildTranscriptArtifact` produces
+  // on its own), so `getSummaryProvider` is wired here rather than left
+  // absent — leaving it absent would silently downgrade every capture to the
+  // plain roll-up.
+  // -------------------------------------------------------------------------
+
+  let runCallCaptureFn:
+    | ((
+        personalityId: string,
+        opts: { source?: string; abortSignal: AbortSignal },
+      ) => Promise<import('@ethosagent/tools-callcapture').CallCaptureResult>)
+    | undefined;
+  if (isCallCaptureToolsEnabled(process.platform, config)) {
+    const sttResolution = await resolveSttProvider({
+      registry: infra.sttProviders,
+      providerName: config.auxiliaryAsr?.provider,
+      providerConfig: { ...config.auxiliaryAsr },
+    });
+    if (!sttResolution.ok) {
+      log.warn(
+        `call-capture: STT unavailable (${sttResolution.error}) — call capture will report itself unavailable`,
+      );
+    }
+    const callCaptureOpts: CallCaptureToolsOptions = {
+      tapCapture: new TapCapture(),
+      micCapture: new MicCapture(),
+      ...(sttResolution.ok ? { sttProvider: sttResolution.provider } : {}),
+      memory,
+      getSummaryProvider: async () => llm,
+    };
+    runCallCaptureFn = (personalityId, { source, abortSignal }) => {
+      // Stable per-personality key (mirrors this repo's `cli:<cwd-basename>`
+      // session-key convention and the daemon's prior sessionKey construction,
+      // relocated here since there is no longer a live turn to carry it).
+      const sessionKey = `callcapture:${personalityId}`;
+      return runCallCapture(callCaptureOpts, {
+        source,
+        scopeId: `personality:${personalityId}`,
+        sessionId: sessionKey,
+        sessionKey,
+        platform: 'callcapture',
+        workingDir: wiringCtx.workingDir,
+        abortSignal,
+      });
+    };
   }
 
   // -------------------------------------------------------------------------
@@ -1032,6 +1110,7 @@ export async function buildAgentLoop(
       onSkillAppliedFn = fn;
     },
     ...(onMemoryCapturedFn ? { onMemoryCaptured: onMemoryCapturedFn } : {}),
+    ...(runCallCaptureFn ? { runCallCapture: runCallCaptureFn } : {}),
     notificationRouter,
     pluginLoader,
     goalRunner,

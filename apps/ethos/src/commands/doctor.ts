@@ -25,6 +25,10 @@ import {
   readRawConfig,
 } from '@ethosagent/config';
 import { resolveSttProvider, resolveTtsProvider } from '@ethosagent/core';
+import {
+  type CallCaptureDependencyCheckResult,
+  callCaptureHealthPath,
+} from '@ethosagent/platform-callcapture';
 import { bundledSkillsSource, UniversalScanner } from '@ethosagent/skills';
 import type { Skill } from '@ethosagent/types';
 import { createBuiltinVoiceRegistries } from '@ethosagent/wiring';
@@ -254,6 +258,19 @@ export interface DoctorFailFlags {
   channelRejected: boolean;
   /** Unreachable-but-not-rejected — warn only, never a hard fail. */
   channelUnreachable: boolean;
+  /** Call capture is configured (`callCapture.personalityId` set) but a
+   *  dependency preflight check failed — "configured but broken", the same
+   *  weight as `configuredMissing`. Optional so existing call sites/tests
+   *  need no change; absent behaves as `false`. */
+  callCaptureDepsMissing?: boolean;
+  /** Call capture is configured but its daemon's heartbeat has gone stale
+   *  (started, then went quiet — likely crashed) — the same weight as
+   *  `gatewayStale`. A `down` daemon (never started / no heartbeat file) is
+   *  NOT a failure here, mirroring `gatewayStale`'s own stale-only gate:
+   *  a configured deployment between runs of `ethos serve`/`ethos gateway`
+   *  is a normal state. Optional so existing call sites/tests need no
+   *  change; absent behaves as `false`. */
+  callCaptureDaemonStale?: boolean;
 }
 
 /** Exit-code matrix: any hard failure → 1; else an unreachable channel probe →
@@ -267,7 +284,9 @@ export function computeDoctorExit(f: DoctorFailFlags): number {
     f.requiredSecretMissing ||
     f.dbUnopenable ||
     f.gatewayStale ||
-    f.channelRejected;
+    f.channelRejected ||
+    f.callCaptureDepsMissing === true ||
+    f.callCaptureDaemonStale === true;
   if (hardFail) return 1;
   if (f.channelUnreachable) return WARN_EXIT;
   return 0;
@@ -330,6 +349,36 @@ async function checkGatewayHealth(storage: Storage): Promise<GatewayHealthResult
     };
   } catch {
     return { status: 'down', adapters: [], lastHeartbeatAgeSec: null };
+  }
+}
+
+export interface CallCaptureDaemonHealthResult {
+  status: 'ok' | 'stale' | 'down';
+  lastHeartbeatAgeSec: number | null;
+}
+
+/** Mirrors `checkGatewayHealth`'s exact shape/semantics (30s staleness), for
+ *  the call-capture daemon's own heartbeat file (`ethos serve`/`ethos
+ *  gateway` both write it every 10s while their `CallCaptureDaemon` is
+ *  running — see `extensions/platform-callcapture/src/health.ts`'s
+ *  `callCaptureHealthPath()`). Says whether the daemon is alive RIGHT NOW,
+ *  which `checkCallCapture`'s binary-presence check cannot answer on its
+ *  own — a crashed or never-started daemon would otherwise report healthy. */
+export async function checkCallCaptureDaemonHealth(
+  storage: Storage,
+): Promise<CallCaptureDaemonHealthResult> {
+  try {
+    const raw = await storage.read(callCaptureHealthPath());
+    if (!raw) return { status: 'down', lastHeartbeatAgeSec: null };
+    const hb = JSON.parse(raw) as { updatedAt: string };
+    const ageSec = (Date.now() - new Date(hb.updatedAt).getTime()) / 1000;
+    const stale = !Number.isFinite(ageSec) || ageSec > 30;
+    return {
+      status: stale ? 'stale' : 'ok',
+      lastHeartbeatAgeSec: Number.isFinite(ageSec) ? Math.round(ageSec) : null,
+    };
+  } catch {
+    return { status: 'down', lastHeartbeatAgeSec: null };
   }
 }
 
@@ -480,6 +529,8 @@ export async function runDoctor(args: string[] = [], options?: DoctorOptions): P
       (c) => !c.ok && (c.reason === 'unreachable' || c.reason === 'unverified'),
     );
 
+    const callCapture = await checkCallCapture(config, storage);
+
     const exitCode = computeDoctorExit({
       coreFailure: coreFailures.length > 0,
       configuredMissing: configuredMissing.length > 0,
@@ -489,6 +540,8 @@ export async function runDoctor(args: string[] = [], options?: DoctorOptions): P
       gatewayStale: gateway.status === 'stale',
       channelRejected,
       channelUnreachable,
+      callCaptureDepsMissing: callCapture.configured && !callCapture.ok,
+      callCaptureDaemonStale: callCapture.daemon?.status === 'stale',
     });
 
     const result = {
@@ -512,6 +565,13 @@ export async function runDoctor(args: string[] = [], options?: DoctorOptions): P
         ...(c.reason ? { reason: c.reason } : {}),
         ...(c.label ? { label: c.label } : {}),
       })),
+      callCapture: {
+        configured: callCapture.configured,
+        ok: callCapture.ok,
+        ...(callCapture.missing.length > 0 ? { missing: callCapture.missing } : {}),
+        ...(callCapture.errors.length > 0 ? { errors: callCapture.errors } : {}),
+        ...(callCapture.daemon ? { daemon: callCapture.daemon } : {}),
+      },
       exit: exitCode,
     };
     process.stdout.write(`${JSON.stringify(result)}\n`);
@@ -684,6 +744,40 @@ export async function runDoctor(args: string[] = [], options?: DoctorOptions): P
   console.log('');
 
   // -------------------------------------------------------------------------
+  // Call capture (Phase 4) — macOS-only, opt-in via callCapture.personalityId.
+  // Silent when unconfigured — see checkCallCapture's doc comment.
+  // -------------------------------------------------------------------------
+
+  const callCapture = await checkCallCapture(config, storage);
+  if (callCapture.configured) {
+    console.log(`${c.bold}Call capture${c.reset}`);
+    if (callCapture.ok) {
+      console.log(
+        `  ${c.green}✓${c.reset}  All dependencies present ${c.dim}(terminal-notifier, mic-detector, mic-capture, audiotee)${c.reset}`,
+      );
+    } else {
+      console.log(`  ${c.red}✗${c.reset}  Missing: ${callCapture.missing.join(', ')}`);
+      for (const err of callCapture.errors) console.log(`      ${c.dim}${err}${c.reset}`);
+    }
+    if (callCapture.daemon) {
+      if (callCapture.daemon.status === 'ok') {
+        console.log(
+          `  ${c.green}✓${c.reset}  Daemon alive ${c.dim}(heartbeat ${callCapture.daemon.lastHeartbeatAgeSec}s ago)${c.reset}`,
+        );
+      } else if (callCapture.daemon.status === 'stale') {
+        console.log(
+          `  ${c.red}✗${c.reset}  Daemon heartbeat stale (${callCapture.daemon.lastHeartbeatAgeSec}s ago) — it may have crashed`,
+        );
+      } else {
+        console.log(
+          `  ${c.dim}–  No daemon heartbeat (not currently running inside 'ethos serve'/'ethos gateway').${c.reset}`,
+        );
+      }
+    }
+    console.log('');
+  }
+
+  // -------------------------------------------------------------------------
   // Plugin health checks (v2.2)
   // -------------------------------------------------------------------------
 
@@ -829,6 +923,12 @@ export async function runDoctor(args: string[] = [], options?: DoctorOptions): P
   }
   if (channelRejected) {
     console.log(`${c.red}✗ A channel token was rejected — see Channel tokens above.${c.reset}`);
+    exitCode = 1;
+  }
+  if (callCapture.configured && !callCapture.ok) {
+    console.log(
+      `${c.red}✗ Call capture is configured but a dependency is missing — see Call capture above.${c.reset}`,
+    );
     exitCode = 1;
   }
   // Unreachable-but-not-rejected → DISTINCT warn exit code (2), so CI can tell a
@@ -1184,6 +1284,59 @@ function readExternalCliRequirements(skill: Skill): { all: string[]; anyOf: stri
 
 function isOnPath(bin: string): boolean {
   return spawnSync('which', [bin], { stdio: 'ignore' }).status === 0;
+}
+
+export interface CallCaptureCheckResult {
+  /** Whether `callCapture.personalityId` is set at all — an unconfigured
+   *  deployment reports nothing further, same "don't warn about an unused
+   *  feature" rule the Channel SDKs section follows. */
+  configured: boolean;
+  ok: boolean;
+  missing: string[];
+  errors: string[];
+  /** Daemon liveness (see `checkCallCaptureDaemonHealth`) — present only
+   *  when `configured` is true. Absent, not a placeholder value, when
+   *  unconfigured: a deployment that never enabled call capture must see
+   *  nothing new from `ethos doctor`. */
+  daemon?: CallCaptureDaemonHealthResult;
+}
+
+export interface CheckCallCaptureOptions {
+  /** Overrides the dependency preflight call. Tests must supply this — a
+   *  fake — instead of exercising the real `terminal-notifier`/native-binary
+   *  presence on the machine running the test suite. Mirrors
+   *  `telephonyReport`'s injectable `resolveMedia` option. */
+  checkDependencies?: () => Promise<CallCaptureDependencyCheckResult>;
+}
+
+/**
+ * Call-capture dependency diagnostics (plan/phases/call-capture-extension.md,
+ * "Preflight" §6 / T5). Structured result — text mode and `--json` mode each
+ * render it their own way, mirroring `probeConfiguredChannels` /
+ * `channelProbeLine`'s data/presentation split. `configured && !ok` feeds
+ * `computeDoctorExit`'s `callCaptureDepsMissing` flag: configured-but-broken
+ * is a hard failure, the same weight as a configured-but-missing channel SDK.
+ */
+export async function checkCallCapture(
+  config: EthosConfig | null,
+  storage: Storage,
+  options: CheckCallCaptureOptions = {},
+): Promise<CallCaptureCheckResult> {
+  if (!config?.callCapture?.personalityId) {
+    return { configured: false, ok: true, missing: [], errors: [] };
+  }
+  const checkDependencies =
+    options.checkDependencies ??
+    (async () => {
+      const { checkCallCaptureDependencies } = await import('@ethosagent/platform-callcapture');
+      return checkCallCaptureDependencies();
+    });
+  const [result, daemon] = await Promise.all([
+    checkDependencies(),
+    checkCallCaptureDaemonHealth(storage),
+  ]);
+  if (result.ok) return { configured: true, ok: true, missing: [], errors: [], daemon };
+  return { configured: true, ok: false, missing: result.missing, errors: result.errors, daemon };
 }
 
 /**

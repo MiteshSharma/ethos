@@ -9,6 +9,7 @@
     }
   },
   "dependencies": {
+    "@ethosagent/safety-injection": "workspace:*",
     "@ethosagent/types": "workspace:*"
   }
 }

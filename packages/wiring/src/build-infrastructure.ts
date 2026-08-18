@@ -72,6 +72,7 @@ import type {
   TtsProviderRegistry,
 } from '@ethosagent/types';
 import { activateFirstPartyPlugins } from './activate-first-party';
+import { validateCallCaptureBinding } from './call-capture-binding';
 import type { CreateAgentLoopOptions, WiringConfig } from './index';
 import { buildVaultBackend, composeGatedMemory } from './memory-backend';
 import { registerRemainingBuiltinProviders } from './register-builtin-providers';
@@ -360,6 +361,13 @@ export async function buildInfrastructure(
     });
     constitutionEnforcement = result.enforcement;
   }
+
+  // -------------------------------------------------------------------------
+  // Call-capture single-personality binding (decision 3) — validated against
+  // the FINAL effective personality set (post safe-mode filtering).
+  // -------------------------------------------------------------------------
+
+  validateCallCaptureBinding(personalities.list(), config.callCapture);
 
   // -------------------------------------------------------------------------
   // Sandbox — shared by browser and code tools

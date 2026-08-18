@@ -1022,6 +1022,17 @@ export interface EthosConfig {
   // biome-ignore format: keep the option shape on one line for readability.
   compaction?: { pressure?: number; target?: number; gateDelta?: number; autoCompact?: boolean; retryOnOverflow?: boolean; smallWindow?: 'auto' | 'on' | 'off'; maxContextTokens?: number; minTailUserMessages?: number };
   /**
+   * Call-capture personality binding (plan/phases/call-capture-extension.md
+   * decision 3). Exactly one personality, system-wide, may hold the
+   * `call_capture` toolset capability (declared in its `toolset.yaml`, not a
+   * `PersonalityConfig` field); this names which one is actually bound.
+   * Validated at wiring time — see `validateCallCaptureBinding` in
+   * `@ethosagent/wiring`, called from `packages/wiring/src/build-infrastructure.ts`.
+   * Flat-key config shape:
+   *   callCapture.personalityId: assistant
+   */
+  callCapture?: { personalityId?: string };
+  /**
    * Fallback provider chain. When 2+ entries are present, `createLLM` wraps
    * them in a `ChainedProvider` with automatic cooldown-based failover.
    * The primary `provider`/`apiKey`/`model` fields are used when absent or
@@ -1932,6 +1943,9 @@ export async function writeConfig(
       lines.push(`compaction.minTailUserMessages: ${config.compaction.minTailUserMessages}`);
     }
   }
+  if (config.callCapture?.personalityId) {
+    lines.push(`callCapture.personalityId: ${config.callCapture.personalityId}`);
+  }
   if (config.memoryConsolidation) {
     const m = config.memoryConsolidation;
     if (m.enabled !== undefined) lines.push(`memoryConsolidation.enabled: ${m.enabled}`);
@@ -2570,6 +2584,8 @@ function parseConfigYaml(src: string): EthosConfig {
   const modelsKv: Record<string, Record<string, string>> = {};
   // §5 — global compaction.<field>: <value> (pressure | target | ...flags).
   const compactionKv: Record<string, string> = {};
+  // Call-capture personality binding (decision 3) — callCapture.personalityId: <id>.
+  const callCaptureKv: Record<string, string> = {};
   // Phase 3 — memoryConsolidation.<field>: <value> (silent flush config).
   const memoryConsolidationKv: Record<string, string> = {};
   const logsRotationKv: Record<string, string> = {};
@@ -3032,6 +3048,12 @@ function parseConfigYaml(src: string): EthosConfig {
       compactionKv[cmp[1]] = cmp[2].trim().replace(/^["']|["']$/g, '');
       continue;
     }
+    // Call-capture personality binding (decision 3) — callCapture.personalityId: <id>
+    const ccap = line.match(/^callCapture\.personalityId:\s*(.+)$/);
+    if (ccap) {
+      callCaptureKv.personalityId = ccap[1].trim().replace(/^["']|["']$/g, '');
+      continue;
+    }
     // Phase 3 — memoryConsolidation.<field>: <value>  (silent flush config).
     const mcz = line.match(
       /^memoryConsolidation\.(enabled|flushThreshold|timeboxMs|maxTokens|maxDeltaChars|minMessagesSinceFlush):\s*(.+)$/,
@@ -3275,6 +3297,9 @@ function parseConfigYaml(src: string): EthosConfig {
       : undefined;
   const models = buildModelProfiles(modelsKv);
   const compaction = buildCompaction(compactionKv);
+  const callCapture = callCaptureKv.personalityId
+    ? { personalityId: callCaptureKv.personalityId }
+    : undefined;
   const memoryConsolidation = buildMemoryConsolidation(memoryConsolidationKv);
   const parsedMaxBytes = logsRotationKv.maxBytes ? Number(logsRotationKv.maxBytes) : undefined;
   const parsedMaxFiles = logsRotationKv.maxFiles ? Number(logsRotationKv.maxFiles) : undefined;
@@ -3482,6 +3507,7 @@ function parseConfigYaml(src: string): EthosConfig {
     toolSettings: Object.keys(toolSettings).length > 0 ? toolSettings : undefined,
     models,
     compaction,
+    callCapture,
     activeContext,
     providers: providers.length > 0 ? providers : undefined,
     telegramToken: kv.telegramToken,

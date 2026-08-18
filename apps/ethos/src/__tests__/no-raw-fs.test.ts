@@ -86,6 +86,50 @@
 //                                 import. The module itself performs no filesystem
 //                                 access at all.
 //
+//   extensions/platform-callcapture/  existsSync checks for the compiled
+//   src/detector.ts                   `mic-detector` CoreAudio helper binary
+//                                      shipped alongside this package
+//                                      (native/bin/), so a missing build can
+//                                      throw a clear "run this command" error
+//                                      instead of a bare ENOENT. Not a
+//                                      ~/.ethos/ operation — same rationale as
+//                                      skills/skill-compat.ts.
+//
+//   extensions/platform-callcapture/  Same rationale as detector.ts above,
+//   src/audio-process.ts              generalized: existsSync checks for
+//                                      either of Phase 3's two native
+//                                      capture binaries (the vendored
+//                                      `audiotee`, native/vendor/, or the
+//                                      compiled `mic-capture`, native/bin/)
+//                                      before spawning, so a missing build
+//                                      throws a clear "run this command"
+//                                      error instead of a bare ENOENT. Not a
+//                                      ~/.ethos/ operation.
+//
+//   extensions/platform-callcapture/  Phase 4's combined dependency preflight
+//   src/preflight.ts                  (`checkCallCaptureDependencies`, T5):
+//                                      existsSync checks the same three
+//                                      native binaries detector.ts/
+//                                      audio-process.ts check individually,
+//                                      before a notification or capture
+//                                      attempt starts. Same rationale — not a
+//                                      ~/.ethos/ operation.
+//
+//   extensions/platform-callcapture/  Cross-process ownership lock
+//   src/ownership.ts                  (`tryClaimOwnership`) so `ethos serve`
+//                                      and `ethos gateway` never both run a
+//                                      live `CallCaptureDaemon` at once. Same
+//                                      carve-out category as
+//                                      `extensions/team-supervisor/src/pid.ts`
+//                                      (already covered by that whole
+//                                      directory's prefix entry below): an
+//                                      atomic PID-claim file is
+//                                      process-management state, not
+//                                      `~/.ethos/` personality data — an
+//                                      exclusive-create + liveness-check +
+//                                      stale-cleanup lock has no equivalent
+//                                      in the Storage interface.
+//
 // If you need to add a new exception, document WHY here and in CLAUDE.md before
 // adding it to ALLOWED_PATHS below. The default answer for code on the
 // personality boundary is "use Storage."
@@ -137,6 +181,10 @@ const ALLOWED_FILES = new Set([
   'extensions/platform-whatsapp/src/session-store.ts',
   'extensions/request-dump/src/index.ts',
   'extensions/tools-code/src/shim/js-shim.ts',
+  'extensions/platform-callcapture/src/detector.ts',
+  'extensions/platform-callcapture/src/audio-process.ts',
+  'extensions/platform-callcapture/src/preflight.ts',
+  'extensions/platform-callcapture/src/ownership.ts',
 ]);
 
 // Matches any static or dynamic import of node:fs or node:fs/promises.

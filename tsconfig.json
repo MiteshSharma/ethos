@@ -52,6 +52,7 @@
       "@ethosagent/gateway": ["./extensions/gateway/src"],
       "@ethosagent/platform-voice": ["./extensions/platform-voice/src"],
       "@ethosagent/platform-meeting": ["./extensions/platform-meeting/src"],
+      "@ethosagent/platform-callcapture": ["./extensions/platform-callcapture/src"],
       "@ethosagent/platform-discord": ["./extensions/platform-discord/src"],
       "@ethosagent/platform-discord/validate": ["./extensions/platform-discord/src/validate"],
       "@ethosagent/platform-discord/clarify-surface": [
@@ -181,6 +182,7 @@
       "@ethosagent/tools-skills": ["./extensions/tools-skills/src"],
       "@ethosagent/tools-voice": ["./extensions/tools-voice/src"],
       "@ethosagent/tools-meeting": ["./extensions/tools-meeting/src"],
+      "@ethosagent/tools-callcapture": ["./extensions/tools-callcapture/src"],
       "@ethosagent/voice-providers": ["./extensions/voice-providers/src"],
       "@ethosagent/voice-satellite": ["./extensions/voice-satellite/src"],
       "@ethosagent/voice-session": ["./extensions/voice-session/src"],

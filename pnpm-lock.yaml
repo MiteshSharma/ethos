@@ -308,6 +308,9 @@ importers:
       '@ethosagent/personality-judge':
         specifier: workspace:*
         version: link:../../extensions/personality-judge
+      '@ethosagent/platform-callcapture':
+        specifier: workspace:*
+        version: link:../../extensions/platform-callcapture
       '@ethosagent/pricing':
         specifier: workspace:*
         version: link:../../packages/pricing
@@ -1379,6 +1382,22 @@ importers:
         specifier: workspace:*
         version: link:../eval-harness
 
+  extensions/platform-callcapture:
+    dependencies:
+      '@ethosagent/types':
+        specifier: workspace:*
+        version: link:../../packages/types
+      '@ethosagent/voice-session':
+        specifier: workspace:*
+        version: link:../voice-session
+      '@ethosagent/voice-text':
+        specifier: workspace:*
+        version: link:../../packages/voice-text
+    devDependencies:
+      '@ethosagent/voice-providers':
+        specifier: workspace:*
+        version: link:../voice-providers
+
   extensions/platform-discord:
     dependencies:
       '@ethosagent/core':
@@ -1418,6 +1437,9 @@ importers:
 
   extensions/platform-meeting:
     dependencies:
+      '@ethosagent/safety-injection':
+        specifier: workspace:*
+        version: link:../../packages/safety/injection
       '@ethosagent/types':
         specifier: workspace:*
         version: link:../../packages/types
@@ -1705,6 +1727,18 @@ importers:
       playwright:
         specifier: ^1.48.0
         version: 1.60.0
+
+  extensions/tools-callcapture:
+    dependencies:
+      '@ethosagent/platform-callcapture':
+        specifier: workspace:*
+        version: link:../platform-callcapture
+      '@ethosagent/safety-injection':
+        specifier: workspace:*
+        version: link:../../packages/safety/injection
+      '@ethosagent/types':
+        specifier: workspace:*
+        version: link:../../packages/types
 
   extensions/tools-code:
     dependencies:
@@ -2370,6 +2404,9 @@ importers:
       '@ethosagent/personalities':
         specifier: workspace:*
         version: link:../../extensions/personalities
+      '@ethosagent/platform-callcapture':
+        specifier: workspace:*
+        version: link:../../extensions/platform-callcapture
       '@ethosagent/platform-discord':
         specifier: workspace:*
         version: link:../../extensions/platform-discord
@@ -2436,6 +2473,9 @@ importers:
       '@ethosagent/tools-browser':
         specifier: workspace:*
         version: link:../../extensions/tools-browser
+      '@ethosagent/tools-callcapture':
+        specifier: workspace:*
+        version: link:../../extensions/tools-callcapture
       '@ethosagent/tools-code':
         specifier: workspace:*
         version: link:../../extensions/tools-code

@@ -14,3 +14,10 @@
 - delegate_task
 - task_status
 - task_result
+# `call_capture` is eligibility-only: no Tool is registered for it, so it adds
+# zero prompt weight (kept "deliberately small" per the note above). It's the
+# capability gate `validateCallCaptureBinding` checks at startup
+# (packages/wiring/src/call-capture-binding.ts); the capture pipeline itself is
+# invoked directly by CallCaptureDaemon (extensions/platform-callcapture/src/daemon.ts),
+# never via an LLM-initiated tool call.
+- call_capture

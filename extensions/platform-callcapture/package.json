@@ -1,0 +1,24 @@
+{
+  "name": "@ethosagent/platform-callcapture",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "import": "./src/index.ts"
+    }
+  },
+  "scripts": {
+    "build:native": "swiftc native/mic-detector.swift -o native/bin/mic-detector -framework CoreAudio -framework Foundation && swiftc native/mic-capture.swift -o native/bin/mic-capture -framework AVFoundation -framework CoreAudio",
+    "build:audiotee": "bash scripts/fetch-audiotee.sh",
+    "build": "pnpm build:native && tsup src/index.ts --format esm --dts"
+  },
+  "dependencies": {
+    "@ethosagent/types": "workspace:*",
+    "@ethosagent/voice-session": "workspace:*",
+    "@ethosagent/voice-text": "workspace:*"
+  },
+  "devDependencies": {
+    "@ethosagent/voice-providers": "workspace:*"
+  }
+}

@@ -41,6 +41,17 @@ import {
   firstParagraph,
   PersonalityA2aIdentityProvider,
 } from '@ethosagent/personalities';
+import {
+  CallCaptureDaemon,
+  callCaptureHealthPath,
+  callCaptureLockPath,
+  checkAnyCallingAppRunning,
+  checkCallCaptureDependencies,
+  MicActivityDetector,
+  NotificationGate,
+  sourceLabelForProcessName,
+  tryClaimOwnership,
+} from '@ethosagent/platform-callcapture';
 import { bundledSkillsSource, createInjectors } from '@ethosagent/skills';
 import Database from '@ethosagent/sqlite';
 import { readRuntime, removeRuntime } from '@ethosagent/team-supervisor';
@@ -473,15 +484,20 @@ export async function runGatewayStart(opts: GatewayStartOptions = {}): Promise<v
   let watcherDeliverFn: ((target: WatcherDeliverTarget, text: string) => Promise<void>) | null =
     null;
   let watcherWakeFn: ((event: WatcherWakeEvent) => Promise<void>) | null = null;
+  // Named (rather than inlined into `WatcherManager`'s `wake` field below) so
+  // the SAME wake path can also drive the call-capture daemon's audit-trail
+  // leg further down — mirrors serve.ts's `watcherWake` closure, reused for
+  // both `WatcherManager` and `CallCaptureDaemon` rather than duplicated.
+  const watcherWake = async (event: WatcherWakeEvent): Promise<void> => {
+    if (watcherWakeFn) await watcherWakeFn(event);
+  };
   const watcherManager = new WatcherManager({
     storage: getStorage(),
     logger: new ConsoleLogger(),
     deliver: async (target, text) => {
       if (watcherDeliverFn) await watcherDeliverFn(target, text);
     },
-    wake: async (event) => {
-      if (watcherWakeFn) await watcherWakeFn(event);
-    },
+    wake: watcherWake,
   });
   const scheduler = new CronScheduler({
     storage: getStorage(),
@@ -637,6 +653,14 @@ export async function runGatewayStart(opts: GatewayStartOptions = {}): Promise<v
     // the whole SIP block below is a clean no-op without it.
     voiceStack,
     refreshPersonalities: refreshSystemPersonalities,
+    // Call capture (plan/phases/call-capture-extension.md, "Phase 4 —
+    // Integration"). `isCallCaptureToolsEnabled` gates this on
+    // darwin + `callCapture.personalityId` regardless of which personality
+    // the system loop itself is "for" — `runCallCapture` is invoked with an
+    // explicit `personalityId` argument at call time (see the daemon
+    // construction below), so any loop's `createAgentLoop()` call produces
+    // an equivalent closure. Absent on every other deployment.
+    runCallCapture: runCallCaptureFromLoop,
   } = await createAgentLoop(config, {
     cronScheduler: scheduler,
     watcherManager,
@@ -1530,6 +1554,96 @@ export async function runGatewayStart(opts: GatewayStartOptions = {}): Promise<v
     );
   }
 
+  // Call-capture daemon (plan/phases/call-capture-extension.md, "Phase 4 —
+  // Integration"; Architecture Issue B — `ethos gateway` previously had no
+  // call-capture wiring at all). Mirrors `serve.ts`'s daemon construction
+  // block exactly: same macOS + `callCapture.personalityId` guard, same
+  // `MicActivityDetector`/`NotificationGate`/`checkCallCaptureDependencies`,
+  // the SAME `watcherWake` closure `WatcherManager` above already uses (not a
+  // second copy), and `runCallCaptureFromLoop` from the system loop's
+  // `createAgentLoop()` result. A complete no-op (nothing constructed) for
+  // every deployment that hasn't set `callCapture.personalityId`.
+  let callCaptureDaemon: CallCaptureDaemon | undefined;
+  // Round-3 Issue 1 — released alongside `callCaptureDaemon?.stop()` on
+  // shutdown. Only set when THIS process won the ownership claim below.
+  let callCaptureOwnershipRelease: (() => void) | undefined;
+  // Liveness heartbeat for `ethos doctor`'s `checkCallCaptureDaemonHealth`
+  // (mirrors this file's own `gateway-health.json` heartbeat below) — only
+  // started/torn down alongside the daemon itself.
+  const CALL_CAPTURE_HEARTBEAT_INTERVAL_MS = 10_000;
+  let callCaptureHeartbeatTimer: NodeJS.Timeout | undefined;
+  if (
+    process.platform === 'darwin' &&
+    config.callCapture?.personalityId &&
+    runCallCaptureFromLoop
+  ) {
+    const callCaptureLogger = new ConsoleLogger();
+    // Round-3 Issue 1 — `ethos serve` and `ethos gateway` can both be
+    // configured with `callCapture.personalityId` at once (e.g. one under a
+    // LaunchAgent, the other under `ethos run-all`, which starts both by
+    // default). At most one process may run a live `CallCaptureDaemon`, or
+    // they fight over the same Process Tap/mic and stomp each other's
+    // shared heartbeat file. Losing this claim is a normal, expected
+    // outcome — not an error — so it logs at info level and simply skips
+    // constructing a daemon in this process.
+    const ownershipClaim = tryClaimOwnership(callCaptureLockPath());
+    if (!ownershipClaim.claimed) {
+      callCaptureLogger.info(
+        `call-capture: already running under PID ${ownershipClaim.ownerPid} — not starting a second instance in this process`,
+      );
+    } else {
+      callCaptureOwnershipRelease = ownershipClaim.release;
+      const boundPersonalityId = config.callCapture.personalityId;
+      const captureRunner = runCallCaptureFromLoop;
+      callCaptureDaemon = new CallCaptureDaemon({
+        detector: new MicActivityDetector(),
+        notificationGate: new NotificationGate(),
+        checkDependencies: checkCallCaptureDependencies,
+        // Decision 1's coarse process prefilter (issue A): mic activity alone
+        // isn't "a call" — require a known calling app to also be running.
+        // Known limitation, documented in the package README: this cannot see
+        // a browser-based call (e.g. Meet in Chrome). Resolves the matched
+        // process to a clean source label (e.g. 'zoom') for the daemon to
+        // forward into runCapture below.
+        checkCallingAppRunning: async () => {
+          const matched = await checkAnyCallingAppRunning();
+          return matched ? sourceLabelForProcessName(matched) : null;
+        },
+        personalityId: boundPersonalityId,
+        wake: watcherWake,
+        runCapture: async (abortSignal, source) => {
+          const result = await captureRunner(boundPersonalityId, { abortSignal, source });
+          if (!result.ok) {
+            callCaptureLogger.error(`call-capture: capture failed: ${result.error}`);
+            return;
+          }
+          if (result.warning) callCaptureLogger.warn(`call-capture: ${result.warning}`);
+          callCaptureLogger.info(`call-capture: saved transcript to ${result.artifactKey}`);
+        },
+        logger: callCaptureLogger,
+      });
+      callCaptureDaemon.start();
+
+      const writeCallCaptureHeartbeat = async () => {
+        try {
+          await storage.writeAtomic(
+            callCaptureHealthPath(),
+            JSON.stringify({ pid: process.pid, updatedAt: new Date().toISOString() }),
+          );
+        } catch {
+          // Best-effort — a missed tick is harmless; the consumer treats
+          // stale/absent data as degraded.
+        }
+      };
+      void writeCallCaptureHeartbeat();
+      callCaptureHeartbeatTimer = setInterval(
+        () => void writeCallCaptureHeartbeat(),
+        CALL_CAPTURE_HEARTBEAT_INTERVAL_MS,
+      );
+      callCaptureHeartbeatTimer.unref?.();
+    }
+  }
+
   console.log(`${c.dim}Listening for messages. Press Ctrl+C to stop.${c.reset}\n`);
   let heartbeatInFlight = false;
   const writeHeartbeat = async () => {
@@ -1564,6 +1678,13 @@ export async function runGatewayStart(opts: GatewayStartOptions = {}): Promise<v
     scheduler.stop();
     dreamExecutor.stop();
     await storage.remove(gatewayHealthPath()).catch(() => {});
+    callCaptureDaemon?.stop();
+    if (callCaptureHeartbeatTimer) clearInterval(callCaptureHeartbeatTimer);
+    if (callCaptureDaemon) await storage.remove(callCaptureHealthPath()).catch(() => {});
+    // Round-3 Issue 1 — release the ownership claim so a restarted process
+    // (or the other host command) can take it. Only set when this process
+    // actually won the claim; a process that lost it never set this.
+    callCaptureOwnershipRelease?.();
     await gateway.shutdown({
       notify:
         '⚠ Ethos was interrupted while answering. Please resend your last message — your session history is preserved.',

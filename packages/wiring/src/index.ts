@@ -164,6 +164,12 @@ export interface WiringConfig {
   // biome-ignore format: Phase 3 adds turn-end auto-compact + overflow-retry flags; Phase 4 adds smallWindow; Item 7 adds the ceiling + user tail.
   compaction?: { pressure?: number; target?: number; gateDelta?: number; autoCompact?: boolean; retryOnOverflow?: boolean; smallWindow?: 'auto' | 'on' | 'off'; maxContextTokens?: number; minTailUserMessages?: number };
   /**
+   * Call-capture personality binding (plan/phases/call-capture-extension.md
+   * decision 3) — see `EthosConfig.callCapture` in `@ethosagent/config` and
+   * `validateCallCaptureBinding` in this package.
+   */
+  callCapture?: { personalityId?: string };
+  /**
    * Phase 3 — silent memory-flush turn config (opt-in). `enabled` gates the
    * whole feature; the rest tune the soft threshold, timebox + token cap,
    * per-flush memory-delta cap, and the trivial-delta skip. Threaded into the
@@ -1002,6 +1008,18 @@ export interface CreateAgentLoopResult {
   onMemoryCaptured?: (
     cb: (n: { sessionId: string; scopeId: string; summary: string }) => void,
   ) => () => void;
+  /**
+   * Directly and deterministically runs the call-capture pipeline for the
+   * given personality — no LLM turn, no tool registry involved. Present only
+   * when call capture is enabled (`isCallCaptureToolsEnabled`). Bound in
+   * `build-agent-loop.ts`, closing over the constructed TapCapture/MicCapture/
+   * STT/memory dependencies. `apps/ethos/src/commands/serve.ts` wires this
+   * directly into `CallCaptureDaemon`'s `runCapture` option.
+   */
+  runCallCapture?: (
+    personalityId: string,
+    opts: { source?: string; abortSignal: AbortSignal },
+  ) => Promise<import('@ethosagent/tools-callcapture').CallCaptureResult>;
   /** v2.2 — Notification router for registering per-session adapters.
    *  CLI/TUI/web-api register a NotificationAdapter on this router so plugin
    *  monitors can deliver messages to the active surface. */
