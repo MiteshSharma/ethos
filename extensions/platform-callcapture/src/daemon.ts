@@ -287,7 +287,11 @@ export class CallCaptureDaemon {
     const handle = await this.notificationGate.presentCaptureOffer({
       callId,
       title: 'Ethos',
-      message: 'A call was just detected on this machine. Capture it?',
+      // terminal-notifier 2.0.0 has no action-button support — clicking the
+      // notification body is the only interactive affordance, and macOS
+      // often labels that click target with a generic "Show" rather than
+      // custom text, so the message itself must carry the instruction.
+      message: 'Call detected — click to start capturing.',
     });
 
     if (this.consumeCancellation(callId)) {
