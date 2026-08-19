@@ -4,7 +4,7 @@ description: "Every field in ~/.ethos/config.yaml — provider, model, channel t
 kind: reference
 audience: user
 slug: config-yaml
-updated: 2026-08-15
+updated: 2026-08-19
 ---
 
 `~/.ethos/config.yaml` is a flat `key: value` file. Dotted keys (e.g. `retention.messages`, `providers.0.provider`) are how nested structures appear on disk — there is no indentation-based nesting. The parser ignores quotes around values.
@@ -287,6 +287,28 @@ SMTP server hostname for outbound mail.
 Type: integer · Default: unset
 
 SMTP server port. Conventional values: `587` (STARTTLS), `465` (TLS).
+
+## web.host, web.port, web.corsOrigins {#web-server}
+
+Type: dotted group · Default: per-field below
+
+Bind address, port, and CORS origins for the `ethos serve` web API — the process that mounts `/v1/*` and `/rpc/*`.
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `web.host` | string | `127.0.0.1` | Bind address. Precedence: `--web-host` CLI flag > `ETHOS_WEB_HOST` env var > this key > default. |
+| `web.port` | integer | `3000` | Listen port. Precedence: `--web-port` CLI flag > `ETHOS_WEB_PORT` env var > this key > default. |
+| `web.corsOrigins` | string | unset (no CORS) | Comma-separated origins (or `*`) allowed to call `/v1/*` directly from a browser. No CLI flag exists for this one. Precedence: `ETHOS_API_CORS_ORIGINS` env var > this key > default (unset). |
+
+```yaml
+web.host: 0.0.0.0
+web.port: 3000
+web.corsOrigins: "https://chat.example.com"
+```
+
+Notes:
+
+- See [Serve Ethos as an OpenAI-compatible backend](../../building/how-to/openai-server-chat.md#1-boot-the-server) for these keys in practice, including the CORS caveat for server-side clients.
 
 ## verbose {#verbose}
 

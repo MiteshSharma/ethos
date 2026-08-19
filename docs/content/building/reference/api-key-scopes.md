@@ -4,7 +4,7 @@ description: "All API key scopes and what each one gates."
 kind: reference
 audience: developer
 slug: api-key-scopes
-updated: 2026-08-09
+updated: 2026-08-19
 ---
 
 A scope is one permission on one API key. Each key carries a set of them, and the set decides which surfaces the bearer reaches: the contract namespaces on `/rpc/*`, the SSE endpoint, and the OpenAI-compatible `/v1/*` endpoints. Two mint paths issue keys from this same vocabulary — the `apiKeys.create` RPC (cookie-auth only, used by the web Settings tab) and `ethos api-key create` on the CLI.
@@ -19,7 +19,7 @@ A scope is one permission on one API key. Each key carries a set of them, and th
 |---|---|
 | `sessions:read` | Read access to `sessions.list` and `sessions.get`. |
 | `sessions:write` | Write access to `sessions.fork`, `sessions.delete`, and `sessions.update`. |
-| `chat` | The whole OpenAI-compatible surface: `/v1/models` and `/v1/chat/completions`. Asserted once at the `/v1` mount, so it covers every route under it. |
+| `chat` | The whole OpenAI-compatible surface: `/v1/*` (currently `/v1/models`, `/v1/chat/completions`, `/v1/capabilities`, and `/v1/audio/transcriptions`). Asserted once at the `/v1` mount, so it covers every route under it. |
 | `chat:send` | Access to `chat.send` and `chat.abort` on `/rpc/*`. |
 | `personalities:read` | Read access to `personalities.list`, `personalities.get`, `personalities.characterSheet`, and personality skills read methods. |
 | `memory:read` | Read access to `memory.list` and `memory.get`. |
@@ -59,7 +59,7 @@ The `apiKeys` namespace is restricted to cookie-auth. A bearer token cannot mint
 import { EthosClient } from '@ethosagent/sdk';
 
 // Cookie-auth -- browser context
-const client = new EthosClient({ baseUrl: 'http://localhost:2400' });
+const client = new EthosClient({ baseUrl: 'http://localhost:3000' });
 
 const { secret, key } = await client.rpc.apiKeys.create({
   name: 'my-dashboard',

@@ -143,6 +143,7 @@ const sidebars: SidebarsConfig = {
             'building/how-to/add-a-stateful-tool',
             'building/how-to/point-sdk-at-ethos',
             'building/how-to/openai-server-chat',
+            'building/how-to/connect-open-webui',
             'building/how-to/add-a-panel',
             'building/how-to/display-live-tool-events',
             'building/how-to/authenticate-dashboard-users',

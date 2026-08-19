@@ -3,8 +3,12 @@ import type { CompletionsService } from '../../features/completions/service';
 import { type ApiKeyAuthStore, bearerAuth } from '../../middleware/bearer-auth';
 import { idempotencyMiddleware } from '../../middleware/idempotency';
 import { openAiCors } from '../../middleware/openai-cors';
+import type { ConfigService } from '../../services/config.service';
 import type { PersonalitiesService } from '../../services/personalities.service';
+import type { VoiceService } from '../../services/voice.service';
 import type { IdempotencyStore } from '../../stores/idempotency-store';
+import { openAiAudioRoutes } from './audio';
+import { openAiCapabilitiesRoutes } from './capabilities';
 import { openAiChatRoutes } from './chat';
 import { openAiModelsRoutes } from './models';
 
@@ -26,6 +30,11 @@ export interface OpenAiRoutesOptions {
   /** SQLite-backed idempotency cache. When provided, `Idempotency-Key`
    *  headers on `/chat/*` requests trigger cache-or-execute semantics. */
   idempotencyStore?: IdempotencyStore;
+  /** Backs `GET /v1/capabilities` (shared with `rpc/meta.capabilities`). */
+  config: ConfigService;
+  /** Backs `GET /v1/capabilities`'s `audio_transcriptions` flag and
+   *  `POST /v1/audio/transcriptions`. Absent → no STT provider configured. */
+  voice?: VoiceService;
 }
 
 export function openAiRoutes(opts: OpenAiRoutesOptions): Hono {
@@ -45,6 +54,9 @@ export function openAiRoutes(opts: OpenAiRoutesOptions): Hono {
       ...(opts.listTeams ? { listTeams: opts.listTeams } : {}),
     }),
   );
+
+  app.route('/capabilities', openAiCapabilitiesRoutes({ config: opts.config, voice: opts.voice }));
+  app.route('/audio', openAiAudioRoutes({ voice: opts.voice }));
 
   if (opts.completions) {
     app.route(

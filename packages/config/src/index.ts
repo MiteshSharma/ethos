@@ -808,10 +808,22 @@ export interface AuxiliaryWebConfig {
   baseUrl?: string;
 }
 
-/** tools-web — web search/extract backend selection. */
+/**
+ * tools-web — web search/extract backend selection, plus the web API
+ * server's bind address, port, and CORS origins (`web.host` / `web.port` /
+ * `web.corsOrigins`). Two unrelated features share this block because the
+ * config-file key is `web.*` in both cases — do not split into two
+ * top-level `web:` keys.
+ */
 export interface WebConfig {
   search_backend?: 'exa' | 'tavily' | 'brave';
   extract_backend?: 'htmltext';
+  /** `--web-host` / `ETHOS_WEB_HOST` default when unset. */
+  host?: string;
+  /** `--web-port` / `ETHOS_WEB_PORT` default when unset. */
+  port?: number;
+  /** `ETHOS_API_CORS_ORIGINS` default when unset. Comma-separated origins or `*`. */
+  corsOrigins?: string;
 }
 
 /**
@@ -2335,6 +2347,9 @@ export async function writeConfig(
   }
   if (config.web?.search_backend) lines.push(`web.search_backend: ${config.web.search_backend}`);
   if (config.web?.extract_backend) lines.push(`web.extract_backend: ${config.web.extract_backend}`);
+  if (config.web?.host) lines.push(`web.host: ${config.web.host}`);
+  if (config.web?.port !== undefined) lines.push(`web.port: ${config.web.port}`);
+  if (config.web?.corsOrigins) lines.push(`web.corsOrigins: ${config.web.corsOrigins}`);
   if (config.webhooks) {
     for (const [hookId, hook] of Object.entries(config.webhooks)) {
       lines.push(`webhooks.${hookId}.personalityId: ${hook.personalityId}`);
@@ -3322,8 +3337,13 @@ function parseConfigYaml(src: string): EthosConfig {
     'auxiliary.tts.timeout',
     auxTimeoutWarnings,
   );
+  const webPort = webKv.port ? parseBoundedInt(webKv.port, 1, 65535) : undefined;
   const webConfig: WebConfig | undefined =
-    webKv.search_backend || webKv.extract_backend
+    webKv.search_backend ||
+    webKv.extract_backend ||
+    webKv.host ||
+    webPort !== undefined ||
+    webKv.corsOrigins
       ? {
           ...(webKv.search_backend === 'exa' ||
           webKv.search_backend === 'tavily' ||
@@ -3333,6 +3353,9 @@ function parseConfigYaml(src: string): EthosConfig {
           ...(webKv.extract_backend === 'htmltext'
             ? { extract_backend: webKv.extract_backend }
             : {}),
+          ...(webKv.host ? { host: webKv.host } : {}),
+          ...(webPort !== undefined ? { port: webPort } : {}),
+          ...(webKv.corsOrigins ? { corsOrigins: webKv.corsOrigins } : {}),
         }
       : undefined;
   const modelCatalogProviders: Record<string, { url: string }> | undefined =
