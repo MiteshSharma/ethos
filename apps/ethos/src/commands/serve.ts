@@ -53,6 +53,7 @@ import { WatcherManager, type WatcherWakeEvent } from '@ethosagent/watchers';
 import {
   type ChatService,
   createWebApi,
+  IdempotencyStore,
   type RouteModule,
   WebTokenRepository,
 } from '@ethosagent/web-api';
@@ -87,7 +88,13 @@ import {
   getStorage,
 } from '../wiring';
 import { runCronTurn } from './cron-turn';
-import { parseFlagValue, parsePort } from './serve-helpers';
+import {
+  parseFlagValue,
+  parsePort,
+  resolveCorsOrigins,
+  resolveWebHost,
+  resolveWebPort,
+} from './serve-helpers';
 import { formatNonLoopbackWarning, isLoopbackHost, listenWithFallback } from './serve-listen';
 
 // `ethos serve` boots:
@@ -98,7 +105,6 @@ import { formatNonLoopbackWarning, isLoopbackHost, listenWithFallback } from './
 // in the same database. SIGINT / SIGTERM cleans up both before exiting.
 
 const ACP_PORT_DEFAULT = 3001;
-const WEB_PORT_DEFAULT = 3000;
 const WEB_PORT_FALLBACK_ATTEMPTS = 5;
 
 // Resilience guard is installed once per process — runServe can be reached
@@ -108,8 +114,9 @@ let resilienceGuardInstalled = false;
 export async function runServe(args: string[], config: EthosConfig | null): Promise<void> {
   installServeResilienceGuard();
   const acpPort = parsePort(parseFlagValue(args, ['--port']), ACP_PORT_DEFAULT);
-  const webPort = parsePort(parseFlagValue(args, ['--web-port']), WEB_PORT_DEFAULT);
-  const webHost = parseFlagValue(args, ['--web-host']) ?? process.env.ETHOS_WEB_HOST ?? '127.0.0.1';
+  const webPort = resolveWebPort(args, process.env, config);
+  const webHost = resolveWebHost(args, process.env, config);
+  const corsOrigins = resolveCorsOrigins(process.env, config);
 
   // WEB-006: only honor X-Forwarded-For for rate limiting behind a trusted
   // reverse proxy. Off by default — a directly-exposed server must never trust
@@ -729,6 +736,9 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
   // OpenAI-compat surface (F1+F2). Shares sessions.db so `ethos api-key`
   // and `ethos serve` see the same rows.
   const apiKeys = new SqliteApiKeyStore(join(dir, 'sessions.db'));
+  // Idempotency cache for `POST /v1/chat/completions` retries — same db,
+  // same rationale.
+  const idempotencyStore = new IdempotencyStore(join(dir, 'sessions.db'));
 
   const identityMap = new IdentityMap({ storage: new FsStorage(), dataDir: dir });
   await identityMap.resolve('desktop', 'desktop', 'Desktop');
@@ -1164,6 +1174,8 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
     ...(pluginLoader ? { pluginLoader } : {}),
     ...(notificationRouter ? { notificationRouter } : {}),
     apiKeys,
+    idempotencyStore,
+    ...(corsOrigins ? { corsOrigins } : {}),
     listTeams: async () => listRegisteredTeams(dir),
     secureCookie: !isLoopbackBind || config.webBaseUrl?.startsWith('https://') === true,
     trustProxy,

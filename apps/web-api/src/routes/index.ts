@@ -66,6 +66,12 @@ export interface CreateRoutesOptions {
    *  seam. Each declares its mount path, auth posture, and description;
    *  `enabled: false` skips it. See {@link RouteModule}. */
   routeModules?: RouteModule[];
+  /** SQLite-backed idempotency cache for `/v1/chat/*`. Absent → no
+   *  `Idempotency-Key` support (previous behavior). */
+  idempotencyStore?: import('../stores/idempotency-store').IdempotencyStore;
+  /** Comma-separated CORS origins or `*` for `/v1/*`. Defaults to
+   *  `ETHOS_API_CORS_ORIGINS` env var when unset. */
+  corsOrigins?: string;
 }
 
 export interface ServiceContainer {
@@ -324,7 +330,11 @@ export function createRoutes(opts: CreateRoutesOptions): Hono {
         apiKeys: opts.apiKeys,
         personalities: opts.services.personalities,
         completions: opts.services.completions,
+        config: opts.services.config,
+        ...(opts.services.voice ? { voice: opts.services.voice } : {}),
         ...(opts.listTeams ? { listTeams: opts.listTeams } : {}),
+        ...(opts.idempotencyStore ? { idempotencyStore: opts.idempotencyStore } : {}),
+        ...(opts.corsOrigins ? { corsOrigins: opts.corsOrigins } : {}),
       }),
     );
   }

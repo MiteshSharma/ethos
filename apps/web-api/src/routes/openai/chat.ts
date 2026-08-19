@@ -236,8 +236,10 @@ function rejectUnsupported(req: ChatCompletionRequest): Rejection | null {
     if (msg.role === 'system') {
       return {
         message:
-          'System messages are not supported. The personality owns the system prompt. ' +
-          'Configure the personality (SOUL.md, config.yaml) instead of overriding per-request.',
+          'System messages are not supported. The personality owns the system prompt — Ethos ' +
+          'rejects any per-request override. In Open WebUI: clear the system prompt in Admin ' +
+          "Settings → Connections → your model's connection, or in the active chat's model " +
+          'settings. Configure identity via the personality (SOUL.md, config.yaml) instead.',
         code: 'system_messages_not_supported',
         param: 'messages',
       };

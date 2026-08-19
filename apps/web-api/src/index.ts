@@ -294,6 +294,19 @@ export interface CreateWebApiOptions {
    * models list reports only personalities + `ethos-default`.
    */
   listTeams?: () => Promise<string[]>;
+  /**
+   * SQLite-backed idempotency cache for `POST /v1/chat/completions`. When
+   * provided, a request carrying an `Idempotency-Key` header is cached and
+   * replayed on retry instead of re-driving the agent loop. Boot code
+   * typically constructs `IdempotencyStore` against the same `sessions.db`
+   * file the session store uses. Omitted → no idempotency support.
+   */
+  idempotencyStore?: import('./stores/idempotency-store').IdempotencyStore;
+  /**
+   * Comma-separated CORS origins or `*` for the `/v1/*` OpenAI-compat
+   * surface. Defaults to the `ETHOS_API_CORS_ORIGINS` env var when unset.
+   */
+  corsOrigins?: string;
   /** Optional title generation function. When provided, ChatService auto-titles new sessions after the first turn. */
   titleFn?: (systemPrompt: string, userMessage: string) => Promise<string>;
   /** Called on every completed chat turn — boot code wires the W4.1 funnel tracker here. */
@@ -1131,6 +1144,8 @@ export function createWebApi(opts: CreateWebApiOptions): CreateWebApiResult {
     ...(opts.apiKeys ? { apiKeys: opts.apiKeys } : {}),
     ...(opts.listTeams ? { listTeams: opts.listTeams } : {}),
     ...(opts.webBaseUrl ? { webBaseUrl: opts.webBaseUrl } : {}),
+    ...(opts.idempotencyStore ? { idempotencyStore: opts.idempotencyStore } : {}),
+    ...(opts.corsOrigins ? { corsOrigins: opts.corsOrigins } : {}),
     // The download route is a built-in module rather than a caller-supplied
     // one: it needs `documentsService`, which is constructed here. Declaring it
     // through the same seam keeps its auth posture explicit and reviewable, and
@@ -1221,6 +1236,7 @@ export { WebTokenRepository } from './repositories/web-token.repository';
 export type { RouteModule } from './routes/route-module';
 export { setWhatsAppPairingCode, setWhatsAppQr } from './routes/setup-whatsapp';
 export type { DangerPredicate, DangerReason } from './services/approval-hook';
+export { IdempotencyStore } from './stores/idempotency-store';
 // The satellite lane, exported so a host that OWNS a satellite client can be
 // tested against the code that actually receives its frames rather than
 // against a fixture — see `apps/ethos/src/__tests__/listen-satellite-e2e.test.ts`.

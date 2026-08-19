@@ -5,7 +5,7 @@ import { CompletionsRepository } from '../../features/completions/repository';
 import { CompletionsService } from '../../features/completions/service';
 import { openAiRoutes } from '../../routes/openai';
 import type { PersonalitiesService } from '../../services/personalities.service';
-import { makeStubAgentLoop } from '../test-helpers';
+import { makeStubAgentLoop, makeStubConfigService } from '../test-helpers';
 
 const KNOWN_PERSONALITIES = ['engineer', 'researcher'];
 
@@ -43,6 +43,7 @@ async function setup(opts: SetupOptions = {}) {
     apiKeys,
     personalities: makeStubPersonalitiesService(),
     completions,
+    config: makeStubConfigService(),
   });
   return {
     app,
@@ -186,8 +187,9 @@ describe('POST /v1/chat/completions', () => {
         }),
       });
       expect(res.status).toBe(400);
-      const body = (await res.json()) as { error: { code: string } };
+      const body = (await res.json()) as { error: { code: string; message: string } };
       expect(body.error.code).toBe('system_messages_not_supported');
+      expect(body.error.message).toContain('Admin Settings → Connections');
     });
   });
 

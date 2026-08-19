@@ -227,7 +227,7 @@ function listDevicesHint(): string {
  */
 const DEFAULT_IDLE_WINDOW_MS = 30_000;
 
-/** `ethos serve --web-port` default. Mirrors WEB_PORT_DEFAULT in serve.ts. */
+/** `ethos serve --web-port` default. Mirrors WEB_PORT_DEFAULT in serve-helpers.ts. */
 const DEFAULT_WEB_PORT = 3000;
 
 /**

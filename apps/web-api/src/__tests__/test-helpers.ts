@@ -8,6 +8,7 @@ import type {
   MemorySnapshot,
   PersonalityConfig,
 } from '@ethosagent/types';
+import type { ConfigGetResult, ConfigService } from '../services/config.service';
 
 // Test helpers shared by route + service tests. Building a real `AgentLoop`
 // requires LLM creds + tools + memory + personalities — overkill for tests
@@ -89,4 +90,27 @@ export function makeStubMemoryProvider(): MemoryProvider {
       return [];
     },
   };
+}
+
+// ---------------------------------------------------------------------------
+// ConfigService stub
+//
+// Route tests that only need `GET /v1/capabilities` to mount (it always
+// requires `config`) don't care about the full settings surface — this
+// returns a minimal `ConfigGetResult` with `voiceProvider`/`voiceTtsProvider`
+// overridable per-test.
+// ---------------------------------------------------------------------------
+
+export function makeStubConfigService(
+  overrides: Partial<Pick<ConfigGetResult, 'voiceProvider' | 'voiceTtsProvider'>> = {},
+): ConfigService {
+  return {
+    async get(): Promise<ConfigGetResult> {
+      return {
+        voiceProvider: null,
+        voiceTtsProvider: null,
+        ...overrides,
+      } as ConfigGetResult;
+    },
+  } as unknown as ConfigService;
 }

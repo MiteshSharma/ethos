@@ -2,6 +2,7 @@ import { SqliteApiKeyStore } from '@ethosagent/session-sqlite';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { openAiRoutes } from '../../routes/openai';
 import type { PersonalitiesService } from '../../services/personalities.service';
+import { makeStubConfigService } from '../test-helpers';
 
 interface ModelsResponse {
   object: string;
@@ -37,6 +38,7 @@ describe('GET /v1/models', () => {
   it('returns OpenAI-shaped list of personalities + ethos-default with a valid key', async () => {
     const app = openAiRoutes({
       apiKeys: store,
+      config: makeStubConfigService(),
       personalities: makeStubPersonalitiesService(['engineer', 'coordinator']),
     });
     const res = await app.request('/models', {
@@ -60,6 +62,7 @@ describe('GET /v1/models', () => {
     // hand a model picker guaranteed-failing selections.
     const app = openAiRoutes({
       apiKeys: store,
+      config: makeStubConfigService(),
       personalities: makeStubPersonalitiesService(['engineer']),
       listTeams: async () => ['analytics', 'support'],
     });
@@ -75,6 +78,7 @@ describe('GET /v1/models', () => {
   it('returns the model object for a known id via GET /v1/models/{id}', async () => {
     const app = openAiRoutes({
       apiKeys: store,
+      config: makeStubConfigService(),
       personalities: makeStubPersonalitiesService(['engineer', 'coordinator']),
     });
     for (const id of ['engineer', 'coordinator', 'ethos-default']) {
@@ -89,6 +93,7 @@ describe('GET /v1/models', () => {
   it('returns 404 in the OpenAI envelope for an unknown id via GET /v1/models/{id}', async () => {
     const app = openAiRoutes({
       apiKeys: store,
+      config: makeStubConfigService(),
       personalities: makeStubPersonalitiesService(['engineer']),
       listTeams: async () => ['analytics'],
     });
@@ -107,6 +112,7 @@ describe('GET /v1/models', () => {
   it('returns 401 when Authorization is missing', async () => {
     const app = openAiRoutes({
       apiKeys: store,
+      config: makeStubConfigService(),
       personalities: makeStubPersonalitiesService(['engineer']),
     });
     const res = await app.request('/models');
@@ -123,6 +129,7 @@ describe('GET /v1/models', () => {
     await store.revoke(target.prefix);
     const app = openAiRoutes({
       apiKeys: store,
+      config: makeStubConfigService(),
       personalities: makeStubPersonalitiesService(['engineer']),
     });
     const res = await app.request('/models', {
