@@ -100,6 +100,7 @@
       "@ethosagent/sandbox-docker": ["./extensions/sandbox-docker/src"],
       "@ethosagent/execution-local": ["./extensions/execution-local/src"],
       "@ethosagent/execution-docker": ["./extensions/execution-docker/src"],
+      "@ethosagent/execution-pi": ["./extensions/execution-pi/src"],
       "@ethosagent/execution-process-backend": ["./extensions/execution-process-backend/src"],
       "@ethosagent/execution-ssh": ["./extensions/execution-ssh/src"],
       "@ethosagent/tools-browser": ["./extensions/tools-browser/src"],

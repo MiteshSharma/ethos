@@ -291,7 +291,7 @@ register_anchors:
     - { path: packages/safety/watcher/src/rules.ts, line: 110, contains: "export function compoundingErrorRule" }
     - { path: packages/safety/watcher/src/rules.ts, line: 161, contains: "export function suspiciousSequenceRule" }
     - { path: packages/safety/watcher/src/rules.ts, line: 205, contains: "export function defaultRules" }
-    - { path: packages/wiring/src/build-agent-loop.ts, line: 466, contains: "defaultRules: watcherDefaultRules" }
+    - { path: packages/wiring/src/build-agent-loop.ts, line: 467, contains: "defaultRules: watcherDefaultRules" }
 
   G-CHAN:
     - { path: packages/safety/channel/src/channel-filter.ts, line: 111, contains: "export function checkMessage" }
@@ -435,6 +435,17 @@ tiers:
     package: "@ethosagent/execution-docker"
     tier: 1
     assigned: 2026-08-12
+
+  # The Pi job runner spawns a foreign coding agent as its own OS process. It
+  # implements no boundary itself — every mount comes out of execution-docker's
+  # `mountsFor`, and the container IS the containment (Pi enforces no path
+  # boundaries of its own) — but it decides what that derivation is asked for,
+  # so a mistake here is a containment mistake. Tier 1 for the same reason
+  # execution-docker is.
+  extensions/execution-pi:
+    package: "@ethosagent/execution-pi"
+    tier: 1
+    assigned: 2026-08-19
 
   extensions/execution-local:
     package: "@ethosagent/execution-local"

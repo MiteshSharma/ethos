@@ -42,6 +42,7 @@
     "@ethosagent/cron": "workspace:*",
     "@ethosagent/document-extractors": "workspace:*",
     "@ethosagent/execution-docker": "workspace:*",
+    "@ethosagent/execution-pi": "workspace:*",
     "@ethosagent/execution-local": "workspace:*",
     "@ethosagent/execution-ssh": "workspace:*",
     "@ethosagent/goal-runner": "workspace:*",

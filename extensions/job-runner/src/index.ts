@@ -12,6 +12,10 @@ import { EthosJobRunner } from './ethos-job-runner';
 import { capText, extractSummarySection, SUMMARY_RESULT_CAP } from './summary';
 
 export { ETHOS_RUNNER_NAME, EthosJobRunner } from './ethos-job-runner';
+// Every background job runs in summary mode, whatever the runner: the parent
+// re-ingests only a bounded digest. Exported so an out-of-process runner
+// appends the SAME instruction rather than growing a third copy of it.
+export { SUMMARY_INSTRUCTION } from './summary';
 
 // ---------------------------------------------------------------------------
 // BackgroundExecutor — the detached background engine for background sub-agents.

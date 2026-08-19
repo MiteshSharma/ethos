@@ -12,6 +12,7 @@ import {
   SimpleCompletionImpl,
 } from '@ethosagent/core';
 import { registerBuiltinExtractors } from '@ethosagent/document-extractors';
+import { PI_RUNNER_NAME, PiJobRunner } from '@ethosagent/execution-pi';
 import { GoalRunner } from '@ethosagent/goal-runner';
 import { BackgroundExecutor, ETHOS_RUNNER_NAME, EthosJobRunner } from '@ethosagent/job-runner';
 import { SQLiteJobStore } from '@ethosagent/job-store';
@@ -933,6 +934,38 @@ export async function buildAgentLoop(
     const jobRunners = new DefaultJobRunnerRegistry();
     jobRunners.register(ETHOS_RUNNER_NAME, () => new EthosJobRunner(loop));
     await jobRunners.resolve(ETHOS_RUNNER_NAME, { logger: log });
+    // Pi — out-of-process, in a container. Registered only when the deployment
+    // names a digest-pinned image (there is nothing sane to default to), so an
+    // un-provisioned machine answers `not_available` rather than failing at
+    // spawn time. The docker backend comes from the SAME registry (and, by its
+    // cache, is the SAME instance) exec tools use: D4's containment claim rests
+    // on one mount derivation, not two.
+    const piConfig = config.background?.pi;
+    if (piConfig?.image) {
+      const piBackend = await infra.executionBackends.resolve('docker', {
+        config: {
+          substitutionVars: { ethosHome: dataDir, cwd: wiringCtx.workingDir },
+          constitution: infra.constitution,
+        },
+        secrets: config.secretsResolver ?? NOOP_SECRETS,
+        logger: log,
+      });
+      jobRunners.register(
+        PI_RUNNER_NAME,
+        () =>
+          new PiJobRunner({
+            backend: piBackend,
+            resolvePersonality: (id) => personalities.get(id),
+            ethosHome: dataDir,
+            cwd: wiringCtx.workingDir,
+            image: piConfig.image,
+            ...(piConfig.memoryMb !== undefined ? { memoryMb: piConfig.memoryMb } : {}),
+            ...(piConfig.configDir ? { piConfigDir: piConfig.configDir } : {}),
+            logger: log,
+          }),
+      );
+      await jobRunners.resolve(PI_RUNNER_NAME, { logger: log });
+    }
     backgroundExecutor = new BackgroundExecutor({
       store: jobStore,
       loop,

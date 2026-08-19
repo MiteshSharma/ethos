@@ -148,6 +148,24 @@
 //                                      command" error instead of a bare
 //                                      ENOENT. Not a ~/.ethos/ operation.
 //
+//   extensions/execution-pi/       Creating a Pi run's workspace IS a
+//   src/worktree.ts                 `git worktree add`: the git binary writes a
+//                                    whole tree, which no Storage method can
+//                                    express, and the surrounding mkdir/exists
+//                                    checks are that same operation's
+//                                    bookkeeping. Same category as the SQLite
+//                                    stores' mkdirSync of a database's parent
+//                                    directory.
+//
+//   extensions/execution-pi/       existsSync answers "is this machine set up
+//   src/availability.ts             to run Pi at all" against the operator's
+//                                    Pi credential file, which is never opened
+//                                    and never read — the container gets it as
+//                                    a read-only mount. Same rationale as
+//                                    platform-callcapture/src/detector.ts's
+//                                    binary-presence check; not a ~/.ethos/
+//                                    operation.
+//
 // If you need to add a new exception, document WHY here and in CLAUDE.md before
 // adding it to ALLOWED_PATHS below. The default answer for code on the
 // personality boundary is "use Storage."
@@ -194,6 +212,8 @@ const ALLOWED_FILES = new Set([
   'extensions/gateway/src/transcode.ts',
   'extensions/skills/src/env-resolver.ts',
   'extensions/execution-docker/src/index.ts',
+  'extensions/execution-pi/src/worktree.ts',
+  'extensions/execution-pi/src/availability.ts',
   'extensions/goal-store/src/index.ts',
   'extensions/kanban-store/src/index.ts',
   'extensions/platform-whatsapp/src/session-store.ts',

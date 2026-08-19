@@ -911,13 +911,29 @@ export interface BackgroundConfig {
   heartbeatMs?: number;
   /** Terminal-row retention before GC (days). Default 30. */
   retentionDays?: number;
+  /**
+   * The Pi job runner (`@ethosagent/execution-pi`). Registered ONLY when
+   * `image` is set: the host runs inside a container built from it, and there
+   * is no sane default to guess — the reference must be digest-pinned, which
+   * makes it a per-deployment fact. Absent means `delegate_task(runner: 'pi')`
+   * answers `not_available`, which is the honest state of a machine that never
+   * built the image.
+   */
+  pi?: {
+    /** Digest-pinned image (`@sha256:`) with `pi` on PATH. See the package's docker/Dockerfile. */
+    image: string;
+    /** Container memory ceiling in MB. Default 2048 — a coding agent, not a shell. */
+    memoryMb?: number;
+    /** Host directory holding Pi's `auth.json`. Default `~/.pi/agent`. */
+    configDir?: string;
+  };
 }
 
 /**
  * Canonical defaults for the `background:` section. `enabled` defaults to false;
  * the wiring layer may override per surface. All other fields are finite.
  */
-export function backgroundDefaults(): Required<Omit<BackgroundConfig, 'enabled'>> & {
+export function backgroundDefaults(): Required<Omit<BackgroundConfig, 'enabled' | 'pi'>> & {
   enabled: boolean;
 } {
   return {
@@ -4239,6 +4255,15 @@ function buildBackgroundConfig(kv: Record<string, string>): BackgroundConfig | u
   if (heartbeatMs !== undefined) cfg.heartbeatMs = heartbeatMs;
   const retentionDays = num(kv.retention_days);
   if (retentionDays !== undefined) cfg.retentionDays = retentionDays;
+  // `pi_image` is the switch: no image, no Pi runner (see `BackgroundConfig.pi`).
+  if (kv.pi_image) {
+    const memoryMb = num(kv.pi_memory_mb);
+    cfg.pi = {
+      image: kv.pi_image,
+      ...(memoryMb !== undefined ? { memoryMb } : {}),
+      ...(kv.pi_config_dir ? { configDir: kv.pi_config_dir } : {}),
+    };
+  }
   if (Object.keys(cfg).length === 0) return undefined;
   return cfg;
 }

@@ -1016,6 +1016,21 @@ importers:
         specifier: workspace:*
         version: link:../../packages/types
 
+  extensions/execution-pi:
+    dependencies:
+      '@ethosagent/core':
+        specifier: workspace:*
+        version: link:../../packages/core
+      '@ethosagent/execution-docker':
+        specifier: workspace:*
+        version: link:../execution-docker
+      '@ethosagent/job-runner':
+        specifier: workspace:*
+        version: link:../job-runner
+      '@ethosagent/types':
+        specifier: workspace:*
+        version: link:../../packages/types
+
   extensions/execution-process-backend:
     dependencies:
       '@ethosagent/plugin-sdk':
@@ -2348,6 +2363,9 @@ importers:
       '@ethosagent/execution-local':
         specifier: workspace:*
         version: link:../../extensions/execution-local
+      '@ethosagent/execution-pi':
+        specifier: workspace:*
+        version: link:../../extensions/execution-pi
       '@ethosagent/execution-ssh':
         specifier: workspace:*
         version: link:../../extensions/execution-ssh
