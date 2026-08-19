@@ -51,6 +51,7 @@ function values(over: Partial<VoiceTelephonyFormValues> = {}): VoiceTelephonyFor
     voiceBargeIn: {
       call: { energyThreshold: null, minSpeechMs: null, silenceMs: null },
       satellite: { energyThreshold: null, minSpeechMs: null, silenceMs: null },
+      browser: { energyThreshold: null, minSpeechMs: null, silenceMs: null },
     },
     ...over,
   };
@@ -297,21 +298,23 @@ describe('voiceTelephonyPatch — barge-in', () => {
     ).toEqual({
       call: { energyThreshold: 0.3, minSpeechMs: null, silenceMs: 500 },
       satellite: { energyThreshold: null, minSpeechMs: null, silenceMs: null },
+      browser: { energyThreshold: null, minSpeechMs: null, silenceMs: null },
     });
   });
 
-  // The form renders a row per surface in BARGE_IN_SURFACES, so a `browser`
-  // block arriving from an older config must not grow a fourth row — and must
-  // not be written back on the next save, which would resurrect a key the
-  // config parser now refuses.
-  it('ignores a browser block coming back from config', () => {
+  // Since L1 (plan §7 "Conflict 2"), the form renders a row per surface in
+  // BARGE_IN_SURFACES including `browser` — the browser pipeline lane tunes
+  // through the same `voice.bargeIn.<surface>` mechanism as `call`/
+  // `satellite` now, so a `browser` block round-trips exactly like the other
+  // two rather than being dropped.
+  it('hydrates and round-trips a tuned browser surface, same as call/satellite', () => {
     const hydrated = voiceBargeInFromConfig({
       browser: { energyThreshold: 0.2, minSpeechMs: null, silenceMs: null },
     });
-    expect(Object.keys(hydrated).sort()).toEqual(['call', 'satellite']);
+    expect(Object.keys(hydrated).sort()).toEqual(['browser', 'call', 'satellite']);
     expect(
       ok(voiceTelephonyPatch(values({ voiceBargeIn: hydrated }), NO_SECRETS)).voiceBargeIn,
-    ).toEqual({});
+    ).toEqual({ browser: { energyThreshold: 0.2 } });
   });
 });
 

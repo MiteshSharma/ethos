@@ -2,8 +2,9 @@
 // holds. plan/phases/settings-navigation.md §4.1, with the two owner amendments
 // folded in: `voice / how it talks` leads Voice (it selects pipeline-vs-realtime
 // and therefore gates everything under it), and `voice / barge-in` gains a third
-// surface, `browser`, for the five `display.voice_*` sliders — the per-section
-// split of the Voice pane is Phase 5, so this file only records that the section
+// surface, `browser` — since L1, tuned through the same generic
+// `voice.bargeIn.<surface>` row as `call`/`satellite` — the per-section split
+// of the Voice pane is Phase 5, so this file only records that the section
 // exists.
 //
 // This is the TAXONOMY only: categories → sections. The per-control index

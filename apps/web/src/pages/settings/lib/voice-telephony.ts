@@ -19,15 +19,20 @@ import type { ConfigGetData, ConfigUpdatePatch, VoiceBargeInPatch } from './conf
 export const TRUNK_PROVIDERS = ['twilio', 'telnyx', 'generic', 'livekit'] as const;
 export const TRUNK_CODECS = ['opus', 'g711'] as const;
 const INBOUND_PREWARMS = ['allowlisted', 'none', 'all'] as const;
-/** The surfaces `voice.bargeIn.<surface>` accepts. Browser talk-mode is not one
- *  of them — it renders as a third box alongside these two, backed by the five
- *  `display.voice_*` sliders, but it writes no `voice.bargeIn.*` key. */
-export const BARGE_IN_SURFACES = ['call', 'satellite'] as const;
+/** The surfaces `voice.bargeIn.<surface>` accepts. `browser` since L1 (plan §7
+ *  "Conflict 2") — the browser pipeline lane runs on the same `VoiceSession`
+ *  orchestrator as `call`/`satellite` now and tunes through the same
+ *  mechanism, so it gets the same generic row. The legacy `display.voice_*`
+ *  sliders that used to be the browser's only tuner are reduced to the two
+ *  knobs that still do something live (the batch-fallback client's own local
+ *  VAD) — see `VOICE_TUNING_CONTROLS` in `panes/voice.tsx`. */
+export const BARGE_IN_SURFACES = ['call', 'satellite', 'browser'] as const;
 type BargeInSurface = (typeof BARGE_IN_SURFACES)[number];
 
 export const BARGE_IN_SURFACE_LABELS: Record<BargeInSurface, string> = {
   call: 'Phone call',
   satellite: 'Wake satellite',
+  browser: 'Browser (this device)',
 };
 
 function trunkProviderOrNull(value: string): (typeof TRUNK_PROVIDERS)[number] | null {

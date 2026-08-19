@@ -98,17 +98,21 @@ function commandTemplateValidator(_rule: unknown, value: string): Promise<void> 
   return error ? Promise.reject(new Error(error)) : Promise.resolve();
 }
 
-// Advanced VAD / barge-in tuning sliders. `name` is the FormShape/config field,
-// `defaultKey` maps to DEFAULT_VOICE_TUNING for the reset affordance, and the
-// range/step mirror the Zod bounds on ConfigUpdateInput. `unit` renders the
-// slider tooltip so the raw number reads clearly.
+// The browser's own local VAD, used ONLY by the batch-fallback client
+// (`batch-voice-call-client.ts`) when this browser can't stream audio. Since
+// L1, the streaming pipeline lane's barge-in/endpointing is tuned by the
+// generic `voice.bargeIn.browser` row above instead (`BARGE_IN_SURFACES`) —
+// three of the five `display.voice_*` sliders that used to live here
+// (`voiceEndpointSilenceMs`, `voiceBargeThreshold`, `voiceBargeSustainMs`)
+// were that row's only tuner and are now redundant with it, so they were
+// dropped from this box. `voiceSpeechThreshold`/`voiceSpeechMinMs` stay:
+// they tune the fallback client's own speech detector, which the barge-in row
+// does not reach. `name` is the FormShape/config field, `defaultKey` maps to
+// DEFAULT_VOICE_TUNING for the reset affordance, and the range/step mirror
+// the Zod bounds on ConfigUpdateInput. `unit` renders the slider tooltip so
+// the raw number reads clearly.
 const VOICE_TUNING_CONTROLS: Array<{
-  name:
-    | 'voiceEndpointSilenceMs'
-    | 'voiceBargeThreshold'
-    | 'voiceBargeSustainMs'
-    | 'voiceSpeechThreshold'
-    | 'voiceSpeechMinMs';
+  name: 'voiceSpeechThreshold' | 'voiceSpeechMinMs';
   defaultKey: keyof typeof DEFAULT_VOICE_TUNING;
   label: string;
   extra: string;
@@ -117,36 +121,6 @@ const VOICE_TUNING_CONTROLS: Array<{
   step: number;
   unit: string;
 }> = [
-  {
-    name: 'voiceEndpointSilenceMs',
-    defaultKey: 'endpointSilenceMs',
-    label: 'Response delay',
-    extra: 'How long you pause before the agent replies.',
-    min: 300,
-    max: 1500,
-    step: 50,
-    unit: 'ms',
-  },
-  {
-    name: 'voiceBargeThreshold',
-    defaultKey: 'bargeThreshold',
-    label: 'Interrupt sensitivity',
-    extra: 'Lower = easier to interrupt the agent while it speaks.',
-    min: 0.02,
-    max: 0.2,
-    step: 0.005,
-    unit: '',
-  },
-  {
-    name: 'voiceBargeSustainMs',
-    defaultKey: 'bargeSustainMs',
-    label: 'Interrupt hold',
-    extra: 'How long you must keep talking to cut in.',
-    min: 100,
-    max: 800,
-    step: 40,
-    unit: 'ms',
-  },
   {
     name: 'voiceSpeechThreshold',
     defaultKey: 'speechThreshold',
@@ -853,6 +827,10 @@ export function VoicePane() {
         ends an utterance on a count of silent frames, not a duration, so its Silence (ms) is not
         read.
       </Typography.Paragraph>
+      {/* voiceBargeIn[surface] — a per-connection tuner. `browser` reaches this
+          deployment's normal talk mode (`VoiceSession`, the same orchestrator
+          `call`/`satellite` use). The separate box further down tunes only the
+          record-and-send fallback for browsers that can't stream audio. */}
       {BARGE_IN_SURFACES.map((surface) => (
         <div key={surface} style={ROW_BOX_STYLE}>
           <Typography.Text strong style={{ fontSize: 13 }}>
@@ -908,8 +886,15 @@ export function VoicePane() {
       ))}
       <div style={ROW_BOX_STYLE}>
         <Typography.Text strong style={{ fontSize: 13 }}>
-          Browser (this device)
+          Browser microphone (no-stream fallback)
         </Typography.Text>
+        <Typography.Paragraph
+          type="secondary"
+          style={{ marginTop: 4, marginBottom: 8, fontSize: 13 }}
+        >
+          Only used when this browser can't stream audio and falls back to record-and-send — the
+          Browser row above tunes the normal case.
+        </Typography.Paragraph>
         {/* settings-index-group: voice-tuning — `name={c.name}` is
             opaque to the source scan, so the group id says which
             `SETTINGS_INDEX` entries this site renders (T6). */}
