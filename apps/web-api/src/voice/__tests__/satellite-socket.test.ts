@@ -14,7 +14,6 @@ import {
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import WebSocket from 'ws';
 import type { WakeRoutingTable } from '../../repositories/config.repository';
-import type { VoiceService } from '../../services/voice.service';
 import { NoSpeechError } from '../no-speech';
 import type { SatelliteLaneDeps, SatelliteLaneLimits } from '../satellite-lane';
 import { SatelliteRegistry } from '../satellite-registry';
@@ -75,16 +74,6 @@ function table(overrides: Partial<WakeRoutingTable> = {}): WakeRoutingTable {
     },
     ...overrides,
   };
-}
-
-/** A VoiceService stand-in — only the two methods the browser lane calls. */
-function fakeVoiceService(): VoiceService {
-  return {
-    transcribeBytes: () => Promise.resolve({ text: 'over the wire', provider: 'fake-stt' }),
-    synthesizeStream: async function* () {
-      yield { audio: new Uint8Array([7, 8, 9]), format: 'opus' as const, provider: 'fake-tts' };
-    },
-  } as unknown as VoiceService;
 }
 
 describe('satellite socket', () => {
@@ -204,7 +193,7 @@ describe('satellite socket', () => {
     const authenticate = (req: { headers: { cookie?: string } }) =>
       Promise.resolve(readCookie(req.headers.cookie, 'ethos_auth') === 'good-token');
     satellite = createSatelliteSocket({ registry, deps, authenticate, limits: laneLimits });
-    voice = createVoiceSocket({ voice: fakeVoiceService(), authenticate });
+    voice = createVoiceSocket({ authenticate });
     // Deliberately attached in the order that used to break: the voice lane's
     // handler was the only `upgrade` listener and 404'd everything else.
     voice.attach(server);

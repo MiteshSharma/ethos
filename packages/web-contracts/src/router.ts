@@ -1236,11 +1236,11 @@ const ConfigGetOutput = z.object({
   /** `voice.inbound.owner.botKey` — which bot delivers the notice in a
    *  multi-bot deployment. Null = the default bot. */
   voiceInboundOwnerBotKey: z.string().nullable(),
-  /** `voice.bargeIn.<surface>.*`, keyed by surface (`call` / `satellite`; the
-   *  browser talk lane endpoints in the browser and is tuned by `display.voice_*`).
-   *  A surface ABSENT from the map was never tuned — which is a different fact
-   *  from "tuned to the defaults" and is why this is a map and not fixed
-   *  objects. */
+  /** `voice.bargeIn.<surface>.*`, keyed by surface (`call` / `satellite` /
+   *  `browser`; an unset `browser` reads through the legacy `display.voice_*`
+   *  keys as a fallback — see `readLegacyBrowserBargeInTuning`). A surface
+   *  ABSENT from the map was never tuned — which is a different fact from
+   *  "tuned to the defaults" and is why this is a map and not fixed objects. */
   voiceBargeIn: z.record(z.string(), VoiceBargeInTuningGetSchema),
   /** `voice.bots[]` — the number → bot → personality table, in file order. */
   voiceBots: z.array(VoiceBotGetSchema),
@@ -1588,9 +1588,9 @@ const ConfigUpdateInput = z.object({
   voiceInboundOwnerBotKey: z.string().nullable().optional(),
   /** `voice.bargeIn.<surface>.*`. Present = REPLACE the whole block (every
    *  `voice.bargeIn.` key is dropped, then these are written), so an omitted
-   *  surface loses its tuning. Keys must be `call` or `satellite`; an unknown
-   *  surface is REFUSED here rather than dropped, because at an RPC boundary
-   *  there is a caller to tell. */
+   *  surface loses its tuning. Keys must be `call`, `satellite`, or `browser`;
+   *  an unknown surface is REFUSED here rather than dropped, because at an RPC
+   *  boundary there is a caller to tell. */
   voiceBargeIn: z.record(z.string(), VoiceBargeInTuningUpdateSchema).optional(),
   /** `voice.bots[]` — the number → bot → personality table. Present = REPLACE
    *  the whole list (every `voice.bots.` key is dropped, then these are

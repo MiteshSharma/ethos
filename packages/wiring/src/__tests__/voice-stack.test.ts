@@ -1,4 +1,4 @@
-import type { VoiceBargeInConfig } from '@ethosagent/config';
+import type { VoiceBargeInConfig, VoiceBargeInTuning } from '@ethosagent/config';
 import {
   AgentLoop,
   DefaultSttProviderRegistry,
@@ -100,8 +100,36 @@ const runner = {
 };
 
 describe('buildVoiceStack', () => {
-  it('is a clean no-op when no voice block is configured', async () => {
-    expect(await buildVoiceStack(deps(config()))).toBeNull();
+  it('is a clean no-op when nothing at all is configured', async () => {
+    expect(
+      await buildVoiceStack(deps(config({ auxiliaryAsr: undefined, auxiliaryTts: undefined }))),
+    ).toBeNull();
+  });
+
+  // Before this fallback existed, ANY deployment with no `voice.*` block
+  // returned null here — including the shape `docs/using/how-to/local-voice.md`
+  // documents (only `auxiliary.asr`/`auxiliary.tts`, no `voice.*` at all),
+  // which broke the browser talk lane for every local-only deployment the
+  // moment it moved onto `VoiceSession`. `config()` defaults to exactly this
+  // shape, so the plain no-override call below is the regression case.
+  it('falls back to a minimal stack when only auxiliary.asr/auxiliary.tts are configured', async () => {
+    const stack = await buildVoiceStack(deps(config()));
+    expect(stack).not.toBeNull();
+    expect(stack?.sttProviderId).toBe('local-stt');
+    expect(stack?.ttsProviderId).toBe('local-tts');
+    // No `voice.livekit`/`voice.trunk` in this shape — telephony stays
+    // unavailable, honestly, rather than half-wired.
+    expect(stack?.createLiveKitAdapter).toBeUndefined();
+    expect(stack?.createSipAdapter).toBeUndefined();
+
+    // The same call `browser-voice-session.ts` makes for a talk-mode connection.
+    const session = await stack?.createSession({
+      laneKey: 'voice:web:browser:client-1',
+      runner,
+      surface: 'browser',
+    });
+    expect(session?.getState()).toBe('idle');
+    await stack?.close();
   });
 
   it('constructs a VoiceSession from real config without throwing', async () => {
@@ -954,6 +982,93 @@ describe('buildVoiceStack', () => {
       await expect(
         transcribedAfterSpeaking({ bargeIn: call({ silenceMs: 0 }), adapter: 'livekit' }),
       ).resolves.toBe(false);
+    });
+  });
+
+  // Conflict 2 (plan §7, L1): the browser pipeline lane opens a `VoiceSession`
+  // directly (no adapter — `browser-voice-session.ts` calls `createSession`
+  // itself), so it is exercised here by pushing PCM straight at the session
+  // rather than through a transport, same probe (did the recognizer see an
+  // utterance) as the SIP/LiveKit suite above.
+  describe('the browser surface', () => {
+    async function transcribedAfterSpeakingOnBrowser(opts: {
+      bargeIn?: VoiceBargeInConfig;
+      bargeInFallback?: VoiceBargeInTuning;
+      amplitude?: number;
+    }): Promise<boolean> {
+      let transcribed = false;
+      const sttProviders = new DefaultSttProviderRegistry();
+      sttProviders.register('local-stt', () => ({
+        name: 'local-stt',
+        caps: {
+          kind: 'stt' as const,
+          formats: ['wav' as const],
+          local: true,
+          contractVersion: STT_CONTRACT_VERSION,
+        },
+        transcribeBuffer: async () => {
+          transcribed = true;
+          return '';
+        },
+      }));
+      const ttsProviders = new DefaultTtsProviderRegistry();
+      ttsProviders.register('local-tts', () => batchTts('local-tts', true));
+
+      const stack = await buildVoiceStack({
+        config: config({
+          voice: { bots: [], ...(opts.bargeIn ? { bargeIn: opts.bargeIn } : {}) },
+        }),
+        logger,
+        sttProviders,
+        ttsProviders,
+      });
+      if (!stack) throw new Error('expected a voice stack');
+      const session = await stack.createSession({
+        laneKey: 'voice:web:browser:client-1',
+        runner,
+        surface: 'browser',
+        ...(opts.bargeInFallback ? { bargeInFallback: opts.bargeInFallback } : {}),
+      });
+      for (let i = 0; i < 10; i++) {
+        session.pushAudio({
+          data: new Int16Array(320).fill(opts.amplitude ?? 12_000),
+          sampleRate: 16_000,
+        });
+      }
+      for (let i = 0; i < 6; i++) {
+        session.pushAudio({ data: new Int16Array(320), sampleRate: 16_000 });
+      }
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      await stack.close();
+      return transcribed;
+    }
+
+    it('applies voice.bargeIn.browser to the browser lane', async () => {
+      await expect(
+        transcribedAfterSpeakingOnBrowser({ bargeIn: { browser: { silenceMs: 0 } } }),
+      ).resolves.toBe(true);
+    });
+
+    it('falls back to the legacy display.voice_* tuning when voice.bargeIn.browser is unset', async () => {
+      await expect(
+        transcribedAfterSpeakingOnBrowser({ bargeInFallback: { silenceMs: 0 } }),
+      ).resolves.toBe(true);
+    });
+
+    it('lets an explicit voice.bargeIn.browser win over the legacy fallback', async () => {
+      // `voice.bargeIn.browser.silenceMs: 5_000` must decide this, not the
+      // fallback's `silenceMs: 0` — so nothing commits inside the harness's
+      // ~0 ms of wall-clock silence.
+      await expect(
+        transcribedAfterSpeakingOnBrowser({
+          bargeIn: { browser: { silenceMs: 5_000 } },
+          bargeInFallback: { silenceMs: 0 },
+        }),
+      ).resolves.toBe(false);
+    });
+
+    it('leaves the built-in defaults alone with no bargeIn block and no fallback', async () => {
+      await expect(transcribedAfterSpeakingOnBrowser({})).resolves.toBe(false);
     });
   });
 });

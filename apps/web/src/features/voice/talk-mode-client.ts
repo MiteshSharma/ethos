@@ -1,8 +1,4 @@
-import {
-  type BatchVoiceCallDeps,
-  createBatchVoiceCallClient,
-  type VoiceTuning,
-} from './batch-voice-call-client';
+import { type BatchVoiceCallDeps, createBatchVoiceCallClient } from './batch-voice-call-client';
 import { createBrowserPlayout, createBrowserVoiceCapture } from './browser-streaming-io';
 import { createBrowserRealtimeSocket } from './realtime-socket';
 import {
@@ -151,10 +147,21 @@ export function createTalkModeClient(deps: TalkModeClientDeps): VoiceCallClient 
       return createBatchVoiceCallClient(deps);
     }
     const context = new AudioContext();
-    const tuning: Partial<VoiceTuning> = deps.tuning ?? {};
+    // `continuous: true` — the server's `VoiceSession` owns VAD, endpointing
+    // and barge-in now (plan §10.1, "kill the split"); the mic streams
+    // unbroken from `connect()` to `disconnect()`, same as the realtime
+    // tier's capture already does. `deps.tuning` is NOT forwarded here: it is
+    // not just that there is no local endpointer left to tune (true, but only
+    // half the reason) — barge-in tuning now flows server-side, from
+    // `voice.bargeIn.browser` or its `display.voice_*` compatibility
+    // read-through (`readLegacyBrowserBargeInTuning`, both operator config
+    // read from `~/.ethos/config.yaml`), not from a per-connection client
+    // payload. `deps.tuning` still reaches `createBatchVoiceCallClient` above
+    // for the batch fallback's own local VAD, which is unaffected by any of
+    // this.
     const capture = createBrowserVoiceCapture({
       context,
-      tuning,
+      continuous: true,
       onDispose: () => context.close().catch(() => {}),
     });
 
@@ -164,10 +171,8 @@ export function createTalkModeClient(deps: TalkModeClientDeps): VoiceCallClient 
       }),
       capture,
       playout: createBrowserPlayout(context),
-      runAgentTurn: deps.runAgentTurn,
       wakeLock: createWakeLock(),
       ...(deps.sessionId ? { sessionId: deps.sessionId } : {}),
-      ...(deps.voice ? { voice: deps.voice } : {}),
       ...(deps.personalityId ? { personalityId: deps.personalityId } : {}),
       ...(deps.chime !== undefined ? { chime: deps.chime } : {}),
     });

@@ -6,12 +6,21 @@
 //
 // Two rules shape it:
 //
-//   1. Absent config is a clean no-op, never a crash. No `voice.*` block →
-//      `buildVoiceStack` returns null and nothing downstream changes. The
-//      LiveKit/SIP MEDIA leg additionally requires an app-supplied room-client
-//      binding (`@livekit/rtc-node` is not a repo dependency), so a
-//      half-configured deployment degrades to "that transport is unavailable"
-//      rather than throwing at boot.
+//   1. Absent config is a clean no-op, never a crash. No `voice.*` block AND
+//      no `auxiliary.asr`/`auxiliary.tts` → `buildVoiceStack` returns null and
+//      nothing downstream changes. A deployment that configures ONLY
+//      `auxiliary.asr`/`auxiliary.tts` (the shape `docs/using/how-to/local-voice.md`
+//      documents — local Whisper/Kokoro, no `voice.*` block at all) still gets
+//      a stack: a minimal `voice = { bots: [] }` is synthesized so the browser
+//      pipeline lane's `VoiceSession` can be built from the auxiliary
+//      providers, the same fallback `resolveSttFor`/`resolveTtsFor` already
+//      apply when a roster entry names nothing. Telephony (`voice.livekit`,
+//      `voice.trunk`, `voice.bots`) stays unavailable in that shape, honestly —
+//      there is nothing configured for it to answer with. The LiveKit/SIP
+//      MEDIA leg additionally requires an app-supplied room-client binding
+//      (`@livekit/rtc-node` is not a repo dependency), so a half-configured
+//      deployment degrades to "that transport is unavailable" rather than
+//      throwing at boot.
 //
 //      What is NO LONGER app-supplied: the LiveKit token minter and the SIP
 //      CONTROL plane. Both are plain signed-JWT + HTTPS work that
@@ -183,11 +192,24 @@ export interface CreateVoiceSessionOptions {
    * Which `voice.bargeIn.<surface>` block tunes this lane's VAD and endpointing.
    *
    * Set by the adapter factories from the lane kind, not by the caller: a PSTN
-   * leg is the `call` surface whoever opened it. Omitted — as it is on a lane
-   * with no surface of its own — and the session keeps the built-in defaults,
-   * which is byte-identical to the behaviour before this option existed.
+   * leg is the `call` surface whoever opened it — and, since L1, the browser
+   * pipeline lane opener stamps `'browser'` the same way. Omitted — as it is on
+   * a lane with no surface of its own (the LiveKit room lane) — and the session
+   * keeps the built-in defaults, which is byte-identical to the behaviour
+   * before this option existed.
    */
   surface?: VoiceBargeInSurface;
+  /**
+   * Fallback barge-in/VAD tuning used ONLY when `voice.bargeIn.<surface>` is
+   * not configured for this lane's surface — `voice.bargeIn.<surface>` always
+   * wins when present. This is the `display.voice_*` compatibility
+   * read-through for the browser lane (Conflict 2, L1): those flat keys
+   * predate `voice.bargeIn.browser` and must keep tuning calls until an
+   * operator migrates. Callers with no legacy source to read from (SIP,
+   * satellite) simply omit this and get the untouched built-in defaults when
+   * their surface is untuned, same as before this option existed.
+   */
+  bargeInFallback?: VoiceBargeInTuning;
 }
 
 export interface VoiceStack {
@@ -252,11 +274,19 @@ export interface VoiceStack {
 }
 
 /**
- * Construct the voice stack from `config.voice.*`. Returns null when no voice
- * block is configured — the clean no-op path every non-voice deployment takes.
+ * Construct the voice stack from `config.voice.*`, falling back to a minimal
+ * stack when only `auxiliary.asr`/`auxiliary.tts` are configured. Returns null
+ * when neither is present — the clean no-op path a deployment with no voice
+ * configuration at all takes.
  */
 export async function buildVoiceStack(deps: BuildVoiceStackDeps): Promise<VoiceStack | null> {
-  const voice = deps.config.voice;
+  const hasAuxiliary = Boolean(deps.config.auxiliaryAsr || deps.config.auxiliaryTts);
+  // Every field below `bots` is optional and already read with `?.` /
+  // fallback-safe defaults (`buildInboundGates`, `voice.livekit`, `voice.trunk`,
+  // `voice.bargeIn?.[surface]`), so `{ bots: [] }` is a legitimate "nothing
+  // telephony-shaped configured" voice section, not a stub that needs new
+  // optional-handling downstream.
+  const voice = deps.config.voice ?? (hasAuxiliary ? { bots: [] } : undefined);
   if (!voice) return null;
 
   const trustedVoicePlugins = voice.trustedPlugins ? new Set(voice.trustedPlugins) : undefined;
@@ -358,9 +388,12 @@ export async function buildVoiceStack(deps: BuildVoiceStackDeps): Promise<VoiceS
     // `voice.bargeIn.<surface>` — parsed, validated, surfaced in Settings, and
     // until now read by nothing. This is the only place it lands: an untuned
     // surface (or a lane with no surface) contributes no keys at all, so the
-    // VAD and the endpoint detector keep their own defaults.
+    // VAD and the endpoint detector keep their own defaults. `bargeInFallback`
+    // is the `display.voice_*` compat read-through (Conflict 2, L1) — it only
+    // ever fills in for an UNCONFIGURED surface; the operator's explicit
+    // `voice.bargeIn.<surface>` always wins.
     const tuning: VoiceBargeInTuning =
-      (opts.surface ? voice.bargeIn?.[opts.surface] : undefined) ?? {};
+      (opts.surface ? voice.bargeIn?.[opts.surface] : undefined) ?? opts.bargeInFallback ?? {};
     const [sttFor, ttsFor] = await Promise.all([
       resolveSttFor(personalityVoice),
       resolveTtsFor(personalityVoice),
@@ -443,12 +476,15 @@ export async function buildVoiceStack(deps: BuildVoiceStackDeps): Promise<VoiceS
     createSession,
     ...(media
       ? {
-          // No `surface` on the room adapter: `voice.bargeIn` names `call` and
-          // `satellite`, and a LiveKit room participant is neither.
-          // `VoiceLaneClientKind` keeps `livekit` and `browser` apart on
-          // purpose, and the browser talk lane does its endpointing in the
-          // browser off `display.voice_*` — which is why there is no `browser`
-          // surface to hand this lane in the first place.
+          // No `surface` on the room adapter: a LiveKit room participant is a
+          // lane kind of its own, distinct from both the PSTN `call` surface
+          // and the browser pipeline lane (which stamps `surface: 'browser'`
+          // itself in `browser-voice-session.ts` — a different construction
+          // path from this factory entirely, since the room adapter is a
+          // `VoiceChannelAdapter` and the browser lane is a bare
+          // `VoiceSession`). `VoiceLaneClientKind` keeps `livekit` and
+          // `browser` apart on purpose; this factory only ever builds the
+          // former.
           createLiveKitAdapter: buildAdapterFactory({
             ...media,
             createSession,

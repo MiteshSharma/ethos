@@ -343,15 +343,20 @@ describe('Settings → Voice telephony', () => {
     expect(await yaml()).not.toContain('voice.bargeIn.');
   });
 
-  // `browser` is refused for the same reason and by the same code path: the
-  // browser talk lane endpoints in the browser, off `display.voice_*`, so a
-  // threshold written here would round-trip and change nothing.
-  it('refuses the browser surface', async () => {
+  // Since L1 (plan §7 "Conflict 2"), the browser pipeline lane runs on the
+  // same `VoiceSession` orchestrator as `call`/`satellite` and accepts the
+  // same per-surface tuning.
+  it('accepts and round-trips the browser surface', async () => {
     await seed();
-    await expect(
-      service.update({ voiceBargeIn: { browser: { energyThreshold: 0.2 } } }),
-    ).rejects.toThrow(/is not a barge-in surface/);
-    expect(await yaml()).not.toContain('voice.bargeIn.');
+    await service.update({ voiceBargeIn: { browser: { energyThreshold: 0.2 } } });
+    const read = await service.get();
+    expect(read.voiceBargeIn.browser).toEqual({
+      energyThreshold: 0.2,
+      minSpeechMs: null,
+      silenceMs: null,
+    });
+    const loaded = await readRawConfig(storage);
+    expect(loaded?.voice?.bargeIn).toEqual({ browser: { energyThreshold: 0.2 } });
   });
 
   it('refuses an energy threshold outside (0, 1]', async () => {

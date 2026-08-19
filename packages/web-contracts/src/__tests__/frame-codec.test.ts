@@ -41,7 +41,7 @@ describe('frame codec', () => {
   });
 
   it('stamps the caller-supplied version, and refuses any other on decode', () => {
-    const bytes = encodeVoiceFrame({ t: 'utterance_end', utteranceId: 'u1' });
+    const bytes = encodeVoiceFrame({ t: 'hello', sessionId: 'u1' });
     expect(bytes[0]).toBe(VOICE_SOCKET_VERSION);
     expect(splitFrame(VOICE_SOCKET_VERSION, bytes).ok).toBe(true);
     expect(splitFrame(VOICE_SOCKET_VERSION + 1, bytes).ok).toBe(false);

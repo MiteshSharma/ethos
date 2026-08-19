@@ -3,7 +3,12 @@ import { InMemorySecretsResolver, InMemoryStorage } from '@ethosagent/storage-fs
 import { isEthosError } from '@ethosagent/types';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ConfigRepository } from '../../repositories/config.repository';
-import { ConfigService, type ConfigUpdateInput, redactKey } from '../../services/config.service';
+import {
+  ConfigService,
+  type ConfigUpdateInput,
+  readLegacyBrowserBargeInTuning,
+  redactKey,
+} from '../../services/config.service';
 
 describe('redactKey', () => {
   it('returns <unset> for missing keys', () => {
@@ -21,6 +26,45 @@ describe('redactKey', () => {
 
   it('refuses to render keys under 6 chars', () => {
     expect(redactKey('abc')).toBe('<short>');
+  });
+});
+
+describe('readLegacyBrowserBargeInTuning', () => {
+  it('returns nothing when no display.voice_* key is set', () => {
+    expect(readLegacyBrowserBargeInTuning({})).toEqual({});
+  });
+
+  it('maps the three barge-relevant display.voice_* keys onto VoiceBargeInTuning', () => {
+    expect(
+      readLegacyBrowserBargeInTuning({
+        'display.voice_barge_threshold': '0.08',
+        'display.voice_barge_sustain_ms': '300',
+        'display.voice_endpoint_silence_ms': '900',
+      }),
+    ).toEqual({ energyThreshold: 0.08, minSpeechMs: 300, silenceMs: 900 });
+  });
+
+  // These tuned the browser's own local endpointer, which the streaming
+  // pipeline lane no longer has — there is nothing for them to map onto.
+  it('ignores display.voice_speech_threshold / display.voice_speech_min_ms', () => {
+    expect(
+      readLegacyBrowserBargeInTuning({
+        'display.voice_speech_threshold': '0.05',
+        'display.voice_speech_min_ms': '250',
+      }),
+    ).toEqual({});
+  });
+
+  it('clamps an out-of-range value to the VOICE_TUNING bounds', () => {
+    expect(readLegacyBrowserBargeInTuning({ 'display.voice_barge_threshold': '5' })).toEqual({
+      energyThreshold: 0.2,
+    });
+  });
+
+  it('ignores an unparseable value', () => {
+    expect(
+      readLegacyBrowserBargeInTuning({ 'display.voice_endpoint_silence_ms': 'not-a-number' }),
+    ).toEqual({});
   });
 });
 

@@ -1,54 +1,56 @@
+import type { PcmChunk } from '@ethosagent/types';
+import type { VoiceSession, VoiceSessionEvent } from '@ethosagent/voice-session';
 import { pcm16ToBytes, type VoiceServerFrame } from '@ethosagent/web-contracts';
 import { describe, expect, it, vi } from 'vitest';
-import { VoiceLane, type VoiceLaneDeps } from '../voice-lane';
+import { VoiceLane, type VoiceLaneSessionOpener } from '../voice-lane';
 
-// The lane's conversation protocol, exercised without a socket: frames in,
-// frames out. Two things are under test here that no smoke check would catch —
-// that a superseded utterance's results never reach the client, and that two
-// lanes built from the same factory and the same provider service cannot see
-// each other's audio.
-
-interface Deferred<T> {
-  promise: Promise<T>;
-  resolve: (value: T) => void;
-  reject: (err: unknown) => void;
-}
-
-function deferred<T>(): Deferred<T> {
-  let resolve!: (value: T) => void;
-  let reject!: (err: unknown) => void;
-  const promise = new Promise<T>((res, rej) => {
-    resolve = res;
-    reject = rej;
-  });
-  return { promise, resolve, reject };
-}
+// The lane's frame-plumbing role, exercised without a socket: frames in,
+// frames out, against a FAKE `VoiceSession` this file drives by hand. The
+// conversation itself (VAD, endpointing, the agent turn) is
+// `@ethosagent/voice-session`'s own test suite's job — this file only proves
+// the TRANSLATION between `VoiceSessionEvent`s and `VoiceServerFrame`s, and
+// that opening the session is deferred to `hello` and is per-connection.
 
 interface Sent {
   frame: VoiceServerFrame;
   payload: Uint8Array;
 }
 
-/** A lane plus the frames it sent, wired to controllable provider fakes. */
-function makeLane(
-  overrides: Partial<VoiceLaneDeps> = {},
-  laneId = 'lane-1',
-): {
+/** A `VoiceSession` stand-in the test emits events through by hand. */
+class FakeVoiceSession {
+  readonly pushed: PcmChunk[] = [];
+  private listeners: Array<(event: VoiceSessionEvent) => void> = [];
+
+  pushAudio(chunk: PcmChunk): void {
+    this.pushed.push(chunk);
+  }
+
+  on(listener: (event: VoiceSessionEvent) => void): () => void {
+    this.listeners.push(listener);
+    return () => {
+      this.listeners = this.listeners.filter((l) => l !== listener);
+    };
+  }
+
+  emit(event: VoiceSessionEvent): void {
+    for (const listener of [...this.listeners]) listener(event);
+  }
+
+  get subscriberCount(): number {
+    return this.listeners.length;
+  }
+}
+
+/** A lane plus the frames it sent, wired to a controllable session opener. */
+function makeLane(opener: VoiceLaneSessionOpener): {
   lane: VoiceLane;
   sent: Sent[];
   frames: () => VoiceServerFrame[];
 } {
   const sent: Sent[] = [];
-  const deps: VoiceLaneDeps = {
-    transcribe: () => Promise.resolve({ text: 'hello there', provider: 'fake-stt' }),
-    synthesize: async function* () {
-      yield { audio: new Uint8Array([1, 2]), format: 'opus' as const, provider: 'fake-tts' };
-    },
-    ...overrides,
-  };
   const lane = new VoiceLane({
-    laneId,
-    deps,
+    laneId: 'lane-1',
+    openSession: opener,
     send: (frame, payload) => sent.push({ frame, payload: payload ?? new Uint8Array() }),
   });
   return { lane, sent, frames: () => sent.map((s) => s.frame) };
@@ -56,378 +58,276 @@ function makeLane(
 
 const pcm = (value: number, count = 4) => pcm16ToBytes(Int16Array.from(Array(count).fill(value)));
 
-describe('VoiceLane — capture → transcript', () => {
-  it('answers hello with ready and transcribes a completed utterance', async () => {
-    const transcribed: Array<{ mimeType: string; bytes: number }> = [];
-    const { lane, frames } = makeLane({
-      transcribe: (audio) => {
-        transcribed.push({ mimeType: audio.mimeType, bytes: audio.data.length });
-        return Promise.resolve({ text: 'what is the weather', provider: 'local-stt' });
-      },
-    });
+describe('VoiceLane — handshake and audio plumbing', () => {
+  it('answers hello with ready before the session finishes opening', async () => {
+    const session = new FakeVoiceSession();
+    const { lane, frames } = makeLane(() => Promise.resolve(session as unknown as VoiceSession));
+
+    lane.handle({ t: 'hello', sampleRate: 16_000 }, new Uint8Array());
+    expect(frames()).toEqual([{ t: 'ready', laneId: 'lane-1', protocolVersion: 1 }]);
+    await vi.waitFor(() => expect(session.subscriberCount).toBe(1));
+  });
+
+  it('does not open a session when hello names no sample rate', async () => {
+    const opener = vi.fn();
+    const { lane, frames } = makeLane(opener);
 
     lane.handle({ t: 'hello' }, new Uint8Array());
-    lane.handle({ t: 'utterance_start', utteranceId: 'u1', sampleRate: 16_000 }, new Uint8Array());
-    lane.handle({ t: 'audio', utteranceId: 'u1', seq: 0 }, pcm(100));
-    lane.handle({ t: 'audio', utteranceId: 'u1', seq: 1 }, pcm(-100));
-    lane.handle({ t: 'utterance_end', utteranceId: 'u1' }, new Uint8Array());
-    await vi.waitFor(() => expect(frames().some((f) => f.t === 'transcript')).toBe(true));
-
-    expect(frames()[0]).toMatchObject({ t: 'ready', laneId: 'lane-1' });
-    // The PCM arrived as a WAV: 44-byte header + 8 samples * 2 bytes.
-    expect(transcribed).toEqual([{ mimeType: 'audio/wav', bytes: 44 + 16 }]);
-    expect(frames().find((f) => f.t === 'transcript')).toEqual({
-      t: 'transcript',
-      utteranceId: 'u1',
-      text: 'what is the weather',
-      final: true,
-      provider: 'local-stt',
-    });
-  });
-
-  // The lane is what makes `voice.stt_provider` real on the talk path: the
-  // personality on `utterance_start` has to reach the resolver, or the roster
-  // is an inert knob.
-  it('carries the utterance’s personality through to transcription', async () => {
-    const seen: Array<string | undefined> = [];
-    const { lane, frames } = makeLane({
-      transcribe: (_audio, opts) => {
-        seen.push(opts.personalityId);
-        return Promise.resolve({ text: 'hola', provider: 'spanish-stt' });
-      },
-    });
-
-    lane.handle(
-      { t: 'utterance_start', utteranceId: 'u1', sampleRate: 16_000, personalityId: 'translator' },
-      new Uint8Array(),
-    );
-    lane.handle({ t: 'audio', utteranceId: 'u1', seq: 0 }, pcm(100));
-    lane.handle({ t: 'utterance_end', utteranceId: 'u1' }, new Uint8Array());
-    await vi.waitFor(() => expect(frames().some((f) => f.t === 'transcript')).toBe(true));
-
-    expect(seen).toEqual(['translator']);
-  });
-
-  it('omits the personality when the client named none', async () => {
-    const seen: Array<string | undefined> = [];
-    const { lane, frames } = makeLane({
-      transcribe: (_audio, opts) => {
-        seen.push(opts.personalityId);
-        return Promise.resolve({ text: 'hi', provider: 'local-stt' });
-      },
-    });
-
-    lane.handle({ t: 'utterance_start', utteranceId: 'u1', sampleRate: 16_000 }, new Uint8Array());
-    lane.handle({ t: 'audio', utteranceId: 'u1', seq: 0 }, pcm(100));
-    lane.handle({ t: 'utterance_end', utteranceId: 'u1' }, new Uint8Array());
-    await vi.waitFor(() => expect(frames().some((f) => f.t === 'transcript')).toBe(true));
-
-    expect(seen).toEqual([undefined]);
-  });
-
-  it('discards an utterance that exceeds the capture cap', () => {
-    const sent: Sent[] = [];
-    const lane = new VoiceLane({
-      laneId: 'lane-1',
-      deps: {
-        transcribe: () => Promise.reject(new Error('must not be called')),
-        synthesize: async function* () {},
-      },
-      send: (frame, payload) => sent.push({ frame, payload: payload ?? new Uint8Array() }),
-      limits: { maxUtteranceBytes: 8 },
-    });
-    lane.handle({ t: 'utterance_start', utteranceId: 'u1', sampleRate: 16_000 }, new Uint8Array());
-    lane.handle({ t: 'audio', utteranceId: 'u1', seq: 0 }, pcm(1, 8));
-
-    const kinds = sent.map((s) => s.frame.t);
-    expect(kinds).toEqual(['dropped', 'error']);
-    expect(lane.activeUtterance).toBeNull();
-  });
-
-  it('keeps the tracked-utterance map bounded across a long call', async () => {
-    const sent: Sent[] = [];
-    const lane = new VoiceLane({
-      laneId: 'lane-1',
-      deps: {
-        transcribe: () => Promise.resolve({ text: 'hi', provider: 'fake-stt' }),
-        synthesize: async function* () {},
-      },
-      send: (frame, payload) => sent.push({ frame, payload: payload ?? new Uint8Array() }),
-      limits: { maxTrackedUtterances: 2 },
-    });
-
-    for (let i = 1; i <= 5; i++) {
-      lane.handle(
-        { t: 'utterance_start', utteranceId: `u${i}`, sampleRate: 16_000 },
-        new Uint8Array(),
-      );
-      lane.handle({ t: 'audio', utteranceId: `u${i}`, seq: 0 }, pcm(50));
-    }
-
-    // The oldest utterances were evicted, so a late synthesis request for one
-    // of them is refused rather than silently served from unbounded state.
-    lane.handle(
-      { t: 'synthesize', utteranceId: 'u1', segmentId: 's0', text: 'stale' },
-      new Uint8Array(),
-    );
     await Promise.resolve();
-    expect(sent.filter((s) => s.frame.t === 'audio')).toHaveLength(0);
-    expect(lane.activeUtterance).toBe('u5');
+
+    expect(opener).not.toHaveBeenCalled();
+    expect(frames()).toEqual([{ t: 'ready', laneId: 'lane-1', protocolVersion: 1 }]);
+  });
+
+  it('forwards audio frames to the session as PCM chunks at the declared sample rate', async () => {
+    const session = new FakeVoiceSession();
+    const { lane } = makeLane(() => Promise.resolve(session as unknown as VoiceSession));
+
+    lane.handle({ t: 'hello', sampleRate: 48_000 }, new Uint8Array());
+    await vi.waitFor(() => expect(session.subscriberCount).toBe(1));
+    lane.handle({ t: 'audio', seq: 0 }, pcm(1000, 3));
+
+    expect(session.pushed).toHaveLength(1);
+    expect(session.pushed[0]?.sampleRate).toBe(48_000);
+    expect(Array.from(session.pushed[0]?.data ?? [])).toEqual([1000, 1000, 1000]);
+  });
+
+  it('drops audio that arrives before the session has opened', async () => {
+    let resolveGate!: (session: VoiceSession | null) => void;
+    const gate = new Promise<VoiceSession | null>((resolve) => {
+      resolveGate = resolve;
+    });
+    const { lane } = makeLane(() => gate);
+
+    lane.handle({ t: 'hello', sampleRate: 16_000 }, new Uint8Array());
+    lane.handle({ t: 'audio', seq: 0 }, pcm(1));
+    // Never throws, never buffers — the frame is simply gone.
+    const session = new FakeVoiceSession();
+    resolveGate(session as unknown as VoiceSession);
+    await vi.waitFor(() => expect(session.subscriberCount).toBe(1));
+    expect(session.pushed).toHaveLength(0);
+  });
+
+  it('drops audio silently once the session resolves null (voice not configured)', async () => {
+    const { lane, frames } = makeLane(() => Promise.resolve(null));
+
+    lane.handle({ t: 'hello', sampleRate: 16_000 }, new Uint8Array());
+    await vi.waitFor(() =>
+      expect(frames().some((f) => f.t === 'error' && f.code === 'voice_unavailable')).toBe(true),
+    );
+    lane.handle({ t: 'audio', seq: 0 }, pcm(1));
+
+    expect(frames().filter((f) => f.t === 'error')).toHaveLength(1);
+  });
+
+  it('surfaces a thrown opener as a voice_unavailable error rather than crashing the lane', async () => {
+    const { lane, frames } = makeLane(() => Promise.reject(new Error('provider refused')));
+
+    lane.handle({ t: 'hello', sampleRate: 16_000 }, new Uint8Array());
+    await vi.waitFor(() =>
+      expect(frames()).toEqual([
+        { t: 'ready', laneId: 'lane-1', protocolVersion: 1 },
+        { t: 'error', code: 'voice_unavailable', message: 'provider refused' },
+      ]),
+    );
+  });
+
+  it('ignores a second hello on an already-opening lane', async () => {
+    const opener = vi.fn(() => new Promise<VoiceSession | null>(() => {}));
+    const { lane } = makeLane(opener);
+
+    lane.handle({ t: 'hello', sampleRate: 16_000, sessionId: 'a' }, new Uint8Array());
+    lane.handle({ t: 'hello', sampleRate: 16_000, sessionId: 'b' }, new Uint8Array());
+
+    expect(opener).toHaveBeenCalledTimes(1);
   });
 });
 
-describe('VoiceLane — utterance-ID staleness discipline', () => {
-  it('drops a transcript whose utterance was superseded while STT was running', async () => {
-    const gate = deferred<{ text: string; provider: string }>();
-    const { lane, frames } = makeLane({ transcribe: () => gate.promise });
+describe('VoiceLane — event translation', () => {
+  async function openedLane(): Promise<{
+    session: FakeVoiceSession;
+    lane: VoiceLane;
+    frames: () => VoiceServerFrame[];
+  }> {
+    const session = new FakeVoiceSession();
+    const { lane, frames } = makeLane(() => Promise.resolve(session as unknown as VoiceSession));
+    lane.handle({ t: 'hello', sampleRate: 16_000 }, new Uint8Array());
+    await vi.waitFor(() => expect(session.subscriberCount).toBe(1));
+    return { session, lane, frames };
+  }
 
-    lane.handle({ t: 'utterance_start', utteranceId: 'u1', sampleRate: 16_000 }, new Uint8Array());
-    lane.handle({ t: 'audio', utteranceId: 'u1', seq: 0 }, pcm(500));
-    lane.handle({ t: 'utterance_end', utteranceId: 'u1' }, new Uint8Array());
+  it('mints an utterance id on utterance_committed and sends it as a transcript', async () => {
+    const { session, frames } = await openedLane();
+    session.emit({ type: 'utterance_committed', text: 'what is the weather' });
 
-    // The user speaks again before the first transcript comes back.
-    lane.handle({ t: 'utterance_start', utteranceId: 'u2', sampleRate: 16_000 }, new Uint8Array());
-    gate.resolve({ text: 'the stale answer', provider: 'fake-stt' });
-
-    await vi.waitFor(() => expect(frames().some((f) => f.t === 'dropped')).toBe(true));
-    expect(frames().some((f) => f.t === 'transcript')).toBe(false);
-    expect(frames().filter((f) => f.t === 'dropped')).toContainEqual({
-      t: 'dropped',
-      utteranceId: 'u1',
-      stage: 'transcript',
-      reason: 'superseded',
-    });
-  });
-
-  it('never synthesizes for an utterance cancelled by barge-in', async () => {
-    const synthesize = vi.fn(async function* () {
-      yield { audio: new Uint8Array([9]), format: 'opus' as const, provider: 'fake-tts' };
-    });
-    const { lane, frames } = makeLane({ synthesize });
-
-    lane.handle({ t: 'utterance_start', utteranceId: 'u1', sampleRate: 16_000 }, new Uint8Array());
-    lane.handle({ t: 'cancel', utteranceId: 'u1', reason: 'barge_in' }, new Uint8Array());
-    lane.handle(
-      { t: 'synthesize', utteranceId: 'u1', segmentId: 's0', text: 'Too late.' },
-      new Uint8Array(),
-    );
-
-    await vi.waitFor(() =>
-      expect(frames().filter((f) => f.t === 'dropped').length).toBeGreaterThanOrEqual(2),
-    );
-    expect(synthesize).not.toHaveBeenCalled();
-    expect(frames().some((f) => f.t === 'audio')).toBe(false);
-  });
-
-  it('stops mid-stream and drops the rest when barge-in lands during synthesis', async () => {
-    const chunkGate = deferred<void>();
-    const { lane, sent, frames } = makeLane({
-      synthesize: async function* () {
-        yield { audio: new Uint8Array([1]), format: 'opus' as const, provider: 'fake-tts' };
-        await chunkGate.promise;
-        yield { audio: new Uint8Array([2]), format: 'opus' as const, provider: 'fake-tts' };
-      },
-    });
-
-    lane.handle({ t: 'utterance_start', utteranceId: 'u1', sampleRate: 16_000 }, new Uint8Array());
-    lane.handle(
-      { t: 'synthesize', utteranceId: 'u1', segmentId: 's0', text: 'One.' },
-      new Uint8Array(),
-    );
-    await vi.waitFor(() => expect(frames().some((f) => f.t === 'audio')).toBe(true));
-
-    lane.handle({ t: 'cancel', utteranceId: 'u1', reason: 'barge_in' }, new Uint8Array());
-    chunkGate.resolve();
-
-    await vi.waitFor(() =>
-      expect(frames().filter((f) => f.t === 'dropped').length).toBeGreaterThanOrEqual(2),
-    );
-    // Exactly the one chunk that was already on the wire — the post-barge-in
-    // chunk is never sent, and the segment never claims completion.
-    expect(sent.filter((s) => s.frame.t === 'audio').map((s) => Array.from(s.payload))).toEqual([
-      [1],
+    expect(frames()).toEqual([
+      { t: 'ready', laneId: 'lane-1', protocolVersion: 1 },
+      { t: 'transcript', utteranceId: 'u1', text: 'what is the weather', final: true },
     ]);
-    expect(frames().some((f) => f.t === 'segment_end')).toBe(false);
   });
 
-  it('keeps reply audio flowing for the utterance that is still current', async () => {
-    const { lane, sent, frames } = makeLane();
-    lane.handle({ t: 'utterance_start', utteranceId: 'u1', sampleRate: 16_000 }, new Uint8Array());
-    lane.handle(
-      { t: 'synthesize', utteranceId: 'u1', segmentId: 's0', text: 'Clear skies.' },
-      new Uint8Array(),
-    );
-    await vi.waitFor(() => expect(frames().some((f) => f.t === 'segment_end')).toBe(true));
+  it('opens a new segment for a reply sentence, closing whatever was open', async () => {
+    const { session, frames } = await openedLane();
+    session.emit({ type: 'utterance_committed', text: 'weather?' });
+    session.emit({ type: 'reply_sentence', text: 'Clear skies.' });
+    session.emit({ type: 'reply_audio', audio: new Uint8Array([1, 2]), format: 'opus' });
+    session.emit({ type: 'reply_sentence', text: 'Twelve degrees.' });
 
-    const audio = sent.filter((s) => s.frame.t === 'audio');
-    expect(audio).toHaveLength(1);
-    expect(audio[0]?.frame).toMatchObject({
+    const kinds = frames().map((f) => f.t);
+    expect(kinds).toEqual([
+      'ready',
+      'transcript',
+      'reply_text',
+      'audio',
+      'segment_end',
+      'reply_text',
+    ]);
+    expect(frames()[2]).toEqual({
+      t: 'reply_text',
+      utteranceId: 'u1',
+      segmentId: 's1',
+      text: 'Clear skies.',
+      kind: 'sentence',
+    });
+    expect(frames()[3]).toMatchObject({
       t: 'audio',
       utteranceId: 'u1',
-      segmentId: 's0',
+      segmentId: 's1',
+      seq: 0,
       codec: 'encoded',
       mimeType: 'audio/ogg;codecs=opus',
-      provider: 'fake-tts',
+    });
+    expect(frames()[4]).toEqual({ t: 'segment_end', utteranceId: 'u1', segmentId: 's1' });
+    expect(frames()[5]).toMatchObject({ t: 'reply_text', segmentId: 's2', kind: 'sentence' });
+  });
+
+  it('marks a filler segment distinctly from a reply sentence', async () => {
+    const { session, frames } = await openedLane();
+    session.emit({ type: 'utterance_committed', text: 'do the thing' });
+    session.emit({ type: 'filler', text: 'One moment.' });
+
+    expect(frames().at(-1)).toEqual({
+      t: 'reply_text',
+      utteranceId: 'u1',
+      segmentId: 's1',
+      text: 'One moment.',
+      kind: 'filler',
+    });
+  });
+
+  it('closes the open segment and ends the turn on reply_complete', async () => {
+    const { session, frames } = await openedLane();
+    session.emit({ type: 'utterance_committed', text: 'weather?' });
+    session.emit({ type: 'reply_sentence', text: 'Clear skies.' });
+    session.emit({ type: 'reply_complete', text: 'Clear skies.' });
+
+    expect(frames().slice(-2)).toEqual([
+      { t: 'segment_end', utteranceId: 'u1', segmentId: 's1' },
+      { t: 'turn_end', utteranceId: 'u1', text: 'Clear skies.', interrupted: false },
+    ]);
+  });
+
+  it('marks the turn interrupted on barge-in', async () => {
+    const { session, frames } = await openedLane();
+    session.emit({ type: 'utterance_committed', text: 'tell me a story' });
+    session.emit({ type: 'reply_sentence', text: 'Once upon a time' });
+    session.emit({ type: 'interrupted', text: 'Once upon a time [interrupted]' });
+
+    expect(frames().at(-1)).toEqual({
+      t: 'turn_end',
+      utteranceId: 'u1',
+      text: 'Once upon a time [interrupted]',
+      interrupted: true,
+    });
+  });
+
+  it('increments the utterance id across successive turns on one connection', async () => {
+    const { session, frames } = await openedLane();
+    session.emit({ type: 'utterance_committed', text: 'first' });
+    session.emit({ type: 'reply_complete', text: 'ok' });
+    session.emit({ type: 'utterance_committed', text: 'second' });
+
+    const transcripts = frames().filter((f) => f.t === 'transcript');
+    expect(transcripts.map((f) => (f as { utteranceId: string }).utteranceId)).toEqual([
+      'u1',
+      'u2',
+    ]);
+  });
+
+  it('forwards a session error as an error frame', async () => {
+    const { session, frames } = await openedLane();
+    session.emit({ type: 'utterance_committed', text: 'weather?' });
+    session.emit({ type: 'error', error: 'STT failed', code: 'stt' });
+
+    expect(frames().at(-1)).toEqual({
+      t: 'error',
+      code: 'stt',
+      message: 'STT failed',
+      utteranceId: 'u1',
     });
   });
 
   it('marks raw PCM as directly schedulable', async () => {
-    const { lane, sent, frames } = makeLane({
-      synthesize: async function* () {
-        yield { audio: pcm(200), format: 'pcm' as const, provider: 'fake-tts' };
-      },
-    });
-    lane.handle({ t: 'utterance_start', utteranceId: 'u1', sampleRate: 16_000 }, new Uint8Array());
-    lane.handle(
-      { t: 'synthesize', utteranceId: 'u1', segmentId: 's0', text: 'Hi.' },
-      new Uint8Array(),
-    );
-    await vi.waitFor(() => expect(frames().some((f) => f.t === 'segment_end')).toBe(true));
-    expect(sent.find((s) => s.frame.t === 'audio')?.frame).toMatchObject({
+    const { session, frames } = await openedLane();
+    session.emit({ type: 'utterance_committed', text: 'hi' });
+    session.emit({ type: 'reply_sentence', text: 'Hi.' });
+    session.emit({ type: 'reply_audio', audio: pcm(200), format: 'pcm' });
+
+    expect(frames().find((f) => f.t === 'audio')).toMatchObject({
       codec: 'pcm_s16le',
       mimeType: 'audio/pcm',
     });
-  });
-
-  it('closes out every in-flight utterance when the socket goes away', async () => {
-    const gate = deferred<{ text: string; provider: string }>();
-    const { lane, frames } = makeLane({ transcribe: () => gate.promise });
-    lane.handle({ t: 'utterance_start', utteranceId: 'u1', sampleRate: 16_000 }, new Uint8Array());
-    lane.handle({ t: 'audio', utteranceId: 'u1', seq: 0 }, pcm(10));
-    lane.handle({ t: 'utterance_end', utteranceId: 'u1' }, new Uint8Array());
-
-    lane.close();
-    gate.resolve({ text: 'nobody is listening', provider: 'fake-stt' });
-    await Promise.resolve();
-    await Promise.resolve();
-
-    expect(frames().some((f) => f.t === 'transcript')).toBe(false);
-    expect(lane.activeUtterance).toBeNull();
   });
 });
 
 describe('VoiceLane — cross-lane isolation (regression)', () => {
   // The bug this is written against: one caller's private audio reaching a
-  // different recipient because voice state was keyed globally (by utterance or
-  // session id) instead of per connection. Both lanes here deliberately use the
-  // SAME utterance id and the SAME provider service, and their provider calls
-  // are resolved out of order — anything shared would cross the streams.
-  it('never routes one lane’s transcript or audio to another lane', async () => {
-    const transcribeGates = new Map<string, Deferred<{ text: string; provider: string }>>();
-    const laneFor = (name: string) => {
-      const gate = deferred<{ text: string; provider: string }>();
-      transcribeGates.set(name, gate);
-      return makeLane(
-        {
-          transcribe: () => gate.promise,
-          synthesize: async function* (text) {
-            yield {
-              audio: new TextEncoder().encode(`${name}:${text}`),
-              format: 'opus' as const,
-              provider: 'shared-tts',
-            };
-          },
-        },
-        name,
-      );
-    };
+  // different recipient because voice state was keyed globally instead of per
+  // connection. Both lanes here deliberately mint the same utterance-id
+  // sequence — the collision a global map would lose.
+  it('never routes one lane’s events to another lane', async () => {
+    const alice = new FakeVoiceSession();
+    const bob = new FakeVoiceSession();
+    const aliceLane = makeLane(() => Promise.resolve(alice as unknown as VoiceSession));
+    const bobLane = makeLane(() => Promise.resolve(bob as unknown as VoiceSession));
 
-    const alice = laneFor('alice');
-    const bob = laneFor('bob');
-
-    // Same utterance id on both lanes — the collision a global map would lose.
-    for (const lane of [alice.lane, bob.lane]) {
-      lane.handle({ t: 'hello' }, new Uint8Array());
-      lane.handle(
-        { t: 'utterance_start', utteranceId: 'u1', sampleRate: 16_000 },
-        new Uint8Array(),
-      );
-      lane.handle({ t: 'audio', utteranceId: 'u1', seq: 0 }, pcm(1000));
-      lane.handle({ t: 'utterance_end', utteranceId: 'u1' }, new Uint8Array());
-    }
-
-    // Resolve Bob's STT first, Alice's second — interleaved completion.
-    transcribeGates.get('bob')?.resolve({ text: 'bob bank balance', provider: 'shared-stt' });
-    transcribeGates.get('alice')?.resolve({ text: 'alice medical result', provider: 'shared-stt' });
-
+    aliceLane.lane.handle({ t: 'hello', sampleRate: 16_000 }, new Uint8Array());
+    bobLane.lane.handle({ t: 'hello', sampleRate: 16_000 }, new Uint8Array());
     await vi.waitFor(() => {
-      expect(alice.frames().some((f) => f.t === 'transcript')).toBe(true);
-      expect(bob.frames().some((f) => f.t === 'transcript')).toBe(true);
+      expect(alice.subscriberCount).toBe(1);
+      expect(bob.subscriberCount).toBe(1);
     });
+
+    bob.emit({ type: 'utterance_committed', text: 'bob bank balance' });
+    alice.emit({ type: 'utterance_committed', text: 'alice medical result' });
 
     const transcriptOf = (frames: VoiceServerFrame[]) =>
       frames.filter((f) => f.t === 'transcript').map((f) => (f as { text: string }).text);
-    expect(transcriptOf(alice.frames())).toEqual(['alice medical result']);
-    expect(transcriptOf(bob.frames())).toEqual(['bob bank balance']);
-
-    // Same for synthesized audio, again under a shared segment id.
-    alice.lane.handle(
-      { t: 'synthesize', utteranceId: 'u1', segmentId: 's0', text: 'private-to-alice' },
-      new Uint8Array(),
-    );
-    bob.lane.handle(
-      { t: 'synthesize', utteranceId: 'u1', segmentId: 's0', text: 'private-to-bob' },
-      new Uint8Array(),
-    );
-    await vi.waitFor(() => {
-      expect(alice.frames().some((f) => f.t === 'segment_end')).toBe(true);
-      expect(bob.frames().some((f) => f.t === 'segment_end')).toBe(true);
-    });
-
-    const audioOf = (sent: Sent[]) =>
-      sent.filter((s) => s.frame.t === 'audio').map((s) => new TextDecoder().decode(s.payload));
-    expect(audioOf(alice.sent)).toEqual(['alice:private-to-alice']);
-    expect(audioOf(bob.sent)).toEqual(['bob:private-to-bob']);
-
-    // And a barge-in on one lane leaves the other lane's call untouched.
-    alice.lane.handle({ t: 'cancel', utteranceId: 'u1', reason: 'barge_in' }, new Uint8Array());
-    expect(alice.lane.activeUtterance).toBeNull();
-    expect(bob.lane.activeUtterance).toBe('u1');
-    bob.lane.handle(
-      { t: 'synthesize', utteranceId: 'u1', segmentId: 's1', text: 'still-bob' },
-      new Uint8Array(),
-    );
-    await vi.waitFor(() =>
-      expect(audioOf(bob.sent)).toEqual(['bob:private-to-bob', 'bob:still-bob']),
-    );
-    expect(audioOf(alice.sent)).toEqual(['alice:private-to-alice']);
+    expect(transcriptOf(aliceLane.frames())).toEqual(['alice medical result']);
+    expect(transcriptOf(bobLane.frames())).toEqual(['bob bank balance']);
   });
 });
 
-// Per-personality voice (task A16). The lane does not CHOOSE a voice — it must
-// hand the server both the client's global default and who is speaking, so the
-// one shared precedence rule in `VoiceService` can apply. A lane that dropped
-// `personalityId` would leave talk-mode permanently on the global voice with
-// nothing in the wire format to show why.
-describe('VoiceLane — voice selection passthrough', () => {
-  function synthArgs(
-    frame: Partial<{ voice: string; personalityId: string; language: string }>,
-  ): Array<Record<string, unknown>> {
-    const seen: Array<Record<string, unknown>> = [];
-    const { lane } = makeLane({
-      synthesize: async function* (_text, opts) {
-        const { signal: _signal, ...rest } = opts;
-        seen.push(rest);
-        yield { audio: new Uint8Array([1]), format: 'opus' as const, provider: 'fake-tts' };
-      },
-    });
-    lane.handle({ t: 'utterance_start', utteranceId: 'u1', sampleRate: 16_000 }, new Uint8Array());
-    lane.handle(
-      { t: 'synthesize', utteranceId: 'u1', segmentId: 's0', text: 'hola', ...frame },
-      new Uint8Array(),
-    );
-    return seen;
-  }
+describe('VoiceLane — lifecycle', () => {
+  it('unsubscribes from the session on close without touching the turn in flight', async () => {
+    const session = new FakeVoiceSession();
+    const { lane } = makeLane(() => Promise.resolve(session as unknown as VoiceSession));
+    lane.handle({ t: 'hello', sampleRate: 16_000 }, new Uint8Array());
+    await vi.waitFor(() => expect(session.subscriberCount).toBe(1));
 
-  it('forwards personalityId and language alongside the global voice', async () => {
-    const seen = synthArgs({ voice: 'am_michael', personalityId: 'voice', language: 'es' });
-    await new Promise((r) => setTimeout(r, 0));
-    expect(seen).toEqual([{ voice: 'am_michael', personalityId: 'voice', language: 'es' }]);
+    lane.close();
+    expect(session.subscriberCount).toBe(0);
+
+    // The session itself is untouched — no abort call exists on the fake, and
+    // an event fired after close reaches no listener rather than throwing.
+    expect(() => session.emit({ type: 'reply_complete', text: 'late' })).not.toThrow();
   });
 
-  it('omits what the client did not send rather than sending empty strings', async () => {
-    const seen = synthArgs({ personalityId: 'voice' });
-    await new Promise((r) => setTimeout(r, 0));
-    expect(seen).toEqual([{ personalityId: 'voice' }]);
+  it('ignores frames after close', async () => {
+    const session = new FakeVoiceSession();
+    const { lane, frames } = makeLane(() => Promise.resolve(session as unknown as VoiceSession));
+    lane.close();
+    lane.handle({ t: 'hello', sampleRate: 16_000 }, new Uint8Array());
+    expect(frames()).toEqual([]);
   });
 });

@@ -1201,6 +1201,10 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
     // Realtime turns record their latency into the voice stack's span writer —
     // the same one the pipeline tier uses.
     ...(voiceStack ? { voiceSpans: voiceStack.spans } : {}),
+    // The browser pipeline lane's `VoiceSession` factory. Absent (no
+    // `voice.*` configured) → the lane still handshakes, but refuses `audio`
+    // frames with a clear error instead of a silent no-op.
+    ...(voiceStack ? { voiceStack } : {}),
     // Local-only voice-egress gate. Armed only when the operator declared
     // `voice.trustedPlugins`; the browser talk lane then refuses a non-local
     // provider instead of shipping audio off the machine.

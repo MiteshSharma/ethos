@@ -1,7 +1,7 @@
 import { join } from 'node:path';
 import { SessionStreamBuffer } from '@ethosagent/agent-bridge';
 import { AgentMesh, defaultRegistryPath } from '@ethosagent/agent-mesh';
-import { resolveSecretRef } from '@ethosagent/config';
+import { resolveSecretRef, type VoiceBargeInTuning } from '@ethosagent/config';
 import { type AgentLoop, satelliteLaneKey } from '@ethosagent/core';
 import type { CronScheduler } from '@ethosagent/cron';
 import {
@@ -60,7 +60,7 @@ import { ApiKeysService } from './services/api-keys.service';
 import { createWebApprovalHook, type DangerPredicate } from './services/approval-hook';
 import { type ApprovalObservability, ApprovalsService } from './services/approvals.service';
 import { CallsService } from './services/calls.service';
-import { ConfigService } from './services/config.service';
+import { ConfigService, readLegacyBrowserBargeInTuning } from './services/config.service';
 import { CronService } from './services/cron.service';
 import { DeliveriesService } from './services/deliveries.service';
 import { DigestService } from './services/digest.service';
@@ -84,6 +84,7 @@ import { ToolSettingsService } from './services/tool-settings.service';
 import { VoiceService } from './services/voice.service';
 import { VoiceLaneModeService } from './services/voice-lane-mode.service';
 import { WakeRoutesService } from './services/wake-routes.service';
+import { createBrowserVoiceSessionOpener } from './voice/browser-voice-session';
 import { withImplicitWakeRoutes } from './voice/implicit-wake-routes';
 import { createRealtimeControlDeps } from './voice/realtime-control-deps';
 import { createRealtimeSurface } from './voice/realtime-surface';
@@ -232,6 +233,15 @@ export interface CreateWebApiOptions {
    * buffer and one sink. Omit → realtime turns write no spans.
    */
   voiceSpans?: import('@ethosagent/voice-session').VoiceSpanRecorder;
+  /**
+   * The deployment's voice stack (`@ethosagent/wiring`'s `buildVoiceStack()`
+   * result). Its `createSession()` is what the browser PIPELINE lane's
+   * `VoiceSession` is built from — the same factory the SIP/LiveKit lanes
+   * use. Absent (no `voice.*` configured) → the pipeline lane still
+   * handshakes but refuses `audio` frames with a clear error instead of
+   * silently doing nothing; realtime-tier calls are unaffected either way.
+   */
+  voiceStack?: import('@ethosagent/wiring').VoiceStack;
   /** Name of the STT provider (from auxiliary.asr.provider). */
   sttProviderName?: string;
   /** Config dict for the STT provider factory. */
@@ -739,13 +749,38 @@ export function createWebApi(opts: CreateWebApiOptions): CreateWebApiResult {
       ...(opts.refreshPersonalities ? { refresh: opts.refreshPersonalities } : {}),
     }),
   });
+  // `display.voice_*` compatibility read-through for the browser lane's
+  // barge-in tuning (Conflict 2, L1 — plan §7). Read live, the same reason the
+  // voice rosters in `voiceService`'s `configGetter` above are: an operator
+  // who just changed Settings → Voice → Advanced means the next call, not the
+  // next restart. `voiceStack.createSession` only applies this when
+  // `voice.bargeIn.browser` is unset.
+  const legacyBargeInTuning = async (): Promise<VoiceBargeInTuning> => {
+    const raw = await configRepo.read();
+    return raw ? readLegacyBrowserBargeInTuning(raw.passthrough) : {};
+  };
   // The persistent binary voice lane (talk-mode). Constructed here so it shares
   // this process's VoiceService — same provider resolution, same egress gate as
   // the batch RPCs — but it only carries traffic once boot code attaches it to
   // the listening HTTP server (`voiceSocket.attach(server)`).
   const realtimeControlRegistry = opts.toolRegistry;
   const voiceSocket = createVoiceSocket({
-    voice: voiceService,
+    // The pipeline tier's browser lane: each connection gets its own
+    // `VoiceSession` from the deployment's voice stack, keyed
+    // `voice:web:browser:<client>` — never the typed chat session. Absent
+    // `opts.voiceStack` (no `voice.*` configured) → the opener resolves null
+    // per connection and the lane refuses `audio` frames honestly instead of
+    // pretending to listen.
+    session: (laneId: string) =>
+      createBrowserVoiceSessionOpener(
+        {
+          voiceStack: opts.voiceStack,
+          agentLoop,
+          personalities: opts.personalities,
+          legacyBargeInTuning,
+        },
+        laneId,
+      ),
     // The realtime tier's CONTROL channel: same socket, same credential, but
     // the frames carry tool calls and transcripts instead of audio. Wired only
     // when a tool registry exists — without one there is nothing to consult,

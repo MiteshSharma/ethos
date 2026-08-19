@@ -164,25 +164,27 @@ describe('parseConfigYaml — V4 telephony validation', () => {
   it('rejects an unknown bargeIn surface', async () => {
     const errors = await parseErrors(['voice.bargeIn.kitchen.silenceMs: 500']);
     expect(errors.some((e) => e.includes('voice.bargeIn.kitchen'))).toBe(true);
-    expect(errors.some((e) => e.includes('call, satellite'))).toBe(true);
+    expect(errors.some((e) => e.includes('call, satellite, browser'))).toBe(true);
   });
 
-  // `browser` parsed for a release and reached nothing — the web talk lane
-  // endpoints in the browser, off `display.voice_*`. Refusing it is the point:
-  // a key that silently absorbs a threshold is how an operator spends an
-  // afternoon tuning a control nothing reads. The refusal names the real knob.
-  it('refuses voice.bargeIn.browser and points at display.voice_*', async () => {
-    const errors = await parseErrors(['voice.bargeIn.browser.energyThreshold: 0.2']);
-    expect(errors.some((e) => e.includes('voice.bargeIn.browser'))).toBe(true);
-    expect(errors.some((e) => e.includes('display.voice_*'))).toBe(true);
+  // Since L1 (plan §7 "Conflict 2"), the browser pipeline lane runs on the
+  // same `VoiceSession` orchestrator as `call`/`satellite` and gets the same
+  // tuner — `browser` is a real surface now, not a control that reads back
+  // what an operator typed and changes nothing.
+  it('parses voice.bargeIn.browser into the typed shape', async () => {
+    const cfg = await load(['voice.bargeIn.browser.energyThreshold: 0.2']);
+    expect(cfg.voice?.bargeIn).toEqual({ browser: { energyThreshold: 0.2 } });
   });
 
-  it('drops the whole bargeIn block when a browser surface is present', async () => {
+  it('keeps other surfaces alongside a browser surface', async () => {
     const cfg = await load([
       'voice.bargeIn.call.silenceMs: 700',
       'voice.bargeIn.browser.energyThreshold: 0.2',
     ]);
-    expect(cfg.voice?.bargeIn).toBeUndefined();
+    expect(cfg.voice?.bargeIn).toEqual({
+      call: { silenceMs: 700 },
+      browser: { energyThreshold: 0.2 },
+    });
   });
 
   it('rejects a bargeIn energyThreshold outside (0, 1]', async () => {

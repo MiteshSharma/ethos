@@ -10,20 +10,17 @@ import {
 
 describe('voice socket framing', () => {
   it('round-trips a control frame with no payload', () => {
-    const bytes = encodeVoiceFrame({ t: 'utterance_end', utteranceId: 'u1' });
+    const bytes = encodeVoiceFrame({ t: 'hello', sessionId: 'u1' });
     const decoded = decodeVoiceClientFrame(bytes);
-    expect(decoded?.header).toEqual({ t: 'utterance_end', utteranceId: 'u1' });
+    expect(decoded?.header).toEqual({ t: 'hello', sessionId: 'u1' });
     expect(decoded?.payload.length).toBe(0);
   });
 
   it('round-trips a PCM audio frame with its header intact', () => {
     const samples = Int16Array.from([0, 1, -1, 32767, -32768, 1234]);
-    const bytes = encodeVoiceFrame(
-      { t: 'audio', utteranceId: 'u7', seq: 3 },
-      pcm16ToBytes(samples),
-    );
+    const bytes = encodeVoiceFrame({ t: 'audio', seq: 3 }, pcm16ToBytes(samples));
     const decoded = decodeVoiceClientFrame(bytes);
-    expect(decoded?.header).toEqual({ t: 'audio', utteranceId: 'u7', seq: 3 });
+    expect(decoded?.header).toEqual({ t: 'audio', seq: 3 });
     expect(Array.from(pcm16FromBytes(decoded?.payload ?? new Uint8Array()))).toEqual(
       Array.from(samples),
     );
@@ -91,7 +88,7 @@ describe('voice socket framing', () => {
   });
 
   it('rejects a frame whose header does not match the contract', () => {
-    const bogus = encodeVoiceFrame({ t: 'utterance_end', utteranceId: 'u1' });
+    const bogus = encodeVoiceFrame({ t: 'hello', sessionId: 'u1' });
     // A server frame decoder must not accept a client frame.
     expect(decodeVoiceServerFrame(bogus)).toBeNull();
     // Neither should garbage, a truncated frame, or a wrong version.

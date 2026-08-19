@@ -8,11 +8,10 @@ import {
   type VoiceServerFrame,
 } from '@ethosagent/web-contracts';
 import { type WebSocket, WebSocketServer } from 'ws';
-import type { VoiceService } from '../services/voice.service';
 import type { RealtimeControlLaneDeps } from './realtime-control-lane';
 import { RealtimeControlLane } from './realtime-control-lane';
 import { refuseUpgrade, registerUpgradeRoute, type UpgradableServer } from './upgrade-router';
-import { VoiceLane, type VoiceLaneLimits } from './voice-lane';
+import { VoiceLane, type VoiceLaneSessionOpener } from './voice-lane';
 
 // The `ws` half of the browser voice lane. Same upgrade posture as the ACP
 // server (`apps/acp-server/src/index.ts`): `noServer: true` plus an explicit
@@ -21,9 +20,11 @@ import { VoiceLane, type VoiceLaneLimits } from './voice-lane';
 // in `./upgrade-router` — one listener dispatching to every mounted lane —
 // because this is no longer the only WebSocket lane on the server.
 //
-// This file owns the socket; `VoiceLane` owns the conversation. Each accepted
-// connection gets its OWN lane — the only shared object is the `VoiceService`
-// that resolves providers, which holds no per-call state.
+// This file owns the socket; `VoiceLane` owns the frame plumbing and the
+// per-connection `VoiceSession` (opened lazily on `hello` via `opts.session`)
+// owns the conversation. Each accepted connection gets its own lane and, once
+// `hello` names a sample rate, its own session — nothing here is shared
+// across connections.
 //
 // A connection carries EITHER tier. On the pipeline tier the frames are audio
 // and `VoiceLane` handles them. On the realtime tier the audio has gone
@@ -34,7 +35,12 @@ import { VoiceLane, type VoiceLaneLimits } from './voice-lane';
 // by the frames the browser actually sends.
 
 export interface VoiceSocketOptions {
-  voice: VoiceService;
+  /**
+   * Per-connection pipeline `VoiceSession` opener. Absent → the pipeline tier
+   * is not available: the handshake still completes, but an `audio` frame
+   * gets a clear `voice_unavailable` error instead of silently going nowhere.
+   */
+  session?: (laneId: string) => VoiceLaneSessionOpener;
   /**
    * Per-connection realtime control deps. Absent → `realtime_*` frames are
    * ignored, which is the honest behaviour for a deployment with no agent
@@ -46,7 +52,6 @@ export interface VoiceSocketOptions {
   /** Extra Origins allowed beyond loopback. Same rule as the HTTP surface. */
   allowedOrigins?: string[];
   path?: string;
-  limits?: Partial<VoiceLaneLimits>;
   logger?: Logger;
 }
 
@@ -73,20 +78,11 @@ export function createVoiceSocket(opts: VoiceSocketOptions): VoiceSocket {
       if (socket.readyState !== socket.OPEN) return;
       socket.send(encodeVoiceFrame(frame, payload), { binary: true });
     };
+    const sessionOpener = opts.session?.(laneId);
     const lane = new VoiceLane({
       laneId,
       send,
-      ...(opts.limits ? { limits: opts.limits } : {}),
-      deps: {
-        transcribe: (audio, transcribeOpts) =>
-          opts.voice.transcribeBytes(
-            audio.data,
-            audio.mimeType,
-            transcribeOpts.signal,
-            transcribeOpts.personalityId ? { personalityId: transcribeOpts.personalityId } : {},
-          ),
-        synthesize: (text, synthOpts) => opts.voice.synthesizeStream(text, synthOpts),
-      },
+      openSession: sessionOpener ?? (() => Promise.resolve(null)),
     });
     lanes.set(socket, lane);
     const realtimeDeps = opts.realtime?.(laneId);

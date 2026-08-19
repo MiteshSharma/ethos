@@ -9,7 +9,7 @@ import {
   type SatelliteFrameDecode,
   type SatelliteServerFrame,
 } from '../satellite-socket';
-import { decodeVoiceClientFrame, decodeVoiceServerFrame, encodeVoiceFrame } from '../voice-socket';
+import { decodeVoiceClientFrame, decodeVoiceServerFrame } from '../voice-socket';
 
 /** Narrow a decode to its success arm, failing the test with the reason if not. */
 function decoded<T>(result: SatelliteFrameDecode<T>): { header: T; payload: Uint8Array } {
@@ -326,15 +326,17 @@ describe('satellite socket framing', () => {
       decodeVoiceServerFrame(encodeSatelliteFrame({ t: 'set_wake_enabled', enabled: true })),
     ).toBeNull();
 
-    // What separates the lanes in production is the MOUNT PATH, not the bytes:
-    // a handful of pure control frames (`utterance_end`) are deliberately
-    // wire-identical in both, and asserting otherwise would be asserting a
-    // coincidence. The version byte is the escape hatch if they ever must
-    // diverge — which is why the codec takes it as a parameter.
+    // What separates the lanes in production is the MOUNT PATH, not the bytes
+    // — same codec, same version byte (tested above). The CLIENT frame
+    // vocabularies no longer overlap at all: the browser voice lane dropped
+    // its client-scoped utterance handshake (server-side VAD owns
+    // endpointing now — the mic streams PCM continuously from `hello` to
+    // disconnect), while the satellite lane keeps its own `utterance_end` for
+    // edge-STT nodes. A frame minted for the satellite lane is refused by the
+    // voice lane's client decoder rather than silently matching by
+    // field-shape coincidence.
     expect(
-      decoded(
-        decodeSatelliteClientFrame(encodeVoiceFrame({ t: 'utterance_end', utteranceId: 'u1' })),
-      ).header,
-    ).toEqual({ t: 'utterance_end', utteranceId: 'u1' });
+      decodeVoiceClientFrame(encodeSatelliteFrame({ t: 'utterance_end', utteranceId: 'u1' })),
+    ).toBeNull();
   });
 });

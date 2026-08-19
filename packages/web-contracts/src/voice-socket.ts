@@ -46,49 +46,28 @@ const ClientHelloSchema = z.object({
   t: z.literal('hello'),
   /** Chat session this call belongs to. Telemetry/observability only. */
   sessionId: z.string().optional(),
-});
-
-const UtteranceStartSchema = z.object({
-  t: z.literal('utterance_start'),
-  utteranceId: z.string().min(1),
-  /** Sample rate of the PCM frames that follow. */
-  sampleRate: z.number().int().positive(),
-  /** Personality listening; its `voice.stt_provider` picks the STT entry. The
-   *  mirror of `personalityId` on `synthesize`. Absent → the default entry. */
+  /** Personality speaking on this lane; picks its toolset, voice and STT/TTS
+   *  roster entries. Absent → the deployment default. */
   personalityId: z.string().optional(),
+  /**
+   * Sample rate of the PCM frames the browser is about to stream. Absent means
+   * this connection is not opening the pipeline audio path at all (e.g. a
+   * realtime-tier-only control channel) — the server never asks for a session
+   * and any `audio` frame that follows anyway is dropped.
+   */
+  sampleRate: z.number().int().positive().optional(),
 });
 
+/**
+ * Continuous mic PCM. Unlike V1, the browser no longer buckets frames into a
+ * client-decided utterance: the server's `VoiceSession` owns VAD, endpointing
+ * and barge-in, so the mic streams unbroken from `hello` to disconnect and the
+ * server decides what a turn is. `seq` is a monotonic per-connection frame
+ * counter — gaps are visible, not silent — not an utterance id.
+ */
 const ClientAudioSchema = z.object({
   t: z.literal('audio'),
-  utteranceId: z.string().min(1),
-  /** Monotonic per-utterance frame counter — gaps are visible, not silent. */
   seq: z.number().int().nonnegative(),
-});
-
-const UtteranceEndSchema = z.object({
-  t: z.literal('utterance_end'),
-  utteranceId: z.string().min(1),
-});
-
-const SynthesizeSchema = z.object({
-  t: z.literal('synthesize'),
-  /** The utterance this reply answers. Stale → the server never synthesizes. */
-  utteranceId: z.string().min(1),
-  /** Reply segment (one sentence), ordered by the client. */
-  segmentId: z.string().min(1),
-  text: z.string(),
-  /** Global default voice from config — lowest precedence (see the RPC input). */
-  voice: z.string().optional(),
-  /** Personality speaking this segment; its `voice.tts_voice` beats `voice`. */
-  personalityId: z.string().optional(),
-  /** BCP-47 tag, selecting from the personality's language→voice map. */
-  language: z.string().optional(),
-});
-
-const CancelSchema = z.object({
-  t: z.literal('cancel'),
-  utteranceId: z.string().min(1),
-  reason: z.enum(['barge_in', 'hangup', 'superseded']),
 });
 
 // --- realtime tier: the CONTROL channel -------------------------------------
@@ -179,11 +158,7 @@ const RealtimeEndSchema = z.object({
 
 const VoiceClientFrameSchema = z.discriminatedUnion('t', [
   ClientHelloSchema,
-  UtteranceStartSchema,
   ClientAudioSchema,
-  UtteranceEndSchema,
-  SynthesizeSchema,
-  CancelSchema,
   RealtimeStartSchema,
   RealtimeToolCallSchema,
   RealtimeTranscriptSchema,
@@ -204,11 +179,40 @@ const ReadySchema = z.object({
 
 const TranscriptSchema = z.object({
   t: z.literal('transcript'),
+  /** Minted server-side once `VoiceSession` commits an utterance (`u1`, `u2`, …). */
   utteranceId: z.string().min(1),
   text: z.string(),
   final: z.boolean(),
   /** The STT provider that actually ran. */
   provider: z.string().optional(),
+});
+
+/**
+ * Text of one reply segment — a full sentence, or a spoken filler queued
+ * during a long tool run — sent BEFORE that segment's `audio`/`segment_end`
+ * frames so a caption can appear ahead of the sound. `segmentId` is minted
+ * server-side and is what groups the `audio` frames that follow it.
+ */
+const ReplyTextSchema = z.object({
+  t: z.literal('reply_text'),
+  utteranceId: z.string().min(1),
+  segmentId: z.string().min(1),
+  text: z.string().min(1),
+  kind: z.enum(['sentence', 'filler']),
+});
+
+/**
+ * The turn is over — either it finished playing, or the user barged in.
+ * `text` is the honest reply: the sentences actually played, unmodified on
+ * `interrupted: false`, or with the trailing `[interrupted]` marker's source
+ * text on `interrupted: true` (the marker itself is a render-time concern —
+ * see `markInterrupted` on the web side).
+ */
+const TurnEndSchema = z.object({
+  t: z.literal('turn_end'),
+  utteranceId: z.string().min(1),
+  text: z.string(),
+  interrupted: z.boolean(),
 });
 
 const ServerAudioSchema = z.object({
@@ -235,13 +239,6 @@ const SegmentEndSchema = z.object({
   t: z.literal('segment_end'),
   utteranceId: z.string().min(1),
   segmentId: z.string().min(1),
-});
-
-const DroppedSchema = z.object({
-  t: z.literal('dropped'),
-  utteranceId: z.string().min(1),
-  stage: z.enum(['capture', 'transcript', 'synthesis']),
-  reason: z.enum(['superseded', 'cancelled', 'lane_closed', 'too_large']),
 });
 
 const ServerErrorSchema = z.object({
@@ -310,9 +307,10 @@ const RealtimeWindDownSchema = z.object({
 const VoiceServerFrameSchema = z.discriminatedUnion('t', [
   ReadySchema,
   TranscriptSchema,
+  ReplyTextSchema,
   ServerAudioSchema,
   SegmentEndSchema,
-  DroppedSchema,
+  TurnEndSchema,
   ServerErrorSchema,
   RealtimeReadySchema,
   RealtimeToolResultSchema,

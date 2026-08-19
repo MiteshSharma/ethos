@@ -99,7 +99,7 @@ describe('voice socket transport', () => {
     sockets[0]?.open();
     await connected;
 
-    transport.send({ t: 'utterance_start', utteranceId: 'u1', sampleRate: 16_000 });
+    transport.send({ t: 'hello', sampleRate: 16_000 });
     expect(sockets[0]?.binaryType).toBe('arraybuffer');
     expect(sockets[0]?.sent).toHaveLength(1);
     expect(transport.status).toBe('open');
@@ -162,7 +162,7 @@ describe('voice socket transport', () => {
     await connected;
     sockets[0]?.drop();
 
-    transport.send({ t: 'audio', utteranceId: 'u1', seq: 0 }, new Uint8Array([1, 2]));
+    transport.send({ t: 'audio', seq: 0 }, new Uint8Array([1, 2]));
     expect(sockets[0]?.sent).toHaveLength(0);
   });
 

@@ -2,7 +2,8 @@ import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { type AgentLoop, DefaultToolRegistry, InMemorySessionStore } from '@ethosagent/core';
 import { AGENT_CONSULT_TOOL, createAgentConsultTool } from '@ethosagent/tools-voice';
-import type { AgentEvent } from '@ethosagent/types';
+import type { AgentEvent, PcmChunk } from '@ethosagent/types';
+import type { VoiceSession, VoiceSessionEvent } from '@ethosagent/voice-session';
 import {
   decodeVoiceServerFrame,
   encodeVoiceFrame,
@@ -13,25 +14,39 @@ import {
 } from '@ethosagent/web-contracts';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import WebSocket from 'ws';
-import type { VoiceService } from '../../services/voice.service';
 import { createRealtimeControlDeps } from '../realtime-control-deps';
 import { RealtimeControlLane } from '../realtime-control-lane';
+import type { VoiceLaneSessionOpener } from '../voice-lane';
 import { createVoiceSocket, originAllowed, readCookie, type VoiceSocket } from '../voice-socket';
 
 // The socket half: upgrade policy (path, Origin, credentials) and the round
-// trip over a REAL `ws` connection. The conversation protocol itself is tested
-// against `VoiceLane` directly in voice-lane.test.ts.
+// trip over a REAL `ws` connection. The frame TRANSLATION itself is tested
+// against `VoiceLane` directly in voice-lane.test.ts; this file proves that a
+// `hello`/`audio` frame off the wire reaches a lane's `openSession` opener and
+// that a `VoiceSession` event comes back as the wire frame the browser
+// decodes.
 
 const COOKIE = 'ethos_auth=good-token';
 
-/** A VoiceService stand-in — only the two methods the lane actually calls. */
-function fakeVoiceService(): VoiceService {
-  return {
-    transcribeBytes: () => Promise.resolve({ text: 'over the wire', provider: 'fake-stt' }),
-    synthesizeStream: async function* () {
-      yield { audio: new Uint8Array([7, 8, 9]), format: 'opus' as const, provider: 'fake-tts' };
-    },
-  } as unknown as VoiceService;
+/** A `VoiceSession` stand-in this file drives from outside. */
+class FakeVoiceSession {
+  readonly pushed: PcmChunk[] = [];
+  private listeners: Array<(event: VoiceSessionEvent) => void> = [];
+
+  pushAudio(chunk: PcmChunk): void {
+    this.pushed.push(chunk);
+  }
+
+  on(listener: (event: VoiceSessionEvent) => void): () => void {
+    this.listeners.push(listener);
+    return () => {
+      this.listeners = this.listeners.filter((l) => l !== listener);
+    };
+  }
+
+  emit(event: VoiceSessionEvent): void {
+    for (const listener of [...this.listeners]) listener(event);
+  }
 }
 
 /**
@@ -61,11 +76,15 @@ describe('voice socket', () => {
   let server: Server;
   let socketLane: VoiceSocket;
   let url: string;
+  let session: FakeVoiceSession;
+  let opener: VoiceLaneSessionOpener;
 
   beforeEach(async () => {
+    session = new FakeVoiceSession();
+    opener = vi.fn(() => Promise.resolve(session as unknown as VoiceSession));
     server = createServer((_req, res) => res.end('ok'));
     socketLane = createVoiceSocket({
-      voice: fakeVoiceService(),
+      session: () => opener,
       authenticate: (req) =>
         Promise.resolve(readCookie(req.headers.cookie, 'ethos_auth') === 'good-token'),
     });
@@ -112,21 +131,21 @@ describe('voice socket', () => {
     expect(status).toBe(403);
   });
 
-  it('carries an utterance up and synthesized audio down as binary frames', async () => {
+  it('opens a session on hello and carries its events down as binary frames', async () => {
     const client = open();
     await new Promise<void>((resolve) => client.ws.on('open', () => resolve()));
 
-    client.send({ t: 'hello', sessionId: 'cli:test' });
-    client.send({ t: 'utterance_start', utteranceId: 'u1', sampleRate: 16_000 });
-    client.send(
-      { t: 'audio', utteranceId: 'u1', seq: 0 },
-      pcm16ToBytes(Int16Array.from([1, 2, 3])),
-    );
-    client.send({ t: 'utterance_end', utteranceId: 'u1' });
-    await vi.waitFor(() => expect(client.frames.some((f) => f.t === 'transcript')).toBe(true));
+    client.send({ t: 'hello', sessionId: 'cli:test', sampleRate: 16_000 });
+    await vi.waitFor(() => expect(client.frames.some((f) => f.t === 'ready')).toBe(true));
 
-    client.send({ t: 'synthesize', utteranceId: 'u1', segmentId: 's0', text: 'Hello back.' });
-    await vi.waitFor(() => expect(client.frames.some((f) => f.t === 'segment_end')).toBe(true));
+    client.send({ t: 'audio', seq: 0 }, pcm16ToBytes(Int16Array.from([1, 2, 3])));
+    await vi.waitFor(() => expect(session.pushed).toHaveLength(1));
+    expect(session.pushed[0]).toEqual({ data: Int16Array.from([1, 2, 3]), sampleRate: 16_000 });
+
+    session.emit({ type: 'utterance_committed', text: 'over the wire' });
+    session.emit({ type: 'reply_sentence', text: 'Hello back.' });
+    session.emit({ type: 'reply_audio', audio: new Uint8Array([7, 8, 9]), format: 'opus' });
+    await vi.waitFor(() => expect(client.frames.some((f) => f.t === 'audio')).toBe(true));
 
     expect(client.frames[0]).toMatchObject({ t: 'ready', protocolVersion: 1 });
     expect(client.frames.find((f) => f.t === 'transcript')).toMatchObject({
@@ -137,6 +156,27 @@ describe('voice socket', () => {
     expect(Array.from(client.payloads[audioIndex] ?? [])).toEqual([7, 8, 9]);
     expect(socketLane.laneCount).toBe(1);
     client.ws.close();
+  });
+
+  it('refuses audio with a clear error when no session opener is wired', async () => {
+    const bareServer = createServer((_req, res) => res.end('ok'));
+    const noOpener = createVoiceSocket({ authenticate: () => Promise.resolve(true) });
+    noOpener.attach(bareServer);
+    await new Promise<void>((resolve) => bareServer.listen(0, '127.0.0.1', resolve));
+    const { port } = bareServer.address() as AddressInfo;
+
+    const client = openClient(`ws://127.0.0.1:${port}`, {}, VOICE_SOCKET_PATH);
+    await new Promise<void>((resolve) => client.ws.on('open', () => resolve()));
+
+    client.send({ t: 'hello', sampleRate: 16_000 });
+    await vi.waitFor(() =>
+      expect(client.frames.some((f) => f.t === 'error' && f.code === 'voice_unavailable')).toBe(
+        true,
+      ),
+    );
+    client.ws.close();
+    await noOpener.close();
+    await new Promise<void>((resolve) => bareServer.close(() => resolve()));
   });
 
   it('ignores a malformed frame with an error rather than dropping the call', async () => {
@@ -166,16 +206,14 @@ describe('voice socket', () => {
     client.ws.close();
   });
 
-  it('releases the lane when the client goes away mid-utterance', async () => {
+  it('releases the lane when the client goes away mid-call', async () => {
     const client = open();
     await new Promise<void>((resolve) => client.ws.on('open', () => resolve()));
-    client.send({ t: 'utterance_start', utteranceId: 'u1', sampleRate: 16_000 });
-    client.send({ t: 'audio', utteranceId: 'u1', seq: 0 }, pcm16ToBytes(Int16Array.from([5])));
+    client.send({ t: 'hello', sampleRate: 16_000 });
+    client.send({ t: 'audio', seq: 0 }, pcm16ToBytes(Int16Array.from([5])));
     await vi.waitFor(() => expect(socketLane.laneCount).toBe(1));
 
     client.ws.terminate();
-    // The half-captured utterance dies with the lane — no server-side state
-    // survives to be resumed, which is exactly the defined WS-drop behavior.
     await vi.waitFor(() => expect(socketLane.laneCount).toBe(0));
   });
 });
@@ -234,7 +272,6 @@ describe('voice socket — the realtime control channel', () => {
     );
     server = createServer((_req, res) => res.end('ok'));
     socketLane = createVoiceSocket({
-      voice: fakeVoiceService(),
       authenticate: (req) =>
         Promise.resolve(readCookie(req.headers.cookie, 'ethos_auth') === 'good-token'),
       realtime: (laneId) => {

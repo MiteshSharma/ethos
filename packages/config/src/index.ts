@@ -570,12 +570,18 @@ export interface VoiceInboundConfig {
 /**
  * The audio surfaces whose barge-in sensitivity tunes separately.
  *
- * Two, not three: the browser talk lane endpoints IN the browser and is tuned by
- * the `display.voice_*` keys, which are a complete, shipped path with five knobs
- * that do not map onto these three. A `browser` member here would be a control
- * that reads back what an operator typed and changes nothing.
+ * Three, since L1 (plan §7 "Conflict 2"): the browser talk lane's pipeline tier
+ * now runs on the SAME `VoiceSession` orchestrator as `call`/`satellite`, so it
+ * gets the same tuner. `voice.bargeIn.browser` always wins when present; the
+ * legacy flat `display.voice_*` keys (Settings → Voice → Advanced voice
+ * tuning) are read through as a fallback ONLY when `voice.bargeIn.browser` is
+ * absent — see `readLegacyBrowserBargeInTuning` in
+ * `apps/web-api/src/services/config.service.ts`. `display.voice_speech_threshold`
+ * / `display.voice_speech_min_ms` have no counterpart here: they tuned the
+ * browser's own local endpointer, which the streaming pipeline lane no longer
+ * has.
  */
-export type VoiceBargeInSurface = 'call' | 'satellite';
+export type VoiceBargeInSurface = 'call' | 'satellite' | 'browser';
 
 /** Barge-in / VAD thresholds for one surface. Every field optional — an
  *  operator tunes the one knob a room is wrong about, not all three. */
@@ -4605,7 +4611,7 @@ function buildVoiceInbound(
   };
 }
 
-const VOICE_BARGE_IN_SURFACES = ['call', 'satellite'] as const;
+const VOICE_BARGE_IN_SURFACES = ['call', 'satellite', 'browser'] as const;
 const VOICE_BARGE_IN_FIELDS = ['energyThreshold', 'minSpeechMs', 'silenceMs'] as const;
 
 /**
@@ -4626,13 +4632,7 @@ function buildVoiceBargeIn(kv: Record<string, Record<string, string>>): {
   for (const [surface, fields] of Object.entries(kv)) {
     if (!(VOICE_BARGE_IN_SURFACES as readonly string[]).includes(surface)) {
       errors.push(
-        surface === 'browser'
-          ? // Named on its own: `browser` used to parse here and reach nothing.
-            // An operator carrying it forward is not making a typo, they are
-            // reading a file that predates the removal, and the useful answer
-            // is where the tuning actually lives.
-            'voice.bargeIn.browser: the browser talk lane endpoints in the browser — tune it with the display.voice_* keys (Settings → Voice → Advanced voice tuning).'
-          : `voice.bargeIn.${surface}: unknown surface (expected one of: ${VOICE_BARGE_IN_SURFACES.join(', ')}).`,
+        `voice.bargeIn.${surface}: unknown surface (expected one of: ${VOICE_BARGE_IN_SURFACES.join(', ')}).`,
       );
       continue;
     }

@@ -1,5 +1,4 @@
-import type { PcmChunk } from '@ethosagent/types';
-import { encodeWav } from '@ethosagent/voice-session';
+import type { VoiceSession, VoiceSessionEvent } from '@ethosagent/voice-session';
 import {
   pcm16FromBytes,
   VOICE_SOCKET_VERSION,
@@ -8,60 +7,36 @@ import {
 } from '@ethosagent/web-contracts';
 
 // One browser voice call, server-side. A lane owns EXACTLY one WebSocket
-// connection and nothing outside it: every piece of state below is an instance
-// field, so two concurrent callers are two `VoiceLane` objects that cannot
-// observe each other. There is no module-level map keyed by utterance or
-// session id — that shape is how one caller's private audio ends up in another
-// caller's stream (voice V1a failure-mode criteria, "no process-global voice
-// state").
+// connection and nothing outside it: every piece of state below is an
+// instance field, so two concurrent callers are two `VoiceLane` objects that
+// cannot observe each other.
 //
-// The lane is transport-free on purpose: it takes `send` and is fed decoded
-// frames, so the conversation protocol is unit-testable without a socket.
+// The lane used to run its own STT → reply-text → TTS conversation directly
+// against `VoiceService`. It no longer does: the conversation — VAD,
+// endpointing, the agent turn, barge-in — lives in `VoiceSession`
+// (`@ethosagent/voice-session`), the same orchestrator the SIP and LiveKit
+// pipeline lanes already run on. `VoiceLane` is now pure frame plumbing: mic
+// PCM off the wire becomes `PcmChunk`s fed into `session.pushAudio()`, and
+// `VoiceSessionEvent`s coming back become `VoiceServerFrame`s. Opening the
+// session is deferred to `hello`, because that is the first frame that names
+// the sample rate and the personality — the lane cannot resolve one at
+// construction time the way the socket layer constructs the lane itself.
 
-/** Provider seams the lane drives. Both are per-call, both are abortable. */
-export interface VoiceLaneDeps {
-  /** Transcribe one complete utterance (WAV bytes) → text + provider that ran.
-   *  `personalityId` lets the resolver honour that personality's own
-   *  `voice.stt_provider`, the same way `synthesize` honours its voice. */
-  transcribe(
-    audio: { data: Uint8Array; mimeType: string },
-    opts: { personalityId?: string; signal: AbortSignal },
-  ): Promise<{ text: string; provider: string }>;
-  /** Stream one reply segment's audio. */
-  synthesize(
-    text: string,
-    opts: { voice?: string; personalityId?: string; language?: string; signal: AbortSignal },
-  ): AsyncIterable<{ audio: Uint8Array; format: 'opus' | 'mp3' | 'wav' | 'pcm'; provider: string }>;
-}
-
-export interface VoiceLaneLimits {
-  /** Cap on captured audio per utterance. Beyond it the utterance is dropped. */
-  maxUtteranceBytes: number;
-  /** How many utterances a lane remembers. Older ones count as superseded. */
-  maxTrackedUtterances: number;
-}
-
-export const DEFAULT_VOICE_LANE_LIMITS: VoiceLaneLimits = {
-  // ~4 minutes of 16 kHz mono PCM. Long enough for any real utterance, small
-  // enough that a stuck or hostile client cannot grow the heap without bound.
-  maxUtteranceBytes: 8 * 1024 * 1024,
-  maxTrackedUtterances: 8,
-};
+/** Opens this connection's `VoiceSession`. Null → the pipeline is not
+ *  available for this deployment (no `voice.*` stack configured); the
+ *  handshake still completes, but audio frames are refused with a clear
+ *  error rather than silently doing nothing. */
+export type VoiceLaneSessionOpener = (info: {
+  sessionId?: string;
+  personalityId?: string;
+}) => Promise<VoiceSession | null>;
 
 export interface VoiceLaneOptions {
   laneId: string;
-  deps: VoiceLaneDeps;
   /** Deliver one frame to THIS lane's socket. */
   send(frame: VoiceServerFrame, payload?: Uint8Array): void;
-  limits?: Partial<VoiceLaneLimits>;
-  /** Structured lane events for logging/telemetry. Never user-facing. */
-  onEvent?: (event: VoiceLaneEvent) => void;
+  openSession: VoiceLaneSessionOpener;
 }
-
-export type VoiceLaneEvent =
-  | { type: 'utterance_superseded'; utteranceId: string; reason: string }
-  | { type: 'transcribed'; utteranceId: string; provider: string; ms: number }
-  | { type: 'synthesized'; utteranceId: string; segmentId: string; provider: string; ms: number };
 
 /** Provider audio format → the MIME type the wire frame carries. Shared with
  *  the satellite lane so the two lanes cannot drift on what `opus` means. */
@@ -72,36 +47,28 @@ export const MIME_BY_FORMAT: Record<string, string> = {
   pcm: 'audio/pcm',
 };
 
-interface UtteranceState {
+/** One reply segment's audio, in flight. */
+interface OpenSegment {
   id: string;
-  sampleRate: number;
-  /** Personality listening, when the client named one. Picks the STT entry. */
-  personalityId: string | undefined;
-  chunks: PcmChunk[];
-  bytes: number;
-  controller: AbortController;
-  /** Superseded by barge-in, a newer utterance, or eviction. Results are dropped. */
-  superseded: boolean;
-  /** Serializes this utterance's synthesis so reply segments stay in order. */
-  synthChain: Promise<void>;
+  seq: number;
 }
 
 export class VoiceLane {
   private readonly opts: VoiceLaneOptions;
-  private readonly limits: VoiceLaneLimits;
-  /** Per-LANE utterance state. Insertion-ordered; oldest evicted first. */
-  private readonly utterances = new Map<string, UtteranceState>();
-  private activeUtteranceId: string | null = null;
+  private session: VoiceSession | null = null;
+  private unsubscribe: (() => void) | null = null;
+  private opening = false;
   private closed = false;
+  /** Sample rate declared on `hello`. Null until then, or when this
+   *  connection never asked to open the pipeline. */
+  private sampleRate: number | null = null;
+  private utteranceSeq = 0;
+  private currentUtteranceId = '';
+  private segmentSeq = 0;
+  private openSegment: OpenSegment | null = null;
 
   constructor(opts: VoiceLaneOptions) {
     this.opts = opts;
-    this.limits = { ...DEFAULT_VOICE_LANE_LIMITS, ...opts.limits };
-  }
-
-  /** The utterance whose results the client is still willing to play. */
-  get activeUtterance(): string | null {
-    return this.activeUtteranceId;
   }
 
   handle(frame: VoiceClientFrame, payload: Uint8Array): void {
@@ -113,289 +80,147 @@ export class VoiceLane {
           laneId: this.opts.laneId,
           protocolVersion: VOICE_SOCKET_VERSION,
         });
-        return;
-      case 'utterance_start':
-        this.startUtterance(frame.utteranceId, frame.sampleRate, frame.personalityId);
+        if (frame.sampleRate !== undefined) {
+          void this.openPipeline(frame.sampleRate, frame.sessionId, frame.personalityId);
+        }
         return;
       case 'audio':
-        this.appendAudio(frame.utteranceId, payload);
-        return;
-      case 'utterance_end':
-        void this.finishUtterance(frame.utteranceId);
-        return;
-      case 'synthesize':
-        this.queueSynthesis(frame);
-        return;
-      case 'cancel':
-        this.supersede(
-          frame.utteranceId,
-          frame.reason === 'barge_in' || frame.reason === 'hangup' ? 'cancelled' : 'superseded',
-          'capture',
-        );
+        if (!this.session || this.sampleRate === null) return;
+        this.session.pushAudio({ data: pcm16FromBytes(payload), sampleRate: this.sampleRate });
         return;
     }
   }
 
-  /** Socket closed. Abort everything in flight; keep no audio around. */
+  /** Socket closed. Unsubscribe — the in-flight turn (if any) is not aborted;
+   *  see `VoiceChannelAdapter.stop()` for the same posture on the other
+   *  `VoiceSession`-backed lanes. */
   close(): void {
     if (this.closed) return;
     this.closed = true;
-    for (const state of this.utterances.values()) {
-      state.superseded = true;
-      state.chunks = [];
-      state.controller.abort();
-    }
-    this.utterances.clear();
-    this.activeUtteranceId = null;
+    this.unsubscribe?.();
+    this.unsubscribe = null;
+    this.session = null;
   }
 
-  private startUtterance(id: string, sampleRate: number, personalityId?: string): void {
-    // A new utterance supersedes every older one: the user moved on, so any
-    // transcript or audio still in flight for a previous utterance is stale
-    // and must never reach the client.
-    for (const previous of this.utterances.keys()) {
-      if (previous !== id) this.supersede(previous, 'superseded', 'capture');
-    }
-    const existing = this.utterances.get(id);
-    if (existing) existing.controller.abort();
-    this.utterances.set(id, {
-      id,
-      sampleRate,
-      personalityId,
-      chunks: [],
-      bytes: 0,
-      controller: new AbortController(),
-      superseded: false,
-      synthChain: Promise.resolve(),
-    });
-    this.activeUtteranceId = id;
-    this.evictOverflow();
-  }
-
-  private appendAudio(id: string, payload: Uint8Array): void {
-    const state = this.utterances.get(id);
-    if (!state || state.superseded) return;
-    if (state.bytes + payload.length > this.limits.maxUtteranceBytes) {
-      this.supersede(id, 'too_large', 'capture');
-      this.opts.send({
-        t: 'error',
-        code: 'utterance_too_long',
-        message: 'Utterance exceeded the capture limit and was discarded.',
-        utteranceId: id,
-      });
-      return;
-    }
-    state.bytes += payload.length;
-    state.chunks.push({ data: pcm16FromBytes(payload), sampleRate: state.sampleRate });
-  }
-
-  private async finishUtterance(id: string): Promise<void> {
-    const state = this.utterances.get(id);
-    if (!state || state.superseded) {
-      this.opts.send({ t: 'dropped', utteranceId: id, stage: 'transcript', reason: 'superseded' });
-      return;
-    }
-    const chunks = state.chunks;
-    // The captured PCM is not needed once it has been handed to STT; holding it
-    // for the rest of the call would keep raw voice in memory for no reason.
-    state.chunks = [];
-    const startedAt = Date.now();
-    const wav = encodeWav(chunks, state.sampleRate);
-
-    try {
-      const result = await this.opts.deps.transcribe(
-        { data: wav, mimeType: 'audio/wav' },
-        {
-          ...(state.personalityId ? { personalityId: state.personalityId } : {}),
-          signal: state.controller.signal,
-        },
-      );
-      if (this.isStale(state)) {
-        this.opts.send({
-          t: 'dropped',
-          utteranceId: id,
-          stage: 'transcript',
-          reason: 'superseded',
-        });
-        return;
-      }
-      this.opts.onEvent?.({
-        type: 'transcribed',
-        utteranceId: id,
-        provider: result.provider,
-        ms: Date.now() - startedAt,
-      });
-      this.opts.send({
-        t: 'transcript',
-        utteranceId: id,
-        text: result.text,
-        final: true,
-        provider: result.provider,
-      });
-    } catch (err) {
-      if (this.isStale(state)) {
-        this.opts.send({
-          t: 'dropped',
-          utteranceId: id,
-          stage: 'transcript',
-          reason: 'superseded',
-        });
-        return;
-      }
-      this.opts.send({
-        t: 'error',
-        code: 'transcribe_failed',
-        message: errorMessage(err, 'Could not transcribe audio — try again'),
-        utteranceId: id,
-        ...providerOf(err),
-      });
-    }
-  }
-
-  private queueSynthesis(frame: Extract<VoiceClientFrame, { t: 'synthesize' }>): void {
-    const state = this.utterances.get(frame.utteranceId);
-    if (!state || state.superseded) {
-      this.opts.send({
-        t: 'dropped',
-        utteranceId: frame.utteranceId,
-        stage: 'synthesis',
-        reason: 'superseded',
-      });
-      return;
-    }
-    // Segments are synthesized one at a time per utterance so their frames
-    // cannot interleave on the wire. The client still gets sentence N+1 while
-    // N is playing — synthesis is far faster than playout — without the lane
-    // having to reassemble an out-of-order stream.
-    state.synthChain = state.synthChain.then(() => this.runSynthesis(state, frame));
-  }
-
-  private async runSynthesis(
-    state: UtteranceState,
-    frame: Extract<VoiceClientFrame, { t: 'synthesize' }>,
+  private async openPipeline(
+    sampleRate: number,
+    sessionId?: string,
+    personalityId?: string,
   ): Promise<void> {
-    if (this.isStale(state)) {
+    if (this.opening) return;
+    this.opening = true;
+    this.sampleRate = sampleRate;
+    let session: VoiceSession | null;
+    try {
+      session = await this.opts.openSession({ sessionId, personalityId });
+    } catch (err) {
+      if (this.closed) return;
       this.opts.send({
-        t: 'dropped',
-        utteranceId: frame.utteranceId,
-        stage: 'synthesis',
-        reason: 'superseded',
+        t: 'error',
+        code: 'voice_unavailable',
+        message: errorMessage(err, 'Could not open the voice session.'),
       });
       return;
     }
-    const startedAt = Date.now();
-    let seq = 0;
-    let provider = '';
-    try {
-      // `voice` is the client's global default; `personalityId` is what lets
-      // the server prefer the personality's own voice over it. The lane does
-      // not choose — it forwards both and `VoiceService` applies the one
-      // shared precedence rule.
-      const stream = this.opts.deps.synthesize(frame.text, {
-        ...(frame.voice ? { voice: frame.voice } : {}),
-        ...(frame.personalityId ? { personalityId: frame.personalityId } : {}),
-        ...(frame.language ? { language: frame.language } : {}),
-        signal: state.controller.signal,
+    if (this.closed) return;
+    if (!session) {
+      this.opts.send({
+        t: 'error',
+        code: 'voice_unavailable',
+        message: 'Voice is not configured for this deployment.',
       });
-      for await (const chunk of stream) {
-        if (this.isStale(state)) {
-          state.controller.abort();
-          this.opts.send({
-            t: 'dropped',
-            utteranceId: frame.utteranceId,
-            stage: 'synthesis',
-            reason: 'superseded',
-          });
-          return;
-        }
-        provider = chunk.provider;
+      return;
+    }
+    this.session = session;
+    this.unsubscribe = session.on((event) => this.onSessionEvent(event));
+  }
+
+  /**
+   * Translate one `VoiceSessionEvent` into the wire frame(s) it corresponds
+   * to. `reply_sentence`/`filler` open a new segment (closing whatever was
+   * still open — `VoiceSession`'s playout queue drains strictly in enqueue
+   * order, so a new segment event can only arrive once the previous one's
+   * audio has finished, which is what makes closing-on-next-open safe here
+   * without `VoiceSession` itself reporting a segment boundary).
+   */
+  private onSessionEvent(event: VoiceSessionEvent): void {
+    switch (event.type) {
+      case 'utterance_committed':
+        this.utteranceSeq += 1;
+        this.currentUtteranceId = `u${this.utteranceSeq}`;
+        this.closeOpenSegment();
+        this.opts.send({
+          t: 'transcript',
+          utteranceId: this.currentUtteranceId,
+          text: event.text,
+          final: true,
+        });
+        return;
+      case 'reply_sentence':
+      case 'filler': {
+        this.closeOpenSegment();
+        this.segmentSeq += 1;
+        const segmentId = `s${this.segmentSeq}`;
+        this.openSegment = { id: segmentId, seq: 0 };
+        this.opts.send({
+          t: 'reply_text',
+          utteranceId: this.currentUtteranceId,
+          segmentId,
+          text: event.text,
+          kind: event.type === 'filler' ? 'filler' : 'sentence',
+        });
+        return;
+      }
+      case 'reply_audio': {
+        const segment = this.openSegment;
+        if (!segment) return;
+        const seq = segment.seq++;
         this.opts.send(
           {
             t: 'audio',
-            utteranceId: frame.utteranceId,
-            segmentId: frame.segmentId,
-            seq: seq++,
-            codec: chunk.format === 'pcm' ? 'pcm_s16le' : 'encoded',
-            mimeType: MIME_BY_FORMAT[chunk.format] ?? 'application/octet-stream',
-            provider: chunk.provider,
+            utteranceId: this.currentUtteranceId,
+            segmentId: segment.id,
+            seq,
+            codec: event.format === 'pcm' ? 'pcm_s16le' : 'encoded',
+            mimeType: MIME_BY_FORMAT[event.format] ?? 'application/octet-stream',
           },
-          chunk.audio,
+          event.audio,
         );
+        return;
       }
-      if (this.isStale(state)) return;
-      this.opts.send({
-        t: 'segment_end',
-        utteranceId: frame.utteranceId,
-        segmentId: frame.segmentId,
-      });
-      this.opts.onEvent?.({
-        type: 'synthesized',
-        utteranceId: frame.utteranceId,
-        segmentId: frame.segmentId,
-        provider,
-        ms: Date.now() - startedAt,
-      });
-    } catch (err) {
-      if (this.isStale(state)) return;
-      this.opts.send({
-        t: 'error',
-        code: 'synthesize_failed',
-        message: errorMessage(err, 'Speech synthesis failed'),
-        utteranceId: frame.utteranceId,
-        // Whatever the stream managed to name before it broke, else the
-        // resolution error's own provider id.
-        ...(provider ? { provider } : providerOf(err)),
-      });
+      case 'reply_complete':
+      case 'interrupted':
+        this.closeOpenSegment();
+        this.opts.send({
+          t: 'turn_end',
+          utteranceId: this.currentUtteranceId,
+          text: event.text,
+          interrupted: event.type === 'interrupted',
+        });
+        return;
+      case 'error':
+        this.opts.send({
+          t: 'error',
+          code: event.code ?? 'voice_error',
+          message: event.error,
+          ...(this.currentUtteranceId ? { utteranceId: this.currentUtteranceId } : {}),
+        });
+        return;
     }
   }
 
-  private supersede(
-    id: string,
-    reason: 'superseded' | 'cancelled' | 'too_large' | 'lane_closed',
-    stage: 'capture' | 'transcript' | 'synthesis',
-  ): void {
-    const state = this.utterances.get(id);
-    if (!state || state.superseded) return;
-    state.superseded = true;
-    state.chunks = [];
-    state.controller.abort();
-    if (this.activeUtteranceId === id) this.activeUtteranceId = null;
-    this.opts.onEvent?.({ type: 'utterance_superseded', utteranceId: id, reason });
-    this.opts.send({ t: 'dropped', utteranceId: id, stage, reason });
-  }
-
-  private isStale(state: UtteranceState): boolean {
-    return this.closed || state.superseded || this.utterances.get(state.id) !== state;
-  }
-
-  /** Keep the tracked-utterance map bounded; evicted utterances are stale. */
-  private evictOverflow(): void {
-    while (this.utterances.size > this.limits.maxTrackedUtterances) {
-      const oldest = this.utterances.keys().next();
-      if (oldest.done) return;
-      const state = this.utterances.get(oldest.value);
-      if (state) {
-        state.superseded = true;
-        state.chunks = [];
-        state.controller.abort();
-      }
-      this.utterances.delete(oldest.value);
-    }
+  private closeOpenSegment(): void {
+    const segment = this.openSegment;
+    if (!segment) return;
+    this.openSegment = null;
+    this.opts.send({
+      t: 'segment_end',
+      utteranceId: this.currentUtteranceId,
+      segmentId: segment.id,
+    });
   }
 }
 
 function errorMessage(err: unknown, fallback: string): string {
   return err instanceof Error && err.message ? err.message : fallback;
-}
-
-/**
- * Name the provider behind a failure when the error carries one
- * (`VoiceProviderError.providerId` from `@ethosagent/core`). Structural rather
- * than an instanceof import: the lane stays free of provider-resolution
- * dependencies, and any error that names its provider gets to say so.
- */
-function providerOf(err: unknown): { provider?: string } {
-  if (typeof err !== 'object' || err === null) return {};
-  const id = (err as { providerId?: unknown }).providerId;
-  return typeof id === 'string' && id ? { provider: id } : {};
 }
