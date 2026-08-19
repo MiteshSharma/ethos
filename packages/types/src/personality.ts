@@ -310,10 +310,10 @@ export interface LivingSoul {
 // this interface at test time and fails if the count drifts from
 // `.personality-field-count`. Culture sets the rule; CI enforces it.
 //
-// How a personality PRESENTS itself — how it sounds, how its call is drawn —
-// is identity, and lives as sub-keys of the `voice` block below (the
-// personality-presentation amendment). It is not a new top-level field, and it
-// is not a licence for one.
+// How a personality PRESENTS itself — how it sounds, how its call is drawn,
+// how it looks — is identity, and lives as sub-keys of an identity block
+// below (`voice`, `display`; the personality-presentation amendment). It is
+// not a new top-level field, and it is not a licence for one.
 //
 // Common rejections — these belong in skills, in `~/.ethos/config.yaml`, or in
 // per-channel adapter config, NOT here:
@@ -546,6 +546,19 @@ export interface PersonalityConfig {
    * leaf type — same precedent as `fs_reach`).
    */
   voice?: PersonalityVoiceConfig;
+  /**
+   * How a personality LOOKS across identity surfaces (the rail, the picker,
+   * the chat header, …) — the visual sibling of `voice`, granted by the same
+   * personality-presentation amendment: a personality is not only its tools
+   * and its plugins, it is also how it looks and feels. First field:
+   * `avatar_url`, a URL to a served or uploaded avatar image. Absent, or an
+   * image that fails to load, falls back to the generated mark
+   * (`PersonalityRingAvatar` / `PersonalityMark`) every identity surface
+   * already renders — no other behavior changes.
+   * Counts as ONE field for the schema-freeze gate (the nested shape is a
+   * leaf type — same precedent as `fs_reach`).
+   */
+  display?: { avatar_url?: string };
 }
 
 /**

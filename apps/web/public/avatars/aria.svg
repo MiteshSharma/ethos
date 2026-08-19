@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128" role="img" aria-label="Aria avatar">
+  <circle cx="64" cy="64" r="64" fill="#FBC9D4"/>
+  <ellipse cx="38" cy="96" rx="9" ry="20" fill="#6B4226"/>
+  <ellipse cx="90" cy="96" rx="9" ry="20" fill="#6B4226"/>
+  <ellipse cx="64" cy="56" rx="34" ry="30" fill="#6B4226"/>
+  <ellipse cx="64" cy="76" rx="28" ry="30" fill="#FFDBB4"/>
+  <circle cx="37" cy="78" r="6" fill="#FFDBB4"/>
+  <circle cx="91" cy="78" r="6" fill="#FFDBB4"/>
+  <path d="M35,64 Q64,40 93,64 L93,52 Q64,32 35,52 Z" fill="#6B4226"/>
+  <ellipse cx="53" cy="74" rx="3.5" ry="4.5" fill="#2B2118"/>
+  <ellipse cx="75" cy="74" rx="3.5" ry="4.5" fill="#2B2118"/>
+  <path d="M52,90 Q64,100 76,90" stroke="#7A4B32" stroke-width="3.5" fill="none" stroke-linecap="round"/>
+</svg>

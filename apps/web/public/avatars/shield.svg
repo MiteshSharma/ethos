@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128" role="img" aria-label="Shield avatar">
+  <circle cx="64" cy="64" r="64" fill="#6FCFC0"/>
+  <path d="M64,22 L96,34 L96,62 C96,88 82,102 64,110 C46,102 32,88 32,62 L32,34 Z" fill="#FFFFFF"/>
+  <polyline points="48,62 60,74 82,48" fill="none" stroke="#6FCFC0" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

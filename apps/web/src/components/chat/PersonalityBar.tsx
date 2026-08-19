@@ -17,6 +17,9 @@ export interface PersonalityBarProps {
   personalityId: string;
   /** Display name. Falls back to the id if no friendly name is provided. */
   name?: string;
+  /** Custom avatar image URL (`display.avatar_url`). Falls back to the
+   *  generated ring mark when absent or on load failure. */
+  avatarUrl?: string;
   model: string;
   /** Called when the user wants to start a fresh session. Caller wipes
    *  reducer state, URL `?session=` param, and localStorage. */
@@ -33,6 +36,7 @@ export interface PersonalityBarProps {
 export function PersonalityBar({
   personalityId,
   name,
+  avatarUrl,
   model,
   onNewSession,
   sessionTitle,
@@ -62,7 +66,7 @@ export function PersonalityBar({
       <div className="personality-bar-stripe" style={{ background: accent }} />
       <div className="personality-bar-content">
         <div className="personality-bar-left">
-          <PersonalityRingAvatar personalityId={personalityId} size={28} />
+          <PersonalityRingAvatar personalityId={personalityId} size={28} avatarUrl={avatarUrl} />
           <div className="personality-bar-identity">
             <span className="personality-bar-name">{displayName}</span>
             {model ? <span className="personality-bar-model">{model}</span> : null}

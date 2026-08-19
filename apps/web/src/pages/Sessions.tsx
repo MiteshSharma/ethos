@@ -4,6 +4,7 @@ import { Button, Dropdown, Input, Popconfirm, Spin, Table } from 'antd';
 import { useEffect, useMemo, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { PersonalityMark } from '../components/ui/PersonalityMark';
+import { usePersonalityList } from '../features/personalities/api/queries';
 import {
   useSessionDelete,
   useSessionExport,
@@ -58,6 +59,17 @@ export function Sessions() {
     useSessionList(debouncedSearch, personalityId);
 
   const flat = useMemo(() => data?.pages.flatMap((p) => p.items) ?? [], [data]);
+
+  // Library twin only (`personalityId` unset) — the Personality column needs
+  // each row's avatar, and a session doesn't carry one itself.
+  const personalitiesQuery = usePersonalityList({ enabled: !personalityId });
+  const avatarByPersonalityId = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const p of personalitiesQuery.data?.items ?? []) {
+      if (p.display?.avatar_url) map.set(p.id, p.display.avatar_url);
+    }
+    return map;
+  }, [personalitiesQuery.data]);
 
   // --- mutations ---
 
@@ -212,7 +224,11 @@ export function Sessions() {
                       render: (v: string | null) =>
                         v ? (
                           <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                            <PersonalityMark personalityId={v} size={16} />
+                            <PersonalityMark
+                              personalityId={v}
+                              size={16}
+                              avatarUrl={avatarByPersonalityId.get(v)}
+                            />
                             <span className="sessions-mono" style={{ fontSize: 12 }}>
                               {v}
                             </span>

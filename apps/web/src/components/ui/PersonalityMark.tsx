@@ -1,6 +1,6 @@
 import { personalityAccent } from '@ethosagent/design-tokens';
 import { generatePersonalityMark } from '@ethosagent/web-contracts';
-import { useId } from 'react';
+import { useId, useState } from 'react';
 
 // SVG renderer for the deterministic personality mark. The algorithm
 // lives in `@ethosagent/web-contracts/marks` so the same mark renders
@@ -24,9 +24,21 @@ export interface PersonalityMarkProps {
   accent?: string;
   /** Accessible label. Default `"<id> personality"`. */
   label?: string;
+  /** Custom avatar image URL (`display.avatar_url`). When present, renders
+   *  in place of the generated grid mark, sized/clipped identically (same
+   *  circular footprint). On load failure (broken link, deleted file, 404)
+   *  falls back to the generated mark exactly as if `avatarUrl` were absent. */
+  avatarUrl?: string;
 }
 
-export function PersonalityMark({ personalityId, size = 40, accent, label }: PersonalityMarkProps) {
+export function PersonalityMark({
+  personalityId,
+  size = 40,
+  accent,
+  label,
+  avatarUrl,
+}: PersonalityMarkProps) {
+  const [imageErrored, setImageErrored] = useState(false);
   const spec = generatePersonalityMark(personalityId);
   const color = accent ?? personalityAccent(personalityId);
   const cellSize = size / 5;
@@ -39,6 +51,29 @@ export function PersonalityMark({ personalityId, size = 40, accent, label }: Per
   const center = size / 2;
   const strokeWidth = Math.max(1, size * 0.04);
   const ringRadius = center - strokeWidth / 2;
+
+  const showAvatar = Boolean(avatarUrl) && !imageErrored;
+
+  if (showAvatar) {
+    return (
+      <img
+        src={avatarUrl}
+        alt=""
+        aria-label={accessibleLabel}
+        width={size}
+        height={size}
+        style={{
+          flexShrink: 0,
+          display: 'block',
+          width: size,
+          height: size,
+          borderRadius: '50%',
+          objectFit: 'cover',
+        }}
+        onError={() => setImageErrored(true)}
+      />
+    );
+  }
 
   return (
     <svg

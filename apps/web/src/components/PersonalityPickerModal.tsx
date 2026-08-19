@@ -30,7 +30,13 @@ export function PersonalityPickerModal({ open, onClose }: PersonalityPickerModal
   const listRef = useRef<HTMLDivElement>(null);
 
   const items = useMemo<PickerPersonality[]>(
-    () => (data?.items ?? []).map((p) => ({ id: p.id, name: p.name, description: p.description })),
+    () =>
+      (data?.items ?? []).map((p) => ({
+        id: p.id,
+        name: p.name,
+        description: p.description,
+        avatarUrl: p.display?.avatar_url,
+      })),
     [data?.items],
   );
   const filtered = useMemo(() => filterPersonalities(items, query), [items, query]);
@@ -131,7 +137,12 @@ export function PersonalityPickerModal({ open, onClose }: PersonalityPickerModal
                   onMouseEnter={() => setSelectedId(p.id)}
                   onClick={() => confirm(p.id)}
                 >
-                  <PersonalityRingAvatar personalityId={p.id} name={p.name} size={32} />
+                  <PersonalityRingAvatar
+                    personalityId={p.id}
+                    name={p.name}
+                    size={32}
+                    avatarUrl={p.avatarUrl}
+                  />
                   <span className="np-picker-info">
                     <span className="np-picker-name">{p.name}</span>
                     {p.description ? <span className="np-picker-desc">{p.description}</span> : null}

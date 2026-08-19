@@ -1212,3 +1212,53 @@ describe('voice round-trip', () => {
     });
   });
 });
+
+// `PersonalityConfig.display` — the personality-presentation amendment's second
+// identity block, parallel to `voice`. Same dotted-key convention as `voice`
+// (`buildDisplayConfig` mirrors `buildVoiceConfig`), so it rides the existing
+// flat parser and renderer rather than becoming a nested block.
+describe('display round-trip', () => {
+  it('parses display.avatar_url into the display block', async () => {
+    await seedPersonality(
+      'display-parse',
+      'name: DisplayParse\ndisplay.avatar_url: /api/personalities/display-parse/avatar\n',
+    );
+    const registry = makeRegistry();
+    await registry.loadFromDirectory(join(testDir, 'personalities'));
+
+    expect(registry.get('display-parse')?.display).toEqual({
+      avatar_url: '/api/personalities/display-parse/avatar',
+    });
+  });
+
+  // Mirrors the `voice` convention: absent = undefined, not `{}`.
+  it('carries no display block when no display.* key is set', async () => {
+    await seedPersonality('display-absent', 'name: DisplayAbsent\n');
+    const registry = makeRegistry();
+    await registry.loadFromDirectory(join(testDir, 'personalities'));
+    expect(registry.get('display-absent')?.display).toBeUndefined();
+  });
+
+  it('survives an unrelated update and re-load', async () => {
+    await seedPersonality(
+      'display-persist',
+      'name: DisplayPersist\ndisplay.avatar_url: /api/personalities/display-persist/avatar\n',
+    );
+    const registry = makeRegistry();
+    await registry.loadFromDirectory(join(testDir, 'personalities'));
+
+    await registry.update('display-persist', { description: 'now with a description' });
+
+    const raw = await readFile(
+      join(testDir, 'personalities', 'display-persist', 'config.yaml'),
+      'utf-8',
+    );
+    expect(raw).toContain('display.avatar_url: /api/personalities/display-persist/avatar');
+
+    const fresh = makeRegistry();
+    await fresh.loadFromDirectory(join(testDir, 'personalities'));
+    expect(fresh.get('display-persist')?.display).toEqual({
+      avatar_url: '/api/personalities/display-persist/avatar',
+    });
+  });
+});

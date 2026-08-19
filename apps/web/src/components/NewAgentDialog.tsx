@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { App as AntApp, AutoComplete, Button, Form, Input, Modal } from 'antd';
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { usePersonalityList } from '../features/personalities/api/queries';
 import { buildWorkspaceChatPath } from '../lib/workspaceRoutes';
@@ -12,6 +12,12 @@ import {
   ToolsetPicker,
 } from '../pages/Personalities';
 import { rpc } from '../rpc';
+import { AvatarPicker } from './personality/AvatarPicker';
+import {
+  type AvatarSelection,
+  attachAvatarAfterCreate,
+  uploadAvatarBytes,
+} from './personality/avatarActions';
 import { PersonalityMark } from './ui/PersonalityMark';
 
 // P5 item 1 (plan/phases/personality-first-ui.md) — the "New agent" fast
@@ -32,6 +38,7 @@ interface NewAgentState {
   model: string;
   toolset: string[];
   skills: string[];
+  avatarSelection: AvatarSelection | null;
 }
 
 const INITIAL_STATE: NewAgentState = {
@@ -41,6 +48,7 @@ const INITIAL_STATE: NewAgentState = {
   model: '',
   toolset: DEFAULT_TOOLSET,
   skills: [],
+  avatarSelection: null,
 };
 
 export function NewAgentDialog({ onClose }: { onClose: () => void }) {
@@ -51,6 +59,32 @@ export function NewAgentDialog({ onClose }: { onClose: () => void }) {
 
   const { data: listData } = usePersonalityList();
   const existingIds = useMemo(() => new Set((listData?.items ?? []).map((p) => p.id)), [listData]);
+
+  // Live avatar preview: an object URL for a staged file selection, revoked
+  // on reselection/unmount so it doesn't leak. A curated pick needs no object
+  // URL — it's already a static path.
+  const objectUrlRef = useRef<string | null>(null);
+  const [previewUrl, setPreviewUrl] = useState<string | undefined>(undefined);
+  useEffect(() => {
+    return () => {
+      if (objectUrlRef.current) URL.revokeObjectURL(objectUrlRef.current);
+    };
+  }, []);
+  function selectCuratedAvatar(url: string) {
+    if (objectUrlRef.current) {
+      URL.revokeObjectURL(objectUrlRef.current);
+      objectUrlRef.current = null;
+    }
+    setPreviewUrl(url);
+    setState((s) => ({ ...s, avatarSelection: { kind: 'curated', url } }));
+  }
+  function selectAvatarFile(file: File) {
+    if (objectUrlRef.current) URL.revokeObjectURL(objectUrlRef.current);
+    const url = URL.createObjectURL(file);
+    objectUrlRef.current = url;
+    setPreviewUrl(url);
+    setState((s) => ({ ...s, avatarSelection: { kind: 'file', file } }));
+  }
 
   // No provider field in the fast path (that's an advanced/wizard concern),
   // so suggestions are gathered across every provider in the catalog rather
@@ -78,6 +112,12 @@ export function NewAgentDialog({ onClose }: { onClose: () => void }) {
         ...(state.model ? { model: state.model } : {}),
       }),
     onSuccess: async () => {
+      // Two independent second steps, both needing the real `id` the create
+      // call just minted. Neither blocks the other, and neither blocks the
+      // dialog's success path (close/navigate/invalidate) below — a failed
+      // second step downgrades the toast to a warning, it never leaves the
+      // personality half-created from the user's point of view.
+      let secondStepFailed = false;
       if (state.skills.length > 0) {
         try {
           await rpc.personalities.skillsImportGlobal({
@@ -85,21 +125,35 @@ export function NewAgentDialog({ onClose }: { onClose: () => void }) {
             skillIds: state.skills,
           });
         } catch {
+          secondStepFailed = true;
           notification.warning({
             message: `Created ${state.name}, but skill attachment failed`,
             description: 'Open the personality editor to attach skills manually.',
             placement: 'topRight',
           });
-          qc.invalidateQueries({ queryKey: ['personalities', 'list'] });
-          qc.invalidateQueries({ queryKey: ['palette', 'personalities'] });
-          onClose();
-          navigate(buildWorkspaceChatPath(state.id));
-          return;
+        }
+      }
+      if (state.avatarSelection) {
+        try {
+          await attachAvatarAfterCreate(state.id, state.avatarSelection, {
+            setAvatarUrl: (id, url) =>
+              rpc.personalities.update({ id, display: { avatar_url: url } }),
+            uploadAvatar: uploadAvatarBytes,
+          });
+        } catch {
+          secondStepFailed = true;
+          notification.warning({
+            message: `Created ${state.name}, but the avatar didn't attach`,
+            description: 'Open the personality editor to set an avatar manually.',
+            placement: 'topRight',
+          });
         }
       }
       qc.invalidateQueries({ queryKey: ['personalities', 'list'] });
       qc.invalidateQueries({ queryKey: ['palette', 'personalities'] });
-      notification.success({ message: `Created ${state.name}`, placement: 'topRight' });
+      if (!secondStepFailed) {
+        notification.success({ message: `Created ${state.name}`, placement: 'topRight' });
+      }
       onClose();
       navigate(buildWorkspaceChatPath(state.id));
     },
@@ -137,7 +191,7 @@ export function NewAgentDialog({ onClose }: { onClose: () => void }) {
         <div style={{ display: 'flex', gap: 16, alignItems: 'flex-start' }}>
           <div style={{ flexShrink: 0, marginTop: 28 }}>
             {state.id ? (
-              <PersonalityMark personalityId={state.id} size={48} />
+              <PersonalityMark personalityId={state.id} size={48} avatarUrl={previewUrl} />
             ) : (
               <div
                 aria-hidden="true"
@@ -189,6 +243,17 @@ export function NewAgentDialog({ onClose }: { onClose: () => void }) {
             </Form.Item>
           </div>
         </div>
+
+        <Form.Item label="Avatar" help="Optional. Falls back to the generated mark shown above.">
+          <AvatarPicker
+            selectedCuratedUrl={
+              state.avatarSelection?.kind === 'curated' ? state.avatarSelection.url : undefined
+            }
+            onSelectCurated={selectCuratedAvatar}
+            onFileSelected={selectAvatarFile}
+            showRemove={false}
+          />
+        </Form.Item>
 
         <Form.Item label="SOUL core" required>
           <Input.TextArea

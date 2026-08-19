@@ -13,6 +13,8 @@ const items: PickerPersonality[] = [
   { id: 'coder', name: 'Coder', description: 'Writes TypeScript' },
   { id: 'writer', name: 'Writer', description: null },
   { id: 'personality-architect', name: 'Architect', description: 'meta agent' },
+  { id: 'team-architect', name: 'Team Architect', description: 'meta agent' },
+  { id: 'debug', name: 'Debug Assistant', description: 'meta agent' },
 ];
 
 describe('filterPersonalities', () => {

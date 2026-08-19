@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useConfig } from '../features/config/api/queries';
 import { usePersonalityList } from '../features/personalities/api/queries';
+import { filterSelectablePersonalities } from '../features/personalities/constants';
 import { useNewSessionModal } from '../hooks/useNewSessionModal';
 import { getLastPersonalityId } from '../lib/lastPersonality';
 import { setLastSessionId } from '../lib/lastSession';
@@ -106,7 +107,13 @@ export function CommandPalette({
   const personalitiesQuery = usePersonalityList({ enabled: open });
   const { data: config } = useConfig();
 
-  const agents = personalitiesQuery.data?.items ?? [];
+  const allAgents = personalitiesQuery.data?.items ?? [];
+  // System personalities (debug, personality-architect, team-architect) are
+  // excluded from the "Agents" group — this palette is a switcher, and
+  // they're not meant to be picked as a main agent. `allAgents` (unfiltered)
+  // still backs the fallback-name lookup below, since a fallback id can
+  // legitimately resolve to one of them.
+  const agents = filterSelectablePersonalities(allAgents);
   // The fallback chain `/` and `/chat` (and every P1a redirect) already use:
   // last-visited agent, else the operator's config default. Workspace pages
   // with no Library twin (Schedule, Memory, Documents, Goals, Tasks,
@@ -118,7 +125,8 @@ export function CommandPalette({
     config?.personality,
   );
   const fallbackPersonalityName =
-    agents.find((p) => p.id === fallbackPersonalityId)?.name ?? capitalize(fallbackPersonalityId);
+    allAgents.find((p) => p.id === fallbackPersonalityId)?.name ??
+    capitalize(fallbackPersonalityId);
 
   const items = useMemo<CommandItem[]>(() => {
     const closeAfter = (fn: () => void) => () => {

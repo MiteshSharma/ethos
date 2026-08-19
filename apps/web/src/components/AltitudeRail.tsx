@@ -1,6 +1,7 @@
 import { Dropdown, type MenuProps, Tooltip } from 'antd';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { usePersonalityList } from '../features/personalities/api/queries';
+import { filterSelectablePersonalities } from '../features/personalities/constants';
 import { extractWorkspacePersonalityId } from '../lib/scopeNav';
 import { buildRailSwitchPath } from '../lib/workspaceRoutes';
 import { EthosMark } from './ui/EthosMark';
@@ -37,7 +38,7 @@ export function AltitudeRail({ onOpenQuickCreate }: { onOpenQuickCreate: () => v
   const navigate = useNavigate();
   const activePersonalityId = extractWorkspacePersonalityId(pathname);
   const { data } = usePersonalityList();
-  const items = data?.items ?? [];
+  const items = filterSelectablePersonalities(data?.items ?? []);
 
   return (
     <nav className="altitude-rail" aria-label="Altitude">
@@ -63,7 +64,11 @@ export function AltitudeRail({ onOpenQuickCreate }: { onOpenQuickCreate: () => v
               aria-label={p.name}
               aria-current={p.id === activePersonalityId ? 'page' : undefined}
             >
-              <PersonalityRingAvatar personalityId={p.id} size={32} />
+              <PersonalityRingAvatar
+                personalityId={p.id}
+                size={32}
+                avatarUrl={p.display?.avatar_url}
+              />
             </Link>
           </Tooltip>
         ))}

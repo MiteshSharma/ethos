@@ -328,7 +328,11 @@ function UsedByMarks({
       {personalityIds.map((id) => (
         <Tooltip key={id} title={personalities.find((p) => p.id === id)?.name ?? id}>
           <span style={{ display: 'inline-flex' }}>
-            <PersonalityMark personalityId={id} size={16} />
+            <PersonalityMark
+              personalityId={id}
+              size={16}
+              avatarUrl={personalities.find((p) => p.id === id)?.display?.avatar_url}
+            />
           </span>
         </Tooltip>
       ))}

@@ -16,7 +16,7 @@ import type { WakeRouteDraft, WakeRouteWire } from './wake-routes';
 
 export interface WakeRouteRowProps {
   draft: WakeRouteDraft;
-  personalities: ReadonlyArray<{ id: string; name: string }>;
+  personalities: ReadonlyArray<{ id: string; name: string; avatarUrl?: string }>;
   /** The phrase tester heard this row. Lights up in the personality's accent. */
   matched: boolean;
   /** Server rejection attributed to this row, or a local validation failure. */
@@ -70,7 +70,11 @@ export function WakeRouteRow({
           →
         </span>
         {draft.personalityId ? (
-          <PersonalityMark personalityId={draft.personalityId} size={20} />
+          <PersonalityMark
+            personalityId={draft.personalityId}
+            size={20}
+            avatarUrl={personalities.find((p) => p.id === draft.personalityId)?.avatarUrl}
+          />
         ) : (
           <span className="wake-route-mark-slot" aria-hidden="true" />
         )}
@@ -130,6 +134,9 @@ export interface WakeImplicitRoutesProps {
   routes: readonly WakeRouteWire[];
   /** The tester's matched key — a synthesized route's key is its wire id. */
   matchedKey: string | null;
+  /** Same lookup `WakeRouteRow` uses for its mark's avatar override. Optional
+   *  — omitted (or an id with no match) falls back to the generated mark. */
+  personalities?: ReadonlyArray<{ id: string; avatarUrl?: string }>;
 }
 
 /**
@@ -148,7 +155,7 @@ export interface WakeImplicitRoutesProps {
  * The mark is drawn always, not only when matched, for the same reason the
  * editable row reserves its mark slot: nothing moves at the moment of proof.
  */
-export function WakeImplicitRoutes({ routes, matchedKey }: WakeImplicitRoutesProps) {
+export function WakeImplicitRoutes({ routes, matchedKey, personalities }: WakeImplicitRoutesProps) {
   if (routes.length === 0) return null;
   return (
     <Typography.Paragraph type="secondary" className="wake-route-note">
@@ -162,7 +169,11 @@ export function WakeImplicitRoutes({ routes, matchedKey }: WakeImplicitRoutesPro
             }`}
             style={{ '--accent': personalityAccent(route.personalityId) } as CSSProperties}
           >
-            <PersonalityMark personalityId={route.personalityId} size={14} />
+            <PersonalityMark
+              personalityId={route.personalityId}
+              size={14}
+              avatarUrl={personalities?.find((p) => p.id === route.personalityId)?.avatarUrl}
+            />
             <span className="wake-route-mono">“{route.phrase}”</span>
           </span>
         ))}

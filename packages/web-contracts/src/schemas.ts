@@ -137,6 +137,10 @@ export const PersonalitySchema = z.object({
   /** Per-personality memory backend. Optional (omitted when unset) so the
    *  editor can read the current provider to populate its form. */
   memory: z.object({ provider: z.string().optional() }).optional(),
+  /** How this personality looks across identity surfaces — currently just a
+   *  custom avatar image URL. Optional (omitted when unset) so surfaces fall
+   *  back to the generated mark. */
+  display: z.object({ avatar_url: z.string().optional() }).optional(),
   /** Nightly governed-learning gates. Optional (omitted when unset) so the
    *  editor can read the current toggles to populate its form. */
   nightly: z

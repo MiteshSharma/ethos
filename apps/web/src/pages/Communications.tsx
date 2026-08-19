@@ -26,13 +26,14 @@ import {
   Tag,
   Typography,
 } from 'antd';
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   useActiveCalls,
   useCallDetail,
   useCallsList,
 } from '../features/communications/api/queries';
+import { usePersonalityList } from '../features/personalities/api/queries';
 import { CallRow } from '../features/voice/CallRow';
 import {
   CALL_DIRECTION_FILTERS,
@@ -1322,6 +1323,14 @@ function CallsPanel() {
 
   const listQuery = useCallsList(filter);
   const activeQuery = useActiveCalls();
+  const personalitiesQuery = usePersonalityList();
+  const avatarByPersonalityId = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const p of personalitiesQuery.data?.items ?? []) {
+      if (p.display?.avatar_url) map.set(p.id, p.display.avatar_url);
+    }
+    return map;
+  }, [personalitiesQuery.data]);
 
   const active = activeQuery.data?.calls ?? [];
   const now = useTickingNow(active.length > 0);
@@ -1342,6 +1351,9 @@ function CallsPanel() {
                 call={call}
                 view={callRowView(call, now)}
                 onOpenTranscript={setTranscriptId}
+                avatarUrl={
+                  call.personalityId ? avatarByPersonalityId.get(call.personalityId) : undefined
+                }
               />
             ))}
           </div>
@@ -1369,6 +1381,9 @@ function CallsPanel() {
               call={call}
               view={callRowView(call, now)}
               onOpenTranscript={setTranscriptId}
+              avatarUrl={
+                call.personalityId ? avatarByPersonalityId.get(call.personalityId) : undefined
+              }
             />
           ))}
         </div>

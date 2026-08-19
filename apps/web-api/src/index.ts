@@ -55,6 +55,7 @@ import { PlatformsRepository } from './repositories/platforms.repository';
 import { WebTokenRepository } from './repositories/web-token.repository';
 import { createRoutes } from './routes';
 import { documentsRoutes } from './routes/documents';
+import { personalityAvatarRoutes } from './routes/personality-avatar';
 import type { RouteModule } from './routes/route-module';
 import { ApiKeysService } from './services/api-keys.service';
 import { createWebApprovalHook, type DangerPredicate } from './services/approval-hook';
@@ -1144,6 +1145,16 @@ export function createWebApi(opts: CreateWebApiOptions): CreateWebApiResult {
         description:
           'Streams a file from a personality workdir. Cookie-only: an `<a download>` ' +
           'navigation carries `ethos_auth`, but a Bearer header cannot be attached to one.',
+      },
+      {
+        basePath: '/api/personalities',
+        router: personalityAvatarRoutes({ personalities: personalitiesService }),
+        auth: 'cookie',
+        description:
+          'Upload/serve/delete a personality avatar image. Cookie-only, same posture as ' +
+          '`/documents`: personality-mutating writes are cookie-only everywhere else in ' +
+          'this app too (see dual-auth.ts SCOPE_MAP), and `<img src>` cannot carry a ' +
+          'Bearer header regardless.',
       },
     ],
     storage,

@@ -26,6 +26,10 @@ export interface SatelliteRowProps {
   now: number;
   busy: boolean;
   onToggleWake: (enabled: boolean) => void;
+  /** Avatar override lookup for the two personality marks this row can draw
+   *  (last wake, active follow-up window). Optional — omitted (or an id with
+   *  no match) falls back to the generated mark. */
+  personalities?: ReadonlyArray<{ id: string; avatarUrl?: string }>;
 }
 
 /** Three bars, animated by CSS. Deliberately NOT a meter: the node protocol
@@ -41,7 +45,14 @@ function LivenessBars() {
   );
 }
 
-export function SatelliteRow({ node, view, now, busy, onToggleWake }: SatelliteRowProps) {
+export function SatelliteRow({
+  node,
+  view,
+  now,
+  busy,
+  onToggleWake,
+  personalities,
+}: SatelliteRowProps) {
   // Computed here rather than trusted from the row: `until` is an instant, and
   // a window that has quietly expired must stop claiming follow-ups will land.
   const followUps = node.conversation ? conversationLeft(node.conversation.until, now) : null;
@@ -82,7 +93,11 @@ export function SatelliteRow({ node, view, now, busy, onToggleWake }: SatelliteR
           <span className="sat-row-arrow" aria-hidden="true">
             →
           </span>
-          <PersonalityMark personalityId={node.lastWake.personalityId} size={16} />
+          <PersonalityMark
+            personalityId={node.lastWake.personalityId}
+            size={16}
+            avatarUrl={personalities?.find((p) => p.id === node.lastWake?.personalityId)?.avatarUrl}
+          />
           <span className="sat-mono">{node.lastWake.personalityId}</span>
           <span className="sat-mono sat-wake-age" title={new Date(node.lastWake.at).toISOString()}>
             {wakeAge(node.lastWake.at, now)}
@@ -97,7 +112,13 @@ export function SatelliteRow({ node, view, now, busy, onToggleWake }: SatelliteR
       {followUps && node.conversation ? (
         <div className="sat-row-wake">
           <span className="sat-mono sat-wake-none">follow-ups reach</span>
-          <PersonalityMark personalityId={node.conversation.personalityId} size={16} />
+          <PersonalityMark
+            personalityId={node.conversation.personalityId}
+            size={16}
+            avatarUrl={
+              personalities?.find((p) => p.id === node.conversation?.personalityId)?.avatarUrl
+            }
+          />
           <span className="sat-mono">{node.conversation.personalityId}</span>
           <span className="sat-mono sat-wake-age">{followUps}</span>
         </div>

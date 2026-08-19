@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128" role="img" aria-label="Manager avatar">
+  <circle cx="64" cy="64" r="64" fill="#B7C4DE"/>
+  <circle cx="64" cy="46" r="16" fill="#FFFFFF"/>
+  <path d="M32,106 C32,80 46,68 64,68 C82,68 96,80 96,106 Z" fill="#FFFFFF"/>
+  <path d="M58,68 L70,68 L64,80 Z" fill="#B7C4DE"/>
+  <path d="M60,80 L68,80 L65,102 L64,106 L63,102 Z" fill="#B7C4DE"/>
+</svg>

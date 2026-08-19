@@ -52,6 +52,32 @@ export const SYSTEM_PERSONALITY_IDS: ReadonlySet<string> = new Set([
 ]);
 
 // ---------------------------------------------------------------------------
+// Avatar storage — `<personality-dir>/avatar.<ext>`, parallel to SOUL.md /
+// config.yaml / toolset.yaml. The extension is always derived from a
+// VALIDATED mime type (never a client-supplied filename) so the mapping here
+// is the single source of truth both the upload route and the serving route
+// key off of.
+// ---------------------------------------------------------------------------
+
+/** Allowlisted avatar mime types → the extension `writeAvatar` stores them
+ *  under. Anything not in this map is rejected. */
+export const AVATAR_MIME_TO_EXT: Readonly<Record<string, string>> = {
+  'image/png': 'png',
+  'image/jpeg': 'jpg',
+  'image/webp': 'webp',
+  'image/gif': 'gif',
+};
+
+const AVATAR_EXT_TO_MIME: Readonly<Record<string, string>> = Object.fromEntries(
+  Object.entries(AVATAR_MIME_TO_EXT).map(([mime, ext]) => [ext, mime]),
+);
+
+/** Matches the one avatar file a personality directory may hold at a time.
+ *  Extensions mirror `AVATAR_MIME_TO_EXT`'s values exactly — this module only
+ *  ever writes those four. */
+const AVATAR_FILENAME_RE = /^avatar\.(png|jpg|webp|gif)$/;
+
+// ---------------------------------------------------------------------------
 // YAML parsers — no external dependency, handles the subset we need
 // ---------------------------------------------------------------------------
 
@@ -690,6 +716,28 @@ export interface UpdatePersonalityPatch {
    *  `''` CLEARS that sub-key — the same convention `fs_reach.workdir` uses,
    *  and the only way the editor can express "back to the default provider". */
   voice?: EditableVoiceConfig;
+  /** Avatar sub-key of the `display` identity block. `''` clears
+   *  `avatar_url` — the same convention as `voice.*` / `fs_reach.workdir`.
+   *  Written by `writeAvatar`/`deleteAvatar` below; not a general editor
+   *  field (there is no raw-URL-paste flow in v1). */
+  display?: { avatar_url?: string };
+}
+
+/**
+ * Apply an editable `display` patch to the stored `display` block. Mirrors
+ * `mergeVoiceConfig`'s clearing convention (`''` clears, `undefined` leaves,
+ * anything else sets) even though `display` has only one sub-key today — a
+ * second sub-key (subject to the same schema-freeze governance as everything
+ * else on `PersonalityConfig`) then has one merge path to extend, not a new
+ * one to invent.
+ */
+function mergeDisplayConfig(
+  existing: PersonalityConfig['display'],
+  patch: { avatar_url?: string } | undefined,
+): PersonalityConfig['display'] {
+  if (patch === undefined || patch.avatar_url === undefined) return existing;
+  if (patch.avatar_url === '') return undefined;
+  return { avatar_url: patch.avatar_url };
 }
 
 /**
@@ -1002,7 +1050,8 @@ export class FilePersonalityRegistry implements PersonalityRegistry {
       patch.safety !== undefined ||
       patch.memory !== undefined ||
       patch.nightly !== undefined ||
-      patch.voice !== undefined
+      patch.voice !== undefined ||
+      patch.display !== undefined
     ) {
       const config = existing.config;
       if (patch.provider !== undefined && patch.provider !== '') {
@@ -1130,6 +1179,7 @@ export class FilePersonalityRegistry implements PersonalityRegistry {
           patch.nightly === undefined ? config.nightly : { ...config.nightly, ...patch.nightly },
         voice:
           patch.voice === undefined ? config.voice : mergeVoiceConfig(config.voice, patch.voice),
+        display: mergeDisplayConfig(config.display, patch.display),
       };
       // renderConfigYaml's safety emission is suppressed here (render with
       // `safety: undefined`) so we append exactly one safety block — never a
@@ -1279,6 +1329,96 @@ export class FilePersonalityRegistry implements PersonalityRegistry {
     const dir = this.dirOf(existing);
     await this.storage.remove(dir, { recursive: true });
     this.remove(id);
+  }
+
+  /**
+   * Write (overwrite) a personality's avatar image and point
+   * `display.avatar_url` at `avatarUrl` — the caller (the web-api route)
+   * computes that URL, since URL/mount-path shape is an HTTP concern this
+   * registry has no business knowing.
+   *
+   * `mimeType` MUST already be one of `AVATAR_MIME_TO_EXT`'s keys — the
+   * caller validates the upload's Content-Type before calling this, but the
+   * check is repeated here (throwing `INVALID_INPUT`) so this method is safe
+   * to call directly, not just safe behind a route that remembers to check
+   * first. The extension is derived from the validated mime type, never from
+   * a client-supplied filename, closing the extension-injection hole.
+   *
+   * At most one `avatar.<ext>` file exists per personality: a re-upload with
+   * a DIFFERENT extension than the stored one deletes the stale file first,
+   * so switching from a `.png` to a `.webp` avatar doesn't leave both behind.
+   * Built-ins are read-only — this throws for them, mirroring `update()`.
+   */
+  async writeAvatar(
+    id: string,
+    bytes: Uint8Array,
+    mimeType: string,
+    avatarUrl: string,
+  ): Promise<void> {
+    const ext = AVATAR_MIME_TO_EXT[mimeType];
+    if (!ext) {
+      throw new EthosError({
+        code: 'INVALID_INPUT',
+        cause: `Unsupported avatar image type "${mimeType}".`,
+        action: `Upload one of: ${Object.keys(AVATAR_MIME_TO_EXT).join(', ')}.`,
+      });
+    }
+    const existing = this.requireMutable(id);
+    const dir = this.dirOf(existing);
+    await this.removeStaleAvatarFiles(dir, ext);
+    await this.storage.write(join(dir, `avatar.${ext}`), bytes);
+    await this.update(id, { display: { avatar_url: avatarUrl } });
+  }
+
+  /**
+   * Read a personality's stored avatar bytes, its mime type, and the file's
+   * mtime (for the serving route's `ETag`/`Last-Modified`). Returns `null`
+   * when there is no `avatar.<ext>` file — including for an unknown id or a
+   * built-in — so the route can turn that straight into a clean 404 rather
+   * than distinguishing "no such personality" from "no avatar set".
+   */
+  async readAvatar(
+    id: string,
+  ): Promise<{ bytes: Uint8Array; mimeType: string; mtimeMs: number } | null> {
+    const described = this.describe(id);
+    if (!described) return null;
+    const dir = this.dirOf(described);
+    const entries = await this.storage.list(dir);
+    const fileName = entries.find((n) => AVATAR_FILENAME_RE.test(n));
+    if (!fileName) return null;
+    const path = join(dir, fileName);
+    const bytes = await this.storage.readBytes(path);
+    if (!bytes) return null;
+    const ext = fileName.slice('avatar.'.length);
+    const mimeType = AVATAR_EXT_TO_MIME[ext] ?? 'application/octet-stream';
+    const mtimeMs = (await this.storage.mtime(path)) ?? 0;
+    return { bytes, mimeType, mtimeMs };
+  }
+
+  /**
+   * Delete a personality's stored avatar file (if any) and clear
+   * `display.avatar_url` back to unset. A no-op (not an error) when no
+   * avatar was stored. Built-ins are read-only — this throws for them,
+   * mirroring `update()` / `deletePersonality()`.
+   */
+  async deleteAvatar(id: string): Promise<void> {
+    const existing = this.requireMutable(id);
+    const dir = this.dirOf(existing);
+    await this.removeStaleAvatarFiles(dir, null);
+    await this.update(id, { display: { avatar_url: '' } });
+  }
+
+  /** Remove every `avatar.<ext>` file in `dir` except `keepExt` (`null` keeps
+   *  none — used by `deleteAvatar`). Keeps "at most one avatar file per
+   *  personality" true across a re-upload with a different extension. */
+  private async removeStaleAvatarFiles(dir: string, keepExt: string | null): Promise<void> {
+    const entries = await this.storage.list(dir);
+    for (const name of entries) {
+      const match = AVATAR_FILENAME_RE.exec(name);
+      if (!match) continue;
+      if (keepExt !== null && match[1] === keepExt) continue;
+      await this.storage.remove(join(dir, name));
+    }
   }
 
   /**
@@ -1548,6 +1688,7 @@ export class FilePersonalityRegistry implements PersonalityRegistry {
     const mcpExport = buildMcpExportConfig(cfg);
     const outboundPolicy = buildOutboundPolicy(cfg);
     const voice = buildVoiceConfig(cfg);
+    const display = buildDisplayConfig(cfg);
 
     const model = buildModelConfig(cfg);
 
@@ -1583,6 +1724,7 @@ export class FilePersonalityRegistry implements PersonalityRegistry {
         ? { evolution_approval_mode: evolutionApprovalMode }
         : {}),
       ...(voice !== undefined ? { voice } : {}),
+      ...(display !== undefined ? { display } : {}),
     };
 
     validateUnsafeCombinations(id, config);
@@ -1852,6 +1994,22 @@ function buildVoiceConfig(
     ...(Object.keys(languages).length > 0 ? { languages } : {}),
   };
   return Object.keys(out).length > 0 ? out : undefined;
+}
+
+/**
+ * Parse the dotted `display.*` keys into `PersonalityConfig.display`.
+ *
+ * Same dotted-key convention as `voice` (see `buildVoiceConfig` above): a
+ * true nested block would mean a second parse path and a second render path
+ * for a single scalar. `display.avatar_url` is the one sub-key today.
+ *
+ *   display.avatar_url: /api/personalities/researcher/avatar
+ */
+function buildDisplayConfig(
+  cfg: Record<string, string>,
+): import('@ethosagent/types').PersonalityConfig['display'] | undefined {
+  const avatarUrl = cfg['display.avatar_url'];
+  return avatarUrl ? { avatar_url: avatarUrl } : undefined;
 }
 
 function buildOutboundPolicy(
@@ -2148,6 +2306,7 @@ type RenderConfigInput = Omit<CreatePersonalityInput, 'id' | 'soulMd'> &
     | 'mcp_export'
     | 'outbound_policy'
     | 'voice'
+    | 'display'
   >;
 
 function renderConfigYaml(input: RenderConfigInput): string {
@@ -2287,6 +2446,9 @@ function renderConfigYaml(input: RenderConfigInput): string {
     for (const [tag, id] of Object.entries(v.languages ?? {})) {
       lines.push(`voice.languages.${tag}: ${yamlScalar(id)}`);
     }
+  }
+  if (input.display?.avatar_url !== undefined) {
+    lines.push(`display.avatar_url: ${yamlScalar(input.display.avatar_url)}`);
   }
   if (input.safety !== undefined && Object.keys(input.safety).length > 0) {
     lines.push('safety:');

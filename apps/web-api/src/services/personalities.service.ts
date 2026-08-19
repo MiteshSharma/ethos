@@ -291,6 +291,41 @@ export class PersonalitiesService {
     await this.opts.personalities.deletePersonality(id);
   }
 
+  // ---------------------------------------------------------------------------
+  // Avatar — thin pass-through to the registry, which owns the directory
+  // layout and the mime↔extension mapping. This service's only job is the
+  // one thing the registry has no business knowing: the served URL shape.
+  // ---------------------------------------------------------------------------
+
+  /** Write (overwrite) a personality's avatar and point `display.avatar_url`
+   *  at the serving route. `mimeType` must already be validated by the
+   *  caller (the route) against the allowlist. */
+  async writeAvatar(
+    id: string,
+    bytes: Uint8Array,
+    mimeType: string,
+  ): Promise<{ avatarUrl: string }> {
+    this.requirePersonality(id);
+    const avatarUrl = `/api/personalities/${id}/avatar`;
+    await this.opts.personalities.writeAvatar(id, bytes, mimeType, avatarUrl);
+    return { avatarUrl };
+  }
+
+  /** Read a personality's stored avatar bytes + mime type + mtime. Returns
+   *  `null` when unset — never throws for "no avatar", since that's the
+   *  serving route's clean-404 case, not an error. */
+  async readAvatar(
+    id: string,
+  ): Promise<{ bytes: Uint8Array; mimeType: string; mtimeMs: number } | null> {
+    return this.opts.personalities.readAvatar(id);
+  }
+
+  /** Delete a personality's stored avatar and clear `display.avatar_url`. */
+  async deleteAvatar(id: string): Promise<void> {
+    this.requirePersonality(id);
+    await this.opts.personalities.deleteAvatar(id);
+  }
+
   async duplicate(id: string, newId: string): Promise<{ personality: Personality }> {
     const created = await this.opts.personalities.duplicate(id, newId);
     return { personality: toWire(created) };
@@ -766,6 +801,9 @@ function toWire(d: DescribedPersonality): Personality {
       ? { safety: { approvalMode: c.safety.approvalMode } }
       : {}),
     ...(c.memory?.provider !== undefined ? { memory: { provider: c.memory.provider } } : {}),
+    ...(c.display?.avatar_url !== undefined
+      ? { display: { avatar_url: c.display.avatar_url } }
+      : {}),
     ...(c.nightly !== undefined ? { nightly: c.nightly } : {}),
     // Every sub-key the editor writes, echoed back so it can populate its form.
     // A sub-key the editor can WRITE but not READ is one a save wipes.

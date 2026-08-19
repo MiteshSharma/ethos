@@ -65,6 +65,10 @@ export default defineConfig({
       // proxied: an absolute :3000 href from :5173 is cross-site and the
       // browser silently drops the cookie, so the download 401s.
       '/documents': 'http://localhost:3000',
+      // Avatar upload/view/delete rides the same `SameSite=Strict`
+      // `ethos_auth` cookie as `/documents` above, for the same reason: an
+      // absolute :3000 request from :5173 is cross-site and drops the cookie.
+      '/api': 'http://localhost:3000',
     },
   },
   build: {

@@ -1,14 +1,19 @@
 // Pure logic for the New Session personality picker. Extracted from the
 // modal component so it can be unit-tested without a DOM.
 
+import { SYSTEM_PERSONALITY_IDS } from '../features/personalities/constants';
+
 export interface PickerPersonality {
   id: string;
   name: string;
   description?: string | null;
+  avatarUrl?: string;
 }
 
-// Meta-personalities that should never start a chat.
-export const HIDDEN_FROM_CHAT = new Set(['personality-architect', 'team-architect']);
+// Meta-personalities that should never start a chat — the same
+// system-personality set hidden from the rail and command palette's
+// "pick your main agent" surfaces (see SYSTEM_PERSONALITY_IDS).
+export const HIDDEN_FROM_CHAT = SYSTEM_PERSONALITY_IDS;
 
 /**
  * Applies the hidden-agent filter plus a case-insensitive name/description

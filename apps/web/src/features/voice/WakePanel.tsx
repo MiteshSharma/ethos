@@ -227,6 +227,19 @@ export function WakePanel() {
   // because the tester closes over it.
   const implicit = useMemo(() => implicitWakeRoutes(serverRoutes ?? []), [serverRoutes]);
 
+  // Avatar override lookup for every personality mark this panel draws
+  // (route rows, implicit routes, satellite last-wake/follow-up). Built once
+  // here rather than per row.
+  const personalitiesForMarks = useMemo(
+    () =>
+      (personalitiesQuery.data?.items ?? []).map((p) => ({
+        id: p.id,
+        name: p.name,
+        avatarUrl: p.display?.avatar_url,
+      })),
+    [personalitiesQuery.data],
+  );
+
   const patchRow = (key: string, patch: Partial<WakeRouteDraft>) => {
     setDrafts((prev) => (prev ?? []).map((d) => (d.key === key ? { ...d, ...patch } : d)));
     setRowErrors(({ [key]: _dropped, ...rest }) => rest);
@@ -266,7 +279,7 @@ export function WakePanel() {
             <WakeRouteRow
               key={draft.key}
               draft={draft}
-              personalities={personalitiesQuery.data?.items ?? []}
+              personalities={personalitiesForMarks}
               matched={matchedKey === draft.key}
               error={rowErrors[draft.key] ?? null}
               disabled={saving}
@@ -280,7 +293,11 @@ export function WakePanel() {
         </div>
       )}
 
-      <WakeImplicitRoutes routes={implicit} matchedKey={matchedKey} />
+      <WakeImplicitRoutes
+        routes={implicit}
+        matchedKey={matchedKey}
+        personalities={personalitiesForMarks}
+      />
 
       {saveError ? (
         <Typography.Text type="danger" className="wake-route-note">
@@ -329,6 +346,7 @@ export function WakePanel() {
               now={Date.now()}
               busy={wakeToggle.isPending && wakeToggle.variables?.nodeId === node.nodeId}
               onToggleWake={(enabled) => wakeToggle.mutate({ nodeId: node.nodeId, enabled })}
+              personalities={personalitiesForMarks}
             />
           ))
         )}

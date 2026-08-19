@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128" role="img" aria-label="Brain avatar">
+  <circle cx="64" cy="64" r="64" fill="#C9B6FA"/>
+  <path d="M40,58 C36,44 46,30 64,30 C82,30 92,44 88,58 C94,62 94,76 86,80 C88,90 78,98 68,96 L68,100 L60,100 L60,96 C50,98 40,90 42,80 C34,76 34,62 40,58 Z" fill="#FFFFFF"/>
+  <line x1="64" y1="34" x2="64" y2="96" stroke="#C9B6FA" stroke-width="4"/>
+</svg>

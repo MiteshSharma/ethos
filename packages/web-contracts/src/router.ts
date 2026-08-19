@@ -437,6 +437,11 @@ const PersonalityUpdateInput = z.object({
   safety: z.object({ approvalMode: z.enum(['manual', 'smart', 'off']).optional() }).optional(),
   /** Per-personality memory backend. Built-ins: 'markdown', 'vector'. */
   memory: z.object({ provider: z.string().optional() }).optional(),
+  /** Avatar sub-key of the `display` identity block. `''` clears
+   *  `avatar_url` back to unset; the avatar upload/delete routes are the
+   *  usual way to change it, but a curated-icon pick goes through here
+   *  directly (it's just a static URL, no bytes to upload). */
+  display: z.object({ avatar_url: z.string().optional() }).optional(),
   /** Nightly governed-learning gates. The UI sends the FULL nightly object
    *  (including the full judge sub-object); the registry one-level-merges it. */
   nightly: PersonalityNightlyInput,

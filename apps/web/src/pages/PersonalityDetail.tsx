@@ -849,7 +849,11 @@ export function PersonalityDetail() {
 
       <div style={{ marginBottom: 32 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 16, marginBottom: 16 }}>
-          <PersonalityMark personalityId={personality.id} size={48} />
+          <PersonalityMark
+            personalityId={personality.id}
+            size={48}
+            avatarUrl={personality.display?.avatar_url}
+          />
           <div>
             <Typography.Title level={3} style={{ margin: 0 }}>
               {personality.name}

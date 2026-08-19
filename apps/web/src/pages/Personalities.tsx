@@ -37,6 +37,13 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { LivingSoulSection } from '../components/LivingSoulSection';
+import { AvatarPicker } from '../components/personality/AvatarPicker';
+import {
+  applyAvatarSelection,
+  deleteAvatarRoute,
+  removeAvatar,
+  uploadAvatarBytes,
+} from '../components/personality/avatarActions';
 import { ExecutionTab } from '../components/personality/ExecutionTab';
 import {
   type PersonalityVoice,
@@ -45,6 +52,7 @@ import {
   voiceLanguageRows,
   voiceUpdateInput,
 } from '../components/personality/PersonalityVoiceFields';
+import { PersonalityMark } from '../components/ui/PersonalityMark';
 import { PersonalityRingAvatar } from '../components/ui/PersonalityRingAvatar';
 import { useCreateFlag } from '../hooks/useCreateFlag';
 import { toolAffordance } from '../lib/execution-posture';
@@ -135,7 +143,7 @@ export function Personalities() {
       key: 'avatar',
       width: 48,
       render: (_: unknown, p: Personality) => (
-        <PersonalityRingAvatar personalityId={p.id} size={32} />
+        <PersonalityRingAvatar personalityId={p.id} size={32} avatarUrl={p.display?.avatar_url} />
       ),
     },
     {
@@ -1501,7 +1509,13 @@ export function EditModal({
             {
               key: 'identity',
               label: 'Identity',
-              children: <IdentityEditor id={id} initialSoulMd={data.soulMd} />,
+              children: (
+                <IdentityEditor
+                  id={id}
+                  initialSoulMd={data.soulMd}
+                  initialAvatarUrl={data.personality.display?.avatar_url}
+                />
+              ),
             },
             {
               key: 'toolset',
@@ -1579,10 +1593,24 @@ function CharacterSheetPanel({ id }: { id: string }) {
   );
 }
 
-export function IdentityEditor({ id, initialSoulMd }: { id: string; initialSoulMd: string }) {
+type IdentityAvatarAction =
+  | { kind: 'curated'; url: string }
+  | { kind: 'file'; file: File }
+  | { kind: 'remove' };
+
+export function IdentityEditor({
+  id,
+  initialSoulMd,
+  initialAvatarUrl,
+}: {
+  id: string;
+  initialSoulMd: string;
+  initialAvatarUrl?: string;
+}) {
   const qc = useQueryClient();
   const { notification } = AntApp.useApp();
   const [draft, setDraft] = useState(initialSoulMd);
+  const [avatarUrl, setAvatarUrl] = useState(initialAvatarUrl);
 
   const mut = useMutation({
     mutationFn: () => rpc.personalities.update({ id, soulMd: draft }),
@@ -1596,9 +1624,69 @@ export function IdentityEditor({ id, initialSoulMd }: { id: string; initialSoulM
       notification.error({ message: 'Save failed', description: (err as Error).message }),
   });
 
+  // The personality already exists here (unlike `NewAgentDialog`'s staged
+  // selection), so every avatar action applies immediately. Curated and file
+  // both go through `applyAvatarSelection` — which, for a curated pick,
+  // DELETEs any stored uploaded file first so it doesn't linger orphaned on
+  // disk once `display.avatar_url` points at a static path instead.
+  const avatarDeps = {
+    setAvatarUrl: (personalityId: string, url: string) =>
+      rpc.personalities.update({ id: personalityId, display: { avatar_url: url } }),
+    uploadAvatar: uploadAvatarBytes,
+    deleteAvatar: deleteAvatarRoute,
+  };
+
+  const avatarMut = useMutation({
+    mutationFn: async (action: IdentityAvatarAction) => {
+      if (action.kind === 'remove') {
+        await removeAvatar(id, avatarDeps);
+      } else {
+        await applyAvatarSelection(id, action, avatarDeps);
+      }
+    },
+    onSuccess: (_result, action) => {
+      qc.invalidateQueries({ queryKey: ['personalities', 'get', id] });
+      qc.invalidateQueries({ queryKey: ['personalities', 'characterSheet', id] });
+      qc.invalidateQueries({ queryKey: ['personalities', 'list'] });
+      if (action.kind === 'remove') {
+        setAvatarUrl(undefined);
+        notification.success({ message: 'Avatar removed', placement: 'topRight' });
+      } else if (action.kind === 'curated') {
+        setAvatarUrl(action.url);
+        notification.success({ message: 'Avatar updated', placement: 'topRight' });
+      } else {
+        // The upload route always serves the same URL for a given
+        // personality — a cache-busting query param is what makes the
+        // `<img>` actually refetch instead of reusing the pre-upload bytes.
+        setAvatarUrl(`/api/personalities/${id}/avatar?v=${Date.now()}`);
+        notification.success({ message: 'Avatar updated', placement: 'topRight' });
+      }
+    },
+    onError: (err) =>
+      notification.error({ message: 'Avatar update failed', description: (err as Error).message }),
+  });
+
   return (
     <Form layout="vertical">
-      <Typography.Paragraph type="secondary" style={{ marginTop: 0 }}>
+      <Form.Item
+        label="Avatar"
+        help="Optional. Falls back to the generated mark when unset or the image fails to load."
+      >
+        <div style={{ display: 'flex', gap: 16, alignItems: 'flex-start' }}>
+          <PersonalityMark personalityId={id} size={48} avatarUrl={avatarUrl} />
+          <div style={{ flex: 1 }}>
+            <AvatarPicker
+              selectedCuratedUrl={avatarUrl}
+              onSelectCurated={(url) => avatarMut.mutate({ kind: 'curated', url })}
+              onFileSelected={(file) => avatarMut.mutate({ kind: 'file', file })}
+              onRemove={() => avatarMut.mutate({ kind: 'remove' })}
+              showRemove={Boolean(avatarUrl)}
+            />
+          </div>
+        </div>
+      </Form.Item>
+
+      <Typography.Paragraph type="secondary">
         First-person identity body. The agent loads this each turn.
       </Typography.Paragraph>
       <Form.Item>

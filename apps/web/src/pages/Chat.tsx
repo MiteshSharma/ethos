@@ -701,6 +701,7 @@ export function Chat() {
     <div className="chat-tab">
       <PersonalityBar
         personalityId={personalityId}
+        avatarUrl={personalityQuery.data?.personality.display?.avatar_url}
         model={isLoading ? '' : model}
         onNewSession={handleNewSession}
         sessionTitle={sessionTitle}

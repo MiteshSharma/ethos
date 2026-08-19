@@ -109,7 +109,13 @@ export function ScopeNav() {
   return (
     <nav className="scope-nav" aria-label="Contextual navigation">
       <div className="scope-nav-identity">
-        {personalityId ? <PersonalityRingAvatar personalityId={personalityId} size={22} /> : null}
+        {personalityId ? (
+          <PersonalityRingAvatar
+            personalityId={personalityId}
+            size={22}
+            avatarUrl={activePersonality?.display?.avatar_url}
+          />
+        ) : null}
         <span className="scope-nav-identity-label">{identityLabel}</span>
       </div>
 

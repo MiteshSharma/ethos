@@ -21,9 +21,12 @@ export interface CallRowProps {
   view: CallRowView;
   /** Opens the full transcript. Only offered when `view.showTranscript`. */
   onOpenTranscript: (id: string) => void;
+  /** Avatar override for `view.personalityId`'s mark. Optional — omitted
+   *  falls back to the generated mark. */
+  avatarUrl?: string;
 }
 
-export function CallRow({ call, view, onOpenTranscript }: CallRowProps) {
+export function CallRow({ call, view, onOpenTranscript, avatarUrl }: CallRowProps) {
   // The live dot is drawn in `var(--accent)`, and outside the chat subtree
   // nothing defines it — every row would otherwise pulse the same generic info
   // blue. Stamped per row from the same resolver the chat tab uses, so a live
@@ -42,7 +45,7 @@ export function CallRow({ call, view, onOpenTranscript }: CallRowProps) {
         <span className="call-mono call-number">{view.otherParty}</span>
         {view.personalityId ? (
           <span className="call-personality">
-            <PersonalityMark personalityId={view.personalityId} size={16} />
+            <PersonalityMark personalityId={view.personalityId} size={16} avatarUrl={avatarUrl} />
             <span className="call-mono">{view.personalityId}</span>
           </span>
         ) : (
