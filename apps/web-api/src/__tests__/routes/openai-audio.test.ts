@@ -1,6 +1,6 @@
 import { SqliteApiKeyStore } from '@ethosagent/session-sqlite';
 import { STT_CONTRACT_VERSION } from '@ethosagent/types';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { openAiRoutes } from '../../routes/openai';
 import type { PersonalitiesService } from '../../services/personalities.service';
 import { VoiceService } from '../../services/voice.service';
@@ -120,6 +120,30 @@ describe('POST /v1/audio/transcriptions', () => {
     const body = (await res.json()) as { error: { code: string; param: string | null } };
     expect(body.error.code).toBe('invalid_request_body');
     expect(body.error.param).toBe('file');
+  });
+
+  it('returns 413 file_too_large and does not call transcribeBytes for an oversized file', async () => {
+    const voice = configuredVoiceService('unused');
+    const transcribeBytes = vi.spyOn(voice, 'transcribeBytes');
+    const app = openAiRoutes({
+      apiKeys: store,
+      personalities: makeStubPersonalitiesService(),
+      config: makeStubConfigService(),
+      voice,
+    });
+    const oversized = new Uint8Array(25 * 1024 * 1024 + 1);
+    const form = new FormData();
+    form.set('file', new File([oversized], 'big.wav', { type: 'audio/wav' }));
+    const res = await app.request('/audio/transcriptions', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${secret}` },
+      body: form,
+    });
+    expect(res.status).toBe(413);
+    const body = (await res.json()) as { error: { code: string; param: string | null } };
+    expect(body.error.code).toBe('file_too_large');
+    expect(body.error.param).toBe('file');
+    expect(transcribeBytes).not.toHaveBeenCalled();
   });
 
   it('returns 401 when unauthenticated', async () => {

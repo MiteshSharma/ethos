@@ -12,6 +12,10 @@ export interface OpenAiAudioRouteOptions {
   voice?: VoiceService;
 }
 
+// OpenAI Whisper's own upload limit — reject larger multipart bodies before
+// buffering them into memory.
+const MAX_AUDIO_BYTES = 25 * 1024 * 1024;
+
 export function openAiAudioRoutes(opts: OpenAiAudioRouteOptions): Hono {
   const app = new Hono();
 
@@ -40,6 +44,18 @@ export function openAiAudioRoutes(opts: OpenAiAudioRouteOptions): Hono {
           param: 'file',
         }),
         400,
+      );
+    }
+
+    if (file.size > MAX_AUDIO_BYTES) {
+      return c.json(
+        openAiErrorBody({
+          message: `File is too large. Maximum size is ${MAX_AUDIO_BYTES} bytes (25MB).`,
+          type: 'invalid_request_error',
+          code: 'file_too_large',
+          param: 'file',
+        }),
+        413,
       );
     }
 

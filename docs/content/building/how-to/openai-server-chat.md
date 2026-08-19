@@ -172,7 +172,7 @@ Reuse the same value across calls and Ethos appends to the same conversation. Th
 
 ### 7. Retry safely with `Idempotency-Key`
 
-A dropped connection mid-turn leaves a client unsure whether the agent loop ran. Send an `Idempotency-Key` header on `POST /v1/chat/completions` and a retry with the same key and the same request body replays the cached response instead of driving the loop a second time:
+A dropped connection mid-turn leaves a client unsure whether the agent loop ran. Send an `Idempotency-Key` header on `POST /v1/chat/completions` and a retry with the same key and the same request body replays the cached response instead of driving the loop a second time. This only covers non-streaming requests (`"stream": false` or omitted) — a streaming retry (`"stream": true`) with the same `Idempotency-Key` still re-runs the turn, since there is no cached SSE stream to replay.
 
 ```bash
 curl http://localhost:3000/v1/chat/completions \

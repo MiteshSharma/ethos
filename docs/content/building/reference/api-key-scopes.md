@@ -19,7 +19,7 @@ A scope is one permission on one API key. Each key carries a set of them, and th
 |---|---|
 | `sessions:read` | Read access to `sessions.list` and `sessions.get`. |
 | `sessions:write` | Write access to `sessions.fork`, `sessions.delete`, and `sessions.update`. |
-| `chat` | The whole OpenAI-compatible surface: `/v1/models` and `/v1/chat/completions`. Asserted once at the `/v1` mount, so it covers every route under it. |
+| `chat` | The whole OpenAI-compatible surface: `/v1/*` (currently `/v1/models`, `/v1/chat/completions`, `/v1/capabilities`, and `/v1/audio/transcriptions`). Asserted once at the `/v1` mount, so it covers every route under it. |
 | `chat:send` | Access to `chat.send` and `chat.abort` on `/rpc/*`. |
 | `personalities:read` | Read access to `personalities.list`, `personalities.get`, `personalities.characterSheet`, and personality skills read methods. |
 | `memory:read` | Read access to `memory.list` and `memory.get`. |
