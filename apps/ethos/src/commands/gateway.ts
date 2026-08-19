@@ -888,6 +888,15 @@ export async function runGatewayStart(opts: GatewayStartOptions = {}): Promise<v
         }
       : undefined;
 
+  // Fix 4 (pi-delegation.md §1b) — rebuild each bot's lane bookkeeping for
+  // rows that survived a restart. Must run AFTER every clarify surface
+  // above has registered its presenter — `hydrate()` only adopts rows this
+  // bridge can actually present. Best-effort: a hydration failure must not
+  // block gateway startup.
+  for (const b of bots) {
+    void b.loop.clarifyBridge?.hydrate().catch(() => {});
+  }
+
   // Telegram personality card reader + greeting provider — wired when any
   // Telegram adapter is configured. The card reader powers `/personality rich`;
   // the greeting provider powers `/start`.
@@ -2851,7 +2860,7 @@ export async function buildAdapters(
  * pair. Loaded lazily — when the platform-telegram surface module isn't
  * installed (or no Telegram adapter is configured), returns `[]` and the
  * Gateway runs without a clarify correlator. The surface registers
- * `bridge.setPresenter`, `bridge.onResolved`, and `adapter.onCallbackQuery`
+ * `bridge.registerPresenter`, `bridge.onResolved`, and `adapter.onCallbackQuery`
  * in its constructor; the gateway later calls `surface.correlateMessage` for
  * every inbound message.
  *
@@ -2907,7 +2916,7 @@ async function buildTelegramClarifySurfaces(
  * Build one `SlackClarifySurface` per (Slack adapter, Slack bot) pair.
  * Loaded lazily — when the platform-slack surface module isn't installed
  * (or no Slack adapter is configured), returns `[]` and Slack just runs
- * without clarify support. Each surface registers `bridge.setPresenter`,
+ * without clarify support. Each surface registers `bridge.registerPresenter`,
  * `bridge.onResolved`, `adapter.onClarifyAction`, and
  * `adapter.onClarifyModalSubmit` in its constructor; nothing else needs
  * wiring (Slack carries its own button-click + modal-submission events

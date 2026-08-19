@@ -126,8 +126,14 @@ export const ClarifyRequestEventSchema = z.object({
   question: z.string(),
   options: z.array(z.string()).optional(),
   default: z.string().optional(),
-  /** ISO-8601 — when the timeout fires and the default is used. */
-  defaultDeadlineAt: z.string(),
+  /**
+   * ISO-8601 — when the timeout fires and the default is used. `null` while
+   * queued behind another clarify in the same lane (D2) — a queued row has no
+   * timer running yet. In practice this event is only pushed once a row is
+   * actually presented, so `null` should not occur here today; nullable for
+   * type-level parity with `PendingClarify.defaultDeadlineAt`.
+   */
+  defaultDeadlineAt: z.string().nullable(),
 });
 
 export const ClarifyResolvedEventSchema = z.object({

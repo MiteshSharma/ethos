@@ -26,6 +26,12 @@ describe('formatCountdown', () => {
   it('renders "now" once the deadline has passed', () => {
     expect(formatCountdown('2026-05-14T23:59:00.000Z', NOW)).toBe('now');
   });
+  // D2 — a clarify still queued behind another one in its lane has no
+  // deadline yet; the countdown must degrade gracefully, not throw or print
+  // a bogus value from `new Date(null)`.
+  it('renders "queued" for a null deadline (still queued behind another clarify, D2)', () => {
+    expect(formatCountdown(null, NOW)).toBe('queued');
+  });
 });
 
 describe('formatClarifyPrompt', () => {

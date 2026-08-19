@@ -1028,7 +1028,7 @@ export function createWebApi(opts: CreateWebApiOptions): CreateWebApiResult {
   // was down.
   const clarifyBridge = agentLoop.clarifyBridge;
   if (clarifyBridge) {
-    clarifyBridge.setPresenter((req) => {
+    clarifyBridge.registerPresenter('web', (req) => {
       chatService.broadcast(req.sessionId, {
         type: 'clarify.request',
         requestId: req.requestId,
@@ -1045,6 +1045,10 @@ export function createWebApi(opts: CreateWebApiOptions): CreateWebApiResult {
         source: response?.source ?? 'timeout-no-default',
       });
     });
+    // Fix 4 (pi-delegation.md §1b) — rebuild lane bookkeeping for rows that
+    // survived a restart (must run AFTER the presenter above is
+    // registered — hydrate() only adopts rows this bridge can present).
+    void clarifyBridge.hydrate();
     void clarifyBridge.sweep();
   }
 

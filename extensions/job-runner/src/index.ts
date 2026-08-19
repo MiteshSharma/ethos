@@ -370,6 +370,7 @@ export class BackgroundExecutor {
         ...(job.personalityId ? { personalityId: job.personalityId } : {}),
         agentId: `depth:${job.depth}`,
         rootSessionKey: job.rootSessionKey,
+        jobId: job.id,
         abortSignal: controller.signal,
       })) {
         if (controller.signal.aborted) break;

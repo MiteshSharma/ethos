@@ -53,6 +53,13 @@ export interface ClarifyResponse {
 export interface PendingClarify {
   requestId: string;
   sessionId: string;
+  /**
+   * D22 — the background job this clarify belongs to, when issued by a
+   * background turn (`ToolContext.jobId`). Absent for foreground clarifies,
+   * which keep the per-session lane. Used to key the busy/queue lane
+   * (`jobId ?? sessionId`, G1) and to resolve the origin-lane fallback (G2/G3/D7).
+   */
+  jobId?: string;
   surfaceType: ClarifySurfaceType;
   /** Per-surface correlation context (e.g. telegram: `{ chatId, messageId }`). */
   surfaceContext: Record<string, unknown>;
@@ -62,7 +69,40 @@ export interface PendingClarify {
   /** Plan Q6 — who may answer in a group chat. */
   answerableBy: ClarifyAnswerableBy;
   createdAt: string; // ISO 8601
-  defaultDeadlineAt: string; // ISO 8601
+  /**
+   * D2 — ISO 8601 when the timeout fires, derived at *presentation* time, not
+   * request time. `null` while the row is still queued behind another clarify
+   * in the same lane (G1) — a queued row has no timer running and `sweep()`
+   * must never expire it (see `ClarifyStore.expired`).
+   */
+  defaultDeadlineAt: string | null;
+  /**
+   * D2 — ISO 8601 when this row was actually shown to a surface. `null`/absent
+   * while queued. Optional so existing fixtures that predate D2 keep compiling.
+   */
+  presentedAt?: string | null;
+  /**
+   * Fix 2 (pi-delegation.md §1b) — the original request's `timeoutMs`. Not
+   * used to derive `defaultDeadlineAt` (that stays request-time-agnostic per
+   * D2) — it exists so a row still QUEUED (`defaultDeadlineAt: null`) across a
+   * process restart can be presented with the SAME timeout window it would
+   * have gotten live, instead of a guessed default. Optional so rows
+   * persisted before this field existed keep compiling/parsing.
+   */
+  timeoutMs?: number;
+  /**
+   * Fix 2 (pi-delegation.md §1b, cross-process answer delivery) — written by
+   * `ClarifyBridge.respond()` when it has no in-process pending entry for
+   * this `requestId`. Two different things can cause that: the owning
+   * process crashed (this IS the final word), or the owning process is
+   * alive in a DIFFERENT process sharing this store (its own periodic
+   * reconcile poll picks this up, finishes the resolution, and removes the
+   * row). This field is what makes the second case actually work — the row
+   * is kept, not deleted, so the real owner can still read the answer.
+   * Distinct from the row simply not existing (already collected, or never
+   * created) and from an open row with no answer yet.
+   */
+  answer?: ClarifyResponse;
 }
 
 /**
@@ -73,7 +113,11 @@ export interface PendingClarify {
 export interface ClarifyStore {
   add(req: PendingClarify): Promise<void>;
   get(requestId: string): Promise<PendingClarify | null>;
-  list(filter?: { surfaceType?: string; sessionId?: string }): Promise<PendingClarify[]>;
+  list(filter?: {
+    surfaceType?: string;
+    sessionId?: string;
+    jobId?: string;
+  }): Promise<PendingClarify[]>;
   remove(requestId: string): Promise<void>;
   /**
    * Patch fields on an existing row by `requestId`. Used by surfaces that
@@ -83,6 +127,10 @@ export interface ClarifyStore {
    * row doesn't exist.
    */
   update(requestId: string, patch: Partial<PendingClarify>): Promise<void>;
-  /** Rows whose `defaultDeadlineAt` is at or before `now` — for the timeout sweep. */
+  /**
+   * Rows whose `defaultDeadlineAt` is at or before `now` — for the timeout
+   * sweep. A row with `defaultDeadlineAt: null` (still queued, D2) must never
+   * be returned — it has no timer running and hasn't been shown to anyone yet.
+   */
   expired(now: Date): Promise<PendingClarify[]>;
 }

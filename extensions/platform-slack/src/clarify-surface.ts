@@ -91,7 +91,7 @@ export class SlackClarifySurface {
     this.getSessionRouting = cfg.getSessionRouting;
     this.observability = cfg.observability;
 
-    this.bridge.setPresenter((row) => this.present(row));
+    this.bridge.registerPresenter(SURFACE, (row) => this.present(row));
     this.bridge.onResolved((row, resp) => {
       void this.onResolved(row, resp);
     });
@@ -109,7 +109,13 @@ export class SlackClarifySurface {
    */
   async present(row: PendingClarify): Promise<void> {
     if (row.surfaceType !== SURFACE) return;
-    const routing = this.getSessionRouting(row.sessionId);
+    // Fix 1 (pi-delegation.md §1b) — `getSessionRouting` only resolves a LIVE
+    // foreground chat session; a background job's clarify has none (its
+    // `sessionId` is the job's own child session). Fall back to the
+    // delivery context the bridge resolved onto `row.surfaceContext`
+    // (origin-lane or foreground-presence routing) so a job-originated
+    // clarify still gets delivered instead of silently dropping.
+    const routing = this.getSessionRouting(row.sessionId) ?? routingFromSurfaceContext(row);
     if (!routing) return;
 
     const blocks = clarifyPendingBlocks({
@@ -117,7 +123,9 @@ export class SlackClarifySurface {
       question: row.question,
       ...(row.options !== undefined ? { options: row.options } : {}),
       ...(row.default !== undefined ? { default: row.default } : {}),
-      defaultDeadlineAt: row.defaultDeadlineAt,
+      // `present()` only fires once a row is actually presented (D2), at
+      // which point this is always set — the fallback is defensive only.
+      defaultDeadlineAt: row.defaultDeadlineAt ?? row.createdAt,
     });
 
     const result = await this.adapter.postClarifyCard({
@@ -228,6 +236,17 @@ export class SlackClarifySurface {
       response = { requestId: row.requestId, answer, source: 'user' };
     }
     this.rememberResponder(row.requestId, evt.userId);
+    // D7 — a human acted on this surface; a background job's next question
+    // may route here instead of always falling back to its origin lane.
+    // Fix 1 — carry real delivery context, reading it off the row itself
+    // (not `evt.channelId`, which is empty for App Home clicks).
+    this.bridge.recordPresence(SURFACE, {
+      chatId: row.surfaceContext.chatId,
+      botKey: this.adapter.botKey,
+      ...(row.surfaceContext.threadId !== undefined
+        ? { threadId: row.surfaceContext.threadId }
+        : {}),
+    });
     await this.bridge.respond(response);
   }
 
@@ -241,6 +260,13 @@ export class SlackClarifySurface {
     if (row.surfaceContext.botKey !== this.adapter.botKey) return;
     if (!gateAnswerer(row, evt.userId)) return;
     this.rememberResponder(row.requestId, evt.userId);
+    this.bridge.recordPresence(SURFACE, {
+      chatId: row.surfaceContext.chatId,
+      botKey: this.adapter.botKey,
+      ...(row.surfaceContext.threadId !== undefined
+        ? { threadId: row.surfaceContext.threadId }
+        : {}),
+    });
     await this.bridge.respond({
       requestId: row.requestId,
       answer: evt.answer,
@@ -290,6 +316,15 @@ export class SlackClarifySurface {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/** Fix 1 (pi-delegation.md §1b) — see the Telegram surface's equivalent for
+ *  the full rationale. Slack additionally carries `threadId`. */
+function routingFromSurfaceContext(row: PendingClarify): SessionRoutingForClarify | undefined {
+  const chatId = row.surfaceContext.chatId;
+  if (typeof chatId !== 'string') return undefined;
+  const threadId = row.surfaceContext.threadId;
+  return { chatId, ...(typeof threadId === 'string' ? { threadId } : {}) };
+}
 
 function gateAnswerer(row: PendingClarify, userId: string | undefined): boolean {
   if (row.answerableBy === 'anyone') return true;

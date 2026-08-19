@@ -13,6 +13,7 @@ import type {
   DryRunToolPlan,
   RunOptions,
 } from '@ethosagent/core';
+import type { ClarifySurfaceType } from '@ethosagent/types';
 import { InMemorySteerSink } from './in-memory-steer-sink';
 
 export type BridgeOpts = Omit<RunOptions, 'abortSignal'>;
@@ -85,7 +86,9 @@ export class AgentBridge extends EventEmitter<BridgeEventMap> {
   // Clarify registrations are held on the bridge, not on the loop's
   // ClarifyBridge directly, so they survive `replaceLoop`: each rebuilt loop
   // gets a fresh ClarifyBridge that must be re-bound to the surface.
-  private clarifyPresenter: ClarifyPresenter | undefined;
+  private clarifyPresenter:
+    | { surfaceType: ClarifySurfaceType; presenter: ClarifyPresenter }
+    | undefined;
   private readonly clarifyResolvedListeners = new Set<ClarifyResolvedListener>();
   private activeSink: InMemorySteerSink | null = null;
 
@@ -112,13 +115,14 @@ export class AgentBridge extends EventEmitter<BridgeEventMap> {
   }
 
   /**
-   * Register how this surface presents a pending clarify. The registration is
-   * remembered and re-applied to the new loop's ClarifyBridge on
-   * `replaceLoop`, so clarify keeps working after a model switch.
+   * Register how this surface presents a pending clarify for its own surface
+   * type (G2). The registration is remembered and re-applied to the new
+   * loop's ClarifyBridge on `replaceLoop`, so clarify keeps working after a
+   * model switch.
    */
-  setClarifyPresenter(presenter: ClarifyPresenter): void {
-    this.clarifyPresenter = presenter;
-    this.loop.clarifyBridge?.setPresenter(presenter);
+  setClarifyPresenter(surfaceType: ClarifySurfaceType, presenter: ClarifyPresenter): void {
+    this.clarifyPresenter = { surfaceType, presenter };
+    this.loop.clarifyBridge?.registerPresenter(surfaceType, presenter);
   }
 
   /**
@@ -212,7 +216,9 @@ export class AgentBridge extends EventEmitter<BridgeEventMap> {
     // surface's clarify registrations so they keep working after the swap.
     const cb = this.loop.clarifyBridge;
     if (!cb) return;
-    if (this.clarifyPresenter) cb.setPresenter(this.clarifyPresenter);
+    if (this.clarifyPresenter) {
+      cb.registerPresenter(this.clarifyPresenter.surfaceType, this.clarifyPresenter.presenter);
+    }
     for (const listener of this.clarifyResolvedListeners) cb.onResolved(listener);
   }
 

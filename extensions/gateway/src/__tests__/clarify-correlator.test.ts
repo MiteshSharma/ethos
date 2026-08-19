@@ -95,6 +95,10 @@ describe('Gateway — clarifyMessageCorrelator short-circuit', () => {
     const bridge = {
       respond: vi.fn(),
       sweep: vi.fn(async () => {}),
+      // Fix 5 (pi-delegation.md D7) — an ordinary message that reaches
+      // normal routing now records presence too; this fake bridge needs the
+      // method to exist.
+      recordPresence: vi.fn(),
     } as unknown as ClarifyBridge;
     const loop = makeFakeLoop(bridge);
     const adapter = makeFakeAdapter();

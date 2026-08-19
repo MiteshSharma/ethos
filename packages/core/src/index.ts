@@ -58,8 +58,10 @@ export type { CapabilityValidationError } from './capability-validator';
 export { validateRegistration } from './capability-validator';
 export {
   ClarifyBridge,
-  ClarifyBusyError,
+  type ClarifyBridgeOptions,
   ClarifyNoSurfaceError,
+  type ClarifyOriginLane,
+  type ClarifyOriginResolver,
   type ClarifyPresenter,
   type ClarifyRequestInput,
   type ClarifyResolvedListener,

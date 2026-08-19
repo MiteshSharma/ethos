@@ -16,7 +16,10 @@ import { rpc } from '../../rpc';
 // the request — the `clarify.respond` call, the countdown, the cancel — is
 // shared, because a second answering path would be a second teardown.
 
-function formatCountdown(deadlineAt: string, now: number): string {
+// `deadlineAt` is `null` while a clarify is still queued behind another one
+// in the same lane (D2) — no timer has started yet.
+function formatCountdown(deadlineAt: string | null, now: number): string | null {
+  if (deadlineAt === null) return null;
   const ms = new Date(deadlineAt).getTime() - now;
   if (!Number.isFinite(ms) || ms <= 0) return 'now';
   const totalSec = Math.round(ms / 1000);
@@ -60,9 +63,11 @@ export function ClarifyCard({ request, variant = 'card' }: ClarifyCardProps) {
   const hasOptions = request.options !== undefined && request.options.length > 0;
   const countdown = formatCountdown(request.defaultDeadlineAt, now);
   const deadlineHint =
-    request.default !== undefined
-      ? `Default \`${request.default}\` in ${countdown}`
-      : `Times out in ${countdown}`;
+    countdown === null
+      ? 'Queued — waiting to be shown'
+      : request.default !== undefined
+        ? `Default \`${request.default}\` in ${countdown}`
+        : `Times out in ${countdown}`;
 
   const isSlot = variant === 'slot';
 

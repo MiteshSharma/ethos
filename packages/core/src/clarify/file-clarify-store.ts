@@ -34,12 +34,17 @@ export class FileClarifyStore implements ClarifyStore {
     return rows.find((r) => r.requestId === requestId) ?? null;
   }
 
-  async list(filter?: { surfaceType?: string; sessionId?: string }): Promise<PendingClarify[]> {
+  async list(filter?: {
+    surfaceType?: string;
+    sessionId?: string;
+    jobId?: string;
+  }): Promise<PendingClarify[]> {
     const rows = await this.readAll();
     return rows.filter(
       (r) =>
         (filter?.surfaceType === undefined || r.surfaceType === filter.surfaceType) &&
-        (filter?.sessionId === undefined || r.sessionId === filter.sessionId),
+        (filter?.sessionId === undefined || r.sessionId === filter.sessionId) &&
+        (filter?.jobId === undefined || r.jobId === filter.jobId),
     );
   }
 
@@ -63,7 +68,12 @@ export class FileClarifyStore implements ClarifyStore {
   async expired(now: Date): Promise<PendingClarify[]> {
     const rows = await this.readAll();
     const cutoff = now.getTime();
-    return rows.filter((r) => new Date(r.defaultDeadlineAt).getTime() <= cutoff);
+    // D2 — a row still queued behind another clarify in its lane persists with
+    // `defaultDeadlineAt: null`. It has no timer running and hasn't been shown
+    // to anyone yet, so it must never be treated as expired.
+    return rows.filter(
+      (r) => r.defaultDeadlineAt !== null && new Date(r.defaultDeadlineAt).getTime() <= cutoff,
+    );
   }
 
   // ---------------------------------------------------------------------------

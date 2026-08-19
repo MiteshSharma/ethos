@@ -243,6 +243,12 @@ export interface RunOptions {
   agentId?: string;
   /** Root session key for background-job containment; threaded to ToolContext.rootSessionKey. */
   rootSessionKey?: string;
+  /**
+   * D22 (pi-delegation plan) — background job id, threaded to ToolContext.jobId
+   * verbatim (no fallback, unlike rootSessionKey). Stamped by
+   * `BackgroundExecutor.runOne`; absent for foreground turns.
+   */
+  jobId?: string;
   /** Origin of this run (`platform:chatId` for channel turns). Threaded to `ToolContext.origin`. Generic — not goal-specific. */
   origin?: string;
   a2aDelegation?: { traceId: string; depth: number; reserveOutbound: () => boolean }; // A2A runner sets this servicing an inbound task → `ToolContext.a2aDelegation` (plan §P8).
@@ -861,6 +867,7 @@ export class AgentLoop {
           opts: {
             agentId: opts.agentId,
             rootSessionKey: opts.rootSessionKey,
+            jobId: opts.jobId,
             origin: opts.origin,
             attachments: opts.attachments,
             dryRun: opts.dryRun,
