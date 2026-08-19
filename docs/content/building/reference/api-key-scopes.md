@@ -4,7 +4,7 @@ description: "All API key scopes and what each one gates."
 kind: reference
 audience: developer
 slug: api-key-scopes
-updated: 2026-08-09
+updated: 2026-08-19
 ---
 
 A scope is one permission on one API key. Each key carries a set of them, and the set decides which surfaces the bearer reaches: the contract namespaces on `/rpc/*`, the SSE endpoint, and the OpenAI-compatible `/v1/*` endpoints. Two mint paths issue keys from this same vocabulary — the `apiKeys.create` RPC (cookie-auth only, used by the web Settings tab) and `ethos api-key create` on the CLI.
@@ -59,7 +59,7 @@ The `apiKeys` namespace is restricted to cookie-auth. A bearer token cannot mint
 import { EthosClient } from '@ethosagent/sdk';
 
 // Cookie-auth -- browser context
-const client = new EthosClient({ baseUrl: 'http://localhost:2400' });
+const client = new EthosClient({ baseUrl: 'http://localhost:3000' });
 
 const { secret, key } = await client.rpc.apiKeys.create({
   name: 'my-dashboard',
