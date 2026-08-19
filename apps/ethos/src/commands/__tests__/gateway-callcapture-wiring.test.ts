@@ -41,38 +41,61 @@ describe('gateway.ts — call-capture daemon wiring', () => {
     expect(src).toMatch(/checkDependencies: checkCallCaptureDependencies,/);
   });
 
-  it('wires the process prefilter (decision 1) via checkAnyCallingAppRunning, mapped to a clean source label', async () => {
+  it('does not wire a separate process-prefilter gate — the native detector already scopes to known apps', async () => {
+    const src = await readGatewaySource();
+    expect(src).not.toMatch(/checkCallingAppRunning:/);
+    expect(src).not.toMatch(/checkAnyCallingAppRunning/);
+  });
+
+  // P0 (plan/phases/call-capture-desktop-ux.md) — a single-attempt
+  // tryClaimOwnership() call left a process daemon-less for its whole
+  // lifetime whenever it lost the race at launch, even after the winner
+  // later exited. `CallCaptureOwnershipManager` (extensions/
+  // platform-callcapture/src/ownership.ts) owns the retry loop now; its own
+  // behaviour is unit-tested directly in ownership.test.ts. These assertions
+  // only lock gateway.ts's wiring INTO that manager — mirrors
+  // serve-callcapture-wiring.test.ts exactly.
+  it('constructs a CallCaptureOwnershipManager with the lock path and the heartbeat interval as the retry cadence', async () => {
+    const src = await readGatewaySource();
+    expect(src).toMatch(/new CallCaptureOwnershipManager\(\{/);
+    expect(src).toMatch(/lockPath: callCaptureLockPath\(ethosDir\(\)\),/);
+    expect(src).toMatch(/retryIntervalMs: CALL_CAPTURE_HEARTBEAT_INTERVAL_MS,/);
+    expect(src).toMatch(/logger: callCaptureLogger,/);
+  });
+
+  it('starts the ownership manager instead of calling tryClaimOwnership directly', async () => {
+    const src = await readGatewaySource();
+    expect(src).toMatch(/callCaptureOwnershipManager\.start\(\);/);
+    expect(src).not.toMatch(/tryClaimOwnership\(/);
+  });
+
+  it('constructs and starts the daemon, and writes the heartbeat, from inside onOwnershipClaimed', async () => {
     const src = await readGatewaySource();
     expect(src).toMatch(
-      /checkCallingAppRunning: async \(\) => \{[\s\S]*?const matched = await checkAnyCallingAppRunning\(\);[\s\S]*?return matched \? sourceLabelForProcessName\(matched\) : null;/,
+      /onOwnershipClaimed: \(\) => \{[\s\S]*?const callCaptureDaemon = new CallCaptureDaemon\(\{/,
     );
+    expect(src).toMatch(/callCaptureDaemon\.start\(\);/);
+    expect(src).toMatch(/callCaptureHeartbeatTimer = setInterval\(/);
   });
 
-  // Round-3 Issue 1 — at most one process may own the call-capture daemon.
-  it('claims ownership via tryClaimOwnership(callCaptureLockPath()) before constructing the daemon', async () => {
+  it('stops via the ownership manager on shutdown (daemon, heartbeat, health file, and lock release all handled there)', async () => {
     const src = await readGatewaySource();
-    expect(src).toMatch(/tryClaimOwnership\(callCaptureLockPath\(\)\)/);
+    expect(src).toMatch(/await callCaptureOwnershipManager\?\.stop\(\);/);
+    expect(src).not.toMatch(/callCaptureOwnershipRelease/);
   });
 
-  it('skips daemon construction and logs info (not error) when ownership is not claimed', async () => {
+  it('the onOwnershipClaimed teardown stops the daemon, clears the heartbeat timer, and removes the health file', async () => {
     const src = await readGatewaySource();
-    expect(src).toMatch(/if \(!ownershipClaim\.claimed\) \{/);
+    expect(src).toMatch(/callCaptureHealthPath\(ethosDir\(\)\)/);
     expect(src).toMatch(
-      /callCaptureLogger\.info\(\s*`call-capture: already running under PID \$\{ownershipClaim\.ownerPid\}/,
+      /return async \(\) => \{\s*callCaptureDaemon\.stop\(\);\s*clearInterval\(callCaptureHeartbeatTimer\);\s*await storage\.remove\(callCaptureHealthPath\(ethosDir\(\)\)\)\.catch\(\(\) => \{\}\);\s*\};/,
     );
-  });
-
-  it('releases the ownership claim on shutdown', async () => {
-    const src = await readGatewaySource();
-    expect(src).toMatch(/let callCaptureOwnershipRelease: \(\(\) => void\) \| undefined;/);
-    expect(src).toMatch(/callCaptureOwnershipRelease = ownershipClaim\.release;/);
-    expect(src).toMatch(/callCaptureOwnershipRelease\?\.\(\);/);
   });
 
   it('binds runCapture to the loop-provided runCallCapture closure, logging failures/warnings/success', async () => {
     const src = await readGatewaySource();
     expect(src).toMatch(
-      /runCapture: async \(abortSignal, source\) => \{[\s\S]*?const result = await captureRunner\(boundPersonalityId, \{ abortSignal, source \}\);/,
+      /runCapture: async \(abortSignal, source, onEntry, onAudioLevel\) => \{[\s\S]*?const result = await captureRunner\(boundPersonalityId, \{[\s\S]*?abortSignal,[\s\S]*?source,[\s\S]*?onEntry,[\s\S]*?onAudioLevel,[\s\S]*?\}\);/,
     );
     expect(src).toMatch(
       /callCaptureLogger\.error\(`call-capture: capture failed: \$\{result\.error\}`\)/,
@@ -83,21 +106,17 @@ describe('gateway.ts — call-capture daemon wiring', () => {
     );
   });
 
-  it('starts the daemon and stops it on shutdown', async () => {
+  // Floating on-screen recording indicator (plan/phases/
+  // call-capture-desktop-ux.md) — the headless-CLI analog of the desktop
+  // app's Electron-based pill.
+  it('constructs a CaptureIndicator alongside the detector/notification gate', async () => {
     const src = await readGatewaySource();
-    expect(src).toMatch(/callCaptureDaemon\.start\(\);/);
-    expect(src).toMatch(/callCaptureDaemon\?\.stop\(\);/);
+    expect(src).toMatch(/indicator: new CaptureIndicator\(\{/);
   });
 
-  it('writes and tears down the call-capture daemon liveness heartbeat', async () => {
+  it('starts the daemon exactly once, from inside onOwnershipClaimed, and stops it in the returned teardown', async () => {
     const src = await readGatewaySource();
-    expect(src).toMatch(/callCaptureHealthPath\(\)/);
-    expect(src).toMatch(/callCaptureHeartbeatTimer = setInterval\(/);
-    expect(src).toMatch(
-      /if \(callCaptureHeartbeatTimer\) clearInterval\(callCaptureHeartbeatTimer\);/,
-    );
-    expect(src).toMatch(
-      /if \(callCaptureDaemon\) await storage\.remove\(callCaptureHealthPath\(\)\)\.catch\(\(\) => \{\}\);/,
-    );
+    expect(src.match(/callCaptureDaemon\.start\(\);/g) ?? []).toHaveLength(1);
+    expect(src.match(/callCaptureDaemon\.stop\(\);/g) ?? []).toHaveLength(1);
   });
 });

@@ -2,13 +2,44 @@ import { describe, expect, it, vi } from 'vitest';
 import type {
   CallCaptureDependencyCheck,
   CallCaptureDetectorPort,
+  CallCaptureIndicatorPort,
   CallCaptureNotificationGatePort,
-  CallCaptureProcessGateCheck,
   CallCaptureWakeEvent,
 } from '../daemon';
 import { CallCaptureDaemon } from '../daemon';
-import type { MicActivityEvent } from '../detector';
+import type { Clock, MicActivityEvent } from '../detector';
 import type { CaptureOfferHandle, CaptureOfferOutcome } from '../notification';
+import type { Speaker, TranscriptEntry } from '../transcript-session';
+
+/** Fake Clock — mirrors detector.test.ts's own FakeClock idiom. Pending
+ * timers are advanced explicitly, never by real time. */
+class FakeClock implements Clock {
+  private nextId = 1;
+  private readonly pending = new Map<number, () => void>();
+  readonly clearedHandles: unknown[] = [];
+
+  setTimeout(fn: () => void, _ms: number): number {
+    const id = this.nextId++;
+    this.pending.set(id, fn);
+    return id;
+  }
+
+  clearTimeout(handle: unknown): void {
+    this.clearedHandles.push(handle);
+    this.pending.delete(handle as number);
+  }
+
+  /** Fire every timer currently pending, as if `ms` had elapsed. */
+  advance(): void {
+    const fns = [...this.pending.values()];
+    this.pending.clear();
+    for (const fn of fns) fn();
+  }
+
+  get pendingCount(): number {
+    return this.pending.size;
+  }
+}
 
 // Pure orchestration logic over injected fakes — no real hardware, binaries,
 // or AgentLoop anywhere in this file, mirroring the injectable-port idiom
@@ -36,7 +67,7 @@ class FakeDetector implements CallCaptureDetectorPort {
 /** Fake notification gate: `presentCaptureOffer` resolves a handle whose
  * outcome the test controls directly via `resolveOutcome`/`expire` spies. */
 class FakeNotificationGate implements CallCaptureNotificationGatePort {
-  readonly offers: Array<{ callId: string; title: string; message: string }> = [];
+  readonly offers: Array<{ callId: string; title: string; message: string; source?: string }> = [];
   readonly expireCalls: string[] = [];
   private resolveOutcome: ((outcome: CaptureOfferOutcome) => void) | null = null;
 
@@ -44,6 +75,7 @@ class FakeNotificationGate implements CallCaptureNotificationGatePort {
     callId: string;
     title: string;
     message: string;
+    source?: string;
   }): Promise<CaptureOfferHandle> {
     this.offers.push(opts);
     const outcomePromise = new Promise<CaptureOfferOutcome>((resolve) => {
@@ -102,19 +134,6 @@ function failingDeps(missing: string[]): CallCaptureDependencyCheck {
   return async () => ({ ok: false, missing, errors: missing.map((m) => `${m} missing`) });
 }
 
-/** Default process-prefilter gate for tests unrelated to Issue A's gating
- * behavior — always reports a known calling app running (as the clean
- * source label the real `checkCallingAppRunning` binding would resolve to),
- * i.e. the gate never blocks. Tests that exercise the gate itself supply
- * their own. */
-function allowAppRunning(source = 'zoom'): CallCaptureProcessGateCheck {
-  return async () => source;
-}
-
-function blockAppRunning(): CallCaptureProcessGateCheck {
-  return async () => null;
-}
-
 /** Dependency check the test resolves manually, to land a `call_ended`
  * exactly while `checkDependencies()` is still pending. */
 function deferredDeps(): {
@@ -132,6 +151,42 @@ function deferredDeps(): {
     check,
     resolve: (result) => resolveFn?.(result),
   };
+}
+
+/** Fake indicator: records show/updateTranscript/hide calls and lets the
+ * test fire "End button clicked" directly, mirroring the other fakes'
+ * "capture the callback, drive it manually" idiom. */
+class FakeIndicator implements CallCaptureIndicatorPort {
+  readonly showCalls: string[] = [];
+  readonly updateCalls: TranscriptEntry[] = [];
+  readonly audioLevelCalls: Array<{ speaker: Speaker; level: number; at: number }> = [];
+  hideCalls = 0;
+  private endRequestedCallback: (() => void) | null = null;
+
+  show(source: string): void {
+    this.showCalls.push(source);
+  }
+
+  updateTranscript(entry: TranscriptEntry): void {
+    this.updateCalls.push(entry);
+  }
+
+  updateAudioLevel(speaker: Speaker, level: number, at: number): void {
+    this.audioLevelCalls.push({ speaker, level, at });
+  }
+
+  hide(): void {
+    this.hideCalls++;
+  }
+
+  onEndRequested(callback: () => void): void {
+    this.endRequestedCallback = callback;
+  }
+
+  /** Simulates the user clicking the indicator's "End" affordance. */
+  triggerEndRequested(): void {
+    this.endRequestedCallback?.();
+  }
 }
 
 function makeLogger() {
@@ -162,13 +217,12 @@ describe('CallCaptureDaemon', () => {
       detector,
       notificationGate: gate,
       checkDependencies: okDeps(),
-      checkCallingAppRunning: allowAppRunning(),
       personalityId: 'receptionist',
       wake,
       runCapture: vi.fn(async () => {}),
     });
     daemon.start();
-    detector.emit({ type: 'call_started', at: 1000 });
+    detector.emit({ type: 'call_started', at: 1000, source: 'zoom' });
     await flush();
 
     expect(wake).toHaveBeenCalledTimes(1);
@@ -186,14 +240,13 @@ describe('CallCaptureDaemon', () => {
       detector,
       notificationGate: gate,
       checkDependencies: failingDeps(['terminal-notifier', 'audiotee']),
-      checkCallingAppRunning: allowAppRunning(),
       personalityId: 'receptionist',
       wake,
       runCapture: vi.fn(async () => {}),
       logger,
     });
     daemon.start();
-    detector.emit({ type: 'call_started', at: 1000 });
+    detector.emit({ type: 'call_started', at: 1000, source: 'zoom' });
     await flush();
 
     expect(wake).not.toHaveBeenCalled();
@@ -213,12 +266,11 @@ describe('CallCaptureDaemon', () => {
       detector,
       notificationGate: gate,
       checkDependencies: okDeps(),
-      checkCallingAppRunning: allowAppRunning(),
       personalityId: 'receptionist',
       runCapture,
     });
     daemon.start();
-    detector.emit({ type: 'call_started', at: 1000 });
+    detector.emit({ type: 'call_started', at: 1000, source: 'zoom' });
     await flush();
 
     gate.settle({ outcome: 'accepted' });
@@ -229,7 +281,7 @@ describe('CallCaptureDaemon', () => {
     expect(signal.aborted).toBe(false);
   });
 
-  it('accepted → runCapture is called with the source label the process-prefilter gate resolved', async () => {
+  it('accepted → runCapture is called with the source label carried on the call_started event', async () => {
     const detector = new FakeDetector();
     const gate = new FakeNotificationGate();
     const runCapture = vi.fn(async (_signal: AbortSignal, _source: string) => {});
@@ -238,12 +290,11 @@ describe('CallCaptureDaemon', () => {
       detector,
       notificationGate: gate,
       checkDependencies: okDeps(),
-      checkCallingAppRunning: allowAppRunning('teams'),
       personalityId: 'receptionist',
       runCapture,
     });
     daemon.start();
-    detector.emit({ type: 'call_started', at: 1000 });
+    detector.emit({ type: 'call_started', at: 1000, source: 'teams' });
     await flush();
 
     gate.settle({ outcome: 'accepted' });
@@ -252,6 +303,34 @@ describe('CallCaptureDaemon', () => {
     expect(runCapture).toHaveBeenCalledTimes(1);
     const [, source] = runCapture.mock.calls[0];
     expect(source).toBe('teams');
+  });
+
+  it('onStateChange observes the full happy-path state sequence, with source carried on the capturing state', async () => {
+    const detector = new FakeDetector();
+    const gate = new FakeNotificationGate();
+    const runCapture = vi.fn(async () => {});
+    const onStateChange = vi.fn();
+
+    const daemon = new CallCaptureDaemon({
+      detector,
+      notificationGate: gate,
+      checkDependencies: okDeps(),
+      personalityId: 'receptionist',
+      runCapture,
+      onStateChange,
+    });
+    daemon.start();
+    detector.emit({ type: 'call_started', at: 1000, source: 'zoom' });
+    await flush();
+
+    gate.settle({ outcome: 'accepted' });
+    await flush();
+
+    const kinds = onStateChange.mock.calls.map(([state]) => state.kind);
+    expect(kinds).toEqual(['settingUp', 'awaiting', 'capturing', 'idle']);
+
+    const capturingCall = onStateChange.mock.calls.find(([state]) => state.kind === 'capturing');
+    expect(capturingCall?.[0].source).toBe('zoom');
   });
 
   it('call_ended while awaiting notification (not yet accepted) → handle.expire() called, no runCapture', async () => {
@@ -263,12 +342,11 @@ describe('CallCaptureDaemon', () => {
       detector,
       notificationGate: gate,
       checkDependencies: okDeps(),
-      checkCallingAppRunning: allowAppRunning(),
       personalityId: 'receptionist',
       runCapture,
     });
     daemon.start();
-    detector.emit({ type: 'call_started', at: 1000 });
+    detector.emit({ type: 'call_started', at: 1000, source: 'zoom' });
     await flush();
 
     detector.emit({ type: 'call_ended', at: 2000 });
@@ -276,6 +354,31 @@ describe('CallCaptureDaemon', () => {
 
     expect(gate.expireCalls).toEqual(['1000']);
     expect(runCapture).not.toHaveBeenCalled();
+  });
+
+  it('onStateChange observes a final idle state when call_ended cancels a call while still awaiting', async () => {
+    const detector = new FakeDetector();
+    const gate = new FakeNotificationGate();
+    const runCapture = vi.fn(async () => {});
+    const onStateChange = vi.fn();
+
+    const daemon = new CallCaptureDaemon({
+      detector,
+      notificationGate: gate,
+      checkDependencies: okDeps(),
+      personalityId: 'receptionist',
+      runCapture,
+      onStateChange,
+    });
+    daemon.start();
+    detector.emit({ type: 'call_started', at: 1000, source: 'zoom' });
+    await flush();
+
+    detector.emit({ type: 'call_ended', at: 2000 });
+    await flush();
+
+    const lastCall = onStateChange.mock.calls[onStateChange.mock.calls.length - 1];
+    expect(lastCall?.[0]).toEqual({ kind: 'idle' });
   });
 
   it('call_ended while capturing (runCapture in flight) → the AbortSignal passed to runCapture is aborted', async () => {
@@ -294,12 +397,11 @@ describe('CallCaptureDaemon', () => {
       detector,
       notificationGate: gate,
       checkDependencies: okDeps(),
-      checkCallingAppRunning: allowAppRunning(),
       personalityId: 'receptionist',
       runCapture,
     });
     daemon.start();
-    detector.emit({ type: 'call_started', at: 1000 });
+    detector.emit({ type: 'call_started', at: 1000, source: 'zoom' });
     await flush();
     gate.settle({ outcome: 'accepted' });
     await flush();
@@ -323,13 +425,12 @@ describe('CallCaptureDaemon', () => {
       detector,
       notificationGate: gate,
       checkDependencies: okDeps(),
-      checkCallingAppRunning: allowAppRunning(),
       personalityId: 'receptionist',
       runCapture,
       logger,
     });
     daemon.start();
-    detector.emit({ type: 'call_started', at: 1000 });
+    detector.emit({ type: 'call_started', at: 1000, source: 'zoom' });
     await flush();
     gate.settle({ outcome: 'expired' });
     await flush();
@@ -348,13 +449,12 @@ describe('CallCaptureDaemon', () => {
       detector,
       notificationGate: gate,
       checkDependencies: okDeps(),
-      checkCallingAppRunning: allowAppRunning(),
       personalityId: 'receptionist',
       runCapture,
       logger,
     });
     daemon.start();
-    detector.emit({ type: 'call_started', at: 1000 });
+    detector.emit({ type: 'call_started', at: 1000, source: 'zoom' });
     await flush();
     gate.settle({ outcome: 'error', message: 'terminal-notifier spawn failed' });
     await flush();
@@ -374,14 +474,13 @@ describe('CallCaptureDaemon', () => {
       detector,
       notificationGate: gate,
       checkDependencies: okDeps(),
-      checkCallingAppRunning: allowAppRunning(),
       personalityId: 'receptionist',
       runCapture,
     });
     daemon.start();
 
     // First call: started, then ended before acceptance (supersedes the offer).
-    detector.emit({ type: 'call_started', at: 1000 });
+    detector.emit({ type: 'call_started', at: 1000, source: 'zoom' });
     await flush();
     detector.emit({ type: 'call_ended', at: 1500 });
     await flush();
@@ -403,12 +502,11 @@ describe('CallCaptureDaemon', () => {
       detector,
       notificationGate: gate,
       checkDependencies: okDeps(),
-      checkCallingAppRunning: allowAppRunning(),
       personalityId: 'receptionist',
       runCapture: vi.fn(async () => {}),
     });
     daemon.start();
-    detector.emit({ type: 'call_started', at: 1000 });
+    detector.emit({ type: 'call_started', at: 1000, source: 'zoom' });
     await flush();
 
     daemon.stop();
@@ -421,6 +519,32 @@ describe('CallCaptureDaemon', () => {
     expect(() => daemon.stop()).not.toThrow();
   });
 
+  it('onStateChange observes a final idle state when stop() is called mid-capture', async () => {
+    const detector = new FakeDetector();
+    const gate = new FakeNotificationGate();
+    const runCapture = vi.fn(() => new Promise<void>(() => {}));
+    const onStateChange = vi.fn();
+
+    const daemon = new CallCaptureDaemon({
+      detector,
+      notificationGate: gate,
+      checkDependencies: okDeps(),
+      personalityId: 'receptionist',
+      runCapture,
+      onStateChange,
+    });
+    daemon.start();
+    detector.emit({ type: 'call_started', at: 1000, source: 'zoom' });
+    await flush();
+    gate.settle({ outcome: 'accepted' });
+    await flush();
+
+    daemon.stop();
+
+    const lastCall = onStateChange.mock.calls[onStateChange.mock.calls.length - 1];
+    expect(lastCall?.[0].kind).toBe('idle');
+  });
+
   it('a call_started arriving while not idle is ignored and logged (defensive guard)', async () => {
     const detector = new FakeDetector();
     const gate = new FakeNotificationGate();
@@ -430,17 +554,16 @@ describe('CallCaptureDaemon', () => {
       detector,
       notificationGate: gate,
       checkDependencies: okDeps(),
-      checkCallingAppRunning: allowAppRunning(),
       personalityId: 'receptionist',
       runCapture: vi.fn(async () => {}),
       logger,
     });
     daemon.start();
-    detector.emit({ type: 'call_started', at: 1000 });
+    detector.emit({ type: 'call_started', at: 1000, source: 'zoom' });
     await flush();
 
     // Second call_started while still awaiting the first notification.
-    detector.emit({ type: 'call_started', at: 2000 });
+    detector.emit({ type: 'call_started', at: 2000, source: 'zoom' });
     await flush();
 
     expect(gate.offers).toHaveLength(1);
@@ -462,7 +585,6 @@ describe('CallCaptureDaemon', () => {
       detector,
       notificationGate: gate,
       checkDependencies: deps.check,
-      checkCallingAppRunning: allowAppRunning(),
       personalityId: 'receptionist',
       wake,
       runCapture: vi.fn(async () => {}),
@@ -470,7 +592,7 @@ describe('CallCaptureDaemon', () => {
     });
     daemon.start();
 
-    detector.emit({ type: 'call_started', at: 1000 });
+    detector.emit({ type: 'call_started', at: 1000, source: 'zoom' });
     // call_ended arrives BEFORE checkDependencies resolves.
     detector.emit({ type: 'call_ended', at: 1500 });
     await flush();
@@ -486,7 +608,7 @@ describe('CallCaptureDaemon', () => {
     // fresh call_started and confirming a new offer IS made. `deps.check`
     // hands out a fresh pending promise per call, so this second call's
     // dependency check needs its own explicit resolve too.
-    detector.emit({ type: 'call_started', at: 2000 });
+    detector.emit({ type: 'call_started', at: 2000, source: 'zoom' });
     await flush();
     expect(gate.offers).toHaveLength(0); // still pending — this call's deps check hasn't resolved yet
     deps.resolve({ ok: true });
@@ -503,13 +625,12 @@ describe('CallCaptureDaemon', () => {
       detector,
       notificationGate: gate,
       checkDependencies: okDeps(),
-      checkCallingAppRunning: allowAppRunning(),
       personalityId: 'receptionist',
       runCapture,
     });
     daemon.start();
 
-    detector.emit({ type: 'call_started', at: 1000 });
+    detector.emit({ type: 'call_started', at: 1000, source: 'zoom' });
     await flush();
 
     // call_ended arrives while presentCaptureOffer is still pending.
@@ -525,7 +646,7 @@ describe('CallCaptureDaemon', () => {
 
     // A fresh call_started afterward proves the daemon returned to idle, not
     // stuck — and that no stray waitForOutcome handler double-fires later.
-    detector.emit({ type: 'call_started', at: 2000 });
+    detector.emit({ type: 'call_started', at: 2000, source: 'zoom' });
     await flush();
     expect(runCapture).not.toHaveBeenCalled();
   });
@@ -547,7 +668,6 @@ describe('CallCaptureDaemon', () => {
       detector,
       notificationGate: gate,
       checkDependencies: deps.check,
-      checkCallingAppRunning: allowAppRunning(),
       personalityId: 'receptionist',
       wake,
       runCapture,
@@ -555,7 +675,7 @@ describe('CallCaptureDaemon', () => {
     });
     daemon.start();
 
-    detector.emit({ type: 'call_started', at: 1000 });
+    detector.emit({ type: 'call_started', at: 1000, source: 'zoom' });
     await flush();
 
     // stop() fires while checkDependencies() is still in flight — this used
@@ -585,13 +705,12 @@ describe('CallCaptureDaemon', () => {
       detector,
       notificationGate: gate,
       checkDependencies: okDeps(),
-      checkCallingAppRunning: allowAppRunning(),
       personalityId: 'receptionist',
       runCapture,
     });
     daemon.start();
 
-    detector.emit({ type: 'call_started', at: 1000 });
+    detector.emit({ type: 'call_started', at: 1000, source: 'zoom' });
     await flush();
 
     // stop() fires while presentCaptureOffer() is still in flight.
@@ -609,10 +728,15 @@ describe('CallCaptureDaemon', () => {
   });
 
   // -------------------------------------------------------------------------
-  // Issue A — process prefilter (decision 1's coarse prefilter, now wired)
+  // Process gating is no longer a separate daemon-level check (formerly
+  // "Issue A" — the process prefilter wired as a `checkCallingAppRunning`
+  // port). The native detector now only ever watches known calling apps in
+  // the first place, so a call_started event is scoped to one by
+  // construction — there is no "mic active, no known app" case left for the
+  // daemon to gate on. See process-prefilter.ts's header comment.
   // -------------------------------------------------------------------------
 
-  it('known calling app running + mic-active → notification fires (unchanged behavior)', async () => {
+  it('call_started carrying a source label → notification fires', async () => {
     const detector = new FakeDetector();
     const gate = new FakeNotificationGate();
     const wake = vi.fn(async () => {});
@@ -621,48 +745,511 @@ describe('CallCaptureDaemon', () => {
       detector,
       notificationGate: gate,
       checkDependencies: okDeps(),
-      checkCallingAppRunning: allowAppRunning(),
       personalityId: 'receptionist',
       wake,
       runCapture: vi.fn(async () => {}),
     });
     daemon.start();
-    detector.emit({ type: 'call_started', at: 1000 });
+    detector.emit({ type: 'call_started', at: 1000, source: 'zoom' });
     await flush();
 
     expect(wake).toHaveBeenCalledTimes(1);
     expect(gate.offers).toHaveLength(1);
   });
 
-  it('no known calling app running → no wake, no notification, state returns to idle, logged', async () => {
+  it('threads the call_started source label through to presentCaptureOffer, for the card subtitle', async () => {
     const detector = new FakeDetector();
     const gate = new FakeNotificationGate();
-    const wake = vi.fn(async () => {});
-    const logger = makeLogger();
 
     const daemon = new CallCaptureDaemon({
       detector,
       notificationGate: gate,
       checkDependencies: okDeps(),
-      checkCallingAppRunning: blockAppRunning(),
       personalityId: 'receptionist',
-      wake,
       runCapture: vi.fn(async () => {}),
-      logger,
     });
     daemon.start();
-    detector.emit({ type: 'call_started', at: 1000 });
+    detector.emit({ type: 'call_started', at: 1000, source: 'teams' });
     await flush();
 
-    expect(wake).not.toHaveBeenCalled();
-    expect(gate.offers).toHaveLength(0);
-    expect(logger.info).toHaveBeenCalledWith(
-      expect.stringContaining('no known calling app is running'),
-    );
+    expect(gate.offers[0]?.source).toBe('teams');
+  });
 
-    // A fresh call_started afterward proves the daemon returned to idle.
-    detector.emit({ type: 'call_started', at: 2000 });
+  // -------------------------------------------------------------------------
+  // Maximum-capture-duration safety net — a last resort UNDER the real
+  // call_ended signal (see daemon.ts's header comment, "CANCELLATION"),
+  // added after testing this fix found a real calling-app process whose own
+  // per-process signal stayed warm with no confirmable active call.
+  // -------------------------------------------------------------------------
+
+  it('aborts an in-flight capture when the safety-net timer fires without a call_ended', async () => {
+    const detector = new FakeDetector();
+    const gate = new FakeNotificationGate();
+    const clock = new FakeClock();
+    let capturedSignal: AbortSignal | undefined;
+    const runCapture = vi.fn((signal: AbortSignal) => {
+      capturedSignal = signal;
+      return new Promise<void>(() => {}); // never resolves on its own
+    });
+
+    const daemon = new CallCaptureDaemon({
+      detector,
+      notificationGate: gate,
+      checkDependencies: okDeps(),
+      personalityId: 'receptionist',
+      runCapture,
+      maxCaptureDurationMs: 1000,
+      clock,
+    });
+    daemon.start();
+    detector.emit({ type: 'call_started', at: 1000, source: 'zoom' });
     await flush();
-    expect(gate.offers).toHaveLength(0);
+    gate.settle({ outcome: 'accepted' });
+    await flush();
+
+    expect(capturedSignal?.aborted).toBe(false);
+
+    clock.advance();
+
+    expect(capturedSignal?.aborted).toBe(true);
+  });
+
+  it('clears the safety-net timer once call_ended aborts the capture normally', async () => {
+    const detector = new FakeDetector();
+    const gate = new FakeNotificationGate();
+    const clock = new FakeClock();
+    let resolveRunCapture: (() => void) | undefined;
+    const runCapture = vi.fn(() => {
+      return new Promise<void>((resolve) => {
+        resolveRunCapture = resolve;
+      });
+    });
+
+    const daemon = new CallCaptureDaemon({
+      detector,
+      notificationGate: gate,
+      checkDependencies: okDeps(),
+      personalityId: 'receptionist',
+      runCapture,
+      maxCaptureDurationMs: 1000,
+      clock,
+    });
+    daemon.start();
+    detector.emit({ type: 'call_started', at: 1000, source: 'zoom' });
+    await flush();
+    gate.settle({ outcome: 'accepted' });
+    await flush();
+
+    expect(clock.pendingCount).toBe(1);
+
+    detector.emit({ type: 'call_ended', at: 3000 });
+    resolveRunCapture?.();
+    await flush();
+
+    expect(clock.pendingCount).toBe(0);
+  });
+
+  it('defaults the safety net to 4 hours when maxCaptureDurationMs is not supplied', async () => {
+    const detector = new FakeDetector();
+    const gate = new FakeNotificationGate();
+    const clock = new FakeClock();
+    const setTimeoutSpy = vi.spyOn(clock, 'setTimeout');
+    const runCapture = vi.fn(() => new Promise<void>(() => {}));
+
+    const daemon = new CallCaptureDaemon({
+      detector,
+      notificationGate: gate,
+      checkDependencies: okDeps(),
+      personalityId: 'receptionist',
+      runCapture,
+      clock,
+    });
+    daemon.start();
+    detector.emit({ type: 'call_started', at: 1000, source: 'zoom' });
+    await flush();
+    gate.settle({ outcome: 'accepted' });
+    await flush();
+
+    expect(setTimeoutSpy).toHaveBeenCalledWith(expect.any(Function), 4 * 60 * 60 * 1000);
+  });
+
+  // -------------------------------------------------------------------------
+  // onStateChange observability hook (plan/phases/call-capture-desktop-ux.md,
+  // P2) — the desktop pill observes capture start/end through this instead of
+  // polling or duplicating the daemon's state machine.
+  // -------------------------------------------------------------------------
+
+  describe('onStateChange', () => {
+    it('fires with each state in order across the full accepted flow, carrying source on the capturing state', async () => {
+      const detector = new FakeDetector();
+      const gate = new FakeNotificationGate();
+      const runCapture = vi.fn(async () => {});
+      const states: Array<{ kind: string }> = [];
+      const onStateChange = vi.fn((state) => states.push(state));
+
+      const daemon = new CallCaptureDaemon({
+        detector,
+        notificationGate: gate,
+        checkDependencies: okDeps(),
+        personalityId: 'receptionist',
+        runCapture,
+        onStateChange,
+      });
+      daemon.start();
+      detector.emit({ type: 'call_started', at: 1000, source: 'zoom' });
+      await flush();
+      gate.settle({ outcome: 'accepted' });
+      await flush();
+      detector.emit({ type: 'call_ended', at: 4000 });
+      await flush();
+
+      expect(states.map((s) => s.kind)).toEqual(['settingUp', 'awaiting', 'capturing', 'idle']);
+      const capturingState = states[2] as { kind: 'capturing'; source: string; callId: string };
+      expect(capturingState.source).toBe('zoom');
+      expect(capturingState.callId).toBe('1000');
+    });
+
+    it('does not fire at all when not supplied (existing callers unaffected)', async () => {
+      const detector = new FakeDetector();
+      const gate = new FakeNotificationGate();
+
+      const daemon = new CallCaptureDaemon({
+        detector,
+        notificationGate: gate,
+        checkDependencies: okDeps(),
+        personalityId: 'receptionist',
+        runCapture: vi.fn(async () => {}),
+      });
+      daemon.start();
+      detector.emit({ type: 'call_started', at: 1000, source: 'zoom' });
+      await flush();
+
+      expect(() => gate.settle({ outcome: 'accepted' })).not.toThrow();
+      await flush();
+    });
+
+    it('fires idle after call_ended while only awaiting (never reached capturing)', async () => {
+      const detector = new FakeDetector();
+      const gate = new FakeNotificationGate();
+      const states: Array<{ kind: string }> = [];
+
+      const daemon = new CallCaptureDaemon({
+        detector,
+        notificationGate: gate,
+        checkDependencies: okDeps(),
+        personalityId: 'receptionist',
+        runCapture: vi.fn(async () => {}),
+        onStateChange: (state) => states.push(state),
+      });
+      daemon.start();
+      detector.emit({ type: 'call_started', at: 1000, source: 'zoom' });
+      await flush();
+      detector.emit({ type: 'call_ended', at: 1500 });
+      await flush();
+
+      expect(states.map((s) => s.kind)).toEqual(['settingUp', 'awaiting', 'idle']);
+    });
+
+    it('fires idle when stop() is called while awaiting', async () => {
+      const detector = new FakeDetector();
+      const gate = new FakeNotificationGate();
+      const states: Array<{ kind: string }> = [];
+
+      const daemon = new CallCaptureDaemon({
+        detector,
+        notificationGate: gate,
+        checkDependencies: okDeps(),
+        personalityId: 'receptionist',
+        runCapture: vi.fn(async () => {}),
+        onStateChange: (state) => states.push(state),
+      });
+      daemon.start();
+      detector.emit({ type: 'call_started', at: 1000, source: 'zoom' });
+      await flush();
+
+      daemon.stop();
+
+      expect(states.map((s) => s.kind)).toEqual(['settingUp', 'awaiting', 'idle']);
+    });
+
+    it('fires idle when stop() aborts an in-flight capture', async () => {
+      const detector = new FakeDetector();
+      const gate = new FakeNotificationGate();
+      const runCapture = vi.fn(() => new Promise<void>(() => {}));
+      const states: Array<{ kind: string }> = [];
+
+      const daemon = new CallCaptureDaemon({
+        detector,
+        notificationGate: gate,
+        checkDependencies: okDeps(),
+        personalityId: 'receptionist',
+        runCapture,
+        onStateChange: (state) => states.push(state),
+      });
+      daemon.start();
+      detector.emit({ type: 'call_started', at: 1000, source: 'zoom' });
+      await flush();
+      gate.settle({ outcome: 'accepted' });
+      await flush();
+
+      daemon.stop();
+
+      expect(states.map((s) => s.kind)).toEqual(['settingUp', 'awaiting', 'capturing', 'idle']);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Floating on-screen recording indicator (plan/phases/
+  // call-capture-desktop-ux.md) — the CLI-daemon's `CallCaptureIndicatorPort`.
+  // -------------------------------------------------------------------------
+
+  describe('indicator', () => {
+    it('shows the indicator with the call source once accepted, and hides it once capture completes normally', async () => {
+      const detector = new FakeDetector();
+      const gate = new FakeNotificationGate();
+      const indicator = new FakeIndicator();
+      const runCapture = vi.fn(async () => {});
+
+      const daemon = new CallCaptureDaemon({
+        detector,
+        notificationGate: gate,
+        checkDependencies: okDeps(),
+        personalityId: 'receptionist',
+        runCapture,
+        indicator,
+      });
+      daemon.start();
+      detector.emit({ type: 'call_started', at: 1000, source: 'zoom' });
+      await flush();
+
+      expect(indicator.showCalls).toEqual([]);
+
+      gate.settle({ outcome: 'accepted' });
+      await flush();
+
+      expect(indicator.showCalls).toEqual(['zoom']);
+      expect(indicator.hideCalls).toBe(1);
+    });
+
+    it("forwards each entry from runCapture's onEntry callback to indicator.updateTranscript, in order", async () => {
+      const detector = new FakeDetector();
+      const gate = new FakeNotificationGate();
+      const indicator = new FakeIndicator();
+      const entries: TranscriptEntry[] = [
+        { speaker: 'you', text: 'hello', at: 1 },
+        { speaker: 'other', text: 'hi there', at: 2 },
+      ];
+      const runCapture = vi.fn(
+        async (
+          _signal: AbortSignal,
+          _source: string,
+          onEntry: (entry: TranscriptEntry) => void,
+        ) => {
+          for (const entry of entries) onEntry(entry);
+        },
+      );
+
+      const daemon = new CallCaptureDaemon({
+        detector,
+        notificationGate: gate,
+        checkDependencies: okDeps(),
+        personalityId: 'receptionist',
+        runCapture,
+        indicator,
+      });
+      daemon.start();
+      detector.emit({ type: 'call_started', at: 1000, source: 'zoom' });
+      await flush();
+      gate.settle({ outcome: 'accepted' });
+      await flush();
+
+      expect(indicator.updateCalls).toEqual(entries);
+    });
+
+    it("forwards each reading from runCapture's onAudioLevel callback to indicator.updateAudioLevel, in order", async () => {
+      const detector = new FakeDetector();
+      const gate = new FakeNotificationGate();
+      const indicator = new FakeIndicator();
+      const readings: Array<{ speaker: Speaker; level: number; at: number }> = [
+        { speaker: 'you', level: 0.1, at: 1 },
+        { speaker: 'other', level: 0.4, at: 2 },
+      ];
+      const runCapture = vi.fn(
+        async (
+          _signal: AbortSignal,
+          _source: string,
+          _onEntry: (entry: TranscriptEntry) => void,
+          onAudioLevel: (speaker: Speaker, level: number, at: number) => void,
+        ) => {
+          for (const reading of readings) onAudioLevel(reading.speaker, reading.level, reading.at);
+        },
+      );
+
+      const daemon = new CallCaptureDaemon({
+        detector,
+        notificationGate: gate,
+        checkDependencies: okDeps(),
+        personalityId: 'receptionist',
+        runCapture,
+        indicator,
+      });
+      daemon.start();
+      detector.emit({ type: 'call_started', at: 1000, source: 'zoom' });
+      await flush();
+      gate.settle({ outcome: 'accepted' });
+      await flush();
+
+      expect(indicator.audioLevelCalls).toEqual(readings);
+    });
+
+    it('hides the indicator when the max-duration safety net aborts an in-flight capture', async () => {
+      const detector = new FakeDetector();
+      const gate = new FakeNotificationGate();
+      const indicator = new FakeIndicator();
+      const clock = new FakeClock();
+      const runCapture = vi.fn((signal: AbortSignal) => {
+        return new Promise<void>((resolve) => {
+          signal.addEventListener('abort', () => resolve());
+        });
+      });
+
+      const daemon = new CallCaptureDaemon({
+        detector,
+        notificationGate: gate,
+        checkDependencies: okDeps(),
+        personalityId: 'receptionist',
+        runCapture,
+        indicator,
+        maxCaptureDurationMs: 1000,
+        clock,
+      });
+      daemon.start();
+      detector.emit({ type: 'call_started', at: 1000, source: 'zoom' });
+      await flush();
+      gate.settle({ outcome: 'accepted' });
+      await flush();
+
+      expect(indicator.hideCalls).toBe(0);
+      clock.advance();
+      await flush();
+
+      expect(indicator.hideCalls).toBe(1);
+    });
+
+    it('hides the indicator when call_ended aborts an in-flight capture', async () => {
+      const detector = new FakeDetector();
+      const gate = new FakeNotificationGate();
+      const indicator = new FakeIndicator();
+      const runCapture = vi.fn((signal: AbortSignal) => {
+        return new Promise<void>((resolve) => {
+          signal.addEventListener('abort', () => resolve());
+        });
+      });
+
+      const daemon = new CallCaptureDaemon({
+        detector,
+        notificationGate: gate,
+        checkDependencies: okDeps(),
+        personalityId: 'receptionist',
+        runCapture,
+        indicator,
+      });
+      daemon.start();
+      detector.emit({ type: 'call_started', at: 1000, source: 'zoom' });
+      await flush();
+      gate.settle({ outcome: 'accepted' });
+      await flush();
+
+      detector.emit({ type: 'call_ended', at: 3000 });
+      await flush();
+
+      expect(indicator.hideCalls).toBe(1);
+    });
+
+    it('an end-requested click aborts the in-flight capture through the SAME path call_ended uses, and hides the indicator', async () => {
+      const detector = new FakeDetector();
+      const gate = new FakeNotificationGate();
+      const indicator = new FakeIndicator();
+      let capturedSignal: AbortSignal | undefined;
+      const runCapture = vi.fn((signal: AbortSignal) => {
+        capturedSignal = signal;
+        return new Promise<void>((resolve) => {
+          signal.addEventListener('abort', () => resolve());
+        });
+      });
+
+      const daemon = new CallCaptureDaemon({
+        detector,
+        notificationGate: gate,
+        checkDependencies: okDeps(),
+        personalityId: 'receptionist',
+        runCapture,
+        indicator,
+      });
+      daemon.start();
+      detector.emit({ type: 'call_started', at: 1000, source: 'zoom' });
+      await flush();
+      gate.settle({ outcome: 'accepted' });
+      await flush();
+
+      expect(capturedSignal?.aborted).toBe(false);
+
+      indicator.triggerEndRequested();
+      await flush();
+
+      expect(capturedSignal?.aborted).toBe(true);
+      expect(indicator.hideCalls).toBe(1);
+    });
+
+    it('an end-requested click while only awaiting (never reached capturing) expires the offer, mirroring a real call_ended', async () => {
+      const detector = new FakeDetector();
+      const gate = new FakeNotificationGate();
+      const indicator = new FakeIndicator();
+
+      const daemon = new CallCaptureDaemon({
+        detector,
+        notificationGate: gate,
+        checkDependencies: okDeps(),
+        personalityId: 'receptionist',
+        runCapture: vi.fn(async () => {}),
+        indicator,
+      });
+      daemon.start();
+      detector.emit({ type: 'call_started', at: 1000, source: 'zoom' });
+      await flush();
+
+      indicator.triggerEndRequested();
+      await flush();
+
+      expect(gate.expireCalls).toEqual(['1000']);
+    });
+
+    it('does not throw when no indicator is configured (existing callers unaffected)', async () => {
+      const detector = new FakeDetector();
+      const gate = new FakeNotificationGate();
+      const runCapture = vi.fn(
+        async (
+          _signal: AbortSignal,
+          _source: string,
+          onEntry: (entry: TranscriptEntry) => void,
+        ) => {
+          onEntry({ speaker: 'you', text: 'hi', at: 1 });
+        },
+      );
+
+      const daemon = new CallCaptureDaemon({
+        detector,
+        notificationGate: gate,
+        checkDependencies: okDeps(),
+        personalityId: 'receptionist',
+        runCapture,
+      });
+      daemon.start();
+      detector.emit({ type: 'call_started', at: 1000, source: 'zoom' });
+      await flush();
+
+      expect(() => gate.settle({ outcome: 'accepted' })).not.toThrow();
+      await flush();
+    });
   });
 });

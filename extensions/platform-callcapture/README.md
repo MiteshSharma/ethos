@@ -11,7 +11,18 @@ accept/decline gating on top of Phase 1's detection output. Phase 3 proves
 the hardest, least-certain piece in isolation: local dual-stream audio
 capture (system audio + mic) with streamed STT. Phase 4 wires all three
 together end-to-end, hosted inside `ethos serve`/`ethos gateway` — see
-"Phase 4 — Integration" below for the finished wiring.
+"Phase 4 — Integration" below for the finished wiring. A post-Phase-4 fix
+(**"Per-process detection"**, near the end of this file) later replaced the
+per-DEVICE detection approach described in the next section with a
+per-PROCESS one, after a real stuck-recording bug in production use — read
+that section for the current design; the section immediately below is kept
+for history and is honest about what was true when Phase 1 shipped, not
+about how detection works today. A second post-Phase-4 fix (**"Native
+notification helper"**, also near the end of this file) later replaced
+Phase 2's `terminal-notifier` dependency with a native `UserNotifications`-
+based helper, after a real reported dark-mode banner-legibility bug — the
+Phase 2 section below is likewise kept for history, not as a description of
+today's notification mechanism.
 
 ## Approach: CoreAudio, not `ioreg`
 
@@ -46,65 +57,80 @@ device, watched via `AudioObjectAddPropertyListenerBlock`. This is:
 
 ## What's in this package
 
-- **`native/mic-detector.swift`** — the compiled CoreAudio watcher. Watches
-  the current default input device's running state, and separately watches
+- **`native/mic-detector.swift`** — the compiled watcher. **As of the
+  per-process detection fix (see that section below), this watches known
+  calling apps' individual audio activity, not the default input device** —
+  the description immediately below is Phase 1's original, now-superseded
+  per-device design, kept for history; see "Per-process detection" for the
+  current one. Originally: watched the current default input device's
+  running state, and separately watched
   `kAudioHardwarePropertyDefaultInputDevice` on the system object so it
-  re-attaches to a new device if the user switches inputs mid-run (e.g.
+  re-attached to a new device if the user switched inputs mid-run (e.g.
   plugging in headphones) without missing a state change. Emits one line of
-  newline-delimited JSON per event to **stdout**:
-  - `{"event":"initial","running":false,"deviceId":92,"at":"...Z"}` — the
-    starting state, emitted once before entering the run loop, so the Node
-    wrapper doesn't have to guess.
-  - `{"event":"running_changed","running":true,"deviceId":92,"at":"...Z"}` —
-    on every observed transition.
-  - `{"event":"error","message":"..."}` — on a CoreAudio API failure, then
-    exits non-zero.
+  newline-delimited JSON per event to **stdout** — the current shape (see
+  "Per-process detection" for the full contract):
+  - `{"event":"initial","running":false,"at":"...Z"}` — the starting state,
+    emitted once before entering the run loop, so the Node wrapper doesn't
+    have to guess. Carries `"source"` when `running` is `true`.
+  - `{"event":"running_changed","running":true,"source":"zoom.us","at":"...Z"}`
+    — on every observed aggregate transition. `"source"` is the raw
+    known-calling-app process name that triggered it (present only when
+    `running` is `true` — an aggregate `false` doesn't name a single app).
+  - `{"event":"error","message":"..."}` — on an API failure, then exits
+    non-zero (currently unused in practice by the per-process design — see
+    "Per-process detection" for why).
 
   Runs until killed (`SIGTERM`) — no fixed timeout in the shipped binary (a
-  timeout was only used for the manual research probe that validated this
-  approach before this package existed).
+  timeout was only used for the manual research probe that validated the
+  original per-device approach before this package existed).
 
 - **`src/detector.ts`** — `MicActivityDetector`, the Node wrapper. Spawns the
   compiled binary, parses its NDJSON stdout, and translates the raw
   `initial`/`running_changed` signal into the public
   `call_started` / `call_ended` / `error` contract. `call_ended` is debounced
-  (default 2000ms, configurable) because the mic can flicker for sub-second
-  gaps as apps hand the device off to each other — a bare state read would
-  falsely report a call "ending" on every flicker. `call_started` is never
-  debounced; it fires the instant the first `running: true` is observed.
-  The binary spawn is injectable (`spawnFn`) so unit tests run entirely
-  against a fake child process — no real hardware, no real mic, no compiled
-  binary required in CI (which has no audio device anyway).
+  (default 2000ms, configurable) because the underlying signal can flicker
+  for sub-second gaps — a bare state read would falsely report a call
+  "ending" on every flicker. `call_started` is never debounced; it fires the
+  instant the first `running: true` is observed, carrying a `source` field
+  (the clean label from `process-prefilter.ts`'s `sourceLabelForProcessName`,
+  e.g. `'zoom'`) resolved from the native event's raw process name. The
+  binary spawn is injectable (`spawnFn`) so unit tests run entirely against
+  a fake child process — no real hardware, no real mic, no compiled binary
+  required in CI (which has no audio device anyway).
 
 - **`src/detect-cli.ts`** — the Phase 1 manual-verification tool. Runs the
   real detector against the real compiled binary and logs every event with a
   timestamp. Standalone dev tool, not wired into `ethos`.
 
-- **`src/click-listener.ts`** — `createClickListener()`, a local loopback
-  HTTP listener (`node:http`, bound to `127.0.0.1` on an ephemeral port).
-  Generates a random token per offer and requires it in the request path, so
-  another local process can't spoof an accept by guessing the URL.
-  `waitForHit()` resolves the first time the URL is requested; `close()`
-  tears the server down.
+- **`src/preflight.ts`** — `checkCallCaptureDependencies()`'s combined
+  dependency preflight, including a plain `existsSync` presence check for
+  the compiled `capture-offer-card` binary (native/bin/), same as
+  `mic-detector`/`mic-capture`/`audiotee`. **This file used to also export
+  `checkNotificationHelperAvailable()`**, a binary-presence +
+  notification-authorization-status check for the (now twice-superseded)
+  `terminal-notifier` -> `notification-helper` accept-gate implementations
+  — the description that used to be here, kept for history below, is no
+  longer accurate: see "Fix — native capture-offer card, retiring
+  `notification-helper`" for why that whole authorization dimension no
+  longer applies. Never a swallowed `spawn ENOENT` either way — resolves a
+  typed `{ ok: false; missing; errors }` naming the fix (`pnpm ... run
+  build:native`) for whichever binary is absent.
 
-- **`src/preflight.ts`** — `checkTerminalNotifierAvailable()`, verifying
-  `terminal-notifier` is on `PATH` before anything tries to show a
-  notification. Runs `terminal-notifier -help` (side-effect-free) through an
-  injectable spawn boundary and resolves a typed `{ available: false; error
-  }` — never a swallowed `spawn ENOENT` — naming the fix
-  (`brew install terminal-notifier`) when it's missing.
-
-- **`src/notification.ts`** — `NotificationGate`, the Phase 2 "show + wait
-  for accept" surface. `presentCaptureOffer({ callId, title, message })`
-  runs the preflight check, then shows a real `terminal-notifier`
-  notification whose click action (`-execute`) is a `curl` against a fresh
-  `click-listener` URL, under a `-group` id derived from `callId`. Returns a
-  handle: `waitForOutcome()` resolves `{ outcome: 'accepted' }` once the
-  listener is hit, and `expire()` withdraws the notification
-  (`terminal-notifier -remove <groupId>`) and resolves `{ outcome: 'expired'
-  }` — the path Phase 1's `call_ended` should drive when nobody clicked in
-  time. Any preflight or spawn failure resolves `{ outcome: 'error';
-  message }` immediately instead of throwing.
+- **`src/notification.ts`** — `NotificationGate`, the "show + wait for
+  accept" surface. `presentCaptureOffer({ callId, title, message, source? })`
+  spawns the compiled `capture-offer-card` binary (one persistent process
+  per offer — see "Fix — native capture-offer card, retiring
+  `notification-helper`" below), a custom AppKit card immune to system
+  notification chrome theming, with its own Start/Skip buttons and an "x"
+  dismiss. Returns a handle: `waitForOutcome()` resolves `{ outcome:
+  'accepted' }` on Start, `{ outcome: 'expired' }` on Skip/"x"/`expire()`
+  (a real call-ended or explicit decline collapse to the same non-accepted
+  outcome — see that section for why a separate `'declined'` variant wasn't
+  added), and any spawn failure resolves `{ outcome: 'error'; message }`
+  immediately instead of throwing. Supersedes this file's original
+  `terminal-notifier`-based implementation and its `notification-helper`
+  (`UNUserNotificationCenter`) successor — see "Fix — native capture-offer
+  card, retiring `notification-helper`" for the full story.
 
 - **`src/phase2-cli.ts`** — the Phase 2 manual-verification tool. Wires the
   real `MicActivityDetector` to a real `NotificationGate`: `call_started`
@@ -588,40 +614,39 @@ port matching `WatcherManagerConfig.wake`'s shape, and each host command
 passes the exact same `watcherWake` closure it already built for its own
 `WatcherManager` — one wake path per host, not a duplicate.
 
-### Process prefilter (decision 1's coarse prefilter, now wired)
+### Process prefilter (decision 1's coarse prefilter — SUPERSEDED, folded into the detector)
 
-Decision 1 describes two signals: mic-in-use (Phase 1's actual detection
-trigger, above) and a "coarse prefilter" using process/app detection,
-explicitly scoped as "a coarse prefilter at best, not the detection signal
-itself." Phase 4 wires this in: `CallCaptureDaemon` now takes a
-`checkCallingAppRunning: () => Promise<string | null>` port
-(`src/daemon.ts`) and requires **both** signals to agree — mic active AND a
-known calling app running — before firing wake or the notification. A
-non-null result also carries which app matched, resolved to a clean source
-label (e.g. `'zoom'`, `'teams'`) that flows into the eventual capture
-artifact's filename and digest line. Without this
-gate, any mic activity at all (Dictation, Siri, Voice Memos, a random
-website's `getUserMedia()` permission grant, ...) would trigger a "capture
-this call?" prompt.
+**As originally wired in Phase 4** (kept here for history — see "Per-process
+detection" below for the current design): decision 1 describes two signals:
+mic-in-use (Phase 1's detection trigger) and a "coarse prefilter" using
+process/app detection, explicitly scoped as "a coarse prefilter at best, not
+the detection signal itself." Phase 4 wired this in as a separate
+`CallCaptureDaemon` port, `checkCallingAppRunning: () => Promise<string |
+null>` (`src/daemon.ts`), backed by `src/process-prefilter.ts`'s
+`checkAnyCallingAppRunning()`, which ran `pgrep -x <name>` against
+`KNOWN_CALLING_APP_PROCESSES` and required **both** signals — mic active AND
+a known calling app running — before firing wake or the notification.
 
-`src/process-prefilter.ts` implements the check: `checkAnyCallingAppRunning()`
-runs `pgrep -x <name>` (mirroring `extensions/watchers/src/differs.ts`'s
-`pgrepAlive`, but NOT imported from `@ethosagent/watchers` — this package
-takes no dependency on that one, structural ports only) against
-`KNOWN_CALLING_APP_PROCESSES`: `zoom.us`, `Microsoft Teams`, `Discord`,
-`Skype`, `FaceTime`, `Webex`, `GoToMeeting`. A plain, easily-extended array —
-no new config surface for this pass.
+**Current state:** the per-process detection fix (below) made this separate
+check redundant and it has been removed. The native detector now only ever
+watches known calling apps in the first place (via `NSWorkspace`, not
+`pgrep`), so a `call_started` event is already scoped to one by
+construction — there is no longer a "mic active, but no known app running"
+case for a downstream gate to filter out. `process-prefilter.ts` still
+exists, narrowed to the `KNOWN_CALLING_APP_PROCESSES` registry and the
+raw-name-to-clean-label lookup (`sourceLabelForProcessName`), which
+`detector.ts` now uses directly when mapping the native detector's
+`call_started` events.
 
-**Known, deliberate, accepted limitation — not a bug, not something this
-pass attempts to fix:** a browser tab running a web-based call (e.g. Google
-Meet in Chrome) does NOT pass this prefilter. Chrome/Safari/etc. are not
-calling-app-specific process names — `extensions/watchers`' own `process`
-differ notes the identical gap. A Meet-in-Chrome call is still correctly
-*detected* by the mic-activity signal (decision 1's actual trigger), but
-`CallCaptureDaemon` will not offer to capture it, because the process gate
-never sees a matching process. This narrows the feature's real-world
-coverage for browser-based calling relative to native-app calls, and is
-called out here explicitly rather than left as a silent gap.
+**Known, deliberate, accepted limitation — unchanged by this fold-in, not a
+bug, not something either the old or new design attempts to fix:** a browser
+tab running a web-based call (e.g. Google Meet in Chrome) is still not
+detected. Chrome/Safari/etc. are not calling-app-specific processes, and
+neither `pgrep` name-matching nor `NSWorkspace` + per-process CoreAudio can
+distinguish a calling tab from any other tab — `extensions/watchers`' own
+`process` differ notes the identical gap. This narrows the feature's
+real-world coverage for browser-based calling relative to native-app calls,
+and is called out here explicitly rather than left as a silent gap.
 
 ### Direct dispatch: no LLM turn, no tool registry involved
 
@@ -674,7 +699,7 @@ command. A configured-but-broken call-capture deployment is a hard failure
 `ethos doctor` already gives a configured-but-missing channel SDK.
 
 **Daemon liveness, not just binary presence.** The checks above verify
-`terminal-notifier`/`mic-detector`/`mic-capture`/`audiotee` are present on
+`capture-offer-card`/`mic-detector`/`mic-capture`/`audiotee` are present on
 disk — they say nothing about whether a `CallCaptureDaemon` is actually
 alive inside a running `ethos serve`/`ethos gateway` process right now. Both
 host commands write a heartbeat (`src/health.ts`'s `callCaptureHealthPath()`,
@@ -724,7 +749,7 @@ adaptation.
                     |
                     v
         +-----------------------+
-        | NotificationGate      |------ terminal-notifier missing/spawn
+        | NotificationGate      |------ capture-offer-card missing/spawn
         | .presentCaptureOffer  |       fail --> outcome 'error', logged
         +-----------------------+
                     |
@@ -879,3 +904,637 @@ run-as-daemon.md`'s "Troubleshoot" section for the general daemon-launch
 failure modes (stripped `PATH`/`HOME`, `nvm`-installed binaries, etc.) — they
 apply here unchanged, since this is the same launchd mechanism wrapping a
 different `ethos` subcommand.
+
+## Fix — per-process detection (2026-08-18)
+
+### The bug, confirmed live in production use
+
+A user ran the shipped Phase 1-4 feature end-to-end: joined a real Zoom
+call, got the notification, accepted it, capture started correctly. They
+then **left the Zoom call but kept the Zoom app open** (did not Quit). The
+capture never stopped — `audiotee`/`mic-capture` ran unattended for many
+minutes after the call ended, because `call_ended` never fired.
+
+**Root cause, confirmed empirically**: `kAudioDevicePropertyDeviceIsRunningSomewhere`
+(what `native/mic-detector.swift` watched, per the "Approach: CoreAudio, not
+`ioreg`" section above) is a **system-wide, device-level** flag — "is
+anything using this input device at all." Zoom keeps it warm in the
+background outside of active calls, so it never returns to `false` once
+Zoom has touched the mic, regardless of whether a call is actually active.
+Quitting Zoom entirely released it, but "quit the app to stop a stuck
+recording" was rejected as a workaround, not a fix.
+
+### The fix: per-PROCESS audio activity, not per-DEVICE
+
+CoreAudio has a more precise API surface: translate a PID to its
+`AudioProcess` object, then watch that SPECIFIC process's own running-input
+state.
+
+- `kAudioHardwarePropertyTranslatePIDToProcessObject` (on
+  `kAudioObjectSystemObject`, `kAudioObjectPropertyScopeGlobal`) —
+  translates a `pid_t` to an `AudioObjectID` representing that process
+  within the audio HAL.
+- `kAudioProcessPropertyIsRunningInput` (on that process's `AudioObjectID`)
+  — a `UInt32` boolean: is this specific process currently running an input
+  stream.
+
+### Validation performed, and honestly which tier
+
+**Mechanism tier (strongest tier achieved — no live Zoom call was available
+in the validation environment):** a controlled two-process test proved the
+exact property this fix depends on. A long-running `ffmpeg` process (B) held
+the default input device the entire time. A second process (a small
+`AVAudioEngine`-based "mic-toggler" harness, standing in for "an app that
+opens the mic for a call, then leaves the call but stays running") captured
+for 5 seconds, then **stopped its own engine while staying alive** for
+another 10 seconds before exiting — simulating "leave the call, keep the app
+open" precisely. A probe watching process A's own
+`kAudioProcessPropertyIsRunningInput` (translated from its PID) observed:
+`true` while A was capturing, transitioning to `false` within one poll tick
+(~32ms) of A stopping its own engine — **while A was still alive** and
+**while process B was still actively holding the device** (confirmed via
+`kAudioDevicePropertyDeviceIsRunningSomewhere` staying `true` throughout).
+This is exactly the property the device-wide flag lacked, proven against a
+second, independent process holding the device the whole time.
+
+**Empirical finding that changed the design — event listeners don't fire for
+Process objects:** the original per-device code used
+`AudioObjectAddPropertyListenerBlock` for genuinely event-driven detection,
+and that mechanism still works fine for Device objects. The equivalent
+listener on a Process object was tested and found NOT to fire: registration
+succeeded (`status == noErr`) for `kAudioProcessPropertyIsRunningInput` and
+`kAudioProcessPropertyIsRunning`, across both `kAudioObjectPropertyScopeGlobal`
+and `kAudioObjectPropertyScopeInput` (three combinations total), but the
+callback was never observed to fire during a real, confirmed transition —
+while polling the identical property on the identical object correctly
+observed every transition within one tick. This is not treated as a bug in
+this package; `audiotee`'s own vendored README already carries an "API
+Instability Warning" for this general area of CoreAudio (Process/Tap
+objects, macOS 14.2+). Consequence: `native/mic-detector.swift` **polls**
+the per-process property (every 2s), but only for the bounded set of
+currently-running known calling apps (typically 0-1), and only while at
+least one is open — app PRESENCE (which known apps are running, their PIDs)
+is still fully event-driven via `NSWorkspace`, so the idle cost (no known
+app open) stays at zero.
+
+**A significant, honestly-reported residual finding:** while testing the
+shipped binary against real processes on the validation machine, a genuine,
+already-running `zoom.us` background process (not started by this testing —
+elapsed ~26 minutes, holding open UDP sockets to a Zoom media relay on port
+8801) reported `kAudioProcessPropertyIsRunningInput` **and**
+`kAudioProcessPropertyIsRunningOutput` as `true`, continuously, with no
+call visibly active from the outside. The validation environment has no
+Accessibility/Screen Recording permission and could not capture a
+screenshot or read window titles, so it was **not possible to conclusively
+determine** whether this reflected a genuinely stuck "left a call, audio
+engine didn't release" state (the same class of symptom the device-wide fix
+was built to solve, just one layer deeper) or a benign always-on
+"pre-warmed audio path" some calling apps may keep regardless of call state.
+**This is reported as an open, unresolved risk, not swept under the rug:**
+the per-process signal is a strict, proven improvement over the device-wide
+one at the mechanism level (see above), but it may not be a complete fix for
+every calling app's specific internal behavior. Anyone deploying this should
+verify with a real call on their own machine: leave a call with the app
+still open and confirm `mic-detector`'s aggregate returns to `false` within
+a few seconds.
+
+### Bounded safety net, added because of that residual finding
+
+Because of the finding above, `CallCaptureDaemon` (`src/daemon.ts`) now
+carries a **bounded maximum-capture-duration safety net** (default 4 hours,
+configurable via `maxCaptureDurationMs`) **underneath** the real
+`call_ended` signal — never a substitute for it. If `call_ended` never
+arrives for an in-flight capture (whether because a given app's per-process
+signal itself gets stuck warm, or any other reason), the safety-net timer
+aborts the capture and logs a warning naming exactly what happened. This is
+a deliberately different situation from the one a prior review round
+rejected a bounded-duration fallback for ("don't build this as a substitute
+for a real cancellation mechanism") — this is a net under a best-effort
+precise signal, not instead of one, added in direct response to a concrete,
+reproducible piece of evidence that the precise signal alone might not be
+airtight for every app.
+
+### Known-app tracking: `NSWorkspace`, not `pgrep` — and the old process-prefilter folded in
+
+`native/mic-detector.swift` now tracks known calling apps (the same list
+`process-prefilter.ts`'s `KNOWN_CALLING_APP_PROCESSES` has always had:
+`zoom.us`, `Microsoft Teams`, `Discord`, `Skype`, `FaceTime`, `Webex`,
+`GoToMeeting`) via `NSWorkspace.shared.runningApplications` for the initial
+scan and `NSWorkspace.shared.notificationCenter`'s
+`didLaunchApplicationNotification`/`didTerminateApplicationNotification` for
+reactive, event-driven tracking as apps launch and quit — attaching/detaching
+a per-process poll entry as each known app comes and goes, rather than
+watching one fixed thing for the binary's whole lifetime.
+
+**Match key, verified empirically:** `NSRunningApplication.executableURL?.lastPathComponent`
+— NOT `.localizedName` or `.bundleIdentifier` — is the correct match key.
+Checked against three installed apps' actual `Info.plist`:
+`CFBundleExecutable` for `zoom.us.app` is `zoom.us`, for `Discord.app` is
+`Discord`, for `FaceTime.app` is `FaceTime` — identical, in every case, to
+the process name `pgrep -x` would have matched. This conveniently means the
+existing `KNOWN_CALLING_APP_PROCESSES` list didn't need to change at all —
+only how it's matched did. (`.bundleIdentifier` was deliberately avoided:
+some of these apps, notably Teams, have shipped multiple bundle IDs across
+"classic" vs. "new" client generations, which the executable name is more
+stable against.)
+
+**Multiple known apps open at once:** each tracked app's `running` state is
+independent; the aggregate "a call is active" is `true` if ANY tracked app
+shows running input, and only returns to `false` once ALL of them do —
+`native/mic-detector.swift`'s `recomputeAggregate()`.
+
+**The old `pgrep`-based process-prefilter gate is gone, not duplicated:**
+see "Process prefilter (decision 1's coarse prefilter — SUPERSEDED, folded
+into the detector)" above. The native detector only ever watches known
+calling apps in the first place, so `CallCaptureDaemon` no longer takes a
+separate `checkCallingAppRunning` port — every `call_started` event already
+carries the triggering app's clean source label (`source` field, mapped by
+`detector.ts` via `sourceLabelForProcessName`), which is at least as precise
+as the old pgrep match (the daemon now knows exactly which app's PID
+triggered the event, not just that some pgrep pattern matched somewhere).
+
+**Unchanged by this fix:** the browser-based-call blind spot (Meet in
+Chrome, etc. — browsers were never in `KNOWN_CALLING_APP_PROCESSES` and
+still aren't, see the process-prefilter section above), the notification/
+accept-gate mechanism (Phase 2), the capture pipeline itself (Phase 3's
+`tap-capture.ts`/`mic-capture.ts`/`transcript-session.ts`), and the
+memory-write/artifact/digest logic (`extensions/tools-callcapture`) except
+that source labels can now be at least as precise as before, never less.
+The floating recording-indicator UI (a separate, larger follow-up) remains
+out of scope here too.
+
+## Fix — native notification helper, replacing terminal-notifier (2026-08-18)
+
+### The bug, and the friction that preceded it
+
+A real user reported the `terminal-notifier` banner rendering with white,
+hard-to-read text on their machine — almost certainly a Light/Dark Mode
+re-theming failure. `terminal-notifier` is a third-party CLI we don't
+control the source of and which gives no styling API, so this wasn't
+something this package could special-case a color fix for. It was also the
+second time `terminal-notifier` had been a source of friction: see
+"Troubleshooting: notification permission granted but no banner appears"
+above, a real production bug that needed a `killall NotificationCenter
+usernoted` workaround.
+
+### The fix: `UNUserNotificationCenter` directly, owned the way `mic-detector`/`mic-capture` already are
+
+`native/notification-helper.swift` uses Apple's modern `UserNotifications`
+framework directly instead of shelling out to `terminal-notifier`. Apple's
+own templated banners are guaranteed to render correctly themed for the
+system's current appearance — this fixes the reported bug as a side effect
+of using the current-generation API, not a bespoke color hack. It also lets
+the click be observed **inside the same process**, via
+`UNUserNotificationCenterDelegate`'s `didReceive response:` callback —
+`click-listener.ts` (the local loopback HTTP bridge that existed solely to
+receive `terminal-notifier -execute`'s shell-out callback) is gone, along
+with its test. `notification.ts`'s public contract
+(`NotificationGate.presentCaptureOffer()` → `CaptureOfferHandle` with
+`waitForOutcome()`/`expire()`) is unchanged — this is a pure internal
+implementation swap. `daemon.ts` needed **zero changes**: it only ever
+depended on that contract.
+
+### App-bundle requirement — empirically confirmed, not assumed
+
+A bare command-line Mach-O executable calling `UNUserNotificationCenter
+.current()` **crashes immediately**:
+
+```
+*** Terminating app due to uncaught exception 'NSInternalInconsistencyException',
+reason: 'bundleProxyForCurrentProcess is nil: mainBundle.bundleURL file://...'
+```
+
+Verified directly on a real machine (macOS 26.2, Darwin 25.2). Wrapping the
+same binary in a minimal `.app` bundle with a `CFBundleIdentifier` in its
+`Info.plist` fixes this — no crash, a real `UNUserNotificationCenter`
+instance. This is the same reason `terminal-notifier` itself ships its own
+app bundle (`fr.julienxx.oss.terminal-notifier` — see the Troubleshooting
+section above), not a difference between this helper and that one.
+
+A second, less obvious requirement was also found empirically: the bundle
+must be registered with Launch Services (`lsregister`) **from a stable,
+non-ephemeral path**. The identical bundle run from `/private/tmp` failed
+with `usernoted: Failed to find or validate client of identifier ...` in
+the unified log (`log show`); the same bundle run from `/Applications` or a
+normal path under `$HOME` (including this package's own `native/bin/`) was
+correctly validated, and its authorization request actually reached
+`usernoted` (status transitioned away from `notDetermined`). Neither
+`AppKit` nor `NSApplication` was needed for any of this — plain
+`Foundation` + `UserNotifications` is enough, contrary to the concern that
+some `UserNotifications` APIs historically required a full app-bundle
+*event loop* (not just a bundle identifier) to work from a bare executable.
+
+`scripts/build-notification-helper.sh` (invoked from `build:native`, same
+as `mic-detector`/`mic-capture`) does the wrapping: compiles the binary into
+`native/bin/notification-helper.app/Contents/MacOS/notification-helper`,
+writes `Info.plist` (`CFBundleIdentifier: ai.ethosagent.callcapture
+.notification-helper`, `LSUIElement: true` — no Dock icon, no menu bar),
+ad-hoc codesigns it (`codesign --sign -`, no paid Developer ID needed for a
+local dev build), and registers it with Launch Services immediately so the
+very first run doesn't race Spotlight/Launch Services' own lazy indexing.
+
+### App icon
+
+The notification banner shows the real Ethos brand icon (the round
+blue-ring mark), not a generic default — `scripts/build-notification
+-helper.sh` copies `apps/desktop/build/icon.icns` (the same icon the
+desktop app ships, built from `apps/desktop/assets/brand/icon-1024.png`)
+into the bundle's `Contents/Resources/icon.icns` and sets
+`CFBundleIconFile`/`CFBundleIconName` in `Info.plist`. Verified empirically:
+rendering the real built bundle's Launch-Services-resolved icon via
+`NSWorkspace.icon(forFile:)` produced a 1024×1024 PNG that is visibly the
+Ethos ring (byte-identical, 268355 bytes, to the same render of an earlier
+test bundle wired the same way) — not a blank-document or generic-
+executable placeholder, and not the same render as an unrelated app's icon
+(`Terminal.app`, compared for contrast, different bytes and image). This is
+the same LaunchServices icon-
+resolution mechanism Finder/Dock/Spotlight/notification banners all share,
+so the mechanism proof transfers; only the literal banner's rendered pixels
+still need a human's eyes to confirm, same caveat as the click-bridge below.
+
+### Protocol
+
+One notification per process invocation (mirrors `mic-capture.swift`'s
+one-process-per-session model, not `mic-detector.swift`'s persistent-
+multi-event one) — simpler than routing a dismiss-by-identifier command
+across multiple concurrently-open notifications in one process, and a
+natural fit since `NotificationGate.presentCaptureOffer()` already mints
+one offer per call.
+
+```
+argv:
+  notification-helper --check-status          side-effect-free preflight
+  notification-helper <callId> <title> <msg>  show one notification
+
+stdout (NDJSON, one line per event):
+  {"event":"status","status":"authorized"|"denied"|"notDetermined"}
+  {"event":"shown"}
+  {"event":"clicked","callId":"..."}   exits 0 right after
+  {"event":"authDenied"}               not authorized; exits 1
+  {"event":"error","message":"..."}    exits 1
+```
+
+**No stdin command channel.** Withdrawing a still-pending/delivered
+notification is done by sending `SIGTERM` — `notification-helper` withdraws
+both its pending and delivered notification (`removePendingNotification-
+Requests`/`removeDeliveredNotifications`) before exiting cleanly. This is
+simpler than a `{"command":"dismiss"}` stdin protocol and needs no
+identifier disambiguation (there's only ever one notification per process),
+and it's exactly `SpawnedChild`'s existing `kill()` idiom from
+`detector.ts` — `NotificationGate`'s `expire()` calls `child.kill('SIGTERM')`
+and awaits the process's own exit before resolving `'expired'`, confirming
+the withdrawal actually ran (mirroring the old `terminal-notifier -remove`
+implementation awaiting its exit the same way).
+
+### Authorization — what was verified, and what honestly wasn't
+
+`requestAuthorization` is called on first use if not already determined —
+this is the genuine system "Allow Notifications from Ethos?" dialog,
+interactive the way Camera/Microphone prompts already are for this
+package's other native helpers, unlike `terminal-notifier` which apparently
+never triggered it. Verified via the unified log that the request pipeline
+works end-to-end once the app-bundle/Launch-Services conditions above are
+met: `usernoted` recognizes the client and the authorization status
+genuinely transitions away from `notDetermined`. What could **not** be
+verified in this environment: this exec session has no interactive Aqua
+session attached (confirmed separately — `open -W` on the bundle fails with
+"Unable to block on applications"), so macOS auto-denies the request rather
+than presenting the dialog to a human. A real user running `ethos serve`/
+`ethos gateway` from their own interactive Terminal session should see the
+real dialog, the same way every other macOS app using
+`UNUserNotificationCenter` does. The same honesty standard applies here as
+applied to the old click-bridge verification above: the plumbing is
+provably correct end-to-end; only a human clicking "Allow" on a real dialog,
+and then a real banner, needs the repo owner's own eyes to confirm.
+
+### `terminal-notifier` fully retired from this package's runtime path
+
+No remaining runtime dependency on it — `preflight.ts`'s
+`checkCallCaptureDependencies()` checks `notification-helper` (binary
+presence + authorization status) instead, `ethos doctor`'s "Call capture"
+section names it in its dependency list, and the historical Phase 2
+narrative above is left as-is (kept for history, per this file's own
+convention — see the top of this file).
+
+### Investigated, not a code bug: "whitish grey layer" on first banner, correct on click (2026-08-19)
+
+A real user tested the new `notification-helper` banner and reported: *"there
+is a whitish grey layer on top of it, when i click on it then it comes out to
+be correct of dark grey background."* Given this immediately follows the
+`terminal-notifier` dark-mode-legibility fix above, it needed a real
+investigation, not an assumption either way.
+
+**Ruled out as the cause, by reading `notification-helper.swift` and Apple's
+`UNMutableNotificationContent` API surface:**
+
+- `content.sound = .default` and no explicit `interruptionLevel` — the
+  default interruption level is `.active`, which is the standard full-banner
+  presentation; there is no undocumented "muted" interruption level, and
+  `.timeSensitive` (which *would* require the
+  `com.apple.developer.usernotifications.time-sensitive` entitlement this
+  ad-hoc-signed, non-provisioned bundle doesn't have, and would silently
+  downgrade to `.active` without it per Apple's docs) governs whether a
+  notification breaks through Focus/DND, not its background material.
+  Setting it explicitly would be a no-op for this symptom.
+- No `categoryIdentifier`/registered `UNNotificationCategory` — this affects
+  which action buttons a banner offers, not its background rendering.
+- The `CFBundleIconFile`/`CFBundleIconName` icon added earlier this session —
+  per Apple's notification layout, the app icon renders in its own fixed
+  thumbnail slot, never as a background layer behind the banner's own chrome.
+  Confirmed by re-reading the icon-wiring code in
+  `scripts/build-notification-helper.sh`: it only ever touches
+  `Contents/Resources/icon.icns`, nothing content/appearance-related.
+- An Apple "delivery quietness" heuristic that mutes a *brand-new, untrained*
+  app's banners until a few interactions "train" it — this was the leading
+  hypothesis going in, but no Apple documentation, WWDC session, or developer
+  forum thread supports it as a real mechanism. `Reduce Interruptions` Focus
+  and notification summaries are real and interaction-adaptive, but they
+  govern *whether/when* a notification is delivered, and are user-opt-in
+  Focus features — not an automatic per-bundle-identity visual toning that
+  self-resolves after a handful of clicks.
+
+**What the evidence actually points to:** this environment is macOS 26.2
+("Tahoe" — see the `Darwin 25.2` build note earlier in this doc), which
+shipped a system-wide "Liquid Glass" material: a translucent, glass-like
+rendering applied throughout system chrome, explicitly including
+notification banners, per Apple's own design documentation. This is widely
+and publicly documented (Apple's own 2025-06 design announcement; TidBITS
+and MacRumors coverage of the macOS 26.1 update) as causing washed-out,
+lower-contrast "whitish" appearance complaints broadly enough that Apple
+shipped a direct fix for it in macOS 26.1: `System Settings → Appearance →
+Liquid Glass → Clear/Tinted`, where `Tinted` raises the material's opacity
+specifically to address this class of readability complaint. Critically,
+this is OS-level system chrome — `UNMutableNotificationContent` exposes no
+property that touches it (title, body, sound, `interruptionLevel`,
+`categoryIdentifier`, attachments, badge — none of these are a background
+material knob). This is the same "we don't control the source of the
+banner's chrome" situation `terminal-notifier`'s original bug lived in, just
+a different, OS-version-specific layer on top of it: the `UNUserNotification-
+Center` migration's promise ("Apple's own templated banners are guaranteed
+to render correctly themed") is still true and still confirmed by this same
+report — the user's own words are that clicking through reveals the
+*correct* dark grey background, i.e. the underlying Dark Mode theming this
+package's fix was for is intact. The transient glass layer on top is a
+separate, newer rendering behavior introduced by this OS version, not a
+regression of it.
+
+**Conclusion: expected macOS 26 system behavior, not a code bug.** No code
+change was made — `notification-helper.swift` is unchanged from what's
+described above. If a user wants a more opaque banner, the fix is on their
+end: `System Settings → Appearance → Liquid Glass → Tinted`. This is
+consistent with this package's standing principle (see the
+`terminal-notifier` fix above) of not reaching for a bespoke color hack over
+system-rendered chrome we don't own.
+
+## Fix — native capture-offer card, retiring `notification-helper` (2026-08-19)
+
+The user-reported "whitish grey" Liquid Glass symptom above was investigated
+and correctly diagnosed as expected OS behavior, not a code bug — but the
+System Settings workaround it points to did NOT resolve it for this user in
+practice. That's the second time a system-owned notification surface has
+been a source of friction in this package (`terminal-notifier`'s theming bug
+was the first), and both times the root problem is the same: this package
+doesn't control the rendering of chrome it doesn't draw itself. A screenshot
+of Granola's own "Meeting detected" UI made the alternative obvious —
+Granola doesn't use a system notification for this at all. It draws its own
+always-on-top card: a white rounded card with a headline, a subtitle naming
+the detected app, its own icon + action label, and Start/Skip buttons —
+completely immune to system notification chrome theming because there is no
+system chrome involved.
+
+### The fix: `native/capture-offer-card.swift`, a custom AppKit window
+
+Mirrors `capture-indicator.swift`'s category exactly (a real Cocoa event
+loop — `NSApplication.shared` + `setActivationPolicy(.accessory)` + an
+`NSApplicationDelegate` + `app.run()` — not the bare `RunLoop.main.run()`
+the headless detector/capture binaries use), and reuses that file's
+proven patterns rather than re-deriving them:
+
+- **Draggable, bottom-right by default, position-persisted** — the exact
+  same manual `mouseDown`/`mouseDragged` override `capture-indicator
+  .swift`'s `BadgeView` uses, for the exact same reason:
+  `isMovableByWindowBackground` does not reliably move this style of
+  borderless/nonactivating panel (proven there via synthetic
+  `NSApplication.sendEvent` injection — not re-proven here, just reapplied).
+  Position persistence reuses AppKit's own frame-autosave mechanism, same as
+  the badge.
+- **Non-activating, all-Spaces-visible** — same `NSPanel` styling
+  (`.borderless`, `.nonactivatingPanel`, `.floating` level,
+  `.canJoinAllSpaces` + `.fullScreenAuxiliary`), `orderFrontRegardless()`
+  never `makeKeyAndOrderFront(_:)` — never steals focus from whatever
+  calling app (Zoom, etc.) is frontmost, and stays visible even if that app
+  is running fullscreen in its own Space.
+- **Bare binary, no app bundle** — unlike `notification-helper.swift`,
+  nothing here touches `UNUserNotificationCenter`, so none of that file's
+  `CFBundleIdentifier`/Launch-Services requirements apply.
+  `capture-indicator.swift` already proves plain AppKit windows work fine
+  from a bare `swiftc`-compiled Mach-O executable in this package; this
+  binary is built the same way (`swiftc ... -framework AppKit -framework
+  Foundation`), with no wrapping script.
+- **Forced light appearance, fixed colors** — `panel.appearance =
+  NSAppearance(named: .aqua)` plus literal (never semantic/dynamic) RGB
+  color values throughout. This is the actual mechanism that makes the
+  "immune to system theming" promise true: a dynamic color like
+  `.labelColor` resolves to near-white under system Dark Mode, which
+  painted onto this card's own fixed white background would silently
+  reproduce a white-on-white rendering — the exact class of bug this whole
+  line of fixes exists to escape. See the file's header comment for the
+  full reasoning.
+
+See `native/capture-offer-card.swift`'s header comment for the complete
+design writeup (protocol, brand-icon resolution, why one process per offer
+rather than per capture session).
+
+### `notification-helper` fully retired, not kept as a backup
+
+Considered and rejected: keeping `notification-helper.swift` running
+alongside the card as a secondary/backup signal, on the theory that a
+system notification can register (with a sound) even when the user isn't
+looking at any window. Decided against, for three reasons:
+
+1. **Granola's own reference design doesn't hedge this way** — this feature
+   exists specifically to match that UX, and Granola ships exactly one
+   accept surface.
+2. **The environments where each surface can appear are identical** — both
+   require a live, logged-in Aqua session; there is no scenario where the
+   system notification would show but the floating, all-Spaces-visible,
+   `.floating`-level card wouldn't.
+3. **Running both means coordinating two independent processes racing to
+   resolve the same offer.** It's workable (both could feed the same
+   `resolveOnce` guard `notification.ts` already has), but it's real
+   ongoing complexity for a benefit that reason 2 says is close to zero.
+
+The one genuinely real gap this leaves — a silent card is easier to miss
+than a system banner if the user truly isn't looking at the screen — is
+covered instead by a short `NSSound` played on the card's appearance
+(`NSSound(named: "Glass")`, a standard bundled macOS alert sound, not a
+custom asset). This needs no second process, no coordination logic, and no
+risk of the two surfaces ever disagreeing about the outcome.
+
+Concretely, this is now the **second** supersession for this package's
+accept-gate surface (`terminal-notifier` -> `notification-helper` ->
+`capture-offer-card`). Unlike the first supersession — where
+`notification-helper.swift` was left on disk with its narrative preserved
+as history — `notification-helper.swift` and its build script
+(`scripts/build-notification-helper.sh`) have been deleted outright, along
+with `checkNotificationHelperAvailable`/`NotificationHelperCheckResult` and
+friends from `preflight.ts`. The Phase 2 and "native notification helper"
+sections above are kept as-is for the historical record (this file's
+standing convention — see its top section), but nothing in the current
+runtime path references the deleted files anymore:
+`checkCallCaptureDependencies()` checks `capture-offer-card`'s binary
+presence with the same plain `existsSync` pattern every other native binary
+in this package gets — there is no authorization-status dimension to check
+anymore, since a plain AppKit window needs no OS permission at all.
+
+### Outcome contract: `declined` stays `'expired'`, not a new variant
+
+The card's Skip button (and its "x" dismiss) gives an explicit decline
+signal that the old click-only notification never had — today, "not
+accepted" collapses `expired` (call ended unanswered) and an implicit
+non-click into the same bucket. A `'declined'` outcome would be more
+precise, but it was deliberately NOT added: `CaptureOfferOutcome` is
+imported by `daemon.ts`, and `handleCallStarted`'s reaction to it is
+`if (outcome.outcome === 'accepted') {...} if (outcome.outcome ===
+'expired') {...} else {...outcome.message...}`. A third non-`accepted`
+member would make that `else` branch fail to typecheck (it assumes
+`error`'s `message` field), forcing a real `daemon.ts` change to add an
+explicit branch. `daemon.ts`'s actual reaction to `'declined'` would be
+identical to `'expired'` anyway (log, go idle) — the extra type-level
+precision isn't worth a `daemon.ts` change for zero behavioral gain, so
+`capture-offer-card`'s `{"event":"declined"}` resolves the existing
+`'expired'` outcome. See `notification.ts`'s inline comment at that
+`switch` case for the same reasoning, kept next to the code it explains.
+
+### Threading the source label through: the one deliberate `daemon.ts` line
+
+The rest of this swap needed zero `daemon.ts` changes, matching the
+`terminal-notifier` -> `notification-helper` precedent exactly. Showing the
+detected app name as the card's subtitle (matching Granola's plain "Zoom"
+subtitle) is the one exception: `source` only exists in `handleCallStarted`'s
+local scope, and `PresentCaptureOfferOptions` never carried it before. The
+fix is the smallest version of this that works: `source` was added as a new
+optional field on `PresentCaptureOfferOptions`/`CallCaptureNotificationGatePort`
+(additive, not a breaking change to either type), and `daemon.ts`'s existing
+`presentCaptureOffer({callId, title, message})` call site gained one line —
+`source,` — using a variable that was already in scope for `handleAccepted`/
+`runCapture` a few lines below. `title`/`message` are passed unchanged and
+are no longer read by `capture-offer-card`'s own fixed UI text, but are kept
+on the type because `DesktopNotificationGate`'s own Electron-based card
+(`apps/desktop/src/main/call-capture-notification-gate.ts`, a sibling
+implementation of this same contract) still renders them into its own HTML.
+
+### Verification performed
+
+- **Rendered to a real PNG, no Screen Recording permission needed** — same
+  `NSView.bitmapImageRepForCachingDisplay`/`cacheDisplay` technique
+  `capture-indicator.swift`'s own verification pass established. The card's
+  real layout code (icon, headline, subtitle, the "Capture" row, Skip/Start
+  buttons) was rasterized off-screen and written to PNG, once with a source
+  label ("Zoom") and once without (subtitle correctly omitted). Confirmed by
+  eye: a genuinely rounded-corner white card (checked at the pixel level too
+  — the top-left corner pixel is fully transparent, alpha 0, while pixels a
+  few points inset are opaque white, confirming the rounded-rect clip is
+  real and not just a flat rectangle), bold black headline, grey subtitle,
+  the Ethos brand icon, a blue filled "Start" button with legible white
+  bold text, and a plain grey "Skip" button — no white-on-white or
+  low-contrast rendering anywhere, because nothing here is drawn by the
+  system.
+- **Drag verified via synthetic event injection, not just "should work"** —
+  a real `NSPanel` was built with the card's exact drag-handling view, and
+  real `NSEvent.mouseEvent` down/dragged/up events were posted through the
+  real `NSApplication.sendEvent(_:)` dispatch path (the same technique
+  `capture-indicator.swift`'s own draggable-badge fix used to disprove
+  `isMovableByWindowBackground` and prove the manual override). Result: a
+  drag gesture of (dx: 40, dy: -25) in window-local coordinates moved the
+  panel's `frame.origin` by exactly (40, -25) — confirmed by comparing the
+  panel's frame before and after, not by inspecting the drag code and
+  asserting it must work.
+- `pnpm --filter @ethosagent/platform-callcapture run build:native` compiles
+  cleanly end to end (all four binaries: `mic-detector`, `mic-capture`,
+  `capture-indicator`, `capture-offer-card`).
+- Full repo `pnpm check` (typecheck + lint + test) passes.
+
+## Floating recording indicator (plan/phases/call-capture-desktop-ux.md)
+
+The follow-up flagged above: a small, draggable, circular on-screen badge
+that appears the moment `CallCaptureDaemon` accepts a capture and disappears
+the moment it ends — the only on-screen feedback the CLI-daemon path
+(`ethos serve`/`ethos gateway`) has that something is actually recording.
+The desktop app has its own, separate Electron `BrowserWindow`-based
+indicator (`apps/desktop/src/main/call-capture-pill.ts`); this is the
+headless-CLI analog, since a bare Node process has no `BrowserWindow`
+available.
+
+**`native/capture-indicator.swift`** — a different category from every
+other native helper in this package. `mic-detector.swift`/`mic-capture.swift`
+are headless CLI tools driven by a bare `RunLoop.main.run()`; this one shows
+a real, draggable, hover-tracking `NSWindow`, which needs the full Cocoa
+event loop. Concretely: `NSApplication.shared` +
+`setActivationPolicy(.accessory)` (no Dock icon/menu bar — a background
+helper, never something the user switches to) + an `NSApplicationDelegate`
++ `app.run()` in place of `RunLoop.main.run()`. See the file's own header
+comment for the full design rationale (draggability, position persistence,
+fullscreen-Space visibility, the badge icon, and the "waiting for
+transcript" placeholder) — it's worth reading in full before touching this
+file, since none of those mechanisms are shared with any other file in this
+package.
+
+**Protocol** — the first helper in this package that reads commands
+INBOUND (every other one only ever writes outbound), one NDJSON object per
+line, same convention just reversed:
+
+```
+Node -> Swift (stdin):
+  {"command":"transcript_append","speaker":"you"|"other","text":"..."}
+  {"command":"audio_level","speaker":"you"|"other","level":<number 0.0-1.0>}
+  {"command":"hide"}
+Swift -> Node (stdout):
+  {"event":"ready"}                  — window created and shown
+  {"event":"end_requested"}          — the popover's "End" button was clicked
+  {"event":"error","message":"..."}  — non-fatal problem worth logging
+```
+
+`audio_level` drives a small two-row per-speaker level meter (smoothed with
+an exponential moving average) shown at the top of the popover, above the
+transcript text — it updates far more often (~100-200ms) than
+`transcript_append` (~8s STT windows), giving visible proof capture is
+working well before the placeholder clears or any transcript text exists.
+
+One process per capture — `argv[1]` is the clean source label (e.g.
+`"zoom"`), `hide`/stdin-EOF/SIGTERM all tear it down. The "End" button is a
+safety net for when the real `call_ended` signal never fires (see "Fix —
+per-process detection" above for why a safety net is still worth having on
+top of that fix): clicking it only emits `end_requested` and keeps
+running — the daemon decides when capture has actually finished and sends
+`hide` once it has, so the badge disappears in sync with capture actually
+stopping, not the instant the button is clicked. `CaptureIndicator`
+(`src/indicator.ts`) is the Node wrapper, structurally satisfying
+`daemon.ts`'s `CallCaptureIndicatorPort` the same import-direction-clean way
+`detector.ts`/`notification.ts` satisfy their own ports.
+
+**Building:**
+
+```sh
+pnpm --filter @ethosagent/platform-callcapture run build:native
+```
+
+Added to the existing `build:native` script. Needs only `AppKit` +
+`Foundation` — no CoreAudio/AVFoundation, unlike the audio-capture helpers.
+
+**Manual verification performed:** compiled with `swiftc` and launched for
+real (this package's dev machine has a live Aqua session). Confirmed via
+`CGWindowListCopyWindowInfo` (filtered to the process's own PID) that
+launching the binary creates exactly two real on-screen windows at the
+expected 48×48 / 300×220 sizes and expected bottom-right-of-screen position;
+exercised `transcript_append`/an unrecognized command/`hide` over a held-open
+stdin pipe and confirmed the process exits cleanly (code 0, zero windows
+left behind) after `hide`. **Not confirmed:** an actual pixel-level
+screenshot of the rendered badge/icon/hover popover — `screencapture` and
+`CGWindowListCreateImage`-style capture both require Screen Recording /
+Accessibility permission this environment's shell doesn't have, and there
+was no human present to look at the screen directly. The icon-path
+resolution and the "waiting for transcript" placeholder text were verified
+by inspecting the resolved file path and reading the source logic, not by
+looking at rendered pixels — treat the exact visual result (icon crop,
+text layout, colors) as unconfirmed until a human checks it live.

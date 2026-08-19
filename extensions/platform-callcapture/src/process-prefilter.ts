@@ -1,52 +1,40 @@
-// Coarse process-based prefilter for call capture (plan/phases/
-// call-capture-extension.md, decision 1): "Treat [process/app detection] as
-// a coarse prefilter at best, not the detection signal itself." Mic-in-use
-// (detector.ts) remains the actual detection trigger. This module answers a
-// narrower, additional question — is at least one KNOWN calling app
-// currently running? — so that any mic activity at all (Dictation, Siri,
-// Voice Memos, a random website's getUserMedia() permission grant, ...)
-// doesn't alone trigger a capture offer. `CallCaptureDaemon` requires BOTH
-// signals to agree before offering a capture (see daemon.ts).
+// Known-calling-app registry for call capture. Originally (Phase 4) a
+// process-based coarse prefilter checked via `pgrep -x` alongside the
+// mic-in-use signal (decision 1) — that pgrep-based check has since been
+// REMOVED (see below), and this module now serves a narrower purpose: the
+// canonical list of known calling-app process names (mirrored by hand into
+// `native/mic-detector.swift`, which now does its own per-process app
+// tracking natively — see that file's header comment) and the raw-process-
+// name-to-clean-source-label lookup `detector.ts` uses when the native
+// detector reports which app triggered a `call_started` event.
 //
-// Deliberate, documented limitation, carried over verbatim from decision 1:
-// this checks process NAMES via `pgrep -x`, which cannot distinguish a
-// browser tab running a web-based call (e.g. Google Meet in Chrome) from any
-// other tab — Chrome/Safari/etc. are not calling-app-specific processes.
-// `extensions/watchers`' own `process` differ notes the identical gap. A
-// Meet call running in a browser will therefore NOT pass this prefilter and
-// will not offer a capture, even though the mic-activity signal (decision
-// 1's actual detection trigger) correctly fires for it. This is an accepted,
-// pre-existing limitation of process-name detection — not something this
-// module attempts to solve — see this package's README.md for the
-// user-facing note.
+// WHY THE PGREP-BASED CHECK WAS REMOVED: the native detector now only ever
+// watches known calling apps in the first place (via `NSWorkspace` +
+// per-process CoreAudio properties — see native/mic-detector.swift). A
+// `call_started` event is therefore ALREADY scoped to a known calling app by
+// construction; there is no longer a separate "mic active but no known app
+// running" case for a downstream process check to filter out (Dictation,
+// Siri, Voice Memos, and a browser tab's `getUserMedia()` grant were never
+// being watched by the new detector in the first place, so they never
+// produce a `call_started` event at all). `checkAnyCallingAppRunning` /
+// `CheckProcessRunning` / `defaultCheckProcessRunning` (the pgrep-based
+// pieces) are gone; `CallCaptureDaemon` no longer takes a separate
+// `checkCallingAppRunning` port — see daemon.ts.
 //
-// Mirrors extensions/watchers/src/differs.ts's `pgrepAlive` exactly (same
-// `pgrep -x <name>` approach), but is deliberately NOT imported from
-// `@ethosagent/watchers` — daemon.ts's header comment already establishes
-// this package takes no dependency on that package (structural ports only,
-// mirroring `detector.ts`/`notification.ts`'s idiom). This is a small, local
-// equivalent, kept in sync by hand rather than shared.
-
-import { execFile } from 'node:child_process';
-
-/** Injectable process-alive check — mirrors `extensions/watchers/src/
- * differs.ts`'s `pgrepAlive` port pattern. Tests must supply this as a fake;
- * real code never shells out to `pgrep` in a test. */
-export type CheckProcessRunning = (name: string) => Promise<boolean>;
-
-/** `pgrep -x <name>` — true if a process with exactly that name is running. */
-export function defaultCheckProcessRunning(name: string): Promise<boolean> {
-  return new Promise((resolve) => {
-    execFile('pgrep', ['-x', name], (err) => resolve(!err));
-  });
-}
+// Deliberate, documented limitation, carried over from the original
+// decision 1 design and UNCHANGED by this fold-in: this can only ever match
+// known NATIVE app processes, so a browser tab running a web-based call
+// (e.g. Google Meet in Chrome) is still not detected — Chrome/Safari/etc.
+// are not calling-app-specific processes, and neither the old pgrep check
+// nor the new per-process CoreAudio approach can distinguish a calling tab
+// from any other tab. See this package's README.md for the user-facing
+// note.
 
 /**
- * Known macOS calling-app process names, checked via `pgrep -x`. A plain,
- * easily-extended array — no new config surface for this pass. Best-effort
- * coverage of common native calling apps, not an exhaustive registry.
- * Deliberately excludes browser processes (Chrome, Safari, ...) since those
- * cannot be distinguished from a non-calling tab — see this file's header
+ * Known macOS calling-app process (executable) names. A plain,
+ * easily-extended array — no new config surface. Best-effort coverage of
+ * common native calling apps, not an exhaustive registry. Deliberately
+ * excludes browser processes (Chrome, Safari, ...) — see this file's header
  * comment.
  */
 export const KNOWN_CALLING_APP_PROCESSES: readonly string[] = [
@@ -58,29 +46,6 @@ export const KNOWN_CALLING_APP_PROCESSES: readonly string[] = [
   'Webex',
   'GoToMeeting',
 ];
-
-/**
- * True if ANY of `processNames` is currently running. Short-circuits on the
- * first match; returns that match's raw process name, or `null` if none
- * matched. Defaults to `KNOWN_CALLING_APP_PROCESSES` checked via the real
- * `pgrep`-backed probe; both are overridable for tests.
- *
- * Returns the RAW process name (e.g. `'zoom.us'`, `'Microsoft Teams'`), not
- * a cleaned-up label — callers that need a filename-safe/human-readable
- * source (capture artifact keys, digest lines) should pass the result
- * through `sourceLabelForProcessName` below. Kept separate so this
- * function's job stays "which known process matched," not "how should that
- * be displayed."
- */
-export async function checkAnyCallingAppRunning(
-  processNames: readonly string[] = KNOWN_CALLING_APP_PROCESSES,
-  checkProcessRunning: CheckProcessRunning = defaultCheckProcessRunning,
-): Promise<string | null> {
-  for (const name of processNames) {
-    if (await checkProcessRunning(name)) return name;
-  }
-  return null;
-}
 
 /**
  * Maps a raw `KNOWN_CALLING_APP_PROCESSES` process name to a clean,

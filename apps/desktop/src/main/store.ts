@@ -44,6 +44,23 @@ export interface AppStoreType {
    * an id nothing will ask for again.
    */
   satelliteNodeId?: string;
+  /**
+   * Personality bound to the desktop-owned call-capture daemon
+   * (`apps/desktop/src/main/call-capture.ts`). Desktop-specific override —
+   * wins over the shared `~/.ethos/config.yaml`'s `callCapture.personalityId`
+   * when both are set (see `readSharedVoiceAndCallCaptureConfig` in
+   * `serve.ts`). There is currently no Settings UI to set this field; today
+   * it's only ever set by hand-editing the Electron store's JSON file
+   * directly.
+   *
+   * Undefined/unset here does NOT by itself mean call-capture is disabled
+   * for this desktop instance: `serve.ts` falls back to the shared config's
+   * `callCapture.personalityId` — the same file/field `ethos serve`/`ethos
+   * gateway` read — when this field is absent. Both absent, and no
+   * personality unconditionally declaring the `call_capture` toolset
+   * capability, is what actually disables it.
+   */
+  callCapturePersonalityId?: string;
 }
 
 let storeInstance: Store<AppStoreType> | null = null;

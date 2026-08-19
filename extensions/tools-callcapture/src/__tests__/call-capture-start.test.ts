@@ -1,3 +1,5 @@
+import type { Speaker, TranscriptEntry } from '@ethosagent/platform-callcapture';
+import { defaultAlwaysDeny, InMemoryStorage, ScopedStorage } from '@ethosagent/storage-fs';
 import type {
   LLMProvider,
   MemoryContext,
@@ -5,6 +7,10 @@ import type {
   MemoryUpdate,
   Message,
   PcmChunk,
+  Storage,
+  StorageDirEntry,
+  StorageRemoveOptions,
+  StorageWriteOptions,
   StreamingSttProvider,
 } from '@ethosagent/types';
 import { STT_CONTRACT_VERSION } from '@ethosagent/types';
@@ -200,8 +206,15 @@ describe('runCallCapture — capture flow', () => {
       now: () => FIXED_STARTED_AT,
     };
 
+    const audioLevels: Array<{ speaker: Speaker; level: number; at: number }> = [];
     const controller = new AbortController();
-    const resultPromise = runCallCapture(opts, inputWith(controller.signal, { source: 'Zoom' }));
+    const resultPromise = runCallCapture(
+      opts,
+      inputWith(controller.signal, {
+        source: 'Zoom',
+        onAudioLevel: (speaker, level, at) => audioLevels.push({ speaker, level, at }),
+      }),
+    );
     controller.abort();
     const result = await resultPromise;
 
@@ -209,6 +222,23 @@ describe('runCallCapture — capture flow', () => {
     expect(mic.startCalled).toBe(true);
     expect(tap.stopCalled).toBe(true);
     expect(mic.stopCalled).toBe(true);
+
+    // Supplying onAudioLevel is purely additive — the tap doesn't alter what
+    // reaches the transcript pipeline. One chunk per stream here, so exactly
+    // one 'you' and one 'other' reading, both plausible (0 < level <= 1).
+    expect(audioLevels).toHaveLength(2);
+    const youLevel = audioLevels.find((a) => a.speaker === 'you');
+    const otherLevel = audioLevels.find((a) => a.speaker === 'other');
+    expect(youLevel).toBeDefined();
+    expect(otherLevel).toBeDefined();
+    if (youLevel) {
+      expect(youLevel.level).toBeGreaterThan(0);
+      expect(youLevel.level).toBeLessThanOrEqual(1);
+    }
+    if (otherLevel) {
+      expect(otherLevel.level).toBeGreaterThan(0);
+      expect(otherLevel.level).toBeLessThanOrEqual(1);
+    }
 
     // Two memory.sync calls: the artifact write, then the digest-index append.
     expect(memory.synced).toHaveLength(2);
@@ -434,5 +464,352 @@ describe('runCallCapture — capture flow', () => {
     expect(memory.synced).toHaveLength(0);
     // The already-started tap stream must be stopped rather than leaked.
     expect(tap.stopCalled).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Documents-tab mirror (plan/phases/call-capture-desktop-ux.md, P4)
+// ---------------------------------------------------------------------------
+
+/** Delegates every call to `inner`, recording which of `write`/`writeAtomic`
+ * was actually invoked and with what arguments. Used to prove the mirror
+ * write goes through `writeAtomic` (finding #7: a crash mid-`write` would
+ * leave a truncated `.md` file in the user's real Documents folder). */
+class RecordingStorage implements Storage {
+  readonly writeAtomicCalls: Array<{ path: string; content: string | Uint8Array }> = [];
+  readonly writeCalls: Array<{ path: string; content: string | Uint8Array }> = [];
+
+  constructor(private readonly inner: Storage) {}
+
+  read(path: string) {
+    return this.inner.read(path);
+  }
+  readBytes(path: string) {
+    return this.inner.readBytes(path);
+  }
+  exists(path: string) {
+    return this.inner.exists(path);
+  }
+  mtime(path: string) {
+    return this.inner.mtime(path);
+  }
+  list(dir: string) {
+    return this.inner.list(dir);
+  }
+  listEntries(dir: string): Promise<StorageDirEntry[]> {
+    return this.inner.listEntries(dir);
+  }
+  async write(path: string, content: string | Uint8Array, opts?: StorageWriteOptions) {
+    this.writeCalls.push({ path, content });
+    return this.inner.write(path, content, opts);
+  }
+  append(path: string, content: string) {
+    return this.inner.append(path, content);
+  }
+  async writeAtomic(path: string, content: string | Uint8Array, opts?: StorageWriteOptions) {
+    this.writeAtomicCalls.push({ path, content });
+    return this.inner.writeAtomic(path, content, opts);
+  }
+  mkdir(dir: string) {
+    return this.inner.mkdir(dir);
+  }
+  remove(path: string, opts?: StorageRemoveOptions) {
+    return this.inner.remove(path, opts);
+  }
+  rename(from: string, to: string) {
+    return this.inner.rename(from, to);
+  }
+  chmod(path: string, mode: number) {
+    return this.inner.chmod(path, mode);
+  }
+}
+
+describe('runCallCapture — Documents mirror', () => {
+  it('mirrors the transcript artifact into fs_reach.workdir/call-captures via writeAtomic on a scoped boundary, but not the digest index', async () => {
+    const tap = new FakeCaptureBoundary([pcmChunk(TAP_MARKER, SAMPLE_RATE)]);
+    const mic = new FakeCaptureBoundary([pcmChunk(MIC_MARKER, SAMPLE_RATE)]);
+    const memory = new RecordingMemory();
+    const inMemory = new InMemoryStorage();
+    await inMemory.mkdir('/workdir');
+    const recording = new RecordingStorage(inMemory);
+    // Mirrors production wiring (build-agent-loop.ts): `runCallCapture` must
+    // receive a Storage already confined to `documentsWorkdir` via
+    // `ScopedStorage`, not a bare unscoped store.
+    const storage = new ScopedStorage(recording, {
+      read: ['/workdir'],
+      write: ['/workdir'],
+      alwaysDeny: defaultAlwaysDeny(),
+    });
+
+    const opts: CallCaptureToolsOptions = {
+      tapCapture: tap,
+      micCapture: mic,
+      sttProvider: createFakeStt(),
+      memory,
+      storage,
+      documentsWorkdir: '/workdir',
+      windowMs: 1000,
+      now: () => FIXED_STARTED_AT,
+    };
+
+    const controller = new AbortController();
+    const resultPromise = runCallCapture(opts, inputWith(controller.signal, { source: 'Zoom' }));
+    controller.abort();
+    const result = await resultPromise;
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.artifactKey).toBe('zoom-2026-08-16-143022123.md');
+
+    // The write went through writeAtomic, never write — a partial write must
+    // never leave a truncated artifact behind.
+    expect(recording.writeCalls).toHaveLength(0);
+    expect(recording.writeAtomicCalls).toHaveLength(1);
+    expect(recording.writeAtomicCalls[0]?.path).toBe(
+      '/workdir/call-captures/zoom-2026-08-16-143022123.md',
+    );
+
+    // Same content as the memory-scope artifact write.
+    const memoryArtifact = memory.synced[0]?.updates[0];
+    const mirrored = await storage.read('/workdir/call-captures/zoom-2026-08-16-143022123.md');
+    expect(mirrored).not.toBeNull();
+    if (memoryArtifact && memoryArtifact.action === 'replace') {
+      expect(mirrored).toBe(memoryArtifact.content);
+    }
+
+    // The digest index is memory-scope only — never mirrored.
+    const entries = await storage.list('/workdir/call-captures');
+    expect(entries).toEqual(['zoom-2026-08-16-143022123.md']);
+    expect(await storage.exists('/workdir/call-captures-index.md')).toBe(false);
+  });
+
+  it('skips the mirror write gracefully when documentsWorkdir is not configured', async () => {
+    const tap = new FakeCaptureBoundary([pcmChunk(TAP_MARKER, SAMPLE_RATE)]);
+    const mic = new FakeCaptureBoundary([pcmChunk(MIC_MARKER, SAMPLE_RATE)]);
+    const memory = new RecordingMemory();
+    const storage = new InMemoryStorage();
+
+    const opts: CallCaptureToolsOptions = {
+      tapCapture: tap,
+      micCapture: mic,
+      sttProvider: createFakeStt(),
+      memory,
+      storage, // storage present, but no documentsWorkdir — must not throw
+      windowMs: 1000,
+      now: () => FIXED_STARTED_AT,
+    };
+
+    const controller = new AbortController();
+    const resultPromise = runCallCapture(opts, inputWith(controller.signal, { source: 'Zoom' }));
+    controller.abort();
+    const result = await resultPromise;
+
+    expect(result.ok).toBe(true);
+    // Memory-scope writes still happen; nothing was ever written to storage.
+    expect(memory.synced).toHaveLength(2);
+    expect(await storage.list('/')).toEqual([]);
+  });
+
+  it('skips the mirror write gracefully when storage is not configured', async () => {
+    const tap = new FakeCaptureBoundary([pcmChunk(TAP_MARKER, SAMPLE_RATE)]);
+    const mic = new FakeCaptureBoundary([pcmChunk(MIC_MARKER, SAMPLE_RATE)]);
+    const memory = new RecordingMemory();
+
+    const opts: CallCaptureToolsOptions = {
+      tapCapture: tap,
+      micCapture: mic,
+      sttProvider: createFakeStt(),
+      memory,
+      documentsWorkdir: '/workdir', // documentsWorkdir present, but no storage — must not throw
+      windowMs: 1000,
+      now: () => FIXED_STARTED_AT,
+    };
+
+    const controller = new AbortController();
+    const resultPromise = runCallCapture(opts, inputWith(controller.signal, { source: 'Zoom' }));
+    controller.abort();
+    const result = await resultPromise;
+
+    expect(result.ok).toBe(true);
+    expect(memory.synced).toHaveLength(2);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Live transcript streaming (plan/phases/call-capture-desktop-ux.md, P3)
+// ---------------------------------------------------------------------------
+
+/** A fake STT provider that ignores audio content and returns a distinct,
+ * incrementing label per `transcribeStream()` call ("window 1", "window 2",
+ * ...) — used instead of the shared `createFakeStt` above so this test can
+ * tell windows apart by their text, independent of any speaker-marker logic. */
+function createSequentialFakeStt(): StreamingSttProvider {
+  let calls = 0;
+  return {
+    name: 'fake-stt-sequential',
+    caps: { kind: 'stt', formats: ['pcm'], streaming: true, contractVersion: STT_CONTRACT_VERSION },
+    async transcribeBuffer() {
+      throw new Error('transcribeBuffer should not be called — streaming path only');
+    },
+    async *transcribeStream(audio) {
+      for await (const _chunk of audio) {
+        // Drain — content is irrelevant to this fake.
+      }
+      calls += 1;
+      yield { text: `window ${calls}`, isFinal: true };
+    },
+  };
+}
+
+describe('runCallCapture — live transcript streaming (onEntry)', () => {
+  it('fires onEntry once per yielded TranscriptEntry, in the same order they are pushed into the saved transcript', async () => {
+    // Two consecutive windows on the tap stream only (mic stream stays empty
+    // and never yields before abort) — a single generator, so completion
+    // order is strictly window order with no cross-stream merge race to
+    // reason about.
+    const tap = new FakeCaptureBoundary([
+      pcmChunk(TAP_MARKER, SAMPLE_RATE),
+      pcmChunk(TAP_MARKER, SAMPLE_RATE),
+    ]);
+    const mic = new FakeCaptureBoundary([]);
+    const memory = new RecordingMemory();
+
+    const liveEntries: TranscriptEntry[] = [];
+    const opts: CallCaptureToolsOptions = {
+      tapCapture: tap,
+      micCapture: mic,
+      sttProvider: createSequentialFakeStt(),
+      memory,
+      windowMs: 1000,
+      now: () => FIXED_STARTED_AT,
+    };
+
+    const controller = new AbortController();
+    const resultPromise = runCallCapture(
+      opts,
+      inputWith(controller.signal, {
+        source: 'meet',
+        onEntry: (entry) => liveEntries.push(entry),
+      }),
+    );
+    controller.abort();
+    const result = await resultPromise;
+
+    expect(result.ok).toBe(true);
+
+    // Exactly one onEntry call per window, in window order.
+    expect(liveEntries).toHaveLength(2);
+    expect(liveEntries.map((e) => e.text)).toEqual(['window 1', 'window 2']);
+    expect(liveEntries.every((e) => e.speaker === 'other')).toBe(true);
+
+    // No divergence between what streamed live and what got saved: the
+    // artifact contains both entries, in the same relative order.
+    const artifactUpdate = memory.synced[0]?.updates[0];
+    expect(artifactUpdate?.action).toBe('replace');
+    if (artifactUpdate && artifactUpdate.action === 'replace') {
+      const idx1 = artifactUpdate.content.indexOf('window 1');
+      const idx2 = artifactUpdate.content.indexOf('window 2');
+      expect(idx1).toBeGreaterThan(-1);
+      expect(idx2).toBeGreaterThan(idx1);
+    }
+  });
+
+  it('does not fire onEntry at all when the callback is not supplied (purely additive)', async () => {
+    const tap = new FakeCaptureBoundary([pcmChunk(TAP_MARKER, SAMPLE_RATE)]);
+    const mic = new FakeCaptureBoundary([pcmChunk(MIC_MARKER, SAMPLE_RATE)]);
+    const memory = new RecordingMemory();
+
+    const opts: CallCaptureToolsOptions = {
+      tapCapture: tap,
+      micCapture: mic,
+      sttProvider: createFakeStt(),
+      memory,
+      windowMs: 1000,
+      now: () => FIXED_STARTED_AT,
+    };
+
+    const controller = new AbortController();
+    // inputWith() omits onEntry by default — this just documents that
+    // runCallCapture never assumes it's present.
+    const resultPromise = runCallCapture(opts, inputWith(controller.signal, { source: 'meet' }));
+    controller.abort();
+    const result = await resultPromise;
+
+    expect(result.ok).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Live audio-level streaming (P2 follow-up: onAudioLevel)
+// ---------------------------------------------------------------------------
+
+describe('runCallCapture — live audio-level streaming (onAudioLevel)', () => {
+  it('fires onAudioLevel once per PCM chunk on each stream, with the right speaker label and a plausible level', async () => {
+    // Two chunks on the tap stream, one on the mic stream — distinguishable
+    // counts per stream so the assertion below can tell them apart without
+    // relying on interleaving order.
+    const tap = new FakeCaptureBoundary([
+      pcmChunk(TAP_MARKER, SAMPLE_RATE),
+      pcmChunk(TAP_MARKER, SAMPLE_RATE),
+    ]);
+    const mic = new FakeCaptureBoundary([pcmChunk(MIC_MARKER, SAMPLE_RATE)]);
+    const memory = new RecordingMemory();
+
+    const audioLevels: Array<{ speaker: Speaker; level: number; at: number }> = [];
+    const opts: CallCaptureToolsOptions = {
+      tapCapture: tap,
+      micCapture: mic,
+      sttProvider: createFakeStt(),
+      memory,
+      windowMs: 1000,
+      now: () => FIXED_STARTED_AT,
+    };
+
+    const controller = new AbortController();
+    const resultPromise = runCallCapture(
+      opts,
+      inputWith(controller.signal, {
+        source: 'meet',
+        onAudioLevel: (speaker, level, at) => audioLevels.push({ speaker, level, at }),
+      }),
+    );
+    controller.abort();
+    const result = await resultPromise;
+
+    expect(result.ok).toBe(true);
+
+    const youReadings = audioLevels.filter((a) => a.speaker === 'you');
+    const otherReadings = audioLevels.filter((a) => a.speaker === 'other');
+    expect(youReadings).toHaveLength(1);
+    expect(otherReadings).toHaveLength(2);
+    for (const reading of audioLevels) {
+      expect(reading.level).toBeGreaterThan(0);
+      expect(reading.level).toBeLessThanOrEqual(1);
+      expect(typeof reading.at).toBe('number');
+    }
+  });
+
+  it('does not fire onAudioLevel at all when the callback is not supplied (purely additive)', async () => {
+    const tap = new FakeCaptureBoundary([pcmChunk(TAP_MARKER, SAMPLE_RATE)]);
+    const mic = new FakeCaptureBoundary([pcmChunk(MIC_MARKER, SAMPLE_RATE)]);
+    const memory = new RecordingMemory();
+
+    const opts: CallCaptureToolsOptions = {
+      tapCapture: tap,
+      micCapture: mic,
+      sttProvider: createFakeStt(),
+      memory,
+      windowMs: 1000,
+      now: () => FIXED_STARTED_AT,
+    };
+
+    const controller = new AbortController();
+    // inputWith() omits onAudioLevel by default — this just documents that
+    // runCallCapture never assumes it's present.
+    const resultPromise = runCallCapture(opts, inputWith(controller.signal, { source: 'meet' }));
+    controller.abort();
+    const result = await resultPromise;
+
+    expect(result.ok).toBe(true);
   });
 });

@@ -2,7 +2,7 @@ import type { PcmChunk, StreamingSttProvider } from '@ethosagent/types';
 import { STT_CONTRACT_VERSION } from '@ethosagent/types';
 import { describe, expect, it } from 'vitest';
 import type { TranscriptEntry } from '../transcript-session';
-import { runTranscriptSession } from '../transcript-session';
+import { computeRmsLevel, runTranscriptSession } from '../transcript-session';
 
 const SAMPLE_RATE = 16_000;
 
@@ -155,5 +155,36 @@ describe('runTranscriptSession — two-stream independence', () => {
       expect(typeof entry.at).toBe('number');
       expect(entry.at).toBeGreaterThan(0);
     }
+  });
+});
+
+describe('computeRmsLevel', () => {
+  it('returns exactly 0 for silence (all-zero samples)', () => {
+    const chunk = { data: new Int16Array(1600).fill(0), sampleRate: SAMPLE_RATE };
+    expect(computeRmsLevel(chunk)).toBe(0);
+  });
+
+  it('returns a level very close to 1.0 for full-scale positive samples', () => {
+    const chunk = { data: new Int16Array(1600).fill(32_767), sampleRate: SAMPLE_RATE };
+    expect(computeRmsLevel(chunk)).toBeCloseTo(1.0, 3);
+  });
+
+  it('returns a level very close to 1.0 for alternating full-scale samples', () => {
+    const data = new Int16Array(1600);
+    for (let i = 0; i < data.length; i++) data[i] = i % 2 === 0 ? 32_767 : -32_768;
+    const chunk = { data, sampleRate: SAMPLE_RATE };
+    expect(computeRmsLevel(chunk)).toBeCloseTo(1.0, 3);
+  });
+
+  it('returns a predictable level for a known constant-value waveform', () => {
+    // RMS of a constant value equals that value; 16384 / 32768 = 0.5 exactly.
+    const chunk = { data: new Int16Array(1600).fill(16_384), sampleRate: SAMPLE_RATE };
+    expect(computeRmsLevel(chunk)).toBe(0.5);
+  });
+
+  it('returns 0 without throwing or producing NaN for an empty chunk', () => {
+    const chunk = { data: new Int16Array(0), sampleRate: SAMPLE_RATE };
+    expect(computeRmsLevel(chunk)).toBe(0);
+    expect(Number.isNaN(computeRmsLevel(chunk))).toBe(false);
   });
 });

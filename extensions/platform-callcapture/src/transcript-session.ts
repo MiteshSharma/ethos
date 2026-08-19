@@ -41,6 +41,22 @@ export interface TranscriptSessionOptions {
 
 const DEFAULT_WINDOW_MS = 8_000;
 
+/** Root-mean-square level of one PCM chunk, normalized to 0.0-1.0 (RMS divided
+ * by 32768, the max magnitude of a signed 16-bit sample). RMS gives smoother,
+ * more visually pleasant level movement than raw peak/max-sample for a live
+ * level-meter UI. Pure and synchronous — no state, no side effects. */
+export function computeRmsLevel(chunk: PcmChunk): number {
+  const { data } = chunk;
+  if (data.length === 0) return 0;
+  let sumSquares = 0;
+  for (let i = 0; i < data.length; i++) {
+    const sample = data[i] ?? 0; // noNonNullAssertion is banned — explicit fallback
+    sumSquares += sample * sample;
+  }
+  const rms = Math.sqrt(sumSquares / data.length);
+  return rms / 32_768;
+}
+
 interface PcmWindow {
   chunks: PcmChunk[];
   at: number;

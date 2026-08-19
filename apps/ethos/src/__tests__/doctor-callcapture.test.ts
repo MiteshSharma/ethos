@@ -13,7 +13,7 @@ import {
 // Call-capture doctor rows: silent when unconfigured (mirrors the Channel
 // SDKs "don't warn about an unused feature" rule), configured-but-broken is a
 // hard failure (same weight as a configured-but-missing channel SDK). The
-// dependency check itself is injected — never the real terminal-notifier/
+// dependency check itself is injected — never the real capture-offer-card/
 // native-binary presence on the machine running the test suite, mirroring
 // doctor-telephony.test.ts's injectable `resolveMedia` pattern. Daemon
 // liveness is exercised against a real `InMemoryStorage`, the same way
@@ -77,16 +77,16 @@ describe('checkCallCapture', () => {
       {
         checkDependencies: async () => ({
           ok: false as const,
-          missing: ['terminal-notifier', 'audiotee'],
-          errors: ['terminal-notifier not found on PATH', 'audiotee binary not found'],
+          missing: ['capture-offer-card', 'audiotee'],
+          errors: ['capture-offer-card binary not found', 'audiotee binary not found'],
         }),
       },
     );
     expect(result).toEqual({
       configured: true,
       ok: false,
-      missing: ['terminal-notifier', 'audiotee'],
-      errors: ['terminal-notifier not found on PATH', 'audiotee binary not found'],
+      missing: ['capture-offer-card', 'audiotee'],
+      errors: ['capture-offer-card binary not found', 'audiotee binary not found'],
       daemon: { status: 'down', lastHeartbeatAgeSec: null },
     });
   });

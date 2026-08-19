@@ -4,17 +4,26 @@
 // call_started/call_ended/error contract, with `call_ended` debounced so a
 // sub-second mic hand-off between apps isn't reported as a call ending.
 //
-// Phase 1 scope only (plan/phases/call-capture-extension.md) — detection,
-// nothing else. See README.md.
+// Per-process detection (see native/mic-detector.swift's header comment and
+// README.md's "Per-process detection" section for the full story): the
+// native binary only ever watches known calling apps (mirroring
+// `process-prefilter.ts`'s `KNOWN_CALLING_APP_PROCESSES`), so every
+// `running: true` event it emits already carries which app triggered it —
+// this wrapper maps that raw process name to a clean source label via
+// `sourceLabelForProcessName` and forwards it on `call_started`. There is no
+// longer a separate process-prefilter gate downstream (`daemon.ts`) — the
+// detector itself never fires for non-calling-app mic activity (Dictation,
+// Siri, Voice Memos, a browser tab's mic grant, ...) in the first place.
 
 import { spawn as nodeSpawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 import type { Readable } from 'node:stream';
+import { sourceLabelForProcessName } from './process-prefilter';
 
 export type MicActivityEvent =
-  | { type: 'call_started'; at: number }
+  | { type: 'call_started'; at: number; source: string }
   | { type: 'call_ended'; at: number }
   | { type: 'error'; message: string };
 
@@ -195,7 +204,18 @@ export class MicActivityDetector {
           });
           return;
         }
-        this.handleRunningChanged(fields.running);
+        if (fields.running) {
+          if (typeof fields.source !== 'string' || fields.source.length === 0) {
+            this.emit({
+              type: 'error',
+              message: `mic-detector "${fields.event}" event with running:true is missing a "source": ${trimmed}`,
+            });
+            return;
+          }
+          this.handleRunningChanged(true, fields.source);
+        } else {
+          this.handleRunningChanged(false, undefined);
+        }
         return;
       case 'error':
         this.emit({
@@ -214,7 +234,7 @@ export class MicActivityDetector {
     }
   }
 
-  private handleRunningChanged(running: boolean): void {
+  private handleRunningChanged(running: boolean, rawSource: string | undefined): void {
     if (running) {
       // A running=true arriving while an end-debounce is pending is exactly
       // the flicker case: cancel the pending end, we're still in the call.
@@ -224,7 +244,11 @@ export class MicActivityDetector {
       }
       if (!this.inCall) {
         this.inCall = true;
-        this.emit({ type: 'call_started', at: Date.now() });
+        this.emit({
+          type: 'call_started',
+          at: Date.now(),
+          source: sourceLabelForProcessName(rawSource as string),
+        });
       }
       return;
     }

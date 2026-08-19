@@ -291,7 +291,7 @@ register_anchors:
     - { path: packages/safety/watcher/src/rules.ts, line: 110, contains: "export function compoundingErrorRule" }
     - { path: packages/safety/watcher/src/rules.ts, line: 161, contains: "export function suspiciousSequenceRule" }
     - { path: packages/safety/watcher/src/rules.ts, line: 205, contains: "export function defaultRules" }
-    - { path: packages/wiring/src/build-agent-loop.ts, line: 338, contains: "defaultRules: watcherDefaultRules" }
+    - { path: packages/wiring/src/build-agent-loop.ts, line: 411, contains: "defaultRules: watcherDefaultRules" }
 
   G-CHAN:
     - { path: packages/safety/channel/src/channel-filter.ts, line: 111, contains: "export function checkMessage" }

@@ -9,7 +9,7 @@
     }
   },
   "scripts": {
-    "build:native": "swiftc native/mic-detector.swift -o native/bin/mic-detector -framework CoreAudio -framework Foundation && swiftc native/mic-capture.swift -o native/bin/mic-capture -framework AVFoundation -framework CoreAudio",
+    "build:native": "swiftc native/mic-detector.swift -o native/bin/mic-detector -framework CoreAudio -framework Foundation -framework AppKit && swiftc native/mic-capture.swift -o native/bin/mic-capture -framework AVFoundation -framework CoreAudio && swiftc native/capture-indicator.swift -o native/bin/capture-indicator -framework AppKit -framework Foundation && swiftc native/capture-offer-card.swift -o native/bin/capture-offer-card -framework AppKit -framework Foundation",
     "build:audiotee": "bash scripts/fetch-audiotee.sh",
     "build": "pnpm build:native && tsup src/index.ts --format esm --dts"
   },

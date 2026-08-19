@@ -61,6 +61,17 @@ const bundleWorkspacePackages = {
     // Node built-ins stay external.
     if (id.startsWith('node:')) return false;
 
+    // ws's optional native perf addons (bufferutil, utf-8-validate) aren't
+    // installed in node_modules — they're genuinely optional, and ws wraps
+    // its own require() of them in a try/catch, falling back to a pure-JS
+    // implementation at runtime. Statically bundling them makes Rollup try
+    // to resolve them at build time ("Could not resolve 'bufferutil'
+    // imported by 'ws'") instead of leaving the require for Node to attempt
+    // (and ws's own try/catch to swallow) at runtime, which is how they
+    // already behave everywhere else in this monorepo that isn't bundled
+    // through Rollup.
+    if (id === 'bufferutil' || id === 'utf-8-validate') return false;
+
     // electron subpaths (e.g. electron/main) stay external — MUST come before
     // the bare-electron check below.
     if (id.startsWith('electron/')) return false;

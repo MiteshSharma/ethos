@@ -101,48 +101,73 @@ describe('MicActivityDetector', () => {
     if (originalPlatform) Object.defineProperty(process, 'platform', originalPlatform);
   });
 
-  it('emits call_started on the first running:true event', async () => {
+  it('emits call_started on the first running:true event, with the clean source label', async () => {
     const { child, events } = setup();
-    child.emitLine({ event: 'initial', running: false, deviceId: 1, at: '2026-01-01T00:00:00Z' });
+    child.emitLine({ event: 'initial', running: false, at: '2026-01-01T00:00:00Z' });
     await flush();
     child.emitLine({
       event: 'running_changed',
       running: true,
-      deviceId: 1,
+      source: 'zoom.us',
       at: '2026-01-01T00:00:01Z',
     });
     await flush();
 
-    expect(events).toEqual([{ type: 'call_started', at: expect.any(Number) }]);
+    expect(events).toEqual([{ type: 'call_started', at: expect.any(Number), source: 'zoom' }]);
+  });
+
+  it('falls back to the raw source when it is not in the known label table', async () => {
+    const { child, events } = setup();
+    child.emitLine({
+      event: 'running_changed',
+      running: true,
+      source: 'SomeUnknownApp',
+      at: 't1',
+    });
+    await flush();
+
+    expect(events).toEqual([
+      { type: 'call_started', at: expect.any(Number), source: 'SomeUnknownApp' },
+    ]);
+  });
+
+  it('surfaces a typed error when a running:true event is missing "source"', async () => {
+    const { child, events } = setup();
+    child.emitLine({ event: 'running_changed', running: true, at: 't1' });
+    await flush();
+
+    expect(events).toEqual([
+      { type: 'error', message: expect.stringContaining('missing a "source"') },
+    ]);
   });
 
   it('debounces call_ended: a brief flicker back to running:true suppresses it', async () => {
     const { child, clock, events } = setup(2000);
-    child.emitLine({ event: 'running_changed', running: true, deviceId: 1, at: 't1' });
+    child.emitLine({ event: 'running_changed', running: true, source: 'Discord', at: 't1' });
     await flush();
-    child.emitLine({ event: 'running_changed', running: false, deviceId: 1, at: 't2' });
+    child.emitLine({ event: 'running_changed', running: false, at: 't2' });
     await flush();
     expect(clock.pendingCount).toBe(1);
 
     // Flicker recovers before the debounce window elapses.
-    child.emitLine({ event: 'running_changed', running: true, deviceId: 1, at: 't3' });
+    child.emitLine({ event: 'running_changed', running: true, source: 'Discord', at: 't3' });
     await flush();
 
     expect(clock.pendingCount).toBe(0);
-    expect(events).toEqual([{ type: 'call_started', at: expect.any(Number) }]);
+    expect(events).toEqual([{ type: 'call_started', at: expect.any(Number), source: 'discord' }]);
   });
 
   it('emits call_ended once the debounce window elapses with no further running:true', async () => {
     const { child, clock, events } = setup(2000);
-    child.emitLine({ event: 'running_changed', running: true, deviceId: 1, at: 't1' });
+    child.emitLine({ event: 'running_changed', running: true, source: 'Discord', at: 't1' });
     await flush();
-    child.emitLine({ event: 'running_changed', running: false, deviceId: 1, at: 't2' });
+    child.emitLine({ event: 'running_changed', running: false, at: 't2' });
     await flush();
 
     clock.advance();
 
     expect(events).toEqual([
-      { type: 'call_started', at: expect.any(Number) },
+      { type: 'call_started', at: expect.any(Number), source: 'discord' },
       { type: 'call_ended', at: expect.any(Number) },
     ]);
   });
@@ -176,7 +201,7 @@ describe('MicActivityDetector', () => {
     detector.stop();
     expect(child.killed).toBe(true);
 
-    child.emitLine({ event: 'running_changed', running: true, deviceId: 1, at: 't1' });
+    child.emitLine({ event: 'running_changed', running: true, source: 'Discord', at: 't1' });
     await flush();
 
     expect(events).toEqual([]);

@@ -389,6 +389,23 @@ export interface CreateAgentLoopOptions {
   dataDir: string;
   /** Working directory tools see. Defaults to `process.cwd()`. */
   workingDir?: string;
+  /**
+   * Override for where personality built-ins load from — forwarded to
+   * `WiringContext.builtinPersonalitiesDir` (see `types.ts` for the full
+   * rationale). Needed only by bundled callers whose `import.meta.dirname`
+   * no longer resolves to the source tree post-bundling (e.g. the desktop
+   * app's electron-vite main bundle). Unset for every other caller.
+   */
+  builtinPersonalitiesDir?: string;
+  /**
+   * Override for the root directory containing call-capture's native
+   * binaries — forwarded to `WiringContext.callCaptureNativeDir` (see
+   * `types.ts` for the full rationale). Needed only by bundled callers
+   * whose `import.meta.dirname` no longer resolves to the source tree
+   * post-bundling (e.g. the desktop app's electron-vite main bundle). Unset
+   * for every other caller.
+   */
+  callCaptureNativeDir?: string;
   /** Surface label surfaced to tools/hooks as `AgentLoop.options.platform`.
    *  Pure metadata — no behavioral branches keyed on it. */
   profile?: WiringProfile;
@@ -1018,7 +1035,27 @@ export interface CreateAgentLoopResult {
    */
   runCallCapture?: (
     personalityId: string,
-    opts: { source?: string; abortSignal: AbortSignal },
+    opts: {
+      source?: string;
+      abortSignal: AbortSignal;
+      /**
+       * Live per-entry callback (plan/phases/call-capture-desktop-ux.md,
+       * P3) — forwarded straight through to `RunCallCaptureInput.onEntry`.
+       * Absent for every caller except the desktop app's pill popover.
+       */
+      onEntry?: (entry: import('@ethosagent/platform-callcapture').TranscriptEntry) => void;
+      /**
+       * Live per-chunk audio-level callback (much higher frequency than
+       * `onEntry`) — forwarded straight through to
+       * `RunCallCaptureInput.onAudioLevel`. Absent for every caller except
+       * the level-meter UI consuming it via `CallCaptureIndicatorPort`.
+       */
+      onAudioLevel?: (
+        speaker: import('@ethosagent/platform-callcapture').Speaker,
+        level: number,
+        at: number,
+      ) => void;
+    },
   ) => Promise<import('@ethosagent/tools-callcapture').CallCaptureResult>;
   /** v2.2 — Notification router for registering per-session adapters.
    *  CLI/TUI/web-api register a NotificationAdapter on this router so plugin

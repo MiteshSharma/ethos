@@ -51,6 +51,10 @@ export function buildWiringContext(
     dataDir,
     workingDir,
     log,
+    ...(opts.builtinPersonalitiesDir
+      ? { builtinPersonalitiesDir: opts.builtinPersonalitiesDir }
+      : {}),
+    ...(opts.callCaptureNativeDir ? { callCaptureNativeDir: opts.callCaptureNativeDir } : {}),
   };
 
   return { wiringCtx, dataDir, workingDir, profile, log, NOOP_SECRETS };

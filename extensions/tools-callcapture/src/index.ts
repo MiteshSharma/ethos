@@ -6,7 +6,11 @@
 // start both capture streams, transcribe until the caller's `abortSignal`
 // fires (the same "transcribe until stopped" lifecycle `meet_join` uses),
 // then summarize, write the transcript+summary artifact to memory, and
-// append a compact digest-index entry (decision 8).
+// append a compact digest-index entry (decision 8). Optionally mirrors the
+// per-call artifact (never the digest index) into the personality's
+// `fs_reach.workdir` so it surfaces in the web app's Documents tab
+// (plan/phases/call-capture-desktop-ux.md, P4) — see `documentsWorkdir`/
+// `storage` on `CallCaptureToolsOptions`.
 //
 // DISPATCH: this is a plain function, not a registered `Tool` — it is never
 // LLM-callable. `requiresApproval: true` on a `Tool` is announcement-only in
@@ -24,13 +28,15 @@
 // before it is persisted — see artifact.ts for the "You" vs "Other
 // participant" wrapping judgment call.
 
-import type { TranscriptEntry } from '@ethosagent/platform-callcapture';
-import { runTranscriptSession } from '@ethosagent/platform-callcapture';
+import { join } from 'node:path';
+import type { Speaker, TranscriptEntry } from '@ethosagent/platform-callcapture';
+import { computeRmsLevel, runTranscriptSession } from '@ethosagent/platform-callcapture';
 import type {
   LLMProvider,
   MemoryContext,
   MemoryProvider,
   PcmChunk,
+  Storage,
   SttProvider,
 } from '@ethosagent/types';
 import {
@@ -69,6 +75,28 @@ export interface CallCaptureToolsOptions {
   /** Store the transcript+summary artifact and the digest index are written to. */
   memory?: MemoryProvider;
   /**
+   * Storage backend for the Documents-tab mirror (plan/phases/
+   * call-capture-desktop-ux.md, P4). Paired with `documentsWorkdir` below —
+   * both must be present for the mirror write to happen; either absent
+   * skips it silently (the general case for any personality with no
+   * `fs_reach.workdir` configured). Never used for the memory-scope write
+   * above, which always goes through `memory`. Callers MUST pass a Storage
+   * already confined to `documentsWorkdir` (e.g. `ScopedStorage` — see
+   * `build-agent-loop.ts`), never the raw process-wide backend: this write
+   * sits outside the personality toolset boundary otherwise.
+   */
+  storage?: Storage;
+  /**
+   * The bound personality's resolved `fs_reach.workdir` (already
+   * `${ETHOS_HOME}`/`${self}`-substituted — see `deriveFsReachPaths` in
+   * `@ethosagent/core`). When set alongside `storage`, the per-call
+   * transcript artifact (never the `call-captures-index.md` digest, which
+   * stays memory-scope only) is additionally written to
+   * `<documentsWorkdir>/call-captures/<artifact.key>` so it shows up in the
+   * web app's Documents tab.
+   */
+  documentsWorkdir?: string;
+  /**
    * Lazy provider for the content-summarization step, mirroring
    * `CompletionVerifierOptions.getProvider` (`tools-kanban`'s verifier) —
    * wiring defers construction until first use. Absent means the plain
@@ -90,6 +118,27 @@ export interface RunCallCaptureInput {
   platform: string;
   workingDir: string;
   abortSignal: AbortSignal;
+  /**
+   * Optional per-entry live callback (plan/phases/call-capture-desktop-ux.md,
+   * P3) — fires once per `TranscriptEntry` yielded by `runTranscriptSession`,
+   * in the same order they're pushed into `entries` below, so a UI
+   * subscriber (the desktop pill's popover) can display partial transcript
+   * text incrementally instead of only after the call ends. Purely
+   * additive: callers that don't pass it (the CLI path) see no behavior
+   * change.
+   */
+  onEntry?: (entry: TranscriptEntry) => void;
+  /**
+   * Optional per-chunk live audio-level callback — fires once per PCM chunk
+   * on EACH stream (mic → speaker 'you', tap → speaker 'other') with an
+   * RMS level normalized 0.0-1.0 (see `computeRmsLevel`). Much higher
+   * frequency than `onEntry` (~100-200ms vs ~8s), for a live level-meter UI
+   * that needs faster feedback than transcript text can provide. Purely
+   * additive: callers that don't pass it see no behavior change, and the
+   * streams reaching `runTranscriptSession` are byte-for-byte identical
+   * whether or not this is supplied.
+   */
+  onAudioLevel?: (speaker: Speaker, level: number, at: number) => void;
 }
 
 export type CallCaptureResult =
@@ -133,16 +182,24 @@ export async function runCallCapture(
     };
   }
 
+  const micWithLevel = withLevelReporting(micChunks, 'you', (speaker, level, at) =>
+    input.onAudioLevel?.(speaker, level, at),
+  );
+  const tapWithLevel = withLevelReporting(tapChunks, 'other', (speaker, level, at) =>
+    input.onAudioLevel?.(speaker, level, at),
+  );
+
   const entries: TranscriptEntry[] = [];
   const sessionDone = (async () => {
     for await (const entry of runTranscriptSession(
-      { mic: micChunks, tap: tapChunks },
+      { mic: micWithLevel, tap: tapWithLevel },
       sttProvider,
       {
         windowMs: opts.windowMs,
       },
     )) {
       entries.push(entry);
+      input.onEntry?.(entry);
     }
   })();
 
@@ -175,6 +232,18 @@ export async function runCallCapture(
   };
   await memory.sync([{ action: 'replace', key: artifact.key, content: artifact.markdown }], memCtx);
 
+  // Documents-tab mirror (P4): the per-call transcript only, never the
+  // digest index below. Both `storage` and `documentsWorkdir` are optional —
+  // absent (the general case for a personality with no `fs_reach.workdir`)
+  // means this is a graceful no-op, not an error.
+  if (opts.storage && opts.documentsWorkdir) {
+    const callCapturesDir = join(opts.documentsWorkdir, 'call-captures');
+    await opts.storage.mkdir(callCapturesDir);
+    // writeAtomic, not write: a crash mid-write must never leave a truncated
+    // .md file sitting in the user's actual Documents folder.
+    await opts.storage.writeAtomic(join(callCapturesDir, artifact.key), artifact.markdown);
+  }
+
   const digestLine = buildDigestLine({ startedAt, source, summary, key: artifact.key, hasEntries });
   await memory.sync([{ action: 'add', key: CALL_CAPTURES_INDEX_KEY, content: digestLine }], memCtx);
 
@@ -184,6 +253,21 @@ export async function runCallCapture(
     summary,
     ...(summaryResult.error ? { warning: summaryResult.error } : {}),
   };
+}
+
+/** Wraps a PCM chunk stream to report each chunk's RMS level via callback
+ * WITHOUT altering what flows downstream — yields the exact same chunk,
+ * unchanged, in the same order. Fully transparent to `runTranscriptSession`:
+ * it receives every chunk it always did, just via this pass-through. */
+async function* withLevelReporting(
+  stream: AsyncIterable<PcmChunk>,
+  speaker: Speaker,
+  onLevel: (speaker: Speaker, level: number, at: number) => void,
+): AsyncGenerator<PcmChunk> {
+  for await (const chunk of stream) {
+    onLevel(speaker, computeRmsLevel(chunk), Date.now());
+    yield chunk;
+  }
 }
 
 function waitForAbort(signal: AbortSignal): Promise<void> {

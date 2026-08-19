@@ -753,7 +753,7 @@ export async function runDoctor(args: string[] = [], options?: DoctorOptions): P
     console.log(`${c.bold}Call capture${c.reset}`);
     if (callCapture.ok) {
       console.log(
-        `  ${c.green}✓${c.reset}  All dependencies present ${c.dim}(terminal-notifier, mic-detector, mic-capture, audiotee)${c.reset}`,
+        `  ${c.green}✓${c.reset}  All dependencies present ${c.dim}(capture-offer-card, mic-detector, mic-capture, audiotee)${c.reset}`,
       );
     } else {
       console.log(`  ${c.red}✗${c.reset}  Missing: ${callCapture.missing.join(', ')}`);
@@ -1303,7 +1303,7 @@ export interface CallCaptureCheckResult {
 
 export interface CheckCallCaptureOptions {
   /** Overrides the dependency preflight call. Tests must supply this — a
-   *  fake — instead of exercising the real `terminal-notifier`/native-binary
+   *  fake — instead of exercising the real capture-offer-card/native-binary
    *  presence on the machine running the test suite. Mirrors
    *  `telephonyReport`'s injectable `resolveMedia` option. */
   checkDependencies?: () => Promise<CallCaptureDependencyCheckResult>;

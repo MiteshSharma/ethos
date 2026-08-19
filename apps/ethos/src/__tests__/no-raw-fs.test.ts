@@ -108,11 +108,12 @@
 //
 //   extensions/platform-callcapture/  Phase 4's combined dependency preflight
 //   src/preflight.ts                  (`checkCallCaptureDependencies`, T5):
-//                                      existsSync checks the same three
+//                                      existsSync checks the same four
 //                                      native binaries detector.ts/
-//                                      audio-process.ts check individually,
-//                                      before a notification or capture
-//                                      attempt starts. Same rationale — not a
+//                                      audio-process.ts/notification.ts
+//                                      check individually, before a
+//                                      notification or capture attempt
+//                                      starts. Same rationale — not a
 //                                      ~/.ethos/ operation.
 //
 //   extensions/platform-callcapture/  Cross-process ownership lock
@@ -129,6 +130,23 @@
 //                                      exclusive-create + liveness-check +
 //                                      stale-cleanup lock has no equivalent
 //                                      in the Storage interface.
+//
+//   extensions/platform-callcapture/  Same rationale as detector.ts above:
+//   src/indicator.ts                  existsSync checks for the compiled
+//                                      `capture-indicator` AppKit helper
+//                                      binary (native/bin/) before spawning
+//                                      it, so a missing build throws a clear
+//                                      "run this command" error instead of a
+//                                      bare ENOENT. Not a ~/.ethos/ operation.
+//
+//   extensions/platform-callcapture/  Same rationale as detector.ts above:
+//   src/notification.ts               existsSync checks for the compiled
+//                                      `capture-offer-card` binary shipped
+//                                      alongside this package (native/bin/)
+//                                      before spawning it, so a missing
+//                                      build throws a clear "run this
+//                                      command" error instead of a bare
+//                                      ENOENT. Not a ~/.ethos/ operation.
 //
 // If you need to add a new exception, document WHY here and in CLAUDE.md before
 // adding it to ALLOWED_PATHS below. The default answer for code on the
@@ -185,6 +203,8 @@ const ALLOWED_FILES = new Set([
   'extensions/platform-callcapture/src/audio-process.ts',
   'extensions/platform-callcapture/src/preflight.ts',
   'extensions/platform-callcapture/src/ownership.ts',
+  'extensions/platform-callcapture/src/indicator.ts',
+  'extensions/platform-callcapture/src/notification.ts',
 ]);
 
 // Matches any static or dynamic import of node:fs or node:fs/promises.

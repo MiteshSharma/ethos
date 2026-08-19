@@ -1,94 +1,33 @@
-// Dependency-presence preflight for Phase 2's notification mechanism, and
-// (below) Phase 4's combined preflight covering every manual-install/build
-// dependency call capture needs before a notification or capture attempt
-// starts (plan/phases/call-capture-extension.md decision 5 / "Preflight"
-// §6). Every dependency's absence must surface as a typed, named-fix error,
-// never a swallowed `spawn ENOENT` or a silent no-op.
+// Dependency-presence preflight for Phase 4's combined preflight (below),
+// covering every manual-install/build dependency call capture needs before
+// a notification or capture attempt starts (plan/phases/
+// call-capture-extension.md decision 5 / "Preflight" §6). Every
+// dependency's absence must surface as a typed, named-fix error, never a
+// swallowed `spawn ENOENT` or a silent no-op.
 //
-// Mirrors `detector.ts`'s injectable spawn-boundary idiom: real code spawns
-// a real process via `defaultPreflightSpawn`; tests inject a fake and never
-// depend on whether terminal-notifier happens to be installed on the
-// machine running the test suite.
+// This file used to also export `checkNotificationHelperAvailable` — a
+// binary-presence + notification-authorization-status check for the (now
+// twice-superseded) `terminal-notifier` -> `notification-helper`
+// (`UNUserNotificationCenter`) accept-gate implementations. The current
+// implementation, `native/capture-offer-card.swift`, is a plain AppKit
+// window: it needs no OS authorization at all, so that whole
+// authorization-status dimension no longer applies, and it's checked below
+// with the same plain `existsSync` presence check every other native
+// binary in this package already gets (mirroring
+// `micDetectorBinaryPath()`/`micCapturePath()`) rather than a dedicated
+// function. See notification.ts and README.md's "native capture-offer
+// card" section for the full history.
+//
+// Mirrors `detector.ts`'s injectable spawn-boundary idiom throughout: real
+// code spawns a real process; tests inject a fake and never depend on
+// whether `build:native` has actually been run on the machine running the
+// test suite.
 
-import { spawn as nodeSpawn } from 'node:child_process';
 import { existsSync as nodeExistsSync } from 'node:fs';
 import { join } from 'node:path';
 
-const TERMINAL_NOTIFIER_BIN = 'terminal-notifier';
-const INSTALL_HINT = 'brew install terminal-notifier';
-
-export type PreflightResult = { available: true } | { available: false; error: string };
-
-export interface PreflightSpawnResult {
-  onExit(listener: (code: number | null) => void): void;
-  onError(listener: (err: NodeJS.ErrnoException) => void): void;
-}
-
-export type PreflightSpawnFn = (command: string, args: string[]) => PreflightSpawnResult;
-
-function defaultPreflightSpawn(command: string, args: string[]): PreflightSpawnResult {
-  const child = nodeSpawn(command, args, { stdio: 'ignore' });
-  return {
-    onExit: (listener) => {
-      child.on('exit', (code) => listener(code));
-    },
-    onError: (listener) => {
-      child.on('error', listener);
-    },
-  };
-}
-
-/**
- * Checks whether `terminal-notifier` is present on `PATH`, by running its
- * side-effect-free `-help` flag (prints usage, exits 0 — never shows a real
- * notification). Resolves, never throws: a missing binary or any other
- * spawn failure comes back as a typed `{ available: false; error }` naming
- * the fix, not an unhandled `ENOENT`.
- */
-export function checkTerminalNotifierAvailable(
-  spawnFn: PreflightSpawnFn = defaultPreflightSpawn,
-): Promise<PreflightResult> {
-  return new Promise((resolve) => {
-    let settled = false;
-    const child = spawnFn(TERMINAL_NOTIFIER_BIN, ['-help']);
-
-    child.onError((err) => {
-      if (settled) return;
-      settled = true;
-      if (err.code === 'ENOENT') {
-        resolve({
-          available: false,
-          error: `${TERMINAL_NOTIFIER_BIN} not found on PATH. Install it with: ${INSTALL_HINT}`,
-        });
-        return;
-      }
-      resolve({
-        available: false,
-        error: `${TERMINAL_NOTIFIER_BIN} check failed: ${err.message}`,
-      });
-    });
-
-    child.onExit((code) => {
-      if (settled) return;
-      settled = true;
-      if (code === 0) {
-        resolve({ available: true });
-        return;
-      }
-      resolve({
-        available: false,
-        error: `${TERMINAL_NOTIFIER_BIN} -help exited with code ${code}`,
-      });
-    });
-  });
-}
-
-// ---------------------------------------------------------------------------
-// Phase 4 — combined dependency-presence preflight (T5)
-// ---------------------------------------------------------------------------
-
-const NATIVE_BUILD_COMMAND = 'pnpm --filter @ethosagent/platform-callcapture run build:native';
 const AUDIOTEE_BUILD_COMMAND = 'pnpm --filter @ethosagent/platform-callcapture run build:audiotee';
+const NATIVE_BUILD_COMMAND = 'pnpm --filter @ethosagent/platform-callcapture run build:native';
 
 /** `native/bin/mic-detector` next to this package — same path `detector.ts`'s
  * own `defaultBinaryPath()` resolves, kept in sync deliberately rather than
@@ -108,13 +47,39 @@ function audioteeBinaryPath(): string {
   return join(import.meta.dirname, '..', 'native', 'vendor', 'audiotee', 'audiotee');
 }
 
+/** `native/bin/capture-offer-card` — mirrors `notification.ts`'s own
+ * `defaultBinaryPath()`, kept in sync deliberately rather than imported,
+ * same rationale as `micDetectorBinaryPath()` above. */
+function captureOfferCardBinaryPath(): string {
+  return join(import.meta.dirname, '..', 'native', 'bin', 'capture-offer-card');
+}
+
 export interface CheckCallCaptureDependenciesDeps {
-  /** Overrides the `terminal-notifier` availability check. */
-  checkTerminalNotifier?: () => Promise<PreflightResult>;
-  /** Overrides the binary-presence check for the three compiled/vendored
+  /** Overrides the binary-presence check for the four compiled/vendored
    * binaries. Tests must supply this — a fake — so the check never depends
    * on whether this machine has actually run `build:native`/`build:audiotee`. */
   existsSync?: (path: string) => boolean;
+  /** Overrides the capture-offer-card binary path checked for presence.
+   * Defaults to `captureOfferCardBinaryPath()`. Needed by bundled callers
+   * (e.g. the desktop app's electron-vite main bundle) whose
+   * `import.meta.dirname` no longer resolves to the source tree post-
+   * bundling — same rationale as `builtinPersonalitiesDir` in
+   * `@ethosagent/personalities`. Omitted, this is byte-identical to the
+   * existing default. */
+  captureOfferCardPath?: string;
+  /** Overrides the mic-detector binary path checked for presence. Defaults
+   * to `micDetectorBinaryPath()`. Needed by bundled callers (e.g. the
+   * desktop app's electron-vite main bundle) whose `import.meta.dirname`
+   * no longer resolves to the source tree post-bundling — same rationale as
+   * `builtinPersonalitiesDir` in `@ethosagent/personalities`. Omitted, this
+   * is byte-identical to the existing default. */
+  micDetectorPath?: string;
+  /** Overrides the mic-capture binary path checked for presence. Defaults
+   * to `micCaptureBinaryPath()`. Same rationale as `micDetectorPath`. */
+  micCapturePath?: string;
+  /** Overrides the audiotee binary path checked for presence. Defaults to
+   * `audioteeBinaryPath()`. Same rationale as `micDetectorPath`. */
+  audioteePath?: string;
 }
 
 export type CallCaptureDependencyCheckResult =
@@ -133,19 +98,20 @@ export type CallCaptureDependencyCheckResult =
 export async function checkCallCaptureDependencies(
   deps: CheckCallCaptureDependenciesDeps = {},
 ): Promise<CallCaptureDependencyCheckResult> {
-  const checkTerminalNotifier = deps.checkTerminalNotifier ?? checkTerminalNotifierAvailable;
   const existsSync = deps.existsSync ?? nodeExistsSync;
 
   const missing: string[] = [];
   const errors: string[] = [];
 
-  const notifier = await checkTerminalNotifier();
-  if (!notifier.available) {
-    missing.push('terminal-notifier');
-    errors.push(notifier.error);
+  const captureOfferCardPath = deps.captureOfferCardPath ?? captureOfferCardBinaryPath();
+  if (!existsSync(captureOfferCardPath)) {
+    missing.push('capture-offer-card');
+    errors.push(
+      `capture-offer-card binary not found at ${captureOfferCardPath}. Build it with: ${NATIVE_BUILD_COMMAND}`,
+    );
   }
 
-  const micDetectorPath = micDetectorBinaryPath();
+  const micDetectorPath = deps.micDetectorPath ?? micDetectorBinaryPath();
   if (!existsSync(micDetectorPath)) {
     missing.push('mic-detector');
     errors.push(
@@ -153,7 +119,7 @@ export async function checkCallCaptureDependencies(
     );
   }
 
-  const micCapturePath = micCaptureBinaryPath();
+  const micCapturePath = deps.micCapturePath ?? micCaptureBinaryPath();
   if (!existsSync(micCapturePath)) {
     missing.push('mic-capture');
     errors.push(
@@ -161,7 +127,7 @@ export async function checkCallCaptureDependencies(
     );
   }
 
-  const audioteePath = audioteeBinaryPath();
+  const audioteePath = deps.audioteePath ?? audioteeBinaryPath();
   if (!existsSync(audioteePath)) {
     missing.push('audiotee');
     errors.push(

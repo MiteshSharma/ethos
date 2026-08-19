@@ -35,14 +35,13 @@ import {
 } from '@ethosagent/personalities';
 import {
   CallCaptureDaemon,
+  CallCaptureOwnershipManager,
+  CaptureIndicator,
   callCaptureHealthPath,
   callCaptureLockPath,
-  checkAnyCallingAppRunning,
   checkCallCaptureDependencies,
   MicActivityDetector,
   NotificationGate,
-  sourceLabelForProcessName,
-  tryClaimOwnership,
 } from '@ethosagent/platform-callcapture';
 import { SessionLane } from '@ethosagent/session-lane';
 import { SqliteApiKeyStore } from '@ethosagent/session-sqlite';
@@ -805,16 +804,12 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
   // is platform+config identical to the condition below), so the extra check
   // here is purely defensive: never construct the daemon with an undefined
   // `runCapture`.
-  let callCaptureDaemon: CallCaptureDaemon | undefined;
-  // Round-3 Issue 1 — released alongside `callCaptureDaemon?.stop()` on
-  // shutdown. Only set when THIS process won the ownership claim below.
-  let callCaptureOwnershipRelease: (() => void) | undefined;
   // Liveness heartbeat for `ethos doctor`'s `checkCallCaptureDaemonHealth`
-  // (mirrors the gateway's own `gateway-health.json` heartbeat) — only
-  // started/torn down alongside the daemon itself, same 10s interval and
-  // `unref()` the gateway heartbeat uses.
+  // (mirrors the gateway's own `gateway-health.json` heartbeat) — same 10s
+  // cadence is reused below as the ownership-claim retry interval too (P0,
+  // plan/phases/call-capture-desktop-ux.md — don't invent a second interval).
   const CALL_CAPTURE_HEARTBEAT_INTERVAL_MS = 10_000;
-  let callCaptureHeartbeatTimer: NodeJS.Timeout | undefined;
+  let callCaptureOwnershipManager: CallCaptureOwnershipManager | undefined;
   if (
     process.platform === 'darwin' &&
     config.callCapture?.personalityId &&
@@ -825,65 +820,85 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
     // LaunchAgent, the other under `ethos run-all`, which starts both by
     // default). At most one process may run a live `CallCaptureDaemon`, or
     // they fight over the same Process Tap/mic and stomp each other's
-    // shared heartbeat file. Losing this claim is a normal, expected
-    // outcome — not an error — so it logs at info level and simply skips
-    // constructing a daemon in this process.
-    const ownershipClaim = tryClaimOwnership(callCaptureLockPath());
-    if (!ownershipClaim.claimed) {
-      watcherLogger.info(
-        `call-capture: already running under PID ${ownershipClaim.ownerPid} — not starting a second instance in this process`,
-      );
-    } else {
-      callCaptureOwnershipRelease = ownershipClaim.release;
-      const boundPersonalityId = config.callCapture.personalityId;
-      const captureRunner = runCallCaptureFromLoop;
-      callCaptureDaemon = new CallCaptureDaemon({
-        detector: new MicActivityDetector(),
-        notificationGate: new NotificationGate(),
-        checkDependencies: checkCallCaptureDependencies,
-        // Decision 1's coarse process prefilter (issue A): mic activity alone
-        // isn't "a call" — require a known calling app to also be running.
-        // Known limitation, documented in the package README: this cannot see
-        // a browser-based call (e.g. Meet in Chrome). Resolves the matched
-        // process to a clean source label (e.g. 'zoom') for the daemon to
-        // forward into runCapture below.
-        checkCallingAppRunning: async () => {
-          const matched = await checkAnyCallingAppRunning();
-          return matched ? sourceLabelForProcessName(matched) : null;
-        },
-        personalityId: boundPersonalityId,
-        wake: watcherWake,
-        runCapture: async (abortSignal, source) => {
-          const result = await captureRunner(boundPersonalityId, { abortSignal, source });
-          if (!result.ok) {
-            watcherLogger.error(`call-capture: capture failed: ${result.error}`);
-            return;
-          }
-          if (result.warning) watcherLogger.warn(`call-capture: ${result.warning}`);
-          watcherLogger.info(`call-capture: saved transcript to ${result.artifactKey}`);
-        },
-        logger: watcherLogger,
-      });
-      callCaptureDaemon.start();
+    // shared heartbeat file. Losing the claim is a normal, expected outcome
+    // — not an error. `CallCaptureOwnershipManager` logs it and keeps
+    // retrying on `CALL_CAPTURE_HEARTBEAT_INTERVAL_MS` until it wins (P0:
+    // the previous single-attempt claim left a process permanently
+    // daemon-less if it lost the race at launch, even after the winner
+    // later exited and released the lock).
+    const boundPersonalityId = config.callCapture.personalityId;
+    const captureRunner = runCallCaptureFromLoop;
+    callCaptureOwnershipManager = new CallCaptureOwnershipManager({
+      lockPath: callCaptureLockPath(dir),
+      retryIntervalMs: CALL_CAPTURE_HEARTBEAT_INTERVAL_MS,
+      logger: watcherLogger,
+      onOwnershipClaimed: () => {
+        const callCaptureDaemon = new CallCaptureDaemon({
+          detector: new MicActivityDetector(),
+          notificationGate: new NotificationGate(),
+          checkDependencies: checkCallCaptureDependencies,
+          // No separate process-prefilter gate here — the native detector
+          // (extensions/platform-callcapture/native/mic-detector.swift) only
+          // ever watches known calling apps in the first place, so every
+          // call_started event it produces is already scoped to one, with its
+          // resolved source label riding along on the event itself. Known
+          // limitation, documented in the package README: this cannot see a
+          // browser-based call (e.g. Meet in Chrome).
+          personalityId: boundPersonalityId,
+          wake: watcherWake,
+          // Floating on-screen recording indicator (plan/phases/
+          // call-capture-desktop-ux.md) — the headless-CLI analog of the
+          // desktop app's Electron-based pill. Fresh per ownership claim,
+          // mirroring detector/notificationGate above.
+          indicator: new CaptureIndicator({
+            onError: (msg) => watcherLogger.warn(`call-capture: ${msg}`),
+          }),
+          runCapture: async (abortSignal, source, onEntry, onAudioLevel) => {
+            const result = await captureRunner(boundPersonalityId, {
+              abortSignal,
+              source,
+              onEntry,
+              onAudioLevel,
+            });
+            if (!result.ok) {
+              watcherLogger.error(`call-capture: capture failed: ${result.error}`);
+              return;
+            }
+            if (result.warning) watcherLogger.warn(`call-capture: ${result.warning}`);
+            watcherLogger.info(`call-capture: saved transcript to ${result.artifactKey}`);
+          },
+          logger: watcherLogger,
+        });
+        callCaptureDaemon.start();
 
-      const writeCallCaptureHeartbeat = async () => {
-        try {
-          await getStorage().writeAtomic(
-            callCaptureHealthPath(),
-            JSON.stringify({ pid: process.pid, updatedAt: new Date().toISOString() }),
-          );
-        } catch {
-          // Best-effort — a missed tick is harmless; the consumer treats
-          // stale/absent data as degraded.
-        }
-      };
-      void writeCallCaptureHeartbeat();
-      callCaptureHeartbeatTimer = setInterval(
-        () => void writeCallCaptureHeartbeat(),
-        CALL_CAPTURE_HEARTBEAT_INTERVAL_MS,
-      );
-      callCaptureHeartbeatTimer.unref?.();
-    }
+        const writeCallCaptureHeartbeat = async () => {
+          try {
+            await getStorage().writeAtomic(
+              callCaptureHealthPath(dir),
+              JSON.stringify({ pid: process.pid, updatedAt: new Date().toISOString() }),
+            );
+          } catch {
+            // Best-effort — a missed tick is harmless; the consumer treats
+            // stale/absent data as degraded.
+          }
+        };
+        void writeCallCaptureHeartbeat();
+        const callCaptureHeartbeatTimer = setInterval(
+          () => void writeCallCaptureHeartbeat(),
+          CALL_CAPTURE_HEARTBEAT_INTERVAL_MS,
+        );
+        callCaptureHeartbeatTimer.unref?.();
+
+        return async () => {
+          callCaptureDaemon.stop();
+          clearInterval(callCaptureHeartbeatTimer);
+          await getStorage()
+            .remove(callCaptureHealthPath(dir))
+            .catch(() => {});
+        };
+      },
+    });
+    callCaptureOwnershipManager.start();
   }
 
   // Phase 8: metadata-only audit sink. Built HERE in the app layer so
@@ -1262,16 +1277,11 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
     if (stopWatchdog) stopWatchdog();
     stopHeartbeat();
     stopPollLoop?.();
-    callCaptureDaemon?.stop();
-    if (callCaptureHeartbeatTimer) clearInterval(callCaptureHeartbeatTimer);
-    if (callCaptureDaemon)
-      await getStorage()
-        .remove(callCaptureHealthPath())
-        .catch(() => {});
-    // Round-3 Issue 1 — release the ownership claim so a restarted process
-    // (or the other host command) can take it. Only set when this process
-    // actually won the claim; a process that lost it never set this.
-    callCaptureOwnershipRelease?.();
+    // Stops the daemon + heartbeat (if this process ever won the ownership
+    // claim, including via a later retry tick — see
+    // `CallCaptureOwnershipManager`) and releases the lock so a restarted
+    // process, or the other host command, can take it.
+    await callCaptureOwnershipManager?.stop();
     await mesh.unregister(agentId);
     if (cronScheduler) cronScheduler.stop();
     if (webShutdown) await webShutdown();

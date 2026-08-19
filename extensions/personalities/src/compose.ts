@@ -15,7 +15,12 @@ export async function compose(
   ctx: WiringContext,
   opts?: { personality?: string },
 ): Promise<PersonalityCompose> {
-  const personalities = await createPersonalityRegistry(ctx.storage);
+  const personalities = await createPersonalityRegistry({
+    storage: ctx.storage,
+    ...(ctx.builtinPersonalitiesDir
+      ? { builtinPersonalitiesDir: ctx.builtinPersonalitiesDir }
+      : {}),
+  });
   await personalities.loadFromDirectory(join(ctx.dataDir, 'personalities'));
 
   if (opts?.personality) {

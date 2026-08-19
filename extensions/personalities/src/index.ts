@@ -1406,9 +1406,15 @@ export class FilePersonalityRegistry implements PersonalityRegistry {
   // Built-in loader
   // -------------------------------------------------------------------------
 
-  async loadBuiltins(): Promise<void> {
+  /**
+   * Loads built-in personalities. `dir`, when supplied, overrides the default
+   * location — used by callers (e.g. the desktop app's bundled main process)
+   * where `import.meta.dirname` no longer points at the source tree after
+   * bundling. Omitted, this is byte-identical to the original hardcoded path.
+   */
+  async loadBuiltins(dir?: string): Promise<void> {
     // import.meta.dirname is the extensions/personalities/src directory
-    const dataDir = join(import.meta.dirname, '..', 'data');
+    const dataDir = dir ?? join(import.meta.dirname, '..', 'data');
     await this.loadFromDirectory(dataDir);
     // Ensure researcher is the default if present
     if (this.personalities.has('researcher')) this.defaultId = 'researcher';
@@ -1611,21 +1617,30 @@ export class FilePersonalityRegistry implements PersonalityRegistry {
 // ---------------------------------------------------------------------------
 
 export async function createPersonalityRegistry(
-  storageOrOpts: Storage | { storage: Storage; userPersonalitiesDir?: string },
+  storageOrOpts:
+    | Storage
+    | { storage: Storage; userPersonalitiesDir?: string; builtinPersonalitiesDir?: string },
 ): Promise<FilePersonalityRegistry> {
   // Two accepted shapes: a bare Storage, or { storage, userPersonalitiesDir }
   // to enable CRUD. Storage is required either way — the composition root
   // injects it; the registry never falls back to raw disk.
+  //
+  // `builtinPersonalitiesDir` overrides where built-ins load from — needed by
+  // bundled callers (e.g. desktop's main process after electron-vite) where
+  // `import.meta.dirname` no longer resolves to the source tree. Omitted,
+  // this is byte-identical to the pre-existing default `loadBuiltins()` path.
   let storage: Storage;
   let userDir: string | undefined;
+  let builtinPersonalitiesDir: string | undefined;
   if (isStorageLike(storageOrOpts)) {
     storage = storageOrOpts;
   } else {
     storage = storageOrOpts.storage;
     userDir = storageOrOpts.userPersonalitiesDir;
+    builtinPersonalitiesDir = storageOrOpts.builtinPersonalitiesDir;
   }
   const registry = new FilePersonalityRegistry(storage, userDir);
-  await registry.loadBuiltins();
+  await registry.loadBuiltins(builtinPersonalitiesDir);
   return registry;
 }
 

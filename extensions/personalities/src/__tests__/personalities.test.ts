@@ -59,6 +59,57 @@ describe('FilePersonalityRegistry', () => {
     });
   });
 
+  describe('createPersonalityRegistry({ storage, builtinPersonalitiesDir })', () => {
+    it('loads built-ins from the given directory instead of the default loadBuiltins() path', async () => {
+      const customDir = join(testDir, 'custom-builtins');
+      const personaDir = join(customDir, 'custom-persona');
+      await mkdir(personaDir, { recursive: true });
+      await writeFile(
+        join(personaDir, 'config.yaml'),
+        'name: Custom Persona\ndescription: only lives in the override dir\n',
+      );
+      await writeFile(join(personaDir, 'SOUL.md'), '# Custom Persona\n\nI only exist here.');
+
+      const registry = await createPersonalityRegistry({
+        storage: new FsStorage(),
+        builtinPersonalitiesDir: customDir,
+      });
+
+      const ids = registry.list().map((p) => p.id);
+      expect(ids).toContain('custom-persona');
+      // The real built-ins (researcher, engineer, ...) must NOT be present —
+      // proof the override REPLACED loadBuiltins(), not supplemented it.
+      expect(ids).not.toContain('researcher');
+      expect(ids).not.toContain('engineer');
+    });
+
+    it('still sets researcher as the default when present in the override directory', async () => {
+      const customDir = join(testDir, 'custom-builtins-researcher');
+      const researcherDir = join(customDir, 'researcher');
+      const otherDir = join(customDir, 'zzz-other');
+      await mkdir(researcherDir, { recursive: true });
+      await mkdir(otherDir, { recursive: true });
+      await writeFile(join(researcherDir, 'config.yaml'), 'name: Researcher\n');
+      await writeFile(join(researcherDir, 'SOUL.md'), '# Researcher');
+      await writeFile(join(otherDir, 'config.yaml'), 'name: Other\n');
+      await writeFile(join(otherDir, 'SOUL.md'), '# Other');
+
+      const registry = await createPersonalityRegistry({
+        storage: new FsStorage(),
+        builtinPersonalitiesDir: customDir,
+      });
+
+      expect(registry.getDefault().id).toBe('researcher');
+    });
+
+    it('omitting builtinPersonalitiesDir keeps the default loadBuiltins() behavior', async () => {
+      const registry = await createPersonalityRegistry({ storage: new FsStorage() });
+      const ids = registry.list().map((p) => p.id);
+      expect(ids).toContain('researcher');
+      expect(registry.getDefault().id).toBe('researcher');
+    });
+  });
+
   describe('loadFromDirectory', () => {
     it('loads a user-defined personality from directory', async () => {
       const personalityDir = join(testDir, 'strategist');

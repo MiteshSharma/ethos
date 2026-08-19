@@ -17,5 +17,8 @@
     "@ethosagent/platform-callcapture": "workspace:*",
     "@ethosagent/safety-injection": "workspace:*",
     "@ethosagent/types": "workspace:*"
+  },
+  "devDependencies": {
+    "@ethosagent/storage-fs": "workspace:*"
   }
 }

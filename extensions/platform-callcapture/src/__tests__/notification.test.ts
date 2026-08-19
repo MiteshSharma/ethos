@@ -1,36 +1,62 @@
+import { Readable } from 'node:stream';
 import { describe, expect, it } from 'vitest';
-import {
-  NotificationGate,
-  type TerminalNotifierRunFn,
-  type TerminalNotifierRunResult,
-} from '../notification';
-import type { PreflightResult } from '../preflight';
+import { type CaptureOfferCardChild, NotificationGate } from '../notification';
 
-function availablePreflight(): Promise<PreflightResult> {
-  return Promise.resolve({ available: true });
+/** Fake spawned child — a real `Readable` (so `readline` works against it
+ * unmodified) plus the minimal exit/error/kill surface `NotificationGate`
+ * needs. Mirrors `detector.test.ts`'s `FakeChild` idiom exactly (this
+ * package's established fake-`SpawnedChild` pattern), extended with
+ * `killedWith` since `expire()`'s SIGTERM-is-the-whole-dismiss-protocol
+ * design (see notification.ts's header comment) needs to be observable. */
+class FakeChild implements CaptureOfferCardChild {
+  readonly stdout = new Readable({ read() {} });
+  readonly killedWith: NodeJS.Signals[] = [];
+  private readonly exitHandlers: Array<
+    (code: number | null, signal: NodeJS.Signals | null) => void
+  > = [];
+  private readonly errorHandlers: Array<(err: Error) => void> = [];
+
+  onExit(listener: (code: number | null, signal: NodeJS.Signals | null) => void): void {
+    this.exitHandlers.push(listener);
+  }
+
+  onError(listener: (err: Error) => void): void {
+    this.errorHandlers.push(listener);
+  }
+
+  kill(signal?: NodeJS.Signals): void {
+    this.killedWith.push(signal ?? 'SIGTERM');
+  }
+
+  emitLine(line: unknown): void {
+    this.stdout.push(`${JSON.stringify(line)}\n`);
+  }
+
+  emitExit(code: number | null, signal: NodeJS.Signals | null = null): void {
+    for (const h of this.exitHandlers) h(code, signal);
+  }
+
+  emitProcessError(err: Error): void {
+    for (const h of this.errorHandlers) h(err);
+  }
 }
 
-function makeFakeRun(behavior?: (args: string[]) => TerminalNotifierRunResult) {
-  const calls: string[][] = [];
-  const runFn: TerminalNotifierRunFn = async (args) => {
-    calls.push(args);
-    return behavior ? behavior(args) : { ok: true };
+function makeFakeSpawn() {
+  const children: FakeChild[] = [];
+  const calls: { binaryPath: string; args: string[] }[] = [];
+  const spawnFn = (binaryPath: string, args: string[]): CaptureOfferCardChild => {
+    calls.push({ binaryPath, args });
+    const child = new FakeChild();
+    children.push(child);
+    return child;
   };
-  return { runFn, calls };
-}
-
-/** Extracts the click-listener URL from the `-execute "curl -fsS <url>"` arg
- * a captured `-show` call was invoked with. */
-function urlFromShowCall(args: string[]): string {
-  const execIndex = args.indexOf('-execute');
-  const execCommand = args[execIndex + 1] ?? '';
-  return execCommand.replace(/^curl -fsS /, '');
+  return { spawnFn, children, calls };
 }
 
 describe('NotificationGate.presentCaptureOffer', () => {
-  it('resolves accepted when the click-listener URL is hit', async () => {
-    const { runFn, calls } = makeFakeRun();
-    const gate = new NotificationGate({ runFn, checkAvailable: availablePreflight });
+  it('resolves accepted when the card emits an accepted line', async () => {
+    const { spawnFn, children } = makeFakeSpawn();
+    const gate = new NotificationGate({ spawnFn });
 
     const handle = await gate.presentCaptureOffer({
       callId: 'call-1',
@@ -38,14 +64,52 @@ describe('NotificationGate.presentCaptureOffer', () => {
       message: 'call detected',
     });
 
-    await fetch(urlFromShowCall(calls[0]));
+    children[0]?.emitLine({ event: 'ready' });
+    children[0]?.emitLine({ event: 'accepted', callId: 'call-1' });
 
     await expect(handle.waitForOutcome()).resolves.toEqual({ outcome: 'accepted' });
   });
 
-  it('expire() resolves expired and issues terminal-notifier -remove with the group id', async () => {
-    const { runFn, calls } = makeFakeRun();
-    const gate = new NotificationGate({ runFn, checkAvailable: availablePreflight });
+  it('passes callId and source as argv, in that order', async () => {
+    const { spawnFn, calls } = makeFakeSpawn();
+    const gate = new NotificationGate({ spawnFn });
+
+    await gate.presentCaptureOffer({
+      callId: 'call-x',
+      title: 'Ethos',
+      message: 'call detected',
+      source: 'zoom',
+    });
+
+    expect(calls[0]?.args).toEqual(['call-x', 'zoom']);
+  });
+
+  it('passes an empty string for source when none is given', async () => {
+    const { spawnFn, calls } = makeFakeSpawn();
+    const gate = new NotificationGate({ spawnFn });
+
+    await gate.presentCaptureOffer({ callId: 'call-y', title: 'Ethos', message: 'call detected' });
+
+    expect(calls[0]?.args).toEqual(['call-y', '']);
+  });
+
+  it('resolves expired (not a new outcome) when the card reports an explicit decline', async () => {
+    const { spawnFn, children } = makeFakeSpawn();
+    const gate = new NotificationGate({ spawnFn });
+
+    const handle = await gate.presentCaptureOffer({
+      callId: 'call-decline',
+      title: 'Ethos',
+      message: 'call detected',
+    });
+    children[0]?.emitLine({ event: 'declined', callId: 'call-decline' });
+
+    await expect(handle.waitForOutcome()).resolves.toEqual({ outcome: 'expired' });
+  });
+
+  it('expire() sends SIGTERM, waits for exit, and resolves expired', async () => {
+    const { spawnFn, children } = makeFakeSpawn();
+    const gate = new NotificationGate({ spawnFn });
 
     const handle = await gate.presentCaptureOffer({
       callId: 'call-2',
@@ -53,16 +117,26 @@ describe('NotificationGate.presentCaptureOffer', () => {
       message: 'call detected',
     });
 
-    await handle.expire();
+    const expirePromise = handle.expire();
+    expect(children[0]?.killedWith).toEqual(['SIGTERM']);
+    // expire() awaits the child's own exit before resolving — it must not
+    // settle just from sending the signal.
+    let expireSettled = false;
+    expirePromise.then(() => {
+      expireSettled = true;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(expireSettled).toBe(false);
+
+    children[0]?.emitExit(0);
+    await expirePromise;
 
     await expect(handle.waitForOutcome()).resolves.toEqual({ outcome: 'expired' });
-    const removeCall = calls.find((args) => args[0] === '-remove');
-    expect(removeCall).toEqual(['-remove', 'ethos-callcapture-call-2']);
   });
 
   it('expire() after acceptance is a no-op and does not flip the outcome', async () => {
-    const { runFn, calls } = makeFakeRun();
-    const gate = new NotificationGate({ runFn, checkAvailable: availablePreflight });
+    const { spawnFn, children } = makeFakeSpawn();
+    const gate = new NotificationGate({ spawnFn });
 
     const handle = await gate.presentCaptureOffer({
       callId: 'call-2b',
@@ -70,22 +144,20 @@ describe('NotificationGate.presentCaptureOffer', () => {
       message: 'call detected',
     });
 
-    await fetch(urlFromShowCall(calls[0]));
+    children[0]?.emitLine({ event: 'accepted', callId: 'call-2b' });
     await expect(handle.waitForOutcome()).resolves.toEqual({ outcome: 'accepted' });
 
     await handle.expire();
 
     await expect(handle.waitForOutcome()).resolves.toEqual({ outcome: 'accepted' });
-    expect(calls.find((args) => args[0] === '-remove')).toBeUndefined();
+    expect(children[0]?.killedWith).toEqual([]);
   });
 
-  it('resolves the error outcome when terminal-notifier is unavailable, never throws', async () => {
-    const { runFn } = makeFakeRun();
-    const gate = new NotificationGate({
-      runFn,
-      checkAvailable: () =>
-        Promise.resolve({ available: false, error: 'terminal-notifier not found on PATH' }),
-    });
+  it('resolves the error outcome when the binary fails to spawn, never throws', async () => {
+    const spawnFn = (): CaptureOfferCardChild => {
+      throw new Error('capture-offer-card binary not found');
+    };
+    const gate = new NotificationGate({ spawnFn });
 
     const handle = await gate.presentCaptureOffer({
       callId: 'call-3',
@@ -93,51 +165,72 @@ describe('NotificationGate.presentCaptureOffer', () => {
       message: 'call detected',
     });
 
-    await expect(handle.waitForOutcome()).resolves.toEqual({
+    const outcome = await handle.waitForOutcome();
+    expect(outcome).toEqual({
       outcome: 'error',
-      message: 'terminal-notifier not found on PATH',
+      message: 'capture-offer-card failed to start: capture-offer-card binary not found',
     });
   });
 
-  it('resolves the error outcome when the show command itself fails to spawn/deliver', async () => {
-    const { runFn } = makeFakeRun((args) =>
-      args[0] === '-remove' ? { ok: true } : { ok: false, error: 'spawn ENOENT' },
-    );
-    const gate = new NotificationGate({ runFn, checkAvailable: availablePreflight });
+  it('resolves the error outcome when the card reports an error line', async () => {
+    const { spawnFn, children } = makeFakeSpawn();
+    const gate = new NotificationGate({ spawnFn });
 
     const handle = await gate.presentCaptureOffer({
-      callId: 'call-4',
+      callId: 'call-5',
       title: 'Ethos',
       message: 'call detected',
     });
+    children[0]?.emitLine({ event: 'error', message: 'usage: capture-offer-card <callId>' });
 
     await expect(handle.waitForOutcome()).resolves.toEqual({
       outcome: 'error',
-      message: 'spawn ENOENT',
+      message: 'usage: capture-offer-card <callId>',
     });
   });
 
-  it('gives two independent offers independent group ids that do not cross-resolve', async () => {
-    const { runFn, calls } = makeFakeRun();
-    const gate = new NotificationGate({ runFn, checkAvailable: availablePreflight });
+  it('resolves the error outcome on an unexpected exit with no prior event', async () => {
+    const { spawnFn, children } = makeFakeSpawn();
+    const gate = new NotificationGate({ spawnFn });
 
-    const handleA = await gate.presentCaptureOffer({
-      callId: 'call-a',
-      title: 't',
-      message: 'm',
+    const handle = await gate.presentCaptureOffer({
+      callId: 'call-6',
+      title: 'Ethos',
+      message: 'call detected',
     });
-    const handleB = await gate.presentCaptureOffer({
-      callId: 'call-b',
-      title: 't',
-      message: 'm',
+    children[0]?.emitExit(134);
+
+    const outcome = await handle.waitForOutcome();
+    expect(outcome.outcome).toBe('error');
+  });
+
+  it('resolves the error outcome when the process errors (e.g. spawn ENOENT)', async () => {
+    const { spawnFn, children } = makeFakeSpawn();
+    const gate = new NotificationGate({ spawnFn });
+
+    const handle = await gate.presentCaptureOffer({
+      callId: 'call-7',
+      title: 'Ethos',
+      message: 'call detected',
     });
+    children[0]?.emitProcessError(new Error('spawn ENOENT'));
 
-    const groupIds = calls
-      .filter((args) => args.includes('-group'))
-      .map((args) => args[args.indexOf('-group') + 1]);
-    expect(new Set(groupIds).size).toBe(2);
+    await expect(handle.waitForOutcome()).resolves.toEqual({
+      outcome: 'error',
+      message: 'capture-offer-card spawn failed: spawn ENOENT',
+    });
+  });
 
-    await fetch(urlFromShowCall(calls[0]));
+  it('gives two independent offers independent processes that do not cross-resolve', async () => {
+    const { spawnFn, children } = makeFakeSpawn();
+    const gate = new NotificationGate({ spawnFn });
+
+    const handleA = await gate.presentCaptureOffer({ callId: 'call-a', title: 't', message: 'm' });
+    const handleB = await gate.presentCaptureOffer({ callId: 'call-b', title: 't', message: 'm' });
+
+    expect(children).toHaveLength(2);
+
+    children[0]?.emitLine({ event: 'accepted', callId: 'call-a' });
     await expect(handleA.waitForOutcome()).resolves.toEqual({ outcome: 'accepted' });
 
     let bSettled = false;
@@ -147,7 +240,9 @@ describe('NotificationGate.presentCaptureOffer', () => {
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(bSettled).toBe(false);
 
-    await handleB.expire();
+    const expireB = handleB.expire();
+    children[1]?.emitExit(0);
+    await expireB;
     await expect(handleB.waitForOutcome()).resolves.toEqual({ outcome: 'expired' });
   });
 });

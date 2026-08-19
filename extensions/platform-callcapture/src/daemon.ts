@@ -4,6 +4,15 @@
 // lifecycle at a time: detector event → preflight → notification (accept
 // gate) → direct capture dispatch → clean cancellation on call end.
 //
+// PROCESS GATING: there is deliberately no separate "is a known calling app
+// running" check in this file (there used to be, wired via a
+// `checkCallingAppRunning` port — since removed). The native detector
+// (`native/mic-detector.swift`, wrapped by `detector.ts`) now only ever
+// watches known calling apps in the first place, so a `call_started` event
+// is already scoped to one by construction; its `source` field names which
+// app triggered it. See `process-prefilter.ts`'s header comment for the
+// full "why this was folded in" story.
+//
 // APPROVAL: the OS notification click IS the human-approval event for this
 // flow. `runCallCapture()` (`@ethosagent/tools-callcapture`) is a plain
 // function, never a registered `Tool` — there is no LLM-initiated
@@ -18,8 +27,19 @@
 // the caller binds to `runCallCapture()` (`extensions/tools-callcapture/
 // src/index.ts` already awaits the signal to stop both capture streams and
 // save whatever was captured). The daemon aborts the controller on
-// `call_ended` — a real, already-existing mechanism, not a bounded-duration
-// safety-net timer.
+// `call_ended` — a real signal-driven mechanism, and (as of the per-process
+// detection fix) ALSO on a bounded `maxCaptureDurationMs` safety-net timer
+// (default 4 hours) that fires if `call_ended` never arrives. This is
+// deliberately a safety net UNDER the real signal, never a substitute for
+// it — see README.md's "Per-process detection" section for why: testing
+// this fix found at least one real, currently-running calling-app process
+// whose own per-process CoreAudio "running input" flag stayed warm with no
+// confirmable active call, the same class of symptom the device-wide flag
+// had. The precise per-process signal is still a strict improvement (proven
+// correct at the mechanism level — see README), but this bounded timer
+// exists so that if ANY watched app's signal gets stuck warm for whatever
+// reason, a capture still cannot run "unattended indefinitely," which is
+// the exact original bug this whole redesign exists to fix.
 //
 // Structural ports throughout, mirroring `detector.ts`/`notification.ts`'s
 // idiom: real code is wired by the caller (`apps/ethos/src/commands/
@@ -27,8 +47,19 @@
 // `checkCallCaptureDependencies`/a bound `runCallCapture()`; tests inject
 // fakes and never touch real hardware, binaries, or an `AgentLoop`.
 
-import type { MicActivityEvent } from './detector';
+import type { Clock, MicActivityEvent } from './detector';
 import type { CaptureOfferHandle } from './notification';
+import type { Speaker, TranscriptEntry } from './transcript-session';
+
+const realClock: Clock = {
+  setTimeout: (fn, ms) => globalThis.setTimeout(fn, ms),
+  clearTimeout: (handle) => globalThis.clearTimeout(handle as NodeJS.Timeout),
+};
+
+/** Default maximum-capture-duration safety net (see this file's header
+ * comment, "CANCELLATION"). Deliberately generous — this exists to catch a
+ * stuck signal, not to cap a long but genuine meeting. */
+const DEFAULT_MAX_CAPTURE_DURATION_MS = 4 * 60 * 60 * 1000; // 4 hours
 
 export interface CallCaptureWakeEvent {
   watcherId: string;
@@ -52,7 +83,52 @@ export interface CallCaptureNotificationGatePort {
     callId: string;
     title: string;
     message: string;
+    /** The clean source label for this call (e.g. `'zoom'`), shown by the
+     * current implementation's card as a subtitle — see `notification.ts`'s
+     * `PresentCaptureOfferOptions.source` doc comment. */
+    source?: string;
   }): Promise<CaptureOfferHandle>;
+}
+
+/**
+ * The floating on-screen recording indicator (plan/phases/
+ * call-capture-desktop-ux.md) — visual confirmation that a capture is
+ * actually in progress, shown the moment one starts and hidden the moment
+ * it ends. Structural port, mirroring `CallCaptureDetectorPort`/
+ * `CallCaptureNotificationGatePort`'s idiom: real code is wired by the
+ * caller (`apps/ethos/src/commands/serve.ts`/`gateway.ts`) from
+ * `CaptureIndicator` (`indicator.ts`, a native AppKit process for the
+ * headless CLI daemon); tests inject a fake.
+ */
+export interface CallCaptureIndicatorPort {
+  /** Shows the indicator — called once a capture is actually about to
+   * start (`handleAccepted`), carrying the same clean source label
+   * (`'zoom'`, `'teams'`, ...) `runCapture` receives. */
+  show(source: string): void;
+  /** Forwards one streamed transcript entry to the indicator's live-preview
+   * popover, in the same order `runCapture`'s `onEntry` callback receives
+   * them. */
+  updateTranscript(entry: TranscriptEntry): void;
+  /** Forwards one live audio-level reading to the indicator's level-meter, in
+   * the same order `runCapture`'s `onAudioLevel` callback receives them.
+   * Optional (unlike `updateTranscript`) because the existing `CaptureIndicator`
+   * implementation (`indicator.ts`, structurally satisfying this port without
+   * an `implements` clause — see that file's header comment) does not
+   * implement it yet; a follow-up task adds the meter there. Making this
+   * required would break that structural match today. */
+  updateAudioLevel?(speaker: Speaker, level: number, at: number): void;
+  /** Hides the indicator — called once this call's capture is done,
+   * regardless of which path ended it (`call_ended`, the max-duration
+   * safety net, or the indicator's own "End" affordance). */
+  hide(): void;
+  /**
+   * Registers the callback fired when the user clicks the indicator's own
+   * manual "End" affordance — the safety net for when `call_ended` never
+   * fires. Registered once, in `start()`; the daemon reacts through the
+   * EXACT SAME path `call_ended` already uses (`handleCallEnded()`), never
+   * a second cancellation mechanism.
+   */
+  onEndRequested(callback: () => void): void;
 }
 
 export interface CallCaptureDaemonLogger {
@@ -61,33 +137,10 @@ export interface CallCaptureDaemonLogger {
   error(msg: string): void;
 }
 
-/**
- * The process-prefilter gate (decision 1's "coarse prefilter"). Resolves the
- * matched calling app's clean source label (e.g. `'zoom'`, `'teams'`) when
- * at least one known calling app is currently running, or `null` when none
- * is — see `process-prefilter.ts`'s `checkAnyCallingAppRunning()` +
- * `sourceLabelForProcessName()`, which the caller (`serve.ts`/`gateway.ts`)
- * composes into this gate. `CallCaptureDaemon` itself stays agnostic to the
- * exact process list and the raw-name-to-label mapping; it only ever calls
- * this zero-arg gate and forwards whatever label it returns into
- * `runCapture`'s `source` argument.
- */
-export type CallCaptureProcessGateCheck = () => Promise<string | null>;
-
 export interface CallCaptureDaemonOptions {
   detector: CallCaptureDetectorPort;
   notificationGate: CallCaptureNotificationGatePort;
   checkDependencies: CallCaptureDependencyCheck;
-  /**
-   * Decision 1's coarse process prefilter: mic-in-use (the detector above)
-   * remains the actual detection trigger, but ANY mic activity alone
-   * (Dictation, Siri, Voice Memos, a browser tab's getUserMedia() grant, ...)
-   * is not "a call." A capture offer only fires when this gate ALSO reports
-   * at least one known calling app running. Known, documented limitation:
-   * this cannot see a browser-based call (e.g. Meet in Chrome) — see
-   * `process-prefilter.ts`'s header comment.
-   */
-  checkCallingAppRunning: CallCaptureProcessGateCheck;
   personalityId: string;
   /**
    * Same shape as `extensions/watchers`' `WatcherManagerConfig.wake` (a
@@ -105,13 +158,58 @@ export interface CallCaptureDaemonOptions {
    * `runCallCapture()` from @ethosagent/tools-callcapture, closing over the
    * bound personality id and constructed capture dependencies. `abortSignal`
    * fires when this daemon later observes `call_ended` for the same call.
-   * `source` is the clean label `checkCallingAppRunning` resolved for this
-   * call (e.g. `'zoom'`) — forwarded through to `runCallCapture`'s
-   * `input.source`, which drives the artifact filename and digest line.
+   * `source` is the clean label the native detector resolved for this call
+   * (e.g. `'zoom'`, via `detector.ts`'s `sourceLabelForProcessName` mapping
+   * on the triggering `call_started` event) — forwarded through to
+   * `runCallCapture`'s `input.source`, which drives the artifact filename
+   * and digest line. `onEntry` is the daemon's own live-transcript relay
+   * (`(entry) => this.indicator?.updateTranscript(entry)`) — the caller
+   * threads it straight through to `runCallCapture`'s own `onEntry` option
+   * so the indicator's popover updates as entries stream in, not only after
+   * the call ends. A caller with no indicator wired (e.g. the desktop app's
+   * own daemon, which relays live entries a different way) can ignore this
+   * third argument entirely — JS tolerates the extra parameter.
+   * `onAudioLevel` is the daemon's own live-level relay
+   * (`(speaker, level, at) => this.indicator?.updateAudioLevel?.(speaker, level, at)`)
+   * — same optional-tolerance reasoning applies to a caller that ignores
+   * this 4th argument.
    */
-  runCapture: (abortSignal: AbortSignal, source: string) => Promise<void>;
+  runCapture: (
+    abortSignal: AbortSignal,
+    source: string,
+    onEntry: (entry: TranscriptEntry) => void,
+    onAudioLevel: (speaker: Speaker, level: number, at: number) => void,
+  ) => Promise<void>;
   logger?: CallCaptureDaemonLogger;
   now?: () => number;
+  /**
+   * Maximum-capture-duration safety net (see this file's header comment,
+   * "CANCELLATION"). Defaults to `DEFAULT_MAX_CAPTURE_DURATION_MS` (4
+   * hours). Aborts an in-flight capture if `call_ended` never arrives for
+   * it — a last-resort net UNDER the real detector signal, never a
+   * substitute for it.
+   */
+  maxCaptureDurationMs?: number;
+  /** Overrides the timer implementation backing `maxCaptureDurationMs`. */
+  clock?: Clock;
+  /**
+   * Observability hook — fires every time the daemon's internal state
+   * changes (idle → settingUp → awaiting → capturing → idle, and the
+   * various early-exit/cancellation paths). Optional and additive:
+   * existing callers that don't pass it see no behavior change. Added for
+   * the desktop app's recording-state pill (plan/phases/
+   * call-capture-desktop-ux.md, P2) to observe capture start/end without
+   * polling or duplicating the daemon's state machine.
+   */
+  onStateChange?: (state: DaemonState) => void;
+  /**
+   * The floating on-screen recording indicator for the headless CLI daemon
+   * (`ethos serve`/`ethos gateway` — the desktop app has its own Electron-
+   * based pill, wired independently). Optional and additive: a caller that
+   * doesn't pass one (tests, or any deployment without the native binary
+   * built) sees no behavior change — every call site below is a `?.` no-op.
+   */
+  indicator?: CallCaptureIndicatorPort;
 }
 
 const NOOP_LOGGER: CallCaptureDaemonLogger = {
@@ -126,11 +224,11 @@ const NOOP_LOGGER: CallCaptureDaemonLogger = {
  * `call_ended` arrives while those awaits are in flight); `awaiting` once the
  * notification is actually showing and outcome-pending; `capturing` from an
  * accepted notification until capture completes or `call_ended` aborts it. */
-type DaemonState =
+export type DaemonState =
   | { kind: 'idle' }
   | { kind: 'settingUp'; callId: string }
   | { kind: 'awaiting'; callId: string; handle: CaptureOfferHandle }
-  | { kind: 'capturing'; callId: string; controller: AbortController };
+  | { kind: 'capturing'; callId: string; controller: AbortController; source: string };
 
 function formatLocalTime(atMs: number): string {
   return new Date(atMs).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
@@ -146,12 +244,15 @@ export class CallCaptureDaemon {
   private readonly detector: CallCaptureDetectorPort;
   private readonly notificationGate: CallCaptureNotificationGatePort;
   private readonly checkDependencies: CallCaptureDependencyCheck;
-  private readonly checkCallingAppRunning: CallCaptureProcessGateCheck;
   private readonly personalityId: string;
   private readonly wakeFn: ((event: CallCaptureWakeEvent) => Promise<void>) | undefined;
   private readonly runCapture: CallCaptureDaemonOptions['runCapture'];
   private readonly logger: CallCaptureDaemonLogger;
   private readonly now: () => number;
+  private readonly maxCaptureDurationMs: number;
+  private readonly clock: Clock;
+  private readonly onStateChange: ((state: DaemonState) => void) | undefined;
+  private readonly indicator: CallCaptureIndicatorPort | undefined;
 
   private state: DaemonState = { kind: 'idle' };
   /** Set by `handleCallEnded` when a `call_ended` is observed while the
@@ -164,18 +265,47 @@ export class CallCaptureDaemon {
     this.detector = options.detector;
     this.notificationGate = options.notificationGate;
     this.checkDependencies = options.checkDependencies;
-    this.checkCallingAppRunning = options.checkCallingAppRunning;
     this.personalityId = options.personalityId;
     this.wakeFn = options.wake;
     this.runCapture = options.runCapture;
     this.logger = options.logger ?? NOOP_LOGGER;
     this.now = options.now ?? Date.now;
+    this.maxCaptureDurationMs = options.maxCaptureDurationMs ?? DEFAULT_MAX_CAPTURE_DURATION_MS;
+    this.clock = options.clock ?? realClock;
+    this.onStateChange = options.onStateChange;
+    this.indicator = options.indicator;
   }
 
   start(): void {
     this.detector.start((event) => {
       this.handleEvent(event);
     });
+    // Registered once, for the daemon's whole lifetime — see
+    // `CallCaptureIndicatorPort.onEndRequested`'s doc comment for why this
+    // reuses `handleCallEnded()` rather than a second cancellation path.
+    this.indicator?.onEndRequested(() => {
+      this.handleCallEnded();
+    });
+  }
+
+  private setState(next: DaemonState): void {
+    this.state = next;
+    this.onStateChange?.(next);
+  }
+
+  /**
+   * Reads `this.state` through a fresh call expression rather than a direct
+   * `this.state` member access. Needed at a few call sites that check
+   * `this.state.kind` after an earlier `if (this.state.kind === X) { ... }`
+   * guard narrowed it in the same scope, followed by a `this.setState(...)`
+   * call meant to change it: TypeScript's control-flow analysis tracks
+   * narrowing through direct `this.state = ...` assignments but not through
+   * an indirection like a method call, so without this the compiler
+   * incorrectly believes `this.state` is still typed as the earlier-narrowed
+   * kind instead of the full union.
+   */
+  private currentState(): DaemonState {
+    return this.state;
   }
 
   stop(): void {
@@ -196,13 +326,13 @@ export class CallCaptureDaemon {
     } else if (this.state.kind === 'capturing') {
       this.state.controller.abort();
     }
-    this.state = { kind: 'idle' };
+    this.setState({ kind: 'idle' });
   }
 
   private handleEvent(event: MicActivityEvent): void {
     switch (event.type) {
       case 'call_started':
-        void this.handleCallStarted(event.at);
+        void this.handleCallStarted(event.at, event.source);
         return;
       case 'call_ended':
         this.handleCallEnded();
@@ -214,7 +344,7 @@ export class CallCaptureDaemon {
     }
   }
 
-  private async handleCallStarted(at: number): Promise<void> {
+  private async handleCallStarted(at: number, source: string): Promise<void> {
     if (this.state.kind !== 'idle') {
       // MicActivityDetector's own debounce means overlapping call_started
       // events shouldn't happen — guard defensively anyway rather than trust it.
@@ -227,18 +357,16 @@ export class CallCaptureDaemon {
     // Set synchronously, before any await, so a call_ended arriving at ANY
     // point from here on is observed by handleCallEnded instead of hitting
     // idle's no-op branch (the race this state exists to close).
-    this.state = { kind: 'settingUp', callId };
+    this.setState({ kind: 'settingUp', callId });
 
-    const [deps, callingApp] = await Promise.all([
-      this.checkDependencies(),
-      this.checkCallingAppRunning(),
-    ]);
+    const deps = await this.checkDependencies();
     if (this.consumeCancellation(callId)) {
       this.logger.info(
-        `call-capture: call ${callId} ended before dependency/process check finished — no notification shown`,
+        `call-capture: call ${callId} ended before the dependency check finished — no notification shown`,
       );
-      if (this.state.kind === 'settingUp' && this.state.callId === callId) {
-        this.state = { kind: 'idle' };
+      const stateAfterDeps = this.currentState();
+      if (stateAfterDeps.kind === 'settingUp' && stateAfterDeps.callId === callId) {
+        this.setState({ kind: 'idle' });
       }
       return;
     }
@@ -246,23 +374,12 @@ export class CallCaptureDaemon {
       this.logger.error(
         `call-capture: missing dependencies (${deps.missing.join(', ')}) — no notification shown. ${deps.errors.join(' ')}`,
       );
-      if (this.state.kind === 'settingUp' && this.state.callId === callId) {
-        this.state = { kind: 'idle' };
-      }
-      return;
-    }
-    if (!callingApp) {
-      // Decision 1's coarse process prefilter: mic activity alone (Dictation,
-      // Siri, Voice Memos, a browser tab's mic grant, ...) is common and
-      // expected — this is not an error, just a frequent non-match, so it
-      // logs at info level. Known limitation: a browser-based call (e.g.
-      // Meet in Chrome) also does not pass this prefilter — see
-      // process-prefilter.ts's header comment.
-      this.logger.info(
-        `call-capture: call ${callId} — mic activity detected, but no known calling app is running — not offering (browser-based calls are not detected by this prefilter)`,
-      );
-      if (this.state.kind === 'settingUp' && this.state.callId === callId) {
-        this.state = { kind: 'idle' };
+      const stateAfterPreflightError = this.currentState();
+      if (
+        stateAfterPreflightError.kind === 'settingUp' &&
+        stateAfterPreflightError.callId === callId
+      ) {
+        this.setState({ kind: 'idle' });
       }
       return;
     }
@@ -291,7 +408,15 @@ export class CallCaptureDaemon {
       // notification body is the only interactive affordance, and macOS
       // often labels that click target with a generic "Show" rather than
       // custom text, so the message itself must carry the instruction.
+      // (`capture-offer-card`, the current implementation, ignores this —
+      // see `PresentCaptureOfferOptions`'s doc comment — but
+      // `DesktopNotificationGate`'s own card still renders it.)
       message: 'Call detected — click to start capturing.',
+      // Threaded through so the card can show it as a subtitle (see
+      // `PresentCaptureOfferOptions.source`'s doc comment). This is the
+      // one line this daemon needed for the capture-offer-card swap — `source`
+      // was already in scope here for `handleAccepted`/`runCapture` below.
+      source,
     });
 
     if (this.consumeCancellation(callId)) {
@@ -299,11 +424,11 @@ export class CallCaptureDaemon {
       // exists (a real notification may be showing), so withdraw it immediately
       // rather than leaving it dangling for some later event to notice.
       void handle.expire();
-      this.state = { kind: 'idle' };
+      this.setState({ kind: 'idle' });
       return;
     }
 
-    this.state = { kind: 'awaiting', callId, handle };
+    this.setState({ kind: 'awaiting', callId, handle });
 
     handle.waitForOutcome().then((outcome) => {
       if (this.state.kind !== 'awaiting' || this.state.callId !== callId) {
@@ -311,7 +436,7 @@ export class CallCaptureDaemon {
         return;
       }
       if (outcome.outcome === 'accepted') {
-        void this.handleAccepted(callId, callingApp);
+        void this.handleAccepted(callId, source);
         return;
       }
       if (outcome.outcome === 'expired') {
@@ -321,7 +446,7 @@ export class CallCaptureDaemon {
           `call-capture: notification error for call ${callId}: ${outcome.message}`,
         );
       }
-      this.state = { kind: 'idle' };
+      this.setState({ kind: 'idle' });
     });
   }
 
@@ -350,17 +475,42 @@ export class CallCaptureDaemon {
       return;
     }
     const controller = new AbortController();
-    this.state = { kind: 'capturing', callId, controller };
+    this.setState({ kind: 'capturing', callId, controller, source });
+    this.indicator?.show(source);
+
+    // Maximum-capture-duration safety net (see this file's header comment,
+    // "CANCELLATION") — a last resort UNDER the real call_ended signal, not
+    // a substitute for it. Cleared in `finally` below regardless of which
+    // path (call_ended, this timer, or a runCapture failure) ends the
+    // capture, so it never outlives the call it was guarding.
+    const safetyTimer = this.clock.setTimeout(() => {
+      this.logger.warn(
+        `call-capture: capture for call ${callId} hit the ${this.maxCaptureDurationMs}ms maximum-duration safety net without a call_ended — aborting as a last resort. This should not happen in normal operation.`,
+      );
+      controller.abort();
+    }, this.maxCaptureDurationMs);
 
     try {
-      await this.runCapture(controller.signal, source);
+      await this.runCapture(
+        controller.signal,
+        source,
+        (entry) => this.indicator?.updateTranscript(entry),
+        (speaker, level, at) => this.indicator?.updateAudioLevel?.(speaker, level, at),
+      );
     } catch (err) {
       this.logger.error(
         `call-capture: capture for call ${callId} failed: ${err instanceof Error ? err.message : String(err)}`,
       );
     } finally {
-      if (this.state.kind === 'capturing' && this.state.callId === callId) {
-        this.state = { kind: 'idle' };
+      this.clock.clearTimeout(safetyTimer);
+      // Hides regardless of which path got here (call_ended's abort, the
+      // safety-net timer's abort, an end-requested click's abort routed
+      // through handleCallEnded, or runCapture finishing/throwing on its
+      // own) — show() was called unconditionally for this same call above.
+      this.indicator?.hide();
+      const stateAfterCapture = this.currentState();
+      if (stateAfterCapture.kind === 'capturing' && stateAfterCapture.callId === callId) {
+        this.setState({ kind: 'idle' });
       }
     }
   }
@@ -377,14 +527,14 @@ export class CallCaptureDaemon {
     }
     if (this.state.kind === 'awaiting') {
       void this.state.handle.expire();
-      this.state = { kind: 'idle' };
+      this.setState({ kind: 'idle' });
       return;
     }
     if (this.state.kind === 'capturing') {
       // Aborts the in-flight capture cleanly — runCapture stops both streams
       // and saves whatever was already captured.
       this.state.controller.abort();
-      this.state = { kind: 'idle' };
+      this.setState({ kind: 'idle' });
     }
     // idle → no-op.
   }

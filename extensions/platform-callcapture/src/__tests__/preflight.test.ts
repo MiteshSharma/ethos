@@ -1,102 +1,27 @@
 import { describe, expect, it } from 'vitest';
-import type { PreflightResult, PreflightSpawnFn } from '../preflight';
-import { checkCallCaptureDependencies, checkTerminalNotifierAvailable } from '../preflight';
-
-function fakeSpawn() {
-  let exitListener: ((code: number | null) => void) | undefined;
-  let errorListener: ((err: NodeJS.ErrnoException) => void) | undefined;
-  const spawnFn: PreflightSpawnFn = () => ({
-    onExit: (listener) => {
-      exitListener = listener;
-    },
-    onError: (listener) => {
-      errorListener = listener;
-    },
-  });
-  return {
-    spawnFn,
-    emitExit: (code: number | null) => exitListener?.(code),
-    emitError: (err: NodeJS.ErrnoException) => errorListener?.(err),
-  };
-}
-
-describe('checkTerminalNotifierAvailable', () => {
-  it('resolves available:true when -help exits 0', async () => {
-    const fake = fakeSpawn();
-    const resultPromise = checkTerminalNotifierAvailable(fake.spawnFn);
-    fake.emitExit(0);
-
-    await expect(resultPromise).resolves.toEqual({ available: true });
-  });
-
-  it('resolves available:false with a non-zero exit code', async () => {
-    const fake = fakeSpawn();
-    const resultPromise = checkTerminalNotifierAvailable(fake.spawnFn);
-    fake.emitExit(1);
-
-    await expect(resultPromise).resolves.toEqual({
-      available: false,
-      error: expect.stringContaining('exited with code 1'),
-    });
-  });
-
-  it('resolves available:false naming the brew install fix on ENOENT, never throws', async () => {
-    const fake = fakeSpawn();
-    const resultPromise = checkTerminalNotifierAvailable(fake.spawnFn);
-    const err = Object.assign(new Error('spawn terminal-notifier ENOENT'), {
-      code: 'ENOENT',
-    }) as NodeJS.ErrnoException;
-    fake.emitError(err);
-
-    await expect(resultPromise).resolves.toEqual({
-      available: false,
-      error: expect.stringContaining('brew install terminal-notifier'),
-    });
-  });
-
-  it('resolves available:false on a non-ENOENT spawn error, still surfaced not swallowed', async () => {
-    const fake = fakeSpawn();
-    const resultPromise = checkTerminalNotifierAvailable(fake.spawnFn);
-    const err = Object.assign(new Error('boom'), { code: 'EACCES' }) as NodeJS.ErrnoException;
-    fake.emitError(err);
-
-    await expect(resultPromise).resolves.toEqual({
-      available: false,
-      error: expect.stringContaining('boom'),
-    });
-  });
-});
-
-function terminalNotifier(available: boolean): () => Promise<PreflightResult> {
-  return () =>
-    Promise.resolve(
-      available ? { available: true } : { available: false, error: 'terminal-notifier missing' },
-    );
-}
+import { checkCallCaptureDependencies } from '../preflight';
 
 describe('checkCallCaptureDependencies', () => {
   it('resolves ok:true when all four dependencies are present', async () => {
-    const result = await checkCallCaptureDependencies({
-      checkTerminalNotifier: terminalNotifier(true),
-      existsSync: () => true,
-    });
+    const result = await checkCallCaptureDependencies({ existsSync: () => true });
     expect(result).toEqual({ ok: true });
   });
 
-  it('names terminal-notifier alone as missing, never a generic message', async () => {
+  it('names capture-offer-card alone as missing when only its binary is absent', async () => {
     const result = await checkCallCaptureDependencies({
-      checkTerminalNotifier: terminalNotifier(false),
-      existsSync: () => true,
+      existsSync: (path) => !path.includes('capture-offer-card'),
     });
     expect(result.ok).toBe(false);
     if (result.ok) throw new Error('unreachable');
-    expect(result.missing).toEqual(['terminal-notifier']);
-    expect(result.errors).toEqual(['terminal-notifier missing']);
+    expect(result.missing).toEqual(['capture-offer-card']);
+    expect(result.errors[0]).toContain('capture-offer-card binary not found');
+    expect(result.errors[0]).toContain(
+      'pnpm --filter @ethosagent/platform-callcapture run build:native',
+    );
   });
 
   it('names mic-detector alone as missing when only its binary is absent', async () => {
     const result = await checkCallCaptureDependencies({
-      checkTerminalNotifier: terminalNotifier(true),
       existsSync: (path) => !path.includes('mic-detector'),
     });
     expect(result.ok).toBe(false);
@@ -110,7 +35,6 @@ describe('checkCallCaptureDependencies', () => {
 
   it('names mic-capture alone as missing when only its binary is absent', async () => {
     const result = await checkCallCaptureDependencies({
-      checkTerminalNotifier: terminalNotifier(true),
       existsSync: (path) => !path.includes('mic-capture'),
     });
     expect(result.ok).toBe(false);
@@ -124,7 +48,6 @@ describe('checkCallCaptureDependencies', () => {
 
   it('names audiotee alone as missing when only its binary is absent', async () => {
     const result = await checkCallCaptureDependencies({
-      checkTerminalNotifier: terminalNotifier(true),
       existsSync: (path) => !path.includes('audiotee'),
     });
     expect(result.ok).toBe(false);
@@ -137,18 +60,118 @@ describe('checkCallCaptureDependencies', () => {
   });
 
   it('surfaces every missing dependency, never just the first', async () => {
-    const result = await checkCallCaptureDependencies({
-      checkTerminalNotifier: terminalNotifier(false),
-      existsSync: () => false,
-    });
+    const result = await checkCallCaptureDependencies({ existsSync: () => false });
     expect(result.ok).toBe(false);
     if (result.ok) throw new Error('unreachable');
     expect(result.missing).toEqual([
-      'terminal-notifier',
+      'capture-offer-card',
       'mic-detector',
       'mic-capture',
       'audiotee',
     ]);
     expect(result.errors).toHaveLength(4);
+  });
+
+  // Bundled callers (the desktop app's electron-vite main bundle) resolve
+  // the real binary paths themselves and pass them in, since this package's
+  // own `import.meta.dirname`-relative defaults point at the bundled output
+  // dir, not the source tree, once bundled. These tests assert the override
+  // is what gets checked — never the internal default path — mirroring the
+  // `loadBuiltins(dir)` override coverage in
+  // `extensions/personalities/src/__tests__/personalities.test.ts`.
+  it('checks the overridden captureOfferCardPath, not the internal default', async () => {
+    const seen: string[] = [];
+    const result = await checkCallCaptureDependencies({
+      existsSync: (path) => {
+        seen.push(path);
+        return true;
+      },
+      captureOfferCardPath: '/bundled/native/bin/capture-offer-card',
+    });
+    expect(result).toEqual({ ok: true });
+    expect(seen).toContain('/bundled/native/bin/capture-offer-card');
+  });
+
+  it('names the overridden captureOfferCardPath in the error when absent', async () => {
+    const result = await checkCallCaptureDependencies({
+      existsSync: (path) => path !== '/bundled/native/bin/capture-offer-card',
+      captureOfferCardPath: '/bundled/native/bin/capture-offer-card',
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error('unreachable');
+    expect(result.missing).toEqual(['capture-offer-card']);
+    expect(result.errors[0]).toContain('/bundled/native/bin/capture-offer-card');
+  });
+
+  it('checks the overridden micDetectorPath, not the internal default', async () => {
+    const seen: string[] = [];
+    const result = await checkCallCaptureDependencies({
+      existsSync: (path) => {
+        seen.push(path);
+        return true;
+      },
+      micDetectorPath: '/bundled/native/bin/mic-detector',
+    });
+    expect(result).toEqual({ ok: true });
+    expect(seen).toContain('/bundled/native/bin/mic-detector');
+  });
+
+  it('names the overridden micDetectorPath in the error when absent', async () => {
+    const result = await checkCallCaptureDependencies({
+      existsSync: (path) => path !== '/bundled/native/bin/mic-detector',
+      micDetectorPath: '/bundled/native/bin/mic-detector',
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error('unreachable');
+    expect(result.missing).toEqual(['mic-detector']);
+    expect(result.errors[0]).toContain('/bundled/native/bin/mic-detector');
+  });
+
+  it('checks the overridden micCapturePath, not the internal default', async () => {
+    const seen: string[] = [];
+    const result = await checkCallCaptureDependencies({
+      existsSync: (path) => {
+        seen.push(path);
+        return true;
+      },
+      micCapturePath: '/bundled/native/bin/mic-capture',
+    });
+    expect(result).toEqual({ ok: true });
+    expect(seen).toContain('/bundled/native/bin/mic-capture');
+  });
+
+  it('names the overridden micCapturePath in the error when absent', async () => {
+    const result = await checkCallCaptureDependencies({
+      existsSync: (path) => path !== '/bundled/native/bin/mic-capture',
+      micCapturePath: '/bundled/native/bin/mic-capture',
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error('unreachable');
+    expect(result.missing).toEqual(['mic-capture']);
+    expect(result.errors[0]).toContain('/bundled/native/bin/mic-capture');
+  });
+
+  it('checks the overridden audioteePath, not the internal default', async () => {
+    const seen: string[] = [];
+    const result = await checkCallCaptureDependencies({
+      existsSync: (path) => {
+        seen.push(path);
+        return true;
+      },
+      audioteePath: '/bundled/native/vendor/audiotee/audiotee',
+    });
+    expect(result).toEqual({ ok: true });
+    expect(seen).toContain('/bundled/native/vendor/audiotee/audiotee');
+  });
+
+  it('names the overridden audioteePath in the error when absent', async () => {
+    const result = await checkCallCaptureDependencies({
+      existsSync: (path) => path !== '/bundled/native/vendor/audiotee/audiotee',
+      audioteePath: '/bundled/native/vendor/audiotee/audiotee',
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error('unreachable');
+    expect(result.missing).toEqual(['audiotee']);
+    expect(result.errors[0]).toContain('/bundled/native/vendor/audiotee/audiotee');
   });
 });

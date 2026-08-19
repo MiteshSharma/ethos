@@ -13,12 +13,24 @@
 // reads from here. Kept in one place (rather than each caller inlining the
 // literal path, as `doctor.ts`'s `checkGatewayHealth` does today for the
 // gateway heartbeat) so the writer(s) and the reader can never drift apart.
+//
+// Both functions take an optional `dataDir`, defaulting to `~/.ethos` — the
+// CLI's `ethos serve`/`ethos gateway` always run against that default (or
+// `ETHOS_STATE_DIR`, via `ethosDir()` in `@ethosagent/config`, which callers
+// pass in explicitly), but the desktop app's `getDataDir()` can point at a
+// custom, user-configured data directory instead. Without this parameter,
+// desktop's heartbeat/lock files would always land under `~/.ethos` even
+// when the desktop app itself reads and writes everything else under a
+// different configured `dataDir` — so `ethos doctor` and the ownership-claim
+// mechanism would disagree with wherever this install's data actually lives.
 
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
-export function callCaptureHealthPath(): string {
-  return join(homedir(), '.ethos', 'callcapture-health.json');
+const DEFAULT_DATA_DIR = (): string => join(homedir(), '.ethos');
+
+export function callCaptureHealthPath(dataDir: string = DEFAULT_DATA_DIR()): string {
+  return join(dataDir, 'callcapture-health.json');
 }
 
 /**
@@ -30,6 +42,6 @@ export function callCaptureHealthPath(): string {
  * stomp each other's heartbeat file. Kept alongside `callCaptureHealthPath`
  * for the same reason — one shared path helper, not one literal per caller.
  */
-export function callCaptureLockPath(): string {
-  return join(homedir(), '.ethos', 'callcapture.lock');
+export function callCaptureLockPath(dataDir: string = DEFAULT_DATA_DIR()): string {
+  return join(dataDir, 'callcapture.lock');
 }

@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { backgroundDefaults } from '@ethosagent/config';
 import {
   AgentLoop,
+  deriveFsReachPaths,
   EagerPrefetchPolicy,
   parseSmallWindowToolset,
   resolveSttProvider,
@@ -20,9 +21,10 @@ import {
 } from '@ethosagent/memory-capture';
 import { withHistory } from '@ethosagent/memory-history';
 import { buildConsolidationUpdates, consolidateMemory } from '@ethosagent/nightly-loop';
+import type { Speaker, TranscriptEntry } from '@ethosagent/platform-callcapture';
 import { MicCapture, TapCapture } from '@ethosagent/platform-callcapture';
 import { sanitize } from '@ethosagent/safety-injection';
-import { FsStorage } from '@ethosagent/storage-fs';
+import { defaultAlwaysDeny, FsStorage, ScopedStorage } from '@ethosagent/storage-fs';
 import { type CallCaptureToolsOptions, runCallCapture } from '@ethosagent/tools-callcapture';
 import {
   type BackgroundToolDeps,
@@ -92,6 +94,28 @@ export function isCallCaptureToolsEnabled(
   config: Pick<WiringConfig, 'callCapture'>,
 ): boolean {
   return platform === 'darwin' && Boolean(config.callCapture?.personalityId);
+}
+
+/**
+ * Resolve the Documents-tab mirror target for one call-capture invocation
+ * (plan/phases/call-capture-desktop-ux.md, P4). Only personalities that
+ * DECLARE `fs_reach.workdir` get a mirror target — `deriveFsReachPaths`
+ * itself falls back to `cwd` when undeclared (so a personality's file tools
+ * still get a workdir), but applying that same fallback here would silently
+ * mirror call-capture transcripts into the process's cwd for every
+ * personality with no declared workdir. Checking `fs_reach?.workdir` first
+ * mirrors the same guard `personalityAssetDir` (`@ethosagent/core`) uses for
+ * the same reason.
+ *
+ * Extracted as a pure function for the same testability reason
+ * `isCallCaptureToolsEnabled` above is — `buildAgentLoop` is a full
+ * composition root, impractical to construct in a focused test.
+ */
+export function resolveCallCaptureDocumentsWorkdir(
+  personality: import('@ethosagent/types').PersonalityConfig | undefined,
+  vars: Parameters<typeof deriveFsReachPaths>[1],
+): string | undefined {
+  return personality?.fs_reach?.workdir ? deriveFsReachPaths(personality, vars).workdir : undefined;
 }
 
 /**
@@ -293,7 +317,12 @@ export async function buildAgentLoop(
   let runCallCaptureFn:
     | ((
         personalityId: string,
-        opts: { source?: string; abortSignal: AbortSignal },
+        opts: {
+          source?: string;
+          abortSignal: AbortSignal;
+          onEntry?: (entry: TranscriptEntry) => void;
+          onAudioLevel?: (speaker: Speaker, level: number, at: number) => void;
+        },
       ) => Promise<import('@ethosagent/tools-callcapture').CallCaptureResult>)
     | undefined;
   if (isCallCaptureToolsEnabled(process.platform, config)) {
@@ -307,18 +336,60 @@ export async function buildAgentLoop(
         `call-capture: STT unavailable (${sttResolution.error}) — call capture will report itself unavailable`,
       );
     }
-    const callCaptureOpts: CallCaptureToolsOptions = {
-      tapCapture: new TapCapture(),
-      micCapture: new MicCapture(),
+    // When `wiringCtx.callCaptureNativeDir` is set (bundled callers only —
+    // see `types.ts`), override each binary's default `import.meta.dirname`-
+    // relative path with one resolved under the real native dir. Absent, both
+    // constructors fall back to their own unchanged defaults.
+    const tapCaptureOpts = wiringCtx.callCaptureNativeDir
+      ? { binaryPath: join(wiringCtx.callCaptureNativeDir, 'vendor', 'audiotee', 'audiotee') }
+      : {};
+    const micCaptureOpts = wiringCtx.callCaptureNativeDir
+      ? { binaryPath: join(wiringCtx.callCaptureNativeDir, 'bin', 'mic-capture') }
+      : {};
+    const baseCallCaptureOpts: CallCaptureToolsOptions = {
+      tapCapture: new TapCapture(tapCaptureOpts),
+      micCapture: new MicCapture(micCaptureOpts),
       ...(sttResolution.ok ? { sttProvider: sttResolution.provider } : {}),
       memory,
       getSummaryProvider: async () => llm,
     };
-    runCallCaptureFn = (personalityId, { source, abortSignal }) => {
+    runCallCaptureFn = (personalityId, { source, abortSignal, onEntry, onAudioLevel }) => {
       // Stable per-personality key (mirrors this repo's `cli:<cwd-basename>`
       // session-key convention and the daemon's prior sessionKey construction,
       // relocated here since there is no longer a live turn to carry it).
       const sessionKey = `callcapture:${personalityId}`;
+      // Documents-tab mirror target (P4): resolved PER INVOCATION, not once at
+      // wiring time — `personalityId` is a runtime parameter (the daemon binds
+      // whichever personality accepted the call), so the workdir it maps to can
+      // only be known here.
+      const documentsWorkdir = resolveCallCaptureDocumentsWorkdir(
+        personalities.get(personalityId),
+        {
+          ethosHome: dataDir,
+          self: personalityId,
+          cwd: wiringCtx.workingDir,
+        },
+      );
+      // Documents-tab mirror storage boundary: `wiringCtx.storage` is the
+      // raw, process-wide Storage — it must never reach `runCallCapture`
+      // unscoped. Confine it to this personality's own `fs_reach.workdir`
+      // via `ScopedStorage`, the same boundary `DocumentsService`
+      // (apps/web-api/src/services/documents.service.ts) enforces for reads
+      // of this same directory. Constructed here, per invocation, because
+      // `documentsWorkdir` itself is only known per invocation.
+      const callCaptureOpts: CallCaptureToolsOptions = {
+        ...baseCallCaptureOpts,
+        ...(documentsWorkdir
+          ? {
+              documentsWorkdir,
+              storage: new ScopedStorage(wiringCtx.storage, {
+                read: [documentsWorkdir],
+                write: [documentsWorkdir],
+                alwaysDeny: defaultAlwaysDeny(),
+              }),
+            }
+          : {}),
+      };
       return runCallCapture(callCaptureOpts, {
         source,
         scopeId: `personality:${personalityId}`,
@@ -327,6 +398,8 @@ export async function buildAgentLoop(
         platform: 'callcapture',
         workingDir: wiringCtx.workingDir,
         abortSignal,
+        ...(onEntry ? { onEntry } : {}),
+        ...(onAudioLevel ? { onAudioLevel } : {}),
       });
     };
   }
