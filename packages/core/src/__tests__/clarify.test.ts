@@ -188,6 +188,36 @@ describe('ClarifyBridge', () => {
     expect(rowsAtPresentTime).toBe(1);
   });
 
+  // Fix 3 (pi-delegation.md §1b) — the presented/deadline transition must be
+  // durable BEFORE the presenter is invoked, not fire-and-forget after. A
+  // crash between "shown in memory" and "persisted to disk" used to leave a
+  // permanently null-deadline row: sweep-immune by design (D2) but never
+  // re-presented either (its in-memory queue entry died with the process) —
+  // a permanent leak. Assert the disk state is already correct by the time
+  // the presenter runs.
+  it('the presented/deadline transition is durable BEFORE the presenter is invoked (Fix 3)', async () => {
+    const { bridge, store } = makeBridge();
+    let deadlineOnDiskAtPresentTime: string | null | undefined;
+    let capturedId = '';
+    const presented = new Promise<void>((resolve) => {
+      bridge.registerPresenter('cli', async (req) => {
+        capturedId = req.requestId;
+        const persisted = await store.get(req.requestId);
+        deadlineOnDiskAtPresentTime = persisted?.defaultDeadlineAt;
+        resolve();
+      });
+    });
+
+    const pending = bridge.request(baseInput);
+    await presented;
+
+    expect(deadlineOnDiskAtPresentTime).not.toBeNull();
+    expect(deadlineOnDiskAtPresentTime).toBeDefined();
+
+    await bridge.respond({ requestId: capturedId, answer: 'x', source: 'user' });
+    await pending;
+  });
+
   // G2 — only the presenter for the resolved surface type is ever invoked;
   // a differently-registered surface never sees the row.
   it('only invokes the presenter for the resolved surface type', async () => {
@@ -489,6 +519,31 @@ describe('ClarifyBridge', () => {
       await pending;
     });
 
+    // Fix 1 (pi-delegation.md §1b) — the foreground-override route used to
+    // hardcode `surfaceContext: {}`, losing the destination's chatId/botKey
+    // even though it correctly picked the surface. Assert the row actually
+    // carries what `recordPresence` was given.
+    it('the foreground-override route carries real surfaceContext, not {} (Fix 1)', async () => {
+      const { bridge } = makeBridge();
+      bridge.setOriginResolver(() => ({
+        surfaceType: 'telegram',
+        surfaceContext: { chatId: 'origin-chat' },
+      }));
+      const cliQueue = makePresentedQueue(bridge, 'cli');
+      bridge.registerPresenter('telegram', () => {
+        throw new Error('should not route to origin — presence override expected');
+      });
+
+      bridge.recordPresence('cli', { chatId: 'cli-chat-42', botKey: 'bot-a' });
+
+      const pending = bridge.request({ ...baseInput, jobId: 'job-1', surfaceType: 'cli' });
+      const row = await cliQueue.next();
+      expect(row.surfaceContext).toEqual({ chatId: 'cli-chat-42', botKey: 'bot-a' });
+
+      await bridge.respond({ requestId: row.requestId, answer: 'x', source: 'user' });
+      await pending;
+    });
+
     it('a foreground clarify (no jobId) ignores origin routing and presence entirely', async () => {
       const { bridge } = makeBridge();
       bridge.setOriginResolver(() => ({ surfaceType: 'telegram' }));
@@ -607,11 +662,17 @@ describe('ClarifyBridge', () => {
     ).resolves.toBeUndefined();
   });
 
-  // Restart-survival: after a gateway crash the original `request()` promise is
-  // gone, but a persisted row may remain and the UI is still showing buttons.
-  // A late respond() (button tap after restart) must still clean the row up
-  // and notify listeners so the surface can edit the message in place.
-  it('respond() cleans up a persisted row + notifies listeners when no in-memory entry exists', async () => {
+  // Fix 2 (pi-delegation.md §1b) — a respond() with no in-process entry can
+  // mean one of two things: the owning process crashed (this IS the final
+  // word), or it's alive in a DIFFERENT process sharing this store (its own
+  // reconcile poll will pick this up). This bridge cannot tell which, so it
+  // no longer deletes the row outright — it marks it answered and lets the
+  // real owner (if any) finish the job. It still notifies ITS OWN listeners
+  // immediately, which is exactly what the same-process-restart case needs
+  // (there is no other process left to do it) and is harmless in the
+  // cross-process case (this bridge typically has no listeners for a row
+  // belonging to a different surface).
+  it('respond() with no in-memory entry marks the row answered (not deleted) and still notifies local listeners', async () => {
     const { bridge, store } = makeBridge();
     const row = makeRow({ requestId: 'orphan', surfaceContext: { chatId: 7 } });
     await store.add(row);
@@ -622,8 +683,251 @@ describe('ClarifyBridge', () => {
 
     await bridge.respond({ requestId: 'orphan', answer: 'postgres', source: 'user' });
 
-    expect(await store.list()).toHaveLength(0);
+    // The row survives — a live owner in a DIFFERENT process may still need
+    // to read this answer to finish resolution itself (see the
+    // cross-process describe block below). It is not silently discarded.
+    const persisted = await store.get('orphan');
+    expect(persisted?.answer).toEqual({ requestId: 'orphan', answer: 'postgres', source: 'user' });
     expect(notified).toEqual([{ requestId: 'orphan', source: 'user' }]);
+  });
+
+  it('a second respond() for an already-answered orphan row is swallowed — first writer wins', async () => {
+    const { bridge, store } = makeBridge();
+    await store.add(makeRow({ requestId: 'orphan' }));
+
+    await bridge.respond({ requestId: 'orphan', answer: 'first', source: 'user' });
+    await bridge.respond({ requestId: 'orphan', answer: 'second', source: 'user' });
+
+    const persisted = await store.get('orphan');
+    expect(persisted?.answer?.answer).toBe('first');
+  });
+
+  // Fix 2 — the low-priority "genuinely dead owner" edge: nobody's
+  // reconcile poll ever picks this row up (the owning process crashed and
+  // never restarted). Once the row's OWN deadline passes, sweep() must
+  // honor the real answer someone gave rather than silently discarding it
+  // for the timeout-default logic.
+  it('sweep() honors a recorded answer on an unreconciled row instead of the timeout default', async () => {
+    const { bridge, store } = makeBridge();
+    await store.add(
+      makeRow({
+        requestId: 'dead-owner',
+        default: 'sqlite',
+        defaultDeadlineAt: '2026-05-15T00:00:00.000Z',
+        answer: { requestId: 'dead-owner', answer: 'postgres', source: 'user' },
+      }),
+    );
+    const swept: Array<{ requestId: string; answer: string | undefined }> = [];
+    bridge.onResolved((row, resp) => {
+      swept.push({ requestId: row.requestId, answer: resp?.answer });
+    });
+
+    await bridge.sweep(new Date('2026-05-15T01:00:00.000Z'));
+
+    expect(swept).toEqual([{ requestId: 'dead-owner', answer: 'postgres' }]);
+    expect(await store.list()).toHaveLength(0);
+  });
+
+  // The genuine cross-process scenario Fix 2 exists for: TWO SEPARATE
+  // `ClarifyBridge` instances (mirroring two real OS processes — gateway and
+  // web-api are always separate processes per pi-delegation.md), sharing
+  // only the persisted store. Instance A holds the live `request()` promise
+  // (the AgentLoop turn actually blocked on it); instance B answers with no
+  // local entry at all, exactly what `apps/web-api/src/rpc/clarify.ts`'s
+  // `clarify.respond` RPC does today.
+  describe('cross-process answer delivery (Fix 2)', () => {
+    it("a job spawned in process A and answered in process B resolves A's request() exactly once", async () => {
+      const storage = new InMemoryStorage();
+      const root = '/ethos/clarify';
+      const storeA = new FileClarifyStore(storage, root); // "gateway"
+      const storeB = new FileClarifyStore(storage, root); // "web-api"
+      // Short poll so the test doesn't need real-timer sleeps or fake-timer
+      // gymnastics around a live setInterval.
+      const bridgeA = new ClarifyBridge(storeA, { reconcilePollMs: 10 });
+      const bridgeB = new ClarifyBridge(storeB, { reconcilePollMs: 10 });
+
+      const presented: PendingClarify[] = [];
+      bridgeA.registerPresenter('telegram', (row) => {
+        presented.push(row);
+      });
+
+      const pending = bridgeA.request({
+        ...baseInput,
+        jobId: 'job-1',
+        surfaceType: 'telegram',
+      });
+      await vi.waitFor(() => expect(presented).toHaveLength(1));
+      const requestId = presented[0]?.requestId;
+      if (!requestId) throw new Error('expected a presented row');
+
+      // "Answered from web" — a completely different process/bridge
+      // instance, sharing only the persisted store.
+      await bridgeB.respond({
+        requestId,
+        answer: 'dual-write, then cut over',
+        source: 'user',
+      });
+
+      // Process A's original request() promise — the one its blocked
+      // AgentLoop turn actually awaits — resolves, not times out.
+      await expect(pending).resolves.toMatchObject({ answer: 'dual-write, then cut over' });
+
+      // And exactly once — the row is gone from the shared store.
+      expect(await storeA.list()).toHaveLength(0);
+    });
+  });
+
+  // Fix 4 (pi-delegation.md §1b) — boot-time rehydration. Each test
+  // constructs a SECOND, fresh `ClarifyBridge` against the SAME persisted
+  // store to simulate "the process restarted" — not just calling methods on
+  // the same live instance, which would prove nothing about restart
+  // survival (the pre-existing T17 sweep test makes exactly this mistake:
+  // it runs sweep() against the same bridge that still holds the row in its
+  // own in-memory laneQueues).
+  describe('boot-time rehydration (Fix 4)', () => {
+    it('an already-presented row resumes waiting (no duplicate prompt) and a queued sibling drains once it resolves', async () => {
+      const storage = new InMemoryStorage();
+      const root = '/ethos/clarify';
+      const storeOld = new FileClarifyStore(storage, root);
+      const bridgeOld = new ClarifyBridge(storeOld);
+      const oldPresented: PendingClarify[] = [];
+      bridgeOld.registerPresenter('cli', (row) => {
+        oldPresented.push(row);
+      });
+
+      // First request presents; second queues behind it in the same lane.
+      // Both promises are deliberately abandoned below ("process crashes") —
+      // `.catch(() => {})` keeps that an intentional no-op, not an unhandled
+      // rejection.
+      void bridgeOld.request({ ...baseInput, jobId: 'job-1' }).catch(() => {});
+      await vi.waitFor(() => expect(oldPresented).toHaveLength(1));
+      void bridgeOld
+        .request({ ...baseInput, jobId: 'job-1', question: 'second question' })
+        .catch(() => {});
+      await vi.waitFor(async () => {
+        expect(await storeOld.list()).toHaveLength(2);
+      });
+
+      // "Process crashes" — bridgeOld is simply abandoned; its two
+      // request() promises are permanently unsettled, exactly what happens
+      // when the process dies mid-turn. A fresh bridge, sharing only the
+      // persisted store, simulates the restarted process.
+      const storeNew = new FileClarifyStore(storage, root);
+      const bridgeNew = new ClarifyBridge(storeNew);
+      const newPresented: PendingClarify[] = [];
+      bridgeNew.registerPresenter('cli', (row) => {
+        newPresented.push(row);
+      });
+
+      await bridgeNew.hydrate();
+
+      // The already-presented row resumes waiting — it must NOT be re-sent
+      // (that would be a duplicate prompt for a question the user already
+      // saw once).
+      expect(newPresented).toHaveLength(0);
+      expect(bridgeNew.hasPending('s1', 'job-1')).toBe(true);
+
+      const rows = await storeNew.list();
+      const first = rows.find((r) => r.question === baseInput.question);
+      if (!first) throw new Error('expected the first row to survive the restart');
+
+      // Resolving the resumed occupant (as if the user finally replies, or
+      // a different process resolves it) drains the queue — the SECOND
+      // question, which the crashed process never got to show, is now
+      // presented for the first time.
+      await bridgeNew.respond({ requestId: first.requestId, answer: 'a', source: 'user' });
+      await vi.waitFor(() => expect(newPresented).toHaveLength(1));
+      expect(newPresented[0]?.question).toBe('second question');
+    });
+
+    it('a queued row with no surviving occupant in its lane is presented for the first time (the Fix 3 crash window)', async () => {
+      const storage = new InMemoryStorage();
+      const store = new FileClarifyStore(storage, '/ethos/clarify');
+      // Simulates presentNow()'s persist-before-present write never landing:
+      // the previous occupant is already gone (store.remove landed) but this
+      // row's own presentedAt/defaultDeadlineAt never got written before the
+      // crash — still legitimately "never shown."
+      await store.add(
+        makeRow({
+          requestId: 'orphan-queued',
+          jobId: 'job-2',
+          surfaceType: 'cli',
+          defaultDeadlineAt: null,
+          presentedAt: null,
+          timeoutMs: 900_000,
+        }),
+      );
+      const bridge = new ClarifyBridge(store);
+      const presented: PendingClarify[] = [];
+      bridge.registerPresenter('cli', (row) => {
+        presented.push(row);
+      });
+
+      await bridge.hydrate();
+
+      // `drainLane` (like `request()`'s own initial present) fires
+      // `presentNow` without awaiting it — the durable persist-before-
+      // present write (Fix 3) is still in flight when `hydrate()` itself
+      // resolves.
+      await vi.waitFor(() => expect(presented).toHaveLength(1));
+      expect(presented[0]?.requestId).toBe('orphan-queued');
+      expect(presented[0]?.presentedAt).not.toBeNull();
+    });
+
+    it('only adopts rows whose surfaceType this bridge has a presenter for', async () => {
+      const storage = new InMemoryStorage();
+      const store = new FileClarifyStore(storage, '/ethos/clarify');
+      await store.add(
+        makeRow({
+          requestId: 'web-row',
+          jobId: 'job-3',
+          surfaceType: 'web',
+          presentedAt: '2026-05-15T00:00:00.000Z',
+          // A near-future (real-clock) deadline, not a distant one — Node's
+          // `setTimeout` clamps/warns past ~24.8 days (32-bit ms overflow),
+          // and armRehydratedTimer computes its delay from real `Date.now()`
+          // in these non-fake-timer tests.
+          defaultDeadlineAt: new Date(Date.now() + 15 * 60_000).toISOString(),
+        }),
+      );
+      // A gateway-process bridge: no 'web' presenter registered.
+      const bridge = new ClarifyBridge(store);
+      bridge.registerPresenter('cli', () => {
+        throw new Error('must not adopt a row belonging to a different surface');
+      });
+
+      await bridge.hydrate();
+
+      expect(bridge.hasPending('s1', 'job-3')).toBe(false);
+    });
+
+    it('is idempotent — a second hydrate() call does not re-adopt or duplicate anything', async () => {
+      const storage = new InMemoryStorage();
+      const store = new FileClarifyStore(storage, '/ethos/clarify');
+      await store.add(
+        makeRow({
+          requestId: 'r1',
+          jobId: 'job-4',
+          presentedAt: '2026-05-15T00:00:00.000Z',
+          // A near-future (real-clock) deadline, not a distant one — Node's
+          // `setTimeout` clamps/warns past ~24.8 days (32-bit ms overflow),
+          // and armRehydratedTimer computes its delay from real `Date.now()`
+          // in these non-fake-timer tests.
+          defaultDeadlineAt: new Date(Date.now() + 15 * 60_000).toISOString(),
+        }),
+      );
+      const bridge = new ClarifyBridge(store);
+      const presented: PendingClarify[] = [];
+      bridge.registerPresenter('cli', (row) => {
+        presented.push(row);
+      });
+
+      await bridge.hydrate();
+      await bridge.hydrate();
+
+      expect(presented).toHaveLength(0); // an occupant row is never re-shown
+      expect(bridge.listPending(undefined, 'job-4')).toHaveLength(1);
+    });
   });
 
   it('sweep() notifies resolved listeners for swept persisted rows', async () => {

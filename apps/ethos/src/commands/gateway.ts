@@ -888,6 +888,15 @@ export async function runGatewayStart(opts: GatewayStartOptions = {}): Promise<v
         }
       : undefined;
 
+  // Fix 4 (pi-delegation.md §1b) — rebuild each bot's lane bookkeeping for
+  // rows that survived a restart. Must run AFTER every clarify surface
+  // above has registered its presenter — `hydrate()` only adopts rows this
+  // bridge can actually present. Best-effort: a hydration failure must not
+  // block gateway startup.
+  for (const b of bots) {
+    void b.loop.clarifyBridge?.hydrate().catch(() => {});
+  }
+
   // Telegram personality card reader + greeting provider — wired when any
   // Telegram adapter is configured. The card reader powers `/personality rich`;
   // the greeting provider powers `/start`.

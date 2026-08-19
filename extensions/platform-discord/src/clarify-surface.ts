@@ -108,7 +108,11 @@ export class DiscordClarifySurface {
 
   async present(row: PendingClarify): Promise<void> {
     if (row.surfaceType !== SURFACE) return;
-    const routing = this.getSessionRouting(row.sessionId);
+    // Fix 1 (pi-delegation.md §1b) — `getSessionRouting` only resolves a LIVE
+    // foreground chat session; a background job's clarify has none. Fall
+    // back to the delivery context the bridge resolved onto
+    // `row.surfaceContext` so a job-originated clarify still delivers.
+    const routing = this.getSessionRouting(row.sessionId) ?? routingFromSurfaceContext(row);
     if (!routing) return;
 
     const msg = clarifyPendingMessage({
@@ -161,7 +165,11 @@ export class DiscordClarifySurface {
       this.rememberResponder(row.requestId, evt.userId);
       // D7 — a human acted on this surface; a background job's next question
       // may route here instead of always falling back to its origin lane.
-      this.bridge.recordPresence(SURFACE);
+      // Fix 1 — carry real delivery context, not just the surface type.
+      this.bridge.recordPresence(SURFACE, {
+        chatId: evt.channelId,
+        botKey: this.adapter.botKey,
+      });
       await this.bridge.respond({
         requestId: row.requestId,
         answer: evt.answer,
@@ -231,7 +239,7 @@ export class DiscordClarifySurface {
       response = { requestId: row.requestId, answer, source: 'user' };
     }
     this.rememberResponder(row.requestId, evt.userId);
-    this.bridge.recordPresence(SURFACE);
+    this.bridge.recordPresence(SURFACE, { chatId: evt.channelId, botKey: this.adapter.botKey });
     await this.bridge.respond(response);
   }
 
@@ -269,6 +277,14 @@ export class DiscordClarifySurface {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/** Fix 1 (pi-delegation.md §1b) — see the Telegram surface's equivalent for
+ *  the full rationale. */
+function routingFromSurfaceContext(row: PendingClarify): SessionRoutingForClarify | undefined {
+  const chatId = row.surfaceContext.chatId;
+  if (typeof chatId !== 'string') return undefined;
+  return { chatId };
+}
 
 function gateAnswerer(row: PendingClarify, userId: string | undefined): boolean {
   if (row.answerableBy === 'anyone') return true;

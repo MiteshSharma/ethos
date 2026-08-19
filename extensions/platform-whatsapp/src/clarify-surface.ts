@@ -83,7 +83,11 @@ export class WhatsAppClarifySurface {
    */
   async present(row: PendingClarify): Promise<void> {
     if (row.surfaceType !== SURFACE) return;
-    const routing = this.getSessionRouting(row.sessionId);
+    // Fix 1 (pi-delegation.md §1b) — `getSessionRouting` only resolves a LIVE
+    // foreground chat session; a background job's clarify has none. Fall
+    // back to the delivery context the bridge resolved onto
+    // `row.surfaceContext` so a job-originated clarify still delivers.
+    const routing = this.getSessionRouting(row.sessionId) ?? routingFromSurfaceContext(row);
     if (!routing) {
       // No routing means the gateway lost track of which chat — the turn
       // will time out and the bridge will fire `timeout-default` or
@@ -146,7 +150,8 @@ export class WhatsAppClarifySurface {
 
     // D7 — a human acted on this surface; a background job's next question
     // may route here instead of always falling back to its origin lane.
-    this.bridge.recordPresence(SURFACE);
+    // Fix 1 — carry real delivery context, not just the surface type.
+    this.bridge.recordPresence(SURFACE, { chatId: message.chatId, botKey: this.adapter.botKey });
 
     if (text.toLowerCase() === CANCEL_COMMAND) {
       return { requestId: target.requestId, answer: '', source: 'cancel' };
@@ -169,6 +174,14 @@ export class WhatsAppClarifySurface {
 
 /** Resolve a reply to one of the presented options: the 1-based number the
  *  numbered fallback printed, or the option label typed verbatim. */
+/** Fix 1 (pi-delegation.md §1b) — see the Telegram surface's equivalent for
+ *  the full rationale. */
+function routingFromSurfaceContext(row: PendingClarify): SessionRoutingForClarify | undefined {
+  const chatId = row.surfaceContext.chatId;
+  if (typeof chatId !== 'string') return undefined;
+  return { chatId };
+}
+
 function matchOption(text: string, options: string[]): string | undefined {
   const n = Number(text);
   if (Number.isInteger(n) && n >= 1 && n <= options.length) return options[n - 1];

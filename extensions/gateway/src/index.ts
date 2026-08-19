@@ -32,6 +32,7 @@ import type {
   BackgroundJob,
   ChannelContext,
   ClarifyResponse,
+  ClarifySurfaceType,
   DeliveryResult,
   InboundMessage,
   Logger,
@@ -172,6 +173,30 @@ const DELIVERED_WAKES_MAX = 4_096;
  * space of names an operator can type as a roster key.
  */
 const DEFAULT_VOICE_ENTRY_KEY = ' default';
+
+/**
+ * Fix 5 (pi-delegation.md D7) — every channel platform with a live clarify
+ * surface (see the `extensions/platform-` packages' `clarify-surface.ts`).
+ * `InboundMessage.platform` is a plain string; other origins (email, mcp,
+ * webhook, cron) carry values with no clarify surface at all. Mirrors the
+ * same set in `packages/wiring/src/build-agent-loop.ts`
+ * (`CLARIFY_SURFACE_TYPES`) — duplicated locally rather than shared because
+ * `extensions/gateway` must not depend on `packages/wiring`
+ * (ARCHITECTURE.md §II layer direction).
+ */
+const CLARIFY_SURFACE_TYPES = new Set<ClarifySurfaceType>([
+  'tui',
+  'cli',
+  'web',
+  'telegram',
+  'slack',
+  'discord',
+  'whatsapp',
+]);
+
+function isClarifySurfaceType(platform: string): platform is ClarifySurfaceType {
+  return CLARIFY_SURFACE_TYPES.has(platform as ClarifySurfaceType);
+}
 
 /**
  * Tools that render typed UI cards on the web surface. Channel adapters get
@@ -1315,6 +1340,21 @@ export class Gateway {
       });
       return;
     }
+
+    // Fix 5 (pi-delegation.md D7) — an ordinary inbound message establishes
+    // presence too, not just answering a clarify (the clarify surfaces'
+    // `correlateMessage`/`handleAction` paths above already record it for
+    // that case). Otherwise a background job's later question only ever
+    // routes to wherever the human last happened to answer a clarify, never
+    // to wherever they're just casually chatting.
+    if (isClarifySurfaceType(message.platform)) {
+      bot.loop.clarifyBridge?.recordPresence(message.platform, {
+        chatId: message.chatId,
+        botKey: bot.botKey,
+        ...(message.threadId ? { threadId: message.threadId } : {}),
+      });
+    }
+
     // Adapters that surface a thread identifier (currently only Slack, via
     // `thread_ts`) get a per-thread lane so concurrent threads in the same
     // channel never share session state. Adapters without thread semantics

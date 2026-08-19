@@ -549,6 +549,15 @@ export async function runChat(config: EthosConfig, opts: RunChatOptions = {}): P
       return;
     }
 
+    // Fix 5 (pi-delegation.md D7) — an ordinary line establishes presence
+    // too, not just answering a clarify (the `awaitingClarify` presenter
+    // above already records it for that path). Otherwise a background
+    // job's later question only ever routes to wherever the human last
+    // happened to answer a clarify, never to wherever they're just
+    // casually chatting. CLI has no chat identity beyond the process
+    // itself, so no `surfaceContext`.
+    loop.clarifyBridge?.recordPresence('cli');
+
     // Slash commands are always dispatched immediately — even mid-turn — except
     // /busy and /steer which have special busy-state semantics handled below.
     const isBusySlash = input.startsWith('/busy') || input.startsWith('/steer');

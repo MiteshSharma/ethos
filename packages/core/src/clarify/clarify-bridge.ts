@@ -103,6 +103,18 @@ export interface ClarifyBridgeOptions {
    * routing at its origin lane. Default 5 minutes.
    */
   presenceTtlMs?: number;
+  /**
+   * Fix 2 (pi-delegation.md §1b) — how often this bridge polls the shared
+   * store for answers a DIFFERENT process's `respond()` wrote onto a row this
+   * bridge is still holding locally-pending (see `pollForAnswers`). Only
+   * runs while at least one request is locally pending — an idle bridge
+   * never polls. Default 1s: fast enough that a cross-process answer
+   * resolves promptly without the 30s+ latency of the general timeout
+   * sweep; cheap enough (one `store.list()` per tick) not to matter at
+   * clarify's cardinality (a handful of concurrent open questions, not
+   * thousands). Set to 0 to disable (tests only).
+   */
+  reconcilePollMs?: number;
 }
 
 interface PendingEntry {
@@ -131,8 +143,24 @@ export class ClarifyBridge {
   private readonly laneOccupant = new Map<string, string>();
   private readonly laneQueues = new Map<string, string[]>();
   private originResolver: ClarifyOriginResolver | undefined;
-  private lastHumanActivity: { surfaceType: ClarifySurfaceType; at: number } | null = null;
+  private lastHumanActivity: {
+    surfaceType: ClarifySurfaceType;
+    /** Fix 1 (pi-delegation.md §1b) — real delivery context (chatId/botKey/
+     *  threadId) captured at the moment presence was recorded, so a
+     *  foreground-presence override in `resolveRouting` has somewhere to
+     *  actually send the prompt, not just a bare surface type. */
+    surfaceContext?: Record<string, unknown>;
+    at: number;
+  } | null = null;
   private readonly presenceTtlMs: number;
+  // Fix 2 (pi-delegation.md §1b) — cross-process answer reconciliation. Runs
+  // only while `pending` is non-empty; see `ensureReconcilePoll`.
+  private reconcilePoll: ReturnType<typeof setInterval> | null = null;
+  private readonly reconcilePollMs: number;
+  // Fix 4 (pi-delegation.md §1b) — `hydrate()` is idempotent; a second call
+  // (e.g. a caller wiring both a boot script and a health-check retry) is a
+  // no-op rather than double-adopting rows.
+  private hydrated = false;
 
   /**
    * `store` is exposed read-only so a surface (e.g. TelegramClarifySurface)
@@ -144,6 +172,7 @@ export class ClarifyBridge {
     opts: ClarifyBridgeOptions = {},
   ) {
     this.presenceTtlMs = opts.presenceTtlMs ?? DEFAULT_PRESENCE_TTL_MS;
+    this.reconcilePollMs = opts.reconcilePollMs ?? 1_000;
   }
 
   /**
@@ -171,9 +200,23 @@ export class ClarifyBridge {
    * falling back to the job's origin lane. An open connection (e.g. an idle
    * SSE subscription) is explicitly NOT presence — only an explicit call here
    * counts.
+   *
+   * Fix 1 (pi-delegation.md §1b) — `surfaceContext` is the real delivery
+   * context (e.g. Telegram: `{chatId, botKey}`; Slack additionally
+   * `threadId`) captured at the moment presence is recorded. Presence
+   * tracking stays GLOBAL ("most recently active surface, anywhere") by
+   * design — a per-job/per-session model would silently mute cross-surface
+   * routing for a job's very FIRST question — but the foreground-override
+   * route in `resolveRouting` needs somewhere to actually deliver the
+   * prompt, not just a bare surface type. Surfaces with no per-chat
+   * identity (web, cli) omit it.
    */
-  recordPresence(surfaceType: ClarifySurfaceType, at: Date = new Date()): void {
-    this.lastHumanActivity = { surfaceType, at: at.getTime() };
+  recordPresence(
+    surfaceType: ClarifySurfaceType,
+    surfaceContext?: Record<string, unknown>,
+    at: Date = new Date(),
+  ): void {
+    this.lastHumanActivity = { surfaceType, surfaceContext, at: at.getTime() };
   }
 
   /**
@@ -256,6 +299,26 @@ export class ClarifyBridge {
   // The single most important edge: QUEUED carries no timer and no deadline.
   // Everything else follows from that.
   //
+  // Two more edges, added by Fix 2/3/4 (pi-delegation.md §1b — cross-process
+  // delivery, durable presenting, and restart survival):
+  //
+  //   PRESENTED ──respond() with no local entry (a DIFFERENT process)──►
+  //       ANSWERED-UNCOLLECTED  (row.answer set, row NOT removed)
+  //           │                                              │
+  //           │ the OWNING process's pollForAnswers()         │ owner never
+  //           │ notices row.answer and finishes RESOLVED       │ comes back
+  //           ▼                                              ▼
+  //       RESOLVED (as above)                    reaped by sweep() once the
+  //                                               row's own deadline passes
+  //                                               (honors row.answer, not
+  //                                               the timeout default)
+  //
+  //   process restart, mid-PRESENTED or mid-QUEUED ──hydrate()──►
+  //       an already-presented row resumes waiting on its EXISTING deadline
+  //       (never re-shown — no duplicate prompt); a still-queued row queues
+  //       behind whatever ends up occupying its lane, then drains normally
+  //       once that occupant resolves.
+  //
 
   /**
    * Issue a clarify request. If the request's lane (`jobId ?? sessionId`, G1)
@@ -287,6 +350,11 @@ export class ClarifyBridge {
       createdAt: createdAt.toISOString(),
       defaultDeadlineAt: null,
       presentedAt: null,
+      // Fix 4 (pi-delegation.md §1b) — a queued row's timer/deadline stay
+      // null (D2) until it's actually presented, but `timeoutMs` itself
+      // isn't derivable from anything else once persisted; a restart-
+      // rehydrated queue drain needs the ORIGINAL window, not a guess.
+      timeoutMs: input.timeoutMs,
     };
 
     // Persistence rule: the pending row goes to disk *before* it is presented
@@ -297,6 +365,9 @@ export class ClarifyBridge {
     return new Promise<ClarifyResponse>((resolve, reject) => {
       const entry: PendingEntry = { row, input, lane, resolve, reject, timer: null };
       this.pending.set(requestId, entry);
+      // Fix 2 — start (or keep alive) the cross-process reconcile poll now
+      // that this bridge has at least one locally-pending request again.
+      this.ensureReconcilePoll();
 
       // Queue or present BEFORE wiring the abort signal: `respond()`'s
       // cleanup (removing this id from `laneQueues`, freeing `laneOccupant`)
@@ -314,7 +385,7 @@ export class ClarifyBridge {
         // Present after the resolver is registered so a synchronous
         // in-process surface can call respond() immediately without racing
         // the Map insert.
-        this.presentNow(lane, requestId);
+        void this.presentNow(lane, requestId);
       }
 
       if (input.abortSignal) {
@@ -337,26 +408,37 @@ export class ClarifyBridge {
    * swallowed (another surface or the timeout beat this one). Frees the lane
    * and drains the next queued item, if any (G1).
    *
-   * Degraded-mode fallback: when no in-process entry exists but the row is
-   * still persisted (gateway crashed mid-clarify, then the user tapped the
-   * button after restart), still clear the row and notify listeners so the
-   * surface can edit its UI to the resolved state. The original `request()`
-   * promise is gone — the agent waiting on it died with the process — so
-   * the answer can't reach the LLM, but at least the visible prompt updates.
+   * Fix 2 (pi-delegation.md §1b) — no in-process entry means one of TWO
+   * things, and this bridge cannot tell which: the owning process crashed
+   * (this respond() call is the final word), or the owning process is alive
+   * in a DIFFERENT process sharing this store (gateway vs web-api are always
+   * separate OS processes) and will find the answer itself via its own
+   * `pollForAnswers()`. So: persist the answer onto the row (`store.update`,
+   * never `store.remove`) instead of discarding it — that is what makes the
+   * live-elsewhere case actually deliver. `notifyResolved` still fires on
+   * THIS bridge immediately either way: harmless when this bridge has no
+   * listeners for the row's surface (the common cross-process case, e.g.
+   * web-api answering a Telegram-origin row), and exactly what's needed for
+   * a same-process-restart answer (there is no other process left to do it).
+   * First writer wins if two non-owning processes race — never overwrite an
+   * `answer` that's already there.
    */
   async respond(response: ClarifyResponse): Promise<void> {
     const entry = this.pending.get(response.requestId);
     if (!entry) {
       const persisted = await this.store.get(response.requestId);
       if (!persisted) return;
-      await this.store.remove(response.requestId);
       const notify = response.source === 'timeout-no-default' ? null : response;
+      if (!persisted.answer) {
+        await this.store.update(response.requestId, { answer: response });
+      }
       this.notifyResolved(persisted, notify);
       return;
     }
     if (entry.timer) clearTimeout(entry.timer);
     this.pending.delete(response.requestId);
     await this.store.remove(response.requestId);
+    this.maybeStopReconcilePoll();
 
     const queue = this.laneQueues.get(entry.lane);
     if (queue) {
@@ -404,6 +486,16 @@ export class ClarifyBridge {
     for (const row of expired) {
       if (this.pending.has(row.requestId)) continue; // a live timer will handle it
       await this.store.remove(row.requestId);
+      // Fix 2 (pi-delegation.md §1b) — a genuinely dead owner (crashed,
+      // never restarted) never ran its reconcile poll to pick this up.
+      // Honor the real answer someone actually gave, recorded by a
+      // DIFFERENT process's `respond()`, rather than silently discarding it
+      // for the timeout-default logic below. The row's own deadline is the
+      // reap bound — deliberately not a separate staleness timer.
+      if (row.answer) {
+        this.notifyResolved(row, row.answer);
+        continue;
+      }
       const source = row.default !== undefined ? 'timeout-default' : 'timeout-no-default';
       const notify =
         source === 'timeout-default'
@@ -424,10 +516,26 @@ export class ClarifyBridge {
     });
   }
 
-  /** Presents a lane's next entry: claims the lane, derives `presentedAt` +
-   *  `defaultDeadlineAt` and starts the timeout timer (D2 — not at request
-   *  time), then invokes the resolved surface's presenter. */
-  private presentNow(lane: string, requestId: string): void {
+  /**
+   * Presents a lane's next entry: claims the lane, derives `presentedAt` +
+   * `defaultDeadlineAt` and starts the timeout timer (D2 — not at request
+   * time), then invokes the resolved surface's presenter.
+   *
+   * Fix 3 (pi-delegation.md §1b) — the persisted transition to "presented"
+   * is now durable BEFORE anything relies on it: `store.update` is awaited
+   * first, and only once it lands do we set `entry.row.presentedAt`/
+   * `defaultDeadlineAt`, start the timer, and invoke the presenter. A crash
+   * before the write lands leaves the row exactly as it was — queued, null
+   * deadline, correctly sweep-immune, correctly re-presentable as "never
+   * shown" by `hydrate()` on restart. A crash after leaves a row with a
+   * real deadline that restart hydration can resume waiting on (still live)
+   * or `sweep()` can reap normally (expired). There is no window where the
+   * in-memory state says "presented" while the disk still says "queued" —
+   * that was the leak: a row nothing would ever re-present (its in-memory
+   * queue entry died with the process) and nothing would ever expire (its
+   * persisted deadline stayed null forever).
+   */
+  private async presentNow(lane: string, requestId: string): Promise<void> {
     const entry = this.pending.get(requestId);
     if (!entry) return;
 
@@ -435,16 +543,24 @@ export class ClarifyBridge {
 
     const presentedAt = new Date();
     const deadline = new Date(presentedAt.getTime() + entry.input.timeoutMs);
-    entry.row.presentedAt = presentedAt.toISOString();
-    entry.row.defaultDeadlineAt = deadline.toISOString();
+    const presentedAtIso = presentedAt.toISOString();
+    const deadlineIso = deadline.toISOString();
+
+    await this.store.update(requestId, {
+      presentedAt: presentedAtIso,
+      defaultDeadlineAt: deadlineIso,
+    });
+
+    // `respond()` may have resolved this request (abort/race) while the
+    // write above was in flight — don't arm a timer or show a prompt for
+    // something already gone.
+    if (!this.pending.has(requestId)) return;
+
+    entry.row.presentedAt = presentedAtIso;
+    entry.row.defaultDeadlineAt = deadlineIso;
     entry.timer = setTimeout(() => {
       void this.fireTimeout(requestId);
     }, entry.input.timeoutMs);
-
-    void this.store.update(requestId, {
-      presentedAt: entry.row.presentedAt,
-      defaultDeadlineAt: entry.row.defaultDeadlineAt,
-    });
 
     const presenter = this.presenters.get(entry.row.surfaceType);
     Promise.resolve(presenter?.(entry.row)).catch(() => {
@@ -458,7 +574,7 @@ export class ClarifyBridge {
     const queue = this.laneQueues.get(lane);
     const nextId = queue?.shift();
     if (nextId === undefined) return;
-    this.presentNow(lane, nextId);
+    void this.presentNow(lane, nextId);
   }
 
   /**
@@ -486,8 +602,165 @@ export class ClarifyBridge {
       Date.now() - presence.at < this.presenceTtlMs;
 
     if (isForeground && presence) {
-      return { surfaceType: presence.surfaceType, surfaceContext: {} };
+      // Fix 1 (pi-delegation.md §1b) — carry the REAL delivery context
+      // captured at `recordPresence()` time, not an empty object. Losing it
+      // here was the bug: the override correctly picked "route to wherever
+      // the human is," but handed the destination presenter nothing to
+      // actually send to.
+      return { surfaceType: presence.surfaceType, surfaceContext: presence.surfaceContext ?? {} };
     }
     return { surfaceType: origin.surfaceType, surfaceContext: origin.surfaceContext ?? {} };
+  }
+
+  // ---------------------------------------------------------------------------
+  // Fix 2 (pi-delegation.md §1b) — cross-process answer reconciliation
+  // ---------------------------------------------------------------------------
+
+  /** Starts the reconcile poll if it isn't already running and this bridge
+   *  actually has something locally pending to reconcile. */
+  private ensureReconcilePoll(): void {
+    if (this.reconcilePoll || this.reconcilePollMs <= 0) return;
+    this.reconcilePoll = setInterval(() => {
+      void this.pollForAnswers();
+    }, this.reconcilePollMs);
+    // Never keeps the process alive on its own — same posture as the
+    // gateway's own clarify sweep timer.
+    this.reconcilePoll.unref?.();
+  }
+
+  /** Stops the reconcile poll once nothing is locally pending — an idle
+   *  bridge should not keep ticking. */
+  private maybeStopReconcilePoll(): void {
+    if (this.pending.size > 0 || !this.reconcilePoll) return;
+    clearInterval(this.reconcilePoll);
+    this.reconcilePoll = null;
+  }
+
+  /**
+   * For every request this bridge still holds locally pending (i.e. it is
+   * the owning process), check whether a DIFFERENT process's `respond()`
+   * has written an answer onto the persisted row (see the `respond()`
+   * no-local-entry branch). One `store.list()` read covers every
+   * locally-pending id, rather than one `store.get()` per entry.
+   */
+  private async pollForAnswers(): Promise<void> {
+    if (this.pending.size === 0) return;
+    const rows = await this.store.list();
+    const byId = new Map(rows.map((r) => [r.requestId, r]));
+    for (const requestId of [...this.pending.keys()]) {
+      const row = byId.get(requestId);
+      if (row?.answer) void this.respond(row.answer);
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Fix 4 (pi-delegation.md §1b) — boot-time rehydration
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Rebuilds `laneOccupant`/`laneQueues` from persisted rows this bridge
+   * survives a restart with. Call once at startup, AFTER every presenter
+   * this process will ever register is registered (`registerPresenter`) —
+   * ownership of a persisted row is decided by `this.presenters.has(row.
+   * surfaceType)`, so a gateway-process bridge naturally skips 'web' rows
+   * and a web-api-process bridge naturally skips telegram/slack/discord/
+   * whatsapp rows, matching the current one-presenter-per-surface-type
+   * deployment shape. (This does not disambiguate BETWEEN two bots sharing
+   * one surface type in one multi-bot process — that ambiguity already
+   * exists in `registerPresenter` today and is not new here.)
+   *
+   * An already-presented row with a still-live deadline resumes waiting on
+   * that EXACT deadline — it is never re-shown (that would be a duplicate
+   * Telegram/Slack message for a question the user already saw once). A
+   * still-queued row (never shown before the crash) queues behind whatever
+   * ends up occupying its lane; `drainLane` — called once per lane at the
+   * end, unconditionally — is what presents it for the very first time,
+   * either because its lane already has no occupant (the Fix 3 crash
+   * window: the previous occupant's `store.remove` landed but the freshly
+   * drained row's `presentNow` persist did not) or later, once whichever
+   * row IS the resumed occupant finally resolves.
+   *
+   * There is no live caller behind any rehydrated entry — the turn that
+   * called `request()` died with the previous process, the same "no
+   * auto-resume" posture the rest of this plan takes for a crashed runner.
+   * These entries exist purely so `respond()`/`sweep()`'s bookkeeping (lane
+   * occupancy, queue draining, `notifyResolved` for UI teardown) behaves
+   * correctly for a row that outlived its process.
+   */
+  async hydrate(): Promise<void> {
+    if (this.hydrated) return;
+    this.hydrated = true;
+
+    const rows = await this.listPersisted();
+    const owned = rows.filter(
+      (row) => this.presenters.has(row.surfaceType) && !this.pending.has(row.requestId),
+    );
+
+    const byLane = new Map<string, PendingClarify[]>();
+    for (const row of owned) {
+      const lane = row.jobId ?? row.sessionId;
+      const laneRows = byLane.get(lane) ?? [];
+      laneRows.push(row);
+      byLane.set(lane, laneRows);
+    }
+
+    for (const [lane, laneRows] of byLane) {
+      // Best-effort FIFO order across a restart — `createdAt` is the only
+      // ordering signal already on the row (adding a dedicated sequence
+      // field would be a schema change for a tie-break that, in practice,
+      // never matters: two clarifies in the same lane are never created in
+      // the same millisecond).
+      laneRows.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+      for (const row of laneRows) {
+        this.pending.set(row.requestId, this.makeRehydratedEntry(lane, row));
+        if (row.presentedAt != null && row.defaultDeadlineAt != null) {
+          this.laneOccupant.set(lane, row.requestId);
+          this.armRehydratedTimer(row);
+        } else {
+          const queue = this.laneQueues.get(lane) ?? [];
+          queue.push(row.requestId);
+          this.laneQueues.set(lane, queue);
+        }
+      }
+      // Safe to call unconditionally: a no-op when the lane already has an
+      // occupant, and exactly what presents a queued-with-no-surviving-
+      // occupant row (the Fix 3 crash window) for the first time.
+      this.drainLane(lane);
+    }
+
+    if (this.pending.size > 0) this.ensureReconcilePoll();
+  }
+
+  private makeRehydratedEntry(lane: string, row: PendingClarify): PendingEntry {
+    const FALLBACK_TIMEOUT_MS = 15 * 60_000; // rows persisted before Fix 2 added `timeoutMs`
+    return {
+      row,
+      input: {
+        question: row.question,
+        ...(row.options !== undefined ? { options: row.options } : {}),
+        ...(row.default !== undefined ? { default: row.default } : {}),
+        timeoutMs: row.timeoutMs ?? FALLBACK_TIMEOUT_MS,
+        answerableBy: row.answerableBy,
+        sessionId: row.sessionId,
+        ...(row.jobId !== undefined ? { jobId: row.jobId } : {}),
+        surfaceType: row.surfaceType,
+        surfaceContext: row.surfaceContext,
+      },
+      lane,
+      // No live caller is waiting (see the `hydrate()` doc comment above).
+      resolve: () => {},
+      reject: () => {},
+      timer: null,
+    };
+  }
+
+  /** Resumes an already-presented row on its EXISTING deadline — never
+   *  re-derives a new one, which would silently extend a window the user
+   *  was already told about. */
+  private armRehydratedTimer(row: PendingClarify): void {
+    const entry = this.pending.get(row.requestId);
+    if (!entry || !row.defaultDeadlineAt) return;
+    const remainingMs = new Date(row.defaultDeadlineAt).getTime() - Date.now();
+    entry.timer = setTimeout(() => void this.fireTimeout(row.requestId), Math.max(0, remainingMs));
   }
 }

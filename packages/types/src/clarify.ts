@@ -81,6 +81,28 @@ export interface PendingClarify {
    * while queued. Optional so existing fixtures that predate D2 keep compiling.
    */
   presentedAt?: string | null;
+  /**
+   * Fix 2 (pi-delegation.md §1b) — the original request's `timeoutMs`. Not
+   * used to derive `defaultDeadlineAt` (that stays request-time-agnostic per
+   * D2) — it exists so a row still QUEUED (`defaultDeadlineAt: null`) across a
+   * process restart can be presented with the SAME timeout window it would
+   * have gotten live, instead of a guessed default. Optional so rows
+   * persisted before this field existed keep compiling/parsing.
+   */
+  timeoutMs?: number;
+  /**
+   * Fix 2 (pi-delegation.md §1b, cross-process answer delivery) — written by
+   * `ClarifyBridge.respond()` when it has no in-process pending entry for
+   * this `requestId`. Two different things can cause that: the owning
+   * process crashed (this IS the final word), or the owning process is
+   * alive in a DIFFERENT process sharing this store (its own periodic
+   * reconcile poll picks this up, finishes the resolution, and removes the
+   * row). This field is what makes the second case actually work — the row
+   * is kept, not deleted, so the real owner can still read the answer.
+   * Distinct from the row simply not existing (already collected, or never
+   * created) and from an open row with no answer yet.
+   */
+  answer?: ClarifyResponse;
 }
 
 /**
