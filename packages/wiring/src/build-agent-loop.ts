@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { backgroundDefaults } from '@ethosagent/config';
 import {
   AgentLoop,
+  type ClarifyOriginLane,
   deriveFsReachPaths,
   EagerPrefetchPolicy,
   parseSmallWindowToolset,
@@ -36,6 +37,8 @@ import { createVisionTools } from '@ethosagent/tools-vision';
 import { createAgentConsultTool } from '@ethosagent/tools-voice';
 import { createWebTools } from '@ethosagent/tools-web';
 import type {
+  BackgroundJob,
+  ClarifySurfaceType,
   LLMProvider,
   MemoryContext,
   MemoryProvider,
@@ -116,6 +119,57 @@ export function resolveCallCaptureDocumentsWorkdir(
   vars: Parameters<typeof deriveFsReachPaths>[1],
 ): string | undefined {
   return personality?.fs_reach?.workdir ? deriveFsReachPaths(personality, vars).workdir : undefined;
+}
+
+// Every channel adapter that sets `InboundMessage.platform` (and therefore
+// `BackgroundJob.originPlatform`, copied from it at spawn) with a live clarify
+// surface. `BackgroundJob.originPlatform` is a plain string — other origins
+// (email, mcp, webhook, cron) carry values with no clarify surface at all.
+const CLARIFY_SURFACE_TYPES = new Set<ClarifySurfaceType>([
+  'tui',
+  'cli',
+  'web',
+  'telegram',
+  'slack',
+  'discord',
+  'whatsapp',
+]);
+
+function isClarifySurfaceType(platform: string): platform is ClarifySurfaceType {
+  return CLARIFY_SURFACE_TYPES.has(platform as ClarifySurfaceType);
+}
+
+/**
+ * D7/G2/G3 (plan/phases/pi-delegation.md §5/§6) — maps a background job's
+ * recorded origin (the Phase-B lane-resolution columns on `BackgroundJob`) to
+ * the `ClarifyOriginLane` `ClarifyBridge.setOriginResolver` expects. `null`
+ * when the job has no recorded origin platform, or that platform has no
+ * clarify surface — the bridge's `resolveRouting()` then falls back to the
+ * request's own `surfaceType` (today's behaviour). `surfaceContext` reuses
+ * the same `chatId`/`botKey`/`threadId` keys the per-platform
+ * `clarify-surface.ts` files (Telegram/Slack/Discord/WhatsApp) write onto a
+ * presented row's `surfaceContext`.
+ *
+ * Extracted as a pure function for the same testability reason
+ * `isCallCaptureToolsEnabled` above is — `buildAgentLoop` is a full
+ * composition root, impractical to construct in a focused test.
+ */
+export function resolveJobClarifyOrigin(
+  job: Pick<
+    BackgroundJob,
+    'originPlatform' | 'originBotKey' | 'originChatId' | 'originThreadId'
+  > | null,
+): ClarifyOriginLane | null {
+  const platform = job?.originPlatform;
+  if (!platform || !isClarifySurfaceType(platform)) return null;
+  return {
+    surfaceType: platform,
+    surfaceContext: {
+      ...(job?.originChatId ? { chatId: job.originChatId } : {}),
+      ...(job?.originBotKey ? { botKey: job.originBotKey } : {}),
+      ...(job?.originThreadId ? { threadId: job.originThreadId } : {}),
+    },
+  };
 }
 
 /**
@@ -856,6 +910,16 @@ export async function buildAgentLoop(
   let meshProxyReconciler: MeshProxyReconciler | undefined;
   if (backgroundEnabled) {
     jobStore = new SQLiteJobStore(join(dataDir, 'jobs.db'));
+    // G2/G3/D7 — a background job's clarify routes to wherever a live human
+    // is currently present (see `ClarifyBridge.resolveRouting`), falling back
+    // to the job's own origin lane. That fallback needs to look the job up;
+    // only wired here, where a `JobStore` actually exists (no jobs, no
+    // resolver to ask about them).
+    const jobStoreForClarify = jobStore;
+    infra.clarifyBridge.setOriginResolver(async (jobId) => {
+      const job = await jobStoreForClarify.get(jobId);
+      return resolveJobClarifyOrigin(job);
+    });
     // Owner is unique per executor instance so multiple loops in one process
     // (multi-bot gateway) never race on claimNextQueued and each runs only its
     // own jobs. randomBytes suffix distinguishes same-profile same-pid instances.
