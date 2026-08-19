@@ -129,6 +129,18 @@ export function createStreamingVoiceCallClient(deps: StreamingVoiceCallDeps): Vo
             : { type: 'reply_complete', text: frame.text },
         );
         return;
+      case 'tick':
+        // Non-speech keep-alive during a long tool call — the same local
+        // WebAudio blip `transcript`/connect already use, reused rather than
+        // shipping synthesized audio over the wire every few seconds.
+        if (deps.chime !== false) {
+          try {
+            deps.capture.playEarcon();
+          } catch {
+            // Best-effort keep-alive; never fails a turn.
+          }
+        }
+        return;
       case 'error':
         emit({
           type: 'error',

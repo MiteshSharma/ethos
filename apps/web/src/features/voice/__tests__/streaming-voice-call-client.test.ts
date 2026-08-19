@@ -86,6 +86,29 @@ describe('streaming talk-mode — server events', () => {
     await client.disconnect();
   });
 
+  it('plays the earcon for a tick keep-alive, with no VoiceCallEvent emitted', async () => {
+    const { transport, capture, client, events } = setup();
+    client.on((event) => events.push(event));
+    await client.connect();
+    expect(capture.earcons).toBe(1); // the connect chime
+
+    transport.deliver({ t: 'tick' });
+
+    expect(capture.earcons).toBe(2);
+    expect(events).toEqual([]); // a tick is a pure audio cue, not a call event
+    await client.disconnect();
+  });
+
+  it('skips the tick earcon when chime is disabled', async () => {
+    const { transport, capture, client } = setup({ chime: false });
+    await client.connect();
+
+    transport.deliver({ t: 'tick' });
+
+    expect(capture.earcons).toBe(0);
+    await client.disconnect();
+  });
+
   it('reports an empty transcript as a dropped utterance', async () => {
     const { transport, client, events } = setup();
     client.on((event) => events.push(event));

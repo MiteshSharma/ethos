@@ -368,6 +368,12 @@ export function buildConfigPatch(
       retryOnOverflow: values.compaction.retryOnOverflow,
       smallWindow: values.compaction.smallWindow,
     },
+    voiceFiller: {
+      enabled: values.voiceFiller.enabled,
+      afterMs: values.voiceFiller.afterMs ?? null,
+      text: strOrNull(values.voiceFiller.text),
+      tickIntervalMs: values.voiceFiller.tickIntervalMs ?? null,
+    },
     ...(values.memory === 'vault'
       ? {
           memoryVault: {

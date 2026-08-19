@@ -91,6 +91,19 @@ const TTS_PROVIDER_DEFAULTS: Record<string, { baseUrl: string; model: string }> 
 // Fixed phrase the "Test TTS" button synthesizes so the check is deterministic.
 const VOICE_TEST_PHRASE = 'Hello — this is an Ethos voice test.';
 
+// `voice.filler.*` built-in defaults, shown as placeholders so an untouched
+// field still tells the operator what the agent actually does. MUST stay
+// byte-equal to `DEFAULT_TOOL_FILLER_AFTER_MS`/`DEFAULT_TOOL_FILLER_TEXT`/
+// `DEFAULT_TOOL_FILLER_TICK_MS` in `packages/wiring/src/voice-stack.ts` — the
+// same duplication tradeoff `apps/web-api/src/services/config.service.ts`
+// already accepts for `VOICE_TUNING`'s defaults (this browser bundle can't
+// import a package that pulls in Node-only deps).
+const DEFAULT_VOICE_FILLER = {
+  afterMs: 600,
+  text: 'Let me check that.',
+  tickIntervalMs: 4000,
+};
+
 /** Antd rule wrapper — the field only renders for a `command-*` provider, so an
  *  unconditional rule here IS the "required when that provider is selected" one. */
 function commandTemplateValidator(_rule: unknown, value: string): Promise<void> {
@@ -920,6 +933,67 @@ export function VoicePane() {
         >
           Reset to defaults
         </Button>
+      </div>
+      <SectionHeading id="tool-call-filler">tool-call filler</SectionHeading>
+      <Typography.Paragraph type="secondary" style={{ marginTop: 0, fontSize: 13 }}>
+        What the agent plays instead of dead air during a slow tool call — a spoken line once, then
+        a short tick while it keeps working. One setting for every lane (call, satellite, browser),
+        unlike barge-in above: the gap this covers is the same gap wherever the agent is talking.
+      </Typography.Paragraph>
+      <SettingRow
+        label="Filler & tick enabled"
+        formName="voiceFiller.enabled"
+        help="Off silences both the spoken filler line and the tick — a tool call runs in total silence, same as before this existed."
+      >
+        <Form.Item
+          name={['voiceFiller', 'enabled']}
+          valuePropName="checked"
+          style={{ marginBottom: 0 }}
+        >
+          <Switch />
+        </Form.Item>
+      </SettingRow>
+      <div style={ROW_BOX_STYLE}>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <div style={{ flex: 1 }}>
+            <RowLabel>Filler debounce (ms)</RowLabel>
+            <Form.Item name={['voiceFiller', 'afterMs']} noStyle>
+              <InputNumber
+                size="small"
+                style={{ width: '100%' }}
+                min={0}
+                max={60_000}
+                step={50}
+                placeholder={String(DEFAULT_VOICE_FILLER.afterMs)}
+              />
+            </Form.Item>
+          </div>
+          <div style={{ flex: 1 }}>
+            <RowLabel>Tick interval (ms)</RowLabel>
+            <Form.Item name={['voiceFiller', 'tickIntervalMs']} noStyle>
+              <InputNumber
+                size="small"
+                style={{ width: '100%' }}
+                min={0}
+                max={60_000}
+                step={250}
+                placeholder={String(DEFAULT_VOICE_FILLER.tickIntervalMs)}
+              />
+            </Form.Item>
+          </div>
+        </div>
+        <Typography.Paragraph
+          type="secondary"
+          style={{ marginTop: 8, marginBottom: 8, fontSize: 13 }}
+        >
+          Debounce: how long a tool call runs before the filler line is spoken — a fast tool never
+          hears it. Tick interval: how often the keep-alive plays after that, for as long as the
+          tool keeps running.
+        </Typography.Paragraph>
+        <RowLabel>Filler line</RowLabel>
+        <Form.Item name={['voiceFiller', 'text']} noStyle>
+          <Input size="small" maxLength={200} placeholder={DEFAULT_VOICE_FILLER.text} />
+        </Form.Item>
       </div>
       <SectionHeading id="channels-that-speak">channels that speak</SectionHeading>
       <SettingRow

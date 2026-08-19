@@ -31,10 +31,15 @@ const COOKIE = 'ethos_auth=good-token';
 /** A `VoiceSession` stand-in this file drives from outside. */
 class FakeVoiceSession {
   readonly pushed: PcmChunk[] = [];
+  stopCalls = 0;
   private listeners: Array<(event: VoiceSessionEvent) => void> = [];
 
   pushAudio(chunk: PcmChunk): void {
     this.pushed.push(chunk);
+  }
+
+  stop(): void {
+    this.stopCalls += 1;
   }
 
   on(listener: (event: VoiceSessionEvent) => void): () => void {
@@ -81,7 +86,12 @@ describe('voice socket', () => {
 
   beforeEach(async () => {
     session = new FakeVoiceSession();
-    opener = vi.fn(() => Promise.resolve(session as unknown as VoiceSession));
+    opener = vi.fn(() =>
+      Promise.resolve({
+        session: session as unknown as VoiceSession,
+        laneKey: 'voice:web:browser:test',
+      }),
+    );
     server = createServer((_req, res) => res.end('ok'));
     socketLane = createVoiceSocket({
       session: () => opener,
@@ -143,8 +153,13 @@ describe('voice socket', () => {
     expect(session.pushed[0]).toEqual({ data: Int16Array.from([1, 2, 3]), sampleRate: 16_000 });
 
     session.emit({ type: 'utterance_committed', text: 'over the wire' });
-    session.emit({ type: 'reply_sentence', text: 'Hello back.' });
-    session.emit({ type: 'reply_audio', audio: new Uint8Array([7, 8, 9]), format: 'opus' });
+    session.emit({ type: 'reply_sentence', text: 'Hello back.', segmentId: 'seg1' });
+    session.emit({
+      type: 'reply_audio',
+      audio: new Uint8Array([7, 8, 9]),
+      format: 'opus',
+      segmentId: 'seg1',
+    });
     await vi.waitFor(() => expect(client.frames.some((f) => f.t === 'audio')).toBe(true));
 
     expect(client.frames[0]).toMatchObject({ t: 'ready', protocolVersion: 1 });
@@ -215,6 +230,119 @@ describe('voice socket', () => {
 
     client.ws.terminate();
     await vi.waitFor(() => expect(socketLane.laneCount).toBe(0));
+  });
+});
+
+// D8 (plan §7): a second browser tab on the SAME conversation is a takeover,
+// not a second billed session. Both connections here resolve to the SAME
+// lane key — exactly what happens when two tabs open `hello` with the same
+// `sessionId` (`browser-voice-session.ts` derives the key from it, ignoring
+// which socket asked). Real `ws` connections end to end, same as the suite
+// above — a fake socket would prove nothing about the actual close handshake
+// the client has to observe.
+describe('voice socket — D8 takeover on one lane key', () => {
+  let server: Server;
+  let socketLane: VoiceSocket;
+  let url: string;
+  let sessions: FakeVoiceSession[];
+
+  beforeEach(async () => {
+    sessions = [];
+    const opener: VoiceLaneSessionOpener = () => {
+      const s = new FakeVoiceSession();
+      sessions.push(s);
+      return Promise.resolve({
+        session: s as unknown as VoiceSession,
+        laneKey: 'voice:web:browser:shared',
+      });
+    };
+    server = createServer((_req, res) => res.end('ok'));
+    socketLane = createVoiceSocket({
+      session: () => opener,
+      authenticate: () => Promise.resolve(true),
+    });
+    socketLane.attach(server);
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const { port } = server.address() as AddressInfo;
+    url = `ws://127.0.0.1:${port}`;
+  });
+
+  afterEach(async () => {
+    await socketLane.close();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  });
+
+  async function connect() {
+    const client = openClient(url, {}, VOICE_SOCKET_PATH);
+    await new Promise<void>((resolve) => client.ws.on('open', () => resolve()));
+    return client;
+  }
+
+  it('closes the first connection (and stops its session) when a second opens the same lane key, and lets the second proceed', async () => {
+    const first = await connect();
+    first.send({ t: 'hello', sessionId: 'chat-9', sampleRate: 16_000 });
+    await vi.waitFor(() => expect(first.frames.some((f) => f.t === 'ready')).toBe(true));
+    await vi.waitFor(() => expect(sessions).toHaveLength(1));
+
+    const second = await connect();
+    second.send({ t: 'hello', sessionId: 'chat-9', sampleRate: 16_000 });
+    await vi.waitFor(() => expect(sessions).toHaveLength(2));
+
+    // The FIRST connection is told why, its session is stopped, and its
+    // socket actually closes.
+    await vi.waitFor(() =>
+      expect(first.frames.some((f) => f.t === 'error' && f.code === 'taken_over')).toBe(true),
+    );
+    await vi.waitFor(() => expect(sessions[0]?.stopCalls).toBe(1));
+    await vi.waitFor(() => expect(first.ws.readyState).toBe(WebSocket.CLOSED));
+
+    // The SECOND connection proceeds normally — it is the live one now.
+    await vi.waitFor(() => expect(second.frames.some((f) => f.t === 'ready')).toBe(true));
+    second.send({ t: 'audio', seq: 0 }, pcm16ToBytes(Int16Array.from([1])));
+    await vi.waitFor(() => expect(sessions[1]?.pushed).toHaveLength(1));
+
+    second.ws.close();
+  });
+
+  it('cascades: a third connection on the same key takes over the second, exactly like the second took over the first', async () => {
+    const first = await connect();
+    first.send({ t: 'hello', sessionId: 'chat-9', sampleRate: 16_000 });
+    await vi.waitFor(() => expect(first.frames.some((f) => f.t === 'ready')).toBe(true));
+    await vi.waitFor(() => expect(sessions).toHaveLength(1));
+
+    const second = await connect();
+    const third = await connect();
+    // Fire both `hello`s back to back, without waiting for the first
+    // connection's close handshake (a real network round trip) to land —
+    // the exact window that used to trip the (now-removed) `voice_lane_busy`
+    // false refusal. `onLaneKey` installs its holder in `holders`
+    // synchronously, so by the time `third`'s `hello` is processed, `second`
+    // is already the sole, fully-live holder — `third` taking over `second`
+    // is exactly as valid as `second` taking over `first` was.
+    second.send({ t: 'hello', sessionId: 'chat-9', sampleRate: 16_000 });
+    third.send({ t: 'hello', sessionId: 'chat-9', sampleRate: 16_000 });
+
+    await vi.waitFor(() => expect(sessions).toHaveLength(3));
+
+    // Both FIRST and SECOND are told they were taken over, their sessions
+    // stopped, and their sockets actually closed.
+    await vi.waitFor(() =>
+      expect(first.frames.some((f) => f.t === 'error' && f.code === 'taken_over')).toBe(true),
+    );
+    await vi.waitFor(() =>
+      expect(second.frames.some((f) => f.t === 'error' && f.code === 'taken_over')).toBe(true),
+    );
+    await vi.waitFor(() => expect(sessions[0]?.stopCalls).toBe(1));
+    await vi.waitFor(() => expect(sessions[1]?.stopCalls).toBe(1));
+    await vi.waitFor(() => expect(first.ws.readyState).toBe(WebSocket.CLOSED));
+    await vi.waitFor(() => expect(second.ws.readyState).toBe(WebSocket.CLOSED));
+
+    // THIRD is the one left standing — it is the live holder and it works.
+    await vi.waitFor(() => expect(third.frames.some((f) => f.t === 'ready')).toBe(true));
+    third.send({ t: 'audio', seq: 0 }, pcm16ToBytes(Int16Array.from([1])));
+    await vi.waitFor(() => expect(sessions[2]?.pushed).toHaveLength(1));
+
+    third.ws.close();
   });
 });
 

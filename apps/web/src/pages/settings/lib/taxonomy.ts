@@ -89,6 +89,10 @@ export const SETTINGS_CATEGORIES: readonly SettingsCategory[] = [
       // Three surfaces: call, satellite, and browser — the last carrying the
       // five `display.voice_*` sliders that endpoint in this browser.
       section('barge-in', 'barge-in'),
+      // Global — one filler line and one tick cadence for every lane, unlike
+      // barge-in's per-surface split (the gap it covers, a silent tool call,
+      // is the same gap on the phone, the satellite and the browser).
+      section('tool-call-filler', 'tool-call filler'),
       section('trunk', 'trunk'),
       section('livekit', 'LiveKit'),
       section('numbers', 'numbers'),

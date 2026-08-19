@@ -345,8 +345,8 @@ describe('talk-mode pin — barge-in', () => {
       runAgentTurn: async function* (_text, signal) {
         signal.addEventListener('abort', () => {
           turnAborted = true;
-          // Production parity: `runVoiceAgentTurn` aborts the chat turn on the
-          // same signal, which ends the SSE tap feeding this stream.
+          // Production parity: `runBrowserVoiceTurn` forwards this same
+          // signal to the `voice.runTurn` RPC call, which ends the stream.
           reply.end();
         });
         for await (const chunk of reply.stream()) {
@@ -396,7 +396,8 @@ describe('talk-mode pin — barge-in', () => {
       synthesize: (text) => Promise.resolve({ audioBase64: `tts:${text}`, mimeType: 'audio/mp3' }),
       runAgentTurn: (_text, signal) => {
         // Aborting the turn ends the upstream reply stream, as it does in
-        // production (`runVoiceAgentTurn` → `abortTurn` → SSE closes).
+        // production (`runBrowserVoiceTurn` forwards the signal into the
+        // `voice.runTurn` RPC call).
         signal.addEventListener('abort', () => reply.end(), { once: true });
         return reply.stream();
       },

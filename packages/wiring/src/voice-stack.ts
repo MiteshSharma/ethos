@@ -39,7 +39,11 @@
 //      personality that speaks picks the provider, and two personalities naming
 //      different roster entries get different providers on the same machine.
 
-import type { VoiceBargeInSurface, VoiceBargeInTuning } from '@ethosagent/config';
+import type {
+  VoiceBargeInSurface,
+  VoiceBargeInTuning,
+  VoiceFillerConfig,
+} from '@ethosagent/config';
 import type { VoiceLaneClientKind } from '@ethosagent/core';
 import {
   deriveBotKey,
@@ -273,6 +277,18 @@ export interface VoiceStack {
   close(): Promise<void>;
 }
 
+// `voice.filler.*` built-in defaults, applied here (not in `VoiceSession`,
+// which stays disabled unless configured) so an unconfigured deployment still
+// gets a spoken line and a tick during a long tool call. `text` is
+// deliberately its own constant rather than `DEFAULT_VOICE_FILLER_TEXT` from
+// `@ethosagent/voice-session`: that constant is ALSO the hosted-realtime
+// tier's consult filler default (`RealtimeControlLane`), which this feature
+// does not touch — changing it would move a different surface's wording as a
+// side effect of tuning this one.
+const DEFAULT_TOOL_FILLER_AFTER_MS = 600;
+const DEFAULT_TOOL_FILLER_TEXT = 'Let me check that.';
+const DEFAULT_TOOL_FILLER_TICK_MS = 4000;
+
 /**
  * Construct the voice stack from `config.voice.*`, falling back to a minimal
  * stack when only `auxiliary.asr`/`auxiliary.tts` are configured. Returns null
@@ -394,6 +410,24 @@ export async function buildVoiceStack(deps: BuildVoiceStackDeps): Promise<VoiceS
     // `voice.bargeIn.<surface>` always wins.
     const tuning: VoiceBargeInTuning =
       (opts.surface ? voice.bargeIn?.[opts.surface] : undefined) ?? opts.bargeInFallback ?? {};
+    // `voice.filler.*` — a deployment-wide setting (plan/phases/voice-live-personality.md
+    // §9) once the operator has an opinion: `enabled: false` turns off both
+    // the filler and the tick everywhere, and an explicit `enabled: true`
+    // turns it on everywhere (phone, satellite, browser alike) — those two
+    // are uniform on purpose, so one flip covers every lane.
+    //
+    // The DEFAULT, absent an explicit `enabled`, is NOT uniform: it is
+    // browser-only. This feature shipped scoped to the browser pipeline lane
+    // (L1) — a phone or satellite deployment that merely has a `voice.*`
+    // block configured (which most do, for STT/TTS) has never heard this
+    // line, and defaulting it on everywhere the moment this ships would be a
+    // silent behavior change to channels this work never touched.
+    const filler: VoiceFillerConfig = voice.filler ?? {};
+    const fillerEnabled = filler.enabled ?? opts.surface === 'browser';
+    const fillerAfterMs = fillerEnabled ? (filler.afterMs ?? DEFAULT_TOOL_FILLER_AFTER_MS) : 0;
+    const tickIntervalMs = fillerEnabled
+      ? (filler.tickIntervalMs ?? DEFAULT_TOOL_FILLER_TICK_MS)
+      : 0;
     const [sttFor, ttsFor] = await Promise.all([
       resolveSttFor(personalityVoice),
       resolveTtsFor(personalityVoice),
@@ -440,6 +474,9 @@ export async function buildVoiceStack(deps: BuildVoiceStackDeps): Promise<VoiceS
         // Under `opts.sessionConfig`: the operator tunes the SURFACE, a caller
         // that hands us an explicit endpoint for one lane means that one lane.
         ...(tuning.silenceMs !== undefined ? { endpointSilenceMs: tuning.silenceMs } : {}),
+        ...(fillerAfterMs > 0 ? { fillerAfterMs } : {}),
+        fillerText: filler.text ?? DEFAULT_TOOL_FILLER_TEXT,
+        ...(tickIntervalMs > 0 ? { tickIntervalMs } : {}),
         ...opts.sessionConfig,
       },
     });

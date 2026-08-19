@@ -1242,6 +1242,19 @@ const ConfigGetOutput = z.object({
    *  ABSENT from the map was never tuned — which is a different fact from
    *  "tuned to the defaults" and is why this is a map and not fixed objects. */
   voiceBargeIn: z.record(z.string(), VoiceBargeInTuningGetSchema),
+  /**
+   * `voice.filler.*` — the tool-call filler/tick keep-alive `VoiceSession`
+   * plays during a long tool call. Global, applied to every lane the same
+   * way — unlike `voiceBargeIn`, there is no per-surface split. `enabled` is
+   * never null (absent = true = on); the other three are null when unset, so
+   * the built-in default applies.
+   */
+  voiceFiller: z.object({
+    enabled: z.boolean(),
+    afterMs: z.number().nullable(),
+    text: z.string().nullable(),
+    tickIntervalMs: z.number().nullable(),
+  }),
   /** `voice.bots[]` — the number → bot → personality table, in file order. */
   voiceBots: z.array(VoiceBotGetSchema),
   // -- Settings-page additions (keys with no other UI home) ------------------
@@ -1592,6 +1605,17 @@ const ConfigUpdateInput = z.object({
    *  an unknown surface is REFUSED here rather than dropped, because at an RPC
    *  boundary there is a caller to tell. */
   voiceBargeIn: z.record(z.string(), VoiceBargeInTuningUpdateSchema).optional(),
+  /** `voice.filler.*`. Per-field merge; null clears one key back to its
+   *  built-in default. `afterMs`/`tickIntervalMs` are bounded the same as the
+   *  `VoiceSession` debounce/interval they configure. */
+  voiceFiller: z
+    .object({
+      enabled: z.boolean().nullable().optional(),
+      afterMs: z.number().int().min(0).max(60_000).nullable().optional(),
+      text: z.string().min(1).max(200).nullable().optional(),
+      tickIntervalMs: z.number().int().min(0).max(60_000).nullable().optional(),
+    })
+    .optional(),
   /** `voice.bots[]` — the number → bot → personality table. Present = REPLACE
    *  the whole list (every `voice.bots.` key is dropped, then these are
    *  written, renumbered from 0), so a removed row is a deletion. Absent leaves
@@ -3061,6 +3085,24 @@ const VoiceSynthesizeOutput = z.object({
 });
 
 /**
+ * The batch-RPC fallback tier's turn driver — for a browser that cannot
+ * stream (`talk-mode-client.ts`'s `forceBatch`/no-`WebSocket` path). Drives
+ * one agent turn against the SAME browser voice lane
+ * (`voice:<botKey>:browser:<sessionId>`) a streaming connection for this
+ * `sessionId` would use — never the typed chat session (Conflict 1,
+ * plan/phases/voice-live-personality.md §7). `sessionId` here is the CHAT
+ * session id this call belongs to, the same field/meaning as the streaming
+ * lane's `hello.sessionId` — telemetry and lane-key derivation only, never
+ * what actually persists the turn.
+ */
+const VoiceRunTurnInput = z.object({
+  text: z.string().min(1),
+  sessionId: z.string().optional(),
+  personalityId: z.string().optional(),
+});
+const VoiceRunTurnOutput = z.object({ reply: z.string() });
+
+/**
  * What one selectable TTS entry can do. `providerId` is the registered provider
  * the entry names (null = nothing configured). `voices` is the provider's
  * advertised `caps.voices`: a list means the voice id must come FROM it, `null`
@@ -3416,6 +3458,9 @@ const CallsGetOutput = z.object({ call: CallDetailSchema.nullable() });
 const voice = {
   transcribe: oc.input(VoiceTranscribeInput).output(VoiceTranscribeOutput),
   synthesize: oc.input(VoiceSynthesizeInput).output(VoiceSynthesizeOutput),
+  /** Batch-RPC fallback tier's turn driver — runs on the browser voice lane,
+   *  never the chat session. See `VoiceRunTurnInput`'s doc comment. */
+  runTurn: oc.input(VoiceRunTurnInput).output(VoiceRunTurnOutput),
   /** Selectable TTS entries + the voice ids each advertises. Read-only: it
    *  constructs providers to read their caps and synthesizes nothing. */
   ttsEntries: oc.output(VoiceTtsEntriesOutput),

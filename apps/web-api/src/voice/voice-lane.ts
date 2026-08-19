@@ -22,20 +22,29 @@ import {
 // the sample rate and the personality — the lane cannot resolve one at
 // construction time the way the socket layer constructs the lane itself.
 
-/** Opens this connection's `VoiceSession`. Null → the pipeline is not
- *  available for this deployment (no `voice.*` stack configured); the
- *  handshake still completes, but audio frames are refused with a clear
- *  error rather than silently doing nothing. */
+/** Opens this connection's `VoiceSession`, alongside the lane key it resolved
+ *  to. Null → the pipeline is not available for this deployment (no
+ *  `voice.*` stack configured); the handshake still completes, but audio
+ *  frames are refused with a clear error rather than silently doing nothing.
+ *  The lane key travels back up WITH the session (rather than staying
+ *  opaque inside the opener closure) so the socket layer can coordinate
+ *  connections that resolve to the SAME key — two browser tabs on one
+ *  conversation (D8 takeover, see `voice-socket.ts`). */
 export type VoiceLaneSessionOpener = (info: {
   sessionId?: string;
   personalityId?: string;
-}) => Promise<VoiceSession | null>;
+}) => Promise<{ session: VoiceSession; laneKey: string } | null>;
 
 export interface VoiceLaneOptions {
   laneId: string;
   /** Deliver one frame to THIS lane's socket. */
   send(frame: VoiceServerFrame, payload?: Uint8Array): void;
   openSession: VoiceLaneSessionOpener;
+  /** Fired once this connection's lane key is known — right after
+   *  `openSession` resolves, before the session's events start flowing.
+   *  Absent → no-op (a caller with no cross-connection coordination needs,
+   *  e.g. a test). */
+  onLaneKey?: (laneKey: string) => void;
 }
 
 /** Provider audio format → the MIME type the wire frame carries. Shared with
@@ -46,12 +55,6 @@ export const MIME_BY_FORMAT: Record<string, string> = {
   wav: 'audio/wav',
   pcm: 'audio/pcm',
 };
-
-/** One reply segment's audio, in flight. */
-interface OpenSegment {
-  id: string;
-  seq: number;
-}
 
 export class VoiceLane {
   private readonly opts: VoiceLaneOptions;
@@ -64,8 +67,11 @@ export class VoiceLane {
   private sampleRate: number | null = null;
   private utteranceSeq = 0;
   private currentUtteranceId = '';
-  private segmentSeq = 0;
-  private openSegment: OpenSegment | null = null;
+  /** Per-segment audio-frame counter for the wire's `seq` field. Keyed by
+   *  `VoiceSessionEvent.segmentId` — `VoiceSession` mints the id and owns
+   *  segment boundaries entirely; this lane no longer tracks "which segment
+   *  is open" itself (see `onSessionEvent`). */
+  private audioSeqBySegment = new Map<string, number>();
 
   constructor(opts: VoiceLaneOptions) {
     this.opts = opts;
@@ -91,14 +97,17 @@ export class VoiceLane {
     }
   }
 
-  /** Socket closed. Unsubscribe — the in-flight turn (if any) is not aborted;
-   *  see `VoiceChannelAdapter.stop()` for the same posture on the other
-   *  `VoiceSession`-backed lanes. */
+  /** Socket closed. Unsubscribe and stop the session — same
+   *  `VoiceSession.stop()` call `VoiceChannelAdapter.stop()` makes on the
+   *  other `VoiceSession`-backed lanes, so a closed tab does not leave the
+   *  in-flight turn (LLM tokens, STT/TTS calls) running to completion with
+   *  nobody listening. */
   close(): void {
     if (this.closed) return;
     this.closed = true;
     this.unsubscribe?.();
     this.unsubscribe = null;
+    this.session?.stop();
     this.session = null;
   }
 
@@ -110,10 +119,16 @@ export class VoiceLane {
     if (this.opening) return;
     this.opening = true;
     this.sampleRate = sampleRate;
-    let session: VoiceSession | null;
+    let opened: { session: VoiceSession; laneKey: string } | null;
     try {
-      session = await this.opts.openSession({ sessionId, personalityId });
+      opened = await this.opts.openSession({ sessionId, personalityId });
     } catch (err) {
+      // Reset on every FAILURE exit (this one and the `!opened` branch
+      // below), never on success: a transient failure must let a retry
+      // `hello` open the pipeline again, but once genuinely open, `opening`
+      // stays true for good — that is what stops a stray duplicate `hello`
+      // from reopening an already-live session.
+      this.opening = false;
       if (this.closed) return;
       this.opts.send({
         t: 'error',
@@ -123,7 +138,8 @@ export class VoiceLane {
       return;
     }
     if (this.closed) return;
-    if (!session) {
+    if (!opened) {
+      this.opening = false;
       this.opts.send({
         t: 'error',
         code: 'voice_unavailable',
@@ -131,24 +147,33 @@ export class VoiceLane {
       });
       return;
     }
-    this.session = session;
-    this.unsubscribe = session.on((event) => this.onSessionEvent(event));
+    this.session = opened.session;
+    // Before the session's own events start flowing, so a socket-layer
+    // takeover triggered by `onLaneKey` (this connection collided with an
+    // already-live one on the same key) can evict the OTHER connection
+    // before either side observes a stray event from it.
+    this.opts.onLaneKey?.(opened.laneKey);
+    if (this.closed) return;
+    this.unsubscribe = opened.session.on((event) => this.onSessionEvent(event));
   }
 
   /**
    * Translate one `VoiceSessionEvent` into the wire frame(s) it corresponds
-   * to. `reply_sentence`/`filler` open a new segment (closing whatever was
-   * still open — `VoiceSession`'s playout queue drains strictly in enqueue
-   * order, so a new segment event can only arrive once the previous one's
-   * audio has finished, which is what makes closing-on-next-open safe here
-   * without `VoiceSession` itself reporting a segment boundary).
+   * to. Segment boundaries are `VoiceSession`'s own call — it mints
+   * `segmentId` on `reply_sentence`/`filler` and reports `reply_segment_end`
+   * once THAT segment's audio is fully delivered (naturally, or because
+   * barge-in cut it off) — never inferred here from "a new segment event
+   * arrived, so the old one must be done". That inference was the bug: with
+   * prefetch, a later sentence's `reply_sentence` (and even its first
+   * `reply_audio`) can arrive before an earlier sentence's audio has
+   * finished, so "whichever segment is currently open" was not always the
+   * segment a `reply_audio` chunk actually belonged to.
    */
   private onSessionEvent(event: VoiceSessionEvent): void {
     switch (event.type) {
       case 'utterance_committed':
         this.utteranceSeq += 1;
         this.currentUtteranceId = `u${this.utteranceSeq}`;
-        this.closeOpenSegment();
         this.opts.send({
           t: 'transcript',
           utteranceId: this.currentUtteranceId,
@@ -157,29 +182,22 @@ export class VoiceLane {
         });
         return;
       case 'reply_sentence':
-      case 'filler': {
-        this.closeOpenSegment();
-        this.segmentSeq += 1;
-        const segmentId = `s${this.segmentSeq}`;
-        this.openSegment = { id: segmentId, seq: 0 };
+      case 'filler':
         this.opts.send({
           t: 'reply_text',
           utteranceId: this.currentUtteranceId,
-          segmentId,
+          segmentId: event.segmentId,
           text: event.text,
           kind: event.type === 'filler' ? 'filler' : 'sentence',
         });
         return;
-      }
       case 'reply_audio': {
-        const segment = this.openSegment;
-        if (!segment) return;
-        const seq = segment.seq++;
+        const seq = this.nextAudioSeq(event.segmentId);
         this.opts.send(
           {
             t: 'audio',
             utteranceId: this.currentUtteranceId,
-            segmentId: segment.id,
+            segmentId: event.segmentId,
             seq,
             codec: event.format === 'pcm' ? 'pcm_s16le' : 'encoded',
             mimeType: MIME_BY_FORMAT[event.format] ?? 'application/octet-stream',
@@ -188,9 +206,19 @@ export class VoiceLane {
         );
         return;
       }
+      case 'reply_segment_end':
+        this.audioSeqBySegment.delete(event.segmentId);
+        this.opts.send({
+          t: 'segment_end',
+          utteranceId: this.currentUtteranceId,
+          segmentId: event.segmentId,
+        });
+        return;
+      case 'tick':
+        this.opts.send({ t: 'tick' });
+        return;
       case 'reply_complete':
       case 'interrupted':
-        this.closeOpenSegment();
         this.opts.send({
           t: 'turn_end',
           utteranceId: this.currentUtteranceId,
@@ -209,15 +237,10 @@ export class VoiceLane {
     }
   }
 
-  private closeOpenSegment(): void {
-    const segment = this.openSegment;
-    if (!segment) return;
-    this.openSegment = null;
-    this.opts.send({
-      t: 'segment_end',
-      utteranceId: this.currentUtteranceId,
-      segmentId: segment.id,
-    });
+  private nextAudioSeq(segmentId: string): number {
+    const seq = this.audioSeqBySegment.get(segmentId) ?? 0;
+    this.audioSeqBySegment.set(segmentId, seq + 1);
+    return seq;
   }
 }
 

@@ -513,6 +513,31 @@ export const SETTINGS_INDEX: readonly SettingEntry[] = [
       dynamicGroup: 'voice-tuning',
     },
   ]),
+  ...group('voice', 'tool-call-filler', [
+    {
+      key: 'voice.filler.enabled',
+      formName: 'voiceFiller.enabled',
+      label: 'Filler & tick enabled',
+    },
+    {
+      key: 'voice.filler.afterMs',
+      formName: 'voiceFiller.afterMs',
+      label: 'Filler debounce (ms)',
+      advanced: true,
+    },
+    {
+      key: 'voice.filler.text',
+      formName: 'voiceFiller.text',
+      label: 'Filler line',
+      advanced: true,
+    },
+    {
+      key: 'voice.filler.tickIntervalMs',
+      formName: 'voiceFiller.tickIntervalMs',
+      label: 'Tick interval (ms)',
+      advanced: true,
+    },
+  ]),
   ...group('voice', 'trunk', [
     { key: 'voice.trunk.provider', formName: 'voiceTrunkProvider', label: 'Trunk provider' },
     { key: 'voice.trunk.trunkId', formName: 'voiceTrunkId', label: 'Trunk id' },

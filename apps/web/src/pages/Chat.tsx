@@ -22,7 +22,6 @@ import {
   callStageVisual,
   resolveCallAccent,
 } from '../features/voice/call-motion';
-import { runVoiceAgentTurn } from '../features/voice/chat-voice-runner';
 import { runVoiceClarify } from '../features/voice/clarify-voice';
 import { personalityCanTalk } from '../features/voice/gating';
 import { createPushToTalkHandlers } from '../features/voice/push-to-talk';
@@ -443,14 +442,10 @@ export function Chat() {
               ...(personalityId ? { personalityId } : {}),
             })
             .then((r) => r.transcript),
-        // Reuse the existing chat send + stream so the spoken turn shares the
-        // active chat session (same personality, same persisted history).
-        runAgentTurn: (text, signal) =>
-          runVoiceAgentTurn(text, signal, {
-            sessionId: () => sessionIdRef.current,
-            sendMessage,
-            abortTurn,
-          }),
+        // No `runAgentTurn` override here: `createTalkModeClient`'s batch
+        // fallback default (`runBrowserVoiceTurn`) drives the turn on the
+        // browser voice lane itself, not the chat session — see Bug 4 /
+        // Conflict 1 in `plan/phases/voice-live-personality.md` §7.
         ...(ttsConfigured
           ? {
               synthesize: (text, voice) =>
@@ -489,8 +484,6 @@ export function Chat() {
       voiceBargeSustainMs,
       voiceSpeechThreshold,
       voiceSpeechMinMs,
-      sendMessage,
-      abortTurn,
       personalityId,
     ],
   );

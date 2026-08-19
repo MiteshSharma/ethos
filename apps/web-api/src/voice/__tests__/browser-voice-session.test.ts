@@ -2,7 +2,7 @@ import type { AgentLoop } from '@ethosagent/core';
 import type { AgentEvent, PersonalityConfig } from '@ethosagent/types';
 import type { CreateVoiceSessionOptions, VoiceStack } from '@ethosagent/wiring';
 import { describe, expect, it } from 'vitest';
-import { createBrowserVoiceSessionOpener } from '../browser-voice-session';
+import { createBrowserVoiceSessionOpener, runBrowserVoiceTurn } from '../browser-voice-session';
 
 // Two things matter here, both load-bearing for Conflict 1 ("kill the split"):
 //
@@ -91,6 +91,26 @@ describe('createBrowserVoiceSessionOpener', () => {
     const session = await opener({ sessionId: 'chat-9' });
     expect(session).toBeNull();
     expect(calls).toEqual([]);
+  });
+
+  // Bug 6 (D8 takeover): the socket layer needs the resolved lane key back
+  // ALONGSIDE the session — it was opaque inside this closure before, which
+  // is what made cross-connection coordination (two tabs, one key)
+  // impossible from `voice-socket.ts`.
+  it('resolves { session, laneKey } together, not a bare session', async () => {
+    const stubSession = { marker: 'stub-session' };
+    const opener = createBrowserVoiceSessionOpener(
+      {
+        voiceStack: fakeVoiceStack(() => stubSession),
+        agentLoop: fakeAgentLoop([]),
+        personalities: { get: () => undefined },
+        botKey: 'ethos',
+      },
+      'lane-1',
+    );
+
+    const resolved = await opener({ sessionId: 'chat-9' });
+    expect(resolved).toEqual({ session: stubSession, laneKey: 'voice:ethos:browser:chat-9' });
   });
 
   it('derives voice:<botKey>:browser:<sessionId>, never a chat session key', async () => {
@@ -308,5 +328,103 @@ describe('createBrowserVoiceSessionOpener', () => {
 
     await opener({ sessionId: 'chat-9' });
     expect(seenOpts[0]).not.toHaveProperty('bargeInFallback');
+  });
+});
+
+// The batch-RPC fallback tier's turn driver (`voice.runTurn`) — Bug 4's fix.
+// Same Conflict-1 argument as `createBrowserVoiceSessionOpener` above: a
+// spoken turn must land on `voice:<botKey>:browser:<id>`, never a chat
+// session key, REGARDLESS of which transport (streaming lane or batch RPC)
+// drove it.
+describe('runBrowserVoiceTurn', () => {
+  it('runs the turn against the browser voice lane key, not a chat session key', async () => {
+    const calls: RunCall[] = [];
+    const reply = await runBrowserVoiceTurn(
+      { agentLoop: fakeAgentLoop(calls), botKey: 'ethos' },
+      { text: 'what is the weather', sessionId: 'chat-9', fallbackClientId: 'batch-1' },
+    );
+
+    expect(reply).toBe('ok');
+    expect(calls).toEqual([
+      {
+        text: 'what is the weather',
+        sessionKey: 'voice:ethos:browser:chat-9',
+        personalityId: undefined,
+        voiceOrigin: { transport: 'browser-talk-mode', speaker: 'owner' },
+        modelOverride: undefined,
+        aborted: undefined,
+      },
+    ]);
+  });
+
+  it('derives the same lane key createBrowserVoiceSessionOpener would for the same sessionId', async () => {
+    const calls: RunCall[] = [];
+    await runBrowserVoiceTurn(
+      { agentLoop: fakeAgentLoop(calls), botKey: 'ethos' },
+      { text: 'hi', sessionId: 'chat-9', fallbackClientId: 'batch-1' },
+    );
+
+    const seenOpts: CreateVoiceSessionOptions[] = [];
+    await createBrowserVoiceSessionOpener(
+      {
+        voiceStack: fakeVoiceStack((opts) => {
+          seenOpts.push(opts);
+          return {};
+        }),
+        agentLoop: fakeAgentLoop([]),
+        personalities: { get: () => undefined },
+        botKey: 'ethos',
+      },
+      'lane-1',
+    )({ sessionId: 'chat-9' });
+
+    expect(calls[0]?.sessionKey).toBe(seenOpts[0]?.laneKey);
+  });
+
+  it('falls back to fallbackClientId when there is no chat session yet', async () => {
+    const calls: RunCall[] = [];
+    await runBrowserVoiceTurn(
+      { agentLoop: fakeAgentLoop(calls) },
+      { text: 'hi', fallbackClientId: 'batch-42' },
+    );
+
+    expect(calls[0]?.sessionKey).toBe('voice:web:browser:batch-42');
+  });
+
+  it('forwards personalityId and abortSignal through to the loop', async () => {
+    const calls: RunCall[] = [];
+    const controller = new AbortController();
+    controller.abort();
+
+    await runBrowserVoiceTurn(
+      { agentLoop: fakeAgentLoop(calls) },
+      {
+        text: 'hi',
+        sessionId: 'chat-9',
+        personalityId: 'researcher',
+        fallbackClientId: 'batch-1',
+        abortSignal: controller.signal,
+      },
+    );
+
+    expect(calls[0]?.personalityId).toBe('researcher');
+    expect(calls[0]?.aborted).toBe(true);
+  });
+
+  it('assembles the reply from every text_delta, not just the first', async () => {
+    const runner: AgentLoop = {
+      run: async function* (): AsyncGenerator<AgentEvent> {
+        yield { type: 'text_delta', text: 'Clear skies. ' };
+        yield { type: 'text_delta', text: 'Twelve degrees.' };
+        yield { type: 'done', text: 'Clear skies. Twelve degrees.', turnCount: 1 };
+      },
+    } as unknown as AgentLoop;
+
+    const reply = await runBrowserVoiceTurn(
+      { agentLoop: runner },
+      { text: 'weather?', sessionId: 'chat-9', fallbackClientId: 'batch-1' },
+    );
+
+    expect(reply).toBe('Clear skies. Twelve degrees.');
   });
 });

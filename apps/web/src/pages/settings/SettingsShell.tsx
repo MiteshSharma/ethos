@@ -188,6 +188,10 @@ export function SettingsShell() {
         displayResumeRecapTurns: configQuery.data.displayResumeRecapTurns,
         displayBellOnComplete: configQuery.data.displayBellOnComplete,
         compaction: { ...configQuery.data.compaction },
+        voiceFiller: {
+          ...configQuery.data.voiceFiller,
+          text: configQuery.data.voiceFiller.text ?? '',
+        },
         memoryVault: {
           path: configQuery.data.memoryVault.path ?? '',
           agentDir: configQuery.data.memoryVault.agentDir ?? '',

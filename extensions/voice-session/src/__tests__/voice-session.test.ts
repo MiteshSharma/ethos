@@ -6,6 +6,7 @@ import {
   batchStt,
   batchTts,
   deferred,
+  FakeTimerClock,
   FakeVad,
   feed,
   makeClock,
@@ -16,6 +17,7 @@ import {
   streamingTts,
   tick,
   waitForEvent,
+  waitForTimer,
 } from './fakes';
 
 function collect(session: VoiceSession): VoiceSessionEvent[] {
@@ -226,5 +228,341 @@ describe('VoiceSession', () => {
     expect(sentences).toEqual(['Okay done.']);
     // Exactly one audio chunk — from the single spoken sentence, nothing else.
     expect(events.filter((e) => e.type === 'reply_audio')).toHaveLength(1);
+  });
+});
+
+describe('VoiceSession — stop()', () => {
+  // Bug: closing a browser tab (or tearing down a SIP/LiveKit call) had no way
+  // to tell VoiceSession to stop. `pushAudio` fires `handleUtterance`/
+  // `runTurn` as a detached async operation, so a caller that only dropped
+  // its reference (the old `VoiceLane.close()`/`VoiceChannelAdapter.stop()`
+  // posture) left the in-flight LLM turn, STT call and TTS synthesis running
+  // to completion with nobody listening — real cost exposure with no way to
+  // stop it short of the whole process dying.
+  it('aborts the in-flight turn and cancels playout without emitting interrupted or reply_complete', async () => {
+    const clock = makeClock();
+    const gate = deferred();
+    let secondYielded = false;
+    const runner: AgentTurnRunner = {
+      async *run(_text, opts): AsyncGenerator<AgentEvent> {
+        yield { type: 'text_delta', text: 'Hello there. ' };
+        await gate.promise;
+        if (opts?.abortSignal?.aborted) return;
+        secondYielded = true;
+        yield { type: 'text_delta', text: 'How are you?' };
+      },
+    };
+    const session = new VoiceSession({
+      runner,
+      stt: streamingStt('hi'),
+      tts: streamingTts(),
+      vad: new FakeVad(),
+      now: clock.now,
+    });
+    const events = collect(session);
+
+    speakUtterance(session, clock);
+    await waitForEvent(events, 'reply_audio'); // first sentence played
+    await tick();
+
+    session.stop();
+
+    // Nothing was emitted for the stop itself — no `interrupted`, and once the
+    // aborted runner unwinds, no `reply_complete` either.
+    expect(events.some((e) => e.type === 'interrupted')).toBe(false);
+    gate.resolve();
+    await session.idle();
+
+    expect(secondYielded).toBe(false); // the turn was aborted before the 2nd sentence
+    expect(events.some((e) => e.type === 'reply_complete')).toBe(false);
+    expect(events.some((e) => e.type === 'interrupted')).toBe(false);
+  });
+
+  it('is idempotent and safe to call on a session with no turn in flight', () => {
+    const clock = makeClock();
+    const session = new VoiceSession({
+      runner: scriptedRunner([]),
+      stt: streamingStt('hi'),
+      tts: streamingTts(),
+      vad: new FakeVad(),
+      now: clock.now,
+    });
+    expect(() => {
+      session.stop();
+      session.stop();
+    }).not.toThrow();
+  });
+
+  it('clears a pending filler debounce and tick interval', async () => {
+    const clock = new FakeTimerClock();
+    const gate = deferred();
+    const runner: AgentTurnRunner = {
+      async *run(): AsyncGenerator<AgentEvent> {
+        yield { type: 'tool_start', toolCallId: 't1', toolName: 'search', args: {} };
+        await gate.promise;
+        yield { type: 'tool_end', toolCallId: 't1', toolName: 'search', ok: true, durationMs: 5 };
+      },
+    };
+    const session = new VoiceSession({
+      runner,
+      stt: streamingStt('hi'),
+      tts: streamingTts(),
+      vad: new FakeVad(),
+      now: clock.now,
+      setTimer: clock.setTimer,
+      clearTimer: clock.clearTimer,
+      config: { fillerAfterMs: 50, tickIntervalMs: 60 },
+    });
+    const events = collect(session);
+
+    feed(session, clock, speechFrame(), 5);
+    feed(session, clock, silenceFrame(), 30);
+    await waitForTimer(clock);
+    expect(clock.hasPending()).toBe(true);
+
+    session.stop();
+
+    expect(clock.hasPending()).toBe(false);
+    expect(events.some((e) => e.type === 'filler')).toBe(false);
+    expect(events.some((e) => e.type === 'tick')).toBe(false);
+    gate.resolve();
+  });
+});
+
+describe('VoiceSession — tool-call filler and tick', () => {
+  it('speaks the filler once a tool call outlasts the debounce', async () => {
+    const clock = new FakeTimerClock();
+    const gate = deferred();
+    const runner: AgentTurnRunner = {
+      async *run(): AsyncGenerator<AgentEvent> {
+        yield { type: 'tool_start', toolCallId: 't1', toolName: 'search', args: {} };
+        await gate.promise;
+        yield { type: 'tool_end', toolCallId: 't1', toolName: 'search', ok: true, durationMs: 5 };
+        yield { type: 'text_delta', text: 'Found it.' };
+      },
+    };
+    const session = new VoiceSession({
+      runner,
+      stt: streamingStt('search for something'),
+      tts: streamingTts(),
+      vad: new FakeVad(),
+      now: clock.now,
+      setTimer: clock.setTimer,
+      clearTimer: clock.clearTimer,
+      config: { fillerAfterMs: 600, fillerText: 'Let me check that.' },
+    });
+    const events = collect(session);
+
+    speakUtterance(session, clock);
+    await waitForTimer(clock); // the filler debounce is now armed
+
+    clock.advance(600);
+    expect(events.find((e) => e.type === 'filler')).toMatchObject({ text: 'Let me check that.' });
+
+    gate.resolve();
+    await session.idle();
+
+    expect(events.find((e) => e.type === 'reply_complete')).toBeTruthy();
+  });
+
+  it('does not speak the filler when the tool finishes before the debounce elapses', async () => {
+    const clock = new FakeTimerClock();
+    const gate = deferred();
+    const runner: AgentTurnRunner = {
+      async *run(): AsyncGenerator<AgentEvent> {
+        yield { type: 'tool_start', toolCallId: 't1', toolName: 'search', args: {} };
+        await gate.promise;
+        yield { type: 'tool_end', toolCallId: 't1', toolName: 'search', ok: true, durationMs: 5 };
+        yield { type: 'text_delta', text: 'Found it.' };
+      },
+    };
+    const session = new VoiceSession({
+      runner,
+      stt: streamingStt('search for something'),
+      tts: streamingTts(),
+      vad: new FakeVad(),
+      now: clock.now,
+      setTimer: clock.setTimer,
+      clearTimer: clock.clearTimer,
+      config: { fillerAfterMs: 600, fillerText: 'Let me check that.' },
+    });
+    const events = collect(session);
+
+    speakUtterance(session, clock);
+    await waitForTimer(clock); // the filler debounce is armed…
+
+    gate.resolve(); // …but the tool finishes right away
+    await tick();
+    await tick();
+
+    // Only now does the debounce window elapse — too late, it was cancelled.
+    clock.advance(600);
+    await session.idle();
+
+    expect(events.find((e) => e.type === 'filler')).toBeUndefined();
+    expect(events.find((e) => e.type === 'reply_complete')).toMatchObject({ text: 'Found it.' });
+  });
+
+  it('does not speak the filler when reply text already started before the tool call', async () => {
+    const clock = new FakeTimerClock();
+    const gate = deferred();
+    const runner: AgentTurnRunner = {
+      async *run(): AsyncGenerator<AgentEvent> {
+        yield { type: 'text_delta', text: 'Let me look. ' };
+        yield { type: 'tool_start', toolCallId: 't1', toolName: 'search', args: {} };
+        await gate.promise;
+        yield { type: 'tool_end', toolCallId: 't1', toolName: 'search', ok: true, durationMs: 5 };
+        yield { type: 'text_delta', text: 'Found it.' };
+      },
+    };
+    const session = new VoiceSession({
+      runner,
+      stt: streamingStt('search for something'),
+      tts: streamingTts(),
+      vad: new FakeVad(),
+      now: clock.now,
+      setTimer: clock.setTimer,
+      clearTimer: clock.clearTimer,
+      config: { fillerAfterMs: 600 },
+    });
+    const events = collect(session);
+
+    speakUtterance(session, clock);
+    await tick();
+    await tick();
+    // No timer is armed at all — text already resumed before this tool call.
+    expect(clock.hasPending()).toBe(false);
+
+    gate.resolve();
+    await session.idle();
+
+    expect(events.find((e) => e.type === 'filler')).toBeUndefined();
+  });
+
+  it('ticks at the configured interval while a tool is in flight, and stops the instant it ends', async () => {
+    const clock = new FakeTimerClock();
+    const gate = deferred();
+    const runner: AgentTurnRunner = {
+      async *run(): AsyncGenerator<AgentEvent> {
+        yield { type: 'tool_start', toolCallId: 't1', toolName: 'search', args: {} };
+        await gate.promise;
+        yield { type: 'tool_end', toolCallId: 't1', toolName: 'search', ok: true, durationMs: 5 };
+        yield { type: 'text_delta', text: 'Found it.' };
+      },
+    };
+    const session = new VoiceSession({
+      runner,
+      stt: streamingStt('search for something'),
+      tts: streamingTts(),
+      vad: new FakeVad(),
+      now: clock.now,
+      setTimer: clock.setTimer,
+      clearTimer: clock.clearTimer,
+      config: { tickIntervalMs: 1000 },
+    });
+    const events = collect(session);
+    const ticks = (): number => events.filter((e) => e.type === 'tick').length;
+
+    speakUtterance(session, clock);
+    await waitForTimer(clock);
+
+    clock.advance(1000);
+    expect(ticks()).toBe(1);
+    clock.advance(1000);
+    expect(ticks()).toBe(2);
+
+    gate.resolve(); // the tool ends
+    await tick();
+    await tick();
+
+    // Ticking has stopped — advancing well past several more intervals must
+    // not add any more.
+    clock.advance(5000);
+    expect(ticks()).toBe(2);
+
+    await session.idle();
+    expect(events.find((e) => e.type === 'reply_complete')).toMatchObject({ text: 'Found it.' });
+  });
+
+  it('stops ticking the instant reply text resumes', async () => {
+    const clock = new FakeTimerClock();
+    const gate = deferred();
+    const runner: AgentTurnRunner = {
+      async *run(): AsyncGenerator<AgentEvent> {
+        yield { type: 'tool_start', toolCallId: 't1', toolName: 'search', args: {} };
+        await gate.promise;
+        // Text resumes without an explicit `tool_end` — the stop-on-text path
+        // must not depend on the tool count reaching zero first.
+        yield { type: 'text_delta', text: 'Found it.' };
+      },
+    };
+    const session = new VoiceSession({
+      runner,
+      stt: streamingStt('search for something'),
+      tts: streamingTts(),
+      vad: new FakeVad(),
+      now: clock.now,
+      setTimer: clock.setTimer,
+      clearTimer: clock.clearTimer,
+      config: { tickIntervalMs: 1000 },
+    });
+    const events = collect(session);
+    const ticks = (): number => events.filter((e) => e.type === 'tick').length;
+
+    speakUtterance(session, clock);
+    await waitForTimer(clock);
+    clock.advance(1000);
+    expect(ticks()).toBe(1);
+
+    gate.resolve();
+    await tick();
+    await tick();
+
+    clock.advance(5000);
+    expect(ticks()).toBe(1);
+
+    await session.idle();
+  });
+
+  it('stops ticking on barge-in', async () => {
+    const clock = new FakeTimerClock();
+    const gate = deferred();
+    const runner: AgentTurnRunner = {
+      async *run(_text, opts): AsyncGenerator<AgentEvent> {
+        yield { type: 'tool_start', toolCallId: 't1', toolName: 'search', args: {} };
+        await gate.promise;
+        if (opts?.abortSignal?.aborted) return;
+        yield { type: 'tool_end', toolCallId: 't1', toolName: 'search', ok: true, durationMs: 5 };
+        yield { type: 'text_delta', text: 'Found it.' };
+      },
+    };
+    const session = new VoiceSession({
+      runner,
+      stt: streamingStt('search for something'),
+      tts: streamingTts(),
+      vad: new FakeVad(),
+      now: clock.now,
+      setTimer: clock.setTimer,
+      clearTimer: clock.clearTimer,
+      config: { tickIntervalMs: 1000 },
+    });
+    const events = collect(session);
+    const ticks = (): number => events.filter((e) => e.type === 'tick').length;
+
+    speakUtterance(session, clock);
+    await waitForTimer(clock);
+    clock.advance(1000);
+    expect(ticks()).toBe(1);
+
+    // User speaks over the (silent, tool-running) turn -> barge-in.
+    clock.advance(20);
+    session.pushAudio(speechFrame());
+    expect(events.find((e) => e.type === 'interrupted')).toBeTruthy();
+
+    clock.advance(5000);
+    expect(ticks()).toBe(1);
+
+    gate.resolve(); // let the (now-aborted) runner unwind
+    await session.idle();
   });
 });

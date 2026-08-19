@@ -57,6 +57,13 @@ describe('voice socket framing', () => {
     expect(Array.from(decoded?.payload ?? [])).toEqual([1, 2, 3]);
   });
 
+  it('round-trips the tick keep-alive frame with no payload', () => {
+    const bytes = encodeVoiceFrame({ t: 'tick' });
+    const decoded = decodeVoiceServerFrame(bytes);
+    expect(decoded?.header).toEqual({ t: 'tick' });
+    expect(decoded?.payload.length).toBe(0);
+  });
+
   it('round-trips the budget wind-down frame, reason and all', () => {
     const bytes = encodeVoiceFrame({
       t: 'realtime_wind_down',

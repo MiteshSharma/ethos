@@ -14,7 +14,7 @@ import type {
   TtsProvider,
 } from '@ethosagent/types';
 import { STT_CONTRACT_VERSION } from '@ethosagent/types';
-import type { AgentTurnRunner, VoiceSessionConfig } from '@ethosagent/voice-session';
+import type { AgentTurnRunner, VoiceSession, VoiceSessionConfig } from '@ethosagent/voice-session';
 import { describe, expect, it } from 'vitest';
 import { createTestSafety } from '../../../core/src/__tests__/helpers/test-safety';
 import type { WiringConfig } from '../index';
@@ -1069,6 +1069,230 @@ describe('buildVoiceStack', () => {
 
     it('leaves the built-in defaults alone with no bargeIn block and no fallback', async () => {
       await expect(transcribedAfterSpeakingOnBrowser({})).resolves.toBe(false);
+    });
+  });
+
+  // `voice.filler.*` — the tool-call filler/tick keep-alive, threaded into
+  // `VoiceSessionConfig`. An EXPLICIT `enabled` is deployment-wide like
+  // `bargeIn` is per-surface: it applies uniformly (unlike `bargeIn`, there is
+  // no per-surface block). Absent `enabled`, the DEFAULT is surface-scoped —
+  // browser only — see the `default enable is surface-scoped` describe below.
+  // Real timers, bounded to well under a second: `VoiceSession` itself takes
+  // no injectable clock/timer from this layer, and the interval under test is
+  // short enough that a real wait is fast and not flaky.
+  describe('voice.filler wiring', () => {
+    /** A runner that holds a tool call open until `release()` is called. */
+    function toolRunner(): { runner: AgentTurnRunner; release: () => void } {
+      let release = () => {};
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      return {
+        runner: {
+          async *run(): AsyncGenerator<AgentEvent> {
+            yield { type: 'tool_start', toolCallId: 't1', toolName: 'search', args: {} };
+            await gate;
+            yield {
+              type: 'tool_end',
+              toolCallId: 't1',
+              toolName: 'search',
+              ok: true,
+              durationMs: 5,
+            };
+            yield { type: 'text_delta', text: 'Found it.' };
+          },
+        },
+        release,
+      };
+    }
+
+    async function speakOneUtterance(session: VoiceSession): Promise<void> {
+      for (let i = 0; i < 5; i++) {
+        session.pushAudio({ data: new Int16Array(320).fill(12_000), sampleRate: 16_000 });
+      }
+      for (let i = 0; i < 6; i++) {
+        session.pushAudio({ data: new Int16Array(320), sampleRate: 16_000 });
+      }
+    }
+
+    it('applies voice.filler.afterMs/text/tickIntervalMs to a slow tool call', async () => {
+      const stack = await buildVoiceStack(
+        deps(
+          config({
+            voice: { bots: [], filler: { afterMs: 50, text: 'One sec.', tickIntervalMs: 60 } },
+          }),
+        ),
+      );
+      if (!stack) throw new Error('expected a voice stack');
+      const { runner: toolCall, release } = toolRunner();
+      const session = await stack.createSession({
+        laneKey: 'voice:bot:filler-on',
+        runner: toolCall,
+        surface: 'browser',
+        sessionConfig: { endpointSilenceMs: 0 },
+      });
+
+      const events: string[] = [];
+      let fillerText = '';
+      session.on((e) => {
+        events.push(e.type);
+        if (e.type === 'filler') fillerText = e.text;
+      });
+      await speakOneUtterance(session);
+
+      // Long enough for both the 50ms filler debounce and at least one 60ms
+      // tick to fire, short enough to keep the test fast.
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      release();
+      await session.idle();
+      await stack.close();
+
+      expect(events).toContain('filler');
+      expect(fillerText).toBe('One sec.');
+      expect(events).toContain('tick');
+      expect(events).toContain('reply_complete');
+    });
+
+    it('turns off both the filler and the tick when voice.filler.enabled is false', async () => {
+      const stack = await buildVoiceStack(
+        deps(
+          config({
+            voice: { bots: [], filler: { enabled: false, afterMs: 10, tickIntervalMs: 10 } },
+          }),
+        ),
+      );
+      if (!stack) throw new Error('expected a voice stack');
+      const { runner: toolCall, release } = toolRunner();
+      const session = await stack.createSession({
+        laneKey: 'voice:bot:filler-off',
+        runner: toolCall,
+        sessionConfig: { endpointSilenceMs: 0 },
+      });
+
+      const events: string[] = [];
+      session.on((e) => events.push(e.type));
+      await speakOneUtterance(session);
+
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      release();
+      await session.idle();
+      await stack.close();
+
+      expect(events).not.toContain('filler');
+      expect(events).not.toContain('tick');
+      expect(events).toContain('reply_complete');
+    });
+
+    it('lets an explicit sessionConfig override the deployment-wide filler default', async () => {
+      const stack = await buildVoiceStack(
+        deps(config({ voice: { bots: [], filler: { afterMs: 5_000, tickIntervalMs: 5_000 } } })),
+      );
+      if (!stack) throw new Error('expected a voice stack');
+      const { runner: toolCall, release } = toolRunner();
+      const session = await stack.createSession({
+        laneKey: 'voice:bot:filler-override',
+        runner: toolCall,
+        // A caller naming its own filler config wins over the 5s deployment
+        // default — same precedence as `endpointSilenceMs` above.
+        sessionConfig: { endpointSilenceMs: 0, fillerAfterMs: 30, tickIntervalMs: 40 },
+      });
+
+      const events: string[] = [];
+      session.on((e) => events.push(e.type));
+      await speakOneUtterance(session);
+
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      release();
+      await session.idle();
+      await stack.close();
+
+      expect(events).toContain('filler');
+      expect(events).toContain('tick');
+    });
+
+    // Bug: the filler/tick default used to apply uniformly to every lane
+    // (`fillerEnabled = filler.enabled ?? true`), so ANY existing deployment
+    // with a `voice.*` block configured for phone or satellite would, the
+    // moment this shipped, start speaking the filler line and playing tick
+    // tones on those surfaces too — a silent behavior change to channels this
+    // feature was never scoped to touch. The default must be browser-only;
+    // an explicit `voice.filler.enabled` always overrides it, everywhere.
+    describe('voice.filler — default enable is surface-scoped', () => {
+      async function fillerEventsFor(opts: {
+        surface?: 'call' | 'satellite' | 'browser';
+        enabled?: boolean;
+      }): Promise<string[]> {
+        const stack = await buildVoiceStack(
+          deps(
+            config({
+              voice: {
+                bots: [],
+                filler: {
+                  ...(opts.enabled !== undefined ? { enabled: opts.enabled } : {}),
+                  afterMs: 10,
+                  tickIntervalMs: 10,
+                },
+              },
+            }),
+          ),
+        );
+        if (!stack) throw new Error('expected a voice stack');
+        const { runner: toolCall, release } = toolRunner();
+        const session = await stack.createSession({
+          laneKey: 'voice:bot:filler-default-scope',
+          runner: toolCall,
+          ...(opts.surface ? { surface: opts.surface } : {}),
+          sessionConfig: { endpointSilenceMs: 0 },
+        });
+        const events: string[] = [];
+        session.on((e) => events.push(e.type));
+        await speakOneUtterance(session);
+        await new Promise((resolve) => setTimeout(resolve, 80));
+        release();
+        await session.idle();
+        await stack.close();
+        return events;
+      }
+
+      it('defaults ON for the browser surface', async () => {
+        const events = await fillerEventsFor({ surface: 'browser' });
+        expect(events).toContain('filler');
+        expect(events).toContain('tick');
+      });
+
+      it('defaults OFF for the call surface', async () => {
+        const events = await fillerEventsFor({ surface: 'call' });
+        expect(events).not.toContain('filler');
+        expect(events).not.toContain('tick');
+      });
+
+      it('defaults OFF for the satellite surface', async () => {
+        const events = await fillerEventsFor({ surface: 'satellite' });
+        expect(events).not.toContain('filler');
+        expect(events).not.toContain('tick');
+      });
+
+      it('defaults OFF for a lane with no surface of its own', async () => {
+        const events = await fillerEventsFor({});
+        expect(events).not.toContain('filler');
+        expect(events).not.toContain('tick');
+      });
+
+      it('an explicit voice.filler.enabled: true turns it on for call and satellite too', async () => {
+        const call = await fillerEventsFor({ surface: 'call', enabled: true });
+        expect(call).toContain('filler');
+        expect(call).toContain('tick');
+
+        const satellite = await fillerEventsFor({ surface: 'satellite', enabled: true });
+        expect(satellite).toContain('filler');
+        expect(satellite).toContain('tick');
+      });
+
+      it('an explicit voice.filler.enabled: false turns it off for the browser surface too', async () => {
+        const events = await fillerEventsFor({ surface: 'browser', enabled: false });
+        expect(events).not.toContain('filler');
+        expect(events).not.toContain('tick');
+      });
     });
   });
 });

@@ -129,9 +129,10 @@ export class VoiceChannelAdapter {
       }) ?? null;
   }
 
-  /** Unwire the bridge and disconnect the transport. */
+  /** Unwire the bridge, stop the session, and disconnect the transport. */
   async stop(): Promise<void> {
     this.unwire();
+    this.session.stop();
     await this.transport.disconnect();
     await this.fireEnded();
   }
@@ -169,6 +170,7 @@ export class VoiceChannelAdapter {
    */
   private async onTransportClosed(): Promise<void> {
     this.unwire();
+    this.session.stop();
     try {
       await this.fireEnded();
     } catch {

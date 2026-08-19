@@ -606,6 +606,26 @@ export interface VoiceBargeInTuning {
 export type VoiceBargeInConfig = Partial<Record<VoiceBargeInSurface, VoiceBargeInTuning>>;
 
 /**
+ * `voice.filler.*` — the spoken/tick keep-alive `VoiceSession` plays during a
+ * long tool call (`extensions/voice-session/src/voice-session.ts`). A SETTING,
+ * not personality identity (plan/phases/voice-live-personality.md §9): the
+ * line and its cadence are the operator's call, the same as barge-in tuning,
+ * and apply uniformly across every lane (call, satellite, browser) — unlike
+ * `bargeIn`, there is no per-surface split, because the gap this covers (a
+ * silent tool call) is the same gap on every surface.
+ */
+export interface VoiceFillerConfig {
+  /** Master switch. Absent = true = on. */
+  enabled?: boolean;
+  /** Debounce (ms) before speaking the filler line. Absent = the built-in default. */
+  afterMs?: number;
+  /** Spoken filler text. Absent = the built-in default. */
+  text?: string;
+  /** Repeat interval (ms) for the non-speech tick cue. Absent = the built-in default. */
+  tickIntervalMs?: number;
+}
+
+/**
  * One wake-phrase → personality route (`voice.wake.routes.<id>`).
  *
  * Lives here, next to `VoiceBotConfig` / `VoiceTrunkConfig`, rather than in
@@ -1242,6 +1262,8 @@ export interface EthosConfig {
     inbound?: VoiceInboundConfig;
     /** Per-surface barge-in sensitivity. See `VoiceBargeInConfig`. */
     bargeIn?: VoiceBargeInConfig;
+    /** Tool-call filler/tick keep-alive. See `VoiceFillerConfig`. */
+    filler?: VoiceFillerConfig;
     trustedPlugins?: string[];
     defaultMode?: 'off' | 'mirror_inbound' | 'all';
     tier?: 'pipeline' | 'realtime';
@@ -2138,6 +2160,15 @@ export async function writeConfig(
         lines.push(`voice.bargeIn.${surface}.silenceMs: ${tuning.silenceMs}`);
       }
     }
+    if (config.voice.filler) {
+      const fl = config.voice.filler;
+      if (fl.enabled !== undefined) lines.push(`voice.filler.enabled: ${fl.enabled}`);
+      if (fl.afterMs !== undefined) lines.push(`voice.filler.afterMs: ${fl.afterMs}`);
+      if (fl.text) lines.push(`voice.filler.text: ${fl.text}`);
+      if (fl.tickIntervalMs !== undefined) {
+        lines.push(`voice.filler.tickIntervalMs: ${fl.tickIntervalMs}`);
+      }
+    }
     // Serialized whenever present, INCLUDING the empty list — an empty
     // allowlist is "trust nothing non-local", not "no opinion".
     if (config.voice.trustedPlugins !== undefined) {
@@ -2610,6 +2641,13 @@ function parseConfigYaml(src: string): EthosConfig {
   const voiceInboundOwnerKv: Record<string, string> = {};
   /** `voice.bargeIn.<surface>.<field>` — VAD thresholds, keyed by surface. */
   const voiceBargeInKv: Record<string, Record<string, string>> = {};
+  /** `voice.filler.<field>` — the tool-call filler/tick knobs, range-checked on the way in. */
+  const voiceFillerKv: {
+    enabled?: boolean;
+    afterMs?: number;
+    text?: string;
+    tickIntervalMs?: number;
+  } = {};
   /** `voice.tts.providers.<name>.<field>` — the named TTS roster, keyed by name. */
   const voiceTtsProvidersKv: Record<string, Record<string, string>> = {};
   /** The older `voice.providers.<name>.<field>` spelling, merged under the above. */
@@ -2802,6 +2840,25 @@ function parseConfigYaml(src: string): EthosConfig {
       const surface = vbi[1];
       voiceBargeInKv[surface] ??= {};
       voiceBargeInKv[surface][vbi[2]] = vbi[3].trim().replace(/^["']|["']$/g, '');
+      continue;
+    }
+    // voice.filler.<field> — the tool-call keep-alive knobs. An unknown value
+    // is ignored rather than clamped or thrown on, same rule as `voice.wake`.
+    const vfl = line.match(/^voice\.filler\.(\w+):\s*(.+)$/);
+    if (vfl) {
+      const field = vfl[1];
+      const value = vfl[2].trim().replace(/^["']|["']$/g, '');
+      if (field === 'enabled') {
+        if (value === 'true' || value === 'false') voiceFillerKv.enabled = value === 'true';
+      } else if (field === 'afterMs') {
+        const n = parseBoundedInt(value, 0, 60_000);
+        if (n !== undefined) voiceFillerKv.afterMs = n;
+      } else if (field === 'text') {
+        if (value) voiceFillerKv.text = value;
+      } else if (field === 'tickIntervalMs') {
+        const n = parseBoundedInt(value, 0, 60_000);
+        if (n !== undefined) voiceFillerKv.tickIntervalMs = n;
+      }
       continue;
     }
     // voice.trustedPlugins: <comma-separated provider ids>. Declaring the key
@@ -3345,6 +3402,7 @@ function parseConfigYaml(src: string): EthosConfig {
   const voiceTrunkResult = buildVoiceTrunk(voiceTrunkKv);
   const voiceInboundResult = buildVoiceInbound(voiceInboundKv, voiceInboundOwnerKv);
   const voiceBargeInResult = buildVoiceBargeIn(voiceBargeInKv);
+  const voiceFiller = Object.keys(voiceFillerKv).length > 0 ? voiceFillerKv : undefined;
   // Legacy `voice.providers.*` entries merge UNDER the new spelling, per name
   // and per field, so a file mid-migration keeps whichever fields it has
   // already moved and the new key always wins.
@@ -3407,6 +3465,7 @@ function parseConfigYaml(src: string): EthosConfig {
     voiceTrunkResult.trunk ||
     voiceInboundResult.inbound ||
     voiceBargeInResult.bargeIn ||
+    voiceFiller !== undefined ||
     voiceTrustedPluginsRaw !== undefined ||
     voiceDefaultMode !== undefined ||
     voiceTier !== undefined ||
@@ -3423,6 +3482,7 @@ function parseConfigYaml(src: string): EthosConfig {
           ...(voiceTrunkResult.trunk ? { trunk: voiceTrunkResult.trunk } : {}),
           ...(voiceInboundResult.inbound ? { inbound: voiceInboundResult.inbound } : {}),
           ...(voiceBargeInResult.bargeIn ? { bargeIn: voiceBargeInResult.bargeIn } : {}),
+          ...(voiceFiller ? { filler: voiceFiller } : {}),
           ...(voiceTrustedPluginsRaw !== undefined
             ? { trustedPlugins: splitList(voiceTrustedPluginsRaw) }
             : {}),

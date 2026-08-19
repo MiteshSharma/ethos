@@ -472,6 +472,12 @@ describe('ConfigService — settings passthrough groups', () => {
       retryOnOverflow: true,
       smallWindow: 'auto',
     });
+    expect(r.voiceFiller).toEqual({
+      enabled: true,
+      afterMs: null,
+      text: null,
+      tickIntervalMs: null,
+    });
     expect(r.memoryApproval).toEqual({ mode: 'off', cap: 200, ttlDays: 30 });
     expect(r.memoryConsolidation.halfLifeDays).toBe(30);
     expect(r.memoryConsolidation.exemptUser).toBe(true);
@@ -570,6 +576,46 @@ describe('ConfigService — settings passthrough groups', () => {
     const r = await service.get();
     expect(r.compaction.pressure).toBeNull();
     expect(r.displayVerbosity).toBe('default');
+  });
+
+  it('round-trips voice.filler.*', async () => {
+    await writeBase();
+    await service.update({
+      voiceFiller: { enabled: false, afterMs: 800, text: 'One sec.', tickIntervalMs: 5000 },
+    });
+
+    const written = await storage.read(join(DATA, 'config.yaml'));
+    expect(written).toContain('voice.filler.enabled: false');
+    expect(written).toContain('voice.filler.afterMs: 800');
+    expect(written).toContain('voice.filler.text: One sec.');
+    expect(written).toContain('voice.filler.tickIntervalMs: 5000');
+
+    const r = await service.get();
+    expect(r.voiceFiller).toEqual({
+      enabled: false,
+      afterMs: 800,
+      text: 'One sec.',
+      tickIntervalMs: 5000,
+    });
+  });
+
+  it('null clears voice.filler fields back to their defaults', async () => {
+    await writeBase(['voice.filler.afterMs: 800', 'voice.filler.enabled: false']);
+    await service.update({ voiceFiller: { afterMs: null, enabled: null } });
+
+    const written = await storage.read(join(DATA, 'config.yaml'));
+    expect(written).not.toContain('voice.filler.afterMs');
+    expect(written).not.toContain('voice.filler.enabled');
+    const r = await service.get();
+    expect(r.voiceFiller.afterMs).toBeNull();
+    expect(r.voiceFiller.enabled).toBe(true);
+  });
+
+  it('refuses an out-of-range voice.filler.afterMs', async () => {
+    await writeBase();
+    await expect(service.update({ voiceFiller: { afterMs: 999_999 } })).rejects.toMatchObject({
+      code: 'CONFIG_INVALID',
+    });
   });
 
   it('round-trips the memory groups and masks the capture key', async () => {

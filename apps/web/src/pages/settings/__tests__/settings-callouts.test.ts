@@ -296,6 +296,7 @@ function baseVoiceConfig(): ConfigGetData {
       retryOnOverflow: true,
       smallWindow: 'auto',
     },
+    voiceFiller: { enabled: true, afterMs: null, text: null, tickIntervalMs: null },
     memoryVault: { path: null, agentDir: null, prefetch: [], exclude: [] },
     memoryApproval: { mode: 'off', cap: 200, ttlDays: 30 },
     memoryConsolidation: {

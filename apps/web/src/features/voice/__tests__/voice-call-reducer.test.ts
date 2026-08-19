@@ -385,9 +385,12 @@ describe('chatMessagesWithVoice — DR5 persistent transcript', () => {
     ]);
   });
 
-  it('leaves the pipeline tier alone — its turns are already in the list', () => {
-    // `chat-voice-runner` routes every pipeline turn through `sendMessage`;
-    // projecting on top of that would render each spoken turn twice.
+  it('leaves the pipeline tier alone — its turns live on the voice lane, not this chat', () => {
+    // A pipeline turn (streaming or the batch RPC fallback) runs on the
+    // browser's own voice lane, never this chat session (Conflict 1) — so
+    // there is nothing of this call in `messages` to double up on, but
+    // nothing to backfill from here either; `voiceTranscriptToMessages`'s
+    // doc comment has the full reasoning.
     expect(chatMessagesWithVoice(typed, callOn('pipeline'))).toBe(typed);
     expect(chatMessagesWithVoice(typed, callOn(null))).toBe(typed);
   });
@@ -491,6 +494,24 @@ describe('voiceCallReducer — degraded to text and mic permission', () => {
     ]);
     expect(state.degraded).toBeNull();
     expect(state.error).toBe('transient');
+  });
+
+  // D8 — another tab took over this conversation's voice lane. Ends the
+  // call, but WITHOUT the `degraded` banner: nothing failed, so
+  // `TalkMode.tsx`'s "voice unavailable ... continuing in text" copy would
+  // be actively wrong here. `error` still carries the server's own message
+  // so Chat.tsx's toast effect surfaces SOMETHING truthful.
+  it('a takeover ends the call without the degraded-provider framing', () => {
+    const state = driveThroughClient([
+      {
+        type: 'error',
+        error: 'This voice call was taken over by another tab.',
+        code: 'taken_over',
+      },
+    ]);
+    expect(state.status).toBe('ended');
+    expect(state.degraded).toBeNull();
+    expect(state.error).toBe('This voice call was taken over by another tab.');
   });
 });
 
@@ -711,6 +732,10 @@ describe('isTerminalClientEvent', () => {
       true,
     );
     expect(isTerminalClientEvent({ type: 'disconnected' })).toBe(true);
+    // D8 — a takeover must release the mic just like a degrading code does,
+    // or the evicted tab keeps capturing (and its transport keeps trying to
+    // reconnect) after the server has already moved on.
+    expect(isTerminalClientEvent({ type: 'error', error: 'taken', code: 'taken_over' })).toBe(true);
   });
 
   it('is false for events the call survives', () => {

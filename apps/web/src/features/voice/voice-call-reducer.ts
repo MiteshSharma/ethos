@@ -131,6 +131,17 @@ const DEGRADING_CODES = new Set(['transcribe_failed', 'synthesize_failed', 'voic
  */
 export const TIER_DEGRADED_CODE = 'realtime_unavailable';
 
+/**
+ * This tab no longer has the voice lane for this conversation — another tab
+ * took it over (D8 takeover, `voice-socket.ts`). Terminal like
+ * `DEGRADING_CODES`, but NOT one of them: nothing failed here — a different
+ * tab is simply the live one now — so the "voice unavailable ... continuing
+ * in text" framing `DEGRADING_CODES` implies (see `TalkMode.tsx`) would be
+ * actively misleading. The generic `error` fallback below is what actually
+ * renders: a toast with the server's own message, no `degraded` banner.
+ */
+export const LANE_TAKEN_OVER_CODES = new Set(['taken_over']);
+
 export function voiceCallReducer(state: VoiceCallState, action: VoiceCallAction): VoiceCallState {
   switch (action.type) {
     case 'start':
@@ -298,6 +309,12 @@ function applyClientEvent(state: VoiceCallState, event: VoiceCallEvent): VoiceCa
       if (event.code === MIC_DENIED_CODE) {
         return { ...state, status: 'ended', error: event.error, micDenied: true };
       }
+      if (event.code && LANE_TAKEN_OVER_CODES.has(event.code)) {
+        // End the call here, without the `degraded` banner: nothing failed,
+        // so there is no provider to blame. `error` alone still surfaces the
+        // server's own message as a toast (Chat.tsx's notification effect).
+        return { ...state, status: 'ended', error: event.error };
+      }
       if (event.code && DEGRADING_CODES.has(event.code)) {
         return {
           ...state,
@@ -326,11 +343,22 @@ function applyClientEvent(state: VoiceCallState, event: VoiceCallEvent): VoiceCa
  * Before this existed, only `disconnected` tore down. A mid-call degrade left
  * the strip saying the call had ended while capture kept running — the mic stayed
  * live and the endpointer kept firing its earcon on every utterance.
+ *
+ * `LANE_TAKEN_OVER_CODES` reads the same way for the same reason: without it,
+ * a tab that just lost its lane to a takeover would keep its mic hot and —
+ * worse — the transport would reconnect and reopen the very lane it was just
+ * evicted from (`createVoiceSocketTransport`'s own reconnect policy fires on
+ * any unexpected close). Tearing down here calls `client.disconnect()`,
+ * which closes the transport FOR GOOD before that reconnect can fire.
  */
 export function isTerminalClientEvent(event: VoiceCallEvent): boolean {
   if (event.type === 'disconnected') return true;
   if (event.type !== 'error' || !event.code) return false;
-  return event.code === MIC_DENIED_CODE || DEGRADING_CODES.has(event.code);
+  return (
+    event.code === MIC_DENIED_CODE ||
+    LANE_TAKEN_OVER_CODES.has(event.code) ||
+    DEGRADING_CODES.has(event.code)
+  );
 }
 
 // --- transcript helpers ----------------------------------------------------
@@ -492,9 +520,19 @@ export function voiceTranscriptToMessages(transcript: VoiceTranscriptLine[]): Ch
  * The two tiers reach the list by different routes, which is why this is a
  * decision rather than a concatenation:
  *
- * - PIPELINE: every spoken turn goes through the chat hook's `sendMessage`
- *   (`chat-voice-runner.ts`), so it is already in `messages` as an ordinary
- *   turn. Projecting the transcript on top would show each turn twice.
+ * - PIPELINE (streaming, and — since Bug 4 — the batch RPC fallback too):
+ *   every spoken turn runs on the browser's own VOICE LANE
+ *   (`voice:<botKey>:browser:<id>`, never the chat session — Conflict 1,
+ *   plan §7), so `messages` knows nothing about it either. Not projected
+ *   here regardless: this call's persistent record lives on the voice lane's
+ *   own session row, a deliberately separate conversation ("chat view is a
+ *   spectator") rather than the current chat's history. Only the LIVE
+ *   captions during the call come from `call.transcript`
+ *   (`voiceCaption`/the call strip) — they do not outlive it in `messages`.
+ *   (Pre-Bug-4, only the batch tier's turns used to land in `messages` too,
+ *   via `chat-voice-runner.ts`'s `sendMessage` — that was the anti-pattern
+ *   the fix removed; this comment used to describe THAT as the reason not to
+ *   project, which stopped being true the moment it was fixed.)
  * - REALTIME: the provider owns the conversation and the browser never runs a
  *   chat turn, so `messages` knows nothing about the call. The transcript is
  *   the page's only record of it — without this, a realtime conversation

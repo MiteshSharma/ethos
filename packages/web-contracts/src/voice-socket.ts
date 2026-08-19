@@ -241,6 +241,16 @@ const SegmentEndSchema = z.object({
   segmentId: z.string().min(1),
 });
 
+/**
+ * A non-speech keep-alive cue: a tool call is still running and no reply text
+ * has resumed. Carries no payload — the browser plays a short LOCAL audio
+ * asset rather than decode synthesized bytes shipped over the wire every few
+ * seconds (`VoiceSession`'s `tick` event, `extensions/voice-session/src/voice-session.ts`).
+ */
+const TickSchema = z.object({
+  t: z.literal('tick'),
+});
+
 const ServerErrorSchema = z.object({
   t: z.literal('error'),
   message: z.string(),
@@ -310,6 +320,7 @@ const VoiceServerFrameSchema = z.discriminatedUnion('t', [
   ReplyTextSchema,
   ServerAudioSchema,
   SegmentEndSchema,
+  TickSchema,
   TurnEndSchema,
   ServerErrorSchema,
   RealtimeReadySchema,

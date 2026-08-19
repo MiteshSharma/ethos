@@ -138,6 +138,7 @@ function store(): FormShape {
       call: { energyThreshold: null, minSpeechMs: null, silenceMs: null },
       satellite: { energyThreshold: null, minSpeechMs: null, silenceMs: null },
     },
+    voiceFiller: { enabled: true, afterMs: null, text: '', tickIntervalMs: null },
     // Background jobs
     background: {
       enabled: false,

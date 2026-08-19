@@ -1,5 +1,6 @@
 import { type BatchVoiceCallDeps, createBatchVoiceCallClient } from './batch-voice-call-client';
 import { createBrowserPlayout, createBrowserVoiceCapture } from './browser-streaming-io';
+import { runBrowserVoiceTurn } from './browser-voice-turn';
 import { createBrowserRealtimeSocket } from './realtime-socket';
 import {
   createRealtimeVoiceCallClient,
@@ -103,9 +104,16 @@ export function realtimeDegradeNotice(answer: RealtimeTokenAnswer): string | nul
   return SILENT_REFUSALS.has(answer.reason) ? null : answer.message;
 }
 
-export interface TalkModeClientDeps extends BatchVoiceCallDeps {
+export interface TalkModeClientDeps extends Omit<BatchVoiceCallDeps, 'runAgentTurn'> {
   /** Chat session the call belongs to; stamped on the lane for telemetry. */
   sessionId?: () => string | null;
+  /**
+   * Override the batch tier's agent-turn driver. Production leaves this
+   * unset and gets `runBrowserVoiceTurn` — the RPC-backed default that runs
+   * on the browser voice lane, never the chat session (Bug 4 / Conflict 1).
+   * Tests inject their own fake here, same as `createDriver`.
+   */
+  runAgentTurn?: BatchVoiceCallDeps['runAgentTurn'];
   /** Force the batch path (fallback verification, or a broken provider). */
   forceBatch?: boolean;
   /**
@@ -130,6 +138,12 @@ export function createTalkModeClient(deps: TalkModeClientDeps): VoiceCallClient 
     for (const listener of [...listeners]) listener(event);
   };
 
+  // The batch-RPC fallback tier's own voice-lane id, used only when this
+  // call has no chat session yet — the same role `VoiceLane`'s `laneId`
+  // plays for the streaming tier's fallback. Minted ONCE per call (not per
+  // turn), so every batch turn on this call lands on the same lane.
+  const fallbackLaneId = crypto.randomUUID();
+
   /** The tier client this call settled on. Chosen inside `connect()`. */
   let inner: VoiceCallClient | null = null;
   let unsubscribe: (() => void) | null = null;
@@ -144,7 +158,16 @@ export function createTalkModeClient(deps: TalkModeClientDeps): VoiceCallClient 
 
   const buildPipelineClient = (): VoiceCallClient => {
     if (deps.forceBatch || !streamingTalkModeSupported(env)) {
-      return createBatchVoiceCallClient(deps);
+      return createBatchVoiceCallClient({
+        ...deps,
+        runAgentTurn:
+          deps.runAgentTurn ??
+          ((text, signal) =>
+            runBrowserVoiceTurn(text, signal, {
+              sessionId: () => deps.sessionId?.() ?? fallbackLaneId,
+              ...(deps.personalityId ? { personalityId: deps.personalityId } : {}),
+            })),
+      });
     }
     const context = new AudioContext();
     // `continuous: true` — the server's `VoiceSession` owns VAD, endpointing

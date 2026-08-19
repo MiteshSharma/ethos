@@ -15,9 +15,9 @@ describe('PlayoutQueue', () => {
     const q = new PlayoutQueue({
       onAudio: (a) => audio.push(a[0] ?? -1),
     });
-    q.enqueue({ text: 'one', synthesize: oneChunk(1) });
-    q.enqueue({ text: 'two', synthesize: oneChunk(2) });
-    q.enqueue({ text: 'three', synthesize: oneChunk(3) });
+    q.enqueue({ id: 'one', text: 'one', synthesize: oneChunk(1) });
+    q.enqueue({ id: 'two', text: 'two', synthesize: oneChunk(2) });
+    q.enqueue({ id: 'three', text: 'three', synthesize: oneChunk(3) });
     await q.idle();
 
     expect(audio).toEqual([1, 2, 3]);
@@ -35,6 +35,7 @@ describe('PlayoutQueue', () => {
     const q = new PlayoutQueue({ onAudio: (a) => audio.push(a[0] ?? -1) });
 
     q.enqueue({
+      id: 'one',
       text: 'one',
       synthesize: async function* () {
         calls.push('synthesize:one');
@@ -45,6 +46,7 @@ describe('PlayoutQueue', () => {
       },
     });
     q.enqueue({
+      id: 'two',
       text: 'two',
       synthesize: async function* () {
         calls.push('synthesize:two');
@@ -72,6 +74,7 @@ describe('PlayoutQueue', () => {
     const q = new PlayoutQueue({ onAudio: () => {} });
 
     const item = (text: string, hold = false) => ({
+      id: text,
       text,
       synthesize: async function* () {
         calls.push(text);
@@ -104,6 +107,7 @@ describe('PlayoutQueue', () => {
     });
 
     q.enqueue({
+      id: 'first',
       text: 'first',
       synthesize: async function* (signal) {
         yield { audio: new Uint8Array([1]), format: 'pcm' };
@@ -115,6 +119,7 @@ describe('PlayoutQueue', () => {
     // Prefetched (inside the lookahead window) — so it IS synthesized, but its
     // audio must never play and cancel must abort it.
     q.enqueue({
+      id: 'second',
       text: 'second',
       synthesize: async function* (signal) {
         await gate.promise;
@@ -124,6 +129,7 @@ describe('PlayoutQueue', () => {
     });
     // Beyond the lookahead window — never synthesized at all.
     q.enqueue({
+      id: 'third',
       text: 'third',
       synthesize: async function* () {
         thirdSynthesized = true;
@@ -148,12 +154,13 @@ describe('PlayoutQueue', () => {
     const played: string[] = [];
     const q = new PlayoutQueue({
       onAudio: () => {},
-      onSentencePlayed: (t) => played.push(t),
+      onSentencePlayed: (_id, t) => played.push(t),
       onError: (err) => errors.push(err instanceof Error ? err.message : String(err)),
     });
 
-    q.enqueue({ text: 'one', synthesize: oneChunk(1) });
+    q.enqueue({ id: 'one', text: 'one', synthesize: oneChunk(1) });
     q.enqueue({
+      id: 'two',
       text: 'two',
       synthesize: () => {
         throw new Error('tts exploded');
@@ -164,5 +171,25 @@ describe('PlayoutQueue', () => {
     expect(played).toEqual(['one']); // the good sentence played first
     expect(errors).toEqual(['tts exploded']);
     expect(q.playedText()).toEqual(['one']);
+  });
+
+  // The correlator the segment-misattribution bug (Ethos voice L1) depends
+  // on: `onAudio`'s third argument is the ENQUEUED ITEM's own id, not
+  // whichever item happens to be "current" by some other bookkeeping — a
+  // consumer keys audio-to-text off this id, not off event arrival order.
+  it('stamps every onAudio chunk with the enqueued item’s own id', async () => {
+    const stamped: Array<{ id: string; byte: number }> = [];
+    const q = new PlayoutQueue({
+      onAudio: (a, _format, id) => stamped.push({ id, byte: a[0] ?? -1 }),
+    });
+
+    q.enqueue({ id: 'seg1', text: 'one', synthesize: oneChunk(1) });
+    q.enqueue({ id: 'seg2', text: 'two', synthesize: oneChunk(2) });
+    await q.idle();
+
+    expect(stamped).toEqual([
+      { id: 'seg1', byte: 1 },
+      { id: 'seg2', byte: 2 },
+    ]);
   });
 });

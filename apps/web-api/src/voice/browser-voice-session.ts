@@ -24,6 +24,14 @@ import type { VoiceLaneSessionOpener } from './voice-lane';
 // the speaking personality's `voice.*` block and pins the fast-lane model.
 // This module's job is everything upstream of that call: the lane key and an
 // `AgentTurnRunner` closure bound to it.
+//
+// `browserVoiceLaneKey` is the ONE place that derivation happens — both the
+// streaming opener below AND `runBrowserVoiceTurn` (the batch-RPC fallback
+// tier's turn driver, `apps/web-api/src/rpc/voice.ts`'s `voice.runTurn`) call
+// it, so a browser that falls back to the batch tier for one turn still lands
+// on the exact same lane a streaming connection for the same `sessionId`
+// would (Conflict 1, plan/phases/voice-live-personality.md §7) — never a
+// second one, and never the typed chat session.
 
 export interface BrowserVoiceSessionDeps {
   /** Absent when `voice.*` is not configured — `open()` then resolves null,
@@ -51,6 +59,23 @@ export interface BrowserVoiceSessionDeps {
 }
 
 /**
+ * This connection's lane key: `voice:<botKey>:browser:<id>`. The one encoder
+ * both the streaming opener and the batch-RPC turn runner call — see the
+ * module doc comment for why that matters.
+ */
+export function browserVoiceLaneKey(opts: {
+  botKey?: string;
+  sessionId?: string;
+  /** Used only when `sessionId` is absent. */
+  fallbackId: string;
+}): string {
+  return voiceLaneKey(opts.botKey ?? 'web', {
+    kind: 'browser',
+    id: opts.sessionId ?? opts.fallbackId,
+  });
+}
+
+/**
  * Build the opener for ONE connection. `fallbackClientId` is the socket's own
  * lane id, used when the browser opens talk-mode before a chat session
  * exists — mirrors `createRealtimeControlDeps`'s `fallbackClientId`, so a
@@ -62,13 +87,14 @@ export function createBrowserVoiceSessionOpener(
 ): VoiceLaneSessionOpener {
   const botKey = deps.botKey ?? 'web';
 
-  return async (info): Promise<VoiceSession | null> => {
+  return async (info): Promise<{ session: VoiceSession; laneKey: string } | null> => {
     const voiceStack = deps.voiceStack;
     if (!voiceStack) return null;
 
-    const laneKey = voiceLaneKey(botKey, {
-      kind: 'browser',
-      id: info.sessionId ?? fallbackClientId,
+    const laneKey = browserVoiceLaneKey({
+      botKey,
+      sessionId: info.sessionId,
+      fallbackId: fallbackClientId,
     });
     const personality = info.personalityId ? deps.personalities.get(info.personalityId) : undefined;
     const runner: AgentTurnRunner = {
@@ -93,12 +119,55 @@ export function createBrowserVoiceSessionOpener(
     // operator who never touched either keeps the session's built-in
     // VAD/endpoint defaults, unchanged from before this option existed.
     const bargeInFallback = deps.legacyBargeInTuning ? await deps.legacyBargeInTuning() : undefined;
-    return voiceStack.createSession({
+    const session = await voiceStack.createSession({
       laneKey,
       runner,
       surface: 'browser',
       ...(personality ? { personality } : {}),
       ...(bargeInFallback && Object.keys(bargeInFallback).length > 0 ? { bargeInFallback } : {}),
     });
+    return { session, laneKey };
   };
+}
+
+/**
+ * The batch-RPC fallback tier's turn driver (`voice.runTurn` in
+ * `apps/web-api/src/rpc/voice.ts`) — the twin of the `AgentTurnRunner`
+ * closure inside `createBrowserVoiceSessionOpener` above, for a browser that
+ * cannot open the streaming lane at all. Resolves the SAME lane key a
+ * streaming connection for this `sessionId` would (`browserVoiceLaneKey`),
+ * runs one turn against it, and returns the assembled reply text — never
+ * driving the turn through the typed chat session (Conflict 1, plan §7).
+ *
+ * A plain function rather than a class: unlike the streaming opener, there is
+ * no per-connection state to close over — every call is a fresh, independent
+ * RPC, and the lane key is recomputed from its own inputs each time.
+ */
+export async function runBrowserVoiceTurn(
+  deps: { agentLoop: AgentLoop; botKey?: string },
+  opts: {
+    text: string;
+    sessionId?: string;
+    personalityId?: string;
+    /** Used only when `sessionId` is absent — see `browserVoiceLaneKey`. */
+    fallbackClientId: string;
+    abortSignal?: AbortSignal;
+  },
+): Promise<string> {
+  const laneKey = browserVoiceLaneKey({
+    botKey: deps.botKey,
+    sessionId: opts.sessionId,
+    fallbackId: opts.fallbackClientId,
+  });
+  let reply = '';
+  for await (const event of deps.agentLoop.run(opts.text, {
+    sessionKey: laneKey,
+    ...(opts.personalityId ? { personalityId: opts.personalityId } : {}),
+    ...(opts.abortSignal ? { abortSignal: opts.abortSignal } : {}),
+    // Same stamp the streaming opener's runner uses above.
+    voiceOrigin: { transport: 'browser-talk-mode', speaker: 'owner' },
+  })) {
+    if (event.type === 'text_delta') reply += event.text;
+  }
+  return reply;
 }

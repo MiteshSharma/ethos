@@ -65,6 +65,13 @@ export interface VoiceSocket {
   close(): Promise<void>;
 }
 
+/** One connection currently holding a lane key's live `VoiceLane`. */
+interface LaneKeyHolder {
+  socket: WebSocket;
+  lane: VoiceLane;
+  send: (frame: VoiceServerFrame, payload?: Uint8Array) => void;
+}
+
 export function createVoiceSocket(opts: VoiceSocketOptions): VoiceSocket {
   const path = opts.path ?? VOICE_SOCKET_PATH;
   const wss = new WebSocketServer({ noServer: true });
@@ -72,17 +79,64 @@ export function createVoiceSocket(opts: VoiceSocketOptions): VoiceSocket {
   const controls = new Map<WebSocket, RealtimeControlLane>();
   let laneSeq = 0;
 
+  // D8 — second tab is a takeover, not a second billed session. Every lane
+  // key resolves to at most one LIVE connection at a time; a new connection
+  // resolving to an already-held key evicts the old one instead of running
+  // beside it (two STT pipelines, two TTS pipelines, two concurrent agent
+  // turns, both writing the same session). The plain Map below is already
+  // sufficient for that: `onLaneKey` is fully synchronous (no `await`
+  // anywhere in its body) and JS is single-threaded, so the read of
+  // `holders.get(laneKey)` and the write of `holders.set(laneKey, ...)`
+  // inside one call can never be interleaved with another connection's call
+  // — `holders` is always immediately, atomically consistent. A third,
+  // fourth, Nth connection on the same key just cascades the same eviction
+  // indefinitely: each one evicts whichever connection `holders` currently
+  // names, which — by that same atomicity — is always the one genuinely
+  // live at that instant. That cascade IS "one live session per key", which
+  // is the actual thing that matters; there is no window in which two
+  // connections could both believe they are the evictor of the same stale
+  // holder.
+  const holders = new Map<string, LaneKeyHolder>();
+
   const onConnection = (socket: WebSocket): void => {
     const laneId = `lane-${++laneSeq}-${Date.now().toString(36)}`;
     const send = (frame: VoiceServerFrame, payload?: Uint8Array): void => {
       if (socket.readyState !== socket.OPEN) return;
       socket.send(encodeVoiceFrame(frame, payload), { binary: true });
     };
+    /** Set once `onLaneKey` resolves this connection's own key, so teardown
+     *  knows what (if anything) to release. */
+    let myLaneKey: string | null = null;
+
+    const onLaneKey = (laneKey: string): void => {
+      const existing = holders.get(laneKey);
+      if (!existing) {
+        holders.set(laneKey, { socket, lane, send });
+        myLaneKey = laneKey;
+        return;
+      }
+      if (existing.socket === socket) return; // defensive; should not happen
+      // Take over: tell the OLD connection why, close ITS session and
+      // socket, then let this one proceed as the new holder. Cascades
+      // cleanly for a third, fourth, Nth connection on the same key — see
+      // the comment above `holders`.
+      existing.send({
+        t: 'error',
+        code: 'taken_over',
+        message: 'This voice call was taken over by another tab.',
+      });
+      existing.lane.close();
+      existing.socket.close();
+      holders.set(laneKey, { socket, lane, send });
+      myLaneKey = laneKey;
+    };
+
     const sessionOpener = opts.session?.(laneId);
     const lane = new VoiceLane({
       laneId,
       send,
       openSession: sessionOpener ?? (() => Promise.resolve(null)),
+      onLaneKey,
     });
     lanes.set(socket, lane);
     const realtimeDeps = opts.realtime?.(laneId);
@@ -112,6 +166,14 @@ export function createVoiceSocket(opts: VoiceSocketOptions): VoiceSocket {
       control?.close();
       lanes.delete(socket);
       controls.delete(socket);
+      if (myLaneKey) {
+        // Only release the key if `holders` still points at THIS socket. An
+        // evicted holder's own teardown must NOT delete the entry the
+        // connection that took it over already installed — that would free
+        // the key for an unrelated later connection while the takeover's
+        // holder is still live.
+        if (holders.get(myLaneKey)?.socket === socket) holders.delete(myLaneKey);
+      }
     };
     socket.on('close', teardown);
     socket.on('error', teardown);

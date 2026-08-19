@@ -1,5 +1,15 @@
+import { runBrowserVoiceTurn } from '../voice/browser-voice-session';
 import { callsRouter } from './calls';
 import { os } from './context';
+
+// The batch-RPC fallback tier has no per-connection identity the way the
+// streaming lane's WebSocket does (`VoiceLane`'s `laneId`, used ONLY when
+// `hello.sessionId` is absent). A stateless RPC call falls back to this
+// literal instead — defensive completeness for a client that somehow omits
+// `sessionId`, which the browser wiring is not expected to do (it mints and
+// holds its own id for the call's lifetime, mirroring the streaming lane's
+// `fallbackClientId`).
+const BATCH_TURN_FALLBACK_ID = 'batch';
 
 export const voiceRouter = {
   transcribe: os.voice.transcribe.handler(async ({ input, context }) => {
@@ -20,6 +30,20 @@ export const voiceRouter = {
       ...(input.language ? { language: input.language } : {}),
       ...(input.override ? { override: input.override } : {}),
     });
+  }),
+  runTurn: os.voice.runTurn.handler(async ({ input, context, signal }) => {
+    if (!context.agentLoop) throw new Error('Voice turn driver not configured');
+    const reply = await runBrowserVoiceTurn(
+      { agentLoop: context.agentLoop },
+      {
+        text: input.text,
+        fallbackClientId: BATCH_TURN_FALLBACK_ID,
+        ...(input.sessionId ? { sessionId: input.sessionId } : {}),
+        ...(input.personalityId ? { personalityId: input.personalityId } : {}),
+        ...(signal ? { abortSignal: signal } : {}),
+      },
+    );
+    return { reply };
   }),
   ttsEntries: os.voice.ttsEntries.handler(async ({ context }) => {
     // No service wired = nothing configured, which is a legitimate state the

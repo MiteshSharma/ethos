@@ -579,6 +579,35 @@ export interface VoiceBargeInTuningUpdate {
   silenceMs?: number;
 }
 
+export interface VoiceFillerGetResult {
+  enabled: boolean;
+  afterMs: number | null;
+  text: string | null;
+  tickIntervalMs: number | null;
+}
+
+export interface VoiceFillerUpdate {
+  enabled?: boolean | null;
+  afterMs?: number | null;
+  text?: string | null;
+  tickIntervalMs?: number | null;
+}
+
+/**
+ * `voice.filler.*` → the tool-call filler/tick keep-alive. `enabled` defaults
+ * ON (mirrors `compaction.retryOnOverflow`'s pattern); the other three stay
+ * null when unset so the page can tell "never configured" from "configured
+ * to the default" — the built-in numbers live in `packages/wiring`, not here.
+ */
+function parseVoiceFiller(p: Record<string, string>): VoiceFillerGetResult {
+  return {
+    enabled: p['voice.filler.enabled'] !== 'false',
+    afterMs: passNumOrNull(p, 'voice.filler.afterMs'),
+    text: passStr(p, 'voice.filler.text'),
+    tickIntervalMs: passNumOrNull(p, 'voice.filler.tickIntervalMs'),
+  };
+}
+
 export interface VoiceBotGetResult {
   id: string | null;
   match: string;
@@ -710,6 +739,7 @@ const SETTINGS_PATCH_KEYS = [
   'displayResumeRecapTurns',
   'displayBellOnComplete',
   'compaction',
+  'voiceFiller',
   'memoryVault',
   'memoryApproval',
   'memoryConsolidation',
@@ -809,6 +839,10 @@ function validateSettingsPatch(patch: ConfigUpdateInput): void {
     checkFraction('compaction.pressure', patch.compaction.pressure);
     checkFraction('compaction.target', patch.compaction.target);
     checkInt('compaction.gateDelta', patch.compaction.gateDelta, 0);
+  }
+  if (patch.voiceFiller) {
+    checkInt('voiceFiller.afterMs', patch.voiceFiller.afterMs, 0, 60_000);
+    checkInt('voiceFiller.tickIntervalMs', patch.voiceFiller.tickIntervalMs, 0, 60_000);
   }
   if (patch.memoryApproval) {
     const mode = patch.memoryApproval.mode;
@@ -1222,6 +1256,8 @@ export interface ConfigGetResult {
   voiceInboundOwnerBotKey: string | null;
   /** Keyed by surface; an absent surface was never tuned. */
   voiceBargeIn: Record<string, VoiceBargeInTuningResult>;
+  /** `voice.filler.*` — the tool-call filler/tick keep-alive. Global, not per-surface. */
+  voiceFiller: VoiceFillerGetResult;
   voiceBots: VoiceBotGetResult[];
   nightlyPass: { enabled: boolean; cron: string };
   weeklyDigest: { enabled: boolean; cron: string; recipients: string[] };
@@ -1360,6 +1396,8 @@ export interface ConfigUpdateInput {
   /** `voice.bargeIn.*`. Present = REPLACE the whole block; an omitted surface
    *  loses its tuning. An unknown surface is refused, not dropped. */
   voiceBargeIn?: Record<string, VoiceBargeInTuningUpdate>;
+  /** `voice.filler.*`. Per-field merge; null clears one key. */
+  voiceFiller?: VoiceFillerUpdate;
   /** `voice.bots[]`. Present = REPLACE the whole list, renumbered from 0; a
    *  removed row is a deletion. */
   voiceBots?: VoiceBotUpdateInput[];
@@ -1614,6 +1652,7 @@ export class ConfigService {
       voiceInboundOwnerChatId: passStr(p, 'voice.inbound.owner.chatId'),
       voiceInboundOwnerBotKey: passStr(p, 'voice.inbound.owner.botKey'),
       voiceBargeIn: parseVoiceBargeIn(p),
+      voiceFiller: parseVoiceFiller(p),
       voiceBots: parseVoiceBots(p),
       apiVersion: passStr(p, 'apiVersion'),
       verbose: passBool(p, 'verbose', false),
@@ -1881,6 +1920,12 @@ export class ConfigService {
       set('compaction.gateDelta', patch.compaction.gateDelta);
       set('compaction.retryOnOverflow', patch.compaction.retryOnOverflow);
       set('compaction.smallWindow', patch.compaction.smallWindow);
+    }
+    if (patch.voiceFiller) {
+      set('voice.filler.enabled', patch.voiceFiller.enabled);
+      set('voice.filler.afterMs', patch.voiceFiller.afterMs);
+      set('voice.filler.text', patch.voiceFiller.text);
+      set('voice.filler.tickIntervalMs', patch.voiceFiller.tickIntervalMs);
     }
     if (patch.memoryVault) {
       set('memoryVault.path', patch.memoryVault.path);

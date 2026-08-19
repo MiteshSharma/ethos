@@ -16,6 +16,16 @@ import type { AudioFormat } from './types';
 const PREFETCH_LOOKAHEAD = 1;
 
 export interface PlayoutItem {
+  /**
+   * Caller-assigned id for this enqueued item — stamped on every `onAudio`
+   * chunk (and the eventual `onSentencePlayed`) that belongs to it. This is
+   * the correlator a consumer must key off of, not enqueue order: with
+   * prefetch, item N+1's synthesis can complete and even be ANNOUNCED
+   * (`reply_sentence`) before item N's audio has finished draining, so
+   * "whichever item is currently open" is not a safe stand-in for "which
+   * item this chunk belongs to."
+   */
+  id: string;
   /** The sentence text this audio corresponds to (for honest played-text tracking). */
   text: string;
   /** Lazily synthesizes the sentence; aborted via `signal` on cancel. */
@@ -23,10 +33,12 @@ export interface PlayoutItem {
 }
 
 export interface PlayoutQueueCallbacks {
-  /** Called per audio chunk as it becomes available for playout. */
-  onAudio: (audio: Uint8Array, format: AudioFormat, text: string) => void;
+  /** Called per audio chunk as it becomes available for playout. `id` is the
+   *  enqueued item's own id (see `PlayoutItem.id`) — the source of truth for
+   *  which item this chunk belongs to. */
+  onAudio: (audio: Uint8Array, format: AudioFormat, id: string) => void;
   /** Called once a sentence has fully played (all chunks emitted, not cancelled). */
-  onSentencePlayed?: (text: string) => void;
+  onSentencePlayed?: (id: string, text: string) => void;
   /** Called on a synthesis error that was not caused by cancellation. */
   onError?: (err: unknown) => void;
 }
@@ -37,6 +49,7 @@ export interface PlayoutQueueCallbacks {
  * comes. That buffer IS the prefetch.
  */
 interface StartedItem {
+  id: string;
   text: string;
   controller: AbortController;
   chunks: Array<{ audio: Uint8Array; format: AudioFormat }>;
@@ -95,7 +108,7 @@ export class PlayoutQueue {
       this.started.shift();
       if (this.cancelled || !completed) break;
       this.playedSentences.push(active.text);
-      this.callbacks.onSentencePlayed?.(active.text);
+      this.callbacks.onSentencePlayed?.(active.id, active.text);
       // A slot just freed: pull the next sentence into the prefetch window.
       this.fill();
     }
@@ -108,7 +121,7 @@ export class PlayoutQueue {
       const chunk = active.chunks[index];
       if (chunk) {
         index += 1;
-        this.callbacks.onAudio(chunk.audio, chunk.format, active.text);
+        this.callbacks.onAudio(chunk.audio, chunk.format, active.id);
         continue;
       }
       if (active.failed) {
@@ -166,6 +179,7 @@ export class PlayoutQueue {
  */
 function startSynthesis(item: PlayoutItem): StartedItem {
   const started: StartedItem = {
+    id: item.id,
     text: item.text,
     controller: new AbortController(),
     chunks: [],

@@ -46,6 +46,14 @@ export interface VoiceSessionDeps {
   spans?: BufferedVoiceSpanWriter;
   /** Lane/session this conversation belongs to; stamped on every span. */
   laneKey?: string;
+  /**
+   * Timer seam for the tool-call filler debounce and tick interval. Same
+   * pattern as `RealtimeControlLane` (`apps/web-api/src/voice/realtime-control-lane.ts`)
+   * — a handle `clearTimer` understands, defaulting to real `setTimeout`.
+   * Inject a hand-driven fake for deterministic tests.
+   */
+  setTimer?: (fn: () => void, ms: number) => unknown;
+  clearTimer?: (handle: unknown) => void;
 }
 
 type Listener = (event: VoiceSessionEvent) => void;
@@ -63,6 +71,8 @@ export class VoiceSession {
 
   private readonly spans: BufferedVoiceSpanWriter | undefined;
   private readonly laneKey: string | undefined;
+  private readonly setTimer: (fn: () => void, ms: number) => unknown;
+  private readonly clearTimer: (handle: unknown) => void;
 
   private listeners: Listener[] = [];
   private state: VoiceSessionState = 'idle';
@@ -74,6 +84,24 @@ export class VoiceSession {
   private currentTurnId = '';
   private currentTurnStart = 0;
   private firstAudioSpanned = false;
+  private segmentSeq = 0;
+  /**
+   * The id of the segment currently draining through playout — i.e. the one
+   * that has actually emitted `reply_audio` chunks, as opposed to one merely
+   * queued/prefetching. This is what `bargeIn()` closes: a segment only ever
+   * closes on ITS OWN completion (natural or interrupted), never because a
+   * later segment's `reply_sentence` happened to arrive first.
+   */
+  private playingSegmentId: string | null = null;
+
+  // Tool-call filler/tick state (see `onToolStart`/`onToolEnd`). Reset at the
+  // top of every `runTurn`; a live count because tools can run in parallel
+  // (`ToolRegistry.executeParallel`), not a boolean.
+  private toolsInFlight = 0;
+  private hasSpokenTextThisTurn = false;
+  private fillerSpokenThisTurn = false;
+  private fillerTimerHandle: unknown = null;
+  private tickTimerHandle: unknown = null;
 
   constructor(deps: VoiceSessionDeps) {
     this.runner = deps.runner;
@@ -84,18 +112,25 @@ export class VoiceSession {
     this.logger = deps.logger;
     this.spans = deps.spans;
     this.laneKey = deps.laneKey;
+    this.setTimer = deps.setTimer ?? ((fn, ms) => setTimeout(fn, ms));
+    this.clearTimer = deps.clearTimer ?? ((handle) => clearTimeout(handle as never));
     this.stt = this.resolveStt(deps.stt);
     this.endpoint = new EndpointDetector({
       silenceMs: this.config.endpointSilenceMs ?? 400,
       now: this.now,
     });
     this.playout = new PlayoutQueue({
-      onAudio: (audio, format) => {
+      onAudio: (audio, format, id) => {
         if (!this.firstAudioSpanned) {
           this.firstAudioSpanned = true;
           this.span('tts_first_audio', this.currentTurnStart, 'ok');
         }
-        this.emit({ type: 'reply_audio', audio, format });
+        this.playingSegmentId = id;
+        this.emit({ type: 'reply_audio', audio, format, segmentId: id });
+      },
+      onSentencePlayed: (id) => {
+        if (this.playingSegmentId === id) this.playingSegmentId = null;
+        this.emit({ type: 'reply_segment_end', segmentId: id });
       },
       onError: (err) => {
         this.logger?.warn('voice-session: synthesis error', { err });
@@ -223,9 +258,10 @@ export class VoiceSession {
   ): Promise<void> {
     const chunker = new SentenceChunker();
     this.playout.reset();
-    const fillerAfterMs = this.config.fillerAfterMs ?? 0;
-    let lastTextAt = this.now();
-    let fillerSpoken = false;
+    this.playingSegmentId = null;
+    this.toolsInFlight = 0;
+    this.hasSpokenTextThisTurn = false;
+    this.fillerSpokenThisTurn = false;
     let firstSentenceSpanned = false;
 
     try {
@@ -233,7 +269,9 @@ export class VoiceSession {
         if (controller.signal.aborted) break;
         if (event.type === 'text_delta') {
           if (this.state === 'thinking') this.setState('speaking');
-          lastTextAt = this.now();
+          this.hasSpokenTextThisTurn = true;
+          // Text resumed — cancel a pending filler and stop ticking.
+          this.stopToolFillerAndTick();
           for (const sentence of chunker.push(event.text)) {
             if (!firstSentenceSpanned) {
               firstSentenceSpanned = true;
@@ -241,13 +279,16 @@ export class VoiceSession {
             }
             this.speakSentence(sentence);
           }
+          continue;
         }
-        // thinking_delta and tool_* events are never spoken. During a long
-        // tool run with no text, speak a filler once past the threshold.
-        if (fillerAfterMs > 0 && !fillerSpoken && this.now() - lastTextAt >= fillerAfterMs) {
-          fillerSpoken = true;
-          this.speakFiller();
+        if (event.type === 'tool_start') {
+          this.onToolStart();
+          continue;
         }
+        if (event.type === 'tool_end') {
+          this.onToolEnd();
+        }
+        // thinking_delta and other events are never spoken.
       }
       if (!controller.signal.aborted) {
         const remainder = chunker.flush();
@@ -257,6 +298,8 @@ export class VoiceSession {
       if (!controller.signal.aborted) {
         this.emit({ type: 'error', error: errorMessage(err), code: 'runner' });
       }
+    } finally {
+      this.stopToolFillerAndTick();
     }
 
     await this.playout.idle();
@@ -271,6 +314,74 @@ export class VoiceSession {
     this.emit({ type: 'reply_complete', text: played });
     this.span('turn', turnStart, 'ok');
     this.setState('listening');
+  }
+
+  /**
+   * A tool call just started. On the FIRST call of a turn that starts before
+   * any reply text has appeared, arm the filler debounce; every tool-call gap
+   * (re)starts the tick interval, independent of whether the filler fires.
+   */
+  private onToolStart(): void {
+    this.toolsInFlight += 1;
+    const fillerAfterMs = this.config.fillerAfterMs ?? 0;
+    if (
+      this.toolsInFlight === 1 &&
+      !this.hasSpokenTextThisTurn &&
+      !this.fillerSpokenThisTurn &&
+      fillerAfterMs > 0 &&
+      this.fillerTimerHandle === null
+    ) {
+      this.fillerTimerHandle = this.setTimer(() => {
+        this.fillerTimerHandle = null;
+        this.fillerSpokenThisTurn = true;
+        this.speakFiller();
+        // Don't double up: push the next tick a full interval out from the
+        // filler that was just spoken, rather than let it land right after.
+        this.restartTick();
+      }, fillerAfterMs);
+    }
+    this.scheduleTick();
+  }
+
+  /** A tool call finished. Once none remain, stop the filler and the tick. */
+  private onToolEnd(): void {
+    this.toolsInFlight = Math.max(0, this.toolsInFlight - 1);
+    if (this.toolsInFlight === 0) this.stopToolFillerAndTick();
+  }
+
+  private scheduleTick(): void {
+    const tickIntervalMs = this.config.tickIntervalMs ?? 0;
+    if (tickIntervalMs <= 0 || this.tickTimerHandle !== null) return;
+    this.tickTimerHandle = this.setTimer(() => this.fireTick(), tickIntervalMs);
+  }
+
+  private restartTick(): void {
+    this.clearTickTimer();
+    this.scheduleTick();
+  }
+
+  private fireTick(): void {
+    this.tickTimerHandle = null;
+    if (this.toolsInFlight <= 0) return;
+    this.emit({ type: 'tick' });
+    this.scheduleTick();
+  }
+
+  private clearFillerTimer(): void {
+    if (this.fillerTimerHandle === null) return;
+    this.clearTimer(this.fillerTimerHandle);
+    this.fillerTimerHandle = null;
+  }
+
+  private clearTickTimer(): void {
+    if (this.tickTimerHandle === null) return;
+    this.clearTimer(this.tickTimerHandle);
+    this.tickTimerHandle = null;
+  }
+
+  private stopToolFillerAndTick(): void {
+    this.clearFillerTimer();
+    this.clearTickTimer();
   }
 
   /**
@@ -297,9 +408,19 @@ export class VoiceSession {
     });
   }
 
+  /** Mints the id that ties one `reply_sentence`/`filler` event to every
+   *  `reply_audio` chunk (and the eventual `reply_segment_end`) that belongs
+   *  to it — see `PlayoutItem.id`. */
+  private nextSegmentId(): string {
+    this.segmentSeq += 1;
+    return `seg${this.segmentSeq}`;
+  }
+
   private speakSentence(text: string): void {
-    this.emit({ type: 'reply_sentence', text });
+    const segmentId = this.nextSegmentId();
+    this.emit({ type: 'reply_sentence', text, segmentId });
     this.playout.enqueue({
+      id: segmentId,
       text,
       synthesize: (signal) => this.synthesize(text, signal),
     });
@@ -307,8 +428,10 @@ export class VoiceSession {
 
   private speakFiller(): void {
     const text = this.config.fillerText ?? DEFAULT_VOICE_FILLER_TEXT;
-    this.emit({ type: 'filler', text });
+    const segmentId = this.nextSegmentId();
+    this.emit({ type: 'filler', text, segmentId });
     this.playout.enqueue({
+      id: segmentId,
       text,
       synthesize: (signal) => this.synthesize(text, signal),
     });
@@ -327,10 +450,33 @@ export class VoiceSession {
     yield { audio: result.audio, format: result.format };
   }
 
-  private bargeIn(): void {
-    // (1) flush queue + abort in-flight synthesis; (2) abort the agent turn;
-    // (3) record the honestly-played reply plus an [interrupted] marker.
+  /**
+   * Hard stop: the caller (browser tab closed, socket torn down) is no longer
+   * listening. Aborts the in-flight turn and cancels playout — the same
+   * mechanics `bargeIn()` uses — but emits NOTHING: nobody is there to
+   * receive `interrupted`/`reply_complete`, and firing them would touch
+   * listeners the caller may already be tearing down. Idempotent; safe to
+   * call on a session that never had a turn in flight.
+   */
+  stop(): void {
+    this.stopToolFillerAndTick();
     this.playout.cancel();
+    this.turnController?.abort();
+    this.turnController = null;
+    this.setState('idle');
+  }
+
+  private bargeIn(): void {
+    // (1) flush queue + abort in-flight synthesis; (2) close whatever segment
+    // was ACTUALLY playing (never a different, later one — see
+    // `playingSegmentId`'s doc); (3) abort the agent turn; (4) record the
+    // honestly-played reply plus an [interrupted] marker.
+    this.stopToolFillerAndTick();
+    this.playout.cancel();
+    if (this.playingSegmentId) {
+      this.emit({ type: 'reply_segment_end', segmentId: this.playingSegmentId });
+      this.playingSegmentId = null;
+    }
     this.turnController?.abort();
     const played = this.playout.playedText();
     const honest = played.length > 0 ? `${played.join(' ')} [interrupted]` : '[interrupted]';

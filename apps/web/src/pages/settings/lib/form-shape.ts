@@ -122,6 +122,14 @@ export interface FormShape extends VoiceTelephonyFormValues {
     retryOnOverflow: boolean;
     smallWindow: 'auto' | 'on' | 'off';
   };
+  /** `voice.filler.*` — the tool-call filler/tick keep-alive. Global, not per-surface. */
+  voiceFiller: {
+    enabled: boolean;
+    afterMs: number | null;
+    /** '' = unset = the built-in default applies, same as `memoryVault.path`. */
+    text: string;
+    tickIntervalMs: number | null;
+  };
   memoryVault: { path: string; agentDir: string; prefetch: string[]; exclude: string[] };
   memoryApproval: { mode: 'off' | 'automated' | 'all'; cap: number | null; ttlDays: number | null };
   memoryConsolidation: {
