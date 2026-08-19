@@ -1,9 +1,9 @@
 import { InMemoryStorage } from '@ethosagent/storage-fs';
-import type { PendingClarify } from '@ethosagent/types';
+import type { ClarifySurfaceType, PendingClarify } from '@ethosagent/types';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   ClarifyBridge,
-  ClarifyBusyError,
+  type ClarifyBridgeOptions,
   ClarifyNoSurfaceError,
   ClarifyTimedOutNoDefaultError,
 } from '../clarify/clarify-bridge';
@@ -19,6 +19,7 @@ function makeRow(overrides: Partial<PendingClarify> = {}): PendingClarify {
     answerableBy: 'anyone',
     createdAt: '2026-05-15T00:00:00.000Z',
     defaultDeadlineAt: '2026-05-15T00:15:00.000Z',
+    presentedAt: '2026-05-15T00:00:00.000Z',
     ...overrides,
   };
 }
@@ -48,12 +49,30 @@ describe('FileClarifyStore', () => {
     expect(rows[0]?.question).toBe('second');
   });
 
+  it('list() filters by jobId', async () => {
+    const store = new FileClarifyStore(new InMemoryStorage(), '/ethos/clarify');
+    await store.add(makeRow({ requestId: 'a', jobId: 'job-1' }));
+    await store.add(makeRow({ requestId: 'b', jobId: 'job-2' }));
+    await store.add(makeRow({ requestId: 'c' }));
+    expect((await store.list({ jobId: 'job-1' })).map((r) => r.requestId)).toEqual(['a']);
+  });
+
   it('expired() returns only rows past the deadline', async () => {
     const store = new FileClarifyStore(new InMemoryStorage(), '/ethos/clarify');
     await store.add(makeRow({ requestId: 'old', defaultDeadlineAt: '2026-05-15T00:00:00.000Z' }));
     await store.add(makeRow({ requestId: 'new', defaultDeadlineAt: '2026-05-15T01:00:00.000Z' }));
     const expired = await store.expired(new Date('2026-05-15T00:30:00.000Z'));
     expect(expired.map((r) => r.requestId)).toEqual(['old']);
+  });
+
+  // D2/T17 — a still-queued row (never presented) persists with a null
+  // deadline. It must never be treated as expired, no matter how far `now`
+  // has advanced, because it has no timer running.
+  it('expired() never returns a row with a null defaultDeadlineAt', async () => {
+    const store = new FileClarifyStore(new InMemoryStorage(), '/ethos/clarify');
+    await store.add(makeRow({ requestId: 'queued', defaultDeadlineAt: null, presentedAt: null }));
+    const expired = await store.expired(new Date('2099-01-01T00:00:00.000Z'));
+    expect(expired).toEqual([]);
   });
 
   it('tolerates a corrupt pending file', async () => {
@@ -81,10 +100,34 @@ describe('FileClarifyStore', () => {
   });
 });
 
+/**
+ * A deterministic queue over a surface's presentations — avoids guessing how
+ * many microtask ticks `request()` takes (it now awaits `resolveRouting()`
+ * and `store.add()`, both real async hops) by awaiting an actual signal
+ * instead of a fixed number of `Promise.resolve()` flushes.
+ */
+function makePresentedQueue(bridge: ClarifyBridge, surfaceType: ClarifySurfaceType) {
+  const items: PendingClarify[] = [];
+  const waiting: Array<(v: PendingClarify) => void> = [];
+  bridge.registerPresenter(surfaceType, (req) => {
+    const waiter = waiting.shift();
+    if (waiter) waiter(req);
+    else items.push(req);
+  });
+  return {
+    all: items,
+    next(): Promise<PendingClarify> {
+      const item = items.shift();
+      if (item) return Promise.resolve(item);
+      return new Promise<PendingClarify>((resolve) => waiting.push(resolve));
+    },
+  };
+}
+
 describe('ClarifyBridge', () => {
-  function makeBridge() {
+  function makeBridge(opts?: ClarifyBridgeOptions) {
     const store = new FileClarifyStore(new InMemoryStorage(), '/ethos/clarify');
-    return { bridge: new ClarifyBridge(store), store };
+    return { bridge: new ClarifyBridge(store, opts), store };
   }
 
   const baseInput = {
@@ -100,22 +143,29 @@ describe('ClarifyBridge', () => {
     await expect(bridge.request(baseInput)).rejects.toBeInstanceOf(ClarifyNoSurfaceError);
   });
 
+  // G2 — a presenter registered for one surface type must never be invoked
+  // for a request resolved to a different surface type.
+  it('rejects with CLARIFY_NO_SURFACE when a presenter exists for a different surface', async () => {
+    const { bridge } = makeBridge();
+    bridge.registerPresenter('telegram', () => {});
+    await expect(bridge.request(baseInput)).rejects.toBeInstanceOf(ClarifyNoSurfaceError);
+  });
+
   it('presents the request and resolves with the user answer', async () => {
     const { bridge, store } = makeBridge();
-    const presented: PendingClarify[] = [];
-    bridge.setPresenter((req) => {
-      presented.push(req);
-      // Simulate a surface answering on the next tick.
-      queueMicrotask(() => {
-        void bridge.respond({ requestId: req.requestId, answer: 'postgres', source: 'user' });
-      });
-    });
+    const queue = makePresentedQueue(bridge, 'cli');
 
-    const res = await bridge.request({ ...baseInput, options: ['postgres', 'sqlite'] });
+    const pending = bridge.request({ ...baseInput, options: ['postgres', 'sqlite'] });
+    const row = await queue.next();
+    await bridge.respond({ requestId: row.requestId, answer: 'postgres', source: 'user' });
+
+    const res = await pending;
     expect(res.answer).toBe('postgres');
     expect(res.source).toBe('user');
-    expect(presented).toHaveLength(1);
-    expect(presented[0]?.question).toBe(baseInput.question);
+    expect(row.question).toBe(baseInput.question);
+    // Presented rows carry a deadline derived at present time (D2).
+    expect(row.presentedAt).not.toBeNull();
+    expect(row.defaultDeadlineAt).not.toBeNull();
     // Persisted before presenting, removed on resolve.
     expect(await store.list()).toHaveLength(0);
   });
@@ -125,7 +175,7 @@ describe('ClarifyBridge', () => {
     let rowsAtPresentTime = -1;
     let capturedId = '';
     const presented = new Promise<void>((resolve) => {
-      bridge.setPresenter(async (req) => {
+      bridge.registerPresenter('cli', async (req) => {
         capturedId = req.requestId;
         rowsAtPresentTime = (await store.list()).length;
         resolve();
@@ -138,19 +188,378 @@ describe('ClarifyBridge', () => {
     expect(rowsAtPresentTime).toBe(1);
   });
 
-  it('rejects a second concurrent clarify for the same session with CLARIFY_BUSY', async () => {
+  // G2 — only the presenter for the resolved surface type is ever invoked;
+  // a differently-registered surface never sees the row.
+  it('only invokes the presenter for the resolved surface type', async () => {
     const { bridge } = makeBridge();
-    const presented = new Promise<PendingClarify>((resolve) => bridge.setPresenter(resolve));
+    const cliQueue = makePresentedQueue(bridge, 'cli');
+    const telegramPresented: PendingClarify[] = [];
+    bridge.registerPresenter('telegram', (req) => {
+      telegramPresented.push(req);
+    });
+
+    const pending = bridge.request(baseInput);
+    const row = await cliQueue.next();
+    await bridge.respond({ requestId: row.requestId, answer: 'x', source: 'user' });
+    await pending;
+
+    expect(telegramPresented).toHaveLength(0);
+  });
+
+  // ---------------------------------------------------------------------------
+  // G1/D22 — per-job FIFO lanes (Phase 1 I1, done-when #1 and #2)
+  // ---------------------------------------------------------------------------
+
+  describe('per-job lanes (G1/D22)', () => {
+    it('presents both immediately when two different jobIds share a session (no queueing)', async () => {
+      const { bridge } = makeBridge();
+      const queue = makePresentedQueue(bridge, 'cli');
+
+      const p1 = bridge.request({ ...baseInput, jobId: 'job-1' });
+      const p2 = bridge.request({ ...baseInput, jobId: 'job-2' });
+
+      // Both present — different lanes, neither waits on the other.
+      const rowA = await queue.next();
+      const rowB = await queue.next();
+      expect([rowA.jobId, rowB.jobId].sort()).toEqual(['job-1', 'job-2']);
+
+      await bridge.respond({ requestId: rowA.requestId, answer: 'a', source: 'user' });
+      await bridge.respond({ requestId: rowB.requestId, answer: 'b', source: 'user' });
+      await expect(p1).resolves.toBeDefined();
+      await expect(p2).resolves.toBeDefined();
+    });
+
+    it('queues a second request for the same job behind the first (no CLARIFY_BUSY)', async () => {
+      const { bridge } = makeBridge();
+      const queue = makePresentedQueue(bridge, 'cli');
+
+      const first = bridge.request({ ...baseInput, jobId: 'job-1' });
+      const second = bridge.request({ ...baseInput, jobId: 'job-1', question: 'second question' });
+
+      const row1 = await queue.next();
+      expect(row1.question).toBe(baseInput.question);
+
+      // The second must not have presented yet — it's queued behind the
+      // first. Race the (still-pending) next presentation against a short
+      // real timeout; racing doesn't cancel it, so it can still be awaited
+      // below once the first resolves and the queue actually drains.
+      const secondPresentedPromise = queue.next();
+      const notYetSentinel = Symbol('not-yet-presented');
+      const raced = await Promise.race([
+        secondPresentedPromise,
+        new Promise((resolve) => setTimeout(() => resolve(notYetSentinel), 20)),
+      ]);
+      expect(raced).toBe(notYetSentinel);
+      expect(bridge.listPending(undefined, 'job-1')).toHaveLength(2); // one presented, one queued
+
+      await bridge.respond({ requestId: row1.requestId, answer: 'a', source: 'user' });
+      await first;
+
+      // Resolving the first drains the queue — the second now presents.
+      const row2 = await secondPresentedPromise;
+      expect(row2.question).toBe('second question');
+
+      await bridge.respond({ requestId: row2.requestId, answer: 'b', source: 'user' });
+      await expect(second).resolves.toMatchObject({ answer: 'b' });
+    });
+
+    it('a foreground clarify with no jobId keeps the per-session lane (unchanged today)', async () => {
+      const { bridge } = makeBridge();
+      const queue = makePresentedQueue(bridge, 'cli');
+
+      const first = bridge.request(baseInput);
+      const row1 = await queue.next();
+
+      const second = bridge.request(baseInput);
+      // Same session, no jobId on either — second queues behind the first;
+      // it must not present until the first resolves.
+      expect(bridge.hasPending('s1')).toBe(true);
+      await vi.waitFor(() => {
+        expect(bridge.listPending('s1')).toHaveLength(2); // one presented, one queued
+      });
+
+      await bridge.respond({ requestId: row1.requestId, answer: 'a', source: 'user' });
+      await first;
+      const row2 = await queue.next();
+      await bridge.respond({ requestId: row2.requestId, answer: 'b', source: 'user' });
+      await expect(second).resolves.toMatchObject({ answer: 'b' });
+    });
+
+    // T16 — a question queued behind a 15-minute question gets its own full
+    // window, measured from when IT is presented, not from when it was requested.
+    it('a queued request gets its own full timeout window from its own present time (T16)', async () => {
+      vi.useFakeTimers();
+      try {
+        const { bridge } = makeBridge();
+        const queue = makePresentedQueue(bridge, 'cli');
+        const FIFTEEN_MIN = 15 * 60_000;
+
+        bridge.request({ ...baseInput, jobId: 'job-1', timeoutMs: FIFTEEN_MIN });
+        const row1 = await queue.next();
+        const second = bridge.request({
+          ...baseInput,
+          jobId: 'job-1',
+          timeoutMs: FIFTEEN_MIN,
+          question: 'second',
+        });
+
+        // Burn 10 of the first request's 15 minutes before it resolves.
+        await vi.advanceTimersByTimeAsync(10 * 60_000);
+        await bridge.respond({ requestId: row1.requestId, answer: 'a', source: 'user' });
+
+        // The second request is now presented — its window starts fresh.
+        const row2 = await queue.next();
+        expect(row2.question).toBe('second');
+
+        // Advance 14 of its 15 minutes — it must NOT have timed out yet,
+        // proving its deadline was derived at presentation, not at the
+        // original request (which was ~10 minutes ago).
+        await vi.advanceTimersByTimeAsync(14 * 60_000);
+        let secondSettled = false;
+        second
+          .catch(() => {})
+          .finally(() => {
+            secondSettled = true;
+          });
+        await Promise.resolve();
+        expect(secondSettled).toBe(false);
+
+        // Advance past its own full window — now it times out (no default).
+        await vi.advanceTimersByTimeAsync(2 * 60_000);
+        await expect(second).rejects.toBeInstanceOf(ClarifyTimedOutNoDefaultError);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    // T17 — a queued row (in-memory, mirroring the persisted null-deadline
+    // row) survives sweep() without being expired.
+    it('sweep() does not expire a still-queued request (T17)', async () => {
+      const { bridge, store } = makeBridge();
+      const queue = makePresentedQueue(bridge, 'cli');
+
+      const first = bridge.request({ ...baseInput, jobId: 'job-1', timeoutMs: 900_000 });
+      const row1 = await queue.next();
+      const second = bridge.request({ ...baseInput, jobId: 'job-1', timeoutMs: 900_000 });
+
+      // Wait for the second (queued) row to actually land in the store —
+      // `request()` persists it asynchronously before queueing.
+      await vi.waitFor(async () => {
+        expect(await store.list()).toHaveLength(2);
+      });
+
+      // The queued row is persisted with a null deadline — a sweep run "at
+      // boot" must leave it alone.
+      await bridge.sweep(new Date('2099-01-01T00:00:00.000Z'));
+      expect(await store.list()).toHaveLength(2); // both rows still persisted
+
+      await bridge.respond({ requestId: row1.requestId, answer: 'a', source: 'user' });
+      await first;
+      const row2 = await queue.next(); // drained after sweep, unaffected
+
+      await bridge.respond({ requestId: row2.requestId, answer: 'b', source: 'user' });
+      await expect(second).resolves.toMatchObject({ answer: 'b' });
+    });
+
+    it('a still-queued request can be cancelled without disturbing the lane', async () => {
+      const { bridge } = makeBridge();
+      const queue = makePresentedQueue(bridge, 'cli');
+
+      const controller = new AbortController();
+      const first = bridge.request({ ...baseInput, jobId: 'job-1' });
+      const row1 = await queue.next();
+      const second = bridge.request({
+        ...baseInput,
+        jobId: 'job-1',
+        abortSignal: controller.signal,
+      });
+
+      controller.abort();
+      await expect(second).resolves.toMatchObject({ source: 'cancel' });
+
+      // Resolving the first should still drive the (now-empty) queue cleanly.
+      await bridge.respond({ requestId: row1.requestId, answer: 'a', source: 'user' });
+      await expect(first).resolves.toMatchObject({ answer: 'a' });
+      expect(queue.all).toHaveLength(0); // the cancelled one was never presented
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // D7/G2/G3 — origin-lane routing with presence override (Phase 1 I3, T18)
+  // ---------------------------------------------------------------------------
+
+  describe('origin-lane routing (D7/G2/G3, T18)', () => {
+    it('routes a job clarify to its origin lane when no presence was recorded ("both idle → origin")', async () => {
+      const { bridge } = makeBridge();
+      bridge.setOriginResolver(() => ({ surfaceType: 'telegram' }));
+      const queue = makePresentedQueue(bridge, 'telegram');
+
+      const pending = bridge.request({ ...baseInput, jobId: 'job-1', surfaceType: 'cli' });
+      const row = await queue.next();
+      await bridge.respond({ requestId: row.requestId, answer: 'x', source: 'user' });
+      await pending;
+    });
+
+    it('falls back to the input surfaceType when the job has no recorded origin', async () => {
+      const { bridge } = makeBridge();
+      bridge.setOriginResolver(() => null);
+      const queue = makePresentedQueue(bridge, 'cli');
+
+      const pending = bridge.request({ ...baseInput, jobId: 'job-1', surfaceType: 'cli' });
+      const row = await queue.next();
+      await bridge.respond({ requestId: row.requestId, answer: 'x', source: 'user' });
+      await pending;
+    });
+
+    it('routes to a foreground surface active within the presence TTL, overriding origin', async () => {
+      vi.useFakeTimers();
+      try {
+        const { bridge } = makeBridge({ presenceTtlMs: 5 * 60_000 });
+        bridge.setOriginResolver(() => ({ surfaceType: 'telegram' }));
+        const cliQueue = makePresentedQueue(bridge, 'cli');
+        bridge.registerPresenter('telegram', () => {
+          throw new Error('should not route to origin — presence override expected');
+        });
+
+        bridge.recordPresence('cli');
+        await vi.advanceTimersByTimeAsync(60_000); // 1 min later — well within TTL
+
+        const pending = bridge.request({ ...baseInput, jobId: 'job-1', surfaceType: 'cli' });
+        const row = await cliQueue.next();
+        await bridge.respond({ requestId: row.requestId, answer: 'x', source: 'user' });
+        await pending;
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('falls back to origin once the presence TTL has elapsed', async () => {
+      vi.useFakeTimers();
+      try {
+        const { bridge } = makeBridge({ presenceTtlMs: 5 * 60_000 });
+        bridge.setOriginResolver(() => ({ surfaceType: 'telegram' }));
+        const telegramQueue = makePresentedQueue(bridge, 'telegram');
+        bridge.registerPresenter('cli', () => {
+          throw new Error('presence expired — must not route to cli');
+        });
+
+        bridge.recordPresence('cli');
+        await vi.advanceTimersByTimeAsync(6 * 60_000); // past the 5 min TTL
+
+        const pending = bridge.request({ ...baseInput, jobId: 'job-1', surfaceType: 'cli' });
+        const row = await telegramQueue.next();
+        await bridge.respond({ requestId: row.requestId, answer: 'x', source: 'user' });
+        await pending;
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('a tie at exactly the TTL boundary routes to origin', async () => {
+      vi.useFakeTimers();
+      try {
+        const { bridge } = makeBridge({ presenceTtlMs: 5 * 60_000 });
+        bridge.setOriginResolver(() => ({ surfaceType: 'telegram' }));
+        const telegramQueue = makePresentedQueue(bridge, 'telegram');
+        bridge.registerPresenter('cli', () => {
+          throw new Error('a tie must route to origin, not cli');
+        });
+
+        bridge.recordPresence('cli');
+        await vi.advanceTimersByTimeAsync(5 * 60_000); // exactly the TTL — not < ttl
+
+        const pending = bridge.request({ ...baseInput, jobId: 'job-1', surfaceType: 'cli' });
+        const row = await telegramQueue.next();
+        await bridge.respond({ requestId: row.requestId, answer: 'x', source: 'user' });
+        await pending;
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('presence recorded on the origin surface itself is not treated as an override', async () => {
+      const { bridge } = makeBridge();
+      bridge.setOriginResolver(() => ({ surfaceType: 'telegram' }));
+      const telegramQueue = makePresentedQueue(bridge, 'telegram');
+
+      bridge.recordPresence('telegram');
+      const pending = bridge.request({ ...baseInput, jobId: 'job-1', surfaceType: 'cli' });
+      const row = await telegramQueue.next();
+      await bridge.respond({ requestId: row.requestId, answer: 'x', source: 'user' });
+      await pending;
+    });
+
+    it('a foreground clarify (no jobId) ignores origin routing and presence entirely', async () => {
+      const { bridge } = makeBridge();
+      bridge.setOriginResolver(() => ({ surfaceType: 'telegram' }));
+      const cliQueue = makePresentedQueue(bridge, 'cli');
+      bridge.registerPresenter('telegram', () => {
+        throw new Error('should never be called for a foreground clarify');
+      });
+
+      const pending = bridge.request(baseInput); // no jobId
+      const row = await cliQueue.next();
+      await bridge.respond({ requestId: row.requestId, answer: 'x', source: 'user' });
+      await pending;
+    });
+
+    // Phase-1 done-when #4 — a job spawned with an origin on Telegram is
+    // answered from a completely different surface (web) via the generic
+    // requestId-keyed respond() path; resolves exactly once, no dangling
+    // presenter on Telegram.
+    it('a job answered on a surface other than where it was presented resolves exactly once', async () => {
+      const { bridge } = makeBridge();
+      bridge.setOriginResolver(() => ({ surfaceType: 'telegram' }));
+      const telegramQueue = makePresentedQueue(bridge, 'telegram');
+      const resolvedRows: string[] = [];
+      bridge.onResolved((row) => resolvedRows.push(row.requestId));
+
+      const pending = bridge.request({ ...baseInput, jobId: 'job-1', surfaceType: 'cli' });
+      const row = await telegramQueue.next();
+
+      // "Answered from web" — a completely different surface resolving by
+      // requestId, exactly what the `clarify.respond` RPC does.
+      await bridge.respond({ requestId: row.requestId, answer: 'dual-write', source: 'user' });
+      await expect(pending).resolves.toMatchObject({ answer: 'dual-write' });
+      expect(resolvedRows).toEqual([row.requestId]);
+
+      // A second respond() for the same id (e.g. a stale Telegram callback
+      // racing in after web already answered) must be swallowed, not throw
+      // or double-resolve.
+      await expect(
+        bridge.respond({ requestId: row.requestId, answer: 'stale', source: 'user' }),
+      ).resolves.toBeUndefined();
+      expect(resolvedRows).toEqual([row.requestId]); // still exactly one notification
+    });
+  });
+
+  // G1/D2 — a second concurrent clarify for the same session (no jobId, so
+  // the per-session lane applies) used to reject outright with
+  // CLARIFY_BUSY. It now queues instead: presented once the first resolves,
+  // with its own full timeout window. Sanctioned behaviour change (G1).
+  it('queues, rather than rejects, a second concurrent clarify for the same session', async () => {
+    const { bridge } = makeBridge();
+    const queue = makePresentedQueue(bridge, 'cli');
+
     const first = bridge.request(baseInput);
-    const row = await presented; // presenter fires after the pending row registers
-    await expect(bridge.request(baseInput)).rejects.toBeInstanceOf(ClarifyBusyError);
-    await bridge.respond({ requestId: row.requestId, answer: 'done', source: 'user' });
+    const row1 = await queue.next(); // presenter fires after the pending row registers
+
+    const second = bridge.request(baseInput);
+    // Still busy — a lane-scoped listPending shows both (one presented, one queued).
+    expect(bridge.hasPending('s1')).toBe(true);
+
+    await bridge.respond({ requestId: row1.requestId, answer: 'done', source: 'user' });
     await expect(first).resolves.toMatchObject({ answer: 'done' });
+
+    // Resolving the first drains the queue — the second is now presented.
+    const row2 = await queue.next();
+    await bridge.respond({ requestId: row2.requestId, answer: 'done2', source: 'user' });
+    await expect(second).resolves.toMatchObject({ answer: 'done2' });
   });
 
   it('allows a second clarify after the first resolves', async () => {
     const { bridge } = makeBridge();
-    bridge.setPresenter((req) => {
+    bridge.registerPresenter('cli', (req) => {
       void bridge.respond({ requestId: req.requestId, answer: 'a', source: 'user' });
     });
     await bridge.request(baseInput);
@@ -163,7 +572,7 @@ describe('ClarifyBridge', () => {
 
     it('resolves with the default on timeout', async () => {
       const { bridge, store } = makeBridge();
-      bridge.setPresenter(() => {});
+      bridge.registerPresenter('cli', () => {});
       const pending = bridge.request({ ...baseInput, default: 'postgres', timeoutMs: 5_000 });
       await vi.advanceTimersByTimeAsync(5_000);
       const res = await pending;
@@ -173,7 +582,7 @@ describe('ClarifyBridge', () => {
 
     it('rejects with CLARIFY_TIMED_OUT_NO_DEFAULT when no default was given', async () => {
       const { bridge } = makeBridge();
-      bridge.setPresenter(() => {});
+      bridge.registerPresenter('cli', () => {});
       const pending = bridge.request({ ...baseInput, timeoutMs: 5_000 });
       const assertion = expect(pending).rejects.toBeInstanceOf(ClarifyTimedOutNoDefaultError);
       await vi.advanceTimersByTimeAsync(5_000);
@@ -183,7 +592,7 @@ describe('ClarifyBridge', () => {
 
   it('resolves as cancelled when the turn abort signal fires', async () => {
     const { bridge } = makeBridge();
-    bridge.setPresenter(() => {});
+    bridge.registerPresenter('cli', () => {});
     const controller = new AbortController();
     const pending = bridge.request({ ...baseInput, abortSignal: controller.signal });
     controller.abort();

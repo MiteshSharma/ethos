@@ -91,7 +91,7 @@ export class SlackClarifySurface {
     this.getSessionRouting = cfg.getSessionRouting;
     this.observability = cfg.observability;
 
-    this.bridge.setPresenter((row) => this.present(row));
+    this.bridge.registerPresenter(SURFACE, (row) => this.present(row));
     this.bridge.onResolved((row, resp) => {
       void this.onResolved(row, resp);
     });
@@ -117,7 +117,9 @@ export class SlackClarifySurface {
       question: row.question,
       ...(row.options !== undefined ? { options: row.options } : {}),
       ...(row.default !== undefined ? { default: row.default } : {}),
-      defaultDeadlineAt: row.defaultDeadlineAt,
+      // `present()` only fires once a row is actually presented (D2), at
+      // which point this is always set — the fallback is defensive only.
+      defaultDeadlineAt: row.defaultDeadlineAt ?? row.createdAt,
     });
 
     const result = await this.adapter.postClarifyCard({
@@ -228,6 +230,9 @@ export class SlackClarifySurface {
       response = { requestId: row.requestId, answer, source: 'user' };
     }
     this.rememberResponder(row.requestId, evt.userId);
+    // D7 — a human acted on this surface; a background job's next question
+    // may route here instead of always falling back to its origin lane.
+    this.bridge.recordPresence(SURFACE);
     await this.bridge.respond(response);
   }
 
@@ -241,6 +246,7 @@ export class SlackClarifySurface {
     if (row.surfaceContext.botKey !== this.adapter.botKey) return;
     if (!gateAnswerer(row, evt.userId)) return;
     this.rememberResponder(row.requestId, evt.userId);
+    this.bridge.recordPresence(SURFACE);
     await this.bridge.respond({
       requestId: row.requestId,
       answer: evt.answer,

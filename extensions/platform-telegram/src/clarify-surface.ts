@@ -81,7 +81,7 @@ export class TelegramClarifySurface {
     this.store = cfg.store;
     this.getSessionRouting = cfg.getSessionRouting;
 
-    this.bridge.setPresenter((row) => this.present(row));
+    this.bridge.registerPresenter(SURFACE, (row) => this.present(row));
     this.bridge.onResolved((row, resp) => {
       void this.onResolved(row, resp);
     });
@@ -152,6 +152,9 @@ export class TelegramClarifySurface {
       const target = await this.findCancelTarget(message.chatId, explicit);
       if (!target) return null;
       if (!gateAnswerer(target, message.userId)) return null;
+      // D7 — a human acted on this surface; a background job's next question
+      // may route here instead of always falling back to its origin lane.
+      this.bridge.recordPresence(SURFACE);
       return { requestId: target.requestId, answer: '', source: 'cancel' };
     }
 
@@ -165,6 +168,7 @@ export class TelegramClarifySurface {
     );
     if (!target) return null;
     if (!gateAnswerer(target, message.userId)) return null;
+    this.bridge.recordPresence(SURFACE);
     return { requestId: target.requestId, answer: text, source: 'user' };
   }
 
@@ -215,6 +219,7 @@ export class TelegramClarifySurface {
       }
       response = { requestId: row.requestId, answer, source: 'user' };
     }
+    this.bridge.recordPresence(SURFACE);
     await this.bridge.respond(response);
     await evt.answer();
   }
@@ -286,10 +291,15 @@ function gateAnswerer(row: PendingClarify, userId: string | undefined): boolean 
 }
 
 function formatPrompt(row: PendingClarify): string {
+  // `present()` only fires once a row is actually presented (D2), at which
+  // point `defaultDeadlineAt` is always set — the `?? row.createdAt` fallback
+  // is defensive only, for the type (null while merely queued).
   const minutes = Math.max(
     1,
     Math.round(
-      (new Date(row.defaultDeadlineAt).getTime() - new Date(row.createdAt).getTime()) / 60_000,
+      (new Date(row.defaultDeadlineAt ?? row.createdAt).getTime() -
+        new Date(row.createdAt).getTime()) /
+        60_000,
     ),
   );
   const lines: string[] = [row.question, ''];

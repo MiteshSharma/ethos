@@ -105,6 +105,14 @@ export interface ToolContext {
    */
   rootSessionKey?: string;
   /**
+   * D22 (pi-delegation plan) — the background job id, stamped by
+   * `BackgroundExecutor.runOne` from `job.id`. Unlike `rootSessionKey` there is
+   * NO fallback: always `undefined` for a foreground turn. The `clarify` tool
+   * threads it into `ClarifyBridge.request()` to key the per-job FIFO lane
+   * (`jobId ?? sessionId`, G1) instead of a per-session lane.
+   */
+  jobId?: string;
+  /**
    * Where this turn originated, as `platform:chatId` for channel turns (else unset).
    * Generic per-run context; goal_create reads it to stamp Goal.origin.
    */

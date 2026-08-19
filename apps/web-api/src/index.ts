@@ -1015,7 +1015,7 @@ export function createWebApi(opts: CreateWebApiOptions): CreateWebApiResult {
   // was down.
   const clarifyBridge = agentLoop.clarifyBridge;
   if (clarifyBridge) {
-    clarifyBridge.setPresenter((req) => {
+    clarifyBridge.registerPresenter('web', (req) => {
       chatService.broadcast(req.sessionId, {
         type: 'clarify.request',
         requestId: req.requestId,

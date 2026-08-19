@@ -707,7 +707,7 @@ export function App({
   // and close it when the request resolves (answer / timeout / cancel).
   // Registered through the bridge so it survives `replaceLoop` (model switch).
   useEffect(() => {
-    bridge.setClarifyPresenter((req) => setClarifyRequest(req));
+    bridge.setClarifyPresenter('tui', (req) => setClarifyRequest(req));
     return bridge.onClarifyResolved(() => setClarifyRequest(null));
   }, [bridge]);
 
@@ -1105,6 +1105,9 @@ export function App({
           request={req}
           onAnswer={(answer) => {
             setClarifyRequest(null);
+            // D7 — a human acted on this surface; a background job's next
+            // question may route here instead of falling back to its origin lane.
+            bridge.clarifyBridge?.recordPresence('tui');
             void bridge.clarifyBridge?.respond({
               requestId: req.requestId,
               answer,
@@ -1113,6 +1116,7 @@ export function App({
           }}
           onCancel={() => {
             setClarifyRequest(null);
+            bridge.clarifyBridge?.recordPresence('tui');
             void bridge.clarifyBridge?.respond({
               requestId: req.requestId,
               answer: '',

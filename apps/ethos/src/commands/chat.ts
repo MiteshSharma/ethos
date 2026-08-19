@@ -376,7 +376,7 @@ export async function runChat(config: EthosConfig, opts: RunChatOptions = {}): P
   // Clarify surface — when the agent calls the `clarify` tool, pause the
   // readline loop, present the question, read one line, and route the answer
   // back. Ctrl-C aborts the turn, which the bridge resolves as a cancel.
-  loop.clarifyBridge?.setPresenter((req) => {
+  loop.clarifyBridge?.registerPresenter('cli', (req) => {
     state.awaitingClarify = true;
     out(`\n${c.dim}${formatClarifyPrompt(req)}${c.reset}`);
     rl.setPrompt(`${c.cyan}?${c.reset}> `);
@@ -395,6 +395,9 @@ export async function runChat(config: EthosConfig, opts: RunChatOptions = {}): P
     const onLine = (raw: string) => {
       const answer = parseClarifyAnswer(raw, req.options);
       finish();
+      // D7 — a human acted on this surface; a background job's next question
+      // may route here instead of always falling back to its origin lane.
+      loop.clarifyBridge?.recordPresence('cli');
       void loop.respondToClarify({ requestId: req.requestId, answer, source: 'user' });
     };
     // Teardown if the request resolves another way first (timeout / abort-cancel).

@@ -7,7 +7,6 @@
 
 import {
   type ClarifyBridge,
-  ClarifyBusyError,
   ClarifyNoSurfaceError,
   ClarifyTimedOutNoDefaultError,
 } from '@ethosagent/core';
@@ -103,6 +102,12 @@ export function createClarifyTool(bridge: ClarifyBridge): Tool<ClarifyArgs> {
 
       const startedAt = Date.now();
       try {
+        // `surfaceType: ctx.platform` is only the FALLBACK route (today's
+        // behaviour for a foreground turn, where it's already correct — the
+        // human is on that platform right now). For a background turn
+        // (`jobId` set), `ClarifyBridge.request()` resolves the actual route
+        // dynamically via its origin resolver + presence tracking (G2/G3/D7),
+        // not from this frozen turn-start value.
         const response = await bridge.request({
           question,
           ...(options && options.length > 0 ? { options } : {}),
@@ -110,6 +115,7 @@ export function createClarifyTool(bridge: ClarifyBridge): Tool<ClarifyArgs> {
           timeoutMs: timeoutS * 1000,
           answerableBy,
           sessionId: ctx.sessionId,
+          ...(ctx.jobId !== undefined ? { jobId: ctx.jobId } : {}),
           surfaceType: ctx.platform as ClarifySurfaceType,
           abortSignal: ctx.abortSignal,
         });
@@ -134,9 +140,6 @@ export function createClarifyTool(bridge: ClarifyBridge): Tool<ClarifyArgs> {
             `CLARIFY_NO_SURFACE: ${err.message}. Ask the question in plain prose instead.`,
             'not_available',
           );
-        }
-        if (err instanceof ClarifyBusyError) {
-          return errorResult(`CLARIFY_BUSY: ${err.message}`, 'execution_failed');
         }
         if (err instanceof ClarifyTimedOutNoDefaultError) {
           return errorResult(`CLARIFY_TIMED_OUT_NO_DEFAULT: ${err.message}`, 'execution_failed');

@@ -87,7 +87,15 @@ describe('Orchestrator guardrails', () => {
     // `opts` object it already forwards, and the precedence
     // (pin > tierOverride > personality model > deployment default) is resolved
     // in agent-loop/stages/turn-setup.ts.
-    expect(lineCount).toBeLessThanOrEqual(937);
+    // Bumped 937 -> 944 (pi-delegation plan Phase 1, D22): the `jobId`
+    // RunOptions field — a declaration and its doc, plus one line threading it
+    // into the internal `opts` object passed to `processTools`. Pass-through
+    // only, unlike `rootSessionKey` there is no `?? sessionKey` fallback: the
+    // per-job clarify lane (G1) needs `jobId` to stay `undefined` for a
+    // foreground turn. The stamping site is `BackgroundExecutor.runOne`
+    // (extensions/job-runner); the consuming logic lives in
+    // agent-loop/stages/tool-processing.ts and packages/core/src/clarify/.
+    expect(lineCount).toBeLessThanOrEqual(944);
   });
 
   it('no stage file exceeds 700 lines', () => {
@@ -141,7 +149,13 @@ describe('Orchestrator guardrails', () => {
       // records. The rule — which tool counts, how the name is extracted, the
       // optional-sink guard — lives in agent-loop/skill-telemetry.ts; only the
       // import and a two-line commented call land here.
-      if (lineCount > 797) {
+      // Bumped 797 -> 801 (pi-delegation plan Phase 1, D22): `ToolContext.jobId`
+      // is threaded into tool-processing's `ToolContext` construction, mirroring
+      // `rootSessionKey` — a field on `ToolProcessingContext['opts']` plus its
+      // conditional-spread line into `toolCtxBase` (no `?? sessionKey`
+      // fallback, per D22). The lane logic itself lives in
+      // packages/core/src/clarify/clarify-bridge.ts.
+      if (lineCount > 801) {
         violations.push(`${file}: ${lineCount} lines`);
       }
     }

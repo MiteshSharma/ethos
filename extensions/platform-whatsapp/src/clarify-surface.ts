@@ -63,15 +63,17 @@ export interface WhatsAppClarifySurfaceConfig {
 
 export class WhatsAppClarifySurface {
   private readonly adapter: WhatsAppClarifyAdapter;
+  private readonly bridge: ClarifyBridge;
   private readonly store: ClarifyStore;
   private readonly getSessionRouting: SessionRoutingResolver;
 
   constructor(cfg: WhatsAppClarifySurfaceConfig) {
     this.adapter = cfg.adapter;
+    this.bridge = cfg.bridge;
     this.store = cfg.store;
     this.getSessionRouting = cfg.getSessionRouting;
 
-    cfg.bridge.setPresenter((row) => this.present(row));
+    this.bridge.registerPresenter(SURFACE, (row) => this.present(row));
   }
 
   /**
@@ -142,6 +144,10 @@ export class WhatsAppClarifySurface {
     if (!target) return null;
     if (!gateAnswerer(target, message.userId)) return null;
 
+    // D7 — a human acted on this surface; a background job's next question
+    // may route here instead of always falling back to its origin lane.
+    this.bridge.recordPresence(SURFACE);
+
     if (text.toLowerCase() === CANCEL_COMMAND) {
       return { requestId: target.requestId, answer: '', source: 'cancel' };
     }
@@ -178,10 +184,15 @@ function gateAnswerer(row: PendingClarify, userId: string | undefined): boolean 
 }
 
 function formatPrompt(row: PendingClarify): string {
+  // `present()` only fires once a row is actually presented (D2), at which
+  // point `defaultDeadlineAt` is always set — the `?? row.createdAt` fallback
+  // is defensive only, for the type (null while merely queued).
   const minutes = Math.max(
     1,
     Math.round(
-      (new Date(row.defaultDeadlineAt).getTime() - new Date(row.createdAt).getTime()) / 60_000,
+      (new Date(row.defaultDeadlineAt ?? row.createdAt).getTime() -
+        new Date(row.createdAt).getTime()) /
+        60_000,
     ),
   );
   const lines: string[] = [row.question, ''];

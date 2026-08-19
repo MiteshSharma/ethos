@@ -11,6 +11,9 @@ import { os } from './context';
 
 export const clarifyRouter = {
   respond: os.clarify.respond.handler(async ({ input, context }) => {
+    // D7 — a human acted on this surface; a background job's next question
+    // may route here instead of always falling back to its origin lane.
+    context.clarifyBridge?.recordPresence('web');
     await context.clarifyBridge?.respond({
       requestId: input.requestId,
       answer: input.answer,
