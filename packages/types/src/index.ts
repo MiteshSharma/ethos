@@ -61,6 +61,7 @@ export type {
 export * from './vision-limits';
 export * from './voice';
 export * from './voice-realtime';
+export * from './worker-session';
 
 // Phase 5 — Personality export/import portable bundles
 export interface ExportStamp {

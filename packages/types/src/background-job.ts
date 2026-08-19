@@ -9,6 +9,10 @@
 // leak through). Zero runtime deps — types and interfaces only.
 // ---------------------------------------------------------------------------
 
+import type { AgentEvent } from './agent-event';
+import type { Logger } from './logger';
+import type { SteerSink } from './steer';
+
 // ---------------------------------------------------------------------------
 // Background job status
 // ---------------------------------------------------------------------------
@@ -60,6 +64,13 @@ export interface BackgroundJob {
   originBotKey?: string;
   originChatId?: string;
   originThreadId?: string;
+  /**
+   * Which runner executed this row (`JobRunner.name`, e.g. `ethos`). Absent on
+   * rows written before the seam existed, and on rows that ran on the default
+   * runner. Persisted because the badge renders from the row, not from a live
+   * handle — `owner` is process identity, not runner kind.
+   */
+  runner?: string;
   // Remote proxy: set when this row tracks a background job running on a mesh peer
   // (created by route_to_agent background:true). A reconciler polls the peer and
   // mirrors status/spend/summary onto this row. No local executor runs a proxy.
@@ -117,6 +128,8 @@ export interface CreateBackgroundJobInput {
   label?: string;
   prompt: string;
   maxCostUsd?: number;
+  /** Runner that should execute this job. Omitted means the executor's default. */
+  runner?: string;
   originPlatform?: string;
   originBotKey?: string;
   originChatId?: string;
@@ -182,4 +195,102 @@ export interface JobStore {
   ): Promise<void>;
   /** Ordered audit trail for a job (seq ASC). */
   getEvents(jobId: string): Promise<BackgroundJobEvent[]>;
+}
+
+// ---------------------------------------------------------------------------
+// JobRunner — the pluggable seam between the executor and whatever actually
+// runs the child turn.
+//
+// The executor owns the durable row, the abort controller, the heartbeat, the
+// spend cap, and the terminal transition. A runner owns exactly one thing:
+// turning a job into a stream of AgentEvents. `run()` is the only verb — the
+// runner honours cancellation and steering, it does not own them.
+// ---------------------------------------------------------------------------
+
+/**
+ * One row of the session detail grid. The shared rows are the UI's fixed
+ * contract; these are the runner's own, so a second harness adds its vocabulary
+ * without touching the component.
+ *
+ * `tone` is a claim about the value, not decoration: `safe` is a fact something
+ * enforces, `warn` is a claim nothing enforces. A row is a fact or it is a
+ * warning, never a hope.
+ */
+export interface DetailRow {
+  label: string;
+  value: string;
+  tone?: 'accent' | 'safe' | 'warn';
+}
+
+/**
+ * One file the runner changed. Artifacts never enter the AgentEvent stream (it
+ * is frozen and has no artifact variant) — they travel out-of-band to the job
+ * event log, and the inspector's Diff tab reads them from there.
+ */
+export interface ArtifactChange {
+  /** Workspace-relative path. */
+  path: string;
+  change: 'created' | 'modified' | 'deleted';
+  /** Line counts for the `+n / −n` file list. */
+  added: number;
+  removed: number;
+  /** Unified diff, when the runner has one to give. */
+  diff?: string;
+}
+
+export interface JobRunnerContext {
+  /** The executor's per-job AbortController signal, driven by `cancelRequested`. */
+  signal: AbortSignal;
+  /** Steering channel — the runner drains it; it does not own the semantic. */
+  steerSink: SteerSink;
+  /** Out-of-band sink for file changes. NOT AgentEvents. */
+  emitArtifact(change: ArtifactChange): void;
+}
+
+/**
+ * What this harness can actually do. Declared per runner, never inferred from
+ * its name — surfaces hide affordances a runner does not support.
+ */
+export interface RunnerCapabilities {
+  /** Interaction kinds this runner can emit. Open strings — never a union. */
+  interactionKinds: readonly string[];
+  /** Answer scopes the runner honours; a one-shot runner declares `['once']`. */
+  answerScopes: readonly ('once' | 'run' | 'always')[];
+  /** Terminal takeover: the attach button renders only for `'pty'`. */
+  takeover: 'pty' | 'none';
+  /** `'none'` means Resume is never offered. */
+  resume: 'session' | 'fork' | 'none';
+  /** `false` ⇒ hide Interrupt. */
+  steer: boolean;
+  sandbox: 'process' | 'external' | 'none';
+  /** Informational, for the detail grid (e.g. `JSON-RPC 2.0 · stdio`). */
+  transport: string;
+}
+
+export interface JobRunner {
+  /**
+   * Open string, resolved through `JobRunnerRegistry`. NOT a union — narrowing
+   * this to a fixed set is what makes runner three a types-package change.
+   */
+  readonly name: string;
+  readonly capabilities: RunnerCapabilities;
+  isAvailable(): Promise<boolean>;
+  /** Runner-specific rows for the session detail grid. */
+  describe(job: BackgroundJob): DetailRow[];
+  /** Run one job to completion, yielding the child turn's events. */
+  run(job: BackgroundJob, ctx: JobRunnerContext): AsyncIterable<AgentEvent>;
+}
+
+export interface JobRunnerFactoryContext {
+  logger: Logger;
+}
+
+export type JobRunnerFactory = (ctx: JobRunnerFactoryContext) => JobRunner | Promise<JobRunner>;
+
+/** Mirrors `ExecutionBackendRegistry`: register a factory → resolve an instance → get it. */
+export interface JobRunnerRegistry {
+  register(name: string, factory: JobRunnerFactory): void;
+  resolve(name: string, ctx: JobRunnerFactoryContext): Promise<JobRunner>;
+  get(name: string): JobRunner | undefined;
+  list(): string[];
 }

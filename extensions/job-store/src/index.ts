@@ -42,7 +42,8 @@ const SCHEMA = `
     origin_chat_id     TEXT,
     origin_thread_id   TEXT,
     remote_peer        TEXT,
-    remote_job_id      TEXT
+    remote_job_id      TEXT,
+    runner             TEXT
   ) STRICT;
 
   CREATE TABLE IF NOT EXISTS job_events (
@@ -69,7 +70,7 @@ const SCHEMA = `
 const DELIVERY_INDEX =
   'CREATE INDEX IF NOT EXISTS jobs_undelivered ON jobs(origin_bot_key, status, delivered_at)';
 
-const JOB_STORE_SCHEMA_VERSION = 3;
+const JOB_STORE_SCHEMA_VERSION = 4;
 
 /**
  * Forward-only DDL steps. Each brings a `(N-1)` database to `N`; the baseline
@@ -87,6 +88,9 @@ const JOB_STORE_MIGRATIONS: Record<number, (db: Database.Database) => void> = {
   // existing row intact with `delivered_at` NULL — i.e. "never announced",
   // which is the honest state for a job that finished before this code existed.
   3: (db) => addColumnIfMissing(db, 'delivered_at', 'INTEGER'),
+  // v3 -> v4: which runner executed the row. NULL on every pre-existing row,
+  // which reads as "the default runner" — the only one that existed then.
+  4: (db) => addColumnIfMissing(db, 'runner', 'TEXT'),
 };
 
 function addColumnIfMissing(db: Database.Database, column: string, type: string): void {
@@ -127,6 +131,7 @@ interface JobRow {
   origin_thread_id: string | null;
   remote_peer: string | null;
   remote_job_id: string | null;
+  runner: string | null;
 }
 
 interface JobEventRow {
@@ -170,6 +175,7 @@ function rowToJob(r: JobRow): BackgroundJob {
     originThreadId: r.origin_thread_id ?? undefined,
     remotePeer: r.remote_peer ?? undefined,
     remoteJobId: r.remote_job_id ?? undefined,
+    runner: r.runner ?? undefined,
   };
 }
 
@@ -232,8 +238,8 @@ export class SQLiteJobStore implements JobStore {
           personality_id, depth, status, label, prompt, spend_usd,
           max_cost_usd, cancel_requested, created_at,
           origin_platform, origin_bot_key, origin_chat_id, origin_thread_id,
-          remote_peer, remote_job_id)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          remote_peer, remote_job_id, runner)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         id,
@@ -256,6 +262,7 @@ export class SQLiteJobStore implements JobStore {
         input.originThreadId ?? null,
         input.remotePeer ?? null,
         input.remoteJobId ?? null,
+        input.runner ?? null,
       );
 
     this.appendEventSync(id, 'queued', {});

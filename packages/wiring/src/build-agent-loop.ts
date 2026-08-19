@@ -4,6 +4,7 @@ import { backgroundDefaults } from '@ethosagent/config';
 import {
   AgentLoop,
   type ClarifyOriginLane,
+  DefaultJobRunnerRegistry,
   deriveFsReachPaths,
   EagerPrefetchPolicy,
   parseSmallWindowToolset,
@@ -12,7 +13,7 @@ import {
 } from '@ethosagent/core';
 import { registerBuiltinExtractors } from '@ethosagent/document-extractors';
 import { GoalRunner } from '@ethosagent/goal-runner';
-import { BackgroundExecutor } from '@ethosagent/job-runner';
+import { BackgroundExecutor, ETHOS_RUNNER_NAME, EthosJobRunner } from '@ethosagent/job-runner';
 import { SQLiteJobStore } from '@ethosagent/job-store';
 import { PendingMemoryStore, TombstoneStore } from '@ethosagent/memory-approval';
 import {
@@ -924,9 +925,18 @@ export async function buildAgentLoop(
     // (multi-bot gateway) never race on claimNextQueued and each runs only its
     // own jobs. randomBytes suffix distinguishes same-profile same-pid instances.
     const owner = `${profile}:${process.pid}:${randomBytes(3).toString('hex')}`;
+    // Runner seam. `ethos` — the in-process AgentLoop path — is the default and
+    // the only runner registered here; an out-of-process harness registers its
+    // own factory and nothing else in this file changes. Resolved eagerly
+    // because both the executor and `delegate_task` read instances, not
+    // factories.
+    const jobRunners = new DefaultJobRunnerRegistry();
+    jobRunners.register(ETHOS_RUNNER_NAME, () => new EthosJobRunner(loop));
+    await jobRunners.resolve(ETHOS_RUNNER_NAME, { logger: log });
     backgroundExecutor = new BackgroundExecutor({
       store: jobStore,
       loop,
+      runners: jobRunners,
       owner,
       config: {
         maxConcurrentJobs: bg.maxConcurrentJobs,
@@ -942,6 +952,7 @@ export async function buildAgentLoop(
     backgroundDeps = {
       store: jobStore,
       nudge: () => backgroundExecutor?.nudge(),
+      runners: jobRunners,
       owner,
       defaultMaxCostUsd: bg.defaultMaxCostUsd,
       maxJobsPerRoot: bg.maxJobsPerRoot,

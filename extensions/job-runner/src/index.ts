@@ -1,6 +1,17 @@
 import type { AgentLoop } from '@ethosagent/core';
-import type { BackgroundJob, HookRegistry, JobStore } from '@ethosagent/types';
-import { capText, extractSummarySection, SUMMARY_INSTRUCTION, SUMMARY_RESULT_CAP } from './summary';
+import type {
+  ArtifactChange,
+  BackgroundJob,
+  HookRegistry,
+  JobRunner,
+  JobRunnerRegistry,
+  JobStore,
+  SteerSink,
+} from '@ethosagent/types';
+import { EthosJobRunner } from './ethos-job-runner';
+import { capText, extractSummarySection, SUMMARY_RESULT_CAP } from './summary';
+
+export { ETHOS_RUNNER_NAME, EthosJobRunner } from './ethos-job-runner';
 
 // ---------------------------------------------------------------------------
 // BackgroundExecutor — the detached background engine for background sub-agents.
@@ -38,7 +49,20 @@ export interface BackgroundExecutorConfig {
 
 export interface BackgroundExecutorDeps {
   store: JobStore;
+  /**
+   * The in-process AgentLoop, used to build the DEFAULT runner (`EthosJobRunner`).
+   * Still required: every deployment has one, and a job with no `runner` on its
+   * row runs on it.
+   */
   loop: AgentLoop;
+  /**
+   * Registry of additional runners, consulted when a job row names one
+   * (`BackgroundJob.runner`). Only RESOLVED instances are visible — see
+   * `DefaultJobRunnerRegistry`. Absent means "this deployment runs the default
+   * runner and nothing else"; a row naming any other runner then fails with a
+   * clear error rather than silently running on Ethos.
+   */
+  runners?: JobRunnerRegistry;
   /** This process's identity, stamped on claims. */
   owner: string;
   config: BackgroundExecutorConfig;
@@ -88,9 +112,23 @@ function shortArgDigest(args: unknown): string {
   return collapsed.length > 120 ? `${collapsed.slice(0, 117)}...` : collapsed;
 }
 
+/**
+ * A no-op steer sink. The executor does not (yet) thread surface-typed steering
+ * into a background job — nothing pushes onto a detached child's sink today.
+ * The runner still receives a real sink so it never has to special-case its
+ * absence, and wiring one up later is a change at the executor, not at every
+ * runner.
+ */
+const NOOP_STEER_SINK: SteerSink = {
+  push: () => false,
+  drain: () => [],
+  depth: () => 0,
+};
+
 export class BackgroundExecutor {
   private readonly store: JobStore;
-  private readonly loop: AgentLoop;
+  private readonly defaultRunner: JobRunner;
+  private readonly runners: JobRunnerRegistry | undefined;
   /** This process's identity, stamped on claims. Read-only so callers (e.g. the
    *  gateway creating `/background` jobs) can stamp the same owner this executor
    *  claims by. */
@@ -122,7 +160,8 @@ export class BackgroundExecutor {
 
   constructor(deps: BackgroundExecutorDeps) {
     this.store = deps.store;
-    this.loop = deps.loop;
+    this.defaultRunner = new EthosJobRunner(deps.loop);
+    this.runners = deps.runners;
     this.owner = deps.owner;
     this.config = deps.config;
     this.pollMs = deps.config.pollMs ?? DEFAULT_POLL_MS;
@@ -317,6 +356,21 @@ export class BackgroundExecutor {
   // Running one job
   // -------------------------------------------------------------------------
 
+  /**
+   * Which runner executes this row. A row carries the runner it was spawned
+   * for; an unset (or default-named) row runs on the default runner. A row
+   * naming a runner this process has not resolved throws — the caller sees a
+   * failed job with the reason, never a silent fallback onto Ethos, which would
+   * run a task on a harness the requester deliberately did not choose.
+   */
+  private runnerFor(job: BackgroundJob): JobRunner {
+    const name = job.runner;
+    if (!name || name === this.defaultRunner.name) return this.defaultRunner;
+    const runner = this.runners?.get(name);
+    if (!runner) throw new Error(`job runner '${name}' is not available in this process`);
+    return runner;
+  }
+
   private async runOne(job: BackgroundJob, controller: AbortController): Promise<void> {
     let heartbeatTimer: ReturnType<typeof setInterval> | undefined;
     try {
@@ -354,9 +408,7 @@ export class BackgroundExecutor {
       }, this.config.heartbeatMs);
       heartbeatTimer.unref?.();
 
-      // Background jobs always run in summary mode — the parent re-ingests only a
-      // bounded digest, so append the summary instruction to the child prompt.
-      const childPrompt = job.prompt + SUMMARY_INSTRUCTION;
+      const runner = this.runnerFor(job);
 
       let output = '';
       let spend = 0;
@@ -365,13 +417,14 @@ export class BackgroundExecutor {
 
       const text = this.createTextSink(job.id);
 
-      for await (const ev of this.loop.run(childPrompt, {
-        sessionKey: job.childSessionKey,
-        ...(job.personalityId ? { personalityId: job.personalityId } : {}),
-        agentId: `depth:${job.depth}`,
-        rootSessionKey: job.rootSessionKey,
-        jobId: job.id,
-        abortSignal: controller.signal,
+      for await (const ev of runner.run(job, {
+        signal: controller.signal,
+        steerSink: NOOP_STEER_SINK,
+        // Artifacts are a job-event-log concern, not an event-stream one. The
+        // persistence path lands with the inspector's Diff tab; until then a
+        // runner may emit and the executor drops it on the floor rather than
+        // pretending to record it.
+        emitArtifact: (_change: ArtifactChange) => {},
       })) {
         if (controller.signal.aborted) break;
 

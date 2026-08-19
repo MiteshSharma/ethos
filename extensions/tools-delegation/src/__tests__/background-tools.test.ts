@@ -16,6 +16,8 @@ import type {
   BackgroundJobEventType,
   BackgroundJobStatus,
   CreateBackgroundJobInput,
+  JobRunner,
+  JobRunnerRegistry,
   JobStore,
   ToolContext,
 } from '@ethosagent/types';
@@ -63,6 +65,7 @@ class FakeJobStore implements JobStore {
       originThreadId: input.originThreadId,
       remotePeer: input.remotePeer,
       remoteJobId: input.remoteJobId,
+      runner: input.runner,
     };
     this.jobs.set(id, job);
     this.events.set(id, []);
@@ -205,6 +208,26 @@ function makeCtx(overrides: Partial<ToolContext> = {}): ToolContext {
   };
 }
 
+/**
+ * A registry holding the named runners as already-RESOLVED instances. The tool
+ * validates through `get`, so registration alone must not make a name usable.
+ */
+function fakeRegistry(resolved: string[]): JobRunnerRegistry {
+  const runners = new Map<string, JobRunner>(
+    resolved.map((name) => [name, { name } as unknown as JobRunner]),
+  );
+  return {
+    register: () => {},
+    resolve: async (name) => {
+      const runner = runners.get(name);
+      if (!runner) throw new Error(`not registered: ${name}`);
+      return runner;
+    },
+    get: (name) => runners.get(name),
+    list: () => [...runners.keys()],
+  };
+}
+
 function makeDeps(store: FakeJobStore, overrides: Partial<BackgroundToolDeps> = {}) {
   const nudge = vi.fn();
   const deps: BackgroundToolDeps = {
@@ -297,6 +320,65 @@ describe('delegate_task background path', () => {
       { prompt: 'p', background: true, personality: 'other' },
       makeCtx({ personalityId: 'me' }),
     );
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.code).toBe('input_invalid');
+    expect(store.jobs.size).toBe(0);
+  });
+
+  it("defaults the runner to 'ethos' when omitted", async () => {
+    const store = new FakeJobStore();
+    const { deps } = makeDeps(store);
+    const tool = createDelegateTaskTool(loop, deps);
+
+    const res = await tool.execute({ prompt: 'p', background: true }, makeCtx());
+    if (!res.ok) throw new Error('expected ok');
+    expect(store.jobs.get(JSON.parse(res.value).jobId)?.runner).toBe('ethos');
+  });
+
+  it('stamps a registered runner on the row', async () => {
+    const store = new FakeJobStore();
+    const { deps } = makeDeps(store, { runners: fakeRegistry(['other-harness']) });
+    const tool = createDelegateTaskTool(loop, deps);
+
+    const res = await tool.execute(
+      { prompt: 'p', background: true, runner: 'other-harness' },
+      makeCtx(),
+    );
+    if (!res.ok) throw new Error('expected ok');
+    expect(store.jobs.get(JSON.parse(res.value).jobId)?.runner).toBe('other-harness');
+  });
+
+  it('refuses an unregistered runner with not_available — never a silent fallback', async () => {
+    const store = new FakeJobStore();
+    const { deps } = makeDeps(store, { runners: fakeRegistry(['other-harness']) });
+    const tool = createDelegateTaskTool(loop, deps);
+
+    const res = await tool.execute({ prompt: 'p', background: true, runner: 'pi' }, makeCtx());
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.code).toBe('not_available');
+    expect(store.jobs.size).toBe(0);
+  });
+
+  it('refuses any non-default runner when the deployment registered none', async () => {
+    const store = new FakeJobStore();
+    const { deps } = makeDeps(store);
+    const tool = createDelegateTaskTool(loop, deps);
+
+    const res = await tool.execute(
+      { prompt: 'p', background: true, runner: 'other-harness' },
+      makeCtx(),
+    );
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.code).toBe('not_available');
+    expect(store.jobs.size).toBe(0);
+  });
+
+  it('rejects runner on the blocking path — it selects a background worker or nothing', async () => {
+    const store = new FakeJobStore();
+    const { deps } = makeDeps(store, { runners: fakeRegistry(['other-harness']) });
+    const tool = createDelegateTaskTool(loop, deps);
+
+    const res = await tool.execute({ prompt: 'p', runner: 'other-harness' }, makeCtx());
     expect(res.ok).toBe(false);
     if (!res.ok) expect(res.code).toBe('input_invalid');
     expect(store.jobs.size).toBe(0);

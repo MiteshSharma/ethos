@@ -9,6 +9,7 @@ import type { AgentLoop } from '@ethosagent/core';
 import type {
   BackgroundJob,
   BackgroundJobEvent,
+  JobRunnerRegistry,
   JobStore,
   Storage,
   Tool,
@@ -171,7 +172,16 @@ export interface BackgroundToolDeps {
    * outside the gateway; a job then delivers to the channel root.
    */
   resolveOriginThreadId?: (sessionKey: string) => string | undefined;
+  /**
+   * Runners this deployment can execute a job on, beyond the default. Used only
+   * to VALIDATE the `runner` arg at the tool boundary — the executor does its
+   * own lookup. Absent means only the default runner exists here.
+   */
+  runners?: JobRunnerRegistry;
 }
+
+/** The runner a background job runs on when `runner` is omitted. */
+const DEFAULT_RUNNER = 'ethos';
 
 const LABEL_RE = /^[a-z0-9-]{1,32}$/;
 
@@ -340,6 +350,12 @@ export function createDelegateTaskTool(loop: AgentLoop, background?: BackgroundT
           description:
             'Per-job USD spend cap; the job aborts on breach. Omit for the deployment default; pass null to explicitly run uncapped.',
         },
+        runner: {
+          type: 'string',
+          description:
+            "Which worker runs the job. Only valid with background: true. Defaults to 'ethos' (an ordinary Ethos sub-agent). " +
+            'Any other name must be registered in this deployment — an unregistered name is refused, never silently downgraded.',
+        },
       },
       required: ['prompt'],
     },
@@ -351,13 +367,26 @@ export function createDelegateTaskTool(loop: AgentLoop, background?: BackgroundT
         label,
         return_mode = 'full',
         background: runInBackground,
+        runner,
       } = args as {
         prompt: string;
         personality?: string;
         label?: string;
         return_mode?: 'full' | 'summary';
         background?: boolean;
+        runner?: string;
       };
+
+      // `runner` selects a background worker; there is nothing to select on the
+      // blocking path. Refusing beats ignoring — a silently dropped runner runs
+      // the task on a harness the caller did not ask for.
+      if (runner !== undefined && runInBackground !== true) {
+        return {
+          ok: false,
+          code: 'input_invalid',
+          error: 'runner is only valid with background: true',
+        };
+      }
 
       // ---- Background (detached) path -------------------------------------
       // Same up-front validation as the blocking path, then hand off to the
@@ -382,6 +411,18 @@ export function createDelegateTaskTool(loop: AgentLoop, background?: BackgroundT
         }
 
         if (!background) return NOT_AVAILABLE;
+
+        // Runner selection. Omitted means the default; anything else must be a
+        // runner this deployment actually resolved. No silent fallback: a job
+        // asked for on a harness we do not have is refused, not re-routed.
+        const jobRunner = runner ?? DEFAULT_RUNNER;
+        if (jobRunner !== DEFAULT_RUNNER && !background.runners?.get(jobRunner)) {
+          return {
+            ok: false,
+            code: 'not_available',
+            error: `runner '${jobRunner}' is not registered in this deployment`,
+          };
+        }
 
         // Slug-restrict the label so the derived child session key is
         // unspoofable — a label cannot smuggle a `:` segment separator.
@@ -446,6 +487,7 @@ export function createDelegateTaskTool(loop: AgentLoop, background?: BackgroundT
           depth: bgDepth + 1,
           label: jobLabel,
           prompt,
+          runner: jobRunner,
           ...(maxCostUsd !== undefined ? { maxCostUsd } : {}),
           ...(originPlatform ? { originPlatform } : {}),
           ...(originBotKey ? { originBotKey } : {}),

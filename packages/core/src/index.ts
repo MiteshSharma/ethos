@@ -127,6 +127,7 @@ export type { ChainedProviderOptions } from './providers/chained-provider';
 export { ChainedProvider } from './providers/chained-provider';
 export { DefaultDocumentExtractorRegistry } from './providers/document-extractor-registry';
 export { DefaultExecutionBackendRegistry } from './providers/execution-registry';
+export { DefaultJobRunnerRegistry } from './providers/job-runner-registry';
 export { DefaultLLMProviderRegistry } from './providers/llm-registry';
 export { DefaultMemoryProviderRegistry } from './providers/memory-registry';
 export { DefaultRealtimeVoiceProviderRegistry } from './providers/realtime-registry';
