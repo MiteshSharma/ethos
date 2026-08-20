@@ -1,8 +1,16 @@
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { BackgroundJob, MountSpec, PersonalityConfig, SteerSink } from '@ethosagent/types';
+import { DefaultJobRunnerRegistry } from '@ethosagent/core';
+import type {
+  BackgroundJob,
+  Logger,
+  MountSpec,
+  PersonalityConfig,
+  SteerSink,
+} from '@ethosagent/types';
 import { afterEach, describe, expect, it } from 'vitest';
+import { PI_RUNNER_CAPABILITIES, PI_RUNNER_NAME } from '../capabilities';
 import { createAutoApproveGate, parseGateTitle } from '../gate';
 import { PiJobRunner } from '../runner';
 import { WorkspaceOutOfReachError } from '../worktree';
@@ -87,6 +95,35 @@ async function drain(stream: AsyncIterable<unknown>): Promise<void> {
     /* consume */
   }
 }
+
+const noopLogger: Logger = {
+  debug: () => {},
+  info: () => {},
+  warn: () => {},
+  error: () => {},
+  child: () => noopLogger,
+};
+
+describe('PiJobRunner.capabilities.takeover', () => {
+  // Phase 7 retirement: Pi has no attach/pty path at any sandboxing level
+  // (Phase 0 Q7 — `--mode rpc` and the TUI are mutually exclusive, and the
+  // session JSONL carries no lock, so a second process is an unguarded
+  // concurrent-append race). `'none'` is the ONLY signal a surface gets, and
+  // §4.1's Take over button is hidden — never disabled — when it reads it.
+  it("declares 'none' on the runner instance, not just on the exported literal", () => {
+    const { runner } = makeRunner('/home/u/.ethos', '/repo');
+    expect(runner.capabilities.takeover).toBe('none');
+    expect(PI_RUNNER_CAPABILITIES.takeover).toBe('none');
+  });
+
+  it("still reads 'none' through the registry a surface resolves the runner from", async () => {
+    const registry = new DefaultJobRunnerRegistry();
+    registry.register(PI_RUNNER_NAME, () => makeRunner('/home/u/.ethos', '/repo').runner);
+    const resolved = await registry.resolve(PI_RUNNER_NAME, { logger: noopLogger });
+    expect(resolved.capabilities.takeover).toBe('none');
+    expect(registry.get(PI_RUNNER_NAME)?.capabilities.takeover).toBe('none');
+  });
+});
 
 describe('PiJobRunner.describe', () => {
   it("reports the run's own facts — including the workspace it is confined to", () => {
