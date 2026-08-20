@@ -37,6 +37,7 @@ import {
 } from '@ethosagent/wiring';
 import type { Hono } from 'hono';
 import { formatRunHandBack } from './features/chat/handback';
+import { resolveJobSessionId } from './features/chat/job-session';
 import { ChatRepository } from './features/chat/repository';
 import { type ChatDefaults, ChatService } from './features/chat/service';
 import { CompletionsRepository } from './features/completions/repository';
@@ -1055,15 +1056,53 @@ export function createWebApi(opts: CreateWebApiOptions): CreateWebApiResult {
     });
   });
 
+  // Session key ↔ session id translation. The `session_start` hook is the one
+  // place both `sessionKey` (what background jobs/routers key by) and
+  // `sessionId` (what the SSE buffer/ChatService is keyed by) are known
+  // together. Shared by the clarify presenter below (a delegated clarify's
+  // `PendingClarify.sessionId` is actually a job's `childSessionKey`, not a
+  // web session id — see job-session.ts) and the delegated-run bridge
+  // further down, which turns `RunUpdateDigest.parentSessionKey` /
+  // `BackgroundJob.parentSessionKey` into the same session id the same way.
+  const sessionIdsByKey = new Map<string, string>();
+  const sessionKeysById = new Map<string, string>();
+  agentLoop.hooks.registerVoid('session_start', async (payload) => {
+    sessionIdsByKey.set(payload.sessionKey, payload.sessionId);
+    sessionKeysById.set(payload.sessionId, payload.sessionKey);
+  });
+  const previousOnReapForSessionKeys = buffer.onReap;
+  buffer.onReap = (sessionId: string) => {
+    const key = sessionKeysById.get(sessionId);
+    if (key !== undefined) {
+      sessionIdsByKey.delete(key);
+      sessionKeysById.delete(sessionId);
+    }
+    previousOnReapForSessionKeys?.(sessionId);
+  };
+
   // Bridge clarify → SSE. The `clarify` tool registers a pending request on
   // the loop's ClarifyBridge; present it to the browser over the same SSE
   // channel approvals use, and broadcast the resolution so the card collapses
   // on every tab. A boot sweep clears rows that expired while the process
   // was down.
+  //
+  // `req.sessionId` (a `PendingClarify`) means two different things depending
+  // on the caller: an interactive clarify sets it to the real session id, but
+  // a background/delegated clarify (`req.jobId !== undefined`) sets it to the
+  // job's `childSessionKey` — not a session the SSE buffer knows about. For
+  // that case, resolve the job's `parentSessionKey` and translate it through
+  // the map above instead.
   const clarifyBridge = agentLoop.clarifyBridge;
   if (clarifyBridge) {
-    clarifyBridge.registerPresenter('web', (req) => {
-      chatService.broadcast(req.sessionId, {
+    clarifyBridge.registerPresenter('web', async (req) => {
+      const sessionId =
+        req.jobId !== undefined
+          ? await resolveJobSessionId(req.jobId, opts.jobStore, sessionIdsByKey)
+          : req.sessionId;
+      // No open session for this key — a CLI/gateway-spawned clarify, or no
+      // browser tab open for it. Nothing to present here.
+      if (!sessionId) return;
+      chatService.broadcast(sessionId, {
         type: 'clarify.request',
         requestId: req.requestId,
         question: req.question,
@@ -1076,10 +1115,21 @@ export function createWebApi(opts: CreateWebApiOptions): CreateWebApiResult {
       });
     });
     clarifyBridge.onResolved((row, response) => {
-      chatService.broadcast(row.sessionId, {
-        type: 'clarify.resolved',
-        requestId: row.requestId,
-        source: response?.source ?? 'timeout-no-default',
+      void (async () => {
+        const sessionId =
+          row.jobId !== undefined
+            ? await resolveJobSessionId(row.jobId, opts.jobStore, sessionIdsByKey)
+            : row.sessionId;
+        if (!sessionId) return;
+        chatService.broadcast(sessionId, {
+          type: 'clarify.resolved',
+          requestId: row.requestId,
+          source: response?.source ?? 'timeout-no-default',
+        });
+      })().catch((err) => {
+        console.warn(
+          `[chat] clarify.resolved broadcast failed for request ${row.requestId}: ${err instanceof Error ? err.message : String(err)}`,
+        );
       });
     });
     // Fix 4 (pi-delegation.md §1b) — rebuild lane bookkeeping for rows that
@@ -1095,30 +1145,12 @@ export function createWebApi(opts: CreateWebApiOptions): CreateWebApiResult {
   // `childSessionKey`, which is not a web session anyone is subscribed to. A run
   // card in the PARENT chat fed by those would render once and freeze at
   // `queued` while the run finished. So the executor publishes a coalesced
-  // digest keyed by `parentSessionKey`, and this block is the one place that
-  // turns a session KEY into the session ID the SSE buffer is keyed by.
-  //
-  // The key→id map is built by the same `session_start` hook the notification
-  // router uses, for the same reason: that hook is the only place both
-  // identifiers are known at once. A run card therefore requires a turn to have
-  // run in its session — which is exactly how the run got delegated.
+  // digest keyed by `parentSessionKey`, and this block reuses the key→id map
+  // above (built by the same `session_start` hook) to turn that session KEY
+  // into the session ID the SSE buffer is keyed by. A run card therefore
+  // requires a turn to have run in its session — which is exactly how the run
+  // got delegated.
   if (opts.subscribeRunUpdates || opts.subscribeJobComplete) {
-    const sessionIdsByKey = new Map<string, string>();
-    const sessionKeysById = new Map<string, string>();
-    agentLoop.hooks.registerVoid('session_start', async (payload) => {
-      sessionIdsByKey.set(payload.sessionKey, payload.sessionId);
-      sessionKeysById.set(payload.sessionId, payload.sessionKey);
-    });
-    const previousOnReap = buffer.onReap;
-    buffer.onReap = (sessionId: string) => {
-      const key = sessionKeysById.get(sessionId);
-      if (key !== undefined) {
-        sessionIdsByKey.delete(key);
-        sessionKeysById.delete(sessionId);
-      }
-      previousOnReap?.(sessionId);
-    };
-
     opts.subscribeRunUpdates?.((update) => {
       const sessionId = sessionIdsByKey.get(update.parentSessionKey);
       // No open session for this key — a CLI- or gateway-spawned run. Its card
