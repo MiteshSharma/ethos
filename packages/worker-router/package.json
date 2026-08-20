@@ -1,5 +1,5 @@
 {
-  "name": "@ethosagent/execution-pi",
+  "name": "@ethosagent/worker-router",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -15,9 +15,6 @@
   },
   "dependencies": {
     "@ethosagent/core": "workspace:*",
-    "@ethosagent/execution-docker": "workspace:*",
-    "@ethosagent/job-runner": "workspace:*",
-    "@ethosagent/types": "workspace:*",
-    "@ethosagent/worker-router": "workspace:*"
+    "@ethosagent/types": "workspace:*"
   }
 }

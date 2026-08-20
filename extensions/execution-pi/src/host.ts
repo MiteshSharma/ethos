@@ -164,6 +164,7 @@ export async function* runPiHost(spec: PiHostSpec): AsyncIterable<AgentEvent> {
       void spec
         .gate({
           requestId: req.id,
+          jobId: spec.jobId,
           kind: req.method,
           toolName: parsed.toolName,
           digest: parsed.digest,

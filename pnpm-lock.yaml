@@ -1036,6 +1036,9 @@ importers:
       '@ethosagent/types':
         specifier: workspace:*
         version: link:../../packages/types
+      '@ethosagent/worker-router':
+        specifier: workspace:*
+        version: link:../../packages/worker-router
 
   extensions/execution-process-backend:
     dependencies:
@@ -2613,10 +2616,22 @@ importers:
       '@ethosagent/watchers':
         specifier: workspace:*
         version: link:../../extensions/watchers
+      '@ethosagent/worker-router':
+        specifier: workspace:*
+        version: link:../worker-router
     devDependencies:
       '@modelcontextprotocol/sdk':
         specifier: ^1.0.0
         version: 1.29.0(zod@4.4.3)
+
+  packages/worker-router:
+    dependencies:
+      '@ethosagent/core':
+        specifier: workspace:*
+        version: link:../core
+      '@ethosagent/types':
+        specifier: workspace:*
+        version: link:../types
 
 packages:
 

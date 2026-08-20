@@ -119,7 +119,8 @@
     "@ethosagent/types": "workspace:*",
     "@ethosagent/voice-providers": "workspace:*",
     "@ethosagent/voice-session": "workspace:*",
-    "@ethosagent/watchers": "workspace:*"
+    "@ethosagent/watchers": "workspace:*",
+    "@ethosagent/worker-router": "workspace:*"
   },
   "devDependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0"

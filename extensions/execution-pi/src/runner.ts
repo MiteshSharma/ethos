@@ -43,7 +43,11 @@ export interface PiJobRunnerDeps {
   /** Host directory holding Pi's `auth.json`. Defaults to `~/.pi/agent`. */
   piConfigDir?: string;
   tools?: string;
-  /** Phase 4 replaces this with the worker router. Defaults to auto-approve. */
+  /**
+   * The tool-call decision. Production wires `createRouterGate` (the worker
+   * router); absent, it defaults to auto-approve so a standalone construction
+   * still runs.
+   */
   gate?: PiGatePolicy;
   logger?: Logger;
 }

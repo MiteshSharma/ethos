@@ -12,6 +12,13 @@ import type { Logger } from '@ethosagent/types';
 export interface PiGateRequest {
   /** `extension_ui_request.id` — the correlation id the answer must carry back. */
   requestId: string;
+  /**
+   * The run this tool call belongs to. Pi's frame does not carry it — the host
+   * stamps it from its own spec — but every policy above a single run needs
+   * it: the router's answer scope is per-job (D17), and a clarify's lane is
+   * the job (G1). Without it a gate can only make one decision for everyone.
+   */
+  jobId: string;
   /** The dialog method Pi used. One of `PI_RUNNER_CAPABILITIES.interactionKinds`. */
   kind: string;
   /** The tool Pi is about to run. */

@@ -291,7 +291,7 @@ register_anchors:
     - { path: packages/safety/watcher/src/rules.ts, line: 110, contains: "export function compoundingErrorRule" }
     - { path: packages/safety/watcher/src/rules.ts, line: 161, contains: "export function suspiciousSequenceRule" }
     - { path: packages/safety/watcher/src/rules.ts, line: 205, contains: "export function defaultRules" }
-    - { path: packages/wiring/src/build-agent-loop.ts, line: 467, contains: "defaultRules: watcherDefaultRules" }
+    - { path: packages/wiring/src/build-agent-loop.ts, line: 473, contains: "defaultRules: watcherDefaultRules" }
 
   G-CHAN:
     - { path: packages/safety/channel/src/channel-filter.ts, line: 111, contains: "export function checkMessage" }
@@ -552,6 +552,18 @@ tiers:
     package: "@ethosagent/plugin-sdk"
     tier: 1
     assigned: 2026-08-12
+
+  # The interaction router decides whether a worker's question is answered
+  # automatically or shown to a human — including the `secret` rule, which
+  # exists because a clarify row is persisted to disk and its answer returns
+  # through a tool result into the model's transcript. Getting that routing
+  # wrong writes secret material into session history, so it sits on a
+  # confidentiality boundary even though it enforces none of the kernel's
+  # guarantees itself.
+  packages/worker-router:
+    package: "@ethosagent/worker-router"
+    tier: 1
+    assigned: 2026-08-20
 
   # ---------------------------------------------------------------------------
   # Tier 2 — extensions, not owned. Best-effort. A bug is a bug, not a CVE.

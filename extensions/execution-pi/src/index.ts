@@ -20,6 +20,7 @@ export {
 } from './gate';
 export { type PiHostSpec, runPiHost } from './host';
 export { JsonlReader, type PiCommand, type PiEvent, toolResultText } from './protocol';
+export { createRouterGate } from './router-gate';
 export { PiJobRunner, type PiJobRunnerDeps } from './runner';
 export { PiEventTranslator } from './translate';
 export {

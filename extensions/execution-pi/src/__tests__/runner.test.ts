@@ -216,7 +216,7 @@ describe('gate policy', () => {
   it('approves everything in Phase 2 — containment is the container, not the gate', async () => {
     const gate = createAutoApproveGate();
     await expect(
-      gate({ requestId: 'r1', kind: 'select', toolName: 'bash', digest: '{}' }),
+      gate({ requestId: 'r1', jobId: 'job-1', kind: 'select', toolName: 'bash', digest: '{}' }),
     ).resolves.toEqual({ allow: true });
   });
 });

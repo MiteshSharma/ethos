@@ -12,7 +12,7 @@ import {
   SimpleCompletionImpl,
 } from '@ethosagent/core';
 import { registerBuiltinExtractors } from '@ethosagent/document-extractors';
-import { PI_RUNNER_NAME, PiJobRunner } from '@ethosagent/execution-pi';
+import { createRouterGate, PI_RUNNER_NAME, PiJobRunner } from '@ethosagent/execution-pi';
 import { GoalRunner } from '@ethosagent/goal-runner';
 import { BackgroundExecutor, ETHOS_RUNNER_NAME, EthosJobRunner } from '@ethosagent/job-runner';
 import { SQLiteJobStore } from '@ethosagent/job-store';
@@ -46,6 +46,12 @@ import type {
   MemoryProvider,
   RequestDumpStore,
 } from '@ethosagent/types';
+import {
+  createClarifyEscalator,
+  createSecretHandler,
+  InteractionRouter,
+  SECRET_KIND,
+} from '@ethosagent/worker-router';
 import type { InfrastructureResult } from './build-infrastructure';
 import type { ComposeToolsResult, GatewaySendRef } from './compose-tools';
 import type {
@@ -941,7 +947,26 @@ export async function buildAgentLoop(
     // cache, is the SAME instance) exec tools use: D4's containment claim rests
     // on one mount derivation, not two.
     const piConfig = config.background?.pi;
+    let interactionRouter: InteractionRouter | undefined;
     if (piConfig?.image) {
+      // Phase 4 — every gated Pi tool call goes through the runner-agnostic
+      // router: cached answer (D17), auto-resolving capability (D16), or the
+      // existing clarify chain. `secret` is registered so a runner that ever
+      // emits that kind fails closed instead of writing secret material into a
+      // persisted clarify row (§4.5); no runner emits it today.
+      const router = new InteractionRouter({
+        escalate: createClarifyEscalator({
+          bridge: infra.clarifyBridge,
+          jobs: jobStoreForClarify,
+          // Only the bridge's last-resort route: a background clarify resolves
+          // its real destination from the job's origin lane + presence
+          // (G2/G3/D7), which is wired above.
+          ...(isClarifySurfaceType(profile) ? { fallbackSurfaceType: profile } : {}),
+        }),
+        logger: log,
+      });
+      router.registry.register(SECRET_KIND, createSecretHandler());
+      interactionRouter = router;
       const piBackend = await infra.executionBackends.resolve('docker', {
         config: {
           substitutionVars: { ethosHome: dataDir, cwd: wiringCtx.workingDir },
@@ -961,6 +986,7 @@ export async function buildAgentLoop(
             image: piConfig.image,
             ...(piConfig.memoryMb !== undefined ? { memoryMb: piConfig.memoryMb } : {}),
             ...(piConfig.configDir ? { piConfigDir: piConfig.configDir } : {}),
+            gate: createRouterGate(router, log),
             logger: log,
           }),
       );
@@ -982,6 +1008,13 @@ export async function buildAgentLoop(
       log: (msg) => log.info(`[background] ${msg}`),
     });
     backgroundExecutor.start();
+    if (interactionRouter) {
+      // D17 — a run's remembered allowances die with the run. `onComplete`
+      // fires on every terminal transition, which is exactly the boundary
+      // "allow for this run" was scoped to.
+      const router = interactionRouter;
+      backgroundExecutor.onComplete((job) => router.forgetJob(job.id));
+    }
     backgroundDeps = {
       store: jobStore,
       nudge: () => backgroundExecutor?.nudge(),

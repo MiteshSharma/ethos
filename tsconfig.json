@@ -126,6 +126,7 @@
       "@ethosagent/storage-memory-backend": ["./extensions/storage-memory-backend/src"],
       "@ethosagent/oauth": ["./extensions/oauth/src"],
       "@ethosagent/agent-bridge": ["./packages/agent-bridge/src"],
+      "@ethosagent/worker-router": ["./packages/worker-router/src"],
       "@ethosagent/wiring": ["./packages/wiring/src"],
       "@ethosagent/wiring/conformance": ["./packages/wiring/src/conformance"],
       "@ethosagent/wiring/security-kernel": ["./packages/wiring/src/security-kernel"],
