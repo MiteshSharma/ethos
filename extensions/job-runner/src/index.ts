@@ -78,6 +78,19 @@ export interface BackgroundExecutorDeps {
    * addition to any `onComplete` subscribers. Absent in standalone deployments.
    */
   hooks?: HookRegistry;
+  /**
+   * Phase 5 — withdraw whatever question this job is parked on when its run is
+   * aborted (cancel, spend cap, shutdown drain). Injected rather than imported:
+   * the thing that owns pending questions is `ClarifyBridge` in
+   * `@ethosagent/core`, and the executor deliberately does not know who asked
+   * (§13.1's "THE SEAM" comment on `markJobBlocked` says the same).
+   *
+   * Without it, cancelling a `blocked` run aborts the controller but leaves the
+   * question live on someone's phone for the rest of its window, and the
+   * escalator's `finally` — which is what un-pauses the heartbeat — never runs.
+   * Absent means today's behaviour: abort only.
+   */
+  cancelInteractions?: (jobId: string) => Promise<void>;
 }
 
 const DEFAULT_POLL_MS = 3_000;
@@ -150,6 +163,7 @@ export class BackgroundExecutor {
   private readonly pollMs: number;
   private readonly log: ((msg: string) => void) | undefined;
   private readonly hooks: HookRegistry | undefined;
+  private readonly cancelInteractions: ((jobId: string) => Promise<void>) | undefined;
 
   /** onComplete subscribers, invoked after every terminal transition. */
   private readonly completeHandlers: Array<(job: BackgroundJob) => void> = [];
@@ -186,6 +200,7 @@ export class BackgroundExecutor {
     this.pollMs = deps.config.pollMs ?? DEFAULT_POLL_MS;
     this.log = deps.log;
     this.hooks = deps.hooks;
+    this.cancelInteractions = deps.cancelInteractions;
   }
 
   /**
@@ -385,6 +400,18 @@ export class BackgroundExecutor {
   /** Register the job's controller synchronously, then run it detached. */
   private startRun(job: BackgroundJob): void {
     const controller = new AbortController();
+    // One listener covers every abort reason — cancel, spend cap, shutdown
+    // drain — instead of a call at each `controller.abort()` site, where the
+    // next reason added would silently miss it.
+    controller.signal.addEventListener(
+      'abort',
+      () => {
+        void this.cancelInteractions?.(job.id).catch((err) => {
+          this.log?.(`cancelling pending questions failed for ${job.id}: ${errMsg(err)}`);
+        });
+      },
+      { once: true },
+    );
     this.activeControllers.set(job.id, controller);
     const run = this.runOne(job, controller).finally(() => {
       this.activeControllers.delete(job.id);

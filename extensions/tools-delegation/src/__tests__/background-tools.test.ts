@@ -149,6 +149,15 @@ class FakeJobStore implements JobStore {
     const job = this.jobs.get(id);
     if (job) job.deliveredAt = undefined;
   }
+  private readonly notices = new Set<string>();
+  async claimNotice(requestId: string): Promise<boolean> {
+    if (this.notices.has(requestId)) return false;
+    this.notices.add(requestId);
+    return true;
+  }
+  async releaseNotice(requestId: string): Promise<void> {
+    this.notices.delete(requestId);
+  }
   async appendEvent(
     jobId: string,
     eventType: BackgroundJobEventType,

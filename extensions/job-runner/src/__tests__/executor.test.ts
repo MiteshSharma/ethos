@@ -230,6 +230,42 @@ describe('BackgroundExecutor', () => {
     await exec.shutdown();
   });
 
+  // I20 (Phase 5) — the abort listener. Cancelling a run must WITHDRAW the
+  // question it is parked on, not just abort the controller: otherwise the card
+  // stays live on someone's phone for the rest of its (now 24 h) window, and
+  // the escalator's `finally` — which un-pauses the heartbeat — never runs.
+  it('withdraws a cancelled run’s pending questions, whatever caused the abort', async () => {
+    const store = new SQLiteJobStore(':memory:');
+    const { loop } = makeNeverEndingLoop();
+    const cancelled: string[] = [];
+    const exec = new BackgroundExecutor({
+      store,
+      loop,
+      owner: OWNER,
+      config: cfg(),
+      cancelInteractions: async (jobId) => {
+        cancelled.push(jobId);
+      },
+    });
+    const job = await store.create(createInput());
+
+    exec.start();
+    exec.nudge();
+    await vi.waitFor(async () => expect((await store.get(job.id))?.status).toBe('running'), {
+      timeout: 2000,
+    });
+
+    await exec.markJobBlocked(job.id, 'clarify-1');
+    await store.requestCancel(job.id);
+
+    await vi.waitFor(() => expect(cancelled).toEqual([job.id]), { timeout: 2000 });
+    await vi.waitFor(async () => expect((await store.get(job.id))?.status).toBe('aborted'), {
+      timeout: 2000,
+    });
+
+    await exec.shutdown();
+  });
+
   it('ignores markJobBlocked for a job this executor is not running', async () => {
     const store = new SQLiteJobStore(':memory:');
     const { loop } = makeNeverEndingLoop();

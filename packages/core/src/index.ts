@@ -67,6 +67,13 @@ export {
   type ClarifyResolvedListener,
   ClarifyTimedOutNoDefaultError,
 } from './clarify/clarify-bridge';
+export {
+  buildClarifyEscalationNotice,
+  type ClarifyEscalationDeps,
+  type ClarifyNoticeTarget,
+  DEFAULT_ESCALATION_DELAY_MS,
+  sweepClarifyEscalations,
+} from './clarify/escalation-notifier';
 export { FileClarifyStore } from './clarify/file-clarify-store';
 export { type ConformanceResult, validateContextEngine } from './context-engines/conformance';
 export { DropOldestEngine } from './context-engines/drop-oldest';

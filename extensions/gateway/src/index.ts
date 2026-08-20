@@ -2,11 +2,14 @@ import { randomUUID } from 'node:crypto';
 import type { AgentLoop } from '@ethosagent/core';
 import {
   buildLaneKey,
+  type ClarifyNoticeTarget,
+  DEFAULT_ESCALATION_DELAY_MS,
   deriveBotKey,
   LaneVoiceModeStore,
   resolveSttProviderForPersonality,
   resolveTtsProviderForPersonality,
   resolveVoicePreferences,
+  sweepClarifyEscalations as runClarifyEscalationSweep,
   type SttProviderForPersonality,
   selectSttEntry,
   selectTtsEntry,
@@ -205,6 +208,14 @@ function isClarifySurfaceType(platform: string): platform is ClarifySurfaceType 
  * backstop, not the gate.
  */
 export const CHANNEL_EXCLUDED_TOOLS: readonly string[] = ['emit_card', 'render_ui'];
+
+/**
+ * §4.6 rung 3 — how often the escalation sweep looks for a question that has
+ * been unanswered past `clarifyEscalationDelayMs`. Deliberately much shorter
+ * than the rung itself: the poll period is the sweep's error bar, so a 60 s
+ * rung polled every 5 s fires between 60 s and 65 s.
+ */
+const CLARIFY_ESCALATION_POLL_MS = 5_000;
 
 /** Reply sent when a lane is rejected under saturation (typed busy result). */
 const SYSTEM_BUSY_MESSAGE =
@@ -454,6 +465,13 @@ export interface GatewayConfig {
    * per plan. Set to 0 to disable (tests).
    */
   clarifySweepIntervalMs?: number;
+  /**
+   * §4.6 rung 3 — how long a PRESENTED background-job question may go
+   * unanswered before a "needs you" notice is pushed to the run's origin lane.
+   * Defaults to 60s per the escalation ladder. Set to 0 to disable the push
+   * entirely (the question still lives its normal life; only the nudge stops).
+   */
+  clarifyEscalationDelayMs?: number;
   /**
    * Optional card reader for `/personality rich`. When set, the gateway
    * renders a character-sheet card for the bound personality. Slack handles
@@ -733,6 +751,9 @@ export class Gateway {
     | undefined;
   /** Live timer running the periodic clarify sweep, cleared on shutdown. */
   private clarifySweepTimer: ReturnType<typeof setInterval> | undefined;
+  /** §4.6 rung 3 — timer running the unanswered-question escalation sweep. */
+  private clarifyEscalationTimer: ReturnType<typeof setInterval> | undefined;
+  private readonly clarifyEscalationDelayMs: number;
   /** Chapter 1 safety: per-platform sender allowlist + pairing config. */
   private readonly channelFilter: ChannelFilterConfig | undefined;
   /** Static per-channel toolset narrowing (platform → allowed tool names). */
@@ -933,6 +954,7 @@ export class Gateway {
     this.streamingEditIntervalMs = config.streamingEditIntervalMs ?? 2500;
     this.onAllowlistChange = config.onAllowlistChange;
     this.clarifyCorrelator = config.clarifyMessageCorrelator;
+    this.clarifyEscalationDelayMs = config.clarifyEscalationDelayMs ?? DEFAULT_ESCALATION_DELAY_MS;
     this.personalityCardReader = config.personalityCardReader;
     this.greetingProvider = config.greetingProvider;
     this.personalityDirectory = config.personalityDirectory;
@@ -1034,6 +1056,17 @@ export class Gateway {
       }, sweepMs);
       // `unref()` lets the process exit when only the sweep timer remains.
       this.clarifySweepTimer.unref?.();
+    }
+
+    // §4.6 rung 3 — its own timer, not the 30s clarify sweep's: a 60s rung
+    // polled every 30s fires anywhere between 60s and 90s, and the ladder's
+    // whole claim is that the push lands when the silence has actually lasted
+    // a minute. Its own cadence keeps the fire window at 60–65s.
+    if (this.clarifyEscalationDelayMs > 0 && bridges.length > 0) {
+      this.clarifyEscalationTimer = setInterval(() => {
+        void this.sweepClarifyEscalations().catch(() => {});
+      }, CLARIFY_ESCALATION_POLL_MS);
+      this.clarifyEscalationTimer.unref?.();
     }
 
     // Seed in-memory allowlists from DB-persisted approved senders
@@ -2845,6 +2878,10 @@ export class Gateway {
       clearInterval(this.clarifySweepTimer);
       this.clarifySweepTimer = undefined;
     }
+    if (this.clarifyEscalationTimer) {
+      clearInterval(this.clarifyEscalationTimer);
+      this.clarifyEscalationTimer = undefined;
+    }
     if (this.bgWakeSweepTimer) {
       clearInterval(this.bgWakeSweepTimer);
       this.bgWakeSweepTimer = undefined;
@@ -3344,6 +3381,113 @@ export class Gateway {
       }
     }
     return { delivered, failed };
+  }
+
+  // ---------------------------------------------------------------------------
+  // Mid-run "needs you" escalation (§4.6 rung 3)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Push a "needs you" notice to the origin lane of every run parked on a
+   * question that has been PRESENTED and unanswered for longer than
+   * `clarifyEscalationDelayMs` (§4.6 rung 3, D2's clock rule).
+   *
+   * Runs on its own timer, and is public so a caller (or a test) can drive one
+   * pass deterministically. Per bot: the bridge supplies the SHARED clarify
+   * store every process sweeps, the job store supplies G5's second claim
+   * (`claimNotice`, keyed by `requestId` so it never spends the completion
+   * notice's `deliveredAt`), and delivery goes through `sendTracked` — the same
+   * ledger-backed path the completion notice uses, so an unconfirmed push is
+   * redelivered by `sweepPendingDeliveries()` rather than lost.
+   *
+   * Never throws: it is called from a timer with no one to catch it.
+   */
+  async sweepClarifyEscalations(
+    now: number = Date.now(),
+  ): Promise<{ pushed: number; failed: number }> {
+    let pushed = 0;
+    let failed = 0;
+    for (const bot of this.bots.values()) {
+      const bridge = bot.loop.clarifyBridge;
+      const store = bot.jobStore;
+      if (!bridge || !store) continue;
+      const result = await runClarifyEscalationSweep(
+        {
+          store: bridge.store,
+          jobs: store,
+          delayMs: this.clarifyEscalationDelayMs,
+          // With a ledger wired, an unconfirmed push left a `pending`
+          // obligation and the ledger sweep owns the retry, so the claim is
+          // kept. Without one, nothing would ever retry — release it.
+          durableRetry: this.deliveryLedger !== undefined,
+          resolveTarget: (job) => this.clarifyNoticeTarget(bot, job),
+          notify: (target, text) => this.deliverClarifyNotice(bot, target, text),
+          onError: (stage, err, details) => {
+            this.observability?.recordSafetyBlock({
+              code: 'clarify.escalation_failed',
+              cause: err instanceof Error ? err.message : String(err),
+              details: { stage, botKey: bot.botKey, ...details },
+            });
+          },
+        },
+        now,
+      );
+      pushed += result.pushed;
+      failed += result.failed;
+    }
+    return { pushed, failed };
+  }
+
+  /**
+   * The lane a parked run's notice is pushed to, or `null` to skip it: a job
+   * with no recorded origin (CLI-owned), a job whose origin belongs to a
+   * DIFFERENT bot in a shared store (an obligation filed under someone else's
+   * botKey is a lost message), or a platform this process has no adapter for.
+   * Skipping returns the row untouched — its claim is never spent.
+   */
+  private clarifyNoticeTarget(
+    bot: GatewayBotConfig,
+    job: BackgroundJob,
+  ): ClarifyNoticeTarget | null {
+    const platform = job.originPlatform;
+    const chatId = job.originChatId;
+    if (!platform || !chatId) return null;
+    if (job.originBotKey && job.originBotKey !== bot.botKey) return null;
+    if (!this.adapterRegistry.get(platform)) return null;
+    return {
+      platform,
+      botKey: bot.botKey,
+      chatId,
+      ...(job.originThreadId ? { threadId: job.originThreadId } : {}),
+    };
+  }
+
+  /**
+   * Send one escalation notice through the durable outbound path. Returns
+   * whether the platform confirmed; a dedup hit counts as confirmed, since the
+   * identical text already reached this lane.
+   */
+  private async deliverClarifyNotice(
+    bot: GatewayBotConfig,
+    target: ClarifyNoticeTarget,
+    text: string,
+  ): Promise<boolean> {
+    const adapter = this.adapterRegistry.get(target.platform);
+    if (!adapter) return false;
+    const laneKey = target.threadId
+      ? buildLaneKey(target.platform, bot.botKey, target.chatId, target.threadId)
+      : buildLaneKey(target.platform, bot.botKey, target.chatId);
+    if (!this.outboundDedup.shouldSend(laneKey, text)) return true;
+    return this.sendTracked(
+      {
+        adapter,
+        botKey: bot.botKey,
+        platform: target.platform,
+        chatId: target.chatId,
+        sessionKey: this.sessionKeys.get(laneKey) ?? laneKey,
+      },
+      { text, ...(target.threadId ? { threadId: target.threadId } : {}) },
+    );
   }
 
   /**

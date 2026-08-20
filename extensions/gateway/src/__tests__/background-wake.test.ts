@@ -176,6 +176,17 @@ class FakeJobStore implements JobStore {
     const job = this.jobs.get(id);
     if (job) job.deliveredAt = undefined;
   }
+  /** G5's second claim, keyed by clarify `requestId` — insert-wins, like the
+   *  SQLite store's `INSERT OR IGNORE` on a PRIMARY KEY. */
+  readonly notices = new Set<string>();
+  async claimNotice(requestId: string): Promise<boolean> {
+    if (this.notices.has(requestId)) return false;
+    this.notices.add(requestId);
+    return true;
+  }
+  async releaseNotice(requestId: string): Promise<void> {
+    this.notices.delete(requestId);
+  }
   /** Recorded so a test can assert what the child wrote to the STORE (allowed)
    *  versus what reached an adapter (not allowed). */
   appended: Array<{ type: BackgroundJobEventType; payload: Record<string, unknown> }> = [];

@@ -1020,6 +1020,14 @@ export async function buildAgentLoop(
         retentionMs: bg.retentionDays * 86_400_000,
       },
       log: (msg) => log.info(`[background] ${msg}`),
+      // Phase 5 — cancelling a run withdraws whatever question it is parked
+      // on. Without this, `task_cancel` on a `blocked` job aborts the run but
+      // leaves its clarify live on someone's phone for the rest of its window
+      // (now up to the 24 h park), and the escalator's `resume` — which
+      // un-pauses the heartbeat — never runs because `request()` never settles.
+      cancelInteractions: async (jobId) => {
+        await infra.clarifyBridge.cancelJob(jobId);
+      },
     });
     backgroundExecutor.start();
     if (interactionRouter) {

@@ -964,3 +964,52 @@ describe('ClarifyBridge', () => {
     expect(tg.map((r) => r.requestId)).toEqual(['a']);
   });
 });
+
+// I20 (Phase 5) — cancelling a run withdraws whatever it is parked on. Closes
+// the gap Phase 4 recorded: abort used to leave the question live on someone's
+// phone for its whole window, with nothing to un-pause the heartbeat.
+describe('ClarifyBridge.cancelJob', () => {
+  function makeBridge() {
+    const store = new FileClarifyStore(new InMemoryStorage(), '/ethos/clarify');
+    return { bridge: new ClarifyBridge(store), store };
+  }
+
+  const input = {
+    question: 'Which migration path?',
+    timeoutMs: 900_000,
+    answerableBy: 'anyone' as const,
+    sessionId: 's1',
+    surfaceType: 'cli' as const,
+  };
+
+  it("cancels the job's presented question AND everything queued behind it, leaving other jobs alone", async () => {
+    const { bridge, store } = makeBridge();
+    const presented = makePresentedQueue(bridge, 'cli');
+
+    const first = bridge.request({ ...input, jobId: 'job-1' });
+    await presented.next();
+    const queued = bridge.request({ ...input, jobId: 'job-1', question: 'And the rollback?' });
+    const other = bridge.request({ ...input, jobId: 'job-2' });
+    await presented.next(); // job-2 has its own lane, so it presents immediately
+
+    expect(await bridge.cancelJob('job-1')).toBe(2);
+
+    await expect(first).resolves.toMatchObject({ answer: '', source: 'cancel' });
+    await expect(queued).resolves.toMatchObject({ answer: '', source: 'cancel' });
+    // The queued row was withdrawn, never shown — freeing the lane must not
+    // present a question this call is in the middle of cancelling.
+    expect(presented.all).toHaveLength(0);
+
+    // Only the untouched job's row is left, in memory and on disk.
+    expect(bridge.listPending().map((r) => r.jobId)).toEqual(['job-2']);
+    expect((await store.list()).map((r) => r.jobId)).toEqual(['job-2']);
+
+    await bridge.cancelJob('job-2');
+    await expect(other).resolves.toMatchObject({ source: 'cancel' });
+  });
+
+  it('is a no-op for a job with nothing pending', async () => {
+    const { bridge } = makeBridge();
+    expect(await bridge.cancelJob('job-nothing')).toBe(0);
+  });
+});

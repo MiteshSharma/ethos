@@ -13,6 +13,7 @@ export {
   type ClarifyEscalatorDeps,
   createClarifyEscalator,
   DEFAULT_ESCALATION_TIMEOUT_MS,
+  DEFAULT_PARK_TIMEOUT_MS,
   RUN_SCOPE_ANSWER,
 } from './clarify-escalator';
 export type { CapabilityHandler, CapabilityRegistry } from './registry';

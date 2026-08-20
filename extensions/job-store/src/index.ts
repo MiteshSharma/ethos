@@ -58,7 +58,20 @@ const SCHEMA = `
     created_at INTEGER NOT NULL
   ) STRICT;
 
+  -- G5 — the second delivery claim. One row per PUSHED mid-run notice, keyed by
+  -- the pending question's requestId. Insert-wins is the claim: the PRIMARY KEY
+  -- makes a concurrent second insert a no-op, so two processes racing the same
+  -- question push it exactly once. Deliberately a table and not a column on
+  -- jobs: a job parks on more than one question over its life, and each park
+  -- needs its own claim (a column would be spent after the first).
+  CREATE TABLE IF NOT EXISTS job_notices (
+    request_id TEXT PRIMARY KEY,
+    job_id     TEXT NOT NULL,
+    claimed_at INTEGER NOT NULL
+  ) STRICT;
+
   CREATE INDEX IF NOT EXISTS job_events_job ON job_events(job_id, seq);
+  CREATE INDEX IF NOT EXISTS job_notices_job ON job_notices(job_id);
   CREATE INDEX IF NOT EXISTS jobs_root_status ON jobs(root_session_key, status);
   CREATE INDEX IF NOT EXISTS jobs_owner_status ON jobs(owner, status);
   CREATE INDEX IF NOT EXISTS jobs_status_created ON jobs(status, created_at);
@@ -73,11 +86,11 @@ const SCHEMA = `
 const DELIVERY_INDEX =
   'CREATE INDEX IF NOT EXISTS jobs_undelivered ON jobs(origin_bot_key, status, delivered_at)';
 
-const JOB_STORE_SCHEMA_VERSION = 5;
+const JOB_STORE_SCHEMA_VERSION = 6;
 
 /**
  * Forward-only DDL steps. Each brings a `(N-1)` database to `N`; the baseline
- * above already describes v5, so a FRESH database never runs one. The
+ * above already describes v6, so a FRESH database never runs one. The
  * `table_info` guards keep each ALTER idempotent even if a database was
  * hand-repaired to the newer shape without its `user_version` being bumped.
  */
@@ -101,6 +114,12 @@ const JOB_STORE_MIGRATIONS: Record<number, (db: Database.Database) => void> = {
     addColumnIfMissing(db, 'blocked_since', 'INTEGER');
     addColumnIfMissing(db, 'blocked_request_id', 'TEXT');
   },
+  // v5 -> v6: G5's second delivery claim (`job_notices`). No DDL of its own —
+  // the baseline's `CREATE TABLE IF NOT EXISTS` already ran by the time this
+  // step executes, on a fresh AND on an upgraded database alike (`migrate`
+  // execs the baseline before the chain). The step exists so `user_version`
+  // moves, which is what the downgrade guard reads.
+  6: () => {},
 };
 
 function addColumnIfMissing(db: Database.Database, column: string, type: string): void {
@@ -550,6 +569,26 @@ export class SQLiteJobStore implements JobStore {
     this.db.prepare('UPDATE jobs SET delivered_at = NULL WHERE id = ?').run(id);
   }
 
+  /**
+   * G5 — the mid-run "needs you" claim, keyed by the pending question's
+   * requestId. `INSERT OR IGNORE` on a PRIMARY KEY is the same atomic
+   * exactly-once shape `claimDelivery`'s conditional UPDATE has: SQLite
+   * serialises the write, so of two processes inserting the same requestId
+   * exactly one reports `changes === 1`.
+   */
+  async claimNotice(requestId: string, jobId: string): Promise<boolean> {
+    const result = this.db
+      .prepare(
+        'INSERT OR IGNORE INTO job_notices (request_id, job_id, claimed_at) VALUES (?, ?, ?)',
+      )
+      .run(requestId, jobId, Date.now());
+    return result.changes === 1;
+  }
+
+  async releaseNotice(requestId: string): Promise<void> {
+    this.db.prepare('DELETE FROM job_notices WHERE request_id = ?').run(requestId);
+  }
+
   async pruneTerminal(cutoffMs: number): Promise<number> {
     const prune = this.db.transaction((): number => {
       // Delete events first to respect the FK (foreign_keys is ON), matching on
@@ -557,6 +596,18 @@ export class SQLiteJobStore implements JobStore {
       this.db
         .prepare(
           `DELETE FROM job_events WHERE job_id IN (
+             SELECT id FROM jobs
+             WHERE status IN ${TERMINAL_STATUSES}
+               AND COALESCE(finished_at, created_at) < ?
+           )`,
+        )
+        .run(cutoffMs);
+
+      // Same predicate for the notice claims: a pruned job's parked-question
+      // claims have nothing left to be exactly-once about.
+      this.db
+        .prepare(
+          `DELETE FROM job_notices WHERE job_id IN (
              SELECT id FROM jobs
              WHERE status IN ${TERMINAL_STATUSES}
                AND COALESCE(finished_at, created_at) < ?

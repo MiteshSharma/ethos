@@ -9,6 +9,8 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   type ClarifyEscalatorDeps,
   createClarifyEscalator,
+  DEFAULT_ESCALATION_TIMEOUT_MS,
+  DEFAULT_PARK_TIMEOUT_MS,
   RUN_SCOPE_ANSWER,
 } from '../clarify-escalator';
 import { SecretUnavailableError } from '../secret';
@@ -91,7 +93,9 @@ describe('createClarifyEscalator', () => {
     expect(input?.sessionId).toBe(JOB.childSessionKey);
     expect(input?.question).toContain('Pi wants to run');
     expect(input?.options).toEqual(['Allow once', RUN_SCOPE_ANSWER, 'Deny']);
-    expect(input?.timeoutMs).toBe(900_000);
+    // No default was supplied, so this question PARKS rather than guessing
+    // (§4.5 / §4.6 rung 4) — see the two-clocks test below.
+    expect(input?.timeoutMs).toBe(DEFAULT_PARK_TIMEOUT_MS);
     expect(input?.answerableBy).toBe('anyone');
     expect(input?.surfaceType).toBe('cli');
     expect(answer).toEqual({
@@ -100,6 +104,23 @@ describe('createClarifyEscalator', () => {
       scope: 'once',
       source: 'human',
     });
+  });
+
+  // §4.5's default policy, §4.6 rung 4: the window a question gets is decided
+  // by whether there is a safe answer to fall back on, not by the question's
+  // kind. A defaultable question keeps the 15-minute clock and then applies its
+  // default; a no-default question parks for hours so "resumable an hour later
+  // from the paused step" is actually reachable.
+  it('runs two clocks: 15 min for a defaultable question, a long park for one with no default', async () => {
+    const withDefault = harness({ requestId: 'x', answer: 'Deny', source: 'timeout-default' });
+    await withDefault.escalate('job-1', ask({ defaultValue: 'Deny' }));
+    expect(withDefault.request.mock.calls[0]?.[0]?.timeoutMs).toBe(DEFAULT_ESCALATION_TIMEOUT_MS);
+    expect(withDefault.request.mock.calls[0]?.[0]?.default).toBe('Deny');
+
+    const noDefault = harness({ requestId: 'x', answer: 'Deny', source: 'user' });
+    await noDefault.escalate('job-1', ask());
+    expect(noDefault.request.mock.calls[0]?.[0]?.timeoutMs).toBe(DEFAULT_PARK_TIMEOUT_MS);
+    expect(noDefault.request.mock.calls[0]?.[0]?.default).toBeUndefined();
   });
 
   it("reads D17's scope off the answer text", async () => {

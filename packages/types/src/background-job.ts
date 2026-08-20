@@ -264,6 +264,24 @@ export interface JobStore {
   claimDelivery(id: string): Promise<boolean>;
   /** Hand a claim back (`deliveredAt` → unset) when the send could not be made durable. */
   releaseDelivery(id: string): Promise<void>;
+  /**
+   * G5 — the SECOND delivery claim, and deliberately not `deliveredAt`.
+   *
+   * `deliveredAt` is spent on the job's ONE completion notice. A mid-run
+   * "needs you" push (§4.6 rung 3) is a different message, can happen more than
+   * once per job (a run parks on a question, resumes, parks on another), and
+   * must not consume the claim the done-notice needs. So it is keyed by the
+   * pending question's `requestId`, not by the job id.
+   *
+   * Atomic and exactly-once across processes, same guarantee as
+   * `claimDelivery`: returns whether THIS caller won. Two gateway processes
+   * sweeping the same shared store push a given question's notice exactly once.
+   * `jobId` is stored for the audit trail and for retention pruning, not for
+   * the key.
+   */
+  claimNotice(requestId: string, jobId: string): Promise<boolean>;
+  /** Hand a notice claim back when the send could not be made durable. */
+  releaseNotice(requestId: string): Promise<void>;
   /** Delete terminal rows whose finishedAt (or createdAt when unfinished) is < cutoffMs, plus their job_events. Returns the count deleted. Retention GC. */
   pruneTerminal(cutoffMs: number): Promise<number>;
   /** Append an audit event. Returns nothing. */

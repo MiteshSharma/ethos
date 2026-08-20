@@ -164,6 +164,10 @@ function makeJobStore(): FakeJobStore {
       return true;
     },
     async releaseDelivery() {},
+    async claimNotice() {
+      return true;
+    },
+    async releaseNotice() {},
   };
 }
 

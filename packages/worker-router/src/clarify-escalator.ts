@@ -12,6 +12,26 @@ import { SecretUnavailableError } from './secret';
 export const DEFAULT_ESCALATION_TIMEOUT_MS = 900_000;
 
 /**
+ * The window for a question with NO default — §4.6 rung 4 and §4.5's default
+ * policy: "high-cost questions carry no default and the run **parks** at
+ * timeout rather than guessing... stops burning budget, resumable hours later
+ * from the paused step."
+ *
+ * A parked run is not a run in trouble, so it must not be measured on the
+ * 15-minute clock a *defaultable* question uses. On that clock a no-default
+ * question dies while you are in a meeting, the escalator rethrows
+ * `ClarifyTimedOutNoDefaultError`, the gate reads the throw as a denial, and
+ * the run continues having silently made the decision the "no default" was
+ * there to prevent — the exact guess §4.5 forbids, arrived at by timing out
+ * instead of choosing.
+ *
+ * 24 hours is still finite on purpose: a question nobody ever answers must
+ * eventually stop holding a concurrency slot and a container. It is a backstop,
+ * not a deadline — nothing is expected to reach it.
+ */
+export const DEFAULT_PARK_TIMEOUT_MS = 24 * 3_600_000;
+
+/**
  * D17 — a clarify card has no scope control of its own, so the scope rides the
  * ANSWER TEXT: a surface offers this string as one of the options and the
  * escalator reads the scope back off whatever the human picked. Anything else
@@ -35,7 +55,13 @@ export interface ClarifyEscalatorDeps {
    * origin.
    */
   fallbackSurfaceType?: ClarifySurfaceType;
+  /** Window for a question that HAS a default. Defaults to 15 min. */
   timeoutMs?: number;
+  /**
+   * Window for a question with no default — how long the run stays parked and
+   * answerable. Defaults to 24 h; see `DEFAULT_PARK_TIMEOUT_MS`.
+   */
+  parkTimeoutMs?: number;
   /**
    * I11 — park the run on `blocked` while a human is being asked, and un-park
    * it when the question settles. Supplied as a PAIR or not at all: a `block`
@@ -99,7 +125,15 @@ export function createClarifyEscalator(deps: ClarifyEscalatorDeps): InteractionE
         question: req.prompt,
         ...(options.length > 0 ? { options } : {}),
         ...(req.defaultValue !== undefined ? { default: req.defaultValue } : {}),
-        timeoutMs: deps.timeoutMs ?? DEFAULT_ESCALATION_TIMEOUT_MS,
+        // §4.5/§4.6 rung 4 — a defaultable question runs the 15-minute clock
+        // and then applies its default; a no-default question PARKS, and the
+        // park is measured in hours because that is what "resumable hours
+        // later from the paused step" means. Same request, two clocks,
+        // decided by whether there is a safe answer to fall back on.
+        timeoutMs:
+          req.defaultValue === undefined
+            ? (deps.parkTimeoutMs ?? DEFAULT_PARK_TIMEOUT_MS)
+            : (deps.timeoutMs ?? DEFAULT_ESCALATION_TIMEOUT_MS),
         answerableBy: 'anyone',
         // The run's own session, so the question lands on the run's stream. The
         // lane it queues in is the JOB (G1), which is passed separately.

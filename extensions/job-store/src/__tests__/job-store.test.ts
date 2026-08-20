@@ -551,7 +551,7 @@ describe('SQLiteJobStore', () => {
     // Bump user_version beyond the code's supported version out-of-band.
     const Database = (await import('@ethosagent/sqlite')).default;
     const raw = new Database(path);
-    raw.pragma('user_version = 6');
+    raw.pragma('user_version = 7');
     raw.close();
 
     expect(() => new SQLiteJobStore(path)).toThrow(/newer than code/);
@@ -683,7 +683,38 @@ describe('SQLiteJobStore', () => {
     store.close();
   });
 
-  it('migrates a v1 database (remote columns + delivered_at + runner + blocked) to v5, preserving rows', async () => {
+  // G5 — the SECOND delivery claim. Two SQLiteJobStore instances on one FILE
+  // are two processes sharing a `jobs.db`, which is the only way to prove the
+  // claim is atomic rather than a read-then-write race inside one connection.
+  it('claimNotice is won exactly once across two connections to the same file, per requestId', async () => {
+    const path = join(tmpdir(), `jobstore-${randomUUID()}.db`);
+    tmpFiles.push(path);
+    const procA = new SQLiteJobStore(path);
+    const procB = new SQLiteJobStore(path);
+    const job = await procA.create(baseInput());
+
+    expect(await procA.claimNotice('rq-1', job.id)).toBe(true);
+    expect(await procB.claimNotice('rq-1', job.id)).toBe(false);
+    // A different question on the SAME job gets its own claim — a run parks
+    // more than once, and the completion notice's `deliveredAt` is untouched.
+    expect(await procB.claimNotice('rq-2', job.id)).toBe(true);
+    expect((await procA.get(job.id))?.deliveredAt).toBeUndefined();
+
+    // A released claim (the send could not be made durable) is reclaimable.
+    await procA.releaseNotice('rq-1');
+    expect(await procB.claimNotice('rq-1', job.id)).toBe(true);
+
+    // Retention GC takes the claims with the job.
+    await procA.claimNextQueued('proc-A');
+    await procA.finish(job.id, 'done', { summary: 'ok' });
+    expect(await procA.pruneTerminal(Date.now() + 1_000_000)).toBe(1);
+    expect(await procB.claimNotice('rq-1', job.id)).toBe(true);
+
+    procA.close();
+    procB.close();
+  });
+
+  it('migrates a v1 database (remote columns + delivered_at + runner + blocked + notices) to v6, preserving rows', async () => {
     const path = join(tmpdir(), `jobstore-${randomUUID()}.db`);
     tmpFiles.push(path);
     // Build a v1 jobs table out-of-band: the full v1 shape minus the remote
@@ -743,7 +774,7 @@ describe('SQLiteJobStore', () => {
       .run();
     rawSeed.close();
 
-    // Opening with current code migrates v1 -> v5.
+    // Opening with current code migrates v1 -> v6.
     const store = new SQLiteJobStore(path);
     const legacy = await store.get('legacy-1');
     expect(legacy?.summary).toBe('legacy summary');
@@ -770,6 +801,6 @@ describe('SQLiteJobStore', () => {
       raw2.prepare(`UPDATE jobs SET delivered_at = 'not-a-number' WHERE id = 'legacy-1'`).run(),
     ).toThrow();
     raw2.close();
-    expect(version).toBe(5);
+    expect(version).toBe(6);
   });
 });

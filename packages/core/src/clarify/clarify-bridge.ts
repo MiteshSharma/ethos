@@ -460,6 +460,37 @@ export class ClarifyBridge {
     this.drainLane(entry.lane);
   }
 
+  /**
+   * Withdraw every question a job is waiting on — its lane occupant AND
+   * anything queued behind it — as `cancel`.
+   *
+   * Wired to the executor's abort (cancel, spend cap, shutdown drain). Without
+   * it, cancelling a `blocked` run aborts the executor's controller but leaves
+   * the clarify row pending for its whole window: a question on someone's
+   * phone for a run that no longer exists, and (because the escalator's
+   * `resume` only runs when `request()` settles) a heartbeat pause nothing
+   * clears. That gap was recorded in Phase 4 and is closed here.
+   *
+   * Queued rows are cancelled BEFORE the occupant so freeing the lane cannot
+   * drain-and-present a row this call is about to withdraw anyway.
+   *
+   * In-process by design: the escalator awaiting the answer runs in the same
+   * process as the executor that aborts it, so there is nothing to reach
+   * across. A row owned elsewhere is not this executor's to cancel.
+   */
+  async cancelJob(jobId: string): Promise<number> {
+    const ids = this.listPending(undefined, jobId).map((row) => row.requestId);
+    const occupied = new Set(this.laneOccupant.values());
+    const ordered = [
+      ...ids.filter((id) => !occupied.has(id)),
+      ...ids.filter((id) => occupied.has(id)),
+    ];
+    for (const requestId of ordered) {
+      await this.respond({ requestId, answer: '', source: 'cancel' });
+    }
+    return ordered.length;
+  }
+
   private notifyResolved(row: PendingClarify, response: ClarifyResponse | null): void {
     for (const listener of this.resolvedListeners) {
       try {
