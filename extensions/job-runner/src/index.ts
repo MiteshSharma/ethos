@@ -96,6 +96,15 @@ const TEXT_CHUNK_CHARS = 2_000;
 const TEXT_FLUSH_MS = 5_000;
 const TEXT_MAX_EVENTS = 100;
 
+/**
+ * Per-artifact cap on the unified diff a runner hands over. The file list
+ * (`path`, `+n / −n`) is always exact; only the diff BODY is bounded, because a
+ * single generated-file rewrite would otherwise put megabytes in one audit row
+ * that the inspector then has to read back. Same `[truncated]` marker the text
+ * sink uses.
+ */
+const ARTIFACT_DIFF_CAP = 20_000;
+
 function errMsg(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
@@ -460,11 +469,26 @@ export class BackgroundExecutor {
       for await (const ev of runner.run(job, {
         signal: controller.signal,
         steerSink: NOOP_STEER_SINK,
-        // Artifacts are a job-event-log concern, not an event-stream one. The
-        // persistence path lands with the inspector's Diff tab; until then a
-        // runner may emit and the executor drops it on the floor rather than
-        // pretending to record it.
-        emitArtifact: (_change: ArtifactChange) => {},
+        // Artifacts are a job-event-log concern, not an event-stream one:
+        // `AgentEvent` is frozen at 17 variants with no artifact slot, so a
+        // file change becomes an `artifact_change` ROW and the inspector's Diff
+        // tab reads it back from there. `emitArtifact` is synchronous by
+        // contract — a runner does not await the audit trail — so the write is
+        // fire-and-forget with the same swallow-and-log policy as every other
+        // appendEvent here: losing an audit row must never fail the job it
+        // describes.
+        emitArtifact: (change: ArtifactChange) => {
+          void this.store
+            .appendEvent(job.id, 'artifact_change', {
+              ...change,
+              ...(change.diff !== undefined
+                ? { diff: capText(change.diff, ARTIFACT_DIFF_CAP) }
+                : {}),
+            })
+            .catch((err) =>
+              this.log?.(`appendEvent(artifact_change) failed for ${job.id}: ${errMsg(err)}`),
+            );
+        },
       })) {
         if (controller.signal.aborted) break;
 

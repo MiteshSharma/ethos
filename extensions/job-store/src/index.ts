@@ -8,6 +8,7 @@ import type {
   BackgroundJobEventType,
   BackgroundJobStatus,
   CreateBackgroundJobInput,
+  GetJobEventsOptions,
   JobStore,
 } from '@ethosagent/types';
 
@@ -604,10 +605,38 @@ export class SQLiteJobStore implements JobStore {
     tx();
   }
 
-  async getEvents(jobId: string): Promise<BackgroundJobEvent[]> {
+  /**
+   * Bounded tail read. The inner query walks the `job_events(job_id, seq)` index
+   * BACKWARDS and stops after `limit` rows, so a two-hour run's trail costs the
+   * page, not the job; the outer query flips it back to ascending because that
+   * is the contract every caller reads against. `beforeSeq` narrows the same
+   * index range, so paging backwards is another bounded scan, not a growing one.
+   *
+   * With no `opts` the query is exactly the old one — the whole trail, seq ASC.
+   */
+  async getEvents(jobId: string, opts?: GetJobEventsOptions): Promise<BackgroundJobEvent[]> {
+    const params: unknown[] = [jobId];
+    let where = 'job_id = ?';
+    if (opts?.beforeSeq !== undefined) {
+      where += ' AND seq < ?';
+      params.push(opts.beforeSeq);
+    }
+
+    if (opts?.limit === undefined) {
+      const rows = this.db
+        .prepare(`SELECT * FROM job_events WHERE ${where} ORDER BY seq ASC`)
+        .all(...params) as JobEventRow[];
+      return rows.map(rowToEvent);
+    }
+
+    params.push(Math.max(0, Math.floor(opts.limit)));
     const rows = this.db
-      .prepare('SELECT * FROM job_events WHERE job_id = ? ORDER BY seq ASC')
-      .all(jobId) as JobEventRow[];
+      .prepare(
+        `SELECT * FROM (
+           SELECT * FROM job_events WHERE ${where} ORDER BY seq DESC LIMIT ?
+         ) ORDER BY seq ASC`,
+      )
+      .all(...params) as JobEventRow[];
     return rows.map(rowToEvent);
   }
 

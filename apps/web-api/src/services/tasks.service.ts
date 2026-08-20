@@ -5,6 +5,9 @@ import type {
   BackgroundJobSummaryWire,
 } from '@ethosagent/web-contracts';
 
+/** How many of a job's newest events one detail read returns. */
+const DETAIL_EVENT_LIMIT = 200;
+
 export interface TasksServiceOptions {
   /** The durable background-job store from wiring's CreateAgentLoopResult.
    *  Absent when background delegation is disabled — every read degrades to
@@ -80,7 +83,10 @@ export class TasksService {
     if (!this.store) return null;
     const job = await this.store.get(id);
     if (!job) return null;
-    const events = await this.store.getEvents(id);
+    // Bounded tail: the newest N rows, not the whole trail. A long run's event
+    // log is unbounded, and this read happens at the exact moment someone opens
+    // a task to find out what went wrong — the worst moment to buffer it all.
+    const events = await this.store.getEvents(id, { limit: DETAIL_EVENT_LIMIT });
     return toDetail(job, events);
   }
 

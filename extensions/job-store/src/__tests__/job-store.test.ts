@@ -452,6 +452,83 @@ describe('SQLiteJobStore', () => {
     store.close();
   });
 
+  // -------------------------------------------------------------------------
+  // T23 — bounded tail read (G10/D12). `getEvents` with no opts still returns
+  // the whole trail; `limit` takes the NEWEST n; `beforeSeq` pages backwards.
+  // -------------------------------------------------------------------------
+
+  it('getEvents({ limit }) returns the newest n, still ordered seq ASC', async () => {
+    const store = new SQLiteJobStore(':memory:');
+    const job = await store.create(baseInput()); // seq 1 = queued
+    for (let i = 0; i < 9; i++) await store.appendEvent(job.id, 'text', { text: `t${i}` });
+
+    // 10 rows total; the newest 3 are seq 8, 9, 10 — ascending, not reversed.
+    expect((await store.getEvents(job.id, { limit: 3 })).map((e) => e.seq)).toEqual([8, 9, 10]);
+    // A limit larger than the trail is not an error, it is just the trail.
+    expect(await store.getEvents(job.id, { limit: 999 })).toHaveLength(10);
+    // Omitted opts is the old contract, byte for byte.
+    expect(await store.getEvents(job.id)).toEqual(await store.getEvents(job.id, { limit: 10 }));
+    store.close();
+  });
+
+  it('getEvents({ beforeSeq }) pages backwards with no gap and no overlap', async () => {
+    const store = new SQLiteJobStore(':memory:');
+    const job = await store.create(baseInput());
+    for (let i = 0; i < 9; i++) await store.appendEvent(job.id, 'text', { text: `t${i}` });
+
+    const page1 = await store.getEvents(job.id, { limit: 4 });
+    const oldest = page1[0]?.seq ?? 0;
+    const page2 = await store.getEvents(job.id, { limit: 4, beforeSeq: oldest });
+
+    expect(page1.map((e) => e.seq)).toEqual([7, 8, 9, 10]);
+    expect(page2.map((e) => e.seq)).toEqual([3, 4, 5, 6]);
+    // Contiguous across the seam, and the cursor row itself is never repeated.
+    expect(page2[page2.length - 1]?.seq).toBe(oldest - 1);
+
+    const page3 = await store.getEvents(job.id, { limit: 4, beforeSeq: page2[0]?.seq });
+    expect(page3.map((e) => e.seq)).toEqual([1, 2]);
+    expect(await store.getEvents(job.id, { limit: 4, beforeSeq: 1 })).toEqual([]);
+    store.close();
+  });
+
+  it('T23: a 10k-event job reads its tail and pages back in bounded time', async () => {
+    const store = new SQLiteJobStore(':memory:');
+    const job = await store.create(baseInput());
+    const chunk = 'x'.repeat(200);
+    // 9_999 + the `queued` row from create() = 10_000.
+    for (let i = 0; i < 9_999; i++) await store.appendEvent(job.id, 'text', { text: chunk, i });
+
+    const tStart = performance.now();
+    const page1 = await store.getEvents(job.id, { limit: 200 });
+    const boundedMs = performance.now() - tStart;
+
+    expect(page1).toHaveLength(200);
+    expect(page1.map((e) => e.seq)).toEqual(
+      Array.from({ length: 200 }, (_, i) => 10_000 - 199 + i),
+    );
+
+    const cursor = page1[0]?.seq;
+    const page2 = await store.getEvents(job.id, { limit: 200, beforeSeq: cursor });
+    expect(page2).toHaveLength(200);
+    expect(page2[page2.length - 1]?.seq).toBe((cursor ?? 0) - 1);
+    expect(page2[0]?.seq).toBe((cursor ?? 0) - 200);
+    // No overlap: the two pages share nothing.
+    const seqs = new Set([...page1, ...page2].map((e) => e.seq));
+    expect(seqs.size).toBe(400);
+
+    // …and it is genuinely bounded, not a full scan that happens to slice: the
+    // unbounded read of the same trail materializes 50x the rows. Timing is
+    // deliberately loose (a 3x margin against a ~50x difference) so this fails
+    // on a regression to O(n), not on a slow CI box.
+    const tFull = performance.now();
+    const all = await store.getEvents(job.id);
+    const fullMs = performance.now() - tFull;
+    expect(all).toHaveLength(10_000);
+    expect(boundedMs * 3).toBeLessThan(fullMs);
+
+    store.close();
+  });
+
   it('persists across reopen of the same db file', async () => {
     const path = join(tmpdir(), `jobstore-${randomUUID()}.db`);
     tmpFiles.push(path);

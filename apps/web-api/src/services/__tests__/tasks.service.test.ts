@@ -3,6 +3,7 @@ import type {
   BackgroundJobEvent,
   BackgroundJobEventType,
   CreateBackgroundJobInput,
+  GetJobEventsOptions,
   JobStore,
 } from '@ethosagent/types';
 import { describe, expect, it } from 'vitest';
@@ -69,8 +70,11 @@ class FakeJobStore implements JobStore {
   }
   async releaseDelivery(): Promise<void> {}
   async appendEvent(): Promise<void> {}
-  async getEvents(jobId: string): Promise<BackgroundJobEvent[]> {
-    return this.events.get(jobId) ?? [];
+  async getEvents(jobId: string, opts?: GetJobEventsOptions): Promise<BackgroundJobEvent[]> {
+    const list = this.events.get(jobId) ?? [];
+    // The service reads a bounded tail (I21); the double honours it rather than
+    // returning everything and letting a broken bound pass unnoticed.
+    return opts?.limit === undefined ? list : list.slice(-opts.limit);
   }
 }
 
