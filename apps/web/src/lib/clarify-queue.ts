@@ -120,16 +120,3 @@ export function resolvedForRun(
 ): ResolvedClarify | undefined {
   return state.resolved.find((r) => r.jobId === jobId);
 }
-
-/**
- * Questions that belong to no run — the foreground `clarify` tool. These keep
- * rendering through the existing floating card, untouched by this plan.
- */
-export function foregroundQuestions(state: ClarifyQueueState): ClarifyRequestEvent[] {
-  return state.pending.filter((c) => c.jobId === undefined);
-}
-
-/** How many runs are parked on a question — the number behind the nav badge. */
-export function runQuestionCount(state: ClarifyQueueState): number {
-  return state.pending.filter((c) => c.jobId !== undefined).length;
-}

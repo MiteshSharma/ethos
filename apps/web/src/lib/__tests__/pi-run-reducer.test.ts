@@ -1,11 +1,9 @@
 import type { BackgroundJobStatusWire, SseEvent } from '@ethosagent/web-contracts';
 import { describe, expect, it } from 'vitest';
 import {
-  activeRuns,
   allRuns,
   applyRunEvent,
   emptyRunsState,
-  forgetTerminalRuns,
   isTerminalRun,
   runCardView,
   runCounts,
@@ -71,7 +69,11 @@ describe('selectors', () => {
   })();
 
   it('separates active from terminal', () => {
-    expect(activeRuns(built).map((r) => r.jobId)).toEqual(['a', 'b']);
+    expect(
+      allRuns(built)
+        .filter((r) => !isTerminalRun(r.status))
+        .map((r) => r.jobId),
+    ).toEqual(['a', 'b']);
     expect(isTerminalRun('done')).toBe(true);
     expect(isTerminalRun('blocked')).toBe(false);
     // A lost host is not terminal — §4.1 offers Resume on a stale card.
@@ -81,13 +83,6 @@ describe('selectors', () => {
   it('counts what the pill and the nav badge render', () => {
     expect(runsNeedingYou(built).map((r) => r.jobId)).toEqual(['b']);
     expect(runCounts(built)).toEqual({ running: 1, needsYou: 1, done: 1 });
-  });
-
-  it('drops terminal runs on a session change, keeping the rest', () => {
-    const pruned = forgetTerminalRuns(built);
-    expect(pruned.order).toEqual(['a', 'b']);
-    // Same reference when nothing changed — the surfaces re-render on identity.
-    expect(forgetTerminalRuns(pruned)).toBe(pruned);
   });
 });
 

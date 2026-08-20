@@ -79,11 +79,6 @@ export function allRuns(state: RunsState): RunState[] {
   return rows;
 }
 
-/** Runs that have not reached a terminal status. */
-export function activeRuns(state: RunsState): RunState[] {
-  return allRuns(state).filter((r) => !isTerminalRun(r.status));
-}
-
 /** Runs parked on a question. The count behind the nav badge and the pill. */
 export function runsNeedingYou(state: RunsState): RunState[] {
   return allRuns(state).filter((r) => r.status === 'blocked');
@@ -101,24 +96,6 @@ export function runCounts(state: RunsState): { running: number; needsYou: number
     else done += 1;
   }
   return { running, needsYou, done };
-}
-
-/**
- * Drop terminal runs. §4.3: "Runs stay listed until terminal, then drop on the
- * next session change" — the session change is what calls this, not a timer.
- */
-export function forgetTerminalRuns(state: RunsState): RunsState {
-  const keep = state.order.filter((id) => {
-    const run = state.byId[id];
-    return run !== undefined && !isTerminalRun(run.status);
-  });
-  if (keep.length === state.order.length) return state;
-  const byId: Record<string, RunState> = {};
-  for (const id of keep) {
-    const run = state.byId[id];
-    if (run) byId[id] = run;
-  }
-  return { byId, order: keep };
 }
 
 // ---------------------------------------------------------------------------

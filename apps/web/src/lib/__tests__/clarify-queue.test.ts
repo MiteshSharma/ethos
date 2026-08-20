@@ -3,12 +3,10 @@ import { describe, expect, it } from 'vitest';
 import {
   applyClarifyEvent,
   emptyClarifyQueue,
-  foregroundQuestions,
   noteAnswer,
   questionForRun,
   RESOLVED_CAP,
   resolvedForRun,
-  runQuestionCount,
 } from '../clarify-queue';
 
 // The question queue as a pure reducer (pi-delegation D9). A clarify occupies
@@ -35,13 +33,14 @@ describe('applyClarifyEvent', () => {
     const s = applyClarifyEvent(emptyClarifyQueue, ask('r1', 'job_1'), 1);
     expect(questionForRun(s, 'job_1')?.requestId).toBe('r1');
     expect(questionForRun(s, 'job_2')).toBeUndefined();
-    expect(runQuestionCount(s)).toBe(1);
   });
 
   it('keeps a foreground clarify out of every run', () => {
+    // No `jobId` means the foreground `clarify` tool asked, and the existing
+    // floating card renders it — no run card claims it.
     const s = applyClarifyEvent(emptyClarifyQueue, ask('r1'), 1);
-    expect(foregroundQuestions(s).map((c) => c.requestId)).toEqual(['r1']);
-    expect(runQuestionCount(s)).toBe(0);
+    expect(s.pending.map((c) => c.jobId)).toEqual([undefined]);
+    expect(questionForRun(s, 'job_1')).toBeUndefined();
   });
 
   it('is a no-op on a re-delivered request', () => {
