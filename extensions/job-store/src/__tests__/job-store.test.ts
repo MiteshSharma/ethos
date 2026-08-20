@@ -237,6 +237,114 @@ describe('SQLiteJobStore', () => {
     store.close();
   });
 
+  // --- blocked (G4 / D21) --------------------------------------------------
+
+  it('markBlocked parks a running row and stamps the question it is parked on', async () => {
+    const store = new SQLiteJobStore(':memory:');
+    const job = await store.create(baseInput());
+    await store.claimNextQueued('proc-A');
+
+    await store.markBlocked(job.id, 'clarify-77');
+    const parked = await store.get(job.id);
+    expect(parked?.status).toBe('blocked');
+    expect(parked?.blockedRequestId).toBe('clarify-77');
+    expect(parked?.blockedSince).toBeGreaterThan(0);
+
+    const last = (await store.getEvents(job.id)).at(-1);
+    expect(last?.eventType).toBe('blocked');
+    expect(last?.payload).toEqual({ requestId: 'clarify-77' });
+    store.close();
+  });
+
+  it('markBlocked is a no-op on a row that is not running', async () => {
+    const store = new SQLiteJobStore(':memory:');
+    const job = await store.create(baseInput()); // still queued
+
+    await store.markBlocked(job.id, 'clarify-77');
+    expect((await store.get(job.id))?.status).toBe('queued');
+    expect((await store.getEvents(job.id)).map((e) => e.eventType)).not.toContain('blocked');
+    store.close();
+  });
+
+  it('resumeFromBlocked returns the row to running, clears the fields, and re-beats', async () => {
+    const store = new SQLiteJobStore(':memory:');
+    const job = await store.create(baseInput());
+    await store.claimNextQueued('proc-A');
+    await store.markBlocked(job.id, 'clarify-77');
+
+    await store.resumeFromBlocked(job.id);
+    const resumed = await store.get(job.id);
+    expect(resumed?.status).toBe('running');
+    expect(resumed?.blockedSince).toBeUndefined();
+    expect(resumed?.blockedRequestId).toBeUndefined();
+    // The heartbeat is bumped by the resume — otherwise a run parked longer than
+    // staleMs is swept stale before the executor's next beat.
+    expect(resumed?.heartbeatAt).toBeGreaterThan(0);
+    expect((await store.getEvents(job.id)).at(-1)?.eventType).toBe('resumed');
+    store.close();
+  });
+
+  it('resumeFromBlocked is a no-op on a row that is not blocked', async () => {
+    const store = new SQLiteJobStore(':memory:');
+    const job = await store.create(baseInput());
+    await store.claimNextQueued('proc-A');
+
+    await store.resumeFromBlocked(job.id);
+    expect((await store.get(job.id))?.status).toBe('running');
+    expect((await store.getEvents(job.id)).map((e) => e.eventType)).not.toContain('resumed');
+    store.close();
+  });
+
+  it('reclaimStale IGNORES blocked rows — a parked question is not a dead host', async () => {
+    const store = new SQLiteJobStore(':memory:');
+    const parked = await store.create(baseInput({ prompt: 'parked' }));
+    await store.claimNextQueued('proc-A');
+    await store.markBlocked(parked.id, 'clarify-77');
+
+    // reclaimStale(0) sweeps every running row regardless of heartbeat age; the
+    // blocked row must survive it.
+    expect(await store.reclaimStale(0)).toHaveLength(0);
+    expect((await store.get(parked.id))?.status).toBe('blocked');
+    store.close();
+  });
+
+  it('countActive* still count blocked — a parked run holds its slot', async () => {
+    const store = new SQLiteJobStore(':memory:');
+    const job = await store.create(baseInput({ personalityId: 'ada' }));
+    await store.claimNextQueued('proc-A');
+    await store.markBlocked(job.id, 'clarify-77');
+
+    expect(await store.countActiveByRoot('cli:root')).toBe(1);
+    expect(await store.countActiveByPersonality('ada')).toBe(1);
+    store.close();
+  });
+
+  it('finish from blocked works and clears the blocked fields', async () => {
+    const store = new SQLiteJobStore(':memory:');
+    const job = await store.create(baseInput());
+    await store.claimNextQueued('proc-A');
+    await store.markBlocked(job.id, 'clarify-77');
+
+    // The blocked card offers Cancel, so blocked → aborted must be reachable.
+    await store.finish(job.id, 'aborted', { error: 'cancelled by task_cancel' });
+    const done = await store.get(job.id);
+    expect(done?.status).toBe('aborted');
+    expect(done?.blockedSince).toBeUndefined();
+    expect(done?.blockedRequestId).toBeUndefined();
+    store.close();
+  });
+
+  it('blocked rows are never pruned by the retention GC (not terminal)', async () => {
+    const store = new SQLiteJobStore(':memory:');
+    const job = await store.create(baseInput());
+    await store.claimNextQueued('proc-A');
+    await store.markBlocked(job.id, 'clarify-77');
+
+    expect(await store.pruneTerminal(Date.now() + 1_000)).toBe(0);
+    expect((await store.get(job.id))?.status).toBe('blocked');
+    store.close();
+  });
+
   it('reclaimStale transitions only running rows past the threshold', async () => {
     const store = new SQLiteJobStore(':memory:');
     const stale = await store.create(baseInput({ prompt: 'stale' }));
@@ -366,7 +474,7 @@ describe('SQLiteJobStore', () => {
     // Bump user_version beyond the code's supported version out-of-band.
     const Database = (await import('@ethosagent/sqlite')).default;
     const raw = new Database(path);
-    raw.pragma('user_version = 5');
+    raw.pragma('user_version = 6');
     raw.close();
 
     expect(() => new SQLiteJobStore(path)).toThrow(/newer than code/);
@@ -498,7 +606,7 @@ describe('SQLiteJobStore', () => {
     store.close();
   });
 
-  it('migrates a v1 database (remote columns + delivered_at + runner) to v4, preserving rows', async () => {
+  it('migrates a v1 database (remote columns + delivered_at + runner + blocked) to v5, preserving rows', async () => {
     const path = join(tmpdir(), `jobstore-${randomUUID()}.db`);
     tmpFiles.push(path);
     // Build a v1 jobs table out-of-band: the full v1 shape minus the remote
@@ -558,7 +666,7 @@ describe('SQLiteJobStore', () => {
       .run();
     rawSeed.close();
 
-    // Opening with current code migrates v1 -> v4.
+    // Opening with current code migrates v1 -> v5.
     const store = new SQLiteJobStore(path);
     const legacy = await store.get('legacy-1');
     expect(legacy?.summary).toBe('legacy summary');
@@ -585,6 +693,6 @@ describe('SQLiteJobStore', () => {
       raw2.prepare(`UPDATE jobs SET delivered_at = 'not-a-number' WHERE id = 'legacy-1'`).run(),
     ).toThrow();
     raw2.close();
-    expect(version).toBe(4);
+    expect(version).toBe(5);
   });
 });

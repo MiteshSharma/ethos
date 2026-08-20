@@ -105,6 +105,24 @@ describe('MeshProxyReconciler.sweepOnce', () => {
     expect(finish).not.toHaveBeenCalled();
   });
 
+  it('keeps a remote job that is BLOCKED alive rather than failing it (D21)', async () => {
+    const { store, finish, heartbeat } = makeStore([makeRow()]);
+    const fetchImpl = vi.fn(
+      async () =>
+        ({
+          json: async () => ({ result: { found: true, status: 'blocked', spendUsd: 0.1 } }),
+        }) as unknown as Response,
+    );
+
+    const rec = new MeshProxyReconciler({ store, fetchImpl });
+    await rec.sweepOnce();
+
+    // `blocked` is non-terminal: the peer's run is parked on a human answer, so
+    // the local proxy row must not be filed as a remote failure.
+    expect(heartbeat).toHaveBeenCalledWith('proxy-1');
+    expect(finish).not.toHaveBeenCalled();
+  });
+
   it('fails the row after missThreshold consecutive fetch errors', async () => {
     const { store, finish, heartbeat } = makeStore([makeRow()]);
     const fetchImpl = vi.fn(async () => {

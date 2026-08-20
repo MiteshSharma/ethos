@@ -177,6 +177,73 @@ describe('BackgroundExecutor', () => {
     await exec.shutdown();
   });
 
+  it('pauses the heartbeat while a run is parked, and resumes it on answer (G4/D21)', async () => {
+    const store = new SQLiteJobStore(':memory:');
+    const { loop } = makeNeverEndingLoop();
+    const exec = new BackgroundExecutor({ store, loop, owner: OWNER, config: cfg() });
+    const job = await store.create(createInput());
+
+    exec.start();
+    exec.nudge();
+    await vi.waitFor(async () => expect((await store.get(job.id))?.status).toBe('running'), {
+      timeout: 2000,
+    });
+
+    const beats = vi.spyOn(store, 'heartbeat');
+    await exec.markJobBlocked(job.id, 'clarify-1');
+    expect((await store.get(job.id))?.status).toBe('blocked');
+
+    // Several heartbeat intervals pass with no beat — which is what makes the
+    // row invisible to reclaimStale rather than a dead host.
+    await new Promise((r) => setTimeout(r, cfg().heartbeatMs * 6));
+    expect(beats).not.toHaveBeenCalled();
+    expect(await store.reclaimStale(0)).toHaveLength(0);
+    expect((await store.get(job.id))?.status).toBe('blocked');
+
+    await exec.resumeJob(job.id);
+    expect((await store.get(job.id))?.status).toBe('running');
+    await vi.waitFor(() => expect(beats).toHaveBeenCalled(), { timeout: 2000 });
+
+    await exec.shutdown();
+  });
+
+  it('keeps a parked run cancellable — blocked → aborted', async () => {
+    const store = new SQLiteJobStore(':memory:');
+    const { loop } = makeNeverEndingLoop();
+    const exec = new BackgroundExecutor({ store, loop, owner: OWNER, config: cfg() });
+    const job = await store.create(createInput());
+
+    exec.start();
+    exec.nudge();
+    await vi.waitFor(async () => expect((await store.get(job.id))?.status).toBe('running'), {
+      timeout: 2000,
+    });
+
+    await exec.markJobBlocked(job.id, 'clarify-1');
+    await store.requestCancel(job.id);
+
+    await vi.waitFor(async () => expect((await store.get(job.id))?.status).toBe('aborted'), {
+      timeout: 2000,
+    });
+    expect((await store.get(job.id))?.blockedRequestId).toBeUndefined();
+
+    await exec.shutdown();
+  });
+
+  it('ignores markJobBlocked for a job this executor is not running', async () => {
+    const store = new SQLiteJobStore(':memory:');
+    const { loop } = makeNeverEndingLoop();
+    const exec = new BackgroundExecutor({ store, loop, owner: OWNER, config: cfg() });
+    // Claimed by a peer process, never by this executor's pool.
+    const job = await store.create(createInput({ owner: 'peer' }));
+    await store.claimNextQueued('peer');
+
+    await exec.markJobBlocked(job.id, 'clarify-1');
+    expect((await store.get(job.id))?.status).toBe('running');
+
+    await exec.shutdown();
+  });
+
   it('respects the pool size and claims the next job only after one finishes', async () => {
     const store = new SQLiteJobStore(':memory:');
     const { loop } = makeNeverEndingLoop();

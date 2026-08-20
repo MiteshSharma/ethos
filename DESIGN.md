@@ -96,6 +96,32 @@ when you have walked into a different room.
 | coach | `#E879F9` | Magenta — encouragement, clarity |
 | operator | `#94A3B8` | Grey — operational, neutral |
 
+### Runner accent (a foreign process is not a personality)
+
+A **runner** is an external coding harness Ethos delegates a job to — Pi today,
+another harness later. It gets an accent for the same reason a personality does:
+you have to be able to tell at a glance whose work you are looking at. It does
+**not** get a personality accent, and it is not a sixth row in the table above.
+The table is the roster of agents that live here; a runner is a process Ethos
+handed work to, and blurring the two would say the wrong thing about what Pi is.
+
+| Runner | Dark | Light | Reasoning |
+|---|---|---|---|
+| pi | `#2DD4BF` | `#0D9488` | Teal — outside the five personality hues and outside the semantic four, so it can never be read as an agent's identity or as a status signal |
+
+Two rules, both load-bearing:
+
+1. **Runner identity is data, not CSS.** Every runner accent, label, and badge
+   string is consumed through a single `RUNNERS` identity map
+   (`{id, label, accent, badgeText}`, `apps/web/src/lib/runners.ts`). No
+   component hardcodes a runner's hex, its badge text, or the literal `pi` — a
+   second harness must be a map entry, never a diff across the render tree. Copy
+   is templated on `{runner}`.
+2. **A runner accent is not an `--accent`.** The per-personality accent swap
+   (above) is unaffected: a delegated run's chrome carries the runner's hue
+   *within the run's own surface*, and the surrounding scope keeps the
+   personality's. The two never trade places.
+
 ### Semantic colors
 
 Used **only** to signal status, never as decoration. Always paired with an icon — never color alone.
@@ -144,6 +170,15 @@ The `Card` primitive is reserved. It appears **only** on:
 - Task tiles (Teams Control Center board)
 
 Everything else uses raw layout primitives. Tool chips are inline rows. Drawer streams are dense lists. Onboarding personality picker is stacked rows. No card grids anywhere.
+
+The rule governs the `Card` **primitive**, not the word "card". A bordered
+container assembled from raw primitives is not an exemption and never needed
+one — `ClarifyCard`, the composer, and `CallStrip` are all built that way. The
+three exemptions above share a property that is the actual test: each is a
+**repeated list unit** whose alternative was a dense row, and each was granted
+because the unit did not fit the row. A one-off container inline in a stream has
+no dense-row alternative to be measured against, so there is nothing for an
+exemption to buy — build it from primitives.
 
 ## Chat surface
 
@@ -537,3 +572,5 @@ The web UI specifically must avoid these patterns. Code review checks for them.
 | 2026-08-16 | Sidebar accent rule restated by scope, not widget; per-personality accent swap moves to the workspace subtree; annulus marks the machine altitude | Personality-first-ui refactor (P0) splits chrome into two altitudes — Library (machine, `◎` annulus) and Workspace (per-agent, contextual column + stage). The 2026-04/05 rule ("the rail is outside the personality subtree") was conditional on a single flat sidebar being the only chrome; under two altitudes the contextual column **is** the personality subtree, so the rule survives restated: global chrome (the altitude rail) stays `--ethos-info` forever, scoped chrome (contextual column + stage) carries the active scope's accent, and it moves only when you walk into a different room. The `<ConfigProvider>` accent swap lifts accordingly, from the chat tab to the workspace subtree. Also recorded: the Ethos annulus (`apps/desktop/assets/brand/ethos-mark.svg`) marks the machine altitude; agents keep their generative marks — Ethos gets the ring, agents don't inherit it. Blocking amendment, landed before any code (constitutional decision, not implementation detail). |
 | 2026-08-16 | Personality mark circular frame actually implemented; unknown-personality accents hash to a unique hue instead of bucketing into the 5 curated colors | Closes the gap between the 2026-06-11 circular-frame decision and the code, which still rendered a rounded square — `PersonalityMark.tsx` and `marks.ts` now draw a clipped circle with accent ring per spec. Also: `accentFor()` previously hashed unknown ids into the 5 curated `tokens.accents` values, guaranteeing collisions once a deployment has more than 5 personalities (this one has 9); it now derives a deterministic per-id hue (fixed S/L, shifted out of the purple/violet/indigo band) while the 5 curated built-ins keep their exact hex. |
 | 2026-08-19 | New `display` identity block on `PersonalityConfig`, first field `display.avatar_url` | Personality avatars plan P0 (schema & governance). Follows the Phase 30.8 personality-presentation amendment: a personality's visual presence is identity, so a custom avatar image lands as a sub-key of an identity block (`display.avatar_url`, an optional string URL to a served or uploaded avatar image) parallel to `voice`, never as a new top-level `PersonalityConfig` field. Falls back to the existing generated mark (`PersonalityRingAvatar` / `PersonalityMark`) whenever unset or the image fails to load — no other rendering change in this phase. |
+| 2026-08-20 | Runner accent `#2DD4BF` dark / `#0D9488` light — a sixth hue that is deliberately NOT a personality accent, consumed only through the `RUNNERS` identity map | Pi-delegation D19/D26. Ethos can now hand a job to an external coding harness, and the run has to be attributable on sight — but a runner is a foreign process, not an agent that lives here, and giving it a sixth row in the per-personality table would say it is one. So it gets its own subsection and a teal that sits outside both the five personality hues and the semantic four, where it can be mistaken for neither an identity nor a status. The consumption rule is the half that has to hold: accent, label, and badge text all come from one `RUNNERS` map (`{id, label, accent, badgeText}`, `apps/web/src/lib/runners.ts`), copy is templated `{runner}`, and no component hardcodes a hex or the literal `pi` — a second harness must be a map entry, not a diff across the render tree. The per-personality accent swap is untouched: a run's own surface carries the runner's hue, the scope around it keeps the personality's. Blocking amendment, landed before the run card (constitutional decision, not implementation detail). |
+| 2026-08-20 | The delegated-run card is NOT a fourth "Cards earn existence" exemption | Ruled on while landing the runner accent, and recorded so it is not relitigated when the card gets built. The run card is heavy — header, task line, live `now` line, meta row, an 18-row collapsible detail grid, a nested question card, a button row — and "does it fit a dense row" answers *no*. But that is the wrong test for it, because the rule governs the `Card` **primitive**, not the word "card": `ClarifyCard`, the composer and `CallStrip` are all bordered containers of comparable weight built from raw primitives, and none of them needed an exemption. The three granted exemptions share a property the run card lacks — each is a **repeated list unit** measured against the dense row it replaced. The run card is a singleton inline in a transcript with no row alternative to lose to, and Antd's `Card` (title slot, `extra`, fixed body padding) buys it nothing it would not immediately override, while its state-varying border and warm blocked tint want explicit CSS anyway. So: built from primitives, and the surfaces that ARE lists stay lists — the drawer Runs pane and the Tasks page rows remain dense rows, which is where the rule was doing real work all along. |

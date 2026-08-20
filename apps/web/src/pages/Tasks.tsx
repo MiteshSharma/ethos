@@ -14,6 +14,7 @@ import {
 const STATUS_CONFIG: Record<BackgroundJobStatusWire, { color: string; label: string }> = {
   queued: { color: 'var(--info)', label: 'Queued' },
   running: { color: 'var(--info)', label: 'Running' },
+  blocked: { color: 'var(--warning)', label: 'Needs you' },
   done: { color: 'var(--success)', label: 'Done' },
   failed: { color: 'var(--error)', label: 'Failed' },
   aborted: { color: 'var(--warning)', label: 'Aborted' },
@@ -21,14 +22,20 @@ const STATUS_CONFIG: Record<BackgroundJobStatusWire, { color: string; label: str
   expired: { color: 'var(--text-tertiary)', label: 'Expired' },
 };
 
-// Only queued/running jobs are cancelable; every other state is terminal.
+// Only non-terminal jobs are cancelable — including `blocked`, which is a run
+// parked on a human answer, not a finished one.
 const CANCELABLE: ReadonlySet<BackgroundJobStatusWire> = new Set<BackgroundJobStatusWire>([
   'queued',
   'running',
+  'blocked',
 ]);
+// ACTIVE is "non-terminal" — it drives the live dot and sorts live rows first.
+// `blocked` belongs here: a run waiting on you is the most urgent row on the
+// page, not something to file below the finished ones.
 const ACTIVE: ReadonlySet<BackgroundJobStatusWire> = new Set<BackgroundJobStatusWire>([
   'queued',
   'running',
+  'blocked',
 ]);
 
 const mono = "'Geist Mono', monospace";

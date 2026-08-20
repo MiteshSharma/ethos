@@ -120,6 +120,8 @@ class FakeJobStore implements JobStore {
   async heartbeat(): Promise<void> {}
   async updateSpend(): Promise<void> {}
   async requestCancel(): Promise<void> {}
+  async markBlocked(): Promise<void> {}
+  async resumeFromBlocked(): Promise<void> {}
   async finish(
     id: string,
     terminal: 'done' | 'failed' | 'aborted',

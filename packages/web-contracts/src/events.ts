@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { ApprovalRequestSchema, MessageRoleSchema } from './schemas';
+import { ApprovalRequestSchema, BackgroundJobStatusSchema, MessageRoleSchema } from './schemas';
 
 // SSE event union. The server writes these as `data: <JSON>` lines on the
 // `/sse/sessions/:id` endpoint, with monotonic `id:` lines so the browser
@@ -136,6 +136,29 @@ export const ClarifyRequestEventSchema = z.object({
   defaultDeadlineAt: z.string().nullable(),
 });
 
+// A delegated run's coalesced liveness digest, published by the executor onto
+// the PARENT session's stream at <=1 Hz per run (pi-delegation D11/D20). It is a
+// PUSH-family event and deliberately NOT an `AgentEvent`: the run card is fed by
+// this digest alone — no second SSE connection — while the runner's full event
+// stream stays on the child session. Adding an 18th `AgentEvent` type instead
+// would void D3.
+export const RunUpdateEventSchema = z.object({
+  type: z.literal('run.update'),
+  jobId: z.string(),
+  /** Which harness is executing — resolved through the `RUNNERS` identity map (D19), never rendered raw. */
+  runner: z.string(),
+  status: BackgroundJobStatusSchema,
+  /**
+   * The card's `now` line: one line of prose, REPLACED never appended
+   * (`editing packages/core/src/auth/session-token.ts`,
+   * `paused — waiting on you`, `finished — 5 files changed`).
+   */
+  now: z.string(),
+  elapsedMs: z.number().nonnegative(),
+  spendUsd: z.number().nonnegative(),
+  toolCount: z.number().int().nonnegative(),
+});
+
 export const ClarifyResolvedEventSchema = z.object({
   type: z.literal('clarify.resolved'),
   requestId: z.string(),
@@ -242,6 +265,7 @@ export const SseEventSchema = z.discriminatedUnion('type', [
   ToolApprovalRequiredEventSchema,
   ApprovalResolvedEventSchema,
   ClarifyRequestEventSchema,
+  RunUpdateEventSchema,
   ClarifyResolvedEventSchema,
   CronFiredEventSchema,
   MeshChangedEventSchema,
@@ -261,3 +285,6 @@ export type SseEventType = SseEvent['type'];
 
 /** The `clarify.request` push event — surfaced as a card in the web UI. */
 export type ClarifyRequestEvent = z.infer<typeof ClarifyRequestEventSchema>;
+
+/** The `run.update` push event — the run card's ≤1 Hz liveness digest. */
+export type RunUpdateEvent = z.infer<typeof RunUpdateEventSchema>;

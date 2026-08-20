@@ -35,6 +35,8 @@ class FakeJobStore implements JobStore {
   async requestCancel(id: string): Promise<void> {
     this.canceled.push(id);
   }
+  async markBlocked(): Promise<void> {}
+  async resumeFromBlocked(): Promise<void> {}
   async finish(): Promise<void> {}
   async listByRoot(rootSessionKey: string): Promise<BackgroundJob[]> {
     return [...this.jobs.values()]

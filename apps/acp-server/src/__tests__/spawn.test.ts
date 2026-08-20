@@ -129,6 +129,8 @@ function makeJobStore(): FakeJobStore {
     async heartbeat() {},
     async updateSpend() {},
     async requestCancel() {},
+    async markBlocked() {},
+    async resumeFromBlocked() {},
     async finish() {},
     async listByRoot() {
       return [];

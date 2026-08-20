@@ -43,7 +43,9 @@ const SCHEMA = `
     origin_thread_id   TEXT,
     remote_peer        TEXT,
     remote_job_id      TEXT,
-    runner             TEXT
+    runner             TEXT,
+    blocked_since      INTEGER,
+    blocked_request_id TEXT
   ) STRICT;
 
   CREATE TABLE IF NOT EXISTS job_events (
@@ -70,11 +72,11 @@ const SCHEMA = `
 const DELIVERY_INDEX =
   'CREATE INDEX IF NOT EXISTS jobs_undelivered ON jobs(origin_bot_key, status, delivered_at)';
 
-const JOB_STORE_SCHEMA_VERSION = 4;
+const JOB_STORE_SCHEMA_VERSION = 5;
 
 /**
  * Forward-only DDL steps. Each brings a `(N-1)` database to `N`; the baseline
- * above already describes v3, so a FRESH database never runs one. The
+ * above already describes v5, so a FRESH database never runs one. The
  * `table_info` guards keep each ALTER idempotent even if a database was
  * hand-repaired to the newer shape without its `user_version` being bumped.
  */
@@ -91,6 +93,13 @@ const JOB_STORE_MIGRATIONS: Record<number, (db: Database.Database) => void> = {
   // v3 -> v4: which runner executed the row. NULL on every pre-existing row,
   // which reads as "the default runner" — the only one that existed then.
   4: (db) => addColumnIfMissing(db, 'runner', 'TEXT'),
+  // v4 -> v5: the `blocked` state's two fields. Same ALTER shape as v2/v3 —
+  // existing rows get NULLs, which is the honest state for every job that
+  // finished before a run could park on a human answer.
+  5: (db) => {
+    addColumnIfMissing(db, 'blocked_since', 'INTEGER');
+    addColumnIfMissing(db, 'blocked_request_id', 'TEXT');
+  },
 };
 
 function addColumnIfMissing(db: Database.Database, column: string, type: string): void {
@@ -132,6 +141,8 @@ interface JobRow {
   remote_peer: string | null;
   remote_job_id: string | null;
   runner: string | null;
+  blocked_since: number | null;
+  blocked_request_id: string | null;
 }
 
 interface JobEventRow {
@@ -176,6 +187,8 @@ function rowToJob(r: JobRow): BackgroundJob {
     remotePeer: r.remote_peer ?? undefined,
     remoteJobId: r.remote_job_id ?? undefined,
     runner: r.runner ?? undefined,
+    blockedSince: r.blocked_since ?? undefined,
+    blockedRequestId: r.blocked_request_id ?? undefined,
   };
 }
 
@@ -190,7 +203,9 @@ function rowToEvent(r: JobEventRow): BackgroundJobEvent {
   };
 }
 
-const ACTIVE_STATUSES = "('queued','running')";
+// `blocked` is ACTIVE, not terminal: a run parked on a human answer still owns
+// its concurrency slot, so the per-root / per-personality caps must see it.
+const ACTIVE_STATUSES = "('queued','running','blocked')";
 const TERMINAL_STATUSES = "('done','failed','aborted','stale','expired')";
 
 // ---------------------------------------------------------------------------
@@ -331,6 +346,38 @@ export class SQLiteJobStore implements JobStore {
     tx();
   }
 
+  async markBlocked(id: string, requestId: string): Promise<void> {
+    const tx = this.db.transaction(() => {
+      const result = this.db
+        .prepare(
+          `UPDATE jobs SET status = 'blocked', blocked_since = ?, blocked_request_id = ?
+           WHERE id = ? AND status = 'running'`,
+        )
+        .run(Date.now(), requestId, id);
+      // Guarded, not asserted: the row may have been cancelled or finished
+      // between the question being asked and this write. No transition, no event.
+      if (result.changes === 1) this.appendEventSync(id, 'blocked', { requestId });
+    });
+    tx();
+  }
+
+  async resumeFromBlocked(id: string): Promise<void> {
+    const tx = this.db.transaction(() => {
+      // heartbeat_at is bumped here, not left as it was: a run parked longer than
+      // staleMs would otherwise be swept stale in the gap between resuming and
+      // the executor's next beat.
+      const result = this.db
+        .prepare(
+          `UPDATE jobs SET status = 'running', blocked_since = NULL,
+             blocked_request_id = NULL, heartbeat_at = ?
+           WHERE id = ? AND status = 'blocked'`,
+        )
+        .run(Date.now(), id);
+      if (result.changes === 1) this.appendEventSync(id, 'resumed', {});
+    });
+    tx();
+  }
+
   async finish(
     id: string,
     terminal: 'done' | 'failed' | 'aborted',
@@ -341,12 +388,20 @@ export class SQLiteJobStore implements JobStore {
         | { status: string }
         | undefined;
       if (!row) throw new Error(`finish: job ${id} not found`);
-      if (row.status !== 'running' && row.status !== 'stale') {
-        throw new Error(`finish: job ${id} not in running/stale (status=${row.status})`);
+      // `blocked` is a legal SOURCE (a parked run is still cancellable — §4.1's
+      // blocked card offers Cancel) but never a terminal ARGUMENT.
+      if (row.status !== 'running' && row.status !== 'stale' && row.status !== 'blocked') {
+        throw new Error(`finish: job ${id} not in running/stale/blocked (status=${row.status})`);
       }
 
+      // The blocked fields are cleared with the transition: a terminal row is not
+      // parked on anything. The audit trail keeps the `blocked` event.
       this.db
-        .prepare('UPDATE jobs SET status = ?, summary = ?, error = ?, finished_at = ? WHERE id = ?')
+        .prepare(
+          `UPDATE jobs SET status = ?, summary = ?, error = ?, finished_at = ?,
+             blocked_since = NULL, blocked_request_id = NULL
+           WHERE id = ?`,
+        )
         .run(terminal, fields.summary ?? null, fields.error ?? null, Date.now(), id);
 
       // A stale row that turns out alive recovers: record it before the terminal
@@ -392,6 +447,10 @@ export class SQLiteJobStore implements JobStore {
   async reclaimStale(staleMs: number): Promise<BackgroundJob[]> {
     const threshold = Date.now() - staleMs;
     const ids = this.db.transaction((): string[] => {
+      // `status = 'running'` is what keeps `blocked` out of the sweep, and that
+      // is deliberate, not incidental: the executor stops beating for a parked
+      // run, so a blocked row's heartbeat ages past the threshold by design. A
+      // question waiting on a person must never be filed as a dead host.
       const rows = this.db
         .prepare(
           `SELECT id FROM jobs

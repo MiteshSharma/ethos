@@ -149,6 +149,12 @@ export class BackgroundExecutor {
   private readonly activeControllers = new Map<string, AbortController>();
   /** job.id -> the in-flight run promise (resolves after its finish is written). */
   private readonly activeRuns = new Map<string, Promise<void>>();
+  /**
+   * job.id -> the requestId the run is parked on. Membership is the heartbeat
+   * pause: while a job is in here its beat is skipped, so `reclaimStale` (which
+   * only sweeps `running`) cannot mistake a parked question for a dead host.
+   */
+  private readonly blockedJobs = new Map<string, string>();
 
   private started = false;
   private shuttingDown = false;
@@ -190,6 +196,30 @@ export class BackgroundExecutor {
   /** Number of jobs currently running in the pool. */
   activeCount(): number {
     return this.activeControllers.size;
+  }
+
+  /**
+   * Park a run on a human answer: `running` -> `blocked`, and pause its
+   * heartbeat. THE SEAM for whatever asks the question — a runner's gate
+   * escalating through the clarify bridge, or a child turn's own `clarify` call.
+   * The executor deliberately does not know which; it only owns the state.
+   *
+   * Cancellation is NOT paused with the beat: the blocked card offers Cancel, so
+   * the timer keeps observing `cancelRequested` and can still abort the run.
+   *
+   * Ignored for a job this executor is not running — another process owns that
+   * row's beat, and tracking it here would leak a pause that nothing clears.
+   */
+  async markJobBlocked(jobId: string, requestId: string): Promise<void> {
+    if (!this.activeControllers.has(jobId)) return;
+    this.blockedJobs.set(jobId, requestId);
+    await this.store.markBlocked(jobId, requestId);
+  }
+
+  /** The counterpart: `blocked` -> `running`, and the heartbeat resumes. */
+  async resumeJob(jobId: string): Promise<void> {
+    if (!this.blockedJobs.delete(jobId)) return;
+    await this.store.resumeFromBlocked(jobId);
   }
 
   /**
@@ -350,6 +380,9 @@ export class BackgroundExecutor {
     const run = this.runOne(job, controller).finally(() => {
       this.activeControllers.delete(job.id);
       this.activeRuns.delete(job.id);
+      // A run that ended while parked (cancelled from the blocked card) must not
+      // leave its pause behind.
+      this.blockedJobs.delete(job.id);
       // A slot freed — pull the next queued row (unless we're draining).
       if (!this.shuttingDown) void this.claimLoop();
     });
@@ -399,7 +432,10 @@ export class BackgroundExecutor {
       heartbeatTimer = setInterval(() => {
         void (async () => {
           try {
-            await this.store.heartbeat(job.id);
+            // Paused while the run is parked on a human answer — see
+            // markJobBlocked. The cancel observation below keeps running, so a
+            // blocked run stays cancellable.
+            if (!this.blockedJobs.has(job.id)) await this.store.heartbeat(job.id);
             const fresh = await this.store.get(job.id);
             if (fresh?.cancelRequested) {
               cancelled = true;

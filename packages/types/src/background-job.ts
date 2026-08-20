@@ -15,11 +15,40 @@ import type { SteerSink } from './steer';
 
 // ---------------------------------------------------------------------------
 // Background job status
+//
+// Run lifecycle (pi-delegation §13.2). If a later change alters a transition,
+// this diagram moves in the same commit.
+//
+//    delegate_task(background: true)
+//             │
+//             ▼
+//          QUEUED ──executor claims──►  RUNNING  ◄──────────────┐
+//             │                          │ │ │ │                │
+//             │                          │ │ │ └── elicitation ─┴─► BLOCKED
+//             │                          │ │ │                        │
+//             │                          │ │ │  ◄─── answer ──────────┘
+//             │                          │ │ │
+//             │                          │ │ └── heartbeat lost ──► STALE
+//             │                          │ │                          │
+//             │                          │ │        Resume (explicit, human) ─┐
+//             │                          │ │                          ▲       │
+//             │                          │ │        NO AUTO-RESUME ───┘       │
+//             │                          │ │                                  ▼
+//             │                          │ ├── cancelRequested ──► ABORTED   (re-queued)
+//             │                          │ ├── spend > cap ──────► ABORTED
+//             │                          │ ├── error ────────────► FAILED
+//             │                          │ └── task.done ────────► DONE
+//             └── never claimed ────────────────────────────────► EXPIRED
+//
+// `blocked` is a run parked on a HUMAN answer — non-terminal, still occupying a
+// concurrency slot, and deliberately invisible to the heartbeat-staleness sweep:
+// a question waiting on a person is not a dead host.
 // ---------------------------------------------------------------------------
 
 export type BackgroundJobStatus =
   | 'queued'
   | 'running'
+  | 'blocked'
   | 'done'
   | 'failed'
   | 'aborted'
@@ -47,6 +76,14 @@ export interface BackgroundJob {
   maxCostUsd?: number; // per-job cap; executor aborts on breach
   cancelRequested?: boolean; // `cancel_requested` INTEGER column — ANY process may set it
   heartbeatAt?: number; // epoch ms, bumped by the executor on a ~30s timer per active job
+  /** Epoch ms the run parked on a human answer. Set with `blocked`, cleared on resume. */
+  blockedSince?: number;
+  /**
+   * The pending question this run is parked on — the same id space as
+   * `PendingClarify.requestId` (see `./clarify`), so a surface can join the
+   * parked run to the question that parked it.
+   */
+  blockedRequestId?: string;
   createdAt: number;
   startedAt?: number;
   finishedAt?: number;
@@ -98,6 +135,10 @@ export type BackgroundJobEventType =
    * row per delta) — see the executor's text-flush policy.
    */
   | 'text'
+  /** The run parked on a human answer. Payload carries the `requestId`. */
+  | 'blocked'
+  /** The human answered (or the question was withdrawn) — the run is running again. */
+  | 'resumed'
   | 'done'
   | 'failed'
   | 'aborted'
@@ -150,7 +191,26 @@ export interface JobStore {
   updateSpend(id: string, spendUsd: number): Promise<void>;
   /** Set cancel_requested = 1. Any process may call. */
   requestCancel(id: string): Promise<void>;
-  /** Terminal transition. Valid from running OR stale (a stale row that turns out alive recovers). */
+  /**
+   * Park a RUNNING job on a human answer: status -> `blocked`, stamping
+   * `blockedSince` and `blockedRequestId`. No-op when the row is not `running`
+   * (it was cancelled or finished out from under the caller) — same fail-quiet
+   * shape as `heartbeat`.
+   */
+  markBlocked(id: string, requestId: string): Promise<void>;
+  /**
+   * Un-park a BLOCKED job: status -> `running`, clearing the blocked fields and
+   * bumping `heartbeatAt` to now. The bump is load-bearing — a run parked longer
+   * than `staleMs` would otherwise be swept stale in the window between resuming
+   * and the executor's next beat. No-op when the row is not `blocked`.
+   */
+  resumeFromBlocked(id: string): Promise<void>;
+  /**
+   * Terminal transition. Valid from running, stale (a stale row that turns out
+   * alive recovers) OR blocked (a parked run is still cancellable, and §4.1's
+   * blocked card offers Cancel). `blocked` is never a terminal ARGUMENT — it is
+   * a distinct transition, reached only through `markBlocked`.
+   */
   finish(
     id: string,
     terminal: 'done' | 'failed' | 'aborted',
@@ -158,11 +218,15 @@ export interface JobStore {
   ): Promise<void>;
   /** All jobs whose rootSessionKey === the given key, newest first. */
   listByRoot(rootSessionKey: string): Promise<BackgroundJob[]>;
-  /** Count non-terminal (queued|running) jobs for a root. */
+  /** Count non-terminal (queued|running|blocked) jobs for a root. A parked run still holds its slot. */
   countActiveByRoot(rootSessionKey: string): Promise<number>;
-  /** Count non-terminal (queued|running) jobs for a personality. */
+  /** Count non-terminal (queued|running|blocked) jobs for a personality. A parked run still holds its slot. */
   countActiveByPersonality(personalityId: string): Promise<number>;
-  /** running rows whose heartbeat is older than staleMs -> stale. Returns the rows transitioned. */
+  /**
+   * running rows whose heartbeat is older than staleMs -> stale. Returns the rows
+   * transitioned. `blocked` rows are IGNORED — a parked human question must never
+   * look like a dead host.
+   */
   reclaimStale(staleMs: number): Promise<BackgroundJob[]>;
   /** queued rows older than ttlMs -> expired. Returns the rows transitioned. */
   expireQueued(ttlMs: number): Promise<BackgroundJob[]>;

@@ -1229,9 +1229,12 @@ export type GoalWire = z.infer<typeof GoalSchema>;
 // trail, and requests cancellation.
 // ---------------------------------------------------------------------------
 
+// `blocked` — the run is parked on a human answer. Non-terminal, still holding
+// its concurrency slot, and never swept stale. Mirrors `BackgroundJobStatus`.
 export const BackgroundJobStatusSchema = z.enum([
   'queued',
   'running',
+  'blocked',
   'done',
   'failed',
   'aborted',
@@ -1250,6 +1253,8 @@ export const BackgroundJobEventTypeSchema = z.enum([
   'tool_headline',
   'tool_end',
   'text',
+  'blocked',
+  'resumed',
   'done',
   'failed',
   'aborted',
