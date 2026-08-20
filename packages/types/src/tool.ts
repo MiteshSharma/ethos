@@ -327,6 +327,8 @@ export interface ToolExecuteRequest {
   teamId?: string;
   agentId?: string;
   rootSessionKey?: string;
+  /** D22 (pi-delegation plan) — mirrors `ToolContext.jobId`; see its doc there. */
+  jobId?: string;
   origin?: string;
   memoryScopeId?: string;
   userScopeId?: string;

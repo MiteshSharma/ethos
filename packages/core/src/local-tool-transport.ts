@@ -53,6 +53,7 @@ export class LocalToolTransport implements ToolTransport {
       personalityId: request.personalityId,
       teamId: request.teamId,
       agentId: request.agentId,
+      jobId: request.jobId,
       origin: request.origin,
       memoryScopeId: request.memoryScopeId,
       userScopeId: request.userScopeId,

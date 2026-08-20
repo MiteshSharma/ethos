@@ -1095,24 +1095,36 @@ export function createWebApi(opts: CreateWebApiOptions): CreateWebApiResult {
   const clarifyBridge = agentLoop.clarifyBridge;
   if (clarifyBridge) {
     clarifyBridge.registerPresenter('web', async (req) => {
-      const sessionId =
-        req.jobId !== undefined
-          ? await resolveJobSessionId(req.jobId, opts.jobStore, sessionIdsByKey)
-          : req.sessionId;
-      // No open session for this key — a CLI/gateway-spawned clarify, or no
-      // browser tab open for it. Nothing to present here.
-      if (!sessionId) return;
-      chatService.broadcast(sessionId, {
-        type: 'clarify.request',
-        requestId: req.requestId,
-        question: req.question,
-        ...(req.options ? { options: req.options } : {}),
-        ...(req.default !== undefined ? { default: req.default } : {}),
-        // Present when a delegated run asked (D22) — the browser draws the
-        // question inside that run's card instead of floating it.
-        ...(req.jobId !== undefined ? { jobId: req.jobId } : {}),
-        defaultDeadlineAt: req.defaultDeadlineAt,
-      });
+      // ClarifyBridge.presentNow() awaits this presenter inside a bare
+      // `.catch(() => {})` (see clarify-bridge.ts) — a throw here is
+      // otherwise invisible anywhere in the process. Log before rethrowing
+      // so a routing/lookup failure shows up in server output instead of
+      // just silently never presenting the card.
+      try {
+        const sessionId =
+          req.jobId !== undefined
+            ? await resolveJobSessionId(req.jobId, opts.jobStore, sessionIdsByKey)
+            : req.sessionId;
+        // No open session for this key — a CLI/gateway-spawned clarify, or no
+        // browser tab open for it. Nothing to present here.
+        if (!sessionId) return;
+        chatService.broadcast(sessionId, {
+          type: 'clarify.request',
+          requestId: req.requestId,
+          question: req.question,
+          ...(req.options ? { options: req.options } : {}),
+          ...(req.default !== undefined ? { default: req.default } : {}),
+          // Present when a delegated run asked (D22) — the browser draws the
+          // question inside that run's card instead of floating it.
+          ...(req.jobId !== undefined ? { jobId: req.jobId } : {}),
+          defaultDeadlineAt: req.defaultDeadlineAt,
+        });
+      } catch (err) {
+        console.warn(
+          `[chat] clarify presenter failed for request ${req.requestId}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+        throw err;
+      }
     });
     clarifyBridge.onResolved((row, response) => {
       void (async () => {

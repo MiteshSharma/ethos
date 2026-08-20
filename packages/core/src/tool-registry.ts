@@ -451,6 +451,7 @@ export class DefaultToolRegistry implements ToolRegistry {
           personalityId: ctx.personalityId,
           teamId: ctx.teamId,
           agentId: ctx.agentId,
+          jobId: ctx.jobId,
           origin: ctx.origin,
           memoryScopeId: ctx.memoryScopeId,
           userScopeId: ctx.userScopeId,
