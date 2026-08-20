@@ -1,3 +1,4 @@
+import type { ClarifyRequestEvent } from '@ethosagent/web-contracts';
 import { useCallback, useEffect, useReducer, useRef, useState } from 'react';
 import { type AttachmentPreview, toMessageAttachment } from '../lib/attachments';
 import {
@@ -139,6 +140,32 @@ export async function loadActiveRuns(
     }));
 }
 
+/**
+ * The questions this session's runs are parked on, read from the durable
+ * clarify rows.
+ *
+ * `loadActiveRuns`'s sibling, and the same gap: the `clarify.request` push has
+ * no replay either, so the run card a mid-run mount just restored would show a
+ * run "waiting on you" with nothing to answer. `ClarifyBridge.listPersisted`
+ * has always been able to answer this — until now nothing exposed it to the
+ * browser.
+ *
+ * Rows come back shaped as the event the live stream would have delivered, so
+ * they fold into the one queue both paths share.
+ */
+export async function loadParkedQuestions(rootSessionKey: string): Promise<ClarifyRequestEvent[]> {
+  const rows = await rpc.clarify.listPending({ rootSessionKey });
+  return rows.map((row) => ({
+    type: 'clarify.request' as const,
+    requestId: row.requestId,
+    question: row.question,
+    ...(row.options ? { options: row.options } : {}),
+    ...(row.default !== undefined ? { default: row.default } : {}),
+    jobId: row.jobId,
+    defaultDeadlineAt: row.defaultDeadlineAt,
+  }));
+}
+
 export function useChat(opts: UseChatOptions): UseChatResult {
   const [state, dispatch] = useReducer(reducer, initialChatState);
   const [currentSessionId, setCurrentSessionId] = useState<string | null>(
@@ -151,11 +178,12 @@ export function useChat(opts: UseChatOptions): UseChatResult {
   // the canonical message list — useState is the right tool here.
   const historyLoadedFor = useRef<string | null>(null);
 
-  // 0b. Rediscover runs that were already going when this page connected.
+  // 0b. Rediscover runs that were already going when this page connected, and
+  //     the questions any of them are parked on.
   //     A restore that fails leaves the transcript exactly as it was — the
   //     drawer and the status pill still carry the run, and a card that never
   //     appears is better than an error banner over a working conversation.
-  const restoreActiveRuns = useCallback(
+  const restoreRunState = useCallback(
     async (rootSessionKey: string, cancelled: () => boolean): Promise<void> => {
       try {
         const runs = await loadActiveRuns(rootSessionKey);
@@ -164,6 +192,12 @@ export function useChat(opts: UseChatOptions): UseChatResult {
           kind: 'action',
           action: { type: 'runs-restored', runs, timestamp: Date.now() },
         });
+        // Chained behind the runs, and only when there ARE runs: the questions
+        // are scoped to this session's live jobs, so with no run restored there
+        // is nothing to ask about and no reason to spend the round trip.
+        const pending = await loadParkedQuestions(rootSessionKey);
+        if (cancelled() || pending.length === 0) return;
+        dispatch({ kind: 'action', action: { type: 'clarify-restored', pending } });
       } catch {
         // best-effort
       }
@@ -192,7 +226,7 @@ export function useChat(opts: UseChatOptions): UseChatResult {
         // one reason: `history-loaded` REPLACES `state.messages`, so a restore
         // that landed first would have its anchors thrown away. It also needs
         // the session's key, which this response already carries.
-        void restoreActiveRuns(res.session.key, () => cancelled);
+        void restoreRunState(res.session.key, () => cancelled);
       })
       .catch((err: unknown) => {
         if (cancelled) return;
@@ -214,7 +248,7 @@ export function useChat(opts: UseChatOptions): UseChatResult {
     return () => {
       cancelled = true;
     };
-  }, [currentSessionId, opts.onSessionNotFound, restoreActiveRuns]);
+  }, [currentSessionId, opts.onSessionNotFound, restoreRunState]);
 
   // 2. Subscribe to SSE for the current session. The wrapper handles
   //    reconnect via Last-Event-ID; we just dispatch every event into

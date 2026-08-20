@@ -15,6 +15,7 @@ import {
   type ClarifyQueueState,
   emptyClarifyQueue,
   noteAnswer,
+  seedClarify,
 } from './clarify-queue';
 import { applyRunEvent, emptyRunsState, type RunsState, seedRun } from './pi-run-reducer';
 
@@ -251,7 +252,18 @@ export type ChatAction =
    * for the rest of the run's life while the shell's drawer and status pill,
    * whose subscription outlives the page, stay correct.
    */
-  | { type: 'runs-restored'; runs: RestoredRun[]; timestamp: number };
+  | { type: 'runs-restored'; runs: RestoredRun[]; timestamp: number }
+  /**
+   * Questions this session's restored runs are parked on, read from the durable
+   * clarify rows (`clarify.listPending`) rather than from the stream.
+   *
+   * The sibling of `runs-restored`, and needed for the same reason: the
+   * `clarify.request` push is live-only too, so a page that mounts after a run
+   * parked draws a card that says "waiting on you" above an empty space where
+   * the question and its Allow/Deny buttons should be — the run is visibly
+   * blocked and there is no way to unblock it.
+   */
+  | { type: 'clarify-restored'; pending: ClarifyRequestEvent[] };
 
 /** One durable job row, mapped onto what a run anchor + card need. */
 export interface RestoredRun {
@@ -670,6 +682,16 @@ export function applyAction(state: ChatState, action: ChatAction): ChatState {
       // honest placement for a rediscovered run is the end of what is on
       // screen, next to the hand-back its completion will write there anyway.
       return { ...state, runs, ...placeRestoredAnchors(state, anchors, action.timestamp) };
+    }
+
+    case 'clarify-restored': {
+      // No transcript work to do — a question is drawn INSIDE its run's card
+      // (§4.5), and `runs-restored` has already placed that card. Seeding is
+      // non-destructive: a question the live stream already delivered, or one
+      // this tab has answered, is left exactly as it is.
+      const queue = seedClarify(state.clarifyQueue, action.pending);
+      if (queue === state.clarifyQueue) return state;
+      return { ...state, clarifyQueue: queue };
     }
 
     case 'undo-turns': {

@@ -22,6 +22,7 @@ import type { AssistantTurn, ChatState } from '../../lib/chat-reducer';
 
 const sessionsGet = vi.fn();
 const tasksList = vi.fn();
+const clarifyListPending = vi.fn();
 /** Push an event to whatever `useChat` subscribed with. */
 let emit: ((event: SseEvent) => void) | null = null;
 
@@ -29,6 +30,10 @@ vi.mock('../../rpc', () => ({
   rpc: {
     sessions: { get: (...args: unknown[]) => sessionsGet(...args) },
     tasks: { list: (...args: unknown[]) => tasksList(...args) },
+    // Chained behind the run restore. Its own guard is
+    // `useChat-clarify-restore.test.ts`; here it just has to exist so these
+    // cases exercise the run path rather than a rejected follow-up read.
+    clarify: { listPending: (...args: unknown[]) => clarifyListPending(...args) },
   },
 }));
 
@@ -105,6 +110,8 @@ beforeEach(() => {
   emit = null;
   sessionsGet.mockReset();
   tasksList.mockReset();
+  clarifyListPending.mockReset();
+  clarifyListPending.mockResolvedValue([]);
   container = document.createElement('div');
   document.body.appendChild(container);
   root = createRoot(container);

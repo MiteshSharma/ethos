@@ -749,6 +749,12 @@ const tools = {
 // Clarify — resolve a pending `clarify` request (the agent asked the user a
 // question mid-turn). The request side flows out over SSE; this is the answer
 // path back, mirroring the tool-approval transport.
+//
+// `listPending` is the catch-up read for the request side, the same role
+// `tasks.list` plays for the run digest: the `clarify.request` push is live
+// only, so a page that mounts after a delegated run parked on a question has
+// no way to learn the question exists. `ClarifyBridge.listPersisted` was
+// built for exactly this and had no route to the browser until now.
 // ---------------------------------------------------------------------------
 
 const ClarifyRespondInput = z.object({
@@ -760,9 +766,31 @@ const ClarifyRespondInput = z.object({
 });
 const ClarifyRespondOutput = z.object({ ok: z.literal(true) });
 
+/** Scoped by root session, never by clarify `sessionId`: a delegated run asks
+ *  on its CHILD session key (`clarify-escalator.ts`), which no browser is ever
+ *  subscribed to. The lane a surface can actually join on is the job (G1). */
+const ClarifyListPendingInput = z.object({ rootSessionKey: z.string().min(1) });
+/** One open question, shaped so the client can fold it straight into the same
+ *  queue the `clarify.request` event feeds. `jobId` is required — every row
+ *  here belongs to one of this session's runs by construction. */
+const ClarifyListPendingOutput = z.array(
+  z.object({
+    requestId: z.string(),
+    jobId: z.string(),
+    question: z.string(),
+    options: z.array(z.string()).optional(),
+    default: z.string().optional(),
+    /** Never null here: only PRESENTED rows are returned, and presentation is
+     *  what starts the clock (D2). A row still queued behind another question
+     *  in its lane has been shown to nobody and is not offered for answering. */
+    defaultDeadlineAt: z.string(),
+  }),
+);
+
 /** @experimental */
 const clarify = {
   respond: oc.input(ClarifyRespondInput).output(ClarifyRespondOutput),
+  listPending: oc.input(ClarifyListPendingInput).output(ClarifyListPendingOutput),
 };
 
 // ---------------------------------------------------------------------------

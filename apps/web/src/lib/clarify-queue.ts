@@ -75,6 +75,33 @@ export function applyClarifyEvent(
 }
 
 /**
+ * Seed questions this surface never received a `clarify.request` for.
+ *
+ * The request push is a LIVE feed with no replay, exactly like the run digest:
+ * a page that mounts after a delegated run parked on a question has missed the
+ * only event that would ever have carried it. `clarify.listPending` is the
+ * catch-up read, and this is where its rows land.
+ *
+ * Non-destructive, the same discipline `seedRun` follows: a question already
+ * pending here has the live event behind it, and one already in `resolved` was
+ * answered on this tab (or collapsed by `clarify.resolved`) — a seed must never
+ * reopen it. Returns `prev` by identity when there is nothing new, so the
+ * caller can skip the state update entirely.
+ */
+export function seedClarify(
+  prev: ClarifyQueueState,
+  rows: ClarifyRequestEvent[],
+): ClarifyQueueState {
+  const fresh = rows.filter(
+    (row) =>
+      !prev.pending.some((c) => c.requestId === row.requestId) &&
+      !prev.resolved.some((r) => r.requestId === row.requestId),
+  );
+  if (fresh.length === 0) return prev;
+  return { ...prev, pending: [...prev.pending, ...fresh] };
+}
+
+/**
  * Record the answer this tab submitted, before the round trip. Without it the
  * resolved card can say a question was answered but not what the answer was —
  * `clarify.resolved` does not carry it.

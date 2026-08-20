@@ -1,4 +1,4 @@
-import type { SseEvent } from '@ethosagent/web-contracts';
+import type { ClarifyRequestEvent, SseEvent } from '@ethosagent/web-contracts';
 import { describe, expect, it } from 'vitest';
 import {
   applyClarifyEvent,
@@ -7,6 +7,7 @@ import {
   questionForRun,
   RESOLVED_CAP,
   resolvedForRun,
+  seedClarify,
 } from '../clarify-queue';
 
 // The question queue as a pure reducer (pi-delegation D9). A clarify occupies
@@ -100,5 +101,44 @@ describe('noteAnswer', () => {
 
   it('ignores an answer for a question it never saw', () => {
     expect(noteAnswer(emptyClarifyQueue, 'nope', 'x', 1)).toBe(emptyClarifyQueue);
+  });
+});
+
+describe('seedClarify', () => {
+  /** One `clarify.listPending` row, in the event shape the queue takes. */
+  function restored(requestId: string, jobId: string): ClarifyRequestEvent {
+    return {
+      type: 'clarify.request',
+      requestId,
+      question: `pick one (${requestId})`,
+      options: ['a', 'b'],
+      jobId,
+      defaultDeadlineAt: '2026-08-20T12:00:00.000Z',
+    };
+  }
+
+  it('opens a question the stream never delivered', () => {
+    const s = seedClarify(emptyClarifyQueue, [restored('r1', 'job_1')]);
+    expect(questionForRun(s, 'job_1')?.requestId).toBe('r1');
+  });
+
+  it('never re-adds a question already pending', () => {
+    const live = applyClarifyEvent(emptyClarifyQueue, ask('r1', 'job_1'), 1);
+    const s = seedClarify(live, [restored('r1', 'job_1')]);
+    expect(s).toBe(live);
+    expect(s.pending).toHaveLength(1);
+  });
+
+  it('never reopens a question this tab already answered', () => {
+    let live = applyClarifyEvent(emptyClarifyQueue, ask('r1', 'job_1'), 1);
+    live = noteAnswer(live, 'r1', 'Allow', 2);
+    live = applyClarifyEvent(live, settle('r1'), 3);
+    const s = seedClarify(live, [restored('r1', 'job_1')]);
+    expect(s).toBe(live);
+    expect(questionForRun(s, 'job_1')).toBeUndefined();
+  });
+
+  it('is identity when there is nothing new', () => {
+    expect(seedClarify(emptyClarifyQueue, [])).toBe(emptyClarifyQueue);
   });
 });
