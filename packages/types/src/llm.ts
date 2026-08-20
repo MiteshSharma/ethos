@@ -27,6 +27,14 @@ export type CompletionChunk =
        * Absent when the provider exposes no such id.
        */
       providerRequestId?: string;
+      /**
+       * Why `usage.estimatedCostUsd` is what it is — `@ethosagent/pricing`'s
+       * `PricingBasis`, duplicated here as a literal union rather than
+       * imported (this package has zero deps; pricing depends on types, not
+       * the other way around). `undefined` for a provider transport that has
+       * not been updated to report it yet.
+       */
+      costBasis?: 'priced' | 'local' | 'unknown';
     }
   | { type: 'done'; finishReason: 'end_turn' | 'tool_use' | 'max_tokens' | 'stop_sequence' }
   | { type: 'warning'; message: string };

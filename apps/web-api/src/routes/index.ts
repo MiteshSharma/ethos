@@ -8,7 +8,7 @@ import { requestId } from 'hono/request-id';
 import type { ChatService } from '../features/chat/service';
 import type { SessionsService } from '../features/sessions/service';
 import { authMiddleware } from '../middleware/auth';
-import type { ApiKeyAuthStore } from '../middleware/bearer-auth';
+import { type ApiKeyAuthStore, bearerAuth } from '../middleware/bearer-auth';
 import { csrfMiddleware } from '../middleware/csrf';
 import { cookieOnlyGuard, dualAuth, resolveScope } from '../middleware/dual-auth';
 import { errorHandler } from '../middleware/error-envelope';
@@ -72,6 +72,9 @@ export interface CreateRoutesOptions {
   /** Comma-separated CORS origins or `*` for `/v1/*`. Defaults to
    *  `ETHOS_API_CORS_ORIGINS` env var when unset. */
   corsOrigins?: string;
+  /** P2-counters (D2/D16) — renders `GET /metrics` (OpenMetrics text, scope
+   *  `metrics:read`). Omitted → `/metrics` is not mounted. */
+  metricsTextFn?: () => Promise<string>;
 }
 
 export interface ServiceContainer {
@@ -337,6 +340,20 @@ export function createRoutes(opts: CreateRoutesOptions): Hono {
         ...(opts.corsOrigins ? { corsOrigins: opts.corsOrigins } : {}),
       }),
     );
+  }
+
+  // Prometheus scrape target (P2-counters, D2/D16/D17). Same bearer-auth
+  // shape as `/v1/*` above: mounted only when an api-key store is wired, so
+  // a deployment without one needs no `metrics:read` key to keep working.
+  // `metricsTextFn` is absent when boot code chose not to wire one (tests,
+  // deployments with no observability store) — `/metrics` stays unmounted
+  // rather than 500ing.
+  if (opts.apiKeys && opts.metricsTextFn) {
+    const metricsTextFn = opts.metricsTextFn;
+    app.get('/metrics', bearerAuth({ store: opts.apiKeys, scope: 'metrics:read' }), async (c) => {
+      const text = await metricsTextFn();
+      return c.body(text, 200, { 'content-type': 'text/plain; version=0.0.4' });
+    });
   }
 
   // WhatsApp QR-pairing SSE stream. Gated behind auth — the QR string is

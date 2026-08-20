@@ -241,6 +241,10 @@ export async function* streamStep(
   let llmFinishReason: 'end_turn' | 'tool_use' | 'max_tokens' | 'stop_sequence' | undefined;
   // B2 — the provider's server-assigned id for this call, when it reports one.
   let providerRequestId: string | undefined;
+  // Gap 3 — why `llmEstimatedCostUsd` is what it is, for the
+  // `ethos_llm_unpriced_calls_total` counter (P2-counters). Not reported by
+  // every transport yet, hence optional.
+  let llmCostBasis: 'priced' | 'local' | 'unknown' | undefined;
   const llmStartTs = Date.now();
 
   try {
@@ -272,6 +276,7 @@ export async function* streamStep(
       if (chunk.type === 'done') llmFinishReason = chunk.finishReason;
       if (chunk.type === 'usage') {
         if (chunk.providerRequestId) providerRequestId = chunk.providerRequestId;
+        if (chunk.costBasis) llmCostBasis = chunk.costBasis;
         llmCacheReadTokens += chunk.usage.cacheReadTokens;
         llmCacheCreationTokens += chunk.usage.cacheCreationTokens;
         llmEstimatedCostUsd += chunk.usage.estimatedCostUsd;
@@ -317,6 +322,11 @@ export async function* streamStep(
       clientRequestId: requestId,
       ...(providerRequestId ? { providerRequestId } : {}),
       ...(llmRequestTokens ? { requestTokens: llmRequestTokens } : {}),
+      // Gap 2/3 (P2-counters) — `provider` and `costBasis` on the span so
+      // Prometheus counters can be derived from spans alone, no re-derivation
+      // through @ethosagent/pricing at read time.
+      provider: deps.llm.name,
+      ...(llmCostBasis ? { costBasis: llmCostBasis } : {}),
     });
 
     if (watchdogController.signal.aborted && !ctx.abortSignal.aborted) {
@@ -341,10 +351,22 @@ export async function* streamStep(
   } catch (err) {
     disarmWatchdog();
     // B2 — a failed call is exactly the one an operator quotes in a support
-    // ticket, so the ids go on the error span too.
+    // ticket, so the ids go on the error span too. The usage/cost accumulator
+    // locals are already populated from whatever chunks arrived before the
+    // stream errored (Fix 4) — mirror the success-path attrs below so a
+    // failed call after partial streaming doesn't lose its real token/cost
+    // counts or get tagged `provider="unknown"` in the Prometheus counters.
     deps.observability?.endSpan(llmSpanId ?? '', 'error', {
+      inputTokens: llmInputTokens,
+      outputTokens: llmOutputTokens,
+      cacheReadTokens: llmCacheReadTokens,
+      cacheCreationTokens: llmCacheCreationTokens,
+      estimatedCostUsd: llmEstimatedCostUsd,
       clientRequestId: requestId,
       ...(providerRequestId ? { providerRequestId } : {}),
+      ...(llmRequestTokens ? { requestTokens: llmRequestTokens } : {}),
+      provider: deps.llm.name,
+      ...(llmCostBasis ? { costBasis: llmCostBasis } : {}),
     });
     if (watchdogController.signal.aborted && !ctx.abortSignal.aborted) {
       deps.observability?.endTrace(ctx.traceId ?? '', 'error');

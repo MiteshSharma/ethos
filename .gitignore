@@ -6,6 +6,7 @@ dist
 .env.local
 .env.*.local
 !.env.example
+deploy/grafana/metrics-token
 *.log
 .DS_Store
 coverage

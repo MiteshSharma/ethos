@@ -48,3 +48,25 @@ describe('ApiKeyScopeSchema — `chat` is mintable through both paths', () => {
     expect(ApiKeyScopeSchema.safeParse('completions').success).toBe(false);
   });
 });
+
+// D17 (analytics-observability plan, P2-counters) — `metrics:read` gates the
+// `/metrics` mount on both web-api and the gateway health server.
+describe('ApiKeyScopeSchema — `metrics:read`', () => {
+  it('accepts `metrics:read`, the scope `/metrics` asserts', () => {
+    expect(ApiKeyScopeSchema.safeParse('metrics:read').success).toBe(true);
+  });
+
+  it('round-trips a CLI-minted `metrics:read` key through ApiKeyMetadataSchema', () => {
+    const parsed = ApiKeyMetadataSchema.safeParse({
+      id: 'key_2',
+      prefix: 'sk-ethos-def',
+      name: 'prometheus',
+      scopes: ['metrics:read'],
+      allowedOrigins: [],
+      createdAt: new Date().toISOString(),
+      lastUsed: null,
+      revokedAt: null,
+    });
+    expect(parsed.success).toBe(true);
+  });
+});

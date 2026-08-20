@@ -1099,6 +1099,7 @@ export const ApiKeyScopeSchema = z.enum([
   'memory:write',
   'tools:approve',
   'events:subscribe',
+  'metrics:read',
 ]);
 export type ApiKeyScope = z.infer<typeof ApiKeyScopeSchema>;
 

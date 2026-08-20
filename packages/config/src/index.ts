@@ -852,6 +852,28 @@ export interface AwsConfig {
   secrets?: AwsSecretsConfig;
 }
 
+/**
+ * Langfuse export target (analytics-observability plan, Part E / D7).
+ * `secretKey` is a real credential and is vaulted like every other provider
+ * secret in this codebase (see `SECRET_FIELD_NAMES`); `publicKey` is not —
+ * Langfuse's own docs treat it the same as a client id.
+ */
+export interface TelemetryLangfuseExportConfig {
+  /** Default false — export is opt-in. */
+  enabled?: boolean;
+  baseUrl?: string;
+  publicKey?: string;
+  secretKey?: string;
+}
+
+export interface TelemetryExportConfig {
+  langfuse?: TelemetryLangfuseExportConfig;
+}
+
+export interface TelemetryConfig {
+  export?: TelemetryExportConfig;
+}
+
 /** Per-hook inbound webhook config (`webhooks.<hookId>.*` keys). */
 export interface WebhookHookConfig {
   personalityId: string;
@@ -1651,6 +1673,17 @@ export interface EthosConfig {
      *  defaults to the team's board path. */
     boardPath?: string;
   };
+  /**
+   * Export/observability targets (analytics-observability plan, Part E).
+   * Currently one leaf: Langfuse. Off by default.
+   *
+   * Config format:
+   *   telemetry.export.langfuse.enabled: true
+   *   telemetry.export.langfuse.baseUrl: https://cloud.langfuse.com
+   *   telemetry.export.langfuse.publicKey: pk-lf-...
+   *   telemetry.export.langfuse.secretKey: sk-lf-...
+   */
+  telemetry?: TelemetryConfig;
 }
 
 export function ethosDir(): string {
@@ -1904,6 +1937,23 @@ async function externalizeConfigSecrets(
     r.memoryCapture = {
       ...r.memoryCapture,
       apiKey: await externalizeSecret(r.memoryCapture.apiKey, ref('memoryCapture.apiKey'), secrets),
+    };
+  }
+  if (r.telemetry?.export?.langfuse?.secretKey) {
+    const lf = r.telemetry.export.langfuse;
+    r.telemetry = {
+      ...r.telemetry,
+      export: {
+        ...r.telemetry.export,
+        langfuse: {
+          ...lf,
+          secretKey: await externalizeSecret(
+            lf.secretKey,
+            ref('telemetry.export.langfuse.secretKey'),
+            secrets,
+          ),
+        },
+      },
     };
   }
   return r;
@@ -2469,6 +2519,13 @@ export async function writeConfig(
     if (config.kanbanPoll.boardPath !== undefined)
       lines.push(`kanbanPoll.boardPath: ${config.kanbanPoll.boardPath}`);
   }
+  if (config.telemetry?.export?.langfuse) {
+    const lf = config.telemetry.export.langfuse;
+    if (lf.enabled !== undefined) lines.push(`telemetry.export.langfuse.enabled: ${lf.enabled}`);
+    if (lf.baseUrl) lines.push(`telemetry.export.langfuse.baseUrl: ${lf.baseUrl}`);
+    if (lf.publicKey) lines.push(`telemetry.export.langfuse.publicKey: ${lf.publicKey}`);
+    if (lf.secretKey) lines.push(`telemetry.export.langfuse.secretKey: ${lf.secretKey}`);
+  }
   await storage.write(join(ethosDir(), 'config.yaml'), `${lines.join('\n')}\n`, { mode: 0o600 });
 }
 
@@ -2619,6 +2676,17 @@ export async function resolveConfigSecrets(
     }
     r.webhooks = hooks;
   }
+  if (r.telemetry?.export?.langfuse?.secretKey) {
+    const lf = r.telemetry.export.langfuse;
+    const secretKey = r.telemetry.export.langfuse.secretKey;
+    r.telemetry = {
+      ...r.telemetry,
+      export: {
+        ...r.telemetry.export,
+        langfuse: { ...lf, secretKey: await resolveSecretValue(secretKey, secrets) },
+      },
+    };
+  }
   if (r.memoryCapture?.apiKey) {
     r.memoryCapture = {
       ...r.memoryCapture,
@@ -2658,6 +2726,7 @@ function parseConfigYaml(src: string): EthosConfig {
   const memoryConsolidationKv: Record<string, string> = {};
   const logsRotationKv: Record<string, string> = {};
   const awsSecretsKv: Record<string, string> = {};
+  const telemetryLangfuseKv: Record<string, string> = {};
   // Indexed list shapes: telegram.bots.<n>.<field> and slack.apps.<n>.<field>,
   // plus their nested `.bind.<field>` sub-keys. Per-team config keyed by name.
   const telegramBotsKv: Record<number, Record<string, string>> = {};
@@ -3107,6 +3176,12 @@ function parseConfigYaml(src: string): EthosConfig {
       awsSecretsKv[awss[1]] = awss[2].trim().replace(/^["']|["']$/g, '');
       continue;
     }
+    // telemetry.export.langfuse.<field>: <value>
+    const tel = line.match(/^telemetry\.export\.langfuse\.(\w+):\s*(.+)$/);
+    if (tel) {
+      telemetryLangfuseKv[tel[1]] = tel[2].trim().replace(/^["']|["']$/g, '');
+      continue;
+    }
     // modelCatalog.providers.<id>.url: <value>
     const mcp = line.match(/^modelCatalog\.providers\.([^.]+)\.(\S+):\s*(.+)$/);
     if (mcp) {
@@ -3433,6 +3508,22 @@ function parseConfigYaml(src: string): EthosConfig {
         }
       : undefined;
   const awsConfig: AwsConfig | undefined = awsSecrets ? { secrets: awsSecrets } : undefined;
+  const telemetryLangfuse: TelemetryLangfuseExportConfig | undefined =
+    Object.keys(telemetryLangfuseKv).length > 0
+      ? {
+          ...(telemetryLangfuseKv.enabled === 'true'
+            ? { enabled: true }
+            : telemetryLangfuseKv.enabled === 'false'
+              ? { enabled: false }
+              : {}),
+          ...(telemetryLangfuseKv.baseUrl ? { baseUrl: telemetryLangfuseKv.baseUrl } : {}),
+          ...(telemetryLangfuseKv.publicKey ? { publicKey: telemetryLangfuseKv.publicKey } : {}),
+          ...(telemetryLangfuseKv.secretKey ? { secretKey: telemetryLangfuseKv.secretKey } : {}),
+        }
+      : undefined;
+  const telemetryConfig: TelemetryConfig | undefined = telemetryLangfuse
+    ? { export: { langfuse: telemetryLangfuse } }
+    : undefined;
   const telegramResult = buildTelegramBots(telegramBotsKv);
   const slackResult = buildSlackApps(slackAppsKv);
   const whatsappResult = buildWhatsApps(whatsappKv);
@@ -3680,6 +3771,7 @@ function parseConfigYaml(src: string): EthosConfig {
     modelCatalog,
     logs: logsRotation ? { rotation: logsRotation } : undefined,
     aws: awsConfig,
+    telemetry: telemetryConfig,
     webBaseUrl: process.env.ETHOS_PUBLIC_URL ?? kv.webBaseUrl ?? undefined,
     storage: buildStorageConfig(kv),
     pluginsAutoInstall,
@@ -3832,6 +3924,7 @@ const SECRET_FIELD_NAMES = new Set([
   'slackAppToken',
   'slackSigningSecret',
   'telegramToken',
+  'secretKey',
 ]);
 
 /**

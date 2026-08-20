@@ -31,6 +31,7 @@
     "@ethosagent/llm-codex": "workspace:*",
     "@ethosagent/logger": "workspace:*",
     "@ethosagent/memory-markdown": "workspace:*",
+    "@ethosagent/observability-sqlite": "workspace:*",
     "@ethosagent/personalities": "workspace:*",
     "@ethosagent/platform-discord": "workspace:*",
     "@ethosagent/platform-slack": "workspace:*",

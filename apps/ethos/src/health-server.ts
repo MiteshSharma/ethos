@@ -8,10 +8,23 @@ export interface HealthPayload {
 
 export type HealthPayloadFn = () => HealthPayload | Promise<HealthPayload>;
 
+/**
+ * P2-counters (D16/D17) — authorizes a `/metrics` scrape on the gateway
+ * health server. Receives the raw `Authorization` header value (or
+ * `undefined`). Omitted entirely when no api-key store is wired for this
+ * process, in which case the loopback-only bind is the sole gate — the same
+ * posture `/healthz` on this server already has.
+ */
+export type MetricsAuthCheck = (
+  authorizationHeader: string | undefined,
+) => boolean | Promise<boolean>;
+
 export function createHealthServer(
   port: number,
   host: string,
   getPayload: HealthPayloadFn,
+  getMetricsText?: () => Promise<string>,
+  checkMetricsAuth?: MetricsAuthCheck,
 ): Server {
   const server = createServer(async (req, res) => {
     if (req.method === 'GET' && (req.url === '/healthz' || req.url === '/health')) {
@@ -23,6 +36,22 @@ export function createHealthServer(
       } catch {
         res.writeHead(503, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ status: 'degraded', error: 'health check failed' }));
+      }
+      return;
+    }
+    if (req.method === 'GET' && req.url === '/metrics' && getMetricsText) {
+      if (checkMetricsAuth && !(await checkMetricsAuth(req.headers.authorization))) {
+        res.writeHead(401, { 'Content-Type': 'text/plain' });
+        res.end('Unauthorized');
+        return;
+      }
+      try {
+        const text = await getMetricsText();
+        res.writeHead(200, { 'Content-Type': 'text/plain; version=0.0.4' });
+        res.end(text);
+      } catch {
+        res.writeHead(500, { 'Content-Type': 'text/plain' });
+        res.end('metrics render failed');
       }
       return;
     }

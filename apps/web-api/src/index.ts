@@ -448,6 +448,14 @@ export interface CreateWebApiOptions {
   contextAnatomyFn?: (
     sessionId: string,
   ) => import('@ethosagent/web-contracts').ContextAnatomyWire | null;
+  /**
+   * P2-counters (D2/D16) — renders the OpenMetrics text `GET /metrics` (scope
+   * `metrics:read`) serves. Boot code builds this via
+   * `createMetricsTextProvider` over the shared `SQLiteObservabilityStore`,
+   * ONCE, so its 5s TTL cache is shared across requests. Omitted → `/metrics`
+   * is not mounted.
+   */
+  metricsTextFn?: () => Promise<string>;
 }
 
 export interface CreateWebApiResult {
@@ -1149,6 +1157,7 @@ export function createWebApi(opts: CreateWebApiOptions): CreateWebApiResult {
     ...(opts.apiKeys ? { apiKeys: opts.apiKeys } : {}),
     ...(opts.listTeams ? { listTeams: opts.listTeams } : {}),
     ...(opts.webBaseUrl ? { webBaseUrl: opts.webBaseUrl } : {}),
+    ...(opts.metricsTextFn ? { metricsTextFn: opts.metricsTextFn } : {}),
     ...(opts.idempotencyStore ? { idempotencyStore: opts.idempotencyStore } : {}),
     ...(opts.corsOrigins ? { corsOrigins: opts.corsOrigins } : {}),
     // The download route is a built-in module rather than a caller-supplied

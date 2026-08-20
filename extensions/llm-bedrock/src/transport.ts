@@ -187,6 +187,11 @@ function* handleBedrockEvent(
     if (usage) {
       const inputTokens = usage.inputTokens ?? 0;
       const outputTokens = usage.outputTokens ?? 0;
+      // Bedrock model ids carry the vendor model name
+      // (`us.anthropic.claude-sonnet-4-...`), so the shared table resolves
+      // them without Bedrock-specific rows. Previously hardcoded to 0, which
+      // reported every Bedrock turn as free.
+      const costEstimate = estimateCost(modelId, { inputTokens, outputTokens });
       yield {
         type: 'usage',
         usage: {
@@ -194,12 +199,9 @@ function* handleBedrockEvent(
           outputTokens,
           cacheReadTokens: 0,
           cacheCreationTokens: 0,
-          // Bedrock model ids carry the vendor model name
-          // (`us.anthropic.claude-sonnet-4-...`), so the shared table resolves
-          // them without Bedrock-specific rows. Previously hardcoded to 0,
-          // which reported every Bedrock turn as free.
-          estimatedCostUsd: estimateCost(modelId, { inputTokens, outputTokens }).costUsd,
+          estimatedCostUsd: costEstimate.costUsd,
         },
+        costBasis: costEstimate.basis,
       };
     }
   }

@@ -128,6 +128,12 @@ export async function* streamAnthropicMessages(
           // token fields read in `message_start`. It is populated when the
           // response connects, so it is set by the time this chunk is built.
           const providerRequestId = stream.request_id ?? undefined;
+          const costEstimate = estimateCost(params.model, {
+            inputTokens,
+            outputTokens,
+            cacheReadTokens,
+            cacheCreationTokens,
+          });
           yield {
             type: 'usage',
             usage: {
@@ -135,15 +141,11 @@ export async function* streamAnthropicMessages(
               outputTokens,
               cacheReadTokens,
               cacheCreationTokens,
-              estimatedCostUsd: estimateCost(params.model, {
-                inputTokens,
-                outputTokens,
-                cacheReadTokens,
-                cacheCreationTokens,
-              }).costUsd,
+              estimatedCostUsd: costEstimate.costUsd,
               requestTokens,
             },
             metadata: {},
+            costBasis: costEstimate.basis,
             ...(providerRequestId ? { providerRequestId } : {}),
           };
           if (event.delta.stop_reason) {

@@ -25,6 +25,7 @@ import {
 import { CronScheduler, runScriptFile } from '@ethosagent/cron';
 import { SQLiteDeliveryLedger } from '@ethosagent/delivery-ledger';
 import { LocalExecutionBackend } from '@ethosagent/execution-local';
+import { LangfusePollLoop } from '@ethosagent/export-langfuse';
 import {
   createCapturingAdapter,
   createFfmpegTranscoder,
@@ -36,6 +37,7 @@ import {
 import { registerGoalNotifications } from '@ethosagent/goal-runner';
 import { KanbanStore } from '@ethosagent/kanban-store';
 import { ConsoleLogger } from '@ethosagent/logger';
+import { createMetricsTextProvider } from '@ethosagent/observability-sqlite';
 import {
   createPersonalityRegistry,
   firstParagraph,
@@ -51,6 +53,7 @@ import {
   MicActivityDetector,
   NotificationGate,
 } from '@ethosagent/platform-callcapture';
+import { hashApiKey, SqliteApiKeyStore } from '@ethosagent/session-sqlite';
 import { bundledSkillsSource, createInjectors } from '@ethosagent/skills';
 import Database from '@ethosagent/sqlite';
 import { readRuntime, removeRuntime } from '@ethosagent/team-supervisor';
@@ -98,7 +101,7 @@ import {
   type ApprovalObservability,
   createSlackApprovalHook,
 } from '../approval-coordinator';
-import { createHealthServer } from '../health-server';
+import { createHealthServer, type MetricsAuthCheck } from '../health-server';
 import { formatQuickCommandOutput, runQuickCommand } from '../lib/quick-command-runner';
 import { resolveLiveKitMedia } from '../livekit-media';
 import { emitReady } from '../logger';
@@ -114,6 +117,7 @@ import {
   createTeamAgentLoop,
   getEthosObservability,
   getFunnelTracker,
+  getObservabilityStore,
   getSecretsResolver,
   getStorage,
 } from '../wiring';
@@ -177,6 +181,25 @@ export async function buildGatewayHeartbeat(
 
 function gatewayHealthPath(): string {
   return join(ethosDir(), 'gateway-health.json');
+}
+
+/**
+ * P2-counters (D16/D17) — gates the gateway health server's `/metrics`
+ * behind `metrics:read`, mirroring
+ * `apps/web-api/src/middleware/bearer-auth.ts`'s core check (parse
+ * `Authorization: Bearer sk-ethos-...`, `hashApiKey()` the secret,
+ * `findByHash()`, require the scope). Exported so the auth logic itself is
+ * testable without booting the full gateway.
+ */
+export function createGatewayMetricsAuthCheck(apiKeys: SqliteApiKeyStore): MetricsAuthCheck {
+  return async (authorizationHeader) => {
+    if (!authorizationHeader?.startsWith('Bearer ')) return false;
+    const secret = authorizationHeader.slice('Bearer '.length).trim();
+    if (!secret.startsWith('sk-ethos-')) return false;
+    const record = await apiKeys.findByHash(hashApiKey(secret));
+    // biome-ignore lint/complexity/useOptionalChain: optional-chaining here returns boolean | undefined, not the boolean MetricsAuthCheck requires.
+    return record !== null && record.scopes.includes('metrics:read');
+  };
 }
 
 // Best-effort dynamic import. Returns null and logs a clear warning if the
@@ -1256,6 +1279,28 @@ export async function runGatewayStart(opts: GatewayStartOptions = {}): Promise<v
   // process open; personalities that don't opt in cost one map lookup a tick.
   dreamExecutor.start();
 
+  // Langfuse export poller (Part E) — opt-in, off by default.
+  let langfusePoll: LangfusePollLoop | null = null;
+  const langfuseCfg = config.telemetry?.export?.langfuse;
+  if (langfuseCfg?.enabled) {
+    if (!langfuseCfg.baseUrl || !langfuseCfg.publicKey || !langfuseCfg.secretKey) {
+      console.error(
+        '[langfuse-export] telemetry.export.langfuse.enabled is true but baseUrl/publicKey/secretKey ' +
+          'are not all set — not starting the export poller.',
+      );
+    } else {
+      langfusePoll = new LangfusePollLoop({
+        store: getObservabilityStore(),
+        baseUrl: langfuseCfg.baseUrl,
+        publicKey: langfuseCfg.publicKey,
+        secretKey: langfuseCfg.secretKey,
+        onError: (err) => console.warn(`[langfuse-export] tick error: ${err.message}`),
+      });
+      langfusePoll.start();
+      console.log(`${c.dim}Langfuse export poller running (${langfuseCfg.baseUrl})${c.reset}`);
+    }
+  }
+
   // Load watchers.json and seed the backing `source:'system'` tick jobs.
   // Idempotent — existing jobs are re-registered so interval edits apply.
   void watcherManager.start().catch((err) => {
@@ -1418,19 +1463,45 @@ export async function runGatewayStart(opts: GatewayStartOptions = {}): Promise<v
 
   const healthPort = Number(process.env.ETHOS_GATEWAY_HEALTH_PORT) || 3002;
   const healthHost = process.env.ETHOS_SERVE_HOST ?? '127.0.0.1';
-  const healthServer = createHealthServer(healthPort, healthHost, async () => {
-    const hb = await buildGatewayHeartbeat(adapters, heartbeatStartedAt);
-    const allOk = hb.adapters.length > 0 && hb.adapters.every((a) => a.ok);
-    return {
-      status: allOk ? 'ok' : 'degraded',
-      uptime: process.uptime(),
-      pid: hb.pid,
-      startedAt: hb.startedAt,
-      updatedAt: hb.updatedAt,
-      adapters: hb.adapters,
-    };
+  // P2-counters (D2/D16) — same rendering pipeline as web-api's `/metrics`
+  // (`createMetricsTextProvider`, `renderMetricsText`), so both surfaces
+  // serve byte-identical text. `ethos_gateway_adapter_up` reads LIVE adapter
+  // health here (this process IS the source of truth for it), not the
+  // persisted heartbeat file web-api reads through a staleness gate.
+  const gatewayMetricsText = createMetricsTextProvider({
+    store: getObservabilityStore(),
+    getGatewayAdapters: async () => {
+      const hb = await buildGatewayHeartbeat(adapters, heartbeatStartedAt);
+      return hb.adapters.map((a) => ({ adapter: a.name, up: a.ok ? 1 : 0 }) as const);
+    },
   });
+  // P2-counters (D16/D17) — `/metrics` stays gated by `metrics:read` even
+  // when an operator rebinds ETHOS_SERVE_HOST off-loopback, per the
+  // monitor-with-grafana how-to. `sessions.db` is already safely shared
+  // cross-process (WAL) with `ethos serve` for other purposes, so a second
+  // `SqliteApiKeyStore` handle on it here is safe.
+  const metricsApiKeys = new SqliteApiKeyStore(join(ethosDir(), 'sessions.db'));
+  const checkMetricsAuth = createGatewayMetricsAuthCheck(metricsApiKeys);
+  const healthServer = createHealthServer(
+    healthPort,
+    healthHost,
+    async () => {
+      const hb = await buildGatewayHeartbeat(adapters, heartbeatStartedAt);
+      const allOk = hb.adapters.length > 0 && hb.adapters.every((a) => a.ok);
+      return {
+        status: allOk ? 'ok' : 'degraded',
+        uptime: process.uptime(),
+        pid: hb.pid,
+        startedAt: hb.startedAt,
+        updatedAt: hb.updatedAt,
+        adapters: hb.adapters,
+      };
+    },
+    gatewayMetricsText,
+    checkMetricsAuth,
+  );
   console.log(`  health: http://${healthHost}:${healthPort}/healthz`);
+  console.log(`  metrics: http://${healthHost}:${healthPort}/metrics`);
 
   // Inbound webhooks — opt-in: only listen when at least one hook is configured.
   const webhookPort = Number(process.env.ETHOS_WEBHOOK_PORT) || 3003;
@@ -1701,6 +1772,7 @@ export async function runGatewayStart(opts: GatewayStartOptions = {}): Promise<v
     clearInterval(retentionPruneTimer);
     scheduler.stop();
     dreamExecutor.stop();
+    langfusePoll?.stop();
     await storage.remove(gatewayHealthPath()).catch(() => {});
     // Stops the daemon + heartbeat (if this process ever won the ownership
     // claim, including via a later retry tick — see
