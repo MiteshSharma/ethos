@@ -98,6 +98,26 @@ describe('AbsolutePlayout — absolute-time pacing', () => {
     expect(ctx.starts[2]?.at).toBe(5 + LEAD);
   });
 
+  it('does not schedule a decode that resolves after stop() (barge-in)', async () => {
+    const ctx = new FakePlayoutContext();
+    const playout = new AbsolutePlayout(ctx, { leadSeconds: LEAD });
+
+    const result = playout.playEncoded(new Uint8Array([1]));
+    await vi.waitFor(() => expect(ctx.pendingDecodes).toBe(1));
+
+    // Server-signalled interruption arrives while the decode is still in
+    // flight — this is the barge-in race the generation guard exists for.
+    playout.stop();
+
+    // The stale decode finally resolves. It must not resurrect playback: the
+    // continuation should bail out instead of reaching `schedule()`.
+    ctx.resolveDecode(0, 0.4);
+    await expect(result).resolves.toBe(0);
+
+    expect(ctx.starts).toHaveLength(0);
+    expect(playout.speaking).toBe(false);
+  });
+
   it('keeps scheduling after a failed decode', async () => {
     const ctx = new FakePlayoutContext();
     ctx.decodeAudioData = () => Promise.reject(new Error('bad container'));

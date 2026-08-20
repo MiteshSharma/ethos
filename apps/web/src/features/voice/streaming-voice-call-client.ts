@@ -64,6 +64,9 @@ export function createStreamingVoiceCallClient(deps: StreamingVoiceCallDeps): Vo
   let unsubs: Array<() => void> = [];
   /** Encoded audio accumulating per segment until `segment_end` arrives. */
   const pendingEncoded = new Map<string, Uint8Array[]>();
+  /** utteranceId of the last barge-in — frames still tagged with it are stale
+   *  audio the server had already queued before the interrupt landed. */
+  let interruptedUtteranceId: string | null = null;
 
   const onCaptureEvent = (event: EndpointerEvent): void => {
     if (disposed || event.type !== 'frame') return;
@@ -101,6 +104,9 @@ export function createStreamingVoiceCallClient(deps: StreamingVoiceCallDeps): Vo
         );
         return;
       case 'audio': {
+        if (frame.utteranceId === interruptedUtteranceId) {
+          return;
+        }
         if (frame.codec === 'pcm_s16le') {
           deps.playout.playPcm16(
             pcm16FromBytes(payload),
@@ -114,6 +120,10 @@ export function createStreamingVoiceCallClient(deps: StreamingVoiceCallDeps): Vo
         return;
       }
       case 'segment_end': {
+        if (frame.utteranceId === interruptedUtteranceId) {
+          pendingEncoded.delete(frame.segmentId); // drop any partial accumulation from before the interrupt
+          return;
+        }
         const parts = pendingEncoded.get(frame.segmentId);
         pendingEncoded.delete(frame.segmentId);
         if (!parts?.length) return; // PCM: every frame was scheduled as it landed.
@@ -123,6 +133,10 @@ export function createStreamingVoiceCallClient(deps: StreamingVoiceCallDeps): Vo
         return;
       }
       case 'turn_end':
+        if (frame.interrupted) {
+          deps.playout.stop();
+          interruptedUtteranceId = frame.utteranceId;
+        }
         emit(
           frame.interrupted
             ? { type: 'interrupted', text: frame.text }
@@ -159,6 +173,7 @@ export function createStreamingVoiceCallClient(deps: StreamingVoiceCallDeps): Vo
       disposed = false;
       seq = 0;
       pendingEncoded.clear();
+      interruptedUtteranceId = null;
       await deps.transport.connect();
       deps.transport.send({
         t: 'hello',

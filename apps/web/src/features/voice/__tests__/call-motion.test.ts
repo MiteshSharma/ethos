@@ -46,7 +46,7 @@ describe('callVisualState', () => {
     expect(callVisualState('thinking')).toBe('thinking');
     expect(callVisualState('consulting')).toBe('thinking');
     expect(callVisualState('agent_speaking')).toBe('speaking');
-    expect(callVisualState('interrupted')).toBe('speaking');
+    expect(callVisualState('interrupted')).toBe('listening');
   });
 
   it('has no shape for the statuses that carry no audio', () => {
@@ -211,6 +211,19 @@ describe('callDrive — which source drives which state', () => {
   it('clamps a hot source to 1', () => {
     expect(callDrive({ ...base, state: 'listening', micLevel: 4 }).raw).toBe(1);
     expect(callDrive({ ...base, state: 'listening', micLevel: -1 }).raw).toBe(0);
+  });
+
+  it('interrupted resolves to the listening shape, so barge-in reads the mic — not the agent', () => {
+    // A barge-in mid-reply must switch the drawn shape to the live mic
+    // immediately, not hold the speaking pose while the user is talking over
+    // the agent. `callVisualState` is the single place that decides this;
+    // `callDrive` then just follows whatever state it resolved to.
+    const state = callVisualState('interrupted');
+    expect(state).toBe('listening');
+    if (!state) throw new Error('interrupted must resolve to a drawn state');
+    const drive = callDrive({ state, micLevel: 0.8, agentLevel: 0.1, tSec: 0, reduced: false });
+    expect(drive.raw).toBeCloseTo(0.8, 5);
+    expect(drive.smooth).toBe(true);
   });
 });
 

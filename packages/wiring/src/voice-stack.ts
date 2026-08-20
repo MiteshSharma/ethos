@@ -289,6 +289,27 @@ const DEFAULT_TOOL_FILLER_AFTER_MS = 600;
 const DEFAULT_TOOL_FILLER_TEXT = 'Let me check that.';
 const DEFAULT_TOOL_FILLER_TICK_MS = 4000;
 
+// The browser surface's effective `voice.bargeIn` defaults when the operator
+// has set neither `voice.bargeIn.browser` nor the legacy `display.voice_*`
+// keys. These match what Settings → Voice → Advanced already displays and
+// implies (`VOICE_TUNING` in `apps/web-api/src/services/config.service.ts`),
+// and mirror the same numbers already duplicated in
+// `DEFAULT_VOICE_TUNING` (`apps/web/src/features/voice/batch-voice-call-client.ts`)
+// for the same layering reason that comment gives: this package cannot import
+// either app. Three copies is the existing pattern, not a new one.
+//
+// `EnergyVad`'s own bare constructor defaults (0.02 threshold, 0ms
+// minSpeechMs) stay untouched — call/satellite lanes, and the tests covering
+// them, still rely on those when untuned. Only the browser surface gets this
+// floor, and only PER-FIELD, so an operator who sets just one browser knob
+// still gets sensible defaults on the other two rather than falling through
+// to EnergyVad's bare 0.02/0ms.
+const DEFAULT_BROWSER_BARGE_IN: Required<VoiceBargeInTuning> = {
+  energyThreshold: 0.06,
+  minSpeechMs: 250,
+  silenceMs: 700,
+};
+
 /**
  * Construct the voice stack from `config.voice.*`, falling back to a minimal
  * stack when only `auxiliary.asr`/`auxiliary.tts` are configured. Returns null
@@ -402,14 +423,20 @@ export async function buildVoiceStack(deps: BuildVoiceStackDeps): Promise<VoiceS
   const createSession = async (opts: CreateVoiceSessionOptions): Promise<VoiceSession> => {
     const personalityVoice = opts.personality?.voice;
     // `voice.bargeIn.<surface>` — parsed, validated, surfaced in Settings, and
-    // until now read by nothing. This is the only place it lands: an untuned
-    // surface (or a lane with no surface) contributes no keys at all, so the
-    // VAD and the endpoint detector keep their own defaults. `bargeInFallback`
+    // until now read by nothing. This is the only place it lands. `bargeInFallback`
     // is the `display.voice_*` compat read-through (Conflict 2, L1) — it only
     // ever fills in for an UNCONFIGURED surface; the operator's explicit
-    // `voice.bargeIn.<surface>` always wins.
-    const tuning: VoiceBargeInTuning =
+    // `voice.bargeIn.<surface>` always wins. For an untuned surface (or a lane
+    // with no surface) OTHER than browser, this contributes no keys at all, so
+    // the VAD and the endpoint detector keep their own bare defaults. The
+    // browser surface is the exception: it layers `DEFAULT_BROWSER_BARGE_IN`
+    // in underneath, per field, so an unconfigured browser deployment lands on
+    // the sensible numbers Settings already implies instead of EnergyVad's
+    // overly-sensitive bare defaults.
+    const rawTuning: VoiceBargeInTuning =
       (opts.surface ? voice.bargeIn?.[opts.surface] : undefined) ?? opts.bargeInFallback ?? {};
+    const tuning: VoiceBargeInTuning =
+      opts.surface === 'browser' ? { ...DEFAULT_BROWSER_BARGE_IN, ...rawTuning } : rawTuning;
     // `voice.filler.*` — a deployment-wide setting (plan/phases/voice-live-personality.md
     // §9) once the operator has an opinion: `enabled: false` turns off both
     // the filler and the tick everywhere, and an explicit `enabled: true`

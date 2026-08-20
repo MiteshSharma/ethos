@@ -292,6 +292,19 @@ describe('voiceCallReducer — barge-in', () => {
       text: 'actually never mind',
     });
   });
+
+  it('hands the floor back when a barge-in utterance is dropped, instead of sticking on interrupted', () => {
+    // A barge-in that turns out to be noise or a hallucinated transcript never
+    // gets a reply of its own — nothing else is coming to move the status off
+    // `interrupted`, so a dropped utterance has to be the thing that does.
+    const state = driveThroughClient([
+      { type: 'utterance_committed', text: 'tell me a long story' },
+      { type: 'reply_sentence', text: 'Once upon a time' },
+      { type: 'interrupted', text: 'Once upon a time [interrupted]' },
+      { type: 'utterance_dropped' },
+    ]);
+    expect(state.status).toBe('listening');
+  });
 });
 
 describe('voiceCallReducer — errors', () => {

@@ -94,6 +94,11 @@ export class VoiceSession {
    */
   private playingSegmentId: string | null = null;
 
+  /** Previous frame's VAD speech flag. Drives the rising-edge gate on
+   *  `bargeIn()` (only silence->speech should interrupt, never a continuing
+   *  speech-positive frame). */
+  private lastSpeechState = false;
+
   // Tool-call filler/tick state (see `onToolStart`/`onToolEnd`). Reset at the
   // top of every `runTurn`; a live count because tools can run in parallel
   // (`ToolRegistry.executeParallel`), not a boolean.
@@ -163,9 +168,18 @@ export class VoiceSession {
   /** Feed one inbound audio frame. Drives VAD, barge-in, and endpointing. */
   pushAudio(chunk: PcmChunk): void {
     const { speech } = this.vad.process(chunk);
+    const risingEdge = speech && !this.lastSpeechState;
+    this.lastSpeechState = speech;
 
-    // Barge-in: speech while we are replying (or audio is still queued).
-    if (speech && (this.state === 'thinking' || this.state === 'speaking' || this.playout.active)) {
+    // Barge-in: only on the RISING EDGE of speech (silence -> speech), while
+    // we are replying (or audio is still queued). Gating on `speech` alone
+    // re-fired bargeIn() on every subsequent frame of the user's continued
+    // talking — once per ~20ms frame, with nothing left to interrupt — which
+    // cancelled the agent's NEXT turn before it could say a word.
+    if (
+      risingEdge &&
+      (this.state === 'thinking' || this.state === 'speaking' || this.playout.active)
+    ) {
       this.bargeIn();
     }
 

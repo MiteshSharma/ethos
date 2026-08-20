@@ -201,8 +201,12 @@ function applyClientEvent(state: VoiceCallState, event: VoiceCallEvent): VoiceCa
       // the user rather than leaving the strip thinking about a turn that will
       // never arrive. Narrow on purpose: a call that has since moved on (the
       // reply is flowing, the link dropped, the call ended) keeps where it got
-      // to.
-      return state.status === 'thinking' ? { ...state, status: 'listening' } : state;
+      // to. `interrupted` is included alongside `thinking` for the same reason:
+      // a dropped barge-in utterance must not leave the UI stuck showing
+      // `interrupted` forever with nothing coming to resolve it.
+      return state.status === 'thinking' || state.status === 'interrupted'
+        ? { ...state, status: 'listening' }
+        : state;
 
     case 'utterance_committed': {
       // The user finished speaking; the agent is now working on the reply —

@@ -196,6 +196,60 @@ describe('streaming talk-mode — server events', () => {
     await client.disconnect();
   });
 
+  it('stops playout on an interrupted turn_end but not a completed one', async () => {
+    const { transport, playout, client } = setup();
+    await client.connect();
+    const stopsAfterConnect = playout.stops;
+
+    transport.deliver({
+      t: 'turn_end',
+      utteranceId: 'u1',
+      text: 'Clear skies.',
+      interrupted: false,
+    });
+    expect(playout.stops).toBe(stopsAfterConnect);
+
+    transport.deliver({
+      t: 'turn_end',
+      utteranceId: 'u2',
+      text: 'cut off [interrupted]',
+      interrupted: true,
+    });
+    expect(playout.stops).toBe(stopsAfterConnect + 1);
+
+    await client.disconnect();
+  });
+
+  it('drops stale audio still tagged with an interrupted utteranceId', async () => {
+    const { transport, playout, client } = setup();
+    await client.connect();
+
+    transport.deliver({
+      t: 'turn_end',
+      utteranceId: 'u1',
+      text: 'cut off [interrupted]',
+      interrupted: true,
+    });
+
+    transport.deliver(
+      { ...opusFrame('u1', 's0'), codec: 'pcm_s16le', mimeType: 'audio/pcm', sampleRate: 24_000 },
+      pcm16ToBytes(new Int16Array(2400)),
+    );
+    expect(playout.pcm).toEqual([]);
+
+    transport.deliver(opusFrame('u1', 's1'), new Uint8Array([1, 2, 3]));
+    transport.deliver({ t: 'segment_end', utteranceId: 'u1', segmentId: 's1' });
+    expect(playout.encoded).toEqual([]);
+
+    transport.deliver(
+      { ...opusFrame('u2', 's2'), codec: 'pcm_s16le', mimeType: 'audio/pcm', sampleRate: 24_000 },
+      pcm16ToBytes(new Int16Array(1200)),
+    );
+    expect(playout.pcm).toEqual([{ samples: 1200, sampleRate: 24_000 }]);
+
+    await client.disconnect();
+  });
+
   it('surfaces a server error as-is', async () => {
     const { transport, client, events } = setup();
     client.on((event) => events.push(event));

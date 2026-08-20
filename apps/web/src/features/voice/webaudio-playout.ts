@@ -113,6 +113,13 @@ export class AbsolutePlayout implements PlayoutSink {
   private live: PlayoutSource[] = [];
   /** Serializes async decodes so segments schedule in arrival order. */
   private chain: Promise<unknown> = Promise.resolve();
+  /**
+   * Bumped by `stop()`. `playEncoded`'s decode may still be in flight when a
+   * barge-in interrupts playback; the continuation captures the generation it
+   * started under and bails out if `stop()` has since moved it, so a stale
+   * decode can never resume audio after the interruption.
+   */
+  private generation = 0;
 
   constructor(ctx: PlayoutContext, opts: AbsolutePlayoutOptions = {}) {
     this.ctx = ctx;
@@ -135,9 +142,18 @@ export class AbsolutePlayout implements PlayoutSink {
     // A copy, because `decodeAudioData` detaches the ArrayBuffer it is given
     // and the caller's payload may be a view into the socket's read buffer.
     const copy = bytes.slice();
+    const generation = this.generation;
     const next = this.chain
       .then(() => this.ctx.decodeAudioData(copy.buffer as ArrayBuffer))
-      .then((buffer) => this.schedule(buffer));
+      .then((buffer) => {
+        // stop() may have fired while this decode was in flight (barge-in).
+        // Scheduling a stale buffer now would audibly resume playback moments
+        // after the interruption, so bail out silently instead.
+        if (generation !== this.generation) {
+          return this.cursor;
+        }
+        return this.schedule(buffer);
+      });
     // Keep the chain alive after a failed decode; the caller sees the rejection.
     this.chain = next.catch(() => undefined);
     return next;
@@ -196,6 +212,7 @@ export class AbsolutePlayout implements PlayoutSink {
     this.cursor = 0;
     this.level = 0;
     this.chain = Promise.resolve();
+    this.generation++;
   }
 
   private schedule(buffer: PlayoutBuffer): number {

@@ -995,6 +995,9 @@ describe('buildVoiceStack', () => {
       bargeIn?: VoiceBargeInConfig;
       bargeInFallback?: VoiceBargeInTuning;
       amplitude?: number;
+      /** Defaults to 20 (400ms) — safely over the 250ms browser default floor. */
+      speechFrames?: number;
+      sessionConfig?: VoiceSessionConfig;
     }): Promise<boolean> {
       let transcribed = false;
       const sttProviders = new DefaultSttProviderRegistry();
@@ -1028,8 +1031,9 @@ describe('buildVoiceStack', () => {
         runner,
         surface: 'browser',
         ...(opts.bargeInFallback ? { bargeInFallback: opts.bargeInFallback } : {}),
+        ...(opts.sessionConfig ? { sessionConfig: opts.sessionConfig } : {}),
       });
-      for (let i = 0; i < 10; i++) {
+      for (let i = 0; i < (opts.speechFrames ?? 20); i++) {
         session.pushAudio({
           data: new Int16Array(320).fill(opts.amplitude ?? 12_000),
           sampleRate: 16_000,
@@ -1067,8 +1071,71 @@ describe('buildVoiceStack', () => {
       ).resolves.toBe(false);
     });
 
-    it('leaves the built-in defaults alone with no bargeIn block and no fallback', async () => {
+    it('applies the browser default tuning with no bargeIn block and no fallback', async () => {
+      // Neither `voice.bargeIn.browser` nor the legacy fallback is set, so the
+      // browser lane lands on `DEFAULT_BROWSER_BARGE_IN`'s 700 ms silenceMs —
+      // still nowhere near the harness's ~0 ms of wall-clock silence, so
+      // nothing commits. (Confirms the floor applies, not that "no defaults"
+      // apply — see the positive-coverage tests below for that.)
       await expect(transcribedAfterSpeakingOnBrowser({})).resolves.toBe(false);
+    });
+
+    it('applies the browser default energyThreshold with no bargeIn block and no fallback', async () => {
+      // RMS ≈0.031 (amplitude 1_000) clears EnergyVad's bare 0.02 default but
+      // sits under the new 0.06 browser default — not speech.
+      await expect(
+        transcribedAfterSpeakingOnBrowser({
+          amplitude: 1_000,
+          sessionConfig: { endpointSilenceMs: 0 },
+        }),
+      ).resolves.toBe(false);
+      // RMS ≈0.366 (amplitude 12_000) is clearly over 0.06 — speech.
+      await expect(
+        transcribedAfterSpeakingOnBrowser({
+          amplitude: 12_000,
+          sessionConfig: { endpointSilenceMs: 0 },
+        }),
+      ).resolves.toBe(true);
+    });
+
+    it('applies the browser default minSpeechMs with no bargeIn block and no fallback', async () => {
+      // 5 frames × 20 ms = 100 ms of loud energy — under the 250 ms floor, a
+      // cough rather than a voice.
+      await expect(
+        transcribedAfterSpeakingOnBrowser({
+          speechFrames: 5,
+          sessionConfig: { endpointSilenceMs: 0 },
+        }),
+      ).resolves.toBe(false);
+      // 15 frames × 20 ms = 300 ms — safely over the 250 ms floor.
+      await expect(
+        transcribedAfterSpeakingOnBrowser({
+          speechFrames: 15,
+          sessionConfig: { endpointSilenceMs: 0 },
+        }),
+      ).resolves.toBe(true);
+    });
+
+    it('falls back to the browser defaults for fields an operator leaves unset', async () => {
+      // Only `energyThreshold` is configured (set low, so it is never the
+      // thing gating the result); `minSpeechMs` must still fall through to
+      // the 250 ms browser default rather than EnergyVad's bare 0 ms — a
+      // 100 ms burst (5 frames) stays below that floor and never registers,
+      // while a 300 ms burst (15 frames) clears it.
+      await expect(
+        transcribedAfterSpeakingOnBrowser({
+          bargeIn: { browser: { energyThreshold: 0.01 } },
+          speechFrames: 5,
+          sessionConfig: { endpointSilenceMs: 0 },
+        }),
+      ).resolves.toBe(false);
+      await expect(
+        transcribedAfterSpeakingOnBrowser({
+          bargeIn: { browser: { energyThreshold: 0.01 } },
+          speechFrames: 15,
+          sessionConfig: { endpointSilenceMs: 0 },
+        }),
+      ).resolves.toBe(true);
     });
   });
 
@@ -1107,7 +1174,10 @@ describe('buildVoiceStack', () => {
     }
 
     async function speakOneUtterance(session: VoiceSession): Promise<void> {
-      for (let i = 0; i < 5; i++) {
+      // 15 frames × 20 ms = 300 ms — safely over the browser surface's new
+      // 250 ms minSpeechMs default (call/satellite/no-surface lanes are
+      // unaffected by the raise; they still use EnergyVad's bare 0ms floor).
+      for (let i = 0; i < 15; i++) {
         session.pushAudio({ data: new Int16Array(320).fill(12_000), sampleRate: 16_000 });
       }
       for (let i = 0; i < 6; i++) {

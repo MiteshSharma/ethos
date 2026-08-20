@@ -75,12 +75,12 @@ export const REDUCED_MOTION_LEVEL = 0.35;
 export function callVisualState(status: VoiceCallStatus): CallVisualState | null {
   switch (status) {
     case 'listening':
+    case 'interrupted':
       return 'listening';
     case 'thinking':
     case 'consulting':
       return 'thinking';
     case 'agent_speaking':
-    case 'interrupted':
       return 'speaking';
     default:
       return null;

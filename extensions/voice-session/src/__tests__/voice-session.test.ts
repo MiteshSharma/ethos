@@ -120,6 +120,148 @@ describe('VoiceSession', () => {
     expect(session.lastReplyText()).toBe('Hello there. [interrupted]');
   });
 
+  // Bug: bargeIn() was gated on `speech` alone, so it re-fired on every
+  // subsequent frame of the user's continued talking (no intervening
+  // silence->speech edge) — not just the first frame that interrupted the
+  // reply. Once state flipped to 'listening', every further speech-positive
+  // frame from the SAME breath re-triggered a full barge-in cycle against
+  // whatever turn came next, cancelling it before it could say a word.
+  it('barge-in fires once per speech onset, not once per continuing speech frame', async () => {
+    const clock = makeClock();
+    const gate = deferred();
+    const runner: AgentTurnRunner = {
+      async *run(_text, opts): AsyncGenerator<AgentEvent> {
+        yield { type: 'text_delta', text: 'Hello there. ' };
+        await gate.promise;
+        if (opts?.abortSignal?.aborted) return;
+        yield { type: 'text_delta', text: 'How are you?' };
+      },
+    };
+    const session = new VoiceSession({
+      runner,
+      stt: streamingStt('hi'),
+      tts: streamingTts(),
+      vad: new FakeVad(),
+      now: clock.now,
+    });
+    const events = collect(session);
+
+    speakUtterance(session, clock);
+    await waitForEvent(events, 'reply_audio'); // first sentence played
+    await tick();
+
+    // User starts talking over the reply -> exactly one barge-in.
+    clock.advance(20);
+    session.pushAudio(speechFrame());
+
+    // Same continuous speech, several more frames, no intervening silence.
+    for (let i = 0; i < 10; i++) {
+      clock.advance(20);
+      session.pushAudio(speechFrame());
+    }
+
+    const interruptions = events.filter((e) => e.type === 'interrupted');
+    expect(interruptions).toHaveLength(1);
+    expect(interruptions[0]).toMatchObject({ text: 'Hello there. [interrupted]' });
+    expect(session.getState()).toBe('listening');
+
+    gate.resolve();
+    await session.idle();
+  });
+
+  // Once the session is already 'listening' (no reply in flight, nothing to
+  // interrupt), continued speech must not invoke bargeIn() at all — it's
+  // ordinary mic audio accumulating toward the next endpoint commit.
+  it('continued speech while already listening does not trigger barge-in', async () => {
+    const clock = makeClock();
+    const session = new VoiceSession({
+      runner: scriptedRunner([{ type: 'text_delta', text: 'Done.' }]),
+      stt: streamingStt('hi'),
+      tts: streamingTts(),
+      vad: new FakeVad(),
+      now: clock.now,
+    });
+    const events = collect(session);
+
+    speakUtterance(session, clock);
+    await session.idle();
+    expect(session.getState()).toBe('listening');
+
+    for (let i = 0; i < 5; i++) {
+      clock.advance(20);
+      session.pushAudio(speechFrame());
+    }
+
+    expect(events.some((e) => e.type === 'interrupted')).toBe(false);
+  });
+
+  // A genuinely new speech onset — silence, THEN speech again — while the
+  // agent is speaking a LATER reply must still trigger its own barge-in. The
+  // rising-edge gate must re-arm once speech drops back to false, not stay
+  // latched off for the rest of the session.
+  it('a fresh speech onset after silence triggers a new barge-in on a later turn', async () => {
+    const clock = makeClock();
+    const gate1 = deferred();
+    const gate2 = deferred();
+    let call = 0;
+    const runner: AgentTurnRunner = {
+      async *run(_text, opts): AsyncGenerator<AgentEvent> {
+        call += 1;
+        const gate = call === 1 ? gate1 : gate2;
+        yield { type: 'text_delta', text: call === 1 ? 'First reply. ' : 'Second reply. ' };
+        await gate.promise;
+        if (opts?.abortSignal?.aborted) return;
+        yield { type: 'text_delta', text: 'more.' };
+      },
+    };
+    const session = new VoiceSession({
+      runner,
+      stt: streamingStt('hi'),
+      tts: streamingTts(),
+      vad: new FakeVad(),
+      now: clock.now,
+    });
+    const events = collect(session);
+    const audioCount = (): number => events.filter((e) => e.type === 'reply_audio').length;
+
+    speakUtterance(session, clock);
+    await waitForEvent(events, 'reply_audio'); // first reply's sentence played
+    await tick();
+
+    // First onset -> barge-in #1, interrupting the first reply.
+    clock.advance(20);
+    session.pushAudio(speechFrame());
+    expect(events.filter((e) => e.type === 'interrupted')).toHaveLength(1);
+    gate1.resolve(); // let the (now-aborted) first turn unwind
+    await tick();
+
+    // Finish the second utterance: normal STT capture while 'listening', not
+    // barge-in — speech continues from the barge-in frame, then enough
+    // trailing silence for the endpoint detector to commit.
+    feed(session, clock, speechFrame(), 5);
+    feed(session, clock, silenceFrame(), 30);
+
+    // Wait for the second reply's audio.
+    const audioBefore = audioCount();
+    const start = Date.now();
+    while (audioCount() <= audioBefore) {
+      if (Date.now() - start > 2000) throw new Error('timeout waiting for second reply audio');
+      await tick();
+    }
+    await tick();
+
+    // Second, genuinely fresh onset (silence intervened) -> barge-in #2.
+    clock.advance(20);
+    session.pushAudio(speechFrame());
+
+    const interruptions = events.filter((e) => e.type === 'interrupted');
+    expect(interruptions).toHaveLength(2);
+    expect(interruptions[1]).toMatchObject({ text: 'Second reply. [interrupted]' });
+
+    gate2.resolve();
+    await session.idle();
+  });
+
   // Construction is TOTAL: a batch-only provider needs nothing injected. The
   // utterance-buffered fallback encodes the frames as a WAV in memory, so
   // there is no `pcmToPath` to forget and no session that throws without one.
