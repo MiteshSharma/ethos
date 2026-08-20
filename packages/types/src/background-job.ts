@@ -139,6 +139,13 @@ export type BackgroundJobEventType =
   | 'blocked'
   /** The human answered (or the question was withdrawn) — the run is running again. */
   | 'resumed'
+  /**
+   * One file the runner changed — payload is an `ArtifactChange` (see below).
+   * Artifacts travel HERE and never through `AgentEvent`, which is frozen at 17
+   * variants and has no artifact slot; the inspector's Diff tab reads this row
+   * type back out of the event log.
+   */
+  | 'artifact_change'
   | 'done'
   | 'failed'
   | 'aborted'
@@ -177,6 +184,14 @@ export interface CreateBackgroundJobInput {
   originThreadId?: string;
   remotePeer?: string;
   remoteJobId?: string;
+}
+
+/** Window over a job's event trail. Both fields are optional; see `getEvents`. */
+export interface GetJobEventsOptions {
+  /** Return at most this many rows, taken from the NEWEST end. */
+  limit?: number;
+  /** Exclusive cursor — only rows with `seq` strictly less than this. */
+  beforeSeq?: number;
 }
 
 export interface JobStore {
@@ -257,8 +272,17 @@ export interface JobStore {
     eventType: BackgroundJobEventType,
     payload: Record<string, unknown>,
   ): Promise<void>;
-  /** Ordered audit trail for a job (seq ASC). */
-  getEvents(jobId: string): Promise<BackgroundJobEvent[]>;
+  /**
+   * Ordered audit trail for a job, ALWAYS returned seq ASC.
+   *
+   * `opts.limit` selects the NEWEST n rows (then returns them ascending — the
+   * same most-recent-N contract `SessionStore.getMessages` uses), and
+   * `opts.beforeSeq` is the backwards-paging cursor: pass the lowest `seq` you
+   * already hold to get the page older than it. Omitting `opts` returns the
+   * whole trail, unchanged — a caller that wants a bound says so, so nothing is
+   * ever silently truncated under a reader expecting everything.
+   */
+  getEvents(jobId: string, opts?: GetJobEventsOptions): Promise<BackgroundJobEvent[]>;
 }
 
 // ---------------------------------------------------------------------------

@@ -16,6 +16,7 @@ import type {
   BackgroundJobEventType,
   BackgroundJobStatus,
   CreateBackgroundJobInput,
+  GetJobEventsOptions,
   JobRunner,
   JobRunnerRegistry,
   JobStore,
@@ -164,8 +165,13 @@ class FakeJobStore implements JobStore {
     });
     this.events.set(jobId, list);
   }
-  async getEvents(jobId: string): Promise<BackgroundJobEvent[]> {
-    return [...(this.events.get(jobId) ?? [])];
+  // Honours the bounded tail contract (I21): a fake that ignored `opts` would
+  // let a caller's `limit` silently do nothing and still pass.
+  async getEvents(jobId: string, opts?: GetJobEventsOptions): Promise<BackgroundJobEvent[]> {
+    let list = [...(this.events.get(jobId) ?? [])];
+    const before = opts?.beforeSeq;
+    if (before !== undefined) list = list.filter((e) => e.seq < before);
+    return opts?.limit === undefined ? list : list.slice(-opts.limit);
   }
 
   // Test helper — seed a fully-formed row directly.

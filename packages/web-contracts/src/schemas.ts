@@ -1255,6 +1255,9 @@ export const BackgroundJobEventTypeSchema = z.enum([
   'text',
   'blocked',
   'resumed',
+  // One file a runner changed. Payload is an `ArtifactChange` — artifacts never
+  // enter the AgentEvent stream, so this row IS the Diff tab's source.
+  'artifact_change',
   'done',
   'failed',
   'aborted',

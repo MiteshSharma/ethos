@@ -282,6 +282,8 @@ function formatEvent(e: BackgroundJobEvent): string {
       const shown = collapsed.length > 300 ? `${collapsed.slice(0, 297)}...` : collapsed;
       return `output: ${shown}`;
     }
+    case 'artifact_change':
+      return `${String(p.change ?? 'changed')} ${String(p.path ?? '')} (+${String(p.added ?? 0)} −${String(p.removed ?? 0)})`;
     case 'spend':
       return `spend $${String(p.spendUsd ?? p.usd ?? '')}`;
     case 'cancel_requested':
@@ -1454,11 +1456,11 @@ export function createTaskLogsTool(background?: BackgroundToolDeps): Tool {
       if (!job) return JOB_NOT_FOUND;
 
       const count = Math.min(Math.max(1, Math.floor(tail ?? 20)), 100);
-      const events = await background.store.getEvents(id);
+      // The store does the tailing — reading the whole trail to throw all but
+      // the last `count` rows away is the unbounded read this tool never needed.
+      const events = await background.store.getEvents(id, { limit: count });
       const now = Date.now();
-      const lines = events
-        .slice(-count)
-        .map((e) => `${relAge(now - e.createdAt)} ${formatEvent(e)}`);
+      const lines = events.map((e) => `${relAge(now - e.createdAt)} ${formatEvent(e)}`);
       return { ok: true, value: lines.join('\n') || '(no events)' };
     },
   };
