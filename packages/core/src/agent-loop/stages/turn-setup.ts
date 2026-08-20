@@ -91,6 +91,9 @@ export async function* setupTurn(
     sessionId,
     personalityId: personality?.id,
     obsConfig,
+    // Gap 1 (P2-counters) — `ethos_turn_outcomes_total{platform,...}` reads
+    // this back off the trace at close; previously never recorded.
+    attrs: { platform: deps.platform },
   });
 
   // Budget cap check — refuse before any LLM work when the session has already

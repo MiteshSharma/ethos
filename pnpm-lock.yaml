@@ -287,6 +287,9 @@ importers:
       '@ethosagent/execution-local':
         specifier: workspace:*
         version: link:../../extensions/execution-local
+      '@ethosagent/export-langfuse':
+        specifier: workspace:*
+        version: link:../../extensions/export-langfuse
       '@ethosagent/gateway':
         specifier: workspace:*
         version: link:../../extensions/gateway
@@ -590,6 +593,9 @@ importers:
       '@ethosagent/memory-markdown':
         specifier: workspace:*
         version: link:../../extensions/memory-markdown
+      '@ethosagent/observability-sqlite':
+        specifier: workspace:*
+        version: link:../../extensions/observability-sqlite
       '@ethosagent/personalities':
         specifier: workspace:*
         version: link:../../extensions/personalities
@@ -1030,6 +1036,19 @@ importers:
       '@ethosagent/types':
         specifier: workspace:*
         version: link:../../packages/types
+
+  extensions/export-langfuse:
+    dependencies:
+      '@ethosagent/observability-sqlite':
+        specifier: workspace:*
+        version: link:../observability-sqlite
+      '@ethosagent/types':
+        specifier: workspace:*
+        version: link:../../packages/types
+    devDependencies:
+      vitest:
+        specifier: ^4.1.10
+        version: 4.1.10(@types/node@24.13.2)(jsdom@30.0.1(@noble/hashes@2.2.0))(vite@6.4.3(@types/node@24.13.2)(jiti@2.7.0)(lightningcss@1.32.0)(terser@5.48.0)(tsx@4.23.9)(yaml@2.9.0))
 
   extensions/gateway:
     dependencies:

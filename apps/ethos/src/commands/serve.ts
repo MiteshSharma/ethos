@@ -27,8 +27,9 @@ import {
 import { type AgentLoop, scriptCallableFor, toolsDeclaringNetwork } from '@ethosagent/core';
 import { CronScheduler } from '@ethosagent/cron';
 import { LocalExecutionBackend } from '@ethosagent/execution-local';
+import { LangfusePollLoop } from '@ethosagent/export-langfuse';
 import { ConsoleLogger } from '@ethosagent/logger';
-import { computeContextAnatomy } from '@ethosagent/observability-sqlite';
+import { computeContextAnatomy, createMetricsTextProvider } from '@ethosagent/observability-sqlite';
 import {
   createPersonalityRegistry,
   PersonalityA2aIdentityProvider,
@@ -685,6 +686,29 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
     }
   }
 
+  // Langfuse export poller (Part E) — opt-in, off by default.
+  let stopLangfusePoll: (() => void) | null = null;
+  const langfuseCfg = config.telemetry?.export?.langfuse;
+  if (langfuseCfg?.enabled) {
+    if (!langfuseCfg.baseUrl || !langfuseCfg.publicKey || !langfuseCfg.secretKey) {
+      console.error(
+        '[langfuse-export] telemetry.export.langfuse.enabled is true but baseUrl/publicKey/secretKey ' +
+          'are not all set — not starting the export poller.',
+      );
+    } else {
+      const langfusePoll = new LangfusePollLoop({
+        store: getObservabilityStore(),
+        baseUrl: langfuseCfg.baseUrl,
+        publicKey: langfuseCfg.publicKey,
+        secretKey: langfuseCfg.secretKey,
+        onError: (err) => console.warn(`[langfuse-export] tick error: ${err.message}`),
+      });
+      langfusePoll.start();
+      stopLangfusePoll = () => langfusePoll.stop();
+      console.log(`  langfuse export: enabled (${langfuseCfg.baseUrl})`);
+    }
+  }
+
   // Web API — always mounts alongside the ACP server.
   let webShutdown: (() => Promise<void>) | null = null;
   const webDist = locateWebDist(parseFlagValue(args, ['--web-dist']));
@@ -1055,6 +1079,31 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
     console.log('  a2a mesh:     enabled (un-advertised mesh mode; audit active)');
   }
 
+  // P2-counters (D2/D16) — `ethos_gateway_adapter_up{adapter}` reads the same
+  // heartbeat file `/healthz` does, through the same 30s staleness gate
+  // (routes/index.ts) — stale ⇒ every known adapter reports 0.
+  const readGatewayAdapterGauges = async () => {
+    try {
+      const raw = await getStorage().read(join(dir, 'gateway-health.json'));
+      if (!raw) return [];
+      const hb = JSON.parse(raw) as {
+        updatedAt: string;
+        adapters: Array<{ name: string; ok: boolean }>;
+      };
+      const ageSec = (Date.now() - new Date(hb.updatedAt).getTime()) / 1000;
+      const stale = !Number.isFinite(ageSec) || ageSec > 30;
+      return hb.adapters.map(
+        (a) => ({ adapter: a.name, up: (stale ? false : a.ok) ? 1 : 0 }) as const,
+      );
+    } catch {
+      return [];
+    }
+  };
+  const metricsText = createMetricsTextProvider({
+    store: getObservabilityStore(),
+    getGatewayAdapters: readGatewayAdapterGauges,
+  });
+
   const created = createWebApi({
     dataDir: dir,
     attachmentCache,
@@ -1240,6 +1289,7 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
         return null;
       }
     },
+    metricsTextFn: metricsText,
   });
   chatService = created.chatService;
   const webApp = created.app;
@@ -1293,6 +1343,7 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
     if (stopWatchdog) stopWatchdog();
     stopHeartbeat();
     stopPollLoop?.();
+    stopLangfusePoll?.();
     // Stops the daemon + heartbeat (if this process ever won the ownership
     // claim, including via a later retry tick — see
     // `CallCaptureOwnershipManager`) and releases the lock so a restarted

@@ -1,0 +1,48 @@
+# Local Prometheus + Grafana for the Ethos observability dashboard
+# (plan/phases/analytics-observability.md, Part D3). This stack runs
+# Prometheus + Grafana only — see prometheus.yml for how it reaches an Ethos
+# process running elsewhere. Full walk-through:
+# docs/content/using/how-to/monitor-with-grafana.md
+#
+# Quick start:
+#   1. ethos api-key create --name grafana --scopes metrics:read
+#   2. cp metrics-token.example metrics-token   # paste the printed secret in
+#   3. docker compose up -d
+#   4. open http://localhost:3300 (default login admin/admin, changes on
+#      first login)
+
+services:
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./metrics-token:/etc/prometheus/metrics-token:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "9090:9090"
+    # Docker Desktop (macOS/Windows) resolves `host.docker.internal`
+    # automatically. Linux Compose needs this entry (Docker 20.10+). If you
+    # instead need to reach the gateway health server at its default
+    # loopback-only bind, swap this service to `network_mode: host` per the
+    # ethos-gateway-health job's comment in prometheus.yml.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:11.2.0
+    depends_on:
+      - prometheus
+    ports:
+      - "3300:3000"
+    volumes:
+      - ./provisioning:/etc/grafana/provisioning:ro
+      - ./ethos-observability.json:/var/lib/grafana/dashboards/ethos-observability.json:ro
+      - grafana-data:/var/lib/grafana
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+    restart: unless-stopped
+
+volumes:
+  prometheus-data:
+  grafana-data:

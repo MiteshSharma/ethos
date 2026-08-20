@@ -159,21 +159,28 @@ async function* parseGeminiSSE(
  * twice, once at the input rate and once at the cache-read rate. The reported
  * token counts keep Gemini's own meaning; only the cost math splits them.
  */
-function geminiUsage(meta: Record<string, number>, model: string): TokenUsage {
+function geminiUsage(
+  meta: Record<string, number>,
+  model: string,
+): { usage: TokenUsage; costBasis: 'priced' | 'local' | 'unknown' } {
   const promptTokens = meta.promptTokenCount ?? 0;
   const outputTokens = meta.candidatesTokenCount ?? 0;
   const cacheReadTokens = meta.cachedContentTokenCount ?? 0;
-  return {
-    inputTokens: promptTokens,
+  // Previously hardcoded to 0, which reported every Gemini turn as free.
+  const costEstimate = estimateCost(model, {
+    inputTokens: Math.max(promptTokens - cacheReadTokens, 0),
     outputTokens,
     cacheReadTokens,
-    cacheCreationTokens: 0,
-    // Previously hardcoded to 0, which reported every Gemini turn as free.
-    estimatedCostUsd: estimateCost(model, {
-      inputTokens: Math.max(promptTokens - cacheReadTokens, 0),
+  });
+  return {
+    usage: {
+      inputTokens: promptTokens,
       outputTokens,
       cacheReadTokens,
-    }).costUsd,
+      cacheCreationTokens: 0,
+      estimatedCostUsd: costEstimate.costUsd,
+    },
+    costBasis: costEstimate.basis,
   };
 }
 
@@ -186,7 +193,7 @@ function* handleGeminiEvent(
   if (!candidates?.length) {
     const meta = event.usageMetadata as Record<string, number> | undefined;
     if (meta) {
-      yield { type: 'usage', usage: geminiUsage(meta, model) };
+      yield { type: 'usage', ...geminiUsage(meta, model) };
     }
     return;
   }
@@ -225,6 +232,6 @@ function* handleGeminiEvent(
 
   const meta = event.usageMetadata as Record<string, number> | undefined;
   if (meta) {
-    yield { type: 'usage', usage: geminiUsage(meta, model) };
+    yield { type: 'usage', ...geminiUsage(meta, model) };
   }
 }

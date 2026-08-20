@@ -197,6 +197,35 @@ describe('validateNoPlaintextSecrets', () => {
     expect(() => validateNoPlaintextSecrets(config)).not.toThrow();
   });
 
+  it('rejects a plaintext Langfuse secretKey (field-aware)', () => {
+    // Not a recognizable secret-shaped string, but `secretKey` is in
+    // SECRET_FIELD_NAMES so it must be a secrets reference regardless.
+    const config = makeConfig({
+      apiKey: secretRef('providers/anthropic/apiKey'),
+      telemetry: { export: { langfuse: { enabled: true, secretKey: 'plain-lf-secret' } } },
+    });
+    expect(() => validateNoPlaintextSecrets(config)).toThrow(
+      /field 'telemetry\.export\.langfuse\.secretKey'.*field requires \$\{secrets:ref\}/,
+    );
+  });
+
+  it('accepts a Langfuse config with secretKey as a secrets ref and publicKey plaintext', () => {
+    const config = makeConfig({
+      apiKey: secretRef('providers/anthropic/apiKey'),
+      telemetry: {
+        export: {
+          langfuse: {
+            enabled: true,
+            baseUrl: 'https://cloud.langfuse.com',
+            publicKey: 'pk-lf-plain',
+            secretKey: secretRef('telemetry/export/langfuse/secretKey'),
+          },
+        },
+      },
+    });
+    expect(() => validateNoPlaintextSecrets(config)).not.toThrow();
+  });
+
   it('rejects an opaque Telegram token in a secret field', () => {
     // '123456:ABC-DEF' does not match any regex pattern, but telegramToken
     // is in SECRET_FIELD_NAMES so it must be a secrets reference

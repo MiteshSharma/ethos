@@ -172,6 +172,7 @@
       "@ethosagent/tools-messaging": ["./extensions/tools-messaging/src"],
       "@ethosagent/tools-personality-design": ["./extensions/tools-personality-design/src"],
       "@ethosagent/observability-sqlite": ["./extensions/observability-sqlite/src"],
+      "@ethosagent/export-langfuse": ["./extensions/export-langfuse/src"],
       "@ethosagent/request-dump": ["./extensions/request-dump/src"],
       "@ethosagent/safety-channel": ["./packages/safety/channel/src"],
       "@ethosagent/safety-injection": ["./packages/safety/injection/src"],

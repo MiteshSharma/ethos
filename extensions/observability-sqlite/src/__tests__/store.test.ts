@@ -208,7 +208,7 @@ describe('SQLiteObservabilityStore', () => {
 });
 
 describe('SQLiteObservabilityStore schema versioning', () => {
-  it('stamps a fresh db to user_version 1', async () => {
+  it('stamps a fresh db to user_version 3', async () => {
     const path = tmpDb();
     const s = new SQLiteObservabilityStore(path);
     s.close();
@@ -217,10 +217,10 @@ describe('SQLiteObservabilityStore schema versioning', () => {
     const db = new Database(path);
     const rows = db.pragma('user_version') as Array<{ user_version: number }>;
     db.close();
-    expect(rows[0]?.user_version).toBe(1);
+    expect(rows[0]?.user_version).toBe(3);
   });
 
-  it('reopening a populated db preserves rows and keeps user_version at 1', async () => {
+  it('reopening a populated db preserves rows and keeps user_version at 3', async () => {
     const path = tmpDb();
     const trace: Trace = { traceId: randomUUID(), kind: 'turn', startTs: Date.now() };
 
@@ -237,14 +237,14 @@ describe('SQLiteObservabilityStore schema versioning', () => {
     const db = new Database(path);
     const rows = db.pragma('user_version') as Array<{ user_version: number }>;
     db.close();
-    expect(rows[0]?.user_version).toBe(1);
+    expect(rows[0]?.user_version).toBe(3);
   });
 
   it('refuses to open a db whose user_version is newer than the code', async () => {
     const path = tmpDb();
     const Database = (await import('@ethosagent/sqlite')).default;
     const raw = new Database(path);
-    raw.pragma('user_version = 2');
+    raw.pragma('user_version = 4');
     raw.close();
 
     expect(() => new SQLiteObservabilityStore(path)).toThrow(/refusing to open to avoid downgrade/);

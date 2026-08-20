@@ -1,0 +1,340 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": { "type": "grafana", "uid": "-- Grafana --" },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "Spend over time",
+      "description": "USD cost of LLM calls, span-derived from ethos_llm_cost_usd_total. This is NOT the same number as `ethos usage` (message-derived) — see the caveat panel below.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "fieldConfig": {
+        "defaults": { "unit": "currencyUSD", "custom": { "drawStyle": "line", "fillOpacity": 10 } },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom" },
+        "tooltip": { "mode": "multi" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "sum by (personality) (max without (job) (rate(ethos_llm_cost_usd_total[5m])))",
+          "legendFormat": "{{personality}}"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Tokens by personality/model",
+      "description": "ethos_llm_tokens_total, summed over kind (input/output/cache_read/cache_creation). openai-compat transport always reports cacheReadTokens=0 in this phase (D22) — see the caveat panel.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "fieldConfig": {
+        "defaults": { "unit": "short", "custom": { "drawStyle": "line", "fillOpacity": 10 } },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom" },
+        "tooltip": { "mode": "multi" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "sum by (personality, model) (max without (job) (rate(ethos_llm_tokens_total[5m])))",
+          "legendFormat": "{{personality}} · {{model}}"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "table",
+      "title": "Top tools by count, duration, failure rate",
+      "description": "No per-tool USD cost exists (only LLM calls carry estimatedCostUsd) — \"cost\" here is time-cost: average and p95 duration from ethos_tool_duration_seconds.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "fieldConfig": {
+        "defaults": { "custom": { "align": "auto" } },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "Value #A" },
+            "properties": [{ "id": "displayName", "value": "Calls" }]
+          },
+          {
+            "matcher": { "id": "byName", "options": "Value #B" },
+            "properties": [
+              { "id": "displayName", "value": "Avg duration (s)" },
+              { "id": "unit", "value": "s" }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "Value #C" },
+            "properties": [
+              { "id": "displayName", "value": "p95 duration (s)" },
+              { "id": "unit", "value": "s" }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "Value #D" },
+            "properties": [
+              { "id": "displayName", "value": "Failure rate" },
+              { "id": "unit", "value": "percentunit" }
+            ]
+          }
+        ]
+      },
+      "options": { "showHeader": true },
+      "transformations": [{ "id": "merge", "options": {} }],
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "sum by (tool) (max without (job) (increase(ethos_tool_calls_total[$__range])))",
+          "format": "table",
+          "instant": true
+        },
+        {
+          "refId": "B",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "sum by (tool) (max without (job) (increase(ethos_tool_duration_seconds_sum[$__range]))) / sum by (tool) (max without (job) (increase(ethos_tool_duration_seconds_count[$__range])))",
+          "format": "table",
+          "instant": true
+        },
+        {
+          "refId": "C",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "histogram_quantile(0.95, sum by (le, tool) (max without (job) (increase(ethos_tool_duration_seconds_bucket[$__range]))))",
+          "format": "table",
+          "instant": true
+        },
+        {
+          "refId": "D",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "sum by (tool) (max without (job) (increase(ethos_tool_calls_total{outcome=\"error\"}[$__range]))) / sum by (tool) (max without (job) (increase(ethos_tool_calls_total[$__range])))",
+          "format": "table",
+          "instant": true
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Outcome rates",
+      "description": "ethos_turn_outcomes_total by status (completed/errored/halted).",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": { "drawStyle": "line", "fillOpacity": 10, "stacking": { "mode": "normal" } }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom" },
+        "tooltip": { "mode": "multi" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "sum by (status) (max without (job) (rate(ethos_turn_outcomes_total[5m])))",
+          "legendFormat": "{{status}}"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Cache-hit rate",
+      "description": "cache_read tokens as a share of cache_read + input. openai-compat transport always reports cacheReadTokens=0 in this phase (D22) — any model routed through it drags this down artificially. See the caveat panel.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 16 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1,
+          "custom": { "drawStyle": "line", "fillOpacity": 10 }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "single" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "sum(max without (job) (rate(ethos_llm_tokens_total{kind=\"cache_read\"}[5m]))) / (sum(max without (job) (rate(ethos_llm_tokens_total{kind=\"cache_read\"}[5m]))) + sum(max without (job) (rate(ethos_llm_tokens_total{kind=\"input\"}[5m]))))",
+          "legendFormat": "cache-hit rate"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "LLM request latency (p95)",
+      "description": "histogram_quantile(0.95, ethos_llm_request_duration_seconds_bucket) by model. Buckets fixed per D18: 0.25, 0.5, 1, 2, 4, 8, 16, 32, 64.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 16 },
+      "fieldConfig": {
+        "defaults": { "unit": "s", "custom": { "drawStyle": "line", "fillOpacity": 10 } },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "histogram_quantile(0.95, sum by (le, model) (max without (job) (rate(ethos_llm_request_duration_seconds_bucket[5m]))))",
+          "legendFormat": "{{model}}"
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Tool duration (p95)",
+      "description": "histogram_quantile(0.95, ethos_tool_duration_seconds_bucket) by tool. Buckets fixed per D18: 0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 16 },
+      "fieldConfig": {
+        "defaults": { "unit": "s", "custom": { "drawStyle": "line", "fillOpacity": 10 } },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "histogram_quantile(0.95, sum by (le, tool) (max without (job) (rate(ethos_tool_duration_seconds_bucket[5m]))))",
+          "legendFormat": "{{tool}}"
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "type": "state-timeline",
+      "title": "Adapter health",
+      "description": "ethos_gateway_adapter_up (1 = up, 0 = down/stale). Stale gateway heartbeat (>30s) reports 0.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 6, "w": 24, "x": 0, "y": 24 },
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "lineWidth": 0, "fillOpacity": 70 },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": { "text": "down", "color": "red" },
+                "1": { "text": "up", "color": "green" }
+              }
+            }
+          ]
+        },
+        "overrides": []
+      },
+      "options": { "showValue": "never" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "max by (adapter) (ethos_gateway_adapter_up)",
+          "legendFormat": "{{adapter}}"
+        }
+      ]
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "Unpriced LLM calls (caveat)",
+      "description": "ethos_llm_unpriced_calls_total — calls with no known price. Read together with the text panel to the right.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 30 },
+      "fieldConfig": {
+        "defaults": { "unit": "short", "custom": { "drawStyle": "line", "fillOpacity": 10 } },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom" },
+        "tooltip": { "mode": "multi" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "sum by (provider, model) (max without (job) (rate(ethos_llm_unpriced_calls_total[5m])))",
+          "legendFormat": "{{provider}} · {{model}}"
+        }
+      ]
+    },
+    {
+      "id": 10,
+      "type": "text",
+      "title": "Caveats — read before trusting a number on this dashboard",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 30 },
+      "options": {
+        "mode": "markdown",
+        "content": "**This dashboard is not the only source of spend numbers — and it is not complete.**\n\n1. **Prometheus spend here is span-derived; `ethos usage` (the CLI) is message-derived.** They read different tables (`observability.db` spans vs. `sessions.db` messages) and can diverge. Never treat them as the same number (D15).\n\n2. **`openai-compat` transport always reports `cacheReadTokens=0` in this phase.** Any model routed through OpenRouter, Ollama, Gemini-via-compat, or Anthropic-via-compat undercounts cache on the *Cache-hit rate* panel and undercounts cost savings on the *Spend* panel (D22). This is not a bug to file — it's a known Phase 2 limitation.\n\n3. **The chart to the left shows LLM calls with no known price**, not the total blind spot. Unattributed spend from approval reviewers, kanban verifiers, and eval scorers isn't captured by these metrics at all — see the plan's \"out of scope\" list."
+      }
+    }
+  ],
+  "preload": false,
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "tags": ["ethos", "observability"],
+  "templating": {
+    "list": [
+      {
+        "current": { "text": "Prometheus", "value": "prometheus" },
+        "hide": 0,
+        "includeAll": false,
+        "label": "Prometheus",
+        "multi": false,
+        "name": "DS_PROMETHEUS",
+        "options": [],
+        "query": "prometheus",
+        "refresh": 1,
+        "regex": "",
+        "skipUrlSync": false,
+        "type": "datasource"
+      }
+    ]
+  },
+  "time": { "from": "now-6h", "to": "now" },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "Ethos Observability",
+  "uid": "ethos-observability",
+  "version": 1,
+  "weekStart": ""
+}

@@ -1,9 +1,23 @@
 import Database, { migrate } from '@ethosagent/sqlite';
 import type { ObsEvent, ObservabilityStore, Snapshot, Span, Trace } from '@ethosagent/types';
+import {
+  incrementCounter,
+  incrementHistogram,
+  LLM_DURATION_BUCKETS,
+  METRIC_COUNTERS_SCHEMA,
+  type MetricCounterRow,
+  readMetricCounters,
+  TOOL_DURATION_BUCKETS,
+} from './metric-counters';
 import { redactJson, redactString } from './redact';
 
-// v1 baseline schema — the current table/index shape, unchanged. Passed to
-// migrate() as the idempotent `CREATE ... IF NOT EXISTS` baseline.
+// v3 baseline schema — the current table/index shape. Passed to migrate() as
+// the idempotent `CREATE ... IF NOT EXISTS` baseline, so a fresh DB gets
+// `metric_counters` (P2-counters, D2/D15) and the `traces.exported_at` /
+// `claimed_at` claim columns (P2-langfuse, D7) without walking the migration
+// chain. `MIGRATIONS[2]`/`MIGRATIONS[3]` below bring an existing older DB the
+// rest of the way — SQLite has no `ADD COLUMN IF NOT EXISTS`, so the baseline
+// alone cannot upgrade a DB that already has a `traces` table without them.
 const OBS_SCHEMA = `
       CREATE TABLE IF NOT EXISTS traces (
         trace_id        TEXT PRIMARY KEY,
@@ -14,7 +28,14 @@ const OBS_SCHEMA = `
         status          TEXT,
         subject_id      TEXT,
         snapshot_id     TEXT,
-        attrs           TEXT
+        attrs           TEXT,
+        -- P2-langfuse (D7) — nullable, ms-epoch. exported_at is set once
+        -- the trace has shipped to Langfuse; claimed_at marks it
+        -- in-flight for a poller so two pollers (or two ticks) never export
+        -- the same trace twice. Both NULL for every trace outside that
+        -- pipeline (untouched by the export poller).
+        exported_at     INTEGER,
+        claimed_at      INTEGER
       ) STRICT;
       CREATE INDEX IF NOT EXISTS idx_traces_session ON traces(session_id, start_ts);
       CREATE INDEX IF NOT EXISTS idx_traces_kind    ON traces(kind, start_ts);
@@ -54,7 +75,28 @@ const OBS_SCHEMA = `
         subject_id      TEXT NOT NULL,
         body            TEXT NOT NULL
       ) STRICT;
+
+      ${METRIC_COUNTERS_SCHEMA}
     `;
+
+const MIGRATIONS = {
+  // v1 -> v2: `metric_counters` (P2-counters). `IF NOT EXISTS` in the
+  // baseline above already creates it for a v1 DB (baseline runs
+  // unconditionally, before this step), so this is a documentation-and-
+  // version-bump step, not load-bearing DDL.
+  2: (db: Database.Database): void => {
+    db.exec(METRIC_COUNTERS_SCHEMA);
+  },
+  // v2 -> v3: `traces.exported_at` / `claimed_at` (P2-langfuse, D7). Unlike
+  // `metric_counters` above, an existing v2 `traces` table already exists
+  // and `CREATE TABLE IF NOT EXISTS` in the baseline is therefore a no-op on
+  // it — the two columns must be added explicitly here, or a v2 DB would
+  // never get them.
+  3: (db: Database.Database): void => {
+    db.exec('ALTER TABLE traces ADD COLUMN exported_at INTEGER');
+    db.exec('ALTER TABLE traces ADD COLUMN claimed_at INTEGER');
+  },
+};
 
 // ---------------------------------------------------------------------------
 // SQLiteObservabilityStore
@@ -68,6 +110,7 @@ export class SQLiteObservabilityStore implements ObservabilityStore {
   constructor(dbPath: string) {
     this.db = new Database(dbPath);
     this.db.pragma('journal_mode = WAL');
+    this.db.pragma('busy_timeout = 5000');
     this.migrate();
   }
 
@@ -86,9 +129,9 @@ export class SQLiteObservabilityStore implements ObservabilityStore {
     // touched. The legacy column rename above still runs first, exactly as before.
     migrate(this.db, {
       name: 'observability-sqlite',
-      targetVersion: 1,
+      targetVersion: 3,
       baseline: OBS_SCHEMA,
-      migrations: {},
+      migrations: MIGRATIONS,
     });
   }
 
@@ -132,9 +175,29 @@ export class SQLiteObservabilityStore implements ObservabilityStore {
   }
 
   closeTrace(traceId: string, status: 'ok' | 'error' | 'aborted'): void {
-    this.db
-      .prepare(`UPDATE traces SET end_ts = ?, status = ? WHERE trace_id = ?`)
-      .run(Date.now(), status, traceId);
+    const now = Date.now();
+    this.db.transaction(() => {
+      const row = this.db
+        .prepare('SELECT kind, subject_id, attrs, end_ts FROM traces WHERE trace_id = ?')
+        .get(traceId) as
+        | { kind: string; subject_id: string | null; attrs: string | null; end_ts: number | null }
+        | undefined;
+      this.db
+        .prepare(`UPDATE traces SET end_ts = ?, status = ? WHERE trace_id = ?`)
+        .run(now, status, traceId);
+      // Only the transition into "closed" counts — a repeat close() must not
+      // double-increment the monotonic total.
+      if (!row || row.end_ts !== null || row.kind !== 'turn') return;
+      const attrs = row.attrs ? (JSON.parse(row.attrs) as Record<string, unknown>) : {};
+      const platform = typeof attrs.platform === 'string' ? attrs.platform : 'unknown';
+      incrementCounter(
+        this.db,
+        'ethos_turn_outcomes_total',
+        { personality: row.subject_id ?? 'unknown', platform, status },
+        1,
+        new Date(now).toISOString(),
+      );
+    })();
   }
 
   getTrace(traceId: string): Trace | null {
@@ -180,25 +243,130 @@ export class SQLiteObservabilityStore implements ObservabilityStore {
     attrs?: Record<string, unknown>,
     extraRedactPatterns?: string[],
   ): void {
-    // Phase 0 — merge close-time attrs (e.g. per-slice llm_call token counts)
-    // into whatever the span was opened with. Without this the numbers a span
-    // learns only at completion (usage, requestTokens) would be lost.
-    if (attrs && Object.keys(attrs).length > 0) {
+    const now = Date.now();
+    this.db.transaction(() => {
       const existingRow = this.db
-        .prepare('SELECT attrs FROM spans WHERE span_id = ?')
-        .get(spanId) as { attrs: string | null } | undefined;
+        .prepare(
+          'SELECT trace_id, kind, name, start_ts, end_ts, attrs FROM spans WHERE span_id = ?',
+        )
+        .get(spanId) as
+        | {
+            trace_id: string;
+            kind: string;
+            name: string;
+            start_ts: number;
+            end_ts: number | null;
+            attrs: string | null;
+          }
+        | undefined;
       const existing = existingRow?.attrs
         ? (JSON.parse(existingRow.attrs) as Record<string, unknown>)
         : {};
-      const merged = { ...existing, ...redactJson(attrs, extraRedactPatterns) };
-      this.db
-        .prepare(`UPDATE spans SET end_ts = ?, status = ?, attrs = ? WHERE span_id = ?`)
-        .run(Date.now(), status, JSON.stringify(merged), spanId);
-      return;
+
+      // Phase 0 — merge close-time attrs (e.g. per-slice llm_call token
+      // counts) into whatever the span was opened with. Without this the
+      // numbers a span learns only at completion (usage, requestTokens)
+      // would be lost.
+      let merged = existing;
+      if (attrs && Object.keys(attrs).length > 0) {
+        merged = { ...existing, ...redactJson(attrs, extraRedactPatterns) };
+        this.db
+          .prepare(`UPDATE spans SET end_ts = ?, status = ?, attrs = ? WHERE span_id = ?`)
+          .run(now, status, JSON.stringify(merged), spanId);
+      } else {
+        this.db
+          .prepare(`UPDATE spans SET end_ts = ?, status = ? WHERE span_id = ?`)
+          .run(now, status, spanId);
+      }
+
+      // Only the transition into "closed" counts — a repeat close() must not
+      // double-increment the monotonic total. An unknown span (e.g. a
+      // suppressed-write no-op spanId) has nothing to count either.
+      if (!existingRow || existingRow.end_ts !== null) return;
+      this.recordSpanCloseCounters(existingRow, status, merged, now);
+    })();
+  }
+
+  /** Counter/histogram side effects of a FIRST-TIME span close (P2-counters,
+   *  D2/D15/D18/D19). Called from inside `closeSpan`'s transaction only. */
+  private recordSpanCloseCounters(
+    span: { trace_id: string; kind: string; name: string; start_ts: number },
+    status: 'ok' | 'error' | 'blocked',
+    attrs: Record<string, unknown>,
+    nowMs: number,
+  ): void {
+    const nowIso = new Date(nowMs).toISOString();
+    const durationSeconds = Math.max(nowMs - span.start_ts, 0) / 1000;
+
+    if (span.kind === 'llm_call') {
+      const traceRow = this.db
+        .prepare('SELECT subject_id FROM traces WHERE trace_id = ?')
+        .get(span.trace_id) as { subject_id: string | null } | undefined;
+      const personality = traceRow?.subject_id ?? 'unknown';
+      const provider = typeof attrs.provider === 'string' ? attrs.provider : 'unknown';
+      const model = span.name;
+
+      const tokenKinds: Array<[string, unknown]> = [
+        ['input', attrs.inputTokens],
+        ['output', attrs.outputTokens],
+        ['cache_read', attrs.cacheReadTokens],
+        ['cache_creation', attrs.cacheCreationTokens],
+      ];
+      for (const [kind, raw] of tokenKinds) {
+        const count = typeof raw === 'number' ? raw : 0;
+        if (count > 0) {
+          incrementCounter(
+            this.db,
+            'ethos_llm_tokens_total',
+            { personality, provider, model, kind },
+            count,
+            nowIso,
+          );
+        }
+      }
+
+      const cost = typeof attrs.estimatedCostUsd === 'number' ? attrs.estimatedCostUsd : 0;
+      incrementCounter(
+        this.db,
+        'ethos_llm_cost_usd_total',
+        { personality, provider, model },
+        cost,
+        nowIso,
+      );
+
+      if (attrs.costBasis === 'unknown') {
+        incrementCounter(this.db, 'ethos_llm_unpriced_calls_total', { provider, model }, 1, nowIso);
+      }
+
+      // D19 — histograms drop `personality` so bucket-row count does not
+      // multiply by personality count.
+      incrementHistogram(
+        this.db,
+        'ethos_llm_request_duration_seconds',
+        LLM_DURATION_BUCKETS,
+        { provider, model },
+        durationSeconds,
+        nowIso,
+      );
+    } else if (span.kind === 'tool_call') {
+      const tool = span.name;
+      incrementCounter(this.db, 'ethos_tool_calls_total', { tool, outcome: status }, 1, nowIso);
+      // A4 — parallel tool spans are all opened before any of them execute,
+      // so span start_ts..end_ts is batch wall-clock, not the per-call
+      // duration. `attrs.durationMs` (tool-registry.ts's per-call timer) is
+      // the accurate figure; the span-derived fallback is only for the rare
+      // caller that closes a tool_call span without it.
+      const toolDurationSeconds =
+        typeof attrs.durationMs === 'number' ? attrs.durationMs / 1000 : durationSeconds;
+      incrementHistogram(
+        this.db,
+        'ethos_tool_duration_seconds',
+        TOOL_DURATION_BUCKETS,
+        { tool },
+        toolDurationSeconds,
+        nowIso,
+      );
     }
-    this.db
-      .prepare(`UPDATE spans SET end_ts = ?, status = ? WHERE span_id = ?`)
-      .run(Date.now(), status, spanId);
   }
 
   getSpans(traceId: string): Span[] {
@@ -234,23 +402,38 @@ export class SQLiteObservabilityStore implements ObservabilityStore {
       ? JSON.stringify(redactJson(event.details, extraRedactPatterns))
       : null;
     const cause = event.cause ? redactString(event.cause, extraRedactPatterns) : null;
-    this.db
-      .prepare(
-        `INSERT OR IGNORE INTO events
-         (event_id, trace_id, span_id, ts, category, severity, code, cause, details)
-         VALUES (?,?,?,?,?,?,?,?,?)`,
-      )
-      .run(
-        event.eventId,
-        event.traceId ?? null,
-        event.spanId ?? null,
-        event.ts,
-        event.category,
-        event.severity,
-        event.code ?? null,
-        cause,
-        detailsJson,
+    this.db.transaction(() => {
+      const inserted = this.db
+        .prepare(
+          `INSERT OR IGNORE INTO events
+           (event_id, trace_id, span_id, ts, category, severity, code, cause, details)
+           VALUES (?,?,?,?,?,?,?,?,?)`,
+        )
+        .run(
+          event.eventId,
+          event.traceId ?? null,
+          event.spanId ?? null,
+          event.ts,
+          event.category,
+          event.severity,
+          event.code ?? null,
+          cause,
+          detailsJson,
+        ).changes;
+
+      // A duplicate event_id (INSERT OR IGNORE no-op) must not double-count.
+      if (inserted === 0) return;
+      if (event.category !== 'skill.invoked' && event.category !== 'skill.exposed') return;
+      const skill = event.details?.skill;
+      if (typeof skill !== 'string') return;
+      incrementCounter(
+        this.db,
+        'ethos_skill_invocations_total',
+        { skill, mode: event.category === 'skill.invoked' ? 'invoked' : 'exposed' },
+        1,
+        new Date(event.ts).toISOString(),
       );
+    })();
   }
 
   getEvents(filter: {
@@ -436,6 +619,108 @@ export class SQLiteObservabilityStore implements ObservabilityStore {
   }
 
   // ---------------------------------------------------------------------------
+  // Metrics (P2-counters, D2/D20) — not on `ObservabilityStore`; the
+  // `/metrics` renderer reaches this concrete class directly.
+  // ---------------------------------------------------------------------------
+
+  getMetricCounters(): MetricCounterRow[] {
+    return readMetricCounters(this.db);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Langfuse export claims (P2-langfuse, D7/D20) — not on `ObservabilityStore`;
+  // `extensions/export-langfuse`'s poller reaches this concrete class
+  // directly, the same way `getMetricCounters` above is reached by the
+  // `/metrics` renderer.
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Atomically claim up to `batchSize` completed, unexported traces
+   * (delivery-ledger idiom, D7). The SELECT and the claiming UPDATE run
+   * inside one `db.transaction().immediate` so no other transaction — even
+   * from a peer process sharing this file, given `busy_timeout` — can
+   * interleave between them; that is what makes two pollers' claims
+   * disjoint. `.immediate` takes the write lock up front (this call is
+   * write-first by nature), so a losing peer fails fast on `SQLITE_BUSY`
+   * instead of doing a wasted candidate SELECT before losing the race on the
+   * UPDATE. `status IS NOT NULL` is "closed" (`closeTrace` sets it); an open
+   * trace has nothing to export yet.
+   *
+   * `claimed_at < staleCutoff` re-claims a row a crashed poller abandoned.
+   * There is no separate stale-claim sweep: the next tick's claim call IS
+   * the sweep, and there is no terminal "abandoned" state — an unexported
+   * trace is eligible again as soon as its claim goes stale, forever.
+   *
+   * The reload after the UPDATE is scoped to `claimed_at = now` — not just
+   * the original candidate id list — so a row a peer claimed out from under
+   * this call between the SELECT and the UPDATE (and that this call's
+   * UPDATE therefore skipped) is never returned as claimed here too. Each
+   * returned trace carries the exact `claimedAt` this call stamped, so
+   * `markTraceExported`/`releaseTraceClaim` can later prove they still hold
+   * the claim they think they hold.
+   */
+  claimUnexportedTraces(batchSize: number, staleClaimCutoffMs: number): ClaimedTrace[] {
+    const now = Date.now();
+    const staleCutoff = now - staleClaimCutoffMs;
+    return this.db
+      .transaction((): ClaimedTrace[] => {
+        const candidates = this.db
+          .prepare(
+            `SELECT trace_id FROM traces
+           WHERE status IS NOT NULL AND exported_at IS NULL
+             AND (claimed_at IS NULL OR claimed_at < ?)
+           ORDER BY start_ts ASC LIMIT ?`,
+          )
+          .all(staleCutoff, batchSize) as { trace_id: string }[];
+        if (candidates.length === 0) return [];
+        const ids = candidates.map((c) => c.trace_id);
+        const placeholders = ids.map(() => '?').join(',');
+        this.db
+          .prepare(
+            `UPDATE traces SET claimed_at = ?
+           WHERE trace_id IN (${placeholders})
+             AND exported_at IS NULL AND (claimed_at IS NULL OR claimed_at < ?)`,
+          )
+          .run(now, ...ids, staleCutoff);
+        const rows = this.db
+          .prepare(`SELECT * FROM traces WHERE trace_id IN (${placeholders}) AND claimed_at = ?`)
+          .all(...ids, now) as TraceRow[];
+        return rows.map((r) => ({ trace: rowToTrace(r), claimedAt: now }));
+      })
+      .immediate();
+  }
+
+  /**
+   * Stamp a claimed trace exported. `claimed_at = ?` restricts this to the
+   * row this SPECIFIC claim holds — not merely "some claim exists" — so a
+   * stale reclaim by a peer can never be stamped exported by the original,
+   * now-late caller.
+   */
+  markTraceExported(traceId: string, claimedAt: number): void {
+    this.db
+      .prepare(
+        `UPDATE traces SET exported_at = ?, claimed_at = NULL
+         WHERE trace_id = ? AND claimed_at = ?`,
+      )
+      .run(Date.now(), traceId, claimedAt);
+  }
+
+  /**
+   * Put a claimed trace back in the unexported pool — the retry path for any
+   * export failure. Unlike the delivery ledger, Langfuse export has no
+   * terminal "abandoned" state: an unexported trace retries forever, because
+   * a temporarily-down Langfuse endpoint is not a reason to stop trying.
+   * `claimed_at = ?` is the same claim-scoping as `markTraceExported` — a
+   * caller that lost the claim to a peer's stale-reclaim must not clear the
+   * peer's now-active claim out from under it.
+   */
+  releaseTraceClaim(traceId: string, claimedAt: number): void {
+    this.db
+      .prepare(`UPDATE traces SET claimed_at = NULL WHERE trace_id = ? AND claimed_at = ?`)
+      .run(traceId, claimedAt);
+  }
+
+  // ---------------------------------------------------------------------------
   // Lifecycle
   // ---------------------------------------------------------------------------
 
@@ -450,6 +735,17 @@ export interface TurnOutcomeCounts {
   errored: number;
   halted: number;
   running: number;
+}
+
+/**
+ * A trace paired with the exact `claimed_at` timestamp this call's
+ * `claimUnexportedTraces` stamped it with — see the method doc. Local to
+ * this export-claim bookkeeping; `Trace` itself (the shared
+ * `@ethosagent/types` interface) is not extended (D20).
+ */
+export interface ClaimedTrace {
+  trace: Trace;
+  claimedAt: number;
 }
 
 export interface ToolUsageRow {

@@ -50,6 +50,7 @@ const sidebars: SidebarsConfig = {
             'using/how-to/run-as-daemon',
             'using/how-to/use-zero-mode',
             'using/how-to/run-in-docker',
+            'using/how-to/monitor-with-grafana',
             'using/how-to/use-skills',
             'using/how-to/interactive-charts-in-chat',
             'using/how-to/use-inline-context-refs',

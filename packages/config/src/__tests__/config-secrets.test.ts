@@ -420,6 +420,47 @@ describe('aws.secrets config round-trip', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Langfuse export config round-trip (analytics-observability plan, Part E)
+// ---------------------------------------------------------------------------
+
+describe('telemetry.export.langfuse config round-trip', () => {
+  it('non-secret fields round-trip through write/parse; secretKey is vaulted', async () => {
+    const storage = new InMemoryStorage();
+    const secrets = new InMemorySecretsResolver();
+    await storage.mkdir(ethosDir());
+    const config: EthosConfig = {
+      provider: 'anthropic',
+      model: 'claude-sonnet-4-6',
+      apiKey: 'sk-ant-test',
+      personality: 'researcher',
+      telemetry: {
+        export: {
+          langfuse: {
+            enabled: true,
+            baseUrl: 'https://cloud.langfuse.com',
+            publicKey: 'pk-lf-abc',
+            secretKey: 'sk-lf-secret',
+          },
+        },
+      },
+    };
+
+    await writeConfig(storage, config, secrets);
+    const raw = (await storage.read(join(ethosDir(), 'config.yaml'))) ?? '';
+    expect(raw).toContain('telemetry.export.langfuse.enabled: true');
+    expect(raw).toContain('telemetry.export.langfuse.baseUrl: https://cloud.langfuse.com');
+    expect(raw).toContain('telemetry.export.langfuse.publicKey: pk-lf-abc');
+    expect(raw).not.toContain('sk-lf-secret');
+
+    const resolved = await readConfig(storage, secrets);
+    expect(resolved?.telemetry?.export?.langfuse?.enabled).toBe(true);
+    expect(resolved?.telemetry?.export?.langfuse?.baseUrl).toBe('https://cloud.langfuse.com');
+    expect(resolved?.telemetry?.export?.langfuse?.publicKey).toBe('pk-lf-abc');
+    expect(resolved?.telemetry?.export?.langfuse?.secretKey).toBe('sk-lf-secret');
+  });
+});
+
+// ---------------------------------------------------------------------------
 // writeConfig externalization (G-SEC — config references a secret by name,
 // never by value). The read path already resolved refs; these cover the write
 // path that used to serialize credential VALUES as plaintext literals.
@@ -482,6 +523,16 @@ function configWithEveryCredential(): EthosConfig {
       hook1: { personalityId: 'researcher', secret: 'PLAIN-hook' },
     },
     memoryCapture: { enabled: true, model: 'm', apiKey: 'PLAIN-capture' },
+    telemetry: {
+      export: {
+        langfuse: {
+          enabled: true,
+          baseUrl: 'https://cloud.langfuse.com',
+          publicKey: 'pk-lf-plain',
+          secretKey: 'PLAIN-langfuse',
+        },
+      },
+    },
   };
 }
 
@@ -515,6 +566,7 @@ describe('writeConfig externalizes every credential field', () => {
     expect(resolved?.auxiliary).toEqual(original.auxiliary);
     expect(resolved?.webhooks).toEqual(original.webhooks);
     expect(resolved?.memoryCapture).toEqual(original.memoryCapture);
+    expect(resolved?.telemetry).toEqual(original.telemetry);
   });
 
   it('uses the documented ref names', async () => {
@@ -545,6 +597,7 @@ describe('writeConfig externalizes every credential field', () => {
         'telegram/bots/bot-a/token',
         `telegram/bots/${deriveBotKey({ token: 'PLAIN-bot-b' })}/token`,
         'telegram/token',
+        'telemetry/export/langfuse/secretKey',
         'voice/livekit/apiKey',
         'voice/livekit/apiSecret',
         'voice/trunk/password',

@@ -446,6 +446,7 @@ const ALL_SCOPES: ApiKeyScope[] = [
   'memory:write',
   'tools:approve',
   'events:subscribe',
+  'metrics:read',
 ];
 
 /**

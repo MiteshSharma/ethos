@@ -272,6 +272,14 @@ export async function* streamChatCompletions(
 
     // Usage chunk (comes on its own chunk when stream_options.include_usage=true)
     if (!choice && chunk.usage) {
+      const costEstimate = estimateCost(
+        params.effectiveModel,
+        {
+          inputTokens: chunk.usage.prompt_tokens,
+          outputTokens: chunk.usage.completion_tokens,
+        },
+        { localRuntime: params.localRuntime },
+      );
       yield {
         type: 'usage',
         usage: {
@@ -279,17 +287,11 @@ export async function* streamChatCompletions(
           outputTokens: chunk.usage.completion_tokens,
           cacheReadTokens: 0,
           cacheCreationTokens: 0,
-          estimatedCostUsd: estimateCost(
-            params.effectiveModel,
-            {
-              inputTokens: chunk.usage.prompt_tokens,
-              outputTokens: chunk.usage.completion_tokens,
-            },
-            { localRuntime: params.localRuntime },
-          ).costUsd,
+          estimatedCostUsd: costEstimate.costUsd,
           requestTokens: params.requestTokens,
         },
         metadata: {},
+        costBasis: costEstimate.basis,
       };
       continue;
     }
