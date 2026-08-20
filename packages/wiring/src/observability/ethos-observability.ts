@@ -62,6 +62,9 @@ export const ETHOS_EVENT_CATEGORIES = [
   'funnel.setup_completed',
   'funnel.first_reply',
   'funnel.channel_first_reply',
+  // Model-visible ⟺ logged (plan/phases/model-visible-logged.md, Phase D) —
+  // should never fire; see `packages/core/src/agent-loop/stages/context-drift.ts`.
+  'context.drift',
 ] as const;
 export type EthosEventCategory = (typeof ETHOS_EVENT_CATEGORIES)[number];
 
@@ -362,6 +365,22 @@ export class EthosObservability {
     },
   ): void {
     this.emit('tool.repair', 'info', opts, { toolName: opts.toolName, outcome: opts.outcome });
+  }
+
+  /**
+   * Model-visible ⟺ logged (Phase D) — a context section's live-assembled
+   * hash didn't match what the emit-on-change write path just confirmed.
+   * Should never fire (plan §6); `severity: 'error'` by default so it isn't
+   * lost among routine `info` events if it ever does.
+   */
+  recordContextDrift(
+    opts: EventBase & { kind: string; expectedHash: string; actualHash: string },
+  ): void {
+    this.emit('context.drift', 'error', opts, {
+      kind: opts.kind,
+      expectedHash: opts.expectedHash,
+      actualHash: opts.actualHash,
+    });
   }
 
   recordChannelPairing(opts: EventBase): void {

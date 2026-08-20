@@ -29,6 +29,8 @@ import {
 } from '../tool-result-aging';
 import type { AssembledContext, LoopDeps, TurnSetup } from '../turn-context';
 import { ageVisionBlocks } from '../vision-aging';
+import { checkContextDrift } from './context-drift';
+import { emitContextEvents } from './context-emit';
 
 // Phase 1a — aging state is persisted per session so the batched-at-crossings
 // invariant survives across turns. Best-effort: any storage error degrades to
@@ -285,7 +287,10 @@ export async function* assembleContext(
     ? deps.safety.redaction.redactPii(rawAnnotatedText, piiConfig.extraPatterns)
     : rawAnnotatedText;
 
-  await deps.session.appendMessage({
+  // Captured for the model-visible ⟺ logged emit-on-change write path (Phase
+  // B, D3): every context event for this turn is tagged with this message's
+  // id as its `message_id`.
+  const userMsg = await deps.session.appendMessage({
     sessionId,
     role: 'user',
     content: annotatedText,
@@ -421,12 +426,27 @@ export async function* assembleContext(
   // SOUL.md / personality identity — routes through Storage so ScopedStorage
   // and InMemoryStorage fixtures work correctly. Only runs when storage is
   // wired (production always provides it; tests without a real soulFile skip).
+  //
+  // `assembledIdentity` is captured (not just pushed) so the drift check
+  // below (Phase D, `context-drift.ts`) can compare the EXACT bytes that
+  // landed in the prompt against what the emit-on-change write path hashed —
+  // without re-reading the file.
+  let assembledIdentity: string | undefined;
   if (personality.soulFile && deps.storage) {
     const identity = await deps.storage.read(personality.soulFile);
-    if (identity) systemParts.push(identity.trim());
+    if (identity) {
+      assembledIdentity = identity.trim();
+      systemParts.push(assembledIdentity);
+    }
   }
 
-  // Context injectors sorted by priority (already sorted in constructor)
+  // Context injectors sorted by priority (already sorted in constructor).
+  // Also captures the two injectors the model-visible ⟺ logged write path
+  // (Phase B) tracks as their own kinds — `file_window` (Tier C) and
+  // `team_index` (Tier B) — since their rendered content is only available
+  // here, inside this loop.
+  let fileWindowContent: string | undefined;
+  let teamIndexContent: string | undefined;
   for (const injector of deps.injectors) {
     // §2 — a lean model's `promptBudget.suppressMemoryGuidance` drops the
     // memory-usage guidance block (the MemoryGuidanceInjector).
@@ -442,6 +462,8 @@ export async function* assembleContext(
       } else {
         systemParts.push(result.content);
       }
+      if (injector.id === 'file-context') fileWindowContent = result.content;
+      else if (injector.id.startsWith('team-memory-index:')) teamIndexContent = result.content;
     }
   }
 
@@ -546,6 +568,33 @@ export async function* assembleContext(
   }
 
   const systemPrompt = systemParts.join('\n\n').trim() || undefined;
+
+  // Model-visible ⟺ logged (plan/phases/model-visible-logged.md, Phase B) —
+  // emit-on-change write path. A no-op unless both `contentStore` and
+  // `contextLog` are wired; never mutates `systemParts`/`systemPrompt`, so
+  // this cannot affect what the model sees or break prefix caching (D1).
+  const emitOutcome = await emitContextEvents(deps, {
+    sessionId,
+    messageId: userMsg.id,
+    timestamp: userMsg.timestamp.getTime(),
+    personality,
+    memSnapshot,
+    fileWindowContent,
+    teamIndexContent,
+  });
+
+  // Phase D — drift invariant (§6). Compares the bytes actually assembled
+  // above against what the write path just confirmed, using values already
+  // in hand (no re-read, no second projection rebuild). A no-op unless
+  // `contentStore` and an observability writer with `recordContextDrift` are
+  // both wired; see `context-drift.ts` for scope and reasoning.
+  checkContextDrift(deps, {
+    sessionId,
+    messageId: userMsg.id,
+    traceId,
+    assembledIdentity,
+    fingerprintSoulSrc: emitOutcome.personalitySoulSrc,
+  });
 
   // Step 8: Agentic loop — LLM call → tool use → LLM call → ...
   // Q1 — collapse exact-duplicate tool results before building the

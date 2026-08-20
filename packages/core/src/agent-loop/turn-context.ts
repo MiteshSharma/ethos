@@ -1,8 +1,10 @@
 import type {
   AgentSafety,
+  ContentStore,
   ContextEngineLLMHandle,
   ContextEngineRegistry,
   ContextInjector,
+  ContextLog,
   HookRegistry,
   LLMProvider,
   McpPolicy,
@@ -136,6 +138,11 @@ export interface LoopDeps {
   sessionReadMtimes: Map<string, Map<string, { mtimeMs: number; readAtTurn: number }>>;
   contextStore: ContextStore;
   documentExtractors?: import('@ethosagent/types').DocumentExtractorRegistry;
+  /** Model-visible ⟺ logged (plan/phases/model-visible-logged.md, Phase B).
+   *  Both optional and always used together — absent either one, the
+   *  emit-on-change write path in context-assembly.ts is a no-op. */
+  contentStore?: ContentStore;
+  contextLog?: ContextLog;
 }
 
 // ---------------------------------------------------------------------------

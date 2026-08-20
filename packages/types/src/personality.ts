@@ -598,4 +598,28 @@ export interface PersonalityRegistry {
    * the concrete method directly.
    */
   update?(id: string, patch: PersonalityRegistryPatch): Promise<unknown>;
+  /**
+   * Model-visible ⟺ logged (plan/phases/model-visible-logged.md, Phase B,
+   * D8) — the six-path content fingerprint (`config.yaml`, `SOUL.md`,
+   * `toolset.yaml`, `mcp.yaml`, `tools.yaml`, `skills/` presence) for a
+   * personality, as raw source strings for the caller to hash. Optional:
+   * only `FilePersonalityRegistry` (extensions/personalities) implements
+   * it, since only a file-backed registry has a directory to read from.
+   * `context-assembly.ts` (packages/core) calls this through the interface
+   * rather than importing extensions/personalities directly — core does not
+   * depend on extensions (ARCHITECTURE.md layer direction). Returns `null`
+   * when the personality is unknown.
+   */
+  getContentFingerprint?(id: string): Promise<PersonalityFingerprintSources | null>;
+}
+
+/** Six-path content sources for a personality's fingerprint (D8). See
+ *  `PersonalityRegistry.getContentFingerprint`. */
+export interface PersonalityFingerprintSources {
+  soulSrc: string | null;
+  configSrc: string | null;
+  toolsetSrc: string | null;
+  mcpSrc: string | null;
+  toolsSrc: string | null;
+  skillsDirPresent: boolean;
 }

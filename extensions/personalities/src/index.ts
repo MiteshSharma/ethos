@@ -8,6 +8,7 @@ import {
   type LivingSoul,
   type ModelTierConfig,
   type PersonalityConfig,
+  type PersonalityFingerprintSources,
   type PersonalityObservabilityConfig,
   type PersonalityRegistry,
   type PersonalitySafetyConfig,
@@ -822,6 +823,13 @@ export class FilePersonalityRegistry implements PersonalityRegistry {
    *  tools.yaml file. */
   getToolsConfig(id: string): PersonalityToolsConfig | undefined {
     return this.toolsConfigs.get(id);
+  }
+
+  /** See `PersonalityRegistry.getContentFingerprint` (D8). */
+  async getContentFingerprint(id: string): Promise<PersonalityFingerprintSources | null> {
+    const described = this.describe(id);
+    if (!described) return null;
+    return readPersonalityFingerprintSources(this.storage, this.dirOf(described));
   }
 
   list(): PersonalityConfig[] {
@@ -1752,6 +1760,42 @@ export class FilePersonalityRegistry implements PersonalityRegistry {
     );
     return parts.join('|');
   }
+}
+
+// ---------------------------------------------------------------------------
+// Content fingerprint (model-visible ⟺ logged, Phase B, D8)
+// ---------------------------------------------------------------------------
+
+/**
+ * Read the six-path personality fingerprint inputs (D8) for content hashing
+ * — distinct from `fileFingerprint` above, which is mtime-based and only
+ * decides whether the registry should re-read a personality. Content hashing
+ * is genuinely new work, not a rename of what's already there (see
+ * plan/phases/model-visible-logged.md, "Repo areas touched").
+ *
+ * Exported as a free function, and also wrapped by
+ * `FilePersonalityRegistry.getContentFingerprint` (the `PersonalityRegistry`
+ * interface method). `packages/core` cannot import this package directly
+ * (ARCHITECTURE.md layer direction — core does not depend on extensions), so
+ * `context-assembly.ts` reaches this through the interface method on the
+ * `PersonalityRegistry` it already holds, never through this export.
+ *
+ * `skills/` is reported as presence only (`skillsDirPresent`), never its
+ * contents — hashing a directory's full contents is out of v1 scope (D8).
+ */
+export async function readPersonalityFingerprintSources(
+  storage: Storage,
+  dir: string,
+): Promise<PersonalityFingerprintSources> {
+  const [configSrc, soulSrc, toolsetSrc, mcpSrc, toolsSrc, skillsDirPresent] = await Promise.all([
+    storage.read(join(dir, 'config.yaml')),
+    storage.read(join(dir, 'SOUL.md')),
+    storage.read(join(dir, 'toolset.yaml')),
+    storage.read(join(dir, 'mcp.yaml')),
+    storage.read(join(dir, 'tools.yaml')),
+    storage.exists(join(dir, 'skills')),
+  ]);
+  return { soulSrc, configSrc, toolsetSrc, mcpSrc, toolsSrc, skillsDirPresent };
 }
 
 // ---------------------------------------------------------------------------

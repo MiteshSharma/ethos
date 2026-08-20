@@ -95,7 +95,14 @@ describe('Orchestrator guardrails', () => {
     // foreground turn. The stamping site is `BackgroundExecutor.runOne`
     // (extensions/job-runner); the consuming logic lives in
     // agent-loop/stages/tool-processing.ts and packages/core/src/clarify/.
-    expect(lineCount).toBeLessThanOrEqual(944);
+    // Bumped 944 -> 961 (model-visible ⟺ logged plan, Phase B): the optional
+    // `contentStore`/`contextLog` config fields (AgentLoopConfig injection,
+    // like every other optional dep), their private fields, one-line
+    // constructor assignments, and one-line deps-getter threading — 17
+    // irreducible pass-through lines. All the emit-on-change logic lives in
+    // agent-loop/stages/context-emit.ts, called from
+    // agent-loop/stages/context-assembly.ts.
+    expect(lineCount).toBeLessThanOrEqual(961);
   });
 
   it('no stage file exceeds 700 lines', () => {

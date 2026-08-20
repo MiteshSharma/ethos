@@ -77,5 +77,20 @@ export interface AgentLoopObservability {
   recordSkillInvocation?(
     opts: RecordEventOpts & { skill: string; mode: 'invoked' | 'exposed' },
   ): void;
+  /**
+   * Model-visible ⟺ logged (plan/phases/model-visible-logged.md, Phase D,
+   * §6) — the live-assembled bytes for a context `kind` did not hash to what
+   * the emit-on-change write path (Phase B) just confirmed for it. Should
+   * never fire: it means a code path read around the log. Not a new
+   * `AgentEvent` variant (frozen at 17, D8) and not `console.*` — this is the
+   * generic "record an anomaly" mechanism the observability writer already
+   * offers, the same one `recordSkillInvocation`/`recordToolRepair` use.
+   *
+   * Optional, like those two — `EthosObservability` satisfies it, lighter
+   * adapters need not.
+   */
+  recordContextDrift?(
+    opts: RecordEventOpts & { kind: string; expectedHash: string; actualHash: string },
+  ): void;
   flush(): void;
 }

@@ -21,6 +21,7 @@ export {
   hashApiKey,
   SqliteApiKeyStore,
 } from './api-key-store';
+export { SQLiteContextLog } from './context-log';
 export {
   decideMigration,
   type MigrateSessionKeysOptions,

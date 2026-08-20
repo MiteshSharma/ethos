@@ -407,6 +407,7 @@ The personality schema is the worked example. [Personality governance](docs/cont
 | Agent event union | Any two repository maintainers | Adding, removing, or renaming a variant | Variant enumeration test |
 | Tool contract | Any two repository maintainers | A change that affects already-shipped tool packages | Shape test |
 | Context engine contract | Any two repository maintainers | Adding, removing, or renaming a method on `ContextEngine` | Method-count test (`context-engine-method-count`) |
+| Content-addressed store (ContentStore) | Any two repository maintainers | Adding, removing, or renaming a method on ContentStore | Method-count test |
 
 Adding an **optional** method to `ContextEngine` is a §VI **Substantive** change:
 it needs two-maintainer approval, the drift gate bumped in the same commit, and
@@ -726,6 +727,12 @@ frozen_schemas:
     frozen_methods: [compact, shouldCompact, onTurnComplete]
     optional_method_addition: substantive
     required_method_addition: substantive_plus_plugin_contract_major
+
+  content_store:
+    owner_class: any_two_maintainers
+    drift_gate: method_count_test
+    frozen_method_count: 4
+    frozen_methods: [put, get, has, hash]
 
 # ---- Exception policy (§VIII) ----------------------------------------
 # Active exceptions live in the sidecar, not here. This block defines

@@ -23,6 +23,7 @@ import { runAudit } from './commands/audit';
 import { runBackup, runImport } from './commands/backup';
 import { runBatch } from './commands/batch';
 import { runBench } from './commands/bench';
+import { runCas } from './commands/cas';
 import { runChat } from './commands/chat';
 import { runClaw } from './commands/claw';
 import { runCommands } from './commands/commands';
@@ -60,6 +61,7 @@ import { runTail } from './commands/tail';
 import { runTeamCommand } from './commands/team';
 import { runTrace } from './commands/trace';
 import { runUpgrade } from './commands/upgrade';
+import { runWhy } from './commands/why';
 import { appendErrorLog } from './error-log';
 import { writeJson } from './json-output';
 import { CliSubcommandRegistry } from './lib/cli-subcommand-registry';
@@ -72,7 +74,7 @@ const ETHOS_VERSION =
   typeof __ETHOS_VERSION__ === 'string' ? __ETHOS_VERSION__ : (process.env.ETHOS_VERSION ?? 'dev');
 
 const USAGE =
-  'Usage: ethos [-z <prompt> | setup | chat | sessions | serve | dashboard | status | run-all | set | team | mesh | a2a | process | logs | gateway | listen | cron | personality | memory | acp | batch | bench | eval | evolve | learn | nightly | digest | plugin | skills | commands | keys | secrets | fallback | slack | api-key | claw | doctor | upgrade | mcp | backup | import | trace | audit | security | errors | perf | tail | retention | data | support | archive | systemd-unit | usage] [--version | --help]';
+  'Usage: ethos [-z <prompt> | setup | chat | sessions | serve | dashboard | status | run-all | set | team | mesh | a2a | process | logs | gateway | listen | cron | personality | memory | acp | batch | bench | eval | evolve | learn | nightly | digest | plugin | skills | commands | keys | secrets | fallback | slack | api-key | claw | doctor | upgrade | mcp | backup | import | trace | audit | security | errors | perf | tail | retention | cas | why | data | support | archive | systemd-unit | usage] [--version | --help]';
 
 const args = process.argv.slice(2);
 const command = args[0] ?? '';
@@ -865,6 +867,16 @@ try {
 
     case 'retention': {
       await runRetention(args[1] ?? 'show', args.slice(2));
+      break;
+    }
+
+    case 'cas': {
+      await runCas(args[1] ?? '', args.slice(2));
+      break;
+    }
+
+    case 'why': {
+      await runWhy(args.slice(1));
       break;
     }
 

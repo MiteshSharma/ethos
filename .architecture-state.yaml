@@ -248,8 +248,8 @@ register_anchors:
     - { path: packages/safety/injection/src/wrap.ts, line: 35, contains: "export function wrapUntrusted" }
     - { path: packages/safety/injection/src/classifier.ts, line: 60, contains: "export function createLLMClassifier" }
     - { path: packages/safety/injection/src/downgrade.ts, line: 23, contains: "export function resolveDowngradedTools" }
-    - { path: packages/core/src/agent-loop/stages/context-assembly.ts, line: 418, contains: "deps.safety.injection.prelude" }
-    - { path: packages/core/src/agent-loop.ts, line: 627, contains: "resolveDowngradedTools(dgConfig?.tools)" }
+    - { path: packages/core/src/agent-loop/stages/context-assembly.ts, line: 422, contains: "deps.safety.injection.prelude" }
+    - { path: packages/core/src/agent-loop.ts, line: 644, contains: "resolveDowngradedTools(dgConfig?.tools)" }
     - { path: packages/core/src/agent-loop/stages/tool-processing.ts, line: 707, contains: "await handleUntrustedResult(" }
     - { path: packages/core/src/agent-loop/result-defense.ts, line: 26, contains: "export async function handleUntrustedResult" }
 
@@ -291,7 +291,7 @@ register_anchors:
     - { path: packages/safety/watcher/src/rules.ts, line: 110, contains: "export function compoundingErrorRule" }
     - { path: packages/safety/watcher/src/rules.ts, line: 161, contains: "export function suspiciousSequenceRule" }
     - { path: packages/safety/watcher/src/rules.ts, line: 205, contains: "export function defaultRules" }
-    - { path: packages/wiring/src/build-agent-loop.ts, line: 473, contains: "defaultRules: watcherDefaultRules" }
+    - { path: packages/wiring/src/build-agent-loop.ts, line: 479, contains: "defaultRules: watcherDefaultRules" }
 
   G-CHAN:
     - { path: packages/safety/channel/src/channel-filter.ts, line: 111, contains: "export function checkMessage" }
@@ -621,6 +621,15 @@ tiers:
     package: "@ethosagent/call-log"
     tier: 2
     assigned: 2026-08-15
+
+  # Plain content-addressed blob store over Storage.writeAtomic — no
+  # enforcement decision of its own, same standing as memory-markdown /
+  # memory-vector. Backs the model-visible-logged invariant's byte storage
+  # (plan/phases/model-visible-logged.md); nothing reads it yet (Phase A).
+  extensions/cas-fs:
+    package: "@ethosagent/cas-fs"
+    tier: 2
+    assigned: 2026-08-20
 
   extensions/claw-migrate:
     package: "@ethosagent/claw-migrate"

@@ -272,6 +272,9 @@ importers:
       '@ethosagent/agent-mesh':
         specifier: workspace:*
         version: link:../../extensions/agent-mesh
+      '@ethosagent/cas-fs':
+        specifier: workspace:*
+        version: link:../../extensions/cas-fs
       '@ethosagent/config':
         specifier: workspace:*
         version: link:../../packages/config
@@ -554,6 +557,9 @@ importers:
       '@ethosagent/call-log':
         specifier: workspace:*
         version: link:../../extensions/call-log
+      '@ethosagent/cas-fs':
+        specifier: workspace:*
+        version: link:../../extensions/cas-fs
       '@ethosagent/config':
         specifier: workspace:*
         version: link:../../packages/config
@@ -876,6 +882,16 @@ importers:
       '@ethosagent/sqlite':
         specifier: workspace:*
         version: link:../../packages/sqlite
+
+  extensions/cas-fs:
+    dependencies:
+      '@ethosagent/types':
+        specifier: workspace:*
+        version: link:../../packages/types
+    devDependencies:
+      '@ethosagent/storage-fs':
+        specifier: workspace:*
+        version: link:../../packages/storage-fs
 
   extensions/claw-migrate:
     dependencies:
@@ -2364,6 +2380,9 @@ importers:
       '@ethosagent/call-log':
         specifier: workspace:*
         version: link:../../extensions/call-log
+      '@ethosagent/cas-fs':
+        specifier: workspace:*
+        version: link:../../extensions/cas-fs
       '@ethosagent/config':
         specifier: workspace:*
         version: link:../config

@@ -1,9 +1,11 @@
 import type {
   AgentEvent,
   AgentSafety,
+  ContentStore,
   ContextEngineLLMHandle,
   ContextEngineRegistry,
   ContextInjector,
+  ContextLog,
   DryRunToolPlan,
   HookRegistry,
   LLMProvider,
@@ -156,6 +158,14 @@ export interface AgentLoopConfig {
    * record of each LLM request/response for offline analysis and debugging.
    */
   requestDumpStore?: RequestDumpStore;
+  /** Model-visible ⟺ logged (Phase B, plan/phases/model-visible-logged.md) —
+   *  content-addressed blob store for Tier A/B context sections. Optional
+   *  together with `contextLog`: unset either one and context-assembly's
+   *  emit-on-change write path is a no-op. */
+  contentStore?: ContentStore;
+  /** Write-only log of which content hash was in effect per context section,
+   *  emitted on change only. See `contentStore`. */
+  contextLog?: ContextLog;
   /** v2.2 — Callback to emit tool invocation metrics to the diagnostic store.
    *  Wiring provides this; core never imports DiagnosticStore directly. */
   onToolMetric?: (opts: {
@@ -364,6 +374,9 @@ export class AgentLoop {
   readonly clarifyBridge?: ClarifyBridge;
   /** Optional request dump store for full LLM request/response recording. */
   private readonly requestDumpStore?: import('@ethosagent/types').RequestDumpStore;
+  /** Model-visible ⟺ logged (Phase B) — see AgentLoopConfig.contentStore/contextLog. */
+  private readonly contentStore?: ContentStore;
+  private readonly contextLog?: ContextLog;
   /** Phase 3 — team id stamped onto ToolContext when loop runs inside a team. */
   private readonly teamId?: string;
   /** Context-engine LLM handle — preferred over engine-constructor injection. */
@@ -420,6 +433,8 @@ export class AgentLoop {
     if (config.teamId) this.teamId = config.teamId;
     if (config.clarifyBridge) this.clarifyBridge = config.clarifyBridge;
     if (config.requestDumpStore) this.requestDumpStore = config.requestDumpStore;
+    if (config.contentStore) this.contentStore = config.contentStore;
+    if (config.contextLog) this.contextLog = config.contextLog;
     if (config.mcpPolicy) this.mcpPolicy = config.mcpPolicy;
     if (config.documentExtractors) this.documentExtractors = config.documentExtractors;
     if (config.onToolMetric) this.onToolMetric = config.onToolMetric;
@@ -541,6 +556,8 @@ export class AgentLoop {
       sessionReadMtimes: this.sessionReadMtimes,
       contextStore: this.contextStore,
       documentExtractors: this.documentExtractors,
+      contentStore: this.contentStore,
+      contextLog: this.contextLog,
     };
   }
 

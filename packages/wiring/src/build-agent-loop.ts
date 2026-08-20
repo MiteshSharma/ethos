@@ -1,5 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import { join } from 'node:path';
+import { FsContentStore } from '@ethosagent/cas-fs';
 import { backgroundDefaults } from '@ethosagent/config';
 import {
   AgentLoop,
@@ -234,6 +235,11 @@ export async function buildAgentLoop(
   // -------------------------------------------------------------------------
 
   const session = sessionCompose.sessionStore;
+  // Model-visible ⟺ logged (plan/phases/model-visible-logged.md, Phase B).
+  // `contextLog` shares `sessions.db` with `session` (D5); `contentStore` is
+  // the content-addressed blob store the log's Tier A/B events reference.
+  const contextLog = sessionCompose.contextLog;
+  const contentStore = new FsContentStore(join(dataDir, 'cas'), new FsStorage());
   const memoryName = config.memory ?? 'markdown';
   const memoryFactory = memoryProviders.get(memoryName);
   if (!memoryFactory) {
@@ -858,6 +864,8 @@ export async function buildAgentLoop(
     storage: new FsStorage(),
     attachmentCache: infra.capabilityBackends.attachmentCache,
     dataDir,
+    contentStore,
+    contextLog,
     modelRouting: config.modelRouting,
     ...(modelSampling ? { modelSampling } : {}),
     compaction: {

@@ -121,6 +121,7 @@
       "@ethosagent/skill-evolver": ["./extensions/skill-evolver/src"],
       "@ethosagent/claw-migrate": ["./extensions/claw-migrate/src"],
       "@ethosagent/secrets-aws": ["./extensions/secrets-aws/src"],
+      "@ethosagent/cas-fs": ["./extensions/cas-fs/src"],
       "@ethosagent/storage-crypto": ["./extensions/storage-crypto/src"],
       "@ethosagent/storage-s3": ["./extensions/storage-s3/src"],
       "@ethosagent/storage-memory-backend": ["./extensions/storage-memory-backend/src"],

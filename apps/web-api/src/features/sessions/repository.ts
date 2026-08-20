@@ -1,4 +1,6 @@
 import type {
+  ContextEvent,
+  ContextLog,
   SearchResult,
   Session,
   SessionFilter,
@@ -15,6 +17,18 @@ import type {
 // rowid-keyed cursor later is a non-breaking change — the cursor is opaque
 // to the client.
 
+/**
+ * The subset of `ContextLog` behavior `fork()` needs: the 3 shared methods
+ * plus `listForSession`, which is intentionally NOT part of the shared
+ * `ContextLog` contract (plan/phases/model-visible-logged.md D5 — "keep it
+ * small"; only this Phase E consumer needs raw per-session event history
+ * rather than `resolveAt`'s merged projection). `SQLiteContextLog` satisfies
+ * this structurally — no adapter needed.
+ */
+export interface ForkableContextLog extends ContextLog {
+  listForSession(sessionId: string): Promise<ContextEvent[]>;
+}
+
 export interface ListPage {
   sessions: Session[];
   nextCursor: string | null;
@@ -28,7 +42,19 @@ export interface ListOptions {
 }
 
 export class SessionsRepository {
-  constructor(private readonly store: SessionStore) {}
+  /**
+   * `contextLog` is optional — 25+ test files across `apps/web-api/src/__tests__/`
+   * construct `SessionsRepository` (or call `createWebApi`) with no notion of a
+   * context log, and making it required would force a much wider, out-of-scope
+   * blast radius. Absent means `fork()` silently skips context-event copying
+   * (today's behavior), which is correct: a session created before this
+   * feature, or a deployment that hasn't wired one, has no context events to
+   * copy anyway.
+   */
+  constructor(
+    private readonly store: SessionStore,
+    private readonly contextLog?: ForkableContextLog,
+  ) {}
 
   async list(opts: ListOptions): Promise<ListPage> {
     if (opts.q?.trim()) {
@@ -159,9 +185,18 @@ export class SessionsRepository {
 
     // Replay the source's history into the fork. Preserves tool_use / tool_result
     // pairing because we copy in chronological order.
+    //
+    // `appendMessage` always assigns a fresh id/timestamp — there is no way to
+    // preserve the source message's id (or its original timestamp) on the copy.
+    // Track old id -> new StoredMessage so context events (keyed by the
+    // SOURCE's message ids) can be remapped onto the fork below; without this,
+    // `resolveContextAt(fork.id, <fork message id>)` could never find
+    // anything, since the copied event's `messageId` would reference an id
+    // that doesn't exist in the fork.
     const history = await this.store.getMessages(source.id);
+    const idMap = new Map<string, StoredMessage>();
     for (const msg of history) {
-      await this.store.appendMessage({
+      const appended = await this.store.appendMessage({
         sessionId: fresh.id,
         role: msg.role,
         content: msg.content,
@@ -170,7 +205,49 @@ export class SessionsRepository {
         ...(msg.toolCalls ? { toolCalls: msg.toolCalls } : {}),
         ...(msg.usage ? { usage: msg.usage } : {}),
       });
+      idMap.set(msg.id, appended);
     }
+
+    // Copy context events onto the child (plan/phases/model-visible-logged.md
+    // D9) so `resolveContextAt` on the fork still reproduces what the parent
+    // saw. `hash`/`kind`/`mode`/`meta` are copied UNCHANGED — the referenced
+    // CAS blobs are content-addressed and global (not per-session), so only
+    // the log rows are copied, never the blobs.
+    //
+    // `timestamp` is deliberately NOT copied unchanged (a deviation from the
+    // original brief for this task, flagged here because it fixes a bug that
+    // brief's own reasoning had): `resolveAt` picks the newest event with
+    // `timestamp <= target message's timestamp`. Every replayed message above
+    // gets a FRESH, later "now" timestamp (there is no way to preserve the
+    // original one — see the loop above), so if a copied event kept its
+    // original (always-earlier) timestamp, EVERY child message would query as
+    // "after all copied events" and last-write-wins would collapse to the
+    // single latest event for every turn — losing exactly the pre-/post-
+    // hot-reload distinction this is supposed to preserve. Stamping each
+    // copied event with the timestamp of the specific new message it was
+    // remapped onto keeps the events ordered against each other exactly as
+    // before (insertion order is preserved) while keeping each one correctly
+    // "in the past" relative to only the later turns, so `resolveContextAt`
+    // on the fork reproduces the parent's per-turn history, not just its
+    // final state.
+    //
+    // `contentBlocks`/`traceId` are deliberately NOT copied here (D9) —
+    // pre-existing gaps in this same message-copy loop, left as a named
+    // follow-up rather than silently expanded.
+    if (this.contextLog) {
+      const events = await this.contextLog.listForSession(source.id);
+      for (const event of events) {
+        const newMessage = idMap.get(event.messageId);
+        if (!newMessage) continue; // defensive; should not happen in practice
+        await this.contextLog.append({
+          ...event,
+          sessionId: fresh.id,
+          messageId: newMessage.id,
+          timestamp: newMessage.timestamp.getTime(),
+        });
+      }
+    }
+
     return fresh;
   }
 }

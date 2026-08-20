@@ -45,7 +45,7 @@ import {
   NotificationGate,
 } from '@ethosagent/platform-callcapture';
 import { SessionLane } from '@ethosagent/session-lane';
-import { SqliteApiKeyStore } from '@ethosagent/session-sqlite';
+import { SQLiteContextLog, SqliteApiKeyStore } from '@ethosagent/session-sqlite';
 import { FsAttachmentCache, FsStorage } from '@ethosagent/storage-fs';
 import { createA2aTools } from '@ethosagent/tools-a2a';
 import type { McpManager } from '@ethosagent/tools-mcp';
@@ -146,6 +146,10 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
   // so the UI can run the onboarding wizard.
   if (config === null) {
     const session = createSessionStore({ dataDir: dir });
+    // No session data exists yet at this point regardless (onboarding hasn't
+    // written config.yaml), so wiring this here is a harmless no-op — cheap
+    // and consistent with the real path below, rather than a special case.
+    const contextLog = new SQLiteContextLog(join(dir, 'sessions.db'));
     const personalities = await createPersonalityRegistry({
       storage: getStorage(),
       userPersonalitiesDir: dir,
@@ -215,6 +219,7 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
       dataDir: dir,
       attachmentCache,
       sessionStore: session,
+      contextLog,
       memoryProvider: createMemoryProvider({
         dataDir: dir,
         storage: getStorage(),
@@ -361,6 +366,13 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
   // key). Declared here so that closure has an in-scope binding, not a forward
   // reference to a later `const`.
   const session = createSessionStore({ dataDir: dir });
+
+  // Phase E of plan/phases/model-visible-logged.md — fork copies context events
+  // onto the child (D9). Same `sessions.db` file `session` uses, separate
+  // handle — the same "same file, separate type" pattern SQLiteContextLog's own
+  // file-header comment documents (WAL mode makes concurrent handles safe). Not
+  // closed on SIGINT/SIGTERM below, matching `session` itself, which also isn't.
+  const contextLog = new SQLiteContextLog(join(dir, 'sessions.db'));
 
   // Cron scheduler — hoisted ABOVE the agent-loop construction so the
   // same scheduler instance can be threaded into createAgentLoop (registers
@@ -1116,6 +1128,7 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
     dataDir: dir,
     attachmentCache,
     sessionStore: session,
+    contextLog,
     personalitiesLlm: () => createLLM(config),
     memoryProvider: createMemoryProvider({
       dataDir: dir,

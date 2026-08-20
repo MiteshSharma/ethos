@@ -112,6 +112,12 @@ export interface CreateWebApiOptions {
   /** SQLite-backed session store, already initialised. Shared with ACP /
    *  gateway so the same DB rows back every surface. */
   sessionStore: SessionStore;
+  /** Phase E of plan/phases/model-visible-logged.md — when provided, session
+   *  fork copies the source's context events onto the child (D9) so
+   *  resolveContextAt on the fork still reproduces what the parent saw.
+   *  Optional: absent in onboarding/stub mode and in tests that don't need it —
+   *  fork() then silently skips the copy (today's behavior). */
+  contextLog?: import('./features/sessions/repository').ForkableContextLog;
   /** Lazy LLM factory for governed-learning drafts (Living Soul Expression
    *  evolution, Soul split). Omitted in onboarding mode — those RPCs then
    *  return NOT_CONFIGURED. */
@@ -538,7 +544,7 @@ export function createWebApi(opts: CreateWebApiOptions): CreateWebApiResult {
 
   // --- Repositories (data access only) ---
   const tokens = new WebTokenRepository({ dataDir: opts.dataDir, storage });
-  const sessionsRepo = new SessionsRepository(opts.sessionStore);
+  const sessionsRepo = new SessionsRepository(opts.sessionStore, opts.contextLog);
   const chatRepo = new ChatRepository(opts.sessionStore);
   const completionsRepo = new CompletionsRepository(opts.sessionStore);
   const configRepo = new ConfigRepository({ dataDir: opts.dataDir, storage, secrets });

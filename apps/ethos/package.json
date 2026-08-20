@@ -88,6 +88,7 @@
     "@ethosagent/a2a": "workspace:*",
     "@ethosagent/agent-bridge": "workspace:*",
     "@ethosagent/agent-mesh": "workspace:*",
+    "@ethosagent/cas-fs": "workspace:*",
     "@ethosagent/config": "workspace:*",
     "@ethosagent/cron": "workspace:*",
     "@ethosagent/delivery-ledger": "workspace:*",
