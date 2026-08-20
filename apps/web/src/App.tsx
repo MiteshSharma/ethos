@@ -24,9 +24,11 @@ import { useGoalDetail } from './features/goals/api/queries';
 import { useSessionGet } from './features/sessions/api/queries';
 import { useNewSessionModal } from './hooks/useNewSessionModal';
 import { usePushEventToasts } from './hooks/usePushEventToasts';
+import { useRunStream } from './hooks/useRunStream';
 import { useSessionTitleSync } from './hooks/useSessionTitleSync';
 import { bridge, isDesktop } from './lib/desktop';
 import { getLastPersonalityId, setLastPersonalityId } from './lib/lastPersonality';
+import { runsNeedingYou } from './lib/pi-run-reducer';
 import { extractWorkspacePersonalityId } from './lib/scopeNav';
 import { accentVars, personalityAccent, personalityTheme } from './lib/theme';
 import {
@@ -159,6 +161,17 @@ export function App() {
     return () => window.removeEventListener('keydown', onKey);
   }, [toggleDrawer]);
 
+  // One shell-level subscription feeds all three delegated-run surfaces — the
+  // drawer Runs pane, the status pill and the Tasks nav badge (§4.3/§4.4/D25).
+  // Subscribing in each of them would open three connections to the same
+  // session for one digest.
+  const runs = useRunStream();
+  const runStream = {
+    runs: runs.runs,
+    clarifyQueue: runs.clarifyQueue,
+    needsYou: runsNeedingYou(runs.runs).length,
+  };
+
   const shellClass = ['app-shell', drawerOpen ? 'drawer-open' : ''].filter(Boolean).join(' ');
 
   // Per DESIGN.md's P0 amendment: global chrome (the rail) stays neutral
@@ -170,7 +183,7 @@ export function App() {
   // grid — ScopeNav and `.app-main` still get their own named grid areas.
   const scopeAndStage = (
     <>
-      <ScopeNav />
+      <ScopeNav needsYouCount={runStream.needsYou} />
       <StageHeader />
       <main className="app-main">
         <Routes>
@@ -288,12 +301,18 @@ export function App() {
       ) : (
         scopeAndStage
       )}
-      <StatusBar drawerOpen={drawerOpen} onToggleDrawer={() => setDrawerOpen((v) => !v)} />
+      <StatusBar
+        drawerOpen={drawerOpen}
+        onToggleDrawer={() => setDrawerOpen((v) => !v)}
+        runs={runStream.runs}
+      />
       {isChat && (
         <RightDrawer
           open={drawerOpen}
           onClose={() => setDrawerOpen(false)}
           debugPanelEnabled={config?.debugPanelEnabled ?? false}
+          runs={runStream.runs}
+          clarifyQueue={runStream.clarifyQueue}
         />
       )}
       <CommandPalette

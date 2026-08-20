@@ -88,6 +88,12 @@ export interface UseChatResult {
     postTotalTokens: number;
     summariesEnabled: boolean;
   } | null>;
+  /**
+   * Record the answer this tab gave a delegated run's question, so the resolved
+   * card can name the decision (pi-delegation §4.5). `clarify.resolved` carries
+   * only a source, never the answer.
+   */
+  noteClarifyAnswer: (requestId: string, answer: string) => void;
 }
 
 type Reducer = (state: ChatState, op: ReducerOp) => ChatState;
@@ -341,6 +347,15 @@ export function useChat(opts: UseChatOptions): UseChatResult {
     [currentSessionId],
   );
 
+  // Remember the answer this tab gave a run's question, so the resolved card
+  // can name the decision (§4.5). `clarify.resolved` carries only a source.
+  const noteClarifyAnswer = useCallback((requestId: string, answer: string) => {
+    dispatch({
+      kind: 'action',
+      action: { type: 'note-clarify-answer', requestId, answer, timestamp: Date.now() },
+    });
+  }, []);
+
   return {
     state,
     currentSessionId,
@@ -351,5 +366,6 @@ export function useChat(opts: UseChatOptions): UseChatResult {
     resetSession,
     undoTurns,
     compact,
+    noteClarifyAnswer,
   };
 }

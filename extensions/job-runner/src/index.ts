@@ -2,10 +2,12 @@ import type { AgentLoop } from '@ethosagent/core';
 import type {
   ArtifactChange,
   BackgroundJob,
+  BackgroundJobStatus,
   HookRegistry,
   JobRunner,
   JobRunnerRegistry,
   JobStore,
+  RunUpdateDigest,
   SteerSink,
 } from '@ethosagent/types';
 import { EthosJobRunner } from './ethos-job-runner';
@@ -139,6 +141,16 @@ function shortArgDigest(args: unknown): string {
 }
 
 /**
+ * The card's `now` line for a tool call in flight: what the run is doing right
+ * now, in one line. A FACT — never phrasing the copy module owns.
+ */
+function nowLine(toolName: string, args: unknown): string {
+  const arg = shortArgDigest(args);
+  const line = arg ? `${toolName} ${arg}` : toolName;
+  return line.length > NOW_LINE_MAX_CHARS ? `${line.slice(0, NOW_LINE_MAX_CHARS - 1)}…` : line;
+}
+
+/**
  * A no-op steer sink. The executor does not (yet) thread surface-typed steering
  * into a background job — nothing pushes onto a detached child's sink today.
  * The runner still receives a real sink so it never has to special-case its
@@ -150,6 +162,32 @@ const NOOP_STEER_SINK: SteerSink = {
   drain: () => [],
   depth: () => 0,
 };
+
+/**
+ * Minimum gap between two digests for the SAME run (D11's "≤1 Hz per run").
+ * Per-run, not global: ten concurrent runs each get their own second.
+ */
+const RUN_UPDATE_MIN_INTERVAL_MS = 1_000;
+
+/** Cap on the `now` line — one line of the card, not a paragraph. */
+const NOW_LINE_MAX_CHARS = 120;
+
+/**
+ * Live digest state for one running job. `pending` is the trailing-edge timer:
+ * a burst of tool events inside one second collapses into a single publish at
+ * the end of it, which is the whole point of coalescing rather than throttling.
+ */
+interface RunDigest {
+  parentSessionKey: string;
+  runner: string;
+  status: BackgroundJobStatus;
+  now: string;
+  startedAt: number;
+  spendUsd: number;
+  toolCount: number;
+  lastPublishedAt: number;
+  pending: ReturnType<typeof setTimeout> | undefined;
+}
 
 export class BackgroundExecutor {
   private readonly store: JobStore;
@@ -167,6 +205,12 @@ export class BackgroundExecutor {
 
   /** onComplete subscribers, invoked after every terminal transition. */
   private readonly completeHandlers: Array<(job: BackgroundJob) => void> = [];
+
+  /** onRunUpdate subscribers — the run card's liveness feed (G9/D11/D20). */
+  private readonly runUpdateHandlers: Array<(update: RunUpdateDigest) => void> = [];
+
+  /** job.id -> its coalescing digest state, for the lifetime of the run. */
+  private readonly runDigests = new Map<string, RunDigest>();
 
   /** job.id -> the job's dedicated (unchained) AbortController. */
   private readonly activeControllers = new Map<string, AbortController>();
@@ -217,6 +261,25 @@ export class BackgroundExecutor {
     };
   }
 
+  /**
+   * Subscribe to the coalesced run digest (G9/D11/D20). Fires at most once per
+   * `RUN_UPDATE_MIN_INTERVAL_MS` per run, plus immediately on every status
+   * change — a status is the one thing that must never wait out a coalescing
+   * window. Returns an unsubscribe function.
+   *
+   * The executor publishes a routing key (`parentSessionKey`) and facts; it does
+   * NOT know what a session stream is. The surface that owns one — web-api's
+   * SSE layer — resolves the key to its own session and maps the digest onto
+   * its `run.update` push event.
+   */
+  onRunUpdate(handler: (update: RunUpdateDigest) => void): () => void {
+    this.runUpdateHandlers.push(handler);
+    return () => {
+      const idx = this.runUpdateHandlers.indexOf(handler);
+      if (idx !== -1) this.runUpdateHandlers.splice(idx, 1);
+    };
+  }
+
   /** Number of jobs currently running in the pool. */
   activeCount(): number {
     return this.activeControllers.size;
@@ -238,12 +301,16 @@ export class BackgroundExecutor {
     if (!this.activeControllers.has(jobId)) return;
     this.blockedJobs.set(jobId, requestId);
     await this.store.markBlocked(jobId, requestId);
+    // Empty `now`: "paused — waiting on you" is UI copy and lives in the copy
+    // module, not here. The status is the fact; the phrasing is the surface's.
+    this.updateDigest(jobId, { status: 'blocked', now: '' });
   }
 
   /** The counterpart: `blocked` -> `running`, and the heartbeat resumes. */
   async resumeJob(jobId: string): Promise<void> {
     if (!this.blockedJobs.delete(jobId)) return;
     await this.store.resumeFromBlocked(jobId);
+    this.updateDigest(jobId, { status: 'running' });
   }
 
   /**
@@ -320,6 +387,13 @@ export class BackgroundExecutor {
     const runs = [...this.activeRuns.values()];
     for (const controller of this.activeControllers.values()) controller.abort();
     await Promise.allSettled(runs);
+
+    // Each run's own teardown drops its digest; anything left here belongs to a
+    // run that never unwound, and its trailing timer must not outlive us.
+    for (const digest of this.runDigests.values()) {
+      if (digest.pending) clearTimeout(digest.pending);
+    }
+    this.runDigests.clear();
   }
 
   // -------------------------------------------------------------------------
@@ -419,6 +493,15 @@ export class BackgroundExecutor {
       // A run that ended while parked (cancelled from the blocked card) must not
       // leave its pause behind.
       this.blockedJobs.delete(job.id);
+      // Belt and braces: `finishAndNotify` closes the digest on every path it
+      // owns, but a throw between openDigest and the finish would strand a
+      // timer. Dropping a live digest here can only orphan a card the run no
+      // longer feeds anyway.
+      const digest = this.runDigests.get(job.id);
+      if (digest) {
+        if (digest.pending) clearTimeout(digest.pending);
+        this.runDigests.delete(job.id);
+      }
       // A slot freed — pull the next queued row (unless we're draining).
       if (!this.shuttingDown) void this.claimLoop();
     });
@@ -486,6 +569,10 @@ export class BackgroundExecutor {
 
       const runner = this.runnerFor(job);
 
+      // G9/D11 — from here the card is fed by the digest and nothing else. Open
+      // it AFTER the spend gate above, which can end the run before it starts.
+      this.openDigest(job);
+
       let output = '';
       let spend = 0;
       let errorText: string | undefined;
@@ -536,7 +623,11 @@ export class BackgroundExecutor {
           } catch (err) {
             this.log?.(`appendEvent failed for ${job.id}: ${errMsg(err)}`);
           }
+          this.updateDigest(job.id, { now: nowLine(ev.toolName, ev.args) });
         } else if (ev.type === 'tool_end') {
+          this.updateDigest(job.id, {
+            toolCount: (this.runDigests.get(job.id)?.toolCount ?? 0) + 1,
+          });
           try {
             await this.store.appendEvent(job.id, 'tool_end', {
               toolName: ev.toolName,
@@ -555,6 +646,7 @@ export class BackgroundExecutor {
           } catch (err) {
             this.log?.(`updateSpend failed for ${job.id}: ${errMsg(err)}`);
           }
+          this.updateDigest(job.id, { spendUsd: spend });
           if (job.maxCostUsd != null && spend > job.maxCostUsd) {
             costBreached = true;
             controller.abort();
@@ -681,6 +773,9 @@ export class BackgroundExecutor {
     fields: { summary?: string; error?: string },
   ): Promise<void> {
     await this.store.finish(id, terminal, fields);
+    // The card's last sample. Published before the completion notice so the run
+    // card is already terminal when Ethos's hand-back message lands under it.
+    this.closeDigest(id, terminal);
     const fresh = await this.store.get(id);
     if (!fresh) return;
     this.fireComplete(fresh);
@@ -702,5 +797,96 @@ export class BackgroundExecutor {
         this.log?.(`onComplete handler failed for ${job.id}: ${errMsg(err)}`);
       }
     }
+  }
+
+  // -------------------------------------------------------------------------
+  // Run digest — the run card's liveness feed (G9/D11/D20)
+  // -------------------------------------------------------------------------
+
+  /** Open the digest for a run and publish its first sample immediately. */
+  private openDigest(job: BackgroundJob): void {
+    this.runDigests.set(job.id, {
+      parentSessionKey: job.parentSessionKey,
+      runner: job.runner ?? this.defaultRunner.name,
+      status: 'running',
+      now: '',
+      startedAt: job.startedAt ?? Date.now(),
+      spendUsd: job.spendUsd ?? 0,
+      toolCount: 0,
+      lastPublishedAt: 0,
+      pending: undefined,
+    });
+    this.publishDigest(job.id);
+  }
+
+  /**
+   * Fold new facts into a run's digest and schedule its publication. A status
+   * change publishes immediately; everything else coalesces.
+   *
+   * A no-op for a job with no open digest — `markJobBlocked` may be called for a
+   * row this process is not running, and a completion write races the run's own
+   * teardown.
+   */
+  private updateDigest(
+    jobId: string,
+    patch: Partial<Pick<RunDigest, 'status' | 'now' | 'spendUsd' | 'toolCount'>>,
+  ): void {
+    const digest = this.runDigests.get(jobId);
+    if (!digest) return;
+    const statusChanged = patch.status !== undefined && patch.status !== digest.status;
+    Object.assign(digest, patch);
+    if (statusChanged) {
+      this.publishDigest(jobId);
+      return;
+    }
+    const wait = RUN_UPDATE_MIN_INTERVAL_MS - (Date.now() - digest.lastPublishedAt);
+    if (wait <= 0) {
+      this.publishDigest(jobId);
+      return;
+    }
+    // Trailing edge: one publish at the end of the window carrying the LATEST
+    // state, not the sample that happened to arrive first.
+    if (digest.pending) return;
+    digest.pending = setTimeout(() => this.publishDigest(jobId), wait);
+    digest.pending.unref?.();
+  }
+
+  /** Emit the digest's current state and reset its coalescing window. */
+  private publishDigest(jobId: string): void {
+    const digest = this.runDigests.get(jobId);
+    if (!digest) return;
+    if (digest.pending) {
+      clearTimeout(digest.pending);
+      digest.pending = undefined;
+    }
+    digest.lastPublishedAt = Date.now();
+    const update: RunUpdateDigest = {
+      parentSessionKey: digest.parentSessionKey,
+      jobId,
+      runner: digest.runner,
+      status: digest.status,
+      now: digest.now,
+      elapsedMs: Math.max(0, Date.now() - digest.startedAt),
+      spendUsd: digest.spendUsd,
+      toolCount: digest.toolCount,
+    };
+    for (const handler of [...this.runUpdateHandlers]) {
+      try {
+        handler(update);
+      } catch (err) {
+        this.log?.(`onRunUpdate handler failed for ${jobId}: ${errMsg(err)}`);
+      }
+    }
+  }
+
+  /** Publish the terminal sample, then drop the digest and its timer. */
+  private closeDigest(jobId: string, status: BackgroundJobStatus): void {
+    const digest = this.runDigests.get(jobId);
+    if (!digest) return;
+    digest.status = status;
+    digest.now = '';
+    this.publishDigest(jobId);
+    if (digest.pending) clearTimeout(digest.pending);
+    this.runDigests.delete(jobId);
   }
 }

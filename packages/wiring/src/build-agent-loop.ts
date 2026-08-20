@@ -914,6 +914,9 @@ export async function buildAgentLoop(
 
   let jobStore: SQLiteJobStore | undefined;
   let backgroundExecutor: BackgroundExecutor | undefined;
+  // Exposed on the result so the web-api's Tasks detail RPC can ask the runner
+  // that executed a row for its own detail-grid rows (pi-delegation D18).
+  let jobRunnerRegistry: import('@ethosagent/types').JobRunnerRegistry | undefined;
   let backgroundDeps: BackgroundToolDeps | undefined;
   let meshProxyReconciler: MeshProxyReconciler | undefined;
   if (backgroundEnabled) {
@@ -938,6 +941,7 @@ export async function buildAgentLoop(
     // because both the executor and `delegate_task` read instances, not
     // factories.
     const jobRunners = new DefaultJobRunnerRegistry();
+    jobRunnerRegistry = jobRunners;
     jobRunners.register(ETHOS_RUNNER_NAME, () => new EthosJobRunner(loop));
     await jobRunners.resolve(ETHOS_RUNNER_NAME, { logger: log });
     // Pi — out-of-process, in a container. Registered only when the deployment
@@ -1352,6 +1356,7 @@ export async function buildAgentLoop(
     goalRunner,
     ...(jobStore ? { jobStore } : {}),
     ...(backgroundExecutor ? { backgroundExecutor } : {}),
+    ...(jobRunnerRegistry ? { jobRunners: jobRunnerRegistry } : {}),
     ...(meshProxyReconciler ? { meshProxyReconciler } : {}),
     activePersonality: activePerson,
     refreshPersonalities: () => personalities.loadFromDirectory(join(dataDir, 'personalities')),

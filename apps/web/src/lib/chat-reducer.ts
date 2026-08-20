@@ -9,6 +9,13 @@ import {
   type StoredMessage,
 } from '@ethosagent/web-contracts';
 import type { MessageAttachment } from './attachments';
+import {
+  applyClarifyEvent,
+  type ClarifyQueueState,
+  emptyClarifyQueue,
+  noteAnswer,
+} from './clarify-queue';
+import { applyRunEvent, emptyRunsState, type RunsState } from './pi-run-reducer';
 
 // Pure reducer that maps SSE events → ChatState. Extracted from the
 // `useChat` hook so we can test the state machine in isolation, without
@@ -108,7 +115,27 @@ export interface CardBlock {
   card: CardEnvelope;
 }
 
-export type AssistantBlock = TextBlock | ToolBlock | ImageBlock | HtmlBlock | PdfBlock | CardBlock;
+/**
+ * Anchor for a delegated run's card (pi-delegation §4.1). It carries the job
+ * id and nothing else on purpose: the run's live state lives in `ChatState.runs`
+ * (a `RunsState`, fed by the `run.update` digest), so a digest arriving at 1 Hz
+ * does not rewrite the transcript. The block only records WHERE the handoff
+ * happened, which is the one thing the transcript owns.
+ */
+export interface RunBlock {
+  kind: 'run';
+  jobId: string;
+  runner: string;
+}
+
+export type AssistantBlock =
+  | TextBlock
+  | ToolBlock
+  | ImageBlock
+  | HtmlBlock
+  | PdfBlock
+  | CardBlock
+  | RunBlock;
 
 export interface AssistantTurn {
   id: string;
@@ -150,6 +177,18 @@ export interface ChatState {
    * Resets with the session (via `reset`), not per turn.
    */
   contextTokens: number | null;
+  /**
+   * Delegated runs seen on this session's stream (pi-delegation D9/D11). The
+   * transcript holds a `RunBlock` anchor; the live state is here, so the card
+   * stays live off the digest alone without a second SSE connection.
+   */
+  runs: RunsState;
+  /**
+   * Questions asked by those runs, queued per lane (D9/G1). Separate from
+   * `pendingClarifies`, which stays the foreground `clarify` tool's floating
+   * card — a run's question is drawn inside its own card instead (§4.5).
+   */
+  clarifyQueue: ClarifyQueueState;
 }
 
 export const initialChatState: ChatState = {
@@ -163,6 +202,8 @@ export const initialChatState: ChatState = {
   currentOp: null,
   turnStartedAt: null,
   contextTokens: null,
+  runs: emptyRunsState,
+  clarifyQueue: emptyClarifyQueue,
 };
 
 /**
@@ -189,7 +230,13 @@ export type ChatAction =
    * the old session's messages until the history fetch completes.
    */
   | { type: 'reset' }
-  | { type: 'undo-turns'; count: number };
+  | { type: 'undo-turns'; count: number }
+  /**
+   * Remember the answer this tab just sent for a run's question. `clarify.resolved`
+   * carries only the source, so without this the resolved card could say a
+   * question was answered but never what the answer was (§4.5).
+   */
+  | { type: 'note-clarify-answer'; requestId: string; answer: string; timestamp: number };
 
 export function applyEvent(state: ChatState, event: SseEvent, now: number): ChatState {
   switch (event.type) {
@@ -448,8 +495,18 @@ export function applyEvent(state: ChatState, event: SseEvent, now: number): Chat
     case 'clarify.request': {
       // The agent called `clarify` — surface the question as a card. Dedupe
       // by requestId so an SSE reconnect re-delivering the event is a no-op.
+      //
+      // A question carrying a `jobId` was asked by a delegated run (D22): it
+      // goes to the run queue only, because §4.5 draws it inside that run's
+      // card. Floating it as well would ask the same question twice.
+      const queue = applyClarifyEvent(state.clarifyQueue, event, now);
+      if (event.jobId !== undefined) return { ...state, clarifyQueue: queue };
       if (state.pendingClarifies.some((c) => c.requestId === event.requestId)) return state;
-      return { ...state, pendingClarifies: [...state.pendingClarifies, event] };
+      return {
+        ...state,
+        clarifyQueue: queue,
+        pendingClarifies: [...state.pendingClarifies, event],
+      };
     }
 
     case 'clarify.resolved': {
@@ -457,7 +514,25 @@ export function applyEvent(state: ChatState, event: SseEvent, now: number): Chat
       // the card here too so every tab collapses it together.
       return {
         ...state,
+        clarifyQueue: applyClarifyEvent(state.clarifyQueue, event, now),
         pendingClarifies: state.pendingClarifies.filter((c) => c.requestId !== event.requestId),
+      };
+    }
+
+    case 'run.update': {
+      // G9 — a delegated run's own events fire on its child session key, which
+      // nobody watching this chat is subscribed to. This coalesced digest is
+      // the card's ONLY feed, which is why the first one also plants the
+      // transcript anchor: the run card renders where the handoff happened,
+      // in place of what would otherwise be a tool chip.
+      const runs = applyRunEvent(state.runs, event, now);
+      if (state.runs.byId[event.jobId] !== undefined) return { ...state, runs };
+      const turn = ensureTurn(state.currentTurn, now);
+      const anchor: RunBlock = { kind: 'run', jobId: event.jobId, runner: event.runner };
+      return {
+        ...state,
+        runs,
+        currentTurn: { ...turn, blocks: [...turn.blocks, anchor] },
       };
     }
 
@@ -538,6 +613,18 @@ export function applyAction(state: ChatState, action: ChatAction): ChatState {
 
     case 'reset': {
       return initialChatState;
+    }
+
+    case 'note-clarify-answer': {
+      return {
+        ...state,
+        clarifyQueue: noteAnswer(
+          state.clarifyQueue,
+          action.requestId,
+          action.answer,
+          action.timestamp,
+        ),
+      };
     }
 
     case 'undo-turns': {

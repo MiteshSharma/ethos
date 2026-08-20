@@ -44,7 +44,13 @@ import { PersonalityRingAvatar } from './ui/PersonalityRingAvatar';
 
 const SIDEBAR_SESSION_LIMIT = 20;
 
-export function ScopeNav() {
+/**
+ * D25 — the numeric "needs you" badge lives on the Tasks ROW, at both
+ * altitudes (workspace and Library "All tasks"), never on a global sidebar.
+ * `ScopeNav` replaced `Sidebar.tsx`; baking a Sidebar selector here would tie
+ * the badge to chrome that no longer exists.
+ */
+export function ScopeNav({ needsYouCount = 0 }: { needsYouCount?: number }) {
   const { pathname } = useLocation();
   const personalityId = extractWorkspacePersonalityId(pathname);
   const [searchParams] = useSearchParams();
@@ -172,7 +178,13 @@ export function ScopeNav() {
             pathname={pathname}
           />
           <NavRow path={`/p/${personalityId}/goals`} icon="🎯" label="Goals" pathname={pathname} />
-          <NavRow path={`/p/${personalityId}/tasks`} icon="🧵" label="Tasks" pathname={pathname} />
+          <NavRow
+            path={`/p/${personalityId}/tasks`}
+            icon="🧵"
+            label="Tasks"
+            pathname={pathname}
+            badge={needsYouCount}
+          />
           <NavRow
             path={`/p/${personalityId}/identity`}
             icon="🪪"
@@ -187,7 +199,14 @@ export function ScopeNav() {
             <NavRow path="/skills" icon="⚡" label="All skills" pathname={pathname} exact />
             <NavRow path="/plugins" icon="🧩" label="All plugins" pathname={pathname} />
             <NavRow path="/mcp" icon="🔌" label="All servers" pathname={pathname} exact />
-            <NavRow path="/library/tasks" icon="🧵" label="All tasks" pathname={pathname} exact />
+            <NavRow
+              path="/library/tasks"
+              icon="🧵"
+              label="All tasks"
+              pathname={pathname}
+              exact
+              badge={needsYouCount}
+            />
             <NavRow path="/communications" icon="📡" label="Platforms" pathname={pathname} exact />
           </div>
           <div className="sidebar-divider" />
@@ -338,12 +357,15 @@ function NavRow({
   hint,
   pathname,
   exact,
+  badge,
 }: {
   path: string;
   icon?: string;
   label: string;
   hint?: string | null;
   pathname: string;
+  /** Numeric attention badge. 0 or absent renders nothing (§4.4/D25). */
+  badge?: number;
   /** Default active-match is `pathname === path || pathname.startsWith(path + '/')`
    *  (so nested routes like `/goals/:goalId` still light up "Goals"). Pass
    *  `exact` for rows with no nested children of their own. */
@@ -351,9 +373,16 @@ function NavRow({
 }) {
   const active = exact ? pathname === path : pathname === path || pathname.startsWith(`${path}/`);
   return (
-    <Link to={path} className={`sidebar-nav-item${active ? ' active' : ''}`} title={label}>
+    <Link
+      to={path}
+      className={`sidebar-nav-item${active ? ' active' : ''}`}
+      title={badge && badge > 0 ? `${label} — ${badge} needs you` : label}
+    >
       {icon ? <span className="nav-icon">{icon}</span> : null}
       <span className="sidebar-nav-label">{label}</span>
+      {/* A count paired with the row's own title text — never colour alone
+          (§4.11), and the title is what a screen reader announces. */}
+      {badge && badge > 0 ? <span className="sidebar-nav-badge">{badge}</span> : null}
       {hint ? <span className="sidebar-nav-hint">{hint}</span> : null}
     </Link>
   );

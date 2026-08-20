@@ -1,14 +1,21 @@
+import { isLightSurface } from '@ethosagent/design-tokens/antd';
 import { useEffect, useState } from 'react';
 import { Link, useLocation } from 'react-router-dom';
 import { useConfig } from '../features/config/api/queries';
 import { getLastPersonalityId } from '../lib/lastPersonality';
 import { getLastSessionId } from '../lib/lastSession';
+import { allRuns, type RunsState, runCounts } from '../lib/pi-run-reducer';
+import { resolveRunner, runnerAccentVars } from '../lib/runners';
+import { useResolvedTokens } from '../lib/skin-tokens';
+import { RUN_COPY } from '../lib/worker-copy';
 import { isChatPathname, resolveFallbackPersonalityId } from '../lib/workspaceRoutes';
 import { subscribeToSession } from '../sse';
 
 interface StatusBarProps {
   drawerOpen: boolean;
   onToggleDrawer: () => void;
+  /** Delegated runs on the active session — the §4.4 pill. */
+  runs?: RunsState;
 }
 
 /** Track pending skill proposals via SSE events. */
@@ -43,7 +50,35 @@ function useSkillProposalCount(): number {
   return count;
 }
 
-export function StatusBar({ drawerOpen, onToggleDrawer }: StatusBarProps) {
+/**
+ * §4.4 — the run pill. Machine-wide, on the status bar, and hidden when no run
+ * exists. Persistent state, never a toast: a notice that vanishes while you are
+ * in another tab is the same as no notice at all.
+ */
+function RunPill({ runs }: { runs: RunsState }) {
+  const tokens = useResolvedTokens();
+  const light = isLightSurface(tokens);
+  const rows = allRuns(runs);
+  const first = rows[0];
+  if (!first) return null;
+  const runner = resolveRunner(first.runner);
+  const counts = runCounts(runs);
+  const text = RUN_COPY.statusPill(runner, counts);
+  if (!text) return null;
+  return (
+    <>
+      <span className="sb-sep" />
+      <span
+        className={`sb-run-pill${counts.needsYou > 0 ? ' sb-run-pill--needs-you' : ''}`}
+        style={runnerAccentVars(runner, light)}
+      >
+        {text}
+      </span>
+    </>
+  );
+}
+
+export function StatusBar({ drawerOpen, onToggleDrawer, runs }: StatusBarProps) {
   const { data, error, isLoading } = useConfig();
   const { pathname } = useLocation();
   const isChat = isChatPathname(pathname);
@@ -101,6 +136,8 @@ export function StatusBar({ drawerOpen, onToggleDrawer }: StatusBarProps) {
           </Link>
         </>
       )}
+
+      {runs ? <RunPill runs={runs} /> : null}
 
       <span className="sb-spacer" />
       {isChat && (

@@ -10,6 +10,7 @@ import { Composer } from '../components/chat/Composer';
 import { GoalIntakeModal } from '../components/chat/GoalIntakeModal';
 import { MessageList } from '../components/chat/MessageList';
 import { PersonalityBar } from '../components/chat/PersonalityBar';
+import type { RunSurface } from '../components/chat/RunCard';
 import { useConfig } from '../features/config/api/queries';
 import { useGoalCreate } from '../features/goals/api/mutations';
 import { useGoalDetection } from '../features/goals/useGoalDetection';
@@ -112,6 +113,7 @@ export function Chat() {
     switchSession,
     resetSession,
     compact,
+    noteClarifyAnswer,
   } = useChat({
     ...(sessionParam ? { initialSessionId: sessionParam } : {}),
     personalityId,
@@ -366,6 +368,18 @@ export function Chat() {
   // arrived while the first modal was open."
   const pendingApproval = state.pendingApprovals[0];
   const pendingClarify = state.pendingClarifies[0];
+
+  // Live state for the delegated-run cards anchored in the transcript (§4.1).
+  // Fed by the `run.update` digest already riding this session's SSE stream —
+  // the card needs no connection of its own (G9/D11).
+  const runSurface: RunSurface = useMemo(
+    () => ({
+      runs: state.runs,
+      clarifyQueue: state.clarifyQueue,
+      onAnswered: noteClarifyAnswer,
+    }),
+    [state.runs, state.clarifyQueue, noteClarifyAnswer],
+  );
 
   // Talk-mode (Phase B). The call affordance is gated on the active
   // personality's toolset (§3(e)) — voice availability is a personality
@@ -773,6 +787,7 @@ export function Chat() {
       <MessageList
         messages={messages}
         currentTurn={state.currentTurn}
+        runSurface={runSurface}
         personalityId={personalityId}
         model={model}
         sessionId={currentSessionId ?? undefined}

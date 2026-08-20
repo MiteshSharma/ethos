@@ -18,8 +18,11 @@ import { FileSecretsResolver, FsStorage } from '@ethosagent/storage-fs';
 import { McpJsonStore, type McpManager } from '@ethosagent/tools-mcp';
 import { buildDashboardTools } from '@ethosagent/tools-ui';
 import type {
+  BackgroundJob,
+  JobRunnerRegistry,
   JobStore,
   MemoryProvider,
+  RunUpdateDigest,
   SecretsResolver,
   SessionStore,
   Storage,
@@ -33,6 +36,7 @@ import {
   type MemoryBackendSelection,
 } from '@ethosagent/wiring';
 import type { Hono } from 'hono';
+import { formatRunHandBack } from './features/chat/handback';
 import { ChatRepository } from './features/chat/repository';
 import { type ChatDefaults, ChatService } from './features/chat/service';
 import { CompletionsRepository } from './features/completions/repository';
@@ -136,6 +140,28 @@ export interface CreateWebApiOptions {
    *  Tasks surface (list/get/cancel). Absent when background delegation is
    *  disabled — the tasks RPC degrades to empty reads. */
   jobStore?: JobStore;
+  /**
+   * Resolved job runners from wiring, so the Tasks detail RPC can ask the runner
+   * that executed a row for its own detail-grid rows (`JobRunner.describe`,
+   * pi-delegation D18). Absent → the grid renders its 12 shared rows and nothing
+   * else, which is a valid card.
+   */
+  jobRunners?: JobRunnerRegistry;
+  /**
+   * Subscribe to the executor's coalesced run digest (pi-delegation G9/D11/D20).
+   * Wired by the surface that owns the `BackgroundExecutor`. Each digest is
+   * routed to its PARENT session's SSE stream as a `run.update` push event —
+   * without it a run card renders once and freezes, because the run's own events
+   * fire on `childSessionKey`, which nobody watching the parent chat subscribes
+   * to. Absent → no digest, and the card is fed by polling nothing.
+   */
+  subscribeRunUpdates?: (handler: (update: RunUpdateDigest) => void) => void;
+  /**
+   * Subscribe to terminal job transitions (`BackgroundExecutor.onComplete`) so
+   * the run's result lands as a message in the parent conversation, from Ethos
+   * (§4.9/D27). Deliberately the EXISTING complete path — not a new bus.
+   */
+  subscribeJobComplete?: (handler: (job: BackgroundJob) => void) => void;
   /** Personality registry — shared with the loop so hot-reloads (mtime cache)
    *  reach both surfaces. Must be a `FilePersonalityRegistry` so the web-api's
    *  Personalities tab can drive its CRUD methods (create / update / delete /
@@ -1043,6 +1069,9 @@ export function createWebApi(opts: CreateWebApiOptions): CreateWebApiResult {
         question: req.question,
         ...(req.options ? { options: req.options } : {}),
         ...(req.default !== undefined ? { default: req.default } : {}),
+        // Present when a delegated run asked (D22) — the browser draws the
+        // question inside that run's card instead of floating it.
+        ...(req.jobId !== undefined ? { jobId: req.jobId } : {}),
         defaultDeadlineAt: req.defaultDeadlineAt,
       });
     });
@@ -1058,6 +1087,77 @@ export function createWebApi(opts: CreateWebApiOptions): CreateWebApiResult {
     // registered — hydrate() only adopts rows this bridge can present).
     void clarifyBridge.hydrate();
     void clarifyBridge.sweep();
+  }
+
+  // Bridge delegated runs → SSE (pi-delegation G9/D11/D20 = I15, §4.9/D27 = I18).
+  //
+  // The problem this solves: a background job's own events fire on its
+  // `childSessionKey`, which is not a web session anyone is subscribed to. A run
+  // card in the PARENT chat fed by those would render once and freeze at
+  // `queued` while the run finished. So the executor publishes a coalesced
+  // digest keyed by `parentSessionKey`, and this block is the one place that
+  // turns a session KEY into the session ID the SSE buffer is keyed by.
+  //
+  // The key→id map is built by the same `session_start` hook the notification
+  // router uses, for the same reason: that hook is the only place both
+  // identifiers are known at once. A run card therefore requires a turn to have
+  // run in its session — which is exactly how the run got delegated.
+  if (opts.subscribeRunUpdates || opts.subscribeJobComplete) {
+    const sessionIdsByKey = new Map<string, string>();
+    const sessionKeysById = new Map<string, string>();
+    agentLoop.hooks.registerVoid('session_start', async (payload) => {
+      sessionIdsByKey.set(payload.sessionKey, payload.sessionId);
+      sessionKeysById.set(payload.sessionId, payload.sessionKey);
+    });
+    const previousOnReap = buffer.onReap;
+    buffer.onReap = (sessionId: string) => {
+      const key = sessionKeysById.get(sessionId);
+      if (key !== undefined) {
+        sessionIdsByKey.delete(key);
+        sessionKeysById.delete(sessionId);
+      }
+      previousOnReap?.(sessionId);
+    };
+
+    opts.subscribeRunUpdates?.((update) => {
+      const sessionId = sessionIdsByKey.get(update.parentSessionKey);
+      // No open session for this key — a CLI- or gateway-spawned run. Its card
+      // does not live here, so there is nothing to keep alive.
+      if (!sessionId) return;
+      chatService.broadcast(sessionId, {
+        type: 'run.update',
+        jobId: update.jobId,
+        runner: update.runner,
+        status: update.status,
+        now: update.now,
+        elapsedMs: update.elapsedMs,
+        spendUsd: update.spendUsd,
+        toolCount: update.toolCount,
+      });
+    });
+
+    opts.subscribeJobComplete?.((job) => {
+      const sessionId = sessionIdsByKey.get(job.parentSessionKey);
+      if (!sessionId) return;
+      const text = formatRunHandBack({
+        runner: job.runner ?? 'ethos',
+        label: job.label,
+        status: job.status,
+        summary: job.summary,
+        error: job.error,
+        spendUsd: job.spendUsd,
+        elapsedMs:
+          job.startedAt !== undefined && job.finishedAt !== undefined
+            ? job.finishedAt - job.startedAt
+            : undefined,
+      });
+      if (!text) return;
+      void chatService.handBack(sessionId, text).catch((err) => {
+        console.warn(
+          `[chat] completion hand-back failed for job ${job.id}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      });
+    });
   }
 
   // E3 — improvement fork SSE. When the wiring layer's setOnSkillProposed

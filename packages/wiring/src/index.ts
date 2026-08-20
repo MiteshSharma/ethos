@@ -1072,6 +1072,10 @@ export interface CreateAgentLoopResult {
   /** Detached background executor — present only when enabled. gateway.ts/chat.ts
    *  register completion handlers and call shutdown() on it. */
   backgroundExecutor?: import('@ethosagent/job-runner').BackgroundExecutor;
+  /** Resolved job runners — present only when the background subsystem is enabled.
+   *  The web-api Tasks detail RPC asks the runner that executed a row for its own
+   *  detail-grid rows (pi-delegation D18). */
+  jobRunners?: import('@ethosagent/types').JobRunnerRegistry;
   /** Mesh proxy reconciler — present only when the background subsystem is enabled.
    *  Polls mesh peers for jobs spawned via route_to_agent(background:true). Timers
    *  are unref'd; expose stop() for shutdown symmetry. */

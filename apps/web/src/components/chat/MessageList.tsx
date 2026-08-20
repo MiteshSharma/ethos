@@ -4,6 +4,7 @@ import type { AssistantTurn, ChatMessage } from '../../lib/chat-reducer';
 import { SaveToDashboardContextMenu } from '../dashboard/SaveToDashboardContextMenu';
 import { SaveToDashboardModal } from '../dashboard/SaveToDashboardModal';
 import { AssistantBubble, UserBubble } from './MessageBubble';
+import type { RunSurface } from './RunCard';
 
 // Scrollable history. Auto-scrolls to the bottom as content arrives —
 // but only when the user was already pinned to the bottom, so reading
@@ -20,6 +21,8 @@ export interface MessageListProps {
   onSuggestPrompt?: (prompt: string) => void;
   /** Starts talk-mode from the empty state. Absent = no "Try voice" pill. */
   onTryVoice?: () => void;
+  /** Live delegated-run state for the transcript's run anchors (§4.1). */
+  runSurface?: RunSurface;
 }
 
 export function MessageList({
@@ -30,6 +33,7 @@ export function MessageList({
   sessionId,
   onSuggestPrompt,
   onTryVoice,
+  runSurface,
 }: MessageListProps) {
   const listRef = useRef<HTMLDivElement>(null);
   const pinnedToBottomRef = useRef(true);
@@ -114,6 +118,7 @@ export function MessageList({
               fenceRenderers={fenceRenderers}
               onSuggestPrompt={onSuggestPrompt}
               {...(personalityId ? { personalityId } : {})}
+              {...(runSurface ? { runSurface } : {})}
             />
           </SaveToDashboardContextMenu>
         ),
@@ -125,6 +130,7 @@ export function MessageList({
           fenceRenderers={fenceRenderers}
           onSuggestPrompt={onSuggestPrompt}
           {...(personalityId ? { personalityId } : {})}
+          {...(runSurface ? { runSurface } : {})}
         />
       ) : null}
       {isThinking ? <ThinkingBubble /> : null}

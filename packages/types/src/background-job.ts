@@ -304,6 +304,42 @@ export interface JobStore {
 }
 
 // ---------------------------------------------------------------------------
+// Run update digest — the run card's liveness feed (pi-delegation D11/D20, G9)
+// ---------------------------------------------------------------------------
+
+/**
+ * One coalesced liveness sample for a run, published by the executor at <=1 Hz
+ * per job. It exists because a job's own events fire on `childSessionKey`, which
+ * nobody watching the PARENT chat is subscribed to — so a card fed by those
+ * would render once and freeze at `queued` (G9).
+ *
+ * The digest is deliberately NOT an `AgentEvent` (that contract is frozen at 17
+ * types, D3). The surface that owns a session stream maps this onto its own
+ * push event — `run.update` in `@ethosagent/web-contracts` — which is why every
+ * field below except `parentSessionKey` is exactly that event's payload.
+ * `parentSessionKey` is the ROUTING key, not part of the payload: it says which
+ * conversation the card lives in.
+ */
+export interface RunUpdateDigest {
+  /** Where the card lives. The parent's session key, never the child's. */
+  parentSessionKey: string;
+  jobId: string;
+  /** `JobRunner.name` — resolved to a label/accent by the surface, never rendered raw. */
+  runner: string;
+  status: BackgroundJobStatus;
+  /**
+   * The card's `now` line: one line of FACT about what the run is doing,
+   * REPLACED never appended. The executor never puts UI copy here — a parked or
+   * lost run sends an empty string and the surface substitutes its own normative
+   * phrasing, so the copy contract stays in one place.
+   */
+  now: string;
+  elapsedMs: number;
+  spendUsd: number;
+  toolCount: number;
+}
+
+// ---------------------------------------------------------------------------
 // JobRunner — the pluggable seam between the executor and whatever actually
 // runs the child turn.
 //

@@ -49,7 +49,12 @@ import { SqliteApiKeyStore } from '@ethosagent/session-sqlite';
 import { FsAttachmentCache, FsStorage } from '@ethosagent/storage-fs';
 import { createA2aTools } from '@ethosagent/tools-a2a';
 import type { McpManager } from '@ethosagent/tools-mcp';
-import { EthosError, type ToolRegistry } from '@ethosagent/types';
+import {
+  type BackgroundJob,
+  EthosError,
+  type RunUpdateDigest,
+  type ToolRegistry,
+} from '@ethosagent/types';
 import { WatcherManager, type WatcherWakeEvent } from '@ethosagent/watchers';
 import {
   type ChatService,
@@ -321,6 +326,7 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
   let backgroundExecutor:
     | import('@ethosagent/wiring').CreateAgentLoopResult['backgroundExecutor']
     | undefined;
+  let jobRunners: import('@ethosagent/types').JobRunnerRegistry | undefined;
   let sttProviders: import('@ethosagent/types').SttProviderRegistry | undefined;
   let ttsProviders: import('@ethosagent/types').TtsProviderRegistry | undefined;
   let realtimeProviders: import('@ethosagent/types').RealtimeVoiceProviderRegistry | undefined;
@@ -513,6 +519,7 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
     goalRunner = result.goalRunner;
     jobStore = result.jobStore;
     backgroundExecutor = result.backgroundExecutor;
+    jobRunners = result.jobRunners;
     sttProviders = result.sttProviders;
     ttsProviders = result.ttsProviders;
     realtimeProviders = result.realtimeProviders;
@@ -568,6 +575,7 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
     goalRunner = result.goalRunner;
     jobStore = result.jobStore;
     backgroundExecutor = result.backgroundExecutor;
+    jobRunners = result.jobRunners;
     sttProviders = result.sttProviders;
     ttsProviders = result.ttsProviders;
     realtimeProviders = result.realtimeProviders;
@@ -1235,6 +1243,20 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
     memoryNoticesEnabled: config.displayMemoryNotices !== false,
     ...(goalRunner ? { goalRunner } : {}),
     ...(jobStore ? { jobStore } : {}),
+    ...(jobRunners ? { jobRunners } : {}),
+    // I15/I18 — the run card's liveness feed and the completion hand-back.
+    // Both ride the executor's EXISTING subscription seams (`onRunUpdate`,
+    // `onComplete`); neither is a new notification bus (G9/D11/D20, D27).
+    ...(backgroundExecutor
+      ? {
+          subscribeRunUpdates: (handler: (update: RunUpdateDigest) => void) => {
+            backgroundExecutor?.onRunUpdate(handler);
+          },
+          subscribeJobComplete: (handler: (job: BackgroundJob) => void) => {
+            backgroundExecutor?.onComplete(handler);
+          },
+        }
+      : {}),
     ...(sttProviders ? { sttProviderRegistry: sttProviders } : {}),
     ...(voiceConfig?.sttProviderName ? { sttProviderName: voiceConfig.sttProviderName } : {}),
     ...(voiceConfig ? { sttProviderConfig: voiceConfig.sttProviderConfig } : {}),

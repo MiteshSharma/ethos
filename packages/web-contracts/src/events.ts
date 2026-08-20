@@ -127,6 +127,13 @@ export const ClarifyRequestEventSchema = z.object({
   options: z.array(z.string()).optional(),
   default: z.string().optional(),
   /**
+   * The delegated run that asked, when one did (`PendingClarify.jobId`, D22).
+   * Absent for a foreground clarify. This is what lets a question be drawn
+   * INSIDE its run card (§4.5) instead of as a floating modal that says
+   * nothing about who is waiting on the answer.
+   */
+  jobId: z.string().optional(),
+  /**
    * ISO-8601 — when the timeout fires and the default is used. `null` while
    * queued behind another clarify in the same lane (D2) — a queued row has no
    * timer running yet. In practice this event is only pushed once a row is

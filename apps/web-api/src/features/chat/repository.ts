@@ -38,6 +38,16 @@ export class ChatRepository {
     if (!exists) throw new Error(`session not found: ${id}`);
     await this.store.updateSession(id, patch);
   }
+
+  /**
+   * Persist one assistant message that no live turn produced — today, the
+   * delegated-run completion hand-back (pi-delegation §4.9/D27). It goes through
+   * the same `appendMessage` a turn uses, so a reload replays it in place rather
+   * than as a notice that evaporated.
+   */
+  async appendAssistantMessage(sessionId: string, content: string): Promise<void> {
+    await this.store.appendMessage({ sessionId, role: 'assistant', content });
+  }
 }
 
 function zeroUsage() {

@@ -7092,3 +7092,351 @@ textarea {
   font-size: 12px;
   color: var(--ethos-text-dim);
 }
+
+/* ---------------------------------------------------------------------------
+   Delegated run card (pi-delegation §4.1) + drawer Runs pane (§4.3) +
+   status-bar pill and nav badge (§4.4).
+
+   Built from raw primitives, not the Antd `Card`: DESIGN.md's decisions log
+   rules the run card is NOT a fourth "cards earn existence" exemption, because
+   the rule governs the primitive and this is a singleton inline in a transcript
+   with no dense row to lose to.
+
+   The runner's hue arrives as `--runner-accent`, stamped on the element by the
+   `RUNNERS` map (D19). Nothing here hardcodes a hex, and it is never assigned
+   to `--accent`: the scope around a run keeps the personality's accent.
+   --------------------------------------------------------------------------- */
+
+.run-card {
+  border: 1px solid var(--ethos-border);
+  border-radius: var(--radius-md, 8px);
+  background: var(--ethos-bg-elevated);
+  padding: 12px;
+  margin: 8px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  transition: border-color var(--motion-default, 180ms) var(--motion-ease, ease);
+}
+
+.run-card:focus {
+  outline: 2px solid var(--runner-accent, var(--ethos-info));
+  outline-offset: 2px;
+}
+
+.run-card--warning {
+  border-color: var(--ethos-warning);
+}
+
+.run-card--success {
+  border-color: var(--ethos-success);
+}
+
+.run-card--error {
+  border-color: var(--ethos-error);
+}
+
+/* The blocked card's warm tint. Paired with the warning border and the
+   "needs you" chip text — never colour alone (§4.11). */
+.run-card--warm {
+  background: color-mix(in srgb, var(--ethos-warning) 6%, var(--ethos-bg-elevated));
+}
+
+.run-card-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.run-card-badge {
+  color: var(--runner-accent, var(--ethos-text-dim));
+  border: 1px solid var(--runner-accent, var(--ethos-border));
+  border-radius: var(--radius-sm, 4px);
+  padding: 0 5px;
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.run-card-label {
+  color: var(--ethos-text);
+}
+
+.run-card-chip {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  color: var(--ethos-text-dim);
+}
+
+.run-card-chip--info {
+  color: var(--ethos-info);
+}
+
+.run-card-chip--warning {
+  color: var(--ethos-warning);
+}
+
+.run-card-chip--success {
+  color: var(--ethos-success);
+}
+
+.run-card-chip--error {
+  color: var(--ethos-error);
+}
+
+.run-card-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: var(--radius-full, 9999px);
+  background: currentColor;
+}
+
+.run-card-dot--pulsing {
+  animation: run-card-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes run-card-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
+/* §4.11 — reduced motion kills the status pulse. */
+@media (prefers-reduced-motion: reduce) {
+  .run-card-dot--pulsing {
+    animation: none;
+  }
+}
+
+.run-card-task {
+  margin: 0;
+  color: var(--ethos-text-dim);
+  font-size: 13px;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.run-card-now {
+  margin: 0;
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+}
+
+.run-card-now-key {
+  color: var(--ethos-text-tertiary);
+  text-transform: uppercase;
+  font-size: 10px;
+  letter-spacing: 0.08em;
+}
+
+.run-card-now-value {
+  color: var(--ethos-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.run-card-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.run-card-details-toggle {
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  color: var(--ethos-text-tertiary);
+  font: inherit;
+}
+
+.run-card-details-toggle:hover {
+  color: var(--ethos-text);
+}
+
+.run-card-grid {
+  margin: 0;
+  display: grid;
+  grid-template-columns: minmax(120px, auto) 1fr;
+  gap: 2px 12px;
+  border-top: 1px solid var(--ethos-border);
+  padding-top: 8px;
+}
+
+.run-card-grid-row {
+  display: contents;
+}
+
+.run-card-grid dt {
+  color: var(--ethos-text-tertiary);
+  text-transform: uppercase;
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  align-self: center;
+}
+
+.run-card-grid dd {
+  margin: 0;
+  color: var(--ethos-text-dim);
+  overflow-wrap: anywhere;
+}
+
+.run-card-grid-value--accent {
+  color: var(--runner-accent, var(--ethos-text-dim));
+}
+
+/* Green is a fact the kernel enforces; amber is a claim nothing does (§4.2). */
+.run-card-grid-value--safe {
+  color: var(--ethos-success);
+}
+
+.run-card-grid-value--warn {
+  color: var(--ethos-warning);
+}
+
+.run-card-question {
+  border-top: 1px solid var(--ethos-border);
+  padding-top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.run-card-question--resolved {
+  flex-direction: row;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--ethos-success);
+}
+
+.run-card-question-route {
+  color: var(--ethos-text-tertiary);
+}
+
+.run-card-attribution,
+.run-card-question-footer {
+  margin: 0;
+}
+
+.run-card-buttons {
+  display: flex;
+  gap: 8px;
+}
+
+.run-card-buttons:empty {
+  display: none;
+}
+
+/* Drawer Runs pane — dense rows, not cards (§4.3). */
+.right-drawer-section-title .runs-pane-needs-you {
+  color: var(--ethos-warning);
+  margin-left: 8px;
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.runs-pane-row {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--ethos-border);
+}
+
+.runs-pane-row--blocked {
+  border-left: none;
+  background: color-mix(in srgb, var(--ethos-warning) 6%, transparent);
+  padding-left: 6px;
+}
+
+.runs-pane-row-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.runs-pane-badge {
+  color: var(--runner-accent, var(--ethos-text-dim));
+  font-size: 10px;
+  letter-spacing: 0.08em;
+}
+
+.runs-pane-label {
+  color: var(--ethos-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.runs-pane-chip {
+  margin-left: auto;
+  color: var(--ethos-text-dim);
+}
+
+.runs-pane-row-now {
+  color: var(--ethos-text-tertiary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.runs-pane-answer {
+  align-self: flex-start;
+  margin-top: 4px;
+  background: none;
+  border: 1px solid var(--ethos-warning);
+  border-radius: var(--radius-sm, 4px);
+  color: var(--ethos-warning);
+  font-size: 11px;
+  padding: 1px 8px;
+  cursor: pointer;
+}
+
+/* Status-bar pill (§4.4). Hidden when no run exists — the component returns
+   null rather than a rule, so there is nothing to hide here. */
+.sb-run-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border: 1px solid var(--runner-accent, var(--ethos-border));
+  border-radius: var(--radius-full, 9999px);
+  padding: 0 8px;
+  color: var(--runner-accent, var(--ethos-text-dim));
+  font-family: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+}
+
+.sb-run-pill--needs-you {
+  border-color: var(--ethos-warning);
+  color: var(--ethos-warning);
+}
+
+/* Numeric "needs you" badge on the Tasks nav row (D25). */
+.sidebar-nav-badge {
+  margin-left: auto;
+  min-width: 16px;
+  height: 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 4px;
+  border-radius: var(--radius-md, 8px);
+  background: var(--ethos-warning);
+  color: var(--ethos-bg);
+  font-size: 10px;
+  font-weight: 600;
+}

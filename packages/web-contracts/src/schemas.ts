@@ -1295,11 +1295,57 @@ export const BackgroundJobSummarySchema = z.object({
 });
 export type BackgroundJobSummaryWire = z.infer<typeof BackgroundJobSummarySchema>;
 
+/**
+ * One row of the run card's session detail grid (pi-delegation §4.2/D18). The
+ * UI owns the 12 shared rows; these are whatever `JobRunner.describe(job)`
+ * returned, so a second harness adds its vocabulary without a component change.
+ *
+ * `tone` is a claim about the value, not decoration: `safe` is a fact something
+ * enforces, `warn` is a claim nothing does. Mirrors `DetailRow` in
+ * `@ethosagent/types`.
+ */
+export const RunDetailRowSchema = z.object({
+  label: z.string(),
+  value: z.string(),
+  tone: z.enum(['accent', 'safe', 'warn']).optional(),
+});
+export type RunDetailRowWire = z.infer<typeof RunDetailRowSchema>;
+
+/**
+ * What a runner can actually do. Surfaces hide affordances a runner does not
+ * support rather than offering a button that throws. Mirrors
+ * `RunnerCapabilities` in `@ethosagent/types`; `interactionKinds` and
+ * `answerScopes` are open strings by design (D16).
+ */
+export const RunnerCapabilitiesSchema = z.object({
+  interactionKinds: z.array(z.string()),
+  answerScopes: z.array(z.enum(['once', 'run', 'always'])),
+  takeover: z.enum(['pty', 'none']),
+  resume: z.enum(['session', 'fork', 'none']),
+  steer: z.boolean(),
+  sandbox: z.enum(['process', 'external', 'none']),
+  transport: z.string(),
+});
+export type RunnerCapabilitiesWire = z.infer<typeof RunnerCapabilitiesSchema>;
+
 export const BackgroundJobDetailSchema = BackgroundJobSummarySchema.extend({
   prompt: z.string(),
   summary: z.string().nullable(),
   error: z.string().nullable(),
   events: z.array(BackgroundJobEventSchema),
+  // --- Run-card detail grid (pi-delegation §4.2). Everything below feeds a row
+  // the card renders; none of it is read by the Tasks list.
+  /** `JobRunner.name`. Null on rows written before the runner seam existed. */
+  runner: z.string().nullable(),
+  childSessionKey: z.string(),
+  originPlatform: z.string().nullable(),
+  originChatId: z.string().nullable(),
+  /** The pending question a `blocked` run is parked on — same id space as `clarify.request`. */
+  blockedRequestId: z.string().nullable(),
+  /** `runner.describe(job)` output. Empty when the runner is not resolved in this process. */
+  detailRows: z.array(RunDetailRowSchema),
+  /** Null when the runner that executed this row is not resolved in this process. */
+  capabilities: RunnerCapabilitiesSchema.nullable(),
 });
 export type BackgroundJobDetailWire = z.infer<typeof BackgroundJobDetailSchema>;
 

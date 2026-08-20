@@ -33,9 +33,15 @@ export interface ClarifyCardProps {
   request: ClarifyRequestEvent;
   /** `card` (default) floats over Chat; `slot` fills the Call Stage's reserved panel. */
   variant?: 'card' | 'slot';
+  /**
+   * Fired with the answer this tab submitted, before the round trip.
+   * `clarify.resolved` carries only a source, so a run card that wants to show
+   * WHAT was decided (pi-delegation §4.5) has to be told here or not at all.
+   */
+  onAnswered?: (answer: string) => void;
 }
 
-export function ClarifyCard({ request, variant = 'card' }: ClarifyCardProps) {
+export function ClarifyCard({ request, variant = 'card', onAnswered }: ClarifyCardProps) {
   const [text, setText] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
@@ -51,6 +57,7 @@ export function ClarifyCard({ request, variant = 'card' }: ClarifyCardProps) {
     setSubmitting(true);
     setSubmitError(null);
     try {
+      if (source === 'user') onAnswered?.(answer);
       await rpc.clarify.respond({ requestId: request.requestId, answer, source });
       // The SSE `clarify.resolved` event drops this request from
       // `pendingClarifies`, unmounting the card. No local close state.

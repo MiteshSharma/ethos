@@ -8,6 +8,7 @@ import { HtmlBlock } from './HtmlBlock';
 import { ImageBlock } from './ImageBlock';
 import { PdfBlock } from './PdfBlock';
 import { PlayButton } from './PlayButton';
+import { RunAnchor, type RunSurface } from './RunCard';
 import { ToolChip } from './ToolChip';
 
 // One rendered message. DESIGN.md voice rules in effect:
@@ -71,6 +72,7 @@ export function AssistantBubble({
   fenceRenderers,
   onSuggestPrompt,
   personalityId,
+  runSurface,
 }: {
   turn: AssistantTurn;
   streaming?: boolean;
@@ -81,6 +83,8 @@ export function AssistantBubble({
   /** Who is speaking — carried to the Play button so click-to-hear uses this
    *  personality's voice rather than the deployment default. */
   personalityId?: string;
+  /** Live state for the delegated-run cards this turn anchors (§4.1). */
+  runSurface?: RunSurface;
 }) {
   const lastBlock = turn.blocks[turn.blocks.length - 1];
   const cursorAfter = streaming && lastBlock?.kind === 'text';
@@ -104,6 +108,7 @@ export function AssistantBubble({
             streamingTail={streaming && idx === turn.blocks.length - 1}
             fenceRenderers={fenceRenderers}
             onSuggestPrompt={onSuggestPrompt}
+            {...(runSurface ? { runSurface } : {})}
           />
         ))}
         {streaming && !cursorAfter && lastBlock?.kind === 'tool' ? (
@@ -122,11 +127,13 @@ function BlockRenderer({
   streamingTail,
   fenceRenderers,
   onSuggestPrompt,
+  runSurface,
 }: {
   block: AssistantBlock;
   streamingTail?: boolean;
   fenceRenderers?: FenceRendererResolver;
   onSuggestPrompt?: (prompt: string) => void;
+  runSurface?: RunSurface;
 }) {
   if (block.kind === 'text') {
     return (
@@ -155,6 +162,13 @@ function BlockRenderer({
   if (block.kind === 'card') {
     return <CardView card={block.card} onSuggestPrompt={onSuggestPrompt} />;
   }
+  if (block.kind === 'run') {
+    // The anchor records where the handoff happened; the card is drawn from
+    // live digest state, which only the chat page holds. No surface (history
+    // replay, the Call Stage) renders nothing rather than a frozen card.
+    if (!runSurface) return null;
+    return <RunAnchor jobId={block.jobId} surface={runSurface} />;
+  }
   return <ToolChip tool={block} />;
 }
 
@@ -165,5 +179,6 @@ function blockKey(block: AssistantBlock, idx: number): string {
   if (block.kind === 'pdf') return `pdf-${block.toolCallId}`;
   // One tool call can emit several cards, so the id alone is not unique.
   if (block.kind === 'card') return `card-${block.toolCallId}-${idx}`;
+  if (block.kind === 'run') return `run-${block.jobId}`;
   return `tool-${block.toolCallId}`;
 }

@@ -125,6 +125,8 @@ export class ChatService {
   private readonly bridges = new Map<string, AgentBridge>();
   private readonly firstUserMessages = new Map<string, string>();
   private readonly emitter = new EventEmitter<InternalEventMap>();
+  /** sessionId -> hand-back texts held until the in-flight turn's `done`. */
+  private readonly pendingHandBacks = new Map<string, string[]>();
 
   constructor(private readonly opts: ChatServiceOptions) {
     // Allow many SSE connections per session (multi-tab) without warnings.
@@ -323,6 +325,45 @@ export class ChatService {
     }
   }
 
+  /**
+   * Speak one message into a session that no live turn produced — the delegated
+   * run's completion hand-back (pi-delegation §4.9/D27). It is Ethos's own
+   * sentence about the result, not the runner's tokens pasted into the chat.
+   *
+   * Two properties, both load-bearing:
+   *  • It is PERSISTED first, so a reload finds it in history rather than
+   *    discovering the run silently vanished.
+   *  • It rides the SAME `text_delta` + `done` pair a turn does — D27's "do not
+   *    invent a new notification bus" taken literally. A turn already in flight
+   *    would otherwise have this text spliced into the middle of its bubble, so
+   *    the broadcast waits for that turn's `done` and lands after it.
+   */
+  async handBack(sessionId: string, text: string): Promise<void> {
+    if (!text) return;
+    await this.opts.sessions.appendAssistantMessage(sessionId, text);
+    const bridge = this.bridges.get(sessionId);
+    if (bridge?.isRunning) {
+      const queued = this.pendingHandBacks.get(sessionId) ?? [];
+      queued.push(text);
+      this.pendingHandBacks.set(sessionId, queued);
+      return;
+    }
+    this.emitHandBack(sessionId, text);
+  }
+
+  private emitHandBack(sessionId: string, text: string): void {
+    this.append(sessionId, { type: 'text_delta', text });
+    this.append(sessionId, { type: 'done', text, turnCount: 0 });
+  }
+
+  /** Drain hand-backs held back by a turn that was mid-flight. */
+  private flushHandBacks(sessionId: string): void {
+    const queued = this.pendingHandBacks.get(sessionId);
+    if (!queued) return;
+    this.pendingHandBacks.delete(sessionId);
+    for (const text of queued) this.emitHandBack(sessionId, text);
+  }
+
   /** Drop bridge + buffer for a session — called by tests / future /new flow. */
   forget(sessionId: string): void {
     const bridge = this.bridges.get(sessionId);
@@ -332,6 +373,7 @@ export class ChatService {
       this.bridges.delete(sessionId);
     }
     this.firstUserMessages.delete(sessionId);
+    this.pendingHandBacks.delete(sessionId);
     this.opts.buffer.clear(sessionId);
     // If approvals are wired, drop any pending requests for this session
     // so the awaiting hook unblocks (`{ decision: 'deny', reason: 'session
@@ -448,6 +490,9 @@ export class ChatService {
         // Funnel/analytics callbacks are best-effort — never break the stream.
       }
       void this.tryAutoTitle(sessionId);
+      // A run that finished mid-turn queued its hand-back rather than splicing
+      // it into the bubble above. The turn is over — say it now.
+      this.flushHandBacks(sessionId);
     });
   }
 
