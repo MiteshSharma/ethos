@@ -69,6 +69,52 @@ export function applyRunEvent(prev: RunsState, event: SseEvent, now: number): Ru
   };
 }
 
+/**
+ * Seed a run this surface never saw a digest for.
+ *
+ * The digest is a LIVE feed with no replay: a page that mounts (reload, tab
+ * change, a route change that remounts the chat stage) while a run is already
+ * moving has missed every sample published so far, and the executor coalesces
+ * at ≤1 Hz per run — for a run that has already published its terminal sample
+ * there is no next one, ever. So a surface has to be able to rediscover a run
+ * from the durable job row (`tasks.list`) instead of only from the stream.
+ *
+ * Only the fields the job row can state honestly are seeded. `now` and
+ * `toolCount` are NOT on the row: `now` seeds empty, which the card already
+ * renders as `—` / the parked / stale phrasing, and `toolCount` seeds 0. Both
+ * are overwritten by this run's next digest, which for a live run is at most a
+ * second away — and a run already in `byId` is returned untouched, so a seed
+ * can never overwrite live digest state with a stale row.
+ */
+export function seedRun(
+  prev: RunsState,
+  row: {
+    jobId: string;
+    runner: string;
+    status: BackgroundJobStatusWire;
+    spendUsd: number;
+    elapsedMs: number;
+  },
+  now: number,
+): RunsState {
+  if (prev.byId[row.jobId]) return prev;
+  const next: RunState = {
+    jobId: row.jobId,
+    runner: row.runner,
+    status: row.status,
+    now: '',
+    elapsedMs: row.elapsedMs,
+    spendUsd: row.spendUsd,
+    toolCount: 0,
+    firstSeenAt: now,
+    updatedAt: now,
+  };
+  return {
+    byId: { ...prev.byId, [row.jobId]: next },
+    order: [...prev.order, row.jobId],
+  };
+}
+
 /** Every run in arrival order. */
 export function allRuns(state: RunsState): RunState[] {
   const rows: RunState[] = [];

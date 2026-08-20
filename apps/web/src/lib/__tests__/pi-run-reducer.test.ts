@@ -8,6 +8,7 @@ import {
   runCardView,
   runCounts,
   runsNeedingYou,
+  seedRun,
 } from '../pi-run-reducer';
 
 // T24 — the run card's whole state table, tested as a reducer (D9). No jsdom,
@@ -57,6 +58,42 @@ describe('applyRunEvent', () => {
   it('ignores every event that is not a run digest', () => {
     const s = applyRunEvent(emptyRunsState, { type: 'done', text: 'x', turnCount: 1 }, 1);
     expect(s).toBe(emptyRunsState);
+  });
+});
+
+describe('seedRun', () => {
+  const row = {
+    jobId: 'job_1',
+    runner: 'pi',
+    status: 'running' as BackgroundJobStatusWire,
+    spendUsd: 0.3,
+    elapsedMs: 12_000,
+  };
+
+  it('opens a run the digest never announced', () => {
+    const s = seedRun(emptyRunsState, row, 5_000);
+    expect(s.order).toEqual(['job_1']);
+    expect(s.byId.job_1?.status).toBe('running');
+    expect(s.byId.job_1?.spendUsd).toBe(0.3);
+    // Neither field is on the job row; both say so rather than guessing.
+    expect(s.byId.job_1?.now).toBe('');
+    expect(s.byId.job_1?.toolCount).toBe(0);
+  });
+
+  it('never overwrites a run the digest already owns', () => {
+    const live = applyRunEvent(emptyRunsState, digest({ toolCount: 11 }), 1_000);
+    const s = seedRun(live, { ...row, spendUsd: 0 }, 9_999);
+    expect(s).toBe(live);
+    expect(s.byId.job_1?.toolCount).toBe(11);
+  });
+
+  it('lets the next digest replace everything it could not state', () => {
+    let s = seedRun(emptyRunsState, row, 5_000);
+    s = applyRunEvent(s, digest({ now: 'running tests', toolCount: 4 }), 6_000);
+    expect(s.byId.job_1?.now).toBe('running tests');
+    expect(s.byId.job_1?.toolCount).toBe(4);
+    expect(s.byId.job_1?.firstSeenAt).toBe(5_000);
+    expect(s.order).toEqual(['job_1']);
   });
 });
 

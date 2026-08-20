@@ -1292,6 +1292,14 @@ export const BackgroundJobSummarySchema = z.object({
   owner: z.string(),
   rootSessionKey: z.string(),
   parentSessionKey: z.string(),
+  /**
+   * `JobRunner.name`. Null on rows written before the runner seam existed.
+   *
+   * On the SUMMARY (not just the detail) because `tasks.list` is what a
+   * freshly-mounted chat page reads to rediscover the runs it was not
+   * connected for, and a run card cannot draw its runner badge without it.
+   */
+  runner: z.string().nullable(),
 });
 export type BackgroundJobSummaryWire = z.infer<typeof BackgroundJobSummarySchema>;
 
@@ -1335,8 +1343,6 @@ export const BackgroundJobDetailSchema = BackgroundJobSummarySchema.extend({
   events: z.array(BackgroundJobEventSchema),
   // --- Run-card detail grid (pi-delegation §4.2). Everything below feeds a row
   // the card renders; none of it is read by the Tasks list.
-  /** `JobRunner.name`. Null on rows written before the runner seam existed. */
-  runner: z.string().nullable(),
   childSessionKey: z.string(),
   originPlatform: z.string().nullable(),
   originChatId: z.string().nullable(),

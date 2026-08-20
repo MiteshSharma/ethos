@@ -1,6 +1,7 @@
 import { VOICE_ORIGIN_TAG } from '@ethosagent/types';
 import {
   type ApprovalRequest,
+  type BackgroundJobStatusWire,
   type CardEnvelope,
   CardEnvelopeSchema,
   type ClarifyRequestEvent,
@@ -15,7 +16,7 @@ import {
   emptyClarifyQueue,
   noteAnswer,
 } from './clarify-queue';
-import { applyRunEvent, emptyRunsState, type RunsState } from './pi-run-reducer';
+import { applyRunEvent, emptyRunsState, type RunsState, seedRun } from './pi-run-reducer';
 
 // Pure reducer that maps SSE events → ChatState. Extracted from the
 // `useChat` hook so we can test the state machine in isolation, without
@@ -236,7 +237,30 @@ export type ChatAction =
    * carries only the source, so without this the resolved card could say a
    * question was answered but never what the answer was (§4.5).
    */
-  | { type: 'note-clarify-answer'; requestId: string; answer: string; timestamp: number };
+  | { type: 'note-clarify-answer'; requestId: string; answer: string; timestamp: number }
+  /**
+   * Runs this session already had going when the page connected, read from the
+   * durable job rows (`tasks.list`) rather than from the stream.
+   *
+   * The `run.update` digest is live-only — no replay, no catch-up (see
+   * `sse.ts`: a subscriber joining an open connection gets events from the
+   * current point forward). So a chat page that mounts mid-run — a reload, a
+   * trip to another tab, the remount a personality switch forces — has missed
+   * every digest published so far, and the transcript anchor that only a FIRST
+   * digest plants is never planted. Without this the run card is simply absent
+   * for the rest of the run's life while the shell's drawer and status pill,
+   * whose subscription outlives the page, stay correct.
+   */
+  | { type: 'runs-restored'; runs: RestoredRun[]; timestamp: number };
+
+/** One durable job row, mapped onto what a run anchor + card need. */
+export interface RestoredRun {
+  jobId: string;
+  runner: string;
+  status: BackgroundJobStatusWire;
+  spendUsd: number;
+  elapsedMs: number;
+}
 
 export function applyEvent(state: ChatState, event: SseEvent, now: number): ChatState {
   switch (event.type) {
@@ -627,6 +651,27 @@ export function applyAction(state: ChatState, action: ChatAction): ChatState {
       };
     }
 
+    case 'runs-restored': {
+      // Only runs this surface has never seen are restored: a run already in
+      // `runs.byId` has a live digest behind it and an anchor already placed,
+      // and re-anchoring it would draw the same card twice.
+      let runs = state.runs;
+      const anchors: RunBlock[] = [];
+      for (const row of action.runs) {
+        const next = seedRun(runs, row, action.timestamp);
+        if (next === runs) continue;
+        runs = next;
+        anchors.push({ kind: 'run', jobId: row.jobId, runner: row.runner });
+      }
+      if (anchors.length === 0) return state;
+      // A restored anchor lands at the TAIL, not at the handoff. §4.1 puts the
+      // card "where the handoff happened", and on a live turn it still does —
+      // but nothing in the persisted transcript records where that was, so the
+      // honest placement for a rediscovered run is the end of what is on
+      // screen, next to the hand-back its completion will write there anyway.
+      return { ...state, runs, ...placeRestoredAnchors(state, anchors, action.timestamp) };
+    }
+
     case 'undo-turns': {
       const msgs = state.messages;
       let remaining = action.count;
@@ -651,6 +696,39 @@ export function applyAction(state: ChatState, action: ChatAction): ChatState {
 
 function ensureTurn(turn: AssistantTurn | null, now: number): AssistantTurn {
   return turn ?? { id: `asst-${now}`, role: 'assistant', blocks: [], timestamp: now };
+}
+
+/**
+ * Put restored run anchors at the tail of the transcript: onto the in-flight
+ * turn if one is running, else onto the last assistant message, else as a turn
+ * of their own so a session whose whole history is a single user message still
+ * shows its run.
+ *
+ * Returns only the keys it changes, so the caller can spread it.
+ */
+function placeRestoredAnchors(
+  state: ChatState,
+  anchors: RunBlock[],
+  now: number,
+): Pick<ChatState, 'messages'> | Pick<ChatState, 'currentTurn'> {
+  if (state.currentTurn) {
+    return {
+      currentTurn: { ...state.currentTurn, blocks: [...state.currentTurn.blocks, ...anchors] },
+    };
+  }
+  const lastIdx = state.messages.length - 1;
+  const last = state.messages[lastIdx];
+  if (last?.role === 'assistant') {
+    const messages = [...state.messages];
+    messages[lastIdx] = { ...last, blocks: [...last.blocks, ...anchors] };
+    return { messages };
+  }
+  return {
+    messages: [
+      ...state.messages,
+      { id: `asst-restored-${now}`, role: 'assistant', blocks: anchors, timestamp: now },
+    ],
+  };
 }
 
 const INTERRUPTED_MARKER = '[interrupted]';

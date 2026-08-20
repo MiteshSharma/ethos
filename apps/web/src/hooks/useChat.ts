@@ -6,8 +6,10 @@ import {
   type ChatAction,
   type ChatState,
   initialChatState,
+  type RestoredRun,
 } from '../lib/chat-reducer';
 import { getClientId } from '../lib/clientId';
+import { isTerminalRun } from '../lib/pi-run-reducer';
 import { rpc } from '../rpc';
 import { subscribeToSession } from '../sse';
 
@@ -106,6 +108,37 @@ const reducer: Reducer = (state, op) => {
   return applyAction(state, op.action);
 };
 
+/**
+ * The runs this session still has going, read from the durable job rows.
+ *
+ * The `run.update` digest is the run card's live feed and it has NO replay: a
+ * page that connects mid-run misses every sample already published, and for a
+ * run past its terminal sample there is no next one. `tasks.list` is the
+ * catch-up — the same shape `ClarifyBridge.listPending` gives a reconnecting
+ * surface for clarify rows.
+ *
+ * Terminal runs are deliberately excluded. Their card has nothing left to say,
+ * and the sentence that matters — the completion hand-back — is a persisted
+ * message that comes back with history on its own.
+ */
+export async function loadActiveRuns(
+  rootSessionKey: string,
+  now: number = Date.now(),
+): Promise<RestoredRun[]> {
+  const rows = await rpc.tasks.list({ rootSessionKey });
+  return rows
+    .filter((row) => !isTerminalRun(row.status))
+    .map((row) => ({
+      jobId: row.id,
+      // Null on rows written before the runner seam existed; those ran on the
+      // in-process default.
+      runner: row.runner ?? 'ethos',
+      status: row.status,
+      spendUsd: row.spendUsd,
+      elapsedMs: Math.max(0, now - (row.startedAt ?? row.createdAt)),
+    }));
+}
+
 export function useChat(opts: UseChatOptions): UseChatResult {
   const [state, dispatch] = useReducer(reducer, initialChatState);
   const [currentSessionId, setCurrentSessionId] = useState<string | null>(
@@ -117,6 +150,26 @@ export function useChat(opts: UseChatOptions): UseChatResult {
   // is single-shot per session and feeds the reducer, which already owns
   // the canonical message list — useState is the right tool here.
   const historyLoadedFor = useRef<string | null>(null);
+
+  // 0b. Rediscover runs that were already going when this page connected.
+  //     A restore that fails leaves the transcript exactly as it was — the
+  //     drawer and the status pill still carry the run, and a card that never
+  //     appears is better than an error banner over a working conversation.
+  const restoreActiveRuns = useCallback(
+    async (rootSessionKey: string, cancelled: () => boolean): Promise<void> => {
+      try {
+        const runs = await loadActiveRuns(rootSessionKey);
+        if (cancelled() || runs.length === 0) return;
+        dispatch({
+          kind: 'action',
+          action: { type: 'runs-restored', runs, timestamp: Date.now() },
+        });
+      } catch {
+        // best-effort
+      }
+    },
+    [],
+  );
 
   // 1. Load history when a session is in scope and we haven't fetched yet.
   useEffect(() => {
@@ -135,6 +188,11 @@ export function useChat(opts: UseChatOptions): UseChatResult {
           kind: 'action',
           action: { type: 'history-loaded', messages: res.messages, cards: res.cards },
         });
+        // Chained off the history load rather than run as its own effect for
+        // one reason: `history-loaded` REPLACES `state.messages`, so a restore
+        // that landed first would have its anchors thrown away. It also needs
+        // the session's key, which this response already carries.
+        void restoreActiveRuns(res.session.key, () => cancelled);
       })
       .catch((err: unknown) => {
         if (cancelled) return;
@@ -156,7 +214,7 @@ export function useChat(opts: UseChatOptions): UseChatResult {
     return () => {
       cancelled = true;
     };
-  }, [currentSessionId, opts.onSessionNotFound]);
+  }, [currentSessionId, opts.onSessionNotFound, restoreActiveRuns]);
 
   // 2. Subscribe to SSE for the current session. The wrapper handles
   //    reconnect via Last-Event-ID; we just dispatch every event into

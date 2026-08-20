@@ -48,6 +48,7 @@ function toSummary(job: BackgroundJob): BackgroundJobSummaryWire {
     owner: job.owner,
     rootSessionKey: job.rootSessionKey,
     parentSessionKey: job.parentSessionKey,
+    runner: job.runner ?? null,
   };
 }
 
@@ -73,7 +74,6 @@ function toDetail(
     summary: job.summary ?? null,
     error: job.error ?? null,
     events: events.map(toEvent),
-    runner: job.runner ?? null,
     childSessionKey: job.childSessionKey,
     originPlatform: job.originPlatform ?? null,
     originChatId: job.originChatId ?? null,

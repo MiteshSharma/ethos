@@ -389,6 +389,73 @@ describe('applyAction — reset', () => {
   });
 });
 
+describe('applyAction — runs-restored', () => {
+  const row = {
+    jobId: 'job_1',
+    runner: 'pi',
+    status: 'running' as const,
+    spendUsd: 0.2,
+    elapsedMs: 9_000,
+  };
+
+  function runAnchors(state: ChatState): string[] {
+    const turns: AssistantTurn[] = [
+      ...state.messages.filter((m): m is AssistantTurn => m.role === 'assistant'),
+      ...(state.currentTurn ? [state.currentTurn] : []),
+    ];
+    return turns.flatMap((t) => t.blocks.flatMap((b) => (b.kind === 'run' ? [b.jobId] : [])));
+  }
+
+  it('anchors onto the last assistant message when no turn is in flight', () => {
+    let s: ChatState = initialChatState;
+    s = applyAction(s, { type: 'submit-user-message', id: 'u1', text: 'go', timestamp: 1 });
+    s = applyEvent(s, { type: 'text_delta', text: 'on it' }, NOW);
+    s = applyEvent(s, { type: 'done', text: 'on it', turnCount: 1 }, NOW);
+    s = applyAction(s, { type: 'runs-restored', runs: [row], timestamp: NOW });
+    expect(runAnchors(s)).toEqual(['job_1']);
+    expect(s.runs.byId.job_1?.status).toBe('running');
+    // Onto the existing turn, not as a bubble of its own.
+    expect(s.messages).toHaveLength(2);
+  });
+
+  it('anchors onto the live turn when one is streaming', () => {
+    let s: ChatState = initialChatState;
+    s = applyEvent(s, { type: 'text_delta', text: 'working' }, NOW);
+    s = applyAction(s, { type: 'runs-restored', runs: [row], timestamp: NOW });
+    expect(s.currentTurn?.blocks.map((b) => b.kind)).toEqual(['text', 'run']);
+  });
+
+  it('opens a turn of its own when the transcript has no assistant message yet', () => {
+    let s: ChatState = initialChatState;
+    s = applyAction(s, { type: 'submit-user-message', id: 'u1', text: 'go', timestamp: 1 });
+    s = applyAction(s, { type: 'runs-restored', runs: [row], timestamp: NOW });
+    expect(runAnchors(s)).toEqual(['job_1']);
+    expect(s.messages).toHaveLength(2);
+  });
+
+  it('is a no-op for a run the digest already anchored', () => {
+    let s: ChatState = initialChatState;
+    s = applyEvent(
+      s,
+      {
+        type: 'run.update',
+        jobId: 'job_1',
+        runner: 'pi',
+        status: 'running',
+        now: 'editing',
+        elapsedMs: 1_000,
+        spendUsd: 0.1,
+        toolCount: 3,
+      },
+      NOW,
+    );
+    const before = s;
+    s = applyAction(s, { type: 'runs-restored', runs: [row], timestamp: NOW });
+    expect(s).toBe(before);
+    expect(runAnchors(s)).toEqual(['job_1']);
+  });
+});
+
 describe('applyEvent — error and unhandled events', () => {
   it('error sets the surface error and stops streaming, preserves blocks', () => {
     let s: ChatState = initialChatState;
