@@ -6,7 +6,11 @@
 import type { ClarifyRequestInput } from '@ethosagent/core';
 import type { BackgroundJob, ClarifyResponse, InteractionRequest } from '@ethosagent/types';
 import { describe, expect, it, vi } from 'vitest';
-import { createClarifyEscalator, RUN_SCOPE_ANSWER } from '../clarify-escalator';
+import {
+  type ClarifyEscalatorDeps,
+  createClarifyEscalator,
+  RUN_SCOPE_ANSWER,
+} from '../clarify-escalator';
 import { SecretUnavailableError } from '../secret';
 
 const JOB = {
@@ -14,8 +18,41 @@ const JOB = {
   childSessionKey: 'cli:test:job:refactor:job-1',
 } as unknown as BackgroundJob;
 
-function harness(response: ClarifyResponse | Error) {
+/**
+ * Stands in for the executor's side of the `blocking` pair
+ * (`BackgroundExecutor.markJobBlocked` / `resumeJob`), modelled through the row
+ * they write. A fake and not the real executor on purpose: this package sits
+ * below extensions and cannot import one (ARCHITECTURE.md §II) — the real
+ * pair's own behaviour is covered in `extensions/job-runner`'s executor tests.
+ */
+function fakeRun() {
+  const calls: string[] = [];
+  const run = { status: 'running', blockedRequestId: undefined as string | undefined };
+  const blocking: NonNullable<ClarifyEscalatorDeps['blocking']> = {
+    block: async (jobId, requestId) => {
+      calls.push(`block:${jobId}:${requestId}`);
+      run.status = 'blocked';
+      run.blockedRequestId = requestId;
+    },
+    resume: async (jobId) => {
+      calls.push(`resume:${jobId}`);
+      run.status = 'running';
+      run.blockedRequestId = undefined;
+    },
+  };
+  return { run, calls, blocking };
+}
+
+function harness(
+  response: ClarifyResponse | Error,
+  extra: {
+    blocking?: ClarifyEscalatorDeps['blocking'];
+    /** Runs inside the pending window, so a test can observe the parked state. */
+    whileAsking?: () => void;
+  } = {},
+) {
   const request = vi.fn(async (_input: ClarifyRequestInput) => {
+    extra.whileAsking?.();
     if (response instanceof Error) throw response;
     return response;
   });
@@ -23,6 +60,7 @@ function harness(response: ClarifyResponse | Error) {
     bridge: { request },
     jobs: { get: async (id) => (id === JOB.id ? JOB : null) },
     fallbackSurfaceType: 'cli',
+    ...(extra.blocking ? { blocking: extra.blocking } : {}),
   });
   return { request, escalate };
 }
@@ -95,5 +133,54 @@ describe('createClarifyEscalator', () => {
     const { request, escalate } = harness({ requestId: 'x', answer: 'Deny', source: 'user' });
     await escalate('job-unknown', ask());
     expect(request.mock.calls[0]?.[0].sessionId).toBe('job-unknown');
+  });
+});
+
+// I11 — a run waiting on a human is `blocked`, not `running`. What matters is
+// the ORDER: parked before the question goes out, un-parked once it settles,
+// whichever way it settled.
+describe('createClarifyEscalator — blocked status', () => {
+  it('parks the run for the whole time the human is being asked', async () => {
+    const { run, calls, blocking } = fakeRun();
+    const observed: { status: string; requestId: string | undefined }[] = [];
+    const { escalate } = harness(
+      { requestId: 'x', answer: 'Allow once', source: 'user' },
+      {
+        blocking,
+        whileAsking: () => observed.push({ status: run.status, requestId: run.blockedRequestId }),
+      },
+    );
+
+    await escalate('job-1', ask());
+
+    // Parked before `bridge.request` was even entered...
+    expect(observed).toEqual([{ status: 'blocked', requestId: 'rq-1' }]);
+    // ...and released once the answer came back.
+    expect(run).toEqual({ status: 'running', blockedRequestId: undefined });
+    expect(calls).toEqual(['block:job-1:rq-1', 'resume:job-1']);
+  });
+
+  it('un-parks a run whose question died, so a denial does not strand it', async () => {
+    const { run, calls, blocking } = fakeRun();
+    const { escalate } = harness(new Error('clarify timed out and no default was provided'), {
+      blocking,
+    });
+
+    await expect(escalate('job-1', ask())).rejects.toThrow('clarify timed out');
+
+    expect(run.status).toBe('running');
+    expect(calls).toEqual(['block:job-1:rq-1', 'resume:job-1']);
+  });
+
+  it('never parks a run on a question it refuses to ask', async () => {
+    const { run, calls, blocking } = fakeRun();
+    const { escalate } = harness({ requestId: 'x', answer: 'nope', source: 'user' }, { blocking });
+
+    await expect(escalate('job-1', ask({ kind: 'input', sensitive: true }))).rejects.toBeInstanceOf(
+      SecretUnavailableError,
+    );
+
+    expect(run.status).toBe('running');
+    expect(calls).toEqual([]);
   });
 });

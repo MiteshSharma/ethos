@@ -958,6 +958,20 @@ export async function buildAgentLoop(
         escalate: createClarifyEscalator({
           bridge: infra.clarifyBridge,
           jobs: jobStoreForClarify,
+          // I11 — a run parked on a human question is `blocked`, not `running`:
+          // its heartbeat pauses so the stale sweep leaves it alone, and the
+          // card can say why it is sitting there. The executor is constructed
+          // below, so this reads it late through the same `let` binding
+          // `backgroundDeps.nudge` uses — the closure only fires when a worker
+          // actually asks something, long after assignment.
+          blocking: {
+            block: async (id, requestId) => {
+              await backgroundExecutor?.markJobBlocked(id, requestId);
+            },
+            resume: async (id) => {
+              await backgroundExecutor?.resumeJob(id);
+            },
+          },
           // Only the bridge's last-resort route: a background clarify resolves
           // its real destination from the job's origin lane + presence
           // (G2/G3/D7), which is wired above.

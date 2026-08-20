@@ -1,5 +1,10 @@
 import type { ClarifyBridge } from '@ethosagent/core';
-import type { ClarifySurfaceType, InteractionAnswer, JobStore } from '@ethosagent/types';
+import type {
+  ClarifyResponse,
+  ClarifySurfaceType,
+  InteractionAnswer,
+  JobStore,
+} from '@ethosagent/types';
 import type { InteractionEscalator } from './router';
 import { SecretUnavailableError } from './secret';
 
@@ -31,6 +36,23 @@ export interface ClarifyEscalatorDeps {
    */
   fallbackSurfaceType?: ClarifySurfaceType;
   timeoutMs?: number;
+  /**
+   * I11 — park the run on `blocked` while a human is being asked, and un-park
+   * it when the question settles. Supplied as a PAIR or not at all: a `block`
+   * with no `resume` leaves a run marked `blocked` that nothing ever clears.
+   *
+   * Injected rather than imported. `BackgroundExecutor` — whose
+   * `markJobBlocked` / `resumeJob` are what this pair binds to — lives in
+   * `extensions/job-runner`, and this package sits BELOW extensions
+   * (ARCHITECTURE.md §II: only `packages/wiring` may name an extension). Going
+   * through `JobStore` instead would type-check, but it would set the row's
+   * status without pausing the executor's per-job heartbeat, which is half the
+   * meaning of `blocked`.
+   */
+  blocking?: {
+    block(jobId: string, requestId: string): Promise<void>;
+    resume(jobId: string): Promise<void>;
+  };
 }
 
 /**
@@ -56,21 +78,42 @@ export function createClarifyEscalator(deps: ClarifyEscalatorDeps): InteractionE
 
     const job = await deps.jobs.get(jobId);
     const options = req.options?.map((o) => o.label) ?? [];
-    // Rejects with `ClarifyTimedOutNoDefaultError` when the window closes and
-    // the harness supplied no default — the run parks instead of guessing
-    // (§4.5's default policy). Deliberately not caught here.
-    const response = await deps.bridge.request({
-      question: req.prompt,
-      ...(options.length > 0 ? { options } : {}),
-      ...(req.defaultValue !== undefined ? { default: req.defaultValue } : {}),
-      timeoutMs: deps.timeoutMs ?? DEFAULT_ESCALATION_TIMEOUT_MS,
-      answerableBy: 'anyone',
-      // The run's own session, so the question lands on the run's stream. The
-      // lane it queues in is the JOB (G1), which is passed separately.
-      sessionId: job?.childSessionKey ?? jobId,
-      jobId,
-      surfaceType: deps.fallbackSurfaceType ?? 'web',
-    });
+    // Park the run BEFORE the await starts blocking, and AWAIT the park: a
+    // surface that answers instantly must not resume a job that is not marked
+    // blocked yet, which would leave the row `blocked` forever.
+    //
+    // The id recorded is the INTERACTION's `requestId`, not the clarify row's.
+    // `ClarifyBridge` mints its own id inside `request()` and no caller can
+    // read it before the promise settles, so `BackgroundJob.blockedRequestId`
+    // cannot in fact hold a `PendingClarify.requestId` for either of the
+    // callers its doc names. The join a surface actually needs — parked run to
+    // pending question — is `jobId`, which IS the clarify's lane (G1) and is
+    // already queryable via `ClarifyBridge.listPending`.
+    await deps.blocking?.block(jobId, req.requestId);
+    let response: ClarifyResponse;
+    try {
+      // Rejects with `ClarifyTimedOutNoDefaultError` when the window closes and
+      // the harness supplied no default — the run parks instead of guessing
+      // (§4.5's default policy). Deliberately not caught here.
+      response = await deps.bridge.request({
+        question: req.prompt,
+        ...(options.length > 0 ? { options } : {}),
+        ...(req.defaultValue !== undefined ? { default: req.defaultValue } : {}),
+        timeoutMs: deps.timeoutMs ?? DEFAULT_ESCALATION_TIMEOUT_MS,
+        answerableBy: 'anyone',
+        // The run's own session, so the question lands on the run's stream. The
+        // lane it queues in is the JOB (G1), which is passed separately.
+        sessionId: job?.childSessionKey ?? jobId,
+        jobId,
+        surfaceType: deps.fallbackSurfaceType ?? 'web',
+      });
+    } finally {
+      // Answered, cancelled, or timed out with no default — whichever way it
+      // settled, the run is no longer waiting on a human. Resuming on the
+      // reject path too is the point of the `finally`: a rejected escalation
+      // becomes a denied tool call and the run keeps going.
+      await deps.blocking?.resume(jobId);
+    }
 
     return {
       requestId: req.requestId,
