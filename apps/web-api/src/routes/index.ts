@@ -18,6 +18,7 @@ import { authRoutes } from './auth';
 import { codexAuthRoutes } from './codex-auth';
 import { type CronFireTrigger, cronRoutes } from './cron';
 import { goalSseRoutes } from './goal-sse';
+import { kanbanSseRoutes } from './kanban-sse';
 import { openAiRoutes } from './openai';
 import { openapiRoutes } from './openapi';
 import type { RouteModule } from './route-module';
@@ -324,6 +325,7 @@ export function createRoutes(opts: CreateRoutesOptions): Hono {
   );
   app.route('/sse', sseRoutes({ chat: opts.services.chat }));
   app.route('/sse', goalSseRoutes({ goals: opts.services.goals }));
+  app.route('/sse', kanbanSseRoutes({ kanban: opts.services.kanban }));
   if (opts.services.systemBus) {
     app.route('/sse', systemSseRoutes({ systemBus: opts.services.systemBus }));
   }

@@ -255,6 +255,49 @@ export class KanbanService {
   }
 
   /**
+   * Board events strictly after `afterId`, ascending — the resume-since-cursor
+   * query behind the kanban SSE stream. Same `task_events` query as
+   * `getBoard()`'s, but `WHERE id > ?` ascending instead of `ORDER BY id DESC
+   * LIMIT ?`.
+   */
+  async getEventsSince(team: string, afterId: number): Promise<KanbanEvent[]> {
+    if (team !== GLOBAL_BOARD_NAME) assertSafeTeamName(team);
+    const boardPath = resolveBoard(this.rootDir, team);
+    if (!existsSync(boardPath)) return [];
+
+    const store =
+      team !== GLOBAL_BOARD_NAME
+        ? new KanbanStore(boardPath, { teamId: team })
+        : new KanbanStore(boardPath);
+    try {
+      const eventRows = (
+        store as unknown as { db: { prepare: (s: string) => { all: (n: number) => unknown[] } } }
+      ).db
+        .prepare(
+          'SELECT id, task_id, kind, actor, data_json, created_at FROM task_events WHERE id > ? ORDER BY id ASC',
+        )
+        .all(afterId) as Array<{
+        id: number;
+        task_id: string;
+        kind: string;
+        actor: string;
+        data_json: string;
+        created_at: number;
+      }>;
+      return eventRows.map((r) => ({
+        id: r.id,
+        taskId: r.task_id,
+        kind: r.kind as KanbanEvent['kind'],
+        actor: r.actor,
+        data: JSON.parse(r.data_json) as Record<string, unknown>,
+        createdAt: new Date(r.created_at).toISOString(),
+      }));
+    } finally {
+      store.close();
+    }
+  }
+
+  /**
    * Human-initiated status update. Threads `human:<sessionLabel>` as the actor
    * so the audit trail clearly separates UI edits from agent actions. Honors
    * the same auto-cancel-on-leave-running semantics as agent calls.

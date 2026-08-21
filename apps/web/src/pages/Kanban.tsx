@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { App as AntApp, Button, Input, Modal, Select, Typography } from 'antd';
 import { useState } from 'react';
 import { Board, TaskDrawer } from '../components/kanban/KanbanBoard';
+import { useKanbanBoardSync } from '../hooks/useKanbanBoardSync';
 import { rpc } from '../rpc';
 
 export function Kanban() {
@@ -19,11 +20,12 @@ export function Kanban() {
   const teams = teamsQuery.data?.teams ?? [];
   const activeTeam = selectedTeam ?? (teams.length === 1 ? (teams[0]?.name ?? null) : null);
 
+  useKanbanBoardSync(activeTeam);
+
   const boardQuery = useQuery({
     queryKey: ['kanban', 'board', activeTeam],
     queryFn: () => rpc.kanban.getBoard({ team: activeTeam ?? '' }),
     enabled: activeTeam !== null,
-    refetchInterval: 3_000,
   });
 
   const board = boardQuery.data?.board ?? null;

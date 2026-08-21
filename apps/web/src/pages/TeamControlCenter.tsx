@@ -3,6 +3,7 @@ import { Button, Spin, Typography } from 'antd';
 import { useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { Activity, Board, Roster, TaskDrawer } from '../components/kanban/KanbanBoard';
+import { useKanbanBoardSync } from '../hooks/useKanbanBoardSync';
 import { rpc } from '../rpc';
 
 // Per-team Control Center.
@@ -26,11 +27,12 @@ export function TeamControlCenter() {
   const [showActivity, setShowActivity] = useState(false);
   const [showRoster, setShowRoster] = useState(false);
 
+  useKanbanBoardSync(name.length > 0 ? name : null);
+
   const { data, isLoading, error, refetch, isFetching } = useQuery({
     queryKey: ['kanban', 'board', name],
     queryFn: () => rpc.kanban.getBoard({ team: name }),
     enabled: name.length > 0,
-    refetchInterval: 2_000,
   });
 
   if (isLoading) {

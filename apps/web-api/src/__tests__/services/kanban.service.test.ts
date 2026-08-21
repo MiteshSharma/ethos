@@ -239,6 +239,53 @@ members:
   });
 
   // ---------------------------------------------------------------------------
+  // getEventsSince
+  // ---------------------------------------------------------------------------
+
+  it('getEventsSince returns only events after the given id, ascending', async () => {
+    writeManifest(
+      'analytics',
+      `
+name: analytics
+description: x
+domain_capabilities: [x]
+members:
+  - personality: alpha
+`,
+    );
+    const store = openBoard('analytics');
+    const task = store.createTask({ title: 'first' }); // 'created' event
+    store.updateStatus(task.id, 'running', undefined, 'alpha'); // 'status_changed' event
+    store.close();
+
+    const all = await service.getEventsSince('analytics', 0);
+    expect(all.length).toBeGreaterThanOrEqual(2);
+    expect(all.map((e) => e.id)).toEqual([...all.map((e) => e.id)].sort((a, b) => a - b));
+
+    const firstId = all[0]?.id ?? 0;
+    const rest = await service.getEventsSince('analytics', firstId);
+    expect(rest.map((e) => e.id)).toEqual(all.slice(1).map((e) => e.id));
+  });
+
+  it('getEventsSince returns an empty array when no board.db exists yet', async () => {
+    writeManifest(
+      'analytics',
+      `
+name: analytics
+description: x
+domain_capabilities: [x]
+members:
+  - personality: alpha
+`,
+    );
+    await expect(service.getEventsSince('analytics', 0)).resolves.toEqual([]);
+  });
+
+  it('getEventsSince rejects path-traversal team names', async () => {
+    await expect(service.getEventsSince('..', 0)).rejects.toThrow(/invalid team name/);
+  });
+
+  // ---------------------------------------------------------------------------
   // updateStatus — path-traversal guard
   // ---------------------------------------------------------------------------
 
