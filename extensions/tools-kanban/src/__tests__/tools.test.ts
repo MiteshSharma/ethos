@@ -275,6 +275,51 @@ describe('kanban tools', () => {
     expect(out.status).toBe('blocked');
   });
 
+  it('kanban_block accepts an optional kind and persists it on the task', async () => {
+    const t = store.createTask({ title: 'x' });
+    store.updateStatus(t.id, 'running');
+    const out = await call<{ status: string; block_kind: string | null }>(
+      tools.kanban_block as Tool,
+      { task_id: t.id, reason: 'waiting on infra', kind: 'dependency' },
+      makeCtx(),
+    );
+    expect(out.status).toBe('blocked');
+    expect(out.block_kind).toBe('dependency');
+  });
+
+  it('kanban_block rejects an unrecognized kind', async () => {
+    const t = store.createTask({ title: 'x' });
+    store.updateStatus(t.id, 'running');
+    const result = await (tools.kanban_block as Tool).execute(
+      { task_id: t.id, reason: 'waiting on infra', kind: 'not_a_real_kind' },
+      makeCtx(),
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.code).toBe('input_invalid');
+  });
+
+  it('kanban_block routes to needs_revision after BLOCK_RECURRENCE_LIMIT same-kind blocks in a row', async () => {
+    const t = store.createTask({ title: 'flaky dependency' });
+    store.updateStatus(t.id, 'running');
+    await call(
+      tools.kanban_block as Tool,
+      { task_id: t.id, reason: 'waiting on service A', kind: 'dependency' },
+      makeCtx(),
+    );
+
+    // Re-claim, then block again with the same kind — the default
+    // BLOCK_RECURRENCE_LIMIT (2) is met on this second consecutive block.
+    store.updateStatus(t.id, 'running');
+    const out = await call<{ status: string; block_recurrence_count: number }>(
+      tools.kanban_block as Tool,
+      { task_id: t.id, reason: 'still waiting on service A', kind: 'dependency' },
+      makeCtx(),
+    );
+
+    expect(out.status).toBe('needs_revision');
+    expect(out.block_recurrence_count).toBe(2);
+  });
+
   it('kanban_unblock returns ready when all parents are done', async () => {
     const p = store.createTask({ title: 'parent' });
     const c = store.createTask({ title: 'child', parents: [p.id] });

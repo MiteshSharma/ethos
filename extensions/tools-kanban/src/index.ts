@@ -1,4 +1,5 @@
 import type {
+  BlockKind,
   KanbanStore,
   Task,
   TaskComment,
@@ -33,7 +34,8 @@ const RULES = [
   'STATUSES',
   '- todo → ready → running → done',
   '- blocked (called out explicitly via kanban_block; unblock with kanban_unblock)',
-  '- needs_revision (a before_ticket_complete verifier rejected the completion; re-claim to retry)',
+  '- needs_revision (a before_ticket_complete verifier rejected the completion, OR kanban_block was called ' +
+    'with the same `kind` too many times in a row; re-claim to retry)',
   '- archived (soft-delete; preserves audit trail)',
 ].join('\n');
 
@@ -69,6 +71,7 @@ const STATUS_VALUES: TaskStatus[] = [
   'needs_revision',
 ];
 const WORKSPACE_MODES: WorkspaceMode[] = ['scratch', 'worktree', 'dir'];
+const BLOCK_KINDS: BlockKind[] = ['dependency', 'needs_input', 'capability', 'transient'];
 
 function isStatus(s: unknown): s is TaskStatus {
   return typeof s === 'string' && (STATUS_VALUES as string[]).includes(s);
@@ -76,6 +79,10 @@ function isStatus(s: unknown): s is TaskStatus {
 
 function isWorkspaceMode(s: unknown): s is WorkspaceMode {
   return typeof s === 'string' && (WORKSPACE_MODES as string[]).includes(s);
+}
+
+function isBlockKind(s: unknown): s is BlockKind {
+  return typeof s === 'string' && (BLOCK_KINDS as string[]).includes(s);
 }
 
 function summariseTask(t: Task) {
@@ -107,6 +114,8 @@ function fullTask(t: Task) {
     retry_count: t.retryCount,
     max_retries: t.maxRetries,
     acceptance_criteria: t.acceptanceCriteria,
+    block_kind: t.blockKind,
+    block_recurrence_count: t.blockRecurrenceCount,
     created_at: t.createdAt,
     updated_at: t.updatedAt,
   };
@@ -691,7 +700,10 @@ function createKanbanBlock(store: KanbanStore): Tool {
   return {
     name: 'kanban_block',
     description:
-      'End the open run with outcome=blocked, set status=blocked. Reason is recorded as a comment for context.\n' +
+      'End the open run with outcome=blocked, set status=blocked. Reason is recorded as a comment for context. ' +
+      'Optional `kind` categorizes why (dependency/needs_input/capability/transient) — repeated blocks with the ' +
+      'same `kind` in a row (no successful completion in between) auto-route the task to needs_revision instead ' +
+      'of looping forever.\n' +
       RULES,
     toolset: 'kanban',
     maxResultChars: MAX_RESULT_CHARS,
@@ -702,10 +714,17 @@ function createKanbanBlock(store: KanbanStore): Tool {
       properties: {
         task_id: { type: 'string' },
         reason: { type: 'string' },
+        kind: {
+          type: 'string',
+          enum: BLOCK_KINDS,
+          description:
+            'Why the task is blocked. "dependency" (waiting on another task — unblocking stays a manual ' +
+            'kanban_unblock call, not auto-routed) does not get auto-unblocked when its parent completes.',
+        },
       },
     },
     async execute(rawArgs, ctx) {
-      const args = (rawArgs ?? {}) as { task_id?: unknown; reason?: unknown };
+      const args = (rawArgs ?? {}) as { task_id?: unknown; reason?: unknown; kind?: unknown };
       if (typeof args.task_id !== 'string') {
         return errorResult('task_id must be a string', 'input_invalid');
       }
@@ -714,9 +733,13 @@ function createKanbanBlock(store: KanbanStore): Tool {
       }
       const reasonErr = tooLong('reason', args.reason, MAX_REASON_CHARS);
       if (reasonErr) return reasonErr;
+      if (args.kind !== undefined && !isBlockKind(args.kind)) {
+        return errorResult(`kind must be one of: ${BLOCK_KINDS.join(', ')}`, 'input_invalid');
+      }
       try {
-        // blockRun atomically records the reason as both run.summary and a comment.
-        const t = store.blockRun(args.task_id, args.reason, actorOf(ctx));
+        // blockRun atomically records the reason as both run.summary and a comment,
+        // and (when kind is set) tracks the unblock-loop breaker.
+        const t = store.blockRun(args.task_id, args.reason, actorOf(ctx), args.kind);
         return jsonResult(fullTask(t));
       } catch (err) {
         return storeError(err);
