@@ -307,7 +307,7 @@ export async function runSessionsCommand(sub: string, argv: string[]): Promise<v
           console.log('No sessions found.');
           break;
         }
-        const idW = 24;
+        const idW = 38; // full 36-char UUID + at least 2 spaces of padding — never truncate
         const titleW = 24;
         const keyW = 16;
         const header = `${'ID'.padEnd(idW) + 'TITLE'.padEnd(titleW) + 'KEY'.padEnd(keyW)}LAST ACTIVE`;
@@ -315,7 +315,7 @@ export async function runSessionsCommand(sub: string, argv: string[]): Promise<v
         console.log('-'.repeat(header.length));
         for (const item of items) {
           console.log(
-            item.id.slice(0, idW - 1).padEnd(idW) +
+            item.id.padEnd(idW) +
               (item.title ?? '').slice(0, titleW - 1).padEnd(titleW) +
               item.key.slice(0, keyW - 1).padEnd(keyW) +
               timeAgo(item.updatedAt),
