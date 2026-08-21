@@ -228,6 +228,9 @@ export function TaskTile({
           <Checkbox
             checked={selected.has(task.id)}
             onClick={(e) => e.stopPropagation()}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' || e.key === ' ') e.stopPropagation();
+            }}
             onChange={() => onToggleSelect(task.id)}
           />
         )}
