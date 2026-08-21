@@ -327,6 +327,30 @@ export class KanbanService {
     }
   }
 
+  /**
+   * Batch status update — one KanbanStore transaction for the whole set of
+   * taskIds rather than looping the single-task RPC from the client.
+   */
+  async bulkUpdateStatus(opts: {
+    team: string;
+    taskIds: string[];
+    status: KanbanTaskStatus;
+    actor: string;
+  }): Promise<{ tasks: KanbanTask[] }> {
+    if (opts.team !== GLOBAL_BOARD_NAME) assertSafeTeamName(opts.team);
+    const boardPath = resolveBoard(this.rootDir, opts.team);
+    if (!existsSync(boardPath)) {
+      throw new Error(`team board not found: ${opts.team}`);
+    }
+    const store = new KanbanStore(boardPath, { teamId: opts.team });
+    try {
+      const updated = store.bulkUpdateStatus(opts.taskIds, opts.status, opts.actor);
+      return { tasks: updated.map(toWireTask) };
+    } finally {
+      store.close();
+    }
+  }
+
   /** Create a task on a team board. */
   async createTask(opts: {
     team: string;
@@ -399,6 +423,34 @@ export class KanbanService {
       }
 
       return { task: toWireTask(task) };
+    } finally {
+      store.close();
+    }
+  }
+
+  /**
+   * Batch reassign — one KanbanStore transaction for the whole set of
+   * taskIds, firing the same non-fatal per-task /notify as assign().
+   */
+  async bulkAssign(opts: {
+    team: string;
+    taskIds: string[];
+    assignee: string;
+    actor: string;
+  }): Promise<{ tasks: KanbanTask[] }> {
+    if (opts.team !== GLOBAL_BOARD_NAME) assertSafeTeamName(opts.team);
+    const boardPath = resolveBoard(this.rootDir, opts.team);
+    const store = new KanbanStore(boardPath, { teamId: opts.team });
+    try {
+      const updated = store.bulkAssign(opts.taskIds, opts.assignee, opts.actor);
+
+      for (const task of updated) {
+        if (this.mesh && task.status === 'ready') {
+          void this.notifyAssignee(opts.assignee, task.id, 'kanban').catch(() => {});
+        }
+      }
+
+      return { tasks: updated.map(toWireTask) };
     } finally {
       store.close();
     }

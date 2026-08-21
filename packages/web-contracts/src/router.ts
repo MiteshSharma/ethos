@@ -2473,6 +2473,13 @@ const KanbanUpdateStatusInput = z.object({
 });
 const KanbanUpdateStatusOutput = z.object({ task: KanbanTaskSchema });
 
+const KanbanBulkUpdateStatusInput = z.object({
+  team: z.string().min(1),
+  taskIds: z.array(z.string().min(1)).min(1),
+  status: KanbanTaskStatusSchema,
+});
+const KanbanBulkUpdateStatusOutput = z.object({ tasks: z.array(KanbanTaskSchema) });
+
 const KanbanCreateTaskInput = z.object({
   team: z.string().min(1),
   title: z.string().min(1),
@@ -2495,6 +2502,13 @@ const KanbanAssignInput = z.object({
 });
 const KanbanAssignOutput = z.object({ task: KanbanTaskSchema });
 
+const KanbanBulkAssignInput = z.object({
+  team: z.string().min(1),
+  taskIds: z.array(z.string().min(1)).min(1),
+  assignee: z.string().min(1),
+});
+const KanbanBulkAssignOutput = z.object({ tasks: z.array(KanbanTaskSchema) });
+
 const KanbanGetTaskInput = z.object({ team: z.string().min(1), taskId: z.string().min(1) });
 const KanbanGetTaskOutput = z.object({
   task: KanbanTaskSchema,
@@ -2513,9 +2527,11 @@ const kanban = {
   list: oc.output(KanbanListOutput),
   getBoard: oc.input(KanbanGetBoardInput).output(KanbanGetBoardOutput),
   updateStatus: oc.input(KanbanUpdateStatusInput).output(KanbanUpdateStatusOutput),
+  bulkUpdateStatus: oc.input(KanbanBulkUpdateStatusInput).output(KanbanBulkUpdateStatusOutput),
   createTask: oc.input(KanbanCreateTaskInput).output(KanbanCreateTaskOutput),
   listAgents: oc.input(KanbanListAgentsInput).output(KanbanListAgentsOutput),
   assign: oc.input(KanbanAssignInput).output(KanbanAssignOutput),
+  bulkAssign: oc.input(KanbanBulkAssignInput).output(KanbanBulkAssignOutput),
   getTask: oc.input(KanbanGetTaskInput).output(KanbanGetTaskOutput),
   addComment: oc.input(KanbanAddCommentInput).output(KanbanAddCommentOutput),
 };

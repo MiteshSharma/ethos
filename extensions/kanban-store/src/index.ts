@@ -1151,6 +1151,24 @@ export class KanbanStore {
     return tx();
   }
 
+  // One outer transaction wrapping N per-task updateStatus calls: any invalid
+  // id anywhere in taskIds throws and rolls back the whole batch, not just
+  // the tasks up to that point (same nested-transaction idiom as archive()).
+  bulkUpdateStatus(taskIds: string[], status: TaskStatus, actor = 'system'): Task[] {
+    const tx = this.db.transaction((): Task[] => {
+      return taskIds.map((id) => this.updateStatus(id, status, undefined, actor));
+    });
+    return tx();
+  }
+
+  // Same all-or-nothing shape as bulkUpdateStatus, composed over assign().
+  bulkAssign(taskIds: string[], assignee: string | null, actor = 'system'): Task[] {
+    const tx = this.db.transaction((): Task[] => {
+      return taskIds.map((id) => this.assign(id, assignee, actor));
+    });
+    return tx();
+  }
+
   link(parentId: string, childId: string, actor = 'system'): void {
     if (parentId === childId) {
       throw new Error(`cycle: ${childId} cannot be its own parent`);

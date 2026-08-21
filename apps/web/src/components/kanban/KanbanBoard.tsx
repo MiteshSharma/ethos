@@ -9,6 +9,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   App as AntApp,
   Button,
+  Checkbox,
   Descriptions,
   Dropdown,
   Input,
@@ -49,12 +50,20 @@ export function Board({
   showArchived,
   onSelect,
   fill,
+  selectMode,
+  onSelectModeChange,
+  selected,
+  onToggleSelect,
 }: {
   snapshot: KanbanBoardSnapshot;
   teamName: string;
   showArchived: boolean;
   onSelect: (id: string) => void;
   fill?: boolean;
+  selectMode: boolean;
+  onSelectModeChange: (next: boolean) => void;
+  selected: Set<string>;
+  onToggleSelect: (taskId: string) => void;
 }) {
   const byStatus = useMemo(() => {
     const map = new Map<KanbanTaskStatus, KanbanTask[]>();
@@ -76,6 +85,13 @@ export function Board({
       <header className="cc-panel-header">
         <h3 className="cc-panel-title">Board</h3>
         <span className="cc-spacer" />
+        <Button
+          size="small"
+          type={selectMode ? 'primary' : 'default'}
+          onClick={() => onSelectModeChange(!selectMode)}
+        >
+          {selectMode ? 'Done selecting' : 'Select'}
+        </Button>
         <Typography.Text type="secondary" style={{ fontSize: 11 }}>
           {snapshot.tasks.length} tasks
         </Typography.Text>
@@ -89,6 +105,9 @@ export function Board({
             childCounts={childCounts}
             teamName={teamName}
             onSelect={onSelect}
+            selectMode={selectMode}
+            selected={selected}
+            onToggleSelect={onToggleSelect}
           />
         ))}
       </div>
@@ -102,12 +121,18 @@ export function BoardColumn({
   childCounts,
   teamName,
   onSelect,
+  selectMode,
+  selected,
+  onToggleSelect,
 }: {
   status: KanbanTaskStatus;
   tasks: KanbanTask[];
   childCounts: Map<string, { total: number; done: number }>;
   teamName: string;
   onSelect: (id: string) => void;
+  selectMode: boolean;
+  selected: Set<string>;
+  onToggleSelect: (taskId: string) => void;
 }) {
   return (
     <div className="cc-column">
@@ -129,6 +154,9 @@ export function BoardColumn({
               childCount={childCounts.get(t.id)}
               teamName={teamName}
               onSelect={onSelect}
+              selectMode={selectMode}
+              selected={selected}
+              onToggleSelect={onToggleSelect}
             />
           ))
         )}
@@ -146,11 +174,17 @@ export function TaskTile({
   childCount,
   teamName,
   onSelect,
+  selectMode,
+  selected,
+  onToggleSelect,
 }: {
   task: KanbanTask;
   childCount?: { total: number; done: number };
   teamName: string;
   onSelect: (id: string) => void;
+  selectMode: boolean;
+  selected: Set<string>;
+  onToggleSelect: (taskId: string) => void;
 }) {
   const queryClient = useQueryClient();
   const { notification } = AntApp.useApp();
@@ -190,6 +224,13 @@ export function TaskTile({
       title={task.title}
     >
       <div className="cc-task-top">
+        {selectMode && (
+          <Checkbox
+            checked={selected.has(task.id)}
+            onClick={(e) => e.stopPropagation()}
+            onChange={() => onToggleSelect(task.id)}
+          />
+        )}
         <span className="cc-task-id">{task.id.slice(0, 8)}</span>
         {task.priority !== 0 && (
           <span className="cc-task-priority" data-p={task.priority}>
@@ -259,6 +300,93 @@ export function TaskTile({
           </button>
         </Dropdown>
       </div>
+    </div>
+  );
+}
+
+// Batch action bar — shown by the page component whenever the lifted
+// selection set is non-empty. Status and reassign each fire their own narrow
+// bulk RPC (mirrors the backend's two-narrow-methods-not-one-polymorphic-method
+// choice); "Archive" reuses the same bulk status-update RPC with
+// status: 'archived' — there is no separate archive RPC on the web layer.
+export function BulkActionBar({
+  selectedIds,
+  teamName,
+  agents,
+  onDone,
+}: {
+  selectedIds: string[];
+  teamName: string;
+  agents: Array<{ personalityId: string; displayName: string; online: boolean }>;
+  onDone: () => void;
+}) {
+  const queryClient = useQueryClient();
+  const { notification } = AntApp.useApp();
+
+  const bulkStatusMut = useMutation({
+    mutationFn: (status: KanbanTaskStatus) =>
+      rpc.kanban.bulkUpdateStatus({ team: teamName, taskIds: selectedIds, status }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['kanban', 'board', teamName] });
+      onDone();
+    },
+    onError: (err) =>
+      notification.error({
+        message: 'Bulk status change failed',
+        description: (err as Error).message,
+      }),
+  });
+
+  const bulkAssignMut = useMutation({
+    mutationFn: (assignee: string) =>
+      rpc.kanban.bulkAssign({ team: teamName, taskIds: selectedIds, assignee }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['kanban', 'board', teamName] });
+      onDone();
+    },
+    onError: (err) =>
+      notification.error({
+        message: 'Bulk reassign failed',
+        description: (err as Error).message,
+      }),
+  });
+
+  return (
+    <div className="cc-panel" style={{ display: 'flex', gap: 8, alignItems: 'center', padding: 8 }}>
+      <Typography.Text strong style={{ fontSize: 12 }}>
+        {selectedIds.length} selected
+      </Typography.Text>
+      <Select
+        size="small"
+        placeholder="Set status…"
+        style={{ minWidth: 160 }}
+        loading={bulkStatusMut.isPending}
+        value={undefined}
+        onChange={(status: KanbanTaskStatus) => bulkStatusMut.mutate(status)}
+        options={ALL_STATUSES.map((s) => ({ label: STATUS_LABEL[s], value: s }))}
+      />
+      <Button
+        size="small"
+        loading={bulkStatusMut.isPending}
+        onClick={() => bulkStatusMut.mutate('archived')}
+      >
+        Archive
+      </Button>
+      <Select
+        size="small"
+        placeholder="Reassign to…"
+        style={{ minWidth: 160 }}
+        loading={bulkAssignMut.isPending}
+        value={undefined}
+        onChange={(assignee: string) => bulkAssignMut.mutate(assignee)}
+        options={agents
+          .filter((a) => a.online)
+          .map((a) => ({ label: a.displayName, value: a.personalityId }))}
+      />
+      <span className="cc-spacer" />
+      <Button size="small" onClick={onDone}>
+        Cancel
+      </Button>
     </div>
   );
 }

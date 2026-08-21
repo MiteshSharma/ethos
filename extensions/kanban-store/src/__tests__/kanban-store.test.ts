@@ -401,6 +401,60 @@ describe('KanbanStore', () => {
   });
 
   // ---------------------------------------------------------------------------
+  // bulkUpdateStatus / bulkAssign
+  // ---------------------------------------------------------------------------
+
+  it('bulkUpdateStatus transitions every task in the batch', () => {
+    const a = store.createTask({ title: 'a' });
+    const b = store.createTask({ title: 'b' });
+    const c = store.createTask({ title: 'c' });
+
+    store.bulkUpdateStatus([a.id, b.id, c.id], 'done', 'tester');
+
+    expect(store.getTask(a.id)?.status).toBe('done');
+    expect(store.getTask(b.id)?.status).toBe('done');
+    expect(store.getTask(c.id)?.status).toBe('done');
+  });
+
+  it('bulkUpdateStatus rolls back the whole batch if any task id is invalid', () => {
+    const a = store.createTask({ title: 'a' });
+    const b = store.createTask({ title: 'b' });
+    const c = store.createTask({ title: 'c' });
+
+    // Invalid id sits in the middle so a and b would already be written if
+    // this weren't wrapped in one transaction.
+    expect(() => store.bulkUpdateStatus([a.id, b.id, 't_nope', c.id], 'done', 'tester')).toThrow();
+
+    expect(store.getTask(a.id)?.status).toBe('todo');
+    expect(store.getTask(b.id)?.status).toBe('todo');
+    expect(store.getTask(c.id)?.status).toBe('todo');
+  });
+
+  it('bulkAssign sets the assignee on every task in the batch', () => {
+    const a = store.createTask({ title: 'a' });
+    const b = store.createTask({ title: 'b' });
+    const c = store.createTask({ title: 'c' });
+
+    store.bulkAssign([a.id, b.id, c.id], 'reviewer', 'tester');
+
+    expect(store.getTask(a.id)?.assignee).toBe('reviewer');
+    expect(store.getTask(b.id)?.assignee).toBe('reviewer');
+    expect(store.getTask(c.id)?.assignee).toBe('reviewer');
+  });
+
+  it('bulkAssign rolls back the whole batch if any task id is invalid', () => {
+    const a = store.createTask({ title: 'a' });
+    const b = store.createTask({ title: 'b' });
+    const c = store.createTask({ title: 'c' });
+
+    expect(() => store.bulkAssign([a.id, b.id, 't_nope', c.id], 'reviewer', 'tester')).toThrow();
+
+    expect(store.getTask(a.id)?.assignee).toBeNull();
+    expect(store.getTask(b.id)?.assignee).toBeNull();
+    expect(store.getTask(c.id)?.assignee).toBeNull();
+  });
+
+  // ---------------------------------------------------------------------------
   // Link + cycle prevention
   // ---------------------------------------------------------------------------
 

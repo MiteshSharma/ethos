@@ -297,6 +297,25 @@ members:
     ).rejects.toThrow(/invalid team name/);
   });
 
+  it('rejects path-traversal team names on bulkUpdateStatus and bulkAssign', async () => {
+    await expect(
+      service.bulkUpdateStatus({
+        team: '..',
+        taskIds: ['t_x'],
+        status: 'done',
+        actor: 'human:test',
+      }),
+    ).rejects.toThrow(/invalid team name/);
+    await expect(
+      service.bulkAssign({
+        team: '..',
+        taskIds: ['t_x'],
+        assignee: 'engineer',
+        actor: 'human:test',
+      }),
+    ).rejects.toThrow(/invalid team name/);
+  });
+
   it('updateStatus writes through the store and tags the actor', async () => {
     writeManifest(
       'analytics',
@@ -366,5 +385,75 @@ members:
       memberId: 'engineer',
       ticketsFailed: 1,
     });
+  });
+
+  // ---------------------------------------------------------------------------
+  // bulkUpdateStatus / bulkAssign
+  // ---------------------------------------------------------------------------
+
+  it('bulkUpdateStatus writes through the store and tags the actor', async () => {
+    writeManifest(
+      'analytics',
+      `
+name: analytics
+description: x
+domain_capabilities: [x]
+members:
+  - personality: alpha
+`,
+    );
+    const store = openBoard('analytics');
+    const a = store.createTask({ title: 'a' });
+    const b = store.createTask({ title: 'b' });
+    store.close();
+
+    const { tasks } = await service.bulkUpdateStatus({
+      team: 'analytics',
+      taskIds: [a.id, b.id],
+      status: 'done',
+      actor: 'human:control-center',
+    });
+    expect(tasks.map((t) => t.status)).toEqual(['done', 'done']);
+
+    const reread = new KanbanStore(join(dir, 'analytics', 'board.db'));
+    for (const id of [a.id, b.id]) {
+      const events = reread.listEvents(id);
+      const statusChange = events.find((e) => e.kind === 'status_changed');
+      expect(statusChange?.actor).toBe('human:control-center');
+    }
+    reread.close();
+  });
+
+  it('bulkAssign writes through the store and tags the actor', async () => {
+    writeManifest(
+      'analytics',
+      `
+name: analytics
+description: x
+domain_capabilities: [x]
+members:
+  - personality: alpha
+`,
+    );
+    const store = openBoard('analytics');
+    const a = store.createTask({ title: 'a' });
+    const b = store.createTask({ title: 'b' });
+    store.close();
+
+    const { tasks } = await service.bulkAssign({
+      team: 'analytics',
+      taskIds: [a.id, b.id],
+      assignee: 'reviewer',
+      actor: 'human:control-center',
+    });
+    expect(tasks.map((t) => t.assignee)).toEqual(['reviewer', 'reviewer']);
+
+    const reread = new KanbanStore(join(dir, 'analytics', 'board.db'));
+    for (const id of [a.id, b.id]) {
+      const events = reread.listEvents(id);
+      const assigned = events.find((e) => e.kind === 'assigned');
+      expect(assigned?.actor).toBe('human:control-center');
+    }
+    reread.close();
   });
 });
