@@ -1089,6 +1089,10 @@ export type KanbanAgent = z.infer<typeof KanbanAgentSchema>;
 //
 // A key needs `chat` to drive Cursor/Aider/the OpenAI SDKs, and `chat:send` to
 // drive a Mission Control built on `@ethosagent/sdk`. Neither implies the other.
+// `cron` gates the whole `POST /cron/fire` route (apps/web-api/src/routes/cron.ts)
+// the same way `chat` gates the whole `/v1/*` surface — a plain bearer-checked
+// route, not an RPC method, so it has no SCOPE_MAP entry (dual-auth.ts's
+// SCOPE_MAP is keyed by oRPC path and only applies to `/rpc/*`/`/sse/*`).
 export const ApiKeyScopeSchema = z.enum([
   'sessions:read',
   'sessions:write',
@@ -1100,6 +1104,7 @@ export const ApiKeyScopeSchema = z.enum([
   'tools:approve',
   'events:subscribe',
   'metrics:read',
+  'cron',
 ]);
 export type ApiKeyScope = z.infer<typeof ApiKeyScopeSchema>;
 

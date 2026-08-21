@@ -489,6 +489,11 @@ export interface CreateWebApiOptions {
    * is not mounted.
    */
   metricsTextFn?: () => Promise<string>;
+  /** External cron trigger (plan/phases/cron-scheduler-seam.md) — mounts
+   *  `POST /cron/fire` (bearer auth, scope `cron`) when present. Boot code
+   *  supplies an `HttpFireTrigger` only when `cron.trigger.external` is
+   *  `true`; omitted → `/cron/fire` is not mounted. */
+  cronFireTrigger?: import('./routes/cron').CronFireTrigger;
 }
 
 export interface CreateWebApiResult {
@@ -1308,6 +1313,7 @@ export function createWebApi(opts: CreateWebApiOptions): CreateWebApiResult {
     ...(opts.listTeams ? { listTeams: opts.listTeams } : {}),
     ...(opts.webBaseUrl ? { webBaseUrl: opts.webBaseUrl } : {}),
     ...(opts.metricsTextFn ? { metricsTextFn: opts.metricsTextFn } : {}),
+    ...(opts.cronFireTrigger ? { cronFireTrigger: opts.cronFireTrigger } : {}),
     ...(opts.idempotencyStore ? { idempotencyStore: opts.idempotencyStore } : {}),
     ...(opts.corsOrigins ? { corsOrigins: opts.corsOrigins } : {}),
     // The download route is a built-in module rather than a caller-supplied

@@ -16,6 +16,7 @@ import { rateLimitMiddleware } from '../middleware/rate-limit';
 import type { WebTokenRepository } from '../repositories/web-token.repository';
 import { authRoutes } from './auth';
 import { codexAuthRoutes } from './codex-auth';
+import { type CronFireTrigger, cronRoutes } from './cron';
 import { goalSseRoutes } from './goal-sse';
 import { openAiRoutes } from './openai';
 import { openapiRoutes } from './openapi';
@@ -75,6 +76,11 @@ export interface CreateRoutesOptions {
   /** P2-counters (D2/D16) — renders `GET /metrics` (OpenMetrics text, scope
    *  `metrics:read`). Omitted → `/metrics` is not mounted. */
   metricsTextFn?: () => Promise<string>;
+  /** External cron trigger (plan/phases/cron-scheduler-seam.md) — mounts
+   *  `POST /cron/fire` (bearer auth, scope `cron`) when present. Boot code
+   *  supplies an `HttpFireTrigger` only when `cron.trigger.external` is
+   *  `true`; omitted → `/cron/fire` is not mounted. */
+  cronFireTrigger?: CronFireTrigger;
 }
 
 export interface ServiceContainer {
@@ -354,6 +360,14 @@ export function createRoutes(opts: CreateRoutesOptions): Hono {
       const text = await metricsTextFn();
       return c.body(text, 200, { 'content-type': 'text/plain; version=0.0.4' });
     });
+  }
+
+  // External cron trigger (plan/phases/cron-scheduler-seam.md). Same
+  // bearer-auth-gated, presence-mounted shape as `/metrics` above — mounted
+  // only when boot code wires an `HttpFireTrigger` (i.e. `cron.trigger.external`
+  // is `true`), so a deployment that never opts in needs no `cron`-scoped key.
+  if (opts.apiKeys && opts.cronFireTrigger) {
+    app.route('/cron', cronRoutes({ apiKeys: opts.apiKeys, trigger: opts.cronFireTrigger }));
   }
 
   // WhatsApp QR-pairing SSE stream. Gated behind auth — the QR string is

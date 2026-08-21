@@ -109,6 +109,34 @@ export interface CronRunInfo {
   outputPath: string;
 }
 
+// ---------------------------------------------------------------------------
+// Trigger seam (plan/phases/cron-scheduler-seam.md) — what a `CronTriggerSource`
+// calls into, and who gets told when the next run is due.
+// ---------------------------------------------------------------------------
+
+/**
+ * The shared due-scan / claim-before-run / execute cycle. `CronScheduler` is
+ * today's only implementation (its `fire()` method) — the interface exists so
+ * a trigger (an in-process interval, or an externally-fired HTTP request) can
+ * drive it uniformly without depending on the concrete class. See `trigger.ts`
+ * for `CronTriggerSource` (`LocalIntervalTrigger` / `HttpFireTrigger`).
+ */
+export interface CronEngine {
+  fire(): Promise<void>;
+}
+
+/**
+ * Told the next time work is due, so an external wake mechanism (e.g. a
+ * future Firecracker Wake Controller) knows when to resume a sleeping
+ * instance. `NoopArmingBackend` (see `trigger.ts`) is the only implementation
+ * this phase ships — arms nothing — but the `arm(nextRunAt)` contract is
+ * exercised for real (see `CronScheduler`'s call site) so a later real backend
+ * is designed against a tested signature, not a guessed one.
+ */
+export interface CronArmingBackend {
+  arm(nextRunAt: Date | null): void | Promise<void>;
+}
+
 export interface CronSchedulerConfig {
   /** Called when a job fires. Returns the text output and session key. */
   runJob: (job: CronJob) => Promise<CronRunResult>;
@@ -137,6 +165,10 @@ export interface CronSchedulerConfig {
     job: CronJob,
     decision: CronDecision & { ranAt: string; delivered: boolean },
   ) => void;
+  /** Told the earliest `nextRunAt` across active jobs after every fire — the
+   *  `CronArmingBackend` seam. Optional; when absent no arming call is made.
+   *  Failures are swallowed (arming is fail-open, never breaks the run). */
+  armingBackend?: CronArmingBackend;
 }
 
 /** Audit actions: heartbeat escalate/silent plus the script-job outcomes. */
@@ -367,7 +399,7 @@ export class CronScheduler {
     job: CronJob,
     decision: CronDecision & { ranAt: string; delivered: boolean },
   ) => void;
-  private timer: ReturnType<typeof setInterval> | null = null;
+  private readonly armingBackend?: CronArmingBackend;
 
   constructor(config: CronSchedulerConfig) {
     this.cronDir = config.cronDir ?? join(homedir(), '.ethos', 'cron');
@@ -383,22 +415,21 @@ export class CronScheduler {
     this.scriptsDir = config.scriptsDir ?? join(homedir(), '.ethos', 'scripts');
     this.executionBackend = config.executionBackend ?? null;
     this.onDecision = config.onDecision;
+    this.armingBackend = config.armingBackend;
   }
 
   // ---------------------------------------------------------------------------
-  // Lifecycle
+  // Engine entry point — `CronEngine.fire()`. The in-process interval loop
+  // that used to live here (`start()`/`stop()`) has moved to
+  // `LocalIntervalTrigger` (see `trigger.ts`); this class is the engine a
+  // `CronTriggerSource` fires into, not the thing that owns the timer.
   // ---------------------------------------------------------------------------
 
-  start(): void {
-    void this.tick(); // check immediately on start (handles missed runs)
-    this.timer = setInterval(() => void this.tick(), this.tickIntervalMs);
-  }
-
-  stop(): void {
-    if (this.timer) {
-      clearInterval(this.timer);
-      this.timer = null;
-    }
+  /** Run the due-scan/claim/execute cycle once, right now. Called by a
+   *  `CronTriggerSource` — an interval loop, or an externally-fired HTTP
+   *  request (`POST /cron/fire`). */
+  async fire(): Promise<void> {
+    await this.tick();
   }
 
   // ---------------------------------------------------------------------------
@@ -769,6 +800,22 @@ export class CronScheduler {
 
       await this.patchJob(job.id, patchData).catch(() => {});
     }
+
+    if (this.armingBackend) {
+      try {
+        const afterTick = await this.readJobs();
+        const nextTimes = afterTick
+          .filter(
+            (j): j is CronJob & { nextRunAt: string } => j.status === 'active' && !!j.nextRunAt,
+          )
+          .map((j) => new Date(j.nextRunAt).getTime())
+          .filter((t) => Number.isFinite(t));
+        const earliest = nextTimes.length > 0 ? new Date(Math.min(...nextTimes)) : null;
+        await this.armingBackend.arm(earliest);
+      } catch {
+        // arming is fail-open — never breaks the tick
+      }
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -1060,6 +1107,18 @@ export {
   nextRunForSchedule,
   parseSchedule,
 } from './schedule';
+
+// ---------------------------------------------------------------------------
+// Re-exports from the trigger module (CronTriggerSource / CronArmingBackend)
+// ---------------------------------------------------------------------------
+
+export type { CronDeploymentConfig, CronTriggerSource, CronTriggers } from './trigger';
+export {
+  buildCronTriggers,
+  HttpFireTrigger,
+  LocalIntervalTrigger,
+  NoopArmingBackend,
+} from './trigger';
 
 // ---------------------------------------------------------------------------
 // Backward-compat helpers — delegate to the new schedule parser

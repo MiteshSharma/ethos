@@ -25,7 +25,7 @@ import {
   writeConfig,
 } from '@ethosagent/config';
 import { type AgentLoop, scriptCallableFor, toolsDeclaringNetwork } from '@ethosagent/core';
-import { CronScheduler } from '@ethosagent/cron';
+import { buildCronTriggers, CronScheduler, type CronTriggers } from '@ethosagent/cron';
 import { LocalExecutionBackend } from '@ethosagent/execution-local';
 import { LangfusePollLoop } from '@ethosagent/export-langfuse';
 import { ConsoleLogger } from '@ethosagent/logger';
@@ -504,6 +504,14 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
   // config above). Backing jobs are seeded by `watcherManager.start()` later.
   watcherManager.attachScheduler(cronScheduler);
 
+  // Cron trigger seam (plan/phases/cron-scheduler-seam.md). `cronScheduler`
+  // is the `CronEngine`; `buildCronTriggers` picks the trigger/backend pair
+  // per `cron.*` config. Defaults (`trigger.local: true`, `trigger.external:
+  // false`) reproduce today's behavior exactly — only the local interval
+  // trigger runs. `external` is threaded into `createWebApi` below (only
+  // when non-null) so `POST /cron/fire` is mounted iff the operator opted in.
+  const cronTriggers: CronTriggers = buildCronTriggers(cronScheduler, config.cron);
+
   if (teamFlag && personalityOverride) {
     // Plan B member spawn — supervisor spawns each member with
     //   ethos serve --personality <member> --team <name> --role <role>
@@ -735,7 +743,7 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
 
   // Start the cron scheduler now — `loop` is assigned, and we'll bind
   // `chatService` to the value returned by createWebApi below.
-  if (cronScheduler) cronScheduler.start();
+  cronTriggers.local?.start();
 
   // Load watchers.json and seed the backing `source:'system'` tick jobs.
   // Idempotent — existing jobs are re-registered so interval edits apply.
@@ -1325,6 +1333,7 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
       }
     },
     metricsTextFn: metricsText,
+    ...(cronTriggers.external ? { cronFireTrigger: cronTriggers.external } : {}),
   });
   chatService = created.chatService;
   const webApp = created.app;
@@ -1385,7 +1394,7 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
     // process, or the other host command, can take it.
     await callCaptureOwnershipManager?.stop();
     await mesh.unregister(agentId);
-    if (cronScheduler) cronScheduler.stop();
+    cronTriggers.local?.stop();
     if (webShutdown) await webShutdown();
     process.exit(0);
   };
