@@ -383,6 +383,170 @@ function createKanbanCreateGoal(store: KanbanStore): Tool {
 }
 
 // ---------------------------------------------------------------------------
+// kanban_create_swarm — atomic root/blackboard + N workers + optional
+// verifier + optional synthesizer DAG (Lane A Phase 5)
+// ---------------------------------------------------------------------------
+
+interface CreateSwarmWorkerArg {
+  personality: string;
+  prompt: string;
+}
+
+interface CreateSwarmArgs {
+  goal: string;
+  workers: CreateSwarmWorkerArg[];
+  verifier_personality?: string;
+  synthesizer_personality?: string;
+}
+
+function createKanbanCreateSwarm(store: KanbanStore): Tool {
+  return {
+    name: 'kanban_create_swarm',
+    description:
+      'Create a whole swarm DAG in one atomic call: a root/blackboard task (immediately done, ' +
+      'body = goal) + one worker task per entry in `workers` (parents=[root]) + an optional ' +
+      'verifier task (parents=every worker) + an optional synthesizer task (parents=[verifier], ' +
+      'or every worker if no verifier was given). All-or-nothing — a failure partway through ' +
+      'creates nothing. Omit verifier_personality/synthesizer_personality to skip that tier. ' +
+      'Returns { root_id, worker_ids, verifier_id, synthesizer_id }.\n' +
+      RULES,
+    toolset: 'kanban',
+    maxResultChars: MAX_RESULT_CHARS,
+    capabilities: {},
+    schema: {
+      type: 'object',
+      required: ['goal', 'workers'],
+      properties: {
+        goal: {
+          type: 'string',
+          description: 'Shared context for the swarm — becomes the root/blackboard task body.',
+        },
+        workers: {
+          type: 'array',
+          minItems: 1,
+          items: {
+            type: 'object',
+            required: ['personality', 'prompt'],
+            properties: {
+              personality: {
+                type: 'string',
+                description: 'Personality id (or "human:<name>") this worker task is assigned to.',
+              },
+              prompt: { type: 'string', description: "This worker's task body." },
+            },
+          },
+        },
+        verifier_personality: {
+          type: 'string',
+          description:
+            'Optional. Personality id assigned to verify all worker outputs once every worker ' +
+            'is done. Omit to skip the verifier tier.',
+        },
+        synthesizer_personality: {
+          type: 'string',
+          description:
+            'Optional. Personality id assigned to synthesize the final result once the ' +
+            'verifier (or, if omitted, every worker) is done. Omit to skip the synthesizer tier.',
+        },
+      },
+    },
+    async execute(rawArgs, ctx) {
+      const args = (rawArgs ?? {}) as Partial<CreateSwarmArgs>;
+      if (typeof args.goal !== 'string' || args.goal.length === 0) {
+        return errorResult('goal must be a non-empty string', 'input_invalid');
+      }
+      const goalErr = tooLong('goal', args.goal, MAX_BODY_CHARS);
+      if (goalErr) return goalErr;
+
+      if (!Array.isArray(args.workers) || args.workers.length === 0) {
+        return errorResult('workers must be a non-empty array', 'input_invalid');
+      }
+      if (args.workers.length > MAX_SWARM_WORKERS) {
+        return errorResult(
+          `workers must have at most ${MAX_SWARM_WORKERS} entries`,
+          'input_invalid',
+        );
+      }
+      const workers: CreateSwarmWorkerArg[] = [];
+      for (const raw of args.workers) {
+        if (typeof raw !== 'object' || raw === null) {
+          return errorResult(
+            'each worker must be an object with personality and prompt',
+            'input_invalid',
+          );
+        }
+        const w = raw as Partial<CreateSwarmWorkerArg>;
+        if (typeof w.personality !== 'string' || w.personality.length === 0) {
+          return errorResult('each worker.personality must be a non-empty string', 'input_invalid');
+        }
+        const personalityErr = tooLong('worker.personality', w.personality, MAX_ASSIGNEE_CHARS);
+        if (personalityErr) return personalityErr;
+        if (typeof w.prompt !== 'string' || w.prompt.length === 0) {
+          return errorResult('each worker.prompt must be a non-empty string', 'input_invalid');
+        }
+        const promptErr = tooLong('worker.prompt', w.prompt, MAX_BODY_CHARS);
+        if (promptErr) return promptErr;
+        workers.push({ personality: w.personality, prompt: w.prompt });
+      }
+
+      let verifierPersonality: string | undefined;
+      if (args.verifier_personality !== undefined) {
+        if (
+          typeof args.verifier_personality !== 'string' ||
+          args.verifier_personality.length === 0
+        ) {
+          return errorResult('verifier_personality must be a non-empty string', 'input_invalid');
+        }
+        const verifierErr = tooLong(
+          'verifier_personality',
+          args.verifier_personality,
+          MAX_ASSIGNEE_CHARS,
+        );
+        if (verifierErr) return verifierErr;
+        verifierPersonality = args.verifier_personality;
+      }
+
+      let synthesizerPersonality: string | undefined;
+      if (args.synthesizer_personality !== undefined) {
+        if (
+          typeof args.synthesizer_personality !== 'string' ||
+          args.synthesizer_personality.length === 0
+        ) {
+          return errorResult('synthesizer_personality must be a non-empty string', 'input_invalid');
+        }
+        const synthesizerErr = tooLong(
+          'synthesizer_personality',
+          args.synthesizer_personality,
+          MAX_ASSIGNEE_CHARS,
+        );
+        if (synthesizerErr) return synthesizerErr;
+        synthesizerPersonality = args.synthesizer_personality;
+      }
+
+      try {
+        const result = store.createSwarm(
+          {
+            goal: args.goal,
+            workers,
+            ...(verifierPersonality !== undefined ? { verifierPersonality } : {}),
+            ...(synthesizerPersonality !== undefined ? { synthesizerPersonality } : {}),
+          },
+          actorOf(ctx),
+        );
+        return jsonResult({
+          root_id: result.rootId,
+          worker_ids: result.workerIds,
+          verifier_id: result.verifierId,
+          synthesizer_id: result.synthesizerId,
+        });
+      } catch (err) {
+        return storeError(err);
+      }
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
 // kanban_decompose — auxiliary-LLM goal-to-children fan-out (Lane A Phase 2)
 // ---------------------------------------------------------------------------
 
@@ -606,6 +770,7 @@ const MAX_SUMMARY_CHARS = 16_000;
 const MAX_REASON_CHARS = 4_000;
 const MAX_IDEMPOTENCY_KEY_CHARS = 200;
 const MAX_ASSIGNEE_CHARS = 200;
+const MAX_SWARM_WORKERS = 20;
 
 function tooLong(field: string, value: string, cap: number): ToolResult | null {
   if (value.length > cap) {
@@ -1151,6 +1316,7 @@ export function createKanbanTools(opts: {
   return [
     createKanbanCreate(store),
     createKanbanCreateGoal(store),
+    createKanbanCreateSwarm(store),
     createKanbanDecompose(store, opts.decomposerProvider),
     createKanbanList(store),
     createKanbanShow(store),

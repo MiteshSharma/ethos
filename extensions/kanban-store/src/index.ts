@@ -136,6 +136,35 @@ export interface ListTasksFilter {
   limit?: number;
 }
 
+/** One worker slot in `createSwarm`'s input — a personality plus its work prompt. */
+export interface SwarmWorkerInput {
+  personality: string;
+  prompt: string;
+}
+
+/**
+ * Input to `createSwarm` (Lane A Phase 5) — the atomic root/blackboard + N
+ * workers + optional verifier + optional synthesizer DAG. See `createSwarm`
+ * for how each optional tier collapses when omitted.
+ */
+export interface CreateSwarmInput {
+  /** Shared context for the swarm. Becomes the root/blackboard task's body. */
+  goal: string;
+  workers: SwarmWorkerInput[];
+  /** Omit to skip the verifier tier entirely. */
+  verifierPersonality?: string;
+  /** Omit to skip the synthesizer tier entirely. */
+  synthesizerPersonality?: string;
+}
+
+/** Ids of every task `createSwarm` created. */
+export interface SwarmResult {
+  rootId: string;
+  workerIds: string[];
+  verifierId: string | null;
+  synthesizerId: string | null;
+}
+
 /**
  * Per-member work outcome counters for one team board. Maintained by the store
  * itself: each terminal task transition (`done`, `failed`/`needs_revision`,
@@ -1169,6 +1198,86 @@ export class KanbanStore {
     return tx();
   }
 
+  /**
+   * Atomically create a root/blackboard task + N worker tasks + an optional
+   * verifier task + an optional synthesizer task (Lane A Phase 5's swarm-graph
+   * primitive). One outer transaction wraps every `createTask`/`updateStatus`
+   * call below — same nested-transaction idiom as `bulkUpdateStatus`/`archive`
+   * — so a failure partway through (a bad worker, a store error) rolls back
+   * the whole graph: no orphan root/worker tasks survive.
+   *
+   * The root is created via the normal `createTask` path (which always starts
+   * a fresh task at `todo`/`scheduled` — `CreateTaskInput` has no `status`
+   * field) then immediately transitioned to `done` in this same transaction.
+   * Because both calls run inside one transaction, no external reader ever
+   * observes the root at `todo`: the graph commits as a unit with the root
+   * already done, so `promoteReady()` sees every worker as promotable on its
+   * very next dispatcher tick.
+   *
+   * The root's assignee is left `null` — the same "transparent container"
+   * rule `kanban_create_goal` relies on (see `promoteReady`'s doc comment):
+   * a parent with no assignee never gates its children regardless of its own
+   * status. Marking it `done` immediately is board hygiene, not a promotion
+   * requirement — there is no assignee who could ever transition it otherwise.
+   *
+   * Worker/verifier/synthesizer parent edges are set via `createTask`'s own
+   * `parents` option, which routes through `link()` internally (see the
+   * comment in `createTask`) — not raw SQL.
+   *
+   * `verifierPersonality`/`synthesizerPersonality` are each optional; omitting
+   * a tier collapses the chain past it: with no verifier, the synthesizer (if
+   * any) parents directly off every worker instead of off a verifier task.
+   */
+  createSwarm(input: CreateSwarmInput, actor = 'system'): SwarmResult {
+    const tx = this.db.transaction((): SwarmResult => {
+      const root = this.createTask({
+        title: `Swarm goal: ${truncateForTitle(input.goal)}`,
+        body: input.goal,
+        assignee: null,
+        actor,
+      });
+      this.updateStatus(root.id, 'done', 'swarm root — shared context', actor);
+
+      const workers = input.workers.map((w) =>
+        this.createTask({
+          title: `Swarm worker (${w.personality}): ${truncateForTitle(w.prompt)}`,
+          body: w.prompt,
+          assignee: w.personality,
+          parents: [root.id],
+          actor,
+        }),
+      );
+      const workerIds = workers.map((w) => w.id);
+
+      let verifierId: string | null = null;
+      if (input.verifierPersonality) {
+        const verifier = this.createTask({
+          title: 'Verify swarm worker output',
+          body: `Verify the worker results below against this goal:\n\n${input.goal}`,
+          assignee: input.verifierPersonality,
+          parents: workerIds,
+          actor,
+        });
+        verifierId = verifier.id;
+      }
+
+      let synthesizerId: string | null = null;
+      if (input.synthesizerPersonality) {
+        const synthesizer = this.createTask({
+          title: 'Synthesize swarm results',
+          body: `Synthesize the final result for this goal:\n\n${input.goal}`,
+          assignee: input.synthesizerPersonality,
+          parents: verifierId !== null ? [verifierId] : workerIds,
+          actor,
+        });
+        synthesizerId = synthesizer.id;
+      }
+
+      return { rootId: root.id, workerIds, verifierId, synthesizerId };
+    });
+    return tx();
+  }
+
   link(parentId: string, childId: string, actor = 'system'): void {
     if (parentId === childId) {
       throw new Error(`cycle: ${childId} cannot be its own parent`);
@@ -1693,4 +1802,14 @@ function shortId(): string {
 // Multi-word inputs match as exact phrases; single words match as tokens.
 function escapeFtsQuery(query: string): string {
   return `"${query.replace(/"/g, '""')}"`;
+}
+
+// Collapse whitespace and cap length for a title derived from free-text body
+// content (goal/prompt, which the tool layer allows up to MAX_BODY_CHARS).
+// Titles have no length CHECK in the schema, but a short, single-line label
+// keeps the board readable — `createSwarm` uses this for its generated tasks.
+function truncateForTitle(text: string, max = 80): string {
+  const trimmed = text.trim().replace(/\s+/g, ' ');
+  if (trimmed.length === 0) return '(empty)';
+  return trimmed.length <= max ? trimmed : `${trimmed.slice(0, max - 1)}…`;
 }

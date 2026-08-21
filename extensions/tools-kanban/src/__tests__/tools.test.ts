@@ -69,7 +69,7 @@ describe('kanban tools', () => {
     store.close();
   });
 
-  it('exposes 14 tools in the kanban toolset with the right maxResultChars', () => {
+  it('exposes 15 tools in the kanban toolset with the right maxResultChars', () => {
     const names = Object.keys(tools).sort();
     expect(names).toEqual([
       'kanban_archive',
@@ -79,6 +79,7 @@ describe('kanban tools', () => {
       'kanban_complete',
       'kanban_create',
       'kanban_create_goal',
+      'kanban_create_swarm',
       'kanban_decompose',
       'kanban_heartbeat',
       'kanban_link',
@@ -170,6 +171,169 @@ describe('kanban tools', () => {
     const out = await call<{ task_id: string }>(tools.kanban_create as Tool, { title: 'x' }, ctx);
     const events = store.listEvents(out.task_id);
     expect(events[0]?.actor).toBe('engineer');
+  });
+
+  // ---------------------------------------------------------------------------
+  // kanban_create_swarm
+  // ---------------------------------------------------------------------------
+
+  it('kanban_create_swarm creates a done root + workers + verifier + synthesizer, wired parent to child', async () => {
+    const out = await call<{
+      root_id: string;
+      worker_ids: string[];
+      verifier_id: string | null;
+      synthesizer_id: string | null;
+    }>(
+      tools.kanban_create_swarm as Tool,
+      {
+        goal: 'Research and report on X',
+        workers: [
+          { personality: 'researcher-a', prompt: 'Look into angle A' },
+          { personality: 'researcher-b', prompt: 'Look into angle B' },
+        ],
+        verifier_personality: 'verifier',
+        synthesizer_personality: 'synthesizer',
+      },
+      makeCtx(),
+    );
+
+    expect(out.worker_ids).toHaveLength(2);
+    expect(out.verifier_id).not.toBeNull();
+    expect(out.synthesizer_id).not.toBeNull();
+
+    const root = store.getTask(out.root_id);
+    expect(root?.status).toBe('done');
+    expect(root?.assignee).toBeNull();
+    expect(root?.body).toBe('Research and report on X');
+
+    for (const workerId of out.worker_ids) {
+      const parents = store.getParents(workerId);
+      expect(parents.map((p) => p.id)).toEqual([out.root_id]);
+    }
+
+    const verifierId = out.verifier_id as string;
+    expect(store.getTask(verifierId)?.assignee).toBe('verifier');
+    expect(
+      store
+        .getParents(verifierId)
+        .map((p) => p.id)
+        .sort(),
+    ).toEqual([...out.worker_ids].sort());
+
+    const synthesizerId = out.synthesizer_id as string;
+    expect(store.getTask(synthesizerId)?.assignee).toBe('synthesizer');
+    expect(store.getParents(synthesizerId).map((p) => p.id)).toEqual([verifierId]);
+  });
+
+  it('kanban_create_swarm skips the verifier tier when verifier_personality is omitted, chaining the synthesizer directly off the workers', async () => {
+    const out = await call<{
+      root_id: string;
+      worker_ids: string[];
+      verifier_id: string | null;
+      synthesizer_id: string | null;
+    }>(
+      tools.kanban_create_swarm as Tool,
+      {
+        goal: 'goal',
+        workers: [{ personality: 'w1', prompt: 'do work' }],
+        synthesizer_personality: 'synthesizer',
+      },
+      makeCtx(),
+    );
+
+    expect(out.verifier_id).toBeNull();
+    expect(out.synthesizer_id).not.toBeNull();
+    const synthesizerId = out.synthesizer_id as string;
+    expect(store.getParents(synthesizerId).map((p) => p.id)).toEqual(out.worker_ids);
+  });
+
+  it('kanban_create_swarm skips both verifier and synthesizer tiers when both are omitted', async () => {
+    const out = await call<{
+      root_id: string;
+      worker_ids: string[];
+      verifier_id: string | null;
+      synthesizer_id: string | null;
+    }>(
+      tools.kanban_create_swarm as Tool,
+      { goal: 'goal', workers: [{ personality: 'w1', prompt: 'do work' }] },
+      makeCtx(),
+    );
+
+    expect(out.verifier_id).toBeNull();
+    expect(out.synthesizer_id).toBeNull();
+    expect(store.listTasks()).toHaveLength(2); // root + 1 worker
+  });
+
+  it('kanban_create_swarm rejects a missing goal', async () => {
+    const result = await (tools.kanban_create_swarm as Tool).execute(
+      { workers: [{ personality: 'w1', prompt: 'p' }] },
+      makeCtx(),
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.code).toBe('input_invalid');
+  });
+
+  it('kanban_create_swarm rejects an empty workers array', async () => {
+    const result = await (tools.kanban_create_swarm as Tool).execute(
+      { goal: 'goal', workers: [] },
+      makeCtx(),
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.code).toBe('input_invalid');
+  });
+
+  it('kanban_create_swarm rejects a worker missing personality or prompt', async () => {
+    const result = await (tools.kanban_create_swarm as Tool).execute(
+      { goal: 'goal', workers: [{ personality: 'w1' }] },
+      makeCtx(),
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.code).toBe('input_invalid');
+  });
+
+  it('kanban_create_swarm rejects more than the max worker count', async () => {
+    const workers = Array.from({ length: 21 }, (_, i) => ({
+      personality: `w${i}`,
+      prompt: 'p',
+    }));
+    const result = await (tools.kanban_create_swarm as Tool).execute(
+      { goal: 'goal', workers },
+      makeCtx(),
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.code).toBe('input_invalid');
+  });
+
+  it('kanban_create_swarm rolls back the whole graph when a failure hits partway through construction — no orphan root/worker tasks survive', async () => {
+    const originalCreateTask = store.createTask.bind(store);
+    let calls = 0;
+    vi.spyOn(store, 'createTask').mockImplementation((createArgs) => {
+      calls += 1;
+      // Let the root and first worker through, then blow up on the second worker —
+      // exactly the "partway through graph construction" case the plan calls for.
+      if (calls === 3) throw new Error('boom');
+      return originalCreateTask(createArgs);
+    });
+
+    const result = await (tools.kanban_create_swarm as Tool).execute(
+      {
+        goal: 'goal',
+        workers: [
+          { personality: 'w1', prompt: 'p1' },
+          { personality: 'w2', prompt: 'p2' },
+        ],
+        verifier_personality: 'verifier',
+      },
+      makeCtx(),
+    );
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toMatch(/boom/);
+    // The root and first worker were created inside the same transaction as
+    // the failing second worker — all of it must have rolled back together.
+    expect(store.listTasks()).toHaveLength(0);
+
+    vi.restoreAllMocks();
   });
 
   // ---------------------------------------------------------------------------

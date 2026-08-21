@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import Database from '@ethosagent/sqlite';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { KanbanStore } from '../index';
 
 function makeStore() {
@@ -642,6 +642,105 @@ describe('KanbanStore', () => {
 
     const stalled = store.findStalledRuns(100, now);
     expect(stalled.map((r) => r.taskId)).toEqual([stale.id]);
+  });
+
+  // ---------------------------------------------------------------------------
+  // createSwarm (Lane A Phase 5 — atomic swarm-graph primitive)
+  // ---------------------------------------------------------------------------
+
+  it('createSwarm creates a done root + N workers + verifier + synthesizer, wired parent to child', () => {
+    const result = store.createSwarm({
+      goal: 'Ship the swarm primitive',
+      workers: [
+        { personality: 'worker-a', prompt: 'do part A' },
+        { personality: 'worker-b', prompt: 'do part B' },
+      ],
+      verifierPersonality: 'verifier',
+      synthesizerPersonality: 'synthesizer',
+    });
+
+    const root = store.getTask(result.rootId);
+    expect(root?.status).toBe('done');
+    expect(root?.assignee).toBeNull();
+
+    expect(result.workerIds).toHaveLength(2);
+    for (const workerId of result.workerIds) {
+      const worker = store.getTask(workerId);
+      expect(worker?.status).toBe('todo');
+      expect(store.getParents(workerId).map((p) => p.id)).toEqual([result.rootId]);
+    }
+
+    expect(result.verifierId).not.toBeNull();
+    const verifierParents = store.getParents(result.verifierId as string).map((p) => p.id);
+    expect(verifierParents.sort()).toEqual([...result.workerIds].sort());
+    expect(store.getTask(result.verifierId as string)?.assignee).toBe('verifier');
+
+    expect(result.synthesizerId).not.toBeNull();
+    expect(store.getParents(result.synthesizerId as string).map((p) => p.id)).toEqual([
+      result.verifierId,
+    ]);
+    expect(store.getTask(result.synthesizerId as string)?.assignee).toBe('synthesizer');
+  });
+
+  it('createSwarm omits verifier/synthesizer tasks when their personalities are omitted', () => {
+    const result = store.createSwarm({
+      goal: 'goal',
+      workers: [{ personality: 'w1', prompt: 'p1' }],
+    });
+
+    expect(result.verifierId).toBeNull();
+    expect(result.synthesizerId).toBeNull();
+    expect(store.listTasks()).toHaveLength(2); // root + 1 worker
+  });
+
+  it('createSwarm rolls back the whole graph if a failure hits partway through construction', () => {
+    const originalCreateTask = store.createTask.bind(store);
+    let calls = 0;
+    vi.spyOn(store, 'createTask').mockImplementation((args) => {
+      calls += 1;
+      // Root (1st call) and worker-a (2nd call) succeed; blow up on worker-b (3rd).
+      if (calls === 3) throw new Error('boom');
+      return originalCreateTask(args);
+    });
+
+    expect(() =>
+      store.createSwarm({
+        goal: 'goal',
+        workers: [
+          { personality: 'worker-a', prompt: 'p1' },
+          { personality: 'worker-b', prompt: 'p2' },
+        ],
+        verifierPersonality: 'verifier',
+      }),
+    ).toThrow(/boom/);
+
+    // Root and worker-a were created inside the same outer transaction as the
+    // failing worker-b create — the whole graph must roll back together, not
+    // just the call that threw.
+    expect(store.listTasks()).toHaveLength(0);
+
+    vi.restoreAllMocks();
+  });
+
+  it('createSwarm + promoteReady: workers promote to ready once the root task is done', () => {
+    const result = store.createSwarm({
+      goal: 'goal',
+      workers: [
+        { personality: 'worker-a', prompt: 'p1' },
+        { personality: 'worker-b', prompt: 'p2' },
+      ],
+    });
+
+    expect(store.getTask(result.rootId)?.status).toBe('done');
+    for (const workerId of result.workerIds) {
+      expect(store.getTask(workerId)?.status).toBe('todo');
+    }
+
+    const promoted = store.promoteReady();
+    expect(promoted.sort()).toEqual([...result.workerIds].sort());
+    for (const workerId of result.workerIds) {
+      expect(store.getTask(workerId)?.status).toBe('ready');
+    }
   });
 
   // ---------------------------------------------------------------------------
