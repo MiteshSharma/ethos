@@ -8,7 +8,7 @@ import type {
   TaskStatus,
   WorkspaceMode,
 } from '@ethosagent/kanban-store';
-import type { HookRegistry, Tool, ToolContext, ToolResult } from '@ethosagent/types';
+import type { HookRegistry, LLMProvider, Tool, ToolContext, ToolResult } from '@ethosagent/types';
 
 export { type PostmortemHandlerOptions, registerPostmortemHandler } from './postmortem';
 export {
@@ -378,6 +378,206 @@ function createKanbanCreateGoal(store: KanbanStore): Tool {
       } catch (err) {
         return storeError(err);
       }
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// kanban_decompose — auxiliary-LLM goal-to-children fan-out (Lane A Phase 2)
+// ---------------------------------------------------------------------------
+
+const DECOMPOSE_CHILDREN_DEFAULT = 5;
+const DECOMPOSE_CHILDREN_CAP = 10;
+const MAX_INSTRUCTIONS_CHARS = 4_000;
+
+const DECOMPOSE_SYSTEM_PROMPT =
+  'You break a parent task into concrete, assignable child sub-tasks. ' +
+  "Given the parent task's title and body, propose child tasks that together accomplish it. " +
+  'Output ONLY a JSON array, no prose, no markdown code fences. Each element must be an object: ' +
+  '{"title": string, "body": string (optional), "assignee": string or null (optional)}. ' +
+  '"assignee" is a personality id this child should be assigned to — use null if no specific ' +
+  'assignee is clear. Keep titles short and imperative; body should carry enough context for the ' +
+  'assignee to start work independently, with no access to this conversation.';
+
+interface ProposedChild {
+  title: string;
+  body?: string;
+  assignee?: string | null;
+}
+
+function buildDecomposePrompt(task: Task, maxChildren: number, instructions?: string): string {
+  const lines = [
+    `Parent task title: ${task.title}`,
+    task.body ? `Parent task body:\n${task.body}` : 'Parent task body: (none)',
+  ];
+  if (instructions) lines.push(`Extra instructions: ${instructions}`);
+  lines.push(`Propose at most ${maxChildren} child tasks, as a JSON array.`);
+  return lines.join('\n\n');
+}
+
+// Defensive parse: the auxiliary model is a free-text LLM, not a structured-
+// output call. Strip an optional ```/```json fence, JSON.parse, and validate
+// shape field-by-field. Any deviation returns null — the caller turns that
+// into a tool error rather than guessing at a partial shape.
+function parseDecomposeResponse(raw: string): ProposedChild[] | null {
+  const fenced = raw.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  const candidate = (fenced?.[1] ?? raw).trim();
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(candidate);
+  } catch {
+    return null;
+  }
+  if (!Array.isArray(parsed) || parsed.length === 0) return null;
+
+  const children: ProposedChild[] = [];
+  for (const item of parsed) {
+    if (typeof item !== 'object' || item === null) return null;
+    const obj = item as Record<string, unknown>;
+    if (typeof obj.title !== 'string' || obj.title.length === 0) return null;
+    const child: ProposedChild = { title: obj.title };
+    if (obj.body !== undefined) {
+      if (typeof obj.body !== 'string') return null;
+      child.body = obj.body;
+    }
+    if (obj.assignee !== undefined) {
+      if (obj.assignee !== null && typeof obj.assignee !== 'string') return null;
+      child.assignee = obj.assignee;
+    }
+    children.push(child);
+  }
+  return children;
+}
+
+function createKanbanDecompose(store: KanbanStore, decomposerProvider?: LLMProvider): Tool {
+  return {
+    name: 'kanban_decompose',
+    description:
+      'Ask the auxiliary kanban_decomposer model to propose child sub-tasks for a parent task, then ' +
+      'create each proposed child with parents=[task_id]. Requires an `auxiliary.kanban_decomposer` ' +
+      'model configured in wiring — without one this returns a clear execution_failed error. ' +
+      'NOT one atomic transaction: if the auxiliary LLM call fails (or returns an unparseable ' +
+      'response), no children are created. If the LLM call succeeds but an individual child create ' +
+      'fails partway through, this returns a partial-success result — children_created lists what ' +
+      'was actually made, failed_child names the one that errored, and not_attempted lists the rest. ' +
+      'Use kanban_archive to clean up unwanted children, or retry.\n' +
+      RULES,
+    toolset: 'kanban',
+    maxResultChars: MAX_RESULT_CHARS,
+    capabilities: {},
+    schema: {
+      type: 'object',
+      required: ['task_id'],
+      properties: {
+        task_id: { type: 'string', description: 'Parent task to decompose into children.' },
+        max_children: {
+          type: 'integer',
+          description: `How many child tasks to propose (default ${DECOMPOSE_CHILDREN_DEFAULT}, capped at ${DECOMPOSE_CHILDREN_CAP}).`,
+        },
+        instructions: {
+          type: 'string',
+          description:
+            'Optional extra guidance for the decomposer model (constraints, preferred assignees, etc).',
+        },
+      },
+    },
+    async execute(rawArgs, ctx) {
+      const args = (rawArgs ?? {}) as {
+        task_id?: unknown;
+        max_children?: unknown;
+        instructions?: unknown;
+      };
+      if (typeof args.task_id !== 'string') {
+        return errorResult('task_id must be a string', 'input_invalid');
+      }
+      const taskId = args.task_id;
+      if (
+        args.max_children !== undefined &&
+        (typeof args.max_children !== 'number' ||
+          !Number.isInteger(args.max_children) ||
+          args.max_children < 1)
+      ) {
+        return errorResult('max_children must be a positive integer', 'input_invalid');
+      }
+      if (args.instructions !== undefined) {
+        if (typeof args.instructions !== 'string') {
+          return errorResult('instructions must be a string', 'input_invalid');
+        }
+        const iErr = tooLong('instructions', args.instructions, MAX_INSTRUCTIONS_CHARS);
+        if (iErr) return iErr;
+      }
+      if (!decomposerProvider) {
+        return errorResult(
+          'no auxiliary.kanban_decomposer model configured; kanban_decompose is unavailable',
+          'execution_failed',
+        );
+      }
+      const task = store.getTask(taskId);
+      if (!task) return errorResult(`task not found: ${taskId}`, 'input_invalid');
+
+      const maxChildren = Math.min(
+        typeof args.max_children === 'number' ? args.max_children : DECOMPOSE_CHILDREN_DEFAULT,
+        DECOMPOSE_CHILDREN_CAP,
+      );
+      const instructions = typeof args.instructions === 'string' ? args.instructions : undefined;
+
+      let raw = '';
+      try {
+        for await (const chunk of decomposerProvider.complete(
+          [{ role: 'user', content: buildDecomposePrompt(task, maxChildren, instructions) }],
+          [],
+          { system: DECOMPOSE_SYSTEM_PROMPT, maxTokens: 2_000, temperature: 0.2 },
+        )) {
+          if (chunk.type === 'text_delta') raw += chunk.text;
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return errorResult(`auxiliary decomposer call failed: ${msg}`, 'execution_failed');
+      }
+
+      const proposed = parseDecomposeResponse(raw);
+      if (!proposed) {
+        return errorResult(
+          'auxiliary decomposer returned an unparseable or empty response; no children created',
+          'execution_failed',
+        );
+      }
+      const children = proposed.slice(0, maxChildren);
+
+      // Per-child creation is NOT wrapped in one transaction (contrast the
+      // atomic swarm primitive elsewhere in this plan): a failure partway
+      // through returns everything created so far instead of silently losing
+      // it or rolling back tasks that other agents may already see.
+      const created: { task_id: string; title: string }[] = [];
+      let failedChild: { title: string; error: string } | undefined;
+      let notAttempted: { title: string }[] = [];
+      for (let i = 0; i < children.length; i++) {
+        const child = children[i];
+        if (!child) continue;
+        try {
+          const childTask = store.createTask({
+            title: child.title,
+            ...(child.body !== undefined ? { body: child.body } : {}),
+            assignee: child.assignee ?? null,
+            parents: [taskId],
+            actor: actorOf(ctx),
+          });
+          created.push({ task_id: childTask.id, title: childTask.title });
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          failedChild = { title: child.title, error: msg };
+          notAttempted = children.slice(i + 1).map((c) => ({ title: c.title }));
+          break;
+        }
+      }
+
+      return jsonResult({
+        task_id: taskId,
+        children_created: created,
+        ...(failedChild
+          ? { partial_failure: true, failed_child: failedChild, not_attempted: notAttempted }
+          : {}),
+      });
     },
   };
 }
@@ -943,11 +1143,15 @@ export function createKanbanTools(opts: {
   hooks?: HookRegistry;
   autonomyTierOf?: AutonomyTierOf;
   personalityLookup?: PersonalityLookup;
+  /** Lane A Phase 2 — auxiliary model backing `kanban_decompose`. Absent means
+   *  the tool still registers but returns a tool error when called. */
+  decomposerProvider?: LLMProvider;
 }): Tool[] {
   const { store, hooks } = opts;
   return [
     createKanbanCreate(store),
     createKanbanCreateGoal(store),
+    createKanbanDecompose(store, opts.decomposerProvider),
     createKanbanList(store),
     createKanbanShow(store),
     createKanbanUpdateStatus(store),

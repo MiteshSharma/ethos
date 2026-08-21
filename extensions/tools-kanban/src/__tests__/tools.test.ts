@@ -1,8 +1,32 @@
 import { DefaultHookRegistry } from '@ethosagent/core';
 import { KanbanStore } from '@ethosagent/kanban-store';
-import type { Tool, ToolContext } from '@ethosagent/types';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import type { CompletionChunk, LLMProvider, Message, Tool, ToolContext } from '@ethosagent/types';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createKanbanTools } from '../index';
+
+// Minimal LLMProvider stub for kanban_decompose — yields a fixed response
+// text as a single text_delta chunk, or throws if `throwsMessage` is set.
+function stubDecomposerProvider(opts: {
+  responseText?: string;
+  throwsMessage?: string;
+}): LLMProvider {
+  return {
+    name: 'stub',
+    model: 'stub-model',
+    maxContextTokens: 100_000,
+    supportsCaching: false,
+    supportsThinking: false,
+    complete(_messages: Message[]): AsyncIterable<CompletionChunk> {
+      return (async function* () {
+        if (opts.throwsMessage) throw new Error(opts.throwsMessage);
+        yield { type: 'text_delta', text: opts.responseText ?? '' } as CompletionChunk;
+      })();
+    },
+    async countTokens() {
+      return 0;
+    },
+  };
+}
 
 // End-to-end tests at the tool boundary — same level the LLM hits.
 // Verifies args parsing, store wiring, and ToolResult shape.
@@ -45,7 +69,7 @@ describe('kanban tools', () => {
     store.close();
   });
 
-  it('exposes 13 tools in the kanban toolset with the right maxResultChars', () => {
+  it('exposes 14 tools in the kanban toolset with the right maxResultChars', () => {
     const names = Object.keys(tools).sort();
     expect(names).toEqual([
       'kanban_archive',
@@ -55,6 +79,7 @@ describe('kanban tools', () => {
       'kanban_complete',
       'kanban_create',
       'kanban_create_goal',
+      'kanban_decompose',
       'kanban_heartbeat',
       'kanban_link',
       'kanban_list',
@@ -145,6 +170,215 @@ describe('kanban tools', () => {
     const out = await call<{ task_id: string }>(tools.kanban_create as Tool, { title: 'x' }, ctx);
     const events = store.listEvents(out.task_id);
     expect(events[0]?.actor).toBe('engineer');
+  });
+
+  // ---------------------------------------------------------------------------
+  // kanban_decompose
+  // ---------------------------------------------------------------------------
+
+  it('kanban_decompose returns execution_failed when no decomposer provider is configured', async () => {
+    // The default `tools` fixture (beforeEach) has no decomposerProvider wired.
+    const goal = await call<{ task_id: string }>(
+      tools.kanban_create_goal as Tool,
+      { title: 'Goal' },
+      makeCtx(),
+    );
+    const result = await (tools.kanban_decompose as Tool).execute(
+      { task_id: goal.task_id },
+      makeCtx(),
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.code).toBe('execution_failed');
+      expect(result.error).toMatch(/no auxiliary\.kanban_decomposer model configured/);
+    }
+  });
+
+  it('kanban_decompose rejects missing task_id', async () => {
+    const provider = stubDecomposerProvider({ responseText: '[]' });
+    const decomposeTools = toolsByName(createKanbanTools({ store, decomposerProvider: provider }));
+    const result = await (decomposeTools.kanban_decompose as Tool).execute({}, makeCtx());
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.code).toBe('input_invalid');
+  });
+
+  it('kanban_decompose returns input_invalid for an unknown task_id', async () => {
+    const provider = stubDecomposerProvider({ responseText: '[]' });
+    const decomposeTools = toolsByName(createKanbanTools({ store, decomposerProvider: provider }));
+    const result = await (decomposeTools.kanban_decompose as Tool).execute(
+      { task_id: 'nope' },
+      makeCtx(),
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.code).toBe('input_invalid');
+  });
+
+  it('kanban_decompose creates a child per proposed task, parented to the goal', async () => {
+    const provider = stubDecomposerProvider({
+      responseText: JSON.stringify([
+        { title: 'child A', body: 'do A', assignee: 'engineer' },
+        { title: 'child B' },
+      ]),
+    });
+    const decomposeTools = toolsByName(createKanbanTools({ store, decomposerProvider: provider }));
+    const goal = await call<{ task_id: string }>(
+      decomposeTools.kanban_create_goal as Tool,
+      { title: 'Goal' },
+      makeCtx(),
+    );
+
+    const out = await call<{
+      task_id: string;
+      children_created: { task_id: string; title: string }[];
+    }>(decomposeTools.kanban_decompose as Tool, { task_id: goal.task_id }, makeCtx());
+
+    expect(out.children_created).toHaveLength(2);
+    expect(out.children_created.map((c) => c.title)).toEqual(['child A', 'child B']);
+    const childA = store.getTask(out.children_created[0]?.task_id ?? '');
+    expect(childA?.body).toBe('do A');
+    expect(childA?.assignee).toBe('engineer');
+    expect(store.getParents(out.children_created[0]?.task_id ?? '').map((p) => p.id)).toEqual([
+      goal.task_id,
+    ]);
+    const childB = store.getTask(out.children_created[1]?.task_id ?? '');
+    expect(childB?.assignee).toBeNull();
+  });
+
+  it('kanban_decompose strips a ```json fence around the response', async () => {
+    const provider = stubDecomposerProvider({
+      responseText: '```json\n[{"title": "fenced child"}]\n```',
+    });
+    const decomposeTools = toolsByName(createKanbanTools({ store, decomposerProvider: provider }));
+    const goal = await call<{ task_id: string }>(
+      decomposeTools.kanban_create_goal as Tool,
+      { title: 'Goal' },
+      makeCtx(),
+    );
+    const out = await call<{ children_created: { title: string }[] }>(
+      decomposeTools.kanban_decompose as Tool,
+      { task_id: goal.task_id },
+      makeCtx(),
+    );
+    expect(out.children_created.map((c) => c.title)).toEqual(['fenced child']);
+  });
+
+  it('kanban_decompose returns execution_failed with no children created when the LLM call throws', async () => {
+    const provider = stubDecomposerProvider({ throwsMessage: 'provider unreachable' });
+    const decomposeTools = toolsByName(createKanbanTools({ store, decomposerProvider: provider }));
+    const goal = await call<{ task_id: string }>(
+      decomposeTools.kanban_create_goal as Tool,
+      { title: 'Goal' },
+      makeCtx(),
+    );
+    const result = await (decomposeTools.kanban_decompose as Tool).execute(
+      { task_id: goal.task_id },
+      makeCtx(),
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.code).toBe('execution_failed');
+      expect(result.error).toMatch(/provider unreachable/);
+    }
+    expect(store.listTasks({ parentId: goal.task_id })).toHaveLength(0);
+  });
+
+  it('kanban_decompose returns execution_failed when the response is not valid JSON', async () => {
+    const provider = stubDecomposerProvider({ responseText: 'not json at all' });
+    const decomposeTools = toolsByName(createKanbanTools({ store, decomposerProvider: provider }));
+    const goal = await call<{ task_id: string }>(
+      decomposeTools.kanban_create_goal as Tool,
+      { title: 'Goal' },
+      makeCtx(),
+    );
+    const result = await (decomposeTools.kanban_decompose as Tool).execute(
+      { task_id: goal.task_id },
+      makeCtx(),
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.code).toBe('execution_failed');
+    expect(store.listTasks({ parentId: goal.task_id })).toHaveLength(0);
+  });
+
+  it('kanban_decompose returns a partial-success result when a per-child create fails partway through', async () => {
+    const provider = stubDecomposerProvider({
+      responseText: JSON.stringify([
+        { title: 'child A' },
+        { title: 'child B' },
+        { title: 'child C' },
+      ]),
+    });
+    const decomposeTools = toolsByName(createKanbanTools({ store, decomposerProvider: provider }));
+    const goal = await call<{ task_id: string }>(
+      decomposeTools.kanban_create_goal as Tool,
+      { title: 'Goal' },
+      makeCtx(),
+    );
+
+    const originalCreateTask = store.createTask.bind(store);
+    let calls = 0;
+    vi.spyOn(store, 'createTask').mockImplementation((args) => {
+      calls += 1;
+      if (calls === 2) throw new Error('boom');
+      return originalCreateTask(args);
+    });
+
+    const out = await call<{
+      task_id: string;
+      children_created: { task_id: string; title: string }[];
+      partial_failure?: boolean;
+      failed_child?: { title: string; error: string };
+      not_attempted?: { title: string }[];
+    }>(decomposeTools.kanban_decompose as Tool, { task_id: goal.task_id }, makeCtx());
+
+    expect(out.children_created).toHaveLength(1);
+    expect(out.children_created[0]?.title).toBe('child A');
+    expect(out.partial_failure).toBe(true);
+    expect(out.failed_child?.title).toBe('child B');
+    expect(out.failed_child?.error).toMatch(/boom/);
+    expect(out.not_attempted).toEqual([{ title: 'child C' }]);
+
+    vi.restoreAllMocks();
+  });
+
+  it('kanban_decompose caps max_children at 10 and rejects a non-positive-integer', async () => {
+    const provider = stubDecomposerProvider({
+      responseText: JSON.stringify(Array.from({ length: 20 }, (_, i) => ({ title: `child ${i}` }))),
+    });
+    const decomposeTools = toolsByName(createKanbanTools({ store, decomposerProvider: provider }));
+    const goal = await call<{ task_id: string }>(
+      decomposeTools.kanban_create_goal as Tool,
+      { title: 'Goal' },
+      makeCtx(),
+    );
+    const out = await call<{ children_created: unknown[] }>(
+      decomposeTools.kanban_decompose as Tool,
+      { task_id: goal.task_id, max_children: 999 },
+      makeCtx(),
+    );
+    expect(out.children_created).toHaveLength(10);
+
+    const badResult = await (decomposeTools.kanban_decompose as Tool).execute(
+      { task_id: goal.task_id, max_children: 0 },
+      makeCtx(),
+    );
+    expect(badResult.ok).toBe(false);
+    if (!badResult.ok) expect(badResult.code).toBe('input_invalid');
+  });
+
+  it('kanban_decompose rejects an over-long instructions string', async () => {
+    const provider = stubDecomposerProvider({ responseText: '[]' });
+    const decomposeTools = toolsByName(createKanbanTools({ store, decomposerProvider: provider }));
+    const goal = await call<{ task_id: string }>(
+      decomposeTools.kanban_create_goal as Tool,
+      { title: 'Goal' },
+      makeCtx(),
+    );
+    const result = await (decomposeTools.kanban_decompose as Tool).execute(
+      { task_id: goal.task_id, instructions: 'a'.repeat(4_001) },
+      makeCtx(),
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.code).toBe('input_invalid');
   });
 
   // ---------------------------------------------------------------------------

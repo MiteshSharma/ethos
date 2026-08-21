@@ -470,6 +470,55 @@ function buildVerifierProviderGetter(
   };
 }
 
+// ---------------------------------------------------------------------------
+// Lane A Phase 2 (kanban-hooks-notify-parity) — auxiliary model for
+// kanban_decompose. Resolved eagerly (composeAllTools is already async and
+// runs once per AgentLoop construction) rather than lazily like the verifier
+// getter above — there's no "only sometimes needed" argument once a team has
+// kanban wired. Mirrors auxiliaryVision/auxiliaryWeb in build-agent-loop.ts:
+// `provider`/`apiKey`/`baseUrl` default to the primary provider's values when
+// unset, and an unregistered provider WARNS and degrades to `undefined`
+// rather than throwing — kanban_decompose still registers as a tool, but
+// returns a clear tool error at call time instead of crashing wiring for
+// personalities that never call it. Exported for the wiring-level test.
+// ---------------------------------------------------------------------------
+
+export async function buildKanbanDecomposerProvider(
+  registry: LLMProviderRegistry,
+  config: WiringConfig,
+  log: Logger,
+): Promise<LLMProvider | undefined> {
+  const aux = config.auxiliaryKanbanDecomposer;
+  if (!aux) return undefined;
+  const providerName = aux.provider ?? config.provider;
+  const factory = registry.get(providerName);
+  if (!factory) {
+    log.warn(
+      `auxiliary.kanban_decomposer provider "${providerName}" is not registered; ` +
+        'kanban_decompose will return a tool error until it is',
+    );
+    return undefined;
+  }
+  const NOOP: SecretsResolver = {
+    get: async () => null,
+    set: async () => {},
+    delete: async () => {},
+    list: async () => [],
+  };
+  const baseUrl = aux.baseUrl ?? config.baseUrl;
+  return factory({
+    config: {
+      provider: providerName,
+      model: aux.model,
+      apiKey: aux.apiKey ?? config.apiKey,
+      ...(baseUrl ? { baseUrl } : {}),
+      ...(config.apiVersion ? { apiVersion: config.apiVersion } : {}),
+    },
+    secrets: config.secretsResolver ?? NOOP,
+    logger: log,
+  });
+}
+
 /**
  * Register all tool groups into the tool registry and wire supporting hooks.
  * Covers: file, terminal, web, todo, think, interactive, kanban, process,
@@ -628,6 +677,7 @@ export async function composeAllTools(
       hooks?: typeof hooks;
       autonomyTierOf?: AutonomyTierOf;
       personalityLookup?: (id: string) => { name: string } | undefined;
+      decomposerProvider?: LLMProvider;
     } = {
       store,
       hooks,
@@ -635,6 +685,7 @@ export async function composeAllTools(
         const p = personalities.get(id);
         return p ? { name: p.name } : undefined;
       },
+      decomposerProvider: await buildKanbanDecomposerProvider(infra.llmProviders, config, log),
     };
     if (config.trustPolicy?.mode === 'tiered') {
       const policy = config.trustPolicy;

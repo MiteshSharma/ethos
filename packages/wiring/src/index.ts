@@ -259,6 +259,20 @@ export interface WiringConfig {
     apiKey?: string;
     baseUrl?: string;
   };
+  /**
+   * Lane A Phase 2 (kanban-hooks-notify-parity) — auxiliary model for
+   * `kanban_decompose`'s goal-to-children fan-out. Same shape as
+   * auxiliaryVision/auxiliaryWeb: `provider`/`apiKey`/`baseUrl` default to the
+   * primary provider's values when unset. When absent, `kanban_decompose`
+   * still registers as a tool but returns a tool error at call time rather
+   * than being omitted from the toolset.
+   */
+  auxiliaryKanbanDecomposer?: {
+    model: string;
+    provider?: string;
+    apiKey?: string;
+    baseUrl?: string;
+  };
   /** tools-web — web_search backend preference. Auto-detect from env when unset. */
   webSearchBackend?: 'exa' | 'tavily' | 'brave';
   /** Global FALLBACK layer for per-personality tool config (`web_search` in
