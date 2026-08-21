@@ -684,7 +684,7 @@ export function createWebApi(opts: CreateWebApiOptions): CreateWebApiResult {
       ...(opts.memoryBackend ? { config: opts.memoryBackend } : {}),
     }).store,
   });
-  const kanbanService = new KanbanService({ mesh });
+  const kanbanService = new KanbanService({ mesh, hooks: agentLoop.hooks });
   const tasksService = new TasksService(opts.jobStore ? { store: opts.jobStore } : {});
   const apiKeysService = new ApiKeysService(opts.apiKeys ?? null);
   // Phase 2 — global named-secrets vault + generic per-tool settings surface.

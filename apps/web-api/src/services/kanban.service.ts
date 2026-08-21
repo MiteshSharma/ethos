@@ -16,6 +16,7 @@ import {
   type TeamRuntime,
   teamsDir,
 } from '@ethosagent/team-supervisor';
+import type { HookRegistry } from '@ethosagent/types';
 import type {
   KanbanBoardSnapshot,
   KanbanComment,
@@ -50,15 +51,23 @@ export interface KanbanServiceOptions {
   teamsDir?: string;
   /** Mesh for agent discovery (listAgents, /notify on assign). */
   mesh?: AgentMesh;
+  /**
+   * Fires `ticket_updated` (Void, fail-open) on human-driven assignee
+   * changes. Optional — a service built without one fires zero hooks,
+   * matching today's exact behavior.
+   */
+  hooks?: HookRegistry;
 }
 
 export class KanbanService {
   private readonly rootDir: string;
   private readonly mesh: AgentMesh | undefined;
+  private readonly hooks: HookRegistry | undefined;
 
   constructor(opts: KanbanServiceOptions = {}) {
     this.rootDir = opts.teamsDir ?? teamsDir();
     this.mesh = opts.mesh;
+    this.hooks = opts.hooks;
   }
 
   /** Enumerate teams from the manifests on disk; merge in runtime status. */
@@ -416,6 +425,13 @@ export class KanbanService {
     const store = new KanbanStore(boardPath, { teamId: opts.team });
     try {
       const task = store.assign(opts.taskId, opts.assignee, opts.actor);
+
+      if (this.hooks) {
+        await this.hooks.fireVoid('ticket_updated', {
+          taskId: opts.taskId,
+          changedFields: ['assignee'],
+        });
+      }
 
       // Fire /notify to the assignee via mesh — non-fatal on failure.
       if (this.mesh && task.status === 'ready') {

@@ -1053,6 +1053,12 @@ function createKanbanComplete(
           completedBy = { id: personalityId, name: info?.name ?? personalityId };
         }
         const t = store.completeRun(taskId, summary, actor, completedBy);
+        // ticket_completed is Void — observer-only, distinct from the
+        // Claiming before_ticket_complete gate above. Fires only on this
+        // successful-transition path, never on a rejected/errored attempt.
+        if (hooks !== undefined) {
+          await hooks.fireVoid('ticket_completed', { taskId, summary });
+        }
         return jsonResult(fullTask(t));
       } catch (err) {
         return storeError(err);
@@ -1061,7 +1067,7 @@ function createKanbanComplete(
   };
 }
 
-function createKanbanBlock(store: KanbanStore): Tool {
+function createKanbanBlock(store: KanbanStore, hooks?: HookRegistry): Tool {
   return {
     name: 'kanban_block',
     description:
@@ -1105,6 +1111,13 @@ function createKanbanBlock(store: KanbanStore): Tool {
         // blockRun atomically records the reason as both run.summary and a comment,
         // and (when kind is set) tracks the unblock-loop breaker.
         const t = store.blockRun(args.task_id, args.reason, actorOf(ctx), args.kind);
+        if (hooks !== undefined) {
+          await hooks.fireVoid('ticket_blocked', {
+            taskId: args.task_id,
+            reason: args.reason,
+            ...(args.kind !== undefined ? { kind: args.kind } : {}),
+          });
+        }
         return jsonResult(fullTask(t));
       } catch (err) {
         return storeError(err);
@@ -1222,7 +1235,7 @@ function createKanbanLink(store: KanbanStore): Tool {
   };
 }
 
-function createKanbanAssign(store: KanbanStore): Tool {
+function createKanbanAssign(store: KanbanStore, hooks?: HookRegistry): Tool {
   return {
     name: 'kanban_assign',
     description: `Set the assignee (personality id or "human:<name>"). Pass null to unassign.\n${RULES}`,
@@ -1253,6 +1266,12 @@ function createKanbanAssign(store: KanbanStore): Tool {
       }
       try {
         const t = store.assign(args.task_id, assignee, actorOf(ctx));
+        if (hooks !== undefined) {
+          await hooks.fireVoid('ticket_updated', {
+            taskId: args.task_id,
+            changedFields: ['assignee'],
+          });
+        }
         return jsonResult(fullTask(t));
       } catch (err) {
         return storeError(err);
@@ -1323,11 +1342,11 @@ export function createKanbanTools(opts: {
     createKanbanUpdateStatus(store),
     createKanbanComment(store),
     createKanbanComplete(store, hooks, opts.autonomyTierOf, opts.personalityLookup),
-    createKanbanBlock(store),
+    createKanbanBlock(store, hooks),
     createKanbanUnblock(store),
     createKanbanHeartbeat(store),
     createKanbanLink(store),
-    createKanbanAssign(store),
+    createKanbanAssign(store, hooks),
     createKanbanArchive(store),
   ];
 }

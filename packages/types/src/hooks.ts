@@ -263,6 +263,81 @@ export interface AfterTicketRevisionPayload {
   successRatio?: number;
 }
 
+/**
+ * Lane B (kanban-hooks-notify-parity) — dispatcher-side ticket lifecycle
+ * observability. Fired by `Dispatcher.tick()` (`@ethosagent/team-supervisor`)
+ * right after the claim-transition `updateStatus(..., 'running', ...)`
+ * commits. Void/observer-only — never gates the claim itself.
+ */
+export interface TicketClaimedPayload {
+  taskId: string;
+  assignee: string;
+  runId: string;
+}
+
+/**
+ * Fired by the `kanban_block` tool after the block transition commits.
+ * `kind` mirrors `kanban_block`'s optional categorization (Lane A Phase 1) —
+ * absent when the caller didn't supply one.
+ */
+export interface TicketBlockedPayload {
+  taskId: string;
+  reason: string;
+  kind?: 'dependency' | 'needs_input' | 'capability' | 'transient';
+}
+
+/**
+ * Fired by the `kanban_complete` tool after the actual `running` -> `done`
+ * transition commits — the successful-completion path only. Distinct from
+ * the existing Claiming hook `before_ticket_complete`, which gates the
+ * transition before it happens; this one observes it after it lands.
+ */
+export interface TicketCompletedPayload {
+  taskId: string;
+  summary: string;
+}
+
+/**
+ * Fired by `Dispatcher.tick()` around its `reclaimTask` call, when a stuck
+ * `running` task is re-queued to `ready` (owner gone or heartbeat stale).
+ * `previousAssignee` is the assignee that lost the claim — `reclaimTask`
+ * keeps the task's `assignee` field across a reclaim, so this is read off
+ * the task before the reclaim, not derived from the (unchanged) post-reclaim
+ * task.
+ */
+export interface TicketStaleReclaimedPayload {
+  taskId: string;
+  previousAssignee: string | null;
+  reason: 'orphan_stale' | 'orphan_no_owner';
+}
+
+/**
+ * Fired on a ticket field mutation outside the status/block/complete
+ * lifecycle — today, `kanban_assign` (agent-facing tool) and
+ * `KanbanService.assign` (human/web-facing RPC). `changedFields` names the
+ * mutated fields only, never their values — a deliberately privacy-conscious
+ * payload (mirrors Hermes's design for the equivalent event).
+ */
+export interface TicketUpdatedPayload {
+  taskId: string;
+  changedFields: string[];
+}
+
+/**
+ * Fired at the bottom of `Dispatcher.tick()`, but only when
+ * `claimedCount > 0 || reclaimedCount > 0` (D9, kanban-hooks-notify-parity
+ * plan) — an idle tick (nothing claimed, nothing reclaimed) fires this hook
+ * zero times, so listeners don't pay for 1Hz of empty notifications on an
+ * idle board. `teamId` is whatever the dispatcher was constructed with
+ * (production wiring passes the team manifest's name); absent for a
+ * dispatcher built without one (e.g. tests).
+ */
+export interface DispatchTickPayload {
+  teamId?: string;
+  claimedCount: number;
+  reclaimedCount: number;
+}
+
 export interface ProcessCompleteEvent {
   processId: string;
   sessionId: string;
@@ -307,6 +382,12 @@ export interface VoidHooks {
   goal_failed: GoalFailedPayload;
   goal_exhausted: GoalExhaustedPayload;
   goal_needs_clarification: GoalNeedsClarificationPayload;
+  ticket_claimed: TicketClaimedPayload;
+  ticket_blocked: TicketBlockedPayload;
+  ticket_completed: TicketCompletedPayload;
+  ticket_stale_reclaimed: TicketStaleReclaimedPayload;
+  ticket_updated: TicketUpdatedPayload;
+  dispatch_tick: DispatchTickPayload;
 }
 
 export interface ModifyingHooks {

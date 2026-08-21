@@ -1,6 +1,15 @@
 import { DefaultHookRegistry } from '@ethosagent/core';
 import { KanbanStore } from '@ethosagent/kanban-store';
-import type { CompletionChunk, LLMProvider, Message, Tool, ToolContext } from '@ethosagent/types';
+import type {
+  CompletionChunk,
+  LLMProvider,
+  Message,
+  TicketBlockedPayload,
+  TicketCompletedPayload,
+  TicketUpdatedPayload,
+  Tool,
+  ToolContext,
+} from '@ethosagent/types';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createKanbanTools } from '../index';
 
@@ -966,5 +975,123 @@ describe('kanban_complete before_ticket_complete hook', () => {
       makeCtx('engineer'),
     );
     expect(out.status).toBe('done');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ticket_blocked / ticket_completed / ticket_updated — Lane B lifecycle hooks
+// (kanban-hooks-notify-parity)
+// ---------------------------------------------------------------------------
+
+describe('kanban tools Lane B lifecycle hooks', () => {
+  let store: KanbanStore;
+
+  beforeEach(() => {
+    store = new KanbanStore(':memory:');
+  });
+
+  afterEach(() => {
+    store.close();
+  });
+
+  it('kanban_block fires ticket_blocked with kind when supplied', async () => {
+    const hooks = new DefaultHookRegistry();
+    const blocked: TicketBlockedPayload[] = [];
+    hooks.registerVoid('ticket_blocked', async (payload) => {
+      blocked.push(payload);
+    });
+    const tools = toolsByName(createKanbanTools({ store, hooks }));
+
+    const t = store.createTask({ title: 'x' });
+    store.updateStatus(t.id, 'running');
+
+    await call(
+      tools.kanban_block as Tool,
+      { task_id: t.id, reason: 'waiting on API key', kind: 'needs_input' },
+      makeCtx('engineer'),
+    );
+
+    expect(blocked).toEqual([{ taskId: t.id, reason: 'waiting on API key', kind: 'needs_input' }]);
+  });
+
+  it('kanban_block fires ticket_blocked without a kind key when none is supplied', async () => {
+    const hooks = new DefaultHookRegistry();
+    const blocked: TicketBlockedPayload[] = [];
+    hooks.registerVoid('ticket_blocked', async (payload) => {
+      blocked.push(payload);
+    });
+    const tools = toolsByName(createKanbanTools({ store, hooks }));
+
+    const t = store.createTask({ title: 'x' });
+    store.updateStatus(t.id, 'running');
+
+    await call(tools.kanban_block as Tool, { task_id: t.id, reason: 'stuck' }, makeCtx('engineer'));
+
+    expect(blocked).toEqual([{ taskId: t.id, reason: 'stuck' }]);
+    expect(blocked[0]).not.toHaveProperty('kind');
+  });
+
+  it('kanban_complete fires ticket_completed with { taskId, summary } on the successful path', async () => {
+    const hooks = new DefaultHookRegistry();
+    const completed: TicketCompletedPayload[] = [];
+    hooks.registerVoid('ticket_completed', async (payload) => {
+      completed.push(payload);
+    });
+    const tools = toolsByName(createKanbanTools({ store, hooks }));
+
+    const t = store.createTask({ title: 'x' });
+    store.updateStatus(t.id, 'running');
+
+    await call(
+      tools.kanban_complete as Tool,
+      { task_id: t.id, summary: 'shipped it' },
+      makeCtx('engineer'),
+    );
+
+    expect(completed).toEqual([{ taskId: t.id, summary: 'shipped it' }]);
+  });
+
+  it('kanban_complete does NOT fire ticket_completed when before_ticket_complete rejects the completion', async () => {
+    const hooks = new DefaultHookRegistry();
+    hooks.registerClaiming('before_ticket_complete', async () => ({
+      handled: true,
+      reason: 'not good enough',
+    }));
+    const completed: TicketCompletedPayload[] = [];
+    hooks.registerVoid('ticket_completed', async (payload) => {
+      completed.push(payload);
+    });
+    const tools = toolsByName(createKanbanTools({ store, hooks }));
+
+    const t = store.createTask({ title: 'x' });
+    store.updateStatus(t.id, 'running');
+
+    const out = await call<{ status: string }>(
+      tools.kanban_complete as Tool,
+      { task_id: t.id, summary: 'shipped it' },
+      makeCtx('engineer'),
+    );
+
+    expect(out.status).toBe('needs_revision');
+    expect(completed).toEqual([]);
+  });
+
+  it('kanban_assign fires ticket_updated with { taskId, changedFields: ["assignee"] }', async () => {
+    const hooks = new DefaultHookRegistry();
+    const updated: TicketUpdatedPayload[] = [];
+    hooks.registerVoid('ticket_updated', async (payload) => {
+      updated.push(payload);
+    });
+    const tools = toolsByName(createKanbanTools({ store, hooks }));
+
+    const t = store.createTask({ title: 'x' });
+
+    await call(
+      tools.kanban_assign as Tool,
+      { task_id: t.id, assignee: 'researcher' },
+      makeCtx('engineer'),
+    );
+
+    expect(updated).toEqual([{ taskId: t.id, changedFields: ['assignee'] }]);
   });
 });

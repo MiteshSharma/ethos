@@ -2,8 +2,10 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { AgentMesh } from '@ethosagent/agent-mesh';
+import { DefaultHookRegistry } from '@ethosagent/core';
 import { KanbanStore } from '@ethosagent/kanban-store';
 import { FsStorage } from '@ethosagent/storage-fs';
+import type { TicketUpdatedPayload } from '@ethosagent/types';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { KanbanService } from '../../services/kanban.service';
 
@@ -177,5 +179,30 @@ describe('KanbanService — assign + /notify', () => {
 
     await new Promise((r) => setImmediate(r));
     expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('assign fires ticket_updated with { taskId, changedFields: ["assignee"] } when hooks are wired', async () => {
+    writeManifest('team-a');
+
+    const store = openBoard('team-a');
+    const task = store.createTask({ title: 'work item' });
+    store.close();
+
+    const hooks = new DefaultHookRegistry();
+    const updated: TicketUpdatedPayload[] = [];
+    hooks.registerVoid('ticket_updated', async (payload) => {
+      updated.push(payload);
+    });
+    const hookedService = new KanbanService({ teamsDir: dir, hooks });
+
+    const { task: result } = await hookedService.assign({
+      team: 'team-a',
+      taskId: task.id,
+      assignee: 'engineer',
+      actor: 'human:test',
+    });
+
+    expect(result.assignee).toBe('engineer');
+    expect(updated).toEqual([{ taskId: task.id, changedFields: ['assignee'] }]);
   });
 });

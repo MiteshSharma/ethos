@@ -380,6 +380,10 @@ export async function runSupervisor(
     board,
     supervisor: supervisorView,
     mesh,
+    // Purely descriptive — identifies this board/team in the `dispatch_tick`
+    // hook payload. No HookRegistry exists in this standalone supervisor
+    // process today, so `hooks` stays unwired (dispatcher fires zero hooks).
+    teamId: name,
     ...(manifest.kanban?.stale_ms !== undefined ? { staleMs: manifest.kanban.stale_ms } : {}),
     ...(manifest.kanban?.poll_ms !== undefined ? { pollMs: manifest.kanban.poll_ms } : {}),
     ...(manifest.kanban?.staleness_threshold_ms !== undefined

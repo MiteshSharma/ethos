@@ -1,6 +1,7 @@
 import type { AgentMesh } from '@ethosagent/agent-mesh';
 import type { KanbanStore, Task } from '@ethosagent/kanban-store';
 import { autonomyTier, type TrustPolicy, tierMaxRetries } from '@ethosagent/kanban-store';
+import type { HookRegistry } from '@ethosagent/types';
 import type { MemberRuntime } from './runtime';
 
 // ---------------------------------------------------------------------------
@@ -123,6 +124,20 @@ export interface DispatcherOptions {
    */
   preferReliable?: boolean;
   trustPolicy?: TrustPolicy;
+  /**
+   * Fires `ticket_claimed` / `ticket_stale_reclaimed` / `dispatch_tick` as the
+   * dispatcher's own lifecycle events (Lane B, kanban-hooks-notify-parity).
+   * Void-only, fail-open, parallel via `Promise.allSettled` — a throwing or
+   * slow handler never blocks `tick()`. Optional: a dispatcher built without
+   * one fires zero hooks, matching today's exact behavior.
+   */
+  hooks?: HookRegistry;
+  /**
+   * Identifies this board/team in the `dispatch_tick` hook payload. Purely
+   * descriptive — has no effect on dispatch behavior. Production wiring
+   * passes the team manifest's name.
+   */
+  teamId?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -152,6 +167,8 @@ export class Dispatcher {
   private readonly stalenessThresholdMs: number;
   private readonly preferReliable: boolean;
   private readonly trustPolicy: TrustPolicy | undefined;
+  private readonly hooks: HookRegistry | undefined;
+  private readonly teamId: string | undefined;
   private readonly inflight = new Map<string, AbortController>();
   private timer: NodeJS.Timeout | null = null;
   private running = false;
@@ -172,6 +189,8 @@ export class Dispatcher {
     this.stalenessThresholdMs = opts.stalenessThresholdMs ?? DEFAULT_STALENESS_THRESHOLD_MS;
     this.preferReliable = opts.preferReliable ?? false;
     this.trustPolicy = opts.trustPolicy;
+    this.hooks = opts.hooks;
+    this.teamId = opts.teamId;
   }
 
   /**
@@ -180,6 +199,11 @@ export class Dispatcher {
    * deterministically. The polling loop is just `tick()` on a setInterval.
    */
   async tick(): Promise<void> {
+    // Counters for the `dispatch_tick` hook (D9) — it only fires when at
+    // least one of these is nonzero, so an idle tick fires zero hooks.
+    let claimedCount = 0;
+    let reclaimedCount = 0;
+
     // 1. Promote — parents-done and scheduled-time-passed both unblock work.
     this.board.promoteReady();
     this.board.promoteScheduled();
@@ -230,6 +254,14 @@ export class Dispatcher {
       if (reason === null) continue;
       try {
         this.board.reclaimTask(task.id, reason, 'dispatcher');
+        reclaimedCount++;
+        if (this.hooks) {
+          await this.hooks.fireVoid('ticket_stale_reclaimed', {
+            taskId: task.id,
+            previousAssignee: assignee,
+            reason,
+          });
+        }
       } catch {
         // Race: another writer ended the run / changed status between our
         // read and our write. Acceptable — they handled it.
@@ -302,6 +334,11 @@ export class Dispatcher {
         continue;
       }
       if (claimed.status !== 'running') continue;
+      claimedCount++;
+      const runId = claimed.currentRunId;
+      if (this.hooks && runId !== null) {
+        await this.hooks.fireVoid('ticket_claimed', { taskId: task.id, assignee, runId });
+      }
 
       const controller = new AbortController();
       this.inflight.set(task.id, controller);
@@ -322,6 +359,17 @@ export class Dispatcher {
           },
         );
       }
+    }
+
+    // Per D9: fire only when something actually happened this tick — an idle
+    // tick (nothing claimed, nothing reclaimed) fires zero hooks, so
+    // listeners don't pay for 1Hz of empty notifications on an idle board.
+    if (this.hooks && (claimedCount > 0 || reclaimedCount > 0)) {
+      await this.hooks.fireVoid('dispatch_tick', {
+        ...(this.teamId !== undefined ? { teamId: this.teamId } : {}),
+        claimedCount,
+        reclaimedCount,
+      });
     }
   }
 
