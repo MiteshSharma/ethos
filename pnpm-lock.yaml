@@ -2432,6 +2432,9 @@ importers:
       '@ethosagent/document-extractors':
         specifier: workspace:*
         version: link:../../extensions/document-extractors
+      '@ethosagent/execution-coding-agents':
+        specifier: workspace:*
+        version: link:../../extensions/execution-coding-agents
       '@ethosagent/execution-docker':
         specifier: workspace:*
         version: link:../../extensions/execution-docker

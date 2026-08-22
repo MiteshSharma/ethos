@@ -13,6 +13,7 @@ import type {
   RunnerCapabilities,
 } from '@ethosagent/types';
 import { type AcpGatePolicy, createAutoApproveGate } from './acp-gate';
+import { ACP_PROTOCOL_VERSION } from './acp-protocol';
 import { CLAUDE_CODE_ACP_CAPABILITIES, CLAUDE_CODE_ACP_RUNNER_NAME } from './capabilities';
 import { runAcpHost } from './host';
 import { acpWorkspacePaths, assertWorkspaceInReach, prepareWorkspace } from './worktree';
@@ -89,6 +90,13 @@ export class AcpJobRunner implements JobRunner {
     const live = this.live.get(job.id);
     return [
       { label: 'backend', value: 'docker' },
+      // D-ACP5 — per-agent facts, not a hardcoded placeholder: which
+      // registered agent this run is on, and the exact command it execs
+      // inside the container. Two agents on the same package must not read
+      // identically here.
+      { label: 'agent', value: this.name },
+      { label: 'command', value: [this.deps.command, ...(this.deps.args ?? [])].join(' ') },
+      { label: 'protocol', value: `ACP v${ACP_PROTOCOL_VERSION}` },
       { label: 'image', value: this.deps.image },
       { label: 'transport', value: this.capabilities.transport },
       // A fact the kernel enforces: this path is the only writable host path

@@ -13,6 +13,7 @@ import {
   SimpleCompletionImpl,
 } from '@ethosagent/core';
 import { registerBuiltinExtractors } from '@ethosagent/document-extractors';
+import { createRouterGate as createAcpRouterGate } from '@ethosagent/execution-coding-agents';
 import { createRouterGate, PI_RUNNER_NAME, PiJobRunner } from '@ethosagent/execution-pi';
 import { GoalRunner } from '@ethosagent/goal-runner';
 import { BackgroundExecutor, ETHOS_RUNNER_NAME, EthosJobRunner } from '@ethosagent/job-runner';
@@ -72,6 +73,7 @@ import {
   resolveSmallWindowMode,
   scaleHistoryLimit,
 } from './model-catalog';
+import { registerAcpJobRunners } from './register-acp-job-runners';
 import {
   evaluateContextFit,
   evaluateToolPayloadGuard,
@@ -959,9 +961,21 @@ export async function buildAgentLoop(
     // cache, is the SAME instance) exec tools use: D4's containment claim rests
     // on one mount derivation, not two.
     const piConfig = config.background?.pi;
+    // T4/I3 — each configured id becomes its own registered runner (`runner:
+    // 'claude'`, `runner: 'gemini'`), never one generic `'acp'` runner (see
+    // plan/phases/acp-job-runner.md's Config shape). Absent `background.acp`
+    // means the roster is empty and nothing below the guard runs.
+    const acpAgentsConfig = config.background?.acp?.agents ?? {};
+    const acpAgentNames = Object.keys(acpAgentsConfig);
     let interactionRouter: InteractionRouter | undefined;
-    if (piConfig?.image) {
-      // Phase 4 — every gated Pi tool call goes through the runner-agnostic
+    // Shared `InteractionRouter` construction: Pi and any configured ACP agent
+    // both gate their tool calls through the SAME router instance (D17's
+    // per-run allowance cache, D16's auto-resolving capabilities, the same
+    // clarify escalation chain) — constructed once, whenever EITHER is
+    // configured, so ACP agents can route interactions even when Pi itself
+    // is absent from this deployment.
+    if (piConfig?.image || acpAgentNames.length > 0) {
+      // Phase 4 — every gated Pi/ACP tool call goes through the runner-agnostic
       // router: cached answer (D17), auto-resolving capability (D16), or the
       // existing clarify chain. `secret` is registered so a runner that ever
       // emits that kind fails closed instead of writing secret material into a
@@ -993,30 +1007,66 @@ export async function buildAgentLoop(
       });
       router.registry.register(SECRET_KIND, createSecretHandler());
       interactionRouter = router;
-      const piBackend = await infra.executionBackends.resolve('docker', {
-        config: {
-          substitutionVars: { ethosHome: dataDir, cwd: wiringCtx.workingDir },
-          constitution: infra.constitution,
-        },
-        secrets: config.secretsResolver ?? NOOP_SECRETS,
-        logger: log,
-      });
-      jobRunners.register(
-        PI_RUNNER_NAME,
-        () =>
-          new PiJobRunner({
-            backend: piBackend,
-            resolvePersonality: (id) => personalities.get(id),
-            ethosHome: dataDir,
-            cwd: wiringCtx.workingDir,
-            image: piConfig.image,
-            ...(piConfig.memoryMb !== undefined ? { memoryMb: piConfig.memoryMb } : {}),
-            ...(piConfig.configDir ? { piConfigDir: piConfig.configDir } : {}),
-            gate: createRouterGate(router, log),
-            logger: log,
-          }),
-      );
-      await jobRunners.resolve(PI_RUNNER_NAME, { logger: log });
+
+      // Pi — out-of-process, in a container. Registered only when the
+      // deployment names a digest-pinned image (there is nothing sane to
+      // default to), so an un-provisioned machine answers `not_available`
+      // rather than failing at spawn time. The docker backend comes from the
+      // SAME registry (and, by its cache, is the SAME instance) exec tools
+      // use: D4's containment claim rests on one mount derivation, not two.
+      if (piConfig?.image) {
+        const piBackend = await infra.executionBackends.resolve('docker', {
+          config: {
+            substitutionVars: { ethosHome: dataDir, cwd: wiringCtx.workingDir },
+            constitution: infra.constitution,
+          },
+          secrets: config.secretsResolver ?? NOOP_SECRETS,
+          logger: log,
+        });
+        jobRunners.register(
+          PI_RUNNER_NAME,
+          () =>
+            new PiJobRunner({
+              backend: piBackend,
+              resolvePersonality: (id) => personalities.get(id),
+              ethosHome: dataDir,
+              cwd: wiringCtx.workingDir,
+              image: piConfig.image,
+              ...(piConfig.memoryMb !== undefined ? { memoryMb: piConfig.memoryMb } : {}),
+              ...(piConfig.configDir ? { piConfigDir: piConfig.configDir } : {}),
+              gate: createRouterGate(router, log),
+              logger: log,
+            }),
+        );
+        await jobRunners.resolve(PI_RUNNER_NAME, { logger: log });
+      }
+
+      // Real ACP-native coding agents — one registered JobRunner per
+      // configured agent id (D-ACP2: one package, many agents; each entry
+      // its own `runner` name). Same docker backend/mount derivation as Pi
+      // (D4) — resolved ONCE here and shared across every configured agent,
+      // not re-resolved per entry; resolving 'docker' again returns the SAME
+      // cached instance either way.
+      if (acpAgentNames.length > 0) {
+        const acpBackend = await infra.executionBackends.resolve('docker', {
+          config: {
+            substitutionVars: { ethosHome: dataDir, cwd: wiringCtx.workingDir },
+            constitution: infra.constitution,
+          },
+          secrets: config.secretsResolver ?? NOOP_SECRETS,
+          logger: log,
+        });
+        await registerAcpJobRunners({
+          jobRunners,
+          acpAgents: acpAgentsConfig,
+          backend: acpBackend,
+          resolvePersonality: (id) => personalities.get(id),
+          ethosHome: dataDir,
+          cwd: wiringCtx.workingDir,
+          gate: createAcpRouterGate(router, log),
+          logger: log,
+        });
+      }
     }
     backgroundExecutor = new BackgroundExecutor({
       store: jobStore,

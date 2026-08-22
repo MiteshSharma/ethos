@@ -115,6 +115,11 @@ class ScriptedAcpAgent {
     this.emit({ jsonrpc: '2.0', id, result });
   }
 
+  /** Answer a host-originated request with a JSON-RPC error instead of a result. */
+  replyError(id: string | number, message: string): void {
+    this.emit({ jsonrpc: '2.0', id, error: { code: -32000, message } });
+  }
+
   /** Agent-originated request; `onReply` fires once the host answers it. */
   request(method: string, params: unknown, onReply: (result: Json) => void): void {
     const id = `agent-${this.nextId++}`;
@@ -245,6 +250,21 @@ describe('runAcpHost — handshake and text/tool translation', () => {
     // flight at all). Either way: an error event, never a hang.
     expect(events).toHaveLength(1);
     expect(events[0]).toMatchObject({ type: 'error', code: 'acp_handshake_failed' });
+  });
+
+  it('surfaces a JSON-RPC error response to `initialize` as a visible failure, not a hang — the agent process stays alive but does not speak ACP correctly', async () => {
+    const agent = new ScriptedAcpAgent();
+    // The process itself is fine (never dies) — it just answers `initialize`
+    // with a JSON-RPC error, the "speaks a different/incompatible protocol
+    // version" case named in the plan's failure-modes table, distinct from
+    // the process-death path covered above.
+    agent.on('initialize', (msg) => agent.replyError(msg.id, 'unsupported protocolVersion'));
+
+    const events = await drainWithTimeout(runAcpHost(baseSpec(), { spawn: spawnFor(agent) }));
+
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ type: 'error', code: 'acp_handshake_failed' });
+    expect((events[0] as { error: string }).error).toContain('unsupported protocolVersion');
   });
 });
 

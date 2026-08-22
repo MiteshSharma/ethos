@@ -153,6 +153,9 @@ describe('AcpJobRunner.describe', () => {
     const rows = runner.describe(job());
     expect(rows.map((r) => r.label)).toEqual([
       'backend',
+      'agent',
+      'command',
+      'protocol',
       'image',
       'transport',
       'workspace',
@@ -163,6 +166,23 @@ describe('AcpJobRunner.describe', () => {
     expect(workspace?.value).toBe('/home/u/.ethos/worktrees/job-abcdef01');
     expect(workspace?.tone).toBe('safe');
     expect(rows.find((r) => r.label === 'host pid')?.value).toBe('—');
+  });
+
+  it("reports the run's OWN agent id and command — not a hardcoded placeholder shared across agents (D-ACP5)", () => {
+    const runner = new AcpJobRunner({
+      backend: recordingBackend(),
+      resolvePersonality: (id) => (id === 'scribe' ? personality() : undefined),
+      ethosHome: '/home/u/.ethos',
+      cwd: '/repo',
+      image:
+        'ethos-acp-gemini@sha256:1111111111111111111111111111111111111111111111111111111111111',
+      command: 'gemini',
+      args: ['--acp'],
+      name: 'gemini',
+    });
+    const rows = runner.describe(job());
+    expect(rows.find((r) => r.label === 'agent')?.value).toBe('gemini');
+    expect(rows.find((r) => r.label === 'command')?.value).toBe('gemini --acp');
   });
 });
 
