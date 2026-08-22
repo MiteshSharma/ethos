@@ -57,6 +57,12 @@ describe('registerAcpJobRunners', () => {
     expect(runner?.name).toBe('claude');
   });
 
+  // T5: `gemini`'s `command`/`args` are Gemini CLI's real, documented ACP
+  // invocation (confirmed live against `npx -y @google/gemini-cli --help` —
+  // "--acp  Starts the agent in ACP mode"), proving D-ACP2's "one package,
+  // many agents" claim against a second, genuinely different, real CLI —
+  // not a synthetic stand-in. Only `image` is a placeholder (no
+  // registry-hosted digest-pinned build exists for either agent yet).
   it('(c) registers two configured agents independently, each its own runner name', async () => {
     const jobRunners = await register({
       claude: { command: 'claude-agent-acp', image: 'x@sha256:aaaa' },

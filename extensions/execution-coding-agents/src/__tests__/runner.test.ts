@@ -129,6 +129,12 @@ describe('AcpJobRunner — construction and registration', () => {
     expect(registry.get(CLAUDE_CODE_ACP_RUNNER_NAME)?.name).toBe(CLAUDE_CODE_ACP_RUNNER_NAME);
   });
 
+  // T5: `command: 'gemini'` / `args: ['--acp']` is Gemini CLI's real, documented
+  // invocation — confirmed live against `npx -y @google/gemini-cli --help`
+  // ("--acp  Starts the agent in ACP mode"), not a guessed placeholder. Only
+  // `image` stays synthetic: D-ACP4's registry-hosted digest-pinned image
+  // doesn't exist in this environment (same as Claude's `ethos-acp-claude`
+  // image above).
   it('D-ACP2: a second agent registers under its own name and capabilities from the SAME class', () => {
     const runner = new AcpJobRunner({
       backend: recordingBackend(),
