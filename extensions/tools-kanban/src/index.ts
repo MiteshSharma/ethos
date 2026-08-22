@@ -569,6 +569,24 @@ interface ProposedChild {
   assignee?: string | null;
 }
 
+// Same caps `kanban_create` applies to its own args, applied here to each
+// LLM-proposed child before it reaches `store.createTask` — without this the
+// decomposer path could dump an oversized title/body/assignee into the
+// durable store and FTS index that `kanban_create` itself would have rejected.
+function childValidationError(child: ProposedChild): string | null {
+  const titleErr = tooLong('title', child.title, MAX_TITLE_CHARS);
+  if (titleErr && !titleErr.ok) return titleErr.error;
+  if (child.body !== undefined) {
+    const bodyErr = tooLong('body', child.body, MAX_BODY_CHARS);
+    if (bodyErr && !bodyErr.ok) return bodyErr.error;
+  }
+  if (child.assignee !== undefined && child.assignee !== null) {
+    const assigneeErr = tooLong('assignee', child.assignee, MAX_ASSIGNEE_CHARS);
+    if (assigneeErr && !assigneeErr.ok) return assigneeErr.error;
+  }
+  return null;
+}
+
 function buildDecomposePrompt(task: Task, maxChildren: number, instructions?: string): string {
   const lines = [
     `Parent task title: ${task.title}`,
@@ -718,6 +736,12 @@ function createKanbanDecompose(store: KanbanStore, decomposerProvider?: LLMProvi
       for (let i = 0; i < children.length; i++) {
         const child = children[i];
         if (!child) continue;
+        const validationError = childValidationError(child);
+        if (validationError) {
+          failedChild = { title: child.title, error: validationError };
+          notAttempted = children.slice(i + 1).map((c) => ({ title: c.title }));
+          break;
+        }
         try {
           const childTask = store.createTask({
             title: child.title,

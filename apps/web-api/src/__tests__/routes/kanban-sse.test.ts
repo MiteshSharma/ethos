@@ -70,6 +70,39 @@ members:
     }
   });
 
+  it('a cold connect (no Last-Event-ID) replays a bounded recent tail, not the whole table', async () => {
+    writeManifest(
+      'analytics',
+      `
+name: analytics
+description: x
+domain_capabilities: [x]
+members:
+  - personality: alpha
+`,
+    );
+    const store = openBoard('analytics');
+    // Each task creation writes a `created` event; 120 tasks comfortably
+    // exceeds the service's RECENT_EVENTS_CAP (100) so an unbounded replay
+    // would return more frames than the cap allows.
+    const taskCount = 120;
+    for (let i = 0; i < taskCount; i++) {
+      store.createTask({ title: `task ${i}` });
+    }
+    store.close();
+
+    const res = await app.request('/sse/kanban/analytics');
+    const frames = await readSseFrames(res, 500);
+
+    expect(frames.length).toBeLessThan(taskCount);
+    expect(frames.length).toBeLessThanOrEqual(100);
+    // The tail is still the MOST RECENT events, in ascending id order.
+    expect(frames[frames.length - 1]?.event.taskId).toBeDefined();
+    for (let i = 1; i < frames.length; i++) {
+      expect(frames[i]?.id).toBeGreaterThan(frames[i - 1]?.id ?? 0);
+    }
+  });
+
   it('Last-Event-ID resume skips events at or before the given id', async () => {
     writeManifest(
       'analytics',

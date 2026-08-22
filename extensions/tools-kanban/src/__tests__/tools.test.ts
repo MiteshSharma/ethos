@@ -513,6 +513,45 @@ describe('kanban tools', () => {
     vi.restoreAllMocks();
   });
 
+  it("kanban_decompose applies kanban_create's length caps to a proposed child and stops at the first oversized one", async () => {
+    // MAX_TITLE_CHARS is 500 (not exported); one char over trips the same
+    // `tooLong` check kanban_create runs on its own args.
+    const oversizedTitle = 'x'.repeat(501);
+    const provider = stubDecomposerProvider({
+      responseText: JSON.stringify([
+        { title: 'child A' },
+        { title: oversizedTitle },
+        { title: 'child C' },
+      ]),
+    });
+    const decomposeTools = toolsByName(createKanbanTools({ store, decomposerProvider: provider }));
+    const goal = await call<{ task_id: string }>(
+      decomposeTools.kanban_create_goal as Tool,
+      { title: 'Goal' },
+      makeCtx(),
+    );
+
+    const out = await call<{
+      task_id: string;
+      children_created: { task_id: string; title: string }[];
+      partial_failure?: boolean;
+      failed_child?: { title: string; error: string };
+      not_attempted?: { title: string }[];
+    }>(decomposeTools.kanban_decompose as Tool, { task_id: goal.task_id }, makeCtx());
+
+    expect(out.children_created).toHaveLength(1);
+    expect(out.children_created[0]?.title).toBe('child A');
+    expect(out.partial_failure).toBe(true);
+    expect(out.failed_child?.title).toBe(oversizedTitle);
+    expect(out.failed_child?.error).toMatch(/title too long/);
+    expect(out.not_attempted).toEqual([{ title: 'child C' }]);
+
+    // The oversized child never reached the store — same "stop at first
+    // failure" semantic as a store.createTask throw, so nothing after it was
+    // attempted either.
+    expect(store.listTasks({ parentId: goal.task_id })).toHaveLength(1);
+  });
+
   it('kanban_decompose caps max_children at 10 and rejects a non-positive-integer', async () => {
     const provider = stubDecomposerProvider({
       responseText: JSON.stringify(Array.from({ length: 20 }, (_, i) => ({ title: `child ${i}` }))),

@@ -286,4 +286,33 @@ describe('KanbanService — assign + /notify', () => {
     expect(result.assignee).toBe('engineer');
     expect(updated).toEqual([{ taskId: task.id, changedFields: ['assignee'] }]);
   });
+
+  it('bulkAssign fires ticket_updated once per reassigned task when hooks are wired', async () => {
+    writeManifest('team-a');
+
+    const store = openBoard('team-a');
+    const a = store.createTask({ title: 'a' });
+    const b = store.createTask({ title: 'b' });
+    store.close();
+
+    const hooks = new DefaultHookRegistry();
+    const updated: TicketUpdatedPayload[] = [];
+    hooks.registerVoid('ticket_updated', async (payload) => {
+      updated.push(payload);
+    });
+    const hookedService = new KanbanService({ teamsDir: dir, hooks });
+
+    const { tasks } = await hookedService.bulkAssign({
+      team: 'team-a',
+      taskIds: [a.id, b.id],
+      assignee: 'engineer',
+      actor: 'human:test',
+    });
+
+    expect(tasks.map((t) => t.assignee)).toEqual(['engineer', 'engineer']);
+    expect(updated).toEqual([
+      { taskId: a.id, changedFields: ['assignee'] },
+      { taskId: b.id, changedFields: ['assignee'] },
+    ]);
+  });
 });

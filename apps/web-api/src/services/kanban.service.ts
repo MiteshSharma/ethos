@@ -264,6 +264,52 @@ export class KanbanService {
   }
 
   /**
+   * Bounded tail of board events, ascending — the last `cap` rows in
+   * `task_events`, same cap (`RECENT_EVENTS_CAP`) as `getBoard()`'s
+   * `recentEvents`. Used for a COLD SSE connect (no real `Last-Event-ID`
+   * cursor): replaying the entire table for a board with a long history is
+   * strictly worse than the polling it replaced, so a cold connect gets the
+   * recent tail instead. A genuine reconnect still uses `getEventsSince`
+   * below and replays everything since its real cursor.
+   */
+  async getRecentEvents(team: string, cap: number = RECENT_EVENTS_CAP): Promise<KanbanEvent[]> {
+    if (team !== GLOBAL_BOARD_NAME) assertSafeTeamName(team);
+    const boardPath = resolveBoard(this.rootDir, team);
+    if (!existsSync(boardPath)) return [];
+
+    const store =
+      team !== GLOBAL_BOARD_NAME
+        ? new KanbanStore(boardPath, { teamId: team })
+        : new KanbanStore(boardPath);
+    try {
+      const eventRows = (
+        store as unknown as { db: { prepare: (s: string) => { all: (n: number) => unknown[] } } }
+      ).db
+        .prepare(
+          'SELECT id, task_id, kind, actor, data_json, created_at FROM task_events ORDER BY id DESC LIMIT ?',
+        )
+        .all(cap) as Array<{
+        id: number;
+        task_id: string;
+        kind: string;
+        actor: string;
+        data_json: string;
+        created_at: number;
+      }>;
+      return eventRows.reverse().map((r) => ({
+        id: r.id,
+        taskId: r.task_id,
+        kind: r.kind as KanbanEvent['kind'],
+        actor: r.actor,
+        data: JSON.parse(r.data_json) as Record<string, unknown>,
+        createdAt: new Date(r.created_at).toISOString(),
+      }));
+    } finally {
+      store.close();
+    }
+  }
+
+  /**
    * Board events strictly after `afterId`, ascending — the resume-since-cursor
    * query behind the kanban SSE stream. Same `task_events` query as
    * `getBoard()`'s, but `WHERE id > ?` ascending instead of `ORDER BY id DESC
@@ -461,6 +507,13 @@ export class KanbanService {
       const updated = store.bulkAssign(opts.taskIds, opts.assignee, opts.actor);
 
       for (const task of updated) {
+        if (this.hooks) {
+          await this.hooks.fireVoid('ticket_updated', {
+            taskId: task.id,
+            changedFields: ['assignee'],
+          });
+        }
+
         if (this.mesh && task.status === 'ready') {
           void this.notifyAssignee(opts.assignee, task.id, 'kanban', opts.team).catch(() => {});
         }

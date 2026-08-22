@@ -13,6 +13,14 @@ export interface KanbanSseOptions {
 // SSE frame with `id: String(event.id)`. Unlike `goal-sse.ts`, a board has no
 // terminal/"done" state — the stream just runs until the client disconnects,
 // same as `sse.ts`'s session stream.
+//
+// A COLD connect (no `Last-Event-ID` header, so `sinceId` parses to 0) has no
+// real cursor to resume from — replaying the whole `task_events` table for a
+// board with a long history would dump thousands of frames on first load, so
+// that case gets `getRecentEvents()`'s bounded tail instead. A genuine
+// reconnect (`sinceId > 0`) still replays everything since that cursor via
+// `getEventsSince()` — the fix targets "no cursor at all", not resumption
+// after a real gap.
 
 export function kanbanSseRoutes(opts: KanbanSseOptions) {
   const app = new Hono();
@@ -30,8 +38,13 @@ export function kanbanSseRoutes(opts: KanbanSseOptions) {
         if (pollTimer) clearInterval(pollTimer);
       });
 
-      // Replay stored events (respecting Last-Event-ID for reconnect)
-      const stored = await opts.kanban.getEventsSince(team, lastId);
+      // Replay stored events (respecting Last-Event-ID for reconnect). A
+      // cold connect (no cursor) gets a bounded recent tail rather than the
+      // full table — see the module comment above.
+      const stored =
+        lastId === 0
+          ? await opts.kanban.getRecentEvents(team)
+          : await opts.kanban.getEventsSince(team, lastId);
       for (const event of stored) {
         await stream.writeSSE({
           id: String(event.id),
