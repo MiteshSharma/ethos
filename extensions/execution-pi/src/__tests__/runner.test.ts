@@ -184,6 +184,7 @@ describe('PiJobRunner.run — containment', () => {
           signal: new AbortController().signal,
           steerSink: NOOP_STEER,
           emitArtifact: () => {},
+          appendLog: () => {},
         }),
       ),
     ).rejects.toThrow(WorkspaceOutOfReachError);
@@ -197,6 +198,7 @@ describe('PiJobRunner.run — containment', () => {
           signal: new AbortController().signal,
           steerSink: NOOP_STEER,
           emitArtifact: () => {},
+          appendLog: () => {},
         }),
       ),
     ).rejects.toThrow(/did not resolve/);
@@ -216,6 +218,7 @@ describe('PiJobRunner.run — containment', () => {
         signal: new AbortController().signal,
         steerSink: NOOP_STEER,
         emitArtifact: () => {},
+        appendLog: () => {},
       }),
     ).catch(() => {});
 

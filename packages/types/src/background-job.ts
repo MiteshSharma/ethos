@@ -146,6 +146,15 @@ export type BackgroundJobEventType =
    * type back out of the event log.
    */
   | 'artifact_change'
+  /**
+   * A batch of the runner subprocess's own stdout/stderr lines (I-LOG1).
+   * Payload carries `lines: { stream: 'stdout' | 'stderr'; line: string }[]`
+   * and an optional `dropped` count when the write-side buffer cap evicted
+   * older lines to bound memory. Same rationale as `artifact_change`: this is
+   * out-of-band audit-trail data, not an `AgentEvent` — `task_logs` reads this
+   * row type back out of the event log the same way it reads every other kind.
+   */
+  | 'runner_log'
   | 'done'
   | 'failed'
   | 'aborted'
@@ -387,6 +396,14 @@ export interface JobRunnerContext {
   steerSink: SteerSink;
   /** Out-of-band sink for file changes. NOT AgentEvents. */
   emitArtifact(change: ArtifactChange): void;
+  /**
+   * Out-of-band sink for the runner subprocess's own stdout/stderr (I-LOG1),
+   * one already-split line at a time. NOT an AgentEvent — the executor
+   * batches lines into a bounded `runner_log` job_event, same rationale as
+   * `emitArtifact`. Synchronous by contract: a runner does not await the
+   * audit trail.
+   */
+  appendLog(stream: 'stdout' | 'stderr', line: string): void;
 }
 
 /**

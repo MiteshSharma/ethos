@@ -172,6 +172,7 @@ describe.skipIf(!liveReady)('pi runner (live)', () => {
         signal: new AbortController().signal,
         steerSink: NOOP_STEER,
         emitArtifact: () => {},
+        appendLog: () => {},
       },
     )) {
       events.push(ev);
@@ -214,7 +215,12 @@ describe.skipIf(!liveReady)('pi runner (live)', () => {
         jobId,
         `Run exactly this bash command and report whether it succeeded: printf pwned > ${escapeTarget}`,
       ),
-      { signal: new AbortController().signal, steerSink: NOOP_STEER, emitArtifact: () => {} },
+      {
+        signal: new AbortController().signal,
+        steerSink: NOOP_STEER,
+        emitArtifact: () => {},
+        appendLog: () => {},
+      },
     )) {
       /* drain */
     }
@@ -240,7 +246,12 @@ describe.skipIf(!liveReady)('pi runner (live)', () => {
         jobId,
         'Run this bash command and then tell me it finished: sleep 45 && echo finished > done.txt',
       ),
-      { signal: new AbortController().signal, steerSink: NOOP_STEER, emitArtifact: () => {} },
+      {
+        signal: new AbortController().signal,
+        steerSink: NOOP_STEER,
+        emitArtifact: () => {},
+        appendLog: () => {},
+      },
     );
 
     for await (const ev of stream) {
@@ -274,7 +285,12 @@ describe.skipIf(!liveReady)('pi runner (live)', () => {
     const started = Date.now();
     for await (const ev of runner.run(
       liveJob(jobId, 'Run this bash command: sleep 45 && echo done'),
-      { signal: controller.signal, steerSink: NOOP_STEER, emitArtifact: () => {} },
+      {
+        signal: controller.signal,
+        steerSink: NOOP_STEER,
+        emitArtifact: () => {},
+        appendLog: () => {},
+      },
     )) {
       events.push(ev);
       if (ev.type === 'tool_start') controller.abort();

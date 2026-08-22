@@ -38,6 +38,15 @@ export interface PiHostSpec {
   tools: string;
   signal: AbortSignal;
   steerSink: SteerSink;
+  /**
+   * I-LOG1 — out-of-band sink for this host's own subprocess output, so a
+   * healthy run's diagnostics are readable via `task_logs`, not just folded
+   * into the crash-time error message `stderrTail` already produces below.
+   * Only stderr is wired today: stdout bytes outside Pi's own parsed
+   * JSON-RPC frames (`onEvent`) aren't captured at all, additive to fix later
+   * if that gap matters — not a regression of anything that exists now.
+   */
+  appendLog: (stream: 'stdout' | 'stderr', line: string) => void;
   gate: PiGatePolicy;
   logger?: Logger;
   /** Called once the host is live, so `describe()` can render real facts. */
@@ -139,6 +148,10 @@ export async function* runPiHost(spec: PiHostSpec): AsyncIterable<AgentEvent> {
   let aborted = false;
   let stderrTail = '';
   let started = false;
+  // Line-buffer for `appendLog`, independent of `stderrTail` above: that tail
+  // is a raw bounded string for the crash-time error message, this is
+  // line-split output for the running audit trail (I-LOG1).
+  let stderrLineBuffer = '';
 
   const bump = (): void => {
     wake?.();
@@ -221,9 +234,20 @@ export async function* runPiHost(spec: PiHostSpec): AsyncIterable<AgentEvent> {
     }
   });
   child.stderr?.on('data', (chunk: Buffer) => {
-    stderrTail = (stderrTail + chunk.toString('utf-8')).slice(-STDERR_TAIL_CHARS);
+    const text = chunk.toString('utf-8');
+    stderrTail = (stderrTail + text).slice(-STDERR_TAIL_CHARS);
+    stderrLineBuffer += text;
+    const lines = stderrLineBuffer.split('\n');
+    stderrLineBuffer = lines.pop() ?? '';
+    for (const line of lines) spec.appendLog('stderr', line);
   });
   child.on('close', () => {
+    // Whatever's left without a trailing newline is still a line worth
+    // keeping — most processes don't end their last write with one.
+    if (stderrLineBuffer) {
+      spec.appendLog('stderr', stderrLineBuffer);
+      stderrLineBuffer = '';
+    }
     closed = true;
     bump();
   });

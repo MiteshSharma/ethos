@@ -733,4 +733,29 @@ describe('task_logs', () => {
       expect(lines[3]).toContain('output truncated');
     }
   });
+
+  // T1 / I-LOG1 — the job is still `running` (not `done`) when this event is
+  // seeded, proving `runner_log` rows are readable mid-run through the same
+  // tool, not only after the job finishes.
+  it('renders a runner_log event emitted mid-run', async () => {
+    const store = new FakeJobStore();
+    const { deps } = makeDeps(store);
+    store.seed({ id: 'l3', rootSessionKey: 'cli:test', status: 'running' });
+    await store.appendEvent('l3', 'runner_log', {
+      lines: [
+        { stream: 'stderr', line: 'npm warn deprecated left-pad' },
+        { stream: 'stdout', line: 'build ok' },
+      ],
+      dropped: 3,
+    });
+
+    const res = await createTaskLogsTool(deps).execute({ id: 'l3', tail: 1 }, makeCtx());
+    expect(res.ok).toBe(true);
+    if (res.ok) {
+      expect(res.value).toContain('[stderr] npm warn deprecated left-pad');
+      expect(res.value).toContain('[stdout] build ok');
+      expect(res.value).toContain('+3 dropped');
+    }
+    expect((await store.get('l3'))?.status).toBe('running');
+  });
 });
