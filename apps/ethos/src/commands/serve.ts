@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { existsSync, readdirSync } from 'node:fs';
 import { join, resolve as pathResolve } from 'node:path';
 import {
@@ -8,10 +8,10 @@ import {
   createA2aAuthRouter,
   createA2aRpcRouter,
   createA2aWellKnownRouter,
-  FetchA2aPushClient,
-  InMemoryA2aTaskStore,
   MemoryA2aLimiter,
+  MemoryA2aPreAuthLimiter,
   MemoryNonceStore,
+  SQLiteA2aTaskStore,
   StorageA2aAllowlist,
   StorageA2aPeerStore,
 } from '@ethosagent/a2a';
@@ -94,7 +94,9 @@ import {
   getStorage,
 } from '../wiring';
 import { runCronTurn } from './cron-turn';
+import { createA2aRunner } from './serve-a2a-runner';
 import {
+  a2aZeroSkillsWarning,
   parseFlagValue,
   parsePort,
   resolveCorsOrigins,
@@ -621,6 +623,29 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
   });
   await personalities.loadFromDirectory(join(dir, 'personalities'));
 
+  // Team members (and team coordinators — both boot through this same shared
+  // path) are dispatch targets for the team-supervisor's `Dispatcher`, which
+  // authenticates to this ACP server with a bearer token resolved via
+  // `SecretsResolver` (see `extensions/team-supervisor/src/dispatcher.ts`).
+  // Without this, `AcpServer` still enforces a bearer token — it just falls
+  // back to a fresh `randomBytes(32)` value that is never shared with
+  // anyone, so a zero-config team could never actually dispatch. Generate the
+  // SAME token that gets passed to the constructor below, store its value
+  // via SecretsResolver (S9 — the mesh registry only ever gets the ref by
+  // name), and regenerate fresh on every boot: the mesh entry itself is
+  // already re-created per-process (`agentId` below is pid+uuid scoped), so
+  // there is nothing relying on token stability across restarts, and
+  // always-fresh avoids any "stale ref pointing at an old secret" bookkeeping.
+  // Solo `ethos serve` (no `--team`) is never a Dispatcher target, so it keeps
+  // the existing behavior unchanged (no ref stored, `AcpServer` self-generates).
+  let teamAuthToken: string | undefined;
+  let teamAuthTokenRef: string | undefined;
+  if (teamFlag) {
+    teamAuthToken = randomBytes(32).toString('hex');
+    teamAuthTokenRef = `mesh/${activeMeshName}/${activePersonality}`;
+    await (await getSecretsResolver()).set(teamAuthTokenRef, teamAuthToken);
+  }
+
   // ACP server (existing behavior — kept first so any breakage is obvious).
   // The MCP session-grant wiring is omitted on the team-coordinator path,
   // which has no McpManager — `session/registerMcpServers` then fails closed.
@@ -633,6 +658,7 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
       : {}),
     ...(jobStore ? { jobStore } : {}),
     ...(backgroundExecutor ? { backgroundExecutor } : {}),
+    ...(teamAuthToken ? { authToken: teamAuthToken } : {}),
   });
   acpServer.startHttp(acpPort);
 
@@ -651,6 +677,7 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
     personalityId: activePersonality,
     displayName: personalityConfig?.name ?? activePersonality,
     boardSubscriptions: teamFlag ? [teamFlag] : ['global'],
+    ...(teamAuthTokenRef ? { authTokenRef: teamAuthTokenRef } : {}),
   });
   const stopHeartbeat = mesh.startHeartbeat(agentId, () => acpServer.activeSessionCount);
 
@@ -820,32 +847,66 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
   // and per-trace fan-out counters persist across requests. The limiter is
   // A2A's OWN isolatable rate + concurrency stack (plan §12 blast-radius): its
   // caps cannot take down `/rpc`.
-  const a2aTaskStore = new InMemoryA2aTaskStore();
+  //
+  // T1.6: SQLite-backed, not in-memory — a task's state, result, and
+  // (critically) its idempotency key must survive a restart, or a peer
+  // polling after a restart gets NOT_FOUND for work that completed, and a
+  // retried send after a restart re-runs the loop instead of deduping.
+  const a2aTaskStore = new SQLiteA2aTaskStore(join(a2aBaseDir, 'tasks.db'));
+  // Retention GC — terminal task rows carry result/error text, so they are
+  // not kept forever. Two windows: bodies clear first (shorter), the row
+  // (status + idempotency key) is deleted only after the longer window,
+  // because idempotency surviving a restart is the reason this store exists.
+  // Prune once at boot, then hourly — same cadence every other SQLite store's
+  // retention GC in this app uses.
+  const A2A_TASK_BODY_RETENTION_MS = 24 * 60 * 60 * 1000;
+  const A2A_TASK_ROW_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+  const pruneA2aTaskStore = () => {
+    const now = Date.now();
+    void a2aTaskStore
+      .pruneBodies(now - A2A_TASK_BODY_RETENTION_MS)
+      .catch((err) => console.warn(`[a2a] task store body prune failed: ${String(err)}`));
+    void a2aTaskStore
+      .pruneTerminal(now - A2A_TASK_ROW_RETENTION_MS)
+      .catch((err) => console.warn(`[a2a] task store retention prune failed: ${String(err)}`));
+  };
+  pruneA2aTaskStore();
+  const a2aTaskStoreRetentionTimer = setInterval(pruneA2aTaskStore, 3_600_000);
+  a2aTaskStoreRetentionTimer.unref?.();
   const a2aDelegationGuard = new A2aDelegationGuard();
   const a2aLimiter = new MemoryA2aLimiter();
-  const a2aPushClient = new FetchA2aPushClient();
+  // Pre-auth gate (plan T1.4) — cheap, keyed on remote address, checked BEFORE
+  // token/PoP verification so an unauthenticated flood never reaches Ed25519.
+  // Additive to `a2aLimiter` above, which is unchanged and enforces a
+  // different thing (per-peer quota, post-auth).
+  const a2aPreAuthLimiter = new MemoryA2aPreAuthLimiter();
   // Phase 7: forward the inbound trace into the loop as the ambient delegation
   // frame, so an onward `a2a_send` signs `depth + 1` and consumes the shared
   // per-trace fan-out budget. `reserveOutbound` binds to the SAME process guard
   // above, so inbound admissions and outbound reservations share one counter.
-  const a2aRunner: A2aTaskRunner = {
-    run: (personalityId, text, opts) => {
-      const delegation = opts?.delegation;
-      return loop.run(text, {
-        personalityId,
-        ...(opts?.sessionKey ? { sessionKey: opts.sessionKey } : {}),
-        ...(delegation
-          ? {
-              a2aDelegation: {
-                traceId: delegation.traceId,
-                depth: delegation.depth,
-                reserveOutbound: () => a2aDelegationGuard.reserveOutbound(delegation.traceId),
-              },
-            }
-          : {}),
-      });
-    },
-  };
+  // T0.2: also resolves the peer-named skill's `required_tools` and narrows
+  // the turn's toolset — fail-closed, see `serve-a2a-runner.ts`.
+  const a2aRunner: A2aTaskRunner = createA2aRunner({
+    loop,
+    personalities,
+    storage: a2aStorage,
+    reserveOutbound: (traceId) => a2aDelegationGuard.reserveOutbound(traceId),
+  });
+
+  // T0.1 — the zero-skills warning (the headline bug): on boot with A2A
+  // enabled, an operator who has not exposed any skill gets total silent
+  // inbound failure (every `message/send` returns FORBIDDEN_SCOPE) with no
+  // signal anywhere that says so. Best-effort: a card-read failure here must
+  // never block boot.
+  if (a2aInitiallyEnabled) {
+    try {
+      const card = await a2aIdentity.getIdentity(activePersonality, 'trusted-peer');
+      const warning = a2aZeroSkillsWarning(activePersonality, card.skills.length);
+      if (warning) console.warn(`[a2a] ${warning}`);
+    } catch {
+      // best-effort boot warning only
+    }
+  }
 
   // Call-capture daemon (plan/phases/call-capture-extension.md, "Phase 4 —
   // Integration"). macOS-only, opt-in via `callCapture.personalityId` —
@@ -1036,8 +1097,8 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
         runner: a2aRunner,
         taskStore: a2aTaskStore,
         limiter: a2aLimiter,
+        preAuthLimiter: a2aPreAuthLimiter,
         delegationGuard: a2aDelegationGuard,
-        pushClient: a2aPushClient,
         auditSink: a2aAuditSink,
       }),
       auth: 'public',

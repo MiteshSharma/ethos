@@ -392,7 +392,7 @@ type changes. Every frozen schema has:
 - A named owner.
 - A bump procedure.
 
-The personality schema is the worked example. [Personality governance](docs/content/building/explanation/personality-governance.md) explains how its freeze rule and the generated character sheet operationalise this section for `PersonalityConfig` — the personality-alignment phase removed four non-identity fields (`skin`, `busyInputMode`, `verbosity`, `metadata`) under exactly the procedure below.
+The personality schema is the worked example. [Personality governance](docs/content/building/explanation/personality-governance.md) explains how its freeze rule and the generated character sheet operationalise this section for `PersonalityConfig` — the personality-alignment phase removed four non-identity fields (`skin`, `busyInputMode`, `verbosity`, `metadata`) under exactly the procedure below. [AgentCard governance](docs/content/building/explanation/agent-card-governance.md) explains why the A2A signed card — a peer verifies it once, out of band, and trusts that anchor from then on — needed the same mechanical treatment (added in the a2a-spec-compat phase, D14).
 
 ### Roster
 
@@ -408,6 +408,7 @@ The personality schema is the worked example. [Personality governance](docs/cont
 | Tool contract | Any two repository maintainers | A change that affects already-shipped tool packages | Shape test |
 | Context engine contract | Any two repository maintainers | Adding, removing, or renaming a method on `ContextEngine` | Method-count test (`context-engine-method-count`) |
 | Content-addressed store (ContentStore) | Any two repository maintainers | Adding, removing, or renaming a method on ContentStore | Method-count test |
+| AgentCard (A2A signed card) | Any two repository maintainers | Adding, removing, or renaming a top-level field on `AgentCard` (`packages/types/src/a2a.ts`) | Field-count + field-name test (`agent-card-field-count`) |
 
 Adding an **optional** method to `ContextEngine` is a §VI **Substantive** change:
 it needs two-maintainer approval, the drift gate bumped in the same commit, and

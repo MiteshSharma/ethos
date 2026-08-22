@@ -1,6 +1,7 @@
 import type { AgentMesh } from '@ethosagent/agent-mesh';
 import type { KanbanStore, Task } from '@ethosagent/kanban-store';
 import { autonomyTier, type TrustPolicy, tierMaxRetries } from '@ethosagent/kanban-store';
+import type { SecretsResolver } from '@ethosagent/types';
 import type { MemberRuntime } from './runtime';
 
 // ---------------------------------------------------------------------------
@@ -31,6 +32,8 @@ export type DispatchCall = (args: {
   prompt: string;
   personalityId: string;
   signal: AbortSignal;
+  /** Bearer token for the target `AcpServer`, resolved via `SecretsResolver`. Omitted when the target has no configured `authTokenRef`. */
+  authToken?: string;
 }) => Promise<string>;
 
 /**
@@ -46,6 +49,8 @@ export type SpawnDispatchCall = (args: {
   prompt: string;
   personalityId: string;
   signal: AbortSignal;
+  /** Bearer token for the target `AcpServer`, resolved via `SecretsResolver`. Omitted when the target has no configured `authTokenRef`. */
+  authToken?: string;
 }) => Promise<{ jobId: string }>;
 
 export interface DispatcherOptions {
@@ -123,6 +128,16 @@ export interface DispatcherOptions {
    */
   preferReliable?: boolean;
   trustPolicy?: TrustPolicy;
+  /**
+   * Resolves a mesh peer's `authTokenRef` (a secret *name*, per
+   * ARCHITECTURE.md S9 — registry.json never carries the token value) to
+   * the actual bearer token at dispatch time. Required for dispatch to
+   * authenticate against a bearer-secured `AcpServer` peer; omitted, a peer
+   * with an `authTokenRef` configured dispatches with no Authorization
+   * header and a bearer-enforcing server rejects it with 401 (surfaced as a
+   * normal dispatch failure, same as any other unreachable peer).
+   */
+  secrets?: SecretsResolver;
 }
 
 // ---------------------------------------------------------------------------
@@ -152,6 +167,7 @@ export class Dispatcher {
   private readonly stalenessThresholdMs: number;
   private readonly preferReliable: boolean;
   private readonly trustPolicy: TrustPolicy | undefined;
+  private readonly secrets: SecretsResolver | undefined;
   private readonly inflight = new Map<string, AbortController>();
   private timer: NodeJS.Timeout | null = null;
   private running = false;
@@ -172,6 +188,7 @@ export class Dispatcher {
     this.stalenessThresholdMs = opts.stalenessThresholdMs ?? DEFAULT_STALENESS_THRESHOLD_MS;
     this.preferReliable = opts.preferReliable ?? false;
     this.trustPolicy = opts.trustPolicy;
+    this.secrets = opts.secrets;
   }
 
   /**
@@ -255,6 +272,8 @@ export class Dispatcher {
       if (assignee === null) continue;
       let dispatchHost = DISPATCH_HOST;
       let dispatchPort: number | null = null;
+      // Secret *name* only (S9) — resolved to a value in fireDispatch/fireSpawnDispatch.
+      let authTokenRef: string | undefined;
 
       if (this.mesh) {
         const entries = await this.mesh.findByPersonality(assignee);
@@ -262,6 +281,7 @@ export class Dispatcher {
         if (entry) {
           dispatchHost = entry.host;
           dispatchPort = entry.port;
+          authTokenRef = entry.authTokenRef;
         }
       } else {
         const status = this.supervisor.statusOf(assignee);
@@ -310,17 +330,27 @@ export class Dispatcher {
       // updates the board as the background job runs — so we do NOT await a full
       // run here. Default path (blocking prompt) is unchanged.
       if (this.dispatchAsBackgroundJob) {
-        void this.fireSpawnDispatch(task, assignee, dispatchHost, dispatchPort, controller).finally(
-          () => {
-            this.inflight.delete(task.id);
-          },
-        );
+        void this.fireSpawnDispatch(
+          task,
+          assignee,
+          dispatchHost,
+          dispatchPort,
+          authTokenRef,
+          controller,
+        ).finally(() => {
+          this.inflight.delete(task.id);
+        });
       } else {
-        void this.fireDispatch(task, assignee, dispatchHost, dispatchPort, controller).finally(
-          () => {
-            this.inflight.delete(task.id);
-          },
-        );
+        void this.fireDispatch(
+          task,
+          assignee,
+          dispatchHost,
+          dispatchPort,
+          authTokenRef,
+          controller,
+        ).finally(() => {
+          this.inflight.delete(task.id);
+        });
       }
     }
   }
@@ -405,14 +435,30 @@ export class Dispatcher {
     this.inflight.clear();
   }
 
+  /**
+   * Resolves a mesh peer's `authTokenRef` (a secret *name*) to its value via
+   * the injected `SecretsResolver` (S9: the registry never carries the
+   * value itself). Returns `undefined` when there is no ref to resolve, or
+   * no resolver was injected, or the name has no stored secret — in every
+   * case dispatch proceeds without an Authorization header, which a
+   * bearer-secured `AcpServer` rejects with 401 and surfaces as a normal
+   * dispatch failure (see `fireDispatch`/`fireSpawnDispatch`).
+   */
+  private async resolveAuthToken(ref: string | undefined): Promise<string | undefined> {
+    if (!ref || !this.secrets) return undefined;
+    return (await this.secrets.get(ref)) ?? undefined;
+  }
+
   private async fireDispatch(
     task: Task,
     assignee: string,
     host: string,
     port: number,
+    authTokenRef: string | undefined,
     controller: AbortController,
   ): Promise<void> {
     const prompt = renderTaskPrompt(task);
+    const authToken = await this.resolveAuthToken(authTokenRef);
 
     // Per-dispatch timeout so a hung transport doesn't outlive its task. Without
     // this, the stale-heartbeat reclaim path could mark the task `blocked` while
@@ -428,6 +474,7 @@ export class Dispatcher {
         prompt,
         personalityId: assignee,
         signal: controller.signal,
+        ...(authToken ? { authToken } : {}),
       });
       // We do not auto-complete here — the assignee is responsible for calling
       // `kanban_complete` / `kanban_block` to record the outcome on the board.
@@ -471,9 +518,11 @@ export class Dispatcher {
     assignee: string,
     host: string,
     port: number,
+    authTokenRef: string | undefined,
     controller: AbortController,
   ): Promise<void> {
     const prompt = renderTaskPrompt(task);
+    const authToken = await this.resolveAuthToken(authTokenRef);
 
     const timer = setTimeout(() => {
       controller.abort(new Error(`dispatch timeout after ${this.dispatchTimeoutMs}ms`));
@@ -486,6 +535,7 @@ export class Dispatcher {
         prompt,
         personalityId: assignee,
         signal: controller.signal,
+        ...(authToken ? { authToken } : {}),
       });
       // Job accepted and durably recorded on the peer (jobId). We intentionally
       // do not await completion: the assignee heartbeats and calls
@@ -548,11 +598,15 @@ export const defaultDispatchCall: DispatchCall = async ({
   prompt,
   personalityId: _personalityId,
   signal,
+  authToken,
 }) => {
   const url = `http://${host}:${port}/notify`;
   const res = await fetch(url, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      'Content-Type': 'application/json',
+      ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
+    },
     body: JSON.stringify({ kind: 'kanban', ref: prompt }),
     signal,
   });
@@ -576,11 +630,15 @@ export const defaultSpawnDispatchCall: SpawnDispatchCall = async ({
   prompt,
   personalityId,
   signal,
+  authToken,
 }) => {
   const url = `http://${host}:${port}/rpc`;
   const res = await fetch(url, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      'Content-Type': 'application/json',
+      ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
+    },
     body: JSON.stringify({
       jsonrpc: '2.0',
       id: 1,

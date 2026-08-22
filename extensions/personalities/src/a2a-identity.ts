@@ -60,6 +60,15 @@ interface LoadedSkill {
   description: string;
   /** Owner opt-in: only skills with this true are exposed to non-internal audiences. */
   exposeToAgents: boolean;
+  /**
+   * Frontmatter `required_tools` (plan T0.2 / D8) — the turn-time
+   * tool-narrowing input, read from the SAME file `exposeToAgents` is read
+   * from so authorization and narrowing never drift onto two parsers.
+   * `undefined` means the key is entirely ABSENT from frontmatter (fails
+   * closed — see {@link resolveA2aSkillTools}); `[]` is a real, legitimate
+   * "no tools" declaration.
+   */
+  requiredTools?: string[];
 }
 
 export class PersonalityA2aIdentityProvider implements A2aIdentityProvider {
@@ -145,7 +154,7 @@ export class PersonalityA2aIdentityProvider implements A2aIdentityProvider {
   private async loadPersonalitySkills(config: PersonalityConfig): Promise<LoadedSkill[]> {
     const out: LoadedSkill[] = [];
     for (const dir of config.skillsDirs ?? []) {
-      for (const filePath of await this.discoverSkillFiles(dir)) {
+      for (const filePath of await discoverSkillFiles(this.storage, dir)) {
         const raw = await this.storage.read(filePath);
         if (raw === null) continue;
         out.push(parseSkillCard(raw, filePath));
@@ -153,22 +162,60 @@ export class PersonalityA2aIdentityProvider implements A2aIdentityProvider {
     }
     return out;
   }
+}
 
-  /** `<dir>/*.md` files plus `<dir>/<sub>/SKILL.md` — the common personality layout. */
-  private async discoverSkillFiles(dir: string): Promise<string[]> {
-    const found: string[] = [];
-    const entries = await this.storage.listEntries(dir);
-    for (const entry of [...entries].sort((a, b) => a.name.localeCompare(b.name))) {
-      if (entry.isDir) {
-        if (entry.name === 'pending' || entry.name.startsWith('.')) continue;
-        const skillMd = join(dir, entry.name, 'SKILL.md');
-        if (await this.storage.exists(skillMd)) found.push(skillMd);
-      } else if (entry.name.endsWith('.md')) {
-        found.push(join(dir, entry.name));
+/** `<dir>/*.md` files plus `<dir>/<sub>/SKILL.md` — the common personality layout. */
+async function discoverSkillFiles(storage: Storage, dir: string): Promise<string[]> {
+  const found: string[] = [];
+  const entries = await storage.listEntries(dir);
+  for (const entry of [...entries].sort((a, b) => a.name.localeCompare(b.name))) {
+    if (entry.isDir) {
+      if (entry.name === 'pending' || entry.name.startsWith('.')) continue;
+      const skillMd = join(dir, entry.name, 'SKILL.md');
+      if (await storage.exists(skillMd)) found.push(skillMd);
+    } else if (entry.name.endsWith('.md')) {
+      found.push(join(dir, entry.name));
+    }
+  }
+  return found;
+}
+
+/**
+ * Turn-time tool-narrowing lookup (plan T0.2 / D8). Walks the SAME
+ * `skillsDirs` the card builder walks and parses each SKILL.md with the SAME
+ * `parseSkillCard` reader that produces the card's skill list — so
+ * authorization (skill name on the trusted-peer card) and narrowing (this
+ * function) read from one source, never a second parser that can drift.
+ *
+ * Fails closed (D2): a caller MUST treat `requiredTools === undefined` as a
+ * refusal, whether because no SKILL.md matched (`found: false`) or because
+ * the matching file has no `required_tools` key at all. `requiredTools: []`
+ * is the one legitimate empty result — an explicit, intentional grant of no
+ * tools.
+ */
+export interface A2aSkillToolsResolution {
+  /** False when no SKILL.md under `config.skillsDirs` names this skill. */
+  found: boolean;
+  /** Declared `required_tools`. `undefined` unless a matching file declared the key. */
+  requiredTools?: string[];
+}
+
+export async function resolveA2aSkillTools(
+  storage: Storage,
+  config: PersonalityConfig,
+  skillName: string,
+): Promise<A2aSkillToolsResolution> {
+  for (const dir of config.skillsDirs ?? []) {
+    for (const filePath of await discoverSkillFiles(storage, dir)) {
+      const raw = await storage.read(filePath);
+      if (raw === null) continue;
+      const parsed = parseSkillCard(raw, filePath);
+      if (parsed.name === skillName) {
+        return { found: true, requiredTools: parsed.requiredTools };
       }
     }
-    return found;
   }
+  return { found: false };
 }
 
 /** Skill id fallback when frontmatter carries no `name`. */
@@ -178,19 +225,23 @@ function skillIdFor(filePath: string): string {
 }
 
 /**
- * Minimal frontmatter reader for the three card fields. Handles the YAML
- * subset skills actually use for these keys: top-level `name:`/`description:`
- * scalars and a nested `ethos:` block carrying `exposeToAgents: true`. Anything
- * else in the frontmatter is ignored. Skills default to private
- * (`exposeToAgents: false`).
+ * Minimal frontmatter reader for the card + narrowing fields. Handles the
+ * YAML subset skills actually use for these keys: top-level `name:`/
+ * `description:` scalars, a top-level `required_tools: [a, b]` flow-style
+ * array (the convention every SKILL.md in this repo already uses — see
+ * `skills/*\/*\/SKILL.md`), and a nested `ethos:` block carrying
+ * `exposeToAgents: true`. Anything else in the frontmatter is ignored.
+ * Skills default to private (`exposeToAgents: false`); `requiredTools`
+ * defaults to `undefined` (key absent — see {@link resolveA2aSkillTools}).
  */
-function parseSkillCard(md: string, filePath: string): LoadedSkill {
+export function parseSkillCard(md: string, filePath: string): LoadedSkill {
   const match = md.match(/^---\r?\n([\s\S]*?)\r?\n---/);
   const lines = match ? match[1].split('\n') : [];
 
   let name: string | undefined;
   let description: string | undefined;
   let exposeToAgents = false;
+  let requiredTools: string[] | undefined;
   let inEthosBlock = false;
 
   for (const line of lines) {
@@ -202,10 +253,11 @@ function parseSkillCard(md: string, filePath: string): LoadedSkill {
       const top = line.match(/^([\w-]+):\s*(.*)$/);
       if (top) {
         const key = top[1];
-        const val = unquote(top[2].trim());
-        if (key === 'name' && val) name = val;
-        else if (key === 'description' && val) description = val;
-        else if (key === 'exposeToAgents') exposeToAgents = val === 'true';
+        const rawVal = top[2].trim();
+        if (key === 'name' && rawVal) name = unquote(rawVal);
+        else if (key === 'description' && rawVal) description = unquote(rawVal);
+        else if (key === 'exposeToAgents') exposeToAgents = unquote(rawVal) === 'true';
+        else if (key === 'required_tools') requiredTools = parseFlowArray(rawVal);
       }
       continue;
     }
@@ -220,7 +272,20 @@ function parseSkillCard(md: string, filePath: string): LoadedSkill {
     name: name ?? skillIdFor(filePath),
     description: description ?? '',
     exposeToAgents,
+    ...(requiredTools !== undefined ? { requiredTools } : {}),
   };
+}
+
+/** Parse a YAML flow-style array `[a, b, "c"]` (or `[]`) into string entries. */
+function parseFlowArray(raw: string): string[] | undefined {
+  const m = raw.match(/^\[(.*)\]$/);
+  if (!m) return undefined;
+  const inner = m[1].trim();
+  if (inner === '') return [];
+  return inner
+    .split(',')
+    .map((s) => unquote(s.trim()))
+    .filter((s) => s.length > 0);
 }
 
 function unquote(v: string): string {

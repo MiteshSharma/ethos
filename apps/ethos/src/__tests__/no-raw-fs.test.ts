@@ -34,6 +34,13 @@
 //                                 per-session `seq` with MAX()+1 inside the insert
 //                                 — both need a real transaction, not file IO.)
 //
+//   packages/a2a/                Same rationale as the SQLite stores above:
+//   src/sqlite-task-store.ts     SQLiteA2aTaskStore (T1.6) opens a raw path via
+//                                 @ethosagent/sqlite and mkdirSync's the db's
+//                                 parent dir, so an async task's terminal state
+//                                 and idempotency key survive an `ethos serve`
+//                                 restart.
+//
 //   extensions/cron/src/index.ts  File lock via fs.open(..., 'wx'): exclusive
 //                                 create is a POSIX-level primitive with no
 //                                 equivalent in the Storage interface.
@@ -225,6 +232,7 @@ const ALLOWED_FILES = new Set([
   'extensions/platform-callcapture/src/ownership.ts',
   'extensions/platform-callcapture/src/indicator.ts',
   'extensions/platform-callcapture/src/notification.ts',
+  'packages/a2a/src/sqlite-task-store.ts',
 ]);
 
 // Matches any static or dynamic import of node:fs or node:fs/promises.

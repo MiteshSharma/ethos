@@ -35,7 +35,9 @@ export {
 export {
   type A2aIdentityProviderOptions,
   type A2aPersonalitySource,
+  type A2aSkillToolsResolution,
   PersonalityA2aIdentityProvider,
+  resolveA2aSkillTools,
 } from './a2a-identity';
 export {
   type CharacterSheetBoundary,

@@ -19,6 +19,17 @@ export interface MeshEntry {
   displayName?: string;
   /** Board/team subscriptions — which boards this agent watches. */
   boardSubscriptions?: string[];
+  /**
+   * Name of the `SecretsResolver` entry holding this peer's ACP bearer
+   * token — never the token value itself (ARCHITECTURE.md S9: secret
+   * values live only in `SecretsResolver`; a config/registry file may hold
+   * a reference by name). A caller that needs to authenticate to this
+   * peer's `AcpServer` resolves the value through an injected
+   * `SecretsResolver` at call time. Absent when the peer has no configured
+   * bearer token to share (e.g. its `AcpServer` fell back to a
+   * process-local random token).
+   */
+  authTokenRef?: string;
 }
 
 const STALE_MS = 30_000;

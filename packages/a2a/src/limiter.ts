@@ -20,6 +20,75 @@
 
 import type { A2aLease, A2aLimiter } from './rpc';
 
+// ---------------------------------------------------------------------------
+// Pre-auth limiter (plan T1.4) — a SEPARATE, cheaper gate that runs BEFORE
+// `authenticate()`, not a replacement for `MemoryA2aLimiter` above. The two
+// enforce different things: this one bounds CPU spent on Ed25519/JWT
+// verification for callers who have not yet proven anything at all (keyed on
+// remote address, coarse, no concurrency tracking); `MemoryA2aLimiter` bounds
+// an AUTHENTICATED peer's rate + concurrency. Both run on every request.
+// ---------------------------------------------------------------------------
+
+/**
+ * A cheap, coarse admission check keyed on an opaque caller-supplied string
+ * (in practice the remote address). `check` must be synchronous-cheap — no
+ * I/O, no crypto — because its entire purpose is to reject a flood BEFORE any
+ * expensive work runs. Returns `false` → the caller must reject the request
+ * without calling `authenticate()`.
+ */
+export interface A2aPreAuthLimiter {
+  check(key: string): boolean;
+}
+
+export interface MemoryA2aPreAuthLimiterOptions {
+  /** Max checks per key within `windowMs`. Default 20. */
+  maxPerWindow?: number;
+  /** Sliding-window length in ms. Default 10_000. */
+  windowMs?: number;
+  /** Injectable clock (ms epoch). Default `Date.now`. */
+  now?: () => number;
+}
+
+/**
+ * In-process sliding-window pre-auth limiter, keyed by an arbitrary string
+ * (the router supplies the remote address; see `rpc.ts`'s `readCredentials`).
+ * Deliberately simpler than {@link MemoryA2aLimiter}: no lease/release, no
+ * concurrency tracking — a flood gate, not a fairness scheduler.
+ */
+export class MemoryA2aPreAuthLimiter implements A2aPreAuthLimiter {
+  private readonly maxPerWindow: number;
+  private readonly windowMs: number;
+  private readonly now: () => number;
+  // key -> ms-epoch timestamps of checks still inside the window.
+  private readonly recent = new Map<string, number[]>();
+
+  constructor(opts: MemoryA2aPreAuthLimiterOptions = {}) {
+    this.maxPerWindow = opts.maxPerWindow ?? 20;
+    this.windowMs = opts.windowMs ?? 10_000;
+    this.now = opts.now ?? Date.now;
+  }
+
+  check(key: string): boolean {
+    const nowMs = this.now();
+    const cutoff = nowMs - this.windowMs;
+    let bucket = this.recent.get(key);
+    if (!bucket) {
+      bucket = [];
+      this.recent.set(key, bucket);
+    }
+    while (bucket.length > 0 && (bucket[0] ?? 0) <= cutoff) bucket.shift();
+    if (bucket.length >= this.maxPerWindow) return false;
+    bucket.push(nowMs);
+    return true;
+  }
+}
+
+export const NOOP_PRE_AUTH_LIMITER: A2aPreAuthLimiter = {
+  check() {
+    return true;
+  },
+};
+
 export interface MemoryA2aLimiterOptions {
   /** Max simultaneously-outstanding leases per peer. Default 4. */
   maxConcurrentPerPeer?: number;

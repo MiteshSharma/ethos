@@ -5,7 +5,7 @@ kind: how-to
 audience: developer
 slug: add-a-skill
 time: "10 min"
-updated: 2026-08-12
+updated: 2026-08-21
 ---
 
 ## Task
@@ -73,6 +73,8 @@ Frontmatter fields the scanner reads:
 | `tags` | No | Used by `tags` filter mode and the deny list. |
 
 Other frontmatter fields from the agentskills.io spec are accepted by the parser and ignored when Ethos has no use for them yet, so your skills stay portable. That cuts both ways: a field Ethos does not read is silently inert, not an error. In particular there is no per-skill switch to block model invocation and no per-skill tool allowlist — `disable-model-invocation` and `allowed-tools` belong to slash commands, a different artifact. The only gates on a skill are the safety scan and the per-personality filter below.
+
+**A2A inbound turns are a deliberate, narrower exception to `fallback_unknown: allow`.** The default above governs the global skill pool your own personality reads from disk — an operator's own tooling, which already trusts itself. A2A's inbound surface reads a *different* signal from the same `required_tools` key: when an authenticated peer names a skill in a personality's own `skills/` directory that declares no `required_tools` at all, the turn is refused outright rather than falling back to the personality's full toolset. The reasoning is who is asking — an untrusted remote peer, not the operator's own tooling — so the safer default flips. This does not change `fallback_unknown` above; it is the one caller in the codebase that does not use it.
 
 ### 3. Configure the per-personality filter
 

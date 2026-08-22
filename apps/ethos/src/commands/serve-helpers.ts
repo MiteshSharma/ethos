@@ -73,3 +73,30 @@ export function resolveCorsOrigins(
 ): string | undefined {
   return env.ETHOS_API_CORS_ORIGINS ?? config?.web?.corsOrigins;
 }
+
+/**
+ * T0.1 — the zero-skills warning (the headline bug). A2A's card projection
+ * filters skills by owner opt-in (`ethos.exposeToAgents` in a skill's
+ * SKILL.md frontmatter, under the personality's own `skills/` directory).
+ * No built-in personality sets it (private-by-default is correct), so a
+ * fresh install's trusted-peer card advertises zero skills and every inbound
+ * `message/send` fails closed with `FORBIDDEN_SCOPE` — silently, with no
+ * signal anywhere that says so. Returns `null` when there is nothing to
+ * warn about (at least one exposed skill).
+ *
+ * Deliberately does NOT name `skillsDirs` — it is loader-populated from
+ * whether a `skills/` directory exists under the personality, not a
+ * `config.yaml` key an operator would set.
+ */
+export function a2aZeroSkillsWarning(
+  personalityId: string,
+  exposedSkillCount: number,
+): string | null {
+  if (exposedSkillCount > 0) return null;
+  return (
+    `A2A is enabled but personality "${personalityId}" exposes no skills to peers — ` +
+    'every inbound request will be rejected with FORBIDDEN_SCOPE. Set ' +
+    "`ethos.exposeToAgents: true` in a skill's SKILL.md frontmatter, under this " +
+    "personality's own skills/ directory, to expose it."
+  );
+}

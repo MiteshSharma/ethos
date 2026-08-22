@@ -75,6 +75,16 @@ importers:
       ws:
         specifier: ^8.20.0
         version: 8.21.0
+    devDependencies:
+      '@ethosagent/kanban-store':
+        specifier: workspace:*
+        version: link:../../extensions/kanban-store
+      '@ethosagent/storage-fs':
+        specifier: workspace:*
+        version: link:../../packages/storage-fs
+      '@ethosagent/team-supervisor':
+        specifier: workspace:*
+        version: link:../../extensions/team-supervisor
 
   apps/desktop:
     dependencies:
@@ -2148,6 +2158,9 @@ importers:
 
   packages/a2a:
     dependencies:
+      '@ethosagent/sqlite':
+        specifier: workspace:*
+        version: link:../sqlite
       '@ethosagent/types':
         specifier: workspace:*
         version: link:../types
@@ -2161,6 +2174,9 @@ importers:
       '@ethosagent/storage-fs':
         specifier: workspace:*
         version: link:../storage-fs
+      '@hono/node-server':
+        specifier: ^2.0.0
+        version: 2.0.4(hono@4.12.23)
 
   packages/agent-bridge:
     dependencies:

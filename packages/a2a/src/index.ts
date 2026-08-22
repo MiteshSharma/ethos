@@ -11,15 +11,7 @@
 export {
   A2aAsyncManager,
   type A2aAsyncManagerOptions,
-  A2aInitiatorTracker,
-  type A2aInitiatorTrackerOptions,
-  type A2aPushClient,
-  type A2aPushPayload,
-  type A2aPushTarget,
   collectAgentRun,
-  FetchA2aPushClient,
-  type OpenedInitiatorTask,
-  type OpenInitiatorArgs,
   type SubmitAsyncArgs,
 } from './async';
 export {
@@ -55,7 +47,14 @@ export {
   type DelegationAdmission,
   signDelegation,
 } from './delegation';
-export { MemoryA2aLimiter, type MemoryA2aLimiterOptions } from './limiter';
+export {
+  type A2aPreAuthLimiter,
+  MemoryA2aLimiter,
+  type MemoryA2aLimiterOptions,
+  MemoryA2aPreAuthLimiter,
+  type MemoryA2aPreAuthLimiterOptions,
+  NOOP_PRE_AUTH_LIMITER,
+} from './limiter';
 export {
   A2aOutboundClient,
   type A2aOutboundClientDeps,
@@ -64,6 +63,7 @@ export {
   type A2aOutboundResult,
   type A2aSession,
   type ConnectArgs,
+  computeA2aBackoffDelayMs,
   type OutboundDelegation,
   type SendMessageArgs,
 } from './outbound';
@@ -77,6 +77,7 @@ export {
   A2A_METHOD_MESSAGE_SEND,
   A2A_METHOD_TASKS_SUBSCRIBE,
   A2A_REQUEST_POP_CONTEXT,
+  A2A_RPC_AUTH_ERROR_CODES,
   type A2aAsyncSubmitResult,
   type A2aAuthResult,
   type A2aLease,
@@ -92,6 +93,7 @@ export {
   createA2aRpcService,
   type JsonRpcResponse,
 } from './rpc';
+export { SQLiteA2aTaskStore } from './sqlite-task-store';
 export {
   type A2aAllowlist,
   type A2aAllowlistAdmin,

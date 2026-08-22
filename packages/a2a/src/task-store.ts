@@ -5,12 +5,18 @@
 // terminal state. The terminal set is deliberately NOT overloaded (plan §10 /
 // O5):
 //
-//   completed        — the run finished and (if requested) was delivered.
-//   failed           — the run errored (an `error` AgentEvent).
-//   cancelled        — explicit cancellation.
-//   expired          — the INITIATOR's task-level timeout elapsed (owned by the
-//                      initiator side — it did not wait forever on a push-back).
-//   peer-unreachable — an async push-back to the peer's server never succeeded.
+//   completed — the run finished and (if requested) was delivered.
+//   failed    — the run errored (an `error` AgentEvent).
+//
+// `cancelled` was removed (T1.7 / D15): there was no cancel method, route, or
+// caller anywhere — a terminal state the system could never enter. Tier 2's
+// `a2a.CancelTask` reintroduces it if/when a real cancel path is wired.
+//
+// `expired` and `peer-unreachable` were removed on the same precedent: they
+// described an initiator-side timeout and a push-back delivery failure, but
+// T1.5 (D11) deleted both the push-back path and the initiator-side tracker
+// as dead code that never closed, leaving neither status settable. See
+// `async.ts`'s header.
 //
 // The store is an INTERFACE with an in-memory default (single-process v1, same
 // assumption as the nonce store). It depends only on `node:crypto` — no types,
@@ -19,22 +25,9 @@
 import { randomUUID } from 'node:crypto';
 
 /** The task lifecycle states (plan §10 async failure matrix). */
-export type A2aTaskStatus =
-  | 'submitted'
-  | 'working'
-  | 'completed'
-  | 'failed'
-  | 'cancelled'
-  | 'expired'
-  | 'peer-unreachable';
+export type A2aTaskStatus = 'submitted' | 'working' | 'completed' | 'failed';
 
-const TERMINAL: ReadonlySet<A2aTaskStatus> = new Set([
-  'completed',
-  'failed',
-  'cancelled',
-  'expired',
-  'peer-unreachable',
-]);
+const TERMINAL: ReadonlySet<A2aTaskStatus> = new Set(['completed', 'failed']);
 
 /** True once a task has settled — no further transitions are expected. */
 export function isTerminalStatus(status: A2aTaskStatus): boolean {

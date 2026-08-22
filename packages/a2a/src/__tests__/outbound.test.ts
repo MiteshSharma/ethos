@@ -13,7 +13,7 @@ import { Hono } from 'hono';
 import { describe, expect, it } from 'vitest';
 import { createA2aAuthRouter } from '../auth';
 import { A2aDelegationGuard } from '../delegation';
-import { A2aOutboundClient, A2aOutboundError } from '../outbound';
+import { A2aOutboundClient, A2aOutboundError, computeA2aBackoffDelayMs } from '../outbound';
 import { createA2aRpcRouter } from '../rpc';
 import { MemoryNonceStore, type PeerGrant } from '../stores';
 import { createA2aWellKnownRouter } from '../well-known';
@@ -144,6 +144,261 @@ describe('A2aOutboundClient — full round-trip (handshake → sync task)', () =
     });
     expect(res.ok).toBe(false);
     if (!res.ok) expect(res.code).toBe(-32003);
+  });
+});
+
+describe('A2aOutboundClient — outbound fetch timeouts (plan T0.3)', () => {
+  /** A `fetch` that hangs until its `AbortSignal` fires, then rejects — like a peer that accepted the connection and never responded. */
+  const hangingFetch: typeof fetch = (_input, init) =>
+    new Promise((_resolve, reject) => {
+      const signal = init?.signal;
+      if (signal?.aborted) {
+        reject(signal.reason);
+        return;
+      }
+      signal?.addEventListener('abort', () => reject(signal.reason));
+    });
+
+  it('sendMessage: a peer that never responds fails within the configured budget, not by hanging', async () => {
+    const target = makeAgent(TARGET_ID);
+    const initiator = makeAgent('initiator');
+    const sheet: SheetHolder = { skills: ['search'] };
+    const clock = { t: Date.now() };
+    const { app } = makeServer(target, initiator, sheet, clock);
+
+    // connect() over the REAL server (fast, separate client) — only the
+    // `message/send` fetch under test hangs.
+    const connectClient = new A2aOutboundClient({
+      fetchImpl: async (input, init) => app.request(toUrl(input), init),
+      now: () => clock.t,
+    });
+    const session = await connectClient.connect({
+      wellKnownUrl: WELL_KNOWN_URL,
+      myCard: initiator.card,
+      myPrivateKeyPem: initiator.privateKeyPem,
+    });
+
+    // T1.3 retry is a SEPARATE lane (see below) — isolate the raw timeout
+    // mechanic here with `sendMaxAttempts: 1` so this test's budget doesn't
+    // have to account for backoff delays between attempts.
+    const client = new A2aOutboundClient({
+      fetchImpl: hangingFetch,
+      now: () => clock.t,
+      sendTimeoutMs: 20,
+      sendMaxAttempts: 1,
+    });
+
+    const started = Date.now();
+    let thrown: unknown;
+    try {
+      await client.sendMessage({
+        session,
+        myPrivateKeyPem: initiator.privateKeyPem,
+        skill: 'search',
+        message: 'hi',
+      });
+    } catch (err) {
+      thrown = err;
+    }
+    const elapsed = Date.now() - started;
+
+    expect(thrown).toBeInstanceOf(A2aOutboundError);
+    if (thrown instanceof A2aOutboundError) expect(thrown.code).toBe('fetch_failed');
+    // Bounded by the configured timeout, not by "never" — well under a
+    // hang-forever failure mode even with test scheduling slack.
+    expect(elapsed).toBeLessThan(2000);
+  });
+
+  it('connect: a peer that never responds to the handshake fails within the configured budget, not by hanging', async () => {
+    const initiator = makeAgent('initiator');
+
+    // The initial card fetch (fetchAndVerifyCard, GET) succeeds; the
+    // handshake POSTs (challenge/response) hang. Isolates the handshake
+    // timeout (postJson) from the card-fetch step, which T0.3 does not touch.
+    const target = makeAgent(TARGET_ID);
+    const sheet: SheetHolder = { skills: [] };
+    const clock = { t: Date.now() };
+    const { app } = makeServer(target, initiator, sheet, clock);
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const url = toUrl(input);
+      if ((init?.method ?? 'GET') === 'POST' && url.includes('/a2a-auth/')) {
+        return hangingFetch(input, init);
+      }
+      return app.request(url, init);
+    };
+    const client = new A2aOutboundClient({
+      fetchImpl,
+      now: () => clock.t,
+      handshakeTimeoutMs: 20,
+    });
+
+    const started = Date.now();
+    let thrown: unknown;
+    try {
+      await client.connect({
+        wellKnownUrl: WELL_KNOWN_URL,
+        myCard: initiator.card,
+        myPrivateKeyPem: initiator.privateKeyPem,
+      });
+    } catch (err) {
+      thrown = err;
+    }
+    const elapsed = Date.now() - started;
+
+    expect(thrown).toBeInstanceOf(A2aOutboundError);
+    if (thrown instanceof A2aOutboundError) expect(thrown.code).toBe('fetch_failed');
+    expect(elapsed).toBeLessThan(2000);
+  });
+});
+
+describe('A2aOutboundClient — retry with backoff + jitter (plan T1.3)', () => {
+  it('delivers on attempt 3 after two transport failures, delays following the backoff schedule', async () => {
+    const target = makeAgent(TARGET_ID);
+    const initiator = makeAgent('initiator');
+    const sheet: SheetHolder = { skills: ['search'] };
+    const clock = { t: Date.now() };
+    const { app, counter } = makeServer(target, initiator, sheet, clock);
+
+    // The first two `message/send` POSTs fail at the transport level; the
+    // third reaches the real server. Connect()'s handshake is untouched.
+    let rpcAttempts = 0;
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const url = toUrl(input);
+      if ((init?.method ?? 'GET') === 'POST' && url.includes('/a2a/')) {
+        rpcAttempts += 1;
+        if (rpcAttempts < 3) throw new Error('simulated transport failure');
+      }
+      return app.request(url, init);
+    };
+
+    const sleeps: number[] = [];
+    const client = new A2aOutboundClient({
+      fetchImpl,
+      now: () => clock.t,
+      randomFn: () => 0.5,
+      sleepFn: async (ms) => {
+        sleeps.push(ms);
+      },
+    });
+    const session = await client.connect({
+      wellKnownUrl: WELL_KNOWN_URL,
+      myCard: initiator.card,
+      myPrivateKeyPem: initiator.privateKeyPem,
+    });
+
+    const res = await client.sendMessage({
+      session,
+      myPrivateKeyPem: initiator.privateKeyPem,
+      skill: 'search',
+      message: 'hi',
+    });
+
+    expect(res.ok).toBe(true);
+    expect(rpcAttempts).toBe(3);
+    expect(counter.runs).toBe(1);
+    // Full jitter with randomFn fixed at 0.5: window = min(cap, base*2^attempt).
+    // attempt 0 (after 1st failure): 0.5 * 500  = 250
+    // attempt 1 (after 2nd failure): 0.5 * 1000 = 500
+    expect(sleeps).toEqual([250, 500]);
+  });
+
+  it('exhausts the retry budget and fails — not before, not by retrying forever', async () => {
+    const target = makeAgent(TARGET_ID);
+    const initiator = makeAgent('initiator');
+    const sheet: SheetHolder = { skills: ['search'] };
+    const clock = { t: Date.now() };
+    const { app, counter } = makeServer(target, initiator, sheet, clock);
+
+    let rpcAttempts = 0;
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const url = toUrl(input);
+      if ((init?.method ?? 'GET') === 'POST' && url.includes('/a2a/')) {
+        rpcAttempts += 1;
+        throw new Error('simulated permanent transport failure');
+      }
+      return app.request(url, init);
+    };
+
+    const sleeps: number[] = [];
+    const client = new A2aOutboundClient({
+      fetchImpl,
+      now: () => clock.t,
+      randomFn: () => 0.5,
+      sleepFn: async (ms) => {
+        sleeps.push(ms);
+      },
+      sendMaxAttempts: 4,
+    });
+    const session = await client.connect({
+      wellKnownUrl: WELL_KNOWN_URL,
+      myCard: initiator.card,
+      myPrivateKeyPem: initiator.privateKeyPem,
+    });
+
+    let thrown: unknown;
+    try {
+      await client.sendMessage({
+        session,
+        myPrivateKeyPem: initiator.privateKeyPem,
+        skill: 'search',
+        message: 'hi',
+      });
+    } catch (err) {
+      thrown = err;
+    }
+
+    expect(thrown).toBeInstanceOf(A2aOutboundError);
+    if (thrown instanceof A2aOutboundError) expect(thrown.code).toBe('fetch_failed');
+    // Exactly the configured budget — not before, not forever.
+    expect(rpcAttempts).toBe(4);
+    expect(counter.runs).toBe(0);
+    // 3 delays between 4 attempts; no delay after the final exhausted attempt.
+    expect(sleeps).toEqual([250, 500, 1000]);
+  });
+
+  it('does NOT retry a JSON-RPC error response — the peer answered; retrying would not change it', async () => {
+    const target = makeAgent(TARGET_ID);
+    const initiator = makeAgent('initiator');
+    const sheet: SheetHolder = { skills: ['search'] };
+    const clock = { t: Date.now() };
+    const { app } = makeServer(target, initiator, sheet, clock);
+
+    let rpcAttempts = 0;
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const url = toUrl(input);
+      if ((init?.method ?? 'GET') === 'POST' && url.includes('/a2a/')) rpcAttempts += 1;
+      return app.request(url, init);
+    };
+    const client = new A2aOutboundClient({ fetchImpl, now: () => clock.t });
+    const session = await client.connect({
+      wellKnownUrl: WELL_KNOWN_URL,
+      myCard: initiator.card,
+      myPrivateKeyPem: initiator.privateKeyPem,
+    });
+
+    // `write` is out of the granted scope → a real FORBIDDEN_SCOPE answer.
+    const res = await client.sendMessage({
+      session,
+      myPrivateKeyPem: initiator.privateKeyPem,
+      skill: 'write',
+      message: 'hi',
+    });
+
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.code).toBe(-32003);
+    expect(rpcAttempts).toBe(1);
+  });
+});
+
+describe('computeA2aBackoffDelayMs — full-jitter schedule', () => {
+  it('scales the window exponentially, caps it, and samples uniformly via randomFn', () => {
+    expect(computeA2aBackoffDelayMs(0, 500, 30_000, () => 0)).toBe(0);
+    expect(computeA2aBackoffDelayMs(0, 500, 30_000, () => 0.5)).toBe(250);
+    expect(computeA2aBackoffDelayMs(1, 500, 30_000, () => 0.5)).toBe(500); // window 1000
+    expect(computeA2aBackoffDelayMs(2, 500, 30_000, () => 0.5)).toBe(1000); // window 2000
+    // Once base*2^attempt exceeds cap, the window is capped rather than growing forever.
+    expect(computeA2aBackoffDelayMs(10, 500, 30_000, () => 0.5)).toBe(15_000);
+    expect(computeA2aBackoffDelayMs(10, 500, 30_000, () => 0.999999)).toBeLessThan(30_000);
   });
 });
 

@@ -25,7 +25,7 @@
 // Sync path: collect the AgentEvent stream → completed/failed and return inline.
 // Async path (Phase 6): dedupe on the idempotency key, return { taskId,
 // status:'submitted' } immediately, and run in the background via the injected
-// A2aAsyncManager (working→completed/failed, optional push-back→peer-unreachable).
+// A2aAsyncManager (working→completed/failed).
 //
 // Layer-clean: imports only `@ethosagent/types` (the AgentEvent TYPE + the
 // identity contract), `hono`, `jose`, and sibling `./` modules (which bottom out
@@ -36,10 +36,11 @@ import { type A2aIdentityProvider, type AgentEvent, EthosError } from '@ethosage
 import { Hono } from 'hono';
 import { streamSSE } from 'hono/streaming';
 import { decodeJwt } from 'jose';
-import { A2aAsyncManager, type A2aPushClient, type A2aPushTarget, collectAgentRun } from './async';
+import { A2aAsyncManager, collectAgentRun } from './async';
 import { type A2aAuditSink, safeAudit } from './audit';
 import { fingerprint, verifyStruct } from './crypto';
 import { type A2aDelegationCredentials, A2aDelegationGuard } from './delegation';
+import { type A2aPreAuthLimiter, NOOP_PRE_AUTH_LIMITER } from './limiter';
 import type { A2aPeerStore } from './stores';
 import {
   type A2aTask,
@@ -72,6 +73,15 @@ export interface A2aTaskRunner {
        * top-level call the runner does not need to contain.
        */
       delegation?: { traceId: string; depth: number };
+      /**
+       * The peer-named skill from `A2aMessageSendParams.skill` (plan T0.2 /
+       * D8). Already authorized by the scope gate above — this is ONLY the
+       * narrowing input. The runner is responsible for resolving it to a
+       * `RunOptions.toolsetNarrow` (walking `skillsDirs` + parsing SKILL.md,
+       * fail-closed per D2) before it hands the turn a toolset; `packages/a2a`
+       * stays layer-clean and does none of that resolution itself.
+       */
+      skill?: string;
     },
   ): AsyncIterable<AgentEvent>;
 }
@@ -163,6 +173,15 @@ const RPC = {
   FORBIDDEN_SCOPE: -32003,
   RATE_LIMITED: -32004,
   DELEGATION_REJECTED: -32005,
+  PAYLOAD_TOO_LARGE: -32006,
+} as const;
+
+/** Auth-rejection JSON-RPC codes (plan T1.2/D13) — exported so a session cache
+ *  (e.g. `extensions/tools-a2a`) can recognize "the peer rejected MY token" and
+ *  invalidate a cached session, without duplicating the magic numbers. */
+export const A2A_RPC_AUTH_ERROR_CODES = {
+  UNAUTHORIZED: RPC.UNAUTHORIZED,
+  PROOF_INVALID: RPC.PROOF_INVALID,
 } as const;
 
 // ---------------------------------------------------------------------------
@@ -182,6 +201,24 @@ export interface A2aRequestCredentials {
    * The server reads the signed depth here — a plain `depth` header is ignored.
    */
   delegation?: A2aDelegationCredentials;
+  /**
+   * Best-effort caller identifier for the PRE-AUTH limiter (plan T1.4) — in
+   * practice the remote address. Optional so every existing direct-service
+   * caller (tests, other callers of `handleRpc`) is unaffected; absent →
+   * `'unknown'`, which the default no-op limiter never rejects anyway. NOT an
+   * authenticated identity — it exists only to bound CPU before crypto runs.
+   */
+  remoteKey?: string;
+  /**
+   * An UNVERIFIED, caller-claimed fingerprint (e.g. from a header), present
+   * only to widen how a legitimate multi-peer proxy is shaped by the pre-auth
+   * limiter. Never treated as identity or authorization — that is what the
+   * real token + PoP gates below are for. Not currently mixed into the
+   * pre-auth limiter key (see T1.4 note in rpc.ts): doing so naively would let
+   * an attacker vary the header per request to dodge the remote-address cap.
+   * Carried on the credentials so a future limiter can use it deliberately.
+   */
+  claimedFingerprint?: string;
 }
 
 /** `message/send` params (sync + async). */
@@ -196,8 +233,6 @@ export interface A2aMessageSendParams {
   mode?: 'sync' | 'async';
   /** Dedupe key — a retried send with the same key does NOT re-run the loop. */
   idempotencyKey?: string;
-  /** Async only: deliver the result back to the peer's JSON-RPC server on completion. */
-  pushBack?: A2aPushTarget;
 }
 
 /** The sync task result returned as the JSON-RPC `result`. */
@@ -242,16 +277,33 @@ export interface A2aRpcServiceOptions {
    * Omit to serve sync-only (async requests then return an execution error).
    */
   taskStore?: A2aTaskStore;
-  /** Push-back delivery client for async completion (plan §10). Omit to disable. */
-  pushClient?: A2aPushClient;
-  /** Push-back delivery attempts before `peer-unreachable`. Default 3. */
-  pushRetries?: number;
   /**
    * Metadata-only audit sink (plan §13 / Phase 8). Records gate denials, accepted
    * dispatches, and terminal task state — fail-open, never a message body. Omit
    * to disable auditing entirely.
    */
   auditSink?: A2aAuditSink;
+  /**
+   * PRE-AUTH limiter (plan T1.4) — cheap, coarse, keyed on `creds.remoteKey`.
+   * Checked BEFORE `authenticate()` so an unauthenticated flood never reaches
+   * token validation or per-request PoP verification (both Ed25519/JWT
+   * operations). This is ADDITIVE to the existing post-auth `limiter` above,
+   * not a replacement — that one enforces a per-peer quota; this one bounds
+   * CPU spent on crypto for callers who have proven nothing yet. Default a
+   * permissive no-op (existing callers unaffected).
+   */
+  preAuthLimiter?: A2aPreAuthLimiter;
+  /**
+   * Max JSON-RPC request body size in bytes (plan T1.4 — "rate limit ≠ 200MB
+   * body"). Checked by the router before `JSON.parse`. Default 1_000_000 (1MB).
+   */
+  maxBodyBytes?: number;
+  /**
+   * Max concurrent SSE task-subscription streams, process-wide (plan T1.4).
+   * A new connection attempt once at the cap is refused before `authenticate()`
+   * even runs. Default 100.
+   */
+  maxSseConnections?: number;
 }
 
 /** Result of the shared token+PoP authentication gate (reused by RPC + SSE). */
@@ -277,6 +329,20 @@ export interface A2aRpcService {
     method: string,
     creds: A2aRequestCredentials,
   ): Promise<A2aAuthResult>;
+  /**
+   * PRE-AUTH gate (plan T1.4) — cheap, coarse, keyed on remote address. False
+   * → the caller must reject WITHOUT calling `authenticate()`. Exposed so the
+   * SSE route (which calls `authenticate()` directly, not `handleRpc`) applies
+   * the same gate `handleRpc` applies internally.
+   */
+  checkPreAuth(remoteKey: string): boolean;
+  /**
+   * Reserve one SSE connection slot against the process-wide cap (plan T1.4).
+   * Returns `null` when at capacity — the caller must refuse the connection
+   * without opening a stream. Release the returned handle when the stream
+   * closes (abort or terminal state).
+   */
+  acquireSseSlot(): A2aLease | null;
 }
 
 export function createA2aRpcService(opts: A2aRpcServiceOptions): A2aRpcService {
@@ -285,13 +351,14 @@ export function createA2aRpcService(opts: A2aRpcServiceOptions): A2aRpcService {
   const limiter = opts.limiter ?? NOOP_LIMITER;
   const delegationGuard = opts.delegationGuard ?? new A2aDelegationGuard();
   const auditSink = opts.auditSink;
+  const preAuthLimiter = opts.preAuthLimiter ?? NOOP_PRE_AUTH_LIMITER;
+  const maxSseConnections = opts.maxSseConnections ?? 100;
+  let openSseConnections = 0;
   const asyncManager = opts.taskStore
     ? new A2aAsyncManager({
         taskStore: opts.taskStore,
         runner: opts.runner,
         now,
-        ...(opts.pushClient ? { pushClient: opts.pushClient } : {}),
-        ...(opts.pushRetries !== undefined ? { pushRetries: opts.pushRetries } : {}),
         ...(auditSink ? { auditSink } : {}),
         onSettled: (traceId) => delegationGuard.releaseTrace(traceId),
       })
@@ -401,6 +468,23 @@ export function createA2aRpcService(opts: A2aRpcServiceOptions): A2aRpcService {
     return { ok: true, claims, peerFingerprint: jkt, peerPublicKey, sheetSkills };
   }
 
+  function checkPreAuth(remoteKey: string): boolean {
+    return preAuthLimiter.check(remoteKey);
+  }
+
+  function acquireSseSlot(): A2aLease | null {
+    if (openSseConnections >= maxSseConnections) return null;
+    openSseConnections += 1;
+    let released = false;
+    return {
+      release() {
+        if (released) return;
+        released = true;
+        openSseConnections = Math.max(0, openSseConnections - 1);
+      },
+    };
+  }
+
   async function handleRpc(
     personalityId: string,
     request: unknown,
@@ -410,14 +494,6 @@ export function createA2aRpcService(opts: A2aRpcServiceOptions): A2aRpcService {
       return errorResponse(null, RPC.INVALID_REQUEST, 'invalid JSON-RPC 2.0 request');
     }
     const id = request.id ?? null;
-
-    if (request.method !== A2A_METHOD_MESSAGE_SEND) {
-      return errorResponse(id, RPC.METHOD_NOT_FOUND, `method not found: ${request.method}`);
-    }
-    if (!isMessageSendParams(request.params)) {
-      return errorResponse(id, RPC.INVALID_PARAMS, 'invalid message/send params');
-    }
-    const params = request.params;
 
     // Metadata-only audit of a gate denial (fail-open). Only identifiers/labels
     // are ever passed — never the message body.
@@ -434,6 +510,24 @@ export function createA2aRpcService(opts: A2aRpcServiceOptions): A2aRpcService {
         ...(extra.traceId ? { traceId: extra.traceId } : {}),
       });
     };
+
+    // --- Gate 0: pre-auth rate limit (plan T1.4) ---------------------------
+    // Cheap, coarse, keyed on remote address — runs BEFORE `authenticate()` so
+    // an unauthenticated flood never reaches token validation or per-request
+    // PoP verification (both Ed25519/JWT operations). Runs ahead of even the
+    // method/params shape checks below, for the same reason.
+    if (!checkPreAuth(creds.remoteKey ?? 'unknown')) {
+      auditDenied('pre-auth-rate-limited', {});
+      return errorResponse(id, RPC.RATE_LIMITED, 'too many requests');
+    }
+
+    if (request.method !== A2A_METHOD_MESSAGE_SEND) {
+      return errorResponse(id, RPC.METHOD_NOT_FOUND, `method not found: ${request.method}`);
+    }
+    if (!isMessageSendParams(request.params)) {
+      return errorResponse(id, RPC.INVALID_PARAMS, 'invalid message/send params');
+    }
+    const params = request.params;
 
     // --- Gates 1+2: token + PoP -------------------------------------------
     // (Recorded HERE, not inside `authenticate` — that gate is shared with the
@@ -534,10 +628,10 @@ export function createA2aRpcService(opts: A2aRpcServiceOptions): A2aRpcService {
         peerFingerprint,
         message: params.message,
         sessionKey,
+        skill,
         traceId,
         depth,
         idempotencyKey,
-        ...(params.pushBack ? { pushBack: params.pushBack } : {}),
       });
       const settled = asyncManager.settled(task.id) ?? Promise.resolve<A2aTask | null>(null);
       void settled.finally(() => lease.release());
@@ -553,10 +647,14 @@ export function createA2aRpcService(opts: A2aRpcServiceOptions): A2aRpcService {
     }
     auditAccepted();
     try {
-      const result = await runSyncTask(opts.runner, personalityId, params.message, sessionKey, {
-        traceId,
-        depth,
-      });
+      const result = await runSyncTask(
+        opts.runner,
+        personalityId,
+        params.message,
+        sessionKey,
+        skill,
+        { traceId, depth },
+      );
       // Sync terminal task-state (fail-open, metadata only).
       safeAudit(auditSink, {
         kind: 'task',
@@ -580,7 +678,7 @@ export function createA2aRpcService(opts: A2aRpcServiceOptions): A2aRpcService {
     }
   }
 
-  return { handleRpc, authenticate };
+  return { handleRpc, authenticate, checkPreAuth, acquireSseSlot };
 }
 
 /** Sync path: collect the stream (shared mapping) into an {@link A2aTaskResult}. */
@@ -589,11 +687,12 @@ async function runSyncTask(
   personalityId: string,
   text: string,
   sessionKey: string,
+  skill: string,
   delegation: { traceId: string; depth: number },
 ): Promise<A2aTaskResult> {
   const taskId = randomUUID();
   const { text: finalText, error } = await collectAgentRun(
-    runner.run(personalityId, text, { sessionKey, delegation }),
+    runner.run(personalityId, text, { sessionKey, skill, delegation }),
   );
   if (error !== undefined) {
     return { taskId, state: 'failed', text: finalText, error };
@@ -622,14 +721,39 @@ async function runSyncTask(
 export function createA2aRpcRouter(opts: A2aRpcServiceOptions): Hono {
   const service = createA2aRpcService(opts);
   const router = new Hono();
+  const maxBodyBytes = opts.maxBodyBytes ?? 1_000_000;
 
   router.post('/:personalityId', async (c) => {
     const personalityId = c.req.param('personalityId');
     const creds = readCredentials(c);
 
+    // Body-size cap (plan T1.4 — "rate limit ≠ 200MB body"), checked BEFORE
+    // `JSON.parse`. Content-Length is a fast pre-check (a peer can omit or lie
+    // about it, so the actual read is capped too, not just the header).
+    const contentLengthHeader = c.req.header('content-length');
+    if (contentLengthHeader && Number(contentLengthHeader) > maxBodyBytes) {
+      return c.json(
+        errorResponse(null, RPC.PAYLOAD_TOO_LARGE, 'request body exceeds size limit'),
+        413,
+      );
+    }
+
+    let bodyText: string;
+    try {
+      bodyText = await c.req.text();
+    } catch {
+      return c.json(errorResponse(null, RPC.PARSE_ERROR, 'parse error'));
+    }
+    if (bodyText.length > maxBodyBytes) {
+      return c.json(
+        errorResponse(null, RPC.PAYLOAD_TOO_LARGE, 'request body exceeds size limit'),
+        413,
+      );
+    }
+
     let body: unknown;
     try {
-      body = await c.req.json();
+      body = JSON.parse(bodyText);
     } catch {
       return c.json(errorResponse(null, RPC.PARSE_ERROR, 'parse error'));
     }
@@ -648,43 +772,62 @@ export function createA2aRpcRouter(opts: A2aRpcServiceOptions): Hono {
       return c.json({ error: 'NOT_SUPPORTED', message: 'async tasks are not enabled' }, 404);
     }
 
-    const auth = await service.authenticate(
-      personalityId,
-      A2A_METHOD_TASKS_SUBSCRIBE,
-      readCredentials(c),
-    );
+    const creds = readCredentials(c);
+
+    // Pre-auth gate (plan T1.4) — same rationale as the RPC POST route: reject
+    // BEFORE `authenticate()` runs any crypto.
+    if (!service.checkPreAuth(creds.remoteKey ?? 'unknown')) {
+      return c.json({ error: 'RATE_LIMITED', message: 'too many requests' }, 429);
+    }
+
+    // Concurrent-connection cap (plan T1.4) — a distinct resource bound from
+    // the rate check above. Checked before `authenticate()` too: an attacker
+    // should not be able to exhaust open-stream capacity for free either.
+    const sseSlot = service.acquireSseSlot();
+    if (!sseSlot) {
+      return c.json({ error: 'RATE_LIMITED', message: 'too many concurrent SSE connections' }, 429);
+    }
+
+    const auth = await service.authenticate(personalityId, A2A_METHOD_TASKS_SUBSCRIBE, creds);
     if (!auth.ok) {
+      sseSlot.release();
       return c.json({ error: 'REJECTED', message: auth.reason }, sseStatusFor(auth.code));
     }
 
     const task = await taskStore.get(taskId);
     if (!task) {
+      sseSlot.release();
       return c.json({ error: 'NOT_FOUND', message: `unknown task "${taskId}"` }, 404);
     }
     // Multi-tenancy task-ownership (plan §15): a task stamped with a personality
     // is readable ONLY via that personality's SSE route — do not leak another
     // personality's task. Optional field ⇒ initiator-tracker tasks are unaffected.
     if (task.personalityId && task.personalityId !== personalityId) {
+      sseSlot.release();
       return c.json({ error: 'NOT_FOUND', message: `unknown task "${taskId}"` }, 404);
     }
 
     return streamSSE(c, async (stream) => {
-      await stream.writeSSE({ data: JSON.stringify(task) });
-      if (isTerminalStatus(task.status)) return;
-      await new Promise<void>((resolve) => {
-        let done = false;
-        const finish = () => {
-          if (done) return;
-          done = true;
-          unsubscribe();
-          resolve();
-        };
-        const unsubscribe = taskStore.subscribe(taskId, (t) => {
-          void stream.writeSSE({ data: JSON.stringify(t) }).catch(() => finish());
-          if (isTerminalStatus(t.status)) finish();
+      try {
+        await stream.writeSSE({ data: JSON.stringify(task) });
+        if (isTerminalStatus(task.status)) return;
+        await new Promise<void>((resolve) => {
+          let done = false;
+          const finish = () => {
+            if (done) return;
+            done = true;
+            unsubscribe();
+            resolve();
+          };
+          const unsubscribe = taskStore.subscribe(taskId, (t) => {
+            void stream.writeSSE({ data: JSON.stringify(t) }).catch(() => finish());
+            if (isTerminalStatus(t.status)) finish();
+          });
+          stream.onAbort(finish);
         });
-        stream.onAbort(finish);
-      });
+      } finally {
+        sseSlot.release();
+      }
     });
   });
 
@@ -715,7 +858,31 @@ function readCredentials(c: {
     proofSignature,
     proofTimestamp,
     delegation: { traceId, depth, signature: delegationSig },
+    remoteKey: remoteKeyOf(c),
+    ...(c.req.header('x-a2a-claimed-fingerprint')
+      ? { claimedFingerprint: c.req.header('x-a2a-claimed-fingerprint') }
+      : {}),
   };
+}
+
+/**
+ * Best-effort caller key for the pre-auth limiter (plan T1.4). `packages/a2a`
+ * stays hono-core-only (no `@hono/node-server` dependency, unlike the apps/*
+ * layer — see `apps/web-api/src/middleware/rate-limit.ts`'s `getConnInfo`
+ * pattern for the socket-level equivalent), so this reads only forwarded
+ * headers. TRUSTED-PROXY ASSUMPTION: `x-forwarded-for` / `x-real-ip` are
+ * client-spoofable — deploying `/a2a` directly exposed (no reverse proxy in
+ * front) lets a caller mint a fresh bucket per request by varying the header,
+ * defeating the cap. `'unknown'` when neither header is present (e.g. direct
+ * `app.request()` in tests) shares one bucket, which the default no-op
+ * limiter never rejects anyway.
+ */
+function remoteKeyOf(c: { req: { header(name: string): string | undefined } }): string {
+  const forwarded = c.req.header('x-forwarded-for')?.split(',')[0]?.trim();
+  if (forwarded) return forwarded;
+  const realIp = c.req.header('x-real-ip');
+  if (realIp) return realIp;
+  return 'unknown';
 }
 
 function errorResponse(id: JsonRpcId, code: number, message: string): JsonRpcErrorResponse {
@@ -735,6 +902,8 @@ function rpcReasonLabel(code: number): string {
       return 'rate-limited';
     case RPC.DELEGATION_REJECTED:
       return 'delegation-rejected';
+    case RPC.PAYLOAD_TOO_LARGE:
+      return 'payload-too-large';
     case RPC.INTERNAL:
       return 'internal-error';
     default:
@@ -774,9 +943,5 @@ function isMessageSendParams(value: unknown): value is A2aMessageSendParams {
   if (v.sessionKey !== undefined && typeof v.sessionKey !== 'string') return false;
   if (v.mode !== undefined && v.mode !== 'sync' && v.mode !== 'async') return false;
   if (v.idempotencyKey !== undefined && typeof v.idempotencyKey !== 'string') return false;
-  if (v.pushBack !== undefined) {
-    if (v.pushBack === null || typeof v.pushBack !== 'object') return false;
-    if (typeof (v.pushBack as Record<string, unknown>).url !== 'string') return false;
-  }
   return true;
 }

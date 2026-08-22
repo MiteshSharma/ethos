@@ -133,6 +133,28 @@ export class AcpServer {
     return this._authToken;
   }
 
+  /**
+   * Roster-constrain `spawn`'s `personalityId` (plan T1.1 / D12). Without a
+   * mesh, `personalityId` was any string the caller supplied — this agent
+   * would happily run a background job under a personality that has nothing
+   * to do with it. When a mesh IS configured, `personalityId` — if given —
+   * must belong to an agent currently registered in the SAME mesh (the mesh
+   * registry IS the declared roster; a member only gets in there via the
+   * existing `mesh.register()` call, same trust boundary as today). No mesh
+   * configured → nothing to constrain against; behavior is unchanged (e.g.
+   * standalone `ethos acp`, which is not part of the mesh threat model D12
+   * targets). Returns a rejection message, or `null` when the call may proceed.
+   */
+  private async checkSpawnRoster(personalityId: string | undefined): Promise<string | null> {
+    if (!personalityId || !this.mesh) return null;
+    const roster = await this.mesh.list();
+    const onRoster = roster.some((entry) => entry.personalityId === personalityId);
+    if (!onRoster) {
+      return `personalityId "${personalityId}" is not a member of this mesh's roster`;
+    }
+    return null;
+  }
+
   get activeSessionCount(): number {
     return this.busySessions.size;
   }
@@ -419,6 +441,10 @@ export class AcpServer {
           if (!p.text || typeof p.text !== 'string') {
             return { jsonrpc: '2.0', id, error: { code: -32602, message: 'text is required' } };
           }
+          const rosterError = await this.checkSpawnRoster(p.personalityId);
+          if (rosterError) {
+            return { jsonrpc: '2.0', id, error: { code: -32602, message: rosterError } };
+          }
           const sk = `acp:${randomUUID()}`;
           const label = sanitizeJobLabel(p.label);
           const job = await this.jobStore.create({
@@ -649,6 +675,11 @@ export class AcpServer {
           };
           if (!p.text || typeof p.text !== 'string') {
             sendError(-32602, 'text is required');
+            return;
+          }
+          const rosterError = await this.checkSpawnRoster(p.personalityId);
+          if (rosterError) {
+            sendError(-32602, rosterError);
             return;
           }
           const sk = `acp:${randomUUID()}`;

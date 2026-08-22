@@ -6,7 +6,7 @@ import { AgentMesh, meshRegistryPath } from '@ethosagent/agent-mesh';
 import { KanbanStore } from '@ethosagent/kanban-store';
 import { noopLogger } from '@ethosagent/logger';
 import { isSafePathSegment } from '@ethosagent/storage-fs';
-import type { Logger, Storage, TeamManifest } from '@ethosagent/types';
+import type { Logger, SecretsResolver, Storage, TeamManifest } from '@ethosagent/types';
 import { Dispatcher, type SupervisorState } from './dispatcher';
 import { startHealthProbeLoop } from './health';
 import { logSupervisorEvent } from './logger';
@@ -55,7 +55,7 @@ interface MemberState extends MemberRuntime {
 export async function runSupervisor(
   manifest: TeamManifest,
   manifestPath: string,
-  opts: { logger?: Logger; storage: Storage },
+  opts: { logger?: Logger; storage: Storage; secrets?: SecretsResolver },
 ): Promise<void> {
   const log0 = opts.logger ?? noopLogger;
   const name = manifest.name;
@@ -380,6 +380,7 @@ export async function runSupervisor(
     board,
     supervisor: supervisorView,
     mesh,
+    ...(opts.secrets ? { secrets: opts.secrets } : {}),
     ...(manifest.kanban?.stale_ms !== undefined ? { staleMs: manifest.kanban.stale_ms } : {}),
     ...(manifest.kanban?.poll_ms !== undefined ? { pollMs: manifest.kanban.poll_ms } : {}),
     ...(manifest.kanban?.staleness_threshold_ms !== undefined

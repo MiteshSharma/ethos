@@ -120,6 +120,19 @@ export function hangingRunner(counter: { runs: number }): A2aTaskRunner {
   };
 }
 
+/** A runner that records the `opts` it was invoked with (plan T0.2). */
+export function capturingRunner(
+  script: AgentEvent[],
+  captured: { opts?: Parameters<A2aTaskRunner['run']>[2] },
+): A2aTaskRunner {
+  return {
+    async *run(_personalityId, _text, opts) {
+      captured.opts = opts;
+      for (const e of script) yield e;
+    },
+  };
+}
+
 export const HELLO_SCRIPT: AgentEvent[] = [
   { type: 'thinking_delta', thinking: 'secret internal reasoning' },
   { type: 'text_delta', text: 'hello ' },

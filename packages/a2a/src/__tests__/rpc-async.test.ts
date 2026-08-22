@@ -16,6 +16,7 @@ import {
 } from '../rpc';
 import { type A2aTask, InMemoryA2aTaskStore, isTerminalStatus } from '../task-store';
 import {
+  capturingRunner,
   countingRunner,
   HELLO_SCRIPT,
   hangingRunner,
@@ -83,6 +84,34 @@ describe('Async message/send — submit + idempotency dedupe', () => {
     expect(final?.status).toBe('completed');
     expect(final?.result).toBe('hello world');
     expect(counter.runs).toBe(1);
+  });
+
+  it('threads params.skill through to the runner on the async path too (plan T0.2)', async () => {
+    const target = makeAgent(TARGET_ID);
+    const peer = makeAgent('peer-a');
+    const sheet: SheetHolder = { skills: ['search'] };
+    const peerStore = newPeerStore();
+    const store = new InMemoryA2aTaskStore();
+    const clock = { t: Date.now() };
+    const captured: Parameters<typeof capturingRunner>[1] = {};
+    const service = createA2aRpcService({
+      getIdentity: stubIdentity(target, sheet),
+      peerStore,
+      runner: capturingRunner(HELLO_SCRIPT, captured),
+      taskStore: store,
+      now: () => clock.t,
+    });
+    const minted = await mintPeerToken(target, peer, ['search'], peerStore, { now: clock.t });
+    const ts = clock.t;
+    const res = await service.handleRpc(TARGET_ID, asyncRpc('search', 'k-skill'), {
+      token: minted.token,
+      proofSignature: signPop(peer, A2A_METHOD_MESSAGE_SEND, minted.claims.jti, ts),
+      proofTimestamp: ts,
+    });
+    if ('error' in res) throw new Error(`unexpected error ${res.error.code}`);
+    const ack = res.result as A2aAsyncSubmitResult;
+    await waitForTerminal(store, ack.taskId);
+    expect(captured.opts?.skill).toBe('search');
   });
 
   it('dedupes a retried async send: runner runs EXACTLY once, second returns the prior task', async () => {

@@ -16,8 +16,8 @@ function seed(overrides: Partial<A2aTask> = {}): A2aTask {
 }
 
 describe('isTerminalStatus', () => {
-  it('classifies all five terminal states and neither non-terminal state', () => {
-    for (const s of ['completed', 'failed', 'cancelled', 'expired', 'peer-unreachable'] as const) {
+  it('classifies both terminal states and neither non-terminal state', () => {
+    for (const s of ['completed', 'failed'] as const) {
       expect(isTerminalStatus(s)).toBe(true);
     }
     expect(isTerminalStatus('submitted')).toBe(false);

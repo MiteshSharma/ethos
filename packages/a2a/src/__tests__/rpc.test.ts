@@ -142,6 +142,19 @@ function stubRunner(script: AgentEvent[], spy?: { consumed: boolean }): A2aTaskR
   };
 }
 
+/** A runner that records the `opts` it was invoked with (plan T0.2). */
+function capturingRunner(
+  script: AgentEvent[],
+  captured: { opts?: Parameters<A2aTaskRunner['run']>[2] },
+): A2aTaskRunner {
+  return {
+    async *run(_personalityId, _text, opts) {
+      captured.opts = opts;
+      for (const e of script) yield e;
+    },
+  };
+}
+
 const HELLO_SCRIPT: AgentEvent[] = [
   { type: 'thinking_delta', thinking: 'secret internal reasoning' },
   { type: 'text_delta', text: 'hello ' },
@@ -246,6 +259,30 @@ describe('A2A JSON-RPC message/send — happy path', () => {
     // The internal reasoning MUST NOT leak across the trust boundary.
     expect(result.text).not.toContain('secret internal reasoning');
     expect(h.runnerSpy.consumed).toBe(true);
+  });
+
+  it('threads params.skill through to the runner (plan T0.2) instead of discarding it', async () => {
+    const target = makeAgent(TARGET_ID);
+    const peer = makeAgent('peer-a');
+    const sheet: SheetHolder = { skills: ['search'] };
+    const peerStore = new StorageA2aPeerStore(new InMemoryStorage(), '/ethos/a2a');
+    const clock = { t: Date.now() };
+    const captured: { opts?: Parameters<A2aTaskRunner['run']>[2] } = {};
+    const service = createA2aRpcService({
+      getIdentity: stubIdentity(target, sheet),
+      peerStore,
+      runner: capturingRunner(HELLO_SCRIPT, captured),
+      now: () => clock.t,
+    });
+    const minted = await mintPeerToken(target, peer, ['search'], peerStore, { now: clock.t });
+    const creds: A2aRequestCredentials = {
+      token: minted.token,
+      proofSignature: signPop(peer, A2A_METHOD_MESSAGE_SEND, minted.claims.jti, clock.t),
+      proofTimestamp: clock.t,
+    };
+
+    await service.handleRpc(TARGET_ID, rpcRequest('search'), creds);
+    expect(captured.opts?.skill).toBe('search');
   });
 });
 

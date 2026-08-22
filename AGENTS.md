@@ -176,6 +176,8 @@ extensions/job-store/ — SQLiteJobStore opens a raw path via @ethosagent/sqlite
 extensions/delivery-ledger/ — SQLiteDeliveryLedger opens a raw path via @ethosagent/sqlite and mkdirSync's the db's parent dir; its atomic redelivery claim is a conditional UPDATE inside a transaction, which no Storage interface can express
 extensions/session-cards/ — SQLiteCardStore opens a raw path via @ethosagent/sqlite and mkdirSync's the db's parent dir; its per-session `seq` derivation is a MAX()+1 read inside the insert's transaction, which no Storage interface can express (same rationale as job-store/delivery-ledger)
 extensions/call-log/ — SQLiteCallLog opens a raw path via @ethosagent/sqlite and mkdirSync's the db's parent dir (same rationale as job-store/delivery-ledger/session-cards)
+packages/a2a/src/sqlite-task-store.ts — SQLiteA2aTaskStore opens a raw path via @ethosagent/sqlite and mkdirSync's the db's parent dir (same rationale as job-store/delivery-ledger/session-cards/call-log); the A2A async task store, so a task's terminal state and idempotency key survive an `ethos serve` restart
+extensions/agent-mesh/src/index.ts acquireRegistryLock — mkdirSync/writeFileSync/statSync/unlinkSync for an advisory `wx`-flag sentinel file guarding the mesh registry.json write; the registry CONTENT itself already goes through the injected Storage (plan a2a-spec-compat T1.1 / D12 — confirmed the only raw `node:fs` in this module). A lock is a primitive Storage cannot express, same category as delivery-ledger's atomic claim
 apps/ethos/src/error-log.ts — sync crash logger; must flush before process exit
 apps/ethos/tsup.config.ts and other build-time tooling
 extensions/skills/src/skill-compat.ts statSync — walks $PATH, not ~/.ethos/

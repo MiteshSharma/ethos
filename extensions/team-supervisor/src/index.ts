@@ -3,6 +3,8 @@ export {
   Dispatcher,
   type DispatcherOptions,
   defaultDispatchCall,
+  defaultSpawnDispatchCall,
+  type SpawnDispatchCall,
   type SupervisorState,
 } from './dispatcher';
 export type { HealthResponse, ProbedMember, ProbeFunction } from './health';

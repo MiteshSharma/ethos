@@ -948,6 +948,7 @@ try {
       await runSupervisor(manifest, manifestPath, {
         logger: supervisorLogger,
         storage: getStorage(),
+        secrets: await getSecretsResolver(),
       });
       break;
     }

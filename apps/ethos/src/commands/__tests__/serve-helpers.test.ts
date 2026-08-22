@@ -1,6 +1,7 @@
 import type { EthosConfig } from '@ethosagent/config';
 import { describe, expect, it } from 'vitest';
 import {
+  a2aZeroSkillsWarning,
   hasFlag,
   parseFlagValue,
   parsePort,
@@ -155,5 +156,25 @@ describe('resolveCorsOrigins', () => {
       web: { corsOrigins: 'https://chat.example.com' },
     } satisfies EthosConfig;
     expect(resolveCorsOrigins({ ETHOS_API_CORS_ORIGINS: '*' }, config)).toBe('*');
+  });
+});
+
+describe('a2aZeroSkillsWarning (T0.1 — the headline bug)', () => {
+  it('fires when the personality exposes zero skills', () => {
+    const warning = a2aZeroSkillsWarning('engineer', 0);
+    expect(warning).not.toBeNull();
+    expect(warning).toContain('engineer');
+    expect(warning).toContain('FORBIDDEN_SCOPE');
+    expect(warning).toContain('ethos.exposeToAgents');
+  });
+
+  it('is silent once at least one skill is exposed', () => {
+    expect(a2aZeroSkillsWarning('engineer', 1)).toBeNull();
+    expect(a2aZeroSkillsWarning('engineer', 5)).toBeNull();
+  });
+
+  it('does not tell the operator to set skillsDirs (loader-populated, not a config key)', () => {
+    const warning = a2aZeroSkillsWarning('engineer', 0);
+    expect(warning?.toLowerCase()).not.toContain('skillsdirs');
   });
 });

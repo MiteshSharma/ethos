@@ -15,6 +15,7 @@
     "dev": "tsx apps/ethos/src/index.ts",
     "dev:web": "pnpm --filter @ethosagent/web dev",
     "test": "vitest run",
+    "test:integration": "vitest run --config vitest.integration.config.ts",
     "test:concurrent": "vitest run --pool=threads extensions/team-supervisor/src/__tests__/concurrent extensions/agent-mesh/src/__tests__/concurrent",
     "test:watch": "vitest",
     "typecheck": "pnpm exec tsc --noEmit -p tsconfig.json && pnpm --filter @ethosagent/web typecheck && pnpm --filter @ethosagent/desktop typecheck",

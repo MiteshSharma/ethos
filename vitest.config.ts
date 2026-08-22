@@ -1,9 +1,13 @@
 import { resolve } from 'node:path';
-import { defineConfig } from 'vitest/config';
+import { configDefaults, defineConfig } from 'vitest/config';
 
 // Publishable packages export from ./dist/ for npm consumers but
 // tests need to resolve them to source so no build step is required.
-const srcAliases = {
+// Exported so `vitest.integration.config.ts` (plan T1.8) can reuse the same
+// alias map without duplicating it — `mergeConfig` concatenates `test.include`
+// arrays instead of replacing them, so that config builds standalone off this
+// export rather than merging with the config object below.
+export const srcAliases = {
   '@ethosagent/types': resolve('./packages/types/src'),
   '@ethosagent/storage-fs': resolve('./packages/storage-fs/src'),
   '@ethosagent/sqlite': resolve('./packages/sqlite/src'),
@@ -71,6 +75,13 @@ export default defineConfig({
       'examples/plugins/*/src/**/*.test.ts',
       'skills/src/**/*.test.ts',
     ],
+    // Real-socket integration tests (plan T1.8) boot actual servers on real
+    // ports — two per test in `packages/a2a`'s case — and are the slowest
+    // thing in the repo by design. They get their own tier
+    // (`vitest.integration.config.ts`, run via `pnpm test:integration`) so
+    // they never drag down the default suite; excluded here so they don't
+    // ALSO run as part of it.
+    exclude: [...configDefaults.exclude, '**/__tests__/integration/**'],
     // CI runners stall workers under transform contention (observed: a ~10ms test
     // exceeding the 5s default); local stays retry: 0 so real regressions surface immediately.
     testTimeout: 15_000,
