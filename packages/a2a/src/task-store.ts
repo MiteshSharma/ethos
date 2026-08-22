@@ -38,7 +38,7 @@ export function isTerminalStatus(status: A2aTaskStatus): boolean {
 export interface A2aTask {
   id: string;
   status: A2aTaskStatus;
-  /** Final assistant text (present when `completed`, or after a `peer-unreachable` delivery). */
+  /** Final assistant text (present when `completed`). */
   result?: string;
   /** Failure reason (present when `failed`). */
   error?: string;
@@ -63,7 +63,16 @@ export interface A2aTask {
  * the listener fires on every `update` until the caller unsubscribes.
  */
 export interface A2aTaskStore {
-  create(task: A2aTask): Promise<void>;
+  /**
+   * Insert a task and return the CANONICAL row for its
+   * `(peerFingerprint, idempotencyKey)` pair. Normally that is `task` itself,
+   * but `(peerFingerprint, idempotencyKey)` is a UNIQUE pair: if another
+   * caller's `create()` raced this one and won, this returns THEIR row
+   * instead of throwing or inserting a duplicate — a caller that loses the
+   * race gets back one consistent, already-existing task and must not act as
+   * though its own insert took effect (e.g. must not execute the task).
+   */
+  create(task: A2aTask): Promise<A2aTask>;
   get(id: string): Promise<A2aTask | null>;
   /** Dedupe lookup on `(peerFingerprint, idempotencyKey)` (plan §10 idempotency). */
   findByIdempotencyKey(peerFingerprint: string, idempotencyKey: string): Promise<A2aTask | null>;
@@ -71,6 +80,18 @@ export interface A2aTaskStore {
   update(id: string, patch: Partial<Omit<A2aTask, 'id'>>): Promise<A2aTask | null>;
   /** Subscribe to updates for one task. Returns an unsubscribe fn. */
   subscribe(id: string, listener: (task: A2aTask) => void): () => void;
+  /**
+   * Boot-time reconciliation: transition every non-terminal (`submitted` or
+   * `working`) row to `failed` with `reason` as its error. A restart loses
+   * `A2aAsyncManager`'s in-process `running` bookkeeping, so a task left
+   * non-terminal by a crash can never resume — without this, a later replay
+   * of its idempotency key would find that stale row forever and report
+   * "still working" for a turn that will never finish. Does not re-run
+   * anything: the prior attempt may already have mutated state, so the only
+   * safe move is to record that it died, not to retry it silently. Returns
+   * the number of rows reconciled (for a boot log line).
+   */
+  failNonTerminal(reason: string): Promise<number>;
 }
 
 /** Mint a fresh task id. Exposed so callers share one id scheme. */
@@ -91,9 +112,21 @@ export class InMemoryA2aTaskStore implements A2aTaskStore {
     return `${peerFingerprint}\x00${idempotencyKey}`;
   }
 
-  async create(task: A2aTask): Promise<void> {
+  async create(task: A2aTask): Promise<A2aTask> {
+    // Check-and-set with no `await` in between: this store's `create()` is
+    // race-free by construction (single-threaded JS, nothing yields control
+    // mid-method), but the OUTWARD contract still matches the SQLite store —
+    // a caller whose `submit()` raced another past `findByIdempotencyKey`
+    // (which DOES await) and loses gets back the winner's row here too.
+    const key = this.idemKey(task.peerFingerprint, task.idempotencyKey);
+    const existingId = this.byIdempotency.get(key);
+    if (existingId !== undefined) {
+      const existing = this.tasks.get(existingId);
+      if (existing) return { ...existing };
+    }
     this.tasks.set(task.id, { ...task });
-    this.byIdempotency.set(this.idemKey(task.peerFingerprint, task.idempotencyKey), task.id);
+    this.byIdempotency.set(key, task.id);
+    return { ...task };
   }
 
   async get(id: string): Promise<A2aTask | null> {
@@ -136,5 +169,21 @@ export class InMemoryA2aTaskStore implements A2aTaskStore {
       s.delete(listener);
       if (s.size === 0) this.listeners.delete(id);
     };
+  }
+
+  async failNonTerminal(reason: string): Promise<number> {
+    let count = 0;
+    for (const [id, task] of this.tasks) {
+      if (isTerminalStatus(task.status)) continue;
+      const next: A2aTask = { ...task, status: 'failed', error: reason };
+      this.tasks.set(id, next);
+      count += 1;
+      const set = this.listeners.get(id);
+      if (set) {
+        const snapshot = { ...next };
+        for (const listener of set) listener(snapshot);
+      }
+    }
+    return count;
   }
 }

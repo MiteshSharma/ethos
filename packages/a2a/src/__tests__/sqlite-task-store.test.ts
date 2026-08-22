@@ -9,6 +9,7 @@ import { randomUUID } from 'node:crypto';
 import { existsSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import Database from '@ethosagent/sqlite';
 import type { AgentEvent } from '@ethosagent/types';
 import { afterEach, describe, expect, it } from 'vitest';
 import { A2aAsyncManager } from '../async';
@@ -86,6 +87,46 @@ describe('SQLiteA2aTaskStore — CRUD + pub/sub (:memory:)', () => {
     unsub();
     await store.update(task.id, { status: 'failed' });
     expect(seen).toEqual(['working', 'completed']);
+    store.close();
+  });
+});
+
+describe('SQLiteA2aTaskStore — idempotency race (Bug 2 correctness fix)', () => {
+  it('create() on a repeated (peerFingerprint, idempotencyKey) returns the winner, not a thrown error', async () => {
+    const store = new SQLiteA2aTaskStore(':memory:');
+    const first = seed({ id: randomUUID(), peerFingerprint: 'fp-a', idempotencyKey: 'dupe' });
+    const second = seed({ id: randomUUID(), peerFingerprint: 'fp-a', idempotencyKey: 'dupe' });
+    const createdFirst = await store.create(first);
+    const createdSecond = await store.create(second);
+    expect(createdFirst.id).toBe(first.id);
+    expect(createdSecond.id).toBe(first.id); // NOT second.id — the UNIQUE index picked a winner
+    expect(await store.get(second.id)).toBeNull(); // second was never actually inserted
+    store.close();
+  });
+
+  it('two concurrent A2aAsyncManager.submit() calls on the same key produce exactly one row and one execution', async () => {
+    const store = new SQLiteA2aTaskStore(':memory:');
+    const counter = { runs: 0 };
+    const mgr = new A2aAsyncManager({ taskStore: store, runner: scriptRunner(HELLO, counter) });
+    const args = {
+      personalityId: 'researcher',
+      peerFingerprint: 'fp-race',
+      message: 'hi',
+      sessionKey: 's',
+      traceId: 't',
+      depth: 0,
+      idempotencyKey: 'race-key',
+    } as const;
+
+    // Both calls pass `findByIdempotencyKey` before either has inserted (the
+    // `await` between the lookup and the insert is exactly the window Bug 2
+    // described) — the store's UNIQUE index, not application logic, decides
+    // which one actually wins the INSERT.
+    const [a, b] = await Promise.all([mgr.submit(args), mgr.submit(args)]);
+
+    expect(a.id).toBe(b.id);
+    await mgr.settled(a.id);
+    expect(counter.runs).toBe(1); // the loser never executed
     store.close();
   });
 });
@@ -173,6 +214,53 @@ describe('SQLiteA2aTaskStore — persists across restart (T1.6 acceptance)', () 
     store2.close();
   });
 
+  it('a task left working before a restart is reconciled to failed, and a replay finds that failed state (Bug 3 fix)', async () => {
+    const path = tmpPath();
+    const store1 = new SQLiteA2aTaskStore(path);
+    const stuck = seed({
+      id: randomUUID(),
+      peerFingerprint: 'fp-a',
+      idempotencyKey: 'stuck-key',
+      status: 'working',
+    });
+    await store1.create(stuck);
+    store1.close();
+
+    // Simulate a restart: a fresh store instance, same underlying file, then
+    // the boot-time reconciliation pass `serve.ts` runs before serving any
+    // traffic.
+    const store2 = new SQLiteA2aTaskStore(path);
+    const reconciled = await store2.failNonTerminal(
+      'interrupted: server restarted before this task completed',
+    );
+    expect(reconciled).toBe(1);
+
+    const reloaded = await store2.get(stuck.id);
+    expect(reloaded?.status).toBe('failed');
+    expect(reloaded?.error).toContain('interrupted');
+
+    // A retry replaying the same idempotency key sees the failed state, not
+    // a perpetual "working" — it can mint a fresh key and try again cleanly.
+    const found = await store2.findByIdempotencyKey('fp-a', 'stuck-key');
+    expect(found?.status).toBe('failed');
+    store2.close();
+  });
+
+  it('failNonTerminal leaves already-terminal tasks untouched', async () => {
+    const path = tmpPath();
+    const store1 = new SQLiteA2aTaskStore(path);
+    const done = seed({ id: randomUUID(), status: 'completed', result: 'already done' });
+    await store1.create(done);
+    store1.close();
+
+    const store2 = new SQLiteA2aTaskStore(path);
+    const reconciled = await store2.failNonTerminal('interrupted: server restarted');
+    expect(reconciled).toBe(0);
+    expect((await store2.get(done.id))?.status).toBe('completed');
+    expect((await store2.get(done.id))?.result).toBe('already done');
+    store2.close();
+  });
+
   it('persists across reopen of the same db file (baseline reopen check)', async () => {
     const path = tmpPath();
     const store1 = new SQLiteA2aTaskStore(path);
@@ -186,16 +274,66 @@ describe('SQLiteA2aTaskStore — persists across restart (T1.6 acceptance)', () 
     expect(reloaded?.idempotencyKey).toBe('k');
     store2.close();
   });
+
+  it('a pre-existing v1 db (plain, non-unique idempotency index) is upgraded to enforce uniqueness on open', async () => {
+    const path = tmpPath();
+    // Hand-build a v1 database — the shape this store shipped with BEFORE the
+    // Bug 2 fix: `a2a_tasks_idempotency` is a plain (non-unique) index. This
+    // reproduces a real installation that already ran the old code, to prove
+    // the v2 migration step actually rebuilds the index rather than relying
+    // on `CREATE UNIQUE INDEX IF NOT EXISTS`, which is a no-op once an index
+    // of that name already exists.
+    const v1db = new Database(path);
+    v1db.exec(`
+      CREATE TABLE a2a_tasks (
+        id               TEXT PRIMARY KEY,
+        status           TEXT NOT NULL,
+        result           TEXT,
+        error            TEXT,
+        created_at       INTEGER NOT NULL,
+        idempotency_key  TEXT NOT NULL,
+        trace_id         TEXT NOT NULL,
+        peer_fingerprint TEXT NOT NULL,
+        personality_id   TEXT
+      ) STRICT;
+      CREATE INDEX a2a_tasks_idempotency ON a2a_tasks(peer_fingerprint, idempotency_key);
+      CREATE INDEX a2a_tasks_status_created ON a2a_tasks(status, created_at);
+    `);
+    v1db.pragma('user_version = 1');
+    v1db.close();
+
+    const store = new SQLiteA2aTaskStore(path);
+    const first = seed({ id: randomUUID(), peerFingerprint: 'fp-a', idempotencyKey: 'legacy-key' });
+    const second = seed({
+      id: randomUUID(),
+      peerFingerprint: 'fp-a',
+      idempotencyKey: 'legacy-key',
+    });
+    const createdFirst = await store.create(first);
+    const createdSecond = await store.create(second);
+    // If the index were still plain, `create()` would insert a SECOND row
+    // silently — no exception to catch, no winner to look up.
+    expect(createdSecond.id).toBe(createdFirst.id);
+    expect(await store.get(second.id)).toBeNull();
+    store.close();
+  });
 });
 
 describe('SQLiteA2aTaskStore — retention pruning', () => {
   it('pruneBodies clears result/error on terminal tasks past the cutoff, keeping the row', async () => {
     const store = new SQLiteA2aTaskStore(':memory:');
-    const old = seed({ id: randomUUID(), status: 'completed', result: 'stale', createdAt: 1_000 });
+    const old = seed({
+      id: randomUUID(),
+      status: 'completed',
+      result: 'stale',
+      idempotencyKey: 'old-key',
+      createdAt: 1_000,
+    });
     const recent = seed({
       id: randomUUID(),
       status: 'completed',
       result: 'fresh',
+      idempotencyKey: 'recent-key',
       createdAt: 100_000,
     });
     await store.create(old);

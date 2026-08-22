@@ -129,7 +129,14 @@ export class A2aAsyncManager {
       // personality read (plan §15 multi-tenancy task-ownership check).
       personalityId: args.personalityId,
     };
-    await this.opts.taskStore.create(task);
+    // `findByIdempotencyKey` above and `create` below are two separate awaits,
+    // so another `submit()` call for the SAME key can interleave between them
+    // and win the actual insert (the store's UNIQUE index is what really
+    // decides it). `create` returns the CANONICAL row in that case — if it is
+    // not the one built here, this call lost the race: return the winner
+    // as-is and do NOT execute, or this key would still run the loop twice.
+    const canonical = await this.opts.taskStore.create(task);
+    if (canonical.id !== task.id) return canonical;
     this.running.set(task.id, this.execute(task, args));
     return task;
   }

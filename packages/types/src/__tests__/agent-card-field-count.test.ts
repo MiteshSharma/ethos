@@ -19,6 +19,7 @@ import { describe, expect, it } from 'vitest';
 const REPO_ROOT = join(import.meta.dirname, '..', '..', '..', '..');
 const SOURCE = join(import.meta.dirname, '..', 'a2a.ts');
 const COUNT_FILE = join(REPO_ROOT, '.agent-card-field-count');
+const ARCHITECTURE = join(REPO_ROOT, 'ARCHITECTURE.md');
 
 /** Top-level field names on `AgentCard`, in declaration order. */
 function fieldNames(src: string): string[] {
@@ -71,6 +72,25 @@ const EXPECTED_FIELDS = [
   'did',
 ];
 
+/** The `agent_card:` entry from ARCHITECTURE.md's `frozen_schemas:` block. */
+function readArchitectureManifest(md: string): { count: number; fields: string[] } {
+  const entryIdx = md.indexOf('\n  agent_card:');
+  if (entryIdx < 0) throw new Error('frozen_schemas.agent_card not found in ARCHITECTURE.md');
+  const block = md.slice(entryIdx, entryIdx + 500);
+  const count = /frozen_field_count:\s*(\d+)/.exec(block)?.[1];
+  const fields = /frozen_fields:\s*\[([^\]]*)\]/.exec(block)?.[1];
+  if (count === undefined || fields === undefined) {
+    throw new Error('agent_card entry is missing frozen_field_count / frozen_fields');
+  }
+  return {
+    count: Number(count),
+    fields: fields
+      .split(',')
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0),
+  };
+}
+
 describe('D14: AgentCard schema freeze (ARCHITECTURE.md §VII)', () => {
   it('field count matches .agent-card-field-count (bump the file in lockstep with schema changes)', () => {
     const src = readFileSync(SOURCE, 'utf-8');
@@ -86,5 +106,11 @@ describe('D14: AgentCard schema freeze (ARCHITECTURE.md §VII)', () => {
   it('field NAMES match exactly — a same-count rename fails this test too', () => {
     const src = readFileSync(SOURCE, 'utf-8');
     expect(fieldNames(src)).toEqual(EXPECTED_FIELDS);
+  });
+
+  it('matches the ARCHITECTURE.md §VII frozen_schemas manifest', () => {
+    const manifest = readArchitectureManifest(readFileSync(ARCHITECTURE, 'utf-8'));
+    expect(manifest.fields).toEqual(EXPECTED_FIELDS);
+    expect(manifest.count).toBe(EXPECTED_FIELDS.length);
   });
 });

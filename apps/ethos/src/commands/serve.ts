@@ -853,6 +853,21 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
   // polling after a restart gets NOT_FOUND for work that completed, and a
   // retried send after a restart re-runs the loop instead of deduping.
   const a2aTaskStore = new SQLiteA2aTaskStore(join(a2aBaseDir, 'tasks.db'));
+  // Boot-time reconciliation (correctness fix): `A2aAsyncManager`'s in-process
+  // `running` map does not survive a restart, so any row still
+  // `submitted`/`working` from before a crash is orphaned — nothing will ever
+  // move it to a terminal state, and a replayed idempotency key would report
+  // "still working" forever. Fail those rows explicitly BEFORE serving any
+  // traffic; never silently re-run them — the prior attempt may already have
+  // mutated state, so the only safe move is to record that it died.
+  const a2aReconciledCount = await a2aTaskStore.failNonTerminal(
+    'interrupted: server restarted before this task completed',
+  );
+  if (a2aReconciledCount > 0) {
+    console.warn(
+      `[a2a] reconciled ${a2aReconciledCount} task(s) left non-terminal by a prior restart`,
+    );
+  }
   // Retention GC — terminal task rows carry result/error text, so they are
   // not kept forever. Two windows: bodies clear first (shorter), the row
   // (status + idempotency key) is deleted only after the longer window,

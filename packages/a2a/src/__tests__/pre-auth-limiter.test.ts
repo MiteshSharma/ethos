@@ -210,6 +210,65 @@ describe('request body cap (plan T1.4)', () => {
     const json = (await res.json()) as { result?: { state: string } };
     expect(json.result?.state).toBe('completed');
   });
+
+  it('aborts a streamed body over the cap WITHOUT draining it first (no/lying Content-Length)', async () => {
+    // Regression test: the router used to call `c.req.text()` (buffering the
+    // ENTIRE body into memory) before ever checking its length against the
+    // cap. `Content-Length` is only a fast pre-check a peer can omit or lie
+    // about, so a peer sending an unbounded body with no such header defeated
+    // the cap entirely. This proves the fix reads the raw stream in capped
+    // chunks and cancels it the moment the running total crosses the cap —
+    // an assertion that would FAIL against the old buffer-then-check code,
+    // which drained every chunk before ever rejecting.
+    const target = makeAgent(TARGET_ID);
+    const sheet = { skills: ['search'] };
+    const counter = { runs: 0 };
+    const app = new Hono();
+    app.route(
+      '/a2a',
+      createA2aRpcRouter({
+        getIdentity: stubIdentity(target, sheet),
+        peerStore: newPeerStore(),
+        runner: countingRunner(HELLO_SCRIPT, counter),
+        maxBodyBytes: 100,
+      }),
+    );
+
+    const chunkSize = 64;
+    const totalChunks = 20; // 20 * 64 = 1280 bytes — far over the 100-byte cap
+    let pulled = 0;
+    let cancelled = false;
+    const stream = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        pulled++;
+        if (pulled > totalChunks) {
+          controller.close();
+          return;
+        }
+        controller.enqueue(new TextEncoder().encode('x'.repeat(chunkSize)));
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+
+    const res = await app.request(`/a2a/${target.id}`, {
+      method: 'POST',
+      // Deliberately no `content-length` header — the dishonest/missing case.
+      headers: { 'content-type': 'application/json' },
+      body: stream,
+      duplex: 'half',
+    } as RequestInit);
+
+    expect(res.status).toBe(413);
+    const json = (await res.json()) as { error: { code: number } };
+    expect(json.error.code).toBe(-32006);
+    expect(counter.runs).toBe(0);
+    // The proof: the router stopped reading well before the stream was
+    // exhausted, and cancelled the underlying source rather than draining it.
+    expect(pulled).toBeLessThan(totalChunks);
+    expect(cancelled).toBe(true);
+  });
 });
 
 describe('SSE connection cap (plan T1.4)', () => {

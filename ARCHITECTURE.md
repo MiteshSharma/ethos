@@ -735,6 +735,12 @@ frozen_schemas:
     frozen_method_count: 4
     frozen_methods: [put, get, has, hash]
 
+  agent_card:
+    owner_class: any_two_maintainers
+    drift_gate: field_count_and_name_test
+    frozen_field_count: 11
+    frozen_fields: [id, name, description, protocolVersion, skills, endpoints, publicKey, keyFingerprint, signatureAlg, signature, did]
+
 # ---- Exception policy (§VIII) ----------------------------------------
 # Active exceptions live in the sidecar, not here. This block defines
 # the shape every entry must take and the validator's failure modes.

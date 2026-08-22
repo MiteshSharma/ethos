@@ -623,16 +623,27 @@ export function createA2aRpcService(opts: A2aRpcServiceOptions): A2aRpcService {
         return errorResponse(id, RPC.RATE_LIMITED, 'rate or concurrency limit exceeded');
       }
       auditAccepted();
-      const task = await asyncManager.submit({
-        personalityId,
-        peerFingerprint,
-        message: params.message,
-        sessionKey,
-        skill,
-        traceId,
-        depth,
-        idempotencyKey,
-      });
+      // `submit()` can throw before ever attaching the `.finally` below (e.g.
+      // a task-store insert failure) — without this catch, that leaks the
+      // lease for this peer until process restart, since nothing else ever
+      // releases it. Mirrors the sync path's try/finally just below.
+      let task: A2aTask;
+      try {
+        task = await asyncManager.submit({
+          personalityId,
+          peerFingerprint,
+          message: params.message,
+          sessionKey,
+          skill,
+          traceId,
+          depth,
+          idempotencyKey,
+        });
+      } catch (err) {
+        lease.release();
+        const message = err instanceof Error ? err.message : String(err);
+        return errorResponse(id, RPC.EXECUTION_FAILED, `task submission failed: ${message}`);
+      }
       const settled = asyncManager.settled(task.id) ?? Promise.resolve<A2aTask | null>(null);
       void settled.finally(() => lease.release());
       const result: A2aAsyncSubmitResult = { taskId: task.id, status: task.status };
@@ -640,6 +651,32 @@ export function createA2aRpcService(opts: A2aRpcServiceOptions): A2aRpcService {
     }
 
     // --- Sync path (Phase 5) — limiter around the run ----------------------
+    // Idempotency dedupe (correctness fix): sync is the DEFAULT mode (a caller
+    // that omits `mode` lands here), and previously had NO dedupe of any
+    // kind — a T1.3 retry after a timeout re-ran the turn in full. Mirrors the
+    // async branch above: when a task store is configured and the caller
+    // supplied an idempotencyKey, a prior TERMINAL result for the same
+    // `(peerFingerprint, idempotencyKey)` is returned as-is, with no re-run.
+    // `opts.taskStore` is optional for sync — a sync-only deployment with none
+    // configured proceeds exactly as before (best-effort, not a hard
+    // requirement of the sync contract).
+    const idempotencyKey = params.idempotencyKey;
+    if (opts.taskStore && idempotencyKey) {
+      const existing = await opts.taskStore.findByIdempotencyKey(peerFingerprint, idempotencyKey);
+      if (existing && isTerminalStatus(existing.status)) {
+        const result: A2aTaskResult =
+          existing.status === 'completed'
+            ? { taskId: existing.id, state: 'completed', text: existing.result ?? '' }
+            : {
+                taskId: existing.id,
+                state: 'failed',
+                text: '',
+                error: existing.error ?? 'unknown error',
+              };
+        return { jsonrpc: '2.0', id, result };
+      }
+    }
+
     const lease = await limiter.acquire(personalityId, peerFingerprint);
     if (!lease) {
       auditDenied('rate-limited', { peerFingerprint, traceId });
@@ -655,6 +692,24 @@ export function createA2aRpcService(opts: A2aRpcServiceOptions): A2aRpcService {
         skill,
         { traceId, depth },
       );
+      if (opts.taskStore && idempotencyKey) {
+        try {
+          await opts.taskStore.create({
+            id: result.taskId,
+            status: result.state,
+            ...(result.state === 'completed'
+              ? { result: result.text }
+              : { error: result.error ?? 'unknown error' }),
+            createdAt: now(),
+            idempotencyKey,
+            traceId,
+            peerFingerprint,
+            personalityId,
+          });
+        } catch {
+          // fail-open — dedupe persistence must never fail the caller's response
+        }
+      }
       // Sync terminal task-state (fail-open, metadata only).
       safeAudit(auditSink, {
         kind: 'task',
@@ -728,8 +783,12 @@ export function createA2aRpcRouter(opts: A2aRpcServiceOptions): Hono {
     const creds = readCredentials(c);
 
     // Body-size cap (plan T1.4 — "rate limit ≠ 200MB body"), checked BEFORE
-    // `JSON.parse`. Content-Length is a fast pre-check (a peer can omit or lie
-    // about it, so the actual read is capped too, not just the header).
+    // `JSON.parse`. `Content-Length` is a fast pre-check for the honest common
+    // case — a peer can omit or lie about it, so `readCappedBody` below
+    // enforces the cap DURING the streamed read too: it cancels the stream the
+    // moment the running byte count crosses `maxBodyBytes`, so a dishonest or
+    // missing header can never force the full oversized body into memory
+    // first (unlike a plain `c.req.text()` followed by a length check).
     const contentLengthHeader = c.req.header('content-length');
     if (contentLengthHeader && Number(contentLengthHeader) > maxBodyBytes) {
       return c.json(
@@ -738,18 +797,17 @@ export function createA2aRpcRouter(opts: A2aRpcServiceOptions): Hono {
       );
     }
 
-    let bodyText: string;
-    try {
-      bodyText = await c.req.text();
-    } catch {
-      return c.json(errorResponse(null, RPC.PARSE_ERROR, 'parse error'));
-    }
-    if (bodyText.length > maxBodyBytes) {
+    const capped = await readCappedBody(c.req.raw, maxBodyBytes);
+    if (capped.kind === 'too-large') {
       return c.json(
         errorResponse(null, RPC.PAYLOAD_TOO_LARGE, 'request body exceeds size limit'),
         413,
       );
     }
+    if (capped.kind === 'read-error') {
+      return c.json(errorResponse(null, RPC.PARSE_ERROR, 'parse error'));
+    }
+    const bodyText = capped.text;
 
     let body: unknown;
     try {
@@ -837,6 +895,52 @@ export function createA2aRpcRouter(opts: A2aRpcServiceOptions): Hono {
 // ---------------------------------------------------------------------------
 // Helpers.
 // ---------------------------------------------------------------------------
+
+type CappedBodyResult =
+  | { kind: 'ok'; text: string }
+  | { kind: 'too-large' }
+  | { kind: 'read-error' };
+
+/**
+ * Read the JSON-RPC request body, refusing to buffer past `capBytes`.
+ *
+ * The caller checks `Content-Length` first as a fast pre-check for the
+ * honest common case. This reads the raw stream chunk-by-chunk and cancels
+ * it the instant the running total crosses `capBytes`, so a peer that omits
+ * (or lies about) `Content-Length` still cannot force an unbounded buffer —
+ * the cap is enforced DURING the read, not just checked after a full
+ * `c.req.text()`. Mirrors `readBodyWithCap` in
+ * `apps/web-api/src/routes/personality-avatar.ts`.
+ */
+async function readCappedBody(raw: Request, capBytes: number): Promise<CappedBodyResult> {
+  const reader = raw.body?.getReader();
+  if (!reader) return { kind: 'ok', text: '' };
+
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > capBytes) {
+        await reader.cancel();
+        return { kind: 'too-large' };
+      }
+      chunks.push(value);
+    }
+  } catch {
+    return { kind: 'read-error' };
+  }
+
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    out.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return { kind: 'ok', text: new TextDecoder().decode(out) };
+}
 
 /** Pull the token + PoP + SIGNED delegation off an inbound HTTP request. */
 function readCredentials(c: {

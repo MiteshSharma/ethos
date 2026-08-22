@@ -333,12 +333,21 @@ export class A2aOutboundClient {
       }
     }
 
+    // Idempotency key stability across T1.3 retries (correctness fix): minted
+    // ONCE here, before the retry loop, and reused verbatim on every attempt
+    // of this logical send. Previously a caller that omitted `idempotencyKey`
+    // (e.g. `extensions/tools-a2a`'s `a2a_send`) got no key at all, so the
+    // server minted a FRESH random one per RPC call — meaning a retry never
+    // matched the first attempt's key and the peer's dedupe (plan T1.6) never
+    // fired. Threading it through the retry loop, rather than trusting every
+    // caller to remember one, fixes this regardless of what calls `sendMessage`.
+    const idempotencyKey = args.idempotencyKey ?? randomUUID();
     const params: A2aMessageSendParams = {
       skill: args.skill,
       message: args.message,
       ...(args.mode ? { mode: args.mode } : {}),
       ...(args.sessionKey ? { sessionKey: args.sessionKey } : {}),
-      ...(args.idempotencyKey ? { idempotencyKey: args.idempotencyKey } : {}),
+      idempotencyKey,
     };
     const bodyText = JSON.stringify({
       jsonrpc: '2.0' as const,

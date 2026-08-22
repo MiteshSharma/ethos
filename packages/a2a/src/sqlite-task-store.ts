@@ -43,13 +43,28 @@ const SCHEMA = `
     personality_id   TEXT
   ) STRICT;
 
-  CREATE INDEX IF NOT EXISTS a2a_tasks_idempotency
+  CREATE UNIQUE INDEX IF NOT EXISTS a2a_tasks_idempotency
     ON a2a_tasks(peer_fingerprint, idempotency_key);
   CREATE INDEX IF NOT EXISTS a2a_tasks_status_created
     ON a2a_tasks(status, created_at);
 `;
 
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
+
+// v2 (correctness fix): `a2a_tasks_idempotency` upgrades from a plain index to
+// UNIQUE. `CREATE UNIQUE INDEX IF NOT EXISTS` in the baseline above is a no-op
+// on a v1 DB — an index with that name already exists, so a fresh `db.exec`
+// of the baseline never revisits its definition. Any DB that already reached
+// v1 needs an explicit step to drop and rebuild it; a fresh (v0) DB gets the
+// UNIQUE index straight from the baseline and never runs this step.
+const MIGRATIONS = {
+  2: (db: Database.Database) => {
+    db.exec('DROP INDEX IF EXISTS a2a_tasks_idempotency');
+    db.exec(
+      'CREATE UNIQUE INDEX IF NOT EXISTS a2a_tasks_idempotency ON a2a_tasks(peer_fingerprint, idempotency_key)',
+    );
+  },
+};
 
 // Mirrors task-store.ts's TERMINAL set (T1.7 removed `cancelled`; a later
 // pass removed `expired`/`peer-unreachable` on the same precedent). Kept as a
@@ -109,27 +124,48 @@ export class SQLiteA2aTaskStore implements A2aTaskStore {
       name: 'a2a-task-store',
       targetVersion: SCHEMA_VERSION,
       baseline: SCHEMA,
+      migrations: MIGRATIONS,
     });
   }
 
-  async create(task: A2aTask): Promise<void> {
-    this.db
-      .prepare(
-        `INSERT INTO a2a_tasks
-         (id, status, result, error, created_at, idempotency_key, trace_id, peer_fingerprint, personality_id)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      )
-      .run(
-        task.id,
-        task.status,
-        task.result ?? null,
-        task.error ?? null,
-        task.createdAt,
-        task.idempotencyKey,
-        task.traceId,
-        task.peerFingerprint,
-        task.personalityId ?? null,
-      );
+  async create(task: A2aTask): Promise<A2aTask> {
+    try {
+      this.db
+        .prepare(
+          `INSERT INTO a2a_tasks
+           (id, status, result, error, created_at, idempotency_key, trace_id, peer_fingerprint, personality_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          task.id,
+          task.status,
+          task.result ?? null,
+          task.error ?? null,
+          task.createdAt,
+          task.idempotencyKey,
+          task.traceId,
+          task.peerFingerprint,
+          task.personalityId ?? null,
+        );
+      return task;
+    } catch (err) {
+      // Two `submit()` calls can both pass `findByIdempotencyKey` before either
+      // `create()`s (the `await` between them yields, letting both proceed) —
+      // the UNIQUE index above is what actually decides the race. Whichever
+      // INSERT loses gets this constraint error; look up and return the
+      // winner's row instead of throwing, so the caller treats it exactly
+      // like a normal idempotency hit rather than a crash.
+      const msg = err instanceof Error ? err.message : String(err);
+      if (
+        /UNIQUE constraint failed: a2a_tasks\.peer_fingerprint, a2a_tasks\.idempotency_key/.test(
+          msg,
+        )
+      ) {
+        const winner = await this.findByIdempotencyKey(task.peerFingerprint, task.idempotencyKey);
+        if (winner) return winner;
+      }
+      throw err;
+    }
   }
 
   async get(id: string): Promise<A2aTask | null> {
@@ -187,6 +223,24 @@ export class SQLiteA2aTaskStore implements A2aTaskStore {
       s.delete(listener);
       if (s.size === 0) this.listeners.delete(id);
     };
+  }
+
+  /**
+   * Boot-time reconciliation (see {@link import('./task-store').A2aTaskStore.failNonTerminal}):
+   * a restart loses `A2aAsyncManager`'s in-process `running` map, so any row
+   * still `submitted`/`working` from before the crash is orphaned — nothing
+   * will ever move it to a terminal state. Fail it explicitly, as a real
+   * write, so a `findByIdempotencyKey` lookup (or the SSE stream) sees the
+   * truth from this point forward instead of "still working" forever.
+   */
+  async failNonTerminal(reason: string): Promise<number> {
+    const nonTerminalStatuses = "('submitted','working')";
+    const result = this.db
+      .prepare(
+        `UPDATE a2a_tasks SET status = 'failed', error = ? WHERE status IN ${nonTerminalStatuses}`,
+      )
+      .run(reason);
+    return result.changes;
   }
 
   /**
