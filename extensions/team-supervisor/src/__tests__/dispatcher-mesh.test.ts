@@ -41,7 +41,7 @@ describe('Dispatcher with AgentMesh', () => {
       activeSessions: 0,
       personalityId: 'engineer',
       displayName: 'Engineer',
-      boardSubscriptions: ['team-a'],
+      boardSubscriptions: [{ board: 'team-a' }],
     });
 
     // Create a ready task assigned to 'engineer'

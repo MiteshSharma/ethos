@@ -42,6 +42,7 @@
         "./extensions/tools-kanban/src/reducers/kanban-list"
       ],
       "@ethosagent/agent-mesh": ["./extensions/agent-mesh/src"],
+      "@ethosagent/notify-queue": ["./extensions/notify-queue/src"],
       "@ethosagent/team-supervisor": ["./extensions/team-supervisor/src"],
       "@ethosagent/acp-server": ["./apps/acp-server/src"],
       "@ethosagent/cron": ["./extensions/cron/src"],

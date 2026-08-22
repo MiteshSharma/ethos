@@ -1,4 +1,4 @@
-import type { AgentMesh } from '@ethosagent/agent-mesh';
+import type { AgentMesh, NotifyMode } from '@ethosagent/agent-mesh';
 import type { KanbanStore, Task } from '@ethosagent/kanban-store';
 import { autonomyTier, type TrustPolicy, tierMaxRetries } from '@ethosagent/kanban-store';
 import type { HookRegistry } from '@ethosagent/types';
@@ -32,6 +32,18 @@ export type DispatchCall = (args: {
   prompt: string;
   personalityId: string;
   signal: AbortSignal;
+  /**
+   * Delivery mode for the peer's `/notify` endpoint (Lane C,
+   * kanban-hooks-notify-parity, Phase 2). `wake`/`notify+wake` force a full
+   * agent turn — today's only behavior. `notify` is a passive delivery: no
+   * turn is forced, and the peer surfaces it later via the pending-notify
+   * `ContextInjector` at its own next turn. Optional and defaults to
+   * `notify+wake` in {@link defaultDispatchCall} — every existing caller
+   * (including this dispatcher's own {@link Dispatcher.fireDispatch}, which
+   * does not set it) keeps today's exact forced-turn behavior unless it
+   * explicitly opts in to a different mode.
+   */
+  mode?: NotifyMode;
 }) => Promise<string>;
 
 /**
@@ -596,12 +608,13 @@ export const defaultDispatchCall: DispatchCall = async ({
   prompt,
   personalityId: _personalityId,
   signal,
+  mode = 'notify+wake',
 }) => {
   const url = `http://${host}:${port}/notify`;
   const res = await fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ kind: 'kanban', ref: prompt }),
+    body: JSON.stringify({ kind: 'kanban', ref: prompt, mode }),
     signal,
   });
   if (!res.ok) {

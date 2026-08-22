@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import type { PendingNotifyQueue, WritePendingNotifyInput } from '@ethosagent/notify-queue';
 import type {
   SearchResult,
   Session,
@@ -7,6 +8,7 @@ import type {
   StoredMessage,
 } from '@ethosagent/types';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { WebSocket } from 'ws';
 import { AcpServer, type AgentRunner } from '../index';
 
 // ---------------------------------------------------------------------------
@@ -93,6 +95,65 @@ function makeRunner(): AgentRunner {
       yield { type: 'done', text: 'ok', turnCount: 1 };
     },
   };
+}
+
+/** A runner that counts how many times `run()` was invoked — lets a test
+ *  assert a `notify`-mode delivery never forces a turn. */
+function makeCountingRunner(): { runner: AgentRunner; callCount: () => number } {
+  let calls = 0;
+  return {
+    callCount: () => calls,
+    runner: {
+      run: async function* () {
+        calls++;
+        yield { type: 'text_delta', text: 'ok' };
+        yield { type: 'done', text: 'ok', turnCount: 1 };
+      },
+    },
+  };
+}
+
+/** In-memory fake of the pending-notify queue, so a test can assert exactly
+ *  what a passive `notify`-mode delivery wrote without spinning up SQLite. */
+function makeFakeQueue(): { queue: PendingNotifyQueue; writes: WritePendingNotifyInput[] } {
+  const writes: WritePendingNotifyInput[] = [];
+  return {
+    writes,
+    queue: {
+      async write(input) {
+        writes.push(input);
+      },
+      async readAndConsume() {
+        return [];
+      },
+    },
+  };
+}
+
+/** One JSON-RPC request/response round trip over the WS transport. */
+function wsRpc(
+  port: number,
+  token: string,
+  method: string,
+  params: unknown,
+  id = 1,
+): Promise<{ id: unknown; result?: unknown; error?: unknown }> {
+  return new Promise((resolve, reject) => {
+    const ws = new WebSocket(`ws://127.0.0.1:${port}/ws`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    ws.on('open', () => {
+      ws.send(JSON.stringify({ jsonrpc: '2.0', id, method, params }));
+    });
+    ws.on('message', (data) => {
+      const msg = JSON.parse(data.toString()) as { id: unknown };
+      if (msg.id === id) {
+        ws.close();
+        resolve(msg as { id: unknown; result?: unknown; error?: unknown });
+      }
+    });
+    ws.on('error', reject);
+  });
 }
 
 async function httpPost(
@@ -189,5 +250,249 @@ describe('AcpServer /notify', () => {
     const body = JSON.parse(res.body);
     expect(body.result.ok).toBe(true);
     expect(typeof body.result.queued).toBe('number');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Lane C (kanban-hooks-notify-parity), Phase 2 — mode branching across all
+// three transports. `notify` mode must never call runBlocking / mint a
+// sessionKey; `wake` and `notify+wake` (and mode absent) must keep today's
+// exact forced-turn behavior.
+// ---------------------------------------------------------------------------
+
+describe('AcpServer /notify — mode branching (Lane C Phase 2)', () => {
+  async function startServer(opts: {
+    runner: AgentRunner;
+    queue?: PendingNotifyQueue;
+    personalityId?: string;
+    teamId?: string;
+  }): Promise<{
+    httpServer: ReturnType<typeof import('node:http').createServer>;
+    port: number;
+    token: string;
+  }> {
+    const server = new AcpServer({
+      runner: opts.runner,
+      session: makeStore(),
+      authToken: 'test-secret-token',
+      ...(opts.queue ? { notifyQueue: opts.queue } : {}),
+      ...(opts.personalityId ? { personalityId: opts.personalityId } : {}),
+      ...(opts.teamId ? { teamId: opts.teamId } : {}),
+    });
+    const token = server.token;
+    const httpServer = server.startHttp(0);
+    const port = await new Promise<number>((resolve) => {
+      httpServer.on('listening', () => {
+        const addr = httpServer.address();
+        resolve(addr && typeof addr === 'object' ? addr.port : 0);
+      });
+    });
+    return { httpServer, port, token };
+  }
+
+  async function stopServer(httpServer: ReturnType<typeof import('node:http').createServer>) {
+    await new Promise<void>((resolve) => httpServer.close(() => resolve()));
+  }
+
+  it('HTTP: mode=notify does not call the runner and writes a pending row instead', async () => {
+    const { runner, callCount } = makeCountingRunner();
+    const { queue, writes } = makeFakeQueue();
+    const { httpServer, port, token } = await startServer({
+      runner,
+      queue,
+      personalityId: 'engineer',
+      teamId: 'team-a',
+    });
+    try {
+      const res = await httpPost(
+        port,
+        '/notify',
+        JSON.stringify({ kind: 'kanban', ref: 'task-1', mode: 'notify' }),
+        { Authorization: `Bearer ${token}` },
+      );
+      expect(res.status).toBe(202);
+      expect(JSON.parse(res.body).ok).toBe(true);
+
+      // Give any stray async work a moment, then assert the runner never ran.
+      await new Promise((r) => setTimeout(r, 50));
+      expect(callCount()).toBe(0);
+      expect(writes).toEqual([
+        { team: 'team-a', assigneePersonalityId: 'engineer', kind: 'kanban', ref: 'task-1' },
+      ]);
+    } finally {
+      await stopServer(httpServer);
+    }
+  });
+
+  it.each(['wake', 'notify+wake'] as const)(
+    'HTTP: mode=%s calls the runner (unchanged behavior)',
+    async (mode) => {
+      const { runner, callCount } = makeCountingRunner();
+      const { httpServer, port, token } = await startServer({ runner });
+      try {
+        const res = await httpPost(
+          port,
+          '/notify',
+          JSON.stringify({ kind: 'kanban', ref: 'task-1', mode }),
+          { Authorization: `Bearer ${token}` },
+        );
+        expect(res.status).toBe(202);
+        await new Promise((r) => setTimeout(r, 50));
+        expect(callCount()).toBe(1);
+      } finally {
+        await stopServer(httpServer);
+      }
+    },
+  );
+
+  it('HTTP: mode absent calls the runner (default-preserving)', async () => {
+    const { runner, callCount } = makeCountingRunner();
+    const { httpServer, port, token } = await startServer({ runner });
+    try {
+      const res = await httpPost(
+        port,
+        '/notify',
+        JSON.stringify({ kind: 'kanban', ref: 'task-1' }),
+        { Authorization: `Bearer ${token}` },
+      );
+      expect(res.status).toBe(202);
+      await new Promise((r) => setTimeout(r, 50));
+      expect(callCount()).toBe(1);
+    } finally {
+      await stopServer(httpServer);
+    }
+  });
+
+  it('HTTP: mode=notify with no queue/team/personality wired is a no-op (no runner call, no throw)', async () => {
+    const { runner, callCount } = makeCountingRunner();
+    const { httpServer, port, token } = await startServer({ runner });
+    try {
+      const res = await httpPost(
+        port,
+        '/notify',
+        JSON.stringify({ kind: 'kanban', ref: 'task-1', mode: 'notify' }),
+        { Authorization: `Bearer ${token}` },
+      );
+      expect(res.status).toBe(202);
+      expect(JSON.parse(res.body).ok).toBe(true);
+      await new Promise((r) => setTimeout(r, 50));
+      expect(callCount()).toBe(0);
+    } finally {
+      await stopServer(httpServer);
+    }
+  });
+
+  it('RPC: notify method with mode=notify does not call the runner, writes a pending row', async () => {
+    const { runner, callCount } = makeCountingRunner();
+    const { queue, writes } = makeFakeQueue();
+    const { httpServer, port, token } = await startServer({
+      runner,
+      queue,
+      personalityId: 'engineer',
+      teamId: 'team-a',
+    });
+    try {
+      const res = await httpPost(
+        port,
+        '/rpc',
+        JSON.stringify({
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'notify',
+          params: { kind: 'kanban', ref: 'task-2', mode: 'notify' },
+        }),
+        { Authorization: `Bearer ${token}` },
+      );
+      expect(res.status).toBe(200);
+      expect(JSON.parse(res.body).result.ok).toBe(true);
+      await new Promise((r) => setTimeout(r, 50));
+      expect(callCount()).toBe(0);
+      expect(writes).toEqual([
+        { team: 'team-a', assigneePersonalityId: 'engineer', kind: 'kanban', ref: 'task-2' },
+      ]);
+    } finally {
+      await stopServer(httpServer);
+    }
+  });
+
+  it.each(['wake', 'notify+wake'] as const)(
+    'RPC: notify method with mode=%s calls the runner (unchanged behavior)',
+    async (mode) => {
+      const { runner, callCount } = makeCountingRunner();
+      const { httpServer, port, token } = await startServer({ runner });
+      try {
+        const res = await httpPost(
+          port,
+          '/rpc',
+          JSON.stringify({
+            jsonrpc: '2.0',
+            id: 1,
+            method: 'notify',
+            params: { kind: 'kanban', ref: 'task-2', mode },
+          }),
+          { Authorization: `Bearer ${token}` },
+        );
+        expect(res.status).toBe(200);
+        await new Promise((r) => setTimeout(r, 50));
+        expect(callCount()).toBe(1);
+      } finally {
+        await stopServer(httpServer);
+      }
+    },
+  );
+
+  it('WS: notify method with mode=notify does not call the runner, writes a pending row', async () => {
+    const { runner, callCount } = makeCountingRunner();
+    const { queue, writes } = makeFakeQueue();
+    const { httpServer, port, token } = await startServer({
+      runner,
+      queue,
+      personalityId: 'engineer',
+      teamId: 'team-a',
+    });
+    try {
+      const resp = await wsRpc(port, token, 'notify', {
+        kind: 'kanban',
+        ref: 'task-3',
+        mode: 'notify',
+      });
+      expect((resp.result as { ok: boolean }).ok).toBe(true);
+      await new Promise((r) => setTimeout(r, 50));
+      expect(callCount()).toBe(0);
+      expect(writes).toEqual([
+        { team: 'team-a', assigneePersonalityId: 'engineer', kind: 'kanban', ref: 'task-3' },
+      ]);
+    } finally {
+      await stopServer(httpServer);
+    }
+  });
+
+  it.each(['wake', 'notify+wake'] as const)(
+    'WS: notify method with mode=%s calls the runner (unchanged behavior)',
+    async (mode) => {
+      const { runner, callCount } = makeCountingRunner();
+      const { httpServer, port, token } = await startServer({ runner });
+      try {
+        const resp = await wsRpc(port, token, 'notify', { kind: 'kanban', ref: 'task-3', mode });
+        expect((resp.result as { ok: boolean }).ok).toBe(true);
+        await new Promise((r) => setTimeout(r, 50));
+        expect(callCount()).toBe(1);
+      } finally {
+        await stopServer(httpServer);
+      }
+    },
+  );
+
+  it('WS: notify method with mode absent calls the runner (default-preserving)', async () => {
+    const { runner, callCount } = makeCountingRunner();
+    const { httpServer, port, token } = await startServer({ runner });
+    try {
+      const resp = await wsRpc(port, token, 'notify', { kind: 'kanban', ref: 'task-3' });
+      expect((resp.result as { ok: boolean }).ok).toBe(true);
+      await new Promise((r) => setTimeout(r, 50));
+      expect(callCount()).toBe(1);
+    } finally {
+      await stopServer(httpServer);
+    }
   });
 });

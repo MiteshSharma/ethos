@@ -11,6 +11,8 @@ import type { GoalRunner } from '@ethosagent/goal-runner';
 import { SQLiteGoalStore } from '@ethosagent/goal-store';
 import { autonomyTier, KanbanStore } from '@ethosagent/kanban-store';
 import { MarkdownFileMemoryProvider } from '@ethosagent/memory-markdown';
+import type { PendingNotify, PendingNotifyQueue } from '@ethosagent/notify-queue';
+import { SQLiteNotifyQueue } from '@ethosagent/notify-queue';
 import {
   platformId as discordId,
   platformPrompt as discordPrompt,
@@ -227,6 +229,48 @@ export function createTeamMemoryIndexInjector(
       const lines = topics.map((t) => `- ${t}`).join('\n');
       return {
         content: `Team memory topics available (call team_memory_read to load):\n${lines}`,
+        position: 'append',
+      };
+    },
+  };
+}
+
+/**
+ * ContextInjector that surfaces passive `notify`-mode board deliveries (Lane
+ * C, kanban-hooks-notify-parity, D6). A `notify`-mode `/notify` call does not
+ * force a turn — it has nowhere else to land — so it is written to the
+ * pending-notify queue instead, and this injector is what surfaces it: on
+ * every turn it reads whatever is pending for `ctx.personalityId` on this
+ * team's board and marks it consumed in the same call, so a row is delivered
+ * exactly once, at the assignee's own next turn. Read-and-consume happens at
+ * INJECT TIME per D6's resolution, not on a separate poll.
+ *
+ * Priority sits just above `team-memory-index`'s 70 so a pending notify reads
+ * as the more time-sensitive of the two dynamic-tail sections.
+ */
+export function createPendingNotifyInjector(
+  queue: PendingNotifyQueue,
+  teamName: string,
+): ContextInjector {
+  return {
+    id: `pending-notify:${teamName}`,
+    priority: 71,
+
+    async inject(ctx: PromptContext): Promise<InjectionResult | null> {
+      if (!ctx.personalityId) return null;
+
+      let rows: PendingNotify[];
+      try {
+        rows = await queue.readAndConsume(teamName, ctx.personalityId);
+      } catch {
+        return null;
+      }
+      if (rows.length === 0) return null;
+
+      const lines = rows.map((r) => `- ${r.kind}${r.ref ? ` (${r.ref})` : ''}`).join('\n');
+      const plural = rows.length === 1 ? 'notify' : 'notifies';
+      return {
+        content: `You have ${rows.length} unread board ${plural}:\n${lines}`,
         position: 'append',
       };
     },
@@ -1024,6 +1068,14 @@ export async function composeAllTools(
     }
 
     injectors.push(createTeamMemoryIndexInjector(teamMemory, config.teamName));
+
+    // Lane C (kanban-hooks-notify-parity, Phase 2) — pending-notify queue.
+    // One file per dataDir, same as goals.db: the ACP server (writer) opens
+    // its own handle onto the same path independently, the same two-instance
+    // pattern delivery-ledger.db already uses across the gateway and
+    // web-api processes.
+    const notifyQueue = new SQLiteNotifyQueue(join(dataDir, 'notify-queue.db'));
+    injectors.push(createPendingNotifyInjector(notifyQueue, config.teamName));
   }
 
   // -------------------------------------------------------------------------

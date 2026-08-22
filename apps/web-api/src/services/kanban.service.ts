@@ -402,7 +402,7 @@ export class KanbanService {
 
     const entries = await this.mesh.list();
     const agents = entries
-      .filter((e) => e.boardSubscriptions?.includes(opts.team))
+      .filter((e) => e.boardSubscriptions?.some((s) => s.board === opts.team))
       .map((e) => ({
         personalityId: e.personalityId ?? e.agentId,
         displayName: e.displayName ?? e.agentId,
@@ -435,7 +435,7 @@ export class KanbanService {
 
       // Fire /notify to the assignee via mesh — non-fatal on failure.
       if (this.mesh && task.status === 'ready') {
-        void this.notifyAssignee(opts.assignee, task.id, 'kanban').catch(() => {});
+        void this.notifyAssignee(opts.assignee, task.id, 'kanban', opts.team).catch(() => {});
       }
 
       return { task: toWireTask(task) };
@@ -462,7 +462,7 @@ export class KanbanService {
 
       for (const task of updated) {
         if (this.mesh && task.status === 'ready') {
-          void this.notifyAssignee(opts.assignee, task.id, 'kanban').catch(() => {});
+          void this.notifyAssignee(opts.assignee, task.id, 'kanban', opts.team).catch(() => {});
         }
       }
 
@@ -525,23 +525,37 @@ export class KanbanService {
       if (assignee) recipients.add(assignee);
       for (const token of parseMentions(opts.body)) recipients.add(token);
       for (const personalityId of recipients) {
-        void this.notifyAssignee(personalityId, opts.taskId, 'kanban_comment').catch(() => {});
+        void this.notifyAssignee(personalityId, opts.taskId, 'kanban_comment', opts.team).catch(
+          () => {},
+        );
       }
     }
     return { comment: toWireComment(comment) };
   }
 
-  private async notifyAssignee(personalityId: string, taskId: string, kind: string): Promise<void> {
+  private async notifyAssignee(
+    personalityId: string,
+    taskId: string,
+    kind: string,
+    team: string,
+  ): Promise<void> {
     if (!this.mesh) return;
     const entries = await this.mesh.findByPersonality(personalityId);
     const entry = entries[0];
     if (!entry) return;
 
+    // Phase 3 (kanban-hooks-notify-parity, D7): honor the subscriber's durable
+    // per-board mode preference instead of hardcoding notify+wake. A
+    // subscription with no entry for this board, or no `mode` set on it,
+    // falls back to notify+wake — the only behavior that existed before
+    // per-subscription preference did.
+    const mode = entry.boardSubscriptions?.find((s) => s.board === team)?.mode ?? 'notify+wake';
+
     try {
       const res = await fetch(`http://${entry.host}:${entry.port}/notify`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ kind, ref: taskId }),
+        body: JSON.stringify({ kind, ref: taskId, mode }),
       });
       if (!res.ok) {
         // Notification failure is non-fatal — poll loop reconciles.

@@ -789,6 +789,11 @@ tiers:
     tier: 2
     assigned: 2026-08-12
 
+  extensions/notify-queue:
+    package: "@ethosagent/notify-queue"
+    tier: 2
+    assigned: 2026-08-22
+
   extensions/oauth:
     package: "@ethosagent/oauth"
     tier: 2

@@ -65,6 +65,7 @@
     "@ethosagent/memory-vault": "workspace:*",
     "@ethosagent/memory-vector": "workspace:*",
     "@ethosagent/nightly-loop": "workspace:*",
+    "@ethosagent/notify-queue": "workspace:*",
     "@ethosagent/oauth": "workspace:*",
     "@ethosagent/oauth-core": "workspace:*",
     "@ethosagent/observability-sqlite": "workspace:*",

@@ -29,6 +29,7 @@ import { buildCronTriggers, CronScheduler, type CronTriggers } from '@ethosagent
 import { LocalExecutionBackend } from '@ethosagent/execution-local';
 import { LangfusePollLoop } from '@ethosagent/export-langfuse';
 import { ConsoleLogger } from '@ethosagent/logger';
+import { SQLiteNotifyQueue } from '@ethosagent/notify-queue';
 import { computeContextAnatomy, createMetricsTextProvider } from '@ethosagent/observability-sqlite';
 import {
   createPersonalityRegistry,
@@ -636,6 +637,13 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
     runner: loop,
     session,
     mesh,
+    personalityId: activePersonality,
+    // Lane C (kanban-hooks-notify-parity, Phase 2) — passive `notify`-mode
+    // delivery needs somewhere to land, which only exists for a team board.
+    // A solo (non-team) `ethos serve` just no-ops that path.
+    ...(teamFlag
+      ? { teamId: teamFlag, notifyQueue: new SQLiteNotifyQueue(join(dir, 'notify-queue.db')) }
+      : {}),
     ...(mcpManager
       ? createAcpMcpWiring({ mcpManager, personalities, defaultPersonalityId: activePersonality })
       : {}),
@@ -658,7 +666,7 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
     activeSessions: 0,
     personalityId: activePersonality,
     displayName: personalityConfig?.name ?? activePersonality,
-    boardSubscriptions: teamFlag ? [teamFlag] : ['global'],
+    boardSubscriptions: teamFlag ? [{ board: teamFlag }] : [{ board: 'global' }],
   });
   const stopHeartbeat = mesh.startHeartbeat(agentId, () => acpServer.activeSessionCount);
 
