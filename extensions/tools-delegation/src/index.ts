@@ -285,6 +285,10 @@ function formatEvent(e: BackgroundJobEvent): string {
     case 'artifact_change':
       return `${String(p.change ?? 'changed')} ${String(p.path ?? '')} (+${String(p.added ?? 0)} −${String(p.removed ?? 0)})`;
     case 'runner_log': {
+      // The per-job retention cap (`LOG_TOTAL_MAX_LINES`) writes one marker
+      // row with an empty `lines` array once hit — render it distinctly so it
+      // doesn't read as a blank/empty log line.
+      if (p.truncated === true) return 'log: (truncated — retention cap reached)';
       // One event renders as one LINE, same collapsing/capping convention the
       // 'text' case above uses — this row can hold up to LOG_BATCH_LINES
       // buffered lines, so it is joined and capped, not printed verbatim.

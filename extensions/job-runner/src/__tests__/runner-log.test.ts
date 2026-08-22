@@ -182,8 +182,36 @@ describe('runner_log delivery', () => {
     const events = await store.getEvents(job.id, { limit: 200 });
     const logRows = events.filter((e) => e.eventType === 'runner_log');
     expect(logRows.map((e) => (e.payload.lines as unknown[]).length)).toEqual([20, 20, 5]);
-    // No lines were dropped — 45 is well under the retention cap.
+    // No lines were dropped from the pre-flush buffer, and 45 is well under
+    // the total per-job retention cap (LOG_TOTAL_MAX_LINES) too.
     expect(logRows.every((e) => e.payload.dropped === undefined)).toBe(true);
+    expect(logRows.every((e) => e.payload.truncated === undefined)).toBe(true);
+    store.close();
+  });
+
+  it('stops persisting once the total per-job retention cap is hit, noting truncation once', async () => {
+    // 250 lines, well past LOG_TOTAL_MAX_LINES (100): the total persisted
+    // across every `runner_log` row must not exceed the cap, and exactly one
+    // marker row notes the truncation.
+    const { store, exec, job } = await setup(new BurstLogRunner(250));
+    exec.start();
+    exec.nudge();
+    await vi.waitFor(async () => expect((await store.get(job.id))?.status).toBe('done'), {
+      timeout: 2000,
+    });
+    await exec.shutdown();
+
+    const events = await store.getEvents(job.id, { limit: 200 });
+    const logRows = events.filter((e) => e.eventType === 'runner_log');
+    const totalPersisted = logRows.reduce(
+      (sum, e) => sum + (e.payload.lines as unknown[]).length,
+      0,
+    );
+    expect(totalPersisted).toBeLessThanOrEqual(100);
+
+    const truncationMarkers = logRows.filter((e) => e.payload.truncated === true);
+    expect(truncationMarkers).toHaveLength(1);
+    expect(truncationMarkers[0]?.payload.lines).toEqual([]);
     store.close();
   });
 

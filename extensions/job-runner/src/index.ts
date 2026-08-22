@@ -802,10 +802,15 @@ export class BackgroundExecutor {
    * (`JobRunnerContext.appendLog`, I-LOG1). Batches already-split lines into
    * one `runner_log` job_event per flush — either `LOG_BATCH_LINES` lines or
    * `LOG_BATCH_MS` have elapsed since the oldest still-buffered line, whichever
-   * comes first. Bounded independently of the flush cadence: past
-   * `LOG_MAX_BUFFERED_LINES` buffered lines, the OLDEST is dropped to make room
-   * for the newest, and the flushed row notes how many were dropped. Swallows
-   * store errors — losing an audit row must never fail the job it describes.
+   * comes first. The in-memory buffer is bounded independently of the flush
+   * cadence (`LOG_MAX_BUFFERED_LINES`, oldest dropped first) as a defensive
+   * backstop. Separately, and this is the actual per-job retention cap:
+   * `LOG_TOTAL_MAX_LINES` bounds how many lines get PERSISTED over the job's
+   * whole life, same cap-and-stop shape as `TEXT_MAX_EVENTS` above — past the
+   * cap, one final marker row is written and the rest is dropped, so
+   * `job_events` can't grow without bound for a long-running chatty job.
+   * Swallows store errors — losing an audit row must never fail the job it
+   * describes.
    */
   private createLogSink(jobId: string): {
     appendLog(stream: 'stdout' | 'stderr', line: string): void;
@@ -813,6 +818,8 @@ export class BackgroundExecutor {
   } {
     const buffer = new BoundedLogBuffer(LOG_MAX_BUFFERED_LINES);
     let timer: ReturnType<typeof setTimeout> | undefined;
+    let totalWritten = 0;
+    let cappedNoted = false;
 
     const doFlush = async (): Promise<void> => {
       if (timer) {
@@ -821,6 +828,18 @@ export class BackgroundExecutor {
       }
       if (buffer.length === 0) return;
       const { entries, dropped } = buffer.drain();
+      if (totalWritten >= LOG_TOTAL_MAX_LINES) {
+        if (!cappedNoted) {
+          cappedNoted = true;
+          try {
+            await this.store.appendEvent(jobId, 'runner_log', { lines: [], truncated: true });
+          } catch (err) {
+            this.log?.(`appendEvent(runner_log) failed for ${jobId}: ${errMsg(err)}`);
+          }
+        }
+        return;
+      }
+      totalWritten += entries.length;
       try {
         await this.store.appendEvent(jobId, 'runner_log', {
           lines: entries,
