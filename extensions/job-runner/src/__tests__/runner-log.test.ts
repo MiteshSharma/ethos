@@ -114,6 +114,39 @@ class BurstLogRunner implements JobRunner {
   }
 }
 
+/**
+ * Pushes a short warm-up batch that flushes on the TIME trigger — landing
+ * `totalWritten` on 5, not a multiple of the 20-line batch size — then a
+ * 100-line burst that crosses `LOG_TOTAL_MAX_LINES` (100) inside a FULL
+ * 20-line batch (at totalWritten 85 -> 105), followed by a small tail that
+ * never reaches the line-count trigger and is only flushed by the
+ * terminal-transition catch-all.
+ */
+class WarmupThenBurstLogRunner implements JobRunner {
+  readonly name = 'warmup-burst-log-fake';
+  readonly capabilities = CAPABILITIES;
+
+  async isAvailable(): Promise<boolean> {
+    return true;
+  }
+
+  describe(): DetailRow[] {
+    return [];
+  }
+
+  async *run(_job: BackgroundJob, ctx: JobRunnerContext): AsyncIterable<AgentEvent> {
+    for (let i = 0; i < 5; i++) ctx.appendLog('stdout', `warm ${i}`);
+    // Force the 250ms time trigger to flush the 5-line warm-up on its own,
+    // so the crossing batch below lands on a non-cap-aligned `totalWritten`.
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    for (let i = 0; i < 100; i++) ctx.appendLog('stdout', `line ${i}`);
+    for (let i = 0; i < 10; i++) ctx.appendLog('stdout', `tail ${i}`);
+    const text = 'done\n\n## Summary\ndone';
+    yield { type: 'text_delta', text };
+    yield { type: 'done', text, turnCount: 1 };
+  }
+}
+
 /** A runner that logs a few lines, then holds the run open past the 250ms flush window. */
 class SlowLogRunner implements JobRunner {
   readonly name = 'slow-log-fake';
@@ -208,6 +241,38 @@ describe('runner_log delivery', () => {
       0,
     );
     expect(totalPersisted).toBeLessThanOrEqual(100);
+
+    const truncationMarkers = logRows.filter((e) => e.payload.truncated === true);
+    expect(truncationMarkers).toHaveLength(1);
+    expect(truncationMarkers[0]?.payload.lines).toEqual([]);
+    store.close();
+  });
+
+  it('never overshoots the cap even when the crossing batch is a full batch', async () => {
+    // Without the fix, the check ran before `totalWritten` was updated: a
+    // flush at totalWritten=85 (under the 100 cap) would write its full
+    // 20-line batch, pushing totalWritten to 105 — a whole batch over the
+    // documented cap — before the NEXT flush ever saw the limit.
+    const { store, exec, job } = await setup(new WarmupThenBurstLogRunner());
+    exec.start();
+    exec.nudge();
+    await vi.waitFor(async () => expect((await store.get(job.id))?.status).toBe('done'), {
+      timeout: 3000,
+    });
+    await exec.shutdown();
+
+    const events = await store.getEvents(job.id, { limit: 200 });
+    const logRows = events.filter((e) => e.eventType === 'runner_log');
+    const totalPersisted = logRows.reduce(
+      (sum, e) => sum + (e.payload.lines as unknown[]).length,
+      0,
+    );
+    // Hard ceiling: totalWritten must never exceed LOG_TOTAL_MAX_LINES (100)
+    // after any flush, across the whole run — not just at the next check.
+    expect(totalPersisted).toBeLessThanOrEqual(100);
+    // The crossing batch (85 -> 105 uncapped) is truncated to exactly the
+    // remaining budget (15), so the run lands on exactly the cap.
+    expect(totalPersisted).toBe(100);
 
     const truncationMarkers = logRows.filter((e) => e.payload.truncated === true);
     expect(truncationMarkers).toHaveLength(1);

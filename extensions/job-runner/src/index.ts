@@ -806,9 +806,11 @@ export class BackgroundExecutor {
    * cadence (`LOG_MAX_BUFFERED_LINES`, oldest dropped first) as a defensive
    * backstop. Separately, and this is the actual per-job retention cap:
    * `LOG_TOTAL_MAX_LINES` bounds how many lines get PERSISTED over the job's
-   * whole life, same cap-and-stop shape as `TEXT_MAX_EVENTS` above — past the
-   * cap, one final marker row is written and the rest is dropped, so
-   * `job_events` can't grow without bound for a long-running chatty job.
+   * whole life, same cap-and-stop shape as `TEXT_MAX_EVENTS` above — the batch
+   * that crosses the cap is truncated to exactly the remaining budget (never
+   * skipped entirely), then one marker row is written on the next flush and
+   * the rest is dropped, so `job_events` can't grow without bound for a
+   * long-running chatty job.
    * Swallows store errors — losing an audit row must never fail the job it
    * describes.
    */
@@ -828,7 +830,8 @@ export class BackgroundExecutor {
       }
       if (buffer.length === 0) return;
       const { entries, dropped } = buffer.drain();
-      if (totalWritten >= LOG_TOTAL_MAX_LINES) {
+      const remaining = LOG_TOTAL_MAX_LINES - totalWritten;
+      if (remaining <= 0) {
         if (!cappedNoted) {
           cappedNoted = true;
           try {
@@ -839,10 +842,15 @@ export class BackgroundExecutor {
         }
         return;
       }
-      totalWritten += entries.length;
+      // The batch that crosses the cap is truncated to exactly the remaining
+      // budget rather than skipped entirely — `totalWritten` must never exceed
+      // `LOG_TOTAL_MAX_LINES` after this flush. If more lines arrive after this,
+      // the NEXT call sees `remaining <= 0` and fires the truncation marker.
+      const toWrite = entries.length > remaining ? entries.slice(0, remaining) : entries;
+      totalWritten += toWrite.length;
       try {
         await this.store.appendEvent(jobId, 'runner_log', {
-          lines: entries,
+          lines: toWrite,
           ...(dropped > 0 ? { dropped } : {}),
         });
       } catch (err) {
