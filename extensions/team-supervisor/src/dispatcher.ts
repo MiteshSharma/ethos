@@ -299,6 +299,7 @@ export class Dispatcher {
       if (assignee === null) continue;
       let dispatchHost = DISPATCH_HOST;
       let dispatchPort: number | null = null;
+      let dispatchMode: NotifyMode | undefined;
 
       if (this.mesh) {
         const entries = await this.mesh.findByPersonality(assignee);
@@ -306,6 +307,15 @@ export class Dispatcher {
         if (entry) {
           dispatchHost = entry.host;
           dispatchPort = entry.port;
+          // Honor the assignee's durable per-board mode preference on the
+          // claim path too (Lane C post-review fix). Mirrors notifyAssignee's
+          // lookup in apps/web-api/src/services/kanban.service.ts: find the
+          // subscription matching this team's board, take its `mode`. No
+          // match (or no `boardSubscriptions` at all) leaves this `undefined`
+          // — fireDispatch below only sets the `mode` field when it's
+          // present, so defaultDispatchCall's own default (`notify+wake`)
+          // still applies exactly as before this fix.
+          dispatchMode = entry.boardSubscriptions?.find((s) => s.board === this.teamId)?.mode;
         }
       } else {
         const status = this.supervisor.statusOf(assignee);
@@ -365,11 +375,16 @@ export class Dispatcher {
           },
         );
       } else {
-        void this.fireDispatch(task, assignee, dispatchHost, dispatchPort, controller).finally(
-          () => {
-            this.inflight.delete(task.id);
-          },
-        );
+        void this.fireDispatch(
+          task,
+          assignee,
+          dispatchHost,
+          dispatchPort,
+          controller,
+          dispatchMode,
+        ).finally(() => {
+          this.inflight.delete(task.id);
+        });
       }
     }
 
@@ -471,6 +486,7 @@ export class Dispatcher {
     host: string,
     port: number,
     controller: AbortController,
+    mode?: NotifyMode,
   ): Promise<void> {
     const prompt = renderTaskPrompt(task);
 
@@ -488,6 +504,7 @@ export class Dispatcher {
         prompt,
         personalityId: assignee,
         signal: controller.signal,
+        ...(mode !== undefined ? { mode } : {}),
       });
       // We do not auto-complete here — the assignee is responsible for calling
       // `kanban_complete` / `kanban_block` to record the outcome on the board.
