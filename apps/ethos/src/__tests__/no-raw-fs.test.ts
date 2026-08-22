@@ -168,6 +168,17 @@
 //                                    binary-presence check; not a ~/.ethos/
 //                                    operation.
 //
+//   extensions/execution-       Same rationale as execution-pi/src/
+//   coding-agents/src/          worktree.ts above, copied not imported
+//   worktree.ts                 (D-ACP1: no shared file between the two
+//                                packages): creating an ACP-agent run's
+//                                workspace IS a `git worktree add`, and the
+//                                surrounding mkdir/exists checks are that
+//                                same operation's bookkeeping. (This
+//                                package's availability.ts needs no entry
+//                                here — it probes with `spawn` only, no
+//                                `node:fs` import at all.)
+//
 // If you need to add a new exception, document WHY here and in CLAUDE.md before
 // adding it to ALLOWED_PATHS below. The default answer for code on the
 // personality boundary is "use Storage."
@@ -217,6 +228,7 @@ const ALLOWED_FILES = new Set([
   'extensions/execution-docker/src/index.ts',
   'extensions/execution-pi/src/worktree.ts',
   'extensions/execution-pi/src/availability.ts',
+  'extensions/execution-coding-agents/src/worktree.ts',
   'extensions/goal-store/src/index.ts',
   'extensions/kanban-store/src/index.ts',
   'extensions/platform-whatsapp/src/session-store.ts',

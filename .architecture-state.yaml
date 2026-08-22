@@ -447,6 +447,20 @@ tiers:
     tier: 1
     assigned: 2026-08-19
 
+  # Same shape as execution-pi immediately above, for the same reason: this
+  # package spawns a foreign coding-agent CLI (any real ACP-native agent) as
+  # its own OS process and decides what mount derivation execution-docker's
+  # `mountsFor` is asked for. It implements no boundary itself — the container
+  # is the containment — but a mistake in what it asks for IS a containment
+  # mistake, so it gets the same Tier 1, not Tier 2. (Contrast notify-queue,
+  # assigned the same day: that package is a plain internal queue with no
+  # subprocess/mount-derivation role, which is why it landed at Tier 2 while
+  # this one does not.)
+  extensions/execution-coding-agents:
+    package: "@ethosagent/execution-coding-agents"
+    tier: 1
+    assigned: 2026-08-22
+
   extensions/execution-local:
     package: "@ethosagent/execution-local"
     tier: 1

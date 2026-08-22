@@ -1029,6 +1029,24 @@ importers:
         specifier: workspace:*
         version: link:../../packages/types
 
+  extensions/execution-coding-agents:
+    dependencies:
+      '@ethosagent/core':
+        specifier: workspace:*
+        version: link:../../packages/core
+      '@ethosagent/execution-docker':
+        specifier: workspace:*
+        version: link:../execution-docker
+      '@ethosagent/job-runner':
+        specifier: workspace:*
+        version: link:../job-runner
+      '@ethosagent/types':
+        specifier: workspace:*
+        version: link:../../packages/types
+      '@ethosagent/worker-router':
+        specifier: workspace:*
+        version: link:../../packages/worker-router
+
   extensions/execution-docker:
     dependencies:
       '@ethosagent/core':
