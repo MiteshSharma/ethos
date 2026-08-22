@@ -19,6 +19,23 @@ import { AcpEventTranslator } from './translate';
 
 /** Grace between SIGTERM and SIGKILL when tearing the host down. */
 const KILL_GRACE_MS = 3_000;
+/**
+ * Timeout for the `initialize` and `session/new` handshake steps ONLY — both
+ * are protocol negotiation, not a model turn, and this package's own T2
+ * live-handshake test confirmed both complete in well under a second against
+ * the real `claude-agent-acp` adapter. No existing constant in this codebase
+ * covers this exact concern: `DEFAULT_DISPATCH_TIMEOUT_MS` in
+ * `team-supervisor/src/dispatcher.ts` (300_000ms) bounds a different thing
+ * (overall task dispatch), not an ACP wire round trip. 30s is a generous
+ * margin over a cold container/slow-start adapter while still turning an
+ * alive-but-silent peer (one that accepts the request and never replies —
+ * heartbeat keeps bumping, so nothing else in the system would ever notice)
+ * into a visible, bounded failure instead of a permanent hang. Deliberately
+ * NOT applied to `session/prompt` below — a real model turn can legitimately
+ * run for minutes, bounded elsewhere by the job's own cancellation
+ * (`ctx.signal`)/cost budget, not by this connection layer.
+ */
+const HANDSHAKE_TIMEOUT_MS = 30_000;
 /** Bounded tail of the agent process's stderr, reported when it dies without settling. */
 const STDERR_TAIL_CHARS = 2_000;
 /** Cap on the digest a gate prompt/log line carries — legible, never a full payload dump. */
@@ -136,9 +153,13 @@ function digestOf(rawInput: unknown): string {
  */
 export async function* runAcpHost(
   spec: AcpHostSpec,
-  deps: { spawn?: SpawnFn } = {},
+  // `handshakeTimeoutMs` overrides `HANDSHAKE_TIMEOUT_MS` for tests only (the
+  // same DI shape `spawn` already uses here) — production callers never pass
+  // it, so they always get the real 30s constant.
+  deps: { spawn?: SpawnFn; handshakeTimeoutMs?: number } = {},
 ): AsyncIterable<AgentEvent> {
   const spawnFn = deps.spawn ?? spawn;
+  const handshakeTimeoutMs = deps.handshakeTimeoutMs ?? HANDSHAKE_TIMEOUT_MS;
   const containerName = `ethos-acp-${spec.jobId.slice(0, 8)}-${Math.random().toString(36).slice(2, 8)}`;
   await startContainer(spec, containerName, spawnFn);
 
@@ -262,17 +283,26 @@ export async function* runAcpHost(
   // way a Pi prompt racing extension load would be.
   void (async () => {
     try {
-      await conn.request<AcpInitializeResult>(ACP_METHODS.initialize, {
-        protocolVersion: ACP_PROTOCOL_VERSION,
-        clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
-        clientInfo: { name: 'ethos' },
-      });
-      const session = await conn.request<AcpNewSessionResult>(ACP_METHODS.sessionNew, {
-        cwd: spec.workspace,
-        mcpServers: [],
-      });
+      await conn.request<AcpInitializeResult>(
+        ACP_METHODS.initialize,
+        {
+          protocolVersion: ACP_PROTOCOL_VERSION,
+          clientCapabilities: {
+            fs: { readTextFile: false, writeTextFile: false },
+            terminal: false,
+          },
+          clientInfo: { name: 'ethos' },
+        },
+        handshakeTimeoutMs,
+      );
+      const session = await conn.request<AcpNewSessionResult>(
+        ACP_METHODS.sessionNew,
+        { cwd: spec.workspace, mcpServers: [] },
+        handshakeTimeoutMs,
+      );
       sessionId = session.sessionId;
       if (aborted) return; // cancelled before the turn ever started
+      // No timeout on `session/prompt` — see `HANDSHAKE_TIMEOUT_MS`'s comment.
       const result = await conn.request<AcpPromptResult>(ACP_METHODS.sessionPrompt, {
         sessionId: session.sessionId,
         prompt: [{ type: 'text', text: spec.prompt }],

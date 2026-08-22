@@ -36,7 +36,7 @@ export class AcpConnection {
   private nextId = 1;
   private readonly pending = new Map<
     JsonRpcId,
-    { resolve: (v: unknown) => void; reject: (e: Error) => void }
+    { resolve: (v: unknown) => void; reject: (e: Error) => void; timer?: NodeJS.Timeout }
   >();
   private readonly reader = new JsonlReader();
 
@@ -52,11 +52,32 @@ export class AcpConnection {
     for (const line of this.reader.push(chunk)) this.handleLine(line);
   }
 
-  /** Send a request to the peer; resolves/rejects when its response arrives. */
-  request<T>(method: string, params?: unknown): Promise<T> {
+  /**
+   * Send a request to the peer; resolves/rejects when its response arrives.
+   *
+   * `timeoutMs`, when given, rejects THIS request specifically if no
+   * response has arrived by then, with a clear "timed out" error, and
+   * cleans up its pending entry so a late response can't resolve an
+   * already-settled promise. Omitted (the default): unchanged, unbounded
+   * behavior — a caller awaiting a legitimately long-running peer turn
+   * (e.g. `session/prompt`) is never cut off by this layer.
+   */
+  request<T>(method: string, params?: unknown, timeoutMs?: number): Promise<T> {
     const id = this.nextId++;
     const promise = new Promise<T>((resolve, reject) => {
-      this.pending.set(id, { resolve: resolve as (v: unknown) => void, reject });
+      const entry: {
+        resolve: (v: unknown) => void;
+        reject: (e: Error) => void;
+        timer?: NodeJS.Timeout;
+      } = { resolve: resolve as (v: unknown) => void, reject };
+      if (timeoutMs !== undefined) {
+        entry.timer = setTimeout(() => {
+          this.pending.delete(id);
+          reject(new Error(`ACP request "${method}" timed out after ${timeoutMs}ms`));
+        }, timeoutMs);
+        entry.timer.unref?.();
+      }
+      this.pending.set(id, entry);
     });
     this.send({ jsonrpc: '2.0', id, method, params });
     return promise;
@@ -73,7 +94,10 @@ export class AcpConnection {
    * own lifetime.
    */
   rejectAllPending(reason: Error): void {
-    for (const [, entry] of this.pending) entry.reject(reason);
+    for (const [, entry] of this.pending) {
+      if (entry.timer) clearTimeout(entry.timer);
+      entry.reject(reason);
+    }
     this.pending.clear();
   }
 
@@ -120,6 +144,7 @@ export class AcpConnection {
         return;
       }
       this.pending.delete(msg.id);
+      if (entry.timer) clearTimeout(entry.timer);
       if ('error' in msg) entry.reject(new Error(msg.error.message));
       else entry.resolve(msg.result);
     }

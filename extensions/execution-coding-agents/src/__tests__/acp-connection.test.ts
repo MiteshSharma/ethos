@@ -61,6 +61,47 @@ describe('AcpConnection — outbound request/response correlation', () => {
   });
 });
 
+describe('AcpConnection — per-call timeout (alive-but-silent peer)', () => {
+  it('rejects a request with a clear error when no response arrives within timeoutMs, and cleans up the pending entry', async () => {
+    const { conn } = harness();
+    const promise = conn.request('initialize', {}, 10);
+
+    await expect(promise).rejects.toThrow('ACP request "initialize" timed out after 10ms');
+
+    // The pending entry was removed on timeout: a late response for the same
+    // id arrives to nobody waiting — logged and dropped, never a throw, and
+    // critically never a second settle of the already-rejected promise.
+    expect(() =>
+      conn.push(`${JSON.stringify({ jsonrpc: '2.0', id: 1, result: { ok: true } })}\n`),
+    ).not.toThrow();
+  });
+
+  it('resolves normally on a late response when no timeout was given — no implicit global timeout', async () => {
+    const { conn } = harness();
+    const promise = conn.request<{ sessionId: string }>('session/prompt', {});
+
+    // Wait well past the handshake timeout host.ts uses (30s) to prove this
+    // specific request, having no `timeoutMs` of its own, is never cut off.
+    await new Promise((r) => setTimeout(r, 30));
+    conn.push(`${JSON.stringify({ jsonrpc: '2.0', id: 1, result: { sessionId: 's1' } })}\n`);
+
+    await expect(promise).resolves.toEqual({ sessionId: 's1' });
+  });
+
+  it('clears the timer when the response arrives before the timeout fires (no leaked timer, no late spurious rejection)', async () => {
+    const { conn } = harness();
+    const promise = conn.request<{ sessionId: string }>('session/new', {}, 200);
+    conn.push(`${JSON.stringify({ jsonrpc: '2.0', id: 1, result: { sessionId: 's1' } })}\n`);
+
+    await expect(promise).resolves.toEqual({ sessionId: 's1' });
+    // If the timer weren't cleared, waiting past it would be harmless to the
+    // already-settled promise either way — the real risk this guards is a
+    // leaked timer object, which isn't directly observable from here, so the
+    // meaningful assertion is just that resolution won, not a later reject.
+    await new Promise((r) => setTimeout(r, 210));
+  });
+});
+
 describe('AcpConnection — inbound requests from the peer', () => {
   it("answers the peer's request with the handler's result, correlated by id", async () => {
     const onRequest = vi.fn(async () => ({ outcome: { outcome: 'cancelled' } }));

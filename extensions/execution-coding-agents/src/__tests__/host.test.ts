@@ -266,6 +266,33 @@ describe('runAcpHost — handshake and text/tool translation', () => {
     expect(events[0]).toMatchObject({ type: 'error', code: 'acp_handshake_failed' });
     expect((events[0] as { error: string }).error).toContain('unsupported protocolVersion');
   });
+
+  it('surfaces an alive-but-silent agent (accepts `initialize`, never replies, never dies) as a visible handshake-timeout failure, not a permanent hang', async () => {
+    const agent = new ScriptedAcpAgent();
+    // Deliberately does nothing: the process stays alive (no close/error
+    // event ever fires) and no response line is ever sent. Before the
+    // per-call timeout this existed with no way to detect it — `request()`
+    // would await forever, and the job's heartbeat (driven independently by
+    // the executor) would keep bumping, so stale-run reclaim would never
+    // fire either. This is that exact scenario, distinct from both the
+    // process-death and JSON-RPC-error cases above.
+    agent.on('initialize', () => {
+      /* never responds */
+    });
+
+    // A short override in place of the real 30s constant — proves the
+    // mechanism without a real 30-second wait.
+    const events = await drainWithTimeout(
+      runAcpHost(baseSpec(), { spawn: spawnFor(agent), handshakeTimeoutMs: 20 }),
+      2_000,
+    );
+
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ type: 'error', code: 'acp_handshake_failed' });
+    expect((events[0] as { error: string }).error).toContain(
+      'ACP request "initialize" timed out after 20ms',
+    );
+  });
 });
 
 describe("runAcpHost — session/request_permission routes through the gate (D-ACP3's supported path)", () => {
