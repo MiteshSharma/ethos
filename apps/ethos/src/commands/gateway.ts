@@ -599,6 +599,9 @@ export async function runGatewayStart(opts: GatewayStartOptions = {}): Promise<v
   // takes effect in a process that also runs `ethos serve`. Defaults
   // (`trigger.local: true`) reproduce today's behavior exactly.
   const cronTriggers: CronTriggers = buildCronTriggers(scheduler, config.cron);
+  // Late-bind the arming backend `buildCronTriggers` just produced back onto
+  // the scheduler it was built from — see `CronScheduler.setArmingBackend`.
+  scheduler.setArmingBackend(cronTriggers.arming);
 
   // Durable call history (voice V4). Same `~/.ethos/<name>.db` shape as
   // jobs.db / delivery-ledger.db / cards.db, and the SAME file `ethos serve`

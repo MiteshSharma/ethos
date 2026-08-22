@@ -399,7 +399,7 @@ export class CronScheduler {
     job: CronJob,
     decision: CronDecision & { ranAt: string; delivered: boolean },
   ) => void;
-  private readonly armingBackend?: CronArmingBackend;
+  private armingBackend?: CronArmingBackend;
 
   constructor(config: CronSchedulerConfig) {
     this.cronDir = config.cronDir ?? join(homedir(), '.ethos', 'cron');
@@ -416,6 +416,21 @@ export class CronScheduler {
     this.executionBackend = config.executionBackend ?? null;
     this.onDecision = config.onDecision;
     this.armingBackend = config.armingBackend;
+  }
+
+  /**
+   * Late-bind the `CronArmingBackend` after construction. Exists because
+   * `buildCronTriggers` (trigger.ts) needs the already-constructed
+   * `CronScheduler` as its `engine` argument, so the arming backend it
+   * produces can't be passed into this scheduler's own constructor —
+   * callers build the scheduler first, then `buildCronTriggers(scheduler,
+   * ...)`, then wire the result back with this setter. `tick()` reads
+   * `this.armingBackend` at call time (see the end of `tick()`), so a
+   * value set after construction — including after the first `fire()` —
+   * is picked up on every subsequent tick.
+   */
+  setArmingBackend(backend: CronArmingBackend): void {
+    this.armingBackend = backend;
   }
 
   // ---------------------------------------------------------------------------
@@ -753,10 +768,16 @@ export class CronScheduler {
       }
 
       // Claim the job by advancing nextRunAt BEFORE executing so a crash
-      // mid-run doesn't double-fire on the next tick.
+      // mid-run doesn't double-fire on the next tick. `claimDueJob` re-checks
+      // `nextRunAt` against this tick's snapshot INSIDE the jobs lock — a
+      // real compare-and-swap, not a last-write-wins patch — so two `tick()`
+      // calls racing on the same due job (hybrid deployments firing both
+      // `LocalIntervalTrigger` and `HttpFireTrigger` close together) can't
+      // both win the claim and both execute it.
       const upcoming = nextRunForSchedule(job.schedule, now, new Date(job.createdAt));
+      let claimed: boolean;
       try {
-        await this.patchJob(job.id, {
+        claimed = await this.claimDueJob(job.id, job.nextRunAt, {
           lastRunAt: now.toISOString(),
           nextRunAt: upcoming?.toISOString(),
         });
@@ -766,6 +787,11 @@ export class CronScheduler {
           jobId: job.id,
           error: String(err),
         });
+        continue;
+      }
+      if (!claimed) {
+        // Another concurrent tick already claimed this job — expected in
+        // the hybrid profile, not an error.
         continue;
       }
 
@@ -1091,6 +1117,38 @@ export class CronScheduler {
       jobs[idx] = { ...existing, ...patch };
       return jobs;
     });
+  }
+
+  /**
+   * Real compare-and-swap for claiming a due job's execution slot. Unlike
+   * `patchJob` (last-write-wins), this re-reads jobs FRESH inside
+   * `withJobsLock` and only applies `patch` if `nextRunAt` still equals
+   * `expectedNextRunAt` (the value the caller's `tick()` snapshotted before
+   * the lock) and the job is still `active`. If another concurrent `tick()`
+   * already claimed/advanced the job first, the check fails and this
+   * returns `false` without writing anything — the caller should treat that
+   * as "someone else already got it", not an error. Returns `true` iff this
+   * call's claim was the one that stuck.
+   */
+  private async claimDueJob(
+    jobId: string,
+    expectedNextRunAt: string | undefined,
+    patch: Partial<CronJob>,
+  ): Promise<boolean> {
+    let claimed = false;
+    await this.withJobsLock(async (jobs) => {
+      const idx = jobs.findIndex((j) => j.id === jobId);
+      const existing = idx >= 0 ? jobs[idx] : undefined;
+      if (!existing) throw new Error(`Job not found: ${jobId}`);
+      if (existing.status !== 'active' || existing.nextRunAt !== expectedNextRunAt) {
+        // Already claimed (or otherwise moved) by a concurrent tick — no-op.
+        return jobs;
+      }
+      jobs[idx] = { ...existing, ...patch };
+      claimed = true;
+      return jobs;
+    });
+    return claimed;
   }
 }
 

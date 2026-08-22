@@ -512,6 +512,9 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
   // trigger runs. `external` is threaded into `createWebApi` below (only
   // when non-null) so `POST /cron/fire` is mounted iff the operator opted in.
   const cronTriggers: CronTriggers = buildCronTriggers(cronScheduler, config.cron);
+  // Late-bind the arming backend `buildCronTriggers` just produced back onto
+  // the scheduler it was built from — see `CronScheduler.setArmingBackend`.
+  cronScheduler.setArmingBackend(cronTriggers.arming);
 
   if (teamFlag && personalityOverride) {
     // Plan B member spawn — supervisor spawns each member with

@@ -655,6 +655,83 @@ describe('CronScheduler.fire()', () => {
 });
 
 // ---------------------------------------------------------------------------
+// CronScheduler.setArmingBackend() — the late-binding seam
+// buildCronTriggers's construction order requires: buildCronTriggers needs
+// the already-constructed CronScheduler as its `engine` arg, so the arming
+// backend it produces can only be wired back in AFTER construction.
+// ---------------------------------------------------------------------------
+
+describe('CronScheduler.setArmingBackend()', () => {
+  it('a backend set after construction is picked up by a subsequent fire()', async () => {
+    const armCalls: Array<Date | null> = [];
+    const scheduler = makeScheduler(); // no armingBackend at construction time
+
+    const job = await scheduler.createJob({
+      name: 'Late Bound Arming Job',
+      schedule: '0 8 * * *',
+      prompt: 'test',
+      personalityId: 'test',
+      missedRunPolicy: 'skip',
+    });
+    const nextAt = new Date(Date.now() + 60 * 60 * 1000);
+    // biome-ignore lint/suspicious/noExplicitAny: test access to private method
+    await (scheduler as any).patchJob(job.id, { nextRunAt: nextAt.toISOString() });
+
+    // Set AFTER construction — mirrors serve.ts/gateway.ts calling
+    // `scheduler.setArmingBackend(cronTriggers.arming)` right after
+    // `buildCronTriggers(scheduler, config.cron)` returns.
+    scheduler.setArmingBackend({ arm: (next) => void armCalls.push(next) });
+
+    await scheduler.fire();
+
+    expect(armCalls).toHaveLength(1);
+    expect(armCalls[0]?.getTime()).toBe(nextAt.getTime());
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Concurrent tick() claims — real compare-and-swap (post-review fix). Two
+// CronTriggerSources (LocalIntervalTrigger + HttpFireTrigger) firing the same
+// engine close together in the hybrid deployment profile must not both win
+// the claim on the same due job.
+// ---------------------------------------------------------------------------
+
+describe('CronScheduler concurrent claim (CAS)', () => {
+  it('two overlapping fire() calls on the same due job execute it exactly once', async () => {
+    const runs: string[] = [];
+    const scheduler = makeScheduler({
+      runJob: async (job) => {
+        runs.push(job.id);
+        // A little run latency gives both overlapping calls room to race.
+        await new Promise((r) => setTimeout(r, 20));
+        return { jobId: job.id, ranAt: new Date().toISOString(), output: 'x', sessionKey: 'k' };
+      },
+    });
+
+    const job = await scheduler.createJob({
+      name: 'Race Due Job',
+      schedule: '0 8 * * *',
+      prompt: 'test',
+      personalityId: 'test',
+      missedRunPolicy: 'run-once',
+    });
+    // biome-ignore lint/suspicious/noExplicitAny: test access to private method
+    await (scheduler as any).patchJob(job.id, {
+      nextRunAt: new Date(Date.now() - 60_000).toISOString(),
+    });
+
+    // Simulate LocalIntervalTrigger's interval and HttpFireTrigger's
+    // /cron/fire both calling into the same engine around the same moment.
+    await Promise.all([scheduler.fire(), scheduler.fire()]);
+
+    // Exactly one execution — not two. Before the fix, both calls' unlocked
+    // readJobs() snapshots saw the same due nextRunAt and both patchJob
+    // "claims" succeeded (last-write-wins), so the job ran twice.
+    expect(runs).toEqual(['race-due-job']);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Job chaining (contextFrom)
 // ---------------------------------------------------------------------------
 
