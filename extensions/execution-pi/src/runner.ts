@@ -165,6 +165,7 @@ export class PiJobRunner implements JobRunner {
         tools: this.deps.tools ?? DEFAULT_PI_TOOLS,
         signal: ctx.signal,
         steerSink: ctx.steerSink,
+        appendLog: ctx.appendLog,
         gate: this.gate,
         ...(this.deps.logger ? { logger: this.deps.logger } : {}),
         onStarted: (info) => this.live.set(job.id, info),

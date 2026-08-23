@@ -447,6 +447,7 @@ const ALL_SCOPES: ApiKeyScope[] = [
   'tools:approve',
   'events:subscribe',
   'metrics:read',
+  'cron',
 ];
 
 /**

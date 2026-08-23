@@ -1,8 +1,41 @@
 import { DefaultHookRegistry } from '@ethosagent/core';
 import { KanbanStore } from '@ethosagent/kanban-store';
-import type { Tool, ToolContext } from '@ethosagent/types';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import type {
+  CompletionChunk,
+  LLMProvider,
+  Message,
+  TicketBlockedPayload,
+  TicketCompletedPayload,
+  TicketUpdatedPayload,
+  Tool,
+  ToolContext,
+} from '@ethosagent/types';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createKanbanTools } from '../index';
+
+// Minimal LLMProvider stub for kanban_decompose — yields a fixed response
+// text as a single text_delta chunk, or throws if `throwsMessage` is set.
+function stubDecomposerProvider(opts: {
+  responseText?: string;
+  throwsMessage?: string;
+}): LLMProvider {
+  return {
+    name: 'stub',
+    model: 'stub-model',
+    maxContextTokens: 100_000,
+    supportsCaching: false,
+    supportsThinking: false,
+    complete(_messages: Message[]): AsyncIterable<CompletionChunk> {
+      return (async function* () {
+        if (opts.throwsMessage) throw new Error(opts.throwsMessage);
+        yield { type: 'text_delta', text: opts.responseText ?? '' } as CompletionChunk;
+      })();
+    },
+    async countTokens() {
+      return 0;
+    },
+  };
+}
 
 // End-to-end tests at the tool boundary — same level the LLM hits.
 // Verifies args parsing, store wiring, and ToolResult shape.
@@ -45,7 +78,7 @@ describe('kanban tools', () => {
     store.close();
   });
 
-  it('exposes 13 tools in the kanban toolset with the right maxResultChars', () => {
+  it('exposes 15 tools in the kanban toolset with the right maxResultChars', () => {
     const names = Object.keys(tools).sort();
     expect(names).toEqual([
       'kanban_archive',
@@ -55,6 +88,8 @@ describe('kanban tools', () => {
       'kanban_complete',
       'kanban_create',
       'kanban_create_goal',
+      'kanban_create_swarm',
+      'kanban_decompose',
       'kanban_heartbeat',
       'kanban_link',
       'kanban_list',
@@ -145,6 +180,417 @@ describe('kanban tools', () => {
     const out = await call<{ task_id: string }>(tools.kanban_create as Tool, { title: 'x' }, ctx);
     const events = store.listEvents(out.task_id);
     expect(events[0]?.actor).toBe('engineer');
+  });
+
+  // ---------------------------------------------------------------------------
+  // kanban_create_swarm
+  // ---------------------------------------------------------------------------
+
+  it('kanban_create_swarm creates a done root + workers + verifier + synthesizer, wired parent to child', async () => {
+    const out = await call<{
+      root_id: string;
+      worker_ids: string[];
+      verifier_id: string | null;
+      synthesizer_id: string | null;
+    }>(
+      tools.kanban_create_swarm as Tool,
+      {
+        goal: 'Research and report on X',
+        workers: [
+          { personality: 'researcher-a', prompt: 'Look into angle A' },
+          { personality: 'researcher-b', prompt: 'Look into angle B' },
+        ],
+        verifier_personality: 'verifier',
+        synthesizer_personality: 'synthesizer',
+      },
+      makeCtx(),
+    );
+
+    expect(out.worker_ids).toHaveLength(2);
+    expect(out.verifier_id).not.toBeNull();
+    expect(out.synthesizer_id).not.toBeNull();
+
+    const root = store.getTask(out.root_id);
+    expect(root?.status).toBe('done');
+    expect(root?.assignee).toBeNull();
+    expect(root?.body).toBe('Research and report on X');
+
+    for (const workerId of out.worker_ids) {
+      const parents = store.getParents(workerId);
+      expect(parents.map((p) => p.id)).toEqual([out.root_id]);
+    }
+
+    const verifierId = out.verifier_id as string;
+    expect(store.getTask(verifierId)?.assignee).toBe('verifier');
+    expect(
+      store
+        .getParents(verifierId)
+        .map((p) => p.id)
+        .sort(),
+    ).toEqual([...out.worker_ids].sort());
+
+    const synthesizerId = out.synthesizer_id as string;
+    expect(store.getTask(synthesizerId)?.assignee).toBe('synthesizer');
+    expect(store.getParents(synthesizerId).map((p) => p.id)).toEqual([verifierId]);
+  });
+
+  it('kanban_create_swarm skips the verifier tier when verifier_personality is omitted, chaining the synthesizer directly off the workers', async () => {
+    const out = await call<{
+      root_id: string;
+      worker_ids: string[];
+      verifier_id: string | null;
+      synthesizer_id: string | null;
+    }>(
+      tools.kanban_create_swarm as Tool,
+      {
+        goal: 'goal',
+        workers: [{ personality: 'w1', prompt: 'do work' }],
+        synthesizer_personality: 'synthesizer',
+      },
+      makeCtx(),
+    );
+
+    expect(out.verifier_id).toBeNull();
+    expect(out.synthesizer_id).not.toBeNull();
+    const synthesizerId = out.synthesizer_id as string;
+    expect(store.getParents(synthesizerId).map((p) => p.id)).toEqual(out.worker_ids);
+  });
+
+  it('kanban_create_swarm skips both verifier and synthesizer tiers when both are omitted', async () => {
+    const out = await call<{
+      root_id: string;
+      worker_ids: string[];
+      verifier_id: string | null;
+      synthesizer_id: string | null;
+    }>(
+      tools.kanban_create_swarm as Tool,
+      { goal: 'goal', workers: [{ personality: 'w1', prompt: 'do work' }] },
+      makeCtx(),
+    );
+
+    expect(out.verifier_id).toBeNull();
+    expect(out.synthesizer_id).toBeNull();
+    expect(store.listTasks()).toHaveLength(2); // root + 1 worker
+  });
+
+  it('kanban_create_swarm rejects a missing goal', async () => {
+    const result = await (tools.kanban_create_swarm as Tool).execute(
+      { workers: [{ personality: 'w1', prompt: 'p' }] },
+      makeCtx(),
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.code).toBe('input_invalid');
+  });
+
+  it('kanban_create_swarm rejects an empty workers array', async () => {
+    const result = await (tools.kanban_create_swarm as Tool).execute(
+      { goal: 'goal', workers: [] },
+      makeCtx(),
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.code).toBe('input_invalid');
+  });
+
+  it('kanban_create_swarm rejects a worker missing personality or prompt', async () => {
+    const result = await (tools.kanban_create_swarm as Tool).execute(
+      { goal: 'goal', workers: [{ personality: 'w1' }] },
+      makeCtx(),
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.code).toBe('input_invalid');
+  });
+
+  it('kanban_create_swarm rejects more than the max worker count', async () => {
+    const workers = Array.from({ length: 21 }, (_, i) => ({
+      personality: `w${i}`,
+      prompt: 'p',
+    }));
+    const result = await (tools.kanban_create_swarm as Tool).execute(
+      { goal: 'goal', workers },
+      makeCtx(),
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.code).toBe('input_invalid');
+  });
+
+  it('kanban_create_swarm rolls back the whole graph when a failure hits partway through construction — no orphan root/worker tasks survive', async () => {
+    const originalCreateTask = store.createTask.bind(store);
+    let calls = 0;
+    vi.spyOn(store, 'createTask').mockImplementation((createArgs) => {
+      calls += 1;
+      // Let the root and first worker through, then blow up on the second worker —
+      // exactly the "partway through graph construction" case the plan calls for.
+      if (calls === 3) throw new Error('boom');
+      return originalCreateTask(createArgs);
+    });
+
+    const result = await (tools.kanban_create_swarm as Tool).execute(
+      {
+        goal: 'goal',
+        workers: [
+          { personality: 'w1', prompt: 'p1' },
+          { personality: 'w2', prompt: 'p2' },
+        ],
+        verifier_personality: 'verifier',
+      },
+      makeCtx(),
+    );
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toMatch(/boom/);
+    // The root and first worker were created inside the same transaction as
+    // the failing second worker — all of it must have rolled back together.
+    expect(store.listTasks()).toHaveLength(0);
+
+    vi.restoreAllMocks();
+  });
+
+  // ---------------------------------------------------------------------------
+  // kanban_decompose
+  // ---------------------------------------------------------------------------
+
+  it('kanban_decompose returns execution_failed when no decomposer provider is configured', async () => {
+    // The default `tools` fixture (beforeEach) has no decomposerProvider wired.
+    const goal = await call<{ task_id: string }>(
+      tools.kanban_create_goal as Tool,
+      { title: 'Goal' },
+      makeCtx(),
+    );
+    const result = await (tools.kanban_decompose as Tool).execute(
+      { task_id: goal.task_id },
+      makeCtx(),
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.code).toBe('execution_failed');
+      expect(result.error).toMatch(/no auxiliary\.kanban_decomposer model configured/);
+    }
+  });
+
+  it('kanban_decompose rejects missing task_id', async () => {
+    const provider = stubDecomposerProvider({ responseText: '[]' });
+    const decomposeTools = toolsByName(createKanbanTools({ store, decomposerProvider: provider }));
+    const result = await (decomposeTools.kanban_decompose as Tool).execute({}, makeCtx());
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.code).toBe('input_invalid');
+  });
+
+  it('kanban_decompose returns input_invalid for an unknown task_id', async () => {
+    const provider = stubDecomposerProvider({ responseText: '[]' });
+    const decomposeTools = toolsByName(createKanbanTools({ store, decomposerProvider: provider }));
+    const result = await (decomposeTools.kanban_decompose as Tool).execute(
+      { task_id: 'nope' },
+      makeCtx(),
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.code).toBe('input_invalid');
+  });
+
+  it('kanban_decompose creates a child per proposed task, parented to the goal', async () => {
+    const provider = stubDecomposerProvider({
+      responseText: JSON.stringify([
+        { title: 'child A', body: 'do A', assignee: 'engineer' },
+        { title: 'child B' },
+      ]),
+    });
+    const decomposeTools = toolsByName(createKanbanTools({ store, decomposerProvider: provider }));
+    const goal = await call<{ task_id: string }>(
+      decomposeTools.kanban_create_goal as Tool,
+      { title: 'Goal' },
+      makeCtx(),
+    );
+
+    const out = await call<{
+      task_id: string;
+      children_created: { task_id: string; title: string }[];
+    }>(decomposeTools.kanban_decompose as Tool, { task_id: goal.task_id }, makeCtx());
+
+    expect(out.children_created).toHaveLength(2);
+    expect(out.children_created.map((c) => c.title)).toEqual(['child A', 'child B']);
+    const childA = store.getTask(out.children_created[0]?.task_id ?? '');
+    expect(childA?.body).toBe('do A');
+    expect(childA?.assignee).toBe('engineer');
+    expect(store.getParents(out.children_created[0]?.task_id ?? '').map((p) => p.id)).toEqual([
+      goal.task_id,
+    ]);
+    const childB = store.getTask(out.children_created[1]?.task_id ?? '');
+    expect(childB?.assignee).toBeNull();
+  });
+
+  it('kanban_decompose strips a ```json fence around the response', async () => {
+    const provider = stubDecomposerProvider({
+      responseText: '```json\n[{"title": "fenced child"}]\n```',
+    });
+    const decomposeTools = toolsByName(createKanbanTools({ store, decomposerProvider: provider }));
+    const goal = await call<{ task_id: string }>(
+      decomposeTools.kanban_create_goal as Tool,
+      { title: 'Goal' },
+      makeCtx(),
+    );
+    const out = await call<{ children_created: { title: string }[] }>(
+      decomposeTools.kanban_decompose as Tool,
+      { task_id: goal.task_id },
+      makeCtx(),
+    );
+    expect(out.children_created.map((c) => c.title)).toEqual(['fenced child']);
+  });
+
+  it('kanban_decompose returns execution_failed with no children created when the LLM call throws', async () => {
+    const provider = stubDecomposerProvider({ throwsMessage: 'provider unreachable' });
+    const decomposeTools = toolsByName(createKanbanTools({ store, decomposerProvider: provider }));
+    const goal = await call<{ task_id: string }>(
+      decomposeTools.kanban_create_goal as Tool,
+      { title: 'Goal' },
+      makeCtx(),
+    );
+    const result = await (decomposeTools.kanban_decompose as Tool).execute(
+      { task_id: goal.task_id },
+      makeCtx(),
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.code).toBe('execution_failed');
+      expect(result.error).toMatch(/provider unreachable/);
+    }
+    expect(store.listTasks({ parentId: goal.task_id })).toHaveLength(0);
+  });
+
+  it('kanban_decompose returns execution_failed when the response is not valid JSON', async () => {
+    const provider = stubDecomposerProvider({ responseText: 'not json at all' });
+    const decomposeTools = toolsByName(createKanbanTools({ store, decomposerProvider: provider }));
+    const goal = await call<{ task_id: string }>(
+      decomposeTools.kanban_create_goal as Tool,
+      { title: 'Goal' },
+      makeCtx(),
+    );
+    const result = await (decomposeTools.kanban_decompose as Tool).execute(
+      { task_id: goal.task_id },
+      makeCtx(),
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.code).toBe('execution_failed');
+    expect(store.listTasks({ parentId: goal.task_id })).toHaveLength(0);
+  });
+
+  it('kanban_decompose returns a partial-success result when a per-child create fails partway through', async () => {
+    const provider = stubDecomposerProvider({
+      responseText: JSON.stringify([
+        { title: 'child A' },
+        { title: 'child B' },
+        { title: 'child C' },
+      ]),
+    });
+    const decomposeTools = toolsByName(createKanbanTools({ store, decomposerProvider: provider }));
+    const goal = await call<{ task_id: string }>(
+      decomposeTools.kanban_create_goal as Tool,
+      { title: 'Goal' },
+      makeCtx(),
+    );
+
+    const originalCreateTask = store.createTask.bind(store);
+    let calls = 0;
+    vi.spyOn(store, 'createTask').mockImplementation((args) => {
+      calls += 1;
+      if (calls === 2) throw new Error('boom');
+      return originalCreateTask(args);
+    });
+
+    const out = await call<{
+      task_id: string;
+      children_created: { task_id: string; title: string }[];
+      partial_failure?: boolean;
+      failed_child?: { title: string; error: string };
+      not_attempted?: { title: string }[];
+    }>(decomposeTools.kanban_decompose as Tool, { task_id: goal.task_id }, makeCtx());
+
+    expect(out.children_created).toHaveLength(1);
+    expect(out.children_created[0]?.title).toBe('child A');
+    expect(out.partial_failure).toBe(true);
+    expect(out.failed_child?.title).toBe('child B');
+    expect(out.failed_child?.error).toMatch(/boom/);
+    expect(out.not_attempted).toEqual([{ title: 'child C' }]);
+
+    vi.restoreAllMocks();
+  });
+
+  it("kanban_decompose applies kanban_create's length caps to a proposed child and stops at the first oversized one", async () => {
+    // MAX_TITLE_CHARS is 500 (not exported); one char over trips the same
+    // `tooLong` check kanban_create runs on its own args.
+    const oversizedTitle = 'x'.repeat(501);
+    const provider = stubDecomposerProvider({
+      responseText: JSON.stringify([
+        { title: 'child A' },
+        { title: oversizedTitle },
+        { title: 'child C' },
+      ]),
+    });
+    const decomposeTools = toolsByName(createKanbanTools({ store, decomposerProvider: provider }));
+    const goal = await call<{ task_id: string }>(
+      decomposeTools.kanban_create_goal as Tool,
+      { title: 'Goal' },
+      makeCtx(),
+    );
+
+    const out = await call<{
+      task_id: string;
+      children_created: { task_id: string; title: string }[];
+      partial_failure?: boolean;
+      failed_child?: { title: string; error: string };
+      not_attempted?: { title: string }[];
+    }>(decomposeTools.kanban_decompose as Tool, { task_id: goal.task_id }, makeCtx());
+
+    expect(out.children_created).toHaveLength(1);
+    expect(out.children_created[0]?.title).toBe('child A');
+    expect(out.partial_failure).toBe(true);
+    expect(out.failed_child?.title).toBe(oversizedTitle);
+    expect(out.failed_child?.error).toMatch(/title too long/);
+    expect(out.not_attempted).toEqual([{ title: 'child C' }]);
+
+    // The oversized child never reached the store — same "stop at first
+    // failure" semantic as a store.createTask throw, so nothing after it was
+    // attempted either.
+    expect(store.listTasks({ parentId: goal.task_id })).toHaveLength(1);
+  });
+
+  it('kanban_decompose caps max_children at 10 and rejects a non-positive-integer', async () => {
+    const provider = stubDecomposerProvider({
+      responseText: JSON.stringify(Array.from({ length: 20 }, (_, i) => ({ title: `child ${i}` }))),
+    });
+    const decomposeTools = toolsByName(createKanbanTools({ store, decomposerProvider: provider }));
+    const goal = await call<{ task_id: string }>(
+      decomposeTools.kanban_create_goal as Tool,
+      { title: 'Goal' },
+      makeCtx(),
+    );
+    const out = await call<{ children_created: unknown[] }>(
+      decomposeTools.kanban_decompose as Tool,
+      { task_id: goal.task_id, max_children: 999 },
+      makeCtx(),
+    );
+    expect(out.children_created).toHaveLength(10);
+
+    const badResult = await (decomposeTools.kanban_decompose as Tool).execute(
+      { task_id: goal.task_id, max_children: 0 },
+      makeCtx(),
+    );
+    expect(badResult.ok).toBe(false);
+    if (!badResult.ok) expect(badResult.code).toBe('input_invalid');
+  });
+
+  it('kanban_decompose rejects an over-long instructions string', async () => {
+    const provider = stubDecomposerProvider({ responseText: '[]' });
+    const decomposeTools = toolsByName(createKanbanTools({ store, decomposerProvider: provider }));
+    const goal = await call<{ task_id: string }>(
+      decomposeTools.kanban_create_goal as Tool,
+      { title: 'Goal' },
+      makeCtx(),
+    );
+    const result = await (decomposeTools.kanban_decompose as Tool).execute(
+      { task_id: goal.task_id, instructions: 'a'.repeat(4_001) },
+      makeCtx(),
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.code).toBe('input_invalid');
   });
 
   // ---------------------------------------------------------------------------
@@ -273,6 +719,51 @@ describe('kanban tools', () => {
       makeCtx(),
     );
     expect(out.status).toBe('blocked');
+  });
+
+  it('kanban_block accepts an optional kind and persists it on the task', async () => {
+    const t = store.createTask({ title: 'x' });
+    store.updateStatus(t.id, 'running');
+    const out = await call<{ status: string; block_kind: string | null }>(
+      tools.kanban_block as Tool,
+      { task_id: t.id, reason: 'waiting on infra', kind: 'dependency' },
+      makeCtx(),
+    );
+    expect(out.status).toBe('blocked');
+    expect(out.block_kind).toBe('dependency');
+  });
+
+  it('kanban_block rejects an unrecognized kind', async () => {
+    const t = store.createTask({ title: 'x' });
+    store.updateStatus(t.id, 'running');
+    const result = await (tools.kanban_block as Tool).execute(
+      { task_id: t.id, reason: 'waiting on infra', kind: 'not_a_real_kind' },
+      makeCtx(),
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.code).toBe('input_invalid');
+  });
+
+  it('kanban_block routes to needs_revision after BLOCK_RECURRENCE_LIMIT same-kind blocks in a row', async () => {
+    const t = store.createTask({ title: 'flaky dependency' });
+    store.updateStatus(t.id, 'running');
+    await call(
+      tools.kanban_block as Tool,
+      { task_id: t.id, reason: 'waiting on service A', kind: 'dependency' },
+      makeCtx(),
+    );
+
+    // Re-claim, then block again with the same kind — the default
+    // BLOCK_RECURRENCE_LIMIT (2) is met on this second consecutive block.
+    store.updateStatus(t.id, 'running');
+    const out = await call<{ status: string; block_recurrence_count: number }>(
+      tools.kanban_block as Tool,
+      { task_id: t.id, reason: 'still waiting on service A', kind: 'dependency' },
+      makeCtx(),
+    );
+
+    expect(out.status).toBe('needs_revision');
+    expect(out.block_recurrence_count).toBe(2);
   });
 
   it('kanban_unblock returns ready when all parents are done', async () => {
@@ -523,5 +1014,123 @@ describe('kanban_complete before_ticket_complete hook', () => {
       makeCtx('engineer'),
     );
     expect(out.status).toBe('done');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ticket_blocked / ticket_completed / ticket_updated — Lane B lifecycle hooks
+// (kanban-hooks-notify-parity)
+// ---------------------------------------------------------------------------
+
+describe('kanban tools Lane B lifecycle hooks', () => {
+  let store: KanbanStore;
+
+  beforeEach(() => {
+    store = new KanbanStore(':memory:');
+  });
+
+  afterEach(() => {
+    store.close();
+  });
+
+  it('kanban_block fires ticket_blocked with kind when supplied', async () => {
+    const hooks = new DefaultHookRegistry();
+    const blocked: TicketBlockedPayload[] = [];
+    hooks.registerVoid('ticket_blocked', async (payload) => {
+      blocked.push(payload);
+    });
+    const tools = toolsByName(createKanbanTools({ store, hooks }));
+
+    const t = store.createTask({ title: 'x' });
+    store.updateStatus(t.id, 'running');
+
+    await call(
+      tools.kanban_block as Tool,
+      { task_id: t.id, reason: 'waiting on API key', kind: 'needs_input' },
+      makeCtx('engineer'),
+    );
+
+    expect(blocked).toEqual([{ taskId: t.id, reason: 'waiting on API key', kind: 'needs_input' }]);
+  });
+
+  it('kanban_block fires ticket_blocked without a kind key when none is supplied', async () => {
+    const hooks = new DefaultHookRegistry();
+    const blocked: TicketBlockedPayload[] = [];
+    hooks.registerVoid('ticket_blocked', async (payload) => {
+      blocked.push(payload);
+    });
+    const tools = toolsByName(createKanbanTools({ store, hooks }));
+
+    const t = store.createTask({ title: 'x' });
+    store.updateStatus(t.id, 'running');
+
+    await call(tools.kanban_block as Tool, { task_id: t.id, reason: 'stuck' }, makeCtx('engineer'));
+
+    expect(blocked).toEqual([{ taskId: t.id, reason: 'stuck' }]);
+    expect(blocked[0]).not.toHaveProperty('kind');
+  });
+
+  it('kanban_complete fires ticket_completed with { taskId, summary } on the successful path', async () => {
+    const hooks = new DefaultHookRegistry();
+    const completed: TicketCompletedPayload[] = [];
+    hooks.registerVoid('ticket_completed', async (payload) => {
+      completed.push(payload);
+    });
+    const tools = toolsByName(createKanbanTools({ store, hooks }));
+
+    const t = store.createTask({ title: 'x' });
+    store.updateStatus(t.id, 'running');
+
+    await call(
+      tools.kanban_complete as Tool,
+      { task_id: t.id, summary: 'shipped it' },
+      makeCtx('engineer'),
+    );
+
+    expect(completed).toEqual([{ taskId: t.id, summary: 'shipped it' }]);
+  });
+
+  it('kanban_complete does NOT fire ticket_completed when before_ticket_complete rejects the completion', async () => {
+    const hooks = new DefaultHookRegistry();
+    hooks.registerClaiming('before_ticket_complete', async () => ({
+      handled: true,
+      reason: 'not good enough',
+    }));
+    const completed: TicketCompletedPayload[] = [];
+    hooks.registerVoid('ticket_completed', async (payload) => {
+      completed.push(payload);
+    });
+    const tools = toolsByName(createKanbanTools({ store, hooks }));
+
+    const t = store.createTask({ title: 'x' });
+    store.updateStatus(t.id, 'running');
+
+    const out = await call<{ status: string }>(
+      tools.kanban_complete as Tool,
+      { task_id: t.id, summary: 'shipped it' },
+      makeCtx('engineer'),
+    );
+
+    expect(out.status).toBe('needs_revision');
+    expect(completed).toEqual([]);
+  });
+
+  it('kanban_assign fires ticket_updated with { taskId, changedFields: ["assignee"] }', async () => {
+    const hooks = new DefaultHookRegistry();
+    const updated: TicketUpdatedPayload[] = [];
+    hooks.registerVoid('ticket_updated', async (payload) => {
+      updated.push(payload);
+    });
+    const tools = toolsByName(createKanbanTools({ store, hooks }));
+
+    const t = store.createTask({ title: 'x' });
+
+    await call(
+      tools.kanban_assign as Tool,
+      { task_id: t.id, assignee: 'researcher' },
+      makeCtx('engineer'),
+    );
+
+    expect(updated).toEqual([{ taskId: t.id, changedFields: ['assignee'] }]);
   });
 });

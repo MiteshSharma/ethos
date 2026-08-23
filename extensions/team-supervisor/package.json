@@ -14,6 +14,7 @@
   },
   "dependencies": {
     "@ethosagent/agent-mesh": "workspace:*",
+    "@ethosagent/core": "workspace:*",
     "@ethosagent/kanban-store": "workspace:*",
     "@ethosagent/logger": "workspace:*",
     "@ethosagent/storage-fs": "workspace:*",

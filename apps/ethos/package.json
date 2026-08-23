@@ -102,6 +102,7 @@
     "@ethosagent/logger": "workspace:*",
     "@ethosagent/mcp-server": "workspace:*",
     "@ethosagent/nightly-loop": "workspace:*",
+    "@ethosagent/notify-queue": "workspace:*",
     "@ethosagent/observability-sqlite": "workspace:*",
     "@ethosagent/platform-callcapture": "workspace:*",
     "@ethosagent/request-dump": "workspace:*",

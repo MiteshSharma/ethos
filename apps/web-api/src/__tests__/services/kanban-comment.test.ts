@@ -56,7 +56,7 @@ describe('KanbanService — addComment + notify', () => {
       activeSessions: 0,
       personalityId: 'engineer',
       displayName: 'Engineer',
-      boardSubscriptions: ['team-a'],
+      boardSubscriptions: [{ board: 'team-a' }],
     });
 
     const fetchSpy = vi
@@ -81,7 +81,11 @@ describe('KanbanService — addComment + notify', () => {
     expect(fetchSpy).toHaveBeenCalledTimes(1);
     const [url, opts] = fetchSpy.mock.calls[0] as [string, RequestInit];
     expect(url).toBe('http://127.0.0.1:9999/notify');
-    expect(JSON.parse(opts.body as string)).toEqual({ kind: 'kanban_comment', ref: task.id });
+    expect(JSON.parse(opts.body as string)).toEqual({
+      kind: 'kanban_comment',
+      ref: task.id,
+      mode: 'notify+wake',
+    });
   });
 
   it('addComment does not throw when /notify fails', async () => {
@@ -102,7 +106,7 @@ describe('KanbanService — addComment + notify', () => {
       activeSessions: 0,
       personalityId: 'engineer',
       displayName: 'Engineer',
-      boardSubscriptions: ['team-a'],
+      boardSubscriptions: [{ board: 'team-a' }],
     });
 
     vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('refused'));
@@ -159,7 +163,7 @@ describe('KanbanService — addComment + notify', () => {
       activeSessions: 0,
       personalityId: 'engineer',
       displayName: 'Engineer',
-      boardSubscriptions: ['team-a'],
+      boardSubscriptions: [{ board: 'team-a' }],
     });
     await mesh.register({
       agentId: 'agent-b:1:xyz',
@@ -171,7 +175,7 @@ describe('KanbanService — addComment + notify', () => {
       activeSessions: 0,
       personalityId: 'agent-b',
       displayName: 'Agent B',
-      boardSubscriptions: ['team-a'],
+      boardSubscriptions: [{ board: 'team-a' }],
     });
 
     const fetchSpy = vi
@@ -192,7 +196,11 @@ describe('KanbanService — addComment + notify', () => {
     for (const call of fetchSpy.mock.calls) {
       const [url, opts] = call as [string, RequestInit];
       urls.add(url);
-      expect(JSON.parse(opts.body as string)).toEqual({ kind: 'kanban_comment', ref: task.id });
+      expect(JSON.parse(opts.body as string)).toEqual({
+        kind: 'kanban_comment',
+        ref: task.id,
+        mode: 'notify+wake',
+      });
     }
     expect(urls).toEqual(new Set(['http://127.0.0.1:9999/notify', 'http://127.0.0.1:8888/notify']));
   });

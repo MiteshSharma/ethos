@@ -42,6 +42,7 @@
         "./extensions/tools-kanban/src/reducers/kanban-list"
       ],
       "@ethosagent/agent-mesh": ["./extensions/agent-mesh/src"],
+      "@ethosagent/notify-queue": ["./extensions/notify-queue/src"],
       "@ethosagent/team-supervisor": ["./extensions/team-supervisor/src"],
       "@ethosagent/acp-server": ["./apps/acp-server/src"],
       "@ethosagent/cron": ["./extensions/cron/src"],
@@ -101,6 +102,7 @@
       "@ethosagent/execution-local": ["./extensions/execution-local/src"],
       "@ethosagent/execution-docker": ["./extensions/execution-docker/src"],
       "@ethosagent/execution-pi": ["./extensions/execution-pi/src"],
+      "@ethosagent/execution-coding-agents": ["./extensions/execution-coding-agents/src"],
       "@ethosagent/execution-process-backend": ["./extensions/execution-process-backend/src"],
       "@ethosagent/execution-ssh": ["./extensions/execution-ssh/src"],
       "@ethosagent/tools-browser": ["./extensions/tools-browser/src"],

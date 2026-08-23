@@ -116,6 +116,12 @@ Payload + result types live in [`packages/types/src/hooks.ts`](https://github.co
 | `subagent_spawned` | `SubagentSpawnedPayload` | After `tools-delegation` spawns a subagent session. |
 | `subagent_ended` | `SubagentEndedPayload` | When a subagent session ends. |
 | `after_ticket_revision` | `AfterTicketRevisionPayload` | After `kanban_complete` was rejected by a `before_ticket_complete` verifier and the ticket was moved to `needs_revision`. |
+| `ticket_claimed` | `TicketClaimedPayload` | After a task is claimed and moves to `running`. |
+| `ticket_blocked` | `TicketBlockedPayload` | After `kanban_block` commits the block transition. |
+| `ticket_completed` | `TicketCompletedPayload` | After `kanban_complete`'s `running -> done` transition commits — the successful-completion path only. |
+| `ticket_stale_reclaimed` | `TicketStaleReclaimedPayload` | Around `Dispatcher.tick()`'s `reclaimTask` call, when a stuck `running` task is re-queued to `ready` (owner gone or heartbeat stale). |
+| `ticket_updated` | `TicketUpdatedPayload` | On a ticket field mutation outside the status/block/complete lifecycle — today, `kanban_assign` and `KanbanService.assign`. |
+| `dispatch_tick` | `DispatchTickPayload` | At the bottom of `Dispatcher.tick()`, but only when `claimedCount > 0 \|\| reclaimedCount > 0` — an idle tick does not fire it. |
 
 ### Modifying hooks {#modifying-hooks}
 

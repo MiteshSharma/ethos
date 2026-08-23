@@ -25,10 +25,11 @@ import {
   writeConfig,
 } from '@ethosagent/config';
 import { type AgentLoop, scriptCallableFor, toolsDeclaringNetwork } from '@ethosagent/core';
-import { CronScheduler } from '@ethosagent/cron';
+import { buildCronTriggers, CronScheduler, type CronTriggers } from '@ethosagent/cron';
 import { LocalExecutionBackend } from '@ethosagent/execution-local';
 import { LangfusePollLoop } from '@ethosagent/export-langfuse';
 import { ConsoleLogger } from '@ethosagent/logger';
+import { SQLiteNotifyQueue } from '@ethosagent/notify-queue';
 import { computeContextAnatomy, createMetricsTextProvider } from '@ethosagent/observability-sqlite';
 import {
   createPersonalityRegistry,
@@ -506,6 +507,17 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
   // config above). Backing jobs are seeded by `watcherManager.start()` later.
   watcherManager.attachScheduler(cronScheduler);
 
+  // Cron trigger seam (plan/phases/cron-scheduler-seam.md). `cronScheduler`
+  // is the `CronEngine`; `buildCronTriggers` picks the trigger/backend pair
+  // per `cron.*` config. Defaults (`trigger.local: true`, `trigger.external:
+  // false`) reproduce today's behavior exactly — only the local interval
+  // trigger runs. `external` is threaded into `createWebApi` below (only
+  // when non-null) so `POST /cron/fire` is mounted iff the operator opted in.
+  const cronTriggers: CronTriggers = buildCronTriggers(cronScheduler, config.cron);
+  // Late-bind the arming backend `buildCronTriggers` just produced back onto
+  // the scheduler it was built from — see `CronScheduler.setArmingBackend`.
+  cronScheduler.setArmingBackend(cronTriggers.arming);
+
   if (teamFlag && personalityOverride) {
     // Plan B member spawn — supervisor spawns each member with
     //   ethos serve --personality <member> --team <name> --role <role>
@@ -653,6 +665,13 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
     runner: loop,
     session,
     mesh,
+    personalityId: activePersonality,
+    // Lane C (kanban-hooks-notify-parity, Phase 2) — passive `notify`-mode
+    // delivery needs somewhere to land, which only exists for a team board.
+    // A solo (non-team) `ethos serve` just no-ops that path.
+    ...(teamFlag
+      ? { teamId: teamFlag, notifyQueue: new SQLiteNotifyQueue(join(dir, 'notify-queue.db')) }
+      : {}),
     ...(mcpManager
       ? createAcpMcpWiring({ mcpManager, personalities, defaultPersonalityId: activePersonality })
       : {}),
@@ -676,7 +695,7 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
     activeSessions: 0,
     personalityId: activePersonality,
     displayName: personalityConfig?.name ?? activePersonality,
-    boardSubscriptions: teamFlag ? [teamFlag] : ['global'],
+    boardSubscriptions: teamFlag ? [{ board: teamFlag }] : [{ board: 'global' }],
     ...(teamAuthTokenRef ? { authTokenRef: teamAuthTokenRef } : {}),
   });
   const stopHeartbeat = mesh.startHeartbeat(agentId, () => acpServer.activeSessionCount);
@@ -762,7 +781,7 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
 
   // Start the cron scheduler now — `loop` is assigned, and we'll bind
   // `chatService` to the value returned by createWebApi below.
-  if (cronScheduler) cronScheduler.start();
+  cronTriggers.local?.start();
 
   // Load watchers.json and seed the backing `source:'system'` tick jobs.
   // Idempotent — existing jobs are re-registered so interval edits apply.
@@ -1401,6 +1420,7 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
       }
     },
     metricsTextFn: metricsText,
+    ...(cronTriggers.external ? { cronFireTrigger: cronTriggers.external } : {}),
   });
   chatService = created.chatService;
   const webApp = created.app;
@@ -1461,7 +1481,7 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
     // process, or the other host command, can take it.
     await callCaptureOwnershipManager?.stop();
     await mesh.unregister(agentId);
-    if (cronScheduler) cronScheduler.stop();
+    cronTriggers.local?.stop();
     if (webShutdown) await webShutdown();
     process.exit(0);
   };

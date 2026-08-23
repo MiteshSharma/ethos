@@ -41,7 +41,7 @@ describe('Dispatcher with AgentMesh', () => {
       activeSessions: 0,
       personalityId: 'engineer',
       displayName: 'Engineer',
-      boardSubscriptions: ['team-a'],
+      boardSubscriptions: [{ board: 'team-a' }],
     });
 
     // Create a ready task assigned to 'engineer'
@@ -119,5 +119,105 @@ describe('Dispatcher with AgentMesh', () => {
     expect(dispatch).toHaveBeenCalledTimes(1);
     const prompt = dispatch.mock.calls[0]?.[0]?.prompt;
     expect(prompt).toContain(t.id);
+  });
+
+  it('honors the assignee mesh entry boardSubscriptions mode on the claim path', async () => {
+    await mesh.register({
+      agentId: 'engineer:1234:abc',
+      capabilities: [],
+      model: 'test',
+      pid: 1234,
+      host: 'localhost',
+      port: 4001,
+      activeSessions: 0,
+      personalityId: 'engineer',
+      displayName: 'Engineer',
+      boardSubscriptions: [{ board: 'team-a', mode: 'notify' }],
+    });
+
+    const t = board.createTask({ title: 'build feature', assignee: 'engineer' });
+    board.updateStatus(t.id, 'ready');
+
+    const dispatch = vi.fn<DispatchCall>(async () => 'ok');
+    const dispatcher = new Dispatcher({
+      board,
+      supervisor: emptySupervisor,
+      mesh,
+      dispatch,
+      teamId: 'team-a',
+    });
+
+    await dispatcher.tick();
+    await new Promise((r) => setImmediate(r));
+
+    expect(dispatch).toHaveBeenCalledTimes(1);
+    const call = dispatch.mock.calls[0]?.[0];
+    expect(call?.mode).toBe('notify');
+  });
+
+  it('omits the mode field when the assignee has no matching board subscription', async () => {
+    await mesh.register({
+      agentId: 'engineer:1234:abc',
+      capabilities: [],
+      model: 'test',
+      pid: 1234,
+      host: 'localhost',
+      port: 4001,
+      activeSessions: 0,
+      personalityId: 'engineer',
+      displayName: 'Engineer',
+      boardSubscriptions: [{ board: 'other-team', mode: 'notify' }],
+    });
+
+    const t = board.createTask({ title: 'build feature', assignee: 'engineer' });
+    board.updateStatus(t.id, 'ready');
+
+    const dispatch = vi.fn<DispatchCall>(async () => 'ok');
+    const dispatcher = new Dispatcher({
+      board,
+      supervisor: emptySupervisor,
+      mesh,
+      dispatch,
+      teamId: 'team-a',
+    });
+
+    await dispatcher.tick();
+    await new Promise((r) => setImmediate(r));
+
+    expect(dispatch).toHaveBeenCalledTimes(1);
+    const call = dispatch.mock.calls[0]?.[0];
+    expect(call).not.toHaveProperty('mode');
+  });
+
+  it('omits the mode field when the mesh entry has no boardSubscriptions at all', async () => {
+    await mesh.register({
+      agentId: 'eng:1:x',
+      capabilities: [],
+      model: 'test',
+      pid: 1,
+      host: 'localhost',
+      port: 5000,
+      activeSessions: 0,
+      personalityId: 'engineer',
+    });
+
+    const t = board.createTask({ title: 'implement API', assignee: 'engineer' });
+    board.updateStatus(t.id, 'ready');
+
+    const dispatch = vi.fn<DispatchCall>(async () => 'ok');
+    const dispatcher = new Dispatcher({
+      board,
+      supervisor: emptySupervisor,
+      mesh,
+      dispatch,
+      teamId: 'team-a',
+    });
+
+    await dispatcher.tick();
+    await new Promise((r) => setImmediate(r));
+
+    expect(dispatch).toHaveBeenCalledTimes(1);
+    const call = dispatch.mock.calls[0]?.[0];
+    expect(call).not.toHaveProperty('mode');
   });
 });

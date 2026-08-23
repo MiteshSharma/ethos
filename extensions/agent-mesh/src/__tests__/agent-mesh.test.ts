@@ -104,14 +104,26 @@ describe('AgentMesh', () => {
       entry({
         personalityId: 'engineer',
         displayName: 'Engineer',
-        boardSubscriptions: ['backend'],
+        boardSubscriptions: [{ board: 'backend' }],
       }),
     );
     const list = await mesh.list();
     expect(list).toHaveLength(1);
     expect(list[0].personalityId).toBe('engineer');
     expect(list[0].displayName).toBe('Engineer');
-    expect(list[0].boardSubscriptions).toEqual(['backend']);
+    expect(list[0].boardSubscriptions).toEqual([{ board: 'backend' }]);
+  });
+
+  it('registers with a per-board mode preference (D7)', async () => {
+    const mesh = makeMesh();
+    await mesh.register(
+      entry({
+        personalityId: 'engineer',
+        boardSubscriptions: [{ board: 'backend', mode: 'notify' }],
+      }),
+    );
+    const list = await mesh.list();
+    expect(list[0].boardSubscriptions).toEqual([{ board: 'backend', mode: 'notify' }]);
   });
 
   it('registers without new fields (backward compat)', async () => {
@@ -122,6 +134,22 @@ describe('AgentMesh', () => {
     expect(list[0].personalityId).toBeUndefined();
     expect(list[0].displayName).toBeUndefined();
     expect(list[0].boardSubscriptions).toBeUndefined();
+  });
+
+  it('normalizes a pre-restructure registry.json (boardSubscriptions as string[]) on read (D7)', async () => {
+    const mesh = makeMesh();
+    await mesh.register(entry({ personalityId: 'engineer' }));
+    // Simulate a registry.json written before D7's restructure — bare board
+    // id strings rather than { board, mode } records — the same technique
+    // the "stale entries" test above uses to hand-edit the file on disk.
+    const path = (mesh as unknown as { path: string }).path;
+    const { readFile, writeFile } = await import('node:fs/promises');
+    const data = JSON.parse(await readFile(path, 'utf8'));
+    data[0].boardSubscriptions = ['backend', 'frontend'];
+    await writeFile(path, JSON.stringify(data));
+
+    const list = await mesh.list();
+    expect(list[0].boardSubscriptions).toEqual([{ board: 'backend' }, { board: 'frontend' }]);
   });
 
   it('findByPersonality returns matching entries', async () => {

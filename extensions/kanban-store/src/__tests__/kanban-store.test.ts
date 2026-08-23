@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import Database from '@ethosagent/sqlite';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { KanbanStore } from '../index';
 
 function makeStore() {
@@ -201,6 +201,115 @@ describe('KanbanStore', () => {
     expect(runs[0]?.endedAt).not.toBeNull();
   });
 
+  // ---------------------------------------------------------------------------
+  // blockRun: typed `kind` + unblock-loop breaker (kanban-hooks-notify-parity, Lane A Phase 1)
+  // ---------------------------------------------------------------------------
+
+  it('blockRun persists an optional kind on the task and starts its recurrence count at 1', () => {
+    const task = store.createTask({ title: 'work' });
+    store.updateStatus(task.id, 'running');
+    const blocked = store.blockRun(task.id, 'waiting on infra', 'system', 'dependency');
+
+    expect(blocked.status).toBe('blocked');
+    expect(blocked.blockKind).toBe('dependency');
+    expect(blocked.blockRecurrenceCount).toBe(1);
+  });
+
+  it('blockRun without a kind does not track recurrence (count stays 0, kind stays null)', () => {
+    const task = store.createTask({ title: 'work' });
+    store.updateStatus(task.id, 'running');
+    const blocked = store.blockRun(task.id, 'waiting on infra');
+
+    expect(blocked.blockKind).toBeNull();
+    expect(blocked.blockRecurrenceCount).toBe(0);
+  });
+
+  it('a differently-kinded re-block resets the recurrence count to 1 instead of accumulating', () => {
+    const task = store.createTask({ title: 'work' });
+    store.updateStatus(task.id, 'running');
+    store.blockRun(task.id, 'db is down', 'system', 'dependency');
+
+    store.updateStatus(task.id, 'running');
+    const reblocked = store.blockRun(task.id, 'need clarification', 'system', 'needs_input');
+
+    expect(reblocked.status).toBe('blocked');
+    expect(reblocked.blockKind).toBe('needs_input');
+    expect(reblocked.blockRecurrenceCount).toBe(1);
+  });
+
+  it('completeRun clears blockKind/blockRecurrenceCount — the next block starts a fresh streak', () => {
+    const task = store.createTask({ title: 'work' });
+    store.updateStatus(task.id, 'running');
+    store.blockRun(task.id, 'waiting on infra', 'system', 'dependency');
+
+    store.updateStatus(task.id, 'running');
+    const done = store.completeRun(task.id, 'unblocked and shipped');
+    expect(done.blockKind).toBeNull();
+    expect(done.blockRecurrenceCount).toBe(0);
+
+    store.updateStatus(task.id, 'running');
+    const reblocked = store.blockRun(task.id, 'again', 'system', 'dependency');
+    expect(reblocked.status).toBe('blocked');
+    expect(reblocked.blockRecurrenceCount).toBe(1);
+  });
+
+  it('routes to needs_revision after BLOCK_RECURRENCE_LIMIT (default 2) consecutive same-kind blocks', () => {
+    const task = store.createTask({ title: 'flaky dependency' });
+
+    // Block 1: re-claim (first claim, not a re-claim) then block with kind=dependency.
+    store.updateStatus(task.id, 'running');
+    const first = store.blockRun(task.id, 'waiting on service A', 'system', 'dependency');
+    expect(first.status).toBe('blocked');
+    expect(first.blockRecurrenceCount).toBe(1);
+
+    // Re-claim (kanban_unblock would normally flip status back to todo/ready first;
+    // updateStatus('running') models the re-claim directly, same as the retry-budget
+    // tests above do).
+    store.updateStatus(task.id, 'running');
+    // Block 2: same kind again — this is the 2nd consecutive same-kind block, which
+    // meets BLOCK_RECURRENCE_LIMIT (2), so the breaker fires instead of landing 'blocked'.
+    const second = store.blockRun(task.id, 'still waiting on service A', 'system', 'dependency');
+
+    expect(second.status).toBe('needs_revision');
+    expect(second.blockKind).toBe('dependency');
+    expect(second.blockRecurrenceCount).toBe(2);
+    expect(second.currentRunId).toBeNull();
+
+    // The transition is auditable via task_events, same as the retry-budget breaker.
+    const events = store.listEvents(task.id);
+    const statusEvents = events.filter((e) => e.kind === 'status_changed');
+    const last = statusEvents[statusEvents.length - 1];
+    expect(last?.data.to).toBe('needs_revision');
+    expect(last?.data.reason).toBe('block_recurrence_limit');
+  });
+
+  it('a custom blockRecurrenceLimit is honored (limit=1 breaches on the very first block)', () => {
+    const strict = new KanbanStore(':memory:', { blockRecurrenceLimit: 1 });
+    try {
+      const task = strict.createTask({ title: 'no second chances' });
+      strict.updateStatus(task.id, 'running');
+      const blocked = strict.blockRun(task.id, 'nope', 'system', 'capability');
+
+      expect(blocked.status).toBe('needs_revision');
+      expect(blocked.blockRecurrenceCount).toBe(1);
+    } finally {
+      strict.close();
+    }
+  });
+
+  it('needs_revision from the block-recurrence breaker credits the assignee ticketsFailed stat', () => {
+    const teamStore = new KanbanStore(':memory:', { teamId: 'team-a', blockRecurrenceLimit: 1 });
+    try {
+      const task = teamStore.createTask({ title: 'work', assignee: 'engineer' });
+      teamStore.updateStatus(task.id, 'running', undefined, 'engineer');
+      teamStore.blockRun(task.id, 'nope', 'engineer', 'transient');
+
+      expect(teamStore.getMemberStats().get('engineer')?.ticketsFailed).toBe(1);
+    } finally {
+      teamStore.close();
+    }
+  });
+
   it('heartbeatRun bumps last_heartbeat_at on the current run', async () => {
     const task = store.createTask({ title: 'long' });
     store.updateStatus(task.id, 'running');
@@ -289,6 +398,60 @@ describe('KanbanStore', () => {
     const task = store.createTask({ title: 't' });
     const archived = store.archive(task.id);
     expect(archived.status).toBe('archived');
+  });
+
+  // ---------------------------------------------------------------------------
+  // bulkUpdateStatus / bulkAssign
+  // ---------------------------------------------------------------------------
+
+  it('bulkUpdateStatus transitions every task in the batch', () => {
+    const a = store.createTask({ title: 'a' });
+    const b = store.createTask({ title: 'b' });
+    const c = store.createTask({ title: 'c' });
+
+    store.bulkUpdateStatus([a.id, b.id, c.id], 'done', 'tester');
+
+    expect(store.getTask(a.id)?.status).toBe('done');
+    expect(store.getTask(b.id)?.status).toBe('done');
+    expect(store.getTask(c.id)?.status).toBe('done');
+  });
+
+  it('bulkUpdateStatus rolls back the whole batch if any task id is invalid', () => {
+    const a = store.createTask({ title: 'a' });
+    const b = store.createTask({ title: 'b' });
+    const c = store.createTask({ title: 'c' });
+
+    // Invalid id sits in the middle so a and b would already be written if
+    // this weren't wrapped in one transaction.
+    expect(() => store.bulkUpdateStatus([a.id, b.id, 't_nope', c.id], 'done', 'tester')).toThrow();
+
+    expect(store.getTask(a.id)?.status).toBe('todo');
+    expect(store.getTask(b.id)?.status).toBe('todo');
+    expect(store.getTask(c.id)?.status).toBe('todo');
+  });
+
+  it('bulkAssign sets the assignee on every task in the batch', () => {
+    const a = store.createTask({ title: 'a' });
+    const b = store.createTask({ title: 'b' });
+    const c = store.createTask({ title: 'c' });
+
+    store.bulkAssign([a.id, b.id, c.id], 'reviewer', 'tester');
+
+    expect(store.getTask(a.id)?.assignee).toBe('reviewer');
+    expect(store.getTask(b.id)?.assignee).toBe('reviewer');
+    expect(store.getTask(c.id)?.assignee).toBe('reviewer');
+  });
+
+  it('bulkAssign rolls back the whole batch if any task id is invalid', () => {
+    const a = store.createTask({ title: 'a' });
+    const b = store.createTask({ title: 'b' });
+    const c = store.createTask({ title: 'c' });
+
+    expect(() => store.bulkAssign([a.id, b.id, 't_nope', c.id], 'reviewer', 'tester')).toThrow();
+
+    expect(store.getTask(a.id)?.assignee).toBeNull();
+    expect(store.getTask(b.id)?.assignee).toBeNull();
+    expect(store.getTask(c.id)?.assignee).toBeNull();
   });
 
   // ---------------------------------------------------------------------------
@@ -479,6 +642,105 @@ describe('KanbanStore', () => {
 
     const stalled = store.findStalledRuns(100, now);
     expect(stalled.map((r) => r.taskId)).toEqual([stale.id]);
+  });
+
+  // ---------------------------------------------------------------------------
+  // createSwarm (Lane A Phase 5 — atomic swarm-graph primitive)
+  // ---------------------------------------------------------------------------
+
+  it('createSwarm creates a done root + N workers + verifier + synthesizer, wired parent to child', () => {
+    const result = store.createSwarm({
+      goal: 'Ship the swarm primitive',
+      workers: [
+        { personality: 'worker-a', prompt: 'do part A' },
+        { personality: 'worker-b', prompt: 'do part B' },
+      ],
+      verifierPersonality: 'verifier',
+      synthesizerPersonality: 'synthesizer',
+    });
+
+    const root = store.getTask(result.rootId);
+    expect(root?.status).toBe('done');
+    expect(root?.assignee).toBeNull();
+
+    expect(result.workerIds).toHaveLength(2);
+    for (const workerId of result.workerIds) {
+      const worker = store.getTask(workerId);
+      expect(worker?.status).toBe('todo');
+      expect(store.getParents(workerId).map((p) => p.id)).toEqual([result.rootId]);
+    }
+
+    expect(result.verifierId).not.toBeNull();
+    const verifierParents = store.getParents(result.verifierId as string).map((p) => p.id);
+    expect(verifierParents.sort()).toEqual([...result.workerIds].sort());
+    expect(store.getTask(result.verifierId as string)?.assignee).toBe('verifier');
+
+    expect(result.synthesizerId).not.toBeNull();
+    expect(store.getParents(result.synthesizerId as string).map((p) => p.id)).toEqual([
+      result.verifierId,
+    ]);
+    expect(store.getTask(result.synthesizerId as string)?.assignee).toBe('synthesizer');
+  });
+
+  it('createSwarm omits verifier/synthesizer tasks when their personalities are omitted', () => {
+    const result = store.createSwarm({
+      goal: 'goal',
+      workers: [{ personality: 'w1', prompt: 'p1' }],
+    });
+
+    expect(result.verifierId).toBeNull();
+    expect(result.synthesizerId).toBeNull();
+    expect(store.listTasks()).toHaveLength(2); // root + 1 worker
+  });
+
+  it('createSwarm rolls back the whole graph if a failure hits partway through construction', () => {
+    const originalCreateTask = store.createTask.bind(store);
+    let calls = 0;
+    vi.spyOn(store, 'createTask').mockImplementation((args) => {
+      calls += 1;
+      // Root (1st call) and worker-a (2nd call) succeed; blow up on worker-b (3rd).
+      if (calls === 3) throw new Error('boom');
+      return originalCreateTask(args);
+    });
+
+    expect(() =>
+      store.createSwarm({
+        goal: 'goal',
+        workers: [
+          { personality: 'worker-a', prompt: 'p1' },
+          { personality: 'worker-b', prompt: 'p2' },
+        ],
+        verifierPersonality: 'verifier',
+      }),
+    ).toThrow(/boom/);
+
+    // Root and worker-a were created inside the same outer transaction as the
+    // failing worker-b create — the whole graph must roll back together, not
+    // just the call that threw.
+    expect(store.listTasks()).toHaveLength(0);
+
+    vi.restoreAllMocks();
+  });
+
+  it('createSwarm + promoteReady: workers promote to ready once the root task is done', () => {
+    const result = store.createSwarm({
+      goal: 'goal',
+      workers: [
+        { personality: 'worker-a', prompt: 'p1' },
+        { personality: 'worker-b', prompt: 'p2' },
+      ],
+    });
+
+    expect(store.getTask(result.rootId)?.status).toBe('done');
+    for (const workerId of result.workerIds) {
+      expect(store.getTask(workerId)?.status).toBe('todo');
+    }
+
+    const promoted = store.promoteReady();
+    expect(promoted.sort()).toEqual([...result.workerIds].sort());
+    for (const workerId of result.workerIds) {
+      expect(store.getTask(workerId)?.status).toBe('ready');
+    }
   });
 
   // ---------------------------------------------------------------------------
@@ -1074,7 +1336,7 @@ describe('KanbanStore', () => {
     const dbPath = join(dir, 'board.db');
     try {
       const future = new Database(dbPath);
-      future.pragma('user_version = 6');
+      future.pragma('user_version = 7');
       future.close();
       expect(() => new KanbanStore(dbPath)).toThrow(/newer than code/);
     } finally {
@@ -1367,13 +1629,13 @@ describe('KanbanStore', () => {
       }
 
       // The stepwise chain runs v1->v2->v3 then the additive v3->v4 bump, so the
-      // DB lands at the current code version (5). The dedicated v1->v4 test
+      // DB lands at the current code version (6). The dedicated v1->v4 test
       // asserts the full chain; here we just confirm the chain doesn't stall.
       const raw = new Database(dbPath);
       try {
         const version = (raw.pragma('user_version') as Array<{ user_version: number }>)[0]
           ?.user_version;
-        expect(version).toBe(5);
+        expect(version).toBe(6);
       } finally {
         raw.close();
       }
@@ -1603,7 +1865,7 @@ describe('KanbanStore', () => {
     const dbPath = join(dir, 'board.db');
     try {
       const future = new Database(dbPath);
-      future.pragma('user_version = 6');
+      future.pragma('user_version = 7');
       future.close();
       expect(() => new KanbanStore(dbPath)).toThrow(/newer than code/);
     } finally {
@@ -1621,7 +1883,7 @@ describe('KanbanStore', () => {
       try {
         const version = (raw.pragma('user_version') as Array<{ user_version: number }>)[0]
           ?.user_version;
-        expect(version).toBe(5);
+        expect(version).toBe(6);
         const tables = (
           raw
             .prepare(
@@ -1751,7 +2013,7 @@ describe('KanbanStore', () => {
       try {
         const version = (raw.pragma('user_version') as Array<{ user_version: number }>)[0]
           ?.user_version;
-        expect(version).toBe(5);
+        expect(version).toBe(6);
       } finally {
         raw.close();
       }
@@ -1864,7 +2126,7 @@ describe('KanbanStore', () => {
       try {
         const version = (raw.pragma('user_version') as Array<{ user_version: number }>)[0]
           ?.user_version;
-        expect(version).toBe(5);
+        expect(version).toBe(6);
       } finally {
         raw.close();
       }
@@ -2021,7 +2283,7 @@ describe('KanbanStore', () => {
       const migrated = snapshot(migratedPath);
       const fresh = snapshot(freshPath);
 
-      expect(migrated.userVersion).toBe(5);
+      expect(migrated.userVersion).toBe(6);
       expect(migrated.userVersion).toBe(fresh.userVersion);
       // `tasks` columns + types (covers the v1->v2 max_retries / retry_count and
       // v2->v3 acceptance_criteria additions converging on the fresh shape).

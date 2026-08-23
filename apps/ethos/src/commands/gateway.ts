@@ -22,7 +22,12 @@ import {
   LaneVoiceModeStore,
   laneVoiceModePath,
 } from '@ethosagent/core';
-import { CronScheduler, runScriptFile } from '@ethosagent/cron';
+import {
+  buildCronTriggers,
+  CronScheduler,
+  type CronTriggers,
+  runScriptFile,
+} from '@ethosagent/cron';
 import { SQLiteDeliveryLedger } from '@ethosagent/delivery-ledger';
 import { LocalExecutionBackend } from '@ethosagent/execution-local';
 import { LangfusePollLoop } from '@ethosagent/export-langfuse';
@@ -585,6 +590,18 @@ export async function runGatewayStart(opts: GatewayStartOptions = {}): Promise<v
   // constructed first so its systemTask handler could ride the scheduler
   // config above). Backing jobs are seeded by `watcherManager.start()` later.
   watcherManager.attachScheduler(scheduler);
+
+  // Cron trigger seam (plan/phases/cron-scheduler-seam.md). `scheduler` is the
+  // `CronEngine`; `buildCronTriggers` picks the trigger/backend pair per
+  // `cron.*` config. `ethos gateway` has no HTTP surface to mount `/cron/fire`
+  // on, so `cronTriggers.external` (when an operator sets `cron.trigger.
+  // external: true` here) is constructed but unused — external firing only
+  // takes effect in a process that also runs `ethos serve`. Defaults
+  // (`trigger.local: true`) reproduce today's behavior exactly.
+  const cronTriggers: CronTriggers = buildCronTriggers(scheduler, config.cron);
+  // Late-bind the arming backend `buildCronTriggers` just produced back onto
+  // the scheduler it was built from — see `CronScheduler.setArmingBackend`.
+  scheduler.setArmingBackend(cronTriggers.arming);
 
   // Durable call history (voice V4). Same `~/.ethos/<name>.db` shape as
   // jobs.db / delivery-ledger.db / cards.db, and the SAME file `ethos serve`
@@ -1272,7 +1289,7 @@ export async function runGatewayStart(opts: GatewayStartOptions = {}): Promise<v
   // cron tools register against the same instance the firing engine
   // uses). At this point `systemLoop` is assigned, so the deferred
   // `runJob` closure can safely run.
-  scheduler.start();
+  cronTriggers.local?.start();
   console.log(`${c.dim}Cron scheduler running (checks every 60s)${c.reset}`);
 
   // Idle checks for dreaming. The interval is unref'd, so it never holds the
@@ -1770,7 +1787,7 @@ export async function runGatewayStart(opts: GatewayStartOptions = {}): Promise<v
     clearInterval(pruneTimer);
     clearInterval(heartbeatTimer);
     clearInterval(retentionPruneTimer);
-    scheduler.stop();
+    cronTriggers.local?.stop();
     dreamExecutor.stop();
     langfusePoll?.stop();
     await storage.remove(gatewayHealthPath()).catch(() => {});

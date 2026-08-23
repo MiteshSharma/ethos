@@ -11,6 +11,8 @@ import type { GoalRunner } from '@ethosagent/goal-runner';
 import { SQLiteGoalStore } from '@ethosagent/goal-store';
 import { autonomyTier, KanbanStore } from '@ethosagent/kanban-store';
 import { MarkdownFileMemoryProvider } from '@ethosagent/memory-markdown';
+import type { PendingNotify, PendingNotifyQueue } from '@ethosagent/notify-queue';
+import { SQLiteNotifyQueue } from '@ethosagent/notify-queue';
 import {
   platformId as discordId,
   platformPrompt as discordPrompt,
@@ -227,6 +229,48 @@ export function createTeamMemoryIndexInjector(
       const lines = topics.map((t) => `- ${t}`).join('\n');
       return {
         content: `Team memory topics available (call team_memory_read to load):\n${lines}`,
+        position: 'append',
+      };
+    },
+  };
+}
+
+/**
+ * ContextInjector that surfaces passive `notify`-mode board deliveries (Lane
+ * C, kanban-hooks-notify-parity, D6). A `notify`-mode `/notify` call does not
+ * force a turn — it has nowhere else to land — so it is written to the
+ * pending-notify queue instead, and this injector is what surfaces it: on
+ * every turn it reads whatever is pending for `ctx.personalityId` on this
+ * team's board and marks it consumed in the same call, so a row is delivered
+ * exactly once, at the assignee's own next turn. Read-and-consume happens at
+ * INJECT TIME per D6's resolution, not on a separate poll.
+ *
+ * Priority sits just above `team-memory-index`'s 70 so a pending notify reads
+ * as the more time-sensitive of the two dynamic-tail sections.
+ */
+export function createPendingNotifyInjector(
+  queue: PendingNotifyQueue,
+  teamName: string,
+): ContextInjector {
+  return {
+    id: `pending-notify:${teamName}`,
+    priority: 71,
+
+    async inject(ctx: PromptContext): Promise<InjectionResult | null> {
+      if (!ctx.personalityId) return null;
+
+      let rows: PendingNotify[];
+      try {
+        rows = await queue.readAndConsume(teamName, ctx.personalityId);
+      } catch {
+        return null;
+      }
+      if (rows.length === 0) return null;
+
+      const lines = rows.map((r) => `- ${r.kind}${r.ref ? ` (${r.ref})` : ''}`).join('\n');
+      const plural = rows.length === 1 ? 'notify' : 'notifies';
+      return {
+        content: `You have ${rows.length} unread board ${plural}:\n${lines}`,
         position: 'append',
       };
     },
@@ -470,6 +514,55 @@ function buildVerifierProviderGetter(
   };
 }
 
+// ---------------------------------------------------------------------------
+// Lane A Phase 2 (kanban-hooks-notify-parity) — auxiliary model for
+// kanban_decompose. Resolved eagerly (composeAllTools is already async and
+// runs once per AgentLoop construction) rather than lazily like the verifier
+// getter above — there's no "only sometimes needed" argument once a team has
+// kanban wired. Mirrors auxiliaryVision/auxiliaryWeb in build-agent-loop.ts:
+// `provider`/`apiKey`/`baseUrl` default to the primary provider's values when
+// unset, and an unregistered provider WARNS and degrades to `undefined`
+// rather than throwing — kanban_decompose still registers as a tool, but
+// returns a clear tool error at call time instead of crashing wiring for
+// personalities that never call it. Exported for the wiring-level test.
+// ---------------------------------------------------------------------------
+
+export async function buildKanbanDecomposerProvider(
+  registry: LLMProviderRegistry,
+  config: WiringConfig,
+  log: Logger,
+): Promise<LLMProvider | undefined> {
+  const aux = config.auxiliaryKanbanDecomposer;
+  if (!aux) return undefined;
+  const providerName = aux.provider ?? config.provider;
+  const factory = registry.get(providerName);
+  if (!factory) {
+    log.warn(
+      `auxiliary.kanban_decomposer provider "${providerName}" is not registered; ` +
+        'kanban_decompose will return a tool error until it is',
+    );
+    return undefined;
+  }
+  const NOOP: SecretsResolver = {
+    get: async () => null,
+    set: async () => {},
+    delete: async () => {},
+    list: async () => [],
+  };
+  const baseUrl = aux.baseUrl ?? config.baseUrl;
+  return factory({
+    config: {
+      provider: providerName,
+      model: aux.model,
+      apiKey: aux.apiKey ?? config.apiKey,
+      ...(baseUrl ? { baseUrl } : {}),
+      ...(config.apiVersion ? { apiVersion: config.apiVersion } : {}),
+    },
+    secrets: config.secretsResolver ?? NOOP,
+    logger: log,
+  });
+}
+
 /**
  * Register all tool groups into the tool registry and wire supporting hooks.
  * Covers: file, terminal, web, todo, think, interactive, kanban, process,
@@ -628,6 +721,7 @@ export async function composeAllTools(
       hooks?: typeof hooks;
       autonomyTierOf?: AutonomyTierOf;
       personalityLookup?: (id: string) => { name: string } | undefined;
+      decomposerProvider?: LLMProvider;
     } = {
       store,
       hooks,
@@ -635,6 +729,7 @@ export async function composeAllTools(
         const p = personalities.get(id);
         return p ? { name: p.name } : undefined;
       },
+      decomposerProvider: await buildKanbanDecomposerProvider(infra.llmProviders, config, log),
     };
     if (config.trustPolicy?.mode === 'tiered') {
       const policy = config.trustPolicy;
@@ -973,6 +1068,14 @@ export async function composeAllTools(
     }
 
     injectors.push(createTeamMemoryIndexInjector(teamMemory, config.teamName));
+
+    // Lane C (kanban-hooks-notify-parity, Phase 2) — pending-notify queue.
+    // One file per dataDir, same as goals.db: the ACP server (writer) opens
+    // its own handle onto the same path independently, the same two-instance
+    // pattern delivery-ledger.db already uses across the gateway and
+    // web-api processes.
+    const notifyQueue = new SQLiteNotifyQueue(join(dataDir, 'notify-queue.db'));
+    injectors.push(createPendingNotifyInjector(notifyQueue, config.teamName));
   }
 
   // -------------------------------------------------------------------------

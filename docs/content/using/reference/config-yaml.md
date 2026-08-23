@@ -4,7 +4,7 @@ description: "Every field in ~/.ethos/config.yaml — provider, model, channel t
 kind: reference
 audience: user
 slug: config-yaml
-updated: 2026-08-19
+updated: 2026-08-22
 ---
 
 `~/.ethos/config.yaml` is a flat `key: value` file. Dotted keys (e.g. `retention.messages`, `providers.0.provider`) are how nested structures appear on disk — there is no indentation-based nesting. The parser ignores quotes around values.
@@ -869,6 +869,33 @@ Notes:
 
 - An entry with no recognised field is dropped rather than kept as an empty object.
 - A node muted from its Settings row is muted over the wire instead, and the satellite persists that choice across restarts — that path does not write this key.
+
+## background.acp.agents.\<name\>.\* {#background-acp-agents}
+
+Type: dotted roster · Default: unset (no ACP-native coding-agent job runners)
+
+Real [Agent Client Protocol](https://agentclientprotocol.com/) (ACP) coding-agent CLIs a background job can run on — Claude Code's official adapter, Gemini CLI, and any other CLI that speaks ACP's `session/*` methods over stdio. `<name>` is the id the job registers under (a `delegate_task` call's `runner` parameter names it directly, e.g. `runner: 'claude'` or `runner: 'gemini'`); each configured entry becomes its own independent job runner, never a single shared `'acp'` runner with a sub-parameter.
+
+| Field | Type | Description |
+|---|---|---|
+| `background.acp.agents.<name>.command` | string | The ACP agent binary to exec inside the sandbox container. Required — an entry missing `command` or `image` is dropped entirely rather than half-built. |
+| `background.acp.agents.<name>.args` | comma-separated list | Arguments after `command`, e.g. the flag that puts the CLI into ACP mode. Optional. |
+| `background.acp.agents.<name>.image` | string | Digest-pinned container image (`@sha256:...`) with `command` reachable inside it. Required. A bare tag does not satisfy the containment posture this needs — same reason `pi_image` must be digest-pinned. |
+
+```yaml
+background.acp.agents.claude.command: claude-agent-acp
+background.acp.agents.claude.image: localhost:5555/ethos-acp-claude@sha256:...
+
+background.acp.agents.gemini.command: gemini
+background.acp.agents.gemini.args: --acp
+background.acp.agents.gemini.image: localhost:5555/ethos-acp-gemini@sha256:...
+```
+
+Notes:
+
+- `gemini`'s `--acp` is the CLI's own documented flag ("Starts the agent in ACP mode" per `gemini --help`); `--experimental-acp` also exists but is deprecated in favor of it.
+- An entry with both `command` and `image` set registers immediately; there is no separate enable switch. Removing an entry (or its `image`) unregisters that runner — a job naming it then gets the same `not_available` answer a machine that never built the image would.
+- Each entry needs its own container image with credentials for that agent mounted in — there is no shared auth story across entries. Neither agent's credential mount is wired yet.
 
 ## activeContext {#active-context}
 

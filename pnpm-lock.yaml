@@ -63,6 +63,9 @@ importers:
       '@ethosagent/agent-mesh':
         specifier: workspace:*
         version: link:../../extensions/agent-mesh
+      '@ethosagent/notify-queue':
+        specifier: workspace:*
+        version: link:../../extensions/notify-queue
       '@ethosagent/session-lane':
         specifier: workspace:*
         version: link:../../packages/session-lane
@@ -324,6 +327,9 @@ importers:
       '@ethosagent/nightly-loop':
         specifier: workspace:*
         version: link:../../extensions/nightly-loop
+      '@ethosagent/notify-queue':
+        specifier: workspace:*
+        version: link:../../extensions/notify-queue
       '@ethosagent/observability-sqlite':
         specifier: workspace:*
         version: link:../../extensions/observability-sqlite
@@ -1033,6 +1039,24 @@ importers:
         specifier: workspace:*
         version: link:../../packages/types
 
+  extensions/execution-coding-agents:
+    dependencies:
+      '@ethosagent/core':
+        specifier: workspace:*
+        version: link:../../packages/core
+      '@ethosagent/execution-docker':
+        specifier: workspace:*
+        version: link:../execution-docker
+      '@ethosagent/job-runner':
+        specifier: workspace:*
+        version: link:../job-runner
+      '@ethosagent/types':
+        specifier: workspace:*
+        version: link:../../packages/types
+      '@ethosagent/worker-router':
+        specifier: workspace:*
+        version: link:../../packages/worker-router
+
   extensions/execution-docker:
     dependencies:
       '@ethosagent/core':
@@ -1389,6 +1413,12 @@ importers:
       '@ethosagent/storage-fs':
         specifier: workspace:*
         version: link:../../packages/storage-fs
+
+  extensions/notify-queue:
+    dependencies:
+      '@ethosagent/sqlite':
+        specifier: workspace:*
+        version: link:../../packages/sqlite
 
   extensions/oauth:
     dependencies:
@@ -1747,6 +1777,9 @@ importers:
       '@ethosagent/agent-mesh':
         specifier: workspace:*
         version: link:../agent-mesh
+      '@ethosagent/core':
+        specifier: workspace:*
+        version: link:../../packages/core
       '@ethosagent/kanban-store':
         specifier: workspace:*
         version: link:../kanban-store
@@ -2414,6 +2447,9 @@ importers:
       '@ethosagent/document-extractors':
         specifier: workspace:*
         version: link:../../extensions/document-extractors
+      '@ethosagent/execution-coding-agents':
+        specifier: workspace:*
+        version: link:../../extensions/execution-coding-agents
       '@ethosagent/execution-docker':
         specifier: workspace:*
         version: link:../../extensions/execution-docker
@@ -2483,6 +2519,9 @@ importers:
       '@ethosagent/nightly-loop':
         specifier: workspace:*
         version: link:../../extensions/nightly-loop
+      '@ethosagent/notify-queue':
+        specifier: workspace:*
+        version: link:../../extensions/notify-queue
       '@ethosagent/oauth':
         specifier: workspace:*
         version: link:../../extensions/oauth

@@ -1,5 +1,5 @@
 import type { KanbanStore } from '@ethosagent/kanban-store';
-import type { HookRegistry, Tool } from '@ethosagent/types';
+import type { HookRegistry, LLMProvider, Tool } from '@ethosagent/types';
 import type { WiringContext } from '@ethosagent/wiring/types';
 import { type AutonomyTierOf, createKanbanTools, type PersonalityLookup } from './index';
 
@@ -14,6 +14,7 @@ export function compose(
     hooks?: HookRegistry;
     autonomyTierOf?: AutonomyTierOf;
     personalityLookup?: PersonalityLookup;
+    decomposerProvider?: LLMProvider;
   },
 ): KanbanToolsCompose {
   return {
@@ -22,6 +23,7 @@ export function compose(
       hooks: deps.hooks,
       autonomyTierOf: deps.autonomyTierOf,
       personalityLookup: deps.personalityLookup,
+      decomposerProvider: deps.decomposerProvider,
     }),
   };
 }

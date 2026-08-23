@@ -20,6 +20,15 @@ export const kanbanRouter = {
     }),
   ),
 
+  bulkUpdateStatus: os.kanban.bulkUpdateStatus.handler(({ input, context }) =>
+    context.kanban.bulkUpdateStatus({
+      team: input.team,
+      taskIds: input.taskIds,
+      status: input.status,
+      actor: 'human:control-center',
+    }),
+  ),
+
   createTask: os.kanban.createTask.handler(({ input, context }) =>
     context.kanban.createTask({
       ...input,
@@ -52,6 +61,15 @@ export const kanbanRouter = {
     context.kanban.assign({
       team: input.team,
       taskId: input.taskId,
+      assignee: input.assignee,
+      actor: 'human:control-center',
+    }),
+  ),
+
+  bulkAssign: os.kanban.bulkAssign.handler(({ input, context }) =>
+    context.kanban.bulkAssign({
+      team: input.team,
+      taskIds: input.taskIds,
       assignee: input.assignee,
       actor: 'human:control-center',
     }),

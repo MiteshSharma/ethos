@@ -27,12 +27,14 @@
 //   extensions/session-sqlite/   @ethosagent/sqlite opens raw paths. WAL, FTS5, and
 //   extensions/memory-vector/    atomic transactions don't fit a generic Storage
 //   extensions/job-store/         interface without losing ACID guarantees.
-//   extensions/delivery-ledger/   (job-store, delivery-ledger, session-cards and
-//   extensions/session-cards/     call-log also mkdirSync the db's parent dir.
+//   extensions/delivery-ledger/   (job-store, delivery-ledger, session-cards, call-log
+//   extensions/session-cards/     and notify-queue also mkdirSync the db's parent dir.
 //   extensions/call-log/          delivery-ledger's atomic redelivery claim is a
-//                                 conditional UPDATE and session-cards derives its
+//   extensions/notify-queue/      conditional UPDATE and session-cards derives its
 //                                 per-session `seq` with MAX()+1 inside the insert
-//                                 — both need a real transaction, not file IO.)
+//                                 — both need a real transaction, not file IO.
+//                                 notify-queue's read-and-consume is the same shape:
+//                                 a SELECT then UPDATE inside one transaction.)
 //
 //   packages/a2a/                Same rationale as the SQLite stores above:
 //   src/sqlite-task-store.ts     SQLiteA2aTaskStore (T1.6) opens a raw path via
@@ -173,6 +175,17 @@
 //                                    binary-presence check; not a ~/.ethos/
 //                                    operation.
 //
+//   extensions/execution-       Same rationale as execution-pi/src/
+//   coding-agents/src/          worktree.ts above, copied not imported
+//   worktree.ts                 (D-ACP1: no shared file between the two
+//                                packages): creating an ACP-agent run's
+//                                workspace IS a `git worktree add`, and the
+//                                surrounding mkdir/exists checks are that
+//                                same operation's bookkeeping. (This
+//                                package's availability.ts needs no entry
+//                                here — it probes with `spawn` only, no
+//                                `node:fs` import at all.)
+//
 // If you need to add a new exception, document WHY here and in CLAUDE.md before
 // adding it to ALLOWED_PATHS below. The default answer for code on the
 // personality boundary is "use Storage."
@@ -199,6 +212,7 @@ const ALLOWED_PREFIXES = [
   'extensions/delivery-ledger/',
   'extensions/session-cards/',
   'extensions/call-log/',
+  'extensions/notify-queue/',
   'extensions/voice-providers/',
   'extensions/agent-mesh/',
   'extensions/llm-codex/',
@@ -221,6 +235,7 @@ const ALLOWED_FILES = new Set([
   'extensions/execution-docker/src/index.ts',
   'extensions/execution-pi/src/worktree.ts',
   'extensions/execution-pi/src/availability.ts',
+  'extensions/execution-coding-agents/src/worktree.ts',
   'extensions/goal-store/src/index.ts',
   'extensions/kanban-store/src/index.ts',
   'extensions/platform-whatsapp/src/session-store.ts',

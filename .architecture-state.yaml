@@ -291,7 +291,7 @@ register_anchors:
     - { path: packages/safety/watcher/src/rules.ts, line: 110, contains: "export function compoundingErrorRule" }
     - { path: packages/safety/watcher/src/rules.ts, line: 161, contains: "export function suspiciousSequenceRule" }
     - { path: packages/safety/watcher/src/rules.ts, line: 205, contains: "export function defaultRules" }
-    - { path: packages/wiring/src/build-agent-loop.ts, line: 479, contains: "defaultRules: watcherDefaultRules" }
+    - { path: packages/wiring/src/build-agent-loop.ts, line: 481, contains: "defaultRules: watcherDefaultRules" }
 
   G-CHAN:
     - { path: packages/safety/channel/src/channel-filter.ts, line: 111, contains: "export function checkMessage" }
@@ -446,6 +446,20 @@ tiers:
     package: "@ethosagent/execution-pi"
     tier: 1
     assigned: 2026-08-19
+
+  # Same shape as execution-pi immediately above, for the same reason: this
+  # package spawns a foreign coding-agent CLI (any real ACP-native agent) as
+  # its own OS process and decides what mount derivation execution-docker's
+  # `mountsFor` is asked for. It implements no boundary itself — the container
+  # is the containment — but a mistake in what it asks for IS a containment
+  # mistake, so it gets the same Tier 1, not Tier 2. (Contrast notify-queue,
+  # assigned the same day: that package is a plain internal queue with no
+  # subprocess/mount-derivation role, which is why it landed at Tier 2 while
+  # this one does not.)
+  extensions/execution-coding-agents:
+    package: "@ethosagent/execution-coding-agents"
+    tier: 1
+    assigned: 2026-08-22
 
   extensions/execution-local:
     package: "@ethosagent/execution-local"
@@ -788,6 +802,11 @@ tiers:
     package: "@ethosagent/nightly-loop"
     tier: 2
     assigned: 2026-08-12
+
+  extensions/notify-queue:
+    package: "@ethosagent/notify-queue"
+    tier: 2
+    assigned: 2026-08-22
 
   extensions/oauth:
     package: "@ethosagent/oauth"

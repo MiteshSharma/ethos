@@ -1,4 +1,10 @@
+import { DefaultHookRegistry } from '@ethosagent/core';
 import { KanbanStore } from '@ethosagent/kanban-store';
+import type {
+  DispatchTickPayload,
+  TicketClaimedPayload,
+  TicketStaleReclaimedPayload,
+} from '@ethosagent/types';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   type DispatchCall,
@@ -669,6 +675,185 @@ describe('Dispatcher.tick()', () => {
 
       expect(dispatch).toHaveBeenCalledTimes(1);
       expect(spawnDispatch).not.toHaveBeenCalled();
+      expect(board.getTask(t.id)?.status).toBe('running');
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // Lane B (kanban-hooks-notify-parity) — dispatcher-fired lifecycle hooks
+  // ---------------------------------------------------------------------------
+
+  describe('Dispatcher hooks (Lane B)', () => {
+    it('fires ticket_claimed with { taskId, assignee, runId } matching the claimed task', async () => {
+      const sup = makeSupervisor({ engineer: { port: 3001, status: 'running' } });
+      const hooks = new DefaultHookRegistry();
+      const claimed: TicketClaimedPayload[] = [];
+      hooks.registerVoid('ticket_claimed', async (payload) => {
+        claimed.push(payload);
+      });
+
+      const t = board.createTask({ title: 'fix bug', assignee: 'engineer' });
+      board.updateStatus(t.id, 'ready');
+
+      const dispatch = vi.fn<DispatchCall>(async () => 'ok');
+      const dispatcher = new Dispatcher({ board, supervisor: sup, dispatch, hooks });
+
+      await dispatcher.tick();
+      await new Promise((r) => setImmediate(r));
+
+      expect(claimed).toHaveLength(1);
+      expect(claimed[0]).toEqual({
+        taskId: t.id,
+        assignee: 'engineer',
+        runId: board.getTask(t.id)?.currentRunId,
+      });
+    });
+
+    it('fires ticket_stale_reclaimed with reason orphan_stale, capturing the pre-reclaim assignee', async () => {
+      const sup = makeSupervisor({ engineer: { port: 3001, status: 'running' } });
+      const hooks = new DefaultHookRegistry();
+      const reclaimed: TicketStaleReclaimedPayload[] = [];
+      hooks.registerVoid('ticket_stale_reclaimed', async (payload) => {
+        reclaimed.push(payload);
+      });
+
+      const t = board.createTask({ title: 'stuck', assignee: 'engineer' });
+      board.updateStatus(t.id, 'ready');
+      board.updateStatus(t.id, 'running', 'dispatched', 'dispatcher');
+      backdateUpdatedAt(t.id, 5_000);
+
+      const dispatch = vi.fn<DispatchCall>(async () => 'ok');
+      const dispatcher = new Dispatcher({
+        board,
+        supervisor: sup,
+        dispatch,
+        stalenessThresholdMs: 1_000,
+        hooks,
+      });
+
+      await dispatcher.tick();
+      await new Promise((r) => setImmediate(r));
+
+      expect(reclaimed).toEqual([
+        { taskId: t.id, previousAssignee: 'engineer', reason: 'orphan_stale' },
+      ]);
+    });
+
+    it('fires ticket_stale_reclaimed with reason orphan_no_owner when the assignee is no longer active', async () => {
+      const sup = makeSupervisor({ engineer: { port: 3001, status: 'failed' } });
+      const hooks = new DefaultHookRegistry();
+      const reclaimed: TicketStaleReclaimedPayload[] = [];
+      hooks.registerVoid('ticket_stale_reclaimed', async (payload) => {
+        reclaimed.push(payload);
+      });
+
+      const t = board.createTask({ title: 'abandoned', assignee: 'engineer' });
+      board.updateStatus(t.id, 'ready');
+      board.updateStatus(t.id, 'running', 'dispatched', 'dispatcher');
+
+      const dispatch = vi.fn<DispatchCall>(async () => 'ok');
+      const dispatcher = new Dispatcher({
+        board,
+        supervisor: sup,
+        dispatch,
+        stalenessThresholdMs: 60_000,
+        hooks,
+      });
+
+      await dispatcher.tick();
+      await new Promise((r) => setImmediate(r));
+
+      expect(reclaimed).toEqual([
+        { taskId: t.id, previousAssignee: 'engineer', reason: 'orphan_no_owner' },
+      ]);
+    });
+
+    describe('dispatch_tick gating (D9)', () => {
+      it('fires dispatch_tick exactly once with the right counts on a claim-only tick', async () => {
+        const sup = makeSupervisor({ engineer: { port: 3001, status: 'running' } });
+        const hooks = new DefaultHookRegistry();
+        const ticks: DispatchTickPayload[] = [];
+        hooks.registerVoid('dispatch_tick', async (payload) => {
+          ticks.push(payload);
+        });
+
+        const t = board.createTask({ title: 'fix bug', assignee: 'engineer' });
+        board.updateStatus(t.id, 'ready');
+
+        const dispatch = vi.fn<DispatchCall>(async () => 'ok');
+        const dispatcher = new Dispatcher({ board, supervisor: sup, dispatch, hooks });
+
+        await dispatcher.tick();
+        await new Promise((r) => setImmediate(r));
+
+        expect(ticks).toHaveLength(1);
+        expect(ticks[0]).toEqual({ claimedCount: 1, reclaimedCount: 0 });
+      });
+
+      it('fires dispatch_tick exactly once with the right counts on a reclaim-only tick', async () => {
+        // orphan_no_owner: the assignee's process is down, so the reclaimed task
+        // can't be re-dispatched within the same tick — reclaim-only.
+        const sup = makeSupervisor({ engineer: { port: 3001, status: 'failed' } });
+        const hooks = new DefaultHookRegistry();
+        const ticks: DispatchTickPayload[] = [];
+        hooks.registerVoid('dispatch_tick', async (payload) => {
+          ticks.push(payload);
+        });
+
+        const t = board.createTask({ title: 'abandoned', assignee: 'engineer' });
+        board.updateStatus(t.id, 'ready');
+        board.updateStatus(t.id, 'running', 'dispatched', 'dispatcher');
+
+        const dispatch = vi.fn<DispatchCall>(async () => 'ok');
+        const dispatcher = new Dispatcher({
+          board,
+          supervisor: sup,
+          dispatch,
+          stalenessThresholdMs: 60_000,
+          hooks,
+        });
+
+        await dispatcher.tick();
+        await new Promise((r) => setImmediate(r));
+
+        expect(ticks).toHaveLength(1);
+        expect(ticks[0]).toEqual({ claimedCount: 0, reclaimedCount: 1 });
+      });
+
+      it('fires dispatch_tick zero times on a fully idle tick', async () => {
+        const sup = makeSupervisor({});
+        const hooks = new DefaultHookRegistry();
+        const ticks: DispatchTickPayload[] = [];
+        hooks.registerVoid('dispatch_tick', async (payload) => {
+          ticks.push(payload);
+        });
+
+        const dispatch = vi.fn<DispatchCall>(async () => 'ok');
+        const dispatcher = new Dispatcher({ board, supervisor: sup, dispatch, hooks });
+
+        await dispatcher.tick();
+        await new Promise((r) => setImmediate(r));
+
+        expect(ticks).toHaveLength(0);
+      });
+    });
+
+    it('a throwing ticket_claimed handler does not stop tick() from resolving, and the task still ends up claimed', async () => {
+      const sup = makeSupervisor({ engineer: { port: 3001, status: 'running' } });
+      const hooks = new DefaultHookRegistry();
+      hooks.registerVoid('ticket_claimed', async () => {
+        throw new Error('boom');
+      });
+
+      const t = board.createTask({ title: 'fix bug', assignee: 'engineer' });
+      board.updateStatus(t.id, 'ready');
+
+      const dispatch = vi.fn<DispatchCall>(async () => 'ok');
+      const dispatcher = new Dispatcher({ board, supervisor: sup, dispatch, hooks });
+
+      await expect(dispatcher.tick()).resolves.toBeUndefined();
+      await new Promise((r) => setImmediate(r));
+
       expect(board.getTask(t.id)?.status).toBe('running');
     });
   });

@@ -949,13 +949,34 @@ export interface BackgroundConfig {
     /** Host directory holding Pi's `auth.json`. Default `~/.pi/agent`. */
     configDir?: string;
   };
+  /**
+   * Real ACP-native coding-agent CLIs (`@ethosagent/execution-coding-agents`),
+   * keyed by the id each entry registers its OWN `JobRunner` under
+   * (`runner: 'claude'`, `runner: 'gemini'`, ...) — see
+   * plan/phases/acp-job-runner.md's "Config shape". Each entry needs its own
+   * digest-pinned `image`, same posture and reason as `pi.image` (D-ACP4): a
+   * bare tag does not satisfy D4's containment claim.
+   */
+  acp?: {
+    agents: Record<
+      string,
+      {
+        /** The ACP agent binary to exec inside the container. */
+        command: string;
+        /** Args after `command`. Defaults to none. */
+        args?: string[];
+        /** Digest-pinned image (`@sha256:`) with `command` reachable inside it. */
+        image: string;
+      }
+    >;
+  };
 }
 
 /**
  * Canonical defaults for the `background:` section. `enabled` defaults to false;
  * the wiring layer may override per surface. All other fields are finite.
  */
-export function backgroundDefaults(): Required<Omit<BackgroundConfig, 'enabled' | 'pi'>> & {
+export function backgroundDefaults(): Required<Omit<BackgroundConfig, 'enabled' | 'pi' | 'acp'>> & {
   enabled: boolean;
 } {
   return {
@@ -969,6 +990,29 @@ export function backgroundDefaults(): Required<Omit<BackgroundConfig, 'enabled' 
     staleMs: 90_000,
     heartbeatMs: 30_000,
     retentionDays: 30,
+  };
+}
+
+/**
+ * Cron trigger/arming seam (`cron:` section, plan/phases/cron-scheduler-seam.md).
+ * Parsed from `cron.trigger.<field>: <value>` / `cron.arming.<field>: <value>`
+ * keys. Defaults are applied by the wiring layer (`@ethosagent/cron`'s
+ * `buildCronTriggers`), not here — an absent `cron:` section means "use
+ * today's behavior" (`trigger.local: true`, `trigger.external: false`,
+ * `arming.backend: 'none'`).
+ */
+export interface CronTopLevelConfig {
+  trigger?: {
+    /** Run the in-process interval trigger. Default `true`. */
+    local?: boolean;
+    /** Mount `POST /cron/fire`, gated by a bearer key with the `cron` scope. Default `false`. */
+    external?: boolean;
+  };
+  arming?: {
+    /** Who gets told the next `nextRunAt`. Only `'none'` is implemented this phase. Default `'none'`. */
+    backend?: string;
+    /** Public URL the arming backend calls back on wake. Required for every backend except `'none'`. */
+    fireUrl?: string | null;
   };
 }
 
@@ -1447,6 +1491,14 @@ export interface EthosConfig {
    * and `backgroundDefaults()` for the fallbacks.
    */
   background?: BackgroundConfig;
+  /**
+   * Cron trigger/arming seam (plan/phases/cron-scheduler-seam.md), parsed
+   * from the `cron.trigger.*` / `cron.arming.*` keys. Defaults
+   * (`trigger.local: true`, `trigger.external: false`, `arming.backend:
+   * 'none'`) reproduce today's behavior exactly — a fresh config.yaml with no
+   * `cron:` section at all runs only the local interval trigger, unchanged.
+   */
+  cron?: CronTopLevelConfig;
   displayBellOnComplete?: boolean;
   displayDebugPanel?: boolean;
   displayDebugPanelModel?: string;
@@ -2707,6 +2759,10 @@ function parseConfigYaml(src: string): EthosConfig {
   const displayKv: Record<string, string> = {};
   const evolverKv: Record<string, string> = {};
   const backgroundKv: Record<string, string> = {};
+  /** `background.acp.agents.<name>.<field>` — the named ACP-agent roster (T4/I3). */
+  const backgroundAcpAgentsKv: Record<string, Record<string, string>> = {};
+  // cron.trigger.<field> / cron.arming.<field> — keyed by combined subsection.field.
+  const cronKv: Record<string, string> = {};
   const auxiliaryCompressionKv: Record<string, string> = {};
   const auxiliaryVisionKv: Record<string, string> = {};
   const auxiliaryWebKv: Record<string, string> = {};
@@ -3122,10 +3178,27 @@ function parseConfigYaml(src: string): EthosConfig {
       evolverKv[evlv[1]] = evlv[2].trim().replace(/^["']|["']$/g, '');
       continue;
     }
+    // background.acp.agents.<name>.<field>: <value> — the named ACP-agent
+    // roster. Matched BEFORE the single-level `background.<field>` line below,
+    // whose `[a-z_]+` cannot swallow a dotted key anyway, but ordering mirrors
+    // the voice roster's own "roster before general" discipline.
+    const bacp = line.match(/^background\.acp\.agents\.([A-Za-z0-9_-]+)\.(\w+):\s*(.+)$/);
+    if (bacp) {
+      const name = bacp[1];
+      backgroundAcpAgentsKv[name] ??= {};
+      backgroundAcpAgentsKv[name][bacp[2]] = bacp[3].trim().replace(/^["']|["']$/g, '');
+      continue;
+    }
     // background.<field>: <value>
     const bg = line.match(/^background\.([a-z_]+):\s*(.+)$/);
     if (bg) {
       backgroundKv[bg[1]] = bg[2].trim().replace(/^["']|["']$/g, '');
+      continue;
+    }
+    // cron.trigger.<field>: <value>  or  cron.arming.<field>: <value>
+    const cron = line.match(/^cron\.(trigger|arming)\.([a-zA-Z]+):\s*(.+)$/);
+    if (cron) {
+      cronKv[`${cron[1]}.${cron[2]}`] = cron[3].trim().replace(/^["']|["']$/g, '');
       continue;
     }
     // auxiliary.compression.<field>: <value>
@@ -3740,7 +3813,8 @@ function parseConfigYaml(src: string): EthosConfig {
     backgroundMaxConcurrent: backgroundKv.max_concurrent
       ? Number(backgroundKv.max_concurrent)
       : undefined,
-    background: buildBackgroundConfig(backgroundKv),
+    background: buildBackgroundConfig(backgroundKv, backgroundAcpAgentsKv),
+    cron: buildCronConfig(cronKv),
     displayBellOnComplete: displayKv.bell_on_complete === 'true' ? true : undefined,
     displayMemoryNotices:
       displayKv.memory_notices === 'true'
@@ -4322,7 +4396,10 @@ function buildRetentionConfig(kv: Record<string, string>): RetentionConfig | und
  * field undefined; the wiring layer distinguishes absence from a tool-level
  * explicit null.
  */
-function buildBackgroundConfig(kv: Record<string, string>): BackgroundConfig | undefined {
+function buildBackgroundConfig(
+  kv: Record<string, string>,
+  acpAgentsKv: Record<string, Record<string, string>>,
+): BackgroundConfig | undefined {
   const cfg: BackgroundConfig = {};
   if (kv.enabled !== undefined) cfg.enabled = kv.enabled === 'true';
   const num = (raw: string | undefined): number | undefined => {
@@ -4357,6 +4434,48 @@ function buildBackgroundConfig(kv: Record<string, string>): BackgroundConfig | u
       ...(kv.pi_config_dir ? { configDir: kv.pi_config_dir } : {}),
     };
   }
+  // `background.acp.agents.<name>.{command,args,image}` — each entry needs
+  // both `command` and `image` to be usable; an incomplete entry is dropped
+  // rather than half-built, same discipline the voice provider roster uses
+  // for a missing `provider` field.
+  const acpAgents: Record<string, { command: string; args?: string[]; image: string }> = {};
+  for (const [name, fields] of Object.entries(acpAgentsKv)) {
+    if (!fields.command || !fields.image) continue;
+    const args = fields.args
+      ? fields.args
+          .split(',')
+          .map((s) => s.trim())
+          .filter(Boolean)
+      : undefined;
+    acpAgents[name] = {
+      command: fields.command,
+      ...(args && args.length > 0 ? { args } : {}),
+      image: fields.image,
+    };
+  }
+  if (Object.keys(acpAgents).length > 0) cfg.acp = { agents: acpAgents };
+  if (Object.keys(cfg).length === 0) return undefined;
+  return cfg;
+}
+
+/**
+ * Parse the `cron:` section from the shared `cron.trigger.*` / `cron.arming.*`
+ * flat-key bag (see `CronTopLevelConfig`). Returns undefined when no
+ * recognised field is present so `config.cron` is only set when the section
+ * actually appears — an absent section means "today's behavior, unchanged".
+ */
+function buildCronConfig(kv: Record<string, string>): CronTopLevelConfig | undefined {
+  const trigger: NonNullable<CronTopLevelConfig['trigger']> = {};
+  if (kv['trigger.local'] !== undefined) trigger.local = kv['trigger.local'] === 'true';
+  if (kv['trigger.external'] !== undefined) trigger.external = kv['trigger.external'] === 'true';
+
+  const arming: NonNullable<CronTopLevelConfig['arming']> = {};
+  if (kv['arming.backend']) arming.backend = kv['arming.backend'];
+  if (kv['arming.fireUrl']) arming.fireUrl = kv['arming.fireUrl'];
+
+  const cfg: CronTopLevelConfig = {};
+  if (Object.keys(trigger).length > 0) cfg.trigger = trigger;
+  if (Object.keys(arming).length > 0) cfg.arming = arming;
   if (Object.keys(cfg).length === 0) return undefined;
   return cfg;
 }
