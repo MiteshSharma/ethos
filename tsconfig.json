@@ -90,6 +90,7 @@
       "@ethosagent/tools-terminal/reducers/bash": ["./extensions/tools-terminal/src/reducers/bash"],
       "@ethosagent/tools-web": ["./extensions/tools-web/src"],
       "@ethosagent/tools-x-search": ["./extensions/tools-x-search/src"],
+      "@ethosagent/tools-reddit": ["./extensions/tools-reddit/src"],
       "@ethosagent/tools-a2a": ["./extensions/tools-a2a/src"],
       "@ethosagent/tools-delegation": ["./extensions/tools-delegation/src"],
       "@ethosagent/tools-memory": ["./extensions/tools-memory/src"],

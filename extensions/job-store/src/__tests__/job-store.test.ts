@@ -526,9 +526,10 @@ describe('SQLiteJobStore', () => {
     // 9_999 + the `queued` row from create() = 10_000.
     for (let i = 0; i < 9_999; i++) await store.appendEvent(job.id, 'text', { text: chunk, i });
 
-    const tStart = performance.now();
+    const cpuStart = process.cpuUsage();
     const page1 = await store.getEvents(job.id, { limit: 200 });
-    const boundedMs = performance.now() - tStart;
+    const boundedCpu = process.cpuUsage(cpuStart);
+    const boundedMs = (boundedCpu.user + boundedCpu.system) / 1000;
 
     expect(page1).toHaveLength(200);
     expect(page1.map((e) => e.seq)).toEqual(
@@ -547,10 +548,16 @@ describe('SQLiteJobStore', () => {
     // …and it is genuinely bounded, not a full scan that happens to slice: the
     // unbounded read of the same trail materializes 50x the rows. Timing is
     // deliberately loose (a 3x margin against a ~50x difference) so this fails
-    // on a regression to O(n), not on a slow CI box.
-    const tFull = performance.now();
+    // on a regression to O(n), not on a slow CI box. Measured via
+    // process.cpuUsage() rather than wall-clock performance.now(): both ops are
+    // synchronous CPU-bound SQLite work, so CPU time isolates the actual work
+    // done from OS scheduling delays — on a shared/loaded machine a context
+    // switch can stall the (much shorter) bounded read's wall-clock window
+    // disproportionately, which is what made this assertion flaky under load.
+    const cpuFullStart = process.cpuUsage();
     const all = await store.getEvents(job.id);
-    const fullMs = performance.now() - tFull;
+    const fullCpu = process.cpuUsage(cpuFullStart);
+    const fullMs = (fullCpu.user + fullCpu.system) / 1000;
     expect(all).toHaveLength(10_000);
     expect(boundedMs * 3).toBeLessThan(fullMs);
 

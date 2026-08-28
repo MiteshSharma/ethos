@@ -31,7 +31,6 @@ import {
 } from '@ethosagent/platform-callcapture';
 import { bundledSkillsSource, UniversalScanner } from '@ethosagent/skills';
 import type { Skill } from '@ethosagent/types';
-import { createBuiltinVoiceRegistries } from '@ethosagent/wiring';
 import { errorLogExists, errorLogPath, readRecentErrors } from '../error-log';
 import { type LiveKitMediaResolution, resolveLiveKitMedia } from '../livekit-media';
 import { buildVersionInfo } from '../version-info';
@@ -1357,6 +1356,10 @@ async function voiceReport(config: EthosConfig | null): Promise<string[]> {
     return lines;
   }
 
+  // Dynamic import — @ethosagent/wiring pulls in the full provider/tool graph
+  // (the heaviest package in the repo); loading it only when voice is actually
+  // configured keeps --check-provider and other narrow doctor paths cheap.
+  const { createBuiltinVoiceRegistries } = await import('@ethosagent/wiring');
   const { sttProviders, ttsProviders } = createBuiltinVoiceRegistries();
   const trustedVoicePlugins = voice?.trustedPlugins ? new Set(voice.trustedPlugins) : undefined;
   const stt = await resolveSttProvider({

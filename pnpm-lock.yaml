@@ -2082,6 +2082,12 @@ importers:
         specifier: workspace:*
         version: link:../../packages/types
 
+  extensions/tools-reddit:
+    dependencies:
+      '@ethosagent/types':
+        specifier: workspace:*
+        version: link:../../packages/types
+
   extensions/tools-skills:
     dependencies:
       '@ethosagent/types':
@@ -2690,6 +2696,9 @@ importers:
       '@ethosagent/tools-process':
         specifier: workspace:*
         version: link:../../extensions/tools-process
+      '@ethosagent/tools-reddit':
+        specifier: workspace:*
+        version: link:../../extensions/tools-reddit
       '@ethosagent/tools-skills':
         specifier: workspace:*
         version: link:../../extensions/tools-skills

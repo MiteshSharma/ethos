@@ -977,6 +977,11 @@ tiers:
     tier: 2
     assigned: 2026-08-12
 
+  extensions/tools-reddit:
+    package: "@ethosagent/tools-reddit"
+    tier: 2
+    assigned: 2026-08-28
+
   extensions/tools-skills:
     package: "@ethosagent/tools-skills"
     tier: 2
