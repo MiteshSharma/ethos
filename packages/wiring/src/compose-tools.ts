@@ -65,6 +65,7 @@ import { compose as composeTodo } from '@ethosagent/tools-todo/compose';
 import { buildCardTools, buildUiTools, createUiGuidanceInjector } from '@ethosagent/tools-ui';
 import { createVoiceTools } from '@ethosagent/tools-voice';
 import { compose as composeWatchers } from '@ethosagent/tools-watchers/compose';
+import { createXSearchTool } from '@ethosagent/tools-x-search';
 import type {
   ContextInjector,
   ExecutionBackend,
@@ -689,6 +690,7 @@ export async function composeAllTools(
   // -------------------------------------------------------------------------
 
   for (const tool of createFileTools()) tools.register(tool);
+  tools.register(createXSearchTool());
   for (const tool of createTerminalTools({
     backend: executionBackend,
     personality: activePerson,

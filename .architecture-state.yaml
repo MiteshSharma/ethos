@@ -1007,6 +1007,11 @@ tiers:
     tier: 2
     assigned: 2026-08-12
 
+  extensions/tools-x-search:
+    package: "@ethosagent/tools-x-search"
+    tier: 2
+    assigned: 2026-08-28
+
   extensions/voice-providers:
     package: "@ethosagent/voice-providers"
     tier: 2

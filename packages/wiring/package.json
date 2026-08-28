@@ -119,6 +119,7 @@
     "@ethosagent/tools-voice": "workspace:*",
     "@ethosagent/tools-watchers": "workspace:*",
     "@ethosagent/tools-web": "workspace:*",
+    "@ethosagent/tools-x-search": "workspace:*",
     "@ethosagent/types": "workspace:*",
     "@ethosagent/voice-providers": "workspace:*",
     "@ethosagent/voice-session": "workspace:*",

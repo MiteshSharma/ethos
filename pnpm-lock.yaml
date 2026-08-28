@@ -2149,6 +2149,12 @@ importers:
         specifier: workspace:*
         version: link:../../packages/types
 
+  extensions/tools-x-search:
+    dependencies:
+      '@ethosagent/types':
+        specifier: workspace:*
+        version: link:../../packages/types
+
   extensions/voice-providers:
     dependencies:
       '@ethosagent/types':
@@ -2690,6 +2696,9 @@ importers:
       '@ethosagent/tools-web':
         specifier: workspace:*
         version: link:../../extensions/tools-web
+      '@ethosagent/tools-x-search':
+        specifier: workspace:*
+        version: link:../../extensions/tools-x-search
       '@ethosagent/types':
         specifier: workspace:*
         version: link:../types
