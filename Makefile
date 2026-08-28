@@ -40,6 +40,7 @@ help:
 	@echo "  web                   - Build SPA + run ethos serve with mounted static (single port :3000)"
 	@echo "  gateway-setup         - Configure Telegram bot token"
 	@echo "  gateway               - Start the Telegram gateway in foreground (dev)"
+	@echo "  boot                  - Merged gateway+serve single-process boot profile (plan/phases/single-process-boot-profile.md)"
 	@echo "  listen                - Start the wake-word satellite, capturing from the mic (DEVICE=<id> to pick one)"
 	@echo "  listen-devices        - List this host's audio input devices (for DEVICE=)"
 	@echo "  listen-doctor         - Preflight the wake stack (engine, models, mic, server)"
@@ -211,6 +212,11 @@ gateway-setup:
 
 gateway:
 	@$(NVM_EXEC) pnpm exec tsx apps/ethos/src/index.ts gateway start
+
+# Merged gateway+serve single-process boot profile (plan/phases/single-process-boot-profile.md).
+# Does not wire SIP, dreaming, the Langfuse poller, kanban polling, or team-supervisor spawning — those still need `gateway start`/`serve` individually.
+boot:
+	@$(NVM_EXEC) pnpm exec tsx apps/ethos/src/index.ts boot --port $(ACP_PORT) --web-port $(WEB_PORT)
 
 # ---------- wake satellite ----------
 #
@@ -651,7 +657,7 @@ clean:
 	@echo "Clean complete."
 
 .PHONY: help setup setup-nvm setup-node setup-pnpm setup-gstack prepare \
-        dev tui web web-dev web-build gateway-setup gateway \
+        dev tui web web-dev web-build gateway-setup gateway boot \
         listen listen-devices listen-doctor \
         cron personality memory keys \
         start-gateway-daemon stop-gateway-daemon delete-gateway-daemon status-gateway-daemon \
