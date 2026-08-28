@@ -345,6 +345,49 @@ describe('DreamExecutor', () => {
   // Timer lifecycle (start/stop)
   // -----------------------------------------------------------------------
 
+  // -----------------------------------------------------------------------
+  // hasActiveDreams — the idle-watcher's busy predicate
+  // -----------------------------------------------------------------------
+
+  describe('hasActiveDreams', () => {
+    it('is false when idle, true mid-dream, and false again once the dream ends', async () => {
+      // A loop whose run() parks until the test releases it, so the dream is
+      // observably in flight rather than over before the assertion.
+      let releaseTurn: (() => void) | undefined;
+      const parked = new Promise<void>((resolve) => {
+        releaseTurn = resolve;
+      });
+      const blockingLoop = {
+        run: async function* () {
+          await parked;
+          yield { type: 'done' as const, text: '', turnCount: 1 };
+        },
+      } as unknown as AgentLoop;
+
+      const cfg = makeConfig();
+      executor = new DreamExecutor(
+        storage,
+        () => blockingLoop,
+        () => cfg,
+      );
+
+      expect(executor.hasActiveDreams()).toBe(false);
+
+      executor.recordUserTurn(personalityId);
+      vi.setSystemTime(Date.now() + 61 * 60_000);
+      const tick = internals(executor).tick();
+
+      // Let the tick reach executeDream and park on the loop.
+      await vi.advanceTimersByTimeAsync(0);
+      expect(executor.hasActiveDreams()).toBe(true);
+
+      releaseTurn?.();
+      await tick;
+
+      expect(executor.hasActiveDreams()).toBe(false);
+    });
+  });
+
   describe('timer lifecycle', () => {
     it('start() creates an interval; stop() clears it', () => {
       build();

@@ -4,11 +4,11 @@
 // owns the team. Tested by calling acquirePidFile twice for the same path:
 // first call succeeds; second call sees EEXIST + a live PID and throws.
 
-import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { acquirePidFile } from '../../pid';
+import { acquirePidFile, hasLiveTeamProcesses } from '../../pid';
 
 let workDir: string;
 
@@ -90,5 +90,65 @@ describe('CC-3: PID file single-supervisor guarantee', () => {
     expect(successCount).toBe(1);
     expect(errorCount).toBe(1);
     releaser?.();
+  });
+});
+
+// A PID guaranteed not to be a running process (see the stale-recovery test
+// above for why this value).
+const STALE_PID = 9_999_999;
+
+describe('hasLiveTeamProcesses', () => {
+  it('reports idle for a missing PID directory — no teams configured', () => {
+    expect(hasLiveTeamProcesses(join(workDir, 'never-created'))).toBe(false);
+  });
+
+  it('reports idle for an empty PID directory', () => {
+    expect(hasLiveTeamProcesses(workDir)).toBe(false);
+  });
+
+  it('reports busy while a PID file names a live process, idle once it is gone', () => {
+    const pidPath = join(workDir, 'alpha.pid');
+    const release = acquirePidFile(pidPath);
+    expect(hasLiveTeamProcesses(workDir)).toBe(true);
+    release();
+    expect(hasLiveTeamProcesses(workDir)).toBe(false);
+  });
+
+  it('reports idle for a stale PID file whose process is gone', () => {
+    writeFileSync(join(workDir, 'alpha.pid'), String(STALE_PID));
+    expect(hasLiveTeamProcesses(workDir)).toBe(false);
+  });
+
+  it('ignores non-.pid entries in the teams directory', () => {
+    writeFileSync(join(workDir, 'alpha.runtime.json'), JSON.stringify({ supervisorPid: 1 }));
+    expect(hasLiveTeamProcesses(workDir)).toBe(false);
+  });
+
+  // Fail-awake: an unreadable or malformed claim is not evidence of absence.
+  it('reports busy for a malformed PID file', () => {
+    writeFileSync(join(workDir, 'alpha.pid'), 'not-a-pid');
+    expect(hasLiveTeamProcesses(workDir)).toBe(true);
+  });
+
+  it('reports busy for an empty PID file', () => {
+    writeFileSync(join(workDir, 'alpha.pid'), '');
+    expect(hasLiveTeamProcesses(workDir)).toBe(true);
+  });
+
+  it('reports busy for an unreadable PID file, never silently skipping it', () => {
+    // A directory at the `.pid` path makes readFileSync fail with EISDIR —
+    // a portable stand-in for a permission or transient FS error (chmod is
+    // a no-op when the suite runs as root).
+    mkdirSync(join(workDir, 'alpha.pid'));
+    expect(hasLiveTeamProcesses(workDir)).toBe(true);
+  });
+
+  it('reports busy when one team is stale but another is live', () => {
+    writeFileSync(join(workDir, 'alpha.pid'), String(STALE_PID));
+    const release = acquirePidFile(join(workDir, 'beta.pid'));
+    expect(hasLiveTeamProcesses(workDir)).toBe(true);
+    release();
+    unlinkSync(join(workDir, 'alpha.pid'));
+    expect(hasLiveTeamProcesses(workDir)).toBe(false);
   });
 });

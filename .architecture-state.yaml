@@ -723,6 +723,11 @@ tiers:
     tier: 2
     assigned: 2026-08-12
 
+  extensions/idle-watcher:
+    package: "@ethosagent/idle-watcher"
+    tier: 2
+    assigned: 2026-08-28
+
   extensions/job-runner:
     package: "@ethosagent/job-runner"
     tier: 2

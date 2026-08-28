@@ -1,13 +1,28 @@
-import type { BeforeToolCallPayload } from '@ethosagent/types';
-import { describe, expect, it, vi } from 'vitest';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { DefaultHookRegistry } from '@ethosagent/core';
+import type { Gateway, GatewayBotConfig } from '@ethosagent/gateway';
+import type {
+  BeforeToolCallPayload,
+  BeforeToolCallResult,
+  PersonalityRegistry,
+  PlatformAdapter,
+} from '@ethosagent/types';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import {
   ApprovalCoordinator,
   type ApprovalObservability,
   createSlackApprovalHook,
   type PendingApproval,
 } from '../approval-coordinator';
+import { wireApprovalFlow } from '../commands/gateway';
 
 type AuditRow = Parameters<ApprovalObservability['recordSafetyApproval']>[0];
+
+/** Mirrors the module-private `SYSTEM_DECIDER` in `../approval-coordinator`
+ *  (and its twin in web-api's `approvals.service.ts`). */
+const SYSTEM_DECIDER = '__ethos_system__';
 
 /** Collecting audit sink — stands in for wiring's EthosObservability. */
 function recordingSink(): { rows: AuditRow[]; observability: ApprovalObservability } {
@@ -303,6 +318,9 @@ describe('ApprovalCoordinator — safety audit trail', () => {
       expect(rows).toHaveLength(1);
       expect(rows[0].decision).toBe('denied');
       expect(rows[0].cause).toContain('approval timed out');
+      // The trail must name the SYSTEM as the decider, so an audit reader can
+      // tell an unattended auto-deny from a human one.
+      expect(rows[0].details).toMatchObject({ decidedBy: SYSTEM_DECIDER });
     } finally {
       vi.useRealTimers();
     }
@@ -406,5 +424,387 @@ describe('createSlackApprovalHook', () => {
     // Generic decision reason + the specific danger reason, so the agent can
     // course-correct instead of retrying blindly.
     expect(result?.error).toBe('denied by user — recursive force-delete');
+  });
+});
+
+describe('ApprovalCoordinator — shutdown + per-request timeout', () => {
+  it('forceSettleAll denies and audits every pending approval, across sessions (T5)', async () => {
+    const { rows, observability } = recordingSink();
+    const coordinator = new ApprovalCoordinator({ observability, timeoutMs: 60_000 });
+
+    const decisions = ['sid-1', 'sid-1', 'sid-2'].map((sessionId, index) =>
+      coordinator.requestApproval({
+        sessionId,
+        toolCallId: `tc-${index}`,
+        toolName: 'terminal',
+        args: {},
+        reason: null,
+      }),
+    );
+    expect(coordinator.pendingCount()).toBe(3);
+
+    coordinator.forceSettleAll();
+
+    for (const decision of decisions) expect((await decision).decision).toBe('deny');
+    expect(rows).toHaveLength(3);
+    expect(rows.every((r) => r.decision === 'denied')).toBe(true);
+    expect(
+      rows.every((r) => (r.details as { decidedBy?: string }).decidedBy === SYSTEM_DECIDER),
+    ).toBe(true);
+    expect(coordinator.pendingCount()).toBe(0);
+  });
+
+  it('timeoutMs: 0 arms no timer — the approval waits for an explicit decision (T7)', async () => {
+    vi.useFakeTimers();
+    try {
+      const coordinator = new ApprovalCoordinator({ timeoutMs: 0 });
+      const pending: PendingApproval[] = [];
+      coordinator.onPending((p) => pending.push(p));
+
+      let settled = false;
+      const decision = coordinator
+        .requestApproval({
+          sessionId: 'sid-1',
+          toolCallId: 'tc-1',
+          toolName: 'terminal',
+          args: {},
+          reason: null,
+        })
+        .then((d) => {
+          settled = true;
+          return d;
+        });
+
+      await vi.advanceTimersByTimeAsync(6 * 60 * 60 * 1000);
+      expect(settled).toBe(false);
+      expect(coordinator.pendingCount()).toBe(1);
+
+      await coordinator.deny(pending[0].approvalId, 'U1');
+      expect((await decision).decision).toBe('deny');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('a per-request timeoutMs overrides the coordinator default', async () => {
+    vi.useFakeTimers();
+    try {
+      const coordinator = new ApprovalCoordinator({ timeoutMs: 60 * 60 * 1000 });
+      const decision = coordinator.requestApproval({
+        sessionId: 'sid-1',
+        toolCallId: 'tc-1',
+        toolName: 'terminal',
+        args: {},
+        reason: null,
+        timeoutMs: 20,
+      });
+
+      await vi.advanceTimersByTimeAsync(20);
+      expect(await decision).toEqual({ decision: 'deny', reason: 'approval timed out' });
+      expect(coordinator.pendingCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('a per-request timeoutMs of 0 opts one request out of a short default', async () => {
+    vi.useFakeTimers();
+    try {
+      const coordinator = new ApprovalCoordinator({ timeoutMs: 20 });
+      let settled = false;
+      void coordinator
+        .requestApproval({
+          sessionId: 'sid-1',
+          toolCallId: 'tc-1',
+          toolName: 'terminal',
+          args: {},
+          reason: null,
+          timeoutMs: 0,
+        })
+        .then(() => {
+          settled = true;
+        });
+
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(settled).toBe(false);
+      expect(coordinator.pendingCount()).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // A delay above the 32-bit signed timer max overflows to ~1ms. Unclamped,
+  // an operator reaching for a MORE permissive window would auto-deny every
+  // dangerous tool call within milliseconds — a silent total lockout.
+  it('a coordinator timeout above the Node timer max is clamped, not overflowed into an instant deny', async () => {
+    vi.useFakeTimers();
+    try {
+      // 30 days — a plausible operator SLA, and well above 2_147_483_647.
+      const coordinator = new ApprovalCoordinator({ timeoutMs: 30 * 24 * 60 * 60 * 1000 });
+      let settled = false;
+      void coordinator
+        .requestApproval({
+          sessionId: 'sid-1',
+          toolCallId: 'tc-1',
+          toolName: 'terminal',
+          args: {},
+          reason: null,
+        })
+        .then(() => {
+          settled = true;
+        });
+
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(settled).toBe(false);
+      expect(coordinator.pendingCount()).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('a per-request timeoutMs above the Node timer max is clamped too', async () => {
+    vi.useFakeTimers();
+    try {
+      const coordinator = new ApprovalCoordinator({ timeoutMs: 60_000 });
+      let settled = false;
+      void coordinator
+        .requestApproval({
+          sessionId: 'sid-1',
+          toolCallId: 'tc-1',
+          toolName: 'terminal',
+          args: {},
+          reason: null,
+          timeoutMs: 30 * 24 * 60 * 60 * 1000,
+        })
+        .then(() => {
+          settled = true;
+        });
+
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(settled).toBe(false);
+      expect(coordinator.pendingCount()).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+// T9 — the gateway's config threading and its shutdown handle. `wireApprovalFlow`
+// is exercised directly (booting a real gateway in a unit test is impractical),
+// following the precedent of `createGatewayMetricsAuthCheck` in
+// gateway-metrics-auth.test.ts.
+describe('wireApprovalFlow', () => {
+  let stateDir: string;
+  let previousStateDir: string | undefined;
+
+  beforeAll(async () => {
+    // The coordinator's audit sink resolves the process-wide observability
+    // store lazily — point it at a throwaway dir so a test never writes to
+    // the developer's real ~/.ethos.
+    stateDir = await mkdtemp(join(tmpdir(), 'ethos-approval-wiring-'));
+    previousStateDir = process.env.ETHOS_STATE_DIR;
+    process.env.ETHOS_STATE_DIR = stateDir;
+  });
+
+  afterAll(async () => {
+    if (previousStateDir === undefined) delete process.env.ETHOS_STATE_DIR;
+    else process.env.ETHOS_STATE_DIR = previousStateDir;
+    await rm(stateDir, { recursive: true, force: true });
+  });
+
+  /** Approval-capable adapter stub. `posted` resolves once a card is posted,
+   *  which is the point the approval is registered with the coordinator. */
+  function stubAdapter(
+    updateGate?: Promise<void>,
+    postGate?: Promise<void>,
+  ): {
+    adapter: PlatformAdapter;
+    posted: Promise<void>;
+    calls: { updates: number };
+  } {
+    let signalPosted = () => {};
+    const posted = new Promise<void>((resolve) => {
+      signalPosted = resolve;
+    });
+    const calls = { updates: 0 };
+    const adapter = {
+      id: 'slack:test',
+      botKey: 'bot-1',
+      postApprovalCard: async () => {
+        signalPosted();
+        // `postGate` stands in for a card post still on the wire.
+        if (postGate) await postGate;
+        return { messageTs: 'ts-1' };
+      },
+      updateApprovalCard: async () => {
+        calls.updates += 1;
+        // `updateGate` stands in for a slow Slack/Telegram round trip.
+        if (updateGate) await updateGate;
+        return { ok: true };
+      },
+      onApprovalDecision: () => {},
+    } as unknown as PlatformAdapter;
+    return { adapter, posted, calls };
+  }
+
+  function wire(approvalTimeoutMs?: number, updateGate?: Promise<void>, postGate?: Promise<void>) {
+    const { adapter, posted, calls } = stubAdapter(updateGate, postGate);
+    const hooks = new DefaultHookRegistry();
+    const bots = [
+      { botKey: 'bot-1', loop: { hooks }, binding: { type: 'personality', name: 'default' } },
+    ] as unknown as GatewayBotConfig[];
+    const gateway = {
+      resolveApprovalRoute: () => ({ adapter, chatId: 'C1', requesterUserId: 'U1' }),
+    } as unknown as Gateway;
+    const flow = wireApprovalFlow(gateway, bots, [adapter], {
+      personalities: { get: () => undefined } as unknown as PersonalityRegistry,
+      getProvider: async () => {
+        throw new Error('no provider in this test');
+      },
+      model: 'test-model',
+      ...(approvalTimeoutMs !== undefined ? { approvalTimeoutMs } : {}),
+    });
+    return { flow, hooks, posted, calls };
+  }
+
+  function fireDangerousCall(hooks: DefaultHookRegistry): Promise<Partial<BeforeToolCallResult>> {
+    return hooks.fireModifying('before_tool_call', {
+      sessionId: 'sid-1',
+      toolCallId: 'tc-1',
+      toolName: 'terminal',
+      args: { command: 'rm -rf /' },
+    } satisfies BeforeToolCallPayload);
+  }
+
+  it('threads config.approvalTimeoutMs into the coordinator', async () => {
+    const { hooks } = wire(25);
+    const result = await fireDangerousCall(hooks);
+    // Auto-denied at the configured window, not the coordinator's 10-minute
+    // default — which would have hung this test out to its timeout.
+    expect(result.error).toContain('approval timed out');
+  });
+
+  it('returns a shutdown handle that drains pending approvals', async () => {
+    // `0` = no timeout, so only the shutdown handle can settle this call.
+    const { flow, hooks, posted } = wire(0);
+    const hookResult = fireDangerousCall(hooks);
+    await posted;
+
+    await flow.shutdown();
+
+    const result = await hookResult;
+    expect(result.error).toContain('gateway shutting down');
+  });
+
+  it('shutdown() awaits the in-flight approval card update', async () => {
+    // `0` = no timeout, so only the shutdown handle settles this call.
+    let releaseUpdate = () => {};
+    const updateGate = new Promise<void>((resolve) => {
+      releaseUpdate = resolve;
+    });
+    const { flow, hooks, posted } = wire(0, updateGate);
+    const hookResult = fireDangerousCall(hooks);
+    await posted;
+    // `posted` fires from inside `postApprovalCard`; let its `.then()` record
+    // the card so the settle below takes the normal update path rather than
+    // the post-races-resolution one.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    let shutdownSettled = false;
+    const shutdown = flow.shutdown().then(() => {
+      shutdownSettled = true;
+    });
+
+    // The deny is already audited, but the card still shows live buttons —
+    // `shutdown()` must not resolve (and let the caller stop the adapters)
+    // while that update is parked on the gate.
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(shutdownSettled).toBe(false);
+
+    releaseUpdate();
+    await shutdown;
+    expect(shutdownSettled).toBe(true);
+    await hookResult;
+  });
+
+  it('shutdown() awaits a card update created by a post that lands mid-drain', async () => {
+    // The gap the single-snapshot drain leaves open: the approval settles while
+    // its `postApprovalCard` is STILL in flight, so `onResolved` finds no card
+    // and it is the post's own `.then()` — which runs after `shutdown()` would
+    // have snapshotted the update set — that fires `updateCard`.
+    let releasePost = () => {};
+    const postGate = new Promise<void>((resolve) => {
+      releasePost = resolve;
+    });
+    let releaseUpdate = () => {};
+    const updateGate = new Promise<void>((resolve) => {
+      releaseUpdate = resolve;
+    });
+    // `0` = no timeout, so only the shutdown handle settles this call.
+    const { flow, hooks, posted, calls } = wire(0, updateGate, postGate);
+    const hookResult = fireDangerousCall(hooks);
+    // Inside `postApprovalCard`, parked on `postGate` — the card does not exist yet.
+    await posted;
+
+    let shutdownSettled = false;
+    const shutdown = flow.shutdown().then(() => {
+      shutdownSettled = true;
+    });
+
+    // Force-settled and audited, but the post is still on the wire.
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(shutdownSettled).toBe(false);
+    expect(calls.updates).toBe(0);
+
+    releasePost();
+    // The post's `.then()` now drains the raced outcome into `updateCard`.
+    // That update was created AFTER shutdown started; it must still be awaited.
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(calls.updates).toBe(1);
+    expect(shutdownSettled).toBe(false);
+
+    releaseUpdate();
+    await shutdown;
+    expect(shutdownSettled).toBe(true);
+    await hookResult;
+  });
+
+  it('shutdown() gives up on a card post that never settles', async () => {
+    vi.useFakeTimers();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      // A hung adapter must not hold the SIGINT path open forever.
+      const neverSettles = new Promise<void>(() => {});
+      const { flow, hooks, posted } = wire(0, undefined, neverSettles);
+      const hookResult = fireDangerousCall(hooks);
+      await posted;
+
+      let shutdownSettled = false;
+      const shutdown = flow.shutdown().then(() => {
+        shutdownSettled = true;
+      });
+      // Well past the drain deadline.
+      await vi.advanceTimersByTimeAsync(60_000);
+      await shutdown;
+
+      expect(shutdownSettled).toBe(true);
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('1 card post'));
+      await hookResult;
+    } finally {
+      warn.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it('hands back a no-op shutdown handle when no adapter can present approvals', async () => {
+    const gateway = { resolveApprovalRoute: () => undefined } as unknown as Gateway;
+    const flow = wireApprovalFlow(gateway, [], [], {
+      personalities: { get: () => undefined } as unknown as PersonalityRegistry,
+      getProvider: async () => {
+        throw new Error('no provider in this test');
+      },
+      model: 'test-model',
+    });
+    await expect(flow.shutdown()).resolves.toBeUndefined();
   });
 });

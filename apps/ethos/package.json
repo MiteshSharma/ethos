@@ -98,6 +98,7 @@
     "@ethosagent/gateway": "workspace:*",
     "@ethosagent/goal-runner": "workspace:*",
     "@ethosagent/goal-store": "workspace:*",
+    "@ethosagent/idle-watcher": "workspace:*",
     "@ethosagent/kanban-store": "workspace:*",
     "@ethosagent/logger": "workspace:*",
     "@ethosagent/mcp-server": "workspace:*",

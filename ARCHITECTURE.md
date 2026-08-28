@@ -409,6 +409,7 @@ The personality schema is the worked example. [Personality governance](docs/cont
 | Context engine contract | Any two repository maintainers | Adding, removing, or renaming a method on `ContextEngine` | Method-count test (`context-engine-method-count`) |
 | Content-addressed store (ContentStore) | Any two repository maintainers | Adding, removing, or renaming a method on ContentStore | Method-count test |
 | AgentCard (A2A signed card) | Any two repository maintainers | Adding, removing, or renaming a top-level field on `AgentCard` (`packages/types/src/a2a.ts`) | Field-count + field-name test (`agent-card-field-count`) |
+| Pause lifecycle contract | Any two repository maintainers | Adding, removing, or renaming a method on `PauseLifecycle` | Method-count test (`pause-lifecycle-method-count`) |
 
 Adding an **optional** method to `ContextEngine` is a §VI **Substantive** change:
 it needs two-maintainer approval, the drift gate bumped in the same commit, and
@@ -734,6 +735,12 @@ frozen_schemas:
     drift_gate: method_count_test
     frozen_method_count: 4
     frozen_methods: [put, get, has, hash]
+
+  pause_lifecycle:
+    owner_class: any_two_maintainers
+    drift_gate: method_count_test
+    frozen_method_count: 2
+    frozen_methods: [readPauseOffset, signalReadyToSuspend]
 
   agent_card:
     owner_class: any_two_maintainers

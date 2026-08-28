@@ -213,6 +213,12 @@ export interface CreateWebApiOptions {
    */
   approvalObservability?: ApprovalObservability;
   /**
+   * Auto-deny window for a pending approval, in ms. Omitted → the
+   * `ApprovalsService` default (10 minutes); `0` disables the timeout so a
+   * call waits forever. Boot code sources it from `config.approvalTimeoutMs`.
+   */
+  approvalTimeoutMs?: number;
+  /**
    * Sink for wake-satellite lane events (`satellite.*`) — today, the turn that
    * ran without speaking because the node declared no loudspeaker. Boot code
    * passes wiring's `EthosObservability`. Omitted (tests) → no rows.
@@ -525,6 +531,20 @@ export interface CreateWebApiResult {
    * `GET /satellite/ws` unmounted and no satellite can connect.
    */
   satelliteSocket: SatelliteSocket;
+  /**
+   * Force-settle every pending tool approval as a deny (audited). Boot code
+   * calls this from its shutdown `cleanup()` closure before `process.exit`:
+   * the auto-deny timers are `unref`'d, so without this a graceful restart
+   * abandons every suspended hook with no audit row.
+   */
+  forceSettleApprovals: () => void;
+  /**
+   * How many tool approvals are still awaiting a human decision. Read by the
+   * idle watcher's `web-approvals` busy source: a suspended approval is
+   * in-flight work, and suspending the VM on one loses it silently
+   * (plan/phases/idle-watcher.md §1 check #12).
+   */
+  pendingApprovalCount: () => number;
 }
 
 export function createWebApi(opts: CreateWebApiOptions): CreateWebApiResult {
@@ -647,6 +667,8 @@ export function createWebApi(opts: CreateWebApiOptions): CreateWebApiResult {
   });
   const approvalsService = new ApprovalsService({
     allowlist: allowlistRepo,
+    // `!== undefined`, not truthiness — `0` ("no timeout") must be threadable.
+    ...(opts.approvalTimeoutMs !== undefined ? { timeoutMs: opts.approvalTimeoutMs } : {}),
     ...(opts.approvalObservability ? { observability: opts.approvalObservability } : {}),
   });
   // Cron service degrades gracefully when no scheduler is provided —
@@ -1358,7 +1380,15 @@ export function createWebApi(opts: CreateWebApiOptions): CreateWebApiResult {
     }).start();
   }
 
-  return { app, chatService, systemBus, voiceSocket, satelliteSocket };
+  return {
+    app,
+    chatService,
+    systemBus,
+    voiceSocket,
+    satelliteSocket,
+    forceSettleApprovals: () => approvalsService.forceSettleAll(),
+    pendingApprovalCount: () => approvalsService.pendingCount(),
+  };
 }
 
 /**

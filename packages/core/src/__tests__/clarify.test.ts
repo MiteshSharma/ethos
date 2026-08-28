@@ -1,5 +1,5 @@
 import { InMemoryStorage } from '@ethosagent/storage-fs';
-import type { ClarifySurfaceType, PendingClarify } from '@ethosagent/types';
+import type { ClarifyStore, ClarifySurfaceType, PendingClarify } from '@ethosagent/types';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   ClarifyBridge,
@@ -927,6 +927,97 @@ describe('ClarifyBridge', () => {
 
       expect(presented).toHaveLength(0); // an occupant row is never re-shown
       expect(bridge.listPending(undefined, 'job-4')).toHaveLength(1);
+    });
+
+    // The resume path (`apps/ethos/src/boot-reconciliation.ts`): a second
+    // `hydrate()` must pick up rows persisted since the first one. This is
+    // what a `hydrated` latch made impossible — the latch turned every call
+    // after the first into a permanent no-op that still reported success.
+    it('a second hydrate() adopts a row persisted after the first call (resume)', async () => {
+      const storage = new InMemoryStorage();
+      const store = new FileClarifyStore(storage, '/ethos/clarify');
+      await store.add(
+        makeRow({
+          requestId: 'first',
+          jobId: 'job-resume-a',
+          presentedAt: '2026-05-15T00:00:00.000Z',
+          defaultDeadlineAt: new Date(Date.now() + 15 * 60_000).toISOString(),
+        }),
+      );
+      const bridge = new ClarifyBridge(store);
+      const presented: PendingClarify[] = [];
+      bridge.registerPresenter('cli', (row) => {
+        presented.push(row);
+      });
+
+      await bridge.hydrate();
+      expect(bridge.hasPending('s1', 'job-resume-a')).toBe(true);
+
+      // A row that landed in the shared store AFTER the first hydrate — e.g.
+      // written by another process while this one was paused.
+      await store.add(
+        makeRow({
+          requestId: 'later',
+          jobId: 'job-resume-b',
+          presentedAt: null,
+          defaultDeadlineAt: null,
+          timeoutMs: 900_000,
+        }),
+      );
+
+      await bridge.hydrate();
+
+      expect(bridge.hasPending('s1', 'job-resume-b')).toBe(true);
+      await vi.waitFor(() => expect(presented).toHaveLength(1));
+      expect(presented[0]?.requestId).toBe('later');
+      // ...and the row adopted by the first call was not adopted twice.
+      expect(bridge.listPending(undefined, 'job-resume-a')).toHaveLength(1);
+    });
+
+    // A failed first hydrate must not poison every later one. The latch was
+    // set BEFORE the first await, so a throwing `store.list()` left the
+    // bridge permanently "hydrated" having adopted nothing.
+    it('a first hydrate() that throws does not prevent a later successful one', async () => {
+      const storage = new InMemoryStorage();
+      const store = new FileClarifyStore(storage, '/ethos/clarify');
+      await store.add(
+        makeRow({
+          requestId: 'r-retry',
+          jobId: 'job-retry',
+          presentedAt: null,
+          defaultDeadlineAt: null,
+          timeoutMs: 900_000,
+        }),
+      );
+      let failNextList = true;
+      const flaky: ClarifyStore = {
+        list: async (filter) => {
+          if (failNextList) {
+            failNextList = false;
+            throw new Error('store unavailable');
+          }
+          return store.list(filter);
+        },
+        add: (row) => store.add(row),
+        get: (id) => store.get(id),
+        remove: (id) => store.remove(id),
+        update: (id, patch) => store.update(id, patch),
+        expired: (now) => store.expired(now),
+      };
+      const bridge = new ClarifyBridge(flaky);
+      const presented: PendingClarify[] = [];
+      bridge.registerPresenter('cli', (row) => {
+        presented.push(row);
+      });
+
+      await expect(bridge.hydrate()).rejects.toThrow('store unavailable');
+      expect(bridge.hasPending('s1', 'job-retry')).toBe(false);
+
+      await bridge.hydrate();
+
+      expect(bridge.hasPending('s1', 'job-retry')).toBe(true);
+      await vi.waitFor(() => expect(presented).toHaveLength(1));
+      expect(presented[0]?.requestId).toBe('r-retry');
     });
   });
 

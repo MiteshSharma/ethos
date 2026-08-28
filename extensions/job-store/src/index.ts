@@ -464,6 +464,13 @@ export class SQLiteJobStore implements JobStore {
     return row.n;
   }
 
+  async countActive(): Promise<number> {
+    const row = this.db
+      .prepare(`SELECT COUNT(*) AS n FROM jobs WHERE status IN ${ACTIVE_STATUSES}`)
+      .get() as { n: number };
+    return row.n;
+  }
+
   async reclaimStale(staleMs: number): Promise<BackgroundJob[]> {
     const threshold = Date.now() - staleMs;
     const ids = this.db.transaction((): string[] => {

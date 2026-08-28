@@ -34,6 +34,8 @@ let boundPort: number | null = null;
 /** Kept so `stopServer` can drop live WS lanes before the port closes. */
 let voiceSocketHandle: { close(): Promise<void> } | null = null;
 let satelliteSocketHandle: { close(): Promise<void> } | null = null;
+/** Kept so `stopServer` can deny + audit any suspended approval on the way out. */
+let forceSettleApprovalsHandle: (() => void) | null = null;
 let callCaptureHandle: CallCaptureDesktopHandle | null = null;
 
 export function getDataDir(): string {
@@ -257,6 +259,7 @@ export async function startServer(port: number): Promise<number> {
     app: webApp,
     voiceSocket,
     satelliteSocket,
+    forceSettleApprovals,
   } = createWebApi({
     dataDir,
     sessionStore: session,
@@ -322,6 +325,7 @@ export async function startServer(port: number): Promise<number> {
     ...(skillsCatalogDir ? { catalogDir: skillsCatalogDir } : {}),
     ...(webDistDir ? { webDist: webDistDir } : {}),
   });
+  forceSettleApprovalsHandle = forceSettleApprovals;
 
   function bind(p: number): Promise<number> {
     return new Promise<number>((resolve, reject) => {
@@ -380,11 +384,17 @@ export async function stopServer(): Promise<void> {
   const voice = voiceSocketHandle;
   const satellites = satelliteSocketHandle;
   const callCapture = callCaptureHandle;
+  const settleApprovals = forceSettleApprovalsHandle;
   serverHandle = null;
   voiceSocketHandle = null;
   satelliteSocketHandle = null;
+  forceSettleApprovalsHandle = null;
   callCaptureHandle = null;
   boundPort = null;
+  // Deny + audit any suspended approval FIRST, before the awaits below — the
+  // auto-deny timers are unref'd and never fire on the way out, and a later
+  // await that hangs must not cost the audit row.
+  settleApprovals?.();
   if (callCapture) await callCapture.stop();
   // Sockets first: `server.close()` waits on open connections, and both a
   // talk-mode tab and a satellite hold their lane open indefinitely by design.

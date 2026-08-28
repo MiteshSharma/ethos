@@ -15,20 +15,56 @@ export interface ListenResult {
 
 export type FetchApp = { fetch: (req: Request) => Response | Promise<Response> };
 
+/**
+ * `reservedPorts` — ports the CALLER has already bound (or is about to bind)
+ * in this same process. They are skipped without a bind attempt.
+ *
+ * Only the merged `ethos boot` profile passes it. In the split-process world
+ * the ladder only ever probes other processes' ports, so `serve.ts` passes
+ * nothing and behaves exactly as before. In one merged process, 3001/3002/3003
+ * are THIS process's ACP / health / webhook servers, so a stale peer holding
+ * 3000 would walk the web bind straight into its own siblings — a silent
+ * self-collision with no precedent in the split architecture
+ * (plan/phases/single-process-boot-profile.md §5 / §11 OQ10). Skipping is the
+ * resolution chosen there: web lands on 3004, or the range is exhausted and
+ * the error below names both the range and what was skipped. Never silent.
+ *
+ * A skipped port does NOT consume an attempt: `attempts` is a depth of real
+ * bind attempts, and it must not silently shrink by however many of this
+ * process's own ports happen to fall in the window. The scan is bounded by
+ * `attempts + reserved.size` ports so a pathological reserved set cannot walk
+ * forever.
+ */
 export async function listenWithFallback(
   app: FetchApp,
   basePort: number,
   attempts: number,
   hostname = '127.0.0.1',
+  reservedPorts?: Iterable<number>,
 ): Promise<ListenResult> {
+  const reserved = new Set(reservedPorts ?? []);
+  const skipped: number[] = [];
   let lastErr: unknown;
-  for (let i = 0; i < attempts; i++) {
-    const port = basePort + i;
+  let tried = 0;
+  let port = basePort;
+  const lastPort = basePort + attempts + reserved.size - 1;
+  for (; tried < attempts && port <= lastPort; port++) {
+    if (reserved.has(port)) {
+      skipped.push(port);
+      continue;
+    }
+    tried++;
     try {
       const result = await tryListen(app, port, hostname);
-      if (i > 0) {
+      if (port !== basePort) {
+        // Two different causes, two different messages: nothing external took
+        // a port THIS process reserved, and saying "taken" there sends the
+        // operator hunting a conflict that does not exist.
+        const why = reserved.has(basePort)
+          ? 'is already reserved by this process'
+          : 'was taken by another process';
         console.warn(
-          `⚠ Port ${basePort} was taken — bound ${port} instead. If you use the Vite dev proxy ` +
+          `⚠ Port ${basePort} ${why} — bound ${port} instead. If you use the Vite dev proxy ` +
             `(make web-dev), it still points at ${basePort} and will talk to whatever owns that port.`,
         );
       }
@@ -40,10 +76,17 @@ export async function listenWithFallback(
   }
   throw new EthosError({
     code: 'INTERNAL',
-    cause: `No free port in range ${basePort}-${basePort + attempts - 1}`,
+    cause:
+      `No free port in range ${basePort}-${port - 1}` +
+      (skipped.length > 0
+        ? ` (skipped ${skipped.join(', ')} — already bound by this process)`
+        : ''),
     action:
       'Pass --web-port=<n> to pick a different starting port, or stop whatever is using these.',
-    details: { lastErr: lastErr instanceof Error ? lastErr.message : String(lastErr) },
+    details: {
+      lastErr: lastErr instanceof Error ? lastErr.message : String(lastErr),
+      ...(skipped.length > 0 ? { skippedReservedPorts: skipped } : {}),
+    },
   });
 }
 

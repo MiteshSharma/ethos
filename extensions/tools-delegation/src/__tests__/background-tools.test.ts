@@ -114,6 +114,9 @@ class FakeJobStore implements JobStore {
       (j) => j.personalityId === personalityId && ACTIVE.has(j.status),
     ).length;
   }
+  async countActive(): Promise<number> {
+    return [...this.jobs.values()].filter((j) => ACTIVE.has(j.status)).length;
+  }
   async reclaimStale(): Promise<BackgroundJob[]> {
     return [];
   }

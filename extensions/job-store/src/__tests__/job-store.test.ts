@@ -439,6 +439,34 @@ describe('SQLiteJobStore', () => {
     store.close();
   });
 
+  it('countActive counts every non-terminal job, unscoped, and returns to 0', async () => {
+    const store = new SQLiteJobStore(':memory:');
+    expect(await store.countActive()).toBe(0);
+
+    const first = await store.create(baseInput({ personalityId: 'ada' }));
+    const second = await store.create(
+      baseInput({ rootSessionKey: 'other', personalityId: 'linus' }),
+    );
+    // Two different roots and two different personalities — neither scoped
+    // count sees both, which is the whole point of the unscoped sibling.
+    expect(await store.countActiveByRoot('cli:root')).toBe(1);
+    expect(await store.countActiveByPersonality('ada')).toBe(1);
+    expect(await store.countActive()).toBe(2);
+
+    // blocked still holds a slot, exactly as the scoped counts treat it.
+    await store.claimNextQueued('proc-A');
+    await store.markBlocked(first.id, 'clarify-1');
+    expect(await store.countActive()).toBe(2);
+
+    await store.finish(first.id, 'done', {});
+    expect(await store.countActive()).toBe(1);
+
+    await store.claimNextQueued('proc-A');
+    await store.finish(second.id, 'failed', { error: 'boom' });
+    expect(await store.countActive()).toBe(0);
+    store.close();
+  });
+
   it('getEvents returns events in seq order', async () => {
     const store = new SQLiteJobStore(':memory:');
     const job = await store.create(baseInput());

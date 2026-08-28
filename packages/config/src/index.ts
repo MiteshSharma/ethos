@@ -1065,6 +1065,15 @@ export interface EthosConfig {
    */
   requestTimeoutMs?: number;
   /**
+   * Operator-tunable approval SLA, in milliseconds — how long a dangerous
+   * tool call may sit waiting for a human Allow/Deny before it is
+   * auto-denied. Absent → each approval store's own 10-minute default
+   * (gateway `ApprovalCoordinator`, web-api `ApprovalsService`). `0` means
+   * no timeout at all — the call waits forever. Flat-key shape:
+   *   approvalTimeoutMs: 1800000
+   */
+  approvalTimeoutMs?: number;
+  /**
    * Lane 4a(d) — retry count for the OpenAI-compat client. Absent → the
    * OpenAI SDK default (2 retries). Flat-key shape:
    *   maxRetries: 0
@@ -1726,6 +1735,41 @@ export interface EthosConfig {
     boardPath?: string;
   };
   /**
+   * Idle watcher: aggregates every subsystem's busy state into one answer so a
+   * scale-to-zero host (Firecracker-style microVMs that pause between
+   * messages) can be told "nothing is in flight, it is safe to stop this VM".
+   *
+   * An operator/deployment concern, NOT personality identity — two deployments
+   * of the same personality trivially disagree about it (a laptop `pnpm dev`
+   * wants it off, a hosted microVM wants it on), so it lives here rather than
+   * on `PersonalityConfig`.
+   *
+   * `enabled` defaults to `false`: this must never activate by omission, since
+   * an unarmed-but-wrong watcher exits a process mid-work. There is
+   * deliberately NO key for the manager's instrumentation-gap check — that gate
+   * is hard-coded, because letting an operator override it reintroduces the
+   * silent-data-loss risk it exists to prevent.
+   *
+   * Config format:
+   *   idleWatcher.enabled: false
+   *   idleWatcher.idleThresholdMs: 120000
+   *   idleWatcher.startupCooldownMs: 30000
+   *   idleWatcher.checkIntervalMs: 15000
+   *   idleWatcher.wakePathConfirmed: false
+   */
+  idleWatcher?: {
+    /** Arming gate 1. Default false — the watcher is not even constructed. */
+    enabled?: boolean;
+    /** Arming gate 5 — consecutive idle duration required before exit fires. */
+    idleThresholdMs?: number;
+    /** Arming gate 4 — no evaluation for this long after boot. */
+    startupCooldownMs?: number;
+    /** How often the idle predicate is sampled. */
+    checkIntervalMs?: number;
+    /** Arming gate 3 — operator attestation that a wake path exists. */
+    wakePathConfirmed?: boolean;
+  };
+  /**
    * Export/observability targets (analytics-observability plan, Part E).
    * Currently one leaf: Langfuse. Off by default.
    *
@@ -2044,6 +2088,8 @@ export async function writeConfig(
   if (config.toolOrder !== undefined) lines.push(`toolOrder: ${config.toolOrder}`);
   if (config.requestTimeoutMs !== undefined)
     lines.push(`requestTimeoutMs: ${config.requestTimeoutMs}`);
+  if (config.approvalTimeoutMs !== undefined)
+    lines.push(`approvalTimeoutMs: ${config.approvalTimeoutMs}`);
   if (config.maxRetries !== undefined) lines.push(`maxRetries: ${config.maxRetries}`);
   if (config.toolPayloadLimitChars !== undefined)
     lines.push(`toolPayloadLimitChars: ${config.toolPayloadLimitChars}`);
@@ -2571,6 +2617,18 @@ export async function writeConfig(
     if (config.kanbanPoll.boardPath !== undefined)
       lines.push(`kanbanPoll.boardPath: ${config.kanbanPoll.boardPath}`);
   }
+  if (config.idleWatcher) {
+    const iw = config.idleWatcher;
+    if (iw.enabled !== undefined) lines.push(`idleWatcher.enabled: ${iw.enabled}`);
+    if (iw.idleThresholdMs !== undefined)
+      lines.push(`idleWatcher.idleThresholdMs: ${iw.idleThresholdMs}`);
+    if (iw.startupCooldownMs !== undefined)
+      lines.push(`idleWatcher.startupCooldownMs: ${iw.startupCooldownMs}`);
+    if (iw.checkIntervalMs !== undefined)
+      lines.push(`idleWatcher.checkIntervalMs: ${iw.checkIntervalMs}`);
+    if (iw.wakePathConfirmed !== undefined)
+      lines.push(`idleWatcher.wakePathConfirmed: ${iw.wakePathConfirmed}`);
+  }
   if (config.telemetry?.export?.langfuse) {
     const lf = config.telemetry.export.langfuse;
     if (lf.enabled !== undefined) lines.push(`telemetry.export.langfuse.enabled: ${lf.enabled}`);
@@ -2780,6 +2838,8 @@ function parseConfigYaml(src: string): EthosConfig {
   const callCaptureKv: Record<string, string> = {};
   // Phase 3 — memoryConsolidation.<field>: <value> (silent flush config).
   const memoryConsolidationKv: Record<string, string> = {};
+  // Scale-to-zero idle watcher — idleWatcher.<field>: <value>.
+  const idleWatcherKv: Record<string, string> = {};
   const logsRotationKv: Record<string, string> = {};
   const awsSecretsKv: Record<string, string> = {};
   const telemetryLangfuseKv: Record<string, string> = {};
@@ -3407,6 +3467,14 @@ function parseConfigYaml(src: string): EthosConfig {
       kv[`kanbanPoll.${kp[1]}`] = kp[2].trim().replace(/^["']|["']$/g, '');
       continue;
     }
+    // idleWatcher.<field>: <value>  (scale-to-zero watcher; default OFF).
+    const iw = line.match(
+      /^idleWatcher\.(enabled|idleThresholdMs|startupCooldownMs|checkIntervalMs|wakePathConfirmed):\s*(.+)$/,
+    );
+    if (iw) {
+      idleWatcherKv[iw[1]] = iw[2].trim().replace(/^["']|["']$/g, '');
+      continue;
+    }
     // memoryCapture.<field>: <value>
     const mcap = line.match(/^memoryCapture\.(\w+):\s*(.+)$/);
     if (mcap) {
@@ -3551,6 +3619,7 @@ function parseConfigYaml(src: string): EthosConfig {
     ? { personalityId: callCaptureKv.personalityId }
     : undefined;
   const memoryConsolidation = buildMemoryConsolidation(memoryConsolidationKv);
+  const idleWatcher = buildIdleWatcher(idleWatcherKv);
   const parsedMaxBytes = logsRotationKv.maxBytes ? Number(logsRotationKv.maxBytes) : undefined;
   const parsedMaxFiles = logsRotationKv.maxFiles ? Number(logsRotationKv.maxFiles) : undefined;
   const logsRotation =
@@ -3760,9 +3829,26 @@ function parseConfigYaml(src: string): EthosConfig {
       const n = Number(kv.requestTimeoutMs);
       return Number.isFinite(n) && n > 0 ? Math.floor(n) : undefined;
     })(),
+    // An approval SLA is a non-negative integer millisecond count. Unlike
+    // `requestTimeoutMs`, `0` is MEANINGFUL here ("no timeout, wait forever")
+    // rather than a typo — only negatives and non-numbers are dropped.
+    approvalTimeoutMs: (() => {
+      const raw = kv.approvalTimeoutMs;
+      // An empty or blank value (`approvalTimeoutMs: ""`, or a bare key with
+      // trailing whitespace) is a typo, not an intentional `0` — and
+      // `Number('')` is `0`, which would silently disable the auto-deny
+      // backstop. Treat it as absent so the store default applies.
+      if (raw === undefined || raw.trim() === '') return undefined;
+      const n = Number(raw);
+      return Number.isFinite(n) && n >= 0 ? Math.floor(n) : undefined;
+    })(),
     maxRetries: (() => {
-      if (kv.maxRetries === undefined) return undefined;
-      const n = Number(kv.maxRetries);
+      const raw = kv.maxRetries;
+      // Same empty-value hazard as `approvalTimeoutMs`: `0` is meaningful
+      // ("never retry"), so `Number('') === 0` would silently turn retries off
+      // on a typo instead of falling through to the provider default.
+      if (raw === undefined || raw.trim() === '') return undefined;
+      const n = Number(raw);
       return Number.isInteger(n) && n >= 0 ? n : undefined;
     })(),
     // Lane 3(a) — a payload limit is a positive integer char count; anything
@@ -3915,6 +4001,7 @@ function parseConfigYaml(src: string): EthosConfig {
             ...(kv['kanbanPoll.boardPath'] ? { boardPath: kv['kanbanPoll.boardPath'] } : {}),
           }
         : undefined,
+    idleWatcher,
   };
   // Stash parse errors so the strict loader can surface them at boot.
   // readRawConfig (used by CLI commands that don't gateway-boot) ignores them
@@ -5346,6 +5433,35 @@ function buildMemoryConsolidation(
     if (raw === undefined) continue;
     const n = Number(raw);
     if (Number.isFinite(n) && n >= 0) result[key] = Math.floor(n);
+  }
+  return Object.keys(result).length > 0 ? result : undefined;
+}
+
+/**
+ * Assemble the scale-to-zero idle-watcher config from parsed flat keys.
+ * Returns `undefined` when nothing survives, so the watcher stays off.
+ *
+ * Both booleans are parsed STRICTLY — only a literal `true` is true. A typo
+ * must never arm the watcher, and `wakePathConfirmed` is an operator
+ * attestation, not a guess.
+ *
+ * The three `*Ms` keys require a POSITIVE integer. A blank value
+ * (`idleThresholdMs: ""`, or a key whose value is only whitespace) is a typo,
+ * and `Number('')` is `0` — which here would mean a zero-length idle threshold
+ * or a zero cooldown, i.e. exit on the first sample. Treat blank as absent so
+ * the manager default applies. (Unlike `approvalTimeoutMs`, `0` is meaningless
+ * for all three, so it is rejected rather than honoured.)
+ */
+function buildIdleWatcher(kv: Record<string, string>): EthosConfig['idleWatcher'] | undefined {
+  const result: NonNullable<EthosConfig['idleWatcher']> = {};
+  if (kv.enabled !== undefined) result.enabled = kv.enabled === 'true';
+  if (kv.wakePathConfirmed !== undefined)
+    result.wakePathConfirmed = kv.wakePathConfirmed === 'true';
+  for (const key of ['idleThresholdMs', 'startupCooldownMs', 'checkIntervalMs'] as const) {
+    const raw = kv[key];
+    if (raw === undefined || raw.trim() === '') continue;
+    const n = Number(raw);
+    if (Number.isInteger(n) && n > 0) result[key] = n;
   }
   return Object.keys(result).length > 0 ? result : undefined;
 }

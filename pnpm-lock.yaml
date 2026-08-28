@@ -315,6 +315,9 @@ importers:
       '@ethosagent/goal-store':
         specifier: workspace:*
         version: link:../../extensions/goal-store
+      '@ethosagent/idle-watcher':
+        specifier: workspace:*
+        version: link:../../extensions/idle-watcher
       '@ethosagent/kanban-store':
         specifier: workspace:*
         version: link:../../extensions/kanban-store
@@ -1172,6 +1175,15 @@ importers:
       '@ethosagent/sqlite':
         specifier: workspace:*
         version: link:../../packages/sqlite
+      '@ethosagent/types':
+        specifier: workspace:*
+        version: link:../../packages/types
+
+  extensions/idle-watcher:
+    dependencies:
+      '@ethosagent/logger':
+        specifier: workspace:*
+        version: link:../../packages/logger
       '@ethosagent/types':
         specifier: workspace:*
         version: link:../../packages/types

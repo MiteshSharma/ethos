@@ -2861,6 +2861,22 @@ export class Gateway {
   }
 
   /**
+   * Whether any turn is in flight on this gateway — the busy predicate an
+   * idle-watcher consults before a scale-to-zero host is told it may snapshot
+   * or stop the VM.
+   *
+   * Both maps are read from one accessor because they are two halves of the
+   * same fact: `activeTurns` and `activeSinks` are set together at turn start
+   * and deleted together in `runTurn`'s `finally`, so they are normally empty
+   * or non-empty as a pair. The `||` is the conservative half — if a sink ever
+   * outlived its turn it would still be work in flight, and answering "idle"
+   * there would stop the process out from under a live steer.
+   */
+  hasActiveTurns(): boolean {
+    return this.activeTurns.size > 0 || this.activeSinks.size > 0;
+  }
+
+  /**
    * Stop all active session lanes gracefully. If `notify` is set, send that
    * text to every chat with an in-flight turn before aborting — so users
    * never see silent failure on shutdown / upgrade. See IMPROVEMENT.md P1-1

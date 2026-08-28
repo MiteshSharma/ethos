@@ -69,6 +69,16 @@ export class DreamExecutor {
     this.inFlight.clear();
   }
 
+  /**
+   * Whether any dream turn is currently running — the unscoped view of
+   * `inFlight`, which the tick loop only ever consults one personality at a
+   * time. Exists for the idle-watcher's busy predicate: a dream is a real
+   * LLM turn, so stopping the process mid-dream truncates it.
+   */
+  hasActiveDreams(): boolean {
+    return this.inFlight.size > 0;
+  }
+
   private async tick(): Promise<void> {
     if (this.ticking) return;
     this.ticking = true;

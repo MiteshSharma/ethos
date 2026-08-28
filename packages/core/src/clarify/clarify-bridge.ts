@@ -157,11 +157,6 @@ export class ClarifyBridge {
   // only while `pending` is non-empty; see `ensureReconcilePoll`.
   private reconcilePoll: ReturnType<typeof setInterval> | null = null;
   private readonly reconcilePollMs: number;
-  // Fix 4 (pi-delegation.md §1b) — `hydrate()` is idempotent; a second call
-  // (e.g. a caller wiring both a boot script and a health-check retry) is a
-  // no-op rather than double-adopting rows.
-  private hydrated = false;
-
   /**
    * `store` is exposed read-only so a surface (e.g. TelegramClarifySurface)
    * can patch `surfaceContext` after presenting the prompt and look up rows
@@ -717,11 +712,25 @@ export class ClarifyBridge {
    * These entries exist purely so `respond()`/`sweep()`'s bookkeeping (lane
    * occupancy, queue draining, `notifyResolved` for UI teardown) behaves
    * correctly for a row that outlived its process.
+   *
+   * **Idempotent by CONSTRUCTION, not by a latch.** Every call re-reads the
+   * persisted rows and adopts only those not already in `pending` — the
+   * `!this.pending.has(row.requestId)` filter below is what prevents
+   * double-adoption, and it does so per row rather than per call. Three
+   * consequences follow, and all three are wanted:
+   *   - Calling again after a failed call actually retries. A latch set
+   *     before the first `await` would have made one transient `store.list()`
+   *     failure a permanent no-op.
+   *   - Calling again on a resume picks up rows persisted SINCE the last
+   *     call (e.g. written by another process while this one was paused),
+   *     instead of silently adopting nothing.
+   *   - Rows already adopted — by an earlier `hydrate()` or by a live
+   *     `request()` — are skipped, so nothing is presented or queued twice.
+   * `apps/ethos/src/boot-reconciliation.ts` is the caller that depends on
+   * this: it is a re-invocable entry point whose `clarify_hydrate` step must
+   * mean "rows were adopted", not merely "the call returned".
    */
   async hydrate(): Promise<void> {
-    if (this.hydrated) return;
-    this.hydrated = true;
-
     const rows = await this.listPersisted();
     const owned = rows.filter(
       (row) => this.presenters.has(row.surfaceType) && !this.pending.has(row.requestId),

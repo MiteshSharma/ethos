@@ -344,6 +344,48 @@ describe('ChatService', () => {
       process.off('unhandledRejection', onUnhandled);
     }
   });
+
+  // The idle watcher's busy predicate for the web-chat surface. `bridges` is
+  // long-lived per session, so these tests pin the difference between "a
+  // session has a bridge" and "a turn is in flight".
+  it('hasActiveBridges is false when no bridge exists', () => {
+    expect(makeService().hasActiveBridges()).toBe(false);
+  });
+
+  it('hasActiveBridges is false when a bridge exists but no turn is running', async () => {
+    const service = makeService();
+    const result = await service.send({ clientId: 'tab-1', text: 'hi' });
+    await waitFor(() => buffer.head(result.sessionId) > 0);
+
+    // The bridge is still in the map — it is only dropped by `forget`. A
+    // `bridges.size > 0` implementation would wrongly report busy here, and
+    // the idle watcher would never suspend an idle process.
+    const bridges = (service as unknown as { bridges: Map<string, unknown> }).bridges;
+    expect(bridges.size).toBe(1);
+    expect(service.hasActiveBridges()).toBe(false);
+  });
+
+  it('hasActiveBridges is true while a turn runs and false again once it finishes', async () => {
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const service = new ChatService({
+      loop: makeStubAgentLoop({ events: [{ type: 'done', text: 'ok', turnCount: 1 }], gate }),
+      sessions,
+      buffer,
+      defaults: { model: 'claude-test', provider: 'anthropic' },
+    });
+
+    const result = await service.send({ clientId: 'tab-1', text: 'hi' });
+    await waitFor(() => service.hasActiveBridges());
+    expect(service.hasActiveBridges()).toBe(true);
+
+    release();
+    await waitFor(() => buffer.head(result.sessionId) > 0);
+    await waitFor(() => !service.hasActiveBridges());
+    expect(service.hasActiveBridges()).toBe(false);
+  });
 });
 
 async function waitFor(predicate: () => boolean, timeoutMs = 1000): Promise<void> {
