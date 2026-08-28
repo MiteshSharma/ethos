@@ -5,6 +5,27 @@ import type { AgentEvent } from '@ethosagent/types';
 const DEFAULT_INTERVAL_MS = 5_000;
 const DEFAULT_STALENESS_THRESHOLD_MS = 1_800_000;
 
+/**
+ * Discount a pause from the board's staleness clocks (gates #6/#7 of
+ * plan/phases/clock-tolerance-pass.md), returning the number of rows corrected.
+ *
+ * Lives here rather than in `serve.ts` because this file owns both halves of the
+ * problem: `DEFAULT_STALENESS_THRESHOLD_MS` above is the 30-minute window a
+ * resumed process would otherwise blow straight through, and `tick()` below is
+ * what would then reclaim a healthy task and burn a retry against its
+ * `max_retries` budget. Opened and closed per call, exactly as `tick()` does —
+ * the loop reopens the board every interval, so there is no long-lived handle to
+ * reuse and holding one across a pause would add a second writer.
+ */
+export function bumpKanbanHeartbeats(boardPath: string, pauseDurationMs: number): number {
+  const store = new KanbanStore(boardPath);
+  try {
+    return store.bumpActiveHeartbeats(pauseDurationMs);
+  } finally {
+    store.close();
+  }
+}
+
 export interface KanbanPollConfig {
   /** Path to the board SQLite file. */
   boardPath: string;

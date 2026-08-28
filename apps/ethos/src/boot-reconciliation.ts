@@ -13,10 +13,12 @@
 // than a member of any one command's file.
 
 import type { Logger, PauseLifecycle, PauseOffset } from '@ethosagent/types';
+import { buildPauseCorrectionTargets, type PauseCorrectionTargets } from './pause-corrections';
 
 /** One reconciliation step, in the order `runBootReconciliation` runs them. */
 export type BootReconciliationStep =
   | 'pause_offset'
+  | 'pause_corrections'
   | 'clarify_hydrate'
   | 'clarify_sweep'
   | 'a2a_fail_non_terminal'
@@ -25,11 +27,20 @@ export type BootReconciliationStep =
   | 'background_boot_sweep'
   | 'cron_fire';
 
-/** `skipped` means the dependency for that step was not supplied. */
+/** `skipped` means the dependency for that step was not supplied. For
+ *  `pause_corrections` a null pause offset also skips: a cold boot has nothing
+ *  to correct. */
 export type BootReconciliationStepOutcome = 'ok' | 'skipped' | 'failed';
 
 const STEP_ORDER: readonly BootReconciliationStep[] = [
   'pause_offset',
+  // MUST sit immediately after `pause_offset` and before every sweep below.
+  // `background_boot_sweep` runs `reclaimStale` and `sweep_pending_deliveries`
+  // runs the delivery ledger's abandon window; both compare a stored timestamp
+  // against `Date.now()`, so a resumed process has to discount the pause first
+  // or those sweeps reclaim and abandon rows that only LOOK stale. The
+  // ordering is load-bearing, not cosmetic.
+  'pause_corrections',
   'clarify_hydrate',
   'clarify_sweep',
   'a2a_fail_non_terminal',
@@ -49,7 +60,10 @@ const STEP_ORDER: readonly BootReconciliationStep[] = [
  * in. Return types are widened where the real implementations return a count or
  * a summary object rather than `void` (see the notes on each field).
  */
-export interface BootReconciliationDeps {
+// Extends rather than redeclares the correction targets: the mid-run resume
+// path and this one MUST correct the same set of gates, and a duplicated field
+// list is how they would quietly stop doing so.
+export interface BootReconciliationDeps extends PauseCorrectionTargets {
   /** `CronEngine` — `extensions/cron/src/index.ts:446` (`CronScheduler.fire`). */
   cronEngine?: { fire(): Promise<void> | void };
   /** `BackgroundExecutor.bootSweep` — `extensions/job-runner/src/index.ts:442`.
@@ -73,6 +87,9 @@ export interface BootReconciliationDeps {
   gateway?: {
     sweepPendingDeliveries(): Promise<unknown>;
     sweepUndeliveredJobs(): Promise<unknown>;
+    /** Optional so every existing caller still typechecks — a `Gateway` that
+     *  predates the correction entry point is still a valid sweep target. */
+    applyPauseOffset?(pauseDurationMs: number): void;
   };
   /** Read once, first, to learn whether this process was resumed from a pause. */
   pauseLifecycle?: PauseLifecycle;
@@ -90,9 +107,10 @@ const FAIL_NON_TERMINAL_REASON = 'boot reconciliation';
 /**
  * Run every boot-time reconciliation step whose dependency is supplied.
  *
- * **Ordering** follows plan §4b: pause offset, clarify hydrate, clarify sweep,
- * A2A `failNonTerminal`, pending-delivery sweep, undelivered-job sweep,
- * background boot sweep, cron fire.
+ * **Ordering** follows plan §4b: pause offset, pause corrections, clarify
+ * hydrate, clarify sweep, A2A `failNonTerminal`, pending-delivery sweep,
+ * undelivered-job sweep, background boot sweep, cron fire. The corrections sit
+ * where they do on purpose — see the comment on `STEP_ORDER`.
  *
  * **Precondition (caller's responsibility, not enforced here):** the delivery
  * sweeps redeliver through live channel adapters, so the caller must have
@@ -109,15 +127,18 @@ const FAIL_NON_TERMINAL_REASON = 'boot reconciliation';
  * propagating would turn one flaky hydration into a total boot failure
  * (plan §4a). The per-step outcome record is how a caller sees what failed.
  *
- * **Pause offset is surfaced, not consumed.** A non-null offset means the
- * process was resumed from a snapshot; under snapshot+restore the process image
- * continues and no boot code re-runs, so this read is the only signal a resume
- * happened. This function does NOT correct any staleness gate with it —
- * `plan/phases/vm-lifecycle-pause-resume.md` §4 catalogues seven wall-clock
- * gates a long pause corrupts (delivery-ledger `abandonStale`, job-store
- * `reclaimStale`, agent-mesh peer staleness, heartbeat freshness windows) and
- * choosing a correction mechanism is an open question in that plan. Do not
- * assume those gates are handled because the offset was read here.
+ * **Pause offset is read, then SPENT.** A non-null offset means the process was
+ * resumed from a snapshot; under snapshot+restore the process image continues
+ * and no boot code re-runs, so this read is the only signal a resume happened.
+ * The `pause_corrections` step immediately after it hands that duration to
+ * every correction target the caller supplied — job-store running heartbeats,
+ * kanban active heartbeats, the pending-memory store, the dream executor, and
+ * the `Gateway` (its delivery-ledger abandon window and job-notification
+ * clocks) — closing the wall-clock gates catalogued in
+ * `plan/phases/clock-tolerance-pass.md` §2. What is corrected is exactly the
+ * set of targets passed in `deps`: a gate whose owner was not supplied is NOT
+ * corrected, and the step reports `skipped` when none was. Agent-mesh peer
+ * staleness has no entry point yet and is not corrected here.
  *
  * **Second-call behaviour of the underlying steps** (verified against source):
  * cron `fire()` re-checks each job's `nextRunAt` under a compare-and-swap claim
@@ -179,6 +200,33 @@ export async function runBootReconciliation(
     return failed > 0 ? 'failed' : 'ok';
   };
 
+  /**
+   * Same independent-settling discipline as `settleBridges` above, and for the
+   * same reason: under `Promise.all` one rejection hides whether the others
+   * ran. Separate rather than shared because a correction target is NAMED (it
+   * is a distinct subsystem, and the log has to say which one failed), where a
+   * clarify bridge is one of N interchangeable instances identified by index.
+   */
+  const settleTargets = async (
+    name: BootReconciliationStep,
+    targets: readonly { label: string; run: () => Promise<void> }[],
+  ): Promise<BootReconciliationStepOutcome> => {
+    const results = await Promise.allSettled(targets.map(async (t) => t.run()));
+    let failed = 0;
+    results.forEach((result, index) => {
+      if (result.status !== 'rejected') return;
+      failed++;
+      const label = targets[index]?.label ?? String(index);
+      logger?.warn(`[boot-reconciliation] step "${name}" failed for ${label}`, {
+        component: 'boot-reconciliation',
+        step: name,
+        target: label,
+        error: result.reason instanceof Error ? result.reason.message : String(result.reason),
+      });
+    });
+    return failed > 0 ? 'failed' : 'ok';
+  };
+
   let pauseOffset: PauseOffset | null = null;
   const { pauseLifecycle } = deps;
   if (pauseLifecycle) {
@@ -192,6 +240,29 @@ export async function runBootReconciliation(
         });
       }
     });
+  }
+
+  // Pause corrections. Runs BEFORE clarify/A2A/the sweeps for the reason spelled
+  // out on `STEP_ORDER`: `background_boot_sweep`'s `reclaimStale` and
+  // `sweep_pending_deliveries`'s abandon window must not see a row that only
+  // looks stale because the wall clock jumped while the guest was paused.
+  //
+  // Re-annotated rather than used directly: `pauseOffset` is assigned inside the
+  // closure above, so the declared union is the honest type here.
+  const resumed: PauseOffset | null = pauseOffset;
+  if (resumed !== null) {
+    const { pauseDurationMs } = resumed;
+    // Shared with the mid-run resume path (`pause-corrections.ts`) so the two
+    // callers can never drift on which gates a resume corrects.
+    const targets = buildPauseCorrectionTargets(deps, pauseDurationMs);
+    if (targets.length > 0) {
+      steps.pause_corrections = await settleTargets('pause_corrections', targets);
+      logger?.info('[boot-reconciliation] applied pause corrections', {
+        component: 'boot-reconciliation',
+        pauseDurationMs,
+        targets: targets.map((t) => t.label),
+      });
+    }
   }
 
   const bridges = deps.clarifyBridges ?? [];

@@ -318,6 +318,9 @@ importers:
       '@ethosagent/idle-watcher':
         specifier: workspace:*
         version: link:../../extensions/idle-watcher
+      '@ethosagent/inbound-dedup':
+        specifier: workspace:*
+        version: link:../../extensions/inbound-dedup
       '@ethosagent/kanban-store':
         specifier: workspace:*
         version: link:../../extensions/kanban-store
@@ -336,6 +339,9 @@ importers:
       '@ethosagent/observability-sqlite':
         specifier: workspace:*
         version: link:../../extensions/observability-sqlite
+      '@ethosagent/pause-clock':
+        specifier: workspace:*
+        version: link:../../extensions/pause-clock
       '@ethosagent/personalities':
         specifier: workspace:*
         version: link:../../extensions/personalities
@@ -1129,6 +1135,9 @@ importers:
       '@ethosagent/delivery-ledger':
         specifier: workspace:*
         version: link:../delivery-ledger
+      '@ethosagent/inbound-dedup':
+        specifier: workspace:*
+        version: link:../inbound-dedup
       '@ethosagent/job-runner':
         specifier: workspace:*
         version: link:../job-runner
@@ -1187,6 +1196,12 @@ importers:
       '@ethosagent/types':
         specifier: workspace:*
         version: link:../../packages/types
+
+  extensions/inbound-dedup:
+    dependencies:
+      '@ethosagent/sqlite':
+        specifier: workspace:*
+        version: link:../../packages/sqlite
 
   extensions/job-runner:
     dependencies:
@@ -1474,6 +1489,12 @@ importers:
       '@ethosagent/plugin-sdk':
         specifier: workspace:*
         version: link:../../packages/plugin-sdk
+      '@ethosagent/types':
+        specifier: workspace:*
+        version: link:../../packages/types
+
+  extensions/pause-clock:
+    dependencies:
       '@ethosagent/types':
         specifier: workspace:*
         version: link:../../packages/types

@@ -17,6 +17,7 @@ import {
   type TtsProviderForPersonality,
 } from '@ethosagent/core';
 import type { DeliveryLedger, DeliveryObligation } from '@ethosagent/delivery-ledger';
+import type { InboundDedupStore } from '@ethosagent/inbound-dedup';
 import type { ChannelFilterConfig } from '@ethosagent/safety-channel';
 import {
   checkMessage,
@@ -388,6 +389,16 @@ export interface GatewayConfig {
    */
   deliveryLedger?: DeliveryLedger;
   /**
+   * Durable backstop for the in-memory inbound dedup `Set`
+   * (plan/phases/telegram-slack-webhook-mode.md §5). Consulted only when the
+   * `Set` misses, so a continuously-running process pays nothing for it.
+   *
+   * Absent → today's behavior: in-memory only, which a process restart
+   * empties. That is the gap webhook mode + scale-to-zero turns from a rare
+   * crash-time risk into a routine one.
+   */
+  inboundDedup?: InboundDedupStore;
+  /**
    * Maximum number of distinct chats kept in memory. The least-recently-used
    * idle chat is evicted (its lane, session key, personality override, and
    * usage stats are forgotten) once this cap is exceeded. Active in-flight
@@ -703,10 +714,15 @@ export class Gateway {
   /** Bounded LRU of recently-seen inbound-message keys. */
   private readonly seenMessages = new Set<string>();
   private readonly dedupWindow: number;
+  /** Durable dedup backstop. Absent → in-memory only. */
+  private readonly inboundDedup: InboundDedupStore | undefined;
   /** Outbound-message dedup cache. Suppresses `(sessionId, content)` within TTL. */
   private readonly outboundDedup: MessageDedupCache;
   /** Durable delivery-obligation ledger (item 9). Absent → no durability. */
   private readonly deliveryLedger: DeliveryLedger | undefined;
+  /** Accumulated host-pause duration discounted from the stale-obligation
+   *  abandon window. See `applyPauseOffset`. */
+  private pauseOffsetMs = 0;
   /** Streaming draft edits enabled for DMs / group chats (W3.1). */
   private readonly streamingDm: boolean;
   private readonly streamingGroup: boolean;
@@ -916,6 +932,7 @@ export class Gateway {
     }
 
     this.dedupWindow = config.dedupWindow ?? 1024;
+    this.inboundDedup = config.inboundDedup;
     this.maxChats = config.maxChats ?? 4096;
     this.channelFilter = config.channelFilter;
     this.channelToolsets = config.channelToolsets;
@@ -1222,8 +1239,21 @@ export class Gateway {
    * `messageId` arriving through two different bots is two distinct
    * inbounds, not a duplicate. (Without the botKey segment, multi-bot
    * routing would silently drop one of them.)
+   *
+   * TWO LAYERS, both keyed identically. The in-memory `Set` is the fast path
+   * and answers alone whenever it hits. Only on a miss — and only when a
+   * durable store is configured — does this touch SQLite, because a process
+   * restart empties the `Set` and a platform redelivery arriving at the fresh
+   * process would otherwise be fully reprocessed and re-billed. Under webhook
+   * mode with scale-to-zero that restart is routine rather than rare.
+   *
+   * Synchronous on purpose: the durable store is synchronous too
+   * (`@ethosagent/sqlite` has no async API), and awaiting here would reorder
+   * the inbound pipeline for every message to pay for a cold-start edge.
    */
   private isDuplicate(message: InboundMessage, botKey: string): boolean {
+    // Both layers are disabled together — `dedupWindow: 0` means "no dedup",
+    // not "no in-memory dedup".
     if (this.dedupWindow <= 0 || !message.messageId) return false;
     const key = buildLaneKey(message.platform, botKey, message.chatId, message.messageId);
     if (this.seenMessages.has(key)) return true;
@@ -1232,6 +1262,11 @@ export class Gateway {
     if (this.seenMessages.size > this.dedupWindow) {
       const first = this.seenMessages.values().next().value;
       if (first !== undefined) this.seenMessages.delete(first);
+    }
+    // `Set` miss. The durable layer records the sighting and reports whether
+    // it had already seen this key — from this process or a previous one.
+    if (this.inboundDedup) {
+      return this.inboundDedup.seen(message.platform, botKey, message.chatId, message.messageId);
     }
     return false;
   }
@@ -1254,6 +1289,9 @@ export class Gateway {
     // full resolution. Adapters stamp `botKey` consistently, so the two agree
     // in practice; single-bot has one loop, so a stale/foreign botKey here has
     // no cross-bot effect. The namespace divergence is deliberate, not a bug.
+    // The durable backstop (`inboundDedup`) sits BEHIND this same call, keyed
+    // on the same `dedupBotKey`, so adding it changed nothing about when dedup
+    // runs relative to botKey resolution or the safety filter.
     const dedupBotKey = message.botKey ?? this.defaultBotKey ?? '';
     if (!message.isEdit && this.isDuplicate(message, dedupBotKey)) return;
 
@@ -3269,6 +3307,20 @@ export class Gateway {
   }
 
   /**
+   * Discount a host pause from the stale-obligation abandon window.
+   *
+   * On a snapshot-and-restore host the wall clock advances while the guest is
+   * frozen. If the pause alone exceeds `abandonAfterDays`, the first
+   * post-resume sweep abandons — and, for voice, DELETES the audio artifact of
+   * — an obligation that was never actually lost. Successive pauses
+   * accumulate. Non-positive or non-finite durations are a no-op.
+   */
+  applyPauseOffset(pauseDurationMs: number): void {
+    if (!Number.isFinite(pauseDurationMs) || pauseDurationMs <= 0) return;
+    this.pauseOffsetMs += pauseDurationMs;
+  }
+
+  /**
    * Retention pass for synthesized voice artifacts.
    *
    * Three mechanisms, in the order they should fire: an obligation that was
@@ -3292,7 +3344,7 @@ export class Gateway {
 
     let abandoned = 0;
     try {
-      const cutoff = Date.now() - opts.abandonAfterDays * 86_400_000;
+      const cutoff = Date.now() - opts.abandonAfterDays * 86_400_000 - this.pauseOffsetMs;
       // Ownership-filtered inside the ledger: a shared ledger file must never
       // let this deployment abandon a live peer's obligation.
       const rows = await ledger.abandonStale([...this.bots.keys()], cutoff);

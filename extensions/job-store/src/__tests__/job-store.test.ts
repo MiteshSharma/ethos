@@ -3,7 +3,7 @@ import { existsSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { CreateBackgroundJobInput } from '@ethosagent/types';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { SQLiteJobStore } from '../index';
 
 function baseInput(overrides: Partial<CreateBackgroundJobInput> = {}): CreateBackgroundJobInput {
@@ -830,5 +830,124 @@ describe('SQLiteJobStore', () => {
     ).toThrow();
     raw2.close();
     expect(version).toBe(6);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Host-pause tolerance — bumpRunningHeartbeats
+//
+// A suspended VM stops the executor's heartbeat loop without killing the job.
+// The gate (`reclaimStale`) is left exactly as it is; only the timestamps it
+// compares get corrected, once, at the resume boundary.
+// ---------------------------------------------------------------------------
+
+describe('SQLiteJobStore.bumpRunningHeartbeats', () => {
+  const SIX_HOURS = 6 * 3_600_000;
+  const STALE_MS = 90_000;
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('WITHOUT a bump, a job alive across a 6h host pause is swept stale on the first post-resume sweep', async () => {
+    vi.useFakeTimers();
+    const store = new SQLiteJobStore(':memory:');
+    const job = await store.create(baseInput());
+    await store.claimNextQueued('proc-A');
+
+    // The host is suspended for 6h. The job is still in flight, but nothing
+    // beat while the clock was stopped.
+    vi.setSystemTime(Date.now() + SIX_HOURS);
+
+    const swept = await store.reclaimStale(STALE_MS);
+    expect(swept.map((j) => j.id)).toEqual([job.id]);
+    expect((await store.get(job.id))?.status).toBe('stale');
+    store.close();
+  });
+
+  it('bumping by the pause duration first keeps that job running', async () => {
+    vi.useFakeTimers();
+    const store = new SQLiteJobStore(':memory:');
+    const job = await store.create(baseInput());
+    await store.claimNextQueued('proc-A');
+
+    vi.setSystemTime(Date.now() + SIX_HOURS);
+
+    expect(await store.bumpRunningHeartbeats(SIX_HOURS)).toBe(1);
+    expect(await store.reclaimStale(STALE_MS)).toEqual([]);
+    expect((await store.get(job.id))?.status).toBe('running');
+    store.close();
+  });
+
+  it('a job that genuinely stopped beating BEFORE the pause is still swept after the bump', async () => {
+    vi.useFakeTimers();
+    const store = new SQLiteJobStore(':memory:');
+    const dead = await store.create(baseInput({ owner: 'proc-dead', prompt: 'dead' }));
+    const alive = await store.create(baseInput({ owner: 'proc-alive', prompt: 'alive' }));
+    await store.claimNextQueued('proc-dead');
+    await store.claimNextQueued('proc-alive');
+
+    // Ten minutes of uptime in which only `alive` keeps beating.
+    vi.setSystemTime(Date.now() + 10 * 60_000);
+    await store.heartbeat(alive.id);
+
+    // Then the 6h pause.
+    vi.setSystemTime(Date.now() + SIX_HOURS);
+    expect(await store.bumpRunningHeartbeats(SIX_HOURS)).toBe(2);
+
+    // The bump moves both clocks by the same amount, so it cannot blind the
+    // gate to a stall that predates the pause.
+    const swept = await store.reclaimStale(STALE_MS);
+    expect(swept.map((j) => j.id)).toEqual([dead.id]);
+    expect((await store.get(alive.id))?.status).toBe('running');
+    store.close();
+  });
+
+  it('leaves queued, blocked, stale and terminal rows untouched', async () => {
+    const store = new SQLiteJobStore(':memory:');
+    const queued = await store.create(baseInput({ owner: 'proc-queued' }));
+    const blocked = await store.create(baseInput({ owner: 'proc-blocked' }));
+    const stale = await store.create(baseInput({ owner: 'proc-stale' }));
+    const done = await store.create(baseInput({ owner: 'proc-done' }));
+    const running = await store.create(baseInput({ owner: 'proc-running' }));
+
+    await store.claimNextQueued('proc-blocked');
+    await store.markBlocked(blocked.id, 'clarify-1');
+    await store.claimNextQueued('proc-stale');
+    await store.reclaimStale(0);
+    await store.claimNextQueued('proc-done');
+    await store.finish(done.id, 'done', { summary: 'ok' });
+    await store.claimNextQueued('proc-running');
+
+    const before = new Map(
+      await Promise.all(
+        [queued, blocked, stale, done].map(
+          async (j) => [j.id, (await store.get(j.id))?.heartbeatAt] as const,
+        ),
+      ),
+    );
+
+    // Only the one running row is bumped.
+    expect(await store.bumpRunningHeartbeats(SIX_HOURS)).toBe(1);
+
+    for (const [id, heartbeatAt] of before) {
+      expect((await store.get(id))?.heartbeatAt).toBe(heartbeatAt);
+    }
+    expect((await store.get(queued.id))?.heartbeatAt).toBeUndefined();
+    expect((await store.get(running.id))?.heartbeatAt).toBeGreaterThan(Date.now());
+    store.close();
+  });
+
+  it('writes nothing for a zero, negative or non-finite pause', async () => {
+    const store = new SQLiteJobStore(':memory:');
+    const job = await store.create(baseInput());
+    await store.claimNextQueued('proc-A');
+    const before = (await store.get(job.id))?.heartbeatAt;
+
+    for (const bogus of [0, -SIX_HOURS, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(await store.bumpRunningHeartbeats(bogus)).toBe(0);
+    }
+    expect((await store.get(job.id))?.heartbeatAt).toBe(before);
+    store.close();
   });
 });

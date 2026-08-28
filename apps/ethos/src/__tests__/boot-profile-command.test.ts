@@ -106,6 +106,10 @@ describe('ethos boot — §3b construction order', () => {
     const src = await read('apps/ethos/src/commands/boot.ts');
     expect(src).toMatch(/const reservedPorts = new Set<number>\(\[acpPort, healthPort\]\);/);
     expect(src).toMatch(/if \(webhookServer\) reservedPorts\.add\(webhookPort\);/);
+    // 3006, the native platform-webhook listener — reserved on the same rule as
+    // 3003 above. Only when it is actually bound: an unconditional reserve
+    // would push the web bind off a port nothing is holding.
+    expect(src).toMatch(/if \(platformWebhookServer\) reservedPorts\.add\(platformWebhookPort\);/);
     expect(src).toMatch(/listenWithFallback\([\s\S]{0,200}?reservedPorts,\s*\);/);
   });
 
@@ -173,9 +177,14 @@ describe('ethos boot — idle watcher', () => {
     // Default-off: on a laptop or a bare-metal box there is no host to suspend
     // into, so the watcher should not exist at all in the common case.
     expect(src).toMatch(/if \(cfg\.idleWatcher\?\.enabled === true\) \{/);
-    // Same handoff stubs as serve.ts / gateway.ts — a no-op lifecycle plus the
-    // gate-3b refusal that keeps it from mistaking that no-op for a real host.
-    expect(src).toMatch(/pauseLifecycle: new NoopPauseLifecycle\(\),/);
+    // Same handoff stub as serve.ts / gateway.ts, plus the gate-3b refusal that
+    // keeps it from mistaking a no-op handoff for a real host. The watcher
+    // SHARES this process's one `PauseLifecycle` rather than constructing a
+    // second: `readPauseOffset()` is consume-on-read, so a second instance
+    // would silently eat the offset boot reconciliation needs.
+    expect(src.match(/createPauseLifecycle\(cfg\)/g) ?? []).toHaveLength(1);
+    expect(src).not.toMatch(/new NoopPauseLifecycle\(\)/);
+    expect(src).toMatch(/^\s+pauseLifecycle,$/m);
     expect(src).toMatch(/hostSignalAvailable: false,/);
     expect(src).toMatch(/capabilities: deriveIdleWatcherCapabilities\(cfg\),/);
   });
@@ -243,9 +252,22 @@ describe('ethos boot — idle watcher', () => {
     expect(src).toMatch(
       /re-armed after a pause of \$\{reconciliation\.pauseOffset\.pauseDurationMs\}ms/,
     );
-    // Honesty gate: the caller exists, the trigger does not. If someone deletes
-    // this caveat they should have shipped Phase 3's resume signal first.
-    expect(src).toContain('WHAT THIS DOES **NOT** ACHIEVE: resume does not work yet.');
+    // The honesty gate this replaces asserted the OPPOSITE — that the caller
+    // existed and the trigger did not — and said whoever deleted it "should
+    // have shipped Phase 3's resume signal first". That is what the clock-drift
+    // detector's `onResume` seam is: under snapshot+restore the process image
+    // continues, so the branch above (driven by a boot-time `readPauseOffset()`)
+    // covers only a genuine cold boot after a restore, and this second
+    // registration is the one that fires on the deployment the watcher exists
+    // for. Both paths must stay: delete either and a resumed process either
+    // never re-arms, or never corrects a clock.
+    // Searched FROM the construction site, not from 0: `runBoot` registers two
+    // resume handlers — the clock-correction fanout, which is deliberately
+    // earlier (it needs only the stores), and this one. A bare `indexOf` finds
+    // the correction handler and proves nothing about the watcher.
+    const midRun = src.indexOf('onPauseResume?.((pauseDurationMs)', construction);
+    expect(midRun).toBeGreaterThan(construction);
+    expect(src.slice(midRun)).toContain('watcher.start();');
   });
 });
 

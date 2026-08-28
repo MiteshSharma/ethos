@@ -728,6 +728,11 @@ tiers:
     tier: 2
     assigned: 2026-08-28
 
+  extensions/inbound-dedup:
+    package: "@ethosagent/inbound-dedup"
+    tier: 2
+    assigned: 2026-08-28
+
   extensions/job-runner:
     package: "@ethosagent/job-runner"
     tier: 2
@@ -822,6 +827,11 @@ tiers:
     package: "@ethosagent/openclaw-compat"
     tier: 2
     assigned: 2026-08-12
+
+  extensions/pause-clock:
+    package: "@ethosagent/pause-clock"
+    tier: 2
+    assigned: 2026-08-28
 
   extensions/personalities:
     package: "@ethosagent/personalities"

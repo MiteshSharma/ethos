@@ -131,6 +131,10 @@ Multi-bot list shape. When set, the gateway creates one `TelegramAdapter` and on
 | `telegram.bots.<i>.bind.type` | `personality` \| `team` | — | Required. `personality` routes to a named personality. `team` routes to the team's coordinator personality and auto-starts the team supervisor. |
 | `telegram.bots.<i>.bind.name` | string | — | Required. Personality id (for `personality`) or team name (for `team`). |
 | `telegram.bots.<i>.bind.allowSlashSwitch` | boolean | `false` | Allow per-chat `/personality` switching. Disabled by default for identity-bound bots. |
+| `telegram.bots.<i>.useWebhook` | boolean | `false` | Receive updates over an inbound webhook instead of long-polling. Requires `webhookUrl` and `webhookSecretToken` — the adapter throws at startup without either. See [Receive Slack and Telegram events over webhooks](../how-to/run-channels-over-webhooks.md). |
+| `telegram.bots.<i>.webhookUrl` | string | — | Required when `useWebhook` is `true`. The full public URL Telegram POSTs updates to, **including** the `/telegram/webhook/<botKey>` path — the host routes on that path, so a URL without it reaches no handler. Registered for you by `setWebhook()` at startup. |
+| `telegram.bots.<i>.webhookSecretToken` | string | — | Required when `useWebhook` is `true`. Echoed by Telegram in `X-Telegram-Bot-Api-Secret-Token` and compared by grammy before the update is processed. A credential: externalized to the secret vault exactly like `token`, so write it as `${secrets:<ref>}`. |
+| `telegram.bots.<i>.dropPendingUpdates` | boolean | `true` | Discard updates Telegram queued while the process was down. **Poll mode only** — `bot.start()` is never called for a webhook-mode bot, so the flag does nothing there. Set `false` on a poll-mode bot in a deployment that sleeps and wakes, so a restart does not wipe the backlog. |
 
 ```yaml
 telegram.bots.0.token: "123456:ABCdefGhIJklmNopQRstuVwxYZ"
@@ -167,8 +171,11 @@ Multi-app list shape for Slack. Each entry creates one Slack adapter bound to a 
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `slack.apps.<i>.botToken` | string | — | `xoxb-` bot token. Required per entry. |
-| `slack.apps.<i>.appToken` | string | — | `xapp-` app-level token for Socket Mode. Required per entry. |
-| `slack.apps.<i>.signingSecret` | string | — | Signing secret for inbound webhook verification. Required per entry. |
+| `slack.apps.<i>.appToken` | string | — | `xapp-` app-level token for Socket Mode. Required only while `mode.socket` is in effect (the default); an HTTP-mode app has no Socket Mode connection and needs none. The adapter throws when `mode.socket` is on and this is absent. |
+| `slack.apps.<i>.signingSecret` | string | — | Signing secret from the app's Basic Information page. Required per entry. Exercised only under `mode.http`, where it is the HMAC key every inbound Events API request is verified against; under Socket Mode it is carried but never used — the socket is authenticated by `appToken` and receives no HTTP requests to verify. |
+| `slack.apps.<i>.mode.socket` | boolean | `true` | Connect over Socket Mode (WebSocket). Mutually exclusive with `mode.http` — the adapter throws when both are `true`, because they are two transports for the same inbound event stream. |
+| `slack.apps.<i>.mode.http` | boolean | `false` | Receive Events API deliveries over inbound HTTP instead. Requires `signingSecret`, and requires setting `mode.socket: false` explicitly. Slack has no registration API: you must set the Event Subscriptions Request URL in the Slack app dashboard yourself. See [Receive Slack and Telegram events over webhooks](../how-to/run-channels-over-webhooks.md). |
+| `slack.apps.<i>.webhookPath` | string | the app's `botKey` | Route segment this app's HTTP receiver answers on, under `/slack/events/`. HTTP mode only. Leading and trailing slashes are stripped. |
 | `slack.apps.<i>.id` | string | `sha256(botToken)[:24]` | Stable, human-readable app key. Used in session lane names and log output. Set once; do not change after the app goes live. |
 | `slack.apps.<i>.bind.type` | `personality` \| `team` | — | Required. Same semantics as the Telegram equivalent. |
 | `slack.apps.<i>.bind.name` | string | — | Required. Personality id or team name. |

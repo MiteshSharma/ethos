@@ -42,6 +42,7 @@ import {
 import { SQLiteDeliveryLedger } from '@ethosagent/delivery-ledger';
 import { LocalExecutionBackend } from '@ethosagent/execution-local';
 import { IdleWatcherManager } from '@ethosagent/idle-watcher';
+import { SQLiteInboundDedupStore } from '@ethosagent/inbound-dedup';
 import { ConsoleLogger } from '@ethosagent/logger';
 import { createMetricsTextProvider } from '@ethosagent/observability-sqlite';
 import { createPersonalityRegistry } from '@ethosagent/personalities';
@@ -52,7 +53,6 @@ import { teamsDir } from '@ethosagent/team-supervisor';
 import {
   EthosError,
   type InboundMessage,
-  NoopPauseLifecycle,
   type NotificationRouter,
   type PlatformAdapter,
 } from '@ethosagent/types';
@@ -71,6 +71,9 @@ import { runBootReconciliation } from '../boot-reconciliation';
 import { createHealthServer } from '../health-server';
 import { resolveSkillsCatalogDir } from '../lib/resolve-skills-catalog-dir';
 import { emitReady } from '../logger';
+import { applyPauseCorrections, hasHeartbeatBump } from '../pause-corrections';
+import { createPauseLifecycle } from '../pause-lifecycle';
+import { createPlatformWebhookServer } from '../platform-webhook-server';
 import { notifyReady, startWatchdog } from '../sd-notify';
 import { createWebhookServer, type PrefilterRunner } from '../webhook-server';
 import {
@@ -94,6 +97,7 @@ import {
   buildGatewayBusySources,
   buildGatewayHeartbeat,
   buildGatewayVoiceOutputs,
+  buildPlatformWebhookMounts,
   createCapturingAdapter,
   createGatewayAttachmentCache,
   createGatewayMetricsAuthCheck,
@@ -204,6 +208,11 @@ export async function runBoot(args: string[], config: EthosConfig | null): Promi
   const healthHost = process.env.ETHOS_SERVE_HOST ?? '127.0.0.1';
   const webhookPort = Number(process.env.ETHOS_WEBHOOK_PORT) || 3003;
   const webhookHost = process.env.ETHOS_SERVE_HOST ?? '127.0.0.1';
+  // 3002 gateway health, 3003 gateway webhook, 3004 `ethos run-all` health, 3005
+  // SIP — 3006 is next. Same default and env var `runGatewayStart` uses, so a
+  // deployment that moves the port moves it for both entry points at once.
+  const platformWebhookPort = Number(process.env.ETHOS_PLATFORM_WEBHOOK_PORT) || 3006;
+  const platformWebhookHost = process.env.ETHOS_SERVE_HOST ?? '127.0.0.1';
 
   console.log(
     `${c.bold}ethos boot${c.reset}  ${c.dim}starting (merged gateway + serve)...${c.reset}`,
@@ -571,6 +580,7 @@ export async function runBoot(args: string[], config: EthosConfig | null): Promi
   }
 
   const deliveryLedger = new SQLiteDeliveryLedger(join(dir, 'delivery-ledger.db'));
+  const inboundDedup = new SQLiteInboundDedupStore(join(dir, 'inbound-dedup.db'));
 
   const adapterMap = new Map<string, PlatformAdapter>();
   for (const adapter of adapters) {
@@ -604,6 +614,7 @@ export async function runBoot(args: string[], config: EthosConfig | null): Promi
     systemLoop,
     adapterMap,
     deliveryLedger,
+    inboundDedup,
     resolveUserId,
     pluginLoader: shared.pluginLoader,
     trustedChannelPlugins: shared.activePersonality?.plugins
@@ -838,6 +849,10 @@ export async function runBoot(args: string[], config: EthosConfig | null): Promi
   // `ethos gateway start` alone never runs A2A `failNonTerminal`. Fail-open
   // per step — `runBootReconciliation` never rejects.
   // -------------------------------------------------------------------------
+  // ONE per process, shared with the idle watcher below (see `pause-lifecycle.ts`).
+  // A `NoopPauseLifecycle` unless the operator enabled `pauseClockCorrection`,
+  // in which case it is a started clock-drift detector.
+  const pauseLifecycle = createPauseLifecycle(cfg);
   const reconciliation = await runBootReconciliation({
     cronEngine: scheduler,
     ...(shared.backgroundExecutor ? { backgroundExecutor: shared.backgroundExecutor } : {}),
@@ -848,10 +863,23 @@ export async function runBoot(args: string[], config: EthosConfig | null): Promi
     ),
     a2aTaskStore: a2a.taskStore,
     gateway,
-    // No real host adapter exists yet (plan §10 / Phase 3), so this always
-    // reports a cold boot. It is wired anyway so the seam is real the day a
-    // resume path lands.
-    pauseLifecycle: new NoopPauseLifecycle(),
+    // Correction targets for a resume (plan/phases/clock-tolerance-pass.md §4).
+    // Only what this profile already holds: the shared job store and the
+    // Gateway. `kanbanStore` and `pendingMemoryStore` are not constructed here,
+    // and dreaming is not wired in this profile at all (see the file header) —
+    // an unsupplied target is skipped by design, and constructing one purely to
+    // satisfy the dep would put a second writer on a store nothing else uses.
+    //
+    // `createAgentLoop` exposes the narrow `JobStore` contract, which has no
+    // pause-correction entry point; the `SQLiteJobStore` it actually returns
+    // does. Duck-typed rather than `instanceof`-checked because
+    // `@ethosagent/job-store` is deliberately NOT a dependency of this app (see
+    // `__tests__/boot-profile-reconciliation-gap.test.ts`), and a backend
+    // without the method is simply skipped.
+    ...(hasHeartbeatBump(shared.jobStore) ? { jobStore: shared.jobStore } : {}),
+    // Shared with the idle watcher below: `readPauseOffset()` is consume-on-read,
+    // so a second instance would silently eat the offset.
+    pauseLifecycle,
     logger,
   });
   if (reconciliation.pauseOffset !== null) {
@@ -859,6 +887,27 @@ export async function runBoot(args: string[], config: EthosConfig | null): Promi
       `${c.dim}Resumed from a pause of ${reconciliation.pauseOffset.pauseDurationMs}ms${c.reset}`,
     );
   }
+  // The mid-run resume seam. `runBootReconciliation` above handles the pause a
+  // COLD-BOOTED process learns about from `readPauseOffset()`; this handles the
+  // one a RUNNING process lives through, which is what snapshot+restore actually
+  // does (the process image continues — no reboot, no boot code re-run). Absent
+  // on `NoopPauseLifecycle`, so this is a no-op unless the operator enabled
+  // `pauseClockCorrection`.
+  //
+  // Targets are exactly those `runBootReconciliation` was given, for the same
+  // reasons documented at that call: this profile builds no `DreamExecutor` and
+  // no kanban store, and a correction pass must not construct one.
+  const onPauseResume = pauseLifecycle.onResume?.bind(pauseLifecycle);
+  onPauseResume?.((pauseDurationMs) => {
+    void applyPauseCorrections(
+      {
+        gateway,
+        ...(hasHeartbeatBump(shared.jobStore) ? { jobStore: shared.jobStore } : {}),
+      },
+      pauseDurationMs,
+      logger,
+    );
+  });
   const failedSteps = Object.entries(reconciliation.steps)
     .filter(([, outcome]) => outcome === 'failed')
     .map(([name]) => name);
@@ -946,6 +995,48 @@ export async function runBoot(args: string[], config: EthosConfig | null): Promi
   // would be the copy-paste the extraction exists to avoid. Telephony
   // deployments should keep using `ethos gateway start`.
 
+  // Native platform webhooks — Telegram + Slack
+  // (plan/phases/telegram-slack-webhook-mode.md §2b, §3c, §4).
+  //
+  // WIRED, unlike the SIP block above, because the asymmetry would be a silent
+  // failure rather than a missing feature: `buildGatewayAdapters` is shared with
+  // `runGatewayStart`, so a bot with `use_webhook` boots identically here and
+  // calls `setWebhook()` against Telegram — registering a public URL with no
+  // listener behind it. Every inbound message would then 404 with nothing in
+  // this process's logs to say why. There is also nothing to duplicate: the
+  // dispatch-map builder and the server are both shared imports.
+  //
+  // PLACED AFTER `adapters.map((a) => a.start())` (§3b step 8 above), AND THAT
+  // IS LOAD-BEARING — the same ordering constraint `runGatewayStart` documents.
+  // `TelegramAdapter.webhook` is `undefined` until `start()` has registered the
+  // webhook and built grammy's callback, so building the map any earlier mounts
+  // nothing and 404s every delivery.
+  //
+  // Opt-in and gated on need exactly like the `cfg.webhooks` block above: with
+  // no bot in webhook mode and no app in HTTP mode, no port is bound at all.
+  const platformWebhookMounts = buildPlatformWebhookMounts(cfg, adapters, (message) =>
+    logger.warn(message),
+  );
+  let platformWebhookServer: import('node:http').Server | undefined;
+  if (platformWebhookMounts.telegram.size > 0 || platformWebhookMounts.slack.size > 0) {
+    // The non-loopback cleartext warning lives inside `createPlatformWebhookServer`
+    // — it is the server that knows what host it bound.
+    platformWebhookServer = createPlatformWebhookServer({
+      port: platformWebhookPort,
+      host: platformWebhookHost,
+      telegram: platformWebhookMounts.telegram,
+      slack: platformWebhookMounts.slack,
+    });
+    for (const botKey of platformWebhookMounts.telegram.keys()) {
+      console.log(
+        `  telegram: http://${platformWebhookHost}:${platformWebhookPort}/telegram/webhook/${botKey}`,
+      );
+    }
+    for (const route of platformWebhookMounts.slack.keys()) {
+      console.log(`  slack: http://${platformWebhookHost}:${platformWebhookPort}${route}`);
+    }
+  }
+
   const acpHttpServer = acpServer.startHttp(acpPort);
   console.log(`  acp:     http://localhost:${acpPort}`);
   const agentId = `${activePersonalityId}:${process.pid}:${crypto.randomUUID().slice(0, 8)}`;
@@ -971,6 +1062,7 @@ export async function runBoot(args: string[], config: EthosConfig | null): Promi
   // what it skipped. Never a silent self-collision.
   const reservedPorts = new Set<number>([acpPort, healthPort]);
   if (webhookServer) reservedPorts.add(webhookPort);
+  if (platformWebhookServer) reservedPorts.add(platformWebhookPort);
   const tokens = new WebTokenRepository({ dataDir: dir, storage });
   const token = await tokens.getOrCreate();
   const { server, port } = await listenWithFallback(
@@ -1061,12 +1153,16 @@ export async function runBoot(args: string[], config: EthosConfig | null): Promi
       await guard('webhook-server', () => {
         webhookServer?.close();
       });
+      await guard('platform-webhook-server', () => {
+        platformWebhookServer?.close();
+      });
       await guard('timers', () => {
         clearInterval(pruneTimer);
         clearInterval(heartbeatTimer);
         clearInterval(a2a.retentionTimer);
         idleWatcher?.stop();
         cronTriggers.local?.stop();
+        pauseLifecycle.stop?.();
       });
       await guard('call-capture-ownership', async () => {
         await callCaptureOwnershipManager?.stop();
@@ -1086,6 +1182,9 @@ export async function runBoot(args: string[], config: EthosConfig | null): Promi
       await guard('adapters', () => Promise.allSettled(adapters.map((a) => a.stop())));
       await guard('delivery-ledger', () => {
         deliveryLedger.close();
+      });
+      await guard('inbound-dedup', () => {
+        inboundDedup.close();
       });
       await guard('sockets', () =>
         Promise.allSettled([created.voiceSocket.close(), created.satelliteSocket.close()]),
@@ -1170,10 +1269,11 @@ export async function runBoot(args: string[], config: EthosConfig | null): Promi
           acpServer,
         }),
       ]),
-      // The only implementation there is. A real host adapter that signals a
-      // Firecracker-style control plane is a later phase; until then the
-      // handoff is a no-op and the watcher's arming gates are what matter.
-      pauseLifecycle: new NoopPauseLifecycle(),
+      // The same instance boot reconciliation read the pause offset from. Its
+      // outbound half is still a no-op: a real host adapter that signals a
+      // Firecracker-style control plane is a later phase, so the watcher's
+      // arming gates are what matter here.
+      pauseLifecycle,
       // Flips to `true` when the `pauseLifecycle` above becomes a real host
       // adapter. While it is a no-op, `signalReadyToSuspend()` resolves,
       // latches, and stops the watcher having suspended nothing — so gate 3b
@@ -1192,14 +1292,10 @@ export async function runBoot(args: string[], config: EthosConfig | null): Promi
     // caller a snapshot-restored process would suspend exactly once and never
     // again.
     //
-    // WHAT THIS DOES **NOT** ACHIEVE: resume does not work yet. On a cold boot
-    // `pauseOffset` is null and this branch never runs — `start()` above has
-    // already armed the watcher exactly once, and a second `start()` would be
-    // a no-op anyway while the timer is live. The branch only becomes live
-    // when something invokes `runBootReconciliation()` on an actual resume,
-    // and that trigger — a SIGCONT handler, a vsock RPC, whatever the host
-    // offers — is Phase 3 and does not exist. This wires the CALLER; the
-    // SIGNAL is still missing.
+    // On a cold boot `pauseOffset` is null and this branch never runs — `start()`
+    // above has already armed the watcher exactly once. It covers the case where
+    // this process genuinely cold-booted after a restore and learned the pause
+    // from `readPauseOffset()`.
     if (reconciliation.pauseOffset !== null) {
       idleWatcher.start();
       logger.info(
@@ -1207,6 +1303,21 @@ export async function runBoot(args: string[], config: EthosConfig | null): Promi
         { component: 'idle-watcher' },
       );
     }
+    // THE MID-RUN PATH, and the one that actually fires under snapshot+restore.
+    // That deployment continues the same process image, so nothing above runs a
+    // second time; the clock-drift detector is the only thing that observes the
+    // resume. Registering here re-arms the watcher AND applies every clock
+    // correction this profile can — previously the corrections had no live
+    // trigger at all and the watcher would have suspended exactly once, ever.
+    // Captured: `idleWatcher` is a `let` assigned inside this branch, so the
+    // closure cannot narrow it away from `undefined` at the point it runs.
+    const watcher = idleWatcher;
+    onPauseResume?.((pauseDurationMs) => {
+      watcher.start();
+      logger.info(`[idle-watcher] re-armed after a pause of ${pauseDurationMs}ms`, {
+        component: 'idle-watcher',
+      });
+    });
   }
 
   await new Promise(() => {});

@@ -55,7 +55,6 @@ import type { McpManager } from '@ethosagent/tools-mcp';
 import {
   type BackgroundJob,
   EthosError,
-  NoopPauseLifecycle,
   type RunUpdateDigest,
   type ToolRegistry,
 } from '@ethosagent/types';
@@ -82,9 +81,11 @@ import {
 import { appendErrorLog } from '../error-log';
 import { createAcpMcpWiring } from '../lib/acp-mcp-wiring';
 import { DeferredToolRegistry } from '../lib/deferred-tool-registry';
-import { KanbanPollLoop, writeRunActivityComments } from '../lib/kanban-poll';
+import { bumpKanbanHeartbeats, KanbanPollLoop, writeRunActivityComments } from '../lib/kanban-poll';
 import { resolveSkillsCatalogDir } from '../lib/resolve-skills-catalog-dir';
 import { emitReady } from '../logger';
+import { applyPauseCorrections, hasHeartbeatBump } from '../pause-corrections';
+import { createPauseLifecycle } from '../pause-lifecycle';
 import { notifyReady, startWatchdog } from '../sd-notify';
 import {
   buildServeBusySources,
@@ -715,6 +716,10 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
 
   // Kanban poll loop — reconcile-on-wake for missed /notify calls.
   let stopPollLoop: (() => void) | null = null;
+  // Captured for the resume-boundary correction below (gates #6/#7). The poll
+  // loop opens a fresh `KanbanStore` per tick rather than holding one, so the
+  // board PATH is the only durable handle there is to correct against.
+  let correctableBoardPath: string | undefined;
   const kanbanPollEnabled = config.kanbanPoll?.enabled !== false; // enabled by default
   if (kanbanPollEnabled) {
     const boardPath =
@@ -722,6 +727,7 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
       (teamFlag ? join(dir, 'teams', teamFlag, 'board.db') : join(dir, 'board.db'));
 
     if (boardPath) {
+      correctableBoardPath = boardPath;
       const lane = new SessionLane();
       const pollLoop = new KanbanPollLoop({
         boardPath,
@@ -1084,6 +1090,39 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
   // (plan/phases/idle-watcher.md §5).
   let idleWatcher: IdleWatcherManager | undefined;
 
+  // ONE per process (see `pause-lifecycle.ts`): a `NoopPauseLifecycle` unless
+  // the operator enabled `pauseClockCorrection`, in which case it is a started
+  // clock-drift detector. Declared here so `cleanup` can stop its timer.
+  const pauseLifecycle = createPauseLifecycle(config);
+
+  // Resume-boundary clock corrections (plan/phases/clock-tolerance-pass.md §3/§4).
+  //
+  // `runServe` never calls `runBootReconciliation`, so this registration is the
+  // only thing that corrects a gate in this process — and it owns the pass's
+  // highest-stakes one. §3.1: an uncorrected `findStaleRunningTasks` cancels the
+  // open run and flips the task back to `ready`, and the re-claim increments
+  // `retry_count`. A task near `max_retries` when the host slept can be pushed
+  // into a hard failure state having done nothing wrong. The poll loop's
+  // threshold is 30 min; any real pause clears it on the very next tick.
+  //
+  // The store is opened per correction and closed again, mirroring the poll
+  // loop's own per-tick `new KanbanStore(boardPath)` — holding one open across
+  // the pause would be a second long-lived writer on a file the loop already
+  // reopens every second.
+  pauseLifecycle.onResume?.((pauseDurationMs) => {
+    const boardPath = correctableBoardPath;
+    void applyPauseCorrections(
+      {
+        ...(hasHeartbeatBump(jobStore) ? { jobStore } : {}),
+        ...(boardPath
+          ? { kanbanStore: { bumpActiveHeartbeats: (ms) => bumpKanbanHeartbeats(boardPath, ms) } }
+          : {}),
+      },
+      pauseDurationMs,
+      new ConsoleLogger(),
+    );
+  });
+
   const cleanup = async () => {
     if (stopWatchdog) stopWatchdog();
     // Deny + audit any suspended approval FIRST, before the awaits below —
@@ -1100,6 +1139,7 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
     await callCaptureOwnershipManager?.stop();
     await mesh.unregister(agentId);
     idleWatcher?.stop();
+    pauseLifecycle.stop?.();
     cronTriggers.local?.stop();
     if (webShutdown) await webShutdown();
     process.exit(0);
@@ -1129,10 +1169,10 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
         teamsPidDir: teamsDir(),
         acpServer,
       }),
-      // The only implementation there is. A real host adapter that signals a
-      // Firecracker-style control plane is a later phase; until then the
-      // handoff is a no-op and the watcher's arming gates are what matter.
-      pauseLifecycle: new NoopPauseLifecycle(),
+      // The one instance for this process. Its outbound half is still a no-op:
+      // a real host adapter that signals a Firecracker-style control plane is a
+      // later phase, so the watcher's arming gates are what matter here.
+      pauseLifecycle,
       // Flips to `true` when the `pauseLifecycle` above becomes a real host
       // adapter. While it is a no-op, `signalReadyToSuspend()` resolves,
       // latches, and stops the watcher having suspended nothing — so gate 3b

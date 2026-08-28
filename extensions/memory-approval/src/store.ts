@@ -130,6 +130,8 @@ export class PendingMemoryStore {
   private readonly ttlMs: number;
   private readonly observability?: PendingGateObservability;
   private readonly now: () => number;
+  /** Accumulated host-pause duration discounted from the TTL clock. */
+  private pauseOffsetMs = 0;
 
   constructor(opts: PendingMemoryStoreOptions) {
     this.storage = opts.storage;
@@ -144,6 +146,28 @@ export class PendingMemoryStore {
 
   private path(scopeId: string): string {
     return join(scopeDir(this.dataDir, scopeId), PENDING_FILE);
+  }
+
+  /**
+   * Discount a host pause from the pending-candidate TTL clock.
+   *
+   * A snapshot-and-restore host advances wall-clock time while the guest is
+   * frozen, so a candidate with days of TTL left when the host paused would be
+   * auto-rejected on the first post-resume prune, though its 30-day window was
+   * never exhausted in owner-visible time.
+   *
+   * Deliberate, documented divergence from `plan/phases/clock-tolerance-pass.md`
+   * §3, which words gate #9's fix as bumping every live entry's `proposedAt`
+   * forward: entries live in per-scope JSONL files and this store has no
+   * scope-enumeration API, so rewriting them would require inventing one.
+   * Shifting the cutoff by the same amount is arithmetically identical for
+   * every entry, needs no I/O, and cannot partially fail — the plan's stated
+   * intent, reached by the cheaper route. Successive pauses accumulate.
+   * Non-positive or non-finite durations are a no-op.
+   */
+  applyPauseOffset(pauseDurationMs: number): void {
+    if (!Number.isFinite(pauseDurationMs) || pauseDurationMs <= 0) return;
+    this.pauseOffsetMs += pauseDurationMs;
   }
 
   private async readAll(scopeId: string): Promise<PendingEntry[]> {
@@ -244,7 +268,7 @@ export class PendingMemoryStore {
    */
   private async prune(scopeId: string, entries: PendingEntry[]): Promise<PendingEntry[]> {
     if (this.ttlMs <= 0) return entries;
-    const cutoff = this.now() - this.ttlMs;
+    const cutoff = this.now() - this.ttlMs - this.pauseOffsetMs;
     const live: PendingEntry[] = [];
     const expired: PendingEntry[] = [];
     for (const e of entries) {

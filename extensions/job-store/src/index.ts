@@ -471,6 +471,37 @@ export class SQLiteJobStore implements JobStore {
     return row.n;
   }
 
+  /**
+   * Discount a host pause from every in-flight job's liveness clock.
+   *
+   * A job that was genuinely alive and progressing across a VM suspend wrote no
+   * heartbeat while the host was stopped, so the first post-resume
+   * `reclaimStale` sweep reads the pause as a dead executor. Advancing every
+   * running row's `heartbeat_at` by the pause duration — once, at the resume
+   * boundary, before that sweep runs — corrects the timestamps the gate
+   * compares without touching the gate: a job that really stopped beating is
+   * still past the threshold afterwards.
+   *
+   * This is `resumeFromBlocked`'s bump generalized from one row to every
+   * in-flight one, for the same reason it bumps there.
+   *
+   * Returns the number of rows bumped. A non-positive or non-finite duration
+   * writes nothing.
+   */
+  async bumpRunningHeartbeats(pauseDurationMs: number): Promise<number> {
+    // heartbeat_at is INTEGER in a STRICT table — a fractional offset would
+    // make the sum a REAL and the write would throw.
+    const offset = Math.round(pauseDurationMs);
+    if (!Number.isFinite(pauseDurationMs) || offset <= 0) return 0;
+    const result = this.db
+      .prepare(
+        `UPDATE jobs SET heartbeat_at = heartbeat_at + ?
+         WHERE status = 'running' AND heartbeat_at IS NOT NULL`,
+      )
+      .run(offset);
+    return result.changes;
+  }
+
   async reclaimStale(staleMs: number): Promise<BackgroundJob[]> {
     const threshold = Date.now() - staleMs;
     const ids = this.db.transaction((): string[] => {

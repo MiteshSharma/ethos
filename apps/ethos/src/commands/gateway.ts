@@ -42,6 +42,7 @@ import {
 } from '@ethosagent/gateway';
 import { registerGoalNotifications } from '@ethosagent/goal-runner';
 import { type BusySource, IdleWatcherManager } from '@ethosagent/idle-watcher';
+import { SQLiteInboundDedupStore } from '@ethosagent/inbound-dedup';
 import { KanbanStore } from '@ethosagent/kanban-store';
 import { ConsoleLogger } from '@ethosagent/logger';
 import { createMetricsTextProvider } from '@ethosagent/observability-sqlite';
@@ -82,7 +83,6 @@ import {
   type InboundMessage,
   type LLMProvider,
   type MemoryContext,
-  NoopPauseLifecycle,
   type NotificationRouter,
   type PersonalityRegistry,
   type PlatformAdapter,
@@ -119,6 +119,12 @@ import { formatQuickCommandOutput, runQuickCommand } from '../lib/quick-command-
 import { resolveLiveKitMedia } from '../livekit-media';
 import { emitReady } from '../logger';
 import { migrateSessionKeysIfNeeded } from '../migrations/session-keys-multi-bot';
+import { applyPauseCorrections, hasHeartbeatBump } from '../pause-corrections';
+import { createPauseLifecycle } from '../pause-lifecycle';
+import {
+  createPlatformWebhookServer,
+  type PlatformWebhookHandler,
+} from '../platform-webhook-server';
 import { notifyReady, startWatchdog } from '../sd-notify';
 import { createSipInboundHandler } from '../sip-inbound-dispatch';
 import { createSipWebhookServer } from '../sip-webhook-server';
@@ -913,6 +919,13 @@ export async function runGatewayStart(opts: GatewayStartOptions = {}): Promise<v
   // sessions.db, which hold the same class of content.
   const deliveryLedger = new SQLiteDeliveryLedger(join(ethosDir(), 'delivery-ledger.db'));
 
+  // Durable inbound dedup (plan/phases/telegram-slack-webhook-mode.md §5). The
+  // Gateway's in-memory `Set` stays the fast path; this is the backstop it
+  // consults on a miss, so a platform retry that lands on a freshly-restarted
+  // process is still recognised as the message it already answered. Same file
+  // convention and same unconditional construction as the ledger above.
+  const inboundDedup = new SQLiteInboundDedupStore(join(ethosDir(), 'inbound-dedup.db'));
+
   // Build adapter registry for send_message cross-platform routing.
   // Derive platform key from adapter.id prefix (e.g. 'telegram:bot-1' → 'telegram',
   // 'email' → 'email'). This is a stable identifier, unlike displayName which is UI text.
@@ -983,6 +996,7 @@ export async function runGatewayStart(opts: GatewayStartOptions = {}): Promise<v
     systemLoop,
     adapterMap,
     deliveryLedger,
+    inboundDedup,
     resolveUserId,
     pluginLoader,
     trustedChannelPlugins,
@@ -1484,6 +1498,47 @@ export async function runGatewayStart(opts: GatewayStartOptions = {}): Promise<v
     );
   }
 
+  // ---------------------------------------------------------------------------
+  // Native platform webhooks — Telegram + Slack
+  // (plan/phases/telegram-slack-webhook-mode.md §2b, §3c, §4)
+  // ---------------------------------------------------------------------------
+  //
+  // PLACED AFTER `adapters.map((a) => a.start())` ABOVE, AND THAT IS LOAD-BEARING.
+  // `TelegramAdapter.webhook` is `undefined` until `start()` has registered the
+  // webhook with Telegram and built grammy's callback; building the dispatch map
+  // at adapter-construction time would mount nothing and 404 every delivery.
+  //
+  // Opt-in, gated on need exactly like the `config.webhooks` block above: with no
+  // bot in webhook mode and no app in HTTP mode, no port is bound at all. That is
+  // what keeps this additive for every deployment that has not asked for it.
+  const platformWebhookMounts = buildPlatformWebhookMounts(config, adapters, (message) =>
+    new ConsoleLogger().warn(message),
+  );
+  // 3002 gateway health, 3003 gateway webhook, 3004 `ethos run-all` health, 3005
+  // SIP — see the SIP block above for why 3004 is not free. 3006 is next.
+  const platformWebhookPort = Number(process.env.ETHOS_PLATFORM_WEBHOOK_PORT) || 3006;
+  const platformWebhookHost = process.env.ETHOS_SERVE_HOST ?? '127.0.0.1';
+  let platformWebhookServer: import('node:http').Server | undefined;
+  if (platformWebhookMounts.telegram.size > 0 || platformWebhookMounts.slack.size > 0) {
+    // The non-loopback cleartext warning lives inside `createPlatformWebhookServer`
+    // (unlike the `config.webhooks` block, which warns at its call site) — it is
+    // the server that knows what host it bound.
+    platformWebhookServer = createPlatformWebhookServer({
+      port: platformWebhookPort,
+      host: platformWebhookHost,
+      telegram: platformWebhookMounts.telegram,
+      slack: platformWebhookMounts.slack,
+    });
+    for (const botKey of platformWebhookMounts.telegram.keys()) {
+      console.log(
+        `  telegram: http://${platformWebhookHost}:${platformWebhookPort}/telegram/webhook/${botKey}`,
+      );
+    }
+    for (const route of platformWebhookMounts.slack.keys()) {
+      console.log(`  slack: http://${platformWebhookHost}:${platformWebhookPort}${route}`);
+    }
+  }
+
   // Call-capture daemon (plan/phases/call-capture-extension.md, "Phase 4 —
   // Integration"; Architecture Issue B — `ethos gateway` previously had no
   // call-capture wiring at all). Mirrors `serve.ts`'s daemon construction
@@ -1614,6 +1669,42 @@ export async function runGatewayStart(opts: GatewayStartOptions = {}): Promise<v
   // reads (plan/phases/idle-watcher.md §5).
   let idleWatcher: IdleWatcherManager | undefined;
 
+  // ONE per process (see `pause-lifecycle.ts`): a `NoopPauseLifecycle` unless
+  // the operator enabled `pauseClockCorrection`, in which case it is a started
+  // clock-drift detector. Declared here so `shutdown` below can stop its timer.
+  const pauseLifecycle = createPauseLifecycle(config);
+
+  // Resume-boundary clock corrections (plan/phases/clock-tolerance-pass.md §3/§4).
+  //
+  // `runGatewayStart` deliberately does not run the merged boot profile's
+  // reconciliation pass (that asymmetry is `ethos boot`'s whole reason to exist,
+  // and a sibling test pins this command to its own sweeps at their original
+  // call site). So this registration is the ONLY thing that corrects a gate in
+  // this process — and this process is the only one that owns two of them: the
+  // `DreamExecutor` (gate #12, the one gate that spends real API cost when it
+  // misfires, by dreaming for every personality at once on the first post-resume
+  // tick) and the `Gateway`'s delivery-ledger abandon window (gate #2, which for
+  // a voice obligation DELETES the artifact).
+  //
+  // ONE job store, not one per bot. Every `createAgentLoop` opens its own
+  // `SQLiteJobStore` against the SAME `jobs.db` (`build-agent-loop.ts:933`), so
+  // the per-bot handles are N views of one file — bumping each would advance
+  // `heartbeat_at` by N × the pause and push live rows into the future. The
+  // adjacent `busy-sources` code can map over all of them safely only because it
+  // READS; this writes.
+  const correctableJobStore = bots.find((b) => b.jobStore !== undefined)?.jobStore;
+  pauseLifecycle.onResume?.((pauseDurationMs) => {
+    void applyPauseCorrections(
+      {
+        gateway,
+        dreamExecutor,
+        ...(hasHeartbeatBump(correctableJobStore) ? { jobStore: correctableJobStore } : {}),
+      },
+      pauseDurationMs,
+      new ConsoleLogger(),
+    );
+  });
+
   // Graceful shutdown on SIGINT / SIGTERM. Tell every in-flight chat that the
   // gateway was interrupted so they don't sit waiting on a response that
   // never comes. See plan/IMPROVEMENT.md P1-1.
@@ -1632,10 +1723,12 @@ export async function runGatewayStart(opts: GatewayStartOptions = {}): Promise<v
     healthServer.close();
     webhookServer?.close();
     sipWebhookServer?.close();
+    platformWebhookServer?.close();
     clearInterval(pruneTimer);
     clearInterval(heartbeatTimer);
     clearInterval(retentionPruneTimer);
     idleWatcher?.stop();
+    pauseLifecycle.stop?.();
     cronTriggers.local?.stop();
     dreamExecutor.stop();
     langfusePoll?.stop();
@@ -1651,6 +1744,7 @@ export async function runGatewayStart(opts: GatewayStartOptions = {}): Promise<v
     });
     await Promise.allSettled(adapters.map((a) => a.stop()));
     deliveryLedger.close();
+    inboundDedup.close();
     callLog?.close();
     stopTeamSupervisors(bots, config.teams ?? {}, supervisorDeps);
     process.exit(0);
@@ -1678,10 +1772,10 @@ export async function runGatewayStart(opts: GatewayStartOptions = {}): Promise<v
         // files it writes actually land in.
         teamsPidDir: teamsDir(),
       }),
-      // The only implementation there is. A real host adapter that signals a
-      // Firecracker-style control plane is a later phase; until then the
-      // handoff is a no-op and the watcher's arming gates are what matter.
-      pauseLifecycle: new NoopPauseLifecycle(),
+      // The one instance for this process. Its outbound half is still a no-op:
+      // a real host adapter that signals a Firecracker-style control plane is a
+      // later phase, so the watcher's arming gates are what matter here.
+      pauseLifecycle,
       // Flips to `true` when the `pauseLifecycle` above becomes a real host
       // adapter. While it is a no-op, `signalReadyToSuspend()` resolves,
       // latches, and stops the watcher having suspended nothing — so gate 3b
@@ -2800,6 +2894,90 @@ function slackSlashAllowlist(
   return base.filter((id) => allowedSlashUsers.includes(id));
 }
 
+/**
+ * The two adapters that can serve a platform webhook, viewed structurally.
+ *
+ * Neither getter is on `PlatformAdapter` — webhook hosting is a property of
+ * two specific adapters, not of the channel contract — and both are optional
+ * because both are `undefined` in the transport mode this repo has always
+ * defaulted to (Telegram long-poll, Slack Socket Mode).
+ */
+interface WebhookCapableAdapter {
+  /** `TelegramAdapter.webhook` — grammy's `'http'` framework callback. */
+  readonly webhook?: PlatformWebhookHandler | undefined;
+  /** `SlackAdapter.requestListener` — Bolt's `HTTPReceiver`. */
+  readonly requestListener?: PlatformWebhookHandler | undefined;
+  /** `SlackAdapter.webhookRoute` — the path that receiver answers on. */
+  readonly webhookRoute?: string | undefined;
+}
+
+/** Dispatch maps for `createPlatformWebhookServer`. Empty = nothing to host. */
+export interface PlatformWebhookMounts {
+  /** botKey → handler, mounted at `/telegram/webhook/<botKey>`. */
+  telegram: Map<string, PlatformWebhookHandler>;
+  /** Full route path → handler, as the Slack adapter reports it. */
+  slack: Map<string, PlatformWebhookHandler>;
+}
+
+/**
+ * Collect the webhook handlers of every bot/app the operator put in webhook
+ * mode (plan/phases/telegram-slack-webhook-mode.md §2b, §3c).
+ *
+ * MUST be called AFTER `adapter.start()`. `TelegramAdapter.webhook` is
+ * `undefined` until `start()` builds the grammy callback, so calling this at
+ * construction time would find nothing to mount and silently fall back to a
+ * server that 404s every delivery.
+ *
+ * Slack is keyed by `adapter.webhookRoute` rather than by a locally recomputed
+ * `/slack/events/<botKey>`: Bolt's `HTTPReceiver` matches its `endpoints` list
+ * EXACTLY, so a mount path derived twice is a mount path that can drift, and
+ * the drift shows up as a production 404 rather than a type error.
+ */
+export function buildPlatformWebhookMounts(
+  config: EthosConfig,
+  adapters: PlatformAdapter[],
+  warn: (message: string) => void,
+): PlatformWebhookMounts {
+  // Idempotent — same defensive call `buildAdapters` makes, so a legacy
+  // single-bot config resolves to the same botKeys the adapters were built on.
+  const shimmed = applyPlatformShim(config).config;
+  const byId = new Map(adapters.map((a) => [a.id, a as PlatformAdapter & WebhookCapableAdapter]));
+  const telegram = new Map<string, PlatformWebhookHandler>();
+  const slack = new Map<string, PlatformWebhookHandler>();
+
+  for (const botCfg of shimmed.telegram?.bots ?? []) {
+    if (!botCfg.useWebhook) continue;
+    const botKey = deriveBotKey(botCfg);
+    const handler = byId.get(`telegram:${botKey}`)?.webhook;
+    if (!handler) {
+      warn(
+        `telegram bot "${botKey}" is configured with use_webhook but its adapter exposes ` +
+          'no webhook handler — no route was mounted and Telegram deliveries will 404.',
+      );
+      continue;
+    }
+    telegram.set(botKey, handler);
+  }
+
+  for (const appCfg of shimmed.slack?.apps ?? []) {
+    if (!appCfg.mode?.http) continue;
+    const botKey = deriveBotKey(appCfg);
+    const adapter = byId.get(`slack:${botKey}`);
+    const handler = adapter?.requestListener;
+    const route = adapter?.webhookRoute;
+    if (!handler || !route) {
+      warn(
+        `slack app "${botKey}" is configured with mode.http but its adapter exposes no ` +
+          'request listener — no route was mounted and Slack deliveries will 404.',
+      );
+      continue;
+    }
+    slack.set(route, handler);
+  }
+
+  return { telegram, slack };
+}
+
 export async function buildAdapters(
   config: EthosConfig,
   loadAdapter: AdapterModuleLoader,
@@ -2855,7 +3033,18 @@ export async function buildAdapters(
             token: botCfg.token,
             cache: telegramCache,
             botKey: deriveBotKey(botCfg),
-            dropPendingUpdates: true,
+            // Straight through, NOT `?? true`: the adapter already defaults
+            // this to `true` (`dropPendingUpdates ?? true`), so defaulting it
+            // here as well would mean two places to change and a config
+            // `false` silently overridden if they ever drift.
+            dropPendingUpdates: botCfg.dropPendingUpdates,
+            // Webhook mode (plan/phases/telegram-slack-webhook-mode.md §2a).
+            // Absent from config = long-poll, exactly today's behaviour. The
+            // adapter throws from `start()` if `useWebhook` arrives without a
+            // URL or secret token, so no validation is duplicated here.
+            ...(botCfg.useWebhook !== undefined ? { useWebhook: botCfg.useWebhook } : {}),
+            ...(botCfg.webhookUrl ? { webhookUrl: botCfg.webhookUrl } : {}),
+            ...(botCfg.webhookSecretToken ? { webhookSecretToken: botCfg.webhookSecretToken } : {}),
             ...(identity ? { identity } : {}),
           }),
         );
@@ -2943,6 +3132,12 @@ export async function buildAdapters(
               ? { longReplyThresholdChars: appCfg.longReplyThresholdChars }
               : {}),
             ...(webUiBaseUrl ? { webUiBaseUrl } : {}),
+            // Inbound transport (plan/phases/telegram-slack-webhook-mode.md
+            // §3b). Absent = Socket Mode, exactly today's behaviour. The
+            // adapter enforces mutual exclusivity and the per-mode credential
+            // requirements (`appToken` for socket, `signingSecret` for http).
+            ...(appCfg.mode ? { mode: appCfg.mode } : {}),
+            ...(appCfg.webhookPath ? { webhookPath: appCfg.webhookPath } : {}),
           }),
         );
       }
@@ -3517,6 +3712,7 @@ export interface BuildGatewayOptions {
   /** Platform-keyed adapter registry for cross-platform `send_message`. */
   adapterMap: Map<string, PlatformAdapter>;
   deliveryLedger: GatewayConfig['deliveryLedger'];
+  inboundDedup: GatewayConfig['inboundDedup'];
   resolveUserId: GatewayConfig['resolveUserId'];
   /** `GatewayConfig['pluginLoader']` is narrower than what `createAgentLoop`
    *  returns — `pluginAdapters` is derived here via `getPlatformAdapters()`,
@@ -3551,6 +3747,7 @@ export function buildGateway(opts: BuildGatewayOptions): Gateway {
     systemLoop,
     adapterMap,
     deliveryLedger,
+    inboundDedup,
     resolveUserId,
     pluginLoader,
     trustedChannelPlugins,
@@ -3583,6 +3780,7 @@ export function buildGateway(opts: BuildGatewayOptions): Gateway {
         defaultPersonality: config.personality,
         adapters: adapterMap,
         deliveryLedger,
+        inboundDedup,
         resolveUserId,
         pluginLoader,
         pluginAdapters: pluginLoader.getPlatformAdapters(),
@@ -3629,6 +3827,7 @@ export function buildGateway(opts: BuildGatewayOptions): Gateway {
         storage,
         adapters: adapterMap,
         deliveryLedger,
+        inboundDedup,
         resolveUserId,
         pluginLoader,
         pluginAdapters: pluginLoader.getPlatformAdapters(),

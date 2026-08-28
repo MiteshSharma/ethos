@@ -79,6 +79,7 @@ describe('runBootReconciliation', () => {
     expect(deps.cronEngine.fire).toHaveBeenCalledTimes(1);
     expect(result.steps).toEqual({
       pause_offset: 'ok',
+      pause_corrections: 'skipped',
       clarify_hydrate: 'ok',
       clarify_sweep: 'ok',
       a2a_fail_non_terminal: 'ok',
@@ -108,7 +109,13 @@ describe('runBootReconciliation', () => {
     expect(bridge.hydrate).toHaveBeenCalledTimes(2);
     expect(deps.cronEngine.fire).toHaveBeenCalledTimes(2);
     expect(deps.gateway.sweepPendingDeliveries).toHaveBeenCalledTimes(2);
-    expect(Object.values(second.steps).every((s) => s === 'ok')).toBe(true);
+    // `pause_corrections` is the one exception: these deps report a cold boot
+    // (null offset) and supply no correction target, so it skips both times.
+    expect(
+      Object.entries(second.steps).every(([name, outcome]) =>
+        name === 'pause_corrections' ? outcome === 'skipped' : outcome === 'ok',
+      ),
+    ).toBe(true);
   });
 
   it('fails open: a rejecting hydrate does not stop or reject the rest', async () => {
@@ -123,6 +130,7 @@ describe('runBootReconciliation', () => {
     expect(order).toEqual(EXPECTED_ORDER.filter((n) => n !== 'hydrate'));
     expect(result.steps).toEqual({
       pause_offset: 'ok',
+      pause_corrections: 'skipped',
       clarify_hydrate: 'failed',
       clarify_sweep: 'ok',
       a2a_fail_non_terminal: 'ok',
@@ -240,5 +248,167 @@ describe('runBootReconciliation', () => {
     expect(logger.warns.filter((m) => m.includes('clarify_hydrate'))).toEqual([
       '[boot-reconciliation] step "clarify_hydrate" failed for bridge 1',
     ]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// pause_corrections — plan/phases/clock-tolerance-pass.md §3/§4.
+//
+// THE GAP THIS CLOSES: reconciliation used to READ the pause offset and stop
+// there, so every wall-clock staleness gate still saw the pause as downtime.
+// Verified failing-first by stubbing the step out: with the block removed, the
+// "calls every correction target" case below reports zero calls on all five.
+// ---------------------------------------------------------------------------
+
+const PAUSE_MS = 6 * 60 * 60 * 1000;
+
+/** The five correction targets, each recording into a shared call-order array. */
+function makeTargets(order: string[]) {
+  return {
+    jobStore: {
+      bumpRunningHeartbeats: vi.fn(async (ms: number) => {
+        order.push(`jobStore:${ms}`);
+        return 3;
+      }),
+    },
+    kanbanStore: {
+      bumpActiveHeartbeats: vi.fn((ms: number) => {
+        order.push(`kanbanStore:${ms}`);
+        return 2;
+      }),
+    },
+    pendingMemoryStore: {
+      applyPauseOffset: vi.fn((ms: number) => {
+        order.push(`pendingMemoryStore:${ms}`);
+      }),
+    },
+    dreamExecutor: {
+      applyPauseOffset: vi.fn((ms: number) => {
+        order.push(`dreamExecutor:${ms}`);
+      }),
+    },
+  };
+}
+
+describe('runBootReconciliation — pause corrections', () => {
+  it('hands the pause duration to every supplied target exactly once', async () => {
+    const order: string[] = [];
+    const { deps } = makeDeps(order);
+    deps.pauseLifecycle.readPauseOffset.mockResolvedValueOnce({ pauseDurationMs: PAUSE_MS });
+    const targets = makeTargets(order);
+    const gatewayApply = vi.fn((ms: number) => {
+      order.push(`gateway:${ms}`);
+    });
+    const logger = makeLogger();
+
+    const result = await runBootReconciliation({
+      ...deps,
+      ...targets,
+      gateway: { ...deps.gateway, applyPauseOffset: gatewayApply },
+      logger,
+    });
+
+    expect(targets.jobStore.bumpRunningHeartbeats).toHaveBeenCalledTimes(1);
+    expect(targets.jobStore.bumpRunningHeartbeats).toHaveBeenCalledWith(PAUSE_MS);
+    expect(targets.kanbanStore.bumpActiveHeartbeats).toHaveBeenCalledWith(PAUSE_MS);
+    expect(targets.pendingMemoryStore.applyPauseOffset).toHaveBeenCalledWith(PAUSE_MS);
+    expect(targets.dreamExecutor.applyPauseOffset).toHaveBeenCalledWith(PAUSE_MS);
+    expect(gatewayApply).toHaveBeenCalledWith(PAUSE_MS);
+    expect(result.steps.pause_corrections).toBe('ok');
+    expect(logger.infos.some((m) => m.includes('applied pause corrections'))).toBe(true);
+    expect(logger.warns).toEqual([]);
+  });
+
+  it('corrects every gate BEFORE any sweep that reads a wall-clock timestamp', async () => {
+    const order: string[] = [];
+    const { deps } = makeDeps(order);
+    deps.pauseLifecycle.readPauseOffset.mockResolvedValueOnce({ pauseDurationMs: PAUSE_MS });
+    const targets = makeTargets(order);
+    const gatewayApply = vi.fn((ms: number) => {
+      order.push(`gateway:${ms}`);
+    });
+
+    await runBootReconciliation({
+      ...deps,
+      ...targets,
+      gateway: { ...deps.gateway, applyPauseOffset: gatewayApply },
+    });
+
+    // Observed order, not STEP_ORDER's contents: a correction applied after
+    // `reclaimStale` or the ledger's abandon window has already lost the rows.
+    const at = (name: string) => order.findIndex((entry) => entry.startsWith(name));
+    for (const target of ['jobStore', 'kanbanStore', 'pendingMemoryStore', 'dreamExecutor']) {
+      expect(at(target)).toBeGreaterThan(at('readPauseOffset'));
+      expect(at(target)).toBeLessThan(at('sweepPendingDeliveries'));
+      expect(at(target)).toBeLessThan(at('sweepUndeliveredJobs'));
+      expect(at(target)).toBeLessThan(at('bootSweep'));
+    }
+  });
+
+  it('skips on a cold boot: a null offset corrects nothing', async () => {
+    const order: string[] = [];
+    const { deps } = makeDeps(order);
+    const targets = makeTargets(order);
+    const logger = makeLogger();
+
+    // The `NoopPauseLifecycle` answer — `makeDeps` already returns null.
+    const result = await runBootReconciliation({ ...deps, ...targets, logger });
+
+    expect(result.pauseOffset).toBeNull();
+    expect(result.steps.pause_corrections).toBe('skipped');
+    expect(targets.jobStore.bumpRunningHeartbeats).not.toHaveBeenCalled();
+    expect(targets.kanbanStore.bumpActiveHeartbeats).not.toHaveBeenCalled();
+    expect(targets.pendingMemoryStore.applyPauseOffset).not.toHaveBeenCalled();
+    expect(targets.dreamExecutor.applyPauseOffset).not.toHaveBeenCalled();
+    expect(logger.infos.some((m) => m.includes('applied pause corrections'))).toBe(false);
+  });
+
+  it('skips when no correction target is supplied, and still runs every other step', async () => {
+    const order: string[] = [];
+    const { deps } = makeDeps(order);
+    deps.pauseLifecycle.readPauseOffset.mockResolvedValueOnce({ pauseDurationMs: PAUSE_MS });
+
+    const result = await runBootReconciliation(deps);
+
+    expect(result.steps.pause_corrections).toBe('skipped');
+    // `mockResolvedValueOnce` replaces the recording implementation, so the
+    // read itself does not land in `order` on this one call.
+    expect(order).toEqual(EXPECTED_ORDER.filter((n) => n !== 'readPauseOffset'));
+    expect(result.steps).toEqual({
+      pause_offset: 'ok',
+      pause_corrections: 'skipped',
+      clarify_hydrate: 'ok',
+      clarify_sweep: 'ok',
+      a2a_fail_non_terminal: 'ok',
+      sweep_pending_deliveries: 'ok',
+      sweep_undelivered_jobs: 'ok',
+      background_boot_sweep: 'ok',
+      cron_fire: 'ok',
+    });
+  });
+
+  it('settles targets independently: one throwing target does not mask the others', async () => {
+    const order: string[] = [];
+    const { deps } = makeDeps(order);
+    deps.pauseLifecycle.readPauseOffset.mockResolvedValueOnce({ pauseDurationMs: PAUSE_MS });
+    const targets = makeTargets(order);
+    targets.kanbanStore.bumpActiveHeartbeats.mockImplementationOnce(() => {
+      throw new Error('board locked');
+    });
+    const logger = makeLogger();
+
+    const result = await runBootReconciliation({ ...deps, ...targets, logger });
+
+    expect(result.steps.pause_corrections).toBe('failed');
+    // The other three still ran — under `Promise.all` they would not have.
+    expect(targets.jobStore.bumpRunningHeartbeats).toHaveBeenCalledWith(PAUSE_MS);
+    expect(targets.pendingMemoryStore.applyPauseOffset).toHaveBeenCalledWith(PAUSE_MS);
+    expect(targets.dreamExecutor.applyPauseOffset).toHaveBeenCalledWith(PAUSE_MS);
+    // The log names WHICH target failed, not an index.
+    expect(logger.warns).toEqual([
+      '[boot-reconciliation] step "pause_corrections" failed for kanbanStore',
+    ]);
+    // And reconciliation still completed rather than rejecting.
+    expect(result.steps.cron_fire).toBe('ok');
   });
 });
