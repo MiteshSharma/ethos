@@ -42,6 +42,7 @@ describe('MicCapture', () => {
 
   beforeEach(() => {
     originalPlatform = Object.getOwnPropertyDescriptor(process, 'platform');
+    Object.defineProperty(process, 'platform', { value: 'darwin' });
   });
 
   afterEach(() => {
