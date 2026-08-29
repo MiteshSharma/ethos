@@ -17,10 +17,19 @@ type PackageCreateLLM = typeof import('@ethosagent/wiring')['createLLM'];
 
 const packageCreateLLM = vi.fn<PackageCreateLLM>();
 
-vi.mock('@ethosagent/wiring', async (importOriginal) => {
-  const orig = await importOriginal<typeof import('@ethosagent/wiring')>();
-  return { ...orig, createLLM: packageCreateLLM };
-});
+// No importOriginal() here — that would load the real @ethosagent/wiring
+// package (the heaviest transitive graph in the repo: every LLM provider,
+// every tool extension, plugin loading) just to override one export, making
+// this test's module load slow and flaky under CPU contention. `../wiring`
+// (the module under test) only touches EthosObservability/FunnelTracker/
+// createAgentLoop lazily inside functions this test never calls, so bare
+// stubs are enough.
+vi.mock('@ethosagent/wiring', () => ({
+  EthosObservability: class {},
+  FunnelTracker: class {},
+  createAgentLoop: vi.fn(),
+  createLLM: packageCreateLLM,
+}));
 
 const TOKENS_REF = 'providers/codex/tokens';
 const TOKENS_VALUE = '{"accessToken":"at-test","refreshToken":"rt-test"}';
@@ -42,6 +51,11 @@ afterAll(() => {
 });
 
 describe('CLI createLLM — secrets resolver threading', () => {
+  // `../wiring` is the real, unmocked module under test — its own top-level
+  // imports (agent-mesh, observability-sqlite, team-supervisor, …) still do
+  // real transform work on first load, so under heavy sibling CPU contention
+  // this can occasionally outrun the default 15s budget even with the light
+  // @ethosagent/wiring stub above.
   it('passes a resolver that reads the on-disk secret store', async () => {
     packageCreateLLM.mockRejectedValue(new Error('__stubbed-provider-construction__'));
     const { createLLM } = await import('../wiring');
@@ -61,5 +75,5 @@ describe('CLI createLLM — secrets resolver threading', () => {
     // Not just "some resolver" — one that actually returns the stored value
     // the crash reported as missing.
     expect(await resolver?.get(TOKENS_REF)).toBe(TOKENS_VALUE);
-  });
+  }, 30_000);
 });

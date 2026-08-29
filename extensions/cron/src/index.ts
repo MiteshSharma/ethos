@@ -83,6 +83,15 @@ export interface CronJob {
   lastRunAt?: string;
   nextRunAt?: string;
   createdAt: string;
+  /**
+   * Mid-execution signal (plan/phases/idle-watcher.md §1 check #7). Epoch ms
+   * stamped inside `claimDueJob`'s compare-and-swap — so only the winning
+   * claimant ever sets it — and cleared in `executeJob`'s `finally`, including
+   * when the job throws. `null` or absent means "not running": records written
+   * before this field existed simply have no key, which reads the same as
+   * cleared. Read through `hasRunningJobs()`, never directly.
+   */
+  runningSince?: number | null;
 }
 
 export interface CronJobUpdate {
@@ -382,6 +391,26 @@ const noopSecrets: SecretsResolver = {
 // CronScheduler
 // ---------------------------------------------------------------------------
 
+/**
+ * Staleness bound on `CronJob.runningSince`, applied at READ time by
+ * `hasRunningJobs()`.
+ *
+ * `runningSince` is persisted (jobs.json), so a process killed mid-run leaves
+ * a stamp with nobody behind it. This is the equivalent of
+ * `JobStore.reclaimStale(staleMs)` — with one deliberate difference: there is
+ * no sweep that rewrites the record. `runningSince` has exactly one consumer
+ * (the `cron-executions` busy source) and no state machine to transition into,
+ * unlike a job row that must move `running` → `stale`, so a ghost stamp only
+ * needs to stop reading as busy. It ages out here, and the job's next claim
+ * overwrites it outright.
+ *
+ * One hour, because a cron prompt job is a full agent turn with tool calls and
+ * has no heartbeat to shorten this against. Erring long is the safe direction:
+ * too short reports a genuinely-running job idle, which is the failure mode
+ * that loses work; too long only delays a suspend.
+ */
+export const CRON_RUNNING_STALE_MS = 60 * 60 * 1000;
+
 export class CronScheduler {
   private readonly cronDir: string;
   private readonly jobsPath: string;
@@ -648,7 +677,28 @@ export class CronScheduler {
   async runJobNow(id: string): Promise<CronRunResult> {
     const job = await this.getJob(id);
     if (!job) throw new Error(`Job not found: ${id}`);
-    return this.executeJob(job);
+    // A manual run is mid-execution too — it does not go through the due-scan
+    // CAS (there is nothing to race with; the caller asked for this one job by
+    // id), but the busy signal must see it, so it gets its own stamp.
+    const runningStamp = Date.now();
+    await this.patchJob(id, { runningSince: runningStamp }).catch(() => {});
+    return this.executeJob(job, runningStamp);
+  }
+
+  /**
+   * Whether any job is mid-execution right now — the aggregate the idle
+   * watcher's `cron-executions` busy source reads (plan §1 check #7).
+   *
+   * Reads `runningSince` off jobs.json rather than an in-process Map on
+   * purpose: in a hybrid deployment several processes share one cron dir, and
+   * a run started by a peer is still work this VM must not be suspended
+   * through. Stamps older than `staleMs` are ignored — see
+   * `CRON_RUNNING_STALE_MS`.
+   */
+  async hasRunningJobs(staleMs: number = CRON_RUNNING_STALE_MS): Promise<boolean> {
+    const cutoff = Date.now() - staleMs;
+    const jobs = await this.readJobs();
+    return jobs.some((j) => typeof j.runningSince === 'number' && j.runningSince > cutoff);
   }
 
   /**
@@ -775,11 +825,14 @@ export class CronScheduler {
       // `LocalIntervalTrigger` and `HttpFireTrigger` close together) can't
       // both win the claim and both execute it.
       const upcoming = nextRunForSchedule(job.schedule, now, new Date(job.createdAt));
+      // Stamped inside the CAS below, so a losing claimant never writes it.
+      const runningStamp = Date.now();
       let claimed: boolean;
       try {
         claimed = await this.claimDueJob(job.id, job.nextRunAt, {
           lastRunAt: now.toISOString(),
           nextRunAt: upcoming?.toISOString(),
+          runningSince: runningStamp,
         });
       } catch (err) {
         this.logger.error(`[cron] Could not claim job "${job.id}", skipping tick`, {
@@ -796,7 +849,7 @@ export class CronScheduler {
       }
 
       try {
-        await this.executeJob(job);
+        await this.executeJob(job, runningStamp);
       } catch (err) {
         this.logger.error(`[cron] Job "${job.id}" failed`, {
           component: 'cron',
@@ -883,7 +936,25 @@ export class CronScheduler {
   // Execution
   // ---------------------------------------------------------------------------
 
-  private async executeJob(job: CronJob): Promise<CronRunResult> {
+  /**
+   * Run one job and always release its mid-execution stamp.
+   *
+   * The `finally` is the load-bearing half: a job that THROWS (script failure,
+   * a dead LLM provider, a missing systemTask handler) must not leave
+   * `runningSince` set, or the idle watcher would read this deployment as
+   * permanently busy and never suspend again.
+   */
+  private async executeJob(job: CronJob, runningStamp?: number): Promise<CronRunResult> {
+    try {
+      return await this.runExecution(job);
+    } finally {
+      if (runningStamp !== undefined) {
+        await this.clearRunning(job.id, runningStamp).catch(() => {});
+      }
+    }
+  }
+
+  private async runExecution(job: CronJob): Promise<CronRunResult> {
     // System jobs dispatch to a registered handler instead of the LLM runJob path
     if (job.source === 'system' && job.systemTask) {
       const handler = this.systemTasks[job.systemTask];
@@ -1149,6 +1220,23 @@ export class CronScheduler {
       return jobs;
     });
     return claimed;
+  }
+
+  /**
+   * Release a mid-execution stamp — a compare-and-swap, not a blind write. It
+   * clears `runningSince` only if the stored stamp is still the one THIS
+   * execution wrote, so a concurrent claim (a `runJobNow` overlapping a tick,
+   * say) that has already stamped a newer value is never clobbered back to
+   * idle. Missing job, or someone else's stamp: no-op.
+   */
+  private async clearRunning(jobId: string, stamp: number): Promise<void> {
+    await this.withJobsLock(async (jobs) => {
+      const idx = jobs.findIndex((j) => j.id === jobId);
+      const existing = idx >= 0 ? jobs[idx] : undefined;
+      if (!existing || existing.runningSince !== stamp) return jobs;
+      jobs[idx] = { ...existing, runningSince: null };
+      return jobs;
+    });
   }
 }
 

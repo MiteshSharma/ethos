@@ -1,4 +1,3 @@
-import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { createCapturingAdapter } from '@ethosagent/gateway';
 import type { InboundMessage, PlatformAdapter } from '@ethosagent/types';
@@ -8,11 +7,12 @@ import {
   type PrefilterRunner,
   type WebhookConfig,
   type WebhookGateway,
+  type WebhookServer,
 } from '../webhook-server';
 
 const webhooks = { hook1: { personalityId: 'researcher', secret: 's3cret' } };
 
-let server: Server | undefined;
+let server: WebhookServer | undefined;
 
 afterEach(() => {
   server?.close();
@@ -389,5 +389,83 @@ describe('createWebhookServer — ack mode', () => {
     );
     expect(res.status).toBe(500);
     expect(calls).toHaveLength(0);
+  });
+});
+
+describe('createWebhookServer — in-flight sync requests', () => {
+  /** The live server handle `start()` stashed, for reading the counter. */
+  function handle(): WebhookServer {
+    if (!server) throw new Error('server not started');
+    return server;
+  }
+
+  it('is 0 when idle, 1 while a sync turn is held, 0 again after the reply', async () => {
+    let releaseTurn!: () => void;
+    const parked = new Promise<void>((r) => {
+      releaseTurn = r;
+    });
+    let resolveInvoked!: () => void;
+    const invoked = new Promise<void>((r) => {
+      resolveInvoked = r;
+    });
+    const gateway: WebhookGateway = {
+      handleMessage: async (_msg: InboundMessage, adapter: PlatformAdapter) => {
+        resolveInvoked();
+        await parked;
+        await adapter.send('chat', { text: 'done' });
+      },
+    };
+    const port = await start(gateway);
+    expect(handle().inFlightSyncRequests()).toBe(0);
+
+    const res = post(port, '/webhook/hook1', JSON.stringify({ prompt: 'hi' }), 'Bearer s3cret');
+    await invoked;
+    expect(handle().inFlightSyncRequests()).toBe(1);
+
+    releaseTurn();
+    expect((await res).status).toBe(200);
+    expect(handle().inFlightSyncRequests()).toBe(0);
+  });
+
+  it('decrements when the handler throws', async () => {
+    const gateway: WebhookGateway = {
+      handleMessage: async () => {
+        throw new Error('boom');
+      },
+    };
+    const port = await start(gateway);
+    const res = await post(
+      port,
+      '/webhook/hook1',
+      JSON.stringify({ prompt: 'hi' }),
+      'Bearer s3cret',
+    );
+    expect(res.status).toBe(500);
+    expect(handle().inFlightSyncRequests()).toBe(0);
+  });
+
+  it('does not count ack-mode requests — the gateway owns that turn', async () => {
+    let resolveInvoked!: () => void;
+    const invoked = new Promise<void>((r) => {
+      resolveInvoked = r;
+    });
+    const gateway: WebhookGateway = {
+      handleMessage: async () => {
+        resolveInvoked();
+        await new Promise<void>(() => {}); // never settles
+      },
+    };
+    const port = await start(gateway, {
+      webhooks: { hook1: { personalityId: 'researcher', secret: 's3cret', mode: 'ack' } },
+    });
+    const res = await post(
+      port,
+      '/webhook/hook1',
+      JSON.stringify({ prompt: 'hi' }),
+      'Bearer s3cret',
+    );
+    expect(res.status).toBe(202);
+    await invoked;
+    expect(handle().inFlightSyncRequests()).toBe(0);
   });
 });

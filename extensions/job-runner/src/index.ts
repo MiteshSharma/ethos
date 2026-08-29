@@ -438,8 +438,13 @@ export class BackgroundExecutor {
    * would clobber a LIVE peer's running rows. The 90s staleMs threshold protects
    * a live peer (its heartbeats are <30s old) while still catching genuinely
    * orphaned rows (heartbeat aged past 90s) — here and on every periodic sweep.
+   *
+   * PUBLIC (not private) because boot/resume reconciliation invokes it
+   * directly: `runBootReconciliation` (apps/ethos/src/boot-reconciliation.ts)
+   * composes it with the other boot-time repair steps, and a resume handler
+   * re-runs that composition without re-running `start()`.
    */
-  private async bootSweep(): Promise<void> {
+  async bootSweep(): Promise<void> {
     try {
       await this.store.reclaimStale(this.config.staleMs);
     } catch (err) {

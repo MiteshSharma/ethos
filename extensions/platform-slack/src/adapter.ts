@@ -4,6 +4,7 @@
 // Triage, channel-mode, slash commands, and Block Kit rendering live in
 // sibling modules.
 
+import type { RequestListener } from 'node:http';
 import { join } from 'node:path';
 import { noopLogger } from '@ethosagent/logger';
 import type {
@@ -71,8 +72,9 @@ import { BackfillStateStore } from './store/backfill-state';
 import { ChannelOverrideStore } from './store/channel-overrides';
 import { ThreadStateStore } from './store/thread-state';
 
-const { App } = boltPkg;
+const { App, HTTPReceiver } = boltPkg;
 type App = InstanceType<typeof App>;
+type HTTPReceiver = InstanceType<typeof HTTPReceiver>;
 
 /**
  * Normalize a configured `webUiBaseUrl`. The value is interpolated directly
@@ -160,19 +162,24 @@ export interface AdapterObservability {
 export interface SlackAdapterConfig {
   /** Bot token (xoxb-...). */
   botToken: string;
-  /** App-level token for socket mode (xapp-...). */
-  appToken: string;
+  /** App-level token for socket mode (xapp-...). Required when `mode.socket`
+   *  is selected (the default); unused — and unnecessary — in HTTP mode,
+   *  where the transport is authenticated by `signingSecret` instead. */
+  appToken?: string;
   /**
    * Signing secret from Slack app config.
    *
-   * CHS-010 — retained but UNUSED under Socket Mode, which is the only mode
-   * this adapter runs. Request signatures authenticate inbound HTTP posts to a
-   * public Events API endpoint; a socket connection is already authenticated by
-   * `appToken` and receives no HTTP requests to verify. It stays on the config
-   * so a future non-socket receiver needs no config migration — do not read it
-   * as evidence that inbound requests are signature-checked today.
+   * CHS-010 — UNUSED under Socket Mode: request signatures authenticate
+   * inbound HTTP posts to a public Events API endpoint, and a socket
+   * connection is already authenticated by `appToken` and receives no HTTP
+   * requests to verify. Do not read a socket-mode deployment's signing secret
+   * as evidence that its inbound events are signature-checked.
+   *
+   * Under `mode.http` it is the HMAC key Bolt's `HTTPReceiver` verifies every
+   * inbound request against, so it is genuinely required there — the
+   * constructor throws without it.
    */
-  signingSecret: string;
+  signingSecret?: string;
   /** Stable bot identity, computed once in wiring (`deriveBotKey`). Required —
    *  the adapter no longer derives its own key; routing is stamped from this. */
   botKey: string;
@@ -253,6 +260,36 @@ export interface SlackAdapterConfig {
   receiptReaction?: string;
   /** Logger for startup diagnostics. Defaults to a silent NoopLogger. */
   logger?: Logger;
+  /**
+   * Inbound transport selection. Absent (or absent sub-keys) reproduces
+   * today's behaviour exactly: Socket Mode on, HTTP Events off.
+   *
+   * `socket` and `http` are mutually exclusive — the constructor throws if
+   * both are `true`. This deliberately diverges from the cron
+   * `trigger: { local, external }` precedent, which *does* allow both: cron's
+   * two triggers are independent sources that don't conflict, whereas Socket
+   * Mode and HTTP Events are two transports for the SAME inbound event
+   * stream. Slack's own app dashboard treats them as alternatives (enabling
+   * Socket Mode removes the need for a Request URL), and there is no reason
+   * to receive every event twice.
+   */
+  mode?: {
+    /** Socket Mode (WebSocket). Defaults to `true`. Requires `appToken`. */
+    socket?: boolean;
+    /**
+     * HTTP Events API. Defaults to `false`. Requires `signingSecret`.
+     *
+     * Slack has no `setWebhook()` equivalent — nothing here registers the
+     * URL. The operator must set the Event Subscriptions Request URL in the
+     * Slack app's own dashboard to `https://<host>/slack/events/<botKey>`
+     * (or `<webhookPath>` in place of `<botKey>`); Slack then posts its
+     * `url_verification` challenge there, which Bolt answers on its own.
+     */
+    http?: boolean;
+  };
+  /** Route segment under `/slack/events/` for this app's HTTP Events
+   *  endpoint. Defaults to `botKey`. Only meaningful in HTTP mode. */
+  webhookPath?: string;
 }
 
 /**
@@ -308,7 +345,7 @@ export class SlackAdapter implements PlatformAdapter, ApprovalCapableAdapter, Vo
       joinGreeting: true,
       roleBasedApprovals: false,
       outboundFiles: true,
-      webhookMode: false,
+      webhookMode: this.httpMode,
     };
   }
 
@@ -339,6 +376,13 @@ export class SlackAdapter implements PlatformAdapter, ApprovalCapableAdapter, Vo
   /** `users.info` display-name resolver, cached (24 h TTL, ≤1024 entries). */
   private readonly users: UsernameResolver;
   private readonly app: App;
+  /** Whether this adapter runs the HTTP Events transport (`mode.http`). */
+  private readonly httpMode: boolean;
+  /** The HTTP Events receiver, or `undefined` in Socket Mode. */
+  private readonly httpReceiver: HTTPReceiver | undefined;
+  /** Path this adapter's HTTP Events endpoint answers on, or `undefined` in
+   *  Socket Mode. Surfaced by the `webhookRoute` getter. */
+  private readonly httpRoute: string | undefined;
   private readonly client: App['client'];
   private readonly backfillState: BackfillStateStore | undefined;
   private readonly channelOverrides: ChannelOverrideStore | undefined;
@@ -396,12 +440,66 @@ export class SlackAdapter implements PlatformAdapter, ApprovalCapableAdapter, Vo
   private readonly pendingReactionsMaxEntries = 1024;
 
   constructor(config: SlackAdapterConfig) {
-    this.app = new App({
-      token: config.botToken,
-      appToken: config.appToken,
-      signingSecret: config.signingSecret,
-      socketMode: true,
-    });
+    // Transport selection. The defaults reproduce today's behaviour exactly:
+    // `mode` absent → Socket Mode on, HTTP Events off.
+    const socketMode = config.mode?.socket ?? true;
+    this.httpMode = config.mode?.http ?? false;
+    if (socketMode && this.httpMode) {
+      // Not the cron `{ local, external }` hybrid: Socket Mode and HTTP
+      // Events carry the SAME inbound event stream, and Slack's dashboard
+      // treats them as alternatives. Receiving every event twice is a
+      // misconfiguration, not a profile.
+      throw new Error(
+        'Slack adapter: mode.socket and mode.http are mutually exclusive — ' +
+          'Socket Mode and HTTP Events are two transports for the same inbound ' +
+          'event stream. Enable exactly one.',
+      );
+    }
+
+    if (this.httpMode) {
+      if (!config.signingSecret) {
+        throw new Error(
+          'Slack adapter: signingSecret is required when mode.http is enabled — ' +
+            'it is the HMAC key every inbound Events API request is verified against.',
+        );
+      }
+      const segment = (config.webhookPath ?? config.botKey).replace(/^\/+|\/+$/g, '');
+      this.httpRoute = `/slack/events/${segment}`;
+      this.httpReceiver = new HTTPReceiver({
+        signingSecret: config.signingSecret,
+        // Bolt matches the request path EXACTLY against this list
+        // (`HTTPReceiver.js:209`, `this.endpoints.includes(path)`), and a
+        // non-match throws `HTTPReceiverDeferredRequestError` straight back
+        // out of `requestListener` — a silent 404 in production. Exactly ONE
+        // entry, the full per-app route: the shared server
+        // (`apps/ethos/src/platform-webhook-server.ts`) forwards `req` with its
+        // path untouched, and mounts at `webhookRoute` — this same string — so
+        // there is nothing else this receiver can legitimately be asked for.
+        endpoints: [this.httpRoute],
+      });
+    } else {
+      this.httpRoute = undefined;
+      this.httpReceiver = undefined;
+      if (!config.appToken) {
+        throw new Error(
+          'Slack adapter: appToken is required when mode.socket is enabled (the default). ' +
+            'Set mode.http to run the HTTP Events transport instead.',
+        );
+      }
+    }
+
+    this.app = this.httpReceiver
+      ? new App({
+          token: config.botToken,
+          receiver: this.httpReceiver,
+        })
+      : // Socket Mode — byte-for-byte what this adapter has always built.
+        new App({
+          token: config.botToken,
+          appToken: config.appToken,
+          signingSecret: config.signingSecret,
+          socketMode: true,
+        });
     this.client = this.app.client;
     this.users = createUsernameResolver(this.client);
 
@@ -710,11 +808,56 @@ export class SlackAdapter implements PlatformAdapter, ApprovalCapableAdapter, Vo
       personality: this.personalityUnfurl,
     });
 
-    await this.app.start();
+    // Transport start. Every registration above is identical in both modes —
+    // only the final step differs.
+    //
+    // In HTTP mode we deliberately do NOT call `this.app.start()`: for an
+    // `HTTPReceiver` that call binds its OWN port
+    // (`HTTPReceiver.js:118-183`), and this deployment has exactly one shared
+    // listener, owned by `apps/ethos/src/platform-webhook-server.ts`, which
+    // mounts `this.requestListener` instead. Adding `app.start()` back here
+    // would bind a second, unwanted port. The receiver is fully live without
+    // it: `App`'s constructor already called `receiver.init(this)`
+    // (`App.js:177`), so the handlers registered above are wired.
+    if (!this.httpMode) {
+      await this.app.start();
+    }
   }
 
   async stop(): Promise<void> {
-    await this.app.stop();
+    // Symmetric with `start()`. In HTTP mode there is nothing of ours to
+    // stop — the shared server owns the listener — and `app.stop()` would
+    // reject: it delegates to `HTTPReceiver.stop()`, which rejects with
+    // `ReceiverInconsistentStateError` when the receiver never started a
+    // server (`HTTPReceiver.js:186-189`).
+    if (!this.httpMode) {
+      await this.app.stop();
+    }
+  }
+
+  /**
+   * The `node:http` request listener for this app's HTTP Events route, or
+   * `undefined` in Socket Mode. Mounted by
+   * `apps/ethos/src/platform-webhook-server.ts` on the shared listener; it
+   * performs Slack's signature verification and answers the
+   * `url_verification` challenge itself.
+   *
+   * Mirrors Telegram's `get webhook()` precedent
+   * (`platform-telegram/src/index.ts`).
+   */
+  get requestListener(): RequestListener | undefined {
+    return this.httpReceiver?.requestListener;
+  }
+
+  /**
+   * The path this adapter's `requestListener` answers on
+   * (`/slack/events/<webhookPath ?? botKey>`), or `undefined` in Socket Mode.
+   * The shared server mounts by asking, rather than recomputing the
+   * convention, because Bolt matches its endpoint list exactly — a mount path
+   * that drifts from it 404s silently.
+   */
+  get webhookRoute(): string | undefined {
+    return this.httpRoute;
   }
 
   async sendTyping(chatId: string): Promise<void> {

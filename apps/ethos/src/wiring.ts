@@ -4,6 +4,7 @@ import { meshRegistryPath, setMeshObservabilityService } from '@ethosagent/agent
 import { type EthosConfig, ethosDir, readKeys, readRawConfig } from '@ethosagent/config';
 import type { AgentLoop } from '@ethosagent/core';
 import type { CronJob } from '@ethosagent/cron';
+import type { BusySource, IdleWatcherCapabilities } from '@ethosagent/idle-watcher';
 import {
   BlobStore,
   ObservabilityService,
@@ -17,7 +18,7 @@ import {
   loadDotEnv,
   MergedSecretsResolver,
 } from '@ethosagent/storage-fs';
-import { parseTeamManifest, teamsDir } from '@ethosagent/team-supervisor';
+import { hasLiveTeamProcesses, parseTeamManifest, teamsDir } from '@ethosagent/team-supervisor';
 import type {
   LLMProvider,
   SecretsResolver,
@@ -200,6 +201,197 @@ export function buildSystemTaskHandlers(
       return { output: 'Skill evolver run completed' };
     },
   };
+}
+
+/**
+ * Which gap-bearing subsystems this deployment switches on — the idle
+ * watcher's arming gate 2 (plan/phases/idle-watcher.md §3). Shared by
+ * `ethos gateway` and `ethos serve` because both boot the same two.
+ *
+ * CONSERVATIVE BY CONSTRUCTION. A false positive only costs a refusal to arm;
+ * a false negative lets the host suspend the VM mid-cron-run or mid-call, the
+ * silent data loss this gate exists to prevent. When in doubt, present.
+ */
+export function deriveIdleWatcherCapabilities(config: EthosConfig): IdleWatcherCapabilities {
+  return {
+    // CLOSED. The gap this used to declare was real — cron had no
+    // mid-execution signal in any form (plan §1 check #7), and since both host
+    // commands construct a CronScheduler and seed system jobs unconditionally,
+    // declaring it present meant the watcher could never arm in ANY
+    // deployment. There is now a real signal: `CronJob.runningSince` (epoch ms,
+    // stamped inside `claimDueJob`'s compare-and-swap, cleared in
+    // `executeJob`'s `finally` even when the job throws), read through
+    // `CronScheduler.hasRunningJobs()`. So cron is covered the way every other
+    // subsystem is — by a `cron-executions` BusySource in both builders below
+    // and in `buildGatewayBusySources` — not by a deployment-level refusal to
+    // arm. Gate 2 is for signals that do not exist; this one does.
+    cron: false,
+    // Voice/call session state genuinely has no queryable signal (plan §1
+    // checks #13/#14), so this half of the gate stays.
+    //
+    // The two halves are asymmetric ON PURPOSE. `callCapture` is darwin-only:
+    // both commands build their `CallCaptureDaemon`/`CallCaptureOwnershipManager`
+    // behind `process.platform === 'darwin' && config.callCapture?.personalityId`,
+    // so on Linux that config block constructs nothing at all. Per plan §2 that
+    // is "not configured", not "configured but unreadable" — refusing to arm
+    // over a subsystem that cannot run on this host is the over-report the rule
+    // exists to prevent. A `voice:` block is NOT platform-gated (livekit,
+    // trunk, realtime and wake all run anywhere), so it counts on every host.
+    voice:
+      (process.platform === 'darwin' && Boolean(config.callCapture?.personalityId)) ||
+      config.voice !== undefined,
+  };
+}
+
+/**
+ * The idle watcher's busy predicate for the `ethos serve` profile
+ * (plan/phases/idle-watcher.md §1). Each source is a thin closure built HERE,
+ * at the wiring site, so `@ethosagent/idle-watcher` needs no cross-extension
+ * imports — the command layer already imports every subsystem (plan §5).
+ *
+ * ABSENT vs UNREADABLE (plan §2): a subsystem this deployment never
+ * constructed is SKIPPED, not wired to a closure that would throw on an
+ * undefined handle. A throwing check reports busy forever under the fail-awake
+ * wrapper, which would leave every deployment permanently busy.
+ *
+ * Exported so tests can assert the registered set without booting a server.
+ */
+export function buildServeBusySources(deps: {
+  chatService: { hasActiveBridges(): boolean };
+  voiceSocket: { readonly laneCount: number };
+  satelliteSocket: { readonly laneCount: number };
+  pendingApprovalCount: () => number;
+  /** Present only when the background subsystem is enabled. */
+  backgroundExecutor: { activeCount(): number } | undefined;
+  jobStore: { countActive(): Promise<number> } | undefined;
+  /** `undefined` when this deployment constructs no scheduler. */
+  cronScheduler: { hasRunningJobs(): Promise<boolean> } | undefined;
+  /** Flat `~/.ethos/teams` — see `pidFilePath` in @ethosagent/team-supervisor. */
+  teamsPidDir: string;
+  /** Present only when the ACP server is constructed (serve only). */
+  acpServer: { readonly activeSessionCount: number } | undefined;
+}): BusySource[] {
+  const sources: BusySource[] = [
+    {
+      // The dashboard-chat surface's own in-flight-turn tracker, completely
+      // independent of the gateway's `activeTurns` (plan §1 check #3).
+      name: 'web-chat-turns',
+      checkBusy: () =>
+        Promise.resolve({
+          busy: deps.chatService.hasActiveBridges(),
+          reason: 'a web chat turn is in flight',
+        }),
+    },
+    {
+      // A third voice channel, distinct from the callcapture daemon and from
+      // `RealtimeSessionCore` (plan §1 check #15).
+      name: 'voice-lanes',
+      checkBusy: () =>
+        Promise.resolve({
+          busy: deps.voiceSocket.laneCount > 0 || deps.satelliteSocket.laneCount > 0,
+          reason: 'a voice or satellite WebSocket lane is open',
+        }),
+    },
+    {
+      name: 'web-approvals',
+      checkBusy: () => {
+        const pending = deps.pendingApprovalCount();
+        return Promise.resolve({
+          busy: pending > 0,
+          reason: `${pending} tool approval(s) awaiting a human decision`,
+        });
+      },
+    },
+    {
+      // Detached children (`detached: true` + `unref()`), so the PID file is
+      // the only signal there is. `hasLiveTeamProcesses` is itself fail-awake:
+      // a missing directory means no teams, anything else unreadable is busy.
+      name: 'team-supervisors',
+      checkBusy: () =>
+        Promise.resolve({
+          busy: hasLiveTeamProcesses(deps.teamsPidDir),
+          reason: 'a detached team supervisor is alive',
+        }),
+    },
+  ];
+
+  const executor = deps.backgroundExecutor;
+  if (executor) {
+    sources.push({
+      name: 'background-jobs',
+      checkBusy: () => {
+        const active = executor.activeCount();
+        return Promise.resolve({ busy: active > 0, reason: `${active} background job(s) running` });
+      },
+    });
+  }
+
+  const jobStore = deps.jobStore;
+  if (jobStore) {
+    sources.push({
+      // Durable, unscoped: queued/running/blocked rows survive a restart, so a
+      // suspend here would strand work no in-process counter can see.
+      name: 'job-store',
+      checkBusy: async () => ({
+        busy: (await jobStore.countActive()) > 0,
+        reason: 'the durable job store has queued/running/blocked jobs',
+      }),
+    });
+  }
+
+  const cronScheduler = deps.cronScheduler;
+  if (cronScheduler) {
+    sources.push({
+      // Persisted `runningSince` stamps (plan §1 check #7), so this sees runs
+      // started by a peer process sharing the cron dir too, not just this one.
+      name: 'cron-executions',
+      checkBusy: async () => ({
+        busy: await cronScheduler.hasRunningJobs(),
+        reason: 'a cron job is mid-execution',
+      }),
+    });
+  }
+
+  const acpServer = deps.acpServer;
+  if (acpServer) {
+    sources.push({
+      // A live ACP coding-agent session is among the most expensive work in
+      // this process to lose. Same counter the mesh heartbeat already reports.
+      name: 'acp-sessions',
+      checkBusy: () => {
+        const active = acpServer.activeSessionCount;
+        return Promise.resolve({ busy: active > 0, reason: `${active} ACP session(s) live` });
+      },
+    });
+  }
+
+  return sources;
+}
+
+/**
+ * Concatenate several roles' busy sources into one list, dropping any later
+ * source that repeats an earlier one's `name`.
+ *
+ * Only `ethos boot` needs this: it runs the gateway role and the serve role in
+ * ONE process, and both builders register `team-supervisors` (the same pure
+ * `hasLiveTeamProcesses` check against the same flat `~/.ethos/teams` dir) and
+ * both may register `background-jobs` / `job-store`. Sampling identical state
+ * twice does not change the verdict — the watcher ANDs every source — but it
+ * doubles the work each tick and makes the "which source said busy" log read
+ * as two unrelated subsystems.
+ *
+ * FIRST WINS, so the caller decides which half survives. A caller MUST NOT let
+ * a source be dropped in favour of a twin that samples LESS state: the watcher
+ * is fail-awake, and a narrower check under the same name would under-report
+ * busy — the one failure mode that loses work.
+ */
+export function dedupeBusySources(sources: BusySource[]): BusySource[] {
+  const seen = new Set<string>();
+  return sources.filter((source) => {
+    if (seen.has(source.name)) return false;
+    seen.add(source.name);
+    return true;
+  });
 }
 
 async function withRotation(config: EthosConfig) {

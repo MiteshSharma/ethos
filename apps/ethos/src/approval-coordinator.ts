@@ -53,6 +53,13 @@ export interface RequestApprovalInput {
   reason: string | null;
   /** See `PendingApproval.requesterUserId`. */
   requesterUserId?: string;
+  /**
+   * Override the coordinator's configured auto-deny window for this one
+   * request — for callers whose wait is legitimately longer than the
+   * attended-card default (an unattended background run). Omit to use the
+   * coordinator default; `0` disables the timer for this request.
+   */
+  timeoutMs?: number;
 }
 
 /** Decider id used for non-user resolutions (timeout, session cancel). It is
@@ -104,6 +111,12 @@ export interface ApprovalCoordinatorOptions {
 
 const DEFAULT_TIMEOUT_MS = 10 * 60 * 1000;
 
+/** Longest delay `setTimeout` can represent (32-bit signed ms, ~24.8 days).
+ *  Duplicated — deliberately, per this file's sibling relationship with
+ *  `apps/web-api/src/services/approvals.service.ts`, which declares the
+ *  identical constant. Keep the two literals in sync. */
+const MAX_TIMER_MS = 2_147_483_647;
+
 export class ApprovalCoordinator {
   private readonly pending = new Map<string, PendingEntry>();
   private readonly emitter = new EventEmitter<CoordinatorEventMap>();
@@ -134,15 +147,26 @@ export class ApprovalCoordinator {
         reason: req.reason,
         requesterUserId: req.requesterUserId,
       };
+      const effectiveTimeout = req.timeoutMs ?? this.timeoutMs;
       let timer: NodeJS.Timeout | undefined;
-      if (this.timeoutMs > 0) {
-        timer = setTimeout(() => {
-          this.settle(
-            approvalId,
-            { decision: 'deny', reason: 'approval timed out' },
-            SYSTEM_DECIDER,
-          );
-        }, this.timeoutMs);
+      if (effectiveTimeout > 0) {
+        // Clamped: a delay above the Node timer max overflows the 32-bit
+        // signed int and fires in ~1ms, so an operator asking for a LONGER
+        // window (say a 30-day SLA) would silently auto-deny every dangerous
+        // call instantly. Clamping to the longest delay the platform can
+        // actually represent keeps the gate fail-closed and as close to the
+        // requested SLA as possible. It must never become "no timer" — that
+        // would flip a safety gate fail-open.
+        timer = setTimeout(
+          () => {
+            this.settle(
+              approvalId,
+              { decision: 'deny', reason: 'approval timed out' },
+              SYSTEM_DECIDER,
+            );
+          },
+          Math.min(effectiveTimeout, MAX_TIMER_MS),
+        );
         // Don't keep the process alive solely for a pending approval.
         timer.unref?.();
       }
@@ -171,6 +195,20 @@ export class ApprovalCoordinator {
   cancelForSession(sessionId: string, reason = 'session ended'): void {
     for (const [approvalId, entry] of this.pending.entries()) {
       if (entry.request.sessionId !== sessionId) continue;
+      this.settle(approvalId, { decision: 'deny', reason }, SYSTEM_DECIDER);
+    }
+  }
+
+  /**
+   * Force-settle EVERY pending approval as a deny — `cancelForSession`
+   * without the session filter. Called from the gateway command's shutdown
+   * closure: the auto-deny timers are `unref`'d, so a graceful restart would
+   * otherwise abandon every suspended hook with no settle, no audit row and
+   * no card update.
+   */
+  forceSettleAll(reason = 'gateway shutting down'): void {
+    // Snapshot the keys — `settle` mutates the map as it goes.
+    for (const approvalId of [...this.pending.keys()]) {
       this.settle(approvalId, { decision: 'deny', reason }, SYSTEM_DECIDER);
     }
   }

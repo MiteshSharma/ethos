@@ -1,13 +1,24 @@
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { SQLiteSessionStore } from '@ethosagent/session-sqlite';
 import { InMemoryStorage } from '@ethosagent/storage-fs';
+import type { BeforeToolCallPayload, BeforeToolCallResult } from '@ethosagent/types';
 import { isEthosError } from '@ethosagent/types';
 import type { ApprovalRequest } from '@ethosagent/web-contracts';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { createWebApi } from '../../index';
 import { AllowlistRepository } from '../../repositories/allowlist.repository';
 import {
   type ApprovalDecision,
   type ApprovalObservability,
   ApprovalsService,
 } from '../../services/approvals.service';
+import {
+  makeStubAgentLoop,
+  makeStubMemoryProvider,
+  makeStubPersonalityRegistry,
+} from '../test-helpers';
 
 // The hard test case is the event-loop inversion: a coroutine awaits a
 // Promise that only resolves when an unrelated HTTP handler later flips a
@@ -387,6 +398,273 @@ describe('ApprovalsService — safety audit trail', () => {
     await expect(throwing.approve(approvalId, 'once', 'tab-A')).resolves.toBeUndefined();
     expect(await decision).toEqual({ decision: 'allow' });
     expect(throwing.pendingCount()).toBe(0);
+  });
+});
+
+// The auto-deny timeout: the backstop for a closed tab or a dropped SSE
+// stream. Without it the agent loop's hook stays suspended forever, with no
+// audit row and no bound. Fail-CLOSED — silence never auto-approves.
+describe('ApprovalsService — auto-deny timeout', () => {
+  type AuditRow = Parameters<ApprovalObservability['recordSafetyApproval']>[0];
+
+  const SYSTEM_DECIDER = '__ethos_system__';
+
+  let allowlist: AllowlistRepository;
+  let rows: AuditRow[];
+
+  beforeEach(() => {
+    const storage = new InMemoryStorage();
+    allowlist = new AllowlistRepository({ dataDir: DATA, storage });
+    rows = [];
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  function makeService(timeoutMs?: number): ApprovalsService {
+    return new ApprovalsService({
+      allowlist,
+      ...(timeoutMs !== undefined ? { timeoutMs } : {}),
+      observability: { recordSafetyApproval: (o) => rows.push(o) },
+    });
+  }
+
+  function firstPending(service: ApprovalsService): Promise<ApprovalRequest> {
+    return new Promise<ApprovalRequest>((resolve) => {
+      const off = service.onPending((_, req) => {
+        off();
+        resolve(req);
+      });
+    });
+  }
+
+  function request(
+    service: ApprovalsService,
+    overrides: Partial<Parameters<ApprovalsService['requestApproval']>[0]> = {},
+    timeoutMs?: number,
+  ): Promise<ApprovalDecision> {
+    return service.requestApproval(
+      {
+        sessionId: 'sess_1',
+        toolCallId: 'tc_1',
+        toolName: 'terminal',
+        args: { command: 'rm -rf /' },
+        ...overrides,
+      },
+      timeoutMs,
+    );
+  }
+
+  it('auto-denies a pending approval once its timeout elapses (T1)', async () => {
+    const approvals = makeService(10);
+    const pending = firstPending(approvals);
+    const decision = request(approvals);
+    await pending;
+
+    await vi.advanceTimersByTimeAsync(10);
+
+    expect(await decision).toEqual({ decision: 'deny', reason: 'approval timed out' });
+    expect(approvals.pendingCount()).toBe(0);
+    // The trail must not hide unattended denials, and must name the system as
+    // the decider so an audit reader can tell it from a human deny.
+    expect(rows).toHaveLength(1);
+    expect(rows[0].decision).toBe('denied');
+    expect(rows[0].cause).toContain('approval timed out');
+    expect(rows[0].details).toMatchObject({ decidedBy: SYSTEM_DECIDER });
+  });
+
+  it('a human answer wins the race and the timer never settles a second time (T2)', async () => {
+    const approvals = makeService(50);
+    const pending = firstPending(approvals);
+    const decision = request(approvals);
+    const { approvalId } = await pending;
+
+    await vi.advanceTimersByTimeAsync(10);
+    await approvals.approve(approvalId, 'once', 'tab-A');
+    expect(await decision).toEqual({ decision: 'allow' });
+
+    // Well past the timeout — the disarmed timer must produce no second row.
+    await vi.advanceTimersByTimeAsync(200);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].decision).toBe('approved');
+  });
+
+  it('a manual deny before the timeout leaves no unhandled rejection (T3)', async () => {
+    const approvals = makeService(50);
+    const rejections: unknown[] = [];
+    const onRejection = (reason: unknown) => rejections.push(reason);
+    process.on('unhandledRejection', onRejection);
+    try {
+      const pending = firstPending(approvals);
+      const decision = request(approvals);
+      const { approvalId } = await pending;
+
+      await approvals.deny(approvalId, 'too risky', 'tab-A');
+      await decision;
+      // `take()` throws on an already-resolved id; a timer firing after a
+      // human decision must swallow that, not crash the process.
+      await vi.advanceTimersByTimeAsync(200);
+
+      expect(rejections).toEqual([]);
+      expect(rows).toHaveLength(1);
+      expect(rows[0].cause).toContain('too risky');
+    } finally {
+      process.off('unhandledRejection', onRejection);
+    }
+  });
+
+  it('forceSettleAll denies and audits every pending approval (T6)', async () => {
+    const approvals = makeService(60_000);
+    const decisions: ApprovalDecision[] = [];
+    for (const [index, sessionId] of ['sess_1', 'sess_1', 'sess_2'].entries()) {
+      const pending = firstPending(approvals);
+      void request(approvals, { sessionId, toolCallId: `tc_${index}` }).then((d) =>
+        decisions.push(d),
+      );
+      await pending;
+    }
+    expect(approvals.pendingCount()).toBe(3);
+
+    approvals.forceSettleAll();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(decisions).toHaveLength(3);
+    expect(decisions.every((d) => d.decision === 'deny')).toBe(true);
+    expect(rows).toHaveLength(3);
+    expect(rows.every((r) => r.decision === 'denied')).toBe(true);
+    expect(approvals.pendingCount()).toBe(0);
+
+    // Each entry's timer was cleared — no late auto-deny row appears.
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(rows).toHaveLength(3);
+  });
+
+  it('forceSettleAll emits resolved for every pending approval (T6)', async () => {
+    const approvals = makeService(60_000);
+    const resolved: [string, string, 'allow' | 'deny', string][] = [];
+    approvals.onResolved((sessionId, approvalId, decision, decidedBy) =>
+      resolved.push([sessionId, approvalId, decision, decidedBy]),
+    );
+    const approvalIds: string[] = [];
+    for (const [index, sessionId] of ['sess_1', 'sess_1', 'sess_2'].entries()) {
+      const pending = firstPending(approvals);
+      void request(approvals, { sessionId, toolCallId: `tc_${index}` });
+      approvalIds.push((await pending).approvalId);
+    }
+
+    approvals.forceSettleAll();
+    await vi.advanceTimersByTimeAsync(0);
+
+    // Without this the SSE bridge never fires and an open dashboard tab keeps
+    // showing an actionable modal for an approval that was already denied.
+    expect(resolved).toEqual([
+      ['sess_1', approvalIds[0], 'deny', SYSTEM_DECIDER],
+      ['sess_1', approvalIds[1], 'deny', SYSTEM_DECIDER],
+      ['sess_2', approvalIds[2], 'deny', SYSTEM_DECIDER],
+    ]);
+  });
+
+  it('timeoutMs: 0 arms no timer — the approval waits for an explicit decision (T7)', async () => {
+    const approvals = makeService(0);
+    let settled = false;
+    const pending = firstPending(approvals);
+    const decision = request(approvals).then((d) => {
+      settled = true;
+      return d;
+    });
+    const { approvalId } = await pending;
+
+    await vi.advanceTimersByTimeAsync(6 * 60 * 60 * 1000);
+    expect(settled).toBe(false);
+    expect(approvals.pendingCount()).toBe(1);
+
+    await approvals.deny(approvalId, undefined, 'tab-A');
+    expect((await decision).decision).toBe('deny');
+  });
+
+  it('a per-request timeoutMs overrides the store default', async () => {
+    const approvals = makeService(60 * 60 * 1000);
+    const pending = firstPending(approvals);
+    const decision = request(approvals, {}, 20);
+    await pending;
+
+    await vi.advanceTimersByTimeAsync(20);
+    expect(await decision).toEqual({ decision: 'deny', reason: 'approval timed out' });
+    expect(approvals.pendingCount()).toBe(0);
+  });
+
+  // A delay above the 32-bit signed timer max overflows to ~1ms. Unclamped,
+  // an operator reaching for a MORE permissive window would auto-deny every
+  // dangerous tool call within milliseconds — a silent total lockout.
+  it('a store timeout above the Node timer max is clamped, not overflowed into an instant deny', async () => {
+    // 30 days — a plausible operator SLA, and well above 2_147_483_647.
+    const approvals = makeService(30 * 24 * 60 * 60 * 1000);
+    let settled = false;
+    const pending = firstPending(approvals);
+    void request(approvals).then(() => {
+      settled = true;
+    });
+    await pending;
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(settled).toBe(false);
+    expect(approvals.pendingCount()).toBe(1);
+    expect(rows).toHaveLength(0);
+  });
+
+  it('a per-request timeoutMs above the Node timer max is clamped too', async () => {
+    const approvals = makeService(60_000);
+    let settled = false;
+    const pending = firstPending(approvals);
+    void request(approvals, {}, 30 * 24 * 60 * 60 * 1000).then(() => {
+      settled = true;
+    });
+    await pending;
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(settled).toBe(false);
+    expect(approvals.pendingCount()).toBe(1);
+    expect(rows).toHaveLength(0);
+  });
+});
+
+// T10 — the config-wiring seam. Asserted through observable behavior (a hook
+// that auto-denies at the configured window) rather than by reaching into the
+// service `createWebApi` builds internally. Real timers: the window is 30ms.
+describe('createWebApi — approvalTimeoutMs threading', () => {
+  it('threads the configured window into the approvals store', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'ethos-approval-timeout-'));
+    const store = new SQLiteSessionStore(':memory:');
+    try {
+      const loop = makeStubAgentLoop();
+      createWebApi({
+        dataDir: dir,
+        sessionStore: store,
+        memoryProvider: makeStubMemoryProvider(),
+        agentLoop: loop,
+        personalities: makeStubPersonalityRegistry(),
+        chatDefaults: { model: 'claude-test', provider: 'anthropic' },
+        approvalTimeoutMs: 30,
+        dangerPredicate: async () => 'every terminal call requires approval (test rule)',
+      });
+
+      const result: Partial<BeforeToolCallResult> = await loop.hooks.fireModifying(
+        'before_tool_call',
+        {
+          sessionId: 'sess_timeout',
+          toolCallId: 'tc_timeout',
+          toolName: 'terminal',
+          args: { command: 'rm -rf /' },
+        } satisfies BeforeToolCallPayload,
+      );
+
+      expect(result.error).toContain('approval timed out');
+    } finally {
+      store.close();
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });
 

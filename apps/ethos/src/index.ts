@@ -74,7 +74,7 @@ const ETHOS_VERSION =
   typeof __ETHOS_VERSION__ === 'string' ? __ETHOS_VERSION__ : (process.env.ETHOS_VERSION ?? 'dev');
 
 const USAGE =
-  'Usage: ethos [-z <prompt> | setup | chat | sessions | serve | dashboard | status | run-all | set | team | mesh | a2a | process | logs | gateway | listen | cron | personality | memory | acp | batch | bench | eval | evolve | learn | nightly | digest | plugin | skills | commands | keys | secrets | fallback | slack | api-key | claw | doctor | upgrade | mcp | backup | import | trace | audit | security | errors | perf | tail | retention | cas | why | data | support | archive | systemd-unit | usage] [--version | --help]';
+  'Usage: ethos [-z <prompt> | setup | chat | sessions | serve | boot | dashboard | status | run-all | set | team | mesh | a2a | process | logs | gateway | listen | cron | personality | memory | acp | batch | bench | eval | evolve | learn | nightly | digest | plugin | skills | commands | keys | secrets | fallback | slack | api-key | claw | doctor | upgrade | mcp | backup | import | trace | audit | security | errors | perf | tail | retention | cas | why | data | support | archive | systemd-unit | usage] [--version | --help]';
 
 const args = process.argv.slice(2);
 const command = args[0] ?? '';
@@ -681,6 +681,26 @@ try {
         setRotationConfig(config.logs.rotation);
       }
       await runServe(args.slice(1), config);
+      break;
+    }
+
+    // `ethos boot` — the merged single-process profile
+    // (plan/phases/single-process-boot-profile.md). Runs the gateway role and
+    // the serve role in ONE process so boot-time reconciliation runs in full on
+    // every start, instead of each command silently skipping the other's half.
+    // Additive: `gateway`, `serve` and `run-all` are unchanged.
+    // Lazily imported for the same reason `listen` is — `commands/boot.ts`
+    // pulls in the gateway, web-api and ACP graphs, which must not sit in the
+    // CLI's top-level import path just because the binary can also merge them.
+    case 'boot': {
+      const secrets = await getSecretsResolver();
+      const config = (await readConfig(getStorage(), secrets)) ?? null;
+      if (config?.logs?.rotation) {
+        const { setRotationConfig } = await import('./error-log');
+        setRotationConfig(config.logs.rotation);
+      }
+      const { runBoot } = await import('./commands/boot');
+      await runBoot(args.slice(1), config);
       break;
     }
 

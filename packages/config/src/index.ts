@@ -164,8 +164,11 @@ const INDEXED_SECRET_REFS: ReadonlyArray<{
   ref: (m: RegExpMatchArray, ctx: SecretRefContext) => string;
 }> = [
   {
-    re: /^telegram\.bots\.(\d+)\.token$/,
-    ref: (m, ctx) => `telegram/bots/${ctx.telegramBotKeys?.[Number(m[1])] ?? m[1]}/token`,
+    // `webhookSecretToken` rides the same rule as `token` so it is keyed by the
+    // bot's stable botKey too — the catch-all below would key it by array index
+    // instead, and reordering the roster would then point two bots at one ref.
+    re: /^telegram\.bots\.(\d+)\.(token|webhookSecretToken)$/,
+    ref: (m, ctx) => `telegram/bots/${ctx.telegramBotKeys?.[Number(m[1])] ?? m[1]}/${m[2]}`,
   },
   {
     re: /^slack\.apps\.(\d+)\.(botToken|appToken|signingSecret)$/,
@@ -375,15 +378,88 @@ export interface TelegramBotConfig {
   token: string;
   bind: BotBinding;
   piiRedaction?: boolean;
+  /**
+   * Receive updates over an inbound webhook instead of long-polling.
+   * Default `false` — long-poll, exactly today's behaviour.
+   *
+   * The four fields below mirror `TelegramAdapterConfig`'s already-implemented
+   * field names 1:1 (`extensions/platform-telegram/src/index.ts`) on purpose:
+   * they are passed straight through at the one construction site, with no
+   * translation layer (plan/phases/telegram-slack-webhook-mode.md §2a).
+   */
+  useWebhook?: boolean;
+  /**
+   * Full public URL Telegram POSTs updates to — INCLUDING the
+   * `/telegram/webhook/<botKey>` path segment, since the host server routes
+   * on that path in multi-bot deployments (§7, §8). Required when
+   * `useWebhook` is true.
+   */
+  webhookUrl?: string;
+  /**
+   * Shared secret Telegram echoes in `X-Telegram-Bot-Api-Secret-Token`.
+   * Required when `useWebhook` is true. Validated by grammy inside
+   * `webhookCallback` — no verification code lives here.
+   *
+   * The adapter already throws when `useWebhook` is set without `webhookUrl`
+   * or `webhookSecretToken`, so this layer only passes the values through and
+   * deliberately does not duplicate that validation (§2a).
+   *
+   * A credential: treated exactly like `token` by the secret externalizer, so
+   * it can be supplied as `${secrets:<ref>}` and never reaches disk in
+   * cleartext.
+   */
+  webhookSecretToken?: string;
+  /**
+   * Discard updates Telegram queued while the process was down. Default
+   * `true`, preserving the literal that used to be hardcoded at the call site.
+   *
+   * Only affects POLL-mode bots: grammy's `bot.start()` calls
+   * `deleteWebhook({ drop_pending_updates })` on every invocation, so every
+   * restart drops the backlog. In webhook mode `bot.start()` is never called
+   * and this flag does nothing. A bot that stays on poll mode under a
+   * sleep/wake deployment should set this `false`, so a restart after a sleep
+   * window does not wipe the backlog Telegram queued while the process was
+   * paused (§6).
+   */
+  dropPendingUpdates?: boolean;
 }
 
 export interface SlackAppConfig {
   id?: string;
   botToken: string;
-  appToken: string;
+  /**
+   * Socket-Mode app-level token. Optional: required only when `mode.socket`
+   * is in effect (which is the default). HTTP-mode apps have no Socket-Mode
+   * connection and therefore no app token. Enforcement lives in the adapter,
+   * not here (§8).
+   */
+  appToken?: string;
   signingSecret: string;
   bind: BotBinding;
   piiRedaction?: boolean;
+  /**
+   * Inbound transport. Absent = today's behaviour: Socket Mode.
+   *
+   * Shape borrowed from `cron`'s `trigger: { local, external }` block, the
+   * convention this file already establishes for an additive boolean pair
+   * (§3b). DELIBERATE DIVERGENCE from that precedent: cron permits both at
+   * once (a documented hybrid/dev profile). This does not. Socket Mode and
+   * HTTP Events are two transports for the SAME inbound event stream —
+   * Slack's own dashboard treats them as alternatives, and there is no reason
+   * to receive every event twice. The adapter throws when both are `true`;
+   * this layer only records what the operator wrote.
+   */
+  mode?: {
+    /** Connect over Socket Mode. Default `true`. Requires `appToken`. */
+    socket?: boolean;
+    /** Receive Events API deliveries over inbound HTTP. Default `false`. */
+    http?: boolean;
+  };
+  /**
+   * Route segment this app's HTTP receiver is mounted at, under
+   * `/slack/events/`. Absent = the app's botKey. HTTP mode only.
+   */
+  webhookPath?: string;
   /** Channel mode for channels with no per-channel override. Absent = the
    *  adapter's own default (`mention_only`). */
   defaultChannelMode?: 'mention_only' | 'thread_follow' | 'all';
@@ -1065,6 +1141,15 @@ export interface EthosConfig {
    */
   requestTimeoutMs?: number;
   /**
+   * Operator-tunable approval SLA, in milliseconds — how long a dangerous
+   * tool call may sit waiting for a human Allow/Deny before it is
+   * auto-denied. Absent → each approval store's own 10-minute default
+   * (gateway `ApprovalCoordinator`, web-api `ApprovalsService`). `0` means
+   * no timeout at all — the call waits forever. Flat-key shape:
+   *   approvalTimeoutMs: 1800000
+   */
+  approvalTimeoutMs?: number;
+  /**
    * Lane 4a(d) — retry count for the OpenAI-compat client. Absent → the
    * OpenAI SDK default (2 retries). Flat-key shape:
    *   maxRetries: 0
@@ -1726,6 +1811,66 @@ export interface EthosConfig {
     boardPath?: string;
   };
   /**
+   * Idle watcher: aggregates every subsystem's busy state into one answer so a
+   * scale-to-zero host (Firecracker-style microVMs that pause between
+   * messages) can be told "nothing is in flight, it is safe to stop this VM".
+   *
+   * An operator/deployment concern, NOT personality identity — two deployments
+   * of the same personality trivially disagree about it (a laptop `pnpm dev`
+   * wants it off, a hosted microVM wants it on), so it lives here rather than
+   * on `PersonalityConfig`.
+   *
+   * `enabled` defaults to `false`: this must never activate by omission, since
+   * an unarmed-but-wrong watcher exits a process mid-work. There is
+   * deliberately NO key for the manager's instrumentation-gap check — that gate
+   * is hard-coded, because letting an operator override it reintroduces the
+   * silent-data-loss risk it exists to prevent.
+   *
+   * Config format:
+   *   idleWatcher.enabled: false
+   *   idleWatcher.idleThresholdMs: 120000
+   *   idleWatcher.startupCooldownMs: 30000
+   *   idleWatcher.checkIntervalMs: 15000
+   *   idleWatcher.wakePathConfirmed: false
+   */
+  idleWatcher?: {
+    /** Arming gate 1. Default false — the watcher is not even constructed. */
+    enabled?: boolean;
+    /** Arming gate 5 — consecutive idle duration required before exit fires. */
+    idleThresholdMs?: number;
+    /** Arming gate 4 — no evaluation for this long after boot. */
+    startupCooldownMs?: number;
+    /** How often the idle predicate is sampled. */
+    checkIntervalMs?: number;
+    /** Arming gate 3 — operator attestation that a wake path exists. */
+    wakePathConfirmed?: boolean;
+  };
+  /**
+   * Pause-clock correction (plan/phases/clock-tolerance-pass.md §7) — the
+   * resume-side twin of `idleWatcher`. On a snapshotting host the guest's wall
+   * clock does not advance while the VM is paused, so on resume every staleness
+   * gate (job-store `reclaimStale`, kanban heartbeats, the delivery ledger's
+   * abandon window) reads the pause as downtime. When enabled, the process runs
+   * a clock-drift detector and boot reconciliation discounts the detected pause
+   * from those gates.
+   *
+   * An operator/deployment concern, NOT personality identity — two deployments
+   * of the same personality trivially disagree about it — so it lives here and
+   * has no personality-facing key.
+   *
+   * Config format:
+   *   pauseClockCorrection.enabled: false
+   *   pauseClockCorrection.thresholdMs: 60000
+   */
+  pauseClockCorrection?: {
+    /** Default false — every non-snapshotting deployment (bare metal, docker,
+     *  `pnpm dev`) has no pause to discount. */
+    enabled?: boolean;
+    /** Wall-clock jump, in ms, above which a tick is treated as a resume rather
+     *  than scheduler slack. Default 60_000. */
+    thresholdMs?: number;
+  };
+  /**
    * Export/observability targets (analytics-observability plan, Part E).
    * Currently one leaf: Langfuse. Off by default.
    *
@@ -1829,6 +1974,11 @@ async function externalizeConfigSecrets(
       bots.push({
         ...bot,
         token: await externalizeSecret(bot.token, ref(`telegram.bots.${i}.token`), secrets),
+        webhookSecretToken: await externalizeSecret(
+          bot.webhookSecretToken,
+          ref(`telegram.bots.${i}.webhookSecretToken`),
+          secrets,
+        ),
       });
     }
     r.telegram = { ...r.telegram, bots };
@@ -2044,6 +2194,8 @@ export async function writeConfig(
   if (config.toolOrder !== undefined) lines.push(`toolOrder: ${config.toolOrder}`);
   if (config.requestTimeoutMs !== undefined)
     lines.push(`requestTimeoutMs: ${config.requestTimeoutMs}`);
+  if (config.approvalTimeoutMs !== undefined)
+    lines.push(`approvalTimeoutMs: ${config.approvalTimeoutMs}`);
   if (config.maxRetries !== undefined) lines.push(`maxRetries: ${config.maxRetries}`);
   if (config.toolPayloadLimitChars !== undefined)
     lines.push(`toolPayloadLimitChars: ${config.toolPayloadLimitChars}`);
@@ -2183,13 +2335,23 @@ export async function writeConfig(
       if (bot.bind.allowSlashSwitch) {
         lines.push(`telegram.bots.${i}.bind.allowSlashSwitch: true`);
       }
+      if (bot.useWebhook !== undefined) {
+        lines.push(`telegram.bots.${i}.useWebhook: ${bot.useWebhook}`);
+      }
+      if (bot.webhookUrl) lines.push(`telegram.bots.${i}.webhookUrl: ${bot.webhookUrl}`);
+      if (bot.webhookSecretToken) {
+        lines.push(`telegram.bots.${i}.webhookSecretToken: ${bot.webhookSecretToken}`);
+      }
+      if (bot.dropPendingUpdates !== undefined) {
+        lines.push(`telegram.bots.${i}.dropPendingUpdates: ${bot.dropPendingUpdates}`);
+      }
     }
   }
   if (config.slack?.apps.length) {
     for (const [i, app] of config.slack.apps.entries()) {
       if (app.id) lines.push(`slack.apps.${i}.id: ${app.id}`);
       lines.push(`slack.apps.${i}.botToken: ${app.botToken}`);
-      lines.push(`slack.apps.${i}.appToken: ${app.appToken}`);
+      if (app.appToken) lines.push(`slack.apps.${i}.appToken: ${app.appToken}`);
       lines.push(`slack.apps.${i}.signingSecret: ${app.signingSecret}`);
       lines.push(`slack.apps.${i}.bind.type: ${app.bind.type}`);
       lines.push(`slack.apps.${i}.bind.name: ${app.bind.name}`);
@@ -2211,6 +2373,13 @@ export async function writeConfig(
       if (app.longReplyThresholdChars !== undefined) {
         lines.push(`slack.apps.${i}.longReplyThresholdChars: ${app.longReplyThresholdChars}`);
       }
+      if (app.mode?.socket !== undefined) {
+        lines.push(`slack.apps.${i}.mode.socket: ${app.mode.socket}`);
+      }
+      if (app.mode?.http !== undefined) {
+        lines.push(`slack.apps.${i}.mode.http: ${app.mode.http}`);
+      }
+      if (app.webhookPath) lines.push(`slack.apps.${i}.webhookPath: ${app.webhookPath}`);
     }
   }
   if (config.whatsapp?.length) {
@@ -2571,6 +2740,24 @@ export async function writeConfig(
     if (config.kanbanPoll.boardPath !== undefined)
       lines.push(`kanbanPoll.boardPath: ${config.kanbanPoll.boardPath}`);
   }
+  if (config.idleWatcher) {
+    const iw = config.idleWatcher;
+    if (iw.enabled !== undefined) lines.push(`idleWatcher.enabled: ${iw.enabled}`);
+    if (iw.idleThresholdMs !== undefined)
+      lines.push(`idleWatcher.idleThresholdMs: ${iw.idleThresholdMs}`);
+    if (iw.startupCooldownMs !== undefined)
+      lines.push(`idleWatcher.startupCooldownMs: ${iw.startupCooldownMs}`);
+    if (iw.checkIntervalMs !== undefined)
+      lines.push(`idleWatcher.checkIntervalMs: ${iw.checkIntervalMs}`);
+    if (iw.wakePathConfirmed !== undefined)
+      lines.push(`idleWatcher.wakePathConfirmed: ${iw.wakePathConfirmed}`);
+  }
+  if (config.pauseClockCorrection) {
+    const pcc = config.pauseClockCorrection;
+    if (pcc.enabled !== undefined) lines.push(`pauseClockCorrection.enabled: ${pcc.enabled}`);
+    if (pcc.thresholdMs !== undefined)
+      lines.push(`pauseClockCorrection.thresholdMs: ${pcc.thresholdMs}`);
+  }
   if (config.telemetry?.export?.langfuse) {
     const lf = config.telemetry.export.langfuse;
     if (lf.enabled !== undefined) lines.push(`telemetry.export.langfuse.enabled: ${lf.enabled}`);
@@ -2610,6 +2797,9 @@ export async function resolveConfigSecrets(
         r.telegram.bots.map(async (bot) => ({
           ...bot,
           token: await resolveSecretValue(bot.token, secrets),
+          ...(bot.webhookSecretToken !== undefined
+            ? { webhookSecretToken: await resolveSecretValue(bot.webhookSecretToken, secrets) }
+            : {}),
         })),
       ),
     };
@@ -2621,7 +2811,11 @@ export async function resolveConfigSecrets(
         r.slack.apps.map(async (app) => ({
           ...app,
           botToken: await resolveSecretValue(app.botToken, secrets),
-          appToken: await resolveSecretValue(app.appToken, secrets),
+          // `appToken` is optional now (HTTP-mode apps have none), so it is
+          // only resolved when present.
+          ...(app.appToken !== undefined
+            ? { appToken: await resolveSecretValue(app.appToken, secrets) }
+            : {}),
           signingSecret: await resolveSecretValue(app.signingSecret, secrets),
         })),
       ),
@@ -2780,6 +2974,10 @@ function parseConfigYaml(src: string): EthosConfig {
   const callCaptureKv: Record<string, string> = {};
   // Phase 3 — memoryConsolidation.<field>: <value> (silent flush config).
   const memoryConsolidationKv: Record<string, string> = {};
+  // Scale-to-zero idle watcher — idleWatcher.<field>: <value>.
+  const idleWatcherKv: Record<string, string> = {};
+  // Resume-side clock correction — pauseClockCorrection.<field>: <value>.
+  const pauseClockCorrectionKv: Record<string, string> = {};
   const logsRotationKv: Record<string, string> = {};
   const awsSecretsKv: Record<string, string> = {};
   const telemetryLangfuseKv: Record<string, string> = {};
@@ -3407,6 +3605,20 @@ function parseConfigYaml(src: string): EthosConfig {
       kv[`kanbanPoll.${kp[1]}`] = kp[2].trim().replace(/^["']|["']$/g, '');
       continue;
     }
+    // idleWatcher.<field>: <value>  (scale-to-zero watcher; default OFF).
+    const iw = line.match(
+      /^idleWatcher\.(enabled|idleThresholdMs|startupCooldownMs|checkIntervalMs|wakePathConfirmed):\s*(.+)$/,
+    );
+    if (iw) {
+      idleWatcherKv[iw[1]] = iw[2].trim().replace(/^["']|["']$/g, '');
+      continue;
+    }
+    // pauseClockCorrection.<field>: <value>  (resume clock correction; default OFF).
+    const pcc = line.match(/^pauseClockCorrection\.(enabled|thresholdMs):\s*(.+)$/);
+    if (pcc) {
+      pauseClockCorrectionKv[pcc[1]] = pcc[2].trim().replace(/^["']|["']$/g, '');
+      continue;
+    }
     // memoryCapture.<field>: <value>
     const mcap = line.match(/^memoryCapture\.(\w+):\s*(.+)$/);
     if (mcap) {
@@ -3551,6 +3763,8 @@ function parseConfigYaml(src: string): EthosConfig {
     ? { personalityId: callCaptureKv.personalityId }
     : undefined;
   const memoryConsolidation = buildMemoryConsolidation(memoryConsolidationKv);
+  const idleWatcher = buildIdleWatcher(idleWatcherKv);
+  const pauseClockCorrection = buildPauseClockCorrection(pauseClockCorrectionKv);
   const parsedMaxBytes = logsRotationKv.maxBytes ? Number(logsRotationKv.maxBytes) : undefined;
   const parsedMaxFiles = logsRotationKv.maxFiles ? Number(logsRotationKv.maxFiles) : undefined;
   const logsRotation =
@@ -3760,9 +3974,26 @@ function parseConfigYaml(src: string): EthosConfig {
       const n = Number(kv.requestTimeoutMs);
       return Number.isFinite(n) && n > 0 ? Math.floor(n) : undefined;
     })(),
+    // An approval SLA is a non-negative integer millisecond count. Unlike
+    // `requestTimeoutMs`, `0` is MEANINGFUL here ("no timeout, wait forever")
+    // rather than a typo — only negatives and non-numbers are dropped.
+    approvalTimeoutMs: (() => {
+      const raw = kv.approvalTimeoutMs;
+      // An empty or blank value (`approvalTimeoutMs: ""`, or a bare key with
+      // trailing whitespace) is a typo, not an intentional `0` — and
+      // `Number('')` is `0`, which would silently disable the auto-deny
+      // backstop. Treat it as absent so the store default applies.
+      if (raw === undefined || raw.trim() === '') return undefined;
+      const n = Number(raw);
+      return Number.isFinite(n) && n >= 0 ? Math.floor(n) : undefined;
+    })(),
     maxRetries: (() => {
-      if (kv.maxRetries === undefined) return undefined;
-      const n = Number(kv.maxRetries);
+      const raw = kv.maxRetries;
+      // Same empty-value hazard as `approvalTimeoutMs`: `0` is meaningful
+      // ("never retry"), so `Number('') === 0` would silently turn retries off
+      // on a typo instead of falling through to the provider default.
+      if (raw === undefined || raw.trim() === '') return undefined;
+      const n = Number(raw);
       return Number.isInteger(n) && n >= 0 ? n : undefined;
     })(),
     // Lane 3(a) — a payload limit is a positive integer char count; anything
@@ -3915,6 +4146,8 @@ function parseConfigYaml(src: string): EthosConfig {
             ...(kv['kanbanPoll.boardPath'] ? { boardPath: kv['kanbanPoll.boardPath'] } : {}),
           }
         : undefined,
+    idleWatcher,
+    pauseClockCorrection,
   };
   // Stash parse errors so the strict loader can surface them at boot.
   // readRawConfig (used by CLI commands that don't gateway-boot) ignores them
@@ -3992,6 +4225,7 @@ const SECRET_FIELD_NAMES = new Set([
   'signingSecret',
   'password',
   'webhookSecret',
+  'webhookSecretToken',
   'emailPassword',
   'discordToken',
   'slackBotToken',
@@ -4633,7 +4867,21 @@ function buildTelegramBots(kv: Record<number, Record<string, string>>): {
       continue;
     }
     if (!result.bind) continue;
-    bots.push({ token: entry.token, bind: result.bind, ...(entry.id ? { id: entry.id } : {}) });
+    const bot: TelegramBotConfig = {
+      token: entry.token,
+      bind: result.bind,
+      ...(entry.id ? { id: entry.id } : {}),
+    };
+    // Presence, not truthiness: `dropPendingUpdates: false` must survive as
+    // boolean `false` rather than collapsing into "absent" (which means "let
+    // the adapter's `?? true` default apply").
+    if (entry.useWebhook !== undefined) bot.useWebhook = entry.useWebhook === 'true';
+    if (entry.webhookUrl) bot.webhookUrl = entry.webhookUrl;
+    if (entry.webhookSecretToken) bot.webhookSecretToken = entry.webhookSecretToken;
+    if (entry.dropPendingUpdates !== undefined) {
+      bot.dropPendingUpdates = entry.dropPendingUpdates === 'true';
+    }
+    bots.push(bot);
   }
   return { bots, errors };
 }
@@ -4648,7 +4896,9 @@ function buildSlackApps(kv: Record<number, Record<string, string>>): {
     const entry = kv[idx];
     if (!entry) continue;
     const label = `slack.apps[${idx}]`;
-    const missing = (['botToken', 'appToken', 'signingSecret'] as const).filter((k) => !entry[k]);
+    // `appToken` is NOT required here: it is needed only in Socket Mode, and
+    // that is enforced by the adapter, which knows the resolved mode (§8).
+    const missing = (['botToken', 'signingSecret'] as const).filter((k) => !entry[k]);
     if (missing.length > 0) {
       errors.push(`${label}: missing required field(s) ${missing.join(', ')}.`);
       continue;
@@ -4661,10 +4911,10 @@ function buildSlackApps(kv: Record<number, Record<string, string>>): {
     if (!result.bind) continue;
     const app: SlackAppConfig = {
       botToken: entry.botToken,
-      appToken: entry.appToken,
       signingSecret: entry.signingSecret,
       bind: result.bind,
       ...(entry.id ? { id: entry.id } : {}),
+      ...(entry.appToken ? { appToken: entry.appToken } : {}),
     };
     const mode = entry.defaultChannelMode;
     if (mode) {
@@ -4701,6 +4951,14 @@ function buildSlackApps(kv: Record<number, Record<string, string>>): {
       }
       app.longReplyThresholdChars = threshold;
     }
+    // `mode.socket` / `mode.http` arrive as flat `mode.<field>` keys, the same
+    // way `bind.<field>` does. Absent = undefined, so the adapter's defaults
+    // (socket on, http off) apply and today's behaviour is unchanged.
+    const transport: NonNullable<SlackAppConfig['mode']> = {};
+    if (entry['mode.socket'] !== undefined) transport.socket = entry['mode.socket'] === 'true';
+    if (entry['mode.http'] !== undefined) transport.http = entry['mode.http'] === 'true';
+    if (Object.keys(transport).length > 0) app.mode = transport;
+    if (entry.webhookPath) app.webhookPath = entry.webhookPath;
     apps.push(app);
   }
   return { apps, errors };
@@ -5346,6 +5604,55 @@ function buildMemoryConsolidation(
     if (raw === undefined) continue;
     const n = Number(raw);
     if (Number.isFinite(n) && n >= 0) result[key] = Math.floor(n);
+  }
+  return Object.keys(result).length > 0 ? result : undefined;
+}
+
+/**
+ * Assemble the scale-to-zero idle-watcher config from parsed flat keys.
+ * Returns `undefined` when nothing survives, so the watcher stays off.
+ *
+ * Both booleans are parsed STRICTLY — only a literal `true` is true. A typo
+ * must never arm the watcher, and `wakePathConfirmed` is an operator
+ * attestation, not a guess.
+ *
+ * The three `*Ms` keys require a POSITIVE integer. A blank value
+ * (`idleThresholdMs: ""`, or a key whose value is only whitespace) is a typo,
+ * and `Number('')` is `0` — which here would mean a zero-length idle threshold
+ * or a zero cooldown, i.e. exit on the first sample. Treat blank as absent so
+ * the manager default applies. (Unlike `approvalTimeoutMs`, `0` is meaningless
+ * for all three, so it is rejected rather than honoured.)
+ */
+function buildIdleWatcher(kv: Record<string, string>): EthosConfig['idleWatcher'] | undefined {
+  const result: NonNullable<EthosConfig['idleWatcher']> = {};
+  if (kv.enabled !== undefined) result.enabled = kv.enabled === 'true';
+  if (kv.wakePathConfirmed !== undefined)
+    result.wakePathConfirmed = kv.wakePathConfirmed === 'true';
+  for (const key of ['idleThresholdMs', 'startupCooldownMs', 'checkIntervalMs'] as const) {
+    const raw = kv[key];
+    if (raw === undefined || raw.trim() === '') continue;
+    const n = Number(raw);
+    if (Number.isInteger(n) && n > 0) result[key] = n;
+  }
+  return Object.keys(result).length > 0 ? result : undefined;
+}
+
+/**
+ * Parse `pauseClockCorrection.<field>` (plan/phases/clock-tolerance-pass.md §7).
+ * Returns undefined when the section is absent so `enabled` stays false by
+ * omission — an absent section must mean today's behaviour, byte for byte.
+ * A blank or non-positive `thresholdMs` is treated as absent so the detector's
+ * own default applies, the same hazard `buildIdleWatcher` guards against.
+ */
+function buildPauseClockCorrection(
+  kv: Record<string, string>,
+): EthosConfig['pauseClockCorrection'] | undefined {
+  const result: NonNullable<EthosConfig['pauseClockCorrection']> = {};
+  if (kv.enabled !== undefined) result.enabled = kv.enabled === 'true';
+  const raw = kv.thresholdMs;
+  if (raw !== undefined && raw.trim() !== '') {
+    const n = Number(raw);
+    if (Number.isInteger(n) && n > 0) result.thresholdMs = n;
   }
   return Object.keys(result).length > 0 ? result : undefined;
 }

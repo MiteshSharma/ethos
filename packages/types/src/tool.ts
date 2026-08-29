@@ -263,6 +263,8 @@ export interface ToolSettingsSecretBindingField {
    */
   secretKind: string;
   required?: boolean;
+  /** When present, rendered as a help popover next to the field's label. */
+  helpText?: string;
 }
 
 export type ToolSettingsField = ToolSettingsEnumField | ToolSettingsSecretBindingField;

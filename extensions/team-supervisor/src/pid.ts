@@ -1,9 +1,17 @@
-import { closeSync, mkdirSync, openSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
-import { dirname } from 'node:path';
+import {
+  closeSync,
+  mkdirSync,
+  openSync,
+  readdirSync,
+  readFileSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs';
+import { dirname, join } from 'node:path';
 import { noopLogger } from '@ethosagent/logger';
 import type { Logger } from '@ethosagent/types';
 
-function isProcessAlive(pid: number): boolean {
+export function isProcessAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);
     return true;
@@ -80,4 +88,49 @@ export function acquirePidFile(pidPath: string, opts: { logger?: Logger } = {}):
       /* ignore */
     }
   };
+}
+
+/**
+ * Whether any team supervisor named by a PID file under `pidDir` is alive.
+ *
+ * Supervisors are spawned `detached: true` + `unref()`ed, so the launching
+ * process keeps no handle on them — the PID file written by `acquirePidFile`
+ * is the only signal there is. `pidDir` is the flat `~/.ethos/teams`
+ * directory (see `pidFilePath` in `./runtime`), which also holds
+ * `<name>.runtime.json`, so only `.pid` entries are considered.
+ *
+ * Boolean rather than a count, deliberately: the fail-awake rule below makes
+ * an unreadable PID file report busy without proving a process exists, so a
+ * number would claim a precision this cannot deliver. The only question ever
+ * asked of it is yes/no.
+ *
+ * Fail-awake. A MISSING `pidDir` means no team was ever started — a
+ * legitimate `false`. Everything else that goes wrong returns `true`: the
+ * directory exists but cannot be listed, a `.pid` file cannot be read, or its
+ * contents do not parse as a PID. An unreadable claim is not evidence of
+ * absence, and answering "idle" there would stop the process while a team is
+ * still running.
+ */
+export function hasLiveTeamProcesses(pidDir: string): boolean {
+  let entries: string[];
+  try {
+    entries = readdirSync(pidDir);
+  } catch (err) {
+    // ENOENT is the one benign failure: no teams directory, so no teams.
+    return (err as NodeJS.ErrnoException).code !== 'ENOENT';
+  }
+
+  for (const entry of entries) {
+    if (!entry.endsWith('.pid')) continue;
+    let raw: string;
+    try {
+      raw = readFileSync(join(pidDir, entry), 'utf-8');
+    } catch {
+      return true; // Unreadable, not absent.
+    }
+    const pid = Number(raw.trim());
+    if (!Number.isInteger(pid) || pid <= 0) return true; // Malformed, not absent.
+    if (isProcessAlive(pid)) return true;
+  }
+  return false;
 }

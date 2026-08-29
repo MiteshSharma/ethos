@@ -263,6 +263,25 @@ export class ChatService {
     return bridge.steer(text);
   }
 
+  /**
+   * Is any web-chat turn currently in flight? The busy predicate the idle
+   * watcher reads for this surface.
+   *
+   * It inspects each bridge's `isRunning` rather than `bridges.size` on
+   * purpose: `bridges` is keyed per session and LONG-LIVED — an entry is
+   * created on the session's first `send` and removed only by `forget`, so a
+   * non-empty map means "sessions exist", not "work is in flight". A size
+   * check would report this process permanently busy and the watcher would
+   * never suspend it. `AgentBridge.isRunning` is the real per-turn signal
+   * (its `controller` is non-null only while a turn runs).
+   */
+  hasActiveBridges(): boolean {
+    for (const bridge of this.bridges.values()) {
+      if (bridge.isRunning) return true;
+    }
+    return false;
+  }
+
   // ---------------------------------------------------------------------------
   // SSE entry point
   // ---------------------------------------------------------------------------

@@ -145,6 +145,9 @@ function makeJobStore(): FakeJobStore {
     async countActiveByPersonality() {
       return 0;
     },
+    async countActive() {
+      return 0;
+    },
     async reclaimStale() {
       return [];
     },

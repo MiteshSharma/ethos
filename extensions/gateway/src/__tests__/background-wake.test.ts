@@ -143,6 +143,9 @@ class FakeJobStore implements JobStore {
   async countActiveByPersonality(): Promise<number> {
     return 0;
   }
+  async countActive(): Promise<number> {
+    return 0;
+  }
   async reclaimStale(): Promise<BackgroundJob[]> {
     return [];
   }

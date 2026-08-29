@@ -243,6 +243,7 @@ Slack rotates the WebSocket; Bolt reconnects automatically. Persistent flapping 
 
 ## See also
 
+- [Receive Slack and Telegram events over webhooks](../using/how-to/run-channels-over-webhooks.md) — swap Socket Mode for the HTTP Events API, including the manual Request URL step.
 - [Telegram adapter](telegram.md) — long-polling adapter sharing the same gateway boundary.
 - [Discord adapter](discord.md) — guild and DM routing.
 - [Send and receive voice notes on a channel](../using/how-to/voice-notes-on-channels.md) — Slack transcribes audio uploads and can reply with a spoken file.

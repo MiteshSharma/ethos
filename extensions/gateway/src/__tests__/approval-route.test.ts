@@ -182,3 +182,27 @@ describe('Gateway.resolveApprovalRoute', () => {
     await Promise.all([turnA, turnB]);
   });
 });
+
+describe('Gateway.hasActiveTurns', () => {
+  it('is false when idle, true during a turn, and false again once it ends', async () => {
+    const { loop, endTurn, turnStarted } = makeFakeLoop();
+    const adapter = makeFakeAdapter();
+    const gateway = new Gateway({
+      bots: [{ botKey: 'bot-1', loop, binding: { type: 'personality', name: 'p' } }],
+    });
+
+    expect(gateway.hasActiveTurns()).toBe(false);
+
+    const laneKey = 'slack:bot-1:C123';
+    const started = turnStarted(laneKey);
+    const turn = gateway.handleMessage(inbound(), adapter);
+    await started;
+
+    expect(gateway.hasActiveTurns()).toBe(true);
+
+    endTurn(laneKey);
+    await turn;
+
+    expect(gateway.hasActiveTurns()).toBe(false);
+  });
+});
