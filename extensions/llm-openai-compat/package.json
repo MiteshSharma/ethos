@@ -17,6 +17,6 @@
     "@ethosagent/plugin-sdk": "workspace:*",
     "@ethosagent/pricing": "workspace:*",
     "@ethosagent/types": "workspace:*",
-    "openai": "^6.48.0"
+    "openai": "^7.5.0"
   }
 }
