@@ -29,3 +29,6 @@ overrides:
   # TS 7 (native compiler) breaks rollup-plugin-dts inside tsup — pin the whole graph
   # to v6 so auto-installed peers (e.g. packages/safety/redact's local tsup) can't pull 7.
   "typescript": "^6.0.0"
+  # @xenova/transformers pulls sharp@0.32.6, which depends on the deprecated
+  # prebuild-install; force the graph onto 0.34.x (already resolved elsewhere) instead.
+  "sharp": "^0.34.0"
