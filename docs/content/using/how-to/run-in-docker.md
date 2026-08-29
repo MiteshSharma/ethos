@@ -5,7 +5,7 @@ kind: how-to
 audience: user
 slug: run-in-docker
 time: 10 min
-updated: 2026-08-14
+updated: 2026-08-29
 ---
 
 Run Ethos via Docker Compose. Set one provider API key, run one command, and get a web UI you can talk to. Config is provisioned by the CLI (`ethos setup --from-env`), which validates your key before writing it — no interactive setup, no hand-edited YAML.
@@ -34,13 +34,17 @@ echo "ANTHROPIC_API_KEY=sk-ant-…" > docker/.env
 docker compose -f docker/docker-compose.single.yml up
 ```
 
-Watch for the final line from the boot output:
+Watch for two lines in the boot output: `✓ Config validated` from provisioning, then an `open:` line printed shortly after by the `serve` sub-process.
 
 ```
 ✓ Config validated — web UI: http://localhost:3000
+...
+  open: http://localhost:3000/auth/exchange?t=<token>
 ```
 
-Open `http://localhost:3000`. The SPA lands directly in chat — the key from `.env` is already validated and written, so you are never re-asked for it. Type a message and the first reply streams back.
+Open that `auth/exchange` URL first, not the bare `http://localhost:3000`. `docker-compose.single.yml` binds the web server to `0.0.0.0`, which marks the auth cookie `Secure` — the browser can only get it by exchanging the token. This is one-time: the exchange sets the cookie and redirects to `/`, and the bare URL works on every visit after that as long as the volume and cookie aren't cleared.
+
+The provider key from `.env` is never re-asked once validated and written — but that's separate from the token exchange above, which is still required on the first visit. Type a message and the first reply streams back.
 
 At boot the entrypoint runs `ethos setup --from-env` (gated by `ETHOS_PROVISION_FROM_ENV=1`): it validates the provider key, writes `config.yaml` into the volume once, and re-syncs secrets from `.env` on every restart. A rejected key (401) stops the boot with an actionable final line — for example `ANTHROPIC_API_KEY rejected (401) — check the key in .env and re-run docker compose up`.
 
@@ -144,6 +148,8 @@ See [config.yaml reference](../reference/config-yaml.md) for every supported fie
 ## Advanced: manual docker run
 
 If you prefer not to use Compose, run the image directly. Both services bind to `127.0.0.1` inside the container by default, so you must set `ETHOS_WEB_HOST=0.0.0.0` (web dashboard, port 3000) and `ETHOS_SERVE_HOST=0.0.0.0` (the `run-all` health server, port 3004) for `-p` to reach them from the host.
+
+That non-loopback bind means the same first-visit token-exchange step from [Quick start](#quick-start-single-service) applies here too — watch `docker logs ethos` for the `open: http://localhost:3000/auth/exchange?t=<token>` line and visit that URL before the bare one.
 
 ### Option A — run the published image (recommended)
 
@@ -261,6 +267,8 @@ To wrap this as a Helm chart, move the per-environment values (provider, model, 
 **Telegram bot is silent.** Inspect `docker logs ethos` for adapter errors. The most common cause is a malformed token in `.env` — the value should have the form `<digits>:<base64-ish>` and the `botKey` suffix (if any) must match the one used in `config.yaml`.
 
 **Permission denied writing to the volume.** The mounted host directory must be owned by uid 1000. `sudo chown -R 1000:1000 ~/ethos-data` fixes this.
+
+**Web UI loads but API calls return 401 Unauthorized.** You opened the bare `http://localhost:3000` before ever visiting the `open: .../auth/exchange?t=<token>` URL from the boot output. Open that exact URL once — it sets the auth cookie — then the bare URL works normally on subsequent visits.
 
 ## See also
 
