@@ -33,11 +33,9 @@ describe('validateCallCaptureBinding', () => {
     ).not.toThrow();
   });
 
-  it('throws when exactly one personality holds the capability but no config is set', () => {
+  it('is a no-op when exactly one personality holds the capability but no config is set — the capability stays inactive until the operator opts in', () => {
     const personalities = [personality('receptionist', ['call_capture'])];
-    expect(() => validateCallCaptureBinding(personalities, undefined)).toThrow(
-      CallCaptureBindingError,
-    );
+    expect(() => validateCallCaptureBinding(personalities, undefined)).not.toThrow();
   });
 
   it('throws when two or more personalities hold the capability, even if config matches one', () => {

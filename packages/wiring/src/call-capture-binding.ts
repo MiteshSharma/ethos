@@ -13,7 +13,11 @@ const CALL_CAPTURE_TOOLSET = 'call_capture';
  *
  * A deployment that uses neither the capability nor the config key is a
  * no-op — call-capture is opt-in, and forcing every deployment without it to
- * validate would fail closed on a feature nobody turned on.
+ * validate would fail closed on a feature nobody turned on. The same applies
+ * when exactly one personality declares the capability but the operator
+ * hasn't opted in via `callCapture.personalityId` yet: the capability stays
+ * inactive until they do, rather than crashing every deployment that ships
+ * a capability-declaring built-in personality.
  */
 export function validateCallCaptureBinding(
   personalities: PersonalityConfig[],
@@ -32,12 +36,7 @@ export function validateCallCaptureBinding(
     );
   }
 
-  if (holders.length === 1 && configuredId === undefined) {
-    throw new CallCaptureBindingError(
-      `personality '${holders[0]?.id ?? 'unknown'}' declares the call_capture toolset ` +
-        `capability but callCapture.personalityId is unset`,
-    );
-  }
+  if (holders.length === 1 && configuredId === undefined) return;
 
   if (configuredId !== undefined && !holders.some((p) => p.id === configuredId)) {
     throw new CallCaptureBindingError(
