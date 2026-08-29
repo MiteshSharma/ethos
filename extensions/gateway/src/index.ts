@@ -1257,18 +1257,29 @@ export class Gateway {
     if (this.dedupWindow <= 0 || !message.messageId) return false;
     const key = buildLaneKey(message.platform, botKey, message.chatId, message.messageId);
     if (this.seenMessages.has(key)) return true;
+    // `Set` miss. The durable layer records the sighting and reports whether it
+    // had already seen this key — from this process or a previous one.
+    //
+    // DURABLE FIRST, THEN THE SET, AND THAT ORDER IS LOAD-BEARING. `seen()` is a
+    // synchronous SQLite write and can throw (lock contention past the busy
+    // timeout, a corrupt or unwritable file). Recording the key in memory first
+    // meant a throw left the process holding a sighting that was never durably
+    // stored: this delivery fails, and then every platform retry for the rest of
+    // the process's life short-circuits on `seenMessages.has(key)` above and is
+    // dropped as a duplicate. The retry is the platform's attempt to save the
+    // message the failure lost, and the poisoned entry is what silently
+    // discarded it. Letting the throw propagate with the Set untouched fails
+    // open instead: the retry is reprocessed.
+    const duplicate = this.inboundDedup
+      ? this.inboundDedup.seen(message.platform, botKey, message.chatId, message.messageId)
+      : false;
     this.seenMessages.add(key);
     // Bound the set — drop the oldest entry once we exceed the window.
     if (this.seenMessages.size > this.dedupWindow) {
       const first = this.seenMessages.values().next().value;
       if (first !== undefined) this.seenMessages.delete(first);
     }
-    // `Set` miss. The durable layer records the sighting and reports whether
-    // it had already seen this key — from this process or a previous one.
-    if (this.inboundDedup) {
-      return this.inboundDedup.seen(message.platform, botKey, message.chatId, message.messageId);
-    }
-    return false;
+    return duplicate;
   }
 
   // ---------------------------------------------------------------------------
@@ -3312,8 +3323,19 @@ export class Gateway {
    * On a snapshot-and-restore host the wall clock advances while the guest is
    * frozen. If the pause alone exceeds `abandonAfterDays`, the first
    * post-resume sweep abandons — and, for voice, DELETES the audio artifact of
-   * — an obligation that was never actually lost. Successive pauses
-   * accumulate. Non-positive or non-finite durations are a no-op.
+   * — an obligation that was never actually lost. Successive pauses accumulate
+   * until spent. Non-positive or non-finite durations are a no-op.
+   *
+   * SPENT ON THE FIRST SWEEP, NOT HELD FOREVER. The offset widens the abandon
+   * window for the sweep that follows the resume and is then zeroed. Holding it
+   * permanently would apply it to obligations CREATED AFTER the resume, whose
+   * `created_at` was stamped by an already-correct clock: a seven-day pause
+   * would silently grant every future obligation seven extra retention days,
+   * and repeated pauses would compound that without bound until nothing was
+   * ever abandoned. Plan §2's own wording for this gate is "the first
+   * post-resume sweep"; one-shot is what makes it match the self-limiting
+   * bump-forward the other gates use, where the correction lands on the stored
+   * timestamps of rows that already exist and cannot touch later ones.
    */
   applyPauseOffset(pauseDurationMs: number): void {
     if (!Number.isFinite(pauseDurationMs) || pauseDurationMs <= 0) return;
@@ -3344,7 +3366,11 @@ export class Gateway {
 
     let abandoned = 0;
     try {
+      // Read and SPEND in one step — see `applyPauseOffset`. Zeroed before the
+      // await, not after, so a sweep that throws still consumes it: a retained
+      // offset would re-widen every later sweep for the life of the process.
       const cutoff = Date.now() - opts.abandonAfterDays * 86_400_000 - this.pauseOffsetMs;
+      this.pauseOffsetMs = 0;
       // Ownership-filtered inside the ledger: a shared ledger file must never
       // let this deployment abandon a live peer's obligation.
       const rows = await ledger.abandonStale([...this.bots.keys()], cutoff);

@@ -132,6 +132,9 @@ export class PendingMemoryStore {
   private readonly now: () => number;
   /** Accumulated host-pause duration discounted from the TTL clock. */
   private pauseOffsetMs = 0;
+  /** Wall clock at the most recent `applyPauseOffset`. Entries proposed at or
+   *  after this were stamped by a correct clock and get no discount. */
+  private pauseBoundaryAt = 0;
 
   constructor(opts: PendingMemoryStoreOptions) {
     this.storage = opts.storage;
@@ -161,13 +164,25 @@ export class PendingMemoryStore {
    * forward: entries live in per-scope JSONL files and this store has no
    * scope-enumeration API, so rewriting them would require inventing one.
    * Shifting the cutoff by the same amount is arithmetically identical for
-   * every entry, needs no I/O, and cannot partially fail — the plan's stated
-   * intent, reached by the cheaper route. Successive pauses accumulate.
+   * every entry THAT EXISTED WHEN THE HOST PAUSED, needs no I/O, and cannot
+   * partially fail — the plan's stated intent, reached by the cheaper route.
+   * Successive pauses accumulate.
+   *
+   * BOUNDED BY THE RESUME BOUNDARY. The equivalence above holds only for
+   * entries the pause actually happened to. A candidate proposed AFTER the
+   * resume had its `proposedAt` stamped by an already-correct clock, so
+   * discounting the pause from its cutoff would hand it extra TTL it never
+   * lost — and successive pauses would compound that indefinitely, eventually
+   * meaning nothing ever expires. `pauseBoundaryAt` records when the discount
+   * was applied so `prune` can tell the two populations apart; that is what
+   * keeps this as self-limiting as the per-entry bump the plan describes.
+   *
    * Non-positive or non-finite durations are a no-op.
    */
   applyPauseOffset(pauseDurationMs: number): void {
     if (!Number.isFinite(pauseDurationMs) || pauseDurationMs <= 0) return;
     this.pauseOffsetMs += pauseDurationMs;
+    this.pauseBoundaryAt = this.now();
   }
 
   private async readAll(scopeId: string): Promise<PendingEntry[]> {
@@ -268,10 +283,14 @@ export class PendingMemoryStore {
    */
   private async prune(scopeId: string, entries: PendingEntry[]): Promise<PendingEntry[]> {
     if (this.ttlMs <= 0) return entries;
-    const cutoff = this.now() - this.ttlMs - this.pauseOffsetMs;
+    const baseCutoff = this.now() - this.ttlMs;
     const live: PendingEntry[] = [];
     const expired: PendingEntry[] = [];
     for (const e of entries) {
+      // Only entries that predate the resume lost time to the pause; see
+      // `applyPauseOffset` for why a blanket discount compounds without bound.
+      const cutoff =
+        e.proposedAt < this.pauseBoundaryAt ? baseCutoff - this.pauseOffsetMs : baseCutoff;
       if (e.proposedAt < cutoff) expired.push(e);
       else live.push(e);
     }

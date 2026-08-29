@@ -157,3 +157,38 @@ describe('Gateway — durable inbound dedup backstop', () => {
     expect(loop.run).toHaveBeenCalledTimes(2);
   });
 });
+
+// Codex review finding: the in-memory key was recorded BEFORE the durable
+// write. A throw from SQLite then left the process holding a sighting that was
+// never persisted, and every platform retry short-circuited on it — silently
+// discarding the message the retry existed to save.
+describe('a throwing durable store must not poison the in-memory Set', () => {
+  it('leaves the key unrecorded, so the retry is reprocessed rather than dropped', async () => {
+    const throwing: InboundDedupStore = {
+      seen: () => {
+        throw new Error('database is locked');
+      },
+      close: () => {},
+    };
+    const adapter = stubAdapter();
+    const loop = stubLoop();
+    const gateway = makeGateway(loop, { inboundDedup: throwing });
+
+    await expect(gateway.handleMessage(makeMessage(), adapter)).rejects.toThrow(
+      'database is locked',
+    );
+    expect(loop.run).not.toHaveBeenCalled();
+
+    // The platform retries into the SAME process. Recording the key before the
+    // durable call meant this hit the poisoned Set and vanished; now the
+    // durable layer is consulted again and the message gets its chance.
+    await expect(gateway.handleMessage(makeMessage(), adapter)).rejects.toThrow(
+      'database is locked',
+    );
+
+    // And once the store recovers, the retry is actually processed.
+    const healthy = makeGateway(loop, { inboundDedup: fakeStore() });
+    await healthy.handleMessage(makeMessage(), adapter);
+    expect(loop.run).toHaveBeenCalledTimes(1);
+  });
+});

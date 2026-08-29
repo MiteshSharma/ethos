@@ -120,3 +120,54 @@ describe('PendingMemoryStore.applyPauseOffset', () => {
     expect(await tombstones.has(SCOPE, 'h3')).toBe(true);
   });
 });
+
+// Codex review finding (same class as the Gateway's): a blanket cutoff shift is
+// only equivalent to the plan's per-entry bump for entries that EXISTED when
+// the host paused. Applied to candidates proposed after the resume it hands
+// them TTL they never lost, and successive pauses compound it without bound.
+describe('PendingMemoryStore.applyPauseOffset — bounded by the resume boundary', () => {
+  let storage: InMemoryStorage;
+  let tombstones: TombstoneStore;
+  let now: number;
+
+  beforeEach(() => {
+    storage = new InMemoryStorage();
+    tombstones = new TombstoneStore({ storage, dataDir: DATA_DIR });
+    now = 1_800_000_000_000;
+  });
+
+  function makeStore(): PendingMemoryStore {
+    return new PendingMemoryStore({
+      storage,
+      dataDir: DATA_DIR,
+      tombstones,
+      apply: async () => {},
+      ttlMs: TTL_MS,
+      now: () => now,
+    });
+  }
+
+  it('does not extend the TTL of a candidate proposed AFTER the resume', async () => {
+    const store = makeStore();
+
+    store.applyPauseOffset(7 * DAY_MS);
+    now += 1_000;
+    await store.propose(capture('after resume', 'h-after'));
+
+    // One full TTL later, with no further pause. Held unbounded, the week-long
+    // pause would have bought this candidate seven days it never lost.
+    now += TTL_MS + 1;
+    expect(await store.list(SCOPE)).toHaveLength(0);
+  });
+
+  it('still discounts the pause for a candidate that predates it', async () => {
+    const store = makeStore();
+
+    await store.propose(capture('before pause', 'h-before'));
+    now += TTL_MS - DAY_MS; // one day of TTL left...
+    now += 7 * DAY_MS; // ...then the host slept a week
+    store.applyPauseOffset(7 * DAY_MS);
+
+    expect(await store.list(SCOPE)).toHaveLength(1);
+  });
+});

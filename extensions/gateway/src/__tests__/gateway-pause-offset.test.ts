@@ -106,3 +106,38 @@ describe('Gateway.applyPauseOffset — abandonStale cutoff', () => {
     expect(cutoff).toBeLessThanOrEqual(after - 14 * DAY_MS);
   });
 });
+
+// Codex review finding: the offset was held forever and subtracted from EVERY
+// later sweep, so one long pause silently extended retention for obligations
+// created long after it, compounding with each pause until nothing was ever
+// abandoned. Plan §2 words this gate as "the first post-resume sweep".
+describe('Gateway.applyPauseOffset — spent on the first sweep, not held', () => {
+  const OPTS = { abandonAfterDays: 14, maxTotalMb: 100 };
+
+  it('does not widen the cutoff of a second sweep', async () => {
+    const { ledger, gateway } = harness();
+
+    gateway.applyPauseOffset(7 * DAY_MS);
+    await gateway.pruneVoiceArtifacts(OPTS);
+    await gateway.pruneVoiceArtifacts(OPTS);
+
+    expect(ledger.cutoffs).toHaveLength(2);
+    const [first, second] = ledger.cutoffs as [number, number];
+    // The second sweep is back to the plain 14-day window — a whole pause newer
+    // than the first. Held forever, the two would have been ~equal.
+    expect(second - first).toBeGreaterThan(7 * DAY_MS - 5_000);
+  });
+
+  it('re-widens after a NEW pause — the correction is not once-per-process', async () => {
+    const { ledger, gateway } = harness();
+
+    gateway.applyPauseOffset(DAY_MS);
+    await gateway.pruneVoiceArtifacts(OPTS);
+    await gateway.pruneVoiceArtifacts(OPTS);
+    gateway.applyPauseOffset(DAY_MS);
+    await gateway.pruneVoiceArtifacts(OPTS);
+
+    const [first, , third] = ledger.cutoffs as [number, number, number];
+    expect(Math.abs(third - first)).toBeLessThan(5_000);
+  });
+});
