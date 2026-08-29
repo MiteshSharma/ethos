@@ -67,6 +67,11 @@ export function createHealthServer(
     }
   });
   server.listen(port, host);
-  server.unref();
+  // Deliberately NOT unref'd: for gateway/serve/boot, every other handle
+  // (heartbeats, cron) is unref'd for clean shutdown, so with no platform
+  // adapter holding a socket this is the only thing keeping the process
+  // alive. unref'ing it too left nothing refed — Node force-exits (code 13,
+  // unfinished top-level await) the moment it goes idle. Callers still
+  // `.close()` this in their SIGINT/SIGTERM handlers, so shutdown stays clean.
   return server;
 }

@@ -1,5 +1,5 @@
-import type { Server } from 'node:http';
-import { afterEach, describe, expect, it } from 'vitest';
+import { Server } from 'node:http';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createHealthServer } from '../health-server';
 
 describe('createHealthServer', () => {
@@ -10,6 +10,21 @@ describe('createHealthServer', () => {
       server.close();
       server = null;
     }
+  });
+
+  // Regression: gateway/serve/boot rely on this server staying ref'd — it's
+  // the only thing keeping the process alive once every other timer
+  // (heartbeats, cron) is unref'd. unref'ing it too caused a crash-loop
+  // (Node exit code 13, unfinished top-level await) whenever no platform
+  // adapter held an open socket.
+  it('does not unref the listening server', async () => {
+    const unrefSpy = vi.spyOn(Server.prototype, 'unref');
+    server = createHealthServer(0, '127.0.0.1', () => ({ status: 'ok', uptime: 0 }));
+    const s = server;
+    if (!s) throw new Error('no server');
+    await new Promise<void>((resolve) => s.once('listening', resolve));
+    expect(unrefSpy).not.toHaveBeenCalled();
+    unrefSpy.mockRestore();
   });
 
   it('returns 200 with ok status', async () => {
