@@ -65,6 +65,7 @@ describe('buildGatewayBusySources', () => {
     approvalFlow: { pendingCount: () => 0 },
     webhookServer: { inFlightSyncRequests: () => 0 },
     cronScheduler: { hasRunningJobs: () => Promise.resolve(false) },
+    callCaptureActive: undefined,
     teamsPidDir,
   });
 
@@ -188,6 +189,23 @@ describe('buildGatewayBusySources', () => {
       await expect(source.checkBusy(), source.name).resolves.toBeDefined();
     }
   });
+
+  // Plan §1 check #13 — the call-capture mid-session signal that used to not
+  // exist, now sourced from `CallCaptureDaemon.onStateChange`.
+  it('skips the call-capture source entirely when no daemon is constructed', () => {
+    const sources = buildGatewayBusySources({ ...idleDeps(), callCaptureActive: undefined });
+    expect(names(sources)).not.toContain('call-capture');
+  });
+
+  it('reports busy while the call-capture daemon is anywhere but idle', async () => {
+    const sources = buildGatewayBusySources({ ...idleDeps(), callCaptureActive: () => true });
+    expect(await busy(sources, 'call-capture')).toBe(true);
+  });
+
+  it('reports idle while the call-capture daemon is idle', async () => {
+    const sources = buildGatewayBusySources({ ...idleDeps(), callCaptureActive: () => false });
+    expect(await busy(sources, 'call-capture')).toBe(false);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -203,6 +221,7 @@ describe('buildServeBusySources', () => {
     backgroundExecutor: { activeCount: () => 0 },
     jobStore: { countActive: () => Promise.resolve(0) },
     cronScheduler: { hasRunningJobs: () => Promise.resolve(false) },
+    callCaptureActive: () => false,
     teamsPidDir,
     acpServer: { activeSessionCount: 0 },
   });
@@ -211,6 +230,7 @@ describe('buildServeBusySources', () => {
     expect(names(buildServeBusySources(idleDeps())).sort()).toEqual([
       'acp-sessions',
       'background-jobs',
+      'call-capture',
       'cron-executions',
       'job-store',
       'team-supervisors',
@@ -302,6 +322,23 @@ describe('buildServeBusySources', () => {
     const sources = buildServeBusySources({ ...idleDeps(), acpServer: undefined });
     expect(names(sources)).not.toContain('acp-sessions');
   });
+
+  // Plan §1 check #13 — the call-capture mid-session signal that used to not
+  // exist, now sourced from `CallCaptureDaemon.onStateChange`.
+  it('skips the call-capture source entirely when no daemon is constructed', () => {
+    const sources = buildServeBusySources({ ...idleDeps(), callCaptureActive: undefined });
+    expect(names(sources)).not.toContain('call-capture');
+  });
+
+  it('reports busy while the call-capture daemon is anywhere but idle', async () => {
+    const sources = buildServeBusySources({ ...idleDeps(), callCaptureActive: () => true });
+    expect(await busy(sources, 'call-capture')).toBe(true);
+  });
+
+  it('reports idle while the call-capture daemon is idle', async () => {
+    const sources = buildServeBusySources({ ...idleDeps(), callCaptureActive: () => false });
+    expect(await busy(sources, 'call-capture')).toBe(false);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -319,21 +356,17 @@ describe('deriveIdleWatcherCapabilities', () => {
     expect(deriveIdleWatcherCapabilities(base).cron).toBe(false);
   });
 
-  it('reports voice present when callCapture is bound to a personality on darwin', () => {
+  // Was `true` unconditionally on darwin — because `callCapture.personalityId`
+  // is forced on for virtually every darwin deployment (the built-in `voice`
+  // personality always declares the `call_capture` toolset, and
+  // `validateCallCaptureBinding` fails boot otherwise), that meant the watcher
+  // could never arm on darwin at all. `CallCaptureDaemon.onStateChange` is a
+  // real signal now, so callCapture alone no longer contributes to `voice` —
+  // it's covered by the `call-capture` BusySource instead, on every platform.
+  it('reports voice absent for callCapture alone, on any platform', () => {
     const config = { ...base, callCapture: { personalityId: 'assistant' } } as EthosConfig;
-    expect(deriveIdleWatcherCapabilities(config).voice).toBe(process.platform === 'darwin');
+    expect(deriveIdleWatcherCapabilities(config).voice).toBe(false);
   });
-
-  // `CallCaptureDaemon` is built behind `process.platform === 'darwin'` in both
-  // hosts, so off darwin this config constructs NOTHING. Plan §2: not-configured
-  // -at-all is not evaluated; only configured-but-unreadable counts as busy.
-  it.runIf(process.platform !== 'darwin')(
-    'reports voice absent for callCapture on a non-darwin host',
-    () => {
-      const config = { ...base, callCapture: { personalityId: 'assistant' } } as EthosConfig;
-      expect(deriveIdleWatcherCapabilities(config).voice).toBe(false);
-    },
-  );
 
   // The `voice:` half is deliberately NOT platform-gated — livekit, trunk,
   // realtime and wake all run anywhere.
@@ -358,6 +391,7 @@ describe('deriveIdleWatcherCapabilities', () => {
         backgroundExecutor: undefined,
         jobStore: undefined,
         cronScheduler: { hasRunningJobs: () => Promise.resolve(false) },
+        callCaptureActive: undefined,
         teamsPidDir,
         acpServer: undefined,
       }),
@@ -381,6 +415,7 @@ describe('deriveIdleWatcherCapabilities', () => {
         backgroundExecutor: undefined,
         jobStore: undefined,
         cronScheduler: { hasRunningJobs: () => Promise.resolve(false) },
+        callCaptureActive: undefined,
         teamsPidDir,
         acpServer: undefined,
       }),

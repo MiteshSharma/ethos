@@ -88,7 +88,7 @@ describe('gateway.ts — call-capture daemon wiring', () => {
     const src = await readGatewaySource();
     expect(src).toMatch(/callCaptureHealthPath\(ethosDir\(\)\)/);
     expect(src).toMatch(
-      /return async \(\) => \{\s*callCaptureDaemon\.stop\(\);\s*clearInterval\(callCaptureHeartbeatTimer\);\s*await storage\.remove\(callCaptureHealthPath\(ethosDir\(\)\)\)\.catch\(\(\) => \{\}\);\s*\};/,
+      /return async \(\) => \{\s*callCaptureDaemon\.stop\(\);\s*callCaptureState = \{ kind: 'idle' \};\s*clearInterval\(callCaptureHeartbeatTimer\);\s*await storage\.remove\(callCaptureHealthPath\(ethosDir\(\)\)\)\.catch\(\(\) => \{\}\);\s*\};/,
     );
   });
 

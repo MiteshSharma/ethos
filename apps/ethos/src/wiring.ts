@@ -226,20 +226,27 @@ export function deriveIdleWatcherCapabilities(config: EthosConfig): IdleWatcherC
     // and in `buildGatewayBusySources` — not by a deployment-level refusal to
     // arm. Gate 2 is for signals that do not exist; this one does.
     cron: false,
-    // Voice/call session state genuinely has no queryable signal (plan §1
-    // checks #13/#14), so this half of the gate stays.
+    // CLOSED (the `callCapture` half). The gap this used to declare was real —
+    // call-capture session state had no queryable signal (plan §1 check #13),
+    // and since virtually every darwin deployment has `callCapture.personalityId`
+    // forced on (the built-in `voice` personality always declares the
+    // `call_capture` toolset, and `validateCallCaptureBinding` fails boot
+    // otherwise), declaring it present meant the watcher could never arm on
+    // darwin at all. There is now a real signal: `CallCaptureDaemon`'s
+    // production-proven `onStateChange` hook (already used by the desktop
+    // app's recording pill), which reports the daemon's last known
+    // `DaemonState.kind`. So this half is covered the way every other
+    // subsystem is — by a `call-capture` BusySource in both `buildServeBusySources`
+    // (this file) and `buildGatewayBusySources` (`gateway.ts`) — not by a
+    // deployment-level refusal to arm.
     //
-    // The two halves are asymmetric ON PURPOSE. `callCapture` is darwin-only:
-    // both commands build their `CallCaptureDaemon`/`CallCaptureOwnershipManager`
-    // behind `process.platform === 'darwin' && config.callCapture?.personalityId`,
-    // so on Linux that config block constructs nothing at all. Per plan §2 that
-    // is "not configured", not "configured but unreadable" — refusing to arm
-    // over a subsystem that cannot run on this host is the over-report the rule
-    // exists to prevent. A `voice:` block is NOT platform-gated (livekit,
-    // trunk, realtime and wake all run anywhere), so it counts on every host.
-    voice:
-      (process.platform === 'darwin' && Boolean(config.callCapture?.personalityId)) ||
-      config.voice !== undefined,
+    // `config.voice !== undefined` remains a genuinely open gap (plan §1 check
+    // #14): `RealtimeSessionCore.isClosed` is not on the public
+    // `RealtimeSession` contract in `@ethosagent/types`, so livekit/trunk/
+    // realtime/wake session state still has no queryable signal, and a `voice:`
+    // block in config (not platform-gated — it runs on every host) still means
+    // a permanent refusal to arm.
+    voice: config.voice !== undefined,
   };
 }
 
@@ -266,6 +273,12 @@ export function buildServeBusySources(deps: {
   jobStore: { countActive(): Promise<number> } | undefined;
   /** `undefined` when this deployment constructs no scheduler. */
   cronScheduler: { hasRunningJobs(): Promise<boolean> } | undefined;
+  /** Present only when this deployment constructs a `CallCaptureDaemon`
+   *  (darwin + `callCapture.personalityId` set). Returns true whenever the
+   *  daemon's last known state is anywhere but idle — settingUp/awaiting count
+   *  as busy too, not just an in-progress capture, since a call being
+   *  negotiated is not yet safe to suspend under either. */
+  callCaptureActive: (() => boolean) | undefined;
   /** Flat `~/.ethos/teams` — see `pidFilePath` in @ethosagent/team-supervisor. */
   teamsPidDir: string;
   /** Present only when the ACP server is constructed (serve only). */
@@ -349,6 +362,18 @@ export function buildServeBusySources(deps: {
         busy: await cronScheduler.hasRunningJobs(),
         reason: 'a cron job is mid-execution',
       }),
+    });
+  }
+
+  const callCaptureActive = deps.callCaptureActive;
+  if (callCaptureActive) {
+    sources.push({
+      name: 'call-capture',
+      checkBusy: () =>
+        Promise.resolve({
+          busy: callCaptureActive(),
+          reason: 'a call-capture session is active',
+        }),
     });
   }
 

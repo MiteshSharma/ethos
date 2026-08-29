@@ -43,6 +43,7 @@ import {
   callCaptureHealthPath,
   callCaptureLockPath,
   checkCallCaptureDependencies,
+  type DaemonState,
   MicActivityDetector,
   NotificationGate,
 } from '@ethosagent/platform-callcapture';
@@ -873,6 +874,11 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
   // plan/phases/call-capture-desktop-ux.md — don't invent a second interval).
   const CALL_CAPTURE_HEARTBEAT_INTERVAL_MS = 10_000;
   let callCaptureOwnershipManager: CallCaptureOwnershipManager | undefined;
+  // Last known daemon state, for the idle watcher's `callCaptureActive`
+  // busy-source below — a call actually in progress right now, not a
+  // permanent capability-level refusal. Stays 'idle' when no daemon is ever
+  // constructed for this deployment (non-darwin, or opted out).
+  let callCaptureState: DaemonState = { kind: 'idle' };
   if (
     process.platform === 'darwin' &&
     config.callCapture?.personalityId &&
@@ -931,6 +937,9 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
             watcherLogger.info(`call-capture: saved transcript to ${result.artifactKey}`);
           },
           logger: watcherLogger,
+          onStateChange: (state) => {
+            callCaptureState = state;
+          },
         });
         callCaptureDaemon.start();
 
@@ -953,6 +962,7 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
         callCaptureHeartbeatTimer.unref?.();
 
         return async () => {
+          callCaptureState = { kind: 'idle' };
           callCaptureDaemon.stop();
           clearInterval(callCaptureHeartbeatTimer);
           await getStorage()
@@ -1168,6 +1178,9 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
         // files it writes actually land in.
         teamsPidDir: teamsDir(),
         acpServer,
+        callCaptureActive: callCaptureOwnershipManager
+          ? () => callCaptureState.kind !== 'idle'
+          : undefined,
       }),
       // The one instance for this process. Its outbound half is still a no-op:
       // a real host adapter that signals a Firecracker-style control plane is a

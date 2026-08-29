@@ -726,6 +726,7 @@ export async function runBoot(args: string[], config: EthosConfig | null): Promi
   let callCaptureOwnershipManager:
     | import('@ethosagent/platform-callcapture').CallCaptureOwnershipManager
     | undefined;
+  let callCaptureState: { kind: string } = { kind: 'idle' };
   const runCallCaptureFromLoop = shared.runCallCapture;
   if (process.platform === 'darwin' && cfg.callCapture?.personalityId && runCallCaptureFromLoop) {
     const {
@@ -754,6 +755,9 @@ export async function runBoot(args: string[], config: EthosConfig | null): Promi
           indicator: new CaptureIndicator({
             onError: (msg) => logger.warn(`call-capture: ${msg}`),
           }),
+          onStateChange: (state) => {
+            callCaptureState = state;
+          },
           runCapture: async (abortSignal, source, onEntry, onAudioLevel) => {
             const result = await captureRunner(boundPersonalityId, {
               abortSignal,
@@ -789,6 +793,7 @@ export async function runBoot(args: string[], config: EthosConfig | null): Promi
         timer.unref?.();
         return async () => {
           daemon.stop();
+          callCaptureState = { kind: 'idle' };
           clearInterval(timer);
           await storage.remove(callCaptureHealthPath(dir)).catch(() => {});
         };
@@ -1256,6 +1261,9 @@ export async function runBoot(args: string[], config: EthosConfig | null): Promi
           // resolves to `<teamsDir()>/<name>.pid`, so this is the dir the PID
           // files it writes actually land in.
           teamsPidDir: teamsDir(),
+          callCaptureActive: callCaptureOwnershipManager
+            ? () => callCaptureState.kind !== 'idle'
+            : undefined,
         }),
         ...buildServeBusySources({
           chatService: created.chatService,
@@ -1267,6 +1275,9 @@ export async function runBoot(args: string[], config: EthosConfig | null): Promi
           cronScheduler: scheduler,
           teamsPidDir: teamsDir(),
           acpServer,
+          callCaptureActive: callCaptureOwnershipManager
+            ? () => callCaptureState.kind !== 'idle'
+            : undefined,
         }),
       ]),
       // The same instance boot reconciliation read the pause offset from. Its

@@ -1555,6 +1555,7 @@ export async function runGatewayStart(opts: GatewayStartOptions = {}): Promise<v
   // interval).
   const CALL_CAPTURE_HEARTBEAT_INTERVAL_MS = 10_000;
   let callCaptureOwnershipManager: CallCaptureOwnershipManager | undefined;
+  let callCaptureState: { kind: string } = { kind: 'idle' };
   if (
     process.platform === 'darwin' &&
     config.callCapture?.personalityId &&
@@ -1599,6 +1600,9 @@ export async function runGatewayStart(opts: GatewayStartOptions = {}): Promise<v
           indicator: new CaptureIndicator({
             onError: (msg) => callCaptureLogger.warn(`call-capture: ${msg}`),
           }),
+          onStateChange: (state) => {
+            callCaptureState = state;
+          },
           runCapture: async (abortSignal, source, onEntry, onAudioLevel) => {
             const result = await captureRunner(boundPersonalityId, {
               abortSignal,
@@ -1637,6 +1641,7 @@ export async function runGatewayStart(opts: GatewayStartOptions = {}): Promise<v
 
         return async () => {
           callCaptureDaemon.stop();
+          callCaptureState = { kind: 'idle' };
           clearInterval(callCaptureHeartbeatTimer);
           await storage.remove(callCaptureHealthPath(ethosDir())).catch(() => {});
         };
@@ -1767,6 +1772,9 @@ export async function runGatewayStart(opts: GatewayStartOptions = {}): Promise<v
         approvalFlow,
         webhookServer,
         cronScheduler: scheduler,
+        callCaptureActive: callCaptureOwnershipManager
+          ? () => callCaptureState.kind !== 'idle'
+          : undefined,
         // Flat layout: `pidFilePath(name)` in @ethosagent/team-supervisor
         // resolves to `<teamsDir()>/<name>.pid`, so this is the dir the PID
         // files it writes actually land in.
@@ -2437,6 +2445,10 @@ export function buildGatewayBusySources(deps: {
   webhookServer: { inFlightSyncRequests(): number } | undefined;
   /** `undefined` when this deployment constructs no scheduler. */
   cronScheduler: { hasRunningJobs(): Promise<boolean> } | undefined;
+  /** Present only when this deployment constructs a `CallCaptureDaemon`
+   *  (darwin + `callCapture.personalityId` set). Returns true whenever the
+   *  daemon's last known state is anywhere but idle. */
+  callCaptureActive: (() => boolean) | undefined;
   /** Flat `~/.ethos/teams` — see `pidFilePath` in @ethosagent/team-supervisor. */
   teamsPidDir: string;
 }): BusySource[] {
@@ -2524,6 +2536,18 @@ export function buildGatewayBusySources(deps: {
         busy: await cronScheduler.hasRunningJobs(),
         reason: 'a cron job is mid-execution',
       }),
+    });
+  }
+
+  const callCaptureActive = deps.callCaptureActive;
+  if (callCaptureActive) {
+    sources.push({
+      name: 'call-capture',
+      checkBusy: () =>
+        Promise.resolve({
+          busy: callCaptureActive(),
+          reason: 'a call-capture session is active',
+        }),
     });
   }
 

@@ -102,7 +102,7 @@ describe('serve.ts — call-capture daemon wiring', () => {
     const src = await readServeSource();
     expect(src).toMatch(/callCaptureHealthPath\(dir\)/);
     expect(src).toMatch(
-      /return async \(\) => \{\s*callCaptureDaemon\.stop\(\);\s*clearInterval\(callCaptureHeartbeatTimer\);\s*await getStorage\(\)\s*\.remove\(callCaptureHealthPath\(dir\)\)\s*\.catch\(\(\) => \{\}\);\s*\};/,
+      /return async \(\) => \{\s*callCaptureState = \{ kind: 'idle' \};\s*callCaptureDaemon\.stop\(\);\s*clearInterval\(callCaptureHeartbeatTimer\);\s*await getStorage\(\)\s*\.remove\(callCaptureHealthPath\(dir\)\)\s*\.catch\(\(\) => \{\}\);\s*\};/,
     );
   });
 
