@@ -5,7 +5,7 @@ kind: how-to
 audience: user
 slug: use-web-dashboard
 time: "10 min"
-updated: 2026-06-09
+updated: 2026-08-14
 ---
 
 ## Task
@@ -46,13 +46,14 @@ Then open `http://localhost:3000` in your local browser.
 
 ### 2. Navigate the main tabs
 
-The sidebar shows seven tabs:
+The sidebar shows eight tabs:
 
 | Tab | Purpose |
 |---|---|
 | **Chat** | Interactive chat with the active personality. |
 | **Personalities** | Create, edit, and inspect personality configurations. |
 | **Memory** | Browse and search personality memory (`MEMORY.md`) and user memory (`USER.md`). |
+| **Documents** | Browse, download, and delete the files a personality wrote in its working directory. See [Retrieve files the agent wrote](retrieve-agent-files.md). |
 | **Cron** | View, manage, and test scheduled jobs. |
 | **MCP** | Add MCP servers, handle OAuth, manage tokens. |
 | **Dashboards** | View plugin data sources as customizable widget panels. |
@@ -137,13 +138,14 @@ The MCP tab also shows:
 
 ### 8. Chat with a personality
 
-Navigate to the **Chat** tab. Select a personality from the dropdown at the top. Type a message and press Enter.
+Navigate to the **Chat** tab. Type a message and press Enter.
+
+A session belongs to the personality it started with. The bar at the top of the chat shows which one that is — accent stripe, mark, name, and model — and there is no control to change it mid-conversation. To talk to a different personality, click **+** in that bar (or press ⌘K and choose **New chat session**) and pick one in the New Session picker. The previous conversation stays in the **Sessions** tab, still under its own personality.
 
 The chat view streams the agent's response in real time, showing tool calls inline with expandable detail panels. Each tool call shows the tool name, arguments, and result. Slash commands work the same as in the CLI:
 
 | Command | Effect |
 |---|---|
-| `/personality <id>` | Switch to a different personality mid-session. |
 | `/new` | Start a fresh session (clears conversation history). |
 | `/skills` | List skills the active personality can access. |
 | `/memory` | Show the active personality's memory summary. |

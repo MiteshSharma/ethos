@@ -111,7 +111,7 @@ describe('AgentBridge', () => {
       return {
         calls,
         bridge: {
-          setPresenter: (p: unknown) => calls.presenters.push(p),
+          registerPresenter: (_surfaceType: unknown, p: unknown) => calls.presenters.push(p),
           onResolved: () => {
             calls.resolvedListeners += 1;
             return () => {};
@@ -125,7 +125,7 @@ describe('AgentBridge', () => {
     const bridge = new AgentBridge(loop1);
 
     const presenter = vi.fn();
-    bridge.setClarifyPresenter(presenter);
+    bridge.setClarifyPresenter('tui', presenter);
     bridge.onClarifyResolved(() => {});
     expect(c1.calls.presenters).toEqual([presenter]);
     expect(c1.calls.resolvedListeners).toBe(1);

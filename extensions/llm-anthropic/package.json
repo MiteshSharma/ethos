@@ -16,6 +16,7 @@
   "dependencies": {
     "@anthropic-ai/sdk": "^0.112.3",
     "@ethosagent/plugin-sdk": "workspace:*",
+    "@ethosagent/pricing": "workspace:*",
     "@ethosagent/types": "workspace:*"
   },
   "devDependencies": {

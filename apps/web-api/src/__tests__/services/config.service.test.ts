@@ -1,9 +1,14 @@
 import { join } from 'node:path';
-import { InMemoryStorage } from '@ethosagent/storage-fs';
+import { InMemorySecretsResolver, InMemoryStorage } from '@ethosagent/storage-fs';
 import { isEthosError } from '@ethosagent/types';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ConfigRepository } from '../../repositories/config.repository';
-import { ConfigService, redactKey } from '../../services/config.service';
+import {
+  ConfigService,
+  type ConfigUpdateInput,
+  readLegacyBrowserBargeInTuning,
+  redactKey,
+} from '../../services/config.service';
 
 describe('redactKey', () => {
   it('returns <unset> for missing keys', () => {
@@ -24,18 +29,63 @@ describe('redactKey', () => {
   });
 });
 
+describe('readLegacyBrowserBargeInTuning', () => {
+  it('returns nothing when no display.voice_* key is set', () => {
+    expect(readLegacyBrowserBargeInTuning({})).toEqual({});
+  });
+
+  it('maps the three barge-relevant display.voice_* keys onto VoiceBargeInTuning', () => {
+    expect(
+      readLegacyBrowserBargeInTuning({
+        'display.voice_barge_threshold': '0.08',
+        'display.voice_barge_sustain_ms': '300',
+        'display.voice_endpoint_silence_ms': '900',
+      }),
+    ).toEqual({ energyThreshold: 0.08, minSpeechMs: 300, silenceMs: 900 });
+  });
+
+  // These tuned the browser's own local endpointer, which the streaming
+  // pipeline lane no longer has — there is nothing for them to map onto.
+  it('ignores display.voice_speech_threshold / display.voice_speech_min_ms', () => {
+    expect(
+      readLegacyBrowserBargeInTuning({
+        'display.voice_speech_threshold': '0.05',
+        'display.voice_speech_min_ms': '250',
+      }),
+    ).toEqual({});
+  });
+
+  it('clamps an out-of-range value to the VOICE_TUNING bounds', () => {
+    expect(readLegacyBrowserBargeInTuning({ 'display.voice_barge_threshold': '5' })).toEqual({
+      energyThreshold: 0.2,
+    });
+  });
+
+  it('ignores an unparseable value', () => {
+    expect(
+      readLegacyBrowserBargeInTuning({ 'display.voice_endpoint_silence_ms': 'not-a-number' }),
+    ).toEqual({});
+  });
+});
+
 const DATA = '/data';
+
+function secretRef(path: string): string {
+  return ['${', 'secrets:', path, '}'].join('');
+}
 
 describe('ConfigService', () => {
   let storage: InMemoryStorage;
+  let secrets: InMemorySecretsResolver;
   let repo: ConfigRepository;
   let service: ConfigService;
 
   beforeEach(async () => {
     storage = new InMemoryStorage();
+    secrets = new InMemorySecretsResolver();
     await storage.mkdir(DATA);
-    repo = new ConfigRepository({ dataDir: DATA, storage });
-    service = new ConfigService({ config: repo });
+    repo = new ConfigRepository({ dataDir: DATA, storage, secrets });
+    service = new ConfigService({ config: repo, secrets });
   });
 
   it('get throws CONFIG_MISSING when no file exists', async () => {
@@ -84,10 +134,15 @@ describe('ConfigService', () => {
 
     const written = await storage.read(join(DATA, 'config.yaml'));
     expect(written).toContain('personality: engineer');
-    expect(written).toContain('telegramToken: tg-1234567890');
-    expect(written).toContain('slackBotToken: xoxb-abc');
+    // Credentials are preserved as vault references, never as literals.
+    expect(written).toContain(`telegramToken: "${secretRef('telegram/token')}"`);
+    expect(written).toContain(`slackBotToken: "${secretRef('slack/botToken')}"`);
+    expect(await secrets.get('telegram/token')).toBe('tg-1234567890');
+    expect(await secrets.get('slack/botToken')).toBe('xoxb-abc');
     // The apiKey wasn't part of the patch — must remain.
-    expect(written).toContain('apiKey: sk-anthropic-1234567890abcdef');
+    expect(written).toContain(`apiKey: "${secretRef('providers/anthropic/apiKey')}"`);
+    expect(await secrets.get('providers/anthropic/apiKey')).toBe('sk-anthropic-1234567890abcdef');
+    expect(written).not.toContain('sk-anthropic-1234567890abcdef');
   });
 
   it('update with empty apiKey is a no-op (does not erase the existing key)', async () => {
@@ -99,7 +154,8 @@ describe('ConfigService', () => {
     );
     await service.update({ apiKey: '' });
     const written = await storage.read(join(DATA, 'config.yaml'));
-    expect(written).toContain('apiKey: sk-keep-this');
+    expect(written).toContain(`apiKey: "${secretRef('providers/anthropic/apiKey')}"`);
+    expect(await secrets.get('providers/anthropic/apiKey')).toBe('sk-keep-this');
   });
 
   it('get returns providers with redacted keys', async () => {
@@ -148,8 +204,10 @@ describe('ConfigService', () => {
     );
     await service.update({ apiKey: 'sk-new-key-12345' });
     const written = await storage.read(join(DATA, 'config.yaml'));
-    expect(written).toContain('apiKey: sk-new-key-12345');
+    expect(written).toContain(`apiKey: "${secretRef('providers/anthropic/apiKey')}"`);
+    expect(written).not.toContain('sk-new-key-12345');
     expect(written).not.toContain('sk-old');
+    expect(await secrets.get('providers/anthropic/apiKey')).toBe('sk-new-key-12345');
   });
 
   it('update translates adminEnabled into the admin.enabled passthrough key', async () => {
@@ -181,6 +239,32 @@ describe('ConfigService', () => {
     expect(result.memoryCaptureEnabled).toBe(false);
     expect(result.memoryCaptureModel).toBeNull();
     expect(result.memoryNotices).toBe(false);
+    // Call Stage: shape and colour both follow the personality by default.
+    expect(result.callStyle).toBe('personality');
+    expect(result.callAccent).toBe('personality');
+  });
+
+  it('persists the call-overlay keys and refuses a color that is not a color', async () => {
+    await storage.write(
+      join(DATA, 'config.yaml'),
+      ['provider: anthropic', 'model: m', 'apiKey: sk-keep', 'personality: researcher'].join('\n'),
+    );
+
+    await service.update({ callStyle: 'orb', callAccent: '#E879F9' });
+    let written = await storage.read(join(DATA, 'config.yaml'));
+    expect(written).toContain('display.call_style: orb');
+    expect(written).toContain('display.call_accent: "#E879F9"');
+    let result = await service.get();
+    expect(result.callStyle).toBe('orb');
+    expect(result.callAccent).toBe('#E879F9');
+
+    // A hand-typed non-color resolves to the personality accent rather than
+    // reaching a canvas fillStyle.
+    await service.update({ callAccent: 'chartreuse' });
+    written = await storage.read(join(DATA, 'config.yaml'));
+    expect(written).toContain('display.call_accent: personality');
+    result = await service.get();
+    expect(result.callAccent).toBe('personality');
   });
 
   it('get reads the behavior flags from their flat config keys', async () => {
@@ -349,6 +433,7 @@ describe('ConfigService', () => {
 
 describe('ConfigService — settings passthrough groups', () => {
   let storage: InMemoryStorage;
+  let secrets: InMemorySecretsResolver;
   let repo: ConfigRepository;
   let service: ConfigService;
 
@@ -367,9 +452,14 @@ describe('ConfigService — settings passthrough groups', () => {
 
   beforeEach(async () => {
     storage = new InMemoryStorage();
+    secrets = new InMemorySecretsResolver();
     await storage.mkdir(DATA);
-    repo = new ConfigRepository({ dataDir: DATA, storage });
-    service = new ConfigService({ config: repo });
+    repo = new ConfigRepository({ dataDir: DATA, storage, secrets });
+    service = new ConfigService({ config: repo, secrets });
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
   });
 
   it('get returns settings defaults when the keys are absent', async () => {
@@ -381,6 +471,12 @@ describe('ConfigService — settings passthrough groups', () => {
       gateDelta: null,
       retryOnOverflow: true,
       smallWindow: 'auto',
+    });
+    expect(r.voiceFiller).toEqual({
+      enabled: true,
+      afterMs: null,
+      text: null,
+      tickIntervalMs: null,
     });
     expect(r.memoryApproval).toEqual({ mode: 'off', cap: 200, ttlDays: 30 });
     expect(r.memoryConsolidation.halfLifeDays).toBe(30);
@@ -482,6 +578,46 @@ describe('ConfigService — settings passthrough groups', () => {
     expect(r.displayVerbosity).toBe('default');
   });
 
+  it('round-trips voice.filler.*', async () => {
+    await writeBase();
+    await service.update({
+      voiceFiller: { enabled: false, afterMs: 800, text: 'One sec.', tickIntervalMs: 5000 },
+    });
+
+    const written = await storage.read(join(DATA, 'config.yaml'));
+    expect(written).toContain('voice.filler.enabled: false');
+    expect(written).toContain('voice.filler.afterMs: 800');
+    expect(written).toContain('voice.filler.text: One sec.');
+    expect(written).toContain('voice.filler.tickIntervalMs: 5000');
+
+    const r = await service.get();
+    expect(r.voiceFiller).toEqual({
+      enabled: false,
+      afterMs: 800,
+      text: 'One sec.',
+      tickIntervalMs: 5000,
+    });
+  });
+
+  it('null clears voice.filler fields back to their defaults', async () => {
+    await writeBase(['voice.filler.afterMs: 800', 'voice.filler.enabled: false']);
+    await service.update({ voiceFiller: { afterMs: null, enabled: null } });
+
+    const written = await storage.read(join(DATA, 'config.yaml'));
+    expect(written).not.toContain('voice.filler.afterMs');
+    expect(written).not.toContain('voice.filler.enabled');
+    const r = await service.get();
+    expect(r.voiceFiller.afterMs).toBeNull();
+    expect(r.voiceFiller.enabled).toBe(true);
+  });
+
+  it('refuses an out-of-range voice.filler.afterMs', async () => {
+    await writeBase();
+    await expect(service.update({ voiceFiller: { afterMs: 999_999 } })).rejects.toMatchObject({
+      code: 'CONFIG_INVALID',
+    });
+  });
+
   it('round-trips the memory groups and masks the capture key', async () => {
     await writeBase();
     await service.update({
@@ -579,6 +715,62 @@ describe('ConfigService — settings passthrough groups', () => {
     await service.update({ webhooks: {} });
     const written3 = await storage.read(join(DATA, 'config.yaml'));
     expect(written3).not.toContain('webhooks.');
+  });
+
+  it('webhooks: removing a hook deletes the vault entry its config key referenced', async () => {
+    await writeBase();
+    await service.update({
+      webhooks: {
+        alerts: { personalityId: 'researcher' },
+        builds: { personalityId: 'researcher' },
+      },
+    });
+    expect(await secrets.list()).toEqual(
+      expect.arrayContaining(['webhooks/alerts/secret', 'webhooks/builds/secret']),
+    );
+
+    await service.update({ webhooks: { builds: { personalityId: 'researcher' } } });
+
+    const listed = await secrets.list();
+    expect(listed).not.toContain('webhooks/alerts/secret');
+    // The survivor's material is untouched.
+    expect(listed).toContain('webhooks/builds/secret');
+    const written = await storage.read(join(DATA, 'config.yaml'));
+    expect(written).not.toContain('webhooks.alerts.');
+    expect(written).toContain(`webhooks.builds.secret: "${secretRef('webhooks/builds/secret')}"`);
+  });
+
+  it('webhooks: keeps a ref a surviving hook still points at', async () => {
+    // Only reachable via a hand-edited config.yaml — minted refs embed the
+    // webhook id — but a shared ref must never be deleted out from under
+    // the hook that still reads it.
+    const shared = 'webhooks/alerts/secret';
+    await secrets.set(shared, 'shhh');
+    await writeBase([
+      'webhooks.alerts.personalityId: researcher',
+      `webhooks.alerts.secret: ${secretRef(shared)}`,
+      'webhooks.builds.personalityId: researcher',
+      `webhooks.builds.secret: ${secretRef(shared)}`,
+    ]);
+
+    await service.update({ webhooks: { builds: { personalityId: 'researcher' } } });
+
+    expect(await secrets.list()).toContain(shared);
+    const written = await storage.read(join(DATA, 'config.yaml'));
+    expect(written).not.toContain('webhooks.alerts.');
+    expect(written).toContain(`webhooks.builds.secret: "${secretRef(shared)}"`);
+  });
+
+  it('webhooks: a failing vault delete surfaces, and the config change still stands', async () => {
+    await writeBase();
+    await service.update({ webhooks: { alerts: { personalityId: 'researcher' } } });
+    vi.spyOn(secrets, 'delete').mockRejectedValue(new Error('vault is read-only'));
+
+    await expect(service.update({ webhooks: {} })).rejects.toThrow('vault is read-only');
+
+    // config.yaml is the source of truth and was written first: the hook is gone.
+    const written = await storage.read(join(DATA, 'config.yaml'));
+    expect(written).not.toContain('webhooks.');
   });
 
   it('round-trips quick commands, channel toolsets, and retention with replace semantics', async () => {
@@ -717,5 +909,139 @@ describe('ConfigService — settings passthrough groups', () => {
     const written = await storage.read(join(DATA, 'config.yaml'));
     expect(written).not.toContain('memoryApproval');
     expect(written).not.toContain('webhooks.');
+  });
+
+  // -- Voice-notes-everywhere operator keys (voice V2 settings parity) --------
+
+  it('get returns the voice channel/transcode/artifact keys as unset', async () => {
+    await writeBase();
+    const r = await service.get();
+    expect(r.voiceChannelTtsOut).toEqual({});
+    expect(r.voiceTranscodeFfmpegPath).toBeNull();
+    expect(r.voiceTranscodeBitrateKbps).toBeNull();
+    expect(r.voiceTranscodeTimeoutSec).toBeNull();
+    expect(r.voiceArtifactAbandonAfterDays).toBeNull();
+    expect(r.voiceArtifactMaxTotalMb).toBeNull();
+  });
+
+  it('get parses the voice channel/transcode/artifact keys from config.yaml', async () => {
+    await writeBase([
+      'voice.channels.telegram.ttsOut: true',
+      'voice.channels.slack.ttsOut: false',
+      // Neither an adapter nor the CLI parser knows this platform; the read
+      // path drops it exactly as packages/config does on load.
+      'voice.channels.carrier-pigeon.ttsOut: true',
+      'voice.transcode.ffmpegPath: /opt/homebrew/bin/ffmpeg',
+      'voice.transcode.bitrateKbps: 48',
+      'voice.transcode.timeout: 45',
+      'voice.artifacts.abandonAfterDays: 14',
+      'voice.artifacts.maxTotalMb: 1024',
+    ]);
+    const r = await service.get();
+    expect(r.voiceChannelTtsOut).toEqual({ telegram: true, slack: false });
+    expect(r.voiceTranscodeFfmpegPath).toBe('/opt/homebrew/bin/ffmpeg');
+    expect(r.voiceTranscodeBitrateKbps).toBe(48);
+    expect(r.voiceTranscodeTimeoutSec).toBe(45);
+    expect(r.voiceArtifactAbandonAfterDays).toBe(14);
+    expect(r.voiceArtifactMaxTotalMb).toBe(1024);
+  });
+
+  it('update writes each voice operator key to its yaml key and round-trips', async () => {
+    await writeBase();
+    await service.update({
+      voiceChannelTtsOut: { telegram: true, whatsapp: false },
+      voiceTranscodeFfmpegPath: '/usr/bin/ffmpeg',
+      voiceTranscodeBitrateKbps: 64,
+      voiceTranscodeTimeoutSec: 90,
+      voiceArtifactAbandonAfterDays: 30,
+      voiceArtifactMaxTotalMb: 2048,
+    });
+
+    const written = await storage.read(join(DATA, 'config.yaml'));
+    expect(written).toContain('voice.channels.telegram.ttsOut: true');
+    expect(written).toContain('voice.channels.whatsapp.ttsOut: false');
+    expect(written).toContain('voice.transcode.ffmpegPath: /usr/bin/ffmpeg');
+    expect(written).toContain('voice.transcode.bitrateKbps: 64');
+    // The RPC field says `Sec`; the yaml key is the bare `timeout`.
+    expect(written).toContain('voice.transcode.timeout: 90');
+    expect(written).toContain('voice.artifacts.abandonAfterDays: 30');
+    expect(written).toContain('voice.artifacts.maxTotalMb: 2048');
+
+    const r = await service.get();
+    expect(r.voiceChannelTtsOut).toEqual({ telegram: true, whatsapp: false });
+    expect(r.voiceTranscodeFfmpegPath).toBe('/usr/bin/ffmpeg');
+    expect(r.voiceTranscodeBitrateKbps).toBe(64);
+    expect(r.voiceTranscodeTimeoutSec).toBe(90);
+    expect(r.voiceArtifactAbandonAfterDays).toBe(30);
+    expect(r.voiceArtifactMaxTotalMb).toBe(2048);
+  });
+
+  it('voiceChannelTtsOut replaces the whole map — an omitted platform disappears', async () => {
+    await writeBase();
+    await service.update({ voiceChannelTtsOut: { telegram: true, slack: false, discord: true } });
+    expect((await service.get()).voiceChannelTtsOut).toEqual({
+      telegram: true,
+      slack: false,
+      discord: true,
+    });
+
+    await service.update({ voiceChannelTtsOut: { slack: true } });
+    const written = await storage.read(join(DATA, 'config.yaml'));
+    expect(written).not.toContain('voice.channels.telegram');
+    expect(written).not.toContain('voice.channels.discord');
+    expect(written).toContain('voice.channels.slack.ttsOut: true');
+    // An omitted platform is "no override", which is not the same as `false`.
+    expect((await service.get()).voiceChannelTtsOut).toEqual({ slack: true });
+  });
+
+  it('null clears each voice operator scalar back to its built-in default', async () => {
+    await writeBase([
+      'voice.transcode.ffmpegPath: /usr/bin/ffmpeg',
+      'voice.transcode.bitrateKbps: 64',
+      'voice.transcode.timeout: 90',
+      'voice.artifacts.abandonAfterDays: 30',
+      'voice.artifacts.maxTotalMb: 2048',
+    ]);
+    await service.update({
+      voiceTranscodeFfmpegPath: null,
+      voiceTranscodeBitrateKbps: null,
+      voiceTranscodeTimeoutSec: null,
+      voiceArtifactAbandonAfterDays: null,
+      voiceArtifactMaxTotalMb: null,
+    });
+
+    const written = await storage.read(join(DATA, 'config.yaml'));
+    expect(written).not.toContain('voice.transcode.');
+    expect(written).not.toContain('voice.artifacts.');
+    const r = await service.get();
+    expect(r.voiceTranscodeFfmpegPath).toBeNull();
+    expect(r.voiceTranscodeBitrateKbps).toBeNull();
+    expect(r.voiceTranscodeTimeoutSec).toBeNull();
+    expect(r.voiceArtifactAbandonAfterDays).toBeNull();
+    expect(r.voiceArtifactMaxTotalMb).toBeNull();
+  });
+
+  it('rejects out-of-range voice operator values and unknown channel platforms', async () => {
+    await writeBase();
+    const cases: ConfigUpdateInput[] = [
+      { voiceTranscodeBitrateKbps: 7 },
+      { voiceTranscodeBitrateKbps: 321 },
+      { voiceTranscodeTimeoutSec: 0 },
+      { voiceTranscodeTimeoutSec: 601 },
+      { voiceArtifactAbandonAfterDays: 0 },
+      { voiceArtifactAbandonAfterDays: 366 },
+      { voiceArtifactMaxTotalMb: 0 },
+      { voiceArtifactMaxTotalMb: 102_401 },
+      // A typo'd platform is REFUSED at the RPC boundary, not dropped the way
+      // the yaml parser drops it on load.
+      { voiceChannelTtsOut: { telegran: true } },
+    ];
+    for (const patch of cases) {
+      await expect(service.update(patch)).rejects.toMatchObject({ code: 'CONFIG_INVALID' });
+    }
+    const written = await storage.read(join(DATA, 'config.yaml'));
+    expect(written).not.toContain('voice.transcode.');
+    expect(written).not.toContain('voice.artifacts.');
+    expect(written).not.toContain('voice.channels.');
   });
 });

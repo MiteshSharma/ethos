@@ -62,6 +62,10 @@ export function projectEvent(event: AgentEvent, verbosity: Verbosity): RenderedL
       out.push({ text: event.text, kind: 'text' });
       break;
     case 'tool_start':
+      // Lane E (tools-as-code-api) — in-script inner calls are tagged
+      // `audience: 'internal'`; `default` hides them, `verbose`+ lifts the
+      // gate (same rule as tool_progress below).
+      if (verbosity === 'default' && event.audience === 'internal') break;
       out.push({ text: `⟳ ${event.toolName}`, kind: 'tool_start' });
       break;
     case 'tool_progress': {
@@ -75,6 +79,10 @@ export function projectEvent(event: AgentEvent, verbosity: Verbosity): RenderedL
       break;
     }
     case 'tool_end':
+      // Lane E — internal inner-call ends stay hidden at `default` even on
+      // failure: an inner error is data the script handles, not a turn
+      // failure. Non-internal failures keep the Phase 30.2 always-render rule.
+      if (verbosity === 'default' && event.audience === 'internal') break;
       out.push({
         text: `${event.ok ? '✓' : '✗'} ${event.toolName} ${event.durationMs}ms`,
         kind: 'tool_end',

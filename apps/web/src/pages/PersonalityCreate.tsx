@@ -4,6 +4,7 @@ import { useNavigate } from 'react-router-dom';
 import { Composer } from '../components/chat/Composer';
 import { MessageList } from '../components/chat/MessageList';
 import { useChat } from '../hooks/useChat';
+import { buildNewSessionPath } from '../lib/newSessionPicker';
 import { personalityTheme } from '../lib/theme';
 
 const ARCHITECT_ID = 'personality-architect';
@@ -81,7 +82,7 @@ export function PersonalityCreate() {
               <Space>
                 <Button
                   type="primary"
-                  onClick={() => navigate(`/chat?personality=${scaffoldResult}`)}
+                  onClick={() => navigate(buildNewSessionPath(scaffoldResult))}
                 >
                   Open Chat with new personality
                 </Button>

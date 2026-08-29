@@ -1,7 +1,23 @@
 import { randomUUID } from 'node:crypto';
 import type { AgentLoop } from '@ethosagent/core';
-import { deriveBotKey, stripAnsiEscapes } from '@ethosagent/core';
-import type { DeliveryLedger } from '@ethosagent/delivery-ledger';
+import {
+  buildLaneKey,
+  type ClarifyNoticeTarget,
+  DEFAULT_ESCALATION_DELAY_MS,
+  deriveBotKey,
+  LaneVoiceModeStore,
+  resolveSttProviderForPersonality,
+  resolveTtsProviderForPersonality,
+  resolveVoicePreferences,
+  sweepClarifyEscalations as runClarifyEscalationSweep,
+  type SttProviderForPersonality,
+  selectSttEntry,
+  selectTtsEntry,
+  stripAnsiEscapes,
+  type TtsProviderForPersonality,
+} from '@ethosagent/core';
+import type { DeliveryLedger, DeliveryObligation } from '@ethosagent/delivery-ledger';
+import type { InboundDedupStore } from '@ethosagent/inbound-dedup';
 import type { ChannelFilterConfig } from '@ethosagent/safety-channel';
 import {
   checkMessage,
@@ -20,18 +36,34 @@ import type {
   BackgroundJob,
   ChannelContext,
   ClarifyResponse,
+  ClarifySurfaceType,
   DeliveryResult,
   InboundMessage,
   Logger,
   OutboundMessage,
+  PersonalityVoiceConfig,
   PlatformAdapter,
   PlatformAdapterFactory,
   SteerSink,
+  Storage,
   SttProvider,
+  SttProviderEntry,
   SttProviderRegistry,
   TtsProvider,
+  TtsProviderEntry,
   TtsProviderRegistry,
+  VoiceAudioFormat,
+  VoiceTurnOrigin,
 } from '@ethosagent/types';
+import { isVoiceOutboundAdapter, voiceAudioExtension, voiceAudioMimeType } from '@ethosagent/types';
+import {
+  DEFAULT_VOICE_MODE,
+  detectLanguage,
+  sanitizeForSpeech,
+  shouldReplyWithVoice,
+  truncateAtSentenceBoundary,
+  type VoiceMode,
+} from '@ethosagent/voice-text';
 import { MessageDedupCache } from './dedup';
 import { beginDelivery, confirmDelivery, type DeliveryBinding } from './delivery';
 import {
@@ -40,14 +72,12 @@ import {
   type OutboundMediaCaps,
 } from './media';
 import { DraftStreamer } from './streaming';
+import type { TranscodeResult, Transcoder } from './transcode';
+import type { VoiceArtifactStore } from './voice-artifacts';
 import {
   buildTranscriptText,
-  DEFAULT_VOICE_MODE,
   hasAudioAttachments,
-  stripMarkdown,
   transcribeAudioAttachments,
-  truncateAtSentenceBoundary,
-  type VoiceMode,
 } from './voice-pipeline';
 
 export { SessionLane } from '@ethosagent/session-lane';
@@ -68,6 +98,19 @@ export {
   parseRetryAfterSeconds,
   type StreamAdapter,
 } from './streaming';
+export {
+  createFfmpegTranscoder,
+  type FfmpegTranscoderOptions,
+  type TranscodeRequest,
+  type TranscodeResult,
+  type Transcoder,
+  type TranscodeStageEvent,
+} from './transcode';
+export {
+  createVoiceArtifactStore,
+  type VoiceArtifactStore,
+  type VoiceArtifactStoreOptions,
+} from './voice-artifacts';
 export { type CapturingAdapter, createCapturingAdapter } from './webhook-adapter';
 
 const noopLogger: Logger = {
@@ -110,34 +153,6 @@ export interface GatewayObservability {
 }
 
 // ---------------------------------------------------------------------------
-// Lane / session key encoding
-// ---------------------------------------------------------------------------
-
-/**
- * Build a lane / session key from its segments. Each segment is
- * URL-encoded so a segment that happens to contain the `:` separator
- * (e.g. a future adapter's `threadId` with a colon) cannot alias two
- * distinct conversations onto the same key.
- *
- * Continuity with pre-encoding session keys is only guaranteed for
- * segments that are themselves URL-safe: platform identifiers
- * (`telegram` / `slack` / ...), the hex-derived default botKey
- * (`deriveBotKey` in `packages/core/src/bot-key.ts`), numeric Slack
- * `thread_ts`, and the chat IDs the supported platforms emit. An
- * operator who configures a custom `id:` value containing reserved
- * characters will see their existing SQLite session key change shape
- * once after upgrade and their history orphan — that's the cost of
- * choosing an unusual botKey, not a regression in the common case.
- *
- * Treat the returned string as opaque. The Gateway never decodes it;
- * collisions only matter at construction time, and the encoder is the
- * single point of truth for what a lane key looks like.
- */
-function buildLaneKey(...segments: string[]): string {
-  return segments.map(encodeURIComponent).join(':');
-}
-
-// ---------------------------------------------------------------------------
 // Concurrency limiter
 // ---------------------------------------------------------------------------
 
@@ -155,6 +170,53 @@ const BACKGROUND_MAX_JOBS_PER_ROOT = 3;
  * `jobs.delivered_at` claim is what actually enforces exactly-once.
  */
 const DELIVERED_WAKES_MAX = 4_096;
+
+/**
+ * Memo key for "the default voice entry" — `auxiliary.asr` / `auxiliary.tts`,
+ * which have no roster name of their own. The leading space keeps it out of the
+ * space of names an operator can type as a roster key.
+ */
+const DEFAULT_VOICE_ENTRY_KEY = ' default';
+
+/**
+ * Fix 5 (pi-delegation.md D7) — every channel platform with a live clarify
+ * surface (see the `extensions/platform-` packages' `clarify-surface.ts`).
+ * `InboundMessage.platform` is a plain string; other origins (email, mcp,
+ * webhook, cron) carry values with no clarify surface at all. Mirrors the
+ * same set in `packages/wiring/src/build-agent-loop.ts`
+ * (`CLARIFY_SURFACE_TYPES`) — duplicated locally rather than shared because
+ * `extensions/gateway` must not depend on `packages/wiring`
+ * (ARCHITECTURE.md §II layer direction).
+ */
+const CLARIFY_SURFACE_TYPES = new Set<ClarifySurfaceType>([
+  'tui',
+  'cli',
+  'web',
+  'telegram',
+  'slack',
+  'discord',
+  'whatsapp',
+]);
+
+function isClarifySurfaceType(platform: string): platform is ClarifySurfaceType {
+  return CLARIFY_SURFACE_TYPES.has(platform as ClarifySurfaceType);
+}
+
+/**
+ * Tools that render typed UI cards on the web surface. Channel adapters get
+ * prose instead — by design, not by omission — so they are excluded from every
+ * channel turn's tool definitions. The tools' own `ctx.platform` check is a
+ * backstop, not the gate.
+ */
+export const CHANNEL_EXCLUDED_TOOLS: readonly string[] = ['emit_card', 'render_ui'];
+
+/**
+ * §4.6 rung 3 — how often the escalation sweep looks for a question that has
+ * been unanswered past `clarifyEscalationDelayMs`. Deliberately much shorter
+ * than the rung itself: the poll period is the sweep's error bar, so a 60 s
+ * rung polled every 5 s fires between 60 s and 65 s.
+ */
+const CLARIFY_ESCALATION_POLL_MS = 5_000;
 
 /** Reply sent when a lane is rejected under saturation (typed busy result). */
 const SYSTEM_BUSY_MESSAGE =
@@ -327,6 +389,16 @@ export interface GatewayConfig {
    */
   deliveryLedger?: DeliveryLedger;
   /**
+   * Durable backstop for the in-memory inbound dedup `Set`
+   * (plan/phases/telegram-slack-webhook-mode.md §5). Consulted only when the
+   * `Set` misses, so a continuously-running process pays nothing for it.
+   *
+   * Absent → today's behavior: in-memory only, which a process restart
+   * empties. That is the gap webhook mode + scale-to-zero turns from a rare
+   * crash-time risk into a routine one.
+   */
+  inboundDedup?: InboundDedupStore;
+  /**
    * Maximum number of distinct chats kept in memory. The least-recently-used
    * idle chat is evicted (its lane, session key, personality override, and
    * usage stats are forgotten) once this cap is exceeded. Active in-flight
@@ -405,6 +477,13 @@ export interface GatewayConfig {
    */
   clarifySweepIntervalMs?: number;
   /**
+   * §4.6 rung 3 — how long a PRESENTED background-job question may go
+   * unanswered before a "needs you" notice is pushed to the run's origin lane.
+   * Defaults to 60s per the escalation ladder. Set to 0 to disable the push
+   * entirely (the question still lives its normal life; only the nudge stops).
+   */
+  clarifyEscalationDelayMs?: number;
+  /**
    * Optional card reader for `/personality rich`. When set, the gateway
    * renders a character-sheet card for the bound personality. Slack handles
    * this in its own slash handler; Telegram routes through the gateway, so
@@ -432,12 +511,28 @@ export interface GatewayConfig {
     refresh(): Promise<void>;
     has(id: string): boolean;
     list(): Array<{ id: string; name: string; isDefault: boolean }>;
+    /**
+     * The personality's `voice` block, when it declares one. Optional so the
+     * seam stays backwards-compatible; absent → channel TTS falls back to the
+     * global `auxiliary.tts.voice`, which is what every deployment did before
+     * per-personality voice existed. Read AFTER `refresh()`, so an edited
+     * `voice.tts_voice` takes effect on the next spoken reply without a
+     * restart, exactly like the rest of the directory.
+     */
+    voice?(id: string): PersonalityVoiceConfig | undefined;
   };
   /**
    * Optional attachment cache for cleaning up cached files on session reset
    * (`/new`) and lane eviction. When absent, no cleanup is performed.
    */
   attachmentCache?: AttachmentCache;
+  /**
+   * Storage used to read cached attachment bytes — today only for transcribing
+   * inbound voice notes, which need the audio itself and not just its path.
+   * Absent (with `attachmentCache` present) means audio attachments still land
+   * as `(voice message)`; they are simply not transcribed.
+   */
+  storage?: Storage;
   /** STT provider registry for resolving voice transcription providers by name. */
   sttProviderRegistry?: SttProviderRegistry;
   /** Name of the STT provider to use (from auxiliary.asr.provider in config). */
@@ -450,10 +545,50 @@ export interface GatewayConfig {
   sttProviderConfig?: Record<string, unknown>;
   /** Config dict passed to TTS provider factory (apiKey, model, voice, etc.). */
   ttsProviderConfig?: Record<string, unknown>;
+  /**
+   * `voice.stt.providers.*` / `voice.tts.providers.*` — the NAMED rosters a
+   * personality's `voice.stt_provider` / `voice.tts_provider` picks from.
+   *
+   * Absent → every personality gets the single `sttProviderName` /
+   * `ttsProviderName` default, which is what every deployment did before
+   * per-personality providers reached channel replies. The roster KEY is a
+   * label the operator typed and is never what the egress gate keys on: the
+   * shared resolver gates on the selected entry's `provider` and the
+   * constructed provider's `caps.local`, so naming a cloud entry
+   * `local-anything` cannot walk it past a local-only gate.
+   */
+  sttProviderRoster?: Readonly<Record<string, SttProviderEntry>>;
+  ttsProviderRoster?: Readonly<Record<string, TtsProviderEntry>>;
   /** Secrets resolver for voice provider factories. */
   voiceSecretsResolver?: import('@ethosagent/types').SecretsResolver;
   /** Default voice mode: 'off' | 'mirror_inbound' | 'all'. Default 'mirror_inbound'. */
   defaultVoiceMode?: VoiceMode;
+  /**
+   * Persisted per-lane voice mode. Absent → an in-memory store seeded with
+   * `defaultVoiceMode`, which is exactly the behaviour of the Map this
+   * replaced: modes live for the life of the process and no further.
+   */
+  voiceModeStore?: LaneVoiceModeStore;
+  /**
+   * Synthesized-audio store. Absent → artifacts are not persisted and a failed
+   * voice send cannot be redelivered (the obligation still records, so the loss
+   * is visible rather than silent).
+   */
+  voiceArtifacts?: VoiceArtifactStore;
+  /**
+   * ffmpeg stage. Absent → no transcode: a synthesized format the adapter does
+   * not accept is SKIPPED rather than sent wrong. Sending mp3 bytes to a sink
+   * that declared opus is how audio arrives as an undownloadable document.
+   */
+  transcoder?: Transcoder;
+  /**
+   * `voice.channels.<platform>.ttsOut`. An explicit `false` silences that
+   * platform regardless of lane mode — an operator decision outranks a
+   * conversational one. A platform absent here inherits the lane's mode.
+   */
+  channelVoiceOut?: Readonly<Record<string, boolean>>;
+  /** Transcode bitrate (`voice.transcode.bitrateKbps`). */
+  voiceBitrateKbps?: number;
   /** Adapter lookup for agent-initiated outbound sends (send_message tool). */
   adapters?: Map<string, PlatformAdapter>;
   /** Plugin-contributed adapter factories. The gateway instantiates and starts
@@ -468,7 +603,7 @@ export interface GatewayConfig {
   trustedChannelPlugins?: Set<string>;
   /** Trusted voice provider plugin IDs. Non-local STT/TTS providers must be
    *  in this set to be activated. Local providers (caps.local=true) are exempt. */
-  trustedVoicePlugins?: Set<string>;
+  trustedVoicePlugins?: ReadonlySet<string>;
   /** Resolves (platform, platformUserId) -> internal userId for per-user profiles. */
   resolveUserId?: (
     platform: string,
@@ -579,10 +714,15 @@ export class Gateway {
   /** Bounded LRU of recently-seen inbound-message keys. */
   private readonly seenMessages = new Set<string>();
   private readonly dedupWindow: number;
+  /** Durable dedup backstop. Absent → in-memory only. */
+  private readonly inboundDedup: InboundDedupStore | undefined;
   /** Outbound-message dedup cache. Suppresses `(sessionId, content)` within TTL. */
   private readonly outboundDedup: MessageDedupCache;
   /** Durable delivery-obligation ledger (item 9). Absent → no durability. */
   private readonly deliveryLedger: DeliveryLedger | undefined;
+  /** Accumulated host-pause duration discounted from the stale-obligation
+   *  abandon window. See `applyPauseOffset`. */
+  private pauseOffsetMs = 0;
   /** Streaming draft edits enabled for DMs / group chats (W3.1). */
   private readonly streamingDm: boolean;
   private readonly streamingGroup: boolean;
@@ -627,6 +767,9 @@ export class Gateway {
     | undefined;
   /** Live timer running the periodic clarify sweep, cleared on shutdown. */
   private clarifySweepTimer: ReturnType<typeof setInterval> | undefined;
+  /** §4.6 rung 3 — timer running the unanswered-question escalation sweep. */
+  private clarifyEscalationTimer: ReturnType<typeof setInterval> | undefined;
+  private readonly clarifyEscalationDelayMs: number;
   /** Chapter 1 safety: per-platform sender allowlist + pairing config. */
   private readonly channelFilter: ChannelFilterConfig | undefined;
   /** Static per-channel toolset narrowing (platform → allowed tool names). */
@@ -657,32 +800,53 @@ export class Gateway {
   private readonly personalityDirectory: GatewayConfig['personalityDirectory'];
   /** Optional attachment cache for cleanup on /new and lane eviction. */
   private readonly attachmentCache: AttachmentCache | undefined;
+  /** Optional storage for reading cached attachment bytes (voice-note STT). */
+  private readonly storage: Storage | undefined;
   /** STT provider registry for resolving voice transcription providers by name. */
   private readonly sttProviderRegistry: SttProviderRegistry | undefined;
   /** Name of the STT provider to use (from auxiliary.asr.provider in config). */
   private readonly sttProviderName: string | undefined;
-  /** Lazily resolved STT provider instance. */
-  private sttProvider: SttProvider | null = null;
-  /** Whether `resolveSttProvider` has been called at least once. */
-  private sttProviderResolved = false;
+  /**
+   * Resolved STT providers, ONE PER ROSTER ENTRY — not one per gateway.
+   *
+   * A single memoized provider is what made `voice.stt_provider` a
+   * browser-talk-mode-only setting: whichever personality spoke first bound the
+   * whole process. The key is the selected roster entry (or the default
+   * entry), so two personalities naming the same entry still share one
+   * constructed provider, and the promise is memoized rather than the settled
+   * value so two concurrent turns cannot race into two factory calls.
+   */
+  private readonly sttProviders = new Map<string, Promise<SttProviderForPersonality>>();
   /** TTS provider registry for resolving voice synthesis providers by name. */
   private readonly ttsProviderRegistry: TtsProviderRegistry | undefined;
   /** Name of the TTS provider to use (from auxiliary.tts.provider in config). */
   private readonly ttsProviderName: string | undefined;
-  /** Lazily resolved TTS provider instance. */
-  private ttsProvider: TtsProvider | null = null;
-  /** Whether `resolveTtsProvider` has been called at least once. */
-  private ttsProviderResolved = false;
+  /** Resolved TTS providers, one per roster entry. See {@link sttProviders}. */
+  private readonly ttsProviders = new Map<string, Promise<TtsProviderForPersonality>>();
   /** Config dict passed to STT provider factory. */
   private readonly sttProviderConfig: Record<string, unknown>;
   /** Config dict passed to TTS provider factory. */
   private readonly ttsProviderConfig: Record<string, unknown>;
+  /** `voice.stt.providers.*` — the named roster a personality can pick from. */
+  private readonly sttProviderRoster: Readonly<Record<string, SttProviderEntry>> | undefined;
+  /** `voice.tts.providers.*` — the named roster a personality can pick from. */
+  private readonly ttsProviderRoster: Readonly<Record<string, TtsProviderEntry>> | undefined;
   /** Secrets resolver for voice provider factories. */
   private readonly voiceSecretsResolver: import('@ethosagent/types').SecretsResolver | undefined;
-  /** Per-lane voice mode. */
-  private readonly voiceModes = new Map<string, VoiceMode>();
-  /** Default voice mode for new lanes. */
-  private readonly defaultVoiceMode: VoiceMode;
+  /**
+   * Per-lane voice mode, and the only place the default now lives — the store
+   * owns it, so there is no second copy on the Gateway to drift from it.
+   * Durable when a storage-backed store was injected.
+   */
+  private readonly voiceModeStore: LaneVoiceModeStore;
+  /** Synthesized-audio store backing voice redelivery. Absent → no artifacts. */
+  private readonly voiceArtifacts: VoiceArtifactStore | undefined;
+  /** ffmpeg stage. Absent → only already-accepted formats are sent. */
+  private readonly transcoder: Transcoder | undefined;
+  /** Per-platform TTS-out overrides from `voice.channels.<platform>.ttsOut`. */
+  private readonly channelVoiceOut: Readonly<Record<string, boolean>> | undefined;
+  /** Transcode bitrate in kbps; undefined leaves the transcoder's own default. */
+  private readonly voiceBitrateKbps: number | undefined;
   /** Tracks whether the most recent inbound message per lane had audio. */
   private readonly lastInboundHadAudio = new Map<string, boolean>();
   /** Adapter lookup for agent-initiated outbound sends (send_message tool). */
@@ -690,7 +854,15 @@ export class Gateway {
   private readonly resolveUserIdFn:
     | ((platform: string, platformUserId: string, displayLabel?: string) => Promise<string>)
     | undefined;
-  private readonly trustedVoicePlugins: Set<string> | undefined;
+  private readonly trustedVoicePlugins: ReadonlySet<string> | undefined;
+  // NO `resolvedSttProviderId` / `resolvedTtsProviderId` fields. They used to
+  // hold "the" provider id, which was honest only while one provider served the
+  // whole process. With per-personality resolution a remembered id is a
+  // last-writer-wins global, and a turn stamping it into its own telemetry
+  // would name whichever personality spoke most recently. Each resolution now
+  // returns its id and the caller stamps THAT.
+  /** Why a configured provider did not resolve (refusal, unknown, init fail). */
+  private readonly voiceProviderErrors: { stt?: string; tts?: string } = {};
   private readonly pluginLoader: GatewayConfig['pluginLoader'];
   private readonly notificationRouter: GatewayConfig['notificationRouter'];
   /** Completion notices waiting for their lane to go idle. laneKey -> items. */
@@ -760,6 +932,7 @@ export class Gateway {
     }
 
     this.dedupWindow = config.dedupWindow ?? 1024;
+    this.inboundDedup = config.inboundDedup;
     this.maxChats = config.maxChats ?? 4096;
     this.channelFilter = config.channelFilter;
     this.channelToolsets = config.channelToolsets;
@@ -798,18 +971,34 @@ export class Gateway {
     this.streamingEditIntervalMs = config.streamingEditIntervalMs ?? 2500;
     this.onAllowlistChange = config.onAllowlistChange;
     this.clarifyCorrelator = config.clarifyMessageCorrelator;
+    this.clarifyEscalationDelayMs = config.clarifyEscalationDelayMs ?? DEFAULT_ESCALATION_DELAY_MS;
     this.personalityCardReader = config.personalityCardReader;
     this.greetingProvider = config.greetingProvider;
     this.personalityDirectory = config.personalityDirectory;
     this.attachmentCache = config.attachmentCache;
+    this.storage = config.storage;
     this.sttProviderRegistry = config.sttProviderRegistry;
     this.sttProviderName = config.sttProviderName;
     this.ttsProviderRegistry = config.ttsProviderRegistry;
     this.ttsProviderName = config.ttsProviderName;
     this.sttProviderConfig = config.sttProviderConfig ?? {};
     this.ttsProviderConfig = config.ttsProviderConfig ?? {};
+    this.sttProviderRoster = config.sttProviderRoster;
+    this.ttsProviderRoster = config.ttsProviderRoster;
     this.voiceSecretsResolver = config.voiceSecretsResolver;
-    this.defaultVoiceMode = config.defaultVoiceMode ?? DEFAULT_VOICE_MODE;
+    // No store injected → an in-memory one. `LaneVoiceModeStore` with no
+    // `storage` is exactly the Map this replaced, so a standalone/test gateway
+    // behaves as it always did while a wired one persists across restarts. An
+    // injected store carries its OWN default (the wiring builds it from
+    // `voice.defaultMode`), so `config.defaultVoiceMode` seeds only the
+    // fallback — one default, in one place, either way.
+    this.voiceModeStore =
+      config.voiceModeStore ??
+      new LaneVoiceModeStore({ defaultMode: config.defaultVoiceMode ?? DEFAULT_VOICE_MODE });
+    this.voiceArtifacts = config.voiceArtifacts;
+    this.transcoder = config.transcoder;
+    this.channelVoiceOut = config.channelVoiceOut;
+    this.voiceBitrateKbps = config.voiceBitrateKbps;
     this.trustedVoicePlugins = config.trustedVoicePlugins;
     this.adapterRegistry = config.adapters ?? new Map();
     this.resolveUserIdFn = config.resolveUserId;
@@ -886,6 +1075,17 @@ export class Gateway {
       this.clarifySweepTimer.unref?.();
     }
 
+    // §4.6 rung 3 — its own timer, not the 30s clarify sweep's: a 60s rung
+    // polled every 30s fires anywhere between 60s and 90s, and the ladder's
+    // whole claim is that the push lands when the silence has actually lasted
+    // a minute. Its own cadence keeps the fire window at 60–65s.
+    if (this.clarifyEscalationDelayMs > 0 && bridges.length > 0) {
+      this.clarifyEscalationTimer = setInterval(() => {
+        void this.sweepClarifyEscalations().catch(() => {});
+      }, CLARIFY_ESCALATION_POLL_MS);
+      this.clarifyEscalationTimer.unref?.();
+    }
+
     // Seed in-memory allowlists from DB-persisted approved senders
     if (config.pairingDb && config.channelFilter) {
       for (const [platform, cfg] of Object.entries(config.channelFilter)) {
@@ -900,74 +1100,133 @@ export class Gateway {
     }
   }
 
-  private async resolveSttProvider(): Promise<SttProvider | null> {
-    if (this.sttProviderResolved) return this.sttProvider;
-    this.sttProviderResolved = true;
-    if (!this.sttProviderRegistry || !this.sttProviderName) return null;
-    const factory = this.sttProviderRegistry.get(this.sttProviderName);
-    if (!factory) return null;
-    try {
-      this.sttProvider = await factory({
-        config: this.sttProviderConfig,
-        secrets:
-          this.voiceSecretsResolver ??
-          ({
-            get: async () => null,
-            set: async () => {},
-            delete: async () => {},
-            list: async () => [],
-          } as import('@ethosagent/types').SecretsResolver),
-        logger: noopLogger,
-      });
-      // Trust gate: non-local providers require explicit allowlist
-      if (
-        this.sttProvider &&
-        !this.sttProvider.caps.local &&
-        this.trustedVoicePlugins !== undefined
-      ) {
-        if (!this.trustedVoicePlugins.has(this.sttProviderName ?? '')) {
-          this.sttProvider = null;
-        }
-      }
-    } catch {
-      // STT provider init failed — transcription will fall back to placeholder
-    }
-    return this.sttProvider;
+  // Both resolvers delegate to the SHARED resolution path in
+  // `@ethosagent/core` — the same one web-api and the wiring-built
+  // VoiceSession stack use. Nothing here re-implements provider lookup, roster
+  // selection or the local-only egress gate; a second implementation is exactly
+  // how "config says one provider, the pipeline used another" happens, and the
+  // gate lives INSIDE that shared resolver so there is one door, not two.
+  //
+  // Resolution is per-PERSONALITY. The memo key is the selected roster entry,
+  // computed by the pure `select*Entry` BEFORE the async factory call — so an
+  // unknown roster name collapses onto the default entry's cached provider,
+  // which is where the shared resolver would send it anyway. The returned
+  // `providerId` is what the caller stamps into its telemetry, so "which
+  // provider served this reply" stays answerable per turn rather than per boot.
+  private resolveSttFor(
+    personalityVoice: PersonalityVoiceConfig | undefined,
+  ): Promise<SttProviderForPersonality> {
+    const key =
+      selectSttEntry({
+        ...(personalityVoice?.stt_provider ? { requestedName: personalityVoice.stt_provider } : {}),
+        ...(this.sttProviderRoster ? { roster: this.sttProviderRoster } : {}),
+      }).entryName ?? DEFAULT_VOICE_ENTRY_KEY;
+    const cached = this.sttProviders.get(key);
+    if (cached) return cached;
+    const pending = resolveSttProviderForPersonality({
+      registry: this.sttProviderRegistry,
+      ...(personalityVoice ? { personality: personalityVoice } : {}),
+      ...(this.sttProviderRoster ? { roster: this.sttProviderRoster } : {}),
+      ...(this.sttProviderName ? { defaultProviderName: this.sttProviderName } : {}),
+      defaultProviderConfig: this.sttProviderConfig,
+      ...(this.voiceSecretsResolver ? { secrets: this.voiceSecretsResolver } : {}),
+      logger: noopLogger,
+      ...(this.trustedVoicePlugins ? { trustedVoicePlugins: this.trustedVoicePlugins } : {}),
+    });
+    this.sttProviders.set(key, pending);
+    return pending;
   }
 
-  private async resolveTtsProvider(): Promise<TtsProvider | null> {
-    if (this.ttsProviderResolved) return this.ttsProvider;
-    this.ttsProviderResolved = true;
-    if (!this.ttsProviderRegistry || !this.ttsProviderName) return null;
-    const factory = this.ttsProviderRegistry.get(this.ttsProviderName);
-    if (!factory) return null;
-    try {
-      this.ttsProvider = await factory({
-        config: this.ttsProviderConfig,
-        secrets:
-          this.voiceSecretsResolver ??
-          ({
-            get: async () => null,
-            set: async () => {},
-            delete: async () => {},
-            list: async () => [],
-          } as import('@ethosagent/types').SecretsResolver),
-        logger: noopLogger,
-      });
-      // Trust gate: non-local providers require explicit allowlist
-      if (
-        this.ttsProvider &&
-        !this.ttsProvider.caps.local &&
-        this.trustedVoicePlugins !== undefined
-      ) {
-        if (!this.trustedVoicePlugins.has(this.ttsProviderName ?? '')) {
-          this.ttsProvider = null;
-        }
-      }
-    } catch {
-      // TTS provider init failed — voice replies disabled
+  private resolveTtsFor(
+    personalityVoice: PersonalityVoiceConfig | undefined,
+  ): Promise<TtsProviderForPersonality> {
+    const key =
+      selectTtsEntry({
+        ...(personalityVoice?.tts_provider ? { requestedName: personalityVoice.tts_provider } : {}),
+        ...(this.ttsProviderRoster ? { roster: this.ttsProviderRoster } : {}),
+      }).entryName ?? DEFAULT_VOICE_ENTRY_KEY;
+    const cached = this.ttsProviders.get(key);
+    if (cached) return cached;
+    const pending = resolveTtsProviderForPersonality({
+      registry: this.ttsProviderRegistry,
+      ...(personalityVoice ? { personality: personalityVoice } : {}),
+      ...(this.ttsProviderRoster ? { roster: this.ttsProviderRoster } : {}),
+      ...(this.ttsProviderName ? { defaultProviderName: this.ttsProviderName } : {}),
+      defaultProviderConfig: this.ttsProviderConfig,
+      ...(this.voiceSecretsResolver ? { secrets: this.voiceSecretsResolver } : {}),
+      logger: noopLogger,
+      ...(this.trustedVoicePlugins ? { trustedVoicePlugins: this.trustedVoicePlugins } : {}),
+    });
+    this.ttsProviders.set(key, pending);
+    return pending;
+  }
+
+  /**
+   * The STT provider serving one personality's inbound audio, or null when none
+   * resolved. Records the failure reason (unless "not configured", which is not
+   * a failure) so a refused provider is reportable rather than looking like
+   * "voice just doesn't work here".
+   */
+  private async resolveSttProvider(personalityId?: string): Promise<{
+    provider: SttProvider | null;
+    providerId: string | undefined;
+  }> {
+    const { resolution } = await this.resolveSttFor(this.personalityVoice(personalityId));
+    if (resolution.ok) {
+      return { provider: resolution.provider, providerId: resolution.providerId };
     }
-    return this.ttsProvider;
+    if (resolution.code !== 'not_configured') this.voiceProviderErrors.stt = resolution.error;
+    return { provider: null, providerId: undefined };
+  }
+
+  /** The TTS provider serving one personality's replies. Mirrors the STT half. */
+  private async resolveTtsProvider(personalityId?: string): Promise<{
+    provider: TtsProvider | null;
+    providerId: string | undefined;
+    /** The chosen entry's own voice id — the lowest rung of voice precedence. */
+    entryVoice: string | undefined;
+  }> {
+    const { resolution, globalTtsVoice } = await this.resolveTtsFor(
+      this.personalityVoice(personalityId),
+    );
+    if (resolution.ok) {
+      return {
+        provider: resolution.provider,
+        providerId: resolution.providerId,
+        entryVoice: globalTtsVoice,
+      };
+    }
+    if (resolution.code !== 'not_configured') this.voiceProviderErrors.tts = resolution.error;
+    return { provider: null, providerId: undefined, entryVoice: undefined };
+  }
+
+  /** This personality's `voice` block, when the directory seam exposes one. */
+  private personalityVoice(personalityId?: string): PersonalityVoiceConfig | undefined {
+    return personalityId ? this.personalityDirectory?.voice?.(personalityId) : undefined;
+  }
+
+  /**
+   * What voice resolution actually does here: the provider ids that serve this
+   * gateway's DEFAULT entries, plus the reason either one is missing (unknown
+   * provider, failed init, or refused by the local-only egress gate). Resolution
+   * is memoized, so calling this is equivalent to what the first voice message
+   * on a personality with no roster pick triggers — which is exactly why it can
+   * answer "which provider ran".
+   */
+  async voiceProviderStatus(): Promise<{
+    stt: string | undefined;
+    tts: string | undefined;
+    sttError: string | undefined;
+    ttsError: string | undefined;
+  }> {
+    const stt = await this.resolveSttProvider();
+    const tts = await this.resolveTtsProvider();
+    return {
+      stt: stt.providerId,
+      tts: tts.providerId,
+      sttError: this.voiceProviderErrors.stt,
+      ttsError: this.voiceProviderErrors.tts,
+    };
   }
 
   /**
@@ -980,18 +1239,47 @@ export class Gateway {
    * `messageId` arriving through two different bots is two distinct
    * inbounds, not a duplicate. (Without the botKey segment, multi-bot
    * routing would silently drop one of them.)
+   *
+   * TWO LAYERS, both keyed identically. The in-memory `Set` is the fast path
+   * and answers alone whenever it hits. Only on a miss — and only when a
+   * durable store is configured — does this touch SQLite, because a process
+   * restart empties the `Set` and a platform redelivery arriving at the fresh
+   * process would otherwise be fully reprocessed and re-billed. Under webhook
+   * mode with scale-to-zero that restart is routine rather than rare.
+   *
+   * Synchronous on purpose: the durable store is synchronous too
+   * (`@ethosagent/sqlite` has no async API), and awaiting here would reorder
+   * the inbound pipeline for every message to pay for a cold-start edge.
    */
   private isDuplicate(message: InboundMessage, botKey: string): boolean {
+    // Both layers are disabled together — `dedupWindow: 0` means "no dedup",
+    // not "no in-memory dedup".
     if (this.dedupWindow <= 0 || !message.messageId) return false;
     const key = buildLaneKey(message.platform, botKey, message.chatId, message.messageId);
     if (this.seenMessages.has(key)) return true;
+    // `Set` miss. The durable layer records the sighting and reports whether it
+    // had already seen this key — from this process or a previous one.
+    //
+    // DURABLE FIRST, THEN THE SET, AND THAT ORDER IS LOAD-BEARING. `seen()` is a
+    // synchronous SQLite write and can throw (lock contention past the busy
+    // timeout, a corrupt or unwritable file). Recording the key in memory first
+    // meant a throw left the process holding a sighting that was never durably
+    // stored: this delivery fails, and then every platform retry for the rest of
+    // the process's life short-circuits on `seenMessages.has(key)` above and is
+    // dropped as a duplicate. The retry is the platform's attempt to save the
+    // message the failure lost, and the poisoned entry is what silently
+    // discarded it. Letting the throw propagate with the Set untouched fails
+    // open instead: the retry is reprocessed.
+    const duplicate = this.inboundDedup
+      ? this.inboundDedup.seen(message.platform, botKey, message.chatId, message.messageId)
+      : false;
     this.seenMessages.add(key);
     // Bound the set — drop the oldest entry once we exceed the window.
     if (this.seenMessages.size > this.dedupWindow) {
       const first = this.seenMessages.values().next().value;
       if (first !== undefined) this.seenMessages.delete(first);
     }
-    return false;
+    return duplicate;
   }
 
   // ---------------------------------------------------------------------------
@@ -1012,6 +1300,9 @@ export class Gateway {
     // full resolution. Adapters stamp `botKey` consistently, so the two agree
     // in practice; single-bot has one loop, so a stale/foreign botKey here has
     // no cross-bot effect. The namespace divergence is deliberate, not a bug.
+    // The durable backstop (`inboundDedup`) sits BEHIND this same call, keyed
+    // on the same `dedupBotKey`, so adding it changed nothing about when dedup
+    // runs relative to botKey resolution or the safety filter.
     const dedupBotKey = message.botKey ?? this.defaultBotKey ?? '';
     if (!message.isEdit && this.isDuplicate(message, dedupBotKey)) return;
 
@@ -1073,6 +1364,29 @@ export class Gateway {
         });
         message = { ...message, text: filterResult.strippedText };
       }
+
+      // …and the same for the channel-history block the adapter attached.
+      // Empty means nothing survived the allowlist: drop the field outright
+      // rather than prepend an empty wrapper to the turn.
+      if (filterResult.strippedPriorContext !== undefined) {
+        this.observability?.recordSafetyBlock({
+          code: 'channel.prior_context_stripped',
+          details: {
+            platform: message.platform,
+            chatId: message.chatId,
+            userId: message.userId,
+            dropped: filterResult.strippedPriorContext === '',
+          },
+        });
+        message = {
+          ...message,
+          priorContext:
+            filterResult.strippedPriorContext === ''
+              ? undefined
+              : filterResult.strippedPriorContext,
+          priorContextEntries: undefined,
+        };
+      }
     }
 
     // Resolve which bot this message is for. `message.botKey` wins when
@@ -1108,6 +1422,21 @@ export class Gateway {
       });
       return;
     }
+
+    // Fix 5 (pi-delegation.md D7) — an ordinary inbound message establishes
+    // presence too, not just answering a clarify (the clarify surfaces'
+    // `correlateMessage`/`handleAction` paths above already record it for
+    // that case). Otherwise a background job's later question only ever
+    // routes to wherever the human last happened to answer a clarify, never
+    // to wherever they're just casually chatting.
+    if (isClarifySurfaceType(message.platform)) {
+      bot.loop.clarifyBridge?.recordPresence(message.platform, {
+        chatId: message.chatId,
+        botKey: bot.botKey,
+        ...(message.threadId ? { threadId: message.threadId } : {}),
+      });
+    }
+
     // Adapters that surface a thread identifier (currently only Slack, via
     // `thread_ts`) get a per-thread lane so concurrent threads in the same
     // channel never share session state. Adapters without thread semantics
@@ -1146,7 +1475,10 @@ export class Gateway {
       this.sessionKeys.set(laneKey, fresh);
       this.usageStore.delete(laneKey);
       this.personalityIds.delete(laneKey); // reset to default personality
-      this.voiceModes.delete(laneKey);
+      // Voice mode deliberately SURVIVES /new: it is a durable per-lane
+      // preference ("talk to me out loud in this chat"), not session state, and
+      // a preference a /new wipes is not durable in any sense the user would
+      // recognise. `lastInboundHadAudio` IS per-turn state and still clears.
       this.lastInboundHadAudio.delete(laneKey);
       await adapter.send(message.chatId, { text: '✓ New session started.' }).catch(() => {});
       return;
@@ -1553,12 +1885,12 @@ export class Gateway {
       const arg = text.split(/\s+/).slice(1).join(' ').trim().toLowerCase();
       const validModes: VoiceMode[] = ['off', 'mirror_inbound', 'all'];
       if (arg && validModes.includes(arg as VoiceMode)) {
-        this.voiceModes.set(laneKey, arg as VoiceMode);
+        await this.voiceModeStore.set(laneKey, arg as VoiceMode);
         await adapter
           .send(message.chatId, { text: `✓ Voice mode: ${arg}`, threadId })
           .catch(() => {});
       } else if (!arg) {
-        const current = this.voiceModes.get(laneKey) ?? this.defaultVoiceMode;
+        const current = await this.voiceModeStore.get(laneKey);
         await adapter
           .send(message.chatId, {
             text: `Voice mode: ${current}\nUsage: /voice off|mirror_inbound|all`,
@@ -1710,7 +2042,7 @@ export class Gateway {
           // gate, then the ledger-wrapped adapter send.
           const claimSessionKey = this.sessionKeys.get(laneKey) ?? laneKey;
           if (this.outboundDedup.shouldSend(claimSessionKey, reply)) {
-            await this.sendTracked(
+            const claimDelivered = await this.sendTracked(
               {
                 adapter,
                 botKey: bot.botKey,
@@ -1720,6 +2052,33 @@ export class Gateway {
               },
               { text: reply, threadId },
             );
+            // A claimed reply is still a reply, so it goes through the SAME
+            // voice decision the agent path does — otherwise a lane in `all`
+            // mode falls silent the moment a hook answers for the agent, which
+            // is exactly the "voice-in gets text-out" drift this lane closes.
+            // The claim runs BEFORE transcription, so the audio signal is the
+            // raw attachment list and there is no transcript to detect a
+            // language from.
+            if (
+              claimDelivered &&
+              shouldReplyWithVoice({
+                mode: await this.voiceModeStore.get(laneKey),
+                inboundHadAudio: hasAudioAttachments(message.attachments),
+              })
+            ) {
+              await this.deliverVoiceReply({
+                adapter,
+                botKey: bot.botKey,
+                platform: message.platform,
+                chatId: message.chatId,
+                threadId,
+                sessionKey: claimSessionKey,
+                text: reply,
+                personalityId:
+                  bot.binding.type === 'team' ? undefined : this.activePersonalityFor(laneKey, bot),
+                language: undefined,
+              });
+            }
           }
         }
         return;
@@ -1883,14 +2242,62 @@ export class Gateway {
       let errored: { error: string; code: string } | null = null;
 
       // --- Voice pipeline: auto-transcribe audio attachments ---
-      if (hasAudioAttachments(message.attachments) && this.attachmentCache) {
-        const provider = await this.resolveSttProvider();
+      const attachmentCache = this.attachmentCache;
+      const storage = this.storage;
+      // Set only when a transcript actually reached the turn. It becomes a
+      // MESSAGE-LEVEL `<voice-origin>` annotation inside AgentLoop, riding
+      // ALONGSIDE the `<attachments>` audio marker rather than replacing it —
+      // the transcript is an annotation on the audio message, never a
+      // substitute for it (OC #87269 / Hermes #51131). Nothing goes into the
+      // system prompt, so a lane that mixes typed and spoken messages keeps a
+      // byte-identical static prefix.
+      let voiceOrigin: VoiceTurnOrigin | undefined;
+      // BCP-47 tag of the inbound utterance, when the personality declares a
+      // voice for it. Carried to the reply so a Spanish voice note comes back
+      // in the Spanish voice.
+      let voiceLanguage: string | undefined;
+      if (hasAudioAttachments(message.attachments) && attachmentCache && storage) {
+        // Resolved for THIS personality: a personality naming `voice.stt_provider`
+        // is transcribed by that provider on a channel voice note, not only in
+        // browser talk mode.
+        const stt = await this.resolveSttProvider(personalityId);
         const results = await transcribeAudioAttachments(
           message.attachments ?? [],
-          provider,
-          (url) => this.attachmentCache?.resolveLocalPath(url) ?? url,
+          stt.provider,
+          (url) => storage.readBytes(attachmentCache.resolveLocalPath(url)),
+          {
+            // Normalize before STT and retry once as wav. Absent transcoder →
+            // the provider gets the platform's raw bytes, as it always did.
+            ...(this.transcoder ? { transcoder: this.transcoder } : {}),
+            onStage: (event) => {
+              if (event.ok) return;
+              this.observability?.recordSafetyBlock({
+                code: `gateway.voice_stt_${event.stage}_failed`,
+                cause: event.error,
+                details: { platform: message.platform, chatId: message.chatId },
+              });
+            },
+          },
         );
         text = buildTranscriptText(text, results);
+        // Detected against the personality's OWN language keys, never against
+        // the world: `detectLanguage` only ever decides between candidates, so
+        // a personality with no language map produces no guess and the default
+        // voice stands — the behaviour that existed before this did.
+        const candidates = Object.keys(this.personalityVoice(personalityId)?.languages ?? {});
+        voiceLanguage = candidates.length > 0 ? detectLanguage(text, { candidates }) : undefined;
+        // A channel voice note is the account owner's own message on their own
+        // lane — channel ingress is already sender-gated. A far-end caller
+        // arrives over telephony (V4), never here.
+        //
+        // The stamped id is THIS turn's resolution, not a remembered global:
+        // per-personality resolution makes "which provider ran" a per-turn fact.
+        voiceOrigin = {
+          transport: `${message.platform}-voice-note`,
+          speaker: 'owner',
+          ...(stt.providerId ? { sttProvider: stt.providerId } : {}),
+          ...(voiceLanguage ? { language: voiceLanguage } : {}),
+        };
       }
 
       const wrapped = wrapUntrusted({ content: text, toolName: 'channel_message' });
@@ -1961,7 +2368,11 @@ export class Gateway {
         userId,
         steerSink,
         origin: `${message.platform}:${message.chatId}`,
+        ...(voiceOrigin ? { voiceOrigin } : {}),
         ...(toolsetNarrow ? { toolsetNarrow } : {}),
+        // Unconditional, not config-driven: UI-card tools have no rendering on
+        // any channel adapter, so they never reach a channel turn's tool list.
+        toolsetExclude: [...CHANNEL_EXCLUDED_TOOLS],
       })) {
         translator.push(event);
         // Feed the live draft. Progress folds in only for `audience:'user'`
@@ -2051,52 +2462,25 @@ export class Gateway {
 
         if (delivered) {
           // --- Voice pipeline: post-turn TTS synthesis ---
-          const voiceMode = this.voiceModes.get(laneKey) ?? this.defaultVoiceMode;
-          const hadAudio = this.lastInboundHadAudio.get(laneKey) ?? false;
-          const shouldSynth = voiceMode === 'all' || (voiceMode === 'mirror_inbound' && hadAudio);
-
+          // `shouldReplyWithVoice` is the ONE decision function (voice V1a
+          // eng-review D3, drift-gated). Everything downstream of it is
+          // delivery mechanics, which is why they live in their own method.
+          const shouldSynth = shouldReplyWithVoice({
+            mode: await this.voiceModeStore.get(laneKey),
+            inboundHadAudio: this.lastInboundHadAudio.get(laneKey) ?? false,
+          });
           if (shouldSynth) {
-            const tts = await this.resolveTtsProvider();
-            if (tts) {
-              try {
-                let synthText = stripMarkdown(sanitized);
-                const maxChars = tts.caps.maxInputChars;
-                if (maxChars && synthText.length > maxChars) {
-                  synthText = truncateAtSentenceBoundary(synthText, maxChars);
-                }
-                if (synthText.length > 0) {
-                  const result = await tts.synthesize(synthText);
-                  if (result.format === 'opus' && 'sendVoice' in adapter) {
-                    const voiceAdapter = adapter as {
-                      sendVoice(
-                        chatId: string,
-                        audio: Uint8Array,
-                        opts?: { threadId?: string },
-                      ): Promise<unknown>;
-                    };
-                    await voiceAdapter.sendVoice(message.chatId, result.audio, {
-                      threadId,
-                    });
-                  } else if ('sendAudio' in adapter) {
-                    const audioAdapter = adapter as {
-                      sendAudio(
-                        chatId: string,
-                        audio: Uint8Array,
-                        filename: string,
-                        opts?: { threadId?: string },
-                      ): Promise<unknown>;
-                    };
-                    const ext =
-                      result.format === 'mp3' ? 'mp3' : result.format === 'wav' ? 'wav' : 'audio';
-                    await audioAdapter.sendAudio(message.chatId, result.audio, `reply.${ext}`, {
-                      threadId,
-                    });
-                  }
-                }
-              } catch {
-                // TTS synthesis failed — text already sent, degrade silently
-              }
-            }
+            await this.deliverVoiceReply({
+              adapter,
+              botKey: bot.botKey,
+              platform: message.platform,
+              chatId: message.chatId,
+              threadId,
+              sessionKey,
+              text: sanitized,
+              personalityId,
+              language: voiceLanguage,
+            });
           }
         }
       }
@@ -2125,6 +2509,219 @@ export class Gateway {
       // were deferred because a turn was running.
       void this.flushWakes(laneKey);
     }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Voice replies (voice V2)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Speak one already-delivered reply.
+   *
+   * The caller has already asked `shouldReplyWithVoice()` — that decision has
+   * exactly one implementation and does not live here. What lives here is
+   * everything between "yes, speak" and bytes on the platform: caps, synthesis,
+   * transcode, the byte cap, the artifact, and the delivery obligation.
+   *
+   * ONE voice note per reply, whatever its length. Sentence-chunking belongs to
+   * live surfaces, where a listener is waiting on the first sentence; on a
+   * channel it is eight notifications for one answer.
+   *
+   * Every early return records an event. A voice reply that silently does not
+   * arrive is the failure mode this whole lane exists to close, so "nothing
+   * happened and nobody knows why" is not an acceptable outcome of any branch.
+   */
+  private async deliverVoiceReply(input: {
+    adapter: PlatformAdapter;
+    botKey: string;
+    platform: string;
+    chatId: string;
+    threadId: string | undefined;
+    sessionKey: string;
+    text: string;
+    personalityId: string | undefined;
+    language: string | undefined;
+  }): Promise<void> {
+    // `recordSafetyBlock` is this file's generic event sink — `dedup_drop` and
+    // `delivery_redelivered` already ride it — not a claim that a skipped voice
+    // note is a safety violation.
+    const event = (code: string, details: Record<string, unknown> = {}, cause?: string): void => {
+      this.observability?.recordSafetyBlock({
+        code,
+        ...(cause ? { cause } : {}),
+        details: {
+          platform: input.platform,
+          botKey: input.botKey,
+          chatId: input.chatId,
+          ...details,
+        },
+      });
+    };
+
+    // 1. Operator override. `voice.channels.<platform>.ttsOut: false` outranks
+    //    the lane's mode — a deployment decision beats a conversational one.
+    if (this.channelVoiceOut?.[input.platform] === false) {
+      event('gateway.voice_channel_disabled');
+      return;
+    }
+
+    // 2. DECLARED caps, not `'sendVoice' in adapter`. The duck-type could not
+    //    tell a voice bubble from a file attachment, could not name an accepted
+    //    container, and gave every new adapter a silent no-op by default.
+    if (!isVoiceOutboundAdapter(input.adapter)) {
+      event('gateway.voice_no_caps');
+      return;
+    }
+    const sink = input.adapter;
+
+    // 3. Provider — resolved for THIS personality. A personality naming
+    //    `voice.tts_provider` speaks through that provider on a channel reply,
+    //    not only in browser talk mode. The refusal path is unchanged: a
+    //    roster entry the egress gate rejects yields no provider and no
+    //    synthesize call, whatever the entry was labelled.
+    const tts = await this.resolveTtsProvider(input.personalityId);
+    const speech = tts.provider;
+    if (!speech) {
+      event(
+        'gateway.voice_no_provider',
+        this.voiceProviderErrors.tts ? { error: this.voiceProviderErrors.tts } : {},
+      );
+      return;
+    }
+
+    // 4. Speakable text — markdown, emoji and code fences are not speech.
+    let synthText = sanitizeForSpeech(input.text);
+    const maxChars = speech.caps.maxInputChars;
+    if (maxChars && synthText.length > maxChars) {
+      synthText = truncateAtSentenceBoundary(synthText, maxChars);
+    }
+    if (synthText.length === 0) return;
+
+    // 5. Which voice. Same resolution function the VoiceSession stack uses, so
+    //    "which voice served this reply" has one answer across surfaces:
+    //    language-specific > personality default > the CHOSEN entry's own voice
+    //    (which is `auxiliary.tts.voice` when the default entry served).
+    const personalityVoice = this.personalityVoice(input.personalityId);
+    const voicePrefs = resolveVoicePreferences({
+      ...(personalityVoice ? { personality: personalityVoice } : {}),
+      ...(tts.entryVoice ? { globalTtsVoice: tts.entryVoice } : {}),
+      ...(input.language ? { language: input.language } : {}),
+    });
+
+    // 6. Synthesis.
+    const synthStarted = Date.now();
+    let synthesized: Awaited<ReturnType<TtsProvider['synthesize']>>;
+    try {
+      synthesized = await speech.synthesize(
+        synthText,
+        voicePrefs.ttsVoice ? { voice: voicePrefs.ttsVoice } : undefined,
+      );
+    } catch (err) {
+      event('gateway.voice_synth_failed', {}, err instanceof Error ? err.message : String(err));
+      return;
+    }
+    event('gateway.voice_synth', {
+      format: synthesized.format,
+      bytes: synthesized.audio.length,
+      durationMs: Date.now() - synthStarted,
+      // The id that actually ran this turn, not a remembered global.
+      ...(tts.providerId ? { ttsProvider: tts.providerId } : {}),
+      ...(voicePrefs.ttsVoice ? { voice: voicePrefs.ttsVoice } : {}),
+    });
+
+    // 7. Transcode into a container the sink actually declared.
+    const targets = sink.voiceCaps.outbound.formats;
+    let bytes = synthesized.audio;
+    let finalFormat: VoiceAudioFormat = synthesized.format;
+    if (this.transcoder) {
+      // `Transcoder` promises a typed result, but the shipped ffmpeg one writes
+      // a scratch file first — a full or read-only tmpdir throws before any of
+      // its own error handling runs. The text reply has already gone out, so
+      // that must degrade to "no voice note, and here is why", never to a
+      // rejected turn.
+      const transcoded = await this.transcoder
+        .transcode({
+          data: synthesized.audio,
+          sourceMimeType: voiceAudioMimeType(synthesized.format),
+          targets,
+          ...(this.voiceBitrateKbps ? { bitrateKbps: this.voiceBitrateKbps } : {}),
+        })
+        .catch(
+          (err: unknown): TranscodeResult => ({
+            ok: false,
+            code: 'failed',
+            error: err instanceof Error ? err.message : String(err),
+          }),
+        );
+      if (!transcoded.ok) {
+        event('gateway.voice_transcode_failed', { code: transcoded.code }, transcoded.error);
+        return;
+      }
+      bytes = transcoded.data;
+      finalFormat = transcoded.format;
+    } else if (!targets.includes(synthesized.format)) {
+      // No ffmpeg on this host. Sending mp3 bytes to a sink that declared opus
+      // produces an undownloadable document, not a voice note — so skip and say
+      // so, rather than deliver something that looks like a bug to the user.
+      event('gateway.voice_format_unsupported', { format: synthesized.format, accepted: targets });
+      return;
+    }
+
+    // 8. Platform byte cap.
+    const maxBytes = sink.voiceCaps.outbound.maxBytes;
+    if (maxBytes !== undefined && bytes.length > maxBytes) {
+      event('gateway.voice_too_large', { bytes: bytes.length, maxBytes });
+      return;
+    }
+
+    // 9. Persist the artifact BEFORE the send, so a failed send has something
+    //    to redeliver. A store that is absent or failing returns null: the
+    //    obligation is still recorded, which makes the loss visible even though
+    //    it cannot then be repaired.
+    const ref = (await this.voiceArtifacts?.put(bytes, finalFormat)) ?? null;
+
+    // 10. Ledger, four-path contract: pending BEFORE the platform call.
+    //     `content` is the SPOKEN TEXT — a voice row stays readable, hashes to
+    //     a comparable value, and is diagnosable when its artifact is gone.
+    const binding = this.deliveryBinding(input.botKey, input.platform);
+    const obligationId = await beginDelivery(binding, {
+      chatId: input.chatId,
+      sessionId: input.sessionKey,
+      threadId: input.threadId,
+      content: synthText,
+      kind: 'voice',
+      ...(ref ? { artifactRef: ref } : {}),
+      mediaFormat: finalFormat,
+    });
+
+    // 11. Send. A throw folds into `{ ok: false }` exactly as in `sendTracked`.
+    const result = await sink
+      .sendVoiceNote(input.chatId, bytes, {
+        format: finalFormat,
+        mimeType: voiceAudioMimeType(finalFormat),
+        filename: `reply.${voiceAudioExtension(finalFormat)}`,
+        ...(input.threadId ? { threadId: input.threadId } : {}),
+      })
+      .catch(
+        (err: unknown): DeliveryResult => ({
+          ok: false,
+          error: err instanceof Error ? err.message : String(err),
+        }),
+      );
+
+    // 12. Confirmed → the obligation is discharged and its artifact is released
+    //     (retention D9: delivering deletes). Otherwise the row stays `pending`
+    //     and the artifact stays on disk for the sweep to re-send.
+    if (result?.ok === true) {
+      await confirmDelivery(binding, obligationId);
+      if (ref) await this.voiceArtifacts?.remove(ref);
+      return;
+    }
+    event(
+      'gateway.delivery_unconfirmed',
+      { kind: 'voice', error: result?.error, durable: obligationId !== null },
+      'adapter did not confirm voice delivery',
+    );
   }
 
   // ---------------------------------------------------------------------------
@@ -2313,6 +2910,22 @@ export class Gateway {
   }
 
   /**
+   * Whether any turn is in flight on this gateway — the busy predicate an
+   * idle-watcher consults before a scale-to-zero host is told it may snapshot
+   * or stop the VM.
+   *
+   * Both maps are read from one accessor because they are two halves of the
+   * same fact: `activeTurns` and `activeSinks` are set together at turn start
+   * and deleted together in `runTurn`'s `finally`, so they are normally empty
+   * or non-empty as a pair. The `||` is the conservative half — if a sink ever
+   * outlived its turn it would still be work in flight, and answering "idle"
+   * there would stop the process out from under a live steer.
+   */
+  hasActiveTurns(): boolean {
+    return this.activeTurns.size > 0 || this.activeSinks.size > 0;
+  }
+
+  /**
    * Stop all active session lanes gracefully. If `notify` is set, send that
    * text to every chat with an in-flight turn before aborting — so users
    * never see silent failure on shutdown / upgrade. See IMPROVEMENT.md P1-1
@@ -2329,6 +2942,10 @@ export class Gateway {
     if (this.clarifySweepTimer) {
       clearInterval(this.clarifySweepTimer);
       this.clarifySweepTimer = undefined;
+    }
+    if (this.clarifyEscalationTimer) {
+      clearInterval(this.clarifyEscalationTimer);
+      this.clarifyEscalationTimer = undefined;
     }
     if (this.bgWakeSweepTimer) {
       clearInterval(this.bgWakeSweepTimer);
@@ -2442,6 +3059,74 @@ export class Gateway {
   }
 
   /**
+   * Send an agent- or subsystem-initiated notification through the DURABLE
+   * outbound path — the public door onto `sendTracked`.
+   *
+   * `sendTo()` is the other public send and records no obligation: it is the
+   * `send_message` tool's path, where the agent is told immediately whether the
+   * send worked and can react. This one is for messages nobody is waiting on —
+   * a post-call summary, an owner notice that a call was refused for capacity —
+   * where "silently lost" is the failure mode and a `pending` row that the boot
+   * sweep redelivers is the fix. Same ledger, same `DeliveryResult.ok === true`
+   * definition of confirmed, same observability event on an unconfirmed send;
+   * there is deliberately no second ledger path.
+   *
+   * Returns whether the platform CONFIRMED. `false` with a ledger wired means
+   * the obligation is still `pending` and will be retried by
+   * {@link sweepPendingDeliveries}.
+   *
+   * Refuses (returning false, and recording the same unconfirmed event) when
+   * the platform has no registered adapter, or when the bot cannot be named: an
+   * obligation filed under a botKey this process does not own is one the sweep
+   * will never pick up, which is a lost message wearing a durable row. In
+   * multi-bot deployments `botKey` is therefore required — `voice.inbound.owner`
+   * carries one for exactly this reason.
+   */
+  async notifyTracked(
+    target: {
+      platform: string;
+      chatId: string;
+      botKey?: string;
+      /** Ledger session id. Defaults to `<platform>:<chatId>`. */
+      sessionKey?: string;
+      threadId?: string;
+    },
+    text: string,
+  ): Promise<boolean> {
+    const refuse = (cause: string): false => {
+      this.observability?.recordSafetyBlock({
+        code: 'gateway.delivery_unconfirmed',
+        cause,
+        details: {
+          platform: target.platform,
+          ...(target.botKey ? { botKey: target.botKey } : {}),
+          chatId: target.chatId,
+          durable: false,
+        },
+      });
+      return false;
+    };
+
+    const adapter = this.adapterRegistry.get(target.platform);
+    if (!adapter) return refuse(`no adapter registered for platform "${target.platform}"`);
+
+    const botKey = target.botKey ?? this.defaultBotKey;
+    if (!botKey) return refuse('no botKey given and this deployment has no single default bot');
+    if (!this.bots.has(botKey)) return refuse(`botKey "${botKey}" is not served by this process`);
+
+    return this.sendTracked(
+      {
+        adapter,
+        botKey,
+        platform: target.platform,
+        chatId: target.chatId,
+        sessionKey: target.sessionKey ?? `${target.platform}:${target.chatId}`,
+      },
+      { text, ...(target.threadId ? { threadId: target.threadId } : {}) },
+    );
+  }
+
+  /**
    * Redeliver every `pending` obligation this process OWNS.
    *
    * Ownership is `botKey ∈ this.bots` — a deployment sharing a ledger file
@@ -2489,6 +3174,14 @@ export class Gateway {
           failed++;
           continue;
         }
+        if (row.kind === 'voice') {
+          // A voice obligation owes BYTES, not a string, so it takes its own
+          // path — one that re-sends the stored artifact and never
+          // re-synthesizes (a second TTS pass is a different recording).
+          if (await this.redeliverVoiceObligation(row, adapter, ledger)) redelivered++;
+          else failed++;
+          continue;
+        }
         // The row carries its thread, so a redelivered reply returns to the
         // sub-conversation it belonged to instead of the root chat. `threadId`
         // is `undefined` for an unthreaded row — never '' or the string 'null',
@@ -2530,6 +3223,178 @@ export class Gateway {
       }
     }
     return { redelivered, failed };
+  }
+
+  /**
+   * Redeliver one claimed `voice` obligation by re-sending its stored artifact.
+   *
+   * It never re-synthesizes. A second TTS pass is a different recording — the
+   * engine is not deterministic and the personality's voice may have changed
+   * since — so the user would receive an answer they can hear is not the one
+   * that was lost. The artifact IS the obligation's payload.
+   *
+   * Returns whether the platform confirmed. Every failure hands the row back to
+   * the pending pool rather than burning it.
+   */
+  private async redeliverVoiceObligation(
+    row: DeliveryObligation,
+    adapter: PlatformAdapter,
+    ledger: DeliveryLedger,
+  ): Promise<boolean> {
+    const giveBack = async (code: string, details: Record<string, unknown> = {}) => {
+      await ledger.release(row.id);
+      this.observability?.recordSafetyBlock({
+        code,
+        details: { platform: row.platform, botKey: row.botKey, chatId: row.chatId, ...details },
+      });
+      return false;
+    };
+
+    const ref = row.artifactRef;
+    const bytes = ref ? await this.voiceArtifacts?.read(ref) : undefined;
+    if (!bytes) {
+      // Deliberately NOT a text fallback on `row.content`. The written reply
+      // for this turn already went out under its own obligation, so sending
+      // the spoken text as a message here would deliver the same answer twice.
+      // A missing voice note is the smaller failure, and the event names it.
+      return giveBack('gateway.voice_artifact_missing', { artifactRef: ref ?? null });
+    }
+    if (!isVoiceOutboundAdapter(adapter)) {
+      return giveBack('gateway.voice_no_caps');
+    }
+
+    const declared = adapter.voiceCaps.outbound.formats;
+    // The row's own format is authoritative: the artifact holds exactly those
+    // bytes, and re-labelling them would hand the platform a mislabelled
+    // container. It is matched against the adapter's declared list because that
+    // is the only typed source of `VoiceAudioFormat` values here — a stored
+    // format the adapter no longer accepts (a caps change between the send and
+    // the sweep) is refused rather than mislabelled. A null column is a pre-v3
+    // row or a store that lost it; the sink's preferred format is the best
+    // available guess.
+    const format = row.mediaFormat ? declared.find((f) => f === row.mediaFormat) : declared[0];
+    if (!format) {
+      return giveBack('gateway.voice_format_unsupported', {
+        format: row.mediaFormat,
+        accepted: declared,
+      });
+    }
+
+    const result = await adapter
+      .sendVoiceNote(row.chatId, bytes, {
+        format,
+        mimeType: voiceAudioMimeType(format),
+        filename: `reply.${voiceAudioExtension(format)}`,
+        ...(row.threadId ? { threadId: row.threadId } : {}),
+      })
+      .catch(
+        (err: unknown): DeliveryResult => ({
+          ok: false,
+          error: err instanceof Error ? err.message : String(err),
+        }),
+      );
+    if (result?.ok !== true) {
+      return giveBack('gateway.delivery_unconfirmed', { kind: 'voice', error: result?.error });
+    }
+
+    await ledger.markDelivered(row.id);
+    // Redelivery bypassed `shouldSend()` — a warm cache must not swallow what
+    // the user never received — so record the key afterwards, exactly as the
+    // text path does, and release the artifact now that it is discharged.
+    this.outboundDedup.record(row.sessionId, row.content);
+    if (ref) await this.voiceArtifacts?.remove(ref);
+    this.observability?.recordSafetyBlock({
+      code: 'gateway.delivery_redelivered',
+      details: {
+        kind: 'voice',
+        platform: row.platform,
+        botKey: row.botKey,
+        chatId: row.chatId,
+        contentHash: row.contentHash,
+        createdAt: row.createdAt,
+      },
+    });
+    return true;
+  }
+
+  /**
+   * Discount a host pause from the stale-obligation abandon window.
+   *
+   * On a snapshot-and-restore host the wall clock advances while the guest is
+   * frozen. If the pause alone exceeds `abandonAfterDays`, the first
+   * post-resume sweep abandons — and, for voice, DELETES the audio artifact of
+   * — an obligation that was never actually lost. Successive pauses accumulate
+   * until spent. Non-positive or non-finite durations are a no-op.
+   *
+   * SPENT ON THE FIRST SWEEP, NOT HELD FOREVER. The offset widens the abandon
+   * window for the sweep that follows the resume and is then zeroed. Holding it
+   * permanently would apply it to obligations CREATED AFTER the resume, whose
+   * `created_at` was stamped by an already-correct clock: a seven-day pause
+   * would silently grant every future obligation seven extra retention days,
+   * and repeated pauses would compound that without bound until nothing was
+   * ever abandoned. Plan §2's own wording for this gate is "the first
+   * post-resume sweep"; one-shot is what makes it match the self-limiting
+   * bump-forward the other gates use, where the correction lands on the stored
+   * timestamps of rows that already exist and cannot touch later ones.
+   */
+  applyPauseOffset(pauseDurationMs: number): void {
+    if (!Number.isFinite(pauseDurationMs) || pauseDurationMs <= 0) return;
+    this.pauseOffsetMs += pauseDurationMs;
+  }
+
+  /**
+   * Retention pass for synthesized voice artifacts.
+   *
+   * Three mechanisms, in the order they should fire: an obligation that was
+   * DELIVERED released its artifact at confirm time (in `deliverVoiceReply`);
+   * one that was never delivered is abandoned here after `abandonAfterDays` and
+   * its artifact deleted with it; and the total-size cap is the backstop for
+   * everything neither of those caught — an artifact whose row vanished, or a
+   * burst that outran the abandon window.
+   *
+   * Never throws, and never runs without both a ledger and a store: abandoning
+   * rows whose artifacts nothing can delete, or deleting artifacts whose rows
+   * nothing abandoned, would leave the two halves permanently out of step.
+   */
+  async pruneVoiceArtifacts(opts: {
+    abandonAfterDays: number;
+    maxTotalMb: number;
+  }): Promise<{ abandoned: number; bytesFreed: number }> {
+    const ledger = this.deliveryLedger;
+    const artifacts = this.voiceArtifacts;
+    if (!ledger || !artifacts) return { abandoned: 0, bytesFreed: 0 };
+
+    let abandoned = 0;
+    try {
+      // Read and SPEND in one step — see `applyPauseOffset`. Zeroed before the
+      // await, not after, so a sweep that throws still consumes it: a retained
+      // offset would re-widen every later sweep for the life of the process.
+      const cutoff = Date.now() - opts.abandonAfterDays * 86_400_000 - this.pauseOffsetMs;
+      this.pauseOffsetMs = 0;
+      // Ownership-filtered inside the ledger: a shared ledger file must never
+      // let this deployment abandon a live peer's obligation.
+      const rows = await ledger.abandonStale([...this.bots.keys()], cutoff);
+      abandoned = rows.length;
+      for (const row of rows) {
+        if (row.artifactRef) await artifacts.remove(row.artifactRef);
+      }
+    } catch (err) {
+      this.observability?.recordSafetyBlock({
+        code: 'gateway.voice_abandon_failed',
+        cause: err instanceof Error ? err.message : String(err),
+      });
+    }
+
+    let bytesFreed = 0;
+    try {
+      bytesFreed = await artifacts.enforceSizeCap(opts.maxTotalMb * 1024 * 1024);
+    } catch (err) {
+      this.observability?.recordSafetyBlock({
+        code: 'gateway.voice_size_cap_failed',
+        cause: err instanceof Error ? err.message : String(err),
+      });
+    }
+    return { abandoned, bytesFreed };
   }
 
   // ---------------------------------------------------------------------------
@@ -2610,6 +3475,113 @@ export class Gateway {
       }
     }
     return { delivered, failed };
+  }
+
+  // ---------------------------------------------------------------------------
+  // Mid-run "needs you" escalation (§4.6 rung 3)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Push a "needs you" notice to the origin lane of every run parked on a
+   * question that has been PRESENTED and unanswered for longer than
+   * `clarifyEscalationDelayMs` (§4.6 rung 3, D2's clock rule).
+   *
+   * Runs on its own timer, and is public so a caller (or a test) can drive one
+   * pass deterministically. Per bot: the bridge supplies the SHARED clarify
+   * store every process sweeps, the job store supplies G5's second claim
+   * (`claimNotice`, keyed by `requestId` so it never spends the completion
+   * notice's `deliveredAt`), and delivery goes through `sendTracked` — the same
+   * ledger-backed path the completion notice uses, so an unconfirmed push is
+   * redelivered by `sweepPendingDeliveries()` rather than lost.
+   *
+   * Never throws: it is called from a timer with no one to catch it.
+   */
+  async sweepClarifyEscalations(
+    now: number = Date.now(),
+  ): Promise<{ pushed: number; failed: number }> {
+    let pushed = 0;
+    let failed = 0;
+    for (const bot of this.bots.values()) {
+      const bridge = bot.loop.clarifyBridge;
+      const store = bot.jobStore;
+      if (!bridge || !store) continue;
+      const result = await runClarifyEscalationSweep(
+        {
+          store: bridge.store,
+          jobs: store,
+          delayMs: this.clarifyEscalationDelayMs,
+          // With a ledger wired, an unconfirmed push left a `pending`
+          // obligation and the ledger sweep owns the retry, so the claim is
+          // kept. Without one, nothing would ever retry — release it.
+          durableRetry: this.deliveryLedger !== undefined,
+          resolveTarget: (job) => this.clarifyNoticeTarget(bot, job),
+          notify: (target, text) => this.deliverClarifyNotice(bot, target, text),
+          onError: (stage, err, details) => {
+            this.observability?.recordSafetyBlock({
+              code: 'clarify.escalation_failed',
+              cause: err instanceof Error ? err.message : String(err),
+              details: { stage, botKey: bot.botKey, ...details },
+            });
+          },
+        },
+        now,
+      );
+      pushed += result.pushed;
+      failed += result.failed;
+    }
+    return { pushed, failed };
+  }
+
+  /**
+   * The lane a parked run's notice is pushed to, or `null` to skip it: a job
+   * with no recorded origin (CLI-owned), a job whose origin belongs to a
+   * DIFFERENT bot in a shared store (an obligation filed under someone else's
+   * botKey is a lost message), or a platform this process has no adapter for.
+   * Skipping returns the row untouched — its claim is never spent.
+   */
+  private clarifyNoticeTarget(
+    bot: GatewayBotConfig,
+    job: BackgroundJob,
+  ): ClarifyNoticeTarget | null {
+    const platform = job.originPlatform;
+    const chatId = job.originChatId;
+    if (!platform || !chatId) return null;
+    if (job.originBotKey && job.originBotKey !== bot.botKey) return null;
+    if (!this.adapterRegistry.get(platform)) return null;
+    return {
+      platform,
+      botKey: bot.botKey,
+      chatId,
+      ...(job.originThreadId ? { threadId: job.originThreadId } : {}),
+    };
+  }
+
+  /**
+   * Send one escalation notice through the durable outbound path. Returns
+   * whether the platform confirmed; a dedup hit counts as confirmed, since the
+   * identical text already reached this lane.
+   */
+  private async deliverClarifyNotice(
+    bot: GatewayBotConfig,
+    target: ClarifyNoticeTarget,
+    text: string,
+  ): Promise<boolean> {
+    const adapter = this.adapterRegistry.get(target.platform);
+    if (!adapter) return false;
+    const laneKey = target.threadId
+      ? buildLaneKey(target.platform, bot.botKey, target.chatId, target.threadId)
+      : buildLaneKey(target.platform, bot.botKey, target.chatId);
+    if (!this.outboundDedup.shouldSend(laneKey, text)) return true;
+    return this.sendTracked(
+      {
+        adapter,
+        botKey: bot.botKey,
+        platform: target.platform,
+        chatId: target.chatId,
+        sessionKey: this.sessionKeys.get(laneKey) ?? laneKey,
+      },
+      { text, ...(target.threadId ? { threadId: target.threadId } : {}) },
+    );
   }
 
   /**
@@ -2745,7 +3717,10 @@ export class Gateway {
       this.sessionKeys.delete(evictedKey);
       this.personalityIds.delete(evictedKey);
       this.usageStore.delete(evictedKey);
-      this.voiceModes.delete(evictedKey);
+      // Voice mode is NOT evicted with the lane. Eviction is a memory-pressure
+      // decision about in-process state; the mode is a persisted preference,
+      // and dropping it here would silently un-set what the user typed the
+      // moment a busy deployment crossed `maxChats`.
       this.lastInboundHadAudio.delete(evictedKey);
     }
   }

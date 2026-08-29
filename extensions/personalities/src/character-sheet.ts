@@ -1,6 +1,9 @@
 import {
   type ConstitutionEnforcement,
+  derivedCallTreatment,
   type ExecutionPosture,
+  GUARANTEE_IDS,
+  type GuaranteeId,
   type PersonalityConfig,
   resolveModelDisplay,
 } from '@ethosagent/types';
@@ -164,27 +167,31 @@ const POSTURE_LABEL: Record<ExecutionPosture['backend'], string> = {
   none: 'none (no execution backend)',
 };
 
+/**
+ * The one posture label. Used by `## Execution` and by the `G-EXEC` row of
+ * `## Boundary`, so the boundary summary cannot describe the posture in
+ * different words from the section it summarises.
+ */
+function postureLabelFor(posture: ExecutionPosture): string {
+  if (posture.containerized) return 'containerized (local)';
+  // F1/P2 — a sandbox/remote backend was wanted but unavailable; execution
+  // honestly runs on the host. Never claim "Sandboxed · Docker" or
+  // "ssh (remote host)" while running un-sandboxed on the host.
+  if (posture.hostFallback) {
+    return posture.hostFallback.reason === 'ssh-unavailable'
+      ? 'local (un-sandboxed — runs on host; ssh backend unavailable)'
+      : 'local (un-sandboxed — runs on host; Docker unavailable)';
+  }
+  return POSTURE_LABEL[posture.backend];
+}
+
 /** Render the `## Execution` block. Pure — takes the resolved posture + context. */
 function executionSection(config: PersonalityConfig, exec: CharacterSheetExecution): string[] {
   const { posture, enforcement } = exec;
   const platform = exec.platform ?? process.platform;
   const lines: string[] = ['## Execution'];
 
-  let postureLabel: string;
-  if (posture.containerized) {
-    postureLabel = 'containerized (local)';
-  } else if (posture.hostFallback) {
-    // F1/P2 — a sandbox/remote backend was wanted but unavailable; execution
-    // honestly runs on the host. Never claim "Sandboxed · Docker" or
-    // "ssh (remote host)" while running un-sandboxed on the host.
-    postureLabel =
-      posture.hostFallback.reason === 'ssh-unavailable'
-        ? 'local (un-sandboxed — runs on host; ssh backend unavailable)'
-        : 'local (un-sandboxed — runs on host; Docker unavailable)';
-  } else {
-    postureLabel = POSTURE_LABEL[posture.backend];
-  }
-  lines.push(`- Posture:    ${postureLabel}`);
+  lines.push(`- Posture:    ${postureLabelFor(posture)}`);
   lines.push(`- Network:    ${posture.networkMode}`);
   lines.push(`- Memory cap: ${posture.memoryMb} MB`);
 
@@ -284,16 +291,410 @@ function executionSection(config: PersonalityConfig, exec: CharacterSheetExecuti
 }
 
 /**
+ * tools-as-code-api Lane G — the script-callable tool surface, as PLAIN DATA.
+ * Computed by callers via `scriptCallableFor()` from `@ethosagent/core` — the
+ * SAME derivation the ScriptToolBridge enforces, so the displayed surface
+ * cannot drift from the enforced one. Passed in like `CharacterSheetModelFit`:
+ * the personalities package never reaches into core/wiring for a registry.
+ * Absent (no live tool registry at the call site) → the line is omitted,
+ * mirroring the fail-soft `## Model fit` behaviour.
+ */
+export interface CharacterSheetScriptSurface {
+  /** Sorted tool names from `scriptCallableFor(personality, registry)`. */
+  callable: readonly string[];
+}
+
+/**
+ * §4.7 — what this surface knows about the personality's reach that the config
+ * alone cannot say. Today one field, computed by callers via
+ * `toolsDeclaringNetwork()` from `@ethosagent/core` (the SAME `capabilities`
+ * declaration G-CAP intersects per call), passed in as PLAIN DATA like
+ * `CharacterSheetScriptSurface`. Absent (no live tool registry at the call
+ * site) → the sheet does not claim a guarantee is inapplicable; it reports the
+ * enforced/configured state and says nothing it cannot see.
+ */
+export interface CharacterSheetBoundary {
+  /** Built-in tools in this personality's toolset that declare network reach. */
+  networkTools: readonly string[];
+}
+
+/**
+ * Status of ONE published guarantee for ONE personality.
+ *
+ * - `enforced` — the kernel enforces it and nothing in this personality's
+ *   configuration changes it.
+ * - `narrowed` — enforced, and this personality tightens it (a smaller toolset,
+ *   a declared `fs_reach`, a host allowlist, extra redaction patterns).
+ * - `relaxed`  — enforced floor still holds, but this personality widens or
+ *   disables something above it. NOT a waiver: no register guarantee can be
+ *   switched off, and the row says what still runs.
+ * - `n/a`      — nothing in this personality reaches the guarantee: no tool that
+ *   could trigger it, or its state is decided outside the personality entirely.
+ */
+type GuaranteeStatus = 'enforced' | 'narrowed' | 'relaxed' | 'n/a';
+
+interface GuaranteeRow {
+  status: GuaranteeStatus;
+  /** One line. What is true for THIS personality — never the register's prose. */
+  detail: string;
+}
+
+function joinParts(parts: string[]): string {
+  return parts.filter((p) => p !== '').join('; ');
+}
+
+function plural(n: number, word: string): string {
+  return `${n} ${word}${n === 1 ? '' : 's'}`;
+}
+
+/**
+ * Derive every register row's status from the personality's RESOLVED
+ * configuration plus whatever this surface resolved for it (execution posture,
+ * script surface, declared network reach). Keyed by `GuaranteeId`, so a
+ * thirteenth register row fails to compile here until it is given a status —
+ * the sheet cannot silently stop covering the register.
+ */
+function guaranteeRows(
+  config: PersonalityConfig,
+  execution?: CharacterSheetExecution,
+  scriptSurface?: CharacterSheetScriptSurface,
+  boundary?: CharacterSheetBoundary,
+): Record<GuaranteeId, GuaranteeRow> {
+  const safety = config.safety;
+  const toolset = config.toolset;
+  const mcpCount = config.mcp_servers?.length ?? 0;
+  const pluginCount = config.plugins?.length ?? 0;
+  // MCP servers and plugins reach out of this process on their own terms — a
+  // plugin runs in-process with full Node privileges — so their presence is
+  // enough to refuse an "inapplicable" verdict for reach-shaped guarantees.
+  const thirdPartyCode = mcpCount > 0 || pluginCount > 0;
+
+  // G-TOOLS — the allowlist is always double-enforced; what varies is whether
+  // this personality declared one at all.
+  let tools: GuaranteeRow;
+  if (toolset === undefined) {
+    tools = {
+      status: 'relaxed',
+      detail: 'no toolset declared — every registered built-in tool is reachable',
+    };
+  } else {
+    const script =
+      toolset.includes('run_code') && scriptSurface
+        ? `${scriptSurface.callable.length} script-callable`
+        : '';
+    tools = {
+      status: 'narrowed',
+      detail: joinParts([
+        `${plural(toolset.length, 'tool')} allowed, re-checked at execution`,
+        script,
+      ]),
+    };
+  }
+
+  // G-CAP — always enforced per call; the personality's own policy is what the
+  // declaration is intersected WITH.
+  const capNarrowings = [
+    config.fs_reach ? 'fs_reach' : '',
+    safety?.network?.allow?.length ? 'network allowlist' : '',
+  ].filter((p) => p !== '');
+  const cap: GuaranteeRow = {
+    status: capNarrowings.length > 0 ? 'narrowed' : 'enforced',
+    detail: joinParts([
+      'tool declarations ∩ personality policy, resolved per call',
+      capNarrowings.length > 0 ? `intersected with ${capNarrowings.join(' + ')}` : '',
+    ]),
+  };
+
+  // G-FS — the floor is always on; a declared reach replaces the default scope.
+  const reach = config.fs_reach;
+  const readCount = reach?.read?.length ?? 0;
+  const writeCount = reach?.write?.length ?? 0;
+  const fs: GuaranteeRow = reach
+    ? {
+        status: 'narrowed',
+        detail: joinParts([
+          `declared reach: ${readCount} read / ${writeCount} write prefix${
+            readCount + writeCount === 1 ? '' : 'es'
+          } (see Filesystem reach)`,
+          reach.workdir ? `workdir ${reach.workdir}` : '',
+        ]),
+      }
+    : {
+        status: 'enforced',
+        detail: 'default reach: own directory, ~/.ethos/skills/, working directory',
+      };
+
+  // G-NET — the safeFetch floor is not overridable from above it; the two
+  // things a personality can do are narrow the destination set and opt into
+  // private-network destinations.
+  const net = safety?.network;
+  let netRow: GuaranteeRow;
+  if (boundary && boundary.networkTools.length === 0 && !thirdPartyCode) {
+    netRow = { status: 'n/a', detail: 'no tool in this toolset declares network reach' };
+  } else {
+    // Every part that is true is stated: a personality can both narrow the
+    // destination set AND opt into private destinations, and hiding the second
+    // behind the first is exactly the thing this section exists to prevent.
+    const allowPart = net?.allow?.length
+      ? `host allowlist: ${plural(net.allow.length, 'host')} over the always-on floor`
+      : 'safeFetch floor: resolved-IP checks, per-hop redirect revalidation';
+    const suffix = joinParts([
+      net?.deny?.length ? plural(net.deny.length, 'deny rule') : '',
+      boundary ? plural(boundary.networkTools.length, 'network tool') : '',
+      thirdPartyCode && boundary?.networkTools.length === 0 ? 'reach is MCP/plugin-side only' : '',
+    ]);
+    netRow = net?.allow_private_urls
+      ? {
+          status: 'relaxed',
+          detail: joinParts([
+            'allow_private_urls — RFC1918/loopback/link-local permitted (cloud metadata still blocked)',
+            allowPart,
+            suffix,
+          ]),
+        }
+      : {
+          status: net?.allow?.length ? 'narrowed' : 'enforced',
+          detail: joinParts([allowPart, suffix]),
+        };
+  }
+
+  // G-INJ — there is no opt-out. The knobs below narrow or relax behaviour
+  // INSIDE the pipeline; wrapping and the tier-1 classifier run regardless.
+  const inj = safety?.injectionDefense;
+  const injRelaxations = [
+    inj?.postReadDowngrade?.enabled === false ? 'post-read downgrade off' : '',
+    inj?.blockSecretResults === false ? 'secret-bearing results emitted, not blocked' : '',
+    inj?.toolResultDelimiters === false ? 'result delimiters off' : '',
+  ].filter((p) => p !== '');
+  const injTightenings = [
+    inj?.classifier?.alwaysCallLLM ? 'LLM classifier on every untrusted result' : '',
+    inj?.postReadDowngrade?.turns !== undefined
+      ? `downgrade ${plural(inj.postReadDowngrade.turns, 'turn')}`
+      : '',
+    Array.isArray(inj?.postReadDowngrade?.tools)
+      ? `downgrade set: ${plural(inj.postReadDowngrade.tools.length, 'tool')}`
+      : '',
+  ].filter((p) => p !== '');
+  let injRow: GuaranteeRow;
+  if (injRelaxations.length > 0) {
+    injRow = {
+      status: 'relaxed',
+      detail: `${joinParts(injRelaxations)} — prelude, wrapping and classifier still run (no opt-out)`,
+    };
+  } else if (injTightenings.length > 0) {
+    injRow = { status: 'narrowed', detail: joinParts(injTightenings) };
+  } else {
+    injRow = {
+      status: 'enforced',
+      detail: 'prelude, provenance wrap, 2-tier classify, post-read downgrade; no opt-out',
+    };
+  }
+
+  // G-RED — redaction runs on the observability write path unconditionally.
+  // The personality's observability policy changes WHAT is written, which is
+  // the honest thing to show next to it.
+  const obs = safety?.observability;
+  const obsParts = [
+    obs?.storeToolArgs ? `tool args ${obs.storeToolArgs}` : '',
+    obs?.storeToolBodies ? `tool bodies ${obs.storeToolBodies}` : '',
+    obs?.storeLlmPayloads ? `LLM payloads ${obs.storeLlmPayloads}` : '',
+    obs?.redactPatterns?.length ? `+${plural(obs.redactPatterns.length, 'pattern')}` : '',
+  ].filter((p) => p !== '');
+  const storesFull =
+    obs?.storeToolArgs === 'full' ||
+    obs?.storeToolBodies === 'full' ||
+    obs?.storeLlmPayloads === 'full';
+  const red: GuaranteeRow = {
+    status: obsParts.length === 0 ? 'enforced' : storesFull ? 'relaxed' : 'narrowed',
+    detail: joinParts([
+      'known credential shapes redacted before observability.db',
+      obsParts.join(', '),
+    ]),
+  };
+
+  // G-APP — approvalMode is the largest per-personality change available, and
+  // `off` is the one an operator most needs to see at a glance.
+  const mode = safety?.approvalMode ?? 'manual';
+  const denyCount = safety?.denyRules?.length ?? 0;
+  const denyPart = denyCount > 0 ? `${plural(denyCount, 'deny rule')} bind first` : '';
+  let appRow: GuaranteeRow;
+  if (mode === 'off') {
+    appRow = {
+      status: 'relaxed',
+      detail: joinParts([
+        'approvalMode off — flagged calls auto-fire; hardline floor still applies',
+        denyPart,
+      ]),
+    };
+  } else if (mode === 'smart') {
+    appRow = {
+      status: 'relaxed',
+      detail: joinParts([
+        'approvalMode smart — a reviewer model auto-approves flagged calls (fail-closed to ask)',
+        denyPart,
+      ]),
+    };
+  } else {
+    appRow = {
+      status: 'enforced',
+      detail: joinParts(['approvalMode manual — flagged calls held for approval', denyPart]),
+    };
+  }
+
+  // G-EXEC — an honesty guarantee. The posture IS the answer; a surface that
+  // did not resolve one says so rather than guessing.
+  let execRow: GuaranteeRow;
+  if (!execution) {
+    execRow = { status: 'enforced', detail: 'no execution posture resolved on this surface' };
+  } else if (execution.posture.backend === 'none') {
+    execRow = {
+      status: 'n/a',
+      detail: 'posture none — no exec-bearing tool in this toolset',
+    };
+  } else {
+    execRow = {
+      status: 'enforced',
+      detail: joinParts([
+        `posture ${postureLabelFor(execution.posture)}`,
+        `network ${execution.posture.networkMode}`,
+        execution.posture.hostFallback
+          ? `host fallback: ${execution.posture.hostFallback.reason}`
+          : '',
+        execution.posture.dockerAbsent ? 'Docker required but not running (A1)' : '',
+      ]),
+    };
+  }
+
+  return {
+    'G-TOOLS': tools,
+    'G-CAP': cap,
+    'G-FS': fs,
+    'G-NET': netRow,
+    'G-INJ': injRow,
+    'G-SEC': {
+      status: 'enforced',
+      detail: 'SecretsResolver is the only credential path; config carries refs, never values',
+    },
+    'G-RED': red,
+    'G-APP': appRow,
+    'G-EXEC': execRow,
+    'G-WATCH': {
+      status: 'enforced',
+      detail: 'out-of-band cross-turn observer; no personality field narrows it',
+    },
+    'G-CHAN': {
+      status: 'n/a',
+      detail:
+        'set by channel config, not by this personality — an unconfigured platform is ungated',
+    },
+    'G-AUDIT': {
+      status: 'enforced',
+      detail: 'safety decisions land in observability.db; no tamper-evidence',
+    },
+  };
+}
+
+/**
+ * Render the `## Boundary` block — which published guarantees are enforced,
+ * narrowed, relaxed, or inapplicable for THIS personality.
+ *
+ * A table rather than bullets: twelve rows read as a scan for the `relaxed`
+ * ones, which is the operator's actual question, and the status column stays
+ * aligned in a terminal as well as in the Web tab's Markdown.
+ */
+function boundarySection(rows: Record<GuaranteeId, GuaranteeRow>): string[] {
+  const width = Math.max(...GUARANTEE_IDS.map((id) => id.length));
+  return [
+    '## Boundary',
+    'Register status for this personality (the twelve published guarantees).',
+    'enforced = kernel-enforced, unchanged here · narrowed = this personality tightens it ·',
+    'relaxed = widens or disables something above the non-overridable floor · n/a = nothing here reaches it.',
+    '',
+    '| Guarantee | Status | For this personality |',
+    '|---|---|---|',
+    ...GUARANTEE_IDS.map((id) => {
+      const row = rows[id];
+      return `| ${id.padEnd(width)} | ${row.status.padEnd(8)} | ${row.detail} |`;
+    }),
+  ];
+}
+
+/**
+ * What each known renderer name means in prose, so the sheet says more than an
+ * opaque `echarts@1`. A renderer with no entry prints its bare spec string —
+ * the declaration is honest either way, and a surface that maps no renderer of
+ * that name simply renders the fence as a code block.
+ */
+const RENDERER_NOTE: Record<string, string> = {
+  echarts: 'interactive charts — via charts skill',
+};
+
+/** `echarts@1` → `echarts@1 (interactive charts — via charts skill)`. */
+function renderSpecLabel(spec: string): string {
+  const note = RENDERER_NOTE[spec.split('@')[0] ?? ''];
+  return note ? `${spec} (${note})` : spec;
+}
+
+/**
+ * Render the `## Voice` block from `PersonalityConfig.voice` — the sanctioned
+ * schema amendment made visible. Each unset knob prints what it inherits, so a
+ * reader never has to guess whether a blank means "unset" or "missing".
+ *
+ * `Call look` prints the DERIVED treatment when unset rather than `(default)`,
+ * because there is no default to name: an undeclared personality still draws a
+ * specific shape, and the sheet's job is to say which one. It cannot see the
+ * operator's `display.call_style`, so the derived value is stated as what it
+ * is — the floor, which a pinned `display.call_style` overrides.
+ */
+function voiceSection(
+  voice: NonNullable<PersonalityConfig['voice']>,
+  personalityId: string,
+): string[] {
+  const lines: string[] = ['## Voice'];
+  lines.push(`- TTS provider: ${voice.tts_provider ?? '(default auxiliary.tts)'}`);
+  lines.push(`- STT provider: ${voice.stt_provider ?? '(default auxiliary.asr)'}`);
+  lines.push(
+    `- Realtime provider: ${voice.realtime_provider ?? '(deployment voice.realtime.default)'}`,
+  );
+  lines.push(`- TTS voice: ${voice.tts_voice ?? '(global default)'}`);
+  const languages = Object.entries(voice.languages ?? {});
+  if (languages.length > 0) {
+    lines.push('- By language:');
+    for (const [tag, id] of languages.sort(([a], [b]) => a.localeCompare(b))) {
+      lines.push(`    - ${tag}: ${id}`);
+    }
+  }
+  lines.push(`- Tier: ${voice.tier ?? '(deployment default)'}`);
+  lines.push(`- Fast-lane model: ${voice.model ?? '(personality model)'}`);
+  lines.push(
+    `- Call look: ${voice.call_style ?? `${derivedCallTreatment(personalityId)} (derived from id)`}`,
+  );
+  return lines;
+}
+
+/**
  * Render a personality's character sheet as Markdown. Pure — takes the
  * loaded config and the SOUL.md body, returns the artifact. Optional
  * fields render as explicit `(none)` / `(engine default)` states so a
  * reader never has to guess whether a blank means "unset" or "missing".
+ *
+ * `renderers` is the skill-declared output capability (`ethos.renders`), as
+ * PLAIN DATA — computed by callers via `SkillsInjector.resolveRenderers()`,
+ * the SAME derivation the surfaces gate on, so the sheet cannot claim a
+ * capability the renderer path would refuse. Absent or empty → no line.
+ *
+ * `boundary` sharpens the `## Boundary` section's applicability verdicts; the
+ * section renders without it, it just never says "not applicable" for a
+ * guarantee it cannot see the reach of.
  */
 export function renderCharacterSheet(
   config: PersonalityConfig,
   soulMd: string,
   execution?: CharacterSheetExecution,
   modelFit?: CharacterSheetModelFit,
+  scriptSurface?: CharacterSheetScriptSurface,
+  renderers?: readonly string[],
+  boundary?: CharacterSheetBoundary,
 ): string {
   const lines: string[] = [`# ${config.id} — ${config.name}`, ''];
 
@@ -308,8 +709,25 @@ export function renderCharacterSheet(
   lines.push(`- Dreaming: ${config.dreaming?.enable ? 'on' : 'off'}`);
   lines.push('');
 
+  // Voice — rendered only when the personality declares one. A personality
+  // with no `voice` block inherits the deployment's voice, and a section that
+  // said so on every sheet would be noise ("cards earn existence").
+  if (config.voice) {
+    lines.push(...voiceSection(config.voice, config.id));
+    lines.push('');
+  }
+
+  // Output capability, derived from the skill set rather than the personality
+  // schema: a skill declaring `ethos.renders` both TEACHES the fence format and
+  // UNLOCKS the renderer, so one declaration drives both. It joins the declared
+  // capabilities rather than following them, so `(none)` still means "nothing
+  // here" instead of sitting above a line that contradicts it.
+  const capabilities = [...(config.capabilities ?? [])];
+  if (renderers && renderers.length > 0) {
+    capabilities.push(`Renders: ${renderers.map(renderSpecLabel).join(', ')}`);
+  }
   lines.push('## Capabilities');
-  lines.push(...bulletList(config.capabilities ?? [], '(none)'));
+  lines.push(...bulletList(capabilities, '(none)'));
   lines.push('');
 
   lines.push('## Memory');
@@ -322,6 +740,15 @@ export function renderCharacterSheet(
     lines.push(`${toolset.length} tool${toolset.length === 1 ? '' : 's'}:`);
   }
   lines.push(...bulletList(toolset, '(none)'));
+  // Lane G — the in-script tool surface (`toolset ∩ SCRIPT_SAFE`), shown only
+  // when the personality can run scripts at all. The exclusion list mirrors
+  // the categories in core's SCRIPT_SAFE policy (script-safe.ts).
+  if (toolset.includes('run_code') && scriptSurface) {
+    lines.push(
+      `- Script-callable (run_code): ${scriptSurface.callable.length} of ${toolset.length} tools ` +
+        '(excluded: code, delegation, MCP, plugins, clarify, credential-bearing terminal/debug)',
+    );
+  }
   lines.push('');
 
   // §2 — the assembled system-prompt weight, so prompt cost is visible per
@@ -357,8 +784,17 @@ export function renderCharacterSheet(
     lines.push(`- Read: ${read.length > 0 ? read.join(', ') : '(none)'}`);
     lines.push(`- Write: ${write.length > 0 ? write.join(', ') : '(none)'}`);
   } else {
-    lines.push('- (default — personality directory only)');
+    lines.push(
+      '- (default — read: own directory, ~/.ethos/skills/, working directory; write: own directory, working directory)',
+    );
   }
+  if (reach?.workdir) lines.push(`- Workdir: ${reach.workdir}`);
+
+  // §4.7 — the register's per-personality state, directly under the reach it
+  // summarises and BEFORE the conditional sections, so adding a posture or a
+  // model-fit verdict still only appends to the sheet.
+  lines.push('');
+  lines.push(...boundarySection(guaranteeRows(config, execution, scriptSurface, boundary)));
 
   const soul = parseLivingSoul(soulMd);
   const isLivingSoul = soul.expression !== '' || soul.learningLog.length > 0;

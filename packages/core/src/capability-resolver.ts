@@ -16,7 +16,20 @@ export interface CapabilityBackends {
   kvStoreFactory?: (tool: string, scopeId: string) => KeyValueStore;
   secretsBackend?: (ref: SecretRef) => Promise<string>;
   storage?: Storage;
-  personalityFsReach?: { read: string[]; write: string[] };
+  /**
+   * Resolves the personality fs_reach allowlist behind every
+   * `from-personality` capability. A RESOLVER, not a stored `{read,write}`:
+   * a stored value froze the boundary at process start, so editing a
+   * personality's `fs_reach` on disk kept failing in the file tools until
+   * `ethos serve` was restarted, even though the character sheet and the
+   * Documents root had already picked the edit up. It is called per tool
+   * execution with the personality id of that call, so a mid-session
+   * `/personality` switch resolves the new personality's reach too.
+   *
+   * An unknown or absent id must degrade to deny-all (`{read:[],write:[]}`),
+   * never to a wider set.
+   */
+  personalityFsReach?: (personalityId?: string) => { read: string[]; write: string[] };
   /**
    * Full personality network policy. The `allow` list is intersected
    * with each tool's declared `allowedHosts`; `deny` and
@@ -53,6 +66,14 @@ export function resolveCapabilities(
   if (!capabilities) return {};
 
   const result: ResolvedFields = {};
+
+  // Resolved once per tool execution (the attachments branch re-reads it),
+  // never once per process — see the CapabilityBackends field doc.
+  let reachCache: { read: string[]; write: string[] } | null = null;
+  const personalityReach = (): { read: string[]; write: string[] } => {
+    reachCache ??= backends.personalityFsReach?.(scopeIds.personalityId) ?? { read: [], write: [] };
+    return reachCache;
+  };
 
   if (capabilities.network) {
     const declaredHosts = capabilities.network.allowedHosts;
@@ -106,14 +127,9 @@ export function resolveCapabilities(
   if (capabilities.fs_reach && backends.storage) {
     const readDecl = capabilities.fs_reach.read;
     const writeDecl = capabilities.fs_reach.write;
-    const readPaths =
-      readDecl === 'from-personality'
-        ? (backends.personalityFsReach?.read ?? [])
-        : (readDecl ?? []);
+    const readPaths = readDecl === 'from-personality' ? personalityReach().read : (readDecl ?? []);
     const writePaths =
-      writeDecl === 'from-personality'
-        ? (backends.personalityFsReach?.write ?? [])
-        : (writeDecl ?? []);
+      writeDecl === 'from-personality' ? personalityReach().write : (writeDecl ?? []);
     result.scopedFs = new ScopedFsImpl(
       backends.storage,
       new Set(readPaths),
@@ -150,14 +166,10 @@ export function resolveCapabilities(
         // Reconstruct with merged read paths
         const readDecl = capabilities.fs_reach?.read;
         const readPaths =
-          readDecl === 'from-personality'
-            ? (backends.personalityFsReach?.read ?? [])
-            : (readDecl ?? []);
+          readDecl === 'from-personality' ? personalityReach().read : (readDecl ?? []);
         const writeDecl = capabilities.fs_reach?.write;
         const writePaths =
-          writeDecl === 'from-personality'
-            ? (backends.personalityFsReach?.write ?? [])
-            : (writeDecl ?? []);
+          writeDecl === 'from-personality' ? personalityReach().write : (writeDecl ?? []);
         const mergedRead = new Set([...readPaths, ...attachmentDirs]);
         result.scopedFs = new ScopedFsImpl(
           backends.storage,

@@ -13,6 +13,7 @@ import type {
   Message,
   MessageContent,
 } from '@ethosagent/types';
+import { stripVisionBlocksForSummary } from '../agent-loop/vision-aging';
 import { partitionStandingInstructions } from './standing-instructions';
 import { estimateMessagesTokens, estimateMessageTokens } from './token-estimator';
 
@@ -68,7 +69,8 @@ export class TieredSummaryEngine implements ContextEngine {
     const summaryTarget = Math.max(200, Math.floor(target * 0.15));
     let summaryText: string;
     if (opts.llm) {
-      summaryText = await opts.llm.summarize(rest, summaryTarget);
+      // C3 — prose in, prose out: the summarizer never needs the image bytes.
+      summaryText = await opts.llm.summarize(stripVisionBlocksForSummary(rest), summaryTarget);
     } else {
       summaryText = `[summary] ${rest.length} earlier message(s) elided to fit context budget.`;
     }

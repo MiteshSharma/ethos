@@ -256,4 +256,133 @@ describe('SkillEvolver', () => {
     const original = await readFile(join(skillsDir, 'shared.md'), 'utf-8');
     expect(original).toBe('preexisting');
   });
+
+  // An LLM-authored skill whose frontmatter does not parse is a boot failure
+  // waiting to be approved — it must never reach pending/ in the first place.
+  const BROKEN_FRONTMATTER = [
+    '---',
+    'name: stock-add',
+    'description: We repeatedly hit the same workflow problem: adding stocks with null sectors',
+    '---',
+    '',
+    'Add stocks carefully.',
+  ].join('\n');
+
+  it('does not write a rewrite whose generated frontmatter is unparseable', async () => {
+    await writeFile(join(skillsDir, 'json.md'), 'old content', 'utf-8');
+
+    const lines: object[] = [];
+    for (let i = 0; i < 12; i++) {
+      lines.push({
+        schema_version: '1.0',
+        task_id: `t${i}`,
+        turn: 0,
+        role: 'assistant',
+        content: '',
+        score: 0.2,
+        skill_files_used: ['json.md'],
+      });
+    }
+    await writeFile(evalPath, jsonl(...lines), 'utf-8');
+
+    const evolver = new SkillEvolver({
+      evalOutputPath: evalPath,
+      skillsDir,
+      pendingDir,
+      config: DEFAULT_EVOLVE_CONFIG,
+      llm: makeLLM([`<skill>\n${BROKEN_FRONTMATTER}\n</skill>`]),
+      storage: new FsStorage(),
+    });
+
+    const result = await evolver.evolve();
+    expect(result.rewritesWritten).toEqual([]);
+    expect(result.skipped).toHaveLength(1);
+    expect(result.skipped[0]).toMatchObject({ kind: 'rewrite', target: 'json.md' });
+    expect(result.skipped[0]?.reason).toContain('invalid-frontmatter');
+
+    const dirEntries = await readdir(pendingDir).catch(() => [] as string[]);
+    expect(dirEntries).toEqual([]);
+  });
+
+  it('does not write a new skill whose generated frontmatter is unparseable', async () => {
+    const lines: object[] = [];
+    for (let i = 0; i < 4; i++) {
+      lines.push(
+        {
+          schema_version: '1.0',
+          task_id: `t${i}`,
+          turn: 0,
+          role: 'user',
+          content: `prompt${i}`,
+        },
+        {
+          schema_version: '1.0',
+          task_id: `t${i}`,
+          turn: 0,
+          role: 'assistant',
+          content: `answer${i}`,
+          score: 1,
+          skill_files_used: [],
+        },
+      );
+    }
+    await writeFile(evalPath, jsonl(...lines), 'utf-8');
+
+    const evolver = new SkillEvolver({
+      evalOutputPath: evalPath,
+      skillsDir,
+      pendingDir,
+      config: DEFAULT_EVOLVE_CONFIG,
+      llm: makeLLM([`<filename>stock-add.md</filename>\n<skill>\n${BROKEN_FRONTMATTER}\n</skill>`]),
+      storage: new FsStorage(),
+    });
+
+    const result = await evolver.evolve();
+    expect(result.newSkillsWritten).toEqual([]);
+    expect(result.skipped).toHaveLength(1);
+    expect(result.skipped[0]).toMatchObject({ kind: 'new', target: 'stock-add.md' });
+    expect(result.skipped[0]?.reason).toContain('invalid-frontmatter');
+
+    const dirEntries = await readdir(pendingDir).catch(() => [] as string[]);
+    expect(dirEntries).toEqual([]);
+  });
+
+  it('still writes a candidate whose frontmatter quotes the colon', async () => {
+    const lines: object[] = [];
+    for (let i = 0; i < 4; i++) {
+      lines.push(
+        {
+          schema_version: '1.0',
+          task_id: `t${i}`,
+          turn: 0,
+          role: 'user',
+          content: `prompt${i}`,
+        },
+        {
+          schema_version: '1.0',
+          task_id: `t${i}`,
+          turn: 0,
+          role: 'assistant',
+          content: `answer${i}`,
+          score: 1,
+          skill_files_used: [],
+        },
+      );
+    }
+    await writeFile(evalPath, jsonl(...lines), 'utf-8');
+
+    const good = '---\nname: stock-add\ndescription: "problem: null sectors"\n---\n\nBody.';
+    const evolver = new SkillEvolver({
+      evalOutputPath: evalPath,
+      skillsDir,
+      pendingDir,
+      config: DEFAULT_EVOLVE_CONFIG,
+      llm: makeLLM([`<filename>stock-add.md</filename>\n<skill>\n${good}\n</skill>`]),
+      storage: new FsStorage(),
+    });
+
+    const result = await evolver.evolve();
+    expect(result.newSkillsWritten).toEqual(['stock-add.md']);
+    expect(result.skipped).toEqual([]);
+  });
 });

@@ -1,23 +1,47 @@
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { synthesizeOpenAiCompat, transcribeOpenAiCompat } from '../openai-compat';
+import type { SttAudio } from '@ethosagent/types';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import {
+  audioFilePart,
+  baseMimeType,
+  synthesizeOpenAiCompat,
+  transcribeOpenAiCompat,
+} from '../openai-compat';
+
+/** A tiny in-memory utterance. No temp file: the transport takes bytes. */
+function audio(mimeType?: string): SttAudio {
+  return { data: new Uint8Array([1, 2, 3, 4]), ...(mimeType ? { mimeType } : {}) };
+}
 
 describe('openai-compat shared transport', () => {
-  let dir: string;
-  let audioPath: string;
   const originalFetch = globalThis.fetch;
 
-  beforeEach(async () => {
-    dir = await mkdtemp(join(tmpdir(), 'voice-compat-'));
-    audioPath = join(dir, 'clip.ogg');
-    await writeFile(audioPath, Buffer.from([1, 2, 3, 4]));
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
   });
 
-  afterEach(async () => {
-    globalThis.fetch = originalFetch;
-    await rm(dir, { recursive: true, force: true });
+  describe('audioFilePart', () => {
+    it.each([
+      ['audio/webm', 'audio.webm', 'audio/webm'],
+      ['audio/wav', 'audio.wav', 'audio/wav'],
+      ['audio/mpeg', 'audio.mp3', 'audio/mpeg'],
+      ['audio/ogg', 'audio.ogg', 'audio/ogg'],
+    ])('maps %s to %s', (mime, filename, contentType) => {
+      expect(audioFilePart(mime)).toEqual({ filename, contentType });
+    });
+
+    it('strips codec parameters — MediaRecorder reports audio/webm;codecs=opus', () => {
+      expect(baseMimeType('audio/webm;codecs=opus')).toBe('audio/webm');
+      expect(audioFilePart('audio/webm;codecs=opus')).toEqual({
+        filename: 'audio.webm',
+        contentType: 'audio/webm',
+      });
+    });
+
+    it('falls back to octet-stream for an unknown or absent MIME', () => {
+      const fallback = { filename: 'audio', contentType: 'application/octet-stream' };
+      expect(audioFilePart('audio/x-nonsense')).toEqual(fallback);
+      expect(audioFilePart(undefined)).toEqual(fallback);
+    });
   });
 
   describe('transcribeOpenAiCompat', () => {
@@ -31,7 +55,7 @@ describe('openai-compat shared transport', () => {
       const text = await transcribeOpenAiCompat({
         baseUrl: 'http://localhost:8000/v1',
         model: 'whisper-large-v3',
-        audioPath,
+        audio: audio('audio/ogg'),
         label: 'Local STT',
       });
 
@@ -46,6 +70,23 @@ describe('openai-compat shared transport', () => {
       expect(body.get('file')).toBeInstanceOf(Blob);
     });
 
+    it('uploads the exact bytes it was handed', async () => {
+      const fetchMock = vi.fn(
+        async (_url: string, _init: RequestInit) => new Response(JSON.stringify({ text: 'ok' })),
+      );
+      globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+      await transcribeOpenAiCompat({
+        baseUrl: 'http://localhost:8000/v1',
+        model: 'm',
+        audio: { data: new Uint8Array([9, 8, 7]), mimeType: 'audio/wav' },
+        label: 'Local STT',
+      });
+
+      const file = (fetchMock.mock.calls[0][1].body as FormData).get('file') as File;
+      expect(Array.from(new Uint8Array(await file.arrayBuffer()))).toEqual([9, 8, 7]);
+    });
+
     it('sends Authorization when an apiKey is present', async () => {
       const fetchMock = vi.fn(
         async (_url: string, _init: RequestInit) => new Response(JSON.stringify({ text: 'ok' })),
@@ -55,7 +96,7 @@ describe('openai-compat shared transport', () => {
       await transcribeOpenAiCompat({
         baseUrl: 'https://api.openai.com/v1',
         model: 'whisper-1',
-        audioPath,
+        audio: audio('audio/ogg'),
         apiKey: 'sk-secret',
         label: 'OpenAI STT',
       });
@@ -73,7 +114,7 @@ describe('openai-compat shared transport', () => {
       await transcribeOpenAiCompat({
         baseUrl: 'http://localhost:8000/v1',
         model: 'whisper-large-v3',
-        audioPath,
+        audio: audio('audio/ogg'),
         label: 'Local STT',
       });
 
@@ -82,14 +123,11 @@ describe('openai-compat shared transport', () => {
     });
 
     it.each([
-      ['clip.webm', 'audio/webm'],
-      ['clip.wav', 'audio/wav'],
-      ['clip.mp3', 'audio/mpeg'],
-      ['clip.ogg', 'audio/ogg'],
-    ])('sends %s as filename with content-type %s', async (name, mime) => {
-      const path = join(dir, name);
-      await writeFile(path, Buffer.from([1, 2, 3, 4]));
-
+      ['audio/webm', 'audio.webm', 'audio/webm'],
+      ['audio/wav', 'audio.wav', 'audio/wav'],
+      ['audio/mpeg', 'audio.mp3', 'audio/mpeg'],
+      ['audio/ogg', 'audio.ogg', 'audio/ogg'],
+    ])('sends %s as %s with content-type %s', async (mime, name, contentType) => {
       const fetchMock = vi.fn(
         async (_url: string, _init: RequestInit) => new Response(JSON.stringify({ text: 'ok' })),
       );
@@ -98,20 +136,17 @@ describe('openai-compat shared transport', () => {
       await transcribeOpenAiCompat({
         baseUrl: 'http://localhost:8000/v1',
         model: 'whisper-large-v3',
-        audioPath: path,
+        audio: audio(mime),
         label: 'Local STT',
       });
 
       const [, init] = fetchMock.mock.calls[0];
       const file = (init.body as FormData).get('file') as File;
       expect(file.name).toBe(name);
-      expect(file.type).toBe(mime);
+      expect(file.type).toBe(contentType);
     });
 
-    it('falls back to octet-stream + "audio" filename for an unknown extension', async () => {
-      const path = join(dir, 'clip.xyz');
-      await writeFile(path, Buffer.from([1, 2, 3, 4]));
-
+    it('falls back to octet-stream + "audio" filename for an unknown MIME', async () => {
       const fetchMock = vi.fn(
         async (_url: string, _init: RequestInit) => new Response(JSON.stringify({ text: 'ok' })),
       );
@@ -120,7 +155,7 @@ describe('openai-compat shared transport', () => {
       await transcribeOpenAiCompat({
         baseUrl: 'http://localhost:8000/v1',
         model: 'whisper-large-v3',
-        audioPath: path,
+        audio: audio('audio/x-nonsense'),
         label: 'Local STT',
       });
 
@@ -128,6 +163,25 @@ describe('openai-compat shared transport', () => {
       const file = (init.body as FormData).get('file') as File;
       expect(file.name).toBe('audio');
       expect(file.type).toBe('application/octet-stream');
+    });
+
+    it('forwards a language hint, and omits the part when none is given', async () => {
+      const fetchMock = vi.fn(
+        async (_url: string, _init: RequestInit) => new Response(JSON.stringify({ text: 'ok' })),
+      );
+      globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+      const call = {
+        baseUrl: 'http://localhost:8000/v1',
+        model: 'm',
+        audio: audio('audio/wav'),
+        label: 'Local STT',
+      };
+      await transcribeOpenAiCompat({ ...call, language: 'es' });
+      await transcribeOpenAiCompat(call);
+
+      expect((fetchMock.mock.calls[0][1].body as FormData).get('language')).toBe('es');
+      expect((fetchMock.mock.calls[1][1].body as FormData).get('language')).toBeNull();
     });
 
     it('threads an abort signal into fetch and rejects when aborted', async () => {
@@ -141,7 +195,7 @@ describe('openai-compat shared transport', () => {
         transcribeOpenAiCompat({
           baseUrl: 'http://localhost:8000/v1',
           model: 'whisper-large-v3',
-          audioPath,
+          audio: audio('audio/ogg'),
           label: 'Local STT',
           signal: AbortSignal.abort(),
         }),
@@ -158,7 +212,7 @@ describe('openai-compat shared transport', () => {
         transcribeOpenAiCompat({
           baseUrl: 'http://localhost:8000/v1',
           model: 'm',
-          audioPath,
+          audio: audio('audio/ogg'),
           label: 'Local STT',
         }),
       ).rejects.toThrow(/Local STT failed \(500\)/);

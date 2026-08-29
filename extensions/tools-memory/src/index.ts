@@ -18,7 +18,7 @@ export function createMemoryReadTool(memory: MemoryProvider): Tool {
   return {
     name: 'memory_read',
     description:
-      'Read the current memory files (MEMORY.md and USER.md). Use to recall past context, user preferences, or project notes before starting a new task.',
+      'Read the current memory files (MEMORY.md and USER.md), or pass "key" to read one arbitrary personality-scope memory entry by its exact file name. Use to recall past context, user preferences, or project notes before starting a new task.',
     toolset: 'memory',
     maxResultChars: 20_000,
     capabilities: {},
@@ -30,10 +30,45 @@ export function createMemoryReadTool(memory: MemoryProvider): Tool {
           enum: ['memory', 'user', 'both'],
           description: 'Which memory file to read (default: both)',
         },
+        key: {
+          type: 'string',
+          description:
+            'Read one arbitrary personality-scope memory entry by exact key (e.g. a file written outside MEMORY.md/USER.md). When set, overrides "store".',
+        },
       },
     },
     async execute(args, ctx): Promise<ToolResult> {
-      const { store = 'both' } = args as { store?: 'memory' | 'user' | 'both' };
+      const { store = 'both', key } = args as {
+        store?: 'memory' | 'user' | 'both';
+        key?: string;
+      };
+
+      if (key) {
+        // Personality-scope memory files are owner-authored (same trust class as
+        // MEMORY.md/USER.md below) — the trust boundary is enforced at WRITE time
+        // by whoever persists the entry (e.g. wrapUntrusted() around adversarial
+        // content before it's written), not here at read time. Do not add
+        // outputIsUntrusted to this tool on that basis.
+        const memCtx = buildMemoryContext(ctx);
+        const entry = await memory.read(key, memCtx);
+        if (!entry) {
+          // 'not_found' is not a member of ToolResult's frozen error-code union
+          // (packages/types/src/tool.ts) — extending that union is a Tool
+          // contract change requiring two-maintainer approval + a shape-test
+          // bump (ARCHITECTURE.md). 'not_available' is the closest existing
+          // code and matches this file's precedent (see the "no team context"
+          // checks above).
+          return {
+            ok: false,
+            error: `no memory entry found for key "${key}"`,
+            code: 'not_available',
+          };
+        }
+        return {
+          ok: true,
+          value: redactString(sanitize(entry.content.trim())) || `"${key}" is empty.`,
+        };
+      }
 
       if (store === 'user') {
         const userCtx = buildUserMemoryContext(ctx);

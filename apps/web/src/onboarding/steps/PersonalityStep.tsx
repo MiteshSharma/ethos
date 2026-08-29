@@ -75,8 +75,8 @@ export function PersonalityStep({
     <section className="onboarding-step-content">
       <h1 className="onboarding-headline">Pick a personality.</h1>
       <p className="onboarding-supporting">
-        Each one's a different toolset and voice. Switch any time — the chat tab auto-forks the
-        session when you do.
+        Each one's a different toolset and voice. This is your default — every session belongs to
+        the personality it starts with, and you pick that when you start a new one.
       </p>
 
       <div className="onboarding-personalities">
@@ -156,7 +156,11 @@ function PersonalityRow({
         className="onboarding-personality-accent-stripe"
         style={{ background: accent, width: active ? 4 : 3 }}
       />
-      <PersonalityMark personalityId={personality.id} size={36} />
+      <PersonalityMark
+        personalityId={personality.id}
+        size={36}
+        avatarUrl={personality.display?.avatar_url}
+      />
       <div className="onboarding-personality-text">
         <span className="onboarding-personality-name">{personality.name}</span>
         {personality.description ? (
@@ -232,7 +236,11 @@ function PersonalityPreviewPane({
       ) : (
         <>
           <div className="onboarding-preview-pane-mark">
-            <PersonalityMark personalityId={personalityId} size={120} />
+            <PersonalityMark
+              personalityId={personalityId}
+              size={120}
+              avatarUrl={data.personality.display?.avatar_url}
+            />
           </div>
           <div className="onboarding-preview-pane-name" style={{ color: accent }}>
             {data.personality.name}

@@ -59,6 +59,9 @@ function ctxFor(overrides: Partial<SlashContext> = {}): SlashContext {
   return {
     binding: { type: 'personality', name: 'researcher' },
     defaultChannelMode: 'mention_only',
+    // The gate is default-deny (CHS-001), so every subcommand test runs as an
+    // allowlisted caller. The gate itself is covered in `slash-authz.test.ts`.
+    allowedUsers: ['U1'],
     ...overrides,
   };
 }

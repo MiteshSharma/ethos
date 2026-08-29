@@ -5,7 +5,7 @@ import { CompletionsRepository } from '../../features/completions/repository';
 import { CompletionsService } from '../../features/completions/service';
 import { openAiRoutes } from '../../routes/openai';
 import type { PersonalitiesService } from '../../services/personalities.service';
-import { makeStubAgentLoop } from '../test-helpers';
+import { makeStubAgentLoop, makeStubConfigService } from '../test-helpers';
 
 const KNOWN_PERSONALITIES = ['engineer', 'researcher'];
 
@@ -43,6 +43,7 @@ async function setup(opts: SetupOptions = {}) {
     apiKeys,
     personalities: makeStubPersonalitiesService(),
     completions,
+    config: makeStubConfigService(),
   });
   return {
     app,
@@ -186,8 +187,9 @@ describe('POST /v1/chat/completions', () => {
         }),
       });
       expect(res.status).toBe(400);
-      const body = (await res.json()) as { error: { code: string } };
+      const body = (await res.json()) as { error: { code: string; message: string } };
       expect(body.error.code).toBe('system_messages_not_supported');
+      expect(body.error.message).toContain('Admin Settings → Connections');
     });
   });
 
@@ -216,6 +218,54 @@ describe('POST /v1/chat/completions', () => {
       expect(body.choices[0]?.message.content).toBe('hello');
       expect(body.choices[0]?.finish_reason).toBe('stop');
       expect(body.usage.total_tokens).toBe(4);
+    });
+
+    it('reports finish_reason "length" when the turn was halted early', async () => {
+      const { app, bearer } = await withSetup({
+        events: [
+          { type: 'text_delta', text: 'partial' },
+          {
+            type: 'halt',
+            kind: 'budget',
+            rule: 'tool-budget',
+            count: 12,
+            message: 'tool budget exhausted',
+          },
+          { type: 'done', text: 'partial', turnCount: 1 },
+        ],
+      });
+      const res = await app.request('/chat/completions', {
+        method: 'POST',
+        headers: { ...bearer, 'content-type': 'application/json' },
+        body: JSON.stringify({
+          model: 'engineer',
+          messages: [{ role: 'user', content: 'hi' }],
+        }),
+      });
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as {
+        choices: Array<{ message: { content: string }; finish_reason: string }>;
+      };
+      expect(body.choices[0]?.message.content).toBe('partial');
+      expect(body.choices[0]?.finish_reason).toBe('length');
+    });
+
+    it('accepts every model id advertised by GET /v1/models', async () => {
+      // Regression guard: the catalog must never offer a selection that
+      // `POST /v1/chat/completions` rejects.
+      const { app, bearer } = await withSetup();
+      const listRes = await app.request('/models', { headers: bearer });
+      expect(listRes.status).toBe(200);
+      const list = (await listRes.json()) as { data: Array<{ id: string }> };
+      expect(list.data.length).toBeGreaterThan(0);
+      for (const model of list.data) {
+        const res = await app.request('/chat/completions', {
+          method: 'POST',
+          headers: { ...bearer, 'content-type': 'application/json' },
+          body: JSON.stringify({ model: model.id, messages: [{ role: 'user', content: 'hi' }] }),
+        });
+        expect([model.id, res.status]).toEqual([model.id, 200]);
+      }
     });
 
     it('accepts `ethos-default` (no personalityId on the loop)', async () => {
@@ -411,6 +461,33 @@ describe('POST /v1/chat/completions', () => {
       expect(dataChunks[dataChunks.length - 1]?.choices[0]?.finish_reason).toBe('stop');
     });
 
+    it('terminates with finish_reason "length" when the turn was halted early', async () => {
+      const { app, bearer } = await withSetup({
+        events: [
+          { type: 'text_delta', text: 'partial' },
+          { type: 'halt', kind: 'watcher', rule: 'loop-guard', message: 'paused' },
+          { type: 'done', text: 'partial', turnCount: 1 },
+        ],
+      });
+      const res = await app.request('/chat/completions', {
+        method: 'POST',
+        headers: { ...bearer, 'content-type': 'application/json' },
+        body: JSON.stringify({
+          model: 'engineer',
+          messages: [{ role: 'user', content: 'hi' }],
+          stream: true,
+        }),
+      });
+      expect(res.status).toBe(200);
+      const frames = await collectSse(res.body);
+      const finalRaw = frames[frames.length - 2];
+      if (!finalRaw) throw new Error('expected a terminal chunk before [DONE]');
+      const final = JSON.parse(finalRaw) as {
+        choices: Array<{ delta: object; finish_reason: string | null }>;
+      };
+      expect(final.choices[0]?.finish_reason).toBe('length');
+    });
+
     it('emits a usage chunk when stream_options.include_usage is set', async () => {
       const { app, bearer } = await withSetup({
         events: [
@@ -438,6 +515,97 @@ describe('POST /v1/chat/completions', () => {
       };
       expect(usageChunk.choices).toEqual([]);
       expect(usageChunk.usage?.total_tokens).toBe(7);
+    });
+  });
+
+  // A session's personality is bound at creation and immutable. Stateful mode
+  // is the one place an HTTP client restates both on every call — the session
+  // in `X-Ethos-Session`, the personality in `model` — so it is the one place
+  // they can disagree. That must read as a client error, not a 500 and not a
+  // stream that dies mid-flight.
+  describe('personality binding on a pinned session', () => {
+    const usage = {
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheCreationTokens: 0,
+      estimatedCostUsd: 0,
+      apiCallCount: 0,
+      compactionCount: 0,
+    };
+
+    async function withBoundSession() {
+      const ctx = await withSetup();
+      await ctx.sessions.createSession({
+        key: `openai:${ctx.apiKeyId}:pinned`,
+        platform: 'openai',
+        model: 'claude-test',
+        provider: 'anthropic',
+        personalityId: 'engineer',
+        usage,
+      });
+      return ctx;
+    }
+
+    it('returns 400 personality_locked on the non-streaming path', async () => {
+      const { app, bearer } = await withBoundSession();
+      const res = await app.request('/chat/completions', {
+        method: 'POST',
+        headers: {
+          ...bearer,
+          'content-type': 'application/json',
+          'X-Ethos-Session': 'pinned',
+        },
+        body: JSON.stringify({
+          model: 'researcher',
+          messages: [{ role: 'user', content: 'hi' }],
+        }),
+      });
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as { error: { code: string; type: string; message: string } };
+      expect(body.error.code).toBe('personality_locked');
+      expect(body.error.type).toBe('invalid_request_error');
+      expect(body.error.message).toContain('engineer');
+      expect(body.error.message).toContain('researcher');
+    });
+
+    it('returns 400 personality_locked on the streaming path (no SSE opened)', async () => {
+      const { app, bearer } = await withBoundSession();
+      const res = await app.request('/chat/completions', {
+        method: 'POST',
+        headers: {
+          ...bearer,
+          'content-type': 'application/json',
+          'X-Ethos-Session': 'pinned',
+        },
+        body: JSON.stringify({
+          model: 'researcher',
+          messages: [{ role: 'user', content: 'hi' }],
+          stream: true,
+        }),
+      });
+      expect(res.status).toBe(400);
+      expect(res.headers.get('content-type')).not.toMatch(/text\/event-stream/);
+      const body = (await res.json()) as { error: { code: string; message: string } };
+      expect(body.error.code).toBe('personality_locked');
+      expect(body.error.message).toContain('engineer');
+    });
+
+    it('proceeds when the pinned session and the requested personality agree', async () => {
+      const { app, bearer } = await withBoundSession();
+      const res = await app.request('/chat/completions', {
+        method: 'POST',
+        headers: {
+          ...bearer,
+          'content-type': 'application/json',
+          'X-Ethos-Session': 'pinned',
+        },
+        body: JSON.stringify({
+          model: 'engineer',
+          messages: [{ role: 'user', content: 'hi' }],
+        }),
+      });
+      expect(res.status).toBe(200);
     });
   });
 });

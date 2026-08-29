@@ -1,20 +1,40 @@
 import { join } from 'node:path';
 import { ethosDir } from '@ethosagent/config';
-import { SQLiteSessionStore } from '@ethosagent/session-sqlite';
+import {
+  type SkillUsageRow,
+  SQLiteObservabilityStore,
+  type ToolUsageRow,
+  type TurnOutcomeCounts,
+} from '@ethosagent/observability-sqlite';
+import { SQLiteSessionStore, type UsageAggregateRow } from '@ethosagent/session-sqlite';
+
+/** Dimensions `--by` accepts. `tool` and `skill` come from observability.db;
+ *  the rest are grouped out of `messages` joined to `sessions`. */
+const DIMENSIONS = ['day', 'model', 'personality', 'channel', 'session', 'tool', 'skill'] as const;
+type Dimension = (typeof DIMENSIONS)[number];
+
+function isDimension(v: string): v is Dimension {
+  return (DIMENSIONS as readonly string[]).includes(v);
+}
+
+interface Totals {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheCreationTokens: number;
+  estimatedCostUsd: number;
+  messages: number;
+  /** Share of billable input served from cache, 0–1. See {@link cacheHitRate}. */
+  cacheHitRate: number;
+}
 
 interface UsageResult {
   since: string;
   until: string;
-  truncated: boolean;
-  totals: { inputTokens: number; outputTokens: number; estimatedCostUsd: number };
-  byProvider: Array<{
-    provider: string;
-    model: string;
-    inputTokens: number;
-    outputTokens: number;
-    estimatedCostUsd: number;
-  }>;
-  byPersonality: Array<{ personality: string; turnCount: number; estimatedCostUsd: number }>;
+  totals: Totals;
+  daily: UsageAggregateRow[];
+  outcomes: TurnOutcomeCounts;
+  by?: { dimension: Dimension; rows: UsageAggregateRow[] | ToolUsageRow[] | SkillUsageRow[] };
 }
 
 export function parseDuration(raw: string): number {
@@ -28,14 +48,65 @@ export function parseDuration(raw: string): number {
   return 0;
 }
 
+/**
+ * Cached share of input tokens.
+ *
+ * Denominator is every token the model read — fresh input, cache reads, and
+ * cache writes — because a cache write is input the provider still charged for.
+ * Excluding it would make the first turn of a session look like a 0% hit rate
+ * on a smaller base and flatter the number thereafter.
+ */
+export function cacheHitRate(t: {
+  inputTokens: number;
+  cacheReadTokens: number;
+  cacheCreationTokens: number;
+}): number {
+  const total = t.inputTokens + t.cacheReadTokens + t.cacheCreationTokens;
+  return total === 0 ? 0 : t.cacheReadTokens / total;
+}
+
+function sumRows(rows: UsageAggregateRow[]): Omit<Totals, 'cacheHitRate'> {
+  const t = {
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheReadTokens: 0,
+    cacheCreationTokens: 0,
+    estimatedCostUsd: 0,
+    messages: 0,
+  };
+  for (const r of rows) {
+    t.inputTokens += r.inputTokens;
+    t.outputTokens += r.outputTokens;
+    t.cacheReadTokens += r.cacheReadTokens;
+    t.cacheCreationTokens += r.cacheCreationTokens;
+    t.estimatedCostUsd += r.estimatedCostUsd;
+    t.messages += r.messages;
+  }
+  return t;
+}
+
+const usd = (n: number): string => `$${n.toFixed(2)}`;
+const pct = (n: number): string => `${(n * 100).toFixed(1)}%`;
+
+function usageHelp(): string {
+  return [
+    'Usage: ethos usage --since <duration> [--by <dimension>] [--json]',
+    '',
+    '  --since   Nh (hours), Nd (days), Nm (minutes)   e.g. 24h, 7d, 30m',
+    `  --by      ${DIMENSIONS.join(' | ')}`,
+    '  --json    machine-readable output',
+  ].join('\n');
+}
+
 export async function runUsage(argv: string[]): Promise<void> {
   const sinceIdx = argv.indexOf('--since');
   const sinceRaw = sinceIdx !== -1 ? argv[sinceIdx + 1] : undefined;
+  const byIdx = argv.indexOf('--by');
+  const byRaw = byIdx !== -1 ? argv[byIdx + 1] : undefined;
   const jsonMode = argv.includes('--json');
 
   if (!sinceRaw) {
-    console.error('Usage: ethos usage --since <duration> [--json]');
-    console.error('  duration: Nh (hours), Nd (days), Nm (minutes)');
+    console.error(usageHelp());
     process.exit(2);
   }
 
@@ -45,137 +116,139 @@ export async function runUsage(argv: string[]): Promise<void> {
     process.exit(2);
   }
 
-  const now = new Date();
-  const since = new Date(now.getTime() - durationMs);
+  if (byRaw !== undefined && !isDimension(byRaw)) {
+    console.error(`Unknown dimension: ${byRaw}. Use one of: ${DIMENSIONS.join(', ')}.`);
+    process.exit(2);
+  }
+  const dimension: Dimension | undefined =
+    byRaw !== undefined && isDimension(byRaw) ? byRaw : undefined;
 
-  const dbPath = join(ethosDir(), 'sessions.db');
+  const until = new Date();
+  const since = new Date(until.getTime() - durationMs);
+
   let store: SQLiteSessionStore;
   try {
-    store = new SQLiteSessionStore(dbPath);
+    store = new SQLiteSessionStore(join(ethosDir(), 'sessions.db'));
   } catch {
-    // DB doesn't exist on fresh installs — return empty results
+    // Fresh install — no database yet. An empty result is the right answer, not
+    // an error: "you have not spent anything" is true.
     const empty: UsageResult = {
       since: since.toISOString(),
-      until: now.toISOString(),
-      truncated: false,
-      totals: { inputTokens: 0, outputTokens: 0, estimatedCostUsd: 0 },
-      byProvider: [],
-      byPersonality: [],
+      until: until.toISOString(),
+      totals: {
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        cacheCreationTokens: 0,
+        estimatedCostUsd: 0,
+        messages: 0,
+        cacheHitRate: 0,
+      },
+      daily: [],
+      outcomes: { completed: 0, errored: 0, halted: 0, running: 0 },
     };
-    if (jsonMode) {
-      process.stdout.write(`${JSON.stringify(empty)}\n`);
-    } else {
-      console.log('No usage data (sessions database not found).');
-    }
+    if (jsonMode) process.stdout.write(`${JSON.stringify(empty)}\n`);
+    else console.log('No usage data (sessions database not found).');
     return;
   }
 
+  // observability.db is optional: turn outcomes, tool and skill breakdowns come
+  // from it, and a deployment with telemetry off simply reports zeros rather
+  // than failing the whole command.
+  let obs: SQLiteObservabilityStore | undefined;
   try {
-    const SESSION_LIMIT = 10_000;
-    const sessions = await store.listSessions({ since, limit: SESSION_LIMIT });
-    const truncated = sessions.length >= SESSION_LIMIT;
+    obs = new SQLiteObservabilityStore(join(ethosDir(), 'observability.db'));
+  } catch {
+    obs = undefined;
+  }
 
-    const totals = { inputTokens: 0, outputTokens: 0, estimatedCostUsd: 0 };
-    const providerMap = new Map<
-      string,
-      {
-        provider: string;
-        model: string;
-        inputTokens: number;
-        outputTokens: number;
-        estimatedCostUsd: number;
-      }
-    >();
-    const personalityMap = new Map<
-      string,
-      { personality: string; turnCount: number; estimatedCostUsd: number }
-    >();
+  try {
+    const daily = await store.usageAggregate({ since, until, dimension: 'day' });
+    const summed = sumRows(daily);
+    const totals: Totals = { ...summed, cacheHitRate: cacheHitRate(summed) };
 
-    for (const s of sessions) {
-      totals.inputTokens += s.usage.inputTokens;
-      totals.outputTokens += s.usage.outputTokens;
-      totals.estimatedCostUsd += s.usage.estimatedCostUsd;
+    const outcomes = obs?.outcomeCounts(since.getTime(), until.getTime()) ?? {
+      completed: 0,
+      errored: 0,
+      halted: 0,
+      running: 0,
+    };
 
-      const provKey = `${s.provider}:${s.model}`;
-      const existing = providerMap.get(provKey);
-      if (existing) {
-        existing.inputTokens += s.usage.inputTokens;
-        existing.outputTokens += s.usage.outputTokens;
-        existing.estimatedCostUsd += s.usage.estimatedCostUsd;
-      } else {
-        providerMap.set(provKey, {
-          provider: s.provider,
-          model: s.model,
-          inputTokens: s.usage.inputTokens,
-          outputTokens: s.usage.outputTokens,
-          estimatedCostUsd: s.usage.estimatedCostUsd,
-        });
-      }
-
-      const pid = s.personalityId ?? 'unknown';
-      const pExisting = personalityMap.get(pid);
-      if (pExisting) {
-        pExisting.turnCount += s.usage.apiCallCount;
-        pExisting.estimatedCostUsd += s.usage.estimatedCostUsd;
-      } else {
-        personalityMap.set(pid, {
-          personality: pid,
-          turnCount: s.usage.apiCallCount,
-          estimatedCostUsd: s.usage.estimatedCostUsd,
-        });
-      }
+    let by: UsageResult['by'];
+    if (dimension === 'tool') {
+      by = { dimension, rows: obs?.toolCounts(since.getTime(), until.getTime()) ?? [] };
+    } else if (dimension === 'skill') {
+      by = { dimension, rows: obs?.skillCounts(since.getTime(), until.getTime()) ?? [] };
+    } else if (dimension !== undefined) {
+      by = { dimension, rows: await store.usageAggregate({ since, until, dimension }) };
     }
-
-    // Round costs
-    totals.estimatedCostUsd = Math.round(totals.estimatedCostUsd * 100) / 100;
 
     const result: UsageResult = {
       since: since.toISOString(),
-      until: now.toISOString(),
-      truncated,
+      until: until.toISOString(),
       totals,
-      byProvider: [...providerMap.values()].map((p) => ({
-        ...p,
-        estimatedCostUsd: Math.round(p.estimatedCostUsd * 100) / 100,
-      })),
-      byPersonality: [...personalityMap.values()].map((p) => ({
-        ...p,
-        estimatedCostUsd: Math.round(p.estimatedCostUsd * 100) / 100,
-      })),
+      daily,
+      outcomes,
+      ...(by ? { by } : {}),
     };
 
     if (jsonMode) {
       process.stdout.write(`${JSON.stringify(result)}\n`);
-    } else {
-      console.log(`Usage from ${since.toISOString()} to ${now.toISOString()}\n`);
-      console.log(
-        `  Total tokens: ${totals.inputTokens.toLocaleString()} in / ${totals.outputTokens.toLocaleString()} out`,
-      );
-      console.log(`  Estimated cost: $${totals.estimatedCostUsd.toFixed(2)}`);
-      if (result.byProvider.length > 0) {
-        console.log('\n  By provider:');
-        for (const p of result.byProvider) {
-          console.log(
-            `    ${p.provider}/${p.model}: $${p.estimatedCostUsd.toFixed(2)}` +
-              ` (${p.inputTokens.toLocaleString()} in / ${p.outputTokens.toLocaleString()} out)`,
-          );
-        }
-      }
-      if (result.byPersonality.length > 0) {
-        console.log('\n  By personality:');
-        for (const p of result.byPersonality) {
-          console.log(
-            `    ${p.personality}: $${p.estimatedCostUsd.toFixed(2)} (${p.turnCount} turns)`,
-          );
-        }
-      }
-      if (truncated) {
-        console.log(
-          `\n  ⚠ Results truncated at ${SESSION_LIMIT.toLocaleString()} sessions. Narrow the --since window for complete data.`,
-        );
+      return;
+    }
+
+    console.log(`Usage from ${since.toISOString()} to ${until.toISOString()}\n`);
+    console.log(
+      `  Tokens        ${totals.inputTokens.toLocaleString()} in / ${totals.outputTokens.toLocaleString()} out`,
+    );
+    console.log(`  Cost          ${usd(totals.estimatedCostUsd)}`);
+    console.log(
+      `  Cache hits    ${pct(totals.cacheHitRate)} (${totals.cacheReadTokens.toLocaleString()} cached / ${totals.cacheCreationTokens.toLocaleString()} written)`,
+    );
+    console.log(
+      `  Turns         ${outcomes.completed} completed, ${outcomes.errored} errored, ${outcomes.halted} halted` +
+        (outcomes.running > 0 ? `, ${outcomes.running} running` : ''),
+    );
+
+    if (daily.length > 1) {
+      console.log('\n  Daily spend:');
+      for (const d of [...daily].sort((a, b) => a.key.localeCompare(b.key))) {
+        console.log(`    ${d.key}  ${usd(d.estimatedCostUsd).padStart(9)}`);
       }
     }
+
+    if (by) printBreakdown(by);
   } finally {
+    obs?.close();
     store.close();
+  }
+}
+
+function printBreakdown(by: NonNullable<UsageResult['by']>): void {
+  console.log(`\n  By ${by.dimension}:`);
+  if (by.rows.length === 0) {
+    console.log('    (nothing recorded in this window)');
+    return;
+  }
+  if (by.dimension === 'tool') {
+    for (const r of by.rows as ToolUsageRow[]) {
+      const failed = r.errors > 0 ? `, ${r.errors} failed` : '';
+      console.log(`    ${r.tool}: ${r.calls} calls${failed}`);
+    }
+    return;
+  }
+  if (by.dimension === 'skill') {
+    // Two columns, never summed — an exposure is paid every turn, an
+    // invocation is a choice. High exposure with zero invocations is the
+    // number worth acting on.
+    for (const r of by.rows as SkillUsageRow[]) {
+      console.log(`    ${r.skill}: ${r.invoked} invoked / ${r.exposed} exposed`);
+    }
+    return;
+  }
+  for (const r of by.rows as UsageAggregateRow[]) {
+    console.log(
+      `    ${r.key}: ${usd(r.estimatedCostUsd)} (${r.inputTokens.toLocaleString()} in / ${r.outputTokens.toLocaleString()} out)`,
+    );
   }
 }

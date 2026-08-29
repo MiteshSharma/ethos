@@ -21,7 +21,9 @@ import { configRouter } from './config';
 import { contextRouter, filesRouter } from './context-resolve';
 import { cronRouter } from './cron';
 import { dashboardsRouter } from './dashboards';
+import { deliveriesRouter } from './deliveries';
 import { digestRouter } from './digest';
+import { documentsRouter } from './documents';
 import { evalRouter } from './eval';
 import { evolverRouter } from './evolver';
 import { goalsRouter } from './goals';
@@ -97,9 +99,11 @@ export const apiRouter = {
   goals: goalsRouter,
   digest: digestRouter,
   voice: voiceRouter,
+  deliveries: deliveriesRouter,
   a2a: a2aRouter,
   namedSecrets: namedSecretsRouter,
   toolSettings: toolSettingsRouter,
+  documents: documentsRouter,
 };
 
 export type ApiRouter = typeof apiRouter;

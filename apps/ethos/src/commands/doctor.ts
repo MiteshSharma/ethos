@@ -17,10 +17,22 @@
 import { spawnSync } from 'node:child_process';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { type EthosConfig, ethosDir, readConfig, readRawConfig } from '@ethosagent/config';
+import {
+  configParseNotices,
+  type EthosConfig,
+  ethosDir,
+  readConfig,
+  readRawConfig,
+} from '@ethosagent/config';
+import { resolveSttProvider, resolveTtsProvider } from '@ethosagent/core';
+import {
+  type CallCaptureDependencyCheckResult,
+  callCaptureHealthPath,
+} from '@ethosagent/platform-callcapture';
 import { bundledSkillsSource, UniversalScanner } from '@ethosagent/skills';
 import type { Skill } from '@ethosagent/types';
 import { errorLogExists, errorLogPath, readRecentErrors } from '../error-log';
+import { type LiveKitMediaResolution, resolveLiveKitMedia } from '../livekit-media';
 import { buildVersionInfo } from '../version-info';
 import { createLLM, getFunnelTracker, getSecretsResolver, getStorage } from '../wiring';
 
@@ -245,6 +257,19 @@ export interface DoctorFailFlags {
   channelRejected: boolean;
   /** Unreachable-but-not-rejected — warn only, never a hard fail. */
   channelUnreachable: boolean;
+  /** Call capture is configured (`callCapture.personalityId` set) but a
+   *  dependency preflight check failed — "configured but broken", the same
+   *  weight as `configuredMissing`. Optional so existing call sites/tests
+   *  need no change; absent behaves as `false`. */
+  callCaptureDepsMissing?: boolean;
+  /** Call capture is configured but its daemon's heartbeat has gone stale
+   *  (started, then went quiet — likely crashed) — the same weight as
+   *  `gatewayStale`. A `down` daemon (never started / no heartbeat file) is
+   *  NOT a failure here, mirroring `gatewayStale`'s own stale-only gate:
+   *  a configured deployment between runs of `ethos serve`/`ethos gateway`
+   *  is a normal state. Optional so existing call sites/tests need no
+   *  change; absent behaves as `false`. */
+  callCaptureDaemonStale?: boolean;
 }
 
 /** Exit-code matrix: any hard failure → 1; else an unreachable channel probe →
@@ -258,7 +283,9 @@ export function computeDoctorExit(f: DoctorFailFlags): number {
     f.requiredSecretMissing ||
     f.dbUnopenable ||
     f.gatewayStale ||
-    f.channelRejected;
+    f.channelRejected ||
+    f.callCaptureDepsMissing === true ||
+    f.callCaptureDaemonStale === true;
   if (hardFail) return 1;
   if (f.channelUnreachable) return WARN_EXIT;
   return 0;
@@ -321,6 +348,36 @@ async function checkGatewayHealth(storage: Storage): Promise<GatewayHealthResult
     };
   } catch {
     return { status: 'down', adapters: [], lastHeartbeatAgeSec: null };
+  }
+}
+
+export interface CallCaptureDaemonHealthResult {
+  status: 'ok' | 'stale' | 'down';
+  lastHeartbeatAgeSec: number | null;
+}
+
+/** Mirrors `checkGatewayHealth`'s exact shape/semantics (30s staleness), for
+ *  the call-capture daemon's own heartbeat file (`ethos serve`/`ethos
+ *  gateway` both write it every 10s while their `CallCaptureDaemon` is
+ *  running — see `extensions/platform-callcapture/src/health.ts`'s
+ *  `callCaptureHealthPath()`). Says whether the daemon is alive RIGHT NOW,
+ *  which `checkCallCapture`'s binary-presence check cannot answer on its
+ *  own — a crashed or never-started daemon would otherwise report healthy. */
+export async function checkCallCaptureDaemonHealth(
+  storage: Storage,
+): Promise<CallCaptureDaemonHealthResult> {
+  try {
+    const raw = await storage.read(callCaptureHealthPath());
+    if (!raw) return { status: 'down', lastHeartbeatAgeSec: null };
+    const hb = JSON.parse(raw) as { updatedAt: string };
+    const ageSec = (Date.now() - new Date(hb.updatedAt).getTime()) / 1000;
+    const stale = !Number.isFinite(ageSec) || ageSec > 30;
+    return {
+      status: stale ? 'stale' : 'ok',
+      lastHeartbeatAgeSec: Number.isFinite(ageSec) ? Math.round(ageSec) : null,
+    };
+  } catch {
+    return { status: 'down', lastHeartbeatAgeSec: null };
   }
 }
 
@@ -471,6 +528,8 @@ export async function runDoctor(args: string[] = [], options?: DoctorOptions): P
       (c) => !c.ok && (c.reason === 'unreachable' || c.reason === 'unverified'),
     );
 
+    const callCapture = await checkCallCapture(config, storage);
+
     const exitCode = computeDoctorExit({
       coreFailure: coreFailures.length > 0,
       configuredMissing: configuredMissing.length > 0,
@@ -480,6 +539,8 @@ export async function runDoctor(args: string[] = [], options?: DoctorOptions): P
       gatewayStale: gateway.status === 'stale',
       channelRejected,
       channelUnreachable,
+      callCaptureDepsMissing: callCapture.configured && !callCapture.ok,
+      callCaptureDaemonStale: callCapture.daemon?.status === 'stale',
     });
 
     const result = {
@@ -503,6 +564,13 @@ export async function runDoctor(args: string[] = [], options?: DoctorOptions): P
         ...(c.reason ? { reason: c.reason } : {}),
         ...(c.label ? { label: c.label } : {}),
       })),
+      callCapture: {
+        configured: callCapture.configured,
+        ok: callCapture.ok,
+        ...(callCapture.missing.length > 0 ? { missing: callCapture.missing } : {}),
+        ...(callCapture.errors.length > 0 ? { errors: callCapture.errors } : {}),
+        ...(callCapture.daemon ? { daemon: callCapture.daemon } : {}),
+      },
       exit: exitCode,
     };
     process.stdout.write(`${JSON.stringify(result)}\n`);
@@ -545,6 +613,12 @@ export async function runDoctor(args: string[] = [], options?: DoctorOptions): P
     console.log(`     provider:    ${config.provider ?? '(not set)'}`);
     console.log(`     model:       ${config.model ?? '(not set)'}`);
     console.log(`     personality: ${config.personality ?? '(default)'}`);
+    // `ethos gateway` and `ethos listen` surface these at boot; an operator
+    // running `ethos serve` and driving the web UI would otherwise never see
+    // them, and this is the command whose job is "what is wrong with my config".
+    const notices = configParseNotices(config);
+    for (const err of notices.errors) console.log(`  ${c.red}✗${c.reset}  ${err}`);
+    for (const warn of notices.warnings) console.log(`  ${c.yellow}⚠${c.reset}  ${warn}`);
   }
   console.log('');
 
@@ -659,6 +733,48 @@ export async function runDoctor(args: string[] = [], options?: DoctorOptions): P
     }
   }
   console.log('');
+
+  // -------------------------------------------------------------------------
+  // Voice — what `config.voice.*` + `auxiliary.asr/tts` actually resolve to
+  // -------------------------------------------------------------------------
+
+  console.log(`${c.bold}Voice${c.reset}`);
+  for (const line of await voiceReport(config)) console.log(line);
+  console.log('');
+
+  // -------------------------------------------------------------------------
+  // Call capture (Phase 4) — macOS-only, opt-in via callCapture.personalityId.
+  // Silent when unconfigured — see checkCallCapture's doc comment.
+  // -------------------------------------------------------------------------
+
+  const callCapture = await checkCallCapture(config, storage);
+  if (callCapture.configured) {
+    console.log(`${c.bold}Call capture${c.reset}`);
+    if (callCapture.ok) {
+      console.log(
+        `  ${c.green}✓${c.reset}  All dependencies present ${c.dim}(capture-offer-card, mic-detector, mic-capture, audiotee)${c.reset}`,
+      );
+    } else {
+      console.log(`  ${c.red}✗${c.reset}  Missing: ${callCapture.missing.join(', ')}`);
+      for (const err of callCapture.errors) console.log(`      ${c.dim}${err}${c.reset}`);
+    }
+    if (callCapture.daemon) {
+      if (callCapture.daemon.status === 'ok') {
+        console.log(
+          `  ${c.green}✓${c.reset}  Daemon alive ${c.dim}(heartbeat ${callCapture.daemon.lastHeartbeatAgeSec}s ago)${c.reset}`,
+        );
+      } else if (callCapture.daemon.status === 'stale') {
+        console.log(
+          `  ${c.red}✗${c.reset}  Daemon heartbeat stale (${callCapture.daemon.lastHeartbeatAgeSec}s ago) — it may have crashed`,
+        );
+      } else {
+        console.log(
+          `  ${c.dim}–  No daemon heartbeat (not currently running inside 'ethos serve'/'ethos gateway').${c.reset}`,
+        );
+      }
+    }
+    console.log('');
+  }
 
   // -------------------------------------------------------------------------
   // Plugin health checks (v2.2)
@@ -806,6 +922,12 @@ export async function runDoctor(args: string[] = [], options?: DoctorOptions): P
   }
   if (channelRejected) {
     console.log(`${c.red}✗ A channel token was rejected — see Channel tokens above.${c.reset}`);
+    exitCode = 1;
+  }
+  if (callCapture.configured && !callCapture.ok) {
+    console.log(
+      `${c.red}✗ Call capture is configured but a dependency is missing — see Call capture above.${c.reset}`,
+    );
     exitCode = 1;
   }
   // Unreachable-but-not-rejected → DISTINCT warn exit code (2), so CI can tell a
@@ -1161,6 +1283,242 @@ function readExternalCliRequirements(skill: Skill): { all: string[]; anyOf: stri
 
 function isOnPath(bin: string): boolean {
   return spawnSync('which', [bin], { stdio: 'ignore' }).status === 0;
+}
+
+export interface CallCaptureCheckResult {
+  /** Whether `callCapture.personalityId` is set at all — an unconfigured
+   *  deployment reports nothing further, same "don't warn about an unused
+   *  feature" rule the Channel SDKs section follows. */
+  configured: boolean;
+  ok: boolean;
+  missing: string[];
+  errors: string[];
+  /** Daemon liveness (see `checkCallCaptureDaemonHealth`) — present only
+   *  when `configured` is true. Absent, not a placeholder value, when
+   *  unconfigured: a deployment that never enabled call capture must see
+   *  nothing new from `ethos doctor`. */
+  daemon?: CallCaptureDaemonHealthResult;
+}
+
+export interface CheckCallCaptureOptions {
+  /** Overrides the dependency preflight call. Tests must supply this — a
+   *  fake — instead of exercising the real capture-offer-card/native-binary
+   *  presence on the machine running the test suite. Mirrors
+   *  `telephonyReport`'s injectable `resolveMedia` option. */
+  checkDependencies?: () => Promise<CallCaptureDependencyCheckResult>;
+}
+
+/**
+ * Call-capture dependency diagnostics (plan/phases/call-capture-extension.md,
+ * "Preflight" §6 / T5). Structured result — text mode and `--json` mode each
+ * render it their own way, mirroring `probeConfiguredChannels` /
+ * `channelProbeLine`'s data/presentation split. `configured && !ok` feeds
+ * `computeDoctorExit`'s `callCaptureDepsMissing` flag: configured-but-broken
+ * is a hard failure, the same weight as a configured-but-missing channel SDK.
+ */
+export async function checkCallCapture(
+  config: EthosConfig | null,
+  storage: Storage,
+  options: CheckCallCaptureOptions = {},
+): Promise<CallCaptureCheckResult> {
+  if (!config?.callCapture?.personalityId) {
+    return { configured: false, ok: true, missing: [], errors: [] };
+  }
+  const checkDependencies =
+    options.checkDependencies ??
+    (async () => {
+      const { checkCallCaptureDependencies } = await import('@ethosagent/platform-callcapture');
+      return checkCallCaptureDependencies();
+    });
+  const [result, daemon] = await Promise.all([
+    checkDependencies(),
+    checkCallCaptureDaemonHealth(storage),
+  ]);
+  if (result.ok) return { configured: true, ok: true, missing: [], errors: [], daemon };
+  return { configured: true, ok: false, missing: result.missing, errors: result.errors, daemon };
+}
+
+/**
+ * Voice diagnostics. Runs the SAME resolution path the pipeline uses — same
+ * registries, same `trustedVoicePlugins` gate — so a refusal shows up here
+ * rather than as silent "voice doesn't work". Resolution constructs providers
+ * only; it makes no network calls.
+ */
+async function voiceReport(config: EthosConfig | null): Promise<string[]> {
+  const lines: string[] = [];
+  const asr = config?.auxiliary?.asr;
+  const tts = config?.auxiliary?.tts;
+  const voice = config?.voice;
+  if (!asr && !tts && !voice) {
+    lines.push(
+      `  ${c.dim}–  Not configured (no auxiliary.asr / auxiliary.tts / voice.*).${c.reset}`,
+    );
+    return lines;
+  }
+
+  // Dynamic import — @ethosagent/wiring pulls in the full provider/tool graph
+  // (the heaviest package in the repo); loading it only when voice is actually
+  // configured keeps --check-provider and other narrow doctor paths cheap.
+  const { createBuiltinVoiceRegistries } = await import('@ethosagent/wiring');
+  const { sttProviders, ttsProviders } = createBuiltinVoiceRegistries();
+  const trustedVoicePlugins = voice?.trustedPlugins ? new Set(voice.trustedPlugins) : undefined;
+  const stt = await resolveSttProvider({
+    registry: sttProviders,
+    providerName: asr?.provider,
+    providerConfig: { ...asr },
+    ...(trustedVoicePlugins ? { trustedVoicePlugins } : {}),
+  });
+  const speech = await resolveTtsProvider({
+    registry: ttsProviders,
+    providerName: tts?.provider,
+    providerConfig: { ...tts },
+    ...(trustedVoicePlugins ? { trustedVoicePlugins } : {}),
+  });
+
+  for (const [label, result] of [
+    ['STT', stt],
+    ['TTS', speech],
+  ] as const) {
+    if (result.ok) {
+      const local = result.provider.caps.local ? 'local' : 'remote';
+      lines.push(
+        `  ${c.green}✓${c.reset}  ${label} ${c.cyan}${result.providerId}${c.reset} ${c.dim}(${local})${c.reset}`,
+      );
+    } else if (result.code === 'not_configured') {
+      lines.push(`  ${c.dim}–  ${label} not configured.${c.reset}`);
+    } else {
+      lines.push(`  ${c.red}✗${c.reset}  ${label}: ${c.dim}${result.error}${c.reset}`);
+    }
+  }
+
+  lines.push(
+    trustedVoicePlugins
+      ? `  ${c.green}✓${c.reset}  Egress gate armed ${c.dim}(voice.trustedPlugins: ${
+          trustedVoicePlugins.size > 0
+            ? [...trustedVoicePlugins].join(', ')
+            : 'local providers only'
+        })${c.reset}`
+      : `  ${c.dim}–  Egress gate off (set voice.trustedPlugins to restrict non-local providers).${c.reset}`,
+  );
+
+  // Telephony gets its own rows only when there is a `voice.*` block to report
+  // on. Without one there is no number, no trunk and no media question to ask —
+  // and a dynamic import of a native package is not worth paying for to print
+  // "absent" three ways.
+  if (voice) lines.push(...(await telephonyReport(voice)));
+  else lines.push(`  ${c.dim}–  Telephony not configured (no voice.*).${c.reset}`);
+  return lines;
+}
+
+/**
+ * Telephony rows — everything an operator needs to know BEFORE they dial.
+ *
+ * This replaced a single line ("N voice bot(s); LiveKit configured; SIP trunk
+ * configured") that answered none of the questions a person actually has when a
+ * call does not work: is the webhook listener even running, is the control plane
+ * constructible, did the media SDK load, who gets through, and which number
+ * reaches which personality. Each of those has its own failure and its own fix,
+ * so each gets its own row.
+ *
+ * Two rules, both load-bearing:
+ *
+ *   - NOTHING here changes doctor's exit code. `computeDoctorExit` takes
+ *     `DoctorFailFlags`, which has no telephony member and gains none — a
+ *     deployment that does not do telephony is not unhealthy, and one that does
+ *     is not unhealthy for lacking an optional native package.
+ *   - An unrun probe reports SKIPPED, never passed (the `listen doctor` rule).
+ *     The only thing actually exercised here is the media import; the control
+ *     plane and the gates are reported as CONFIGURED, which is a different and
+ *     weaker claim than "verified".
+ */
+export async function telephonyReport(
+  voice: NonNullable<EthosConfig['voice']>,
+  deps: { resolveMedia?: () => Promise<LiveKitMediaResolution> } = {},
+): Promise<string[]> {
+  const lines: string[] = [];
+  const trunk = voice.trunk;
+  const livekit = voice.livekit;
+
+  // --- Trunk -------------------------------------------------------------
+  if (!trunk) {
+    lines.push(`  ${c.dim}–  SIP trunk not configured (no voice.trunk.*).${c.reset}`);
+  } else {
+    lines.push(
+      `  ${c.green}✓${c.reset}  SIP trunk ${c.cyan}${trunk.provider}${c.reset} ${c.dim}(trunkId ${trunk.trunkId}${trunk.fromNumber ? `, from ${trunk.fromNumber}` : ''})${c.reset}`,
+    );
+    lines.push(
+      trunk.webhookSecret
+        ? `  ${c.green}✓${c.reset}  Inbound webhook secret set ${c.dim}(listener mounts at ${trunk.webhookPath ?? '/sip/inbound'})${c.reset}`
+        : `  ${c.yellow}⚠${c.reset}  ${c.dim}voice.trunk.webhookSecret is unset — the inbound call listener stays off. An unsigned webhook is an open line anyone who learns the URL can ring.${c.reset}`,
+    );
+  }
+
+  // --- LiveKit control plane ---------------------------------------------
+  // Signed JWT + HTTPS, no SDK: present credentials mean the SIP trunk client
+  // and the token minter are CONSTRUCTIBLE. Not that the server answered —
+  // nothing here dials it.
+  if (!livekit) {
+    lines.push(
+      trunk
+        ? `  ${c.red}✗${c.reset}  LiveKit control plane absent ${c.dim}(voice.livekit.url/apiKey/apiSecret) — a trunk without it has no SIP control plane; telephony is unavailable.${c.reset}`
+        : `  ${c.dim}–  LiveKit control plane not configured (no voice.livekit.*).${c.reset}`,
+    );
+  } else {
+    lines.push(
+      `  ${c.green}✓${c.reset}  LiveKit control plane ${c.dim}(${livekit.url}; token minter + SIP trunk client constructible — not dialled from here)${c.reset}`,
+    );
+  }
+
+  // --- LiveKit media ------------------------------------------------------
+  // The one thing this report actually runs. `@livekit/rtc-node` is not a repo
+  // dependency (per-arch native binary), so an operator installs it themselves;
+  // without it every other row can be green and a call still carries no audio.
+  const resolveMedia = deps.resolveMedia ?? (() => resolveLiveKitMedia());
+  const media = await resolveMedia();
+  if (media.ok) {
+    lines.push(
+      `  ${c.green}✓${c.reset}  LiveKit media ${c.cyan}@livekit/rtc-node${media.version ? ` ${media.version}` : ''}${c.reset} ${c.dim}(calls can carry audio)${c.reset}`,
+    );
+  } else if (trunk || livekit) {
+    lines.push(
+      `  ${c.yellow}⚠${c.reset}  LiveKit media unavailable: ${c.dim}${media.reason}${c.reset}`,
+    );
+    lines.push(
+      `  ${c.dim}   Calls are answered, screened and logged, but carry no audio until it loads.${c.reset}`,
+    );
+  } else {
+    lines.push(`  ${c.dim}–  LiveKit media not needed (no trunk, no LiveKit).${c.reset}`);
+  }
+
+  // --- Inbound gates ------------------------------------------------------
+  const inbound = voice.inbound;
+  lines.push(
+    `  ${c.dim}   Inbound gates: concurrency ${inbound?.concurrencyCap ?? '2 (default)'}` +
+      `; per-caller/hour ${inbound?.perCallerPerHour ?? 'unlimited'}` +
+      `; daily budget ${inbound?.dailyBudgetUsd !== undefined ? `$${inbound.dailyBudgetUsd}` : 'unlimited'}` +
+      `; prewarm ${inbound?.prewarm ?? 'allowlisted (default)'}${c.reset}`,
+  );
+  lines.push(
+    `  ${c.dim}   Allowlist ${inbound?.allowlist?.length ?? 0} pattern(s)` +
+      `; receptionist ${inbound?.receptionist ?? 'not configured'}` +
+      `; owner ${inbound?.owner ? `${inbound.owner.platform}:${inbound.owner.chatId}` : 'not configured — call summaries have nowhere to go'}${c.reset}`,
+  );
+
+  // --- Number → bot → personality ----------------------------------------
+  if (voice.bots.length === 0) {
+    lines.push(
+      `  ${c.dim}–  No voice bots configured — no number maps to a personality (voice.bots[]).${c.reset}`,
+    );
+  } else {
+    for (const bot of voice.bots) {
+      const key = bot.id ?? `sha256(${bot.match})`;
+      lines.push(
+        `  ${c.dim}   ${bot.match} → ${key} → ${bot.bind.type} ${bot.bind.name}${c.reset}`,
+      );
+    }
+  }
+
+  return lines;
 }
 
 async function checkSkillPrerequisites(): Promise<SkillPrereqIssue[]> {

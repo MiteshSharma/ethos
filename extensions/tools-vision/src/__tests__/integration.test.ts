@@ -94,7 +94,7 @@ const latin1Storage: Storage = {
 
 const testBackends: CapabilityBackends = {
   storage: latin1Storage,
-  personalityFsReach: { read: ['/'], write: ['/'] },
+  personalityFsReach: () => ({ read: ['/'], write: ['/'] }),
 };
 
 // Minimal valid fixtures — same byte sequences the unit tests use.
@@ -310,7 +310,7 @@ describe('vision_analyze — P3 wiring integration', () => {
     // hand-rolled latin1Storage mock that papered over the encoding bug.
     const registry = new DefaultToolRegistry({
       storage: new FsStorage(),
-      personalityFsReach: { read: ['/'], write: ['/'] },
+      personalityFsReach: () => ({ read: ['/'], write: ['/'] }),
     });
     const tools = createVisionTools({
       resolveProvider: (model) => (model === 'claude-opus-4-7' ? provider : null),

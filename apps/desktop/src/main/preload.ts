@@ -1,5 +1,6 @@
 import { contextBridge, ipcRenderer } from 'electron';
-import { IPC_CHANNELS } from '../shared/ipc-contract';
+import type { SatelliteStatus } from '../shared/ipc-contract';
+import { IPC_CHANNELS, RENDERER_EVENTS } from '../shared/ipc-contract';
 
 const api = {
   platform: process.platform,
@@ -124,6 +125,23 @@ const api = {
     start: () => ipcRenderer.invoke(IPC_CHANNELS['gateway:start']),
     stop: () => ipcRenderer.invoke(IPC_CHANNELS['gateway:stop']),
     logPath: () => ipcRenderer.invoke(IPC_CHANNELS['gateway:logPath']),
+  },
+  satellite: {
+    status: () => ipcRenderer.invoke(IPC_CHANNELS['satellite:status']),
+    start: () => ipcRenderer.invoke(IPC_CHANNELS['satellite:start']),
+    stop: () => ipcRenderer.invoke(IPC_CHANNELS['satellite:stop']),
+    doctor: () => ipcRenderer.invoke(IPC_CHANNELS['satellite:doctor']),
+    setWakeEnabled: (req: { enabled: boolean }) =>
+      ipcRenderer.invoke(IPC_CHANNELS['satellite:setWakeEnabled'], req),
+    // Unsubscribe-returning, like theme/navigate/oauth above — a SPA route that
+    // mounts the Settings → Voice panel twice must not leave a listener behind.
+    onStateChanged: (cb: (status: SatelliteStatus) => void) => {
+      const listener = (_e: unknown, status: SatelliteStatus) => cb(status);
+      ipcRenderer.on(RENDERER_EVENTS['satellite:stateChanged'], listener);
+      return () => {
+        ipcRenderer.removeListener(RENDERER_EVENTS['satellite:stateChanged'], listener);
+      };
+    },
   },
   connection: {
     get: () => ipcRenderer.invoke(IPC_CHANNELS['connection:get']),

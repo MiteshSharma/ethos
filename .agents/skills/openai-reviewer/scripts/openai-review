@@ -108,10 +108,26 @@ if [[ -z "$DIFF" ]]; then
 fi
 
 # --- Pull project rules so Codex respects them ---
+# CLAUDE.md goes in WHOLE. The old 8 KiB cap existed because the prompt was an argv
+# element (MAX_ARG_STRLEN, 128 KiB); the prompt now goes in on stdin, so that reason
+# is gone. At 8 KiB the reviewer saw ~18% of the file and none of the storage
+# abstraction, the sanctioned raw-node:fs exceptions roster, the key conventions, or
+# the learnings — so it flagged permitted code as violations.
+#
+# RULES_MAX_BYTES is a backstop against a pathological file (generated, concatenated,
+# binary), not a formatter: at ~5x the current size it will not fire on normal growth,
+# and if it ever does it says so IN the prompt instead of truncating silently.
+RULES_MAX_BYTES=262144
 PROJECT_RULES="No project rules found."
 ROOT=$(git rev-parse --show-toplevel 2>/dev/null || echo "")
 if [[ -n "$ROOT" && -f "$ROOT/CLAUDE.md" ]]; then
-    PROJECT_RULES=$(head -c 8192 "$ROOT/CLAUDE.md")
+    RULES_BYTES=$(wc -c < "$ROOT/CLAUDE.md")
+    if (( RULES_BYTES > RULES_MAX_BYTES )); then
+        PROJECT_RULES=$(head -c "$RULES_MAX_BYTES" "$ROOT/CLAUDE.md")
+        PROJECT_RULES+=$'\n\n[project rules truncated at '"$RULES_MAX_BYTES"' bytes of '"$RULES_BYTES"' — rules below this point were NOT shown to you; do not assume the absence of a rule]'
+    else
+        PROJECT_RULES=$(cat "$ROOT/CLAUDE.md")
+    fi
 fi
 
 FOCUS_TEXT=$(focus_clause)
@@ -164,7 +180,22 @@ EOF
 )
 
 # --- Run codex ---
-RAW=$(codex exec --skip-git-repo-check "$PROMPT" 2>/dev/null) || RAW=$(codex exec "$PROMPT" 2>/dev/null) || die "codex exec failed"
+# The prompt goes in on stdin (`codex exec -`), never as an argv element: Linux caps a
+# single argv string at MAX_ARG_STRLEN (128 KiB) regardless of ARG_MAX, and a milestone
+# diff blows past that with "Argument list too long".
+CODEX_ERR_FILE=$(mktemp "${TMPDIR:-/tmp}/openai-review-stderr.XXXXXX")
+trap 'rm -f "$CODEX_ERR_FILE"' EXIT
+
+RAW=""
+CODEX_OK=0
+if RAW=$(codex exec --skip-git-repo-check - <<<"$PROMPT" 2>"$CODEX_ERR_FILE"); then
+    CODEX_OK=1
+elif RAW=$(codex exec - <<<"$PROMPT" 2>>"$CODEX_ERR_FILE"); then
+    CODEX_OK=1
+fi
+
+CODEX_ERR=$(tail -c 1000 "$CODEX_ERR_FILE" 2>/dev/null || echo "")
+[[ "$CODEX_OK" -eq 1 ]] || die "codex exec failed: ${CODEX_ERR:-<no stderr>}"
 
 # Extract first JSON object from response (codex may wrap in prose)
 JSON=$(echo "$RAW" | awk '
@@ -176,6 +207,8 @@ JSON=$(echo "$RAW" | awk '
 if echo "$JSON" | jq -e . >/dev/null 2>&1; then
     echo "$JSON"
 else
-    # Fail-open to avoid infinite loop in the auto-review hook
-    printf '{"verdict":"approved","summary":"Codex output unparseable; skipping.","findings":[]}\n'
+    # Never fail *open*: a reviewer that reports "approved" without having reviewed
+    # anything is worse than no reviewer. Fail loud instead — the auto-review hook
+    # already fail-opens on a non-zero exit, so this cannot spin the review loop.
+    die "Codex ran but produced no parseable JSON verdict — nothing was reviewed. stderr: ${CODEX_ERR:-<no stderr>}"
 fi

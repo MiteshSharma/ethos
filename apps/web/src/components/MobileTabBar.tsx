@@ -1,6 +1,7 @@
 import { Drawer } from 'antd';
 import { useState } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
+import { useConfig } from '../features/config/api/queries';
 
 // Bottom tab bar shown at <768px. Per the plan's responsive contract:
 // "Mobile triage-only — read + approve + triage, not full functionality."
@@ -34,15 +35,26 @@ interface MoreLink {
   label: string;
 }
 
+// P5 (plan/phases/personality-first-ui.md) — the audit found this list
+// (alongside CommandPalette's "Pages" group, see `paletteDestinations.ts`)
+// omitted Dashboards, Teams, Kanban, Admin, and MCP from the post-refactor
+// route table. Goals and Tasks stay out: they're workspace-only (no bare
+// `/goals` page to link to on this triage-only surface — resolving a
+// fallback personality here would be new logic, not a stale-link fix).
 const MORE_LINKS: ReadonlyArray<MoreLink> = [
   { path: '/activity', label: 'Activity' },
   { path: '/personalities', label: 'Personalities' },
   { path: '/skills', label: 'Skills' },
+  { path: '/mcp', label: 'MCP Servers' },
   { path: '/memory', label: 'Memory' },
+  { path: '/documents', label: 'Documents' },
   { path: '/communications', label: 'Communications' },
   { path: '/batch', label: 'Batch' },
   { path: '/eval', label: 'Eval' },
   { path: '/plugins', label: 'Plugins' },
+  { path: '/dashboards', label: 'Dashboards' },
+  { path: '/teams', label: 'Teams' },
+  { path: '/kanban', label: 'Kanban' },
   { path: '/settings', label: 'Settings' },
 ];
 
@@ -50,6 +62,11 @@ export function MobileTabBar() {
   const { pathname } = useLocation();
   const navigate = useNavigate();
   const [moreOpen, setMoreOpen] = useState(false);
+  const { data: config } = useConfig();
+
+  const moreLinks = config?.adminEnabled
+    ? [...MORE_LINKS, { path: '/admin', label: 'Admin' }]
+    : MORE_LINKS;
 
   const moreActive = !PRIMARY.some((p) => pathname === p.path || pathname.startsWith(`${p.path}/`));
 
@@ -92,7 +109,7 @@ export function MobileTabBar() {
         title="All tabs"
       >
         <ul className="mobile-more-list">
-          {MORE_LINKS.map((link) => (
+          {moreLinks.map((link) => (
             <li key={link.path}>
               <button
                 type="button"

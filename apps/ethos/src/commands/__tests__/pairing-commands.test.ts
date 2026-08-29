@@ -6,8 +6,8 @@
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { generateCode, initPairingDb } from '@ethosagent/safety-channel';
 import Database from '@ethosagent/sqlite';
+import { generateCode, initPairingDb } from '@ethosagent/wiring/security-kernel';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 let tmp: string;
@@ -72,7 +72,7 @@ describe('runPairingCommand', () => {
     initPairingDb(db);
     const code = generateCode(db, 'bob', 'discord');
     if (!code) throw new Error('failed to generate pairing code in test setup');
-    const { consumeAndAllow } = await import('@ethosagent/safety-channel');
+    const { consumeAndAllow } = await import('@ethosagent/wiring/security-kernel');
     const r1 = consumeAndAllow(db, code);
     expect(r1.ok).toBe(true);
     db.close();
@@ -104,7 +104,7 @@ describe('runPairingCommand', () => {
     const c1 = generateCode(db, 'alice', 'telegram');
     const c2 = generateCode(db, 'bob', 'slack');
     if (!c1 || !c2) throw new Error('failed to generate pairing codes in test setup');
-    const { consumeAndAllow } = await import('@ethosagent/safety-channel');
+    const { consumeAndAllow } = await import('@ethosagent/wiring/security-kernel');
     consumeAndAllow(db, c1);
     consumeAndAllow(db, c2);
     generateCode(db, 'charlie', 'telegram'); // pending

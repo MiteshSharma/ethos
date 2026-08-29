@@ -92,6 +92,53 @@ describe('triageMessage', () => {
     expect(result.effectiveMode).toBe('all');
   });
 
+  // SP-B1 — bot/workflow allowlist (plan/phases/slack-parity-multimodal.md).
+  // The gate is default-closed: a bot reaches the agent only when the operator
+  // named its `bot_id`. The envelope stamps that `bot_id` as `userId` so the
+  // gateway's channel filter — which allowlists by `userId` — still governs it.
+  describe('bot/workflow allowlist', () => {
+    const botMessage: RawSlackMessage = {
+      channel: 'D123',
+      text: 'deploy finished',
+      ts: '111.222',
+      channel_type: 'im',
+      subtype: 'bot_message',
+      bot_id: 'B_DEPLOY',
+    };
+
+    it('accepts an allowlisted bot and stamps userId with the bot_id', async () => {
+      const result = await triageMessage(botMessage, { ...baseCtx, allowedBotIds: ['B_DEPLOY'] });
+      expect(result.drop).toBeUndefined();
+      expect(result.envelope?.text).toBe('deploy finished');
+      // Load-bearing: the channel filter keys on `userId`, so the bot_id must
+      // land here or the operator has no way to allowlist the bot downstream.
+      expect(result.envelope?.userId).toBe('B_DEPLOY');
+    });
+
+    it('drops a bot that is not on the allowlist', async () => {
+      const result = await triageMessage(botMessage, { ...baseCtx, allowedBotIds: ['B_OTHER'] });
+      expect(result.envelope).toBeUndefined();
+      expect(result.drop).toBe('subtype');
+    });
+
+    it('drops every bot when the allowlist is absent (default-closed)', async () => {
+      const result = await triageMessage(botMessage, baseCtx);
+      expect(result.envelope).toBeUndefined();
+      expect(result.drop).toBe('subtype');
+    });
+
+    it('drops every bot when the allowlist is empty (default-closed)', async () => {
+      const result = await triageMessage(botMessage, { ...baseCtx, allowedBotIds: [] });
+      expect(result.envelope).toBeUndefined();
+      expect(result.drop).toBe('subtype');
+    });
+
+    it('leaves a human message untouched when an allowlist is configured', async () => {
+      const result = await triageMessage(dmMessage, { ...baseCtx, allowedBotIds: ['B_DEPLOY'] });
+      expect(result.envelope?.userId).toBe('U1');
+    });
+  });
+
   it('thread_follow consults thread state when present', async () => {
     const threadState = {
       hasBotPosted: (channel: string, ts: string) => channel === 'C123' && ts === 'T1',

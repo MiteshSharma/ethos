@@ -1,18 +1,8 @@
 // A2A async task orchestration (plan §10 / §17 Phase 6).
 //
-// Two roles, two sides of the wire:
-//
-//   RESPONDER (this server) — A2aAsyncManager. `submit` dedupes on the
-//   idempotency key, creates a `submitted` task, and runs the injected runner in
-//   the BACKGROUND: `working` → `completed` / `failed`. If the request asked for
-//   push-back, it then POSTs the result to the peer's OWN JSON-RPC server
-//   through the injected push client; if delivery fails after retries the task
-//   settles `peer-unreachable` (NOT `failed` — delivery, not execution, failed).
-//
-//   INITIATOR (the caller awaiting an async result) — A2aInitiatorTracker. It
-//   owns the task-level TIMEOUT: if the push-back never arrives in time the task
-//   settles `expired` (NOT `failed` — the initiator gave up waiting, the peer
-//   did not error). `resolve` lands an arriving push-back as `completed`.
+// A2aAsyncManager is the RESPONDER-side (this server) task manager. `submit`
+// dedupes on the idempotency key, creates a `submitted` task, and runs the
+// injected runner in the BACKGROUND: `working` → `completed` / `failed`.
 //
 // Idempotency (plan §10): a retried `message/send` with the same key MUST NOT
 // re-run the loop — tools run and state mutates, so a double `run()` is a real
@@ -21,21 +11,20 @@
 //
 // Layer-clean: imports `./task-store`, the `A2aTaskRunner` TYPE from `./rpc`
 // (type-only — no runtime cycle), and `@ethosagent/types` for `AgentEvent`. No
-// core, no extensions, no apps — the runner + push client are injected.
+// core, no extensions, no apps — the runner is injected.
+//
+// NOTE (T1.5 / D11): an earlier revision also carried a push-back delivery
+// path (POSTing the result to the peer's own JSON-RPC server as a
+// notification) and an initiator-side tracker class that awaited it. Neither
+// ever closed: nothing populated a push target on an outbound send, and there
+// was no inbound handler to receive the notification. Both were deleted
+// rather than finished — Tier 2 scope if the loop is ever closed (poll via
+// spec GetTask).
 
 import type { AgentEvent } from '@ethosagent/types';
 import { type A2aAuditSink, safeAudit } from './audit';
-import { signStruct } from './crypto';
 import type { A2aTaskRunner } from './rpc';
 import { type A2aTask, type A2aTaskStore, isTerminalStatus, newTaskId } from './task-store';
-
-// Duplicated as local literals (NOT imported from `./rpc`) so this module keeps
-// `./rpc` a TYPE-only dependency — a runtime import would create a require cycle
-// (rpc.ts imports A2aAsyncManager + collectAgentRun from here). The strings must
-// match rpc.ts's `A2A_REQUEST_POP_CONTEXT` and the `tasks/pushResult` method the
-// initiator's /a2a endpoint verifies the PoP against.
-const A2A_REQUEST_POP_CONTEXT = 'a2a-request-pop' as const;
-const A2A_METHOD_TASKS_PUSH_RESULT = 'tasks/pushResult' as const;
 
 // ---------------------------------------------------------------------------
 // Shared AgentEvent → result mapping (plan §10 / Phase 5).
@@ -73,93 +62,6 @@ export async function collectAgentRun(
 }
 
 // ---------------------------------------------------------------------------
-// Push-back client (plan §10) — injected so it is stubbable in tests.
-// ---------------------------------------------------------------------------
-
-/** Where a push-back is delivered: the peer's JSON-RPC URL + the token to auth with. */
-export interface A2aPushTarget {
-  url: string;
-  /** The token THIS agent holds for the peer (from gated reciprocation). */
-  token?: string;
-  /**
-   * The RESPONDER's Ed25519 private key (PKCS8 PEM). Set SERVER-SIDE by the
-   * responder wiring (NEVER from the wire — the initiator never learns it) so
-   * the push-back carries a per-request proof-of-possession, exactly like every
-   * other /a2a call. When absent the push is bearer-only (legacy behaviour).
-   */
-  signingKeyPem?: string;
-  /**
-   * The `jti` of {@link A2aPushTarget.token} — bound into the PoP struct so the
-   * proof is useless for any other token. Required alongside `signingKeyPem`.
-   */
-  tokenJti?: string;
-}
-
-/** The push-back payload delivered to the initiator on async completion. */
-export interface A2aPushPayload {
-  taskId: string;
-  status: A2aTask['status'];
-  result?: string;
-  error?: string;
-}
-
-/**
- * Delivers an async result back to the initiator's JSON-RPC server. Injected —
- * the default {@link FetchA2aPushClient} POSTs via `fetch`; tests pass a stub.
- * `push` MUST throw (or reject) on a delivery failure so the manager can retry.
- */
-export interface A2aPushClient {
-  push(target: A2aPushTarget, payload: A2aPushPayload): Promise<void>;
-}
-
-/**
- * Default push client: POST the payload as a JSON-RPC notification to the peer.
- *
- * Phase 7 formalizes the OUTBOUND push proof-of-possession: when the responder
- * supplies `signingKeyPem` + `tokenJti` on the target, the push carries an
- * `X-A2A-PoP` over the domain-separated `{ context:'a2a-request-pop',
- * method:'tasks/pushResult', jti, timestamp }` struct — the same shape the
- * initiator's /a2a endpoint verifies for any other call. The full initiator-side
- * `tasks/pushResult` INBOUND handler (verifying this PoP and landing the result)
- * is Phase 8/9 scope; here we close the OUTBOUND half so the loop is closeable.
- */
-export class FetchA2aPushClient implements A2aPushClient {
-  private readonly fetchImpl: typeof fetch;
-  private readonly now: () => number;
-
-  constructor(fetchImpl: typeof fetch = fetch, now: () => number = Date.now) {
-    this.fetchImpl = fetchImpl;
-    this.now = now;
-  }
-
-  async push(target: A2aPushTarget, payload: A2aPushPayload): Promise<void> {
-    const headers: Record<string, string> = { 'content-type': 'application/json' };
-    if (target.token) headers.authorization = `Bearer ${target.token}`;
-    if (target.signingKeyPem && target.tokenJti) {
-      const timestamp = this.now();
-      const popStruct = {
-        context: A2A_REQUEST_POP_CONTEXT,
-        method: A2A_METHOD_TASKS_PUSH_RESULT,
-        jti: target.tokenJti,
-        timestamp,
-      };
-      headers['x-a2a-pop'] = signStruct(popStruct, target.signingKeyPem);
-      headers['x-a2a-pop-timestamp'] = String(timestamp);
-    }
-    const res = await this.fetchImpl(target.url, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({
-        jsonrpc: '2.0',
-        method: 'tasks/pushResult',
-        params: payload,
-      }),
-    });
-    if (!res.ok) throw new Error(`push-back returned HTTP ${res.status}`);
-  }
-}
-
-// ---------------------------------------------------------------------------
 // Responder-side async manager
 // ---------------------------------------------------------------------------
 
@@ -168,10 +70,6 @@ export interface A2aAsyncManagerOptions {
   runner: A2aTaskRunner;
   /** Injectable clock (ms epoch). Default `Date.now`. */
   now?: () => number;
-  /** Push-back delivery client. Omit to disable push-back entirely. */
-  pushClient?: A2aPushClient;
-  /** Delivery attempts before settling `peer-unreachable`. Default 3. */
-  pushRetries?: number;
   /** Called after a trace's task settles, so the delegation guard can free it. */
   onSettled?: (traceId: string) => void;
   /** Metadata-only audit sink (plan §13 / Phase 8) — records task-state transitions. */
@@ -183,26 +81,29 @@ export interface SubmitAsyncArgs {
   peerFingerprint: string;
   message: string;
   sessionKey: string;
+  /**
+   * The peer-named skill — threaded to the runner for turn-time tool
+   * narrowing (T0.2). Optional so existing test callers that don't exercise
+   * narrowing are unaffected; a real inbound `message/send` always supplies
+   * it (`A2aMessageSendParams.skill` is a required protocol field).
+   */
+  skill?: string;
   traceId: string;
   /** Signed delegation depth this task was admitted at — threaded to the runner (P8). */
   depth: number;
   idempotencyKey: string;
-  /** When set (and a push client is wired), deliver the result on completion. */
-  pushBack?: A2aPushTarget;
 }
 
 /** The responder-side async task manager. */
 export class A2aAsyncManager {
   private readonly opts: A2aAsyncManagerOptions;
   private readonly now: () => number;
-  private readonly pushRetries: number;
   // task id → the background settle promise (lets callers/tests await settlement).
   private readonly running = new Map<string, Promise<A2aTask>>();
 
   constructor(opts: A2aAsyncManagerOptions) {
     this.opts = opts;
     this.now = opts.now ?? Date.now;
-    this.pushRetries = opts.pushRetries ?? 3;
   }
 
   /**
@@ -228,7 +129,14 @@ export class A2aAsyncManager {
       // personality read (plan §15 multi-tenancy task-ownership check).
       personalityId: args.personalityId,
     };
-    await this.opts.taskStore.create(task);
+    // `findByIdempotencyKey` above and `create` below are two separate awaits,
+    // so another `submit()` call for the SAME key can interleave between them
+    // and win the actual insert (the store's UNIQUE index is what really
+    // decides it). `create` returns the CANONICAL row in that case — if it is
+    // not the one built here, this call lost the race: return the winner
+    // as-is and do NOT execute, or this key would still run the loop twice.
+    const canonical = await this.opts.taskStore.create(task);
+    if (canonical.id !== task.id) return canonical;
     this.running.set(task.id, this.execute(task, args));
     return task;
   }
@@ -249,7 +157,7 @@ export class A2aAsyncManager {
       traceId: task.traceId,
       status,
       decision: 'accepted',
-      severity: status === 'failed' || status === 'peer-unreachable' ? 'error' : 'info',
+      severity: status === 'failed' ? 'error' : 'info',
       ts: this.now(),
     });
   }
@@ -262,6 +170,7 @@ export class A2aAsyncManager {
       const { text, error } = await collectAgentRun(
         this.opts.runner.run(args.personalityId, args.message, {
           sessionKey: args.sessionKey,
+          skill: args.skill,
           delegation: { traceId: args.traceId, depth: args.depth },
         }),
       );
@@ -270,19 +179,6 @@ export class A2aAsyncManager {
         return await this.finalize(task, { status: 'failed', error });
       }
       await store.update(task.id, { status: 'completed', result: text });
-
-      // Push-back delivery — a distinct failure axis from execution.
-      if (args.pushBack && this.opts.pushClient) {
-        const delivered = await this.deliver(args.pushBack, {
-          taskId: task.id,
-          status: 'completed',
-          result: text,
-        });
-        if (!delivered) {
-          this.auditStatus(task, args, 'peer-unreachable');
-          return await this.finalize(task, { status: 'peer-unreachable', result: text });
-        }
-      }
       this.auditStatus(task, args, 'completed');
       return await this.finalize(task, { status: 'completed', result: text });
     } catch (err) {
@@ -297,105 +193,6 @@ export class A2aAsyncManager {
     this.running.delete(task.id);
     this.opts.onSettled?.(task.traceId);
     return updated;
-  }
-
-  private async deliver(target: A2aPushTarget, payload: A2aPushPayload): Promise<boolean> {
-    const client = this.opts.pushClient;
-    if (!client) return false;
-    for (let attempt = 0; attempt < this.pushRetries; attempt++) {
-      try {
-        await client.push(target, payload);
-        return true;
-      } catch {
-        // Retry until the budget is exhausted, then settle peer-unreachable.
-      }
-    }
-    return false;
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Initiator-side tracker — owns the task-level timeout (`expired`).
-// ---------------------------------------------------------------------------
-
-export interface A2aInitiatorTrackerOptions {
-  taskStore: A2aTaskStore;
-  /** Injectable clock (ms epoch). Default `Date.now`. */
-  now?: () => number;
-}
-
-export interface OpenInitiatorArgs {
-  peerFingerprint: string;
-  traceId: string;
-  idempotencyKey: string;
-  /** How long to wait for the peer's push-back before settling `expired`. */
-  timeoutMs: number;
-}
-
-export interface OpenedInitiatorTask {
-  task: A2aTask;
-  /** Resolves when the task settles — `completed` (push-back arrived) or `expired`. */
-  settled: Promise<A2aTask>;
-}
-
-/**
- * Tracks an outbound async task the initiator is awaiting. It arms a timeout:
- * if {@link A2aInitiatorTracker.resolve} is not called with the push-back before
- * `timeoutMs`, the task settles `expired` — the initiator does not wait forever.
- */
-export class A2aInitiatorTracker {
-  private readonly opts: A2aInitiatorTrackerOptions;
-  private readonly now: () => number;
-  private readonly pending = new Map<
-    string,
-    { settle: (task: A2aTask) => void; timer: ReturnType<typeof setTimeout> }
-  >();
-
-  constructor(opts: A2aInitiatorTrackerOptions) {
-    this.opts = opts;
-    this.now = opts.now ?? Date.now;
-  }
-
-  async open(args: OpenInitiatorArgs): Promise<OpenedInitiatorTask> {
-    const task: A2aTask = {
-      id: newTaskId(),
-      status: 'working',
-      createdAt: this.now(),
-      idempotencyKey: args.idempotencyKey,
-      traceId: args.traceId,
-      peerFingerprint: args.peerFingerprint,
-    };
-    await this.opts.taskStore.create(task);
-
-    let settle!: (t: A2aTask) => void;
-    const settled = new Promise<A2aTask>((resolve) => {
-      settle = resolve;
-    });
-    const timer = setTimeout(() => {
-      void this.expire(task.id);
-    }, args.timeoutMs);
-    // Do not keep the process alive solely for this timer.
-    if (typeof timer === 'object' && timer && 'unref' in timer) timer.unref();
-    this.pending.set(task.id, { settle, timer });
-    return { task, settled };
-  }
-
-  /** Land an arriving push-back: settle the task `completed`. */
-  async resolve(taskId: string, result: string): Promise<void> {
-    const entry = this.pending.get(taskId);
-    if (!entry) return;
-    clearTimeout(entry.timer);
-    this.pending.delete(taskId);
-    const updated = await this.opts.taskStore.update(taskId, { status: 'completed', result });
-    if (updated) entry.settle(updated);
-  }
-
-  private async expire(taskId: string): Promise<void> {
-    const entry = this.pending.get(taskId);
-    if (!entry) return;
-    this.pending.delete(taskId);
-    const updated = await this.opts.taskStore.update(taskId, { status: 'expired' });
-    if (updated) entry.settle(updated);
   }
 }
 

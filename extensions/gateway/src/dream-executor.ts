@@ -48,6 +48,31 @@ export class DreamExecutor {
     }
   }
 
+  /**
+   * Discount a host pause from every personality's idle clock.
+   *
+   * A snapshot-and-restore host advances wall-clock time while the guest is
+   * frozen, so the first tick after a pause longer than `idleMinutes` would
+   * fire a real LLM turn — writing MEMORY.md/USER.md and spending API cost —
+   * for every personality with dreaming enabled.
+   *
+   * Adding the pause duration to each stored timestamp preserves whatever idle
+   * time had already accrued BEFORE the pause: a personality genuinely idle
+   * for hours beforehand is still idle afterwards. `recordUserTurn()` would
+   * not do — it bumps to `Date.now()` (erasing that pre-pause idle time) and
+   * aborts in-flight dreams. `plan/phases/clock-tolerance-pass.md` §2 words
+   * gate #12's fix as "bump to Date.now()"; §3's general rule is to advance by
+   * the known pause duration when that number is available, and here it is.
+   *
+   * Non-positive or non-finite durations are a no-op.
+   */
+  applyPauseOffset(pauseDurationMs: number): void {
+    if (!Number.isFinite(pauseDurationMs) || pauseDurationMs <= 0) return;
+    for (const [personalityId, lastTurn] of this.lastUserTurnAt) {
+      this.lastUserTurnAt.set(personalityId, lastTurn + pauseDurationMs);
+    }
+  }
+
   /** Start the idle-check interval (every 5 minutes). */
   start(): void {
     if (this.timer) return;
@@ -67,6 +92,16 @@ export class DreamExecutor {
       abort.abort();
     }
     this.inFlight.clear();
+  }
+
+  /**
+   * Whether any dream turn is currently running — the unscoped view of
+   * `inFlight`, which the tick loop only ever consults one personality at a
+   * time. Exists for the idle-watcher's busy predicate: a dream is a real
+   * LLM turn, so stopping the process mid-dream truncates it.
+   */
+  hasActiveDreams(): boolean {
+    return this.inFlight.size > 0;
   }
 
   private async tick(): Promise<void> {

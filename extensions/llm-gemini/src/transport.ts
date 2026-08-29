@@ -1,7 +1,9 @@
+import { estimateCost } from '@ethosagent/pricing';
 import type {
   CompletionChunk,
   CompletionOptions,
   Message,
+  TokenUsage,
   ToolDefinitionLite,
 } from '@ethosagent/types';
 
@@ -37,7 +39,7 @@ export async function* streamGeminiGenerate(
 
   if (!response.body) throw new Error('Gemini response has no body');
 
-  yield* parseGeminiSSE(response.body);
+  yield* parseGeminiSSE(response.body, config.model);
 }
 
 function buildGeminiBody(
@@ -89,14 +91,22 @@ function convertPart(c: { type: string; [key: string]: unknown }): Record<string
       return { functionCall: { name: c.name, args: c.input } };
     case 'tool_result':
       return { functionResponse: { name: c.tool_use_id, response: { result: c.content } } };
+    // Gemini takes images and PDFs through the same `inlineData` part, keyed
+    // by mime type. `document` shares the case: without it a PDF fell to the
+    // default branch and reached the model as the literal text "undefined",
+    // while the provider advertised `visionDocuments: true`.
     case 'image':
+    case 'document':
       return { inlineData: { mimeType: c.mediaType, data: c.data } };
     default:
       return { text: String(c.text ?? '') };
   }
 }
 
-async function* parseGeminiSSE(body: ReadableStream<Uint8Array>): AsyncGenerator<CompletionChunk> {
+async function* parseGeminiSSE(
+  body: ReadableStream<Uint8Array>,
+  model: string,
+): AsyncGenerator<CompletionChunk> {
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let buffer = '';
@@ -120,7 +130,7 @@ async function* parseGeminiSSE(body: ReadableStream<Uint8Array>): AsyncGenerator
 
         try {
           const event = JSON.parse(dataLine);
-          yield* handleGeminiEvent(event, toolCallCounter);
+          yield* handleGeminiEvent(event, toolCallCounter, model);
           const candidates = event.candidates as Array<Record<string, unknown>> | undefined;
           if (candidates?.[0]) {
             const content = candidates[0].content as Record<string, unknown> | undefined;
@@ -141,24 +151,49 @@ async function* parseGeminiSSE(body: ReadableStream<Uint8Array>): AsyncGenerator
   }
 }
 
+/**
+ * Map Gemini's `usageMetadata` onto `TokenUsage`, priced.
+ *
+ * `promptTokenCount` INCLUDES `cachedContentTokenCount`, so the cached slice is
+ * subtracted before the input rate is applied — otherwise a cache hit is billed
+ * twice, once at the input rate and once at the cache-read rate. The reported
+ * token counts keep Gemini's own meaning; only the cost math splits them.
+ */
+function geminiUsage(
+  meta: Record<string, number>,
+  model: string,
+): { usage: TokenUsage; costBasis: 'priced' | 'local' | 'unknown' } {
+  const promptTokens = meta.promptTokenCount ?? 0;
+  const outputTokens = meta.candidatesTokenCount ?? 0;
+  const cacheReadTokens = meta.cachedContentTokenCount ?? 0;
+  // Previously hardcoded to 0, which reported every Gemini turn as free.
+  const costEstimate = estimateCost(model, {
+    inputTokens: Math.max(promptTokens - cacheReadTokens, 0),
+    outputTokens,
+    cacheReadTokens,
+  });
+  return {
+    usage: {
+      inputTokens: promptTokens,
+      outputTokens,
+      cacheReadTokens,
+      cacheCreationTokens: 0,
+      estimatedCostUsd: costEstimate.costUsd,
+    },
+    costBasis: costEstimate.basis,
+  };
+}
+
 function* handleGeminiEvent(
   event: Record<string, unknown>,
   toolCallOffset: number,
+  model: string,
 ): Generator<CompletionChunk> {
   const candidates = event.candidates as Array<Record<string, unknown>> | undefined;
   if (!candidates?.length) {
     const meta = event.usageMetadata as Record<string, number> | undefined;
     if (meta) {
-      yield {
-        type: 'usage',
-        usage: {
-          inputTokens: meta.promptTokenCount ?? 0,
-          outputTokens: meta.candidatesTokenCount ?? 0,
-          cacheReadTokens: meta.cachedContentTokenCount ?? 0,
-          cacheCreationTokens: 0,
-          estimatedCostUsd: 0,
-        },
-      };
+      yield { type: 'usage', ...geminiUsage(meta, model) };
     }
     return;
   }
@@ -197,15 +232,6 @@ function* handleGeminiEvent(
 
   const meta = event.usageMetadata as Record<string, number> | undefined;
   if (meta) {
-    yield {
-      type: 'usage',
-      usage: {
-        inputTokens: meta.promptTokenCount ?? 0,
-        outputTokens: meta.candidatesTokenCount ?? 0,
-        cacheReadTokens: meta.cachedContentTokenCount ?? 0,
-        cacheCreationTokens: 0,
-        estimatedCostUsd: 0,
-      },
-    };
+    yield { type: 'usage', ...geminiUsage(meta, model) };
   }
 }

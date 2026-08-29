@@ -15,13 +15,14 @@ import {
 import { RETENTION_DEFAULTS } from '@ethosagent/types';
 import { EthosObservability } from '@ethosagent/wiring';
 import { writeJson } from '../json-output';
-import { getStorage } from '../wiring';
+import { getEthosObservability, getStorage } from '../wiring';
 
 // ---------------------------------------------------------------------------
 // ethos data stats
 // ethos data prune [--dry-run] [--category <name>] [--older-than <duration>]
 // ethos data reset [--dry-run] [--blobs-only]
 // ethos data archive list
+// ethos data recompute-costs [--json]
 // ---------------------------------------------------------------------------
 
 function formatBytes(bytes: number): string {
@@ -306,6 +307,55 @@ async function runReset(argv: string[]): Promise<void> {
   }
 }
 
+// ---------------------------------------------------------------------------
+// ethos data recompute-costs
+// ---------------------------------------------------------------------------
+//
+// A5 backfill. Fixing the emitters does nothing for the numbers already on
+// disk: three providers wrote $0 for every call and llm-anthropic priced
+// unrecognised `claude-*` ids at Sonnet rates. This re-derives every stored
+// message cost from its stored token counts through the one rate table, and
+// rebuilds the session rollups that cache their sum.
+async function runRecomputeCosts(argv: string[]): Promise<void> {
+  const sessDbPath = join(ethosDir(), 'sessions.db');
+  if (!fileSize(sessDbPath)) {
+    console.log('No sessions.db found — nothing to recompute.');
+    return;
+  }
+
+  const { SQLiteSessionStore } = await import('@ethosagent/session-sqlite');
+  const store = new SQLiteSessionStore(sessDbPath);
+  let result: Awaited<ReturnType<typeof store.recomputeMessageCosts>>;
+  try {
+    result = await store.recomputeMessageCosts();
+  } finally {
+    store.close();
+  }
+
+  getEthosObservability().recordCostRecompute({
+    code: 'data.recompute_costs',
+    messagesScanned: result.messagesScanned,
+    messagesUpdated: result.messagesUpdated,
+    sessionsUpdated: result.sessionsUpdated,
+    unpricedModels: result.unpricedModels,
+  });
+
+  if (argv.includes('--json')) {
+    writeJson(result);
+    return;
+  }
+
+  console.log(
+    `Recomputed ${result.messagesScanned} message(s): ${result.messagesUpdated} cost(s) rewritten, ` +
+      `${result.sessionsUpdated} session rollup(s) rebuilt.`,
+  );
+  if (result.unpricedModels.length > 0) {
+    console.log(
+      `  No rate for: ${result.unpricedModels.join(', ')} — those rows are recorded as $0.`,
+    );
+  }
+}
+
 async function runArchiveCommand(argv: string[]): Promise<void> {
   const dir = ethosDir();
   const archiveDir = join(dir, 'archive');
@@ -400,7 +450,12 @@ export async function runData(sub: string, argv: string[]): Promise<void> {
     return;
   }
 
+  if (sub === 'recompute-costs') {
+    await runRecomputeCosts(argv);
+    return;
+  }
+
   console.log(
-    'Usage: ethos data [stats | prune [--dry-run] [--personality <id>] | reset [--dry-run] [--blobs-only] | archive [list | --month YYYY-MM | --dry-run]]',
+    'Usage: ethos data [stats | prune [--dry-run] [--personality <id>] | reset [--dry-run] [--blobs-only] | archive [list | --month YYYY-MM | --dry-run] | recompute-costs [--json]]',
   );
 }

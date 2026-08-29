@@ -707,7 +707,7 @@ export function App({
   // and close it when the request resolves (answer / timeout / cancel).
   // Registered through the bridge so it survives `replaceLoop` (model switch).
   useEffect(() => {
-    bridge.setClarifyPresenter((req) => setClarifyRequest(req));
+    bridge.setClarifyPresenter('tui', (req) => setClarifyRequest(req));
     return bridge.onClarifyResolved(() => setClarifyRequest(null));
   }, [bridge]);
 
@@ -836,9 +836,23 @@ export function App({
           ]);
         } else {
           const newPersonality = args[0] ?? personality;
+          // A session's personality is bound at creation and immutable, so a
+          // switch cannot mutate the active session — the next turn would be
+          // refused with `personality_locked`. Rotate to a fresh session key
+          // and reset the same per-session state `/new` resets.
+          bridge.resetSessionCost(sessionKey);
+          setSessionKey(`cli:${basename(process.cwd())}:${Date.now()}`);
           setPersonality(newPersonality);
           setBudgetCapUsd(bridge.getPersonalityBudgetCap(newPersonality) ?? null);
-          setStatusMsg(`[personality: ${newPersonality}]`);
+          setMessages([]);
+          setCompletedTools([]);
+          setDelegations([]);
+          setTimelineEvents([]);
+          setFileActivity([]);
+          setUsage({ inputTokens: 0, outputTokens: 0, costUsd: 0 });
+          setStatusMsg(
+            `[personality: ${newPersonality} — new session started; personality is fixed for a session]`,
+          );
         }
         break;
       case 'model':
@@ -1091,6 +1105,9 @@ export function App({
           request={req}
           onAnswer={(answer) => {
             setClarifyRequest(null);
+            // D7 — a human acted on this surface; a background job's next
+            // question may route here instead of falling back to its origin lane.
+            bridge.clarifyBridge?.recordPresence('tui');
             void bridge.clarifyBridge?.respond({
               requestId: req.requestId,
               answer,
@@ -1099,6 +1116,7 @@ export function App({
           }}
           onCancel={() => {
             setClarifyRequest(null);
+            bridge.clarifyBridge?.recordPresence('tui');
             void bridge.clarifyBridge?.respond({
               requestId: req.requestId,
               answer: '',

@@ -1,0 +1,23 @@
+# Deliberately small. Latency decision L5 caps this personality's static prompt
+# at ~2k tokens, and every tool definition is prompt weight paid on every spoken
+# turn. Nothing that writes to the filesystem or runs a shell is here: a
+# consequential action asked for out loud goes through `delegate_task` to the
+# full agent, where the normal approval surface applies.
+#
+# `voice_session` is the toolset entry that gates browser talk-mode
+# (apps/web/src/features/voice/gating.ts). This is the first built-in to carry it.
+- voice_session
+- memory_read
+- memory_write
+- session_search
+- web_search
+- delegate_task
+- task_status
+- task_result
+# `call_capture` is eligibility-only: no Tool is registered for it, so it adds
+# zero prompt weight (kept "deliberately small" per the note above). It's the
+# capability gate `validateCallCaptureBinding` checks at startup
+# (packages/wiring/src/call-capture-binding.ts); the capture pipeline itself is
+# invoked directly by CallCaptureDaemon (extensions/platform-callcapture/src/daemon.ts),
+# never via an LLM-initiated tool call.
+- call_capture

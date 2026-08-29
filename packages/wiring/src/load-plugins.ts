@@ -146,6 +146,11 @@ export async function loadPlugins(
   const pluginLoader = new PluginLoader(pluginRegistries, {
     storage: new FsStorage(),
     logger: log,
+    // G-SEC — plugin credentials go through the same vault as every other
+    // secret. Injected rather than left to the loader's default so a host that
+    // built a resolver chain (file + env + AWS) resolves plugin credentials
+    // through it too.
+    secrets: config.secretsResolver,
   });
   await pluginLoader.loadAll();
 

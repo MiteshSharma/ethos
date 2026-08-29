@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128" role="img" aria-label="Kai avatar">
+  <circle cx="64" cy="64" r="64" fill="#FFD9B3"/>
+  <ellipse cx="64" cy="76" rx="28" ry="30" fill="#8D5524"/>
+  <circle cx="37" cy="78" r="6" fill="#8D5524"/>
+  <circle cx="91" cy="78" r="6" fill="#8D5524"/>
+  <path d="M35,60 Q64,34 93,60 L93,50 Q64,26 35,50 Z" fill="#1A1410"/>
+  <circle cx="91" cy="82" r="3" fill="none" stroke="#D4AF37" stroke-width="1.8"/>
+  <ellipse cx="53" cy="74" rx="3.5" ry="4.5" fill="#1A1410"/>
+  <ellipse cx="75" cy="74" rx="3.5" ry="4.5" fill="#1A1410"/>
+  <path d="M54,91 Q64,96 74,91" stroke="#5C2E0E" stroke-width="3.5" fill="none" stroke-linecap="round"/>
+</svg>

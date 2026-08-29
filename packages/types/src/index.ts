@@ -4,11 +4,14 @@
 export * from './a2a';
 export * from './agent-event';
 export * from './background-job';
+export * from './call-capture';
 export * from './channel-conformance';
 export * from './clarify';
 export * from './command';
 export * from './constitution';
+export * from './content-store';
 export * from './context-engine';
+export * from './context-log';
 export * from './diagnostics';
 export * from './document-extractor';
 export * from './errors';
@@ -27,6 +30,7 @@ export * from './monitor';
 export * from './notification-router';
 export * from './oauth';
 export * from './observability';
+export * from './pause-lifecycle';
 export * from './personality';
 export * from './platform';
 export * from './plugin';
@@ -57,7 +61,10 @@ export type {
   ToolResultReducer,
   ToolResultReducerRegistry,
 } from './tool-reducer';
+export * from './vision-limits';
 export * from './voice';
+export * from './voice-realtime';
+export * from './worker-session';
 
 // Phase 5 — Personality export/import portable bundles
 export interface ExportStamp {
@@ -74,7 +81,11 @@ export interface BundleManifest {
   publisher: 'ethos';
   createdAt: string;
   declared: {
-    fsReach: { read: string[]; write: string[] };
+    /** `workdir` is optional so bundles exported before it existed still
+     *  validate. It is disclosed alongside read/write because a declared
+     *  workdir is injected into BOTH derived reach lists — omitting it
+     *  understates the filesystem reach the importer is being asked to grant. */
+    fsReach: { read: string[]; write: string[]; workdir?: string };
     toolset: string[];
     budgetCapUsd?: number;
   };

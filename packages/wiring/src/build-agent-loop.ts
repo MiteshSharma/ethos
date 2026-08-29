@@ -1,15 +1,22 @@
 import { randomBytes } from 'node:crypto';
 import { join } from 'node:path';
+import { FsContentStore } from '@ethosagent/cas-fs';
 import { backgroundDefaults } from '@ethosagent/config';
 import {
   AgentLoop,
+  type ClarifyOriginLane,
+  DefaultJobRunnerRegistry,
+  deriveFsReachPaths,
   EagerPrefetchPolicy,
   parseSmallWindowToolset,
+  resolveSttProvider,
   SimpleCompletionImpl,
 } from '@ethosagent/core';
 import { registerBuiltinExtractors } from '@ethosagent/document-extractors';
+import { createRouterGate as createAcpRouterGate } from '@ethosagent/execution-coding-agents';
+import { createRouterGate, PI_RUNNER_NAME, PiJobRunner } from '@ethosagent/execution-pi';
 import { GoalRunner } from '@ethosagent/goal-runner';
-import { BackgroundExecutor } from '@ethosagent/job-runner';
+import { BackgroundExecutor, ETHOS_RUNNER_NAME, EthosJobRunner } from '@ethosagent/job-runner';
 import { SQLiteJobStore } from '@ethosagent/job-store';
 import { PendingMemoryStore, TombstoneStore } from '@ethosagent/memory-approval';
 import {
@@ -19,8 +26,11 @@ import {
 } from '@ethosagent/memory-capture';
 import { withHistory } from '@ethosagent/memory-history';
 import { buildConsolidationUpdates, consolidateMemory } from '@ethosagent/nightly-loop';
+import type { Speaker, TranscriptEntry } from '@ethosagent/platform-callcapture';
+import { MicCapture, TapCapture } from '@ethosagent/platform-callcapture';
 import { sanitize } from '@ethosagent/safety-injection';
-import { FsStorage } from '@ethosagent/storage-fs';
+import { defaultAlwaysDeny, FsStorage, ScopedStorage } from '@ethosagent/storage-fs';
+import { type CallCaptureToolsOptions, runCallCapture } from '@ethosagent/tools-callcapture';
 import {
   type BackgroundToolDeps,
   createDelegationTools,
@@ -28,13 +38,22 @@ import {
 } from '@ethosagent/tools-delegation';
 import { createMemoryTools } from '@ethosagent/tools-memory';
 import { createVisionTools } from '@ethosagent/tools-vision';
+import { createAgentConsultTool } from '@ethosagent/tools-voice';
 import { createWebTools } from '@ethosagent/tools-web';
 import type {
+  BackgroundJob,
+  ClarifySurfaceType,
   LLMProvider,
   MemoryContext,
   MemoryProvider,
   RequestDumpStore,
 } from '@ethosagent/types';
+import {
+  createClarifyEscalator,
+  createSecretHandler,
+  InteractionRouter,
+  SECRET_KIND,
+} from '@ethosagent/worker-router';
 import type { InfrastructureResult } from './build-infrastructure';
 import type { ComposeToolsResult, GatewaySendRef } from './compose-tools';
 import type {
@@ -54,6 +73,7 @@ import {
   resolveSmallWindowMode,
   scaleHistoryLimit,
 } from './model-catalog';
+import { registerAcpJobRunners } from './register-acp-job-runners';
 import {
   evaluateContextFit,
   evaluateToolPayloadGuard,
@@ -64,6 +84,7 @@ import {
 } from './static-floor';
 import { evaluateTierMismatch } from './tier-diagnostics';
 import type { WiringContext } from './types';
+import { buildVoiceStack } from './voice-stack';
 
 export interface BuildAgentLoopDeps {
   infra: InfrastructureResult;
@@ -71,6 +92,95 @@ export interface BuildAgentLoopDeps {
   pluginsResult: LoadPluginsResult;
   llm: LLMProvider;
   profile: WiringProfile;
+}
+
+/**
+ * Call-capture's registration gate (plan/phases/call-capture-extension.md —
+ * macOS-only, opt-in via `callCapture.personalityId`). Extracted as a pure
+ * function so the gate itself is unit-testable without invoking the full
+ * `buildAgentLoop` composition root (which opens SQLite stores, constructs an
+ * LLM provider, loads plugins, and reads `~/.ethos/` — impractical to
+ * construct in a focused test, per the same rationale
+ * `safety-conformance-wiring.test.ts` documents for `buildAgentLoop`).
+ */
+export function isCallCaptureToolsEnabled(
+  platform: NodeJS.Platform,
+  config: Pick<WiringConfig, 'callCapture'>,
+): boolean {
+  return platform === 'darwin' && Boolean(config.callCapture?.personalityId);
+}
+
+/**
+ * Resolve the Documents-tab mirror target for one call-capture invocation
+ * (plan/phases/call-capture-desktop-ux.md, P4). Only personalities that
+ * DECLARE `fs_reach.workdir` get a mirror target — `deriveFsReachPaths`
+ * itself falls back to `cwd` when undeclared (so a personality's file tools
+ * still get a workdir), but applying that same fallback here would silently
+ * mirror call-capture transcripts into the process's cwd for every
+ * personality with no declared workdir. Checking `fs_reach?.workdir` first
+ * mirrors the same guard `personalityAssetDir` (`@ethosagent/core`) uses for
+ * the same reason.
+ *
+ * Extracted as a pure function for the same testability reason
+ * `isCallCaptureToolsEnabled` above is — `buildAgentLoop` is a full
+ * composition root, impractical to construct in a focused test.
+ */
+export function resolveCallCaptureDocumentsWorkdir(
+  personality: import('@ethosagent/types').PersonalityConfig | undefined,
+  vars: Parameters<typeof deriveFsReachPaths>[1],
+): string | undefined {
+  return personality?.fs_reach?.workdir ? deriveFsReachPaths(personality, vars).workdir : undefined;
+}
+
+// Every channel adapter that sets `InboundMessage.platform` (and therefore
+// `BackgroundJob.originPlatform`, copied from it at spawn) with a live clarify
+// surface. `BackgroundJob.originPlatform` is a plain string — other origins
+// (email, mcp, webhook, cron) carry values with no clarify surface at all.
+const CLARIFY_SURFACE_TYPES = new Set<ClarifySurfaceType>([
+  'tui',
+  'cli',
+  'web',
+  'telegram',
+  'slack',
+  'discord',
+  'whatsapp',
+]);
+
+function isClarifySurfaceType(platform: string): platform is ClarifySurfaceType {
+  return CLARIFY_SURFACE_TYPES.has(platform as ClarifySurfaceType);
+}
+
+/**
+ * D7/G2/G3 (plan/phases/pi-delegation.md §5/§6) — maps a background job's
+ * recorded origin (the Phase-B lane-resolution columns on `BackgroundJob`) to
+ * the `ClarifyOriginLane` `ClarifyBridge.setOriginResolver` expects. `null`
+ * when the job has no recorded origin platform, or that platform has no
+ * clarify surface — the bridge's `resolveRouting()` then falls back to the
+ * request's own `surfaceType` (today's behaviour). `surfaceContext` reuses
+ * the same `chatId`/`botKey`/`threadId` keys the per-platform
+ * `clarify-surface.ts` files (Telegram/Slack/Discord/WhatsApp) write onto a
+ * presented row's `surfaceContext`.
+ *
+ * Extracted as a pure function for the same testability reason
+ * `isCallCaptureToolsEnabled` above is — `buildAgentLoop` is a full
+ * composition root, impractical to construct in a focused test.
+ */
+export function resolveJobClarifyOrigin(
+  job: Pick<
+    BackgroundJob,
+    'originPlatform' | 'originBotKey' | 'originChatId' | 'originThreadId'
+  > | null,
+): ClarifyOriginLane | null {
+  const platform = job?.originPlatform;
+  if (!platform || !isClarifySurfaceType(platform)) return null;
+  return {
+    surfaceType: platform,
+    surfaceContext: {
+      ...(job?.originChatId ? { chatId: job.originChatId } : {}),
+      ...(job?.originBotKey ? { botKey: job.originBotKey } : {}),
+      ...(job?.originThreadId ? { threadId: job.originThreadId } : {}),
+    },
+  };
 }
 
 /**
@@ -87,7 +197,8 @@ export async function buildAgentLoop(
   const { dataDir, log } = wiringCtx;
   const { infra, toolsResult, pluginsResult, llm, profile } = deps;
   const { memoryProviders, personalities, hooks, sessionCompose, tools } = infra;
-  const { gatewaySendRef, goalStore, goalRunnerRef, injectors, mcpManager } = toolsResult;
+  const { gatewaySendRef, goalStore, goalRunnerRef, injectors, mcpManager, skillsInjector } =
+    toolsResult;
   const {
     pluginLoader,
     pluginRegistries,
@@ -126,6 +237,11 @@ export async function buildAgentLoop(
   // -------------------------------------------------------------------------
 
   const session = sessionCompose.sessionStore;
+  // Model-visible ⟺ logged (plan/phases/model-visible-logged.md, Phase B).
+  // `contextLog` shares `sessions.db` with `session` (D5); `contentStore` is
+  // the content-addressed blob store the log's Tier A/B events reference.
+  const contextLog = sessionCompose.contextLog;
+  const contentStore = new FsContentStore(join(dataDir, 'cas'), new FsStorage());
   const memoryName = config.memory ?? 'markdown';
   const memoryFactory = memoryProviders.get(memoryName);
   if (!memoryFactory) {
@@ -251,6 +367,114 @@ export async function buildAgentLoop(
   }
 
   // -------------------------------------------------------------------------
+  // Call-capture (built here, not registered as a tool, because it needs
+  // `llm` and `memory` — the same reason the vision and web tools above
+  // construct here rather than in compose-tools.ts). macOS-only per
+  // plan/phases/call-capture-extension.md — a complete no-op (no
+  // construction, no behavior change) for every deployment that hasn't set
+  // `callCapture.personalityId`. `runCallCapture` is never registered as a
+  // `Tool` — it is not LLM-reachable from any chat turn; the only caller is
+  // `CallCaptureDaemon`'s accept-gated `runCapture`, bound below into
+  // `runCallCaptureFn` and threaded out through `CreateAgentLoopResult`
+  // (see `apps/ethos/src/commands/serve.ts`). Decision 7 of the plan requires
+  // an LLM content-summarization step over the finished transcript (not the
+  // plain participant/line-count roll-up `buildTranscriptArtifact` produces
+  // on its own), so `getSummaryProvider` is wired here rather than left
+  // absent — leaving it absent would silently downgrade every capture to the
+  // plain roll-up.
+  // -------------------------------------------------------------------------
+
+  let runCallCaptureFn:
+    | ((
+        personalityId: string,
+        opts: {
+          source?: string;
+          abortSignal: AbortSignal;
+          onEntry?: (entry: TranscriptEntry) => void;
+          onAudioLevel?: (speaker: Speaker, level: number, at: number) => void;
+        },
+      ) => Promise<import('@ethosagent/tools-callcapture').CallCaptureResult>)
+    | undefined;
+  if (isCallCaptureToolsEnabled(process.platform, config)) {
+    const sttResolution = await resolveSttProvider({
+      registry: infra.sttProviders,
+      providerName: config.auxiliaryAsr?.provider,
+      providerConfig: { ...config.auxiliaryAsr },
+    });
+    if (!sttResolution.ok) {
+      log.warn(
+        `call-capture: STT unavailable (${sttResolution.error}) — call capture will report itself unavailable`,
+      );
+    }
+    // When `wiringCtx.callCaptureNativeDir` is set (bundled callers only —
+    // see `types.ts`), override each binary's default `import.meta.dirname`-
+    // relative path with one resolved under the real native dir. Absent, both
+    // constructors fall back to their own unchanged defaults.
+    const tapCaptureOpts = wiringCtx.callCaptureNativeDir
+      ? { binaryPath: join(wiringCtx.callCaptureNativeDir, 'vendor', 'audiotee', 'audiotee') }
+      : {};
+    const micCaptureOpts = wiringCtx.callCaptureNativeDir
+      ? { binaryPath: join(wiringCtx.callCaptureNativeDir, 'bin', 'mic-capture') }
+      : {};
+    const baseCallCaptureOpts: CallCaptureToolsOptions = {
+      tapCapture: new TapCapture(tapCaptureOpts),
+      micCapture: new MicCapture(micCaptureOpts),
+      ...(sttResolution.ok ? { sttProvider: sttResolution.provider } : {}),
+      memory,
+      getSummaryProvider: async () => llm,
+    };
+    runCallCaptureFn = (personalityId, { source, abortSignal, onEntry, onAudioLevel }) => {
+      // Stable per-personality key (mirrors this repo's `cli:<cwd-basename>`
+      // session-key convention and the daemon's prior sessionKey construction,
+      // relocated here since there is no longer a live turn to carry it).
+      const sessionKey = `callcapture:${personalityId}`;
+      // Documents-tab mirror target (P4): resolved PER INVOCATION, not once at
+      // wiring time — `personalityId` is a runtime parameter (the daemon binds
+      // whichever personality accepted the call), so the workdir it maps to can
+      // only be known here.
+      const documentsWorkdir = resolveCallCaptureDocumentsWorkdir(
+        personalities.get(personalityId),
+        {
+          ethosHome: dataDir,
+          self: personalityId,
+          cwd: wiringCtx.workingDir,
+        },
+      );
+      // Documents-tab mirror storage boundary: `wiringCtx.storage` is the
+      // raw, process-wide Storage — it must never reach `runCallCapture`
+      // unscoped. Confine it to this personality's own `fs_reach.workdir`
+      // via `ScopedStorage`, the same boundary `DocumentsService`
+      // (apps/web-api/src/services/documents.service.ts) enforces for reads
+      // of this same directory. Constructed here, per invocation, because
+      // `documentsWorkdir` itself is only known per invocation.
+      const callCaptureOpts: CallCaptureToolsOptions = {
+        ...baseCallCaptureOpts,
+        ...(documentsWorkdir
+          ? {
+              documentsWorkdir,
+              storage: new ScopedStorage(wiringCtx.storage, {
+                read: [documentsWorkdir],
+                write: [documentsWorkdir],
+                alwaysDeny: defaultAlwaysDeny(),
+              }),
+            }
+          : {}),
+      };
+      return runCallCapture(callCaptureOpts, {
+        source,
+        scopeId: `personality:${personalityId}`,
+        sessionId: sessionKey,
+        sessionKey,
+        platform: 'callcapture',
+        workingDir: wiringCtx.workingDir,
+        abortSignal,
+        ...(onEntry ? { onEntry } : {}),
+        ...(onAudioLevel ? { onAudioLevel } : {}),
+      });
+    };
+  }
+
+  // -------------------------------------------------------------------------
   // Ch.6a — In-process watcher
   // -------------------------------------------------------------------------
 
@@ -311,6 +535,11 @@ export async function buildAgentLoop(
     },
     scopedStorageFactory: (base, scope) =>
       new ScopedStorageCls(base, { ...scope, alwaysDeny: defaultAlwaysDenyFn() }),
+    // G4 — this composition root gates tool calls behind the danger predicate
+    // (`./danger-predicate`, reached via the `before_tool_call` modifying hooks
+    // each surface registers). Declaring it makes core verify the claim at the
+    // first tool dispatch instead of assuming it.
+    approvalPosture: { kind: 'gated', policy: 'danger-predicate' },
     watcher,
   };
 
@@ -637,6 +866,8 @@ export async function buildAgentLoop(
     storage: new FsStorage(),
     attachmentCache: infra.capabilityBackends.attachmentCache,
     dataDir,
+    contentStore,
+    contextLog,
     modelRouting: config.modelRouting,
     ...(modelSampling ? { modelSampling } : {}),
     compaction: {
@@ -647,6 +878,7 @@ export async function buildAgentLoop(
     ...(promptBudget ? { promptBudget } : {}),
     memoryProviders: memoryProviderMap,
     safety,
+    logger: log,
     documentExtractors,
     contextEngines,
     ...(llmHandle ? { llmHandle } : {}),
@@ -692,17 +924,154 @@ export async function buildAgentLoop(
 
   let jobStore: SQLiteJobStore | undefined;
   let backgroundExecutor: BackgroundExecutor | undefined;
+  // Exposed on the result so the web-api's Tasks detail RPC can ask the runner
+  // that executed a row for its own detail-grid rows (pi-delegation D18).
+  let jobRunnerRegistry: import('@ethosagent/types').JobRunnerRegistry | undefined;
   let backgroundDeps: BackgroundToolDeps | undefined;
   let meshProxyReconciler: MeshProxyReconciler | undefined;
   if (backgroundEnabled) {
     jobStore = new SQLiteJobStore(join(dataDir, 'jobs.db'));
+    // G2/G3/D7 — a background job's clarify routes to wherever a live human
+    // is currently present (see `ClarifyBridge.resolveRouting`), falling back
+    // to the job's own origin lane. That fallback needs to look the job up;
+    // only wired here, where a `JobStore` actually exists (no jobs, no
+    // resolver to ask about them).
+    const jobStoreForClarify = jobStore;
+    infra.clarifyBridge.setOriginResolver(async (jobId) => {
+      const job = await jobStoreForClarify.get(jobId);
+      return resolveJobClarifyOrigin(job);
+    });
     // Owner is unique per executor instance so multiple loops in one process
     // (multi-bot gateway) never race on claimNextQueued and each runs only its
     // own jobs. randomBytes suffix distinguishes same-profile same-pid instances.
     const owner = `${profile}:${process.pid}:${randomBytes(3).toString('hex')}`;
+    // Runner seam. `ethos` — the in-process AgentLoop path — is the default and
+    // the only runner registered here; an out-of-process harness registers its
+    // own factory and nothing else in this file changes. Resolved eagerly
+    // because both the executor and `delegate_task` read instances, not
+    // factories.
+    const jobRunners = new DefaultJobRunnerRegistry();
+    jobRunnerRegistry = jobRunners;
+    jobRunners.register(ETHOS_RUNNER_NAME, () => new EthosJobRunner(loop));
+    await jobRunners.resolve(ETHOS_RUNNER_NAME, { logger: log });
+    // Pi — out-of-process, in a container. Registered only when the deployment
+    // names a digest-pinned image (there is nothing sane to default to), so an
+    // un-provisioned machine answers `not_available` rather than failing at
+    // spawn time. The docker backend comes from the SAME registry (and, by its
+    // cache, is the SAME instance) exec tools use: D4's containment claim rests
+    // on one mount derivation, not two.
+    const piConfig = config.background?.pi;
+    // T4/I3 — each configured id becomes its own registered runner (`runner:
+    // 'claude'`, `runner: 'gemini'`), never one generic `'acp'` runner (see
+    // plan/phases/acp-job-runner.md's Config shape). Absent `background.acp`
+    // means the roster is empty and nothing below the guard runs.
+    const acpAgentsConfig = config.background?.acp?.agents ?? {};
+    const acpAgentNames = Object.keys(acpAgentsConfig);
+    let interactionRouter: InteractionRouter | undefined;
+    // Shared `InteractionRouter` construction: Pi and any configured ACP agent
+    // both gate their tool calls through the SAME router instance (D17's
+    // per-run allowance cache, D16's auto-resolving capabilities, the same
+    // clarify escalation chain) — constructed once, whenever EITHER is
+    // configured, so ACP agents can route interactions even when Pi itself
+    // is absent from this deployment.
+    if (piConfig?.image || acpAgentNames.length > 0) {
+      // Phase 4 — every gated Pi/ACP tool call goes through the runner-agnostic
+      // router: cached answer (D17), auto-resolving capability (D16), or the
+      // existing clarify chain. `secret` is registered so a runner that ever
+      // emits that kind fails closed instead of writing secret material into a
+      // persisted clarify row (§4.5); no runner emits it today.
+      const router = new InteractionRouter({
+        escalate: createClarifyEscalator({
+          bridge: infra.clarifyBridge,
+          jobs: jobStoreForClarify,
+          // I11 — a run parked on a human question is `blocked`, not `running`:
+          // its heartbeat pauses so the stale sweep leaves it alone, and the
+          // card can say why it is sitting there. The executor is constructed
+          // below, so this reads it late through the same `let` binding
+          // `backgroundDeps.nudge` uses — the closure only fires when a worker
+          // actually asks something, long after assignment.
+          blocking: {
+            block: async (id, requestId) => {
+              await backgroundExecutor?.markJobBlocked(id, requestId);
+            },
+            resume: async (id) => {
+              await backgroundExecutor?.resumeJob(id);
+            },
+          },
+          // Only the bridge's last-resort route: a background clarify resolves
+          // its real destination from the job's origin lane + presence
+          // (G2/G3/D7), which is wired above.
+          ...(isClarifySurfaceType(profile) ? { fallbackSurfaceType: profile } : {}),
+        }),
+        logger: log,
+      });
+      router.registry.register(SECRET_KIND, createSecretHandler());
+      interactionRouter = router;
+
+      // Pi — out-of-process, in a container. Registered only when the
+      // deployment names a digest-pinned image (there is nothing sane to
+      // default to), so an un-provisioned machine answers `not_available`
+      // rather than failing at spawn time. The docker backend comes from the
+      // SAME registry (and, by its cache, is the SAME instance) exec tools
+      // use: D4's containment claim rests on one mount derivation, not two.
+      if (piConfig?.image) {
+        const piBackend = await infra.executionBackends.resolve('docker', {
+          config: {
+            substitutionVars: { ethosHome: dataDir, cwd: wiringCtx.workingDir },
+            constitution: infra.constitution,
+          },
+          secrets: config.secretsResolver ?? NOOP_SECRETS,
+          logger: log,
+        });
+        jobRunners.register(
+          PI_RUNNER_NAME,
+          () =>
+            new PiJobRunner({
+              backend: piBackend,
+              resolvePersonality: (id) => personalities.get(id),
+              ethosHome: dataDir,
+              cwd: wiringCtx.workingDir,
+              image: piConfig.image,
+              ...(piConfig.memoryMb !== undefined ? { memoryMb: piConfig.memoryMb } : {}),
+              ...(piConfig.configDir ? { piConfigDir: piConfig.configDir } : {}),
+              gate: createRouterGate(router, log),
+              logger: log,
+            }),
+        );
+        await jobRunners.resolve(PI_RUNNER_NAME, { logger: log });
+      }
+
+      // Real ACP-native coding agents — one registered JobRunner per
+      // configured agent id (D-ACP2: one package, many agents; each entry
+      // its own `runner` name). Same docker backend/mount derivation as Pi
+      // (D4) — resolved ONCE here and shared across every configured agent,
+      // not re-resolved per entry; resolving 'docker' again returns the SAME
+      // cached instance either way.
+      if (acpAgentNames.length > 0) {
+        const acpBackend = await infra.executionBackends.resolve('docker', {
+          config: {
+            substitutionVars: { ethosHome: dataDir, cwd: wiringCtx.workingDir },
+            constitution: infra.constitution,
+          },
+          secrets: config.secretsResolver ?? NOOP_SECRETS,
+          logger: log,
+        });
+        await registerAcpJobRunners({
+          jobRunners,
+          acpAgents: acpAgentsConfig,
+          backend: acpBackend,
+          resolvePersonality: (id) => personalities.get(id),
+          ethosHome: dataDir,
+          cwd: wiringCtx.workingDir,
+          gate: createAcpRouterGate(router, log),
+          logger: log,
+        });
+      }
+    }
     backgroundExecutor = new BackgroundExecutor({
       store: jobStore,
       loop,
+      runners: jobRunners,
       owner,
       config: {
         maxConcurrentJobs: bg.maxConcurrentJobs,
@@ -713,11 +1082,27 @@ export async function buildAgentLoop(
         retentionMs: bg.retentionDays * 86_400_000,
       },
       log: (msg) => log.info(`[background] ${msg}`),
+      // Phase 5 — cancelling a run withdraws whatever question it is parked
+      // on. Without this, `task_cancel` on a `blocked` job aborts the run but
+      // leaves its clarify live on someone's phone for the rest of its window
+      // (now up to the 24 h park), and the escalator's `resume` — which
+      // un-pauses the heartbeat — never runs because `request()` never settles.
+      cancelInteractions: async (jobId) => {
+        await infra.clarifyBridge.cancelJob(jobId);
+      },
     });
     backgroundExecutor.start();
+    if (interactionRouter) {
+      // D17 — a run's remembered allowances die with the run. `onComplete`
+      // fires on every terminal transition, which is exactly the boundary
+      // "allow for this run" was scoped to.
+      const router = interactionRouter;
+      backgroundExecutor.onComplete((job) => router.forgetJob(job.id));
+    }
     backgroundDeps = {
       store: jobStore,
       nudge: () => backgroundExecutor?.nudge(),
+      runners: jobRunners,
       owner,
       defaultMaxCostUsd: bg.defaultMaxCostUsd,
       maxJobsPerRoot: bg.maxJobsPerRoot,
@@ -748,6 +1133,30 @@ export async function buildAgentLoop(
     backgroundDeps,
   ))
     tools.register(tool);
+
+  // `agent_consult` — the hosted-realtime voice surface's one call back into
+  // the agent. Loop-bearing for the same reason the delegation tools are, so it
+  // registers here rather than in `compose-tools`. Registered UNCONDITIONALLY:
+  // the realtime seam advertises what the registry actually holds
+  // (`deriveRealtimeToolset`), so a conditional registration would silently
+  // produce a session that offers nothing and a model that stops asking.
+  //
+  // The voice origin is fixed to browser talk-mode because that is the only
+  // surface whose realtime session opens behind the operator's own credentials —
+  // `voice.realtimeToken` mints behind the web-api session cookie.
+  //
+  // A PHONE CALL MUST NOT USE THIS INSTANCE. V4's call path builds its own via
+  // `createFarEndConsultTool` (`./far-end-consult`), which pins
+  // `speaker: 'far_end'` and, for a screened caller, the receptionist
+  // personality. The spoken-confirmation gate refuses a far-end caller BEFORE
+  // consulting any confirmation record, and that refusal keys on exactly this
+  // field — so reusing the owner's instance on a call would promote every
+  // stranger to the operator.
+  tools.register(
+    createAgentConsultTool(loop, {
+      voiceOrigin: { transport: 'browser-talk-mode', speaker: 'owner' },
+    }),
+  );
 
   // Goal runner — loop-bearing, constructed after the loop exists (mirrors
   // createDelegationTools handing the loop to tools post-construction). Shares
@@ -963,6 +1372,23 @@ export async function buildAgentLoop(
     onMemoryCapturedFn = (cb) => captureRunner.onCaptured(cb);
   }
 
+  // Real-time voice stack. Null (a clean no-op) unless `config.voice.*` is
+  // configured. The SIP trunk and the LiveKit token minter now build themselves
+  // from config inside `buildVoiceStack`; what still needs an app-supplied
+  // binding is the room MEDIA client (`@livekit/rtc-node`), which callers pass
+  // as `livekit.createClient` — absent, the transports degrade to unavailable
+  // and everything else in the stack still works. `apps/ethos` supplies it from
+  // `resolveLiveKitMedia()` when telephony is configured; nothing else does.
+  const voiceStack = await buildVoiceStack({
+    config,
+    sttProviders: infra.sttProviders,
+    ttsProviders: infra.ttsProviders,
+    ...(config.secretsResolver ? { secrets: config.secretsResolver } : {}),
+    logger: log,
+    ...(opts.observability ? { observability: opts.observability } : {}),
+    ...(opts.livekit ? { livekit: opts.livekit } : {}),
+  });
+
   return {
     loop,
     toolRegistry: tools,
@@ -971,6 +1397,7 @@ export async function buildAgentLoop(
     // warning uses (no second measurement path).
     contextWindow: llm.maxContextTokens,
     mcpManager,
+    skillsInjector,
     setMessagingSend: (fn) => {
       ref.fn = fn;
     },
@@ -981,16 +1408,20 @@ export async function buildAgentLoop(
       onSkillAppliedFn = fn;
     },
     ...(onMemoryCapturedFn ? { onMemoryCaptured: onMemoryCapturedFn } : {}),
+    ...(runCallCaptureFn ? { runCallCapture: runCallCaptureFn } : {}),
     notificationRouter,
     pluginLoader,
     goalRunner,
     ...(jobStore ? { jobStore } : {}),
     ...(backgroundExecutor ? { backgroundExecutor } : {}),
+    ...(jobRunnerRegistry ? { jobRunners: jobRunnerRegistry } : {}),
     ...(meshProxyReconciler ? { meshProxyReconciler } : {}),
     activePersonality: activePerson,
     refreshPersonalities: () => personalities.loadFromDirectory(join(dataDir, 'personalities')),
     sttProviders: infra.sttProviders,
     ttsProviders: infra.ttsProviders,
+    realtimeProviders: infra.realtimeProviders,
+    ...(voiceStack ? { voiceStack } : {}),
     voiceConfig: {
       sttProviderName: config.auxiliaryAsr?.provider,
       sttProviderConfig: config.auxiliaryAsr
@@ -998,6 +1429,8 @@ export async function buildAgentLoop(
             apiKey: config.auxiliaryAsr.apiKey,
             model: config.auxiliaryAsr.model,
             baseUrl: config.auxiliaryAsr.baseUrl,
+            command: config.auxiliaryAsr.command,
+            timeout: config.auxiliaryAsr.timeout,
           }
         : {},
       ttsProviderName: config.auxiliaryTts?.provider,
@@ -1007,10 +1440,43 @@ export async function buildAgentLoop(
             model: config.auxiliaryTts.model,
             voice: config.auxiliaryTts.voice,
             baseUrl: config.auxiliaryTts.baseUrl,
+            command: config.auxiliaryTts.command,
+            outputFormat: config.auxiliaryTts.outputFormat,
+            timeout: config.auxiliaryTts.timeout,
+            maxTextLength: config.auxiliaryTts.maxTextLength,
           }
         : {},
+      // The named rosters (`voice.tts.providers.*` / `voice.stt.providers.*`).
+      // `auxiliary.tts` / `auxiliary.asr` above stay the default entries; these
+      // are what a personality's `voice.tts_provider` / `voice.stt_provider` can
+      // name instead.
+      ...(config.voice?.tts?.providers ? { ttsRoster: config.voice.tts.providers } : {}),
+      ...(config.voice?.stt?.providers ? { sttRoster: config.voice.stt.providers } : {}),
+      // The realtime roster (`voice.realtime.providers.*`) plus the two keys
+      // that decide whether the realtime tier runs at all: which entry a
+      // personality that names none gets, and the deployment's tier default.
+      ...(config.voice?.realtime?.providers
+        ? { realtimeRoster: config.voice.realtime.providers }
+        : {}),
+      ...(config.voice?.realtime?.default
+        ? { realtimeDefault: config.voice.realtime.default }
+        : {}),
+      ...(config.voice?.tier ? { tier: config.voice.tier } : {}),
+      // The cap on ONE realtime call. Forwarded here rather than left to
+      // web-api's live-config read alone — that read is optional, and a
+      // deployment whose cap depends on an optional code path does not have a
+      // cap, it has a coincidence.
+      ...(config.voice?.realtime?.sessionBudgetUsd !== undefined
+        ? { realtimeSessionBudgetUsd: config.voice.realtime.sessionBudgetUsd }
+        : {}),
       secretsResolver:
         config.secretsResolver ?? (NOOP_SECRETS as import('@ethosagent/types').SecretsResolver),
+      // Armed only when `voice.trustedPlugins` is declared. Computed once here
+      // so every surface enforces the SAME allowlist instead of each deriving
+      // its own notion of "trusted".
+      ...(config.voice?.trustedPlugins
+        ? { trustedVoicePlugins: new Set(config.voice.trustedPlugins) }
+        : {}),
     },
   };
 }

@@ -47,6 +47,31 @@ describe('FW-10 verbosity projection', () => {
       expect(projectEvent(ev.progress('terminal', 'phase 2', 'internal'), 'default')).toEqual([]);
     });
 
+    it('Lane E — internal inner-call tool_start/tool_end dropped (one chip per script)', () => {
+      const innerStart: AgentEvent = {
+        type: 'tool_start',
+        toolCallId: 'call-1#3',
+        toolName: 'read_file',
+        args: {},
+        audience: 'internal',
+      };
+      const innerEnd: AgentEvent = {
+        type: 'tool_end',
+        toolCallId: 'call-1#3',
+        toolName: 'read_file',
+        ok: false,
+        durationMs: 4,
+        audience: 'internal',
+        error: 'boom',
+      };
+      expect(projectEvent(innerStart, 'default')).toEqual([]);
+      // Internal ends stay hidden even on failure — inner errors are script data.
+      expect(projectEvent(innerEnd, 'default')).toEqual([]);
+      // verbose lifts the gate, same rule as tool_progress.
+      expect(projectEvent(innerStart, 'verbose')).toHaveLength(1);
+      expect(projectEvent(innerEnd, 'verbose')).toHaveLength(1);
+    });
+
     it('surfaces user-opt-in progress', () => {
       const lines = projectEvent(ev.progress('read_file', 'reading 2MB', 'user'), 'default');
       expect(lines).toHaveLength(1);

@@ -145,6 +145,28 @@ sandbox_exec "
 "
 echo "  ✅ Anthropic + OpenAI proxy keys will be unset on shell entry."
 
+# Disarm leftover xterm mouse reporting on every prompt.
+# A full-screen TUI (Claude Code, vim, tmux) enables mouse tracking modes 1003 (report
+# every motion event) + 1006 (SGR encoding) and disables them on exit. If it crashes,
+# that cleanup never runs, so the terminal keeps emitting a report for every mouse
+# movement and the shell reads them as keystrokes -- "35;84;38M35;85;38M..." typing
+# itself forever until someone runs `reset`.
+# Guarded to interactive TTYs: /etc/sandbox-persistent.sh is also BASH_ENV for
+# non-interactive child shells, where emitting escapes would corrupt command output.
+echo "  🖱️  Installing mouse-reporting reset on shell prompt..."
+sandbox_exec "
+  grep -q '_sandbox_mouse_off' /etc/sandbox-persistent.sh 2>/dev/null || cat >> /etc/sandbox-persistent.sh <<'MOUSE_EOF'
+
+# Reset xterm mouse tracking (1000/1002/1003/1005/1006/1015) + bracketed paste (2004)
+# before every prompt, so a crashed TUI cannot leave the shell flooded with motion reports.
+_sandbox_mouse_off() { printf '\033[?1000l\033[?1002l\033[?1003l\033[?1005l\033[?1006l\033[?1015l\033[?2004l'; }
+case \$- in
+  *i*) [ -t 1 ] && PROMPT_COMMAND=\"_sandbox_mouse_off\${PROMPT_COMMAND:+; \$PROMPT_COMMAND}\" ;;
+esac
+MOUSE_EOF
+"
+echo "  ✅ Mouse reporting will be reset on every prompt."
+
 # Configure git identity from host
 GIT_USER_NAME="$(git config --global user.name 2>/dev/null)" || true
 GIT_USER_EMAIL="$(git config --global user.email 2>/dev/null)" || true

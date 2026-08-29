@@ -1,5 +1,6 @@
 import type { AgentEvent, Attachment, MemoryContext, PromptContext } from '@ethosagent/types';
 import { buildAttachmentAnnotation } from '../../attachment-annotation';
+import { canInlineNatively, encodeNativeBlocks } from '../../attachment-blocks';
 import { classifyAttachment, unsupportedTypeError } from '../../attachment-classifier';
 import {
   formatInlinedAttachment,
@@ -7,6 +8,7 @@ import {
   sanitizeFilename,
 } from '../../attachment-text-resolver';
 import { estimateMessagesTokens, estimateTokens } from '../../context-engines/token-estimator';
+import { buildVoiceOriginAnnotation } from '../../voice-origin';
 import { maybeCompact } from '../compaction';
 import { skillCallsFromMessages, usesSkillIndexMode } from '../ghost-skills';
 import { dedupHistory, toLLMMessages } from '../history';
@@ -18,6 +20,7 @@ import {
 } from '../manual-compact';
 import { applyMicroToView } from '../micro-compaction';
 import { loadMicroState } from '../micro-state';
+import { recordSkillsExposed } from '../skill-telemetry';
 import {
   type AgingState,
   advanceAgingState,
@@ -25,6 +28,9 @@ import {
   DEFAULT_AGING_STATE,
 } from '../tool-result-aging';
 import type { AssembledContext, LoopDeps, TurnSetup } from '../turn-context';
+import { ageVisionBlocks } from '../vision-aging';
+import { checkContextDrift } from './context-drift';
+import { emitContextEvents } from './context-emit';
 
 // Phase 1a — aging state is persisted per session so the batched-at-crossings
 // invariant survives across turns. Best-effort: any storage error degrades to
@@ -96,16 +102,24 @@ export async function* assembleContext(
     /** T3 — max output tokens for the pending completion; reserved from the
      *  context window by compaction so the response can't overflow. */
     maxCompletionTokens?: number;
+    /** Set when this turn's text is a transcript of speech. Rendered as a
+     *  message-level annotation on the persisted user message. */
+    voiceOrigin?: import('@ethosagent/types').VoiceTurnOrigin;
   },
 ): AsyncGenerator<AgentEvent, AssembledContext> {
   const {
     sessionId,
     sessionKey,
     personality,
+    // The turn's workdir (see TurnSetup.workingDir). Assembly must read the
+    // same value the tool contexts do, so `AGENTS.md`/`CLAUDE.md` discovery and
+    // the injectors agree with where the agent's writes actually land.
+    workingDir,
     turnNumber,
     lastCompactionTurn,
     allowedPlugins,
     memScopeId,
+    traceId,
   } = setup;
 
   // Step 3: Persist the user message.
@@ -130,12 +144,36 @@ export async function* assembleContext(
   const annotatedAttachments: Attachment[] = [];
   const attachmentErrors: string[] = [];
 
+  // C1 -- which native media, if any, this turn may send as inline blocks.
+  //
+  // The gate is the TURN's model, not the provider default: `turn-setup`
+  // already resolved the tier, and a `trivial`-tier route can land on a model
+  // with no vision at all. Capabilities are declared per provider CLASS rather
+  // than per model (openai-compat advertises `visionImages: true` whatever
+  // model it was constructed with), so a resolved override is a model whose
+  // capabilities we cannot actually verify -- and we degrade to annotation
+  // instead of guessing. That is not a temporary shortfall: the plan names
+  // tier downgrades as a permanent reason for this fallback, alongside local
+  // models.
+  const caps = setup.modelOverride ? undefined : deps.llm.capabilities;
+  const nativeVision = {
+    images: caps?.visionImages === true,
+    documents: caps?.visionDocuments === true,
+  };
+  const nativeCandidates: Attachment[] = [];
+
   for (const att of rawAttachments) {
     const cls = classifyAttachment(att);
     switch (cls) {
       case 'native':
-        // Class A -- keep for annotation, existing vision path handles these
+        // Class A -- always annotated (the annotation carries filenames and
+        // sizes the pixels do not, and block aging degrades back to it). When
+        // the turn's model can take them natively, the bytes ALSO go inline as
+        // blocks; `nativeCandidates` is that second pass, run below once the
+        // whole attachment list is classified so the per-turn block cap can be
+        // applied to the set rather than to each file in isolation.
         annotatedAttachments.push(att);
+        if (canInlineNatively(att, nativeVision)) nativeCandidates.push(att);
         break;
       case 'text': {
         // Class B-text -- read, decode, inline
@@ -200,6 +238,14 @@ export async function* assembleContext(
     }
   }
 
+  // C1 -- encode the native candidates once the whole list is classified, so
+  // the per-turn block cap applies to the set rather than to each file alone.
+  const native = await encodeNativeBlocks(nativeCandidates, {
+    storage: deps.storage,
+    attachmentCache: deps.attachmentCache,
+  });
+  attachmentErrors.push(...native.errors);
+
   // Build annotation only for Class A + Class B-extract attachments
   const attachmentAnnotation = buildAttachmentAnnotation(annotatedAttachments);
 
@@ -220,16 +266,38 @@ export async function* assembleContext(
 
   const inlinePrefix = [...attachmentErrors, ...budgetedBlocks].join('\n\n');
 
-  const fullPrefix = [attachmentAnnotation, inlinePrefix].filter(Boolean).join('\n\n');
+  // Voice-origin annotation (voice V1a, eng-review D16). It sits BESIDE the
+  // attachment annotation, never in place of it: the audio marker and the
+  // transcript both survive on the same message, which is the whole point —
+  // a transcript that replaces the media marker is how the model forgets it is
+  // in a voice conversation and answers with a markdown table.
+  //
+  // It is on the MESSAGE, not in the system prompt. A session mixes typed and
+  // spoken turns, so a per-turn system section would break the byte-identical
+  // static prefix (`__tests__/prompt-prefix-stability.test.ts`).
+  const voiceOriginAnnotation = opts.voiceOrigin
+    ? buildVoiceOriginAnnotation(opts.voiceOrigin)
+    : '';
+
+  const fullPrefix = [attachmentAnnotation, voiceOriginAnnotation, inlinePrefix]
+    .filter(Boolean)
+    .join('\n\n');
   const rawAnnotatedText = fullPrefix ? `${fullPrefix}\n\n${text}` : text;
   const annotatedText = piiConfig?.enabled
     ? deps.safety.redaction.redactPii(rawAnnotatedText, piiConfig.extraPatterns)
     : rawAnnotatedText;
 
-  await deps.session.appendMessage({
+  // Captured for the model-visible ⟺ logged emit-on-change write path (Phase
+  // B, D3): every context event for this turn is tagged with this message's
+  // id as its `message_id`.
+  const userMsg = await deps.session.appendMessage({
     sessionId,
     role: 'user',
     content: annotatedText,
+    // Persisted so a resumed session re-sends the same blocks rather than
+    // silently degrading to the annotation. Absent when nothing went inline.
+    ...(native.blocks.length > 0 ? { contentBlocks: native.blocks } : {}),
+    traceId,
   });
 
   // Step 4: Load history (trimmed to most-recent limit)
@@ -271,7 +339,7 @@ export async function* assembleContext(
     sessionId,
     sessionKey,
     platform: deps.platform,
-    workingDir: deps.workingDir,
+    workingDir,
   };
   let memSnapshot = await activeMemory.prefetch(memCtx);
 
@@ -295,7 +363,7 @@ export async function* assembleContext(
       sessionId,
       sessionKey,
       platform: deps.platform,
-      workingDir: deps.workingDir,
+      workingDir,
     };
     const userEntry = await activeMemory.read('USER.md', userCtx);
     if (userEntry?.content.trim()) {
@@ -333,7 +401,7 @@ export async function* assembleContext(
     platform: deps.platform,
     model: deps.llm.model,
     history,
-    workingDir: deps.workingDir,
+    workingDir,
     isDm: true,
     turnNumber: allMessages.length,
     personalityId: personality.id,
@@ -346,25 +414,39 @@ export async function* assembleContext(
 
   // Ch.3a — prepend the injection-defense prelude so the model knows how to
   // read `<untrusted>` blocks before any personality content sets the tone.
-  const injectionDefenseEnabled = personality.safety?.injectionDefense?.enabled !== false;
-  if (injectionDefenseEnabled) {
-    // §2 — a lean model's `promptBudget.compactPrelude` swaps in the short
-    // prelude variant; fall back to the full prelude when none is wired.
-    const prelude = deps.promptBudget?.compactPrelude
+  // §V S6: unconditional — no personality, channel, or tool can opt out.
+  // §2 — a lean model's `promptBudget.compactPrelude` swaps in the short
+  // prelude variant; fall back to the full prelude when none is wired.
+  systemParts.push(
+    deps.promptBudget?.compactPrelude
       ? (deps.safety.injection.preludeCompact ?? deps.safety.injection.prelude)
-      : deps.safety.injection.prelude;
-    systemParts.push(prelude);
-  }
+      : deps.safety.injection.prelude,
+  );
 
   // SOUL.md / personality identity — routes through Storage so ScopedStorage
   // and InMemoryStorage fixtures work correctly. Only runs when storage is
   // wired (production always provides it; tests without a real soulFile skip).
+  //
+  // `assembledIdentity` is captured (not just pushed) so the drift check
+  // below (Phase D, `context-drift.ts`) can compare the EXACT bytes that
+  // landed in the prompt against what the emit-on-change write path hashed —
+  // without re-reading the file.
+  let assembledIdentity: string | undefined;
   if (personality.soulFile && deps.storage) {
     const identity = await deps.storage.read(personality.soulFile);
-    if (identity) systemParts.push(identity.trim());
+    if (identity) {
+      assembledIdentity = identity.trim();
+      systemParts.push(assembledIdentity);
+    }
   }
 
-  // Context injectors sorted by priority (already sorted in constructor)
+  // Context injectors sorted by priority (already sorted in constructor).
+  // Also captures the two injectors the model-visible ⟺ logged write path
+  // (Phase B) tracks as their own kinds — `file_window` (Tier C) and
+  // `team_index` (Tier B) — since their rendered content is only available
+  // here, inside this loop.
+  let fileWindowContent: string | undefined;
+  let teamIndexContent: string | undefined;
   for (const injector of deps.injectors) {
     // §2 — a lean model's `promptBudget.suppressMemoryGuidance` drops the
     // memory-usage guidance block (the MemoryGuidanceInjector).
@@ -380,6 +462,8 @@ export async function* assembleContext(
       } else {
         systemParts.push(result.content);
       }
+      if (injector.id === 'file-context') fileWindowContent = result.content;
+      else if (injector.id.startsWith('team-memory-index:')) teamIndexContent = result.content;
     }
   }
 
@@ -392,6 +476,12 @@ export async function* assembleContext(
     Array.isArray(rawSkills) && rawSkills.every((s) => typeof s === 'string')
       ? (rawSkills as string[])
       : undefined;
+
+  // AN-C1 — one `skill.exposed` per skill in this turn's prompt. Emitted here
+  // (not in the injector) because the turn's `traceId` is in hand and assembly
+  // runs once per turn, which is the dedup the contract asks for. The rule
+  // lives in agent-loop/skill-telemetry.ts.
+  recordSkillsExposed(deps.observability, activeSkillFiles, traceId);
 
   // Memory injected last, as context about the user. The snapshot is a
   // list of (key, content) pairs; render USER.md as "About You" first,
@@ -479,11 +569,44 @@ export async function* assembleContext(
 
   const systemPrompt = systemParts.join('\n\n').trim() || undefined;
 
+  // Model-visible ⟺ logged (plan/phases/model-visible-logged.md, Phase B) —
+  // emit-on-change write path. A no-op unless both `contentStore` and
+  // `contextLog` are wired; never mutates `systemParts`/`systemPrompt`, so
+  // this cannot affect what the model sees or break prefix caching (D1).
+  const emitOutcome = await emitContextEvents(deps, {
+    sessionId,
+    messageId: userMsg.id,
+    timestamp: userMsg.timestamp.getTime(),
+    personality,
+    memSnapshot,
+    fileWindowContent,
+    teamIndexContent,
+  });
+
+  // Phase D — drift invariant (§6). Compares the bytes actually assembled
+  // above against what the write path just confirmed, using values already
+  // in hand (no re-read, no second projection rebuild). A no-op unless
+  // `contentStore` and an observability writer with `recordContextDrift` are
+  // both wired; see `context-drift.ts` for scope and reasoning.
+  checkContextDrift(deps, {
+    sessionId,
+    messageId: userMsg.id,
+    traceId,
+    assembledIdentity,
+    fingerprintSoulSrc: emitOutcome.personalitySoulSrc,
+  });
+
   // Step 8: Agentic loop — LLM call → tool use → LLM call → ...
   // Q1 — collapse exact-duplicate tool results before building the
   // LLM-facing history, so re-reads of the same file don't burn tokens.
   // `replayHistory` carries any active compaction watermark (summary + tail).
   let llmMessages = toLLMMessages(dedupHistory(replayHistory, ghostOpts));
+  // C3 — age out image/document blocks past the recency window. Runs on the
+  // unconditional path, ahead of the pressure-gated aging below, because this
+  // one is about RECENCY: a session that never nears its context window would
+  // otherwise re-send every screenshot on every request for the rest of its
+  // life. No-op (and no allocation) when nothing aged.
+  llmMessages = ageVisionBlocks(llmMessages);
   // Phase 1c — actuals-first gate signal. The most recent assistant turn's
   // real input tokens (+ measured static sections system+tools) were persisted
   // by Phase 0; prefer them over the chars/4 estimate. Absent on the first
@@ -625,7 +748,6 @@ export async function* assembleContext(
     llmMessages,
     cacheBreakpoints,
     activeSkillFiles,
-    injectionDefenseEnabled,
     baseMessageCount: allMessages.length,
     userScopeId,
     compactedThisTurn: compacted.notice !== undefined,

@@ -1,4 +1,5 @@
 import { join } from 'node:path';
+import { checkSkillFrontmatter } from '@ethosagent/skills';
 import type { LLMProvider, Message, Storage } from '@ethosagent/types';
 import { analyzeEvalOutput, parseEvalJsonl } from './analyze';
 import {
@@ -63,6 +64,15 @@ export class SkillEvolver {
         continue;
       }
       const outName = candidate.fileName;
+      const check = checkSkillFrontmatter(parsed.content);
+      if (!check.ok) {
+        skipped.push({
+          kind: 'rewrite',
+          target: outName,
+          reason: `invalid-frontmatter: ${check.error}`,
+        });
+        continue;
+      }
       await storage.write(join(pendingDir, outName), `${parsed.content}\n`);
       rewritesWritten.push(outName);
     }
@@ -73,6 +83,15 @@ export class SkillEvolver {
       const parsed = parseNewSkillResponse(raw);
       if (parsed.kind === 'skip') {
         skipped.push({ kind: 'new', target: 'pattern-bundle', reason: parsed.reason });
+        continue;
+      }
+      const check = checkSkillFrontmatter(parsed.content);
+      if (!check.ok) {
+        skipped.push({
+          kind: 'new',
+          target: parsed.fileName,
+          reason: `invalid-frontmatter: ${check.error}`,
+        });
         continue;
       }
       const safeName = await pickAvailableName(parsed.fileName, pendingDir, skillsDir, storage);

@@ -1,15 +1,18 @@
-import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import {
+  createSpokenStyleInjector,
   type DefaultToolRegistry,
   LastWriteWinsPolicy,
   LazyOnDemandPolicy,
+  personalityAssetDir,
   SessionManager,
 } from '@ethosagent/core';
 import type { GoalRunner } from '@ethosagent/goal-runner';
 import { SQLiteGoalStore } from '@ethosagent/goal-store';
 import { autonomyTier, KanbanStore } from '@ethosagent/kanban-store';
 import { MarkdownFileMemoryProvider } from '@ethosagent/memory-markdown';
+import type { PendingNotify, PendingNotifyQueue } from '@ethosagent/notify-queue';
+import { SQLiteNotifyQueue } from '@ethosagent/notify-queue';
 import {
   platformId as discordId,
   platformPrompt as discordPrompt,
@@ -27,7 +30,7 @@ import {
   platformPrompt as telegramPrompt,
 } from '@ethosagent/platform-telegram/format';
 import { createSkillProposeTool } from '@ethosagent/skill-evolver';
-import type { UniversalScanner } from '@ethosagent/skills';
+import { type SkillsInjector, SkillsLibrary, type UniversalScanner } from '@ethosagent/skills';
 import { compose as composeSkills } from '@ethosagent/skills/compose';
 import { createCryptoStorage } from '@ethosagent/storage-crypto';
 import { FsStorage } from '@ethosagent/storage-fs';
@@ -55,14 +58,15 @@ import { createTeamDesignTools } from '@ethosagent/tools-personality-design';
 import { compose as composePersonalityDesign } from '@ethosagent/tools-personality-design/compose';
 import { createProcessGuardHook } from '@ethosagent/tools-process';
 import { compose as composeProcess } from '@ethosagent/tools-process/compose';
+import { createRedditSearchTool } from '@ethosagent/tools-reddit';
 import { compose as composeSkillsTools } from '@ethosagent/tools-skills/compose';
 import { createTerminalGuardHook, createTerminalTools } from '@ethosagent/tools-terminal';
 import { createThinkDeeperTool } from '@ethosagent/tools-tier';
 import { compose as composeTodo } from '@ethosagent/tools-todo/compose';
-import { createTtsTools } from '@ethosagent/tools-tts';
-import { buildUiTools } from '@ethosagent/tools-ui';
+import { buildCardTools, buildUiTools, createUiGuidanceInjector } from '@ethosagent/tools-ui';
 import { createVoiceTools } from '@ethosagent/tools-voice';
 import { compose as composeWatchers } from '@ethosagent/tools-watchers/compose';
+import { createXSearchTool } from '@ethosagent/tools-x-search';
 import type {
   ContextInjector,
   ExecutionBackend,
@@ -82,6 +86,7 @@ import type {
   Tool,
 } from '@ethosagent/types';
 import type { InfrastructureResult } from './build-infrastructure';
+import { ensureFsReachDirs } from './fs-reach-dirs';
 import type { CreateAgentLoopOptions, WiringConfig, WiringProfile } from './index';
 import { resolveKanbanDbPath } from './kanban-path';
 import { MODEL_CATALOG } from './model-catalog';
@@ -89,6 +94,7 @@ import { fetchManifest, loadModelCatalog, manifestToEntries } from './model-cata
 import { resolveExecutionPosture } from './resolve-execution-posture';
 import { applySkillPassthrough, deriveSkillPassthrough } from './skill-passthrough';
 import type { WiringContext } from './types';
+import { resolveSipTrunkClient } from './voice-stack';
 
 // ---------------------------------------------------------------------------
 // WEB_PROMPT — kept here since platformPrompts is also assembled here
@@ -232,15 +238,168 @@ export function createTeamMemoryIndexInjector(
 }
 
 /**
- * ContextInjector that tells the agent about its personality asset folder.
- * Files placed at ~/.ethos/personalities/<id>/files/ are readable by render_*
- * tools via the files:// URI scheme (e.g. files://chart.png).
+ * ContextInjector that surfaces passive `notify`-mode board deliveries (Lane
+ * C, kanban-hooks-notify-parity, D6). A `notify`-mode `/notify` call does not
+ * force a turn — it has nowhere else to land — so it is written to the
+ * pending-notify queue instead, and this injector is what surfaces it: on
+ * every turn it reads whatever is pending for `ctx.personalityId` on this
+ * team's board and marks it consumed in the same call, so a row is delivered
+ * exactly once, at the assignee's own next turn. Read-and-consume happens at
+ * INJECT TIME per D6's resolution, not on a separate poll.
+ *
+ * Priority sits just above `team-memory-index`'s 70 so a pending notify reads
+ * as the more time-sensitive of the two dynamic-tail sections.
+ */
+export function createPendingNotifyInjector(
+  queue: PendingNotifyQueue,
+  teamName: string,
+): ContextInjector {
+  return {
+    id: `pending-notify:${teamName}`,
+    priority: 71,
+
+    async inject(ctx: PromptContext): Promise<InjectionResult | null> {
+      if (!ctx.personalityId) return null;
+
+      let rows: PendingNotify[];
+      try {
+        rows = await queue.readAndConsume(teamName, ctx.personalityId);
+      } catch {
+        return null;
+      }
+      if (rows.length === 0) return null;
+
+      const lines = rows.map((r) => `- ${r.kind}${r.ref ? ` (${r.ref})` : ''}`).join('\n');
+      const plural = rows.length === 1 ? 'notify' : 'notifies';
+      return {
+        content: `You have ${rows.length} unread board ${plural}:\n${lines}`,
+        position: 'append',
+      };
+    },
+  };
+}
+
+/**
+ * Resolve any known personality's asset folder — the directory `files://`
+ * addresses. Wiring owns this because it is the composition root: it holds the
+ * personality registry, so `personalityAssetDir` (the one `fs_reach`
+ * derivation) runs here and tools-ui is handed the answer instead of deriving
+ * a path of its own.
+ *
+ * Resolved per call, never captured: the registry hot-reloads and a loop's
+ * personality can change mid-session (`/personality`), so a `fs_reach.workdir`
+ * edited on disk takes effect on the next turn.
+ *
+ * `undefined` when the personality is unknown, or when a declared workdir names
+ * an unresolvable substitution variable (`EmptySubstitutionError` — turn setup
+ * surfaces that; `files://` merely refuses).
+ */
+export function createAssetDirResolver(
+  lookup: (personalityId: string) => PersonalityConfig | undefined,
+  vars: { ethosHome: string; cwd: string },
+): (personalityId: string) => string | undefined {
+  return (personalityId) => {
+    const personality = lookup(personalityId);
+    if (!personality) return undefined;
+    try {
+      return personalityAssetDir(personality, {
+        ethosHome: vars.ethosHome,
+        self: personality.id,
+        cwd: vars.cwd,
+      });
+    } catch {
+      return undefined;
+    }
+  };
+}
+
+/**
+ * Resolve any known personality's OWN directory — the one holding `SOUL.md`,
+ * and beneath it the `ui/` Canvas templates `render_ui` reads.
+ *
+ * Distinct from the asset folder: assets follow `fs_reach` and may be
+ * relocated anywhere, whereas templates are authored alongside the
+ * personality's identity files and travel with it. `soulFile` is
+ * `<dir>/SOUL.md`, populated by the loader for built-in and user
+ * personalities alike, so `dirname` is the whole derivation.
+ *
+ * Resolved per call, never captured: the registry hot-reloads and a loop's
+ * personality can change mid-session (`/personality`).
+ *
+ * `undefined` when the personality is unknown, or when it is config-only and
+ * therefore has no `soulFile` — `render_ui` then refuses template mode rather
+ * than guessing at a directory.
+ */
+export function createPersonalityDirResolver(
+  lookup: (personalityId: string) => PersonalityConfig | undefined,
+): (personalityId: string) => string | undefined {
+  return (personalityId) => {
+    const soulFile = lookup(personalityId)?.soulFile;
+    return soulFile ? dirname(soulFile) : undefined;
+  };
+}
+
+/**
+ * Scan a personality's `ui/` folder once, at composition time, for the Canvas
+ * template catalog the UI-guidance injector advertises. Per-turn listing is
+ * forbidden here: the injector's content must stay byte-identical across turns
+ * or it breaks the static prompt prefix.
+ *
+ * Descriptions are best-effort — the first HTML comment, else the `<title>`.
+ * Any failure (missing folder, unreadable file) yields no catalog rather than
+ * failing composition.
+ */
+async function scanUiTemplates(
+  storage: Storage,
+  personalityDir: string,
+): Promise<Array<{ name: string; description?: string }>> {
+  const dir = join(personalityDir, 'ui');
+  try {
+    const entries = await storage.listEntries(dir);
+    const files = entries
+      .filter((e) => !e.isDir && e.name.endsWith('.html'))
+      .map((e) => e.name)
+      .sort(); // deterministic order — the prompt prefix depends on it
+    const catalog: Array<{ name: string; description?: string }> = [];
+    for (const file of files) {
+      const name = file.slice(0, -'.html'.length);
+      let description: string | undefined;
+      try {
+        const html = await storage.read(join(dir, file));
+        description = html ? templateDescription(html) : undefined;
+      } catch {
+        description = undefined;
+      }
+      catalog.push(description ? { name, description } : { name });
+    }
+    return catalog;
+  } catch {
+    return [];
+  }
+}
+
+/** First HTML comment, else `<title>`; single line, trimmed, capped. */
+function templateDescription(html: string): string | undefined {
+  const comment = /<!--([\s\S]*?)-->/.exec(html)?.[1];
+  const title = /<title>([\s\S]*?)<\/title>/i.exec(html)?.[1];
+  for (const candidate of [comment, title]) {
+    const line = candidate?.trim().split('\n')[0]?.trim();
+    if (line) return line.slice(0, 160);
+  }
+  return undefined;
+}
+
+/**
+ * ContextInjector that tells the agent about its personality asset folder —
+ * the directory render tools reach through the `files://` URI scheme. The
+ * advertised path is the one `createAssetDirResolver` yields, so the prompt
+ * names the directory the tools actually resolve: the declared
+ * `fs_reach.workdir` when there is one, else `<ethosHome>/personalities/<id>/files`.
  */
 export function createPersonalityFilesInjector(
   personalityId: string,
-  homedirPath: string,
+  filesDir: string,
 ): ContextInjector {
-  const filesDir = `${homedirPath}/.ethos/personalities/${personalityId}/files`;
   return {
     id: `personality-files:${personalityId}`,
     priority: 30,
@@ -301,6 +460,10 @@ export interface ComposeToolsResult {
   injectors: ContextInjector[];
   /** Universal scanner (needed by loadPlugins for plugin skill merging). */
   skillScanner: UniversalScanner;
+  /** The live SkillsInjector — surfaced so read-only surfaces (the web-api's
+   *  `personalities.renderers`) reuse THIS instance's resolveSkills + mtime
+   *  cache instead of constructing a second injector with a duplicate scanner. */
+  skillsInjector: SkillsInjector;
   /** McpManager instance — threaded to the web-api so re-auth hits the live manager. */
   mcpManager: McpManager;
 }
@@ -353,6 +516,55 @@ function buildVerifierProviderGetter(
   };
 }
 
+// ---------------------------------------------------------------------------
+// Lane A Phase 2 (kanban-hooks-notify-parity) — auxiliary model for
+// kanban_decompose. Resolved eagerly (composeAllTools is already async and
+// runs once per AgentLoop construction) rather than lazily like the verifier
+// getter above — there's no "only sometimes needed" argument once a team has
+// kanban wired. Mirrors auxiliaryVision/auxiliaryWeb in build-agent-loop.ts:
+// `provider`/`apiKey`/`baseUrl` default to the primary provider's values when
+// unset, and an unregistered provider WARNS and degrades to `undefined`
+// rather than throwing — kanban_decompose still registers as a tool, but
+// returns a clear tool error at call time instead of crashing wiring for
+// personalities that never call it. Exported for the wiring-level test.
+// ---------------------------------------------------------------------------
+
+export async function buildKanbanDecomposerProvider(
+  registry: LLMProviderRegistry,
+  config: WiringConfig,
+  log: Logger,
+): Promise<LLMProvider | undefined> {
+  const aux = config.auxiliaryKanbanDecomposer;
+  if (!aux) return undefined;
+  const providerName = aux.provider ?? config.provider;
+  const factory = registry.get(providerName);
+  if (!factory) {
+    log.warn(
+      `auxiliary.kanban_decomposer provider "${providerName}" is not registered; ` +
+        'kanban_decompose will return a tool error until it is',
+    );
+    return undefined;
+  }
+  const NOOP: SecretsResolver = {
+    get: async () => null,
+    set: async () => {},
+    delete: async () => {},
+    list: async () => [],
+  };
+  const baseUrl = aux.baseUrl ?? config.baseUrl;
+  return factory({
+    config: {
+      provider: providerName,
+      model: aux.model,
+      apiKey: aux.apiKey ?? config.apiKey,
+      ...(baseUrl ? { baseUrl } : {}),
+      ...(config.apiVersion ? { apiVersion: config.apiVersion } : {}),
+    },
+    secrets: config.secretsResolver ?? NOOP,
+    logger: log,
+  });
+}
+
 /**
  * Register all tool groups into the tool registry and wire supporting hooks.
  * Covers: file, terminal, web, todo, think, interactive, kanban, process,
@@ -369,6 +581,18 @@ export async function composeAllTools(
   const { dataDir, log } = wiringCtx;
   const { infra, profile } = deps;
   const { personalities, activePerson, hooks, capabilityBackends, tools, clarifyBridge } = infra;
+
+  // Materialize the personality's derived write directories BEFORE the posture
+  // branch below, so every posture gets them: docker would otherwise let the
+  // daemon auto-create the missing bind source as root (EACCES for the
+  // `--user <uid>:<gid>` container), and local `Storage.write()` requires the
+  // parent directory to already exist.
+  await ensureFsReachDirs(
+    activePerson,
+    wiringCtx.storage,
+    { ethosHome: dataDir, cwd: wiringCtx.workingDir },
+    log,
+  );
 
   // -------------------------------------------------------------------------
   // Execution posture + backend (Phase 2a lane c + security fix F1) — resolve
@@ -467,13 +691,21 @@ export async function composeAllTools(
   // -------------------------------------------------------------------------
 
   for (const tool of createFileTools()) tools.register(tool);
+  tools.register(createXSearchTool());
+  tools.register(createRedditSearchTool());
   for (const tool of createTerminalTools({
     backend: executionBackend,
     personality: activePerson,
     hostExecForbidden,
   }))
     tools.register(tool);
-  for (const tool of buildUiTools()) tools.register(tool);
+  const assetDirFor = createAssetDirResolver((id) => personalities.get(id), {
+    ethosHome: dataDir,
+    cwd: wiringCtx.workingDir,
+  });
+  for (const tool of buildUiTools(assetDirFor)) tools.register(tool);
+  const personalityDirFor = createPersonalityDirResolver((id) => personalities.get(id));
+  for (const tool of buildCardTools({ personalityDir: personalityDirFor })) tools.register(tool);
 
   // One InMemoryTodoStore per process — lifetime tied to the AgentLoop.
   const { tools: todoTools } = composeTodo(wiringCtx);
@@ -493,6 +725,7 @@ export async function composeAllTools(
       hooks?: typeof hooks;
       autonomyTierOf?: AutonomyTierOf;
       personalityLookup?: (id: string) => { name: string } | undefined;
+      decomposerProvider?: LLMProvider;
     } = {
       store,
       hooks,
@@ -500,6 +733,7 @@ export async function composeAllTools(
         const p = personalities.get(id);
         return p ? { name: p.name } : undefined;
       },
+      decomposerProvider: await buildKanbanDecomposerProvider(infra.llmProviders, config, log),
     };
     if (config.trustPolicy?.mode === 'tiered') {
       const policy = config.trustPolicy;
@@ -607,15 +841,30 @@ export async function composeAllTools(
       tools.register(tool);
   }
 
-  // TTS tool — registers as unavailable when provider is null (no TTS configured).
-  for (const tool of createTtsTools({ provider: null })) tools.register(tool);
-
   // Voice tools — `voice_session` is the always-available capability marker that
   // makes a personality selectable for real-time voice (browser talk-mode /
-  // telephony); the web talk-mode gate keys off its presence in the toolset. The
-  // outbound `call` tool self-reports unavailable until a SIP trunk is wired
-  // (the live LiveKit/SIP binding is app-layer/manual, not wired here).
-  for (const tool of createVoiceTools()) tools.register(tool);
+  // telephony); the web talk-mode gate keys off its presence in the toolset.
+  //
+  // The outbound `call` tool goes live exactly when a trunk is configured:
+  // `resolveSipTrunkClient` is the SAME derivation `buildVoiceStack` uses
+  // (`voice.trunk.*` + `voice.livekit.*`), so "the tool is advertised" and "the
+  // deployment can dial" are one fact rather than two that can disagree. With
+  // neither block configured it returns undefined and `call.isAvailable()` stays
+  // false with its existing error. `call` is in APPROVAL_SURFACE_ALWAYS_ASK
+  // (see `./danger-predicate`), so the approval gate was in place before the
+  // capability went live.
+  //
+  // The call log is threaded through so an agent-PLACED call leaves a row, the
+  // way an inbound one always has. Optional: a surface that wires none (chat,
+  // one-shot CLI) dials exactly as before and writes nothing.
+  const sipTrunk = resolveSipTrunkClient(config);
+  for (const tool of createVoiceTools({
+    ...(sipTrunk ? { trunk: sipTrunk } : {}),
+    ...(config.voice?.trunk?.fromNumber ? { fromNumber: config.voice.trunk.fromNumber } : {}),
+    ...(opts.callLog ? { callLog: opts.callLog } : {}),
+    onError: (message) => log.warn(`voice: ${message}`),
+  }))
+    tools.register(tool);
 
   // Meeting tool — `meet_join` self-reports unavailable until a MeetingClient is
   // wired (the Playwright/browser binding is app-layer/manual, not wired here).
@@ -633,15 +882,25 @@ export async function composeAllTools(
     log,
     toolNamesForPersonality: createToolReachGetter(tools),
   });
-  const { skillPool, injectors, scanner: skillScanner } = skillsCompose;
+  const { skillPool, injectors, scanner: skillScanner, skillsInjector } = skillsCompose;
   for (const tool of skillsCompose.tools) tools.register(tool);
 
   const bootToolNames = new Set(activePerson.toolset ?? []);
   const attachedServers = new Set(activePerson.mcp_servers ?? []);
   const skillPassthrough = deriveSkillPassthrough(skillPool, activePerson, bootToolNames);
 
-  // Skill introspection tools — skills_list + skill_view.
-  for (const tool of composeSkillsTools(wiringCtx, { skillPool }).tools) tools.register(tool);
+  // Skill introspection tools — skills_list + skill_view, plus the pending-queue
+  // review tools. The library handle is the same class the web Skills/Evolver
+  // tab drives, so chat-side approve/reject is one path, not a second one.
+  for (const tool of composeSkillsTools(wiringCtx, {
+    skillPool,
+    pendingSkills: new SkillsLibrary({
+      dataDir: wiringCtx.dataDir,
+      storage: wiringCtx.storage,
+    }),
+  }).tools) {
+    tools.register(tool);
+  }
 
   // skill_propose — lets the agent propose new skills from chat when asked,
   // gated by the 'skills' toolset so personalities opt in via toolset.yaml.
@@ -666,6 +925,10 @@ export async function composeAllTools(
   const mcpManager = new McpManager(mcpConfig, {
     logger: log,
     enableScopeProbe: process.env.ETHOS_MCP_SCOPE_PROBE === '1',
+    // stdio clients need a resolver to materialise `${secrets:...}` env refs
+    // at spawn time. OAuth transports still get the per-personality scoped
+    // resolver derived from `innerSecrets`.
+    secrets: config.secretsResolver,
     innerSecrets: config.secretsResolver,
     onToolsChanged: (added, removedNames) => {
       for (const t of added) tools.register(t);
@@ -809,13 +1072,69 @@ export async function composeAllTools(
     }
 
     injectors.push(createTeamMemoryIndexInjector(teamMemory, config.teamName));
+
+    // Lane C (kanban-hooks-notify-parity, Phase 2) — pending-notify queue.
+    // One file per dataDir, same as goals.db: the ACP server (writer) opens
+    // its own handle onto the same path independently, the same two-instance
+    // pattern delivery-ledger.db already uses across the gateway and
+    // web-api processes.
+    const notifyQueue = new SQLiteNotifyQueue(join(dataDir, 'notify-queue.db'));
+    injectors.push(createPendingNotifyInjector(notifyQueue, config.teamName));
   }
 
   // -------------------------------------------------------------------------
   // Personality files injector
   // -------------------------------------------------------------------------
 
-  injectors.push(createPersonalityFilesInjector(activePerson.id, homedir()));
+  // The prompt must name the SAME directory `files://` resolves to, so it goes
+  // through the one resolver. An unresolvable asset folder (declared workdir
+  // with an empty substitution variable) advertises nothing rather than a path
+  // the render tools would refuse.
+  const activeAssetDir = assetDirFor(activePerson.id);
+  if (activeAssetDir) {
+    injectors.push(createPersonalityFilesInjector(activePerson.id, activeAssetDir));
+  }
+
+  // -------------------------------------------------------------------------
+  // UI-guidance injector — cards + Canvas composition rules
+  // -------------------------------------------------------------------------
+
+  // Gated on reach, not on registration: the card tools are always registered
+  // (the registry filters them per personality), but turn-composition rules are
+  // dead prompt weight for a personality that cannot emit a card. An undefined
+  // toolset means "all tools", so it qualifies.
+  const activeToolset = activePerson.toolset;
+  const reachesCards =
+    activeToolset === undefined ||
+    activeToolset.some((name: string) => name === 'emit_card' || name === 'render_ui');
+  if (reachesCards) {
+    const personalityDir = personalityDirFor(activePerson.id);
+    const templates = personalityDir
+      ? await scanUiTemplates(wiringCtx.storage, personalityDir)
+      : [];
+    injectors.push(createUiGuidanceInjector({ personalityId: activePerson.id, templates }));
+  }
+
+  // -------------------------------------------------------------------------
+  // Spoken-style injector — how a voice personality talks (voice V1a §4)
+  // -------------------------------------------------------------------------
+
+  // Gated on DECLARED intent to be heard: a `voice` block, or `voice_session`
+  // in the toolset. Unlike the card injector above, an undefined toolset
+  // ("all tools") does NOT qualify — most personalities are text-only, and
+  // ~900 chars of rules about speaking is dead weight on every one of them.
+  //
+  // The content is built from the personality id ALONE and never consults the
+  // turn, so the static prompt prefix stays byte-identical across turns — a
+  // session that mixes typed and spoken turns is exactly the case that would
+  // break if the per-turn fact lived here instead of on the message
+  // (`packages/core/src/__tests__/prompt-prefix-stability.test.ts`).
+  const speaks =
+    activePerson.voice !== undefined ||
+    (activeToolset?.some((name: string) => name === 'voice_session') ?? false);
+  if (speaks) {
+    injectors.push(createSpokenStyleInjector({ personalityId: activePerson.id }));
+  }
 
   // -------------------------------------------------------------------------
   // Debug tools (debug sessions only)
@@ -835,6 +1154,7 @@ export async function composeAllTools(
     skillPool,
     injectors,
     skillScanner,
+    skillsInjector,
     mcpManager,
   };
 }

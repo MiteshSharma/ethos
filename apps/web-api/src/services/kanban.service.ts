@@ -16,6 +16,7 @@ import {
   type TeamRuntime,
   teamsDir,
 } from '@ethosagent/team-supervisor';
+import type { HookRegistry } from '@ethosagent/types';
 import type {
   KanbanBoardSnapshot,
   KanbanComment,
@@ -50,15 +51,23 @@ export interface KanbanServiceOptions {
   teamsDir?: string;
   /** Mesh for agent discovery (listAgents, /notify on assign). */
   mesh?: AgentMesh;
+  /**
+   * Fires `ticket_updated` (Void, fail-open) on human-driven assignee
+   * changes. Optional — a service built without one fires zero hooks,
+   * matching today's exact behavior.
+   */
+  hooks?: HookRegistry;
 }
 
 export class KanbanService {
   private readonly rootDir: string;
   private readonly mesh: AgentMesh | undefined;
+  private readonly hooks: HookRegistry | undefined;
 
   constructor(opts: KanbanServiceOptions = {}) {
     this.rootDir = opts.teamsDir ?? teamsDir();
     this.mesh = opts.mesh;
+    this.hooks = opts.hooks;
   }
 
   /** Enumerate teams from the manifests on disk; merge in runtime status. */
@@ -255,6 +264,95 @@ export class KanbanService {
   }
 
   /**
+   * Bounded tail of board events, ascending — the last `cap` rows in
+   * `task_events`, same cap (`RECENT_EVENTS_CAP`) as `getBoard()`'s
+   * `recentEvents`. Used for a COLD SSE connect (no real `Last-Event-ID`
+   * cursor): replaying the entire table for a board with a long history is
+   * strictly worse than the polling it replaced, so a cold connect gets the
+   * recent tail instead. A genuine reconnect still uses `getEventsSince`
+   * below and replays everything since its real cursor.
+   */
+  async getRecentEvents(team: string, cap: number = RECENT_EVENTS_CAP): Promise<KanbanEvent[]> {
+    if (team !== GLOBAL_BOARD_NAME) assertSafeTeamName(team);
+    const boardPath = resolveBoard(this.rootDir, team);
+    if (!existsSync(boardPath)) return [];
+
+    const store =
+      team !== GLOBAL_BOARD_NAME
+        ? new KanbanStore(boardPath, { teamId: team })
+        : new KanbanStore(boardPath);
+    try {
+      const eventRows = (
+        store as unknown as { db: { prepare: (s: string) => { all: (n: number) => unknown[] } } }
+      ).db
+        .prepare(
+          'SELECT id, task_id, kind, actor, data_json, created_at FROM task_events ORDER BY id DESC LIMIT ?',
+        )
+        .all(cap) as Array<{
+        id: number;
+        task_id: string;
+        kind: string;
+        actor: string;
+        data_json: string;
+        created_at: number;
+      }>;
+      return eventRows.reverse().map((r) => ({
+        id: r.id,
+        taskId: r.task_id,
+        kind: r.kind as KanbanEvent['kind'],
+        actor: r.actor,
+        data: JSON.parse(r.data_json) as Record<string, unknown>,
+        createdAt: new Date(r.created_at).toISOString(),
+      }));
+    } finally {
+      store.close();
+    }
+  }
+
+  /**
+   * Board events strictly after `afterId`, ascending — the resume-since-cursor
+   * query behind the kanban SSE stream. Same `task_events` query as
+   * `getBoard()`'s, but `WHERE id > ?` ascending instead of `ORDER BY id DESC
+   * LIMIT ?`.
+   */
+  async getEventsSince(team: string, afterId: number): Promise<KanbanEvent[]> {
+    if (team !== GLOBAL_BOARD_NAME) assertSafeTeamName(team);
+    const boardPath = resolveBoard(this.rootDir, team);
+    if (!existsSync(boardPath)) return [];
+
+    const store =
+      team !== GLOBAL_BOARD_NAME
+        ? new KanbanStore(boardPath, { teamId: team })
+        : new KanbanStore(boardPath);
+    try {
+      const eventRows = (
+        store as unknown as { db: { prepare: (s: string) => { all: (n: number) => unknown[] } } }
+      ).db
+        .prepare(
+          'SELECT id, task_id, kind, actor, data_json, created_at FROM task_events WHERE id > ? ORDER BY id ASC',
+        )
+        .all(afterId) as Array<{
+        id: number;
+        task_id: string;
+        kind: string;
+        actor: string;
+        data_json: string;
+        created_at: number;
+      }>;
+      return eventRows.map((r) => ({
+        id: r.id,
+        taskId: r.task_id,
+        kind: r.kind as KanbanEvent['kind'],
+        actor: r.actor,
+        data: JSON.parse(r.data_json) as Record<string, unknown>,
+        createdAt: new Date(r.created_at).toISOString(),
+      }));
+    } finally {
+      store.close();
+    }
+  }
+
+  /**
    * Human-initiated status update. Threads `human:<sessionLabel>` as the actor
    * so the audit trail clearly separates UI edits from agent actions. Honors
    * the same auto-cancel-on-leave-running semantics as agent calls.
@@ -279,6 +377,30 @@ export class KanbanService {
     try {
       const updated = store.updateStatus(opts.taskId, opts.status, opts.reason, opts.actor);
       return { task: toWireTask(updated) };
+    } finally {
+      store.close();
+    }
+  }
+
+  /**
+   * Batch status update — one KanbanStore transaction for the whole set of
+   * taskIds rather than looping the single-task RPC from the client.
+   */
+  async bulkUpdateStatus(opts: {
+    team: string;
+    taskIds: string[];
+    status: KanbanTaskStatus;
+    actor: string;
+  }): Promise<{ tasks: KanbanTask[] }> {
+    if (opts.team !== GLOBAL_BOARD_NAME) assertSafeTeamName(opts.team);
+    const boardPath = resolveBoard(this.rootDir, opts.team);
+    if (!existsSync(boardPath)) {
+      throw new Error(`team board not found: ${opts.team}`);
+    }
+    const store = new KanbanStore(boardPath, { teamId: opts.team });
+    try {
+      const updated = store.bulkUpdateStatus(opts.taskIds, opts.status, opts.actor);
+      return { tasks: updated.map(toWireTask) };
     } finally {
       store.close();
     }
@@ -326,7 +448,7 @@ export class KanbanService {
 
     const entries = await this.mesh.list();
     const agents = entries
-      .filter((e) => e.boardSubscriptions?.includes(opts.team))
+      .filter((e) => e.boardSubscriptions?.some((s) => s.board === opts.team))
       .map((e) => ({
         personalityId: e.personalityId ?? e.agentId,
         displayName: e.displayName ?? e.agentId,
@@ -350,12 +472,54 @@ export class KanbanService {
     try {
       const task = store.assign(opts.taskId, opts.assignee, opts.actor);
 
+      if (this.hooks) {
+        await this.hooks.fireVoid('ticket_updated', {
+          taskId: opts.taskId,
+          changedFields: ['assignee'],
+        });
+      }
+
       // Fire /notify to the assignee via mesh — non-fatal on failure.
       if (this.mesh && task.status === 'ready') {
-        void this.notifyAssignee(opts.assignee, task.id, 'kanban').catch(() => {});
+        void this.notifyAssignee(opts.assignee, task.id, 'kanban', opts.team).catch(() => {});
       }
 
       return { task: toWireTask(task) };
+    } finally {
+      store.close();
+    }
+  }
+
+  /**
+   * Batch reassign — one KanbanStore transaction for the whole set of
+   * taskIds, firing the same non-fatal per-task /notify as assign().
+   */
+  async bulkAssign(opts: {
+    team: string;
+    taskIds: string[];
+    assignee: string;
+    actor: string;
+  }): Promise<{ tasks: KanbanTask[] }> {
+    if (opts.team !== GLOBAL_BOARD_NAME) assertSafeTeamName(opts.team);
+    const boardPath = resolveBoard(this.rootDir, opts.team);
+    const store = new KanbanStore(boardPath, { teamId: opts.team });
+    try {
+      const updated = store.bulkAssign(opts.taskIds, opts.assignee, opts.actor);
+
+      for (const task of updated) {
+        if (this.hooks) {
+          await this.hooks.fireVoid('ticket_updated', {
+            taskId: task.id,
+            changedFields: ['assignee'],
+          });
+        }
+
+        if (this.mesh && task.status === 'ready') {
+          void this.notifyAssignee(opts.assignee, task.id, 'kanban', opts.team).catch(() => {});
+        }
+      }
+
+      return { tasks: updated.map(toWireTask) };
     } finally {
       store.close();
     }
@@ -414,23 +578,37 @@ export class KanbanService {
       if (assignee) recipients.add(assignee);
       for (const token of parseMentions(opts.body)) recipients.add(token);
       for (const personalityId of recipients) {
-        void this.notifyAssignee(personalityId, opts.taskId, 'kanban_comment').catch(() => {});
+        void this.notifyAssignee(personalityId, opts.taskId, 'kanban_comment', opts.team).catch(
+          () => {},
+        );
       }
     }
     return { comment: toWireComment(comment) };
   }
 
-  private async notifyAssignee(personalityId: string, taskId: string, kind: string): Promise<void> {
+  private async notifyAssignee(
+    personalityId: string,
+    taskId: string,
+    kind: string,
+    team: string,
+  ): Promise<void> {
     if (!this.mesh) return;
     const entries = await this.mesh.findByPersonality(personalityId);
     const entry = entries[0];
     if (!entry) return;
 
+    // Phase 3 (kanban-hooks-notify-parity, D7): honor the subscriber's durable
+    // per-board mode preference instead of hardcoding notify+wake. A
+    // subscription with no entry for this board, or no `mode` set on it,
+    // falls back to notify+wake — the only behavior that existed before
+    // per-subscription preference did.
+    const mode = entry.boardSubscriptions?.find((s) => s.board === team)?.mode ?? 'notify+wake';
+
     try {
       const res = await fetch(`http://${entry.host}:${entry.port}/notify`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ kind, ref: taskId }),
+        body: JSON.stringify({ kind, ref: taskId, mode }),
       });
       if (!res.ok) {
         // Notification failure is non-fatal — poll loop reconciles.

@@ -1,6 +1,6 @@
 ---
 name: export-csv
-description: Export tabular data as a well-formed CSV file. No installation required — uses write_file only. Always includes a header row, correctly quotes fields containing commas, double-quotes, or newlines, and writes UTF-8. Output is at ~/.ethos/files/generated/<slug>.csv.
+description: Export tabular data as a well-formed CSV file. No installation required — uses write_file only. Always includes a header row, correctly quotes fields containing commas, double-quotes, or newlines, and writes UTF-8. Output is written to the working directory as <slug>.csv.
 version: 1.0.0
 author: ethosagent
 tags: [document, csv, export, data]
@@ -22,7 +22,7 @@ ethos:
 
 # Export CSV
 
-Export tabular data as a well-formed CSV file. No installation required — uses `write_file` only. Output is at `~/.ethos/files/generated/<slug>.csv`. Always produces a header row and correctly escapes all field values.
+Export tabular data as a well-formed CSV file. No installation required — uses `write_file` only. Output is written to the working directory as `<slug>.csv`. Always produces a header row and correctly escapes all field values.
 
 ## When to use this skill
 
@@ -80,10 +80,10 @@ From the user's data:
 
 **Step 2: Write to file**
 
-Use `write_file` to write the complete CSV content to:
+Use `write_file` to write the complete CSV content to a relative path, which resolves inside the working directory:
 
 ```
-~/.ethos/files/generated/<slug>.csv
+<slug>.csv
 ```
 
 Where `<slug>` is a lowercase-hyphenated identifier derived from the data or user's request (e.g. `user-list-2026-06`, `product-inventory`, `q2-transactions`).
@@ -94,11 +94,11 @@ Write the file as UTF-8. Do not add a BOM unless the user says they will open it
 
 Tell the user:
 
-> "CSV exported to: `~/.ethos/files/generated/<slug>.csv`"
+> "CSV exported to: `<slug>.csv` in the working directory — visible in the Documents tab."
 
 If the file has an unusual number of rows or columns, mention the count:
 
-> "CSV exported to: `~/.ethos/files/generated/<slug>.csv` — 3 columns, 42 rows (plus header)."
+> "CSV exported to: `<slug>.csv` in the working directory — 3 columns, 42 rows (plus header)."
 
 ## Anti-patterns
 
@@ -111,7 +111,7 @@ If the file has an unusual number of rows or columns, mention the count:
 
 ## Hard rules
 
-- All generated files go to `~/.ethos/files/generated/`. Never write outside this directory.
+- All generated files go to the working directory. Always write a relative path — never write outside the working directory.
 - Always tell the user the exact output path after completion.
 - The first row must always be the header row.
 - Every field containing `,`, `"`, or a newline must be wrapped in double-quotes.

@@ -78,6 +78,25 @@ export interface Skill {
    * for the skill to load. From frontmatter `ethos.external_cli_alternatives`.
    */
   external_cli_alternatives?: string[];
+  /**
+   * Renderer capabilities the skill declares, from frontmatter
+   * `ethos.renders` (e.g. `['echarts@1']`). Each entry is
+   * `<renderer-name>@<spec-version>`.
+   *
+   * Two-level versioning: the integer names OUR spec version — a documented
+   * option subset taught by the skill (e.g. "the ECharts option subset of
+   * charts skill v1") — NOT the npm version of the rendering library. The
+   * levels move independently: the surface pins the library and owns the
+   * spec→renderer map, so a library major bump that still renders the subset
+   * is invisible to every skill, while a spec bump is a deliberate
+   * skill-authoring event. Spec versions are small integers by design, so
+   * semver strings are rejected at parse time.
+   *
+   * A skill DECLARES a capability; it never ships renderer code. A surface
+   * renders only spec versions it maps, and degrades to a code block
+   * otherwise.
+   */
+  renders?: string[];
   /** Raw parsed frontmatter object. */
   rawFrontmatter: Record<string, unknown>;
   /** Which frontmatter dialect was detected. */

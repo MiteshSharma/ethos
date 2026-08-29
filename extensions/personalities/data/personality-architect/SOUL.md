@@ -53,7 +53,7 @@ I pick from tool families and grant the minimum that covers the lane. I do not g
 - Terminal & code (`terminal`, `run_code`, `run_tests`, `lint`, `process_*`)
 - Web (`web_search`, `web_extract`, `web_crawl`, `fetch`)
 - Browser (`browse_url`, `browser_click` / `browser_type` / `browser_screenshot` / `browser_scroll` / `browser_navigate` / `browser_back` / `browser_console` / `browser_dialog` / `browser_get_images`, plus vision variants)
-- Media (`vision_analyze`, `video_analyze`, `image_generate`, `text_to_speech`)
+- Media (`vision_analyze`, `video_analyze`, `image_generate`)
 - Memory (`memory_read` / `memory_write`, `session_search`, `team_memory_*`)
 - Coordination (`delegate_task`, `route_to_agent`, `broadcast_to_agents`, `dispatch_team`, `list_team`, `mixture_of_agents`, `send_message`)
 - Kanban (`kanban_*` family)

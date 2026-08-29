@@ -2,6 +2,7 @@ import { personalityAccent } from '@ethosagent/design-tokens';
 import { useQuery } from '@tanstack/react-query';
 import { Dropdown, Input } from 'antd';
 import { type KeyboardEvent, useCallback, useEffect, useRef, useState } from 'react';
+import { TalkMicIcon } from '../../features/voice/TalkMode';
 import type { AttachmentPreview } from '../../lib/attachments';
 import { formatContextTokens } from '../../lib/format-context-tokens';
 import { rpc } from '../../rpc';
@@ -21,6 +22,17 @@ export interface ComposerProps {
   /** Input-token count from the last turn — the current context size. Renders
    *  nothing when null/0 (before the first turn). */
   contextTokens?: number | null;
+  /** Text pushed in from a suggestion pill. `seq` makes picking the same
+   *  suggestion twice a fresh event; the draft is replaced, not appended. */
+  suggestion?: { text: string; seq: number };
+  /** Toggle talk-mode: starts a call, or ends the one in progress. Absent =
+   *  this surface has no live-call affordance. */
+  onTalkMode?: () => void;
+  /** True while a call is up — the glyph reads active, and the composer's own
+   *  push-to-talk mic stands down so the two never contend for the device. */
+  talkModeActive?: boolean;
+  /** Hover text for the talk glyph; also its accessible name. */
+  talkModeHint?: string;
 }
 
 export function Composer({
@@ -35,6 +47,10 @@ export function Composer({
   onRemoveAttachment,
   onGoalRun,
   contextTokens,
+  suggestion,
+  onTalkMode,
+  talkModeActive,
+  talkModeHint,
 }: ComposerProps) {
   const [text, setText] = useState('');
   const [isVoiceRecording, setIsVoiceRecording] = useState(false);
@@ -60,6 +76,13 @@ export function Composer({
 
   const hasReadyAttachments = attachments && attachments.length > 0;
   const isUploading = attachments?.some((a) => a.state === 'uploading');
+
+  // A suggestion pill fills the draft; it never sends on the user's behalf.
+  // Keyed on `seq` so the same suggestion picked twice still lands.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: `seq` is the event, `text` is the payload
+  useEffect(() => {
+    if (suggestion) setText(suggestion.text);
+  }, [suggestion?.seq]);
 
   useEffect(() => {
     if (atQuery === null) {
@@ -426,6 +449,18 @@ export function Composer({
                 {formatContextTokens(contextTokens)} tokens
               </span>
             ) : null}
+            {onTalkMode ? (
+              <button
+                type="button"
+                className={`composer-talk-btn${talkModeActive ? ' composer-talk-active' : ''}`}
+                onClick={onTalkMode}
+                title={talkModeHint ?? 'Talk'}
+                aria-label={talkModeHint ?? 'Talk'}
+                aria-pressed={talkModeActive ?? false}
+              >
+                <TalkMicIcon />
+              </button>
+            ) : null}
             {voiceEnabled && (
               <VoiceButton
                 onTranscript={(t) => {
@@ -433,6 +468,7 @@ export function Composer({
                 }}
                 onRecordingChange={setIsVoiceRecording}
                 disabled={disabled || isStreaming}
+                micBusy={talkModeActive}
                 accent={accent}
               />
             )}

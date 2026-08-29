@@ -9,13 +9,15 @@ import { type AgentEvent, type AgentLoop, stripAnsiEscapes } from '@ethosagent/c
 import { FsAttachmentCache, FsStorage } from '@ethosagent/storage-fs';
 import { parseSlashCommand, shouldSurfaceProgress } from '@ethosagent/surface-kit';
 import type { SplashInventory } from '@ethosagent/tui';
-import type {
-  Attachment,
-  JobStore,
-  NotificationAdapter,
-  SteerSink,
-  Storage,
+import {
+  type Attachment,
+  type JobStore,
+  type NotificationAdapter,
+  type SteerSink,
+  type Storage,
+  toEthosError,
 } from '@ethosagent/types';
+import { appendErrorLog } from '../error-log';
 import { resolveAtRefs } from '../lib/at-refs';
 import { makeCompleter } from '../lib/autocomplete';
 import { formatClarifyPrompt, parseClarifyAnswer } from '../lib/clarify-prompt';
@@ -374,7 +376,7 @@ export async function runChat(config: EthosConfig, opts: RunChatOptions = {}): P
   // Clarify surface — when the agent calls the `clarify` tool, pause the
   // readline loop, present the question, read one line, and route the answer
   // back. Ctrl-C aborts the turn, which the bridge resolves as a cancel.
-  loop.clarifyBridge?.setPresenter((req) => {
+  loop.clarifyBridge?.registerPresenter('cli', (req) => {
     state.awaitingClarify = true;
     out(`\n${c.dim}${formatClarifyPrompt(req)}${c.reset}`);
     rl.setPrompt(`${c.cyan}?${c.reset}> `);
@@ -393,6 +395,9 @@ export async function runChat(config: EthosConfig, opts: RunChatOptions = {}): P
     const onLine = (raw: string) => {
       const answer = parseClarifyAnswer(raw, req.options);
       finish();
+      // D7 — a human acted on this surface; a background job's next question
+      // may route here instead of always falling back to its origin lane.
+      loop.clarifyBridge?.recordPresence('cli');
       void loop.respondToClarify({ requestId: req.requestId, answer, source: 'user' });
     };
     // Teardown if the request resolves another way first (timeout / abort-cancel).
@@ -543,6 +548,15 @@ export async function runChat(config: EthosConfig, opts: RunChatOptions = {}): P
       rl.prompt();
       return;
     }
+
+    // Fix 5 (pi-delegation.md D7) — an ordinary line establishes presence
+    // too, not just answering a clarify (the `awaitingClarify` presenter
+    // above already records it for that path). Otherwise a background
+    // job's later question only ever routes to wherever the human last
+    // happened to answer a clarify, never to wherever they're just
+    // casually chatting. CLI has no chat identity beyond the process
+    // itself, so no `surfaceContext`.
+    loop.clarifyBridge?.recordPresence('cli');
 
     // Slash commands are always dispatched immediately — even mid-turn — except
     // /busy and /steer which have special busy-state semantics handled below.
@@ -741,6 +755,10 @@ async function runTurn(input: string, state: ChatState, loop: AgentLoop): Promis
   const toolArgs = new Map<string, unknown>();
   const toolNames = new Map<string, string>();
   let hasText = false;
+  // B3 — the turn's single identity, learned from the first event of the turn.
+  // Used to stamp any error this turn writes to `errors.jsonl`, so the log line
+  // and the trace in `observability.db` name the same turn.
+  let turnTraceId: string | undefined;
 
   // Drain pending attachments — pass to loop.run() and clear the list.
   const turnAttachments =
@@ -761,18 +779,25 @@ async function runTurn(input: string, state: ChatState, loop: AgentLoop): Promis
       ...(toolsetNarrow ? { toolsetNarrow } : {}),
       ...(state.dryRun ? { dryRun: true } : {}),
     })) {
+      // Lane E (tools-as-code-api) — in-script inner calls carry
+      // `audience: 'internal'`. They must not drive turn-level UI state
+      // (iteration proxy, spinner, duration stats); rendering is gated in
+      // projectEvent (verbosity.ts).
+      const internalToolEvent =
+        (event.type === 'tool_start' || event.type === 'tool_end') && event.audience === 'internal';
+
       // Track iteration count — proxy by counting `run_start`+tool_start sequences.
       // Per AgentLoop, an iteration starts on before_llm_call hook. We don't get
       // that event externally, so use first tool_start or text_delta as proxy.
-      if (event.type === 'text_delta' || event.type === 'tool_start') {
+      if (event.type === 'text_delta' || (event.type === 'tool_start' && !internalToolEvent)) {
         if (state.iterationsThisTurn === 0) state.iterationsThisTurn = 1;
       }
-      if (event.type === 'tool_end') {
+      if (event.type === 'tool_end' && !internalToolEvent) {
         // A tool_end -> next iteration boundary, so the steer drain fires next.
         state.iterationsThisTurn++;
       }
 
-      if (event.type === 'tool_start') {
+      if (event.type === 'tool_start' && !internalToolEvent) {
         toolStartTimes.set(event.toolCallId, Date.now());
         toolArgs.set(event.toolCallId, event.args);
         toolNames.set(event.toolCallId, event.toolName);
@@ -782,11 +807,11 @@ async function runTurn(input: string, state: ChatState, loop: AgentLoop): Promis
         clearSpinner();
         if (state.verbosity !== 'quiet') out(`${c.bold}ethos${c.reset} > `);
       }
-      if (event.type === 'tool_start' && !spinnerCleared) {
+      if (event.type === 'tool_start' && !internalToolEvent && !spinnerCleared) {
         clearSpinner();
         if (state.verbosity !== 'quiet') out('\n');
       }
-      if (event.type === 'tool_end') {
+      if (event.type === 'tool_end' && !internalToolEvent) {
         toolDurations.push(event.durationMs);
       }
       if (event.type === 'usage') {
@@ -799,6 +824,7 @@ async function runTurn(input: string, state: ChatState, loop: AgentLoop): Promis
         // Latest turn's input tokens = current context size (mirrors web composer).
         state.contextInputTokens = event.inputTokens;
       }
+      if (event.type === 'run_start') turnTraceId = event.traceId;
       if (event.type === 'error') clearSpinner();
 
       renderEventForVerbosity(event, state, {
@@ -830,6 +856,14 @@ async function runTurn(input: string, state: ChatState, loop: AgentLoop): Promis
     clearSpinner();
     if (!state.abort?.signal.aborted) {
       out(`\n${c.red}Error: ${err instanceof Error ? err.message : String(err)}${c.reset}`);
+      // Phase 30.10 says every error rendered through a surface path lands in
+      // `errors.jsonl`; a turn that threw out of `loop.run` was the one path
+      // that only printed. B3 makes it worth logging: the row carries the
+      // turn's `traceId`, so `ethos trace <id>` resolves the failed turn.
+      appendErrorLog(toEthosError(err), {
+        command: 'chat',
+        ...(turnTraceId ? { traceId: turnTraceId } : {}),
+      });
     }
   } finally {
     clearInterval(spinnerInterval);
@@ -1027,7 +1061,7 @@ export function buildChatHelpText(
     `  /new                  start a fresh session\n` +
     `  /personality          show current personality\n` +
     `  /personality list     list all personalities\n` +
-    `  /personality <id>     switch personality\n` +
+    `  /personality <id>     start a new session bound to <id>\n` +
     `  /model <name>         switch model for this session\n` +
     `  /tier <name>          override tier for next turn (trivial|default|deep)\n` +
     `  /memory               show ~/.ethos/MEMORY.md and USER.md\n` +
@@ -1100,8 +1134,22 @@ async function handleSlashCommand(
         );
         break;
       }
+      // A session's personality is bound at creation and immutable, so this
+      // cannot mutate the active session — the next turn would be refused with
+      // `personality_locked`. Mirror the gateway's `/personality` handler:
+      // set the new id AND rotate to a fresh session key, resetting the same
+      // per-session state `/new` resets.
+      loop.resetSessionCost(state.sessionKey);
+      ctx.notificationRouter.deregister(state.sessionKey);
       state.personalityId = arg;
-      out(`${c.dim}[personality: ${arg}]${c.reset}\n`);
+      state.sessionKey = `cli:${basename(process.cwd())}:${Date.now()}`;
+      ctx.notificationRouter.register(state.sessionKey, ctx.cliAdapter);
+      state.contextTokens = 0;
+      state.contextInputTokens = 0;
+      state.startedAt = Date.now();
+      out(
+        `${c.dim}[personality: ${arg} — new session started; personality is fixed for a session]${c.reset}\n`,
+      );
       break;
     }
 

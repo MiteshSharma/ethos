@@ -460,4 +460,12 @@ describe('entry-point wiring', () => {
     expect(src).toContain('createApprovalDangerPredicate({');
     expect(src).not.toMatch(/createDangerPredicate\(\s*\)/);
   });
+
+  // Every surface that CAN prompt must flag the always-ask set. Checked at the
+  // source because the value only matters at the construction site — a predicate
+  // built without it is silently ungated, with no runtime signal.
+  it.each(ENTRY_POINTS)('%s passes APPROVAL_SURFACE_ALWAYS_ASK', (relPath) => {
+    const src = readFileSync(join(ROOT, relPath), 'utf-8');
+    expect(src).toContain('alwaysAsk: APPROVAL_SURFACE_ALWAYS_ASK');
+  });
 });

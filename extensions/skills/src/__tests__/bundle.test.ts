@@ -49,6 +49,13 @@ describe('@ethosagent/skills bundle', () => {
       // with the first one advertised in BUNDLED_SKILL_IDS
       // (`writer/no-ai-slop`).
       'writer',
+      // `platform-integration` covers skills that operate an external
+      // platform's own CLI/API under the user's own account (e.g. X via
+      // `xurl`) — distinct from `research` (broad, unauthenticated lookup)
+      // and `github-workflow` (a specific existing category for one
+      // platform). Added with the first one advertised in BUNDLED_SKILL_IDS
+      // (`platform-integration/xurl`).
+      'platform-integration',
     ]);
     for (const id of BUNDLED_SKILL_IDS) {
       const raw = readFileSync(join(SOURCE.dir, id, 'SKILL.md'), 'utf8');

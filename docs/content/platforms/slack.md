@@ -5,7 +5,7 @@ kind: how-to
 audience: shared
 slug: platform-slack
 time: "15 min"
-updated: 2026-06-09
+updated: 2026-08-13
 ---
 
 ## Task
@@ -53,6 +53,7 @@ In `https://api.slack.com/apps`:
    - `users:read` — resolve user ids when audit-logging.
    - `files:read` — download user-attached files from `url_private_download`. Without it, Slack returns an HTML page in place of the file bytes; see [Receive files via Slack](../using/how-to/receive-files-via-slack.md).
    - `reactions:write` — set and clear the 👀 receipt reaction on inbound messages (best-effort; missing scope just drops the reaction).
+   - `files:write` — upload a long answer as `answer.md` instead of a four-message wall (best-effort; missing scope falls back to the chunked messages). Tune with `slack.apps.<i>.longReplyThresholdChars`.
 3. Under **Socket Mode** → **Enable Socket Mode**.
 4. Under **Basic Information** → **App-Level Tokens** → **Generate Token and Scopes**, add the `connections:write` scope. Copy the `xapp-…` token.
 5. Under **Event Subscriptions** → **Enable Events**, subscribe to bot events:
@@ -95,7 +96,7 @@ Expected boot lines include `⚡️ Bolt app started`. Socket Mode means no reve
 
 When the inbound message has a `thread_ts` or the `replyToId` is set, the adapter passes `thread_ts` to `chat.postMessage` so the reply lands in the same thread. New top-level mentions start a new thread when the agent's reply spans multiple chunks.
 
-The adapter skips messages with any `subtype` (bot messages, edits, joins) — Bolt surfaces those as `message` events too.
+The adapter skips messages with any `subtype` (bot messages, edits, joins) — Bolt surfaces those as `message` events too. Bot- and workflow-authored posts are the one exception: allowlist their `bot_id` under [`slack.apps.<i>.allowedBotIds`](../using/reference/config-yaml.md#slack-apps) and they reach the agent.
 
 ### 4a. Plugin commands
 
@@ -132,6 +133,16 @@ From inside `ethos chat`:
 /allow 7H3K-9XQ2
 /deny slack U02ABCDEFGH
 ```
+
+### 5a. Restrict who can run `/ethos` and open App Home
+
+`/ethos` and the App Home tab never become inbound messages, so the filter above does not see them. They get their own gate, and it is default-deny: the allowlist is `ownerUserId` + `recipientAllowlist` from the block above, optionally narrowed by [`slack.apps.<i>.allowedSlashUsers`](../using/reference/config-yaml.md#slack-apps).
+
+```yaml
+slack.apps.0.allowedSlashUsers: U01ABCDEFGH,U02ABCDEFGH
+```
+
+A user who is not on that allowlist gets an ephemeral "You are not authorized to use this command" and an App Home tab whose memory, session, kanban, and channel sections are replaced by a notice. Configure `ownerUserId` before rolling out: with no `channel_filter.slack` entry, nobody — including you — can run `/ethos memory add`, `/ethos channel-mode`, or read the bot's memory from App Home.
 
 ### 6. Drive multi-workspace deployments
 
@@ -225,13 +236,16 @@ Slack rotates the WebSocket; Bolt reconnects automatically. Persistent flapping 
 | `channel.mention_gate` | gateway audit | Allowlisted sender posted in a channel without `@mentioning` the bot. | Mention the bot or reply in-thread. |
 | `channel.pairing.sent` | gateway audit | First DM from a non-allowlisted user; pairing code emitted. | Owner runs `/allow <code>` to approve. |
 | `channel.context_stripped` | gateway audit | Quoted thread content from a non-allowlisted user was removed before the turn. | Expected when `contextVisibility: allowlist`. |
+| `channel.prior_context_stripped` | gateway audit | Thread-backfill lines from non-allowlisted authors were removed; `details.dropped` is `true` when nothing survived. | Expected when `contextVisibility: allowlist`. Add the author's user id (or a bot's `bot_id`) to `recipientAllowlist` to keep their lines. |
 | `invalid_auth` | adapter health | Bot token revoked or wrong. | Reinstall the app, copy the new `xoxb-…` token. |
 | `not_in_channel` | delivery result | Bot is not a member of the target channel. | Invite the bot. |
 | `missing_scope` | delivery result | App lacks a Bot Token Scope. | Add the scope, reinstall, update the token. |
 
 ## See also
 
+- [Receive Slack and Telegram events over webhooks](../using/how-to/run-channels-over-webhooks.md) — swap Socket Mode for the HTTP Events API, including the manual Request URL step.
 - [Telegram adapter](telegram.md) — long-polling adapter sharing the same gateway boundary.
 - [Discord adapter](discord.md) — guild and DM routing.
+- [Send and receive voice notes on a channel](../using/how-to/voice-notes-on-channels.md) — Slack transcribes audio uploads and can reply with a spoken file.
 - [Run Ethos as a daemon](../using/how-to/run-as-daemon.md) — `launchd`, `systemd`, `pm2`.
 - [Glossary](../getting-started/glossary.md) — [`gateway`](../getting-started/glossary.md#gateway), [`session`](../getting-started/glossary.md#session), [`audience boundary`](../getting-started/glossary.md#audience-boundary).

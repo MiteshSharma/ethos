@@ -156,20 +156,77 @@ export const DEFAULT_TOKENS: Tokens = {
   },
 };
 
+// DESIGN.md's slop-blacklist forbids purple/violet/indigo accents in the
+// same hue band `validate.ts` rejects for the curated accents (rule 1:
+// hue [240°, 290°]). Derived hues are shifted out of the band rather than
+// re-hashed, so the mapping stays a pure function of the id.
+const DERIVED_HUE_PURPLE_MIN = 240;
+const DERIVED_HUE_PURPLE_MAX = 290;
+const DERIVED_HUE_BAND_SPAN = DERIVED_HUE_PURPLE_MAX - DERIVED_HUE_PURPLE_MIN + 1; // 51
+// Fixed saturation/lightness chosen to match the curated palette's
+// vividness (e.g. #4A9EFF ≈ S100 L65, #4ADE80 ≈ S71 L65, #F59E0B ≈ S92 L50,
+// #E879F9 ≈ S90 L73) — only the hue varies per id.
+const DERIVED_ACCENT_SATURATION = 0.75;
+const DERIVED_ACCENT_LIGHTNESS = 0.62;
+
+/** Simple deterministic string hash — pure function of the input, no state. */
+function hashString(value: string): number {
+  let hash = 0;
+  for (let i = 0; i < value.length; i++) {
+    hash = (hash * 31 + value.charCodeAt(i)) | 0;
+  }
+  return Math.abs(hash);
+}
+
+/** HSL (h in [0,360), s/l in [0,1]) to a 6-digit uppercase hex color. */
+function hslToHex(h: number, s: number, l: number): string {
+  const c = (1 - Math.abs(2 * l - 1)) * s;
+  const hPrime = h / 60;
+  const x = c * (1 - Math.abs((hPrime % 2) - 1));
+  let r = 0;
+  let g = 0;
+  let b = 0;
+  if (hPrime < 1) [r, g, b] = [c, x, 0];
+  else if (hPrime < 2) [r, g, b] = [x, c, 0];
+  else if (hPrime < 3) [r, g, b] = [0, c, x];
+  else if (hPrime < 4) [r, g, b] = [0, x, c];
+  else if (hPrime < 5) [r, g, b] = [x, 0, c];
+  else [r, g, b] = [c, 0, x];
+  const m = l - c / 2;
+  const toHex = (v: number) =>
+    Math.round((v + m) * 255)
+      .toString(16)
+      .padStart(2, '0');
+  return `#${toHex(r)}${toHex(g)}${toHex(b)}`.toUpperCase();
+}
+
 /**
- * Resolve a personality's accent against a token pack. Unknown personalities
- * fall back to operator grey — a sensible neutral until per-personality
- * customization lands as its own decision.
+ * Derive a deterministic, unique-per-id accent color for a personality
+ * that has no curated entry in `tokens.accents`. Hue comes from a hash of
+ * the id (so different ids land at different points on the wheel instead
+ * of bucketing into the 5 curated colors); saturation/lightness are fixed
+ * to match the curated palette's vividness. Hues that land in the
+ * slop-blacklisted purple/violet/indigo band are shifted just past it.
+ */
+function deriveAccentHex(personalityId: string): string {
+  let hue = hashString(personalityId) % 360;
+  if (hue >= DERIVED_HUE_PURPLE_MIN && hue <= DERIVED_HUE_PURPLE_MAX) {
+    hue = (hue + DERIVED_HUE_BAND_SPAN) % 360;
+  }
+  return hslToHex(hue, DERIVED_ACCENT_SATURATION, DERIVED_ACCENT_LIGHTNESS);
+}
+
+/**
+ * Resolve a personality's accent against a token pack. The 5 curated
+ * built-ins (and anything a caller explicitly adds to a custom token pack)
+ * resolve to their exact hex. Every other id gets a color hash-derived from
+ * its own id — distinct per id, not bucketed into the curated 5 — so a
+ * deployment with more personalities than curated colors still gives each
+ * one a genuinely distinct accent.
  */
 export function accentFor(tokens: Tokens, personalityId: string): string {
   if (tokens.accents[personalityId]) return tokens.accents[personalityId];
-  const values = Object.values(tokens.accents);
-  if (values.length === 0) return '#94A3B8';
-  let hash = 0;
-  for (let i = 0; i < personalityId.length; i++) {
-    hash = (hash * 31 + personalityId.charCodeAt(i)) | 0;
-  }
-  return values[Math.abs(hash) % values.length] ?? '#94A3B8';
+  return deriveAccentHex(personalityId);
 }
 
 /**

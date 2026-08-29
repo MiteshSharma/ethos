@@ -1,7 +1,15 @@
+// Desktop — connection, storage, retention, keychain & auth. Off `Card`, onto
+// `SectionHeading` (§4.2 rows D1–D7; plan Phase 4). Rendered inside the Desktop
+// category's pane (`settings/panes/desktop.tsx`) only in the desktop build.
+//
+// The seven cards talk to Electron IPC, not `config.yaml`, so none of these
+// controls is a named `Form.Item` (all `stateBacked: true` in `SETTINGS_INDEX`)
+// — they stay in their current freeform shape, per the plan's "non-form widgets
+// stay in their current shape; Phase 6 converts rosters/tables, not this".
+
 import {
   App as AntApp,
   Button,
-  Card,
   Checkbox,
   Input,
   InputNumber,
@@ -11,6 +19,9 @@ import {
 } from 'antd';
 import { useEffect, useState } from 'react';
 import { bridge } from '../lib/desktop';
+import { ROW_BOX_STYLE } from './settings/components/primitives';
+import { SectionHeading } from './settings/components/section-heading';
+import { SelfSaveMarker } from './settings/components/self-save-marker';
 
 export function DesktopSettings() {
   const { notification } = AntApp.useApp();
@@ -28,9 +39,6 @@ export function DesktopSettings() {
   const [dataDir, setDataDir] = useState('');
   const [restartNeeded, setRestartNeeded] = useState(false);
 
-  // Utilities
-  const [exportPath, setExportPath] = useState<string | null>(null);
-
   // Keychain
   const [keychainPreview, setKeychainPreview] = useState<string | null>(null);
   const [keychainValue, setKeychainValue] = useState('');
@@ -43,7 +51,6 @@ export function DesktopSettings() {
   const [retentionDays, setRetentionDays] = useState(90);
   const [traceLogDays, setTraceLogDays] = useState(30);
   const [observabilityDays, setObservabilityDays] = useState(7);
-  const [pruneResult, setPruneResult] = useState<string | null>(null);
 
   useEffect(() => {
     if (!bridge) return;
@@ -179,25 +186,6 @@ export function DesktopSettings() {
     }
   }
 
-  async function handleExportData() {
-    try {
-      const result = await b.settings.exportData();
-      if (result.ok && result.path) {
-        setExportPath(result.path);
-      } else {
-        notification.error({
-          message: 'Export failed',
-          description: result.error ?? 'Unknown error',
-        });
-      }
-    } catch (err) {
-      notification.error({
-        message: 'Export failed',
-        description: err instanceof Error ? err.message : String(err),
-      });
-    }
-  }
-
   async function handleUpdateKeychain() {
     try {
       const result = await b.keychain.set({ key: 'api-key', value: keychainValue });
@@ -234,26 +222,24 @@ export function DesktopSettings() {
     }
   }
 
-  async function handlePruneRetention() {
+  async function handleSaveRetention() {
     try {
-      setPruneResult(null);
-      const result = await b.settings.pruneRetention({
+      const result = await b.settings.updateConfig({
         retentionDays,
         traceLogDays,
         observabilityDays,
       });
       if (result.ok) {
-        const freed = result.freedBytes ?? 0;
-        setPruneResult(`Freed ${(freed / 1024).toFixed(1)} KB`);
+        notification.success({ message: 'Retention settings saved' });
       } else {
         notification.error({
-          message: 'Prune failed',
+          message: 'Failed to save retention settings',
           description: result.error ?? 'Unknown error',
         });
       }
     } catch (err) {
       notification.error({
-        message: 'Prune failed',
+        message: 'Failed to save retention settings',
         description: err instanceof Error ? err.message : String(err),
       });
     }
@@ -261,8 +247,14 @@ export function DesktopSettings() {
 
   return (
     <>
-      <Card title="Connection mode" size="small" style={{ marginBottom: 16 }}>
-        <Space direction="vertical" style={{ width: '100%' }}>
+      <SectionHeading id="connection">connection</SectionHeading>
+      <SelfSaveMarker />
+
+      <div style={ROW_BOX_STYLE}>
+        <Typography.Text strong style={{ fontSize: 13 }}>
+          Connection mode
+        </Typography.Text>
+        <Space direction="vertical" style={{ width: '100%', marginTop: 8 }}>
           <Radio.Group value={connMode} onChange={(e) => setConnMode(e.target.value)}>
             <Radio value="local">Local</Radio>
             <Radio value="remote">Remote</Radio>
@@ -289,19 +281,30 @@ export function DesktopSettings() {
             Save
           </Button>
         </Space>
-      </Card>
+      </div>
 
-      <Card title="Launch at login" size="small" style={{ marginBottom: 16 }}>
-        <Checkbox
-          checked={launchAtLogin}
-          onChange={(e) => handleLaunchAtLoginChange(e.target.checked)}
-        >
-          Start Ethos when you log in
-        </Checkbox>
-      </Card>
+      <div className="settings-row">
+        <div className="settings-row-info">
+          <div className="settings-row-label">Launch at login</div>
+        </div>
+        <div className="settings-row-control">
+          <Checkbox
+            checked={launchAtLogin}
+            onChange={(e) => handleLaunchAtLoginChange(e.target.checked)}
+          >
+            Start Ethos when you log in
+          </Checkbox>
+        </div>
+      </div>
 
-      <Card title="Data directory" size="small" style={{ marginBottom: 16 }}>
-        <Space direction="vertical" style={{ width: '100%' }}>
+      <SectionHeading id="storage">storage</SectionHeading>
+      <SelfSaveMarker />
+
+      <div style={ROW_BOX_STYLE}>
+        <Typography.Text strong style={{ fontSize: 13 }}>
+          Data directory
+        </Typography.Text>
+        <Space direction="vertical" style={{ width: '100%', marginTop: 8 }}>
           <Typography.Text>Current: {dataDir}</Typography.Text>
           <Button onClick={handleChangeDataDir}>Change</Button>
           {restartNeeded && (
@@ -310,22 +313,76 @@ export function DesktopSettings() {
             </Typography.Text>
           )}
         </Space>
-      </Card>
+      </div>
 
-      <Card title="Utilities" size="small" style={{ marginBottom: 16 }}>
-        <Space>
-          <Button onClick={handleOpenConfigFolder}>Open Config Folder</Button>
-          <Button onClick={handleExportData}>Export Data</Button>
-        </Space>
-        {exportPath && (
-          <Typography.Text style={{ display: 'block', marginTop: 8 }}>
-            Exported to: {exportPath}
+      <div style={ROW_BOX_STYLE}>
+        <Typography.Text strong style={{ fontSize: 13 }}>
+          Utilities
+        </Typography.Text>
+        <div style={{ marginTop: 8 }}>
+          <Space>
+            <Button onClick={handleOpenConfigFolder}>Open Config Folder</Button>
+            <Button disabled>Export Data</Button>
+          </Space>
+          <Typography.Text type="secondary" style={{ display: 'block', marginTop: 8 }}>
+            Exporting your data is not implemented yet.
           </Typography.Text>
-        )}
-      </Card>
+        </div>
+      </div>
 
-      <Card title="Keychain API key" size="small" style={{ marginBottom: 16 }}>
-        <Space direction="vertical" style={{ width: '100%' }}>
+      <SectionHeading id="retention">retention</SectionHeading>
+      <SelfSaveMarker />
+
+      <div style={ROW_BOX_STYLE}>
+        <Typography.Text strong style={{ fontSize: 13 }}>
+          Desktop cache retention
+        </Typography.Text>
+        <Space direction="vertical" style={{ width: '100%', marginTop: 8 }}>
+          <Space>
+            <Typography.Text>Retention days:</Typography.Text>
+            <InputNumber
+              min={7}
+              max={365}
+              value={retentionDays}
+              onChange={(v) => setRetentionDays(v ?? 90)}
+            />
+          </Space>
+          <Space>
+            <Typography.Text>Trace log days:</Typography.Text>
+            <InputNumber
+              min={1}
+              max={90}
+              value={traceLogDays}
+              onChange={(v) => setTraceLogDays(v ?? 30)}
+            />
+          </Space>
+          <Space>
+            <Typography.Text>Observability days:</Typography.Text>
+            <InputNumber
+              min={1}
+              max={30}
+              value={observabilityDays}
+              onChange={(v) => setObservabilityDays(v ?? 7)}
+            />
+          </Space>
+          <Space>
+            <Button type="primary" onClick={handleSaveRetention}>
+              Save
+            </Button>
+            <Button disabled>Prune now</Button>
+          </Space>
+          <Typography.Text type="secondary">Pruning is not implemented yet.</Typography.Text>
+        </Space>
+      </div>
+
+      <SectionHeading id="keychain-and-auth">keychain &amp; auth</SectionHeading>
+      <SelfSaveMarker />
+
+      <div style={ROW_BOX_STYLE}>
+        <Typography.Text strong style={{ fontSize: 13 }}>
+          Keychain API key
+        </Typography.Text>
+        <Space direction="vertical" style={{ width: '100%', marginTop: 8 }}>
           {keychainPreview && <Typography.Text>Current: {keychainPreview}</Typography.Text>}
           <Input.Password
             placeholder="New API key"
@@ -334,44 +391,20 @@ export function DesktopSettings() {
           />
           <Button onClick={handleUpdateKeychain}>Update</Button>
         </Space>
-      </Card>
+      </div>
 
-      <Card title="Codex Authentication" size="small" style={{ marginBottom: 16 }}>
-        <Space direction="vertical" style={{ width: '100%' }}>
+      <div style={ROW_BOX_STYLE}>
+        <Typography.Text strong style={{ fontSize: 13 }}>
+          Codex Authentication
+        </Typography.Text>
+        <Space direction="vertical" style={{ width: '100%', marginTop: 8 }}>
           <Typography.Text>
             Status: {codexAuthorized ? 'Authorized' : 'Not configured'}
           </Typography.Text>
           {codexUserCode && <Typography.Text copyable>Code: {codexUserCode}</Typography.Text>}
           {!codexAuthorized && <Button onClick={handleStartCodexAuth}>Start Auth</Button>}
         </Space>
-      </Card>
-
-      <Card title="Retention" size="small" style={{ marginBottom: 16 }}>
-        <Space direction="vertical" style={{ width: '100%' }}>
-          <Space>
-            <Typography.Text>Retention days:</Typography.Text>
-            <InputNumber
-              min={1}
-              value={retentionDays}
-              onChange={(v) => setRetentionDays(v ?? 90)}
-            />
-          </Space>
-          <Space>
-            <Typography.Text>Trace log days:</Typography.Text>
-            <InputNumber min={1} value={traceLogDays} onChange={(v) => setTraceLogDays(v ?? 30)} />
-          </Space>
-          <Space>
-            <Typography.Text>Observability days:</Typography.Text>
-            <InputNumber
-              min={1}
-              value={observabilityDays}
-              onChange={(v) => setObservabilityDays(v ?? 7)}
-            />
-          </Space>
-          <Button onClick={handlePruneRetention}>Prune now</Button>
-          {pruneResult && <Typography.Text>{pruneResult}</Typography.Text>}
-        </Space>
-      </Card>
+      </div>
     </>
   );
 }

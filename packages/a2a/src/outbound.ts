@@ -90,6 +90,61 @@ export interface A2aOutboundClientDeps {
   fetchImpl?: typeof fetch;
   /** Injectable clock (ms epoch). Default `Date.now`. */
   now?: () => number;
+  /**
+   * Timeout (ms) for the `message/send` POST (plan T0.3). An unresponsive
+   * peer must not hang the calling turn. Default 30s.
+   */
+  sendTimeoutMs?: number;
+  /**
+   * Timeout (ms) for each handshake step (`connect`'s challenge + response
+   * POSTs, plan T0.3). Default 10s.
+   */
+  handshakeTimeoutMs?: number;
+  /**
+   * Max attempts for `message/send` on TRANSPORT failure (plan T1.3) — a
+   * connection error or a T0.3 timeout, mapped to `A2aOutboundError`'s
+   * `fetch_failed`. Safe specifically because `idempotencyKey` (already
+   * required by `A2aMessageSendParams` for any caller that cares) means a
+   * retried send does not re-run the peer's turn — the peer's task store
+   * dedupes on it (plan T1.6). A JSON-RPC error response (wrong scope, rate
+   * limit, ...) is NOT a transport failure and is never retried — the peer
+   * responded; retrying would not change its answer. Default 5.
+   */
+  sendMaxAttempts?: number;
+  /** Backoff base (ms) — full jitter, `random(0, min(cap, base * 2^attempt))`. Default 500. */
+  sendBackoffBaseMs?: number;
+  /** Backoff cap (ms). Default 30_000. */
+  sendBackoffCapMs?: number;
+  /**
+   * Injectable delay for retry backoff (tests skip the real wait — mirrors
+   * `extensions/goal-runner`'s `sleepFn` for the same purpose). Default a real
+   * `setTimeout`-based delay.
+   */
+  sleepFn?: (ms: number) => Promise<void>;
+  /** Injectable jitter source, `[0, 1)` (tests want determinism). Default `Math.random`. */
+  randomFn?: () => number;
+}
+
+const DEFAULT_SEND_TIMEOUT_MS = 30_000;
+const DEFAULT_HANDSHAKE_TIMEOUT_MS = 10_000;
+const DEFAULT_SEND_MAX_ATTEMPTS = 5;
+const DEFAULT_BACKOFF_BASE_MS = 500;
+const DEFAULT_BACKOFF_CAP_MS = 30_000;
+
+/**
+ * Full-jitter exponential backoff (AWS's "full jitter" formula): a uniform
+ * random delay in `[0, min(cap, base * 2^attempt))`. `attempt` is 0-based —
+ * the delay AFTER the first failure, before the second attempt, uses
+ * `attempt=0`. Exported for direct unit testing of the schedule.
+ */
+export function computeA2aBackoffDelayMs(
+  attempt: number,
+  baseMs: number,
+  capMs: number,
+  randomFn: () => number,
+): number {
+  const window = Math.min(capMs, baseMs * 2 ** attempt);
+  return Math.floor(randomFn() * window);
 }
 
 export interface ConnectArgs {
@@ -142,10 +197,34 @@ export interface SendMessageArgs {
 export class A2aOutboundClient {
   private readonly fetchImpl: typeof fetch;
   private readonly now: () => number;
+  private readonly sendTimeoutMs: number;
+  private readonly handshakeTimeoutMs: number;
+  private readonly sendMaxAttempts: number;
+  private readonly sendBackoffBaseMs: number;
+  private readonly sendBackoffCapMs: number;
+  private readonly sleepFn: (ms: number) => Promise<void>;
+  private readonly randomFn: () => number;
+  // jti -> the last PoP timestamp signed for that token. EdDSA is
+  // DETERMINISTIC: the same {context, method, jti, timestamp} struct always
+  // produces the same signature, and the server's PoP replay guard is keyed
+  // on the signature bytes. A session (and its token/jti) can legitimately be
+  // reused across many `sendMessage` calls (T1.2 caches exactly this), so two
+  // calls landing in the same clock tick would otherwise sign an IDENTICAL
+  // struct and the second would be rejected as a replay of the first. Forcing
+  // a strictly increasing timestamp per jti — regardless of clock resolution
+  // — keeps every signed struct distinct without changing the wire shape.
+  private readonly lastPopTimestampByJti = new Map<string, number>();
 
   constructor(deps: A2aOutboundClientDeps = {}) {
     this.fetchImpl = deps.fetchImpl ?? fetch;
     this.now = deps.now ?? Date.now;
+    this.sendTimeoutMs = deps.sendTimeoutMs ?? DEFAULT_SEND_TIMEOUT_MS;
+    this.handshakeTimeoutMs = deps.handshakeTimeoutMs ?? DEFAULT_HANDSHAKE_TIMEOUT_MS;
+    this.sendMaxAttempts = deps.sendMaxAttempts ?? DEFAULT_SEND_MAX_ATTEMPTS;
+    this.sendBackoffBaseMs = deps.sendBackoffBaseMs ?? DEFAULT_BACKOFF_BASE_MS;
+    this.sendBackoffCapMs = deps.sendBackoffCapMs ?? DEFAULT_BACKOFF_CAP_MS;
+    this.sleepFn = deps.sleepFn ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+    this.randomFn = deps.randomFn ?? Math.random;
   }
 
   /** Fetch + verify the peer's card, then run the auth handshake for a token. */
@@ -178,7 +257,12 @@ export class A2aOutboundClient {
 
     // Step 2: challenge — present my card, receive a single-use nonce.
     const challengeBody: ChallengeRequest = { card: args.myCard };
-    const challenge = await this.postJson(`${authEndpoint}/challenge`, challengeBody, false);
+    const challenge = await this.postJson(
+      `${authEndpoint}/challenge`,
+      challengeBody,
+      false,
+      this.handshakeTimeoutMs,
+    );
     if (!isChallengeIssue(challenge)) {
       throw new A2aOutboundError('invalid_response', 'malformed challenge response from peer');
     }
@@ -196,7 +280,12 @@ export class A2aOutboundClient {
       signature: signStruct(struct, args.myPrivateKeyPem),
       fingerprint: args.myCard.keyFingerprint,
     };
-    const minted = await this.postJson(`${authEndpoint}/response`, responseBody, false);
+    const minted = await this.postJson(
+      `${authEndpoint}/response`,
+      responseBody,
+      false,
+      this.handshakeTimeoutMs,
+    );
     if (!isTokenIssue(minted)) {
       throw new A2aOutboundError('invalid_response', 'malformed token response from peer');
     }
@@ -204,33 +293,27 @@ export class A2aOutboundClient {
     return { peerCard, token: minted.token, expiresAt: minted.expiresAt };
   }
 
-  /** Send a `message/send` to the peer under an established session. */
+  /**
+   * Send a `message/send` to the peer under an established session. Retries
+   * with exponential backoff + full jitter (plan T1.3) ONLY on a TRANSPORT
+   * failure (`fetch_failed` — a connection error or the T0.3 timeout firing);
+   * a JSON-RPC error response is a real answer from the peer and is returned
+   * as-is on the first attempt, never retried. Safe because a retried send
+   * carries the SAME idempotency key — the peer's task store dedupes it
+   * (plan T1.6), so a retry cannot double-run the peer's turn.
+   */
   async sendMessage(args: SendMessageArgs): Promise<A2aOutboundResult> {
     const jsonRpcUrl = args.jsonRpcUrl ?? args.session.peerCard.endpoints.jsonRpc;
 
-    // Per-request proof-of-possession over the token's jti (an unverified read
-    // of MY OWN token — I am only echoing its jti into the signed struct).
     const jti = decodeJwt(args.session.token).jti;
     if (typeof jti !== 'string') {
       throw new A2aOutboundError('invalid_response', 'session token is missing a jti');
     }
-    const timestamp = this.now();
-    const popStruct: A2aRequestPopStruct = {
-      context: A2A_REQUEST_POP_CONTEXT,
-      method: A2A_METHOD_MESSAGE_SEND,
-      jti,
-      timestamp,
-    };
-
-    const headers: Record<string, string> = {
-      'content-type': 'application/json',
-      authorization: `Bearer ${args.session.token}`,
-      'x-a2a-pop': signStruct(popStruct, args.myPrivateKeyPem),
-      'x-a2a-pop-timestamp': String(timestamp),
-    };
 
     // Delegation containment (P8): when spawned while servicing an inbound task,
-    // consume the per-trace fan-out budget and sign a FRESH envelope at depth+1.
+    // consume the per-trace fan-out budget ONCE for this logical send (not per
+    // retry attempt) and sign a FRESH envelope at depth+1.
+    let delegationHeaders: Record<string, string> = {};
     if (args.delegation) {
       const { traceId, depth, reserveOutbound } = args.delegation;
       if (reserveOutbound && !reserveOutbound()) {
@@ -242,82 +325,155 @@ export class A2aOutboundClient {
       const nextDepth = depth + 1;
       const creds = buildDelegationCredentials(traceId, nextDepth, args.myPrivateKeyPem);
       if (creds.signature) {
-        headers['x-a2a-trace-id'] = traceId;
-        headers['x-a2a-delegation-depth'] = String(nextDepth);
-        headers['x-a2a-delegation-sig'] = creds.signature;
+        delegationHeaders = {
+          'x-a2a-trace-id': traceId,
+          'x-a2a-delegation-depth': String(nextDepth),
+          'x-a2a-delegation-sig': creds.signature,
+        };
       }
     }
 
+    // Idempotency key stability across T1.3 retries (correctness fix): minted
+    // ONCE here, before the retry loop, and reused verbatim on every attempt
+    // of this logical send. Previously a caller that omitted `idempotencyKey`
+    // (e.g. `extensions/tools-a2a`'s `a2a_send`) got no key at all, so the
+    // server minted a FRESH random one per RPC call — meaning a retry never
+    // matched the first attempt's key and the peer's dedupe (plan T1.6) never
+    // fired. Threading it through the retry loop, rather than trusting every
+    // caller to remember one, fixes this regardless of what calls `sendMessage`.
+    const idempotencyKey = args.idempotencyKey ?? randomUUID();
     const params: A2aMessageSendParams = {
       skill: args.skill,
       message: args.message,
       ...(args.mode ? { mode: args.mode } : {}),
       ...(args.sessionKey ? { sessionKey: args.sessionKey } : {}),
-      ...(args.idempotencyKey ? { idempotencyKey: args.idempotencyKey } : {}),
+      idempotencyKey,
     };
-    const body = {
+    const bodyText = JSON.stringify({
       jsonrpc: '2.0' as const,
       id: randomUUID(),
       method: A2A_METHOD_MESSAGE_SEND,
       params,
-    };
+    });
 
-    let response: Response;
-    try {
-      response = await this.fetchImpl(jsonRpcUrl, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify(body),
-      });
-    } catch (err) {
-      const reason = err instanceof Error ? err.message : String(err);
-      throw new A2aOutboundError('fetch_failed', `POST ${jsonRpcUrl} failed: ${reason}`);
-    }
+    for (let attempt = 0; attempt < this.sendMaxAttempts; attempt++) {
+      // Per-request proof-of-possession over the token's jti (an unverified
+      // read of MY OWN token — I am only echoing its jti into the signed
+      // struct). Recomputed per attempt with a fresh timestamp: reusing a
+      // signature across a retry risks the server having already consumed it
+      // (single-use, plan §9) if a prior attempt's response was merely lost to
+      // the timeout rather than never processed. Strictly monotonic per jti —
+      // see `lastPopTimestampByJti`'s comment above.
+      const timestamp = this.nextPopTimestamp(jti);
+      const popStruct: A2aRequestPopStruct = {
+        context: A2A_REQUEST_POP_CONTEXT,
+        method: A2A_METHOD_MESSAGE_SEND,
+        jti,
+        timestamp,
+      };
+      const headers: Record<string, string> = {
+        'content-type': 'application/json',
+        authorization: `Bearer ${args.session.token}`,
+        'x-a2a-pop': signStruct(popStruct, args.myPrivateKeyPem),
+        'x-a2a-pop-timestamp': String(timestamp),
+        ...delegationHeaders,
+      };
 
-    let json: unknown;
-    try {
-      json = await response.json();
-    } catch {
-      throw new A2aOutboundError('invalid_response', 'peer returned a non-JSON JSON-RPC response');
-    }
-
-    if (isJsonRpcError(json)) {
-      return { ok: false, code: json.error.code, message: json.error.message };
-    }
-    if (!isJsonRpcResult(json)) {
-      throw new A2aOutboundError('invalid_response', 'malformed JSON-RPC response envelope');
-    }
-
-    const mode = args.mode ?? 'sync';
-    if (mode === 'async') {
-      if (!isAsyncSubmit(json.result)) {
-        throw new A2aOutboundError('invalid_response', 'malformed async submit result');
+      let response: Response;
+      try {
+        response = await this.fetchImpl(jsonRpcUrl, {
+          method: 'POST',
+          headers,
+          body: bodyText,
+          signal: AbortSignal.timeout(this.sendTimeoutMs),
+        });
+      } catch (err) {
+        const reason = err instanceof Error ? err.message : String(err);
+        const failure = new A2aOutboundError(
+          'fetch_failed',
+          `POST ${jsonRpcUrl} failed: ${reason}`,
+        );
+        if (attempt >= this.sendMaxAttempts - 1) throw failure;
+        const delayMs = computeA2aBackoffDelayMs(
+          attempt,
+          this.sendBackoffBaseMs,
+          this.sendBackoffCapMs,
+          this.randomFn,
+        );
+        await this.sleepFn(delayMs);
+        continue;
       }
-      return { ok: true, mode: 'async', taskId: json.result.taskId, status: json.result.status };
+
+      let json: unknown;
+      try {
+        json = await response.json();
+      } catch {
+        throw new A2aOutboundError(
+          'invalid_response',
+          'peer returned a non-JSON JSON-RPC response',
+        );
+      }
+
+      if (isJsonRpcError(json)) {
+        return { ok: false, code: json.error.code, message: json.error.message };
+      }
+      if (!isJsonRpcResult(json)) {
+        throw new A2aOutboundError('invalid_response', 'malformed JSON-RPC response envelope');
+      }
+
+      const mode = args.mode ?? 'sync';
+      if (mode === 'async') {
+        if (!isAsyncSubmit(json.result)) {
+          throw new A2aOutboundError('invalid_response', 'malformed async submit result');
+        }
+        return { ok: true, mode: 'async', taskId: json.result.taskId, status: json.result.status };
+      }
+      if (!isSyncTaskResult(json.result)) {
+        throw new A2aOutboundError('invalid_response', 'malformed sync task result');
+      }
+      const result = json.result;
+      return {
+        ok: true,
+        mode: 'sync',
+        taskId: result.taskId,
+        state: result.state,
+        text: result.text,
+        ...(typeof result.error === 'string' ? { error: result.error } : {}),
+      };
     }
-    if (!isSyncTaskResult(json.result)) {
-      throw new A2aOutboundError('invalid_response', 'malformed sync task result');
-    }
-    const result = json.result;
-    return {
-      ok: true,
-      mode: 'sync',
-      taskId: result.taskId,
-      state: result.state,
-      text: result.text,
-      ...(typeof result.error === 'string' ? { error: result.error } : {}),
-    };
+    // Unreachable: the loop always either returns, throws on the final
+    // attempt, or `continue`s after a non-final failure.
+    throw new A2aOutboundError('fetch_failed', `POST ${jsonRpcUrl} failed: retry budget exhausted`);
+  }
+
+  /**
+   * A PoP timestamp for `jti` strictly greater than the last one signed for
+   * it — see `lastPopTimestampByJti`'s field comment for why. Falls back to
+   * `this.now()` when that is already ahead of the last-used value.
+   */
+  private nextPopTimestamp(jti: string): number {
+    const candidate = this.now();
+    const last = this.lastPopTimestampByJti.get(jti);
+    const timestamp = last !== undefined && candidate <= last ? last + 1 : candidate;
+    this.lastPopTimestampByJti.set(jti, timestamp);
+    return timestamp;
   }
 
   /** POST JSON and return the parsed body. `rpc` requests stay HTTP 200; the
    *  handshake returns non-2xx on rejection, so `allowNonOk` gates it. */
-  private async postJson(url: string, body: unknown, allowNonOk: boolean): Promise<unknown> {
+  private async postJson(
+    url: string,
+    body: unknown,
+    allowNonOk: boolean,
+    timeoutMs: number,
+  ): Promise<unknown> {
     let response: Response;
     try {
       response = await this.fetchImpl(url, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify(body),
+        signal: AbortSignal.timeout(timeoutMs),
       });
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err);

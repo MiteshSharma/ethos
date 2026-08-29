@@ -4,7 +4,7 @@ description: Twenty-two issues surfaced by pre-launch and ongoing security revie
 kind: reference
 audience: shared
 slug: security-fixes
-updated: 2026-05-28
+updated: 2026-08-12
 ---
 
 Most agent frameworks ship the security model first and patch CVEs afterward. Ethos shipped the security model after a deliberate adversarial review — and continues to harden it with each audit pass.
@@ -133,8 +133,18 @@ The numbering below is the original review order, preserved for traceability wit
 **Fix.** Two parts, tracked separately. Misdirection defense (shipped): `realpath()` resolution before the prefix check. A symlink planted inside an allowed directory pointing at a disallowed target is rejected after resolution. TOCTOU race closure (planned): kernel-tied operations — `openat`-style directory handles plus `O_NOFOLLOW` semantics where the platform supports them — so the checked object and the opened object are tied by the kernel, not by timing. The split is acknowledged in the source comments.
 
 - **Status:** Partial — misdirection defense shipped; TOCTOU race closure planned.
-- Source: `extensions/tools-file/src/index.ts`
+- Source: `packages/core/src/scoped/scoped-fs.ts` (`checkReach`) — see the 2026-08-12 addendum below.
 - Tests: `extensions/tools-file/src/__tests__/boundary.test.ts`
+
+**Addendum — 2026-08-12. The misdirection defense was absent for a period, and the source path above has changed.**
+
+The fix as originally written above shipped as a `realpath()` call inside the file tools. A later refactor centralised path normalisation in the reach check at the boundary, which made the per-tool `realpath()` calls redundant *for lexical traversal* — `..`, `.`, and redundant-slash escapes are all handled by `normalize(resolve())` — and they were removed on that basis. What the removal silently dropped was the **symbolic** case, which normalisation cannot see: `resolve()` is a string operation and a symlink is a filesystem fact. The documentation was not updated, so the misdirection half of this entry, and the *Shipped* status it carried in the controls catalogue, described a defense the code no longer had. Nothing failed: no test, no validator, no reviewer prompt. The symlink cases in `boundary.test.ts` had been skipped with a note saying they belonged in the layer that never received the support.
+
+The defense is re-implemented as of this release, at the boundary rather than per-tool: `checkReach` normalises lexically and then walks **every path segment** with `lstat`, refusing any segment that is a symbolic link. Per-segment, because a symlinked parent escapes behind a non-symlink leaf. Because it lives at the chokepoint, every consumer — file tools, vision, web-api, gateway, and any future one — inherits it from one place, which is what the original per-tool implementation could not offer.
+
+The original entry above is preserved unedited. The split it describes is still correct: misdirection is closed, TOCTOU is not, and closing TOCTOU is a container-level remediation rather than a framework one.
+
+The structural lesson is why this addendum exists rather than a quiet rewrite: a published claim drifted from its enforcement point and nothing detected it, because no artefact tied claims to `file:line` locations and no check asserted the tie. That artefact now exists — see the [guarantee register](./security-boundary.md#register) — and the validator that fails CI when a row stops resolving is tracked as an open gap on the same page.
 
 ### 9. bash in toolset requires attested-strict backend at config-load time {#9-bash-requires-attested-backend}
 
@@ -311,3 +321,4 @@ If a real CVE lands after launch (and we expect some will — defense in depth d
 - [What is the threat model?](./threat-model.md) — what each fix is defending against.
 - [Security controls](./controls.md) — the catalogue of shipped controls, with source paths for verification.
 - [Responsible disclosure](./responsible-disclosure.md) — how to report a new issue.
+- [What does Ethos guarantee, and what is outside its security boundary?](./security-boundary.md) — the register that ties each published claim to its enforcement point.

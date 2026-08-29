@@ -164,6 +164,12 @@ export interface WiringConfig {
   // biome-ignore format: Phase 3 adds turn-end auto-compact + overflow-retry flags; Phase 4 adds smallWindow; Item 7 adds the ceiling + user tail.
   compaction?: { pressure?: number; target?: number; gateDelta?: number; autoCompact?: boolean; retryOnOverflow?: boolean; smallWindow?: 'auto' | 'on' | 'off'; maxContextTokens?: number; minTailUserMessages?: number };
   /**
+   * Call-capture personality binding (plan/phases/call-capture-extension.md
+   * decision 3) — see `EthosConfig.callCapture` in `@ethosagent/config` and
+   * `validateCallCaptureBinding` in this package.
+   */
+  callCapture?: { personalityId?: string };
+  /**
    * Phase 3 — silent memory-flush turn config (opt-in). `enabled` gates the
    * whole feature; the rest tune the soft threshold, timebox + token cap,
    * per-flush memory-delta cap, and the trivial-delta skip. Threaded into the
@@ -253,6 +259,20 @@ export interface WiringConfig {
     apiKey?: string;
     baseUrl?: string;
   };
+  /**
+   * Lane A Phase 2 (kanban-hooks-notify-parity) — auxiliary model for
+   * `kanban_decompose`'s goal-to-children fan-out. Same shape as
+   * auxiliaryVision/auxiliaryWeb: `provider`/`apiKey`/`baseUrl` default to the
+   * primary provider's values when unset. When absent, `kanban_decompose`
+   * still registers as a tool but returns a tool error at call time rather
+   * than being omitted from the toolset.
+   */
+  auxiliaryKanbanDecomposer?: {
+    model: string;
+    provider?: string;
+    apiKey?: string;
+    baseUrl?: string;
+  };
   /** tools-web — web_search backend preference. Auto-detect from env when unset. */
   webSearchBackend?: 'exa' | 'tavily' | 'brave';
   /** Global FALLBACK layer for per-personality tool config (`web_search` in
@@ -260,21 +280,24 @@ export interface WiringConfig {
    *  the gap for personalities that don't declare the tool. Keyed by
    *  personality ID (or `_default`). */
   toolSettings?: import('@ethosagent/config').ToolSettingsMap;
-  /** Voice STT provider. auxiliary.asr in config.yaml. */
-  auxiliaryAsr?: {
-    provider: string;
-    model?: string;
-    apiKey?: string;
-    baseUrl?: string;
-  };
-  /** Voice TTS provider. auxiliary.tts in config.yaml. */
-  auxiliaryTts?: {
-    provider: string;
-    model?: string;
-    apiKey?: string;
-    voice?: string;
-    baseUrl?: string;
-  };
+  /** DEFAULT voice STT provider. auxiliary.asr in config.yaml. `command` is the
+   *  shell template the local `command-stt` recipe provider runs, `timeout` its
+   *  budget in seconds. Named alternatives live in `voice.stt.providers.*`. */
+  auxiliaryAsr?: import('@ethosagent/types').SttProviderEntry;
+  /** DEFAULT voice TTS provider. auxiliary.tts in config.yaml. `command` is the
+   *  shell template the local `command-tts` recipe provider runs, `outputFormat`
+   *  the container it writes, `timeout` its budget in seconds, and
+   *  `maxTextLength` the per-call text cap it advertises as
+   *  `caps.maxInputChars`. Named alternatives live in `voice.tts.providers.*`. */
+  auxiliaryTts?: import('@ethosagent/types').TtsProviderEntry;
+  /**
+   * Real-time voice deployment config — `voice.*` in config.yaml, mapped
+   * straight through from `EthosConfig`. Read by `buildVoiceStack`: bots give
+   * the personality binding + lane keys, `livekit`/`trunk` gate concrete
+   * transport construction (absent → those transports are simply not built),
+   * and `trustedPlugins` arms the local-only egress gate.
+   */
+  voice?: import('@ethosagent/config').EthosConfig['voice'];
   /**
    * memory-experience pillar B — proactive capture. Default-off; when
    * `enabled`, the capture runner is wired on the `agent_done` seam. `model`
@@ -380,6 +403,23 @@ export interface CreateAgentLoopOptions {
   dataDir: string;
   /** Working directory tools see. Defaults to `process.cwd()`. */
   workingDir?: string;
+  /**
+   * Override for where personality built-ins load from — forwarded to
+   * `WiringContext.builtinPersonalitiesDir` (see `types.ts` for the full
+   * rationale). Needed only by bundled callers whose `import.meta.dirname`
+   * no longer resolves to the source tree post-bundling (e.g. the desktop
+   * app's electron-vite main bundle). Unset for every other caller.
+   */
+  builtinPersonalitiesDir?: string;
+  /**
+   * Override for the root directory containing call-capture's native
+   * binaries — forwarded to `WiringContext.callCaptureNativeDir` (see
+   * `types.ts` for the full rationale). Needed only by bundled callers
+   * whose `import.meta.dirname` no longer resolves to the source tree
+   * post-bundling (e.g. the desktop app's electron-vite main bundle). Unset
+   * for every other caller.
+   */
+  callCaptureNativeDir?: string;
   /** Surface label surfaced to tools/hooks as `AgentLoop.options.platform`.
    *  Pure metadata — no behavioral branches keyed on it. */
   profile?: WiringProfile;
@@ -431,6 +471,17 @@ export interface CreateAgentLoopOptions {
    */
   watcherManager?: import('@ethosagent/watchers').WatcherManager;
   /**
+   * Shared call history for the outbound `call` tool. When provided, a call the
+   * agent places opens a row the same way an inbound one does, so the
+   * Communications call list is the whole story rather than the inbound half of
+   * it. Pass the SAME instance the surface's inbound dispatch writes to — a
+   * second `SQLiteCallLog` on the same file is a second connection for no gain.
+   *
+   * Absent (chat, one-shot CLI, tests) and `call` dials exactly as before,
+   * writing nothing: the log is a seam, never a precondition for dialling.
+   */
+  callLog?: import('@ethosagent/call-log').CallLog;
+  /**
    * App-layer slash command registry. When provided, plugins that call
    * `registerSlashCommand` during loading land their commands here so the
    * CLI's autocomplete and /help can surface them. Omit for surfaces with
@@ -470,6 +521,17 @@ export interface CreateAgentLoopOptions {
    * context`); chat and gateway startup leave it unset and ride the cache.
    */
   probeWindowRefresh?: boolean;
+  /**
+   * Native LiveKit MEDIA binding, forwarded to `buildVoiceStack`.
+   *
+   * `@livekit/rtc-node` ships a per-arch native binary and is deliberately NOT
+   * a repo dependency (see `extensions/platform-voice/src/livekit/room-client.ts`),
+   * so the app layer loads it optionally and passes the binding down. Absent —
+   * which is every deployment that does not do telephony, and every test — the
+   * voice stack builds exactly as it did before and the LiveKit/SIP media
+   * transports report themselves unavailable.
+   */
+  livekit?: import('./voice-stack').LiveKitBindings;
 }
 
 // ---------------------------------------------------------------------------
@@ -952,6 +1014,12 @@ export interface CreateAgentLoopResult {
   /** The McpManager instance from tool composition. Pass to createWebApi so
    *  re-auth via the web UI hits the live manager and updates the tool registry. */
   mcpManager: McpManager;
+  /** The SkillsInjector from tool composition — the single eligibility decision
+   *  ("which skills does personality P see"). Pass to createWebApi so read-only
+   *  surfaces derive from THIS instance rather than building a second injector
+   *  with its own scanner + mtime cache. Note it closes over the LOOP's
+   *  personality registry, not the web-api's; refresh via `refreshPersonalities`. */
+  skillsInjector: import('@ethosagent/skills').SkillsInjector;
   /** Replace the messaging tool's send implementation with the real gateway.
    *  Called from gateway.ts after Gateway construction. Scoped to this loop
    *  instance — multiple loops in the same process are independent. */
@@ -971,6 +1039,38 @@ export interface CreateAgentLoopResult {
   onMemoryCaptured?: (
     cb: (n: { sessionId: string; scopeId: string; summary: string }) => void,
   ) => () => void;
+  /**
+   * Directly and deterministically runs the call-capture pipeline for the
+   * given personality — no LLM turn, no tool registry involved. Present only
+   * when call capture is enabled (`isCallCaptureToolsEnabled`). Bound in
+   * `build-agent-loop.ts`, closing over the constructed TapCapture/MicCapture/
+   * STT/memory dependencies. `apps/ethos/src/commands/serve.ts` wires this
+   * directly into `CallCaptureDaemon`'s `runCapture` option.
+   */
+  runCallCapture?: (
+    personalityId: string,
+    opts: {
+      source?: string;
+      abortSignal: AbortSignal;
+      /**
+       * Live per-entry callback (plan/phases/call-capture-desktop-ux.md,
+       * P3) — forwarded straight through to `RunCallCaptureInput.onEntry`.
+       * Absent for every caller except the desktop app's pill popover.
+       */
+      onEntry?: (entry: import('@ethosagent/platform-callcapture').TranscriptEntry) => void;
+      /**
+       * Live per-chunk audio-level callback (much higher frequency than
+       * `onEntry`) — forwarded straight through to
+       * `RunCallCaptureInput.onAudioLevel`. Absent for every caller except
+       * the level-meter UI consuming it via `CallCaptureIndicatorPort`.
+       */
+      onAudioLevel?: (
+        speaker: import('@ethosagent/platform-callcapture').Speaker,
+        level: number,
+        at: number,
+      ) => void;
+    },
+  ) => Promise<import('@ethosagent/tools-callcapture').CallCaptureResult>;
   /** v2.2 — Notification router for registering per-session adapters.
    *  CLI/TUI/web-api register a NotificationAdapter on this router so plugin
    *  monitors can deliver messages to the active surface. */
@@ -986,6 +1086,10 @@ export interface CreateAgentLoopResult {
   /** Detached background executor — present only when enabled. gateway.ts/chat.ts
    *  register completion handlers and call shutdown() on it. */
   backgroundExecutor?: import('@ethosagent/job-runner').BackgroundExecutor;
+  /** Resolved job runners — present only when the background subsystem is enabled.
+   *  The web-api Tasks detail RPC asks the runner that executed a row for its own
+   *  detail-grid rows (pi-delegation D18). */
+  jobRunners?: import('@ethosagent/types').JobRunnerRegistry;
   /** Mesh proxy reconciler — present only when the background subsystem is enabled.
    *  Polls mesh peers for jobs spawned via route_to_agent(background:true). Timers
    *  are unref'd; expose stop() for shutdown symmetry. */
@@ -1002,13 +1106,63 @@ export interface CreateAgentLoopResult {
   sttProviders: import('@ethosagent/types').SttProviderRegistry;
   /** TTS provider registry — threaded to Gateway for voice synthesis. */
   ttsProviders: import('@ethosagent/types').TtsProviderRegistry;
+  /**
+   * Realtime (speech-to-speech) provider registry — threaded to web-api so the
+   * browser talk lane can mint an ephemeral token on the realtime tier.
+   */
+  realtimeProviders: import('@ethosagent/types').RealtimeVoiceProviderRegistry;
+  /**
+   * Real-time voice stack built from `config.voice.*`. Absent when no voice
+   * block is configured — the clean no-op every non-voice deployment takes.
+   */
+  voiceStack?: import('./voice-stack').VoiceStack;
   /** Voice provider config from auxiliary.asr / auxiliary.tts in config. */
   voiceConfig: {
     sttProviderName?: string;
     sttProviderConfig: Record<string, unknown>;
     ttsProviderName?: string;
     ttsProviderConfig: Record<string, unknown>;
+    /**
+     * Named TTS roster from `voice.tts.providers.*`, keyed by the operator's
+     * label. A personality's `voice.tts_provider` names one of these; anything
+     * else (and anything unknown) falls back to the `auxiliary.tts` default.
+     */
+    ttsRoster?: Record<string, import('@ethosagent/types').TtsProviderEntry>;
+    /**
+     * Named STT roster from `voice.stt.providers.*`. The exact mirror:
+     * `voice.stt_provider` names one, anything unknown falls back to the
+     * `auxiliary.asr` default.
+     */
+    sttRoster?: Record<string, import('@ethosagent/types').SttProviderEntry>;
+    /**
+     * Named REALTIME roster from `voice.realtime.providers.*`. Unlike the other
+     * two this roster has no `auxiliary.*` default underneath it:
+     * `realtimeDefault` NAMES one of these entries, and a deployment with
+     * neither simply has no realtime tier.
+     */
+    realtimeRoster?: Record<string, import('@ethosagent/types').RealtimeProviderEntry>;
+    /** `voice.realtime.default` — the roster key a personality that names none gets. */
+    realtimeDefault?: string;
+    /** `voice.tier` — the deployment's default voice engine. */
+    tier?: 'pipeline' | 'realtime';
+    /**
+     * `voice.realtime.sessionBudgetUsd` — USD cap on ONE realtime call.
+     *
+     * Forwarded for the same reason `tier` is. Without it the only route from
+     * the parsed config to the surface that enforces the cap was web-api's
+     * OPTIONAL live-config read, so a surface built without that read was
+     * silently uncapped — and a cap that silently does not apply is worse than
+     * no cap, because the deployment believes it has one.
+     */
+    realtimeSessionBudgetUsd?: number;
     secretsResolver: import('@ethosagent/types').SecretsResolver;
+    /**
+     * Local-only voice-egress allowlist from `voice.trustedPlugins`. Present
+     * only when the operator declared the key; surfaces pass it straight
+     * through so a non-local provider selection is refused with a typed error
+     * instead of quietly shipping audio off the machine.
+     */
+    trustedVoicePlugins?: ReadonlySet<string>;
   };
 }
 
@@ -1249,6 +1403,7 @@ export {
   createLazyProvider,
 } from './approval-seams';
 export {
+  APPROVAL_SURFACE_ALWAYS_ASK,
   type CreateDangerPredicateOptions,
   canonicalizeArgs,
   createDangerPredicate,
@@ -1270,6 +1425,36 @@ export {
   probeProvider,
 } from './probe-provider';
 export { type CreateSmartApproverOptions, createSmartApprover } from './smart-approver';
+export {
+  farEndRefusalReason,
+  SPOKEN_CONFIRMATION_TOOLS,
+  type SpokenConfirmationOptions,
+  type SpokenConfirmationRecord,
+  spokenConfirmationReason,
+  withSpokenConfirmation,
+} from './spoken-confirmation';
+
+// ---------------------------------------------------------------------------
+// Real-time voice stack (config.voice.* → VoiceSession / transports)
+// ---------------------------------------------------------------------------
+
+export {
+  createFarEndConsultTool,
+  FAR_END_VOICE_ORIGIN,
+  type FarEndConsultOptions,
+} from './far-end-consult';
+export { createBuiltinVoiceRegistries } from './voice-registries';
+export {
+  type BuildVoiceStackDeps,
+  buildVoiceStack,
+  type CreateVoiceAdapterOptions,
+  type CreateVoiceSessionOptions,
+  createObservabilitySpanSink,
+  type LiveKitBindings,
+  resolveSipTrunkClient,
+  type VoiceInboundGates,
+  type VoiceStack,
+} from './voice-stack';
 
 // ---------------------------------------------------------------------------
 // Ethos observability adapter
@@ -1312,3 +1497,14 @@ export {
 // ---------------------------------------------------------------------------
 
 export { createOAuthService } from './oauth-factory';
+
+// ---------------------------------------------------------------------------
+// Security kernel — passthrough for apps (ARCHITECTURE.md §II, §III Law 5)
+//
+// The list lives in ./security-kernel so a lazily-loaded CLI command can import
+// it WITHOUT the composition root's import graph (a barrel import costs ~7s and
+// loads every extension). Re-exported here so surfaces already on the barrel —
+// gateway, serve — keep one import.
+// ---------------------------------------------------------------------------
+
+export * from './security-kernel';

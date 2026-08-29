@@ -5,7 +5,7 @@
 // change client behavior.
 
 import { join } from 'node:path';
-import { InMemoryStorage } from '@ethosagent/storage-fs';
+import { InMemorySecretsResolver, InMemoryStorage } from '@ethosagent/storage-fs';
 import { describe, expect, it } from 'vitest';
 import { ethosDir, readRawConfig, writeConfig } from '../index';
 
@@ -51,14 +51,18 @@ describe('requestTimeoutMs / maxRetries config keys (Lane 4a(d))', () => {
 
   it('round-trips through writeConfig', async () => {
     const storage = new InMemoryStorage();
-    await writeConfig(storage, {
-      provider: 'ollama',
-      model: 'llama3.2',
-      apiKey: 'sk',
-      personality: 'p',
-      requestTimeoutMs: 90_000,
-      maxRetries: 4,
-    });
+    await writeConfig(
+      storage,
+      {
+        provider: 'ollama',
+        model: 'llama3.2',
+        apiKey: 'sk',
+        personality: 'p',
+        requestTimeoutMs: 90_000,
+        maxRetries: 4,
+      },
+      new InMemorySecretsResolver(),
+    );
     const cfg = await readRawConfig(storage);
     expect(cfg?.requestTimeoutMs).toBe(90_000);
     expect(cfg?.maxRetries).toBe(4);
@@ -66,12 +70,16 @@ describe('requestTimeoutMs / maxRetries config keys (Lane 4a(d))', () => {
 
   it('writeConfig omits both keys when unset', async () => {
     const storage = new InMemoryStorage();
-    await writeConfig(storage, {
-      provider: 'ollama',
-      model: 'llama3.2',
-      apiKey: 'sk',
-      personality: 'p',
-    });
+    await writeConfig(
+      storage,
+      {
+        provider: 'ollama',
+        model: 'llama3.2',
+        apiKey: 'sk',
+        personality: 'p',
+      },
+      new InMemorySecretsResolver(),
+    );
     const raw = await storage.read(join(ethosDir(), 'config.yaml'));
     expect(raw).not.toContain('requestTimeoutMs:');
     expect(raw).not.toContain('maxRetries:');

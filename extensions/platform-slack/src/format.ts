@@ -16,8 +16,25 @@ You are replying inside a Slack workspace. Follow these rules:
 - Maximum reply length: 3000 characters. If more is needed, summarise with an offer to
   continue.`;
 
+/**
+ * Render model output as Slack mrkdwn.
+ *
+ * CHS-004 — escaping runs FIRST, on the raw text, and syntax is generated
+ * after. The previous order (convert, then patch up stray delimiters with a
+ * lookbehind) never escaped `<` at all, so a model that emitted `<!channel>`
+ * broadcast-pinged the whole workspace, and `<@U123>` pinged a member. Slack
+ * treats those as control sequences wherever they appear in message text; the
+ * only reliable defence is to escape the angle brackets the model wrote and
+ * emit only the delimiters we generate ourselves.
+ *
+ * Escaping first also fixes the legitimate-link breakage the old lookbehind
+ * caused, because the link rule now runs against text with no ambient `<`/`>`
+ * to trip over.
+ */
 export function toNativeMarkdown(text: string): string {
-  let out = text;
+  // Slack's documented escape set. Order matters: `&` first, or the entities
+  // written by the next two rules get double-escaped.
+  let out = text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
   // Headers → bold (Slack has no native headers)
   out = out.replace(/^#{1,6}\s+(.+)$/gm, '*$1*');
@@ -27,13 +44,9 @@ export function toNativeMarkdown(text: string): string {
 
   // Italic: _text_ stays as _text_ (Slack uses underscore for italic)
 
-  // Links: [text](url) → <url|text>
+  // Links: [text](url) → <url|text>. Generated last so these delimiters are
+  // the only unescaped `<`/`>` in the output.
   out = out.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<$2|$1>');
-
-  // Escape bare &, <, > that are not part of link syntax
-  // Process in reverse order to avoid double-escaping
-  out = out.replace(/&(?!amp;|lt;|gt;)/g, '&amp;');
-  out = out.replace(/(?<!<[^|>]*?)>(?![^<]*?\|)/g, '&gt;');
 
   return out;
 }

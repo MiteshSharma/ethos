@@ -1,8 +1,10 @@
 import type {
   AgentSafety,
+  ContentStore,
   ContextEngineLLMHandle,
   ContextEngineRegistry,
   ContextInjector,
+  ContextLog,
   HookRegistry,
   LLMProvider,
   McpPolicy,
@@ -136,6 +138,11 @@ export interface LoopDeps {
   sessionReadMtimes: Map<string, Map<string, { mtimeMs: number; readAtTurn: number }>>;
   contextStore: ContextStore;
   documentExtractors?: import('@ethosagent/types').DocumentExtractorRegistry;
+  /** Model-visible ⟺ logged (plan/phases/model-visible-logged.md, Phase B).
+   *  Both optional and always used together — absent either one, the
+   *  emit-on-change write path in context-assembly.ts is a no-op. */
+  contentStore?: ContentStore;
+  contextLog?: ContextLog;
 }
 
 // ---------------------------------------------------------------------------
@@ -146,6 +153,25 @@ export interface TurnSetup {
   sessionId: string;
   sessionKey: string;
   personality: PersonalityConfig;
+  /**
+   * The turn's working directory — the personality's declared `fs_reach.workdir`
+   * (substituted, absolute), or `LoopDeps.workingDir` when undeclared. Derived
+   * PER TURN because the personality resolves per turn while `LoopDeps` is
+   * fixed at loop construction: two personalities on one loop must each get
+   * their own workdir. Every consumer inside the turn — tool contexts, the
+   * memory context, the prompt context — reads THIS value, so the tools and the
+   * injectors can never disagree about where the agent is standing.
+   */
+  workingDir: string;
+  /**
+   * The read/write allowlist from the SAME `deriveFsReachPaths` call that
+   * produced {@link TurnSetup.workingDir}. Threaded rather than re-derived: the
+   * derivation is not idempotent (a declared workdir of `${CWD}/out` would
+   * compound if the resolved workdir were fed back in as `cwd`), and one
+   * derivation is the only way the app-layer prefixes and the workdir can be
+   * guaranteed to describe the same filesystem.
+   */
+  fsReach: { read: string[]; write: string[] };
   obsConfig: PersonalityObservabilityConfig | undefined;
   traceId: string | undefined;
   turnNumber: number;
@@ -170,7 +196,6 @@ export interface AssembledContext {
   llmMessages: import('@ethosagent/types').Message[];
   cacheBreakpoints: number[] | undefined;
   activeSkillFiles: string[] | undefined;
-  injectionDefenseEnabled: boolean;
   baseMessageCount: number;
   userScopeId: string | undefined;
   /** Phase 3 — a pressure-gated compaction fired during THIS turn's assembly.

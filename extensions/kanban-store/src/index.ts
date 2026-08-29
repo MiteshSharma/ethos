@@ -27,6 +27,16 @@ export type TaskStatus =
 
 export type WorkspaceMode = 'scratch' | 'worktree' | 'dir';
 
+/**
+ * Why a task was blocked, distinct from the free-text `reason`. Used by the
+ * unblock-loop breaker (see `blockRun`) to detect consecutive blocks for the
+ * *same underlying reason* even when the free-text wording differs run to run.
+ */
+export type BlockKind = 'dependency' | 'needs_input' | 'capability' | 'transient';
+
+/** Default for `KanbanStoreOptions.blockRecurrenceLimit`. See `blockRun`. */
+export const DEFAULT_BLOCK_RECURRENCE_LIMIT = 2;
+
 export type RunOutcome = 'completed' | 'blocked' | 'stalled' | 'cancelled';
 
 export type EventKind =
@@ -59,6 +69,12 @@ export interface Task {
   retryCount: number;
   /** Optional acceptance criteria a `before_ticket_complete` verifier checks. `null` = none set. */
   acceptanceCriteria: string | null;
+  /** `kind` of the most recent block, or `null` if the task has never been blocked
+   *  (or was blocked without a `kind`) since its last successful completion. */
+  blockKind: BlockKind | null;
+  /** Consecutive blocks landed with the *same* `blockKind` in a row, with no
+   *  successful completion in between. Reset to 0 on `completeRun`. See `blockRun`. */
+  blockRecurrenceCount: number;
   createdAt: number;
   updatedAt: number;
 }
@@ -120,6 +136,35 @@ export interface ListTasksFilter {
   limit?: number;
 }
 
+/** One worker slot in `createSwarm`'s input — a personality plus its work prompt. */
+export interface SwarmWorkerInput {
+  personality: string;
+  prompt: string;
+}
+
+/**
+ * Input to `createSwarm` (Lane A Phase 5) — the atomic root/blackboard + N
+ * workers + optional verifier + optional synthesizer DAG. See `createSwarm`
+ * for how each optional tier collapses when omitted.
+ */
+export interface CreateSwarmInput {
+  /** Shared context for the swarm. Becomes the root/blackboard task's body. */
+  goal: string;
+  workers: SwarmWorkerInput[];
+  /** Omit to skip the verifier tier entirely. */
+  verifierPersonality?: string;
+  /** Omit to skip the synthesizer tier entirely. */
+  synthesizerPersonality?: string;
+}
+
+/** Ids of every task `createSwarm` created. */
+export interface SwarmResult {
+  rootId: string;
+  workerIds: string[];
+  verifierId: string | null;
+  synthesizerId: string | null;
+}
+
 /**
  * Per-member work outcome counters for one team board. Maintained by the store
  * itself: each terminal task transition (`done`, `failed`/`needs_revision`,
@@ -147,6 +192,14 @@ export interface KanbanStoreOptions {
    * personality boards — stats are skipped entirely.
    */
   teamId?: string;
+  /**
+   * How many consecutive `blockRun` calls with the same `kind` a task tolerates
+   * before the unblock-loop breaker routes it to `needs_revision` instead of
+   * `blocked`. Defaults to `DEFAULT_BLOCK_RECURRENCE_LIMIT` (2). Exposed as a
+   * constructor option (mirroring `dispatcher.ts`'s `pollMs`) so tests and
+   * unusual deployments can tune it without a global constant.
+   */
+  blockRecurrenceLimit?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -172,7 +225,9 @@ const SCHEMA = `
     retry_count     INTEGER NOT NULL DEFAULT 0 CHECK (retry_count >= 0),
     acceptance_criteria TEXT,
     created_at      INTEGER NOT NULL,
-    updated_at      INTEGER NOT NULL
+    updated_at      INTEGER NOT NULL,
+    block_kind      TEXT CHECK (block_kind IS NULL OR block_kind IN ('dependency','needs_input','capability','transient')),
+    block_recurrence_count INTEGER NOT NULL DEFAULT 0 CHECK (block_recurrence_count >= 0)
   ) STRICT;
 
   CREATE UNIQUE INDEX IF NOT EXISTS tasks_idem ON tasks(idempotency_key)
@@ -296,9 +351,11 @@ export class KanbanStore {
    * `null`, terminal transitions skip the `team_member_stats` update entirely.
    */
   private readonly teamId: string | null;
+  private readonly blockRecurrenceLimit: number;
 
   constructor(dbPath: string, opts: KanbanStoreOptions = {}) {
     this.teamId = opts.teamId ?? null;
+    this.blockRecurrenceLimit = opts.blockRecurrenceLimit ?? DEFAULT_BLOCK_RECURRENCE_LIMIT;
     // mkdir -p the parent directory. Same raw-fs exception that session-sqlite uses
     // for path setup (the `Storage` abstraction is for ~/.ethos/ data IO, not for
     // bootstrapping the SQLite file's enclosing directory). `:memory:` has no
@@ -312,9 +369,9 @@ export class KanbanStore {
     // Version check FIRST — refuse to touch a DB whose schema is newer than this code.
     const versionRows = this.db.pragma('user_version') as Array<{ user_version: number }>;
     const currentVersion = versionRows[0]?.user_version ?? 0;
-    if (currentVersion > 5) {
+    if (currentVersion > 6) {
       throw new Error(
-        `kanban-store: database user_version=${currentVersion} is newer than code (5); refusing to open to avoid downgrade`,
+        `kanban-store: database user_version=${currentVersion} is newer than code (6); refusing to open to avoid downgrade`,
       );
     }
     // SCHEMA describes the current (v4) shape. A fresh DB (user_version=0) gets it
@@ -324,7 +381,7 @@ export class KanbanStore {
     // `exec(SCHEMA)` above on every version, so v3 needs only the version bump.
     this.db.exec(SCHEMA);
     if (currentVersion === 0) {
-      this.db.pragma('user_version = 5');
+      this.db.pragma('user_version = 6');
     } else {
       // Stepwise migration chain: a v1 DB runs v1->v2->v2->v3 then the v3->v4
       // bump; a v2 DB runs v2->v3 then the bump; a v3 DB just bumps. The v1ToV2
@@ -342,6 +399,9 @@ export class KanbanStore {
       }
       if (currentVersion <= 4) {
         this.migrateV4ToV5();
+      }
+      if (currentVersion <= 5) {
+        this.migrateV5ToV6();
       }
     }
   }
@@ -547,6 +607,108 @@ export class KanbanStore {
       // them via CREATE TABLE IF NOT EXISTS. Ignore duplicate-column errors.
     }
     this.db.pragma('user_version = 5');
+  }
+
+  /**
+   * Bring a v5 board forward to v6: add `block_kind` / `block_recurrence_count`
+   * to `tasks` for the unblock-loop breaker (see `blockRun`).
+   *
+   * Unlike `migrateV4ToV5` (plain `ALTER TABLE ADD COLUMN` on `task_runs`), this
+   * uses the full table-rebuild dance from `migrateV1ToV2`/`migrateV2ToV3` even
+   * though no CHECK constraint needs widening (`tasks.status` already allows
+   * `needs_revision` since v3). Reason: `updated_at` is `tasks`' last column with
+   * no trailing table-level constraint after it, so a plain ADD COLUMN would be
+   * appended past the position SQLite's DDL-text reconstruction expects — it
+   * reuses the original trailing whitespace before the old closing paren as a
+   * separator, producing a schema string that's syntactically fine but NOT
+   * byte-identical (post-whitespace-normalization) to a fresh `CREATE TABLE`
+   * with the same final columns — which is exactly what the
+   * "fully-migrated DB is structurally identical to a fresh DB" convergence
+   * test (and the invariant it's guarding) checks. The rebuild sidesteps that
+   * entirely: `tasks_new` is created with the literal final shape, so its
+   * stored SQL always matches SCHEMA's.
+   */
+  private migrateV5ToV6(): void {
+    this.db.pragma('foreign_keys = OFF');
+    try {
+      const rebuild = this.db.transaction(() => {
+        this.db.exec(`
+          DROP TRIGGER IF EXISTS tasks_fts_ai;
+          DROP TRIGGER IF EXISTS tasks_fts_au;
+          DROP TRIGGER IF EXISTS tasks_fts_ad;
+          DROP INDEX IF EXISTS tasks_idem;
+          DROP INDEX IF EXISTS tasks_status_assignee;
+          DROP INDEX IF EXISTS tasks_scheduled;
+
+          CREATE TABLE tasks_new (
+            id              TEXT PRIMARY KEY,
+            title           TEXT NOT NULL,
+            body            TEXT NOT NULL DEFAULT '',
+            assignee        TEXT,
+            status          TEXT NOT NULL
+                            CHECK (status IN ('todo','ready','running','blocked','done','archived','scheduled','failed','needs_revision')),
+            priority        INTEGER NOT NULL DEFAULT 0,
+            workspace_mode  TEXT NOT NULL DEFAULT 'scratch'
+                            CHECK (workspace_mode IN ('scratch','worktree','dir')),
+            workspace_path  TEXT,
+            scheduled_for   INTEGER,
+            idempotency_key TEXT,
+            current_run_id  TEXT,
+            max_retries     INTEGER CHECK (max_retries IS NULL OR max_retries >= 0),
+            retry_count     INTEGER NOT NULL DEFAULT 0 CHECK (retry_count >= 0),
+            acceptance_criteria TEXT,
+            created_at      INTEGER NOT NULL,
+            updated_at      INTEGER NOT NULL,
+            block_kind      TEXT CHECK (block_kind IS NULL OR block_kind IN ('dependency','needs_input','capability','transient')),
+            block_recurrence_count INTEGER NOT NULL DEFAULT 0 CHECK (block_recurrence_count >= 0)
+          ) STRICT;
+
+          INSERT INTO tasks_new
+            (id, title, body, assignee, status, priority, workspace_mode, workspace_path,
+             scheduled_for, idempotency_key, current_run_id, max_retries, retry_count,
+             acceptance_criteria, created_at, updated_at)
+            SELECT id, title, body, assignee, status, priority, workspace_mode,
+                   workspace_path, scheduled_for, idempotency_key, current_run_id,
+                   max_retries, retry_count, acceptance_criteria, created_at, updated_at
+            FROM tasks;
+
+          DROP TABLE tasks;
+          ALTER TABLE tasks_new RENAME TO tasks;
+
+          CREATE UNIQUE INDEX tasks_idem ON tasks(idempotency_key)
+            WHERE idempotency_key IS NOT NULL;
+          CREATE INDEX tasks_status_assignee ON tasks(status, assignee);
+          CREATE INDEX tasks_scheduled ON tasks(scheduled_for)
+            WHERE scheduled_for IS NOT NULL;
+
+          CREATE TRIGGER tasks_fts_ai AFTER INSERT ON tasks BEGIN
+            INSERT INTO task_fts(task_id, title, body, comments)
+            VALUES (new.id, new.title, new.body, '');
+          END;
+
+          CREATE TRIGGER tasks_fts_au AFTER UPDATE OF title, body ON tasks BEGIN
+            UPDATE task_fts SET title = new.title, body = new.body
+            WHERE task_id = new.id;
+          END;
+
+          CREATE TRIGGER tasks_fts_ad AFTER DELETE ON tasks BEGIN
+            DELETE FROM task_fts WHERE task_id = old.id;
+          END;
+        `);
+        const violations = this.db.pragma('foreign_key_check') as unknown[];
+        if (violations.length > 0) {
+          throw new Error(
+            `kanban-store: v5→v6 migration left ${violations.length} foreign-key violation(s)`,
+          );
+        }
+        // Bump inside the transaction so version and schema move together: a
+        // rollback leaves a clean v5 DB, never a v5-versioned DB with v6 columns.
+        this.db.pragma('user_version = 6');
+      });
+      rebuild();
+    } finally {
+      this.db.pragma('foreign_keys = ON');
+    }
   }
 
   createTask(input: CreateTaskInput): Task {
@@ -799,10 +961,25 @@ export class KanbanStore {
     return this.endRun(taskId, 'done', 'completed', summary, actor, { completedBy });
   }
 
-  blockRun(taskId: string, reason: string, actor = 'system'): Task {
+  /**
+   * End the open run as blocked. `kind` (optional) categorizes *why*, distinct from
+   * the free-text `reason` — it's what the unblock-loop breaker compares run to run.
+   *
+   * Breaker semantics: if this block's `kind` matches the task's previous `blockKind`
+   * (both must be set — an unspecified `kind` never counts as a repeat), the
+   * consecutive-same-kind counter increments; otherwise it resets to 1 (or 0 if no
+   * `kind` was given at all, since an unlabelled block carries no recurrence signal).
+   * Once the counter reaches `blockRecurrenceLimit`, this call lands the task on
+   * `needs_revision` (per plan D1) instead of `blocked` — same atomic transition,
+   * so the check can never race a concurrent re-claim. The counter (and `blockKind`)
+   * resets to 0/null on the next `completeRun`, matching "no successful completion
+   * in between" from the plan; it is untouched by `kanban_unblock` (a plain
+   * `updateStatus`, not `endRun`), so an unblock-then-reblock streak still counts.
+   */
+  blockRun(taskId: string, reason: string, actor = 'system', kind?: BlockKind): Task {
     // The reason is captured both on the run (summary column) and as a comment so
     // it shows up in the human-readable thread. Atomic with the block transition.
-    return this.endRun(taskId, 'blocked', 'blocked', reason, actor, { comment: reason });
+    return this.endRun(taskId, 'blocked', 'blocked', reason, actor, { comment: reason, kind });
   }
 
   private endRun(
@@ -811,16 +988,28 @@ export class KanbanStore {
     outcome: RunOutcome,
     summary: string | null,
     actor: string,
-    opts: { comment?: string; completedBy?: { id: string; name: string } } = {},
+    opts: {
+      comment?: string;
+      completedBy?: { id: string; name: string };
+      kind?: BlockKind;
+    } = {},
   ): Task {
     const now = Date.now();
     // The whole "claim the run and end it" sequence runs inside one transaction so that
     // a concurrent writer can't end the same run between our read and our write.
     const tx = this.db.transaction((): Task => {
       const row = this.db
-        .prepare('SELECT status, assignee, current_run_id FROM tasks WHERE id = ?')
+        .prepare(
+          'SELECT status, assignee, current_run_id, block_kind, block_recurrence_count FROM tasks WHERE id = ?',
+        )
         .get(taskId) as
-        | { status: TaskStatus; assignee: string | null; current_run_id: string | null }
+        | {
+            status: TaskStatus;
+            assignee: string | null;
+            current_run_id: string | null;
+            block_kind: BlockKind | null;
+            block_recurrence_count: number;
+          }
         | undefined;
       if (!row) throw new Error(`endRun: task ${taskId} not found`);
       if (row.current_run_id === null) {
@@ -842,14 +1031,46 @@ export class KanbanStore {
       if (result.changes !== 1) {
         throw new Error(`no open run: race ended run ${row.current_run_id} concurrently`);
       }
+
+      // The unblock-loop breaker: only the blocked path tracks/consults it, and
+      // only `done` clears it (see the doc comment on `blockRun`).
+      let effectiveStatus = newStatus;
+      let nextBlockKind = row.block_kind;
+      let nextBlockRecurrenceCount = row.block_recurrence_count;
+      let breached = false;
+      if (newStatus === 'blocked') {
+        nextBlockKind = opts.kind ?? null;
+        nextBlockRecurrenceCount =
+          opts.kind !== undefined && opts.kind === row.block_kind
+            ? row.block_recurrence_count + 1
+            : opts.kind !== undefined
+              ? 1
+              : 0;
+        if (nextBlockRecurrenceCount >= this.blockRecurrenceLimit) {
+          effectiveStatus = 'needs_revision';
+          breached = true;
+        }
+      } else if (newStatus === 'done') {
+        nextBlockKind = null;
+        nextBlockRecurrenceCount = 0;
+      }
+
       this.db
-        .prepare('UPDATE tasks SET status = ?, current_run_id = NULL, updated_at = ? WHERE id = ?')
-        .run(newStatus, now, taskId);
+        .prepare(
+          `UPDATE tasks
+           SET status = ?, current_run_id = NULL, block_kind = ?, block_recurrence_count = ?, updated_at = ?
+           WHERE id = ?`,
+        )
+        .run(effectiveStatus, nextBlockKind, nextBlockRecurrenceCount, now, taskId);
       // Terminal transition: a `done` landing credits the assignee's completed
-      // counter. `blocked` is not terminal for stats — the task can be reclaimed
-      // and retried — so only `done` bumps here.
-      if (newStatus === 'done') {
+      // counter; a breaker-forced `needs_revision` counts the same as any other
+      // failed-transition (mirrors `updateStatus`'s retry-budget-exhaustion path).
+      // `blocked` on its own is not terminal for stats — the task can be reclaimed
+      // and retried — so only these two bump here.
+      if (effectiveStatus === 'done') {
         this.bumpMemberStat(row.assignee, 'tickets_completed');
+      } else if (effectiveStatus === 'needs_revision') {
+        this.bumpMemberStat(row.assignee, 'tickets_failed');
       }
       if (opts.comment !== undefined) {
         const commentId = newCommentId();
@@ -865,8 +1086,12 @@ export class KanbanStore {
         summary,
         completedBy: opts.completedBy ?? null,
       });
-      if (row.status !== newStatus) {
-        this.emit(taskId, 'status_changed', actor, { from: row.status, to: newStatus });
+      if (row.status !== effectiveStatus) {
+        this.emit(taskId, 'status_changed', actor, {
+          from: row.status,
+          to: effectiveStatus,
+          ...(breached ? { reason: 'block_recurrence_limit' } : {}),
+        });
       }
       return this.getTask(taskId) as Task;
     });
@@ -951,6 +1176,104 @@ export class KanbanStore {
       const updated = this.updateStatus(taskId, 'archived', undefined, actor);
       this.emit(taskId, 'archived', actor, {});
       return updated;
+    });
+    return tx();
+  }
+
+  // One outer transaction wrapping N per-task updateStatus calls: any invalid
+  // id anywhere in taskIds throws and rolls back the whole batch, not just
+  // the tasks up to that point (same nested-transaction idiom as archive()).
+  bulkUpdateStatus(taskIds: string[], status: TaskStatus, actor = 'system'): Task[] {
+    const tx = this.db.transaction((): Task[] => {
+      return taskIds.map((id) => this.updateStatus(id, status, undefined, actor));
+    });
+    return tx();
+  }
+
+  // Same all-or-nothing shape as bulkUpdateStatus, composed over assign().
+  bulkAssign(taskIds: string[], assignee: string | null, actor = 'system'): Task[] {
+    const tx = this.db.transaction((): Task[] => {
+      return taskIds.map((id) => this.assign(id, assignee, actor));
+    });
+    return tx();
+  }
+
+  /**
+   * Atomically create a root/blackboard task + N worker tasks + an optional
+   * verifier task + an optional synthesizer task (Lane A Phase 5's swarm-graph
+   * primitive). One outer transaction wraps every `createTask`/`updateStatus`
+   * call below — same nested-transaction idiom as `bulkUpdateStatus`/`archive`
+   * — so a failure partway through (a bad worker, a store error) rolls back
+   * the whole graph: no orphan root/worker tasks survive.
+   *
+   * The root is created via the normal `createTask` path (which always starts
+   * a fresh task at `todo`/`scheduled` — `CreateTaskInput` has no `status`
+   * field) then immediately transitioned to `done` in this same transaction.
+   * Because both calls run inside one transaction, no external reader ever
+   * observes the root at `todo`: the graph commits as a unit with the root
+   * already done, so `promoteReady()` sees every worker as promotable on its
+   * very next dispatcher tick.
+   *
+   * The root's assignee is left `null` — the same "transparent container"
+   * rule `kanban_create_goal` relies on (see `promoteReady`'s doc comment):
+   * a parent with no assignee never gates its children regardless of its own
+   * status. Marking it `done` immediately is board hygiene, not a promotion
+   * requirement — there is no assignee who could ever transition it otherwise.
+   *
+   * Worker/verifier/synthesizer parent edges are set via `createTask`'s own
+   * `parents` option, which routes through `link()` internally (see the
+   * comment in `createTask`) — not raw SQL.
+   *
+   * `verifierPersonality`/`synthesizerPersonality` are each optional; omitting
+   * a tier collapses the chain past it: with no verifier, the synthesizer (if
+   * any) parents directly off every worker instead of off a verifier task.
+   */
+  createSwarm(input: CreateSwarmInput, actor = 'system'): SwarmResult {
+    const tx = this.db.transaction((): SwarmResult => {
+      const root = this.createTask({
+        title: `Swarm goal: ${truncateForTitle(input.goal)}`,
+        body: input.goal,
+        assignee: null,
+        actor,
+      });
+      this.updateStatus(root.id, 'done', 'swarm root — shared context', actor);
+
+      const workers = input.workers.map((w) =>
+        this.createTask({
+          title: `Swarm worker (${w.personality}): ${truncateForTitle(w.prompt)}`,
+          body: w.prompt,
+          assignee: w.personality,
+          parents: [root.id],
+          actor,
+        }),
+      );
+      const workerIds = workers.map((w) => w.id);
+
+      let verifierId: string | null = null;
+      if (input.verifierPersonality) {
+        const verifier = this.createTask({
+          title: 'Verify swarm worker output',
+          body: `Verify the worker results below against this goal:\n\n${input.goal}`,
+          assignee: input.verifierPersonality,
+          parents: workerIds,
+          actor,
+        });
+        verifierId = verifier.id;
+      }
+
+      let synthesizerId: string | null = null;
+      if (input.synthesizerPersonality) {
+        const synthesizer = this.createTask({
+          title: 'Synthesize swarm results',
+          body: `Synthesize the final result for this goal:\n\n${input.goal}`,
+          assignee: input.synthesizerPersonality,
+          parents: verifierId !== null ? [verifierId] : workerIds,
+          actor,
+        });
+        synthesizerId = synthesizer.id;
+      }
+
+      return { rootId: root.id, workerIds, verifierId, synthesizerId };
     });
     return tx();
   }
@@ -1065,6 +1388,44 @@ export class KanbanStore {
       this.updateStatus(c.id, 'ready', 'scheduled time reached', actor);
     }
     return candidates.map((c) => c.id);
+  }
+
+  /**
+   * Discount a host pause from every active run's and running task's liveness
+   * clock.
+   *
+   * A run that was genuinely alive across a VM suspend wrote no heartbeat while
+   * the host was stopped, so the first post-resume sweep reads the pause as a
+   * stuck agent: `findStalledRuns` blocks the run, and `findStaleRunningTasks`
+   * feeds `reclaimTask`, whose re-claim through `updateStatus('running')`
+   * increments `retry_count` — burning real budget out of `max_retries` for
+   * time nobody was running. Advancing both liveness columns by the pause
+   * duration — once, at the resume boundary, before either gate compares again
+   * — corrects the timestamps without touching the gates: a run that really
+   * went quiet is still past its cutoff afterwards.
+   *
+   * Both columns move together, the same pairing `heartbeatRun` writes.
+   *
+   * Returns the total rows bumped (runs + tasks). A non-positive or non-finite
+   * duration writes nothing.
+   */
+  bumpActiveHeartbeats(pauseDurationMs: number): number {
+    // Both columns are INTEGER in STRICT tables — a fractional offset would
+    // make the sum a REAL and the write would throw.
+    const offset = Math.round(pauseDurationMs);
+    if (!Number.isFinite(pauseDurationMs) || offset <= 0) return 0;
+    const tx = this.db.transaction((): number => {
+      const runs = this.db
+        .prepare(
+          'UPDATE task_runs SET last_heartbeat_at = last_heartbeat_at + ? WHERE ended_at IS NULL',
+        )
+        .run(offset);
+      const tasks = this.db
+        .prepare(`UPDATE tasks SET updated_at = updated_at + ? WHERE status = 'running'`)
+        .run(offset);
+      return runs.changes + tasks.changes;
+    });
+    return tx();
   }
 
   /**
@@ -1362,6 +1723,8 @@ interface TaskRow {
   max_retries: number | null;
   retry_count: number;
   acceptance_criteria: string | null;
+  block_kind: string | null;
+  block_recurrence_count: number;
   created_at: number;
   updated_at: number;
 }
@@ -1448,6 +1811,8 @@ function rowToTask(r: TaskRow): Task {
     maxRetries: r.max_retries,
     retryCount: r.retry_count,
     acceptanceCriteria: r.acceptance_criteria,
+    blockKind: r.block_kind as BlockKind | null,
+    blockRecurrenceCount: r.block_recurrence_count,
     createdAt: r.created_at,
     updatedAt: r.updated_at,
   };
@@ -1475,4 +1840,14 @@ function shortId(): string {
 // Multi-word inputs match as exact phrases; single words match as tokens.
 function escapeFtsQuery(query: string): string {
   return `"${query.replace(/"/g, '""')}"`;
+}
+
+// Collapse whitespace and cap length for a title derived from free-text body
+// content (goal/prompt, which the tool layer allows up to MAX_BODY_CHARS).
+// Titles have no length CHECK in the schema, but a short, single-line label
+// keeps the board readable — `createSwarm` uses this for its generated tasks.
+function truncateForTitle(text: string, max = 80): string {
+  const trimmed = text.trim().replace(/\s+/g, ' ');
+  if (trimmed.length === 0) return '(empty)';
+  return trimmed.length <= max ? trimmed : `${trimmed.slice(0, max - 1)}…`;
 }

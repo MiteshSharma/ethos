@@ -1,0 +1,56 @@
+import type { FenceRendererResolver } from '@ethosagent/ui-components';
+import { useMemo } from 'react';
+import { useActiveRenderers } from '../personalities/api/queries';
+import { decideFence } from './activation';
+import { RenderedFence, SpecVersionNotice } from './FenceBlock';
+import { FENCE_RENDERER_REGISTRY, type FenceRendererEntry } from './registry';
+
+/**
+ * Build the resolver `MarkdownRenderer` consults for every fenced block.
+ *
+ * `declarations` is the personality's `<renderer>@<spec>` set from
+ * `personalities.renderers`. Empty — which is also what loading and errored
+ * look like — decides every fence as a code block.
+ */
+export function makeFenceResolver(
+  declarations: readonly string[],
+  registry: readonly FenceRendererEntry[] = FENCE_RENDERER_REGISTRY,
+): FenceRendererResolver {
+  return ({ language, code, streaming }) => {
+    const decision = decideFence({ language, streaming, declarations, registry });
+    if (decision.kind === 'code') return null;
+    if (decision.kind === 'version-mismatch') {
+      return {
+        kind: 'annotate',
+        notice: (
+          <SpecVersionNotice
+            fenceLang={decision.fenceLang}
+            declared={decision.declared}
+            supported={decision.supported}
+          />
+        ),
+      };
+    }
+    const entry = registry.find((candidate) => candidate.fenceLang === decision.fenceLang);
+    const option = entry?.prepare(code);
+    // Invalid JSON, a non-object root, or a spec with nothing left after the
+    // allowlist filter — all the same answer as "no renderer".
+    if (!option) return null;
+    return {
+      kind: 'replace',
+      node: <RenderedFence fenceLang={decision.fenceLang} source={code} option={option} />,
+    };
+  };
+}
+
+/**
+ * Referentially stable per declaration set. `useActiveRenderers` returns a
+ * fresh array on every render (`?? []`), so the memo is keyed on the joined
+ * declarations rather than the array identity — an unstable resolver would
+ * remount the whole markdown subtree on every streamed token.
+ */
+export function useFenceResolver(personalityId: string): FenceRendererResolver {
+  const { renderers } = useActiveRenderers(personalityId);
+  const key = renderers.join('\x00');
+  return useMemo(() => makeFenceResolver(key ? key.split('\x00') : []), [key]);
+}

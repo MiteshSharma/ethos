@@ -95,19 +95,8 @@ describe('triage: file_share passthrough', () => {
 
 /** Extension sets duplicated from adapter.ts for assertion purposes. */
 const IMAGE_EXTS = new Set(['jpg', 'jpeg', 'png', 'gif', 'webp', 'heic', 'bmp', 'svg', 'tiff']);
-const SKIP_EXTS = new Set([
-  'mp3',
-  'mp4',
-  'mov',
-  'webm',
-  'wav',
-  'ogg',
-  'flac',
-  'aac',
-  'm4a',
-  'avi',
-  'mkv',
-]);
+const AUDIO_EXTS = new Set(['mp3', 'wav', 'ogg', 'flac', 'aac', 'm4a']);
+const SKIP_EXTS = new Set(['mp4', 'mov', 'webm', 'avi', 'mkv']);
 
 import type { Attachment, AttachmentCache, InboundMessage } from '@ethosagent/types';
 import type { RawSlackFile } from '../routing/triage';
@@ -132,7 +121,11 @@ async function extractFileAttachments(
     if ((file.size ?? 0) > MAX_FILE_SIZE) continue;
     if (!file.url_private_download) continue;
 
-    const type = IMAGE_EXTS.has(ext) ? ('image' as const) : ('file' as const);
+    const type = IMAGE_EXTS.has(ext)
+      ? ('image' as const)
+      : AUDIO_EXTS.has(ext)
+        ? ('audio' as const)
+        : ('file' as const);
 
     try {
       const res = await fetch(file.url_private_download, {
@@ -242,18 +235,11 @@ describe('extractFileAttachments', () => {
     fetchSpy.mockRestore();
   });
 
-  it('skips audio/video extensions', async () => {
+  it('skips video extensions', async () => {
     const cache = new InMemoryAttachmentCache();
     const fetchSpy = vi.spyOn(globalThis, 'fetch');
 
     const files: RawSlackFile[] = [
-      {
-        name: 'song.mp3',
-        filetype: 'mp3',
-        mimetype: 'audio/mpeg',
-        size: 5000,
-        url_private_download: 'https://files.slack.com/song.mp3',
-      },
       {
         name: 'video.mp4',
         filetype: 'mp4',
@@ -267,6 +253,29 @@ describe('extractFileAttachments', () => {
 
     expect(result.attachments).toBeUndefined();
     expect(fetchSpy).not.toHaveBeenCalled();
+    fetchSpy.mockRestore();
+  });
+
+  it('admits audio extensions and classifies them as audio (STT consumes them)', async () => {
+    const cache = new InMemoryAttachmentCache();
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(new Response(new Uint8Array([1, 2]), { status: 200 }));
+
+    const files: RawSlackFile[] = [
+      {
+        name: 'song.mp3',
+        filetype: 'mp3',
+        mimetype: 'audio/mpeg',
+        size: 5000,
+        url_private_download: 'https://files.slack.com/song.mp3',
+      },
+    ];
+
+    const result = await extractFileAttachments(makeEnvelope(), files, cache, 'xoxb-test', 'bot-a');
+
+    expect(result.attachments).toHaveLength(1);
+    expect(result.attachments?.[0]?.type).toBe('audio');
     fetchSpy.mockRestore();
   });
 

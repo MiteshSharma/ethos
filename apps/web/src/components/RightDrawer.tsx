@@ -1,3 +1,4 @@
+import { isLightSurface } from '@ethosagent/design-tokens/antd';
 import { useNavigate } from 'react-router-dom';
 import {
   type DrawerNotification,
@@ -5,6 +6,11 @@ import {
   type UsageState,
   useDrawerStream,
 } from '../hooks/useDrawerStream';
+import { type ClarifyQueueState, questionForRun } from '../lib/clarify-queue';
+import { allRuns, type RunState, type RunsState, runsNeedingYou } from '../lib/pi-run-reducer';
+import { resolveRunner, runnerAccentVars } from '../lib/runners';
+import { useResolvedTokens } from '../lib/skin-tokens';
+import { RUN_COPY } from '../lib/worker-copy';
 import { DebugPanel } from './DebugPanel';
 
 // Right-side observability drawer. Three panes, top-to-bottom:
@@ -24,9 +30,19 @@ export interface RightDrawerProps {
   open: boolean;
   onClose: () => void;
   debugPanelEnabled?: boolean;
+  /** Delegated runs on the active session — the top pane (§4.3). */
+  runs?: RunsState;
+  /** Questions those runs are parked on, quoted on the row (§4.3). */
+  clarifyQueue?: ClarifyQueueState;
 }
 
-export function RightDrawer({ open, onClose, debugPanelEnabled }: RightDrawerProps) {
+export function RightDrawer({
+  open,
+  onClose,
+  debugPanelEnabled,
+  runs,
+  clarifyQueue,
+}: RightDrawerProps) {
   const { sessionId, toolStream, notifications, usage } = useDrawerStream();
 
   if (!open) return null;
@@ -46,6 +62,8 @@ export function RightDrawer({ open, onClose, debugPanelEnabled }: RightDrawerPro
       </div>
 
       <div className="right-drawer-scroll">
+        {runs ? <RunsPane runs={runs} clarifyQueue={clarifyQueue} /> : null}
+
         <Section title="Tool stream">
           {!sessionId ? (
             <EmptyHint>No active session. Start a chat to see tool calls live.</EmptyHint>
@@ -84,6 +102,95 @@ export function RightDrawer({ open, onClose, debugPanelEnabled }: RightDrawerPro
       {debugPanelEnabled && <DebugPanel sessionId={sessionId} />}
     </aside>
   );
+}
+
+/**
+ * §4.3 — the top pane of the drawer, above Tool stream. Deliberately NOT a new
+ * sidebar: a permanent column for something idle most of the day is the "cards
+ * earn existence" failure, and a second live-events column would compete with
+ * the drawer that already streams tool calls.
+ *
+ * Rows are dense rows, and stay dense rows — the run CARD is the singleton
+ * inline in the transcript; this is the list.
+ */
+function RunsPane({ runs, clarifyQueue }: { runs: RunsState; clarifyQueue?: ClarifyQueueState }) {
+  const rows = allRuns(runs);
+  const needsYou = runsNeedingYou(runs).length;
+  const tokens = useResolvedTokens();
+  const light = isLightSurface(tokens);
+  return (
+    <section className="right-drawer-section">
+      <h3 className="right-drawer-section-title">
+        <span>Runs {rows.length > 0 ? rows.length : ''}</span>
+        {needsYou > 0 ? (
+          <span className="runs-pane-needs-you">{RUN_COPY.needsYouSummary(needsYou)}</span>
+        ) : null}
+      </h3>
+      {rows.length === 0 ? (
+        <EmptyHint>{RUN_COPY.drawerEmpty}</EmptyHint>
+      ) : (
+        <ul className="right-drawer-list">
+          {rows.map((run) => (
+            <RunRow
+              key={run.jobId}
+              run={run}
+              light={light}
+              {...(clarifyQueue
+                ? { question: questionForRun(clarifyQueue, run.jobId)?.question }
+                : {})}
+            />
+          ))}
+        </ul>
+      )}
+    </section>
+  );
+}
+
+function RunRow({ run, light, question }: { run: RunState; light: boolean; question?: string }) {
+  const runner = resolveRunner(run.runner);
+  const blocked = run.status === 'blocked';
+  // A blocked row quotes the question instead of the `now` line: what the run
+  // is doing is "waiting for you", and the useful half is what it asked.
+  const second = blocked && question ? `\u201c${truncate(question, 90)}\u201d` : run.now;
+  return (
+    <li
+      className={`runs-pane-row${blocked ? ' runs-pane-row--blocked' : ''}`}
+      style={runnerAccentVars(runner, light)}
+    >
+      <div className="runs-pane-row-head">
+        <span className="runs-pane-badge talk-mono">{runner.badgeText}</span>
+        <span className="runs-pane-label talk-mono">{shortLabel(run.jobId)}</span>
+        <span className="runs-pane-chip talk-mono">
+          {RUN_COPY.statusChip(run.status, run.elapsedMs)}
+        </span>
+      </div>
+      {second ? <div className="runs-pane-row-now talk-mono">{second}</div> : null}
+      {blocked ? (
+        <button
+          type="button"
+          className="runs-pane-answer"
+          onClick={() => {
+            // Scroll the card into view and focus it. The drawer row is a
+            // pointer to the answer surface, not a second one — §4.5 keeps the
+            // question in exactly one place so the two cannot disagree.
+            const el = document.getElementById(`run-card-${run.jobId}`);
+            el?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            el?.focus({ preventScroll: true });
+          }}
+        >
+          Answer
+        </button>
+      ) : null}
+    </li>
+  );
+}
+
+function truncate(text: string, max: number): string {
+  return text.length <= max ? text : `${text.slice(0, max - 1)}\u2026`;
+}
+
+function shortLabel(jobId: string): string {
+  return jobId.length > 12 ? jobId.slice(0, 12) : jobId;
 }
 
 function Section({ title, children }: { title: string; children: React.ReactNode }) {

@@ -40,6 +40,8 @@ export const ETHOS_EVENT_CATEGORIES = [
   'audit.injection_flag',
   'audit.redacted',
   'audit.compaction',
+  'audit.cost_recompute',
+  'pricing.unknown_model',
   'tool.repair',
   'channel.pairing',
   'channel.allow',
@@ -48,6 +50,10 @@ export const ETHOS_EVENT_CATEGORIES = [
   'install.event',
   'tier.escalation',
   'tier.override',
+  // AN-C1 — separate categories, not one with a mode field, so `ethos usage
+  // --by-skill` counts them with two indexed reads rather than a JSON probe.
+  'skill.invoked',
+  'skill.exposed',
   'heartbeat.decision',
   'memory.pending_cap',
   'a2a.auth',
@@ -56,6 +62,9 @@ export const ETHOS_EVENT_CATEGORIES = [
   'funnel.setup_completed',
   'funnel.first_reply',
   'funnel.channel_first_reply',
+  // Model-visible ⟺ logged (plan/phases/model-visible-logged.md, Phase D) —
+  // should never fire; see `packages/core/src/agent-loop/stages/context-drift.ts`.
+  'context.drift',
 ] as const;
 export type EthosEventCategory = (typeof ETHOS_EVENT_CATEGORIES)[number];
 
@@ -157,6 +166,20 @@ export class EthosObservability {
     return this.writer.startTrace({
       sessionId: opts.sessionId,
       kind: 'channel.inbound',
+      subjectId: opts.personalityId,
+      attrs: opts.attrs,
+    });
+  }
+
+  /** One live voice turn: utterance committed → reply finished/interrupted. */
+  startVoiceTurnTrace(opts: {
+    sessionId?: string;
+    personalityId?: string;
+    attrs?: Record<string, unknown>;
+  }): string {
+    return this.writer.startTrace({
+      sessionId: opts.sessionId,
+      kind: 'voice.turn',
       subjectId: opts.personalityId,
       attrs: opts.attrs,
     });
@@ -289,6 +312,51 @@ export class EthosObservability {
     this.emit('audit.compaction', 'info', opts);
   }
 
+  /**
+   * AN-C1 — a skill reached the model. `mode` separates a deliberate
+   * `get_skill` call from injection-mode prompt presence; `ethos usage
+   * --by-skill` reports the two as distinct columns because they are distinct
+   * costs. The skill name rides `details` so the events table needs no new
+   * column.
+   */
+  recordSkillInvocation(
+    opts: EventBase & { skill: string; mode: 'invoked' | 'exposed'; severity?: EventSeverity },
+  ): void {
+    this.emit(opts.mode === 'invoked' ? 'skill.invoked' : 'skill.exposed', 'info', opts, {
+      skill: opts.skill,
+    });
+  }
+
+  /**
+   * A5 — an LLM call used a model `@ethosagent/pricing` has no rate for, so its
+   * cost was recorded as 0. Emitted at most once per model per process (the
+   * de-duplication lives in the pricing package); a spend total that silently
+   * absorbs unpriced calls is the failure mode this exists to make visible.
+   *
+   * Distinct from a locally-served model, which costs 0 for real and emits
+   * nothing.
+   */
+  recordUnknownModelPricing(opts: EventBase & { model: string }): void {
+    this.emit('pricing.unknown_model', 'warn', opts, { model: opts.model });
+  }
+
+  /** A5 backfill — `ethos data recompute-costs` rewrote stored message costs. */
+  recordCostRecompute(
+    opts: EventBase & {
+      messagesScanned: number;
+      messagesUpdated: number;
+      sessionsUpdated: number;
+      unpricedModels: string[];
+    },
+  ): void {
+    this.emit('audit.cost_recompute', 'info', opts, {
+      messagesScanned: opts.messagesScanned,
+      messagesUpdated: opts.messagesUpdated,
+      sessionsUpdated: opts.sessionsUpdated,
+      unpricedModels: opts.unpricedModels,
+    });
+  }
+
   recordToolRepair(
     opts: EventBase & {
       toolName: string;
@@ -297,6 +365,22 @@ export class EthosObservability {
     },
   ): void {
     this.emit('tool.repair', 'info', opts, { toolName: opts.toolName, outcome: opts.outcome });
+  }
+
+  /**
+   * Model-visible ⟺ logged (Phase D) — a context section's live-assembled
+   * hash didn't match what the emit-on-change write path just confirmed.
+   * Should never fire (plan §6); `severity: 'error'` by default so it isn't
+   * lost among routine `info` events if it ever does.
+   */
+  recordContextDrift(
+    opts: EventBase & { kind: string; expectedHash: string; actualHash: string },
+  ): void {
+    this.emit('context.drift', 'error', opts, {
+      kind: opts.kind,
+      expectedHash: opts.expectedHash,
+      actualHash: opts.actualHash,
+    });
   }
 
   recordChannelPairing(opts: EventBase): void {

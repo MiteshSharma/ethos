@@ -15,6 +15,7 @@ import type {
   Message,
   MessageContent,
 } from '@ethosagent/types';
+import { stripVisionBlocksForSummary } from '../agent-loop/vision-aging';
 import { partitionStandingInstructions } from './standing-instructions';
 import { estimateMessagesTokens, estimateMessageTokens } from './token-estimator';
 
@@ -77,7 +78,14 @@ export class SemanticSummaryEngine implements ContextEngine {
     let summaryText: string;
     const summarizer = opts.llm?.summarize ?? this.summarize;
     if (summarizer) {
-      summaryText = await summarizer(rest, summaryTarget, opts.instructions);
+      // C3 — the summarizer produces prose; handing it the image bytes doubles
+      // the cost of compacting and can overflow the summarizer's own window.
+      // It sees what was attached, not the pixels.
+      summaryText = await summarizer(
+        stripVisionBlocksForSummary(rest),
+        summaryTarget,
+        opts.instructions,
+      );
     } else {
       // Fallback: synthesise a deterministic placeholder. Loses information
       // but preserves history shape so downstream replay still works.

@@ -97,7 +97,17 @@ export function openAiChatRoutes(opts: OpenAiChatRouteOptions): Hono {
       ...(sessionKeyOverride ? { sessionKeyOverride } : {}),
     };
 
-    // 5. Branch: streaming vs JSON.
+    // 5. A pinned session's personality is immutable. Check it BEFORE the
+    //    streaming branch: once `streamSSE` opens, the status is pinned at 200
+    //    and the only way left to report a client error is a `server_error`
+    //    frame. Both branches are covered by this one call.
+    try {
+      await opts.completions.assertPersonalityUnlocked(input);
+    } catch (err) {
+      return jsonError(c, err);
+    }
+
+    // 6. Branch: streaming vs JSON.
     if (req.stream === true) {
       return streamCompletion(c, opts.completions, input);
     }
@@ -151,7 +161,7 @@ function jsonError(c: Context, err: unknown): Response {
       openAiErrorBody({
         message: err.cause,
         type: 'invalid_request_error',
-        code: 'invalid_request_body',
+        code: openAiCodeOf(err.details) ?? 'invalid_request_body',
       }),
       400,
     );
@@ -169,6 +179,17 @@ function jsonError(c: Context, err: unknown): Response {
     }),
     500,
   );
+}
+
+/**
+ * A user-facing `EthosError` may name the OpenAI-envelope `code` its 400 should
+ * carry (e.g. `personality_locked`) on `details.openAiCode`. Without one the
+ * generic `invalid_request_body` stands.
+ */
+function openAiCodeOf(details: unknown): string | null {
+  if (typeof details !== 'object' || details === null) return null;
+  const code = (details as { openAiCode?: unknown }).openAiCode;
+  return typeof code === 'string' ? code : null;
 }
 
 // ---------------------------------------------------------------------------
@@ -215,8 +236,10 @@ function rejectUnsupported(req: ChatCompletionRequest): Rejection | null {
     if (msg.role === 'system') {
       return {
         message:
-          'System messages are not supported. The personality owns the system prompt. ' +
-          'Configure the personality (SOUL.md, config.yaml) instead of overriding per-request.',
+          'System messages are not supported. The personality owns the system prompt — Ethos ' +
+          'rejects any per-request override. In Open WebUI: clear the system prompt in Admin ' +
+          "Settings → Connections → your model's connection, or in the active chat's model " +
+          'settings. Configure identity via the personality (SOUL.md, config.yaml) instead.',
         code: 'system_messages_not_supported',
         param: 'messages',
       };
@@ -225,7 +248,9 @@ function rejectUnsupported(req: ChatCompletionRequest): Rejection | null {
   if (req.tools && req.tools.length > 0) {
     return {
       message:
-        'Client-side `tools` lands in C1. Drop the field or wait for the C1 release for client-tools mode.',
+        'Client-side `tools` are not supported. Ethos runs tools server-side — the ' +
+        "personality's toolset decides what the agent can call. Turn off tool/function " +
+        'calling in your client and omit the `tools` field.',
       code: 'client_tools_not_implemented',
       param: 'tools',
     };
@@ -233,14 +258,20 @@ function rejectUnsupported(req: ChatCompletionRequest): Rejection | null {
   for (const msg of req.messages) {
     if (msg.role === 'tool') {
       return {
-        message: '`role: "tool"` messages require client-tools mode (C1).',
+        message:
+          '`role: "tool"` messages are not supported. Ethos executes tools server-side, so ' +
+          'there are no client tool results to send back. Turn off tool/function calling in ' +
+          'your client and send only `user` and `assistant` messages.',
         code: 'client_tools_not_implemented',
         param: 'messages',
       };
     }
     if (msg.role === 'assistant' && msg.tool_calls && msg.tool_calls.length > 0) {
       return {
-        message: '`assistant.tool_calls` requires client-tools mode (C1).',
+        message:
+          '`assistant.tool_calls` is not supported. Ethos runs tools server-side and never ' +
+          'returns tool calls to the client. Turn off tool/function calling in your client ' +
+          'and drop `tool_calls` from the assistant messages.',
         code: 'client_tools_not_implemented',
         param: 'messages',
       };

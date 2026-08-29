@@ -1,6 +1,11 @@
+import type { EthosConfig } from '@ethosagent/config';
+
 // Pure helpers for `runServe`. Extracted so we can unit-test arg parsing
 // without booting an HTTP server, and so the boot path stays focused on
 // orchestration.
+
+/** Default `--web-port` when no flag, env var, or config key is set. */
+export const WEB_PORT_DEFAULT = 3000;
 
 /**
  * Find the value of a `--name=value` or `--name value` flag. Returns the
@@ -35,4 +40,63 @@ export function parsePort(raw: string | undefined, fallback: number): number {
   if (raw === undefined) return fallback;
   const n = Number(raw);
   return Number.isInteger(n) && n > 0 && n < 65536 ? n : fallback;
+}
+
+/** Precedence: CLI flag > env var > config.yaml > default (`127.0.0.1`). */
+export function resolveWebHost(
+  args: string[],
+  env: NodeJS.ProcessEnv,
+  config: EthosConfig | null,
+): string {
+  return (
+    parseFlagValue(args, ['--web-host']) ?? env.ETHOS_WEB_HOST ?? config?.web?.host ?? '127.0.0.1'
+  );
+}
+
+/** Precedence: CLI flag > env var > config.yaml > `WEB_PORT_DEFAULT`. */
+export function resolveWebPort(
+  args: string[],
+  env: NodeJS.ProcessEnv,
+  config: EthosConfig | null,
+): number {
+  const fallback = parsePort(env.ETHOS_WEB_PORT, config?.web?.port ?? WEB_PORT_DEFAULT);
+  return parsePort(parseFlagValue(args, ['--web-port']), fallback);
+}
+
+/**
+ * Precedence: env var > config.yaml > default (unset — no CORS). No CLI flag,
+ * matching Hermes (`API_SERVER_CORS_ORIGINS` is env-only).
+ */
+export function resolveCorsOrigins(
+  env: NodeJS.ProcessEnv,
+  config: EthosConfig | null,
+): string | undefined {
+  return env.ETHOS_API_CORS_ORIGINS ?? config?.web?.corsOrigins;
+}
+
+/**
+ * T0.1 — the zero-skills warning (the headline bug). A2A's card projection
+ * filters skills by owner opt-in (`ethos.exposeToAgents` in a skill's
+ * SKILL.md frontmatter, under the personality's own `skills/` directory).
+ * No built-in personality sets it (private-by-default is correct), so a
+ * fresh install's trusted-peer card advertises zero skills and every inbound
+ * `message/send` fails closed with `FORBIDDEN_SCOPE` — silently, with no
+ * signal anywhere that says so. Returns `null` when there is nothing to
+ * warn about (at least one exposed skill).
+ *
+ * Deliberately does NOT name `skillsDirs` — it is loader-populated from
+ * whether a `skills/` directory exists under the personality, not a
+ * `config.yaml` key an operator would set.
+ */
+export function a2aZeroSkillsWarning(
+  personalityId: string,
+  exposedSkillCount: number,
+): string | null {
+  if (exposedSkillCount > 0) return null;
+  return (
+    `A2A is enabled but personality "${personalityId}" exposes no skills to peers — ` +
+    'every inbound request will be rejected with FORBIDDEN_SCOPE. Set ' +
+    "`ethos.exposeToAgents: true` in a skill's SKILL.md frontmatter, under this " +
+    "personality's own skills/ directory, to expose it."
+  );
 }

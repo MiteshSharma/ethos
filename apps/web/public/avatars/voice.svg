@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128" role="img" aria-label="Voice avatar">
+  <circle cx="64" cy="64" r="64" fill="#FFAFC0"/>
+  <rect x="52" y="26" width="24" height="46" rx="12" fill="#FFFFFF"/>
+  <path d="M40,60 L40,66 A24,24 0 0 0 88,66 L88,60" fill="none" stroke="#FFFFFF" stroke-width="7" stroke-linecap="round"/>
+  <line x1="64" y1="90" x2="64" y2="102" stroke="#FFFFFF" stroke-width="7" stroke-linecap="round"/>
+  <line x1="48" y1="102" x2="80" y2="102" stroke="#FFFFFF" stroke-width="7" stroke-linecap="round"/>
+</svg>

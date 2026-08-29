@@ -109,6 +109,29 @@ export function bearerAuth(opts: BearerAuthOptions): MiddlewareHandler {
     }
     const record = await opts.store.findByHash(hashApiKey(secret));
     if (!record) return invalidAuth(c, 'API key is invalid or has been revoked.');
+    // Origin allowlist. An empty list means unrestricted — `ethos api-key create`
+    // has no origin flag and stores `[]`, so CLI-minted keys must stay open.
+    //
+    // Deliberate divergence from `dual-auth.ts`: a MISSING Origin header is
+    // allowed here. `/v1/*` is the OpenAI-compat surface, and its normal client
+    // (curl, the OpenAI Python/Node SDKs, Open WebUI's server-side proxy) is not
+    // a browser and never sends Origin. Rejecting on absence — the way dual-auth
+    // does for the browser-only `/rpc/*` surface — would silently brick every
+    // SDK client the moment a key is scoped to an origin. Do not "fix" this into
+    // consistency with dual-auth.
+    if (record.allowedOrigins.length > 0) {
+      const origin = c.req.header('origin');
+      if (origin && !record.allowedOrigins.includes(origin)) {
+        return c.json(
+          openAiErrorBody({
+            message: `Origin "${origin}" is not in the allowedOrigins list for this API key.`,
+            type: 'permission_error',
+            code: 'origin_not_allowed',
+          }),
+          403,
+        );
+      }
+    }
     if (!record.scopes.includes(opts.scope)) {
       return forbidden(c, `API key is missing required scope "${opts.scope}".`);
     }

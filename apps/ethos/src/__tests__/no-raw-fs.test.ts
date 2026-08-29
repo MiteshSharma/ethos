@@ -27,10 +27,24 @@
 //   extensions/session-sqlite/   @ethosagent/sqlite opens raw paths. WAL, FTS5, and
 //   extensions/memory-vector/    atomic transactions don't fit a generic Storage
 //   extensions/job-store/         interface without losing ACID guarantees.
-//   extensions/delivery-ledger/   (job-store and delivery-ledger also mkdirSync
-//                                 the db's parent dir. delivery-ledger's atomic
-//                                 redelivery claim is a conditional UPDATE — it
-//                                 needs a real transaction, not file IO.)
+//   extensions/delivery-ledger/   (job-store, delivery-ledger, session-cards, call-log
+//   extensions/session-cards/     and notify-queue also mkdirSync the db's parent dir.
+//   extensions/call-log/          delivery-ledger's atomic redelivery claim is a
+//   extensions/notify-queue/      conditional UPDATE and session-cards derives its
+//   extensions/inbound-dedup/     per-session `seq` with MAX()+1 inside the insert
+//                                 — both need a real transaction, not file IO.
+//                                 notify-queue's read-and-consume is the same shape:
+//                                 a SELECT then UPDATE inside one transaction, and
+//                                 inbound-dedup's check-and-record is one
+//                                 `INSERT OR IGNORE` whose affected-row count IS
+//                                 the answer.)
+//
+//   packages/a2a/                Same rationale as the SQLite stores above:
+//   src/sqlite-task-store.ts     SQLiteA2aTaskStore (T1.6) opens a raw path via
+//                                 @ethosagent/sqlite and mkdirSync's the db's
+//                                 parent dir, so an async task's terminal state
+//                                 and idempotency key survive an `ethos serve`
+//                                 restart.
 //
 //   extensions/cron/src/index.ts  File lock via fs.open(..., 'wx'): exclusive
 //                                 create is a POSIX-level primitive with no
@@ -51,6 +65,16 @@
 //                                 symlink-refusal on an arbitrary project path
 //                                 requires raw lstat (Storage.mtime follows symlinks).
 //
+//   packages/core/               lstat/readlink walk the segments of a path that has
+//   src/scoped/scoped-fs.ts      already passed the lexical fs_reach check, to refuse
+//                                 a symlink that resolves outside the reach (G11).
+//                                 This IS the personality filesystem boundary, not a
+//                                 module sitting behind it: Storage follows symlinks
+//                                 and exposes no lstat, so the check cannot be
+//                                 expressed through the contract it guards. Same
+//                                 rationale as gateway/media.ts and
+//                                 web-api/documents.service.ts.
+//
 //   extensions/gateway/          lstat refuses symlinked path-based outbound media
 //   src/media.ts                 (W3.2) before it reaches an adapter — an
 //                                 exfiltration guard on an ARBITRARY tool-produced
@@ -58,6 +82,112 @@
 //                                 file-context-injector: Storage scopes to ~/.ethos/
 //                                 and follows symlinks, so symlink-refusal on an
 //                                 arbitrary path needs raw lstat.
+//
+//   extensions/gateway/          ffmpeg transcodes FILES, not buffers: the stage
+//   src/transcode.ts             writes the source bytes to a scratch path, runs
+//                                 the binary, and reads the output back. Those
+//                                 paths live in `os.tmpdir()`, never `~/.ethos/`
+//                                 — same carve-out as command-tts in
+//                                 extensions/voice-providers/, which shells out
+//                                 the same way for the same reason.
+//
+//   extensions/tools-code/       Textual false positive: the `node:fs` import sits
+//   src/shim/js-shim.ts          inside a String.raw literal — it is the
+//                                 CONTAINER-side shim client source delivered at
+//                                 exec time (tools-as-code-api Lane A), not a host
+//                                 import. The module itself performs no filesystem
+//                                 access at all.
+//
+//   extensions/platform-callcapture/  existsSync checks for the compiled
+//   src/detector.ts                   `mic-detector` CoreAudio helper binary
+//                                      shipped alongside this package
+//                                      (native/bin/), so a missing build can
+//                                      throw a clear "run this command" error
+//                                      instead of a bare ENOENT. Not a
+//                                      ~/.ethos/ operation — same rationale as
+//                                      skills/skill-compat.ts.
+//
+//   extensions/platform-callcapture/  Same rationale as detector.ts above,
+//   src/audio-process.ts              generalized: existsSync checks for
+//                                      either of Phase 3's two native
+//                                      capture binaries (the vendored
+//                                      `audiotee`, native/vendor/, or the
+//                                      compiled `mic-capture`, native/bin/)
+//                                      before spawning, so a missing build
+//                                      throws a clear "run this command"
+//                                      error instead of a bare ENOENT. Not a
+//                                      ~/.ethos/ operation.
+//
+//   extensions/platform-callcapture/  Phase 4's combined dependency preflight
+//   src/preflight.ts                  (`checkCallCaptureDependencies`, T5):
+//                                      existsSync checks the same four
+//                                      native binaries detector.ts/
+//                                      audio-process.ts/notification.ts
+//                                      check individually, before a
+//                                      notification or capture attempt
+//                                      starts. Same rationale — not a
+//                                      ~/.ethos/ operation.
+//
+//   extensions/platform-callcapture/  Cross-process ownership lock
+//   src/ownership.ts                  (`tryClaimOwnership`) so `ethos serve`
+//                                      and `ethos gateway` never both run a
+//                                      live `CallCaptureDaemon` at once. Same
+//                                      carve-out category as
+//                                      `extensions/team-supervisor/src/pid.ts`
+//                                      (already covered by that whole
+//                                      directory's prefix entry below): an
+//                                      atomic PID-claim file is
+//                                      process-management state, not
+//                                      `~/.ethos/` personality data — an
+//                                      exclusive-create + liveness-check +
+//                                      stale-cleanup lock has no equivalent
+//                                      in the Storage interface.
+//
+//   extensions/platform-callcapture/  Same rationale as detector.ts above:
+//   src/indicator.ts                  existsSync checks for the compiled
+//                                      `capture-indicator` AppKit helper
+//                                      binary (native/bin/) before spawning
+//                                      it, so a missing build throws a clear
+//                                      "run this command" error instead of a
+//                                      bare ENOENT. Not a ~/.ethos/ operation.
+//
+//   extensions/platform-callcapture/  Same rationale as detector.ts above:
+//   src/notification.ts               existsSync checks for the compiled
+//                                      `capture-offer-card` binary shipped
+//                                      alongside this package (native/bin/)
+//                                      before spawning it, so a missing
+//                                      build throws a clear "run this
+//                                      command" error instead of a bare
+//                                      ENOENT. Not a ~/.ethos/ operation.
+//
+//   extensions/execution-pi/       Creating a Pi run's workspace IS a
+//   src/worktree.ts                 `git worktree add`: the git binary writes a
+//                                    whole tree, which no Storage method can
+//                                    express, and the surrounding mkdir/exists
+//                                    checks are that same operation's
+//                                    bookkeeping. Same category as the SQLite
+//                                    stores' mkdirSync of a database's parent
+//                                    directory.
+//
+//   extensions/execution-pi/       existsSync answers "is this machine set up
+//   src/availability.ts             to run Pi at all" against the operator's
+//                                    Pi credential file, which is never opened
+//                                    and never read — the container gets it as
+//                                    a read-only mount. Same rationale as
+//                                    platform-callcapture/src/detector.ts's
+//                                    binary-presence check; not a ~/.ethos/
+//                                    operation.
+//
+//   extensions/execution-       Same rationale as execution-pi/src/
+//   coding-agents/src/          worktree.ts above, copied not imported
+//   worktree.ts                 (D-ACP1: no shared file between the two
+//                                packages): creating an ACP-agent run's
+//                                workspace IS a `git worktree add`, and the
+//                                surrounding mkdir/exists checks are that
+//                                same operation's bookkeeping. (This
+//                                package's availability.ts needs no entry
+//                                here — it probes with `spawn` only, no
+//                                `node:fs` import at all.)
 //
 // If you need to add a new exception, document WHY here and in CLAUDE.md before
 // adding it to ALLOWED_PATHS below. The default answer for code on the
@@ -83,6 +213,10 @@ const ALLOWED_PREFIXES = [
   'extensions/memory-vector/',
   'extensions/job-store/',
   'extensions/delivery-ledger/',
+  'extensions/session-cards/',
+  'extensions/call-log/',
+  'extensions/notify-queue/',
+  'extensions/inbound-dedup/',
   'extensions/voice-providers/',
   'extensions/agent-mesh/',
   'extensions/llm-codex/',
@@ -94,17 +228,30 @@ const ALLOWED_PREFIXES = [
 
 // Specific files (relative to ROOT) that are permitted to import node:fs.
 const ALLOWED_FILES = new Set([
+  'packages/core/src/scoped/scoped-fs.ts',
   'extensions/cron/src/index.ts',
   'extensions/claw-migrate/src/index.ts',
   'extensions/skills/src/skill-compat.ts',
   'extensions/skills/src/file-context-injector.ts',
   'extensions/gateway/src/media.ts',
+  'extensions/gateway/src/transcode.ts',
   'extensions/skills/src/env-resolver.ts',
   'extensions/execution-docker/src/index.ts',
+  'extensions/execution-pi/src/worktree.ts',
+  'extensions/execution-pi/src/availability.ts',
+  'extensions/execution-coding-agents/src/worktree.ts',
   'extensions/goal-store/src/index.ts',
   'extensions/kanban-store/src/index.ts',
   'extensions/platform-whatsapp/src/session-store.ts',
   'extensions/request-dump/src/index.ts',
+  'extensions/tools-code/src/shim/js-shim.ts',
+  'extensions/platform-callcapture/src/detector.ts',
+  'extensions/platform-callcapture/src/audio-process.ts',
+  'extensions/platform-callcapture/src/preflight.ts',
+  'extensions/platform-callcapture/src/ownership.ts',
+  'extensions/platform-callcapture/src/indicator.ts',
+  'extensions/platform-callcapture/src/notification.ts',
+  'packages/a2a/src/sqlite-task-store.ts',
 ]);
 
 // Matches any static or dynamic import of node:fs or node:fs/promises.

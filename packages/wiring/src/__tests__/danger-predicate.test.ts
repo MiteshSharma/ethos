@@ -5,7 +5,11 @@ import { FilePersonalityRegistry } from '@ethosagent/personalities';
 import { FsStorage } from '@ethosagent/storage-fs';
 import type { BeforeToolCallPayload, PersonalityConfig } from '@ethosagent/types';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { createDangerPredicate, SMART_MODE_CONSEQUENTIAL_TOOLS } from '../danger-predicate';
+import {
+  APPROVAL_SURFACE_ALWAYS_ASK,
+  createDangerPredicate,
+  SMART_MODE_CONSEQUENTIAL_TOOLS,
+} from '../danger-predicate';
 
 function payload(toolName: string, args: unknown = {}): BeforeToolCallPayload {
   return { sessionId: 's', toolCallId: 'tc', toolName, args };
@@ -166,9 +170,10 @@ describe('createDangerPredicate — Ch.4b approvalMode', () => {
     });
   });
 
-  // The built-in flag list is what makes `smart` reachable at all: no
-  // production caller passes `alwaysAsk`, so without it `dangerReason` was
-  // always null under smart and the reviewer never ran.
+  // The built-in flag list is what makes `smart` reachable at all: when it was
+  // added no production caller passed `alwaysAsk`, so without it `dangerReason`
+  // was always null under smart and the reviewer never ran. (Entry points now
+  // pass APPROVAL_SURFACE_ALWAYS_ASK, but that set is deliberately narrow.)
   describe('SMART_MODE_CONSEQUENTIAL_TOOLS', () => {
     /** Calls that must never be flagged — one reviewer round-trip per lookup. */
     const READ_ONLY = ['read_file', 'search_files', 'web_search', 'list_available_tools'];
@@ -317,6 +322,104 @@ describe('createDangerPredicate — Ch.4b approvalMode', () => {
         getPersonality: () => person('off'),
       });
       expect(await pred(payload('email_send', { to: 'a@b' }))).toMatch(/explicit approval/);
+    });
+  });
+
+  // The pending-skill queue tools promote or discard a proposed skill, and the
+  // agent is also what proposes skills — so left ungated it can approve its own
+  // proposal into the live library. `requiresApproval: true` on the Tool does
+  // NOT gate anything (tool-processing.ts emits the event then runs the tool);
+  // `alwaysAsk` is the only mechanism that prompts. This pins the flag set that
+  // all three approval-surface entry points construct with.
+  describe('APPROVAL_SURFACE_ALWAYS_ASK (production-shaped construction)', () => {
+    const PENDING_TOOLS = ['skills_pending_approve', 'skills_pending_reject'];
+
+    it.each(PENDING_TOOLS)('flags %s under the default manual mode', async (tool) => {
+      const pred = createDangerPredicate({
+        alwaysAsk: APPROVAL_SURFACE_ALWAYS_ASK,
+        getPersonality: () => person('manual'),
+      });
+      expect(await pred(payload(tool, { id: 'some-skill' }))).toMatch(
+        new RegExp(`${tool} requires explicit approval`),
+      );
+    });
+
+    it.each(PENDING_TOOLS)('flags %s with no personality resolved', async (tool) => {
+      // Unknown session (no `session_start` seen) — the legacy manual default.
+      const pred = createDangerPredicate({ alwaysAsk: APPROVAL_SURFACE_ALWAYS_ASK });
+      expect(await pred(payload(tool, { id: 'some-skill' }))).toMatch(/explicit approval/);
+    });
+
+    it.each(PENDING_TOOLS)(
+      'still flags %s under off, as production constructs it',
+      async (tool) => {
+        // No entry point passes `allowAutoApproveDangerousTools`, so `off` falls
+        // back to manual and these stay gated.
+        const pred = createDangerPredicate({
+          alwaysAsk: APPROVAL_SURFACE_ALWAYS_ASK,
+          getPersonality: () => person('off'),
+        });
+        expect(await pred(payload(tool, { id: 'some-skill' }))).toMatch(/explicit approval/);
+      },
+    );
+
+    it('still flags both under smart (union, not replacement)', async () => {
+      const pred = createDangerPredicate({
+        alwaysAsk: APPROVAL_SURFACE_ALWAYS_ASK,
+        getPersonality: () => person('smart'),
+        smartApprove: async () => ({ decision: 'ask', reason: 'undecided' }),
+      });
+      for (const tool of PENDING_TOOLS) {
+        expect(await pred(payload(tool, { id: 'some-skill' }))).toMatch(/explicit approval/);
+      }
+      // The smart-mode built-ins are unioned in, not replaced by alwaysAsk.
+      expect(await pred(payload('write_file', { path: 'x' }))).toMatch(/explicit approval/);
+    });
+
+    // The gate predates the capability: `call` self-reports unavailable until
+    // a SIP trunk is wired, and it must already be always-ask on the day one
+    // is. These assertions are what stop that flip from being silent.
+    describe('call (outbound telephony) is always-ask', () => {
+      it('is listed in the always-ask set', () => {
+        expect(APPROVAL_SURFACE_ALWAYS_ASK).toContain('call');
+      });
+
+      it.each(['manual', 'off', 'smart'] as const)('flags call under %s', async (mode) => {
+        const pred = createDangerPredicate({
+          alwaysAsk: APPROVAL_SURFACE_ALWAYS_ASK,
+          getPersonality: () => person(mode),
+          smartApprove: async () => ({ decision: 'ask', reason: 'undecided' }),
+        });
+        expect(await pred(payload('call', { to: '+15551234567' }))).toMatch(
+          /call requires explicit approval/,
+        );
+      });
+
+      it('flags call with no personality resolved', async () => {
+        const pred = createDangerPredicate({ alwaysAsk: APPROVAL_SURFACE_ALWAYS_ASK });
+        expect(await pred(payload('call', { to: '+15551234567' }))).toMatch(/explicit approval/);
+      });
+
+      it('does not flag the voice_session capability marker', async () => {
+        // `voice_session` marks a personality as voice-engageable; it places no
+        // call, so gating it would prompt on every voice turn for nothing.
+        const pred = createDangerPredicate({
+          alwaysAsk: APPROVAL_SURFACE_ALWAYS_ASK,
+          getPersonality: () => person('manual'),
+        });
+        expect(await pred(payload('voice_session', {}))).toBeNull();
+      });
+    });
+
+    it('does not flag the read-only queue tools', async () => {
+      // Listing and viewing the queue mutate nothing — gating a read would cost
+      // a prompt for no safety benefit.
+      const pred = createDangerPredicate({
+        alwaysAsk: APPROVAL_SURFACE_ALWAYS_ASK,
+        getPersonality: () => person('manual'),
+      });
+      expect(await pred(payload('skills_pending_list', {}))).toBeNull();
+      expect(await pred(payload('skills_pending_view', { id: 'x' }))).toBeNull();
     });
   });
 });

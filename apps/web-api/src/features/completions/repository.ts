@@ -13,9 +13,15 @@ export class CompletionsRepository {
     platform: string;
     model: string;
     provider: string;
+    /** Bound at creation and immutable thereafter — never patched later. */
+    personalityId?: string;
     usage: Session['usage'];
   }): Promise<Session> {
     return this.store.createSession(input);
+  }
+
+  async getSessionByKey(key: string): Promise<Session | null> {
+    return this.store.getSessionByKey(key);
   }
 
   async appendMessage(input: {

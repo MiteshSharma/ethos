@@ -325,27 +325,13 @@ describe('pruneObservability', () => {
   });
 
   it('messages pruning uses ISO timestamp column and prunes old messages', () => {
-    // Create a minimal sessions.db schema in a separate in-memory db.
-    const sessDb = new Database(':memory:');
-    sessDb.exec(`
-      CREATE TABLE messages (
-        id       INTEGER PRIMARY KEY,
-        session_id TEXT NOT NULL,
-        content    TEXT NOT NULL,
-        timestamp  TEXT NOT NULL
-      ) STRICT;
-    `);
+    const sessDb = makeSessDb();
 
     // Messages retention default is 365d. Use 400d-old message to cross the cutoff.
-    const veryOld = NOW - 400 * 86_400_000;
-    const oldIso = new Date(veryOld).toISOString();
+    const oldIso = new Date(NOW - 400 * 86_400_000).toISOString();
     const recentIso = new Date(RECENT).toISOString();
-    sessDb
-      .prepare('INSERT INTO messages (session_id, content, timestamp) VALUES (?, ?, ?)')
-      .run('s1', 'old msg', oldIso);
-    sessDb
-      .prepare('INSERT INTO messages (session_id, content, timestamp) VALUES (?, ?, ?)')
-      .run('s1', 'recent msg', recentIso);
+    insertMessage(sessDb, 's1', 'old msg', oldIso);
+    insertMessage(sessDb, 's1', 'recent msg', recentIso);
 
     const result = pruneObservability(db, RETENTION_DEFAULTS, {
       dryRun: false,
@@ -359,7 +345,307 @@ describe('pruneObservability', () => {
     expect(remaining).toBe(1); // recent message kept
     sessDb.close();
   });
+
+  // A1a — `ethos data prune` opens sessions.db raw, without running the store's
+  // migrations, so the file may predate the usage rollup entirely. Pruning
+  // messages is the primary job: a rollup that cannot be maintained is skipped,
+  // never allowed to block the delete.
+  it('prunes messages on a sessions.db with no sessions table', () => {
+    const sessDb = new Database(':memory:');
+    sessDb.exec(`
+      CREATE TABLE messages (
+        id         INTEGER PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        content    TEXT NOT NULL,
+        timestamp  TEXT NOT NULL
+      ) STRICT;
+    `);
+    insertMinimalMessage(sessDb, 's1', 'old', new Date(NOW - 400 * 86_400_000).toISOString());
+    insertMinimalMessage(sessDb, 's1', 'recent', new Date(RECENT).toISOString());
+
+    const result = pruneObservability(db, RETENTION_DEFAULTS, {
+      dryRun: false,
+      now: NOW,
+      sessDb,
+    });
+
+    expect(result.messages).toBe(1);
+    const remaining = (sessDb.prepare('SELECT COUNT(*) as n FROM messages').get() as { n: number })
+      .n;
+    expect(remaining).toBe(1);
+    sessDb.close();
+  });
+
+  it('prunes messages when the sessions table lacks the usage columns', () => {
+    const sessDb = new Database(':memory:');
+    sessDb.exec(`
+      CREATE TABLE sessions (id TEXT PRIMARY KEY, key TEXT NOT NULL) STRICT;
+
+      CREATE TABLE messages (
+        id         INTEGER PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        content    TEXT NOT NULL,
+        timestamp  TEXT NOT NULL
+      ) STRICT;
+    `);
+    sessDb.prepare('INSERT INTO sessions (id, key) VALUES (?, ?)').run('s1', 'cli:old');
+    insertMinimalMessage(sessDb, 's1', 'old', new Date(NOW - 400 * 86_400_000).toISOString());
+    insertMinimalMessage(sessDb, 's1', 'recent', new Date(RECENT).toISOString());
+
+    const result = pruneObservability(db, RETENTION_DEFAULTS, {
+      dryRun: false,
+      now: NOW,
+      sessDb,
+    });
+
+    expect(result.messages).toBe(1);
+    const remaining = (sessDb.prepare('SELECT COUNT(*) as n FROM messages').get() as { n: number })
+      .n;
+    expect(remaining).toBe(1);
+    sessDb.close();
+  });
+
+  // A1 / analytics decision 9 — the session rollup columns are a derived cache
+  // of the surviving `messages` rows, so a prune has to take the pruned rows'
+  // usage back out of them.
+  it('keeps the session rollup equal to SUM(messages) after pruning', () => {
+    const sessDb = makeSessDb();
+    const oldIso = new Date(NOW - 400 * 86_400_000).toISOString();
+    const recentIso = new Date(RECENT).toISOString();
+
+    // s1: one pruned turn (100/20/0.01) + one surviving turn (7/3/0.002).
+    insertSession(sessDb, 's1', {
+      inputTokens: 107,
+      outputTokens: 23,
+      estimatedCostUsd: 0.012,
+    });
+    insertMessage(sessDb, 's1', 'old', oldIso, {
+      inputTokens: 100,
+      outputTokens: 20,
+      estimatedCostUsd: 0.01,
+    });
+    insertMessage(sessDb, 's1', 'recent', recentIso, {
+      inputTokens: 7,
+      outputTokens: 3,
+      estimatedCostUsd: 0.002,
+    });
+    // s2 has nothing old — its rollup must not move.
+    insertSession(sessDb, 's2', { inputTokens: 40, outputTokens: 4, estimatedCostUsd: 0.004 });
+    insertMessage(sessDb, 's2', 'recent', recentIso, {
+      inputTokens: 40,
+      outputTokens: 4,
+      estimatedCostUsd: 0.004,
+    });
+
+    const result = pruneObservability(db, RETENTION_DEFAULTS, {
+      dryRun: false,
+      now: NOW,
+      sessDb,
+    });
+    expect(result.messages).toBe(1);
+
+    const rows = sessDb
+      .prepare(
+        `SELECT s.id,
+                s.input_tokens, s.output_tokens, s.estimated_cost_usd,
+                COALESCE((SELECT SUM(m.input_tokens) FROM messages m WHERE m.session_id = s.id), 0)       AS sum_input,
+                COALESCE((SELECT SUM(m.output_tokens) FROM messages m WHERE m.session_id = s.id), 0)      AS sum_output,
+                COALESCE((SELECT SUM(m.estimated_cost_usd) FROM messages m WHERE m.session_id = s.id), 0) AS sum_cost
+         FROM sessions s ORDER BY s.id`,
+      )
+      .all() as Array<Record<string, number>>;
+
+    for (const r of rows) {
+      expect(r.input_tokens).toBe(r.sum_input);
+      expect(r.output_tokens).toBe(r.sum_output);
+      expect(r.estimated_cost_usd).toBeCloseTo(r.sum_cost ?? 0, 10);
+    }
+    expect(rows[0]?.input_tokens).toBe(7);
+    expect(rows[1]?.input_tokens).toBe(40);
+    sessDb.close();
+  });
+
+  it('does not double-subtract usage already removed by an undo', () => {
+    const sessDb = makeSessDb();
+    const oldIso = new Date(NOW - 400 * 86_400_000).toISOString();
+
+    // The old row was soft-deleted (undone), which already subtracted its usage.
+    // The rollup reflects only the surviving message, and hard-pruning the
+    // undone row must leave it untouched.
+    insertSession(sessDb, 's1', { inputTokens: 50, outputTokens: 5, estimatedCostUsd: 0.003 });
+    insertMessage(
+      sessDb,
+      's1',
+      'undone',
+      oldIso,
+      { inputTokens: 100, outputTokens: 20, estimatedCostUsd: 0.01 },
+      oldIso,
+    );
+    insertMessage(sessDb, 's1', 'recent', new Date(RECENT).toISOString(), {
+      inputTokens: 50,
+      outputTokens: 5,
+      estimatedCostUsd: 0.003,
+    });
+
+    expect(
+      pruneObservability(db, RETENTION_DEFAULTS, { dryRun: false, now: NOW, sessDb }).messages,
+    ).toBe(1);
+
+    const row = sessDb.prepare('SELECT * FROM sessions WHERE id = ?').get('s1') as {
+      input_tokens: number;
+      output_tokens: number;
+      estimated_cost_usd: number;
+    };
+    expect(row.input_tokens).toBe(50);
+    expect(row.output_tokens).toBe(5);
+    expect(row.estimated_cost_usd).toBeCloseTo(0.003, 10);
+    sessDb.close();
+  });
+
+  // The subtraction is one grouped pass joined back onto `sessions`, so a wrong
+  // join key would still look right with a single session. Pin the per-session
+  // attribution: each session gets its own total, and one with nothing to prune
+  // is left alone.
+  it('subtracts per-session totals when several sessions are pruned in one call', () => {
+    const sessDb = makeSessDb();
+    const oldIso = new Date(NOW - 400 * 86_400_000).toISOString();
+    const recentIso = new Date(RECENT).toISOString();
+
+    // s1: two pruned turns + one surviving turn.
+    insertSession(sessDb, 's1', { inputTokens: 130, outputTokens: 27, estimatedCostUsd: 0.016 });
+    insertMessage(sessDb, 's1', 'old-a', oldIso, {
+      inputTokens: 100,
+      outputTokens: 20,
+      estimatedCostUsd: 0.01,
+    });
+    insertMessage(sessDb, 's1', 'old-b', oldIso, {
+      inputTokens: 23,
+      outputTokens: 4,
+      estimatedCostUsd: 0.004,
+    });
+    insertMessage(sessDb, 's1', 'recent', recentIso, {
+      inputTokens: 7,
+      outputTokens: 3,
+      estimatedCostUsd: 0.002,
+    });
+    // s2: a different total, entirely prunable.
+    insertSession(sessDb, 's2', { inputTokens: 60, outputTokens: 11, estimatedCostUsd: 0.009 });
+    insertMessage(sessDb, 's2', 'old', oldIso, {
+      inputTokens: 60,
+      outputTokens: 11,
+      estimatedCostUsd: 0.009,
+    });
+    // s3: nothing prunable — must not be touched by s1/s2's subtraction.
+    insertSession(sessDb, 's3', { inputTokens: 40, outputTokens: 4, estimatedCostUsd: 0.004 });
+    insertMessage(sessDb, 's3', 'recent', recentIso, {
+      inputTokens: 40,
+      outputTokens: 4,
+      estimatedCostUsd: 0.004,
+    });
+
+    expect(
+      pruneObservability(db, RETENTION_DEFAULTS, { dryRun: false, now: NOW, sessDb }).messages,
+    ).toBe(3);
+
+    const rows = sessDb
+      .prepare(
+        'SELECT id, input_tokens, output_tokens, estimated_cost_usd FROM sessions ORDER BY id',
+      )
+      .all() as Array<{
+      id: string;
+      input_tokens: number;
+      output_tokens: number;
+      estimated_cost_usd: number;
+    }>;
+
+    expect(rows.map((r) => [r.id, r.input_tokens, r.output_tokens])).toEqual([
+      ['s1', 7, 3],
+      ['s2', 0, 0],
+      ['s3', 40, 4],
+    ]);
+    expect(rows[0]?.estimated_cost_usd).toBeCloseTo(0.002, 10);
+    expect(rows[1]?.estimated_cost_usd).toBeCloseTo(0, 10);
+    expect(rows[2]?.estimated_cost_usd).toBeCloseTo(0.004, 10);
+    sessDb.close();
+  });
 });
+
+// Mirrors the columns of the real sessions.db that retention pruning touches.
+function makeSessDb(): Database.Database {
+  const sessDb = new Database(':memory:');
+  sessDb.exec(`
+      CREATE TABLE sessions (
+        id                    TEXT PRIMARY KEY,
+        input_tokens          INTEGER NOT NULL DEFAULT 0,
+        output_tokens         INTEGER NOT NULL DEFAULT 0,
+        cache_read_tokens     INTEGER NOT NULL DEFAULT 0,
+        cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+        estimated_cost_usd    REAL NOT NULL DEFAULT 0
+      ) STRICT;
+
+      CREATE TABLE messages (
+        id       INTEGER PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        content    TEXT NOT NULL,
+        timestamp  TEXT NOT NULL,
+        input_tokens INTEGER,
+        output_tokens INTEGER,
+        cache_read_tokens INTEGER,
+        cache_creation_tokens INTEGER,
+        estimated_cost_usd REAL,
+        deleted_at TEXT
+      ) STRICT;
+    `);
+  return sessDb;
+}
+
+function insertSession(
+  sessDb: Database.Database,
+  id: string,
+  usage: { inputTokens: number; outputTokens: number; estimatedCostUsd: number },
+): void {
+  sessDb
+    .prepare(
+      'INSERT INTO sessions (id, input_tokens, output_tokens, estimated_cost_usd) VALUES (?, ?, ?, ?)',
+    )
+    .run(id, usage.inputTokens, usage.outputTokens, usage.estimatedCostUsd);
+}
+
+/** Insert into a pre-usage-columns `messages` table (id/session_id/content/timestamp only). */
+function insertMinimalMessage(
+  sessDb: Database.Database,
+  sessionId: string,
+  content: string,
+  timestamp: string,
+): void {
+  sessDb
+    .prepare('INSERT INTO messages (session_id, content, timestamp) VALUES (?, ?, ?)')
+    .run(sessionId, content, timestamp);
+}
+
+function insertMessage(
+  sessDb: Database.Database,
+  sessionId: string,
+  content: string,
+  timestamp: string,
+  usage?: { inputTokens: number; outputTokens: number; estimatedCostUsd: number },
+  deletedAt?: string,
+): void {
+  sessDb
+    .prepare(
+      `INSERT INTO messages (session_id, content, timestamp, input_tokens, output_tokens, estimated_cost_usd, deleted_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .run(
+      sessionId,
+      content,
+      timestamp,
+      usage?.inputTokens ?? null,
+      usage?.outputTokens ?? null,
+      usage?.estimatedCostUsd ?? null,
+      deletedAt ?? null,
+    );
+}
 
 // ---------------------------------------------------------------------------
 // G4: referenced blobs survive prune

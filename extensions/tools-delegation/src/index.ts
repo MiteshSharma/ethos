@@ -9,6 +9,7 @@ import type { AgentLoop } from '@ethosagent/core';
 import type {
   BackgroundJob,
   BackgroundJobEvent,
+  JobRunnerRegistry,
   JobStore,
   Storage,
   Tool,
@@ -171,7 +172,16 @@ export interface BackgroundToolDeps {
    * outside the gateway; a job then delivers to the channel root.
    */
   resolveOriginThreadId?: (sessionKey: string) => string | undefined;
+  /**
+   * Runners this deployment can execute a job on, beyond the default. Used only
+   * to VALIDATE the `runner` arg at the tool boundary — the executor does its
+   * own lookup. Absent means only the default runner exists here.
+   */
+  runners?: JobRunnerRegistry;
 }
+
+/** The runner a background job runs on when `runner` is omitted. */
+const DEFAULT_RUNNER = 'ethos';
 
 const LABEL_RE = /^[a-z0-9-]{1,32}$/;
 
@@ -272,6 +282,27 @@ function formatEvent(e: BackgroundJobEvent): string {
       const shown = collapsed.length > 300 ? `${collapsed.slice(0, 297)}...` : collapsed;
       return `output: ${shown}`;
     }
+    case 'artifact_change':
+      return `${String(p.change ?? 'changed')} ${String(p.path ?? '')} (+${String(p.added ?? 0)} −${String(p.removed ?? 0)})`;
+    case 'runner_log': {
+      // The per-job retention cap (`LOG_TOTAL_MAX_LINES`) writes one marker
+      // row with an empty `lines` array once hit — render it distinctly so it
+      // doesn't read as a blank/empty log line.
+      if (p.truncated === true) return 'log: (truncated — retention cap reached)';
+      // One event renders as one LINE, same collapsing/capping convention the
+      // 'text' case above uses — this row can hold up to LOG_BATCH_LINES
+      // buffered lines, so it is joined and capped, not printed verbatim.
+      const entries = Array.isArray(p.lines) ? (p.lines as Record<string, unknown>[]) : [];
+      const rendered = entries
+        .map((l) => `[${String(l.stream ?? '?')}] ${String(l.line ?? '')}`)
+        .join(' | ')
+        .replace(/\s+/g, ' ')
+        .trim();
+      const shown = rendered.length > 300 ? `${rendered.slice(0, 297)}...` : rendered;
+      const droppedNote =
+        typeof p.dropped === 'number' && p.dropped > 0 ? ` (+${p.dropped} dropped)` : '';
+      return shown ? `log: ${shown}${droppedNote}` : 'log: (empty)';
+    }
     case 'spend':
       return `spend $${String(p.spendUsd ?? p.usd ?? '')}`;
     case 'cancel_requested':
@@ -340,6 +371,12 @@ export function createDelegateTaskTool(loop: AgentLoop, background?: BackgroundT
           description:
             'Per-job USD spend cap; the job aborts on breach. Omit for the deployment default; pass null to explicitly run uncapped.',
         },
+        runner: {
+          type: 'string',
+          description:
+            "Which worker runs the job. Only valid with background: true. Defaults to 'ethos' (an ordinary Ethos sub-agent). " +
+            'Any other name must be registered in this deployment — an unregistered name is refused, never silently downgraded.',
+        },
       },
       required: ['prompt'],
     },
@@ -351,13 +388,26 @@ export function createDelegateTaskTool(loop: AgentLoop, background?: BackgroundT
         label,
         return_mode = 'full',
         background: runInBackground,
+        runner,
       } = args as {
         prompt: string;
         personality?: string;
         label?: string;
         return_mode?: 'full' | 'summary';
         background?: boolean;
+        runner?: string;
       };
+
+      // `runner` selects a background worker; there is nothing to select on the
+      // blocking path. Refusing beats ignoring — a silently dropped runner runs
+      // the task on a harness the caller did not ask for.
+      if (runner !== undefined && runInBackground !== true) {
+        return {
+          ok: false,
+          code: 'input_invalid',
+          error: 'runner is only valid with background: true',
+        };
+      }
 
       // ---- Background (detached) path -------------------------------------
       // Same up-front validation as the blocking path, then hand off to the
@@ -382,6 +432,18 @@ export function createDelegateTaskTool(loop: AgentLoop, background?: BackgroundT
         }
 
         if (!background) return NOT_AVAILABLE;
+
+        // Runner selection. Omitted means the default; anything else must be a
+        // runner this deployment actually resolved. No silent fallback: a job
+        // asked for on a harness we do not have is refused, not re-routed.
+        const jobRunner = runner ?? DEFAULT_RUNNER;
+        if (jobRunner !== DEFAULT_RUNNER && !background.runners?.get(jobRunner)) {
+          return {
+            ok: false,
+            code: 'not_available',
+            error: `runner '${jobRunner}' is not registered in this deployment`,
+          };
+        }
 
         // Slug-restrict the label so the derived child session key is
         // unspoofable — a label cannot smuggle a `:` segment separator.
@@ -446,6 +508,7 @@ export function createDelegateTaskTool(loop: AgentLoop, background?: BackgroundT
           depth: bgDepth + 1,
           label: jobLabel,
           prompt,
+          runner: jobRunner,
           ...(maxCostUsd !== undefined ? { maxCostUsd } : {}),
           ...(originPlatform ? { originPlatform } : {}),
           ...(originBotKey ? { originBotKey } : {}),
@@ -487,12 +550,21 @@ export function createDelegateTaskTool(loop: AgentLoop, background?: BackgroundT
         };
       }
 
-      const sessionKey = `${ctx.sessionKey}:sub:${label ?? 'task'}:${ctx.currentTurn}`;
+      // The child's personality is caller-selectable, and a session's
+      // personality is bound at creation and immutable thereafter (turn-setup
+      // refuses a mismatch with `personality_locked`). Two same-turn fan-out
+      // calls without a label would otherwise derive the identical key and the
+      // second would be refused — so the RESOLVED personality is part of the
+      // key. Resolved once, used for both the key and the child run, so the two
+      // can never diverge. An empty segment means "no personality in play"; a
+      // personality id is never empty, so it cannot alias a real one.
+      const childPersonalityId = personality ?? ctx.personalityId;
+      const sessionKey = `${ctx.sessionKey}:sub:${label ?? 'task'}:${childPersonalityId ?? ''}:${ctx.currentTurn}`;
       const childPrompt = return_mode === 'summary' ? prompt + SUMMARY_INSTRUCTION : prompt;
 
       try {
         const output = await runSubAgent(loop, childPrompt, {
-          personalityId: personality ?? ctx.personalityId,
+          personalityId: childPersonalityId,
           sessionKey,
           depth: depth + 1,
           abortSignal: ctx.abortSignal,
@@ -1403,11 +1475,11 @@ export function createTaskLogsTool(background?: BackgroundToolDeps): Tool {
       if (!job) return JOB_NOT_FOUND;
 
       const count = Math.min(Math.max(1, Math.floor(tail ?? 20)), 100);
-      const events = await background.store.getEvents(id);
+      // The store does the tailing — reading the whole trail to throw all but
+      // the last `count` rows away is the unbounded read this tool never needed.
+      const events = await background.store.getEvents(id, { limit: count });
       const now = Date.now();
-      const lines = events
-        .slice(-count)
-        .map((e) => `${relAge(now - e.createdAt)} ${formatEvent(e)}`);
+      const lines = events.map((e) => `${relAge(now - e.createdAt)} ${formatEvent(e)}`);
       return { ok: true, value: lines.join('\n') || '(no events)' };
     },
   };

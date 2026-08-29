@@ -3,7 +3,7 @@
 // POLICY key. Parse + serialize round-trip.
 
 import { join } from 'node:path';
-import { InMemoryStorage } from '@ethosagent/storage-fs';
+import { InMemorySecretsResolver, InMemoryStorage } from '@ethosagent/storage-fs';
 import { describe, expect, it } from 'vitest';
 import { ethosDir, readRawConfig, writeConfig } from '../index';
 
@@ -50,25 +50,33 @@ describe('contextWindow config key (Lane 0, D4)', () => {
 
   it('round-trips through writeConfig', async () => {
     const storage = new InMemoryStorage();
-    await writeConfig(storage, {
-      provider: 'ollama',
-      model: 'llama3.2',
-      apiKey: 'sk',
-      personality: 'p',
-      contextWindow: 8192,
-    });
+    await writeConfig(
+      storage,
+      {
+        provider: 'ollama',
+        model: 'llama3.2',
+        apiKey: 'sk',
+        personality: 'p',
+        contextWindow: 8192,
+      },
+      new InMemorySecretsResolver(),
+    );
     const cfg = await readRawConfig(storage);
     expect(cfg?.contextWindow).toBe(8192);
   });
 
   it('writeConfig omits the key when unset', async () => {
     const storage = new InMemoryStorage();
-    await writeConfig(storage, {
-      provider: 'ollama',
-      model: 'llama3.2',
-      apiKey: 'sk',
-      personality: 'p',
-    });
+    await writeConfig(
+      storage,
+      {
+        provider: 'ollama',
+        model: 'llama3.2',
+        apiKey: 'sk',
+        personality: 'p',
+      },
+      new InMemorySecretsResolver(),
+    );
     const raw = await storage.read(join(ethosDir(), 'config.yaml'));
     expect(raw).not.toContain('contextWindow:');
   });

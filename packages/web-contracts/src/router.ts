@@ -1,5 +1,13 @@
+// The ONE runtime import from `@ethosagent/types` this contract takes: the
+// voice-mode list is a closed enum every layer names (the decision function in
+// voice-text, `LaneVoiceModeStore` in core, the gateway's `/voice` command, and
+// the chat header), and a second spelling here is exactly the drift the shared
+// constant exists to prevent. `@ethosagent/types` is zero-dep, so importing it
+// costs the published contract nothing.
+import { VOICE_MODES } from '@ethosagent/types';
 import { oc } from '@orpc/contract';
 import { z } from 'zod';
+import { SessionCardSchema } from './cards';
 import {
   A2aIdentityViewSchema,
   A2aPeerRowSchema,
@@ -118,6 +126,8 @@ const SessionGetInput = z.object({ id: z.string() });
 const SessionGetOutput = z.object({
   session: SessionSchema,
   messages: z.array(StoredMessageSchema),
+  /** Card envelopes emitted during this session, for replay. Empty when none. */
+  cards: z.array(SessionCardSchema),
 });
 
 const SessionForkInput = z.object({
@@ -286,6 +296,49 @@ const PersonalityNightlyInput = z
   })
   .optional();
 
+/**
+ * A `voice.languages.<tag>` key. The tag is written into config.yaml as part of
+ * a dotted key, so the charset is BCP-47's own (letters, digits, hyphen) and
+ * nothing else — a tag carrying a separator or a newline would serialize into
+ * lines the loader never meant to read.
+ */
+const VoiceLanguageTagSchema = z.string().regex(/^[A-Za-z0-9-]+$/);
+
+/**
+ * The editable slice of a personality's `voice` block — how it sounds and what
+ * it listens through.
+ *
+ * `tts_provider` / `stt_provider` / `realtime_provider` name entries in the
+ * deployment's `voice.tts.providers.*` / `voice.stt.providers.*` /
+ * `voice.realtime.providers.*` rosters (LABELS, never credentials); `tts_voice`
+ * is the TTS provider's voice id. `''` clears the key, so "Default" is
+ * expressible.
+ *
+ * `call_style` is how the personality LOOKS on a call — the visual sibling of
+ * `tts_voice`, and editable for the same reason. `''` clears it, which hands
+ * the choice back to `display.call_style` and then to the id derivation.
+ *
+ * `tier` picks which voice stack serves this personality, `model` names its
+ * fast-lane model, and `languages` maps a BCP-47 tag to the voice that speaks
+ * it. All three are existing sub-keys of the frozen `voice` block — no new
+ * top-level `PersonalityConfig` field is introduced by exposing them.
+ *
+ * `languages` REPLACES the stored map (an empty object clears it), unlike the
+ * scalars beside it, because a per-key merge would leave no way to delete a tag.
+ */
+const PersonalityVoiceInput = z
+  .object({
+    tts_provider: z.string().optional(),
+    stt_provider: z.string().optional(),
+    realtime_provider: z.string().optional(),
+    tts_voice: z.string().optional(),
+    call_style: z.enum(['liquid', 'orb', 'rings', '']).optional(),
+    tier: z.enum(['pipeline', 'realtime', '']).optional(),
+    model: z.string().optional(),
+    languages: z.record(VoiceLanguageTagSchema, z.string().min(1)).optional(),
+  })
+  .optional();
+
 const PersonalityCreateInput = z.object({
   /** Lowercase id; becomes the directory name. */
   id: z.string().min(1).regex(PersonalityIdRegex),
@@ -303,6 +356,9 @@ const PersonalityCreateInput = z.object({
     .object({
       read: z.array(z.string()).optional(),
       write: z.array(z.string()).optional(),
+      /** Declared working directory. Tokens (`${ETHOS_HOME}`, `${self}`,
+       *  `${CWD}`) are stored verbatim and resolved at turn setup. */
+      workdir: z.string().optional(),
     })
     .optional(),
   skill_evolution: z
@@ -319,6 +375,7 @@ const PersonalityCreateInput = z.object({
    *  automatically; 'user' holds it for human approval. */
   evolution_approval_mode: z.enum(['auto', 'user']).optional(),
   nightly: PersonalityNightlyInput,
+  voice: PersonalityVoiceInput,
 });
 const PersonalityCreateOutput = z.object({ personality: PersonalitySchema });
 
@@ -341,10 +398,14 @@ const PersonalityUpdateInput = z.object({
   plugins: z.array(z.string()).optional(),
   capabilities: z.array(z.string()).optional(),
   provider: ProviderIdSchema.or(z.literal('')).optional(),
+  /** Sub-keys are shallow-merged onto the stored block, so a patch carrying
+   *  only `read`/`write` leaves an existing `workdir` in place. `''` clears
+   *  the workdir. */
   fs_reach: z
     .object({
       read: z.array(z.string()).optional(),
       write: z.array(z.string()).optional(),
+      workdir: z.string().optional(),
     })
     .optional(),
   /** Idle-time dreaming controls. `enable` toggles dreaming; idleMinutes /
@@ -376,9 +437,18 @@ const PersonalityUpdateInput = z.object({
   safety: z.object({ approvalMode: z.enum(['manual', 'smart', 'off']).optional() }).optional(),
   /** Per-personality memory backend. Built-ins: 'markdown', 'vector'. */
   memory: z.object({ provider: z.string().optional() }).optional(),
+  /** Avatar sub-key of the `display` identity block. `''` clears
+   *  `avatar_url` back to unset; the avatar upload/delete routes are the
+   *  usual way to change it, but a curated-icon pick goes through here
+   *  directly (it's just a static URL, no bytes to upload). */
+  display: z.object({ avatar_url: z.string().optional() }).optional(),
   /** Nightly governed-learning gates. The UI sends the FULL nightly object
    *  (including the full judge sub-object); the registry one-level-merges it. */
   nightly: PersonalityNightlyInput,
+  /** Sub-keys are shallow-merged onto the stored `voice` block, so a patch
+   *  carrying only `tts_voice` leaves a hand-written `languages` map alone.
+   *  `''` clears that sub-key. */
+  voice: PersonalityVoiceInput,
 });
 const PersonalityUpdateOutput = z.object({ personality: PersonalitySchema });
 
@@ -394,6 +464,13 @@ const PersonalityDuplicateOutput = z.object({ personality: PersonalitySchema });
 // Per-personality skills (gate 19).
 const PersonalitySkillsListInput = z.object({ personalityId: z.string().min(1) });
 const PersonalitySkillsListOutput = z.object({ skills: z.array(PersonalitySkillSchema) });
+
+// Renderer capabilities (`ethos.renders`) declared by the personality's
+// resolved skill set — `<renderer>@<spec-version>` entries a chat surface
+// checks against its own curated registry before upgrading a fenced block
+// from a code block. Empty array = code block, which is also the failure mode.
+const PersonalityRenderersInput = z.object({ id: z.string().min(1) });
+const PersonalityRenderersOutput = z.object({ renderers: z.array(z.string()) });
 
 const PersonalitySkillsGetInput = z.object({
   personalityId: z.string().min(1),
@@ -537,6 +614,7 @@ const personalities = {
   update: oc.input(PersonalityUpdateInput).output(PersonalityUpdateOutput),
   delete: oc.input(PersonalityDeleteInput).output(PersonalityOkOutput),
   duplicate: oc.input(PersonalityDuplicateInput).output(PersonalityDuplicateOutput),
+  renderers: oc.input(PersonalityRenderersInput).output(PersonalityRenderersOutput),
   skillsList: oc.input(PersonalitySkillsListInput).output(PersonalitySkillsListOutput),
   skillsGet: oc.input(PersonalitySkillsGetInput).output(PersonalitySkillsGetOutput),
   skillsCreate: oc.input(PersonalitySkillsCreateInput).output(PersonalitySkillsCreateOutput),
@@ -587,6 +665,13 @@ const ChatSendInput = z.object({
    *  stream emits a `dry_run_summary` event with the tool plan instead of
    *  running the tools. */
   dryRun: z.boolean().optional(),
+  /**
+   * How this turn's text reached the client. `voice` means `text` is a
+   * transcript of the user speaking (talk-mode), which the server turns into a
+   * MESSAGE-LEVEL voice-origin annotation on the turn — never a system-prompt
+   * section, because one session mixes typed and spoken turns. Default `text`.
+   */
+  origin: z.enum(['text', 'voice']).optional(),
   attachments: z
     .array(
       z.object({
@@ -664,6 +749,12 @@ const tools = {
 // Clarify — resolve a pending `clarify` request (the agent asked the user a
 // question mid-turn). The request side flows out over SSE; this is the answer
 // path back, mirroring the tool-approval transport.
+//
+// `listPending` is the catch-up read for the request side, the same role
+// `tasks.list` plays for the run digest: the `clarify.request` push is live
+// only, so a page that mounts after a delegated run parked on a question has
+// no way to learn the question exists. `ClarifyBridge.listPersisted` was
+// built for exactly this and had no route to the browser until now.
 // ---------------------------------------------------------------------------
 
 const ClarifyRespondInput = z.object({
@@ -675,9 +766,31 @@ const ClarifyRespondInput = z.object({
 });
 const ClarifyRespondOutput = z.object({ ok: z.literal(true) });
 
+/** Scoped by root session, never by clarify `sessionId`: a delegated run asks
+ *  on its CHILD session key (`clarify-escalator.ts`), which no browser is ever
+ *  subscribed to. The lane a surface can actually join on is the job (G1). */
+const ClarifyListPendingInput = z.object({ rootSessionKey: z.string().min(1) });
+/** One open question, shaped so the client can fold it straight into the same
+ *  queue the `clarify.request` event feeds. `jobId` is required — every row
+ *  here belongs to one of this session's runs by construction. */
+const ClarifyListPendingOutput = z.array(
+  z.object({
+    requestId: z.string(),
+    jobId: z.string(),
+    question: z.string(),
+    options: z.array(z.string()).optional(),
+    default: z.string().optional(),
+    /** Never null here: only PRESENTED rows are returned, and presentation is
+     *  what starts the clock (D2). A row still queued behind another question
+     *  in its lane has been shown to nobody and is not offered for answering. */
+    defaultDeadlineAt: z.string(),
+  }),
+);
+
 /** @experimental */
 const clarify = {
   respond: oc.input(ClarifyRespondInput).output(ClarifyRespondOutput),
+  listPending: oc.input(ClarifyListPendingInput).output(ClarifyListPendingOutput),
 };
 
 // ---------------------------------------------------------------------------
@@ -837,6 +950,159 @@ const AuxModelUpdateSchema = z.object({
   baseUrl: z.string().nullable().optional(),
 });
 
+/** Roster-entry key. The parser in `@ethosagent/config` matches
+ *  `voice.<tts|stt>.providers.([A-Za-z0-9_-]+).<field>`, so a name outside that
+ *  charset would serialize to a line the loader silently drops. */
+const VoiceProviderNameRegex = /^[A-Za-z0-9_-]+$/;
+
+/** One entry of the named TTS roster (`voice.tts.providers.<name>.*`). Same
+ *  field set as the default `auxiliary.tts` entry, because it IS one — the entry
+ *  a personality gets when it names no other. API key never round-trips. */
+const VoiceProviderEntryGetSchema = z.object({
+  /** Registered provider id (`openai-tts`, `local-tts`, `command-tts`, …). */
+  provider: z.string(),
+  model: z.string().nullable(),
+  apiKeyPreview: z.string().nullable(),
+  voice: z.string().nullable(),
+  baseUrl: z.string().nullable(),
+  command: z.string().nullable(),
+  outputFormat: z.enum(['opus', 'mp3', 'wav', 'pcm']).nullable(),
+  /** `voice.tts.providers.<name>.timeout` — seconds, `command-tts`'s unit. */
+  timeout: z.number().nullable(),
+  maxTextLength: z.number().nullable(),
+});
+/** Write shape for one roster entry. Omitting `apiKey` KEEPS the stored key —
+ *  the form never receives it, so an absent field cannot mean "clear it". */
+const VoiceProviderEntryUpdateSchema = z.object({
+  provider: z.string().min(1),
+  model: z.string().optional(),
+  /** Write-only; never echoed back. Omit to keep the stored key. */
+  apiKey: z.string().optional(),
+  voice: z.string().optional(),
+  baseUrl: z.string().optional(),
+  command: z.string().optional(),
+  outputFormat: z.enum(['opus', 'mp3', 'wav', 'pcm']).optional(),
+  /** Seconds. */
+  timeout: z.number().int().min(1).max(3600).optional(),
+  maxTextLength: z.number().int().min(100).max(100_000).optional(),
+});
+
+/** One entry of the named STT roster (`voice.stt.providers.<name>.*`). The
+ *  mirror of the TTS entry over the `auxiliary.asr` field set — no `voice`,
+ *  `outputFormat` or `maxTextLength`, which only mean something when producing
+ *  audio. API key never round-trips. */
+const VoiceSttProviderEntryGetSchema = z.object({
+  /** Registered provider id (`openai-stt`, `local-stt`, `command-stt`, …). */
+  provider: z.string(),
+  model: z.string().nullable(),
+  apiKeyPreview: z.string().nullable(),
+  baseUrl: z.string().nullable(),
+  command: z.string().nullable(),
+  /** `voice.stt.providers.<name>.timeout` — seconds, `command-stt`'s unit. */
+  timeout: z.number().nullable(),
+});
+const VoiceSttProviderEntryUpdateSchema = z.object({
+  provider: z.string().min(1),
+  model: z.string().optional(),
+  /** Write-only; never echoed back. Omit to keep the stored key. */
+  apiKey: z.string().optional(),
+  baseUrl: z.string().optional(),
+  command: z.string().optional(),
+  /** Seconds. */
+  timeout: z.number().int().min(1).max(3600).optional(),
+});
+
+/** One entry of the named REALTIME roster (`voice.realtime.providers.<name>.*`)
+ *  — hosted speech-to-speech. No `command` or `timeout`: a realtime provider is
+ *  a duplex session, not a request you shell out for. `costPerMinuteUsd` is the
+ *  provider's published rate, which is what turns session minutes into the cost
+ *  `voiceRealtimeSessionBudgetUsd` halts on. API key never round-trips. */
+const VoiceRealtimeProviderEntryGetSchema = z.object({
+  /** Registered provider id (`openai-realtime`, `gemini-live`, …). */
+  provider: z.string(),
+  model: z.string().nullable(),
+  apiKeyPreview: z.string().nullable(),
+  baseUrl: z.string().nullable(),
+  voice: z.string().nullable(),
+  costPerMinuteUsd: z.number().nullable(),
+});
+const VoiceRealtimeProviderEntryUpdateSchema = z.object({
+  provider: z.string().min(1),
+  model: z.string().optional(),
+  /** Write-only; never echoed back. Omit to keep the stored key. */
+  apiKey: z.string().optional(),
+  baseUrl: z.string().optional(),
+  voice: z.string().optional(),
+  /** USD per minute of audio. Fractional — 6 cents a minute is `0.06`. */
+  costPerMinuteUsd: z.number().positive().max(100).optional(),
+});
+
+// -- Telephony (`voice.trunk` / `voice.livekit` / `voice.inbound` /
+//    `voice.bargeIn` / `voice.bots`) ------------------------------------------
+//
+// Every one of these keys was previously reachable only by hand-editing
+// config.yaml. A phone number is the surface strangers can dial, so its
+// allowlist, its budget and the personality that answers it must be visible and
+// editable where the operator already manages the deployment — a yaml-only
+// telephony key is a guard nobody can see.
+//
+// Same closed sets the CLI parser enforces, restated as Zod so a bad value is
+// refused at the RPC boundary instead of turning into a parse error the next
+// time the agent loads its config.
+
+const VoiceTrunkProviderSchema = z.enum(['twilio', 'telnyx', 'generic', 'livekit']);
+const VoiceTrunkCodecSchema = z.enum(['opus', 'g711']);
+const VoiceInboundPrewarmSchema = z.enum(['allowlisted', 'none', 'all']);
+
+/** One surface's barge-in thresholds, as stored. Every field independently
+ *  nullable: an operator tunes the one knob a room is wrong about. */
+const VoiceBargeInTuningGetSchema = z.object({
+  energyThreshold: z.number().nullable(),
+  minSpeechMs: z.number().nullable(),
+  silenceMs: z.number().nullable(),
+});
+
+/** The write side of one surface's thresholds. Bounds mirror the CLI parser,
+ *  which REFUSES an out-of-range value rather than dropping it. */
+const VoiceBargeInTuningUpdateSchema = z.object({
+  /** Input energy above which the caller counts as speaking, 0 < x <= 1. */
+  energyThreshold: z.number().gt(0).max(1).optional(),
+  /** Milliseconds of speech before a barge-in is believed. */
+  minSpeechMs: z.number().int().min(1).optional(),
+  /** Milliseconds of silence that end an utterance. */
+  silenceMs: z.number().int().min(1).optional(),
+});
+
+/** One `voice.bots[]` entry as stored — the number → bot → personality map. */
+const VoiceBotGetSchema = z.object({
+  /** `voice.bots.<n>.id`; null when the operator left it to the derived
+   *  sha256-of-`match` default. */
+  id: z.string().nullable(),
+  /** E.164 number or room name (`*` wildcards allowed) this bot answers. */
+  match: z.string(),
+  bind: z.object({
+    type: z.enum(['personality', 'team']),
+    name: z.string(),
+    /** `voice.bots.<n>.bind.allowSlashSwitch`; false when the key is absent. */
+    allowSlashSwitch: z.boolean(),
+  }),
+});
+
+const VoiceBotUpdateSchema = z.object({
+  /** Omit to let the loader derive one from `match`. Must be an identifier
+   *  (`[A-Za-z0-9_-]+`) — it becomes part of a config.yaml key. */
+  id: z.string().optional(),
+  match: z.string().min(1),
+  bind: z.object({
+    type: z.enum(['personality', 'team']),
+    /** Validated against the personality registry when `type` is
+     *  `personality` — a bot bound to a personality that does not exist fails
+     *  silently on a ringing phone, and this is the last place to catch it. */
+    name: z.string().min(1),
+    allowSlashSwitch: z.boolean().optional(),
+  }),
+});
+
 const ConfigGetOutput = z.object({
   provider: z.string(),
   model: z.string(),
@@ -857,6 +1123,11 @@ const ConfigGetOutput = z.object({
   adminEnabled: z.boolean(),
   /** Channel streaming draft edits (display.streaming_edits). */
   streamingEdits: z.enum(['off', 'dms', 'all']),
+  /** Call Stage treatment (display.call_style). `personality` — the default —
+   *  lets each personality draw its own, declared or derived from its id. */
+  callStyle: z.enum(['liquid', 'orb', 'rings', 'personality']),
+  /** In-call overlay color (display.call_accent): `personality` or `#RRGGBB`. */
+  callAccent: z.string(),
   /** Auto-compact long sessions near the model window (compaction.autoCompact). */
   autoCompact: z.boolean(),
   /** Silent memory-flush turn (memoryConsolidation.enabled). */
@@ -888,6 +1159,137 @@ const ConfigGetOutput = z.object({
   voiceTtsVoice: z.string().nullable(),
   voiceTtsBaseUrl: z.string().nullable(),
   voiceTtsModel: z.string().nullable(),
+  /** `auxiliary.asr.command` — shell template the `command-stt` provider runs. */
+  voiceSttCommand: z.string().nullable(),
+  /** `auxiliary.tts.command` — shell template the `command-tts` provider runs. */
+  voiceTtsCommand: z.string().nullable(),
+  /** `auxiliary.tts.outputFormat` — container the TTS provider is asked for. */
+  voiceTtsOutputFormat: z.enum(['opus', 'mp3', 'wav', 'pcm']).nullable(),
+  /** `auxiliary.tts.timeout`, seconds. */
+  voiceTtsTimeoutMs: z.number().nullable(),
+  /** `auxiliary.tts.maxTextLength` — chars per synthesis request. */
+  voiceTtsMaxTextLength: z.number().nullable(),
+  /** `auxiliary.asr.timeout`, seconds. */
+  voiceSttTimeoutMs: z.number().nullable(),
+  /** `voice.trustedPlugins` — the local-only egress allowlist. `null` = key
+   *  absent = gate OFF; a list arms it (providers with `caps.local` always pass). */
+  voiceTrustedPlugins: z.array(z.string()).nullable(),
+  /** `voice.defaultMode` — where a new channel lane starts. */
+  voiceDefaultMode: z.enum(['off', 'mirror_inbound', 'all']).nullable(),
+  /** `voice.channels.<platform>.ttsOut` — which channels speak their replies
+   *  without being asked, keyed by platform id. A platform ABSENT from the map
+   *  has no override and inherits `voiceDefaultMode`; an explicit `false` means
+   *  "never speak here" and outranks a lane's own mode. */
+  voiceChannelTtsOut: z.record(z.string(), z.boolean()),
+  /** `voice.transcode.ffmpegPath` — null = `ffmpeg` on PATH. */
+  voiceTranscodeFfmpegPath: z.string().nullable(),
+  /** `voice.transcode.bitrateKbps` — null = the built-in 32 kbps. */
+  voiceTranscodeBitrateKbps: z.number().nullable(),
+  /** `voice.transcode.timeout`, SECONDS (the unit ffmpeg's budget is set in);
+   *  null = the built-in 30s. */
+  voiceTranscodeTimeoutSec: z.number().nullable(),
+  /** `voice.artifacts.abandonAfterDays` — null = the built-in 7 days. */
+  voiceArtifactAbandonAfterDays: z.number().nullable(),
+  /** `voice.artifacts.maxTotalMb` — null = the built-in 512 MiB. */
+  voiceArtifactMaxTotalMb: z.number().nullable(),
+  /** `voice.tts.providers.<name>.*` — the named TTS roster, keyed by the
+   *  operator's label. `auxiliary.tts` (the `voiceTts*` fields above) stays the
+   *  DEFAULT entry and is NOT repeated here. Empty object = no roster.
+   *  The older `voice.providers.*` spelling is read into this same map. */
+  voiceTtsProviders: z.record(z.string(), VoiceProviderEntryGetSchema),
+  /** `voice.stt.providers.<name>.*` — the named STT roster. `auxiliary.asr`
+   *  (the `voiceProvider` / `voiceModel` / … fields above) stays the DEFAULT
+   *  entry and is NOT repeated here. */
+  voiceSttProviders: z.record(z.string(), VoiceSttProviderEntryGetSchema),
+  /** `voice.realtime.providers.<name>.*` — the named realtime roster. Unlike
+   *  the other two this roster has no `auxiliary.*` default entry; the default
+   *  is `voiceRealtimeDefault`, which NAMES one of these. */
+  voiceRealtimeProviders: z.record(z.string(), VoiceRealtimeProviderEntryGetSchema),
+  /** `voice.realtime.default` — the realtime roster entry a personality that
+   *  names none gets. A label from `voiceRealtimeProviders`, never a provider
+   *  id. Null = key absent. */
+  voiceRealtimeDefault: z.string().nullable(),
+  /** `voice.tier` — the deployment's default voice engine. Null = key absent
+   *  (the surface decides). */
+  voiceTier: z.enum(['pipeline', 'realtime']).nullable(),
+  /** `voice.realtime.sessionBudgetUsd` — USD cap on ONE realtime session's
+   *  accrued cost. Null = no cap. */
+  voiceRealtimeSessionBudgetUsd: z.number().nullable(),
+  // -- Telephony read side (see the block above the schemas) -----------------
+  /** `voice.trunk.provider` — selects the inbound webhook signature scheme. */
+  voiceTrunkProvider: VoiceTrunkProviderSchema.nullable(),
+  /** `voice.trunk.trunkId` — the LiveKit SIP trunk the number is attached to. */
+  voiceTrunkId: z.string().nullable(),
+  /** `voice.trunk.fromNumber` — caller ID presented on outbound calls (E.164). */
+  voiceTrunkFromNumber: z.string().nullable(),
+  /** `voice.trunk.username` — SIP registrar/auth username. */
+  voiceTrunkUsername: z.string().nullable(),
+  /** `voice.trunk.password`, REDACTED (`sk-…abc1`). The raw value never leaves
+   *  the service layer, so the browser is never handed a credential to type
+   *  back — which is why a blank incoming `voiceTrunkPassword` KEEPS the stored
+   *  secret instead of erasing it. Null = unset. */
+  voiceTrunkPasswordPreview: z.string().nullable(),
+  /** `voice.trunk.webhookSecret`, REDACTED. Same rule as the password: this one
+   *  authenticates the TRUNK to us on an inbound leg, so it rotates
+   *  independently. Null = unset. */
+  voiceTrunkWebhookSecretPreview: z.string().nullable(),
+  /** `voice.trunk.webhookPath` — where the inbound listener mounts, e.g.
+   *  `/voice/inbound`. Null = the listener's own default. */
+  voiceTrunkWebhookPath: z.string().nullable(),
+  /** `voice.trunk.codec` — null leaves the choice to the bridge's negotiation. */
+  voiceTrunkCodec: VoiceTrunkCodecSchema.nullable(),
+  /** `voice.livekit.url` — the LiveKit server the SIP leg bridges into. */
+  voiceLivekitUrl: z.string().nullable(),
+  /** `voice.livekit.apiKey`, REDACTED. */
+  voiceLivekitApiKeyPreview: z.string().nullable(),
+  /** `voice.livekit.apiSecret`, REDACTED. */
+  voiceLivekitApiSecretPreview: z.string().nullable(),
+  /** `voice.inbound.allowlist` — caller numbers that reach the owner's own
+   *  personality. Null = key absent, which the consumer reads as "screen
+   *  everyone through the receptionist". An explicitly EMPTY allowlist is not
+   *  expressible on disk; `voiceInboundReceptionist` IS that policy. */
+  voiceInboundAllowlist: z.array(z.string()).nullable(),
+  /** `voice.inbound.receptionist` — personality answering non-allowlisted
+   *  callers, in a restricted scope. */
+  voiceInboundReceptionist: z.string().nullable(),
+  /** `voice.inbound.concurrencyCap` — ceiling on concurrent inbound calls. */
+  voiceInboundConcurrencyCap: z.number().nullable(),
+  /** `voice.inbound.perCallerPerHour` — per-caller ceiling in a rolling hour. */
+  voiceInboundPerCallerPerHour: z.number().nullable(),
+  /** `voice.inbound.dailyBudgetUsd` — daily spend ceiling across inbound calls. */
+  voiceInboundDailyBudgetUsd: z.number().nullable(),
+  /** `voice.inbound.prewarm` — which callers get the realtime socket opened
+   *  during ring. */
+  voiceInboundPrewarm: VoiceInboundPrewarmSchema.nullable(),
+  /** `voice.inbound.owner.platform` — where call summaries and refusal notices
+   *  are delivered. Required together with the chat id. */
+  voiceInboundOwnerPlatform: z.string().nullable(),
+  /** `voice.inbound.owner.chatId`. */
+  voiceInboundOwnerChatId: z.string().nullable(),
+  /** `voice.inbound.owner.botKey` — which bot delivers the notice in a
+   *  multi-bot deployment. Null = the default bot. */
+  voiceInboundOwnerBotKey: z.string().nullable(),
+  /** `voice.bargeIn.<surface>.*`, keyed by surface (`call` / `satellite` /
+   *  `browser`; an unset `browser` reads through the legacy `display.voice_*`
+   *  keys as a fallback — see `readLegacyBrowserBargeInTuning`). A surface
+   *  ABSENT from the map was never tuned — which is a different fact from
+   *  "tuned to the defaults" and is why this is a map and not fixed objects. */
+  voiceBargeIn: z.record(z.string(), VoiceBargeInTuningGetSchema),
+  /**
+   * `voice.filler.*` — the tool-call filler/tick keep-alive `VoiceSession`
+   * plays during a long tool call. Global, applied to every lane the same
+   * way — unlike `voiceBargeIn`, there is no per-surface split. `enabled` is
+   * never null (absent = true = on); the other three are null when unset, so
+   * the built-in default applies.
+   */
+  voiceFiller: z.object({
+    enabled: z.boolean(),
+    afterMs: z.number().nullable(),
+    text: z.string().nullable(),
+    tickIntervalMs: z.number().nullable(),
+  }),
+  /** `voice.bots[]` — the number → bot → personality table, in file order. */
+  voiceBots: z.array(VoiceBotGetSchema),
   // -- Settings-page additions (keys with no other UI home) ------------------
   /** Azure-only REST API version (`apiVersion`); null when unset. */
   apiVersion: z.string().nullable(),
@@ -1093,6 +1495,9 @@ const ConfigUpdateInput = z.object({
   debugPanelModel: z.string().nullable().optional(),
   adminEnabled: z.boolean().optional(),
   streamingEdits: z.enum(['off', 'dms', 'all']).optional(),
+  callStyle: z.enum(['liquid', 'orb', 'rings', 'personality']).optional(),
+  /** `personality` or `#RRGGBB`; anything else resolves to `personality`. */
+  callAccent: z.string().optional(),
   autoCompact: z.boolean().optional(),
   memoryConsolidationEnabled: z.boolean().optional(),
   memoryCaptureEnabled: z.boolean().optional(),
@@ -1113,6 +1518,142 @@ const ConfigUpdateInput = z.object({
   voiceTtsVoice: z.string().optional(),
   voiceTtsBaseUrl: z.string().optional(),
   voiceTtsModel: z.string().optional(),
+  /** `auxiliary.asr.command` — `command-stt`'s shell template; null clears the key. */
+  voiceSttCommand: z.string().nullable().optional(),
+  /** `auxiliary.tts.command` — `command-tts`'s shell template; null clears the key. */
+  voiceTtsCommand: z.string().nullable().optional(),
+  /** `auxiliary.tts.outputFormat`; null clears the key. */
+  voiceTtsOutputFormat: z.enum(['opus', 'mp3', 'wav', 'pcm']).nullable().optional(),
+  /** `auxiliary.tts.timeout`, seconds; null clears the key. */
+  voiceTtsTimeoutMs: z.number().int().min(1).max(3600).nullable().optional(),
+  /** `auxiliary.tts.maxTextLength`, chars; null clears the key. */
+  voiceTtsMaxTextLength: z.number().int().min(100).max(100_000).nullable().optional(),
+  /** `auxiliary.asr.timeout`, seconds; null clears the key. */
+  voiceSttTimeoutMs: z.number().int().min(1).max(3600).nullable().optional(),
+  /** `voice.trustedPlugins`; null (or an empty list) clears the key, which
+   *  turns the local-only egress gate OFF. */
+  voiceTrustedPlugins: z.array(z.string()).nullable().optional(),
+  /** `voice.defaultMode`; null clears the key (back to `mirror_inbound`). */
+  voiceDefaultMode: z.enum(['off', 'mirror_inbound', 'all']).nullable().optional(),
+  /** `voice.channels.<platform>.ttsOut`. Present = REPLACE the whole map (every
+   *  `voice.channels.` key is dropped, then these are written), so an omitted
+   *  platform loses its override. Keys are validated against the platform ids
+   *  `@ethosagent/config` accepts; an unknown one is REFUSED here rather than
+   *  dropped, because at an RPC boundary there is a caller to tell. */
+  voiceChannelTtsOut: z.record(z.string(), z.boolean()).optional(),
+  /** `voice.transcode.ffmpegPath`; null clears the key. */
+  voiceTranscodeFfmpegPath: z.string().nullable().optional(),
+  /** `voice.transcode.bitrateKbps`, 8–320; null clears the key. */
+  voiceTranscodeBitrateKbps: z.number().int().min(8).max(320).nullable().optional(),
+  /** `voice.transcode.timeout`, SECONDS, 1–600; null clears the key. */
+  voiceTranscodeTimeoutSec: z.number().int().min(1).max(600).nullable().optional(),
+  /** `voice.artifacts.abandonAfterDays`, 1–365; null clears the key. */
+  voiceArtifactAbandonAfterDays: z.number().int().min(1).max(365).nullable().optional(),
+  /** `voice.artifacts.maxTotalMb`, 1–102400; null clears the key. */
+  voiceArtifactMaxTotalMb: z.number().int().min(1).max(102_400).nullable().optional(),
+  /** `voice.tts.providers.*` — the named TTS roster. Present = REPLACE the whole
+   *  roster (every `voice.tts.providers.` key — and every legacy
+   *  `voice.providers.` key — is dropped, then these are written), so an omitted
+   *  entry is a deletion. Absent leaves the roster untouched. */
+  voiceTtsProviders: z
+    .record(z.string().regex(VoiceProviderNameRegex), VoiceProviderEntryUpdateSchema)
+    .optional(),
+  /** `voice.stt.providers.*` — the named STT roster. Same full-replacement rule. */
+  voiceSttProviders: z
+    .record(z.string().regex(VoiceProviderNameRegex), VoiceSttProviderEntryUpdateSchema)
+    .optional(),
+  /** `voice.realtime.providers.*` — the named realtime roster. Same
+   *  full-replacement rule: an omitted entry is a deletion. */
+  voiceRealtimeProviders: z
+    .record(z.string().regex(VoiceProviderNameRegex), VoiceRealtimeProviderEntryUpdateSchema)
+    .optional(),
+  /** `voice.realtime.default`; null clears the key. */
+  voiceRealtimeDefault: z.string().nullable().optional(),
+  /** `voice.tier`; null clears the key. */
+  voiceTier: z.enum(['pipeline', 'realtime']).nullable().optional(),
+  /** `voice.realtime.sessionBudgetUsd`; null clears the cap. */
+  voiceRealtimeSessionBudgetUsd: z.number().positive().max(10_000).nullable().optional(),
+  // -- Telephony write side --------------------------------------------------
+  // Scalars follow the null-clears rule above. The two exceptions worth reading
+  // before wiring a form:
+  //
+  //   1. Secrets (`voiceTrunkPassword`, `voiceTrunkWebhookSecret`,
+  //      `voiceLivekitApiKey`, `voiceLivekitApiSecret`) are WRITE-ONLY and never
+  //      echoed back. A blank or omitted value KEEPS the stored secret — the
+  //      browser only ever saw a preview, so treating blank as "erase" would
+  //      delete a credential every time someone saved an unrelated field. Send
+  //      null to actually clear one.
+  //   2. `voiceTrunkProvider: null` drops the WHOLE `voice.trunk.*` block, and
+  //      `voiceLivekitUrl: null` the whole `voice.livekit.*` block, secrets
+  //      included. The CLI parser requires provider+trunkId (and url+apiKey+
+  //      apiSecret) together, so a block cannot lose its anchor and stay
+  //      loadable — "clear the trunk" has to mean the block, not one key.
+  /** `voice.trunk.provider`; null clears the whole `voice.trunk.*` block. */
+  voiceTrunkProvider: VoiceTrunkProviderSchema.nullable().optional(),
+  /** `voice.trunk.trunkId`; required whenever the block exists. */
+  voiceTrunkId: z.string().nullable().optional(),
+  /** `voice.trunk.fromNumber`; null clears the key. */
+  voiceTrunkFromNumber: z.string().nullable().optional(),
+  /** `voice.trunk.username`; null clears the key. */
+  voiceTrunkUsername: z.string().nullable().optional(),
+  /** `voice.trunk.password`. Write-only; blank keeps the stored secret, null
+   *  clears it. */
+  voiceTrunkPassword: z.string().nullable().optional(),
+  /** `voice.trunk.webhookSecret`. Write-only; blank keeps, null clears. */
+  voiceTrunkWebhookSecret: z.string().nullable().optional(),
+  /** `voice.trunk.webhookPath`; must start with `/`. Null clears the key. */
+  voiceTrunkWebhookPath: z.string().regex(/^\//, 'must start with /').nullable().optional(),
+  /** `voice.trunk.codec`; null clears the key. */
+  voiceTrunkCodec: VoiceTrunkCodecSchema.nullable().optional(),
+  /** `voice.livekit.url`; null clears the whole `voice.livekit.*` block. */
+  voiceLivekitUrl: z.string().nullable().optional(),
+  /** `voice.livekit.apiKey`. Write-only; blank keeps, null clears. */
+  voiceLivekitApiKey: z.string().nullable().optional(),
+  /** `voice.livekit.apiSecret`. Write-only; blank keeps, null clears. */
+  voiceLivekitApiSecret: z.string().nullable().optional(),
+  /** `voice.inbound.allowlist`; null (or an empty list) clears the key, which
+   *  means "screen everyone through the receptionist". */
+  voiceInboundAllowlist: z.array(z.string()).nullable().optional(),
+  /** `voice.inbound.receptionist`; null clears the key. */
+  voiceInboundReceptionist: z.string().nullable().optional(),
+  /** `voice.inbound.concurrencyCap`, a positive integer; null clears the key. */
+  voiceInboundConcurrencyCap: z.number().int().min(1).max(1000).nullable().optional(),
+  /** `voice.inbound.perCallerPerHour`, a positive integer; null clears. */
+  voiceInboundPerCallerPerHour: z.number().int().min(1).max(1000).nullable().optional(),
+  /** `voice.inbound.dailyBudgetUsd`, a positive number; null clears the cap. */
+  voiceInboundDailyBudgetUsd: z.number().positive().max(100_000).nullable().optional(),
+  /** `voice.inbound.prewarm`; null clears the key. */
+  voiceInboundPrewarm: VoiceInboundPrewarmSchema.nullable().optional(),
+  /** `voice.inbound.owner.platform`; null clears the whole
+   *  `voice.inbound.owner.*` block (platform and chatId are required together,
+   *  so half a destination is a parse error rather than a route). */
+  voiceInboundOwnerPlatform: z.string().nullable().optional(),
+  /** `voice.inbound.owner.chatId`; required whenever the owner block exists. */
+  voiceInboundOwnerChatId: z.string().nullable().optional(),
+  /** `voice.inbound.owner.botKey`; null clears the key. */
+  voiceInboundOwnerBotKey: z.string().nullable().optional(),
+  /** `voice.bargeIn.<surface>.*`. Present = REPLACE the whole block (every
+   *  `voice.bargeIn.` key is dropped, then these are written), so an omitted
+   *  surface loses its tuning. Keys must be `call`, `satellite`, or `browser`;
+   *  an unknown surface is REFUSED here rather than dropped, because at an RPC
+   *  boundary there is a caller to tell. */
+  voiceBargeIn: z.record(z.string(), VoiceBargeInTuningUpdateSchema).optional(),
+  /** `voice.filler.*`. Per-field merge; null clears one key back to its
+   *  built-in default. `afterMs`/`tickIntervalMs` are bounded the same as the
+   *  `VoiceSession` debounce/interval they configure. */
+  voiceFiller: z
+    .object({
+      enabled: z.boolean().nullable().optional(),
+      afterMs: z.number().int().min(0).max(60_000).nullable().optional(),
+      text: z.string().min(1).max(200).nullable().optional(),
+      tickIntervalMs: z.number().int().min(0).max(60_000).nullable().optional(),
+    })
+    .optional(),
+  /** `voice.bots[]` — the number → bot → personality table. Present = REPLACE
+   *  the whole list (every `voice.bots.` key is dropped, then these are
+   *  written, renumbered from 0), so a removed row is a deletion. Absent leaves
+   *  the table untouched. */
+  voiceBots: z.array(VoiceBotUpdateSchema).optional(),
   // -- Settings-page additions (see the null-clears note above) --------------
   /** Azure-only REST API version (`apiVersion`). */
   apiVersion: z.string().nullable().optional(),
@@ -1932,6 +2473,13 @@ const KanbanUpdateStatusInput = z.object({
 });
 const KanbanUpdateStatusOutput = z.object({ task: KanbanTaskSchema });
 
+const KanbanBulkUpdateStatusInput = z.object({
+  team: z.string().min(1),
+  taskIds: z.array(z.string().min(1)).min(1),
+  status: KanbanTaskStatusSchema,
+});
+const KanbanBulkUpdateStatusOutput = z.object({ tasks: z.array(KanbanTaskSchema) });
+
 const KanbanCreateTaskInput = z.object({
   team: z.string().min(1),
   title: z.string().min(1),
@@ -1954,6 +2502,13 @@ const KanbanAssignInput = z.object({
 });
 const KanbanAssignOutput = z.object({ task: KanbanTaskSchema });
 
+const KanbanBulkAssignInput = z.object({
+  team: z.string().min(1),
+  taskIds: z.array(z.string().min(1)).min(1),
+  assignee: z.string().min(1),
+});
+const KanbanBulkAssignOutput = z.object({ tasks: z.array(KanbanTaskSchema) });
+
 const KanbanGetTaskInput = z.object({ team: z.string().min(1), taskId: z.string().min(1) });
 const KanbanGetTaskOutput = z.object({
   task: KanbanTaskSchema,
@@ -1972,9 +2527,11 @@ const kanban = {
   list: oc.output(KanbanListOutput),
   getBoard: oc.input(KanbanGetBoardInput).output(KanbanGetBoardOutput),
   updateStatus: oc.input(KanbanUpdateStatusInput).output(KanbanUpdateStatusOutput),
+  bulkUpdateStatus: oc.input(KanbanBulkUpdateStatusInput).output(KanbanBulkUpdateStatusOutput),
   createTask: oc.input(KanbanCreateTaskInput).output(KanbanCreateTaskOutput),
   listAgents: oc.input(KanbanListAgentsInput).output(KanbanListAgentsOutput),
   assign: oc.input(KanbanAssignInput).output(KanbanAssignOutput),
+  bulkAssign: oc.input(KanbanBulkAssignInput).output(KanbanBulkAssignOutput),
   getTask: oc.input(KanbanGetTaskInput).output(KanbanGetTaskOutput),
   addComment: oc.input(KanbanAddCommentInput).output(KanbanAddCommentOutput),
 };
@@ -2533,24 +3090,526 @@ const digest = {
 const VoiceTranscribeInput = z.object({
   audio: z.string().min(1),
   mimeType: z.string().min(1),
+  /** Personality listening. Without it the server cannot honour a personality's
+   *  declared `voice.stt_provider` and uses the default `auxiliary.asr` entry —
+   *  the mirror of `personalityId` on `voice.synthesize`. */
+  personalityId: z.string().optional(),
+  /** BCP-47 tag handed to the provider, when the client knows it. */
+  language: z.string().optional(),
 });
 const VoiceTranscribeOutput = z.object({
   transcript: z.string(),
 });
 const VoiceSynthesizeInput = z.object({
   text: z.string().min(1),
+  /** Global default voice the client read from config. The LOWEST precedence
+   *  rung — the active personality's `voice.tts_voice` beats it, and a
+   *  language-specific entry beats that (`resolveVoicePreferences`). */
   voice: z.string().optional(),
+  /** Personality speaking this reply. Without it the server cannot honour a
+   *  personality's declared voice and falls back to the global default. */
+  personalityId: z.string().optional(),
+  /** BCP-47 tag of the reply, selecting from the personality's language map. */
+  language: z.string().optional(),
+  /**
+   * Audition an unsaved selection: `provider` names a
+   * `voice.tts.providers.<name>` roster entry and `voice` the voice id, and
+   * both BEAT the personality's own `voice` block and the global default. The
+   * personality editor's Preview button uses it, since the selection it is
+   * previewing is not on disk yet.
+   *
+   * `provider` is a roster LABEL, never a provider id or a credential — an
+   * unknown label falls back to the default entry exactly as a personality's
+   * would, and the egress gate still keys on the resolved provider.
+   */
+  override: z.object({ provider: z.string().optional(), voice: z.string().optional() }).optional(),
 });
 const VoiceSynthesizeOutput = z.object({
   audio: z.string(),
   format: z.enum(['opus', 'mp3', 'wav', 'pcm']),
   mimeType: z.string(),
+  /** Provider id that ACTUALLY synthesized this audio. Optional so an older
+   *  client that never asked for it keeps validating. */
+  provider: z.string().optional(),
 });
+
+/**
+ * The batch-RPC fallback tier's turn driver — for a browser that cannot
+ * stream (`talk-mode-client.ts`'s `forceBatch`/no-`WebSocket` path). Drives
+ * one agent turn against the SAME browser voice lane
+ * (`voice:<botKey>:browser:<sessionId>`) a streaming connection for this
+ * `sessionId` would use — never the typed chat session (Conflict 1,
+ * plan/phases/voice-live-personality.md §7). `sessionId` here is the CHAT
+ * session id this call belongs to, the same field/meaning as the streaming
+ * lane's `hello.sessionId` — telemetry and lane-key derivation only, never
+ * what actually persists the turn.
+ */
+const VoiceRunTurnInput = z.object({
+  text: z.string().min(1),
+  sessionId: z.string().optional(),
+  personalityId: z.string().optional(),
+});
+const VoiceRunTurnOutput = z.object({ reply: z.string() });
+
+/**
+ * What one selectable TTS entry can do. `providerId` is the registered provider
+ * the entry names (null = nothing configured). `voices` is the provider's
+ * advertised `caps.voices`: a list means the voice id must come FROM it, `null`
+ * means the provider takes open-ended ids (Kokoro, a `command-tts` recipe) and
+ * the surface should offer free text rather than guess a list.
+ */
+const VoiceTtsEntrySchema = z.object({
+  providerId: z.string().nullable(),
+  voices: z.array(z.string()).nullable(),
+});
+const VoiceTtsEntriesOutput = z.object({
+  /** The `auxiliary.tts` default entry — what a personality that names nothing gets. */
+  default: VoiceTtsEntrySchema,
+  /** `voice.tts.providers.*`, keyed by the operator's label. */
+  roster: z.record(z.string(), VoiceTtsEntrySchema),
+});
+
+/**
+ * One selectable STT entry. `providerId` only: an ear advertises no voice ids,
+ * so there is nothing to construct a provider to read, and this procedure makes
+ * no provider at all.
+ */
+const VoiceSttEntrySchema = z.object({ providerId: z.string().nullable() });
+const VoiceSttEntriesOutput = z.object({
+  /** The `auxiliary.asr` default entry — what a personality that names nothing gets. */
+  default: VoiceSttEntrySchema,
+  /** `voice.stt.providers.*`, keyed by the operator's label. */
+  roster: z.record(z.string(), VoiceSttEntrySchema),
+});
+
+/**
+ * One selectable REALTIME entry — `providerId` only, for the same reason the
+ * STT one is: this procedure constructs no provider, so it can report what an
+ * entry NAMES but not what it advertises.
+ */
+const VoiceRealtimeEntrySchema = z.object({ providerId: z.string().nullable() });
+/**
+ * The roster a personality's `voice.realtime_provider` picks from.
+ *
+ * There is no `auxiliary.*` entry under this tier the way there is under TTS
+ * and STT, so instead of a synthetic "default entry" this carries the roster
+ * label `voice.realtime.default` NAMES. A deployment with an empty roster has
+ * no realtime tier rather than an implicit one, and the editor says so instead
+ * of offering a Default that resolves to nothing.
+ */
+const VoiceRealtimeEntriesOutput = z.object({
+  roster: z.record(z.string(), VoiceRealtimeEntrySchema),
+  /** The label `voice.realtime.default` names, or null when the key is unset. */
+  defaultEntryName: z.string().nullable(),
+});
+
+const VoiceRealtimeTokenInput = z.object({
+  /** Personality about to talk. Its `voice.realtime_provider` picks the roster
+   *  entry and its `voice.tier` decides whether the realtime tier runs at all. */
+  personalityId: z.string().optional(),
+});
+
+/**
+ * Why the browser is NOT getting a realtime session. Each reason renders as
+ * different copy, which is the whole point of typing them: "this deployment has
+ * no realtime provider" and "your local-only gate refused the one it has" are
+ * the same non-event to the user unless the surface can tell them apart.
+ *
+ * `pipeline_preferred` is not a failure — it is the configured answer, so the
+ * surface renders no notice and simply starts the pipeline call.
+ */
+const VoiceRealtimeRefusalReason = z.enum([
+  /** `voice.tier` (personality first, then deployment) asked for the pipeline. */
+  'pipeline_preferred',
+  /** No realtime roster entry is configured, or none is named as the default. */
+  'not_configured',
+  /** The personality (or `voice.realtime.default`) names an entry this deployment lacks. */
+  'unknown_entry',
+  /** `voice.trustedPlugins` refuses the resolved provider — the local-only egress gate. */
+  'untrusted_provider',
+  /** The provider is server-relayed (`caps.ephemeralToken !== true`) — Gemini Live. */
+  'no_browser_token',
+  /** The provider would not construct, or the mint itself failed. */
+  'provider_unavailable',
+]);
+
+/**
+ * A minted browser-direct session, or a typed refusal.
+ *
+ * The success arm carries BOTH sample rates because the two are not necessarily
+ * equal (`RealtimeVoiceCapabilities` in `@ethosagent/types`): the browser
+ * captures at `inputSampleRate` and plays out at `outputSampleRate`.
+ *
+ * `token` is a short-lived provider credential minted for this session. The
+ * operator's long-lived API key never appears here, and no part of it appears
+ * in a refusal message either.
+ */
+const VoiceRealtimeTokenOutput = z.discriminatedUnion('ok', [
+  z.object({
+    ok: z.literal(true),
+    /** The REGISTERED provider id that minted it (`openai-realtime`), never the roster label. */
+    providerId: z.string(),
+    /** Model the token was minted against; null when the provider pins none. */
+    model: z.string().nullable(),
+    token: z.string(),
+    /** Absolute expiry, epoch milliseconds. Not a TTL — no clock arithmetic at the edge. */
+    expiresAt: z.number(),
+    /** Endpoint the browser connects to with `token`. */
+    url: z.string(),
+    inputSampleRate: z.number(),
+    outputSampleRate: z.number(),
+  }),
+  z.object({
+    ok: z.literal(false),
+    reason: VoiceRealtimeRefusalReason,
+    /** Renderable sentence. Never carries credentials. */
+    message: z.string(),
+    /** The provider that was actually about to run, when one was resolved. */
+    providerId: z.string().nullable(),
+  }),
+]);
+
+/**
+ * Per-conversation voice mode for the browser chat header.
+ *
+ * The mode is durable (`LaneVoiceModeStore`) and SHARED with the gateway's
+ * channel lanes, so a mode set here is the same fact the gateway reads. The
+ * `default` on the read is the deployment's `voice.defaultMode`: a lane with no
+ * override is INHERITING, and the header says so rather than pretending the
+ * inherited value was chosen.
+ */
+const VoiceLaneModeGetInput = z.object({ sessionId: z.string().min(1) });
+const VoiceLaneModeGetOutput = z.object({
+  /** The lane's effective mode — its override, or `default` when it has none. */
+  mode: z.enum(VOICE_MODES),
+  /** `voice.defaultMode` — what an unset lane inherits. */
+  default: z.enum(VOICE_MODES),
+});
+const VoiceLaneModeSetInput = z.object({
+  sessionId: z.string().min(1),
+  mode: z.enum(VOICE_MODES),
+});
+const VoiceLaneModeSetOutput = z.object({ mode: z.enum(VOICE_MODES) });
+
+// --- Wake satellites (voice V3) ---------------------------------------------
+
+/**
+ * One connected wake satellite, as Settings → Voice renders it.
+ *
+ * Everything here is what the NODE reported, not what the server inferred. A
+ * microphone in a room that misreports whether it is listening is a privacy
+ * defect, so `state` comes from the only component that can see the capture
+ * loop, `probes` carries `ethos listen doctor`'s findings so the row can name
+ * the failing dependency inline, and `lastWake` is the receipt that a phrase
+ * actually reached a personality.
+ */
+const SatelliteNodeSchema = z.object({
+  nodeId: z.string(),
+  laneId: z.string(),
+  displayName: z.string().nullable(),
+  capabilities: z.object({
+    edgeStt: z.boolean(),
+    playback: z.boolean(),
+    captureSampleRate: z.number(),
+    /** False → the SERVER matches wake phrases for this node, from the transcript. */
+    phraseMatch: z.boolean(),
+  }),
+  state: z.enum(['listening', 'muted', 'wake_off', 'speaking', 'degraded']),
+  /** Which probe failed, which device disappeared. Renders inline on the row. */
+  stateDetail: z.string().nullable(),
+  wakeEnabled: z.boolean(),
+  probes: z.array(z.object({ name: z.string(), ok: z.boolean(), detail: z.string().nullable() })),
+  lastWake: z.object({ phrase: z.string(), personalityId: z.string(), at: z.number() }).nullable(),
+  /**
+   * The open addressing window: who a follow-up with no wake phrase reaches,
+   * and until when. Null means the next utterance has to name somebody.
+   */
+  conversation: z.object({ personalityId: z.string(), until: z.number() }).nullable(),
+  connectedAt: z.number(),
+});
+
+const SatellitesListOutput = z.object({ nodes: z.array(SatelliteNodeSchema) });
+
+const SatelliteSetWakeEnabledInput = z.object({
+  nodeId: z.string().min(1),
+  enabled: z.boolean(),
+});
+/** `false` = no such node is connected. The row says "not reachable" rather
+ *  than reporting a mute that never left the process. */
+const SatelliteSetWakeEnabledOutput = z.object({ ok: z.boolean() });
+
+/** One editable wake route. `id` is the yaml key, so it carries the same
+ *  charset the config parser will match on the way back in. */
+const WakeRouteSchema = z.object({
+  id: z.string().regex(/^[A-Za-z0-9_-]+$/),
+  phrase: z.string().min(1),
+  personalityId: z.string().min(1),
+  /** Route-level opt-in for a privileged personality (eng-review D13). */
+  privileged: z.boolean(),
+  enabled: z.boolean(),
+});
+
+/**
+ * One route as READ — the effective table, which is wider than the file.
+ *
+ * Every unprivileged personality answers to `hey <name>` without any config, so
+ * the read carries those synthesized routes alongside the configured ones and
+ * `implicit` is how the editor tells them apart: configured rows are editable,
+ * implicit rows are shown and not saved back. The id is only `min(1)` here
+ * because a synthesized id is `auto:<personalityId>`, deliberately outside the
+ * charset a config key may use — which is also why the WRITE schema above stays
+ * strict and carries no `implicit` field. An implicit route is not something the
+ * editor can send back.
+ */
+const WakeRouteViewSchema = z.object({
+  id: z.string().min(1),
+  phrase: z.string().min(1),
+  personalityId: z.string().min(1),
+  privileged: z.boolean(),
+  enabled: z.boolean(),
+  /** True for a `hey <name>` default; false for a `voice.wake.routes` entry. */
+  implicit: z.boolean(),
+});
+
+/**
+ * Deployment-wide satellite knobs, defaults already applied.
+ *
+ * Read-only through this namespace: the routing TABLE is what the wake-route
+ * manager edits, and these scalars are a separate Settings surface. Returned on
+ * the read so the manager can show what the routes will run under.
+ */
+const WakeSettingsSchema = z.object({
+  engine: z.enum(['fallback', 'sherpa', 'openwakeword']),
+  sensitivity: z.number(),
+  confirmationFrames: z.number(),
+  edgeStt: z.boolean(),
+  idleTimeoutMs: z.number(),
+  wakeEnabled: z.boolean(),
+});
+
+const WakeRoutesGetOutput = z.object({
+  routes: z.array(WakeRouteViewSchema),
+  settings: WakeSettingsSchema,
+});
+
+/**
+ * Replace the whole route table.
+ *
+ * Wholesale, not a merge: a route the operator deleted has to actually stop
+ * answering the door. The write round-trips through `config.yaml` and then
+ * pushes to every connected satellite, so a save takes effect without a
+ * restart (eng-review D5).
+ */
+const WakeRoutesSetInput = z.object({ routes: z.array(WakeRouteSchema) });
+
+// ---------------------------------------------------------------------------
+// Calls — read-only view of the durable telephony call log
+//
+// The gateway opens a row when a number rings and closes it on hang-up. This is
+// the operator's window onto that: what rang, who was refused and why, what it
+// cost, and whether a call is up right now.
+//
+// Read-only by construction: there is no RPC that starts, patches, hangs up or
+// prunes a call. Dialling out and ending a live call are the agent's and the
+// gateway's decisions, made against their own botKeys; a settings page must not
+// be able to place a call or cut one off.
+// ---------------------------------------------------------------------------
+
+export const CallDirectionSchema = z.enum(['inbound', 'outbound']);
+
+/** `screened` / `refused` are decisions Ethos made (not allowlisted, budget
+ *  spent); `failed` is the network or the provider letting us down. An operator
+ *  reading the list needs to tell "we said no" from "it broke". */
+export const CallStatusSchema = z.enum([
+  'ringing',
+  'live',
+  'completed',
+  'screened',
+  'refused',
+  'failed',
+]);
+
+export const CallTierSchema = z.enum(['pipeline', 'realtime']);
+
+/**
+ * One row of the call list.
+ *
+ * Deliberately NOT the whole record: a call carries its full transcript, and a
+ * 200-row list dragging 200 transcripts through the wire is the wrong shape —
+ * it is slow, it is a lot of conversation sitting in a browser network log, and
+ * the list renders none of it. `summaryPreview` is the post-call summary
+ * truncated to 200 characters; `hasTranscript` says whether opening the row
+ * will show anything. `voice.calls.get` returns the full text.
+ */
+export const CallSummarySchema = z.object({
+  /** The provider's call id — stable for the life of the call. */
+  id: z.string(),
+  botKey: z.string(),
+  /** `voice:<botKey>:sip:<callerId>` — the lane the turns ran in. */
+  laneKey: z.string(),
+  direction: CallDirectionSchema,
+  fromNumber: z.string(),
+  toNumber: z.string(),
+  personalityId: z.string().nullable(),
+  tier: CallTierSchema.nullable(),
+  status: CallStatusSchema,
+  /** Epoch milliseconds. */
+  startedAt: z.number(),
+  /** Epoch milliseconds; null while the call is still up. */
+  endedAt: z.number().nullable(),
+  /** Why a screened/refused call was turned away (`not_allowlisted`,
+   *  `over_budget`, … or free text). Free-form on purpose — a refusal reason is
+   *  shown to a human and a closed set would force a schema change per guard. */
+  reason: z.string().nullable(),
+  /** Post-call summary, truncated to 200 characters. Null when there is none. */
+  summaryPreview: z.string().nullable(),
+  /** Whether a transcript exists for this call — `get` returns it. */
+  hasTranscript: z.boolean(),
+  costUsd: z.number().nullable(),
+});
+
+/** One call with the text the list withholds. */
+export const CallDetailSchema = CallSummarySchema.extend({
+  /** The full post-call summary; null when there is none. */
+  summary: z.string().nullable(),
+  /** The full transcript; null when there is none. */
+  transcript: z.string().nullable(),
+});
+
+export type CallDirection = z.infer<typeof CallDirectionSchema>;
+export type CallStatus = z.infer<typeof CallStatusSchema>;
+export type CallSummary = z.infer<typeof CallSummarySchema>;
+export type CallDetail = z.infer<typeof CallDetailSchema>;
+
+const CallsListInput = z.object({
+  /** Rows to return, newest first. Clamped to 1–200 by the call log. */
+  limit: z.number().int().min(1).max(200).optional(),
+  /** Keep only inbound / outbound calls. Absent = both. */
+  direction: CallDirectionSchema.optional(),
+  /** Keep only calls in this state. Absent = every state. */
+  status: CallStatusSchema.optional(),
+});
+
+const CallsListOutput = z.object({ calls: z.array(CallSummarySchema) });
+
+/** Live calls are `ringing` or `live`, OLDEST first — the order a "calls in
+ *  progress" indicator wants (the call that has been waiting longest is the one
+ *  worth looking at). */
+const CallsActiveOutput = z.object({ calls: z.array(CallSummarySchema) });
+
+const CallsGetInput = z.object({ id: z.string().min(1) });
+
+/** `call` is null for an unknown id — a pruned or mistyped call is an empty
+ *  detail pane, not an error to throw at the UI. */
+const CallsGetOutput = z.object({ call: CallDetailSchema.nullable() });
 
 /** @experimental */
 const voice = {
   transcribe: oc.input(VoiceTranscribeInput).output(VoiceTranscribeOutput),
   synthesize: oc.input(VoiceSynthesizeInput).output(VoiceSynthesizeOutput),
+  /** Batch-RPC fallback tier's turn driver — runs on the browser voice lane,
+   *  never the chat session. See `VoiceRunTurnInput`'s doc comment. */
+  runTurn: oc.input(VoiceRunTurnInput).output(VoiceRunTurnOutput),
+  /** Selectable TTS entries + the voice ids each advertises. Read-only: it
+   *  constructs providers to read their caps and synthesizes nothing. */
+  ttsEntries: oc.output(VoiceTtsEntriesOutput),
+  /** Selectable STT entries. Read-only and construction-free. */
+  sttEntries: oc.output(VoiceSttEntriesOutput),
+  /** Selectable REALTIME entries. Read-only and construction-free. */
+  realtimeEntries: oc.output(VoiceRealtimeEntriesOutput),
+  /** Mint a browser-direct realtime credential, or say why not. */
+  realtimeToken: oc.input(VoiceRealtimeTokenInput).output(VoiceRealtimeTokenOutput),
+  /** Read / write ONE conversation's durable voice mode. */
+  laneMode: {
+    get: oc.input(VoiceLaneModeGetInput).output(VoiceLaneModeGetOutput),
+    set: oc.input(VoiceLaneModeSetInput).output(VoiceLaneModeSetOutput),
+  },
+  /** Connected wake satellites — the Settings → Voice liveness rows. */
+  satellites: {
+    list: oc.output(SatellitesListOutput),
+    /** Mute / unmute ONE node. The node persists it across restarts. */
+    setWakeEnabled: oc.input(SatelliteSetWakeEnabledInput).output(SatelliteSetWakeEnabledOutput),
+  },
+  /** The wake-phrase → personality table. */
+  wakeRoutes: {
+    get: oc.output(WakeRoutesGetOutput),
+    set: oc.input(WakeRoutesSetInput).output(WakeRoutesGetOutput),
+  },
+  /** Telephony call history. Read-only — see the block comment above the
+   *  schemas. A deployment with no call log reports an empty list rather than
+   *  failing, so the Communications tab renders an empty state, not an error. */
+  calls: {
+    /** Recent calls, newest first — the Communications call list. */
+    list: oc.input(CallsListInput).output(CallsListOutput),
+    /** In-progress calls — the live-call indicator. */
+    active: oc.output(CallsActiveOutput),
+    /** One call with its transcript and summary. */
+    get: oc.input(CallsGetInput).output(CallsGetOutput),
+  },
+};
+
+// ---------------------------------------------------------------------------
+// Deliveries — read-only view of the durable delivery-obligation ledger
+//
+// The gateway writes a `pending` obligation before every covered outbound send
+// and flips it to `delivered` only on a confirmed platform ack. This namespace
+// is the operator's window onto that: how many replies are owed, how many were
+// abandoned, and — for a voice deployment — the same counts for voice notes,
+// whose payload is an artifact on disk.
+//
+// Read-only by construction: there is no RPC that records, claims, delivers or
+// prunes. Redelivery is the gateway's decision, made against its own botKeys;
+// a settings page must not be able to re-send someone's message.
+// ---------------------------------------------------------------------------
+
+const DeliveryStatusCountsSchema = z.object({
+  pending: z.number(),
+  redelivering: z.number(),
+  delivered: z.number(),
+  abandoned: z.number(),
+});
+
+const DeliveryStatsSchema = DeliveryStatusCountsSchema.extend({
+  /** The same counts restricted to `kind = 'voice'`, so a voice deployment can
+   *  see whether the loss it is looking at is specific to voice notes. */
+  voice: DeliveryStatusCountsSchema,
+});
+
+const DeliveryObligationSchema = z.object({
+  id: z.string(),
+  platform: z.string(),
+  chatId: z.string(),
+  /** Null for the root chat — a thread is a distinct conversation. */
+  threadId: z.string().nullable(),
+  status: z.enum(['pending', 'redelivering', 'delivered', 'abandoned']),
+  kind: z.enum(['text', 'voice']),
+  /**
+   * The reply text — for a voice obligation, the SPOKEN text — truncated to 200
+   * characters. Nothing here is redacted: the operator owns this text and it is
+   * their own agent's outbound reply. It is truncated because a settings page
+   * asking "what is still owed" must not become a way to read whole
+   * conversations out of the ledger, on screen or in a browser network log.
+   */
+  content: z.string(),
+  /** Container of the stored artifact for a voice obligation; null for text. */
+  mediaFormat: z.string().nullable(),
+  /** Epoch milliseconds. */
+  createdAt: z.number(),
+});
+
+const DeliveriesSummaryInput = z.object({
+  /** Rows to return, newest first. Clamped to 1–200 by the ledger. */
+  limit: z.number().int().min(1).max(200).optional(),
+});
+
+const DeliveriesSummaryOutput = z.object({
+  stats: DeliveryStatsSchema,
+  recent: z.array(DeliveryObligationSchema),
+});
+
+/** @experimental */
+const deliveries = {
+  summary: oc.input(DeliveriesSummaryInput).output(DeliveriesSummaryOutput),
 };
 
 // ---------------------------------------------------------------------------
@@ -2685,6 +3744,7 @@ const ToolSettingsSecretBindingFieldSchema = z.object({
   label: z.string(),
   secretKind: z.string(),
   required: z.boolean().optional(),
+  helpText: z.string().optional(),
 });
 const ToolSettingsSchemaSchema = z.object({
   fields: z.array(
@@ -2717,6 +3777,52 @@ const toolSettings = {
   setForPersonality: oc
     .input(z.object({ personalityId: z.string().min(1), values: ToolSettingsValuesSchema }))
     .output(z.object({ ok: z.literal(true), storage: ToolStorageSchema })),
+};
+
+// ---------------------------------------------------------------------------
+// Documents — the operator's view of the files the agent writes
+//
+// Rooted at the personality's declared `fs_reach.workdir`, NOT its personality
+// directory: SOUL.md / config.yaml / mcp.yaml stay off this surface. Every
+// `path` is RELATIVE to that root; the service joins and lets `ScopedStorage`
+// judge, so a `..` or absolute path is refused rather than interpreted.
+//
+// Bytes never travel over RPC. Download is a streaming, cookie-authenticated
+// `GET /documents/download` — see `apps/web-api/src/routes/documents.ts`.
+// ---------------------------------------------------------------------------
+
+const DocumentEntrySchema = z.object({
+  name: z.string(),
+  /** Path relative to the workdir root — feed it straight back to list/delete. */
+  path: z.string(),
+  isDir: z.boolean(),
+  /** Absent for directories and for entries that could not be stat'd. */
+  size: z.number().optional(),
+  mtimeMs: z.number().optional(),
+  /** Symlinks are LISTED so the operator can see them, but refused on
+   *  download and delete — they can point outside the workdir. */
+  isSymlink: z.boolean(),
+});
+
+/** Omitted `personalityId` means the configured default personality. */
+const DocumentsPersonalityInput = z.object({ personalityId: z.string().min(1).optional() });
+
+const DocumentsRootOutput = z.object({ root: z.string(), personalityId: z.string() });
+
+const DocumentsListInput = DocumentsPersonalityInput.extend({
+  /** Subdirectory relative to the root. Omitted = the root itself. */
+  path: z.string().optional(),
+});
+const DocumentsListOutput = z.object({ entries: z.array(DocumentEntrySchema) });
+
+const DocumentsDeleteInput = DocumentsPersonalityInput.extend({ path: z.string().min(1) });
+const DocumentsDeleteOutput = z.object({ ok: z.literal(true) });
+
+/** @experimental */
+const documents = {
+  root: oc.input(DocumentsPersonalityInput).output(DocumentsRootOutput),
+  list: oc.input(DocumentsListInput).output(DocumentsListOutput),
+  delete: oc.input(DocumentsDeleteInput).output(DocumentsDeleteOutput),
 };
 
 // ---------------------------------------------------------------------------
@@ -2755,9 +3861,11 @@ export const contract = {
   tasks,
   digest,
   voice,
+  deliveries,
   a2a,
   namedSecrets,
   toolSettings,
+  documents,
 };
 
 export type Contract = typeof contract;

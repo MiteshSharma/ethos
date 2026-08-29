@@ -19,6 +19,9 @@ function fakeClock(start = 1_000_000) {
 interface EditCall {
   messageId: string;
   text: string;
+  /** `true` only on the terminal edit — adapters key terminal-only rendering
+   *  (Slack's long-answer snippet fallback) off this. */
+  final?: boolean;
 }
 
 function fakeAdapter(opts: { editResult?: () => DeliveryResult } = {}) {
@@ -33,8 +36,13 @@ function fakeAdapter(opts: { editResult?: () => DeliveryResult } = {}) {
       return { ok: true, messageId: String(nextId++) };
     }),
     editMessage: vi.fn(
-      async (_chatId: string, messageId: string, text: string): Promise<DeliveryResult> => {
-        edits.push({ messageId, text });
+      async (
+        _chatId: string,
+        messageId: string,
+        text: string,
+        editOpts?: { final?: boolean },
+      ): Promise<DeliveryResult> => {
+        edits.push({ messageId, text, ...(editOpts?.final ? { final: true } : {}) });
         return opts.editResult ? opts.editResult() : { ok: true, messageId };
       },
     ),
@@ -133,6 +141,23 @@ describe('DraftStreamer', () => {
     expect(adapter.edits.at(-1)?.text).toBe('Hello world');
     // Final content registered in dedup.
     expect(dedup.shouldSend('sess-1', 'Hello world')).toBe(false);
+  });
+
+  // SP-B3 — the terminal edit is the only one an adapter may render
+  // differently (Slack collapses an over-long answer into a lead + file).
+  // Intermediate flushes must stay unmarked, or the adapter would collapse a
+  // still-growing draft on every flush.
+  it('marks only the terminal edit with final: true', async () => {
+    const adapter = fakeAdapter();
+    const clock = fakeClock();
+    const { streamer } = makeStreamer(adapter, clock);
+
+    await streamer.pushText('Hel');
+    clock.advance(3000);
+    await streamer.pushText('Hello wor');
+    await streamer.finalize('Hello world');
+
+    expect(adapter.edits.map((e) => e.final)).toEqual([undefined, true]);
   });
 
   it('emits a throttled intermediate edit once the interval elapses', async () => {

@@ -3,6 +3,7 @@ import type {
   BackgroundJobEvent,
   BackgroundJobEventType,
   CreateBackgroundJobInput,
+  GetJobEventsOptions,
   JobStore,
 } from '@ethosagent/types';
 import { describe, expect, it } from 'vitest';
@@ -35,6 +36,8 @@ class FakeJobStore implements JobStore {
   async requestCancel(id: string): Promise<void> {
     this.canceled.push(id);
   }
+  async markBlocked(): Promise<void> {}
+  async resumeFromBlocked(): Promise<void> {}
   async finish(): Promise<void> {}
   async listByRoot(rootSessionKey: string): Promise<BackgroundJob[]> {
     return [...this.jobs.values()]
@@ -45,6 +48,9 @@ class FakeJobStore implements JobStore {
     return 0;
   }
   async countActiveByPersonality(): Promise<number> {
+    return 0;
+  }
+  async countActive(): Promise<number> {
     return 0;
   }
   async reclaimStale(): Promise<BackgroundJob[]> {
@@ -66,9 +72,16 @@ class FakeJobStore implements JobStore {
     return true;
   }
   async releaseDelivery(): Promise<void> {}
+  async claimNotice(): Promise<boolean> {
+    return true;
+  }
+  async releaseNotice(): Promise<void> {}
   async appendEvent(): Promise<void> {}
-  async getEvents(jobId: string): Promise<BackgroundJobEvent[]> {
-    return this.events.get(jobId) ?? [];
+  async getEvents(jobId: string, opts?: GetJobEventsOptions): Promise<BackgroundJobEvent[]> {
+    const list = this.events.get(jobId) ?? [];
+    // The service reads a bounded tail (I21); the double honours it rather than
+    // returning everything and letting a broken bound pass unnoticed.
+    return opts?.limit === undefined ? list : list.slice(-opts.limit);
   }
 }
 

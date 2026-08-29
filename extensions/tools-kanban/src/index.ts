@@ -1,4 +1,5 @@
 import type {
+  BlockKind,
   KanbanStore,
   Task,
   TaskComment,
@@ -7,7 +8,7 @@ import type {
   TaskStatus,
   WorkspaceMode,
 } from '@ethosagent/kanban-store';
-import type { HookRegistry, Tool, ToolContext, ToolResult } from '@ethosagent/types';
+import type { HookRegistry, LLMProvider, Tool, ToolContext, ToolResult } from '@ethosagent/types';
 
 export { type PostmortemHandlerOptions, registerPostmortemHandler } from './postmortem';
 export {
@@ -33,7 +34,8 @@ const RULES = [
   'STATUSES',
   '- todo → ready → running → done',
   '- blocked (called out explicitly via kanban_block; unblock with kanban_unblock)',
-  '- needs_revision (a before_ticket_complete verifier rejected the completion; re-claim to retry)',
+  '- needs_revision (a before_ticket_complete verifier rejected the completion, OR kanban_block was called ' +
+    'with the same `kind` too many times in a row; re-claim to retry)',
   '- archived (soft-delete; preserves audit trail)',
 ].join('\n');
 
@@ -69,6 +71,7 @@ const STATUS_VALUES: TaskStatus[] = [
   'needs_revision',
 ];
 const WORKSPACE_MODES: WorkspaceMode[] = ['scratch', 'worktree', 'dir'];
+const BLOCK_KINDS: BlockKind[] = ['dependency', 'needs_input', 'capability', 'transient'];
 
 function isStatus(s: unknown): s is TaskStatus {
   return typeof s === 'string' && (STATUS_VALUES as string[]).includes(s);
@@ -76,6 +79,10 @@ function isStatus(s: unknown): s is TaskStatus {
 
 function isWorkspaceMode(s: unknown): s is WorkspaceMode {
   return typeof s === 'string' && (WORKSPACE_MODES as string[]).includes(s);
+}
+
+function isBlockKind(s: unknown): s is BlockKind {
+  return typeof s === 'string' && (BLOCK_KINDS as string[]).includes(s);
 }
 
 function summariseTask(t: Task) {
@@ -107,6 +114,8 @@ function fullTask(t: Task) {
     retry_count: t.retryCount,
     max_retries: t.maxRetries,
     acceptance_criteria: t.acceptanceCriteria,
+    block_kind: t.blockKind,
+    block_recurrence_count: t.blockRecurrenceCount,
     created_at: t.createdAt,
     updated_at: t.updatedAt,
   };
@@ -374,6 +383,394 @@ function createKanbanCreateGoal(store: KanbanStore): Tool {
 }
 
 // ---------------------------------------------------------------------------
+// kanban_create_swarm — atomic root/blackboard + N workers + optional
+// verifier + optional synthesizer DAG (Lane A Phase 5)
+// ---------------------------------------------------------------------------
+
+interface CreateSwarmWorkerArg {
+  personality: string;
+  prompt: string;
+}
+
+interface CreateSwarmArgs {
+  goal: string;
+  workers: CreateSwarmWorkerArg[];
+  verifier_personality?: string;
+  synthesizer_personality?: string;
+}
+
+function createKanbanCreateSwarm(store: KanbanStore): Tool {
+  return {
+    name: 'kanban_create_swarm',
+    description:
+      'Create a whole swarm DAG in one atomic call: a root/blackboard task (immediately done, ' +
+      'body = goal) + one worker task per entry in `workers` (parents=[root]) + an optional ' +
+      'verifier task (parents=every worker) + an optional synthesizer task (parents=[verifier], ' +
+      'or every worker if no verifier was given). All-or-nothing — a failure partway through ' +
+      'creates nothing. Omit verifier_personality/synthesizer_personality to skip that tier. ' +
+      'Returns { root_id, worker_ids, verifier_id, synthesizer_id }.\n' +
+      RULES,
+    toolset: 'kanban',
+    maxResultChars: MAX_RESULT_CHARS,
+    capabilities: {},
+    schema: {
+      type: 'object',
+      required: ['goal', 'workers'],
+      properties: {
+        goal: {
+          type: 'string',
+          description: 'Shared context for the swarm — becomes the root/blackboard task body.',
+        },
+        workers: {
+          type: 'array',
+          minItems: 1,
+          items: {
+            type: 'object',
+            required: ['personality', 'prompt'],
+            properties: {
+              personality: {
+                type: 'string',
+                description: 'Personality id (or "human:<name>") this worker task is assigned to.',
+              },
+              prompt: { type: 'string', description: "This worker's task body." },
+            },
+          },
+        },
+        verifier_personality: {
+          type: 'string',
+          description:
+            'Optional. Personality id assigned to verify all worker outputs once every worker ' +
+            'is done. Omit to skip the verifier tier.',
+        },
+        synthesizer_personality: {
+          type: 'string',
+          description:
+            'Optional. Personality id assigned to synthesize the final result once the ' +
+            'verifier (or, if omitted, every worker) is done. Omit to skip the synthesizer tier.',
+        },
+      },
+    },
+    async execute(rawArgs, ctx) {
+      const args = (rawArgs ?? {}) as Partial<CreateSwarmArgs>;
+      if (typeof args.goal !== 'string' || args.goal.length === 0) {
+        return errorResult('goal must be a non-empty string', 'input_invalid');
+      }
+      const goalErr = tooLong('goal', args.goal, MAX_BODY_CHARS);
+      if (goalErr) return goalErr;
+
+      if (!Array.isArray(args.workers) || args.workers.length === 0) {
+        return errorResult('workers must be a non-empty array', 'input_invalid');
+      }
+      if (args.workers.length > MAX_SWARM_WORKERS) {
+        return errorResult(
+          `workers must have at most ${MAX_SWARM_WORKERS} entries`,
+          'input_invalid',
+        );
+      }
+      const workers: CreateSwarmWorkerArg[] = [];
+      for (const raw of args.workers) {
+        if (typeof raw !== 'object' || raw === null) {
+          return errorResult(
+            'each worker must be an object with personality and prompt',
+            'input_invalid',
+          );
+        }
+        const w = raw as Partial<CreateSwarmWorkerArg>;
+        if (typeof w.personality !== 'string' || w.personality.length === 0) {
+          return errorResult('each worker.personality must be a non-empty string', 'input_invalid');
+        }
+        const personalityErr = tooLong('worker.personality', w.personality, MAX_ASSIGNEE_CHARS);
+        if (personalityErr) return personalityErr;
+        if (typeof w.prompt !== 'string' || w.prompt.length === 0) {
+          return errorResult('each worker.prompt must be a non-empty string', 'input_invalid');
+        }
+        const promptErr = tooLong('worker.prompt', w.prompt, MAX_BODY_CHARS);
+        if (promptErr) return promptErr;
+        workers.push({ personality: w.personality, prompt: w.prompt });
+      }
+
+      let verifierPersonality: string | undefined;
+      if (args.verifier_personality !== undefined) {
+        if (
+          typeof args.verifier_personality !== 'string' ||
+          args.verifier_personality.length === 0
+        ) {
+          return errorResult('verifier_personality must be a non-empty string', 'input_invalid');
+        }
+        const verifierErr = tooLong(
+          'verifier_personality',
+          args.verifier_personality,
+          MAX_ASSIGNEE_CHARS,
+        );
+        if (verifierErr) return verifierErr;
+        verifierPersonality = args.verifier_personality;
+      }
+
+      let synthesizerPersonality: string | undefined;
+      if (args.synthesizer_personality !== undefined) {
+        if (
+          typeof args.synthesizer_personality !== 'string' ||
+          args.synthesizer_personality.length === 0
+        ) {
+          return errorResult('synthesizer_personality must be a non-empty string', 'input_invalid');
+        }
+        const synthesizerErr = tooLong(
+          'synthesizer_personality',
+          args.synthesizer_personality,
+          MAX_ASSIGNEE_CHARS,
+        );
+        if (synthesizerErr) return synthesizerErr;
+        synthesizerPersonality = args.synthesizer_personality;
+      }
+
+      try {
+        const result = store.createSwarm(
+          {
+            goal: args.goal,
+            workers,
+            ...(verifierPersonality !== undefined ? { verifierPersonality } : {}),
+            ...(synthesizerPersonality !== undefined ? { synthesizerPersonality } : {}),
+          },
+          actorOf(ctx),
+        );
+        return jsonResult({
+          root_id: result.rootId,
+          worker_ids: result.workerIds,
+          verifier_id: result.verifierId,
+          synthesizer_id: result.synthesizerId,
+        });
+      } catch (err) {
+        return storeError(err);
+      }
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// kanban_decompose — auxiliary-LLM goal-to-children fan-out (Lane A Phase 2)
+// ---------------------------------------------------------------------------
+
+const DECOMPOSE_CHILDREN_DEFAULT = 5;
+const DECOMPOSE_CHILDREN_CAP = 10;
+const MAX_INSTRUCTIONS_CHARS = 4_000;
+
+const DECOMPOSE_SYSTEM_PROMPT =
+  'You break a parent task into concrete, assignable child sub-tasks. ' +
+  "Given the parent task's title and body, propose child tasks that together accomplish it. " +
+  'Output ONLY a JSON array, no prose, no markdown code fences. Each element must be an object: ' +
+  '{"title": string, "body": string (optional), "assignee": string or null (optional)}. ' +
+  '"assignee" is a personality id this child should be assigned to — use null if no specific ' +
+  'assignee is clear. Keep titles short and imperative; body should carry enough context for the ' +
+  'assignee to start work independently, with no access to this conversation.';
+
+interface ProposedChild {
+  title: string;
+  body?: string;
+  assignee?: string | null;
+}
+
+// Same caps `kanban_create` applies to its own args, applied here to each
+// LLM-proposed child before it reaches `store.createTask` — without this the
+// decomposer path could dump an oversized title/body/assignee into the
+// durable store and FTS index that `kanban_create` itself would have rejected.
+function childValidationError(child: ProposedChild): string | null {
+  const titleErr = tooLong('title', child.title, MAX_TITLE_CHARS);
+  if (titleErr && !titleErr.ok) return titleErr.error;
+  if (child.body !== undefined) {
+    const bodyErr = tooLong('body', child.body, MAX_BODY_CHARS);
+    if (bodyErr && !bodyErr.ok) return bodyErr.error;
+  }
+  if (child.assignee !== undefined && child.assignee !== null) {
+    const assigneeErr = tooLong('assignee', child.assignee, MAX_ASSIGNEE_CHARS);
+    if (assigneeErr && !assigneeErr.ok) return assigneeErr.error;
+  }
+  return null;
+}
+
+function buildDecomposePrompt(task: Task, maxChildren: number, instructions?: string): string {
+  const lines = [
+    `Parent task title: ${task.title}`,
+    task.body ? `Parent task body:\n${task.body}` : 'Parent task body: (none)',
+  ];
+  if (instructions) lines.push(`Extra instructions: ${instructions}`);
+  lines.push(`Propose at most ${maxChildren} child tasks, as a JSON array.`);
+  return lines.join('\n\n');
+}
+
+// Defensive parse: the auxiliary model is a free-text LLM, not a structured-
+// output call. Strip an optional ```/```json fence, JSON.parse, and validate
+// shape field-by-field. Any deviation returns null — the caller turns that
+// into a tool error rather than guessing at a partial shape.
+function parseDecomposeResponse(raw: string): ProposedChild[] | null {
+  const fenced = raw.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  const candidate = (fenced?.[1] ?? raw).trim();
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(candidate);
+  } catch {
+    return null;
+  }
+  if (!Array.isArray(parsed) || parsed.length === 0) return null;
+
+  const children: ProposedChild[] = [];
+  for (const item of parsed) {
+    if (typeof item !== 'object' || item === null) return null;
+    const obj = item as Record<string, unknown>;
+    if (typeof obj.title !== 'string' || obj.title.length === 0) return null;
+    const child: ProposedChild = { title: obj.title };
+    if (obj.body !== undefined) {
+      if (typeof obj.body !== 'string') return null;
+      child.body = obj.body;
+    }
+    if (obj.assignee !== undefined) {
+      if (obj.assignee !== null && typeof obj.assignee !== 'string') return null;
+      child.assignee = obj.assignee;
+    }
+    children.push(child);
+  }
+  return children;
+}
+
+function createKanbanDecompose(store: KanbanStore, decomposerProvider?: LLMProvider): Tool {
+  return {
+    name: 'kanban_decompose',
+    description:
+      'Ask the auxiliary kanban_decomposer model to propose child sub-tasks for a parent task, then ' +
+      'create each proposed child with parents=[task_id]. Requires an `auxiliary.kanban_decomposer` ' +
+      'model configured in wiring — without one this returns a clear execution_failed error. ' +
+      'NOT one atomic transaction: if the auxiliary LLM call fails (or returns an unparseable ' +
+      'response), no children are created. If the LLM call succeeds but an individual child create ' +
+      'fails partway through, this returns a partial-success result — children_created lists what ' +
+      'was actually made, failed_child names the one that errored, and not_attempted lists the rest. ' +
+      'Use kanban_archive to clean up unwanted children, or retry.\n' +
+      RULES,
+    toolset: 'kanban',
+    maxResultChars: MAX_RESULT_CHARS,
+    capabilities: {},
+    schema: {
+      type: 'object',
+      required: ['task_id'],
+      properties: {
+        task_id: { type: 'string', description: 'Parent task to decompose into children.' },
+        max_children: {
+          type: 'integer',
+          description: `How many child tasks to propose (default ${DECOMPOSE_CHILDREN_DEFAULT}, capped at ${DECOMPOSE_CHILDREN_CAP}).`,
+        },
+        instructions: {
+          type: 'string',
+          description:
+            'Optional extra guidance for the decomposer model (constraints, preferred assignees, etc).',
+        },
+      },
+    },
+    async execute(rawArgs, ctx) {
+      const args = (rawArgs ?? {}) as {
+        task_id?: unknown;
+        max_children?: unknown;
+        instructions?: unknown;
+      };
+      if (typeof args.task_id !== 'string') {
+        return errorResult('task_id must be a string', 'input_invalid');
+      }
+      const taskId = args.task_id;
+      if (
+        args.max_children !== undefined &&
+        (typeof args.max_children !== 'number' ||
+          !Number.isInteger(args.max_children) ||
+          args.max_children < 1)
+      ) {
+        return errorResult('max_children must be a positive integer', 'input_invalid');
+      }
+      if (args.instructions !== undefined) {
+        if (typeof args.instructions !== 'string') {
+          return errorResult('instructions must be a string', 'input_invalid');
+        }
+        const iErr = tooLong('instructions', args.instructions, MAX_INSTRUCTIONS_CHARS);
+        if (iErr) return iErr;
+      }
+      if (!decomposerProvider) {
+        return errorResult(
+          'no auxiliary.kanban_decomposer model configured; kanban_decompose is unavailable',
+          'execution_failed',
+        );
+      }
+      const task = store.getTask(taskId);
+      if (!task) return errorResult(`task not found: ${taskId}`, 'input_invalid');
+
+      const maxChildren = Math.min(
+        typeof args.max_children === 'number' ? args.max_children : DECOMPOSE_CHILDREN_DEFAULT,
+        DECOMPOSE_CHILDREN_CAP,
+      );
+      const instructions = typeof args.instructions === 'string' ? args.instructions : undefined;
+
+      let raw = '';
+      try {
+        for await (const chunk of decomposerProvider.complete(
+          [{ role: 'user', content: buildDecomposePrompt(task, maxChildren, instructions) }],
+          [],
+          { system: DECOMPOSE_SYSTEM_PROMPT, maxTokens: 2_000, temperature: 0.2 },
+        )) {
+          if (chunk.type === 'text_delta') raw += chunk.text;
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return errorResult(`auxiliary decomposer call failed: ${msg}`, 'execution_failed');
+      }
+
+      const proposed = parseDecomposeResponse(raw);
+      if (!proposed) {
+        return errorResult(
+          'auxiliary decomposer returned an unparseable or empty response; no children created',
+          'execution_failed',
+        );
+      }
+      const children = proposed.slice(0, maxChildren);
+
+      // Per-child creation is NOT wrapped in one transaction (contrast the
+      // atomic swarm primitive elsewhere in this plan): a failure partway
+      // through returns everything created so far instead of silently losing
+      // it or rolling back tasks that other agents may already see.
+      const created: { task_id: string; title: string }[] = [];
+      let failedChild: { title: string; error: string } | undefined;
+      let notAttempted: { title: string }[] = [];
+      for (let i = 0; i < children.length; i++) {
+        const child = children[i];
+        if (!child) continue;
+        const validationError = childValidationError(child);
+        if (validationError) {
+          failedChild = { title: child.title, error: validationError };
+          notAttempted = children.slice(i + 1).map((c) => ({ title: c.title }));
+          break;
+        }
+        try {
+          const childTask = store.createTask({
+            title: child.title,
+            ...(child.body !== undefined ? { body: child.body } : {}),
+            assignee: child.assignee ?? null,
+            parents: [taskId],
+            actor: actorOf(ctx),
+          });
+          created.push({ task_id: childTask.id, title: childTask.title });
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          failedChild = { title: child.title, error: msg };
+          notAttempted = children.slice(i + 1).map((c) => ({ title: c.title }));
+          break;
+        }
+      }
+
+      return jsonResult({
+        task_id: taskId,
+        children_created: created,
+        ...(failedChild
+          ? { partial_failure: true, failed_child: failedChild, not_attempted: notAttempted }
+          : {}),
+      });
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
 // kanban_list
 // ---------------------------------------------------------------------------
 
@@ -397,6 +794,7 @@ const MAX_SUMMARY_CHARS = 16_000;
 const MAX_REASON_CHARS = 4_000;
 const MAX_IDEMPOTENCY_KEY_CHARS = 200;
 const MAX_ASSIGNEE_CHARS = 200;
+const MAX_SWARM_WORKERS = 20;
 
 function tooLong(field: string, value: string, cap: number): ToolResult | null {
   if (value.length > cap) {
@@ -679,6 +1077,12 @@ function createKanbanComplete(
           completedBy = { id: personalityId, name: info?.name ?? personalityId };
         }
         const t = store.completeRun(taskId, summary, actor, completedBy);
+        // ticket_completed is Void — observer-only, distinct from the
+        // Claiming before_ticket_complete gate above. Fires only on this
+        // successful-transition path, never on a rejected/errored attempt.
+        if (hooks !== undefined) {
+          await hooks.fireVoid('ticket_completed', { taskId, summary });
+        }
         return jsonResult(fullTask(t));
       } catch (err) {
         return storeError(err);
@@ -687,11 +1091,14 @@ function createKanbanComplete(
   };
 }
 
-function createKanbanBlock(store: KanbanStore): Tool {
+function createKanbanBlock(store: KanbanStore, hooks?: HookRegistry): Tool {
   return {
     name: 'kanban_block',
     description:
-      'End the open run with outcome=blocked, set status=blocked. Reason is recorded as a comment for context.\n' +
+      'End the open run with outcome=blocked, set status=blocked. Reason is recorded as a comment for context. ' +
+      'Optional `kind` categorizes why (dependency/needs_input/capability/transient) — repeated blocks with the ' +
+      'same `kind` in a row (no successful completion in between) auto-route the task to needs_revision instead ' +
+      'of looping forever.\n' +
       RULES,
     toolset: 'kanban',
     maxResultChars: MAX_RESULT_CHARS,
@@ -702,10 +1109,17 @@ function createKanbanBlock(store: KanbanStore): Tool {
       properties: {
         task_id: { type: 'string' },
         reason: { type: 'string' },
+        kind: {
+          type: 'string',
+          enum: BLOCK_KINDS,
+          description:
+            'Why the task is blocked. "dependency" (waiting on another task — unblocking stays a manual ' +
+            'kanban_unblock call, not auto-routed) does not get auto-unblocked when its parent completes.',
+        },
       },
     },
     async execute(rawArgs, ctx) {
-      const args = (rawArgs ?? {}) as { task_id?: unknown; reason?: unknown };
+      const args = (rawArgs ?? {}) as { task_id?: unknown; reason?: unknown; kind?: unknown };
       if (typeof args.task_id !== 'string') {
         return errorResult('task_id must be a string', 'input_invalid');
       }
@@ -714,9 +1128,20 @@ function createKanbanBlock(store: KanbanStore): Tool {
       }
       const reasonErr = tooLong('reason', args.reason, MAX_REASON_CHARS);
       if (reasonErr) return reasonErr;
+      if (args.kind !== undefined && !isBlockKind(args.kind)) {
+        return errorResult(`kind must be one of: ${BLOCK_KINDS.join(', ')}`, 'input_invalid');
+      }
       try {
-        // blockRun atomically records the reason as both run.summary and a comment.
-        const t = store.blockRun(args.task_id, args.reason, actorOf(ctx));
+        // blockRun atomically records the reason as both run.summary and a comment,
+        // and (when kind is set) tracks the unblock-loop breaker.
+        const t = store.blockRun(args.task_id, args.reason, actorOf(ctx), args.kind);
+        if (hooks !== undefined) {
+          await hooks.fireVoid('ticket_blocked', {
+            taskId: args.task_id,
+            reason: args.reason,
+            ...(args.kind !== undefined ? { kind: args.kind } : {}),
+          });
+        }
         return jsonResult(fullTask(t));
       } catch (err) {
         return storeError(err);
@@ -834,7 +1259,7 @@ function createKanbanLink(store: KanbanStore): Tool {
   };
 }
 
-function createKanbanAssign(store: KanbanStore): Tool {
+function createKanbanAssign(store: KanbanStore, hooks?: HookRegistry): Tool {
   return {
     name: 'kanban_assign',
     description: `Set the assignee (personality id or "human:<name>"). Pass null to unassign.\n${RULES}`,
@@ -865,6 +1290,12 @@ function createKanbanAssign(store: KanbanStore): Tool {
       }
       try {
         const t = store.assign(args.task_id, assignee, actorOf(ctx));
+        if (hooks !== undefined) {
+          await hooks.fireVoid('ticket_updated', {
+            taskId: args.task_id,
+            changedFields: ['assignee'],
+          });
+        }
         return jsonResult(fullTask(t));
       } catch (err) {
         return storeError(err);
@@ -920,21 +1351,26 @@ export function createKanbanTools(opts: {
   hooks?: HookRegistry;
   autonomyTierOf?: AutonomyTierOf;
   personalityLookup?: PersonalityLookup;
+  /** Lane A Phase 2 — auxiliary model backing `kanban_decompose`. Absent means
+   *  the tool still registers but returns a tool error when called. */
+  decomposerProvider?: LLMProvider;
 }): Tool[] {
   const { store, hooks } = opts;
   return [
     createKanbanCreate(store),
     createKanbanCreateGoal(store),
+    createKanbanCreateSwarm(store),
+    createKanbanDecompose(store, opts.decomposerProvider),
     createKanbanList(store),
     createKanbanShow(store),
     createKanbanUpdateStatus(store),
     createKanbanComment(store),
     createKanbanComplete(store, hooks, opts.autonomyTierOf, opts.personalityLookup),
-    createKanbanBlock(store),
+    createKanbanBlock(store, hooks),
     createKanbanUnblock(store),
     createKanbanHeartbeat(store),
     createKanbanLink(store),
-    createKanbanAssign(store),
+    createKanbanAssign(store, hooks),
     createKanbanArchive(store),
   ];
 }

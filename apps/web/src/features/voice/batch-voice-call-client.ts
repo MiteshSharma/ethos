@@ -1,3 +1,5 @@
+import { splitSentences } from '@ethosagent/voice-text';
+import { playThinkingEarcon } from './earcon';
 import type { VoiceCallClient, VoiceCallEvent } from './voice-call-client';
 
 // Turn-based, LiveKit-free browser talk-mode. A `VoiceCallClient` that runs the
@@ -111,8 +113,16 @@ export interface BatchVoiceCallDeps {
    * aborts the turn on barge-in / hang-up.
    */
   runAgentTurn(text: string, signal: AbortSignal): AsyncIterable<string>;
-  /** Optional TTS voice id passed through to `synthesize`. */
+  /** Optional TTS voice id passed through to `synthesize`. Global default —
+   *  the server prefers the personality's own voice over it. */
   voice?: string;
+  /**
+   * Active personality. The batch path does not send it itself (its
+   * `synthesize` closure owns the RPC call and already carries it); it is
+   * declared here so `createTalkModeClient` can forward one set of deps to
+   * either transport.
+   */
+  personalityId?: string;
   /**
    * Play the brief "processing" earcon after each captured utterance. Defaults
    * to true; set false (from the `display.voice_chime` config toggle) to keep
@@ -171,28 +181,6 @@ class PlayQueue {
   }
 }
 
-/**
- * Split accumulated reply text into complete sentences plus a trailing
- * incomplete remainder. A sentence is only cut at a terminator (`.`/`!`/`?`)
- * that is followed by whitespace, so "3.14" or a mid-stream "Dr." fragment is
- * not split prematurely; the leftover stays in `rest` for the next chunk (or the
- * end-of-turn flush).
- */
-export function splitSentences(buffer: string): { sentences: string[]; rest: string } {
-  const sentences: string[] = [];
-  let rest = buffer;
-  const boundary = /([.!?]+)(\s+)/;
-  while (true) {
-    const match = boundary.exec(rest);
-    if (!match) break;
-    const end = match.index + match[1].length;
-    const sentence = rest.slice(0, end).trim();
-    if (sentence) sentences.push(sentence);
-    rest = rest.slice(end + match[2].length);
-  }
-  return { sentences, rest };
-}
-
 function errorText(err: unknown, fallback: string): string {
   return err instanceof Error && err.message ? err.message : fallback;
 }
@@ -213,6 +201,24 @@ export function createBatchVoiceCallClient(deps: BatchVoiceCallDeps): VoiceCallC
 
   const chimeEnabled = deps.chime ?? true;
   const disconnectController = new AbortController();
+
+  /**
+   * One clip at a time. This tier has no playout scheduler — it hands a data URL
+   * to an `Audio` element — so two overlapping `play()` calls are two voices
+   * talking over each other. The reply pump and a spoken clarify question both
+   * go through here, which is what keeps a question asked mid-turn off the top
+   * of the sentence the agent said just before it. (The streaming tier gets this
+   * for free: its lane serializes synthesis and its playout is absolute-time.)
+   */
+  let playChain: Promise<unknown> = Promise.resolve();
+  const playInOrder = (clip: SynthesizedClip, signal: AbortSignal): Promise<void> => {
+    const next = playChain
+      .catch(() => {})
+      .then(() => driver.play(clip.audioBase64, clip.mimeType, signal));
+    playChain = next.catch(() => {});
+    return next;
+  };
+
   let running = false;
   let disposed = false;
   let turnController: AbortController | null = null;
@@ -245,7 +251,7 @@ export function createBatchVoiceCallClient(deps: BatchVoiceCallDeps): VoiceCallC
         }
         if (clip && !ctrl.signal.aborted) {
           try {
-            await driver.play(clip.audioBase64, clip.mimeType, ctrl.signal);
+            await playInOrder(clip, ctrl.signal);
           } catch {
             break; // aborted mid-playout (barge-in / hang-up)
           }
@@ -289,6 +295,68 @@ export function createBatchVoiceCallClient(deps: BatchVoiceCallDeps): VoiceCallC
     }
   }
 
+  /**
+   * Speak a clarify question and hear the answer, without ending the turn that
+   * asked it — the batch tier's half of the `VoiceCallClient.ask` contract.
+   *
+   * The turn is parked inside the `clarify` tool, which parks `runTurn`, which
+   * parks `loop()`: nothing else is capturing or playing, so the question uses
+   * the same synthesize → play → capture → transcribe primitives a turn does.
+   * Barge-in is the one thing that has to move: it is armed for the whole turn,
+   * and here there is no reply to interrupt — a barge would abort the very turn
+   * the card is waiting on.
+   *
+   * Null for every "this cannot happen": no TTS configured, synthesis or
+   * playout or transcription failed, the call hung up, or the caller aborted
+   * because the card was answered on screen first.
+   */
+  async function askClarify(question: string, signal: AbortSignal): Promise<string | null> {
+    const synthesize = deps.synthesize;
+    // No TTS on this call means the question has no voice at all — which is
+    // exactly what a null tells the caller.
+    if (disposed || signal.aborted || !synthesize) return null;
+
+    // One signal for "the ask is over", so a hang-up releases the capture the
+    // same way the caller's abort does.
+    const linked = new AbortController();
+    const abortLinked = (): void => linked.abort();
+    signal.addEventListener('abort', abortLinked, { once: true });
+    disconnectController.signal.addEventListener('abort', abortLinked, { once: true });
+
+    driver.setBargeInEnabled(false);
+    // Captioned like any other spoken line — the strip and the transcript are
+    // how a listener who missed the audio still sees what was asked.
+    emit({ type: 'reply_sentence', text: question });
+    try {
+      const clip = await synthesize(question, deps.voice);
+      if (linked.signal.aborted || disposed) return null;
+      // Behind whatever the agent was already saying when it asked.
+      await playInOrder(clip, linked.signal);
+      if (linked.signal.aborted || disposed) return null;
+      // The question has been said; the floor goes back to the user.
+      emit({ type: 'reply_complete', text: question });
+      const capture = await driver.captureUtterance(linked.signal);
+      if (!capture || disposed) return null;
+      emit({ type: 'speech_end' });
+      const text = (await deps.transcribe(capture.audioBase64, capture.mimeType)).trim();
+      if (!text || disposed) {
+        emit({ type: 'utterance_dropped' });
+        return null;
+      }
+      emit({ type: 'utterance_committed', text });
+      return text;
+    } catch {
+      // Nothing was heard or nothing was understood. The turn is untouched and
+      // the card is still the way to answer it.
+      return null;
+    } finally {
+      signal.removeEventListener('abort', abortLinked);
+      disconnectController.signal.removeEventListener('abort', abortLinked);
+      // Hand barge-in back to the turn, unless the call is already over.
+      if (!disposed && turnController) driver.setBargeInEnabled(true);
+    }
+  }
+
   async function loop(): Promise<void> {
     while (running && !disposed) {
       let capture: UtteranceCapture | null;
@@ -298,6 +366,11 @@ export function createBatchVoiceCallClient(deps: BatchVoiceCallDeps): VoiceCallC
         break;
       }
       if (!capture || disposed) break;
+
+      // The utterance endpointed: the user is done and the system is working.
+      // The audible half of that is the earcon below; this is the visible half,
+      // and it fires now rather than after the transcribe round trip.
+      emit({ type: 'speech_end' });
 
       // Acknowledge the captured utterance the instant it endpoints, covering
       // the transcribe → LLM → first-audio gap. Fire-and-forget: never blocks or
@@ -315,9 +388,16 @@ export function createBatchVoiceCallClient(deps: BatchVoiceCallDeps): VoiceCallC
         transcript = (await deps.transcribe(capture.audioBase64, capture.mimeType)).trim();
       } catch (err) {
         emit({ type: 'error', error: errorText(err, 'Transcription failed') });
+        emit({ type: 'utterance_dropped' });
         continue;
       }
-      if (!transcript || disposed) continue;
+      if (disposed) break;
+      if (!transcript) {
+        // Heard something, understood nothing. The loop goes straight back to
+        // listening, so the UI must too.
+        emit({ type: 'utterance_dropped' });
+        continue;
+      }
 
       emit({ type: 'utterance_committed', text: transcript });
       await runTurn(transcript);
@@ -345,6 +425,7 @@ export function createBatchVoiceCallClient(deps: BatchVoiceCallDeps): VoiceCallC
     micStream(): MediaStream | null {
       return driver.micStream();
     },
+    ask: askClarify,
     on(listener: (event: VoiceCallEvent) => void): () => void {
       listeners.add(listener);
       return () => {
@@ -537,31 +618,8 @@ export function createBrowserVoiceIoDriver(
     },
 
     playEarcon(): void {
-      try {
-        if (!audioCtx) audioCtx = new AudioContext();
-        const ctx = audioCtx;
-        if (ctx.state === 'suspended') void ctx.resume();
-        const NOTE_S = 0.12; // ~120ms per note
-        const PEAK = 0.15; // low peak so it won't self-trip the VAD / barge-in
-        const notes = [880, 1175]; // ascending "ting ting"
-        notes.forEach((freq, i) => {
-          const startAt = ctx.currentTime + i * NOTE_S;
-          const osc = ctx.createOscillator();
-          const gain = ctx.createGain();
-          osc.type = 'sine';
-          osc.frequency.value = freq;
-          // Quick attack, linear decay to silence — a clean, subtle blip.
-          gain.gain.setValueAtTime(0, startAt);
-          gain.gain.linearRampToValueAtTime(PEAK, startAt + 0.01);
-          gain.gain.linearRampToValueAtTime(0, startAt + NOTE_S);
-          osc.connect(gain);
-          gain.connect(ctx.destination);
-          osc.start(startAt);
-          osc.stop(startAt + NOTE_S);
-        });
-      } catch {
-        // Web Audio unavailable / blocked — the earcon is best-effort.
-      }
+      if (!audioCtx) audioCtx = new AudioContext();
+      playThinkingEarcon(audioCtx);
     },
 
     onBargeIn(listener: () => void): () => void {

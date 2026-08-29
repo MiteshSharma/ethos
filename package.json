@@ -15,10 +15,12 @@
     "dev": "tsx apps/ethos/src/index.ts",
     "dev:web": "pnpm --filter @ethosagent/web dev",
     "test": "vitest run",
+    "test:integration": "vitest run --config vitest.integration.config.ts",
     "test:concurrent": "vitest run --pool=threads extensions/team-supervisor/src/__tests__/concurrent extensions/agent-mesh/src/__tests__/concurrent",
     "test:watch": "vitest",
     "typecheck": "pnpm exec tsc --noEmit -p tsconfig.json && pnpm --filter @ethosagent/web typecheck && pnpm --filter @ethosagent/desktop typecheck",
     "check": "pnpm typecheck && pnpm lint && pnpm test",
+    "check:architecture": "node scripts/check-architecture.mjs --unenforced",
     "lint": "biome check .",
     "lint:fix": "biome check --write .",
     "format": "biome format --write .",
@@ -26,7 +28,11 @@
     "docs": "pnpm --filter docs run start",
     "docs:build": "pnpm --filter docs run build",
     "docs:check": "pnpm --filter docs run check",
-    "test:catalog-smoke": "bash scripts/smoke-test-catalog.sh"
+    "test:catalog-smoke": "bash scripts/smoke-test-catalog.sh",
+    "bench:voice": "tsx scripts/voice-latency-bench.ts --assert-budget",
+    "bench:voice:realtime": "tsx scripts/voice-latency-bench.ts --tier=realtime --assert-budget",
+    "bench:voice:live": "tsx scripts/voice-latency-bench.ts --live",
+    "bench:voice:live:realtime": "tsx scripts/voice-latency-bench.ts --live --tier=realtime"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.5.6",
@@ -36,7 +42,8 @@
     "tsx": "^4.23.5",
     "typescript": "^6.0.0",
     "vite": "^6.0.0",
-    "vitest": "^4.1.10"
+    "vitest": "^4.1.10",
+    "yaml": "^2.9.0"
   },
   "dependencies": {
     "@types/ws": "^8.18.1",

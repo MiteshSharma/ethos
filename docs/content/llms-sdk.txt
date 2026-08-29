@@ -122,10 +122,14 @@ Auto-reconnects with 3s delay, resumes via lastEventId.
 
 ## API key scopes
 
-sessions:read, sessions:write, chat:send, personalities:read,
+sessions:read, sessions:write, chat, chat:send, personalities:read,
 memory:read, memory:write, tools:approve, events:subscribe.
 
+`chat` gates the OpenAI-compatible /v1/* surface. `chat:send` gates the
+chat.send and chat.abort RPC procedures on /rpc/*. Neither implies the other.
+
 Minimum for a chat UI: chat:send + events:subscribe + sessions:read.
+Minimum for an OpenAI-compatible client: chat.
 
 ## Key types
 

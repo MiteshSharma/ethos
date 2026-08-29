@@ -1,5 +1,6 @@
 import type {
   AdapterCapabilities,
+  AdapterVoiceCaps,
   ApprovalCapableAdapter,
   ApprovalDecisionEvent,
   AttachmentCache,
@@ -7,9 +8,19 @@ import type {
   InboundMessage,
   OutboundMessage,
   PlatformAdapter,
+  SendVoiceNoteOptions,
   Storage,
+  VoiceOutboundAdapter,
 } from '@ethosagent/types';
-import { Client, GatewayIntentBits, type Interaction, Partials, REST, Routes } from 'discord.js';
+import {
+  AttachmentBuilder,
+  Client,
+  GatewayIntentBits,
+  type Interaction,
+  Partials,
+  REST,
+  Routes,
+} from 'discord.js';
 import { chunkText, reflowChunks } from './chunking';
 import type { clarifyModalPayload } from './clarify-blocks';
 import type { CommandContext, CommandPayload } from './commands';
@@ -64,20 +75,59 @@ interface DiscordAdapterConfig {
    */
   approvalPolicy?: 'role_gate' | 'allow_any';
   /**
+   * CHS-005 — sink for security decisions this adapter makes alone. An
+   * approval-button refusal never reaches the gateway, so without this it is
+   * visible only as an ephemeral reply to the person who was refused.
+   *
+   * Declared structurally so the adapter takes no dependency on the
+   * observability implementation; the gateway supplies it.
+   */
+  observability?: {
+    recordSafetyBlock(opts: {
+      code?: string;
+      cause?: string;
+      details?: Record<string, unknown>;
+    }): void;
+  };
+  /**
    * When enabled, `sendTyping()` posts a short "Thinking..." placeholder
    * message that is deleted when the real response is sent. Default: false.
    */
   postThinkingPlaceholder?: boolean;
 }
 
-export class DiscordAdapter implements PlatformAdapter, ApprovalCapableAdapter {
+export class DiscordAdapter
+  implements PlatformAdapter, ApprovalCapableAdapter, VoiceOutboundAdapter
+{
   readonly id: string;
   readonly displayName = 'Discord';
   readonly canSendTyping = true;
   readonly canEditMessage = true;
   readonly canReact = true;
+  /**
+   * Stays `false` even though {@link sendVoiceNote} can attach a file. The
+   * gateway derives generic outbound-media caps from this flag (see
+   * `outboundMediaCaps` in `@ethosagent/gateway`), and `send()` still ignores
+   * `OutboundMessage.attachments` — flipping it would make the gateway build
+   * attachments that Discord then silently drops. It flips when `send()`
+   * learns to upload attachments, not before.
+   */
   readonly canSendFiles = false;
   readonly maxMessageLength = 2000;
+
+  /**
+   * Declared voice capabilities. Discord has no voice-bubble primitive for
+   * bot messages — an uploaded audio file gets an inline player — so the
+   * honest declaration is `kind: 'file'`.
+   */
+  readonly voiceCaps: AdapterVoiceCaps = {
+    inbound: ['ogg', 'mp3', 'm4a', 'wav'],
+    outbound: {
+      formats: ['mp3', 'ogg', 'wav'],
+      kind: 'file',
+      maxBytes: 25 * 1024 * 1024,
+    },
+  };
 
   get capabilities(): AdapterCapabilities {
     return {
@@ -90,6 +140,7 @@ export class DiscordAdapter implements PlatformAdapter, ApprovalCapableAdapter {
       homeView: true,
       joinGreeting: false,
       roleBasedApprovals: true,
+      // Kept in sync with `canSendFiles` — see the note there.
       outboundFiles: false,
       webhookMode: false,
     };
@@ -106,6 +157,8 @@ export class DiscordAdapter implements PlatformAdapter, ApprovalCapableAdapter {
   private readonly binding: Binding;
   private readonly defaultChannelMode: ChannelMode;
   private readonly approvalRoleIds: string[];
+  /** CHS-005 — optional sink for adapter-local security decisions. */
+  private readonly observability: DiscordAdapterConfig['observability'];
   private readonly approvalPolicy: 'role_gate' | 'allow_any';
   private readonly postThinkingPlaceholder: boolean;
 
@@ -139,6 +192,7 @@ export class DiscordAdapter implements PlatformAdapter, ApprovalCapableAdapter {
     this.binding = config.binding ?? { type: 'personality', name: 'default' };
     this.approvalRoleIds = config.approvalRoleIds ?? [];
     this.approvalPolicy = config.approvalPolicy ?? 'role_gate';
+    this.observability = config.observability;
     this.postThinkingPlaceholder = config.postThinkingPlaceholder ?? false;
 
     // Gap 9: derive defaultChannelMode from deprecated mentionOnly when
@@ -255,6 +309,41 @@ export class DiscordAdapter implements PlatformAdapter, ApprovalCapableAdapter {
       }
 
       return { ok: true, messageId: ids[0] };
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
+  }
+
+  /**
+   * The declared voice sink — attaches the synthesized audio, which Discord
+   * renders with an inline player. Threads are addressed the same way `send()`
+   * addresses them: by replacing the target channel with the thread's id.
+   * Never throws: `{ok:true}` is the delivery ledger's only proof of delivery.
+   */
+  async sendVoiceNote(
+    chatId: string,
+    audio: Uint8Array,
+    opts: SendVoiceNoteOptions,
+  ): Promise<DeliveryResult> {
+    try {
+      const targetId = opts.threadId ?? chatId;
+      const channel = await this.client.channels.fetch(targetId);
+      if (!channel || !('send' in channel)) {
+        return { ok: false, error: 'Channel not found or not sendable' };
+      }
+
+      // biome-ignore lint/suspicious/noExplicitAny: discord.js channel union
+      const sent = await (channel as any).send({
+        files: [new AttachmentBuilder(Buffer.from(audio), { name: opts.filename })],
+        ...(opts.caption ? { content: opts.caption } : {}),
+        allowedMentions: { parse: [] },
+      });
+
+      if (opts.threadId && this.threadState) {
+        await this.threadState.recordPost(chatId, opts.threadId);
+      }
+
+      return { ok: true, messageId: String(sent.id) };
     } catch (err) {
       return { ok: false, error: err instanceof Error ? err.message : String(err) };
     }
@@ -537,6 +626,13 @@ export class DiscordAdapter implements PlatformAdapter, ApprovalCapableAdapter {
       if (this.approvalRoleIds.length === 0) {
         // No roles configured → no one can approve. This is intentional:
         // the operator must explicitly configure approvalRoleIds or opt into 'allow_any'.
+        // CHS-005 — recorded because a misconfiguration that silently blocks
+        // every approval looks identical to "nobody clicked" from outside.
+        this.observability?.recordSafetyBlock({
+          code: 'discord.approval.role_denied',
+          cause: 'approvalRoleIds is empty under role_gate',
+          details: { approvalId, userId, channelId: interaction.channelId ?? '' },
+        });
         interaction
           .reply({ content: 'Approval roles not configured. No one can approve.', ephemeral: true })
           .catch(() => {});
@@ -549,6 +645,13 @@ export class DiscordAdapter implements PlatformAdapter, ApprovalCapableAdapter {
           : null;
       const hasRole = memberRoles ? this.approvalRoleIds.some((id) => memberRoles.has(id)) : false;
       if (!hasRole) {
+        // CHS-005 — a refused approval click is a security decision, and the
+        // ephemeral reply is seen only by the person refused.
+        this.observability?.recordSafetyBlock({
+          code: 'discord.approval.role_denied',
+          cause: 'user holds none of the approval roles',
+          details: { approvalId, userId, channelId: interaction.channelId ?? '' },
+        });
         interaction
           .reply({ content: 'You do not have permission to approve/deny.', ephemeral: true })
           .catch(() => {});
@@ -659,6 +762,7 @@ export const capabilities: AdapterCapabilities = {
   homeView: true,
   joinGreeting: false,
   roleBasedApprovals: true,
+  // Kept in sync with `DiscordAdapter.canSendFiles` — see the note there.
   outboundFiles: false,
   webhookMode: false,
 };

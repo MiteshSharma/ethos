@@ -1,14 +1,40 @@
 // @ethosagent/voice-session — streaming voice orchestration over AgentLoop.
+//
+// Speakable-text helpers (`isHallucination`, `SentenceChunker`, …) are not
+// re-exported here: they live in @ethosagent/voice-text, which every voice
+// surface imports directly.
 
 export { createBufferedSttAdapter } from './buffered-stt';
 export { EndpointDetector, type EndpointDetectorConfig } from './endpoint-detector';
-export { isHallucination } from './hallucination';
+export {
+  percentile,
+  type StagePercentiles,
+  summarizeLatency,
+  turnLatenciesFromSpans,
+  VOICE_LATENCY_BUDGET_MS,
+  VOICE_LATENCY_STAGES,
+  VOICE_REALTIME_LATENCY_BUDGET_MS,
+  VOICE_REALTIME_LATENCY_STAGES,
+  type VoiceLatencyReport,
+  type VoiceLatencyStage,
+  type VoiceLatencyTier,
+  type VoicePipelineLatencyStage,
+  type VoiceRealtimeLatencyStage,
+  type VoiceTurnLatency,
+} from './latency-budget';
 export {
   type PlayoutItem,
   PlayoutQueue,
   type PlayoutQueueCallbacks,
 } from './playout-queue';
-export { SentenceChunker } from './sentence-chunker';
+export {
+  BufferedVoiceSpanWriter,
+  type BufferedVoiceSpanWriterOptions,
+  type VoiceSpanRecorder,
+  type VoiceSpanSink,
+  type VoiceSpanStage,
+  type VoiceTurnSpan,
+} from './span-writer';
 export type {
   AgentTurnRunner,
   AudioFormat,
@@ -17,5 +43,7 @@ export type {
   VoiceSessionEvent,
   VoiceSessionState,
 } from './types';
+export { DEFAULT_VOICE_FILLER_TEXT } from './types';
 export { EnergyVad, type EnergyVadConfig, rmsEnergy } from './vad';
 export { VoiceSession, type VoiceSessionDeps } from './voice-session';
+export { encodeWav } from './wav';

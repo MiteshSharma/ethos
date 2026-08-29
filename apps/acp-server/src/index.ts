@@ -8,6 +8,7 @@ import type { Socket } from 'node:net';
 import { createInterface } from 'node:readline';
 import type { Readable, Writable } from 'node:stream';
 import type { AgentMesh, MeshEntry } from '@ethosagent/agent-mesh';
+import type { PendingNotifyQueue } from '@ethosagent/notify-queue';
 import { SessionLane } from '@ethosagent/session-lane';
 import type { McpServerConfig, McpSessionView } from '@ethosagent/tools-mcp';
 import type { JobStore, SessionStore } from '@ethosagent/types';
@@ -99,6 +100,11 @@ export class AcpServer {
   private readonly jobStore: JobStore | undefined;
   private readonly backgroundExecutor: { readonly owner: string; nudge(): void } | undefined;
 
+  // Lane C (kanban-hooks-notify-parity, Phase 2) — passive `notify`-mode delivery.
+  private readonly personalityId: string | undefined;
+  private readonly teamId: string | undefined;
+  private readonly notifyQueue: PendingNotifyQueue | undefined;
+
   constructor(config: {
     runner: AgentRunner;
     session: SessionStore;
@@ -115,6 +121,21 @@ export class AcpServer {
     jobStore?: JobStore;
     // Structural — avoids depending on @ethosagent/job-runner. Only owner + nudge are needed.
     backgroundExecutor?: { readonly owner: string; nudge(): void };
+    /**
+     * This server's own personality identity (Lane C, kanban-hooks-notify-parity,
+     * Phase 2). Every `/notify` call already targets this exact process —
+     * `Dispatcher.fireDispatch` and `KanbanService.notifyAssignee` both resolve
+     * host:port per-assignee via the mesh — so a passive `notify`-mode delivery
+     * is written to the pending-notify queue under THIS personality's id, never
+     * one read off the wire. Required (alongside `teamId` and `notifyQueue`)
+     * for the passive path to have anywhere to land; absent on a solo
+     * (non-team) ACP server, which then just drops that path.
+     */
+    personalityId?: string;
+    /** Team this server belongs to. See `personalityId` above. */
+    teamId?: string;
+    /** Pending-notify queue writer for the passive `notify` mode (Phase 2). */
+    notifyQueue?: PendingNotifyQueue;
   }) {
     this.runner = config.runner;
     this.session = config.session;
@@ -126,11 +147,53 @@ export class AcpServer {
     this._authToken = config.authToken ?? randomBytes(32).toString('hex');
     this.jobStore = config.jobStore;
     this.backgroundExecutor = config.backgroundExecutor;
+    this.personalityId = config.personalityId;
+    this.teamId = config.teamId;
+    this.notifyQueue = config.notifyQueue;
+  }
+
+  /**
+   * Writes a passive `notify`-mode delivery to the pending-notify queue
+   * (Lane C, kanban-hooks-notify-parity, D6) instead of forcing a turn. A
+   * no-op when the queue isn't wired (solo/non-team ACP server) — there is
+   * nowhere for the notice to land, and falling back to the forced-turn path
+   * would defeat the point of asking for `notify`-only delivery.
+   */
+  private async deliverPassiveNotify(kind: string, ref: string | undefined): Promise<void> {
+    if (!this.notifyQueue || !this.teamId || !this.personalityId) return;
+    await this.notifyQueue.write({
+      team: this.teamId,
+      assigneePersonalityId: this.personalityId,
+      kind,
+      ref,
+    });
   }
 
   /** Returns the bearer token clients must present to access authenticated endpoints. */
   get token(): string {
     return this._authToken;
+  }
+
+  /**
+   * Roster-constrain `spawn`'s `personalityId` (plan T1.1 / D12). Without a
+   * mesh, `personalityId` was any string the caller supplied — this agent
+   * would happily run a background job under a personality that has nothing
+   * to do with it. When a mesh IS configured, `personalityId` — if given —
+   * must belong to an agent currently registered in the SAME mesh (the mesh
+   * registry IS the declared roster; a member only gets in there via the
+   * existing `mesh.register()` call, same trust boundary as today). No mesh
+   * configured → nothing to constrain against; behavior is unchanged (e.g.
+   * standalone `ethos acp`, which is not part of the mesh threat model D12
+   * targets). Returns a rejection message, or `null` when the call may proceed.
+   */
+  private async checkSpawnRoster(personalityId: string | undefined): Promise<string | null> {
+    if (!personalityId || !this.mesh) return null;
+    const roster = await this.mesh.list();
+    const onRoster = roster.some((entry) => entry.personalityId === personalityId);
+    if (!onRoster) {
+      return `personalityId "${personalityId}" is not a member of this mesh's roster`;
+    }
+    return null;
   }
 
   get activeSessionCount(): number {
@@ -256,9 +319,9 @@ export class AcpServer {
 
     if (req.method === 'POST' && req.url === '/notify') {
       const body = await readBody(req);
-      let parsed: { kind?: unknown; ref?: unknown };
+      let parsed: { kind?: unknown; ref?: unknown; mode?: unknown };
       try {
-        parsed = JSON.parse(body) as { kind?: unknown; ref?: unknown };
+        parsed = JSON.parse(body) as { kind?: unknown; ref?: unknown; mode?: unknown };
       } catch {
         res.writeHead(400, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: 'Invalid JSON' }));
@@ -271,6 +334,19 @@ export class AcpServer {
       }
       const kind = parsed.kind;
       const ref = typeof parsed.ref === 'string' ? parsed.ref : undefined;
+
+      // Lane C (kanban-hooks-notify-parity), Phase 2 — `notify` mode is a
+      // passive delivery: no forced turn, no minted sessionKey. It is
+      // surfaced later by the pending-notify ContextInjector at this
+      // personality's own next turn (D6). `wake`/`notify+wake`/absent all
+      // keep today's exact forced-turn behavior below.
+      if (parsed.mode === 'notify') {
+        await this.deliverPassiveNotify(kind, ref).catch(() => {});
+        res.writeHead(202, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true, queued: this.lane.length }));
+        return;
+      }
+
       const prompt = renderNotifyPrompt(kind, ref);
       const sessionKey = `notify:${kind}:${Date.now()}`;
       void this.lane.enqueue(async (_signal) => {
@@ -390,9 +466,13 @@ export class AcpServer {
           };
 
         case 'notify': {
-          const p = req.params as { kind: string; ref?: string };
+          const p = req.params as { kind: string; ref?: string; mode?: string };
           if (!p.kind || typeof p.kind !== 'string') {
             return { jsonrpc: '2.0', id, error: { code: -32602, message: 'kind is required' } };
+          }
+          if (p.mode === 'notify') {
+            await this.deliverPassiveNotify(p.kind, p.ref).catch(() => {});
+            return { jsonrpc: '2.0', id, result: { ok: true, queued: this.lane.length } };
           }
           const prompt = renderNotifyPrompt(p.kind, p.ref);
           const sessionKey = `notify:${p.kind}:${Date.now()}`;
@@ -418,6 +498,10 @@ export class AcpServer {
           };
           if (!p.text || typeof p.text !== 'string') {
             return { jsonrpc: '2.0', id, error: { code: -32602, message: 'text is required' } };
+          }
+          const rosterError = await this.checkSpawnRoster(p.personalityId);
+          if (rosterError) {
+            return { jsonrpc: '2.0', id, error: { code: -32602, message: rosterError } };
           }
           const sk = `acp:${randomUUID()}`;
           const label = sanitizeJobLabel(p.label);
@@ -622,10 +706,15 @@ export class AcpServer {
           break;
 
         case 'notify': {
-          const p = req.params as { kind: string; ref?: string };
+          const p = req.params as { kind: string; ref?: string; mode?: string };
           if (!p.kind || typeof p.kind !== 'string') {
             sendError(-32602, 'kind is required');
             return;
+          }
+          if (p.mode === 'notify') {
+            await this.deliverPassiveNotify(p.kind, p.ref).catch(() => {});
+            sendResult({ ok: true, queued: this.lane.length });
+            break;
           }
           const prompt = renderNotifyPrompt(p.kind, p.ref);
           const sessionKey = `notify:${p.kind}:${Date.now()}`;
@@ -649,6 +738,11 @@ export class AcpServer {
           };
           if (!p.text || typeof p.text !== 'string') {
             sendError(-32602, 'text is required');
+            return;
+          }
+          const rosterError = await this.checkSpawnRoster(p.personalityId);
+          if (rosterError) {
+            sendError(-32602, rosterError);
             return;
           }
           const sk = `acp:${randomUUID()}`;

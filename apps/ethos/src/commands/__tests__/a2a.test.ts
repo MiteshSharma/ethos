@@ -4,10 +4,11 @@
 // exact console strings (those are cosmetic).
 
 import type { EthosConfig } from '@ethosagent/config';
+import { InMemoryStorage } from '@ethosagent/storage-fs';
 import type { A2aIdentityView, A2aPeerRow } from '@ethosagent/wiring';
 import { A2aPeeringError } from '@ethosagent/wiring';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { type A2aCommandDeps, type A2aPeeringPort, runA2aCommand } from '../a2a';
+import { type A2aCommandDeps, type A2aPeeringPort, resetDirContents, runA2aCommand } from '../a2a';
 
 function baseConfig(overrides: Partial<EthosConfig> = {}): EthosConfig {
   return {
@@ -75,6 +76,7 @@ function makeDeps(overrides: Partial<A2aCommandDeps> & { config?: EthosConfig } 
         saved.push(c);
       }),
     confirm: overrides.confirm ?? (async () => true),
+    resetA2aDir: overrides.resetA2aDir ?? (async () => []),
     now: overrides.now ?? (() => 1_000_000),
   };
   return { deps, saved, port };
@@ -239,6 +241,41 @@ describe('ethos a2a peer enable/disable/remove', () => {
   });
 });
 
+describe('ethos a2a reset', () => {
+  it('without --yes asks for confirmation, and does not reset when declined', async () => {
+    const confirmFn = vi.fn(async () => false);
+    const resetFn = vi.fn(async () => ['tasks.db', 'peers']);
+    const { deps } = makeDeps({ confirm: confirmFn, resetA2aDir: resetFn });
+    await runA2aCommand(['reset'], deps);
+    expect(confirmFn).toHaveBeenCalled();
+    expect(resetFn).not.toHaveBeenCalled();
+    expect(output(logSpy)).toContain('aborted');
+  });
+
+  it('with --yes skips the prompt and resets', async () => {
+    const confirmFn = vi.fn(async () => true);
+    const resetFn = vi.fn(async () => ['tasks.db', 'peers', 'allowlist']);
+    const { deps } = makeDeps({ confirm: confirmFn, resetA2aDir: resetFn });
+    await runA2aCommand(['reset', '--yes'], deps);
+    expect(confirmFn).not.toHaveBeenCalled();
+    expect(resetFn).toHaveBeenCalled();
+    expect(output(logSpy)).toContain('tasks.db');
+  });
+
+  it('confirmed and accepted still resets (interactive yes)', async () => {
+    const resetFn = vi.fn(async () => ['tasks.db']);
+    const { deps } = makeDeps({ confirm: async () => true, resetA2aDir: resetFn });
+    await runA2aCommand(['reset'], deps);
+    expect(resetFn).toHaveBeenCalled();
+  });
+
+  it('reports when there is nothing to reset', async () => {
+    const { deps } = makeDeps({ resetA2aDir: async () => [] });
+    await runA2aCommand(['reset', '--yes'], deps);
+    expect(output(logSpy)).toContain('nothing to reset');
+  });
+});
+
 describe('ethos a2a enable/disable/status', () => {
   it('enable writes a2a.enabled: true and warns when webBaseUrl is unset', async () => {
     const { deps, saved } = makeDeps({ config: baseConfig({ webBaseUrl: undefined }) });
@@ -273,5 +310,61 @@ describe('ethos a2a enable/disable/status', () => {
     await runA2aCommand(['status'], deps);
     expect(port.listPeers).toHaveBeenCalledWith('swing-trader');
     expect(output(logSpy)).toContain('2 configured');
+  });
+
+  it('status warns when the active personality exposes zero skills (T0.1)', async () => {
+    const port = makePort({ identity: vi.fn(async () => makeIdentity({ exposedSkills: [] })) });
+    const { deps } = makeDeps({ peering: port, config: baseConfig({ a2a: { enabled: true } }) });
+    await runA2aCommand(['status'], deps);
+    const out = output(logSpy);
+    expect(out).toContain('FORBIDDEN_SCOPE');
+    expect(out).toContain('exposeToAgents');
+    expect(out).toContain('swing-trader');
+  });
+
+  it('status stays silent when the active personality exposes at least one skill', async () => {
+    const port = makePort({
+      identity: vi.fn(async () => makeIdentity({ exposedSkills: ['market-brief'] })),
+    });
+    const { deps } = makeDeps({ peering: port, config: baseConfig({ a2a: { enabled: true } }) });
+    await runA2aCommand(['status'], deps);
+    expect(output(logSpy)).not.toContain('FORBIDDEN_SCOPE');
+  });
+
+  it('status does not check exposed skills when A2A is disabled', async () => {
+    const port = makePort({ identity: vi.fn(async () => makeIdentity({ exposedSkills: [] })) });
+    const { deps } = makeDeps({ peering: port, config: baseConfig({ a2a: { enabled: false } }) });
+    await runA2aCommand(['status'], deps);
+    expect(port.identity).not.toHaveBeenCalled();
+  });
+});
+
+// `resetDirContents` is the real filesystem-clearing behaviour behind `ethos
+// a2a reset` (the command-level tests above stub the whole seam). Exercised
+// against a fixture `InMemoryStorage`, never the real ~/.ethos/.
+describe('resetDirContents', () => {
+  it('removes every top-level entry under the directory and returns their names', async () => {
+    const storage = new InMemoryStorage();
+    await storage.mkdir('/a2a');
+    await storage.write('/a2a/tasks.db', 'binary-ish');
+    await storage.mkdir('/a2a/peers');
+    await storage.write('/a2a/peers/fp1.json', '{}');
+    await storage.mkdir('/a2a/allowlist');
+    await storage.write('/a2a/allowlist/fp1.json', '{}');
+
+    const removed = await resetDirContents(storage, '/a2a');
+
+    expect(removed.sort()).toEqual(['allowlist', 'peers', 'tasks.db']);
+    expect(await storage.list('/a2a')).toEqual([]);
+    expect(await storage.exists('/a2a/tasks.db')).toBe(false);
+    expect(await storage.exists('/a2a/peers/fp1.json')).toBe(false);
+    // The directory itself survives — only its CONTENTS are cleared.
+    expect(await storage.exists('/a2a')).toBe(true);
+  });
+
+  it('returns an empty list when the directory does not exist', async () => {
+    const storage = new InMemoryStorage();
+    const removed = await resetDirContents(storage, '/a2a');
+    expect(removed).toEqual([]);
   });
 });

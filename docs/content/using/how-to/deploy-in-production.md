@@ -5,7 +5,7 @@ kind: how-to
 audience: user
 slug: deploy-in-production
 time: "10 min"
-updated: 2026-05-17
+updated: 2026-08-14
 ---
 
 ## Task
@@ -26,6 +26,7 @@ Run Ethos on an always-on machine — a mini PC, a Raspberry Pi 4+, a cheap VPS,
 - Node 24+ installed (`node --version`).
 - API keys for at least one [LLM provider](configure-providers.md) and one [channel](../../platforms/telegram.md) you want to expose.
 - Network access from the box outbound (LLM APIs, Telegram, Slack).
+- `ffmpeg` on `PATH`, if you want spoken replies on channels. Optional — the gateway runs and speaks without it, but only in formats the TTS provider already emits, and it prints a `⚠ ffmpeg not found` notice at startup. Install with `sudo apt-get install -y ffmpeg` (Debian/Ubuntu), `sudo dnf install -y ffmpeg` (AL2023/Fedora), or `brew install ffmpeg`. See [Send and receive voice notes on a channel](voice-notes-on-channels.md).
 
 The official mental model: you don't need a beefy server. A 4 GB Pi or a $5 VPS is plenty for a single operator's bots; SQLite WAL handles concurrent reads, the long-polling/Socket-Mode adapters dial out so you don't even need an inbound port unless you want the web dashboard public.
 

@@ -134,6 +134,28 @@ describe('GET /healthz — gateway heartbeat', () => {
     expect(gw.status).toBe('stale');
   });
 
+  it('returns 200 + ok when the gateway is fresh and no adapters are configured', async () => {
+    // A headless deployment with no Slack/Telegram/Discord bot attached is a
+    // normal configuration — an empty adapter list is not a failure.
+    const hb = {
+      pid: 1234,
+      startedAt: '2026-05-20T08:00:00Z',
+      updatedAt: new Date().toISOString(),
+      adapters: [],
+    };
+    await mkdir(join(homedir(), '.ethos'), { recursive: true });
+    await writeFile(healthPath, JSON.stringify(hb), 'utf-8');
+
+    const res = await app.request('/healthz');
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.status).toBe('ok');
+
+    const gw = body.gateway as { status: string; adapters: unknown[] };
+    expect(gw.status).toBe('ok');
+    expect(gw.adapters).toEqual([]);
+  });
+
   it('returns 503 + degraded when an adapter reports not-ok', async () => {
     const hb = {
       pid: 1234,

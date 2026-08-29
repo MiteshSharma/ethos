@@ -1,5 +1,5 @@
 import type Database from '@ethosagent/sqlite';
-import type { InboundMessage } from '@ethosagent/types';
+import type { InboundMessage, PriorContextEntry } from '@ethosagent/types';
 import { generateCode } from './pairing-store';
 
 // ---------------------------------------------------------------------------
@@ -25,7 +25,9 @@ export interface ChannelPlatformConfig {
   /**
    * Context visibility filter.
    * 'all' (default): pass everything through.
-   * 'allowlist': strip quoted/threaded content from non-allowlisted senders.
+   * 'allowlist': strip quoted/threaded content from non-allowlisted senders,
+   *   and drop the channel-history lines they authored. History the adapter
+   *   did not attribute per line is dropped whole.
    * 'allowlist_quote': alias for 'allowlist'.
    */
   contextVisibility?: 'all' | 'allowlist' | 'allowlist_quote';
@@ -44,6 +46,13 @@ export interface ChannelFilterResult {
   reply?: string;
   /** When set, the caller should use this text instead of message.text. */
   strippedText?: string;
+  /**
+   * When set, the caller should use this instead of `message.priorContext`.
+   * The empty string means nothing survived the filter and the caller should
+   * drop `priorContext` (and `priorContextEntries`) from the message
+   * altogether. Undefined means the filter did not rewrite it.
+   */
+  strippedPriorContext?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -96,7 +105,7 @@ export function isSenderAllowed(
  * 4. Not allowlisted + group → drop.
  * 5. Not allowlisted + DM → apply dmPolicy.
  * 6. Allowlisted + group + no mention → drop (mention gating).
- * 7. Context visibility filter.
+ * 7. Context visibility filter — quoted text (7a) and channel history (7b).
  * 8. → allow.
  */
 export function checkMessage(
@@ -158,23 +167,59 @@ export function checkMessage(
   }
 
   // Step 7: context visibility filter (1d)
-  // Only strip when replyToUserId is explicitly set AND non-allowlisted.
-  // If replyToUserId is absent (adapter can't provide it), do not strip.
+  // The filter owns every context-carrying field on the envelope, not just
+  // `text`: quoted content (7a) and adapter-supplied channel history (7b).
   const visibility = config.contextVisibility ?? 'all';
-  if (
-    (visibility === 'allowlist' || visibility === 'allowlist_quote') &&
-    message.replyToId !== undefined &&
-    message.replyToUserId !== undefined
-  ) {
-    const replyAllowed = isInAllowlist(allowlist, message.replyToUserId);
-    if (!replyAllowed) {
-      const stripped =
-        '[quoted content from non-allowlisted sender removed]\n' +
-        message.text.replace(/^>.*\n?/gm, '').trim();
-      return { action: 'allow', strippedText: stripped };
-    }
+  if (visibility !== 'allowlist' && visibility !== 'allowlist_quote') {
+    // Step 8: allow
+    return { action: 'allow' };
   }
 
-  // Step 8: allow
-  return { action: 'allow' };
+  const result: ChannelFilterResult = { action: 'allow' };
+
+  // Step 7a: quoted / replied-to message.
+  // Only strip when replyToUserId is explicitly set AND non-allowlisted.
+  // If replyToUserId is absent (adapter can't provide it), do not strip.
+  if (
+    message.replyToId !== undefined &&
+    message.replyToUserId !== undefined &&
+    !isInAllowlist(allowlist, message.replyToUserId)
+  ) {
+    result.strippedText =
+      '[quoted content from non-allowlisted sender removed]\n' +
+      message.text.replace(/^>.*\n?/gm, '').trim();
+  }
+
+  // Step 7b: adapter-supplied channel/thread history. Unlike 7a this is
+  // fail-closed — a history blob the adapter did not attribute per line
+  // cannot be checked against the allowlist, so none of it passes.
+  if (message.priorContext !== undefined) {
+    const filtered = filterPriorContext(message.priorContextEntries, allowlist);
+    if (filtered !== undefined) result.strippedPriorContext = filtered;
+  }
+
+  return result;
+}
+
+/**
+ * Keep only the history lines whose author is on the allowlist.
+ *
+ * Returns `undefined` when every line survives (the caller keeps the adapter's
+ * own rendering, preamble and all), the empty string when none does, and the
+ * surviving lines otherwise.
+ */
+function filterPriorContext(
+  entries: PriorContextEntry[] | undefined,
+  allowlist: string[],
+): string | undefined {
+  if (entries === undefined) return '';
+  const kept = entries.filter(
+    (entry) => entry.userId !== undefined && isInAllowlist(allowlist, entry.userId),
+  );
+  // Order matters: an empty `entries` alongside a non-empty `priorContext` is
+  // an unattributed blob, and must drop rather than count as "nothing removed".
+  if (kept.length === 0) return '';
+  if (kept.length === entries.length) return undefined;
+  const lines = kept.map((entry) => entry.text).join('\n');
+  return `[channel history — lines from non-allowlisted senders removed]\n${lines}`;
 }

@@ -16,6 +16,7 @@
   "dependencies": {
     "@ethosagent/oauth-core": "workspace:*",
     "@ethosagent/plugin-sdk": "workspace:*",
+    "@ethosagent/pricing": "workspace:*",
     "@ethosagent/types": "workspace:*"
   },
   "devDependencies": {

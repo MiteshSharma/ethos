@@ -101,6 +101,26 @@ function authorized(header: string | undefined, secret: string): boolean {
 }
 
 /**
+ * The listener plus one read-only query. Returned instead of a bare `Server`
+ * so existing callers — which only ever hold it as a `Server` — keep working
+ * unchanged; the accessor rides along on the same object.
+ */
+export type WebhookServer = Server & {
+  /**
+   * How many requests are currently parked on the SYNCHRONOUS reply path —
+   * the ones holding an open HTTP connection while `gateway.handleMessage`
+   * runs. Exists for an idle-watcher's busy predicate: stopping the process
+   * here drops a caller's connection with no reply and no retry.
+   *
+   * `mode: 'ack'` requests are deliberately NOT counted. They are answered 202
+   * before the turn starts and the turn itself runs detached inside the
+   * gateway, where `Gateway.hasActiveTurns()` already sees it — counting them
+   * here would double-count the same work.
+   */
+  inFlightSyncRequests(): number;
+};
+
+/**
  * Inbound webhook listener. Exposes `POST /webhook/<hookId>`: an external caller
  * supplies a bearer secret and a prompt; the handler synthesizes an
  * `InboundMessage` and drives the mapped personality through the existing
@@ -116,7 +136,9 @@ export function createWebhookServer(
   webhooks: Record<string, WebhookConfig>,
   createCapturingAdapter: CaptureFactory,
   runPrefilter?: PrefilterRunner,
-): Server {
+): WebhookServer {
+  /** Requests parked on the synchronous reply path. See `inFlightSyncRequests`. */
+  let inFlightSync = 0;
   const server = createServer(async (req, res) => {
     const match = req.url ? WEBHOOK_PATH.exec(req.url) : null;
     if (req.method !== 'POST' || !match) {
@@ -254,6 +276,7 @@ export function createWebhookServer(
 
     let timer: NodeJS.Timeout | undefined;
     let responded = false;
+    inFlightSync++;
     try {
       const timeout = new Promise<'timeout'>((resolve) => {
         timer = setTimeout(() => resolve('timeout'), timeoutMs);
@@ -274,6 +297,7 @@ export function createWebhookServer(
         sendJson(res, 500, { error: 'internal error' });
       }
     } finally {
+      inFlightSync--;
       if (timer) clearTimeout(timer);
     }
   });
@@ -287,5 +311,5 @@ export function createWebhookServer(
   });
   server.listen(port, host);
   server.unref();
-  return server;
+  return Object.assign(server, { inFlightSyncRequests: () => inFlightSync });
 }

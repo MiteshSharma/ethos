@@ -1,6 +1,8 @@
+import type { IncomingMessage, ServerResponse } from 'node:http';
 import { join } from 'node:path';
 import type {
   AdapterCapabilities,
+  AdapterVoiceCaps,
   ApprovalCapableAdapter,
   ApprovalDecisionEvent,
   Attachment,
@@ -9,7 +11,9 @@ import type {
   InboundMessage,
   OutboundMessage,
   PlatformAdapter,
+  SendVoiceNoteOptions,
   Storage,
+  VoiceOutboundAdapter,
 } from '@ethosagent/types';
 import { Bot, InlineKeyboard, InputFile, webhookCallback } from 'grammy';
 import { type ChannelMode, DEFAULT_CHANNEL_MODE } from './config';
@@ -335,7 +339,9 @@ function toTelegramInputFile(att: Attachment): InputFile {
   return new InputFile(att.url, name);
 }
 
-export class TelegramAdapter implements PlatformAdapter, ApprovalCapableAdapter {
+export class TelegramAdapter
+  implements PlatformAdapter, ApprovalCapableAdapter, VoiceOutboundAdapter
+{
   readonly id: string;
   readonly displayName = 'Telegram';
   readonly canSendTyping = true;
@@ -343,6 +349,21 @@ export class TelegramAdapter implements PlatformAdapter, ApprovalCapableAdapter 
   readonly canReact = true;
   readonly canSendFiles = true;
   readonly maxMessageLength = 4096;
+
+  /**
+   * Declared voice capabilities. `opus` leads the outbound list because
+   * `sendVoice` with Ogg/Opus bytes is what makes Telegram render a playable
+   * voice bubble; anything else degrades to `sendAudio` (still playable, but
+   * an audio card rather than a bubble).
+   */
+  readonly voiceCaps: AdapterVoiceCaps = {
+    inbound: ['opus', 'ogg', 'mp3', 'm4a'],
+    outbound: {
+      formats: ['opus', 'ogg', 'mp3'],
+      kind: 'voice_note',
+      maxBytes: 50 * 1024 * 1024,
+    },
+  };
 
   get capabilities(): AdapterCapabilities {
     return {
@@ -383,8 +404,7 @@ export class TelegramAdapter implements PlatformAdapter, ApprovalCapableAdapter 
   /** JSONL-backed thread-follow tracking (Gap 4). */
   private readonly threadState?: ThreadStateStore;
   /** Webhook callback for external HTTP server wiring (Gap 6). */
-  // biome-ignore lint/suspicious/noExplicitAny: grammy's webhookCallback returns an Express-typed handler
-  private webhookCb?: (...args: any[]) => any;
+  private webhookCb?: (req: IncomingMessage, res: ServerResponse) => Promise<void>;
 
   constructor(config: TelegramAdapterConfig) {
     this.bot = new Bot(config.token);
@@ -668,7 +688,7 @@ export class TelegramAdapter implements PlatformAdapter, ApprovalCapableAdapter 
       await this.bot.api.setWebhook(this.config.webhookUrl, {
         secret_token: this.config.webhookSecretToken,
       });
-      this.webhookCb = webhookCallback(this.bot, 'express', {
+      this.webhookCb = webhookCallback(this.bot, 'http', {
         secretToken: this.config.webhookSecretToken,
       });
     } else {
@@ -695,14 +715,15 @@ export class TelegramAdapter implements PlatformAdapter, ApprovalCapableAdapter 
 
   /**
    * Webhook callback for external HTTP server wiring (Gap 6).
-   * Returns an Express-compatible middleware when webhook mode is enabled,
-   * `undefined` when polling. The host app mounts it on a route:
+   * Returns a plain `node:http` request handler when webhook mode is enabled,
+   * `undefined` when polling. grammy's `'http'` adapter reads the raw request
+   * body itself and answers the response, so the host must mount it without
+   * pre-parsing the body:
    * ```ts
-   * app.post('/telegram/webhook', adapter.webhook);
+   * createServer((req, res) => { void adapter.webhook?.(req, res); });
    * ```
    */
-  // biome-ignore lint/suspicious/noExplicitAny: grammy's webhookCallback returns an Express-typed handler
-  get webhook(): ((...args: any[]) => any) | undefined {
+  get webhook(): ((req: IncomingMessage, res: ServerResponse) => Promise<void>) | undefined {
     return this.webhookCb;
   }
 
@@ -907,22 +928,58 @@ export class TelegramAdapter implements PlatformAdapter, ApprovalCapableAdapter 
     }
   }
 
-  async sendVoice(
+  /**
+   * The declared voice sink. Ogg/Opus goes through `sendVoice` (voice bubble);
+   * every other declared format goes through `sendAudio` (playable audio card).
+   * Neither path may throw — `{ok:true}` is the delivery ledger's only proof of
+   * delivery, so a platform failure must surface as `{ok:false}`.
+   */
+  async sendVoiceNote(
     chatId: string,
     audio: Uint8Array,
-    opts?: { threadId?: string; caption?: string },
+    opts: SendVoiceNoteOptions,
   ): Promise<DeliveryResult> {
+    const sendOpts = {
+      ...(opts.caption ? { caption: opts.caption } : {}),
+      ...(opts.threadId ? { message_thread_id: Number(opts.threadId) } : {}),
+    };
+    const input = new InputFile(audio, opts.filename);
     try {
-      const sent = await this.bot.api.sendVoice(Number(chatId), new InputFile(audio, 'voice.ogg'), {
-        ...(opts?.caption ? { caption: opts.caption } : {}),
-        ...(opts?.threadId ? { message_thread_id: Number(opts.threadId) } : {}),
-      });
+      const sent =
+        opts.format === 'opus' || opts.format === 'ogg'
+          ? await this.bot.api.sendVoice(Number(chatId), input, sendOpts)
+          : await this.bot.api.sendAudio(Number(chatId), input, sendOpts);
       return { ok: true, messageId: String(sent.message_id) };
     } catch (err) {
       return { ok: false, error: err instanceof Error ? err.message : String(err) };
     }
   }
 
+  /** @deprecated Back-compat shim — delegates to {@link sendVoiceNote}. */
+  async sendVoice(
+    chatId: string,
+    audio: Uint8Array,
+    opts?: { threadId?: string; caption?: string },
+  ): Promise<DeliveryResult> {
+    return this.sendVoiceNote(chatId, audio, {
+      format: 'opus',
+      mimeType: 'audio/ogg; codecs=opus',
+      filename: 'voice.ogg',
+      ...(opts?.threadId ? { threadId: opts.threadId } : {}),
+      ...(opts?.caption ? { caption: opts.caption } : {}),
+    });
+  }
+
+  /**
+   * Send playable audio that is NOT a voice note. This used to call
+   * `sendDocument`, which is why TTS replies arrived as a downloadable file
+   * instead of an audio player — that was the document-arrival bug.
+   *
+   * `opts.mimeType` is accepted but has no Bot API parameter to ride on:
+   * `sendAudio` takes no mimetype and grammy's `InputFile` takes only bytes and
+   * a filename, so Telegram infers the type from the filename extension. The
+   * caller therefore supplies an extension that matches the mime type.
+   */
   async sendAudio(
     chatId: string,
     audio: Uint8Array,
@@ -930,7 +987,7 @@ export class TelegramAdapter implements PlatformAdapter, ApprovalCapableAdapter 
     opts?: { threadId?: string; caption?: string; mimeType?: string },
   ): Promise<DeliveryResult> {
     try {
-      const sent = await this.bot.api.sendDocument(Number(chatId), new InputFile(audio, filename), {
+      const sent = await this.bot.api.sendAudio(Number(chatId), new InputFile(audio, filename), {
         ...(opts?.caption ? { caption: opts.caption } : {}),
         ...(opts?.threadId ? { message_thread_id: Number(opts.threadId) } : {}),
       });

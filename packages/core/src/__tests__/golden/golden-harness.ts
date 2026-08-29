@@ -111,7 +111,11 @@ function normalize(result: GoldenResult): GoldenResult {
 
   const llmInputs = result.llmInputs.map((call) => ({
     messages: call.messages,
-    options: { ...call.options, abortSignal: undefined },
+    // B2 — `requestId` is a fresh UUID per LLM call, so it is normalized out
+    // for the same reason `abortSignal` is: it can never be stable in a
+    // fixture. That it reaches the provider at all is characterized by
+    // `provider-request-correlation.test.ts`, not by these goldens.
+    options: { ...call.options, abortSignal: undefined, requestId: undefined },
   }));
 
   return JSON.parse(JSON.stringify({ events, messages, llmInputs }));

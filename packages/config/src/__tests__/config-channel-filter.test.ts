@@ -1,5 +1,5 @@
 import { join } from 'node:path';
-import { InMemoryStorage } from '@ethosagent/storage-fs';
+import { InMemorySecretsResolver, InMemoryStorage } from '@ethosagent/storage-fs';
 import { describe, expect, it } from 'vitest';
 import { type EthosConfig, ethosDir, readRawConfig, writeConfig } from '../index';
 
@@ -68,7 +68,7 @@ describe('writeConfig — channel_filter.<platform>.enable round-trip', () => {
       personality: 'researcher',
       channelFilter: { telegram: { enabled: false, ownerUserId: 'owner-1' } },
     };
-    await writeConfig(storage, original);
+    await writeConfig(storage, original, new InMemorySecretsResolver());
 
     const raw = await storage.read(join(ethosDir(), 'config.yaml'));
     expect(raw).toContain('channel_filter.telegram.enable: false');
@@ -80,13 +80,17 @@ describe('writeConfig — channel_filter.<platform>.enable round-trip', () => {
   it('does not emit the enable line when enabled is true', async () => {
     const storage = new InMemoryStorage();
     await storage.mkdir(ethosDir());
-    await writeConfig(storage, {
-      provider: 'anthropic',
-      model: 'claude-opus-4-7',
-      apiKey: 'sk',
-      personality: 'researcher',
-      channelFilter: { telegram: { enabled: true, ownerUserId: 'owner-1' } },
-    });
+    await writeConfig(
+      storage,
+      {
+        provider: 'anthropic',
+        model: 'claude-opus-4-7',
+        apiKey: 'sk',
+        personality: 'researcher',
+        channelFilter: { telegram: { enabled: true, ownerUserId: 'owner-1' } },
+      },
+      new InMemorySecretsResolver(),
+    );
     const raw = await storage.read(join(ethosDir(), 'config.yaml'));
     expect(raw).not.toContain('channel_filter.telegram.enable');
   });
@@ -94,13 +98,17 @@ describe('writeConfig — channel_filter.<platform>.enable round-trip', () => {
   it('does not emit the enable line when enabled is unset', async () => {
     const storage = new InMemoryStorage();
     await storage.mkdir(ethosDir());
-    await writeConfig(storage, {
-      provider: 'anthropic',
-      model: 'claude-opus-4-7',
-      apiKey: 'sk',
-      personality: 'researcher',
-      channelFilter: { telegram: { ownerUserId: 'owner-1' } },
-    });
+    await writeConfig(
+      storage,
+      {
+        provider: 'anthropic',
+        model: 'claude-opus-4-7',
+        apiKey: 'sk',
+        personality: 'researcher',
+        channelFilter: { telegram: { ownerUserId: 'owner-1' } },
+      },
+      new InMemorySecretsResolver(),
+    );
     const raw = await storage.read(join(ethosDir(), 'config.yaml'));
     expect(raw).not.toContain('channel_filter.telegram.enable');
   });

@@ -4,7 +4,7 @@ description: "A personality is a directory of three files that atomically swaps 
 kind: explanation
 audience: user
 slug: what-is-a-personality
-updated: 2026-06-09
+updated: 2026-08-14
 ---
 
 ## Context
@@ -136,12 +136,12 @@ This is not procedural caution. The schema is the load-bearing surface — it is
 
 The categories the schema explicitly refuses:
 
-- Voice modes, TTS settings, speech parameters.
+- Voice modes, VAD tuning, speech parameters, TTS engine settings.
 - Emotion, mood, sentiment tags.
 - Response templates and label vocabulary.
 - Per-channel UI affordances (button labels, card layouts).
 
-Each of these is a real product need; none of them are personality concerns. Voice belongs to the channel adapter. Response templates belong to skills. UI affordances belong to the surface (web, CLI, Telegram). Mixing them into the personality directory was the first instinct and has been refused four times — the goal is a tight unit you can reason about, not a god object that accretes every cross-cutting concern.
+Each of these is a real product need; none of them are personality concerns. Response templates belong to skills. UI affordances belong to the surface (web, CLI, Telegram). Voice splits along the same line: *which* voice a personality speaks in is identity and lives in its `voice` block; *when* and *whether* it speaks is the operator's, in `~/.ethos/config.yaml`. Mixing them into the personality directory was the first instinct and has been refused four times — the goal is a tight unit you can reason about, not a god object that accretes every cross-cutting concern.
 
 ### The first-person voice in `SOUL.md`
 

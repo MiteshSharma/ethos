@@ -1,7 +1,8 @@
 # Single-service "just talk to it" profile (W1.4, zero-friction-first-hour).
 #
-# One service, ETHOS_MODE=all (web UI + gateway under one supervisor), one
-# volume. Put an API key in .env next to this file, then:
+# One service, ETHOS_MODE=all (web UI + gateway under one supervisor), two
+# volumes — state and the agent's working directory. Put an API key in .env
+# next to this file, then:
 #
 #   docker compose -f docker-compose.single.yml up
 #
@@ -14,7 +15,8 @@
 # docker-compose.yml.
 #
 # ETHOS_IMAGE pins a specific published tag (the smoke gate sets it to the
-# just-published version). ETHOS_DATA_DIR relocates the state volume.
+# just-published version). ETHOS_DATA_DIR relocates the state volume,
+# ETHOS_WORKSPACE_DIR the working-directory volume.
 
 services:
   ethos:
@@ -40,8 +42,14 @@ services:
       TELEGRAM_OWNER_ID:
     ports:
       - "3000:3000"
+    # read_only: true makes only the container's ROOT filesystem read-only —
+    # bind mounts stay writable. The workspace mount is what makes the agent's
+    # default fs_reach on cwd (process.cwd()) behave the same in a container as
+    # it does from a local terminal: writable and persistent across restarts.
+    working_dir: /home/ethos/workspace
     volumes:
       - ${ETHOS_DATA_DIR:-./ethos-data}:/home/ethos/.ethos
+      - ${ETHOS_WORKSPACE_DIR:-./ethos-workspace}:/home/ethos/workspace
     read_only: true
     tmpfs:
       - /tmp

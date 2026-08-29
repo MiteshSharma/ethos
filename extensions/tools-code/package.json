@@ -26,5 +26,8 @@
     "@ethosagent/core": "workspace:*",
     "@ethosagent/sandbox-docker": "workspace:*",
     "@ethosagent/types": "workspace:*"
+  },
+  "devDependencies": {
+    "@ethosagent/execution-docker": "workspace:*"
   }
 }

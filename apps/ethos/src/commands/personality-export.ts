@@ -608,7 +608,7 @@ function buildBundleManifest(
   entries: Entry[],
   personality: {
     toolset?: string[];
-    fs_reach?: { read?: string[]; write?: string[] };
+    fs_reach?: { read?: string[]; write?: string[]; workdir?: string };
     budgetCapUsd?: number;
     mcp_servers?: string[];
     plugins?: string[];
@@ -616,9 +616,11 @@ function buildBundleManifest(
   withMemory: boolean,
 ): BundleManifest {
   const toolset = personality.toolset ?? [];
-  const fsReach = {
+  const workdir = personality.fs_reach?.workdir;
+  const fsReach: BundleManifest['declared']['fsReach'] = {
     read: personality.fs_reach?.read ?? [],
     write: personality.fs_reach?.write ?? [],
+    ...(workdir ? { workdir } : {}),
   };
 
   // MCP servers

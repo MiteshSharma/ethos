@@ -14,8 +14,14 @@ import {
   createA2aRpcService,
   type JsonRpcResponse,
 } from '../rpc';
-import { type A2aTask, InMemoryA2aTaskStore, isTerminalStatus } from '../task-store';
 import {
+  type A2aTask,
+  type A2aTaskStore,
+  InMemoryA2aTaskStore,
+  isTerminalStatus,
+} from '../task-store';
+import {
+  capturingRunner,
   countingRunner,
   HELLO_SCRIPT,
   hangingRunner,
@@ -83,6 +89,34 @@ describe('Async message/send — submit + idempotency dedupe', () => {
     expect(final?.status).toBe('completed');
     expect(final?.result).toBe('hello world');
     expect(counter.runs).toBe(1);
+  });
+
+  it('threads params.skill through to the runner on the async path too (plan T0.2)', async () => {
+    const target = makeAgent(TARGET_ID);
+    const peer = makeAgent('peer-a');
+    const sheet: SheetHolder = { skills: ['search'] };
+    const peerStore = newPeerStore();
+    const store = new InMemoryA2aTaskStore();
+    const clock = { t: Date.now() };
+    const captured: Parameters<typeof capturingRunner>[1] = {};
+    const service = createA2aRpcService({
+      getIdentity: stubIdentity(target, sheet),
+      peerStore,
+      runner: capturingRunner(HELLO_SCRIPT, captured),
+      taskStore: store,
+      now: () => clock.t,
+    });
+    const minted = await mintPeerToken(target, peer, ['search'], peerStore, { now: clock.t });
+    const ts = clock.t;
+    const res = await service.handleRpc(TARGET_ID, asyncRpc('search', 'k-skill'), {
+      token: minted.token,
+      proofSignature: signPop(peer, A2A_METHOD_MESSAGE_SEND, minted.claims.jti, ts),
+      proofTimestamp: ts,
+    });
+    if ('error' in res) throw new Error(`unexpected error ${res.error.code}`);
+    const ack = res.result as A2aAsyncSubmitResult;
+    await waitForTerminal(store, ack.taskId);
+    expect(captured.opts?.skill).toBe('search');
   });
 
   it('dedupes a retried async send: runner runs EXACTLY once, second returns the prior task', async () => {
@@ -276,5 +310,68 @@ describe('§O6 — per-peer concurrency cap returns typed busy (-32004)', () => 
     clock.t += 1000;
     const second = await send(clock.t, 'k2');
     expect(errorCode(second)).toBe(-32004); // over the concurrency cap → typed busy
+  });
+});
+
+describe('Async message/send — lease leak on submit() failure (correctness fix)', () => {
+  it('does not leak the concurrency lease when submit() throws before attaching settled.finally', async () => {
+    const target = makeAgent(TARGET_ID);
+    const peer = makeAgent('peer-a');
+    const sheet: SheetHolder = { skills: ['search'] };
+    const peerStore = newPeerStore();
+    const counter = { runs: 0 };
+    const clock = { t: Date.now() };
+    // Simulates e.g. a SQLite insert failure between lease acquisition and
+    // `submit()` resolving — the lease is acquired BEFORE this call, so
+    // without the fix nothing ever releases it.
+    const brokenStore: A2aTaskStore = {
+      async create() {
+        throw new Error('simulated task-store insert failure');
+      },
+      async get() {
+        return null;
+      },
+      async findByIdempotencyKey() {
+        return null;
+      },
+      async update() {
+        return null;
+      },
+      subscribe() {
+        return () => {};
+      },
+      async failNonTerminal() {
+        return 0;
+      },
+    };
+    const service = createA2aRpcService({
+      getIdentity: stubIdentity(target, sheet),
+      peerStore,
+      runner: countingRunner(HELLO_SCRIPT, counter),
+      taskStore: brokenStore,
+      limiter: new MemoryA2aLimiter({ maxConcurrentPerPeer: 1, ratePerWindow: 1000 }),
+      now: () => clock.t,
+    });
+    const minted = await mintPeerToken(target, peer, ['search'], peerStore, { now: clock.t });
+
+    const send = (ts: number, key: string) =>
+      service.handleRpc(TARGET_ID, asyncRpc('search', key), {
+        token: minted.token,
+        proofSignature: signPop(peer, A2A_METHOD_MESSAGE_SEND, minted.claims.jti, ts),
+        proofTimestamp: ts,
+      });
+
+    const first = await send(clock.t, 'k1');
+    expect(errorCode(first)).toBe(-32000); // EXECUTION_FAILED — surfaced, not swallowed
+    expect(counter.runs).toBe(0);
+
+    // maxConcurrentPerPeer is 1. If the first call's lease had leaked, this
+    // SECOND call (a distinct key, so no idempotency short-circuit) would be
+    // rejected as over the concurrency cap (-32004) instead of reaching the
+    // same store failure again.
+    clock.t += 1000;
+    const second = await send(clock.t, 'k2');
+    expect(errorCode(second)).toBe(-32000);
+    expect(errorCode(second)).not.toBe(-32004);
   });
 });

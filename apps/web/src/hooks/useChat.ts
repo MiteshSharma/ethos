@@ -1,3 +1,4 @@
+import type { ClarifyRequestEvent } from '@ethosagent/web-contracts';
 import { useCallback, useEffect, useReducer, useRef, useState } from 'react';
 import { type AttachmentPreview, toMessageAttachment } from '../lib/attachments';
 import {
@@ -6,8 +7,10 @@ import {
   type ChatAction,
   type ChatState,
   initialChatState,
+  type RestoredRun,
 } from '../lib/chat-reducer';
 import { getClientId } from '../lib/clientId';
+import { isTerminalRun } from '../lib/pi-run-reducer';
 import { rpc } from '../rpc';
 import { subscribeToSession } from '../sse';
 
@@ -53,7 +56,11 @@ export interface UseChatResult {
   /** Server-assigned session id once a turn has run. Null on a fresh chat
    *  before the user types anything. */
   currentSessionId: string | null;
-  sendMessage: (text: string, attachments?: AttachmentPreview[]) => Promise<void>;
+  sendMessage: (
+    text: string,
+    attachments?: AttachmentPreview[],
+    opts?: { origin?: 'text' | 'voice' },
+  ) => Promise<void>;
   /** Steer the running turn. Returns true if accepted, false if the turn
    *  already ended or the RPC failed. */
   steerMessage: (text: string) => Promise<boolean>;
@@ -84,6 +91,12 @@ export interface UseChatResult {
     postTotalTokens: number;
     summariesEnabled: boolean;
   } | null>;
+  /**
+   * Record the answer this tab gave a delegated run's question, so the resolved
+   * card can name the decision (pi-delegation §4.5). `clarify.resolved` carries
+   * only a source, never the answer.
+   */
+  noteClarifyAnswer: (requestId: string, answer: string) => void;
 }
 
 type Reducer = (state: ChatState, op: ReducerOp) => ChatState;
@@ -96,6 +109,63 @@ const reducer: Reducer = (state, op) => {
   return applyAction(state, op.action);
 };
 
+/**
+ * The runs this session still has going, read from the durable job rows.
+ *
+ * The `run.update` digest is the run card's live feed and it has NO replay: a
+ * page that connects mid-run misses every sample already published, and for a
+ * run past its terminal sample there is no next one. `tasks.list` is the
+ * catch-up — the same shape `ClarifyBridge.listPending` gives a reconnecting
+ * surface for clarify rows.
+ *
+ * Terminal runs are deliberately excluded. Their card has nothing left to say,
+ * and the sentence that matters — the completion hand-back — is a persisted
+ * message that comes back with history on its own.
+ */
+export async function loadActiveRuns(
+  rootSessionKey: string,
+  now: number = Date.now(),
+): Promise<RestoredRun[]> {
+  const rows = await rpc.tasks.list({ rootSessionKey });
+  return rows
+    .filter((row) => !isTerminalRun(row.status))
+    .map((row) => ({
+      jobId: row.id,
+      // Null on rows written before the runner seam existed; those ran on the
+      // in-process default.
+      runner: row.runner ?? 'ethos',
+      status: row.status,
+      spendUsd: row.spendUsd,
+      elapsedMs: Math.max(0, now - (row.startedAt ?? row.createdAt)),
+    }));
+}
+
+/**
+ * The questions this session's runs are parked on, read from the durable
+ * clarify rows.
+ *
+ * `loadActiveRuns`'s sibling, and the same gap: the `clarify.request` push has
+ * no replay either, so the run card a mid-run mount just restored would show a
+ * run "waiting on you" with nothing to answer. `ClarifyBridge.listPersisted`
+ * has always been able to answer this — until now nothing exposed it to the
+ * browser.
+ *
+ * Rows come back shaped as the event the live stream would have delivered, so
+ * they fold into the one queue both paths share.
+ */
+export async function loadParkedQuestions(rootSessionKey: string): Promise<ClarifyRequestEvent[]> {
+  const rows = await rpc.clarify.listPending({ rootSessionKey });
+  return rows.map((row) => ({
+    type: 'clarify.request' as const,
+    requestId: row.requestId,
+    question: row.question,
+    ...(row.options ? { options: row.options } : {}),
+    ...(row.default !== undefined ? { default: row.default } : {}),
+    jobId: row.jobId,
+    defaultDeadlineAt: row.defaultDeadlineAt,
+  }));
+}
+
 export function useChat(opts: UseChatOptions): UseChatResult {
   const [state, dispatch] = useReducer(reducer, initialChatState);
   const [currentSessionId, setCurrentSessionId] = useState<string | null>(
@@ -107,6 +177,33 @@ export function useChat(opts: UseChatOptions): UseChatResult {
   // is single-shot per session and feeds the reducer, which already owns
   // the canonical message list — useState is the right tool here.
   const historyLoadedFor = useRef<string | null>(null);
+
+  // 0b. Rediscover runs that were already going when this page connected, and
+  //     the questions any of them are parked on.
+  //     A restore that fails leaves the transcript exactly as it was — the
+  //     drawer and the status pill still carry the run, and a card that never
+  //     appears is better than an error banner over a working conversation.
+  const restoreRunState = useCallback(
+    async (rootSessionKey: string, cancelled: () => boolean): Promise<void> => {
+      try {
+        const runs = await loadActiveRuns(rootSessionKey);
+        if (cancelled() || runs.length === 0) return;
+        dispatch({
+          kind: 'action',
+          action: { type: 'runs-restored', runs, timestamp: Date.now() },
+        });
+        // Chained behind the runs, and only when there ARE runs: the questions
+        // are scoped to this session's live jobs, so with no run restored there
+        // is nothing to ask about and no reason to spend the round trip.
+        const pending = await loadParkedQuestions(rootSessionKey);
+        if (cancelled() || pending.length === 0) return;
+        dispatch({ kind: 'action', action: { type: 'clarify-restored', pending } });
+      } catch {
+        // best-effort
+      }
+    },
+    [],
+  );
 
   // 1. Load history when a session is in scope and we haven't fetched yet.
   useEffect(() => {
@@ -121,7 +218,15 @@ export function useChat(opts: UseChatOptions): UseChatResult {
         // Mark as loaded only after success so a Strict Mode
         // cancel+remount cycle retries rather than skipping.
         historyLoadedFor.current = currentSessionId;
-        dispatch({ kind: 'action', action: { type: 'history-loaded', messages: res.messages } });
+        dispatch({
+          kind: 'action',
+          action: { type: 'history-loaded', messages: res.messages, cards: res.cards },
+        });
+        // Chained off the history load rather than run as its own effect for
+        // one reason: `history-loaded` REPLACES `state.messages`, so a restore
+        // that landed first would have its anchors thrown away. It also needs
+        // the session's key, which this response already carries.
+        void restoreRunState(res.session.key, () => cancelled);
       })
       .catch((err: unknown) => {
         if (cancelled) return;
@@ -143,7 +248,7 @@ export function useChat(opts: UseChatOptions): UseChatResult {
     return () => {
       cancelled = true;
     };
-  }, [currentSessionId, opts.onSessionNotFound]);
+  }, [currentSessionId, opts.onSessionNotFound, restoreRunState]);
 
   // 2. Subscribe to SSE for the current session. The wrapper handles
   //    reconnect via Last-Event-ID; we just dispatch every event into
@@ -179,7 +284,11 @@ export function useChat(opts: UseChatOptions): UseChatResult {
   const onSessionCreated = opts.onSessionCreated;
   const personalityId = opts.personalityId;
   const sendMessage = useCallback(
-    async (text: string, attachments?: AttachmentPreview[]): Promise<void> => {
+    async (
+      text: string,
+      attachments?: AttachmentPreview[],
+      opts?: { origin?: 'text' | 'voice' },
+    ): Promise<void> => {
       const trimmed = text.trim();
       if (!trimmed && !attachments?.length) return;
 
@@ -192,6 +301,10 @@ export function useChat(opts: UseChatOptions): UseChatResult {
           text: trimmed,
           timestamp: Date.now(),
           ...(attachments?.length ? { attachments: attachments.map(toMessageAttachment) } : {}),
+          // The bubble carries the same "this arrived as speech" fact the
+          // server is told below — the transcript is shown BESIDE the marker,
+          // never instead of it.
+          ...(opts?.origin === 'voice' ? { origin: 'voice' as const } : {}),
         },
       });
 
@@ -201,6 +314,9 @@ export function useChat(opts: UseChatOptions): UseChatResult {
           clientId: getClientId(),
           text: trimmed,
           ...(personalityId ? { personalityId } : {}),
+          // Talk-mode marks its turns so the server can annotate them as
+          // spoken. Typed sends omit it entirely.
+          ...(opts?.origin === 'voice' ? { origin: 'voice' as const } : {}),
           ...(attachments?.length
             ? {
                 attachments: attachments.map((a) => ({
@@ -323,6 +439,15 @@ export function useChat(opts: UseChatOptions): UseChatResult {
     [currentSessionId],
   );
 
+  // Remember the answer this tab gave a run's question, so the resolved card
+  // can name the decision (§4.5). `clarify.resolved` carries only a source.
+  const noteClarifyAnswer = useCallback((requestId: string, answer: string) => {
+    dispatch({
+      kind: 'action',
+      action: { type: 'note-clarify-answer', requestId, answer, timestamp: Date.now() },
+    });
+  }, []);
+
   return {
     state,
     currentSessionId,
@@ -333,5 +458,6 @@ export function useChat(opts: UseChatOptions): UseChatResult {
     resetSession,
     undoTurns,
     compact,
+    noteClarifyAnswer,
   };
 }

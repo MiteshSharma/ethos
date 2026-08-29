@@ -1,6 +1,9 @@
-import { randomUUID } from 'node:crypto';
 import { EthosError, type EthosErrorCode, isEthosError } from '@ethosagent/types';
 import type { Context, MiddlewareHandler } from 'hono';
+// Side-effect import: `hono/request-id` augments Hono's `ContextVariableMap`
+// with `requestId`, which is what types `c.get('requestId')` below. The
+// middleware itself is mounted in routes/index.ts.
+import 'hono/request-id';
 
 // Uniform JSON error shape on the wire. Services throw `EthosError`; this
 // middleware catches anything that escaped a route and renders it as
@@ -16,6 +19,10 @@ export interface ErrorEnvelope {
   code: EthosErrorCode;
   error: string;
   action: string;
+  /** B1 — the request's `x-request-id`, echoed so a user can quote the exact
+   *  failed request. Optional because `toEnvelope` is also called from routes
+   *  that build an envelope without a Hono context. */
+  requestId?: string;
 }
 
 const STATUS_BY_CODE: Partial<Record<EthosErrorCode, number>> = {
@@ -53,23 +60,30 @@ export function statusFor(code: EthosErrorCode): number {
  * directly when they want to short-circuit without throwing.
  */
 export function errorHandler(err: Error, c: Context): Response {
+  // B1 — the id the `x-request-id` middleware settled on for THIS request (an
+  // inbound one it accepted, or the UUID it generated). This used to be a
+  // freshly minted UUID visible only in the 500 body, so the id the client was
+  // told to quote appeared in no response header and named no other log line.
+  // Widened to `| undefined` on purpose: Hono types the variable as `string`
+  // once the middleware is registered, but `errorHandler` is also mounted on
+  // sub-apps in tests where it never ran.
+  const requestId: string | undefined = c.get('requestId');
   if (isEthosError(err)) {
     return c.json(
-      toEnvelope(err),
+      { ...toEnvelope(err), ...(requestId ? { requestId } : {}) },
       statusFor(err.code) as 400 | 401 | 403 | 404 | 409 | 500 | 502 | 504,
     );
   }
   // Anything else is a bug (uncaught raw Error). Log the full error server-side
   // for debugging but never reflect raw err.message to the client — it may
   // contain internal paths, stack traces, or database details.
-  const requestId = randomUUID();
   console.error('[internal_error]', requestId, err);
   const wrapped = new EthosError({
     code: 'INTERNAL',
-    cause: `Internal server error (request_id: ${requestId})`,
+    cause: requestId ? `Internal server error (request_id: ${requestId})` : 'Internal server error',
     action: 'Re-run the request. If the error repeats, file an issue with the request_id.',
   });
-  return c.json(toEnvelope(wrapped), 500);
+  return c.json({ ...toEnvelope(wrapped), ...(requestId ? { requestId } : {}) }, 500);
 }
 
 /**

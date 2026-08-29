@@ -16,6 +16,9 @@ import type {
   BackgroundJobEventType,
   BackgroundJobStatus,
   CreateBackgroundJobInput,
+  GetJobEventsOptions,
+  JobRunner,
+  JobRunnerRegistry,
   JobStore,
   ToolContext,
 } from '@ethosagent/types';
@@ -63,6 +66,7 @@ class FakeJobStore implements JobStore {
       originThreadId: input.originThreadId,
       remotePeer: input.remotePeer,
       remoteJobId: input.remoteJobId,
+      runner: input.runner,
     };
     this.jobs.set(id, job);
     this.events.set(id, []);
@@ -92,6 +96,8 @@ class FakeJobStore implements JobStore {
     const job = this.jobs.get(id);
     if (job) job.cancelRequested = true;
   }
+  async markBlocked(): Promise<void> {}
+  async resumeFromBlocked(): Promise<void> {}
   async finish(): Promise<void> {}
   async listByRoot(rootSessionKey: string): Promise<BackgroundJob[]> {
     return [...this.jobs.values()]
@@ -107,6 +113,9 @@ class FakeJobStore implements JobStore {
     return [...this.jobs.values()].filter(
       (j) => j.personalityId === personalityId && ACTIVE.has(j.status),
     ).length;
+  }
+  async countActive(): Promise<number> {
+    return [...this.jobs.values()].filter((j) => ACTIVE.has(j.status)).length;
   }
   async reclaimStale(): Promise<BackgroundJob[]> {
     return [];
@@ -143,6 +152,15 @@ class FakeJobStore implements JobStore {
     const job = this.jobs.get(id);
     if (job) job.deliveredAt = undefined;
   }
+  private readonly notices = new Set<string>();
+  async claimNotice(requestId: string): Promise<boolean> {
+    if (this.notices.has(requestId)) return false;
+    this.notices.add(requestId);
+    return true;
+  }
+  async releaseNotice(requestId: string): Promise<void> {
+    this.notices.delete(requestId);
+  }
   async appendEvent(
     jobId: string,
     eventType: BackgroundJobEventType,
@@ -159,8 +177,13 @@ class FakeJobStore implements JobStore {
     });
     this.events.set(jobId, list);
   }
-  async getEvents(jobId: string): Promise<BackgroundJobEvent[]> {
-    return [...(this.events.get(jobId) ?? [])];
+  // Honours the bounded tail contract (I21): a fake that ignored `opts` would
+  // let a caller's `limit` silently do nothing and still pass.
+  async getEvents(jobId: string, opts?: GetJobEventsOptions): Promise<BackgroundJobEvent[]> {
+    let list = [...(this.events.get(jobId) ?? [])];
+    const before = opts?.beforeSeq;
+    if (before !== undefined) list = list.filter((e) => e.seq < before);
+    return opts?.limit === undefined ? list : list.slice(-opts.limit);
   }
 
   // Test helper — seed a fully-formed row directly.
@@ -202,6 +225,26 @@ function makeCtx(overrides: Partial<ToolContext> = {}): ToolContext {
     emit: () => {},
     resultBudgetChars: 80_000,
     ...overrides,
+  };
+}
+
+/**
+ * A registry holding the named runners as already-RESOLVED instances. The tool
+ * validates through `get`, so registration alone must not make a name usable.
+ */
+function fakeRegistry(resolved: string[]): JobRunnerRegistry {
+  const runners = new Map<string, JobRunner>(
+    resolved.map((name) => [name, { name } as unknown as JobRunner]),
+  );
+  return {
+    register: () => {},
+    resolve: async (name) => {
+      const runner = runners.get(name);
+      if (!runner) throw new Error(`not registered: ${name}`);
+      return runner;
+    },
+    get: (name) => runners.get(name),
+    list: () => [...runners.keys()],
   };
 }
 
@@ -297,6 +340,65 @@ describe('delegate_task background path', () => {
       { prompt: 'p', background: true, personality: 'other' },
       makeCtx({ personalityId: 'me' }),
     );
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.code).toBe('input_invalid');
+    expect(store.jobs.size).toBe(0);
+  });
+
+  it("defaults the runner to 'ethos' when omitted", async () => {
+    const store = new FakeJobStore();
+    const { deps } = makeDeps(store);
+    const tool = createDelegateTaskTool(loop, deps);
+
+    const res = await tool.execute({ prompt: 'p', background: true }, makeCtx());
+    if (!res.ok) throw new Error('expected ok');
+    expect(store.jobs.get(JSON.parse(res.value).jobId)?.runner).toBe('ethos');
+  });
+
+  it('stamps a registered runner on the row', async () => {
+    const store = new FakeJobStore();
+    const { deps } = makeDeps(store, { runners: fakeRegistry(['other-harness']) });
+    const tool = createDelegateTaskTool(loop, deps);
+
+    const res = await tool.execute(
+      { prompt: 'p', background: true, runner: 'other-harness' },
+      makeCtx(),
+    );
+    if (!res.ok) throw new Error('expected ok');
+    expect(store.jobs.get(JSON.parse(res.value).jobId)?.runner).toBe('other-harness');
+  });
+
+  it('refuses an unregistered runner with not_available — never a silent fallback', async () => {
+    const store = new FakeJobStore();
+    const { deps } = makeDeps(store, { runners: fakeRegistry(['other-harness']) });
+    const tool = createDelegateTaskTool(loop, deps);
+
+    const res = await tool.execute({ prompt: 'p', background: true, runner: 'pi' }, makeCtx());
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.code).toBe('not_available');
+    expect(store.jobs.size).toBe(0);
+  });
+
+  it('refuses any non-default runner when the deployment registered none', async () => {
+    const store = new FakeJobStore();
+    const { deps } = makeDeps(store);
+    const tool = createDelegateTaskTool(loop, deps);
+
+    const res = await tool.execute(
+      { prompt: 'p', background: true, runner: 'other-harness' },
+      makeCtx(),
+    );
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.code).toBe('not_available');
+    expect(store.jobs.size).toBe(0);
+  });
+
+  it('rejects runner on the blocking path — it selects a background worker or nothing', async () => {
+    const store = new FakeJobStore();
+    const { deps } = makeDeps(store, { runners: fakeRegistry(['other-harness']) });
+    const tool = createDelegateTaskTool(loop, deps);
+
+    const res = await tool.execute({ prompt: 'p', runner: 'other-harness' }, makeCtx());
     expect(res.ok).toBe(false);
     if (!res.ok) expect(res.code).toBe('input_invalid');
     expect(store.jobs.size).toBe(0);
@@ -633,5 +735,30 @@ describe('task_logs', () => {
       expect(lines[2]).toContain('output: first line second line');
       expect(lines[3]).toContain('output truncated');
     }
+  });
+
+  // T1 / I-LOG1 — the job is still `running` (not `done`) when this event is
+  // seeded, proving `runner_log` rows are readable mid-run through the same
+  // tool, not only after the job finishes.
+  it('renders a runner_log event emitted mid-run', async () => {
+    const store = new FakeJobStore();
+    const { deps } = makeDeps(store);
+    store.seed({ id: 'l3', rootSessionKey: 'cli:test', status: 'running' });
+    await store.appendEvent('l3', 'runner_log', {
+      lines: [
+        { stream: 'stderr', line: 'npm warn deprecated left-pad' },
+        { stream: 'stdout', line: 'build ok' },
+      ],
+      dropped: 3,
+    });
+
+    const res = await createTaskLogsTool(deps).execute({ id: 'l3', tail: 1 }, makeCtx());
+    expect(res.ok).toBe(true);
+    if (res.ok) {
+      expect(res.value).toContain('[stderr] npm warn deprecated left-pad');
+      expect(res.value).toContain('[stdout] build ok');
+      expect(res.value).toContain('+3 dropped');
+    }
+    expect((await store.get('l3'))?.status).toBe('running');
   });
 });

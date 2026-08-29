@@ -73,6 +73,86 @@ describe('blocks/approval — pending', () => {
     expect(rendered.match(/```/g)?.length).toBe(2);
   });
 
+  it('redacts credential-shaped values inside object args', () => {
+    // CHS-003. The approval card renders args in full into a channel every
+    // member can read. A gated `terminal` call carrying a token must not
+    // publish it. Every shape below is in `@ethosagent/safety-redact`'s
+    // pattern set (github-pat, aws-key, slack-token, generic-secret).
+    const blocks = approvalPendingBlocks({
+      approvalId: 'a1',
+      toolName: 'terminal',
+      reason: 'network call with credentials',
+      args: {
+        githubToken: 'ghp_0123456789abcdefghijABCDEFGHIJ012345',
+        awsKey: 'AKIA0123456789ABCDEF',
+        slackToken: 'xoxb-1234567890-1234567890-abcdefghijklmnopqrstuvwx',
+        command: 'psql --dsn password=abcdefghijklmnopqrstuvwxyz',
+      },
+    });
+    const text = plaintextFallback(blocks);
+    expect(text).not.toContain('ghp_0123456789abcdefghijABCDEFGHIJ012345');
+    expect(text).not.toContain('AKIA0123456789ABCDEF');
+    expect(text).not.toContain('xoxb-1234567890-1234567890-abcdefghijklmnopqrstuvwx');
+    expect(text).not.toContain('password=abcdefghijklmnopqrstuvwxyz');
+    expect(text).toContain('[REDACTED:github-pat]');
+    expect(text).toContain('[REDACTED:aws-key]');
+    expect(text).toContain('[REDACTED:slack-token]');
+    expect(text).toContain('[REDACTED:generic-secret]');
+    // The surrounding args still render — redaction replaces the value, not
+    // the key or the rest of the command.
+    expect(text).toContain('githubToken');
+    expect(text).toContain('psql --dsn');
+  });
+
+  it('redacts and still neutralizes a code fence in the same args', () => {
+    // The two defenses are independent and must compose: redaction must not
+    // reintroduce a fence, and fence-breaking must not un-redact anything.
+    const blocks = approvalPendingBlocks({
+      approvalId: 'a1',
+      toolName: 'terminal',
+      reason: 'danger',
+      args: { command: '```\n<!channel> export KEY=ghp_0123456789abcdefghijABCDEFGHIJ012345\n```' },
+    });
+    const argsBlock = blocks.find(
+      (b) =>
+        b.type === 'section' && String((b.text as { text?: string })?.text).includes('channel'),
+    );
+    const rendered = String((argsBlock?.text as { text?: string })?.text ?? '');
+    expect(rendered.match(/```/g)?.length).toBe(2);
+    expect(rendered).not.toContain('ghp_0123456789abcdefghijABCDEFGHIJ012345');
+    expect(rendered).toContain('[REDACTED:github-pat]');
+  });
+
+  it('redacts a credential when args are a bare string', () => {
+    const blocks = approvalPendingBlocks({
+      approvalId: 'a1',
+      toolName: 'web_fetch',
+      reason: 'danger',
+      args: 'curl -H "Authorization: ghp_0123456789abcdefghijABCDEFGHIJ012345" https://x.test',
+    });
+    const text = plaintextFallback(blocks);
+    expect(text).not.toContain('ghp_0123456789abcdefghijABCDEFGHIJ012345');
+    expect(text).toContain('[REDACTED:github-pat]');
+    expect(text).toContain('https://x.test');
+  });
+
+  it('leaves benign args untouched — redaction must not gut the card', () => {
+    // The card exists so a human can read what they are approving. An
+    // over-broad redactor would make it useless.
+    const blocks = approvalPendingBlocks({
+      approvalId: 'a1',
+      toolName: 'terminal',
+      reason: 'writes to disk',
+      args: { command: 'ls -la /tmp/reports', cwd: '/home/agent', retries: 3, dryRun: false },
+    });
+    const text = plaintextFallback(blocks);
+    expect(text).toContain('ls -la /tmp/reports');
+    expect(text).toContain('/home/agent');
+    expect(text).toContain('3');
+    expect(text).toContain('false');
+    expect(text).not.toContain('REDACTED');
+  });
+
   it('escapes mrkdwn metacharacters in toolName and reason', () => {
     // toolName comes from the registry, reason from the danger predicate —
     // both model/config-influenced. An unescaped `<@U…>` or `<http…|text>`

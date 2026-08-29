@@ -1,11 +1,19 @@
 import { describe, expect, it } from 'vitest';
+import { TIER_DEGRADED_CODE as TRANSPORT_TIER_DEGRADED_CODE } from '../talk-mode-client';
 import { parseVoiceCallControlEvent, type VoiceCallEvent } from '../voice-call-client';
 import {
+  callStripVisible,
+  chatMessagesWithVoice,
   initialVoiceCallState,
+  isTerminalClientEvent,
+  MIC_DENIED_CODE,
+  TIER_DEGRADED_CODE,
   type VoiceCallState,
   voiceCallReducer,
+  voiceCaption,
   voiceTranscriptToMessages,
 } from '../voice-call-reducer';
+import { classifyVoiceStartError } from '../voice-start-error';
 import { FakeVoiceCallClient } from './fake-voice-call-client';
 
 // Reduce a whole event sequence — the shape the hook feeds the reducer.
@@ -17,7 +25,7 @@ function reduce(events: Array<Parameters<typeof voiceCallReducer>[1]>): VoiceCal
 // hook does (subscribe -> dispatch 'client-event').
 function driveThroughClient(events: VoiceCallEvent[]): VoiceCallState {
   const client = new FakeVoiceCallClient();
-  let state: VoiceCallState = { status: 'listening', transcript: [], error: null };
+  let state: VoiceCallState = { ...initialVoiceCallState, status: 'listening' };
   const unsubscribe = client.on((event) => {
     state = voiceCallReducer(state, { type: 'client-event', event });
   });
@@ -34,14 +42,18 @@ describe('voiceCallReducer — connection lifecycle', () => {
     expect(listening.status).toBe('listening');
   });
 
-  it('start clears a prior transcript and error', () => {
+  it('start clears a prior transcript, error and notices', () => {
     const dirty: VoiceCallState = {
+      ...initialVoiceCallState,
       status: 'ended',
       transcript: [{ id: 'voice-0', role: 'user', text: 'old' }],
       error: 'boom',
+      degraded: { provider: 'openai-tts', message: 'boom' },
+      micDenied: true,
+      sttProvider: 'local-stt',
     };
     const fresh = voiceCallReducer(dirty, { type: 'start' });
-    expect(fresh).toEqual({ status: 'connecting', transcript: [], error: null });
+    expect(fresh).toEqual({ ...initialVoiceCallState, status: 'connecting' });
   });
 
   it('hang-up ends the call; reset returns to idle', () => {
@@ -62,9 +74,11 @@ describe('voiceCallReducer — connection lifecycle', () => {
 });
 
 describe('voiceCallReducer — transcript', () => {
-  it('appends a user line on utterance_committed', () => {
+  it('appends a user line on utterance_committed and enters thinking', () => {
     const state = driveThroughClient([{ type: 'utterance_committed', text: 'what time is it' }]);
-    expect(state.status).toBe('listening');
+    // The gap between "you stopped talking" and "it started answering" is its
+    // own state (DR1 thinking) — the accent dot goes steady, not back to a mic.
+    expect(state.status).toBe('thinking');
     expect(state.transcript).toEqual([{ id: 'voice-0', role: 'user', text: 'what time is it' }]);
   });
 
@@ -125,6 +139,25 @@ describe('voiceCallReducer — transcript', () => {
     ]);
   });
 
+  it('a spoken filler is a CONSULT, not speech — the steady-dot state', () => {
+    // DR1's "Thinking / consulting" row. The round trip can take seconds, and
+    // the pulsing dot would claim the agent is mid-sentence for all of it.
+    const consulting = driveThroughClient([
+      { type: 'utterance_committed', text: 'what did we decide?' },
+      { type: 'filler', text: 'Let me check.' },
+    ]);
+    expect(consulting.status).toBe('consulting');
+    // Captioned throughout — that is what makes the wait visible, not dead air.
+    expect(voiceCaption(consulting)).toBe('Let me check.');
+
+    // The answer it was waiting for is ordinary speech again.
+    const answered = voiceCallReducer(consulting, {
+      type: 'client-event',
+      event: { type: 'reply_sentence', text: 'Friday.' },
+    });
+    expect(answered.status).toBe('agent_speaking');
+  });
+
   it('reply_audio marks the agent speaking without touching the transcript', () => {
     const before = driveThroughClient([{ type: 'utterance_committed', text: 'hi' }]);
     const after = voiceCallReducer(before, {
@@ -133,6 +166,98 @@ describe('voiceCallReducer — transcript', () => {
     });
     expect(after.status).toBe('agent_speaking');
     expect(after.transcript).toEqual(before.transcript);
+  });
+});
+
+describe('voiceCallReducer — speech_end (thinking starts when the user stops)', () => {
+  it('enters thinking at the speech-end edge, not when the transcript returns', () => {
+    // The bug this pins: `thinking` used to wait for `utterance_committed`,
+    // which is a hosted-STT round trip away (~2s on Whisper). For all of it the
+    // strip read `listening` — telling the user to keep talking.
+    const state = driveThroughClient([{ type: 'speech_end' }]);
+    expect(state.status).toBe('thinking');
+    // Nothing is claimed about WHAT was said until the transcript lands.
+    expect(state.transcript).toEqual([]);
+  });
+
+  it('still lands the transcript exactly once when it arrives', () => {
+    const state = driveThroughClient([
+      { type: 'speech_end' },
+      { type: 'utterance_committed', text: 'what time is it', provider: 'openai-stt' },
+    ]);
+    expect(state.status).toBe('thinking');
+    expect(state.transcript).toEqual([{ id: 'voice-0', role: 'user', text: 'what time is it' }]);
+    expect(state.sttProvider).toBe('openai-stt');
+  });
+
+  it('closes the open agent line on commit the same way it always did', () => {
+    const state = driveThroughClient([
+      { type: 'utterance_committed', text: 'q1' },
+      { type: 'reply_sentence', text: 'a1' },
+      { type: 'speech_end' },
+      { type: 'utterance_committed', text: 'q2' },
+    ]);
+    expect(state.transcript).toEqual([
+      { id: 'voice-0', role: 'user', text: 'q1' },
+      { id: 'voice-1', role: 'agent', text: 'a1', open: false },
+      { id: 'voice-2', role: 'user', text: 'q2' },
+    ]);
+  });
+
+  it('does not speak over a state that outranks it', () => {
+    for (const status of ['idle', 'ended', 'reconnecting'] as const) {
+      const state = voiceCallReducer(
+        { ...initialVoiceCallState, status },
+        { type: 'client-event', event: { type: 'speech_end' } },
+      );
+      expect(state.status).toBe(status);
+    }
+  });
+
+  it('leaves barge-in intact: the cut line stays, the new utterance thinks', () => {
+    const state = driveThroughClient([
+      { type: 'utterance_committed', text: 'tell me a story' },
+      { type: 'reply_sentence', text: 'Once upon a time' },
+      { type: 'interrupted', text: 'Once upon a time [interrupted]' },
+      { type: 'speech_end' },
+    ]);
+    expect(state.status).toBe('thinking');
+    expect(state.transcript[1]).toEqual({
+      id: 'voice-1',
+      role: 'agent',
+      text: 'Once upon a time [interrupted]',
+      interrupted: true,
+      open: false,
+    });
+  });
+
+  it('hands the floor back when the utterance produced nothing to answer', () => {
+    // Otherwise an unintelligible noise leaves the strip thinking forever about
+    // a turn that will never arrive, while the mic is in fact still listening.
+    const state = driveThroughClient([{ type: 'speech_end' }, { type: 'utterance_dropped' }]);
+    expect(state.status).toBe('listening');
+    expect(state.transcript).toEqual([]);
+  });
+
+  it('a drop never rewinds a call that has already moved on', () => {
+    const speaking = driveThroughClient([
+      { type: 'speech_end' },
+      { type: 'utterance_committed', text: 'hi' },
+      { type: 'reply_sentence', text: 'Hello.' },
+      { type: 'utterance_dropped' },
+    ]);
+    expect(speaking.status).toBe('agent_speaking');
+
+    const ended = voiceCallReducer(
+      { ...initialVoiceCallState, status: 'ended' },
+      { type: 'client-event', event: { type: 'utterance_dropped' } },
+    );
+    expect(ended.status).toBe('ended');
+  });
+
+  it('neither event ends the call', () => {
+    expect(isTerminalClientEvent({ type: 'speech_end' })).toBe(false);
+    expect(isTerminalClientEvent({ type: 'utterance_dropped' })).toBe(false);
   });
 });
 
@@ -153,19 +278,32 @@ describe('voiceCallReducer — barge-in', () => {
     });
   });
 
-  it('recovers to listening when the user speaks over the interruption', () => {
+  it('leaves the interrupted state when the user speaks over the interruption', () => {
     const state = driveThroughClient([
       { type: 'utterance_committed', text: 'story please' },
       { type: 'reply_sentence', text: 'Once' },
       { type: 'interrupted', text: 'Once [interrupted]' },
       { type: 'utterance_committed', text: 'actually never mind' },
     ]);
-    expect(state.status).toBe('listening');
+    expect(state.status).toBe('thinking');
     expect(state.transcript[2]).toEqual({
       id: 'voice-2',
       role: 'user',
       text: 'actually never mind',
     });
+  });
+
+  it('hands the floor back when a barge-in utterance is dropped, instead of sticking on interrupted', () => {
+    // A barge-in that turns out to be noise or a hallucinated transcript never
+    // gets a reply of its own — nothing else is coming to move the status off
+    // `interrupted`, so a dropped utterance has to be the thing that does.
+    const state = driveThroughClient([
+      { type: 'utterance_committed', text: 'tell me a long story' },
+      { type: 'reply_sentence', text: 'Once upon a time' },
+      { type: 'interrupted', text: 'Once upon a time [interrupted]' },
+      { type: 'utterance_dropped' },
+    ]);
+    expect(state.status).toBe('listening');
   });
 });
 
@@ -187,7 +325,15 @@ describe('voiceTranscriptToMessages', () => {
       { id: 'voice-0', role: 'user', text: 'hi' },
       { id: 'voice-1', role: 'agent', text: 'hello', open: false },
     ]);
-    expect(messages[0]).toEqual({ id: 'voice-0', role: 'user', content: 'hi', timestamp: 0 });
+    // A realtime transcript line was SPOKEN — there is no other way into one —
+    // so the bubble carries the voice marker beside the words it transcribed.
+    expect(messages[0]).toEqual({
+      id: 'voice-0',
+      role: 'user',
+      content: 'hi',
+      timestamp: 0,
+      origin: 'voice',
+    });
     expect(messages[1]).toEqual({
       id: 'voice-1',
       role: 'assistant',
@@ -219,6 +365,72 @@ describe('voiceTranscriptToMessages', () => {
   });
 });
 
+describe('chatMessagesWithVoice — DR5 persistent transcript', () => {
+  const typed = [{ id: 'm1', role: 'user' as const, content: 'typed earlier', timestamp: 1 }];
+
+  function callOn(tier: 'pipeline' | 'realtime' | null): VoiceCallState {
+    let state = voiceCallReducer(initialVoiceCallState, { type: 'start' });
+    if (tier) state = voiceCallReducer(state, { type: 'tier', tier });
+    state = voiceCallReducer(state, { type: 'connected' });
+    for (const event of [
+      { type: 'utterance_committed', text: 'what did we decide?' },
+      { type: 'reply_complete', text: 'Friday.' },
+    ] satisfies VoiceCallEvent[]) {
+      state = voiceCallReducer(state, { type: 'client-event', event });
+    }
+    return state;
+  }
+
+  it('shows a realtime call in the chat list — it reaches it no other way', () => {
+    // The realtime tier never calls `sendMessage`, so without this the whole
+    // conversation exists only as captions that scroll away with the strip.
+    const messages = chatMessagesWithVoice(typed, callOn('realtime'));
+    expect(messages).toHaveLength(3);
+    expect(messages[1]).toEqual({
+      id: 'voice-0',
+      role: 'user',
+      content: 'what did we decide?',
+      timestamp: 0,
+      origin: 'voice',
+    });
+    expect(messages[2]?.role === 'assistant' && messages[2].blocks).toEqual([
+      { kind: 'text', content: 'Friday.' },
+    ]);
+  });
+
+  it('leaves the pipeline tier alone — its turns live on the voice lane, not this chat', () => {
+    // A pipeline turn (streaming or the batch RPC fallback) runs on the
+    // browser's own voice lane, never this chat session (Conflict 1) — so
+    // there is nothing of this call in `messages` to double up on, but
+    // nothing to backfill from here either; `voiceTranscriptToMessages`'s
+    // doc comment has the full reasoning.
+    expect(chatMessagesWithVoice(typed, callOn('pipeline'))).toBe(typed);
+    expect(chatMessagesWithVoice(typed, callOn(null))).toBe(typed);
+  });
+
+  it('survives the call ending — the transcript is what stays behind', () => {
+    const ended = voiceCallReducer(callOn('realtime'), { type: 'hang-up' });
+    expect(chatMessagesWithVoice(typed, ended)).toHaveLength(3);
+  });
+
+  it('carries the [interrupted] marker into chat, like the pipeline tier', () => {
+    let state = voiceCallReducer(initialVoiceCallState, { type: 'start' });
+    state = voiceCallReducer(state, { type: 'tier', tier: 'realtime' });
+    state = voiceCallReducer(state, {
+      type: 'client-event',
+      event: { type: 'reply_sentence', text: 'Once upon a time' },
+    });
+    state = voiceCallReducer(state, {
+      type: 'client-event',
+      event: { type: 'interrupted', text: 'Once upon a time' },
+    });
+    const [msg] = chatMessagesWithVoice([], state);
+    expect(msg?.role === 'assistant' && msg.blocks).toEqual([
+      { kind: 'text', content: 'Once upon a time [interrupted]' },
+    ]);
+  });
+});
+
 describe('parseVoiceCallControlEvent (untrusted transport JSON)', () => {
   it('accepts a well-formed control event', () => {
     expect(parseVoiceCallControlEvent({ type: 'reply_sentence', text: 'hi' })).toEqual({
@@ -231,5 +443,378 @@ describe('parseVoiceCallControlEvent (untrusted transport JSON)', () => {
     expect(parseVoiceCallControlEvent({ type: 'reply_sentence' })).toBeNull();
     expect(parseVoiceCallControlEvent({ type: 'nope' })).toBeNull();
     expect(parseVoiceCallControlEvent('garbage')).toBeNull();
+  });
+});
+
+describe('voiceCallReducer — link state (DR1 reconnecting)', () => {
+  it('a dropped link becomes reconnecting, and recovers to listening', () => {
+    const dropped = driveThroughClient([{ type: 'link', status: 'reconnecting' }]);
+    expect(dropped.status).toBe('reconnecting');
+    const back = voiceCallReducer(dropped, {
+      type: 'client-event',
+      event: { type: 'link', status: 'open' },
+    });
+    expect(back.status).toBe('listening');
+  });
+
+  it('link noise never revives an idle or ended call', () => {
+    const idle = voiceCallReducer(initialVoiceCallState, {
+      type: 'client-event',
+      event: { type: 'link', status: 'reconnecting' },
+    });
+    expect(idle.status).toBe('idle');
+  });
+});
+
+describe('voiceCallReducer — degraded to text and mic permission', () => {
+  it('a provider failure ends voice and names the provider', () => {
+    const state = driveThroughClient([
+      {
+        type: 'error',
+        error: 'Speech synthesis failed',
+        code: 'synthesize_failed',
+        provider: 'openai-tts',
+      },
+    ]);
+    expect(state.status).toBe('ended');
+    expect(state.degraded).toEqual({
+      provider: 'openai-tts',
+      message: 'Speech synthesis failed',
+    });
+  });
+
+  it('a refused mic is guidance, not a degraded-provider notice', () => {
+    const state = driveThroughClient([
+      { type: 'error', error: 'Allow the microphone…', code: MIC_DENIED_CODE },
+    ]);
+    expect(state.micDenied).toBe(true);
+    expect(state.degraded).toBeNull();
+  });
+
+  it('dismissing clears both notices without restarting the call', () => {
+    const denied = driveThroughClient([
+      { type: 'error', error: 'Allow the microphone…', code: MIC_DENIED_CODE },
+    ]);
+    const dismissed = voiceCallReducer(denied, { type: 'dismiss-notice' });
+    expect(dismissed.micDenied).toBe(false);
+    expect(dismissed.error).toBeNull();
+    expect(dismissed.status).toBe('ended');
+  });
+
+  it('an unrecognized error code stays recoverable', () => {
+    const state = driveThroughClient([
+      { type: 'error', error: 'transient', code: 'utterance_too_long' },
+    ]);
+    expect(state.degraded).toBeNull();
+    expect(state.error).toBe('transient');
+  });
+
+  // D8 — another tab took over this conversation's voice lane. Ends the
+  // call, but WITHOUT the `degraded` banner: nothing failed, so
+  // `TalkMode.tsx`'s "voice unavailable ... continuing in text" copy would
+  // be actively wrong here. `error` still carries the server's own message
+  // so Chat.tsx's toast effect surfaces SOMETHING truthful.
+  it('a takeover ends the call without the degraded-provider framing', () => {
+    const state = driveThroughClient([
+      {
+        type: 'error',
+        error: 'This voice call was taken over by another tab.',
+        code: 'taken_over',
+      },
+    ]);
+    expect(state.status).toBe('ended');
+    expect(state.degraded).toBeNull();
+    expect(state.error).toBe('This voice call was taken over by another tab.');
+  });
+});
+
+describe('voiceCallReducer — provider attribution', () => {
+  it('records the providers that actually served the turn', () => {
+    const state = driveThroughClient([
+      { type: 'utterance_committed', text: 'hi', provider: 'local-stt' },
+      { type: 'reply_sentence', text: 'Hello.' },
+      { type: 'reply_audio', audio: new Uint8Array(), format: 'pcm', provider: 'local-tts' },
+    ]);
+    expect(state.sttProvider).toBe('local-stt');
+    expect(state.ttsProvider).toBe('local-tts');
+  });
+});
+
+describe('voiceCaption', () => {
+  it('captions the agent line while it is speaking', () => {
+    const state = driveThroughClient([
+      { type: 'utterance_committed', text: 'hi' },
+      { type: 'reply_sentence', text: 'Hello there.' },
+    ]);
+    expect(voiceCaption(state)).toBe('Hello there.');
+  });
+
+  it('keeps captioning the interrupted line after barge-in', () => {
+    const state = driveThroughClient([
+      { type: 'utterance_committed', text: 'story' },
+      { type: 'reply_sentence', text: 'Once upon a time' },
+      { type: 'interrupted', text: 'Once upon a time' },
+    ]);
+    expect(voiceCaption(state)).toBe('Once upon a time');
+  });
+
+  it('captions nothing while the user has the floor', () => {
+    const state = driveThroughClient([{ type: 'utterance_committed', text: 'hi' }]);
+    expect(voiceCaption(state)).toBeNull();
+  });
+});
+
+describe('voiceCallReducer — realtime tier degrade', () => {
+  it('keeps the call alive and surfaces the reason as a dismissible notice', () => {
+    // The realtime tier was refused; the pipeline tier is serving the call. The
+    // strip must NOT collapse the way `degraded` makes it — voice still works.
+    const state = driveThroughClient([
+      {
+        type: 'error',
+        error: 'Realtime provider "gemini-live" cannot issue a browser credential.',
+        code: TIER_DEGRADED_CODE,
+      },
+      { type: 'utterance_committed', text: 'hi' },
+    ]);
+    expect(state.notice).toBe('Realtime provider "gemini-live" cannot issue a browser credential.');
+    expect(state.degraded).toBeNull();
+    expect(state.status).toBe('thinking');
+    // The state word stays the state word — the reason lives in the notice.
+    expect(state.error).toBeNull();
+  });
+
+  it('clears the tier notice on dismiss', () => {
+    let state = driveThroughClient([
+      { type: 'error', error: 'no browser credential', code: TIER_DEGRADED_CODE },
+    ]);
+    state = voiceCallReducer(state, { type: 'dismiss-notice' });
+    expect(state.notice).toBeNull();
+  });
+
+  it('records the tier the transport settled on', () => {
+    let state = voiceCallReducer(initialVoiceCallState, { type: 'start' });
+    expect(state.tier).toBeNull();
+    state = voiceCallReducer(state, { type: 'tier', tier: 'realtime' });
+    expect(state.tier).toBe('realtime');
+    // A fresh call forgets it — the next one may land on a different tier.
+    expect(voiceCallReducer(state, { type: 'start' }).tier).toBeNull();
+  });
+});
+
+describe('voiceCallReducer — budget wind-down (DR1 ★)', () => {
+  const SIGN_OFF = "That's the spending limit for this call, so I'll stop here.";
+
+  it('captions the spoken sign-off and keeps captioning it after the call ends', () => {
+    let state = driveThroughClient([{ type: 'budget_wind_down', text: SIGN_OFF }]);
+    // Still speaking — the sentence is being said right now.
+    expect(state.status).toBe('agent_speaking');
+    expect(state.windDown).toBe(SIGN_OFF);
+    expect(voiceCaption(state)).toBe(SIGN_OFF);
+
+    state = voiceCallReducer(state, { type: 'client-event', event: { type: 'disconnected' } });
+    expect(state.status).toBe('ended');
+    // The reason survives the close: `call ended` with nothing to explain it is
+    // what this state exists to avoid.
+    expect(voiceCaption(state)).toBe(SIGN_OFF);
+    expect(state.windDown).toBe(SIGN_OFF);
+  });
+
+  it('keeps the sign-off in the transcript that persists into chat', () => {
+    const state = driveThroughClient([
+      { type: 'reply_sentence', text: 'Here is the answer.' },
+      { type: 'budget_wind_down', text: SIGN_OFF },
+    ]);
+    expect(
+      voiceTranscriptToMessages(state.transcript).map((m) =>
+        m.role === 'assistant' ? m.blocks[0] : m,
+      ),
+    ).toEqual([
+      { kind: 'text', content: 'Here is the answer.' },
+      { kind: 'text', content: SIGN_OFF },
+    ]);
+  });
+
+  it('is not an error: nothing lands where the state word or a notice goes', () => {
+    const state = driveThroughClient([{ type: 'budget_wind_down', text: SIGN_OFF }]);
+    expect(state.error).toBeNull();
+    expect(state.degraded).toBeNull();
+    expect(state.notice).toBeNull();
+  });
+
+  it('a fresh call forgets it', () => {
+    let state = driveThroughClient([{ type: 'budget_wind_down', text: SIGN_OFF }]);
+    state = voiceCallReducer(state, { type: 'start' });
+    expect(state.windDown).toBeNull();
+  });
+
+  it('parses off the control channel like every other control event', () => {
+    expect(parseVoiceCallControlEvent({ type: 'budget_wind_down', text: SIGN_OFF })).toEqual({
+      type: 'budget_wind_down',
+      text: SIGN_OFF,
+    });
+  });
+});
+
+describe('callStripVisible — what Chat still renders after a call stops', () => {
+  const SIGN_OFF = "That's the spending limit for this call, so I'll stop here.";
+
+  it('shows the strip for a live call and drops it when one simply ends', () => {
+    expect(callStripVisible({ ...initialVoiceCallState, status: 'listening' })).toBe(true);
+    expect(callStripVisible({ ...initialVoiceCallState, status: 'ended' })).toBe(false);
+    expect(callStripVisible(initialVoiceCallState)).toBe(false);
+  });
+
+  it('keeps the budget explanation on screen as the call closes', () => {
+    // The whole point of the wind-down: the sign-off is spoken, the client
+    // disconnects, and the `budget reached` chip must not vanish at the exact
+    // moment it is the only thing explaining why the call stopped.
+    let state = driveThroughClient([
+      { type: 'budget_wind_down', text: SIGN_OFF },
+      { type: 'disconnected' },
+    ]);
+    expect(state.status).toBe('ended');
+    expect(callStripVisible(state)).toBe(true);
+    expect(voiceCaption(state)).toBe(SIGN_OFF);
+
+    // …and it is dismissible, so it does not become furniture.
+    state = voiceCallReducer(state, { type: 'dismiss-notice' });
+    expect(state.windDown).toBeNull();
+    expect(callStripVisible(state)).toBe(false);
+  });
+
+  it('does not let a mid-call dismiss take the budget chip with it', () => {
+    // The tier notice has its own dismiss control and it sits above a LIVE
+    // strip; using it must not silence the wind-down that is still being said.
+    const state = voiceCallReducer(
+      driveThroughClient([
+        { type: 'error', error: 'Realtime refused; on the pipeline.', code: TIER_DEGRADED_CODE },
+        { type: 'budget_wind_down', text: SIGN_OFF },
+      ]),
+      { type: 'dismiss-notice' },
+    );
+    expect(state.notice).toBeNull();
+    expect(state.windDown).toBe(SIGN_OFF);
+  });
+
+  it('keeps a refusal on screen when the fallback tier also fails to start', () => {
+    // The edge: realtime is refused (a notice above the strip), the pipeline
+    // fallback then throws out of `connect()`, and the hook's catch ends the
+    // call. Unmounting there would leave the user with neither explanation —
+    // not the refusal, not the failure.
+    const refusal = 'Realtime voice is not available for this deployment: untrusted provider.';
+    let state = driveThroughClient([
+      { type: 'error', error: refusal, code: TIER_DEGRADED_CODE },
+      classifyVoiceStartError(new Error('Could not open the voice socket.')),
+    ]);
+    state = voiceCallReducer(state, { type: 'hang-up' });
+
+    expect(state.status).toBe('ended');
+    expect(callStripVisible(state)).toBe(true);
+    // Both halves survive: why realtime did not run, and why nothing else did.
+    expect(state.notice).toBe(refusal);
+    expect(state.error).toBe('Could not open the voice socket.');
+
+    state = voiceCallReducer(state, { type: 'dismiss-notice' });
+    expect(callStripVisible(state)).toBe(false);
+  });
+
+  it('still drops the strip when the downgrade was the whole story', () => {
+    // A call that merely ran on the fallback tier and then ended normally
+    // leaves no error behind, so the notice goes with the strip rather than
+    // outliving the conversation it was about.
+    const state = voiceCallReducer(
+      driveThroughClient([
+        { type: 'error', error: 'Realtime refused; on the pipeline.', code: TIER_DEGRADED_CODE },
+        { type: 'utterance_committed', text: 'hi' },
+      ]),
+      { type: 'hang-up' },
+    );
+    expect(state.notice).not.toBeNull();
+    expect(callStripVisible(state)).toBe(false);
+  });
+});
+
+describe('isTerminalClientEvent', () => {
+  const degradingCodes = ['transcribe_failed', 'synthesize_failed', 'voice_unavailable'];
+
+  it('is true for every code that ends voice for the call', () => {
+    for (const code of degradingCodes) {
+      expect(isTerminalClientEvent({ type: 'error', error: 'boom', code })).toBe(true);
+    }
+    expect(isTerminalClientEvent({ type: 'error', error: 'Allow…', code: MIC_DENIED_CODE })).toBe(
+      true,
+    );
+    expect(isTerminalClientEvent({ type: 'disconnected' })).toBe(true);
+    // D8 — a takeover must release the mic just like a degrading code does,
+    // or the evicted tab keeps capturing (and its transport keeps trying to
+    // reconnect) after the server has already moved on.
+    expect(isTerminalClientEvent({ type: 'error', error: 'taken', code: 'taken_over' })).toBe(true);
+  });
+
+  it('is false for events the call survives', () => {
+    // The tier downgrade is the sharp one: voice still WORKS, so tearing the mic
+    // down here would kill a call that is about to run on the pipeline.
+    expect(
+      isTerminalClientEvent({ type: 'error', error: 'on the pipeline', code: TIER_DEGRADED_CODE }),
+    ).toBe(false);
+    expect(isTerminalClientEvent({ type: 'error', error: 'transient' })).toBe(false);
+    expect(
+      isTerminalClientEvent({ type: 'error', error: 'transient', code: 'utterance_too_long' }),
+    ).toBe(false);
+    expect(isTerminalClientEvent({ type: 'utterance_committed', text: 'hi' })).toBe(false);
+    expect(isTerminalClientEvent({ type: 'reply_sentence', text: 'Hello.' })).toBe(false);
+    expect(isTerminalClientEvent({ type: 'link', status: 'reconnecting' })).toBe(false);
+    expect(isTerminalClientEvent({ type: 'budget_wind_down', text: 'Out of budget.' })).toBe(false);
+  });
+
+  it('agrees with the reducer about which events reach `ended`', () => {
+    // The predicate is what makes the hook release the mic; the reducer is what
+    // makes the strip say the call is over. If they ever disagree, one of the two
+    // is lying to the user — this is the pin that keeps them in step.
+    const live: VoiceCallState = { ...initialVoiceCallState, status: 'listening' };
+    const events: VoiceCallEvent[] = [
+      ...degradingCodes.map((code): VoiceCallEvent => ({ type: 'error', error: 'boom', code })),
+      { type: 'error', error: 'Allow…', code: MIC_DENIED_CODE },
+      { type: 'error', error: 'on the pipeline', code: TIER_DEGRADED_CODE },
+      { type: 'error', error: 'transient', code: 'utterance_too_long' },
+      { type: 'disconnected' },
+      { type: 'utterance_committed', text: 'hi' },
+      { type: 'reply_sentence', text: 'Hello.' },
+      { type: 'reply_complete', text: 'Hello.' },
+      { type: 'interrupted', text: 'Hel' },
+      { type: 'filler', text: 'One moment.' },
+      { type: 'budget_wind_down', text: 'Out of budget.' },
+      { type: 'link', status: 'reconnecting' },
+    ];
+    for (const event of events) {
+      const ended = voiceCallReducer(live, { type: 'client-event', event }).status === 'ended';
+      expect({ event: event.type, code: 'code' in event ? event.code : null, ended }).toEqual({
+        event: event.type,
+        code: 'code' in event ? event.code : null,
+        ended: isTerminalClientEvent(event),
+      });
+    }
+  });
+
+  it('leaves the degraded notice standing so the strip can explain itself', () => {
+    // Teardown is refs-only in the hook, but the guarantee that matters is
+    // stated here: the state a torn-down degrade leaves behind still renders.
+    const state = driveThroughClient([
+      { type: 'error', error: 'Voice unavailable', code: 'voice_unavailable', provider: 'openai' },
+    ]);
+    expect(isTerminalClientEvent({ type: 'error', error: 'x', code: 'voice_unavailable' })).toBe(
+      true,
+    );
+    expect(state.status).toBe('ended');
+    expect(state.degraded).toEqual({ provider: 'openai', message: 'Voice unavailable' });
+    expect(callStripVisible(state)).toBe(true);
+  });
+});
+
+describe('tier-degrade code', () => {
+  it('is the same string the transport emits', () => {
+    // The reducer keeps its own literal so it imports no transport; this is the
+    // pin that stops the two from drifting apart silently.
+    expect(TIER_DEGRADED_CODE).toBe(TRANSPORT_TIER_DEGRADED_CODE);
   });
 });

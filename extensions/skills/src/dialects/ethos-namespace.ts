@@ -42,6 +42,31 @@ export function parseEthosFallbackForTools(data: Record<string, unknown>): strin
   return list.length > 0 ? list : undefined;
 }
 
+/**
+ * Renderer capability grammar: `<renderer-name>@<spec-version>`, where the
+ * version is an INTEGER. Semver is rejected on purpose — a spec version names
+ * a documented subset, not a package (see `Skill.renders`).
+ */
+const RENDERER_SPEC_RE = /^[a-z][a-z0-9-]*@\d+$/;
+
+/**
+ * Parse `ethos.renders` — the renderer capabilities a skill declares:
+ *   ethos:
+ *     renders: ['echarts@1']
+ *
+ * Entries that are not strings, or that do not match the grammar, are dropped
+ * silently (the namespace's lenient posture). Returns undefined when nothing
+ * survives, so consumers never see an empty array.
+ */
+export function parseEthosRenders(data: Record<string, unknown>): string[] | undefined {
+  const ethos = getEthosBlock(data);
+  if (!ethos) return undefined;
+  const raw = ethos.renders;
+  if (!Array.isArray(raw)) return undefined;
+  const list = raw.filter((x): x is string => typeof x === 'string' && RENDERER_SPEC_RE.test(x));
+  return list.length > 0 ? list : undefined;
+}
+
 function parseEnvRefList(raw: unknown): SkillEnvRef[] | undefined {
   if (!Array.isArray(raw)) return undefined;
   const out: SkillEnvRef[] = [];

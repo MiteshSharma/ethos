@@ -1,5 +1,4 @@
 import './styles.css';
-import { BUILTIN_SKINS, DEFAULT_TOKENS, resolveSkin } from '@ethosagent/design-tokens';
 import { tokensToAntd, tokensToCssVariables } from '@ethosagent/design-tokens/antd';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { App as AntApp, ConfigProvider, type ThemeConfig } from 'antd';
@@ -14,6 +13,7 @@ import {
   REDUCED_MOTION_STYLESHEET,
   watchReducedMotion,
 } from './lib/reduced-motion';
+import { resolveTokensForSkin } from './lib/skin-tokens';
 import { QuickChat } from './pages/QuickChat';
 
 // Boot order: QueryClientProvider → Root → ConfigProvider → ...
@@ -44,14 +44,7 @@ function Root() {
   const configQuery = useConfigRetryFalse();
   const skinName = configQuery.data?.skin ?? 'paper';
 
-  const resolvedTokens = useMemo(() => {
-    if (!BUILTIN_SKINS[skinName]) return DEFAULT_TOKENS;
-    try {
-      return resolveSkin(DEFAULT_TOKENS, BUILTIN_SKINS, skinName);
-    } catch {
-      return DEFAULT_TOKENS;
-    }
-  }, [skinName]);
+  const resolvedTokens = useMemo(() => resolveTokensForSkin(skinName), [skinName]);
 
   // prefers-reduced-motion — DESIGN.md line 139 says every transition
   // and animation must freeze under `reduce`. Track the OS preference,

@@ -1,6 +1,7 @@
 import { readFile, stat } from 'node:fs/promises';
-import { extname, join, normalize, resolve, sep } from 'node:path';
+import { join, normalize, resolve, sep } from 'node:path';
 import { Hono } from 'hono';
+import { mimeForPath } from './mime';
 
 // Static handler for the bundled `apps/web/dist/` SPA. We don't use
 // `@hono/node-server`'s `serveStatic` because it requires CWD-relative
@@ -15,26 +16,6 @@ import { Hono } from 'hono';
 //
 // API + auth + SSE routes are mounted BEFORE this on the Hono app, so
 // the static handler only ever sees requests they didn't match.
-
-const MIME_BY_EXT: Record<string, string> = {
-  '.html': 'text/html; charset=utf-8',
-  '.js': 'application/javascript; charset=utf-8',
-  '.mjs': 'application/javascript; charset=utf-8',
-  '.css': 'text/css; charset=utf-8',
-  '.json': 'application/json; charset=utf-8',
-  '.svg': 'image/svg+xml',
-  '.png': 'image/png',
-  '.jpg': 'image/jpeg',
-  '.jpeg': 'image/jpeg',
-  '.gif': 'image/gif',
-  '.webp': 'image/webp',
-  '.ico': 'image/x-icon',
-  '.woff': 'font/woff',
-  '.woff2': 'font/woff2',
-  '.ttf': 'font/ttf',
-  '.txt': 'text/plain; charset=utf-8',
-  '.map': 'application/json; charset=utf-8',
-};
 
 export interface StaticRoutesOptions {
   /** Absolute path to the built SPA output (typically `apps/web/dist`). */
@@ -88,7 +69,7 @@ async function tryServe(root: string, requestPath: string): Promise<Response | n
   // Web Response constructor accepts it without DOM-lib type friction.
   const ab = body.buffer.slice(body.byteOffset, body.byteOffset + body.byteLength);
   const headers = new Headers({
-    'content-type': MIME_BY_EXT[extname(filePath).toLowerCase()] ?? 'application/octet-stream',
+    'content-type': mimeForPath(filePath),
     'content-length': String(stats.size),
     // index.html should always re-fetch so SPA users see fresh shell on
     // deploy. Hashed assets get long cache.

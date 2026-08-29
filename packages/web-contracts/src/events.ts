@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { ApprovalRequestSchema, MessageRoleSchema } from './schemas';
+import { ApprovalRequestSchema, BackgroundJobStatusSchema, MessageRoleSchema } from './schemas';
 
 // SSE event union. The server writes these as `data: <JSON>` lines on the
 // `/sse/sessions/:id` endpoint, with monotonic `id:` lines so the browser
@@ -33,6 +33,9 @@ export const ToolStartEventSchema = z.object({
   toolCallId: z.string(),
   toolName: z.string(),
   args: z.unknown(),
+  /** Lane E (tools-as-code-api) — 'internal' marks in-script inner calls;
+   *  the web chat MUST NOT render a chip for them. */
+  audience: z.enum(['internal', 'user', 'dashboard']).optional(),
 });
 
 export const ToolProgressEventSchema = z.object({
@@ -73,6 +76,10 @@ export const TurnDoneEventSchema = z.object({
   type: z.literal('done'),
   text: z.string(),
   turnCount: z.number().int().nonnegative(),
+  /** B3 (additive-optional) — the turn's observability trace id, mirrored from
+   *  the `done` AgentEvent. Absent when the server has no observability
+   *  adapter wired. */
+  traceId: z.string().optional(),
 });
 
 export const TurnErrorEventSchema = z.object({
@@ -119,8 +126,44 @@ export const ClarifyRequestEventSchema = z.object({
   question: z.string(),
   options: z.array(z.string()).optional(),
   default: z.string().optional(),
-  /** ISO-8601 — when the timeout fires and the default is used. */
-  defaultDeadlineAt: z.string(),
+  /**
+   * The delegated run that asked, when one did (`PendingClarify.jobId`, D22).
+   * Absent for a foreground clarify. This is what lets a question be drawn
+   * INSIDE its run card (§4.5) instead of as a floating modal that says
+   * nothing about who is waiting on the answer.
+   */
+  jobId: z.string().optional(),
+  /**
+   * ISO-8601 — when the timeout fires and the default is used. `null` while
+   * queued behind another clarify in the same lane (D2) — a queued row has no
+   * timer running yet. In practice this event is only pushed once a row is
+   * actually presented, so `null` should not occur here today; nullable for
+   * type-level parity with `PendingClarify.defaultDeadlineAt`.
+   */
+  defaultDeadlineAt: z.string().nullable(),
+});
+
+// A delegated run's coalesced liveness digest, published by the executor onto
+// the PARENT session's stream at <=1 Hz per run (pi-delegation D11/D20). It is a
+// PUSH-family event and deliberately NOT an `AgentEvent`: the run card is fed by
+// this digest alone — no second SSE connection — while the runner's full event
+// stream stays on the child session. Adding an 18th `AgentEvent` type instead
+// would void D3.
+export const RunUpdateEventSchema = z.object({
+  type: z.literal('run.update'),
+  jobId: z.string(),
+  /** Which harness is executing — resolved through the `RUNNERS` identity map (D19), never rendered raw. */
+  runner: z.string(),
+  status: BackgroundJobStatusSchema,
+  /**
+   * The card's `now` line: one line of prose, REPLACED never appended
+   * (`editing packages/core/src/auth/session-token.ts`,
+   * `paused — waiting on you`, `finished — 5 files changed`).
+   */
+  now: z.string(),
+  elapsedMs: z.number().nonnegative(),
+  spendUsd: z.number().nonnegative(),
+  toolCount: z.number().int().nonnegative(),
 });
 
 export const ClarifyResolvedEventSchema = z.object({
@@ -187,6 +230,22 @@ export const RunStartEventSchema = z.object({
   provider: z.string(),
   model: z.string(),
   source: z.enum(['team-coordinator', 'team-personality', 'personality', 'global']),
+  /** B3 (additive-optional) — the turn's observability trace id. This is the
+   *  turn identity a tab quotes in a bug report; it joins the SSE stream to
+   *  `observability.db`, `messages.trace_id`, and (later) the provider request
+   *  ids on the turn's `llm_call` spans. */
+  traceId: z.string().optional(),
+});
+
+// B1 — the FIRST frame of every `/sse/sessions/:id` stream. Carries the
+// `x-request-id` of the SSE request itself. The same id is on the response's
+// `x-request-id` header, but `EventSource` gives browser clients no way to
+// read response headers, so the id has to ride the stream to be quotable from
+// the UI. Written outside the replay buffer (no `id:` line), so it never
+// disturbs `Last-Event-ID` resume.
+export const StreamMetaEventSchema = z.object({
+  type: z.literal('stream_meta'),
+  requestId: z.string(),
 });
 
 export const ProtocolUpgradeRequiredEventSchema = z.object({
@@ -213,6 +272,7 @@ export const SseEventSchema = z.discriminatedUnion('type', [
   ToolApprovalRequiredEventSchema,
   ApprovalResolvedEventSchema,
   ClarifyRequestEventSchema,
+  RunUpdateEventSchema,
   ClarifyResolvedEventSchema,
   CronFiredEventSchema,
   MeshChangedEventSchema,
@@ -222,6 +282,7 @@ export const SseEventSchema = z.discriminatedUnion('type', [
   MemoryCapturedEventSchema,
   DryRunSummaryEventSchema,
   RunStartEventSchema,
+  StreamMetaEventSchema,
   ProtocolUpgradeRequiredEventSchema,
 ]);
 export type SseEvent = z.infer<typeof SseEventSchema>;
@@ -231,3 +292,6 @@ export type SseEventType = SseEvent['type'];
 
 /** The `clarify.request` push event — surfaced as a card in the web UI. */
 export type ClarifyRequestEvent = z.infer<typeof ClarifyRequestEventSchema>;
+
+/** The `run.update` push event — the run card's ≤1 Hz liveness digest. */
+export type RunUpdateEvent = z.infer<typeof RunUpdateEventSchema>;

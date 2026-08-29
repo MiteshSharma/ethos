@@ -4,10 +4,11 @@ import type { SecretsResolver, Storage } from '@ethosagent/types';
 import { Hono } from 'hono';
 import { getCookie } from 'hono/cookie';
 import { cors } from 'hono/cors';
+import { requestId } from 'hono/request-id';
 import type { ChatService } from '../features/chat/service';
 import type { SessionsService } from '../features/sessions/service';
 import { authMiddleware } from '../middleware/auth';
-import type { ApiKeyAuthStore } from '../middleware/bearer-auth';
+import { type ApiKeyAuthStore, bearerAuth } from '../middleware/bearer-auth';
 import { csrfMiddleware } from '../middleware/csrf';
 import { cookieOnlyGuard, dualAuth, resolveScope } from '../middleware/dual-auth';
 import { errorHandler } from '../middleware/error-envelope';
@@ -15,7 +16,9 @@ import { rateLimitMiddleware } from '../middleware/rate-limit';
 import type { WebTokenRepository } from '../repositories/web-token.repository';
 import { authRoutes } from './auth';
 import { codexAuthRoutes } from './codex-auth';
+import { type CronFireTrigger, cronRoutes } from './cron';
 import { goalSseRoutes } from './goal-sse';
+import { kanbanSseRoutes } from './kanban-sse';
 import { openAiRoutes } from './openai';
 import { openapiRoutes } from './openapi';
 import type { RouteModule } from './route-module';
@@ -65,6 +68,20 @@ export interface CreateRoutesOptions {
    *  seam. Each declares its mount path, auth posture, and description;
    *  `enabled: false` skips it. See {@link RouteModule}. */
   routeModules?: RouteModule[];
+  /** SQLite-backed idempotency cache for `/v1/chat/*`. Absent → no
+   *  `Idempotency-Key` support (previous behavior). */
+  idempotencyStore?: import('../stores/idempotency-store').IdempotencyStore;
+  /** Comma-separated CORS origins or `*` for `/v1/*`. Defaults to
+   *  `ETHOS_API_CORS_ORIGINS` env var when unset. */
+  corsOrigins?: string;
+  /** P2-counters (D2/D16) — renders `GET /metrics` (OpenMetrics text, scope
+   *  `metrics:read`). Omitted → `/metrics` is not mounted. */
+  metricsTextFn?: () => Promise<string>;
+  /** External cron trigger (plan/phases/cron-scheduler-seam.md) — mounts
+   *  `POST /cron/fire` (bearer auth, scope `cron`) when present. Boot code
+   *  supplies an `HttpFireTrigger` only when `cron.trigger.external` is
+   *  `true`; omitted → `/cron/fire` is not mounted. */
+  cronFireTrigger?: CronFireTrigger;
 }
 
 export interface ServiceContainer {
@@ -92,9 +109,23 @@ export interface ServiceContainer {
   debug: import('../features/debug/service').DebugService;
   apiKeys: import('../services/api-keys.service').ApiKeysService;
   digest: import('../services/digest.service').DigestService;
+  /** Browse / delete files under a personality's declared workdir. */
+  documents: import('../services/documents.service').DocumentsService;
   namedSecrets: import('../services/named-secrets.service').NamedSecretsService;
   toolSettings: import('../services/tool-settings.service').ToolSettingsService;
   voice?: import('../services/voice.service').VoiceService;
+  /** Durable per-conversation voice mode, shared with the gateway's lanes. */
+  voiceLaneMode: import('../services/voice-lane-mode.service').VoiceLaneModeService;
+  /** Read-only delivery-obligation ledger view. */
+  deliveries: import('../services/deliveries.service').DeliveriesService;
+  /** Connected wake satellites + the pushed routing table. Absent when this
+   *  deployment mounts no satellite lane. */
+  satellites?: import('../voice/satellite-registry').SatelliteRegistry;
+  /** Read-only telephony call history. Absent when this deployment has no
+   *  call log. */
+  calls?: import('../services/calls.service').CallsService;
+  /** Read / replace the wake-phrase → personality table. */
+  wakeRoutes: import('../services/wake-routes.service').WakeRoutesService;
   toolRegistry?: import('@ethosagent/types').ToolRegistry;
   dashboards?: import('@ethosagent/dashboard').DashboardsService;
   pluginLoader?: import('@ethosagent/plugin-loader').PluginLoader;
@@ -129,8 +160,22 @@ export function resolveCorsOrigin(
 export function createRoutes(opts: CreateRoutesOptions): Hono {
   const app = new Hono();
 
+  // B1 — `x-request-id` on every request/response pair. Registered FIRST,
+  // ahead of `/healthz` and every other route, because Hono stops the chain at
+  // the first handler that returns a response: a middleware mounted later
+  // simply never runs for a route registered earlier, and "echo on every
+  // response" has to mean every response.
+  //
+  // Behaviour comes from Hono's own middleware: an inbound `x-request-id` is
+  // respected as-is when it is at most 255 chars of `[A-Za-z0-9_\-=]`, and a
+  // UUID is generated otherwise. That character/length filter is load-bearing,
+  // not cosmetic — the id is reflected into a response header and an error
+  // envelope, so an unvalidated inbound value would be a header-injection
+  // vector. Downstream code reads it with `c.get('requestId')`.
+  app.use('*', requestId({ headerName: 'x-request-id' }));
+
   // Unauthenticated health-check for container probes (liveness / readiness).
-  // Registered before any middleware so it never requires auth or CORS.
+  // Registered before any auth / CORS middleware so it never requires either.
   // Reads the gateway heartbeat file written by the gateway process to surface
   // adapter health alongside the serve process's own uptime.
   app.get('/healthz', async (c) => {
@@ -162,8 +207,13 @@ export function createRoutes(opts: CreateRoutesOptions): Hono {
       gatewayBlock = { status: 'down', adapters: [], lastHeartbeatAgeSec: null };
     }
 
-    const allAdaptersOk =
-      gatewayBlock.adapters.length > 0 && gatewayBlock.adapters.every((a) => a.ok);
+    // An EMPTY adapter list is healthy. A headless deployment with no Slack /
+    // Telegram / Discord bot attached is a normal configuration, and `every()`
+    // is vacuously true on `[]` — do NOT re-add a `length > 0` guard, it makes
+    // every such deployment permanently 503 and reports every restart as a
+    // failed start to any supervisor probing this endpoint. What must still
+    // fail is a gateway that is absent or stale, which `status === 'ok'` covers.
+    const allAdaptersOk = gatewayBlock.adapters.every((a) => a.ok);
     const healthy = gatewayBlock.status === 'ok' && allAdaptersOk;
     const status = healthy ? 'ok' : 'degraded';
 
@@ -275,6 +325,7 @@ export function createRoutes(opts: CreateRoutesOptions): Hono {
   );
   app.route('/sse', sseRoutes({ chat: opts.services.chat }));
   app.route('/sse', goalSseRoutes({ goals: opts.services.goals }));
+  app.route('/sse', kanbanSseRoutes({ kanban: opts.services.kanban }));
   if (opts.services.systemBus) {
     app.route('/sse', systemSseRoutes({ systemBus: opts.services.systemBus }));
   }
@@ -290,9 +341,35 @@ export function createRoutes(opts: CreateRoutesOptions): Hono {
         apiKeys: opts.apiKeys,
         personalities: opts.services.personalities,
         completions: opts.services.completions,
+        config: opts.services.config,
+        ...(opts.services.voice ? { voice: opts.services.voice } : {}),
         ...(opts.listTeams ? { listTeams: opts.listTeams } : {}),
+        ...(opts.idempotencyStore ? { idempotencyStore: opts.idempotencyStore } : {}),
+        ...(opts.corsOrigins ? { corsOrigins: opts.corsOrigins } : {}),
       }),
     );
+  }
+
+  // Prometheus scrape target (P2-counters, D2/D16/D17). Same bearer-auth
+  // shape as `/v1/*` above: mounted only when an api-key store is wired, so
+  // a deployment without one needs no `metrics:read` key to keep working.
+  // `metricsTextFn` is absent when boot code chose not to wire one (tests,
+  // deployments with no observability store) — `/metrics` stays unmounted
+  // rather than 500ing.
+  if (opts.apiKeys && opts.metricsTextFn) {
+    const metricsTextFn = opts.metricsTextFn;
+    app.get('/metrics', bearerAuth({ store: opts.apiKeys, scope: 'metrics:read' }), async (c) => {
+      const text = await metricsTextFn();
+      return c.body(text, 200, { 'content-type': 'text/plain; version=0.0.4' });
+    });
+  }
+
+  // External cron trigger (plan/phases/cron-scheduler-seam.md). Same
+  // bearer-auth-gated, presence-mounted shape as `/metrics` above — mounted
+  // only when boot code wires an `HttpFireTrigger` (i.e. `cron.trigger.external`
+  // is `true`), so a deployment that never opts in needs no `cron`-scoped key.
+  if (opts.apiKeys && opts.cronFireTrigger) {
+    app.route('/cron', cronRoutes({ apiKeys: opts.apiKeys, trigger: opts.cronFireTrigger }));
   }
 
   // WhatsApp QR-pairing SSE stream. Gated behind auth — the QR string is

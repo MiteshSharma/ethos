@@ -70,34 +70,44 @@ The primary mental model.
                           │   Apps   │      user-facing entry points
                           └────┬─────┘
                                │
-                          ┌────▼─────┐
-                          │  Wiring  │      composition roots
-                          └─┬──────┬─┘
-                            │      │
-                     ┌──────▼─┐  ┌─▼──────────┐
-                     │  Core  │  │ Extensions │
-                     └──────┬─┘  └─┬──────────┘
-                            │      │
-                         ┌──▼──────▼──┐
-                         │ Contracts  │      interfaces, zero internal deps
-                         └────────────┘
+              ┌────────────────▼──────────────────┐
+              │              Wiring               │   composition roots
+              └─────┬──────────┬──────────┬───────┘
+                    │          │          │
+      ┌─────────────▼───┐  ┌───▼────┐  ┌──▼─────────┐
+      │ Security kernel │  │  Core  │  │ Extensions │
+      └───────┬─────────┘  └───┬────┘  └─────┬──────┘
+              │                │             │
+            ┌─▼────────────────▼─────────────▼──┐
+            │             Contracts             │   interfaces, zero
+            └───────────────────────────────────┘   internal deps
 ```
 
 **Contracts** are the floor: pure TypeScript interfaces, value types,
 discriminated unions. They have no internal dependencies. Everything
 else depends on them.
 
+**Security kernel** is the layer that implements the safety primitives
+§V mandates. It depends on contracts only and imports nothing above
+itself. Core does not import it at runtime: core consumes kernel
+capability through injected contract types, and wiring is the layer that
+binds an implementation to that seam. This is a restriction on core, not
+a licence for anyone else — a kernel that core could import directly
+would make the engine unswappable and the kernel unreplaceable.
+
 **Core** is the framework engine: the agent loop, the registries, the
-default context engines, and the safety primitives mandated by §V. Core
-depends on contracts only.
+default context engines, and the enforcement points at which the §V
+safety primitives are applied. Core depends on contracts only.
 
 **Extensions** are concrete implementations of contracts: providers,
 tools, memory backends, platform adapters, persistence stores, content
-bundles. Extensions depend on contracts and on core; they do not assume
-the presence of sibling extensions outside the patterns in §IV.
+bundles. Extensions depend on contracts, on the security kernel, and on
+core; they do not assume the presence of sibling extensions outside the
+patterns in §IV.
 
 **Wiring** is the composition layer: the only layer that imports
-extensions by name and assembles them into a running system.
+extensions by name, assembles them into a running system, and binds a
+security-kernel implementation to the seam core is constructed with.
 
 **Apps** are user-facing entry points: CLIs, TUIs, web clients, IDE
 extensions, protocol servers. Apps drive wiring; they do not bypass it.
@@ -196,6 +206,16 @@ contract for all output. `console.*` is permitted only in app entry
 modules and in build/test tooling. *Rationale:* silent libraries
 compose; chatty libraries pollute every embedder.
 
+### Law 11 — Kernel guarantees are not weakenable from outside
+A module outside the security kernel must not be able to weaken a
+guarantee the kernel enforces. *Rationale:* a guarantee an extension can
+switch off was never a guarantee, and the failure is silent — which is
+how a shipped control claim survived in the documentation after the code
+stopped implementing it.
+
+Like §V, this law has no exception path under §VIII: an exception to it
+is, by definition, a module that can weaken a kernel guarantee.
+
 ------------------------------------------------------------------------
 
 ## IV. Extension Patterns
@@ -265,9 +285,10 @@ These rules are absolute. They have no exception path. They predate any
 feature and outlive any release. Amendments to this section follow §VI
 structural-class rules.
 
-Safety primitives located in the core layer follow the same bump
-procedure as the engine itself; breaking changes require the unanimous
-maintainer agreement that core changes require.
+Safety primitives, whether they sit in the security kernel or at a core
+enforcement point, follow the same bump procedure as the engine itself;
+breaking changes require the unanimous maintainer agreement that core
+changes require.
 
 **S1 — Tool allowlist is authoritative.**
 The personality toolset is the sole authority on which tools the model
@@ -301,8 +322,12 @@ action is a contract violation.
 
 **S6 — Inbound text passes safety injection.**
 Every inbound user message and every retrieved memory passes through the
-safety injection pipeline before reaching the LLM. The pipeline is part
-of core; it cannot be opted out of by personality, channel, or tool.
+safety injection pipeline before reaching the LLM. The pipeline is
+reachable only through the safety seam injected into every agent loop;
+no personality, channel, or tool may disable it, and no schema field may
+exist whose effect is to disable it. A personality safety block may only
+ever narrow what the framework already permits; a field that widens
+policy is a violation of this rule, not a configuration of it.
 
 **S7 — Boundary errors are user-facing.**
 A boundary violation — storage scope, tool allowlist, sandbox
@@ -367,7 +392,7 @@ type changes. Every frozen schema has:
 - A named owner.
 - A bump procedure.
 
-The personality schema is the worked example. [Personality governance](docs/content/building/explanation/personality-governance.md) explains how its freeze rule and the generated character sheet operationalise this section for `PersonalityConfig` — the personality-alignment phase removed four non-identity fields (`skin`, `busyInputMode`, `verbosity`, `metadata`) under exactly the procedure below.
+The personality schema is the worked example. [Personality governance](docs/content/building/explanation/personality-governance.md) explains how its freeze rule and the generated character sheet operationalise this section for `PersonalityConfig` — the personality-alignment phase removed four non-identity fields (`skin`, `busyInputMode`, `verbosity`, `metadata`) under exactly the procedure below. [AgentCard governance](docs/content/building/explanation/agent-card-governance.md) explains why the A2A signed card — a peer verifies it once, out of band, and trusts that anchor from then on — needed the same mechanical treatment (added in the a2a-spec-compat phase, D14).
 
 ### Roster
 
@@ -382,6 +407,9 @@ The personality schema is the worked example. [Personality governance](docs/cont
 | Agent event union | Any two repository maintainers | Adding, removing, or renaming a variant | Variant enumeration test |
 | Tool contract | Any two repository maintainers | A change that affects already-shipped tool packages | Shape test |
 | Context engine contract | Any two repository maintainers | Adding, removing, or renaming a method on `ContextEngine` | Method-count test (`context-engine-method-count`) |
+| Content-addressed store (ContentStore) | Any two repository maintainers | Adding, removing, or renaming a method on ContentStore | Method-count test |
+| AgentCard (A2A signed card) | Any two repository maintainers | Adding, removing, or renaming a top-level field on `AgentCard` (`packages/types/src/a2a.ts`) | Field-count + field-name test (`agent-card-field-count`) |
+| Pause lifecycle contract | Any two repository maintainers | Adding, removing, or renaming a method on `PauseLifecycle` | Method-count test (`pause-lifecycle-method-count`) |
 
 Adding an **optional** method to `ContextEngine` is a §VI **Substantive** change:
 it needs two-maintainer approval, the drift gate bumped in the same commit, and
@@ -444,6 +472,9 @@ exception is a temporary, named, time-bounded carve-out.
   unobservable.
 - Exceptions to §V Safety Constitution rules. Safety rules are amended
   through §VI or not at all.
+- Exceptions to §III Law 11. An exception permitting a module outside
+  the security kernel to weaken a kernel guarantee is the violation the
+  law names.
 - Exceptions broader than a single named scope. A pattern-wide
   exception is a law change, not an exception.
 
@@ -495,25 +526,36 @@ layers:
     forbids:
       - internal_workspace_deps: all
 
-  - name: core
-    role: "Framework engine plus §V-mandated safety primitives."
+  - name: security-kernel
+    role: "Implementations of the §V-mandated safety primitives."
     depends_on: [contracts]
     forbids:
+      - imports_outside_layer: [core, extensions, wiring, apps]
+      - raw_filesystem_apis: true
+      - direct_console_writes: true
+
+  - name: core
+    role: "Framework engine. Applies §V safety primitives through injected seams."
+    depends_on: [contracts]
+    # Core reaches the kernel only through contract types bound by wiring.
+    type_only_deps: [security-kernel]
+    forbids:
       - imports_outside_layer: [extensions, wiring, apps]
+      - runtime_imports_of_layer: [security-kernel]
       - raw_filesystem_apis: true
       - direct_console_writes: true
 
   - name: extensions
     role: "Concrete implementations of contracts."
-    depends_on: [contracts, core]
+    depends_on: [contracts, security-kernel, core]
     sibling_dependencies: permitted
     forbids:
       - direct_console_writes: true
       - raw_filesystem_apis_outside_storage_contract: true
 
   - name: wiring
-    role: "Composition root. Imports concrete extensions by name."
-    depends_on: [contracts, core, extensions]
+    role: "Composition root. Imports concrete extensions by name and binds the kernel."
+    depends_on: [contracts, security-kernel, core, extensions]
     composition_root: true
 
   - name: apps
@@ -565,6 +607,12 @@ laws:
     allowed_in: layer:apps/entry
     contract: logger
 
+  L11_kernel_guarantees_not_weakenable:
+    check: forbid_external_weakening_of_kernel_guarantee
+    scope: "* except layer:security-kernel"
+    severity: error
+    no_exception_path: true
+
 # ---- Safety constitution (§V) ----------------------------------------
 # These have no exception path. A violation here is a release blocker.
 
@@ -593,7 +641,12 @@ safety:
 
   S6_inbound_safety_injection:
     pipeline_position: before_llm
+    reachable_only_via: injected_safety_seam
     opt_out: forbidden
+    personality_safety_fields: narrowing_only
+    # Mechanical: no schema field disables the pipeline, so the rule is
+    # enforced by the personality drift gate, not by review.
+    enforcement: mechanical
 
   S7_boundary_errors_surface:
     typed_error: required
@@ -624,6 +677,19 @@ frozen_schemas:
       - per_channel_display
       - templates_labels
       - capabilities_outside_toolset
+    # §VI amendment, voice V1a (eng-review D2): ONE field is carved out of
+    # voice_speech_audio. `voice` carries identity — TTS voice id, language→voice
+    # map, tier preference, fast-lane model — on the reasoning that a deployment
+    # chooses the voice PROVIDER while the personality chooses how it SOUNDS,
+    # the same way it chooses its model. Voice modes, VAD tuning and per-channel
+    # speech affordances remain forbidden, and the exception is closed at both
+    # ends: `personality-field-count.test.ts` fails if a second speech/audio
+    # field appears.
+    granted_field_exceptions:
+      - field: voice
+        category: voice_speech_audio
+        rationale: identity_not_setting
+        granted_by: voice_v1a_amendment
 
   plugin_contract:
     owner_class: plugin_platform_maintainers
@@ -664,6 +730,24 @@ frozen_schemas:
     optional_method_addition: substantive
     required_method_addition: substantive_plus_plugin_contract_major
 
+  content_store:
+    owner_class: any_two_maintainers
+    drift_gate: method_count_test
+    frozen_method_count: 4
+    frozen_methods: [put, get, has, hash]
+
+  pause_lifecycle:
+    owner_class: any_two_maintainers
+    drift_gate: method_count_test
+    frozen_method_count: 2
+    frozen_methods: [readPauseOffset, signalReadyToSuspend]
+
+  agent_card:
+    owner_class: any_two_maintainers
+    drift_gate: field_count_and_name_test
+    frozen_field_count: 11
+    frozen_fields: [id, name, description, protocolVersion, skills, endpoints, publicKey, keyFingerprint, signatureAlg, signature, did]
+
 # ---- Exception policy (§VIII) ----------------------------------------
 # Active exceptions live in the sidecar, not here. This block defines
 # the shape every entry must take and the validator's failure modes.
@@ -675,6 +759,7 @@ exception_policy:
     - missing_owner
     - unobservable_removal_condition
     - safety_constitution_carve_out
+    - kernel_guarantee_carve_out
     - pattern_wide_scope
   expiry:
     on_review_by_passed: surface_as_violation

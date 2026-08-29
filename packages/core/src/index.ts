@@ -6,6 +6,18 @@ export type {
   RunOptions,
 } from './agent-loop';
 export { AgentLoop, isKnownAgentEvent, KNOWN_AGENT_EVENT_TYPES } from './agent-loop';
+// tools-as-code-api Lane B — the per-turn bridge (and its budget-counter
+// companions) are exported so integration tests and non-loop surfaces can
+// drive the EXACT enforcement path the loop wires, not a re-statement of it.
+// `checkCostBudget` is the `cost-cap` half on its own, for spend that accrues
+// outside a turn (the realtime voice tier's per-audio-minute accrual).
+export {
+  type BudgetExceeded,
+  type BudgetRule,
+  type CostBudget,
+  checkCostBudget,
+  checkTurnBudgets,
+} from './agent-loop/budgets';
 // Lane 1(b/c) — the gate's output-reserve constant, shared with wiring's
 // startup floor diagnostic and window-scaled result budget so there is ONE
 // reserve arithmetic, not a drifting copy.
@@ -16,28 +28,52 @@ export { DEFAULT_OUTPUT_RESERVE_TOKENS } from './agent-loop/compaction';
 // serializer here would prove nothing (Hermes #4555 failure class).
 export { dedupHistory, toLLMMessages } from './agent-loop/history';
 export { reconstructFromWatermark, selectActiveWatermark } from './agent-loop/manual-compact';
+// The app-layer half of fs_reach enforcement. Exported so the docker/ScopedStorage
+// parity test drives EXACTLY the scope the loop builds, not a re-statement of it.
+export { buildScopedStorage } from './agent-loop/scoped-storage';
 // Lane 3(b) — declared small-window toolset parsing, shared with wiring's
 // startup narrowing diagnostic so both read the declaration identically.
 export { parseSmallWindowToolset } from './agent-loop/small-window-toolset';
+export {
+  createTurnBudgetCounters,
+  recordToolCallForBudgets,
+  type TurnBudgetCounters,
+} from './agent-loop/stages/per-call-enforcement';
+export {
+  SCRIPT_CALLS_PER_EXECUTION,
+  SCRIPT_RESULT_BUDGET_CHARS,
+  ScriptToolBridge,
+  type ScriptToolBridgeDeps,
+} from './agent-loop/stages/script-tool-bridge';
 // Lane 5(i) — the tier resolution (with its provider-match guard), exported so
 // wiring's tier-mismatch startup diagnostic is tested against EXACTLY the
 // guard the loop runs, not a drifting re-statement of it.
 export { resolveModelWithTier } from './agent-loop/turn-context';
 export { buildAttachmentAnnotation } from './attachment-annotation';
 export { deriveBotKey } from './bot-key';
+export { toolsDeclaringNetwork } from './capability-reach';
 export type { CapabilityBackends, CapabilityScopeIds } from './capability-resolver';
 export { resolveCapabilities } from './capability-resolver';
 export type { CapabilityValidationError } from './capability-validator';
 export { validateRegistration } from './capability-validator';
 export {
   ClarifyBridge,
-  ClarifyBusyError,
+  type ClarifyBridgeOptions,
   ClarifyNoSurfaceError,
+  type ClarifyOriginLane,
+  type ClarifyOriginResolver,
   type ClarifyPresenter,
   type ClarifyRequestInput,
   type ClarifyResolvedListener,
   ClarifyTimedOutNoDefaultError,
 } from './clarify/clarify-bridge';
+export {
+  buildClarifyEscalationNotice,
+  type ClarifyEscalationDeps,
+  type ClarifyNoticeTarget,
+  DEFAULT_ESCALATION_DELAY_MS,
+  sweepClarifyEscalations,
+} from './clarify/escalation-notifier';
 export { FileClarifyStore } from './clarify/file-clarify-store';
 export { type ConformanceResult, validateContextEngine } from './context-engines/conformance';
 export { DropOldestEngine } from './context-engines/drop-oldest';
@@ -66,7 +102,19 @@ export {
 } from './execution/conformance';
 export type { SessionLifecycleEvent, SessionManagerOptions } from './execution/session-manager';
 export { SessionManager } from './execution/session-manager';
+// The ONE fs_reach derivation. Both enforcement layers — ScopedStorage
+// (app) and the docker backend's bind mounts (OS) — consume this; a second
+// copy would drift into silent data loss (writes permitted but never mounted).
+export {
+  deriveFsReachPaths,
+  EmptySubstitutionError,
+  type FsReachVars,
+  personalityAssetDir,
+  substitute,
+} from './fs-reach';
 export { DefaultHookRegistry } from './hook-registry';
+export type { VoiceLaneClient, VoiceLaneClientKind } from './lane-key';
+export { buildLaneKey, satelliteLaneKey, voiceLaneKey } from './lane-key';
 export type { LearnRequest } from './learn';
 export { buildLearnPrompt, parseLearnArgs } from './learn';
 export type { LocalToolTransportLiveCtx } from './local-tool-transport';
@@ -86,17 +134,77 @@ export type { ChainedProviderOptions } from './providers/chained-provider';
 export { ChainedProvider } from './providers/chained-provider';
 export { DefaultDocumentExtractorRegistry } from './providers/document-extractor-registry';
 export { DefaultExecutionBackendRegistry } from './providers/execution-registry';
+export { DefaultJobRunnerRegistry } from './providers/job-runner-registry';
 export { DefaultLLMProviderRegistry } from './providers/llm-registry';
 export { DefaultMemoryProviderRegistry } from './providers/memory-registry';
+export { DefaultRealtimeVoiceProviderRegistry } from './providers/realtime-registry';
 export { DefaultStorageRegistry } from './providers/storage-registry';
 export { DefaultSttProviderRegistry } from './providers/stt-registry';
 export { DefaultTtsProviderRegistry } from './providers/tts-registry';
+export type {
+  RealtimeEntrySelection,
+  RealtimeProviderForPersonality,
+  ResolvedVoicePreferences,
+  ResolveRealtimeForPersonalityOptions,
+  ResolveRealtimeOptions,
+  ResolveSttForPersonalityOptions,
+  ResolveSttOptions,
+  ResolveTtsForPersonalityOptions,
+  ResolveTtsOptions,
+  ResolveVoicePreferencesOptions,
+  ResolveVoiceProviderOptions,
+  SelectRealtimeEntryOptions,
+  SelectSttEntryOptions,
+  SelectTtsEntryOptions,
+  SelectVoiceEntryOptions,
+  SttEntrySelection,
+  SttProviderForPersonality,
+  TtsEntrySelection,
+  TtsProviderForPersonality,
+  VoiceEntrySelection,
+  VoiceEntrySelectionReason,
+  VoiceResolution,
+  VoiceResolutionErrorCode,
+} from './providers/voice-resolution';
+export {
+  realtimeEntryProviderConfig,
+  resolveRealtimeProvider,
+  resolveRealtimeProviderForPersonality,
+  resolveSttProvider,
+  resolveSttProviderForPersonality,
+  resolveTtsProvider,
+  resolveTtsProviderForPersonality,
+  resolveVoicePreferences,
+  selectRealtimeEntry,
+  selectSttEntry,
+  selectTtsEntry,
+  sttEntryProviderConfig,
+  ttsEntryProviderConfig,
+  unwrapVoiceResolution,
+  VoiceProviderError,
+} from './providers/voice-resolution';
 export { InMemoryRequestDumpStore } from './request-dump-store';
+export {
+  type AgentSafetyConformanceResult,
+  runAgentSafetyConformance,
+} from './safety-conformance';
 export { stripAnsiEscapes } from './sanitize-output';
 export type { SafeFetchFn, SecretsBackend } from './scoped';
 export { ScopedFetchImpl, ScopedFsImpl, ScopedProcessImpl, ScopedSecretsImpl } from './scoped';
+export type { ScriptExclusionCategory, ScriptSafeToolMeta } from './script-safe';
+export { scriptCallableFor, scriptExclusionError, scriptExclusionFor } from './script-safe';
 export { SimpleCompletionImpl } from './simple-completion';
+export type { SpokenStyleInjectorOptions } from './spoken-style-injector';
+export { createSpokenStyleInjector, SPOKEN_STYLE_BLOCK } from './spoken-style-injector';
 export { applyTemporalDecay, parseTemporalBound, toJournalKey } from './temporal';
 export { DefaultToolResultReducerRegistry } from './tool-reducer-registry';
 export { DefaultToolRegistry } from './tool-registry';
 export { SsrfError, type ValidateUrlOptions, validateUrl } from './url-validator';
+// Voice V2 Lane 6a — the durable per-lane `/voice` mode, shared by the gateway
+// and web-api so a mode set on one surface is the same fact on the other.
+export {
+  LaneVoiceModeStore,
+  type LaneVoiceModeStoreOptions,
+  laneVoiceModePath,
+} from './voice/lane-voice-mode';
+export { buildVoiceOriginAnnotation, VOICE_ORIGIN_TAG } from './voice-origin';

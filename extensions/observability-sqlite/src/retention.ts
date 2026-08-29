@@ -34,6 +34,55 @@ export function mergeRetentionConfig(
   };
 }
 
+/** Rollup columns on `sessions`, and their per-message counterparts. */
+const USAGE_COLUMNS = [
+  'input_tokens',
+  'output_tokens',
+  'cache_read_tokens',
+  'cache_creation_tokens',
+  'estimated_cost_usd',
+] as const;
+
+/**
+ * Take the usage of the messages about to be pruned back out of the session
+ * rollup columns. Those columns are a derived cache of the surviving `messages`
+ * rows (analytics decision 9), so the subtraction has to happen before the
+ * delete and inside its transaction.
+ *
+ * Already soft-deleted rows were subtracted when they were undone, so they are
+ * excluded — the column is absent on `sessions.db` files old enough to predate
+ * undo, in which case there is nothing to double-subtract either. The floor at
+ * zero protects sessions whose rollups predate the columns being maintained.
+ *
+ * Nothing here may assume the current schema: `ethos data prune` opens
+ * `sessions.db` raw without running the store's migrations, so the `sessions`
+ * table (and the usage columns on either table) can be missing entirely —
+ * `table_info` then returns no rows. Pruning messages is the primary job, so a
+ * rollup that cannot be maintained is skipped rather than allowed to throw.
+ */
+function subtractPrunedUsage(sessDb: BetterSqlite3.Database, iso: string): void {
+  const columnsOf = (table: string) =>
+    new Set((sessDb.pragma(`table_info(${table})`) as Array<{ name: string }>).map((c) => c.name));
+  const messageCols = columnsOf('messages');
+  const sessionCols = columnsOf('sessions');
+  if (!USAGE_COLUMNS.every((c) => sessionCols.has(c) && messageCols.has(c))) return;
+
+  const live = messageCols.has('deleted_at') ? 'AND deleted_at IS NULL' : '';
+  const sets = USAGE_COLUMNS.map((col) => `${col} = max(sessions.${col} - pruned.${col}, 0)`).join(
+    ', ',
+  );
+  const sums = USAGE_COLUMNS.map((col) => `COALESCE(SUM(${col}), 0) AS ${col}`).join(', ');
+
+  sessDb
+    .prepare(
+      `UPDATE sessions SET ${sets}
+       FROM (SELECT session_id, ${sums} FROM messages
+             WHERE timestamp < ? ${live} GROUP BY session_id) AS pruned
+       WHERE sessions.id = pruned.session_id`,
+    )
+    .run(iso);
+}
+
 export interface PruneResult {
   traces: number;
   spans: number;
@@ -255,9 +304,11 @@ export function pruneObservability(
             .get(iso) as { n: number }
         ).n;
       } else {
-        result.messages = opts.sessDb
-          .prepare('DELETE FROM messages WHERE timestamp < ?')
-          .run(iso).changes;
+        const sessDb = opts.sessDb;
+        result.messages = sessDb.transaction((): number => {
+          subtractPrunedUsage(sessDb, iso);
+          return sessDb.prepare('DELETE FROM messages WHERE timestamp < ?').run(iso).changes;
+        })();
       }
     }
   }

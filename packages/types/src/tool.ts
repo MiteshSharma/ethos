@@ -50,6 +50,48 @@ export interface ToolProgressEvent {
   audience?: 'internal' | 'user' | 'dashboard';
 }
 
+/**
+ * Result of one in-script tool call across the script-tool seam
+ * (tools-as-code-api Lane B). Errors travel as data (`ok: false`), never as
+ * throws — the same contract as `ExecRpcResponse`, so `run_code` can forward
+ * results to the RPC transport 1:1.
+ */
+export interface ScriptToolCallResult {
+  ok: boolean;
+  value?: string;
+  error?: string;
+  code?: string;
+}
+
+/** One script execution's handle onto the agent's tools (per-execution call cap applies). */
+export interface ScriptToolExecution {
+  call(name: string, args: unknown): Promise<ScriptToolCallResult>;
+}
+
+/**
+ * The script-tool seam (tools-as-code-api Lane B). Implemented by core's
+ * ScriptToolBridge; consumed by `run_code`, which answers in-script
+ * `ethos.call(name, args)` RPC requests through it so script-initiated calls
+ * traverse the SAME per-call enforcement path as LLM-issued calls (personality
+ * allowlist, `before_tool_call` hooks, safety watchers, shared turn budgets).
+ */
+export interface ScriptToolsApi {
+  /** Sorted tool names callable from a script under this turn's personality. */
+  callableTools(): string[];
+  /**
+   * Begin one script execution. `onAbortExecution` fires when enforcement
+   * requires the whole execution to die (watcher pause/terminate) — the caller
+   * wires it to the exec AbortController so the container is killed.
+   * `parentToolCallId` (Lane E) is the invoking `run_code` call's own id;
+   * inner-call events are namespaced `<parentToolCallId>#<n>` under it so a
+   * transcript reader can reconstruct the tree.
+   */
+  startExecution(opts?: {
+    onAbortExecution?: (reason: string) => void;
+    parentToolCallId?: string;
+  }): ScriptToolExecution;
+}
+
 export interface ToolContext {
   sessionId: string;
   sessionKey: string;
@@ -63,6 +105,14 @@ export interface ToolContext {
    */
   rootSessionKey?: string;
   /**
+   * D22 (pi-delegation plan) — the background job id, stamped by
+   * `BackgroundExecutor.runOne` from `job.id`. Unlike `rootSessionKey` there is
+   * NO fallback: always `undefined` for a foreground turn. The `clarify` tool
+   * threads it into `ClarifyBridge.request()` to key the per-job FIFO lane
+   * (`jobId ?? sessionId`, G1) instead of a per-session lane.
+   */
+  jobId?: string;
+  /**
    * Where this turn originated, as `platform:chatId` for channel turns (else unset).
    * Generic per-run context; goal_create reads it to stamp Goal.origin.
    */
@@ -73,6 +123,23 @@ export interface ToolContext {
    * the per-trace fan-out budget (plan §P8). Absent for normal turns.
    */
   a2aDelegation?: { traceId: string; depth: number; reserveOutbound: () => boolean };
+  /**
+   * tools-as-code-api Lane B — set per turn by AgentLoop when a
+   * ScriptToolBridge is wired. `run_code` threads it into the exec RPC seam so
+   * in-script `ethos.call(name, args)` traverses the identical enforcement
+   * path as LLM-issued calls. Carries live callbacks, so like `a2aDelegation`
+   * it rides the transport's live side-channel, never the serializable
+   * `ToolExecuteRequest`. Absent → the tool API is not wired for this turn.
+   */
+  scriptTools?: ScriptToolsApi;
+  /**
+   * tools-as-code-api Lane E — the executing call's own toolCallId, populated
+   * by the transport from `ToolExecuteRequest.toolCallId`. `run_code` threads
+   * it into `scriptTools.startExecution` as `parentToolCallId` so inner-call
+   * events are namespaced under the parent. Optional: hand-built test
+   * contexts may omit it; consumers must tolerate absence.
+   */
+  toolCallId?: string;
   /** Active personality for this turn. Tools that touch memory must thread this through. */
   personalityId?: string;
   /**
@@ -196,6 +263,8 @@ export interface ToolSettingsSecretBindingField {
    */
   secretKind: string;
   required?: boolean;
+  /** When present, rendered as a help popover next to the field's label. */
+  helpText?: string;
 }
 
 export type ToolSettingsField = ToolSettingsEnumField | ToolSettingsSecretBindingField;
@@ -260,6 +329,8 @@ export interface ToolExecuteRequest {
   teamId?: string;
   agentId?: string;
   rootSessionKey?: string;
+  /** D22 (pi-delegation plan) — mirrors `ToolContext.jobId`; see its doc there. */
+  jobId?: string;
   origin?: string;
   memoryScopeId?: string;
   userScopeId?: string;
@@ -300,6 +371,13 @@ export interface ToolFilterOpts {
    * only the listed tools pass. undefined = no per-tool filter.
    */
   allowedMcpTools?: Record<string, string[]>;
+  /**
+   * Tool names that must never appear or execute on this surface, regardless
+   * of the personality toolset or `alwaysInclude`. Surface policy, not
+   * personality policy: the gateway sets it so UI-card tools stay off channel
+   * adapters while the web path keeps them. undefined = no exclusion.
+   */
+  excludeTools?: string[];
 }
 
 export interface ToolRegistry {
@@ -312,6 +390,12 @@ export interface ToolRegistry {
   getForToolset(toolset: string): Tool[];
   /** v2.2 — Return the plugin id that registered a tool, if any. */
   getPluginId?(name: string): string | undefined;
+  /**
+   * `durationMs` is that ONE call's wall clock, not the batch's — parallel
+   * calls finish at different times and each reports its own. Optional
+   * because implementations may omit it; callers fall back to their own
+   * timing when it is absent.
+   */
   executeParallel(
     calls: Array<{ toolCallId: string; name: string; args: unknown }>,
     ctx: ToolContext,
@@ -319,7 +403,7 @@ export interface ToolRegistry {
     filterOpts?: ToolFilterOpts,
     turnAttachments?: import('./platform').Attachment[],
     filters?: import('./tool-filter').ToolInvocationFilter[],
-  ): Promise<Array<{ toolCallId: string; name: string; result: ToolResult }>>;
+  ): Promise<Array<{ toolCallId: string; name: string; result: ToolResult; durationMs?: number }>>;
   toDefinitions(
     allowedTools?: string[],
     filterOpts?: ToolFilterOpts,

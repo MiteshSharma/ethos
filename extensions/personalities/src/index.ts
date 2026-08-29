@@ -8,6 +8,7 @@ import {
   type LivingSoul,
   type ModelTierConfig,
   type PersonalityConfig,
+  type PersonalityFingerprintSources,
   type PersonalityObservabilityConfig,
   type PersonalityRegistry,
   type PersonalitySafetyConfig,
@@ -34,11 +35,15 @@ export {
 export {
   type A2aIdentityProviderOptions,
   type A2aPersonalitySource,
+  type A2aSkillToolsResolution,
   PersonalityA2aIdentityProvider,
+  resolveA2aSkillTools,
 } from './a2a-identity';
 export {
+  type CharacterSheetBoundary,
   type CharacterSheetExecution,
   type CharacterSheetModelFit,
+  type CharacterSheetScriptSurface,
   firstParagraph,
   renderCharacterSheet,
 } from './character-sheet';
@@ -48,6 +53,32 @@ export const SYSTEM_PERSONALITY_IDS: ReadonlySet<string> = new Set([
   'team-architect',
   'debug',
 ]);
+
+// ---------------------------------------------------------------------------
+// Avatar storage — `<personality-dir>/avatar.<ext>`, parallel to SOUL.md /
+// config.yaml / toolset.yaml. The extension is always derived from a
+// VALIDATED mime type (never a client-supplied filename) so the mapping here
+// is the single source of truth both the upload route and the serving route
+// key off of.
+// ---------------------------------------------------------------------------
+
+/** Allowlisted avatar mime types → the extension `writeAvatar` stores them
+ *  under. Anything not in this map is rejected. */
+export const AVATAR_MIME_TO_EXT: Readonly<Record<string, string>> = {
+  'image/png': 'png',
+  'image/jpeg': 'jpg',
+  'image/webp': 'webp',
+  'image/gif': 'gif',
+};
+
+const AVATAR_EXT_TO_MIME: Readonly<Record<string, string>> = Object.fromEntries(
+  Object.entries(AVATAR_MIME_TO_EXT).map(([mime, ext]) => [ext, mime]),
+);
+
+/** Matches the one avatar file a personality directory may hold at a time.
+ *  Extensions mirror `AVATAR_MIME_TO_EXT`'s values exactly — this module only
+ *  ever writes those four. */
+const AVATAR_FILENAME_RE = /^avatar\.(png|jpg|webp|gif)$/;
 
 // ---------------------------------------------------------------------------
 // YAML parsers — no external dependency, handles the subset we need
@@ -593,7 +624,7 @@ export interface CreatePersonalityInput {
   capabilities?: string[];
   mcp_servers?: string[];
   plugins?: string[];
-  fs_reach?: { read?: string[]; write?: string[] };
+  fs_reach?: { read?: string[]; write?: string[]; workdir?: string };
   skill_evolution?: {
     enabled?: boolean;
     min_tool_calls?: number;
@@ -606,7 +637,47 @@ export interface CreatePersonalityInput {
   dreaming?: import('@ethosagent/types').DreamingConfig;
   evolution_approval_mode?: 'auto' | 'user';
   nightly?: import('@ethosagent/types').PersonalityConfig['nightly'];
+  /** How this personality sounds, listens, and looks on a call. `tts_provider` /
+   *  `stt_provider` / `realtime_provider` name entries in the deployment's
+   *  `voice.tts.providers.*` / `voice.stt.providers.*` /
+   *  `voice.realtime.providers.*` rosters; `tts_voice` is the TTS provider's
+   *  voice id; `call_style` is the Call Stage treatment. Empty strings are
+   *  dropped, so an editor can send blanks for "unset". */
+  voice?: EditableVoiceConfig;
 }
+
+/**
+ * The sub-keys of `PersonalityVoiceConfig` an editor may write.
+ *
+ * Every sub-key of the frozen `voice` block is here — the block is what a
+ * personality declares about how it sounds, and a sub-key only config.yaml can
+ * reach is a sub-key the editor silently erases on the next save.
+ */
+export interface EditableVoiceConfig {
+  tts_provider?: string;
+  stt_provider?: string;
+  realtime_provider?: string;
+  tts_voice?: string;
+  /** How the Call Stage draws this personality. `''` clears it. */
+  call_style?: import('@ethosagent/types').CallTreatment | '';
+  /** Which voice stack serves this personality. `''` clears it. */
+  tier?: 'pipeline' | 'realtime' | '';
+  /** Fast-lane model for spoken turns. `''` clears it. */
+  model?: string;
+  /** BCP-47 tag → voice id. REPLACES the stored map; `{}` clears it. */
+  languages?: Record<string, string>;
+}
+
+/** The editable STRING sub-keys, in one place — the merge walks exactly this
+ *  list. `call_style` and `tier` are merged separately: they are enums, and a
+ *  loop that assigns across a union of value types does not typecheck. */
+const EDITABLE_VOICE_KEYS = [
+  'tts_provider',
+  'stt_provider',
+  'realtime_provider',
+  'tts_voice',
+  'model',
+] as const;
 
 export interface UpdatePersonalityPatch {
   name?: string;
@@ -618,7 +689,7 @@ export interface UpdatePersonalityPatch {
   plugins?: string[];
   capabilities?: string[];
   provider?: string;
-  fs_reach?: { read?: string[]; write?: string[] };
+  fs_reach?: { read?: string[]; write?: string[]; workdir?: string };
   /** Partial dreaming config — shallow-merged onto the existing dreaming block
    *  so a patch that carries only `enable` (or only a cadence number) never
    *  drops sibling fields. */
@@ -643,6 +714,69 @@ export interface UpdatePersonalityPatch {
    *  (incl. the full judge sub-object), so a one-level shallow merge onto the
    *  existing block is correct — `judge` is replaced wholesale, not deep-merged. */
   nightly?: import('@ethosagent/types').PersonalityConfig['nightly'];
+  /** Voice sub-keys, shallow-merged onto the stored `voice` block so a patch
+   *  carrying only `tts_voice` leaves a hand-written `languages` map alone.
+   *  `''` CLEARS that sub-key — the same convention `fs_reach.workdir` uses,
+   *  and the only way the editor can express "back to the default provider". */
+  voice?: EditableVoiceConfig;
+  /** Avatar sub-key of the `display` identity block. `''` clears
+   *  `avatar_url` — the same convention as `voice.*` / `fs_reach.workdir`.
+   *  Written by `writeAvatar`/`deleteAvatar` below; not a general editor
+   *  field (there is no raw-URL-paste flow in v1). */
+  display?: { avatar_url?: string };
+}
+
+/**
+ * Apply an editable `display` patch to the stored `display` block. Mirrors
+ * `mergeVoiceConfig`'s clearing convention (`''` clears, `undefined` leaves,
+ * anything else sets) even though `display` has only one sub-key today — a
+ * second sub-key (subject to the same schema-freeze governance as everything
+ * else on `PersonalityConfig`) then has one merge path to extend, not a new
+ * one to invent.
+ */
+function mergeDisplayConfig(
+  existing: PersonalityConfig['display'],
+  patch: { avatar_url?: string } | undefined,
+): PersonalityConfig['display'] {
+  if (patch === undefined || patch.avatar_url === undefined) return existing;
+  if (patch.avatar_url === '') return undefined;
+  return { avatar_url: patch.avatar_url };
+}
+
+/**
+ * Apply an editable voice patch to the stored `voice` block.
+ *
+ * `''` clears a scalar sub-key, `undefined` leaves it, anything else sets it.
+ * `languages` is the one non-scalar: a patch that carries it REPLACES the
+ * stored map, because merging per tag would leave no way to delete one — and a
+ * patch that omits it still leaves a hand-written map alone.
+ * A block left with nothing in it is dropped rather than written empty.
+ */
+function mergeVoiceConfig(
+  existing: import('@ethosagent/types').PersonalityVoiceConfig | undefined,
+  patch: EditableVoiceConfig,
+): import('@ethosagent/types').PersonalityVoiceConfig | undefined {
+  const next: import('@ethosagent/types').PersonalityVoiceConfig = { ...existing };
+  for (const key of EDITABLE_VOICE_KEYS) {
+    const value = patch[key];
+    if (value === undefined) continue;
+    if (value === '') delete next[key];
+    else next[key] = value;
+  }
+  if (patch.call_style !== undefined) {
+    if (patch.call_style === '') delete next.call_style;
+    else next.call_style = patch.call_style;
+  }
+  if (patch.tier !== undefined) {
+    if (patch.tier === '') delete next.tier;
+    else next.tier = patch.tier;
+  }
+  if (patch.languages !== undefined) {
+    const languages = patch.languages;
+    if (Object.keys(languages).length === 0) delete next.languages;
+    else next.languages = { ...languages };
+  }
+  return Object.keys(next).length > 0 ? next : undefined;
 }
 
 export class FilePersonalityRegistry implements PersonalityRegistry {
@@ -691,6 +825,13 @@ export class FilePersonalityRegistry implements PersonalityRegistry {
    *  tools.yaml file. */
   getToolsConfig(id: string): PersonalityToolsConfig | undefined {
     return this.toolsConfigs.get(id);
+  }
+
+  /** See `PersonalityRegistry.getContentFingerprint` (D8). */
+  async getContentFingerprint(id: string): Promise<PersonalityFingerprintSources | null> {
+    const described = this.describe(id);
+    if (!described) return null;
+    return readPersonalityFingerprintSources(this.storage, this.dirOf(described));
   }
 
   list(): PersonalityConfig[] {
@@ -879,7 +1020,13 @@ export class FilePersonalityRegistry implements PersonalityRegistry {
     const dir = this.userPathFor(input.id);
     await this.storage.mkdir(dir);
     await this.storage.mkdir(join(dir, 'files'));
-    await this.storage.write(join(dir, 'config.yaml'), renderConfigYaml(input));
+    // Through `mergeVoiceConfig` even on create, so blank editor fields become
+    // "no voice block" rather than `voice.tts_provider: ` lines the loader ignores.
+    const voice = input.voice ? mergeVoiceConfig(undefined, input.voice) : undefined;
+    await this.storage.write(
+      join(dir, 'config.yaml'),
+      renderConfigYaml({ ...input, ...(voice ? { voice } : { voice: undefined }) }),
+    );
     await this.storage.write(join(dir, 'toolset.yaml'), renderToolsetYaml(input.toolset));
     await this.storage.write(join(dir, 'SOUL.md'), input.soulMd);
     await this.refreshUserDir();
@@ -912,7 +1059,9 @@ export class FilePersonalityRegistry implements PersonalityRegistry {
       patch.skill_evolution !== undefined ||
       patch.safety !== undefined ||
       patch.memory !== undefined ||
-      patch.nightly !== undefined
+      patch.nightly !== undefined ||
+      patch.voice !== undefined ||
+      patch.display !== undefined
     ) {
       const config = existing.config;
       if (patch.provider !== undefined && patch.provider !== '') {
@@ -945,7 +1094,14 @@ export class FilePersonalityRegistry implements PersonalityRegistry {
         }
       }
       if (patch.fs_reach !== undefined) {
-        const allPaths = [...(patch.fs_reach.read ?? []), ...(patch.fs_reach.write ?? [])];
+        // workdir is validated by the same predicate — it lands in both derived
+        // reach lists, so an unchecked one would be a hole straight through this
+        // guard.
+        const allPaths = [
+          ...(patch.fs_reach.read ?? []),
+          ...(patch.fs_reach.write ?? []),
+          ...(patch.fs_reach.workdir ? [patch.fs_reach.workdir] : []),
+        ];
         for (const p of allPaths) {
           if (/[\n\r,]/.test(p) || p.includes('\0')) {
             throw new EthosError({
@@ -1015,7 +1171,15 @@ export class FilePersonalityRegistry implements PersonalityRegistry {
         plugins: patch.plugins ?? config.plugins,
         capabilities: patch.capabilities === undefined ? config.capabilities : patch.capabilities,
         provider: patch.provider === undefined ? config.provider : patch.provider,
-        fs_reach: patch.fs_reach === undefined ? config.fs_reach : patch.fs_reach,
+        // Shallow-merged, like `safety` / `memory` / `nightly` / `skill_evolution`
+        // below: a patch carrying only `read` and `write` (what the web config
+        // editor sends) must not silently drop a hand-declared `workdir`. The
+        // whole-object replacements in this block are all scalars or arrays,
+        // which have no sub-keys to lose. Pass `workdir: ''` to clear it.
+        fs_reach:
+          patch.fs_reach === undefined
+            ? config.fs_reach
+            : { ...config.fs_reach, ...patch.fs_reach },
         dreaming: mergedDreaming,
         evolution_approval_mode: patch.evolution_approval_mode ?? config.evolution_approval_mode,
         skill_evolution: mergedSkillEvolution,
@@ -1023,6 +1187,9 @@ export class FilePersonalityRegistry implements PersonalityRegistry {
         memory: patch.memory === undefined ? config.memory : { ...config.memory, ...patch.memory },
         nightly:
           patch.nightly === undefined ? config.nightly : { ...config.nightly, ...patch.nightly },
+        voice:
+          patch.voice === undefined ? config.voice : mergeVoiceConfig(config.voice, patch.voice),
+        display: mergeDisplayConfig(config.display, patch.display),
       };
       // renderConfigYaml's safety emission is suppressed here (render with
       // `safety: undefined`) so we append exactly one safety block — never a
@@ -1175,6 +1342,96 @@ export class FilePersonalityRegistry implements PersonalityRegistry {
   }
 
   /**
+   * Write (overwrite) a personality's avatar image and point
+   * `display.avatar_url` at `avatarUrl` — the caller (the web-api route)
+   * computes that URL, since URL/mount-path shape is an HTTP concern this
+   * registry has no business knowing.
+   *
+   * `mimeType` MUST already be one of `AVATAR_MIME_TO_EXT`'s keys — the
+   * caller validates the upload's Content-Type before calling this, but the
+   * check is repeated here (throwing `INVALID_INPUT`) so this method is safe
+   * to call directly, not just safe behind a route that remembers to check
+   * first. The extension is derived from the validated mime type, never from
+   * a client-supplied filename, closing the extension-injection hole.
+   *
+   * At most one `avatar.<ext>` file exists per personality: a re-upload with
+   * a DIFFERENT extension than the stored one deletes the stale file first,
+   * so switching from a `.png` to a `.webp` avatar doesn't leave both behind.
+   * Built-ins are read-only — this throws for them, mirroring `update()`.
+   */
+  async writeAvatar(
+    id: string,
+    bytes: Uint8Array,
+    mimeType: string,
+    avatarUrl: string,
+  ): Promise<void> {
+    const ext = AVATAR_MIME_TO_EXT[mimeType];
+    if (!ext) {
+      throw new EthosError({
+        code: 'INVALID_INPUT',
+        cause: `Unsupported avatar image type "${mimeType}".`,
+        action: `Upload one of: ${Object.keys(AVATAR_MIME_TO_EXT).join(', ')}.`,
+      });
+    }
+    const existing = this.requireMutable(id);
+    const dir = this.dirOf(existing);
+    await this.removeStaleAvatarFiles(dir, ext);
+    await this.storage.write(join(dir, `avatar.${ext}`), bytes);
+    await this.update(id, { display: { avatar_url: avatarUrl } });
+  }
+
+  /**
+   * Read a personality's stored avatar bytes, its mime type, and the file's
+   * mtime (for the serving route's `ETag`/`Last-Modified`). Returns `null`
+   * when there is no `avatar.<ext>` file — including for an unknown id or a
+   * built-in — so the route can turn that straight into a clean 404 rather
+   * than distinguishing "no such personality" from "no avatar set".
+   */
+  async readAvatar(
+    id: string,
+  ): Promise<{ bytes: Uint8Array; mimeType: string; mtimeMs: number } | null> {
+    const described = this.describe(id);
+    if (!described) return null;
+    const dir = this.dirOf(described);
+    const entries = await this.storage.list(dir);
+    const fileName = entries.find((n) => AVATAR_FILENAME_RE.test(n));
+    if (!fileName) return null;
+    const path = join(dir, fileName);
+    const bytes = await this.storage.readBytes(path);
+    if (!bytes) return null;
+    const ext = fileName.slice('avatar.'.length);
+    const mimeType = AVATAR_EXT_TO_MIME[ext] ?? 'application/octet-stream';
+    const mtimeMs = (await this.storage.mtime(path)) ?? 0;
+    return { bytes, mimeType, mtimeMs };
+  }
+
+  /**
+   * Delete a personality's stored avatar file (if any) and clear
+   * `display.avatar_url` back to unset. A no-op (not an error) when no
+   * avatar was stored. Built-ins are read-only — this throws for them,
+   * mirroring `update()` / `deletePersonality()`.
+   */
+  async deleteAvatar(id: string): Promise<void> {
+    const existing = this.requireMutable(id);
+    const dir = this.dirOf(existing);
+    await this.removeStaleAvatarFiles(dir, null);
+    await this.update(id, { display: { avatar_url: '' } });
+  }
+
+  /** Remove every `avatar.<ext>` file in `dir` except `keepExt` (`null` keeps
+   *  none — used by `deleteAvatar`). Keeps "at most one avatar file per
+   *  personality" true across a re-upload with a different extension. */
+  private async removeStaleAvatarFiles(dir: string, keepExt: string | null): Promise<void> {
+    const entries = await this.storage.list(dir);
+    for (const name of entries) {
+      const match = AVATAR_FILENAME_RE.exec(name);
+      if (!match) continue;
+      if (keepExt !== null && match[1] === keepExt) continue;
+      await this.storage.remove(join(dir, name));
+    }
+  }
+
+  /**
    * Copy a built-in (or any other) personality directory into the user
    * dir under a new id. The duplicate's `name:` line is rewritten to
    * "<original> (copy)" so the editor opens with a distinct identity
@@ -1299,9 +1556,15 @@ export class FilePersonalityRegistry implements PersonalityRegistry {
   // Built-in loader
   // -------------------------------------------------------------------------
 
-  async loadBuiltins(): Promise<void> {
+  /**
+   * Loads built-in personalities. `dir`, when supplied, overrides the default
+   * location — used by callers (e.g. the desktop app's bundled main process)
+   * where `import.meta.dirname` no longer points at the source tree after
+   * bundling. Omitted, this is byte-identical to the original hardcoded path.
+   */
+  async loadBuiltins(dir?: string): Promise<void> {
     // import.meta.dirname is the extensions/personalities/src directory
-    const dataDir = join(import.meta.dirname, '..', 'data');
+    const dataDir = dir ?? join(import.meta.dirname, '..', 'data');
     await this.loadFromDirectory(dataDir);
     // Ensure researcher is the default if present
     if (this.personalities.has('researcher')) this.defaultId = 'researcher';
@@ -1312,16 +1575,21 @@ export class FilePersonalityRegistry implements PersonalityRegistry {
   // -------------------------------------------------------------------------
 
   private async loadOne(dir: string, id: string): Promise<void> {
-    // Fingerprint guard — invalidate when any of the three personality files change.
+    // Fingerprint guard — invalidate when any of the personality's inputs change.
     // mtime alone is enough: filesystems we run on (APFS / ext4 / NTFS) all
     // expose sub-millisecond mtime, so two writes within the same tick
     // is vanishingly unlikely for personality files (humans editing config).
+    // `skills/` is a DIRECTORY, and it is fingerprinted because `buildConfig`
+    // derives `skillsDirs` from its existence — without it, installing the
+    // first skill into a personality that had no `skills/` dir would never be
+    // seen until the process restarted.
     const fingerprint = await this.fileFingerprint([
       join(dir, 'config.yaml'),
       join(dir, 'SOUL.md'),
       join(dir, 'toolset.yaml'),
       join(dir, 'mcp.yaml'),
       join(dir, 'tools.yaml'),
+      join(dir, 'skills'),
     ]);
     if (this.fingerprintCache.get(dir) === fingerprint) return;
     this.fingerprintCache.set(dir, fingerprint);
@@ -1383,17 +1651,19 @@ export class FilePersonalityRegistry implements PersonalityRegistry {
         ? Number.parseInt(cfg.streamingTimeoutMs, 10)
         : undefined;
 
-    // fs_reach.read / fs_reach.write are comma-separated path lists.
-    // Substitutions (${ETHOS_HOME}, ${self}, ${CWD}) are resolved by
-    // the AgentLoop at turn construction time — the registry only
-    // surfaces the raw strings.
+    // fs_reach.read / fs_reach.write are comma-separated path lists;
+    // fs_reach.workdir is a single path. Substitutions (${ETHOS_HOME},
+    // ${self}, ${CWD}) are resolved by the AgentLoop at turn construction
+    // time — the registry only surfaces the raw strings.
     const fsReachRead = parseCsv(cfg['fs_reach.read']);
     const fsReachWrite = parseCsv(cfg['fs_reach.write']);
+    const fsReachWorkdir = cfg['fs_reach.workdir']?.trim() || undefined;
     const fsReach: PersonalityConfig['fs_reach'] | undefined =
-      fsReachRead || fsReachWrite
+      fsReachRead || fsReachWrite || fsReachWorkdir
         ? {
             ...(fsReachRead ? { read: fsReachRead } : {}),
             ...(fsReachWrite ? { write: fsReachWrite } : {}),
+            ...(fsReachWorkdir ? { workdir: fsReachWorkdir } : {}),
           }
         : undefined;
 
@@ -1427,6 +1697,8 @@ export class FilePersonalityRegistry implements PersonalityRegistry {
     const memoryConfig = buildMemoryConfig(cfg);
     const mcpExport = buildMcpExportConfig(cfg);
     const outboundPolicy = buildOutboundPolicy(cfg);
+    const voice = buildVoiceConfig(cfg);
+    const display = buildDisplayConfig(cfg);
 
     const model = buildModelConfig(cfg);
 
@@ -1461,6 +1733,8 @@ export class FilePersonalityRegistry implements PersonalityRegistry {
       ...(evolutionApprovalMode !== undefined
         ? { evolution_approval_mode: evolutionApprovalMode }
         : {}),
+      ...(voice !== undefined ? { voice } : {}),
+      ...(display !== undefined ? { display } : {}),
     };
 
     validateUnsafeCombinations(id, config);
@@ -1491,25 +1765,70 @@ export class FilePersonalityRegistry implements PersonalityRegistry {
 }
 
 // ---------------------------------------------------------------------------
+// Content fingerprint (model-visible ⟺ logged, Phase B, D8)
+// ---------------------------------------------------------------------------
+
+/**
+ * Read the six-path personality fingerprint inputs (D8) for content hashing
+ * — distinct from `fileFingerprint` above, which is mtime-based and only
+ * decides whether the registry should re-read a personality. Content hashing
+ * is genuinely new work, not a rename of what's already there (see
+ * plan/phases/model-visible-logged.md, "Repo areas touched").
+ *
+ * Exported as a free function, and also wrapped by
+ * `FilePersonalityRegistry.getContentFingerprint` (the `PersonalityRegistry`
+ * interface method). `packages/core` cannot import this package directly
+ * (ARCHITECTURE.md layer direction — core does not depend on extensions), so
+ * `context-assembly.ts` reaches this through the interface method on the
+ * `PersonalityRegistry` it already holds, never through this export.
+ *
+ * `skills/` is reported as presence only (`skillsDirPresent`), never its
+ * contents — hashing a directory's full contents is out of v1 scope (D8).
+ */
+export async function readPersonalityFingerprintSources(
+  storage: Storage,
+  dir: string,
+): Promise<PersonalityFingerprintSources> {
+  const [configSrc, soulSrc, toolsetSrc, mcpSrc, toolsSrc, skillsDirPresent] = await Promise.all([
+    storage.read(join(dir, 'config.yaml')),
+    storage.read(join(dir, 'SOUL.md')),
+    storage.read(join(dir, 'toolset.yaml')),
+    storage.read(join(dir, 'mcp.yaml')),
+    storage.read(join(dir, 'tools.yaml')),
+    storage.exists(join(dir, 'skills')),
+  ]);
+  return { soulSrc, configSrc, toolsetSrc, mcpSrc, toolsSrc, skillsDirPresent };
+}
+
+// ---------------------------------------------------------------------------
 // Factory
 // ---------------------------------------------------------------------------
 
 export async function createPersonalityRegistry(
-  storageOrOpts: Storage | { storage: Storage; userPersonalitiesDir?: string },
+  storageOrOpts:
+    | Storage
+    | { storage: Storage; userPersonalitiesDir?: string; builtinPersonalitiesDir?: string },
 ): Promise<FilePersonalityRegistry> {
   // Two accepted shapes: a bare Storage, or { storage, userPersonalitiesDir }
   // to enable CRUD. Storage is required either way — the composition root
   // injects it; the registry never falls back to raw disk.
+  //
+  // `builtinPersonalitiesDir` overrides where built-ins load from — needed by
+  // bundled callers (e.g. desktop's main process after electron-vite) where
+  // `import.meta.dirname` no longer resolves to the source tree. Omitted,
+  // this is byte-identical to the pre-existing default `loadBuiltins()` path.
   let storage: Storage;
   let userDir: string | undefined;
+  let builtinPersonalitiesDir: string | undefined;
   if (isStorageLike(storageOrOpts)) {
     storage = storageOrOpts;
   } else {
     storage = storageOrOpts.storage;
     userDir = storageOrOpts.userPersonalitiesDir;
+    builtinPersonalitiesDir = storageOrOpts.builtinPersonalitiesDir;
   }
   const registry = new FilePersonalityRegistry(storage, userDir);
-  await registry.loadBuiltins();
+  await registry.loadBuiltins(builtinPersonalitiesDir);
   return registry;
 }
 
@@ -1654,6 +1973,89 @@ function buildMemoryConfig(
     else options[subKey] = value;
   }
   return { provider, ...(Object.keys(options).length > 0 ? { options } : {}) };
+}
+
+/**
+ * Parse the dotted `voice.*` keys into `PersonalityConfig.voice`.
+ *
+ * Dotted keys, not a nested block: `config.yaml` is flat by design, the flat
+ * parser already reads `[\w.]+` keys, and every comparable field (`fs_reach.*`,
+ * `memory.options.*`, `nightly.judge.*`) uses the same shape. Adding `voice` to
+ * `NESTED_BLOCKS` would mean a second parse path, a second render path, and a
+ * raw-block-preservation dance like `safety`'s — for four scalars and a string
+ * map. The language map mirrors `memory.options.*`: any `voice.languages.<tag>`
+ * key becomes an entry.
+ *
+ *   voice.tts_provider: studio
+ *   voice.stt_provider: whisper-es
+ *   voice.realtime_provider: live
+ *   voice.tts_voice: af_bella
+ *   voice.tier: pipeline
+ *   voice.model: claude-haiku-4-5
+ *   voice.call_style: rings
+ *   voice.languages.es: ef_dora
+ *
+ * `voice.tts_provider` / `voice.stt_provider` / `voice.realtime_provider` name
+ * entries in the deployment's `voice.tts.providers.*` / `voice.stt.providers.*`
+ * / `voice.realtime.providers.*` rosters. They are kept verbatim — validating
+ * them here would mean this loader knew the machine's config, and a name this
+ * machine lacks is a fallback at resolution time (`selectTtsEntry` /
+ * `selectSttEntry`), not a load failure.
+ *
+ * `voice.provider` is accepted as the older spelling of `voice.tts_provider`
+ * (it shipped before a personality could name an STT engine). The explicit new
+ * key wins; the renderer only ever writes the new one, so a personality
+ * re-saved from either spelling carries one key, not two.
+ *
+ * An unknown `voice.tier` or `voice.call_style` is dropped rather than thrown
+ * on: a bad voice id should not make a personality unloadable — it falls back
+ * to the global voice, and to the operator/derived call treatment.
+ */
+function buildVoiceConfig(
+  cfg: Record<string, string>,
+): import('@ethosagent/types').PersonalityVoiceConfig | undefined {
+  const ttsProvider = cfg['voice.tts_provider'] || cfg['voice.provider'];
+  const sttProvider = cfg['voice.stt_provider'];
+  const realtimeProvider = cfg['voice.realtime_provider'];
+  const ttsVoice = cfg['voice.tts_voice'];
+  const tier = cfg['voice.tier'];
+  const model = cfg['voice.model'];
+  const callStyle = cfg['voice.call_style'];
+  const languages: Record<string, string> = {};
+  for (const [key, value] of Object.entries(cfg)) {
+    if (!key.startsWith('voice.languages.')) continue;
+    const tag = key.slice('voice.languages.'.length);
+    if (tag.length > 0 && value) languages[tag] = value;
+  }
+  const out: import('@ethosagent/types').PersonalityVoiceConfig = {
+    ...(ttsProvider ? { tts_provider: ttsProvider } : {}),
+    ...(sttProvider ? { stt_provider: sttProvider } : {}),
+    ...(realtimeProvider ? { realtime_provider: realtimeProvider } : {}),
+    ...(ttsVoice ? { tts_voice: ttsVoice } : {}),
+    ...(tier === 'pipeline' || tier === 'realtime' ? { tier } : {}),
+    ...(model ? { model } : {}),
+    ...(callStyle === 'liquid' || callStyle === 'orb' || callStyle === 'rings'
+      ? { call_style: callStyle }
+      : {}),
+    ...(Object.keys(languages).length > 0 ? { languages } : {}),
+  };
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+/**
+ * Parse the dotted `display.*` keys into `PersonalityConfig.display`.
+ *
+ * Same dotted-key convention as `voice` (see `buildVoiceConfig` above): a
+ * true nested block would mean a second parse path and a second render path
+ * for a single scalar. `display.avatar_url` is the one sub-key today.
+ *
+ *   display.avatar_url: /api/personalities/researcher/avatar
+ */
+function buildDisplayConfig(
+  cfg: Record<string, string>,
+): import('@ethosagent/types').PersonalityConfig['display'] | undefined {
+  const avatarUrl = cfg['display.avatar_url'];
+  return avatarUrl ? { avatar_url: avatarUrl } : undefined;
 }
 
 function buildOutboundPolicy(
@@ -1829,8 +2231,6 @@ function buildSafetyConfig(raw: Record<string, unknown>): PersonalitySafetyConfi
   const inj = raw.injectionDefense as Record<string, unknown> | undefined;
   if (inj) {
     const out: NonNullable<PersonalitySafetyConfig['injectionDefense']> = {};
-    const enabled = nestedBool(inj.enabled);
-    if (enabled !== undefined) out.enabled = enabled;
     const classifier = inj.classifier as Record<string, unknown> | undefined;
     if (classifier) {
       const alwaysCallLLM = nestedBool(classifier.alwaysCallLLM);
@@ -1951,6 +2351,8 @@ type RenderConfigInput = Omit<CreatePersonalityInput, 'id' | 'soulMd'> &
     | 'memory'
     | 'mcp_export'
     | 'outbound_policy'
+    | 'voice'
+    | 'display'
   >;
 
 function renderConfigYaml(input: RenderConfigInput): string {
@@ -1980,6 +2382,9 @@ function renderConfigYaml(input: RenderConfigInput): string {
   }
   if (input.fs_reach?.write !== undefined && input.fs_reach.write.length > 0) {
     lines.push(`fs_reach.write: ${input.fs_reach.write.join(', ')}`);
+  }
+  if (input.fs_reach?.workdir) {
+    lines.push(`fs_reach.workdir: ${input.fs_reach.workdir}`);
   }
   if (input.streamingTimeoutMs !== undefined) {
     lines.push(`streamingTimeoutMs: ${input.streamingTimeoutMs}`);
@@ -2066,6 +2471,30 @@ function renderConfigYaml(input: RenderConfigInput): string {
   }
   if (input.evolution_approval_mode !== undefined) {
     lines.push(`evolution_approval_mode: ${yamlScalar(input.evolution_approval_mode)}`);
+  }
+  if (input.voice !== undefined) {
+    const v = input.voice;
+    // Always the NEW spelling — a personality read from `voice.provider` is
+    // written back as `voice.tts_provider`, never both.
+    if (v.tts_provider !== undefined) {
+      lines.push(`voice.tts_provider: ${yamlScalar(v.tts_provider)}`);
+    }
+    if (v.stt_provider !== undefined) {
+      lines.push(`voice.stt_provider: ${yamlScalar(v.stt_provider)}`);
+    }
+    if (v.realtime_provider !== undefined) {
+      lines.push(`voice.realtime_provider: ${yamlScalar(v.realtime_provider)}`);
+    }
+    if (v.tts_voice !== undefined) lines.push(`voice.tts_voice: ${yamlScalar(v.tts_voice)}`);
+    if (v.tier !== undefined) lines.push(`voice.tier: ${v.tier}`);
+    if (v.model !== undefined) lines.push(`voice.model: ${yamlScalar(v.model)}`);
+    if (v.call_style !== undefined) lines.push(`voice.call_style: ${v.call_style}`);
+    for (const [tag, id] of Object.entries(v.languages ?? {})) {
+      lines.push(`voice.languages.${tag}: ${yamlScalar(id)}`);
+    }
+  }
+  if (input.display?.avatar_url !== undefined) {
+    lines.push(`display.avatar_url: ${yamlScalar(input.display.avatar_url)}`);
   }
   if (input.safety !== undefined && Object.keys(input.safety).length > 0) {
     lines.push('safety:');

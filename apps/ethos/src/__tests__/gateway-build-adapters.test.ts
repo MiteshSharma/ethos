@@ -1,6 +1,9 @@
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import type { EthosConfig } from '@ethosagent/config';
 import type { InboundMessage, PlatformAdapter } from '@ethosagent/types';
-import { describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { type AdapterModuleLoader, buildAdapters } from '../commands/gateway';
 
 // Phase 2 — multi-adapter instantiation.
@@ -286,5 +289,244 @@ describe('buildAdapters — multi-bot adapter loop (Phase 2)', () => {
       failingLoader,
     );
     expect(adapters).toEqual([]);
+  });
+});
+
+// SP-A — Slack boot wiring (plan/phases/slack-parity-multimodal.md, Part A).
+//
+// `SlackAdapterConfig` has accepted `defaultChannelMode`, `receiptReaction`,
+// `webUiBaseUrl`, `session`, `sessionUnfurl`, `kanban`, `kanbanUnfurl` and
+// `personalityUnfurl` since the adapter was written, but the construction site
+// passed none of them — unfurls, App Home session rows and the workspace
+// default channel mode silently degraded. This block is the regression guard
+// for exactly that failure mode: "built, but nobody passed it".
+describe('buildAdapters — Slack surface wiring (SP-A)', () => {
+  let stateDir: string;
+  let priorStateDir: string | undefined;
+
+  beforeAll(async () => {
+    // Point `ethosDir()` at a scratch dir: the session reader opens
+    // `sessions.db` and the kanban reader probes `teams/<name>/board.db`, and
+    // neither belongs in the developer's real `~/.ethos`.
+    priorStateDir = process.env.ETHOS_STATE_DIR;
+    stateDir = await mkdtemp(join(tmpdir(), 'ethos-slack-wiring-'));
+    process.env.ETHOS_STATE_DIR = stateDir;
+  });
+
+  afterAll(async () => {
+    if (priorStateDir === undefined) delete process.env.ETHOS_STATE_DIR;
+    else process.env.ETHOS_STATE_DIR = priorStateDir;
+    await rm(stateDir, { recursive: true, force: true });
+  });
+
+  const slackApp = (bind: { type: 'personality' | 'team'; name: string }) => ({
+    id: `sl-${bind.name}`,
+    botToken: 'xoxb',
+    appToken: 'xapp',
+    signingSecret: 's',
+    bind,
+  });
+
+  it('passes the per-app surface knobs and the public web URL to the adapter', async () => {
+    const adapters = await buildAdapters(
+      {
+        ...baseConfig,
+        // Not a Slack-specific key: the same public URL the OAuth redirect
+        // uses (`ETHOS_PUBLIC_URL` / `webBaseUrl`).
+        webBaseUrl: 'https://ethos.example.com',
+        slack: {
+          apps: [
+            {
+              ...slackApp({ type: 'personality', name: 'researcher' }),
+              defaultChannelMode: 'thread_follow',
+              receiptReaction: 'hourglass_flowing_sand',
+            },
+          ],
+        },
+      },
+      makeLoader(),
+    );
+
+    expect((adapters[0] as CapturedAdapter).capturedConfig).toMatchObject({
+      defaultChannelMode: 'thread_follow',
+      receiptReaction: 'hourglass_flowing_sand',
+      // Without this the adapter's `registerLinkEvents` returns early and no
+      // `link_shared` handler is ever registered.
+      webUiBaseUrl: 'https://ethos.example.com',
+    });
+  });
+
+  // SP-B1 — the bot allowlist has to survive the trip from config to adapter;
+  // an unwired key is a gate that silently never opens.
+  it('passes allowedBotIds through to the adapter', async () => {
+    const adapters = await buildAdapters(
+      {
+        ...baseConfig,
+        slack: {
+          apps: [
+            {
+              ...slackApp({ type: 'personality', name: 'researcher' }),
+              allowedBotIds: ['B_DEPLOY'],
+            },
+          ],
+        },
+      },
+      makeLoader(),
+    );
+
+    expect((adapters[0] as CapturedAdapter).capturedConfig).toMatchObject({
+      allowedBotIds: ['B_DEPLOY'],
+    });
+  });
+
+  // SP-B3 — the long-answer fallback is on by default, so the only thing this
+  // key has to do is arrive: `0` is the off switch and must not be dropped as
+  // a falsy value on the way through.
+  it('passes longReplyThresholdChars: 0 through to the adapter', async () => {
+    const adapters = await buildAdapters(
+      {
+        ...baseConfig,
+        slack: {
+          apps: [
+            {
+              ...slackApp({ type: 'personality', name: 'researcher' }),
+              longReplyThresholdChars: 0,
+            },
+          ],
+        },
+      },
+      makeLoader(),
+    );
+
+    expect((adapters[0] as CapturedAdapter).capturedConfig).toMatchObject({
+      longReplyThresholdChars: 0,
+    });
+  });
+
+  it('omits the knobs the operator did not set, leaving adapter defaults in charge', async () => {
+    const adapters = await buildAdapters(
+      { ...baseConfig, slack: { apps: [slackApp({ type: 'personality', name: 'researcher' })] } },
+      makeLoader(),
+    );
+
+    const cfg = (adapters[0] as CapturedAdapter).capturedConfig;
+    expect(cfg).not.toHaveProperty('defaultChannelMode');
+    expect(cfg).not.toHaveProperty('receiptReaction');
+    expect(cfg).not.toHaveProperty('webUiBaseUrl');
+    expect(cfg).not.toHaveProperty('allowedBotIds');
+  });
+
+  it('wires session + personality-unfurl readers on every Slack bot', async () => {
+    const adapters = await buildAdapters(
+      { ...baseConfig, slack: { apps: [slackApp({ type: 'personality', name: 'researcher' })] } },
+      makeLoader(),
+    );
+
+    const cfg = (adapters[0] as CapturedAdapter).capturedConfig as {
+      session: { recentSessions: () => Promise<unknown[]> };
+      sessionUnfurl: { lookupSession: (id: string) => Promise<unknown> };
+      personalityUnfurl: { lookupPersonality: (id: string) => Promise<unknown> };
+    };
+    // Live objects, not just truthy fields — call each one against the empty
+    // scratch state dir.
+    expect(await cfg.session.recentSessions()).toEqual([]);
+    expect(await cfg.sessionUnfurl.lookupSession('no-such-session')).toBeNull();
+    expect(await cfg.personalityUnfurl.lookupPersonality('no-such-personality')).toBeNull();
+  });
+
+  // CHS-001 — the slash / App Home allowlist. `checkMessage` never sees these
+  // surfaces, so the trust set has to be handed to the adapter here, derived
+  // from the message surface's own allowlist so the two cannot disagree.
+  it('derives allowedUsers from channel_filter.slack when allowedSlashUsers is unset', async () => {
+    const adapters = await buildAdapters(
+      {
+        ...baseConfig,
+        channelFilter: {
+          slack: { ownerUserId: 'U-owner', recipientAllowlist: ['U-teammate'] },
+        },
+        slack: { apps: [slackApp({ type: 'personality', name: 'researcher' })] },
+      },
+      makeLoader(),
+    );
+
+    expect((adapters[0] as CapturedAdapter).capturedConfig).toMatchObject({
+      allowedUsers: ['U-owner', 'U-teammate'],
+    });
+  });
+
+  it('lets allowedSlashUsers narrow the channel_filter allowlist, never widen it', async () => {
+    const adapters = await buildAdapters(
+      {
+        ...baseConfig,
+        channelFilter: {
+          slack: { ownerUserId: 'U-owner', recipientAllowlist: ['U-teammate'] },
+        },
+        slack: {
+          apps: [
+            {
+              ...slackApp({ type: 'personality', name: 'researcher' }),
+              // `U-stranger` cannot message the bot, so it cannot drive the
+              // slash surface either — it is dropped, not added.
+              allowedSlashUsers: ['U-owner', 'U-stranger'],
+            },
+          ],
+        },
+      },
+      makeLoader(),
+    );
+
+    expect((adapters[0] as CapturedAdapter).capturedConfig).toMatchObject({
+      allowedUsers: ['U-owner'],
+    });
+  });
+
+  it('passes an empty allowedUsers (deny-all) when no channel_filter.slack exists', async () => {
+    const adapters = await buildAdapters(
+      { ...baseConfig, slack: { apps: [slackApp({ type: 'personality', name: 'researcher' })] } },
+      makeLoader(),
+    );
+
+    expect((adapters[0] as CapturedAdapter).capturedConfig).toMatchObject({ allowedUsers: [] });
+  });
+
+  it('does not treat channel_filter.slack.enabled: false as an open slash surface', async () => {
+    const adapters = await buildAdapters(
+      {
+        ...baseConfig,
+        channelFilter: { slack: { enabled: false } },
+        slack: { apps: [slackApp({ type: 'personality', name: 'researcher' })] },
+      },
+      makeLoader(),
+    );
+
+    expect((adapters[0] as CapturedAdapter).capturedConfig).toMatchObject({ allowedUsers: [] });
+  });
+
+  it('wires kanban readers for team-bound bots only', async () => {
+    const adapters = await buildAdapters(
+      {
+        ...baseConfig,
+        slack: {
+          apps: [
+            slackApp({ type: 'team', name: 'eng' }),
+            slackApp({ type: 'personality', name: 'researcher' }),
+          ],
+        },
+      },
+      makeLoader(),
+    );
+
+    const team = (adapters[0] as CapturedAdapter).capturedConfig as {
+      kanban: { listOpenTickets: () => Promise<unknown[]> };
+      kanbanUnfurl: { lookupTicket: (id: string) => Promise<unknown> };
+    };
+    // No board on disk for this team yet — degrade to empty rather than
+    // creating one as a side effect of booting.
+    expect(await team.kanban.listOpenTickets()).toEqual([]);
+    expect(await team.kanbanUnfurl.lookupTicket('T-1')).toBeNull();
+
+    const personality = (adapters[1] as CapturedAdapter).capturedConfig;
+    expect(personality).not.toHaveProperty('kanban');
+    expect(personality).not.toHaveProperty('kanbanUnfurl');
   });
 });

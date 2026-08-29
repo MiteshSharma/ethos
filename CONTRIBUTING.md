@@ -67,6 +67,17 @@ Defined in `packages/types/src/personality.ts`. Any PR adding a top-level field 
 
 The schema is intentionally narrow. Voice modes, emotion tags, mood files, and label or response templates are NOT personality concerns — they belong in skills or per-channel adapter config.
 
+One exception was granted deliberately, and it is the shape every future request in this category will be measured against: `voice` (voice V1a, eng-review D2) carries a personality's TTS voice id, language→voice map, tier preference, and fast-lane model. It survived review because a deployment chooses the voice *provider* while the personality chooses how it *sounds* — identity, like `model`, not a setting. Voice *modes*, VAD tuning, and per-channel speech affordances stay out, and `personality-field-count.test.ts` now fails if a second speech/audio-shaped top-level field appears.
+
+**Amended (personality-presentation):** the same reasoning extends from *sounds* to *presents*. `voice.call_style` — which treatment the Call Stage draws for this personality — is identity by the same test: a personality is not only its tools and its plugins, it is also how it looks and feels. Two deployments of the same personality would not reasonably disagree about which shape *is* it, the way they might disagree about which STT engine the machine can afford to run.
+
+Two limits keep the amendment narrow, and both are mechanical:
+
+1. **Sub-key, not a field.** Presentation keys attach to an identity block that already exists (`voice`). `.personality-field-count` does not move, and a PR that moves it is back under the full bump procedure.
+2. **Presentation, not per-channel affordance.** How a personality presents itself is one answer everywhere. A key that would let the same personality render differently on Slack than on Telegram, or that tunes a transport (VAD, endpointing, barge thresholds, rosters, credentials), is still refused — that is the operator's, in `~/.ethos/config.yaml` or adapter config.
+
+The test for a new presentation key: *would changing it make this feel like a different agent?* (identity — arguable) versus *could two deployments of the same personality reasonably disagree about it?* (setting — refused).
+
 ### Plugin contract
 
 Defined in `packages/plugin-contract/src/`. Any breaking change (field

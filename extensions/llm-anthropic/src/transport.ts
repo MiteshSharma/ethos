@@ -1,6 +1,6 @@
 import type Anthropic from '@anthropic-ai/sdk';
+import { estimateCost } from '@ethosagent/pricing';
 import type { CompletionChunk } from '@ethosagent/types';
-import { estimateCost } from './index';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -119,6 +119,21 @@ export async function* streamAnthropicMessages(
 
         case 'message_delta': {
           const outputTokens = event.usage?.output_tokens ?? 0;
+          // B2 — the server-assigned request id. On a STREAMING call the SDK
+          // does not expose `_request_id` on anything we hold: that property is
+          // attached to decoded JSON response bodies (the non-streaming
+          // `messages.create` path). The streaming equivalent is
+          // `MessageStream.request_id`, a typed public getter over the
+          // `request-id` response header — no cast needed, unlike the cache
+          // token fields read in `message_start`. It is populated when the
+          // response connects, so it is set by the time this chunk is built.
+          const providerRequestId = stream.request_id ?? undefined;
+          const costEstimate = estimateCost(params.model, {
+            inputTokens,
+            outputTokens,
+            cacheReadTokens,
+            cacheCreationTokens,
+          });
           yield {
             type: 'usage',
             usage: {
@@ -126,16 +141,12 @@ export async function* streamAnthropicMessages(
               outputTokens,
               cacheReadTokens,
               cacheCreationTokens,
-              estimatedCostUsd: estimateCost(
-                params.model,
-                inputTokens,
-                outputTokens,
-                cacheReadTokens,
-                cacheCreationTokens,
-              ),
+              estimatedCostUsd: costEstimate.costUsd,
               requestTokens,
             },
             metadata: {},
+            costBasis: costEstimate.basis,
+            ...(providerRequestId ? { providerRequestId } : {}),
           };
           if (event.delta.stop_reason) {
             yield { type: 'done', finishReason: toFinishReason(event.delta.stop_reason) };

@@ -1,6 +1,8 @@
 import { join } from 'node:path';
 import {
+  type CharacterSheetBoundary,
   type CharacterSheetModelFit,
+  type CharacterSheetScriptSurface,
   type CreatePersonalityInput,
   type DescribedPersonality,
   type FilePersonalityRegistry,
@@ -10,7 +12,7 @@ import {
   type UpdatePersonalityPatch,
 } from '@ethosagent/personalities';
 import { draftExpressionUpdate, draftSoulSplit } from '@ethosagent/skill-evolver';
-import type { PersonalitySkillRecord, SkillsLibrary } from '@ethosagent/skills';
+import type { PersonalitySkillRecord, SkillsInjector, SkillsLibrary } from '@ethosagent/skills';
 import { type McpJsonStore, mcpTokenSecretRef } from '@ethosagent/tools-mcp';
 import {
   EthosError,
@@ -74,12 +76,41 @@ export interface PersonalitiesServiceOptions {
    */
   refresh?: () => Promise<void>;
   /**
+   * The live `SkillsInjector` from wiring — backs `renderers()`. It resolves
+   * against the LOOP's personality registry (a different instance from
+   * `personalities` above), which is why `refreshLoopPersonalities` exists.
+   * Absent → `renderers()` returns `[]` (tests, onboarding, deployments with
+   * no loop).
+   */
+  skillsInjector?: SkillsInjector;
+  /**
+   * `CreateAgentLoopResult.refreshPersonalities` — reloads the LOOP registry
+   * the injector reads. Awaited in `renderers()` so a personality edited on
+   * disk (e.g. a `skills/` dir just created) is seen without a restart.
+   */
+  refreshLoopPersonalities?: () => Promise<void>;
+  /**
    * Lane 6 (D5) — compute the arithmetic model-fit verdict for a personality.
    * A closure over wiring's `resolvePersonalityModelFit` (the service never
    * sees the tool registry or provider config). Absent, resolving `null`, or
    * throwing → the sheet renders without the `## Model fit` section.
    */
   modelFit?: (personalityId: string) => Promise<CharacterSheetModelFit | null>;
+  /**
+   * tools-as-code-api Lane G — the script-callable surface for the sheet's
+   * `Script-callable (run_code)` line. A closure over core's
+   * `scriptCallableFor` against the live tool registry (same derivation the
+   * ScriptToolBridge enforces). Absent, resolving `null`, or throwing → the
+   * sheet renders without the line.
+   */
+  scriptSurface?: (personalityId: string) => Promise<CharacterSheetScriptSurface | null>;
+  /**
+   * §4.7 — declared network reach for the sheet's `## Boundary` section. A
+   * closure over core's `toolsDeclaringNetwork` against the live tool registry.
+   * Absent, resolving `null`, or throwing → the section renders without an
+   * inapplicability verdict for reach it cannot see.
+   */
+  boundary?: (personalityId: string) => Promise<CharacterSheetBoundary | null>;
 }
 
 export class PersonalitiesService {
@@ -92,6 +123,18 @@ export class PersonalitiesService {
       nextCursor: null,
       defaultId: this.opts.personalities.getDefault().id,
     };
+  }
+
+  /**
+   * Does this id resolve, after a disk refresh?
+   *
+   * For validating a reference to a personality where the caller does not want
+   * the personality itself — the wake-route editor, which must refuse a route
+   * naming nothing rather than let it fail silently in a room later.
+   */
+  async exists(id: string): Promise<boolean> {
+    await this.opts.refresh?.();
+    return this.opts.personalities.describe(id) !== null;
   }
 
   async get(
@@ -126,10 +169,41 @@ export class PersonalitiesService {
         modelFit = undefined;
       }
     }
+    // Lane G — same fail-soft posture as modelFit: no seam, no line.
+    let scriptSurface: CharacterSheetScriptSurface | undefined;
+    if (this.opts.scriptSurface) {
+      try {
+        scriptSurface = (await this.opts.scriptSurface(id)) ?? undefined;
+      } catch {
+        scriptSurface = undefined;
+      }
+    }
+    // §4.7 — declared network reach for the `## Boundary` section. Same
+    // fail-soft posture as the seams above: no seam, no inapplicability claim.
+    let boundary: CharacterSheetBoundary | undefined;
+    if (this.opts.boundary) {
+      try {
+        boundary = (await this.opts.boundary(id)) ?? undefined;
+      } catch {
+        boundary = undefined;
+      }
+    }
+    // skill-declared-renderers Lane E — reuse `renderers()` rather than a second
+    // path to the injector, so the sheet's claim and the RPC the web renderer
+    // gates on are literally the same call. Already fail-closed to `[]`.
+    const { renderers } = await this.renderers(id);
     const dataDir = this.opts.dataDir;
     if (!dataDir) {
       return {
-        markdown: renderCharacterSheet(described.config, soulMd, undefined, modelFit),
+        markdown: renderCharacterSheet(
+          described.config,
+          soulMd,
+          undefined,
+          modelFit,
+          scriptSurface,
+          renderers,
+          boundary,
+        ),
         posture: null,
       };
     }
@@ -142,7 +216,15 @@ export class PersonalitiesService {
       ...(this.opts.dockerBuildable === false ? { dockerBuildable: false } : {}),
     });
     return {
-      markdown: renderCharacterSheet(described.config, soulMd, { posture }, modelFit),
+      markdown: renderCharacterSheet(
+        described.config,
+        soulMd,
+        { posture },
+        modelFit,
+        scriptSurface,
+        renderers,
+        boundary,
+      ),
       posture,
     };
   }
@@ -209,9 +291,73 @@ export class PersonalitiesService {
     await this.opts.personalities.deletePersonality(id);
   }
 
+  // ---------------------------------------------------------------------------
+  // Avatar — thin pass-through to the registry, which owns the directory
+  // layout and the mime↔extension mapping. This service's only job is the
+  // one thing the registry has no business knowing: the served URL shape.
+  // ---------------------------------------------------------------------------
+
+  /** Write (overwrite) a personality's avatar and point `display.avatar_url`
+   *  at the serving route. `mimeType` must already be validated by the
+   *  caller (the route) against the allowlist. */
+  async writeAvatar(
+    id: string,
+    bytes: Uint8Array,
+    mimeType: string,
+  ): Promise<{ avatarUrl: string }> {
+    this.requirePersonality(id);
+    const avatarUrl = `/api/personalities/${id}/avatar`;
+    await this.opts.personalities.writeAvatar(id, bytes, mimeType, avatarUrl);
+    return { avatarUrl };
+  }
+
+  /** Read a personality's stored avatar bytes + mime type + mtime. Returns
+   *  `null` when unset — never throws for "no avatar", since that's the
+   *  serving route's clean-404 case, not an error. */
+  async readAvatar(
+    id: string,
+  ): Promise<{ bytes: Uint8Array; mimeType: string; mtimeMs: number } | null> {
+    return this.opts.personalities.readAvatar(id);
+  }
+
+  /** Delete a personality's stored avatar and clear `display.avatar_url`. */
+  async deleteAvatar(id: string): Promise<void> {
+    this.requirePersonality(id);
+    await this.opts.personalities.deleteAvatar(id);
+  }
+
   async duplicate(id: string, newId: string): Promise<{ personality: Personality }> {
     const created = await this.opts.personalities.duplicate(id, newId);
     return { personality: toWire(created) };
+  }
+
+  /**
+   * Renderer capabilities the personality's resolved skill set declares
+   * (`ethos.renders`). Derived by the live `SkillsInjector` — the same
+   * eligibility decision that builds the prompt, so what a personality is
+   * TAUGHT and what it may RENDER cannot drift apart.
+   *
+   * Fail-closed by construction: no injector wired, an unknown personality, or
+   * a throwing derivation all yield `[]`, which every surface renders as a
+   * plain code block. A chart that appears a beat late is fine; a chart that
+   * appears for a personality without the skill is not.
+   */
+  async renderers(id: string): Promise<{ renderers: string[] }> {
+    const injector = this.opts.skillsInjector;
+    if (!injector) return { renderers: [] };
+    try {
+      // Two registries, both refreshed: this service reads its own (to reject an
+      // unknown id — `resolveSkills` would otherwise silently fall back to the
+      // DEFAULT personality's skills), while the injector closes over the LOOP's.
+      // Refreshing the loop's is what makes a freshly installed skills/ dir
+      // visible without a restart.
+      await this.opts.refresh?.();
+      await this.opts.refreshLoopPersonalities?.();
+      if (!this.opts.personalities.describe(id)) return { renderers: [] };
+      return { renderers: await injector.resolveRenderers(id) };
+    } catch {
+      return { renderers: [] };
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -632,7 +778,11 @@ function toWire(d: DescribedPersonality): Personality {
     mcp_servers: c.mcp_servers ?? null,
     plugins: c.plugins ?? null,
     fs_reach: c.fs_reach
-      ? { read: c.fs_reach.read ?? null, write: c.fs_reach.write ?? null }
+      ? {
+          read: c.fs_reach.read ?? null,
+          write: c.fs_reach.write ?? null,
+          workdir: c.fs_reach.workdir ?? null,
+        }
       : null,
     ...(c.dreaming
       ? {
@@ -651,7 +801,28 @@ function toWire(d: DescribedPersonality): Personality {
       ? { safety: { approvalMode: c.safety.approvalMode } }
       : {}),
     ...(c.memory?.provider !== undefined ? { memory: { provider: c.memory.provider } } : {}),
+    ...(c.display?.avatar_url !== undefined
+      ? { display: { avatar_url: c.display.avatar_url } }
+      : {}),
     ...(c.nightly !== undefined ? { nightly: c.nightly } : {}),
+    // Every sub-key the editor writes, echoed back so it can populate its form.
+    // A sub-key the editor can WRITE but not READ is one a save wipes.
+    ...(c.voice !== undefined && Object.keys(c.voice).length > 0
+      ? {
+          voice: {
+            ...(c.voice.tts_provider !== undefined ? { tts_provider: c.voice.tts_provider } : {}),
+            ...(c.voice.stt_provider !== undefined ? { stt_provider: c.voice.stt_provider } : {}),
+            ...(c.voice.realtime_provider !== undefined
+              ? { realtime_provider: c.voice.realtime_provider }
+              : {}),
+            ...(c.voice.tts_voice !== undefined ? { tts_voice: c.voice.tts_voice } : {}),
+            ...(c.voice.call_style !== undefined ? { call_style: c.voice.call_style } : {}),
+            ...(c.voice.tier !== undefined ? { tier: c.voice.tier } : {}),
+            ...(c.voice.model !== undefined ? { model: c.voice.model } : {}),
+            ...(c.voice.languages !== undefined ? { languages: c.voice.languages } : {}),
+          },
+        }
+      : {}),
     system: d.builtin && SYSTEM_PERSONALITY_IDS.has(c.id),
     builtin: d.builtin,
     version: 1,

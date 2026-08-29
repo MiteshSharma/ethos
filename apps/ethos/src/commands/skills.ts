@@ -3,6 +3,9 @@ import { mkdir, open, readdir, readFile, rename, rm, stat, unlink } from 'node:f
 import { dirname, join, relative } from 'node:path';
 import { createInterface } from 'node:readline';
 import { ethosDir } from '@ethosagent/config';
+import { bundledSkillsSource, checkRequirements, UniversalScanner } from '@ethosagent/skills';
+import { isSafePathSegment } from '@ethosagent/storage-fs';
+import { EthosError, type Skill } from '@ethosagent/types';
 import {
   canInstall,
   deriveTier,
@@ -10,10 +13,7 @@ import {
   scanPluginCode,
   scanSkillMd,
   type TrustTier,
-} from '@ethosagent/safety-scanner';
-import { bundledSkillsSource, checkRequirements, UniversalScanner } from '@ethosagent/skills';
-import { isSafePathSegment } from '@ethosagent/storage-fs';
-import { EthosError, type Skill } from '@ethosagent/types';
+} from '@ethosagent/wiring/security-kernel';
 import { writeJson } from '../json-output';
 import { getStorage } from '../wiring';
 
@@ -86,6 +86,7 @@ export async function runSkills(args: string[]): Promise<void> {
 
 async function installSkill(slug: string, yesFlag = false): Promise<void> {
   const dir = skillsRoot();
+  printSkillConsequence();
   console.log(
     `${c.dim}Installing ${c.reset}${c.bold}${slug}${c.reset}${c.dim} via clawhub to ${dir}...${c.reset}\n`,
   );
@@ -118,8 +119,9 @@ async function installSkill(slug: string, yesFlag = false): Promise<void> {
   console.log(`\n${c.green}✓ Installed ${slug}.${c.reset}`);
 }
 
-async function updateOne(slug: string, yesFlag = false): Promise<void> {
+async function updateOne(slug: string, yesFlag = false, announce = true): Promise<void> {
   const dir = skillsRoot();
+  if (announce) printSkillConsequence();
   console.log(`${c.dim}Updating ${c.reset}${c.bold}${slug}${c.reset}${c.dim}...${c.reset}\n`);
   try {
     // clawhub treats `install` of an existing slug as an update.
@@ -157,8 +159,9 @@ async function updateAll(yesFlag = false): Promise<void> {
     console.log(`${c.dim}No skills installed.${c.reset}`);
     return;
   }
+  printSkillConsequence();
   for (const slug of slugs) {
-    await updateOne(slug, yesFlag);
+    await updateOne(slug, yesFlag, false);
   }
 }
 
@@ -257,6 +260,36 @@ async function listSkills(args: string[] = []): Promise<void> {
     }
     console.log();
   }
+}
+
+// ---------------------------------------------------------------------------
+// The operator consequence — shown before the install, not after
+// ---------------------------------------------------------------------------
+
+/**
+ * §4.7 / G5 — the consequence sentence at the moment the operator takes the
+ * risk on. A skill is instructions plus scripts handed to an agent that already
+ * holds the user's shell, files, and keys; installing one is the same class of
+ * decision as installing a plugin, one indirection removed.
+ *
+ * Do not soften this, and do not let it imply the scanner is a boundary.
+ */
+export const SKILL_CONSEQUENCE =
+  'Installing a skill is equivalent to running arbitrary code as your user.';
+
+function printSkillConsequence(): void {
+  console.log(`\n${c.bold}What installing a skill means${c.reset}`);
+  console.log(`  ${SKILL_CONSEQUENCE}`);
+  console.log(
+    `  ${c.dim}Your agent reads its instructions and runs its scripts with your files,${c.reset}`,
+  );
+  console.log(
+    `  ${c.dim}your environment, and your API keys. The safety scan below is a static${c.reset}`,
+  );
+  console.log(
+    `  ${c.dim}pre-install read of the source: advisory only. It sandboxes nothing and${c.reset}`,
+  );
+  console.log(`  ${c.dim}it can be evaded.${c.reset}\n`);
 }
 
 // ---------------------------------------------------------------------------

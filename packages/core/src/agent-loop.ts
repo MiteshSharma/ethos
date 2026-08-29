@@ -1,12 +1,15 @@
 import type {
   AgentEvent,
   AgentSafety,
+  ContentStore,
   ContextEngineLLMHandle,
   ContextEngineRegistry,
   ContextInjector,
+  ContextLog,
   DryRunToolPlan,
   HookRegistry,
   LLMProvider,
+  Logger,
   MemoryProvider,
   PersonalityRegistry,
   RequestDumpStore,
@@ -14,17 +17,23 @@ import type {
   SteerSink,
   Storage,
   ToolRegistry,
+  VoiceTurnOrigin,
 } from '@ethosagent/types';
-import type { IdenticalStreak } from './agent-loop/budgets';
-import { checkTurnBudgets, updateDenialStreak, updateIdenticalStreak } from './agent-loop/budgets';
+import { createApprovalPostureGuard } from './agent-loop/approval-posture';
+import { checkTurnBudgets, updateDenialStreak } from './agent-loop/budgets';
 import { compactSession, type ManualCompactionResult } from './agent-loop/manual-compact';
 import { applyOverflowRetry } from './agent-loop/overflow';
 import { applySamplingDefaults, type ModelSamplingDefaults } from './agent-loop/sampling';
 import { assembleContext } from './agent-loop/stages/context-assembly';
+import {
+  createTurnBudgetCounters,
+  recordToolCallForBudgets,
+} from './agent-loop/stages/per-call-enforcement';
+import { ScriptToolBridge } from './agent-loop/stages/script-tool-bridge';
 import type { StreamStepDeps } from './agent-loop/stages/stream-step';
 import { streamStep } from './agent-loop/stages/stream-step';
 import { processTools } from './agent-loop/stages/tool-processing';
-import { finalizeTurn } from './agent-loop/stages/turn-finalizer';
+import { createTurnUsage, finalizeTurn, flushTurnUsage } from './agent-loop/stages/turn-finalizer';
 import { setupTurn } from './agent-loop/stages/turn-setup';
 import type { LoopDeps } from './agent-loop/turn-context';
 import { buildTurnEndCtx, maybeConsolidateAtTurnEnd } from './agent-loop/turn-end';
@@ -149,6 +158,14 @@ export interface AgentLoopConfig {
    * record of each LLM request/response for offline analysis and debugging.
    */
   requestDumpStore?: RequestDumpStore;
+  /** Model-visible ⟺ logged (Phase B, plan/phases/model-visible-logged.md) —
+   *  content-addressed blob store for Tier A/B context sections. Optional
+   *  together with `contextLog`: unset either one and context-assembly's
+   *  emit-on-change write path is a no-op. */
+  contentStore?: ContentStore;
+  /** Write-only log of which content hash was in effect per context section,
+   *  emitted on change only. See `contentStore`. */
+  contextLog?: ContextLog;
   /** v2.2 — Callback to emit tool invocation metrics to the diagnostic store.
    *  Wiring provides this; core never imports DiagnosticStore directly. */
   onToolMetric?: (opts: {
@@ -176,6 +193,9 @@ export interface AgentLoopConfig {
   } | null>;
   /** Injected safety bundle — injection defense, redaction, and scoped storage. */
   safety: AgentSafety;
+  /** Library output sink (Law 10). Carries the once-per-loop `ungated`
+   *  approval-posture notice; omitted → the framework stays silent. */
+  logger?: Logger;
   options?: {
     maxIterations?: number;
     historyLimit?: number;
@@ -233,6 +253,12 @@ export interface RunOptions {
   agentId?: string;
   /** Root session key for background-job containment; threaded to ToolContext.rootSessionKey. */
   rootSessionKey?: string;
+  /**
+   * D22 (pi-delegation plan) — background job id, threaded to ToolContext.jobId
+   * verbatim (no fallback, unlike rootSessionKey). Stamped by
+   * `BackgroundExecutor.runOne`; absent for foreground turns.
+   */
+  jobId?: string;
   /** Origin of this run (`platform:chatId` for channel turns). Threaded to `ToolContext.origin`. Generic — not goal-specific. */
   origin?: string;
   a2aDelegation?: { traceId: string; depth: number; reserveOutbound: () => boolean }; // A2A runner sets this servicing an inbound task → `ToolContext.a2aDelegation` (plan §P8).
@@ -256,6 +282,17 @@ export interface RunOptions {
    * Consumed once; does not persist across runs.
    */
   tierOverride?: import('@ethosagent/types').ModelTierName;
+  /**
+   * Route THIS run to a named model, whatever the personality and the tiers
+   * resolve to. Top rung of the routing ladder: explicit override >
+   * `tierOverride` > the personality's configured model > deployment default.
+   *
+   * Generic on purpose — core never learns WHY a surface pinned the model. The
+   * voice stack sets it so a spoken lane answers on a fast model instead of the
+   * agentic default (latency decision L5), but the field says nothing about
+   * voice and any surface needing one turn on a specific model may use it.
+   */
+  modelOverride?: string;
   /** Opaque user id (from IdentityMap). When present, USER.md is read from `user:<userId>` scope. */
   userId?: string;
   dryRun?: boolean;
@@ -270,12 +307,26 @@ export interface RunOptions {
    * declared `allowedTools` can never escalate beyond the personality allowlist.
    */
   toolsetNarrow?: string[];
+  /**
+   * Surface-level exclusion — tool names that must neither appear in the tool
+   * definitions nor execute. Independent of `toolsetNarrow`: narrow intersects
+   * the personality toolset, exclude subtracts unconditionally and defeats
+   * `alwaysInclude`. Set by the surface, never by the personality.
+   */
+  toolsetExclude?: string[];
   /** Override the per-turn tool-call cap for this run only (goal runs raise it; default applies when absent). */
   maxToolCallsPerTurn?: number;
   /** Override the per-tool-name repeat cap for this run only (goal runs raise it; default applies when absent). */
   maxIdenticalToolCalls?: number;
   /** When true, bypass safety-watcher halts for this run (opt-in, dangerous; caps still apply). */
   allowDangerousToolCalls?: boolean;
+  /** Set when this turn's text is a transcript of speech (voice V1a, D16).
+   *  Effects are message-level only — the system prompt is untouched, so
+   *  `prompt-prefix-stability` holds for a session mixing typed and spoken
+   *  turns. See `./voice-origin` (the annotation, rendered alongside the
+   *  `<attachments>` audio marker) and `withSpokenConfirmation` in
+   *  `@ethosagent/wiring` (the gate it reaches via `before_tool_call`). */
+  voiceOrigin?: VoiceTurnOrigin;
 }
 
 // ---------------------------------------------------------------------------
@@ -323,6 +374,9 @@ export class AgentLoop {
   readonly clarifyBridge?: ClarifyBridge;
   /** Optional request dump store for full LLM request/response recording. */
   private readonly requestDumpStore?: import('@ethosagent/types').RequestDumpStore;
+  /** Model-visible ⟺ logged (Phase B) — see AgentLoopConfig.contentStore/contextLog. */
+  private readonly contentStore?: ContentStore;
+  private readonly contextLog?: ContextLog;
   /** Phase 3 — team id stamped onto ToolContext when loop runs inside a team. */
   private readonly teamId?: string;
   /** Context-engine LLM handle — preferred over engine-constructor injection. */
@@ -335,6 +389,8 @@ export class AgentLoop {
   /** v2.2 — Pre-turn credential check callback. */
   private readonly credentialCheck?: AgentLoopConfig['credentialCheck'];
   private readonly safety: AgentSafety;
+  /** G4 — see `agent-loop/approval-posture.ts`. Latches after its first run. */
+  private readonly checkApprovalPosture: () => void;
   /** Per-session accumulated spend in USD. Keyed by sessionKey. Reset via resetSessionCost(). */
   private readonly sessionCosts = new Map<string, number>();
   /** FW-28 — per-session mtime registry. Keyed by sessionKey → (absPath → record). */
@@ -377,11 +433,14 @@ export class AgentLoop {
     if (config.teamId) this.teamId = config.teamId;
     if (config.clarifyBridge) this.clarifyBridge = config.clarifyBridge;
     if (config.requestDumpStore) this.requestDumpStore = config.requestDumpStore;
+    if (config.contentStore) this.contentStore = config.contentStore;
+    if (config.contextLog) this.contextLog = config.contextLog;
     if (config.mcpPolicy) this.mcpPolicy = config.mcpPolicy;
     if (config.documentExtractors) this.documentExtractors = config.documentExtractors;
     if (config.onToolMetric) this.onToolMetric = config.onToolMetric;
     if (config.credentialCheck) this.credentialCheck = config.credentialCheck;
     this.safety = config.safety;
+    this.checkApprovalPosture = createApprovalPostureGuard(this.safety, this.hooks, config.logger);
     this.contextEngines = config.contextEngines ?? new DefaultContextEngineRegistry();
     if (config.llmHandle) this.llmHandle = config.llmHandle;
   }
@@ -421,6 +480,16 @@ export class AgentLoop {
   /** Resets the session spend counter — call after /new or /personality switch. */
   resetSessionCost(sessionKey: string): void {
     this.sessionCosts.delete(sessionKey);
+  }
+
+  /** Fold spend incurred OUTSIDE a turn into a session's budget — the realtime
+   *  voice tier's per-audio-minute accrual, billed on a socket the browser holds
+   *  and keyed on the same lane `agent_consult` runs its turns on, so
+   *  `budgetCapUsd` governs the whole call. Non-positive deltas are ignored: a
+   *  budget that can be moved backwards is not a budget. */
+  addSessionCost(sessionKey: string, usd: number): void {
+    if (!Number.isFinite(usd) || usd <= 0) return;
+    this.sessionCosts.set(sessionKey, (this.sessionCosts.get(sessionKey) ?? 0) + usd);
   }
 
   /** Manual `/compact` — force a compaction outside a turn (delegates to
@@ -487,6 +556,8 @@ export class AgentLoop {
       sessionReadMtimes: this.sessionReadMtimes,
       contextStore: this.contextStore,
       documentExtractors: this.documentExtractors,
+      contentStore: this.contentStore,
+      contextLog: this.contextLog,
     };
   }
 
@@ -507,7 +578,6 @@ export class AgentLoop {
       llmMessages: initialLlmMessages,
       cacheBreakpoints: initialCacheBreakpoints,
       activeSkillFiles,
-      injectionDefenseEnabled,
       baseMessageCount,
       userScopeId,
       compactedThisTurn,
@@ -524,6 +594,8 @@ export class AgentLoop {
       sessionId,
       sessionKey,
       personality,
+      workingDir,
+      fsReach,
       obsConfig,
       traceId,
       turnNumber,
@@ -546,12 +618,11 @@ export class AgentLoop {
     const effectiveMaxIdentical = opts.maxIdenticalToolCalls ?? this.maxIdenticalToolCalls;
 
     // Tool-call budget tracking — prevents runaway loops (see IMPROVEMENT.md P1-3).
-    // Counted across all iterations within a single user turn.
-    let totalToolCalls = 0;
+    // Counted across all iterations within a single user turn; one mutable
+    // object so per-call enforcement shares the SAME counters (see
+    // agent-loop/stages/per-call-enforcement.ts + agent-loop/budgets.ts).
+    const budgetCounters = createTurnBudgetCounters();
     let successfulToolCalls = 0;
-    const toolNameCounts = new Map<string, number>();
-    // Pathology detectors, not throughput limits — see agent-loop/budgets.ts.
-    let identicalStreak: IdenticalStreak | null = null;
     let denialStreak = 0;
 
     // Dry-run tracking — accumulates across all iterations of a turn.
@@ -568,7 +639,7 @@ export class AgentLoop {
     // matching the chapter's "counter resets when the user sends a fresh
     // message" contract.
     const dgConfig = personality.safety?.injectionDefense?.postReadDowngrade;
-    const dgEnabled = injectionDefenseEnabled && dgConfig?.enabled !== false;
+    const dgEnabled = dgConfig?.enabled !== false;
     const dgTurns = dgConfig?.turns ?? 2;
     const dgTools = this.safety.injection.resolveDowngradedTools(dgConfig?.tools);
     const dgRemainingRef = { value: 0 };
@@ -580,6 +651,45 @@ export class AgentLoop {
     if (opts.allowDangerousToolCalls) watcherTap.getHalt = () => null;
     const getHalt = watcherTap.getHalt;
 
+    // ONE budget check for both callers — the loop's iteration boundary below
+    // and the ScriptToolBridge's per-call check — so a script call fails with
+    // exactly the message the loop halts with. Reads live values (spend,
+    // denial streak) at call time.
+    const checkBudgets = () =>
+      checkTurnBudgets(
+        budgetCounters.totalToolCalls,
+        effectiveMaxToolCalls,
+        budgetCounters.toolNameCounts,
+        effectiveMaxIdentical,
+        budgetCounters.identicalStreak,
+        this.maxConsecutiveIdenticalCalls,
+        { spentUsd: this.sessionCosts.get(sessionKey) ?? 0, capUsd: personality.budgetCapUsd },
+        denialStreak,
+      );
+
+    // tools-as-code-api Lane B — per-turn bridge for in-script tool calls.
+    // Closes over the turn's allowlist, hook registry, watcher tap, and the
+    // SAME budget counters; threaded to tools via ToolContext.scriptTools.
+    const scriptToolBridge = new ScriptToolBridge({
+      tools: this.tools,
+      hooks: this.hooks,
+      observability: this.observability,
+      sessionId,
+      traceId,
+      allowedTools,
+      allowedPlugins,
+      filterOpts,
+      watcherTap,
+      counters: budgetCounters,
+      checkBudgets,
+      turnAttachments: opts.attachments,
+      ...(this.onToolMetric ? { onToolMetric: this.onToolMetric } : {}),
+    });
+
+    // A1 — this turn's token/cost rollup: filled as each assistant message is
+    // persisted, flushed by the finalizer (and by the early exits that skip it).
+    const turnUsage = createTurnUsage();
+
     const streamDeps: StreamStepDeps = {
       llm: this.llm,
       tools: this.tools,
@@ -588,12 +698,14 @@ export class AgentLoop {
       observability: this.observability,
       requestDumpStore: this.requestDumpStore,
       sessionCosts: this.sessionCosts,
+      turnUsage,
       streamingTimeoutMs: this.streamingTimeoutMs,
       modelRouting: this.modelRouting,
     };
 
     for (let iteration = 0; iteration < this.maxIterations; iteration++) {
       if (abortSignal.aborted) {
+        await flushTurnUsage(this.session, sessionId, turnUsage, this.observability);
         yield { type: 'error', error: 'Aborted', code: 'aborted' };
         if (traceId) {
           this.observability?.endTrace(traceId, 'aborted');
@@ -611,6 +723,7 @@ export class AgentLoop {
       const halt = getHalt();
       if (halt) {
         if (halt.action === 'terminate') {
+          await flushTurnUsage(this.session, sessionId, turnUsage, this.observability);
           yield {
             type: 'error',
             error: `Watcher: ${halt.reason}`,
@@ -634,16 +747,7 @@ export class AgentLoop {
 
       // Budget guard — tool-call / per-tool repeat / session cost / denial streak.
       // Prior tool_results are in llmMessages, so breaking keeps the history valid.
-      const budgetResult = checkTurnBudgets(
-        totalToolCalls,
-        effectiveMaxToolCalls,
-        toolNameCounts,
-        effectiveMaxIdentical,
-        identicalStreak,
-        this.maxConsecutiveIdenticalCalls,
-        { spentUsd: this.sessionCosts.get(sessionKey) ?? 0, capUsd: personality.budgetCapUsd },
-        denialStreak,
-      );
+      const budgetResult = checkBudgets();
       if (budgetResult.exceeded) {
         const { rule, toolName, count, message } = budgetResult;
         yield { type: 'tool_progress', toolName, message, audience: 'user' };
@@ -693,6 +797,7 @@ export class AgentLoop {
           iteration--; // retry this iteration with the shrunk history
           continue;
         }
+        await flushTurnUsage(this.session, sessionId, turnUsage, this.observability);
         yield { type: 'error', error: stepResult.error, code: 'context_overflow' };
         if (traceId) {
           this.observability?.endTrace(traceId, 'error');
@@ -701,17 +806,18 @@ export class AgentLoop {
         return;
       }
 
-      if (stepResult.outcome === 'fatal') return;
+      if (stepResult.outcome === 'fatal') {
+        await flushTurnUsage(this.session, sessionId, turnUsage, this.observability);
+        return;
+      }
 
       fullText += stepResult.fullTextDelta;
       turnCount++;
 
       // Update budget counters — these gate the NEXT iteration's LLM call.
       if (stepResult.outcome === 'tool-calls') {
-        totalToolCalls += stepResult.completedToolCalls.length;
         for (const tc of stepResult.completedToolCalls) {
-          toolNameCounts.set(tc.toolName, (toolNameCounts.get(tc.toolName) ?? 0) + 1);
-          identicalStreak = updateIdenticalStreak(identicalStreak, tc.toolName, tc.args);
+          recordToolCallForBudgets(budgetCounters, tc.toolName, tc.args);
         }
       }
 
@@ -719,6 +825,10 @@ export class AgentLoop {
 
       const { completedToolCalls } = stepResult;
       const usageSink = stepResult.usageSink;
+
+      // G4 — the first tool dispatch is where the posture has to hold: every
+      // surface's hooks are registered by now and nothing has executed yet.
+      this.checkApprovalPosture();
 
       // Stage: Tool processing (pre-flight hooks, execution, result collection)
       const toolResult = yield* processTools(
@@ -733,7 +843,6 @@ export class AgentLoop {
           sessionCosts: this.sessionCosts,
           storage: this.storage,
           dataDir: this.dataDir,
-          workingDir: this.workingDir,
           platform: this.platform,
           resultBudgetChars: this.resultBudgetChars,
           teamId: this.teamId,
@@ -746,6 +855,8 @@ export class AgentLoop {
           sessionId,
           sessionKey,
           personality,
+          workingDir,
+          fsReach,
           traceId,
           obsConfig,
           effectiveModel,
@@ -760,7 +871,7 @@ export class AgentLoop {
           userScopeId,
           watcherTap,
           usageSink,
-          injectionDefenseEnabled,
+          scriptToolBridge,
           dgEnabled,
           dgRemaining: dgRemainingRef,
           dgTools,
@@ -769,9 +880,11 @@ export class AgentLoop {
           dryRunState,
           tierEscalationRef,
           steerSink: opts.steerSink,
+          ...(opts.voiceOrigin ? { voiceOrigin: opts.voiceOrigin } : {}),
           opts: {
             agentId: opts.agentId,
             rootSessionKey: opts.rootSessionKey,
+            jobId: opts.jobId,
             origin: opts.origin,
             attachments: opts.attachments,
             dryRun: opts.dryRun,
@@ -783,6 +896,7 @@ export class AgentLoop {
 
       if (toolResult.kind === 'return-direct') {
         fullText = toolResult.text;
+        await flushTurnUsage(this.session, sessionId, turnUsage, this.observability);
         return;
       }
 
@@ -799,13 +913,14 @@ export class AgentLoop {
       fullText,
       turnCount,
       successfulToolCalls,
-      totalToolCalls,
-      toolNames: [...toolNameCounts.keys()],
+      totalToolCalls: budgetCounters.totalToolCalls,
+      toolNames: [...budgetCounters.toolNameCounts.keys()],
       initialPrompt: text,
       activeSkillFiles,
       dryRunPlan: dryRunState.plan,
       dryRunCapped: dryRunState.capped,
       isDryRun: opts.dryRun ?? false,
+      turnUsage,
     });
 
     // Phase 3 — turn-end context maintenance (silent memory flush at 70%,

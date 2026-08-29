@@ -14,8 +14,10 @@
   },
   "dependencies": {
     "@ethosagent/agent-mesh": "workspace:*",
+    "@ethosagent/core": "workspace:*",
     "@ethosagent/kanban-store": "workspace:*",
     "@ethosagent/logger": "workspace:*",
+    "@ethosagent/storage-fs": "workspace:*",
     "@ethosagent/types": "workspace:*",
     "yaml": "^2.7.1",
     "zod": "^4.3.6"

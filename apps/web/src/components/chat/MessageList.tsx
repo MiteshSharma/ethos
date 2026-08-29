@@ -1,8 +1,10 @@
 import { useEffect, useRef, useState } from 'react';
+import { useFenceResolver } from '../../features/renderers/resolver';
 import type { AssistantTurn, ChatMessage } from '../../lib/chat-reducer';
 import { SaveToDashboardContextMenu } from '../dashboard/SaveToDashboardContextMenu';
 import { SaveToDashboardModal } from '../dashboard/SaveToDashboardModal';
 import { AssistantBubble, UserBubble } from './MessageBubble';
+import type { RunSurface } from './RunCard';
 
 // Scrollable history. Auto-scrolls to the bottom as content arrives —
 // but only when the user was already pinned to the bottom, so reading
@@ -15,6 +17,12 @@ export interface MessageListProps {
   personalityId?: string;
   model?: string;
   sessionId?: string;
+  /** Puts a suggested prompt in the composer (`recommend_actions` pills). */
+  onSuggestPrompt?: (prompt: string) => void;
+  /** Starts talk-mode from the empty state. Absent = no "Try voice" pill. */
+  onTryVoice?: () => void;
+  /** Live delegated-run state for the transcript's run anchors (§4.1). */
+  runSurface?: RunSurface;
 }
 
 export function MessageList({
@@ -23,12 +31,19 @@ export function MessageList({
   personalityId,
   model,
   sessionId,
+  onSuggestPrompt,
+  onTryVoice,
+  runSurface,
 }: MessageListProps) {
   const listRef = useRef<HTMLDivElement>(null);
   const pinnedToBottomRef = useRef(true);
   const [saveModalOpen, setSaveModalOpen] = useState(false);
   const [saveModalUserMessage, setSaveModalUserMessage] = useState<string | undefined>();
   const [showScrollDown, setShowScrollDown] = useState(false);
+  // One resolver for the whole list, derived from the personality actually
+  // being rendered with. History re-decides live on a personality switch —
+  // nothing is stamped onto a message.
+  const fenceRenderers = useFenceResolver(personalityId ?? '');
 
   const onScroll = () => {
     const el = listRef.current;
@@ -59,7 +74,14 @@ export function MessageList({
   }, [messages.length, currentTurn]);
 
   if (messages.length === 0 && !currentTurn) {
-    return <EmptyState personalityId={personalityId} model={model} />;
+    return (
+      <EmptyState
+        personalityId={personalityId}
+        model={model}
+        onSuggestPrompt={onSuggestPrompt}
+        {...(onTryVoice ? { onTryVoice } : {})}
+      />
+    );
   }
 
   // Derived "thinking" state: the user just sent a message, no SSE event
@@ -91,11 +113,26 @@ export function MessageList({
           <UserBubble key={m.id} message={m} />
         ) : (
           <SaveToDashboardContextMenu key={m.id} onSaveToDashboard={() => openSaveModal(idx)}>
-            <AssistantBubble turn={m} />
+            <AssistantBubble
+              turn={m}
+              fenceRenderers={fenceRenderers}
+              onSuggestPrompt={onSuggestPrompt}
+              {...(personalityId ? { personalityId } : {})}
+              {...(runSurface ? { runSurface } : {})}
+            />
           </SaveToDashboardContextMenu>
         ),
       )}
-      {currentTurn ? <AssistantBubble turn={currentTurn} streaming /> : null}
+      {currentTurn ? (
+        <AssistantBubble
+          turn={currentTurn}
+          streaming
+          fenceRenderers={fenceRenderers}
+          onSuggestPrompt={onSuggestPrompt}
+          {...(personalityId ? { personalityId } : {})}
+          {...(runSurface ? { runSurface } : {})}
+        />
+      ) : null}
       {isThinking ? <ThinkingBubble /> : null}
       <SaveToDashboardModal
         open={saveModalOpen}
@@ -148,7 +185,17 @@ const DEFAULT_PILLS = [
   'Run a skill',
 ] as const;
 
-function EmptyState({ personalityId, model }: { personalityId?: string; model?: string }) {
+function EmptyState({
+  personalityId,
+  model,
+  onSuggestPrompt,
+  onTryVoice,
+}: {
+  personalityId?: string;
+  model?: string;
+  onSuggestPrompt?: (prompt: string) => void;
+  onTryVoice?: () => void;
+}) {
   return (
     <div className="message-list-empty">
       <div
@@ -174,10 +221,23 @@ function EmptyState({ personalityId, model }: { personalityId?: string; model?: 
       <div className="empty-state-tagline">Ready to help.</div>
       <div className="empty-state-pills">
         {DEFAULT_PILLS.map((p) => (
-          <button key={p} type="button" className="empty-state-pill">
+          <button
+            key={p}
+            type="button"
+            className="empty-state-pill"
+            onClick={() => onSuggestPrompt?.(p)}
+          >
             {p}
           </button>
         ))}
+        {/* The one pill that does not pre-fill the composer — it starts a call
+            (DR2 first-conversation moment). Rendered only where talk-mode is
+            actually available, so it is never a dead end. */}
+        {onTryVoice ? (
+          <button type="button" className="empty-state-pill" onClick={onTryVoice}>
+            Try voice
+          </button>
+        ) : null}
       </div>
     </div>
   );

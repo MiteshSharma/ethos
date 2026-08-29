@@ -120,6 +120,8 @@ class FakeJobStore implements JobStore {
   async heartbeat(): Promise<void> {}
   async updateSpend(): Promise<void> {}
   async requestCancel(): Promise<void> {}
+  async markBlocked(): Promise<void> {}
+  async resumeFromBlocked(): Promise<void> {}
   async finish(
     id: string,
     terminal: 'done' | 'failed' | 'aborted',
@@ -139,6 +141,9 @@ class FakeJobStore implements JobStore {
     return 0;
   }
   async countActiveByPersonality(): Promise<number> {
+    return 0;
+  }
+  async countActive(): Promise<number> {
     return 0;
   }
   async reclaimStale(): Promise<BackgroundJob[]> {
@@ -173,6 +178,17 @@ class FakeJobStore implements JobStore {
   async releaseDelivery(id: string): Promise<void> {
     const job = this.jobs.get(id);
     if (job) job.deliveredAt = undefined;
+  }
+  /** G5's second claim, keyed by clarify `requestId` — insert-wins, like the
+   *  SQLite store's `INSERT OR IGNORE` on a PRIMARY KEY. */
+  readonly notices = new Set<string>();
+  async claimNotice(requestId: string): Promise<boolean> {
+    if (this.notices.has(requestId)) return false;
+    this.notices.add(requestId);
+    return true;
+  }
+  async releaseNotice(requestId: string): Promise<void> {
+    this.notices.delete(requestId);
   }
   /** Recorded so a test can assert what the child wrote to the STORE (allowed)
    *  versus what reached an adapter (not allowed). */

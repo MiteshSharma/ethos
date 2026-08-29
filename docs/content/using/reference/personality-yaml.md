@@ -1,10 +1,10 @@
 ---
 title: "Personality config reference"
-description: "Every field in a personality's config.yaml and toolset.yaml — model, fs_reach, MCP, plugins, budget, safety."
+description: "Every field in a personality's config.yaml and toolset.yaml — model, fs_reach, MCP, plugins, budget, voice, safety."
 kind: reference
 audience: user
 slug: personality-yaml
-updated: 2026-07-17
+updated: 2026-08-14
 ---
 
 A [personality](../../getting-started/glossary.md#personality) is a directory at `~/.ethos/personalities/<id>/` with three files:
@@ -122,13 +122,13 @@ streamingTimeoutMs: 300000
 
 Type: comma-separated absolute paths · Default: AgentLoop fallback scope
 
-Per-personality filesystem allowlist for the `read_file` / `write_file` tools. The runtime resolves these substitutions at construction time:
+Per-personality filesystem allowlist for the `read_file` / `write_file` tools. The runtime resolves these substitutions once per turn:
 
 | Token | Resolves to |
 |---|---|
 | `${ETHOS_HOME}` | `~/.ethos` |
 | `${self}` | This personality's id. |
-| `${CWD}` | `AgentLoop.workingDir`. |
+| `${CWD}` | The personality's working directory — [`fs_reach.workdir`](#fs-reach-workdir) when declared, otherwise the process working directory. |
 
 When unset, the fallback is:
 
@@ -137,12 +137,37 @@ read:  [~/.ethos/personalities/<self>/, ~/.ethos/skills/, ${CWD}]
 write: [~/.ethos/personalities/<self>/, ${CWD}]
 ```
 
-Paths outside the allowlist surface as a `BoundaryError` from `ScopedStorage` and are rendered as a user-facing tool error.
+A declared list replaces the defaults for that direction — it is not merged with them. Paths outside the allowlist surface as a `BoundaryError` from `ScopedStorage` and are rendered as a user-facing tool error.
 
 ```yaml
 fs_reach.read: ${CWD}, ${ETHOS_HOME}/skills, ${ETHOS_HOME}/personalities/${self}
 fs_reach.write: ${CWD}, ${ETHOS_HOME}/personalities/${self}
 ```
+
+Notes:
+
+- Under the container execution posture, the derived read and write paths are the container's bind mounts (read-only and read-write respectively), so the app-layer allowlist and the OS-layer mount set never disagree.
+- The active personality's derived write paths are created at startup if missing. Read-only paths are not — a read prefix that does not exist is simply an empty scope.
+- Paths under `/proc`, `/sys`, `/dev`, or a Docker socket are never mounted into a container and are never pre-created.
+
+## fs_reach.workdir {#fs-reach-workdir}
+
+Type: single absolute path · Default: the process working directory
+
+The personality's working directory. It takes the same substitution tokens as `fs_reach.read` / `fs_reach.write`, resolves to an absolute path, and becomes `${CWD}` for the rest of the `fs_reach` derivation. Every tool in the personality's toolset stands here: a bare relative path passed to `read_file` or `write_file` resolves against it, and the `terminal` tool runs its commands in it under both the local and the container execution posture.
+
+```yaml
+fs_reach.workdir: ${ETHOS_HOME}/workspace/${self}
+```
+
+Notes:
+
+- A declared workdir is added to both the derived read list and the derived write list, so it stays reachable even when `fs_reach.write` is declared and therefore replaces the defaults.
+- One path, not a list. The dotted key is the only accepted syntax — an indented `fs_reach:` block is refused at load with `Top-level key "fs_reach" cannot be a nested object in personality config`.
+- A token that resolves to an empty string refuses the turn with `FS_REACH_INVALID` rather than synthesizing a path at the filesystem root.
+- Unset changes nothing: the working directory is the process working directory and the read/write lists derive exactly as they did before this field existed.
+- `ethos personality show <id>` prints the declared value (tokens unresolved) as a `Workdir` line under **Filesystem reach**.
+- Files written here are retrievable from a browser — see [Retrieve files the agent wrote](../how-to/retrieve-agent-files.md).
 
 ## mcp_servers {#mcp-servers}
 
@@ -287,6 +312,40 @@ Controls what the observability store persists for this personality.
 | `safety.observability.storeLlmPayloads` | `none` \| `metadata` \| `full` | LLM request and response payloads. |
 | `safety.observability.redactPatterns` | string[] | Substrings redacted from anything stored. |
 
+## voice.\* {#voice}
+
+Type: dotted block · Default: unset (inherit the deployment's voice config)
+
+How this personality sounds, which engines serve it, and how its call is drawn. A deployment picks the *provider*; the personality picks how it *sounds* and how it *looks*, so anything declared here beats the global [`auxiliary.tts.*` / `voice.*`](./config-yaml.md#voice-tier) and `display.call_style` settings, and silence means inherit. The provider, voice and call-look keys are editable in the web Personalities tab (Identity step); `tier`, `model` and the language map are file-only.
+
+| Field | Type | Description |
+|---|---|---|
+| `voice.tts_voice` | string | Voice id handed to the TTS provider. Provider-specific and free-form — `af_bella` for Kokoro, `alloy` for OpenAI. |
+| `voice.languages.<tag>` | string | BCP-47 tag → voice id. Beats `tts_voice` when the turn's language is known. Two surfaces supply one: browser talk-mode reports the language it heard, and the gateway derives it from an inbound voice note's transcript with `detectLanguage()` (`@ethosagent/voice-text`). Detection is constrained to the tags declared here and to nothing else — a personality with no language map supplies no candidates, so no guess is made and `tts_voice` wins. |
+| `voice.tier` | `pipeline` \| `realtime` | Preferred voice engine, beating the deployment's [`voice.tier`](./config-yaml.md#voice-tier). A preference, not a guarantee: a deployment with no realtime provider serves `pipeline` either way. An unrecognised value is dropped rather than thrown on — a bad voice field must not make a personality unloadable. |
+| `voice.tts_provider` | string | Names an entry in the deployment's TTS roster (`voice.tts.providers.<name>`). A **label** the operator chose, never a provider id. A name this machine lacks falls back to the default `auxiliary.tts` entry, so a shared personality still speaks. |
+| `voice.stt_provider` | string | The same, for the STT roster. A personality's voice is identity; its ear is a technical override. |
+| `voice.realtime_provider` | string | The same, for the [realtime roster](./config-yaml.md#voice-realtime-providers). Consulted only on the realtime tier; falls back to `voice.realtime.default`. |
+| `voice.model` | string | Fast-lane model for spoken turns — a small, quick model for conversation, so a voice lane never waits on the agentic default. Pinned onto the lane's runner once when the session opens, not per turn, so every host that opens a voice lane (the LiveKit adapter, the SIP adapter) gets the routing without having to remember it. Resolves from the personality alone: the deployment's `model` is deliberately not a fallback, since handing it over would pin every spoken lane to the model this key exists to keep off it. Unset leaves the runner untouched. |
+| `voice.call_style` | `liquid` \| `orb` \| `rings` | Which treatment the Call Stage draws for this personality — `liquid`, the circle filling like a vessel; `orb`, a body deforming with the voice; `rings`, concentric rings breathing outward. Unset is **not** a fixed default: the treatment falls through to the operator's `display.call_style` when that names a concrete shape, and otherwise to one derived from the personality id, so every personality already looks distinct. An unrecognised value is dropped rather than thrown on. |
+
+```yaml
+voice.tts_voice: af_bella
+voice.languages.es: ef_dora
+voice.tier: realtime
+voice.realtime_provider: live
+voice.call_style: rings
+```
+
+Notes:
+
+- Voice-id precedence, resolved in one function (`resolveVoicePreferences`) so every surface agrees: `voice.languages.<tag>` > `voice.tts_voice` > the chosen entry's own `voice` > global `auxiliary.tts.voice`. A realtime call uses the same order, so switching tiers does not switch who you are talking to.
+- Naming a roster entry buys no trust. The [egress gate](./config-yaml.md#voice-trusted-plugins) keys on the entry's underlying `provider`, so an entry called `local-anything` backed by a hosted model is still refused.
+- `voice.provider` is accepted on read as the older spelling of `voice.tts_provider` and re-serialized as the new one; a file never carries both.
+- Talk-mode also needs `voice_session` in [`toolset.yaml`](#toolset-yaml). Without it the phone button renders disabled.
+- Call-look precedence, resolved in one function (`resolveCallTreatment` in `packages/types/src/personality.ts`) so every surface agrees: `voice.call_style` > a concrete `display.call_style` > derived from the personality id. `display.call_style: personality` is the default and is not a pin — it defers to the derivation.
+- Confirm what parsed with `ethos personality show <id>` — it emits a `## Voice` block, and omits the section entirely when the personality declares no `voice` block. Its `Call look` line names the derived treatment when the key is unset, because there is no blank state to report.
+
 ## toolset.yaml {#toolset-yaml}
 
 Flat YAML list of tool names. Each entry on its own line, prefixed with `- `. Tools missing from this list are filtered out before the LLM sees them.
@@ -321,3 +380,5 @@ Optional sibling directory at `~/.ethos/personalities/<id>/skills/`. Per-persona
 - [CLI reference](./cli.md#ethos-personality) — the `ethos personality` subcommands that scaffold and edit these files.
 - [Glossary: personality](../../getting-started/glossary.md#personality) — one-line definition shared across every page that names the construct.
 - [Glossary: fs_reach](../../getting-started/glossary.md#fs-reach) — the path-allowlist field this file declares; backed by `ScopedStorage`.
+- [Retrieve files the agent wrote](../how-to/retrieve-agent-files.md) — `fs_reach.workdir` in practice, on a headless deployment.
+- [Local voice: Kokoro TTS + Whisper large v3 STT](../how-to/local-voice.md) — configure the providers this file's `voice.*` block picks between.

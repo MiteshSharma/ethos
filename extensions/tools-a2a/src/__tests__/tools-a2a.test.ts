@@ -288,6 +288,191 @@ describe('a2a_send — full round-trip', () => {
   });
 });
 
+describe('a2a_send — session/token caching (plan T1.2)', () => {
+  it('performs exactly ONE handshake across two sequential sends to the same peer', async () => {
+    const target = makeAgent(TARGET_ID);
+    const initiator = makeAgent('me');
+    const clock = { t: Date.now() };
+    const { app, counter } = makeServer(target, initiator, clock);
+
+    let authPosts = 0;
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const url = toUrl(input);
+      if ((init?.method ?? 'GET') === 'POST' && url.includes('/a2a-auth/')) authPosts += 1;
+      return app.request(url, init);
+    };
+    const client = new A2aOutboundClient({ fetchImpl, now: () => clock.t });
+
+    const [tool] = createA2aTools({
+      identity: stubIdentity(initiator, ['search']),
+      secrets: stubSecrets({ [`a2a/${initiator.id}/private-key`]: initiator.privateKeyPem }),
+      allowlist: egressAllow(target),
+      client,
+    });
+    const args = {
+      peer_url: WELL_KNOWN_URL,
+      fingerprint: target.fingerprint,
+      skill: 'search',
+      message: 'hi',
+    };
+
+    const first = await tool?.execute(args, makeCtx(initiator.id));
+    const second = await tool?.execute(args, makeCtx(initiator.id));
+
+    expect(first?.ok).toBe(true);
+    expect(second?.ok).toBe(true);
+    expect(counter.runs).toBe(2);
+    // The handshake is challenge + response = 2 POSTs to /a2a-auth/ — ONCE
+    // total across both sends, not once PER send.
+    expect(authPosts).toBe(2);
+  });
+
+  it('hits the cache via peer_url even when the repeat call omits the fingerprint arg', async () => {
+    const target = makeAgent(TARGET_ID);
+    const initiator = makeAgent('me');
+    const clock = { t: Date.now() };
+    const { app, counter } = makeServer(target, initiator, clock);
+
+    let authPosts = 0;
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const url = toUrl(input);
+      if ((init?.method ?? 'GET') === 'POST' && url.includes('/a2a-auth/')) authPosts += 1;
+      return app.request(url, init);
+    };
+    const client = new A2aOutboundClient({ fetchImpl, now: () => clock.t });
+
+    const [tool] = createA2aTools({
+      identity: stubIdentity(initiator, ['search']),
+      secrets: stubSecrets({ [`a2a/${initiator.id}/private-key`]: initiator.privateKeyPem }),
+      allowlist: egressAllow(target),
+      client,
+    });
+
+    const first = await tool?.execute(
+      { peer_url: WELL_KNOWN_URL, fingerprint: target.fingerprint, skill: 'search', message: 'hi' },
+      makeCtx(initiator.id),
+    );
+    // Second call omits `fingerprint` — the url index must still find it.
+    const second = await tool?.execute(
+      { peer_url: WELL_KNOWN_URL, skill: 'search', message: 'hi again' },
+      makeCtx(initiator.id),
+    );
+
+    expect(first?.ok).toBe(true);
+    expect(second?.ok).toBe(true);
+    expect(counter.runs).toBe(2);
+    expect(authPosts).toBe(2);
+  });
+
+  it('a revoked peer fails closed on the very next send — no stale cached token grants access', async () => {
+    const target = makeAgent(TARGET_ID);
+    const initiator = makeAgent('me');
+    const clock = { t: Date.now() };
+    const { app, counter } = makeServer(target, initiator, clock);
+    const fetchImpl: typeof fetch = async (input, init) => app.request(toUrl(input), init);
+    const client = new A2aOutboundClient({ fetchImpl, now: () => clock.t });
+
+    // A MUTABLE egress allowlist so the test can simulate revocation between
+    // the two calls (distinct from the target's own INBOUND allowlist).
+    const myEgress = new Map([
+      [target.fingerprint, { fingerprint: target.fingerprint, scope: [], enabled: true }],
+    ]);
+    const [tool] = createA2aTools({
+      identity: stubIdentity(initiator, ['search']),
+      secrets: stubSecrets({ [`a2a/${initiator.id}/private-key`]: initiator.privateKeyPem }),
+      allowlist: stubAllowlist(myEgress),
+      client,
+    });
+    const args = {
+      peer_url: WELL_KNOWN_URL,
+      fingerprint: target.fingerprint,
+      skill: 'search',
+      message: 'hi',
+    };
+
+    const first = await tool?.execute(args, makeCtx(initiator.id));
+    expect(first?.ok).toBe(true);
+    expect(counter.runs).toBe(1);
+
+    // Revoke: remove the peer from MY OWN egress allowlist. No cache-change
+    // notification exists (D13) — the cached token is still cryptographically
+    // valid; only the per-send allowlist re-check catches this.
+    myEgress.delete(target.fingerprint);
+
+    const second = await tool?.execute(args, makeCtx(initiator.id));
+    expect(second?.ok).toBe(false);
+    if (second && !second.ok) {
+      expect(second.code).toBe('execution_failed');
+      expect(second.error).toContain('egress allowlist');
+    }
+    // The stale cached token granted NO access — no second delivery happened.
+    expect(counter.runs).toBe(1);
+  });
+
+  it('invalidates the cache on an auth-rejection from the peer, so the next send re-handshakes', async () => {
+    const target = makeAgent(TARGET_ID);
+    const initiator = makeAgent('me');
+    const clock = { t: Date.now() };
+    const { app, counter } = makeServer(target, initiator, clock);
+
+    let authPosts = 0;
+    let rpcCalls = 0;
+    // The first RPC call gets a normal response; from the second RPC call
+    // onward (simulating the peer having revoked/rotated our token server
+    // side) we substitute a synthetic UNAUTHORIZED JSON-RPC error, mirroring
+    // what a real peer would send back on a bad token.
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const url = toUrl(input);
+      const method = init?.method ?? 'GET';
+      if (method === 'POST' && url.includes('/a2a-auth/')) authPosts += 1;
+      if (method === 'POST' && url.includes('/a2a/') && !url.includes('/a2a-auth/')) {
+        rpcCalls += 1;
+        if (rpcCalls === 2) {
+          return new Response(
+            JSON.stringify({
+              jsonrpc: '2.0',
+              id: 'x',
+              error: { code: -32001, message: 'token rejected: revoked' },
+            }),
+            { status: 200, headers: { 'content-type': 'application/json' } },
+          );
+        }
+      }
+      return app.request(url, init);
+    };
+    const client = new A2aOutboundClient({ fetchImpl, now: () => clock.t });
+
+    const [tool] = createA2aTools({
+      identity: stubIdentity(initiator, ['search']),
+      secrets: stubSecrets({ [`a2a/${initiator.id}/private-key`]: initiator.privateKeyPem }),
+      allowlist: egressAllow(target),
+      client,
+    });
+    const args = {
+      peer_url: WELL_KNOWN_URL,
+      fingerprint: target.fingerprint,
+      skill: 'search',
+      message: 'hi',
+    };
+
+    const first = await tool?.execute(args, makeCtx(initiator.id));
+    expect(first?.ok).toBe(true);
+
+    // Second send: cache hit skips the handshake, the synthetic peer rejection
+    // fires, and the cache MUST be invalidated (not just surfaced as an error).
+    const second = await tool?.execute(args, makeCtx(initiator.id));
+    expect(second?.ok).toBe(false);
+    expect(authPosts).toBe(2); // still just the ONE real handshake so far
+
+    // Third send: the invalidated cache forces a fresh handshake, which
+    // succeeds again (the real server never actually revoked anything).
+    const third = await tool?.execute(args, makeCtx(initiator.id));
+    expect(third?.ok).toBe(true);
+    expect(authPosts).toBe(4); // a SECOND handshake happened
+    expect(counter.runs).toBe(2); // first + third delivered; second did not
+  });
+});
+
 describe('a2a_send — delegation containment (ctx.a2aDelegation → client → guard)', () => {
   it('first call fans out under budget; second call is refused with no onward HTTP', async () => {
     const target = makeAgent(TARGET_ID);

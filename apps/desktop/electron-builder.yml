@@ -12,6 +12,20 @@ extraResources:
     to: web-dist
     filter:
       - "**/*"
+  # Call-capture's native binaries — resolved at runtime by
+  # `resolveCallCaptureNativePath()` in `src/main/call-capture.ts`. Only
+  # `native/bin` (the compiled Swift helpers) and `native/vendor/audiotee`
+  # (the vendored audio-tap binary) are needed; `native/vendor/audiotee-src`
+  # is the vendored SOURCE checkout (its own `.git`, `.build`, etc.) and is
+  # never read at runtime.
+  - from: ../../extensions/platform-callcapture/native/bin
+    to: callcapture-native/bin
+    filter:
+      - "**/*"
+  - from: ../../extensions/platform-callcapture/native/vendor/audiotee
+    to: callcapture-native/vendor/audiotee
+    filter:
+      - "**/*"
 mac:
   icon: build/icon.icns
   category: public.app-category.productivity

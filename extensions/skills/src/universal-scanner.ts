@@ -25,9 +25,17 @@ export interface UniversalScannerOptions {
   /**
    * First-party extension point — for content shipped inside Ethos itself
    * (the bundled coding skills package, future bundled skill packs). Skills
-   * loaded from these sources are gated at the `trusted-repo` tier (red
-   * still blocks; yellow is auto-acknowledged) so legitimate mentions of
-   * `bash`, `gh`, `curl`, etc. in skill bodies don't trip the scanner.
+   * loaded from these sources are gated at the `builtin` tier: `builtin`
+   * means "code shipped inside this repository", which is exactly the claim
+   * a caller in this monorepo pointing at its own `data/` directory makes.
+   * `builtin` is the only tier that auto-acknowledges yellow findings, so
+   * legitimate mentions of `bash`, `gh`, `curl`, etc. in bundled skill
+   * bodies don't drop the skill from the pool at discovery time — where no
+   * human is present to acknowledge anything.
+   *
+   * NOT `trusted-repo`: since the trust-tier tightening, `trusted-repo`
+   * means "a GitHub org the operator named in `security.trusted_github_orgs`"
+   * — a weaker, different claim that no longer auto-acknowledges yellow.
    *
    * IMPORTANT: only callers that ship code as part of Ethos (i.e. live in
    * this monorepo) should populate this. User config / plugins / MCP / any
@@ -37,7 +45,7 @@ export interface UniversalScannerOptions {
   /**
    * Override ALL default sources. Use in tests to avoid scanning real
    * ~/.ethos/skills/, ~/.claude/skills/, etc. Each entry is gated at the
-   * `community` tier — callers that want trusted-tier sources in tests
+   * `community` tier — callers that want a privileged tier in tests
    * combine this with `trustedFirstPartySources`.
    */
   sources?: ScanSource[];
@@ -64,10 +72,15 @@ interface CacheEntry {
  * because they can contain hundreds of files not intended for ethos.
  */
 function defaultTrustedSources(): ScanSource[] {
-  // ~/.ethos/skills/ is user-managed local content. We treat it as
-  // trusted-repo so the user's own skills aren't blocked by yellow findings
-  // (legitimate mentions of bash, curl, etc.). Red findings (prompt
-  // injection) still block.
+  // ~/.ethos/skills/ is user-managed local content, NOT content shipped
+  // inside Ethos — so `builtin` would be a false provenance claim and this
+  // stays at `trusted-repo`. Since `autoAcknowledgeYellow` narrowed to
+  // `builtin`, that means a user skill with a yellow finding (any bare URL
+  // outside a code fence trips `external-url-instruction`) is dropped here
+  // with an `onSkip`, because discovery calls `canInstall` with no `force`
+  // and no human to acknowledge. The missing piece is a persisted record of
+  // the operator's install-time acknowledgment that discovery can honour —
+  // not a higher tier for this directory. Tracked as follow-up work.
   return [{ label: 'ethos', dir: join(homedir(), '.ethos', 'skills') }];
 }
 
@@ -99,8 +112,8 @@ export function externalSources(): ScanSource[] {
  *
  * Trust tier is set by which option a source arrives through, never by
  * the caller — `extraSources` is always `community`, `trustedFirstParty
- * Sources` is always `trusted-repo`. There is no way for an untrusted
- * caller to claim trust by guessing a privileged label.
+ * Sources` is always `builtin`. There is no way for an untrusted caller
+ * to claim trust by guessing a privileged label.
  */
 export class UniversalScanner {
   private readonly sources: ResolvedSource[];
@@ -114,7 +127,7 @@ export class UniversalScanner {
     const communityDefaults = opts.sources ?? defaultCommunitySources();
     this.sources = [
       ...trustedDefaults.map((s) => withTier(s, 'trusted-repo')),
-      ...(opts.trustedFirstPartySources ?? []).map((s) => withTier(s, 'trusted-repo')),
+      ...(opts.trustedFirstPartySources ?? []).map((s) => withTier(s, 'builtin')),
       ...communityDefaults.map((s) => withTier(s, 'community')),
       ...(opts.extraSources ?? []).map((s) => withTier(s, 'community')),
     ];
@@ -219,10 +232,11 @@ export class UniversalScanner {
     const qualifiedName = `${source.label}/${name}`;
 
     const skill = this.parseWithDialect(raw, filePath, source.label, name, qualifiedName, mtimeMs);
+    if (!skill) return null;
 
     // Trust tier is fixed by which option the source arrived through —
     // `extraSources` always lands on `community`, `trustedFirstParty
-    // Sources` on `trusted-repo`. Callers cannot self-escalate.
+    // Sources` on `builtin`. Callers cannot self-escalate.
     const scanResult = scanSkillMd(raw, filePath);
     const decision = canInstall(scanResult, source.trustTier);
     if (!decision.allowed) {
@@ -234,6 +248,12 @@ export class UniversalScanner {
     return skill;
   }
 
+  /**
+   * Returns null when the file's frontmatter is unparseable. gray-matter
+   * parses YAML strictly, so an agent-authored skill with (say) an unquoted
+   * `": "` in its description throws here — and this runs at startup, before
+   * any port is bound. One bad file must cost one skill, not the process.
+   */
   private parseWithDialect(
     raw: string,
     filePath: string,
@@ -241,9 +261,21 @@ export class UniversalScanner {
     name: string,
     qualifiedName: string,
     mtimeMs: number,
-  ): Skill {
-    const { data } = matter(raw);
-    const fm = data as Record<string, unknown>;
+  ): Skill | null {
+    let fm: Record<string, unknown>;
+    let content: string;
+    try {
+      // `{}` bypasses gray-matter's module-global cache, which is populated
+      // BEFORE parsing — a throw leaves a half-built entry behind, so the same
+      // bad file would parse "successfully" into garbage on the next scan.
+      const file = matter(raw, {});
+      fm = file.data as Record<string, unknown>;
+      content = file.content;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      this.onSkip?.(qualifiedName, `invalid frontmatter: ${message.split('\n')[0] ?? message}`);
+      return null;
+    }
 
     let partial: Omit<Skill, 'qualifiedName'> | null = null;
 
@@ -258,7 +290,6 @@ export class UniversalScanner {
     if (partial) return { ...partial, qualifiedName };
 
     // Legacy: plain markdown with no recognized frontmatter
-    const { content } = matter(raw);
     return {
       qualifiedName,
       name,

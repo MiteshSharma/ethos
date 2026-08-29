@@ -14,9 +14,15 @@
   },
   "dependencies": {
     "@ethosagent/agent-mesh": "workspace:*",
+    "@ethosagent/notify-queue": "workspace:*",
     "@ethosagent/session-lane": "workspace:*",
     "@ethosagent/tools-mcp": "workspace:*",
     "@ethosagent/types": "workspace:*",
     "ws": "^8.20.0"
+  },
+  "devDependencies": {
+    "@ethosagent/kanban-store": "workspace:*",
+    "@ethosagent/storage-fs": "workspace:*",
+    "@ethosagent/team-supervisor": "workspace:*"
   }
 }

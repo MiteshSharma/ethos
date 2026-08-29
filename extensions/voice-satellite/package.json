@@ -1,0 +1,23 @@
+{
+  "name": "@ethosagent/voice-satellite",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "Wake engine, supervised capture state machine, and node-protocol client shared by every wake satellite host (ethos listen, Electron main).",
+  "exports": {
+    ".": {
+      "import": "./src/index.ts",
+      "production": "./dist/index.js"
+    }
+  },
+  "dependencies": {
+    "@ethosagent/types": "workspace:*",
+    "@ethosagent/voice-session": "workspace:*",
+    "@ethosagent/voice-text": "workspace:*",
+    "@ethosagent/web-contracts": "workspace:*",
+    "ws": "^8.20.0"
+  },
+  "devDependencies": {
+    "@ethosagent/storage-fs": "workspace:*"
+  }
+}

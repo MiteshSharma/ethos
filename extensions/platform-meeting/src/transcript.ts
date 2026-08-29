@@ -4,6 +4,7 @@
 // so the transcript lands in the same scope-bound store MEMORY.md/USER.md use —
 // the "searchable knowledge base" outcome users cite (plan §3(d)).
 
+import { wrapUntrusted } from '@ethosagent/safety-injection';
 import type { MemoryContext, MemoryProvider } from '@ethosagent/types';
 import type { TranscriptEntry } from './caption-parser';
 
@@ -47,11 +48,25 @@ export function buildTranscriptArtifact(input: BuildTranscriptInput): Transcript
   const title = `Meeting transcript — ${iso}`;
   const key = `meeting-${now}.md`;
   const summary = summarize(input.entries);
+  const hasEntries = input.entries.length > 0;
 
-  const body =
-    input.entries.length === 0
-      ? '_No captions were captured. Captions must be enabled by the meeting host._'
-      : input.entries.map((e) => `- **${e.speaker || 'Unknown'}:** ${e.text}`).join('\n');
+  const body = hasEntries
+    ? input.entries.map((e) => `- **${e.speaker || 'Unknown'}:** ${e.text}`).join('\n')
+    : '_No captions were captured. Captions must be enabled by the meeting host._';
+
+  // Captions and speaker names come from meeting participants — anyone with
+  // the link can pick their display name — so both are adversary-controlled.
+  // Wrap them in the provenance fence before persisting to memory (the
+  // framework's default-trusted store) so a later memory_read/search doesn't
+  // launder untrusted speech into trusted context. The standalone `summary`
+  // field returned below stays plain; it flows through the tool result,
+  // which is already marked `outputIsUntrusted` at the tool level.
+  const persistedSummary = hasEntries
+    ? wrapUntrusted({ content: summary, toolName: 'meet_join', source: 'meeting' }).content
+    : summary;
+  const persistedBody = hasEntries
+    ? wrapUntrusted({ content: body, toolName: 'meet_join', source: 'meeting' }).content
+    : body;
 
   const markdown = [
     `# ${title}`,
@@ -61,11 +76,11 @@ export function buildTranscriptArtifact(input: BuildTranscriptInput): Transcript
     '',
     '## Summary',
     '',
-    summary,
+    persistedSummary,
     '',
     '## Transcript',
     '',
-    body,
+    persistedBody,
     '',
   ].join('\n');
 

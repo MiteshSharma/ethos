@@ -9,6 +9,7 @@
 
 import type { PendingClarify } from '@ethosagent/types';
 import type { App } from '@slack/bolt';
+import { isUserAuthorized } from '../authz';
 import type { KanbanTicket } from '../blocks/kanban';
 import type { SessionSummary } from '../blocks/session';
 import type { KanbanReader } from '../commands/kanban';
@@ -54,6 +55,15 @@ export interface HomeEventDeps {
   clarify?: ClarifyHomeReader;
   /** Ethos web UI origin for session deep links. Links render only when set. */
   webUiBaseUrl?: string;
+  /**
+   * Slack user IDs allowed to see this bot's private state. Everything the
+   * Home tab renders below the header — MEMORY.md entries, session labels,
+   * the kanban board, the channel roster — is bot-private, and
+   * `app_home_opened` fires for any workspace member who clicks the app.
+   * Default-deny: unset or empty hides every one of those sections. Pending
+   * clarifies are exempt because they are already filtered to the viewer.
+   */
+  allowedUsers?: string[];
 }
 
 /** Number of MEMORY.md entries surfaced in the home tab. */
@@ -69,10 +79,11 @@ type HomeClient = {
 
 export function registerHomeEvents(app: App, deps: HomeEventDeps): void {
   const publishHome = async (client: HomeClient, userId: string): Promise<void> => {
+    const authorized = isUserAuthorized(userId, deps.allowedUsers);
     const [sessions, kanbanTickets, memorySnippets, pendingClarifies] = await Promise.all([
-      gatherSessions(deps),
-      gatherKanban(deps),
-      gatherMemory(deps),
+      gatherSessions(deps, userId),
+      gatherKanban(deps, userId),
+      gatherMemory(deps, userId),
       gatherPendingClarifies(deps, userId),
     ]);
     // `buildHomeView` is pure first-party code — a bug here should surface via
@@ -82,9 +93,10 @@ export function registerHomeEvents(app: App, deps: HomeEventDeps): void {
       sessions,
       kanbanTickets,
       memorySnippets,
-      channelModes: deps.channelOverrides?.entries() ?? [],
+      channelModes: authorized ? (deps.channelOverrides?.entries() ?? []) : [],
       pendingClarifies,
       webUiBaseUrl: deps.webUiBaseUrl,
+      restricted: !authorized,
     });
     try {
       await client.views.publish({ user_id: userId, view });
@@ -113,9 +125,10 @@ export function registerHomeEvents(app: App, deps: HomeEventDeps): void {
   });
 }
 
-/** Gather recent sessions, tolerating a missing or throwing reader. */
-async function gatherSessions(deps: HomeEventDeps): Promise<SessionSummary[]> {
-  if (!deps.session) return [];
+/** Gather recent sessions for an allowlisted viewer, tolerating a missing or
+ *  throwing reader. A non-allowlisted viewer gets `[]` — and no read. */
+async function gatherSessions(deps: HomeEventDeps, userId: string): Promise<SessionSummary[]> {
+  if (!deps.session || !isUserAuthorized(userId, deps.allowedUsers)) return [];
   try {
     return await deps.session.recentSessions();
   } catch {
@@ -123,9 +136,11 @@ async function gatherSessions(deps: HomeEventDeps): Promise<SessionSummary[]> {
   }
 }
 
-/** Gather kanban tickets — only for team bots, tolerating reader failure. */
-async function gatherKanban(deps: HomeEventDeps): Promise<KanbanTicket[]> {
+/** Gather kanban tickets — only for team bots and allowlisted viewers,
+ *  tolerating reader failure. */
+async function gatherKanban(deps: HomeEventDeps, userId: string): Promise<KanbanTicket[]> {
   if (deps.binding.type !== 'team' || !deps.kanban) return [];
+  if (!isUserAuthorized(userId, deps.allowedUsers)) return [];
   try {
     return await deps.kanban.listOpenTickets();
   } catch {
@@ -133,9 +148,11 @@ async function gatherKanban(deps: HomeEventDeps): Promise<KanbanTicket[]> {
   }
 }
 
-/** Gather the last N MEMORY.md entries, tolerating reader failure. */
-async function gatherMemory(deps: HomeEventDeps): Promise<string[]> {
-  if (!deps.memory) return [];
+/** Gather the last N MEMORY.md entries for an allowlisted viewer, tolerating
+ *  reader failure. Memory is the same trusted text the system prompt is built
+ *  from, so a non-allowlisted viewer gets `[]` and MEMORY.md is never read. */
+async function gatherMemory(deps: HomeEventDeps, userId: string): Promise<string[]> {
+  if (!deps.memory || !isUserAuthorized(userId, deps.allowedUsers)) return [];
   try {
     const body = await deps.memory.read();
     return extractRecentEntries(body, MEMORY_SNIPPET_COUNT);

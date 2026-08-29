@@ -1,7 +1,8 @@
+import { resolveCallTreatment } from '@ethosagent/types';
 import { TurnStatusBar } from '@ethosagent/ui-components';
 import { useQueryClient } from '@tanstack/react-query';
 import { App as AntApp, ConfigProvider } from 'antd';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { ApprovalModal } from '../components/chat/ApprovalModal';
 import { ClarifyCard } from '../components/chat/ClarifyCard';
@@ -9,24 +10,44 @@ import { Composer } from '../components/chat/Composer';
 import { GoalIntakeModal } from '../components/chat/GoalIntakeModal';
 import { MessageList } from '../components/chat/MessageList';
 import { PersonalityBar } from '../components/chat/PersonalityBar';
+import type { RunSurface } from '../components/chat/RunCard';
 import { useConfig } from '../features/config/api/queries';
 import { useGoalCreate } from '../features/goals/api/mutations';
 import { useGoalDetection } from '../features/goals/useGoalDetection';
 import { usePersonalityGet } from '../features/personalities/api/queries';
 import { useSessionRenameFromChat } from '../features/sessions/api/mutations';
-import { useSessionGet } from '../features/sessions/api/queries';
-import { createBatchVoiceCallClient } from '../features/voice/batch-voice-call-client';
-import { runVoiceAgentTurn } from '../features/voice/chat-voice-runner';
+import { useRecentSessions, useSessionGet } from '../features/sessions/api/queries';
+import { CallStage } from '../features/voice/CallStage';
+import {
+  callStageMounted,
+  callStageVisual,
+  resolveCallAccent,
+} from '../features/voice/call-motion';
+import { runVoiceClarify } from '../features/voice/clarify-voice';
 import { personalityCanTalk } from '../features/voice/gating';
-import { TalkModeCallBar, TalkModeToggle } from '../features/voice/TalkMode';
-import { useVoiceCall } from '../features/voice/useVoiceCall';
+import { createPushToTalkHandlers } from '../features/voice/push-to-talk';
+import {
+  providerSummary,
+  STATUS_LABEL,
+  TalkModeCallBar,
+  TalkModeToggle,
+} from '../features/voice/TalkMode';
+import { createTalkModeClient, type RealtimeTokenAnswer } from '../features/voice/talk-mode-client';
+import { useVoiceCall, type VoiceCallClientHooks } from '../features/voice/useVoiceCall';
+import { VoiceModeToggle } from '../features/voice/VoiceModeToggle';
 import type { VoiceCallClient } from '../features/voice/voice-call-client';
+import {
+  callStripVisible,
+  chatMessagesWithVoice,
+  voiceCaption,
+} from '../features/voice/voice-call-reducer';
 import { useActivePersonality } from '../hooks/useActivePersonality';
 import { useChat } from '../hooks/useChat';
 import { useNewSessionModal } from '../hooks/useNewSessionModal';
 import { type AttachmentPreview, placeholderPreview, readPreviewData } from '../lib/attachments';
-import { clearLastSessionId, getLastSessionId, setLastSessionId } from '../lib/lastSession';
-import { personalityTheme } from '../lib/theme';
+import { clearLastSessionId, setLastSessionId } from '../lib/lastSession';
+import { accentVars, personalityTheme } from '../lib/theme';
+import { mostRecentSessionIdForPersonality } from '../lib/workspaceScope';
 import { rpc } from '../rpc';
 
 // The chat surface — daily-driver tab in v0. Composition:
@@ -42,20 +63,36 @@ import { rpc } from '../rpc';
 //   │  Composer (sticky bottom)      │
 //   └────────────────────────────────┘
 //
-// The whole subtree is wrapped in a per-personality `<ConfigProvider>`
-// so Antd primitives inherit the active accent (Send button background,
-// caret, focus ring, link colors). The base theme + AntApp wrap higher
-// up in `main.tsx`.
+// While a call is carrying audio the page renders the Call Stage INSTEAD of
+// that composition — a mode, not a layer over it (DESIGN.md § "Call Stage").
+//
+// The per-personality accent (`<ConfigProvider>` + `--accent`) lifted up to
+// the workspace subtree in App.tsx (P1b, plan/phases/personality-first-ui.md)
+// — it now wraps ScopeNav + StageHeader + this whole stage, not just Chat.
+// The plain (non-call) branch below no longer wraps itself; it inherits
+// `--accent` from that ancestor. The call-stage branch keeps its OWN
+// `<ConfigProvider>` + `accentVars`, because `callAccent` can differ from the
+// personality's own accent (an operator-pinned call hex) — a distinct scope,
+// not the one P0 amended. The base theme + AntApp wrap higher up in
+// `main.tsx`.
 //
 // `?session=<id>` in the URL is the deep-link handle — opening a session
 // from the Sessions tab (W4) navigates here with the param set; sending
 // a fresh message updates the URL to the server-assigned id so refresh
 // stays on the same conversation.
+//
+// The active PERSONALITY, separately, is the route's `:personalityId` —
+// `useActivePersonality()` reads it off the URL, not session-bound
+// component state. App.tsx renders this component through a wrapper keyed
+// on that param (`<Chat key={personalityId} />`), so switching agents
+// (AltitudeRail, `sessionOpenPath`, a redirect) always remounts fresh rather
+// than patching a live instance — the effects below run once per agent, not
+// once ever.
 
 export function Chat() {
   const [searchParams, setSearchParams] = useSearchParams();
   const sessionParam = searchParams.get('session') ?? undefined;
-  const { id: personalityId, model, isLoading, setOverride } = useActivePersonality();
+  const { id: personalityId, model, isLoading } = useActivePersonality();
   const { notification } = AntApp.useApp();
   const queryClient = useQueryClient();
   const navigate = useNavigate();
@@ -76,6 +113,7 @@ export function Chat() {
     switchSession,
     resetSession,
     compact,
+    noteClarifyAnswer,
   } = useChat({
     ...(sessionParam ? { initialSessionId: sessionParam } : {}),
     personalityId,
@@ -102,18 +140,43 @@ export function Chat() {
     renameMut.mutate({ id: currentSessionId, title });
   };
 
-  // Restore last session on first mount when no `?session=` is in the URL.
-  // Lives at the page level (not inside useChat) because it interacts with
-  // routing — restoring means navigating, which is a Chat-page concern.
-  // biome-ignore lint/correctness/useExhaustiveDependencies: deliberately mount-only — once we know there's no URL param we look up storage exactly once
-  useEffect(() => {
-    if (sessionParam) return;
-    const stored = getLastSessionId();
-    if (stored) setSearchParams({ session: stored }, { replace: true });
-  }, []);
+  // `?new=1` from the New Session picker / architect flow (`buildNewSessionPath`,
+  // which already routes to THIS agent's own `/p/:id/chat` — no `?personality=`
+  // param to consume here anymore). It means "start fresh, don't restore the
+  // last session below" — read early so both effects that follow can see it.
+  const newSessionParam = searchParams.get('new');
 
-  // Mirror every URL session change into localStorage so a refresh after
-  // landing here from the Sessions tab (or a deep-link paste) sticks.
+  // Restore this agent's own last session on mount when the URL has neither
+  // `?session=` nor `?new=1`. Sourced from `sessions.list` (the same RPC and
+  // cache ScopeNav's session block already fills), not localStorage: Chat
+  // fully remounts on a personality switch (`key={personalityId}` on its
+  // route wrapper in App.tsx), so this is one fresh, agent-scoped lookup per
+  // switch rather than a single cross-agent pointer — the plan's "Done when"
+  // for Chat specifically ("restore that agent's last session, or land on an
+  // empty Chat — never a foreign `?session=`"). Falls through to an empty
+  // Chat when this agent has no sessions yet. Lives at the page level (not
+  // inside useChat) because it interacts with routing.
+  const recentSessionsQuery = useRecentSessions(20);
+  useEffect(() => {
+    if (sessionParam || currentSessionId || newSessionParam) return;
+    if (!recentSessionsQuery.data) return;
+    const restored = mostRecentSessionIdForPersonality(
+      recentSessionsQuery.data.items,
+      personalityId,
+    );
+    if (restored) setSearchParams({ session: restored }, { replace: true });
+  }, [
+    sessionParam,
+    currentSessionId,
+    newSessionParam,
+    recentSessionsQuery.data,
+    personalityId,
+    setSearchParams,
+  ]);
+
+  // Mirror every URL session change into localStorage so cross-agent chrome
+  // (CommandPalette, StatusBar, the right drawer's SSE toasts) that isn't
+  // itself personality-scoped still finds "the session I was just in".
   useEffect(() => {
     if (sessionParam) setLastSessionId(sessionParam);
   }, [sessionParam]);
@@ -125,7 +188,6 @@ export function Chat() {
       initialMount.current = false;
       return;
     }
-    setOverride(null);
     if (sessionParam && sessionParam !== currentSessionId) {
       switchSession(sessionParam);
     } else if (!sessionParam && currentSessionId) {
@@ -134,36 +196,17 @@ export function Chat() {
     }
   }, [sessionParam]);
 
-  // Restore the personality that was last used with this session.
-  // biome-ignore lint/correctness/useExhaustiveDependencies: setOverride is a stable useState setter
+  // Consume `?new=1`: force a fresh session instead of the restore above.
+  // The param is stripped either way so Back doesn't re-trigger it.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: resetSession/clearLastSessionId are stable; deps intentionally key on the param only
   useEffect(() => {
-    const stored = sessionQuery.data?.session.personalityId;
-    if (stored) setOverride(stored);
-  }, [sessionQuery.data?.session.personalityId]);
-
-  // Consume `?personality=<id>` deep-links from the command palette.
-  // Sets the per-session override and strips the param so Back doesn't
-  // re-trigger the switch. The override state owns this flow — we
-  // intentionally don't fork the session here because the user picked
-  // the personality from the palette before sending anything; if they
-  // *had* an active conversation, the bar's switcher is the right path
-  // (it forks). Treat the deep-link as a "configure-then-chat" intent.
-  const personalityParam = searchParams.get('personality');
-  const newSessionParam = searchParams.get('new');
-  // biome-ignore lint/correctness/useExhaustiveDependencies: resetSession/clearLastSessionId are stable; deps intentionally key on the params only
-  useEffect(() => {
-    if (!personalityParam) return;
-    setOverride(personalityParam);
-    if (newSessionParam === '1') {
-      // New Session flow: start fresh under the chosen personality.
-      resetSession();
-      clearLastSessionId();
-    }
+    if (!newSessionParam) return;
+    resetSession();
+    clearLastSessionId();
     const next = new URLSearchParams(searchParams);
-    next.delete('personality');
     next.delete('new');
     setSearchParams(next, { replace: true });
-  }, [personalityParam, newSessionParam, searchParams, setSearchParams, setOverride]);
+  }, [newSessionParam, searchParams, setSearchParams]);
 
   // Periodically re-render while streaming so the stall indicator can
   // compare lastStreamEventAt to the current wall clock.
@@ -180,6 +223,13 @@ export function Chat() {
     Date.now() - state.lastStreamEventAt > 30_000;
 
   const [pendingAttachments, setPendingAttachments] = useState<AttachmentPreview[]>([]);
+
+  // Suggestion pills (empty state + `recommend_actions` cards) fill the
+  // composer draft. `seq` makes a repeat pick a distinct event.
+  const [suggestion, setSuggestion] = useState<{ text: string; seq: number } | undefined>();
+  const handleSuggestPrompt = useCallback((text: string) => {
+    setSuggestion((prev) => ({ text, seq: (prev?.seq ?? 0) + 1 }));
+  }, []);
 
   const { intakeOpen, setIntakeOpen, detectedMessage, restatedGoal, openIntake } =
     useGoalDetection();
@@ -319,11 +369,23 @@ export function Chat() {
   const pendingApproval = state.pendingApprovals[0];
   const pendingClarify = state.pendingClarifies[0];
 
+  // Live state for the delegated-run cards anchored in the transcript (§4.1).
+  // Fed by the `run.update` digest already riding this session's SSE stream —
+  // the card needs no connection of its own (G9/D11).
+  const runSurface: RunSurface = useMemo(
+    () => ({
+      runs: state.runs,
+      clarifyQueue: state.clarifyQueue,
+      onAnswered: noteClarifyAnswer,
+    }),
+    [state.runs, state.clarifyQueue, noteClarifyAnswer],
+  );
+
   // Talk-mode (Phase B). The call affordance is gated on the active
   // personality's toolset (§3(e)) — voice availability is a personality
-  // capability, not a config field. The live-call client is injected; until
-  // `livekit-client` is wired (see features/voice/README.md) the default client
-  // reports the manual step honestly instead of connecting.
+  // capability, not a config field. The live-call client is injected — this page
+  // supplies `createTalkModeClient` below (see features/voice/README.md), which
+  // picks the realtime or pipeline tier at call time.
   const personalityQuery = usePersonalityGet(personalityId);
   const canTalk = personalityCanTalk(personalityQuery.data?.personality.toolset);
 
@@ -348,28 +410,74 @@ export function Chat() {
   const sessionIdRef = useRef(currentSessionId);
   sessionIdRef.current = currentSessionId;
 
+  // The user's explicit private/offline choice. Held in a ref because the
+  // client factory reads it at CONNECT time — flipping it must change what the
+  // next call dials, not rebuild a client mid-call — and mirrored into state so
+  // the strip can offer the way back out.
+  const [privateVoice, setPrivateVoice] = useState(false);
+  const privateVoiceRef = useRef(false);
+  privateVoiceRef.current = privateVoice;
+  // Which realtime provider/model actually served the call. Reported by the
+  // transport once the mint answered, so the strip's `{provider} · {model}`
+  // names what ran instead of what config defaults to.
+  const [realtimeRan, setRealtimeRan] = useState<{ provider: string; model: string | null } | null>(
+    null,
+  );
+
   const createVoiceClient = useCallback(
-    (): VoiceCallClient =>
-      createBatchVoiceCallClient({
+    (hooks: VoiceCallClientHooks): VoiceCallClient =>
+      // Streaming (binary PCM over one persistent WebSocket, WebAudio playout)
+      // where the browser supports it; the batch RPC path otherwise. Same
+      // events either way, so nothing below this line changes.
+      createTalkModeClient({
+        sessionId: () => sessionIdRef.current,
+        // The realtime tier is decided SERVER-side: this asks for a credential
+        // and gets either one or a typed reason, and the transport degrades to
+        // the local pipeline with that reason on screen.
+        mintRealtimeToken: (): Promise<RealtimeTokenAnswer> =>
+          rpc.voice.realtimeToken({ ...(personalityId ? { personalityId } : {}) }),
+        forcePipeline: privateVoiceRef.current,
+        onTier: (tier, detail) => {
+          hooks.onTier(tier);
+          setRealtimeRan(
+            tier === 'realtime' && detail.provider
+              ? { provider: detail.provider, model: detail.model ?? null }
+              : null,
+          );
+        },
+        // `personalityId` picks the STT entry the same way it picks the voice,
+        // so the batch fallback hears through the same engine the streaming
+        // lane does rather than silently reverting to the global default.
         transcribe: (audioBase64, mimeType) =>
-          rpc.voice.transcribe({ audio: audioBase64, mimeType }).then((r) => r.transcript),
-        // Reuse the existing chat send + stream so the spoken turn shares the
-        // active chat session (same personality, same persisted history).
-        runAgentTurn: (text, signal) =>
-          runVoiceAgentTurn(text, signal, {
-            sessionId: () => sessionIdRef.current,
-            sendMessage,
-            abortTurn,
-          }),
+          rpc.voice
+            .transcribe({
+              audio: audioBase64,
+              mimeType,
+              ...(personalityId ? { personalityId } : {}),
+            })
+            .then((r) => r.transcript),
+        // No `runAgentTurn` override here: `createTalkModeClient`'s batch
+        // fallback default (`runBrowserVoiceTurn`) drives the turn on the
+        // browser voice lane itself, not the chat session — see Bug 4 /
+        // Conflict 1 in `plan/phases/voice-live-personality.md` §7.
         ...(ttsConfigured
           ? {
               synthesize: (text, voice) =>
                 rpc.voice
-                  .synthesize({ text, ...(voice ? { voice } : {}) })
+                  .synthesize({
+                    text,
+                    ...(voice ? { voice } : {}),
+                    ...(personalityId ? { personalityId } : {}),
+                  })
                   .then((r) => ({ audioBase64: r.audio, mimeType: r.mimeType })),
             }
           : {}),
+        // `voice` is the GLOBAL default from Settings; `personalityId` is what
+        // lets the server prefer the active personality's declared voice over
+        // it. Precedence is resolved server-side in one place
+        // (`resolveVoicePreferences`) so every surface agrees.
         ...(ttsVoice ? { voice: ttsVoice } : {}),
+        ...(personalityId ? { personalityId } : {}),
         chime: voiceChime,
         tuning: {
           ...(voiceEndpointSilenceMs !== undefined
@@ -390,15 +498,75 @@ export function Chat() {
       voiceBargeSustainMs,
       voiceSpeechThreshold,
       voiceSpeechMinMs,
-      sendMessage,
-      abortTurn,
+      personalityId,
     ],
   );
 
   const voice = useVoiceCall({ createClient: createVoiceClient });
   const inCall = voice.status !== 'idle' && voice.status !== 'ended';
 
+  // The Call Stage (DESIGN.md § "Call Stage"). Starting a call switches this
+  // page INTO the stage; ending it returns to normal chat. The stage's "Back to
+  // chat" control collapses it back to the strip without hanging up — that is
+  // what keeps the composer reachable while a call is reconnecting.
+  const [stageOpen, setStageOpen] = useState(true);
+  useEffect(() => {
+    if (inCall) setStageOpen(true);
+  }, [inCall]);
+  const callVisual = callStageVisual(voice.status);
+  const callAccent = resolveCallAccent(configQuery.data?.callAccent, personalityId);
+  // Which shape the stage draws. One precedence rule, in contracts, shared with
+  // the character sheet: the personality's own `voice.call_style` first, then a
+  // concrete `display.call_style` pin, then a treatment derived from the id.
+  const callTreatment = resolveCallTreatment({
+    personalityId,
+    ...(personalityQuery.data?.personality.voice?.call_style
+      ? { personalityCallStyle: personalityQuery.data.personality.voice.call_style }
+      : {}),
+    ...(configQuery.data?.callStyle ? { operatorCallStyle: configQuery.data.callStyle } : {}),
+  });
+  const callProviderLabel = providerSummary({
+    status: voice.status,
+    sttProvider: voice.sttProvider ?? configQuery.data?.voiceProvider ?? null,
+    sttModel: configQuery.data?.voiceModel ?? null,
+    ttsProvider: voice.ttsProvider ?? configQuery.data?.voiceTtsProvider ?? null,
+    ttsModel: configQuery.data?.voiceTtsModel ?? null,
+    realtimeProvider: realtimeRan?.provider ?? null,
+    realtimeModel: realtimeRan?.model ?? null,
+  });
+  // The stage is mounted by the CALL, not by the drawn state: connecting and
+  // reconnecting render INSIDE it (see `callStageVisual`), because unmounting
+  // for a transient status restarts the enter animation and the canvas, and that
+  // reads as the mode flickering out and back mid-sentence. Degraded / mic-denied
+  // still hand over to the strip — that is where the explanation lives.
+  // `available` and `visible` differ only in the collapse, so the strip offers to
+  // restore a stage exactly when there is one to restore.
+  const stageMount = {
+    status: voice.status,
+    degraded: voice.degraded !== null,
+    micDenied: voice.micDenied,
+  };
+  const stageAvailable = callStageMounted({ ...stageMount, minimized: false });
+  const stageVisible = callStageMounted({ ...stageMount, minimized: !stageOpen });
+
+  // DR5's persistent transcript. On the realtime tier the provider owns the
+  // conversation and nothing ever reaches `sendMessage`, so the spoken turns
+  // land in the SAME message list only because they are projected here — the
+  // strip's captions are not a record, they scroll away with the call.
+  const { tier: voiceTier, transcript: voiceTranscript } = voice;
+  const messages = useMemo(
+    () => chatMessagesWithVoice(state.messages, { tier: voiceTier, transcript: voiceTranscript }),
+    [state.messages, voiceTier, voiceTranscript],
+  );
+
+  // A real toggle: the composer glyph both starts the call and ends it. The
+  // strip's hang-up button and Esc stay the primary way out — this is the
+  // second affordance for the control that claims `aria-pressed`.
   const handleTalkToggle = useCallback(() => {
+    if (inCall) {
+      voice.hangUp();
+      return;
+    }
     if (!sttConfigured) {
       notification.info({
         message: 'Voice',
@@ -408,136 +576,263 @@ export function Chat() {
       return;
     }
     voice.start();
-  }, [sttConfigured, voice.start, notification]);
+  }, [inCall, sttConfigured, voice.start, voice.hangUp, notification]);
+
+  /**
+   * Turn on the private/offline mode for the NEXT call.
+   *
+   * It cannot switch mid-call: the two tiers hold different sockets and
+   * different audio graphs, so "switching" is hanging up and dialling again.
+   * Saying that plainly beats silently reconnecting under the user.
+   */
+  const handleUsePrivateMode = useCallback(() => {
+    setPrivateVoice(true);
+    voice.hangUp();
+    notification.info({
+      message: 'Private mode',
+      description:
+        'Voice will run entirely on the local pipeline. Start the call again to talk privately.',
+      placement: 'topRight',
+    });
+  }, [voice.hangUp, notification]);
+
+  /** Undo the private/offline choice. Takes effect on the next call, same as on. */
+  const handleLeavePrivateMode = useCallback(() => {
+    setPrivateVoice(false);
+    voice.hangUp();
+    notification.info({
+      message: 'Private mode off',
+      description: 'Start the call again to use the realtime voice tier.',
+      placement: 'topRight',
+    });
+  }, [voice.hangUp, notification]);
 
   useEffect(() => {
-    if (voice.error) {
+    // The strip owns the mic-denied and degraded-to-text stories — a toast on
+    // top of them would say the same thing twice, in a place the user cannot
+    // act on.
+    if (voice.error && !voice.micDenied && !voice.degraded && !voice.notice) {
       notification.info({ message: 'Voice', description: voice.error, placement: 'topRight' });
     }
-  }, [voice.error, notification]);
+  }, [voice.error, voice.micDenied, voice.degraded, voice.notice, notification]);
 
-  const handleSwitchPersonality = async (newId: string) => {
-    // No-op: same personality clicked.
-    if (newId === personalityId) return;
+  // Keyboard push-to-talk: hold Space to talk, Esc ends the call. Bound only
+  // while a call is up, and never while the user is typing (Space is a
+  // character before it is a control).
+  useEffect(() => {
+    if (!inCall) return;
+    const handlers = createPushToTalkHandlers({
+      onHold: () => voice.pressToTalk(true),
+      onRelease: () => voice.pressToTalk(false),
+      onEnd: voice.hangUp,
+    });
+    const down = (event: KeyboardEvent) => handlers.keyDown(event);
+    const up = (event: KeyboardEvent) => handlers.keyUp(event);
+    window.addEventListener('keydown', down);
+    window.addEventListener('keyup', up);
+    return () => {
+      window.removeEventListener('keydown', down);
+      window.removeEventListener('keyup', up);
+    };
+  }, [inCall, voice.pressToTalk, voice.hangUp]);
 
-    // Empty session — no fork needed; the next chat.send creates a fresh
-    // session under the new personality.
-    if (!currentSessionId || state.messages.length === 0) {
-      setOverride(newId);
-      return;
-    }
-
-    // Active conversation — auto-fork per DESIGN.md to avoid tool-history
-    // mismatch when the new personality's toolset doesn't cover the prior
-    // calls. Old session stays available in Sessions tab; fork starts
-    // clean (well, with the same history copied) under the new accent.
-    try {
-      const result = await rpc.sessions.fork({ id: currentSessionId, personalityId: newId });
-      switchSession(result.session.id);
-      setSearchParams({ session: result.session.id }, { replace: true });
-      setLastSessionId(result.session.id);
-      setOverride(newId);
-      notification.info({
-        message: `Forked to ${capitalize(newId)}`,
-        description: 'Previous conversation is in the Sessions tab.',
-        placement: 'topRight',
-      });
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      notification.error({
-        message: 'Could not fork session',
-        description: message,
-        placement: 'topRight',
-      });
-    }
-  };
+  // Voice-native clarify. While a call is up, the agent's mid-turn question is
+  // SPOKEN and the next thing the user says answers it — routed to
+  // `clarify.respond`, not sent as a new chat turn. Without a call this effect
+  // does nothing at all and the card behaves exactly as it always has.
+  //
+  // The card renders throughout either way (below), non-blocking: the visual
+  // record of what was asked, the fallback when the tier cannot speak or
+  // synthesis fails, and still clickable — whichever answer lands first wins.
+  // Cleanup runs when the request leaves `pendingClarifies`, which is the
+  // existing `clarify.resolved` path (answered here, answered on the card,
+  // timed out, cancelled); aborting the ask there is what takes voice back out
+  // of "the next thing you say answers this".
+  const askByVoice = voice.ask;
+  useEffect(() => {
+    if (!pendingClarify || !inCall) return;
+    const controller = new AbortController();
+    void runVoiceClarify({
+      request: pendingClarify,
+      ask: askByVoice,
+      respond: (answer) =>
+        rpc.clarify
+          .respond({ requestId: pendingClarify.requestId, answer, source: 'user' })
+          .then(() => undefined),
+      signal: controller.signal,
+    });
+    return () => controller.abort();
+  }, [pendingClarify, inCall, askByVoice]);
 
   const handleNewSession = () => {
     openNewSessionModal();
   };
 
+  // Call Stage is a MODE: while it is up it IS the chat surface, so the normal
+  // chat chrome (personality bar, message list, composer) is not also on screen
+  // behind it — including the PersonalityBar, whose rename/new-session are the
+  // wrong things to offer mid-call. The way back to text is the stage's own
+  // "Back to chat" control, which collapses the mode WITHOUT ending the call and
+  // hands over to the strip.
+  if (stageVisible) {
+    return (
+      <ConfigProvider theme={personalityTheme(personalityId)}>
+        {/* `--accent` for the mode is the CALL's accent, which is the
+            personality's unless the operator pinned an explicit hex. The stage
+            used to stamp it on itself; defining it here instead keeps one
+            definition per subtree and lets the strip-era rules (turn label,
+            focus rings) resolve to the same colour the canvas is drawn in. */}
+        <div className="chat-tab chat-tab-call" style={accentVars(callAccent)}>
+          <CallStage
+            state={callVisual}
+            treatment={callTreatment}
+            accent={callAccent}
+            personalityId={personalityId}
+            personalityName={capitalize(personalityId)}
+            micLevels={voice.micLevels}
+            agentLevel={voice.agentLevel}
+            statusLabel={STATUS_LABEL[voice.status]}
+            providerLabel={callProviderLabel}
+            latencyMs={voice.latency?.totalMs ?? null}
+            transcript={voice.transcript}
+            clarify={pendingClarify ?? null}
+            muted={voice.muted}
+            onToggleMute={voice.toggleMute}
+            onExpandChat={() => setStageOpen(false)}
+            onHangUp={voice.hangUp}
+          />
+          {/* An approval is a hard gate on a running turn — it outranks the
+              mode and keeps its own surface, exactly as it does off-call. */}
+          {pendingApproval ? (
+            <ApprovalModal key={pendingApproval.approvalId} request={pendingApproval} />
+          ) : null}
+        </div>
+      </ConfigProvider>
+    );
+  }
+
   return (
-    <ConfigProvider theme={personalityTheme(personalityId)}>
-      <div className="chat-tab">
-        <PersonalityBar
-          personalityId={personalityId}
-          model={isLoading ? '' : model}
-          onSwitchPersonality={(id) => void handleSwitchPersonality(id)}
-          onNewSession={handleNewSession}
-          sessionTitle={sessionTitle}
-          onRenameSession={handleRenameSession}
-          actionsSlot={
+    <div className="chat-tab">
+      <PersonalityBar
+        personalityId={personalityId}
+        avatarUrl={personalityQuery.data?.personality.display?.avatar_url}
+        model={isLoading ? '' : model}
+        onNewSession={handleNewSession}
+        sessionTitle={sessionTitle}
+        onRenameSession={handleRenameSession}
+        actionsSlot={
+          <>
+            {/* Whether replies are SPOKEN in this conversation, and whether
+                  the phone is up, are two different questions — so they are two
+                  controls, side by side, not one overloaded affordance. */}
+            <VoiceModeToggle sessionId={currentSessionId} />
             <TalkModeToggle
               canTalk={canTalk}
               personalityName={capitalize(personalityId)}
               inCall={inCall}
               onToggle={handleTalkToggle}
             />
-          }
+          </>
+        }
+      />
+      {/* Not `inCall`: a finished call can still be the only thing on screen
+            explaining why it finished. `callStripVisible` owns that rule. This
+            branch only runs when the stage is down — the strip is what the stage
+            collapses TO, so the two are never up together. Nothing is lost by
+            that: every state the strip alone can explain (degraded, mic-denied,
+            ended) already forces `stageVisible` false, and the transient ones the
+            stage carries itself. */}
+      {callStripVisible(voice) ? (
+        <TalkModeCallBar
+          status={voice.status}
+          micLevels={voice.micLevels}
+          muted={voice.muted}
+          error={voice.error}
+          onToggleMute={voice.toggleMute}
+          onHangUp={voice.hangUp}
+          caption={voiceCaption(voice)}
+          windDown={voice.windDown}
+          degraded={voice.degraded}
+          micDenied={voice.micDenied}
+          onDismissNotice={voice.dismissNotice}
+          notice={voice.notice}
+          tier={voice.tier}
+          privateMode={privateVoice}
+          onUsePrivateMode={handleUsePrivateMode}
+          onLeavePrivateMode={handleLeavePrivateMode}
+          sttProvider={voice.sttProvider ?? configQuery.data?.voiceProvider ?? null}
+          sttModel={configQuery.data?.voiceModel ?? null}
+          ttsProvider={voice.ttsProvider ?? configQuery.data?.voiceTtsProvider ?? null}
+          ttsModel={configQuery.data?.voiceTtsModel ?? null}
+          realtimeProvider={realtimeRan?.provider ?? null}
+          realtimeModel={realtimeRan?.model ?? null}
+          latency={voice.latency}
+          {...(stageAvailable && !stageOpen ? { onExpand: () => setStageOpen(true) } : {})}
         />
-        {inCall ? (
-          <TalkModeCallBar
-            status={voice.status}
-            micLevels={voice.micLevels}
-            muted={voice.muted}
-            error={voice.error}
-            onToggleMute={voice.toggleMute}
-            onHangUp={voice.hangUp}
-          />
+      ) : null}
+      <GoalIntakeModal
+        open={intakeOpen}
+        onClose={() => setIntakeOpen(false)}
+        userMessage={detectedMessage}
+        restatedGoal={restatedGoal}
+        onQuickStart={(g) => void handleGoalQuickStart(g)}
+        onConfiguredRun={(c) => void handleGoalConfiguredRun(c)}
+      />
+      {pendingApproval ? (
+        <ApprovalModal key={pendingApproval.approvalId} request={pendingApproval} />
+      ) : null}
+      {pendingClarify ? (
+        <ClarifyCard key={pendingClarify.requestId} request={pendingClarify} />
+      ) : null}
+      <MessageList
+        messages={messages}
+        currentTurn={state.currentTurn}
+        runSurface={runSurface}
+        personalityId={personalityId}
+        model={model}
+        sessionId={currentSessionId ?? undefined}
+        onSuggestPrompt={handleSuggestPrompt}
+        {...(canTalk && !inCall ? { onTryVoice: handleTalkToggle } : {})}
+      />
+      <TurnStatusBar
+        isStreaming={state.isStreaming}
+        currentOp={state.currentOp}
+        elapsedMs={elapsedMs}
+      />
+      <div>
+        {state.error ? (
+          <div className="chat-error" role="alert">
+            {state.error}
+          </div>
         ) : null}
-        <GoalIntakeModal
-          open={intakeOpen}
-          onClose={() => setIntakeOpen(false)}
-          userMessage={detectedMessage}
-          restatedGoal={restatedGoal}
-          onQuickStart={(g) => void handleGoalQuickStart(g)}
-          onConfiguredRun={(c) => void handleGoalConfiguredRun(c)}
-        />
-        {pendingApproval ? (
-          <ApprovalModal key={pendingApproval.approvalId} request={pendingApproval} />
+        {isStalled ? (
+          <div className="chat-stall-notice" role="status">
+            Still working — this is taking longer than usual…
+          </div>
         ) : null}
-        {pendingClarify ? (
-          <ClarifyCard key={pendingClarify.requestId} request={pendingClarify} />
-        ) : null}
-        <MessageList
-          messages={state.messages}
-          currentTurn={state.currentTurn}
+        <Composer
           personalityId={personalityId}
-          model={model}
-          sessionId={currentSessionId ?? undefined}
-        />
-        <TurnStatusBar
+          disabled={false}
+          onSend={handleSend}
+          placeholder={state.isStreaming ? 'Steer the agent…' : 'Send a message…'}
           isStreaming={state.isStreaming}
-          currentOp={state.currentOp}
-          elapsedMs={elapsedMs}
+          onAbort={() => void abortTurn()}
+          attachments={pendingAttachments}
+          onAttach={handleAttach}
+          onRemoveAttachment={handleRemoveAttachment}
+          onGoalRun={handleGoalRunDirect}
+          contextTokens={state.contextTokens}
+          suggestion={suggestion}
+          {...(canTalk
+            ? {
+                onTalkMode: handleTalkToggle,
+                talkModeActive: inCall,
+                talkModeHint: inCall ? 'End call' : `Talk to ${capitalize(personalityId)}`,
+              }
+            : {})}
         />
-        <div>
-          {state.error ? (
-            <div className="chat-error" role="alert">
-              {state.error}
-            </div>
-          ) : null}
-          {isStalled ? (
-            <div className="chat-stall-notice" role="status">
-              Still working — this is taking longer than usual…
-            </div>
-          ) : null}
-          <Composer
-            personalityId={personalityId}
-            disabled={false}
-            onSend={handleSend}
-            placeholder={state.isStreaming ? 'Steer the agent…' : 'Send a message…'}
-            isStreaming={state.isStreaming}
-            onAbort={() => void abortTurn()}
-            attachments={pendingAttachments}
-            onAttach={handleAttach}
-            onRemoveAttachment={handleRemoveAttachment}
-            onGoalRun={handleGoalRunDirect}
-            contextTokens={state.contextTokens}
-          />
-        </div>
       </div>
-    </ConfigProvider>
+    </div>
   );
 }
 

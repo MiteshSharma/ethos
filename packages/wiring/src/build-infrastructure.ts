@@ -13,10 +13,9 @@ import {
   DefaultLLMProviderRegistry,
   DefaultMemoryProviderRegistry,
   DefaultStorageRegistry,
-  DefaultSttProviderRegistry,
   DefaultToolRegistry,
   DefaultToolResultReducerRegistry,
-  DefaultTtsProviderRegistry,
+  deriveFsReachPaths,
   FileClarifyStore,
 } from '@ethosagent/core';
 import { DockerExecutionBackend } from '@ethosagent/execution-docker';
@@ -63,24 +62,22 @@ import type {
   ExecutionBackendRegistry,
   HookRegistry,
   LLMProviderRegistry,
+  Logger,
   MemoryProviderRegistry,
   PersonalityConfig,
+  PersonalityRegistry,
+  RealtimeVoiceProviderRegistry,
   StorageRegistry,
   SttProviderRegistry,
   TtsProviderRegistry,
 } from '@ethosagent/types';
-import {
-  groqSttFactory,
-  localSttFactory,
-  localTtsFactory,
-  openaiSttFactory,
-  openaiTtsFactory,
-} from '@ethosagent/voice-providers';
 import { activateFirstPartyPlugins } from './activate-first-party';
+import { validateCallCaptureBinding } from './call-capture-binding';
 import type { CreateAgentLoopOptions, WiringConfig } from './index';
 import { buildVaultBackend, composeGatedMemory } from './memory-backend';
 import { registerRemainingBuiltinProviders } from './register-builtin-providers';
 import type { WiringContext } from './types';
+import { createBuiltinVoiceRegistries } from './voice-registries';
 
 export interface InfrastructureResult {
   llmProviders: LLMProviderRegistry;
@@ -97,6 +94,7 @@ export interface InfrastructureResult {
   clarifyBridge: ClarifyBridge;
   sttProviders: SttProviderRegistry;
   ttsProviders: TtsProviderRegistry;
+  realtimeProviders: RealtimeVoiceProviderRegistry;
   constitutionEnforcement?: ConstitutionEnforcement;
   /**
    * The loaded operator constitution. `undefined` only in SAFE MODE (malformed
@@ -105,6 +103,77 @@ export interface InfrastructureResult {
    * just at load time.
    */
   constitution?: Constitution;
+}
+
+/**
+ * The `personalityFsReach` handed to `CapabilityBackends` — the allow set behind
+ * every `from-personality` tool capability (`ctx.scopedFs`).
+ *
+ * It goes through `deriveFsReachPaths` for the same reason ScopedStorage and the
+ * docker mounts do: three copies of one rule drift. Reading the raw declared
+ * config here meant an undeclared personality got an EMPTY set — which
+ * `ScopedFsImpl` treats as deny-all — while the other two layers gave it
+ * `ownDir + cwd`; and `${…}` tokens went unsubstituted.
+ *
+ * `EmptySubstitutionError` degrades to deny-all with a warning rather than
+ * throwing. Warn-and-degrade matches `ensureFsReachDirs` (one bad path must not
+ * take down the whole compose), and deny-all is the correct DIRECTION to degrade
+ * an allowlist in: an unresolvable declared path must never be treated as
+ * broader reach. The execution backend still throws the same error at exec time,
+ * so the loud failure survives where it can be acted on.
+ */
+export function derivePersonalityFsReach(
+  personality: PersonalityConfig,
+  vars: { ethosHome: string; cwd: string },
+  log: Logger,
+): { read: string[]; write: string[] } {
+  try {
+    const { read, write } = deriveFsReachPaths(personality, {
+      ethosHome: vars.ethosHome,
+      self: personality.id,
+      cwd: vars.cwd,
+    });
+    return { read, write };
+  } catch (err) {
+    log.warn('fs_reach: could not derive tool reach; falling back to deny-all', {
+      personalityId: personality.id,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return { read: [], write: [] };
+  }
+}
+
+/**
+ * The `personalityFsReach` resolver handed to `CapabilityBackends`.
+ *
+ * It resolves per tool execution against the LIVE registry instead of storing a
+ * derived `{read, write}`. Storing one froze the boundary at process start: an
+ * edit to `~/.ethos/personalities/<id>/config.yaml` reached the character sheet
+ * and the Documents root immediately, but the file tools kept refusing paths
+ * the config plainly allowed until `ethos serve` was restarted. Capturing a
+ * `PersonalityConfig` here would reintroduce exactly that, so the resolver
+ * holds only the registry and looks the personality up by id — an in-memory map
+ * lookup against the registry the surfaces already refresh, no disk I/O per
+ * call. Taking the id per call is also what makes a mid-session `/personality`
+ * switch resolve the new personality's reach.
+ *
+ * An id the registry does not know degrades to deny-all with a warning, never
+ * to the active personality's (wider) set — same direction as the
+ * `EmptySubstitutionError` degradation above.
+ */
+export function createPersonalityFsReachResolver(
+  personalities: Pick<PersonalityRegistry, 'get' | 'getDefault'>,
+  vars: { ethosHome: string; cwd: string },
+  log: Logger,
+): (personalityId?: string) => { read: string[]; write: string[] } {
+  return (personalityId?: string) => {
+    const person = personalityId ? personalities.get(personalityId) : personalities.getDefault();
+    if (!person) {
+      log.warn('fs_reach: unknown personality; falling back to deny-all', { personalityId });
+      return { read: [], write: [] };
+    }
+    return derivePersonalityFsReach(person, vars, log);
+  };
 }
 
 /**
@@ -248,16 +317,11 @@ export async function buildInfrastructure(
     return createS3Storage(ctx.config, ctx.secrets);
   });
 
-  // Voice provider registries — built-ins registered here; plugins add more via
-  // registerSttProvider / registerTtsProvider.
-  const sttProviders = new DefaultSttProviderRegistry();
-  sttProviders.register('openai-stt', openaiSttFactory);
-  sttProviders.register('groq-stt', groqSttFactory);
-  sttProviders.register('local-stt', localSttFactory);
-
-  const ttsProviders = new DefaultTtsProviderRegistry();
-  ttsProviders.register('openai-tts', openaiTtsFactory);
-  ttsProviders.register('local-tts', localTtsFactory);
+  // Voice provider registries — the built-in roster lives in one place
+  // (`createBuiltinVoiceRegistries`) so diagnostics report exactly what the
+  // running system has; plugins add more via registerSttProvider /
+  // registerTtsProvider.
+  const { sttProviders, ttsProviders, realtimeProviders } = createBuiltinVoiceRegistries();
 
   // -------------------------------------------------------------------------
   // Personalities
@@ -297,6 +361,13 @@ export async function buildInfrastructure(
     });
     constitutionEnforcement = result.enforcement;
   }
+
+  // -------------------------------------------------------------------------
+  // Call-capture single-personality binding (decision 3) — validated against
+  // the FINAL effective personality set (post safe-mode filtering).
+  // -------------------------------------------------------------------------
+
+  validateCallCaptureBinding(personalities.list(), config.callCapture);
 
   // -------------------------------------------------------------------------
   // Sandbox — shared by browser and code tools
@@ -354,10 +425,11 @@ export async function buildInfrastructure(
       },
       logger: log,
     }),
-    personalityFsReach: {
-      read: effectiveActivePerson.fs_reach?.read ?? [],
-      write: effectiveActivePerson.fs_reach?.write ?? [],
-    },
+    personalityFsReach: createPersonalityFsReachResolver(
+      personalities,
+      { ethosHome: dataDir, cwd: wiringCtx.workingDir },
+      log,
+    ),
     personalityNetworkPolicy: effectiveActivePerson.safety?.network ?? {},
     safeFetch,
     alwaysDenyPaths: defaultAlwaysDeny(),
@@ -397,6 +469,7 @@ export async function buildInfrastructure(
     clarifyBridge,
     sttProviders,
     ttsProviders,
+    realtimeProviders,
     constitutionEnforcement,
     constitution,
   };

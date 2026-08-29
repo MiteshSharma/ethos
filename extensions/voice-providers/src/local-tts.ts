@@ -1,15 +1,15 @@
 import type {
-  TtsProvider,
+  StreamingTtsProvider,
   VoiceCapabilities,
   VoiceProviderFactoryContext,
 } from '@ethosagent/types';
-import { synthesizeOpenAiCompat } from './openai-compat';
+import { streamOpenAiCompat, synthesizeOpenAiCompat } from './openai-compat';
 
 // Local TTS over an OpenAI-compatible endpoint (e.g. kokoro-fastapi). API key is
 // OPTIONAL — local servers usually need none. `voice` is a free-form, server-
 // specific id (Kokoro: `af_bella`, `am_adam`, …) passed straight through, so no
 // fixed voice list is enforced (`caps.voices` is omitted).
-export class LocalTtsProvider implements TtsProvider {
+export class LocalTtsProvider implements StreamingTtsProvider {
   readonly name = 'local-tts';
   readonly caps: VoiceCapabilities;
   private readonly apiKey: string | undefined;
@@ -26,6 +26,7 @@ export class LocalTtsProvider implements TtsProvider {
       kind: 'tts',
       formats: ['opus'],
       local: true,
+      streaming: true,
       contractVersion: 1,
     };
   }
@@ -47,6 +48,31 @@ export class LocalTtsProvider implements TtsProvider {
       label: 'Local TTS',
       signal: opts?.signal,
     });
+  }
+
+  /**
+   * Streaming synthesis over the same OpenAI-compatible route. kokoro-fastapi
+   * streams `/v1/audio/speech` as chunked transfer, so playout starts on the
+   * first chunk rather than on the completed sentence. One request per piece,
+   * sequential, so audio stays in text order.
+   */
+  async *synthesizeStream(
+    text: AsyncIterable<string>,
+    opts?: { voice?: string; speed?: number; signal?: AbortSignal },
+  ): AsyncIterable<{ audio: Uint8Array; format: 'opus' }> {
+    for await (const piece of text) {
+      if (piece.trim().length === 0) continue;
+      yield* streamOpenAiCompat({
+        baseUrl: this.baseUrl,
+        apiKey: this.apiKey,
+        model: this.model,
+        voice: opts?.voice ?? this.defaultVoice,
+        input: piece,
+        speed: opts?.speed ?? 1.0,
+        label: 'Local TTS',
+        signal: opts?.signal,
+      });
+    }
   }
 }
 

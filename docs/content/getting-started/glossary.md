@@ -4,7 +4,7 @@ description: "Every Ethos domain term in one place: personality, skill, tool, ho
 kind: reference
 audience: shared
 slug: glossary
-updated: 2026-06-09
+updated: 2026-08-14
 ---
 
 Every domain term used elsewhere in the docs has one canonical entry here. Pages link to the entry on first use. The list is alphabetical inside each cluster; clusters are ordered by how often a newcomer hits them.
@@ -65,7 +65,7 @@ A field in a personality's `config.yaml` controlling whether its agent reads and
 
 ### fs_reach {#fs-reach}
 
-The per-personality filesystem allowlist. A list of absolute or glob paths a personality's file tools may read or write. Default-deny: anything not listed is unreachable. Surfaces as a `BoundaryError` when violated.
+The per-personality filesystem allowlist. A list of absolute or glob paths a personality's file tools may read or write. Default-deny: anything not listed is unreachable. Surfaces as a `BoundaryError` when violated. The same block also sets the personality's working directory via `fs_reach.workdir` — where its relative paths land. See [Personality config reference](../using/reference/personality-yaml.md#fs-reach).
 
 ## Tools, hooks, registries {#tools-hooks-registries}
 
@@ -160,6 +160,22 @@ The runtime layer between channel adapters and `AgentLoop`. Routes inbound messa
 ### Remote gateway {#remote-gateway}
 
 A configuration mode where the desktop app connects to an Ethos server running on another machine rather than starting a local backend. Configured via the Connection settings tab.
+
+### Voice mode {#voice-mode}
+
+Whether a conversation gets spoken replies: `off`, `mirror_inbound` (speak back when spoken to — the default), or `all`. Set per conversation with `/voice`, persisted to `~/.ethos/voice/lane-modes.json` so it outlives `/new` and a gateway restart, and overridden downward by an operator's `voice.channels.<platform>.ttsOut: false`. See [Send and receive voice notes on a channel](../using/how-to/voice-notes-on-channels.md).
+
+### Wake satellite {#wake-satellite}
+
+A separate process that owns a microphone and connects to the Ethos server over `GET /satellite/ws`, streaming captured speech up and receiving synthesized replies back. Two hosts ship: the `ethos listen` daemon (capture is raw PCM on stdin; it matches no phrase itself, so the server transcribes everything and matches the personality's name there) and the Electron main process (which has no capture device today and reports `degraded`). Each satellite has a stable `nodeId` that survives restarts, so the conversation it was having is still there after a reboot. See [Run a wake satellite](../using/how-to/run-a-wake-satellite.md).
+
+### Wake route {#wake-route}
+
+One `phrase → personality` mapping the server owns: `voice.wake.routes.<id>` in `~/.ethos/config.yaml`, edited in **Settings → Voice → Wake routes** and pushed to every connected [wake satellite](#wake-satellite) on save. Routing is a deployment fact, not a [personality](#personality) field — two deployments of the same personality can reasonably answer to different phrases. Every unprivileged personality also answers to its own bare name with no configuration at all; those synthesized routes carry the id `auto:<personalityId>`. A greeting in front of a phrase — `hey`, `hi`, `hello`, `ok`, `okay`, `yo`, `hey there` — is optional in both directions, so `researcher` and `hey researcher` are one trigger.
+
+### Delivery obligation {#delivery-obligation}
+
+One row in the delivery ledger recording that a reply is owed to a chat. Written `pending` before the platform call and marked `delivered` only on a confirmed ack; whatever is still pending at the next gateway start is re-sent. A `kind: 'voice'` obligation carries the synthesized recording as a file on disk, so a retry re-sends those bytes rather than synthesizing again. See [Why does a redelivered voice note re-send the recording?](../building/explanation/why-voice-replies-redeliver.md).
 
 ## Web surfaces {#web-surfaces}
 

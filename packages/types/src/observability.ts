@@ -5,7 +5,13 @@
  */
 export type TraceKind = string;
 
-export type SpanKind = 'tool_call' | 'llm_call' | 'hook' | 'mcp_call';
+/**
+ * `voice_stage` covers the per-turn voice pipeline stages (stt, first
+ * sentence, first audio, whole turn). It is a distinct kind because a voice
+ * stage is neither a tool nor an LLM call, and "which stage ate the latency"
+ * is the only question voice telemetry is asked.
+ */
+export type SpanKind = 'tool_call' | 'llm_call' | 'hook' | 'mcp_call' | 'voice_stage';
 
 /**
  * Opaque event category. Convention: `<domain>.<verb>` (e.g. `audit.transition`,
@@ -162,7 +168,12 @@ export interface ObservabilityWriter {
 // ---------------------------------------------------------------------------
 
 export interface RequestDumpRecord {
+  /** The loop's client-minted per-LLM-call id (sent outbound as
+   *  `X-Client-Request-Id` where the provider supports it). */
   requestId: string;
+  /** B2 — the provider's server-assigned id for the same call (Anthropic's
+   *  `request-id` header). Absent when the provider exposes none. */
+  providerRequestId?: string;
   timestamp: string;
   sessionId: string;
   personalityId?: string;

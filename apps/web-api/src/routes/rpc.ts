@@ -3,6 +3,8 @@ import { ORPCError } from '@orpc/server';
 import { RPCHandler } from '@orpc/server/fetch';
 import { Hono } from 'hono';
 import { getCookie } from 'hono/cookie';
+// Side-effect import: augments Hono's `ContextVariableMap` with `requestId`.
+import 'hono/request-id';
 import { statusFor } from '../middleware/error-envelope';
 import { apiRouter } from '../rpc/router';
 import type { ServiceContainer } from './index';
@@ -112,23 +114,26 @@ export function rpcRoutes(opts: RpcRoutesOptions) {
       startReqClone = c.req.raw.clone();
     }
 
-    // Thread the cookie value + derived redirect URI into the service
-    // context as enumerable own properties. oRPC interceptors spread the
-    // context (`{...options.context, ...next.context}`), so prototype-only
-    // properties would be lost — every field the handlers read must be
-    // own-and-enumerable on the same object. The underscore prefix marks
-    // these as framework-internal so namespace code knows not to touch
-    // them outside the dedicated helpers in `rpc/mcp.ts`.
-    const context: ServiceContainer =
-      mcpPendingState || mcpRequestOrigin || mcpPendingPersonalityId
-        ? Object.assign(
-            Object.create(null) as ServiceContainer,
-            opts.services,
-            mcpPendingState ? { _mcpPendingState: mcpPendingState } : {},
-            mcpPendingPersonalityId ? { _mcpPendingPersonalityId: mcpPendingPersonalityId } : {},
-            mcpRequestOrigin ? { _mcpRequestOrigin: mcpRequestOrigin } : {},
-          )
-        : opts.services;
+    // Thread the cookie value + derived redirect URI + this request's
+    // `x-request-id` into the service context as enumerable own properties.
+    // oRPC interceptors spread the context (`{...options.context,
+    // ...next.context}`), so prototype-only properties would be lost — every
+    // field the handlers read must be own-and-enumerable on the same object.
+    // The underscore prefix marks these as framework-internal so namespace
+    // code knows not to touch them outside the dedicated helpers in
+    // `rpc/mcp.ts` / `features/chat/rpc/send.ts`.
+    //
+    // B1 — `_requestId` is always present (the middleware runs for every
+    // request), which is why this is no longer conditional on the MCP fields.
+    const requestId: string | undefined = c.get('requestId');
+    const context: ServiceContainer = Object.assign(
+      Object.create(null) as ServiceContainer,
+      opts.services,
+      requestId ? { _requestId: requestId } : {},
+      mcpPendingState ? { _mcpPendingState: mcpPendingState } : {},
+      mcpPendingPersonalityId ? { _mcpPendingPersonalityId: mcpPendingPersonalityId } : {},
+      mcpRequestOrigin ? { _mcpRequestOrigin: mcpRequestOrigin } : {},
+    );
 
     const { matched, response } = await handler.handle(c.req.raw, {
       prefix: '/rpc',

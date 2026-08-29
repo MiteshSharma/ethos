@@ -2,6 +2,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SQLiteSessionStore } from '@ethosagent/session-sqlite';
+import { InMemoryStorage } from '@ethosagent/storage-fs';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createWebApi } from '../../index';
 import {
@@ -20,6 +21,10 @@ describe('GET /healthz', () => {
     store = new SQLiteSessionStore(':memory:');
     app = createWebApi({
       dataDir: dir,
+      // In-memory storage so the heartbeat lookup cannot see the real
+      // ~/.ethos/gateway-health.json — the gateway-heartbeat suite writes that
+      // same path, and vitest runs the two files in parallel.
+      storage: new InMemoryStorage(),
       sessionStore: store,
       memoryProvider: makeStubMemoryProvider(),
       agentLoop: makeStubAgentLoop(),

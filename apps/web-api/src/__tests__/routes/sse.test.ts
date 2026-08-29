@@ -158,6 +158,12 @@ async function readSseUntilDone(response: Response, timeoutMs: number): Promise<
         buf = buf.slice(split + 2);
         const parsed = parseFrame(frame);
         if (parsed) {
+          // B1 — every stream opens with a `stream_meta` frame carrying the
+          // connection's `x-request-id`. It is per-CONNECTION, not a buffered
+          // session event: it has no `id:` line and never enters the replay
+          // buffer, so it is not part of what these seq/replay assertions
+          // describe. Its own coverage lives in middleware/request-id.test.ts.
+          if (parsed.event.type === 'stream_meta') continue;
           out.push(parsed);
           if (parsed.event.type === 'done') return out;
         }

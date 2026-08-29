@@ -15,6 +15,7 @@ export class FakeLiveKitRoomClient implements LiveKitRoomClient {
   connectOpts: LiveKitConnectOptions | null = null;
   readonly published: LiveKitAudioFrame[] = [];
   private remoteHandlers: Array<(frame: LiveKitAudioFrame) => void> = [];
+  private disconnectHandlers: Array<() => void> = [];
 
   constructor(private readonly identity = 'caller-1') {}
 
@@ -26,6 +27,14 @@ export class FakeLiveKitRoomClient implements LiveKitRoomClient {
   async disconnect(): Promise<void> {
     this.connected = false;
     this.remoteHandlers = [];
+    this.disconnectHandlers = [];
+  }
+
+  onDisconnected(handler: () => void): () => void {
+    this.disconnectHandlers.push(handler);
+    return () => {
+      this.disconnectHandlers = this.disconnectHandlers.filter((h) => h !== handler);
+    };
   }
 
   onRemoteAudio(handler: (frame: LiveKitAudioFrame) => void): () => void {
@@ -52,6 +61,26 @@ export class FakeLiveKitRoomClient implements LiveKitRoomClient {
   emitRemote(frame: LiveKitAudioFrame): void {
     for (const handler of this.remoteHandlers) handler(frame);
   }
+
+  /** Test driver: simulate the caller hanging up / the room closing under us. */
+  emitDisconnected(): void {
+    this.connected = false;
+    for (const handler of [...this.disconnectHandlers]) handler();
+  }
+}
+
+/**
+ * A room client written BEFORE `onDisconnected` existed — the shape every
+ * app-supplied binding still has today. Proves the seam stayed optional.
+ */
+export function legacyRoomClient(): LiveKitRoomClient {
+  return {
+    connect: async () => {},
+    disconnect: async () => {},
+    onRemoteAudio: () => () => {},
+    publishAudio: () => {},
+    remoteIdentity: () => 'legacy-caller',
+  };
 }
 
 export class FakeTokenMinter implements LiveKitTokenMinter {

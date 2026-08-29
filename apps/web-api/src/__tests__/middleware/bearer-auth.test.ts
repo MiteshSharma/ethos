@@ -96,6 +96,58 @@ describe('bearerAuth middleware', () => {
     expect(after).toBeInstanceOf(Date);
   });
 
+  describe('allowedOrigins', () => {
+    let restrictedSecret: string;
+    let restrictedApp: Hono;
+
+    beforeEach(async () => {
+      const created = await store.create({
+        name: 'browser',
+        scopes: ['chat'],
+        allowedOrigins: ['https://a.example'],
+      });
+      restrictedSecret = created.secret;
+      restrictedApp = new Hono();
+      restrictedApp.use('/v1/*', bearerAuth({ store, scope: 'chat' }));
+      restrictedApp.get('/v1/ping', (c) => c.json({ ok: true }));
+    });
+
+    it('returns 403 origin_not_allowed for an Origin outside the list', async () => {
+      const res = await restrictedApp.request('/v1/ping', {
+        headers: { Authorization: `Bearer ${restrictedSecret}`, Origin: 'https://b.example' },
+      });
+      expect(res.status).toBe(403);
+      const body = (await res.json()) as {
+        error: { type: string; code: string; message: string; param: string | null };
+      };
+      expect(body.error.type).toBe('permission_error');
+      expect(body.error.code).toBe('origin_not_allowed');
+      expect(body.error.param).toBeNull();
+      expect(body.error.message).toMatch(/https:\/\/b\.example/);
+    });
+
+    it('passes through for an Origin inside the list', async () => {
+      const res = await restrictedApp.request('/v1/ping', {
+        headers: { Authorization: `Bearer ${restrictedSecret}`, Origin: 'https://a.example' },
+      });
+      expect(res.status).toBe(200);
+    });
+
+    it('passes through when no Origin header is sent (server-side SDK clients)', async () => {
+      const res = await restrictedApp.request('/v1/ping', {
+        headers: { Authorization: `Bearer ${restrictedSecret}` },
+      });
+      expect(res.status).toBe(200);
+    });
+
+    it('passes through for any Origin when allowedOrigins is empty (CLI keys)', async () => {
+      const res = await app.request('/v1/ping', {
+        headers: { Authorization: `Bearer ${secret}`, Origin: 'https://anywhere.example' },
+      });
+      expect(res.status).toBe(200);
+    });
+  });
+
   it('coalesces last_used writes within the throttle window (no SQLite write per request)', async () => {
     // Spy on the underlying store. The middleware should write once on the
     // first request and then skip subsequent calls until the throttle expires.

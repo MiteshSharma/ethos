@@ -68,12 +68,13 @@ export interface PersonalitySafetyConfig {
    * values when absent, so a personality with no `injectionDefense` block
    * still gets provenance wrapping on `outputIsUntrusted` tools and a 2-turn
    * post-read downgrade for the default dangerous-tool list.
+   *
+   * There is deliberately no master switch. ARCHITECTURE.md §V S6 makes the
+   * inbound safety pipeline non-opt-out-able by personality, channel, or
+   * tool; these knobs may only narrow behaviour within it, never remove it.
    */
   injectionDefense?: {
-    /** Master switch. Default: true. Setting `false` skips wrapping, pattern
-     *  check, and post-read downgrade — used by tests and headless tooling. */
-    enabled?: boolean;
-    /** Tier-2 LLM classifier policy. Tier-1 regex always runs when enabled. */
+    /** Tier-2 LLM classifier policy. Tier-1 regex always runs. */
     classifier?: {
       /**
        * Force the LLM classifier to fire on every `outputIsUntrusted` result
@@ -126,6 +127,133 @@ export interface OutboundPolicyConfig {
   approve_before_send: boolean;
   channels?: string[];
   approver_personality?: string;
+}
+
+/**
+ * How a personality's call LOOKS (DESIGN.md § "Call Stage"). Three treatments,
+ * all driven by the same amplitude signal — only the shape differs.
+ */
+export type CallTreatment = 'liquid' | 'orb' | 'rings';
+
+/** The treatments in a fixed order. The derivation below indexes into this. */
+export const CALL_TREATMENTS: readonly CallTreatment[] = ['liquid', 'orb', 'rings'];
+
+/**
+ * The treatment a personality gets when nobody picked one.
+ *
+ * Content-addressed on the id, so the same personality draws the same shape on
+ * every machine and across restarts — a look that is part of who it is, not an
+ * accident of insertion order or a random seed. Deliberately the same hash
+ * `accentFor` in `@ethosagent/design-tokens` uses for the accent: one
+ * derivation shape for "identity → look", not two.
+ */
+export function derivedCallTreatment(personalityId: string): CallTreatment {
+  let hash = 0;
+  for (let i = 0; i < personalityId.length; i++) {
+    hash = (hash * 31 + personalityId.charCodeAt(i)) | 0;
+  }
+  return CALL_TREATMENTS[Math.abs(hash) % CALL_TREATMENTS.length] ?? 'liquid';
+}
+
+/**
+ * The ONE precedence rule for which treatment a call draws. Every surface calls
+ * this — a second copy of the order is a second answer to the same question.
+ *
+ *   1. The personality's own `voice.call_style` — explicit identity wins.
+ *   2. The operator's `display.call_style`, when it names a concrete treatment
+ *      (`personality`, the default, is not a pin — it defers to step 3).
+ *   3. Derived from the personality id, so every personality has a distinct
+ *      look with nothing configured.
+ */
+export function resolveCallTreatment(input: {
+  personalityId: string;
+  /** `PersonalityConfig.voice.call_style`. */
+  personalityCallStyle?: CallTreatment | undefined;
+  /** `display.call_style` from `~/.ethos/config.yaml`. */
+  operatorCallStyle?: CallTreatment | 'personality' | undefined;
+}): CallTreatment {
+  if (input.personalityCallStyle) return input.personalityCallStyle;
+  const operator = input.operatorCallStyle;
+  if (operator && operator !== 'personality') return operator;
+  return derivedCallTreatment(input.personalityId);
+}
+
+/**
+ * How a personality SOUNDS, and how its call LOOKS. The sanctioned exception to
+ * the "no voice/speech fields on PersonalityConfig" rule (voice V1a,
+ * eng-review D2), widened by the personality-presentation amendment: a
+ * deployment chooses the voice PROVIDER, the personality chooses its own voice
+ * and its own call treatment, the same way it chooses its own model.
+ * Everything that is a deployment or per-channel concern stays out — voice
+ * modes, VAD tuning, per-adapter affordances, and wake routes all remain
+ * gateway/config-owned.
+ *
+ * Absent = inherit the global `auxiliary.asr.*` / `auxiliary.tts.*` defaults,
+ * and a call treatment derived from the personality id.
+ */
+export interface PersonalityVoiceConfig {
+  /**
+   * Name of an entry in the deployment's TTS roster
+   * (`voice.tts.providers.<name>.*` in `~/.ethos/config.yaml`). A LABEL the
+   * operator chose, never a provider id — the egress gate keys on the entry's
+   * underlying `provider`, so naming an entry `local-kokoro` buys nothing.
+   *
+   * Absent, or naming an entry this machine does not have, falls back to the
+   * default `auxiliary.tts` entry: a personality shared between machines must
+   * still speak on one that lacks its preferred provider.
+   *
+   * `voice.provider` is still ACCEPTED on read as the older spelling of this
+   * key; the loader maps it here and re-serializes the new one, so a config
+   * never carries both.
+   */
+  tts_provider?: string;
+  /**
+   * Name of an entry in the deployment's STT roster
+   * (`voice.stt.providers.<name>.*`). The exact mirror of `tts_provider`, down
+   * to the fallback: unknown here → the default `auxiliary.asr` entry.
+   *
+   * A personality's VOICE is identity; its EAR is a technical override — a
+   * Spanish-tuned or local-only personality transcribing through a different
+   * engine than the deployment default.
+   */
+  stt_provider?: string;
+  /**
+   * Name of an entry in the deployment's REALTIME roster
+   * (`voice.realtime.providers.<name>.*`). The speech-to-speech sibling of
+   * `tts_provider` / `stt_provider`, under the same rules: a LABEL the operator
+   * chose, never a provider id, and a name this machine lacks falls back to
+   * `voice.realtime.default` rather than failing the load.
+   *
+   * Only consulted when a turn runs on the realtime tier; on the pipeline tier
+   * `tts_provider` / `stt_provider` are what speak and listen.
+   */
+  realtime_provider?: string;
+  /** TTS voice id, provider-specific (e.g. `af_bella` for Kokoro, `alloy` for OpenAI). */
+  tts_voice?: string;
+  /**
+   * BCP-47 tag → TTS voice id. Wins over `tts_voice` when the turn's language
+   * is known: a personality that declares a Spanish voice means it in Spanish.
+   */
+  languages?: Record<string, string>;
+  /**
+   * Preferred voice tier. `pipeline` = STT → LLM → TTS (V1a); `realtime` =
+   * hosted speech-to-speech (V1b). A preference, not a guarantee — a
+   * deployment with no realtime provider serves `pipeline` either way.
+   */
+  tier?: 'pipeline' | 'realtime';
+  /**
+   * Fast-lane model for spoken turns. Conversational latency and agentic depth
+   * want different models; this is how a personality says which one talks.
+   */
+  model?: string;
+  /**
+   * Which treatment the Call Stage draws for this personality — how it LOOKS
+   * while it holds the floor, the visual sibling of `tts_voice`. Absent falls
+   * through to the operator's `display.call_style` and then to a value derived
+   * from the id, so a personality always has a look; see
+   * {@link resolveCallTreatment} for the one precedence rule every surface uses.
+   */
+  call_style?: CallTreatment;
 }
 
 export interface DreamingConfig {
@@ -182,12 +310,23 @@ export interface LivingSoul {
 // this interface at test time and fails if the count drifts from
 // `.personality-field-count`. Culture sets the rule; CI enforces it.
 //
-// Common rejections — these belong in skills or per-channel adapter config,
-// NOT here:
-//   - voice modes / TTS settings
+// How a personality PRESENTS itself — how it sounds, how its call is drawn,
+// how it looks — is identity, and lives as sub-keys of an identity block
+// below (`voice`, `display`; the personality-presentation amendment). It is
+// not a new top-level field, and it is not a licence for one.
+//
+// Common rejections — these belong in skills, in `~/.ethos/config.yaml`, or in
+// per-channel adapter config, NOT here:
+//   - voice MODES, VAD tuning, per-channel voice affordances (the `voice`
+//     field below is identity — which voice this personality speaks in and
+//     what its call looks like — and is the one sanctioned exception, granted
+//     by the voice V1a amendment; it is not a licence for further
+//     speech/audio SETTINGS)
 //   - emotion / mood / sentiment tags
 //   - label or response templates
 //   - per-channel UI affordances
+//   - operator and deployment concerns: transport, credentials, rosters,
+//     endpoints, anything an operator sets once for the machine
 export interface PersonalityConfig {
   /** @internal Personality directory name; populated by the loader, not user-set. */
   id: string;
@@ -227,10 +366,19 @@ export interface PersonalityConfig {
    *   read:  [~/.ethos/personalities/<self>/, ~/.ethos/skills/, ${CWD}]
    *   write: [~/.ethos/personalities/<self>/, ${CWD}]
    *
+   * `workdir` is this personality's working directory — where its relative
+   * file paths land. It takes the same substitutions, must resolve absolute,
+   * and BECOMES the `${CWD}` that the read/write entries substitute against.
+   * A declared workdir is always reachable: it is added to both derived
+   * lists, because a declared `write` REPLACES the defaults and would
+   * otherwise leave the workdir unwritable. When `workdir` is unset the
+   * working directory is the process cwd and read/write derive exactly as
+   * before.
+   *
    * Counts as ONE field for the schema-freeze gate (the nested shape is
    * a leaf type).
    */
-  fs_reach?: { read?: string[]; write?: string[] };
+  fs_reach?: { read?: string[]; write?: string[]; workdir?: string };
   /**
    * MCP servers this personality can reach. Server configs stay global in
    * ~/.ethos/mcp.json; this is a per-role allowlist keyed by server name.
@@ -387,6 +535,30 @@ export interface PersonalityConfig {
     judge?: { enabled?: boolean; minInteractions?: number };
     expression?: boolean;
   };
+  /**
+   * Voice V1a — how this personality SOUNDS: TTS voice id, language→voice map,
+   * tier preference, fast-lane model — and, since the personality-presentation
+   * amendment, how its call LOOKS (`call_style`). See
+   * {@link PersonalityVoiceConfig} for why this is identity rather than a
+   * deployment setting, and what stays out.
+   * Absent = inherit the global `auxiliary.tts.*` config.
+   * Counts as ONE field for the schema-freeze gate (the nested shape is a
+   * leaf type — same precedent as `fs_reach`).
+   */
+  voice?: PersonalityVoiceConfig;
+  /**
+   * How a personality LOOKS across identity surfaces (the rail, the picker,
+   * the chat header, …) — the visual sibling of `voice`, granted by the same
+   * personality-presentation amendment: a personality is not only its tools
+   * and its plugins, it is also how it looks and feels. First field:
+   * `avatar_url`, a URL to a served or uploaded avatar image. Absent, or an
+   * image that fails to load, falls back to the generated mark
+   * (`PersonalityRingAvatar` / `PersonalityMark`) every identity surface
+   * already renders — no other behavior changes.
+   * Counts as ONE field for the schema-freeze gate (the nested shape is a
+   * leaf type — same precedent as `fs_reach`).
+   */
+  display?: { avatar_url?: string };
 }
 
 /**
@@ -426,4 +598,28 @@ export interface PersonalityRegistry {
    * the concrete method directly.
    */
   update?(id: string, patch: PersonalityRegistryPatch): Promise<unknown>;
+  /**
+   * Model-visible ⟺ logged (plan/phases/model-visible-logged.md, Phase B,
+   * D8) — the six-path content fingerprint (`config.yaml`, `SOUL.md`,
+   * `toolset.yaml`, `mcp.yaml`, `tools.yaml`, `skills/` presence) for a
+   * personality, as raw source strings for the caller to hash. Optional:
+   * only `FilePersonalityRegistry` (extensions/personalities) implements
+   * it, since only a file-backed registry has a directory to read from.
+   * `context-assembly.ts` (packages/core) calls this through the interface
+   * rather than importing extensions/personalities directly — core does not
+   * depend on extensions (ARCHITECTURE.md layer direction). Returns `null`
+   * when the personality is unknown.
+   */
+  getContentFingerprint?(id: string): Promise<PersonalityFingerprintSources | null>;
+}
+
+/** Six-path content sources for a personality's fingerprint (D8). See
+ *  `PersonalityRegistry.getContentFingerprint`. */
+export interface PersonalityFingerprintSources {
+  soulSrc: string | null;
+  configSrc: string | null;
+  toolsetSrc: string | null;
+  mcpSrc: string | null;
+  toolsSrc: string | null;
+  skillsDirPresent: boolean;
 }

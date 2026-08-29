@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { estimateCost } from '@ethosagent/pricing';
 import Database, { migrate } from '@ethosagent/sqlite';
 import type {
   CompressionEvent,
@@ -20,6 +21,7 @@ export {
   hashApiKey,
   SqliteApiKeyStore,
 } from './api-key-store';
+export { SQLiteContextLog } from './context-log';
 export {
   decideMigration,
   type MigrateSessionKeysOptions,
@@ -27,6 +29,29 @@ export {
   type SessionKeyMigrationResult,
 } from './session-key-migration';
 export { SqliteKeyValueStore };
+
+/** One grouped row from {@link SQLiteSessionStore.usageAggregate}. */
+export interface UsageAggregateRow {
+  key: string;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheCreationTokens: number;
+  estimatedCostUsd: number;
+  messages: number;
+}
+
+/** Outcome of {@link SQLiteSessionStore.recomputeMessageCosts}. */
+export interface RecomputeCostsResult {
+  /** Message rows carrying token counts, i.e. rows a cost can be derived for. */
+  messagesScanned: number;
+  /** Rows whose stored cost differed from the recomputed one and were rewritten. */
+  messagesUpdated: number;
+  /** Sessions whose derived rollup total had to be rebuilt. */
+  sessionsUpdated: number;
+  /** Models with no rate — their rows were (re)written as 0. Sorted, unique. */
+  unpricedModels: string[];
+}
 
 // ---------------------------------------------------------------------------
 // SQLiteSessionStore
@@ -158,6 +183,13 @@ export class SQLiteSessionStore implements SessionStore {
       this.db.exec('ALTER TABLE messages ADD COLUMN trace_id TEXT');
     }
 
+    // Additive migration: inline vision/document blocks for natively-sent
+    // attachments. Held apart from `content` so the FTS5 external-content
+    // index never sees base64 payloads — see StoredMessage.contentBlocks.
+    if (!cols.some((c) => c.name === 'content_blocks')) {
+      this.db.exec('ALTER TABLE messages ADD COLUMN content_blocks TEXT');
+    }
+
     // Additive migration (context_compression Q2): per-session turn counter
     // and the turn of the last compaction, used by the anti-thrashing cooldown.
     const sessCols = this.db.pragma('table_info(sessions)') as Array<{ name: string }>;
@@ -249,6 +281,18 @@ export class SQLiteSessionStore implements SessionStore {
       values.push(patch.title);
     }
     if (patch.personalityId !== undefined) {
+      // A session's personality is bound at creation and immutable thereafter.
+      // Binding an unset one is allowed; re-pointing a bound one never is.
+      const bound = (
+        this.db.prepare('SELECT personality_id FROM sessions WHERE id = ?').get(id) as
+          | { personality_id: string | null }
+          | undefined
+      )?.personality_id;
+      if (bound != null && bound !== patch.personalityId) {
+        throw new Error(
+          `Session ${id} is bound to personality "${bound}" and cannot be changed to "${patch.personalityId}".`,
+        );
+      }
       sets.push('personality_id = ?');
       values.push(patch.personalityId);
     }
@@ -335,9 +379,9 @@ export class SQLiteSessionStore implements SessionStore {
       .prepare(
         `INSERT INTO messages
          (id, session_id, role, content, tool_call_id, tool_name, tool_calls,
-          input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
-          estimated_cost_usd, timestamp)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+          content_blocks, input_tokens, output_tokens, cache_read_tokens,
+          cache_creation_tokens, estimated_cost_usd, trace_id, timestamp)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       )
       .run(
         id,
@@ -347,11 +391,13 @@ export class SQLiteSessionStore implements SessionStore {
         data.toolCallId ?? null,
         data.toolName ?? null,
         data.toolCalls ? JSON.stringify(data.toolCalls) : null,
+        data.contentBlocks ? JSON.stringify(data.contentBlocks) : null,
         data.usage?.inputTokens ?? null,
         data.usage?.outputTokens ?? null,
         data.usage?.cacheReadTokens ?? null,
         data.usage?.cacheCreationTokens ?? null,
         data.usage?.estimatedCostUsd ?? null,
+        data.traceId ?? null,
         timestamp,
       );
 
@@ -559,15 +605,152 @@ export class SQLiteSessionStore implements SessionStore {
     if (toDelete.length === 0) return 0;
     const now = new Date().toISOString();
     const placeholders = toDelete.map(() => '?').join(',');
-    this.db
-      .prepare(`UPDATE messages SET deleted_at = ? WHERE id IN (${placeholders})`)
-      .run(now, ...toDelete);
+    // The session's token/cost columns are a derived cache of the surviving
+    // `messages` rows (analytics decision 9), so the soft-delete and the
+    // rollup subtraction have to land together or the cache goes stale.
+    this.db.transaction(() => {
+      this.subtractMessageUsage(sessionId, toDelete);
+      this.db
+        .prepare(`UPDATE messages SET deleted_at = ? WHERE id IN (${placeholders})`)
+        .run(now, ...toDelete);
+    })();
     return pairs;
+  }
+
+  /**
+   * Take the usage recorded on the given (still-live) messages back out of the
+   * session's rollup columns. Only rows belonging to `sessionId` that have not
+   * already been soft-deleted count, so a row can never be subtracted twice.
+   *
+   * Clamped at zero: sessions written before rollups were maintained carry
+   * message usage the columns never saw, and a negative total is a worse lie
+   * than a floored one.
+   */
+  private subtractMessageUsage(sessionId: string, messageIds: string[]): void {
+    const placeholders = messageIds.map(() => '?').join(',');
+    const removed = this.db
+      .prepare(
+        `SELECT COALESCE(SUM(input_tokens), 0)          AS input_tokens,
+                COALESCE(SUM(output_tokens), 0)         AS output_tokens,
+                COALESCE(SUM(cache_read_tokens), 0)     AS cache_read_tokens,
+                COALESCE(SUM(cache_creation_tokens), 0) AS cache_creation_tokens,
+                COALESCE(SUM(estimated_cost_usd), 0)    AS estimated_cost_usd
+         FROM messages
+         WHERE session_id = ? AND deleted_at IS NULL AND id IN (${placeholders})`,
+      )
+      .get(sessionId, ...messageIds) as {
+      input_tokens: number;
+      output_tokens: number;
+      cache_read_tokens: number;
+      cache_creation_tokens: number;
+      estimated_cost_usd: number;
+    };
+
+    this.db
+      .prepare(
+        `UPDATE sessions SET
+           input_tokens          = max(input_tokens - ?, 0),
+           output_tokens         = max(output_tokens - ?, 0),
+           cache_read_tokens     = max(cache_read_tokens - ?, 0),
+           cache_creation_tokens = max(cache_creation_tokens - ?, 0),
+           estimated_cost_usd    = max(estimated_cost_usd - ?, 0.0)
+         WHERE id = ?`,
+      )
+      .run(
+        removed.input_tokens,
+        removed.output_tokens,
+        removed.cache_read_tokens,
+        removed.cache_creation_tokens,
+        removed.estimated_cost_usd,
+        sessionId,
+      );
   }
 
   // ---------------------------------------------------------------------------
   // Maintenance
   // ---------------------------------------------------------------------------
+
+  /**
+   * A5 backfill — re-derive `messages.estimated_cost_usd` from the token counts
+   * already stored on each row, using the one shared rate table.
+   *
+   * History written before `@ethosagent/pricing` existed is poisoned in two
+   * directions: three providers hardcoded every call to $0, and llm-anthropic
+   * priced any unrecognised `claude-*` id at Sonnet rates. Both are recorded
+   * numbers, so no amount of fixing the emitters repairs what is already on
+   * disk. This does.
+   *
+   * The model comes from `sessions.model` — `messages` has no model column, and
+   * the session's model is the only per-row signal that exists. A session whose
+   * model was switched mid-conversation is re-priced entirely at its current
+   * model; that is a known approximation and still strictly better than a
+   * column of zeros.
+   *
+   * IDEMPOTENT. The cost is a pure function of (model, token counts), and the
+   * session rollup is rewritten to the sum it must equal rather than adjusted by
+   * a delta, so a second run writes nothing and reports 0 rows updated.
+   *
+   * ROLLUP INVARIANT (analytics decision 9). `sessions.estimated_cost_usd` is a
+   * derived cache of the live `messages` rows. Rewriting message costs without
+   * rebuilding it would leave the cache stale — the exact invariant A1's
+   * consistency test pins — so both land in one transaction.
+   */
+  async recomputeMessageCosts(): Promise<RecomputeCostsResult> {
+    const rows = this.db
+      .prepare(
+        `SELECT m.id, m.input_tokens, m.output_tokens, m.cache_read_tokens,
+                m.cache_creation_tokens, m.estimated_cost_usd, s.model
+         FROM messages m
+         JOIN sessions s ON s.id = m.session_id
+         WHERE m.input_tokens IS NOT NULL`,
+      )
+      .all() as Array<{
+      id: string;
+      input_tokens: number;
+      output_tokens: number | null;
+      cache_read_tokens: number | null;
+      cache_creation_tokens: number | null;
+      estimated_cost_usd: number | null;
+      model: string;
+    }>;
+
+    const unpriced = new Set<string>();
+    const updates: Array<{ id: string; cost: number }> = [];
+    for (const r of rows) {
+      const { costUsd, basis } = estimateCost(r.model, {
+        inputTokens: r.input_tokens,
+        outputTokens: r.output_tokens ?? 0,
+        cacheReadTokens: r.cache_read_tokens ?? 0,
+        cacheCreationTokens: r.cache_creation_tokens ?? 0,
+      });
+      if (basis === 'unknown') unpriced.add(r.model);
+      if (r.estimated_cost_usd !== costUsd) updates.push({ id: r.id, cost: costUsd });
+    }
+
+    // `IS NOT` is SQLite's null-safe comparison, so a session already holding
+    // the right total is left alone and the reported count means "changed".
+    const sessionsUpdated = this.db.transaction(() => {
+      const setCost = this.db.prepare('UPDATE messages SET estimated_cost_usd = ? WHERE id = ?');
+      for (const u of updates) setCost.run(u.cost, u.id);
+      return this.db
+        .prepare(
+          `UPDATE sessions SET estimated_cost_usd = COALESCE(
+             (SELECT SUM(estimated_cost_usd) FROM messages
+              WHERE session_id = sessions.id AND deleted_at IS NULL), 0.0)
+           WHERE estimated_cost_usd IS NOT COALESCE(
+             (SELECT SUM(estimated_cost_usd) FROM messages
+              WHERE session_id = sessions.id AND deleted_at IS NULL), 0.0)`,
+        )
+        .run().changes;
+    })();
+
+    return {
+      messagesScanned: rows.length,
+      messagesUpdated: updates.length,
+      sessionsUpdated,
+      unpricedModels: [...unpriced].sort(),
+    };
+  }
 
   // ---------------------------------------------------------------------------
   // FW-4 — title management
@@ -625,6 +808,55 @@ export class SQLiteSessionStore implements SessionStore {
     this.db.exec('VACUUM');
   }
 
+  /**
+   * AN-D1 — spend and token aggregates over a window, for `ethos usage`.
+   *
+   * Reads the `messages` rows rather than the per-session rollup: the rollup is
+   * a derived cache keyed to whole sessions, so a session straddling the window
+   * boundary would contribute all of its spend to whichever side it started on.
+   * Messages carry their own timestamp, so the window is exact.
+   *
+   * `dimension` picks the grouping key. `session`/`personality`/`channel`/
+   * `model` join to `sessions`; `day` groups by UTC date. Half-open window
+   * [since, until).
+   */
+  async usageAggregate(opts: {
+    since: Date;
+    until: Date;
+    dimension: 'day' | 'model' | 'personality' | 'channel' | 'session';
+  }): Promise<UsageAggregateRow[]> {
+    const keyExpr = {
+      // `substr(timestamp, 1, 10)` over an ISO-8601 string is the UTC date, and
+      // it stays sargable against idx_messages_session's timestamp component.
+      day: 'substr(m.timestamp, 1, 10)',
+      model: 's.model',
+      personality: "COALESCE(s.personality_id, 'unknown')",
+      channel: 's.platform',
+      session: 'm.session_id',
+    }[opts.dimension];
+
+    return this.db
+      .prepare(
+        `SELECT ${keyExpr} AS key,
+                COALESCE(SUM(m.input_tokens), 0)          AS inputTokens,
+                COALESCE(SUM(m.output_tokens), 0)         AS outputTokens,
+                COALESCE(SUM(m.cache_read_tokens), 0)     AS cacheReadTokens,
+                COALESCE(SUM(m.cache_creation_tokens), 0) AS cacheCreationTokens,
+                COALESCE(SUM(m.estimated_cost_usd), 0)    AS estimatedCostUsd,
+                COUNT(*)                                  AS messages
+           FROM messages m
+           JOIN sessions s ON s.id = m.session_id
+          WHERE m.timestamp >= ? AND m.timestamp < ?
+            AND m.input_tokens IS NOT NULL
+          -- Group by the EXPRESSION, never the \`key\` alias: \`sessions.key\` is a
+          -- real column, so \`GROUP BY key\` silently resolves to it and every
+          -- dimension collapses to per-session grouping.
+          GROUP BY ${keyExpr}
+          ORDER BY estimatedCostUsd DESC`,
+      )
+      .all(opts.since.toISOString(), opts.until.toISOString()) as UsageAggregateRow[];
+  }
+
   /** Close the database connection (useful in tests). */
   close(): void {
     this.db.close();
@@ -666,11 +898,13 @@ interface MessageRow {
   tool_call_id: string | null;
   tool_name: string | null;
   tool_calls: string | null;
+  content_blocks: string | null;
   input_tokens: number | null;
   output_tokens: number | null;
   cache_read_tokens: number | null;
   cache_creation_tokens: number | null;
   estimated_cost_usd: number | null;
+  trace_id: string | null;
   timestamp: string;
 }
 
@@ -733,6 +967,9 @@ function rowToMessage(r: MessageRow): StoredMessage {
     toolCallId: r.tool_call_id ?? undefined,
     toolName: r.tool_name ?? undefined,
     toolCalls: r.tool_calls ? (JSON.parse(r.tool_calls) as StoredMessage['toolCalls']) : undefined,
+    contentBlocks: r.content_blocks
+      ? (JSON.parse(r.content_blocks) as StoredMessage['contentBlocks'])
+      : undefined,
     usage:
       r.input_tokens != null
         ? {
@@ -743,6 +980,7 @@ function rowToMessage(r: MessageRow): StoredMessage {
             estimatedCostUsd: r.estimated_cost_usd ?? 0,
           }
         : undefined,
+    traceId: r.trace_id ?? undefined,
     timestamp: new Date(r.timestamp),
   };
 }

@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128" role="img" aria-label="Remy avatar">
+  <circle cx="64" cy="64" r="64" fill="#B3E5E0"/>
+  <ellipse cx="64" cy="76" rx="28" ry="30" fill="#C68642"/>
+  <circle cx="37" cy="78" r="6" fill="#C68642"/>
+  <circle cx="91" cy="78" r="6" fill="#C68642"/>
+  <path d="M34,58 Q64,32 94,58 L94,46 Q64,24 34,46 Z" fill="#3B82F6"/>
+  <path d="M78,34 Q92,38 90,52 Q84,42 76,42 Z" fill="#3B82F6"/>
+  <ellipse cx="53" cy="74" rx="3.5" ry="4.5" fill="#2B2118"/>
+  <ellipse cx="75" cy="74" rx="3.5" ry="4.5" fill="#2B2118"/>
+  <circle cx="70" cy="86" r="1.6" fill="#C0C0C8"/>
+  <path d="M52,89 Q64,95 74,88" stroke="#7A4B32" stroke-width="3.5" fill="none" stroke-linecap="round"/>
+</svg>

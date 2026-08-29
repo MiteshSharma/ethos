@@ -1,6 +1,7 @@
 import { Spin, Typography } from 'antd';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useParams } from 'react-router-dom';
 import { useGoalsList } from '../features/goals/api/queries';
+import { filterGoalsByPersonality } from '../lib/workspaceScope';
 
 const STATUS_CONFIG: Record<string, { color: string; label: string; icon: string }> = {
   planning: { color: '#14B8A6', label: 'Planning', icon: '⏳' },
@@ -65,6 +66,12 @@ function truncate(text: string, max: number): string {
 export function Goals() {
   const { data, isLoading, error } = useGoalsList();
   const navigate = useNavigate();
+  // P2: `goals.list()` has no `personalityId` input, so this pane filters
+  // client-side — `GoalSchema.personalityId` is on every row already. The
+  // bare `/goals` URL always redirects into a workspace (P1a), so
+  // `personalityId` is undefined only for routes this page never actually
+  // renders at today.
+  const { personalityId } = useParams<{ personalityId?: string }>();
 
   if (isLoading) {
     return (
@@ -82,7 +89,9 @@ export function Goals() {
     );
   }
 
-  const allGoals = data?.goals ?? [];
+  const allGoals = personalityId
+    ? filterGoalsByPersonality(data?.goals ?? [], personalityId)
+    : (data?.goals ?? []);
   const sorted = [...allGoals].sort((a, b) => {
     const aActive = ACTIVE_STATUSES.has(a.status) ? 0 : 1;
     const bActive = ACTIVE_STATUSES.has(b.status) ? 0 : 1;
@@ -133,7 +142,7 @@ export function Goals() {
             background: 'var(--bg-elevated)',
           }}
         >
-          No goals yet — use Run as Goal in a chat to get started
+          No goals yet. Use Send as Goal in a chat to start one.
         </div>
       ) : (
         <div
@@ -177,7 +186,7 @@ export function Goals() {
               <button
                 key={goal.id}
                 type="button"
-                onClick={() => navigate(`/goals/${goal.id}`)}
+                onClick={() => navigate(`/p/${goal.personalityId}/goals/${goal.id}`)}
                 style={{
                   display: 'grid',
                   gridTemplateColumns: '1fr 120px 110px 130px 80px 70px',

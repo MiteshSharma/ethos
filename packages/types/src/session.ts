@@ -1,4 +1,4 @@
-import type { TokenUsage } from './llm';
+import type { MessageContent, TokenUsage } from './llm';
 
 export interface Session {
   id: string;
@@ -6,6 +6,13 @@ export interface Session {
   platform: string;
   model: string;
   provider: string;
+  /**
+   * The personality this session is bound to. Set at creation and immutable
+   * thereafter: `updateSession` throws if a patch would change it to a
+   * different id once set (setting it from unset is allowed, so legacy rows can
+   * be bound on first use). To involve a different personality, create a new
+   * session or fork this one into a child session.
+   */
   personalityId?: string;
   parentSessionId?: string;
   workingDir?: string;
@@ -37,8 +44,31 @@ export interface StoredMessage {
   toolCallId?: string;
   toolName?: string;
   toolCalls?: Array<{ id: string; name: string; input: unknown }>;
+  /**
+   * Inline image/document blocks for a `user` row whose attachments were sent
+   * natively to a vision-capable model, so a resumed session re-sends the same
+   * blocks instead of degrading to the annotation.
+   *
+   * Deliberately a SEPARATE field rather than widening `content` to
+   * `string | MessageContent[]`, for the same reason `toolCalls` is separate:
+   * `content` backs the FTS5 external-content index, and base64 payloads in
+   * that column would bloat the index and pollute `session_search` results.
+   * `content` therefore keeps the human-readable `<attachments>` annotation,
+   * which is also the residue block-aging falls back to.
+   *
+   * Absent on every row that has no inline blocks, which is almost all of them.
+   */
+  contentBlocks?: MessageContent[];
   timestamp: Date;
   usage?: TokenUsage;
+  /**
+   * Observability trace id of the turn that persisted this message — the SAME
+   * id the turn's trace carries in `observability.db`, so `sessions.db` rows
+   * join to traces/spans without a second identity. Undefined — never `''` or
+   * `'null'` — on messages written outside a traced turn (no observability
+   * wired) or by a store that does not persist it.
+   */
+  traceId?: string;
 }
 
 export interface SessionFilter {

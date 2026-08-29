@@ -1,16 +1,25 @@
 // LiveKitRoomClient / LiveKitTokenMinter — the isolated boundary that keeps the
-// concrete LiveKit SDKs out of this repo's dependency graph.
+// concrete LiveKit MEDIA SDK out of this repo's dependency graph.
 //
-// The production binding wraps two native npm packages:
-//   - `@livekit/rtc-node`     — WebRTC media: room connect, track subscribe /
-//                               publish, and PCM `AudioFrame`s.
-//   - `livekit-server-sdk`    — signs JWT access tokens (`AccessToken`).
-// NEITHER is installed in-repo: `@livekit/rtc-node` ships a native binary that
-// cannot be verified here without a running `livekit-server`, so committing it
-// would put an unverifiable dependency in the monorepo. Instead the transport
-// (`transport.ts`) binds ONLY to the two interfaces below, so everything
-// typechecks and unit-tests against fakes; wiring the real SDKs is a documented
-// MANUAL step (see README.md "Manual verification checklist").
+// The split, as of V4, is no longer "no LiveKit code in-repo". It is:
+//
+//   - MEDIA (`LiveKitRoomClient`) still needs `@livekit/rtc-node` — room
+//     connect, track subscribe/publish, PCM `AudioFrame`s. That package ships a
+//     NATIVE binary which cannot be verified here without a running
+//     `livekit-server`, so committing it would put an unverifiable dependency
+//     in the monorepo. It stays an app-supplied binding behind the interface
+//     below, and wiring it stays a documented MANUAL step (see README.md
+//     "Manual verification checklist").
+//   - CONTROL needs NO SDK AT ALL. A LiveKit access token is an HS256 JWT and
+//     the SIP API is a JSON POST authorized by one; `livekit-server-sdk` would
+//     contribute a signer and a request builder we can write with `node:crypto`
+//     and `fetch`. So `../livekit/token.ts` mints tokens for real and
+//     `../sip/trunk-client-livekit.ts` places real outbound calls — zero new
+//     dependencies, fully unit-testable, and `voice.livekit.apiKey`/`apiSecret`
+//     are finally read by something.
+//
+// The transport binds ONLY to the two interfaces below either way, so it still
+// typechecks and unit-tests against fakes.
 
 /**
  * One frame of linear PCM audio as delivered by / handed to the LiveKit media
@@ -52,6 +61,20 @@ export interface LiveKitRoomClient {
   /** Publish one frame of local audio to the room (the outbound track sink). */
   publishAudio(frame: LiveKitAudioFrame): void;
   /**
+   * Subscribe to the room ending under us — the remote participant left, the
+   * SIP leg hung up, the server closed the room. Returns an unsubscribe
+   * function.
+   *
+   * OPTIONAL so an app-supplied binding written before this existed still
+   * typechecks. A binding that omits it never fires `VoiceTransport.onClosed`,
+   * which is exactly the state this repo shipped in: the adapter's remote
+   * hang-up path — and therefore the post-call summary for a caller who simply
+   * hung up — was unreachable on a real LiveKit leg, because nothing on this
+   * boundary could observe the disconnect. Production bindings map
+   * `RoomEvent.Disconnected` / `ParticipantDisconnected` here.
+   */
+  onDisconnected?(handler: () => void): () => void;
+  /**
    * The remote participant's identity (the callerId). Available once a remote
    * participant is present; used by the wiring seam to spin up a per-caller
    * session.
@@ -60,10 +83,11 @@ export interface LiveKitRoomClient {
 }
 
 /**
- * Mints a LiveKit access token (JWT). The production binding wraps
- * `livekit-server-sdk`'s `AccessToken`, signing with the project
- * apiKey/apiSecret (`voice.livekit.*` in `@ethosagent/config`). Behind the
- * boundary so JWT minting never pulls the server SDK into a unit test.
+ * Mints a LiveKit access token (JWT) signed with the project apiKey/apiSecret
+ * (`voice.livekit.*` in `@ethosagent/config`). `createLiveKitTokenMinter` in
+ * `./token.ts` is the real implementation — HS256 over `node:crypto`, no SDK.
+ * The interface remains so a deployment can substitute its own minter (an
+ * external signing service, a rotated key) without touching the transport.
  */
 export interface LiveKitTokenMinter {
   mint(roomName: string, identity: string): string;

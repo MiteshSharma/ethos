@@ -5,9 +5,9 @@ import { defineConfig, type PluginOption } from 'vite';
 // Vite config for the web client. Two run modes:
 //
 //  • Dev   — `pnpm --filter @ethosagent/web dev` runs Vite at :5173 with the
-//            `/rpc`, `/sse`, `/auth`, `/openapi` paths proxied to the
-//            ethos-serve API on :3000. Cookies sent by the API stay scoped
-//            to localhost so the proxy is transparent.
+//            `/rpc`, `/sse`, `/auth`, `/openapi`, `/documents` paths proxied
+//            to the ethos-serve API on :3000. Cookies sent by the API stay
+//            scoped to localhost so the proxy is transparent.
 //  • Build — `pnpm --filter @ethosagent/web build` writes to `apps/web/dist/`.
 //            `apps/web-api`'s static handler serves that directory in
 //            production runs of `ethos serve`.
@@ -25,7 +25,24 @@ export default defineConfig({
     alias: {
       '@ethosagent/web-contracts': resolve(root, 'packages/web-contracts/src'),
       '@ethosagent/ui-components': resolve(root, 'packages/ui-components/src'),
+      // Contracts. Mostly `import type` here, but the call-treatment
+      // derivation is a VALUE the Call Stage calls at render time, and the
+      // character sheet calls the same function server-side — one precedence
+      // rule, so the alias has to resolve for real, not just for tsc.
+      '@ethosagent/types': resolve(root, 'packages/types/src'),
+      // The realtime tier's frame mapping, shared with the server-side
+      // providers. Carries no transport, so nothing node-only rides along —
+      // `packages/voice-realtime-protocol/src/__tests__/browser-safety.test.ts`
+      // fails the build if that stops being true.
+      '@ethosagent/voice-realtime-protocol': resolve(root, 'packages/voice-realtime-protocol/src'),
     },
+    // Vite's default order puts '.js' ahead of '.ts'/'.tsx'. Several workspace
+    // packages still carry committed compiled mirrors next to their sources
+    // (`packages/ui-components/src/*.js`), which silently shadowed the real
+    // `.tsx` in every build — edits to the source were no-ops. TypeScript
+    // first matches what esbuild/tsup already do, so one resolution order
+    // holds across bundlers. Same class of bug as f7e920f.
+    extensions: ['.mts', '.ts', '.tsx', '.mjs', '.js', '.jsx', '.json'],
   },
   server: {
     port: 5173,
@@ -43,6 +60,15 @@ export default defineConfig({
       // OAuth callback — proxy to the API server so the server-side handler
       // runs regardless of whether the DCR redirect_uri points to :5173 or :3000.
       '/oauth': 'http://localhost:3000',
+      // Documents download streams bytes over a plain <a download> navigation
+      // authenticated by the `SameSite=Strict` `ethos_auth` cookie. It MUST be
+      // proxied: an absolute :3000 href from :5173 is cross-site and the
+      // browser silently drops the cookie, so the download 401s.
+      '/documents': 'http://localhost:3000',
+      // Avatar upload/view/delete rides the same `SameSite=Strict`
+      // `ethos_auth` cookie as `/documents` above, for the same reason: an
+      // absolute :3000 request from :5173 is cross-site and drops the cookie.
+      '/api': 'http://localhost:3000',
     },
   },
   build: {

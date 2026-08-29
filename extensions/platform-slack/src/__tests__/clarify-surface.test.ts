@@ -166,7 +166,16 @@ describe('SlackClarifySurface — handleAction (button taps)', () => {
     await new Promise((r) => setImmediate(r));
 
     expect(resolved).toMatchObject({ answer: 'sqlite', source: 'user' });
-    expect(await store.get(row.requestId)).toBeNull();
+    // Fix 2 (pi-delegation.md §1b) — this row was never `request()`-ed on
+    // THIS bridge instance (added straight to the store, mirroring a
+    // cross-process answer), so `respond()` hits the no-local-entry branch:
+    // it marks the row answered rather than deleting it, so a genuinely
+    // live owner in a different process could still read the answer. It is
+    // no longer removed outright.
+    expect((await store.get(row.requestId))?.answer).toMatchObject({
+      answer: 'sqlite',
+      source: 'user',
+    });
   });
 
   it('rejects clicks whose channel/messageTs/botKey do not match the stored row', async () => {

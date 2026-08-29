@@ -1,0 +1,20 @@
+{
+  "name": "@ethosagent/voice-realtime-protocol",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "The one realtime speech-to-speech wire mapping: per-provider frame codecs, the session core that owns the event stream, and the transport seam they sit on. Runs unchanged in node and in the browser — no ws, no node builtins.",
+  "exports": {
+    ".": {
+      "import": "./src/index.ts",
+      "types": "./src/index.ts",
+      "production": "./dist/index.js"
+    }
+  },
+  "dependencies": {
+    "@ethosagent/types": "workspace:*"
+  },
+  "scripts": {
+    "build": "tsup src/index.ts --format esm --dts"
+  }
+}

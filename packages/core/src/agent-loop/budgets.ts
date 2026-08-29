@@ -85,6 +85,37 @@ export interface CostBudget {
   capUsd?: number;
 }
 
+/** What a tripped budget guard reports. Shared by every caller of the checks. */
+export interface BudgetExceeded {
+  exceeded: true;
+  rule: BudgetRule;
+  toolName: string;
+  count?: number;
+  message: string;
+}
+
+/**
+ * The `cost-cap` guard on its own: has this session already spent its cap?
+ *
+ * Extracted from {@link checkTurnBudgets} (which still calls it, so there is one
+ * threshold and one message) because not every kind of spend arrives inside a
+ * turn. The realtime voice tier accrues wall-clock audio cost on its own control
+ * lane with no tool calls, no identical-call streak and no denials to check —
+ * calling the full turn-budget function there would mean inventing loop counters
+ * that do not exist just to reach the one branch that applies.
+ */
+export function checkCostBudget(cost: CostBudget): { exceeded: false } | BudgetExceeded {
+  if (cost.capUsd == null || cost.spentUsd < cost.capUsd) return { exceeded: false };
+  return {
+    exceeded: true,
+    rule: 'cost-cap',
+    toolName: '_budget',
+    message:
+      `Stopped: hit $${cost.capUsd.toFixed(2)} budget cap for this session ` +
+      `($${cost.spentUsd.toFixed(4)} spent)`,
+  };
+}
+
 export function checkTurnBudgets(
   totalToolCalls: number,
   maxToolCallsPerTurn: number,
@@ -108,15 +139,9 @@ export function checkTurnBudgets(
   }
   // Cost first: money spent is a harder constraint than loop pathology, and
   // `turn-setup`'s pre-turn refusal only ever sees spend from previous turns.
-  if (cost?.capUsd != null && cost.spentUsd >= cost.capUsd) {
-    return {
-      exceeded: true,
-      rule: 'cost-cap',
-      toolName: '_budget',
-      message:
-        `Stopped: hit $${cost.capUsd.toFixed(2)} budget cap for this session ` +
-        `($${cost.spentUsd.toFixed(4)} spent)`,
-    };
+  if (cost) {
+    const overspent = checkCostBudget(cost);
+    if (overspent.exceeded) return overspent;
   }
   if (totalToolCalls >= maxToolCallsPerTurn) {
     return {

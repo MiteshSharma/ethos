@@ -5,6 +5,7 @@
 import { mkdir, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
+import { checkSkillFrontmatter } from '@ethosagent/skills';
 
 const c = {
   reset: '\x1b[0m',
@@ -103,6 +104,22 @@ function ensureSafeFilename(name: string): string | null {
   return name;
 }
 
+/**
+ * Skills in `skillsDir` are parsed at startup, so promoting a file with
+ * unparseable frontmatter turns a bad proposal into a boot failure. Returns
+ * an error string when the file must not be promoted, null when it is safe.
+ */
+async function frontmatterBlocker(path: string): Promise<string | null> {
+  let raw: string;
+  try {
+    raw = await readFile(path, 'utf-8');
+  } catch {
+    return 'unreadable';
+  }
+  const check = checkSkillFrontmatter(raw);
+  return check.ok ? null : check.error;
+}
+
 export async function runEvolveApply(args: string[], ethosDir: string): Promise<void> {
   const skillsDir = join(ethosDir, 'skills');
   const pendingDir = join(skillsDir, 'pending');
@@ -123,6 +140,11 @@ export async function runEvolveApply(args: string[], ethosDir: string): Promise<
       return;
     }
     for (const f of mds) {
+      const blocker = await frontmatterBlocker(join(pendingDir, f));
+      if (blocker) {
+        console.error(`${c.red}skipped${c.reset} ${f} — invalid frontmatter: ${blocker}`);
+        continue;
+      }
       await rename(join(pendingDir, f), join(skillsDir, f));
       console.log(`${c.green}approved${c.reset} ${f}`);
     }
@@ -144,12 +166,20 @@ export async function runEvolveApply(args: string[], ethosDir: string): Promise<
 
   try {
     await stat(join(pendingDir, safe));
-    await rename(join(pendingDir, safe), join(skillsDir, safe));
-    console.log(`${c.green}approved${c.reset} ${safe}`);
   } catch {
     console.error(`${c.red}No such pending skill: ${safe}${c.reset}`);
     process.exit(1);
   }
+
+  const blocker = await frontmatterBlocker(join(pendingDir, safe));
+  if (blocker) {
+    console.error(`${c.red}Invalid frontmatter in ${safe}: ${blocker}${c.reset}`);
+    console.error(`${c.dim}Values containing ": " must be quoted. Left in pending/.${c.reset}`);
+    process.exit(1);
+  }
+
+  await rename(join(pendingDir, safe), join(skillsDir, safe));
+  console.log(`${c.green}approved${c.reset} ${safe}`);
 }
 
 // ---------------------------------------------------------------------------

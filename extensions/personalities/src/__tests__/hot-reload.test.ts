@@ -130,6 +130,27 @@ describe('personality hot-reload — refresh-on-resolve', () => {
     expect(registry.get('sage')).toBeDefined();
   });
 
+  it('installing the first skill into a personality with no skills/ dir invalidates the fingerprint', async () => {
+    const storage = new InMemoryStorage();
+    await writePersonality(storage, 'atlas', { name: 'Atlas' });
+
+    const registry = new FilePersonalityRegistry(storage);
+    await registry.loadFromDirectory(DIR);
+    expect(registry.get('atlas')?.skillsDirs).toBeUndefined();
+
+    // Install a skill: the `skills/` DIRECTORY is created where none existed.
+    // No fingerprinted FILE changed — only the directory. Without `skills/` in
+    // the fingerprint, loadOne short-circuits and `skillsDirs` stays undefined
+    // until the process restarts.
+    const skillsDir = join(DIR, 'atlas', 'skills');
+    await storage.mkdir(skillsDir);
+    await storage.write(join(skillsDir, 'charts.md'), '---\nname: charts\n---\n# Charts\n');
+
+    await registry.loadFromDirectory(DIR);
+
+    expect(registry.get('atlas')?.skillsDirs).toEqual([skillsDir]);
+  });
+
   it('criterion 6 — fingerprint fast path: a no-change refresh performs no read() and no re-parse', async () => {
     const storage = new InMemoryStorage();
     await writePersonality(storage, 'atlas', { name: 'Atlas' });

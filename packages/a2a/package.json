@@ -19,11 +19,13 @@
     "build": "tsup src/index.ts src/crypto.ts --format esm --dts"
   },
   "dependencies": {
+    "@ethosagent/sqlite": "workspace:*",
     "@ethosagent/types": "workspace:*",
     "hono": "^4.12.15",
     "jose": "^6.2.3"
   },
   "devDependencies": {
-    "@ethosagent/storage-fs": "workspace:*"
+    "@ethosagent/storage-fs": "workspace:*",
+    "@hono/node-server": "^2.0.0"
   }
 }

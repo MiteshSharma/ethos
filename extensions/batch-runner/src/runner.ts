@@ -83,8 +83,12 @@ export class BatchRunner {
     completed: Set<string>,
     failed: Set<string>,
   ): Promise<void> {
-    const sessionKey = `batch:${task.id}`;
     const personalityId = task.personalityId ?? this.options.defaultPersonalityId;
+    // The personality is part of the key: a session's personality is bound at
+    // creation and immutable, so a per-task-only key would bind on the first
+    // personality and refuse every other one — exactly what an A/B comparison
+    // of the same task across personalities does.
+    const sessionKey = `batch:${personalityId}:${task.id}`;
 
     await writer.append({
       schema_version: ATROPOS_SCHEMA_VERSION,

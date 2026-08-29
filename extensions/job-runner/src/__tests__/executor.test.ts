@@ -177,6 +177,109 @@ describe('BackgroundExecutor', () => {
     await exec.shutdown();
   });
 
+  it('pauses the heartbeat while a run is parked, and resumes it on answer (G4/D21)', async () => {
+    const store = new SQLiteJobStore(':memory:');
+    const { loop } = makeNeverEndingLoop();
+    const exec = new BackgroundExecutor({ store, loop, owner: OWNER, config: cfg() });
+    const job = await store.create(createInput());
+
+    exec.start();
+    exec.nudge();
+    await vi.waitFor(async () => expect((await store.get(job.id))?.status).toBe('running'), {
+      timeout: 2000,
+    });
+
+    const beats = vi.spyOn(store, 'heartbeat');
+    await exec.markJobBlocked(job.id, 'clarify-1');
+    expect((await store.get(job.id))?.status).toBe('blocked');
+
+    // Several heartbeat intervals pass with no beat — which is what makes the
+    // row invisible to reclaimStale rather than a dead host.
+    await new Promise((r) => setTimeout(r, cfg().heartbeatMs * 6));
+    expect(beats).not.toHaveBeenCalled();
+    expect(await store.reclaimStale(0)).toHaveLength(0);
+    expect((await store.get(job.id))?.status).toBe('blocked');
+
+    await exec.resumeJob(job.id);
+    expect((await store.get(job.id))?.status).toBe('running');
+    await vi.waitFor(() => expect(beats).toHaveBeenCalled(), { timeout: 2000 });
+
+    await exec.shutdown();
+  });
+
+  it('keeps a parked run cancellable — blocked → aborted', async () => {
+    const store = new SQLiteJobStore(':memory:');
+    const { loop } = makeNeverEndingLoop();
+    const exec = new BackgroundExecutor({ store, loop, owner: OWNER, config: cfg() });
+    const job = await store.create(createInput());
+
+    exec.start();
+    exec.nudge();
+    await vi.waitFor(async () => expect((await store.get(job.id))?.status).toBe('running'), {
+      timeout: 2000,
+    });
+
+    await exec.markJobBlocked(job.id, 'clarify-1');
+    await store.requestCancel(job.id);
+
+    await vi.waitFor(async () => expect((await store.get(job.id))?.status).toBe('aborted'), {
+      timeout: 2000,
+    });
+    expect((await store.get(job.id))?.blockedRequestId).toBeUndefined();
+
+    await exec.shutdown();
+  });
+
+  // I20 (Phase 5) — the abort listener. Cancelling a run must WITHDRAW the
+  // question it is parked on, not just abort the controller: otherwise the card
+  // stays live on someone's phone for the rest of its (now 24 h) window, and
+  // the escalator's `finally` — which un-pauses the heartbeat — never runs.
+  it('withdraws a cancelled run’s pending questions, whatever caused the abort', async () => {
+    const store = new SQLiteJobStore(':memory:');
+    const { loop } = makeNeverEndingLoop();
+    const cancelled: string[] = [];
+    const exec = new BackgroundExecutor({
+      store,
+      loop,
+      owner: OWNER,
+      config: cfg(),
+      cancelInteractions: async (jobId) => {
+        cancelled.push(jobId);
+      },
+    });
+    const job = await store.create(createInput());
+
+    exec.start();
+    exec.nudge();
+    await vi.waitFor(async () => expect((await store.get(job.id))?.status).toBe('running'), {
+      timeout: 2000,
+    });
+
+    await exec.markJobBlocked(job.id, 'clarify-1');
+    await store.requestCancel(job.id);
+
+    await vi.waitFor(() => expect(cancelled).toEqual([job.id]), { timeout: 2000 });
+    await vi.waitFor(async () => expect((await store.get(job.id))?.status).toBe('aborted'), {
+      timeout: 2000,
+    });
+
+    await exec.shutdown();
+  });
+
+  it('ignores markJobBlocked for a job this executor is not running', async () => {
+    const store = new SQLiteJobStore(':memory:');
+    const { loop } = makeNeverEndingLoop();
+    const exec = new BackgroundExecutor({ store, loop, owner: OWNER, config: cfg() });
+    // Claimed by a peer process, never by this executor's pool.
+    const job = await store.create(createInput({ owner: 'peer' }));
+    await store.claimNextQueued('peer');
+
+    await exec.markJobBlocked(job.id, 'clarify-1');
+    expect((await store.get(job.id))?.status).toBe('running');
+
+    await exec.shutdown();
+  });
+
   it('respects the pool size and claims the next job only after one finishes', async () => {
     const store = new SQLiteJobStore(':memory:');
     const { loop } = makeNeverEndingLoop();

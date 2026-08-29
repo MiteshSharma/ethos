@@ -147,8 +147,59 @@ describe('SSE event union', () => {
     },
     { type: 'protocol.upgrade_required', serverVersion: '0.2.0', clientVersionExpected: '0.1.x' },
     { type: 'memory.captured', summary: 'daughter Priya (b. 2019)' },
+    {
+      type: 'run.update',
+      jobId: 'job_8f3c21ab',
+      runner: 'pi',
+      status: 'running',
+      now: 'editing packages/core/src/auth/session-token.ts',
+      elapsedMs: 401_000,
+      spendUsd: 0.83,
+      toolCount: 12,
+    },
+    {
+      type: 'run.update',
+      jobId: 'job_8f3c21ab',
+      runner: 'pi',
+      status: 'blocked',
+      now: 'paused — waiting on you',
+      elapsedMs: 402_000,
+      spendUsd: 0.83,
+      toolCount: 12,
+    },
   ])('accepts %j', (event) => {
     expect(SseEventSchema.parse(event)).toEqual(event);
+  });
+
+  // D20 — `run.update` is an SSE push-family event, never an AgentEvent. These
+  // two guards keep the payload from drifting into a free-form bag.
+  it('rejects a run.update carrying a status outside the job-status enum', () => {
+    expect(() =>
+      SseEventSchema.parse({
+        type: 'run.update',
+        jobId: 'job_1',
+        runner: 'pi',
+        status: 'paused', // not a BackgroundJobStatus
+        now: 'x',
+        elapsedMs: 0,
+        spendUsd: 0,
+        toolCount: 0,
+      }),
+    ).toThrow();
+  });
+
+  it('rejects a run.update missing the now line', () => {
+    expect(() =>
+      SseEventSchema.parse({
+        type: 'run.update',
+        jobId: 'job_1',
+        runner: 'pi',
+        status: 'running',
+        elapsedMs: 0,
+        spendUsd: 0,
+        toolCount: 0,
+      }),
+    ).toThrow();
   });
 
   it('rejects an unknown discriminator', () => {
@@ -232,7 +283,9 @@ describe('contract router', () => {
       'cron',
       'dashboards',
       'debug',
+      'deliveries',
       'digest',
+      'documents',
       'eval',
       'evolver',
       'files',

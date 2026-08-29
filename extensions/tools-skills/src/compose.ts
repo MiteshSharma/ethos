@@ -1,6 +1,6 @@
 import type { Skill, Tool } from '@ethosagent/types';
 import type { WiringContext } from '@ethosagent/wiring/types';
-import { createSkillsTools, type SkillEntry } from './index';
+import { createSkillsTools, type PendingSkillsPort, type SkillEntry } from './index';
 
 export interface SkillsToolsCompose {
   tools: Tool[];
@@ -8,10 +8,11 @@ export interface SkillsToolsCompose {
 
 export function compose(
   _ctx: WiringContext,
-  deps: { skillPool: Map<string, Skill> },
+  deps: { skillPool: Map<string, Skill>; pendingSkills: PendingSkillsPort },
 ): SkillsToolsCompose {
   const { skillPool } = deps;
   const tools = createSkillsTools({
+    pending: deps.pendingSkills,
     listSkills: (): SkillEntry[] => {
       return [...skillPool.values()].map((s) => ({
         name: s.name,

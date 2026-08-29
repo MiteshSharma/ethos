@@ -1,6 +1,6 @@
 {
   "name": "@ethosagent/web-contracts",
-  "version": "0.6.1",
+  "version": "0.7.0",
   "type": "module",
   "description": "Typed oRPC contract and Zod schemas for the Ethos web API",
   "license": "MIT",
@@ -37,6 +37,7 @@
     "build": "tsup src/index.ts --format esm --dts"
   },
   "dependencies": {
+    "@ethosagent/types": "workspace:*",
     "@orpc/contract": "^1.14.3",
     "zod": "^4.3.6"
   }

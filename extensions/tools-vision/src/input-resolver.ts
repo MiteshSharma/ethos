@@ -17,7 +17,7 @@
 
 import { isAbsolute, resolve as resolvePath } from 'node:path';
 import { type NetworkPolicy, safeFetch } from '@ethosagent/safety-network';
-import type { ScopedFs } from '@ethosagent/types';
+import { type ScopedFs, VISION_URL_STREAM_MAX_BYTES, visionMaxBytesFor } from '@ethosagent/types';
 
 // ---------------------------------------------------------------------------
 // Path normalization — security-critical
@@ -97,11 +97,9 @@ export interface ResolveContext {
 // Size caps
 // ---------------------------------------------------------------------------
 
-const IMAGE_MAX_BYTES = 5 * 1024 * 1024; // 5 MB
-const PDF_MAX_BYTES = 32 * 1024 * 1024; // 32 MB
-// Coarse URL streaming cap — matches the largest per-media limit so we never
-// download bytes we'd reject anyway. Finer per-media check runs after detection.
-const URL_STREAM_MAX_BYTES = PDF_MAX_BYTES;
+// The caps themselves live in `@ethosagent/types` (`vision-limits.ts`) because
+// the agent loop's native-attachment path applies the same limits and core
+// cannot import an extension.
 
 // ---------------------------------------------------------------------------
 // resolveFile
@@ -220,7 +218,7 @@ async function readFromUrl(url: string, ctx: ResolveContext): Promise<Buffer> {
     throw new VisionInputError('URL_BLOCKED', `HTTP ${response.status} ${response.statusText}`);
   }
 
-  return await readResponseCapped(response, URL_STREAM_MAX_BYTES);
+  return await readResponseCapped(response, VISION_URL_STREAM_MAX_BYTES);
 }
 
 async function readResponseCapped(response: Response, maxBytes: number): Promise<Buffer> {
@@ -330,7 +328,7 @@ function detectMediaType(buf: Buffer): ResolvedMediaType | null {
 // ---------------------------------------------------------------------------
 
 function enforceSizeCap(buf: Buffer, mediaType: ResolvedMediaType): void {
-  const max = mediaType === 'application/pdf' ? PDF_MAX_BYTES : IMAGE_MAX_BYTES;
+  const max = visionMaxBytesFor(mediaType);
   if (buf.length > max) {
     throw new VisionInputError(
       'FILE_TOO_LARGE',

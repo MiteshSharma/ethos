@@ -37,8 +37,24 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { LivingSoulSection } from '../components/LivingSoulSection';
+import { AvatarPicker } from '../components/personality/AvatarPicker';
+import {
+  applyAvatarSelection,
+  deleteAvatarRoute,
+  removeAvatar,
+  uploadAvatarBytes,
+} from '../components/personality/avatarActions';
 import { ExecutionTab } from '../components/personality/ExecutionTab';
+import {
+  type PersonalityVoice,
+  PersonalityVoiceFields,
+  voiceCreateInput,
+  voiceLanguageRows,
+  voiceUpdateInput,
+} from '../components/personality/PersonalityVoiceFields';
+import { PersonalityMark } from '../components/ui/PersonalityMark';
 import { PersonalityRingAvatar } from '../components/ui/PersonalityRingAvatar';
+import { useCreateFlag } from '../hooks/useCreateFlag';
 import { toolAffordance } from '../lib/execution-posture';
 import {
   CATEGORY_META,
@@ -51,7 +67,7 @@ import { rpc } from '../rpc';
 // Shape of one suggestion entry returned by the models.catalog RPC.
 type CatalogModel = { id: string; label: string; contextWindow: number; default?: boolean };
 
-function modelOptionsForProvider(
+export function modelOptionsForProvider(
   catalog: { providers: Record<string, { models: CatalogModel[] }> } | undefined,
   provider: string | undefined,
 ): { value: string; label: string }[] {
@@ -62,7 +78,7 @@ function modelOptionsForProvider(
 
 // Case-insensitive substring match on the model id (option value) so typing
 // narrows the suggestion list. AutoComplete still accepts arbitrary input.
-const modelFilterOption = (input: string, option?: { value: string; label: string }) =>
+export const modelFilterOption = (input: string, option?: { value: string; label: string }) =>
   (option?.value ?? '').toLowerCase().includes(input.toLowerCase());
 
 // Personalities tab — v1.
@@ -87,6 +103,14 @@ export function Personalities() {
   const [createOpen, setCreateOpen] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [duplicatePrompt, setDuplicatePrompt] = useState<Personality | null>(null);
+
+  // P5 — StageHeader's "+ New Personality" action navigates here with
+  // `?create=1`; this opens the same create wizard the page's own button
+  // does.
+  const shouldCreate = useCreateFlag();
+  useEffect(() => {
+    if (shouldCreate) setCreateOpen(true);
+  }, [shouldCreate]);
 
   const listQuery = useQuery({
     queryKey: ['personalities', 'list'],
@@ -119,7 +143,7 @@ export function Personalities() {
       key: 'avatar',
       width: 48,
       render: (_: unknown, p: Personality) => (
-        <PersonalityRingAvatar personalityId={p.id} size={32} />
+        <PersonalityRingAvatar personalityId={p.id} size={32} avatarUrl={p.display?.avatar_url} />
       ),
     },
     {
@@ -370,6 +394,7 @@ interface WizardState {
   capabilities: string[];
   fsReachRead: string[];
   fsReachWrite: string[];
+  fsReachWorkdir: string;
   toolset: string[];
   soulMd: string;
   skills: string[];
@@ -378,7 +403,23 @@ interface WizardState {
   skillEvolutionMinToolCalls: number;
   skillEvolutionCooldownMinutes: number;
   evolutionApprovalMode: 'auto' | 'user';
+  /** The whole `voice` block as the editor holds it. One object rather than a
+   *  field per sub-key: the language map is a list, and flattening a list into
+   *  wizard state buys nothing. */
+  voice: PersonalityVoice;
 }
+
+/** No `voice` block at all — every sub-key unset. */
+const BLANK_VOICE: PersonalityVoice = {
+  ttsProvider: '',
+  ttsVoice: '',
+  sttProvider: '',
+  realtimeProvider: '',
+  callStyle: '',
+  tier: '',
+  model: '',
+  languages: [],
+};
 
 const SOUL_TEMPLATE = `# About me\n\nI am a {role}. I {what I do}. I {how I work}.\n\n## How I respond\n\n- {tone / shape}\n- {tone / shape}\n- {tone / shape}\n`;
 
@@ -398,6 +439,7 @@ function CreateWizard({ existingIds, onClose }: { existingIds: Set<string>; onCl
     capabilities: [],
     fsReachRead: [],
     fsReachWrite: [],
+    fsReachWorkdir: '',
     toolset: ['memory_read', 'memory_write', 'session_search', 'cron'],
     soulMd: SOUL_TEMPLATE,
     skills: [],
@@ -406,6 +448,7 @@ function CreateWizard({ existingIds, onClose }: { existingIds: Set<string>; onCl
     skillEvolutionMinToolCalls: 3,
     skillEvolutionCooldownMinutes: 30,
     evolutionApprovalMode: 'user',
+    voice: BLANK_VOICE,
   });
 
   const createMut = useMutation({
@@ -427,8 +470,16 @@ function CreateWizard({ existingIds, onClose }: { existingIds: Set<string>; onCl
             : {}),
         ...(state.provider ? { provider: state.provider as ProviderId } : {}),
         ...(state.capabilities.length > 0 ? { capabilities: state.capabilities } : {}),
-        ...(state.fsReachRead.length > 0 || state.fsReachWrite.length > 0
-          ? { fs_reach: { read: state.fsReachRead, write: state.fsReachWrite } }
+        ...(state.fsReachRead.length > 0 ||
+        state.fsReachWrite.length > 0 ||
+        state.fsReachWorkdir !== ''
+          ? {
+              fs_reach: {
+                read: state.fsReachRead,
+                write: state.fsReachWrite,
+                ...(state.fsReachWorkdir ? { workdir: state.fsReachWorkdir } : {}),
+              },
+            }
           : {}),
         ...(state.plugins.length > 0 ? { plugins: state.plugins } : {}),
         toolset: state.toolset,
@@ -439,6 +490,9 @@ function CreateWizard({ existingIds, onClose }: { existingIds: Set<string>; onCl
           cooldown_minutes: state.skillEvolutionCooldownMinutes,
         },
         evolution_approval_mode: state.evolutionApprovalMode,
+        // Omitted entirely when none is set, so a personality created without
+        // touching these carries no `voice` block at all.
+        ...voiceCreateInput(state.voice),
       }),
     onSuccess: async () => {
       if (state.skills.length > 0) {
@@ -592,11 +646,15 @@ function IdentityStep({
           onChange={(e) => setState((s) => ({ ...s, description: e.target.value }))}
         />
       </Form.Item>
+      <PersonalityVoiceFields
+        value={state.voice}
+        onChange={(voice) => setState((s) => ({ ...s, voice }))}
+      />
     </Form>
   );
 }
 
-function slugify(name: string): string {
+export function slugify(name: string): string {
   return name
     .toLowerCase()
     .replace(/\s+/g, '-')
@@ -610,6 +668,28 @@ function ToolsetStep({
   state: WizardState;
   setState: React.Dispatch<React.SetStateAction<WizardState>>;
 }) {
+  const toggle = (name: string) => {
+    setState((s) => {
+      const has = s.toolset.includes(name);
+      return { ...s, toolset: has ? s.toolset.filter((t) => t !== name) : [...s.toolset, name] };
+    });
+  };
+
+  return <ToolsetPicker selected={state.toolset} onToggle={toggle} />;
+}
+
+// Category-grouped, checkable-tags toolset editor. Standalone and
+// state-agnostic — `ToolsetStep` (the create-wizard tab) and
+// `NewAgentDialog` (the rail-`+` fast path, P5) both wrap it around their
+// own selection state rather than each rendering the catalog fetch and
+// category layout themselves.
+export function ToolsetPicker({
+  selected,
+  onToggle,
+}: {
+  selected: string[];
+  onToggle: (tool: string) => void;
+}) {
   const catalogQuery = useQuery({
     queryKey: ['tools', 'catalog'],
     queryFn: () => rpc.tools.catalog({}),
@@ -618,13 +698,6 @@ function ToolsetStep({
     group: g.group,
     tools: g.tools.map((t) => t.name),
   }));
-
-  const toggle = (name: string) => {
-    setState((s) => {
-      const has = s.toolset.includes(name);
-      return { ...s, toolset: has ? s.toolset.filter((t) => t !== name) : [...s.toolset, name] };
-    });
-  };
 
   const descMap = useMemo(() => {
     const map = new Map<string, string>();
@@ -748,7 +821,7 @@ function ToolsetStep({
                     ) : null}
                     <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
                       {group.tools.map((tool) => {
-                        const enabled = state.toolset.includes(tool);
+                        const enabled = selected.includes(tool);
                         return (
                           <Tooltip
                             key={tool}
@@ -756,7 +829,7 @@ function ToolsetStep({
                           >
                             <Tag.CheckableTag
                               checked={enabled}
-                              onChange={() => toggle(tool)}
+                              onChange={() => onToggle(tool)}
                               style={{ padding: '4px 10px', fontSize: 12 }}
                             >
                               {tool}
@@ -981,6 +1054,30 @@ function WizardSkillsStep({
   state: WizardState;
   setState: React.Dispatch<React.SetStateAction<WizardState>>;
 }) {
+  const toggle = (skillId: string) => {
+    setState((prev) => {
+      const next = new Set(prev.skills);
+      if (next.has(skillId)) next.delete(skillId);
+      else next.add(skillId);
+      return { ...prev, skills: [...next] };
+    });
+  };
+
+  return <SkillsPicker selected={state.skills} onToggle={toggle} />;
+}
+
+// System + user skill checklist, grouped and checkable. Standalone and
+// state-agnostic — `WizardSkillsStep` (the create-wizard tab) and
+// `NewAgentDialog` (the rail-`+` fast path, P5) both wrap it around their
+// own selection state rather than each rendering the catalog fetch and
+// grouping themselves.
+export function SkillsPicker({
+  selected,
+  onToggle,
+}: {
+  selected: string[];
+  onToggle: (skillId: string) => void;
+}) {
   const skillsQuery = useQuery({
     queryKey: ['skills', 'list'],
     queryFn: () => rpc.skills.list({}),
@@ -1007,21 +1104,10 @@ function WizardSkillsStep({
 
   const systemSkills = skills.filter((s) => s.source === 'system');
   const userSkills = skills.filter((s) => s.source !== 'system');
-  const selectedSet = new Set(state.skills);
+  const selectedSet = new Set(selected);
 
   const renderCheckbox = (s: Skill) => (
-    <Checkbox
-      key={s.id}
-      checked={selectedSet.has(s.id)}
-      onChange={(e) => {
-        setState((prev) => {
-          const next = new Set(prev.skills);
-          if (e.target.checked) next.add(s.id);
-          else next.delete(s.id);
-          return { ...prev, skills: [...next] };
-        });
-      }}
-    >
+    <Checkbox key={s.id} checked={selectedSet.has(s.id)} onChange={() => onToggle(s.id)}>
       <span style={{ fontWeight: 500 }}>{s.name}</span>
       {s.description ? (
         <Typography.Text type="secondary" style={{ marginLeft: 8, fontSize: 12 }}>
@@ -1192,7 +1278,7 @@ function WizardConfigTab({
         message="Filesystem reach"
         description="These paths control which directories this personality can read and write. Adding broad paths (e.g. /, /home) lets the personality access anything inside. Edit only if you understand the implications."
       />
-      <Form.Item label="Read paths">
+      <Form.Item label="Read paths" extra={FS_REACH_READ_HELP}>
         <Select
           mode="tags"
           allowClear
@@ -1202,7 +1288,7 @@ function WizardConfigTab({
           onChange={(val) => setState((s) => ({ ...s, fsReachRead: val }))}
         />
       </Form.Item>
-      <Form.Item label="Write paths">
+      <Form.Item label="Write paths" extra={FS_REACH_WRITE_HELP}>
         <Select
           mode="tags"
           allowClear
@@ -1210,6 +1296,13 @@ function WizardConfigTab({
           tokenSeparators={[',']}
           value={state.fsReachWrite}
           onChange={(val) => setState((s) => ({ ...s, fsReachWrite: val }))}
+        />
+      </Form.Item>
+      <Form.Item label="Working directory" extra={FS_REACH_WORKDIR_HELP}>
+        <Input
+          placeholder={FS_REACH_WORKDIR_PLACEHOLDER}
+          value={state.fsReachWorkdir}
+          onChange={(e) => setState((s) => ({ ...s, fsReachWorkdir: e.target.value }))}
         />
       </Form.Item>
     </Form>
@@ -1371,7 +1464,28 @@ function WizardPluginsTab({
 // Edit modal — three tabs (Identity / Toolset / Config) + Skills sub-surface
 // ---------------------------------------------------------------------------
 
-export function EditModal({ id, onClose }: { id: string; onClose: () => void }) {
+/** Tab keys the Edit modal's `Tabs` renders — used to open on a specific tab
+ *  (e.g. Identity page's "Edit SOUL" fast path lands on `'identity'` instead
+ *  of the default `'characterSheet'`). */
+export type EditModalTabKey =
+  | 'characterSheet'
+  | 'identity'
+  | 'toolset'
+  | 'execution'
+  | 'config'
+  | 'soul'
+  | 'skills'
+  | 'plugins';
+
+export function EditModal({
+  id,
+  onClose,
+  initialTab = 'characterSheet',
+}: {
+  id: string;
+  onClose: () => void;
+  initialTab?: EditModalTabKey;
+}) {
   const { data, isLoading } = useQuery({
     queryKey: ['personalities', 'get', id],
     queryFn: () => rpc.personalities.get({ id }),
@@ -1385,7 +1499,7 @@ export function EditModal({ id, onClose }: { id: string; onClose: () => void }) 
         </div>
       ) : (
         <Tabs
-          defaultActiveKey="characterSheet"
+          defaultActiveKey={initialTab}
           items={[
             {
               key: 'characterSheet',
@@ -1395,7 +1509,13 @@ export function EditModal({ id, onClose }: { id: string; onClose: () => void }) 
             {
               key: 'identity',
               label: 'Identity',
-              children: <IdentityEditor id={id} initialSoulMd={data.soulMd} />,
+              children: (
+                <IdentityEditor
+                  id={id}
+                  initialSoulMd={data.soulMd}
+                  initialAvatarUrl={data.personality.display?.avatar_url}
+                />
+              ),
             },
             {
               key: 'toolset',
@@ -1473,10 +1593,24 @@ function CharacterSheetPanel({ id }: { id: string }) {
   );
 }
 
-export function IdentityEditor({ id, initialSoulMd }: { id: string; initialSoulMd: string }) {
+type IdentityAvatarAction =
+  | { kind: 'curated'; url: string }
+  | { kind: 'file'; file: File }
+  | { kind: 'remove' };
+
+export function IdentityEditor({
+  id,
+  initialSoulMd,
+  initialAvatarUrl,
+}: {
+  id: string;
+  initialSoulMd: string;
+  initialAvatarUrl?: string;
+}) {
   const qc = useQueryClient();
   const { notification } = AntApp.useApp();
   const [draft, setDraft] = useState(initialSoulMd);
+  const [avatarUrl, setAvatarUrl] = useState(initialAvatarUrl);
 
   const mut = useMutation({
     mutationFn: () => rpc.personalities.update({ id, soulMd: draft }),
@@ -1490,9 +1624,69 @@ export function IdentityEditor({ id, initialSoulMd }: { id: string; initialSoulM
       notification.error({ message: 'Save failed', description: (err as Error).message }),
   });
 
+  // The personality already exists here (unlike `NewAgentDialog`'s staged
+  // selection), so every avatar action applies immediately. Curated and file
+  // both go through `applyAvatarSelection` — which, for a curated pick,
+  // DELETEs any stored uploaded file first so it doesn't linger orphaned on
+  // disk once `display.avatar_url` points at a static path instead.
+  const avatarDeps = {
+    setAvatarUrl: (personalityId: string, url: string) =>
+      rpc.personalities.update({ id: personalityId, display: { avatar_url: url } }),
+    uploadAvatar: uploadAvatarBytes,
+    deleteAvatar: deleteAvatarRoute,
+  };
+
+  const avatarMut = useMutation({
+    mutationFn: async (action: IdentityAvatarAction) => {
+      if (action.kind === 'remove') {
+        await removeAvatar(id, avatarDeps);
+      } else {
+        await applyAvatarSelection(id, action, avatarDeps);
+      }
+    },
+    onSuccess: (_result, action) => {
+      qc.invalidateQueries({ queryKey: ['personalities', 'get', id] });
+      qc.invalidateQueries({ queryKey: ['personalities', 'characterSheet', id] });
+      qc.invalidateQueries({ queryKey: ['personalities', 'list'] });
+      if (action.kind === 'remove') {
+        setAvatarUrl(undefined);
+        notification.success({ message: 'Avatar removed', placement: 'topRight' });
+      } else if (action.kind === 'curated') {
+        setAvatarUrl(action.url);
+        notification.success({ message: 'Avatar updated', placement: 'topRight' });
+      } else {
+        // The upload route always serves the same URL for a given
+        // personality — a cache-busting query param is what makes the
+        // `<img>` actually refetch instead of reusing the pre-upload bytes.
+        setAvatarUrl(`/api/personalities/${id}/avatar?v=${Date.now()}`);
+        notification.success({ message: 'Avatar updated', placement: 'topRight' });
+      }
+    },
+    onError: (err) =>
+      notification.error({ message: 'Avatar update failed', description: (err as Error).message }),
+  });
+
   return (
     <Form layout="vertical">
-      <Typography.Paragraph type="secondary" style={{ marginTop: 0 }}>
+      <Form.Item
+        label="Avatar"
+        help="Optional. Falls back to the generated mark when unset or the image fails to load."
+      >
+        <div style={{ display: 'flex', gap: 16, alignItems: 'flex-start' }}>
+          <PersonalityMark personalityId={id} size={48} avatarUrl={avatarUrl} />
+          <div style={{ flex: 1 }}>
+            <AvatarPicker
+              selectedCuratedUrl={avatarUrl}
+              onSelectCurated={(url) => avatarMut.mutate({ kind: 'curated', url })}
+              onFileSelected={(file) => avatarMut.mutate({ kind: 'file', file })}
+              onRemove={() => avatarMut.mutate({ kind: 'remove' })}
+              showRemove={Boolean(avatarUrl)}
+            />
+          </div>
+        </div>
+      </Form.Item>
+
+      <Typography.Paragraph type="secondary">
         First-person identity body. The agent loads this each turn.
       </Typography.Paragraph>
       <Form.Item>
@@ -1607,6 +1801,16 @@ function ToolsetAffordances({ draft }: { draft: string }) {
 // biome-ignore lint/suspicious/noTemplateCurlyInString: literal placeholder text for the UI, not a template variable
 const FS_REACH_READ_PLACEHOLDER = 'e.g. /data, ${self}/docs';
 
+// biome-ignore lint/suspicious/noTemplateCurlyInString: literal placeholder text for the UI, not a template variable
+const FS_REACH_WORKDIR_PLACEHOLDER = 'e.g. ${ETHOS_HOME}/workspace/${self}';
+
+const FS_REACH_READ_HELP = 'Directories this personality may read from.';
+
+const FS_REACH_WRITE_HELP = 'Directories this personality may write to.';
+
+const FS_REACH_WORKDIR_HELP =
+  'The one folder bare filenames land in — the output home for this personality, and what the Documents tab lists for download and deletion. Recommended: without it, output goes to whatever directory the server was started in.';
+
 export function ConfigEditor({ id, personality }: { id: string; personality: Personality }) {
   const qc = useQueryClient();
   const { notification } = AntApp.useApp();
@@ -1621,6 +1825,7 @@ export function ConfigEditor({ id, personality }: { id: string; personality: Per
     capabilities: string[];
     fsReachRead: string[];
     fsReachWrite: string[];
+    fsReachWorkdir: string;
     dreaming: boolean;
     dreamingIdleMinutes: number;
     dreamingMaxPerDay: number;
@@ -1642,6 +1847,11 @@ export function ConfigEditor({ id, personality }: { id: string; personality: Per
   const [tieredMode, setTieredMode] = useState(
     typeof personality.model === 'object' && personality.model !== null,
   );
+  // Voice lives outside the Antd form: `PersonalityVoiceFields` is a controlled
+  // pair (the voice control switches between a select and free text as the
+  // provider changes), and threading that through registered Form.Items buys
+  // nothing but indirection.
+  const [voice, setVoice] = useState<PersonalityVoice>(BLANK_VOICE);
   const catalogQuery = useQuery({
     queryKey: ['models', 'catalog'],
     queryFn: () => rpc.models.catalog(),
@@ -1664,6 +1874,7 @@ export function ConfigEditor({ id, personality }: { id: string; personality: Per
       capabilities: personality.capabilities ?? [],
       fsReachRead: personality.fs_reach?.read ?? [],
       fsReachWrite: personality.fs_reach?.write ?? [],
+      fsReachWorkdir: personality.fs_reach?.workdir ?? '',
       dreaming: personality.dreaming?.enable ?? false,
       dreamingIdleMinutes: personality.dreaming?.idleMinutes ?? 60,
       dreamingMaxPerDay: personality.dreaming?.maxPerDay ?? 1,
@@ -1685,6 +1896,16 @@ export function ConfigEditor({ id, personality }: { id: string; personality: Per
       nightlyJudgeMinInteractions: personality.nightly?.judge?.minInteractions ?? 20,
       nightlyExpression: personality.nightly?.expression ?? true,
     });
+    setVoice({
+      ttsProvider: personality.voice?.tts_provider ?? '',
+      ttsVoice: personality.voice?.tts_voice ?? '',
+      sttProvider: personality.voice?.stt_provider ?? '',
+      realtimeProvider: personality.voice?.realtime_provider ?? '',
+      callStyle: personality.voice?.call_style ?? '',
+      tier: personality.voice?.tier ?? '',
+      model: personality.voice?.model ?? '',
+      languages: voiceLanguageRows(personality.voice?.languages),
+    });
   }, [personality, form]);
 
   const mut = useMutation({
@@ -1699,6 +1920,7 @@ export function ConfigEditor({ id, personality }: { id: string; personality: Per
       capabilities: string[];
       fsReachRead: string[];
       fsReachWrite: string[];
+      fsReachWorkdir: string;
       dreaming: boolean;
       dreamingIdleMinutes: number;
       dreamingMaxPerDay: number;
@@ -1734,7 +1956,14 @@ export function ConfigEditor({ id, personality }: { id: string; personality: Per
         model,
         provider: values.provider || '',
         capabilities: values.capabilities,
-        fs_reach: { read: values.fsReachRead, write: values.fsReachWrite },
+        // `workdir` is always sent, empty string included: the registry
+        // shallow-merges fs_reach sub-keys, so omitting it would preserve the
+        // stored value and make the field impossible to clear from here.
+        fs_reach: {
+          read: values.fsReachRead,
+          write: values.fsReachWrite,
+          workdir: values.fsReachWorkdir,
+        },
         dreaming: {
           enable: values.dreaming,
           idleMinutes: values.dreamingIdleMinutes,
@@ -1752,6 +1981,10 @@ export function ConfigEditor({ id, personality }: { id: string; personality: Per
         },
         safety: { approvalMode: values.safetyApprovalMode },
         memory: { provider: values.memoryProvider },
+        // Every sub-key always sent, empty string included: the registry
+        // shallow-merges the voice block, so omitting one would preserve the
+        // stored value and make "back to the default provider" unexpressible.
+        voice: voiceUpdateInput(voice),
         nightly: {
           enabled: values.nightlyEnabled,
           judge: {
@@ -1788,6 +2021,7 @@ export function ConfigEditor({ id, personality }: { id: string; personality: Per
           capabilities: values.capabilities ?? [],
           fsReachRead: values.fsReachRead ?? [],
           fsReachWrite: values.fsReachWrite ?? [],
+          fsReachWorkdir: values.fsReachWorkdir ?? '',
           dreaming: values.dreaming ?? false,
           dreamingIdleMinutes: values.dreamingIdleMinutes ?? 60,
           dreamingMaxPerDay: values.dreamingMaxPerDay ?? 1,
@@ -1814,6 +2048,7 @@ export function ConfigEditor({ id, personality }: { id: string; personality: Per
       <Form.Item label="Description" name="description">
         <Input />
       </Form.Item>
+      <PersonalityVoiceFields value={voice} onChange={setVoice} />
       <Form.Item
         label="Provider"
         name="provider"
@@ -2103,7 +2338,7 @@ export function ConfigEditor({ id, personality }: { id: string; personality: Per
         message="Filesystem reach"
         description="These paths control which directories this personality can read and write. Adding broad paths (e.g. /, /home) lets the personality access anything inside. Edit only if you understand the implications."
       />
-      <Form.Item label="Read paths" name="fsReachRead">
+      <Form.Item label="Read paths" name="fsReachRead" extra={FS_REACH_READ_HELP}>
         <Select
           mode="tags"
           allowClear
@@ -2111,8 +2346,11 @@ export function ConfigEditor({ id, personality }: { id: string; personality: Per
           tokenSeparators={[',']}
         />
       </Form.Item>
-      <Form.Item label="Write paths" name="fsReachWrite">
+      <Form.Item label="Write paths" name="fsReachWrite" extra={FS_REACH_WRITE_HELP}>
         <Select mode="tags" allowClear placeholder="e.g. /data/output" tokenSeparators={[',']} />
+      </Form.Item>
+      <Form.Item label="Working directory" name="fsReachWorkdir" extra={FS_REACH_WORKDIR_HELP}>
+        <Input placeholder={FS_REACH_WORKDIR_PLACEHOLDER} />
       </Form.Item>
       <Form.Item>
         <Button type="primary" htmlType="submit" loading={mut.isPending}>
@@ -2470,7 +2708,7 @@ function ImportGlobalSkillsModal({
 // Duplicate modal — pick a new id, then open the editor on the copy
 // ---------------------------------------------------------------------------
 
-function DuplicateModal({
+export function DuplicateModal({
   source,
   existingIds,
   onClose,

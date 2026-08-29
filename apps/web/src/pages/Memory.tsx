@@ -20,6 +20,10 @@ import {
 } from 'antd';
 import type { Dayjs } from 'dayjs';
 import { useEffect, useState } from 'react';
+import { useParams } from 'react-router-dom';
+import { PersonalitySelect } from '../components/personality/PersonalitySelect';
+import { useFavouritePersonality } from '../hooks/useFavouritePersonality';
+import { resolvePersonalityId } from '../lib/favouritePersonality';
 import { rpc } from '../rpc';
 
 type MemoryHistorySource = MemoryHistoryEntry['source'];
@@ -28,15 +32,32 @@ type MemoryView = 'files' | 'timeline' | 'pending';
 export function Memory() {
   const [view, setView] = useState<MemoryView>('files');
   const [activeStore, setActiveStore] = useState<MemoryStoreId>('memory');
-  const [personalityId, setPersonalityId] = useState<string | null>(null);
+  const { personalityId: routePersonalityId } = useParams<{ personalityId?: string }>();
+  const [personalityId, setPersonalityId] = useState<string | null>(routePersonalityId ?? null);
   const [userId, setUserId] = useState<string | null>(null);
+  const { favouriteId, toggleFavourite } = useFavouritePersonality();
+
+  // P2 (plan/phases/personality-first-ui.md): default to — and stay in sync
+  // with — the workspace route's personality rather than the independently-
+  // remembered favourite. `resolvePersonalityId` below still lets a manual
+  // pick win until the next navigation; switching agents (AltitudeRail) is
+  // what re-syncs it, same as every other workspace pane.
+  useEffect(() => {
+    if (routePersonalityId) setPersonalityId(routePersonalityId);
+  }, [routePersonalityId]);
 
   const personalitiesQuery = useQuery({
     queryKey: ['personalities', 'list'],
     queryFn: () => rpc.personalities.list({}),
   });
 
-  const effectivePersonalityId = personalityId ?? personalitiesQuery.data?.defaultId ?? null;
+  const personalities = personalitiesQuery.data?.items ?? [];
+  const effectivePersonalityId = resolvePersonalityId({
+    selectedId: personalityId,
+    favouriteId,
+    defaultId: personalitiesQuery.data?.defaultId ?? null,
+    available: personalities.map((p) => p.id),
+  });
 
   const usersQuery = useQuery({
     queryKey: ['memory', 'listUsers'],
@@ -77,7 +98,6 @@ export function Memory() {
   const fileByStore = new Map(files.map((f) => [f.store, f] as const));
   const memoryMode = configQuery.data?.memory ?? 'markdown';
 
-  const personalities = personalitiesQuery.data?.items ?? [];
   const users = usersQuery.data?.users ?? [];
 
   return (
@@ -86,16 +106,13 @@ export function Memory() {
         <Typography.Text type="secondary" style={{ fontSize: 12 }}>
           Personality
         </Typography.Text>
-        <Select
-          size="small"
-          style={{ width: 200 }}
-          value={effectivePersonalityId ?? undefined}
-          onChange={(v) => setPersonalityId(v)}
+        <PersonalitySelect
+          personalities={personalities}
+          value={effectivePersonalityId}
+          onChange={setPersonalityId}
           loading={personalitiesQuery.isLoading}
-          options={personalities.map((p) => ({
-            value: p.id,
-            label: p.name,
-          }))}
+          favouriteId={favouriteId}
+          onToggleFavourite={toggleFavourite}
         />
         {view === 'files' && activeStore === 'user' ? (
           <>

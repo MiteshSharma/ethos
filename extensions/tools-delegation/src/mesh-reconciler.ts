@@ -146,7 +146,10 @@ export class MeshProxyReconciler {
             error: result.error ?? `remote job ${status}`,
           });
         } else {
-          // queued/running — keep it alive locally.
+          // Any non-terminal remote status — queued/running, and `blocked` when
+          // the peer's run is parked on a human answer — keeps the local proxy
+          // row alive. The proxy row itself stays `running`: the local card for a
+          // remote run is not the surface that answers the peer's question.
           await this.store.heartbeat(row.id);
         }
       } catch (err) {

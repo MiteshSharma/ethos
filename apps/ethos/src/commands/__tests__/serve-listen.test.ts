@@ -1,6 +1,6 @@
 import { createServer } from 'node:net';
 import { afterEach, describe, expect, it } from 'vitest';
-import { listenWithFallback } from '../serve-listen';
+import { formatNonLoopbackWarning, listenWithFallback } from '../serve-listen';
 
 // Minimal stub that satisfies the `{ fetch }` shape `listenWithFallback`
 // expects. Avoids dragging Hono into the CLI app's direct deps just for
@@ -97,6 +97,42 @@ describe('listenWithFallback', () => {
     });
 
     for (const b of blockers) await b.release();
+  });
+});
+
+describe('formatNonLoopbackWarning', () => {
+  it('warns with the bind address, exposed surfaces, and the Secure-cookie trap', () => {
+    const banner = formatNonLoopbackWarning('0.0.0.0', 3000);
+    expect(banner).not.toBeNull();
+    const text = banner ?? '';
+    expect(text).toContain('0.0.0.0:3000');
+    expect(text).toContain('/v1/*');
+    expect(text).toContain('/rpc/*');
+    expect(text).toContain('web UI');
+    expect(text).toContain('bash');
+    expect(text).toContain('WILL NOT LOG IN over plain http');
+    expect(text).toContain('webBaseUrl');
+    expect(text).toContain('reverse proxy');
+    expect(text).toContain('deploy-mission-control-remote.md');
+  });
+
+  it('reports the port it was given, not the requested one', () => {
+    expect(formatNonLoopbackWarning('192.168.1.20', 3002)).toContain('192.168.1.20:3002');
+  });
+
+  it('stays silent for loopback binds', () => {
+    expect(formatNonLoopbackWarning('127.0.0.1', 3000)).toBeNull();
+    expect(formatNonLoopbackWarning('localhost', 3000)).toBeNull();
+    expect(formatNonLoopbackWarning('::1', 3000)).toBeNull();
+  });
+
+  it('keeps the box square regardless of hostname length', () => {
+    const banner = formatNonLoopbackWarning('a-very-long-internal-hostname.example.internal', 8080);
+    const widths = new Set(
+      // biome-ignore lint/suspicious/noControlCharactersInRegex: stripping ANSI SGR codes
+      (banner ?? '').split('\n').map((l) => l.replace(/\x1b\[[0-9;]*m/g, '').length),
+    );
+    expect(widths.size).toBe(1);
   });
 });
 

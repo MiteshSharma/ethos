@@ -65,6 +65,7 @@ function makeMeetJoinTool(opts: MeetingToolsOptions): Tool {
     maxResultChars: 1024,
     capabilities: {},
     requiresApproval: true,
+    outputIsUntrusted: true,
     isAvailable: () => opts.meetingClient !== undefined && opts.memory !== undefined,
     schema: {
       type: 'object',

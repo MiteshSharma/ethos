@@ -1,7 +1,8 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { App as AntApp, Button, Input, Modal, Select, Typography } from 'antd';
 import { useState } from 'react';
-import { Board, TaskDrawer } from '../components/kanban/KanbanBoard';
+import { Board, BulkActionBar, TaskDrawer } from '../components/kanban/KanbanBoard';
+import { useKanbanBoardSync } from '../hooks/useKanbanBoardSync';
 import { rpc } from '../rpc';
 
 export function Kanban() {
@@ -10,6 +11,20 @@ export function Kanban() {
   const [showArchived, setShowArchived] = useState(false);
   const [showCreateTask, setShowCreateTask] = useState(false);
   const [showHelp, setShowHelp] = useState(false);
+  const [selectMode, setSelectMode] = useState(false);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+
+  const onSelectModeChange = (next: boolean) => {
+    setSelectMode(next);
+    if (!next) setSelected(new Set());
+  };
+  const onToggleSelect = (id: string) =>
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
 
   const teamsQuery = useQuery({
     queryKey: ['kanban', 'list'],
@@ -19,11 +34,18 @@ export function Kanban() {
   const teams = teamsQuery.data?.teams ?? [];
   const activeTeam = selectedTeam ?? (teams.length === 1 ? (teams[0]?.name ?? null) : null);
 
+  useKanbanBoardSync(activeTeam);
+
   const boardQuery = useQuery({
     queryKey: ['kanban', 'board', activeTeam],
     queryFn: () => rpc.kanban.getBoard({ team: activeTeam ?? '' }),
     enabled: activeTeam !== null,
-    refetchInterval: 3_000,
+  });
+
+  const agentsQuery = useQuery({
+    queryKey: ['kanban', 'agents', activeTeam],
+    queryFn: () => rpc.kanban.listAgents({ team: activeTeam ?? '' }),
+    enabled: activeTeam !== null && selected.size > 0,
   });
 
   const board = boardQuery.data?.board ?? null;
@@ -85,9 +107,22 @@ export function Kanban() {
             showArchived={showArchived}
             onSelect={setSelectedTaskId}
             fill
+            selectMode={selectMode}
+            onSelectModeChange={onSelectModeChange}
+            selected={selected}
+            onToggleSelect={onToggleSelect}
           />
           {showHelp && <ConnectAgentsPanel teamName={activeTeam} />}
         </div>
+      )}
+
+      {activeTeam && selected.size > 0 && (
+        <BulkActionBar
+          selectedIds={Array.from(selected)}
+          teamName={activeTeam}
+          agents={agentsQuery.data?.agents ?? []}
+          onDone={() => setSelected(new Set())}
+        />
       )}
 
       {board && activeTeam && (

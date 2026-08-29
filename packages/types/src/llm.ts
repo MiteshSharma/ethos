@@ -14,7 +14,28 @@ export type CompletionChunk =
   | { type: 'tool_use_start'; toolCallId: string; toolName: string }
   | { type: 'tool_use_delta'; toolCallId: string; partialJson: string }
   | { type: 'tool_use_end'; toolCallId: string; inputJson: string }
-  | { type: 'usage'; usage: TokenUsage; metadata?: Record<string, unknown> }
+  | {
+      type: 'usage';
+      usage: TokenUsage;
+      metadata?: Record<string, unknown>;
+      /**
+       * B2 — the provider's own SERVER-ASSIGNED id for this HTTP request
+       * (Anthropic's `request-id` response header, surfaced by the SDK as
+       * `MessageStream.request_id`). Inbound and opaque to us: it is the value
+       * a provider support ticket asks for. Distinct from the loop's
+       * client-minted `CompletionOptions.requestId`, which travels outbound.
+       * Absent when the provider exposes no such id.
+       */
+      providerRequestId?: string;
+      /**
+       * Why `usage.estimatedCostUsd` is what it is — `@ethosagent/pricing`'s
+       * `PricingBasis`, duplicated here as a literal union rather than
+       * imported (this package has zero deps; pricing depends on types, not
+       * the other way around). `undefined` for a provider transport that has
+       * not been updated to report it yet.
+       */
+      costBasis?: 'priced' | 'local' | 'unknown';
+    }
   | { type: 'done'; finishReason: 'end_turn' | 'tool_use' | 'max_tokens' | 'stop_sequence' }
   | { type: 'warning'; message: string };
 
@@ -35,8 +56,18 @@ export type MessageContent =
       type: 'image';
       mediaType: 'image/png' | 'image/jpeg' | 'image/gif' | 'image/webp';
       data: string;
+      /** Source filename. Carried so block aging can name what it removed
+       *  (`[image aged out: shot.png]`) — providers build their payload from
+       *  `mediaType`/`data` and never send this. */
+      filename?: string;
     }
-  | { type: 'document'; mediaType: 'application/pdf'; data: string };
+  | {
+      type: 'document';
+      mediaType: 'application/pdf';
+      data: string;
+      /** Source filename — see the `image` variant. */
+      filename?: string;
+    };
 
 export interface CompletionOptions {
   system?: string;
@@ -49,6 +80,15 @@ export interface CompletionOptions {
   abortSignal?: AbortSignal;
   stopSequences?: string[];
   modelOverride?: string;
+  /**
+   * B2 — the agent loop's per-LLM-call id (minted in `stream-step.ts`), sent
+   * OUTBOUND where the provider supports it: openai-compat puts it on the
+   * `X-Client-Request-Id` request header so a provider-side log line can be
+   * matched to our trace. Client-minted; the provider's own server-assigned id
+   * comes back on the `usage` chunk as `providerRequestId`. Providers with no
+   * client-id convention ignore this field.
+   */
+  requestId?: string;
   /**
    * context_compression F2 — message-history cache breakpoints. Each number
    * is an index into `messages`; the provider places a `cache_control` marker

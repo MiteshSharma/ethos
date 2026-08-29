@@ -23,6 +23,7 @@ import { runAudit } from './commands/audit';
 import { runBackup, runImport } from './commands/backup';
 import { runBatch } from './commands/batch';
 import { runBench } from './commands/bench';
+import { runCas } from './commands/cas';
 import { runChat } from './commands/chat';
 import { runClaw } from './commands/claw';
 import { runCommands } from './commands/commands';
@@ -60,6 +61,7 @@ import { runTail } from './commands/tail';
 import { runTeamCommand } from './commands/team';
 import { runTrace } from './commands/trace';
 import { runUpgrade } from './commands/upgrade';
+import { runWhy } from './commands/why';
 import { appendErrorLog } from './error-log';
 import { writeJson } from './json-output';
 import { CliSubcommandRegistry } from './lib/cli-subcommand-registry';
@@ -72,7 +74,7 @@ const ETHOS_VERSION =
   typeof __ETHOS_VERSION__ === 'string' ? __ETHOS_VERSION__ : (process.env.ETHOS_VERSION ?? 'dev');
 
 const USAGE =
-  'Usage: ethos [-z <prompt> | setup | chat | sessions | serve | dashboard | status | run-all | set | team | mesh | a2a | process | logs | gateway | cron | personality | memory | acp | batch | bench | eval | evolve | learn | nightly | digest | plugin | skills | commands | keys | secrets | fallback | slack | api-key | claw | doctor | upgrade | mcp | backup | import | trace | audit | security | errors | perf | tail | retention | data | support | archive | systemd-unit | usage] [--version | --help]';
+  'Usage: ethos [-z <prompt> | setup | chat | sessions | serve | boot | dashboard | status | run-all | set | team | mesh | a2a | process | logs | gateway | listen | cron | personality | memory | acp | batch | bench | eval | evolve | learn | nightly | digest | plugin | skills | commands | keys | secrets | fallback | slack | api-key | claw | doctor | upgrade | mcp | backup | import | trace | audit | security | errors | perf | tail | retention | cas | why | data | support | archive | systemd-unit | usage] [--version | --help]';
 
 const args = process.argv.slice(2);
 const command = args[0] ?? '';
@@ -363,7 +365,11 @@ try {
           console.error('Run ethos setup first.');
           process.exit(1);
         }
-        await writeConfig(getStorage(), { ...cfg, personality: args[2] });
+        await writeConfig(
+          getStorage(),
+          { ...cfg, personality: args[2] },
+          await getSecretsResolver(),
+        );
         console.log(`Personality set to: ${args[2]}`);
       } else if (sub === 'mcp') {
         await runPersonalityMcp(args.slice(2));
@@ -640,6 +646,16 @@ try {
       break;
     }
 
+    case 'listen': {
+      // Lazily imported: `@ethosagent/voice-satellite` (and, behind it, `ws`)
+      // must not sit in the CLI's top-level import graph just because the
+      // binary can also be a wake satellite. Same doctrine the daemon-free
+      // smoke test enforces for the gateway.
+      const { runListen } = await import('./commands/listen');
+      await runListen(args.slice(1));
+      break;
+    }
+
     case 'cron': {
       const config = await loadRequiredConfig();
       await runCronCommand(args[1] ?? 'list', args.slice(2), config);
@@ -665,6 +681,26 @@ try {
         setRotationConfig(config.logs.rotation);
       }
       await runServe(args.slice(1), config);
+      break;
+    }
+
+    // `ethos boot` — the merged single-process profile
+    // (plan/phases/single-process-boot-profile.md). Runs the gateway role and
+    // the serve role in ONE process so boot-time reconciliation runs in full on
+    // every start, instead of each command silently skipping the other's half.
+    // Additive: `gateway`, `serve` and `run-all` are unchanged.
+    // Lazily imported for the same reason `listen` is — `commands/boot.ts`
+    // pulls in the gateway, web-api and ACP graphs, which must not sit in the
+    // CLI's top-level import path just because the binary can also merge them.
+    case 'boot': {
+      const secrets = await getSecretsResolver();
+      const config = (await readConfig(getStorage(), secrets)) ?? null;
+      if (config?.logs?.rotation) {
+        const { setRotationConfig } = await import('./error-log');
+        setRotationConfig(config.logs.rotation);
+      }
+      const { runBoot } = await import('./commands/boot');
+      await runBoot(args.slice(1), config);
       break;
     }
 
@@ -854,6 +890,16 @@ try {
       break;
     }
 
+    case 'cas': {
+      await runCas(args[1] ?? '', args.slice(2));
+      break;
+    }
+
+    case 'why': {
+      await runWhy(args.slice(1));
+      break;
+    }
+
     case 'data': {
       await runData(args[1] ?? 'stats', args.slice(2));
       break;
@@ -922,6 +968,7 @@ try {
       await runSupervisor(manifest, manifestPath, {
         logger: supervisorLogger,
         storage: getStorage(),
+        secrets: await getSecretsResolver(),
       });
       break;
     }
@@ -1208,6 +1255,9 @@ async function runPersonalityShow(argv: string[]): Promise<void> {
   // that cannot be constructed, renders today's sheet without the verdict —
   // the character sheet is the command's contract.
   let modelFit: import('@ethosagent/personalities').CharacterSheetModelFit | undefined;
+  let scriptSurface: import('@ethosagent/personalities').CharacterSheetScriptSurface | undefined;
+  let boundary: import('@ethosagent/personalities').CharacterSheetBoundary | undefined;
+  let renderers: string[] | undefined;
   let loopConstructed = false;
   try {
     const cfg = await readConfig(storage, await getSecretsResolver());
@@ -1215,6 +1265,15 @@ async function runPersonalityShow(argv: string[]): Promise<void> {
       const { createAgentLoop } = await import('./wiring');
       const result = await createAgentLoop(cfg);
       loopConstructed = true;
+      // Lane G (tools-as-code-api) — the script-callable surface, computed by
+      // the SAME derivation the ScriptToolBridge enforces. Fail-soft with the
+      // rest of this block: no loop → no line.
+      const { scriptCallableFor, toolsDeclaringNetwork } = await import('@ethosagent/core');
+      scriptSurface = { callable: scriptCallableFor(described.config, result.toolRegistry) };
+      // §4.7 — which tools in reach DECLARE network egress, so the `## Boundary`
+      // section can say G-NET is inapplicable rather than implying reach this
+      // personality does not have. Same declaration G-CAP intersects per call.
+      boundary = { networkTools: toolsDeclaringNetwork(described.config, result.toolRegistry) };
       const model = cfg.modelRouting?.[id] ?? cfg.model;
       modelFit = await resolvePersonalityModelFit({
         personality: described.config,
@@ -1233,11 +1292,27 @@ async function runPersonalityShow(argv: string[]): Promise<void> {
         dataDir: ethosDir(),
         forceProbeRefresh: true,
       });
+      // skill-declared-renderers Lane E — the same `resolveRenderers` derivation
+      // the `personalities.renderers` RPC gates the web renderer on, so the
+      // sheet and the surface cannot disagree about what may be drawn. Last in
+      // the block: this one touches disk, and a skills read that fails should
+      // cost the Renders line, not the model-fit verdict above it.
+      renderers = await result.skillsInjector.resolveRenderers(id);
     }
   } catch {
     // The verdict is advisory — the character sheet is the command's contract.
   }
-  console.log(`\n${renderCharacterSheet(described.config, soulMd, { posture }, modelFit)}`);
+  console.log(
+    `\n${renderCharacterSheet(
+      described.config,
+      soulMd,
+      { posture },
+      modelFit,
+      scriptSurface,
+      renderers,
+      boundary,
+    )}`,
+  );
 
   // Loop construction can leave live handles (MCP children, background
   // executors); the sheet is printed and flushed, so exit explicitly (same

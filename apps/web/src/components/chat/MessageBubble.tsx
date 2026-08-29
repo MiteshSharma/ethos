@@ -1,5 +1,6 @@
-import { ContentRenderer } from '@ethosagent/ui-components';
+import { ContentRenderer, type FenceRendererResolver } from '@ethosagent/ui-components';
 import { useQuery } from '@tanstack/react-query';
+import { CardView } from '../../features/cards/CardView';
 import { formatBytes, type MessageAttachment } from '../../lib/attachments';
 import type { AssistantBlock, AssistantTurn, UserMessage } from '../../lib/chat-reducer';
 import { rpc } from '../../rpc';
@@ -7,6 +8,7 @@ import { HtmlBlock } from './HtmlBlock';
 import { ImageBlock } from './ImageBlock';
 import { PdfBlock } from './PdfBlock';
 import { PlayButton } from './PlayButton';
+import { RunAnchor, type RunSurface } from './RunCard';
 import { ToolChip } from './ToolChip';
 
 // One rendered message. DESIGN.md voice rules in effect:
@@ -19,6 +21,15 @@ export function UserBubble({ message }: { message: UserMessage }) {
   return (
     <div className="message-row message-row-user">
       {message.isSteer && <div className="message-steer-label">↗ Steering</div>}
+      {/* The turn arrived as speech. The marker sits ABOVE the transcript, in
+          the same 11px mono treatment as the steering marker, so the
+          transcript is fully readable beside it and never replaces the fact
+          that it was spoken. */}
+      {message.origin === 'voice' && (
+        <div className="message-voice-label" role="note" aria-label="Sent by voice">
+          voice
+        </div>
+      )}
       {message.content ? <div className="message-user">{message.content}</div> : null}
       {attachments.length > 0 ? (
         <div className="message-attachments">
@@ -55,7 +66,26 @@ function AttachmentChip({ attachment }: { attachment: MessageAttachment }) {
   );
 }
 
-export function AssistantBubble({ turn, streaming }: { turn: AssistantTurn; streaming?: boolean }) {
+export function AssistantBubble({
+  turn,
+  streaming,
+  fenceRenderers,
+  onSuggestPrompt,
+  personalityId,
+  runSurface,
+}: {
+  turn: AssistantTurn;
+  streaming?: boolean;
+  /** Fence-upgrade decision for this surface. Must be referentially stable. */
+  fenceRenderers?: FenceRendererResolver;
+  /** Puts a `recommend_actions` prompt in the composer. */
+  onSuggestPrompt?: (prompt: string) => void;
+  /** Who is speaking — carried to the Play button so click-to-hear uses this
+   *  personality's voice rather than the deployment default. */
+  personalityId?: string;
+  /** Live state for the delegated-run cards this turn anchors (§4.1). */
+  runSurface?: RunSurface;
+}) {
   const lastBlock = turn.blocks[turn.blocks.length - 1];
   const cursorAfter = streaming && lastBlock?.kind === 'text';
   const fullText = turn.blocks
@@ -76,12 +106,17 @@ export function AssistantBubble({ turn, streaming }: { turn: AssistantTurn; stre
             key={blockKey(block, idx)}
             block={block}
             streamingTail={streaming && idx === turn.blocks.length - 1}
+            fenceRenderers={fenceRenderers}
+            onSuggestPrompt={onSuggestPrompt}
+            {...(runSurface ? { runSurface } : {})}
           />
         ))}
         {streaming && !cursorAfter && lastBlock?.kind === 'tool' ? (
           <span className="streaming-cursor streaming-cursor-trailing" aria-hidden="true" />
         ) : null}
-        {!streaming && fullText && ttsEnabled ? <PlayButton text={fullText} /> : null}
+        {!streaming && fullText && ttsEnabled ? (
+          <PlayButton text={fullText} {...(personalityId ? { personalityId } : {})} />
+        ) : null}
       </div>
     </div>
   );
@@ -90,14 +125,27 @@ export function AssistantBubble({ turn, streaming }: { turn: AssistantTurn; stre
 function BlockRenderer({
   block,
   streamingTail,
+  fenceRenderers,
+  onSuggestPrompt,
+  runSurface,
 }: {
   block: AssistantBlock;
   streamingTail?: boolean;
+  fenceRenderers?: FenceRendererResolver;
+  onSuggestPrompt?: (prompt: string) => void;
+  runSurface?: RunSurface;
 }) {
   if (block.kind === 'text') {
     return (
       <>
-        <ContentRenderer content={block.content} format="markdown" />
+        <ContentRenderer
+          content={block.content}
+          format="markdown"
+          fenceRenderers={fenceRenderers}
+          // Only the tail block of a live turn can hold an unclosed fence;
+          // earlier blocks in the same turn are already complete.
+          streaming={streamingTail}
+        />
         {streamingTail ? <span className="streaming-cursor" aria-hidden="true" /> : null}
       </>
     );
@@ -111,6 +159,16 @@ function BlockRenderer({
   if (block.kind === 'pdf') {
     return <PdfBlock block={block} />;
   }
+  if (block.kind === 'card') {
+    return <CardView card={block.card} onSuggestPrompt={onSuggestPrompt} />;
+  }
+  if (block.kind === 'run') {
+    // The anchor records where the handoff happened; the card is drawn from
+    // live digest state, which only the chat page holds. No surface (history
+    // replay, the Call Stage) renders nothing rather than a frozen card.
+    if (!runSurface) return null;
+    return <RunAnchor jobId={block.jobId} surface={runSurface} />;
+  }
   return <ToolChip tool={block} />;
 }
 
@@ -119,5 +177,8 @@ function blockKey(block: AssistantBlock, idx: number): string {
   if (block.kind === 'image') return `image-${block.toolCallId}`;
   if (block.kind === 'html') return `html-${block.toolCallId}`;
   if (block.kind === 'pdf') return `pdf-${block.toolCallId}`;
+  // One tool call can emit several cards, so the id alone is not unique.
+  if (block.kind === 'card') return `card-${block.toolCallId}-${idx}`;
+  if (block.kind === 'run') return `run-${block.jobId}`;
   return `tool-${block.toolCallId}`;
 }

@@ -260,39 +260,6 @@ export function toOpenAIMessages(
 }
 
 // ---------------------------------------------------------------------------
-// Per-model pricing (USD per million tokens, approximate)
-// ---------------------------------------------------------------------------
-
-const OPENAI_PRICING: Array<{ prefix: string; input: number; output: number }> = [
-  // OpenAI
-  { prefix: 'gpt-4o-mini', input: 0.15, output: 0.6 },
-  { prefix: 'gpt-4o', input: 2.5, output: 10 },
-  { prefix: 'gpt-4-turbo', input: 10, output: 30 },
-  { prefix: 'gpt-4', input: 30, output: 60 },
-  { prefix: 'gpt-3.5-turbo', input: 0.5, output: 1.5 },
-  // Google Gemini
-  { prefix: 'gemini-2.0-flash', input: 0.1, output: 0.4 },
-  { prefix: 'gemini-1.5-flash', input: 0.075, output: 0.3 },
-  { prefix: 'gemini-1.5-pro', input: 1.25, output: 5.0 },
-  // DeepSeek
-  { prefix: 'deepseek-v3', input: 0.14, output: 0.28 },
-  { prefix: 'deepseek-r1', input: 0.55, output: 2.19 },
-  // Mistral
-  { prefix: 'mistral-large', input: 2.0, output: 6.0 },
-  { prefix: 'mistral-small', input: 0.1, output: 0.3 },
-];
-
-export function estimateCostOpenAI(
-  model: string,
-  inputTokens: number,
-  outputTokens: number,
-): number {
-  const p = OPENAI_PRICING.find((r) => model.toLowerCase().includes(r.prefix));
-  if (!p) return 0; // unknown model — local/Ollama or unrecognised
-  return (inputTokens * p.input + outputTokens * p.output) / 1_000_000;
-}
-
-// ---------------------------------------------------------------------------
 // OpenAICompatProvider
 // ---------------------------------------------------------------------------
 

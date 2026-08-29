@@ -5,7 +5,7 @@ import {
   createPersonalityRegistry,
   PersonalityA2aIdentityProvider,
 } from '@ethosagent/personalities';
-import type { AgentCard } from '@ethosagent/types';
+import type { AgentCard, Storage } from '@ethosagent/types';
 import {
   type A2aIdentityView,
   A2aPeeringError,
@@ -13,6 +13,7 @@ import {
   buildA2aPeeringService,
 } from '@ethosagent/wiring';
 import { getSecretsResolver, getStorage } from '../wiring';
+import { a2aZeroSkillsWarning } from './serve-helpers';
 
 // `ethos a2a <subcommand>` — Stage 2 of A2A peering (plan §5).
 //
@@ -60,8 +61,15 @@ export interface A2aCommandDeps {
   peering: A2aPeeringPort;
   loadConfig: () => Promise<EthosConfig | null>;
   saveConfig: (config: EthosConfig) => Promise<void>;
-  /** Interactive y/N confirm (for `peer remove` without `--yes`). */
+  /** Interactive y/N confirm (for `peer remove` / `reset` without `--yes`). */
   confirm: (prompt: string) => Promise<boolean>;
+  /**
+   * Wipe `~/.ethos/a2a/`'s contents (T1.6 follow-up) — the task store, peer
+   * store, allowlist, and any A2A keys for every personality. Returns the
+   * names of the top-level entries removed (empty if the directory was
+   * already empty or absent).
+   */
+  resetA2aDir: () => Promise<string[]>;
   /** Clock for relative "last seen" rendering; defaults to Date.now. */
   now?: () => number;
 }
@@ -102,7 +110,9 @@ const USAGE = `Usage: ethos a2a <command>
   peer list [--personality <id>] [--json]    list configured peers
   peer enable <fp> [--personality <id>]      activate a peer
   peer disable <fp> [--personality <id>]     revoke a peer
-  peer remove <fp> [--personality <id>] [--yes]   delete a peer grant`;
+  peer remove <fp> [--personality <id>] [--yes]   delete a peer grant
+
+  reset [--yes]   PERMANENTLY delete ~/.ethos/a2a/ (task store, peer store, allowlist, keys)`;
 
 // ---------------------------------------------------------------------------
 // Entry point — builds real deps, then delegates to the testable core.
@@ -130,13 +140,29 @@ async function buildRealDeps(): Promise<A2aCommandDeps> {
     storage,
     ...(config.webBaseUrl ? { baseUrl: config.webBaseUrl } : {}),
   });
-  const peering = buildA2aPeeringService({ storage, baseDir: join(dir, 'a2a'), identity });
+  const a2aDir = join(dir, 'a2a');
+  const peering = buildA2aPeeringService({ storage, baseDir: a2aDir, identity });
   return {
     peering,
     loadConfig: () => readRawConfig(storage),
-    saveConfig: (cfg) => writeConfig(storage, cfg),
+    saveConfig: (cfg) => writeConfig(storage, cfg, secrets),
     confirm,
+    resetA2aDir: () => resetDirContents(storage, a2aDir),
   };
+}
+
+/**
+ * Remove every top-level entry under `dir`, returning their names. Exported
+ * for direct testing against `InMemoryStorage` — the command-level tests stub
+ * the whole `resetA2aDir` seam, so this is what actually exercises the
+ * filesystem-clearing behaviour.
+ */
+export async function resetDirContents(storage: Storage, dir: string): Promise<string[]> {
+  const names = await storage.list(dir);
+  for (const name of names) {
+    await storage.remove(join(dir, name), { recursive: true });
+  }
+  return names;
 }
 
 // ---------------------------------------------------------------------------
@@ -156,6 +182,8 @@ export async function runA2aCommand(args: string[], deps: A2aCommandDeps): Promi
       return a2aIdentity(args.slice(1), deps);
     case 'peer':
       return a2aPeer(args.slice(1), deps);
+    case 'reset':
+      return a2aReset(args.slice(1), deps);
     default:
       console.log(USAGE);
   }
@@ -214,6 +242,18 @@ async function a2aStatus(args: string[], deps: A2aCommandDeps): Promise<void> {
   console.log(
     `${G} ${c.bold}peers${c.reset}         ${peers.length} configured for ${c.cyan}${pid}${c.reset}`,
   );
+
+  // T0.1 — the zero-skills warning (the headline bug). Best-effort: an
+  // unknown/unreachable personality here must not turn `status` into an error.
+  if (enabled) {
+    try {
+      const view = await deps.peering.identity(pid);
+      const warning = a2aZeroSkillsWarning(pid, view.exposedSkills.length);
+      if (warning) console.log(`${W} ${warning}`);
+    } catch {
+      // best-effort; `identity` surfaces its own errors elsewhere (ethos a2a identity)
+    }
+  }
 }
 
 // -- identity ---------------------------------------------------------------
@@ -414,6 +454,35 @@ async function peerRemove(args: string[], deps: A2aCommandDeps): Promise<void> {
   }
   await deps.peering.removePeer(pid, fp);
   console.log(`${G} peer ${c.cyan}${fp}${c.reset} removed.`);
+}
+
+// -- reset (T1.6 follow-up) --------------------------------------------------
+
+/**
+ * Wipe `~/.ethos/a2a/` — the task store, every personality's peer store and
+ * allowlist, and any A2A signing keys. No prior migration policy exists for
+ * that directory (T1.6), so this is a full, explicit reset: run `ethos a2a
+ * disable` first if `ethos serve`/`gateway` is live, since a running process
+ * can still hold the task store open.
+ */
+async function a2aReset(args: string[], deps: A2aCommandDeps): Promise<void> {
+  const flags = parseFlags(args);
+  if (!flags.yes) {
+    const ok = await deps.confirm(
+      `${c.red}This permanently deletes ~/.ethos/a2a/${c.reset} — the task store, every ` +
+        `personality's peer store, allowlist, and A2A signing keys. Continue? [y/N] `,
+    );
+    if (!ok) {
+      console.log('aborted.');
+      return;
+    }
+  }
+  const removed = await deps.resetA2aDir();
+  if (removed.length === 0) {
+    console.log(`${G} nothing to reset — ~/.ethos/a2a/ is already empty or absent.`);
+    return;
+  }
+  console.log(`${G} reset ~/.ethos/a2a/ — removed: ${removed.join(', ')}`);
 }
 
 // ---------------------------------------------------------------------------

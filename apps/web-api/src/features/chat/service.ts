@@ -6,9 +6,11 @@ import {
   type SessionStreamBuffer,
 } from '@ethosagent/agent-bridge';
 import type { AgentLoop } from '@ethosagent/core';
+import type { CardStore } from '@ethosagent/session-cards';
 import { EthosError } from '@ethosagent/types';
-import type { SseEvent } from '@ethosagent/web-contracts';
+import type { CardEnvelope, SseEvent } from '@ethosagent/web-contracts';
 import type { SystemEventBus } from '../../services/system-event-bus';
+import { gateStructuredCard } from './card-gate';
 import type { ChatRepository } from './repository';
 
 // Chat orchestrator. The one place that touches `AgentBridge` per the spec
@@ -56,6 +58,13 @@ export interface ChatServiceOptions {
   /** Optional attachment cache for persisting inbound attachments. */
   attachmentCache?: import('@ethosagent/types').AttachmentCache;
   /**
+   * Optional durable store for typed UI cards. When wired, a valid
+   * `tool_end.structured.card` is persisted so `sessions.get` can replay it
+   * after the in-memory stream buffer is reaped. Absent → cards live only for
+   * the length of the stream (tests, embedders).
+   */
+  cardStore?: CardStore;
+  /**
    * Optional refresh closure — reloads the loop's personality registry from
    * disk before a turn runs, so a hot-dropped or edited personality resolves
    * without a server restart. Absent → no refresh.
@@ -72,10 +81,21 @@ export interface ChatServiceOptions {
 export interface ChatSendInput {
   sessionId?: string;
   clientId: string;
+  /**
+   * B1/B3 — the `x-request-id` of the HTTP request that asked for this turn.
+   * Threaded in by the RPC layer. It becomes the returned `turnId`, so the
+   * handle a tab gets back is the same id the response header and any error
+   * envelope carry, instead of a third UUID that names nothing else. The
+   * turn's own `traceId` is a DIFFERENT id and arrives on the SSE stream
+   * (`run_start.traceId`) — see the note on `ChatSendOutput.turnId`.
+   */
+  requestId?: string;
   text: string;
   personalityId?: string;
   userId?: string;
   dryRun?: boolean;
+  /** `voice` → `text` is a transcript of speech (talk-mode). Default `text`. */
+  origin?: 'text' | 'voice';
   attachments?: Array<{
     type: 'image' | 'file';
     data: string;
@@ -86,6 +106,13 @@ export interface ChatSendInput {
 
 export interface ChatSendOutput {
   sessionId: string;
+  /**
+   * The request id of the `chat.send` that started this turn (see
+   * `ChatSendInput.requestId`). It is NOT the turn's `traceId`: `send` returns
+   * before the loop has run turn-setup, and blocking until it had would mean
+   * waiting behind the bridge's FIFO queue for any turn already in flight. The
+   * `traceId` reaches the client on the SSE stream instead.
+   */
   turnId: string;
 }
 
@@ -98,6 +125,8 @@ export class ChatService {
   private readonly bridges = new Map<string, AgentBridge>();
   private readonly firstUserMessages = new Map<string, string>();
   private readonly emitter = new EventEmitter<InternalEventMap>();
+  /** sessionId -> hand-back texts held until the in-flight turn's `done`. */
+  private readonly pendingHandBacks = new Map<string, string[]>();
 
   constructor(private readonly opts: ChatServiceOptions) {
     // Allow many SSE connections per session (multi-tab) without warnings.
@@ -175,7 +204,10 @@ export class ChatService {
       }
     }
 
-    const turnId = randomUUID();
+    // No UUID minted here: the request that started the turn already has an id
+    // (`x-request-id`). The fallback covers callers with no HTTP request behind
+    // them (tests, embedders).
+    const turnId = input.requestId ?? randomUUID();
 
     // Refresh the loop's personality registry from disk before the turn runs so
     // a hot-dropped or edited personality resolves without a restart. No-op when
@@ -200,6 +232,14 @@ export class ChatService {
         ...(input.userId ? { userId: input.userId } : {}),
         ...(input.dryRun ? { dryRun: true } : {}),
         ...(loopAttachments?.length ? { attachments: loopAttachments } : {}),
+        // Talk-mode turn: the loop renders a message-level `<voice-origin>`
+        // annotation on the persisted user message so the model knows it is
+        // speaking. `owner` — this is the operator's own browser session,
+        // behind the same auth as the rest of the surface; a far-end caller
+        // can never reach this code path.
+        ...(input.origin === 'voice'
+          ? { voiceOrigin: { transport: 'browser-talk-mode', speaker: 'owner' as const } }
+          : {}),
       })
       .catch((err) => {
         // bridge.send doesn't reject for in-flight failures (those land as
@@ -221,6 +261,25 @@ export class ChatService {
     const bridge = this.bridges.get(sessionId);
     if (!bridge) return false;
     return bridge.steer(text);
+  }
+
+  /**
+   * Is any web-chat turn currently in flight? The busy predicate the idle
+   * watcher reads for this surface.
+   *
+   * It inspects each bridge's `isRunning` rather than `bridges.size` on
+   * purpose: `bridges` is keyed per session and LONG-LIVED — an entry is
+   * created on the session's first `send` and removed only by `forget`, so a
+   * non-empty map means "sessions exist", not "work is in flight". A size
+   * check would report this process permanently busy and the watcher would
+   * never suspend it. `AgentBridge.isRunning` is the real per-turn signal
+   * (its `controller` is non-null only while a turn runs).
+   */
+  hasActiveBridges(): boolean {
+    for (const bridge of this.bridges.values()) {
+      if (bridge.isRunning) return true;
+    }
+    return false;
   }
 
   // ---------------------------------------------------------------------------
@@ -285,6 +344,45 @@ export class ChatService {
     }
   }
 
+  /**
+   * Speak one message into a session that no live turn produced — the delegated
+   * run's completion hand-back (pi-delegation §4.9/D27). It is Ethos's own
+   * sentence about the result, not the runner's tokens pasted into the chat.
+   *
+   * Two properties, both load-bearing:
+   *  • It is PERSISTED first, so a reload finds it in history rather than
+   *    discovering the run silently vanished.
+   *  • It rides the SAME `text_delta` + `done` pair a turn does — D27's "do not
+   *    invent a new notification bus" taken literally. A turn already in flight
+   *    would otherwise have this text spliced into the middle of its bubble, so
+   *    the broadcast waits for that turn's `done` and lands after it.
+   */
+  async handBack(sessionId: string, text: string): Promise<void> {
+    if (!text) return;
+    await this.opts.sessions.appendAssistantMessage(sessionId, text);
+    const bridge = this.bridges.get(sessionId);
+    if (bridge?.isRunning) {
+      const queued = this.pendingHandBacks.get(sessionId) ?? [];
+      queued.push(text);
+      this.pendingHandBacks.set(sessionId, queued);
+      return;
+    }
+    this.emitHandBack(sessionId, text);
+  }
+
+  private emitHandBack(sessionId: string, text: string): void {
+    this.append(sessionId, { type: 'text_delta', text });
+    this.append(sessionId, { type: 'done', text, turnCount: 0 });
+  }
+
+  /** Drain hand-backs held back by a turn that was mid-flight. */
+  private flushHandBacks(sessionId: string): void {
+    const queued = this.pendingHandBacks.get(sessionId);
+    if (!queued) return;
+    this.pendingHandBacks.delete(sessionId);
+    for (const text of queued) this.emitHandBack(sessionId, text);
+  }
+
   /** Drop bridge + buffer for a session — called by tests / future /new flow. */
   forget(sessionId: string): void {
     const bridge = this.bridges.get(sessionId);
@@ -294,6 +392,7 @@ export class ChatService {
       this.bridges.delete(sessionId);
     }
     this.firstUserMessages.delete(sessionId);
+    this.pendingHandBacks.delete(sessionId);
     this.opts.buffer.clear(sessionId);
     // If approvals are wired, drop any pending requests for this session
     // so the awaiting hook unblocks (`{ decision: 'deny', reason: 'session
@@ -337,8 +436,14 @@ export class ChatService {
     bridge.on('thinking_delta', (thinking) =>
       this.append(sessionId, { type: 'thinking_delta', thinking }),
     );
-    bridge.on('tool_start', (toolCallId, toolName, args) =>
-      this.append(sessionId, { type: 'tool_start', toolCallId, toolName, args }),
+    bridge.on('tool_start', (toolCallId, toolName, args, audience) =>
+      this.append(sessionId, {
+        type: 'tool_start',
+        toolCallId,
+        toolName,
+        args,
+        ...(audience !== undefined ? { audience } : {}),
+      }),
     );
     bridge.on('tool_progress', (toolName, message, percent) =>
       this.append(sessionId, {
@@ -351,7 +456,16 @@ export class ChatService {
         audience: 'user',
       }),
     );
-    bridge.on('tool_end', (toolCallId, toolName, ok, durationMs, result, structured) =>
+    bridge.on('tool_end', (toolCallId, toolName, ok, durationMs, result, structured, audience) => {
+      // Cards are gated before anything else sees them: an envelope that does
+      // not match the contract is neither broadcast nor persisted.
+      const gated = gateStructuredCard(structured);
+      if (gated.issues) {
+        console.warn(
+          `[chat] dropped invalid card envelope from ${toolName} (${toolCallId}): ${gated.issues.join('; ')}`,
+        );
+      }
+      if (gated.card) this.persistCard(sessionId, toolCallId, gated.card);
       this.append(sessionId, {
         type: 'tool_end',
         toolCallId,
@@ -359,9 +473,10 @@ export class ChatService {
         ok,
         durationMs,
         ...(result !== undefined ? { result } : {}),
-        ...(structured !== undefined ? { structured } : {}),
-      }),
-    );
+        ...(gated.structured !== undefined ? { structured: gated.structured } : {}),
+        ...(audience !== undefined ? { audience } : {}),
+      });
+    });
     bridge.on('usage', (inputTokens, outputTokens, estimatedCostUsd) =>
       this.append(sessionId, {
         type: 'usage',
@@ -373,19 +488,46 @@ export class ChatService {
     bridge.on('dry_run_summary', (plan, capped) =>
       this.append(sessionId, { type: 'dry_run_summary', plan, capped }),
     );
-    bridge.on('run_start', (provider, model, source) =>
-      this.append(sessionId, { type: 'run_start', provider, model, source }),
+    // B3 — the turn's `traceId` is passed straight through onto the stream on
+    // both the opening and closing event of the turn. This is the only turn
+    // identity web-api publishes; it does not mint one of its own.
+    bridge.on('run_start', (provider, model, source, traceId) =>
+      this.append(sessionId, {
+        type: 'run_start',
+        provider,
+        model,
+        source,
+        ...(traceId ? { traceId } : {}),
+      }),
     );
     bridge.on('error', (error, code) => this.append(sessionId, { type: 'error', error, code }));
-    bridge.on('done', (text, turnCount) => {
-      this.append(sessionId, { type: 'done', text, turnCount });
+    bridge.on('done', (text, turnCount, traceId) => {
+      this.append(sessionId, { type: 'done', text, turnCount, ...(traceId ? { traceId } : {}) });
       try {
         this.opts.onTurnDone?.();
       } catch {
         // Funnel/analytics callbacks are best-effort — never break the stream.
       }
       void this.tryAutoTitle(sessionId);
+      // A run that finished mid-turn queued its hand-back rather than splicing
+      // it into the bubble above. The turn is over — say it now.
+      this.flushHandBacks(sessionId);
     });
+  }
+
+  /**
+   * Persist a validated card for replay. Best-effort by design: a store
+   * failure costs one card on a later reload, and must never break the live
+   * stream the user is watching.
+   */
+  private persistCard(sessionId: string, toolCallId: string, envelope: CardEnvelope): void {
+    try {
+      this.opts.cardStore?.append(sessionId, toolCallId, envelope);
+    } catch (err) {
+      console.warn(
+        `[chat] card persist failed for session ${sessionId} (${toolCallId}): ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
   }
 
   private async tryAutoTitle(sessionId: string): Promise<void> {

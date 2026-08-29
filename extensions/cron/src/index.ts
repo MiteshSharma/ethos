@@ -83,6 +83,15 @@ export interface CronJob {
   lastRunAt?: string;
   nextRunAt?: string;
   createdAt: string;
+  /**
+   * Mid-execution signal (plan/phases/idle-watcher.md §1 check #7). Epoch ms
+   * stamped inside `claimDueJob`'s compare-and-swap — so only the winning
+   * claimant ever sets it — and cleared in `executeJob`'s `finally`, including
+   * when the job throws. `null` or absent means "not running": records written
+   * before this field existed simply have no key, which reads the same as
+   * cleared. Read through `hasRunningJobs()`, never directly.
+   */
+  runningSince?: number | null;
 }
 
 export interface CronJobUpdate {
@@ -107,6 +116,34 @@ export interface CronRunInfo {
   ranAt: string;
   /** Absolute path to the persisted markdown output. */
   outputPath: string;
+}
+
+// ---------------------------------------------------------------------------
+// Trigger seam (plan/phases/cron-scheduler-seam.md) — what a `CronTriggerSource`
+// calls into, and who gets told when the next run is due.
+// ---------------------------------------------------------------------------
+
+/**
+ * The shared due-scan / claim-before-run / execute cycle. `CronScheduler` is
+ * today's only implementation (its `fire()` method) — the interface exists so
+ * a trigger (an in-process interval, or an externally-fired HTTP request) can
+ * drive it uniformly without depending on the concrete class. See `trigger.ts`
+ * for `CronTriggerSource` (`LocalIntervalTrigger` / `HttpFireTrigger`).
+ */
+export interface CronEngine {
+  fire(): Promise<void>;
+}
+
+/**
+ * Told the next time work is due, so an external wake mechanism (e.g. a
+ * future Firecracker Wake Controller) knows when to resume a sleeping
+ * instance. `NoopArmingBackend` (see `trigger.ts`) is the only implementation
+ * this phase ships — arms nothing — but the `arm(nextRunAt)` contract is
+ * exercised for real (see `CronScheduler`'s call site) so a later real backend
+ * is designed against a tested signature, not a guessed one.
+ */
+export interface CronArmingBackend {
+  arm(nextRunAt: Date | null): void | Promise<void>;
 }
 
 export interface CronSchedulerConfig {
@@ -137,6 +174,10 @@ export interface CronSchedulerConfig {
     job: CronJob,
     decision: CronDecision & { ranAt: string; delivered: boolean },
   ) => void;
+  /** Told the earliest `nextRunAt` across active jobs after every fire — the
+   *  `CronArmingBackend` seam. Optional; when absent no arming call is made.
+   *  Failures are swallowed (arming is fail-open, never breaks the run). */
+  armingBackend?: CronArmingBackend;
 }
 
 /** Audit actions: heartbeat escalate/silent plus the script-job outcomes. */
@@ -350,6 +391,26 @@ const noopSecrets: SecretsResolver = {
 // CronScheduler
 // ---------------------------------------------------------------------------
 
+/**
+ * Staleness bound on `CronJob.runningSince`, applied at READ time by
+ * `hasRunningJobs()`.
+ *
+ * `runningSince` is persisted (jobs.json), so a process killed mid-run leaves
+ * a stamp with nobody behind it. This is the equivalent of
+ * `JobStore.reclaimStale(staleMs)` — with one deliberate difference: there is
+ * no sweep that rewrites the record. `runningSince` has exactly one consumer
+ * (the `cron-executions` busy source) and no state machine to transition into,
+ * unlike a job row that must move `running` → `stale`, so a ghost stamp only
+ * needs to stop reading as busy. It ages out here, and the job's next claim
+ * overwrites it outright.
+ *
+ * One hour, because a cron prompt job is a full agent turn with tool calls and
+ * has no heartbeat to shorten this against. Erring long is the safe direction:
+ * too short reports a genuinely-running job idle, which is the failure mode
+ * that loses work; too long only delays a suspend.
+ */
+export const CRON_RUNNING_STALE_MS = 60 * 60 * 1000;
+
 export class CronScheduler {
   private readonly cronDir: string;
   private readonly jobsPath: string;
@@ -367,7 +428,7 @@ export class CronScheduler {
     job: CronJob,
     decision: CronDecision & { ranAt: string; delivered: boolean },
   ) => void;
-  private timer: ReturnType<typeof setInterval> | null = null;
+  private armingBackend?: CronArmingBackend;
 
   constructor(config: CronSchedulerConfig) {
     this.cronDir = config.cronDir ?? join(homedir(), '.ethos', 'cron');
@@ -383,22 +444,36 @@ export class CronScheduler {
     this.scriptsDir = config.scriptsDir ?? join(homedir(), '.ethos', 'scripts');
     this.executionBackend = config.executionBackend ?? null;
     this.onDecision = config.onDecision;
+    this.armingBackend = config.armingBackend;
+  }
+
+  /**
+   * Late-bind the `CronArmingBackend` after construction. Exists because
+   * `buildCronTriggers` (trigger.ts) needs the already-constructed
+   * `CronScheduler` as its `engine` argument, so the arming backend it
+   * produces can't be passed into this scheduler's own constructor —
+   * callers build the scheduler first, then `buildCronTriggers(scheduler,
+   * ...)`, then wire the result back with this setter. `tick()` reads
+   * `this.armingBackend` at call time (see the end of `tick()`), so a
+   * value set after construction — including after the first `fire()` —
+   * is picked up on every subsequent tick.
+   */
+  setArmingBackend(backend: CronArmingBackend): void {
+    this.armingBackend = backend;
   }
 
   // ---------------------------------------------------------------------------
-  // Lifecycle
+  // Engine entry point — `CronEngine.fire()`. The in-process interval loop
+  // that used to live here (`start()`/`stop()`) has moved to
+  // `LocalIntervalTrigger` (see `trigger.ts`); this class is the engine a
+  // `CronTriggerSource` fires into, not the thing that owns the timer.
   // ---------------------------------------------------------------------------
 
-  start(): void {
-    void this.tick(); // check immediately on start (handles missed runs)
-    this.timer = setInterval(() => void this.tick(), this.tickIntervalMs);
-  }
-
-  stop(): void {
-    if (this.timer) {
-      clearInterval(this.timer);
-      this.timer = null;
-    }
+  /** Run the due-scan/claim/execute cycle once, right now. Called by a
+   *  `CronTriggerSource` — an interval loop, or an externally-fired HTTP
+   *  request (`POST /cron/fire`). */
+  async fire(): Promise<void> {
+    await this.tick();
   }
 
   // ---------------------------------------------------------------------------
@@ -602,7 +677,28 @@ export class CronScheduler {
   async runJobNow(id: string): Promise<CronRunResult> {
     const job = await this.getJob(id);
     if (!job) throw new Error(`Job not found: ${id}`);
-    return this.executeJob(job);
+    // A manual run is mid-execution too — it does not go through the due-scan
+    // CAS (there is nothing to race with; the caller asked for this one job by
+    // id), but the busy signal must see it, so it gets its own stamp.
+    const runningStamp = Date.now();
+    await this.patchJob(id, { runningSince: runningStamp }).catch(() => {});
+    return this.executeJob(job, runningStamp);
+  }
+
+  /**
+   * Whether any job is mid-execution right now — the aggregate the idle
+   * watcher's `cron-executions` busy source reads (plan §1 check #7).
+   *
+   * Reads `runningSince` off jobs.json rather than an in-process Map on
+   * purpose: in a hybrid deployment several processes share one cron dir, and
+   * a run started by a peer is still work this VM must not be suspended
+   * through. Stamps older than `staleMs` are ignored — see
+   * `CRON_RUNNING_STALE_MS`.
+   */
+  async hasRunningJobs(staleMs: number = CRON_RUNNING_STALE_MS): Promise<boolean> {
+    const cutoff = Date.now() - staleMs;
+    const jobs = await this.readJobs();
+    return jobs.some((j) => typeof j.runningSince === 'number' && j.runningSince > cutoff);
   }
 
   /**
@@ -722,12 +818,21 @@ export class CronScheduler {
       }
 
       // Claim the job by advancing nextRunAt BEFORE executing so a crash
-      // mid-run doesn't double-fire on the next tick.
+      // mid-run doesn't double-fire on the next tick. `claimDueJob` re-checks
+      // `nextRunAt` against this tick's snapshot INSIDE the jobs lock — a
+      // real compare-and-swap, not a last-write-wins patch — so two `tick()`
+      // calls racing on the same due job (hybrid deployments firing both
+      // `LocalIntervalTrigger` and `HttpFireTrigger` close together) can't
+      // both win the claim and both execute it.
       const upcoming = nextRunForSchedule(job.schedule, now, new Date(job.createdAt));
+      // Stamped inside the CAS below, so a losing claimant never writes it.
+      const runningStamp = Date.now();
+      let claimed: boolean;
       try {
-        await this.patchJob(job.id, {
+        claimed = await this.claimDueJob(job.id, job.nextRunAt, {
           lastRunAt: now.toISOString(),
           nextRunAt: upcoming?.toISOString(),
+          runningSince: runningStamp,
         });
       } catch (err) {
         this.logger.error(`[cron] Could not claim job "${job.id}", skipping tick`, {
@@ -737,9 +842,14 @@ export class CronScheduler {
         });
         continue;
       }
+      if (!claimed) {
+        // Another concurrent tick already claimed this job — expected in
+        // the hybrid profile, not an error.
+        continue;
+      }
 
       try {
-        await this.executeJob(job);
+        await this.executeJob(job, runningStamp);
       } catch (err) {
         this.logger.error(`[cron] Job "${job.id}" failed`, {
           component: 'cron',
@@ -768,6 +878,22 @@ export class CronScheduler {
       }
 
       await this.patchJob(job.id, patchData).catch(() => {});
+    }
+
+    if (this.armingBackend) {
+      try {
+        const afterTick = await this.readJobs();
+        const nextTimes = afterTick
+          .filter(
+            (j): j is CronJob & { nextRunAt: string } => j.status === 'active' && !!j.nextRunAt,
+          )
+          .map((j) => new Date(j.nextRunAt).getTime())
+          .filter((t) => Number.isFinite(t));
+        const earliest = nextTimes.length > 0 ? new Date(Math.min(...nextTimes)) : null;
+        await this.armingBackend.arm(earliest);
+      } catch {
+        // arming is fail-open — never breaks the tick
+      }
     }
   }
 
@@ -810,7 +936,25 @@ export class CronScheduler {
   // Execution
   // ---------------------------------------------------------------------------
 
-  private async executeJob(job: CronJob): Promise<CronRunResult> {
+  /**
+   * Run one job and always release its mid-execution stamp.
+   *
+   * The `finally` is the load-bearing half: a job that THROWS (script failure,
+   * a dead LLM provider, a missing systemTask handler) must not leave
+   * `runningSince` set, or the idle watcher would read this deployment as
+   * permanently busy and never suspend again.
+   */
+  private async executeJob(job: CronJob, runningStamp?: number): Promise<CronRunResult> {
+    try {
+      return await this.runExecution(job);
+    } finally {
+      if (runningStamp !== undefined) {
+        await this.clearRunning(job.id, runningStamp).catch(() => {});
+      }
+    }
+  }
+
+  private async runExecution(job: CronJob): Promise<CronRunResult> {
     // System jobs dispatch to a registered handler instead of the LLM runJob path
     if (job.source === 'system' && job.systemTask) {
       const handler = this.systemTasks[job.systemTask];
@@ -1045,6 +1189,55 @@ export class CronScheduler {
       return jobs;
     });
   }
+
+  /**
+   * Real compare-and-swap for claiming a due job's execution slot. Unlike
+   * `patchJob` (last-write-wins), this re-reads jobs FRESH inside
+   * `withJobsLock` and only applies `patch` if `nextRunAt` still equals
+   * `expectedNextRunAt` (the value the caller's `tick()` snapshotted before
+   * the lock) and the job is still `active`. If another concurrent `tick()`
+   * already claimed/advanced the job first, the check fails and this
+   * returns `false` without writing anything — the caller should treat that
+   * as "someone else already got it", not an error. Returns `true` iff this
+   * call's claim was the one that stuck.
+   */
+  private async claimDueJob(
+    jobId: string,
+    expectedNextRunAt: string | undefined,
+    patch: Partial<CronJob>,
+  ): Promise<boolean> {
+    let claimed = false;
+    await this.withJobsLock(async (jobs) => {
+      const idx = jobs.findIndex((j) => j.id === jobId);
+      const existing = idx >= 0 ? jobs[idx] : undefined;
+      if (!existing) throw new Error(`Job not found: ${jobId}`);
+      if (existing.status !== 'active' || existing.nextRunAt !== expectedNextRunAt) {
+        // Already claimed (or otherwise moved) by a concurrent tick — no-op.
+        return jobs;
+      }
+      jobs[idx] = { ...existing, ...patch };
+      claimed = true;
+      return jobs;
+    });
+    return claimed;
+  }
+
+  /**
+   * Release a mid-execution stamp — a compare-and-swap, not a blind write. It
+   * clears `runningSince` only if the stored stamp is still the one THIS
+   * execution wrote, so a concurrent claim (a `runJobNow` overlapping a tick,
+   * say) that has already stamped a newer value is never clobbered back to
+   * idle. Missing job, or someone else's stamp: no-op.
+   */
+  private async clearRunning(jobId: string, stamp: number): Promise<void> {
+    await this.withJobsLock(async (jobs) => {
+      const idx = jobs.findIndex((j) => j.id === jobId);
+      const existing = idx >= 0 ? jobs[idx] : undefined;
+      if (!existing || existing.runningSince !== stamp) return jobs;
+      jobs[idx] = { ...existing, runningSince: null };
+      return jobs;
+    });
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1060,6 +1253,18 @@ export {
   nextRunForSchedule,
   parseSchedule,
 } from './schedule';
+
+// ---------------------------------------------------------------------------
+// Re-exports from the trigger module (CronTriggerSource / CronArmingBackend)
+// ---------------------------------------------------------------------------
+
+export type { CronDeploymentConfig, CronTriggerSource, CronTriggers } from './trigger';
+export {
+  buildCronTriggers,
+  HttpFireTrigger,
+  LocalIntervalTrigger,
+  NoopArmingBackend,
+} from './trigger';
 
 // ---------------------------------------------------------------------------
 // Backward-compat helpers — delegate to the new schedule parser

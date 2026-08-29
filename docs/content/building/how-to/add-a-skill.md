@@ -5,7 +5,7 @@ kind: how-to
 audience: developer
 slug: add-a-skill
 time: "10 min"
-updated: 2026-05-12
+updated: 2026-08-21
 ---
 
 ## Task
@@ -14,7 +14,7 @@ Author a markdown-defined [skill](../../getting-started/glossary.md#skill), plac
 
 ## Result
 
-The skill is parsed at boot, deduped by qualified name (`<source>/<name>`), and added to the skill pool. Personalities whose toolset reaches the skill's `required_tools` see it; the rest do not. `ethos doctor --skills` lists it under the source label and visibility per personality.
+The skill is parsed at boot, keyed by qualified name (`<source>/<name>`), and added to the skill pool. Personalities whose toolset reaches the skill's `required_tools` see it; the rest do not. `ethos skills list` shows it grouped under its source label.
 
 ## Prereqs
 
@@ -31,11 +31,14 @@ Ethos scans these paths at startup. Pick the one that matches the skill's scope.
 | Path | Source label | Visible to |
 |---|---|---|
 | `~/.ethos/skills/<name>/SKILL.md` | `ethos` | All projects on this machine. |
-| `<repo>/.ethos/skills/<name>/SKILL.md` | `ethos-project` | Anyone running Ethos inside this checkout. Commit to share. |
+| `<repo>/.claude/skills/<name>/SKILL.md` | `claude-code-project` | Anyone running Ethos inside this checkout. Commit to share. |
+| `<repo>/.opencode/skills/<name>/SKILL.md` | `opencode-project` | Same, for repos that already keep skills in OpenCode's layout. |
 | `~/.claude/skills/<name>/SKILL.md` | `claude-code` | Ethos AND Claude Code. Best for cross-framework skills. |
 | `~/.ethos/personalities/<id>/skills/<name>/SKILL.md` | per-personality | Only the named personality. Always loads, bypasses the filter. |
 
-`skills/data/<category>/<name>/SKILL.md` is the bundled location; it ships inside the framework and is read-only at runtime. Add new skills under one of the user paths.
+Ethos has no per-repo `.ethos/skills/` source. A skill you want committed alongside the code goes in `<repo>/.claude/skills/` — the scanner reads that directory whatever tool wrote it. (`<repo>/.ethos/commands/` is a real project-scoped directory, but it holds slash commands, not skills.)
+
+`skills/<category>/<name>/SKILL.md` inside the Ethos checkout is the bundled location; it ships inside the framework and is read-only at runtime. Add new skills under one of the user paths.
 
 ### 2. Write the SKILL.md file
 
@@ -64,13 +67,14 @@ Frontmatter fields the scanner reads:
 
 | Field | Required | Purpose |
 |---|---|---|
-| `name` | No | Slug for `/skill-name` invocation. Defaults to the directory name. |
+| `name` | No | The `<name>` half of the qualified name `<source>/<name>`. Defaults to the directory name. |
 | `description` | Yes (in practice) | The agent reads this to decide when to load the skill. Keep keywords up front. |
 | `required_tools` | No | The filter compares this list against the personality's toolset. Skills with no declaration are allowed by default (`fallback_unknown: allow`). |
 | `tags` | No | Used by `tags` filter mode and the deny list. |
-| `disable-model-invocation` | No | `true` blocks LLM-initiated activation. Use for skills with destructive side effects. |
 
-Other frontmatter fields from the agentskills.io spec are accepted by the parser and ignored when Ethos has no use for them yet, so your skills stay portable.
+Other frontmatter fields from the agentskills.io spec are accepted by the parser and ignored when Ethos has no use for them yet, so your skills stay portable. That cuts both ways: a field Ethos does not read is silently inert, not an error. In particular there is no per-skill switch to block model invocation and no per-skill tool allowlist — `disable-model-invocation` and `allowed-tools` belong to slash commands, a different artifact. The only gates on a skill are the safety scan and the per-personality filter below.
+
+**A2A inbound turns are a deliberate, narrower exception to `fallback_unknown: allow`.** The default above governs the global skill pool your own personality reads from disk — an operator's own tooling, which already trusts itself. A2A's inbound surface reads a *different* signal from the same `required_tools` key: when an authenticated peer names a skill in a personality's own `skills/` directory that declares no `required_tools` at all, the turn is refused outright rather than falling back to the personality's full toolset. The reasoning is who is asking — an untrusted remote peer, not the operator's own tooling — so the safer default flips. This does not change `fallback_unknown` above; it is the one caller in the codebase that does not use it.
 
 ### 3. Configure the per-personality filter
 
@@ -133,31 +137,35 @@ This is the explicit hand-curated library — bypassing the global filter is int
 
 ## Verify
 
-Boot the agent and check the skill registry:
+Scan the pool and confirm the skill is in it:
 
 ```bash
-ethos doctor --skills
+ethos skills list
 ```
 
-Expect output like:
+Skills are grouped by source label, bundled first, then your own:
 
 ```text
-Skills loaded: 47 total · 14 visible to researcher
-  sources: ethos (12), claude-code (28), openclaw (7)
-  visible to researcher: ethos/explain-code, claude-code/citation-format, ...
+ethos-bundled
+  code-review  [software-development]
+  tdd  [software-development]
+ethos  (/Users/you/.ethos/skills)
+  explain-code
 ```
 
-Then invoke the skill directly:
+Add `--json` for a machine-readable list of `{ name, source, category }`.
+
+Then give the agent a request that matches the skill's `description`:
 
 ```bash
-ethos chat -q "/explain-code src/auth/login.ts"
+ethos chat -q "how does src/auth/login.ts work?"
 ```
 
-A turn that opens with the analogy you wrote in `SKILL.md` confirms the skill loaded and the LLM followed it.
+A turn that opens with the analogy you wrote in `SKILL.md` confirms the skill reached the prompt and the LLM followed it. There is no slash command for a directory-shaped skill — activation is the description match plus the per-personality filter.
 
 ## Troubleshoot
 
-**Skill not in the boot output at all.** — The scanner did not find the directory. Confirm the path matches one of the discovered sources. `~/.claude/skills/explain-code/SKILL.md` is right; `~/.claude/skills/explain-code.md` is wrong — every skill is its own directory.
+**Skill not in `ethos skills list` at all.** — The scanner did not find the directory. Confirm the path matches one of the sources in step 1: `<repo>/.ethos/skills/` is not one of them. Confirm the shape too — `~/.claude/skills/explain-code/SKILL.md` is right; `~/.claude/skills/explain-code.md` is wrong. Every discovered skill is its own directory with `SKILL.md` inside it.
 
 **Skill is in the pool but not visible to the personality.** — The filter is rejecting it. Check `capability` mode: every entry in `required_tools` must appear in the personality's `toolset.yaml`. A skill with `required_tools: [terminal, web_extract]` will not reach a personality whose toolset is `[web_search, read_file]`.
 
@@ -167,4 +175,4 @@ A turn that opens with the analogy you wrote in `SKILL.md` confirms the skill lo
 
 **Frontmatter not parsing.** — The file is missing the leading `---` delimiter or the YAML is malformed. Run `head -10 ~/.ethos/skills/<name>/SKILL.md`; the first line must be exactly `---`, and the closing `---` must be on its own line.
 
-**Duplicate skill names across sources.** — The scanner dedupes by qualified name (`<source>/<name>`), so two sources with the same skill name coexist. To override an `ethos-bundled` skill, drop a same-named directory under `~/.ethos/skills/`; the user source wins.
+**Duplicate skill names across sources.** — The pool is keyed by qualified name (`<source>/<name>`), so two sources with the same skill name both survive — `ethos/code-review` and `ethos-bundled/code-review` are distinct entries and both reach the filter. There is no override: a same-named directory under `~/.ethos/skills/` adds a second skill, it does not replace the bundled one. To suppress the bundled copy, name the personality's `deny` list: `deny: [ethos-bundled/code-review]`.

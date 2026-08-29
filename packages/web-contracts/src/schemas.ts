@@ -101,6 +101,9 @@ export const PersonalitySchema = z.object({
     .object({
       read: z.array(z.string()).nullable(),
       write: z.array(z.string()).nullable(),
+      /** Declared working directory, substitution tokens unresolved. null =
+       *  undeclared (the agent falls back to the process working directory). */
+      workdir: z.string().nullable(),
     })
     .nullable(),
   /** Idle-time dreaming state. Optional (omitted when unset) so the editor
@@ -134,6 +137,10 @@ export const PersonalitySchema = z.object({
   /** Per-personality memory backend. Optional (omitted when unset) so the
    *  editor can read the current provider to populate its form. */
   memory: z.object({ provider: z.string().optional() }).optional(),
+  /** How this personality looks across identity surfaces — currently just a
+   *  custom avatar image URL. Optional (omitted when unset) so surfaces fall
+   *  back to the generated mark. */
+  display: z.object({ avatar_url: z.string().optional() }).optional(),
   /** Nightly governed-learning gates. Optional (omitted when unset) so the
    *  editor can read the current toggles to populate its form. */
   nightly: z
@@ -146,6 +153,25 @@ export const PersonalitySchema = z.object({
         })
         .optional(),
       expression: z.boolean().optional(),
+    })
+    .optional(),
+  /** How this personality sounds, listens, and looks on a call — the sub-keys
+   *  the editor writes: `voice.tts_provider` / `voice.stt_provider` /
+   *  `voice.realtime_provider` (roster labels), `voice.tts_voice`,
+   *  `voice.call_style`, `voice.tier`, `voice.model` and the
+   *  `voice.languages.<tag>` map. Read back so the editor can populate its form
+   *  — a field the editor cannot READ is a field a save silently erases.
+   *  Omitted when the personality declares no voice. */
+  voice: z
+    .object({
+      tts_provider: z.string().optional(),
+      stt_provider: z.string().optional(),
+      realtime_provider: z.string().optional(),
+      tts_voice: z.string().optional(),
+      call_style: z.enum(['liquid', 'orb', 'rings']).optional(),
+      tier: z.enum(['pipeline', 'realtime']).optional(),
+      model: z.string().optional(),
+      languages: z.record(z.string(), z.string()).optional(),
     })
     .optional(),
   system: z.boolean(),
@@ -1051,15 +1077,34 @@ export type KanbanAgent = z.infer<typeof KanbanAgentSchema>;
 // returned on create; subsequent reads never expose it.
 // ---------------------------------------------------------------------------
 
+// Two scopes read as "chat" and they are NOT interchangeable:
+//
+//   `chat`      gates the whole OpenAI-compatible `/v1/*` surface
+//               (`/v1/models`, `/v1/chat/completions`). Asserted by
+//               `bearerAuth` at the `/v1` mount in
+//               apps/web-api/src/routes/openai/index.ts.
+//   `chat:send` gates the `chat.send` / `chat.abort` RPC procedures on the
+//               browser-facing `/rpc/*` surface, via SCOPE_MAP in
+//               apps/web-api/src/middleware/dual-auth.ts.
+//
+// A key needs `chat` to drive Cursor/Aider/the OpenAI SDKs, and `chat:send` to
+// drive a Mission Control built on `@ethosagent/sdk`. Neither implies the other.
+// `cron` gates the whole `POST /cron/fire` route (apps/web-api/src/routes/cron.ts)
+// the same way `chat` gates the whole `/v1/*` surface — a plain bearer-checked
+// route, not an RPC method, so it has no SCOPE_MAP entry (dual-auth.ts's
+// SCOPE_MAP is keyed by oRPC path and only applies to `/rpc/*`/`/sse/*`).
 export const ApiKeyScopeSchema = z.enum([
   'sessions:read',
   'sessions:write',
+  'chat',
   'chat:send',
   'personalities:read',
   'memory:read',
   'memory:write',
   'tools:approve',
   'events:subscribe',
+  'metrics:read',
+  'cron',
 ]);
 export type ApiKeyScope = z.infer<typeof ApiKeyScopeSchema>;
 
@@ -1189,9 +1234,12 @@ export type GoalWire = z.infer<typeof GoalSchema>;
 // trail, and requests cancellation.
 // ---------------------------------------------------------------------------
 
+// `blocked` — the run is parked on a human answer. Non-terminal, still holding
+// its concurrency slot, and never swept stale. Mirrors `BackgroundJobStatus`.
 export const BackgroundJobStatusSchema = z.enum([
   'queued',
   'running',
+  'blocked',
   'done',
   'failed',
   'aborted',
@@ -1210,6 +1258,14 @@ export const BackgroundJobEventTypeSchema = z.enum([
   'tool_headline',
   'tool_end',
   'text',
+  'blocked',
+  'resumed',
+  // One file a runner changed. Payload is an `ArtifactChange` — artifacts never
+  // enter the AgentEvent stream, so this row IS the Diff tab's source.
+  'artifact_change',
+  // A batch of the runner subprocess's own stdout/stderr lines (I-LOG1).
+  // Payload carries `lines` and an optional `dropped` count.
+  'runner_log',
   'done',
   'failed',
   'aborted',
@@ -1244,14 +1300,66 @@ export const BackgroundJobSummarySchema = z.object({
   owner: z.string(),
   rootSessionKey: z.string(),
   parentSessionKey: z.string(),
+  /**
+   * `JobRunner.name`. Null on rows written before the runner seam existed.
+   *
+   * On the SUMMARY (not just the detail) because `tasks.list` is what a
+   * freshly-mounted chat page reads to rediscover the runs it was not
+   * connected for, and a run card cannot draw its runner badge without it.
+   */
+  runner: z.string().nullable(),
 });
 export type BackgroundJobSummaryWire = z.infer<typeof BackgroundJobSummarySchema>;
+
+/**
+ * One row of the run card's session detail grid (pi-delegation §4.2/D18). The
+ * UI owns the 12 shared rows; these are whatever `JobRunner.describe(job)`
+ * returned, so a second harness adds its vocabulary without a component change.
+ *
+ * `tone` is a claim about the value, not decoration: `safe` is a fact something
+ * enforces, `warn` is a claim nothing does. Mirrors `DetailRow` in
+ * `@ethosagent/types`.
+ */
+export const RunDetailRowSchema = z.object({
+  label: z.string(),
+  value: z.string(),
+  tone: z.enum(['accent', 'safe', 'warn']).optional(),
+});
+export type RunDetailRowWire = z.infer<typeof RunDetailRowSchema>;
+
+/**
+ * What a runner can actually do. Surfaces hide affordances a runner does not
+ * support rather than offering a button that throws. Mirrors
+ * `RunnerCapabilities` in `@ethosagent/types`; `interactionKinds` and
+ * `answerScopes` are open strings by design (D16).
+ */
+export const RunnerCapabilitiesSchema = z.object({
+  interactionKinds: z.array(z.string()),
+  answerScopes: z.array(z.enum(['once', 'run', 'always'])),
+  takeover: z.enum(['pty', 'none']),
+  resume: z.enum(['session', 'fork', 'none']),
+  steer: z.boolean(),
+  sandbox: z.enum(['process', 'external', 'none']),
+  transport: z.string(),
+});
+export type RunnerCapabilitiesWire = z.infer<typeof RunnerCapabilitiesSchema>;
 
 export const BackgroundJobDetailSchema = BackgroundJobSummarySchema.extend({
   prompt: z.string(),
   summary: z.string().nullable(),
   error: z.string().nullable(),
   events: z.array(BackgroundJobEventSchema),
+  // --- Run-card detail grid (pi-delegation §4.2). Everything below feeds a row
+  // the card renders; none of it is read by the Tasks list.
+  childSessionKey: z.string(),
+  originPlatform: z.string().nullable(),
+  originChatId: z.string().nullable(),
+  /** The pending question a `blocked` run is parked on — same id space as `clarify.request`. */
+  blockedRequestId: z.string().nullable(),
+  /** `runner.describe(job)` output. Empty when the runner is not resolved in this process. */
+  detailRows: z.array(RunDetailRowSchema),
+  /** Null when the runner that executed this row is not resolved in this process. */
+  capabilities: RunnerCapabilitiesSchema.nullable(),
 });
 export type BackgroundJobDetailWire = z.infer<typeof BackgroundJobDetailSchema>;
 

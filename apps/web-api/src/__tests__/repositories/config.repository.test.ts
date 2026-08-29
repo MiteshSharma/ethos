@@ -1,17 +1,24 @@
 import { join } from 'node:path';
-import { InMemoryStorage } from '@ethosagent/storage-fs';
+import { deriveBotKey } from '@ethosagent/core';
+import { InMemorySecretsResolver, InMemoryStorage } from '@ethosagent/storage-fs';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { ConfigRepository } from '../../repositories/config.repository';
 
 const DATA = '/data';
 
+function secretRef(path: string): string {
+  return ['${', 'secrets:', path, '}'].join('');
+}
+
 describe('ConfigRepository', () => {
   let storage: InMemoryStorage;
+  let secrets: InMemorySecretsResolver;
   let repo: ConfigRepository;
 
   beforeEach(() => {
     storage = new InMemoryStorage();
-    repo = new ConfigRepository({ dataDir: DATA, storage });
+    secrets = new InMemorySecretsResolver();
+    repo = new ConfigRepository({ dataDir: DATA, storage, secrets });
   });
 
   it('preserves dotted passthrough keys on read and write', async () => {
@@ -38,7 +45,15 @@ describe('ConfigRepository', () => {
     // Update an unrelated field — dotted keys must survive
     await repo.update({ model: 'claude-opus-4-7' });
     const yaml = await storage.read(join(DATA, 'config.yaml'));
-    expect(yaml).toContain('telegram.bots.0.token: "123:ABC"');
+    // The token is preserved, but as a vault reference — never as a literal.
+    // The ref is keyed by the bot's stable botKey (what PlatformsRepository
+    // mints for the same token), not by array position.
+    const botKey = deriveBotKey('123:ABC');
+    expect(yaml).toContain(
+      `telegram.bots.0.token: "${secretRef(`telegram/bots/${botKey}/token`)}"`,
+    );
+    expect(yaml).not.toContain('123:ABC');
+    expect(await secrets.get(`telegram/bots/${botKey}/token`)).toBe('123:ABC');
     expect(yaml).toContain('telegram.bots.1.bind.name: eng');
   });
 
@@ -193,6 +208,7 @@ describe('ConfigRepository', () => {
     ]);
     const config = await repo.read();
     expect(config?.passthrough['telegram.bots.0.token']).toBeUndefined();
-    expect(config?.passthrough.telegramToken).toBe('old');
+    expect(config?.passthrough.telegramToken).toBe(secretRef('telegram/token'));
+    expect(await secrets.get('telegram/token')).toBe('old');
   });
 });

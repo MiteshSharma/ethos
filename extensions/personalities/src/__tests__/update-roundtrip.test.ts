@@ -137,6 +137,89 @@ describe('fs_reach round-trip', () => {
     expect(raw).toContain('fs_reach.read: /data, ${self}/docs');
     expect(raw).toContain('fs_reach.write: /data/output');
   });
+
+  it('persists fs_reach.workdir through update and re-load', async () => {
+    await seedPersonality('reach-workdir', 'name: ReachWorkdir\n');
+    const registry = makeRegistry();
+    await registry.loadFromDirectory(join(testDir, 'personalities'));
+
+    await registry.update('reach-workdir', {
+      fs_reach: { workdir: '${ETHOS_HOME}/workspace/${self}' },
+    });
+
+    const raw = await readFile(
+      join(testDir, 'personalities', 'reach-workdir', 'config.yaml'),
+      'utf-8',
+    );
+    expect(raw).toContain('fs_reach.workdir: ${ETHOS_HOME}/workspace/${self}');
+
+    const fresh = makeRegistry();
+    await fresh.loadFromDirectory(join(testDir, 'personalities'));
+    // A workdir-only declaration must still construct fs_reach — the loader's
+    // truthiness guard used to look at read/write only.
+    expect(fresh.get('reach-workdir')?.fs_reach?.workdir).toBe('${ETHOS_HOME}/workspace/${self}');
+  });
+
+  // The regression guard for the data-loss bug: the web config editor builds
+  // `fs_reach` from its two path lists and sends the whole object. Before
+  // `fs_reach` was shallow-merged, that patch replaced the stored block
+  // wholesale and a hand-declared `workdir` vanished from disk — the agent
+  // silently reverted to process.cwd().
+  it('does NOT drop fs_reach.workdir when a read/write-only patch is applied', async () => {
+    const registry = makeRegistry();
+    await mkdir(join(testDir, 'personalities'), { recursive: true });
+    await registry.loadFromDirectory(join(testDir, 'personalities'));
+    await registry.create({
+      id: 'reach-preserve',
+      name: 'ReachPreserve',
+      toolset: ['read_file'],
+      soulMd: '# ReachPreserve\n',
+      fs_reach: { workdir: '${ETHOS_HOME}/workspace/${self}' },
+    });
+    expect(registry.get('reach-preserve')?.fs_reach?.workdir).toBe(
+      '${ETHOS_HOME}/workspace/${self}',
+    );
+
+    await registry.update('reach-preserve', {
+      fs_reach: { read: ['/data'], write: ['/data/output'] },
+    });
+
+    const raw = await readFile(
+      join(testDir, 'personalities', 'reach-preserve', 'config.yaml'),
+      'utf-8',
+    );
+    expect(raw).toContain('fs_reach.workdir: ${ETHOS_HOME}/workspace/${self}');
+
+    const fresh = makeRegistry();
+    await fresh.loadFromDirectory(join(testDir, 'personalities'));
+    const config = fresh.get('reach-preserve')?.fs_reach;
+    expect(config?.workdir).toBe('${ETHOS_HOME}/workspace/${self}');
+    expect(config?.read).toEqual(['/data']);
+    expect(config?.write).toEqual(['/data/output']);
+  });
+
+  it('clears fs_reach.workdir when the patch carries an empty string', async () => {
+    await seedPersonality('reach-clear', 'name: ReachClear\nfs_reach.workdir: /srv/ethos/out\n');
+    const registry = makeRegistry();
+    await registry.loadFromDirectory(join(testDir, 'personalities'));
+    expect(registry.get('reach-clear')?.fs_reach?.workdir).toBe('/srv/ethos/out');
+
+    // The config editor always sends `workdir`, empty string included, so the
+    // shallow merge never makes the field un-clearable from that surface.
+    await registry.update('reach-clear', {
+      fs_reach: { read: ['/data'], write: [], workdir: '' },
+    });
+
+    const raw = await readFile(
+      join(testDir, 'personalities', 'reach-clear', 'config.yaml'),
+      'utf-8',
+    );
+    expect(raw).not.toContain('fs_reach.workdir');
+
+    const fresh = makeRegistry();
+    await fresh.loadFromDirectory(join(testDir, 'personalities'));
+    expect(fresh.get('reach-clear')?.fs_reach?.workdir).toBeUndefined();
+  });
 });
 
 describe('dreaming round-trip', () => {
@@ -545,6 +628,7 @@ describe('lossless update — full config round-trip', () => {
     'plugins: kanban notes',
     'fs_reach.read: /data, ${self}/docs',
     'fs_reach.write: /data/output',
+    'fs_reach.workdir: ${ETHOS_HOME}/workspace/${self}',
     'streamingTimeoutMs: 90000',
     'budgetCapUsd: 12.5',
     'evolution_approval_mode: user',
@@ -597,7 +681,6 @@ describe('lossless update — full config round-trip', () => {
     '      - evil.com',
     '    allow_private_urls: true',
     '  injectionDefense:',
-    '    enabled: false',
     '    classifier:',
     '      alwaysCallLLM: true',
     '    postReadDowngrade:',
@@ -737,5 +820,445 @@ describe('safety block preservation', () => {
       'utf-8',
     );
     expect(raw).toContain('api.example.com');
+  });
+});
+
+// `PersonalityConfig.voice` — the voice V1a schema amendment. It rides the
+// established DOTTED-KEY convention (`fs_reach.*`, `memory.options.*`,
+// `nightly.judge.*`) rather than becoming a second nested block, so the flat
+// parser reads it unchanged and the renderer emits it the same way it emits
+// every other structured field.
+describe('voice round-trip', () => {
+  it('parses the dotted voice.* keys into the voice block', async () => {
+    await seedPersonality(
+      'voice-parse',
+      `${[
+        'name: VoiceParse',
+        'voice.tts_voice: af_bella',
+        'voice.tier: pipeline',
+        'voice.model: claude-haiku-4-5',
+        'voice.languages.es: ef_dora',
+        'voice.languages.ja: jf_alpha',
+      ].join('\n')}\n`,
+    );
+    const registry = makeRegistry();
+    await registry.loadFromDirectory(join(testDir, 'personalities'));
+
+    expect(registry.get('voice-parse')?.voice).toEqual({
+      tts_voice: 'af_bella',
+      tier: 'pipeline',
+      model: 'claude-haiku-4-5',
+      languages: { es: 'ef_dora', ja: 'jf_alpha' },
+    });
+  });
+
+  // `voice.tts_provider` / `voice.stt_provider` name entries in the deployment's
+  // `voice.tts.providers.*` / `voice.stt.providers.*` rosters. They are SUB-KEYS
+  // of the existing `voice` block, not new top-level PersonalityConfig fields —
+  // the field count stays where it is.
+  it('parses both roster keys and keeps them verbatim through an update', async () => {
+    await seedPersonality(
+      'voice-roster',
+      'name: VoiceRoster\nvoice.tts_provider: studio\nvoice.stt_provider: whisper-es\nvoice.tts_voice: alloy\n',
+    );
+    const registry = makeRegistry();
+    await registry.loadFromDirectory(join(testDir, 'personalities'));
+    expect(registry.get('voice-roster')?.voice).toEqual({
+      tts_provider: 'studio',
+      stt_provider: 'whisper-es',
+      tts_voice: 'alloy',
+    });
+
+    await registry.update('voice-roster', { description: 'still points at studio' });
+    const raw = await readFile(
+      join(testDir, 'personalities', 'voice-roster', 'config.yaml'),
+      'utf-8',
+    );
+    expect(raw).toContain('voice.tts_provider: studio');
+    expect(raw).toContain('voice.stt_provider: whisper-es');
+
+    const fresh = makeRegistry();
+    await fresh.loadFromDirectory(join(testDir, 'personalities'));
+    expect(fresh.get('voice-roster')?.voice?.tts_provider).toBe('studio');
+    expect(fresh.get('voice-roster')?.voice?.stt_provider).toBe('whisper-es');
+  });
+
+  // `voice.realtime_provider` is the third roster key, added with the hosted
+  // speech-to-speech tier. Also a SUB-KEY of the same `voice` block, so the
+  // top-level field count is untouched by it too.
+  it('parses the realtime roster key and keeps it verbatim through an update', async () => {
+    await seedPersonality(
+      'voice-realtime',
+      'name: VoiceRealtime\nvoice.tts_provider: studio\nvoice.realtime_provider: live\n',
+    );
+    const registry = makeRegistry();
+    await registry.loadFromDirectory(join(testDir, 'personalities'));
+    expect(registry.get('voice-realtime')?.voice).toEqual({
+      tts_provider: 'studio',
+      realtime_provider: 'live',
+    });
+
+    await registry.update('voice-realtime', { voice: { realtime_provider: 'gemini' } });
+    const raw = await readFile(
+      join(testDir, 'personalities', 'voice-realtime', 'config.yaml'),
+      'utf-8',
+    );
+    expect(raw).toContain('voice.realtime_provider: gemini');
+    // A patch naming only this sub-key leaves its siblings alone.
+    expect(raw).toContain('voice.tts_provider: studio');
+
+    const fresh = makeRegistry();
+    await fresh.loadFromDirectory(join(testDir, 'personalities'));
+    expect(fresh.get('voice-realtime')?.voice?.realtime_provider).toBe('gemini');
+  });
+
+  // `voice.provider` was the spelling before a personality could name an STT
+  // engine. A hand-written config still carrying it must load, and re-serialize
+  // to the new key alone.
+  it('accepts the older voice.provider spelling and rewrites it as voice.tts_provider', async () => {
+    await seedPersonality(
+      'voice-legacy',
+      'name: VoiceLegacy\nvoice.provider: studio\nvoice.tts_voice: alloy\n',
+    );
+    const registry = makeRegistry();
+    await registry.loadFromDirectory(join(testDir, 'personalities'));
+    expect(registry.get('voice-legacy')?.voice).toEqual({
+      tts_provider: 'studio',
+      tts_voice: 'alloy',
+    });
+
+    await registry.update('voice-legacy', { description: 'unrelated edit' });
+    const raw = await readFile(
+      join(testDir, 'personalities', 'voice-legacy', 'config.yaml'),
+      'utf-8',
+    );
+    expect(raw).toContain('voice.tts_provider: studio');
+    expect(raw).not.toMatch(/^voice\.provider:/m);
+
+    const fresh = makeRegistry();
+    await fresh.loadFromDirectory(join(testDir, 'personalities'));
+    expect(fresh.get('voice-legacy')?.voice?.tts_provider).toBe('studio');
+  });
+
+  // `voice.call_style` is how a personality LOOKS on a call — the visual
+  // sibling of `tts_voice`, and a SUB-KEY of the same block, so the top-level
+  // field count is untouched by it as well.
+  it('parses voice.call_style and round-trips it through an update', async () => {
+    await seedPersonality(
+      'voice-look',
+      'name: VoiceLook\nvoice.tts_voice: alloy\nvoice.call_style: rings\n',
+    );
+    const registry = makeRegistry();
+    await registry.loadFromDirectory(join(testDir, 'personalities'));
+    expect(registry.get('voice-look')?.voice).toEqual({
+      tts_voice: 'alloy',
+      call_style: 'rings',
+    });
+
+    await registry.update('voice-look', { voice: { call_style: 'orb' } });
+    const raw = await readFile(
+      join(testDir, 'personalities', 'voice-look', 'config.yaml'),
+      'utf-8',
+    );
+    expect(raw).toContain('voice.call_style: orb');
+    // A patch naming only the look leaves the voice alone.
+    expect(raw).toContain('voice.tts_voice: alloy');
+
+    const fresh = makeRegistry();
+    await fresh.loadFromDirectory(join(testDir, 'personalities'));
+    expect(fresh.get('voice-look')?.voice?.call_style).toBe('orb');
+  });
+
+  it("clears voice.call_style on '' — the only way to say 'back to derived'", async () => {
+    await seedPersonality('voice-unlook', 'name: VoiceUnlook\nvoice.call_style: liquid\n');
+    const registry = makeRegistry();
+    await registry.loadFromDirectory(join(testDir, 'personalities'));
+
+    await registry.update('voice-unlook', { voice: { call_style: '' } });
+    const raw = await readFile(
+      join(testDir, 'personalities', 'voice-unlook', 'config.yaml'),
+      'utf-8',
+    );
+    expect(raw).not.toMatch(/^voice\.call_style:/m);
+
+    const fresh = makeRegistry();
+    await fresh.loadFromDirectory(join(testDir, 'personalities'));
+    expect(fresh.get('voice-unlook')?.voice?.call_style).toBeUndefined();
+  });
+
+  it('drops an unrecognised voice.call_style rather than failing the load', async () => {
+    await seedPersonality('voice-bad-look', 'name: VoiceBadLook\nvoice.call_style: sparkles\n');
+    const registry = makeRegistry();
+    await registry.loadFromDirectory(join(testDir, 'personalities'));
+    expect(registry.get('voice-bad-look')?.name).toBe('VoiceBadLook');
+    expect(registry.get('voice-bad-look')?.voice).toBeUndefined();
+  });
+
+  it('prefers the new spelling when a config somehow carries both', async () => {
+    await seedPersonality(
+      'voice-both',
+      'name: VoiceBoth\nvoice.provider: old\nvoice.tts_provider: new\n',
+    );
+    const registry = makeRegistry();
+    await registry.loadFromDirectory(join(testDir, 'personalities'));
+    expect(registry.get('voice-both')?.voice).toEqual({ tts_provider: 'new' });
+  });
+
+  it('loads a personality naming a provider this machine has never heard of', async () => {
+    // Validation would mean the loader knew the machine's config. It does not:
+    // an unknown name is a resolution-time fallback, never a load failure.
+    await seedPersonality(
+      'voice-alien',
+      'name: VoiceAlien\nvoice.tts_provider: elevenlabs-studio\nvoice.stt_provider: deepgram-eu\n',
+    );
+    const registry = makeRegistry();
+    await registry.loadFromDirectory(join(testDir, 'personalities'));
+    expect(registry.get('voice-alien')?.voice).toEqual({
+      tts_provider: 'elevenlabs-studio',
+      stt_provider: 'deepgram-eu',
+    });
+  });
+
+  // The editor's write path: create with a voice, retune it, and clear it back
+  // to the default entry — all through the sub-keys the web form exposes.
+  it('writes the voice a create carries, and nothing when it carries none', async () => {
+    const registry = makeRegistry();
+    await registry.loadFromDirectory(join(testDir, 'personalities'));
+
+    await registry.create({
+      id: 'voice-created',
+      name: 'VoiceCreated',
+      toolset: ['read_file'],
+      soulMd: '# VoiceCreated\n',
+      voice: { tts_provider: 'studio', stt_provider: 'whisper-es', tts_voice: 'nova' },
+    });
+    expect(registry.get('voice-created')?.voice).toEqual({
+      tts_provider: 'studio',
+      stt_provider: 'whisper-es',
+      tts_voice: 'nova',
+    });
+
+    // Blank form fields are not a voice block — an empty `voice.tts_provider:` line
+    // would be a key the loader reads back as nothing.
+    await registry.create({
+      id: 'voice-blank',
+      name: 'VoiceBlank',
+      toolset: ['read_file'],
+      soulMd: '# VoiceBlank\n',
+      voice: { tts_provider: '', stt_provider: '', tts_voice: '' },
+    });
+    expect(registry.get('voice-blank')?.voice).toBeUndefined();
+    const blankRaw = await readFile(
+      join(testDir, 'personalities', 'voice-blank', 'config.yaml'),
+      'utf-8',
+    );
+    expect(blankRaw).not.toContain('voice.');
+  });
+
+  it('updates one voice sub-key without disturbing the others', async () => {
+    await seedPersonality(
+      'voice-patch',
+      'name: VoicePatch\nvoice.tts_provider: studio\nvoice.tts_voice: alloy\nvoice.languages.es: ef_dora\n',
+    );
+    const registry = makeRegistry();
+    await registry.loadFromDirectory(join(testDir, 'personalities'));
+
+    await registry.update('voice-patch', { voice: { tts_voice: 'nova' } });
+
+    const fresh = makeRegistry();
+    await fresh.loadFromDirectory(join(testDir, 'personalities'));
+    // A patch that does not NAME the language map leaves it alone — the map is
+    // replaced only by a patch that carries one.
+    expect(fresh.get('voice-patch')?.voice).toEqual({
+      tts_provider: 'studio',
+      tts_voice: 'nova',
+      languages: { es: 'ef_dora' },
+    });
+  });
+
+  // `tier`, `model` and `languages` are the three sub-keys the web editor could
+  // not reach until V1a's Settings-parity pass. They are SUB-KEYS of the same
+  // frozen `voice` block, so exposing them moves no top-level field count.
+  it('edits voice.tier and voice.model, and clears the tier on an empty string', async () => {
+    await seedPersonality(
+      'voice-lane',
+      'name: VoiceLane\nvoice.tts_voice: alloy\nvoice.tier: pipeline\nvoice.model: old-model\n',
+    );
+    const registry = makeRegistry();
+    await registry.loadFromDirectory(join(testDir, 'personalities'));
+
+    await registry.update('voice-lane', { voice: { tier: 'realtime', model: 'fast-model' } });
+    let raw = await readFile(join(testDir, 'personalities', 'voice-lane', 'config.yaml'), 'utf-8');
+    expect(raw).toContain('voice.tier: realtime');
+    expect(raw).toContain('voice.model: fast-model');
+    expect(raw).toContain('voice.tts_voice: alloy');
+
+    await registry.update('voice-lane', { voice: { tier: '', model: '' } });
+    raw = await readFile(join(testDir, 'personalities', 'voice-lane', 'config.yaml'), 'utf-8');
+    expect(raw).not.toMatch(/^voice\.tier:/m);
+    expect(raw).not.toMatch(/^voice\.model:/m);
+
+    const fresh = makeRegistry();
+    await fresh.loadFromDirectory(join(testDir, 'personalities'));
+    expect(fresh.get('voice-lane')?.voice).toEqual({ tts_voice: 'alloy' });
+  });
+
+  it('REPLACES the language map when a patch carries one, so a tag can be deleted', async () => {
+    // Merging per tag would leave no way to remove one: the editor sends the
+    // map it holds, and a tag it no longer holds is a tag the operator deleted.
+    await seedPersonality(
+      'voice-langs',
+      'name: VoiceLangs\nvoice.languages.es: ef_dora\nvoice.languages.ja: jf_alpha\n',
+    );
+    const registry = makeRegistry();
+    await registry.loadFromDirectory(join(testDir, 'personalities'));
+
+    await registry.update('voice-langs', { voice: { languages: { es: 'ef_nueva' } } });
+    const raw = await readFile(
+      join(testDir, 'personalities', 'voice-langs', 'config.yaml'),
+      'utf-8',
+    );
+    expect(raw).toContain('voice.languages.es: ef_nueva');
+    expect(raw).not.toContain('voice.languages.ja');
+
+    const fresh = makeRegistry();
+    await fresh.loadFromDirectory(join(testDir, 'personalities'));
+    expect(fresh.get('voice-langs')?.voice).toEqual({ languages: { es: 'ef_nueva' } });
+  });
+
+  it('clears the language map on an empty object', async () => {
+    await seedPersonality('voice-nolangs', 'name: VoiceNoLangs\nvoice.languages.es: ef_dora\n');
+    const registry = makeRegistry();
+    await registry.loadFromDirectory(join(testDir, 'personalities'));
+
+    await registry.update('voice-nolangs', { voice: { languages: {} } });
+
+    const fresh = makeRegistry();
+    await fresh.loadFromDirectory(join(testDir, 'personalities'));
+    expect(fresh.get('voice-nolangs')?.voice).toBeUndefined();
+  });
+
+  it('an empty provider clears the key, putting it back on the default entry', async () => {
+    await seedPersonality(
+      'voice-clear',
+      'name: VoiceClear\nvoice.tts_provider: studio\nvoice.tts_voice: alloy\n',
+    );
+    const registry = makeRegistry();
+    await registry.loadFromDirectory(join(testDir, 'personalities'));
+
+    await registry.update('voice-clear', { voice: { tts_provider: '', tts_voice: 'alloy' } });
+
+    const raw = await readFile(
+      join(testDir, 'personalities', 'voice-clear', 'config.yaml'),
+      'utf-8',
+    );
+    expect(raw).not.toContain('voice.tts_provider');
+    const fresh = makeRegistry();
+    await fresh.loadFromDirectory(join(testDir, 'personalities'));
+    expect(fresh.get('voice-clear')?.voice).toEqual({ tts_voice: 'alloy' });
+  });
+
+  it('clearing every sub-key removes the voice block entirely', async () => {
+    await seedPersonality('voice-drop', 'name: VoiceDrop\nvoice.tts_voice: alloy\n');
+    const registry = makeRegistry();
+    await registry.loadFromDirectory(join(testDir, 'personalities'));
+
+    await registry.update('voice-drop', { voice: { tts_provider: '', tts_voice: '' } });
+
+    const fresh = makeRegistry();
+    await fresh.loadFromDirectory(join(testDir, 'personalities'));
+    expect(fresh.get('voice-drop')?.voice).toBeUndefined();
+  });
+
+  it('carries no voice block when no voice.* key is set', async () => {
+    await seedPersonality('voice-absent', 'name: VoiceAbsent\n');
+    const registry = makeRegistry();
+    await registry.loadFromDirectory(join(testDir, 'personalities'));
+    expect(registry.get('voice-absent')?.voice).toBeUndefined();
+  });
+
+  it('drops an unknown tier rather than making the personality unloadable', async () => {
+    await seedPersonality(
+      'voice-bad-tier',
+      'name: VoiceBadTier\nvoice.tts_voice: af_bella\nvoice.tier: telepathy\n',
+    );
+    const registry = makeRegistry();
+    await registry.loadFromDirectory(join(testDir, 'personalities'));
+    expect(registry.get('voice-bad-tier')?.voice).toEqual({ tts_voice: 'af_bella' });
+  });
+
+  it('survives an unrelated update and re-load', async () => {
+    await seedPersonality(
+      'voice-persist',
+      'name: VoicePersist\nvoice.tts_voice: af_bella\nvoice.languages.es: ef_dora\n',
+    );
+    const registry = makeRegistry();
+    await registry.loadFromDirectory(join(testDir, 'personalities'));
+
+    await registry.update('voice-persist', { description: 'now with a description' });
+
+    const raw = await readFile(
+      join(testDir, 'personalities', 'voice-persist', 'config.yaml'),
+      'utf-8',
+    );
+    expect(raw).toContain('voice.tts_voice: af_bella');
+    expect(raw).toContain('voice.languages.es: ef_dora');
+
+    const fresh = makeRegistry();
+    await fresh.loadFromDirectory(join(testDir, 'personalities'));
+    expect(fresh.get('voice-persist')?.voice).toEqual({
+      tts_voice: 'af_bella',
+      languages: { es: 'ef_dora' },
+    });
+  });
+});
+
+// `PersonalityConfig.display` — the personality-presentation amendment's second
+// identity block, parallel to `voice`. Same dotted-key convention as `voice`
+// (`buildDisplayConfig` mirrors `buildVoiceConfig`), so it rides the existing
+// flat parser and renderer rather than becoming a nested block.
+describe('display round-trip', () => {
+  it('parses display.avatar_url into the display block', async () => {
+    await seedPersonality(
+      'display-parse',
+      'name: DisplayParse\ndisplay.avatar_url: /api/personalities/display-parse/avatar\n',
+    );
+    const registry = makeRegistry();
+    await registry.loadFromDirectory(join(testDir, 'personalities'));
+
+    expect(registry.get('display-parse')?.display).toEqual({
+      avatar_url: '/api/personalities/display-parse/avatar',
+    });
+  });
+
+  // Mirrors the `voice` convention: absent = undefined, not `{}`.
+  it('carries no display block when no display.* key is set', async () => {
+    await seedPersonality('display-absent', 'name: DisplayAbsent\n');
+    const registry = makeRegistry();
+    await registry.loadFromDirectory(join(testDir, 'personalities'));
+    expect(registry.get('display-absent')?.display).toBeUndefined();
+  });
+
+  it('survives an unrelated update and re-load', async () => {
+    await seedPersonality(
+      'display-persist',
+      'name: DisplayPersist\ndisplay.avatar_url: /api/personalities/display-persist/avatar\n',
+    );
+    const registry = makeRegistry();
+    await registry.loadFromDirectory(join(testDir, 'personalities'));
+
+    await registry.update('display-persist', { description: 'now with a description' });
+
+    const raw = await readFile(
+      join(testDir, 'personalities', 'display-persist', 'config.yaml'),
+      'utf-8',
+    );
+    expect(raw).toContain('display.avatar_url: /api/personalities/display-persist/avatar');
+
+    const fresh = makeRegistry();
+    await fresh.loadFromDirectory(join(testDir, 'personalities'));
+    expect(fresh.get('display-persist')?.display).toEqual({
+      avatar_url: '/api/personalities/display-persist/avatar',
+    });
   });
 });

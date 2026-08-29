@@ -7,9 +7,9 @@ import {
   DefaultStorageRegistry,
   DefaultToolRegistry,
 } from '@ethosagent/core';
-import { InMemoryStorage } from '@ethosagent/storage-fs';
+import { InMemorySecretsResolver, InMemoryStorage } from '@ethosagent/storage-fs';
 import { describe, expect, it } from 'vitest';
-import type { CredentialStorage, PluginRegistries } from '../index';
+import type { PluginRegistries } from '../index';
 import { PluginApiImpl } from '../index';
 import { createTestRuntime, mockLLM, mockTool } from '../testing';
 import { defineTool, err, ok } from '../tool-helpers';
@@ -392,15 +392,20 @@ describe('PluginApiImpl.registerMemoryProvider', () => {
 // Credential methods
 // ---------------------------------------------------------------------------
 
-async function makeCredentialApi(): Promise<{ api: PluginApiImpl; storage: InMemoryStorage }> {
+async function makeCredentialApi(
+  opts: { pluginId?: string; secrets?: InMemorySecretsResolver } = {},
+): Promise<{ api: PluginApiImpl; storage: InMemoryStorage; secrets: InMemorySecretsResolver }> {
   const storage = new InMemoryStorage();
   await storage.mkdir('/test');
   await storage.mkdir('/test/credentials');
-  const api = new PluginApiImpl('test-plugin', makeRegistries(), {
-    storage: storage as CredentialStorage,
+  const secrets = opts.secrets ?? new InMemorySecretsResolver();
+  const api = new PluginApiImpl(opts.pluginId ?? 'test-plugin', makeRegistries(), {
+    secrets,
+    storage,
     basePath: '/test',
   });
-  return { api, storage };
+  await api.primeSecrets();
+  return { api, storage, secrets };
 }
 
 describe('credential methods', () => {
@@ -418,17 +423,62 @@ describe('credential methods', () => {
     expect(await api.getSecret('token')).toBe('abc');
   });
 
-  it('setSecret writes value and .meta file', async () => {
-    const { api, storage } = await makeCredentialApi();
+  it('setSecret puts the value in the vault and writes only a .meta file to storage', async () => {
+    // G-SEC — the SecretsResolver is the sole storage path for the value. The
+    // assertion is on what reached storage, not on what the api returns: a
+    // check that only round-trips through getSecret passes against the old
+    // implementation that wrote plaintext to `<basePath>/credentials/<key>`.
+    const { api, storage, secrets } = await makeCredentialApi();
     await api.setSecret('db-pass', 's3cret');
 
-    expect(await storage.read('/test/credentials/db-pass')).toBe('s3cret');
+    expect(await secrets.get('plugins/test-plugin/db-pass')).toBe('s3cret');
+    expect(await storage.exists('/test/credentials/db-pass')).toBe(false);
 
     const meta = await storage.read('/test/credentials/db-pass.meta');
     expect(meta).not.toBeNull();
     const parsed = JSON.parse(meta as string);
     expect(parsed.updatedAt).toBeDefined();
     expect(typeof parsed.updatedAt).toBe('string');
+  });
+
+  it('setSecret writes the meta file owner-only, and locks the directory', async () => {
+    const { api, storage } = await makeCredentialApi();
+    await api.setSecret('db-pass', 's3cret');
+
+    expect(storage.getMode('/test/credentials/db-pass.meta')).toBe(0o600);
+    expect(storage.getDirMode('/test/credentials')).toBe(0o700);
+  });
+
+  it('primeSecrets makes a pre-existing vault entry visible to the first hasSecret', async () => {
+    const secrets = new InMemorySecretsResolver();
+    await secrets.set('plugins/test-plugin/seeded', 'from-a-previous-run');
+    const { api } = await makeCredentialApi({ secrets });
+
+    expect(api.hasSecret('seeded')).toBe(true);
+    expect(await api.getSecret('seeded')).toBe('from-a-previous-run');
+  });
+
+  it('rejects a traversal-shaped key without writing anything', async () => {
+    const { api, secrets } = await makeCredentialApi();
+
+    await expect(api.setSecret('../../evil', 'x')).rejects.toThrow(/Invalid credential key/);
+    await expect(api.getSecret('../../evil')).rejects.toThrow(/Invalid credential key/);
+    expect(api.hasSecret('../../evil')).toBe(false);
+    // Refused before the write, not routed somewhere else.
+    expect(await secrets.list()).toEqual([]);
+  });
+
+  it('one plugin cannot read a sibling plugin secret through its own prefix', async () => {
+    const secrets = new InMemorySecretsResolver();
+    const { api: alice } = await makeCredentialApi({ pluginId: 'alice', secrets });
+    const { api: bob } = await makeCredentialApi({ pluginId: 'bob', secrets });
+
+    await alice.setSecret('token', 'alice-token');
+    await bob.primeSecrets();
+
+    expect(bob.hasSecret('token')).toBe(false);
+    expect(await bob.getSecret('token')).toBeNull();
+    expect(await secrets.list('plugins/alice/')).toEqual(['plugins/alice/token']);
   });
 
   it('setSecret fires onCredentialUpdate handlers', async () => {

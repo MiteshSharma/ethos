@@ -1,6 +1,7 @@
-import type { AgentMesh } from '@ethosagent/agent-mesh';
+import type { AgentMesh, NotifyMode } from '@ethosagent/agent-mesh';
 import type { KanbanStore, Task } from '@ethosagent/kanban-store';
 import { autonomyTier, type TrustPolicy, tierMaxRetries } from '@ethosagent/kanban-store';
+import type { HookRegistry, SecretsResolver } from '@ethosagent/types';
 import type { MemberRuntime } from './runtime';
 
 // ---------------------------------------------------------------------------
@@ -31,6 +32,20 @@ export type DispatchCall = (args: {
   prompt: string;
   personalityId: string;
   signal: AbortSignal;
+  /** Bearer token for the target `AcpServer`, resolved via `SecretsResolver`. Omitted when the target has no configured `authTokenRef`. */
+  authToken?: string;
+  /**
+   * Delivery mode for the peer's `/notify` endpoint (Lane C,
+   * kanban-hooks-notify-parity, Phase 2). `wake`/`notify+wake` force a full
+   * agent turn — today's only behavior. `notify` is a passive delivery: no
+   * turn is forced, and the peer surfaces it later via the pending-notify
+   * `ContextInjector` at its own next turn. Optional and defaults to
+   * `notify+wake` in {@link defaultDispatchCall} — every existing caller
+   * (including this dispatcher's own {@link Dispatcher.fireDispatch}, which
+   * does not set it) keeps today's exact forced-turn behavior unless it
+   * explicitly opts in to a different mode.
+   */
+  mode?: NotifyMode;
 }) => Promise<string>;
 
 /**
@@ -46,6 +61,8 @@ export type SpawnDispatchCall = (args: {
   prompt: string;
   personalityId: string;
   signal: AbortSignal;
+  /** Bearer token for the target `AcpServer`, resolved via `SecretsResolver`. Omitted when the target has no configured `authTokenRef`. */
+  authToken?: string;
 }) => Promise<{ jobId: string }>;
 
 export interface DispatcherOptions {
@@ -123,6 +140,30 @@ export interface DispatcherOptions {
    */
   preferReliable?: boolean;
   trustPolicy?: TrustPolicy;
+  /**
+   * Resolves a mesh peer's `authTokenRef` (a secret *name*, per
+   * ARCHITECTURE.md S9 — registry.json never carries the token value) to
+   * the actual bearer token at dispatch time. Required for dispatch to
+   * authenticate against a bearer-secured `AcpServer` peer; omitted, a peer
+   * with an `authTokenRef` configured dispatches with no Authorization
+   * header and a bearer-enforcing server rejects it with 401 (surfaced as a
+   * normal dispatch failure, same as any other unreachable peer).
+   */
+  secrets?: SecretsResolver;
+  /**
+   * Fires `ticket_claimed` / `ticket_stale_reclaimed` / `dispatch_tick` as the
+   * dispatcher's own lifecycle events (Lane B, kanban-hooks-notify-parity).
+   * Void-only, fail-open, parallel via `Promise.allSettled` — a throwing or
+   * slow handler never blocks `tick()`. Optional: a dispatcher built without
+   * one fires zero hooks, matching today's exact behavior.
+   */
+  hooks?: HookRegistry;
+  /**
+   * Identifies this board/team in the `dispatch_tick` hook payload. Purely
+   * descriptive — has no effect on dispatch behavior. Production wiring
+   * passes the team manifest's name.
+   */
+  teamId?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -152,6 +193,9 @@ export class Dispatcher {
   private readonly stalenessThresholdMs: number;
   private readonly preferReliable: boolean;
   private readonly trustPolicy: TrustPolicy | undefined;
+  private readonly secrets: SecretsResolver | undefined;
+  private readonly hooks: HookRegistry | undefined;
+  private readonly teamId: string | undefined;
   private readonly inflight = new Map<string, AbortController>();
   private timer: NodeJS.Timeout | null = null;
   private running = false;
@@ -172,6 +216,9 @@ export class Dispatcher {
     this.stalenessThresholdMs = opts.stalenessThresholdMs ?? DEFAULT_STALENESS_THRESHOLD_MS;
     this.preferReliable = opts.preferReliable ?? false;
     this.trustPolicy = opts.trustPolicy;
+    this.secrets = opts.secrets;
+    this.hooks = opts.hooks;
+    this.teamId = opts.teamId;
   }
 
   /**
@@ -180,6 +227,11 @@ export class Dispatcher {
    * deterministically. The polling loop is just `tick()` on a setInterval.
    */
   async tick(): Promise<void> {
+    // Counters for the `dispatch_tick` hook (D9) — it only fires when at
+    // least one of these is nonzero, so an idle tick fires zero hooks.
+    let claimedCount = 0;
+    let reclaimedCount = 0;
+
     // 1. Promote — parents-done and scheduled-time-passed both unblock work.
     this.board.promoteReady();
     this.board.promoteScheduled();
@@ -230,6 +282,14 @@ export class Dispatcher {
       if (reason === null) continue;
       try {
         this.board.reclaimTask(task.id, reason, 'dispatcher');
+        reclaimedCount++;
+        if (this.hooks) {
+          await this.hooks.fireVoid('ticket_stale_reclaimed', {
+            taskId: task.id,
+            previousAssignee: assignee,
+            reason,
+          });
+        }
       } catch {
         // Race: another writer ended the run / changed status between our
         // read and our write. Acceptable — they handled it.
@@ -255,6 +315,9 @@ export class Dispatcher {
       if (assignee === null) continue;
       let dispatchHost = DISPATCH_HOST;
       let dispatchPort: number | null = null;
+      // Secret *name* only (S9) — resolved to a value in fireDispatch/fireSpawnDispatch.
+      let authTokenRef: string | undefined;
+      let dispatchMode: NotifyMode | undefined;
 
       if (this.mesh) {
         const entries = await this.mesh.findByPersonality(assignee);
@@ -262,6 +325,16 @@ export class Dispatcher {
         if (entry) {
           dispatchHost = entry.host;
           dispatchPort = entry.port;
+          authTokenRef = entry.authTokenRef;
+          // Honor the assignee's durable per-board mode preference on the
+          // claim path too (Lane C post-review fix). Mirrors notifyAssignee's
+          // lookup in apps/web-api/src/services/kanban.service.ts: find the
+          // subscription matching this team's board, take its `mode`. No
+          // match (or no `boardSubscriptions` at all) leaves this `undefined`
+          // — fireDispatch below only sets the `mode` field when it's
+          // present, so defaultDispatchCall's own default (`notify+wake`)
+          // still applies exactly as before this fix.
+          dispatchMode = entry.boardSubscriptions?.find((s) => s.board === this.teamId)?.mode;
         }
       } else {
         const status = this.supervisor.statusOf(assignee);
@@ -302,6 +375,11 @@ export class Dispatcher {
         continue;
       }
       if (claimed.status !== 'running') continue;
+      claimedCount++;
+      const runId = claimed.currentRunId;
+      if (this.hooks && runId !== null) {
+        await this.hooks.fireVoid('ticket_claimed', { taskId: task.id, assignee, runId });
+      }
 
       const controller = new AbortController();
       this.inflight.set(task.id, controller);
@@ -310,18 +388,40 @@ export class Dispatcher {
       // updates the board as the background job runs — so we do NOT await a full
       // run here. Default path (blocking prompt) is unchanged.
       if (this.dispatchAsBackgroundJob) {
-        void this.fireSpawnDispatch(task, assignee, dispatchHost, dispatchPort, controller).finally(
-          () => {
-            this.inflight.delete(task.id);
-          },
-        );
+        void this.fireSpawnDispatch(
+          task,
+          assignee,
+          dispatchHost,
+          dispatchPort,
+          authTokenRef,
+          controller,
+        ).finally(() => {
+          this.inflight.delete(task.id);
+        });
       } else {
-        void this.fireDispatch(task, assignee, dispatchHost, dispatchPort, controller).finally(
-          () => {
-            this.inflight.delete(task.id);
-          },
-        );
+        void this.fireDispatch(
+          task,
+          assignee,
+          dispatchHost,
+          dispatchPort,
+          authTokenRef,
+          controller,
+          dispatchMode,
+        ).finally(() => {
+          this.inflight.delete(task.id);
+        });
       }
+    }
+
+    // Per D9: fire only when something actually happened this tick — an idle
+    // tick (nothing claimed, nothing reclaimed) fires zero hooks, so
+    // listeners don't pay for 1Hz of empty notifications on an idle board.
+    if (this.hooks && (claimedCount > 0 || reclaimedCount > 0)) {
+      await this.hooks.fireVoid('dispatch_tick', {
+        ...(this.teamId !== undefined ? { teamId: this.teamId } : {}),
+        claimedCount,
+        reclaimedCount,
+      });
     }
   }
 
@@ -405,14 +505,31 @@ export class Dispatcher {
     this.inflight.clear();
   }
 
+  /**
+   * Resolves a mesh peer's `authTokenRef` (a secret *name*) to its value via
+   * the injected `SecretsResolver` (S9: the registry never carries the
+   * value itself). Returns `undefined` when there is no ref to resolve, or
+   * no resolver was injected, or the name has no stored secret — in every
+   * case dispatch proceeds without an Authorization header, which a
+   * bearer-secured `AcpServer` rejects with 401 and surfaces as a normal
+   * dispatch failure (see `fireDispatch`/`fireSpawnDispatch`).
+   */
+  private async resolveAuthToken(ref: string | undefined): Promise<string | undefined> {
+    if (!ref || !this.secrets) return undefined;
+    return (await this.secrets.get(ref)) ?? undefined;
+  }
+
   private async fireDispatch(
     task: Task,
     assignee: string,
     host: string,
     port: number,
+    authTokenRef: string | undefined,
     controller: AbortController,
+    mode?: NotifyMode,
   ): Promise<void> {
     const prompt = renderTaskPrompt(task);
+    const authToken = await this.resolveAuthToken(authTokenRef);
 
     // Per-dispatch timeout so a hung transport doesn't outlive its task. Without
     // this, the stale-heartbeat reclaim path could mark the task `blocked` while
@@ -428,6 +545,8 @@ export class Dispatcher {
         prompt,
         personalityId: assignee,
         signal: controller.signal,
+        ...(authToken ? { authToken } : {}),
+        ...(mode !== undefined ? { mode } : {}),
       });
       // We do not auto-complete here — the assignee is responsible for calling
       // `kanban_complete` / `kanban_block` to record the outcome on the board.
@@ -471,9 +590,11 @@ export class Dispatcher {
     assignee: string,
     host: string,
     port: number,
+    authTokenRef: string | undefined,
     controller: AbortController,
   ): Promise<void> {
     const prompt = renderTaskPrompt(task);
+    const authToken = await this.resolveAuthToken(authTokenRef);
 
     const timer = setTimeout(() => {
       controller.abort(new Error(`dispatch timeout after ${this.dispatchTimeoutMs}ms`));
@@ -486,6 +607,7 @@ export class Dispatcher {
         prompt,
         personalityId: assignee,
         signal: controller.signal,
+        ...(authToken ? { authToken } : {}),
       });
       // Job accepted and durably recorded on the peer (jobId). We intentionally
       // do not await completion: the assignee heartbeats and calls
@@ -548,12 +670,17 @@ export const defaultDispatchCall: DispatchCall = async ({
   prompt,
   personalityId: _personalityId,
   signal,
+  authToken,
+  mode = 'notify+wake',
 }) => {
   const url = `http://${host}:${port}/notify`;
   const res = await fetch(url, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ kind: 'kanban', ref: prompt }),
+    headers: {
+      'Content-Type': 'application/json',
+      ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
+    },
+    body: JSON.stringify({ kind: 'kanban', ref: prompt, mode }),
     signal,
   });
   if (!res.ok) {
@@ -576,11 +703,15 @@ export const defaultSpawnDispatchCall: SpawnDispatchCall = async ({
   prompt,
   personalityId,
   signal,
+  authToken,
 }) => {
   const url = `http://${host}:${port}/rpc`;
   const res = await fetch(url, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      'Content-Type': 'application/json',
+      ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
+    },
     body: JSON.stringify({
       jsonrpc: '2.0',
       id: 1,

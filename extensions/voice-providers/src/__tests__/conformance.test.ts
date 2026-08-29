@@ -1,6 +1,7 @@
 import type { SttProvider, TtsProvider, VoiceCapabilities } from '@ethosagent/types';
+import { STT_CONTRACT_VERSION } from '@ethosagent/types';
 import { describe, expect, it } from 'vitest';
-import { validateVoiceCaps } from '../conformance';
+import { validateSttProvider, validateTtsProvider, validateVoiceCaps } from '../conformance';
 import { LocalSttProvider } from '../local-stt';
 import { LocalTtsProvider } from '../local-tts';
 
@@ -10,7 +11,7 @@ describe('VoiceCapabilities conformance', () => {
       kind: 'stt',
       formats: ['opus', 'mp3'],
       local: true,
-      contractVersion: 1,
+      contractVersion: STT_CONTRACT_VERSION,
     };
     expect(validateVoiceCaps(caps)).toEqual([]);
   });
@@ -30,7 +31,7 @@ describe('VoiceCapabilities conformance', () => {
     const caps: VoiceCapabilities = {
       kind: 'stt',
       formats: [],
-      contractVersion: 1,
+      contractVersion: STT_CONTRACT_VERSION,
     };
     expect(validateVoiceCaps(caps)).toContain('formats must be a non-empty array');
   });
@@ -68,12 +69,12 @@ describe('Provider contract conformance', () => {
   it('STT provider must have name and caps', () => {
     const provider: SttProvider = {
       name: 'test-stt',
-      caps: { kind: 'stt', formats: ['opus'], contractVersion: 1 },
-      transcribe: async () => 'hello',
+      caps: { kind: 'stt', formats: ['opus'], contractVersion: STT_CONTRACT_VERSION },
+      transcribeBuffer: async () => 'hello',
     };
     expect(provider.name).toBeTruthy();
     expect(provider.caps.kind).toBe('stt');
-    expect(typeof provider.transcribe).toBe('function');
+    expect(typeof provider.transcribeBuffer).toBe('function');
   });
 
   it('TTS provider must have name and caps', () => {
@@ -110,8 +111,8 @@ describe('Provider contract conformance', () => {
   it('detects STT provider with empty formats in caps', () => {
     const provider: SttProvider = {
       name: 'broken-stt',
-      caps: { kind: 'stt', formats: [], contractVersion: 1 },
-      transcribe: async () => 'hello',
+      caps: { kind: 'stt', formats: [], contractVersion: STT_CONTRACT_VERSION },
+      transcribeBuffer: async () => 'hello',
     };
     const errors = validateVoiceCaps(provider.caps);
     expect(errors.length).toBeGreaterThan(0);
@@ -128,5 +129,56 @@ describe('Provider contract conformance', () => {
     const provider = new LocalTtsProvider();
     expect(provider.caps.local).toBe(true);
     expect(validateVoiceCaps(provider.caps)).toEqual([]);
+  });
+});
+
+// The STT contract moved from `transcribe(audioPath)` to
+// `transcribeBuffer(audio)` with no deprecation window, so a v1 declaration is
+// not "old but working" — it names a method that no longer exists. Conformance
+// catches that before the first live utterance does.
+describe('STT contract v2 migration', () => {
+  it('rejects an STT provider still declaring contractVersion 1', () => {
+    const errors = validateVoiceCaps({ kind: 'stt', formats: ['wav'], contractVersion: 1 });
+    expect(errors.some((e) => e.includes('transcribeBuffer'))).toBe(true);
+  });
+
+  it('leaves TTS providers at contractVersion 1 alone — their contract did not move', () => {
+    expect(validateVoiceCaps({ kind: 'tts', formats: ['wav'], contractVersion: 1 })).toEqual([]);
+  });
+
+  it('accepts a conforming buffer-based STT provider', () => {
+    const provider: SttProvider = {
+      name: 'good-stt',
+      caps: { kind: 'stt', formats: ['wav'], contractVersion: STT_CONTRACT_VERSION },
+      transcribeBuffer: async () => 'hello',
+    };
+    expect(validateSttProvider(provider)).toEqual([]);
+  });
+
+  it('rejects a provider that claims streaming without implementing it', () => {
+    const provider: SttProvider = {
+      name: 'liar-stt',
+      caps: {
+        kind: 'stt',
+        formats: ['wav'],
+        streaming: true,
+        contractVersion: STT_CONTRACT_VERSION,
+      },
+      transcribeBuffer: async () => 'hello',
+    };
+    expect(validateSttProvider(provider)).toContain(
+      'caps.streaming is true but transcribeStream(audio, opts?) is missing',
+    );
+  });
+
+  it('rejects a TTS provider that claims streaming without implementing it', () => {
+    const provider: TtsProvider = {
+      name: 'liar-tts',
+      caps: { kind: 'tts', formats: ['wav'], streaming: true, contractVersion: 1 },
+      synthesize: async () => ({ audio: new Uint8Array(0), format: 'wav' }),
+    };
+    expect(validateTtsProvider(provider)).toContain(
+      'caps.streaming is true but synthesizeStream(text, opts?) is missing',
+    );
   });
 });

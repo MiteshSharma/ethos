@@ -8,6 +8,7 @@ import type {
   MemorySnapshot,
   PersonalityConfig,
 } from '@ethosagent/types';
+import type { ConfigGetResult, ConfigService } from '../services/config.service';
 
 // Test helpers shared by route + service tests. Building a real `AgentLoop`
 // requires LLM creds + tools + memory + personalities — overkill for tests
@@ -20,6 +21,11 @@ export interface StubLoopOptions {
   events?: AgentEvent[];
   /** If provided, called on every run with the input text + opts. */
   onRun?: (input: string, opts: unknown) => void;
+  /**
+   * If provided, `run()` awaits this before yielding any event — lets a test
+   * hold a turn in flight while it observes busy state.
+   */
+  gate?: Promise<void>;
 }
 
 export function makeStubAgentLoop(options: StubLoopOptions = {}): AgentLoop {
@@ -30,6 +36,7 @@ export function makeStubAgentLoop(options: StubLoopOptions = {}): AgentLoop {
     hooks: new DefaultHookRegistry(),
     async *run(input: string, opts: unknown): AsyncGenerator<AgentEvent> {
       options.onRun?.(input, opts);
+      if (options.gate) await options.gate;
       for (const event of events) yield event;
     },
   };
@@ -89,4 +96,27 @@ export function makeStubMemoryProvider(): MemoryProvider {
       return [];
     },
   };
+}
+
+// ---------------------------------------------------------------------------
+// ConfigService stub
+//
+// Route tests that only need `GET /v1/capabilities` to mount (it always
+// requires `config`) don't care about the full settings surface — this
+// returns a minimal `ConfigGetResult` with `voiceProvider`/`voiceTtsProvider`
+// overridable per-test.
+// ---------------------------------------------------------------------------
+
+export function makeStubConfigService(
+  overrides: Partial<Pick<ConfigGetResult, 'voiceProvider' | 'voiceTtsProvider'>> = {},
+): ConfigService {
+  return {
+    async get(): Promise<ConfigGetResult> {
+      return {
+        voiceProvider: null,
+        voiceTtsProvider: null,
+        ...overrides,
+      } as ConfigGetResult;
+    },
+  } as unknown as ConfigService;
 }

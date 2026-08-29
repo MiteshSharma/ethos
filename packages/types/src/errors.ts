@@ -44,6 +44,7 @@ export type EthosErrorCode =
   | 'JOB_LOCK_FAILED'
   | 'CRON_INVALID'
   | 'CRON_PERSONALITY_MISSING'
+  | 'CRON_RUN_FAILED'
   // MCP
   | 'MCP_TRANSPORT_INVALID'
   | 'MCP_SERVER_NOT_FOUND'
@@ -60,6 +61,7 @@ export type EthosErrorCode =
   | 'MISSING_SKILL'
   // Plugins (Phase 30.6 surface)
   | 'PLUGIN_CONTRACT_INCOMPATIBLE'
+  | 'PLUGIN_INSTALL_FAILED'
   // Team manifest (Teamwork Core)
   | 'TEAM_MANIFEST_INVALID'
   // Backup / import

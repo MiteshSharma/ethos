@@ -21,6 +21,12 @@ export interface LocalToolTransportLiveCtx {
    * this live side-channel and be re-attached to the reconstructed ctx.
    */
   a2aDelegation?: { traceId: string; depth: number; reserveOutbound: () => boolean };
+  /**
+   * Script-tool seam (tools-as-code-api Lane B). Carries live callbacks — like
+   * `a2aDelegation` it cannot ride the serializable `ToolExecuteRequest` and
+   * must be re-attached to the reconstructed ctx.
+   */
+  scriptTools?: import('@ethosagent/types').ScriptToolsApi;
 }
 
 export class LocalToolTransport implements ToolTransport {
@@ -39,6 +45,7 @@ export class LocalToolTransport implements ToolTransport {
     const live = this.getLiveCtx?.();
 
     const ctx: ToolContext = {
+      toolCallId: request.toolCallId,
       sessionId: request.sessionId,
       sessionKey: request.sessionKey,
       platform: request.platform,
@@ -46,6 +53,7 @@ export class LocalToolTransport implements ToolTransport {
       personalityId: request.personalityId,
       teamId: request.teamId,
       agentId: request.agentId,
+      jobId: request.jobId,
       origin: request.origin,
       memoryScopeId: request.memoryScopeId,
       userScopeId: request.userScopeId,
@@ -59,6 +67,7 @@ export class LocalToolTransport implements ToolTransport {
       readMtimes: live?.readMtimes,
       storage: live?.storage,
       a2aDelegation: live?.a2aDelegation,
+      scriptTools: live?.scriptTools,
     };
 
     if (tool.capabilities && this.backends) {

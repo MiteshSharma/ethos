@@ -1,4 +1,8 @@
 import { randomUUID } from 'node:crypto';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { AgentMesh } from '@ethosagent/agent-mesh';
+import { FsStorage } from '@ethosagent/storage-fs';
 import type {
   BackgroundJob,
   CreateBackgroundJobInput,
@@ -129,6 +133,8 @@ function makeJobStore(): FakeJobStore {
     async heartbeat() {},
     async updateSpend() {},
     async requestCancel() {},
+    async markBlocked() {},
+    async resumeFromBlocked() {},
     async finish() {},
     async listByRoot() {
       return [];
@@ -137,6 +143,9 @@ function makeJobStore(): FakeJobStore {
       return 0;
     },
     async countActiveByPersonality() {
+      return 0;
+    },
+    async countActive() {
       return 0;
     },
     async reclaimStale() {
@@ -162,6 +171,10 @@ function makeJobStore(): FakeJobStore {
       return true;
     },
     async releaseDelivery() {},
+    async claimNotice() {
+      return true;
+    },
+    async releaseNotice() {},
   };
 }
 
@@ -334,5 +347,86 @@ describe('AcpServer spawn / job_status (background jobs NOT enabled)', () => {
     const body = JSON.parse(res.body);
     expect(body.error.code).toBe(-32000);
     expect(body.error.message).toContain('not enabled');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// plan T1.1 / D12 — roster-constrain `spawn`'s `personalityId` when a mesh is
+// configured. Real HTTP server + real fetch (same pattern the rest of this
+// file already uses), which is what makes this a real-transport proof of the
+// trust boundary rather than a unit stub.
+// ---------------------------------------------------------------------------
+
+describe('AcpServer spawn — mesh roster constraint (plan T1.1 / D12)', () => {
+  let server: AcpServer;
+  let httpServer: ReturnType<typeof import('node:http').createServer>;
+  let port: number;
+  let token: string;
+  let jobStore: FakeJobStore;
+  let nudge: ReturnType<typeof vi.fn<() => void>>;
+  let mesh: AgentMesh;
+
+  beforeEach(async () => {
+    jobStore = makeJobStore();
+    nudge = vi.fn<() => void>();
+    // `AgentMesh`'s lock acquisition is raw `node:fs` regardless of the
+    // injected `Storage` (CLAUDE.md exception — a lock is a primitive Storage
+    // can't express), so a real tmpdir path is required here — same pattern
+    // `extensions/agent-mesh/src/__tests__/agent-mesh.test.ts` uses.
+    const registryPath = join(tmpdir(), `acp-spawn-roster-test-${randomUUID()}.json`);
+    mesh = new AgentMesh(registryPath, { storage: new FsStorage() });
+    // A live roster member — the SAME registration path production wiring uses
+    // (`serve.ts`'s `mesh.register()`), not a hand-crafted allowlist.
+    await mesh.register({
+      agentId: 'coder:1:aaaaaaaa',
+      capabilities: [],
+      model: 'test-model',
+      pid: 1,
+      host: 'localhost',
+      port: 9999,
+      activeSessions: 0,
+      personalityId: 'coder',
+    });
+    server = new AcpServer({
+      runner: makeRunner(),
+      session: makeStore(),
+      authToken: 'test-secret-token',
+      jobStore,
+      backgroundExecutor: { owner: 'test', nudge },
+      mesh,
+    });
+    token = server.token;
+    ({ httpServer, port } = await listen(server));
+  });
+
+  afterEach(async () => {
+    await new Promise<void>((resolve) => {
+      httpServer.close(() => resolve());
+    });
+  });
+
+  it('rejects a personalityId NOT on the mesh roster', async () => {
+    const res = await rpc(port, token, 'spawn', { text: 'x', personalityId: 'not-a-team-member' });
+    const body = JSON.parse(res.body);
+    expect(body.error.code).toBe(-32602);
+    expect(body.error.message).toContain('not-a-team-member');
+    expect(body.error.message).toContain('roster');
+    expect(jobStore.created).toHaveLength(0);
+    expect(nudge).not.toHaveBeenCalled();
+  });
+
+  it('accepts a personalityId ON the mesh roster — no regression to legitimate dispatch', async () => {
+    const res = await rpc(port, token, 'spawn', { text: 'x', personalityId: 'coder' });
+    const body = JSON.parse(res.body);
+    expect(typeof body.result.jobId).toBe('string');
+    expect(jobStore.created[0]?.personalityId).toBe('coder');
+    expect(nudge).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not constrain spawn calls with no personalityId at all', async () => {
+    const res = await rpc(port, token, 'spawn', { text: 'x' });
+    const body = JSON.parse(res.body);
+    expect(typeof body.result.jobId).toBe('string');
+    expect(jobStore.created[0]?.personalityId).toBeUndefined();
   });
 });

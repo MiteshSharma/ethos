@@ -52,6 +52,11 @@ describe('McpJsonStore', () => {
     expect(all).toEqual([a, b]);
   });
 
+  it('writes mcp.json owner-only (headers / env are credential-adjacent)', async () => {
+    await store.upsert('a', makeEntry('a'));
+    expect(storage.getMode(PATH)).toBe(0o600);
+  });
+
   it('get() returns one entry by name', async () => {
     const a = makeEntry('a');
     await store.upsert(a.name, a);

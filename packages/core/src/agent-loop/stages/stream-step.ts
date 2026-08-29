@@ -18,6 +18,7 @@ import { handleChunk } from '../chunk-handler';
 import { isContextOverflowError } from '../overflow';
 import type { WatcherTap } from '../turn-context';
 import { resolveModelWithTier } from '../turn-context';
+import type { TurnUsageAccumulator } from './turn-finalizer';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -71,6 +72,8 @@ export interface StreamStepDeps {
   observability?: AgentLoopObservability;
   requestDumpStore?: RequestDumpStore;
   sessionCosts: Map<string, number>;
+  /** A1 — per-turn rollup accumulator, flushed by the turn finalizer. */
+  turnUsage: TurnUsageAccumulator;
   streamingTimeoutMs: number;
   modelRouting: Record<string, string>;
 }
@@ -102,6 +105,47 @@ export interface StreamStepContext {
     /** Provider-namespaced escape hatch (§7 carries topK/minP here). */
     providerOptions?: Record<string, Record<string, unknown>>;
   };
+}
+
+// ---------------------------------------------------------------------------
+// Terminal-failure persistence
+// ---------------------------------------------------------------------------
+
+/**
+ * Persist the partial assistant text produced before a TERMINAL stream failure
+ * (stalled watchdog / provider error). Nothing retries those paths and the
+ * orchestrator returns immediately on `outcome: 'fatal'`, so without this the
+ * text lives only in the client's streaming buffer and vanishes as soon as the
+ * next turn reloads history from the store.
+ *
+ * Text only — any tool calls still in flight never ran and never will, so their
+ * `tool_use` blocks would be orphans in the replayed history. Dropping them is
+ * the cheaper half of the Anthropic tool_use/tool_result contract.
+ *
+ * Deliberately NOT called on the recoverable `overflow` path: that one compacts
+ * and retries, and needs the clean history it has always had.
+ *
+ * Empty (or whitespace-only) text is not persisted — an empty assistant turn is
+ * noise, not context.
+ */
+async function persistInterruptedAssistant(
+  session: SessionStore,
+  sessionId: string,
+  text: string,
+  reason: string,
+  traceId: string | undefined,
+): Promise<void> {
+  if (!text.trim()) return;
+  // Provider error messages can be multi-KB (HTML error pages, JSON dumps) and
+  // this marker replays into the next turn's context — keep it a label, not a
+  // payload. The full message still reaches the client on the `error` event.
+  const label = reason.length > 200 ? `${reason.slice(0, 200)}…` : reason;
+  await session.appendMessage({
+    sessionId,
+    role: 'assistant',
+    content: `${text}\n\n[interrupted — ${label}]`,
+    traceId,
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -195,6 +239,12 @@ export async function* streamStep(
   let llmEstimatedCostUsd = 0;
   let llmRequestTokens: { system: number; tools: number; messages: number } | undefined;
   let llmFinishReason: 'end_turn' | 'tool_use' | 'max_tokens' | 'stop_sequence' | undefined;
+  // B2 — the provider's server-assigned id for this call, when it reports one.
+  let providerRequestId: string | undefined;
+  // Gap 3 — why `llmEstimatedCostUsd` is what it is, for the
+  // `ethos_llm_unpriced_calls_total` counter (P2-counters). Not reported by
+  // every transport yet, hence optional.
+  let llmCostBasis: 'priced' | 'local' | 'unknown' | undefined;
   const llmStartTs = Date.now();
 
   try {
@@ -203,6 +253,11 @@ export async function* streamStep(
       system: ctx.systemPrompt,
       cacheSystemPrompt: true,
       abortSignal: combinedSignal,
+      // B2 — the client-minted id above goes outward where the provider
+      // supports it (openai-compat: `X-Client-Request-Id`), so a provider-side
+      // log line can be matched back to this call. Providers without a
+      // client-id convention ignore it.
+      requestId,
       ...(iterModelOverride ? { modelOverride: iterModelOverride } : {}),
       ...(ctx.cacheBreakpoints ? { cacheBreakpoints: ctx.cacheBreakpoints } : {}),
       ...(ctx.opts.temperature !== undefined ? { temperature: ctx.opts.temperature } : {}),
@@ -220,6 +275,8 @@ export async function* streamStep(
       armWatchdog();
       if (chunk.type === 'done') llmFinishReason = chunk.finishReason;
       if (chunk.type === 'usage') {
+        if (chunk.providerRequestId) providerRequestId = chunk.providerRequestId;
+        if (chunk.costBasis) llmCostBasis = chunk.costBasis;
         llmCacheReadTokens += chunk.usage.cacheReadTokens;
         llmCacheCreationTokens += chunk.usage.cacheCreationTokens;
         llmEstimatedCostUsd += chunk.usage.estimatedCostUsd;
@@ -254,12 +311,36 @@ export async function* streamStep(
       outputTokens: llmOutputTokens,
       cacheReadTokens: llmCacheReadTokens,
       cacheCreationTokens: llmCacheCreationTokens,
+      // A2 — the span used to carry tokens but no money, so every cost
+      // aggregate over `llm_call` spans read 0. This is the provider's own
+      // reported cost (already summed off the usage chunks above), not a
+      // re-derivation: core must not depend on @ethosagent/pricing.
+      estimatedCostUsd: llmEstimatedCostUsd,
+      // B2 — the two request ids, kept apart on purpose. `clientRequestId` is
+      // ours (minted above, sent outbound); `providerRequestId` is the
+      // server's, and it is the one a provider support ticket asks for.
+      clientRequestId: requestId,
+      ...(providerRequestId ? { providerRequestId } : {}),
       ...(llmRequestTokens ? { requestTokens: llmRequestTokens } : {}),
+      // Gap 2/3 (P2-counters) — `provider` and `costBasis` on the span so
+      // Prometheus counters can be derived from spans alone, no re-derivation
+      // through @ethosagent/pricing at read time.
+      provider: deps.llm.name,
+      ...(llmCostBasis ? { costBasis: llmCostBasis } : {}),
     });
 
     if (watchdogController.signal.aborted && !ctx.abortSignal.aborted) {
       deps.observability?.endTrace(ctx.traceId ?? '', 'error');
       deps.observability?.flush();
+      // Persist before yielding — a consumer that stops iterating on the error
+      // event closes the generator, and nothing after the yield would run.
+      await persistInterruptedAssistant(
+        deps.session,
+        ctx.sessionId,
+        chunkText,
+        `LLM stream stalled after ${watchdogMs}ms`,
+        ctx.traceId,
+      );
       yield {
         type: 'error',
         error: `LLM stream stalled — no chunk for ${watchdogMs}ms`,
@@ -269,10 +350,34 @@ export async function* streamStep(
     }
   } catch (err) {
     disarmWatchdog();
-    deps.observability?.endSpan(llmSpanId ?? '', 'error');
+    // B2 — a failed call is exactly the one an operator quotes in a support
+    // ticket, so the ids go on the error span too. The usage/cost accumulator
+    // locals are already populated from whatever chunks arrived before the
+    // stream errored (Fix 4) — mirror the success-path attrs below so a
+    // failed call after partial streaming doesn't lose its real token/cost
+    // counts or get tagged `provider="unknown"` in the Prometheus counters.
+    deps.observability?.endSpan(llmSpanId ?? '', 'error', {
+      inputTokens: llmInputTokens,
+      outputTokens: llmOutputTokens,
+      cacheReadTokens: llmCacheReadTokens,
+      cacheCreationTokens: llmCacheCreationTokens,
+      estimatedCostUsd: llmEstimatedCostUsd,
+      clientRequestId: requestId,
+      ...(providerRequestId ? { providerRequestId } : {}),
+      ...(llmRequestTokens ? { requestTokens: llmRequestTokens } : {}),
+      provider: deps.llm.name,
+      ...(llmCostBasis ? { costBasis: llmCostBasis } : {}),
+    });
     if (watchdogController.signal.aborted && !ctx.abortSignal.aborted) {
       deps.observability?.endTrace(ctx.traceId ?? '', 'error');
       deps.observability?.flush();
+      await persistInterruptedAssistant(
+        deps.session,
+        ctx.sessionId,
+        chunkText,
+        `LLM stream stalled after ${watchdogMs}ms`,
+        ctx.traceId,
+      );
       yield {
         type: 'error',
         error: `LLM stream stalled — no chunk for ${watchdogMs}ms`,
@@ -283,8 +388,8 @@ export async function* streamStep(
     const msg = err instanceof Error ? err.message : String(err);
     // Phase 3 — a context-overflow rejection is recoverable: hand it back to the
     // orchestrator (no `error` event) so it can compact-and-retry. The assistant
-    // message was NOT persisted (this catch precedes appendMessage), so the retry
-    // starts from a clean history.
+    // message is deliberately NOT persisted on this path (unlike the terminal
+    // failures above), so the retry starts from a clean history.
     if (isContextOverflowError(err)) {
       deps.observability?.recordCompaction({
         severity: 'warn',
@@ -295,6 +400,7 @@ export async function* streamStep(
     }
     deps.observability?.endTrace(ctx.traceId ?? '', 'error');
     deps.observability?.flush();
+    await persistInterruptedAssistant(deps.session, ctx.sessionId, chunkText, msg, ctx.traceId);
     yield { type: 'error', error: msg, code: 'llm_error' };
     return { outcome: 'fatal' };
   }
@@ -349,7 +455,19 @@ export async function* streamStep(
       estimatedCostUsd: llmEstimatedCostUsd,
       ...(llmRequestTokens ? { requestTokens: llmRequestTokens } : {}),
     },
+    // A3 — the turn's observability trace id, so this row joins to the trace
+    // and its `llm_call` span in `observability.db`.
+    traceId: ctx.traceId,
   });
+
+  // A1 — mirror the row just written into the turn's rollup accumulator. Kept
+  // adjacent to the append so the session's cached usage columns can only ever
+  // reflect message rows that actually landed (analytics decision 9).
+  deps.turnUsage.inputTokens += llmInputTokens;
+  deps.turnUsage.outputTokens += llmOutputTokens;
+  deps.turnUsage.cacheReadTokens += llmCacheReadTokens;
+  deps.turnUsage.cacheCreationTokens += llmCacheCreationTokens;
+  deps.turnUsage.estimatedCostUsd += llmEstimatedCostUsd;
 
   // Fire after_llm_call — content gated by personality observability config
   const llmDurationMs = Date.now() - llmStartTs;
@@ -381,7 +499,10 @@ export async function* streamStep(
   // turnNumber uses turnCount + 1 to match the original post-increment behavior.
   if (deps.requestDumpStore) {
     await deps.requestDumpStore.append({
+      // B2 — `requestId` is the client-minted outbound id; `providerRequestId`
+      // is the server-assigned one. Same pair as the `llm_call` span attrs.
       requestId,
+      ...(providerRequestId ? { providerRequestId } : {}),
       timestamp: new Date().toISOString(),
       sessionId: ctx.sessionId,
       personalityId: ctx.personality.id,

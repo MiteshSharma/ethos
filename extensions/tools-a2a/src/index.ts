@@ -11,10 +11,12 @@
 // Layer purity: imports ONLY `@ethosagent/types` + `@ethosagent/a2a`. No core, no apps.
 
 import {
+  A2A_RPC_AUTH_ERROR_CODES,
   type A2aAllowlist,
   A2aClientError,
   A2aOutboundClient,
   A2aOutboundError,
+  type A2aSession,
 } from '@ethosagent/a2a';
 import type {
   A2aIdentityProvider,
@@ -23,6 +25,7 @@ import type {
   ToolContext,
   ToolResult,
 } from '@ethosagent/types';
+import { A2aSessionCache } from './session-cache';
 
 export interface A2aToolDeps {
   /** Projects the active personality into a signed AgentCard (MY card). */
@@ -37,6 +40,12 @@ export interface A2aToolDeps {
   allowlist: A2aAllowlist;
   /** Injectable outbound client (tests); defaults to a fresh `A2aOutboundClient`. */
   client?: A2aOutboundClient;
+  /**
+   * Session/token cache (plan T1.2). Injectable so tests can share one cache
+   * across calls or inspect it directly; defaults to a fresh, empty cache per
+   * `createA2aTools` call (i.e. per personality wiring).
+   */
+  sessionCache?: A2aSessionCache;
   /**
    * Allow a personality to call its OWN agent over A2A (self-loop). Default
    * false — set via `ETHOS_A2A_SELF_LOOP=1` at the wiring layer (plan §14).
@@ -76,6 +85,7 @@ function parseArgs(args: unknown): A2aSendArgs | null {
 
 function makeA2aSendTool(deps: A2aToolDeps): Tool {
   const client = deps.client ?? new A2aOutboundClient();
+  const sessionCache = deps.sessionCache ?? new A2aSessionCache();
 
   return {
     name: 'a2a_send',
@@ -151,16 +161,47 @@ function makeA2aSendTool(deps: A2aToolDeps): Tool {
       }
 
       try {
-        const session = await client.connect({
-          wellKnownUrl: args.peer_url,
-          ...(args.fingerprint ? { expectedFingerprint: args.fingerprint } : {}),
-          myCard,
-          myPrivateKeyPem: pem,
-          ...(deps.allowSelfLoop ? { allowSelfLoop: true } : {}),
-          // Egress default-deny: refuse a peer that is not on this personality's
-          // allowlist BEFORE the handshake (no challenge, no card, no token).
-          egressCheck: (fp) => deps.allowlist.lookup(personalityId, fp).then((g) => g !== null),
-        });
+        // T1.2: a known fingerprint (the caller's out-of-band arg, or a prior
+        // successful connect at this same peer_url) lets a repeat send skip
+        // the ENTIRE handshake. D13: the allowlist is re-checked on every
+        // single send — cache hit or miss, before the cache is even consulted
+        // — so a revoked peer fails closed even though its cached token is
+        // still cryptographically valid.
+        const knownFingerprint =
+          args.fingerprint ?? sessionCache.resolveFingerprint(personalityId, args.peer_url);
+
+        let session: A2aSession | null = null;
+        if (knownFingerprint) {
+          const grant = await deps.allowlist.lookup(personalityId, knownFingerprint);
+          if (!grant) {
+            sessionCache.invalidate(personalityId, knownFingerprint);
+            throw new A2aOutboundError(
+              'egress_denied',
+              `peer ${knownFingerprint} is not on this personality's A2A egress allowlist (default-deny) — approve it out-of-band before calling it.`,
+            );
+          }
+          session = sessionCache.get(personalityId, knownFingerprint);
+        }
+
+        if (!session) {
+          // Cache MISS — the full handshake, which re-verifies the card's
+          // signature and fingerprint in full (never trust a cached card past
+          // its token's life; only a HIT skips this).
+          session = await client.connect({
+            wellKnownUrl: args.peer_url,
+            ...(args.fingerprint ? { expectedFingerprint: args.fingerprint } : {}),
+            myCard,
+            myPrivateKeyPem: pem,
+            ...(deps.allowSelfLoop ? { allowSelfLoop: true } : {}),
+            // Egress default-deny: refuse a peer that is not on this personality's
+            // allowlist BEFORE the handshake (no challenge, no card, no token).
+            // Redundant with the pre-check above when `knownFingerprint` was
+            // set — cheap, and the only guard at all for a first-ever call to
+            // a peer_url with no prior fingerprint.
+            egressCheck: (fp) => deps.allowlist.lookup(personalityId, fp).then((g) => g !== null),
+          });
+          sessionCache.set(personalityId, args.peer_url, session);
+        }
 
         // Ambient inbound trace (P8) — already the {traceId, depth, reserveOutbound}
         // shape the client expects. Absent → a fresh top-level call.
@@ -176,6 +217,15 @@ function makeA2aSendTool(deps: A2aToolDeps): Tool {
         });
 
         if (!result.ok) {
+          // T1.2: the PEER rejected my token/proof — the cached session is no
+          // longer good. Evict it so the NEXT send re-handshakes rather than
+          // repeating a doomed request every time.
+          if (
+            result.code === A2A_RPC_AUTH_ERROR_CODES.UNAUTHORIZED ||
+            result.code === A2A_RPC_AUTH_ERROR_CODES.PROOF_INVALID
+          ) {
+            sessionCache.invalidate(personalityId, session.peerCard.keyFingerprint);
+          }
           return {
             ok: false,
             error: `${result.code}: ${result.message}`,

@@ -1,3 +1,4 @@
+import { estimateCost } from '@ethosagent/pricing';
 import type {
   CompletionChunk,
   CompletionOptions,
@@ -51,7 +52,7 @@ export async function* streamBedrockConverse(
 
   if (!response.body) throw new Error('Bedrock response has no body');
 
-  yield* parseBedrockEventStream(response.body);
+  yield* parseBedrockEventStream(response.body, config.modelId);
 }
 
 function buildConverseBody(
@@ -117,6 +118,7 @@ function convertContent(c: { type: string; [key: string]: unknown }): Record<str
 
 async function* parseBedrockEventStream(
   body: ReadableStream<Uint8Array>,
+  modelId: string,
 ): AsyncGenerator<CompletionChunk> {
   const reader = body.getReader();
   const decoder = new TextDecoder();
@@ -138,7 +140,7 @@ async function* parseBedrockEventStream(
 
         try {
           const event = JSON.parse(trimmed);
-          yield* handleBedrockEvent(event);
+          yield* handleBedrockEvent(event, modelId);
         } catch {
           // Skip non-JSON lines (event stream framing)
         }
@@ -149,7 +151,10 @@ async function* parseBedrockEventStream(
   }
 }
 
-function* handleBedrockEvent(event: Record<string, unknown>): Generator<CompletionChunk> {
+function* handleBedrockEvent(
+  event: Record<string, unknown>,
+  modelId: string,
+): Generator<CompletionChunk> {
   if (event.contentBlockStart) {
     const start = event.contentBlockStart as Record<string, unknown>;
     const block = start.start as Record<string, unknown> | undefined;
@@ -180,15 +185,23 @@ function* handleBedrockEvent(event: Record<string, unknown>): Generator<Completi
     const meta = event.metadata as Record<string, unknown>;
     const usage = meta.usage as Record<string, number> | undefined;
     if (usage) {
+      const inputTokens = usage.inputTokens ?? 0;
+      const outputTokens = usage.outputTokens ?? 0;
+      // Bedrock model ids carry the vendor model name
+      // (`us.anthropic.claude-sonnet-4-...`), so the shared table resolves
+      // them without Bedrock-specific rows. Previously hardcoded to 0, which
+      // reported every Bedrock turn as free.
+      const costEstimate = estimateCost(modelId, { inputTokens, outputTokens });
       yield {
         type: 'usage',
         usage: {
-          inputTokens: usage.inputTokens ?? 0,
-          outputTokens: usage.outputTokens ?? 0,
+          inputTokens,
+          outputTokens,
           cacheReadTokens: 0,
           cacheCreationTokens: 0,
-          estimatedCostUsd: 0,
+          estimatedCostUsd: costEstimate.costUsd,
         },
+        costBasis: costEstimate.basis,
       };
     }
   }

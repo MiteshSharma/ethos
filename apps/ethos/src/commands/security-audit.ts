@@ -7,7 +7,7 @@
 
 import { stat } from 'node:fs/promises';
 import { join } from 'node:path';
-import { ethosDir } from '@ethosagent/config';
+import { ethosDir, readRawConfig } from '@ethosagent/config';
 import { createPersonalityRegistry } from '@ethosagent/personalities';
 import type { PersonalityConfig } from '@ethosagent/types';
 import { getStorage } from '../wiring';
@@ -48,6 +48,34 @@ async function check0600(path: string): Promise<Severity> {
   } catch {
     return 'ok'; // missing file = nothing to lock down
   }
+}
+
+export async function check0700(path: string): Promise<Severity> {
+  try {
+    const s = await stat(path);
+    const mode = s.mode & 0o777;
+    return mode === 0o700 ? 'ok' : 'warn';
+  } catch {
+    return 'ok'; // missing directory = nothing to lock down
+  }
+}
+
+/**
+ * Directories holding WhatsApp device credentials and pre-keys. Baileys
+ * writes those files itself, so the directory mode is the only lever — the
+ * adapter creates each one 0o700 (extensions/platform-whatsapp/src/session-store.ts).
+ * The default location is always checked so an operator who removed the
+ * config still sees a stale world-readable directory.
+ */
+export function whatsAppSessionDirs(
+  whatsapp: ReadonlyArray<{ session_dir?: string }> | undefined,
+  ethosHome: string,
+): string[] {
+  const dirs = [join(ethosHome, 'whatsapp')];
+  for (const wa of whatsapp ?? []) {
+    if (wa.session_dir) dirs.push(wa.session_dir);
+  }
+  return [...new Set(dirs)];
 }
 
 interface RunOptions {
@@ -144,6 +172,24 @@ export async function runSecurityAudit(argv: string[]): Promise<void> {
     });
   }
 
+  const rawConfig = await readRawConfig(getStorage()).catch(() => null);
+  for (const d of whatsAppSessionDirs(rawConfig?.whatsapp, dir)) {
+    const sev = await check0700(d);
+    findings.push({
+      severity: sev,
+      section: 'File hygiene',
+      message:
+        sev === 'ok'
+          ? `${d} is mode 0700 (or absent)`
+          : `${d} mode is too permissive — WhatsApp device credentials live under it, should be 0700`,
+      fixable: sev !== 'ok',
+      fix: async () => {
+        const { chmod } = await import('node:fs/promises');
+        await chmod(d, 0o700);
+      },
+    });
+  }
+
   // ---- Always-deny floor advisory (informational) ----
   findings.push({
     severity: 'ok',
@@ -159,14 +205,6 @@ export async function runSecurityAudit(argv: string[]): Promise<void> {
         severity: 'warn',
         section: 'Network policy',
         message: `${p.id}: allow_private_urls=true (cloud-metadata still blocked, but RFC1918 is reachable)`,
-      });
-    }
-    const inj = p.safety?.injectionDefense;
-    if (inj?.enabled === false) {
-      findings.push({
-        severity: 'warn',
-        section: 'Injection defense',
-        message: `${p.id}: injectionDefense disabled (no provenance wrapping or post-read downgrade)`,
       });
     }
   }
@@ -258,13 +296,6 @@ export async function runSecurityAuditAndCollect(
         severity: 'warn',
         section: 'Network policy',
         message: `${p.id}: allow_private_urls=true`,
-      });
-    }
-    if (p.safety?.injectionDefense?.enabled === false) {
-      findings.push({
-        severity: 'warn',
-        section: 'Injection defense',
-        message: `${p.id}: injectionDefense disabled`,
       });
     }
   }

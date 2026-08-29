@@ -171,13 +171,16 @@ export function clarifyResolvedBlocks(input: ClarifyResolvedInput): SlackBlock[]
  *  entirely when there are no pending rows. */
 export function clarifyHomeEntryBlocks(row: PendingClarify): SlackBlock[] {
   // Reuse the pending builder so the home tab and the channel card stay in
-  // sync — same buttons, same value encoding, same caps.
+  // sync — same buttons, same value encoding, same caps. `listPendingForBot`
+  // only ever returns rows that were actually presented (a still-queued row
+  // has no `surfaceContext.botKey` yet, so it's filtered out there) — the
+  // `?? row.createdAt` fallback is defensive only, for the type.
   return clarifyPendingBlocks({
     requestId: row.requestId,
     question: row.question,
     options: row.options,
     default: row.default,
-    defaultDeadlineAt: row.defaultDeadlineAt,
+    defaultDeadlineAt: row.defaultDeadlineAt ?? row.createdAt,
   });
 }
 

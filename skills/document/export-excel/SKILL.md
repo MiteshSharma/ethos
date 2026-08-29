@@ -1,6 +1,6 @@
 ---
 name: export-excel
-description: Export structured tabular data to an Excel .xlsx file using a Node.js script and the exceljs library. The skill writes a generator script to ~/.ethos/files/generated/gen-excel.js, installs exceljs locally under ~/.ethos/tools if needed, then runs the script to produce the workbook. Handles multiple sheets, column headers, and typed cell values.
+description: Export structured tabular data to an Excel .xlsx file using a Node.js script and the exceljs library. The skill writes a generator script to gen-excel.js in the working directory, installs exceljs locally under ~/.ethos/tools if needed, then runs the script to produce the workbook. Handles multiple sheets, column headers, and typed cell values.
 version: 1.0.0
 author: ethosagent
 tags: [document, excel, xlsx, export, data]
@@ -24,7 +24,7 @@ ethos:
 
 # Export Excel
 
-Export structured tabular data to an Excel `.xlsx` file. A Node.js script using `exceljs` is written to a temp path, `exceljs` is installed locally if missing, and the script is run to produce the workbook. Output is at `~/.ethos/files/generated/<filename>.xlsx`.
+Export structured tabular data to an Excel `.xlsx` file. A Node.js script using `exceljs` is written to a temp path, `exceljs` is installed locally if missing, and the script is run to produce the workbook. Output is written to the working directory as `<filename>.xlsx`.
 
 ## When to use this skill
 
@@ -53,21 +53,21 @@ If not found, stop and tell the user:
 
 Do not proceed further.
 
-**Step 2: Create the working directories**
+**Step 2: Create the tools directory**
 
 ```bash
-mkdir -p ~/.ethos/files/generated ~/.ethos/tools
+mkdir -p ~/.ethos/tools
 ```
 
 **Step 3: Write the generator script**
 
-Use `write_file` to write a Node.js script to `~/.ethos/files/generated/gen-excel.js`. The script should:
+Use `write_file` to write a Node.js script to the relative path `gen-excel.js`, which resolves inside the working directory. The script should:
 
 - Embed the data directly (as a JavaScript object literal).
 - Use `exceljs` to create a workbook with one sheet per logical table.
 - Set column headers from the data keys.
 - Write each row of data.
-- Save to `~/.ethos/files/generated/<filename>.xlsx`.
+- Save to the relative path `<filename>.xlsx`.
 
 Minimal script template:
 
@@ -90,9 +90,7 @@ async function main() {
   ];
   rows.forEach(row => sheet.addRow(row));
 
-  await workbook.xlsx.writeFile(
-    require('os').homedir() + '/.ethos/files/generated/<filename>.xlsx'
-  );
+  await workbook.xlsx.writeFile('<filename>.xlsx');
   console.log('Done');
 }
 
@@ -123,26 +121,26 @@ Do not proceed further.
 **Step 5: Run the generator script**
 
 ```bash
-NODE_PATH=~/.ethos/tools/node_modules node ~/.ethos/files/generated/gen-excel.js
+NODE_PATH=~/.ethos/tools/node_modules node gen-excel.js
 ```
 
 **Step 6: Confirm to the user**
 
 Tell the user:
 
-> "Excel file created at: `~/.ethos/files/generated/<filename>.xlsx`"
+> "Excel file created at: `<filename>.xlsx` in the working directory — visible in the Documents tab."
 
 ## Anti-patterns
 
 - **Do not install `exceljs` globally** — use `--prefix ~/.ethos/tools` to keep it isolated and avoid permission issues.
-- **Do not hardcode `/Users/<username>/`** — use `require('os').homedir()` in the script for portability.
+- **Do not use an absolute output path in the script** — write to a bare relative filename so the workbook lands in the working directory.
 - **Do not write a generic script and ask the user to fill in the data** — embed the actual data in the script before running it.
 - **Do not produce an empty workbook** — always include at least a header row.
 - **Do not reuse a stale `gen-excel.js`** from a previous run without overwriting it with the current data.
 
 ## Hard rules
 
-- All generated files go to `~/.ethos/files/generated/`. Never write the `.xlsx` outside this directory.
+- All generated files go to the working directory. Always write a relative path — never write the `.xlsx` outside the working directory.
 - Always tell the user the exact output path after completion.
 - If `node` is not installed, show the fallback message verbatim — do not proceed.
 - If `exceljs` install fails, show the fallback message verbatim — do not proceed.

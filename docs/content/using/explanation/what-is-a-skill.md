@@ -4,7 +4,7 @@ description: "A skill is a reusable instruction packet discovered across ecosyst
 kind: explanation
 audience: user
 slug: what-is-a-skill
-updated: 2026-06-09
+updated: 2026-08-12
 ---
 
 ## Context
@@ -47,22 +47,23 @@ Skills are the layer for *standing instructions that outlive the conversation bu
 
 A skill is just a directory with a `SKILL.md` in it. Many ecosystems agreed on this shape (the [agentskills.io](https://agentskills.io) standard) and many users already have a library. Ethos's universal scanner reads them in place.
 
-The default sources walked at startup:
+The sources the shipped CLI and gateway walk at startup:
 
 | Source label | Path | Trust tier |
 |---|---|---|
-| `ethos-bundled` | `skills/data/<category>/*/SKILL.md` (ships inside Ethos) | trusted-repo |
+| `ethos-bundled` | `skills/<category>/<name>/SKILL.md` (ships inside Ethos) | builtin |
 | `ethos` | `~/.ethos/skills/*/SKILL.md` | trusted-repo |
-| `ethos-project` | `<cwd>/.ethos/skills/*/SKILL.md` (per-repo) | community |
 | `claude-code` | `~/.claude/skills/*/SKILL.md` | community |
 | `claude-code-project` | `<cwd>/.claude/skills/*/SKILL.md` | community |
 | `opencode-project` | `<cwd>/.opencode/skills/*/SKILL.md` | community |
+
+There is no per-repo `.ethos/skills/` source. A skill that should travel with a checkout goes in `<repo>/.claude/skills/` and is picked up under `claude-code-project` — the same directory Claude Code reads, which is the point of reading other ecosystems' layouts rather than inventing one. (`<repo>/.ethos/` *is* a real project-scoped directory, but only for [slash commands](../reference/slash-commands.md), not skills.)
 
 External tool home directories (OpenClaw, Hermes, OpenCode home) are opt-in via `extraSources` — they can contain hundreds of files, not all of which belong to Ethos.
 
 A dialect parser handles each format. Agentskills.io, OpenClaw, and Hermes each have small differences in their frontmatter; the parser pool unifies them into one `Skill` record with a `qualifiedName` of `<source>/<name>`. Duplicates across sources are deduped by qualified name.
 
-Trust tier is set by which option the source arrives through, not by the caller. `extraSources` is always `community` — red *and* yellow safety findings block. `trustedFirstPartySources` is `trusted-repo` — red blocks, yellow auto-acknowledges so legitimate mentions of `bash`, `gh`, `curl` in skill bodies do not trip the scanner. A caller cannot pass a custom directory at the trusted tier; the scanner refuses that escalation.
+Trust tier is set by which option the source arrives through, not by the caller. `extraSources` is always `community` — red *and* yellow safety findings block. `trustedFirstPartySources` is always `builtin`, the tier that means "shipped inside the Ethos repository" — red blocks, yellow auto-acknowledges, so legitimate mentions of `bash`, `gh`, `curl` in bundled skill bodies do not trip the scanner. Only callers that live in the Ethos monorepo populate that option; a caller cannot pass a custom directory at a privileged tier, and the scanner refuses that escalation.
 
 The scanner caches per-source by mtime. Re-startup is cheap; only changed sources get re-parsed.
 
@@ -107,11 +108,11 @@ The full set of frontmatter fields, dialect differences, and per-personality fil
 
 ### Invocation — model-invoked vs user-invoked
 
-A skill activates in two ways. The model invokes it when the user's message matches the skill's `description` and the per-personality filter has admitted it. The user invokes it directly with `/<skill-name>` in chat.
+The normal path is model invocation. The filter admits the skill to the personality's pool, the model reads the skill's `description`, and it loads the body when the user's message matches. Nothing the user types names the skill.
 
-For sensitive skills — anything with side effects (deploy, commit, send-email) — the frontmatter can set `disable-model-invocation: true`. Only the user's explicit `/<skill-name>` activates it; the model cannot pull it in from a description match. The intent is to keep destructive skills behind a literal command rather than a heuristic match on the user's wording.
+CLI chat also registers a `/<slug>` slash command for each *flat* markdown file directly under `~/.ethos/skills/` and under the active personality's `skills/` directory — `~/.ethos/skills/explain-code.md` becomes `/explain-code`. Directory-shaped skills (`~/.ethos/skills/explain-code/SKILL.md`), which is the shape the scanner discovers, do not get a slash command. The two mechanisms read the same directory but not the same files, and only the scanner's directory shape participates in the trust tiers and the per-personality filter.
 
-`allowed-tools` in the frontmatter declares the subset of tools the skill can use without per-call permission. This trims the surface for skills the user trusts to run a specific set of tools quickly.
+There is no per-skill switch that disables model invocation, and no per-skill tool allowlist. Both of those are properties of [slash commands](../reference/slash-commands.md), a separate artifact with its own frontmatter — a skill cannot narrow the personality's toolset or opt out of being loaded on a description match.
 
 ### What a skill is not
 
@@ -121,13 +122,14 @@ A skill is not a [personality](../../getting-started/glossary.md#personality). I
 
 A skill is not a [hook](../../getting-started/glossary.md#hook). Hooks fire at fixed boundaries in the turn cycle and run code; skills are markdown the agent reads at prompt build time.
 
-A skill is not a slash command. `/personality` switches personality; `/new` clears the session. Skills are invoked by the agent — directly via `/skill-name` if the user wants, or model-invoked when the description matches the user's request and the filter lets the skill through.
+A skill is not a slash command. `/personality` switches personality; `/new` clears the session. A discovered skill is loaded by the agent when its description matches the request and the filter lets it through — the user does not type its name.
 
 ### Safety scanning at load
 
 Every discovered skill passes through a safety scanner before it joins the pool. The scanner looks for red findings (clear prompt-injection or malicious instruction patterns) and yellow findings (suspicious but ambiguous mentions of dangerous tools). Trust tier governs how the framework reacts:
 
-- `trusted-repo` (your own `~/.ethos/skills/`, Ethos-bundled): red findings block; yellow findings are auto-acknowledged. The user's own skills should not be silently rejected because the body mentions `bash`.
+- `builtin` (Ethos-bundled skills, shipped inside the repository): red findings block; yellow findings are auto-acknowledged. This is the only tier that auto-acknowledges, because "this code ships inside Ethos" is a provenance claim the framework can actually make about itself.
+- `trusted-repo` (your own `~/.ethos/skills/`, and repos under an org you named in `security.trusted_github_orgs`): red findings block; yellow findings need your acknowledgment. `ethos skills install` shows the findings and asks. Discovery has nobody to ask — a yellow finding there drops the skill from the pool and logs the reason, so a skill you wrote that mentions `curl` outside a code fence will not load until you clear the finding.
 - `community` (everything else, including external tool home directories and project-local): red AND yellow findings block. A skill from a third-party catalogue that mentions running `curl` cannot silently load.
 
 The scanner's job is to refuse the catastrophic combination — a community-sourced skill telling the agent to exfiltrate secrets via a shell command — without making the trusted user experience tedious. A rejected skill is dropped from the pool entirely; the personality filter never sees it.

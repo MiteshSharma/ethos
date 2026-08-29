@@ -1,8 +1,16 @@
 import type {
+  SttAudio,
   SttProvider,
   VoiceCapabilities,
   VoiceProviderFactoryContext,
 } from '@ethosagent/types';
+import { STT_CONTRACT_VERSION } from '@ethosagent/types';
+import { transcribeOpenAiCompat } from './openai-compat';
+
+// Groq serves the OpenAI transcription API verbatim at `/openai/v1`, so it
+// rides the shared transport rather than hand-rolling a second multipart
+// builder (which is how it ended up hard-coding `audio.ogg` for every upload).
+const GROQ_BASE_URL = 'https://api.groq.com/openai/v1';
 
 export class GroqSttProvider implements SttProvider {
   readonly name = 'groq-stt';
@@ -17,31 +25,23 @@ export class GroqSttProvider implements SttProvider {
       kind: 'stt',
       formats: ['opus', 'mp3', 'wav'],
       local: false,
-      contractVersion: 1,
+      contractVersion: STT_CONTRACT_VERSION,
     };
   }
 
-  async transcribe(audioPath: string): Promise<string> {
-    const { readFile } = await import('node:fs/promises');
-    const data = await readFile(audioPath);
-    const blob = new Blob([data]);
-    const formData = new FormData();
-    formData.append('file', blob, 'audio.ogg');
-    formData.append('model', this.model);
-
-    const res = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${this.apiKey}` },
-      body: formData,
+  async transcribeBuffer(
+    audio: SttAudio,
+    opts?: { language?: string; signal?: AbortSignal },
+  ): Promise<string> {
+    return transcribeOpenAiCompat({
+      baseUrl: GROQ_BASE_URL,
+      apiKey: this.apiKey,
+      model: this.model,
+      audio,
+      label: 'Groq STT',
+      ...(opts?.language ? { language: opts.language } : {}),
+      ...(opts?.signal ? { signal: opts.signal } : {}),
     });
-
-    if (!res.ok) {
-      const body = await res.text().catch(() => '');
-      throw new Error(`Groq STT failed (${res.status}): ${body}`);
-    }
-
-    const json = (await res.json()) as { text: string };
-    return json.text;
   }
 }
 

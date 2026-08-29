@@ -14,7 +14,8 @@ import {
   Tag,
   Typography,
 } from 'antd';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
+import { useCreateFlag } from '../hooks/useCreateFlag';
 import { rpc } from '../rpc';
 
 // Lab → Batch tab. v1.
@@ -28,6 +29,13 @@ const PLACEHOLDER = `{"id": "task-1", "prompt": "Summarize the README in two sen
 
 export function Batch() {
   const [submitOpen, setSubmitOpen] = useState(false);
+
+  // P5 — StageHeader's "New batch" action navigates here with `?create=1`;
+  // this opens the same SubmitModal the page's own button does.
+  const shouldCreate = useCreateFlag();
+  useEffect(() => {
+    if (shouldCreate) setSubmitOpen(true);
+  }, [shouldCreate]);
 
   const listQuery = useQuery({
     queryKey: ['batch', 'list'],

@@ -41,12 +41,17 @@ function mcpServerName(toolName: string): string | undefined {
   return toolName.split('__')[1];
 }
 
-/** Returns true when a tool passes the MCP server + plugin filters. */
+/** Returns true when a tool passes the surface exclusion + MCP server + plugin filters. */
 function passesFilter(entry: ToolEntry, filterOpts: ToolFilterOpts | undefined): boolean {
   if (!filterOpts) return true;
 
-  const { allowedMcpServers, allowedPlugins, allowedMcpTools } = filterOpts;
+  const { allowedMcpServers, allowedPlugins, allowedMcpTools, excludeTools } = filterOpts;
   const toolName = entry.tool.name;
+
+  // Surface gate: strictly stronger than the toolset gate. It applies to every
+  // tool — built-in, MCP, plugin — and defeats `alwaysInclude`, because it
+  // expresses what the surface cannot render, not what the personality may use.
+  if (excludeTools?.includes(toolName)) return false;
 
   // MCP server gate: MCP tools only appear when their server is in the allowlist.
   if (allowedMcpServers !== undefined) {
@@ -311,7 +316,7 @@ export class DefaultToolRegistry implements ToolRegistry {
     filterOpts?: ToolFilterOpts,
     turnAttachments?: import('@ethosagent/types').Attachment[],
     filters?: import('@ethosagent/types').ToolInvocationFilter[],
-  ): Promise<Array<{ toolCallId: string; name: string; result: ToolResult }>> {
+  ): Promise<Array<{ toolCallId: string; name: string; result: ToolResult; durationMs?: number }>> {
     const perCallBudget = Math.floor(ctx.resultBudgetChars / Math.max(calls.length, 1));
 
     // Update live turn context for the default LocalToolTransport
@@ -321,164 +326,190 @@ export class DefaultToolRegistry implements ToolRegistry {
       storage: ctx.storage,
       inboundAttachments: turnAttachments,
       a2aDelegation: ctx.a2aDelegation,
+      scriptTools: ctx.scriptTools,
+    };
+
+    // A4 — one clock per call. The batch used to be timed by a single timer in
+    // the agent loop, so every tool in a parallel batch reported the batch wall
+    // time. Each call is timed here, where it actually runs.
+    const runCall = async (call: { toolCallId: string; name: string; args: unknown }) => {
+      const entry = this.tools.get(call.name);
+      if (!entry) {
+        return {
+          toolCallId: call.toolCallId,
+          name: call.name,
+          result: {
+            ok: false,
+            error: `Unknown tool: ${call.name}`,
+            code: 'not_available',
+          } as ToolResult,
+        };
+      }
+
+      // Surface gate (L8 execution-time half): checked before the
+      // MCP/plugin/alwaysInclude bypass below, because an excluded tool is
+      // off this surface no matter who registered it.
+      if (filterOpts?.excludeTools?.includes(call.name)) {
+        return {
+          toolCallId: call.toolCallId,
+          name: call.name,
+          result: {
+            ok: false,
+            error: `Tool ${call.name} is not available on this surface`,
+            code: 'not_available',
+          } as ToolResult,
+        };
+      }
+
+      // Toolset (allowedTools) only gates built-in tools — see toDefinitions
+      // for the rationale. MCP and plugin tools are gated by passesFilter().
+      const isMcpOrPluginTool = call.name.startsWith('mcp__') || entry.pluginId !== undefined;
+      if (
+        !isMcpOrPluginTool &&
+        !entry.tool.alwaysInclude &&
+        allowedTools &&
+        !allowedTools.includes(call.name)
+      ) {
+        return {
+          toolCallId: call.toolCallId,
+          name: call.name,
+          result: {
+            ok: false,
+            error: `Tool ${call.name} is not permitted for this personality`,
+            code: 'not_available',
+          } as ToolResult,
+        };
+      }
+
+      // MCP server + plugin filter check
+      if (!passesFilter(entry, filterOpts)) {
+        return {
+          toolCallId: call.toolCallId,
+          name: call.name,
+          result: {
+            ok: false,
+            error: `Tool ${call.name} is not permitted for this personality`,
+            code: 'not_available',
+          } as ToolResult,
+        };
+      }
+
+      if (entry.tool.isAvailable && !entry.tool.isAvailable()) {
+        return {
+          toolCallId: call.toolCallId,
+          name: call.name,
+          result: {
+            ok: false,
+            error: `Tool ${call.name} is not currently available`,
+            code: 'not_available',
+          } as ToolResult,
+        };
+      }
+
+      // v2: result cache — check before executing
+      const cached = this.cacheGet(entry.tool, call.args, ctx);
+      if (cached) {
+        return { toolCallId: call.toolCallId, name: call.name, result: cached };
+      }
+
+      // Fail closed: tools that declare real capabilities require wired backends.
+      // capabilities: {} (empty) is opt-in to the framework path without needing backends.
+      if (needsBackends(entry.tool.capabilities) && !this.backends) {
+        return {
+          toolCallId: call.toolCallId,
+          name: call.name,
+          result: {
+            ok: false,
+            error: `Tool ${call.name} declares capabilities but no capability backends are configured`,
+            code: 'not_available',
+          } as ToolResult,
+        };
+      }
+
+      // Dry-run mode: return a synthetic result without executing the tool.
+      // Dynamic import keeps the non-dry-run path lean.
+      if (ctx.dryRun) {
+        const { synthesizeDryRunResult } = await import('./dry-run');
+        return {
+          toolCallId: call.toolCallId,
+          name: call.name,
+          result: synthesizeDryRunResult(call.name, call.args),
+        };
+      }
+
+      const cappedBudget = Math.min(perCallBudget, entry.tool.maxResultChars ?? perCallBudget);
+
+      try {
+        const request: ToolExecuteRequest = {
+          toolCallId: call.toolCallId,
+          name: call.name,
+          args: call.args,
+          sessionId: ctx.sessionId,
+          sessionKey: ctx.sessionKey,
+          platform: ctx.platform,
+          workingDir: ctx.workingDir,
+          personalityId: ctx.personalityId,
+          teamId: ctx.teamId,
+          agentId: ctx.agentId,
+          jobId: ctx.jobId,
+          origin: ctx.origin,
+          memoryScopeId: ctx.memoryScopeId,
+          userScopeId: ctx.userScopeId,
+          currentTurn: ctx.currentTurn,
+          messageCount: ctx.messageCount,
+          resultBudgetChars: cappedBudget,
+          networkPolicy: ctx.networkPolicy,
+          dryRun: ctx.dryRun,
+        };
+
+        const rawResult =
+          filters && filters.length > 0
+            ? await this.applyFilters(
+                filters,
+                entry.tool,
+                call.args,
+                ctx,
+                { toolName: call.name, toolCallId: call.toolCallId },
+                () => this.transport.execute(request, ctx.abortSignal),
+              )
+            : await this.transport.execute(request, ctx.abortSignal);
+        // Apply reducer before budget trim so budget sees post-reduced text
+        const reducer = this.reducers?.get(call.name);
+        const result = reducer
+          ? safeReduce(reducer, rawResult, { args: call.args, turnCount: ctx.currentTurn ?? 0 })
+          : rawResult;
+        // Post-trim result to budget
+        if (result.ok && result.value.length > cappedBudget) {
+          return {
+            toolCallId: call.toolCallId,
+            name: call.name,
+            result: {
+              ok: true,
+              value: `${result.value.slice(0, cappedBudget)}\n[truncated — ${result.value.length} chars total]`,
+            } as ToolResult,
+          };
+        }
+        // v2: cache the result if applicable
+        this.cacheSet(entry.tool, call.args, result, ctx);
+        return { toolCallId: call.toolCallId, name: call.name, result };
+      } catch (err) {
+        return {
+          toolCallId: call.toolCallId,
+          name: call.name,
+          result: {
+            ok: false,
+            error: err instanceof Error ? err.message : String(err),
+            code: 'execution_failed',
+          } as ToolResult,
+        };
+      }
     };
 
     const results = await Promise.allSettled(
       calls.map(async (call) => {
-        const entry = this.tools.get(call.name);
-        if (!entry) {
-          return {
-            toolCallId: call.toolCallId,
-            name: call.name,
-            result: {
-              ok: false,
-              error: `Unknown tool: ${call.name}`,
-              code: 'not_available',
-            } as ToolResult,
-          };
-        }
-
-        // Toolset (allowedTools) only gates built-in tools — see toDefinitions
-        // for the rationale. MCP and plugin tools are gated by passesFilter().
-        const isMcpOrPluginTool = call.name.startsWith('mcp__') || entry.pluginId !== undefined;
-        if (
-          !isMcpOrPluginTool &&
-          !entry.tool.alwaysInclude &&
-          allowedTools &&
-          !allowedTools.includes(call.name)
-        ) {
-          return {
-            toolCallId: call.toolCallId,
-            name: call.name,
-            result: {
-              ok: false,
-              error: `Tool ${call.name} is not permitted for this personality`,
-              code: 'not_available',
-            } as ToolResult,
-          };
-        }
-
-        // MCP server + plugin filter check
-        if (!passesFilter(entry, filterOpts)) {
-          return {
-            toolCallId: call.toolCallId,
-            name: call.name,
-            result: {
-              ok: false,
-              error: `Tool ${call.name} is not permitted for this personality`,
-              code: 'not_available',
-            } as ToolResult,
-          };
-        }
-
-        if (entry.tool.isAvailable && !entry.tool.isAvailable()) {
-          return {
-            toolCallId: call.toolCallId,
-            name: call.name,
-            result: {
-              ok: false,
-              error: `Tool ${call.name} is not currently available`,
-              code: 'not_available',
-            } as ToolResult,
-          };
-        }
-
-        // v2: result cache — check before executing
-        const cached = this.cacheGet(entry.tool, call.args, ctx);
-        if (cached) {
-          return { toolCallId: call.toolCallId, name: call.name, result: cached };
-        }
-
-        // Fail closed: tools that declare real capabilities require wired backends.
-        // capabilities: {} (empty) is opt-in to the framework path without needing backends.
-        if (needsBackends(entry.tool.capabilities) && !this.backends) {
-          return {
-            toolCallId: call.toolCallId,
-            name: call.name,
-            result: {
-              ok: false,
-              error: `Tool ${call.name} declares capabilities but no capability backends are configured`,
-              code: 'not_available',
-            } as ToolResult,
-          };
-        }
-
-        // Dry-run mode: return a synthetic result without executing the tool.
-        // Dynamic import keeps the non-dry-run path lean.
-        if (ctx.dryRun) {
-          const { synthesizeDryRunResult } = await import('./dry-run');
-          return {
-            toolCallId: call.toolCallId,
-            name: call.name,
-            result: synthesizeDryRunResult(call.name, call.args),
-          };
-        }
-
-        const cappedBudget = Math.min(perCallBudget, entry.tool.maxResultChars ?? perCallBudget);
-
-        try {
-          const request: ToolExecuteRequest = {
-            toolCallId: call.toolCallId,
-            name: call.name,
-            args: call.args,
-            sessionId: ctx.sessionId,
-            sessionKey: ctx.sessionKey,
-            platform: ctx.platform,
-            workingDir: ctx.workingDir,
-            personalityId: ctx.personalityId,
-            teamId: ctx.teamId,
-            agentId: ctx.agentId,
-            origin: ctx.origin,
-            memoryScopeId: ctx.memoryScopeId,
-            userScopeId: ctx.userScopeId,
-            currentTurn: ctx.currentTurn,
-            messageCount: ctx.messageCount,
-            resultBudgetChars: cappedBudget,
-            networkPolicy: ctx.networkPolicy,
-            dryRun: ctx.dryRun,
-          };
-
-          const rawResult =
-            filters && filters.length > 0
-              ? await this.applyFilters(
-                  filters,
-                  entry.tool,
-                  call.args,
-                  ctx,
-                  { toolName: call.name, toolCallId: call.toolCallId },
-                  () => this.transport.execute(request, ctx.abortSignal),
-                )
-              : await this.transport.execute(request, ctx.abortSignal);
-          // Apply reducer before budget trim so budget sees post-reduced text
-          const reducer = this.reducers?.get(call.name);
-          const result = reducer
-            ? safeReduce(reducer, rawResult, { args: call.args, turnCount: ctx.currentTurn ?? 0 })
-            : rawResult;
-          // Post-trim result to budget
-          if (result.ok && result.value.length > cappedBudget) {
-            return {
-              toolCallId: call.toolCallId,
-              name: call.name,
-              result: {
-                ok: true,
-                value: `${result.value.slice(0, cappedBudget)}\n[truncated — ${result.value.length} chars total]`,
-              } as ToolResult,
-            };
-          }
-          // v2: cache the result if applicable
-          this.cacheSet(entry.tool, call.args, result, ctx);
-          return { toolCallId: call.toolCallId, name: call.name, result };
-        } catch (err) {
-          return {
-            toolCallId: call.toolCallId,
-            name: call.name,
-            result: {
-              ok: false,
-              error: err instanceof Error ? err.message : String(err),
-              code: 'execution_failed',
-            } as ToolResult,
-          };
-        }
+        const startedAt = Date.now();
+        const settled = await runCall(call);
+        return { ...settled, durationMs: Date.now() - startedAt };
       }),
     );
 

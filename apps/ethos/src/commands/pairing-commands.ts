@@ -20,13 +20,13 @@
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { ethosDir } from '@ethosagent/config';
+import Database from '@ethosagent/sqlite';
 import {
   consumeAndAllow,
   getApprovedSenders,
   initPairingDb,
   revokeApproval,
-} from '@ethosagent/safety-channel';
-import Database from '@ethosagent/sqlite';
+} from '@ethosagent/wiring/security-kernel';
 
 const SUPPORTED_PLATFORMS = ['telegram', 'discord', 'slack', 'whatsapp', 'email'];
 

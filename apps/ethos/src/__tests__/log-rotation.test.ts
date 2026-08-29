@@ -163,7 +163,7 @@ describe('log-rotation config parsing', () => {
   });
 
   it('round-trips logs.rotation through writeConfig', async () => {
-    const { InMemoryStorage } = await import('@ethosagent/storage-fs');
+    const { InMemorySecretsResolver, InMemoryStorage } = await import('@ethosagent/storage-fs');
     const { ethosDir, readRawConfig, writeConfig } = await import('@ethosagent/config');
     const storage = new InMemoryStorage();
     await storage.mkdir(ethosDir());
@@ -174,7 +174,7 @@ describe('log-rotation config parsing', () => {
       personality: 'researcher',
       logs: { rotation: { maxBytes: 5242880, maxFiles: 3, enabled: false } },
     };
-    await writeConfig(storage, original);
+    await writeConfig(storage, original, new InMemorySecretsResolver());
     const roundTripped = await readRawConfig(storage);
     expect(roundTripped?.logs?.rotation).toEqual(original.logs.rotation);
   });

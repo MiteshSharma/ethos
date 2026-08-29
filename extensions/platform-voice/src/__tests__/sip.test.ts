@@ -1,4 +1,4 @@
-import { deriveBotKey } from '@ethosagent/core';
+import { deriveBotKey, voiceLaneKey } from '@ethosagent/core';
 import type { AgentTurnRunner } from '@ethosagent/voice-session';
 import { VoiceSession } from '@ethosagent/voice-session';
 import { describe, expect, it } from 'vitest';
@@ -17,6 +17,7 @@ import {
   scriptedRunner,
   streamingStt,
   streamingTts,
+  tick,
 } from './fakes';
 
 function makeSession(runner: AgentTurnRunner, clock = makeClock()): VoiceSession {
@@ -100,7 +101,9 @@ describe('createInboundDispatcher', () => {
     // callerId is the CALLER's number (per-caller lane), not the dialed DID.
     expect(adapter?.callerId).toBe('+15551234567');
     expect(adapter?.botKey).toBe('reception');
-    expect(adapter?.laneKey).toBe('voice:reception:+15551234567');
+    expect(adapter?.laneKey).toBe(
+      voiceLaneKey('reception', { kind: 'livekit', id: '+15551234567' }),
+    );
   });
 
   it('returns null for a dialed number bound to no bot', () => {
@@ -120,7 +123,9 @@ describe('createInboundDispatcher', () => {
     // history via the SessionStore path.
     const second = dispatch({ ...call, roomName: 'sip-room-b' });
 
-    expect(first?.laneKey).toBe(`voice:reception:${call.fromNumber}`);
+    expect(first?.laneKey).toBe(
+      voiceLaneKey('reception', { kind: 'livekit', id: call.fromNumber }),
+    );
     expect(second?.laneKey).toBe(first?.laneKey);
   });
 
@@ -135,7 +140,9 @@ describe('createInboundDispatcher', () => {
       roomName: 'r',
     });
     expect(adapter?.botKey).toBe(deriveBotKey('+1555*'));
-    expect(adapter?.laneKey).toBe(`voice:${deriveBotKey('+1555*')}:+15559998888`);
+    expect(adapter?.laneKey).toBe(
+      voiceLaneKey(deriveBotKey('+1555*'), { kind: 'livekit', id: '+15559998888' }),
+    );
   });
 });
 
@@ -199,5 +206,101 @@ describe('createPostCallSummary', () => {
     const onCallEnd = createPostCallSummary();
     // Resolves without throwing even though nothing is delivered.
     await expect(onCallEnd(adapter)).resolves.toBeUndefined();
+  });
+
+  it('routes through `deliver` instead of the artifact sink when supplied', async () => {
+    const { delivered, sink } = dedupSink();
+    const ledger: Array<{ laneKey: string; callerId: string; text: string }> = [];
+    const adapter = new VoiceChannelAdapter({
+      transport: new FakeVoiceTransport('+15551234567'),
+      session: makeSession(scriptedRunner([{ type: 'text_delta', text: 'All set.' }])),
+      bot: { id: 'reception', match: '+1555*' },
+      sendArtifact: sink,
+    });
+
+    const onCallEnd = createPostCallSummary({
+      deliver: async (summary) => {
+        ledger.push(summary);
+      },
+    });
+    await onCallEnd(adapter);
+
+    // The ledger path took it; the direct artifact sink was NOT used.
+    expect(delivered).toHaveLength(0);
+    expect(ledger).toHaveLength(1);
+    expect(ledger[0]?.laneKey).toBe(adapter.laneKey);
+    expect(ledger[0]?.callerId).toBe('+15551234567');
+    expect(ledger[0]?.text).toContain('+15551234567');
+  });
+
+  // A failed summary must not take down the hang-up path — the handler runs
+  // from the adapter's call-end trigger, often with no caller to catch.
+  it('reports summarizer and delivery failures through onError instead of throwing', async () => {
+    const adapter = new VoiceChannelAdapter({
+      transport: new FakeVoiceTransport('+1777'),
+      session: makeSession(scriptedRunner([])),
+      bot: { match: '+1*' },
+    });
+
+    const summarizerErrors: unknown[] = [];
+    await expect(
+      createPostCallSummary({
+        summarize: () => {
+          throw new Error('llm unavailable');
+        },
+        onError: (err) => summarizerErrors.push(err),
+      })(adapter),
+    ).resolves.toBeUndefined();
+    expect(String(summarizerErrors[0])).toContain('llm unavailable');
+
+    const deliveryErrors: unknown[] = [];
+    await expect(
+      createPostCallSummary({
+        deliver: () => Promise.reject(new Error('ledger write failed')),
+        onError: (err) => deliveryErrors.push(err),
+      })(adapter),
+    ).resolves.toBeUndefined();
+    expect(String(deliveryErrors[0])).toContain('ledger write failed');
+  });
+
+  it('swallows a failure when no onError sink is wired', async () => {
+    const adapter = new VoiceChannelAdapter({
+      transport: new FakeVoiceTransport('+1777'),
+      session: makeSession(scriptedRunner([])),
+      bot: { match: '+1*' },
+    });
+    await expect(
+      createPostCallSummary({
+        deliver: () => Promise.reject(new Error('boom')),
+      })(adapter),
+    ).resolves.toBeUndefined();
+  });
+});
+
+// The call-end trigger the summary handler has never had: wiring it as the
+// adapter's `onEnded` means a caller who simply hangs up still produces one.
+describe('createPostCallSummary wired as the adapter call-end trigger', () => {
+  it('produces exactly one summary on a remote hang-up', async () => {
+    const delivered: string[] = [];
+    const transport = new FakeVoiceTransport('+15551234567');
+    const adapter = new VoiceChannelAdapter({
+      transport,
+      session: makeSession(scriptedRunner([])),
+      bot: { id: 'reception', match: '+1555*' },
+      laneKind: 'sip',
+      onEnded: createPostCallSummary({
+        deliver: async (summary) => {
+          delivered.push(summary.text);
+        },
+      }),
+    });
+
+    await adapter.start();
+    transport.close();
+    await tick();
+    await adapter.stop();
+
+    expect(delivered).toHaveLength(1);
+    expect(delivered[0]).toContain('+15551234567');
   });
 });

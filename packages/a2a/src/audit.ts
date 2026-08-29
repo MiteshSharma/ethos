@@ -28,7 +28,7 @@ export interface A2aAuditEntry {
   decision: 'accepted' | 'denied';
   /** A short reason CODE/label (e.g. 'unauthorized') — never a body. */
   reason?: string;
-  /** Async/terminal task status (e.g. 'completed', 'peer-unreachable'). */
+  /** Async/terminal task status (e.g. 'completed', 'failed'). */
   status?: string;
   severity?: 'info' | 'warn' | 'error';
   ts: number;

@@ -3,10 +3,17 @@ import { spawn } from 'node:child_process';
 import { createWriteStream, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { AgentMesh, meshRegistryPath } from '@ethosagent/agent-mesh';
+import { DefaultHookRegistry } from '@ethosagent/core';
 import { KanbanStore } from '@ethosagent/kanban-store';
 import { noopLogger } from '@ethosagent/logger';
 import { isSafePathSegment } from '@ethosagent/storage-fs';
-import type { Logger, Storage, TeamManifest } from '@ethosagent/types';
+import type {
+  HookRegistry,
+  Logger,
+  SecretsResolver,
+  Storage,
+  TeamManifest,
+} from '@ethosagent/types';
 import { Dispatcher, type SupervisorState } from './dispatcher';
 import { startHealthProbeLoop } from './health';
 import { logSupervisorEvent } from './logger';
@@ -48,6 +55,64 @@ interface MemberState extends MemberRuntime {
 }
 
 /**
+ * Registers framework-internal (non-plugin) logging handlers for the three
+ * lifecycle hooks `Dispatcher.tick()` fires from *this* process:
+ * `ticket_claimed`, `ticket_stale_reclaimed`, `dispatch_tick`. Mirrors the
+ * direct `hooks.registerVoid(...)` pattern already used for approval seams
+ * and watchdog completion (`packages/wiring/src/approval-seams.ts`,
+ * `packages/wiring/src/build-agent-loop.ts`) — framework-internal wiring,
+ * not the plugin loader.
+ *
+ * Scope note: this makes the dispatcher's own three hooks fire into a real,
+ * live `HookRegistry` with framework-level logging attached — it does NOT
+ * make third-party plugin hook handlers run in the supervisor process. See
+ * the comment at this function's call site in `runSupervisor` for why that
+ * remains out of scope.
+ *
+ * Exported so tests can drive it against a real `DefaultHookRegistry`
+ * without spinning up the full `runSupervisor` (which spawns child
+ * processes, acquires a PID file, and blocks forever).
+ */
+export function registerDispatcherHookLogging(
+  hooks: HookRegistry,
+  logger: Logger,
+  team: string,
+): void {
+  hooks.registerVoid('ticket_claimed', async (payload) => {
+    logger.debug(`[team-supervisor] ticket claimed: ${payload.taskId} -> ${payload.assignee}`, {
+      component: 'team-supervisor',
+      team,
+      taskId: payload.taskId,
+      assignee: payload.assignee,
+      runId: payload.runId,
+    });
+  });
+  hooks.registerVoid('ticket_stale_reclaimed', async (payload) => {
+    logger.info(
+      `[team-supervisor] ticket ${payload.taskId} reclaimed (${payload.reason}); previous assignee ${payload.previousAssignee ?? '(none)'}`,
+      {
+        component: 'team-supervisor',
+        team,
+        taskId: payload.taskId,
+        previousAssignee: payload.previousAssignee,
+        reason: payload.reason,
+      },
+    );
+  });
+  hooks.registerVoid('dispatch_tick', async (payload) => {
+    logger.debug(
+      `[team-supervisor] dispatch tick: claimed=${payload.claimedCount} reclaimed=${payload.reclaimedCount}`,
+      {
+        component: 'team-supervisor',
+        team,
+        claimedCount: payload.claimedCount,
+        reclaimedCount: payload.reclaimedCount,
+      },
+    );
+  });
+}
+
+/**
  * Run the team supervisor for `manifest`. Blocks until the team is stopped
  * (SIGTERM / SIGINT). Designed to be called from an isolated child process
  * launched by `ethos team start`.
@@ -55,7 +120,7 @@ interface MemberState extends MemberRuntime {
 export async function runSupervisor(
   manifest: TeamManifest,
   manifestPath: string,
-  opts: { logger?: Logger; storage: Storage },
+  opts: { logger?: Logger; storage: Storage; secrets?: SecretsResolver },
 ): Promise<void> {
   const log0 = opts.logger ?? noopLogger;
   const name = manifest.name;
@@ -376,10 +441,37 @@ export async function runSupervisor(
     statusOf: (p) => memberMap.get(p)?.status ?? null,
   };
 
+  // Real HookRegistry, live for the lifetime of this process. This closes the
+  // "hooks: undefined is the feature off" gap for the three hooks
+  // `Dispatcher.tick()` fires from THIS process (`ticket_claimed`,
+  // `ticket_stale_reclaimed`, `dispatch_tick`) — `registerDispatcherHookLogging`
+  // wires framework-internal logging handlers, the same direct
+  // `hooks.registerVoid(...)` pattern used for approval seams and watchdog
+  // completion, not the plugin loader.
+  //
+  // What this does NOT do: run third-party PLUGIN hook handlers (anything a
+  // plugin author registers via `EthosPluginApi.registerHook`/`registerVoid`
+  // in their own plugin code). The plugin loader (`packages/wiring/src/load-plugins.ts`,
+  // `PluginLoader`) requires a full `PluginRegistries` composition root —
+  // tools/personalities/llmProviders/memoryProviders plus an `activePerson` —
+  // i.e. a whole personality's AgentLoop, which this lightweight standalone
+  // supervisor process does not have and cannot cheaply construct without
+  // either duplicating each member's own AgentLoop or building a new
+  // cross-process hook-relay mechanism (dispatcher event -> mesh -> the
+  // right member's own already-plugin-loaded process). Both are real design
+  // projects, out of scope here, and tracked as a follow-up in
+  // plan/phases/kanban-hooks-notify-parity.md rather than silently implied-fixed.
+  const hooks = new DefaultHookRegistry();
+  registerDispatcherHookLogging(hooks, log0, name);
+
   const dispatcher = new Dispatcher({
     board,
     supervisor: supervisorView,
     mesh,
+    ...(opts.secrets ? { secrets: opts.secrets } : {}),
+    hooks,
+    // Identifies this board/team in the `dispatch_tick` hook payload.
+    teamId: name,
     ...(manifest.kanban?.stale_ms !== undefined ? { staleMs: manifest.kanban.stale_ms } : {}),
     ...(manifest.kanban?.poll_ms !== undefined ? { pollMs: manifest.kanban.poll_ms } : {}),
     ...(manifest.kanban?.staleness_threshold_ms !== undefined

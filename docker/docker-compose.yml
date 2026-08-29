@@ -81,8 +81,14 @@ services:
         condition: service_completed_successfully
     ports:
       - "3000:3000"
+    # read_only: true makes only the container's ROOT filesystem read-only —
+    # bind mounts stay writable. The workspace mount is what makes the agent's
+    # default fs_reach on cwd (process.cwd()) behave the same in a container as
+    # it does from a local terminal: writable and persistent across restarts.
+    working_dir: /home/ethos/workspace
     volumes:
       - ${ETHOS_DATA_DIR:-../ethos-data}:${ETHOS_STATE_DIR:-/home/ethos/.ethos}
+      - ${ETHOS_WORKSPACE_DIR:-../ethos-workspace}:/home/ethos/workspace
     read_only: true
     tmpfs:
       - /tmp
@@ -111,8 +117,11 @@ services:
     depends_on:
       init:
         condition: service_completed_successfully
+    # Same workspace mount as ethos-web — see the note there.
+    working_dir: /home/ethos/workspace
     volumes:
       - ${ETHOS_DATA_DIR:-../ethos-data}:${ETHOS_STATE_DIR:-/home/ethos/.ethos}
+      - ${ETHOS_WORKSPACE_DIR:-../ethos-workspace}:/home/ethos/workspace
     read_only: true
     tmpfs:
       - /tmp

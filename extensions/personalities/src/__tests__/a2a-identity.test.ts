@@ -1,7 +1,14 @@
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { InMemorySecretsResolver, InMemoryStorage } from '@ethosagent/storage-fs';
+import type { PersonalityConfig } from '@ethosagent/types';
 import { describe, expect, it } from 'vitest';
 import { verifyCard } from '../a2a-crypto';
-import { PersonalityA2aIdentityProvider } from '../a2a-identity';
+import {
+  PersonalityA2aIdentityProvider,
+  parseSkillCard,
+  resolveA2aSkillTools,
+} from '../a2a-identity';
 import { FilePersonalityRegistry } from '../index';
 
 const ROOT = '/ethos/personalities';
@@ -128,5 +135,123 @@ describe('PersonalityA2aIdentityProvider.getIdentity', () => {
   it('throws for an unknown personality', async () => {
     const { provider } = await makeProvider();
     await expect(provider.getIdentity('nope', 'internal')).rejects.toThrow(/not found/i);
+  });
+});
+
+// --- T0.2 / D8 — turn-time tool-narrowing resolution ------------------------
+
+describe('resolveA2aSkillTools (plan T0.2 / D8)', () => {
+  const DIR2 = `${ROOT}/relay`;
+  const CONFIG: PersonalityConfig = {
+    id: 'relay',
+    name: 'Relay',
+    skillsDirs: [`${DIR2}/skills`],
+  };
+
+  async function seed(): Promise<InMemoryStorage> {
+    const storage = new InMemoryStorage();
+    await storage.mkdir(`${DIR2}/skills/with-tools`);
+    await storage.write(
+      `${DIR2}/skills/with-tools/SKILL.md`,
+      [
+        '---',
+        'name: with-tools',
+        'description: Declares a non-empty required_tools list.',
+        'required_tools: [web_search, read_file]',
+        'ethos:',
+        '  exposeToAgents: true',
+        '---',
+        'Body.',
+      ].join('\n'),
+    );
+    await storage.mkdir(`${DIR2}/skills/empty-tools`);
+    await storage.write(
+      `${DIR2}/skills/empty-tools/SKILL.md`,
+      [
+        '---',
+        'name: empty-tools',
+        'description: Explicitly declares no tools.',
+        'required_tools: []',
+        'ethos:',
+        '  exposeToAgents: true',
+        '---',
+        'Body.',
+      ].join('\n'),
+    );
+    await storage.mkdir(`${DIR2}/skills/no-declaration`);
+    await storage.write(
+      `${DIR2}/skills/no-declaration/SKILL.md`,
+      [
+        '---',
+        'name: no-declaration',
+        'description: Never mentions required_tools at all.',
+        'ethos:',
+        '  exposeToAgents: true',
+        '---',
+        'Body.',
+      ].join('\n'),
+    );
+    return storage;
+  }
+
+  it('returns the declared required_tools for a non-empty list', async () => {
+    const storage = await seed();
+    const result = await resolveA2aSkillTools(storage, CONFIG, 'with-tools');
+    expect(result).toEqual({ found: true, requiredTools: ['web_search', 'read_file'] });
+  });
+
+  it('returns an empty array for an explicit required_tools: [] (legitimate, not a refusal)', async () => {
+    const storage = await seed();
+    const result = await resolveA2aSkillTools(storage, CONFIG, 'empty-tools');
+    expect(result.found).toBe(true);
+    expect(result.requiredTools).toEqual([]);
+  });
+
+  it('returns requiredTools: undefined when the key is entirely absent (fails closed, D2)', async () => {
+    const storage = await seed();
+    const result = await resolveA2aSkillTools(storage, CONFIG, 'no-declaration');
+    expect(result.found).toBe(true);
+    expect(result.requiredTools).toBeUndefined();
+  });
+
+  it('returns found: false when no SKILL.md matches the skill name at all', async () => {
+    const storage = await seed();
+    const result = await resolveA2aSkillTools(storage, CONFIG, 'ghost-skill');
+    expect(result).toEqual({ found: false });
+  });
+
+  it('returns found: false when the personality has no skillsDirs', async () => {
+    const storage = await seed();
+    const result = await resolveA2aSkillTools(storage, { id: 'bare', name: 'Bare' }, 'with-tools');
+    expect(result).toEqual({ found: false });
+  });
+});
+
+// --- T0.1 — the operator-copyable exposure template ------------------------
+
+describe('examples/skills/a2a-expose-template/SKILL.md (T0.1)', () => {
+  const TEMPLATE_PATH = join(
+    import.meta.dirname,
+    '..',
+    '..',
+    '..',
+    '..',
+    'examples',
+    'skills',
+    'a2a-expose-template',
+    'SKILL.md',
+  );
+
+  it('does not declare a2a_send in required_tools (D9 — not a relay amplifier)', () => {
+    const raw = readFileSync(TEMPLATE_PATH, 'utf-8');
+    const parsed = parseSkillCard(raw, TEMPLATE_PATH);
+    expect(parsed.requiredTools ?? []).not.toContain('a2a_send');
+  });
+
+  it('is not named a2a-communicate or a2a-handle-inbound (D9)', () => {
+    const raw = readFileSync(TEMPLATE_PATH, 'utf-8');
+    const parsed = parseSkillCard(raw, TEMPLATE_PATH);
+    expect(parsed.name).not.toBe('a2a-communicate');
+    expect(parsed.name).not.toBe('a2a-handle-inbound');
   });
 });

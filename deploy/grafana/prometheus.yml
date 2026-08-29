@@ -1,0 +1,48 @@
+# Prometheus scrape config for the Ethos observability stack
+# (plan/phases/analytics-observability.md, Part D3). This compose stack runs
+# Prometheus + Grafana only — it does not run Ethos. Point the targets below
+# at an Ethos web-api and/or gateway process that is already running on the
+# host (or in its own container with the relevant port published).
+#
+# `host.docker.internal` is Docker's host-loopback alias. Docker Desktop
+# (macOS/Windows) resolves it out of the box; docker-compose.yml adds the
+# `extra_hosts` entry Linux needs (Docker 20.10+).
+
+global:
+  scrape_interval: 15s
+
+scrape_configs:
+  # web-api's /metrics — auth-gated behind the `metrics:read` API key scope
+  # (D17). Generate a key with:
+  #   ethos api-key create --name grafana --scopes metrics:read
+  # then paste the printed secret (shown once, never again) into
+  # ./metrics-token — see metrics-token.example.
+  - job_name: ethos-web-api
+    scheme: http
+    metrics_path: /metrics
+    authorization:
+      credentials_file: /etc/prometheus/metrics-token
+    static_configs:
+      - targets: ["host.docker.internal:3000"]
+
+  # Gateway health server's /metrics (D16 — the second mount, for deployments
+  # with no web-api, e.g. Telegram-only). It binds to 127.0.0.1 by default
+  # (ETHOS_SERVE_HOST / ETHOS_GATEWAY_HEALTH_PORT, default port 3002) —
+  # loopback-only, so a Prometheus container cannot reach it as-is. Two ways
+  # to actually scrape it:
+  #   1. Run this Prometheus service with `network_mode: host` (Linux only)
+  #      so it shares the host's network namespace and can reach
+  #      127.0.0.1:3002 directly.
+  #   2. Rebind the gateway health server off-loopback
+  #      (ETHOS_SERVE_HOST=0.0.0.0 on the gateway process) and publish the
+  #      port. This is a deliberate choice to expose it — matching D16's own
+  #      language, do it only on a trusted network, and keep an api-key store
+  #      wired so `metrics:read` auth still gates the endpoint.
+  # The target below assumes option 2, with the port published as 3002.
+  - job_name: ethos-gateway-health
+    scheme: http
+    metrics_path: /metrics
+    authorization:
+      credentials_file: /etc/prometheus/metrics-token
+    static_configs:
+      - targets: ["host.docker.internal:3002"]

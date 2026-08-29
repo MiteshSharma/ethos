@@ -48,7 +48,7 @@ Exactly one of `file_path` / `file_url` / `file_base64` must be set.
 | Field | Type | Required | Description |
 |---|---|---|---|
 | `file_path` | absolute path | one-of | Local file. Must lie inside the personality's `fs_reach` allowlist. |
-| `file_url` | HTTPS URL | one-of | Fetched through the [`@ethosagent/safety-network`](https://github.com/ethosagent/ethos/blob/main/extensions/safety-network) SSRF gate. Max 32 MB. |
+| `file_url` | HTTPS URL | one-of | Fetched through the [`@ethosagent/safety-network`](https://github.com/ethosagent/ethos/blob/main/packages/safety/network) SSRF gate. Max 32 MB. |
 | `file_base64` | base64 string | one-of | Raw bytes. Optional `data:<mime>;base64,` prefix accepted. |
 | `prompt` | string | yes | Question or instruction for the model. |
 | `model` | string | no | Override; otherwise follows the model fallback chain below. |

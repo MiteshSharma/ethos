@@ -1,4 +1,5 @@
-import { Select, Typography } from 'antd';
+import { QuestionCircleOutlined } from '@ant-design/icons';
+import { Popover, Select, Typography } from 'antd';
 import type { CSSProperties } from 'react';
 import {
   describeToolSettingsFields,
@@ -48,6 +49,11 @@ export function ToolSettingsForm({ schema, value, onChange, disabled }: ToolSett
         <div key={control.key}>
           <Typography.Text type="secondary" style={SECTION_LABEL_STYLE}>
             {control.label}
+            {control.kind === 'secret' && control.helpText ? (
+              <Popover content={control.helpText} trigger="click">
+                <QuestionCircleOutlined style={{ marginLeft: 4, cursor: 'pointer' }} />
+              </Popover>
+            ) : null}
           </Typography.Text>
           {control.kind === 'enum' ? (
             <Select

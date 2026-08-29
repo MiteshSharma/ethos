@@ -81,7 +81,7 @@ export class TelegramClarifySurface {
     this.store = cfg.store;
     this.getSessionRouting = cfg.getSessionRouting;
 
-    this.bridge.setPresenter((row) => this.present(row));
+    this.bridge.registerPresenter(SURFACE, (row) => this.present(row));
     this.bridge.onResolved((row, resp) => {
       void this.onResolved(row, resp);
     });
@@ -98,7 +98,16 @@ export class TelegramClarifySurface {
    */
   async present(row: PendingClarify): Promise<void> {
     if (row.surfaceType !== SURFACE) return;
-    const routing = this.getSessionRouting(row.sessionId);
+    // Fix 1 (pi-delegation.md §1b) — `getSessionRouting` only resolves a
+    // LIVE foreground chat session (the gateway's `approvalRoutes`, cleared
+    // once the turn ends). A background job's clarify has no such session —
+    // its `sessionId` is the job's own child session, never a chat turn —
+    // so it falls back to the delivery context the bridge resolved onto
+    // `row.surfaceContext` (origin-lane or foreground-presence routing, both
+    // populated by `ClarifyBridge.resolveRouting`). Without this fallback a
+    // job-originated clarify always has "no routing" here and is silently
+    // never delivered, regardless of how correctly it was routed upstream.
+    const routing = this.getSessionRouting(row.sessionId) ?? routingFromSurfaceContext(row);
     if (!routing) {
       // No routing means the gateway lost track of which chat — the turn
       // will time out and the bridge will fire `timeout-no-default` or
@@ -152,6 +161,10 @@ export class TelegramClarifySurface {
       const target = await this.findCancelTarget(message.chatId, explicit);
       if (!target) return null;
       if (!gateAnswerer(target, message.userId)) return null;
+      // D7 — a human acted on this surface; a background job's next question
+      // may route here instead of always falling back to its origin lane.
+      // Fix 1 — carry real delivery context, not just the surface type.
+      this.bridge.recordPresence(SURFACE, { chatId: message.chatId, botKey: this.adapter.botKey });
       return { requestId: target.requestId, answer: '', source: 'cancel' };
     }
 
@@ -165,6 +178,7 @@ export class TelegramClarifySurface {
     );
     if (!target) return null;
     if (!gateAnswerer(target, message.userId)) return null;
+    this.bridge.recordPresence(SURFACE, { chatId: message.chatId, botKey: this.adapter.botKey });
     return { requestId: target.requestId, answer: text, source: 'user' };
   }
 
@@ -215,6 +229,7 @@ export class TelegramClarifySurface {
       }
       response = { requestId: row.requestId, answer, source: 'user' };
     }
+    this.bridge.recordPresence(SURFACE, { chatId: evt.chatId, botKey: this.adapter.botKey });
     await this.bridge.respond(response);
     await evt.answer();
   }
@@ -278,6 +293,20 @@ function parseCallback(data: string): ParsedCallback | null {
   return { kind: 'choice', requestId, choiceIndex: idx };
 }
 
+/** Fix 1 (pi-delegation.md §1b) — derive delivery routing from the row's own
+ *  `surfaceContext` when no live foreground session route exists. `chatId`
+ *  is the minimum needed to send; `requesterUserId` is intentionally NOT
+ *  read from `surfaceContext.originatorUserId` here — that field is written
+ *  back only AFTER a prompt is sent, so a fresh presentation genuinely has
+ *  no originator yet, and `answerable_by: 'originator'` should not gate on
+ *  presence-derived context (whoever is currently active, not necessarily
+ *  who should answer). */
+function routingFromSurfaceContext(row: PendingClarify): SessionRoutingForClarify | undefined {
+  const chatId = row.surfaceContext.chatId;
+  if (typeof chatId !== 'string') return undefined;
+  return { chatId };
+}
+
 function gateAnswerer(row: PendingClarify, userId: string | undefined): boolean {
   if (row.answerableBy === 'anyone') return true;
   const originator = row.surfaceContext.originatorUserId;
@@ -286,10 +315,15 @@ function gateAnswerer(row: PendingClarify, userId: string | undefined): boolean 
 }
 
 function formatPrompt(row: PendingClarify): string {
+  // `present()` only fires once a row is actually presented (D2), at which
+  // point `defaultDeadlineAt` is always set — the `?? row.createdAt` fallback
+  // is defensive only, for the type (null while merely queued).
   const minutes = Math.max(
     1,
     Math.round(
-      (new Date(row.defaultDeadlineAt).getTime() - new Date(row.createdAt).getTime()) / 60_000,
+      (new Date(row.defaultDeadlineAt ?? row.createdAt).getTime() -
+        new Date(row.createdAt).getTime()) /
+        60_000,
     ),
   );
   const lines: string[] = [row.question, ''];

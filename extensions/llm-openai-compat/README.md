@@ -18,7 +18,7 @@ A single OpenAI-shaped client covers most non-Anthropic providers. This package 
 
 Streaming tool calls is the biggest difference from Anthropic. OpenAI delivers them as deltas on `choices[0].delta.tool_calls[index]`, where the *first* delta for a given numeric `index` carries the `id` and `name` and subsequent deltas carry only `arguments` chunks. The provider keeps a `Map<number, { id, name, args }>` keyed by index (`src/index.ts:228`) and emits `tool_use_start` once per index, `tool_use_delta` per arguments fragment, and `tool_use_end` at `finish_reason`. Do not key by `id` — it shows up late and may be empty on early deltas.
 
-Usage arrives in its own chunk when `stream_options.include_usage: true` is set, signalled by `chunk.usage` being present and `chunk.choices[0]` being absent (`src/index.ts:234`). Cost is estimated against an `OPENAI_PRICING` prefix table; unknown models (Ollama, custom finetunes) report `0`.
+Usage arrives in its own chunk when `stream_options.include_usage: true` is set, signalled by `chunk.usage` being present and `chunk.choices[0]` being absent (`src/index.ts:234`). Cost is estimated by `estimateCost` from `@ethosagent/pricing`, the one cache-aware rate table shared by every provider extension. A call served by a classified local runtime costs 0 by construction; any other unrecognised model costs 0 and reports `pricing.unknown_model` so the gap is visible.
 
 If the `baseUrl` host is `generativelanguage.googleapis.com`, `normalizeGeminiSchema` is applied to every tool's `parameters` before send (`src/index.ts:207`). It recursively strips the offending keys and rewrites `type: ["string", "null"]` to the first non-`null` entry.
 

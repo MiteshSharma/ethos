@@ -10,12 +10,15 @@ import type {
   MessageContent,
   PersonalityConfig,
   PersonalityObservabilityConfig,
+  ScriptToolsApi,
   SessionStore,
   SteerSink,
   Storage,
+  ToolContext,
   ToolFilterOpts,
   ToolRegistry,
   ToolResult,
+  VoiceTurnOrigin,
 } from '@ethosagent/types';
 import type { ContextStore } from '../../context-store';
 import { redactArgs } from '../../dry-run';
@@ -26,7 +29,10 @@ import { capIngestedResult } from '../ingestion-cap';
 import { checkMcpEnabled, checkMcpRejectArgs } from '../mcp-policy';
 import { handleUntrustedResult } from '../result-defense';
 import { buildScopedStorage } from '../scoped-storage';
+import { recordSkillInvoked } from '../skill-telemetry';
 import type { WatcherTap } from '../turn-context';
+import { consultWatcherHalt, enforceBeforeToolCall } from './per-call-enforcement';
+import type { ScriptToolBridge } from './script-tool-bridge';
 import type { CompletedToolCall, UsageSink } from './stream-step';
 import { emitToolRejection, validateRepairedArgs } from './tool-rejection';
 
@@ -56,7 +62,6 @@ export interface ToolProcessingDeps {
   sessionCosts: Map<string, number>;
   storage?: Storage;
   dataDir?: string;
-  workingDir: string;
   platform: string;
   resultBudgetChars: number;
   teamId?: string;
@@ -70,6 +75,12 @@ export interface ToolProcessingContext {
   sessionId: string;
   sessionKey: string;
   personality: PersonalityConfig;
+  /** The turn's working directory — see `TurnSetup.workingDir`. Per-turn, not
+   *  per-loop, because it comes from the turn's personality. */
+  workingDir: string;
+  /** The turn's `fs_reach` allowlist, from the same derivation as
+   *  `workingDir` — see `TurnSetup.fsReach`. */
+  fsReach: { read: string[]; write: string[] };
   traceId: string | undefined;
   obsConfig: PersonalityObservabilityConfig | undefined;
   effectiveModel: string;
@@ -84,7 +95,8 @@ export interface ToolProcessingContext {
   userScopeId: string | undefined;
   watcherTap: WatcherTap;
   usageSink: UsageSink;
-  injectionDefenseEnabled: boolean;
+  /** tools-as-code-api Lane B — per-turn bridge for in-script tool calls. */
+  scriptToolBridge?: ScriptToolBridge;
 
   // Downgrade state — mutable refs
   dgEnabled: boolean;
@@ -102,10 +114,16 @@ export interface ToolProcessingContext {
   // Steer
   steerSink?: SteerSink;
 
+  /** Set when this turn's text is a transcript of speech — threaded onto every
+   *  `before_tool_call` payload so the approval surface can tell a spoken
+   *  request from a typed one. Absent on typed turns. */
+  voiceOrigin?: VoiceTurnOrigin;
+
   // Run options
   opts: {
     agentId?: string;
     rootSessionKey?: string;
+    jobId?: string;
     origin?: string;
     attachments?: Attachment[];
     dryRun?: boolean;
@@ -124,24 +142,21 @@ export async function* processTools(
 ): AsyncGenerator<AgentEvent, ProcessToolsResult> {
   // Step 9: Pre-flight hooks → execute non-rejected tools → collect all results
 
-  // Phase 30.2 — tools call ctx.emit() during execution. We drain progress
-  // events in real-time via an async queue that runs concurrently with
-  // executeParallel. The resolver is signalled on each push and on completion.
-  const progressQueue: Array<{
-    toolName: string;
-    message: string;
-    percent?: number;
-    audience: 'internal' | 'user' | 'dashboard';
-  }> = [];
+  // Phase 30.2 — tools call ctx.emit() during execution. We drain events in
+  // real-time via an async queue that runs concurrently with executeParallel.
+  // The resolver is signalled on each push and on completion. Lane E widened
+  // the queue from progress-only to AgentEvent so the ScriptToolBridge can
+  // emit inner-call tool_start/tool_end (audience: 'internal') mid-execution
+  // through the same drain.
+  const progressQueue: AgentEvent[] = [];
   let progressQueueResolve: (() => void) | null = null;
+  const pushLiveEvent = (event: AgentEvent): void => {
+    progressQueue.push(event);
+    progressQueueResolve?.();
+    progressQueueResolve = null;
+  };
 
-  const scopedStorage = buildScopedStorage(
-    ctx.personality,
-    deps.storage,
-    deps.safety,
-    deps.dataDir,
-    deps.workingDir,
-  );
+  const scopedStorage = buildScopedStorage(deps.storage, deps.safety, ctx.fsReach);
 
   // FW-28 — retrieve or create the per-session mtime registry for this turn.
   let sessionMtimes = deps.sessionReadMtimes.get(ctx.sessionKey);
@@ -157,9 +172,12 @@ export async function* processTools(
     sessionId: ctx.sessionId,
     sessionKey: ctx.sessionKey,
     platform: deps.platform,
-    workingDir: deps.workingDir,
+    workingDir: ctx.workingDir,
     agentId: ctx.opts.agentId,
     rootSessionKey: ctx.opts.rootSessionKey ?? ctx.sessionKey,
+    // No `?? sessionKey` fallback (unlike rootSessionKey) — jobId must stay
+    // undefined for a foreground turn (D22).
+    ...(ctx.opts.jobId !== undefined ? { jobId: ctx.opts.jobId } : {}),
     origin: ctx.opts.origin,
     ...(ctx.opts.a2aDelegation ? { a2aDelegation: ctx.opts.a2aDelegation } : {}),
     personalityId: ctx.personality.id,
@@ -177,14 +195,13 @@ export async function* processTools(
       percent?: number;
       audience?: 'internal' | 'user' | 'dashboard';
     }) => {
-      progressQueue.push({
+      pushLiveEvent({
+        type: 'tool_progress',
         toolName: event.toolName,
         message: event.message,
         ...(event.percent !== undefined && { percent: event.percent }),
         audience: event.audience ?? 'internal',
       });
-      progressQueueResolve?.();
-      progressQueueResolve = null;
     },
     resultBudgetChars: deps.resultBudgetChars,
     readMtimes: sessionMtimes,
@@ -196,6 +213,16 @@ export async function* processTools(
       ctx.usageSink.llmOutputTokens += output;
     }),
   };
+
+  // tools-as-code-api Lane B — attach the per-turn bridge to this batch's
+  // ToolContext. `bind` reads the context lazily so the bridge sees the final
+  // object (including this very `scriptTools` field). Lane E: the bridge's
+  // inner-call events ride the same live queue as tool progress.
+  const scriptTools: ScriptToolsApi | undefined = ctx.scriptToolBridge?.bind(
+    () => toolCtx,
+    pushLiveEvent,
+  );
+  const toolCtx: ToolContext = scriptTools ? { ...toolCtxBase, scriptTools } : toolCtxBase;
 
   // Run before_tool_call hooks; build exec list with effective args
   // Rejected tools get tool_end ok:false + an error tool_result sent back to LLM
@@ -268,35 +295,32 @@ export async function* processTools(
       continue;
     }
 
-    const beforeResult = await deps.hooks.fireModifying(
-      'before_tool_call',
+    const beforeDecision = await enforceBeforeToolCall(
+      { hooks: deps.hooks, observability: deps.observability },
       {
         sessionId: ctx.sessionId,
         toolCallId: tc.toolCallId,
         toolName: tc.toolName,
         args: tc.args,
+        allowedPlugins: ctx.allowedPlugins,
+        traceId: ctx.traceId,
+        ...(ctx.voiceOrigin ? { voiceOrigin: ctx.voiceOrigin } : {}),
       },
-      ctx.allowedPlugins,
     );
 
-    if (beforeResult.error) {
+    if (!beforeDecision.allowed) {
       hookDenials++;
-      deps.observability?.recordSafetyBlock({
-        traceId: ctx.traceId,
-        code: 'tool_blocked',
-        cause: beforeResult.error,
-      });
-      yield* emitToolRejection(observe, tc.toolCallId, tc.toolName, beforeResult.error);
+      yield* emitToolRejection(observe, tc.toolCallId, tc.toolName, beforeDecision.reason);
       prepped.push({
         toolCallId: tc.toolCallId,
         name: tc.toolName,
         args: tc.args,
-        rejected: beforeResult.error,
+        rejected: beforeDecision.reason,
       });
       continue;
     }
 
-    const effectiveArgs = beforeResult.args ?? tc.args;
+    const effectiveArgs = beforeDecision.effectiveArgs;
 
     // MCP enabled policy — short-circuit if the server is disabled for this personality.
     const enabledError = checkMcpEnabled(deps.mcpPolicy, tc.toolName);
@@ -334,6 +358,10 @@ export async function* processTools(
       continue;
     }
 
+    // AN-C1 — a `get_skill` call is an INVOCATION, distinct from assembly's
+    // `exposed`. The rule lives in agent-loop/skill-telemetry.ts.
+    recordSkillInvoked(deps.observability, tc.toolName, effectiveArgs, ctx.traceId);
+
     const spanId = deps.observability?.startSpan({
       traceId: ctx.traceId ?? '',
       kind: 'tool_call',
@@ -342,7 +370,10 @@ export async function* processTools(
       obsConfig: ctx.obsConfig,
     });
     spanIds.set(tc.toolCallId, spanId ?? '');
-    // v2: requiresApproval gate
+    // v2: requiresApproval is ANNOUNCEMENT ONLY, NOT A GATE — this emits the
+    // event then runs the tool regardless, and nothing consumes it. The real
+    // gate is the `before_tool_call` approval hook, whose danger predicate flags
+    // tools BY NAME (`APPROVAL_SURFACE_ALWAYS_ASK`, packages/wiring). v2.2 scope.
     const reqApprovalTool = deps.tools.get(tc.toolName);
     if (reqApprovalTool?.requiresApproval) {
       yield {
@@ -351,8 +382,6 @@ export async function* processTools(
         toolName: tc.toolName,
         args: effectiveArgs,
       };
-      // Auto-approve when no approval surface is wired.
-      // Full approval flow (claiming hook + UI response) is v2.2 scope.
     }
 
     observe({ type: 'tool_start', toolName: tc.toolName, args: effectiveArgs });
@@ -371,11 +400,11 @@ export async function* processTools(
   // BEFORE the tool ran; we must not let it run anyway. This is
   // the bug Codex called out: the iteration-top check would only
   // fire AFTER the batch executed.
-  const haltDuringBatch = getHalt();
-  if (haltDuringBatch) {
+  const haltDuringBatch = consultWatcherHalt(getHalt);
+  if (haltDuringBatch.halted) {
     for (const p of prepped) {
       if (p.rejected === undefined) {
-        p.rejected = `Watcher halted before execution: ${haltDuringBatch.reason}`;
+        p.rejected = haltDuringBatch.rejectionReason;
       }
     }
   }
@@ -385,13 +414,13 @@ export async function* processTools(
     .filter((p) => p.rejected === undefined)
     .map((p) => ({ toolCallId: p.toolCallId, name: p.name, args: p.args }));
 
-  const startedAt = Date.now();
+  const batchStartedAt = Date.now();
   let toolsDone = false;
   const toolsPromise =
     execInputs.length > 0
       ? deps.tools.executeParallel(
           execInputs,
-          toolCtxBase,
+          toolCtx,
           ctx.allowedTools,
           ctx.filterOpts,
           ctx.opts.attachments,
@@ -410,12 +439,12 @@ export async function* processTools(
       progressQueueResolve = null;
     },
   );
-  // Drain progress events in real-time while tools execute.
+  // Drain live events (tool progress + inner-call start/end) while tools execute.
   while (!toolsDone || progressQueue.length > 0) {
     while (progressQueue.length > 0) {
       const ev = progressQueue.shift();
       if (ev) {
-        yield { type: 'tool_progress', ...ev } as AgentEvent;
+        yield ev;
       }
     }
     if (!toolsDone) {
@@ -450,6 +479,7 @@ export async function* processTools(
         content: capIngestedResult(result.ok ? result.value : result.error, deps.resultBudgetChars),
         toolCallId: p.toolCallId,
         toolName: p.name,
+        traceId: ctx.traceId,
       });
     }
     // Emit tool_end for all completed tools
@@ -459,7 +489,7 @@ export async function* processTools(
         toolCallId: r.toolCallId,
         toolName: r.name,
         ok: r.result.ok,
-        durationMs: Date.now() - startedAt,
+        durationMs: r.durationMs ?? Date.now() - batchStartedAt,
         result: r.result.ok ? r.result.value : r.result.error,
         ...(r.result.ok && r.result.structured !== undefined
           ? { structured: r.result.structured }
@@ -469,7 +499,12 @@ export async function* processTools(
     }
     if (ctx.traceId) deps.observability?.endTrace(ctx.traceId, 'ok');
     deps.observability?.flush();
-    yield { type: 'done', text: directResult.result.value, turnCount: ctx.turnCount };
+    yield {
+      type: 'done',
+      text: directResult.result.value,
+      turnCount: ctx.turnCount,
+      ...(ctx.traceId ? { traceId: ctx.traceId } : {}),
+    };
     return { kind: 'return-direct', text: directResult.result.value, turnCount: ctx.turnCount };
   }
 
@@ -513,7 +548,6 @@ export async function* processTools(
   let localSuccessfulToolCalls = 0;
 
   for (const p of prepped) {
-    const durationMs = Date.now() - startedAt;
     let result: ToolResult;
     // Ch.3a — `result` carries the original raw value for tool_end events
     // and after_tool_call hooks (the user-visible chip and audit trail
@@ -522,6 +556,9 @@ export async function* processTools(
     // and is what gets persisted to history so toLLMMessages() replays
     // the exact bytes the model saw on the prior turn.
     let llmContent: string;
+    // Ch.3a — set when this result went through the injection pipeline, so the
+    // delimiter fence below covers untrusted errors as well as untrusted values.
+    let passedInjectionPipeline = false;
 
     if (p.rejected !== undefined) {
       result = { ok: false, error: p.rejected, code: 'execution_failed' };
@@ -531,6 +568,11 @@ export async function* processTools(
       // tool_end already emitted above; no after_tool_call hook for blocked tools
     } else {
       const execResult = execResultMap.get(p.toolCallId);
+      const durationMs = execResult?.durationMs ?? Date.now() - batchStartedAt;
+      // Ch.3a provenance — the ONLY known-internal result on this branch is the
+      // fallback we construct right here (the registry lost the call). It is
+      // identified by its construction site, not by inspecting its text.
+      const frameworkAuthored = execResult === undefined;
       result = execResult?.result ?? {
         ok: false,
         error: 'Tool result missing',
@@ -608,7 +650,7 @@ export async function* processTools(
             personalityId: ctx.personality.id,
             toolName: p.name,
             filePath: touchedPath,
-            workingDir: deps.workingDir,
+            workingDir: ctx.workingDir,
           },
           ctx.allowedPlugins,
         );
@@ -641,12 +683,25 @@ export async function* processTools(
       // cut off, and before persistence (see agent-loop/ingestion-cap.ts).
       llmContent = capIngestedResult(llmContent, deps.resultBudgetChars);
 
-      // Ch.3a + 3c — provenance wrap + Tier-1 pattern check + optional
-      // Tier-2 LLM classifier. Only applies on success; errors are
-      // framework-authored and skip wrapping. Wraps the already-capped
-      // content, so the wrapper (a small constant) is the only growth past
-      // the budget and the fence always terminates.
-      if (ctx.injectionDefenseEnabled && result.ok) {
+      // Ch.3a + 3c — provenance wrap + Tier-1 pattern check + optional Tier-2
+      // LLM classifier. §V S6: unconditional — no personality knob skips it,
+      // and neither does the ok/error discriminant. This was gated on
+      // `result.ok` on the claim that errors are framework-authored; false for
+      // exactly the tools the defense exists for — MCP tools declare
+      // `outputIsUntrusted` and a server answering `isError: true` has its own
+      // text lifted verbatim into `error` (extensions/tools-mcp). One boolean
+      // bypassed both the wrap and the downgrade.
+      //
+      // Framework-authored is decided by construction site, never by reading
+      // the string: `p.rejected` (handled above, never reaches here) and the
+      // `Tool result missing` fallback flagged as `frameworkAuthored` above.
+      // Everything else came from `executeParallel` and is indistinguishable
+      // here from tool-authored text — `ToolResult` has no origin field and
+      // `code` is tool-controlled — so it takes the fail-safe side.
+      //
+      // Wraps the already-capped content, so the wrapper (a small constant) is
+      // the only growth past the budget and the fence always terminates.
+      if (!frameworkAuthored) {
         const tool = deps.tools.get(p.name);
         if (tool?.outputIsUntrusted) {
           const verdict = await handleUntrustedResult(
@@ -659,6 +714,7 @@ export async function* processTools(
             deps.observability,
           );
           llmContent = verdict.wrappedContent;
+          passedInjectionPipeline = true;
           if (verdict.containsInstructions) {
             deps.observability?.recordSafetyBlock({
               traceId: ctx.traceId,
@@ -672,6 +728,8 @@ export async function* processTools(
               audience: 'user',
             };
           }
+          // Ch.3d — arms on the error path too; wrapping without arming still
+          // lets the next call reach a dangerous tool.
           untrustedReadThisIteration = true;
         }
       }
@@ -679,7 +737,10 @@ export async function* processTools(
 
     const delimiterEnabled = ctx.personality.safety?.injectionDefense?.toolResultDelimiters ?? true;
     let finalContent: string;
-    if (delimiterEnabled && result.ok) {
+    // Fence successes plus any error that carried untrusted content — the
+    // escaping below is what stops attacker text forging a framework
+    // delimiter, and that text is now reachable on the error path.
+    if (delimiterEnabled && (result.ok || passedInjectionPipeline)) {
       const escaped = llmContent
         .replace(/===TOOL_RESULT_START/g, '=​==TOOL_RESULT_START')
         .replace(/===TOOL_RESULT_END/g, '=​==TOOL_RESULT_END');
@@ -695,6 +756,7 @@ export async function* processTools(
       content: finalContent,
       toolCallId: p.toolCallId,
       toolName: p.name,
+      traceId: ctx.traceId,
     });
 
     toolResultContent.push({
@@ -726,6 +788,7 @@ export async function* processTools(
         sessionId: ctx.sessionId,
         role: 'user_steer',
         content: steerText,
+        traceId: ctx.traceId,
       });
     }
   }

@@ -6,10 +6,13 @@ import { detectSecrets } from '@ethosagent/safety-redact';
 import { REF_TO_ENV } from '@ethosagent/storage-fs';
 import type {
   ModelProfile,
+  RealtimeProviderEntry,
   RetentionConfig,
   RetentionEventsConfig,
   SecretsResolver,
   Storage,
+  SttProviderEntry,
+  TtsProviderEntry,
 } from '@ethosagent/types';
 
 // ---------------------------------------------------------------------------
@@ -47,6 +50,181 @@ async function resolveSecretValue(value: string, secrets: SecretsResolver): Prom
   return resolved;
 }
 
+/**
+ * Public single-value counterpart of `resolveConfigSecrets`, for surfaces that
+ * hold one credential-bearing string rather than a whole `EthosConfig` (the
+ * web's own config reader). Throws when a referenced secret is missing —
+ * failing loudly beats handing a provider the literal reference string.
+ */
+export async function resolveSecretRef(value: string, secrets: SecretsResolver): Promise<string> {
+  return resolveSecretValue(value, secrets);
+}
+
+// ---------------------------------------------------------------------------
+// ${secrets:ref} externalization (write path)
+// ---------------------------------------------------------------------------
+
+/** True when `value` is ENTIRELY `${secrets:…}` reference(s) — i.e. it carries
+ *  no literal credential material. */
+function isSecretRef(value: string): boolean {
+  return value.replace(SECRETS_REF_RE, '').trim().length === 0;
+}
+
+const SINGLE_SECRET_REF_RE = /^\$\{secrets:([^}]+)\}$/;
+
+/**
+ * The vault ref a stored config value points at, or `null` when it points at
+ * none (a legacy plaintext value predating externalization never had material
+ * stored, so there is nothing to delete).
+ *
+ * The read-back counterpart of `externalizeSecret`, and the ONE parser for the
+ * `${secrets:…}` wire format on the removal path. Read the ref that was
+ * WRITTEN — never re-derive one: ref names embed context the value alone does
+ * not carry (provider name, bot key, content hash), and `externalizeSecret`'s
+ * idempotent branch means a field keeps whatever ref it was first minted with.
+ * Re-minting from what is on disk would name a ref the vault has never heard
+ * of and orphan the real one.
+ *
+ * Deliberately strict: the whole value must be exactly one reference. A value
+ * that merely CONTAINS a reference (`Bearer ${secrets:x}`) or concatenates
+ * several yields `null`. Callers use this to decide which credential material
+ * to DELETE, so a loose parse deletes material something else still needs.
+ */
+export function secretRefFromValue(value: string): string | null {
+  return value.match(SINGLE_SECRET_REF_RE)?.[1] ?? null;
+}
+
+/**
+ * Store a credential in the vault and return the `${secrets:<ref>}` reference
+ * that belongs in config.yaml. This is the ONLY way a credential-bearing field
+ * reaches disk (G-SEC / ARCHITECTURE.md §V S9 — config references a secret by
+ * name, never by value).
+ *
+ * Idempotent: a value that is ALREADY a reference is returned untouched.
+ * Re-wrapping would corrupt the config and orphan the stored secret, so that
+ * branch is the load-bearing one on every rewrite of an existing config.
+ * Empty / undefined values are returned unchanged — there is nothing to store.
+ */
+export async function externalizeSecret(
+  value: string,
+  ref: string,
+  secrets: SecretsResolver,
+): Promise<string>;
+export async function externalizeSecret(
+  value: string | undefined,
+  ref: string,
+  secrets: SecretsResolver,
+): Promise<string | undefined>;
+export async function externalizeSecret(
+  value: string | undefined,
+  ref: string,
+  secrets: SecretsResolver,
+): Promise<string | undefined> {
+  if (value === undefined || value === '') return value;
+  if (isSecretRef(value)) return value;
+  await secrets.set(ref, value);
+  return `\${secrets:${ref}}`;
+}
+
+/** Context `secretRefForConfigKey` needs for the keys whose ref embeds a value
+ *  from elsewhere in the config. */
+export interface SecretRefContext {
+  /** The `provider:` value — names the ref for the top-level `apiKey`. */
+  provider?: string;
+  /** Provider-chain names by index. `providers.<n>.apiKey` refs embed the
+   *  provider name, matching what `ethos fallback add` already mints. */
+  providerChain?: readonly string[];
+  /** Stable botKey per `telegram.bots.<n>` — `deriveBotKey(bot)`. Keys the
+   *  ref by identity rather than array position, matching what the web
+   *  Communications tab (PlatformsRepository) already mints. Falls back to
+   *  the index when the caller can't supply one. */
+  telegramBotKeys?: readonly (string | undefined)[];
+  /** Stable botKey per `slack.apps.<n>` — see `telegramBotKeys`. */
+  slackAppKeys?: readonly (string | undefined)[];
+  /** Stable identity per rotation key in `~/.ethos/keys.json` —
+   *  `rotationKeyId(profile)`. See `telegramBotKeys`. */
+  rotationKeyIds?: readonly (string | undefined)[];
+}
+
+/** Flat key → ref, for keys whose ref name doesn't follow from the key path. */
+const STATIC_SECRET_REFS: Record<string, string> = {
+  telegramToken: 'telegram/token',
+  discordToken: 'discord/token',
+  slackBotToken: 'slack/botToken',
+  slackAppToken: 'slack/appToken',
+  slackSigningSecret: 'slack/signingSecret',
+  emailPassword: 'email/password',
+};
+
+/** Indexed key families. The ref is keyed by the entry's stable botKey when the
+ *  caller supplies one, so reordering the array can't point two entries at one
+ *  ref; the array index is the fallback. */
+const INDEXED_SECRET_REFS: ReadonlyArray<{
+  re: RegExp;
+  ref: (m: RegExpMatchArray, ctx: SecretRefContext) => string;
+}> = [
+  {
+    // `webhookSecretToken` rides the same rule as `token` so it is keyed by the
+    // bot's stable botKey too — the catch-all below would key it by array index
+    // instead, and reordering the roster would then point two bots at one ref.
+    re: /^telegram\.bots\.(\d+)\.(token|webhookSecretToken)$/,
+    ref: (m, ctx) => `telegram/bots/${ctx.telegramBotKeys?.[Number(m[1])] ?? m[1]}/${m[2]}`,
+  },
+  {
+    re: /^slack\.apps\.(\d+)\.(botToken|appToken|signingSecret)$/,
+    ref: (m, ctx) => `slack/apps/${ctx.slackAppKeys?.[Number(m[1])] ?? m[1]}/${m[2]}`,
+  },
+  {
+    // `~/.ethos/keys.json`, not config.yaml — the rotation pool is a second
+    // file through the same ref minter. `rotation/` is the prefix `ethos keys`
+    // has always used, so it can't collide with the `providers/…` refs above.
+    re: /^keys\.(\d+)\.apiKey$/,
+    ref: (m, ctx) => `rotation/${ctx.rotationKeyIds?.[Number(m[1])] ?? m[1]}`,
+  },
+];
+
+/** Credential leaves `SECRET_FIELD_NAMES` doesn't list (it catches these by
+ *  regex instead). The write path can't rely on a regex — it must externalize
+ *  them by name. */
+const EXTRA_SECRET_LEAVES = new Set(['apiSecret', 'secret']);
+
+/**
+ * Map a flat config key (`apiKey`, `telegram.bots.0.token`, `webhooks.x.secret`)
+ * to the vault ref its value belongs at, or `null` when the key carries no
+ * credential.
+ *
+ * The single ref-naming scheme: both config serializers — `writeConfig` here
+ * and `ConfigRepository` in apps/web-api — go through it, so a rewrite from
+ * either surface lands on the same ref instead of minting a second one and
+ * orphaning the first.
+ */
+export function secretRefForConfigKey(key: string, ctx: SecretRefContext = {}): string | null {
+  // `toolSettings.<id>.web_search.secret` is a secret NAME, not a value
+  // (WebSearchToolSetting) — externalizing it would break the binding.
+  if (key.startsWith('toolSettings.')) return null;
+  if (key === 'apiKey') return `providers/${ctx.provider ?? 'default'}/apiKey`;
+  const chain = key.match(/^providers\.(\d+)\.apiKey$/);
+  if (chain?.[1] !== undefined) {
+    const name = ctx.providerChain?.[Number(chain[1])];
+    return name ? `providers/${chain[1]}/${name}/apiKey` : `providers/${chain[1]}/apiKey`;
+  }
+  const staticRef = STATIC_SECRET_REFS[key];
+  if (staticRef) return staticRef;
+  for (const rule of INDEXED_SECRET_REFS) {
+    const m = key.match(rule.re);
+    if (m) return rule.ref(m, ctx);
+  }
+  // Catch-all: any other key whose LEAF names a credential field. Keeps keys
+  // this table doesn't enumerate (notably apps/web-api's passthrough block,
+  // which round-trips keys it never models) from reaching disk in plaintext.
+  // `auxiliary.tts.apiKey` → `auxiliary/tts/apiKey`.
+  const leaf = key.slice(key.lastIndexOf('.') + 1);
+  if (SECRET_FIELD_NAMES.has(leaf) || EXTRA_SECRET_LEAVES.has(leaf)) {
+    return key.replace(/\./g, '/');
+  }
+  return null;
+}
+
 // ---------------------------------------------------------------------------
 // Key rotation pool
 // ---------------------------------------------------------------------------
@@ -73,12 +251,90 @@ export async function readKeys(storage: Storage, secrets?: SecretsResolver): Pro
   }
 }
 
-export async function writeKeys(storage: Storage, keys: KeyProfile[]): Promise<void> {
+/**
+ * Stable identity for a rotation key, used to name its vault ref.
+ *
+ * `KeyProfile` has no id field and `label` is optional and not unique, so
+ * there is nothing to key on but the material itself — the same position
+ * `telegram.bots.<n>` is in when the operator omits `id:`. Hashing the value
+ * gives a ref that survives reordering, is identical across rewrites, and
+ * leaks nothing. Reuses core's `deriveBotKey` rather than hashing here: two
+ * implementations of the algorithm is two ways for it to diverge.
+ *
+ * Only meaningful for a plaintext value. A profile that already carries a
+ * `${secrets:…}` reference keeps whatever ref it was minted with — the ref
+ * derived here is discarded by `externalizeSecret`'s idempotent branch.
+ */
+function rotationKeyId(profile: KeyProfile): string {
+  return deriveBotKeyFromSeed(profile.apiKey);
+}
+
+/**
+ * Write-path mirror of `readKeys`: `apiKey` — the one credential-bearing
+ * field on `KeyProfile` — is moved into the vault and replaced by its
+ * `${secrets:<ref>}` reference. `priority` and `label` carry no credential
+ * and are serialized as-is.
+ *
+ * Existing installs migrate implicitly: the first `writeKeys` after upgrade
+ * lifts whatever plaintext keys.json still carries into `~/.ethos/secrets/`.
+ */
+async function externalizeRotationKeys(
+  keys: KeyProfile[],
+  secrets: SecretsResolver,
+): Promise<KeyProfile[]> {
+  const ctx: SecretRefContext = { rotationKeyIds: keys.map(rotationKeyId) };
+  const out: KeyProfile[] = [];
+  for (const [i, profile] of keys.entries()) {
+    const key = `keys.${i}.apiKey`;
+    const ref = secretRefForConfigKey(key, ctx);
+    if (ref === null) throw new Error(`No secret ref is defined for config key '${key}'`);
+    out.push({ ...profile, apiKey: await externalizeSecret(profile.apiKey, ref, secrets) });
+  }
+  return out;
+}
+
+/**
+ * Serialize `~/.ethos/keys.json` (the key-rotation pool).
+ *
+ * `secrets` is REQUIRED for the same reason it is on `writeConfig`: an
+ * omittable control is not a guarantee. Every key value is externalized into
+ * the vault before serialization, so the file holds ordering and refs only
+ * (G-SEC / ARCHITECTURE.md §V S9).
+ */
+export async function writeKeys(
+  storage: Storage,
+  keys: KeyProfile[],
+  secrets: SecretsResolver,
+): Promise<void> {
+  const externalized = await externalizeRotationKeys(keys, secrets);
+  // Fail-closed gate: the same field policy `writeConfig` applies, on exactly
+  // what is about to be serialized. Reused rather than re-implemented so the
+  // two write paths can never disagree about what counts as plaintext.
+  validateNoPlaintextSecrets({ keys: externalized });
   await storage.mkdir(ethosDir());
-  // 0o600 — keys file contains rotation API keys; restrict to owner.
-  await storage.write(join(ethosDir(), 'keys.json'), `${JSON.stringify(keys, null, 2)}\n`, {
+  // 0o600 — keys file contains rotation key refs and ordering; restrict to owner.
+  await storage.write(join(ethosDir(), 'keys.json'), `${JSON.stringify(externalized, null, 2)}\n`, {
     mode: 0o600,
   });
+}
+
+/**
+ * The vault ref a rotation profile's `apiKey` points at, or `null` when it
+ * points at none — a legacy plaintext profile predating externalization never
+ * had material stored, so there is nothing to delete.
+ *
+ * The removal-side counterpart of `externalizeRotationKeys`. `rotationKeyId`
+ * hashes the key VALUE, but `readKeys(storage)` — what `ethos keys` uses —
+ * hands back the reference string, so the ref is parsed out of it by
+ * `secretRefFromValue` rather than re-derived. The profile-shaped signature is
+ * what the rotation-pool callers read against; the parsing itself lives in one
+ * place.
+ *
+ * Refs are content-addressed, so two profiles holding the SAME key value share
+ * one ref. Callers deleting on removal must check the surviving profiles first.
+ */
+export function rotationSecretRef(profile: KeyProfile): string | null {
+  return secretRefFromValue(profile.apiKey);
 }
 
 export interface ActiveContext {
@@ -122,15 +378,107 @@ export interface TelegramBotConfig {
   token: string;
   bind: BotBinding;
   piiRedaction?: boolean;
+  /**
+   * Receive updates over an inbound webhook instead of long-polling.
+   * Default `false` — long-poll, exactly today's behaviour.
+   *
+   * The four fields below mirror `TelegramAdapterConfig`'s already-implemented
+   * field names 1:1 (`extensions/platform-telegram/src/index.ts`) on purpose:
+   * they are passed straight through at the one construction site, with no
+   * translation layer (plan/phases/telegram-slack-webhook-mode.md §2a).
+   */
+  useWebhook?: boolean;
+  /**
+   * Full public URL Telegram POSTs updates to — INCLUDING the
+   * `/telegram/webhook/<botKey>` path segment, since the host server routes
+   * on that path in multi-bot deployments (§7, §8). Required when
+   * `useWebhook` is true.
+   */
+  webhookUrl?: string;
+  /**
+   * Shared secret Telegram echoes in `X-Telegram-Bot-Api-Secret-Token`.
+   * Required when `useWebhook` is true. Validated by grammy inside
+   * `webhookCallback` — no verification code lives here.
+   *
+   * The adapter already throws when `useWebhook` is set without `webhookUrl`
+   * or `webhookSecretToken`, so this layer only passes the values through and
+   * deliberately does not duplicate that validation (§2a).
+   *
+   * A credential: treated exactly like `token` by the secret externalizer, so
+   * it can be supplied as `${secrets:<ref>}` and never reaches disk in
+   * cleartext.
+   */
+  webhookSecretToken?: string;
+  /**
+   * Discard updates Telegram queued while the process was down. Default
+   * `true`, preserving the literal that used to be hardcoded at the call site.
+   *
+   * Only affects POLL-mode bots: grammy's `bot.start()` calls
+   * `deleteWebhook({ drop_pending_updates })` on every invocation, so every
+   * restart drops the backlog. In webhook mode `bot.start()` is never called
+   * and this flag does nothing. A bot that stays on poll mode under a
+   * sleep/wake deployment should set this `false`, so a restart after a sleep
+   * window does not wipe the backlog Telegram queued while the process was
+   * paused (§6).
+   */
+  dropPendingUpdates?: boolean;
 }
 
 export interface SlackAppConfig {
   id?: string;
   botToken: string;
-  appToken: string;
+  /**
+   * Socket-Mode app-level token. Optional: required only when `mode.socket`
+   * is in effect (which is the default). HTTP-mode apps have no Socket-Mode
+   * connection and therefore no app token. Enforcement lives in the adapter,
+   * not here (§8).
+   */
+  appToken?: string;
   signingSecret: string;
   bind: BotBinding;
   piiRedaction?: boolean;
+  /**
+   * Inbound transport. Absent = today's behaviour: Socket Mode.
+   *
+   * Shape borrowed from `cron`'s `trigger: { local, external }` block, the
+   * convention this file already establishes for an additive boolean pair
+   * (§3b). DELIBERATE DIVERGENCE from that precedent: cron permits both at
+   * once (a documented hybrid/dev profile). This does not. Socket Mode and
+   * HTTP Events are two transports for the SAME inbound event stream —
+   * Slack's own dashboard treats them as alternatives, and there is no reason
+   * to receive every event twice. The adapter throws when both are `true`;
+   * this layer only records what the operator wrote.
+   */
+  mode?: {
+    /** Connect over Socket Mode. Default `true`. Requires `appToken`. */
+    socket?: boolean;
+    /** Receive Events API deliveries over inbound HTTP. Default `false`. */
+    http?: boolean;
+  };
+  /**
+   * Route segment this app's HTTP receiver is mounted at, under
+   * `/slack/events/`. Absent = the app's botKey. HTTP mode only.
+   */
+  webhookPath?: string;
+  /** Channel mode for channels with no per-channel override. Absent = the
+   *  adapter's own default (`mention_only`). */
+  defaultChannelMode?: 'mention_only' | 'thread_follow' | 'all';
+  /** Slack emoji name (no colons) reacted onto inbound messages to
+   *  acknowledge receipt. Absent = the adapter's default (`eyes`). */
+  receiptReaction?: string;
+  /** Slack user IDs allowed to run `/ethos` and see the App Home tab's private
+   *  sections. Narrows `channel_filter.slack` (`ownerUserId` +
+   *  `recipientAllowlist`); it cannot widen it, so an id listed here that is
+   *  not allowlisted on the message surface stays denied. Empty/absent = the
+   *  `channel_filter.slack` allowlist alone. Both empty = nobody. */
+  allowedSlashUsers?: string[];
+  /** Slack `bot_id`s whose messages reach the agent. Empty/absent drops every
+   *  bot/workflow message, which is the behaviour before this key existed. */
+  allowedBotIds?: string[];
+  /** Reply length (characters) above which the adapter posts a lead message
+   *  plus the full answer as `answer.md` instead of a chunk wall. Absent = the
+   *  adapter's default (9000); `0` disables the fallback. */
+  longReplyThresholdChars?: number;
 }
 
 /**
@@ -209,9 +557,11 @@ export interface VoiceLiveKitConfig {
  * (`livekit-server-sdk` SIP API) is supplied at the app layer, not committed.
  */
 export interface VoiceTrunkConfig {
-  /** Telephony trunk provider bridged into LiveKit SIP. Informational — the
-   *  app-layer binding selects the concrete SDK/credentials shape. */
-  provider: 'twilio' | 'telnyx' | 'generic';
+  /** Telephony trunk provider bridged into LiveKit SIP. Selects which inbound
+   *  webhook signature scheme the listener verifies with — the providers do not
+   *  agree on how a request is signed, so this is the one fact the verifier
+   *  cannot infer from the payload. */
+  provider: 'twilio' | 'telnyx' | 'generic' | 'livekit';
   /** LiveKit SIP trunk id the number is attached to (inbound + outbound). */
   trunkId: string;
   /** Caller-ID number presented on outbound `call` (E.164). Optional. */
@@ -220,6 +570,161 @@ export interface VoiceTrunkConfig {
   username?: string;
   /** SIP auth password/token. Optional; read as a literal (like apiSecret). */
   password?: string;
+  /**
+   * Shared secret the inbound-webhook listener verifies the trunk's signature
+   * against. Separate from `password`: that one authenticates US to the trunk
+   * on an outbound leg, this one authenticates the TRUNK to us on an inbound
+   * one, and a deployment that rotates one must not be forced to rotate the
+   * other. Externalized to the vault exactly like `password`.
+   */
+  webhookSecret?: string;
+  /**
+   * HTTP path the gateway's inbound listener mounts the trunk webhook at, e.g.
+   * `/voice/inbound`. Must start with `/`. Left undefined when absent — the
+   * default belongs to the listener that serves the route, not to the parser
+   * that reads the file.
+   */
+  webhookPath?: string;
+  /**
+   * Preferred call codec. `opus` where the trunk carries it (wideband, the
+   * better ear), `g711` for the narrowband PSTN fallback every trunk speaks.
+   * Absent leaves the choice to the bridge's own negotiation.
+   */
+  codec?: 'opus' | 'g711';
+}
+
+/**
+ * Inbound-call policy: who gets through, what it may cost, and who hears about
+ * it (plan/phases/voice-v4-telephony.md — inbound hardening).
+ *
+ * A phone number is the one surface strangers can reach without being invited,
+ * so the answering rules are DEPLOYMENT facts, not personality identity: the
+ * same receptionist personality behind a personal line and behind a business
+ * line should reasonably disagree about allowlists, budgets and who to notify.
+ */
+export interface VoiceInboundConfig {
+  /**
+   * Caller numbers that reach the owner's own personality with pre-warm on
+   * ring. E.164 patterns using the same `*` wildcard grammar as
+   * `voice.bots[].match` (`matchesVoicePattern`), so one grammar governs every
+   * number match in the system.
+   *
+   * Absent = no allowlist configured, which the consumer reads as "screen
+   * everyone through the receptionist". An operator wanting an explicitly
+   * EMPTY allowlist cannot express it here: a flat `key: value` line with no
+   * value does not parse, so absent and empty are the same file. Say
+   * `voice.inbound.receptionist` instead — that IS the empty-allowlist policy.
+   */
+  allowlist?: string[];
+  /** Personality id answering callers that are not on the allowlist. Runs in a
+   *  restricted scope — no owner memory, no privileged tools. */
+  receptionist?: string;
+  /** Ceiling on concurrent inbound calls; over-cap callers get busy handling.
+   *  Positive integer. Absent = the consumer's default (2). */
+  concurrencyCap?: number;
+  /** Per-caller call ceiling inside a rolling hour — the anti-hammering knob.
+   *  Positive integer. */
+  perCallerPerHour?: number;
+  /** Daily spend ceiling in USD across all inbound calls. Positive number. */
+  dailyBudgetUsd?: number;
+  /**
+   * Which callers get the realtime provider socket opened during ring.
+   * `allowlisted` (known callers only — pre-warm where the call is almost
+   * certainly worth answering), `none` (always warm on answer), `all` (warm
+   * every ring, and pay for the ones that get screened).
+   */
+  prewarm?: 'allowlisted' | 'none' | 'all';
+  /**
+   * Where call summaries and capacity/refusal notices are delivered. `platform`
+   * and `chatId` are required together — a destination missing either half is a
+   * parse error rather than a half-built route that silently drops the one
+   * notification the operator configured this block to receive.
+   */
+  owner?: { platform: string; chatId: string; botKey?: string };
+}
+
+/**
+ * The audio surfaces whose barge-in sensitivity tunes separately.
+ *
+ * Three, since L1 (plan §7 "Conflict 2"): the browser talk lane's pipeline tier
+ * now runs on the SAME `VoiceSession` orchestrator as `call`/`satellite`, so it
+ * gets the same tuner. `voice.bargeIn.browser` always wins when present; the
+ * legacy flat `display.voice_*` keys (Settings → Voice → Advanced voice
+ * tuning) are read through as a fallback ONLY when `voice.bargeIn.browser` is
+ * absent — see `readLegacyBrowserBargeInTuning` in
+ * `apps/web-api/src/services/config.service.ts`. `display.voice_speech_threshold`
+ * / `display.voice_speech_min_ms` have no counterpart here: they tuned the
+ * browser's own local endpointer, which the streaming pipeline lane no longer
+ * has.
+ */
+export type VoiceBargeInSurface = 'call' | 'satellite' | 'browser';
+
+/** Barge-in / VAD thresholds for one surface. Every field optional — an
+ *  operator tunes the one knob a room is wrong about, not all three. */
+export interface VoiceBargeInTuning {
+  /** Input energy above which the caller counts as speaking, 0 < x <= 1. */
+  energyThreshold?: number;
+  /** Milliseconds of speech before a barge-in is believed. Positive integer. */
+  minSpeechMs?: number;
+  /** Milliseconds of silence that end an utterance. Positive integer. */
+  silenceMs?: number;
+}
+
+/**
+ * Per-surface barge-in sensitivity. A phone line is noisier than a room and a
+ * satellite sits across that room, so one global threshold is wrong on at least
+ * one of the two — this is the config that lets each be right.
+ *
+ * Partial on purpose: only the surfaces the operator declared are present, so a
+ * consumer can tell "tuned to this" from "never tuned" and apply its own
+ * default to the rest.
+ */
+export type VoiceBargeInConfig = Partial<Record<VoiceBargeInSurface, VoiceBargeInTuning>>;
+
+/**
+ * `voice.filler.*` — the spoken/tick keep-alive `VoiceSession` plays during a
+ * long tool call (`extensions/voice-session/src/voice-session.ts`). A SETTING,
+ * not personality identity (plan/phases/voice-live-personality.md §9): the
+ * line and its cadence are the operator's call, the same as barge-in tuning,
+ * and apply uniformly across every lane (call, satellite, browser) — unlike
+ * `bargeIn`, there is no per-surface split, because the gap this covers (a
+ * silent tool call) is the same gap on every surface.
+ */
+export interface VoiceFillerConfig {
+  /** Master switch. Absent = true = on. */
+  enabled?: boolean;
+  /** Debounce (ms) before speaking the filler line. Absent = the built-in default. */
+  afterMs?: number;
+  /** Spoken filler text. Absent = the built-in default. */
+  text?: string;
+  /** Repeat interval (ms) for the non-speech tick cue. Absent = the built-in default. */
+  tickIntervalMs?: number;
+}
+
+/**
+ * One wake-phrase → personality route (`voice.wake.routes.<id>`).
+ *
+ * Lives here, next to `VoiceBotConfig` / `VoiceTrunkConfig`, rather than in
+ * `@ethosagent/types`: a wake route is a DEPLOYMENT routing fact the operator
+ * writes in `config.yaml`, not a runtime contract the kernel resolves. Nothing
+ * in `packages/core` reads it — which is exactly why `TtsProviderEntry` had to
+ * live in contracts and this does not.
+ */
+export interface WakeRouteConfig {
+  /** The spoken trigger, e.g. `hey engineer`. */
+  phrase: string;
+  /** Personality id this phrase wakes. Validated against the registry at dispatch. */
+  personality: string;
+  /**
+   * Opt-in for a PRIVILEGED personality (eng-review D13). The default wake
+   * surface exposes only unprivileged personalities: anyone within earshot can
+   * trigger a wake, so a personality with consequential tools must be named
+   * explicitly here before a voice from across the room can reach it. Absent =
+   * false = not wake-reachable if the personality is privileged.
+   */
+  privileged?: boolean;
+  /** Route off without deleting it. Absent = enabled. */
+  enabled?: boolean;
 }
 
 export interface ProviderConfig {
@@ -379,10 +884,22 @@ export interface AuxiliaryWebConfig {
   baseUrl?: string;
 }
 
-/** tools-web — web search/extract backend selection. */
+/**
+ * tools-web — web search/extract backend selection, plus the web API
+ * server's bind address, port, and CORS origins (`web.host` / `web.port` /
+ * `web.corsOrigins`). Two unrelated features share this block because the
+ * config-file key is `web.*` in both cases — do not split into two
+ * top-level `web:` keys.
+ */
 export interface WebConfig {
   search_backend?: 'exa' | 'tavily' | 'brave';
   extract_backend?: 'htmltext';
+  /** `--web-host` / `ETHOS_WEB_HOST` default when unset. */
+  host?: string;
+  /** `--web-port` / `ETHOS_WEB_PORT` default when unset. */
+  port?: number;
+  /** `ETHOS_API_CORS_ORIGINS` default when unset. Comma-separated origins or `*`. */
+  corsOrigins?: string;
 }
 
 /**
@@ -409,6 +926,28 @@ export interface AwsSecretsConfig {
 
 export interface AwsConfig {
   secrets?: AwsSecretsConfig;
+}
+
+/**
+ * Langfuse export target (analytics-observability plan, Part E / D7).
+ * `secretKey` is a real credential and is vaulted like every other provider
+ * secret in this codebase (see `SECRET_FIELD_NAMES`); `publicKey` is not —
+ * Langfuse's own docs treat it the same as a client id.
+ */
+export interface TelemetryLangfuseExportConfig {
+  /** Default false — export is opt-in. */
+  enabled?: boolean;
+  baseUrl?: string;
+  publicKey?: string;
+  secretKey?: string;
+}
+
+export interface TelemetryExportConfig {
+  langfuse?: TelemetryLangfuseExportConfig;
+}
+
+export interface TelemetryConfig {
+  export?: TelemetryExportConfig;
 }
 
 /** Per-hook inbound webhook config (`webhooks.<hookId>.*` keys). */
@@ -470,13 +1009,50 @@ export interface BackgroundConfig {
   heartbeatMs?: number;
   /** Terminal-row retention before GC (days). Default 30. */
   retentionDays?: number;
+  /**
+   * The Pi job runner (`@ethosagent/execution-pi`). Registered ONLY when
+   * `image` is set: the host runs inside a container built from it, and there
+   * is no sane default to guess — the reference must be digest-pinned, which
+   * makes it a per-deployment fact. Absent means `delegate_task(runner: 'pi')`
+   * answers `not_available`, which is the honest state of a machine that never
+   * built the image.
+   */
+  pi?: {
+    /** Digest-pinned image (`@sha256:`) with `pi` on PATH. See the package's docker/Dockerfile. */
+    image: string;
+    /** Container memory ceiling in MB. Default 2048 — a coding agent, not a shell. */
+    memoryMb?: number;
+    /** Host directory holding Pi's `auth.json`. Default `~/.pi/agent`. */
+    configDir?: string;
+  };
+  /**
+   * Real ACP-native coding-agent CLIs (`@ethosagent/execution-coding-agents`),
+   * keyed by the id each entry registers its OWN `JobRunner` under
+   * (`runner: 'claude'`, `runner: 'gemini'`, ...) — see
+   * plan/phases/acp-job-runner.md's "Config shape". Each entry needs its own
+   * digest-pinned `image`, same posture and reason as `pi.image` (D-ACP4): a
+   * bare tag does not satisfy D4's containment claim.
+   */
+  acp?: {
+    agents: Record<
+      string,
+      {
+        /** The ACP agent binary to exec inside the container. */
+        command: string;
+        /** Args after `command`. Defaults to none. */
+        args?: string[];
+        /** Digest-pinned image (`@sha256:`) with `command` reachable inside it. */
+        image: string;
+      }
+    >;
+  };
 }
 
 /**
  * Canonical defaults for the `background:` section. `enabled` defaults to false;
  * the wiring layer may override per surface. All other fields are finite.
  */
-export function backgroundDefaults(): Required<Omit<BackgroundConfig, 'enabled'>> & {
+export function backgroundDefaults(): Required<Omit<BackgroundConfig, 'enabled' | 'pi' | 'acp'>> & {
   enabled: boolean;
 } {
   return {
@@ -490,6 +1066,29 @@ export function backgroundDefaults(): Required<Omit<BackgroundConfig, 'enabled'>
     staleMs: 90_000,
     heartbeatMs: 30_000,
     retentionDays: 30,
+  };
+}
+
+/**
+ * Cron trigger/arming seam (`cron:` section, plan/phases/cron-scheduler-seam.md).
+ * Parsed from `cron.trigger.<field>: <value>` / `cron.arming.<field>: <value>`
+ * keys. Defaults are applied by the wiring layer (`@ethosagent/cron`'s
+ * `buildCronTriggers`), not here — an absent `cron:` section means "use
+ * today's behavior" (`trigger.local: true`, `trigger.external: false`,
+ * `arming.backend: 'none'`).
+ */
+export interface CronTopLevelConfig {
+  trigger?: {
+    /** Run the in-process interval trigger. Default `true`. */
+    local?: boolean;
+    /** Mount `POST /cron/fire`, gated by a bearer key with the `cron` scope. Default `false`. */
+    external?: boolean;
+  };
+  arming?: {
+    /** Who gets told the next `nextRunAt`. Only `'none'` is implemented this phase. Default `'none'`. */
+    backend?: string;
+    /** Public URL the arming backend calls back on wake. Required for every backend except `'none'`. */
+    fireUrl?: string | null;
   };
 }
 
@@ -541,6 +1140,15 @@ export interface EthosConfig {
    *   requestTimeoutMs: 120000
    */
   requestTimeoutMs?: number;
+  /**
+   * Operator-tunable approval SLA, in milliseconds — how long a dangerous
+   * tool call may sit waiting for a human Allow/Deny before it is
+   * auto-denied. Absent → each approval store's own 10-minute default
+   * (gateway `ApprovalCoordinator`, web-api `ApprovalsService`). `0` means
+   * no timeout at all — the call waits forever. Flat-key shape:
+   *   approvalTimeoutMs: 1800000
+   */
+  approvalTimeoutMs?: number;
   /**
    * Lane 4a(d) — retry count for the OpenAI-compat client. Absent → the
    * OpenAI SDK default (2 retries). Flat-key shape:
@@ -619,6 +1227,17 @@ export interface EthosConfig {
   // biome-ignore format: keep the option shape on one line for readability.
   compaction?: { pressure?: number; target?: number; gateDelta?: number; autoCompact?: boolean; retryOnOverflow?: boolean; smallWindow?: 'auto' | 'on' | 'off'; maxContextTokens?: number; minTailUserMessages?: number };
   /**
+   * Call-capture personality binding (plan/phases/call-capture-extension.md
+   * decision 3). Exactly one personality, system-wide, may hold the
+   * `call_capture` toolset capability (declared in its `toolset.yaml`, not a
+   * `PersonalityConfig` field); this names which one is actually bound.
+   * Validated at wiring time — see `validateCallCaptureBinding` in
+   * `@ethosagent/wiring`, called from `packages/wiring/src/build-infrastructure.ts`.
+   * Flat-key config shape:
+   *   callCapture.personalityId: assistant
+   */
+  callCapture?: { personalityId?: string };
+  /**
    * Fallback provider chain. When 2+ entries are present, `createLLM` wraps
    * them in a `ChainedProvider` with automatic cooldown-based failover.
    * The primary `provider`/`apiKey`/`model` fields are used when absent or
@@ -677,8 +1296,166 @@ export interface EthosConfig {
    *   voice.bots.0.bind.name: receptionist
    * LiveKit transport keys live alongside the bots under `voice.livekit.*`;
    * SIP trunk keys (telephony) live under `voice.trunk.*`.
+   *
+   * `trustedPlugins` is the local-only voice-egress allowlist:
+   *   voice.trustedPlugins: openai-tts, elevenlabs
+   * Declaring the key AT ALL arms the gate — providers advertising
+   * `caps.local` always pass, and every other provider must be named here or
+   * its selection is refused before a single audio byte leaves the machine.
+   * Absent (the default) leaves the gate off, which is why an empty list is a
+   * meaningful value, not the same as omitting the key.
+   *
+   * `defaultMode` is the voice-reply mode a NEW channel lane starts in:
+   *   voice.defaultMode: mirror_inbound
+   * `off` never speaks back, `mirror_inbound` speaks when it was spoken to,
+   * `all` speaks every reply. `/voice <mode>` overrides it per lane at runtime;
+   * this is only where a lane starts. Absent = `mirror_inbound`.
+   *
+   * `tts.providers` / `stt.providers` are the named rosters — several
+   * configured providers a personality can pick between by name
+   * (`voice.tts_provider:` / `voice.stt_provider:` in its `config.yaml`). Three
+   * dotted levels, each entry the same shape as `auxiliary.tts` / `auxiliary.asr`:
+   *   voice.tts.providers.mac-say.provider: command-tts
+   *   voice.tts.providers.mac-say.command: say -o {output_path} -f {input_path}
+   *   voice.tts.providers.mac-say.outputFormat: wav
+   *   voice.tts.providers.studio.provider: openai-tts
+   *   voice.tts.providers.studio.apiKey: ${secrets:voice/tts/providers/studio/apiKey}
+   *   voice.stt.providers.whisper-es.provider: local-stt
+   *   voice.stt.providers.whisper-es.baseUrl: http://localhost:8000/v1
+   * `auxiliary.tts` / `auxiliary.asr` remain the DEFAULT entries: a personality
+   * that names no provider — or names one this machine does not have — uses
+   * them, so a deployment with no roster is unchanged. Names are restricted to
+   * `[A-Za-z0-9_-]+` so they round-trip through the line-based format.
+   *
+   * `voice.providers.<name>.*` is ACCEPTED on read as the older spelling of
+   * `voice.tts.providers.<name>.*` — it shipped before STT had a roster, when
+   * "providers" could only mean one thing. It is never written back: a config
+   * re-serialized from either spelling carries only the new one.
+   *
+   * `realtime.providers` is the THIRD roster, on the same three dotted levels
+   * and through the same builder — hosted speech-to-speech engines that own the
+   * audio in both directions instead of a transcribe → think → speak pipeline:
+   *   voice.realtime.providers.live.provider: openai-realtime
+   *   voice.realtime.providers.live.apiKey: ${secrets:voice/realtime/providers/live/apiKey}
+   *   voice.realtime.providers.live.costPerMinuteUsd: 0.06
+   * `realtime.default` names the entry a deployment uses when a personality
+   * names none, and `realtime.sessionBudgetUsd` caps the accrued cost of ONE
+   * session (rate × audio minutes) before it is cut short.
+   *
+   * `tier` is the deployment's default voice engine: `realtime` runs talk mode
+   * as one hosted duplex session, `pipeline` is the explicit private/offline
+   * mode (STT → LLM → TTS, which is what local providers can serve). Absent
+   * leaves the choice to the surface. Anything other than those two values is
+   * ignored, the same way an unknown `defaultMode` is.
    */
-  voice?: { bots: VoiceBotConfig[]; livekit?: VoiceLiveKitConfig; trunk?: VoiceTrunkConfig };
+  voice?: {
+    /**
+     * Per-channel TTS-out default: which platforms speak their replies without
+     * being asked. Keyed by platform id (`telegram`, `slack`, `discord`,
+     * `whatsapp`, `email` — see `VOICE_CHANNEL_PLATFORMS`), value
+     * `true`/`false`.
+     *
+     *   voice.channels.slack.ttsOut: false
+     *
+     * A platform absent here inherits `voice.defaultMode`. An explicit `false`
+     * means "never speak on this channel", and outranks a lane's mode — an
+     * operator turning a channel off is a deployment decision, not a
+     * conversational one. `/voice all` in a Slack lane with
+     * `voice.channels.slack.ttsOut: false` stays silent. An unknown platform id
+     * or a non-boolean value is ignored, the same way an unknown `tier` is.
+     */
+    channels?: Record<string, { ttsOut?: boolean }>;
+    /**
+     * ffmpeg transcode stage. Present because voice notes only render as voice
+     * bubbles in the container each platform wants, and the host binary is the
+     * one new runtime dependency this feature has. Out-of-range numbers are
+     * dropped, not clamped.
+     */
+    transcode?: {
+      /** Path or name of the ffmpeg binary. Default: `ffmpeg` on PATH. */
+      ffmpegPath?: string;
+      /** Target bitrate for compressed containers, kbps. 8–320. Default 32 (voice). */
+      bitrateKbps?: number;
+      /** Budget for one ffmpeg invocation, seconds. 1–600. Default 30. */
+      timeout?: number;
+    };
+    /**
+     * Retention for synthesized voice artifacts. An artifact is deleted the
+     * moment its delivery obligation is confirmed; these two keys bound what
+     * happens to the ones that are never confirmed.
+     */
+    artifacts?: {
+      /**
+       * Give up on an undelivered obligation after this many days and delete
+       * its artifact. 1–365. Default 7.
+       */
+      abandonAfterDays?: number;
+      /**
+       * Total on-disk cap for the artifact directory, MiB. Oldest-first
+       * eviction once exceeded — the backstop for runaway accumulation when
+       * neither delivery nor abandonment has fired. 1–102400. Default 512.
+       */
+      maxTotalMb?: number;
+    };
+    /**
+     * Wake-word satellites: "hey engineer" from across the room wakes THAT
+     * personality, with its toolset, memory scope and model routing intact.
+     *
+     * Routing is a DEPLOYMENT concern and deliberately not a PersonalityConfig
+     * field: which phrase reaches which personality depends on the room and the
+     * people in it, and two deployments of one personality can reasonably
+     * disagree. Voice IDENTITY — the TTS voice, language map, tier, fast-lane
+     * model — is on `PersonalityConfig.voice` and stays there.
+     *
+     * Out-of-range numbers and unknown engine ids are ignored rather than
+     * clamped, and a route id outside `[A-Za-z0-9_-]+` is dropped: a typo here
+     * must not make the whole config unloadable.
+     */
+    wake?: {
+      /** Master switch. Absent → satellites decide from their own persisted state. */
+      enabled?: boolean;
+      /** Wake matcher: `fallback` (built-in, no native deps) | `sherpa` | `openwakeword`. */
+      engine?: 'fallback' | 'sherpa' | 'openwakeword';
+      /** Match threshold, 0..1. Higher = fewer false accepts, more misses. */
+      sensitivity?: number;
+      /** Consecutive matching frames before a wake fires — the false-accept damper. */
+      confirmationFrames?: number;
+      /** Transcribe on the satellite instead of shipping audio upstream. */
+      edgeStt?: boolean;
+      /**
+       * Seconds of silence that end the LISTENING state. Ends listening ONLY —
+       * never the session (eng-review D15). A post-timeout re-wake resumes the
+       * same conversation.
+       */
+      idleTimeout?: number;
+      /** Phrase → personality. Key is an operator-chosen route id. */
+      routes?: Record<string, WakeRouteConfig>;
+      /** Per-satellite overrides, keyed by the node's stable id. */
+      nodes?: Record<string, { inputDevice?: string; enabled?: boolean }>;
+    };
+    bots: VoiceBotConfig[];
+    livekit?: VoiceLiveKitConfig;
+    trunk?: VoiceTrunkConfig;
+    /** Who may reach the number, what answering costs, and where the summary
+     *  goes. See `VoiceInboundConfig`. */
+    inbound?: VoiceInboundConfig;
+    /** Per-surface barge-in sensitivity. See `VoiceBargeInConfig`. */
+    bargeIn?: VoiceBargeInConfig;
+    /** Tool-call filler/tick keep-alive. See `VoiceFillerConfig`. */
+    filler?: VoiceFillerConfig;
+    trustedPlugins?: string[];
+    defaultMode?: 'off' | 'mirror_inbound' | 'all';
+    tier?: 'pipeline' | 'realtime';
+    tts?: { providers: Record<string, TtsProviderEntry> };
+    stt?: { providers: Record<string, SttProviderEntry> };
+    realtime?: {
+      providers?: Record<string, RealtimeProviderEntry>;
+      /** Roster entry name a deployment falls back to. Not a provider id. */
+      default?: string;
+      /** USD cap on ONE realtime session's accrued cost. */
+      sessionBudgetUsd?: number;
+    };
+  };
   // Email platform
   emailImapHost?: string;
   emailImapPort?: number;
@@ -799,6 +1576,14 @@ export interface EthosConfig {
    * and `backgroundDefaults()` for the fallbacks.
    */
   background?: BackgroundConfig;
+  /**
+   * Cron trigger/arming seam (plan/phases/cron-scheduler-seam.md), parsed
+   * from the `cron.trigger.*` / `cron.arming.*` keys. Defaults
+   * (`trigger.local: true`, `trigger.external: false`, `arming.backend:
+   * 'none'`) reproduce today's behavior exactly — a fresh config.yaml with no
+   * `cron:` section at all runs only the local interval trigger, unchanged.
+   */
+  cron?: CronTopLevelConfig;
   displayBellOnComplete?: boolean;
   displayDebugPanel?: boolean;
   displayDebugPanelModel?: string;
@@ -819,6 +1604,25 @@ export interface EthosConfig {
    */
   displayStreamingEdits?: 'off' | 'dms' | 'all';
   /**
+   * Which treatment the Call Stage draws (DESIGN.md § "Call Stage").
+   * Config key: `display.call_style`.
+   *   `'personality'` (default) — each personality draws its own treatment:
+   *     its `voice.call_style` if it declares one, otherwise a shape derived
+   *     from its id.
+   *   `'liquid' | 'orb' | 'rings'` — pin one treatment for every personality
+   *     that has not declared its own.
+   * Unset = `personality`.
+   */
+  displayCallStyle?: 'liquid' | 'orb' | 'rings' | 'personality';
+  /**
+   * What color the Call Stage draws in. Config key: `display.call_accent`.
+   *   `'personality'` (default) — follow the active personality's `--accent`
+   *   `'#RRGGBB'`               — an explicit hex
+   * Anything else is ignored, so a typo falls back to the personality accent
+   * rather than painting the call an unreadable color.
+   */
+  displayCallAccent?: string;
+  /**
    * context_compression F1 — auxiliary model wiring. `auxiliary.compression`
    * configures the cheap summarizer that `semantic_summary` uses to condense
    * long histories. Config keys:
@@ -838,8 +1642,20 @@ export interface EthosConfig {
     compression?: AuxiliaryCompressionConfig;
     vision?: AuxiliaryVisionConfig;
     web?: AuxiliaryWebConfig;
-    asr?: { provider: string; model?: string; apiKey?: string; baseUrl?: string };
-    tts?: { provider: string; model?: string; apiKey?: string; voice?: string; baseUrl?: string };
+    /** The DEFAULT STT entry. `command` is the shell template the `command-stt`
+     *  provider runs (placeholders: {input_path}, {output_path}, {language});
+     *  `timeout` is that command's budget, in seconds. Same shape as every
+     *  `voice.stt.providers.<name>` roster entry, because it IS one — the one a
+     *  personality gets when it names no other. */
+    asr?: SttProviderEntry;
+    /** The DEFAULT TTS entry. `command` is the shell template the `command-tts`
+     *  provider runs (placeholders: {input_path}, {output_path}, {format},
+     *  {voice}, {speed}); `outputFormat` is the container that command writes —
+     *  and the extension `{output_path}` carries; `timeout` is its budget in
+     *  seconds; `maxTextLength` caps the text handed to one synthesis call.
+     *  Same shape as every `voice.tts.providers.<name>` roster entry, because it
+     *  IS one — the one a personality gets when it names no other. */
+    tts?: TtsProviderEntry;
   };
   /** tools-web — web_search/web_extract backend selection. */
   web?: WebConfig;
@@ -922,6 +1738,19 @@ export interface EthosConfig {
    */
   a2a?: { enabled?: boolean };
   /**
+   * Operator-controlled security settings.
+   *
+   * `trustedGitHubOrgs` — the GitHub organizations whose skills and plugins
+   * resolve to the `trusted-repo` install tier. The configured list REPLACES
+   * the shipped default (`ethosagent`, `anthropic`) rather than extending it,
+   * so an operator can remove an org they do not trust. An explicitly empty
+   * value is meaningful — it trusts no organization — and is distinct from the
+   * key being absent, which leaves the default in force. Config keys:
+   *   security.trusted_github_orgs: acme-corp, ethosagent
+   *   security.trusted_github_orgs: ""     # trust no org
+   */
+  security?: { trustedGitHubOrgs?: string[] };
+  /**
    * Governed-learning nightly pass scheduler (Phase 3c E). Default-off: when
    * absent or `enabled !== true`, no timer is created and behavior is
    * unchanged. When enabled, `ethos serve` / `ethos gateway start` fire the
@@ -981,6 +1810,77 @@ export interface EthosConfig {
      *  defaults to the team's board path. */
     boardPath?: string;
   };
+  /**
+   * Idle watcher: aggregates every subsystem's busy state into one answer so a
+   * scale-to-zero host (Firecracker-style microVMs that pause between
+   * messages) can be told "nothing is in flight, it is safe to stop this VM".
+   *
+   * An operator/deployment concern, NOT personality identity — two deployments
+   * of the same personality trivially disagree about it (a laptop `pnpm dev`
+   * wants it off, a hosted microVM wants it on), so it lives here rather than
+   * on `PersonalityConfig`.
+   *
+   * `enabled` defaults to `false`: this must never activate by omission, since
+   * an unarmed-but-wrong watcher exits a process mid-work. There is
+   * deliberately NO key for the manager's instrumentation-gap check — that gate
+   * is hard-coded, because letting an operator override it reintroduces the
+   * silent-data-loss risk it exists to prevent.
+   *
+   * Config format:
+   *   idleWatcher.enabled: false
+   *   idleWatcher.idleThresholdMs: 120000
+   *   idleWatcher.startupCooldownMs: 30000
+   *   idleWatcher.checkIntervalMs: 15000
+   *   idleWatcher.wakePathConfirmed: false
+   */
+  idleWatcher?: {
+    /** Arming gate 1. Default false — the watcher is not even constructed. */
+    enabled?: boolean;
+    /** Arming gate 5 — consecutive idle duration required before exit fires. */
+    idleThresholdMs?: number;
+    /** Arming gate 4 — no evaluation for this long after boot. */
+    startupCooldownMs?: number;
+    /** How often the idle predicate is sampled. */
+    checkIntervalMs?: number;
+    /** Arming gate 3 — operator attestation that a wake path exists. */
+    wakePathConfirmed?: boolean;
+  };
+  /**
+   * Pause-clock correction (plan/phases/clock-tolerance-pass.md §7) — the
+   * resume-side twin of `idleWatcher`. On a snapshotting host the guest's wall
+   * clock does not advance while the VM is paused, so on resume every staleness
+   * gate (job-store `reclaimStale`, kanban heartbeats, the delivery ledger's
+   * abandon window) reads the pause as downtime. When enabled, the process runs
+   * a clock-drift detector and boot reconciliation discounts the detected pause
+   * from those gates.
+   *
+   * An operator/deployment concern, NOT personality identity — two deployments
+   * of the same personality trivially disagree about it — so it lives here and
+   * has no personality-facing key.
+   *
+   * Config format:
+   *   pauseClockCorrection.enabled: false
+   *   pauseClockCorrection.thresholdMs: 60000
+   */
+  pauseClockCorrection?: {
+    /** Default false — every non-snapshotting deployment (bare metal, docker,
+     *  `pnpm dev`) has no pause to discount. */
+    enabled?: boolean;
+    /** Wall-clock jump, in ms, above which a tick is treated as a resume rather
+     *  than scheduler slack. Default 60_000. */
+    thresholdMs?: number;
+  };
+  /**
+   * Export/observability targets (analytics-observability plan, Part E).
+   * Currently one leaf: Langfuse. Off by default.
+   *
+   * Config format:
+   *   telemetry.export.langfuse.enabled: true
+   *   telemetry.export.langfuse.baseUrl: https://cloud.langfuse.com
+   *   telemetry.export.langfuse.publicKey: pk-lf-...
+   *   telemetry.export.langfuse.secretKey: sk-lf-...
+   */
+  telemetry?: TelemetryConfig;
 }
 
 export function ethosDir(): string {
@@ -1020,7 +1920,265 @@ export async function readConfig(
   return resolveConfigSecrets(raw, secrets);
 }
 
-export async function writeConfig(storage: Storage, config: EthosConfig): Promise<void> {
+/**
+ * Write-path mirror of `resolveConfigSecrets`: every credential-bearing field
+ * is moved into the vault and replaced by its `${secrets:<ref>}` reference.
+ * Values that are already references pass through untouched, so rewriting an
+ * externalized config is a no-op on the vault.
+ *
+ * Existing installs migrate implicitly — the first `writeConfig` after upgrade
+ * lifts whatever plaintext the file still carries into `~/.ethos/secrets/`.
+ */
+async function externalizeConfigSecrets(
+  config: EthosConfig,
+  secrets: SecretsResolver,
+): Promise<EthosConfig> {
+  const ctx: SecretRefContext = {
+    provider: config.provider,
+    providerChain: config.providers?.map((p) => p.provider),
+    telegramBotKeys: config.telegram?.bots.map((b) => deriveBotKey(b)),
+    slackAppKeys: config.slack?.apps.map((a) => deriveBotKey(a)),
+  };
+  const ref = (key: string): string => {
+    const r = secretRefForConfigKey(key, ctx);
+    if (r === null) throw new Error(`No secret ref is defined for config key '${key}'`);
+    return r;
+  };
+
+  const r = { ...config };
+  r.apiKey = await externalizeSecret(r.apiKey, ref('apiKey'), secrets);
+  r.telegramToken = await externalizeSecret(r.telegramToken, ref('telegramToken'), secrets);
+  r.discordToken = await externalizeSecret(r.discordToken, ref('discordToken'), secrets);
+  r.slackBotToken = await externalizeSecret(r.slackBotToken, ref('slackBotToken'), secrets);
+  r.slackAppToken = await externalizeSecret(r.slackAppToken, ref('slackAppToken'), secrets);
+  r.slackSigningSecret = await externalizeSecret(
+    r.slackSigningSecret,
+    ref('slackSigningSecret'),
+    secrets,
+  );
+  r.emailPassword = await externalizeSecret(r.emailPassword, ref('emailPassword'), secrets);
+
+  if (r.providers) {
+    const out: ProviderConfig[] = [];
+    for (const [i, p] of r.providers.entries()) {
+      out.push({
+        ...p,
+        apiKey: await externalizeSecret(p.apiKey, ref(`providers.${i}.apiKey`), secrets),
+      });
+    }
+    r.providers = out;
+  }
+  if (r.telegram?.bots) {
+    const bots: TelegramBotConfig[] = [];
+    for (const [i, bot] of r.telegram.bots.entries()) {
+      bots.push({
+        ...bot,
+        token: await externalizeSecret(bot.token, ref(`telegram.bots.${i}.token`), secrets),
+        webhookSecretToken: await externalizeSecret(
+          bot.webhookSecretToken,
+          ref(`telegram.bots.${i}.webhookSecretToken`),
+          secrets,
+        ),
+      });
+    }
+    r.telegram = { ...r.telegram, bots };
+  }
+  if (r.slack?.apps) {
+    const apps: SlackAppConfig[] = [];
+    for (const [i, app] of r.slack.apps.entries()) {
+      apps.push({
+        ...app,
+        botToken: await externalizeSecret(app.botToken, ref(`slack.apps.${i}.botToken`), secrets),
+        appToken: await externalizeSecret(app.appToken, ref(`slack.apps.${i}.appToken`), secrets),
+        signingSecret: await externalizeSecret(
+          app.signingSecret,
+          ref(`slack.apps.${i}.signingSecret`),
+          secrets,
+        ),
+      });
+    }
+    r.slack = { ...r.slack, apps };
+  }
+  if (r.voice?.livekit) {
+    const lk = r.voice.livekit;
+    r.voice = {
+      ...r.voice,
+      livekit: {
+        ...lk,
+        apiKey: await externalizeSecret(lk.apiKey, ref('voice.livekit.apiKey'), secrets),
+        apiSecret: await externalizeSecret(lk.apiSecret, ref('voice.livekit.apiSecret'), secrets),
+      },
+    };
+  }
+  if (r.voice?.trunk) {
+    // Both trunk credentials take the same path: `password` authenticates us to
+    // the trunk outbound, `webhookSecret` authenticates the trunk to us inbound.
+    // Spread conditionally so a block carrying only one does not gain an
+    // `undefined` key the serializer would then have to think about.
+    const trunk = r.voice.trunk;
+    r.voice = {
+      ...r.voice,
+      trunk: {
+        ...trunk,
+        ...(trunk.password
+          ? {
+              password: await externalizeSecret(
+                trunk.password,
+                ref('voice.trunk.password'),
+                secrets,
+              ),
+            }
+          : {}),
+        ...(trunk.webhookSecret
+          ? {
+              webhookSecret: await externalizeSecret(
+                trunk.webhookSecret,
+                ref('voice.trunk.webhookSecret'),
+                secrets,
+              ),
+            }
+          : {}),
+      },
+    };
+  }
+  // Per-ENTRY refs. A roster key must not be able to route its credential
+  // around the vault, so each entry externalizes exactly like
+  // `auxiliary.tts.apiKey` does — `voice.tts.providers.<name>.apiKey` →
+  // `voice/tts/providers/<name>/apiKey`, and the STT and realtime rosters the
+  // same way. Same-named entries in different rosters therefore land on
+  // different refs and cannot overwrite each other.
+  const externalizeRoster = async <E extends { apiKey?: string }>(
+    kind: 'tts' | 'stt' | 'realtime',
+    roster: Record<string, E>,
+  ): Promise<Record<string, E>> => {
+    const out: Record<string, E> = {};
+    for (const [name, entry] of Object.entries(roster)) {
+      out[name] = entry.apiKey
+        ? {
+            ...entry,
+            apiKey: await externalizeSecret(
+              entry.apiKey,
+              ref(`voice.${kind}.providers.${name}.apiKey`),
+              secrets,
+            ),
+          }
+        : entry;
+    }
+    return out;
+  };
+  if (r.voice?.tts?.providers) {
+    r.voice = {
+      ...r.voice,
+      tts: { providers: await externalizeRoster('tts', r.voice.tts.providers) },
+    };
+  }
+  if (r.voice?.stt?.providers) {
+    r.voice = {
+      ...r.voice,
+      stt: { providers: await externalizeRoster('stt', r.voice.stt.providers) },
+    };
+  }
+  if (r.voice?.realtime?.providers) {
+    r.voice = {
+      ...r.voice,
+      realtime: {
+        ...r.voice.realtime,
+        providers: await externalizeRoster('realtime', r.voice.realtime.providers),
+      },
+    };
+  }
+  if (r.auxiliary) {
+    const aux = { ...r.auxiliary };
+    if (aux.compression?.apiKey) {
+      aux.compression = {
+        ...aux.compression,
+        apiKey: await externalizeSecret(
+          aux.compression.apiKey,
+          ref('auxiliary.compression.apiKey'),
+          secrets,
+        ),
+      };
+    }
+    if (aux.vision?.apiKey) {
+      aux.vision = {
+        ...aux.vision,
+        apiKey: await externalizeSecret(aux.vision.apiKey, ref('auxiliary.vision.apiKey'), secrets),
+      };
+    }
+    if (aux.web?.apiKey) {
+      aux.web = {
+        ...aux.web,
+        apiKey: await externalizeSecret(aux.web.apiKey, ref('auxiliary.web.apiKey'), secrets),
+      };
+    }
+    if (aux.asr?.apiKey) {
+      aux.asr = {
+        ...aux.asr,
+        apiKey: await externalizeSecret(aux.asr.apiKey, ref('auxiliary.asr.apiKey'), secrets),
+      };
+    }
+    if (aux.tts?.apiKey) {
+      aux.tts = {
+        ...aux.tts,
+        apiKey: await externalizeSecret(aux.tts.apiKey, ref('auxiliary.tts.apiKey'), secrets),
+      };
+    }
+    r.auxiliary = aux;
+  }
+  if (r.webhooks) {
+    const hooks: Record<string, WebhookHookConfig> = {};
+    for (const [id, hook] of Object.entries(r.webhooks)) {
+      hooks[id] = {
+        ...hook,
+        secret: await externalizeSecret(hook.secret, ref(`webhooks.${id}.secret`), secrets),
+      };
+    }
+    r.webhooks = hooks;
+  }
+  if (r.memoryCapture?.apiKey) {
+    r.memoryCapture = {
+      ...r.memoryCapture,
+      apiKey: await externalizeSecret(r.memoryCapture.apiKey, ref('memoryCapture.apiKey'), secrets),
+    };
+  }
+  if (r.telemetry?.export?.langfuse?.secretKey) {
+    const lf = r.telemetry.export.langfuse;
+    r.telemetry = {
+      ...r.telemetry,
+      export: {
+        ...r.telemetry.export,
+        langfuse: {
+          ...lf,
+          secretKey: await externalizeSecret(
+            lf.secretKey,
+            ref('telemetry.export.langfuse.secretKey'),
+            secrets,
+          ),
+        },
+      },
+    };
+  }
+  return r;
+}
+
+/**
+ * Serialize `~/.ethos/config.yaml`.
+ *
+ * `secrets` is REQUIRED, not optional: every credential value is externalized
+ * into the vault before serialization, and an optional resolver would be a
+ * control a caller could silently omit — which is exactly how plaintext
+ * credentials kept reaching disk (G-SEC).
+ */
+export async function writeConfig(
+  storage: Storage,
+  input: EthosConfig,
+  secrets: SecretsResolver,
+): Promise<void> {
+  const config = await externalizeConfigSecrets(input, secrets);
+  // Fail-closed gate: the same field policy `loadConfigStrict` enforces at
+  // boot, applied to exactly what is about to be serialized. Reused rather
+  // than re-implemented so the write and boot checks can never disagree.
+  validateNoPlaintextSecrets(config);
   await storage.mkdir(ethosDir());
   const lines = [
     `schemaVersion: ${config.schemaVersion ?? CURRENT_ETHOS_CONFIG_SCHEMA_VERSION}`,
@@ -1036,6 +2194,8 @@ export async function writeConfig(storage: Storage, config: EthosConfig): Promis
   if (config.toolOrder !== undefined) lines.push(`toolOrder: ${config.toolOrder}`);
   if (config.requestTimeoutMs !== undefined)
     lines.push(`requestTimeoutMs: ${config.requestTimeoutMs}`);
+  if (config.approvalTimeoutMs !== undefined)
+    lines.push(`approvalTimeoutMs: ${config.approvalTimeoutMs}`);
   if (config.maxRetries !== undefined) lines.push(`maxRetries: ${config.maxRetries}`);
   if (config.toolPayloadLimitChars !== undefined)
     lines.push(`toolPayloadLimitChars: ${config.toolPayloadLimitChars}`);
@@ -1093,6 +2253,9 @@ export async function writeConfig(storage: Storage, config: EthosConfig): Promis
       lines.push(`compaction.minTailUserMessages: ${config.compaction.minTailUserMessages}`);
     }
   }
+  if (config.callCapture?.personalityId) {
+    lines.push(`callCapture.personalityId: ${config.callCapture.personalityId}`);
+  }
   if (config.memoryConsolidation) {
     const m = config.memoryConsolidation;
     if (m.enabled !== undefined) lines.push(`memoryConsolidation.enabled: ${m.enabled}`);
@@ -1134,6 +2297,8 @@ export async function writeConfig(storage: Storage, config: EthosConfig): Promis
     lines.push(`display.memory_notices: ${config.displayMemoryNotices}`);
   if (config.displayStreamingEdits)
     lines.push(`display.streaming_edits: ${config.displayStreamingEdits}`);
+  if (config.displayCallStyle) lines.push(`display.call_style: ${config.displayCallStyle}`);
+  if (config.displayCallAccent) lines.push(`display.call_accent: ${config.displayCallAccent}`);
   if (config.displayDebugPanel) lines.push('display.debug_panel: true');
   if (config.displayDebugPanelModel)
     lines.push(`display.debug_panel_model: ${config.displayDebugPanelModel}`);
@@ -1170,19 +2335,51 @@ export async function writeConfig(storage: Storage, config: EthosConfig): Promis
       if (bot.bind.allowSlashSwitch) {
         lines.push(`telegram.bots.${i}.bind.allowSlashSwitch: true`);
       }
+      if (bot.useWebhook !== undefined) {
+        lines.push(`telegram.bots.${i}.useWebhook: ${bot.useWebhook}`);
+      }
+      if (bot.webhookUrl) lines.push(`telegram.bots.${i}.webhookUrl: ${bot.webhookUrl}`);
+      if (bot.webhookSecretToken) {
+        lines.push(`telegram.bots.${i}.webhookSecretToken: ${bot.webhookSecretToken}`);
+      }
+      if (bot.dropPendingUpdates !== undefined) {
+        lines.push(`telegram.bots.${i}.dropPendingUpdates: ${bot.dropPendingUpdates}`);
+      }
     }
   }
   if (config.slack?.apps.length) {
     for (const [i, app] of config.slack.apps.entries()) {
       if (app.id) lines.push(`slack.apps.${i}.id: ${app.id}`);
       lines.push(`slack.apps.${i}.botToken: ${app.botToken}`);
-      lines.push(`slack.apps.${i}.appToken: ${app.appToken}`);
+      if (app.appToken) lines.push(`slack.apps.${i}.appToken: ${app.appToken}`);
       lines.push(`slack.apps.${i}.signingSecret: ${app.signingSecret}`);
       lines.push(`slack.apps.${i}.bind.type: ${app.bind.type}`);
       lines.push(`slack.apps.${i}.bind.name: ${app.bind.name}`);
       if (app.bind.allowSlashSwitch) {
         lines.push(`slack.apps.${i}.bind.allowSlashSwitch: true`);
       }
+      if (app.defaultChannelMode) {
+        lines.push(`slack.apps.${i}.defaultChannelMode: ${app.defaultChannelMode}`);
+      }
+      if (app.receiptReaction) {
+        lines.push(`slack.apps.${i}.receiptReaction: ${app.receiptReaction}`);
+      }
+      if (app.allowedSlashUsers?.length) {
+        lines.push(`slack.apps.${i}.allowedSlashUsers: ${app.allowedSlashUsers.join(',')}`);
+      }
+      if (app.allowedBotIds?.length) {
+        lines.push(`slack.apps.${i}.allowedBotIds: ${app.allowedBotIds.join(',')}`);
+      }
+      if (app.longReplyThresholdChars !== undefined) {
+        lines.push(`slack.apps.${i}.longReplyThresholdChars: ${app.longReplyThresholdChars}`);
+      }
+      if (app.mode?.socket !== undefined) {
+        lines.push(`slack.apps.${i}.mode.socket: ${app.mode.socket}`);
+      }
+      if (app.mode?.http !== undefined) {
+        lines.push(`slack.apps.${i}.mode.http: ${app.mode.http}`);
+      }
+      if (app.webhookPath) lines.push(`slack.apps.${i}.webhookPath: ${app.webhookPath}`);
     }
   }
   if (config.whatsapp?.length) {
@@ -1225,6 +2422,140 @@ export async function writeConfig(storage: Storage, config: EthosConfig): Promis
       if (t.fromNumber) lines.push(`voice.trunk.fromNumber: ${t.fromNumber}`);
       if (t.username) lines.push(`voice.trunk.username: ${t.username}`);
       if (t.password) lines.push(`voice.trunk.password: ${t.password}`);
+      if (t.webhookSecret) lines.push(`voice.trunk.webhookSecret: ${t.webhookSecret}`);
+      if (t.webhookPath) lines.push(`voice.trunk.webhookPath: ${t.webhookPath}`);
+      if (t.codec) lines.push(`voice.trunk.codec: ${t.codec}`);
+    }
+    if (config.voice.inbound) {
+      const ib = config.voice.inbound;
+      if (ib.allowlist?.length) lines.push(`voice.inbound.allowlist: ${ib.allowlist.join(', ')}`);
+      if (ib.receptionist) lines.push(`voice.inbound.receptionist: ${ib.receptionist}`);
+      if (ib.concurrencyCap !== undefined) {
+        lines.push(`voice.inbound.concurrencyCap: ${ib.concurrencyCap}`);
+      }
+      if (ib.perCallerPerHour !== undefined) {
+        lines.push(`voice.inbound.perCallerPerHour: ${ib.perCallerPerHour}`);
+      }
+      if (ib.dailyBudgetUsd !== undefined) {
+        lines.push(`voice.inbound.dailyBudgetUsd: ${ib.dailyBudgetUsd}`);
+      }
+      if (ib.prewarm) lines.push(`voice.inbound.prewarm: ${ib.prewarm}`);
+      // `platform` and `chatId` are unconditional — an owner is only ever built
+      // with both, and a half-written destination would round-trip to nothing.
+      if (ib.owner) {
+        lines.push(`voice.inbound.owner.platform: ${ib.owner.platform}`);
+        lines.push(`voice.inbound.owner.chatId: ${ib.owner.chatId}`);
+        if (ib.owner.botKey) lines.push(`voice.inbound.owner.botKey: ${ib.owner.botKey}`);
+      }
+    }
+    for (const [surface, tuning] of Object.entries(config.voice.bargeIn ?? {})) {
+      if (tuning.energyThreshold !== undefined) {
+        lines.push(`voice.bargeIn.${surface}.energyThreshold: ${tuning.energyThreshold}`);
+      }
+      if (tuning.minSpeechMs !== undefined) {
+        lines.push(`voice.bargeIn.${surface}.minSpeechMs: ${tuning.minSpeechMs}`);
+      }
+      if (tuning.silenceMs !== undefined) {
+        lines.push(`voice.bargeIn.${surface}.silenceMs: ${tuning.silenceMs}`);
+      }
+    }
+    if (config.voice.filler) {
+      const fl = config.voice.filler;
+      if (fl.enabled !== undefined) lines.push(`voice.filler.enabled: ${fl.enabled}`);
+      if (fl.afterMs !== undefined) lines.push(`voice.filler.afterMs: ${fl.afterMs}`);
+      if (fl.text) lines.push(`voice.filler.text: ${fl.text}`);
+      if (fl.tickIntervalMs !== undefined) {
+        lines.push(`voice.filler.tickIntervalMs: ${fl.tickIntervalMs}`);
+      }
+    }
+    // Serialized whenever present, INCLUDING the empty list — an empty
+    // allowlist is "trust nothing non-local", not "no opinion".
+    if (config.voice.trustedPlugins !== undefined) {
+      lines.push(`voice.trustedPlugins: ${config.voice.trustedPlugins.join(', ')}`);
+    }
+    if (config.voice.defaultMode) {
+      lines.push(`voice.defaultMode: ${config.voice.defaultMode}`);
+    }
+    if (config.voice.tier) {
+      lines.push(`voice.tier: ${config.voice.tier}`);
+    }
+    for (const [platform, entry] of Object.entries(config.voice.channels ?? {})) {
+      if (entry.ttsOut !== undefined) {
+        lines.push(`voice.channels.${platform}.ttsOut: ${entry.ttsOut}`);
+      }
+    }
+    if (config.voice.transcode) {
+      const tc = config.voice.transcode;
+      if (tc.ffmpegPath) lines.push(`voice.transcode.ffmpegPath: ${tc.ffmpegPath}`);
+      if (tc.bitrateKbps !== undefined)
+        lines.push(`voice.transcode.bitrateKbps: ${tc.bitrateKbps}`);
+      if (tc.timeout !== undefined) lines.push(`voice.transcode.timeout: ${tc.timeout}`);
+    }
+    if (config.voice.artifacts) {
+      const ar = config.voice.artifacts;
+      if (ar.abandonAfterDays !== undefined) {
+        lines.push(`voice.artifacts.abandonAfterDays: ${ar.abandonAfterDays}`);
+      }
+      if (ar.maxTotalMb !== undefined) lines.push(`voice.artifacts.maxTotalMb: ${ar.maxTotalMb}`);
+    }
+    if (config.voice.wake) {
+      const wk = config.voice.wake;
+      if (wk.enabled !== undefined) lines.push(`voice.wake.enabled: ${wk.enabled}`);
+      if (wk.engine) lines.push(`voice.wake.engine: ${wk.engine}`);
+      if (wk.sensitivity !== undefined) lines.push(`voice.wake.sensitivity: ${wk.sensitivity}`);
+      if (wk.confirmationFrames !== undefined) {
+        lines.push(`voice.wake.confirmationFrames: ${wk.confirmationFrames}`);
+      }
+      if (wk.edgeStt !== undefined) lines.push(`voice.wake.edgeStt: ${wk.edgeStt}`);
+      if (wk.idleTimeout !== undefined) lines.push(`voice.wake.idleTimeout: ${wk.idleTimeout}`);
+      // `phrase` and `personality` are unconditional — a route is only ever
+      // built with both, and a half-written route would round-trip to nothing.
+      for (const [id, route] of Object.entries(wk.routes ?? {})) {
+        lines.push(`voice.wake.routes.${id}.phrase: ${route.phrase}`);
+        lines.push(`voice.wake.routes.${id}.personality: ${route.personality}`);
+        if (route.privileged !== undefined) {
+          lines.push(`voice.wake.routes.${id}.privileged: ${route.privileged}`);
+        }
+        if (route.enabled !== undefined) {
+          lines.push(`voice.wake.routes.${id}.enabled: ${route.enabled}`);
+        }
+      }
+      for (const [id, node] of Object.entries(wk.nodes ?? {})) {
+        if (node.inputDevice) {
+          lines.push(`voice.wake.nodes.${id}.inputDevice: ${node.inputDevice}`);
+        }
+        if (node.enabled !== undefined) {
+          lines.push(`voice.wake.nodes.${id}.enabled: ${node.enabled}`);
+        }
+      }
+    }
+    // Always the NEW spelling, whichever one was read. A config parsed from
+    // `voice.providers.*` re-serializes as `voice.tts.providers.*` and never
+    // carries both.
+    for (const [name, entry] of Object.entries(config.voice.tts?.providers ?? {})) {
+      lines.push(
+        ...voiceProviderEntryLines(`voice.tts.providers.${name}`, entry, TTS_ENTRY_FIELDS),
+      );
+    }
+    for (const [name, entry] of Object.entries(config.voice.stt?.providers ?? {})) {
+      lines.push(
+        ...voiceProviderEntryLines(`voice.stt.providers.${name}`, entry, STT_ENTRY_FIELDS),
+      );
+    }
+    for (const [name, entry] of Object.entries(config.voice.realtime?.providers ?? {})) {
+      lines.push(
+        ...voiceProviderEntryLines(
+          `voice.realtime.providers.${name}`,
+          entry,
+          REALTIME_ENTRY_FIELDS,
+        ),
+      );
+    }
+    if (config.voice.realtime?.default) {
+      lines.push(`voice.realtime.default: ${config.voice.realtime.default}`);
+    }
+    if (config.voice.realtime?.sessionBudgetUsd !== undefined) {
+      lines.push(`voice.realtime.sessionBudgetUsd: ${config.voice.realtime.sessionBudgetUsd}`);
     }
   }
   if (config.teams) {
@@ -1296,22 +2627,16 @@ export async function writeConfig(storage: Storage, config: EthosConfig): Promis
     if (w.baseUrl) lines.push(`auxiliary.web.baseUrl: ${w.baseUrl}`);
   }
   if (config.auxiliary?.asr) {
-    const a = config.auxiliary.asr;
-    lines.push(`auxiliary.asr.provider: ${a.provider}`);
-    if (a.model) lines.push(`auxiliary.asr.model: ${a.model}`);
-    if (a.apiKey) lines.push(`auxiliary.asr.apiKey: ${a.apiKey}`);
-    if (a.baseUrl) lines.push(`auxiliary.asr.baseUrl: ${a.baseUrl}`);
+    lines.push(...voiceProviderEntryLines('auxiliary.asr', config.auxiliary.asr, STT_ENTRY_FIELDS));
   }
   if (config.auxiliary?.tts) {
-    const t = config.auxiliary.tts;
-    lines.push(`auxiliary.tts.provider: ${t.provider}`);
-    if (t.model) lines.push(`auxiliary.tts.model: ${t.model}`);
-    if (t.apiKey) lines.push(`auxiliary.tts.apiKey: ${t.apiKey}`);
-    if (t.voice) lines.push(`auxiliary.tts.voice: ${t.voice}`);
-    if (t.baseUrl) lines.push(`auxiliary.tts.baseUrl: ${t.baseUrl}`);
+    lines.push(...voiceProviderEntryLines('auxiliary.tts', config.auxiliary.tts, TTS_ENTRY_FIELDS));
   }
   if (config.web?.search_backend) lines.push(`web.search_backend: ${config.web.search_backend}`);
   if (config.web?.extract_backend) lines.push(`web.extract_backend: ${config.web.extract_backend}`);
+  if (config.web?.host) lines.push(`web.host: ${config.web.host}`);
+  if (config.web?.port !== undefined) lines.push(`web.port: ${config.web.port}`);
+  if (config.web?.corsOrigins) lines.push(`web.corsOrigins: ${config.web.corsOrigins}`);
   if (config.webhooks) {
     for (const [hookId, hook] of Object.entries(config.webhooks)) {
       lines.push(`webhooks.${hookId}.personalityId: ${hook.personalityId}`);
@@ -1352,6 +2677,16 @@ export async function writeConfig(storage: Storage, config: EthosConfig): Promis
     lines.push(`plugins.auto_install: ${config.pluginsAutoInstall}`);
   if (config.admin?.enabled !== undefined) lines.push(`admin.enabled: ${config.admin.enabled}`);
   if (config.a2a?.enabled !== undefined) lines.push(`a2a.enabled: ${config.a2a.enabled}`);
+  // Written even when the list is empty — `""` is how "trust no org" survives
+  // a round-trip, and dropping the line would silently restore the default.
+  if (config.security?.trustedGitHubOrgs !== undefined)
+    lines.push(
+      `security.trusted_github_orgs: ${
+        config.security.trustedGitHubOrgs.length > 0
+          ? config.security.trustedGitHubOrgs.join(',')
+          : '""'
+      }`,
+    );
   if (config.nightlyPass) {
     if (config.nightlyPass.enabled !== undefined)
       lines.push(`nightlyPass.enabled: ${config.nightlyPass.enabled}`);
@@ -1405,6 +2740,31 @@ export async function writeConfig(storage: Storage, config: EthosConfig): Promis
     if (config.kanbanPoll.boardPath !== undefined)
       lines.push(`kanbanPoll.boardPath: ${config.kanbanPoll.boardPath}`);
   }
+  if (config.idleWatcher) {
+    const iw = config.idleWatcher;
+    if (iw.enabled !== undefined) lines.push(`idleWatcher.enabled: ${iw.enabled}`);
+    if (iw.idleThresholdMs !== undefined)
+      lines.push(`idleWatcher.idleThresholdMs: ${iw.idleThresholdMs}`);
+    if (iw.startupCooldownMs !== undefined)
+      lines.push(`idleWatcher.startupCooldownMs: ${iw.startupCooldownMs}`);
+    if (iw.checkIntervalMs !== undefined)
+      lines.push(`idleWatcher.checkIntervalMs: ${iw.checkIntervalMs}`);
+    if (iw.wakePathConfirmed !== undefined)
+      lines.push(`idleWatcher.wakePathConfirmed: ${iw.wakePathConfirmed}`);
+  }
+  if (config.pauseClockCorrection) {
+    const pcc = config.pauseClockCorrection;
+    if (pcc.enabled !== undefined) lines.push(`pauseClockCorrection.enabled: ${pcc.enabled}`);
+    if (pcc.thresholdMs !== undefined)
+      lines.push(`pauseClockCorrection.thresholdMs: ${pcc.thresholdMs}`);
+  }
+  if (config.telemetry?.export?.langfuse) {
+    const lf = config.telemetry.export.langfuse;
+    if (lf.enabled !== undefined) lines.push(`telemetry.export.langfuse.enabled: ${lf.enabled}`);
+    if (lf.baseUrl) lines.push(`telemetry.export.langfuse.baseUrl: ${lf.baseUrl}`);
+    if (lf.publicKey) lines.push(`telemetry.export.langfuse.publicKey: ${lf.publicKey}`);
+    if (lf.secretKey) lines.push(`telemetry.export.langfuse.secretKey: ${lf.secretKey}`);
+  }
   await storage.write(join(ethosDir(), 'config.yaml'), `${lines.join('\n')}\n`, { mode: 0o600 });
 }
 
@@ -1437,6 +2797,9 @@ export async function resolveConfigSecrets(
         r.telegram.bots.map(async (bot) => ({
           ...bot,
           token: await resolveSecretValue(bot.token, secrets),
+          ...(bot.webhookSecretToken !== undefined
+            ? { webhookSecretToken: await resolveSecretValue(bot.webhookSecretToken, secrets) }
+            : {}),
         })),
       ),
     };
@@ -1448,7 +2811,11 @@ export async function resolveConfigSecrets(
         r.slack.apps.map(async (app) => ({
           ...app,
           botToken: await resolveSecretValue(app.botToken, secrets),
-          appToken: await resolveSecretValue(app.appToken, secrets),
+          // `appToken` is optional now (HTTP-mode apps have none), so it is
+          // only resolved when present.
+          ...(app.appToken !== undefined
+            ? { appToken: await resolveSecretValue(app.appToken, secrets) }
+            : {}),
           signingSecret: await resolveSecretValue(app.signingSecret, secrets),
         })),
       ),
@@ -1472,6 +2839,106 @@ export async function resolveConfigSecrets(
       },
     };
   }
+  if (r.auxiliary?.web?.apiKey) {
+    r.auxiliary = {
+      ...r.auxiliary,
+      web: {
+        ...r.auxiliary.web,
+        apiKey: await resolveSecretValue(r.auxiliary.web.apiKey, secrets),
+      },
+    };
+  }
+  if (r.auxiliary?.asr?.apiKey) {
+    r.auxiliary = {
+      ...r.auxiliary,
+      asr: {
+        ...r.auxiliary.asr,
+        apiKey: await resolveSecretValue(r.auxiliary.asr.apiKey, secrets),
+      },
+    };
+  }
+  if (r.auxiliary?.tts?.apiKey) {
+    r.auxiliary = {
+      ...r.auxiliary,
+      tts: {
+        ...r.auxiliary.tts,
+        apiKey: await resolveSecretValue(r.auxiliary.tts.apiKey, secrets),
+      },
+    };
+  }
+  if (r.voice?.livekit) {
+    r.voice = {
+      ...r.voice,
+      livekit: {
+        ...r.voice.livekit,
+        apiKey: await resolveSecretValue(r.voice.livekit.apiKey, secrets),
+        apiSecret: await resolveSecretValue(r.voice.livekit.apiSecret, secrets),
+      },
+    };
+  }
+  if (r.voice?.trunk) {
+    const trunk = r.voice.trunk;
+    r.voice = {
+      ...r.voice,
+      trunk: {
+        ...trunk,
+        ...(trunk.password ? { password: await resolveSecretValue(trunk.password, secrets) } : {}),
+        ...(trunk.webhookSecret
+          ? { webhookSecret: await resolveSecretValue(trunk.webhookSecret, secrets) }
+          : {}),
+      },
+    };
+  }
+  const resolveRoster = async <E extends { apiKey?: string }>(
+    roster: Record<string, E>,
+  ): Promise<Record<string, E>> => {
+    const out: Record<string, E> = {};
+    for (const [name, entry] of Object.entries(roster)) {
+      out[name] = entry.apiKey
+        ? { ...entry, apiKey: await resolveSecretValue(entry.apiKey, secrets) }
+        : entry;
+    }
+    return out;
+  };
+  if (r.voice?.tts?.providers) {
+    r.voice = { ...r.voice, tts: { providers: await resolveRoster(r.voice.tts.providers) } };
+  }
+  if (r.voice?.stt?.providers) {
+    r.voice = { ...r.voice, stt: { providers: await resolveRoster(r.voice.stt.providers) } };
+  }
+  if (r.voice?.realtime?.providers) {
+    r.voice = {
+      ...r.voice,
+      realtime: {
+        ...r.voice.realtime,
+        providers: await resolveRoster(r.voice.realtime.providers),
+      },
+    };
+  }
+  if (r.webhooks) {
+    const hooks: Record<string, WebhookHookConfig> = {};
+    for (const [id, hook] of Object.entries(r.webhooks)) {
+      hooks[id] = { ...hook, secret: await resolveSecretValue(hook.secret, secrets) };
+    }
+    r.webhooks = hooks;
+  }
+  if (r.telemetry?.export?.langfuse?.secretKey) {
+    const lf = r.telemetry.export.langfuse;
+    const secretKey = r.telemetry.export.langfuse.secretKey;
+    r.telemetry = {
+      ...r.telemetry,
+      export: {
+        ...r.telemetry.export,
+        langfuse: { ...lf, secretKey: await resolveSecretValue(secretKey, secrets) },
+      },
+    };
+  }
+  if (r.memoryCapture?.apiKey) {
+    r.memoryCapture = {
+      ...r.memoryCapture,
+      apiKey: await resolveSecretValue(r.memoryCapture.apiKey, secrets),
+    };
+  }
   return r;
 }
 
@@ -1486,6 +2953,10 @@ function parseConfigYaml(src: string): EthosConfig {
   const displayKv: Record<string, string> = {};
   const evolverKv: Record<string, string> = {};
   const backgroundKv: Record<string, string> = {};
+  /** `background.acp.agents.<name>.<field>` — the named ACP-agent roster (T4/I3). */
+  const backgroundAcpAgentsKv: Record<string, Record<string, string>> = {};
+  // cron.trigger.<field> / cron.arming.<field> — keyed by combined subsection.field.
+  const cronKv: Record<string, string> = {};
   const auxiliaryCompressionKv: Record<string, string> = {};
   const auxiliaryVisionKv: Record<string, string> = {};
   const auxiliaryWebKv: Record<string, string> = {};
@@ -1499,10 +2970,17 @@ function parseConfigYaml(src: string): EthosConfig {
   const modelsKv: Record<string, Record<string, string>> = {};
   // §5 — global compaction.<field>: <value> (pressure | target | ...flags).
   const compactionKv: Record<string, string> = {};
+  // Call-capture personality binding (decision 3) — callCapture.personalityId: <id>.
+  const callCaptureKv: Record<string, string> = {};
   // Phase 3 — memoryConsolidation.<field>: <value> (silent flush config).
   const memoryConsolidationKv: Record<string, string> = {};
+  // Scale-to-zero idle watcher — idleWatcher.<field>: <value>.
+  const idleWatcherKv: Record<string, string> = {};
+  // Resume-side clock correction — pauseClockCorrection.<field>: <value>.
+  const pauseClockCorrectionKv: Record<string, string> = {};
   const logsRotationKv: Record<string, string> = {};
   const awsSecretsKv: Record<string, string> = {};
+  const telemetryLangfuseKv: Record<string, string> = {};
   // Indexed list shapes: telegram.bots.<n>.<field> and slack.apps.<n>.<field>,
   // plus their nested `.bind.<field>` sub-keys. Per-team config keyed by name.
   const telegramBotsKv: Record<number, Record<string, string>> = {};
@@ -1511,6 +2989,56 @@ function parseConfigYaml(src: string): EthosConfig {
   const voiceBotsKv: Record<number, Record<string, string>> = {};
   const voiceLiveKitKv: Record<string, string> = {};
   const voiceTrunkKv: Record<string, string> = {};
+  /** `voice.inbound.<field>` — the scalar inbound-call policy knobs. */
+  const voiceInboundKv: Record<string, string> = {};
+  /** `voice.inbound.owner.<field>` — the notification destination, one level down. */
+  const voiceInboundOwnerKv: Record<string, string> = {};
+  /** `voice.bargeIn.<surface>.<field>` — VAD thresholds, keyed by surface. */
+  const voiceBargeInKv: Record<string, Record<string, string>> = {};
+  /** `voice.filler.<field>` — the tool-call filler/tick knobs, range-checked on the way in. */
+  const voiceFillerKv: {
+    enabled?: boolean;
+    afterMs?: number;
+    text?: string;
+    tickIntervalMs?: number;
+  } = {};
+  /** `voice.tts.providers.<name>.<field>` — the named TTS roster, keyed by name. */
+  const voiceTtsProvidersKv: Record<string, Record<string, string>> = {};
+  /** The older `voice.providers.<name>.<field>` spelling, merged under the above. */
+  const voiceTtsProvidersLegacyKv: Record<string, Record<string, string>> = {};
+  /** `voice.stt.providers.<name>.<field>` — the named STT roster. */
+  const voiceSttProvidersKv: Record<string, Record<string, string>> = {};
+  /** `voice.realtime.providers.<name>.<field>` — the named realtime roster. */
+  const voiceRealtimeProvidersKv: Record<string, Record<string, string>> = {};
+  /** Raw `voice.trustedPlugins` line; `undefined` = key absent = gate off. */
+  let voiceTrustedPluginsRaw: string | undefined;
+  /** `voice.defaultMode`; `undefined` = key absent = the built-in default. */
+  let voiceDefaultMode: 'off' | 'mirror_inbound' | 'all' | undefined;
+  /** `voice.tier`; `undefined` = key absent = the surface decides. */
+  let voiceTier: 'pipeline' | 'realtime' | undefined;
+  /** `voice.realtime.default` — names a realtime roster entry. */
+  let voiceRealtimeDefault: string | undefined;
+  /** `voice.realtime.sessionBudgetUsd` — USD cap on one session's accrued cost. */
+  let voiceRealtimeSessionBudgetUsd: number | undefined;
+  /** `voice.channels.<platform>.ttsOut` — per-channel TTS-out overrides. */
+  const voiceChannelsKv: Record<string, { ttsOut?: boolean }> = {};
+  /** `voice.transcode.<field>` — ffmpeg stage knobs, range-checked on the way in. */
+  const voiceTranscodeKv: { ffmpegPath?: string; bitrateKbps?: number; timeout?: number } = {};
+  /** `voice.artifacts.<field>` — retention bounds, range-checked on the way in. */
+  const voiceArtifactsKv: { abandonAfterDays?: number; maxTotalMb?: number } = {};
+  /** `voice.wake.<field>` — satellite wake knobs, range-checked on the way in. */
+  const voiceWakeKv: {
+    enabled?: boolean;
+    engine?: 'fallback' | 'sherpa' | 'openwakeword';
+    sensitivity?: number;
+    confirmationFrames?: number;
+    edgeStt?: boolean;
+    idleTimeout?: number;
+  } = {};
+  /** `voice.wake.routes.<id>.<field>` — raw route fields, keyed by route id. */
+  const voiceWakeRoutesKv: Record<string, Record<string, string>> = {};
+  /** `voice.wake.nodes.<id>.<field>` — per-satellite overrides, keyed by node id. */
+  const voiceWakeNodesKv: Record<string, Record<string, string>> = {};
   const teamsKv: Record<string, Record<string, string>> = {};
   const webhooksKv: Record<string, Record<string, string>> = {};
   // FW-16 — quick_commands.<name>.<field>: <value>
@@ -1584,6 +3112,53 @@ function parseConfigYaml(src: string): EthosConfig {
       voiceBotsKv[idx][vbot[2]] = vbot[3].trim().replace(/^["']|["']$/g, '');
       continue;
     }
+    // voice.<tts|stt|realtime>.providers.<name>.<field>: <value> — the named
+    // rosters. The name is anchored to the identifier charset so the split is
+    // unambiguous and the last level is a plain field, exactly the way
+    // `telegram.bots.<n>.<field>` is matched. One regex serves all three rosters
+    // so they cannot acquire different name rules.
+    const vprov = line.match(
+      /^voice\.(tts|stt|realtime)\.providers\.([A-Za-z0-9_-]+)\.(\w+):\s*(.+)$/,
+    );
+    if (vprov) {
+      const bag =
+        vprov[1] === 'stt'
+          ? voiceSttProvidersKv
+          : vprov[1] === 'realtime'
+            ? voiceRealtimeProvidersKv
+            : voiceTtsProvidersKv;
+      const name = vprov[2];
+      bag[name] ??= {};
+      bag[name][vprov[3]] = vprov[4].trim().replace(/^["']|["']$/g, '');
+      continue;
+    }
+    // voice.realtime.default / voice.realtime.sessionBudgetUsd. Matched AFTER
+    // the roster line above, whose third level is `providers` and whose tail
+    // carries dots — so this `(\w+)` can never swallow a roster key.
+    const vrt = line.match(/^voice\.realtime\.(\w+):\s*(.+)$/);
+    if (vrt) {
+      const value = vrt[2].trim().replace(/^["']|["']$/g, '');
+      if (vrt[1] === 'default') {
+        voiceRealtimeDefault = value;
+      } else if (vrt[1] === 'sessionBudgetUsd') {
+        const n = Number(value);
+        if (Number.isFinite(n) && n > 0) voiceRealtimeSessionBudgetUsd = n;
+      }
+      continue;
+    }
+    // voice.providers.<name>.<field> — the OLDER spelling of the TTS roster,
+    // from before STT had one. Read-time alias only: it is merged UNDER the new
+    // spelling below (so a file carrying both is decided by the key, not by
+    // line order) and re-serializes as `voice.tts.providers.*`.
+    const vprovLegacy = line.match(/^voice\.providers\.([A-Za-z0-9_-]+)\.(\w+):\s*(.+)$/);
+    if (vprovLegacy) {
+      const name = vprovLegacy[1];
+      voiceTtsProvidersLegacyKv[name] ??= {};
+      voiceTtsProvidersLegacyKv[name][vprovLegacy[2]] = vprovLegacy[3]
+        .trim()
+        .replace(/^["']|["']$/g, '');
+      continue;
+    }
     // voice.livekit.<field>: <value>
     const vlk = line.match(/^voice\.livekit\.(\w+):\s*(.+)$/);
     if (vlk) {
@@ -1594,6 +3169,159 @@ function parseConfigYaml(src: string): EthosConfig {
     const vtr = line.match(/^voice\.trunk\.(\w+):\s*(.+)$/);
     if (vtr) {
       voiceTrunkKv[vtr[1]] = vtr[2].trim().replace(/^["']|["']$/g, '');
+      continue;
+    }
+    // voice.inbound.owner.<field>: <value> — matched BEFORE the scalar line
+    // below, which the `\w+` in its key position could not have swallowed
+    // anyway; the order is what makes that safe to read rather than to prove.
+    const vino = line.match(/^voice\.inbound\.owner\.(\w+):\s*(.+)$/);
+    if (vino) {
+      voiceInboundOwnerKv[vino[1]] = vino[2].trim().replace(/^["']|["']$/g, '');
+      continue;
+    }
+    // voice.inbound.<field>: <value>
+    const vin = line.match(/^voice\.inbound\.(\w+):\s*(.+)$/);
+    if (vin) {
+      voiceInboundKv[vin[1]] = vin[2].trim().replace(/^["']|["']$/g, '');
+      continue;
+    }
+    // voice.bargeIn.<surface>.<field>: <value>. The surface is anchored to the
+    // identifier charset and validated by name in the builder — an unknown
+    // surface is a parse error, not a dropped line, because a threshold typed
+    // against a surface nothing reads is silently no tuning at all.
+    const vbi = line.match(/^voice\.bargeIn\.([A-Za-z0-9_-]+)\.(\w+):\s*(.+)$/);
+    if (vbi) {
+      const surface = vbi[1];
+      voiceBargeInKv[surface] ??= {};
+      voiceBargeInKv[surface][vbi[2]] = vbi[3].trim().replace(/^["']|["']$/g, '');
+      continue;
+    }
+    // voice.filler.<field> — the tool-call keep-alive knobs. An unknown value
+    // is ignored rather than clamped or thrown on, same rule as `voice.wake`.
+    const vfl = line.match(/^voice\.filler\.(\w+):\s*(.+)$/);
+    if (vfl) {
+      const field = vfl[1];
+      const value = vfl[2].trim().replace(/^["']|["']$/g, '');
+      if (field === 'enabled') {
+        if (value === 'true' || value === 'false') voiceFillerKv.enabled = value === 'true';
+      } else if (field === 'afterMs') {
+        const n = parseBoundedInt(value, 0, 60_000);
+        if (n !== undefined) voiceFillerKv.afterMs = n;
+      } else if (field === 'text') {
+        if (value) voiceFillerKv.text = value;
+      } else if (field === 'tickIntervalMs') {
+        const n = parseBoundedInt(value, 0, 60_000);
+        if (n !== undefined) voiceFillerKv.tickIntervalMs = n;
+      }
+      continue;
+    }
+    // voice.trustedPlugins: <comma-separated provider ids>. Declaring the key
+    // AT ALL turns the local-only egress gate on, so an empty value is
+    // meaningful (= trust nothing non-local) and must not collapse to absent.
+    const vtp = line.match(/^voice\.trustedPlugins:\s*(.*)$/);
+    if (vtp) {
+      voiceTrustedPluginsRaw = vtp[1].trim().replace(/^["']|["']$/g, '');
+      continue;
+    }
+    // voice.defaultMode: off | mirror_inbound | all — where a new lane starts.
+    const vdm = line.match(/^voice\.defaultMode:\s*(.+)$/);
+    if (vdm) {
+      const mode = vdm[1].trim().replace(/^["']|["']$/g, '');
+      if (mode === 'off' || mode === 'mirror_inbound' || mode === 'all') {
+        voiceDefaultMode = mode;
+      }
+      continue;
+    }
+    // voice.tier: pipeline | realtime — the deployment's default voice engine.
+    // An unknown value is ignored rather than thrown on, exactly like the mode
+    // above: a typo here must not make the whole config unloadable.
+    const vtier = line.match(/^voice\.tier:\s*(.+)$/);
+    if (vtier) {
+      const tier = vtier[1].trim().replace(/^["']|["']$/g, '');
+      if (tier === 'pipeline' || tier === 'realtime') voiceTier = tier;
+      continue;
+    }
+    // voice.channels.<platform>.ttsOut: true | false — which channels speak
+    // their replies without being asked. Only the platforms in
+    // VOICE_CHANNEL_PLATFORMS are accepted; an unknown id or a non-boolean is
+    // dropped, so a typo cannot invent a channel entry no adapter will read.
+    const vch = line.match(/^voice\.channels\.([A-Za-z0-9_-]+)\.ttsOut:\s*(.+)$/);
+    if (vch) {
+      const platform = vch[1];
+      const value = vch[2].trim().replace(/^["']|["']$/g, '');
+      if (isVoiceChannelPlatform(platform) && (value === 'true' || value === 'false')) {
+        voiceChannelsKv[platform] = { ttsOut: value === 'true' };
+      }
+      continue;
+    }
+    // voice.transcode.<field> — ffmpeg stage. Out-of-range or non-numeric
+    // values are ignored, same rule as the mode and tier above.
+    const vtc = line.match(/^voice\.transcode\.(\w+):\s*(.+)$/);
+    if (vtc) {
+      const value = vtc[2].trim().replace(/^["']|["']$/g, '');
+      if (vtc[1] === 'ffmpegPath') {
+        if (value) voiceTranscodeKv.ffmpegPath = value;
+      } else if (vtc[1] === 'bitrateKbps') {
+        const n = parseBoundedInt(value, 8, 320);
+        if (n !== undefined) voiceTranscodeKv.bitrateKbps = n;
+      } else if (vtc[1] === 'timeout') {
+        const n = parseBoundedInt(value, 1, 600);
+        if (n !== undefined) voiceTranscodeKv.timeout = n;
+      }
+      continue;
+    }
+    // voice.artifacts.<field> — retention for synthesized voice artifacts.
+    const vart = line.match(/^voice\.artifacts\.(\w+):\s*(.+)$/);
+    if (vart) {
+      const value = vart[2].trim().replace(/^["']|["']$/g, '');
+      if (vart[1] === 'abandonAfterDays') {
+        const n = parseBoundedInt(value, 1, 365);
+        if (n !== undefined) voiceArtifactsKv.abandonAfterDays = n;
+      } else if (vart[1] === 'maxTotalMb') {
+        const n = parseBoundedInt(value, 1, 102400);
+        if (n !== undefined) voiceArtifactsKv.maxTotalMb = n;
+      }
+      continue;
+    }
+    // voice.wake.routes.<id>.<field> / voice.wake.nodes.<id>.<field> — the two
+    // record-valued wake sub-blocks. One regex serves both so they cannot
+    // acquire different id rules, and the id is anchored to the identifier
+    // charset exactly like a provider roster name: a key the serializer could
+    // not round-trip is dropped here rather than corrupting the file later.
+    // Matched BEFORE the scalar `voice.wake.<field>` line below.
+    const vwrec = line.match(/^voice\.wake\.(routes|nodes)\.([A-Za-z0-9_-]+)\.(\w+):\s*(.+)$/);
+    if (vwrec) {
+      const bag = vwrec[1] === 'routes' ? voiceWakeRoutesKv : voiceWakeNodesKv;
+      const id = vwrec[2];
+      bag[id] ??= {};
+      bag[id][vwrec[3]] = vwrec[4].trim().replace(/^["']|["']$/g, '');
+      continue;
+    }
+    // voice.wake.<field> — the scalar satellite knobs. An unknown engine and an
+    // out-of-range number are ignored rather than clamped or thrown on, same
+    // rule as the mode and tier above.
+    const vwk = line.match(/^voice\.wake\.(\w+):\s*(.+)$/);
+    if (vwk) {
+      const field = vwk[1];
+      const value = vwk[2].trim().replace(/^["']|["']$/g, '');
+      if (field === 'enabled') {
+        if (value === 'true' || value === 'false') voiceWakeKv.enabled = value === 'true';
+      } else if (field === 'edgeStt') {
+        if (value === 'true' || value === 'false') voiceWakeKv.edgeStt = value === 'true';
+      } else if (field === 'engine') {
+        if (value === 'fallback' || value === 'sherpa' || value === 'openwakeword') {
+          voiceWakeKv.engine = value;
+        }
+      } else if (field === 'sensitivity') {
+        const n = parseBoundedFloat(value, 0, 1);
+        if (n !== undefined) voiceWakeKv.sensitivity = n;
+      } else if (field === 'confirmationFrames') {
+        const n = parseBoundedInt(value, 1, 10);
+        if (n !== undefined) voiceWakeKv.confirmationFrames = n;
+      } else if (field === 'idleTimeout') {
+        const n = parseBoundedInt(value, 5, 600);
+        if (n !== undefined) voiceWakeKv.idleTimeout = n;
+      }
       continue;
     }
     // teams.<name>.<field>: <value>
@@ -1648,10 +3376,27 @@ function parseConfigYaml(src: string): EthosConfig {
       evolverKv[evlv[1]] = evlv[2].trim().replace(/^["']|["']$/g, '');
       continue;
     }
+    // background.acp.agents.<name>.<field>: <value> — the named ACP-agent
+    // roster. Matched BEFORE the single-level `background.<field>` line below,
+    // whose `[a-z_]+` cannot swallow a dotted key anyway, but ordering mirrors
+    // the voice roster's own "roster before general" discipline.
+    const bacp = line.match(/^background\.acp\.agents\.([A-Za-z0-9_-]+)\.(\w+):\s*(.+)$/);
+    if (bacp) {
+      const name = bacp[1];
+      backgroundAcpAgentsKv[name] ??= {};
+      backgroundAcpAgentsKv[name][bacp[2]] = bacp[3].trim().replace(/^["']|["']$/g, '');
+      continue;
+    }
     // background.<field>: <value>
     const bg = line.match(/^background\.([a-z_]+):\s*(.+)$/);
     if (bg) {
       backgroundKv[bg[1]] = bg[2].trim().replace(/^["']|["']$/g, '');
+      continue;
+    }
+    // cron.trigger.<field>: <value>  or  cron.arming.<field>: <value>
+    const cron = line.match(/^cron\.(trigger|arming)\.([a-zA-Z]+):\s*(.+)$/);
+    if (cron) {
+      cronKv[`${cron[1]}.${cron[2]}`] = cron[3].trim().replace(/^["']|["']$/g, '');
       continue;
     }
     // auxiliary.compression.<field>: <value>
@@ -1702,6 +3447,12 @@ function parseConfigYaml(src: string): EthosConfig {
       awsSecretsKv[awss[1]] = awss[2].trim().replace(/^["']|["']$/g, '');
       continue;
     }
+    // telemetry.export.langfuse.<field>: <value>
+    const tel = line.match(/^telemetry\.export\.langfuse\.(\w+):\s*(.+)$/);
+    if (tel) {
+      telemetryLangfuseKv[tel[1]] = tel[2].trim().replace(/^["']|["']$/g, '');
+      continue;
+    }
     // modelCatalog.providers.<id>.url: <value>
     const mcp = line.match(/^modelCatalog\.providers\.([^.]+)\.(\S+):\s*(.+)$/);
     if (mcp) {
@@ -1735,6 +3486,12 @@ function parseConfigYaml(src: string): EthosConfig {
     );
     if (cmp) {
       compactionKv[cmp[1]] = cmp[2].trim().replace(/^["']|["']$/g, '');
+      continue;
+    }
+    // Call-capture personality binding (decision 3) — callCapture.personalityId: <id>
+    const ccap = line.match(/^callCapture\.personalityId:\s*(.+)$/);
+    if (ccap) {
+      callCaptureKv.personalityId = ccap[1].trim().replace(/^["']|["']$/g, '');
       continue;
     }
     // Phase 3 — memoryConsolidation.<field>: <value>  (silent flush config).
@@ -1822,6 +3579,14 @@ function parseConfigYaml(src: string): EthosConfig {
       kv['a2a.enabled'] = a2a[1].trim().replace(/^["']|["']$/g, '');
       continue;
     }
+    // security.trusted_github_orgs: <org,list>
+    // `(.*)` — not `(.+)` — on purpose: an empty value is a meaningful
+    // configuration ("trust no org"), distinct from the key being absent.
+    const sec = line.match(/^security\.trusted_github_orgs:\s*(.*)$/);
+    if (sec) {
+      kv['security.trusted_github_orgs'] = sec[1].trim().replace(/^["']|["']$/g, '');
+      continue;
+    }
     // nightlyPass.<field>: <value>
     const np = line.match(/^nightlyPass\.(\w+):\s*(.+)$/);
     if (np) {
@@ -1838,6 +3603,20 @@ function parseConfigYaml(src: string): EthosConfig {
     const kp = line.match(/^kanbanPoll\.(\w+):\s*(.+)$/);
     if (kp) {
       kv[`kanbanPoll.${kp[1]}`] = kp[2].trim().replace(/^["']|["']$/g, '');
+      continue;
+    }
+    // idleWatcher.<field>: <value>  (scale-to-zero watcher; default OFF).
+    const iw = line.match(
+      /^idleWatcher\.(enabled|idleThresholdMs|startupCooldownMs|checkIntervalMs|wakePathConfirmed):\s*(.+)$/,
+    );
+    if (iw) {
+      idleWatcherKv[iw[1]] = iw[2].trim().replace(/^["']|["']$/g, '');
+      continue;
+    }
+    // pauseClockCorrection.<field>: <value>  (resume clock correction; default OFF).
+    const pcc = line.match(/^pauseClockCorrection\.(enabled|thresholdMs):\s*(.+)$/);
+    if (pcc) {
+      pauseClockCorrectionKv[pcc[1]] = pcc[2].trim().replace(/^["']|["']$/g, '');
       continue;
     }
     // memoryCapture.<field>: <value>
@@ -1918,29 +3697,29 @@ function parseConfigYaml(src: string): EthosConfig {
         ...(auxiliaryWebKv.baseUrl ? { baseUrl: auxiliaryWebKv.baseUrl } : {}),
       }
     : undefined;
-  const auxiliaryAsr:
-    | { provider: string; model?: string; apiKey?: string; baseUrl?: string }
-    | undefined = auxiliaryAsrKv.provider
-    ? {
-        provider: auxiliaryAsrKv.provider,
-        ...(auxiliaryAsrKv.model ? { model: auxiliaryAsrKv.model } : {}),
-        ...(auxiliaryAsrKv.apiKey ? { apiKey: auxiliaryAsrKv.apiKey } : {}),
-        ...(auxiliaryAsrKv.baseUrl ? { baseUrl: auxiliaryAsrKv.baseUrl } : {}),
-      }
-    : undefined;
-  const auxiliaryTts:
-    | { provider: string; model?: string; apiKey?: string; voice?: string; baseUrl?: string }
-    | undefined = auxiliaryTtsKv.provider
-    ? {
-        provider: auxiliaryTtsKv.provider,
-        ...(auxiliaryTtsKv.model ? { model: auxiliaryTtsKv.model } : {}),
-        ...(auxiliaryTtsKv.apiKey ? { apiKey: auxiliaryTtsKv.apiKey } : {}),
-        ...(auxiliaryTtsKv.voice ? { voice: auxiliaryTtsKv.voice } : {}),
-        ...(auxiliaryTtsKv.baseUrl ? { baseUrl: auxiliaryTtsKv.baseUrl } : {}),
-      }
-    : undefined;
+  // The default entries go through the SAME builder as their rosters, so a
+  // field the default supports is a field the roster supports. The timeout
+  // shim wraps the two DEFAULT entries here rather than living inside the
+  // builder, because the builder also builds roster entries — whose `timeout`
+  // was always seconds on every surface and must not be rewritten.
+  const auxTimeoutWarnings: string[] = [];
+  const auxiliaryAsr = normalizeAuxEntryTimeout(
+    buildVoiceProviderEntry<SttProviderEntry>(auxiliaryAsrKv, STT_ENTRY_FIELDS),
+    'auxiliary.asr.timeout',
+    auxTimeoutWarnings,
+  );
+  const auxiliaryTts = normalizeAuxEntryTimeout(
+    buildVoiceProviderEntry<TtsProviderEntry>(auxiliaryTtsKv, TTS_ENTRY_FIELDS),
+    'auxiliary.tts.timeout',
+    auxTimeoutWarnings,
+  );
+  const webPort = webKv.port ? parseBoundedInt(webKv.port, 1, 65535) : undefined;
   const webConfig: WebConfig | undefined =
-    webKv.search_backend || webKv.extract_backend
+    webKv.search_backend ||
+    webKv.extract_backend ||
+    webKv.host ||
+    webPort !== undefined ||
+    webKv.corsOrigins
       ? {
           ...(webKv.search_backend === 'exa' ||
           webKv.search_backend === 'tavily' ||
@@ -1950,6 +3729,9 @@ function parseConfigYaml(src: string): EthosConfig {
           ...(webKv.extract_backend === 'htmltext'
             ? { extract_backend: webKv.extract_backend }
             : {}),
+          ...(webKv.host ? { host: webKv.host } : {}),
+          ...(webPort !== undefined ? { port: webPort } : {}),
+          ...(webKv.corsOrigins ? { corsOrigins: webKv.corsOrigins } : {}),
         }
       : undefined;
   const modelCatalogProviders: Record<string, { url: string }> | undefined =
@@ -1977,7 +3759,12 @@ function parseConfigYaml(src: string): EthosConfig {
       : undefined;
   const models = buildModelProfiles(modelsKv);
   const compaction = buildCompaction(compactionKv);
+  const callCapture = callCaptureKv.personalityId
+    ? { personalityId: callCaptureKv.personalityId }
+    : undefined;
   const memoryConsolidation = buildMemoryConsolidation(memoryConsolidationKv);
+  const idleWatcher = buildIdleWatcher(idleWatcherKv);
+  const pauseClockCorrection = buildPauseClockCorrection(pauseClockCorrectionKv);
   const parsedMaxBytes = logsRotationKv.maxBytes ? Number(logsRotationKv.maxBytes) : undefined;
   const parsedMaxFiles = logsRotationKv.maxFiles ? Number(logsRotationKv.maxFiles) : undefined;
   const logsRotation =
@@ -2008,18 +3795,123 @@ function parseConfigYaml(src: string): EthosConfig {
         }
       : undefined;
   const awsConfig: AwsConfig | undefined = awsSecrets ? { secrets: awsSecrets } : undefined;
+  const telemetryLangfuse: TelemetryLangfuseExportConfig | undefined =
+    Object.keys(telemetryLangfuseKv).length > 0
+      ? {
+          ...(telemetryLangfuseKv.enabled === 'true'
+            ? { enabled: true }
+            : telemetryLangfuseKv.enabled === 'false'
+              ? { enabled: false }
+              : {}),
+          ...(telemetryLangfuseKv.baseUrl ? { baseUrl: telemetryLangfuseKv.baseUrl } : {}),
+          ...(telemetryLangfuseKv.publicKey ? { publicKey: telemetryLangfuseKv.publicKey } : {}),
+          ...(telemetryLangfuseKv.secretKey ? { secretKey: telemetryLangfuseKv.secretKey } : {}),
+        }
+      : undefined;
+  const telemetryConfig: TelemetryConfig | undefined = telemetryLangfuse
+    ? { export: { langfuse: telemetryLangfuse } }
+    : undefined;
   const telegramResult = buildTelegramBots(telegramBotsKv);
   const slackResult = buildSlackApps(slackAppsKv);
   const whatsappResult = buildWhatsApps(whatsappKv);
   const voiceResult = buildVoiceBots(voiceBotsKv);
   const voiceLiveKitResult = buildVoiceLiveKit(voiceLiveKitKv);
   const voiceTrunkResult = buildVoiceTrunk(voiceTrunkKv);
+  const voiceInboundResult = buildVoiceInbound(voiceInboundKv, voiceInboundOwnerKv);
+  const voiceBargeInResult = buildVoiceBargeIn(voiceBargeInKv);
+  const voiceFiller = Object.keys(voiceFillerKv).length > 0 ? voiceFillerKv : undefined;
+  // Legacy `voice.providers.*` entries merge UNDER the new spelling, per name
+  // and per field, so a file mid-migration keeps whichever fields it has
+  // already moved and the new key always wins.
+  const mergedTtsProvidersKv: Record<string, Record<string, string>> = {};
+  for (const [name, fields] of Object.entries(voiceTtsProvidersLegacyKv)) {
+    mergedTtsProvidersKv[name] = { ...fields };
+  }
+  for (const [name, fields] of Object.entries(voiceTtsProvidersKv)) {
+    mergedTtsProvidersKv[name] = { ...mergedTtsProvidersKv[name], ...fields };
+  }
+  const voiceTtsProviders = buildVoiceProviderRoster<TtsProviderEntry>(
+    mergedTtsProvidersKv,
+    TTS_ENTRY_FIELDS,
+  );
+  const voiceSttProviders = buildVoiceProviderRoster<SttProviderEntry>(
+    voiceSttProvidersKv,
+    STT_ENTRY_FIELDS,
+  );
+  const voiceRealtimeProviders = buildVoiceProviderRoster<RealtimeProviderEntry>(
+    voiceRealtimeProvidersKv,
+    REALTIME_ENTRY_FIELDS,
+  );
+  // `default` and `sessionBudgetUsd` stand on their own: a deployment can name a
+  // default (or cap a session) before its roster is typed in, and losing the cap
+  // because the roster is momentarily empty would be the wrong way round.
+  const voiceRealtime =
+    voiceRealtimeProviders !== undefined ||
+    voiceRealtimeDefault !== undefined ||
+    voiceRealtimeSessionBudgetUsd !== undefined
+      ? {
+          ...(voiceRealtimeProviders ? { providers: voiceRealtimeProviders } : {}),
+          ...(voiceRealtimeDefault ? { default: voiceRealtimeDefault } : {}),
+          ...(voiceRealtimeSessionBudgetUsd !== undefined
+            ? { sessionBudgetUsd: voiceRealtimeSessionBudgetUsd }
+            : {}),
+        }
+      : undefined;
+  // Each of the three V2 sub-sections stands on its own: an operator can cap
+  // artifact disk before naming an ffmpeg path, and vice versa.
+  const voiceChannels = Object.keys(voiceChannelsKv).length > 0 ? voiceChannelsKv : undefined;
+  const voiceTranscode = Object.keys(voiceTranscodeKv).length > 0 ? voiceTranscodeKv : undefined;
+  const voiceArtifacts = Object.keys(voiceArtifactsKv).length > 0 ? voiceArtifactsKv : undefined;
+  // The wake block stands on its own too: an operator can set the engine before
+  // typing a single route, and a routes-only config is the common first edit.
+  const voiceWakeRoutes = buildWakeRoutes(voiceWakeRoutesKv);
+  const voiceWakeNodes = buildWakeNodes(voiceWakeNodesKv);
+  const voiceWake =
+    Object.keys(voiceWakeKv).length > 0 ||
+    voiceWakeRoutes !== undefined ||
+    voiceWakeNodes !== undefined
+      ? {
+          ...voiceWakeKv,
+          ...(voiceWakeRoutes ? { routes: voiceWakeRoutes } : {}),
+          ...(voiceWakeNodes ? { nodes: voiceWakeNodes } : {}),
+        }
+      : undefined;
   const voiceSection =
-    voiceResult.bots.length > 0 || voiceLiveKitResult.livekit || voiceTrunkResult.trunk
+    voiceResult.bots.length > 0 ||
+    voiceLiveKitResult.livekit ||
+    voiceTrunkResult.trunk ||
+    voiceInboundResult.inbound ||
+    voiceBargeInResult.bargeIn ||
+    voiceFiller !== undefined ||
+    voiceTrustedPluginsRaw !== undefined ||
+    voiceDefaultMode !== undefined ||
+    voiceTier !== undefined ||
+    voiceTtsProviders !== undefined ||
+    voiceSttProviders !== undefined ||
+    voiceRealtime !== undefined ||
+    voiceChannels !== undefined ||
+    voiceTranscode !== undefined ||
+    voiceArtifacts !== undefined ||
+    voiceWake !== undefined
       ? {
           bots: voiceResult.bots,
           ...(voiceLiveKitResult.livekit ? { livekit: voiceLiveKitResult.livekit } : {}),
           ...(voiceTrunkResult.trunk ? { trunk: voiceTrunkResult.trunk } : {}),
+          ...(voiceInboundResult.inbound ? { inbound: voiceInboundResult.inbound } : {}),
+          ...(voiceBargeInResult.bargeIn ? { bargeIn: voiceBargeInResult.bargeIn } : {}),
+          ...(voiceFiller ? { filler: voiceFiller } : {}),
+          ...(voiceTrustedPluginsRaw !== undefined
+            ? { trustedPlugins: splitList(voiceTrustedPluginsRaw) }
+            : {}),
+          ...(voiceDefaultMode ? { defaultMode: voiceDefaultMode } : {}),
+          ...(voiceTier ? { tier: voiceTier } : {}),
+          ...(voiceTtsProviders ? { tts: { providers: voiceTtsProviders } } : {}),
+          ...(voiceSttProviders ? { stt: { providers: voiceSttProviders } } : {}),
+          ...(voiceRealtime ? { realtime: voiceRealtime } : {}),
+          ...(voiceChannels ? { channels: voiceChannels } : {}),
+          ...(voiceTranscode ? { transcode: voiceTranscode } : {}),
+          ...(voiceArtifacts ? { artifacts: voiceArtifacts } : {}),
+          ...(voiceWake ? { wake: voiceWake } : {}),
         }
       : undefined;
   const teams = buildTeamsConfig(teamsKv);
@@ -2034,6 +3926,8 @@ function parseConfigYaml(src: string): EthosConfig {
     ...voiceResult.errors,
     ...voiceLiveKitResult.errors,
     ...voiceTrunkResult.errors,
+    ...voiceInboundResult.errors,
+    ...voiceBargeInResult.errors,
     ...webhooksResult.errors,
   ];
 
@@ -2080,9 +3974,26 @@ function parseConfigYaml(src: string): EthosConfig {
       const n = Number(kv.requestTimeoutMs);
       return Number.isFinite(n) && n > 0 ? Math.floor(n) : undefined;
     })(),
+    // An approval SLA is a non-negative integer millisecond count. Unlike
+    // `requestTimeoutMs`, `0` is MEANINGFUL here ("no timeout, wait forever")
+    // rather than a typo — only negatives and non-numbers are dropped.
+    approvalTimeoutMs: (() => {
+      const raw = kv.approvalTimeoutMs;
+      // An empty or blank value (`approvalTimeoutMs: ""`, or a bare key with
+      // trailing whitespace) is a typo, not an intentional `0` — and
+      // `Number('')` is `0`, which would silently disable the auto-deny
+      // backstop. Treat it as absent so the store default applies.
+      if (raw === undefined || raw.trim() === '') return undefined;
+      const n = Number(raw);
+      return Number.isFinite(n) && n >= 0 ? Math.floor(n) : undefined;
+    })(),
     maxRetries: (() => {
-      if (kv.maxRetries === undefined) return undefined;
-      const n = Number(kv.maxRetries);
+      const raw = kv.maxRetries;
+      // Same empty-value hazard as `approvalTimeoutMs`: `0` is meaningful
+      // ("never retry"), so `Number('') === 0` would silently turn retries off
+      // on a typo instead of falling through to the provider default.
+      if (raw === undefined || raw.trim() === '') return undefined;
+      const n = Number(raw);
       return Number.isInteger(n) && n >= 0 ? n : undefined;
     })(),
     // Lane 3(a) — a payload limit is a positive integer char count; anything
@@ -2096,6 +4007,7 @@ function parseConfigYaml(src: string): EthosConfig {
     toolSettings: Object.keys(toolSettings).length > 0 ? toolSettings : undefined,
     models,
     compaction,
+    callCapture,
     activeContext,
     providers: providers.length > 0 ? providers : undefined,
     telegramToken: kv.telegramToken,
@@ -2132,7 +4044,8 @@ function parseConfigYaml(src: string): EthosConfig {
     backgroundMaxConcurrent: backgroundKv.max_concurrent
       ? Number(backgroundKv.max_concurrent)
       : undefined,
-    background: buildBackgroundConfig(backgroundKv),
+    background: buildBackgroundConfig(backgroundKv, backgroundAcpAgentsKv),
+    cron: buildCronConfig(cronKv),
     displayBellOnComplete: displayKv.bell_on_complete === 'true' ? true : undefined,
     displayMemoryNotices:
       displayKv.memory_notices === 'true'
@@ -2143,6 +4056,8 @@ function parseConfigYaml(src: string): EthosConfig {
     displayDebugPanel: displayKv.debug_panel === 'true' ? true : undefined,
     displayDebugPanelModel: displayKv.debug_panel_model || undefined,
     displayStreamingEdits: parseStreamingEdits(displayKv.streaming_edits),
+    displayCallStyle: parseCallStyle(displayKv.call_style),
+    displayCallAccent: parseCallAccent(displayKv.call_accent),
     quick_commands,
     channelToolsets,
     channelFilter,
@@ -2161,12 +4076,24 @@ function parseConfigYaml(src: string): EthosConfig {
     modelCatalog,
     logs: logsRotation ? { rotation: logsRotation } : undefined,
     aws: awsConfig,
+    telemetry: telemetryConfig,
     webBaseUrl: process.env.ETHOS_PUBLIC_URL ?? kv.webBaseUrl ?? undefined,
     storage: buildStorageConfig(kv),
     pluginsAutoInstall,
     admin:
       kv['admin.enabled'] !== undefined ? { enabled: kv['admin.enabled'] === 'true' } : undefined,
     a2a: kv['a2a.enabled'] !== undefined ? { enabled: kv['a2a.enabled'] === 'true' } : undefined,
+    // `!== undefined` — not truthiness: an empty value must survive as `[]`
+    // (trust no org) instead of collapsing back to the shipped default.
+    security:
+      kv['security.trusted_github_orgs'] !== undefined
+        ? {
+            trustedGitHubOrgs: kv['security.trusted_github_orgs']
+              .split(/[,\s]+/)
+              .map((o) => o.trim())
+              .filter((o) => o.length > 0),
+          }
+        : undefined,
     nightlyPass:
       kv['nightlyPass.enabled'] !== undefined || kv['nightlyPass.cron'] !== undefined
         ? {
@@ -2219,11 +4146,14 @@ function parseConfigYaml(src: string): EthosConfig {
             ...(kv['kanbanPoll.boardPath'] ? { boardPath: kv['kanbanPoll.boardPath'] } : {}),
           }
         : undefined,
+    idleWatcher,
+    pauseClockCorrection,
   };
   // Stash parse errors so the strict loader can surface them at boot.
   // readRawConfig (used by CLI commands that don't gateway-boot) ignores them
   // and continues with whatever entries did parse.
   parseErrorsByConfig.set(config, parseErrors);
+  parseWarningsByConfig.set(config, auxTimeoutWarnings);
   return config;
 }
 
@@ -2232,11 +4162,31 @@ function parseConfigYaml(src: string): EthosConfig {
 // have to remember to ignore.
 const parseErrorsByConfig = new WeakMap<EthosConfig, string[]>();
 
+// The NON-fatal sibling: notices the parse can emit without the config being
+// wrong. Kept out of `parseErrors` because the gateway exits non-zero on any
+// entry there, and a boot warning that boots nothing is worse than the thing
+// it warns about.
+const parseWarningsByConfig = new WeakMap<EthosConfig, string[]>();
+
+/**
+ * Parse-time notices for a config returned by {@link readRawConfig} — the read
+ * side of the two side-tables, for commands that read the raw config instead of
+ * going through {@link loadConfigStrict} (`ethos doctor`).
+ */
+export function configParseNotices(config: EthosConfig): { errors: string[]; warnings: string[] } {
+  return {
+    errors: parseErrorsByConfig.get(config) ?? [],
+    warnings: parseWarningsByConfig.get(config) ?? [],
+  };
+}
+
 /**
  * Strict loader used by the gateway boot path. Returns the parsed config
- * along with any deprecation messages from the legacy → list-shape shim
- * AND any parse-time errors for malformed bot entries. Boot prints both
- * and exits non-zero on errors so a typo never silently boots zero bots.
+ * along with any deprecation messages — from the legacy → list-shape shim and
+ * from the parse itself — AND any parse-time errors for malformed bot entries.
+ * Boot prints both and exits non-zero on errors so a typo never silently boots
+ * zero bots. A deprecation is never fatal; a parse error always is, which is
+ * why a value the parse quietly repaired belongs in `deprecations`.
  */
 export interface LoadedConfig {
   config: EthosConfig;
@@ -2252,9 +4202,10 @@ export async function loadConfigStrict(
   if (!parsed) return null;
   if (secrets) validateNoPlaintextSecrets(parsed);
   const parseErrors = parseErrorsByConfig.get(parsed) ?? [];
+  const parseWarnings = parseWarningsByConfig.get(parsed) ?? [];
   const resolved = secrets ? await resolveConfigSecrets(parsed, secrets) : parsed;
   const { config, deprecations } = applyPlatformShim(resolved);
-  return { config, parseErrors, deprecations };
+  return { config, parseErrors, deprecations: [...parseWarnings, ...deprecations] };
 }
 
 // ---------------------------------------------------------------------------
@@ -2273,12 +4224,15 @@ const SECRET_FIELD_NAMES = new Set([
   'appToken',
   'signingSecret',
   'password',
+  'webhookSecret',
+  'webhookSecretToken',
   'emailPassword',
   'discordToken',
   'slackBotToken',
   'slackAppToken',
   'slackSigningSecret',
   'telegramToken',
+  'secretKey',
 ]);
 
 /**
@@ -2294,8 +4248,12 @@ const SECRET_FIELD_NAMES = new Set([
  *
  * Skips validation entirely when no SecretsResolver is configured (local dev
  * without secrets infrastructure).
+ *
+ * The check is purely structural, so the parameter is any on-disk object
+ * graph, not only `EthosConfig` — `writeKeys` runs the same gate over
+ * `~/.ethos/keys.json`.
  */
-export function validateNoPlaintextSecrets(config: EthosConfig): void {
+export function validateNoPlaintextSecrets(config: object): void {
   const violations: Array<{ field: string; label: string }> = [];
   walkStringValues(config, '', (field, value) => {
     const stripped = value.replace(SECRETS_REF_RE, '');
@@ -2365,11 +4323,281 @@ function parseStreamingEdits(v: string | undefined): EthosConfig['displayStreami
   return v === 'off' || v === 'dms' || v === 'all' ? v : undefined;
 }
 
+function parseCallStyle(v: string | undefined): EthosConfig['displayCallStyle'] {
+  return v === 'liquid' || v === 'orb' || v === 'rings' || v === 'personality' ? v : undefined;
+}
+
+/** `personality` or a 6-digit hex. Anything else is dropped, not coerced. */
+function parseCallAccent(v: string | undefined): string | undefined {
+  if (v === 'personality') return v;
+  return v !== undefined && /^#[0-9a-fA-F]{6}$/.test(v) ? v : undefined;
+}
+
 function parseToolPreviewLength(v: string | undefined): number | undefined {
   if (!v) return undefined;
   const n = Number(v);
   if (!Number.isFinite(n) || n < 0 || !Number.isInteger(n)) return undefined;
   return n;
+}
+
+/**
+ * Platform ids that may carry a `voice.channels.<platform>.ttsOut` override —
+ * the channels that have an adapter able to act on it. Anything else is
+ * ignored on read.
+ */
+export const VOICE_CHANNEL_PLATFORMS = [
+  'telegram',
+  'slack',
+  'discord',
+  'whatsapp',
+  'email',
+] as const;
+
+/** Exported so the RPC boundary (web-api's ConfigService) can REFUSE a platform
+ *  id this parser would silently drop, rather than keeping a second list. */
+export function isVoiceChannelPlatform(v: string): boolean {
+  return (VOICE_CHANNEL_PLATFORMS as readonly string[]).includes(v);
+}
+
+/** An integer inside [min, max], or `undefined` — never a clamped near-miss. */
+function parseBoundedInt(v: string, min: number, max: number): number | undefined {
+  const n = Number(v);
+  return Number.isInteger(n) && n >= min && n <= max ? n : undefined;
+}
+
+/**
+ * A finite number inside [min, max], or `undefined` — the float sibling of
+ * `parseBoundedInt`, for the one wake bound (`sensitivity`) that is a fraction
+ * rather than a count. Same contract: never a clamped near-miss.
+ */
+function parseBoundedFloat(v: string, min: number, max: number): number | undefined {
+  const n = Number(v);
+  return Number.isFinite(n) && n >= min && n <= max ? n : undefined;
+}
+
+/**
+ * `voice.wake.routes.<id>` — phrase → personality.
+ *
+ * A route missing `phrase` OR `personality` is DROPPED entirely rather than
+ * half-built: a phrase-less route can never fire and a personality-less one
+ * would wake nothing, so keeping the remnant would hide the typo behind an
+ * entry that looks configured in the Settings UI.
+ */
+function buildWakeRoutes(
+  kv: Record<string, Record<string, string>>,
+): Record<string, WakeRouteConfig> | undefined {
+  const out: Record<string, WakeRouteConfig> = {};
+  for (const [id, fields] of Object.entries(kv)) {
+    const phrase = fields.phrase;
+    const personality = fields.personality;
+    if (!phrase || !personality) continue;
+    // `privileged` and `enabled` stay ABSENT unless written: the consumer must
+    // be able to tell "operator said no" from "operator never said".
+    out[id] = {
+      phrase,
+      personality,
+      ...(fields.privileged === 'true'
+        ? { privileged: true }
+        : fields.privileged === 'false'
+          ? { privileged: false }
+          : {}),
+      ...(fields.enabled === 'true'
+        ? { enabled: true }
+        : fields.enabled === 'false'
+          ? { enabled: false }
+          : {}),
+    };
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+/** `voice.wake.nodes.<id>` — per-satellite overrides. An entry with no
+ *  recognised field is dropped rather than kept as an empty object. */
+function buildWakeNodes(
+  kv: Record<string, Record<string, string>>,
+): Record<string, { inputDevice?: string; enabled?: boolean }> | undefined {
+  const out: Record<string, { inputDevice?: string; enabled?: boolean }> = {};
+  for (const [id, fields] of Object.entries(kv)) {
+    const entry = {
+      ...(fields.inputDevice ? { inputDevice: fields.inputDevice } : {}),
+      ...(fields.enabled === 'true'
+        ? { enabled: true }
+        : fields.enabled === 'false'
+          ? { enabled: false }
+          : {}),
+    };
+    if (Object.keys(entry).length > 0) out[id] = entry;
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+function isAudioFormat(v: string | undefined): v is 'opus' | 'mp3' | 'wav' | 'pcm' {
+  return v === 'opus' || v === 'mp3' || v === 'wav' || v === 'pcm';
+}
+
+// ---------------------------------------------------------------------------
+// Voice provider entries — ONE builder and ONE serializer, parameterised by
+// field set.
+//
+// There are five places an entry shape is read or written: the default TTS
+// entry (`auxiliary.tts`), the TTS roster (`voice.tts.providers.<name>`), the
+// default STT entry (`auxiliary.asr`), the STT roster
+// (`voice.stt.providers.<name>`), and the realtime roster
+// (`voice.realtime.providers.<name>`, which has no `auxiliary.*` default —
+// `voice.realtime.default` names one of its own entries instead). Five
+// hand-written field lists would be five chances for a roster to quietly stop
+// supporting a field its default still has. So the field set is DATA — a spec
+// keyed to the entry interface, checked by the compiler — and the code that
+// walks it is written once.
+// ---------------------------------------------------------------------------
+
+/**
+ * One field of a voice-provider entry. `name` is constrained to a key of `E`
+ * other than `provider` (which every entry has and which is always written
+ * first), so a spec cannot name a field the interface does not carry.
+ */
+interface VoiceEntryFieldSpec<E> {
+  name: Exclude<keyof E, 'provider'> & string;
+  kind: 'string' | 'audioFormat' | 'positiveNumber';
+}
+
+const TTS_ENTRY_FIELDS: readonly VoiceEntryFieldSpec<TtsProviderEntry>[] = [
+  { name: 'model', kind: 'string' },
+  { name: 'apiKey', kind: 'string' },
+  { name: 'voice', kind: 'string' },
+  { name: 'baseUrl', kind: 'string' },
+  { name: 'command', kind: 'string' },
+  { name: 'outputFormat', kind: 'audioFormat' },
+  { name: 'timeout', kind: 'positiveNumber' },
+  { name: 'maxTextLength', kind: 'positiveNumber' },
+];
+
+const STT_ENTRY_FIELDS: readonly VoiceEntryFieldSpec<SttProviderEntry>[] = [
+  { name: 'model', kind: 'string' },
+  { name: 'apiKey', kind: 'string' },
+  { name: 'baseUrl', kind: 'string' },
+  { name: 'command', kind: 'string' },
+  { name: 'timeout', kind: 'positiveNumber' },
+];
+
+/**
+ * No `command` and no `timeout`: a realtime provider is a duplex SESSION, not a
+ * request you shell out for and time out. `costPerMinuteUsd` rides the existing
+ * `positiveNumber` kind, so a rate of `0` reads as absent — which is what it
+ * means for accrual, since a free minute costs nothing to charge.
+ */
+const REALTIME_ENTRY_FIELDS: readonly VoiceEntryFieldSpec<RealtimeProviderEntry>[] = [
+  { name: 'model', kind: 'string' },
+  { name: 'apiKey', kind: 'string' },
+  { name: 'baseUrl', kind: 'string' },
+  { name: 'voice', kind: 'string' },
+  { name: 'costPerMinuteUsd', kind: 'positiveNumber' },
+];
+
+/**
+ * One entry from its flat `<field>: <value>` map. No `provider` → no entry: an
+ * entry that names nothing resolvable is dropped rather than half-built.
+ *
+ * The single `as E` is backed by the compiler: `VoiceEntryFieldSpec<E>` only
+ * admits names that are keys of `E`, and every value written is one of the
+ * kinds those keys declare.
+ */
+function buildVoiceProviderEntry<E extends { provider: string }>(
+  kv: Record<string, string>,
+  fields: readonly VoiceEntryFieldSpec<E>[],
+): E | undefined {
+  if (!kv.provider) return undefined;
+  const out: Record<string, string | number> = { provider: kv.provider };
+  for (const field of fields) {
+    const raw = kv[field.name];
+    if (!raw) continue;
+    if (field.kind === 'positiveNumber') {
+      const n = Number(raw);
+      if (Number.isFinite(n) && n > 0) out[field.name] = n;
+    } else if (field.kind === 'audioFormat') {
+      if (isAudioFormat(raw)) out[field.name] = raw;
+    } else {
+      out[field.name] = raw;
+    }
+  }
+  return out as E;
+}
+
+/** The largest `timeout` a *correct* config can express: the roster field's own
+ *  declared ceiling (`min(1).max(3600)` in `@ethosagent/web-contracts`). */
+const AUX_TIMEOUT_MAX_SECONDS = 3600;
+
+/**
+ * SHIM — `auxiliary.{asr,tts}.timeout` is SECONDS (the `command-stt` /
+ * `command-tts` providers multiply it by 1000), but the web UI shipped the
+ * field labelled and bounded in milliseconds, so existing configs carry values
+ * like `30000` — an 8h20m budget, i.e. a timeout that never fires.
+ *
+ * A value above {@link AUX_TIMEOUT_MAX_SECONDS} is therefore read as
+ * milliseconds. That threshold is above the maximum a correct config can
+ * express, so there is no legitimate value in the misfire range — no single
+ * speech request has a multi-hour budget.
+ *
+ * Removed in the minor release after the one that ships the seconds label —
+ * tracked as `aux-timeout-shim-removal` in `plan/uncompleted-tasks.md`.
+ */
+export function normalizeAuxTimeoutSeconds(raw: number): { seconds: number; coerced: boolean } {
+  if (raw <= AUX_TIMEOUT_MAX_SECONDS) return { seconds: raw, coerced: false };
+  return {
+    seconds: Math.min(AUX_TIMEOUT_MAX_SECONDS, Math.max(1, Math.round(raw / 1000))),
+    coerced: true,
+  };
+}
+
+/** {@link normalizeAuxTimeoutSeconds} over one default entry, appending the
+ *  one-per-load warning to `warnings` when it coerces. */
+function normalizeAuxEntryTimeout<E extends { timeout?: number }>(
+  entry: E | undefined,
+  key: string,
+  warnings: string[],
+): E | undefined {
+  if (!entry || entry.timeout === undefined) return entry;
+  const { seconds, coerced } = normalizeAuxTimeoutSeconds(entry.timeout);
+  if (!coerced) return entry;
+  warnings.push(
+    `${key}: ${entry.timeout} looks like milliseconds — this field is seconds. ` +
+      `Reading it as ${seconds}s. Set it to ${seconds} in ~/.ethos/config.yaml to make it ` +
+      'explicit; this shim is removed in the next minor.',
+  );
+  return { ...entry, timeout: seconds };
+}
+
+/**
+ * Serialize one entry under `prefix` (`auxiliary.tts`, `auxiliary.asr`, or a
+ * `voice.<kind>.providers.<name>` roster key). The write-side mirror of
+ * {@link buildVoiceProviderEntry}, walking the SAME spec — a round-trip cannot
+ * lose a field on only one of the two paths.
+ */
+function voiceProviderEntryLines<E extends { provider: string }>(
+  prefix: string,
+  entry: E,
+  fields: readonly VoiceEntryFieldSpec<E>[],
+): string[] {
+  const lines = [`${prefix}.provider: ${entry.provider}`];
+  for (const field of fields) {
+    const value = entry[field.name];
+    if (!value) continue;
+    lines.push(`${prefix}.${field.name}: ${String(value)}`);
+  }
+  return lines;
+}
+
+/** A whole roster (`voice.tts.providers.*` / `voice.stt.providers.*`). */
+function buildVoiceProviderRoster<E extends { provider: string }>(
+  kv: Record<string, Record<string, string>>,
+  fields: readonly VoiceEntryFieldSpec<E>[],
+): Record<string, E> | undefined {
+  const out: Record<string, E> = {};
+  for (const [name, entryKv] of Object.entries(kv)) {
+    const entry = buildVoiceProviderEntry(entryKv, fields);
+    if (entry) out[name] = entry;
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
 }
 
 function buildRetentionConfig(kv: Record<string, string>): RetentionConfig | undefined {
@@ -2402,7 +4630,10 @@ function buildRetentionConfig(kv: Record<string, string>): RetentionConfig | und
  * field undefined; the wiring layer distinguishes absence from a tool-level
  * explicit null.
  */
-function buildBackgroundConfig(kv: Record<string, string>): BackgroundConfig | undefined {
+function buildBackgroundConfig(
+  kv: Record<string, string>,
+  acpAgentsKv: Record<string, Record<string, string>>,
+): BackgroundConfig | undefined {
   const cfg: BackgroundConfig = {};
   if (kv.enabled !== undefined) cfg.enabled = kv.enabled === 'true';
   const num = (raw: string | undefined): number | undefined => {
@@ -2428,6 +4659,57 @@ function buildBackgroundConfig(kv: Record<string, string>): BackgroundConfig | u
   if (heartbeatMs !== undefined) cfg.heartbeatMs = heartbeatMs;
   const retentionDays = num(kv.retention_days);
   if (retentionDays !== undefined) cfg.retentionDays = retentionDays;
+  // `pi_image` is the switch: no image, no Pi runner (see `BackgroundConfig.pi`).
+  if (kv.pi_image) {
+    const memoryMb = num(kv.pi_memory_mb);
+    cfg.pi = {
+      image: kv.pi_image,
+      ...(memoryMb !== undefined ? { memoryMb } : {}),
+      ...(kv.pi_config_dir ? { configDir: kv.pi_config_dir } : {}),
+    };
+  }
+  // `background.acp.agents.<name>.{command,args,image}` — each entry needs
+  // both `command` and `image` to be usable; an incomplete entry is dropped
+  // rather than half-built, same discipline the voice provider roster uses
+  // for a missing `provider` field.
+  const acpAgents: Record<string, { command: string; args?: string[]; image: string }> = {};
+  for (const [name, fields] of Object.entries(acpAgentsKv)) {
+    if (!fields.command || !fields.image) continue;
+    const args = fields.args
+      ? fields.args
+          .split(',')
+          .map((s) => s.trim())
+          .filter(Boolean)
+      : undefined;
+    acpAgents[name] = {
+      command: fields.command,
+      ...(args && args.length > 0 ? { args } : {}),
+      image: fields.image,
+    };
+  }
+  if (Object.keys(acpAgents).length > 0) cfg.acp = { agents: acpAgents };
+  if (Object.keys(cfg).length === 0) return undefined;
+  return cfg;
+}
+
+/**
+ * Parse the `cron:` section from the shared `cron.trigger.*` / `cron.arming.*`
+ * flat-key bag (see `CronTopLevelConfig`). Returns undefined when no
+ * recognised field is present so `config.cron` is only set when the section
+ * actually appears — an absent section means "today's behavior, unchanged".
+ */
+function buildCronConfig(kv: Record<string, string>): CronTopLevelConfig | undefined {
+  const trigger: NonNullable<CronTopLevelConfig['trigger']> = {};
+  if (kv['trigger.local'] !== undefined) trigger.local = kv['trigger.local'] === 'true';
+  if (kv['trigger.external'] !== undefined) trigger.external = kv['trigger.external'] === 'true';
+
+  const arming: NonNullable<CronTopLevelConfig['arming']> = {};
+  if (kv['arming.backend']) arming.backend = kv['arming.backend'];
+  if (kv['arming.fireUrl']) arming.fireUrl = kv['arming.fireUrl'];
+
+  const cfg: CronTopLevelConfig = {};
+  if (Object.keys(trigger).length > 0) cfg.trigger = trigger;
+  if (Object.keys(arming).length > 0) cfg.arming = arming;
   if (Object.keys(cfg).length === 0) return undefined;
   return cfg;
 }
@@ -2585,7 +4867,21 @@ function buildTelegramBots(kv: Record<number, Record<string, string>>): {
       continue;
     }
     if (!result.bind) continue;
-    bots.push({ token: entry.token, bind: result.bind, ...(entry.id ? { id: entry.id } : {}) });
+    const bot: TelegramBotConfig = {
+      token: entry.token,
+      bind: result.bind,
+      ...(entry.id ? { id: entry.id } : {}),
+    };
+    // Presence, not truthiness: `dropPendingUpdates: false` must survive as
+    // boolean `false` rather than collapsing into "absent" (which means "let
+    // the adapter's `?? true` default apply").
+    if (entry.useWebhook !== undefined) bot.useWebhook = entry.useWebhook === 'true';
+    if (entry.webhookUrl) bot.webhookUrl = entry.webhookUrl;
+    if (entry.webhookSecretToken) bot.webhookSecretToken = entry.webhookSecretToken;
+    if (entry.dropPendingUpdates !== undefined) {
+      bot.dropPendingUpdates = entry.dropPendingUpdates === 'true';
+    }
+    bots.push(bot);
   }
   return { bots, errors };
 }
@@ -2600,7 +4896,9 @@ function buildSlackApps(kv: Record<number, Record<string, string>>): {
     const entry = kv[idx];
     if (!entry) continue;
     const label = `slack.apps[${idx}]`;
-    const missing = (['botToken', 'appToken', 'signingSecret'] as const).filter((k) => !entry[k]);
+    // `appToken` is NOT required here: it is needed only in Socket Mode, and
+    // that is enforced by the adapter, which knows the resolved mode (§8).
+    const missing = (['botToken', 'signingSecret'] as const).filter((k) => !entry[k]);
     if (missing.length > 0) {
       errors.push(`${label}: missing required field(s) ${missing.join(', ')}.`);
       continue;
@@ -2611,13 +4909,57 @@ function buildSlackApps(kv: Record<number, Record<string, string>>): {
       continue;
     }
     if (!result.bind) continue;
-    apps.push({
+    const app: SlackAppConfig = {
       botToken: entry.botToken,
-      appToken: entry.appToken,
       signingSecret: entry.signingSecret,
       bind: result.bind,
       ...(entry.id ? { id: entry.id } : {}),
-    });
+      ...(entry.appToken ? { appToken: entry.appToken } : {}),
+    };
+    const mode = entry.defaultChannelMode;
+    if (mode) {
+      if (mode !== 'mention_only' && mode !== 'thread_follow' && mode !== 'all') {
+        errors.push(
+          `${label}: invalid defaultChannelMode '${mode}' (expected 'mention_only', 'thread_follow' or 'all').`,
+        );
+        continue;
+      }
+      app.defaultChannelMode = mode;
+    }
+    if (entry.receiptReaction) app.receiptReaction = entry.receiptReaction;
+    if (entry.allowedSlashUsers) {
+      const users = entry.allowedSlashUsers
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean);
+      if (users.length > 0) app.allowedSlashUsers = users;
+    }
+    if (entry.allowedBotIds) {
+      const botIds = entry.allowedBotIds
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean);
+      if (botIds.length > 0) app.allowedBotIds = botIds;
+    }
+    if (entry.longReplyThresholdChars) {
+      const threshold = Number(entry.longReplyThresholdChars);
+      if (!Number.isInteger(threshold) || threshold < 0) {
+        errors.push(
+          `${label}: invalid longReplyThresholdChars '${entry.longReplyThresholdChars}' (expected a non-negative integer; 0 disables).`,
+        );
+        continue;
+      }
+      app.longReplyThresholdChars = threshold;
+    }
+    // `mode.socket` / `mode.http` arrive as flat `mode.<field>` keys, the same
+    // way `bind.<field>` does. Absent = undefined, so the adapter's defaults
+    // (socket on, http off) apply and today's behaviour is unchanged.
+    const transport: NonNullable<SlackAppConfig['mode']> = {};
+    if (entry['mode.socket'] !== undefined) transport.socket = entry['mode.socket'] === 'true';
+    if (entry['mode.http'] !== undefined) transport.http = entry['mode.http'] === 'true';
+    if (Object.keys(transport).length > 0) app.mode = transport;
+    if (entry.webhookPath) app.webhookPath = entry.webhookPath;
+    apps.push(app);
   }
   return { apps, errors };
 }
@@ -2711,7 +5053,9 @@ function buildVoiceLiveKit(kv: Record<string, string>): {
   return { livekit: { url, apiKey, apiSecret }, errors: [] };
 }
 
-const VOICE_TRUNK_PROVIDERS = ['twilio', 'telnyx', 'generic'] as const;
+const VOICE_TRUNK_PROVIDERS = ['twilio', 'telnyx', 'generic', 'livekit'] as const;
+
+const VOICE_TRUNK_CODECS = ['opus', 'g711'] as const;
 
 function buildVoiceTrunk(kv: Record<string, string>): {
   trunk?: VoiceTrunkConfig;
@@ -2720,7 +5064,8 @@ function buildVoiceTrunk(kv: Record<string, string>): {
   // Absent block is valid — SIP trunk keys are optional.
   if (Object.keys(kv).length === 0) return { errors: [] };
   const errors: string[] = [];
-  const { provider, trunkId, fromNumber, username, password } = kv;
+  const { provider, trunkId, fromNumber, username, password, webhookSecret, webhookPath, codec } =
+    kv;
   if (!provider) errors.push("voice.trunk: missing required field 'provider'.");
   else if (!(VOICE_TRUNK_PROVIDERS as readonly string[]).includes(provider)) {
     errors.push(
@@ -2728,6 +5073,14 @@ function buildVoiceTrunk(kv: Record<string, string>): {
     );
   }
   if (!trunkId) errors.push("voice.trunk: missing required field 'trunkId'.");
+  if (webhookPath !== undefined && !webhookPath.startsWith('/')) {
+    errors.push(`voice.trunk.webhookPath: must start with '/' (got '${webhookPath}').`);
+  }
+  if (codec !== undefined && !(VOICE_TRUNK_CODECS as readonly string[]).includes(codec)) {
+    errors.push(
+      `voice.trunk.codec: invalid codec '${codec}' (expected one of: ${VOICE_TRUNK_CODECS.join(', ')}).`,
+    );
+  }
   if (errors.length > 0) return { errors };
   return {
     trunk: {
@@ -2736,9 +5089,158 @@ function buildVoiceTrunk(kv: Record<string, string>): {
       ...(fromNumber ? { fromNumber } : {}),
       ...(username ? { username } : {}),
       ...(password ? { password } : {}),
+      ...(webhookSecret ? { webhookSecret } : {}),
+      ...(webhookPath ? { webhookPath } : {}),
+      ...(codec ? { codec: codec as VoiceTrunkConfig['codec'] } : {}),
     },
     errors: [],
   };
+}
+
+const VOICE_PREWARM_MODES = ['allowlisted', 'none', 'all'] as const;
+const VOICE_INBOUND_FIELDS = [
+  'allowlist',
+  'receptionist',
+  'concurrencyCap',
+  'perCallerPerHour',
+  'dailyBudgetUsd',
+  'prewarm',
+] as const;
+const VOICE_INBOUND_OWNER_FIELDS = ['platform', 'chatId', 'botKey'] as const;
+
+/**
+ * `voice.inbound.*` — who reaches the number and what answering may cost.
+ *
+ * Loud rather than lenient, unlike the `voice.wake.*` knobs above: a dropped
+ * wake threshold costs a slightly worse match, while a dropped budget or
+ * concurrency cap costs real money on a surface strangers can dial. Every
+ * malformed value is a parse error naming its own key.
+ */
+function buildVoiceInbound(
+  kv: Record<string, string>,
+  ownerKv: Record<string, string>,
+): { inbound?: VoiceInboundConfig; errors: string[] } {
+  if (Object.keys(kv).length === 0 && Object.keys(ownerKv).length === 0) return { errors: [] };
+  const errors: string[] = [];
+  for (const field of Object.keys(kv)) {
+    if (!(VOICE_INBOUND_FIELDS as readonly string[]).includes(field)) {
+      errors.push(
+        `voice.inbound.${field}: unknown field (expected one of: ${VOICE_INBOUND_FIELDS.join(', ')}).`,
+      );
+    }
+  }
+  for (const field of Object.keys(ownerKv)) {
+    if (!(VOICE_INBOUND_OWNER_FIELDS as readonly string[]).includes(field)) {
+      errors.push(
+        `voice.inbound.owner.${field}: unknown field (expected one of: ${VOICE_INBOUND_OWNER_FIELDS.join(', ')}).`,
+      );
+    }
+  }
+  /** A count is a positive integer; zero and fractions are refusals, not caps. */
+  const positiveInt = (field: string): number | undefined => {
+    const raw = kv[field];
+    if (raw === undefined) return undefined;
+    const n = Number(raw);
+    if (!Number.isInteger(n) || n < 1) {
+      errors.push(`voice.inbound.${field}: must be a positive integer (got '${raw}').`);
+      return undefined;
+    }
+    return n;
+  };
+  const concurrencyCap = positiveInt('concurrencyCap');
+  const perCallerPerHour = positiveInt('perCallerPerHour');
+  let dailyBudgetUsd: number | undefined;
+  if (kv.dailyBudgetUsd !== undefined) {
+    const n = Number(kv.dailyBudgetUsd);
+    if (!Number.isFinite(n) || n <= 0) {
+      errors.push(
+        `voice.inbound.dailyBudgetUsd: must be a positive number (got '${kv.dailyBudgetUsd}').`,
+      );
+    } else {
+      dailyBudgetUsd = n;
+    }
+  }
+  if (
+    kv.prewarm !== undefined &&
+    !(VOICE_PREWARM_MODES as readonly string[]).includes(kv.prewarm)
+  ) {
+    errors.push(
+      `voice.inbound.prewarm: invalid value '${kv.prewarm}' (expected one of: ${VOICE_PREWARM_MODES.join(', ')}).`,
+    );
+  }
+  const { platform, chatId, botKey } = ownerKv;
+  if (Object.keys(ownerKv).length > 0) {
+    if (!platform) errors.push("voice.inbound.owner: missing required field 'platform'.");
+    if (!chatId) errors.push("voice.inbound.owner: missing required field 'chatId'.");
+  }
+  if (errors.length > 0) return { errors };
+  const allowlist = splitList(kv.allowlist);
+  return {
+    inbound: {
+      ...(allowlist.length > 0 ? { allowlist } : {}),
+      ...(kv.receptionist ? { receptionist: kv.receptionist } : {}),
+      ...(concurrencyCap !== undefined ? { concurrencyCap } : {}),
+      ...(perCallerPerHour !== undefined ? { perCallerPerHour } : {}),
+      ...(dailyBudgetUsd !== undefined ? { dailyBudgetUsd } : {}),
+      ...(kv.prewarm ? { prewarm: kv.prewarm as VoiceInboundConfig['prewarm'] } : {}),
+      ...(platform && chatId ? { owner: { platform, chatId, ...(botKey ? { botKey } : {}) } } : {}),
+    },
+    errors: [],
+  };
+}
+
+const VOICE_BARGE_IN_SURFACES = ['call', 'satellite', 'browser'] as const;
+const VOICE_BARGE_IN_FIELDS = ['energyThreshold', 'minSpeechMs', 'silenceMs'] as const;
+
+/**
+ * `voice.bargeIn.<surface>.<field>` — VAD thresholds per audio surface.
+ *
+ * Loud for the same reason `voice.inbound` is: a threshold typed against a
+ * misspelled surface or field is not "a slightly different setting", it is no
+ * setting at all, and the operator would only find out from a line the agent
+ * kept talking over.
+ */
+function buildVoiceBargeIn(kv: Record<string, Record<string, string>>): {
+  bargeIn?: VoiceBargeInConfig;
+  errors: string[];
+} {
+  if (Object.keys(kv).length === 0) return { errors: [] };
+  const errors: string[] = [];
+  const out: VoiceBargeInConfig = {};
+  for (const [surface, fields] of Object.entries(kv)) {
+    if (!(VOICE_BARGE_IN_SURFACES as readonly string[]).includes(surface)) {
+      errors.push(
+        `voice.bargeIn.${surface}: unknown surface (expected one of: ${VOICE_BARGE_IN_SURFACES.join(', ')}).`,
+      );
+      continue;
+    }
+    const tuning: VoiceBargeInTuning = {};
+    for (const [field, raw] of Object.entries(fields)) {
+      const key = `voice.bargeIn.${surface}.${field}`;
+      if (field === 'energyThreshold') {
+        const n = Number(raw);
+        if (!Number.isFinite(n) || n <= 0 || n > 1) {
+          errors.push(`${key}: must be a number in (0, 1] (got '${raw}').`);
+        } else {
+          tuning.energyThreshold = n;
+        }
+      } else if (field === 'minSpeechMs' || field === 'silenceMs') {
+        const n = Number(raw);
+        if (!Number.isInteger(n) || n < 1) {
+          errors.push(`${key}: must be a positive integer (got '${raw}').`);
+        } else {
+          tuning[field] = n;
+        }
+      } else {
+        errors.push(
+          `${key}: unknown field (expected one of: ${VOICE_BARGE_IN_FIELDS.join(', ')}).`,
+        );
+      }
+    }
+    out[surface as VoiceBargeInSurface] = tuning;
+  }
+  if (errors.length > 0) return { errors };
+  return { bargeIn: out, errors: [] };
 }
 
 function buildTeamsConfig(
@@ -3102,6 +5604,55 @@ function buildMemoryConsolidation(
     if (raw === undefined) continue;
     const n = Number(raw);
     if (Number.isFinite(n) && n >= 0) result[key] = Math.floor(n);
+  }
+  return Object.keys(result).length > 0 ? result : undefined;
+}
+
+/**
+ * Assemble the scale-to-zero idle-watcher config from parsed flat keys.
+ * Returns `undefined` when nothing survives, so the watcher stays off.
+ *
+ * Both booleans are parsed STRICTLY — only a literal `true` is true. A typo
+ * must never arm the watcher, and `wakePathConfirmed` is an operator
+ * attestation, not a guess.
+ *
+ * The three `*Ms` keys require a POSITIVE integer. A blank value
+ * (`idleThresholdMs: ""`, or a key whose value is only whitespace) is a typo,
+ * and `Number('')` is `0` — which here would mean a zero-length idle threshold
+ * or a zero cooldown, i.e. exit on the first sample. Treat blank as absent so
+ * the manager default applies. (Unlike `approvalTimeoutMs`, `0` is meaningless
+ * for all three, so it is rejected rather than honoured.)
+ */
+function buildIdleWatcher(kv: Record<string, string>): EthosConfig['idleWatcher'] | undefined {
+  const result: NonNullable<EthosConfig['idleWatcher']> = {};
+  if (kv.enabled !== undefined) result.enabled = kv.enabled === 'true';
+  if (kv.wakePathConfirmed !== undefined)
+    result.wakePathConfirmed = kv.wakePathConfirmed === 'true';
+  for (const key of ['idleThresholdMs', 'startupCooldownMs', 'checkIntervalMs'] as const) {
+    const raw = kv[key];
+    if (raw === undefined || raw.trim() === '') continue;
+    const n = Number(raw);
+    if (Number.isInteger(n) && n > 0) result[key] = n;
+  }
+  return Object.keys(result).length > 0 ? result : undefined;
+}
+
+/**
+ * Parse `pauseClockCorrection.<field>` (plan/phases/clock-tolerance-pass.md §7).
+ * Returns undefined when the section is absent so `enabled` stays false by
+ * omission — an absent section must mean today's behaviour, byte for byte.
+ * A blank or non-positive `thresholdMs` is treated as absent so the detector's
+ * own default applies, the same hazard `buildIdleWatcher` guards against.
+ */
+function buildPauseClockCorrection(
+  kv: Record<string, string>,
+): EthosConfig['pauseClockCorrection'] | undefined {
+  const result: NonNullable<EthosConfig['pauseClockCorrection']> = {};
+  if (kv.enabled !== undefined) result.enabled = kv.enabled === 'true';
+  const raw = kv.thresholdMs;
+  if (raw !== undefined && raw.trim() !== '') {
+    const n = Number(raw);
+    if (Number.isInteger(n) && n > 0) result.thresholdMs = n;
   }
   return Object.keys(result).length > 0 ? result : undefined;
 }

@@ -2,7 +2,14 @@ import { useQuery } from '@tanstack/react-query';
 import { Button, Spin, Typography } from 'antd';
 import { useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
-import { Activity, Board, Roster, TaskDrawer } from '../components/kanban/KanbanBoard';
+import {
+  Activity,
+  Board,
+  BulkActionBar,
+  Roster,
+  TaskDrawer,
+} from '../components/kanban/KanbanBoard';
+import { useKanbanBoardSync } from '../hooks/useKanbanBoardSync';
 import { rpc } from '../rpc';
 
 // Per-team Control Center.
@@ -25,12 +32,33 @@ export function TeamControlCenter() {
   const [showArchived, setShowArchived] = useState(false);
   const [showActivity, setShowActivity] = useState(false);
   const [showRoster, setShowRoster] = useState(false);
+  const [selectMode, setSelectMode] = useState(false);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+
+  const onSelectModeChange = (next: boolean) => {
+    setSelectMode(next);
+    if (!next) setSelected(new Set());
+  };
+  const onToggleSelect = (id: string) =>
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+
+  useKanbanBoardSync(name.length > 0 ? name : null);
 
   const { data, isLoading, error, refetch, isFetching } = useQuery({
     queryKey: ['kanban', 'board', name],
     queryFn: () => rpc.kanban.getBoard({ team: name }),
     enabled: name.length > 0,
-    refetchInterval: 2_000,
+  });
+
+  const agentsQuery = useQuery({
+    queryKey: ['kanban', 'agents', name],
+    queryFn: () => rpc.kanban.listAgents({ team: name }),
+    enabled: name.length > 0 && selected.size > 0,
   });
 
   if (isLoading) {
@@ -105,12 +133,25 @@ export function TeamControlCenter() {
           teamName={name}
           showArchived={showArchived}
           onSelect={setSelectedTaskId}
+          selectMode={selectMode}
+          onSelectModeChange={onSelectModeChange}
+          selected={selected}
+          onToggleSelect={onToggleSelect}
         />
         {showActivity && (
           <Activity events={board.recentEvents} tasks={board.tasks} onSelect={setSelectedTaskId} />
         )}
         {showRoster && <Roster snapshot={board} />}
       </div>
+
+      {selected.size > 0 && (
+        <BulkActionBar
+          selectedIds={Array.from(selected)}
+          teamName={name}
+          agents={agentsQuery.data?.agents ?? []}
+          onDone={() => setSelected(new Set())}
+        />
+      )}
 
       <TaskDrawer
         task={selectedTask ?? null}

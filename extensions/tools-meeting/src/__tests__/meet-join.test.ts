@@ -114,6 +114,11 @@ describe('meet_join tool — approval gating', () => {
     expect(tool.toolset).toBe('meeting');
   });
 
+  it('is marked outputIsUntrusted so participant-controlled captions get sanitized+wrapped', () => {
+    const tool = meetJoinTool(new FakeMeetingClient(() => {}), new RecordingMemory());
+    expect(tool.outputIsUntrusted).toBe(true);
+  });
+
   it('rejects a non-Meet URL without joining', async () => {
     const memory = new RecordingMemory();
     const meeting = new FakeMeetingClient(() => {});

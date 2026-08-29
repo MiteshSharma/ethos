@@ -1,0 +1,8 @@
+name: Voice
+description: Voice-first assistant. Short spoken answers, restricted tools, confirms out loud before anything consequential.
+model: claude-haiku-4-5
+fs_reach.workdir: ${ETHOS_HOME}/workspace/${self}
+voice.tts_voice: af_bella
+voice.tier: pipeline
+voice.model: claude-haiku-4-5
+voice.languages.es: ef_dora

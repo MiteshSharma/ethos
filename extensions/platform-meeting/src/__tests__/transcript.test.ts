@@ -48,6 +48,10 @@ describe('buildTranscriptArtifact', () => {
     expect(artifact.markdown).toContain('## Transcript');
     expect(artifact.markdown).toContain('- **Alice Chen:** So I think we should ship Phase D');
     expect(artifact.markdown).toContain('https://meet.google.com/abc-defg-hij');
+    // Participant-controlled speech (captions + speaker names) is wrapped in
+    // the provenance fence before it's persisted to trusted memory.
+    expect(artifact.markdown).toContain('<untrusted source="meeting" tool="meet_join">');
+    expect(artifact.markdown).toContain('</untrusted>');
   });
 
   it('handles an empty transcript honestly (captions not host-enabled)', () => {
@@ -58,6 +62,9 @@ describe('buildTranscriptArtifact', () => {
     });
     expect(artifact.summary).toBe('No captions were captured.');
     expect(artifact.markdown).toContain('Captions must be enabled by the meeting host');
+    // The framework-authored placeholder is not participant-controlled, so it
+    // stays unwrapped.
+    expect(artifact.markdown).not.toContain('<untrusted');
   });
 });
 

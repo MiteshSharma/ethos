@@ -1,4 +1,7 @@
+import type { SseEvent } from '@ethosagent/web-contracts';
 import { Hono } from 'hono';
+// Side-effect import: augments Hono's `ContextVariableMap` with `requestId`.
+import 'hono/request-id';
 import { streamSSE } from 'hono/streaming';
 import type { ChatService } from '../features/chat/service';
 
@@ -27,6 +30,7 @@ export function sseRoutes(opts: SseRoutesOptions) {
     const sessionId = c.req.param('id');
     const lastIdHeader = c.req.header('Last-Event-ID');
     const sinceSeq = parseLastEventId(lastIdHeader);
+    const requestId: string | undefined = c.get('requestId');
 
     return streamSSE(c, async (stream) => {
       let unsubscribe: (() => void) | null = null;
@@ -36,6 +40,22 @@ export function sseRoutes(opts: SseRoutesOptions) {
         aborted = true;
         if (unsubscribe) unsubscribe();
       });
+
+      // B1 — lead with the stream's own `x-request-id`. It is on the response
+      // header too, but `EventSource` exposes no response headers to the
+      // browser, so header-only would leave the web UI with no id to quote.
+      // Deliberately NO `id:` line: this frame is per-connection, not a
+      // buffered session event, so it must not move the client's
+      // `Last-Event-ID` cursor or renumber the replay that follows.
+      if (requestId) {
+        const meta: SseEvent = { type: 'stream_meta', requestId };
+        try {
+          await stream.writeSSE({ data: JSON.stringify(meta) });
+        } catch {
+          // Client hung up before the first byte — the subscribe path below
+          // handles teardown; nothing to do here.
+        }
+      }
 
       unsubscribe = opts.chat.subscribe(sessionId, sinceSeq, async (buffered) => {
         // Skip once the stream is aborted (tab-switch / disconnect). Writing to

@@ -13,6 +13,7 @@ import type {
   DryRunToolPlan,
   RunOptions,
 } from '@ethosagent/core';
+import type { ClarifySurfaceType } from '@ethosagent/types';
 import { InMemorySteerSink } from './in-memory-steer-sink';
 
 export type BridgeOpts = Omit<RunOptions, 'abortSignal'>;
@@ -29,7 +30,15 @@ export interface BridgeOptions {
 interface BridgeEventMap {
   text_delta: [text: string];
   thinking_delta: [thinking: string];
-  tool_start: [toolCallId: string, toolName: string, args: unknown];
+  // Lane E (tools-as-code-api) — the trailing `audience` mirrors the optional
+  // AgentEvent field: 'internal' marks in-script inner calls that user-facing
+  // consumers must not render. Trailing/optional so 3-arg handlers keep working.
+  tool_start: [
+    toolCallId: string,
+    toolName: string,
+    args: unknown,
+    audience: 'internal' | 'user' | 'dashboard' | undefined,
+  ];
   tool_progress: [toolName: string, message: string, percent: number | undefined];
   tool_end: [
     toolCallId: string,
@@ -38,17 +47,23 @@ interface BridgeEventMap {
     durationMs: number,
     result: string | undefined,
     structured: Record<string, unknown> | undefined,
+    audience: 'internal' | 'user' | 'dashboard' | undefined,
   ];
   usage: [inputTokens: number, outputTokens: number, estimatedCostUsd: number];
   error: [error: string, code: string];
-  done: [text: string, turnCount: number];
+  // B3 — the trailing `traceId` mirrors the optional AgentEvent field: the
+  // turn's observability trace id, or undefined when no adapter is wired.
+  // Trailing/optional so existing 2-arg handlers keep working.
+  done: [text: string, turnCount: number, traceId: string | undefined];
   idle: [];
   queued: [input: string, queueDepth: number];
-  /** Phase 5 — emitted once per turn with the resolved provider/model and routing source. */
+  /** Phase 5 — emitted once per turn with the resolved provider/model and routing source.
+   *  B3 — the trailing `traceId` is the turn identity; see `done` above. */
   run_start: [
     provider: string,
     model: string,
     source: 'team-coordinator' | 'team-personality' | 'personality' | 'global',
+    traceId: string | undefined,
   ];
   /** Emitted when dryRun is active — carries the planned tool calls. */
   dry_run_summary: [plan: DryRunToolPlan[], capped: number];
@@ -71,7 +86,9 @@ export class AgentBridge extends EventEmitter<BridgeEventMap> {
   // Clarify registrations are held on the bridge, not on the loop's
   // ClarifyBridge directly, so they survive `replaceLoop`: each rebuilt loop
   // gets a fresh ClarifyBridge that must be re-bound to the surface.
-  private clarifyPresenter: ClarifyPresenter | undefined;
+  private clarifyPresenter:
+    | { surfaceType: ClarifySurfaceType; presenter: ClarifyPresenter }
+    | undefined;
   private readonly clarifyResolvedListeners = new Set<ClarifyResolvedListener>();
   private activeSink: InMemorySteerSink | null = null;
 
@@ -98,13 +115,14 @@ export class AgentBridge extends EventEmitter<BridgeEventMap> {
   }
 
   /**
-   * Register how this surface presents a pending clarify. The registration is
-   * remembered and re-applied to the new loop's ClarifyBridge on
-   * `replaceLoop`, so clarify keeps working after a model switch.
+   * Register how this surface presents a pending clarify for its own surface
+   * type (G2). The registration is remembered and re-applied to the new
+   * loop's ClarifyBridge on `replaceLoop`, so clarify keeps working after a
+   * model switch.
    */
-  setClarifyPresenter(presenter: ClarifyPresenter): void {
-    this.clarifyPresenter = presenter;
-    this.loop.clarifyBridge?.setPresenter(presenter);
+  setClarifyPresenter(surfaceType: ClarifySurfaceType, presenter: ClarifyPresenter): void {
+    this.clarifyPresenter = { surfaceType, presenter };
+    this.loop.clarifyBridge?.registerPresenter(surfaceType, presenter);
   }
 
   /**
@@ -198,7 +216,9 @@ export class AgentBridge extends EventEmitter<BridgeEventMap> {
     // surface's clarify registrations so they keep working after the swap.
     const cb = this.loop.clarifyBridge;
     if (!cb) return;
-    if (this.clarifyPresenter) cb.setPresenter(this.clarifyPresenter);
+    if (this.clarifyPresenter) {
+      cb.registerPresenter(this.clarifyPresenter.surfaceType, this.clarifyPresenter.presenter);
+    }
     for (const listener of this.clarifyResolvedListeners) cb.onResolved(listener);
   }
 
@@ -245,13 +265,13 @@ export class AgentBridge extends EventEmitter<BridgeEventMap> {
           case 'done':
             clearTimeout(timeoutHandle);
             this.flushText();
-            this.emit('done', event.text, event.turnCount);
+            this.emit('done', event.text, event.turnCount, event.traceId);
             break;
           case 'thinking_delta':
             this.emit('thinking_delta', event.thinking);
             break;
           case 'tool_start':
-            this.emit('tool_start', event.toolCallId, event.toolName, event.args);
+            this.emit('tool_start', event.toolCallId, event.toolName, event.args, event.audience);
             break;
           case 'tool_progress':
             this.emit('tool_progress', event.toolName, event.message, event.percent);
@@ -265,6 +285,7 @@ export class AgentBridge extends EventEmitter<BridgeEventMap> {
               event.durationMs,
               event.result,
               event.structured,
+              event.audience,
             );
             break;
           case 'usage':
@@ -276,7 +297,7 @@ export class AgentBridge extends EventEmitter<BridgeEventMap> {
             this.emit('error', event.error, event.code);
             break;
           case 'run_start':
-            this.emit('run_start', event.provider, event.model, event.source);
+            this.emit('run_start', event.provider, event.model, event.source, event.traceId);
             break;
           case 'dry_run_summary':
             this.emit('dry_run_summary', event.plan, event.capped);

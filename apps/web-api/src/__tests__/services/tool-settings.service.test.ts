@@ -58,7 +58,11 @@ describe('ToolSettingsService', () => {
 
     const library = new SkillsLibrary({ dataDir: DATA, storage });
     personalities = new PersonalitiesService({ personalities: registry, library });
-    config = new ConfigRepository({ dataDir: DATA, storage });
+    config = new ConfigRepository({
+      dataDir: DATA,
+      storage,
+      secrets: new InMemorySecretsResolver(),
+    });
 
     const toolRegistry = new DefaultToolRegistry();
     toolRegistry.register(webSearchStub);

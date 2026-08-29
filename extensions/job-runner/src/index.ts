@@ -1,6 +1,25 @@
 import type { AgentLoop } from '@ethosagent/core';
-import type { BackgroundJob, HookRegistry, JobStore } from '@ethosagent/types';
-import { capText, extractSummarySection, SUMMARY_INSTRUCTION, SUMMARY_RESULT_CAP } from './summary';
+import type {
+  ArtifactChange,
+  BackgroundJob,
+  BackgroundJobStatus,
+  HookRegistry,
+  JobRunner,
+  JobRunnerRegistry,
+  JobStore,
+  RunUpdateDigest,
+  SteerSink,
+} from '@ethosagent/types';
+import { EthosJobRunner } from './ethos-job-runner';
+import { BoundedLogBuffer } from './log-buffer';
+import { capText, extractSummarySection, SUMMARY_RESULT_CAP } from './summary';
+
+export { ETHOS_RUNNER_NAME, EthosJobRunner } from './ethos-job-runner';
+export { BoundedLogBuffer, type RunnerLogLine } from './log-buffer';
+// Every background job runs in summary mode, whatever the runner: the parent
+// re-ingests only a bounded digest. Exported so an out-of-process runner
+// appends the SAME instruction rather than growing a third copy of it.
+export { SUMMARY_INSTRUCTION } from './summary';
 
 // ---------------------------------------------------------------------------
 // BackgroundExecutor — the detached background engine for background sub-agents.
@@ -38,7 +57,20 @@ export interface BackgroundExecutorConfig {
 
 export interface BackgroundExecutorDeps {
   store: JobStore;
+  /**
+   * The in-process AgentLoop, used to build the DEFAULT runner (`EthosJobRunner`).
+   * Still required: every deployment has one, and a job with no `runner` on its
+   * row runs on it.
+   */
   loop: AgentLoop;
+  /**
+   * Registry of additional runners, consulted when a job row names one
+   * (`BackgroundJob.runner`). Only RESOLVED instances are visible — see
+   * `DefaultJobRunnerRegistry`. Absent means "this deployment runs the default
+   * runner and nothing else"; a row naming any other runner then fails with a
+   * clear error rather than silently running on Ethos.
+   */
+  runners?: JobRunnerRegistry;
   /** This process's identity, stamped on claims. */
   owner: string;
   config: BackgroundExecutorConfig;
@@ -50,6 +82,19 @@ export interface BackgroundExecutorDeps {
    * addition to any `onComplete` subscribers. Absent in standalone deployments.
    */
   hooks?: HookRegistry;
+  /**
+   * Phase 5 — withdraw whatever question this job is parked on when its run is
+   * aborted (cancel, spend cap, shutdown drain). Injected rather than imported:
+   * the thing that owns pending questions is `ClarifyBridge` in
+   * `@ethosagent/core`, and the executor deliberately does not know who asked
+   * (§13.1's "THE SEAM" comment on `markJobBlocked` says the same).
+   *
+   * Without it, cancelling a `blocked` run aborts the controller but leaves the
+   * question live on someone's phone for the rest of its window, and the
+   * escalator's `finally` — which is what un-pauses the heartbeat — never runs.
+   * Absent means today's behaviour: abort only.
+   */
+  cancelInteractions?: (jobId: string) => Promise<void>;
 }
 
 const DEFAULT_POLL_MS = 3_000;
@@ -67,6 +112,44 @@ const DEFAULT_POLL_MS = 3_000;
 const TEXT_CHUNK_CHARS = 2_000;
 const TEXT_FLUSH_MS = 5_000;
 const TEXT_MAX_EVENTS = 100;
+
+/**
+ * Per-artifact cap on the unified diff a runner hands over. The file list
+ * (`path`, `+n / −n`) is always exact; only the diff BODY is bounded, because a
+ * single generated-file rewrite would otherwise put megabytes in one audit row
+ * that the inspector then has to read back. Same `[truncated]` marker the text
+ * sink uses.
+ */
+const ARTIFACT_DIFF_CAP = 20_000;
+
+// --- Runner-log persistence bounds (I-LOG1) ---------------------------------
+// A runner subprocess's own stdout/stderr is batched into `runner_log`
+// job_events rather than one write per line: `@ethosagent/sqlite` is
+// synchronous, so a chatty child would otherwise burst many blocking writes
+// onto the executor's event loop. Two independent triggers flush a batch,
+// whichever fires first — the same two-trigger shape `createTextSink` already
+// uses for the child's own text output, for the same reason:
+const LOG_BATCH_LINES = 20;
+const LOG_BATCH_MS = 250;
+// Hard cap on lines held in the IN-MEMORY buffer awaiting flush, so a
+// subprocess that out-produces the flush cadence cannot grow memory without
+// bound. In normal operation the batch triggers above empty this well before
+// it's ever reached — it's a defensive backstop, not the retention cap. The
+// OLDEST buffered line is dropped first here — for a log tail, the freshest
+// output is the one worth keeping.
+const LOG_MAX_BUFFERED_LINES = 100;
+// Separate concern: the total number of runner-log LINES persisted to the
+// store over a job's whole lifetime. Without this, a long-running chatty
+// job's `runner_log` rows would accumulate in `job_events` forever — the
+// same unbounded-growth failure mode `TEXT_MAX_EVENTS` above already guards
+// against for `text` rows. Matches `task_logs`'s existing `tail` cap (100
+// events) and `TEXT_MAX_EVENTS`, per the plan's Open Question 4
+// recommendation. Uses the SAME cap-and-stop policy as `TEXT_MAX_EVENTS`
+// (write one final marker, then stop), not oldest-eviction: evicting already
+// -persisted rows would need a delete/prune method on `JobStore`, which the
+// interface doesn't have — out of scope here, and worth a follow-up if a
+// true "keep the freshest" retention policy is wanted later.
+const LOG_TOTAL_MAX_LINES = 100;
 
 function errMsg(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
@@ -88,9 +171,59 @@ function shortArgDigest(args: unknown): string {
   return collapsed.length > 120 ? `${collapsed.slice(0, 117)}...` : collapsed;
 }
 
+/**
+ * The card's `now` line for a tool call in flight: what the run is doing right
+ * now, in one line. A FACT — never phrasing the copy module owns.
+ */
+function nowLine(toolName: string, args: unknown): string {
+  const arg = shortArgDigest(args);
+  const line = arg ? `${toolName} ${arg}` : toolName;
+  return line.length > NOW_LINE_MAX_CHARS ? `${line.slice(0, NOW_LINE_MAX_CHARS - 1)}…` : line;
+}
+
+/**
+ * A no-op steer sink. The executor does not (yet) thread surface-typed steering
+ * into a background job — nothing pushes onto a detached child's sink today.
+ * The runner still receives a real sink so it never has to special-case its
+ * absence, and wiring one up later is a change at the executor, not at every
+ * runner.
+ */
+const NOOP_STEER_SINK: SteerSink = {
+  push: () => false,
+  drain: () => [],
+  depth: () => 0,
+};
+
+/**
+ * Minimum gap between two digests for the SAME run (D11's "≤1 Hz per run").
+ * Per-run, not global: ten concurrent runs each get their own second.
+ */
+const RUN_UPDATE_MIN_INTERVAL_MS = 1_000;
+
+/** Cap on the `now` line — one line of the card, not a paragraph. */
+const NOW_LINE_MAX_CHARS = 120;
+
+/**
+ * Live digest state for one running job. `pending` is the trailing-edge timer:
+ * a burst of tool events inside one second collapses into a single publish at
+ * the end of it, which is the whole point of coalescing rather than throttling.
+ */
+interface RunDigest {
+  parentSessionKey: string;
+  runner: string;
+  status: BackgroundJobStatus;
+  now: string;
+  startedAt: number;
+  spendUsd: number;
+  toolCount: number;
+  lastPublishedAt: number;
+  pending: ReturnType<typeof setTimeout> | undefined;
+}
+
 export class BackgroundExecutor {
   private readonly store: JobStore;
-  private readonly loop: AgentLoop;
+  private readonly defaultRunner: JobRunner;
+  private readonly runners: JobRunnerRegistry | undefined;
   /** This process's identity, stamped on claims. Read-only so callers (e.g. the
    *  gateway creating `/background` jobs) can stamp the same owner this executor
    *  claims by. */
@@ -99,14 +232,27 @@ export class BackgroundExecutor {
   private readonly pollMs: number;
   private readonly log: ((msg: string) => void) | undefined;
   private readonly hooks: HookRegistry | undefined;
+  private readonly cancelInteractions: ((jobId: string) => Promise<void>) | undefined;
 
   /** onComplete subscribers, invoked after every terminal transition. */
   private readonly completeHandlers: Array<(job: BackgroundJob) => void> = [];
+
+  /** onRunUpdate subscribers — the run card's liveness feed (G9/D11/D20). */
+  private readonly runUpdateHandlers: Array<(update: RunUpdateDigest) => void> = [];
+
+  /** job.id -> its coalescing digest state, for the lifetime of the run. */
+  private readonly runDigests = new Map<string, RunDigest>();
 
   /** job.id -> the job's dedicated (unchained) AbortController. */
   private readonly activeControllers = new Map<string, AbortController>();
   /** job.id -> the in-flight run promise (resolves after its finish is written). */
   private readonly activeRuns = new Map<string, Promise<void>>();
+  /**
+   * job.id -> the requestId the run is parked on. Membership is the heartbeat
+   * pause: while a job is in here its beat is skipped, so `reclaimStale` (which
+   * only sweeps `running`) cannot mistake a parked question for a dead host.
+   */
+  private readonly blockedJobs = new Map<string, string>();
 
   private started = false;
   private shuttingDown = false;
@@ -122,12 +268,14 @@ export class BackgroundExecutor {
 
   constructor(deps: BackgroundExecutorDeps) {
     this.store = deps.store;
-    this.loop = deps.loop;
+    this.defaultRunner = new EthosJobRunner(deps.loop);
+    this.runners = deps.runners;
     this.owner = deps.owner;
     this.config = deps.config;
     this.pollMs = deps.config.pollMs ?? DEFAULT_POLL_MS;
     this.log = deps.log;
     this.hooks = deps.hooks;
+    this.cancelInteractions = deps.cancelInteractions;
   }
 
   /**
@@ -144,9 +292,56 @@ export class BackgroundExecutor {
     };
   }
 
+  /**
+   * Subscribe to the coalesced run digest (G9/D11/D20). Fires at most once per
+   * `RUN_UPDATE_MIN_INTERVAL_MS` per run, plus immediately on every status
+   * change — a status is the one thing that must never wait out a coalescing
+   * window. Returns an unsubscribe function.
+   *
+   * The executor publishes a routing key (`parentSessionKey`) and facts; it does
+   * NOT know what a session stream is. The surface that owns one — web-api's
+   * SSE layer — resolves the key to its own session and maps the digest onto
+   * its `run.update` push event.
+   */
+  onRunUpdate(handler: (update: RunUpdateDigest) => void): () => void {
+    this.runUpdateHandlers.push(handler);
+    return () => {
+      const idx = this.runUpdateHandlers.indexOf(handler);
+      if (idx !== -1) this.runUpdateHandlers.splice(idx, 1);
+    };
+  }
+
   /** Number of jobs currently running in the pool. */
   activeCount(): number {
     return this.activeControllers.size;
+  }
+
+  /**
+   * Park a run on a human answer: `running` -> `blocked`, and pause its
+   * heartbeat. THE SEAM for whatever asks the question — a runner's gate
+   * escalating through the clarify bridge, or a child turn's own `clarify` call.
+   * The executor deliberately does not know which; it only owns the state.
+   *
+   * Cancellation is NOT paused with the beat: the blocked card offers Cancel, so
+   * the timer keeps observing `cancelRequested` and can still abort the run.
+   *
+   * Ignored for a job this executor is not running — another process owns that
+   * row's beat, and tracking it here would leak a pause that nothing clears.
+   */
+  async markJobBlocked(jobId: string, requestId: string): Promise<void> {
+    if (!this.activeControllers.has(jobId)) return;
+    this.blockedJobs.set(jobId, requestId);
+    await this.store.markBlocked(jobId, requestId);
+    // Empty `now`: "paused — waiting on you" is UI copy and lives in the copy
+    // module, not here. The status is the fact; the phrasing is the surface's.
+    this.updateDigest(jobId, { status: 'blocked', now: '' });
+  }
+
+  /** The counterpart: `blocked` -> `running`, and the heartbeat resumes. */
+  async resumeJob(jobId: string): Promise<void> {
+    if (!this.blockedJobs.delete(jobId)) return;
+    await this.store.resumeFromBlocked(jobId);
+    this.updateDigest(jobId, { status: 'running' });
   }
 
   /**
@@ -223,6 +418,13 @@ export class BackgroundExecutor {
     const runs = [...this.activeRuns.values()];
     for (const controller of this.activeControllers.values()) controller.abort();
     await Promise.allSettled(runs);
+
+    // Each run's own teardown drops its digest; anything left here belongs to a
+    // run that never unwound, and its trailing timer must not outlive us.
+    for (const digest of this.runDigests.values()) {
+      if (digest.pending) clearTimeout(digest.pending);
+    }
+    this.runDigests.clear();
   }
 
   // -------------------------------------------------------------------------
@@ -236,8 +438,13 @@ export class BackgroundExecutor {
    * would clobber a LIVE peer's running rows. The 90s staleMs threshold protects
    * a live peer (its heartbeats are <30s old) while still catching genuinely
    * orphaned rows (heartbeat aged past 90s) — here and on every periodic sweep.
+   *
+   * PUBLIC (not private) because boot/resume reconciliation invokes it
+   * directly: `runBootReconciliation` (apps/ethos/src/boot-reconciliation.ts)
+   * composes it with the other boot-time repair steps, and a resume handler
+   * re-runs that composition without re-running `start()`.
    */
-  private async bootSweep(): Promise<void> {
+  async bootSweep(): Promise<void> {
     try {
       await this.store.reclaimStale(this.config.staleMs);
     } catch (err) {
@@ -303,10 +510,34 @@ export class BackgroundExecutor {
   /** Register the job's controller synchronously, then run it detached. */
   private startRun(job: BackgroundJob): void {
     const controller = new AbortController();
+    // One listener covers every abort reason — cancel, spend cap, shutdown
+    // drain — instead of a call at each `controller.abort()` site, where the
+    // next reason added would silently miss it.
+    controller.signal.addEventListener(
+      'abort',
+      () => {
+        void this.cancelInteractions?.(job.id).catch((err) => {
+          this.log?.(`cancelling pending questions failed for ${job.id}: ${errMsg(err)}`);
+        });
+      },
+      { once: true },
+    );
     this.activeControllers.set(job.id, controller);
     const run = this.runOne(job, controller).finally(() => {
       this.activeControllers.delete(job.id);
       this.activeRuns.delete(job.id);
+      // A run that ended while parked (cancelled from the blocked card) must not
+      // leave its pause behind.
+      this.blockedJobs.delete(job.id);
+      // Belt and braces: `finishAndNotify` closes the digest on every path it
+      // owns, but a throw between openDigest and the finish would strand a
+      // timer. Dropping a live digest here can only orphan a card the run no
+      // longer feeds anyway.
+      const digest = this.runDigests.get(job.id);
+      if (digest) {
+        if (digest.pending) clearTimeout(digest.pending);
+        this.runDigests.delete(job.id);
+      }
       // A slot freed — pull the next queued row (unless we're draining).
       if (!this.shuttingDown) void this.claimLoop();
     });
@@ -316,6 +547,21 @@ export class BackgroundExecutor {
   // -------------------------------------------------------------------------
   // Running one job
   // -------------------------------------------------------------------------
+
+  /**
+   * Which runner executes this row. A row carries the runner it was spawned
+   * for; an unset (or default-named) row runs on the default runner. A row
+   * naming a runner this process has not resolved throws — the caller sees a
+   * failed job with the reason, never a silent fallback onto Ethos, which would
+   * run a task on a harness the requester deliberately did not choose.
+   */
+  private runnerFor(job: BackgroundJob): JobRunner {
+    const name = job.runner;
+    if (!name || name === this.defaultRunner.name) return this.defaultRunner;
+    const runner = this.runners?.get(name);
+    if (!runner) throw new Error(`job runner '${name}' is not available in this process`);
+    return runner;
+  }
 
   private async runOne(job: BackgroundJob, controller: AbortController): Promise<void> {
     let heartbeatTimer: ReturnType<typeof setInterval> | undefined;
@@ -341,7 +587,10 @@ export class BackgroundExecutor {
       heartbeatTimer = setInterval(() => {
         void (async () => {
           try {
-            await this.store.heartbeat(job.id);
+            // Paused while the run is parked on a human answer — see
+            // markJobBlocked. The cancel observation below keeps running, so a
+            // blocked run stays cancellable.
+            if (!this.blockedJobs.has(job.id)) await this.store.heartbeat(job.id);
             const fresh = await this.store.get(job.id);
             if (fresh?.cancelRequested) {
               cancelled = true;
@@ -354,9 +603,11 @@ export class BackgroundExecutor {
       }, this.config.heartbeatMs);
       heartbeatTimer.unref?.();
 
-      // Background jobs always run in summary mode — the parent re-ingests only a
-      // bounded digest, so append the summary instruction to the child prompt.
-      const childPrompt = job.prompt + SUMMARY_INSTRUCTION;
+      const runner = this.runnerFor(job);
+
+      // G9/D11 — from here the card is fed by the digest and nothing else. Open
+      // it AFTER the spend gate above, which can end the run before it starts.
+      this.openDigest(job);
 
       let output = '';
       let spend = 0;
@@ -364,13 +615,35 @@ export class BackgroundExecutor {
       let costBreached = false;
 
       const text = this.createTextSink(job.id);
+      const logSink = this.createLogSink(job.id);
 
-      for await (const ev of this.loop.run(childPrompt, {
-        sessionKey: job.childSessionKey,
-        ...(job.personalityId ? { personalityId: job.personalityId } : {}),
-        agentId: `depth:${job.depth}`,
-        rootSessionKey: job.rootSessionKey,
-        abortSignal: controller.signal,
+      for await (const ev of runner.run(job, {
+        signal: controller.signal,
+        steerSink: NOOP_STEER_SINK,
+        // Artifacts are a job-event-log concern, not an event-stream one:
+        // `AgentEvent` is frozen at 17 variants with no artifact slot, so a
+        // file change becomes an `artifact_change` ROW and the inspector's Diff
+        // tab reads it back from there. `emitArtifact` is synchronous by
+        // contract — a runner does not await the audit trail — so the write is
+        // fire-and-forget with the same swallow-and-log policy as every other
+        // appendEvent here: losing an audit row must never fail the job it
+        // describes.
+        emitArtifact: (change: ArtifactChange) => {
+          void this.store
+            .appendEvent(job.id, 'artifact_change', {
+              ...change,
+              ...(change.diff !== undefined
+                ? { diff: capText(change.diff, ARTIFACT_DIFF_CAP) }
+                : {}),
+            })
+            .catch((err) =>
+              this.log?.(`appendEvent(artifact_change) failed for ${job.id}: ${errMsg(err)}`),
+            );
+        },
+        // I-LOG1 — same out-of-band, synchronous-by-contract shape as
+        // `emitArtifact` above, batched by `createLogSink` into bounded
+        // `runner_log` rows instead of one write per line.
+        appendLog: (stream, line) => logSink.appendLog(stream, line),
       })) {
         if (controller.signal.aborted) break;
 
@@ -391,7 +664,11 @@ export class BackgroundExecutor {
           } catch (err) {
             this.log?.(`appendEvent failed for ${job.id}: ${errMsg(err)}`);
           }
+          this.updateDigest(job.id, { now: nowLine(ev.toolName, ev.args) });
         } else if (ev.type === 'tool_end') {
+          this.updateDigest(job.id, {
+            toolCount: (this.runDigests.get(job.id)?.toolCount ?? 0) + 1,
+          });
           try {
             await this.store.appendEvent(job.id, 'tool_end', {
               toolName: ev.toolName,
@@ -410,6 +687,7 @@ export class BackgroundExecutor {
           } catch (err) {
             this.log?.(`updateSpend failed for ${job.id}: ${errMsg(err)}`);
           }
+          this.updateDigest(job.id, { spendUsd: spend });
           if (job.maxCostUsd != null && spend > job.maxCostUsd) {
             costBreached = true;
             controller.abort();
@@ -430,6 +708,11 @@ export class BackgroundExecutor {
       // Whatever the terminal state, the tail of the child's text belongs in the
       // stream before the terminal event.
       await text.flush();
+      // Same for whatever runner-log lines are still buffered. Known gap,
+      // matching `stderrTail`'s existing crash tradeoff: a throw between here
+      // and process exit — or a crash mid-buffer before this point — loses
+      // whatever hasn't flushed yet. No crash-durability is built for this.
+      await logSink.flush();
 
       // Terminal transition, in priority order.
       if (costBreached) {
@@ -519,6 +802,83 @@ export class BackgroundExecutor {
     };
   }
 
+  /**
+   * Buffered writer for the runner subprocess's own stdout/stderr
+   * (`JobRunnerContext.appendLog`, I-LOG1). Batches already-split lines into
+   * one `runner_log` job_event per flush — either `LOG_BATCH_LINES` lines or
+   * `LOG_BATCH_MS` have elapsed since the oldest still-buffered line, whichever
+   * comes first. The in-memory buffer is bounded independently of the flush
+   * cadence (`LOG_MAX_BUFFERED_LINES`, oldest dropped first) as a defensive
+   * backstop. Separately, and this is the actual per-job retention cap:
+   * `LOG_TOTAL_MAX_LINES` bounds how many lines get PERSISTED over the job's
+   * whole life, same cap-and-stop shape as `TEXT_MAX_EVENTS` above — the batch
+   * that crosses the cap is truncated to exactly the remaining budget (never
+   * skipped entirely), then one marker row is written on the next flush and
+   * the rest is dropped, so `job_events` can't grow without bound for a
+   * long-running chatty job.
+   * Swallows store errors — losing an audit row must never fail the job it
+   * describes.
+   */
+  private createLogSink(jobId: string): {
+    appendLog(stream: 'stdout' | 'stderr', line: string): void;
+    flush(): Promise<void>;
+  } {
+    const buffer = new BoundedLogBuffer(LOG_MAX_BUFFERED_LINES);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let totalWritten = 0;
+    let cappedNoted = false;
+
+    const doFlush = async (): Promise<void> => {
+      if (timer) {
+        clearTimeout(timer);
+        timer = undefined;
+      }
+      if (buffer.length === 0) return;
+      const { entries, dropped } = buffer.drain();
+      const remaining = LOG_TOTAL_MAX_LINES - totalWritten;
+      if (remaining <= 0) {
+        if (!cappedNoted) {
+          cappedNoted = true;
+          try {
+            await this.store.appendEvent(jobId, 'runner_log', { lines: [], truncated: true });
+          } catch (err) {
+            this.log?.(`appendEvent(runner_log) failed for ${jobId}: ${errMsg(err)}`);
+          }
+        }
+        return;
+      }
+      // The batch that crosses the cap is truncated to exactly the remaining
+      // budget rather than skipped entirely — `totalWritten` must never exceed
+      // `LOG_TOTAL_MAX_LINES` after this flush. If more lines arrive after this,
+      // the NEXT call sees `remaining <= 0` and fires the truncation marker.
+      const toWrite = entries.length > remaining ? entries.slice(0, remaining) : entries;
+      totalWritten += toWrite.length;
+      try {
+        await this.store.appendEvent(jobId, 'runner_log', {
+          lines: toWrite,
+          ...(dropped > 0 ? { dropped } : {}),
+        });
+      } catch (err) {
+        this.log?.(`appendEvent(runner_log) failed for ${jobId}: ${errMsg(err)}`);
+      }
+    };
+
+    return {
+      appendLog(stream: 'stdout' | 'stderr', line: string): void {
+        buffer.push({ stream, line });
+        if (buffer.length >= LOG_BATCH_LINES) {
+          void doFlush();
+          return;
+        }
+        if (!timer) {
+          timer = setTimeout(() => void doFlush(), LOG_BATCH_MS);
+          timer.unref?.();
+        }
+      },
+      flush: () => doFlush(),
+    };
+  }
+
   // -------------------------------------------------------------------------
   // Terminal transition + completion notification
   // -------------------------------------------------------------------------
@@ -536,6 +896,9 @@ export class BackgroundExecutor {
     fields: { summary?: string; error?: string },
   ): Promise<void> {
     await this.store.finish(id, terminal, fields);
+    // The card's last sample. Published before the completion notice so the run
+    // card is already terminal when Ethos's hand-back message lands under it.
+    this.closeDigest(id, terminal);
     const fresh = await this.store.get(id);
     if (!fresh) return;
     this.fireComplete(fresh);
@@ -557,5 +920,96 @@ export class BackgroundExecutor {
         this.log?.(`onComplete handler failed for ${job.id}: ${errMsg(err)}`);
       }
     }
+  }
+
+  // -------------------------------------------------------------------------
+  // Run digest — the run card's liveness feed (G9/D11/D20)
+  // -------------------------------------------------------------------------
+
+  /** Open the digest for a run and publish its first sample immediately. */
+  private openDigest(job: BackgroundJob): void {
+    this.runDigests.set(job.id, {
+      parentSessionKey: job.parentSessionKey,
+      runner: job.runner ?? this.defaultRunner.name,
+      status: 'running',
+      now: '',
+      startedAt: job.startedAt ?? Date.now(),
+      spendUsd: job.spendUsd ?? 0,
+      toolCount: 0,
+      lastPublishedAt: 0,
+      pending: undefined,
+    });
+    this.publishDigest(job.id);
+  }
+
+  /**
+   * Fold new facts into a run's digest and schedule its publication. A status
+   * change publishes immediately; everything else coalesces.
+   *
+   * A no-op for a job with no open digest — `markJobBlocked` may be called for a
+   * row this process is not running, and a completion write races the run's own
+   * teardown.
+   */
+  private updateDigest(
+    jobId: string,
+    patch: Partial<Pick<RunDigest, 'status' | 'now' | 'spendUsd' | 'toolCount'>>,
+  ): void {
+    const digest = this.runDigests.get(jobId);
+    if (!digest) return;
+    const statusChanged = patch.status !== undefined && patch.status !== digest.status;
+    Object.assign(digest, patch);
+    if (statusChanged) {
+      this.publishDigest(jobId);
+      return;
+    }
+    const wait = RUN_UPDATE_MIN_INTERVAL_MS - (Date.now() - digest.lastPublishedAt);
+    if (wait <= 0) {
+      this.publishDigest(jobId);
+      return;
+    }
+    // Trailing edge: one publish at the end of the window carrying the LATEST
+    // state, not the sample that happened to arrive first.
+    if (digest.pending) return;
+    digest.pending = setTimeout(() => this.publishDigest(jobId), wait);
+    digest.pending.unref?.();
+  }
+
+  /** Emit the digest's current state and reset its coalescing window. */
+  private publishDigest(jobId: string): void {
+    const digest = this.runDigests.get(jobId);
+    if (!digest) return;
+    if (digest.pending) {
+      clearTimeout(digest.pending);
+      digest.pending = undefined;
+    }
+    digest.lastPublishedAt = Date.now();
+    const update: RunUpdateDigest = {
+      parentSessionKey: digest.parentSessionKey,
+      jobId,
+      runner: digest.runner,
+      status: digest.status,
+      now: digest.now,
+      elapsedMs: Math.max(0, Date.now() - digest.startedAt),
+      spendUsd: digest.spendUsd,
+      toolCount: digest.toolCount,
+    };
+    for (const handler of [...this.runUpdateHandlers]) {
+      try {
+        handler(update);
+      } catch (err) {
+        this.log?.(`onRunUpdate handler failed for ${jobId}: ${errMsg(err)}`);
+      }
+    }
+  }
+
+  /** Publish the terminal sample, then drop the digest and its timer. */
+  private closeDigest(jobId: string, status: BackgroundJobStatus): void {
+    const digest = this.runDigests.get(jobId);
+    if (!digest) return;
+    digest.status = status;
+    digest.now = '';
+    this.publishDigest(jobId);
+    if (digest.pending) clearTimeout(digest.pending);
+    this.runDigests.delete(jobId);
   }
 }

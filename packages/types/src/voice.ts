@@ -1,10 +1,51 @@
 // packages/types/src/voice.ts — voice provider contracts
 
+/**
+ * Contract version an STT provider must declare in `caps.contractVersion`.
+ *
+ * v1 took a filesystem path (`transcribe(audioPath)`); v2 takes the utterance
+ * bytes directly (`transcribeBuffer`). The migration was additive-then-remove
+ * with no deprecation window (voice V1a, eng-review D4), so there is no v1
+ * signature left to fall back to — a provider still declaring `1` cannot be
+ * satisfying the interface it claims. `validateVoiceCaps` in
+ * `@ethosagent/voice-providers` enforces the floor for third-party providers.
+ */
+export const STT_CONTRACT_VERSION = 2;
+
+/**
+ * A complete captured utterance, held in memory. The batch STT input.
+ *
+ * Utterances are seconds of 16 kHz mono audio — tens of kilobytes. Routing
+ * them through a temp file cost a write, a read, a permission decision and a
+ * cleanup obligation on the most sensitive artifact the system handles, for a
+ * payload that every provider immediately loaded back into memory anyway.
+ * A provider that genuinely needs a path (one that shells out to a binary)
+ * materializes its own temp file and owns its lifetime.
+ */
+export interface SttAudio {
+  /** Encoded audio bytes. */
+  data: Uint8Array;
+  /**
+   * MIME type of `data` (e.g. `audio/webm`, `audio/wav`, `audio/ogg`).
+   * Providers that upload the bytes derive the multipart filename and
+   * content-type from it. Absent/unrecognized → `application/octet-stream`.
+   */
+  mimeType?: string;
+  /** Sample rate in Hz. Meaningful only for raw `audio/pcm`. */
+  sampleRate?: number;
+}
+
 export interface SttProvider {
   readonly name: string;
   readonly caps: VoiceCapabilities;
-  transcribe(
-    audioPath: string,
+  /**
+   * Transcribe one complete utterance. Providers that can transcribe
+   * incrementally implement {@link StreamingSttProvider} in addition and
+   * advertise `caps.streaming === true`; callers prefer the stream when it is
+   * there and fall back to this method otherwise.
+   */
+  transcribeBuffer(
+    audio: SttAudio,
     opts?: { language?: string; signal?: AbortSignal },
   ): Promise<string>;
 }
@@ -23,9 +64,16 @@ export interface VoiceCapabilities {
   formats: Array<'opus' | 'mp3' | 'wav' | 'pcm'>;
   languages?: string[];
   voices?: string[];
+  /**
+   * The provider also implements {@link StreamingSttProvider} /
+   * {@link StreamingTtsProvider}. This is the flag callers gate on: a session
+   * prefers the streaming method when it is `true` and falls back to the batch
+   * method otherwise.
+   */
   streaming?: boolean;
   local?: boolean;
   maxInputChars?: number;
+  /** STT providers declare {@link STT_CONTRACT_VERSION}; TTS providers `1`. */
   contractVersion: number;
 }
 
@@ -33,8 +81,8 @@ export interface VoiceCapabilities {
 // Streaming voice contracts (additive — batch providers above remain valid).
 //
 // Real-time voice (see plan/phases/gap-voice-realtime.md §3(a)) drives audio
-// as a live stream rather than a complete file. These interfaces extend the
-// batch contracts above WITHOUT modifying them: a provider that advertises
+// as a live stream rather than a complete utterance. These interfaces extend
+// the batch contracts above WITHOUT modifying them: a provider that advertises
 // `caps.streaming === true` implements the streaming variant in addition to
 // the batch method it inherits. Consumers feature-detect with the type
 // guards below; batch-only providers keep working via utterance-buffered
@@ -59,8 +107,9 @@ export interface SttPartial {
 
 /**
  * A streaming STT provider. Extends {@link SttProvider} additively: it still
- * carries the batch `transcribe()` method, and adds `transcribeStream()` for
- * live partial transcription. Advertise support via `caps.streaming === true`.
+ * carries the batch `transcribeBuffer()` method, and adds `transcribeStream()`
+ * for live partial transcription. Advertise support via
+ * `caps.streaming === true`.
  */
 export interface StreamingSttProvider extends SttProvider {
   transcribeStream(
@@ -96,6 +145,59 @@ export function isStreamingTtsProvider(p: TtsProvider): p is StreamingTtsProvide
   );
 }
 
+/**
+ * One configured TTS provider — the shape `auxiliary.tts` has always had, named
+ * so a deployment can carry SEVERAL of them (`voice.tts.providers.<name>.*`) and
+ * a personality can pick one by name via `PersonalityVoiceConfig.tts_provider`.
+ *
+ * `provider` is the REGISTERED provider id (`openai-tts`, `command-tts`, …).
+ * The roster key is a label the operator chose; it is never a provider id and
+ * never what the local-only egress gate keys on — see `selectTtsEntry` in
+ * `@ethosagent/core`.
+ */
+export interface TtsProviderEntry {
+  /** Registered provider id, e.g. `openai-tts` / `command-tts`. */
+  provider: string;
+  model?: string;
+  apiKey?: string;
+  /** Default voice id for this entry; a personality's own voice wins over it. */
+  voice?: string;
+  baseUrl?: string;
+  /** Shell template for `command-tts`
+   *  (placeholders: {input_path}, {output_path}, {format}, {voice}, {speed}). */
+  command?: string;
+  /** Container the provider is asked to write. */
+  outputFormat?: 'opus' | 'mp3' | 'wav' | 'pcm';
+  /** Budget for `command`, in seconds. */
+  timeout?: number;
+  /** Chars handed to one synthesis call. */
+  maxTextLength?: number;
+}
+
+/**
+ * One configured STT provider — the shape `auxiliary.asr` has always had, named
+ * so a deployment can carry SEVERAL of them (`voice.stt.providers.<name>.*`) and
+ * a personality can pick one by name via `PersonalityVoiceConfig.stt_provider`.
+ *
+ * The exact mirror of {@link TtsProviderEntry}, minus the fields that only mean
+ * something when you are producing audio (`voice`, `outputFormat`,
+ * `maxTextLength`). Same rule about the roster key: it is a label the operator
+ * chose, never a provider id, and never what the local-only egress gate keys on
+ * — see `selectSttEntry` in `@ethosagent/core`.
+ */
+export interface SttProviderEntry {
+  /** Registered provider id, e.g. `openai-stt` / `command-stt`. */
+  provider: string;
+  model?: string;
+  apiKey?: string;
+  baseUrl?: string;
+  /** Shell template for `command-stt`
+   *  (placeholders: {input_path}, {output_path}, {language}). */
+  command?: string;
+  /** Budget for `command`, in seconds. */
+  timeout?: number;
+}
+
 export interface VoiceProviderFactoryContext {
   config: Record<string, unknown>;
   secrets: import('./secrets').SecretsResolver;
@@ -121,4 +223,82 @@ export interface TtsProviderRegistry {
   unregister(name: string): void;
   get(name: string): TtsProviderFactory | undefined;
   list(): string[];
+}
+
+// ---------------------------------------------------------------------------
+// Voice-origin annotation (voice V1a, eng-review D16)
+// ---------------------------------------------------------------------------
+
+/**
+ * Who spoke a voice turn, for authorization purposes.
+ *
+ * - `owner`   — the operator's own microphone: browser talk-mode, the desktop
+ *               satellite, a voice note in the owner's own DM.
+ * - `far_end` — somebody else's mouth on the far end of a call. Never
+ *               owner-authoritative: a far-end caller's voice can NEVER
+ *               satisfy an owner-level confirmation (eng-review D13). The
+ *               spoken-confirmation gate enforces that ahead of any recorded
+ *               confirmation, so the rule cannot be argued away by a caller
+ *               who says the right words.
+ */
+export type VoiceSpeaker = 'owner' | 'far_end';
+
+/**
+ * Every per-lane voice mode, in declaration order.
+ *
+ * The runtime list is the source and {@link VoiceMode} is derived from it, so
+ * a validator that parses a hand-edited document cannot drift from the union
+ * it validates against.
+ */
+export const VOICE_MODES = ['off', 'mirror_inbound', 'all'] as const;
+
+/**
+ * Per-lane voice mode. Persisted by the caller; `/voice <mode>` mutates it.
+ *
+ * A value type in contracts rather than in `@ethosagent/voice-text` because
+ * every layer names it: the decision function in voice-text, the durable
+ * store in core (`LaneVoiceModeStore`), the gateway lane commands, and the
+ * browser chat header. `@ethosagent/voice-text` re-exports it so its own
+ * importers are unaffected.
+ */
+export type VoiceMode = (typeof VOICE_MODES)[number];
+
+/** Mode a lane starts in: speak back when spoken to, stay quiet otherwise. */
+export const DEFAULT_VOICE_MODE: VoiceMode = 'mirror_inbound';
+
+/**
+ * Marker tag name for the voice-origin annotation — the stable string that
+ * both the producer and every consumer match on.
+ *
+ * In contracts rather than in `@ethosagent/core` (which re-exports it, so
+ * core's public surface is unchanged) because the browser bundle cannot import
+ * core: the web chat has to strip this annotation back off a stored user
+ * message before rendering it, and a second spelling of the tag in `apps/web`
+ * is exactly the drift that would rot. Same move already made for
+ * {@link VoiceMode}, for the same reason.
+ */
+export const VOICE_ORIGIN_TAG = 'voice-origin';
+
+/**
+ * "This turn arrived as speech."
+ *
+ * A MESSAGE-LEVEL fact, not a system-prompt fact (eng-review D16). One session
+ * mixes typed and spoken turns, so putting this in the static prefix would
+ * change the prompt per turn and destroy prefix caching. It rides on the
+ * transcribed user message as an annotation instead — an annotation ON the
+ * audio marker, never a replacement for it — and on the `before_tool_call`
+ * payload so the approval surface can tell a spoken request from a typed one.
+ */
+export interface VoiceTurnOrigin {
+  /**
+   * How the audio reached the agent. Free-form but stable per surface, e.g.
+   * `telegram-voice-note`, `browser-talk-mode`.
+   */
+  transport: string;
+  /** Whose voice it is. See {@link VoiceSpeaker}. */
+  speaker: VoiceSpeaker;
+  /** STT provider that produced the transcript, when the surface knows it. */
+  sttProvider?: string;
+  /** BCP-47 tag of the utterance, when the surface knows it. */
+  language?: string;
 }

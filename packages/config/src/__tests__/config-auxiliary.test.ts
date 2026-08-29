@@ -1,7 +1,11 @@
 import { join } from 'node:path';
-import { InMemoryStorage } from '@ethosagent/storage-fs';
+import { InMemorySecretsResolver, InMemoryStorage } from '@ethosagent/storage-fs';
 import { describe, expect, it } from 'vitest';
-import { ethosDir, readRawConfig, writeConfig } from '../index';
+import { ethosDir, readConfig, readRawConfig, writeConfig } from '../index';
+
+function secretRef(path: string): string {
+  return ['${', 'secrets:', path, '}'].join('');
+}
 
 // context_compression F1 — auxiliary.compression config block.
 describe('auxiliary.compression config parsing', () => {
@@ -60,9 +64,13 @@ describe('auxiliary.compression config parsing', () => {
         },
       },
     };
-    await writeConfig(storage, original);
-    const roundTripped = await readRawConfig(storage);
-    expect(roundTripped?.auxiliary?.compression).toEqual(original.auxiliary.compression);
+    const secrets = new InMemorySecretsResolver();
+    await writeConfig(storage, original, secrets);
+    // The key is externalized: the file carries a ref, the vault carries the value.
+    const raw = await readRawConfig(storage);
+    expect(raw?.auxiliary?.compression?.apiKey).toBe(secretRef('auxiliary/compression/apiKey'));
+    const resolved = await readConfig(storage, secrets);
+    expect(resolved?.auxiliary?.compression).toEqual(original.auxiliary.compression);
   });
 });
 
@@ -124,9 +132,13 @@ describe('auxiliary.vision config parsing', () => {
         },
       },
     };
-    await writeConfig(storage, original);
-    const roundTripped = await readRawConfig(storage);
-    expect(roundTripped?.auxiliary?.vision).toEqual(original.auxiliary.vision);
+    const secrets = new InMemorySecretsResolver();
+    await writeConfig(storage, original, secrets);
+    // The key is externalized: the file carries a ref, the vault carries the value.
+    const raw = await readRawConfig(storage);
+    expect(raw?.auxiliary?.vision?.apiKey).toBe(secretRef('auxiliary/vision/apiKey'));
+    const resolved = await readConfig(storage, secrets);
+    expect(resolved?.auxiliary?.vision).toEqual(original.auxiliary.vision);
   });
 
   it('parses both auxiliary.compression and auxiliary.vision together', async () => {
@@ -168,8 +180,14 @@ describe('writeConfig round-trip — previously dropped fields', () => {
         { provider: 'openrouter', apiKey: 'sk-or-2', baseUrl: 'https://openrouter.ai/api/v1' },
       ],
     };
-    await writeConfig(storage, original);
-    const roundTripped = await readRawConfig(storage);
+    const secrets = new InMemorySecretsResolver();
+    await writeConfig(storage, original, secrets);
+    const roundTripped = await readConfig(storage, secrets);
+    // Credentials survive the round-trip through the vault, not the file.
+    const onDisk = await readRawConfig(storage);
+    expect(onDisk?.emailPassword).toBe(secretRef('email/password'));
+    expect(onDisk?.providers?.[0]?.apiKey).toBe(secretRef('providers/0/anthropic/apiKey'));
+    expect(onDisk?.providers?.[1]?.apiKey).toBe(secretRef('providers/1/openrouter/apiKey'));
     expect(roundTripped?.emailImapHost).toBe('imap.example.com');
     expect(roundTripped?.emailImapPort).toBe(993);
     expect(roundTripped?.emailUser).toBe('user@example.com');
@@ -269,7 +287,7 @@ describe('auxiliary.asr / auxiliary.tts config parsing', () => {
         },
       },
     };
-    await writeConfig(storage, original);
+    await writeConfig(storage, original, new InMemorySecretsResolver());
     const roundTripped = await readRawConfig(storage);
     expect(roundTripped?.auxiliary?.asr).toEqual(original.auxiliary.asr);
     expect(roundTripped?.auxiliary?.tts).toEqual(original.auxiliary.tts);
@@ -307,13 +325,17 @@ describe('nightlyPass config parsing', () => {
   it('round-trips through writeConfig', async () => {
     const storage = new InMemoryStorage();
     await storage.mkdir(ethosDir());
-    await writeConfig(storage, {
-      provider: 'anthropic',
-      model: 'claude-opus-4-7',
-      apiKey: 'sk-test',
-      personality: 'researcher',
-      nightlyPass: { enabled: true, cron: '0 3 * * *' },
-    });
+    await writeConfig(
+      storage,
+      {
+        provider: 'anthropic',
+        model: 'claude-opus-4-7',
+        apiKey: 'sk-test',
+        personality: 'researcher',
+        nightlyPass: { enabled: true, cron: '0 3 * * *' },
+      },
+      new InMemorySecretsResolver(),
+    );
     const roundTripped = await readRawConfig(storage);
     expect(roundTripped?.nightlyPass).toEqual({ enabled: true, cron: '0 3 * * *' });
   });
@@ -359,13 +381,17 @@ describe('weeklyDigest config parsing', () => {
   it('round-trips through writeConfig', async () => {
     const storage = new InMemoryStorage();
     await storage.mkdir(ethosDir());
-    await writeConfig(storage, {
-      provider: 'anthropic',
-      model: 'claude-opus-4-7',
-      apiKey: 'sk-test',
-      personality: 'researcher',
-      weeklyDigest: { enabled: true, cron: '0 9 * * 1', recipients: ['a@example.com'] },
-    });
+    await writeConfig(
+      storage,
+      {
+        provider: 'anthropic',
+        model: 'claude-opus-4-7',
+        apiKey: 'sk-test',
+        personality: 'researcher',
+        weeklyDigest: { enabled: true, cron: '0 9 * * 1', recipients: ['a@example.com'] },
+      },
+      new InMemorySecretsResolver(),
+    );
     const roundTripped = await readRawConfig(storage);
     expect(roundTripped?.weeklyDigest).toEqual({
       enabled: true,

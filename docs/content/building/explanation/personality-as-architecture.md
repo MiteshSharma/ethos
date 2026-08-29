@@ -4,7 +4,7 @@ description: "A personality is a structural component — a directory that binds
 kind: explanation
 audience: developer
 slug: personality-as-architecture
-updated: 2026-06-09
+updated: 2026-08-14
 ---
 
 ## Context
@@ -82,7 +82,7 @@ If you set out to replicate this with prompt strings, you would write five promp
 
 The "what does not belong on `PersonalityConfig`" question is the one that comes up repeatedly. Four categories the schema has refused, with the reason each was rejected:
 
-- **Voice modes / TTS settings.** Voice is the channel adapter's concern. Telegram does not speak; the email adapter does not stream audio. Putting voice on the personality assumes one surface.
+- **Voice modes / TTS engine settings.** *Which* voice a personality speaks in is identity and was granted a narrow exception (the `voice` block — `tts_voice`, `languages`, `tier`, `call_style`). *When* it speaks is not: voice modes, VAD tuning, endpointing, and per-channel speech switches are deployment concerns, because two deployments of the same personality would reasonably disagree about them. They live in `~/.ethos/config.yaml` under `voice.defaultMode` and `voice.channels.*`. See [Why is a personality a governed contract?](personality-governance.md).
 - **Emotion / mood / sentiment tags.** Mood is a presentation hint, not a structural property. A reviewer being "cautious" is its identity (`SOUL.md`), not a flag.
 - **Response templates.** A skill is the unit for "how do I phrase a code-review comment". Templates belong to skills because they are reusable across personalities.
 - **Per-channel UI affordances.** Button labels, card layouts, Slack block kit — these are channel-adapter concerns. A personality does not know which surface is rendering it.

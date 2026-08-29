@@ -4,10 +4,12 @@
 // Triage, channel-mode, slash commands, and Block Kit rendering live in
 // sibling modules.
 
+import type { RequestListener } from 'node:http';
 import { join } from 'node:path';
 import { noopLogger } from '@ethosagent/logger';
 import type {
   AdapterCapabilities,
+  AdapterVoiceCaps,
   ApprovalCapableAdapter,
   ApprovalDecisionEvent,
   Attachment,
@@ -17,7 +19,9 @@ import type {
   Logger,
   OutboundMessage,
   PlatformAdapter,
+  SendVoiceNoteOptions,
   Storage,
+  VoiceOutboundAdapter,
 } from '@ethosagent/types';
 import boltPkg from '@slack/bolt';
 import {
@@ -63,12 +67,14 @@ import {
   handleClarifyModalSubmission,
 } from './interactions/clarify';
 import { type RawSlackFile, resolveChannelMode } from './routing/triage';
+import { createUsernameResolver, type UsernameResolver } from './routing/usernames';
 import { BackfillStateStore } from './store/backfill-state';
 import { ChannelOverrideStore } from './store/channel-overrides';
 import { ThreadStateStore } from './store/thread-state';
 
-const { App } = boltPkg;
+const { App, HTTPReceiver } = boltPkg;
 type App = InstanceType<typeof App>;
+type HTTPReceiver = InstanceType<typeof HTTPReceiver>;
 
 /**
  * Normalize a configured `webUiBaseUrl`. The value is interpolated directly
@@ -99,28 +105,81 @@ function normalizeWebUiBaseUrl(raw: string | undefined): string | undefined {
 /** Maximum file size in bytes that we'll download into memory. */
 const MAX_FILE_SIZE = 25 * 1024 * 1024; // 25 MB
 
+/**
+ * CHS-006 — hosts a token-bearing file download may target.
+ *
+ * `url_private_download` comes off an event payload, and the download sends
+ * the workspace bot token in an `Authorization` header. Confining the host is
+ * what stops a forged or tampered event from pointing that header at an
+ * attacker's server; the caller pairs this with `redirect: 'error'`, because a
+ * 302 off an allowed host would otherwise carry the token anywhere.
+ *
+ * Suffix match on a leading dot (plus the bare apex) so `slack.com` and
+ * `files.slack.com` pass while `slack.com.evil.test` and `notslack.com` do not.
+ */
+export function isSlackDownloadUrl(rawUrl: string): boolean {
+  let parsed: URL;
+  try {
+    parsed = new URL(rawUrl);
+  } catch {
+    return false;
+  }
+  if (parsed.protocol !== 'https:') return false;
+  const host = parsed.hostname.toLowerCase();
+  return host === 'slack.com' || host.endsWith('.slack.com');
+}
+
 const IMAGE_EXTS = new Set(['jpg', 'jpeg', 'png', 'gif', 'webp', 'heic', 'bmp', 'svg', 'tiff']);
-const SKIP_EXTS = new Set([
-  'mp3',
-  'mp4',
-  'mov',
-  'webm',
-  'wav',
-  'ogg',
-  'flac',
-  'aac',
-  'm4a',
-  'avi',
-  'mkv',
-]);
+/**
+ * Audio uploads are now ADMITTED rather than skipped, and classified as
+ * `type: 'audio'`, because channel STT consumes them. Skipping them meant a
+ * Slack voice memo never reached transcription at all.
+ */
+const AUDIO_EXTS = new Set(['mp3', 'wav', 'ogg', 'flac', 'aac', 'm4a']);
+/**
+ * Video stays skipped — nothing downstream consumes it. `webm` is ambiguous
+ * (it carries either audio or video) and is overwhelmingly video on Slack, so
+ * it stays on the skip list rather than being classified as audio.
+ */
+const SKIP_EXTS = new Set(['mp4', 'mov', 'webm', 'avi', 'mkv']);
+
+/**
+ * CHS-005 — minimal structural view of the observability sink.
+ *
+ * Declared here rather than imported so the adapter takes no dependency on
+ * `observability-sqlite`; the gateway supplies anything of this shape, exactly
+ * as it does for `ApprovalObservability`. Optional throughout: an adapter
+ * constructed without one records nothing and behaves identically.
+ */
+export interface AdapterObservability {
+  recordSafetyBlock(opts: {
+    code?: string;
+    cause?: string;
+    details?: Record<string, unknown>;
+  }): void;
+}
 
 export interface SlackAdapterConfig {
   /** Bot token (xoxb-...). */
   botToken: string;
-  /** App-level token for socket mode (xapp-...). */
-  appToken: string;
-  /** Signing secret from Slack app config */
-  signingSecret: string;
+  /** App-level token for socket mode (xapp-...). Required when `mode.socket`
+   *  is selected (the default); unused — and unnecessary — in HTTP mode,
+   *  where the transport is authenticated by `signingSecret` instead. */
+  appToken?: string;
+  /**
+   * Signing secret from Slack app config.
+   *
+   * CHS-010 — UNUSED under Socket Mode: request signatures authenticate
+   * inbound HTTP posts to a public Events API endpoint, and a socket
+   * connection is already authenticated by `appToken` and receives no HTTP
+   * requests to verify. Do not read a socket-mode deployment's signing secret
+   * as evidence that its inbound events are signature-checked.
+   *
+   * Under `mode.http` it is the HMAC key Bolt's `HTTPReceiver` verifies every
+   * inbound request against, so it is genuinely required there — the
+   * constructor throws without it.
+   */
+  signingSecret?: string;
   /** Stable bot identity, computed once in wiring (`deriveBotKey`). Required —
    *  the adapter no longer derives its own key; routing is stamped from this. */
   botKey: string;
@@ -130,6 +189,29 @@ export interface SlackAdapterConfig {
   binding?: Binding;
   /** Default channel mode for unmapped channels. Defaults to `mention_only`. */
   defaultChannelMode?: ChannelMode;
+  /**
+   * Slack `bot_id`s whose messages reach the agent. Absent or empty drops
+   * every bot/workflow message — the gate is default-closed. An allowlisted
+   * bot's envelope carries `userId = <bot_id>`, so the gateway channel filter
+   * must allowlist that same id for the message to be admitted.
+   */
+  allowedBotIds?: string[];
+  /**
+   * Slack user IDs allowed to drive the bot's out-of-band surfaces: the
+   * `/ethos` slash command and the private sections of the App Home tab.
+   * Neither is an inbound message, so neither reaches the gateway's
+   * `checkMessage` — this list is their only authorization control, and it is
+   * default-closed. Absent or empty denies everyone, including the operator;
+   * wire it from the same trust source the message surface uses.
+   */
+  allowedUsers?: string[];
+  /**
+   * CHS-005 — sink for security decisions this adapter makes alone. Slash
+   * refusals and clarify gate denials never reach the gateway's `checkMessage`,
+   * so without this every one of them is silent and an operator investigating
+   * an incident has nothing to read.
+   */
+  observability?: AdapterObservability;
   /** Storage instance rooted at `~/.ethos`. When provided, the adapter
    *  persists per-channel mode overrides and thread-participation state
    *  under `~/.ethos/slack/<botKey>/`. */
@@ -162,6 +244,14 @@ export interface SlackAdapterConfig {
   /** Optional attachment cache for downloading and caching inbound file attachments. */
   cache?: AttachmentCache;
   /**
+   * Character count above which one outbound reply is posted as a short lead
+   * message plus the complete text uploaded as `answer.md`, instead of a
+   * multi-message chunk wall. Defaults to `3 × maxMessageLength` (9000) — a
+   * reply that would take four or more messages. `0` (or any non-positive
+   * value) disables the fallback and restores the plain chunked send.
+   */
+  longReplyThresholdChars?: number;
+  /**
    * Slack emoji name (no colons) set as a reaction on inbound messages to
    * acknowledge receipt, then cleared once the agent's reply has landed.
    * Default `'eyes'` (👀). Requires the `reactions:write` bot scope; missing
@@ -170,6 +260,36 @@ export interface SlackAdapterConfig {
   receiptReaction?: string;
   /** Logger for startup diagnostics. Defaults to a silent NoopLogger. */
   logger?: Logger;
+  /**
+   * Inbound transport selection. Absent (or absent sub-keys) reproduces
+   * today's behaviour exactly: Socket Mode on, HTTP Events off.
+   *
+   * `socket` and `http` are mutually exclusive — the constructor throws if
+   * both are `true`. This deliberately diverges from the cron
+   * `trigger: { local, external }` precedent, which *does* allow both: cron's
+   * two triggers are independent sources that don't conflict, whereas Socket
+   * Mode and HTTP Events are two transports for the SAME inbound event
+   * stream. Slack's own app dashboard treats them as alternatives (enabling
+   * Socket Mode removes the need for a Request URL), and there is no reason
+   * to receive every event twice.
+   */
+  mode?: {
+    /** Socket Mode (WebSocket). Defaults to `true`. Requires `appToken`. */
+    socket?: boolean;
+    /**
+     * HTTP Events API. Defaults to `false`. Requires `signingSecret`.
+     *
+     * Slack has no `setWebhook()` equivalent — nothing here registers the
+     * URL. The operator must set the Event Subscriptions Request URL in the
+     * Slack app's own dashboard to `https://<host>/slack/events/<botKey>`
+     * (or `<webhookPath>` in place of `<botKey>`); Slack then posts its
+     * `url_verification` challenge there, which Bolt answers on its own.
+     */
+    http?: boolean;
+  };
+  /** Route segment under `/slack/events/` for this app's HTTP Events
+   *  endpoint. Defaults to `botKey`. Only meaningful in HTTP mode. */
+  webhookPath?: string;
 }
 
 /**
@@ -183,7 +303,24 @@ function slackFileSource(att: Attachment): Buffer | string {
   return att.url;
 }
 
-export class SlackAdapter implements PlatformAdapter, ApprovalCapableAdapter {
+/** Marker closing the lead message when the full answer rides as a file. */
+const LONG_REPLY_SUFFIX = '\n\n*full answer attached*';
+/** Filename of the uploaded complete answer. */
+const LONG_REPLY_FILENAME = 'answer.md';
+/** Default long-reply threshold, as a multiple of `maxMessageLength`. */
+const LONG_REPLY_CHUNK_MULTIPLE = 3;
+
+/**
+ * The lead message for a long answer: the text up to the first chunk boundary
+ * with the "full answer attached" marker appended. The chunk budget is reduced
+ * by the marker so the composed lead still fits in one Slack message.
+ */
+function leadMessage(rendered: string, maxLength: number): string {
+  const first = chunkText(rendered, maxLength - LONG_REPLY_SUFFIX.length)[0] ?? '';
+  return `${first.trimEnd()}${LONG_REPLY_SUFFIX}`;
+}
+
+export class SlackAdapter implements PlatformAdapter, ApprovalCapableAdapter, VoiceOutboundAdapter {
   readonly id: string;
   readonly displayName = 'Slack';
   get canSendTyping(): boolean {
@@ -208,15 +345,44 @@ export class SlackAdapter implements PlatformAdapter, ApprovalCapableAdapter {
       joinGreeting: true,
       roleBasedApprovals: false,
       outboundFiles: true,
-      webhookMode: false,
+      webhookMode: this.httpMode,
     };
   }
+
+  /**
+   * Declared voice capabilities. Slack has no voice-bubble primitive: an
+   * uploaded audio file gets an inline player, which is a `file`, not a
+   * `voice_note` — declaring it honestly is the point of the caps model.
+   * `mp3` leads because Slack's inline player is most reliable with it.
+   */
+  readonly voiceCaps: AdapterVoiceCaps = {
+    inbound: ['mp3', 'm4a', 'wav', 'ogg'],
+    outbound: {
+      formats: ['mp3', 'm4a', 'wav'],
+      kind: 'file',
+      maxBytes: 25 * 1024 * 1024,
+    },
+  };
 
   readonly botKey: string;
   readonly binding: Binding | undefined;
   readonly defaultChannelMode: ChannelMode;
 
+  private readonly allowedBotIds: string[] | undefined;
+  /** Slash-command / App Home allowlist. Undefined denies every user. */
+  private readonly allowedUsers: string[] | undefined;
+  /** CHS-005 — optional sink for adapter-local security decisions. */
+  private readonly observability: AdapterObservability | undefined;
+  /** `users.info` display-name resolver, cached (24 h TTL, ≤1024 entries). */
+  private readonly users: UsernameResolver;
   private readonly app: App;
+  /** Whether this adapter runs the HTTP Events transport (`mode.http`). */
+  private readonly httpMode: boolean;
+  /** The HTTP Events receiver, or `undefined` in Socket Mode. */
+  private readonly httpReceiver: HTTPReceiver | undefined;
+  /** Path this adapter's HTTP Events endpoint answers on, or `undefined` in
+   *  Socket Mode. Surfaced by the `webhookRoute` getter. */
+  private readonly httpRoute: string | undefined;
   private readonly client: App['client'];
   private readonly backfillState: BackfillStateStore | undefined;
   private readonly channelOverrides: ChannelOverrideStore | undefined;
@@ -261,6 +427,9 @@ export class SlackAdapter implements PlatformAdapter, ApprovalCapableAdapter {
 
   /** Emoji name (no colons) for the inbound-receipt reaction. */
   private readonly receiptReaction: string;
+
+  /** Long-answer snippet-fallback threshold; `<= 0` disables the fallback. */
+  private readonly longReplyThresholdChars: number;
   /**
    * Pending receipt-reaction ledger. Keyed by `${chatId}:${threadTs|'top'}`
    * so concurrent in-flight replies in different threads of the same channel
@@ -271,18 +440,76 @@ export class SlackAdapter implements PlatformAdapter, ApprovalCapableAdapter {
   private readonly pendingReactionsMaxEntries = 1024;
 
   constructor(config: SlackAdapterConfig) {
-    this.app = new App({
-      token: config.botToken,
-      appToken: config.appToken,
-      signingSecret: config.signingSecret,
-      socketMode: true,
-    });
+    // Transport selection. The defaults reproduce today's behaviour exactly:
+    // `mode` absent → Socket Mode on, HTTP Events off.
+    const socketMode = config.mode?.socket ?? true;
+    this.httpMode = config.mode?.http ?? false;
+    if (socketMode && this.httpMode) {
+      // Not the cron `{ local, external }` hybrid: Socket Mode and HTTP
+      // Events carry the SAME inbound event stream, and Slack's dashboard
+      // treats them as alternatives. Receiving every event twice is a
+      // misconfiguration, not a profile.
+      throw new Error(
+        'Slack adapter: mode.socket and mode.http are mutually exclusive — ' +
+          'Socket Mode and HTTP Events are two transports for the same inbound ' +
+          'event stream. Enable exactly one.',
+      );
+    }
+
+    if (this.httpMode) {
+      if (!config.signingSecret) {
+        throw new Error(
+          'Slack adapter: signingSecret is required when mode.http is enabled — ' +
+            'it is the HMAC key every inbound Events API request is verified against.',
+        );
+      }
+      const segment = (config.webhookPath ?? config.botKey).replace(/^\/+|\/+$/g, '');
+      this.httpRoute = `/slack/events/${segment}`;
+      this.httpReceiver = new HTTPReceiver({
+        signingSecret: config.signingSecret,
+        // Bolt matches the request path EXACTLY against this list
+        // (`HTTPReceiver.js:209`, `this.endpoints.includes(path)`), and a
+        // non-match throws `HTTPReceiverDeferredRequestError` straight back
+        // out of `requestListener` — a silent 404 in production. Exactly ONE
+        // entry, the full per-app route: the shared server
+        // (`apps/ethos/src/platform-webhook-server.ts`) forwards `req` with its
+        // path untouched, and mounts at `webhookRoute` — this same string — so
+        // there is nothing else this receiver can legitimately be asked for.
+        endpoints: [this.httpRoute],
+      });
+    } else {
+      this.httpRoute = undefined;
+      this.httpReceiver = undefined;
+      if (!config.appToken) {
+        throw new Error(
+          'Slack adapter: appToken is required when mode.socket is enabled (the default). ' +
+            'Set mode.http to run the HTTP Events transport instead.',
+        );
+      }
+    }
+
+    this.app = this.httpReceiver
+      ? new App({
+          token: config.botToken,
+          receiver: this.httpReceiver,
+        })
+      : // Socket Mode — byte-for-byte what this adapter has always built.
+        new App({
+          token: config.botToken,
+          appToken: config.appToken,
+          signingSecret: config.signingSecret,
+          socketMode: true,
+        });
     this.client = this.app.client;
+    this.users = createUsernameResolver(this.client);
 
     this.botKey = config.botKey;
     this.id = `slack:${this.botKey}`;
     this.binding = config.binding;
     this.defaultChannelMode = config.defaultChannelMode ?? DEFAULT_CHANNEL_MODE;
+    this.allowedBotIds = config.allowedBotIds;
+    this.allowedUsers = config.allowedUsers;
+    this.observability = config.observability;
     this.storage = config.storage;
     this.memory = config.memory;
     this.kanban = config.kanban;
@@ -295,6 +522,8 @@ export class SlackAdapter implements PlatformAdapter, ApprovalCapableAdapter {
     this.cache = config.cache;
     this.botToken = config.botToken;
     this.receiptReaction = config.receiptReaction ?? 'eyes';
+    this.longReplyThresholdChars =
+      config.longReplyThresholdChars ?? LONG_REPLY_CHUNK_MULTIPLE * this.maxMessageLength;
     this.logger = (config.logger ?? noopLogger).child({ component: 'slack' });
 
     if (config.storage) {
@@ -340,6 +569,8 @@ export class SlackAdapter implements PlatformAdapter, ApprovalCapableAdapter {
         channelOverrides: this.channelOverrides,
         threadState: this.threadState,
         backfillState: this.backfillState,
+        users: this.users,
+        ...(this.allowedBotIds ? { allowedBotIds: this.allowedBotIds } : {}),
       },
       {
         onEnvelope: (msg) => {
@@ -395,6 +626,8 @@ export class SlackAdapter implements PlatformAdapter, ApprovalCapableAdapter {
         personalityCard: this.personalityCard,
         storage: this.storage,
         submitAgentTurn: this.makeAskSubmitter(),
+        allowedUsers: this.allowedUsers,
+        observability: this.observability,
       });
       try {
         await respond({
@@ -561,6 +794,7 @@ export class SlackAdapter implements PlatformAdapter, ApprovalCapableAdapter {
       kanban: this.kanban,
       clarify: this.clarifyHomeReader,
       webUiBaseUrl: this.webUiBaseUrl,
+      allowedUsers: this.allowedUsers,
     });
 
     // `link_shared` URL unfurling. `registerLinkEvents` is a no-op when
@@ -574,11 +808,56 @@ export class SlackAdapter implements PlatformAdapter, ApprovalCapableAdapter {
       personality: this.personalityUnfurl,
     });
 
-    await this.app.start();
+    // Transport start. Every registration above is identical in both modes —
+    // only the final step differs.
+    //
+    // In HTTP mode we deliberately do NOT call `this.app.start()`: for an
+    // `HTTPReceiver` that call binds its OWN port
+    // (`HTTPReceiver.js:118-183`), and this deployment has exactly one shared
+    // listener, owned by `apps/ethos/src/platform-webhook-server.ts`, which
+    // mounts `this.requestListener` instead. Adding `app.start()` back here
+    // would bind a second, unwanted port. The receiver is fully live without
+    // it: `App`'s constructor already called `receiver.init(this)`
+    // (`App.js:177`), so the handlers registered above are wired.
+    if (!this.httpMode) {
+      await this.app.start();
+    }
   }
 
   async stop(): Promise<void> {
-    await this.app.stop();
+    // Symmetric with `start()`. In HTTP mode there is nothing of ours to
+    // stop — the shared server owns the listener — and `app.stop()` would
+    // reject: it delegates to `HTTPReceiver.stop()`, which rejects with
+    // `ReceiverInconsistentStateError` when the receiver never started a
+    // server (`HTTPReceiver.js:186-189`).
+    if (!this.httpMode) {
+      await this.app.stop();
+    }
+  }
+
+  /**
+   * The `node:http` request listener for this app's HTTP Events route, or
+   * `undefined` in Socket Mode. Mounted by
+   * `apps/ethos/src/platform-webhook-server.ts` on the shared listener; it
+   * performs Slack's signature verification and answers the
+   * `url_verification` challenge itself.
+   *
+   * Mirrors Telegram's `get webhook()` precedent
+   * (`platform-telegram/src/index.ts`).
+   */
+  get requestListener(): RequestListener | undefined {
+    return this.httpReceiver?.requestListener;
+  }
+
+  /**
+   * The path this adapter's `requestListener` answers on
+   * (`/slack/events/<webhookPath ?? botKey>`), or `undefined` in Socket Mode.
+   * The shared server mounts by asking, rather than recomputing the
+   * convention, because Bolt matches its endpoint list exactly — a mount path
+   * that drifts from it 404s silently.
+   */
+  get webhookRoute(): string | undefined {
+    return this.httpRoute;
   }
 
   async sendTyping(chatId: string): Promise<void> {
@@ -624,18 +903,31 @@ export class SlackAdapter implements PlatformAdapter, ApprovalCapableAdapter {
       // sets `replyToId` for outbound today.
       const threadTs = message.threadId;
 
-      const chunks = chunkText(toNativeMarkdown(message.text), this.maxMessageLength);
-      const ids: string[] = [];
+      const rendered = toNativeMarkdown(message.text);
+      const chunks = chunkText(rendered, this.maxMessageLength);
 
-      for (const chunk of chunks) {
-        const result = await this.client.chat.postMessage({
-          channel: chatId,
-          text: chunk,
-          ...(threadTs ? { thread_ts: threadTs } : {}),
-          mrkdwn: true,
-        });
-        const ts = result.ts as string | undefined;
-        if (ts) ids.push(ts);
+      // A reply long enough to become a message wall goes out as a lead
+      // message plus the whole answer as `answer.md`. `undefined` means the
+      // fallback declined to take the reply — fall through to the wall.
+      let ids = this.isLongReply(rendered)
+        ? await this.sendLongAnswer(chatId, rendered, chunks, threadTs)
+        : undefined;
+
+      if (!ids) {
+        ids = [];
+        for (const chunk of chunks) {
+          const result = await this.client.chat.postMessage({
+            channel: chatId,
+            text: chunk,
+            ...(threadTs ? { thread_ts: threadTs } : {}),
+            mrkdwn: true,
+            // CHS-004 defence in depth: never auto-linkify @name/#channel from
+            // message text, so text that bypasses toNativeMarkdown still cannot ping.
+            link_names: false,
+          });
+          const ts = result.ts as string | undefined;
+          if (ts) ids.push(ts);
+        }
       }
 
       this.rememberChunkIds(ids);
@@ -687,6 +979,145 @@ export class SlackAdapter implements PlatformAdapter, ApprovalCapableAdapter {
     }
   }
 
+  /**
+   * The declared voice sink — a `files.uploadV2` of the synthesized audio,
+   * which Slack renders with an inline player. `opts.threadId` is Slack's
+   * `thread_ts`, the same translation `send()` and `sendWithAttachments()` use.
+   * Never throws: `{ok:true}` is the delivery ledger's only proof of delivery.
+   */
+  async sendVoiceNote(
+    chatId: string,
+    audio: Uint8Array,
+    opts: SendVoiceNoteOptions,
+  ): Promise<DeliveryResult> {
+    try {
+      const res = (await this.client.files.uploadV2({
+        channel_id: chatId,
+        file: Buffer.from(audio),
+        filename: opts.filename,
+        ...(opts.caption ? { initial_comment: opts.caption } : {}),
+        ...(opts.threadId ? { thread_ts: opts.threadId } : {}),
+      })) as { files?: Array<{ ts?: string }> };
+      if (opts.threadId) await this.threadState?.recordPost(chatId, opts.threadId);
+      const ts = res.files?.[0]?.ts;
+      return { ok: true, ...(ts ? { messageId: ts } : {}) };
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Long-answer snippet fallback (SP-B3)
+  //
+  // Four-plus messages of prose is a wall nobody reads. Past
+  // `longReplyThresholdChars` the reply becomes a lead message ending in
+  // "*full answer attached*" plus the complete text uploaded as `answer.md`,
+  // threaded under the lead. The upload is an attachment, not a `send()`, so
+  // the gateway's `MessageDedupCache` — which gates `adapter.send()` on the
+  // reply text — is untouched by it.
+  // ---------------------------------------------------------------------------
+
+  /** Whether a rendered reply crosses the long-answer threshold. */
+  private isLongReply(rendered: string): boolean {
+    return this.longReplyThresholdChars > 0 && rendered.length > this.longReplyThresholdChars;
+  }
+
+  /**
+   * Upload the complete answer as `answer.md` under `threadTs`.
+   * `initial_comment` is deliberately unset: the lead message already carries
+   * the opening text and a comment would repeat it.
+   *
+   * Returns `false` instead of throwing when the upload fails — including the
+   * `missing_scope` case for a workspace that never granted `files:write`.
+   * Silent degradation is the same policy the receipt reaction and the
+   * username resolver follow; the caller falls back to the chunk wall.
+   */
+  private async uploadAnswerFile(chatId: string, text: string, threadTs: string): Promise<boolean> {
+    try {
+      await this.client.files.uploadV2({
+        channel_id: chatId,
+        file: Buffer.from(text, 'utf8'),
+        filename: LONG_REPLY_FILENAME,
+        thread_ts: threadTs,
+      });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Post the lead message and attach the full answer. Returns the posted
+   * message ids, or `undefined` when Slack accepted the lead but returned no
+   * `ts` — without it the upload can't be threaded under the lead, so the
+   * caller posts the ordinary wall instead.
+   */
+  private async sendLongAnswer(
+    chatId: string,
+    rendered: string,
+    chunks: string[],
+    threadTs: string | undefined,
+  ): Promise<string[] | undefined> {
+    const lead = await this.client.chat.postMessage({
+      channel: chatId,
+      text: leadMessage(rendered, this.maxMessageLength),
+      ...(threadTs ? { thread_ts: threadTs } : {}),
+      mrkdwn: true,
+      // CHS-004 defence in depth: never auto-linkify @name/#channel from
+      // message text, so text that bypasses toNativeMarkdown still cannot ping.
+      link_names: false,
+    });
+    const leadTs = lead.ts as string | undefined;
+    if (!leadTs) return undefined;
+
+    if (await this.uploadAnswerFile(chatId, rendered, threadTs ?? leadTs)) return [leadTs];
+
+    // The lead promised an attachment that will never arrive. Expand it back
+    // into today's chunk wall in place — a message wall beats a broken promise.
+    return reflowChunks(chunks, [leadTs], this.reflowOps(chatId, threadTs));
+  }
+
+  /** `reflowChunks` operations bound to one channel. `threadTs` keeps appended
+   *  chunks in the thread the reply belongs to; `editMessage` has no thread
+   *  context and passes none, exactly as before. */
+  private reflowOps(
+    chatId: string,
+    threadTs?: string,
+  ): {
+    edit: (id: string, text: string) => Promise<string>;
+    append: (text: string) => Promise<string>;
+    deleteId: (id: string) => Promise<void>;
+  } {
+    return {
+      edit: async (ts, chunk) => {
+        // CHS-004 — the streaming terminal edit rewrites message text, so it
+        // needs the same mention suppression as the send paths.
+        await this.client.chat.update({
+          channel: chatId,
+          ts,
+          text: chunk,
+          link_names: false,
+        });
+        return ts;
+      },
+      append: async (chunk) => {
+        const result = await this.client.chat.postMessage({
+          channel: chatId,
+          text: chunk,
+          ...(threadTs ? { thread_ts: threadTs } : {}),
+          mrkdwn: true,
+          // CHS-004 defence in depth: never auto-linkify @name/#channel from
+          // message text, so text that bypasses toNativeMarkdown still cannot ping.
+          link_names: false,
+        });
+        return (result.ts as string | undefined) ?? '';
+      },
+      deleteId: async (ts) => {
+        await this.client.chat.delete({ channel: chatId, ts });
+      },
+    };
+  }
+
   // ---------------------------------------------------------------------------
   // Receipt reactions — best-effort acknowledgement of inbound messages.
   //
@@ -735,28 +1166,33 @@ export class SlackAdapter implements PlatformAdapter, ApprovalCapableAdapter {
       .catch(() => {});
   }
 
-  async editMessage(chatId: string, messageId: string, text: string): Promise<DeliveryResult> {
+  async editMessage(
+    chatId: string,
+    messageId: string,
+    text: string,
+    opts?: { final?: boolean },
+  ): Promise<DeliveryResult> {
     try {
-      const newChunks = chunkText(toNativeMarkdown(text), this.maxMessageLength);
+      const rendered = toNativeMarkdown(text);
       const existingIds = this.chunkMap.get(messageId) ?? [messageId];
+      let newChunks = chunkText(rendered, this.maxMessageLength);
 
-      const updatedIds = await reflowChunks(newChunks, existingIds, {
-        edit: async (ts, chunk) => {
-          await this.client.chat.update({ channel: chatId, ts, text: chunk });
-          return ts;
-        },
-        append: async (chunk) => {
-          const result = await this.client.chat.postMessage({
-            channel: chatId,
-            text: chunk,
-            mrkdwn: true,
-          });
-          return (result.ts as string | undefined) ?? '';
-        },
-        deleteId: async (ts) => {
-          await this.client.chat.delete({ channel: chatId, ts });
-        },
-      });
+      // Long-answer fallback on the TERMINAL edit only. An intermediate draft
+      // flush can't know how much more text is coming, and collapsing on every
+      // flush would upload one `answer.md` per flush. The upload runs BEFORE
+      // the collapse: if the file never lands, the chunk wall stays exactly as
+      // it is rather than being deleted with nothing to replace it.
+      // `editMessage` carries no thread context, so the lead's own ts is the
+      // thread parent for the upload. When the draft already lives in a
+      // thread, Slack files that under the same parent thread.
+      if (opts?.final && this.isLongReply(rendered)) {
+        const leadTs = existingIds[0] ?? messageId;
+        if (await this.uploadAnswerFile(chatId, rendered, leadTs)) {
+          newChunks = [leadMessage(rendered, this.maxMessageLength)];
+        }
+      }
+
+      const updatedIds = await reflowChunks(newChunks, existingIds, this.reflowOps(chatId));
 
       this.chunkMap.delete(messageId);
       this.rememberChunkIds(updatedIds);
@@ -950,7 +1386,8 @@ export class SlackAdapter implements PlatformAdapter, ApprovalCapableAdapter {
   /**
    * Enrich an inbound envelope with file attachments downloaded from Slack.
    * Best-effort: files that fail to download or exceed the size cap are
-   * silently skipped. Audio/video files are skipped in v1.
+   * silently skipped. Video files are skipped; audio is admitted as
+   * `type: 'audio'` so channel STT can transcribe it.
    */
   private async extractFileAttachments(
     envelope: InboundMessage,
@@ -968,12 +1405,22 @@ export class SlackAdapter implements PlatformAdapter, ApprovalCapableAdapter {
       if (SKIP_EXTS.has(ext)) continue;
       if ((file.size ?? 0) > MAX_FILE_SIZE) continue;
       if (!file.url_private_download) continue;
+      // CHS-006 — the URL arrives on an event payload, and the request carries
+      // the bot token. Confine it to Slack's own hosts and refuse redirects:
+      // otherwise an attacker-controlled `url_private_download` (or a redirect
+      // off one) exfiltrates the workspace token in an Authorization header.
+      if (!isSlackDownloadUrl(file.url_private_download)) continue;
 
-      const type = IMAGE_EXTS.has(ext) ? ('image' as const) : ('file' as const);
+      const type = IMAGE_EXTS.has(ext)
+        ? ('image' as const)
+        : AUDIO_EXTS.has(ext)
+          ? ('audio' as const)
+          : ('file' as const);
 
       try {
         const res = await fetch(file.url_private_download, {
           headers: { Authorization: `Bearer ${this.botToken}` },
+          redirect: 'error',
         });
         if (!res.ok) continue;
         const contentLength = Number(res.headers.get('content-length') ?? 0);

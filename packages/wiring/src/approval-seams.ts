@@ -21,6 +21,7 @@ import type {
 } from '@ethosagent/types';
 import { createDangerPredicate, type DangerPredicate } from './danger-predicate';
 import { createSmartApprover } from './smart-approver';
+import { type SpokenConfirmationRecord, withSpokenConfirmation } from './spoken-confirmation';
 
 /**
  * Backstop on the session → personality map. Entries are added on
@@ -72,13 +73,26 @@ export interface CreateApprovalDangerPredicateOptions {
   /** Model the smart reviewer runs on (the primary model today). */
   model: string;
   /**
-   * Extra tools that always require approval, in every mode. No production
-   * caller sets this yet; it is threaded through so a caller can flag tools
-   * without reaching around this module. Under `approvalMode: 'smart'` the
-   * predicate unions it with `SMART_MODE_CONSEQUENTIAL_TOOLS` — under `manual`
-   * and `off` this is the only non-hardline danger source.
+   * Extra tools that always require approval, in every mode. All three
+   * production callers — `apps/ethos/src/commands/serve.ts` and
+   * `apps/desktop/src/main/serve.ts` (web modal) and
+   * `apps/ethos/src/commands/gateway.ts` (Slack card) — pass
+   * `APPROVAL_SURFACE_ALWAYS_ASK`, the set of tools that must never run
+   * unprompted on a surface that can prompt. A caller with additional
+   * deployment-specific tools to gate unions them in here. Under
+   * `approvalMode: 'smart'` the predicate unions this with
+   * `SMART_MODE_CONSEQUENTIAL_TOOLS` — under `manual` and `off` this is the
+   * only non-hardline danger source.
    */
   alwaysAsk?: ReadonlyArray<string>;
+  /**
+   * Verbal re-confirmations already given on an owner-trusted voice surface,
+   * keyed by `toolCallId`. Optional — the spoken-confirmation gate is applied
+   * either way; without this nothing is ever pre-confirmed, so a spoken
+   * high-impact request always reaches the approval surface. A far-end
+   * caller's voice is refused regardless of what this contains.
+   */
+  spokenConfirmations?: SpokenConfirmationRecord;
 }
 
 /**
@@ -112,18 +126,25 @@ export function createApprovalDangerPredicate(
   // constructs the reviewer — and therefore never constructs a provider.
   let approver: ReturnType<typeof createSmartApprover> | undefined;
 
-  return createDangerPredicate({
-    ...(opts.alwaysAsk ? { alwaysAsk: opts.alwaysAsk } : {}),
-    getPersonality: (payload): PersonalityConfig | undefined => {
-      const id = activeBySession.get(payload.sessionId);
-      // Unknown session (no `session_start` seen) → no personality, which is
-      // the legacy `manual` default. Never guess a personality here: guessing
-      // could apply another personality's `approvalMode: 'off'`.
-      return id === undefined ? undefined : opts.personalities.get(id);
-    },
-    smartApprove: (payload, reason) => {
-      approver ??= createSmartApprover({ getProvider: opts.getProvider, model: opts.model });
-      return approver(payload, reason);
-    },
-  });
+  // Spoken-confirmation gate wraps the predicate on every approval surface.
+  // Inert for typed turns (no `voiceOrigin` on the payload), so this costs
+  // nothing until a surface actually speaks — and it is in place BEFORE
+  // telephony can produce a far-end caller (voice V1a, eng-review D13).
+  return withSpokenConfirmation(
+    createDangerPredicate({
+      ...(opts.alwaysAsk ? { alwaysAsk: opts.alwaysAsk } : {}),
+      getPersonality: (payload): PersonalityConfig | undefined => {
+        const id = activeBySession.get(payload.sessionId);
+        // Unknown session (no `session_start` seen) → no personality, which is
+        // the legacy `manual` default. Never guess a personality here: guessing
+        // could apply another personality's `approvalMode: 'off'`.
+        return id === undefined ? undefined : opts.personalities.get(id);
+      },
+      smartApprove: (payload, reason) => {
+        approver ??= createSmartApprover({ getProvider: opts.getProvider, model: opts.model });
+        return approver(payload, reason);
+      },
+    }),
+    opts.spokenConfirmations ? { confirmations: opts.spokenConfirmations } : {},
+  );
 }

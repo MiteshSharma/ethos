@@ -15,18 +15,91 @@ describe('PlayoutQueue', () => {
     const q = new PlayoutQueue({
       onAudio: (a) => audio.push(a[0] ?? -1),
     });
-    q.enqueue({ text: 'one', synthesize: oneChunk(1) });
-    q.enqueue({ text: 'two', synthesize: oneChunk(2) });
-    q.enqueue({ text: 'three', synthesize: oneChunk(3) });
+    q.enqueue({ id: 'one', text: 'one', synthesize: oneChunk(1) });
+    q.enqueue({ id: 'two', text: 'two', synthesize: oneChunk(2) });
+    q.enqueue({ id: 'three', text: 'three', synthesize: oneChunk(3) });
     await q.idle();
 
     expect(audio).toEqual([1, 2, 3]);
     expect(q.playedText()).toEqual(['one', 'two', 'three']);
   });
 
+  // The prefetch: sentence N+1 is synthesized while N is still playing, so the
+  // synthesis round-trip hides behind audio the user is already hearing.
+  // Asserted on recorded call order, not on wall-clock timing.
+  it('synthesizes the next sentence while the current one is still playing', async () => {
+    const calls: string[] = [];
+    const audio: number[] = [];
+    const gate = deferred();
+
+    const q = new PlayoutQueue({ onAudio: (a) => audio.push(a[0] ?? -1) });
+
+    q.enqueue({
+      id: 'one',
+      text: 'one',
+      synthesize: async function* () {
+        calls.push('synthesize:one');
+        yield { audio: new Uint8Array([1]), format: 'pcm' as AudioFormat };
+        await gate.promise;
+        yield { audio: new Uint8Array([2]), format: 'pcm' as AudioFormat };
+        calls.push('finish:one');
+      },
+    });
+    q.enqueue({
+      id: 'two',
+      text: 'two',
+      synthesize: async function* () {
+        calls.push('synthesize:two');
+        yield { audio: new Uint8Array([3]), format: 'pcm' as AudioFormat };
+        calls.push('finish:two');
+      },
+    });
+
+    await tick();
+    // "two" was synthesized — and finished — while "one" is still mid-stream.
+    expect(calls).toEqual(['synthesize:one', 'synthesize:two', 'finish:two']);
+    // …but none of its audio has played: playout has not reordered.
+    expect(audio).toEqual([1]);
+
+    gate.resolve();
+    await q.idle();
+
+    expect(audio).toEqual([1, 2, 3]);
+    expect(q.playedText()).toEqual(['one', 'two']);
+  });
+
+  it('does not run ahead further than one sentence', async () => {
+    const calls: string[] = [];
+    const gate = deferred();
+    const q = new PlayoutQueue({ onAudio: () => {} });
+
+    const item = (text: string, hold = false) => ({
+      id: text,
+      text,
+      synthesize: async function* () {
+        calls.push(text);
+        if (hold) await gate.promise;
+        yield { audio: new Uint8Array([1]), format: 'pcm' as AudioFormat };
+      },
+    });
+
+    q.enqueue(item('one', true));
+    q.enqueue(item('two'));
+    q.enqueue(item('three'));
+
+    await tick();
+    expect(calls).toEqual(['one', 'two']); // "three" is still waiting its slot
+
+    gate.resolve();
+    await q.idle();
+    expect(calls).toEqual(['one', 'two', 'three']);
+    expect(q.playedText()).toEqual(['one', 'two', 'three']);
+  });
+
   it('cancel drops pending items and does not mark the in-flight one as played', async () => {
     const audio: number[] = [];
-    let secondSynthesized = false;
+    let thirdSynthesized = false;
+    let secondAborted = false;
     const gate = deferred();
 
     const q = new PlayoutQueue({
@@ -34,6 +107,7 @@ describe('PlayoutQueue', () => {
     });
 
     q.enqueue({
+      id: 'first',
       text: 'first',
       synthesize: async function* (signal) {
         yield { audio: new Uint8Array([1]), format: 'pcm' };
@@ -42,10 +116,23 @@ describe('PlayoutQueue', () => {
         yield { audio: new Uint8Array([2]), format: 'pcm' };
       },
     });
+    // Prefetched (inside the lookahead window) — so it IS synthesized, but its
+    // audio must never play and cancel must abort it.
     q.enqueue({
+      id: 'second',
       text: 'second',
+      synthesize: async function* (signal) {
+        await gate.promise;
+        secondAborted = signal.aborted;
+        yield { audio: new Uint8Array([9]), format: 'pcm' };
+      },
+    });
+    // Beyond the lookahead window — never synthesized at all.
+    q.enqueue({
+      id: 'third',
+      text: 'third',
       synthesize: async function* () {
-        secondSynthesized = true;
+        thirdSynthesized = true;
         yield { audio: new Uint8Array([9]), format: 'pcm' };
       },
     });
@@ -54,9 +141,55 @@ describe('PlayoutQueue', () => {
     q.cancel();
     gate.resolve();
     await q.idle();
+    await tick();
 
     expect(audio).toEqual([1]); // only the first chunk played
     expect(q.playedText()).toEqual([]); // interrupted item is not "played"
-    expect(secondSynthesized).toBe(false); // pending item dropped
+    expect(secondAborted).toBe(true); // prefetched item was aborted by cancel
+    expect(thirdSynthesized).toBe(false); // pending item dropped
+  });
+
+  it('surfaces a prefetched synthesis error only when that sentence comes up', async () => {
+    const errors: string[] = [];
+    const played: string[] = [];
+    const q = new PlayoutQueue({
+      onAudio: () => {},
+      onSentencePlayed: (_id, t) => played.push(t),
+      onError: (err) => errors.push(err instanceof Error ? err.message : String(err)),
+    });
+
+    q.enqueue({ id: 'one', text: 'one', synthesize: oneChunk(1) });
+    q.enqueue({
+      id: 'two',
+      text: 'two',
+      synthesize: () => {
+        throw new Error('tts exploded');
+      },
+    });
+    await q.idle();
+
+    expect(played).toEqual(['one']); // the good sentence played first
+    expect(errors).toEqual(['tts exploded']);
+    expect(q.playedText()).toEqual(['one']);
+  });
+
+  // The correlator the segment-misattribution bug (Ethos voice L1) depends
+  // on: `onAudio`'s third argument is the ENQUEUED ITEM's own id, not
+  // whichever item happens to be "current" by some other bookkeeping — a
+  // consumer keys audio-to-text off this id, not off event arrival order.
+  it('stamps every onAudio chunk with the enqueued item’s own id', async () => {
+    const stamped: Array<{ id: string; byte: number }> = [];
+    const q = new PlayoutQueue({
+      onAudio: (a, _format, id) => stamped.push({ id, byte: a[0] ?? -1 }),
+    });
+
+    q.enqueue({ id: 'seg1', text: 'one', synthesize: oneChunk(1) });
+    q.enqueue({ id: 'seg2', text: 'two', synthesize: oneChunk(2) });
+    await q.idle();
+
+    expect(stamped).toEqual([
+      { id: 'seg1', byte: 1 },
+      { id: 'seg2', byte: 2 },
+    ]);
   });
 });

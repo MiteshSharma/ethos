@@ -12,7 +12,10 @@ interface ClarifyModalProps {
   onCancel: () => void;
 }
 
-function formatCountdown(deadlineAt: string, now: number): string {
+// `deadlineAt` is `null` while a clarify is still queued behind another one
+// in the same lane (D2) — no timer has started yet.
+function formatCountdown(deadlineAt: string | null, now: number): string {
+  if (deadlineAt === null) return 'queued';
   const ms = new Date(deadlineAt).getTime() - now;
   if (!Number.isFinite(ms) || ms <= 0) return 'now';
   const totalSec = Math.round(ms / 1000);

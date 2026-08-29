@@ -67,7 +67,7 @@ function makeScriptedLLM(script: ScriptStep[]): LLMProvider {
 // mutate via node:fs.
 const testBackends: CapabilityBackends = {
   storage: new FsStorage(),
-  personalityFsReach: { read: ['/'], write: ['/'] },
+  personalityFsReach: () => ({ read: ['/'], write: ['/'] }),
 };
 
 async function buildFileRegistry() {
@@ -79,17 +79,18 @@ async function buildFileRegistry() {
 }
 
 /**
- * Build a personality registry that disables injection defense so the
- * post-untrusted-read downgrade doesn't block write_file during tests.
- * The stale-write guard operates on the mtime check, not injection defense.
+ * Build a personality registry that disables the post-untrusted-read downgrade
+ * so it doesn't block write_file during tests. The stale-write guard operates
+ * on the mtime check, not injection defense. Only the downgrade is narrowed —
+ * provenance wrapping and the prelude are non-optional (§V S6).
  */
-async function buildPersonalitiesNoInjectionDefense() {
+async function buildPersonalitiesNoDowngrade() {
   const { DefaultPersonalityRegistry } = await import('../defaults/noop-personality');
   const personalities = new DefaultPersonalityRegistry();
   vi.spyOn(personalities, 'getDefault').mockReturnValue({
     id: 'default',
     name: 'Default',
-    safety: { injectionDefense: { enabled: false } },
+    safety: { injectionDefense: { postReadDowngrade: { enabled: false } } },
   });
   return personalities;
 }
@@ -115,7 +116,7 @@ describe('FW-28: stale-write guard', () => {
     await writeFile(filePath, 'original content');
 
     const tools = await buildFileRegistry();
-    const personalities = await buildPersonalitiesNoInjectionDefense();
+    const personalities = await buildPersonalitiesNoDowngrade();
     const llm = makeScriptedLLM([
       { tool: 'read_file', args: { path: filePath } },
       { tool: 'write_file', args: { path: filePath, content: 'new content' } },
@@ -157,7 +158,7 @@ describe('FW-28: stale-write guard', () => {
     await writeFile(filePath, 'original content');
 
     const tools = await buildFileRegistry();
-    const personalities = await buildPersonalitiesNoInjectionDefense();
+    const personalities = await buildPersonalitiesNoDowngrade();
     const llm = makeScriptedLLM([
       { tool: 'read_file', args: { path: filePath } },
       { tool: 'write_file', args: { path: filePath, content: 'updated content' } },
@@ -186,7 +187,7 @@ describe('FW-28: stale-write guard', () => {
     // File does NOT exist yet — agent writes it for the first time
 
     const tools = await buildFileRegistry();
-    const personalities = await buildPersonalitiesNoInjectionDefense();
+    const personalities = await buildPersonalitiesNoDowngrade();
     const llm = makeScriptedLLM([
       { tool: 'write_file', args: { path: filePath, content: 'brand new' } },
       { text: 'done' },
@@ -216,7 +217,7 @@ describe('FW-28: stale-write guard', () => {
     let bumpDone = false;
 
     const tools = await buildFileRegistry();
-    const personalities = await buildPersonalitiesNoInjectionDefense();
+    const personalities = await buildPersonalitiesNoDowngrade();
 
     // Script: read → write (will be stale) → read again → write (OK) → text
     const llm = makeScriptedLLM([
@@ -266,7 +267,7 @@ describe('FW-28: stale-write guard', () => {
     await writeFile(filePath, 'will be deleted');
 
     const tools = await buildFileRegistry();
-    const personalities = await buildPersonalitiesNoInjectionDefense();
+    const personalities = await buildPersonalitiesNoDowngrade();
     const llm = makeScriptedLLM([
       { tool: 'read_file', args: { path: filePath } },
       { tool: 'write_file', args: { path: filePath, content: 'recreated' } },

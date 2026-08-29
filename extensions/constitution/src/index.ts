@@ -246,8 +246,13 @@ export function enforceConstitution(args: EnforceArgs): { enforcement: Constitut
       );
     }
 
-    // (1d) A2 fs_reach within allowedMountRoots
-    const reachPaths = [...(p.fs_reach?.read ?? []), ...(p.fs_reach?.write ?? [])];
+    // (1d) A2 fs_reach within allowedMountRoots. workdir counts: it is injected
+    // into both derived reach lists, so an unbounded workdir is unbounded reach.
+    const reachPaths = [
+      ...(p.fs_reach?.read ?? []),
+      ...(p.fs_reach?.write ?? []),
+      ...(p.fs_reach?.workdir ? [p.fs_reach.workdir] : []),
+    ];
     if (
       reachPaths.length > 0 &&
       !isReachWithinAllowedRoots(reachPaths, args.constitution, vars(p.id))

@@ -1,10 +1,16 @@
-import { mkdir, rm, unlink, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rm, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { FsStorage } from '@ethosagent/storage-fs';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { CronJob, CronRunResult, CronSchedulerConfig } from '../index';
-import { CronScheduler, isValidCronExpression, nextRun, nextRunAfter } from '../index';
+import type { CronArmingBackend, CronJob, CronRunResult, CronSchedulerConfig } from '../index';
+import {
+  CRON_RUNNING_STALE_MS,
+  CronScheduler,
+  isValidCronExpression,
+  nextRun,
+  nextRunAfter,
+} from '../index';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -32,12 +38,14 @@ function makeScheduler(opts?: {
   runJob?: (job: CronJob) => Promise<CronRunResult>;
   deliver?: (job: CronJob, output: string) => Promise<void>;
   onDecision?: CronSchedulerConfig['onDecision'];
+  armingBackend?: CronArmingBackend;
 }) {
   return new CronScheduler({
     cronDir: testDir,
     scriptsDir,
     tickIntervalMs: 999_999, // don't auto-tick in tests
     storage: new FsStorage(),
+    ...(opts?.armingBackend ? { armingBackend: opts.armingBackend } : {}),
     runJob:
       opts?.runJob ??
       (async (job) => ({
@@ -540,6 +548,192 @@ describe('CronScheduler tick', () => {
     await (scheduler as any).tick();
 
     expect(runs).not.toContain('paused-job');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// CronScheduler.fire() — the public CronEngine entry point a
+// CronTriggerSource calls into (plan/phases/cron-scheduler-seam.md).
+// ---------------------------------------------------------------------------
+
+describe('CronScheduler.fire()', () => {
+  it('runs the same due-scan/claim/execute cycle as the private tick()', async () => {
+    const runs: string[] = [];
+    const scheduler = makeScheduler({
+      runJob: async (job) => {
+        runs.push(job.id);
+        return { jobId: job.id, ranAt: new Date().toISOString(), output: 'x', sessionKey: 'k' };
+      },
+    });
+
+    const job = await scheduler.createJob({
+      name: 'Fire Due Job',
+      schedule: '0 8 * * *',
+      prompt: 'test',
+      personalityId: 'test',
+      missedRunPolicy: 'run-once',
+    });
+
+    // biome-ignore lint/suspicious/noExplicitAny: test access to private method
+    await (scheduler as any).patchJob(job.id, {
+      nextRunAt: new Date(Date.now() - 60_000).toISOString(),
+    });
+
+    await scheduler.fire();
+
+    expect(runs).toContain('fire-due-job');
+  });
+
+  it('calls the arming backend with the earliest nextRunAt across active jobs after firing', async () => {
+    const armCalls: Array<Date | null> = [];
+    const armingBackend: CronArmingBackend = { arm: (next) => void armCalls.push(next) };
+    const scheduler = makeScheduler({ armingBackend });
+
+    const later = await scheduler.createJob({
+      name: 'Arm Later Job',
+      schedule: '0 8 * * *',
+      prompt: 'test',
+      personalityId: 'test',
+      missedRunPolicy: 'skip',
+    });
+    const sooner = await scheduler.createJob({
+      name: 'Arm Sooner Job',
+      schedule: '0 9 * * *',
+      prompt: 'test',
+      personalityId: 'test',
+      missedRunPolicy: 'skip',
+    });
+
+    const laterAt = new Date(Date.now() + 2 * 60 * 60 * 1000);
+    const soonerAt = new Date(Date.now() + 60 * 60 * 1000);
+    // biome-ignore lint/suspicious/noExplicitAny: test access to private method
+    await (scheduler as any).patchJob(later.id, { nextRunAt: laterAt.toISOString() });
+    // biome-ignore lint/suspicious/noExplicitAny: test access to private method
+    await (scheduler as any).patchJob(sooner.id, { nextRunAt: soonerAt.toISOString() });
+
+    await scheduler.fire();
+
+    expect(armCalls).toHaveLength(1);
+    expect(armCalls[0]?.getTime()).toBe(soonerAt.getTime());
+  });
+
+  it('arms null when no active job has a nextRunAt', async () => {
+    const armCalls: Array<Date | null> = [];
+    const armingBackend: CronArmingBackend = { arm: (next) => void armCalls.push(next) };
+    const scheduler = makeScheduler({ armingBackend });
+
+    await scheduler.fire();
+
+    expect(armCalls).toHaveLength(1);
+    expect(armCalls[0]).toBeNull();
+  });
+
+  it('a throwing arming backend never breaks the fire (fail-open)', async () => {
+    const runs: string[] = [];
+    const armingBackend: CronArmingBackend = {
+      arm: () => {
+        throw new Error('arming backend exploded');
+      },
+    };
+    const scheduler = makeScheduler({
+      armingBackend,
+      runJob: async (job) => {
+        runs.push(job.id);
+        return { jobId: job.id, ranAt: new Date().toISOString(), output: 'x', sessionKey: 'k' };
+      },
+    });
+
+    const job = await scheduler.createJob({
+      name: 'Survives Arming Failure',
+      schedule: '0 8 * * *',
+      prompt: 'test',
+      personalityId: 'test',
+      missedRunPolicy: 'run-once',
+    });
+    // biome-ignore lint/suspicious/noExplicitAny: test access to private method
+    await (scheduler as any).patchJob(job.id, {
+      nextRunAt: new Date(Date.now() - 60_000).toISOString(),
+    });
+
+    await expect(scheduler.fire()).resolves.toBeUndefined();
+    expect(runs).toContain('survives-arming-failure');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// CronScheduler.setArmingBackend() — the late-binding seam
+// buildCronTriggers's construction order requires: buildCronTriggers needs
+// the already-constructed CronScheduler as its `engine` arg, so the arming
+// backend it produces can only be wired back in AFTER construction.
+// ---------------------------------------------------------------------------
+
+describe('CronScheduler.setArmingBackend()', () => {
+  it('a backend set after construction is picked up by a subsequent fire()', async () => {
+    const armCalls: Array<Date | null> = [];
+    const scheduler = makeScheduler(); // no armingBackend at construction time
+
+    const job = await scheduler.createJob({
+      name: 'Late Bound Arming Job',
+      schedule: '0 8 * * *',
+      prompt: 'test',
+      personalityId: 'test',
+      missedRunPolicy: 'skip',
+    });
+    const nextAt = new Date(Date.now() + 60 * 60 * 1000);
+    // biome-ignore lint/suspicious/noExplicitAny: test access to private method
+    await (scheduler as any).patchJob(job.id, { nextRunAt: nextAt.toISOString() });
+
+    // Set AFTER construction — mirrors serve.ts/gateway.ts calling
+    // `scheduler.setArmingBackend(cronTriggers.arming)` right after
+    // `buildCronTriggers(scheduler, config.cron)` returns.
+    scheduler.setArmingBackend({ arm: (next) => void armCalls.push(next) });
+
+    await scheduler.fire();
+
+    expect(armCalls).toHaveLength(1);
+    expect(armCalls[0]?.getTime()).toBe(nextAt.getTime());
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Concurrent tick() claims — real compare-and-swap (post-review fix). Two
+// CronTriggerSources (LocalIntervalTrigger + HttpFireTrigger) firing the same
+// engine close together in the hybrid deployment profile must not both win
+// the claim on the same due job.
+// ---------------------------------------------------------------------------
+
+describe('CronScheduler concurrent claim (CAS)', () => {
+  it('two overlapping fire() calls on the same due job execute it exactly once', async () => {
+    const runs: string[] = [];
+    const scheduler = makeScheduler({
+      runJob: async (job) => {
+        runs.push(job.id);
+        // A little run latency gives both overlapping calls room to race.
+        await new Promise((r) => setTimeout(r, 20));
+        return { jobId: job.id, ranAt: new Date().toISOString(), output: 'x', sessionKey: 'k' };
+      },
+    });
+
+    const job = await scheduler.createJob({
+      name: 'Race Due Job',
+      schedule: '0 8 * * *',
+      prompt: 'test',
+      personalityId: 'test',
+      missedRunPolicy: 'run-once',
+    });
+    // biome-ignore lint/suspicious/noExplicitAny: test access to private method
+    await (scheduler as any).patchJob(job.id, {
+      nextRunAt: new Date(Date.now() - 60_000).toISOString(),
+    });
+
+    // Simulate LocalIntervalTrigger's interval and HttpFireTrigger's
+    // /cron/fire both calling into the same engine around the same moment.
+    await Promise.all([scheduler.fire(), scheduler.fire()]);
+
+    // Exactly one execution — not two. Before the fix, both calls' unlocked
+    // readJobs() snapshots saw the same due nextRunAt and both patchJob
+    // "claims" succeeded (last-write-wins), so the job ran twice.
+    expect(runs).toEqual(['race-due-job']);
   });
 });
 
@@ -1592,5 +1786,203 @@ describe('CronScheduler precheck gate', () => {
     await scheduler.runJobNow(job.id);
     expect(prompts).toHaveLength(1);
     expect(prompts[0]).toContain('analyze the diff');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Mid-execution signal — `CronJob.runningSince` + `hasRunningJobs()`
+// (plan/phases/idle-watcher.md §1 check #7). This is what the idle watcher's
+// `cron-executions` busy source reads; before it existed, arming gate 2
+// refused to arm in every deployment because cron is always constructed.
+// ---------------------------------------------------------------------------
+
+describe('CronScheduler mid-execution signal', () => {
+  /** Make a job due one minute ago so the next `fire()` claims it. */
+  async function makeDue(scheduler: CronScheduler, name: string): Promise<CronJob> {
+    const job = await scheduler.createJob({
+      name,
+      schedule: '0 8 * * *',
+      prompt: 'test',
+      personalityId: 'test',
+      missedRunPolicy: 'run-once',
+    });
+    // biome-ignore lint/suspicious/noExplicitAny: test access to private method
+    await (scheduler as any).patchJob(job.id, {
+      nextRunAt: new Date(Date.now() - 60_000).toISOString(),
+    });
+    return job;
+  }
+
+  it('reports no running jobs before anything has fired', async () => {
+    const scheduler = makeScheduler();
+    await makeDue(scheduler, 'Idle Job');
+    expect(await scheduler.hasRunningJobs()).toBe(false);
+  });
+
+  it('stamps runningSince at claim and clears it when execution completes', async () => {
+    let midRunStamp: number | null | undefined;
+    let midRunAggregate = false;
+    let scheduler!: CronScheduler;
+    scheduler = makeScheduler({
+      runJob: async (job) => {
+        midRunStamp = (await scheduler.getJob(job.id))?.runningSince;
+        midRunAggregate = await scheduler.hasRunningJobs();
+        return { jobId: job.id, ranAt: new Date().toISOString(), output: 'x', sessionKey: 'k' };
+      },
+    });
+
+    const job = await makeDue(scheduler, 'Stamped Job');
+    await scheduler.fire();
+
+    expect(typeof midRunStamp).toBe('number');
+    expect(midRunAggregate).toBe(true);
+    expect((await scheduler.getJob(job.id))?.runningSince).toBeNull();
+    expect(await scheduler.hasRunningJobs()).toBe(false);
+  });
+
+  // THE regression that matters: a stuck stamp means the watcher reads this
+  // deployment as busy forever and never suspends again.
+  it('clears runningSince even when the job throws', async () => {
+    let midRunAggregate = false;
+    let scheduler!: CronScheduler;
+    scheduler = makeScheduler({
+      runJob: async () => {
+        midRunAggregate = await scheduler.hasRunningJobs();
+        throw new Error('provider exploded');
+      },
+    });
+
+    const job = await makeDue(scheduler, 'Throwing Job');
+    await scheduler.fire();
+
+    expect(midRunAggregate).toBe(true);
+    const after = await scheduler.getJob(job.id);
+    expect(after?.runningSince).toBeNull();
+    expect(after?.lastError).toContain('provider exploded');
+    expect(await scheduler.hasRunningJobs()).toBe(false);
+  });
+
+  it('clears runningSince when a script job fails', async () => {
+    await writeScript('boom.sh', '#!/bin/bash\nexit 3\n');
+    const scheduler = makeScheduler();
+    const job = await scheduler.createJob({
+      name: 'Failing Script Job',
+      schedule: '0 8 * * *',
+      script: { file: 'boom.sh', timeoutSeconds: 5 },
+      personalityId: 'test',
+      missedRunPolicy: 'run-once',
+    });
+    // biome-ignore lint/suspicious/noExplicitAny: test access to private method
+    await (scheduler as any).patchJob(job.id, {
+      nextRunAt: new Date(Date.now() - 60_000).toISOString(),
+    });
+
+    await scheduler.fire();
+
+    expect((await scheduler.getJob(job.id))?.runningSince).toBeNull();
+    expect(await scheduler.hasRunningJobs()).toBe(false);
+  });
+
+  // The stamp rides inside `claimDueJob`'s compare-and-swap, so a claimant
+  // whose snapshot is stale writes nothing at all — not even the stamp.
+  it('a losing claimant does not stamp runningSince', async () => {
+    const scheduler = makeScheduler();
+    const job = await makeDue(scheduler, 'Contested Job');
+
+    // biome-ignore lint/suspicious/noExplicitAny: test access to private method
+    const internals = scheduler as any;
+    const claimed = await internals.claimDueJob(job.id, 'a-stale-snapshot-value', {
+      runningSince: Date.now(),
+    });
+
+    expect(claimed).toBe(false);
+    expect((await scheduler.getJob(job.id))?.runningSince).toBeUndefined();
+    expect(await scheduler.hasRunningJobs()).toBe(false);
+  });
+
+  it('two overlapping fire() calls leave exactly one stamp, then none', async () => {
+    const observed: Array<number | null | undefined> = [];
+    let scheduler!: CronScheduler;
+    scheduler = makeScheduler({
+      runJob: async (job) => {
+        observed.push((await scheduler.getJob(job.id))?.runningSince);
+        await new Promise((r) => setTimeout(r, 20));
+        return { jobId: job.id, ranAt: new Date().toISOString(), output: 'x', sessionKey: 'k' };
+      },
+    });
+
+    await makeDue(scheduler, 'Raced Job');
+    await Promise.all([scheduler.fire(), scheduler.fire()]);
+
+    expect(observed).toHaveLength(1);
+    expect(typeof observed[0]).toBe('number');
+    expect(await scheduler.hasRunningJobs()).toBe(false);
+  });
+
+  it('covers manual runJobNow executions too', async () => {
+    let midRunAggregate = false;
+    let scheduler!: CronScheduler;
+    scheduler = makeScheduler({
+      runJob: async (job) => {
+        midRunAggregate = await scheduler.hasRunningJobs();
+        return { jobId: job.id, ranAt: new Date().toISOString(), output: 'x', sessionKey: 'k' };
+      },
+    });
+    const job = await scheduler.createJob({
+      name: 'Manual Job',
+      schedule: '0 8 * * *',
+      prompt: 'test',
+      personalityId: 'test',
+      missedRunPolicy: 'skip',
+    });
+
+    await scheduler.runJobNow(job.id);
+
+    expect(midRunAggregate).toBe(true);
+    expect((await scheduler.getJob(job.id))?.runningSince).toBeNull();
+    expect(await scheduler.hasRunningJobs()).toBe(false);
+  });
+
+  // Crash recovery. `runningSince` is persisted, so a process killed mid-run
+  // leaves a stamp nobody owns. There is no sweep: the stamp ages out at READ
+  // time (`CRON_RUNNING_STALE_MS`) and the job's next claim overwrites it.
+  it('ignores a stamp older than the staleness bound', async () => {
+    const scheduler = makeScheduler();
+    const job = await makeDue(scheduler, 'Crashed Job');
+    // biome-ignore lint/suspicious/noExplicitAny: test access to private method
+    await (scheduler as any).patchJob(job.id, {
+      runningSince: Date.now() - CRON_RUNNING_STALE_MS - 1_000,
+    });
+
+    expect(await scheduler.hasRunningJobs()).toBe(false);
+    // Still busy under a wide enough bound — the stamp is there, just old.
+    expect(await scheduler.hasRunningJobs(CRON_RUNNING_STALE_MS * 4)).toBe(true);
+  });
+
+  it('lets the next claim overwrite a crashed run stamp', async () => {
+    const scheduler = makeScheduler();
+    const job = await makeDue(scheduler, 'Recovered Job');
+    // biome-ignore lint/suspicious/noExplicitAny: test access to private method
+    await (scheduler as any).patchJob(job.id, {
+      runningSince: Date.now() - CRON_RUNNING_STALE_MS - 1_000,
+    });
+
+    await scheduler.fire();
+
+    expect((await scheduler.getJob(job.id))?.runningSince).toBeNull();
+    expect(await scheduler.hasRunningJobs()).toBe(false);
+  });
+
+  // Records written before this field existed have no key at all.
+  it('treats a persisted record with no runningSince key as not running', async () => {
+    const scheduler = makeScheduler();
+    await makeDue(scheduler, 'Legacy Job');
+    const raw = JSON.parse(await readFile(join(testDir, 'jobs.json'), 'utf-8')) as CronJob[];
+    expect(raw[0]).not.toHaveProperty('runningSince');
+
+    expect(await scheduler.hasRunningJobs()).toBe(false);
+    // And it still claims/executes normally — the absent key is not a blocker.
+    await scheduler.fire();
+    expect((await scheduler.getJob('legacy-job'))?.runCount).toBe(1);
   });
 });

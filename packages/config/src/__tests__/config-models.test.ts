@@ -1,7 +1,7 @@
 // §7 — per-model profile overrides (`models.<providerId>/<modelId>.<field>`).
 
 import { join } from 'node:path';
-import { InMemoryStorage } from '@ethosagent/storage-fs';
+import { InMemorySecretsResolver, InMemoryStorage } from '@ethosagent/storage-fs';
 import { describe, expect, it } from 'vitest';
 import { ethosDir, readRawConfig, writeConfig } from '../index';
 
@@ -71,7 +71,7 @@ describe('models: per-model profile config parsing', () => {
         },
       },
     };
-    await writeConfig(storage, original);
+    await writeConfig(storage, original, new InMemorySecretsResolver());
     const roundTripped = await readRawConfig(storage);
     expect(roundTripped?.models).toEqual(original.models);
   });

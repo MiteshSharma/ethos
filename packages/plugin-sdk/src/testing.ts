@@ -94,6 +94,10 @@ function createPluginTestSafety(): AgentSafety {
       detectSecrets: () => [],
     },
     scopedStorageFactory: (base) => base,
+    approvalPosture: {
+      kind: 'ungated',
+      reason: 'plugin test runtime — no approval policy is registered',
+    },
   };
 }
 

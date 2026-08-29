@@ -47,4 +47,15 @@ export interface VoiceTransport {
 
   /** Publish one frame of reply audio to the participant (outbound sink). */
   sendAudio(frame: OutboundAudioFrame): void;
+
+  /**
+   * Subscribe to remote teardown — the participant left, the caller hung up,
+   * the room closed. Returns an unsubscribe function.
+   *
+   * OPTIONAL because not every transport can observe it: a browser mic knows
+   * only what its owner tells it. A transport that omits this simply never
+   * fires the adapter's remote-hangup path, and the call ends when someone
+   * calls `stop()` — the behaviour every transport had before this existed.
+   */
+  onClosed?(handler: () => void): () => void;
 }

@@ -4,8 +4,13 @@
 
 import type { PendingClarify } from '@ethosagent/types';
 
-/** Human-readable "in 14m" / "in 45s" for the default-timeout hint. */
-export function formatCountdown(deadlineAt: string, now: number = Date.now()): string {
+/**
+ * Human-readable "in 14m" / "in 45s" for the default-timeout hint.
+ * `deadlineAt` is `null` while a clarify is still queued behind another one
+ * in the same lane (D2) — no timer has started yet.
+ */
+export function formatCountdown(deadlineAt: string | null, now: number = Date.now()): string {
+  if (deadlineAt === null) return 'queued';
   const ms = new Date(deadlineAt).getTime() - now;
   if (!Number.isFinite(ms) || ms <= 0) return 'now';
   const totalSec = Math.round(ms / 1000);

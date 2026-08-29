@@ -1,4 +1,4 @@
-import { deriveBotKey } from '@ethosagent/core';
+import { deriveBotKey, voiceLaneKey } from '@ethosagent/core';
 import type { AgentEvent } from '@ethosagent/types';
 import type { AgentTurnRunner, VoiceSessionEvent } from '@ethosagent/voice-session';
 import { VoiceSession } from '@ethosagent/voice-session';
@@ -36,7 +36,9 @@ describe('VoiceChannelAdapter', () => {
 
     expect(adapter.botKey).toBe(deriveBotKey('+1555*'));
     expect(adapter.callerId).toBe('+15551234567');
-    expect(adapter.laneKey).toBe(`voice:${deriveBotKey('+1555*')}:+15551234567`);
+    expect(adapter.laneKey).toBe(
+      voiceLaneKey(deriveBotKey('+1555*'), { kind: 'livekit', id: '+15551234567' }),
+    );
   });
 
   it('honors an explicit bot id over the derived key', () => {
@@ -49,7 +51,109 @@ describe('VoiceChannelAdapter', () => {
     });
 
     expect(adapter.botKey).toBe('reception');
-    expect(adapter.laneKey).toBe('voice:reception:room-participant-7');
+    expect(adapter.laneKey).toBe(
+      voiceLaneKey('reception', { kind: 'livekit', id: 'room-participant-7' }),
+    );
+  });
+
+  // The two assertions above compare against the encoder, so they hold no
+  // matter what shape the encoder produces. This one names the LITERAL string,
+  // because the lane key is a durable identifier: the day a phone leg is
+  // actually wired (no in-repo caller supplies the LiveKit bindings today —
+  // `buildVoiceStack` builds no adapter without them, which is why the B6
+  // change from `voice:<botKey>:<callerId>` to `voice:<botKey>:livekit:<callerId>`
+  // orphaned nothing and needed no migration), every call history is filed
+  // under it. Changing it silently after that point is what would strand a
+  // caller's history, so a change to it must fail a test, not a support ticket.
+  it('pins the literal lane-key shape a call history would be filed under', () => {
+    const transport = new FakeVoiceTransport('+15551234567');
+    const session = makeSession(makeClock(), scriptedRunner([]));
+    const adapter = new VoiceChannelAdapter({
+      transport,
+      session,
+      bot: { id: 'reception', match: '+1*' },
+    });
+
+    // `+` is URL-encoded — every segment is, so no caller id can smuggle a
+    // separator and alias itself onto another lane.
+    expect(adapter.laneKey).toBe('voice:reception:livekit:%2B15551234567');
+  });
+
+  // The second durable shape. A PSTN leg passes `laneKind: 'sip'`, and the same
+  // person's browser session keeps `livekit` — the segment is what stops one
+  // caller id from merging two conversations into one history.
+  it('pins the literal sip lane-key shape', () => {
+    const transport = new FakeVoiceTransport('+15551234567');
+    const session = makeSession(makeClock(), scriptedRunner([]));
+    const adapter = new VoiceChannelAdapter({
+      transport,
+      session,
+      bot: { id: 'reception', match: '+1*' },
+      laneKind: 'sip',
+    });
+
+    expect(adapter.laneKey).toBe('voice:reception:sip:%2B15551234567');
+  });
+
+  describe('onEnded', () => {
+    function makeAdapter(onEnded: () => void): {
+      adapter: VoiceChannelAdapter;
+      transport: FakeVoiceTransport;
+    } {
+      const transport = new FakeVoiceTransport('+1555');
+      const adapter = new VoiceChannelAdapter({
+        transport,
+        session: makeSession(makeClock(), scriptedRunner([])),
+        bot: { match: '+1*' },
+        onEnded,
+      });
+      return { adapter, transport };
+    }
+
+    it('fires once on stop()', async () => {
+      let calls = 0;
+      const { adapter } = makeAdapter(() => {
+        calls += 1;
+      });
+      await adapter.start();
+      await adapter.stop();
+      expect(calls).toBe(1);
+    });
+
+    it('fires once when the transport closes under us (remote hang-up)', async () => {
+      let calls = 0;
+      const { adapter, transport } = makeAdapter(() => {
+        calls += 1;
+      });
+      await adapter.start();
+      transport.close();
+      await tick();
+      expect(calls).toBe(1);
+    });
+
+    it('does not fire twice when a remote close is followed by stop()', async () => {
+      let calls = 0;
+      const { adapter, transport } = makeAdapter(() => {
+        calls += 1;
+      });
+      await adapter.start();
+      transport.close();
+      await tick();
+      await adapter.stop();
+      expect(calls).toBe(1);
+    });
+
+    it('does not fire a stale handler after stop() unsubscribed the transport', async () => {
+      let calls = 0;
+      const { adapter, transport } = makeAdapter(() => {
+        calls += 1;
+      });
+      await adapter.start();
+      await adapter.stop();
+      transport.close();
+      await tick();
+      expect(calls).toBe(1);
+    });
   });
 
   it('bridges a full call: inbound frames -> reply audio on the outbound sink', async () => {

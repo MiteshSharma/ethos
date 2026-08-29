@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { existsSync, readdirSync } from 'node:fs';
 import { join, resolve as pathResolve } from 'node:path';
 import {
@@ -8,10 +8,10 @@ import {
   createA2aAuthRouter,
   createA2aRpcRouter,
   createA2aWellKnownRouter,
-  FetchA2aPushClient,
-  InMemoryA2aTaskStore,
   MemoryA2aLimiter,
+  MemoryA2aPreAuthLimiter,
   MemoryNonceStore,
+  SQLiteA2aTaskStore,
   StorageA2aAllowlist,
   StorageA2aPeerStore,
 } from '@ethosagent/a2a';
@@ -24,30 +24,50 @@ import {
   readRawConfig,
   writeConfig,
 } from '@ethosagent/config';
-import type { AgentLoop } from '@ethosagent/core';
-import { CronScheduler } from '@ethosagent/cron';
+import { type AgentLoop, scriptCallableFor, toolsDeclaringNetwork } from '@ethosagent/core';
+import { buildCronTriggers, CronScheduler, type CronTriggers } from '@ethosagent/cron';
 import { LocalExecutionBackend } from '@ethosagent/execution-local';
+import { LangfusePollLoop } from '@ethosagent/export-langfuse';
+import { IdleWatcherManager } from '@ethosagent/idle-watcher';
 import { ConsoleLogger } from '@ethosagent/logger';
-import { computeContextAnatomy } from '@ethosagent/observability-sqlite';
+import { SQLiteNotifyQueue } from '@ethosagent/notify-queue';
+import { computeContextAnatomy, createMetricsTextProvider } from '@ethosagent/observability-sqlite';
 import {
   createPersonalityRegistry,
   PersonalityA2aIdentityProvider,
 } from '@ethosagent/personalities';
-import { sanitize, wrapUntrusted } from '@ethosagent/safety-injection';
+import {
+  CallCaptureDaemon,
+  CallCaptureOwnershipManager,
+  CaptureIndicator,
+  callCaptureHealthPath,
+  callCaptureLockPath,
+  checkCallCaptureDependencies,
+  MicActivityDetector,
+  NotificationGate,
+} from '@ethosagent/platform-callcapture';
 import { SessionLane } from '@ethosagent/session-lane';
-import { SqliteApiKeyStore } from '@ethosagent/session-sqlite';
+import { SQLiteContextLog, SqliteApiKeyStore } from '@ethosagent/session-sqlite';
 import { FsAttachmentCache, FsStorage } from '@ethosagent/storage-fs';
+import { teamsDir } from '@ethosagent/team-supervisor';
 import { createA2aTools } from '@ethosagent/tools-a2a';
 import type { McpManager } from '@ethosagent/tools-mcp';
-import { EthosError, type ToolRegistry } from '@ethosagent/types';
-import { WatcherManager } from '@ethosagent/watchers';
+import {
+  type BackgroundJob,
+  EthosError,
+  type RunUpdateDigest,
+  type ToolRegistry,
+} from '@ethosagent/types';
+import { WatcherManager, type WatcherWakeEvent } from '@ethosagent/watchers';
 import {
   type ChatService,
   createWebApi,
+  IdempotencyStore,
   type RouteModule,
   WebTokenRepository,
 } from '@ethosagent/web-api';
 import {
+  APPROVAL_SURFACE_ALWAYS_ASK,
   buildA2aPeeringService,
   createApprovalDangerPredicate,
   createLazyProvider,
@@ -55,27 +75,42 @@ import {
   createSessionStore,
   IdentityMap,
   resolvePersonalityModelFit,
+  sanitize,
+  wrapUntrusted,
 } from '@ethosagent/wiring';
 import { appendErrorLog } from '../error-log';
 import { createAcpMcpWiring } from '../lib/acp-mcp-wiring';
 import { DeferredToolRegistry } from '../lib/deferred-tool-registry';
-import { KanbanPollLoop, writeRunActivityComments } from '../lib/kanban-poll';
+import { bumpKanbanHeartbeats, KanbanPollLoop, writeRunActivityComments } from '../lib/kanban-poll';
 import { resolveSkillsCatalogDir } from '../lib/resolve-skills-catalog-dir';
 import { emitReady } from '../logger';
+import { applyPauseCorrections, hasHeartbeatBump } from '../pause-corrections';
+import { createPauseLifecycle } from '../pause-lifecycle';
 import { notifyReady, startWatchdog } from '../sd-notify';
 import {
+  buildServeBusySources,
   buildSystemTaskHandlers,
   createAgentLoop,
   createLLM,
   createTeamAgentLoop,
+  deriveIdleWatcherCapabilities,
   getEthosObservability,
   getFunnelTracker,
   getObservabilityStore,
   getSecretsResolver,
   getStorage,
 } from '../wiring';
-import { parseFlagValue, parsePort } from './serve-helpers';
-import { listenWithFallback } from './serve-listen';
+import { runCronTurn } from './cron-turn';
+import { createA2aRunner } from './serve-a2a-runner';
+import {
+  a2aZeroSkillsWarning,
+  parseFlagValue,
+  parsePort,
+  resolveCorsOrigins,
+  resolveWebHost,
+  resolveWebPort,
+} from './serve-helpers';
+import { formatNonLoopbackWarning, isLoopbackHost, listenWithFallback } from './serve-listen';
 
 // `ethos serve` boots:
 //   • ACP server on `--port` (default 3001) + mesh registration
@@ -85,18 +120,34 @@ import { listenWithFallback } from './serve-listen';
 // in the same database. SIGINT / SIGTERM cleans up both before exiting.
 
 const ACP_PORT_DEFAULT = 3001;
-const WEB_PORT_DEFAULT = 3000;
 const WEB_PORT_FALLBACK_ATTEMPTS = 5;
 
 // Resilience guard is installed once per process — runServe can be reached
 // twice (onboarding mode then real mode), so guard against double-registration.
 let resilienceGuardInstalled = false;
 
+/** The voice slice `createAgentLoop`/`createTeamAgentLoop` hands back, as
+ *  `runServe` holds it and as `buildServeWebApi` below receives it. */
+type ServeVoiceConfig = {
+  sttProviderName?: string;
+  sttProviderConfig: Record<string, unknown>;
+  ttsProviderName?: string;
+  ttsProviderConfig: Record<string, unknown>;
+  ttsRoster?: Record<string, import('@ethosagent/types').TtsProviderEntry>;
+  sttRoster?: Record<string, import('@ethosagent/types').SttProviderEntry>;
+  realtimeRoster?: Record<string, import('@ethosagent/types').RealtimeProviderEntry>;
+  realtimeDefault?: string;
+  tier?: 'pipeline' | 'realtime';
+  realtimeSessionBudgetUsd?: number;
+  trustedVoicePlugins?: ReadonlySet<string>;
+};
+
 export async function runServe(args: string[], config: EthosConfig | null): Promise<void> {
   installServeResilienceGuard();
   const acpPort = parsePort(parseFlagValue(args, ['--port']), ACP_PORT_DEFAULT);
-  const webPort = parsePort(parseFlagValue(args, ['--web-port']), WEB_PORT_DEFAULT);
-  const webHost = parseFlagValue(args, ['--web-host']) ?? process.env.ETHOS_WEB_HOST ?? '127.0.0.1';
+  const webPort = resolveWebPort(args, process.env, config);
+  const webHost = resolveWebHost(args, process.env, config);
+  const corsOrigins = resolveCorsOrigins(process.env, config);
 
   // WEB-006: only honor X-Forwarded-For for rate limiting behind a trusted
   // reverse proxy. Off by default — a directly-exposed server must never trust
@@ -107,7 +158,7 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
   // reachable off-loopback (non-loopback bind) or fronted by HTTPS
   // (`webBaseUrl`). The loopback-http default (127.0.0.1 without https) keeps
   // `Secure` off so the cookie still works over plain http on localhost.
-  const isLoopbackBind = webHost === '127.0.0.1' || webHost === 'localhost' || webHost === '::1';
+  const isLoopbackBind = isLoopbackHost(webHost);
 
   const dir = ethosDir();
 
@@ -120,6 +171,10 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
   // so the UI can run the onboarding wizard.
   if (config === null) {
     const session = createSessionStore({ dataDir: dir });
+    // No session data exists yet at this point regardless (onboarding hasn't
+    // written config.yaml), so wiring this here is a harmless no-op — cheap
+    // and consistent with the real path below, rather than a special case.
+    const contextLog = new SQLiteContextLog(join(dir, 'sessions.db'));
     const personalities = await createPersonalityRegistry({
       storage: getStorage(),
       userPersonalitiesDir: dir,
@@ -189,6 +244,7 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
       dataDir: dir,
       attachmentCache,
       sessionStore: session,
+      contextLog,
       memoryProvider: createMemoryProvider({
         dataDir: dir,
         storage: getStorage(),
@@ -232,6 +288,10 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
       console.log('  no SPA build found — run `pnpm --filter @ethosagent/web dev` for HMR,');
       console.log(`    then visit http://localhost:5173/auth/exchange?t=${token}`);
     }
+    // Reported against the bound port, not the requested one — listenWithFallback
+    // may have walked forward on EADDRINUSE.
+    const exposureWarning = formatNonLoopbackWarning(webHost, port);
+    if (exposureWarning) console.warn(`\n${exposureWarning}`);
 
     emitReady('serve');
     notifyReady();
@@ -243,6 +303,9 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
       });
     const cleanup = async () => {
       if (stopWatchdog) stopWatchdog();
+      // Deny + audit any suspended approval BEFORE the awaits below — the
+      // auto-deny timers are unref'd and never fire on the way out.
+      created.forceSettleApprovals();
       await webShutdown();
       process.exit(0);
     };
@@ -288,24 +351,42 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
   let onMemoryCaptured:
     | import('@ethosagent/wiring').CreateAgentLoopResult['onMemoryCaptured']
     | undefined;
+  let runCallCaptureFromLoop:
+    | import('@ethosagent/wiring').CreateAgentLoopResult['runCallCapture']
+    | undefined;
   let goalRunner: import('@ethosagent/goal-runner').GoalRunner | undefined;
   let jobStore: import('@ethosagent/types').JobStore | undefined;
   let backgroundExecutor:
     | import('@ethosagent/wiring').CreateAgentLoopResult['backgroundExecutor']
     | undefined;
+  let jobRunners: import('@ethosagent/types').JobRunnerRegistry | undefined;
   let sttProviders: import('@ethosagent/types').SttProviderRegistry | undefined;
   let ttsProviders: import('@ethosagent/types').TtsProviderRegistry | undefined;
+  let realtimeProviders: import('@ethosagent/types').RealtimeVoiceProviderRegistry | undefined;
   // Loop-registry refresh from createAgentLoop; undefined on the team-coordinator
   // path (createTeamAgentLoop has no personality registry to hot-reload).
   let refreshLoopPersonalities: (() => Promise<void>) | undefined;
-  let voiceConfig:
-    | {
-        sttProviderName?: string;
-        sttProviderConfig: Record<string, unknown>;
-        ttsProviderName?: string;
-        ttsProviderConfig: Record<string, unknown>;
-      }
-    | undefined;
+  // The loop's SkillsInjector — backs `personalities.renderers`. Undefined on
+  // the team-coordinator path, where the RPC degrades to no renderers.
+  let skillsInjector: import('@ethosagent/skills').SkillsInjector | undefined;
+  let voiceConfig: ServeVoiceConfig | undefined;
+  // The voice stack, held only for its span writer: the browser realtime tier
+  // records per-turn latency into the SAME writer the pipeline tier uses, so a
+  // deployment has one voice-span buffer and one sink rather than two.
+  let voiceStack: import('@ethosagent/wiring').VoiceStack | undefined;
+
+  // Shared by the ACP server, the web API, and the cron `runJob` closure below
+  // (which reads a web-origin session's bound personality before reusing its
+  // key). Declared here so that closure has an in-scope binding, not a forward
+  // reference to a later `const`.
+  const session = createSessionStore({ dataDir: dir });
+
+  // Phase E of plan/phases/model-visible-logged.md — fork copies context events
+  // onto the child (D9). Same `sessions.db` file `session` uses, separate
+  // handle — the same "same file, separate type" pattern SQLiteContextLog's own
+  // file-header comment documents (WAL mode makes concurrent handles safe). Not
+  // closed on SIGINT/SIGTERM below, matching `session` itself, which also isn't.
+  const contextLog = new SQLiteContextLog(join(dir, 'sessions.db'));
 
   // Cron scheduler — hoisted ABOVE the agent-loop construction so the
   // same scheduler instance can be threaded into createAgentLoop (registers
@@ -325,7 +406,33 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
   // no channel adapters, so `deliver` targets are unreachable here — log
   // loudly instead of dropping silently. `wake` drives the loop directly,
   // mirroring how cron prompt jobs run in this process.
+  //
+  // Pulled out to a named closure (rather than inline in the WatcherManager
+  // config below) so the SAME wake path can also drive the call-capture
+  // daemon's audit-trail leg further down — the daemon's own
+  // `CallCaptureWakeEvent` is structurally identical to `WatcherWakeEvent`
+  // (plan/phases/call-capture-extension.md decision 4), so one closure serves
+  // both without a second copy of this logic.
   const watcherLogger = new ConsoleLogger();
+  const watcherWake = async (event: WatcherWakeEvent): Promise<void> => {
+    if (!loop) return;
+    const wrapped = wrapUntrusted({
+      content: event.summary,
+      toolName: 'watcher',
+      source: `${event.watcherId}:${event.target}`,
+    });
+    const prompt = sanitize(
+      `${event.promptPrefix ?? 'A watcher you own detected a change.'}\n\n${wrapped.content}`,
+    );
+    const sessionKey = `watcher:${event.watcherId}:${new Date().toISOString()}`;
+    for await (const _event of loop.run(prompt, {
+      sessionKey,
+      personalityId: event.personalityId,
+    })) {
+      // Drain — a woken agent acts through its tools; no surface consumes
+      // this stream in `ethos serve`.
+    }
+  };
   const watcherManager = new WatcherManager({
     storage: getStorage(),
     logger: watcherLogger,
@@ -334,25 +441,7 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
         `[watcher] deliver to ${target.platform}:${target.chatId} unavailable — 'ethos serve' has no channel adapters; run 'ethos gateway' for channel delivery`,
       );
     },
-    wake: async (event) => {
-      if (!loop) return;
-      const wrapped = wrapUntrusted({
-        content: event.summary,
-        toolName: 'watcher',
-        source: `${event.watcherId}:${event.target}`,
-      });
-      const prompt = sanitize(
-        `${event.promptPrefix ?? 'A watcher you own detected a change.'}\n\n${wrapped.content}`,
-      );
-      const sessionKey = `watcher:${event.watcherId}:${new Date().toISOString()}`;
-      for await (const _event of loop.run(prompt, {
-        sessionKey,
-        personalityId: event.personalityId,
-      })) {
-        // Drain — a woken agent acts through its tools; no surface consumes
-        // this stream in `ethos serve`.
-      }
-    },
+    wake: watcherWake,
   });
   cronScheduler = new CronScheduler({
     storage: getStorage(),
@@ -398,27 +487,27 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
       const pers = cronPersonalities.get(pid);
       const toolsetOverride = pers?.toolset?.filter((t: string) => t !== 'cron');
 
-      // Use the originating web chat's session key so messages land in that
-      // session's history and the client can reload to show the cron turn.
       const webOrigin =
         job.origin?.platform === 'web' && job.origin.chatId ? job.origin.chatId : null;
-      const sessionKey = webOrigin ?? `cron:${job.id}:${new Date().toISOString()}`;
       const ranAt = new Date().toISOString();
-      let output = '';
-      for await (const event of loop.run(job.prompt ?? '', {
-        sessionKey,
+      const { sessionKey, output, reusedWebOrigin } = await runCronTurn({
+        loop,
+        sessions: session,
+        jobId: job.id,
+        prompt: job.prompt ?? '',
         personalityId: pid,
-        toolsetOverride,
-      })) {
-        if (event.type === 'text_delta') output += event.text;
-      }
+        webOrigin,
+        ...(toolsetOverride ? { toolsetOverride } : {}),
+      });
       if (chatService) {
         chatService.broadcastAll({
           type: 'cron.fired',
           jobId: job.id,
           ranAt,
           outputPath: null,
-          ...(webOrigin ? { sessionKey: webOrigin } : {}),
+          // Only point the client at the web session when the turn actually
+          // ran there; a personality-mismatched firing lives elsewhere.
+          ...(reusedWebOrigin && webOrigin ? { sessionKey: webOrigin } : {}),
         });
       }
       return { jobId: job.id, ranAt, output, sessionKey };
@@ -428,6 +517,17 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
   // constructed first so its systemTask handler could ride the scheduler
   // config above). Backing jobs are seeded by `watcherManager.start()` later.
   watcherManager.attachScheduler(cronScheduler);
+
+  // Cron trigger seam (plan/phases/cron-scheduler-seam.md). `cronScheduler`
+  // is the `CronEngine`; `buildCronTriggers` picks the trigger/backend pair
+  // per `cron.*` config. Defaults (`trigger.local: true`, `trigger.external:
+  // false`) reproduce today's behavior exactly — only the local interval
+  // trigger runs. `external` is threaded into `createWebApi` below (only
+  // when non-null) so `POST /cron/fire` is mounted iff the operator opted in.
+  const cronTriggers: CronTriggers = buildCronTriggers(cronScheduler, config.cron);
+  // Late-bind the arming backend `buildCronTriggers` just produced back onto
+  // the scheduler it was built from — see `CronScheduler.setArmingBackend`.
+  cronScheduler.setArmingBackend(cronTriggers.arming);
 
   if (teamFlag && personalityOverride) {
     // Plan B member spawn — supervisor spawns each member with
@@ -452,13 +552,18 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
     notificationRouter = result.notificationRouter;
     setOnSkillProposed = result.setOnSkillProposed;
     onMemoryCaptured = result.onMemoryCaptured;
+    runCallCaptureFromLoop = result.runCallCapture;
     goalRunner = result.goalRunner;
     jobStore = result.jobStore;
     backgroundExecutor = result.backgroundExecutor;
+    jobRunners = result.jobRunners;
     sttProviders = result.sttProviders;
     ttsProviders = result.ttsProviders;
+    realtimeProviders = result.realtimeProviders;
     voiceConfig = result.voiceConfig;
+    voiceStack = result.voiceStack;
     refreshLoopPersonalities = result.refreshPersonalities;
+    skillsInjector = result.skillsInjector;
   } else if (teamFlag) {
     // Chat UX: `ethos serve --team <name>` → run as the team's coordinator.
     const {
@@ -469,6 +574,7 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
       setOnSkillProposed: teamSetOnSkillProposed,
       pluginLoader: teamPluginLoader,
       notificationRouter: teamNotificationRouter,
+      runCallCapture: teamRunCallCapture,
     } = await createTeamAgentLoop(config, teamFlag, {
       profile: loopProfile,
       ...(roleFlag ? { role: roleFlag } : {}),
@@ -480,6 +586,12 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
     setOnSkillProposed = teamSetOnSkillProposed;
     pluginLoader = teamPluginLoader;
     notificationRouter = teamNotificationRouter;
+    // Round-3 Issue 2 — this branch previously never assigned
+    // runCallCaptureFromLoop at all, so the daemon-construction gate below
+    // (which requires it) silently skipped call capture in coordinator mode
+    // even when callCapture.personalityId was configured. Threaded through
+    // createTeamAgentLoop now (see apps/ethos/src/wiring.ts).
+    runCallCaptureFromLoop = teamRunCallCapture;
   } else {
     activeMeshName = meshName;
     activePersonality = config.personality;
@@ -496,13 +608,18 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
     notificationRouter = result.notificationRouter;
     setOnSkillProposed = result.setOnSkillProposed;
     onMemoryCaptured = result.onMemoryCaptured;
+    runCallCaptureFromLoop = result.runCallCapture;
     goalRunner = result.goalRunner;
     jobStore = result.jobStore;
     backgroundExecutor = result.backgroundExecutor;
+    jobRunners = result.jobRunners;
     sttProviders = result.sttProviders;
     ttsProviders = result.ttsProviders;
+    realtimeProviders = result.realtimeProviders;
     voiceConfig = result.voiceConfig;
+    voiceStack = result.voiceStack;
     refreshLoopPersonalities = result.refreshPersonalities;
+    skillsInjector = result.skillsInjector;
   }
   let titleFn: ((systemPrompt: string, userMessage: string) => Promise<string>) | undefined;
   try {
@@ -521,7 +638,6 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
     console.warn('[ethos] session auto-title disabled: failed to create title LLM:', err);
   }
 
-  const session = createSessionStore({ dataDir: dir });
   const mesh = new AgentMesh(meshRegistryPath(activeMeshName), { storage: getStorage() });
 
   const personalities = await createPersonalityRegistry({
@@ -530,18 +646,44 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
   });
   await personalities.loadFromDirectory(join(dir, 'personalities'));
 
+  // Team members (and team coordinators — both boot through this same shared
+  // path) are dispatch targets for the team-supervisor's `Dispatcher`, which
+  // authenticates to this ACP server with a bearer token resolved via
+  // `SecretsResolver` (see `extensions/team-supervisor/src/dispatcher.ts`).
+  // Without this, `AcpServer` still enforces a bearer token — it just falls
+  // back to a fresh `randomBytes(32)` value that is never shared with
+  // anyone, so a zero-config team could never actually dispatch. Generate the
+  // SAME token that gets passed to the constructor below, store its value
+  // via SecretsResolver (S9 — the mesh registry only ever gets the ref by
+  // name), and regenerate fresh on every boot: the mesh entry itself is
+  // already re-created per-process (`agentId` below is pid+uuid scoped), so
+  // there is nothing relying on token stability across restarts, and
+  // always-fresh avoids any "stale ref pointing at an old secret" bookkeeping.
+  // Solo `ethos serve` (no `--team`) is never a Dispatcher target, so it keeps
+  // the existing behavior unchanged (no ref stored, `AcpServer` self-generates).
+  let teamAuthToken: string | undefined;
+  let teamAuthTokenRef: string | undefined;
+  if (teamFlag) {
+    teamAuthToken = randomBytes(32).toString('hex');
+    teamAuthTokenRef = `mesh/${activeMeshName}/${activePersonality}`;
+    await (await getSecretsResolver()).set(teamAuthTokenRef, teamAuthToken);
+  }
+
   // ACP server (existing behavior — kept first so any breakage is obvious).
   // The MCP session-grant wiring is omitted on the team-coordinator path,
   // which has no McpManager — `session/registerMcpServers` then fails closed.
-  const acpServer = new AcpServer({
-    runner: loop,
+  const acpServer = buildServeAcpServer({
+    dir,
+    loop,
     session,
     mesh,
-    ...(mcpManager
-      ? createAcpMcpWiring({ mcpManager, personalities, defaultPersonalityId: activePersonality })
-      : {}),
-    ...(jobStore ? { jobStore } : {}),
-    ...(backgroundExecutor ? { backgroundExecutor } : {}),
+    personalities,
+    activePersonality,
+    teamFlag,
+    mcpManager,
+    jobStore,
+    backgroundExecutor,
+    teamAuthToken,
   });
   acpServer.startHttp(acpPort);
 
@@ -559,7 +701,8 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
     activeSessions: 0,
     personalityId: activePersonality,
     displayName: personalityConfig?.name ?? activePersonality,
-    boardSubscriptions: teamFlag ? [teamFlag] : ['global'],
+    boardSubscriptions: teamFlag ? [{ board: teamFlag }] : [{ board: 'global' }],
+    ...(teamAuthTokenRef ? { authTokenRef: teamAuthTokenRef } : {}),
   });
   const stopHeartbeat = mesh.startHeartbeat(agentId, () => acpServer.activeSessionCount);
 
@@ -573,6 +716,10 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
 
   // Kanban poll loop — reconcile-on-wake for missed /notify calls.
   let stopPollLoop: (() => void) | null = null;
+  // Captured for the resume-boundary correction below (gates #6/#7). The poll
+  // loop opens a fresh `KanbanStore` per tick rather than holding one, so the
+  // board PATH is the only durable handle there is to correct against.
+  let correctableBoardPath: string | undefined;
   const kanbanPollEnabled = config.kanbanPoll?.enabled !== false; // enabled by default
   if (kanbanPollEnabled) {
     const boardPath =
@@ -580,6 +727,7 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
       (teamFlag ? join(dir, 'teams', teamFlag, 'board.db') : join(dir, 'board.db'));
 
     if (boardPath) {
+      correctableBoardPath = boardPath;
       const lane = new SessionLane();
       const pollLoop = new KanbanPollLoop({
         boardPath,
@@ -615,13 +763,36 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
     }
   }
 
+  // Langfuse export poller (Part E) — opt-in, off by default.
+  let stopLangfusePoll: (() => void) | null = null;
+  const langfuseCfg = config.telemetry?.export?.langfuse;
+  if (langfuseCfg?.enabled) {
+    if (!langfuseCfg.baseUrl || !langfuseCfg.publicKey || !langfuseCfg.secretKey) {
+      console.error(
+        '[langfuse-export] telemetry.export.langfuse.enabled is true but baseUrl/publicKey/secretKey ' +
+          'are not all set — not starting the export poller.',
+      );
+    } else {
+      const langfusePoll = new LangfusePollLoop({
+        store: getObservabilityStore(),
+        baseUrl: langfuseCfg.baseUrl,
+        publicKey: langfuseCfg.publicKey,
+        secretKey: langfuseCfg.secretKey,
+        onError: (err) => console.warn(`[langfuse-export] tick error: ${err.message}`),
+      });
+      langfusePoll.start();
+      stopLangfusePoll = () => langfusePoll.stop();
+      console.log(`  langfuse export: enabled (${langfuseCfg.baseUrl})`);
+    }
+  }
+
   // Web API — always mounts alongside the ACP server.
   let webShutdown: (() => Promise<void>) | null = null;
   const webDist = locateWebDist(parseFlagValue(args, ['--web-dist']));
 
   // Start the cron scheduler now — `loop` is assigned, and we'll bind
   // `chatService` to the value returned by createWebApi below.
-  if (cronScheduler) cronScheduler.start();
+  cronTriggers.local?.start();
 
   // Load watchers.json and seed the backing `source:'system'` tick jobs.
   // Idempotent — existing jobs are re-registered so interval edits apply.
@@ -666,6 +837,9 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
   // OpenAI-compat surface (F1+F2). Shares sessions.db so `ethos api-key`
   // and `ethos serve` see the same rows.
   const apiKeys = new SqliteApiKeyStore(join(dir, 'sessions.db'));
+  // Idempotency cache for `POST /v1/chat/completions` retries — same db,
+  // same rationale.
+  const idempotencyStore = new IdempotencyStore(join(dir, 'sessions.db'));
 
   const identityMap = new IdentityMap({ storage: new FsStorage(), dataDir: dir });
   await identityMap.resolve('desktop', 'desktop', 'Desktop');
@@ -673,6 +847,562 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
   const attachmentCache = new FsAttachmentCache(new FsStorage(), join(dir, 'cache', 'attachments'));
   void attachmentCache.pruneOlderThan(24 * 60 * 60 * 1000).catch(() => {});
 
+  const a2a = await buildServeA2aCore({
+    config,
+    dir,
+    loop,
+    personalities,
+    activePersonality,
+  });
+  const { isA2aEnabled } = a2a;
+
+  // Call-capture daemon (plan/phases/call-capture-extension.md, "Phase 4 —
+  // Integration"). macOS-only, opt-in via `callCapture.personalityId` —
+  // constructing nothing at all otherwise, mirroring `MicActivityDetector`'s
+  // own platform guard at a higher level. `loop` is fully assigned by this
+  // point (same ordering constraint `watcherWake` already relies on above —
+  // it closes over `loop` too, and `wake` is only ever invoked later once a
+  // real event fires). `runCallCaptureFromLoop` mirrors the same gate
+  // (`isCallCaptureToolsEnabled` in `packages/wiring/src/build-agent-loop.ts`
+  // is platform+config identical to the condition below), so the extra check
+  // here is purely defensive: never construct the daemon with an undefined
+  // `runCapture`.
+  // Liveness heartbeat for `ethos doctor`'s `checkCallCaptureDaemonHealth`
+  // (mirrors the gateway's own `gateway-health.json` heartbeat) — same 10s
+  // cadence is reused below as the ownership-claim retry interval too (P0,
+  // plan/phases/call-capture-desktop-ux.md — don't invent a second interval).
+  const CALL_CAPTURE_HEARTBEAT_INTERVAL_MS = 10_000;
+  let callCaptureOwnershipManager: CallCaptureOwnershipManager | undefined;
+  if (
+    process.platform === 'darwin' &&
+    config.callCapture?.personalityId &&
+    runCallCaptureFromLoop
+  ) {
+    // Round-3 Issue 1 — `ethos serve` and `ethos gateway` can both be
+    // configured with `callCapture.personalityId` at once (e.g. one under a
+    // LaunchAgent, the other under `ethos run-all`, which starts both by
+    // default). At most one process may run a live `CallCaptureDaemon`, or
+    // they fight over the same Process Tap/mic and stomp each other's
+    // shared heartbeat file. Losing the claim is a normal, expected outcome
+    // — not an error. `CallCaptureOwnershipManager` logs it and keeps
+    // retrying on `CALL_CAPTURE_HEARTBEAT_INTERVAL_MS` until it wins (P0:
+    // the previous single-attempt claim left a process permanently
+    // daemon-less if it lost the race at launch, even after the winner
+    // later exited and released the lock).
+    const boundPersonalityId = config.callCapture.personalityId;
+    const captureRunner = runCallCaptureFromLoop;
+    callCaptureOwnershipManager = new CallCaptureOwnershipManager({
+      lockPath: callCaptureLockPath(dir),
+      retryIntervalMs: CALL_CAPTURE_HEARTBEAT_INTERVAL_MS,
+      logger: watcherLogger,
+      onOwnershipClaimed: () => {
+        const callCaptureDaemon = new CallCaptureDaemon({
+          detector: new MicActivityDetector(),
+          notificationGate: new NotificationGate(),
+          checkDependencies: checkCallCaptureDependencies,
+          // No separate process-prefilter gate here — the native detector
+          // (extensions/platform-callcapture/native/mic-detector.swift) only
+          // ever watches known calling apps in the first place, so every
+          // call_started event it produces is already scoped to one, with its
+          // resolved source label riding along on the event itself. Known
+          // limitation, documented in the package README: this cannot see a
+          // browser-based call (e.g. Meet in Chrome).
+          personalityId: boundPersonalityId,
+          wake: watcherWake,
+          // Floating on-screen recording indicator (plan/phases/
+          // call-capture-desktop-ux.md) — the headless-CLI analog of the
+          // desktop app's Electron-based pill. Fresh per ownership claim,
+          // mirroring detector/notificationGate above.
+          indicator: new CaptureIndicator({
+            onError: (msg) => watcherLogger.warn(`call-capture: ${msg}`),
+          }),
+          runCapture: async (abortSignal, source, onEntry, onAudioLevel) => {
+            const result = await captureRunner(boundPersonalityId, {
+              abortSignal,
+              source,
+              onEntry,
+              onAudioLevel,
+            });
+            if (!result.ok) {
+              watcherLogger.error(`call-capture: capture failed: ${result.error}`);
+              return;
+            }
+            if (result.warning) watcherLogger.warn(`call-capture: ${result.warning}`);
+            watcherLogger.info(`call-capture: saved transcript to ${result.artifactKey}`);
+          },
+          logger: watcherLogger,
+        });
+        callCaptureDaemon.start();
+
+        const writeCallCaptureHeartbeat = async () => {
+          try {
+            await getStorage().writeAtomic(
+              callCaptureHealthPath(dir),
+              JSON.stringify({ pid: process.pid, updatedAt: new Date().toISOString() }),
+            );
+          } catch {
+            // Best-effort — a missed tick is harmless; the consumer treats
+            // stale/absent data as degraded.
+          }
+        };
+        void writeCallCaptureHeartbeat();
+        const callCaptureHeartbeatTimer = setInterval(
+          () => void writeCallCaptureHeartbeat(),
+          CALL_CAPTURE_HEARTBEAT_INTERVAL_MS,
+        );
+        callCaptureHeartbeatTimer.unref?.();
+
+        return async () => {
+          callCaptureDaemon.stop();
+          clearInterval(callCaptureHeartbeatTimer);
+          await getStorage()
+            .remove(callCaptureHealthPath(dir))
+            .catch(() => {});
+        };
+      },
+    });
+    callCaptureOwnershipManager.start();
+  }
+
+  const {
+    routeModules: a2aRouteModules,
+    peering: a2aPeering,
+    setA2aEnabled,
+  } = buildServeA2aSurface({ config, core: a2a, toolRegistry });
+
+  // P2-counters (D2/D16) — `ethos_gateway_adapter_up{adapter}` reads the same
+  // heartbeat file `/healthz` does, through the same 30s staleness gate
+  // (routes/index.ts) — stale ⇒ every known adapter reports 0.
+  const readGatewayAdapterGauges = async () => {
+    try {
+      const raw = await getStorage().read(join(dir, 'gateway-health.json'));
+      if (!raw) return [];
+      const hb = JSON.parse(raw) as {
+        updatedAt: string;
+        adapters: Array<{ name: string; ok: boolean }>;
+      };
+      const ageSec = (Date.now() - new Date(hb.updatedAt).getTime()) / 1000;
+      const stale = !Number.isFinite(ageSec) || ageSec > 30;
+      return hb.adapters.map(
+        (a) => ({ adapter: a.name, up: (stale ? false : a.ok) ? 1 : 0 }) as const,
+      );
+    } catch {
+      return [];
+    }
+  };
+  const metricsText = createMetricsTextProvider({
+    store: getObservabilityStore(),
+    getGatewayAdapters: readGatewayAdapterGauges,
+  });
+
+  const created = buildServeWebApi({
+    config,
+    dir,
+    loop,
+    session,
+    contextLog,
+    personalities,
+    identityMap,
+    attachmentCache,
+    apiKeys,
+    idempotencyStore,
+    toolRegistry,
+    mcpManager,
+    pluginLoader,
+    notificationRouter,
+    cronScheduler,
+    cronTriggers,
+    goalRunner,
+    jobStore,
+    jobRunners,
+    backgroundExecutor,
+    setOnSkillProposed,
+    onMemoryCaptured,
+    refreshLoopPersonalities,
+    skillsInjector,
+    skillsCatalogDir,
+    sttProviders,
+    ttsProviders,
+    realtimeProviders,
+    voiceConfig,
+    voiceStack,
+    titleFn,
+    corsOrigins,
+    trustProxy,
+    isLoopbackBind,
+    webDist,
+    metricsText,
+    a2aRouteModules,
+    a2aPeering,
+    isA2aEnabled,
+    setA2aEnabled,
+  });
+  chatService = created.chatService;
+  const webApp = created.app;
+  const tokens = new WebTokenRepository({ dataDir: dir, storage: getStorage() });
+  const token = await tokens.getOrCreate();
+  const { server, port } = await listenWithFallback(
+    webApp,
+    webPort,
+    WEB_PORT_FALLBACK_ATTEMPTS,
+    webHost,
+  );
+  // Talk-mode's persistent binary lane (`GET /voice/ws`). Same server, same
+  // auth cookie; unattached it simply 404s and the browser uses the batch RPCs.
+  created.voiceSocket.attach(server);
+  // The wake-satellite lane (`GET /satellite/ws`). Shares the upgrade router
+  // with the voice lane above, so attach order does not matter and neither
+  // path can swallow the other's upgrade.
+  created.satelliteSocket.attach(server);
+  console.log('');
+  const displayHost = webHost === '0.0.0.0' ? 'localhost' : webHost;
+  console.log(`ethos web UI listening on http://${displayHost}:${port}`);
+  console.log(`  admin: http://${displayHost}:${port}/admin`);
+  if (webDist) {
+    console.log(`  open: http://${displayHost}:${port}/auth/exchange?t=${token}`);
+    console.log('  (token rotates on first use; cookie remains the steady-state credential)');
+    console.log(`  serving SPA from: ${webDist}`);
+  } else {
+    console.log(`  auth token: ${token}`);
+    console.log('  (token rotates on first use; cookie remains the steady-state credential)');
+    console.log('  no SPA build found — run `pnpm --filter @ethosagent/web dev` for HMR,');
+    console.log(`    then visit http://localhost:5173/auth/exchange?t=${token}`);
+    console.log('  or `pnpm --filter @ethosagent/web build` to bundle into this server.');
+  }
+  // Reported against the bound port, not the requested one — listenWithFallback
+  // may have walked forward on EADDRINUSE.
+  const exposureWarning = formatNonLoopbackWarning(webHost, port);
+  if (exposureWarning) console.warn(`\n${exposureWarning}`);
+  webShutdown = () =>
+    Promise.all([created.voiceSocket.close(), created.satelliteSocket.close()]).then(
+      () =>
+        new Promise<void>((resolve) => {
+          server.close(() => resolve());
+        }),
+    );
+
+  emitReady('serve');
+  notifyReady();
+  const stopWatchdog = startWatchdog();
+
+  // Idle watcher — declared here only so `cleanup` can stop its interval. It
+  // is CONSTRUCTED below the signal handlers, after every subsystem it reads
+  // (plan/phases/idle-watcher.md §5).
+  let idleWatcher: IdleWatcherManager | undefined;
+
+  // ONE per process (see `pause-lifecycle.ts`): a `NoopPauseLifecycle` unless
+  // the operator enabled `pauseClockCorrection`, in which case it is a started
+  // clock-drift detector. Declared here so `cleanup` can stop its timer.
+  const pauseLifecycle = createPauseLifecycle(config);
+
+  // Resume-boundary clock corrections (plan/phases/clock-tolerance-pass.md §3/§4).
+  //
+  // `runServe` never calls `runBootReconciliation`, so this registration is the
+  // only thing that corrects a gate in this process — and it owns the pass's
+  // highest-stakes one. §3.1: an uncorrected `findStaleRunningTasks` cancels the
+  // open run and flips the task back to `ready`, and the re-claim increments
+  // `retry_count`. A task near `max_retries` when the host slept can be pushed
+  // into a hard failure state having done nothing wrong. The poll loop's
+  // threshold is 30 min; any real pause clears it on the very next tick.
+  //
+  // The store is opened per correction and closed again, mirroring the poll
+  // loop's own per-tick `new KanbanStore(boardPath)` — holding one open across
+  // the pause would be a second long-lived writer on a file the loop already
+  // reopens every second.
+  pauseLifecycle.onResume?.((pauseDurationMs) => {
+    const boardPath = correctableBoardPath;
+    void applyPauseCorrections(
+      {
+        ...(hasHeartbeatBump(jobStore) ? { jobStore } : {}),
+        ...(boardPath
+          ? { kanbanStore: { bumpActiveHeartbeats: (ms) => bumpKanbanHeartbeats(boardPath, ms) } }
+          : {}),
+      },
+      pauseDurationMs,
+      new ConsoleLogger(),
+    );
+  });
+
+  const cleanup = async () => {
+    if (stopWatchdog) stopWatchdog();
+    // Deny + audit any suspended approval FIRST, before the awaits below —
+    // the auto-deny timers are unref'd and never fire on the way out, and a
+    // later await that hangs must not cost the audit row.
+    created.forceSettleApprovals();
+    stopHeartbeat();
+    stopPollLoop?.();
+    stopLangfusePoll?.();
+    // Stops the daemon + heartbeat (if this process ever won the ownership
+    // claim, including via a later retry tick — see
+    // `CallCaptureOwnershipManager`) and releases the lock so a restarted
+    // process, or the other host command, can take it.
+    await callCaptureOwnershipManager?.stop();
+    await mesh.unregister(agentId);
+    idleWatcher?.stop();
+    pauseLifecycle.stop?.();
+    cronTriggers.local?.stop();
+    if (webShutdown) await webShutdown();
+    process.exit(0);
+  };
+  process.on('SIGTERM', () => void cleanup());
+  process.on('SIGINT', () => void cleanup());
+
+  // Idle watcher (plan/phases/idle-watcher.md §5) — CONSTRUCTED LAST, after
+  // every subsystem its sources read, and only when the operator opted in.
+  // Unlike `watchers`/`cron` this is not always-constructed: on a laptop or a
+  // bare-metal box there is no host to suspend into, so it should not exist at
+  // all in the common case. The onboarding branch above returns before this,
+  // and has no config to opt in with.
+  if (config.idleWatcher?.enabled === true) {
+    idleWatcher = new IdleWatcherManager({
+      sources: buildServeBusySources({
+        chatService: created.chatService,
+        voiceSocket: created.voiceSocket,
+        satelliteSocket: created.satelliteSocket,
+        pendingApprovalCount: created.pendingApprovalCount,
+        backgroundExecutor,
+        jobStore,
+        cronScheduler: cronScheduler ?? undefined,
+        // Flat layout: `pidFilePath(name)` in @ethosagent/team-supervisor
+        // resolves to `<teamsDir()>/<name>.pid`, so this is the dir the PID
+        // files it writes actually land in.
+        teamsPidDir: teamsDir(),
+        acpServer,
+      }),
+      // The one instance for this process. Its outbound half is still a no-op:
+      // a real host adapter that signals a Firecracker-style control plane is a
+      // later phase, so the watcher's arming gates are what matter here.
+      pauseLifecycle,
+      // Flips to `true` when the `pauseLifecycle` above becomes a real host
+      // adapter. While it is a no-op, `signalReadyToSuspend()` resolves,
+      // latches, and stops the watcher having suspended nothing — so gate 3b
+      // refuses to arm rather than accept that as a handoff.
+      hostSignalAvailable: false,
+      capabilities: deriveIdleWatcherCapabilities(config),
+      options: config.idleWatcher,
+      logger: new ConsoleLogger(),
+      // NO pre-suspend `mesh.unregister(agentId)` here. It is DESIRABLE —
+      // peers keep routing into a suspended VM until the registry's 30s
+      // `STALE_MS` prunes it — but it is not safe yet, because nothing
+      // re-registers after a resume: `AgentMesh.heartbeat()` only UPDATES an
+      // existing entry (unknown agentId is a silent no-op) and `register()`
+      // runs once at boot, which a snapshot-resumed process never re-runs. So
+      // unregistering would remove this instance permanently, which is worse
+      // than the self-healing 30s window. Restore it once a resume path exists
+      // (`runBootReconciliation()`, plan/phases/single-process-boot-profile.md)
+      // AND agent-mesh can re-register.
+    });
+    // Fire-and-forget: `start()` evaluates the arming gates itself and is a
+    // no-op (with a logged reason) when any of them refuses.
+    idleWatcher.start();
+  }
+
+  await new Promise(() => {});
+}
+
+/**
+ * Install process-level resilience handlers for the long-running web/ACP
+ * server. A stray rejected SSE write (e.g. writing to a stream the browser
+ * aborted on tab-switch) must NOT take down the server and drop every other
+ * live stream. We log-and-continue here rather than exit — this is scoped to
+ * the serve path only; one-shot CLI commands still fail loudly via the
+ * top-level handler. Idempotent via `resilienceGuardInstalled`.
+ */
+function installServeResilienceGuard(): void {
+  if (resilienceGuardInstalled) return;
+  resilienceGuardInstalled = true;
+  process.on('unhandledRejection', (reason) => {
+    const cause = reason instanceof Error ? reason.message : String(reason);
+    appendErrorLog(
+      new EthosError({
+        code: 'INTERNAL',
+        cause: `Unhandled promise rejection: ${cause}`,
+        action: 'A background promise rejected and was not awaited. The server kept running.',
+      }),
+      { command: 'serve' },
+    );
+    console.error(`[serve] unhandled rejection (kept alive): ${cause}`);
+  });
+  process.on('uncaughtException', (err) => {
+    const cause = err instanceof Error ? err.message : String(err);
+    appendErrorLog(
+      new EthosError({
+        code: 'INTERNAL',
+        cause: `Uncaught exception: ${cause}`,
+        action:
+          'An uncaught exception was trapped by the serve resilience guard. The server kept running.',
+      }),
+      { command: 'serve' },
+    );
+    console.error(`[serve] uncaught exception (kept alive): ${cause}`);
+  });
+}
+
+/**
+ * Resolve the absolute path to the built SPA. Search order:
+ *   1. `--web-dist <path>` flag (explicit, wins).
+ *   2. Sibling to the bundled CLI: `<cliDist>/web/index.html` (the
+ *      pre-publish hook that bundles the web app drops it here, per
+ *      CEO finding 9.1).
+ *   3. Monorepo dev path: `apps/web/dist/index.html` resolved up from
+ *      `import.meta.dirname`.
+ * Returns null when no candidate exists; the server skips the static
+ * mount and prints a hint pointing devs at `pnpm dev:web`.
+ */
+export function locateWebDist(explicit: string | undefined): string | null {
+  if (explicit) {
+    const abs = pathResolve(explicit);
+    return existsSync(join(abs, 'index.html')) ? abs : null;
+  }
+  const candidates = [
+    pathResolve(import.meta.dirname, '..', 'web'),
+    pathResolve(import.meta.dirname, '..', '..', '..', '..', 'apps', 'web', 'dist'),
+    pathResolve(import.meta.dirname, '..', '..', '..', 'apps', 'web', 'dist'),
+  ];
+  for (const candidate of candidates) {
+    if (existsSync(join(candidate, 'index.html'))) return candidate;
+  }
+  return null;
+}
+
+/**
+ * Enumerate registered team names for `GET /v1/models`. Scoped to the
+ * `dataDir` the server is actually using (not `~/.ethos/teams` blindly),
+ * so isolated/test installations report only their own teams. Manifest
+ * files live at `<dataDir>/teams/<name>.yaml`; `.runtime.yaml` is the
+ * supervisor's runtime state, not a manifest.
+ */
+function listRegisteredTeams(dataDir: string): string[] {
+  const teamsPath = join(dataDir, 'teams');
+  if (!existsSync(teamsPath)) return [];
+  return readdirSync(teamsPath, { withFileTypes: true })
+    .filter((e) => e.isFile() && e.name.endsWith('.yaml') && !e.name.endsWith('.runtime.yaml'))
+    .map((e) => e.name.slice(0, -'.yaml'.length))
+    .sort();
+}
+
+// ---------------------------------------------------------------------------
+// Serve-role construction seams
+// ---------------------------------------------------------------------------
+//
+// plan/phases/single-process-boot-profile.md §3a/§7 Phase 1: the constructor
+// logic below used to sit inline inside `runServe`, which meant a third entry
+// point (the merged `boot` profile of §6) could only reuse it by copy-pasting.
+// Each unit is now a named, exported, individually-callable function that
+// `runServe` calls in place of the inline code — behavior-identical, same
+// order, same arguments.
+//
+// They live in THIS file rather than a sibling module because
+// `packages/wiring/src/__tests__/approval-seams.test.ts` asserts against the
+// SOURCE TEXT of `apps/ethos/src/commands/serve.ts` that the danger predicate
+// is built with its seams (`createApprovalDangerPredicate({` …
+// `alwaysAsk: APPROVAL_SURFACE_ALWAYS_ASK`) — that construction site is inside
+// the web-api option assembly, so moving it to another file would break that
+// gate.
+
+type ServePersonalityRegistry = Awaited<ReturnType<typeof createPersonalityRegistry>>;
+type AcpServerOptions = ConstructorParameters<typeof AcpServer>[0];
+
+export interface BuildServeAcpServerOptions {
+  /** `~/.ethos` (or the `--data-dir` override) — the notify-queue db's parent. */
+  dir: string;
+  loop: AcpServerOptions['runner'];
+  session: AcpServerOptions['session'];
+  mesh: AcpServerOptions['mesh'];
+  personalities: ServePersonalityRegistry;
+  activePersonality: string;
+  /** `--team <name>`; absent on a solo serve. */
+  teamFlag: string | undefined;
+  mcpManager: McpManager | undefined;
+  jobStore: AcpServerOptions['jobStore'];
+  backgroundExecutor: AcpServerOptions['backgroundExecutor'];
+  teamAuthToken: string | undefined;
+}
+
+/**
+ * Construct the ACP server (plan §3b step 4, "ACP server construction").
+ *
+ * Construction only — `startHttp()` stays at the call site. `serve.ts` binds
+ * ACP first on purpose ("kept first so any breakage is obvious"), and plan §3b's
+ * callout / §11 Open Question 8 leaves that ordering undecided for the merged
+ * profile; keeping the bind out of this function means neither answer is
+ * pre-empted here.
+ */
+export function buildServeAcpServer(opts: BuildServeAcpServerOptions): AcpServer {
+  const {
+    dir,
+    loop,
+    session,
+    mesh,
+    personalities,
+    activePersonality,
+    teamFlag,
+    mcpManager,
+    jobStore,
+    backgroundExecutor,
+    teamAuthToken,
+  } = opts;
+  // The MCP session-grant wiring is omitted on the team-coordinator path,
+  // which has no McpManager — `session/registerMcpServers` then fails closed.
+  return new AcpServer({
+    runner: loop,
+    session,
+    mesh,
+    personalityId: activePersonality,
+    // Lane C (kanban-hooks-notify-parity, Phase 2) — passive `notify`-mode
+    // delivery needs somewhere to land, which only exists for a team board.
+    // A solo (non-team) `ethos serve` just no-ops that path.
+    ...(teamFlag
+      ? { teamId: teamFlag, notifyQueue: new SQLiteNotifyQueue(join(dir, 'notify-queue.db')) }
+      : {}),
+    ...(mcpManager
+      ? createAcpMcpWiring({ mcpManager, personalities, defaultPersonalityId: activePersonality })
+      : {}),
+    ...(jobStore ? { jobStore } : {}),
+    ...(backgroundExecutor ? { backgroundExecutor } : {}),
+    ...(teamAuthToken ? { authToken: teamAuthToken } : {}),
+  });
+}
+
+export interface BuildServeA2aCoreOptions {
+  config: EthosConfig;
+  /** `~/.ethos` (or the `--data-dir` override) — the a2a state dir's parent. */
+  dir: string;
+  loop: AgentLoop;
+  personalities: ServePersonalityRegistry;
+  activePersonality: string;
+}
+
+/**
+ * The process-scoped half of the A2A stack (plan §3b step 4, "A2A stack
+ * including `SQLiteA2aTaskStore`"): identity, peer store, allowlist, the
+ * SQLite task store and its boot reconciliation + retention GC, the delegation
+ * guard, both limiters, and the task runner.
+ *
+ * Split from `buildServeA2aSurface` below — and NOT merged with it — because
+ * `runServe` constructs the call-capture daemon BETWEEN the two, and folding
+ * them together would reorder that construction. Phase 1 is a
+ * no-behavior-change extraction, so the seam follows the existing order rather
+ * than tidying it.
+ */
+export async function buildServeA2aCore(opts: BuildServeA2aCoreOptions): Promise<{
+  state: { enabled: boolean };
+  isA2aEnabled: () => boolean;
+  secrets: Awaited<ReturnType<typeof getSecretsResolver>>;
+  storage: ReturnType<typeof getStorage>;
+  baseDir: string;
+  identity: PersonalityA2aIdentityProvider;
+  peerStore: StorageA2aPeerStore;
+  allowlist: StorageA2aAllowlist;
+  taskStore: SQLiteA2aTaskStore;
+  delegationGuard: A2aDelegationGuard;
+  limiter: MemoryA2aLimiter;
+  preAuthLimiter: MemoryA2aPreAuthLimiter;
+  runner: A2aTaskRunner;
+  /** Hourly task-store retention GC. Returned so the caller owns teardown. */
+  retentionTimer: NodeJS.Timeout;
+}> {
+  const { config, dir, loop, personalities, activePersonality } = opts;
   // A2A (Agent-to-Agent) — ALWAYS constructed, LIVE-GATED at request time so
   // `ethos a2a enable/disable` and the Settings toggle flip it WITHOUT a restart.
   // Initial state is `config.a2a.enabled`; the deprecated `ETHOS_A2A_ENABLED=1`
@@ -703,32 +1433,135 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
   // and per-trace fan-out counters persist across requests. The limiter is
   // A2A's OWN isolatable rate + concurrency stack (plan §12 blast-radius): its
   // caps cannot take down `/rpc`.
-  const a2aTaskStore = new InMemoryA2aTaskStore();
+  //
+  // T1.6: SQLite-backed, not in-memory — a task's state, result, and
+  // (critically) its idempotency key must survive a restart, or a peer
+  // polling after a restart gets NOT_FOUND for work that completed, and a
+  // retried send after a restart re-runs the loop instead of deduping.
+  const a2aTaskStore = new SQLiteA2aTaskStore(join(a2aBaseDir, 'tasks.db'));
+  // Boot-time reconciliation (correctness fix): `A2aAsyncManager`'s in-process
+  // `running` map does not survive a restart, so any row still
+  // `submitted`/`working` from before a crash is orphaned — nothing will ever
+  // move it to a terminal state, and a replayed idempotency key would report
+  // "still working" forever. Fail those rows explicitly BEFORE serving any
+  // traffic; never silently re-run them — the prior attempt may already have
+  // mutated state, so the only safe move is to record that it died.
+  const a2aReconciledCount = await a2aTaskStore.failNonTerminal(
+    'interrupted: server restarted before this task completed',
+  );
+  if (a2aReconciledCount > 0) {
+    console.warn(
+      `[a2a] reconciled ${a2aReconciledCount} task(s) left non-terminal by a prior restart`,
+    );
+  }
+  // Retention GC — terminal task rows carry result/error text, so they are
+  // not kept forever. Two windows: bodies clear first (shorter), the row
+  // (status + idempotency key) is deleted only after the longer window,
+  // because idempotency surviving a restart is the reason this store exists.
+  // Prune once at boot, then hourly — same cadence every other SQLite store's
+  // retention GC in this app uses.
+  const A2A_TASK_BODY_RETENTION_MS = 24 * 60 * 60 * 1000;
+  const A2A_TASK_ROW_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+  const pruneA2aTaskStore = () => {
+    const now = Date.now();
+    void a2aTaskStore
+      .pruneBodies(now - A2A_TASK_BODY_RETENTION_MS)
+      .catch((err) => console.warn(`[a2a] task store body prune failed: ${String(err)}`));
+    void a2aTaskStore
+      .pruneTerminal(now - A2A_TASK_ROW_RETENTION_MS)
+      .catch((err) => console.warn(`[a2a] task store retention prune failed: ${String(err)}`));
+  };
+  pruneA2aTaskStore();
+  const a2aTaskStoreRetentionTimer = setInterval(pruneA2aTaskStore, 3_600_000);
+  a2aTaskStoreRetentionTimer.unref?.();
   const a2aDelegationGuard = new A2aDelegationGuard();
   const a2aLimiter = new MemoryA2aLimiter();
-  const a2aPushClient = new FetchA2aPushClient();
+  // Pre-auth gate (plan T1.4) — cheap, keyed on remote address, checked BEFORE
+  // token/PoP verification so an unauthenticated flood never reaches Ed25519.
+  // Additive to `a2aLimiter` above, which is unchanged and enforces a
+  // different thing (per-peer quota, post-auth).
+  const a2aPreAuthLimiter = new MemoryA2aPreAuthLimiter();
   // Phase 7: forward the inbound trace into the loop as the ambient delegation
   // frame, so an onward `a2a_send` signs `depth + 1` and consumes the shared
   // per-trace fan-out budget. `reserveOutbound` binds to the SAME process guard
   // above, so inbound admissions and outbound reservations share one counter.
-  const a2aRunner: A2aTaskRunner = {
-    run: (personalityId, text, opts) => {
-      const delegation = opts?.delegation;
-      return loop.run(text, {
-        personalityId,
-        ...(opts?.sessionKey ? { sessionKey: opts.sessionKey } : {}),
-        ...(delegation
-          ? {
-              a2aDelegation: {
-                traceId: delegation.traceId,
-                depth: delegation.depth,
-                reserveOutbound: () => a2aDelegationGuard.reserveOutbound(delegation.traceId),
-              },
-            }
-          : {}),
-      });
-    },
+  // T0.2: also resolves the peer-named skill's `required_tools` and narrows
+  // the turn's toolset — fail-closed, see `serve-a2a-runner.ts`.
+  const a2aRunner: A2aTaskRunner = createA2aRunner({
+    loop,
+    personalities,
+    storage: a2aStorage,
+    reserveOutbound: (traceId) => a2aDelegationGuard.reserveOutbound(traceId),
+  });
+
+  // T0.1 — the zero-skills warning (the headline bug): on boot with A2A
+  // enabled, an operator who has not exposed any skill gets total silent
+  // inbound failure (every `message/send` returns FORBIDDEN_SCOPE) with no
+  // signal anywhere that says so. Best-effort: a card-read failure here must
+  // never block boot.
+  if (a2aInitiallyEnabled) {
+    try {
+      const card = await a2aIdentity.getIdentity(activePersonality, 'trusted-peer');
+      const warning = a2aZeroSkillsWarning(activePersonality, card.skills.length);
+      if (warning) console.warn(`[a2a] ${warning}`);
+    } catch {
+      // best-effort boot warning only
+    }
+  }
+  return {
+    state: a2aState,
+    isA2aEnabled,
+    secrets: a2aSecrets,
+    storage: a2aStorage,
+    baseDir: a2aBaseDir,
+    identity: a2aIdentity,
+    peerStore: a2aPeerStore,
+    allowlist: a2aAllowlist,
+    taskStore: a2aTaskStore,
+    delegationGuard: a2aDelegationGuard,
+    limiter: a2aLimiter,
+    preAuthLimiter: a2aPreAuthLimiter,
+    runner: a2aRunner,
+    retentionTimer: a2aTaskStoreRetentionTimer,
   };
+}
+
+/**
+ * The request-surface half of the A2A stack: the metadata-only audit sink, the
+ * peering service, the three public `RouteModule`s the web API mounts, the
+ * outbound `a2a_send` tool registration, and the live enable/disable control.
+ *
+ * Takes the already-constructed core so calling it does not reconstruct
+ * anything (plan §4b's "already-constructed objects, not config" rule applied
+ * to the construction seams too).
+ */
+export function buildServeA2aSurface(opts: {
+  config: EthosConfig;
+  core: Awaited<ReturnType<typeof buildServeA2aCore>>;
+  /** Absent on deployments with no tool registry — `a2a_send` is then not
+   *  registered, exactly as before. */
+  toolRegistry: ToolRegistry | undefined;
+}): {
+  routeModules: RouteModule[];
+  peering: ReturnType<typeof buildA2aPeeringService>;
+  setA2aEnabled: (enabled: boolean) => Promise<void>;
+} {
+  const { config, core, toolRegistry } = opts;
+  const {
+    isA2aEnabled,
+    state: a2aState,
+    secrets: a2aSecrets,
+    storage: a2aStorage,
+    baseDir: a2aBaseDir,
+    identity: a2aIdentity,
+    peerStore: a2aPeerStore,
+    allowlist: a2aAllowlist,
+    taskStore: a2aTaskStore,
+    delegationGuard: a2aDelegationGuard,
+    limiter: a2aLimiter,
+    preAuthLimiter: a2aPreAuthLimiter,
+    runner: a2aRunner,
+  } = core;
   // Phase 8: metadata-only audit sink. Built HERE in the app layer so
   // `@ethosagent/a2a` types never leak into `packages/wiring`. It maps each
   // A2aAuditEntry to an ethos observability event via the escape hatch — the
@@ -810,8 +1643,8 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
         runner: a2aRunner,
         taskStore: a2aTaskStore,
         limiter: a2aLimiter,
+        preAuthLimiter: a2aPreAuthLimiter,
         delegationGuard: a2aDelegationGuard,
-        pushClient: a2aPushClient,
         auditSink: a2aAuditSink,
       }),
       auth: 'public',
@@ -848,7 +1681,8 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
     a2aState.enabled = enabled;
     try {
       const raw = await readRawConfig(a2aStorage);
-      if (raw) await writeConfig(a2aStorage, { ...raw, a2a: { enabled } });
+      if (raw)
+        await writeConfig(a2aStorage, { ...raw, a2a: { enabled } }, await getSecretsResolver());
     } catch (err) {
       console.warn(
         `  a2a:          failed to persist a2a.enabled=${enabled} to config.yaml (toggle still applied for this process):`,
@@ -871,11 +1705,116 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
   if (process.env.ETHOS_A2A_MESH === '1') {
     console.log('  a2a mesh:     enabled (un-advertised mesh mode; audit active)');
   }
+  return { routeModules: a2aRouteModules, peering: a2aPeering, setA2aEnabled };
+}
 
-  const created = createWebApi({
+export interface BuildServeWebApiOptions {
+  config: EthosConfig;
+  /** `~/.ethos` (or the `--data-dir` override). */
+  dir: string;
+  loop: AgentLoop;
+  session: ReturnType<typeof createSessionStore>;
+  contextLog: SQLiteContextLog;
+  personalities: ServePersonalityRegistry;
+  identityMap: IdentityMap;
+  attachmentCache: FsAttachmentCache;
+  apiKeys: SqliteApiKeyStore;
+  idempotencyStore: IdempotencyStore;
+  toolRegistry: ToolRegistry | undefined;
+  mcpManager: McpManager | undefined;
+  pluginLoader: import('@ethosagent/plugin-loader').PluginLoader | undefined;
+  notificationRouter: import('@ethosagent/types').NotificationRouter | undefined;
+  cronScheduler: CronScheduler | null;
+  cronTriggers: CronTriggers;
+  goalRunner: import('@ethosagent/goal-runner').GoalRunner | undefined;
+  jobStore: import('@ethosagent/types').JobStore | undefined;
+  jobRunners: import('@ethosagent/types').JobRunnerRegistry | undefined;
+  backgroundExecutor:
+    | import('@ethosagent/wiring').CreateAgentLoopResult['backgroundExecutor']
+    | undefined;
+  setOnSkillProposed: ((fn: (skillId: string, personalityId: string) => void) => void) | undefined;
+  onMemoryCaptured:
+    | import('@ethosagent/wiring').CreateAgentLoopResult['onMemoryCaptured']
+    | undefined;
+  refreshLoopPersonalities: (() => Promise<void>) | undefined;
+  skillsInjector: import('@ethosagent/skills').SkillsInjector | undefined;
+  skillsCatalogDir: ReturnType<typeof resolveSkillsCatalogDir>;
+  sttProviders: import('@ethosagent/types').SttProviderRegistry | undefined;
+  ttsProviders: import('@ethosagent/types').TtsProviderRegistry | undefined;
+  realtimeProviders: import('@ethosagent/types').RealtimeVoiceProviderRegistry | undefined;
+  voiceConfig: ServeVoiceConfig | undefined;
+  voiceStack: import('@ethosagent/wiring').VoiceStack | undefined;
+  titleFn: ((systemPrompt: string, userMessage: string) => Promise<string>) | undefined;
+  corsOrigins: ReturnType<typeof resolveCorsOrigins>;
+  trustProxy: boolean;
+  /** Drives the `Secure` cookie flag together with `config.webBaseUrl`. */
+  isLoopbackBind: boolean;
+  webDist: ReturnType<typeof locateWebDist>;
+  metricsText: ReturnType<typeof createMetricsTextProvider>;
+  a2aRouteModules: RouteModule[];
+  a2aPeering: ReturnType<typeof buildA2aPeeringService>;
+  isA2aEnabled: () => boolean;
+  setA2aEnabled: (enabled: boolean) => Promise<void>;
+}
+
+/**
+ * Assemble and construct the web API (plan §3b step 4, "web-api
+ * (`createWebApi`)").
+ *
+ * Pure option assembly around one `createWebApi` call — every collaborator
+ * arrives already constructed, so calling this does not build a loop, a store,
+ * or a provider. The returned handle (`app`, `chatService`, `voiceSocket`,
+ * `satelliteSocket`) is what the caller listens on; this function binds no
+ * port.
+ */
+export function buildServeWebApi(opts: BuildServeWebApiOptions): ReturnType<typeof createWebApi> {
+  const {
+    config,
+    dir,
+    loop,
+    session,
+    contextLog,
+    personalities,
+    identityMap,
+    attachmentCache,
+    apiKeys,
+    idempotencyStore,
+    toolRegistry,
+    mcpManager,
+    pluginLoader,
+    notificationRouter,
+    cronScheduler,
+    cronTriggers,
+    goalRunner,
+    jobStore,
+    jobRunners,
+    backgroundExecutor,
+    setOnSkillProposed,
+    onMemoryCaptured,
+    refreshLoopPersonalities,
+    skillsInjector,
+    skillsCatalogDir,
+    sttProviders,
+    ttsProviders,
+    realtimeProviders,
+    voiceConfig,
+    voiceStack,
+    titleFn,
+    corsOrigins,
+    trustProxy,
+    isLoopbackBind,
+    webDist,
+    metricsText,
+    a2aRouteModules,
+    a2aPeering,
+    isA2aEnabled,
+    setA2aEnabled,
+  } = opts;
+  return createWebApi({
     dataDir: dir,
     attachmentCache,
     sessionStore: session,
+    contextLog,
     personalitiesLlm: () => createLLM(config),
     memoryProvider: createMemoryProvider({
       dataDir: dir,
@@ -893,6 +1832,9 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
     // Loop-registry refresh — chat/completions await it before a turn so a
     // hot-dropped/edited personality resolves without a restart.
     ...(refreshLoopPersonalities ? { refreshPersonalities: refreshLoopPersonalities } : {}),
+    // Renderer-capability seam for `personalities.renderers` — the loop's own
+    // SkillsInjector, so the derivation reuses one scanner + mtime cache.
+    ...(skillsInjector ? { skillsInjector } : {}),
     // Lane 6 (D5) — model-fit seam for the `personalities.characterSheet`
     // RPC: the SAME wiring assembler the CLI `personality show` calls, so the
     // two surfaces render one verdict. Cache-first probe (a web read is not a
@@ -923,6 +1865,26 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
               dataDir: dir,
             });
           },
+          // tools-as-code-api Lane G — the script-callable surface for the
+          // sheet's `Script-callable (run_code)` line. Same derivation the
+          // ScriptToolBridge enforces; resolves null for unknown ids.
+          scriptSurface: async (personalityId: string) => {
+            const registry = toolRegistry;
+            if (!registry) return null;
+            const described = personalities.describe(personalityId);
+            if (!described) return null;
+            return { callable: scriptCallableFor(described.config, registry) };
+          },
+          // §4.7 — declared network reach for the sheet's `## Boundary`
+          // section, so the Web tab reports G-NET inapplicable on exactly the
+          // personalities the CLI does. Resolves null for unknown ids.
+          boundary: async (personalityId: string) => {
+            const registry = toolRegistry;
+            if (!registry) return null;
+            const described = personalities.describe(personalityId);
+            if (!described) return null;
+            return { networkTools: toolsDeclaringNetwork(described.config, registry) };
+          },
         }
       : {}),
     chatDefaults: {
@@ -940,11 +1902,31 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
       personalities,
       getProvider: createLazyProvider(() => createLLM(config)),
       model: config.model,
+      alwaysAsk: APPROVAL_SURFACE_ALWAYS_ASK,
     }),
     // Every modal decision (and every allowlist auto-allow) lands in the
     // safety audit trail behind `ethos audit decisions`.
     approvalObservability: {
       recordSafetyApproval: (o) => getEthosObservability().recordSafetyApproval(o),
+    },
+    // Operator-tunable approval SLA. `!== undefined`, not truthiness — `0`
+    // ("wait forever") is a meaningful value the operator may have set.
+    ...(config.approvalTimeoutMs !== undefined
+      ? { approvalTimeoutMs: config.approvalTimeoutMs }
+      : {}),
+    // Wake-satellite lane events (`satellite.*`) — today, the turn that ran
+    // without speaking because the node declared no loudspeaker. Same
+    // observability instance as the approval trail above; fail-open like every
+    // other audit call in this file, so a store that will not initialise costs
+    // a row and never a turn.
+    satelliteObservability: {
+      recordSafetyBlock: (o) => {
+        try {
+          getEthosObservability().recordSafetyBlock(o);
+        } catch {
+          // observability unavailable — audit is fail-open
+        }
+      },
     },
     ...(skillsCatalogDir ? { catalogDir: skillsCatalogDir } : {}),
     ...(cronScheduler ? { cronScheduler } : {}),
@@ -953,6 +1935,8 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
     ...(pluginLoader ? { pluginLoader } : {}),
     ...(notificationRouter ? { notificationRouter } : {}),
     apiKeys,
+    idempotencyStore,
+    ...(corsOrigins ? { corsOrigins } : {}),
     listTeams: async () => listRegisteredTeams(dir),
     secureCookie: !isLoopbackBind || config.webBaseUrl?.startsWith('https://') === true,
     trustProxy,
@@ -963,12 +1947,57 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
     memoryNoticesEnabled: config.displayMemoryNotices !== false,
     ...(goalRunner ? { goalRunner } : {}),
     ...(jobStore ? { jobStore } : {}),
+    ...(jobRunners ? { jobRunners } : {}),
+    // I15/I18 — the run card's liveness feed and the completion hand-back.
+    // Both ride the executor's EXISTING subscription seams (`onRunUpdate`,
+    // `onComplete`); neither is a new notification bus (G9/D11/D20, D27).
+    ...(backgroundExecutor
+      ? {
+          subscribeRunUpdates: (handler: (update: RunUpdateDigest) => void) => {
+            backgroundExecutor?.onRunUpdate(handler);
+          },
+          subscribeJobComplete: (handler: (job: BackgroundJob) => void) => {
+            backgroundExecutor?.onComplete(handler);
+          },
+        }
+      : {}),
     ...(sttProviders ? { sttProviderRegistry: sttProviders } : {}),
     ...(voiceConfig?.sttProviderName ? { sttProviderName: voiceConfig.sttProviderName } : {}),
     ...(voiceConfig ? { sttProviderConfig: voiceConfig.sttProviderConfig } : {}),
     ...(ttsProviders ? { ttsProviderRegistry: ttsProviders } : {}),
     ...(voiceConfig?.ttsProviderName ? { ttsProviderName: voiceConfig.ttsProviderName } : {}),
     ...(voiceConfig ? { ttsProviderConfig: voiceConfig.ttsProviderConfig } : {}),
+    // Named rosters — what a personality's `voice.tts_provider` /
+    // `voice.stt_provider` pick from.
+    ...(voiceConfig?.ttsRoster ? { ttsRoster: voiceConfig.ttsRoster } : {}),
+    ...(voiceConfig?.sttRoster ? { sttRoster: voiceConfig.sttRoster } : {}),
+    // Realtime tier — the registry backs `voice.realtimeToken`; the roster and
+    // tier default are boot snapshots that live Settings config overrides.
+    ...(realtimeProviders ? { realtimeProviderRegistry: realtimeProviders } : {}),
+    ...(voiceConfig?.realtimeRoster ? { realtimeRoster: voiceConfig.realtimeRoster } : {}),
+    ...(voiceConfig?.realtimeDefault ? { realtimeDefault: voiceConfig.realtimeDefault } : {}),
+    ...(voiceConfig?.tier ? { voiceTier: voiceConfig.tier } : {}),
+    // Where a conversation with no explicit `/voice` mode starts, the same
+    // `voice.defaultMode` the gateway reads for its channel lanes.
+    ...(config.voice?.defaultMode ? { voiceDefaultMode: config.voice.defaultMode } : {}),
+    // The typed per-call cap. Live Settings config still wins; this is the
+    // route that exists whether or not the live read does.
+    ...(voiceConfig?.realtimeSessionBudgetUsd !== undefined
+      ? { realtimeSessionBudgetUsd: voiceConfig.realtimeSessionBudgetUsd }
+      : {}),
+    // Realtime turns record their latency into the voice stack's span writer —
+    // the same one the pipeline tier uses.
+    ...(voiceStack ? { voiceSpans: voiceStack.spans } : {}),
+    // The browser pipeline lane's `VoiceSession` factory. Absent (no
+    // `voice.*` configured) → the lane still handshakes, but refuses `audio`
+    // frames with a clear error instead of a silent no-op.
+    ...(voiceStack ? { voiceStack } : {}),
+    // Local-only voice-egress gate. Armed only when the operator declared
+    // `voice.trustedPlugins`; the browser talk lane then refuses a non-local
+    // provider instead of shipping audio off the machine.
+    ...(voiceConfig?.trustedVoicePlugins
+      ? { trustedVoicePlugins: voiceConfig.trustedVoicePlugins }
+      : {}),
     ...(titleFn ? { titleFn } : {}),
     // W4.1 — first completed web turn stamps funnel.first_reply.
     onTurnDone: () => {
@@ -986,133 +2015,7 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
         return null;
       }
     },
+    metricsTextFn: metricsText,
+    ...(cronTriggers.external ? { cronFireTrigger: cronTriggers.external } : {}),
   });
-  chatService = created.chatService;
-  const webApp = created.app;
-  const tokens = new WebTokenRepository({ dataDir: dir, storage: getStorage() });
-  const token = await tokens.getOrCreate();
-  const { server, port } = await listenWithFallback(
-    webApp,
-    webPort,
-    WEB_PORT_FALLBACK_ATTEMPTS,
-    webHost,
-  );
-  console.log('');
-  const displayHost = webHost === '0.0.0.0' ? 'localhost' : webHost;
-  console.log(`ethos web UI listening on http://${displayHost}:${port}`);
-  console.log(`  admin: http://${displayHost}:${port}/admin`);
-  if (webDist) {
-    console.log(`  open: http://${displayHost}:${port}/auth/exchange?t=${token}`);
-    console.log('  (token rotates on first use; cookie remains the steady-state credential)');
-    console.log(`  serving SPA from: ${webDist}`);
-  } else {
-    console.log(`  auth token: ${token}`);
-    console.log('  (token rotates on first use; cookie remains the steady-state credential)');
-    console.log('  no SPA build found — run `pnpm --filter @ethosagent/web dev` for HMR,');
-    console.log(`    then visit http://localhost:5173/auth/exchange?t=${token}`);
-    console.log('  or `pnpm --filter @ethosagent/web build` to bundle into this server.');
-  }
-  webShutdown = () =>
-    new Promise<void>((resolve) => {
-      server.close(() => resolve());
-    });
-
-  emitReady('serve');
-  notifyReady();
-  const stopWatchdog = startWatchdog();
-
-  const cleanup = async () => {
-    if (stopWatchdog) stopWatchdog();
-    stopHeartbeat();
-    stopPollLoop?.();
-    await mesh.unregister(agentId);
-    if (cronScheduler) cronScheduler.stop();
-    if (webShutdown) await webShutdown();
-    process.exit(0);
-  };
-  process.on('SIGTERM', () => void cleanup());
-  process.on('SIGINT', () => void cleanup());
-
-  await new Promise(() => {});
-}
-
-/**
- * Install process-level resilience handlers for the long-running web/ACP
- * server. A stray rejected SSE write (e.g. writing to a stream the browser
- * aborted on tab-switch) must NOT take down the server and drop every other
- * live stream. We log-and-continue here rather than exit — this is scoped to
- * the serve path only; one-shot CLI commands still fail loudly via the
- * top-level handler. Idempotent via `resilienceGuardInstalled`.
- */
-function installServeResilienceGuard(): void {
-  if (resilienceGuardInstalled) return;
-  resilienceGuardInstalled = true;
-  process.on('unhandledRejection', (reason) => {
-    const cause = reason instanceof Error ? reason.message : String(reason);
-    appendErrorLog(
-      new EthosError({
-        code: 'INTERNAL',
-        cause: `Unhandled promise rejection: ${cause}`,
-        action: 'A background promise rejected and was not awaited. The server kept running.',
-      }),
-      { command: 'serve' },
-    );
-    console.error(`[serve] unhandled rejection (kept alive): ${cause}`);
-  });
-  process.on('uncaughtException', (err) => {
-    const cause = err instanceof Error ? err.message : String(err);
-    appendErrorLog(
-      new EthosError({
-        code: 'INTERNAL',
-        cause: `Uncaught exception: ${cause}`,
-        action:
-          'An uncaught exception was trapped by the serve resilience guard. The server kept running.',
-      }),
-      { command: 'serve' },
-    );
-    console.error(`[serve] uncaught exception (kept alive): ${cause}`);
-  });
-}
-
-/**
- * Resolve the absolute path to the built SPA. Search order:
- *   1. `--web-dist <path>` flag (explicit, wins).
- *   2. Sibling to the bundled CLI: `<cliDist>/web/index.html` (the
- *      pre-publish hook that bundles the web app drops it here, per
- *      CEO finding 9.1).
- *   3. Monorepo dev path: `apps/web/dist/index.html` resolved up from
- *      `import.meta.dirname`.
- * Returns null when no candidate exists; the server skips the static
- * mount and prints a hint pointing devs at `pnpm dev:web`.
- */
-function locateWebDist(explicit: string | undefined): string | null {
-  if (explicit) {
-    const abs = pathResolve(explicit);
-    return existsSync(join(abs, 'index.html')) ? abs : null;
-  }
-  const candidates = [
-    pathResolve(import.meta.dirname, '..', 'web'),
-    pathResolve(import.meta.dirname, '..', '..', '..', '..', 'apps', 'web', 'dist'),
-    pathResolve(import.meta.dirname, '..', '..', '..', 'apps', 'web', 'dist'),
-  ];
-  for (const candidate of candidates) {
-    if (existsSync(join(candidate, 'index.html'))) return candidate;
-  }
-  return null;
-}
-
-/**
- * Enumerate registered team names for `GET /v1/models`. Scoped to the
- * `dataDir` the server is actually using (not `~/.ethos/teams` blindly),
- * so isolated/test installations report only their own teams. Manifest
- * files live at `<dataDir>/teams/<name>.yaml`; `.runtime.yaml` is the
- * supervisor's runtime state, not a manifest.
- */
-function listRegisteredTeams(dataDir: string): string[] {
-  const teamsPath = join(dataDir, 'teams');
-  if (!existsSync(teamsPath)) return [];
-  return readdirSync(teamsPath, { withFileTypes: true })
-    .filter((e) => e.isFile() && e.name.endsWith('.yaml') && !e.name.endsWith('.runtime.yaml'))
-    .map((e) => e.name.slice(0, -'.yaml'.length))
-    .sort();
 }

@@ -8,6 +8,7 @@ import type {
   BackgroundJobEventType,
   BackgroundJobStatus,
   CreateBackgroundJobInput,
+  GetJobEventsOptions,
   JobStore,
 } from '@ethosagent/types';
 
@@ -42,7 +43,10 @@ const SCHEMA = `
     origin_chat_id     TEXT,
     origin_thread_id   TEXT,
     remote_peer        TEXT,
-    remote_job_id      TEXT
+    remote_job_id      TEXT,
+    runner             TEXT,
+    blocked_since      INTEGER,
+    blocked_request_id TEXT
   ) STRICT;
 
   CREATE TABLE IF NOT EXISTS job_events (
@@ -54,7 +58,20 @@ const SCHEMA = `
     created_at INTEGER NOT NULL
   ) STRICT;
 
+  -- G5 — the second delivery claim. One row per PUSHED mid-run notice, keyed by
+  -- the pending question's requestId. Insert-wins is the claim: the PRIMARY KEY
+  -- makes a concurrent second insert a no-op, so two processes racing the same
+  -- question push it exactly once. Deliberately a table and not a column on
+  -- jobs: a job parks on more than one question over its life, and each park
+  -- needs its own claim (a column would be spent after the first).
+  CREATE TABLE IF NOT EXISTS job_notices (
+    request_id TEXT PRIMARY KEY,
+    job_id     TEXT NOT NULL,
+    claimed_at INTEGER NOT NULL
+  ) STRICT;
+
   CREATE INDEX IF NOT EXISTS job_events_job ON job_events(job_id, seq);
+  CREATE INDEX IF NOT EXISTS job_notices_job ON job_notices(job_id);
   CREATE INDEX IF NOT EXISTS jobs_root_status ON jobs(root_session_key, status);
   CREATE INDEX IF NOT EXISTS jobs_owner_status ON jobs(owner, status);
   CREATE INDEX IF NOT EXISTS jobs_status_created ON jobs(status, created_at);
@@ -69,11 +86,11 @@ const SCHEMA = `
 const DELIVERY_INDEX =
   'CREATE INDEX IF NOT EXISTS jobs_undelivered ON jobs(origin_bot_key, status, delivered_at)';
 
-const JOB_STORE_SCHEMA_VERSION = 3;
+const JOB_STORE_SCHEMA_VERSION = 6;
 
 /**
  * Forward-only DDL steps. Each brings a `(N-1)` database to `N`; the baseline
- * above already describes v3, so a FRESH database never runs one. The
+ * above already describes v6, so a FRESH database never runs one. The
  * `table_info` guards keep each ALTER idempotent even if a database was
  * hand-repaired to the newer shape without its `user_version` being bumped.
  */
@@ -87,6 +104,22 @@ const JOB_STORE_MIGRATIONS: Record<number, (db: Database.Database) => void> = {
   // existing row intact with `delivered_at` NULL — i.e. "never announced",
   // which is the honest state for a job that finished before this code existed.
   3: (db) => addColumnIfMissing(db, 'delivered_at', 'INTEGER'),
+  // v3 -> v4: which runner executed the row. NULL on every pre-existing row,
+  // which reads as "the default runner" — the only one that existed then.
+  4: (db) => addColumnIfMissing(db, 'runner', 'TEXT'),
+  // v4 -> v5: the `blocked` state's two fields. Same ALTER shape as v2/v3 —
+  // existing rows get NULLs, which is the honest state for every job that
+  // finished before a run could park on a human answer.
+  5: (db) => {
+    addColumnIfMissing(db, 'blocked_since', 'INTEGER');
+    addColumnIfMissing(db, 'blocked_request_id', 'TEXT');
+  },
+  // v5 -> v6: G5's second delivery claim (`job_notices`). No DDL of its own —
+  // the baseline's `CREATE TABLE IF NOT EXISTS` already ran by the time this
+  // step executes, on a fresh AND on an upgraded database alike (`migrate`
+  // execs the baseline before the chain). The step exists so `user_version`
+  // moves, which is what the downgrade guard reads.
+  6: () => {},
 };
 
 function addColumnIfMissing(db: Database.Database, column: string, type: string): void {
@@ -127,6 +160,9 @@ interface JobRow {
   origin_thread_id: string | null;
   remote_peer: string | null;
   remote_job_id: string | null;
+  runner: string | null;
+  blocked_since: number | null;
+  blocked_request_id: string | null;
 }
 
 interface JobEventRow {
@@ -170,6 +206,9 @@ function rowToJob(r: JobRow): BackgroundJob {
     originThreadId: r.origin_thread_id ?? undefined,
     remotePeer: r.remote_peer ?? undefined,
     remoteJobId: r.remote_job_id ?? undefined,
+    runner: r.runner ?? undefined,
+    blockedSince: r.blocked_since ?? undefined,
+    blockedRequestId: r.blocked_request_id ?? undefined,
   };
 }
 
@@ -184,7 +223,9 @@ function rowToEvent(r: JobEventRow): BackgroundJobEvent {
   };
 }
 
-const ACTIVE_STATUSES = "('queued','running')";
+// `blocked` is ACTIVE, not terminal: a run parked on a human answer still owns
+// its concurrency slot, so the per-root / per-personality caps must see it.
+const ACTIVE_STATUSES = "('queued','running','blocked')";
 const TERMINAL_STATUSES = "('done','failed','aborted','stale','expired')";
 
 // ---------------------------------------------------------------------------
@@ -232,8 +273,8 @@ export class SQLiteJobStore implements JobStore {
           personality_id, depth, status, label, prompt, spend_usd,
           max_cost_usd, cancel_requested, created_at,
           origin_platform, origin_bot_key, origin_chat_id, origin_thread_id,
-          remote_peer, remote_job_id)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          remote_peer, remote_job_id, runner)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         id,
@@ -256,6 +297,7 @@ export class SQLiteJobStore implements JobStore {
         input.originThreadId ?? null,
         input.remotePeer ?? null,
         input.remoteJobId ?? null,
+        input.runner ?? null,
       );
 
     this.appendEventSync(id, 'queued', {});
@@ -324,6 +366,38 @@ export class SQLiteJobStore implements JobStore {
     tx();
   }
 
+  async markBlocked(id: string, requestId: string): Promise<void> {
+    const tx = this.db.transaction(() => {
+      const result = this.db
+        .prepare(
+          `UPDATE jobs SET status = 'blocked', blocked_since = ?, blocked_request_id = ?
+           WHERE id = ? AND status = 'running'`,
+        )
+        .run(Date.now(), requestId, id);
+      // Guarded, not asserted: the row may have been cancelled or finished
+      // between the question being asked and this write. No transition, no event.
+      if (result.changes === 1) this.appendEventSync(id, 'blocked', { requestId });
+    });
+    tx();
+  }
+
+  async resumeFromBlocked(id: string): Promise<void> {
+    const tx = this.db.transaction(() => {
+      // heartbeat_at is bumped here, not left as it was: a run parked longer than
+      // staleMs would otherwise be swept stale in the gap between resuming and
+      // the executor's next beat.
+      const result = this.db
+        .prepare(
+          `UPDATE jobs SET status = 'running', blocked_since = NULL,
+             blocked_request_id = NULL, heartbeat_at = ?
+           WHERE id = ? AND status = 'blocked'`,
+        )
+        .run(Date.now(), id);
+      if (result.changes === 1) this.appendEventSync(id, 'resumed', {});
+    });
+    tx();
+  }
+
   async finish(
     id: string,
     terminal: 'done' | 'failed' | 'aborted',
@@ -334,12 +408,20 @@ export class SQLiteJobStore implements JobStore {
         | { status: string }
         | undefined;
       if (!row) throw new Error(`finish: job ${id} not found`);
-      if (row.status !== 'running' && row.status !== 'stale') {
-        throw new Error(`finish: job ${id} not in running/stale (status=${row.status})`);
+      // `blocked` is a legal SOURCE (a parked run is still cancellable — §4.1's
+      // blocked card offers Cancel) but never a terminal ARGUMENT.
+      if (row.status !== 'running' && row.status !== 'stale' && row.status !== 'blocked') {
+        throw new Error(`finish: job ${id} not in running/stale/blocked (status=${row.status})`);
       }
 
+      // The blocked fields are cleared with the transition: a terminal row is not
+      // parked on anything. The audit trail keeps the `blocked` event.
       this.db
-        .prepare('UPDATE jobs SET status = ?, summary = ?, error = ?, finished_at = ? WHERE id = ?')
+        .prepare(
+          `UPDATE jobs SET status = ?, summary = ?, error = ?, finished_at = ?,
+             blocked_since = NULL, blocked_request_id = NULL
+           WHERE id = ?`,
+        )
         .run(terminal, fields.summary ?? null, fields.error ?? null, Date.now(), id);
 
       // A stale row that turns out alive recovers: record it before the terminal
@@ -382,9 +464,51 @@ export class SQLiteJobStore implements JobStore {
     return row.n;
   }
 
+  async countActive(): Promise<number> {
+    const row = this.db
+      .prepare(`SELECT COUNT(*) AS n FROM jobs WHERE status IN ${ACTIVE_STATUSES}`)
+      .get() as { n: number };
+    return row.n;
+  }
+
+  /**
+   * Discount a host pause from every in-flight job's liveness clock.
+   *
+   * A job that was genuinely alive and progressing across a VM suspend wrote no
+   * heartbeat while the host was stopped, so the first post-resume
+   * `reclaimStale` sweep reads the pause as a dead executor. Advancing every
+   * running row's `heartbeat_at` by the pause duration — once, at the resume
+   * boundary, before that sweep runs — corrects the timestamps the gate
+   * compares without touching the gate: a job that really stopped beating is
+   * still past the threshold afterwards.
+   *
+   * This is `resumeFromBlocked`'s bump generalized from one row to every
+   * in-flight one, for the same reason it bumps there.
+   *
+   * Returns the number of rows bumped. A non-positive or non-finite duration
+   * writes nothing.
+   */
+  async bumpRunningHeartbeats(pauseDurationMs: number): Promise<number> {
+    // heartbeat_at is INTEGER in a STRICT table — a fractional offset would
+    // make the sum a REAL and the write would throw.
+    const offset = Math.round(pauseDurationMs);
+    if (!Number.isFinite(pauseDurationMs) || offset <= 0) return 0;
+    const result = this.db
+      .prepare(
+        `UPDATE jobs SET heartbeat_at = heartbeat_at + ?
+         WHERE status = 'running' AND heartbeat_at IS NOT NULL`,
+      )
+      .run(offset);
+    return result.changes;
+  }
+
   async reclaimStale(staleMs: number): Promise<BackgroundJob[]> {
     const threshold = Date.now() - staleMs;
     const ids = this.db.transaction((): string[] => {
+      // `status = 'running'` is what keeps `blocked` out of the sweep, and that
+      // is deliberate, not incidental: the executor stops beating for a parked
+      // run, so a blocked row's heartbeat ages past the threshold by design. A
+      // question waiting on a person must never be filed as a dead host.
       const rows = this.db
         .prepare(
           `SELECT id FROM jobs
@@ -483,6 +607,26 @@ export class SQLiteJobStore implements JobStore {
     this.db.prepare('UPDATE jobs SET delivered_at = NULL WHERE id = ?').run(id);
   }
 
+  /**
+   * G5 — the mid-run "needs you" claim, keyed by the pending question's
+   * requestId. `INSERT OR IGNORE` on a PRIMARY KEY is the same atomic
+   * exactly-once shape `claimDelivery`'s conditional UPDATE has: SQLite
+   * serialises the write, so of two processes inserting the same requestId
+   * exactly one reports `changes === 1`.
+   */
+  async claimNotice(requestId: string, jobId: string): Promise<boolean> {
+    const result = this.db
+      .prepare(
+        'INSERT OR IGNORE INTO job_notices (request_id, job_id, claimed_at) VALUES (?, ?, ?)',
+      )
+      .run(requestId, jobId, Date.now());
+    return result.changes === 1;
+  }
+
+  async releaseNotice(requestId: string): Promise<void> {
+    this.db.prepare('DELETE FROM job_notices WHERE request_id = ?').run(requestId);
+  }
+
   async pruneTerminal(cutoffMs: number): Promise<number> {
     const prune = this.db.transaction((): number => {
       // Delete events first to respect the FK (foreign_keys is ON), matching on
@@ -490,6 +634,18 @@ export class SQLiteJobStore implements JobStore {
       this.db
         .prepare(
           `DELETE FROM job_events WHERE job_id IN (
+             SELECT id FROM jobs
+             WHERE status IN ${TERMINAL_STATUSES}
+               AND COALESCE(finished_at, created_at) < ?
+           )`,
+        )
+        .run(cutoffMs);
+
+      // Same predicate for the notice claims: a pruned job's parked-question
+      // claims have nothing left to be exactly-once about.
+      this.db
+        .prepare(
+          `DELETE FROM job_notices WHERE job_id IN (
              SELECT id FROM jobs
              WHERE status IN ${TERMINAL_STATUSES}
                AND COALESCE(finished_at, created_at) < ?
@@ -538,10 +694,38 @@ export class SQLiteJobStore implements JobStore {
     tx();
   }
 
-  async getEvents(jobId: string): Promise<BackgroundJobEvent[]> {
+  /**
+   * Bounded tail read. The inner query walks the `job_events(job_id, seq)` index
+   * BACKWARDS and stops after `limit` rows, so a two-hour run's trail costs the
+   * page, not the job; the outer query flips it back to ascending because that
+   * is the contract every caller reads against. `beforeSeq` narrows the same
+   * index range, so paging backwards is another bounded scan, not a growing one.
+   *
+   * With no `opts` the query is exactly the old one — the whole trail, seq ASC.
+   */
+  async getEvents(jobId: string, opts?: GetJobEventsOptions): Promise<BackgroundJobEvent[]> {
+    const params: unknown[] = [jobId];
+    let where = 'job_id = ?';
+    if (opts?.beforeSeq !== undefined) {
+      where += ' AND seq < ?';
+      params.push(opts.beforeSeq);
+    }
+
+    if (opts?.limit === undefined) {
+      const rows = this.db
+        .prepare(`SELECT * FROM job_events WHERE ${where} ORDER BY seq ASC`)
+        .all(...params) as JobEventRow[];
+      return rows.map(rowToEvent);
+    }
+
+    params.push(Math.max(0, Math.floor(opts.limit)));
     const rows = this.db
-      .prepare('SELECT * FROM job_events WHERE job_id = ? ORDER BY seq ASC')
-      .all(jobId) as JobEventRow[];
+      .prepare(
+        `SELECT * FROM (
+           SELECT * FROM job_events WHERE ${where} ORDER BY seq DESC LIMIT ?
+         ) ORDER BY seq ASC`,
+      )
+      .all(...params) as JobEventRow[];
     return rows.map(rowToEvent);
   }
 

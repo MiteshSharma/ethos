@@ -1,3 +1,4 @@
+import { estimateCost } from '@ethosagent/pricing';
 import type {
   CompletionChunk,
   CompletionOptions,
@@ -7,7 +8,7 @@ import type {
 } from '@ethosagent/types';
 import { orderToolDefinitions } from '@ethosagent/types';
 import type OpenAI from 'openai';
-import { estimateCostOpenAI, normalizeGeminiSchema, toOpenAIMessages } from './index';
+import { normalizeGeminiSchema, toOpenAIMessages } from './index';
 import type { LocalOpenAiRuntime } from './runtime-classify';
 import { sanitizeToolSchemaForGrammar } from './schema-sanitize';
 
@@ -19,7 +20,20 @@ export interface ChatCompletionsStreamParams {
   oaiParams: OpenAI.Chat.ChatCompletionCreateParamsStreaming;
   requestTokens?: { system: number; tools: number; messages: number };
   effectiveModel: string;
+  /** Served by a local runtime (Ollama, vLLM, llama.cpp, LM Studio). Pricing
+   *  reads this rather than guessing from the model name: `deepseek-r1` and
+   *  `mistral` name both an Ollama pull and a paid hosted model, so the name
+   *  alone cannot tell an intentional $0 from an unpriced one. */
+  localRuntime?: boolean;
+  /** B2 — the loop's client-minted per-LLM-call id, sent outbound on the
+   *  `X-Client-Request-Id` header. Absent → no header is sent. */
+  clientRequestId?: string;
 }
+
+/** B2 — outbound correlation header. OpenAI, OpenRouter and the local runtimes
+ *  all pass unknown `X-`-prefixed request headers through to their logs, so one
+ *  header name works across every openai-compat dialect. */
+const CLIENT_REQUEST_ID_HEADER = 'X-Client-Request-Id';
 
 type StructuredOutputDialect = 'openai' | 'ollama' | 'vllm';
 
@@ -174,7 +188,15 @@ export function buildChatCompletionsParams(
   applyStructuredOutput(oaiParams, options, dialect);
   applySamplingExtras(oaiParams, options, dialect, opts?.localRuntime);
 
-  return { oaiParams, requestTokens: undefined, effectiveModel };
+  return {
+    oaiParams,
+    requestTokens: undefined,
+    effectiveModel,
+    localRuntime: opts?.localRuntime !== undefined,
+    // B2 — carried beside the body, not in it: the id is a request HEADER, so
+    // it never perturbs the byte-stable prefix the local caches hash.
+    ...(options.requestId ? { clientRequestId: options.requestId } : {}),
+  };
 }
 
 /**
@@ -228,7 +250,12 @@ export async function* streamChatCompletions(
   params: ChatCompletionsStreamParams,
   signal?: AbortSignal,
 ): AsyncIterable<CompletionChunk> {
-  const stream = await client.chat.completions.create(params.oaiParams, { signal });
+  const stream = await client.chat.completions.create(params.oaiParams, {
+    signal,
+    ...(params.clientRequestId
+      ? { headers: { [CLIENT_REQUEST_ID_HEADER]: params.clientRequestId } }
+      : {}),
+  });
 
   // Track streaming tool calls by index (OpenAI streams them as deltas)
   const pendingTools = new Map<number, { id: string; name: string; args: string }>();
@@ -245,6 +272,14 @@ export async function* streamChatCompletions(
 
     // Usage chunk (comes on its own chunk when stream_options.include_usage=true)
     if (!choice && chunk.usage) {
+      const costEstimate = estimateCost(
+        params.effectiveModel,
+        {
+          inputTokens: chunk.usage.prompt_tokens,
+          outputTokens: chunk.usage.completion_tokens,
+        },
+        { localRuntime: params.localRuntime },
+      );
       yield {
         type: 'usage',
         usage: {
@@ -252,14 +287,11 @@ export async function* streamChatCompletions(
           outputTokens: chunk.usage.completion_tokens,
           cacheReadTokens: 0,
           cacheCreationTokens: 0,
-          estimatedCostUsd: estimateCostOpenAI(
-            params.effectiveModel,
-            chunk.usage.prompt_tokens,
-            chunk.usage.completion_tokens,
-          ),
+          estimatedCostUsd: costEstimate.costUsd,
           requestTokens: params.requestTokens,
         },
         metadata: {},
+        costBasis: costEstimate.basis,
       };
       continue;
     }

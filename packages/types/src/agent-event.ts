@@ -66,7 +66,18 @@ export type ToolProgressAudience = 'internal' | 'user' | 'dashboard';
 export type AgentEvent =
   | { type: 'text_delta'; text: string }
   | { type: 'thinking_delta'; thinking: string }
-  | { type: 'tool_start'; toolCallId: string; toolName: string; args: unknown }
+  // tools-as-code-api Lane E — `audience` mirrors the Phase 30.2 field on
+  // `tool_end`. In-script inner calls emit real tool_start events tagged
+  // `'internal'` (toolCallId namespaced `<parentToolCallId>#<n>`); surfaces
+  // MUST NOT render those to the user. Absent = LLM-issued call, renders as
+  // before. Additive optional field — NOT a new event variant.
+  | {
+      type: 'tool_start';
+      toolCallId: string;
+      toolName: string;
+      args: unknown;
+      audience?: ToolProgressAudience;
+    }
   // Phase 30.2 — `audience` gates whether channel adapters / chat.ts surface
   // this event to the user. Default is `'internal'`; tools opt in to `'user'`
   // per event. Framework-emitted budget warnings are `'user'` (see step 7).
@@ -100,9 +111,28 @@ export type AgentEvent =
       /** Error message from the tool's ToolResult. Only set when `ok: false`. */
       error?: string;
     }
-  | { type: 'usage'; inputTokens: number; outputTokens: number; estimatedCostUsd: number }
+  // A6 — `cacheReadTokens` / `cacheCreationTokens` are ADDITIVE-OPTIONAL (see
+  // ARCHITECTURE.md §VII, Agent event union). They mirror the provider's
+  // `TokenUsage` fields and are present only when the provider actually
+  // reported cache activity; a cacheless call omits them rather than
+  // reporting a misleading 0, so consumers can tell "no caching" apart from
+  // "cached nothing this call".
+  | {
+      type: 'usage';
+      inputTokens: number;
+      outputTokens: number;
+      estimatedCostUsd: number;
+      cacheReadTokens?: number;
+      cacheCreationTokens?: number;
+    }
   | { type: 'error'; error: string; code: string }
-  | { type: 'done'; text: string; turnCount: number }
+  // B3 — `traceId` is ADDITIVE-OPTIONAL (see ARCHITECTURE.md §VII, Agent event
+  // union: the bump trigger is adding/removing/renaming a VARIANT, which this
+  // is not). It is the turn's observability trace id — the same id the turn's
+  // spans hang off and `messages.trace_id` carries — so a surface that only
+  // sees the event stream can still name the turn. Absent when no
+  // observability adapter is wired.
+  | { type: 'done'; text: string; turnCount: number; traceId?: string }
   /**
    * Emitted when the loop stops a turn early for safety: a per-turn tool
    * budget tripped (`kind: 'budget'`, rule is one of 'tool-budget' |
@@ -127,12 +157,17 @@ export type AgentEvent =
    * Carries the resolved provider/model and the routing source so consumers
    * (TUI status bar, CLI verbose mode, telemetry) can show the effective model.
    * `source` reflects which routing rule selected the model (see model_update.md).
+   *
+   * B3 — `traceId` is ADDITIVE-OPTIONAL, same rationale as on `done`. This is
+   * the first event of a turn, so it is where a surface learns the turn's
+   * identity before any output arrives.
    */
   | {
       type: 'run_start';
       provider: string;
       model: string;
       source: 'team-coordinator' | 'team-personality' | 'personality' | 'global';
+      traceId?: string;
     }
   | {
       type: 'dry_run_summary';

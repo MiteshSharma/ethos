@@ -5,10 +5,16 @@ import { type ChildProcess, spawn } from 'node:child_process';
 import { realpathSync } from 'node:fs';
 import { homedir, userInfo } from 'node:os';
 import { join, resolve as resolvePath } from 'node:path';
+// The fs_reach derivation is SHARED with the app-layer ScopedStorage scope
+// (packages/core/src/fs-reach.ts). Two copies would drift into silent data
+// loss: a write ScopedStorage permits but no mount backs is written into the
+// container's ephemeral layer and discarded by `docker run --rm`.
+import { deriveFsReachPaths, type FsReachVars, substitute } from '@ethosagent/core';
 import type {
   Constitution,
   ExecChunk,
   ExecOpts,
+  ExecRpcResponse,
   ExecSession,
   ExecutionBackend,
   ExecutionBackendConfig,
@@ -18,6 +24,21 @@ import type {
   SandboxAttestation,
   SecretsResolver,
 } from '@ethosagent/types';
+import {
+  encodeFrame,
+  FrameParser,
+  type HostFrame,
+  RPC_PROTOCOL_VERSION,
+  RpcProtocolError,
+  RpcVersionMismatchError,
+  type ShimFrame,
+} from './frames';
+
+// Re-exported so downstream consumers (and this package's tests) keep importing
+// the fs_reach substitution failure from the backend that throws it, even though
+// the canonical class now lives in core alongside the shared derivation.
+export { EmptySubstitutionError } from '@ethosagent/core';
+export * from './frames';
 
 export class ExecAbortedError extends Error {
   readonly code = 'EXEC_ABORTED';
@@ -70,17 +91,6 @@ export class ConstitutionMountError extends Error {
   }
 }
 
-export class EmptySubstitutionError extends Error {
-  readonly code = 'EMPTY_SUBSTITUTION';
-  constructor(
-    public readonly variable: string,
-    public readonly template: string,
-  ) {
-    super(`Substitution variable ${variable} is empty/unresolved in fs_reach path "${template}"`);
-    this.name = 'EmptySubstitutionError';
-  }
-}
-
 /**
  * Built-in critical denylist (review A2). These host paths grant container
  * escape (docker socket) or expose the host kernel/devices; `mountsFor`
@@ -109,6 +119,28 @@ const SCRATCH_TMPFS_PATHS = ['/tmp', '/home/sandbox'] as const;
 export function scratchTmpfsFor(mounts: MountSpec[]): string[] {
   const mounted = new Set(mounts.map((m) => m.containerPath));
   return SCRATCH_TMPFS_PATHS.filter((p) => !mounted.has(p));
+}
+
+/**
+ * `--workdir` args for a requested `ExecOpts.cwd` — empty when the path is not
+ * one the container can actually see.
+ *
+ * `mountsFor` binds with identity mapping (`hostPath === containerPath`), so a
+ * mounted host path exists at the same absolute path inside the container and
+ * `-w` lands the shell exactly where the file tools write. A path OUTSIDE the
+ * mount set is the dangerous case: Docker does not fail on it, it CREATES the
+ * directory in the container's own writable layer, and `docker run --rm`
+ * discards whatever is written there — the same silent data loss the fs_reach
+ * parity test exists to prevent. So an unmounted cwd is dropped and the image's
+ * own WORKDIR stands, which is exactly what every cwd got before this flag
+ * existed. A personality that declares `fs_reach.workdir` always lands in the
+ * mounted branch: `deriveFsReachPaths` injects a declared workdir into both the
+ * read and the write list, so it is always bound.
+ */
+export function workdirArgsFor(cwd: string | undefined, mounts: MountSpec[]): string[] {
+  if (!cwd) return [];
+  const containerPath = resolvePath(cwd);
+  return mounts.some((m) => m.containerPath === containerPath) ? ['--workdir', containerPath] : [];
 }
 
 /**
@@ -150,8 +182,12 @@ export function resolveNetworkMode(p?: PersonalityConfig): 'none' | 'bridge' {
 /** Output byte ceiling per exec (review #6). Past this the exec is killed. */
 const MAX_EXEC_OUTPUT_BYTES = 1_000_000;
 
-/** True when `p` resolves to or under one of the forbidden mount roots. */
-function isForbiddenMount(p: string): boolean {
+/**
+ * True when `p` resolves to or under one of the forbidden mount roots.
+ * Exported so the wiring-layer `fs_reach` directory pre-creation reuses THIS
+ * denylist rather than growing a second one that could disagree with it.
+ */
+export function isForbiddenMount(p: string): boolean {
   const abs = resolvePath(p);
   return FORBIDDEN_MOUNT_ROOTS.some((root) => abs === root || abs.startsWith(`${root}/`));
 }
@@ -196,7 +232,7 @@ function isUnderPath(path: string, prefix: string): boolean {
 function checkConstitutionMount(
   hostPath: string,
   constitution: Constitution | undefined,
-  vars: { ethosHome: string; self: string; cwd: string },
+  vars: FsReachVars,
 ): void {
   const fs = constitution?.filesystem;
   if (!fs) return;
@@ -218,37 +254,29 @@ function checkConstitutionMount(
 }
 
 /**
- * Local copy of the core substitution helper — extensions must not import core.
- * Throws EmptySubstitutionError when a token present in the template maps to an
- * empty value: an explicitly-declared fs_reach path whose substitution variable
- * is empty is a configuration error — fail loudly rather than mount a bogus path
- * (e.g. `${ETHOS_HOME}/skills` with an empty ethosHome would bind `/skills`).
- */
-function substitute(
-  template: string,
-  vars: { ethosHome: string; self: string; cwd: string },
-): string {
-  const checks: Array<[token: string, re: RegExp, value: string]> = [
-    ['${ETHOS_HOME}', /\$\{ETHOS_HOME\}/g, vars.ethosHome],
-    ['${self}', /\$\{self\}/g, vars.self],
-    ['${CWD}', /\$\{CWD\}/g, vars.cwd],
-  ];
-  let out = template;
-  for (const [token, re, value] of checks) {
-    if (template.includes(token)) {
-      if (value === '') throw new EmptySubstitutionError(token, template);
-      out = out.replace(re, value);
-    }
-  }
-  return out;
-}
-
-/**
  * Queue-backed async generator that streams interleaved stdout/stderr chunks
  * from a spawned child process. Self-contained per backend (duplicated, not
  * shared) so each execution package has zero cross-package coupling.
+ *
+ * Two modes, gated on `opts.rpc` (tools-as-code-api Lane A):
+ *
+ * - Absent → today's path, byte-identical: raw stdout/stderr passthrough,
+ *   stdin written once then ended.
+ * - Present → framed mode: the container's stdout carries shim frames, which
+ *   are demultiplexed HERE — before `withByteCeiling` — so the output byte
+ *   ceiling counts only `output` frames, never RPC traffic. `opts.stdin` is
+ *   delivered as a `script` frame and stdin stays OPEN so `rpc_response`
+ *   frames can flow back for the execution's lifetime. `rpc_request` frames
+ *   are answered via `opts.rpc.onRequest`, serialized (one in-flight call at
+ *   a time), off the chunk-pump path — so a slow (or never-resolving) handler
+ *   cannot stall or outlive the exec stream: timeout/abort still kill the
+ *   container and terminate the stream, and a response that completes after
+ *   teardown is dropped, not written to a dead pipe.
+ *
+ * Exported for transport unit tests (driven with a scripted fake child — no
+ * Docker needed); not part of the backend's public contract.
  */
-async function* streamChild(
+export async function* streamChild(
   child: ChildProcess,
   opts: ExecOpts,
   killContainer: () => void,
@@ -259,10 +287,93 @@ async function* streamChild(
   let resolveNext: (() => void) | null = null;
   let exitCode: number | null = null;
 
-  child.stdout?.on('data', (c: Buffer) => {
-    chunks.push({ stream: 'stdout', data: c.toString('utf-8') });
-    resolveNext?.();
-  });
+  const rpc = opts.rpc;
+  let rpcTeardown: (() => void) | null = null;
+  if (rpc) {
+    const parser = new FrameParser();
+    let sawHello = false;
+    let closed = false;
+    let rpcChain: Promise<void> = Promise.resolve();
+    rpcTeardown = () => {
+      closed = true;
+      try {
+        child.stdin?.end();
+      } catch {
+        /* container already gone */
+      }
+    };
+    const failProtocol = (err: Error) => {
+      error = err;
+      child.kill('SIGKILL');
+      killContainer();
+      done = true;
+      resolveNext?.();
+    };
+    const writeFrame = (frame: HostFrame) => {
+      if (closed || !child.stdin || child.stdin.destroyed) return;
+      try {
+        child.stdin.write(encodeFrame(frame));
+      } catch {
+        /* container died mid-write; the stream error surfaces separately */
+      }
+    };
+    const onFrame = (frame: ShimFrame): void => {
+      if (!sawHello) {
+        if (frame.type !== 'hello') {
+          failProtocol(new RpcProtocolError(`first frame must be 'hello', got '${frame.type}'`));
+        } else if (frame.version !== RPC_PROTOCOL_VERSION) {
+          failProtocol(new RpcVersionMismatchError(RPC_PROTOCOL_VERSION, frame.version));
+        } else {
+          sawHello = true;
+        }
+        return;
+      }
+      if (frame.type === 'output') {
+        chunks.push({ stream: frame.stream, data: frame.data });
+        return;
+      }
+      if (frame.type === 'rpc_request') {
+        const { id, name, args } = frame;
+        // Serialized v1 contract: requests are answered strictly in order.
+        rpcChain = rpcChain.then(async () => {
+          let res: ExecRpcResponse;
+          try {
+            res = await rpc.onRequest({ name, args });
+          } catch (err) {
+            // Errors are data on this boundary; a throwing handler must not
+            // wedge the shim's blocked client.
+            res = {
+              ok: false,
+              error: err instanceof Error ? err.message : String(err),
+              code: 'rpc_handler_error',
+            };
+          }
+          writeFrame({ type: 'rpc_response', id, ...res });
+        });
+        return;
+      }
+      failProtocol(new RpcProtocolError(`unexpected frame type '${frame.type}'`));
+    };
+    child.stdout?.on('data', (c: Buffer) => {
+      let frames: ShimFrame[];
+      try {
+        frames = parser.push(c);
+      } catch (err) {
+        failProtocol(err instanceof Error ? err : new RpcProtocolError(String(err)));
+        return;
+      }
+      for (const frame of frames) {
+        if (done) break;
+        onFrame(frame);
+      }
+      resolveNext?.();
+    });
+  } else {
+    child.stdout?.on('data', (c: Buffer) => {
+      chunks.push({ stream: 'stdout', data: c.toString('utf-8') });
+      resolveNext?.();
+    });
+  }
   child.stderr?.on('data', (c: Buffer) => {
     chunks.push({ stream: 'stderr', data: c.toString('utf-8') });
     resolveNext?.();
@@ -308,8 +419,16 @@ async function* streamChild(
     }
   }
 
-  if (opts.stdin !== undefined) child.stdin?.write(opts.stdin, 'utf-8');
-  child.stdin?.end();
+  if (rpc) {
+    // Framed mode: deliver the script as frame 0 and keep stdin OPEN — the
+    // rpc_response frames flow back on it for the execution's lifetime.
+    child.stdin?.write(
+      encodeFrame({ type: 'script', version: RPC_PROTOCOL_VERSION, code: opts.stdin ?? '' }),
+    );
+  } else {
+    if (opts.stdin !== undefined) child.stdin?.write(opts.stdin, 'utf-8');
+    child.stdin?.end();
+  }
 
   try {
     while (true) {
@@ -332,6 +451,7 @@ async function* streamChild(
     }
   } finally {
     clearTimeout(timer);
+    rpcTeardown?.();
   }
 }
 
@@ -381,6 +501,9 @@ export function buildDockerArgs(opts: {
   env?: Record<string, string>;
   mounts?: MountSpec[];
   tmpfs?: readonly string[];
+  /** `ExecOpts.cwd`. Emitted as `--workdir` only when it is mounted — see
+   *  {@link workdirArgsFor}. */
+  cwd?: string;
 }): string[] {
   if (!opts.image.includes('@sha256:')) {
     throw new InvalidImageRefError(opts.image);
@@ -405,6 +528,7 @@ export function buildDockerArgs(opts: {
   for (const m of opts.mounts ?? []) {
     args.push('-v', `${m.hostPath}:${m.containerPath}:${m.mode}`);
   }
+  args.push(...workdirArgsFor(opts.cwd, opts.mounts ?? []));
   if (opts.env) {
     for (const [k, v] of Object.entries(opts.env)) {
       args.push('-e', `${k}=${v}`);
@@ -429,6 +553,10 @@ export function buildKeepAliveArgs(opts: {
   gid: number;
   mounts?: MountSpec[];
   tmpfs?: readonly string[];
+  /** `ExecOpts.cwd` of the exec that started the session. Emitted as
+   *  `--workdir` only when it is mounted — see {@link workdirArgsFor}. The
+   *  container's workdir is inherited by every later `docker exec` on it. */
+  cwd?: string;
 }): string[] {
   if (!opts.image.includes('@sha256:')) {
     throw new InvalidImageRefError(opts.image);
@@ -448,6 +576,7 @@ export function buildKeepAliveArgs(opts: {
   for (const m of opts.mounts ?? []) {
     args.push('-v', `${m.hostPath}:${m.containerPath}:${m.mode}`);
   }
+  args.push(...workdirArgsFor(opts.cwd, opts.mounts ?? []));
   args.push('--', opts.image, 'sleep', 'infinity');
   return args;
 }
@@ -516,6 +645,7 @@ class DockerPersistentSession implements ExecSession {
         gid: info.gid,
         mounts,
         tmpfs: scratchTmpfsFor(mounts),
+        cwd: opts.cwd,
       });
       await new Promise<void>((resolve, reject) => {
         const run = spawn('docker', args, { stdio: 'ignore' });
@@ -769,10 +899,11 @@ export class DockerExecutionBackend implements ExecutionBackend {
       networkMode: resolveNetworkMode(opts.personality),
       uid: info.uid,
       gid: info.gid,
-      stdin: opts.stdin !== undefined,
+      stdin: opts.stdin !== undefined || opts.rpc !== undefined,
       env: opts.env,
       mounts,
       tmpfs: scratchTmpfsFor(mounts),
+      cwd: opts.cwd,
     });
     const killContainer = () => {
       spawn('docker', ['kill', containerName], { stdio: 'ignore' }).on('close', () => {
@@ -809,18 +940,9 @@ export class DockerExecutionBackend implements ExecutionBackend {
   mountsFor(p: PersonalityConfig): MountSpec[] {
     const ethosHome = this.config.substitutionVars?.ethosHome ?? join(homedir(), '.ethos');
     const cwd = this.config.substitutionVars?.cwd ?? process.cwd();
-    const self = p.id;
-    const ownDir = `${join(ethosHome, 'personalities', self)}/`;
-
-    const reach = p.fs_reach;
-    const readPaths =
-      reach?.read && reach.read.length > 0
-        ? reach.read.map((path) => substitute(path, { ethosHome, self, cwd }))
-        : [ownDir, `${join(ethosHome, 'skills')}/`, cwd];
-    const writePaths =
-      reach?.write && reach.write.length > 0
-        ? reach.write.map((path) => substitute(path, { ethosHome, self, cwd }))
-        : [ownDir, cwd];
+    const vars: FsReachVars = { ethosHome, self: p.id, cwd };
+    // ONE derivation, shared with ScopedStorage — see the import note above.
+    const { read: readPaths, write: writePaths } = deriveFsReachPaths(p, vars);
 
     const byPath = new Map<string, MountSpec>();
     const add = (rawPath: string, mode: 'ro' | 'rw'): void => {
@@ -836,7 +958,6 @@ export class DockerExecutionBackend implements ExecutionBackend {
       // ACTUAL derived host path (and its symlink target), including the defaults
       // a no-fs_reach personality gets. The built-in denylist above still applies
       // unconditionally on top.
-      const vars = { ethosHome, self, cwd };
       checkConstitutionMount(hostPath, this.config.constitution, vars);
       if (realPath !== hostPath) checkConstitutionMount(realPath, this.config.constitution, vars);
       const existing = byPath.get(hostPath);

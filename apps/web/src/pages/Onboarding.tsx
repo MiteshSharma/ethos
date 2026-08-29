@@ -5,6 +5,7 @@ import { useCallback, useEffect, useReducer, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { bridge, isDesktop } from '../lib/desktop';
 import { personalityTheme } from '../lib/theme';
+import { buildWorkspaceChatPath } from '../lib/workspaceRoutes';
 import { type CatalogProviderId, getCatalogEntry } from '../onboarding/catalog/providers';
 import { clearDraft, type DraftState, loadDraft, saveDraft } from '../onboarding/draft';
 import {
@@ -180,13 +181,14 @@ export function Onboarding({ startAtStep }: { startAtStep?: WizardStepId }) {
       });
       return;
     }
+    const personalityId = answers.personalityId;
     try {
       await rpc.onboarding.complete({
         provider: catalog?.wiresAs as ProviderId,
         model: answers.model,
         apiKey: answers.apiKey,
         ...(answers.baseUrl ? { baseUrl: answers.baseUrl } : {}),
-        personalityId: answers.personalityId,
+        personalityId,
       });
       // Restart desktop backend so it picks up the new API key.
       if (isDesktop && bridge) {
@@ -195,8 +197,11 @@ export function Onboarding({ startAtStep }: { startAtStep?: WizardStepId }) {
       clearDraft();
       void queryClient.invalidateQueries({ queryKey: ['config'] });
       void queryClient.invalidateQueries({ queryKey: ['onboarding'] });
-      // replace: true so browser back from /chat doesn't return to /onboarding
-      navigate('/chat', { replace: true, state: { setupBanner: true } });
+      // replace: true so browser back doesn't return to /onboarding
+      navigate(buildWorkspaceChatPath(personalityId), {
+        replace: true,
+        state: { setupBanner: true },
+      });
     } catch (err) {
       notification.error({
         message: 'Setup failed',

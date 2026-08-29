@@ -1,5 +1,17 @@
 import { dirname, join } from 'node:path';
-import type { Storage } from '@ethosagent/types';
+import {
+  externalizeSecret,
+  type SecretRefContext,
+  secretRefForConfigKey,
+} from '@ethosagent/config';
+import { deriveBotKey } from '@ethosagent/core';
+import type {
+  RealtimeProviderEntry,
+  SecretsResolver,
+  Storage,
+  SttProviderEntry,
+  TtsProviderEntry,
+} from '@ethosagent/types';
 import { requireStorage } from './require-storage';
 
 // Read/write `~/.ethos/config.yaml` from the web side. The file is shared
@@ -17,6 +29,13 @@ export interface ConfigRepositoryOptions {
   dataDir: string;
   /** Storage backend. Injected by the composition root; required. */
   storage: Storage;
+  /**
+   * Credential vault. Required, not optional: every credential-bearing value
+   * this repository serializes is externalized through it and the file gets
+   * only a `${secrets:<ref>}` reference (G-SEC / §V S9). An optional resolver
+   * would be a control a caller could silently omit.
+   */
+  secrets: SecretsResolver;
 }
 
 /** A single entry in the provider chain (providers.N.* lines in config.yaml). */
@@ -71,11 +90,16 @@ export interface RawConfig {
 
 export class ConfigRepository {
   private readonly storage: Storage;
+  private readonly secrets: SecretsResolver;
   private readonly path: string;
   private writeChain: Promise<void> = Promise.resolve();
 
   constructor(opts: ConfigRepositoryOptions) {
     this.storage = requireStorage(opts.storage, 'ConfigRepository');
+    if (!opts.secrets) {
+      throw new Error('ConfigRepository requires a SecretsResolver');
+    }
+    this.secrets = opts.secrets;
     this.path = join(opts.dataDir, 'config.yaml');
   }
 
@@ -336,9 +360,63 @@ export class ConfigRepository {
     return current;
   }
 
-  private async write(config: RawConfig): Promise<void> {
+  /**
+   * Move every credential-bearing value into the vault, leaving the config
+   * with `${secrets:<ref>}` references only (G-SEC / §V S9). Ref naming and
+   * the already-a-reference passthrough come from `@ethosagent/config`, so
+   * this serializer and the CLI's `writeConfig` mint the same refs for the
+   * same fields instead of each inventing a scheme.
+   *
+   * Passthrough keys are covered too: the settings form writes credentials
+   * (`auxiliary.*.apiKey`, `webhooks.<id>.secret`, platform tokens) through
+   * that block, and it round-trips keys this layer never models.
+   */
+  private async externalizeSecrets(config: RawConfig): Promise<RawConfig> {
+    const ctx: SecretRefContext = {
+      ...(config.provider ? { provider: config.provider } : {}),
+      providerChain: config.providers.map((p) => p.provider),
+      telegramBotKeys: botKeys(config.passthrough, 'telegram.bots', 'token'),
+      slackAppKeys: botKeys(config.passthrough, 'slack.apps', 'botToken'),
+    };
+    const ref = (key: string): string => {
+      const r = secretRefForConfigKey(key, ctx);
+      if (r === null) throw new Error(`No secret ref is defined for config key '${key}'`);
+      return r;
+    };
+    const next: RawConfig = { ...config };
+    next.apiKey = await externalizeSecret(next.apiKey, ref('apiKey'), this.secrets);
+    next.voiceApiKey = await externalizeSecret(
+      next.voiceApiKey,
+      ref('auxiliary.asr.apiKey'),
+      this.secrets,
+    );
+    next.voiceTtsApiKey = await externalizeSecret(
+      next.voiceTtsApiKey,
+      ref('auxiliary.tts.apiKey'),
+      this.secrets,
+    );
+    const providers: RawProviderEntry[] = [];
+    for (const [i, p] of config.providers.entries()) {
+      providers.push({
+        ...p,
+        apiKey: await externalizeSecret(p.apiKey, ref(`providers.${i}.apiKey`), this.secrets),
+      });
+    }
+    next.providers = providers;
+    const passthrough: Record<string, string> = {};
+    for (const [key, value] of Object.entries(config.passthrough)) {
+      const keyRef = secretRefForConfigKey(key, ctx);
+      passthrough[key] =
+        keyRef === null ? value : ((await externalizeSecret(value, keyRef, this.secrets)) ?? value);
+    }
+    next.passthrough = passthrough;
+    return next;
+  }
+
+  private async write(input: RawConfig): Promise<void> {
     await this.storage.mkdir(dirname(this.path));
 
+    const config = await this.externalizeSecrets(input);
     const lines: string[] = [];
     if (config.provider) lines.push(`provider: ${yamlScalar(config.provider)}`);
     if (config.model) lines.push(`model: ${yamlScalar(config.model)}`);
@@ -398,15 +476,311 @@ export class ConfigRepository {
     for (const key of Object.keys(config.passthrough).sort()) {
       lines.push(`${yamlScalar(key)}: ${yamlScalar(config.passthrough[key] ?? '')}`);
     }
-    // config.yaml holds plaintext provider apiKeys — write it 0o600 so a
-    // web-driven update never regresses the file to a world-readable mode
-    // (matches apps/ethos/src/config.ts and web-token.repository.ts).
+    // Credential values live in the vault, not here — but write 0o600 anyway
+    // so a web-driven update never regresses the file to a world-readable
+    // mode (matches apps/ethos/src/config.ts and web-token.repository.ts).
     await this.storage.writeAtomic(this.path, `${lines.join('\n')}\n`, { mode: 0o600 });
   }
 }
 
 function stripQuotes(s: string): string {
   return s.replace(/^["']|["']$/g, '');
+}
+
+/**
+ * The named voice rosters (`voice.<tts|stt|realtime>.providers.<name>.<field>`)
+ * out of the passthrough block, which is where these lines land — this parser
+ * models no key, it just round-trips them.
+ *
+ * Deliberately a mirror of `buildVoiceProviderEntry` in `@ethosagent/config`:
+ * same charset for the name, same field sets, and the same rule that an entry
+ * without `provider` names nothing resolvable and is dropped rather than
+ * half-built. Two readers of one file format is already one too many; they must
+ * at least agree on what a valid entry is. All three kinds run through ONE
+ * walker here for the same reason they do there.
+ *
+ * `voice.providers.<name>.<field>` — the older TTS-only spelling — is accepted
+ * on read and merged UNDER the new keys, so a hand-written config from before
+ * the rename still loads. Nothing writes it back.
+ *
+ * `apiKey` comes back exactly as stored — usually a `${secrets:…}` reference.
+ * Callers that hand entries to a provider factory must resolve it first;
+ * callers that show it to a browser must redact it.
+ */
+const TTS_ROSTER_FIELDS = {
+  strings: ['model', 'apiKey', 'voice', 'baseUrl', 'command'],
+  numbers: ['timeout', 'maxTextLength'],
+  audioFormat: true,
+} as const;
+
+const STT_ROSTER_FIELDS = {
+  strings: ['model', 'apiKey', 'baseUrl', 'command'],
+  numbers: ['timeout'],
+  audioFormat: false,
+} as const;
+
+/** No `command` / `timeout`: a realtime provider is a duplex session, not a
+ *  request you shell out for and time out. */
+const REALTIME_ROSTER_FIELDS = {
+  strings: ['model', 'apiKey', 'baseUrl', 'voice'],
+  numbers: ['costPerMinuteUsd'],
+  audioFormat: false,
+} as const;
+
+interface RosterFieldSet {
+  readonly strings: readonly string[];
+  readonly numbers: readonly string[];
+  readonly audioFormat: boolean;
+}
+
+function collectRoster(
+  passthrough: Record<string, string>,
+  prefixes: readonly string[],
+): Record<string, Record<string, string>> {
+  const bag: Record<string, Record<string, string>> = {};
+  // Prefixes are applied in order and later ones overwrite earlier ones, so the
+  // canonical spelling wins over the legacy alias regardless of key order.
+  for (const prefix of prefixes) {
+    const re = new RegExp(`^${prefix.replace(/\./g, '\\.')}\\.([A-Za-z0-9_-]+)\\.(\\w+)$`);
+    for (const [key, value] of Object.entries(passthrough)) {
+      const m = key.match(re);
+      const name = m?.[1];
+      const field = m?.[2];
+      if (!name || !field) continue;
+      const slot = bag[name] ?? {};
+      bag[name] = slot;
+      slot[field] = value;
+    }
+  }
+  return bag;
+}
+
+function buildRoster<E extends { provider: string }>(
+  bag: Record<string, Record<string, string>>,
+  fields: RosterFieldSet,
+): Record<string, E> {
+  const out: Record<string, E> = {};
+  for (const [name, kv] of Object.entries(bag)) {
+    if (!kv.provider) continue;
+    const entry: Record<string, string | number> = { provider: kv.provider };
+    for (const field of fields.strings) {
+      const value = kv[field];
+      if (value) entry[field] = value;
+    }
+    for (const field of fields.numbers) {
+      const n = Number(kv[field]);
+      if (kv[field] && Number.isFinite(n) && n > 0) entry[field] = n;
+    }
+    if (fields.audioFormat && isAudioFormat(kv.outputFormat)) {
+      entry.outputFormat = kv.outputFormat;
+    }
+    out[name] = entry as E;
+  }
+  return out;
+}
+
+export function parseTtsRoster(
+  passthrough: Record<string, string>,
+): Record<string, TtsProviderEntry> {
+  return buildRoster<TtsProviderEntry>(
+    collectRoster(passthrough, ['voice.providers', 'voice.tts.providers']),
+    TTS_ROSTER_FIELDS,
+  );
+}
+
+export function parseSttRoster(
+  passthrough: Record<string, string>,
+): Record<string, SttProviderEntry> {
+  return buildRoster<SttProviderEntry>(
+    collectRoster(passthrough, ['voice.stt.providers']),
+    STT_ROSTER_FIELDS,
+  );
+}
+
+export function parseRealtimeRoster(
+  passthrough: Record<string, string>,
+): Record<string, RealtimeProviderEntry> {
+  return buildRoster<RealtimeProviderEntry>(
+    collectRoster(passthrough, ['voice.realtime.providers']),
+    REALTIME_ROSTER_FIELDS,
+  );
+}
+
+function isAudioFormat(v: string | undefined): v is 'opus' | 'mp3' | 'wav' | 'pcm' {
+  return v === 'opus' || v === 'mp3' || v === 'wav' || v === 'pcm';
+}
+
+// ---------------------------------------------------------------------------
+// Wake routing (`voice.wake.*`) — the satellite lane's pushed table
+// ---------------------------------------------------------------------------
+
+/** One resolved wake route. Unlike `WakeRouteConfig` in `@ethosagent/config`,
+ *  the two tri-state flags are RESOLVED here: the wire frame the satellite
+ *  receives is a decision, not a config file with holes in it. */
+export interface WakeRoute {
+  id: string;
+  phrase: string;
+  personalityId: string;
+  /** Route-level opt-in for a privileged personality (eng-review D13). */
+  privileged: boolean;
+  enabled: boolean;
+  /**
+   * True for a route SYNTHESIZED from a personality's name rather than read
+   * from `config.yaml` — see `withImplicitWakeRoutes`. Nothing writes an
+   * implicit route back to the file, and the editor renders it read-only, so
+   * the flag is what keeps "the effective table" and "the operator's table"
+   * from being confused for each other.
+   */
+  implicit: boolean;
+}
+
+/** Deployment-wide satellite knobs, defaults applied. */
+export interface WakeSettings {
+  engine: 'fallback' | 'sherpa' | 'openwakeword';
+  sensitivity: number;
+  confirmationFrames: number;
+  edgeStt: boolean;
+  /** `voice.wake.idleTimeout` in milliseconds — the frame's unit, not yaml's. */
+  idleTimeoutMs: number;
+  wakeEnabled: boolean;
+}
+
+/** Everything a `routes` frame is built from. */
+export interface WakeRoutingTable {
+  routes: WakeRoute[];
+  settings: WakeSettings;
+  /** `voice.wake.nodes.<nodeId>` — per-satellite overrides. */
+  nodes: Record<string, { inputDevice?: string; enabled?: boolean }>;
+}
+
+/**
+ * Defaults for a deployment that has written no `voice.wake.*` scalar.
+ *
+ * `wakeEnabled: true` is deliberate: the yaml key is a MASTER SWITCH, and its
+ * absence means the operator never disabled wake, not that they disabled it.
+ * A node's own persisted preference (and the per-node `enabled` override) is
+ * what turns an individual microphone off — see `set_wake_enabled`.
+ */
+export const WAKE_SETTINGS_DEFAULTS: WakeSettings = {
+  engine: 'fallback',
+  sensitivity: 0.5,
+  confirmationFrames: 2,
+  edgeStt: false,
+  idleTimeoutMs: 30_000,
+  wakeEnabled: true,
+};
+
+/**
+ * Read the wake routing table out of the passthrough block.
+ *
+ * Mirrors `packages/config`'s reader deliberately, the same way the voice
+ * rosters above do: same route-id charset, the same "a route missing `phrase`
+ * or `personality` is dropped rather than half-built" rule, and the same bounds
+ * — an out-of-range number is IGNORED (the default applies) rather than clamped
+ * to a value the operator did not write.
+ */
+export function parseWakeRouting(passthrough: Record<string, string>): WakeRoutingTable {
+  const routeKv = collectRoster(passthrough, ['voice.wake.routes']);
+  const routes: WakeRoute[] = [];
+  for (const [id, fields] of Object.entries(routeKv)) {
+    const phrase = fields.phrase;
+    const personalityId = fields.personality;
+    if (!phrase || !personalityId) continue;
+    routes.push({
+      id,
+      phrase,
+      personalityId,
+      privileged: fields.privileged === 'true',
+      enabled: fields.enabled !== 'false',
+      // Everything this function returns came out of the file, by definition.
+      implicit: false,
+    });
+  }
+  routes.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+
+  const nodeKv = collectRoster(passthrough, ['voice.wake.nodes']);
+  const nodes: Record<string, { inputDevice?: string; enabled?: boolean }> = {};
+  for (const [id, fields] of Object.entries(nodeKv)) {
+    nodes[id] = {
+      ...(fields.inputDevice ? { inputDevice: fields.inputDevice } : {}),
+      ...(fields.enabled === 'true'
+        ? { enabled: true }
+        : fields.enabled === 'false'
+          ? { enabled: false }
+          : {}),
+    };
+  }
+
+  const engine = passthrough['voice.wake.engine'];
+  const idleSeconds = boundedNumber(passthrough['voice.wake.idleTimeout'], 5, 600, true);
+  return {
+    routes,
+    nodes,
+    settings: {
+      ...WAKE_SETTINGS_DEFAULTS,
+      ...(engine === 'fallback' || engine === 'sherpa' || engine === 'openwakeword'
+        ? { engine }
+        : {}),
+      ...pick('sensitivity', boundedNumber(passthrough['voice.wake.sensitivity'], 0, 1, false)),
+      ...pick(
+        'confirmationFrames',
+        boundedNumber(passthrough['voice.wake.confirmationFrames'], 1, 10, true),
+      ),
+      ...(passthrough['voice.wake.edgeStt'] === 'true'
+        ? { edgeStt: true }
+        : passthrough['voice.wake.edgeStt'] === 'false'
+          ? { edgeStt: false }
+          : {}),
+      ...(idleSeconds !== undefined ? { idleTimeoutMs: idleSeconds * 1000 } : {}),
+      ...(passthrough['voice.wake.enabled'] === 'false' ? { wakeEnabled: false } : {}),
+    },
+  };
+}
+
+/** `{ [key]: value }` when the value is defined, `{}` otherwise — so a rejected
+ *  number leaves the default in place instead of overwriting it with undefined. */
+function pick<K extends string>(key: K, value: number | undefined): Partial<Record<K, number>> {
+  return value === undefined ? {} : ({ [key]: value } as Record<K, number>);
+}
+
+/** A finite number inside `[min, max]`, else undefined. Never a clamped
+ *  near-miss — same contract as `parseBoundedInt` in `@ethosagent/config`. */
+function boundedNumber(
+  raw: string | undefined,
+  min: number,
+  max: number,
+  integer: boolean,
+): number | undefined {
+  if (raw === undefined) return undefined;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < min || n > max) return undefined;
+  if (integer && !Number.isInteger(n)) return undefined;
+  return n;
+}
+
+/**
+ * Stable botKey per indexed passthrough entry (`telegram.bots.<n>`,
+ * `slack.apps.<n>`), so a token's ref is keyed by bot identity rather than
+ * array position. Explicit `.id` wins — that is what PlatformsRepository
+ * writes; otherwise derive from the token, which lands on the same key
+ * PlatformsRepository would have derived from the same token.
+ */
+function botKeys(
+  passthrough: Record<string, string>,
+  prefix: string,
+  tokenField: string,
+): (string | undefined)[] {
+  const keys: (string | undefined)[] = [];
+  const re = new RegExp(`^${prefix.replace(/\./g, '\\.')}\\.(\\d+)\\.(id|${tokenField})$`);
+  for (const [key, value] of Object.entries(passthrough)) {
+    const m = key.match(re);
+    const idx = m?.[1];
+    if (idx === undefined) continue;
+    const i = Number(idx);
+    if (m?.[2] === 'id') keys[i] = value;
+    else if (keys[i] === undefined) keys[i] = deriveBotKey(value);
+  }
+  return keys;
 }
 
 /** Escape a value for safe YAML scalar emission. If the value contains
