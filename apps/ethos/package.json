@@ -107,6 +107,7 @@
     "@ethosagent/notify-queue": "workspace:*",
     "@ethosagent/observability-sqlite": "workspace:*",
     "@ethosagent/pause-clock": "workspace:*",
+    "@ethosagent/pause-http": "workspace:*",
     "@ethosagent/platform-callcapture": "workspace:*",
     "@ethosagent/request-dump": "workspace:*",
     "@ethosagent/personalities": "workspace:*",

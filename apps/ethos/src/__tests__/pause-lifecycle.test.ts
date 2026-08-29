@@ -8,8 +8,9 @@
 
 import type { EthosConfig } from '@ethosagent/config';
 import { ClockDriftPauseLifecycle, DEFAULT_DRIFT_THRESHOLD_MS } from '@ethosagent/pause-clock';
+import { HttpPauseLifecycle } from '@ethosagent/pause-http';
 import { NoopPauseLifecycle } from '@ethosagent/types';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createPauseLifecycle } from '../pause-lifecycle';
 
 const base: EthosConfig = {
@@ -61,5 +62,57 @@ describe('createPauseLifecycle', () => {
     });
     expect(await detector.readPauseOffset()).toBeNull();
     detector.stop?.();
+  });
+
+  describe('pauseLifecycle.http', () => {
+    afterEach(() => {
+      vi.restoreAllMocks();
+    });
+
+    it('yields an HttpPauseLifecycle when enabled with a url', () => {
+      const lifecycle = createPauseLifecycle({
+        ...base,
+        pauseLifecycle: { http: { enabled: true, url: 'https://example.com/idle' } },
+      });
+      expect(lifecycle).toBeInstanceOf(HttpPauseLifecycle);
+      expect(lifecycle.hostSignalAvailable).toBe(true);
+      expect(lifecycle).not.toBeInstanceOf(NoopPauseLifecycle);
+    });
+
+    it('throws when enabled without a url', () => {
+      expect(() =>
+        createPauseLifecycle({
+          ...base,
+          pauseLifecycle: { http: { enabled: true } },
+        }),
+      ).toThrow();
+    });
+
+    it('yields a NoopPauseLifecycle when http is present but disabled', () => {
+      expect(
+        createPauseLifecycle({ ...base, pauseLifecycle: { http: { enabled: false } } }),
+      ).toBeInstanceOf(NoopPauseLifecycle);
+    });
+
+    it('takes precedence over pauseClockCorrection when both are enabled', () => {
+      const lifecycle = createPauseLifecycle({
+        ...base,
+        pauseLifecycle: { http: { enabled: true, url: 'https://example.com/idle' } },
+        pauseClockCorrection: { enabled: true },
+      });
+      expect(lifecycle).toBeInstanceOf(HttpPauseLifecycle);
+      expect(lifecycle).not.toBeInstanceOf(ClockDriftPauseLifecycle);
+    });
+  });
+
+  it('logs an observability message when the default noop signals ready to suspend', async () => {
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    try {
+      const lifecycle = createPauseLifecycle(base);
+      await lifecycle.signalReadyToSuspend();
+      expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('[pause-lifecycle]'));
+    } finally {
+      logSpy.mockRestore();
+    }
   });
 });

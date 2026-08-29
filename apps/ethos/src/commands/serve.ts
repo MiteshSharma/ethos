@@ -1177,7 +1177,7 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
       // adapter. While it is a no-op, `signalReadyToSuspend()` resolves,
       // latches, and stops the watcher having suspended nothing — so gate 3b
       // refuses to arm rather than accept that as a handoff.
-      hostSignalAvailable: false,
+      hostSignalAvailable: pauseLifecycle.hostSignalAvailable ?? false,
       capabilities: deriveIdleWatcherCapabilities(config),
       options: config.idleWatcher,
       logger: new ConsoleLogger(),

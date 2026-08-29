@@ -1871,6 +1871,30 @@ export interface EthosConfig {
     thresholdMs?: number;
   };
   /**
+   * Pause/resume lifecycle notifications to an external orchestrator — an
+   * operator/deployment concern, NOT personality identity, same rationale as
+   * `pauseClockCorrection` above.
+   *
+   * Config format:
+   *   pauseLifecycle.http.enabled: true
+   *   pauseLifecycle.http.url: https://orchestrator.example.com/tenants/<id>/idle
+   *   pauseLifecycle.http.token: ${secrets:pauseLifecycle/http/token}
+   *   pauseLifecycle.http.timeoutMs: 5000
+   */
+  pauseLifecycle?: {
+    http?: {
+      /** Default false. */
+      enabled?: boolean;
+      /** Orchestrator endpoint to notify. */
+      url?: string;
+      /** Bearer credential sent with the notification. Externalize via
+       *  `${secrets:<ref>}` — see `SECRET_FIELD_NAMES`. */
+      token?: string;
+      /** Request timeout, in ms. */
+      timeoutMs?: number;
+    };
+  };
+  /**
    * Export/observability targets (analytics-observability plan, Part E).
    * Currently one leaf: Langfuse. Off by default.
    *
@@ -2155,6 +2179,16 @@ async function externalizeConfigSecrets(
             secrets,
           ),
         },
+      },
+    };
+  }
+  if (r.pauseLifecycle?.http?.token) {
+    const http = r.pauseLifecycle.http;
+    r.pauseLifecycle = {
+      ...r.pauseLifecycle,
+      http: {
+        ...http,
+        token: await externalizeSecret(http.token, ref('pauseLifecycle.http.token'), secrets),
       },
     };
   }
@@ -2758,6 +2792,13 @@ export async function writeConfig(
     if (pcc.thresholdMs !== undefined)
       lines.push(`pauseClockCorrection.thresholdMs: ${pcc.thresholdMs}`);
   }
+  if (config.pauseLifecycle?.http) {
+    const plh = config.pauseLifecycle.http;
+    if (plh.enabled !== undefined) lines.push(`pauseLifecycle.http.enabled: ${plh.enabled}`);
+    if (plh.url) lines.push(`pauseLifecycle.http.url: ${plh.url}`);
+    if (plh.token) lines.push(`pauseLifecycle.http.token: ${plh.token}`);
+    if (plh.timeoutMs !== undefined) lines.push(`pauseLifecycle.http.timeoutMs: ${plh.timeoutMs}`);
+  }
   if (config.telemetry?.export?.langfuse) {
     const lf = config.telemetry.export.langfuse;
     if (lf.enabled !== undefined) lines.push(`telemetry.export.langfuse.enabled: ${lf.enabled}`);
@@ -2939,6 +2980,14 @@ export async function resolveConfigSecrets(
       apiKey: await resolveSecretValue(r.memoryCapture.apiKey, secrets),
     };
   }
+  if (r.pauseLifecycle?.http?.token) {
+    const http = r.pauseLifecycle.http;
+    const token = r.pauseLifecycle.http.token;
+    r.pauseLifecycle = {
+      ...r.pauseLifecycle,
+      http: { ...http, token: await resolveSecretValue(token, secrets) },
+    };
+  }
   return r;
 }
 
@@ -2978,6 +3027,8 @@ function parseConfigYaml(src: string): EthosConfig {
   const idleWatcherKv: Record<string, string> = {};
   // Resume-side clock correction — pauseClockCorrection.<field>: <value>.
   const pauseClockCorrectionKv: Record<string, string> = {};
+  // Pause/resume lifecycle notifications — pauseLifecycle.http.<field>: <value>.
+  const pauseLifecycleHttpKv: Record<string, string> = {};
   const logsRotationKv: Record<string, string> = {};
   const awsSecretsKv: Record<string, string> = {};
   const telemetryLangfuseKv: Record<string, string> = {};
@@ -3619,6 +3670,12 @@ function parseConfigYaml(src: string): EthosConfig {
       pauseClockCorrectionKv[pcc[1]] = pcc[2].trim().replace(/^["']|["']$/g, '');
       continue;
     }
+    // pauseLifecycle.http.<field>: <value>  (orchestrator idle notification; default OFF).
+    const plh = line.match(/^pauseLifecycle\.http\.(enabled|url|token|timeoutMs):\s*(.+)$/);
+    if (plh) {
+      pauseLifecycleHttpKv[plh[1]] = plh[2].trim().replace(/^["']|["']$/g, '');
+      continue;
+    }
     // memoryCapture.<field>: <value>
     const mcap = line.match(/^memoryCapture\.(\w+):\s*(.+)$/);
     if (mcap) {
@@ -3765,6 +3822,22 @@ function parseConfigYaml(src: string): EthosConfig {
   const memoryConsolidation = buildMemoryConsolidation(memoryConsolidationKv);
   const idleWatcher = buildIdleWatcher(idleWatcherKv);
   const pauseClockCorrection = buildPauseClockCorrection(pauseClockCorrectionKv);
+  // ETHOS_ORCHESTRATOR_URL / ETHOS_ORCHESTRATOR_TOKEN win over the yaml value,
+  // same precedence as ETHOS_PUBLIC_URL over webBaseUrl below.
+  const pauseLifecycleHttpBuilt = buildPauseLifecycleHttp(pauseLifecycleHttpKv);
+  const pauseLifecycleHttpUrl = process.env.ETHOS_ORCHESTRATOR_URL ?? pauseLifecycleHttpBuilt?.url;
+  const pauseLifecycleHttpToken =
+    process.env.ETHOS_ORCHESTRATOR_TOKEN ?? pauseLifecycleHttpBuilt?.token;
+  const pauseLifecycleHttp =
+    pauseLifecycleHttpBuilt ||
+    pauseLifecycleHttpUrl !== undefined ||
+    pauseLifecycleHttpToken !== undefined
+      ? {
+          ...pauseLifecycleHttpBuilt,
+          ...(pauseLifecycleHttpUrl !== undefined ? { url: pauseLifecycleHttpUrl } : {}),
+          ...(pauseLifecycleHttpToken !== undefined ? { token: pauseLifecycleHttpToken } : {}),
+        }
+      : undefined;
   const parsedMaxBytes = logsRotationKv.maxBytes ? Number(logsRotationKv.maxBytes) : undefined;
   const parsedMaxFiles = logsRotationKv.maxFiles ? Number(logsRotationKv.maxFiles) : undefined;
   const logsRotation =
@@ -4148,6 +4221,7 @@ function parseConfigYaml(src: string): EthosConfig {
         : undefined,
     idleWatcher,
     pauseClockCorrection,
+    pauseLifecycle: pauseLifecycleHttp ? { http: pauseLifecycleHttp } : undefined,
   };
   // Stash parse errors so the strict loader can surface them at boot.
   // readRawConfig (used by CLI commands that don't gateway-boot) ignores them
@@ -5653,6 +5727,26 @@ function buildPauseClockCorrection(
   if (raw !== undefined && raw.trim() !== '') {
     const n = Number(raw);
     if (Number.isInteger(n) && n > 0) result.thresholdMs = n;
+  }
+  return Object.keys(result).length > 0 ? result : undefined;
+}
+
+/**
+ * Parse `pauseLifecycle.http.<field>`. Returns undefined when the section is
+ * absent so an absent section behaves identically to before the feature
+ * existed — same contract as `buildPauseClockCorrection` above.
+ */
+function buildPauseLifecycleHttp(
+  kv: Record<string, string>,
+): NonNullable<EthosConfig['pauseLifecycle']>['http'] | undefined {
+  const result: NonNullable<NonNullable<EthosConfig['pauseLifecycle']>['http']> = {};
+  if (kv.enabled !== undefined) result.enabled = kv.enabled === 'true';
+  if (kv.url) result.url = kv.url;
+  if (kv.token) result.token = kv.token;
+  const raw = kv.timeoutMs;
+  if (raw !== undefined && raw.trim() !== '') {
+    const n = Number(raw);
+    if (Number.isInteger(n) && n > 0) result.timeoutMs = n;
   }
   return Object.keys(result).length > 0 ? result : undefined;
 }

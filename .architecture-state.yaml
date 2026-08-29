@@ -833,6 +833,15 @@ tiers:
     tier: 2
     assigned: 2026-08-28
 
+  # Outbound-only HTTP client: POSTs a "ready to suspend" signal to an
+  # orchestrator URL. No inbound listener, no untrusted input parsed — same
+  # shape as pause-clock (an internal PauseLifecycle implementation with no
+  # channel-adapter role), so it gets the same Tier 2.
+  extensions/pause-http:
+    package: "@ethosagent/pause-http"
+    tier: 2
+    assigned: 2026-08-29
+
   extensions/personalities:
     package: "@ethosagent/personalities"
     tier: 2

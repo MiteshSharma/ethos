@@ -51,6 +51,7 @@
       "@ethosagent/watchers": ["./extensions/watchers/src"],
       "@ethosagent/idle-watcher": ["./extensions/idle-watcher/src"],
       "@ethosagent/pause-clock": ["./extensions/pause-clock/src"],
+      "@ethosagent/pause-http": ["./extensions/pause-http/src"],
       "@ethosagent/tools-watchers": ["./extensions/tools-watchers/src"],
       "@ethosagent/tools-debug": ["./extensions/tools-debug/src"],
       "@ethosagent/gateway": ["./extensions/gateway/src"],
