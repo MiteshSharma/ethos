@@ -16,7 +16,7 @@
     "@ethosagent/types": "workspace:*",
     "@ethosagent/web-contracts": "workspace:*",
     "@ethosagent/wiring": "workspace:*",
-    "ink": "^7.0.0",
+    "ink": "^7.1.1",
     "react": "19.2.6"
   },
   "devDependencies": {
