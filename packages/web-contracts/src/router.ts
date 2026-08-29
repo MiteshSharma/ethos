@@ -3744,6 +3744,7 @@ const ToolSettingsSecretBindingFieldSchema = z.object({
   label: z.string(),
   secretKind: z.string(),
   required: z.boolean().optional(),
+  helpText: z.string().optional(),
 });
 const ToolSettingsSchemaSchema = z.object({
   fields: z.array(

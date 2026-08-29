@@ -63,6 +63,7 @@ describe('MCP reliability bundle', () => {
   beforeEach(() => {
     vi.useFakeTimers();
     vi.clearAllMocks();
+    mockConnect.mockResolvedValue(undefined);
     mockListTools.mockResolvedValue({ tools: [] });
     mockCallTool.mockResolvedValue({
       content: [{ type: 'text', text: 'ok' }],
@@ -240,6 +241,88 @@ describe('MCP reliability bundle', () => {
       expect(mockConnect.mock.calls.length).toBeGreaterThanOrEqual(2);
 
       await client.disconnect();
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Reconnect backoff — permanent-wedge regression
+  // -------------------------------------------------------------------------
+
+  describe('reconnect backoff', () => {
+    const config: McpServerConfig = {
+      name: 'srv',
+      transport: 'stdio',
+      command: 'node',
+      keepaliveSeconds: 0,
+      connectTimeoutMs: 500,
+    };
+
+    /** Connect once, then drop the connection so attempt 0 is scheduled. */
+    async function connectThenDrop(client: McpClient): Promise<void> {
+      await client.connect();
+      const { Client } = await import('@modelcontextprotocol/sdk/client');
+      const instances = vi.mocked(Client).mock.results;
+      const sdkInstance = instances[instances.length - 1]?.value;
+      sdkInstance?.onclose?.();
+    }
+
+    it('keeps the first five delays at 1s/2s/4s/8s/16s', async () => {
+      const client = new McpClient(config);
+      await connectThenDrop(client);
+      mockConnect.mockRejectedValue(new Error('boom'));
+
+      // Initial successful connect is call #1; each retry adds one.
+      let expected = 1;
+      for (const delay of [1000, 2000, 4000, 8000, 16_000]) {
+        await vi.advanceTimersByTimeAsync(delay - 1);
+        expect(mockConnect).toHaveBeenCalledTimes(expected);
+        await vi.advanceTimersByTimeAsync(1);
+        expected += 1;
+        expect(mockConnect).toHaveBeenCalledTimes(expected);
+      }
+
+      await client.disconnect();
+    });
+
+    it('keeps retrying past attempt 5 at the 30s cap', async () => {
+      const client = new McpClient(config);
+      await connectThenDrop(client);
+      mockConnect.mockRejectedValue(new Error('boom'));
+
+      // Five failures: attempts 0..4 at 1s/2s/4s/8s/16s.
+      await vi.advanceTimersByTimeAsync(31_000);
+      expect(mockConnect).toHaveBeenCalledTimes(6);
+
+      // Attempt 5 onwards holds at the 30s cap and does NOT give up.
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(mockConnect).toHaveBeenCalledTimes(7);
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(mockConnect).toHaveBeenCalledTimes(8);
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(mockConnect).toHaveBeenCalledTimes(9);
+
+      // A late recovery (attempt 8) still revives the client.
+      mockConnect.mockResolvedValue(undefined);
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(client.isConnected()).toBe(true);
+
+      expect(await client.callTool('t', {})).toEqual({ ok: true, value: 'ok' });
+
+      await client.disconnect();
+    });
+
+    it('stops the retry chain once disconnected', async () => {
+      const client = new McpClient(config);
+      await connectThenDrop(client);
+      mockConnect.mockRejectedValue(new Error('boom'));
+
+      await vi.advanceTimersByTimeAsync(31_000);
+      expect(mockConnect).toHaveBeenCalledTimes(6);
+
+      await client.disconnect();
+
+      await vi.advanceTimersByTimeAsync(300_000);
+      expect(mockConnect).toHaveBeenCalledTimes(6);
     });
   });
 

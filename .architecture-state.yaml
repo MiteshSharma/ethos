@@ -723,6 +723,16 @@ tiers:
     tier: 2
     assigned: 2026-08-12
 
+  extensions/idle-watcher:
+    package: "@ethosagent/idle-watcher"
+    tier: 2
+    assigned: 2026-08-28
+
+  extensions/inbound-dedup:
+    package: "@ethosagent/inbound-dedup"
+    tier: 2
+    assigned: 2026-08-28
+
   extensions/job-runner:
     package: "@ethosagent/job-runner"
     tier: 2
@@ -817,6 +827,11 @@ tiers:
     package: "@ethosagent/openclaw-compat"
     tier: 2
     assigned: 2026-08-12
+
+  extensions/pause-clock:
+    package: "@ethosagent/pause-clock"
+    tier: 2
+    assigned: 2026-08-28
 
   extensions/personalities:
     package: "@ethosagent/personalities"
@@ -962,6 +977,11 @@ tiers:
     tier: 2
     assigned: 2026-08-12
 
+  extensions/tools-reddit:
+    package: "@ethosagent/tools-reddit"
+    tier: 2
+    assigned: 2026-08-28
+
   extensions/tools-skills:
     package: "@ethosagent/tools-skills"
     tier: 2
@@ -1001,6 +1021,11 @@ tiers:
     package: "@ethosagent/tools-web"
     tier: 2
     assigned: 2026-08-12
+
+  extensions/tools-x-search:
+    package: "@ethosagent/tools-x-search"
+    tier: 2
+    assigned: 2026-08-28
 
   extensions/voice-providers:
     package: "@ethosagent/voice-providers"

@@ -38,8 +38,11 @@ import {
   DreamExecutor,
   Gateway,
   type GatewayBotConfig,
+  type GatewayConfig,
 } from '@ethosagent/gateway';
 import { registerGoalNotifications } from '@ethosagent/goal-runner';
+import { type BusySource, IdleWatcherManager } from '@ethosagent/idle-watcher';
+import { SQLiteInboundDedupStore } from '@ethosagent/inbound-dedup';
 import { KanbanStore } from '@ethosagent/kanban-store';
 import { ConsoleLogger } from '@ethosagent/logger';
 import { createMetricsTextProvider } from '@ethosagent/observability-sqlite';
@@ -61,7 +64,12 @@ import {
 import { hashApiKey, SqliteApiKeyStore } from '@ethosagent/session-sqlite';
 import { bundledSkillsSource, createInjectors } from '@ethosagent/skills';
 import Database from '@ethosagent/sqlite';
-import { readRuntime, removeRuntime } from '@ethosagent/team-supervisor';
+import {
+  hasLiveTeamProcesses,
+  readRuntime,
+  removeRuntime,
+  teamsDir,
+} from '@ethosagent/team-supervisor';
 import { createA2aTools } from '@ethosagent/tools-a2a';
 // Platform adapters are loaded LAZILY in runGatewayStart() — see plan/IMPROVEMENT.md P0-3.
 // Their underlying SDKs (grammy, discord.js, @slack/bolt, imapflow…) are
@@ -111,6 +119,12 @@ import { formatQuickCommandOutput, runQuickCommand } from '../lib/quick-command-
 import { resolveLiveKitMedia } from '../livekit-media';
 import { emitReady } from '../logger';
 import { migrateSessionKeysIfNeeded } from '../migrations/session-keys-multi-bot';
+import { applyPauseCorrections, hasHeartbeatBump } from '../pause-corrections';
+import { createPauseLifecycle } from '../pause-lifecycle';
+import {
+  createPlatformWebhookServer,
+  type PlatformWebhookHandler,
+} from '../platform-webhook-server';
 import { notifyReady, startWatchdog } from '../sd-notify';
 import { createSipInboundHandler } from '../sip-inbound-dispatch';
 import { createSipWebhookServer } from '../sip-webhook-server';
@@ -120,6 +134,7 @@ import {
   createAgentLoop,
   createLLM,
   createTeamAgentLoop,
+  deriveIdleWatcherCapabilities,
   getEthosObservability,
   getFunnelTracker,
   getObservabilityStore,
@@ -830,16 +845,7 @@ export async function runGatewayStart(opts: GatewayStartOptions = {}): Promise<v
   // Shared attachment cache for all platform adapters. Hoisted here so the
   // same instance flows into both `buildAdapters` (Telegram, Slack) and the
   // `Gateway` (cleanup on /new and lane eviction).
-  const { FsAttachmentCache } = await import('@ethosagent/storage-fs');
-  const attachmentCache = new FsAttachmentCache(storage, join(ethosDir(), 'cache', 'attachments'));
-  // TTL sweep — prune cached attachments older than 24 h every hour.
-  const pruneTimer = setInterval(
-    () => {
-      void attachmentCache.pruneOlderThan(24 * 60 * 60 * 1000).catch(() => {});
-    },
-    60 * 60 * 1000,
-  );
-  pruneTimer.unref?.();
+  const { attachmentCache, pruneTimer } = await createGatewayAttachmentCache(storage);
 
   // Build and register all configured adapters early so we can wire the
   // clarify surfaces *before* constructing the Gateway. The surfaces' combined
@@ -847,86 +853,14 @@ export async function runGatewayStart(opts: GatewayStartOptions = {}): Promise<v
   // surface's `getSessionRouting` closes over a mutable holder filled in
   // right after Gateway construction — necessary because the surface and the
   // Gateway each need a reference to the other.
-  const adapters = await buildAdapters(config, loadAdapterModule, attachmentCache, {
-    onWhatsAppQr: (botId, qr) => {
-      import('@ethosagent/web-api').then((m) => m.setWhatsAppQr(botId, qr)).catch(() => {});
-    },
-    onWhatsAppPairingCode: (botId, code) => {
-      if (code !== null) {
-        console.log(
-          `\n  ${c.bold}WhatsApp pairing code for "${botId}": ${c.cyan}${code}${c.reset}\n` +
-            `  ${c.dim}On that phone: WhatsApp → Linked Devices → Link with phone number instead → enter the code.${c.reset}\n`,
-        );
-      }
-      import('@ethosagent/web-api')
-        .then((m) => m.setWhatsAppPairingCode(botId, code))
-        .catch(() => {});
-    },
-  });
+  const adapters = await buildGatewayAdapters(config, attachmentCache);
 
-  const telegramClarifySurfaces = await buildTelegramClarifySurfaces(
+  const { clarifyMessageCorrelator } = await registerGatewayClarifySurfaces({
     bots,
     adapters,
-    (sessionId) => {
-      const route = gatewayRef?.resolveApprovalRoute(sessionId);
-      if (!route) return undefined;
-      return route.requesterUserId !== undefined
-        ? { chatId: route.chatId, requesterUserId: route.requesterUserId }
-        : { chatId: route.chatId };
-    },
-  );
-  // Slack clarify surfaces are wired identically — only the surface module
-  // and the routing fields differ (Slack carries a `threadId` for thread
-  // routing). The surfaces register their own `block_actions` /
-  // `view_submission` listeners on the adapter; the gateway never calls into
-  // them directly, so they don't contribute to `clarifyMessageCorrelator`.
-  await buildSlackClarifySurfaces(bots, adapters, (sessionId) => {
-    const route = gatewayRef?.resolveApprovalRoute(sessionId);
-    if (!route) return undefined;
-    return {
-      chatId: route.chatId,
-      ...(route.threadId !== undefined ? { threadId: route.threadId } : {}),
-      ...(route.requesterUserId !== undefined ? { requesterUserId: route.requesterUserId } : {}),
-    };
+    systemLoop,
+    resolveApprovalRoute: (sessionId) => gatewayRef?.resolveApprovalRoute(sessionId),
   });
-  // Discord clarify surfaces — same pattern as Slack but no thread routing.
-  // Discord delivers component clicks via `interactionCreate`, which the
-  // surface registers on directly via `adapter.onClarifyInteraction`.
-  // Discord now appears in `buildGatewayBots`, so the surface binds to that
-  // per-bot loop's bridge; `systemLoop` remains the fallback for the rare
-  // case where no bot entry matched.
-  await buildDiscordClarifySurfaces(bots, adapters, systemLoop, (sessionId) => {
-    const route = gatewayRef?.resolveApprovalRoute(sessionId);
-    if (!route) return undefined;
-    return {
-      chatId: route.chatId,
-      ...(route.requesterUserId !== undefined ? { requesterUserId: route.requesterUserId } : {}),
-    };
-  });
-  // WhatsApp clarify surfaces — text-only (Baileys cannot send buttons or
-  // lists), so like Telegram they resolve through `correlateMessage`.
-  const whatsAppClarifySurfaces = await buildWhatsAppClarifySurfaces(
-    bots,
-    adapters,
-    (sessionId) => {
-      const route = gatewayRef?.resolveApprovalRoute(sessionId);
-      if (!route) return undefined;
-      return route.requesterUserId !== undefined
-        ? { chatId: route.chatId, requesterUserId: route.requesterUserId }
-        : { chatId: route.chatId };
-    },
-  );
-  const correlatingClarifySurfaces = [...telegramClarifySurfaces, ...whatsAppClarifySurfaces];
-  const clarifyMessageCorrelator =
-    correlatingClarifySurfaces.length > 0
-      ? async (msg: InboundMessage): Promise<ClarifyResponse | null> => {
-          for (const surface of correlatingClarifySurfaces) {
-            const r = await surface.correlateMessage(msg);
-            if (r) return r;
-          }
-          return null;
-        }
-      : undefined;
 
   // Fix 4 (pi-delegation.md §1b) — rebuild each bot's lane bookkeeping for
   // rows that survived a restart. Must run AFTER every clarify surface
@@ -984,6 +918,13 @@ export async function runGatewayStart(opts: GatewayStartOptions = {}): Promise<v
   // rest of the ethos state; umask default, same posture as jobs.db /
   // sessions.db, which hold the same class of content.
   const deliveryLedger = new SQLiteDeliveryLedger(join(ethosDir(), 'delivery-ledger.db'));
+
+  // Durable inbound dedup (plan/phases/telegram-slack-webhook-mode.md §5). The
+  // Gateway's in-memory `Set` stays the fast path; this is the backstop it
+  // consults on a miss, so a platform retry that lands on a freshly-restarted
+  // process is still recognised as the message it already answered. Same file
+  // convention and same unconditional construction as the ledger above.
+  const inboundDedup = new SQLiteInboundDedupStore(join(ethosDir(), 'inbound-dedup.db'));
 
   // Build adapter registry for send_message cross-platform routing.
   // Derive platform key from adapter.id prefix (e.g. 'telegram:bot-1' → 'telegram',
@@ -1046,135 +987,39 @@ export async function runGatewayStart(opts: GatewayStartOptions = {}): Promise<v
   // Voice-note machinery. Built ONCE and handed to whichever Gateway the
   // branch below constructs — a second store would mean two caches over the
   // same file and two artifact dirs over the same bytes.
-  //
-  // The store carries the deployment default, so `defaultVoiceMode` is not also
-  // passed: an injected store's own default is the one the Gateway reads.
-  const voiceModeStore = new LaneVoiceModeStore({
-    storage,
-    path: laneVoiceModePath(ethosDir()),
-    ...(config.voice?.defaultMode ? { defaultMode: config.voice.defaultMode } : {}),
-    onError: (err) => {
-      new ConsoleLogger().warn(`voice lane-mode persist failed: ${err}`);
-    },
-  });
-  // ffmpeg stage. Optional at runtime: an unavailable binary degrades to
-  // pass-through, and the startup probe below says so once.
-  const transcoder = createFfmpegTranscoder({
-    ...(config.voice?.transcode?.ffmpegPath
-      ? { ffmpegPath: config.voice.transcode.ffmpegPath }
-      : {}),
-    // `voice.transcode.timeout` is SECONDS; the option is milliseconds.
-    timeoutMs: (config.voice?.transcode?.timeout ?? 30) * 1000,
-  });
-  // Synthesized audio has to outlive a failed send: redelivery re-sends THOSE
-  // bytes rather than re-synthesizing, which would be a different take.
-  const voiceArtifacts = createVoiceArtifactStore({
-    storage,
-    dir: join(ethosDir(), 'voice', 'artifacts'),
-    onError: (op, err) => {
-      new ConsoleLogger().warn(`voice artifact ${op} failed: ${err}`);
-    },
-  });
-  const channelVoiceOut = deriveChannelVoiceOut(config.voice?.channels);
-  const voiceBitrateKbps = config.voice?.transcode?.bitrateKbps;
+  const { voiceModeStore, transcoder, voiceArtifacts, channelVoiceOut, voiceBitrateKbps } =
+    buildGatewayVoiceOutputs(config, storage);
 
-  const gateway: Gateway =
-    bots.length === 0
-      ? // No platform configured — idle gateway. Every configured platform
-        // (including Discord/Email) now registers a bot in `buildGatewayBots`,
-        // so this single-loop path is reached only when nothing is wired up.
-        new Gateway({
-          loop: systemLoop,
-          defaultPersonality: config.personality,
-          adapters: adapterMap,
-          deliveryLedger,
-          resolveUserId,
-          pluginLoader,
-          pluginAdapters: pluginLoader.getPlatformAdapters(),
-          trustedChannelPlugins,
-          notificationRouter: gatewayNotificationRouter,
-          sttProviderRegistry: sttProviders,
-          sttProviderName: voiceConfig.sttProviderName,
-          sttProviderConfig: voiceConfig.sttProviderConfig,
-          ttsProviderRegistry: ttsProviders,
-          ttsProviderName: voiceConfig.ttsProviderName,
-          ttsProviderConfig: voiceConfig.ttsProviderConfig,
-          // The named rosters (`voice.stt.providers.*` / `voice.tts.providers.*`)
-          // a personality's `voice.stt_provider` / `voice.tts_provider` selects
-          // from. Without them the gateway resolves every lane onto the default
-          // entry, so per-personality voice would be live in `buildVoiceStack`
-          // and silently inert on every channel.
-          ...(voiceConfig.sttRoster ? { sttProviderRoster: voiceConfig.sttRoster } : {}),
-          ...(voiceConfig.ttsRoster ? { ttsProviderRoster: voiceConfig.ttsRoster } : {}),
-          voiceSecretsResolver: voiceConfig.secretsResolver,
-          // Local-only voice-egress gate (`voice.trustedPlugins`); undefined = off.
-          ...(voiceConfig.trustedVoicePlugins
-            ? { trustedVoicePlugins: voiceConfig.trustedVoicePlugins }
-            : {}),
-          // Where a NEW lane starts (`voice.defaultMode`); `/voice` still wins
-          // per lane, and the store persists that choice across restarts.
-          voiceModeStore,
-          voiceArtifacts,
-          transcoder,
-          ...(channelVoiceOut ? { channelVoiceOut } : {}),
-          ...(voiceBitrateKbps !== undefined ? { voiceBitrateKbps } : {}),
-          personalityDirectory,
-          onTurnComplete,
-          onUserTurn,
-          streamingEdits,
-          ...(config.channelToolsets ? { channelToolsets: config.channelToolsets } : {}),
-          ...(config.channelFilter ? { channelFilter: config.channelFilter } : {}),
-          ...(pairingDb ? { pairingDb } : {}),
-        })
-      : new Gateway({
-          bots,
-          attachmentCache,
-          // Reading cached attachment bytes: an inbound voice note is
-          // transcribed from the audio itself, not from a path.
-          storage,
-          adapters: adapterMap,
-          deliveryLedger,
-          resolveUserId,
-          pluginLoader,
-          pluginAdapters: pluginLoader.getPlatformAdapters(),
-          trustedChannelPlugins,
-          notificationRouter: gatewayNotificationRouter,
-          sttProviderRegistry: sttProviders,
-          sttProviderName: voiceConfig.sttProviderName,
-          sttProviderConfig: voiceConfig.sttProviderConfig,
-          ttsProviderRegistry: ttsProviders,
-          ttsProviderName: voiceConfig.ttsProviderName,
-          ttsProviderConfig: voiceConfig.ttsProviderConfig,
-          // The named rosters (`voice.stt.providers.*` / `voice.tts.providers.*`)
-          // a personality's `voice.stt_provider` / `voice.tts_provider` selects
-          // from. Without them the gateway resolves every lane onto the default
-          // entry, so per-personality voice would be live in `buildVoiceStack`
-          // and silently inert on every channel.
-          ...(voiceConfig.sttRoster ? { sttProviderRoster: voiceConfig.sttRoster } : {}),
-          ...(voiceConfig.ttsRoster ? { ttsProviderRoster: voiceConfig.ttsRoster } : {}),
-          voiceSecretsResolver: voiceConfig.secretsResolver,
-          // Local-only voice-egress gate (`voice.trustedPlugins`); undefined = off.
-          ...(voiceConfig.trustedVoicePlugins
-            ? { trustedVoicePlugins: voiceConfig.trustedVoicePlugins }
-            : {}),
-          // Where a NEW lane starts (`voice.defaultMode`); `/voice` still wins
-          // per lane, and the store persists that choice across restarts.
-          voiceModeStore,
-          voiceArtifacts,
-          transcoder,
-          ...(channelVoiceOut ? { channelVoiceOut } : {}),
-          ...(voiceBitrateKbps !== undefined ? { voiceBitrateKbps } : {}),
-          personalityDirectory,
-          onTurnComplete,
-          onUserTurn,
-          streamingEdits,
-          ...(config.channelToolsets ? { channelToolsets: config.channelToolsets } : {}),
-          ...(clarifyMessageCorrelator ? { clarifyMessageCorrelator } : {}),
-          ...(telegramCardReader ? { personalityCardReader: telegramCardReader } : {}),
-          ...(telegramGreetingProvider ? { greetingProvider: telegramGreetingProvider } : {}),
-          ...(config.channelFilter ? { channelFilter: config.channelFilter } : {}),
-          ...(pairingDb ? { pairingDb } : {}),
-        });
+  const gateway: Gateway = buildGateway({
+    config,
+    bots,
+    systemLoop,
+    adapterMap,
+    deliveryLedger,
+    inboundDedup,
+    resolveUserId,
+    pluginLoader,
+    trustedChannelPlugins,
+    notificationRouter: gatewayNotificationRouter,
+    storage,
+    attachmentCache,
+    sttProviders,
+    ttsProviders,
+    voiceConfig,
+    voiceModeStore,
+    voiceArtifacts,
+    transcoder,
+    channelVoiceOut,
+    voiceBitrateKbps,
+    personalityDirectory,
+    onTurnComplete,
+    onUserTurn,
+    streamingEdits,
+    pairingDb,
+    clarifyMessageCorrelator,
+    personalityCardReader: telegramCardReader,
+    greetingProvider: telegramGreetingProvider,
+  });
   gatewayRef = gateway;
 
   // Wire goal completion notifications back to their originating channel.
@@ -1279,10 +1124,13 @@ export async function runGatewayStart(opts: GatewayStartOptions = {}): Promise<v
   // hook on every bot loop that suspends a dangerous tool call until the
   // user clicks Allow / Deny on an approval card (Slack or Telegram).
   // No-op for deployments without an approval-capable adapter.
-  wireApprovalFlow(gateway, bots, adapters, {
+  const approvalFlow = wireApprovalFlow(gateway, bots, adapters, {
     personalities: seamPersonalities,
     getProvider: createLazyProvider(() => createLLM(config)),
     model: config.model,
+    ...(config.approvalTimeoutMs !== undefined
+      ? { approvalTimeoutMs: config.approvalTimeoutMs }
+      : {}),
   });
 
   // Start the cron scheduler that was hoisted above (so agent-callable
@@ -1650,6 +1498,47 @@ export async function runGatewayStart(opts: GatewayStartOptions = {}): Promise<v
     );
   }
 
+  // ---------------------------------------------------------------------------
+  // Native platform webhooks — Telegram + Slack
+  // (plan/phases/telegram-slack-webhook-mode.md §2b, §3c, §4)
+  // ---------------------------------------------------------------------------
+  //
+  // PLACED AFTER `adapters.map((a) => a.start())` ABOVE, AND THAT IS LOAD-BEARING.
+  // `TelegramAdapter.webhook` is `undefined` until `start()` has registered the
+  // webhook with Telegram and built grammy's callback; building the dispatch map
+  // at adapter-construction time would mount nothing and 404 every delivery.
+  //
+  // Opt-in, gated on need exactly like the `config.webhooks` block above: with no
+  // bot in webhook mode and no app in HTTP mode, no port is bound at all. That is
+  // what keeps this additive for every deployment that has not asked for it.
+  const platformWebhookMounts = buildPlatformWebhookMounts(config, adapters, (message) =>
+    new ConsoleLogger().warn(message),
+  );
+  // 3002 gateway health, 3003 gateway webhook, 3004 `ethos run-all` health, 3005
+  // SIP — see the SIP block above for why 3004 is not free. 3006 is next.
+  const platformWebhookPort = Number(process.env.ETHOS_PLATFORM_WEBHOOK_PORT) || 3006;
+  const platformWebhookHost = process.env.ETHOS_SERVE_HOST ?? '127.0.0.1';
+  let platformWebhookServer: import('node:http').Server | undefined;
+  if (platformWebhookMounts.telegram.size > 0 || platformWebhookMounts.slack.size > 0) {
+    // The non-loopback cleartext warning lives inside `createPlatformWebhookServer`
+    // (unlike the `config.webhooks` block, which warns at its call site) — it is
+    // the server that knows what host it bound.
+    platformWebhookServer = createPlatformWebhookServer({
+      port: platformWebhookPort,
+      host: platformWebhookHost,
+      telegram: platformWebhookMounts.telegram,
+      slack: platformWebhookMounts.slack,
+    });
+    for (const botKey of platformWebhookMounts.telegram.keys()) {
+      console.log(
+        `  telegram: http://${platformWebhookHost}:${platformWebhookPort}/telegram/webhook/${botKey}`,
+      );
+    }
+    for (const route of platformWebhookMounts.slack.keys()) {
+      console.log(`  slack: http://${platformWebhookHost}:${platformWebhookPort}${route}`);
+    }
+  }
+
   // Call-capture daemon (plan/phases/call-capture-extension.md, "Phase 4 —
   // Integration"; Architecture Issue B — `ethos gateway` previously had no
   // call-capture wiring at all). Mirrors `serve.ts`'s daemon construction
@@ -1775,18 +1664,71 @@ export async function runGatewayStart(opts: GatewayStartOptions = {}): Promise<v
   const heartbeatTimer = setInterval(() => void writeHeartbeat(), HEARTBEAT_INTERVAL_MS);
   heartbeatTimer.unref?.();
 
+  // Idle watcher — declared here only so `shutdown` can stop its interval.
+  // It is CONSTRUCTED below the signal handlers, after every subsystem it
+  // reads (plan/phases/idle-watcher.md §5).
+  let idleWatcher: IdleWatcherManager | undefined;
+
+  // ONE per process (see `pause-lifecycle.ts`): a `NoopPauseLifecycle` unless
+  // the operator enabled `pauseClockCorrection`, in which case it is a started
+  // clock-drift detector. Declared here so `shutdown` below can stop its timer.
+  const pauseLifecycle = createPauseLifecycle(config);
+
+  // Resume-boundary clock corrections (plan/phases/clock-tolerance-pass.md §3/§4).
+  //
+  // `runGatewayStart` deliberately does not run the merged boot profile's
+  // reconciliation pass (that asymmetry is `ethos boot`'s whole reason to exist,
+  // and a sibling test pins this command to its own sweeps at their original
+  // call site). So this registration is the ONLY thing that corrects a gate in
+  // this process — and this process is the only one that owns two of them: the
+  // `DreamExecutor` (gate #12, the one gate that spends real API cost when it
+  // misfires, by dreaming for every personality at once on the first post-resume
+  // tick) and the `Gateway`'s delivery-ledger abandon window (gate #2, which for
+  // a voice obligation DELETES the artifact).
+  //
+  // ONE job store, not one per bot. Every `createAgentLoop` opens its own
+  // `SQLiteJobStore` against the SAME `jobs.db` (`build-agent-loop.ts:933`), so
+  // the per-bot handles are N views of one file — bumping each would advance
+  // `heartbeat_at` by N × the pause and push live rows into the future. The
+  // adjacent `busy-sources` code can map over all of them safely only because it
+  // READS; this writes.
+  const correctableJobStore = bots.find((b) => b.jobStore !== undefined)?.jobStore;
+  pauseLifecycle.onResume?.((pauseDurationMs) => {
+    void applyPauseCorrections(
+      {
+        gateway,
+        dreamExecutor,
+        ...(hasHeartbeatBump(correctableJobStore) ? { jobStore: correctableJobStore } : {}),
+      },
+      pauseDurationMs,
+      new ConsoleLogger(),
+    );
+  });
+
   // Graceful shutdown on SIGINT / SIGTERM. Tell every in-flight chat that the
   // gateway was interrupted so they don't sit waiting on a response that
   // never comes. See plan/IMPROVEMENT.md P1-1.
   const shutdown = async () => {
     console.log(`\n${c.dim}Shutting down...${c.reset}`);
     if (stopWatchdog) stopWatchdog();
+    // Deny + audit any suspended approval FIRST — the coordinator's auto-deny
+    // timers are unref'd and never fire on the way out, and a later await
+    // that hangs must not cost the audit row or the card update.
+    //
+    // MUST stay above `adapters.map((a) => a.stop())`: the awaited handle
+    // drains the in-flight `updateApprovalCard` calls, and stopping the
+    // adapters first would tear out the transport those updates ride on,
+    // leaving a denied approval's card showing live Allow/Deny buttons.
+    await approvalFlow.shutdown();
     healthServer.close();
     webhookServer?.close();
     sipWebhookServer?.close();
+    platformWebhookServer?.close();
     clearInterval(pruneTimer);
     clearInterval(heartbeatTimer);
     clearInterval(retentionPruneTimer);
+    idleWatcher?.stop();
+    pauseLifecycle.stop?.();
     cronTriggers.local?.stop();
     dreamExecutor.stop();
     langfusePoll?.stop();
@@ -1802,6 +1744,7 @@ export async function runGatewayStart(opts: GatewayStartOptions = {}): Promise<v
     });
     await Promise.allSettled(adapters.map((a) => a.stop()));
     deliveryLedger.close();
+    inboundDedup.close();
     callLog?.close();
     stopTeamSupervisors(bots, config.teams ?? {}, supervisorDeps);
     process.exit(0);
@@ -1809,6 +1752,43 @@ export async function runGatewayStart(opts: GatewayStartOptions = {}): Promise<v
 
   process.on('SIGINT', () => void shutdown());
   process.on('SIGTERM', () => void shutdown());
+
+  // Idle watcher (plan/phases/idle-watcher.md §5) — CONSTRUCTED LAST, after
+  // every subsystem its sources read, and only when the operator opted in.
+  // Unlike `watchers`/`cron` this is not always-constructed: on a laptop or a
+  // bare-metal box there is no host to suspend into, so it should not exist at
+  // all in the common case.
+  if (config.idleWatcher?.enabled === true) {
+    idleWatcher = new IdleWatcherManager({
+      sources: buildGatewayBusySources({
+        gateway,
+        dreamExecutor,
+        bots,
+        approvalFlow,
+        webhookServer,
+        cronScheduler: scheduler,
+        // Flat layout: `pidFilePath(name)` in @ethosagent/team-supervisor
+        // resolves to `<teamsDir()>/<name>.pid`, so this is the dir the PID
+        // files it writes actually land in.
+        teamsPidDir: teamsDir(),
+      }),
+      // The one instance for this process. Its outbound half is still a no-op:
+      // a real host adapter that signals a Firecracker-style control plane is a
+      // later phase, so the watcher's arming gates are what matter here.
+      pauseLifecycle,
+      // Flips to `true` when the `pauseLifecycle` above becomes a real host
+      // adapter. While it is a no-op, `signalReadyToSuspend()` resolves,
+      // latches, and stops the watcher having suspended nothing — so gate 3b
+      // refuses to arm rather than accept that as a handoff.
+      hostSignalAvailable: false,
+      capabilities: deriveIdleWatcherCapabilities(config),
+      options: config.idleWatcher,
+      logger: new ConsoleLogger(),
+    });
+    // Fire-and-forget: `start()` evaluates the arming gates itself and is a
+    // no-op (with a logged reason) when any of them refuses.
+    idleWatcher.start();
+  }
 
   // Gateway is fully up and listening — let the caller print its own ready
   // banner (the W2.5 t.me success block) after all the adapter/health lines.
@@ -1829,7 +1809,7 @@ export async function runGatewayStart(opts: GatewayStartOptions = {}): Promise<v
  * or a team coordinator loop (`createTeamAgentLoop`). The botKey
  * matches what adapters will stamp on inbound messages.
  */
-interface BuildGatewayBotsResult {
+export interface BuildGatewayBotsResult {
   bots: GatewayBotConfig[];
   messagingSetters: Array<(fn: MessagingSendFn) => void>;
   /** One NotificationRouter per bot loop — `process_complete` hooks fire on
@@ -1882,7 +1862,7 @@ function emailBotKey(user: string, imapHost: string): string {
   return deriveBotKeyFromSeed(`${user}@${imapHost}`);
 }
 
-async function buildGatewayBots(
+export async function buildGatewayBots(
   config: EthosConfig,
   scheduler: CronScheduler,
   watcherManager: WatcherManager,
@@ -2138,6 +2118,11 @@ function isApprovalCapable(
   );
 }
 
+/** How long `wireApprovalFlow`'s shutdown waits for in-flight approval card
+ *  posts and updates. A card round trip is well under this; a hung adapter
+ *  costs a stale card rather than a shutdown that never returns. */
+const APPROVAL_SHUTDOWN_DRAIN_MS = 5_000;
+
 /**
  * Connect the agent loop's `before_tool_call` hook to approval cards.
  *
@@ -2150,8 +2135,16 @@ function isApprovalCapable(
  *      and an in-place update of the card.
  *
  * Skipped entirely when no approval-capable adapter is configured.
+ *
+ * Returns a `{ shutdown, pendingCount }` handle: the caller's SIGINT/SIGTERM
+ * closure calls `shutdown` so pending approvals are force-settled (deny +
+ * audit + card update) before the process exits, and the idle watcher reads
+ * `pendingCount` — an unanswered approval is in-flight work, and exiting on
+ * one loses it silently (plan/phases/idle-watcher.md §1 check #11). Exported
+ * so tests can exercise the config threading and those handles without
+ * booting a real gateway.
  */
-function wireApprovalFlow(
+export function wireApprovalFlow(
   gateway: Gateway,
   bots: GatewayBotConfig[],
   adapters: PlatformAdapter[],
@@ -2164,10 +2157,15 @@ function wireApprovalFlow(
     getProvider: () => Promise<LLMProvider>;
     /** Model the smart reviewer runs on. */
     model: string;
+    /** Operator's approval SLA (`config.approvalTimeoutMs`). Undefined → the
+     *  coordinator's own 10-minute default; `0` → no timeout. */
+    approvalTimeoutMs?: number;
   },
-): void {
+): { shutdown: () => Promise<void>; pendingCount: () => number } {
   const approvalAdapters = adapters.filter(isApprovalCapable);
-  if (approvalAdapters.length === 0) return;
+  // No approval surface — hand back a no-op handle so the caller needs no
+  // null check in its shutdown closure. Nothing can ever be pending here.
+  if (approvalAdapters.length === 0) return { shutdown: async () => {}, pendingCount: () => 0 };
 
   // Every settled approval lands in the safety audit trail (`ethos audit
   // decisions`). Resolved lazily so a boot that never touches observability
@@ -2175,7 +2173,12 @@ function wireApprovalFlow(
   const observability: ApprovalObservability = {
     recordSafetyApproval: (opts) => getEthosObservability().recordSafetyApproval(opts),
   };
-  const coordinator = new ApprovalCoordinator({ observability });
+  const coordinator = new ApprovalCoordinator({
+    observability,
+    // `!== undefined`, not truthiness — `0` ("wait forever") is a meaningful
+    // operator setting, not an absent one.
+    ...(seams.approvalTimeoutMs !== undefined ? { timeoutMs: seams.approvalTimeoutMs } : {}),
+  });
 
   // Where a posted card lives, keyed by `approvalId`. Populated once
   // `postApprovalCard` succeeds; consumed by the `onResolved` handler so the
@@ -2196,6 +2199,18 @@ function wireApprovalFlow(
   // adapter / post failure) would record an outcome that no post
   // `.then()` ever drains — an unbounded leak.
   const inFlightPosts = new Set<string>();
+  // The same posts as awaitable promises. A `Set<string>` can be tested but not
+  // awaited, and shutdown must await these: a post that completes mid-shutdown
+  // fires `updateCard` from its own `.then()`, creating a card update that no
+  // snapshot taken at the top of `shutdown()` could have contained. Each entry
+  // is the TAIL of the post chain, so by the time it settles the update it
+  // spawned is already registered in `inFlightCardUpdates`.
+  const inFlightCardPosts = new Set<Promise<unknown>>();
+  // Card updates genuinely in flight. `updateApprovalCard` is a network round
+  // trip, and a settle fires it fire-and-forget; without this the shutdown
+  // path would tear the adapter out from under the update and leave a denied
+  // approval rendering live Allow/Deny buttons in the channel.
+  const inFlightCardUpdates = new Set<Promise<unknown>>();
 
   // Resolve a `sessionId` to its approval target. Returns `undefined` for
   // any turn whose route isn't an approval-capable adapter.
@@ -2237,7 +2252,7 @@ function wireApprovalFlow(
     decision: 'allow' | 'deny',
     decidedBy: string,
   ): void => {
-    void card.adapter
+    const update = card.adapter
       .updateApprovalCard({
         chatId: card.chatId,
         messageTs: card.messageTs,
@@ -2252,7 +2267,11 @@ function wireApprovalFlow(
       })
       .catch((err) => {
         console.error('[gateway] failed to update approval card:', err);
+      })
+      .finally(() => {
+        inFlightCardUpdates.delete(update);
       });
+    inFlightCardUpdates.add(update);
   };
 
   // Pending approval → post a card on the originating Slack conversation.
@@ -2271,7 +2290,7 @@ function wireApprovalFlow(
     }
     const adapter = route.adapter;
     inFlightPosts.add(req.approvalId);
-    void adapter
+    const post: Promise<unknown> = adapter
       .postApprovalCard({
         chatId: route.chatId,
         threadId: route.threadId,
@@ -2311,7 +2330,11 @@ function wireApprovalFlow(
         resolvedBeforePost.delete(req.approvalId);
         console.error('[gateway] failed to post approval card:', err);
         void coordinator.deny(req.approvalId, 'system');
+      })
+      .finally(() => {
+        inFlightCardPosts.delete(post);
       });
+    inFlightCardPosts.add(post);
   });
 
   // Resolution (from ANY source — click, timeout, cancel) → update the card
@@ -2344,6 +2367,181 @@ function wireApprovalFlow(
       }
     });
   }
+
+  return {
+    // `forceSettleAll` is synchronous (settle → audit → resolve), but each
+    // settle fires `onResolved` → `updateCard`, an async round trip. Drain
+    // those before returning so the caller can stop its adapters without
+    // stranding a denied approval's card with live buttons.
+    //
+    // A LOOP, not a single `allSettled`: `forceSettleAll` settles every
+    // pending approval, including any whose card post is still on the wire.
+    // Awaiting such a post lets its `.then()` drain `resolvedBeforePost` and
+    // fire a card update that did not exist when the drain started, so both
+    // sets are re-read each pass. Bounded, because this runs on the
+    // SIGINT/SIGTERM path: a hung adapter must cost a stale card, not a
+    // shutdown that never completes.
+    shutdown: async () => {
+      coordinator.forceSettleAll();
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const deadline = new Promise<'expired'>((resolve) => {
+        timer = setTimeout(() => resolve('expired'), APPROVAL_SHUTDOWN_DRAIN_MS);
+      });
+      try {
+        while (inFlightCardPosts.size > 0 || inFlightCardUpdates.size > 0) {
+          const drained = Promise.allSettled([...inFlightCardPosts, ...inFlightCardUpdates]).then(
+            () => 'drained' as const,
+          );
+          if ((await Promise.race([drained, deadline])) === 'expired') {
+            console.warn(
+              `[gateway] approval shutdown gave up after ${APPROVAL_SHUTDOWN_DRAIN_MS}ms with ` +
+                `${inFlightCardPosts.size} card post(s) and ${inFlightCardUpdates.size} ` +
+                'card update(s) outstanding',
+            );
+            return;
+          }
+        }
+      } finally {
+        clearTimeout(timer);
+      }
+    },
+    pendingCount: () => coordinator.pendingCount(),
+  };
+}
+
+/**
+ * The idle watcher's busy predicate for the `ethos gateway` profile
+ * (plan/phases/idle-watcher.md §1). Each source is a thin closure built HERE,
+ * at the wiring site, so `@ethosagent/idle-watcher` needs no cross-extension
+ * imports — the command layer already imports every subsystem (plan §5).
+ *
+ * ABSENT vs UNREADABLE (plan §2) is the whole point of the conditionals below.
+ * A subsystem this deployment never constructed is SKIPPED — no source at all.
+ * Registering one whose closure would throw on an undefined handle would make
+ * the fail-awake wrapper report busy forever, i.e. every deployment
+ * permanently busy, the exact opposite of useful. Only a
+ * configured-but-unreadable check counts as busy.
+ *
+ * Exported so tests can assert the registered set without booting a gateway.
+ */
+export function buildGatewayBusySources(deps: {
+  gateway: { hasActiveTurns(): boolean };
+  dreamExecutor: { hasActiveDreams(): boolean };
+  /** Background subsystems are per-bot; a bot without one contributes nothing. */
+  bots: readonly {
+    jobStore?: { countActive(): Promise<number> };
+    backgroundExecutor?: { activeCount(): number };
+  }[];
+  approvalFlow: { pendingCount(): number };
+  /** Opt-in: `undefined` when no webhook is configured. */
+  webhookServer: { inFlightSyncRequests(): number } | undefined;
+  /** `undefined` when this deployment constructs no scheduler. */
+  cronScheduler: { hasRunningJobs(): Promise<boolean> } | undefined;
+  /** Flat `~/.ethos/teams` — see `pidFilePath` in @ethosagent/team-supervisor. */
+  teamsPidDir: string;
+}): BusySource[] {
+  const sources: BusySource[] = [
+    {
+      // Covers checks #1 AND #2: `hasActiveTurns()` ORs `activeTurns` and
+      // `activeSinks`, which are cleared together in the same `finally`.
+      name: 'gateway-turns',
+      checkBusy: () =>
+        Promise.resolve({
+          busy: deps.gateway.hasActiveTurns(),
+          reason: 'a channel turn or steer sink is in flight',
+        }),
+    },
+    {
+      name: 'dream-executor',
+      checkBusy: () =>
+        Promise.resolve({
+          busy: deps.dreamExecutor.hasActiveDreams(),
+          reason: 'a dream turn is running',
+        }),
+    },
+    {
+      // Always registered: `wireApprovalFlow` hands back a truthful `() => 0`
+      // when no approval-capable adapter exists, so there is no undefined
+      // handle to guard against.
+      name: 'approvals',
+      checkBusy: () => {
+        const pending = deps.approvalFlow.pendingCount();
+        return Promise.resolve({
+          busy: pending > 0,
+          reason: `${pending} tool approval(s) awaiting a human decision`,
+        });
+      },
+    },
+    {
+      // Detached children (`detached: true` + `unref()`), so the PID file is
+      // the only signal there is. `hasLiveTeamProcesses` is itself fail-awake:
+      // a missing directory means no teams, anything else unreadable is busy.
+      name: 'team-supervisors',
+      checkBusy: () =>
+        Promise.resolve({
+          busy: hasLiveTeamProcesses(deps.teamsPidDir),
+          reason: 'a detached team supervisor is alive',
+        }),
+    },
+  ];
+
+  const executors = deps.bots
+    .map((bot) => bot.backgroundExecutor)
+    .filter((executor) => executor !== undefined);
+  if (executors.length > 0) {
+    sources.push({
+      name: 'background-jobs',
+      checkBusy: () => {
+        const active = executors.reduce((total, executor) => total + executor.activeCount(), 0);
+        return Promise.resolve({ busy: active > 0, reason: `${active} background job(s) running` });
+      },
+    });
+  }
+
+  const jobStores = deps.bots.map((bot) => bot.jobStore).filter((store) => store !== undefined);
+  if (jobStores.length > 0) {
+    sources.push({
+      // Durable, unscoped: queued/running/blocked rows survive a restart, so a
+      // suspend here would strand work no in-process counter can see.
+      name: 'job-store',
+      checkBusy: async () => {
+        const counts = await Promise.all(jobStores.map((store) => store.countActive()));
+        return {
+          busy: counts.some((n) => n > 0),
+          reason: 'the durable job store has queued/running/blocked jobs',
+        };
+      },
+    });
+  }
+
+  const cronScheduler = deps.cronScheduler;
+  if (cronScheduler) {
+    sources.push({
+      // Persisted `runningSince` stamps (plan §1 check #7), so this sees runs
+      // started by a peer process sharing the cron dir too, not just this one.
+      name: 'cron-executions',
+      checkBusy: async () => ({
+        busy: await cronScheduler.hasRunningJobs(),
+        reason: 'a cron job is mid-execution',
+      }),
+    });
+  }
+
+  const webhookServer = deps.webhookServer;
+  if (webhookServer) {
+    sources.push({
+      name: 'webhook-in-flight',
+      checkBusy: () => {
+        const inFlight = webhookServer.inFlightSyncRequests();
+        return Promise.resolve({
+          busy: inFlight > 0,
+          reason: `${inFlight} webhook request(s) parked on the synchronous reply path`,
+        });
+      },
+    });
+  }
+
+  return sources;
 }
 
 /**
@@ -2353,7 +2551,7 @@ function wireApprovalFlow(
  * to drift the next time built-ins change. Team set comes from
  * `~/.ethos/teams/<name>.yaml`.
  */
-async function validateBindings(config: EthosConfig): Promise<string[]> {
+export async function validateBindings(config: EthosConfig): Promise<string[]> {
   const storage = getStorage();
   const registry = await createPersonalityRegistry({
     storage,
@@ -2596,7 +2794,7 @@ function createSlackKanbanReaders(teamName: string) {
  * personality module. Lazily imports `@ethosagent/platform-telegram` so
  * the function stays safe when the Telegram adapter SDK isn't installed.
  */
-async function createTelegramPersonalityCardReader() {
+export async function createTelegramPersonalityCardReader() {
   const storage = getStorage();
   const personalitiesDir = join(ethosDir(), 'personalities');
   const registry = await createPersonalityRegistry({
@@ -2644,7 +2842,7 @@ async function createTelegramPersonalityCardReader() {
  * greeting composed of the personality's description (or first paragraph of
  * SOUL.md), plus a pointer to `/help`.
  */
-async function createTelegramGreetingProvider() {
+export async function createTelegramGreetingProvider() {
   const storage = getStorage();
   const personalitiesDir = join(ethosDir(), 'personalities');
   const registry = await createPersonalityRegistry({
@@ -2694,6 +2892,90 @@ function slackSlashAllowlist(
   if (filter?.recipientAllowlist) base.push(...filter.recipientAllowlist);
   if (!allowedSlashUsers || allowedSlashUsers.length === 0) return base;
   return base.filter((id) => allowedSlashUsers.includes(id));
+}
+
+/**
+ * The two adapters that can serve a platform webhook, viewed structurally.
+ *
+ * Neither getter is on `PlatformAdapter` — webhook hosting is a property of
+ * two specific adapters, not of the channel contract — and both are optional
+ * because both are `undefined` in the transport mode this repo has always
+ * defaulted to (Telegram long-poll, Slack Socket Mode).
+ */
+interface WebhookCapableAdapter {
+  /** `TelegramAdapter.webhook` — grammy's `'http'` framework callback. */
+  readonly webhook?: PlatformWebhookHandler | undefined;
+  /** `SlackAdapter.requestListener` — Bolt's `HTTPReceiver`. */
+  readonly requestListener?: PlatformWebhookHandler | undefined;
+  /** `SlackAdapter.webhookRoute` — the path that receiver answers on. */
+  readonly webhookRoute?: string | undefined;
+}
+
+/** Dispatch maps for `createPlatformWebhookServer`. Empty = nothing to host. */
+export interface PlatformWebhookMounts {
+  /** botKey → handler, mounted at `/telegram/webhook/<botKey>`. */
+  telegram: Map<string, PlatformWebhookHandler>;
+  /** Full route path → handler, as the Slack adapter reports it. */
+  slack: Map<string, PlatformWebhookHandler>;
+}
+
+/**
+ * Collect the webhook handlers of every bot/app the operator put in webhook
+ * mode (plan/phases/telegram-slack-webhook-mode.md §2b, §3c).
+ *
+ * MUST be called AFTER `adapter.start()`. `TelegramAdapter.webhook` is
+ * `undefined` until `start()` builds the grammy callback, so calling this at
+ * construction time would find nothing to mount and silently fall back to a
+ * server that 404s every delivery.
+ *
+ * Slack is keyed by `adapter.webhookRoute` rather than by a locally recomputed
+ * `/slack/events/<botKey>`: Bolt's `HTTPReceiver` matches its `endpoints` list
+ * EXACTLY, so a mount path derived twice is a mount path that can drift, and
+ * the drift shows up as a production 404 rather than a type error.
+ */
+export function buildPlatformWebhookMounts(
+  config: EthosConfig,
+  adapters: PlatformAdapter[],
+  warn: (message: string) => void,
+): PlatformWebhookMounts {
+  // Idempotent — same defensive call `buildAdapters` makes, so a legacy
+  // single-bot config resolves to the same botKeys the adapters were built on.
+  const shimmed = applyPlatformShim(config).config;
+  const byId = new Map(adapters.map((a) => [a.id, a as PlatformAdapter & WebhookCapableAdapter]));
+  const telegram = new Map<string, PlatformWebhookHandler>();
+  const slack = new Map<string, PlatformWebhookHandler>();
+
+  for (const botCfg of shimmed.telegram?.bots ?? []) {
+    if (!botCfg.useWebhook) continue;
+    const botKey = deriveBotKey(botCfg);
+    const handler = byId.get(`telegram:${botKey}`)?.webhook;
+    if (!handler) {
+      warn(
+        `telegram bot "${botKey}" is configured with use_webhook but its adapter exposes ` +
+          'no webhook handler — no route was mounted and Telegram deliveries will 404.',
+      );
+      continue;
+    }
+    telegram.set(botKey, handler);
+  }
+
+  for (const appCfg of shimmed.slack?.apps ?? []) {
+    if (!appCfg.mode?.http) continue;
+    const botKey = deriveBotKey(appCfg);
+    const adapter = byId.get(`slack:${botKey}`);
+    const handler = adapter?.requestListener;
+    const route = adapter?.webhookRoute;
+    if (!handler || !route) {
+      warn(
+        `slack app "${botKey}" is configured with mode.http but its adapter exposes no ` +
+          'request listener — no route was mounted and Slack deliveries will 404.',
+      );
+      continue;
+    }
+    slack.set(route, handler);
+  }
+
+  return { telegram, slack };
 }
 
 export async function buildAdapters(
@@ -2751,7 +3033,18 @@ export async function buildAdapters(
             token: botCfg.token,
             cache: telegramCache,
             botKey: deriveBotKey(botCfg),
-            dropPendingUpdates: true,
+            // Straight through, NOT `?? true`: the adapter already defaults
+            // this to `true` (`dropPendingUpdates ?? true`), so defaulting it
+            // here as well would mean two places to change and a config
+            // `false` silently overridden if they ever drift.
+            dropPendingUpdates: botCfg.dropPendingUpdates,
+            // Webhook mode (plan/phases/telegram-slack-webhook-mode.md §2a).
+            // Absent from config = long-poll, exactly today's behaviour. The
+            // adapter throws from `start()` if `useWebhook` arrives without a
+            // URL or secret token, so no validation is duplicated here.
+            ...(botCfg.useWebhook !== undefined ? { useWebhook: botCfg.useWebhook } : {}),
+            ...(botCfg.webhookUrl ? { webhookUrl: botCfg.webhookUrl } : {}),
+            ...(botCfg.webhookSecretToken ? { webhookSecretToken: botCfg.webhookSecretToken } : {}),
             ...(identity ? { identity } : {}),
           }),
         );
@@ -2839,6 +3132,12 @@ export async function buildAdapters(
               ? { longReplyThresholdChars: appCfg.longReplyThresholdChars }
               : {}),
             ...(webUiBaseUrl ? { webUiBaseUrl } : {}),
+            // Inbound transport (plan/phases/telegram-slack-webhook-mode.md
+            // §3b). Absent = Socket Mode, exactly today's behaviour. The
+            // adapter enforces mutual exclusivity and the per-mode credential
+            // requirements (`appToken` for socket, `signingSecret` for http).
+            ...(appCfg.mode ? { mode: appCfg.mode } : {}),
+            ...(appCfg.webhookPath ? { webhookPath: appCfg.webhookPath } : {}),
           }),
         );
       }
@@ -3156,4 +3455,418 @@ async function buildWhatsAppClarifySurfaces(
     );
   }
   return surfaces;
+}
+
+// ---------------------------------------------------------------------------
+// Gateway-role construction seams
+// ---------------------------------------------------------------------------
+//
+// plan/phases/single-process-boot-profile.md §3a/§7 Phase 1: the constructor
+// logic below used to sit inline inside `runGatewayStart`, which meant a third
+// entry point (the merged `boot` profile of §6) could only reuse it by
+// copy-pasting. Each unit is now a named, exported, individually-callable
+// function that `runGatewayStart` calls in place of the inline code —
+// behavior-identical, same order, same arguments.
+//
+// They live in THIS file rather than a sibling module on purpose:
+// `apps/ethos/src/__tests__/daemon-free-smoke.test.ts` asserts that
+// `commands/gateway.ts` is the ONLY file under `apps/ethos/src/` that imports
+// `@ethosagent/gateway`, and every one of these needs a type or a value from
+// it. Moving them out would break the daemon-free doctrine gate.
+
+/** The shape `createAgentLoop` returns — used to type the collaborators the
+ *  extracted builders below receive already-constructed. */
+type AgentLoopBuild = Awaited<ReturnType<typeof createAgentLoop>>;
+
+/**
+ * The shared attachment cache every platform adapter and the `Gateway` read
+ * from, plus its hourly TTL sweep.
+ *
+ * Extracted verbatim from `runGatewayStart`. The timer is returned rather than
+ * hidden because the caller owns teardown — `runGatewayStart`'s `shutdown`
+ * clears it.
+ */
+/**
+ * The gateway role's voice-OUTPUT machinery: the lane voice-mode store, the
+ * ffmpeg transcode stage, the synthesized-artifact store, and the two derived
+ * channel-egress settings.
+ *
+ * Extracted verbatim from `runGatewayStart` (plan §3b step 5). Built ONCE per
+ * process and handed to whichever `Gateway` `buildGateway` constructs — a
+ * second store would mean two caches over the same file and two artifact dirs
+ * over the same bytes, which is exactly the double-construction hazard the
+ * merged `boot` profile has to avoid (plan §3c).
+ */
+export function buildGatewayVoiceOutputs(
+  config: EthosConfig,
+  storage: import('@ethosagent/types').Storage,
+): {
+  voiceModeStore: LaneVoiceModeStore;
+  transcoder: ReturnType<typeof createFfmpegTranscoder>;
+  voiceArtifacts: ReturnType<typeof createVoiceArtifactStore>;
+  channelVoiceOut: ReturnType<typeof deriveChannelVoiceOut>;
+  voiceBitrateKbps: number | undefined;
+} {
+  // The store carries the deployment default, so `defaultVoiceMode` is not also
+  // passed: an injected store's own default is the one the Gateway reads.
+  const voiceModeStore = new LaneVoiceModeStore({
+    storage,
+    path: laneVoiceModePath(ethosDir()),
+    ...(config.voice?.defaultMode ? { defaultMode: config.voice.defaultMode } : {}),
+    onError: (err) => {
+      new ConsoleLogger().warn(`voice lane-mode persist failed: ${err}`);
+    },
+  });
+  // ffmpeg stage. Optional at runtime: an unavailable binary degrades to
+  // pass-through, and the startup probe in the caller says so once.
+  const transcoder = createFfmpegTranscoder({
+    ...(config.voice?.transcode?.ffmpegPath
+      ? { ffmpegPath: config.voice.transcode.ffmpegPath }
+      : {}),
+    // `voice.transcode.timeout` is SECONDS; the option is milliseconds.
+    timeoutMs: (config.voice?.transcode?.timeout ?? 30) * 1000,
+  });
+  // Synthesized audio has to outlive a failed send: redelivery re-sends THOSE
+  // bytes rather than re-synthesizing, which would be a different take.
+  const voiceArtifacts = createVoiceArtifactStore({
+    storage,
+    dir: join(ethosDir(), 'voice', 'artifacts'),
+    onError: (op, err) => {
+      new ConsoleLogger().warn(`voice artifact ${op} failed: ${err}`);
+    },
+  });
+  return {
+    voiceModeStore,
+    transcoder,
+    voiceArtifacts,
+    channelVoiceOut: deriveChannelVoiceOut(config.voice?.channels),
+    voiceBitrateKbps: config.voice?.transcode?.bitrateKbps,
+  };
+}
+
+/**
+ * Re-exported from `@ethosagent/gateway` so the merged `boot` profile can wire
+ * the inbound-webhook server without importing the gateway package itself —
+ * `apps/ethos/src/__tests__/daemon-free-smoke.test.ts` allows exactly one file
+ * under `apps/ethos/src/` to do that, and this is it.
+ */
+export { createCapturingAdapter };
+
+export async function createGatewayAttachmentCache(
+  storage: import('@ethosagent/types').Storage,
+): Promise<{
+  attachmentCache: import('@ethosagent/types').AttachmentCache;
+  pruneTimer: NodeJS.Timeout;
+}> {
+  const { FsAttachmentCache } = await import('@ethosagent/storage-fs');
+  const attachmentCache = new FsAttachmentCache(storage, join(ethosDir(), 'cache', 'attachments'));
+  // TTL sweep — prune cached attachments older than 24 h every hour.
+  const pruneTimer = setInterval(
+    () => {
+      void attachmentCache.pruneOlderThan(24 * 60 * 60 * 1000).catch(() => {});
+    },
+    60 * 60 * 1000,
+  );
+  pruneTimer.unref?.();
+  return { attachmentCache, pruneTimer };
+}
+
+/**
+ * Construct every configured channel adapter for the gateway role (plan §3b
+ * step 5, "channel adapters *constructed* but not started").
+ *
+ * `buildAdapters` was already a named export; what was still inline in
+ * `runGatewayStart` — and is now here — is the WhatsApp QR / pairing-code
+ * reporting the gateway role wires around it: the code is printed to the
+ * console AND pushed to the web API's pairing surface, so an operator can
+ * link a device from either place.
+ */
+export async function buildGatewayAdapters(
+  config: EthosConfig,
+  attachmentCache: import('@ethosagent/types').AttachmentCache,
+): Promise<PlatformAdapter[]> {
+  return buildAdapters(config, loadAdapterModule, attachmentCache, {
+    onWhatsAppQr: (botId, qr) => {
+      import('@ethosagent/web-api').then((m) => m.setWhatsAppQr(botId, qr)).catch(() => {});
+    },
+    onWhatsAppPairingCode: (botId, code) => {
+      if (code !== null) {
+        console.log(
+          `\n  ${c.bold}WhatsApp pairing code for "${botId}": ${c.cyan}${code}${c.reset}\n` +
+            `  ${c.dim}On that phone: WhatsApp \u2192 Linked Devices \u2192 Link with phone number instead \u2192 enter the code.${c.reset}\n`,
+        );
+      }
+      import('@ethosagent/web-api')
+        .then((m) => m.setWhatsAppPairingCode(botId, code))
+        .catch(() => {});
+    },
+  });
+}
+
+/**
+ * Register the per-platform clarify surfaces and derive the Gateway's
+ * `clarifyMessageCorrelator`.
+ *
+ * Extracted verbatim from `runGatewayStart` (plan §3b step 5, "clarify
+ * surfaces registered per platform"). `resolveApprovalRoute` is the caller's
+ * late-bound handle on the not-yet-constructed Gateway — the surfaces and the
+ * Gateway each need a reference to the other, so the caller passes a closure
+ * over its own mutable holder rather than the Gateway itself.
+ *
+ * Telegram and WhatsApp are text-only surfaces, so they correlate a reply by
+ * matching an inbound message; Slack and Discord register their own
+ * interaction listeners on the adapter and contribute nothing to the
+ * correlator.
+ */
+export async function registerGatewayClarifySurfaces(opts: {
+  bots: GatewayBotConfig[];
+  adapters: PlatformAdapter[];
+  systemLoop: AgentLoop;
+  resolveApprovalRoute: (
+    sessionId: string,
+  ) => { chatId: string; threadId?: string; requesterUserId?: string } | undefined;
+}): Promise<{
+  clarifyMessageCorrelator?: (msg: InboundMessage) => Promise<ClarifyResponse | null>;
+}> {
+  const { bots, adapters, systemLoop, resolveApprovalRoute } = opts;
+  const telegramClarifySurfaces = await buildTelegramClarifySurfaces(
+    bots,
+    adapters,
+    (sessionId) => {
+      const route = resolveApprovalRoute(sessionId);
+      if (!route) return undefined;
+      return route.requesterUserId !== undefined
+        ? { chatId: route.chatId, requesterUserId: route.requesterUserId }
+        : { chatId: route.chatId };
+    },
+  );
+  // Slack clarify surfaces are wired identically — only the surface module
+  // and the routing fields differ (Slack carries a `threadId` for thread
+  // routing). The surfaces register their own `block_actions` /
+  // `view_submission` listeners on the adapter; the gateway never calls into
+  // them directly, so they don't contribute to `clarifyMessageCorrelator`.
+  await buildSlackClarifySurfaces(bots, adapters, (sessionId) => {
+    const route = resolveApprovalRoute(sessionId);
+    if (!route) return undefined;
+    return {
+      chatId: route.chatId,
+      ...(route.threadId !== undefined ? { threadId: route.threadId } : {}),
+      ...(route.requesterUserId !== undefined ? { requesterUserId: route.requesterUserId } : {}),
+    };
+  });
+  // Discord clarify surfaces — same pattern as Slack but no thread routing.
+  // Discord delivers component clicks via `interactionCreate`, which the
+  // surface registers on directly via `adapter.onClarifyInteraction`.
+  // Discord now appears in `buildGatewayBots`, so the surface binds to that
+  // per-bot loop's bridge; `systemLoop` remains the fallback for the rare
+  // case where no bot entry matched.
+  await buildDiscordClarifySurfaces(bots, adapters, systemLoop, (sessionId) => {
+    const route = resolveApprovalRoute(sessionId);
+    if (!route) return undefined;
+    return {
+      chatId: route.chatId,
+      ...(route.requesterUserId !== undefined ? { requesterUserId: route.requesterUserId } : {}),
+    };
+  });
+  // WhatsApp clarify surfaces — text-only (Baileys cannot send buttons or
+  // lists), so like Telegram they resolve through `correlateMessage`.
+  const whatsAppClarifySurfaces = await buildWhatsAppClarifySurfaces(
+    bots,
+    adapters,
+    (sessionId) => {
+      const route = resolveApprovalRoute(sessionId);
+      if (!route) return undefined;
+      return route.requesterUserId !== undefined
+        ? { chatId: route.chatId, requesterUserId: route.requesterUserId }
+        : { chatId: route.chatId };
+    },
+  );
+  const correlatingClarifySurfaces = [...telegramClarifySurfaces, ...whatsAppClarifySurfaces];
+  const clarifyMessageCorrelator =
+    correlatingClarifySurfaces.length > 0
+      ? async (msg: InboundMessage): Promise<ClarifyResponse | null> => {
+          for (const surface of correlatingClarifySurfaces) {
+            const r = await surface.correlateMessage(msg);
+            if (r) return r;
+          }
+          return null;
+        }
+      : undefined;
+  return clarifyMessageCorrelator ? { clarifyMessageCorrelator } : {};
+}
+
+/**
+ * Construct the `Gateway` for the gateway role.
+ *
+ * Extracted verbatim from `runGatewayStart` (plan §3b step 5, "`Gateway` class
+ * constructed"). The two-branch shape is preserved exactly: with no bot
+ * configured the Gateway is built on the single system loop and skips the
+ * bot-only collaborators (attachment cache, clarify correlator, Telegram card
+ * / greeting readers); with bots it is built on the routing table.
+ */
+export interface BuildGatewayOptions {
+  config: EthosConfig;
+  bots: GatewayBotConfig[];
+  /** Used only on the no-bot idle path (`GatewayConfig.loop`). */
+  systemLoop: AgentLoop;
+  /** Platform-keyed adapter registry for cross-platform `send_message`. */
+  adapterMap: Map<string, PlatformAdapter>;
+  deliveryLedger: GatewayConfig['deliveryLedger'];
+  inboundDedup: GatewayConfig['inboundDedup'];
+  resolveUserId: GatewayConfig['resolveUserId'];
+  /** `GatewayConfig['pluginLoader']` is narrower than what `createAgentLoop`
+   *  returns — `pluginAdapters` is derived here via `getPlatformAdapters()`,
+   *  which that narrower shape does not declare. */
+  pluginLoader: AgentLoopBuild['pluginLoader'];
+  trustedChannelPlugins: GatewayConfig['trustedChannelPlugins'];
+  notificationRouter: NotificationRouter;
+  storage: GatewayConfig['storage'];
+  attachmentCache: NonNullable<GatewayConfig['attachmentCache']>;
+  sttProviders: GatewayConfig['sttProviderRegistry'];
+  ttsProviders: GatewayConfig['ttsProviderRegistry'];
+  voiceConfig: AgentLoopBuild['voiceConfig'];
+  voiceModeStore: GatewayConfig['voiceModeStore'];
+  voiceArtifacts: GatewayConfig['voiceArtifacts'];
+  transcoder: GatewayConfig['transcoder'];
+  channelVoiceOut: GatewayConfig['channelVoiceOut'];
+  voiceBitrateKbps: GatewayConfig['voiceBitrateKbps'];
+  personalityDirectory: GatewayConfig['personalityDirectory'];
+  onTurnComplete: GatewayConfig['onTurnComplete'];
+  onUserTurn: GatewayConfig['onUserTurn'];
+  streamingEdits: GatewayConfig['streamingEdits'];
+  pairingDb: GatewayConfig['pairingDb'];
+  clarifyMessageCorrelator: GatewayConfig['clarifyMessageCorrelator'];
+  personalityCardReader: GatewayConfig['personalityCardReader'];
+  greetingProvider: GatewayConfig['greetingProvider'];
+}
+
+export function buildGateway(opts: BuildGatewayOptions): Gateway {
+  const {
+    config,
+    bots,
+    systemLoop,
+    adapterMap,
+    deliveryLedger,
+    inboundDedup,
+    resolveUserId,
+    pluginLoader,
+    trustedChannelPlugins,
+    notificationRouter: gatewayNotificationRouter,
+    storage,
+    attachmentCache,
+    sttProviders,
+    ttsProviders,
+    voiceConfig,
+    voiceModeStore,
+    voiceArtifacts,
+    transcoder,
+    channelVoiceOut,
+    voiceBitrateKbps,
+    personalityDirectory,
+    onTurnComplete,
+    onUserTurn,
+    streamingEdits,
+    pairingDb,
+    clarifyMessageCorrelator,
+    personalityCardReader: telegramCardReader,
+    greetingProvider: telegramGreetingProvider,
+  } = opts;
+  return bots.length === 0
+    ? // No platform configured — idle gateway. Every configured platform
+      // (including Discord/Email) now registers a bot in `buildGatewayBots`,
+      // so this single-loop path is reached only when nothing is wired up.
+      new Gateway({
+        loop: systemLoop,
+        defaultPersonality: config.personality,
+        adapters: adapterMap,
+        deliveryLedger,
+        inboundDedup,
+        resolveUserId,
+        pluginLoader,
+        pluginAdapters: pluginLoader.getPlatformAdapters(),
+        trustedChannelPlugins,
+        notificationRouter: gatewayNotificationRouter,
+        sttProviderRegistry: sttProviders,
+        sttProviderName: voiceConfig.sttProviderName,
+        sttProviderConfig: voiceConfig.sttProviderConfig,
+        ttsProviderRegistry: ttsProviders,
+        ttsProviderName: voiceConfig.ttsProviderName,
+        ttsProviderConfig: voiceConfig.ttsProviderConfig,
+        // The named rosters (`voice.stt.providers.*` / `voice.tts.providers.*`)
+        // a personality's `voice.stt_provider` / `voice.tts_provider` selects
+        // from. Without them the gateway resolves every lane onto the default
+        // entry, so per-personality voice would be live in `buildVoiceStack`
+        // and silently inert on every channel.
+        ...(voiceConfig.sttRoster ? { sttProviderRoster: voiceConfig.sttRoster } : {}),
+        ...(voiceConfig.ttsRoster ? { ttsProviderRoster: voiceConfig.ttsRoster } : {}),
+        voiceSecretsResolver: voiceConfig.secretsResolver,
+        // Local-only voice-egress gate (`voice.trustedPlugins`); undefined = off.
+        ...(voiceConfig.trustedVoicePlugins
+          ? { trustedVoicePlugins: voiceConfig.trustedVoicePlugins }
+          : {}),
+        // Where a NEW lane starts (`voice.defaultMode`); `/voice` still wins
+        // per lane, and the store persists that choice across restarts.
+        voiceModeStore,
+        voiceArtifacts,
+        transcoder,
+        ...(channelVoiceOut ? { channelVoiceOut } : {}),
+        ...(voiceBitrateKbps !== undefined ? { voiceBitrateKbps } : {}),
+        personalityDirectory,
+        onTurnComplete,
+        onUserTurn,
+        streamingEdits,
+        ...(config.channelToolsets ? { channelToolsets: config.channelToolsets } : {}),
+        ...(config.channelFilter ? { channelFilter: config.channelFilter } : {}),
+        ...(pairingDb ? { pairingDb } : {}),
+      })
+    : new Gateway({
+        bots,
+        attachmentCache,
+        // Reading cached attachment bytes: an inbound voice note is
+        // transcribed from the audio itself, not from a path.
+        storage,
+        adapters: adapterMap,
+        deliveryLedger,
+        inboundDedup,
+        resolveUserId,
+        pluginLoader,
+        pluginAdapters: pluginLoader.getPlatformAdapters(),
+        trustedChannelPlugins,
+        notificationRouter: gatewayNotificationRouter,
+        sttProviderRegistry: sttProviders,
+        sttProviderName: voiceConfig.sttProviderName,
+        sttProviderConfig: voiceConfig.sttProviderConfig,
+        ttsProviderRegistry: ttsProviders,
+        ttsProviderName: voiceConfig.ttsProviderName,
+        ttsProviderConfig: voiceConfig.ttsProviderConfig,
+        // The named rosters (`voice.stt.providers.*` / `voice.tts.providers.*`)
+        // a personality's `voice.stt_provider` / `voice.tts_provider` selects
+        // from. Without them the gateway resolves every lane onto the default
+        // entry, so per-personality voice would be live in `buildVoiceStack`
+        // and silently inert on every channel.
+        ...(voiceConfig.sttRoster ? { sttProviderRoster: voiceConfig.sttRoster } : {}),
+        ...(voiceConfig.ttsRoster ? { ttsProviderRoster: voiceConfig.ttsRoster } : {}),
+        voiceSecretsResolver: voiceConfig.secretsResolver,
+        // Local-only voice-egress gate (`voice.trustedPlugins`); undefined = off.
+        ...(voiceConfig.trustedVoicePlugins
+          ? { trustedVoicePlugins: voiceConfig.trustedVoicePlugins }
+          : {}),
+        // Where a NEW lane starts (`voice.defaultMode`); `/voice` still wins
+        // per lane, and the store persists that choice across restarts.
+        voiceModeStore,
+        voiceArtifacts,
+        transcoder,
+        ...(channelVoiceOut ? { channelVoiceOut } : {}),
+        ...(voiceBitrateKbps !== undefined ? { voiceBitrateKbps } : {}),
+        personalityDirectory,
+        onTurnComplete,
+        onUserTurn,
+        streamingEdits,
+        ...(config.channelToolsets ? { channelToolsets: config.channelToolsets } : {}),
+        ...(clarifyMessageCorrelator ? { clarifyMessageCorrelator } : {}),
+        ...(telegramCardReader ? { personalityCardReader: telegramCardReader } : {}),
+        ...(telegramGreetingProvider ? { greetingProvider: telegramGreetingProvider } : {}),
+        ...(config.channelFilter ? { channelFilter: config.channelFilter } : {}),
+        ...(pairingDb ? { pairingDb } : {}),
+      });
 }

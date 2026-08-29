@@ -21,6 +21,11 @@ export interface StubLoopOptions {
   events?: AgentEvent[];
   /** If provided, called on every run with the input text + opts. */
   onRun?: (input: string, opts: unknown) => void;
+  /**
+   * If provided, `run()` awaits this before yielding any event — lets a test
+   * hold a turn in flight while it observes busy state.
+   */
+  gate?: Promise<void>;
 }
 
 export function makeStubAgentLoop(options: StubLoopOptions = {}): AgentLoop {
@@ -31,6 +36,7 @@ export function makeStubAgentLoop(options: StubLoopOptions = {}): AgentLoop {
     hooks: new DefaultHookRegistry(),
     async *run(input: string, opts: unknown): AsyncGenerator<AgentEvent> {
       options.onRun?.(input, opts);
+      if (options.gate) await options.gate;
       for (const event of events) yield event;
     },
   };

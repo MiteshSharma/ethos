@@ -17,6 +17,7 @@ import {
   type TtsProviderForPersonality,
 } from '@ethosagent/core';
 import type { DeliveryLedger, DeliveryObligation } from '@ethosagent/delivery-ledger';
+import type { InboundDedupStore } from '@ethosagent/inbound-dedup';
 import type { ChannelFilterConfig } from '@ethosagent/safety-channel';
 import {
   checkMessage,
@@ -388,6 +389,16 @@ export interface GatewayConfig {
    */
   deliveryLedger?: DeliveryLedger;
   /**
+   * Durable backstop for the in-memory inbound dedup `Set`
+   * (plan/phases/telegram-slack-webhook-mode.md §5). Consulted only when the
+   * `Set` misses, so a continuously-running process pays nothing for it.
+   *
+   * Absent → today's behavior: in-memory only, which a process restart
+   * empties. That is the gap webhook mode + scale-to-zero turns from a rare
+   * crash-time risk into a routine one.
+   */
+  inboundDedup?: InboundDedupStore;
+  /**
    * Maximum number of distinct chats kept in memory. The least-recently-used
    * idle chat is evicted (its lane, session key, personality override, and
    * usage stats are forgotten) once this cap is exceeded. Active in-flight
@@ -703,10 +714,15 @@ export class Gateway {
   /** Bounded LRU of recently-seen inbound-message keys. */
   private readonly seenMessages = new Set<string>();
   private readonly dedupWindow: number;
+  /** Durable dedup backstop. Absent → in-memory only. */
+  private readonly inboundDedup: InboundDedupStore | undefined;
   /** Outbound-message dedup cache. Suppresses `(sessionId, content)` within TTL. */
   private readonly outboundDedup: MessageDedupCache;
   /** Durable delivery-obligation ledger (item 9). Absent → no durability. */
   private readonly deliveryLedger: DeliveryLedger | undefined;
+  /** Accumulated host-pause duration discounted from the stale-obligation
+   *  abandon window. See `applyPauseOffset`. */
+  private pauseOffsetMs = 0;
   /** Streaming draft edits enabled for DMs / group chats (W3.1). */
   private readonly streamingDm: boolean;
   private readonly streamingGroup: boolean;
@@ -916,6 +932,7 @@ export class Gateway {
     }
 
     this.dedupWindow = config.dedupWindow ?? 1024;
+    this.inboundDedup = config.inboundDedup;
     this.maxChats = config.maxChats ?? 4096;
     this.channelFilter = config.channelFilter;
     this.channelToolsets = config.channelToolsets;
@@ -1222,18 +1239,47 @@ export class Gateway {
    * `messageId` arriving through two different bots is two distinct
    * inbounds, not a duplicate. (Without the botKey segment, multi-bot
    * routing would silently drop one of them.)
+   *
+   * TWO LAYERS, both keyed identically. The in-memory `Set` is the fast path
+   * and answers alone whenever it hits. Only on a miss — and only when a
+   * durable store is configured — does this touch SQLite, because a process
+   * restart empties the `Set` and a platform redelivery arriving at the fresh
+   * process would otherwise be fully reprocessed and re-billed. Under webhook
+   * mode with scale-to-zero that restart is routine rather than rare.
+   *
+   * Synchronous on purpose: the durable store is synchronous too
+   * (`@ethosagent/sqlite` has no async API), and awaiting here would reorder
+   * the inbound pipeline for every message to pay for a cold-start edge.
    */
   private isDuplicate(message: InboundMessage, botKey: string): boolean {
+    // Both layers are disabled together — `dedupWindow: 0` means "no dedup",
+    // not "no in-memory dedup".
     if (this.dedupWindow <= 0 || !message.messageId) return false;
     const key = buildLaneKey(message.platform, botKey, message.chatId, message.messageId);
     if (this.seenMessages.has(key)) return true;
+    // `Set` miss. The durable layer records the sighting and reports whether it
+    // had already seen this key — from this process or a previous one.
+    //
+    // DURABLE FIRST, THEN THE SET, AND THAT ORDER IS LOAD-BEARING. `seen()` is a
+    // synchronous SQLite write and can throw (lock contention past the busy
+    // timeout, a corrupt or unwritable file). Recording the key in memory first
+    // meant a throw left the process holding a sighting that was never durably
+    // stored: this delivery fails, and then every platform retry for the rest of
+    // the process's life short-circuits on `seenMessages.has(key)` above and is
+    // dropped as a duplicate. The retry is the platform's attempt to save the
+    // message the failure lost, and the poisoned entry is what silently
+    // discarded it. Letting the throw propagate with the Set untouched fails
+    // open instead: the retry is reprocessed.
+    const duplicate = this.inboundDedup
+      ? this.inboundDedup.seen(message.platform, botKey, message.chatId, message.messageId)
+      : false;
     this.seenMessages.add(key);
     // Bound the set — drop the oldest entry once we exceed the window.
     if (this.seenMessages.size > this.dedupWindow) {
       const first = this.seenMessages.values().next().value;
       if (first !== undefined) this.seenMessages.delete(first);
     }
-    return false;
+    return duplicate;
   }
 
   // ---------------------------------------------------------------------------
@@ -1254,6 +1300,9 @@ export class Gateway {
     // full resolution. Adapters stamp `botKey` consistently, so the two agree
     // in practice; single-bot has one loop, so a stale/foreign botKey here has
     // no cross-bot effect. The namespace divergence is deliberate, not a bug.
+    // The durable backstop (`inboundDedup`) sits BEHIND this same call, keyed
+    // on the same `dedupBotKey`, so adding it changed nothing about when dedup
+    // runs relative to botKey resolution or the safety filter.
     const dedupBotKey = message.botKey ?? this.defaultBotKey ?? '';
     if (!message.isEdit && this.isDuplicate(message, dedupBotKey)) return;
 
@@ -2861,6 +2910,22 @@ export class Gateway {
   }
 
   /**
+   * Whether any turn is in flight on this gateway — the busy predicate an
+   * idle-watcher consults before a scale-to-zero host is told it may snapshot
+   * or stop the VM.
+   *
+   * Both maps are read from one accessor because they are two halves of the
+   * same fact: `activeTurns` and `activeSinks` are set together at turn start
+   * and deleted together in `runTurn`'s `finally`, so they are normally empty
+   * or non-empty as a pair. The `||` is the conservative half — if a sink ever
+   * outlived its turn it would still be work in flight, and answering "idle"
+   * there would stop the process out from under a live steer.
+   */
+  hasActiveTurns(): boolean {
+    return this.activeTurns.size > 0 || this.activeSinks.size > 0;
+  }
+
+  /**
    * Stop all active session lanes gracefully. If `notify` is set, send that
    * text to every chat with an in-flight turn before aborting — so users
    * never see silent failure on shutdown / upgrade. See IMPROVEMENT.md P1-1
@@ -3253,6 +3318,31 @@ export class Gateway {
   }
 
   /**
+   * Discount a host pause from the stale-obligation abandon window.
+   *
+   * On a snapshot-and-restore host the wall clock advances while the guest is
+   * frozen. If the pause alone exceeds `abandonAfterDays`, the first
+   * post-resume sweep abandons — and, for voice, DELETES the audio artifact of
+   * — an obligation that was never actually lost. Successive pauses accumulate
+   * until spent. Non-positive or non-finite durations are a no-op.
+   *
+   * SPENT ON THE FIRST SWEEP, NOT HELD FOREVER. The offset widens the abandon
+   * window for the sweep that follows the resume and is then zeroed. Holding it
+   * permanently would apply it to obligations CREATED AFTER the resume, whose
+   * `created_at` was stamped by an already-correct clock: a seven-day pause
+   * would silently grant every future obligation seven extra retention days,
+   * and repeated pauses would compound that without bound until nothing was
+   * ever abandoned. Plan §2's own wording for this gate is "the first
+   * post-resume sweep"; one-shot is what makes it match the self-limiting
+   * bump-forward the other gates use, where the correction lands on the stored
+   * timestamps of rows that already exist and cannot touch later ones.
+   */
+  applyPauseOffset(pauseDurationMs: number): void {
+    if (!Number.isFinite(pauseDurationMs) || pauseDurationMs <= 0) return;
+    this.pauseOffsetMs += pauseDurationMs;
+  }
+
+  /**
    * Retention pass for synthesized voice artifacts.
    *
    * Three mechanisms, in the order they should fire: an obligation that was
@@ -3276,7 +3366,11 @@ export class Gateway {
 
     let abandoned = 0;
     try {
-      const cutoff = Date.now() - opts.abandonAfterDays * 86_400_000;
+      // Read and SPEND in one step — see `applyPauseOffset`. Zeroed before the
+      // await, not after, so a sweep that throws still consumes it: a retained
+      // offset would re-widen every later sweep for the life of the process.
+      const cutoff = Date.now() - opts.abandonAfterDays * 86_400_000 - this.pauseOffsetMs;
+      this.pauseOffsetMs = 0;
       // Ownership-filtered inside the ledger: a shared ledger file must never
       // let this deployment abandon a live peer's obligation.
       const rows = await ledger.abandonStale([...this.bots.keys()], cutoff);

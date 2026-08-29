@@ -30,6 +30,7 @@ export * from './monitor';
 export * from './notification-router';
 export * from './oauth';
 export * from './observability';
+export * from './pause-lifecycle';
 export * from './personality';
 export * from './platform';
 export * from './plugin';

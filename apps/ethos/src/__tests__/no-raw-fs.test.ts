@@ -31,10 +31,13 @@
 //   extensions/session-cards/     and notify-queue also mkdirSync the db's parent dir.
 //   extensions/call-log/          delivery-ledger's atomic redelivery claim is a
 //   extensions/notify-queue/      conditional UPDATE and session-cards derives its
-//                                 per-session `seq` with MAX()+1 inside the insert
+//   extensions/inbound-dedup/     per-session `seq` with MAX()+1 inside the insert
 //                                 — both need a real transaction, not file IO.
 //                                 notify-queue's read-and-consume is the same shape:
-//                                 a SELECT then UPDATE inside one transaction.)
+//                                 a SELECT then UPDATE inside one transaction, and
+//                                 inbound-dedup's check-and-record is one
+//                                 `INSERT OR IGNORE` whose affected-row count IS
+//                                 the answer.)
 //
 //   packages/a2a/                Same rationale as the SQLite stores above:
 //   src/sqlite-task-store.ts     SQLiteA2aTaskStore (T1.6) opens a raw path via
@@ -213,6 +216,7 @@ const ALLOWED_PREFIXES = [
   'extensions/session-cards/',
   'extensions/call-log/',
   'extensions/notify-queue/',
+  'extensions/inbound-dedup/',
   'extensions/voice-providers/',
   'extensions/agent-mesh/',
   'extensions/llm-codex/',

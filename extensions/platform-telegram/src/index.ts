@@ -1,3 +1,4 @@
+import type { IncomingMessage, ServerResponse } from 'node:http';
 import { join } from 'node:path';
 import type {
   AdapterCapabilities,
@@ -403,8 +404,7 @@ export class TelegramAdapter
   /** JSONL-backed thread-follow tracking (Gap 4). */
   private readonly threadState?: ThreadStateStore;
   /** Webhook callback for external HTTP server wiring (Gap 6). */
-  // biome-ignore lint/suspicious/noExplicitAny: grammy's webhookCallback returns an Express-typed handler
-  private webhookCb?: (...args: any[]) => any;
+  private webhookCb?: (req: IncomingMessage, res: ServerResponse) => Promise<void>;
 
   constructor(config: TelegramAdapterConfig) {
     this.bot = new Bot(config.token);
@@ -688,7 +688,7 @@ export class TelegramAdapter
       await this.bot.api.setWebhook(this.config.webhookUrl, {
         secret_token: this.config.webhookSecretToken,
       });
-      this.webhookCb = webhookCallback(this.bot, 'express', {
+      this.webhookCb = webhookCallback(this.bot, 'http', {
         secretToken: this.config.webhookSecretToken,
       });
     } else {
@@ -715,14 +715,15 @@ export class TelegramAdapter
 
   /**
    * Webhook callback for external HTTP server wiring (Gap 6).
-   * Returns an Express-compatible middleware when webhook mode is enabled,
-   * `undefined` when polling. The host app mounts it on a route:
+   * Returns a plain `node:http` request handler when webhook mode is enabled,
+   * `undefined` when polling. grammy's `'http'` adapter reads the raw request
+   * body itself and answers the response, so the host must mount it without
+   * pre-parsing the body:
    * ```ts
-   * app.post('/telegram/webhook', adapter.webhook);
+   * createServer((req, res) => { void adapter.webhook?.(req, res); });
    * ```
    */
-  // biome-ignore lint/suspicious/noExplicitAny: grammy's webhookCallback returns an Express-typed handler
-  get webhook(): ((...args: any[]) => any) | undefined {
+  get webhook(): ((req: IncomingMessage, res: ServerResponse) => Promise<void>) | undefined {
     return this.webhookCb;
   }
 

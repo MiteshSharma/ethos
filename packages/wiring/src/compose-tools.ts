@@ -58,6 +58,7 @@ import { createTeamDesignTools } from '@ethosagent/tools-personality-design';
 import { compose as composePersonalityDesign } from '@ethosagent/tools-personality-design/compose';
 import { createProcessGuardHook } from '@ethosagent/tools-process';
 import { compose as composeProcess } from '@ethosagent/tools-process/compose';
+import { createRedditSearchTool } from '@ethosagent/tools-reddit';
 import { compose as composeSkillsTools } from '@ethosagent/tools-skills/compose';
 import { createTerminalGuardHook, createTerminalTools } from '@ethosagent/tools-terminal';
 import { createThinkDeeperTool } from '@ethosagent/tools-tier';
@@ -65,6 +66,7 @@ import { compose as composeTodo } from '@ethosagent/tools-todo/compose';
 import { buildCardTools, buildUiTools, createUiGuidanceInjector } from '@ethosagent/tools-ui';
 import { createVoiceTools } from '@ethosagent/tools-voice';
 import { compose as composeWatchers } from '@ethosagent/tools-watchers/compose';
+import { createXSearchTool } from '@ethosagent/tools-x-search';
 import type {
   ContextInjector,
   ExecutionBackend,
@@ -689,6 +691,8 @@ export async function composeAllTools(
   // -------------------------------------------------------------------------
 
   for (const tool of createFileTools()) tools.register(tool);
+  tools.register(createXSearchTool());
+  tools.register(createRedditSearchTool());
   for (const tool of createTerminalTools({
     backend: executionBackend,
     personality: activePerson,

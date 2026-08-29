@@ -247,6 +247,13 @@ export interface JobStore {
   /** Count non-terminal (queued|running|blocked) jobs for a personality. A parked run still holds its slot. */
   countActiveByPersonality(personalityId: string): Promise<number>;
   /**
+   * Count non-terminal (queued|running|blocked) jobs across the whole store —
+   * the unscoped sibling of the two counts above. Answers "is any durable job
+   * still owed work" for an idle predicate, where no root or personality
+   * scopes the question.
+   */
+  countActive(): Promise<number>;
+  /**
    * running rows whose heartbeat is older than staleMs -> stale. Returns the rows
    * transitioned. `blocked` rows are IGNORED — a parked human question must never
    * look like a dead host.

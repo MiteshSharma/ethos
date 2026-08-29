@@ -11,7 +11,7 @@ export type { HealthResponse, ProbedMember, ProbeFunction } from './health';
 export { probeHealth, startHealthProbeLoop } from './health';
 export type { SupervisorEventKind, SupervisorLogEntry } from './logger';
 export { logSupervisorEvent, supervisorLogPath } from './logger';
-export { acquirePidFile } from './pid';
+export { acquirePidFile, hasLiveTeamProcesses, isProcessAlive } from './pid';
 export type { PortAllocation } from './ports';
 export { allocatePort, allocatePorts, isPortInUse } from './ports';
 export type { MemberRuntime, MemberStatus, TeamRuntime } from './runtime';

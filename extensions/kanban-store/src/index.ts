@@ -1391,6 +1391,44 @@ export class KanbanStore {
   }
 
   /**
+   * Discount a host pause from every active run's and running task's liveness
+   * clock.
+   *
+   * A run that was genuinely alive across a VM suspend wrote no heartbeat while
+   * the host was stopped, so the first post-resume sweep reads the pause as a
+   * stuck agent: `findStalledRuns` blocks the run, and `findStaleRunningTasks`
+   * feeds `reclaimTask`, whose re-claim through `updateStatus('running')`
+   * increments `retry_count` — burning real budget out of `max_retries` for
+   * time nobody was running. Advancing both liveness columns by the pause
+   * duration — once, at the resume boundary, before either gate compares again
+   * — corrects the timestamps without touching the gates: a run that really
+   * went quiet is still past its cutoff afterwards.
+   *
+   * Both columns move together, the same pairing `heartbeatRun` writes.
+   *
+   * Returns the total rows bumped (runs + tasks). A non-positive or non-finite
+   * duration writes nothing.
+   */
+  bumpActiveHeartbeats(pauseDurationMs: number): number {
+    // Both columns are INTEGER in STRICT tables — a fractional offset would
+    // make the sum a REAL and the write would throw.
+    const offset = Math.round(pauseDurationMs);
+    if (!Number.isFinite(pauseDurationMs) || offset <= 0) return 0;
+    const tx = this.db.transaction((): number => {
+      const runs = this.db
+        .prepare(
+          'UPDATE task_runs SET last_heartbeat_at = last_heartbeat_at + ? WHERE ended_at IS NULL',
+        )
+        .run(offset);
+      const tasks = this.db
+        .prepare(`UPDATE tasks SET updated_at = updated_at + ? WHERE status = 'running'`)
+        .run(offset);
+      return runs.changes + tasks.changes;
+    });
+    return tx();
+  }
+
+  /**
    * Find open runs whose `last_heartbeat_at` is older than `cutoffMs` ago.
    * The caller (typically the dispatcher) decides what to do — usually
    * `blockRun(id, 'stalled')`.

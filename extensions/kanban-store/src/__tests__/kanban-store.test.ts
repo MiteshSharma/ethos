@@ -2317,3 +2317,145 @@ describe('KanbanStore', () => {
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// Host-pause tolerance — bumpActiveHeartbeats
+//
+// A suspended VM stops every agent's heartbeat without killing the work. The
+// two gates (`findStalledRuns`, `findStaleRunningTasks`) are left exactly as
+// they are; only the timestamps they compare get corrected, once, at the
+// resume boundary.
+// ---------------------------------------------------------------------------
+
+describe('KanbanStore.bumpActiveHeartbeats', () => {
+  const SIX_HOURS = 6 * 3_600_000;
+  const CUTOFF_MS = 90_000;
+
+  let store: KanbanStore;
+
+  beforeEach(() => {
+    store = makeStore();
+  });
+
+  afterEach(() => {
+    store.close();
+  });
+
+  /** Test-only shortcut for backdating a liveness column, as elsewhere in this file. */
+  function rawUpdate(sql: string, ...params: Array<number | string>): void {
+    (
+      store as unknown as {
+        db: { prepare: (s: string) => { run: (...a: Array<number | string>) => void } };
+      }
+    ).db
+      .prepare(sql)
+      .run(...params);
+  }
+
+  it('WITHOUT a bump, a run alive across a 6h host pause reads as stalled AND its task as orphaned', () => {
+    const task = store.createTask({ title: 'long migration', assignee: 'engineer' });
+    store.updateStatus(task.id, 'running', undefined, 'engineer');
+    const resumeNow = Date.now() + SIX_HOURS;
+
+    expect(store.findStalledRuns(CUTOFF_MS, resumeNow).map((r) => r.taskId)).toEqual([task.id]);
+    expect(store.findStaleRunningTasks(CUTOFF_MS, resumeNow).map((t) => t.id)).toEqual([task.id]);
+  });
+
+  it('bumping by the pause duration first clears both gates', () => {
+    const task = store.createTask({ title: 'long migration', assignee: 'engineer' });
+    store.updateStatus(task.id, 'running', undefined, 'engineer');
+    const resumeNow = Date.now() + SIX_HOURS;
+
+    // One open run + one running task.
+    expect(store.bumpActiveHeartbeats(SIX_HOURS)).toBe(2);
+
+    expect(store.findStalledRuns(CUTOFF_MS, resumeNow)).toEqual([]);
+    expect(store.findStaleRunningTasks(CUTOFF_MS, resumeNow)).toEqual([]);
+    expect(store.getTask(task.id)?.status).toBe('running');
+  });
+
+  it('an agent that genuinely went quiet BEFORE the pause is still caught after the bump', () => {
+    const alive = store.createTask({ title: 'alive' });
+    store.updateStatus(alive.id, 'running');
+    const quiet = store.createTask({ title: 'quiet' });
+    store.updateStatus(quiet.id, 'running');
+
+    const now = Date.now();
+    // `quiet` stopped heartbeating 10 minutes before the host was suspended.
+    const quietRunId = store.getTask(quiet.id)?.currentRunId as string;
+    rawUpdate('UPDATE task_runs SET last_heartbeat_at = ? WHERE id = ?', now - 600_000, quietRunId);
+    rawUpdate('UPDATE tasks SET updated_at = ? WHERE id = ?', now - 600_000, quiet.id);
+
+    // Both clocks move by the same amount, so the bump cannot blind either gate
+    // to a stall that predates the pause.
+    expect(store.bumpActiveHeartbeats(SIX_HOURS)).toBe(4);
+
+    const resumeNow = now + SIX_HOURS;
+    expect(store.findStalledRuns(CUTOFF_MS, resumeNow).map((r) => r.taskId)).toEqual([quiet.id]);
+    expect(store.findStaleRunningTasks(CUTOFF_MS, resumeNow).map((t) => t.id)).toEqual([quiet.id]);
+  });
+
+  it('leaves ended runs and non-running tasks untouched', () => {
+    const todo = store.createTask({ title: 'todo' });
+    const done = store.createTask({ title: 'done' });
+    store.updateStatus(done.id, 'running');
+    store.completeRun(done.id, 'shipped');
+    const blocked = store.createTask({ title: 'blocked' });
+    store.updateStatus(blocked.id, 'running');
+    store.blockRun(blocked.id, 'waiting on review');
+    const running = store.createTask({ title: 'running' });
+    store.updateStatus(running.id, 'running');
+
+    const before = [todo, done, blocked].map((t) => ({
+      id: t.id,
+      updatedAt: store.getTask(t.id)?.updatedAt,
+      runs: store.listRuns(t.id).map((r) => r.lastHeartbeatAt),
+    }));
+
+    // Only the one open run and the one running task.
+    expect(store.bumpActiveHeartbeats(SIX_HOURS)).toBe(2);
+
+    for (const snapshot of before) {
+      expect(store.getTask(snapshot.id)?.updatedAt).toBe(snapshot.updatedAt);
+      expect(store.listRuns(snapshot.id).map((r) => r.lastHeartbeatAt)).toEqual(snapshot.runs);
+    }
+    expect(store.listRuns(running.id)[0]?.lastHeartbeatAt).toBeGreaterThan(Date.now());
+    expect(store.getTask(running.id)?.updatedAt).toBeGreaterThan(Date.now());
+  });
+
+  it('writes nothing for a zero, negative or non-finite pause', () => {
+    const task = store.createTask({ title: 'running' });
+    store.updateStatus(task.id, 'running');
+    const updatedAt = store.getTask(task.id)?.updatedAt;
+    const heartbeatAt = store.listRuns(task.id)[0]?.lastHeartbeatAt;
+
+    for (const bogus of [0, -SIX_HOURS, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(store.bumpActiveHeartbeats(bogus)).toBe(0);
+    }
+    expect(store.getTask(task.id)?.updatedAt).toBe(updatedAt);
+    expect(store.listRuns(task.id)[0]?.lastHeartbeatAt).toBe(heartbeatAt);
+  });
+
+  it('plan §3.1: the pause burns retry budget without the bump, and none with it', () => {
+    // Today: the first post-resume sweep sees an orphan, reclaimTask cancels the
+    // run, and the re-claim through updateStatus('running') increments
+    // retry_count — real budget spent on time nobody was running.
+    const burned = store.createTask({ title: 'burned', assignee: 'engineer', maxRetries: 1 });
+    store.updateStatus(burned.id, 'running', undefined, 'engineer');
+    const resumeNow = Date.now() + SIX_HOURS;
+
+    expect(store.findStaleRunningTasks(CUTOFF_MS, resumeNow).map((t) => t.id)).toContain(burned.id);
+    store.reclaimTask(burned.id, 'orphan_stale', 'dispatcher');
+    store.updateStatus(burned.id, 'running', undefined, 'engineer');
+    expect(store.getTask(burned.id)?.retryCount).toBe(1);
+
+    // With the pause discounted, the gate does not fire at all — reclaimTask is
+    // never called, so the budget is untouched.
+    const spared = store.createTask({ title: 'spared', assignee: 'engineer', maxRetries: 1 });
+    store.updateStatus(spared.id, 'running', undefined, 'engineer');
+    store.bumpActiveHeartbeats(SIX_HOURS);
+
+    expect(store.findStaleRunningTasks(CUTOFF_MS, resumeNow)).toEqual([]);
+    expect(store.getTask(spared.id)?.retryCount).toBe(0);
+  });
+});

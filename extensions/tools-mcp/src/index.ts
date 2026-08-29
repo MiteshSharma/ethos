@@ -451,8 +451,25 @@ export class McpClient {
     );
   }
 
+  /**
+   * Schedule a reconnect attempt. The backoff ramps 1s/2s/4s/8s/16s and then
+   * HOLDS at a 30s cap, retrying indefinitely.
+   *
+   * It used to give up after five attempts (~31s total). That made any outage
+   * longer than half a minute — a paused VM, a slow network recovery — a
+   * permanent wedge: `_connected` stayed `false` forever and every subsequent
+   * `callTool` fast-failed at the up-front `not_available` gate, which returns
+   * before the connection-error retry branch can ever reschedule. Nothing else
+   * revives the client, because `_startKeepalive()` only restarts from inside a
+   * SUCCESSFUL `connect()`. A non-terminating capped backoff is the smaller of
+   * the two fixes the plan names (the other being a reconnect trigger at that
+   * short-circuit) and it keeps ONE recovery mechanism rather than two.
+   *
+   * `_destroyed` still ends the chain immediately, and the timer is `unref`'d
+   * so an unreachable server never holds the process open.
+   */
   private _scheduleReconnect(attempt: number): void {
-    if (this._destroyed || attempt >= 5) return;
+    if (this._destroyed) return;
     if (!this._reconnectPromise) {
       this._reconnectPromise = new Promise((resolve) => {
         this._reconnectResolve = resolve;
@@ -460,7 +477,7 @@ export class McpClient {
     }
     const delay = Math.min(1000 * 2 ** attempt, 30_000);
     const gen = ++this._generation;
-    this._reconnectTimer = setTimeout(async () => {
+    const timer = setTimeout(async () => {
       this._reconnectTimer = null;
       if (this._destroyed || gen !== this._generation) return;
       this._sdk = new Client({ name: 'ethos', version: '1.0.0' }, { capabilities: {} });
@@ -487,6 +504,8 @@ export class McpClient {
         if (gen === this._generation) this._scheduleReconnect(attempt + 1);
       }
     }, delay);
+    timer.unref?.();
+    this._reconnectTimer = timer;
   }
 
   isConnected(): boolean {

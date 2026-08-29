@@ -20,7 +20,7 @@ export type ToolSettingsControl =
       options: Array<{ value: string; label: string }>;
       default?: string;
     }
-  | { kind: 'secret'; key: string; label: string; secretKind: string };
+  | { kind: 'secret'; key: string; label: string; secretKind: string; helpText?: string };
 
 /** Map a tool's `settingsSchema` into the list of controls the form renders.
  *  Exactly two kinds are supported today (enum, secret-binding). */
@@ -40,6 +40,7 @@ export function describeToolSettingsFields(schema: ToolSettingsSchemaWire): Tool
       key: field.key,
       label: field.label,
       secretKind: field.secretKind,
+      ...(field.helpText !== undefined ? { helpText: field.helpText } : {}),
     };
   });
 }
