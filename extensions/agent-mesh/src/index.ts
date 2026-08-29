@@ -257,6 +257,11 @@ export class AgentMesh {
     await this.withLock(async () => {
       const entries = await this.read();
       await this.write(entries.filter((e) => e.agentId !== agentId));
+      // Explicit unregister of our own entry must not be resurrected by a
+      // heartbeat() queued behind this lock — clear self here, inside the
+      // critical section, distinct from the peer-staleness-prune case
+      // heartbeat() is designed to heal from.
+      if (this.self?.descriptor.agentId === agentId) this.self = null;
     });
   }
 
