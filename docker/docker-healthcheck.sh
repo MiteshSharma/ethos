@@ -25,7 +25,7 @@
 # ETHOS_HEALTHCHECK_WEB_PORT exists for the test matrix only; inside the
 # image the web-api always listens on 3000.
 
-MODE="${ETHOS_MODE:-all}"
+MODE="${ETHOS_MODE:-boot}"
 
 case "$MODE" in
   boot | gateway) PORT="${ETHOS_GATEWAY_HEALTH_PORT:-3002}" ;;

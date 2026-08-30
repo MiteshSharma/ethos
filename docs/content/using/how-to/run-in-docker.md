@@ -93,10 +93,10 @@ The image bakes one healthcheck script (`docker-healthcheck.sh`) that probes the
 
 | `ETHOS_MODE` | Probe | Serves |
 |---|---|---|
-| `all` (default) | `:3000/healthz` | web UI + supervised gateway |
+| `all` | `:3000/healthz` | web UI + supervised gateway |
 | `ui` | `:3000/healthz` | web UI only |
 | `gateway` | `:3002/healthz` | gateway's own health server |
-| `boot` | `:3002/healthz` | merged scale-to-zero single-process profile — same health server as `gateway` |
+| `boot` (default) | `:3002/healthz` | merged scale-to-zero single-process profile — same health server as `gateway` |
 
 A hardcoded `:3000` check could never pass in `gateway` mode — nothing listens there. The script fixes that.
 
@@ -191,6 +191,8 @@ docker run -d --name ethos \
 The image runs as `ethos:1000` and exposes port 3000. `ETHOS_MANAGED=1` skips the interactive setup wizard and exits with code 2 if `config.yaml` is missing.
 
 To run only the gateway (no web API), pass `-e ETHOS_MODE=gateway`. To run only the web API, pass `-e ETHOS_MODE=ui`.
+
+The image's default when `ETHOS_MODE` is unset — as in Option A/B's commands above — is now `boot`, not `all`. `boot` still gives a talking web UI at the same `:3000`, just via the merged single-process profile rather than two supervised subprocesses. Pass `-e ETHOS_MODE=all` to opt back into the two-subprocess topology with independent crash isolation.
 
 ## Kubernetes
 

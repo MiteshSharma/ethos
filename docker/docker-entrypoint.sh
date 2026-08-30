@@ -18,7 +18,11 @@ fi
 # isolation for one cold boot and complete reconciliation, which is the right
 # call for a single-tenant scale-to-zero microVM and the wrong one for a
 # shared always-on host.
-case "${ETHOS_MODE:-all}" in
+# `boot` is now the default when ETHOS_MODE is unset: single-tenant deployments
+# (Fly Machines, etc.) are the common case; docker-compose.yml's three-service
+# topology and docker-compose.single.yml are unaffected because both set
+# ETHOS_MODE explicitly.
+case "${ETHOS_MODE:-boot}" in
   all)     exec ethos run-all "$@" ;;
   gateway) exec ethos gateway start "$@" ;;
   ui)      exec ethos serve "$@" ;;
