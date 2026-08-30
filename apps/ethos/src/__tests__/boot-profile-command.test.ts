@@ -185,7 +185,7 @@ describe('ethos boot — idle watcher', () => {
     expect(src.match(/createPauseLifecycle\(cfg\)/g) ?? []).toHaveLength(1);
     expect(src).not.toMatch(/new NoopPauseLifecycle\(\)/);
     expect(src).toMatch(/^\s+pauseLifecycle,$/m);
-    expect(src).toMatch(/hostSignalAvailable: false,/);
+    expect(src).toMatch(/hostSignalAvailable: pauseLifecycle\.hostSignalAvailable \?\? false,/);
     expect(src).toMatch(/capabilities: deriveIdleWatcherCapabilities\(cfg\),/);
   });
 

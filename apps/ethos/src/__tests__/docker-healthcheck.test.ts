@@ -159,6 +159,24 @@ describe('docker-healthcheck.sh mode matrix', () => {
     expect(await runScript({ ETHOS_MODE: 'gateway', ETHOS_GATEWAY_HEALTH_PORT: '1' })).toBe(1);
   });
 
+  it('boot mode: healthy → exit 0', async () => {
+    const port = await serveHealthz(200, gatewayHealthy);
+    expect(await runScript({ ETHOS_MODE: 'boot', ETHOS_GATEWAY_HEALTH_PORT: String(port) })).toBe(
+      0,
+    );
+  });
+
+  it('boot mode: degraded adapters (upstream outage) → still exit 0', async () => {
+    const port = await serveHealthz(503, gatewayDegraded);
+    expect(await runScript({ ETHOS_MODE: 'boot', ETHOS_GATEWAY_HEALTH_PORT: String(port) })).toBe(
+      0,
+    );
+  });
+
+  it('boot mode: process dead (no response) → exit 1', async () => {
+    expect(await runScript({ ETHOS_MODE: 'boot', ETHOS_GATEWAY_HEALTH_PORT: '1' })).toBe(1);
+  });
+
   it('unknown mode → exit 1', async () => {
     expect(await runScript({ ETHOS_MODE: 'bogus' })).toBe(1);
   });

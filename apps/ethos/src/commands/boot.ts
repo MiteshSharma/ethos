@@ -1289,7 +1289,7 @@ export async function runBoot(args: string[], config: EthosConfig | null): Promi
       // adapter. While it is a no-op, `signalReadyToSuspend()` resolves,
       // latches, and stops the watcher having suspended nothing — so gate 3b
       // refuses to arm rather than accept that as a handoff.
-      hostSignalAvailable: false,
+      hostSignalAvailable: pauseLifecycle.hostSignalAvailable ?? false,
       capabilities: deriveIdleWatcherCapabilities(cfg),
       options: cfg.idleWatcher,
       logger,

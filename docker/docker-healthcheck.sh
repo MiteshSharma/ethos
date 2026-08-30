@@ -9,6 +9,9 @@
 #              which builds a live heartbeat per request — the same
 #              buildGatewayHeartbeat machinery behind gateway-health.json,
 #              not a second health mechanism.
+#   boot     → the merged scale-to-zero single-process profile; binds its
+#              health server on the same :3002/healthz (ETHOS_GATEWAY_HEALTH_PORT)
+#              as gateway mode — same mechanism, not a second one.
 #
 # Liveness semantics (plan W1.2): only DEFINITIVE local failure flips the
 # container unhealthy. Third-party unreachability (a Telegram outage, an
@@ -25,10 +28,10 @@
 MODE="${ETHOS_MODE:-all}"
 
 case "$MODE" in
-  gateway) PORT="${ETHOS_GATEWAY_HEALTH_PORT:-3002}" ;;
+  boot | gateway) PORT="${ETHOS_GATEWAY_HEALTH_PORT:-3002}" ;;
   ui | all) PORT="${ETHOS_HEALTHCHECK_WEB_PORT:-3000}" ;;
   *)
-    echo "unknown ETHOS_MODE: $MODE (valid: all, gateway, ui)" >&2
+    echo "unknown ETHOS_MODE: $MODE (valid: all, boot, gateway, ui)" >&2
     exit 1
     ;;
 esac

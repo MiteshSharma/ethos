@@ -96,6 +96,7 @@ The image bakes one healthcheck script (`docker-healthcheck.sh`) that probes the
 | `all` (default) | `:3000/healthz` | web UI + supervised gateway |
 | `ui` | `:3000/healthz` | web UI only |
 | `gateway` | `:3002/healthz` | gateway's own health server |
+| `boot` | `:3002/healthz` | merged scale-to-zero single-process profile — same health server as `gateway` |
 
 A hardcoded `:3000` check could never pass in `gateway` mode — nothing listens there. The script fixes that.
 
