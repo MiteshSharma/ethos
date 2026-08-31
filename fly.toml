@@ -1,0 +1,35 @@
+app = "ethos-fly-e2e"
+primary_region = "iad"
+
+[build]
+  image = "ethosagent/ethos:0.7.1"
+
+[env]
+  ETHOS_MODE = "boot"
+  ETHOS_PROVISION_FROM_ENV = "1"
+  ETHOS_WEB_HOST = "0.0.0.0"
+  ETHOS_SERVE_HOST = "0.0.0.0"
+  ETHOS_ALLOWED_ORIGINS = "https://ethos-fly-e2e.fly.dev"
+
+[http_service]
+  internal_port = 3000
+  force_https = true
+  auto_stop_machines = "off"
+  auto_start_machines = true
+  min_machines_running = 1
+
+  [[http_service.checks]]
+    interval = "30s"
+    timeout = "10s"
+    grace_period = "30s"
+    method = "GET"
+    path = "/healthz"
+
+[[mounts]]
+  source = "ethos_data"
+  destination = "/home/ethos/.ethos"
+
+[[vm]]
+  memory = "1gb"
+  cpu_kind = "shared"
+  cpus = 1
