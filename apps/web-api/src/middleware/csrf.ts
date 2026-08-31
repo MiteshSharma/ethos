@@ -7,9 +7,10 @@ import type { MiddlewareHandler } from 'hono';
 // changing method catches the few that slip through.
 //
 // Localhost-bound servers accept any localhost Origin (port doesn't have to
-// match — `?bind=0.0.0.0` deployments still want their own LAN address to
-// work). When `allowedOrigins` is set explicitly, that list is enforced
-// verbatim instead.
+// match — a server bound to a LAN-visible host still wants its own address
+// to work). Non-localhost deployments set `ETHOS_ALLOWED_ORIGINS` (see
+// `resolveAllowedOrigins` in `apps/ethos/src/commands/serve-helpers.ts`) to
+// trust their own public origin explicitly.
 
 const STATEFUL_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 
@@ -60,7 +61,8 @@ export function csrfMiddleware(opts: CsrfMiddlewareOptions = {}): MiddlewareHand
     throw new EthosError({
       code: 'UNAUTHORIZED',
       cause: `Cross-origin request from ${candidate} blocked`,
-      action: 'Use the URL printed by `ethos serve`, or pass `--bind` with an explicit allow-list.',
+      action:
+        'Set `ETHOS_ALLOWED_ORIGINS` to include this origin — comma-separated exact origins, or `*.yourdomain.com` wildcards for a domain you own (never a shared hosting domain like `*.fly.dev`).',
     });
   };
 }
@@ -70,9 +72,27 @@ function isAllowed(
   allowed: string[] | undefined,
   allowLocalhost: boolean,
 ): boolean {
-  if (allowed && allowed.length > 0) return allowed.includes(origin);
+  if (allowed && allowed.length > 0) {
+    if (allowed.includes(origin)) return true;
+    return allowed.some((pattern) => matchesWildcard(origin, pattern));
+  }
   if (allowLocalhost && isLocalhost(origin)) return true;
   return false;
+}
+
+// `*.example.com` matches `https://foo.example.com` (any subdomain) AND
+// `https://example.com` itself (the bare apex) — an operator who lists the
+// wildcard almost always means "this whole domain," not "subdomains only,
+// but not the domain itself."
+function matchesWildcard(origin: string, pattern: string): boolean {
+  if (!pattern.startsWith('*.')) return false;
+  const suffix = pattern.slice(2);
+  try {
+    const hostname = new URL(origin).hostname;
+    return hostname === suffix || hostname.endsWith(`.${suffix}`);
+  } catch {
+    return false;
+  }
 }
 
 function isLocalhost(origin: string): boolean {

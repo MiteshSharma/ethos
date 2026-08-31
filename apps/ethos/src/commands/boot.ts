@@ -117,6 +117,7 @@ import {
 import {
   parseFlagValue,
   parsePort,
+  resolveAllowedOrigins,
   resolveCorsOrigins,
   resolveWebHost,
   resolveWebPort,
@@ -201,6 +202,7 @@ export async function runBoot(args: string[], config: EthosConfig | null): Promi
   const webPort = resolveWebPort(args, process.env, cfg);
   const webHost = resolveWebHost(args, process.env, cfg);
   const corsOrigins = resolveCorsOrigins(process.env, cfg);
+  const allowedOrigins = resolveAllowedOrigins(process.env);
   const trustProxy =
     process.env.ETHOS_TRUST_PROXY === '1' || process.env.ETHOS_TRUST_PROXY === 'true';
   const isLoopbackBind = isLoopbackHost(webHost);
@@ -526,6 +528,7 @@ export async function runBoot(args: string[], config: EthosConfig | null): Promi
     voiceStack: shared.voiceStack,
     titleFn,
     corsOrigins,
+    allowedOrigins,
     trustProxy,
     isLoopbackBind,
     webDist,

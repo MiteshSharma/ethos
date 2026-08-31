@@ -5,6 +5,7 @@ import {
   hasFlag,
   parseFlagValue,
   parsePort,
+  resolveAllowedOrigins,
   resolveCorsOrigins,
   resolveWebHost,
   resolveWebPort,
@@ -156,6 +157,36 @@ describe('resolveCorsOrigins', () => {
       web: { corsOrigins: 'https://chat.example.com' },
     } satisfies EthosConfig;
     expect(resolveCorsOrigins({ ETHOS_API_CORS_ORIGINS: '*' }, config)).toBe('*');
+  });
+});
+
+describe('resolveAllowedOrigins', () => {
+  it('is unset when nothing is set', () => {
+    expect(resolveAllowedOrigins({})).toBeUndefined();
+  });
+
+  it('parses a single exact origin', () => {
+    expect(resolveAllowedOrigins({ ETHOS_ALLOWED_ORIGINS: 'https://app.example.com' })).toEqual([
+      'https://app.example.com',
+    ]);
+  });
+
+  it('parses multiple comma-separated origins (exact + wildcard), trimming whitespace', () => {
+    expect(
+      resolveAllowedOrigins({
+        ETHOS_ALLOWED_ORIGINS: ' https://app.example.com , *.ethos.example.com ',
+      }),
+    ).toEqual(['https://app.example.com', '*.ethos.example.com']);
+  });
+
+  it('throws when a wildcard targets a known shared hosting domain', () => {
+    expect(() => resolveAllowedOrigins({ ETHOS_ALLOWED_ORIGINS: '*.fly.dev' })).toThrow(/fly\.dev/);
+  });
+
+  it('does not throw for a wildcard on a domain not in the shared list', () => {
+    expect(resolveAllowedOrigins({ ETHOS_ALLOWED_ORIGINS: '*.mycompany.com' })).toEqual([
+      '*.mycompany.com',
+    ]);
   });
 });
 

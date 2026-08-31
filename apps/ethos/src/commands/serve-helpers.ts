@@ -1,4 +1,5 @@
 import type { EthosConfig } from '@ethosagent/config';
+import { EthosError } from '@ethosagent/types';
 
 // Pure helpers for `runServe`. Extracted so we can unit-test arg parsing
 // without booting an HTTP server, and so the boot path stays focused on
@@ -72,6 +73,65 @@ export function resolveCorsOrigins(
   config: EthosConfig | null,
 ): string | undefined {
   return env.ETHOS_API_CORS_ORIGINS ?? config?.web?.corsOrigins;
+}
+
+// Shared public hosting domains — wildcarding these would trust every OTHER
+// operator's app on the same platform, not just this deployment's. Not an
+// exhaustive list (a real Public Suffix List has thousands of entries); it
+// exists to catch the specific, likely mistake of wildcarding a shared
+// domain rather than a domain the operator actually owns.
+const KNOWN_SHARED_SUFFIXES = [
+  'fly.dev',
+  'flycast.dev',
+  'vercel.app',
+  'netlify.app',
+  'herokuapp.com',
+  'github.io',
+  'pages.dev',
+  'ngrok.io',
+  'ngrok-free.app',
+  'ondigitalocean.app',
+  'railway.app',
+];
+
+/**
+ * Precedence: env var only — no CLI flag, no config.yaml field, matching
+ * `resolveCorsOrigins`'s env-only posture for the same reason (this is
+ * deployment-shape config, not a personality/behavior setting). Each
+ * comma-separated `ETHOS_ALLOWED_ORIGINS` entry is either an exact origin
+ * (`https://app.example.com`) or a wildcard (`*.ethos.example.com`, matching
+ * any subdomain of `ethos.example.com` and the bare domain itself).
+ *
+ * Fails closed (throws) rather than warns when a wildcard targets a known
+ * shared hosting domain — a warning can be missed, and this is a real
+ * CSRF-bypass footgun (every other app on that shared domain would also be
+ * trusted), not a style nit.
+ */
+export function resolveAllowedOrigins(env: NodeJS.ProcessEnv): string[] | undefined {
+  const raw = env.ETHOS_ALLOWED_ORIGINS;
+  if (!raw) return undefined;
+  const entries = raw
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0);
+  for (const entry of entries) {
+    if (!entry.startsWith('*.')) continue;
+    const suffix = entry.slice(2).toLowerCase();
+    const isShared = KNOWN_SHARED_SUFFIXES.some(
+      (shared) => suffix === shared || suffix.endsWith(`.${shared}`),
+    );
+    if (isShared) {
+      throw new EthosError({
+        code: 'CONFIG_INVALID',
+        cause:
+          `ETHOS_ALLOWED_ORIGINS: refusing wildcard "${entry}" — "${suffix}" is a shared ` +
+          `public hosting domain (other operators' apps live there too); wildcarding it would ` +
+          `trust every app on that platform, not just yours.`,
+        action: `Use an exact origin instead (e.g. https://your-app.${suffix}), or wildcard a domain you exclusively own.`,
+      });
+    }
+  }
+  return entries;
 }
 
 /**

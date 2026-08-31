@@ -107,6 +107,7 @@ import {
   a2aZeroSkillsWarning,
   parseFlagValue,
   parsePort,
+  resolveAllowedOrigins,
   resolveCorsOrigins,
   resolveWebHost,
   resolveWebPort,
@@ -149,6 +150,7 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
   const webPort = resolveWebPort(args, process.env, config);
   const webHost = resolveWebHost(args, process.env, config);
   const corsOrigins = resolveCorsOrigins(process.env, config);
+  const allowedOrigins = resolveAllowedOrigins(process.env);
 
   // WEB-006: only honor X-Forwarded-For for rate limiting behind a trusted
   // reverse proxy. Off by default — a directly-exposed server must never trust
@@ -1038,6 +1040,7 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
     voiceStack,
     titleFn,
     corsOrigins,
+    allowedOrigins,
     trustProxy,
     isLoopbackBind,
     webDist,
@@ -1759,6 +1762,7 @@ export interface BuildServeWebApiOptions {
   voiceStack: import('@ethosagent/wiring').VoiceStack | undefined;
   titleFn: ((systemPrompt: string, userMessage: string) => Promise<string>) | undefined;
   corsOrigins: ReturnType<typeof resolveCorsOrigins>;
+  allowedOrigins: string[] | undefined;
   trustProxy: boolean;
   /** Drives the `Secure` cookie flag together with `config.webBaseUrl`. */
   isLoopbackBind: boolean;
@@ -1814,6 +1818,7 @@ export function buildServeWebApi(opts: BuildServeWebApiOptions): ReturnType<type
     voiceStack,
     titleFn,
     corsOrigins,
+    allowedOrigins,
     trustProxy,
     isLoopbackBind,
     webDist,
@@ -1950,6 +1955,7 @@ export function buildServeWebApi(opts: BuildServeWebApiOptions): ReturnType<type
     apiKeys,
     idempotencyStore,
     ...(corsOrigins ? { corsOrigins } : {}),
+    ...(allowedOrigins ? { allowedOrigins } : {}),
     listTeams: async () => listRegisteredTeams(dir),
     secureCookie: !isLoopbackBind || config.webBaseUrl?.startsWith('https://') === true,
     trustProxy,
