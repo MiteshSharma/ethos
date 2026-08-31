@@ -2,7 +2,7 @@ app = "ethos-fly-e2e"
 primary_region = "iad"
 
 [build]
-  image = "ethosagent/ethos:0.7.1"
+  image = "ethosagent/ethos:0.7.2"
 
 [env]
   ETHOS_MODE = "boot"
