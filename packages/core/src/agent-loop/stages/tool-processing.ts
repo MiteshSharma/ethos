@@ -27,6 +27,7 @@ import { SimpleCompletionImpl } from '../../simple-completion';
 import { extractFilePath } from '../extract-file-path';
 import { capIngestedResult } from '../ingestion-cap';
 import { checkMcpEnabled, checkMcpRejectArgs } from '../mcp-policy';
+import { recordMemoryWriteIfApplicable } from '../memory-telemetry';
 import { handleUntrustedResult } from '../result-defense';
 import { buildScopedStorage } from '../scoped-storage';
 import { recordSkillInvoked } from '../skill-telemetry';
@@ -578,6 +579,12 @@ export async function* processTools(
         error: 'Tool result missing',
         code: 'execution_failed',
       };
+
+      // P2-counters — a successful memory write, not a rejected/invalid call.
+      // Uses `p.args` (the full, untruncated effectiveArgs), never the
+      // span's truncated `attrs.args` JSON — see memory-telemetry.ts.
+      recordMemoryWriteIfApplicable(deps.observability, p.name, p.args, result, ctx.traceId);
+
       const sid = spanIds.get(p.toolCallId);
       if (sid) {
         deps.observability?.endSpan(sid, result.ok ? 'ok' : 'error', {

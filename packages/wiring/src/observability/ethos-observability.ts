@@ -54,6 +54,9 @@ export const ETHOS_EVENT_CATEGORIES = [
   // --by-skill` counts them with two indexed reads rather than a JSON probe.
   'skill.invoked',
   'skill.exposed',
+  // P2-counters — a successful memory_write/team_memory_write call, feeding
+  // ethos_memory_writes_total. See `recordMemoryWrite` below.
+  'memory.write',
   'heartbeat.decision',
   'memory.pending_cap',
   'a2a.auth',
@@ -325,6 +328,16 @@ export class EthosObservability {
     this.emit(opts.mode === 'invoked' ? 'skill.invoked' : 'skill.exposed', 'info', opts, {
       skill: opts.skill,
     });
+  }
+
+  /**
+   * P2-counters — a successful `memory_write` or `team_memory_write` call, one
+   * that actually wrote (a rejected/`input_invalid` call must not reach this).
+   * `store`/`action` ride `details` the same way `recordSkillInvocation`'s
+   * `skill` does; the events table needs no new column.
+   */
+  recordMemoryWrite(opts: EventBase & { store: string; action: string }): void {
+    this.emit('memory.write', 'info', opts, { store: opts.store, action: opts.action });
   }
 
   /**

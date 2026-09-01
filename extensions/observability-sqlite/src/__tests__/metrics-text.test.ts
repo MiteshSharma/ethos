@@ -44,6 +44,28 @@ describe('renderMetricsText', () => {
     expect(text).toContain('ethos_gateway_adapter_up{adapter="telegram"} 1');
   });
 
+  it('renders ethos_memory_writes_total and ethos_http_requests_total', () => {
+    const rows: MetricCounterRow[] = [
+      {
+        metric: 'ethos_memory_writes_total',
+        labels: { store: 'memory', action: 'add' },
+        value: 3,
+      },
+      {
+        metric: 'ethos_http_requests_total',
+        labels: { method: 'GET', status: '200' },
+        value: 7,
+      },
+    ];
+
+    const text = renderMetricsText(rows, []);
+
+    expect(text).toContain('# TYPE ethos_memory_writes_total counter');
+    expect(text).toContain('ethos_memory_writes_total{action="add",store="memory"} 3');
+    expect(text).toContain('# TYPE ethos_http_requests_total counter');
+    expect(text).toContain('ethos_http_requests_total{method="GET",status="200"} 7');
+  });
+
   it('drops a row for a metric name outside the fixed family list (D18)', () => {
     const rows: MetricCounterRow[] = [{ metric: 'not_a_real_metric', labels: {}, value: 1 }];
     expect(renderMetricsText(rows, [])).toBe('');

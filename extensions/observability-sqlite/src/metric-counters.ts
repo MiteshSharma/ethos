@@ -45,6 +45,9 @@ export const ALLOWED_LABEL_KEYS = [
   'status',
   'adapter',
   'le',
+  'store',
+  'action',
+  'method',
 ] as const;
 export type AllowedLabelKey = (typeof ALLOWED_LABEL_KEYS)[number];
 

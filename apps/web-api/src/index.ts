@@ -495,6 +495,13 @@ export interface CreateWebApiOptions {
    * is not mounted.
    */
   metricsTextFn?: () => Promise<string>;
+  /**
+   * P2-counters (D2) — records one `ethos_http_requests_total` increment per
+   * request, method + status code labeled. Boot code builds this over the
+   * shared `SQLiteObservabilityStore`. Omitted → requests are simply not
+   * counted (no `/metrics` family, no behavior change).
+   */
+  recordHttpRequest?: (method: string, status: number) => void;
   /** External cron trigger (plan/phases/cron-scheduler-seam.md) — mounts
    *  `POST /cron/fire` (bearer auth, scope `cron`) when present. Boot code
    *  supplies an `HttpFireTrigger` only when `cron.trigger.external` is
@@ -1335,6 +1342,7 @@ export function createWebApi(opts: CreateWebApiOptions): CreateWebApiResult {
     ...(opts.listTeams ? { listTeams: opts.listTeams } : {}),
     ...(opts.webBaseUrl ? { webBaseUrl: opts.webBaseUrl } : {}),
     ...(opts.metricsTextFn ? { metricsTextFn: opts.metricsTextFn } : {}),
+    ...(opts.recordHttpRequest ? { recordHttpRequest: opts.recordHttpRequest } : {}),
     ...(opts.cronFireTrigger ? { cronFireTrigger: opts.cronFireTrigger } : {}),
     ...(opts.idempotencyStore ? { idempotencyStore: opts.idempotencyStore } : {}),
     ...(opts.corsOrigins ? { corsOrigins: opts.corsOrigins } : {}),

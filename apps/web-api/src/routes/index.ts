@@ -77,6 +77,10 @@ export interface CreateRoutesOptions {
   /** P2-counters (D2/D16) — renders `GET /metrics` (OpenMetrics text, scope
    *  `metrics:read`). Omitted → `/metrics` is not mounted. */
   metricsTextFn?: () => Promise<string>;
+  /** P2-counters (D2) — records one `ethos_http_requests_total` increment per
+   *  request (method + status), excluding `/healthz`. Omitted → requests are
+   *  simply not counted. */
+  recordHttpRequest?: (method: string, status: number) => void;
   /** External cron trigger (plan/phases/cron-scheduler-seam.md) — mounts
    *  `POST /cron/fire` (bearer auth, scope `cron`) when present. Boot code
    *  supplies an `HttpFireTrigger` only when `cron.trigger.external` is
@@ -219,6 +223,22 @@ export function createRoutes(opts: CreateRoutesOptions): Hono {
 
     return c.json({ status, uptime, gateway: gatewayBlock }, healthy ? 200 : 503);
   });
+
+  // P2-counters (D2) — ethos_http_requests_total: real tenant traffic
+  // (RPC/SSE/OpenAPI/v1/cron), not platform liveness probing. Registered
+  // AFTER `/healthz` above, on the same ordering `requestId` at the top of
+  // this function documents: `/healthz`'s handler is already terminal by the
+  // time this `'*'` middleware is added to the router, so it is never part of
+  // that route's composed chain and `/healthz` needs no explicit path check.
+  // Optional passthrough, like `metricsTextFn` — omitted when boot code chose
+  // not to wire an observability store.
+  if (opts.recordHttpRequest) {
+    const recordHttpRequest = opts.recordHttpRequest;
+    app.use('*', async (c, next) => {
+      await next();
+      recordHttpRequest(c.req.method, c.res.status);
+    });
+  }
 
   // Last-resort error catcher. Routes that throw EthosError land here.
   app.onError(errorHandler);

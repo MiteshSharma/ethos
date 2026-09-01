@@ -344,6 +344,69 @@ describe('insertEvent — ethos_skill_invocations_total', () => {
   });
 });
 
+describe('insertEvent — ethos_memory_writes_total', () => {
+  function memoryWriteEvent(store: string, action: string): ObsEvent {
+    return {
+      eventId: randomUUID(),
+      ts: Date.now(),
+      category: 'memory.write',
+      severity: 'info',
+      details: { store, action },
+    };
+  }
+
+  it('increments for a memory.write event, labeled by store and action', () => {
+    store.insertEvent(memoryWriteEvent('memory', 'add'));
+    store.insertEvent(memoryWriteEvent('memory', 'add'));
+    store.insertEvent(memoryWriteEvent('team', 'replace'));
+
+    const rows = store.getMetricCounters();
+    expect(
+      counterFor(rows, 'ethos_memory_writes_total', { store: 'memory', action: 'add' })?.value,
+    ).toBe(2);
+    expect(
+      counterFor(rows, 'ethos_memory_writes_total', { store: 'team', action: 'replace' })?.value,
+    ).toBe(1);
+  });
+
+  it('does not double-count a duplicate event_id', () => {
+    const event = memoryWriteEvent('user', 'remove');
+    store.insertEvent(event);
+    store.insertEvent(event); // same eventId — INSERT OR IGNORE no-ops
+
+    const rows = store.getMetricCounters();
+    expect(
+      counterFor(rows, 'ethos_memory_writes_total', { store: 'user', action: 'remove' })?.value,
+    ).toBe(1);
+  });
+
+  it('ignores a memory.write event missing store/action details', () => {
+    store.insertEvent({
+      eventId: randomUUID(),
+      ts: Date.now(),
+      category: 'memory.write',
+      severity: 'info',
+    });
+    expect(store.getMetricCounters()).toEqual([]);
+  });
+});
+
+describe('recordHttpRequest — ethos_http_requests_total', () => {
+  it('increments, labeled by method and status', () => {
+    store.recordHttpRequest('GET', 200);
+    store.recordHttpRequest('GET', 200);
+    store.recordHttpRequest('POST', 404);
+
+    const rows = store.getMetricCounters();
+    expect(
+      counterFor(rows, 'ethos_http_requests_total', { method: 'GET', status: '200' })?.value,
+    ).toBe(2);
+    expect(
+      counterFor(rows, 'ethos_http_requests_total', { method: 'POST', status: '404' })?.value,
+    ).toBe(1);
+  });
+});
+
 describe('D19 — label cardinality', () => {
   it('no forbidden per-call id ever appears as a label key on a written row', () => {
     const traceId = randomUUID();

@@ -16,6 +16,8 @@ const COUNTER_FAMILIES = [
   'ethos_tool_calls_total',
   'ethos_skill_invocations_total',
   'ethos_turn_outcomes_total',
+  'ethos_memory_writes_total',
+  'ethos_http_requests_total',
 ] as const;
 
 /** Histogram base names (D18) — bucket rows are named `<base>_bucket`, plus

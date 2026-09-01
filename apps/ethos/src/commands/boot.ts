@@ -490,6 +490,10 @@ export async function runBoot(args: string[], config: EthosConfig | null): Promi
       return hb.adapters.map((a) => ({ adapter: a.name, up: a.ok ? 1 : 0 }) as const);
     },
   });
+  // P2-counters — ethos_http_requests_total. Same closure shape as serve.ts.
+  const recordHttpRequest = (method: string, status: number): void => {
+    getObservabilityStore().recordHttpRequest(method, status);
+  };
 
   // §3b step 6 — the web API. Its own SSE clarify presenter is registered
   // INSIDE `createWebApi`, and its `ClarifyBridge.hydrate()`/`.sweep()` fire
@@ -533,6 +537,7 @@ export async function runBoot(args: string[], config: EthosConfig | null): Promi
     isLoopbackBind,
     webDist,
     metricsText,
+    recordHttpRequest,
     a2aRouteModules,
     a2aPeering,
     isA2aEnabled: a2a.isA2aEnabled,

@@ -162,7 +162,13 @@ describe('Orchestrator guardrails', () => {
       // conditional-spread line into `toolCtxBase` (no `?? sessionKey`
       // fallback, per D22). The lane logic itself lives in
       // packages/core/src/clarify/clarify-bridge.ts.
-      if (lineCount > 801) {
+      // Bumped 801 -> 808 (P2-counters): a successful `memory_write`/
+      // `team_memory_write` call feeds `ethos_memory_writes_total`, counted
+      // only after `execute()` resolves and `result.ok` is known (never
+      // derived from the span's truncated `attrs.args`). One import plus a
+      // three-line commented call site; the dispatch rule itself lives in
+      // agent-loop/memory-telemetry.ts.
+      if (lineCount > 808) {
         violations.push(`${file}: ${lineCount} lines`);
       }
     }

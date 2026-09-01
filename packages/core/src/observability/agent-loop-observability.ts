@@ -78,6 +78,12 @@ export interface AgentLoopObservability {
     opts: RecordEventOpts & { skill: string; mode: 'invoked' | 'exposed' },
   ): void;
   /**
+   * P2-counters — a successful `memory_write`/`team_memory_write` call, feeding
+   * `ethos_memory_writes_total`. Optional, like `recordSkillInvocation` —
+   * `EthosObservability` satisfies it, lighter adapters need not.
+   */
+  recordMemoryWrite?(opts: RecordEventOpts & { store: string; action: string }): void;
+  /**
    * Model-visible ⟺ logged (plan/phases/model-visible-logged.md, Phase D,
    * §6) — the live-assembled bytes for a context `kind` did not hash to what
    * the emit-on-change write path (Phase B) just confirmed for it. Should

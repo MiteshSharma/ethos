@@ -423,16 +423,32 @@ export class SQLiteObservabilityStore implements ObservabilityStore {
 
       // A duplicate event_id (INSERT OR IGNORE no-op) must not double-count.
       if (inserted === 0) return;
-      if (event.category !== 'skill.invoked' && event.category !== 'skill.exposed') return;
-      const skill = event.details?.skill;
-      if (typeof skill !== 'string') return;
-      incrementCounter(
-        this.db,
-        'ethos_skill_invocations_total',
-        { skill, mode: event.category === 'skill.invoked' ? 'invoked' : 'exposed' },
-        1,
-        new Date(event.ts).toISOString(),
-      );
+
+      if (event.category === 'skill.invoked' || event.category === 'skill.exposed') {
+        const skill = event.details?.skill;
+        if (typeof skill !== 'string') return;
+        incrementCounter(
+          this.db,
+          'ethos_skill_invocations_total',
+          { skill, mode: event.category === 'skill.invoked' ? 'invoked' : 'exposed' },
+          1,
+          new Date(event.ts).toISOString(),
+        );
+        return;
+      }
+
+      if (event.category === 'memory.write') {
+        const store = event.details?.store;
+        const action = event.details?.action;
+        if (typeof store !== 'string' || typeof action !== 'string') return;
+        incrementCounter(
+          this.db,
+          'ethos_memory_writes_total',
+          { store, action },
+          1,
+          new Date(event.ts).toISOString(),
+        );
+      }
     })();
   }
 
@@ -625,6 +641,27 @@ export class SQLiteObservabilityStore implements ObservabilityStore {
 
   getMetricCounters(): MetricCounterRow[] {
     return readMetricCounters(this.db);
+  }
+
+  /**
+   * `ethos_http_requests_total` (P2-counters) — web-api tenant HTTP traffic
+   * (RPC/SSE/OpenAPI/v1/cron), excluding `/healthz` platform liveness probes
+   * (filtered by the caller — see `apps/web-api/src/routes/index.ts`). Unlike
+   * the span/event-derived counters above, there is no trace or span wrapping
+   * an arbitrary HTTP request, so this is a direct increment — still inside
+   * its own transaction to keep the "increments happen inside a transaction"
+   * discipline (D15) even though there is no broader write to piggyback on.
+   */
+  recordHttpRequest(method: string, status: number): void {
+    this.db.transaction(() => {
+      incrementCounter(
+        this.db,
+        'ethos_http_requests_total',
+        { method, status: String(status) },
+        1,
+        new Date().toISOString(),
+      );
+    })();
   }
 
   // ---------------------------------------------------------------------------

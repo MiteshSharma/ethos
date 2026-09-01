@@ -1006,6 +1006,11 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
     store: getObservabilityStore(),
     getGatewayAdapters: readGatewayAdapterGauges,
   });
+  // P2-counters — ethos_http_requests_total. A plain closure over the same
+  // store `metricsText` reads from, same threading as `metricsText` itself.
+  const recordHttpRequest = (method: string, status: number): void => {
+    getObservabilityStore().recordHttpRequest(method, status);
+  };
 
   const created = buildServeWebApi({
     config,
@@ -1045,6 +1050,7 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
     isLoopbackBind,
     webDist,
     metricsText,
+    recordHttpRequest,
     a2aRouteModules,
     a2aPeering,
     isA2aEnabled,
@@ -1768,6 +1774,7 @@ export interface BuildServeWebApiOptions {
   isLoopbackBind: boolean;
   webDist: ReturnType<typeof locateWebDist>;
   metricsText: ReturnType<typeof createMetricsTextProvider>;
+  recordHttpRequest: (method: string, status: number) => void;
   a2aRouteModules: RouteModule[];
   a2aPeering: ReturnType<typeof buildA2aPeeringService>;
   isA2aEnabled: () => boolean;
@@ -1823,6 +1830,7 @@ export function buildServeWebApi(opts: BuildServeWebApiOptions): ReturnType<type
     isLoopbackBind,
     webDist,
     metricsText,
+    recordHttpRequest,
     a2aRouteModules,
     a2aPeering,
     isA2aEnabled,
@@ -2035,6 +2043,7 @@ export function buildServeWebApi(opts: BuildServeWebApiOptions): ReturnType<type
       }
     },
     metricsTextFn: metricsText,
+    recordHttpRequest,
     ...(cronTriggers.external ? { cronFireTrigger: cronTriggers.external } : {}),
   });
 }
