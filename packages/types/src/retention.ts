@@ -12,6 +12,17 @@ export interface RetentionConfig {
   events?: RetentionEventsConfig;
   blobs?: string;
   archive?: string;
+  /**
+   * Run `VACUUM` on the session database after a prune actually deleted rows.
+   * Default `false` — VACUUM rewrites the whole file and holds a write lock,
+   * so reclaiming the freed pages is opt-in.
+   */
+  vacuumAfterPrune?: boolean;
+  /**
+   * Minimum whole days between two automatic vacuums. Default `0` (vacuum on
+   * every prune that deleted rows). Only consulted when `vacuumAfterPrune`.
+   */
+  minVacuumIntervalDays?: number;
 }
 
 export const RETENTION_DEFAULTS: {

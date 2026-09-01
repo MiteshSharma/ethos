@@ -161,6 +161,11 @@ const RETENTION_DURATION_RE = /^(forever|\d+[dwmy])$/;
  *  survive the line-based format — same identifier rule as bot ids. */
 const RECORD_KEY_RE = /^[A-Za-z0-9_-]+$/;
 
+/** `logs.level` values, ordered by severity. Mirrors `LOG_LEVELS` in
+ *  `@ethosagent/config` (and `LogLevel` in `@ethosagent/types`). */
+const LOG_LEVELS = ['debug', 'info', 'warn', 'error'] as const;
+type LogLevelValue = (typeof LOG_LEVELS)[number];
+
 /** Redacted view of one auxiliary model slot (`auxiliary.<slot>.*`). */
 export interface AuxModelGetResult {
   model: string | null;
@@ -303,6 +308,37 @@ function passNumOrNull(p: Record<string, string>, key: string): number | null {
   if (raw === undefined || raw === '') return null;
   const n = Number(raw);
   return Number.isFinite(n) ? n : null;
+}
+
+/**
+ * Like {@link passNumOrNull} but applying the SAME bound `validateSettingsPatch`
+ * applies to the matching field on write — an out-of-range value reads as
+ * unset, so the caller's `??` default is what gets reported.
+ *
+ * A hand-edited or older `config.yaml` can hold a value `@ethosagent/config`'s
+ * `build*` helpers drop on load; reading it back unbounded showed the dashboard
+ * a number the runtime is not using. Used only by the bounded leaves — the
+ * unbounded passthrough families above keep {@link passNumOrNull}.
+ */
+function passBoundedInt(
+  p: Record<string, string>,
+  key: string,
+  min: number,
+  max = Number.MAX_SAFE_INTEGER,
+): number | null {
+  const raw = p[key];
+  if (raw === undefined || raw === '') return null;
+  const n = Number(raw);
+  return Number.isInteger(n) && n >= min && n <= max ? n : null;
+}
+
+/** {@link passBoundedInt}'s float sibling, for the one cap (`execution.docker.cpu`)
+ * the loader and `checkPositive` both allow to be fractional. */
+function passPositiveNum(p: Record<string, string>, key: string): number | null {
+  const raw = p[key];
+  if (raw === undefined || raw === '') return null;
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : null;
 }
 
 /**
@@ -767,6 +803,18 @@ const SETTINGS_PATCH_KEYS = [
   'a2aEnabled',
   'pluginsAutoInstall',
   'webBaseUrl',
+  'retentionVacuumAfterPrune',
+  'retentionMinVacuumIntervalDays',
+  'logsLevel',
+  'memoryCharLimits',
+  'executionDocker',
+  'kanban',
+  'cronMaxParallelJobs',
+  'toolLoop',
+  'browser',
+  'gatewayMaxInboundMediaBytes',
+  'teamSupervisorRestartLoopGuard',
+  'discordMissedMessageBackfill',
   ...TELEPHONY_PATCH_KEYS,
 ] as const;
 
@@ -886,6 +934,49 @@ function validateSettingsPatch(patch: ConfigUpdateInput): void {
   if (patch.logsRotation) {
     checkInt('logsRotation.maxBytes', patch.logsRotation.maxBytes, 1);
     checkInt('logsRotation.maxFiles', patch.logsRotation.maxFiles, 1);
+  }
+  // Bounds below mirror the `build*` helpers in packages/config, which DROP an
+  // out-of-range value rather than clamping it — a silently ignored save is
+  // worse at an RPC boundary than a refusal, so these reject instead.
+  if (patch.logsLevel !== undefined && patch.logsLevel !== null) {
+    if (!(LOG_LEVELS as readonly string[]).includes(patch.logsLevel)) {
+      invalidValue('logsLevel', "must be one of 'debug', 'info', 'warn', 'error'");
+    }
+  }
+  checkInt('retentionMinVacuumIntervalDays', patch.retentionMinVacuumIntervalDays, 0);
+  checkInt('cronMaxParallelJobs', patch.cronMaxParallelJobs, 1);
+  checkInt('gatewayMaxInboundMediaBytes', patch.gatewayMaxInboundMediaBytes, 1024, 134_217_728);
+  if (patch.memoryCharLimits) {
+    checkInt('memoryCharLimits.memory', patch.memoryCharLimits.memory, 1);
+    checkInt('memoryCharLimits.user', patch.memoryCharLimits.user, 1);
+  }
+  if (patch.executionDocker) {
+    // `cpu` is the one cap that may be fractional (`--cpus 1.5`).
+    checkPositive('executionDocker.cpu', patch.executionDocker.cpu);
+    checkInt('executionDocker.diskMb', patch.executionDocker.diskMb, 1);
+  }
+  if (patch.kanban) {
+    checkInt('kanban.maxInProgress', patch.kanban.maxInProgress, 1);
+    checkInt('kanban.maxInProgressPerProfile', patch.kanban.maxInProgressPerProfile, 1);
+  }
+  if (patch.toolLoop) {
+    checkInt('toolLoop.maxToolCallsWarnAt', patch.toolLoop.maxToolCallsWarnAt, 1);
+    checkInt('toolLoop.maxIdenticalToolCallsWarnAt', patch.toolLoop.maxIdenticalToolCallsWarnAt, 1);
+  }
+  if (patch.browser) {
+    checkInt('browser.navigationTimeoutMs', patch.browser.navigationTimeoutMs, 1_000, 600_000);
+    checkInt('browser.commandTimeoutMs', patch.browser.commandTimeoutMs, 1_000, 600_000);
+  }
+  if (patch.teamSupervisorRestartLoopGuard) {
+    const g = patch.teamSupervisorRestartLoopGuard;
+    checkInt('teamSupervisorRestartLoopGuard.maxRestarts', g.maxRestarts, 1, 1000);
+    checkInt('teamSupervisorRestartLoopGuard.windowSeconds', g.windowSeconds, 1, 86_400);
+  }
+  if (patch.discordMissedMessageBackfill) {
+    const b = patch.discordMissedMessageBackfill;
+    checkInt('discordMissedMessageBackfill.windowSeconds', b.windowSeconds, 1, 604_800);
+    // 100 is Discord's own `messages.fetch` ceiling.
+    checkInt('discordMissedMessageBackfill.limit', b.limit, 1, 100);
   }
   if (patch.retention) checkRetentionMap('retention', patch.retention);
   if (patch.personalityRetention) {
@@ -1164,6 +1255,7 @@ export interface ConfigGetResult {
     target: number | null;
     gateDelta: number | null;
     retryOnOverflow: boolean;
+    abortOnSummaryFailure: boolean;
     smallWindow: 'auto' | 'on' | 'off';
   };
   memoryVault: {
@@ -1271,6 +1363,36 @@ export interface ConfigGetResult {
   a2aEnabled: boolean;
   pluginsAutoInstall: boolean | null;
   webBaseUrl: string | null;
+  /** `retention.vacuumAfterPrune`; default false (opt-in). */
+  retentionVacuumAfterPrune: boolean;
+  /** `retention.minVacuumIntervalDays`; null = no minimum interval. */
+  retentionMinVacuumIntervalDays: number | null;
+  /** `logs.level`; default 'debug' — the ungated behaviour the tier replaced. */
+  logsLevel: LogLevelValue;
+  /** `memory.charLimits.*` — markdown backend per-key ceilings. */
+  memoryCharLimits: { memory: number; user: number };
+  /** `execution.docker.*` — container resource caps; `diskMb` null = no quota. */
+  executionDocker: { cpu: number; diskMb: number | null };
+  /** `kanban.*` WIP caps; null = uncapped. */
+  kanban: { maxInProgress: number | null; maxInProgressPerProfile: number | null };
+  /** `cron.maxParallelJobs`; null = uncapped. */
+  cronMaxParallelJobs: number | null;
+  /** `toolLoop.*` soft-warn tiers; null = no warn tier. */
+  toolLoop: { maxToolCallsWarnAt: number | null; maxIdenticalToolCallsWarnAt: number | null };
+  /** `browser.*` Playwright budgets, ms. */
+  browser: { navigationTimeoutMs: number; commandTimeoutMs: number };
+  /** `gateway.maxInboundMediaBytes`; null = each adapter's platform default. */
+  gatewayMaxInboundMediaBytes: number | null;
+  /** `teamSupervisor.restartLoopGuard.*` — member auto-restart brake. Unset =
+   *  5 respawns in 60s, one more than the previous hardcoded guard, which gave
+   *  up on the fifth crash and so performed four restarts. */
+  teamSupervisorRestartLoopGuard: { maxRestarts: number; windowSeconds: number };
+  /** `discord.missedMessageBackfill.*`; `windowSeconds` null = no age bound. */
+  discordMissedMessageBackfill: {
+    enabled: boolean;
+    windowSeconds: number | null;
+    limit: number;
+  };
 }
 
 export interface ConfigUpdateInput {
@@ -1417,6 +1539,7 @@ export interface ConfigUpdateInput {
     target?: number | null;
     gateDelta?: number | null;
     retryOnOverflow?: boolean | null;
+    abortOnSummaryFailure?: boolean | null;
     smallWindow?: 'auto' | 'on' | 'off' | null;
   };
   memoryVault?: {
@@ -1487,6 +1610,22 @@ export interface ConfigUpdateInput {
   a2aEnabled?: boolean | null;
   pluginsAutoInstall?: boolean | null;
   webBaseUrl?: string | null;
+  retentionVacuumAfterPrune?: boolean | null;
+  retentionMinVacuumIntervalDays?: number | null;
+  logsLevel?: LogLevelValue | null;
+  memoryCharLimits?: { memory?: number | null; user?: number | null };
+  executionDocker?: { cpu?: number | null; diskMb?: number | null };
+  kanban?: { maxInProgress?: number | null; maxInProgressPerProfile?: number | null };
+  cronMaxParallelJobs?: number | null;
+  toolLoop?: { maxToolCallsWarnAt?: number | null; maxIdenticalToolCallsWarnAt?: number | null };
+  browser?: { navigationTimeoutMs?: number | null; commandTimeoutMs?: number | null };
+  gatewayMaxInboundMediaBytes?: number | null;
+  teamSupervisorRestartLoopGuard?: { maxRestarts?: number | null; windowSeconds?: number | null };
+  discordMissedMessageBackfill?: {
+    enabled?: boolean | null;
+    windowSeconds?: number | null;
+    limit?: number | null;
+  };
 }
 
 export interface ConfigServiceOptions {
@@ -1676,6 +1815,9 @@ export class ConfigService {
         gateDelta: passNumOrNull(p, 'compaction.gateDelta'),
         // Default ON — only an explicit false disables the overflow retry.
         retryOnOverflow: p['compaction.retryOnOverflow'] !== 'false',
+        // Default OFF — an emergency-summary failure stays the generic overflow
+        // rejection unless the operator asks for the distinct error.
+        abortOnSummaryFailure: passBool(p, 'compaction.abortOnSummaryFailure', false),
         smallWindow: pickEnum(p['compaction.smallWindow'], ['auto', 'on', 'off'], 'auto'),
       },
       memoryVault: {
@@ -1758,6 +1900,53 @@ export class ConfigService {
       pluginsAutoInstall:
         p['plugins.auto_install'] === undefined ? null : p['plugins.auto_install'] === 'true',
       webBaseUrl: passStr(p, 'webBaseUrl'),
+      // Defaults below mirror the `build*` helpers in packages/config — web-api
+      // parses the same file through its own reader and shares no code with them.
+      retentionVacuumAfterPrune: passBool(p, 'retention.vacuumAfterPrune', false),
+      // Bounds below are the ones `validateSettingsPatch` enforces on the write
+      // path. An on-disk value outside them is one `@ethosagent/config` drops on
+      // load, so reporting it here would show a number the runtime is not using.
+      retentionMinVacuumIntervalDays: passBoundedInt(p, 'retention.minVacuumIntervalDays', 0),
+      logsLevel: pickEnum(p['logs.level'], LOG_LEVELS, 'debug'),
+      memoryCharLimits: {
+        memory: passBoundedInt(p, 'memory.charLimits.memory', 1) ?? 524_288,
+        user: passBoundedInt(p, 'memory.charLimits.user', 1) ?? 524_288,
+      },
+      executionDocker: {
+        cpu: passPositiveNum(p, 'execution.docker.cpu') ?? 2,
+        diskMb: passBoundedInt(p, 'execution.docker.diskMb', 1),
+      },
+      kanban: {
+        maxInProgress: passBoundedInt(p, 'kanban.maxInProgress', 1),
+        maxInProgressPerProfile: passBoundedInt(p, 'kanban.maxInProgressPerProfile', 1),
+      },
+      cronMaxParallelJobs: passBoundedInt(p, 'cron.maxParallelJobs', 1),
+      toolLoop: {
+        maxToolCallsWarnAt: passBoundedInt(p, 'toolLoop.maxToolCallsWarnAt', 1),
+        maxIdenticalToolCallsWarnAt: passBoundedInt(p, 'toolLoop.maxIdenticalToolCallsWarnAt', 1),
+      },
+      browser: {
+        navigationTimeoutMs:
+          passBoundedInt(p, 'browser.navigationTimeoutMs', 1_000, 600_000) ?? 30_000,
+        commandTimeoutMs: passBoundedInt(p, 'browser.commandTimeoutMs', 1_000, 600_000) ?? 10_000,
+      },
+      gatewayMaxInboundMediaBytes: passBoundedInt(
+        p,
+        'gateway.maxInboundMediaBytes',
+        1024,
+        134_217_728,
+      ),
+      teamSupervisorRestartLoopGuard: {
+        maxRestarts: passBoundedInt(p, 'teamSupervisor.restartLoopGuard.maxRestarts', 1, 1000) ?? 5,
+        windowSeconds:
+          passBoundedInt(p, 'teamSupervisor.restartLoopGuard.windowSeconds', 1, 86_400) ?? 60,
+      },
+      discordMissedMessageBackfill: {
+        // Default ON — the adapter backfills unless an explicit false says not to.
+        enabled: passBool(p, 'discord.missedMessageBackfill.enabled', true),
+        windowSeconds: passBoundedInt(p, 'discord.missedMessageBackfill.windowSeconds', 1, 604_800),
+        limit: passBoundedInt(p, 'discord.missedMessageBackfill.limit', 1, 100) ?? 50,
+      },
     };
   }
 
@@ -1919,6 +2108,7 @@ export class ConfigService {
       set('compaction.target', patch.compaction.target);
       set('compaction.gateDelta', patch.compaction.gateDelta);
       set('compaction.retryOnOverflow', patch.compaction.retryOnOverflow);
+      set('compaction.abortOnSummaryFailure', patch.compaction.abortOnSummaryFailure);
       set('compaction.smallWindow', patch.compaction.smallWindow);
     }
     if (patch.voiceFiller) {
@@ -1990,6 +2180,42 @@ export class ConfigService {
       set('logs.rotation.maxBytes', patch.logsRotation.maxBytes);
       set('logs.rotation.maxFiles', patch.logsRotation.maxFiles);
     }
+    set('logs.level', patch.logsLevel);
+    set('retention.vacuumAfterPrune', patch.retentionVacuumAfterPrune);
+    set('retention.minVacuumIntervalDays', patch.retentionMinVacuumIntervalDays);
+    set('cron.maxParallelJobs', patch.cronMaxParallelJobs);
+    set('gateway.maxInboundMediaBytes', patch.gatewayMaxInboundMediaBytes);
+    if (patch.memoryCharLimits) {
+      set('memory.charLimits.memory', patch.memoryCharLimits.memory);
+      set('memory.charLimits.user', patch.memoryCharLimits.user);
+    }
+    if (patch.executionDocker) {
+      set('execution.docker.cpu', patch.executionDocker.cpu);
+      set('execution.docker.diskMb', patch.executionDocker.diskMb);
+    }
+    if (patch.kanban) {
+      set('kanban.maxInProgress', patch.kanban.maxInProgress);
+      set('kanban.maxInProgressPerProfile', patch.kanban.maxInProgressPerProfile);
+    }
+    if (patch.toolLoop) {
+      set('toolLoop.maxToolCallsWarnAt', patch.toolLoop.maxToolCallsWarnAt);
+      set('toolLoop.maxIdenticalToolCallsWarnAt', patch.toolLoop.maxIdenticalToolCallsWarnAt);
+    }
+    if (patch.browser) {
+      set('browser.navigationTimeoutMs', patch.browser.navigationTimeoutMs);
+      set('browser.commandTimeoutMs', patch.browser.commandTimeoutMs);
+    }
+    if (patch.teamSupervisorRestartLoopGuard) {
+      const g = patch.teamSupervisorRestartLoopGuard;
+      set('teamSupervisor.restartLoopGuard.maxRestarts', g.maxRestarts);
+      set('teamSupervisor.restartLoopGuard.windowSeconds', g.windowSeconds);
+    }
+    if (patch.discordMissedMessageBackfill) {
+      const b = patch.discordMissedMessageBackfill;
+      set('discord.missedMessageBackfill.enabled', b.enabled);
+      set('discord.missedMessageBackfill.windowSeconds', b.windowSeconds);
+      set('discord.missedMessageBackfill.limit', b.limit);
+    }
     set('web.search_backend', patch.webSearchBackend);
     set('web.extract_backend', patch.webExtractBackend);
     const setAux = (prefix: string, aux: AuxModelUpdateInput | undefined): void => {
@@ -2059,7 +2285,14 @@ export class ConfigService {
       }
     };
     if (patch.retention !== undefined) {
-      deletePrefix('retention.');
+      // Scoped to the duration subkeys this record owns, NOT the whole prefix:
+      // `retention.vacuumAfterPrune` / `retention.minVacuumIntervalDays` are
+      // separate scalars that happen to share it, and a prefix sweep would
+      // silently clear them whenever a TTL was edited.
+      const owned = new Set(RETENTION_SUBKEYS.map((sub) => `retention.${sub}`));
+      for (const key of Object.keys(currentPassthrough)) {
+        if (owned.has(key)) deleteKeys.push(key);
+      }
       for (const [sub, dur] of Object.entries(patch.retention)) {
         set(`retention.${sub}`, dur);
       }

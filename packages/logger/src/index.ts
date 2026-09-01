@@ -20,9 +20,14 @@ export const noopLogger: Logger = new NoopLogger();
 // (pino, etc.) — this is the framework's default for ergonomic CLI use.
 export class ConsoleLogger implements Logger {
   private readonly baseMeta: LogMeta;
+  private readonly minLevel: LogLevel;
 
-  constructor(baseMeta: LogMeta = {}) {
+  // `level` is the lowest severity that prints. Defaults to `'debug'` — the
+  // whole range — so an app that installs a ConsoleLogger without configuring
+  // `logs.level` behaves exactly as it did before the gate existed.
+  constructor(baseMeta: LogMeta = {}, level: LogLevel = 'debug') {
     this.baseMeta = baseMeta;
+    this.minLevel = level;
   }
 
   debug(message: string, meta?: LogMeta): void {
@@ -39,10 +44,11 @@ export class ConsoleLogger implements Logger {
   }
 
   child(meta: LogMeta): Logger {
-    return new ConsoleLogger({ ...this.baseMeta, ...meta });
+    return new ConsoleLogger({ ...this.baseMeta, ...meta }, this.minLevel);
   }
 
   private emit(level: LogLevel, message: string, meta?: LogMeta): void {
+    if (LEVEL_RANK[level] < LEVEL_RANK[this.minLevel]) return;
     const merged = meta ? { ...this.baseMeta, ...meta } : this.baseMeta;
     const prefix = formatPrefix(merged);
     const suffix = formatSuffix(merged);
@@ -60,6 +66,10 @@ export class ConsoleLogger implements Logger {
     }
   }
 }
+
+// Severity order for the `logs.level` gate — a record printed below the
+// configured level is dropped before any formatting work happens.
+const LEVEL_RANK: Record<LogLevel, number> = { debug: 0, info: 1, warn: 2, error: 3 };
 
 function formatPrefix(meta: LogMeta): string {
   const component = meta.component;

@@ -153,6 +153,13 @@ export interface CronSchedulerConfig {
   cronDir?: string;
   /** Tick interval in ms. Default 60_000 (1 min). */
   tickIntervalMs?: number;
+  /**
+   * Cap on cron jobs executing at once across overlapping ticks (mapped from
+   * `cron.maxParallelJobs`). A due job reached while the cap is met is left
+   * unclaimed — `nextRunAt` is not advanced, so it stays due and fires on a
+   * later tick rather than being dropped. Unset = no cap.
+   */
+  maxParallelJobs?: number;
   /** Storage backend. Injected by the composition root; required — never
    *  falls back to raw disk. */
   storage: Storage;
@@ -418,6 +425,10 @@ export class CronScheduler {
   private readonly outputDir: string;
   private readonly runJob: (job: CronJob) => Promise<CronRunResult>;
   private readonly tickIntervalMs: number;
+  /** `null` = uncapped. See `CronSchedulerConfig.maxParallelJobs`. */
+  private readonly maxParallelJobs: number | null;
+  /** Jobs currently executing, across every concurrent `tick()`. */
+  private inFlight = 0;
   private readonly storage: Storage;
   private readonly logger: Logger;
   private readonly deliver?: (job: CronJob, output: string) => Promise<void>;
@@ -437,6 +448,7 @@ export class CronScheduler {
     this.outputDir = join(this.cronDir, 'output');
     this.runJob = config.runJob;
     this.tickIntervalMs = config.tickIntervalMs ?? 60_000;
+    this.maxParallelJobs = config.maxParallelJobs ?? null;
     this.storage = config.storage;
     this.logger = config.logger ?? noopLogger;
     this.deliver = config.deliver;
@@ -817,6 +829,18 @@ export class CronScheduler {
         continue;
       }
 
+      // `cron.maxParallelJobs` — stop firing once the in-flight count is at the
+      // cap. Checked BEFORE the claim so the deferred job keeps its `nextRunAt`
+      // and stays due for a later tick instead of being silently consumed.
+      if (this.maxParallelJobs !== null && this.inFlight >= this.maxParallelJobs) {
+        this.logger.debug('[cron] parallel job cap reached — deferring due jobs', {
+          component: 'cron',
+          inFlight: this.inFlight,
+          maxParallelJobs: this.maxParallelJobs,
+        });
+        break;
+      }
+
       // Claim the job by advancing nextRunAt BEFORE executing so a crash
       // mid-run doesn't double-fire on the next tick. `claimDueJob` re-checks
       // `nextRunAt` against this tick's snapshot INSIDE the jobs lock — a
@@ -848,6 +872,7 @@ export class CronScheduler {
         continue;
       }
 
+      this.inFlight++;
       try {
         await this.executeJob(job, runningStamp);
       } catch (err) {
@@ -860,6 +885,8 @@ export class CronScheduler {
           lastError: err instanceof Error ? err.message : String(err),
         }).catch(() => {});
         continue;
+      } finally {
+        this.inFlight--;
       }
 
       // After successful execution: increment runCount and check retirement.

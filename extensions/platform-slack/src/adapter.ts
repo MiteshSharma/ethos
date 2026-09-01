@@ -103,6 +103,8 @@ function normalizeWebUiBaseUrl(raw: string | undefined): string | undefined {
 }
 
 /** Maximum file size in bytes that we'll download into memory. */
+/** Default inbound-attachment ceiling. Overridable per deployment via
+ *  `gateway.maxInboundMediaBytes` → `SlackAdapterConfig.maxInboundMediaBytes`. */
 const MAX_FILE_SIZE = 25 * 1024 * 1024; // 25 MB
 
 /**
@@ -290,6 +292,11 @@ export interface SlackAdapterConfig {
   /** Route segment under `/slack/events/` for this app's HTTP Events
    *  endpoint. Defaults to `botKey`. Only meaningful in HTTP mode. */
   webhookPath?: string;
+  /**
+   * Override for the largest inbound file this adapter will download (bytes).
+   * Absent = {@link MAX_FILE_SIZE}. Set from `gateway.maxInboundMediaBytes`.
+   */
+  maxInboundMediaBytes?: number;
 }
 
 /**
@@ -378,6 +385,8 @@ export class SlackAdapter implements PlatformAdapter, ApprovalCapableAdapter, Vo
   private readonly app: App;
   /** Whether this adapter runs the HTTP Events transport (`mode.http`). */
   private readonly httpMode: boolean;
+  /** Resolved inbound-file ceiling, bytes. Defaults to MAX_FILE_SIZE. */
+  private readonly maxInboundMediaBytes: number;
   /** The HTTP Events receiver, or `undefined` in Socket Mode. */
   private readonly httpReceiver: HTTPReceiver | undefined;
   /** Path this adapter's HTTP Events endpoint answers on, or `undefined` in
@@ -444,6 +453,7 @@ export class SlackAdapter implements PlatformAdapter, ApprovalCapableAdapter, Vo
     // `mode` absent → Socket Mode on, HTTP Events off.
     const socketMode = config.mode?.socket ?? true;
     this.httpMode = config.mode?.http ?? false;
+    this.maxInboundMediaBytes = config.maxInboundMediaBytes ?? MAX_FILE_SIZE;
     if (socketMode && this.httpMode) {
       // Not the cron `{ local, external }` hybrid: Socket Mode and HTTP
       // Events carry the SAME inbound event stream, and Slack's dashboard
@@ -1403,7 +1413,7 @@ export class SlackAdapter implements PlatformAdapter, ApprovalCapableAdapter, Vo
       const file = files[i];
       const ext = (file.filetype ?? '').toLowerCase();
       if (SKIP_EXTS.has(ext)) continue;
-      if ((file.size ?? 0) > MAX_FILE_SIZE) continue;
+      if ((file.size ?? 0) > this.maxInboundMediaBytes) continue;
       if (!file.url_private_download) continue;
       // CHS-006 — the URL arrives on an event payload, and the request carries
       // the bot token. Confine it to Slack's own hosts and refuse redirects:
@@ -1424,9 +1434,9 @@ export class SlackAdapter implements PlatformAdapter, ApprovalCapableAdapter, Vo
         });
         if (!res.ok) continue;
         const contentLength = Number(res.headers.get('content-length') ?? 0);
-        if (contentLength > MAX_FILE_SIZE) continue;
+        if (contentLength > this.maxInboundMediaBytes) continue;
         const bytes = new Uint8Array(await res.arrayBuffer());
-        if (bytes.length > MAX_FILE_SIZE) continue;
+        if (bytes.length > this.maxInboundMediaBytes) continue;
         const filename = file.name ?? `att-${i}`;
         const mime = file.mimetype ?? 'application/octet-stream';
         const url = await this.cache.write(bytes, {

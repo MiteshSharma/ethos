@@ -9,6 +9,7 @@ import type { Tool, ToolResult } from '@ethosagent/types';
 import { getOrCreateSessionWithRoute } from './session-route';
 import { closeSession, findActiveSession, isPlaywrightInstalled } from './sessions';
 import { snapshotPage } from './snapshot';
+import type { BrowserTimeouts } from './timeouts';
 
 async function resolveHost(host: string): Promise<string[]> {
   const records = await lookup(host, { all: true });
@@ -166,50 +167,53 @@ export const browserScrollTool: Tool = {
 // browser_back — Navigate back
 // ---------------------------------------------------------------------------
 
-export const browserBackTool: Tool = {
-  name: 'browser_back',
-  description: 'Navigate the browser back to the previous page. Returns the updated page content.',
-  toolset: 'browser',
-  maxResultChars: 20_000,
-  capabilities: {
-    network: { allowedHosts: ['*'] },
-    process: { allowedBinaries: ['docker'] },
-  },
-  isAvailable: isPlaywrightInstalled,
-  schema: {
-    type: 'object',
-    properties: {},
-    required: [],
-  },
-  async execute(_args, ctx): Promise<ToolResult> {
-    const session = findActiveSession(ctx.sessionId, ctx.networkPolicy ?? {});
-    if (!session) {
-      return {
-        ok: false,
-        error: 'No active browser session. Call browse_url first.',
-        code: 'execution_failed',
-      };
-    }
+export function createBrowserBackTool(timeouts: BrowserTimeouts): Tool {
+  return {
+    name: 'browser_back',
+    description:
+      'Navigate the browser back to the previous page. Returns the updated page content.',
+    toolset: 'browser',
+    maxResultChars: 20_000,
+    capabilities: {
+      network: { allowedHosts: ['*'] },
+      process: { allowedBinaries: ['docker'] },
+    },
+    isAvailable: isPlaywrightInstalled,
+    schema: {
+      type: 'object',
+      properties: {},
+      required: [],
+    },
+    async execute(_args, ctx): Promise<ToolResult> {
+      const session = findActiveSession(ctx.sessionId, ctx.networkPolicy ?? {});
+      if (!session) {
+        return {
+          ok: false,
+          error: 'No active browser session. Call browse_url first.',
+          code: 'execution_failed',
+        };
+      }
 
-    try {
-      await session.page.goBack({ timeout: 10_000 });
-      await session.page.waitForTimeout(500);
+      try {
+        await session.page.goBack({ timeout: timeouts.navigationMs });
+        await session.page.waitForTimeout(500);
 
-      const { text, refs, title, url } = await snapshotPage(session.page);
-      session.refs = refs;
-      session.lastUrl = url;
+        const { text, refs, title, url } = await snapshotPage(session.page);
+        session.refs = refs;
+        session.lastUrl = url;
 
-      const header = `[${title}] ${url}\n\n`;
-      return { ok: true, value: header + text };
-    } catch (err) {
-      return {
-        ok: false,
-        error: err instanceof Error ? err.message : String(err),
-        code: 'execution_failed',
-      };
-    }
-  },
-};
+        const header = `[${title}] ${url}\n\n`;
+        return { ok: true, value: header + text };
+      } catch (err) {
+        return {
+          ok: false,
+          error: err instanceof Error ? err.message : String(err),
+          code: 'execution_failed',
+        };
+      }
+    },
+  };
+}
 
 // ---------------------------------------------------------------------------
 // browser_console — Get console messages
@@ -365,98 +369,104 @@ export const browserDialogTool: Tool = {
 // browser_navigate — Navigate to URL (alias for browse_url, Hermes compat)
 // ---------------------------------------------------------------------------
 
-export const browserNavigateTool: Tool = {
-  name: 'browser_navigate',
-  description:
-    'Navigate a browser to a URL and return an accessibility tree with @e{n} element references. Alias for browse_url.',
-  toolset: 'browser',
-  maxResultChars: 20_000,
-  capabilities: {
-    network: { allowedHosts: ['*'] },
-    process: { allowedBinaries: ['docker'] },
-  },
-  outputIsUntrusted: true,
-  isAvailable: isPlaywrightInstalled,
-  schema: {
-    type: 'object',
-    properties: {
-      url: { type: 'string', description: 'URL to navigate to' },
-      wait_for: {
-        type: 'string',
-        enum: ['load', 'domcontentloaded', 'networkidle'],
-        description: 'Wait condition (default: domcontentloaded)',
-      },
+export function createBrowserNavigateTool(timeouts: BrowserTimeouts): Tool {
+  return {
+    name: 'browser_navigate',
+    description:
+      'Navigate a browser to a URL and return an accessibility tree with @e{n} element references. Alias for browse_url.',
+    toolset: 'browser',
+    maxResultChars: 20_000,
+    capabilities: {
+      network: { allowedHosts: ['*'] },
+      process: { allowedBinaries: ['docker'] },
     },
-    required: ['url'],
-  },
-  async execute(args, ctx): Promise<ToolResult> {
-    const { url, wait_for = 'domcontentloaded' } = args as {
-      url: string;
-      wait_for?: 'load' | 'domcontentloaded' | 'networkidle';
-    };
-
-    if (!url) return { ok: false, error: 'url is required', code: 'input_invalid' };
-
-    let parsed: URL;
-    try {
-      parsed = new URL(url);
-    } catch {
-      return { ok: false, error: `Invalid URL: ${url}`, code: 'input_invalid' };
-    }
-
-    if (!['http:', 'https:'].includes(parsed.protocol)) {
-      return { ok: false, error: 'Only http and https URLs are supported', code: 'input_invalid' };
-    }
-
-    const policy = ctx.networkPolicy ?? {};
-    const policyCheck = await validateUrl(url, policy, resolveHost);
-    if (!policyCheck.ok) {
-      return { ok: false, error: policyCheck.reason ?? 'blocked', code: 'execution_failed' };
-    }
-    const ssrf = await checkSsrf(url);
-    if (ssrf.blocked) {
-      return { ok: false, error: ssrf.reason, code: 'execution_failed' };
-    }
-
-    if (!isPlaywrightInstalled()) {
-      return {
-        ok: false,
-        error: 'Playwright is not installed. Run: npx playwright install chromium',
-        code: 'not_available',
+    outputIsUntrusted: true,
+    isAvailable: isPlaywrightInstalled,
+    schema: {
+      type: 'object',
+      properties: {
+        url: { type: 'string', description: 'URL to navigate to' },
+        wait_for: {
+          type: 'string',
+          enum: ['load', 'domcontentloaded', 'networkidle'],
+          description: 'Wait condition (default: domcontentloaded)',
+        },
+      },
+      required: ['url'],
+    },
+    async execute(args, ctx): Promise<ToolResult> {
+      const { url, wait_for = 'domcontentloaded' } = args as {
+        url: string;
+        wait_for?: 'load' | 'domcontentloaded' | 'networkidle';
       };
-    }
 
-    try {
-      const session = await getOrCreateSessionWithRoute(ctx.sessionId, policy);
+      if (!url) return { ok: false, error: 'url is required', code: 'input_invalid' };
 
-      if (ctx.abortSignal.aborted) {
-        await closeSession(ctx.sessionId);
-        return { ok: false, error: 'Aborted', code: 'execution_failed' };
+      let parsed: URL;
+      try {
+        parsed = new URL(url);
+      } catch {
+        return { ok: false, error: `Invalid URL: ${url}`, code: 'input_invalid' };
       }
 
-      await session.page.goto(url, {
-        waitUntil: wait_for,
-        timeout: 30_000,
-      });
-      session.lastUrl = url;
+      if (!['http:', 'https:'].includes(parsed.protocol)) {
+        return {
+          ok: false,
+          error: 'Only http and https URLs are supported',
+          code: 'input_invalid',
+        };
+      }
 
-      const { text, refs, title } = await snapshotPage(session.page);
-      session.refs = refs;
+      const policy = ctx.networkPolicy ?? {};
+      const policyCheck = await validateUrl(url, policy, resolveHost);
+      if (!policyCheck.ok) {
+        return { ok: false, error: policyCheck.reason ?? 'blocked', code: 'execution_failed' };
+      }
+      const ssrf = await checkSsrf(url);
+      if (ssrf.blocked) {
+        return { ok: false, error: ssrf.reason, code: 'execution_failed' };
+      }
 
-      const refSummary =
-        refs.size > 0
-          ? `\n\nInteractive elements (${refs.size}): ${[...refs.keys()].join(', ')}`
-          : '';
+      if (!isPlaywrightInstalled()) {
+        return {
+          ok: false,
+          error: 'Playwright is not installed. Run: npx playwright install chromium',
+          code: 'not_available',
+        };
+      }
 
-      const header = `[${title}] ${url}\n\n`;
-      return { ok: true, value: header + text + refSummary };
-    } catch (err) {
-      await closeSession(ctx.sessionId);
-      return {
-        ok: false,
-        error: err instanceof Error ? err.message : String(err),
-        code: 'execution_failed',
-      };
-    }
-  },
-};
+      try {
+        const session = await getOrCreateSessionWithRoute(ctx.sessionId, policy);
+
+        if (ctx.abortSignal.aborted) {
+          await closeSession(ctx.sessionId);
+          return { ok: false, error: 'Aborted', code: 'execution_failed' };
+        }
+
+        await session.page.goto(url, {
+          waitUntil: wait_for,
+          timeout: timeouts.navigationMs,
+        });
+        session.lastUrl = url;
+
+        const { text, refs, title } = await snapshotPage(session.page);
+        session.refs = refs;
+
+        const refSummary =
+          refs.size > 0
+            ? `\n\nInteractive elements (${refs.size}): ${[...refs.keys()].join(', ')}`
+            : '';
+
+        const header = `[${title}] ${url}\n\n`;
+        return { ok: true, value: header + text + refSummary };
+      } catch (err) {
+        await closeSession(ctx.sessionId);
+        return {
+          ok: false,
+          error: err instanceof Error ? err.message : String(err),
+          code: 'execution_failed',
+        };
+      }
+    },
+  };
+}

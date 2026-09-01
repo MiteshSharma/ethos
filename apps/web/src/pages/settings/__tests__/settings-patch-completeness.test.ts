@@ -45,9 +45,11 @@ function store(): FormShape {
       minMessagesSinceFlush: null,
     },
     memoryCapture: { provider: '', apiKey: '', baseUrl: '', maxPerHour: null, maxPerDay: null },
+    memoryCharLimits: { memory: 524_288, user: 524_288 },
     // Security & access
     approvalMode: 'smart',
     adminEnabled: false,
+    gatewayMaxInboundMediaBytes: null,
     // Chat & context
     verbosity: 'balanced',
     streamingEdits: 'dms',
@@ -58,6 +60,7 @@ function store(): FormShape {
       target: null,
       gateDelta: null,
       retryOnOverflow: true,
+      abortOnSummaryFailure: false,
       smallWindow: 'auto',
     },
     displayVerbosity: 'default',
@@ -66,11 +69,16 @@ function store(): FormShape {
     displayResumeHint: true,
     displayResumeRecapTurns: null,
     displayBellOnComplete: false,
+    discordMissedMessageBackfill: { enabled: true, windowSeconds: null, limit: 50 },
     // Developer
     debugMode: false,
     debugPanelEnabled: false,
     debugPanelModel: '',
     logsRotation: { enabled: true, maxBytes: null, maxFiles: null },
+    logsLevel: 'debug',
+    executionDocker: { cpu: 2, diskMb: null },
+    toolLoop: { maxToolCallsWarnAt: null, maxIdenticalToolCallsWarnAt: null },
+    browser: { navigationTimeoutMs: 30_000, commandTimeoutMs: 10_000 },
     pluginsAutoInstall: 'default',
     webBaseUrl: '',
     apiVersion: '',
@@ -152,9 +160,15 @@ function store(): FormShape {
       heartbeatMs: null,
       retentionDays: null,
     },
+    kanban: { maxInProgress: null, maxInProgressPerProfile: null },
+    // Data & retention
+    retentionVacuumAfterPrune: false,
+    retentionMinVacuumIntervalDays: null,
     // Automation
     nightlyPass: { enabled: false, cron: '' },
     weeklyDigest: { enabled: false, cron: '', recipients: [] },
+    cronMaxParallelJobs: null,
+    teamSupervisorRestartLoopGuard: { maxRestarts: 5, windowSeconds: 60 },
     // Models & providers
     modelCatalog: { enabled: true, url: '', ttlHours: null },
     webSearchBackend: '',

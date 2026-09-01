@@ -195,6 +195,19 @@ export function ChatPane() {
           </Form.Item>
         </SettingRow>
         <SettingRow
+          label="Abort on summary failure"
+          formName="compaction.abortOnSummaryFailure"
+          help="Surface a failed emergency summary as its own error instead of the generic overflow rejection (default off)."
+        >
+          <Form.Item
+            name={['compaction', 'abortOnSummaryFailure']}
+            valuePropName="checked"
+            style={{ marginBottom: 0 }}
+          >
+            <Switch />
+          </Form.Item>
+        </SettingRow>
+        <SettingRow
           label="Small-window mode"
           formName="compaction.smallWindow"
           help="Force small-window handling for local models (default auto)."
@@ -207,6 +220,46 @@ export function ChatPane() {
                 { value: 'off', label: 'Off' },
               ]}
             />
+          </Form.Item>
+        </SettingRow>
+      </AdvancedBlock>
+
+      <SectionHeading id="discord">Discord</SectionHeading>
+
+      <SettingRow
+        label="Backfill missed messages"
+        formName="discordMissedMessageBackfill.enabled"
+        help="Read a channel's recent history the first time the Discord adapter sees a lane (default on)."
+      >
+        <Form.Item
+          name={['discordMissedMessageBackfill', 'enabled']}
+          valuePropName="checked"
+          style={{ marginBottom: 0 }}
+        >
+          <Switch />
+        </Form.Item>
+      </SettingRow>
+
+      <AdvancedBlock>
+        <SettingRow
+          label="Backfill window (seconds)"
+          formName="discordMissedMessageBackfill.windowSeconds"
+          help="Skip messages older than this. Blank = no age bound."
+        >
+          <Form.Item
+            name={['discordMissedMessageBackfill', 'windowSeconds']}
+            style={{ marginBottom: 0 }}
+          >
+            <InputNumber min={1} max={604800} precision={0} style={{ width: '100%' }} />
+          </Form.Item>
+        </SettingRow>
+        <SettingRow
+          label="Backfill message limit"
+          formName="discordMissedMessageBackfill.limit"
+          help="Messages read per lane (default 50). 100 is Discord's own ceiling."
+        >
+          <Form.Item name={['discordMissedMessageBackfill', 'limit']} style={{ marginBottom: 0 }}>
+            <InputNumber min={1} max={100} precision={0} style={{ width: '100%' }} />
           </Form.Item>
         </SettingRow>
       </AdvancedBlock>

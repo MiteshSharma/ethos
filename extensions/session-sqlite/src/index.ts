@@ -150,14 +150,43 @@ export function createKvStoreFactory(
   return (tool, scopeId) => new SqliteKeyValueStore(db, tool, scopeId);
 }
 
+/**
+ * Post-prune maintenance knobs, sourced from `retention.*` in `~/.ethos/config.yaml`.
+ * Absent → today's behavior: `pruneOldSessions` deletes rows and never vacuums.
+ */
+export interface SQLiteSessionStoreOptions {
+  /** Run `VACUUM` after a prune that actually deleted rows. Default false. */
+  vacuumAfterPrune?: boolean;
+  /** Minimum whole days between two automatic vacuums. Default 0 (every prune). */
+  minVacuumIntervalDays?: number;
+  /** Test seam for the interval clock. */
+  now?: () => number;
+}
+
+/** `store_meta` key holding the epoch-ms timestamp of the last automatic vacuum. */
+const LAST_VACUUM_KEY = 'last_vacuum_at';
+
+/** SQLITE_BUSY (5) / SQLITE_LOCKED (6) — a peer holds the write lock right now. */
+function isLockedError(err: unknown): boolean {
+  if (typeof err !== 'object' || err === null) return false;
+  const code = (err as { errcode?: unknown }).errcode;
+  return code === 5 || code === 6;
+}
+
 export class SQLiteSessionStore implements SessionStore {
   private readonly db: Database.Database;
+  private readonly vacuumAfterPrune: boolean;
+  private readonly minVacuumIntervalMs: number;
+  private readonly now: () => number;
 
-  constructor(dbPath: string) {
+  constructor(dbPath: string, opts: SQLiteSessionStoreOptions = {}) {
     this.db = new Database(dbPath);
     this.db.pragma('journal_mode = WAL');
     this.db.pragma('foreign_keys = ON');
     this.migrate();
+    this.vacuumAfterPrune = opts.vacuumAfterPrune === true;
+    this.minVacuumIntervalMs = Math.max(0, opts.minVacuumIntervalDays ?? 0) * 86_400_000;
+    this.now = opts.now ?? Date.now;
   }
 
   // ---------------------------------------------------------------------------
@@ -218,6 +247,14 @@ export class SQLiteSessionStore implements SessionStore {
     if (!compCols.some((c) => c.name === 'kept_from_message_id')) {
       this.db.exec('ALTER TABLE compressions ADD COLUMN kept_from_message_id TEXT');
     }
+
+    // Additive migration: store-level maintenance metadata. Holds the epoch-ms
+    // timestamp of the last automatic VACUUM so `retention.minVacuumIntervalDays`
+    // survives a restart — nothing else tracked "when did we last vacuum". Kept
+    // out of the v1 baseline so DBs already stamped at user_version=1 get it too.
+    this.db.exec(
+      'CREATE TABLE IF NOT EXISTS store_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL) STRICT',
+    );
   }
 
   // ---------------------------------------------------------------------------
@@ -801,11 +838,63 @@ export class SQLiteSessionStore implements SessionStore {
     const result = this.db
       .prepare('DELETE FROM sessions WHERE updated_at < ?')
       .run(olderThan.toISOString());
+    // `retention.vacuumAfterPrune` — reclaim the freed pages. Only when the
+    // prune actually deleted something: VACUUM rewrites the whole file behind a
+    // write lock, so a no-op prune must not pay for it. `minVacuumIntervalDays`
+    // throttles across restarts via the `store_meta` row.
+    if (result.changes > 0 && this.vacuumAfterPrune) {
+      await this.maybeVacuum();
+    }
     return result.changes;
   }
 
   async vacuum(): Promise<void> {
     this.db.exec('VACUUM');
+  }
+
+  /**
+   * Claim the maintenance window, then vacuum. Both a lost claim (a peer
+   * process already vacuumed inside the interval) and a locked database are a
+   * SKIPPED maintenance pass, not a failed prune: the rows are already
+   * deleted and `pruneOldSessions` must still report that count.
+   */
+  private async maybeVacuum(): Promise<void> {
+    try {
+      if (!this.claimVacuumWindow()) return;
+      await this.vacuum();
+    } catch (err) {
+      if (isLockedError(err)) return;
+      throw err;
+    }
+  }
+
+  /**
+   * Atomically claim the vacuum window — the conditional UPDATE's affected-row
+   * count IS the decision, the same idiom the delivery ledger's redelivery
+   * claim uses. `ethos run-all` launches gateway and serve as separate
+   * processes over one `sessions.db`; a read-then-vacuum check let both read
+   * the same stale stamp, both decide to vacuum, and then collide on VACUUM's
+   * exclusive write lock.
+   *
+   * The stamp is written BEFORE the VACUUM runs, so a vacuum that fails or is
+   * interrupted does not leave every following prune retrying the full
+   * database rewrite. The missing-row case is an `INSERT OR IGNORE`, so the
+   * first-ever vacuum on a database is claimed by exactly one peer too.
+   */
+  private claimVacuumWindow(): boolean {
+    const now = this.now();
+    const cutoff = now - this.minVacuumIntervalMs;
+    const claim = this.db.transaction((): boolean => {
+      const updated = this.db
+        .prepare('UPDATE store_meta SET value = ? WHERE key = ? AND CAST(value AS INTEGER) <= ?')
+        .run(String(now), LAST_VACUUM_KEY, cutoff);
+      if (updated.changes > 0) return true;
+      const inserted = this.db
+        .prepare('INSERT OR IGNORE INTO store_meta (key, value) VALUES (?, ?)')
+        .run(LAST_VACUUM_KEY, String(now));
+      return inserted.changes > 0;
+    });
+    return claim.immediate();
   }
 
   /**

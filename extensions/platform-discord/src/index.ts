@@ -94,6 +94,19 @@ interface DiscordAdapterConfig {
    * message that is deleted when the real response is sent. Default: false.
    */
   postThinkingPlaceholder?: boolean;
+  /**
+   * Override for the largest inbound attachment this adapter will download
+   * (bytes). Absent = the adapter's own 25 MB default. Set from
+   * `gateway.maxInboundMediaBytes`.
+   */
+  maxInboundMediaBytes?: number;
+  /**
+   * Missed-message backfill: the slice of channel history read the first time
+   * this bot sees a lane, so its first reply is not context-blind. Absent =
+   * today's behaviour (on, 50 messages, no age bound). Set from
+   * `discord.missedMessageBackfill`.
+   */
+  missedMessageBackfill?: { enabled?: boolean; windowSeconds?: number; limit?: number };
 }
 
 export class DiscordAdapter
@@ -161,6 +174,9 @@ export class DiscordAdapter
   private readonly observability: DiscordAdapterConfig['observability'];
   private readonly approvalPolicy: 'role_gate' | 'allow_any';
   private readonly postThinkingPlaceholder: boolean;
+  /** Inbound-attachment ceiling override, bytes. Absent = the 25 MB default. */
+  private readonly maxInboundMediaBytes: number | undefined;
+  private readonly missedMessageBackfill: DiscordAdapterConfig['missedMessageBackfill'];
 
   private readonly threadState?: ThreadStateStore;
   private readonly channelOverrides?: ChannelOverrideStore;
@@ -194,6 +210,8 @@ export class DiscordAdapter
     this.approvalPolicy = config.approvalPolicy ?? 'role_gate';
     this.observability = config.observability;
     this.postThinkingPlaceholder = config.postThinkingPlaceholder ?? false;
+    this.maxInboundMediaBytes = config.maxInboundMediaBytes;
+    this.missedMessageBackfill = config.missedMessageBackfill;
 
     // Gap 9: derive defaultChannelMode from deprecated mentionOnly when
     // the caller hasn't set defaultChannelMode explicitly.
@@ -238,6 +256,8 @@ export class DiscordAdapter
       channelOverrides: this.channelOverrides,
       threadState: this.threadState,
       backfillState: this.backfillState,
+      maxInboundMediaBytes: this.maxInboundMediaBytes,
+      backfill: this.missedMessageBackfill,
       onMessage: (msg: InboundMessage) => this.messageHandler?.(msg),
       onReceipt: (channelId: string, messageId: string) => {
         if (this.pendingReactions.size >= this.pendingReactionsMax) {

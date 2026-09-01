@@ -386,6 +386,63 @@ describe('AgentLoop', () => {
       expect(halt?.count).toBe(3);
     });
 
+    it('nudges ONCE on the soft-warn tier without halting the turn', async () => {
+      let llmCallCount = 0;
+      const tools = await buildRegistry('repeat_me');
+      const llm = makeLoopingToolLLM('repeat_me', () => {
+        llmCallCount++;
+        return llmCallCount;
+      });
+
+      const loop = new AgentLoop({
+        llm,
+        tools,
+        safety: createTestSafety(),
+        options: {
+          maxToolCallsPerTurn: 100,
+          maxIdenticalToolCalls: 6,
+          // Raised so the identical-NAME cap is the one that stops the turn —
+          // the consecutive-streak cap (default 5) would trip first otherwise.
+          maxConsecutiveIdenticalCalls: 100,
+          maxIdenticalToolCallsWarnAt: 2,
+        },
+      });
+      const events = await collect(loop.run('hi'));
+
+      const warns = events.filter(
+        (e): e is Extract<AgentEvent, { type: 'tool_progress' }> =>
+          e.type === 'tool_progress' && e.message.includes('warn at 2'),
+      );
+      // Crossed on several iterations, surfaced exactly once.
+      expect(warns).toHaveLength(1);
+      // Phase 30.2 — a framework diagnostic, never surfaced to the user.
+      expect(warns[0]?.audience).toBe('internal');
+      expect(warns[0]?.toolName).toBe('repeat_me');
+
+      // The warn does not end the turn — the HARD cap did, several calls later.
+      const halt = events.find((e) => e.type === 'halt') as
+        | Extract<AgentEvent, { type: 'halt' }>
+        | undefined;
+      expect(halt?.count).toBe(6);
+    });
+
+    it('emits no warn event when no warn threshold is configured', async () => {
+      const tools = await buildRegistry('repeat_me');
+      const llm = makeLoopingToolLLM('repeat_me', () => 1);
+
+      const loop = new AgentLoop({
+        llm,
+        tools,
+        safety: createTestSafety(),
+        options: { maxToolCallsPerTurn: 100, maxIdenticalToolCalls: 3 },
+      });
+      const events = await collect(loop.run('hi'));
+
+      expect(events.filter((e) => e.type === 'tool_progress' && e.audience === 'internal')).toEqual(
+        [],
+      );
+    });
+
     it('streaming watchdog fires when no chunk arrives within timeout', async () => {
       // A provider that hangs forever — never yields. Watchdog must trip.
       const hangingLlm: LLMProvider = {

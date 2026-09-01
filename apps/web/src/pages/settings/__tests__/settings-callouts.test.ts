@@ -294,6 +294,7 @@ function baseVoiceConfig(): ConfigGetData {
       target: null,
       gateDelta: null,
       retryOnOverflow: true,
+      abortOnSummaryFailure: false,
       smallWindow: 'auto',
     },
     voiceFiller: { enabled: true, afterMs: null, text: null, tickIntervalMs: null },
@@ -345,6 +346,18 @@ function baseVoiceConfig(): ConfigGetData {
     a2aEnabled: false,
     pluginsAutoInstall: null,
     webBaseUrl: null,
+    retentionVacuumAfterPrune: false,
+    retentionMinVacuumIntervalDays: null,
+    logsLevel: 'debug',
+    memoryCharLimits: { memory: 524_288, user: 524_288 },
+    executionDocker: { cpu: 2, diskMb: null },
+    kanban: { maxInProgress: null, maxInProgressPerProfile: null },
+    cronMaxParallelJobs: null,
+    toolLoop: { maxToolCallsWarnAt: null, maxIdenticalToolCallsWarnAt: null },
+    browser: { navigationTimeoutMs: 30_000, commandTimeoutMs: 10_000 },
+    gatewayMaxInboundMediaBytes: null,
+    teamSupervisorRestartLoopGuard: { maxRestarts: 5, windowSeconds: 60 },
+    discordMissedMessageBackfill: { enabled: true, windowSeconds: null, limit: 50 },
   };
 }
 

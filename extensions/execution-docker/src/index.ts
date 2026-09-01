@@ -485,6 +485,120 @@ export async function* withByteCeiling(
   }
 }
 
+/** `--cpus` applied when `execution.docker.cpu` is unset. */
+const DEFAULT_CPUS = 2;
+
+/**
+ * Storage drivers that enforce `--storage-opt size=` on their own, whatever
+ * they are backed by, so naming the driver is proof enough. `overlay2` is
+ * deliberately absent: it needs xfs project quotas, which no `docker info`
+ * field reports, so it is proven by probe instead — see
+ * {@link DockerExecutionBackend.resolveDiskQuotaMb}. Every other driver —
+ * `vfs`, the legacy `overlay` — makes `docker create` FAIL with the option
+ * present, so those skip the quota with one warning rather than breaking
+ * every sandbox.
+ */
+const DISK_QUOTA_DRIVERS = new Set(['btrfs', 'zfs', 'devicemapper', 'windowsfilter']);
+
+/**
+ * Backing filesystems on which `overlay2` CAN carry a size quota. overlay2
+ * implements `--storage-opt size=` with filesystem project quotas, which only
+ * xfs provides — and only when that xfs is mounted with `pquota`. `docker
+ * info` names the filesystem but never the mount option, so this set narrows
+ * the capability probe to the one genuinely ambiguous case; `extfs` and
+ * everything else skip with a warning and spawn nothing.
+ */
+const OVERLAY2_QUOTA_FILESYSTEMS = new Set(['xfs']);
+
+/** What the daemon reports about its storage layer. */
+export interface StorageDriverInfo {
+  driver: string;
+  /** `docker info`'s `Backing Filesystem`; absent on drivers that report none. */
+  backingFilesystem: string | null;
+}
+
+/** The one pair `docker info` cannot answer for: overlay2 on xfs, where quota
+ *  support hinges on the unreported `pquota` mount option. */
+function needsQuotaProbe(info: StorageDriverInfo): boolean {
+  return (
+    info.driver === 'overlay2' &&
+    info.backingFilesystem !== null &&
+    OVERLAY2_QUOTA_FILESYSTEMS.has(info.backingFilesystem)
+  );
+}
+
+/**
+ * `--storage-opt size=<N>m` for a MB quota. Docker's size parser takes an `m`
+ * suffix, so the requested bound is emitted EXACTLY — rounding up to whole GB
+ * would silently weaken a small quota by up to 1024x.
+ */
+function diskQuotaArgs(diskMb: number | undefined): string[] {
+  if (diskMb === undefined) return [];
+  return ['--storage-opt', `size=${diskMb}m`];
+}
+
+/**
+ * Prove `--storage-opt size=` on this daemon by creating a container with the
+ * option and removing it again. `docker create` is enough — it is the call the
+ * daemon rejects when project quotas are off — and the container never runs.
+ * Any failure at all (option refused, image missing, docker gone) answers
+ * "not supported", so an unprovable daemon loses the quota instead of losing
+ * every sandbox. The `rm` runs in a `finally` so a create that unexpectedly
+ * succeeded still leaves nothing behind.
+ */
+async function defaultQuotaProbe(image: string, diskMb: number): Promise<boolean> {
+  if (!image) return false;
+  const name = `ethos-quota-probe-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  try {
+    return await new Promise<boolean>((resolve) => {
+      const child = spawn(
+        'docker',
+        ['create', '--name', name, '--storage-opt', `size=${diskMb}m`, image, 'true'],
+        { stdio: 'ignore' },
+      );
+      child.on('close', (code) => resolve(code === 0));
+      child.on('error', () => resolve(false));
+    });
+  } catch {
+    return false;
+  } finally {
+    await new Promise<void>((resolve) => {
+      const rm = spawn('docker', ['rm', '-f', name], { stdio: 'ignore' });
+      rm.on('close', () => resolve());
+      rm.on('error', () => resolve());
+    });
+  }
+}
+
+/**
+ * Read the daemon's storage driver and its backing filesystem. `null` when
+ * docker cannot be asked. The `Backing Filesystem` row lives in `DriverStatus`,
+ * so the template pulls it out by name; drivers that report none yield ''.
+ */
+function defaultStorageDriverCheck(): Promise<StorageDriverInfo | null> {
+  const format =
+    '{{.Driver}}\t{{range .DriverStatus}}{{if eq (index . 0) "Backing Filesystem"}}{{index . 1}}{{end}}{{end}}';
+  return new Promise<StorageDriverInfo | null>((resolve) => {
+    try {
+      const child = spawn('docker', ['info', '--format', format], {
+        stdio: ['ignore', 'pipe', 'ignore'],
+      });
+      let out = '';
+      child.stdout.on('data', (c: Buffer) => {
+        out += c.toString();
+      });
+      child.on('close', (exitCode) => {
+        if (exitCode !== 0) return resolve(null);
+        const [driver = '', backing = ''] = out.trim().split('\t');
+        resolve({ driver: driver.trim(), backingFilesystem: backing.trim() || null });
+      });
+      child.on('error', () => resolve(null));
+    } catch {
+      resolve(null);
+    }
+  });
+}
+
 /**
  * Build `docker run` args (after the program name). Pure — no spawning.
  * Throws InvalidImageRefError unless the image is digest-pinned (@sha256:).
@@ -494,6 +608,10 @@ export function buildDockerArgs(opts: {
   cmd: string;
   containerName: string;
   memoryMb: number;
+  /** `--cpus` quota. Default 2. */
+  cpu?: number;
+  /** `--storage-opt size=` quota, emitted in MB exactly as given. Omitted when unset. */
+  diskMb?: number;
   networkMode: 'none' | 'bridge';
   uid: number;
   gid: number;
@@ -512,7 +630,8 @@ export function buildDockerArgs(opts: {
   if (opts.stdin) args.push('-i');
   args.push('--network', opts.networkMode);
   args.push(`--memory=${opts.memoryMb}m`, '--memory-swap', `${opts.memoryMb}m`);
-  args.push('--cpus', '2', '--pids-limit', '256');
+  args.push('--cpus', String(opts.cpu ?? DEFAULT_CPUS), '--pids-limit', '256');
+  args.push(...diskQuotaArgs(opts.diskMb));
   args.push('--cap-drop', 'ALL', '--security-opt', 'no-new-privileges');
   // uid/gid are -1 on Windows; CI is macOS/Linux
   if (opts.uid >= 0 && opts.gid >= 0) {
@@ -548,6 +667,10 @@ export function buildKeepAliveArgs(opts: {
   image: string;
   containerName: string;
   memoryMb: number;
+  /** `--cpus` quota. Default 2. */
+  cpu?: number;
+  /** `--storage-opt size=` quota, emitted in MB exactly as given. Omitted when unset. */
+  diskMb?: number;
   networkMode: 'none' | 'bridge';
   uid: number;
   gid: number;
@@ -564,7 +687,8 @@ export function buildKeepAliveArgs(opts: {
   const args: string[] = ['run', '-d', '--name', opts.containerName];
   args.push('--network', opts.networkMode);
   args.push(`--memory=${opts.memoryMb}m`, '--memory-swap', `${opts.memoryMb}m`);
-  args.push('--cpus', '2', '--pids-limit', '256');
+  args.push('--cpus', String(opts.cpu ?? DEFAULT_CPUS), '--pids-limit', '256');
+  args.push(...diskQuotaArgs(opts.diskMb));
   args.push('--cap-drop', 'ALL', '--security-opt', 'no-new-privileges');
   if (opts.uid >= 0 && opts.gid >= 0) {
     args.push('--user', `${opts.uid}:${opts.gid}`);
@@ -633,6 +757,7 @@ class DockerPersistentSession implements ExecSession {
       const image = this.config.images?.default ?? '';
       if (!image) throw new InvalidImageRefError(image);
       const memoryMb = this.config.memoryMb ?? 256;
+      const diskMb = await this.backend.resolveDiskQuotaMb();
       const containerName = `ethos-sandbox-sess-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
       const info = userInfo();
       const mounts = opts.personality ? this.backend.mountsFor(opts.personality) : [];
@@ -640,6 +765,8 @@ class DockerPersistentSession implements ExecSession {
         image,
         containerName,
         memoryMb,
+        ...(this.config.cpu !== undefined ? { cpu: this.config.cpu } : {}),
+        ...(diskMb !== undefined ? { diskMb } : {}),
         networkMode: resolveNetworkMode(opts.personality),
         uid: info.uid,
         gid: info.gid,
@@ -868,13 +995,66 @@ export class DockerExecutionBackend implements ExecutionBackend {
   readonly name = 'docker';
   private readonly config: ExecutionBackendConfig;
   private readonly checkAvailable: () => Promise<boolean>;
+  private readonly logger: Logger;
+  private readonly checkStorageDriver: () => Promise<StorageDriverInfo | null>;
+  private readonly probeQuota: (image: string, diskMb: number) => Promise<boolean>;
+  /** Memoised so the `docker info` lookup — and the create/rm probe behind it
+   *  — run at most once per backend. */
+  private diskQuota: Promise<number | undefined> | null = null;
 
   constructor(
     ctx: { config: ExecutionBackendConfig; secrets: SecretsResolver; logger: Logger },
     checkAvailable?: () => Promise<boolean>,
+    checkStorageDriver?: () => Promise<StorageDriverInfo | null>,
+    probeQuota?: (image: string, diskMb: number) => Promise<boolean>,
   ) {
     this.config = ctx.config;
     this.checkAvailable = checkAvailable ?? defaultDockerInfoCheck;
+    this.logger = ctx.logger;
+    this.checkStorageDriver = checkStorageDriver ?? defaultStorageDriverCheck;
+    this.probeQuota = probeQuota ?? defaultQuotaProbe;
+  }
+
+  /**
+   * `execution.docker.diskMb`, or `undefined` when the daemon's storage layer
+   * cannot be PROVEN to enforce it. Best-effort by contract: a driver that
+   * would reject `--storage-opt size=` — and so fail EVERY container create —
+   * warns once through the injected logger and containers start without the
+   * quota rather than failing outright.
+   *
+   * Drivers that enforce size natively are taken at their word. overlay2 on
+   * xfs is the ambiguous case — it needs `pquota`, which `docker info` never
+   * reports — so it is settled by one throwaway `docker create`/`docker rm`.
+   * overlay2 on anything else, and every other driver, skip without probing.
+   */
+  async resolveDiskQuotaMb(): Promise<number | undefined> {
+    const diskMb = this.config.diskMb;
+    if (diskMb === undefined) return undefined;
+    this.diskQuota ??= (async () => {
+      const info = await this.checkStorageDriver();
+      if (info !== null && DISK_QUOTA_DRIVERS.has(info.driver)) return diskMb;
+      if (info !== null && needsQuotaProbe(info)) {
+        // `.catch` because an errored probe must never break a sandbox run:
+        // any failure to prove support means the flag is not emitted.
+        const proven = await this.probeQuota(this.config.images?.default ?? '', diskMb).catch(
+          () => false,
+        );
+        if (proven) return diskMb;
+        this.logger.warn(
+          `execution.docker.diskMb ignored: docker would not accept --storage-opt size on ${info.driver} on ${info.backingFilesystem} — xfs project quotas (pquota) are not enabled`,
+        );
+        return undefined;
+      }
+      const what =
+        info === null
+          ? 'unknown'
+          : `${info.driver}${info.backingFilesystem ? ` on ${info.backingFilesystem}` : ''}`;
+      this.logger.warn(
+        `execution.docker.diskMb ignored: docker storage driver "${what}" cannot enforce --storage-opt size`,
+      );
+      return undefined;
+    })();
+    return this.diskQuota;
   }
 
   isAvailable(): Promise<boolean> {
@@ -888,6 +1068,7 @@ export class DockerExecutionBackend implements ExecutionBackend {
     if (!image) throw new InvalidImageRefError(image);
 
     const memoryMb = this.config.memoryMb ?? 256;
+    const diskMb = await this.resolveDiskQuotaMb();
     const containerName = `ethos-sandbox-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const info = userInfo();
     const mounts = opts.personality ? this.mountsFor(opts.personality) : [];
@@ -896,6 +1077,8 @@ export class DockerExecutionBackend implements ExecutionBackend {
       cmd,
       containerName,
       memoryMb,
+      ...(this.config.cpu !== undefined ? { cpu: this.config.cpu } : {}),
+      ...(diskMb !== undefined ? { diskMb } : {}),
       networkMode: resolveNetworkMode(opts.personality),
       uid: info.uid,
       gid: info.gid,

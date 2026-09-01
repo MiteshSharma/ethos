@@ -120,6 +120,8 @@ export interface FormShape extends VoiceTelephonyFormValues {
     target: number | null;
     gateDelta: number | null;
     retryOnOverflow: boolean;
+    /** `compaction.abortOnSummaryFailure` — default false. */
+    abortOnSummaryFailure: boolean;
     smallWindow: 'auto' | 'on' | 'off';
   };
   /** `voice.filler.*` — the tool-call filler/tick keep-alive. Global, not per-surface. */
@@ -165,6 +167,35 @@ export interface FormShape extends VoiceTelephonyFormValues {
   weeklyDigest: { enabled: boolean; cron: string; recipients: string[] };
   modelCatalog: { enabled: boolean; url: string; ttlHours: number | null };
   logsRotation: { enabled: boolean; maxBytes: number | null; maxFiles: number | null };
+  /** `logs.level` — lowest severity `ConsoleLogger` prints. */
+  logsLevel: 'debug' | 'info' | 'warn' | 'error';
+  /** `retention.vacuumAfterPrune` — VACUUM the session DB after a prune sweep. */
+  retentionVacuumAfterPrune: boolean;
+  /** `retention.minVacuumIntervalDays` — null = no minimum interval. */
+  retentionMinVacuumIntervalDays: number | null;
+  /** `memory.charLimits.*` — per-key ceilings for the markdown memory backend. */
+  memoryCharLimits: { memory: number | null; user: number | null };
+  /** `execution.docker.*` — container caps; `diskMb` null = no quota. */
+  executionDocker: { cpu: number | null; diskMb: number | null };
+  /** `toolLoop.*` — soft-warn tiers; null = no warn tier. */
+  toolLoop: { maxToolCallsWarnAt: number | null; maxIdenticalToolCallsWarnAt: number | null };
+  /** `browser.*` — Playwright budgets, milliseconds. */
+  browser: { navigationTimeoutMs: number | null; commandTimeoutMs: number | null };
+  /** `kanban.*` — board WIP caps; null = uncapped. */
+  kanban: { maxInProgress: number | null; maxInProgressPerProfile: number | null };
+  /** `cron.maxParallelJobs` — concurrent cron firings; null = uncapped. */
+  cronMaxParallelJobs: number | null;
+  /** `gateway.maxInboundMediaBytes` — override on every adapter's inbound cap;
+   *  null = each adapter keeps its own. */
+  gatewayMaxInboundMediaBytes: number | null;
+  /** `teamSupervisor.restartLoopGuard.*` — the member auto-restart brake. */
+  teamSupervisorRestartLoopGuard: { maxRestarts: number | null; windowSeconds: number | null };
+  /** `discord.missedMessageBackfill.*` — bounds on the first-sight history read. */
+  discordMissedMessageBackfill: {
+    enabled: boolean;
+    windowSeconds: number | null;
+    limit: number | null;
+  };
   webSearchBackend: '' | 'exa' | 'tavily' | 'brave';
   webExtractBackend: '' | 'htmltext';
   auxCompression: AuxModelFormShape;

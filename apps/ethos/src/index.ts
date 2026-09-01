@@ -965,10 +965,15 @@ try {
       const manifest = parseTeamManifest(readFileSync(manifestPath, 'utf-8'), {
         logger: supervisorLogger,
       });
+      const supervisorSecrets = await getSecretsResolver();
+      const supervisorConfig = await readConfig(getStorage(), supervisorSecrets);
       await runSupervisor(manifest, manifestPath, {
         logger: supervisorLogger,
         storage: getStorage(),
-        secrets: await getSecretsResolver(),
+        secrets: supervisorSecrets,
+        ...(supervisorConfig?.teamSupervisor?.restartLoopGuard
+          ? { restartLoopGuard: supervisorConfig.teamSupervisor.restartLoopGuard }
+          : {}),
       });
       break;
     }

@@ -54,6 +54,11 @@ function numberField(
   );
 }
 
+// The `background.*` pool caps and the `kanban.*` board caps are both limits on
+// work in flight, so they share the heading — but they are different keys over
+// different things (sub-agent processes vs. tasks in the running column), and
+// `numberField` above is bound to `background.*`. So the two kanban rows are
+// written out rather than widening the helper for them.
 function LimitsFields() {
   return (
     <>
@@ -88,6 +93,24 @@ function LimitsFields() {
         'Cap per personality (background.max_jobs_per_personality, default 5).',
         { min: 1 },
       )}
+      <SettingRow
+        label="Max tasks in progress"
+        formName="kanban.maxInProgress"
+        help="Kanban tasks in the running column across the whole board (kanban.maxInProgress). Blank = uncapped."
+      >
+        <Form.Item name={['kanban', 'maxInProgress']} style={{ marginBottom: 0 }}>
+          <InputNumber min={1} precision={0} style={{ width: '100%' }} />
+        </Form.Item>
+      </SettingRow>
+      <SettingRow
+        label="Max tasks in progress per assignee"
+        formName="kanban.maxInProgressPerProfile"
+        help="The same cap per assignee (kanban.maxInProgressPerProfile). Blank = uncapped."
+      >
+        <Form.Item name={['kanban', 'maxInProgressPerProfile']} style={{ marginBottom: 0 }}>
+          <InputNumber min={1} precision={0} style={{ width: '100%' }} />
+        </Form.Item>
+      </SettingRow>
     </>
   );
 }

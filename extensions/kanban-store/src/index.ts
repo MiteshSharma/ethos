@@ -200,6 +200,17 @@ export interface KanbanStoreOptions {
    * unusual deployments can tune it without a global constant.
    */
   blockRecurrenceLimit?: number;
+  /**
+   * Board-wide work-in-progress cap: how many tasks may sit in `running` at
+   * once. Unset (the default) means no cap — today's behaviour. Enforced on the
+   * transition INTO `running`, the only transition that opens a run.
+   */
+  maxInProgress?: number;
+  /**
+   * Same cap, per assignee (the profile/personality claiming the task). Unset
+   * means no cap. A task with no assignee is never counted against it.
+   */
+  maxInProgressPerProfile?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -352,10 +363,15 @@ export class KanbanStore {
    */
   private readonly teamId: string | null;
   private readonly blockRecurrenceLimit: number;
+  /** WIP caps; `null` = uncapped. See `KanbanStoreOptions.maxInProgress`. */
+  private readonly maxInProgress: number | null;
+  private readonly maxInProgressPerProfile: number | null;
 
   constructor(dbPath: string, opts: KanbanStoreOptions = {}) {
     this.teamId = opts.teamId ?? null;
     this.blockRecurrenceLimit = opts.blockRecurrenceLimit ?? DEFAULT_BLOCK_RECURRENCE_LIMIT;
+    this.maxInProgress = opts.maxInProgress ?? null;
+    this.maxInProgressPerProfile = opts.maxInProgressPerProfile ?? null;
     // mkdir -p the parent directory. Same raw-fs exception that session-sqlite uses
     // for path setup (the `Storage` abstraction is for ~/.ethos/ data IO, not for
     // bootstrapping the SQLite file's enclosing directory). `:memory:` has no
@@ -840,6 +856,38 @@ export class KanbanStore {
     return rows.map(rowToTask);
   }
 
+  /**
+   * Refuse a claim that would exceed the configured WIP caps. Throws — the same
+   * rejection channel `updateStatus` already uses for an unknown task id, which
+   * the kanban tools turn into a tool error via `storeError`. Unset caps never
+   * throw. The claiming task is excluded from the count so a re-claim of a task
+   * already marked `running` is not blocked by itself.
+   */
+  private assertWipCapacity(taskId: string, assignee: string | null): void {
+    if (this.maxInProgress !== null) {
+      const row = this.db
+        .prepare("SELECT COUNT(*) AS n FROM tasks WHERE status = 'running' AND id != ?")
+        .get(taskId) as { n: number };
+      if (row.n >= this.maxInProgress) {
+        throw new Error(
+          `kanban WIP limit reached: ${row.n} task(s) already running (maxInProgress=${this.maxInProgress})`,
+        );
+      }
+    }
+    if (this.maxInProgressPerProfile !== null && assignee !== null) {
+      const row = this.db
+        .prepare(
+          "SELECT COUNT(*) AS n FROM tasks WHERE status = 'running' AND assignee = ? AND id != ?",
+        )
+        .get(assignee, taskId) as { n: number };
+      if (row.n >= this.maxInProgressPerProfile) {
+        throw new Error(
+          `kanban WIP limit reached for ${assignee}: ${row.n} task(s) already running (maxInProgressPerProfile=${this.maxInProgressPerProfile})`,
+        );
+      }
+    }
+  }
+
   updateStatus(taskId: string, status: TaskStatus, reason?: string, actor = 'system'): Task {
     const now = Date.now();
 
@@ -869,6 +917,11 @@ export class KanbanStore {
       let runCancelled = false;
 
       if (status === 'running' && oldRunId === null) {
+        // WIP caps first: a claim that would push the board (or the assignee)
+        // past its limit is refused before anything is written. Inside the same
+        // transaction as the run INSERT, so two concurrent claims cannot both
+        // read "one slot left" and both take it.
+        this.assertWipCapacity(taskId, row.assignee);
         // Open a new run as a side-effect of the status flip. If the task already
         // has an ended run, opening another is a "re-claim" (the prior attempt
         // failed or was reclaimed) — bump retry_count.

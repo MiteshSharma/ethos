@@ -173,6 +173,21 @@ export interface ExecutionBackendConfig {
   images?: Record<string, string>;
   /** Default container memory cap in MB (docker). */
   memoryMb?: number;
+  /** Container CPU quota, passed as docker `--cpus`. Default 2. */
+  cpu?: number;
+  /**
+   * Best-effort container disk quota in MB, passed as docker
+   * `--storage-opt size=<N>m` — the requested bound exactly, never rounded up
+   * to whole GB. Docker has no universal disk-quota flag: `btrfs`, `zfs`,
+   * `devicemapper` and `windowsfilter` enforce the option natively, and
+   * `overlay2` only over xfs mounted with project quotas (`pquota`), which
+   * `docker info` does not report — so the backend proves that one case with
+   * a throwaway `docker create`/`docker rm` before emitting the flag. On any
+   * daemon that cannot enforce it the backend warns once through the injected
+   * logger and starts the container without the quota rather than failing the
+   * sandbox.
+   */
+  diskMb?: number;
   /** ssh target — remote-host trust, NOT mount-confinement (review A3). */
   ssh?: { host: string; user?: string; port?: number; identityFile?: string };
   /**

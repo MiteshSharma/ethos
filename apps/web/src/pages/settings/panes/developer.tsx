@@ -1,6 +1,10 @@
-// Developer — debug, logs, escape hatches. The Developer card and the Advanced
-// (misc) card, moved verbatim from `Settings.tsx` (§4.2 rows 8, 17), off `Card`
-// onto `SettingRow` / `SectionHeading` (Phase 4).
+// Developer — debug, logs, tool execution, escape hatches. The Developer card
+// and the Advanced (misc) card, moved verbatim from `Settings.tsx` (§4.2 rows
+// 8, 17), off `Card` onto `SettingRow` / `SectionHeading` (Phase 4).
+//
+// `tool execution` is the one section that was not in that move: the sandbox,
+// browser and tool-loop budgets are not debug affordances, log knobs or escape
+// hatches, so they get a section rather than being averaged into one.
 //
 // `admin.enabled` is deliberately NOT here: enabling a system-operations console
 // is a privilege decision, not a debug affordance, so it lives in Security &
@@ -48,6 +52,23 @@ export function DeveloperPane() {
 
       <SectionHeading id="logs">logs</SectionHeading>
 
+      <SettingRow
+        label="Log level"
+        formName="logsLevel"
+        help="Lowest severity the logger prints (logs.level, default debug)."
+      >
+        <Form.Item name="logsLevel" style={{ marginBottom: 0 }}>
+          <Select
+            options={[
+              { value: 'debug', label: 'Debug' },
+              { value: 'info', label: 'Info' },
+              { value: 'warn', label: 'Warn' },
+              { value: 'error', label: 'Error' },
+            ]}
+          />
+        </Form.Item>
+      </SettingRow>
+
       <AdvancedBlock>
         <SettingRow
           label="Log rotation"
@@ -78,6 +99,65 @@ export function DeveloperPane() {
         >
           <Form.Item name={['logsRotation', 'maxFiles']} style={{ marginBottom: 0 }}>
             <InputNumber min={1} precision={0} style={{ width: '100%' }} />
+          </Form.Item>
+        </SettingRow>
+      </AdvancedBlock>
+
+      <SectionHeading id="tool-execution">tool execution</SectionHeading>
+
+      <AdvancedBlock>
+        <SettingRow
+          label="Sandbox CPU cores"
+          formName="executionDocker.cpu"
+          help="Cores the docker execution sandbox may use (execution.docker.cpu, default 2). Fractional values are allowed."
+        >
+          <Form.Item name={['executionDocker', 'cpu']} style={{ marginBottom: 0 }}>
+            <InputNumber min={0.1} step={0.5} style={{ width: '100%' }} />
+          </Form.Item>
+        </SettingRow>
+        <SettingRow
+          label="Sandbox disk quota (MB)"
+          formName="executionDocker.diskMb"
+          help="Best-effort disk quota for the docker sandbox (execution.docker.diskMb). Uses Docker's --storage-opt size=, which only works on btrfs/zfs/devicemapper or on overlay2 backed by xfs; anywhere else (including the common overlay2-on-ext4) it is skipped with a warning rather than failing the sandbox. Blank = no quota."
+        >
+          <Form.Item name={['executionDocker', 'diskMb']} style={{ marginBottom: 0 }}>
+            <InputNumber min={1} precision={0} style={{ width: '100%' }} />
+          </Form.Item>
+        </SettingRow>
+        <SettingRow
+          label="Warn at tool calls per turn"
+          formName="toolLoop.maxToolCallsWarnAt"
+          help="Log a nudge once a turn passes this many tool calls (toolLoop.maxToolCallsWarnAt). A soft warn threshold, not a hard cap — crossing it does not stop the turn. Blank = no warn tier."
+        >
+          <Form.Item name={['toolLoop', 'maxToolCallsWarnAt']} style={{ marginBottom: 0 }}>
+            <InputNumber min={1} precision={0} style={{ width: '100%' }} />
+          </Form.Item>
+        </SettingRow>
+        <SettingRow
+          label="Warn at identical tool calls"
+          formName="toolLoop.maxIdenticalToolCallsWarnAt"
+          help="Log a nudge once a turn repeats the same tool call this many times (toolLoop.maxIdenticalToolCallsWarnAt). A soft warn threshold, not a hard cap — crossing it does not stop the turn. Blank = no warn tier."
+        >
+          <Form.Item name={['toolLoop', 'maxIdenticalToolCallsWarnAt']} style={{ marginBottom: 0 }}>
+            <InputNumber min={1} precision={0} style={{ width: '100%' }} />
+          </Form.Item>
+        </SettingRow>
+        <SettingRow
+          label="Browser navigation timeout (ms)"
+          formName="browser.navigationTimeoutMs"
+          help="How long a browser navigation may run before it fails (browser.navigationTimeoutMs, default 30000)."
+        >
+          <Form.Item name={['browser', 'navigationTimeoutMs']} style={{ marginBottom: 0 }}>
+            <InputNumber min={1000} max={600000} precision={0} style={{ width: '100%' }} />
+          </Form.Item>
+        </SettingRow>
+        <SettingRow
+          label="Browser command timeout (ms)"
+          formName="browser.commandTimeoutMs"
+          help="How long a single browser command may run before it fails (browser.commandTimeoutMs, default 10000)."
+        >
+          <Form.Item name={['browser', 'commandTimeoutMs']} style={{ marginBottom: 0 }}>
+            <InputNumber min={1000} max={600000} precision={0} style={{ width: '100%' }} />
           </Form.Item>
         </SettingRow>
       </AdvancedBlock>

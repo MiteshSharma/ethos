@@ -6,10 +6,11 @@
 // routing`, not a place to force a control that would not otherwise exist.
 
 import { RETENTION_DEFAULTS } from '@ethosagent/types';
-import { Button, Input, Select, Typography } from 'antd';
+import { Button, Form, Input, InputNumber, Select, Switch, Typography } from 'antd';
 import type { Dispatch, SetStateAction } from 'react';
 import { AdvancedBlock } from '../components/advanced';
 import { SectionHeading } from '../components/section-heading';
+import { SettingRow } from '../components/setting-row';
 import { SettingTable } from '../components/setting-table';
 import {
   type PersonalityOption,
@@ -33,6 +34,28 @@ export function DataPane() {
           setRows={setRetentionRows}
           personalities={personalities}
         />
+        <SettingRow
+          label="VACUUM after a prune sweep"
+          formName="retentionVacuumAfterPrune"
+          help="Reclaim session-database file space once a prune has deleted rows (retention.vacuumAfterPrune, default off). A VACUUM rewrites the whole database and holds a write lock while it runs."
+        >
+          <Form.Item
+            name="retentionVacuumAfterPrune"
+            valuePropName="checked"
+            style={{ marginBottom: 0 }}
+          >
+            <Switch />
+          </Form.Item>
+        </SettingRow>
+        <SettingRow
+          label="Minimum days between VACUUMs"
+          formName="retentionMinVacuumIntervalDays"
+          help="Days that must pass before another VACUUM runs (retention.minVacuumIntervalDays). Blank or 0 = every prune sweep may vacuum."
+        >
+          <Form.Item name="retentionMinVacuumIntervalDays" style={{ marginBottom: 0 }}>
+            <InputNumber min={0} precision={0} style={{ width: '100%' }} />
+          </Form.Item>
+        </SettingRow>
       </AdvancedBlock>
 
       <SectionHeading id="built-in-defaults">built-in defaults</SectionHeading>

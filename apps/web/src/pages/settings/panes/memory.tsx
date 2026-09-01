@@ -94,6 +94,27 @@ export function MemoryPane() {
         }
       </Form.Item>
 
+      <AdvancedBlock>
+        <SettingRow
+          label="MEMORY.md character limit"
+          formName="memoryCharLimits.memory"
+          help="Ceiling on MEMORY.md for the markdown backend (memory.charLimits.memory, default 524288). Past it the oldest lines move to memory-archive.md."
+        >
+          <Form.Item name={['memoryCharLimits', 'memory']} style={{ marginBottom: 0 }}>
+            <InputNumber min={1} precision={0} style={{ width: '100%' }} />
+          </Form.Item>
+        </SettingRow>
+        <SettingRow
+          label="USER.md character limit"
+          formName="memoryCharLimits.user"
+          help="Ceiling on USER.md for the markdown backend (memory.charLimits.user, default 524288). Past it the oldest lines move to memory-archive.md."
+        >
+          <Form.Item name={['memoryCharLimits', 'user']} style={{ marginBottom: 0 }}>
+            <InputNumber min={1} precision={0} style={{ width: '100%' }} />
+          </Form.Item>
+        </SettingRow>
+      </AdvancedBlock>
+
       <SectionHeading id="approval">approval</SectionHeading>
 
       <SettingRow label="Memory approval" formName="memoryApproval.mode">

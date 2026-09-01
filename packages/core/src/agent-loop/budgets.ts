@@ -1,3 +1,5 @@
+import type { AgentEvent } from '@ethosagent/types';
+
 /** Running streak of consecutive tool calls with identical name + args. */
 export interface IdenticalStreak {
   /** Identity key — `${toolName}:${JSON.stringify(args)}`. */
@@ -116,6 +118,34 @@ export function checkCostBudget(cost: CostBudget): { exceeded: false } | BudgetE
   };
 }
 
+/**
+ * Soft-warn tiers, checked only when no hard cap has tripped. Both unset (the
+ * default) means the check is exactly the binary exceeded/not-exceeded it was
+ * before — no warn is ever produced and nothing about a turn changes.
+ */
+export interface ToolLoopWarnThresholds {
+  /** Total tool calls in the turn at which to nudge. Below `maxToolCallsPerTurn`. */
+  maxToolCallsWarnAt?: number;
+  /** Per-tool-name repeat count at which to nudge. Below `maxIdenticalToolCalls`. */
+  maxIdenticalToolCallsWarnAt?: number;
+}
+
+/** A crossed soft-warn threshold. Advisory — the turn continues. */
+export interface BudgetWarn {
+  rule: BudgetRule;
+  toolName: string;
+  count: number;
+  message: string;
+}
+
+/**
+ * `warns` carries EVERY crossed soft threshold, not the first one. Returning
+ * only the first let a crossed total-call tier permanently mask the
+ * identical-tool tier: `budgetGuardEvents` latches one emission per rule, so a
+ * rule that never reaches it is never emitted at all.
+ */
+export type TurnBudgetResult = { exceeded: false; warns?: BudgetWarn[] } | BudgetExceeded;
+
 export function checkTurnBudgets(
   totalToolCalls: number,
   maxToolCallsPerTurn: number,
@@ -125,9 +155,8 @@ export function checkTurnBudgets(
   maxConsecutiveIdenticalCalls: number,
   cost?: CostBudget,
   consecutiveDenials = 0,
-):
-  | { exceeded: false }
-  | { exceeded: true; rule: BudgetRule; toolName: string; count?: number; message: string } {
+  warn?: ToolLoopWarnThresholds,
+): TurnBudgetResult {
   if (consecutiveDenials >= MAX_CONSECUTIVE_DENIALS) {
     return {
       exceeded: true,
@@ -173,5 +202,65 @@ export function checkTurnBudgets(
       message: `Stopped: ${identicalStreak.toolName} called ${identicalStreak.count} times in a row with identical arguments (loop)`,
     };
   }
-  return { exceeded: false };
+  // Warn tier — reached only when NO hard cap tripped, so crossing a warn
+  // threshold never sets `exceeded` and never ends the turn. Every crossed
+  // tier is collected: returning just the first would starve the others,
+  // because the caller's per-rule latch only ever sees what is returned.
+  const warns: BudgetWarn[] = [];
+  const callsWarnAt = warn?.maxToolCallsWarnAt;
+  if (callsWarnAt !== undefined && totalToolCalls >= callsWarnAt) {
+    warns.push({
+      rule: 'tool-budget',
+      toolName: '_budget',
+      count: totalToolCalls,
+      message: `${totalToolCalls} tool calls this turn (warn at ${callsWarnAt}, hard cap ${maxToolCallsPerTurn})`,
+    });
+  }
+  const identicalWarnAt = warn?.maxIdenticalToolCallsWarnAt;
+  if (identicalWarnAt !== undefined) {
+    const nearing = [...toolNameCounts.entries()].find(([, count]) => count >= identicalWarnAt);
+    if (nearing) {
+      warns.push({
+        rule: 'identical-name',
+        toolName: nearing[0],
+        count: nearing[1],
+        message: `${nearing[0]} called ${nearing[1]} times this turn (warn at ${identicalWarnAt}, hard cap ${maxIdenticalToolCalls})`,
+      });
+    }
+  }
+  return warns.length > 0 ? { exceeded: false, warns } : { exceeded: false };
+}
+
+/**
+ * Render a budget check as the events the turn loop emits, and report whether
+ * the turn must stop.
+ *
+ * Extracted from the orchestrator so `agent-loop.ts` keeps only the dispatch.
+ * A tripped hard cap yields the user-facing chip plus the `halt` event and
+ * returns `true`. A crossed warn threshold yields ONE `tool_progress` per rule
+ * per turn — latched in `latch.warned` — at the DEFAULT `'internal'` audience:
+ * it is a diagnostic for logs and telemetry, not something a channel adapter
+ * surfaces mid-conversation.
+ */
+export function* budgetGuardEvents(
+  result: TurnBudgetResult,
+  latch: { warned: Set<string> },
+): Generator<AgentEvent, boolean> {
+  if (result.exceeded) {
+    const { rule, toolName, count, message } = result;
+    yield { type: 'tool_progress', toolName, message, audience: 'user' };
+    yield { type: 'halt', kind: 'budget', rule, toolName, count, message };
+    return true;
+  }
+  for (const warn of result.warns ?? []) {
+    if (latch.warned.has(warn.rule)) continue;
+    latch.warned.add(warn.rule);
+    yield {
+      type: 'tool_progress',
+      toolName: warn.toolName,
+      message: warn.message,
+      audience: 'internal',
+    };
+  }
+  return false;
 }

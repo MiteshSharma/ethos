@@ -57,7 +57,10 @@ export function isContextOverflowError(err: unknown): boolean {
  * count, so the target is derived from the CURRENT estimate (halved), not a
  * window fraction — guaranteeing the engine actually drops when there is more
  * than one message. Falls back to keeping the last message so the retry never
- * ships an empty history. Returns the original messages on engine failure.
+ * ships an empty history. Returns the original messages on engine failure, with
+ * `summaryError` set — the caller distinguishes "the engine threw" from "the
+ * engine ran but could not shrink", which `compaction.abortOnSummaryFailure`
+ * keys on.
  */
 export async function emergencyCompact(
   engine: ContextEngine,
@@ -71,7 +74,7 @@ export async function emergencyCompact(
     lastCompactionTurn: number;
   },
   extra?: { llm?: ContextEngineLLMHandle; countTokens?: (m: Message[]) => Promise<number> },
-): Promise<Message[]> {
+): Promise<{ messages: Message[]; summaryError?: string }> {
   const currentEstimate = estimateTokens(systemPrompt) + estimateMessagesTokens(messages);
   const targetTokens = Math.max(1, Math.floor(currentEstimate / 2));
   try {
@@ -86,20 +89,30 @@ export async function emergencyCompact(
     });
     if (result.messages.length === 0 && messages.length > 0) {
       const last = messages[messages.length - 1];
-      return last ? [last] : messages;
+      return { messages: last ? [last] : messages };
     }
-    return result.messages;
-  } catch {
-    return messages;
+    return { messages: result.messages };
+  } catch (err) {
+    return { messages, summaryError: err instanceof Error ? err.message : String(err) };
   }
+}
+
+/** Outcome of one compact-and-retry attempt. */
+export interface OverflowRetryResult {
+  /** History was shrunk in place — the caller re-runs the current iteration. */
+  retried: boolean;
+  /** Set when the context engine THREW, as opposed to running without shrinking. */
+  summaryError?: string;
 }
 
 /**
  * Overflow→compact-and-retry seam for the loop. Resolves the personality's
  * engine (or the per-model-class default), runs {@link emergencyCompact}, and —
- * when it shrinks — replaces `llmMessages` IN PLACE and returns `true` so the
- * caller re-runs the current iteration. Returns `false` when nothing could be
- * trimmed (the caller then surfaces the overflow error).
+ * when it shrinks — replaces `llmMessages` IN PLACE and reports `retried: true`
+ * so the caller re-runs the current iteration. Reports `retried: false` when
+ * nothing could be trimmed (the caller then surfaces the overflow error), with
+ * `summaryError` set when the engine raised rather than merely failing to
+ * shrink.
  */
 export async function applyOverflowRetry(
   deps: Pick<LoopDeps, 'llm' | 'contextEngines' | 'llmHandle' | 'compaction'>,
@@ -112,11 +125,11 @@ export async function applyOverflowRetry(
     turnNumber: number;
     lastCompactionTurn: number;
   },
-): Promise<boolean> {
+): Promise<OverflowRetryResult> {
   const engineName = personality.context_engine ?? deps.compaction?.defaultEngine ?? 'drop_oldest';
   const engine = deps.contextEngines.get(engineName) ?? deps.contextEngines.get('drop_oldest');
-  if (!engine) return false;
-  const trimmed = await emergencyCompact(
+  if (!engine) return { retried: false };
+  const { messages: trimmed, summaryError } = await emergencyCompact(
     engine,
     llmMessages,
     systemPrompt,
@@ -127,8 +140,31 @@ export async function applyOverflowRetry(
       countTokens: deps.llm.countTokens.bind(deps.llm),
     },
   );
-  if (trimmed.length >= llmMessages.length) return false;
+  if (trimmed.length >= llmMessages.length) {
+    return { retried: false, ...(summaryError !== undefined ? { summaryError } : {}) };
+  }
   llmMessages.length = 0;
   llmMessages.push(...trimmed);
-  return true;
+  return { retried: true };
+}
+
+/**
+ * Which error a non-recoverable overflow surfaces. `abortOnSummaryFailure`
+ * promotes a THROWN emergency summary to its own code so the real cause is not
+ * masked by the provider's generic overflow rejection; without it (the
+ * default), and whenever the engine merely failed to shrink, the provider's
+ * error is reported unchanged.
+ */
+export function overflowErrorEvent(
+  retry: OverflowRetryResult,
+  providerError: string,
+  compaction: { abortOnSummaryFailure?: boolean } | undefined,
+): { error: string; code: string } {
+  if (compaction?.abortOnSummaryFailure === true && retry.summaryError !== undefined) {
+    return {
+      error: `compaction summary failed: ${retry.summaryError}`,
+      code: 'compaction_summary_failed',
+    };
+  }
+  return { error: providerError, code: 'context_overflow' };
 }

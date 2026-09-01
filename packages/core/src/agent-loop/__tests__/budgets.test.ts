@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  budgetGuardEvents,
   checkCostBudget,
   checkTurnBudgets,
   type IdenticalStreak,
@@ -231,5 +232,162 @@ describe('denial circuit breaker', () => {
 
   it('defaults to no denials when the argument is omitted', () => {
     expect(checkTurnBudgets(0, 100, new Map(), 25, null, 5)).toEqual({ exceeded: false });
+  });
+});
+
+describe('soft-warn tier', () => {
+  const warn = (totalToolCalls: number, counts: Map<string, number>, tiers = {}) =>
+    checkTurnBudgets(totalToolCalls, 100, counts, 25, null, 5, undefined, 0, tiers);
+
+  it('produces no warn when no threshold is configured', () => {
+    expect(warn(99, new Map([['bash', 24]]))).toEqual({ exceeded: false });
+  });
+
+  it('warns on the total-call tier without setting exceeded', () => {
+    const r = warn(40, new Map(), { maxToolCallsWarnAt: 40 });
+    expect(r.exceeded).toBe(false);
+    expect(r).toEqual({
+      exceeded: false,
+      warns: [
+        {
+          rule: 'tool-budget',
+          toolName: '_budget',
+          count: 40,
+          message: '40 tool calls this turn (warn at 40, hard cap 100)',
+        },
+      ],
+    });
+  });
+
+  it('warns on the per-tool-name tier without setting exceeded', () => {
+    const r = warn(5, new Map([['bash', 10]]), { maxIdenticalToolCallsWarnAt: 10 });
+    expect(r.exceeded).toBe(false);
+    expect(r).toEqual({
+      exceeded: false,
+      warns: [
+        {
+          rule: 'identical-name',
+          toolName: 'bash',
+          count: 10,
+          message: 'bash called 10 times this turn (warn at 10, hard cap 25)',
+        },
+      ],
+    });
+  });
+
+  // Regression: the total-call tier used to return early, so once it was
+  // crossed the identical-tool tier could never be reported at all.
+  it('reports BOTH tiers when both are crossed in the same turn', () => {
+    const r = warn(40, new Map([['bash', 10]]), {
+      maxToolCallsWarnAt: 40,
+      maxIdenticalToolCallsWarnAt: 10,
+    });
+    expect(r.exceeded).toBe(false);
+    expect(r).toEqual({
+      exceeded: false,
+      warns: [
+        expect.objectContaining({ rule: 'tool-budget', count: 40 }),
+        expect.objectContaining({ rule: 'identical-name', toolName: 'bash', count: 10 }),
+      ],
+    });
+  });
+
+  it('stays silent below the threshold', () => {
+    expect(
+      warn(39, new Map([['bash', 9]]), {
+        maxToolCallsWarnAt: 40,
+        maxIdenticalToolCallsWarnAt: 10,
+      }),
+    ).toEqual({ exceeded: false });
+  });
+
+  it('yields to the hard cap — an exceeded result never carries a warn', () => {
+    const r = checkTurnBudgets(100, 100, new Map(), 25, null, 5, undefined, 0, {
+      maxToolCallsWarnAt: 40,
+    });
+    expect(r.exceeded).toBe(true);
+    expect(r).not.toHaveProperty('warns');
+  });
+});
+
+describe('budgetGuardEvents', () => {
+  const latch = () => ({ warned: new Set<string>() });
+
+  it('emits the warn once per rule per turn, at the internal audience', () => {
+    const l = latch();
+    const result = checkTurnBudgets(40, 100, new Map(), 25, null, 5, undefined, 0, {
+      maxToolCallsWarnAt: 40,
+    });
+
+    const first = [...budgetGuardEvents(result, l)];
+    expect(first).toEqual([
+      {
+        type: 'tool_progress',
+        toolName: '_budget',
+        message: '40 tool calls this turn (warn at 40, hard cap 100)',
+        audience: 'internal',
+      },
+    ]);
+
+    // Same rule, later iteration of the same turn — silent.
+    const second = [...budgetGuardEvents(result, l)];
+    expect(second).toEqual([]);
+  });
+
+  it('emits both crossed rules exactly once each in the same turn', () => {
+    const l = latch();
+    const result = checkTurnBudgets(40, 100, new Map([['bash', 10]]), 25, null, 5, undefined, 0, {
+      maxToolCallsWarnAt: 40,
+      maxIdenticalToolCallsWarnAt: 10,
+    });
+
+    expect([...budgetGuardEvents(result, l)]).toEqual([
+      {
+        type: 'tool_progress',
+        toolName: '_budget',
+        message: '40 tool calls this turn (warn at 40, hard cap 100)',
+        audience: 'internal',
+      },
+      {
+        type: 'tool_progress',
+        toolName: 'bash',
+        message: 'bash called 10 times this turn (warn at 10, hard cap 25)',
+        audience: 'internal',
+      },
+    ]);
+    // Both rules are latched — a later iteration of the same turn is silent.
+    expect([...budgetGuardEvents(result, l)]).toEqual([]);
+  });
+
+  it('reports false for a warn (the turn continues) and true for a hard cap', () => {
+    const l = latch();
+    const warned = checkTurnBudgets(40, 100, new Map(), 25, null, 5, undefined, 0, {
+      maxToolCallsWarnAt: 40,
+    });
+    const warnGen = budgetGuardEvents(warned, l);
+    while (!warnGen.next().done) {
+      // drain
+    }
+    expect(budgetGuardEvents(warned, latch()).next().value).toBeDefined();
+
+    const halted = checkTurnBudgets(100, 100, new Map(), 25, null, 5);
+    const gen = budgetGuardEvents(halted, latch());
+    let step = gen.next();
+    const events = [];
+    while (!step.done) {
+      events.push(step.value);
+      step = gen.next();
+    }
+    expect(step.value).toBe(true);
+    expect(events).toHaveLength(2);
+    expect(events[0]).toMatchObject({ type: 'tool_progress', audience: 'user' });
+    expect(events[1]).toMatchObject({ type: 'halt', kind: 'budget' });
+  });
+
+  it('returns false when nothing tripped and emits nothing', () => {
+    const gen = budgetGuardEvents({ exceeded: false }, latch());
+    const step = gen.next();
+    expect(step.done).toBe(true);
+    expect(step.value).toBe(false);
   });
 });

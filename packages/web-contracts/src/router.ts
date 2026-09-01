@@ -1360,6 +1360,9 @@ const ConfigGetOutput = z.object({
     gateDelta: z.number().nullable(),
     /** `compaction.retryOnOverflow` — compact-and-retry on overflow; default true. */
     retryOnOverflow: z.boolean(),
+    /** `compaction.abortOnSummaryFailure` — surface a failed emergency summary
+     *  as its own error instead of the generic overflow rejection; default false. */
+    abortOnSummaryFailure: z.boolean(),
     /** `compaction.smallWindow` — small-window-mode override; default 'auto'. */
     smallWindow: z.enum(['auto', 'on', 'off']),
   }),
@@ -1503,6 +1506,79 @@ const ConfigGetOutput = z.object({
   pluginsAutoInstall: z.boolean().nullable(),
   /** Public web UI URL, OAuth redirect base (`webBaseUrl`); null = localhost default. */
   webBaseUrl: z.string().nullable(),
+  /** `retention.vacuumAfterPrune` — VACUUM the session DB after a prune sweep;
+   *  default false (opt-in). */
+  retentionVacuumAfterPrune: z.boolean(),
+  /** `retention.minVacuumIntervalDays` — days that must pass between VACUUMs;
+   *  null = no minimum interval. */
+  retentionMinVacuumIntervalDays: z.number().nullable(),
+  /** `logs.level` — lowest severity `ConsoleLogger` prints; default 'debug',
+   *  which is the ungated behaviour the level tier replaced. */
+  logsLevel: z.enum(['debug', 'info', 'warn', 'error']),
+  /** `memory.charLimits.*` — per-key ceilings for the markdown memory backend. */
+  memoryCharLimits: z.object({
+    /** `memory.charLimits.memory` — MEMORY.md ceiling; default 524288. */
+    memory: z.number(),
+    /** `memory.charLimits.user` — USER.md ceiling; default 524288. */
+    user: z.number(),
+  }),
+  /** `execution.docker.*` — container resource caps for the docker backend. */
+  executionDocker: z.object({
+    /** `execution.docker.cpu` — core count, may be fractional; default 2. */
+    cpu: z.number(),
+    /** `execution.docker.diskMb` — best-effort `--storage-opt size=<N>m` quota,
+     *  enforceable only on btrfs/zfs/devicemapper or overlay2-on-xfs; null = no
+     *  quota. */
+    diskMb: z.number().nullable(),
+  }),
+  /** `kanban.*` — board WIP caps. Null = uncapped. */
+  kanban: z.object({
+    /** `kanban.maxInProgress` — running tasks across the whole board. */
+    maxInProgress: z.number().nullable(),
+    /** `kanban.maxInProgressPerProfile` — running tasks per assignee. */
+    maxInProgressPerProfile: z.number().nullable(),
+  }),
+  /** `cron.maxParallelJobs` — concurrent cron firings; null = uncapped. */
+  cronMaxParallelJobs: z.number().nullable(),
+  /** `toolLoop.*` — soft-warn tiers below the hard per-turn caps. Null = no
+   *  warn tier, which is the default. */
+  toolLoop: z.object({
+    /** `toolLoop.maxToolCallsWarnAt` */
+    maxToolCallsWarnAt: z.number().nullable(),
+    /** `toolLoop.maxIdenticalToolCallsWarnAt` */
+    maxIdenticalToolCallsWarnAt: z.number().nullable(),
+  }),
+  /** `browser.*` — Playwright budgets, milliseconds. */
+  browser: z.object({
+    /** `browser.navigationTimeoutMs`; default 30000. */
+    navigationTimeoutMs: z.number(),
+    /** `browser.commandTimeoutMs`; default 10000. */
+    commandTimeoutMs: z.number(),
+  }),
+  /** `gateway.maxInboundMediaBytes` — one cap the four channel adapters read as
+   *  an override; null = each adapter's own platform default, which is 25 MB on
+   *  all four (Discord, Telegram, Slack, WhatsApp). */
+  gatewayMaxInboundMediaBytes: z.number().nullable(),
+  /** `teamSupervisor.restartLoopGuard.*` — the member auto-restart brake.
+   *  Unset = 5 respawns in 60s, one more than the previous hardcoded guard,
+   *  which gave up on the fifth crash and so performed four restarts. */
+  teamSupervisorRestartLoopGuard: z.object({
+    /** `teamSupervisor.restartLoopGuard.maxRestarts` — respawns allowed inside
+     *  the window; unset = 5. */
+    maxRestarts: z.number(),
+    /** `teamSupervisor.restartLoopGuard.windowSeconds`; unset = 60. */
+    windowSeconds: z.number(),
+  }),
+  /** `discord.missedMessageBackfill.*` — bounds on the channel-history read the
+   *  adapter does the first time it sees a lane. */
+  discordMissedMessageBackfill: z.object({
+    /** `discord.missedMessageBackfill.enabled`; default true. */
+    enabled: z.boolean(),
+    /** `discord.missedMessageBackfill.windowSeconds`; null = no age bound. */
+    windowSeconds: z.number().nullable(),
+    /** `discord.missedMessageBackfill.limit`; default 50, Discord's own ceiling is 100. */
+    limit: z.number(),
+  }),
 });
 
 // For the Settings-page additions below, every scalar accepts `null` meaning
@@ -1724,6 +1800,8 @@ const ConfigUpdateInput = z.object({
       gateDelta: z.number().int().min(0).nullable().optional(),
       /** `compaction.retryOnOverflow` */
       retryOnOverflow: z.boolean().nullable().optional(),
+      /** `compaction.abortOnSummaryFailure` */
+      abortOnSummaryFailure: z.boolean().nullable().optional(),
       /** `compaction.smallWindow` */
       smallWindow: z.enum(['auto', 'on', 'off']).nullable().optional(),
     })
@@ -1846,6 +1924,71 @@ const ConfigUpdateInput = z.object({
   pluginsAutoInstall: z.boolean().nullable().optional(),
   /** `webBaseUrl` */
   webBaseUrl: z.string().nullable().optional(),
+  /** `retention.vacuumAfterPrune` */
+  retentionVacuumAfterPrune: z.boolean().nullable().optional(),
+  /** `retention.minVacuumIntervalDays` — integer >= 0. */
+  retentionMinVacuumIntervalDays: z.number().int().min(0).nullable().optional(),
+  /** `logs.level` */
+  logsLevel: z.enum(['debug', 'info', 'warn', 'error']).nullable().optional(),
+  /** `memory.charLimits.*`. Per-field merge; null clears one key. */
+  memoryCharLimits: z
+    .object({
+      /** Positive integer. */
+      memory: z.number().int().min(1).nullable().optional(),
+      /** Positive integer. */
+      user: z.number().int().min(1).nullable().optional(),
+    })
+    .optional(),
+  /** `execution.docker.*`. Per-field merge; null clears one key. */
+  executionDocker: z
+    .object({
+      /** Positive core count; fractional is allowed (`--cpus 1.5`). */
+      cpu: z.number().positive().nullable().optional(),
+      /** Positive integer megabytes. */
+      diskMb: z.number().int().min(1).nullable().optional(),
+    })
+    .optional(),
+  /** `kanban.*` WIP caps. Per-field merge; null clears one key (uncapped). */
+  kanban: z
+    .object({
+      maxInProgress: z.number().int().min(1).nullable().optional(),
+      maxInProgressPerProfile: z.number().int().min(1).nullable().optional(),
+    })
+    .optional(),
+  /** `cron.maxParallelJobs`; null clears the cap. */
+  cronMaxParallelJobs: z.number().int().min(1).nullable().optional(),
+  /** `toolLoop.*` soft-warn tiers. Per-field merge; null clears one tier. */
+  toolLoop: z
+    .object({
+      maxToolCallsWarnAt: z.number().int().min(1).nullable().optional(),
+      maxIdenticalToolCallsWarnAt: z.number().int().min(1).nullable().optional(),
+    })
+    .optional(),
+  /** `browser.*` timeouts, 1000–600000 ms. Per-field merge; null clears one key. */
+  browser: z
+    .object({
+      navigationTimeoutMs: z.number().int().min(1_000).max(600_000).nullable().optional(),
+      commandTimeoutMs: z.number().int().min(1_000).max(600_000).nullable().optional(),
+    })
+    .optional(),
+  /** `gateway.maxInboundMediaBytes`, 1 KiB–128 MiB; null clears the override. */
+  gatewayMaxInboundMediaBytes: z.number().int().min(1024).max(134_217_728).nullable().optional(),
+  /** `teamSupervisor.restartLoopGuard.*`. Per-field merge; null clears one key. */
+  teamSupervisorRestartLoopGuard: z
+    .object({
+      maxRestarts: z.number().int().min(1).max(1000).nullable().optional(),
+      windowSeconds: z.number().int().min(1).max(86_400).nullable().optional(),
+    })
+    .optional(),
+  /** `discord.missedMessageBackfill.*`. Per-field merge; null clears one key. */
+  discordMissedMessageBackfill: z
+    .object({
+      enabled: z.boolean().nullable().optional(),
+      windowSeconds: z.number().int().min(1).max(604_800).nullable().optional(),
+      /** 1–100 — 100 is Discord's own `messages.fetch` ceiling. */
+      limit: z.number().int().min(1).max(100).nullable().optional(),
+    })
+    .optional(),
 });
 const ConfigUpdateOutput = z.object({ ok: z.literal(true) });
 

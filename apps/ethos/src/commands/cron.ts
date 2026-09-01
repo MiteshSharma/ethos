@@ -36,7 +36,10 @@ function makeScheduler(config: EthosConfig): { scheduler: CronScheduler; cleanup
 
   const scheduler = new CronScheduler({
     storage: getStorage(),
-    logger: new ConsoleLogger(),
+    logger: new ConsoleLogger({}, config.logs?.level),
+    ...(config.cron?.maxParallelJobs !== undefined
+      ? { maxParallelJobs: config.cron.maxParallelJobs }
+      : {}),
     onDecision: (job, d) => {
       try {
         getEthosObservability().recordHeartbeatDecision({

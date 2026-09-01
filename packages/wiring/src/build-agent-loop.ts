@@ -688,6 +688,7 @@ export async function buildAgentLoop(
   const defaultEngine = resolveDefaultContextEngine(llm.maxContextTokens, summarizerWired);
   const autoCompact = config.compaction?.autoCompact;
   const retryOnOverflow = config.compaction?.retryOnOverflow;
+  const abortOnSummaryFailure = config.compaction?.abortOnSummaryFailure;
   // Item 7 — global-only knobs (no per-model layer, since that would mean a
   // `packages/types` change): the absolute context-token ceiling that lowers
   // BOTH gates, and the guaranteed verbatim user tail.
@@ -698,6 +699,7 @@ export async function buildAgentLoop(
     ...(gateDelta !== undefined ? { gateDelta } : {}),
     ...(autoCompact !== undefined ? { autoCompact } : {}),
     ...(retryOnOverflow !== undefined ? { retryOnOverflow } : {}),
+    ...(abortOnSummaryFailure !== undefined ? { abortOnSummaryFailure } : {}),
     ...(maxContextTokens !== undefined ? { maxContextTokens } : {}),
     ...(minTailUserMessages !== undefined ? { minTailUserMessages } : {}),
     defaultEngine,
@@ -912,6 +914,14 @@ export async function buildAgentLoop(
       // Lane 3(b) — only passed when small-window mode is active, so hosted
       // frontier-window loop options stay byte-identical to today.
       ...(smallWindow ? { smallWindow } : {}),
+      // Soft-warn tiers — only passed when configured, so an unconfigured loop
+      // never produces a warn event.
+      ...(config.toolLoop?.maxToolCallsWarnAt !== undefined
+        ? { maxToolCallsWarnAt: config.toolLoop.maxToolCallsWarnAt }
+        : {}),
+      ...(config.toolLoop?.maxIdenticalToolCallsWarnAt !== undefined
+        ? { maxIdenticalToolCallsWarnAt: config.toolLoop.maxIdenticalToolCallsWarnAt }
+        : {}),
     },
   });
 

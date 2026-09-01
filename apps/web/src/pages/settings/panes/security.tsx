@@ -32,6 +32,7 @@ import {
   Checkbox,
   Form,
   Input,
+  InputNumber,
   Modal,
   Radio,
   Space,
@@ -120,6 +121,25 @@ export function SecurityPane() {
 
       <SectionHeading id="web-search-defaults">web-search defaults</SectionHeading>
       <WebSearchDefaultsSection />
+
+      <SectionHeading id="inbound-media">inbound media</SectionHeading>
+      <AdvancedBlock>
+        <SettingRow
+          label="Max inbound media size (bytes)"
+          formName="gatewayMaxInboundMediaBytes"
+          help="Overrides each channel adapter's own default cap on an attachment it will download. 1 KiB to 128 MiB. Blank = every adapter keeps its own, which is 25 MB on all four."
+        >
+          <Form.Item name="gatewayMaxInboundMediaBytes" style={{ marginBottom: 0 }}>
+            <InputNumber
+              min={1024}
+              max={134217728}
+              precision={0}
+              style={{ width: '100%' }}
+              placeholder="26214400"
+            />
+          </Form.Item>
+        </SettingRow>
+      </AdvancedBlock>
 
       <SectionHeading id="api-keys">API keys</SectionHeading>
       <ApiKeysSection />

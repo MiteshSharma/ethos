@@ -73,7 +73,14 @@ export const SETTINGS_CATEGORIES: readonly SettingsCategory[] = [
     slug: 'chat',
     label: 'Chat & context',
     group: 'Agent',
-    sections: [section('display', 'display'), section('context', 'context')],
+    sections: [
+      section('display', 'display'),
+      section('context', 'context'),
+      // The Discord adapter's first-sight channel-history read. Not `context`:
+      // that section is the context WINDOW (layering, compaction), while this
+      // is how far back one channel adapter reaches before the window exists.
+      section('discord', 'Discord'),
+    ],
   },
   {
     slug: 'voice',
@@ -111,6 +118,10 @@ export const SETTINGS_CATEGORIES: readonly SettingsCategory[] = [
       section('quick-commands', 'quick commands'),
       section('channel-toolsets', 'channel toolsets'),
       section('scheduled-passes', 'scheduled passes'),
+      // The brake on automatic member restarts. Nothing here is scheduled and
+      // nothing is per-channel, so it earns a heading rather than being
+      // averaged into `scheduled-passes`.
+      section('team-supervisor', 'team supervisor'),
     ],
   },
   {
@@ -139,6 +150,9 @@ export const SETTINGS_CATEGORIES: readonly SettingsCategory[] = [
       section('approval-mode', 'approval mode'),
       section('named-secrets', 'named secrets'),
       section('web-search-defaults', 'web-search defaults'),
+      // The ceiling on bytes an untrusted sender can push through a channel.
+      // Not a secret, not an approval, not a search default.
+      section('inbound-media', 'inbound media'),
       section('api-keys', 'API keys'),
       section('a2a', 'A2A'),
     ],
@@ -150,6 +164,11 @@ export const SETTINGS_CATEGORIES: readonly SettingsCategory[] = [
     sections: [
       section('debug', 'debug'),
       section('logs', 'logs'),
+      // The sandbox, the browser tool and the tool loop itself. None of the
+      // three is a debug affordance, a log knob or an escape hatch: they are
+      // the budgets a tool call runs inside, so they get their own section
+      // rather than being averaged into `escape-hatches`.
+      section('tool-execution', 'tool execution'),
       section('escape-hatches', 'escape hatches'),
     ],
   },

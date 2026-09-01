@@ -50,6 +50,8 @@ export interface MemoryBackendSelection {
     prefetch?: string[];
     exclude?: string[];
   };
+  /** Per-key markdown ceilings, in characters. Absent → 512K per key. */
+  memoryCharLimits?: { memory?: number; user?: number };
 }
 
 export interface UndecoratedBackend {
@@ -127,7 +129,11 @@ export function createUndecoratedBackend(opts: {
       ...(opts.logger ? { logger: opts.logger } : {}),
     });
   }
-  const base = new MarkdownFileMemoryProvider({ dir: opts.dataDir, storage: opts.storage });
+  const base = new MarkdownFileMemoryProvider({
+    dir: opts.dataDir,
+    storage: opts.storage,
+    ...(opts.selection.memoryCharLimits ? { charLimits: opts.selection.memoryCharLimits } : {}),
+  });
   const history = new HistoryStore({ dataDir: opts.dataDir, storage: opts.storage });
   return { base, history, memoryRoot: opts.dataDir, storage: opts.storage };
 }

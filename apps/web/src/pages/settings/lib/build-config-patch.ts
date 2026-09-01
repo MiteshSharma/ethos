@@ -366,6 +366,7 @@ export function buildConfigPatch(
       target: values.compaction.target ?? null,
       gateDelta: values.compaction.gateDelta ?? null,
       retryOnOverflow: values.compaction.retryOnOverflow,
+      abortOnSummaryFailure: values.compaction.abortOnSummaryFailure,
       smallWindow: values.compaction.smallWindow,
     },
     voiceFiller: {
@@ -436,6 +437,40 @@ export function buildConfigPatch(
       enabled: values.logsRotation.enabled,
       maxBytes: values.logsRotation.maxBytes ?? null,
       maxFiles: values.logsRotation.maxFiles ?? null,
+    },
+    logsLevel: values.logsLevel,
+    retentionVacuumAfterPrune: values.retentionVacuumAfterPrune,
+    retentionMinVacuumIntervalDays: values.retentionMinVacuumIntervalDays ?? null,
+    memoryCharLimits: {
+      memory: values.memoryCharLimits.memory ?? null,
+      user: values.memoryCharLimits.user ?? null,
+    },
+    executionDocker: {
+      cpu: values.executionDocker.cpu ?? null,
+      diskMb: values.executionDocker.diskMb ?? null,
+    },
+    toolLoop: {
+      maxToolCallsWarnAt: values.toolLoop.maxToolCallsWarnAt ?? null,
+      maxIdenticalToolCallsWarnAt: values.toolLoop.maxIdenticalToolCallsWarnAt ?? null,
+    },
+    browser: {
+      navigationTimeoutMs: values.browser.navigationTimeoutMs ?? null,
+      commandTimeoutMs: values.browser.commandTimeoutMs ?? null,
+    },
+    kanban: {
+      maxInProgress: values.kanban.maxInProgress ?? null,
+      maxInProgressPerProfile: values.kanban.maxInProgressPerProfile ?? null,
+    },
+    cronMaxParallelJobs: values.cronMaxParallelJobs ?? null,
+    gatewayMaxInboundMediaBytes: values.gatewayMaxInboundMediaBytes ?? null,
+    teamSupervisorRestartLoopGuard: {
+      maxRestarts: values.teamSupervisorRestartLoopGuard.maxRestarts ?? null,
+      windowSeconds: values.teamSupervisorRestartLoopGuard.windowSeconds ?? null,
+    },
+    discordMissedMessageBackfill: {
+      enabled: values.discordMissedMessageBackfill.enabled,
+      windowSeconds: values.discordMissedMessageBackfill.windowSeconds ?? null,
+      limit: values.discordMissedMessageBackfill.limit ?? null,
     },
     webSearchBackend: values.webSearchBackend === '' ? null : values.webSearchBackend,
     webExtractBackend: values.webExtractBackend === '' ? null : values.webExtractBackend,

@@ -4,10 +4,14 @@
 
 import type { Tool, ToolResult } from '@ethosagent/types';
 import { findActiveSession, isPlaywrightInstalled } from './sessions';
+import type { BrowserTimeouts } from './timeouts';
 import type { VisionResolverOptions } from './vision-resolver';
 import { resolveByA11y, resolveByVision } from './vision-resolver';
 
-export function createBrowserVisionClickTool(visionOpts: VisionResolverOptions): Tool {
+export function createBrowserVisionClickTool(
+  visionOpts: VisionResolverOptions,
+  timeouts: BrowserTimeouts,
+): Tool {
   return {
     name: 'browser_vision_click',
     description:
@@ -59,7 +63,7 @@ export function createBrowserVisionClickTool(visionOpts: VisionResolverOptions):
           await session.page
             .getByText(matchedName, { exact: false })
             .first()
-            .click({ timeout: 10_000 });
+            .click({ timeout: timeouts.commandMs });
           return {
             ok: true,
             value: JSON.stringify({

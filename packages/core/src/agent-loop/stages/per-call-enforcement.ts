@@ -91,11 +91,22 @@ export interface TurnBudgetCounters {
   totalToolCalls: number;
   toolNameCounts: Map<string, number>;
   identicalStreak: IdenticalStreak | null;
+  /**
+   * Soft-warn rules already nudged about this turn. Turn-scoped like the
+   * counters it sits with, which is what makes the nudge fire once per turn
+   * instead of on every iteration past the threshold.
+   */
+  warned: Set<string>;
 }
 
 /** Fresh counters for one user turn. */
 export function createTurnBudgetCounters(): TurnBudgetCounters {
-  return { totalToolCalls: 0, toolNameCounts: new Map(), identicalStreak: null };
+  return {
+    totalToolCalls: 0,
+    toolNameCounts: new Map(),
+    identicalStreak: null,
+    warned: new Set(),
+  };
 }
 
 /** Fold one tool call into the turn's budget counters. */

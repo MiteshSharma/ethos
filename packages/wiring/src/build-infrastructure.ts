@@ -273,7 +273,10 @@ export async function buildInfrastructure(
     // in the history decorator so every mutation is auditable. Dream turns write
     // through the same handle and are relabelled from their `dream:` sessionKey
     // (§2.1).
-    const { memoryProvider } = composeMemory({ ...wiringCtx, dataDir: dir });
+    const { memoryProvider } = composeMemory(
+      { ...wiringCtx, dataDir: dir },
+      config.memoryCharLimits ? { charLimits: config.memoryCharLimits } : undefined,
+    );
     const history = new HistoryStore({ dataDir: dir, storage: wiringCtx.storage });
     return composeGatedMemory({
       base: memoryProvider,

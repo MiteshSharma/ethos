@@ -33,6 +33,12 @@ export interface WhatsAppAdapterConfig {
    *  the resulting ~8-char code through `onPairingCode`. */
   phoneNumber?: string;
   onPairingCode?: (code: string | null) => void;
+  /**
+   * Override for the largest inbound media message this adapter will download
+   * (bytes). Absent = the 25 MB default in `downloadMedia`. Set from
+   * `gateway.maxInboundMediaBytes`.
+   */
+  maxInboundMediaBytes?: number;
 }
 
 export class WhatsAppAdapter implements PlatformAdapter, VoiceOutboundAdapter {
@@ -236,6 +242,7 @@ export class WhatsAppAdapter implements PlatformAdapter, VoiceOutboundAdapter {
               },
               this.config.cache,
               sessionKey,
+              this.config.maxInboundMediaBytes,
             );
             if (att) attachments = [att];
           } catch {

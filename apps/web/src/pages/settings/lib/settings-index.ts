@@ -224,6 +224,18 @@ export const SETTINGS_INDEX: readonly SettingEntry[] = [
     { key: 'memoryVault.agentDir', formName: 'memoryVault.agentDir', label: 'Agent directory' },
     { key: 'memoryVault.prefetch', formName: 'memoryVault.prefetch', label: 'Prefetch notes' },
     { key: 'memoryVault.exclude', formName: 'memoryVault.exclude', label: 'Excluded notes' },
+    {
+      key: 'memory.charLimits.memory',
+      formName: 'memoryCharLimits.memory',
+      label: 'MEMORY.md character limit',
+      advanced: true,
+    },
+    {
+      key: 'memory.charLimits.user',
+      formName: 'memoryCharLimits.user',
+      label: 'USER.md character limit',
+      advanced: true,
+    },
   ]),
   ...group('memory', 'approval', [
     { key: 'memoryApproval.mode', formName: 'memoryApproval.mode', label: 'Memory approval' },
@@ -394,9 +406,34 @@ export const SETTINGS_INDEX: readonly SettingEntry[] = [
       advanced: true,
     },
     {
+      key: 'compaction.abortOnSummaryFailure',
+      formName: 'compaction.abortOnSummaryFailure',
+      label: 'Abort on summary failure',
+      advanced: true,
+    },
+    {
       key: 'compaction.smallWindow',
       formName: 'compaction.smallWindow',
       label: 'Small-window mode',
+      advanced: true,
+    },
+  ]),
+  ...group('chat', 'discord', [
+    {
+      key: 'discord.missedMessageBackfill.enabled',
+      formName: 'discordMissedMessageBackfill.enabled',
+      label: 'Backfill missed messages',
+    },
+    {
+      key: 'discord.missedMessageBackfill.windowSeconds',
+      formName: 'discordMissedMessageBackfill.windowSeconds',
+      label: 'Backfill window (seconds)',
+      advanced: true,
+    },
+    {
+      key: 'discord.missedMessageBackfill.limit',
+      formName: 'discordMissedMessageBackfill.limit',
+      label: 'Backfill message limit',
       advanced: true,
     },
   ]),
@@ -719,6 +756,26 @@ export const SETTINGS_INDEX: readonly SettingEntry[] = [
       formName: 'weeklyDigest.recipients',
       label: 'Digest recipients',
     },
+    {
+      key: 'cron.maxParallelJobs',
+      formName: 'cronMaxParallelJobs',
+      label: 'Max parallel cron jobs',
+      advanced: true,
+    },
+  ]),
+  ...group('automation', 'team-supervisor', [
+    {
+      key: 'teamSupervisor.restartLoopGuard.maxRestarts',
+      formName: 'teamSupervisorRestartLoopGuard.maxRestarts',
+      label: 'Max restarts in the window',
+      advanced: true,
+    },
+    {
+      key: 'teamSupervisor.restartLoopGuard.windowSeconds',
+      formName: 'teamSupervisorRestartLoopGuard.windowSeconds',
+      label: 'Restart window (seconds)',
+      advanced: true,
+    },
   ]),
   ...group('jobs', 'limits', [
     {
@@ -743,6 +800,18 @@ export const SETTINGS_INDEX: readonly SettingEntry[] = [
       key: 'background.max_jobs_per_personality',
       formName: 'background.maxJobsPerPersonality',
       label: 'Max jobs per personality',
+      advanced: true,
+    },
+    {
+      key: 'kanban.maxInProgress',
+      formName: 'kanban.maxInProgress',
+      label: 'Max tasks in progress',
+      advanced: true,
+    },
+    {
+      key: 'kanban.maxInProgressPerProfile',
+      formName: 'kanban.maxInProgressPerProfile',
+      label: 'Max tasks in progress per assignee',
       advanced: true,
     },
   ]),
@@ -793,6 +862,18 @@ export const SETTINGS_INDEX: readonly SettingEntry[] = [
       advanced: true,
       stateBacked: true,
     },
+    {
+      key: 'retention.vacuumAfterPrune',
+      formName: 'retentionVacuumAfterPrune',
+      label: 'VACUUM after a prune sweep',
+      advanced: true,
+    },
+    {
+      key: 'retention.minVacuumIntervalDays',
+      formName: 'retentionMinVacuumIntervalDays',
+      label: 'Minimum days between VACUUMs',
+      advanced: true,
+    },
   ]),
   ...group('security', 'approval-mode', [
     { key: 'approvalMode', formName: 'approvalMode', label: 'Approval mode' },
@@ -813,6 +894,14 @@ export const SETTINGS_INDEX: readonly SettingEntry[] = [
       label: 'Web-search defaults',
       saves: 'self',
       stateBacked: true,
+    },
+  ]),
+  ...group('security', 'inbound-media', [
+    {
+      key: 'gateway.maxInboundMediaBytes',
+      formName: 'gatewayMaxInboundMediaBytes',
+      label: 'Max inbound media size (bytes)',
+      advanced: true,
     },
   ]),
   ...group('security', 'api-keys', [
@@ -857,6 +946,7 @@ export const SETTINGS_INDEX: readonly SettingEntry[] = [
     { key: 'display.debug_panel_model', formName: 'debugPanelModel', label: 'Debug panel model' },
   ]),
   ...group('developer', 'logs', [
+    { key: 'logs.level', formName: 'logsLevel', label: 'Log level' },
     {
       key: 'logs.rotation.enabled',
       formName: 'logsRotation.enabled',
@@ -873,6 +963,44 @@ export const SETTINGS_INDEX: readonly SettingEntry[] = [
       key: 'logs.rotation.maxFiles',
       formName: 'logsRotation.maxFiles',
       label: 'Rotated files kept',
+      advanced: true,
+    },
+  ]),
+  ...group('developer', 'tool-execution', [
+    {
+      key: 'execution.docker.cpu',
+      formName: 'executionDocker.cpu',
+      label: 'Sandbox CPU cores',
+      advanced: true,
+    },
+    {
+      key: 'execution.docker.diskMb',
+      formName: 'executionDocker.diskMb',
+      label: 'Sandbox disk quota (MB)',
+      advanced: true,
+    },
+    {
+      key: 'toolLoop.maxToolCallsWarnAt',
+      formName: 'toolLoop.maxToolCallsWarnAt',
+      label: 'Warn at tool calls per turn',
+      advanced: true,
+    },
+    {
+      key: 'toolLoop.maxIdenticalToolCallsWarnAt',
+      formName: 'toolLoop.maxIdenticalToolCallsWarnAt',
+      label: 'Warn at identical tool calls',
+      advanced: true,
+    },
+    {
+      key: 'browser.navigationTimeoutMs',
+      formName: 'browser.navigationTimeoutMs',
+      label: 'Browser navigation timeout (ms)',
+      advanced: true,
+    },
+    {
+      key: 'browser.commandTimeoutMs',
+      formName: 'browser.commandTimeoutMs',
+      label: 'Browser command timeout (ms)',
       advanced: true,
     },
   ]),

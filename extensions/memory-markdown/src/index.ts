@@ -18,8 +18,16 @@ import type {
 // tools-memory write arbitrary `.md` keys via sync().
 const PERSONALITY_PREFETCH_KEYS = ['MEMORY.md', 'USER.md'] as const;
 
-/** Maximum size in bytes for any single memory key's content. */
-const MAX_MEMORY_BYTES = 512 * 1024; // 512KB per key
+/** Default ceiling, in characters, for any single memory key's content. */
+const DEFAULT_MEMORY_CHAR_LIMIT = 512 * 1024; // 512K per key
+
+/** Per-key content ceilings, in characters. Both default to 512K. */
+export interface MemoryCharLimits {
+  /** Ceiling for `MEMORY.md`. */
+  memory?: number;
+  /** Ceiling for `USER.md`. */
+  user?: number;
+}
 
 export interface MarkdownMemoryConfig {
   /** Directory containing MEMORY.md and USER.md. Defaults to ~/.ethos */
@@ -27,15 +35,30 @@ export interface MarkdownMemoryConfig {
   /** Storage backend. Injected by wiring (composition root). Inject
    *  InMemoryStorage in tests. Required — never falls back to raw disk. */
   storage: Storage;
+  /** `memory.charLimits.*` from config. Absent → 512K for every key. */
+  charLimits?: MemoryCharLimits;
 }
 
 export class MarkdownFileMemoryProvider implements MemoryProvider {
   private readonly dir: string;
   private readonly storage: Storage;
+  private readonly charLimits: MemoryCharLimits;
 
   constructor(config: MarkdownMemoryConfig) {
     this.dir = config.dir ?? join(homedir(), '.ethos');
     this.storage = config.storage;
+    this.charLimits = config.charLimits ?? {};
+  }
+
+  /**
+   * Ceiling for one key. `MEMORY.md` and `USER.md` are configurable
+   * independently; every other key (team topics, tool-written `.md` files)
+   * keeps the 512K default — they have no config surface of their own.
+   */
+  private charLimitFor(fileName: string): number {
+    if (fileName === 'MEMORY.md') return this.charLimits.memory ?? DEFAULT_MEMORY_CHAR_LIMIT;
+    if (fileName === 'USER.md') return this.charLimits.user ?? DEFAULT_MEMORY_CHAR_LIMIT;
+    return DEFAULT_MEMORY_CHAR_LIMIT;
   }
 
   // ---------------------------------------------------------------------------
@@ -276,9 +299,10 @@ export class MarkdownFileMemoryProvider implements MemoryProvider {
       }
     }
 
-    if (content.length > MAX_MEMORY_BYTES) {
+    const charLimit = this.charLimitFor(basename(filePath));
+    if (content.length > charLimit) {
       // Trim from the beginning, preserving the most recent content
-      const trimmed = content.slice(content.length - MAX_MEMORY_BYTES);
+      const trimmed = content.slice(content.length - charLimit);
       // Find the first complete line break to avoid cutting mid-line
       const firstNewline = trimmed.indexOf('\n');
       const kept = firstNewline > 0 ? trimmed.slice(firstNewline + 1) : trimmed;

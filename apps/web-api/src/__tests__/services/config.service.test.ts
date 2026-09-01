@@ -470,6 +470,7 @@ describe('ConfigService — settings passthrough groups', () => {
       target: null,
       gateDelta: null,
       retryOnOverflow: true,
+      abortOnSummaryFailure: false,
       smallWindow: 'auto',
     });
     expect(r.voiceFiller).toEqual({
@@ -552,6 +553,7 @@ describe('ConfigService — settings passthrough groups', () => {
       target: 0.7,
       gateDelta: 2000,
       retryOnOverflow: false,
+      abortOnSummaryFailure: false,
       smallWindow: 'on',
     });
     expect(r.displayVerbosity).toBe('quiet');
@@ -672,6 +674,291 @@ describe('ConfigService — settings passthrough groups', () => {
     expect(r.background.defaultMaxCostUsd).toBe(2.5);
     // Untouched caps resolve to their defaults.
     expect(r.background.maxJobsPerRoot).toBe(3);
+  });
+
+  // -- config.yaml keys added for Hermes parity ------------------------------
+  // Each has a runtime bounds check in packages/config's `build*` helpers; the
+  // service mirrors them so a direct (non-RPC) caller can't persist a value the
+  // CLI loader would silently drop.
+
+  it('get returns the parity defaults when the new keys are absent', async () => {
+    await writeBase();
+    const r = await service.get();
+    expect(r.compaction.abortOnSummaryFailure).toBe(false);
+    expect(r.retentionVacuumAfterPrune).toBe(false);
+    expect(r.retentionMinVacuumIntervalDays).toBeNull();
+    expect(r.logsLevel).toBe('debug');
+    expect(r.memoryCharLimits).toEqual({ memory: 524_288, user: 524_288 });
+    expect(r.executionDocker).toEqual({ cpu: 2, diskMb: null });
+    expect(r.kanban).toEqual({ maxInProgress: null, maxInProgressPerProfile: null });
+    expect(r.cronMaxParallelJobs).toBeNull();
+    expect(r.toolLoop).toEqual({ maxToolCallsWarnAt: null, maxIdenticalToolCallsWarnAt: null });
+    expect(r.browser).toEqual({ navigationTimeoutMs: 30_000, commandTimeoutMs: 10_000 });
+    expect(r.gatewayMaxInboundMediaBytes).toBeNull();
+    expect(r.teamSupervisorRestartLoopGuard).toEqual({ maxRestarts: 5, windowSeconds: 60 });
+    expect(r.discordMissedMessageBackfill).toEqual({
+      enabled: true,
+      windowSeconds: null,
+      limit: 50,
+    });
+  });
+
+  it('round-trips every parity leaf under its dotted config key', async () => {
+    await writeBase();
+    await service.update({
+      compaction: { abortOnSummaryFailure: true },
+      retentionVacuumAfterPrune: true,
+      retentionMinVacuumIntervalDays: 7,
+      logsLevel: 'warn',
+      memoryCharLimits: { memory: 200_000, user: 100_000 },
+      executionDocker: { cpu: 1.5, diskMb: 4096 },
+      kanban: { maxInProgress: 3, maxInProgressPerProfile: 1 },
+      cronMaxParallelJobs: 2,
+      toolLoop: { maxToolCallsWarnAt: 20, maxIdenticalToolCallsWarnAt: 4 },
+      browser: { navigationTimeoutMs: 45_000, commandTimeoutMs: 15_000 },
+      gatewayMaxInboundMediaBytes: 8_388_608,
+      teamSupervisorRestartLoopGuard: { maxRestarts: 3, windowSeconds: 120 },
+      discordMissedMessageBackfill: { enabled: false, windowSeconds: 3600, limit: 25 },
+    });
+
+    const written = await storage.read(join(DATA, 'config.yaml'));
+    expect(written).toContain('compaction.abortOnSummaryFailure: true');
+    expect(written).toContain('retention.vacuumAfterPrune: true');
+    expect(written).toContain('retention.minVacuumIntervalDays: 7');
+    expect(written).toContain('logs.level: warn');
+    expect(written).toContain('memory.charLimits.memory: 200000');
+    expect(written).toContain('memory.charLimits.user: 100000');
+    expect(written).toContain('execution.docker.cpu: 1.5');
+    expect(written).toContain('execution.docker.diskMb: 4096');
+    expect(written).toContain('kanban.maxInProgress: 3');
+    expect(written).toContain('kanban.maxInProgressPerProfile: 1');
+    expect(written).toContain('cron.maxParallelJobs: 2');
+    expect(written).toContain('toolLoop.maxToolCallsWarnAt: 20');
+    expect(written).toContain('toolLoop.maxIdenticalToolCallsWarnAt: 4');
+    expect(written).toContain('browser.navigationTimeoutMs: 45000');
+    expect(written).toContain('browser.commandTimeoutMs: 15000');
+    expect(written).toContain('gateway.maxInboundMediaBytes: 8388608');
+    expect(written).toContain('teamSupervisor.restartLoopGuard.maxRestarts: 3');
+    expect(written).toContain('teamSupervisor.restartLoopGuard.windowSeconds: 120');
+    expect(written).toContain('discord.missedMessageBackfill.enabled: false');
+    expect(written).toContain('discord.missedMessageBackfill.windowSeconds: 3600');
+    expect(written).toContain('discord.missedMessageBackfill.limit: 25');
+
+    const r = await service.get();
+    expect(r.compaction.abortOnSummaryFailure).toBe(true);
+    expect(r.retentionVacuumAfterPrune).toBe(true);
+    expect(r.retentionMinVacuumIntervalDays).toBe(7);
+    expect(r.logsLevel).toBe('warn');
+    expect(r.memoryCharLimits).toEqual({ memory: 200_000, user: 100_000 });
+    expect(r.executionDocker).toEqual({ cpu: 1.5, diskMb: 4096 });
+    expect(r.kanban).toEqual({ maxInProgress: 3, maxInProgressPerProfile: 1 });
+    expect(r.cronMaxParallelJobs).toBe(2);
+    expect(r.toolLoop).toEqual({ maxToolCallsWarnAt: 20, maxIdenticalToolCallsWarnAt: 4 });
+    expect(r.browser).toEqual({ navigationTimeoutMs: 45_000, commandTimeoutMs: 15_000 });
+    expect(r.gatewayMaxInboundMediaBytes).toBe(8_388_608);
+    expect(r.teamSupervisorRestartLoopGuard).toEqual({ maxRestarts: 3, windowSeconds: 120 });
+    expect(r.discordMissedMessageBackfill).toEqual({
+      enabled: false,
+      windowSeconds: 3600,
+      limit: 25,
+    });
+  });
+
+  it('null clears every parity leaf back to its default', async () => {
+    await writeBase([
+      'compaction.abortOnSummaryFailure: true',
+      'retention.vacuumAfterPrune: true',
+      'retention.minVacuumIntervalDays: 7',
+      'logs.level: warn',
+      'memory.charLimits.memory: 200000',
+      'memory.charLimits.user: 100000',
+      'execution.docker.cpu: 1.5',
+      'execution.docker.diskMb: 4096',
+      'kanban.maxInProgress: 3',
+      'kanban.maxInProgressPerProfile: 1',
+      'cron.maxParallelJobs: 2',
+      'toolLoop.maxToolCallsWarnAt: 20',
+      'toolLoop.maxIdenticalToolCallsWarnAt: 4',
+      'browser.navigationTimeoutMs: 45000',
+      'browser.commandTimeoutMs: 15000',
+      'gateway.maxInboundMediaBytes: 8388608',
+      'teamSupervisor.restartLoopGuard.maxRestarts: 3',
+      'teamSupervisor.restartLoopGuard.windowSeconds: 120',
+      'discord.missedMessageBackfill.enabled: false',
+      'discord.missedMessageBackfill.windowSeconds: 3600',
+      'discord.missedMessageBackfill.limit: 25',
+    ]);
+    await service.update({
+      compaction: { abortOnSummaryFailure: null },
+      retentionVacuumAfterPrune: null,
+      retentionMinVacuumIntervalDays: null,
+      logsLevel: null,
+      memoryCharLimits: { memory: null, user: null },
+      executionDocker: { cpu: null, diskMb: null },
+      kanban: { maxInProgress: null, maxInProgressPerProfile: null },
+      cronMaxParallelJobs: null,
+      toolLoop: { maxToolCallsWarnAt: null, maxIdenticalToolCallsWarnAt: null },
+      browser: { navigationTimeoutMs: null, commandTimeoutMs: null },
+      gatewayMaxInboundMediaBytes: null,
+      teamSupervisorRestartLoopGuard: { maxRestarts: null, windowSeconds: null },
+      discordMissedMessageBackfill: { enabled: null, windowSeconds: null, limit: null },
+    });
+
+    const written = await storage.read(join(DATA, 'config.yaml'));
+    for (const key of [
+      'compaction.abortOnSummaryFailure',
+      'retention.vacuumAfterPrune',
+      'retention.minVacuumIntervalDays',
+      'logs.level',
+      'memory.charLimits.memory',
+      'memory.charLimits.user',
+      'execution.docker.cpu',
+      'execution.docker.diskMb',
+      'kanban.maxInProgress',
+      'cron.maxParallelJobs',
+      'toolLoop.maxToolCallsWarnAt',
+      'browser.navigationTimeoutMs',
+      'gateway.maxInboundMediaBytes',
+      'teamSupervisor.restartLoopGuard.maxRestarts',
+      'discord.missedMessageBackfill.enabled',
+    ]) {
+      expect(written).not.toContain(key);
+    }
+
+    const r = await service.get();
+    expect(r.compaction.abortOnSummaryFailure).toBe(false);
+    expect(r.retentionVacuumAfterPrune).toBe(false);
+    expect(r.retentionMinVacuumIntervalDays).toBeNull();
+    expect(r.logsLevel).toBe('debug');
+    expect(r.memoryCharLimits).toEqual({ memory: 524_288, user: 524_288 });
+    expect(r.executionDocker).toEqual({ cpu: 2, diskMb: null });
+    expect(r.kanban).toEqual({ maxInProgress: null, maxInProgressPerProfile: null });
+    expect(r.cronMaxParallelJobs).toBeNull();
+    expect(r.toolLoop).toEqual({ maxToolCallsWarnAt: null, maxIdenticalToolCallsWarnAt: null });
+    expect(r.browser).toEqual({ navigationTimeoutMs: 30_000, commandTimeoutMs: 10_000 });
+    expect(r.gatewayMaxInboundMediaBytes).toBeNull();
+    expect(r.teamSupervisorRestartLoopGuard).toEqual({ maxRestarts: 5, windowSeconds: 60 });
+    expect(r.discordMissedMessageBackfill).toEqual({
+      enabled: true,
+      windowSeconds: null,
+      limit: 50,
+    });
+  });
+
+  it.each([
+    ['retentionMinVacuumIntervalDays', { retentionMinVacuumIntervalDays: -1 }],
+    ['logsLevel', { logsLevel: 'loud' as never }],
+    ['cronMaxParallelJobs', { cronMaxParallelJobs: 0 }],
+    ['gatewayMaxInboundMediaBytes below 1 KiB', { gatewayMaxInboundMediaBytes: 1023 }],
+    ['gatewayMaxInboundMediaBytes above 128 MiB', { gatewayMaxInboundMediaBytes: 134_217_729 }],
+    ['memoryCharLimits.memory', { memoryCharLimits: { memory: 0 } }],
+    ['memoryCharLimits.user', { memoryCharLimits: { user: -1 } }],
+    ['executionDocker.cpu', { executionDocker: { cpu: 0 } }],
+    ['executionDocker.diskMb', { executionDocker: { diskMb: 0 } }],
+    ['kanban.maxInProgress', { kanban: { maxInProgress: 0 } }],
+    ['kanban.maxInProgressPerProfile', { kanban: { maxInProgressPerProfile: -2 } }],
+    ['toolLoop.maxToolCallsWarnAt', { toolLoop: { maxToolCallsWarnAt: 0 } }],
+    ['toolLoop.maxIdenticalToolCallsWarnAt', { toolLoop: { maxIdenticalToolCallsWarnAt: 0 } }],
+    ['browser.navigationTimeoutMs below 1s', { browser: { navigationTimeoutMs: 999 } }],
+    ['browser.commandTimeoutMs above 10min', { browser: { commandTimeoutMs: 600_001 } }],
+    [
+      'teamSupervisorRestartLoopGuard.maxRestarts',
+      { teamSupervisorRestartLoopGuard: { maxRestarts: 0 } },
+    ],
+    [
+      'teamSupervisorRestartLoopGuard.windowSeconds',
+      { teamSupervisorRestartLoopGuard: { windowSeconds: 86_401 } },
+    ],
+    [
+      'discordMissedMessageBackfill.windowSeconds',
+      { discordMissedMessageBackfill: { windowSeconds: 604_801 } },
+    ],
+    ['discordMissedMessageBackfill.limit', { discordMissedMessageBackfill: { limit: 101 } }],
+  ] satisfies Array<[string, ConfigUpdateInput]>)(
+    'refuses an out-of-range %s',
+    async (_label, patch) => {
+      await writeBase();
+      await expect(service.update(patch)).rejects.toMatchObject({ code: 'CONFIG_INVALID' });
+      // Nothing was persisted — the guard runs before the write.
+      const written = await storage.read(join(DATA, 'config.yaml'));
+      expect(written).not.toContain('retention.minVacuumIntervalDays');
+      expect(written).not.toContain('kanban.');
+    },
+  );
+
+  it('get reports an out-of-range on-disk value the way the runtime treats it', async () => {
+    // A hand-edited or older config.yaml. `@ethosagent/config`'s `build*`
+    // helpers drop every one of these on load and the runtime runs on the
+    // default, so the read path must not surface them as live.
+    await writeBase([
+      'retention.minVacuumIntervalDays: -1',
+      'logs.level: loud',
+      'memory.charLimits.memory: 0',
+      'memory.charLimits.user: -1',
+      'execution.docker.cpu: 0',
+      'execution.docker.diskMb: 0',
+      'kanban.maxInProgress: 0',
+      'kanban.maxInProgressPerProfile: -2',
+      'cron.maxParallelJobs: 0',
+      'toolLoop.maxToolCallsWarnAt: 0',
+      'toolLoop.maxIdenticalToolCallsWarnAt: nonsense',
+      'browser.navigationTimeoutMs: 999',
+      'browser.commandTimeoutMs: 600001',
+      'gateway.maxInboundMediaBytes: 1023',
+      'teamSupervisor.restartLoopGuard.maxRestarts: 0',
+      'teamSupervisor.restartLoopGuard.windowSeconds: 86401',
+      'discord.missedMessageBackfill.windowSeconds: 604801',
+      'discord.missedMessageBackfill.limit: 101',
+    ]);
+
+    const r = await service.get();
+    expect(r.retentionMinVacuumIntervalDays).toBeNull();
+    expect(r.logsLevel).toBe('debug');
+    expect(r.memoryCharLimits).toEqual({ memory: 524_288, user: 524_288 });
+    expect(r.executionDocker).toEqual({ cpu: 2, diskMb: null });
+    expect(r.kanban).toEqual({ maxInProgress: null, maxInProgressPerProfile: null });
+    expect(r.cronMaxParallelJobs).toBeNull();
+    expect(r.toolLoop).toEqual({ maxToolCallsWarnAt: null, maxIdenticalToolCallsWarnAt: null });
+    expect(r.browser).toEqual({ navigationTimeoutMs: 30_000, commandTimeoutMs: 10_000 });
+    expect(r.gatewayMaxInboundMediaBytes).toBeNull();
+    expect(r.teamSupervisorRestartLoopGuard).toEqual({ maxRestarts: 5, windowSeconds: 60 });
+    expect(r.discordMissedMessageBackfill).toEqual({
+      enabled: true,
+      windowSeconds: null,
+      limit: 50,
+    });
+  });
+
+  it('get keeps an on-disk value that sits exactly on a bound', async () => {
+    await writeBase([
+      'retention.minVacuumIntervalDays: 0',
+      'browser.navigationTimeoutMs: 1000',
+      'browser.commandTimeoutMs: 600000',
+      'gateway.maxInboundMediaBytes: 1024',
+      'discord.missedMessageBackfill.limit: 100',
+    ]);
+
+    const r = await service.get();
+    expect(r.retentionMinVacuumIntervalDays).toBe(0);
+    expect(r.browser).toEqual({ navigationTimeoutMs: 1_000, commandTimeoutMs: 600_000 });
+    expect(r.gatewayMaxInboundMediaBytes).toBe(1024);
+    expect(r.discordMissedMessageBackfill.limit).toBe(100);
+  });
+
+  it('editing retention TTLs leaves the vacuum scalars alone', async () => {
+    await writeBase([
+      'retention.messages: 30d',
+      'retention.vacuumAfterPrune: true',
+      'retention.minVacuumIntervalDays: 7',
+    ]);
+    // The retention MAP is a full replacement of its duration subkeys — but the
+    // two vacuum scalars only share the prefix and must survive.
+    await service.update({ retention: { messages: '90d' } });
+
+    const r = await service.get();
+    expect(r.retention).toEqual({ messages: '90d' });
+    expect(r.retentionVacuumAfterPrune).toBe(true);
+    expect(r.retentionMinVacuumIntervalDays).toBe(7);
   });
 
   it('webhooks: generates a secret when absent, masks it in get, preserves it across updates', async () => {

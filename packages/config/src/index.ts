@@ -5,6 +5,7 @@ import type { ChannelFilterConfig, ChannelPlatformConfig } from '@ethosagent/saf
 import { detectSecrets } from '@ethosagent/safety-redact';
 import { REF_TO_ENV } from '@ethosagent/storage-fs';
 import type {
+  LogLevel,
   ModelProfile,
   RealtimeProviderEntry,
   RetentionConfig,
@@ -1090,6 +1091,13 @@ export interface CronTopLevelConfig {
     /** Public URL the arming backend calls back on wake. Required for every backend except `'none'`. */
     fireUrl?: string | null;
   };
+  /**
+   * Cap on cron jobs executing at once across overlapping ticks. A due job
+   * reached while the cap is met is left unclaimed and fires on a later tick.
+   * Positive integer; absent = no cap (today's behavior). Config key:
+   *   cron.maxParallelJobs: 2
+   */
+  maxParallelJobs?: number;
 }
 
 export interface EthosConfig {
@@ -1105,6 +1113,26 @@ export interface EthosConfig {
   personality: string;
   /** Memory backend: 'markdown' (default), 'vector' (semantic retrieval), or 'vault' (bring-your-own external directory) */
   memory?: 'markdown' | 'vector' | 'vault';
+  /**
+   * Per-key ceilings, in characters, for the markdown memory backend. A write
+   * past the ceiling keeps the newest content and archives the trimmed prefix
+   * into `memory-archive.md`. Both default to 524288 (512K). Named
+   * `memoryCharLimits` on the type because `memory` is already the backend
+   * selector; the flat config keys keep the block shape:
+   *   memory.charLimits.memory: 524288
+   *   memory.charLimits.user: 262144
+   */
+  memoryCharLimits?: { memory?: number; user?: number };
+  /**
+   * Execution-backend resource caps, forwarded to `ExecutionBackendConfig`.
+   * `cpu` is the docker `--cpus` quota (default 2); `diskMb` is a best-effort
+   * `--storage-opt size=<N>m` quota honoured only where the daemon's storage
+   * driver and backing filesystem can enforce it (the backend warns and skips
+   * otherwise). Flat keys:
+   *   execution.docker.cpu: 4
+   *   execution.docker.diskMb: 20480
+   */
+  execution?: { docker?: { cpu?: number; diskMb?: number } };
   baseUrl?: string;
   /** Azure-only: REST API version (e.g. `2024-10-21`). Required when
    *  `provider === 'azure'`; ignored otherwise. */
@@ -1223,9 +1251,13 @@ export interface EthosConfig {
    * rows of any role, and a tool-heavy tail can hold none. Flat-key shape:
    *   compaction.maxContextTokens: 400000
    *   compaction.minTailUserMessages: 3
+   * `abortOnSummaryFailure` (default false) surfaces a failed emergency
+   * summary as its own `compaction_summary_failed` error instead of masking it
+   * as the generic overflow rejection:
+   *   compaction.abortOnSummaryFailure: true
    */
   // biome-ignore format: keep the option shape on one line for readability.
-  compaction?: { pressure?: number; target?: number; gateDelta?: number; autoCompact?: boolean; retryOnOverflow?: boolean; smallWindow?: 'auto' | 'on' | 'off'; maxContextTokens?: number; minTailUserMessages?: number };
+  compaction?: { pressure?: number; target?: number; gateDelta?: number; autoCompact?: boolean; retryOnOverflow?: boolean; abortOnSummaryFailure?: boolean; smallWindow?: 'auto' | 'on' | 'off'; maxContextTokens?: number; minTailUserMessages?: number };
   /**
    * Call-capture personality binding (plan/phases/call-capture-extension.md
    * decision 3). Exactly one personality, system-wide, may hold the
@@ -1284,6 +1316,32 @@ export interface EthosConfig {
    *   slack.apps.0.bind.name: coder
    */
   slack?: { apps: SlackAppConfig[] };
+  /**
+   * Discord-adapter knobs that are not per-bot credentials. Today only the
+   * missed-message backfill: the first time the bot sees a channel it reads a
+   * slice of recent history so its first reply is not context-blind.
+   *
+   * Config format:
+   *   discord.missedMessageBackfill.enabled: false
+   *   discord.missedMessageBackfill.windowSeconds: 3600
+   *   discord.missedMessageBackfill.limit: 50
+   */
+  discord?: {
+    missedMessageBackfill?: {
+      /** Read history at all. Default `true` — today's behaviour. */
+      enabled?: boolean;
+      /**
+       * Drop fetched messages older than this many seconds. Absent = no age
+       * bound, which is today's behaviour. 1–604800 (7 days).
+       */
+      windowSeconds?: number;
+      /**
+       * How many messages to ask Discord for. 1–100 (the platform's own
+       * `messages.fetch` ceiling). Default 50.
+       */
+      limit?: number;
+    };
+  };
   /** Per-team runtime knobs. Keyed by team manifest name (same identifier rules). */
   teams?: Record<string, TeamRuntimeConfig>;
   whatsapp?: WhatsAppConfig[];
@@ -1681,11 +1739,14 @@ export interface EthosConfig {
    */
   modelCatalog?: ModelCatalogConfig;
   /**
-   * Log rotation settings. Controls when `~/.ethos/logs/errors.jsonl` is
-   * rotated. Config keys:
+   * Logging settings. `rotation` controls when `~/.ethos/logs/errors.jsonl` is
+   * rotated; `level` is the lowest severity `ConsoleLogger` prints (records
+   * below it are dropped). Absent `level` means `'debug'` — everything prints,
+   * which is what the framework did before the gate existed. Config keys:
    *   logs.rotation.maxBytes: 10485760
    *   logs.rotation.maxFiles: 5
    *   logs.rotation.enabled: false
+   *   logs.level: info
    */
   logs?: {
     rotation?: {
@@ -1693,6 +1754,7 @@ export interface EthosConfig {
       maxFiles?: number;
       enabled?: boolean;
     };
+    level?: LogLevel;
   };
   /**
    * AWS integration configuration. Currently supports Secrets Manager
@@ -1802,6 +1864,93 @@ export interface EthosConfig {
    *   kanbanPoll.intervalMs: 5000
    *   kanbanPoll.boardPath: ~/.ethos/teams/myteam/board.db
    */
+  /**
+   * Soft-warn tiers for the agent loop's tool-call budgets. Crossing one emits
+   * a one-per-turn internal-audience `tool_progress` nudge; it never stops the
+   * turn — that stays the job of the hard caps in `AgentLoopConfig.options`.
+   * Absent = no warn, unchanged behaviour.
+   *
+   * Config format:
+   *   toolLoop.maxToolCallsWarnAt: 40
+   *   toolLoop.maxIdenticalToolCallsWarnAt: 10
+   */
+  toolLoop?: {
+    /** Total tool calls in one turn at which to nudge. Positive integer. */
+    maxToolCallsWarnAt?: number;
+    /** Per-tool-name repeat count at which to nudge. Positive integer. */
+    maxIdenticalToolCallsWarnAt?: number;
+  };
+  /**
+   * Board-wide work-in-progress caps. Distinct from `kanbanPoll` (poll cadence)
+   * — these bound how many tasks may be `running` at once, enforced by
+   * `KanbanStore.updateStatus` on the transition into `running`. Absent = no
+   * cap, unchanged behaviour.
+   *
+   * Config format:
+   *   kanban.maxInProgress: 5
+   *   kanban.maxInProgressPerProfile: 2
+   */
+  kanban?: {
+    /** Max tasks in `running` across the whole board. Positive integer. */
+    maxInProgress?: number;
+    /** Max tasks in `running` per assignee. Positive integer. */
+    maxInProgressPerProfile?: number;
+  };
+  /**
+   * Playwright timeouts for the `browser` toolset. Both were hardcoded at the
+   * call sites before they became configurable, so the defaults below are
+   * exactly what those literals were.
+   *
+   * Config format:
+   *   browser.navigationTimeoutMs: 30000
+   *   browser.commandTimeoutMs: 10000
+   */
+  browser?: {
+    /** Budget for one page load (`goto`/`goBack`), ms. 1000–600000. Default 30000. */
+    navigationTimeoutMs?: number;
+    /** Budget for one element interaction (`click`), ms. 1000–600000. Default 10000. */
+    commandTimeoutMs?: number;
+  };
+  /**
+   * Gateway-wide knobs that are not per-adapter credentials.
+   *
+   * `maxInboundMediaBytes` is an OVERRIDE, not a universal cap: each platform
+   * adapter keeps its own default (the ceiling the platform itself imposes)
+   * and only reads this when it is set. There is no central inbound-media
+   * path to enforce it at — the value is threaded into each adapter at
+   * construction.
+   *
+   * Config format:
+   *   gateway.maxInboundMediaBytes: 52428800
+   */
+  gateway?: {
+    /** Largest inbound attachment any adapter will download, bytes. 1024–134217728. */
+    maxInboundMediaBytes?: number;
+  };
+  /**
+   * Team-supervisor knobs. Named `teamSupervisor` rather than `gateway`
+   * because the gateway process does not restart itself — member auto-restart
+   * is owned by the supervisor that spawned them.
+   *
+   * Config format:
+   *   teamSupervisor.restartLoopGuard.maxRestarts: 5
+   *   teamSupervisor.restartLoopGuard.windowSeconds: 60
+   */
+  teamSupervisor?: {
+    /**
+     * Rolling-window brake on `auto_restart`. A member is respawned up to
+     * `maxRestarts` times inside `windowSeconds`; the crash after that leaves
+     * it marked failed. Unset means 5 respawns in 60 seconds — one MORE
+     * respawn than the previous hardcoded guard, which gave up on the fifth
+     * crash and so performed four restarts.
+     */
+    restartLoopGuard?: {
+      /** Respawns allowed inside the window. 1–1000. Unset = 5. */
+      maxRestarts?: number;
+      /** Width of the rolling window, seconds. 1–86400. Default 60. */
+      windowSeconds?: number;
+    };
+  };
   kanbanPoll?: {
     enabled?: boolean;
     /** Poll interval in milliseconds. Default 5000. */
@@ -2222,6 +2371,22 @@ export async function writeConfig(
     `personality: ${config.personality}`,
   ];
   if (config.memory) lines.push(`memory: ${config.memory}`);
+  if (config.memoryCharLimits) {
+    if (config.memoryCharLimits.memory !== undefined) {
+      lines.push(`memory.charLimits.memory: ${config.memoryCharLimits.memory}`);
+    }
+    if (config.memoryCharLimits.user !== undefined) {
+      lines.push(`memory.charLimits.user: ${config.memoryCharLimits.user}`);
+    }
+  }
+  if (config.execution?.docker) {
+    if (config.execution.docker.cpu !== undefined) {
+      lines.push(`execution.docker.cpu: ${config.execution.docker.cpu}`);
+    }
+    if (config.execution.docker.diskMb !== undefined) {
+      lines.push(`execution.docker.diskMb: ${config.execution.docker.diskMb}`);
+    }
+  }
   if (config.baseUrl) lines.push(`baseUrl: ${config.baseUrl}`);
   if (config.apiVersion) lines.push(`apiVersion: ${config.apiVersion}`);
   if (config.contextWindow !== undefined) lines.push(`contextWindow: ${config.contextWindow}`);
@@ -2276,6 +2441,9 @@ export async function writeConfig(
     }
     if (config.compaction.retryOnOverflow !== undefined) {
       lines.push(`compaction.retryOnOverflow: ${config.compaction.retryOnOverflow}`);
+    }
+    if (config.compaction.abortOnSummaryFailure !== undefined) {
+      lines.push(`compaction.abortOnSummaryFailure: ${config.compaction.abortOnSummaryFailure}`);
     }
     if (config.compaction.smallWindow !== undefined) {
       lines.push(`compaction.smallWindow: ${config.compaction.smallWindow}`);
@@ -2699,6 +2867,7 @@ export async function writeConfig(
     if (r.maxFiles !== undefined) lines.push(`logs.rotation.maxFiles: ${r.maxFiles}`);
     if (r.enabled === false) lines.push('logs.rotation.enabled: false');
   }
+  if (config.logs?.level !== undefined) lines.push(`logs.level: ${config.logs.level}`);
   if (config.aws?.secrets) {
     const s = config.aws.secrets;
     if (s.enabled !== undefined) lines.push(`aws.secrets.enabled: ${s.enabled}`);
@@ -2765,6 +2934,47 @@ export async function writeConfig(
     if (config.weeklyDigest.cron) lines.push(`weeklyDigest.cron: ${config.weeklyDigest.cron}`);
     if (config.weeklyDigest.recipients && config.weeklyDigest.recipients.length > 0)
       lines.push(`weeklyDigest.recipients: ${config.weeklyDigest.recipients.join(',')}`);
+  }
+  if (config.toolLoop) {
+    if (config.toolLoop.maxToolCallsWarnAt !== undefined)
+      lines.push(`toolLoop.maxToolCallsWarnAt: ${config.toolLoop.maxToolCallsWarnAt}`);
+    if (config.toolLoop.maxIdenticalToolCallsWarnAt !== undefined)
+      lines.push(
+        `toolLoop.maxIdenticalToolCallsWarnAt: ${config.toolLoop.maxIdenticalToolCallsWarnAt}`,
+      );
+  }
+  if (config.cron?.maxParallelJobs !== undefined) {
+    lines.push(`cron.maxParallelJobs: ${config.cron.maxParallelJobs}`);
+  }
+  if (config.kanban) {
+    if (config.kanban.maxInProgress !== undefined)
+      lines.push(`kanban.maxInProgress: ${config.kanban.maxInProgress}`);
+    if (config.kanban.maxInProgressPerProfile !== undefined)
+      lines.push(`kanban.maxInProgressPerProfile: ${config.kanban.maxInProgressPerProfile}`);
+  }
+  if (config.browser) {
+    if (config.browser.navigationTimeoutMs !== undefined)
+      lines.push(`browser.navigationTimeoutMs: ${config.browser.navigationTimeoutMs}`);
+    if (config.browser.commandTimeoutMs !== undefined)
+      lines.push(`browser.commandTimeoutMs: ${config.browser.commandTimeoutMs}`);
+  }
+  if (config.gateway?.maxInboundMediaBytes !== undefined) {
+    lines.push(`gateway.maxInboundMediaBytes: ${config.gateway.maxInboundMediaBytes}`);
+  }
+  if (config.teamSupervisor?.restartLoopGuard) {
+    const rg = config.teamSupervisor.restartLoopGuard;
+    if (rg.maxRestarts !== undefined)
+      lines.push(`teamSupervisor.restartLoopGuard.maxRestarts: ${rg.maxRestarts}`);
+    if (rg.windowSeconds !== undefined)
+      lines.push(`teamSupervisor.restartLoopGuard.windowSeconds: ${rg.windowSeconds}`);
+  }
+  if (config.discord?.missedMessageBackfill) {
+    const bf = config.discord.missedMessageBackfill;
+    if (bf.enabled !== undefined)
+      lines.push(`discord.missedMessageBackfill.enabled: ${bf.enabled}`);
+    if (bf.windowSeconds !== undefined)
+      lines.push(`discord.missedMessageBackfill.windowSeconds: ${bf.windowSeconds}`);
+    if (bf.limit !== undefined) lines.push(`discord.missedMessageBackfill.limit: ${bf.limit}`);
   }
   if (config.kanbanPoll) {
     if (config.kanbanPoll.enabled !== undefined)
@@ -2991,6 +3201,9 @@ export async function resolveConfigSecrets(
   return r;
 }
 
+/** Accepted `logs.level` values, ordered by severity. Mirrors `LogLevel`. */
+const LOG_LEVELS: readonly LogLevel[] = ['debug', 'info', 'warn', 'error'];
+
 function parseConfigYaml(src: string): EthosConfig {
   const kv: Record<string, string> = {};
   const modelRouting: Record<string, string> = {};
@@ -3019,6 +3232,23 @@ function parseConfigYaml(src: string): EthosConfig {
   const modelsKv: Record<string, Record<string, string>> = {};
   // §5 — global compaction.<field>: <value> (pressure | target | ...flags).
   const compactionKv: Record<string, string> = {};
+  // memory.charLimits.<memory|user>: <chars> — markdown-backend per-key ceilings.
+  const memoryCharLimitsKv: Record<string, string> = {};
+  // execution.docker.<cpu|diskMb>: <value> — container resource caps.
+  const executionDockerKv: Record<string, string> = {};
+  // kanban.<maxInProgress|maxInProgressPerProfile>: <n> — board WIP caps.
+  const kanbanKv: Record<string, string> = {};
+  // toolLoop.<field>: <n> — soft-warn tiers under the loop's hard tool caps.
+  const toolLoopKv: Record<string, string> = {};
+  // browser.<navigationTimeoutMs|commandTimeoutMs>: <ms> — Playwright budgets.
+  const browserKv: Record<string, string> = {};
+  // gateway.<field>: <value> — gateway-wide, non-credential knobs.
+  const gatewayKv: Record<string, string> = {};
+  // teamSupervisor.restartLoopGuard.<field>: <n> — member auto-restart brake.
+  // Unset = 5 respawns in 60s (one more than the old hardcoded four).
+  const restartLoopGuardKv: Record<string, string> = {};
+  // discord.missedMessageBackfill.<field>: <value> — channel-history backfill.
+  const discordBackfillKv: Record<string, string> = {};
   // Call-capture personality binding (decision 3) — callCapture.personalityId: <id>.
   const callCaptureKv: Record<string, string> = {};
   // Phase 3 — memoryConsolidation.<field>: <value> (silent flush config).
@@ -3450,6 +3680,12 @@ function parseConfigYaml(src: string): EthosConfig {
       cronKv[`${cron[1]}.${cron[2]}`] = cron[3].trim().replace(/^["']|["']$/g, '');
       continue;
     }
+    // cron.maxParallelJobs: <n>  (scalar sibling of the trigger/arming blocks)
+    const cronMax = line.match(/^cron\.maxParallelJobs:\s*(.+)$/);
+    if (cronMax) {
+      cronKv.maxParallelJobs = cronMax[1].trim().replace(/^["']|["']$/g, '');
+      continue;
+    }
     // auxiliary.compression.<field>: <value>
     const auxc = line.match(/^auxiliary\.compression\.(\w+):\s*(.+)$/);
     if (auxc) {
@@ -3490,6 +3726,12 @@ function parseConfigYaml(src: string): EthosConfig {
     const lr = line.match(/^logs\.rotation\.(\w+):\s*(.+)$/);
     if (lr) {
       logsRotationKv[lr[1]] = lr[2].trim().replace(/^["']|["']$/g, '');
+      continue;
+    }
+    // logs.level: <debug|info|warn|error>
+    const ll = line.match(/^logs\.level:\s*(.+)$/);
+    if (ll) {
+      kv['logs.level'] = ll[1].trim().replace(/^["']|["']$/g, '');
       continue;
     }
     // aws.secrets.<field>: <value>
@@ -3533,7 +3775,7 @@ function parseConfigYaml(src: string): EthosConfig {
     }
     // §5 / Phase 3 — compaction.<field>: <value>  (global gate + turn-end flags).
     const cmp = line.match(
-      /^compaction\.(pressure|target|gateDelta|autoCompact|retryOnOverflow|smallWindow|maxContextTokens|minTailUserMessages):\s*(.+)$/,
+      /^compaction\.(pressure|target|gateDelta|autoCompact|retryOnOverflow|abortOnSummaryFailure|smallWindow|maxContextTokens|minTailUserMessages):\s*(.+)$/,
     );
     if (cmp) {
       compactionKv[cmp[1]] = cmp[2].trim().replace(/^["']|["']$/g, '');
@@ -3650,6 +3892,18 @@ function parseConfigYaml(src: string): EthosConfig {
       kv[`weeklyDigest.${wd[1]}`] = wd[2].trim().replace(/^["']|["']$/g, '');
       continue;
     }
+    // toolLoop.<field>: <value>  (soft-warn tiers; the hard caps are not config)
+    const tl = line.match(/^toolLoop\.(maxToolCallsWarnAt|maxIdenticalToolCallsWarnAt):\s*(.+)$/);
+    if (tl) {
+      toolLoopKv[tl[1]] = tl[2].trim().replace(/^["']|["']$/g, '');
+      continue;
+    }
+    // kanban.<field>: <value>  (board WIP caps; distinct from kanbanPoll)
+    const kb = line.match(/^kanban\.(maxInProgress|maxInProgressPerProfile):\s*(.+)$/);
+    if (kb) {
+      kanbanKv[kb[1]] = kb[2].trim().replace(/^["']|["']$/g, '');
+      continue;
+    }
     // kanbanPoll.<field>: <value>
     const kp = line.match(/^kanbanPoll\.(\w+):\s*(.+)$/);
     if (kp) {
@@ -3674,6 +3928,46 @@ function parseConfigYaml(src: string): EthosConfig {
     const plh = line.match(/^pauseLifecycle\.http\.(enabled|url|token|timeoutMs):\s*(.+)$/);
     if (plh) {
       pauseLifecycleHttpKv[plh[1]] = plh[2].trim().replace(/^["']|["']$/g, '');
+      continue;
+    }
+    // memory.charLimits.<memory|user>: <chars>  (markdown per-key ceilings).
+    const mcl = line.match(/^memory\.charLimits\.(memory|user):\s*(.+)$/);
+    if (mcl) {
+      memoryCharLimitsKv[mcl[1]] = mcl[2].trim().replace(/^["']|["']$/g, '');
+      continue;
+    }
+    // execution.docker.<cpu|diskMb>: <value>  (container resource caps).
+    const exd = line.match(/^execution\.docker\.(cpu|diskMb):\s*(.+)$/);
+    if (exd) {
+      executionDockerKv[exd[1]] = exd[2].trim().replace(/^["']|["']$/g, '');
+      continue;
+    }
+    // browser.<navigationTimeoutMs|commandTimeoutMs>: <ms>  (Playwright budgets).
+    const brw = line.match(/^browser\.(navigationTimeoutMs|commandTimeoutMs):\s*(.+)$/);
+    if (brw) {
+      browserKv[brw[1]] = brw[2].trim().replace(/^["']|["']$/g, '');
+      continue;
+    }
+    // gateway.<field>: <value>  (gateway-wide, non-credential knobs).
+    const gwy = line.match(/^gateway\.(maxInboundMediaBytes):\s*(.+)$/);
+    if (gwy) {
+      gatewayKv[gwy[1]] = gwy[2].trim().replace(/^["']|["']$/g, '');
+      continue;
+    }
+    // teamSupervisor.restartLoopGuard.<field>: <n>  (member auto-restart brake).
+    const trg = line.match(
+      /^teamSupervisor\.restartLoopGuard\.(maxRestarts|windowSeconds):\s*(.+)$/,
+    );
+    if (trg) {
+      restartLoopGuardKv[trg[1]] = trg[2].trim().replace(/^["']|["']$/g, '');
+      continue;
+    }
+    // discord.missedMessageBackfill.<field>: <value>  (channel-history backfill).
+    const dbf = line.match(
+      /^discord\.missedMessageBackfill\.(enabled|windowSeconds|limit):\s*(.+)$/,
+    );
+    if (dbf) {
+      discordBackfillKv[dbf[1]] = dbf[2].trim().replace(/^["']|["']$/g, '');
       continue;
     }
     // memoryCapture.<field>: <value>
@@ -3816,6 +4110,10 @@ function parseConfigYaml(src: string): EthosConfig {
       : undefined;
   const models = buildModelProfiles(modelsKv);
   const compaction = buildCompaction(compactionKv);
+  const memoryCharLimits = buildMemoryCharLimits(memoryCharLimitsKv);
+  const execution = buildExecutionConfig(executionDockerKv);
+  const restartLoopGuard = buildRestartLoopGuard(restartLoopGuardKv);
+  const discordBackfill = buildDiscordBackfill(discordBackfillKv);
   const callCapture = callCaptureKv.personalityId
     ? { personalityId: callCaptureKv.personalityId }
     : undefined;
@@ -3854,6 +4152,10 @@ function parseConfigYaml(src: string): EthosConfig {
             : {}),
         }
       : undefined;
+  // An unrecognised level is dropped rather than defaulted, so a typo never
+  // silences output that was printing before.
+  const rawLogLevel = kv['logs.level'];
+  const logsLevel = LOG_LEVELS.find((l) => l === rawLogLevel);
   const awsSecrets: AwsSecretsConfig | undefined =
     Object.keys(awsSecretsKv).length > 0
       ? {
@@ -4080,6 +4382,8 @@ function parseConfigYaml(src: string): EthosConfig {
     toolSettings: Object.keys(toolSettings).length > 0 ? toolSettings : undefined,
     models,
     compaction,
+    memoryCharLimits,
+    execution,
     callCapture,
     activeContext,
     providers: providers.length > 0 ? providers : undefined,
@@ -4147,7 +4451,13 @@ function parseConfigYaml(src: string): EthosConfig {
     web: webConfig,
     webhooks: webhooksResult.webhooks,
     modelCatalog,
-    logs: logsRotation ? { rotation: logsRotation } : undefined,
+    logs:
+      logsRotation || logsLevel
+        ? {
+            ...(logsRotation ? { rotation: logsRotation } : {}),
+            ...(logsLevel ? { level: logsLevel } : {}),
+          }
+        : undefined,
     aws: awsConfig,
     telemetry: telemetryConfig,
     webBaseUrl: process.env.ETHOS_PUBLIC_URL ?? kv.webBaseUrl ?? undefined,
@@ -4205,6 +4515,12 @@ function parseConfigYaml(src: string): EthosConfig {
               : {}),
           }
         : undefined,
+    toolLoop: buildToolLoop(toolLoopKv),
+    kanban: buildKanban(kanbanKv),
+    browser: buildBrowser(browserKv),
+    gateway: buildGateway(gatewayKv),
+    teamSupervisor: restartLoopGuard ? { restartLoopGuard } : undefined,
+    discord: discordBackfill ? { missedMessageBackfill: discordBackfill } : undefined,
     kanbanPoll:
       kv['kanbanPoll.enabled'] !== undefined ||
       kv['kanbanPoll.intervalMs'] !== undefined ||
@@ -4688,7 +5004,51 @@ function buildRetentionConfig(kv: Record<string, string>): RetentionConfig | und
   if (kv['events.channel']) ev.channel = kv['events.channel'];
   if (kv['events.install']) ev.install = kv['events.install'];
   if (Object.keys(ev).length > 0) cfg.events = ev;
+  // Item 6 — post-prune VACUUM. `vacuumAfterPrune` is a strict boolean; a typo
+  // leaves it undefined (opt-in stays off). `minVacuumIntervalDays` is a
+  // non-negative integer number of days; anything else is dropped.
+  if (kv.vacuumAfterPrune === 'true') cfg.vacuumAfterPrune = true;
+  else if (kv.vacuumAfterPrune === 'false') cfg.vacuumAfterPrune = false;
+  const minInterval = Number(kv.minVacuumIntervalDays);
+  if (kv.minVacuumIntervalDays !== undefined && Number.isFinite(minInterval) && minInterval >= 0) {
+    cfg.minVacuumIntervalDays = Math.floor(minInterval);
+  }
   return cfg;
+}
+
+/**
+ * Item 8 — per-key character ceilings for the markdown memory backend. Both
+ * fields are positive integers; a non-numeric or non-positive value is dropped
+ * so the provider keeps its 512K default. Returns `undefined` when nothing
+ * survives, so an absent block never materialises an empty object.
+ */
+function buildMemoryCharLimits(
+  kv: Record<string, string>,
+): EthosConfig['memoryCharLimits'] | undefined {
+  const result: NonNullable<EthosConfig['memoryCharLimits']> = {};
+  for (const key of ['memory', 'user'] as const) {
+    const raw = kv[key];
+    if (raw === undefined) continue;
+    const n = Number(raw);
+    if (Number.isFinite(n) && n > 0) result[key] = Math.floor(n);
+  }
+  return Object.keys(result).length > 0 ? result : undefined;
+}
+
+/**
+ * Item 9 — docker execution-backend resource caps. `cpu` is a positive
+ * (possibly fractional) core count, `diskMb` a positive integer; out-of-range
+ * values are dropped so the backend keeps its `--cpus 2` / no-quota defaults.
+ */
+function buildExecutionConfig(kv: Record<string, string>): EthosConfig['execution'] | undefined {
+  const docker: NonNullable<NonNullable<EthosConfig['execution']>['docker']> = {};
+  const cpu = Number(kv.cpu);
+  if (kv.cpu !== undefined && Number.isFinite(cpu) && cpu > 0) docker.cpu = cpu;
+  const diskMb = Number(kv.diskMb);
+  if (kv.diskMb !== undefined && Number.isFinite(diskMb) && diskMb > 0) {
+    docker.diskMb = Math.floor(diskMb);
+  }
+  return Object.keys(docker).length > 0 ? { docker } : undefined;
 }
 
 /**
@@ -4784,6 +5144,12 @@ function buildCronConfig(kv: Record<string, string>): CronTopLevelConfig | undef
   const cfg: CronTopLevelConfig = {};
   if (Object.keys(trigger).length > 0) cfg.trigger = trigger;
   if (Object.keys(arming).length > 0) cfg.arming = arming;
+  // Positive integer only — `0` would mean "never fire anything", which is a
+  // typo rather than a setting, so it is dropped along with negatives.
+  const maxParallel = Number(kv.maxParallelJobs);
+  if (kv.maxParallelJobs !== undefined && Number.isFinite(maxParallel) && maxParallel > 0) {
+    cfg.maxParallelJobs = Math.floor(maxParallel);
+  }
   if (Object.keys(cfg).length === 0) return undefined;
   return cfg;
 }
@@ -5638,6 +6004,10 @@ function buildCompaction(kv: Record<string, string>): EthosConfig['compaction'] 
   else if (kv.autoCompact === 'false') result.autoCompact = false;
   if (kv.retryOnOverflow === 'true') result.retryOnOverflow = true;
   else if (kv.retryOnOverflow === 'false') result.retryOnOverflow = false;
+  // Item 7 — surface a failed emergency summary as its own error instead of
+  // masking it as the generic overflow rejection. Default off.
+  if (kv.abortOnSummaryFailure === 'true') result.abortOnSummaryFailure = true;
+  else if (kv.abortOnSummaryFailure === 'false') result.abortOnSummaryFailure = false;
   // Phase 4 — small-window-mode override (auto | on | off).
   if (kv.smallWindow === 'auto' || kv.smallWindow === 'on' || kv.smallWindow === 'off') {
     result.smallWindow = kv.smallWindow;
@@ -5653,6 +6023,123 @@ function buildCompaction(kv: Record<string, string>): EthosConfig['compaction'] 
   if (rawTail !== undefined) {
     const t = Number(rawTail);
     if (Number.isFinite(t) && t >= 0) result.minTailUserMessages = Math.floor(t);
+  }
+  return Object.keys(result).length > 0 ? result : undefined;
+}
+
+/**
+ * Tool-loop soft-warn tiers from the flat `toolLoop.<field>` keys. Positive
+ * integers — `0` would nudge on every turn before a single tool ran, which is a
+ * typo, not a setting. Returns `undefined` when nothing survives, leaving the
+ * loop with no warn tier at all.
+ */
+function buildToolLoop(kv: Record<string, string>): EthosConfig['toolLoop'] | undefined {
+  const result: NonNullable<EthosConfig['toolLoop']> = {};
+  for (const key of ['maxToolCallsWarnAt', 'maxIdenticalToolCallsWarnAt'] as const) {
+    const raw = kv[key];
+    if (raw === undefined) continue;
+    const n = Number(raw);
+    if (Number.isFinite(n) && n > 0) result[key] = Math.floor(n);
+  }
+  return Object.keys(result).length > 0 ? result : undefined;
+}
+
+/**
+ * Playwright timeouts from the flat `browser.<field>` keys. Bounded to
+ * 1s–10min: below a second no page load completes, and past ten minutes the
+ * tool's own result budget has long since become the real limit. Out-of-range
+ * values are dropped, leaving the call sites on their built-in defaults.
+ */
+function buildBrowser(kv: Record<string, string>): EthosConfig['browser'] | undefined {
+  const result: NonNullable<EthosConfig['browser']> = {};
+  for (const key of ['navigationTimeoutMs', 'commandTimeoutMs'] as const) {
+    const raw = kv[key];
+    if (raw === undefined) continue;
+    const n = parseBoundedInt(raw, 1_000, 600_000);
+    if (n !== undefined) result[key] = n;
+  }
+  return Object.keys(result).length > 0 ? result : undefined;
+}
+
+/**
+ * Gateway-wide knobs from the flat `gateway.<field>` keys.
+ * `maxInboundMediaBytes` is bounded to 1 KiB–128 MiB: smaller than a kilobyte
+ * rejects every real attachment, and every adapter buffers the whole download
+ * in memory (`arrayBuffer()`), so the ceiling is what a Node heap can hold from
+ * an untrusted sender — 128 MiB is over 5x the largest per-adapter default
+ * (25 MB) and above every platform's own attachment limit. Out-of-range values
+ * are dropped, leaving each adapter on its own platform default.
+ */
+function buildGateway(kv: Record<string, string>): EthosConfig['gateway'] | undefined {
+  const raw = kv.maxInboundMediaBytes;
+  if (raw === undefined) return undefined;
+  const n = parseBoundedInt(raw, 1024, 134_217_728);
+  return n === undefined ? undefined : { maxInboundMediaBytes: n };
+}
+
+/**
+ * Member auto-restart brake from the flat
+ * `teamSupervisor.restartLoopGuard.<field>` keys. Both are positive integers —
+ * `0` restarts would mean `auto_restart: true` never restarts anything, which
+ * is what `auto_restart: false` already says. Returns `undefined` when nothing
+ * survives, leaving the supervisor on its 5-restarts-in-60s defaults.
+ */
+function buildRestartLoopGuard(
+  kv: Record<string, string>,
+): NonNullable<EthosConfig['teamSupervisor']>['restartLoopGuard'] | undefined {
+  const result: NonNullable<NonNullable<EthosConfig['teamSupervisor']>['restartLoopGuard']> = {};
+  const maxRestarts = kv.maxRestarts;
+  if (maxRestarts !== undefined) {
+    const n = parseBoundedInt(maxRestarts, 1, 1000);
+    if (n !== undefined) result.maxRestarts = n;
+  }
+  const windowSeconds = kv.windowSeconds;
+  if (windowSeconds !== undefined) {
+    const n = parseBoundedInt(windowSeconds, 1, 86_400);
+    if (n !== undefined) result.windowSeconds = n;
+  }
+  return Object.keys(result).length > 0 ? result : undefined;
+}
+
+/**
+ * Discord channel-history backfill from the flat
+ * `discord.missedMessageBackfill.<field>` keys. `limit` stops at 100 because
+ * that is Discord's own `messages.fetch` ceiling — asking for more is an error
+ * at the API, not a bigger read. Returns `undefined` when nothing survives, so
+ * the adapter keeps today's unbounded-window, 50-message behaviour.
+ */
+function buildDiscordBackfill(
+  kv: Record<string, string>,
+): NonNullable<EthosConfig['discord']>['missedMessageBackfill'] | undefined {
+  const result: NonNullable<NonNullable<EthosConfig['discord']>['missedMessageBackfill']> = {};
+  if (kv.enabled === 'true') result.enabled = true;
+  else if (kv.enabled === 'false') result.enabled = false;
+  const windowSeconds = kv.windowSeconds;
+  if (windowSeconds !== undefined) {
+    const n = parseBoundedInt(windowSeconds, 1, 604_800);
+    if (n !== undefined) result.windowSeconds = n;
+  }
+  const limit = kv.limit;
+  if (limit !== undefined) {
+    const n = parseBoundedInt(limit, 1, 100);
+    if (n !== undefined) result.limit = n;
+  }
+  return Object.keys(result).length > 0 ? result : undefined;
+}
+
+/**
+ * Board WIP caps from the flat `kanban.<field>` keys. Both are positive
+ * integers — `0` would mean "no task may ever run", which is a typo, not a
+ * setting, so it is dropped along with negatives and non-numerics. Returns
+ * `undefined` when nothing survives, leaving the board uncapped.
+ */
+function buildKanban(kv: Record<string, string>): EthosConfig['kanban'] | undefined {
+  const result: NonNullable<EthosConfig['kanban']> = {};
+  for (const key of ['maxInProgress', 'maxInProgressPerProfile'] as const) {
+    const raw = kv[key];
+    if (raw === undefined) continue;
+    const n = Number(raw);
+    if (Number.isFinite(n) && n > 0) result[key] = Math.floor(n);
   }
   return Object.keys(result).length > 0 ? result : undefined;
 }
@@ -5816,6 +6303,12 @@ function retentionToLines(cfg: RetentionConfig): Array<[string, string]> {
     if (cfg.events.audit) lines.push(['events.audit', cfg.events.audit]);
     if (cfg.events.channel) lines.push(['events.channel', cfg.events.channel]);
     if (cfg.events.install) lines.push(['events.install', cfg.events.install]);
+  }
+  if (cfg.vacuumAfterPrune !== undefined) {
+    lines.push(['vacuumAfterPrune', String(cfg.vacuumAfterPrune)]);
+  }
+  if (cfg.minVacuumIntervalDays !== undefined) {
+    lines.push(['minVacuumIntervalDays', String(cfg.minVacuumIntervalDays)]);
   }
   return lines;
 }

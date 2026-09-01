@@ -454,6 +454,8 @@ export async function runGatewayStart(opts: GatewayStartOptions = {}): Promise<v
     console.log(`${c.yellow}⚠ deprecation${c.reset} ${c.dim}${note}${c.reset}`);
   }
   const config = loaded.config;
+  // `logs.level` — the lowest severity every ConsoleLogger built here prints.
+  const logLevel = config.logs?.level;
 
   const identityMap = new IdentityMap({ storage, dataDir: ethosDir() });
   const resolveUserId = (platform: string, platformUserId: string, displayLabel?: string) =>
@@ -535,7 +537,7 @@ export async function runGatewayStart(opts: GatewayStartOptions = {}): Promise<v
   };
   const watcherManager = new WatcherManager({
     storage: getStorage(),
-    logger: new ConsoleLogger(),
+    logger: new ConsoleLogger({}, logLevel),
     deliver: async (target, text) => {
       if (watcherDeliverFn) await watcherDeliverFn(target, text);
     },
@@ -543,13 +545,16 @@ export async function runGatewayStart(opts: GatewayStartOptions = {}): Promise<v
   });
   const scheduler = new CronScheduler({
     storage: getStorage(),
-    logger: new ConsoleLogger(),
+    logger: new ConsoleLogger({}, logLevel),
+    ...(config.cron?.maxParallelJobs !== undefined
+      ? { maxParallelJobs: config.cron.maxParallelJobs }
+      : {}),
     // Script/precheck jobs execute through the same local backend class the
     // execution tools use — never raw child_process in the scheduler.
     executionBackend: new LocalExecutionBackend({
       config: {},
       secrets,
-      logger: new ConsoleLogger(),
+      logger: new ConsoleLogger({}, logLevel),
     }),
     systemTasks: { ...buildSystemTaskHandlers(config), ...watcherManager.systemTasks() },
     onDecision: (job, d) => {
@@ -1223,7 +1228,7 @@ export async function runGatewayStart(opts: GatewayStartOptions = {}): Promise<v
       }
     })
     .catch((err) => {
-      new ConsoleLogger().warn(`delivery ledger boot sweep failed: ${String(err)}`);
+      new ConsoleLogger({}, logLevel).warn(`delivery ledger boot sweep failed: ${String(err)}`);
     });
 
   // Restore-and-deliver (item 10). A background job that finished while this
@@ -1240,14 +1245,18 @@ export async function runGatewayStart(opts: GatewayStartOptions = {}): Promise<v
       }
     })
     .catch((err) => {
-      new ConsoleLogger().warn(`background completion boot sweep failed: ${String(err)}`);
+      new ConsoleLogger({}, logLevel).warn(
+        `background completion boot sweep failed: ${String(err)}`,
+      );
     });
 
   // Retention GC — delivered rows carry message bodies, so they are not kept
   // forever. Prune once at boot, then hourly. Pending rows are never pruned.
   const pruneDeliveryLedger = () => {
     void deliveryLedger.pruneDelivered(Date.now() - DELIVERY_LEDGER_RETENTION_MS).catch((err) => {
-      new ConsoleLogger().warn(`delivery ledger retention prune failed: ${String(err)}`);
+      new ConsoleLogger({}, logLevel).warn(
+        `delivery ledger retention prune failed: ${String(err)}`,
+      );
     });
   };
   // Voice artifacts ride the same schedule: abandon obligations nothing ever
@@ -1260,7 +1269,9 @@ export async function runGatewayStart(opts: GatewayStartOptions = {}): Promise<v
         maxTotalMb: config.voice?.artifacts?.maxTotalMb ?? 512,
       })
       .catch((err) => {
-        new ConsoleLogger().warn(`voice artifact retention prune failed: ${String(err)}`);
+        new ConsoleLogger({}, logLevel).warn(
+          `voice artifact retention prune failed: ${String(err)}`,
+        );
       });
   };
   // Ended call rows carry whole transcripts, so they age out too. `ringing` and
@@ -1268,7 +1279,7 @@ export async function runGatewayStart(opts: GatewayStartOptions = {}): Promise<v
   // row stuck past the cutoff is a lost hang-up worth seeing, not a row to drop.
   const pruneCallLog = () => {
     void callLog?.pruneEnded(Date.now() - CALL_LOG_RETENTION_MS).catch((err) => {
-      new ConsoleLogger().warn(`call log retention prune failed: ${String(err)}`);
+      new ConsoleLogger({}, logLevel).warn(`call log retention prune failed: ${String(err)}`);
     });
   };
   pruneDeliveryLedger();
@@ -1378,7 +1389,7 @@ export async function runGatewayStart(opts: GatewayStartOptions = {}): Promise<v
   const webhookPrefilterBackend = new LocalExecutionBackend({
     config: {},
     secrets,
-    logger: new ConsoleLogger(),
+    logger: new ConsoleLogger({}, logLevel),
   });
   const runWebhookPrefilter: PrefilterRunner = (file, opts) =>
     runScriptFile(
@@ -1404,7 +1415,7 @@ export async function runGatewayStart(opts: GatewayStartOptions = {}): Promise<v
   if (webhookServer && config.webhooks) {
     const isLoopbackHost = ['127.0.0.1', 'localhost', '::1'].includes(webhookHost);
     if (!isLoopbackHost) {
-      new ConsoleLogger().warn(
+      new ConsoleLogger({}, logLevel).warn(
         `webhook bound to non-loopback host ${webhookHost} over plaintext HTTP — ` +
           'the bearer secret is transmitted in cleartext. Put a TLS-terminating ' +
           'proxy in front, or bind to loopback (ETHOS_SERVE_HOST=127.0.0.1).',
@@ -1479,7 +1490,7 @@ export async function runGatewayStart(opts: GatewayStartOptions = {}): Promise<v
               text,
             )
           : false,
-      onError: (message) => new ConsoleLogger().warn(`sip: ${message}`),
+      onError: (message) => new ConsoleLogger({}, logLevel).warn(`sip: ${message}`),
     });
     sipWebhookServer = createSipWebhookServer({
       port: sipWebhookPort,
@@ -1512,7 +1523,7 @@ export async function runGatewayStart(opts: GatewayStartOptions = {}): Promise<v
   // bot in webhook mode and no app in HTTP mode, no port is bound at all. That is
   // what keeps this additive for every deployment that has not asked for it.
   const platformWebhookMounts = buildPlatformWebhookMounts(config, adapters, (message) =>
-    new ConsoleLogger().warn(message),
+    new ConsoleLogger({}, logLevel).warn(message),
   );
   // 3002 gateway health, 3003 gateway webhook, 3004 `ethos run-all` health, 3005
   // SIP — see the SIP block above for why 3004 is not free. 3006 is next.
@@ -1561,7 +1572,7 @@ export async function runGatewayStart(opts: GatewayStartOptions = {}): Promise<v
     config.callCapture?.personalityId &&
     runCallCaptureFromLoop
   ) {
-    const callCaptureLogger = new ConsoleLogger();
+    const callCaptureLogger = new ConsoleLogger({}, logLevel);
     // Round-3 Issue 1 — `ethos serve` and `ethos gateway` can both be
     // configured with `callCapture.personalityId` at once (e.g. one under a
     // LaunchAgent, the other under `ethos run-all`, which starts both by
@@ -1706,7 +1717,7 @@ export async function runGatewayStart(opts: GatewayStartOptions = {}): Promise<v
         ...(hasHeartbeatBump(correctableJobStore) ? { jobStore: correctableJobStore } : {}),
       },
       pauseDurationMs,
-      new ConsoleLogger(),
+      new ConsoleLogger({}, logLevel),
     );
   });
 
@@ -1791,7 +1802,7 @@ export async function runGatewayStart(opts: GatewayStartOptions = {}): Promise<v
       hostSignalAvailable: pauseLifecycle.hostSignalAvailable ?? false,
       capabilities: deriveIdleWatcherCapabilities(config),
       options: config.idleWatcher,
-      logger: new ConsoleLogger(),
+      logger: new ConsoleLogger({}, logLevel),
     });
     // Fire-and-forget: `start()` evaluates the arming gates itself and is a
     // no-op (with a logged reason) when any of them refuses.
@@ -3070,6 +3081,12 @@ export async function buildAdapters(
             ...(botCfg.webhookUrl ? { webhookUrl: botCfg.webhookUrl } : {}),
             ...(botCfg.webhookSecretToken ? { webhookSecretToken: botCfg.webhookSecretToken } : {}),
             ...(identity ? { identity } : {}),
+            // Operator override for the inbound-attachment ceiling. Absent
+            // leaves each adapter on its own platform default — the platforms
+            // themselves disagree about what is deliverable.
+            ...(config.gateway?.maxInboundMediaBytes !== undefined
+              ? { maxInboundMediaBytes: config.gateway.maxInboundMediaBytes }
+              : {}),
           }),
         );
       }
@@ -3162,6 +3179,9 @@ export async function buildAdapters(
             // requirements (`appToken` for socket, `signingSecret` for http).
             ...(appCfg.mode ? { mode: appCfg.mode } : {}),
             ...(appCfg.webhookPath ? { webhookPath: appCfg.webhookPath } : {}),
+            ...(config.gateway?.maxInboundMediaBytes !== undefined
+              ? { maxInboundMediaBytes: config.gateway.maxInboundMediaBytes }
+              : {}),
           }),
         );
       }
@@ -3183,6 +3203,12 @@ export async function buildAdapters(
           observability: {
             recordSafetyBlock: (opts) => getEthosObservability().recordSafetyBlock(opts),
           },
+          ...(config.gateway?.maxInboundMediaBytes !== undefined
+            ? { maxInboundMediaBytes: config.gateway.maxInboundMediaBytes }
+            : {}),
+          ...(config.discord?.missedMessageBackfill
+            ? { missedMessageBackfill: config.discord.missedMessageBackfill }
+            : {}),
         }),
       );
     }
@@ -3258,6 +3284,9 @@ export async function buildAdapters(
             onPairingCode: onPairingCb
               ? (code) => onPairingCb(waCfg.id ?? 'default', code)
               : undefined,
+            ...(config.gateway?.maxInboundMediaBytes !== undefined
+              ? { maxInboundMediaBytes: config.gateway.maxInboundMediaBytes }
+              : {}),
           }),
         );
       }
@@ -3531,6 +3560,7 @@ export function buildGatewayVoiceOutputs(
   channelVoiceOut: ReturnType<typeof deriveChannelVoiceOut>;
   voiceBitrateKbps: number | undefined;
 } {
+  const logLevel = config.logs?.level;
   // The store carries the deployment default, so `defaultVoiceMode` is not also
   // passed: an injected store's own default is the one the Gateway reads.
   const voiceModeStore = new LaneVoiceModeStore({
@@ -3538,7 +3568,7 @@ export function buildGatewayVoiceOutputs(
     path: laneVoiceModePath(ethosDir()),
     ...(config.voice?.defaultMode ? { defaultMode: config.voice.defaultMode } : {}),
     onError: (err) => {
-      new ConsoleLogger().warn(`voice lane-mode persist failed: ${err}`);
+      new ConsoleLogger({}, logLevel).warn(`voice lane-mode persist failed: ${err}`);
     },
   });
   // ffmpeg stage. Optional at runtime: an unavailable binary degrades to
@@ -3556,7 +3586,7 @@ export function buildGatewayVoiceOutputs(
     storage,
     dir: join(ethosDir(), 'voice', 'artifacts'),
     onError: (op, err) => {
-      new ConsoleLogger().warn(`voice artifact ${op} failed: ${err}`);
+      new ConsoleLogger({}, logLevel).warn(`voice artifact ${op} failed: ${err}`);
     },
   });
   return {

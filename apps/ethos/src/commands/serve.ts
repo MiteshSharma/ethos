@@ -382,7 +382,10 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
   // (which reads a web-origin session's bound personality before reusing its
   // key). Declared here so that closure has an in-scope binding, not a forward
   // reference to a later `const`.
-  const session = createSessionStore({ dataDir: dir });
+  const session = createSessionStore({
+    dataDir: dir,
+    ...(config.retention ? { retention: config.retention } : {}),
+  });
 
   // Phase E of plan/phases/model-visible-logged.md — fork copies context events
   // onto the child (D9). Same `sessions.db` file `session` uses, separate
@@ -416,7 +419,9 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
   // `CallCaptureWakeEvent` is structurally identical to `WatcherWakeEvent`
   // (plan/phases/call-capture-extension.md decision 4), so one closure serves
   // both without a second copy of this logic.
-  const watcherLogger = new ConsoleLogger();
+  // `logs.level` — the lowest severity every ConsoleLogger built here prints.
+  const logLevel = config.logs?.level;
+  const watcherLogger = new ConsoleLogger({}, logLevel);
   const watcherWake = async (event: WatcherWakeEvent): Promise<void> => {
     if (!loop) return;
     const wrapped = wrapUntrusted({
@@ -448,13 +453,16 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
   });
   cronScheduler = new CronScheduler({
     storage: getStorage(),
-    logger: new ConsoleLogger(),
+    logger: new ConsoleLogger({}, logLevel),
+    ...(config.cron?.maxParallelJobs !== undefined
+      ? { maxParallelJobs: config.cron.maxParallelJobs }
+      : {}),
     // Script/precheck jobs execute through the same local backend class the
     // execution tools use — never raw child_process in the scheduler.
     executionBackend: new LocalExecutionBackend({
       config: {},
       secrets: await getSecretsResolver(),
-      logger: new ConsoleLogger(),
+      logger: new ConsoleLogger({}, logLevel),
     }),
     systemTasks: { ...buildSystemTaskHandlers(config), ...watcherManager.systemTasks() },
     onDecision: (job, d) => {
@@ -1138,7 +1146,7 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
           : {}),
       },
       pauseDurationMs,
-      new ConsoleLogger(),
+      new ConsoleLogger({}, logLevel),
     );
   });
 
@@ -1202,7 +1210,7 @@ export async function runServe(args: string[], config: EthosConfig | null): Prom
       hostSignalAvailable: pauseLifecycle.hostSignalAvailable ?? false,
       capabilities: deriveIdleWatcherCapabilities(config),
       options: config.idleWatcher,
-      logger: new ConsoleLogger(),
+      logger: new ConsoleLogger({}, logLevel),
       // NO pre-suspend `mesh.unregister(agentId)` here. It is DESIRABLE —
       // peers keep routing into a suspended VM until the registry's 30s
       // `STALE_MS` prunes it — but it is not safe yet, because nothing

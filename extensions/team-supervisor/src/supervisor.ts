@@ -24,9 +24,63 @@ import { pidFilePath, teamLogDir, teamsDir, writeRuntime } from './runtime';
 
 const BACKOFF_BASE_MS = 1000;
 const BACKOFF_CAP_MS = 30_000;
-const MAX_FAILURES_PER_MINUTE = 5;
-const FAILURE_WINDOW_MS = 60_000;
+const DEFAULT_MAX_RESTARTS = 5;
+const DEFAULT_RESTART_WINDOW_SECONDS = 60;
 const SHUTDOWN_GRACE_MS = 5_000;
+
+/**
+ * Rolling-window brake on `member.auto_restart`. `maxRestarts` counts
+ * RESPAWNS, not crashes: a member is restarted up to `maxRestarts` times
+ * inside `windowSeconds`, and the crash after that leaves it marked failed.
+ * Older crashes age out of the window, so a member that recovers earns its
+ * restarts back.
+ *
+ * Both fields are optional. Unset means 5 respawns in 60 seconds — one MORE
+ * respawn than the guard this supervisor hardcoded before it was
+ * configurable, which gave up ON the fifth crash and so performed four
+ * restarts. Counting respawns is what the field name, the config contract and
+ * the settings UI all say, so five it is.
+ */
+export interface RestartLoopGuardConfig {
+  maxRestarts?: number;
+  windowSeconds?: number;
+}
+
+/** Resolved form of {@link RestartLoopGuardConfig}, in the units the loop uses. */
+export interface RestartLimits {
+  maxRestarts: number;
+  windowMs: number;
+}
+
+export function resolveRestartLimits(guard?: RestartLoopGuardConfig): RestartLimits {
+  return {
+    maxRestarts: guard?.maxRestarts ?? DEFAULT_MAX_RESTARTS,
+    windowMs: (guard?.windowSeconds ?? DEFAULT_RESTART_WINDOW_SECONDS) * 1000,
+  };
+}
+
+/**
+ * Record a crash at `now` and decide whether the member may be respawned.
+ * Returns the pruned failure list so the caller stores exactly what the
+ * decision was made on — the window is a rolling one, not a lifetime counter.
+ *
+ * The comparison is `<=` because this crash's own respawn is the one being
+ * decided: the Nth crash inside the window earns the Nth restart, and only the
+ * crash after that is refused. `maxRestarts` restarts therefore happen, which
+ * is what the field is named.
+ *
+ * Exported so the guard can be tested without `runSupervisor`, which spawns
+ * child processes, acquires a PID file, and blocks forever.
+ */
+export function evaluateRestartGuard(
+  recentFailures: number[],
+  now: number,
+  limits: RestartLimits,
+): { allowed: boolean; failures: number[] } {
+  const failures = recentFailures.filter((t) => now - t < limits.windowMs);
+  failures.push(now);
+  return { allowed: failures.length <= limits.maxRestarts, failures };
+}
 
 export function buildMemberLaunchArgs(
   entryPoint: string,
@@ -120,9 +174,15 @@ export function registerDispatcherHookLogging(
 export async function runSupervisor(
   manifest: TeamManifest,
   manifestPath: string,
-  opts: { logger?: Logger; storage: Storage; secrets?: SecretsResolver },
+  opts: {
+    logger?: Logger;
+    storage: Storage;
+    secrets?: SecretsResolver;
+    restartLoopGuard?: RestartLoopGuardConfig;
+  },
 ): Promise<void> {
   const log0 = opts.logger ?? noopLogger;
+  const restartLimits = resolveRestartLimits(opts.restartLoopGuard);
   const name = manifest.name;
   if (!isSafePathSegment(name)) {
     throw new Error(
@@ -321,26 +381,26 @@ export async function runSupervisor(
         return;
       }
 
-      // Rate-limit: prune failures outside the window, then add this one.
-      const now = Date.now();
-      m.recentFailures = m.recentFailures.filter((t) => now - t < FAILURE_WINDOW_MS);
-      m.recentFailures.push(now);
+      // Restart-loop guard: prune failures outside the rolling window, add
+      // this one, and refuse the respawn once the window is full.
+      const guard = evaluateRestartGuard(m.recentFailures, Date.now(), restartLimits);
+      m.recentFailures = guard.failures;
       m.failureCount++;
 
-      if (m.recentFailures.length >= MAX_FAILURES_PER_MINUTE) {
+      if (!guard.allowed) {
         m.status = 'failed';
         log(personality, 'give_up', {
           failureCount: m.failureCount,
-          windowMs: FAILURE_WINDOW_MS,
+          windowMs: restartLimits.windowMs,
         });
         log0.error(
-          `[team-supervisor] ${personality}: giving up — ${MAX_FAILURES_PER_MINUTE} failures in ${FAILURE_WINDOW_MS / 1000}s`,
+          `[team-supervisor] ${personality}: giving up — used all ${restartLimits.maxRestarts} restarts in ${restartLimits.windowMs / 1000}s`,
           {
             component: 'team-supervisor',
             team: name,
             personality,
             failureCount: m.failureCount,
-            windowMs: FAILURE_WINDOW_MS,
+            windowMs: restartLimits.windowMs,
           },
         );
         persist();

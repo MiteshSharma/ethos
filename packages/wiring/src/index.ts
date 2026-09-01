@@ -29,6 +29,7 @@ import type {
   MemoryContext,
   MemoryProvider,
   ModelProfile,
+  RetentionConfig,
   SecretsResolver,
   SessionStore,
   Storage,
@@ -108,6 +109,32 @@ export interface WiringConfig {
     prefetch?: string[];
     exclude?: string[];
   };
+  /**
+   * Per-key content ceilings for the markdown backend, in characters (mapped
+   * from `EthosConfig.memoryCharLimits`). Absent → 512K per key.
+   */
+  memoryCharLimits?: { memory?: number; user?: number };
+  /**
+   * Execution-backend resource caps (mapped from `EthosConfig.execution`).
+   * Forwarded to `ExecutionBackendConfig` when the docker backend is resolved.
+   */
+  execution?: { docker?: { cpu?: number; diskMb?: number } };
+  /**
+   * Board work-in-progress caps (mapped from `EthosConfig.kanban`). Forwarded
+   * to `KanbanStore`, which refuses a claim past the cap. Absent = uncapped.
+   */
+  kanban?: { maxInProgress?: number; maxInProgressPerProfile?: number };
+  /**
+   * Tool-loop soft-warn tiers (mapped from `EthosConfig.toolLoop`). Forwarded
+   * to `AgentLoopConfig.options`; absent = no warn tier.
+   */
+  toolLoop?: { maxToolCallsWarnAt?: number; maxIdenticalToolCallsWarnAt?: number };
+  /**
+   * Playwright timeout budgets for the browser toolset (mapped from
+   * `EthosConfig.browser`). Forwarded to `createBrowserTools`; absent = the
+   * 30s navigation / 10s command literals those call sites shipped with.
+   */
+  browser?: { navigationTimeoutMs?: number; commandTimeoutMs?: number };
   baseUrl?: string;
   /** Azure-only: REST API version (e.g. `2024-10-21`). Required when
    *  `provider === 'azure'`; ignored otherwise. */
@@ -162,7 +189,7 @@ export interface WiringConfig {
    * number of user messages every compaction keeps verbatim (default 3).
    */
   // biome-ignore format: Phase 3 adds turn-end auto-compact + overflow-retry flags; Phase 4 adds smallWindow; Item 7 adds the ceiling + user tail.
-  compaction?: { pressure?: number; target?: number; gateDelta?: number; autoCompact?: boolean; retryOnOverflow?: boolean; smallWindow?: 'auto' | 'on' | 'off'; maxContextTokens?: number; minTailUserMessages?: number };
+  compaction?: { pressure?: number; target?: number; gateDelta?: number; autoCompact?: boolean; retryOnOverflow?: boolean; abortOnSummaryFailure?: boolean; smallWindow?: 'auto' | 'on' | 'off'; maxContextTokens?: number; minTailUserMessages?: number };
   /**
    * Call-capture personality binding (plan/phases/call-capture-extension.md
    * decision 3) — see `EthosConfig.callCapture` in `@ethosagent/config` and
@@ -1261,10 +1288,23 @@ export async function createAgentLoop(
 export interface CreateSessionStoreOptions {
   /** Root data directory (typically `~/.ethos`). */
   dataDir: string;
+  /**
+   * `retention.*` slice from the app config. Only the post-prune maintenance
+   * knobs are consumed here; the TTL strings belong to the observability prune
+   * pass. Absent → no automatic vacuum, today's behavior.
+   */
+  retention?: Pick<RetentionConfig, 'vacuumAfterPrune' | 'minVacuumIntervalDays'>;
 }
 
 export function createSessionStore(opts: CreateSessionStoreOptions): SessionStore {
-  return new SQLiteSessionStore(join(opts.dataDir, 'sessions.db'));
+  return new SQLiteSessionStore(join(opts.dataDir, 'sessions.db'), {
+    ...(opts.retention?.vacuumAfterPrune !== undefined
+      ? { vacuumAfterPrune: opts.retention.vacuumAfterPrune }
+      : {}),
+    ...(opts.retention?.minVacuumIntervalDays !== undefined
+      ? { minVacuumIntervalDays: opts.retention.minVacuumIntervalDays }
+      : {}),
+  });
 }
 
 export interface CreateMemoryProviderOptions {

@@ -26,4 +26,10 @@ export {
   writeRuntime,
 } from './runtime';
 export { parseTeamManifest, validateForStart } from './schema';
-export { buildMemberLaunchArgs, runSupervisor } from './supervisor';
+export type { RestartLimits, RestartLoopGuardConfig } from './supervisor';
+export {
+  buildMemberLaunchArgs,
+  evaluateRestartGuard,
+  resolveRestartLimits,
+  runSupervisor,
+} from './supervisor';

@@ -2,6 +2,8 @@ import type { Attachment, AttachmentCache } from '@ethosagent/types';
 import type { RawWhatsAppMessage } from './message-parser';
 import { getMediaMeta } from './message-parser';
 
+/** Default inbound-media ceiling. Overridable per deployment via
+ *  `gateway.maxInboundMediaBytes` → `WhatsAppAdapterConfig.maxInboundMediaBytes`. */
 const MAX_MEDIA_BYTES = 25 * 1024 * 1024; // 25 MB
 
 function getFileLength(msg: RawWhatsAppMessage): number | null {

@@ -227,7 +227,10 @@ export async function runBoot(args: string[], config: EthosConfig | null): Promi
 
   // ONE session store and ONE personality registry for both roles — the merge
   // win the split process cannot have.
-  const session = createSessionStore({ dataDir: dir });
+  const session = createSessionStore({
+    dataDir: dir,
+    ...(config.retention ? { retention: config.retention } : {}),
+  });
   const contextLog = new SQLiteContextLog(join(dir, 'sessions.db'));
   const personalities = await createPersonalityRegistry({
     storage,
@@ -250,7 +253,7 @@ export async function runBoot(args: string[], config: EthosConfig | null): Promi
   // Hoisted above `createAgentLoop` for the same reason both commands hoist
   // it: the loop registers the agent-callable `cron`/`watcher` tools against
   // these instances, and the scheduler's `runJob` forward-references the loop.
-  const logger = new ConsoleLogger();
+  const logger = new ConsoleLogger({}, cfg.logs?.level);
   let sharedLoop: AgentLoop | null = null;
   let chatServiceRef: import('@ethosagent/web-api').ChatService | null = null;
   let cronDeliverFn:
@@ -276,6 +279,9 @@ export async function runBoot(args: string[], config: EthosConfig | null): Promi
   const scheduler = new CronScheduler({
     storage,
     logger,
+    ...(cfg.cron?.maxParallelJobs !== undefined
+      ? { maxParallelJobs: cfg.cron.maxParallelJobs }
+      : {}),
     executionBackend: new LocalExecutionBackend({ config: {}, secrets, logger }),
     systemTasks: { ...buildSystemTaskHandlers(cfg), ...watcherManager.systemTasks() },
     onDecision: (job, d) => {

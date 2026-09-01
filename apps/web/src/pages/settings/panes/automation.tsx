@@ -20,6 +20,7 @@ import {
   Checkbox,
   Form,
   Input,
+  InputNumber,
   Select,
   Spin,
   Switch,
@@ -49,6 +50,9 @@ export function AutomationPane() {
       <SectionHeading id="scheduled-passes">scheduled passes</SectionHeading>
       <ScheduledPassesFields />
       <LatestDigestSection />
+
+      <SectionHeading id="team-supervisor">team supervisor</SectionHeading>
+      <TeamSupervisorFields />
     </>
   );
 }
@@ -326,6 +330,50 @@ function ScheduledPassesFields() {
           ) : null
         }
       </Form.Item>
+
+      <SettingRow
+        label="Max parallel cron jobs"
+        formName="cronMaxParallelJobs"
+        help="Cron firings allowed to run at once (cron.maxParallelJobs). Blank = uncapped."
+      >
+        <Form.Item name="cronMaxParallelJobs" style={{ marginBottom: 0 }}>
+          <InputNumber min={1} precision={0} style={{ width: '100%' }} />
+        </Form.Item>
+      </SettingRow>
+    </>
+  );
+}
+
+// The brake on the supervisor's own restarts of a crashed team member: how many
+// it may attempt, and the window it counts them in. Nothing scheduled and
+// nothing per-channel, which is why it is not folded into scheduled passes.
+function TeamSupervisorFields() {
+  return (
+    <>
+      <SettingRow
+        label="Max restarts in the window"
+        formName="teamSupervisorRestartLoopGuard.maxRestarts"
+        help="Automatic member respawns allowed inside the window before the supervisor gives up (teamSupervisor.restartLoopGuard.maxRestarts, unset = 5 — one more than the old hardcoded four)."
+      >
+        <Form.Item
+          name={['teamSupervisorRestartLoopGuard', 'maxRestarts']}
+          style={{ marginBottom: 0 }}
+        >
+          <InputNumber min={1} max={1000} precision={0} style={{ width: '100%' }} />
+        </Form.Item>
+      </SettingRow>
+      <SettingRow
+        label="Restart window (seconds)"
+        formName="teamSupervisorRestartLoopGuard.windowSeconds"
+        help="How long those respawns are counted over (teamSupervisor.restartLoopGuard.windowSeconds, unset = 60)."
+      >
+        <Form.Item
+          name={['teamSupervisorRestartLoopGuard', 'windowSeconds']}
+          style={{ marginBottom: 0 }}
+        >
+          <InputNumber min={1} max={86400} precision={0} style={{ width: '100%' }} />
+        </Form.Item>
+      </SettingRow>
     </>
   );
 }

@@ -12,7 +12,9 @@ import type { BackfillStateStore } from '../store/backfill-state';
 import type { ChannelOverrideStore } from '../store/channel-overrides';
 import type { ThreadStateStore } from '../store/thread-state';
 
-const MAX_FILE_SIZE = 25 * 1024 * 1024; // 25 MB
+/** Default inbound-attachment ceiling. Overridable per deployment via
+ *  `gateway.maxInboundMediaBytes`, threaded in as `MessageContext.maxInboundMediaBytes`. */
+export const MAX_FILE_SIZE = 25 * 1024 * 1024; // 25 MB
 
 /** Known Discord CDN hosts for attachment downloads. */
 const DISCORD_CDN_HOSTS = new Set(['cdn.discordapp.com', 'media.discordapp.net']);
@@ -57,6 +59,14 @@ interface MessageContext {
   channelOverrides?: ChannelOverrideStore;
   threadState?: ThreadStateStore;
   backfillState?: BackfillStateStore;
+  /** Inbound-attachment ceiling in bytes. Absent = {@link MAX_FILE_SIZE}. */
+  maxInboundMediaBytes?: number;
+  /**
+   * Missed-message backfill bounds. `enabled: false` skips the history read
+   * entirely; the two numbers bound how far back and how much is read. Absent
+   * fields fall back to {@link BACKFILL_FETCH_LIMIT} and no age bound.
+   */
+  backfill?: { enabled?: boolean; windowSeconds?: number; limit?: number };
   onMessage: (msg: InboundMessage) => void;
   onReceipt: (channelId: string, messageId: string) => void;
 }
@@ -69,13 +79,13 @@ export function registerMessageHandler(ctx: MessageContext): void {
     if (!envelope) return;
 
     // Channel history backfill — first encounter in this lane
-    if (ctx.backfillState) {
+    if (ctx.backfillState && ctx.backfill?.enabled !== false) {
       const bfChatId = message.channel.isThread()
         ? (message.channel.parentId ?? message.channelId)
         : message.channelId;
       const bfThreadId = message.channel.isThread() ? message.channelId : undefined;
       if (!ctx.backfillState.hasDone(bfChatId, bfThreadId)) {
-        const history = await fetchChannelHistory(message);
+        const history = await fetchChannelHistory(message, ctx.backfill);
         await ctx.backfillState.mark(bfChatId, bfThreadId);
         if (history) {
           envelope.priorContext = history.text;
@@ -95,7 +105,11 @@ export function registerMessageHandler(ctx: MessageContext): void {
       return;
     }
 
-    const attachments = await downloadAttachments(message, ctx.cache);
+    const attachments = await downloadAttachments(
+      message,
+      ctx.cache,
+      ctx.maxInboundMediaBytes ?? MAX_FILE_SIZE,
+    );
     if (attachments.length > 0) {
       envelope.attachments = attachments;
       if (!envelope.text) {
@@ -236,11 +250,12 @@ export function classifyAttachmentType(
 async function downloadAttachments(
   message: Message,
   cache: AttachmentCache,
+  maxBytes: number,
 ): Promise<Attachment[]> {
   const results: Attachment[] = [];
 
   for (const [, attachment] of message.attachments) {
-    if (attachment.size > MAX_FILE_SIZE) continue;
+    if (attachment.size > maxBytes) continue;
 
     const ext = attachment.name?.split('.').pop()?.toLowerCase() ?? '';
     if (SKIP_EXTS.has(ext)) continue;
@@ -301,19 +316,30 @@ interface DiscordHistory {
   entries: PriorContextEntry[];
 }
 
-async function fetchChannelHistory(message: Message): Promise<DiscordHistory | undefined> {
+async function fetchChannelHistory(
+  message: Message,
+  bounds?: { windowSeconds?: number; limit?: number },
+): Promise<DiscordHistory | undefined> {
   try {
     const fetched = await message.channel.messages.fetch({
-      limit: BACKFILL_FETCH_LIMIT,
+      limit: bounds?.limit ?? BACKFILL_FETCH_LIMIT,
       before: message.id,
     });
     if (fetched.size === 0) return undefined;
+
+    // Discord's `messages.fetch` has no age parameter, so the window is a
+    // client-side cutoff on what came back.
+    const cutoff =
+      bounds?.windowSeconds !== undefined
+        ? message.createdTimestamp - bounds.windowSeconds * 1000
+        : undefined;
 
     // `userId` is the id the gateway's channel filter allowlists by, so it has
     // to match what `triageMessage` stamps on a live envelope: `author.id`.
     const entries: PriorContextEntry[] = [...fetched.values()]
       .reverse()
       .filter((m) => m.content.trim() && !m.author.bot)
+      .filter((m) => cutoff === undefined || m.createdTimestamp >= cutoff)
       .slice(-BACKFILL_INCLUDE_LIMIT)
       .map((m) => ({ userId: m.author.id, text: `${m.author.username}: ${m.content.trim()}` }));
 

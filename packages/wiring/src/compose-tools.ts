@@ -628,6 +628,12 @@ export async function composeAllTools(
     };
     const backendConfig: ExecutionBackendConfig = {
       substitutionVars: { ethosHome: dataDir, cwd: wiringCtx.workingDir },
+      // `execution.docker.*` — container resource caps. Absent leaves the
+      // backend on its `--cpus 2` default with no disk quota.
+      ...(config.execution?.docker?.cpu !== undefined ? { cpu: config.execution.docker.cpu } : {}),
+      ...(config.execution?.docker?.diskMb !== undefined
+        ? { diskMb: config.execution.docker.diskMb }
+        : {}),
       // F2 — pass the resolved constitution so the docker backend enforces
       // allowedMountRoots / deniedPathPrefixes against the ACTUAL mount set
       // (including the ownDir/skills/cwd defaults), not just declared fs_reach.
@@ -718,7 +724,14 @@ export async function composeAllTools(
   let kanbanStore: KanbanStore | null = null;
   if ((activePerson.toolset ?? []).some((name: string) => name.startsWith('kanban_'))) {
     const kanbanDbPath = resolveKanbanDbPath(config, dataDir);
-    kanbanStore = new KanbanStore(kanbanDbPath);
+    kanbanStore = new KanbanStore(kanbanDbPath, {
+      ...(config.kanban?.maxInProgress !== undefined
+        ? { maxInProgress: config.kanban.maxInProgress }
+        : {}),
+      ...(config.kanban?.maxInProgressPerProfile !== undefined
+        ? { maxInProgressPerProfile: config.kanban.maxInProgressPerProfile }
+        : {}),
+    });
     const store = kanbanStore;
     const kanbanOpts: {
       store: KanbanStore;
@@ -804,6 +817,12 @@ export async function composeAllTools(
       visionApiKey: config.apiKey,
       visionProvider: config.provider,
       visionModel: config.model,
+      ...(config.browser?.navigationTimeoutMs !== undefined
+        ? { navigationTimeoutMs: config.browser.navigationTimeoutMs }
+        : {}),
+      ...(config.browser?.commandTimeoutMs !== undefined
+        ? { commandTimeoutMs: config.browser.commandTimeoutMs }
+        : {}),
     }).tools)
       tools.register(tool);
   }

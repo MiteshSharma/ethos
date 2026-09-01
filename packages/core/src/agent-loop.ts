@@ -20,9 +20,9 @@ import type {
   VoiceTurnOrigin,
 } from '@ethosagent/types';
 import { createApprovalPostureGuard } from './agent-loop/approval-posture';
-import { checkTurnBudgets, updateDenialStreak } from './agent-loop/budgets';
+import { budgetGuardEvents, checkTurnBudgets, updateDenialStreak } from './agent-loop/budgets';
 import { compactSession, type ManualCompactionResult } from './agent-loop/manual-compact';
-import { applyOverflowRetry } from './agent-loop/overflow';
+import { applyOverflowRetry, overflowErrorEvent } from './agent-loop/overflow';
 import { applySamplingDefaults, type ModelSamplingDefaults } from './agent-loop/sampling';
 import { assembleContext } from './agent-loop/stages/context-assembly';
 import {
@@ -111,7 +111,7 @@ export interface AgentLoopConfig {
   modelRouting?: Record<string, string>;
   modelSampling?: ModelSamplingDefaults; // §7 — applied when the per-call value is unset
   // biome-ignore format: §5 gate + Phase 3 turn-end/overflow/engine + Lane 1a knobs; one line keeps agent-loop.ts under the size guardrail.
-  compaction?: { pressure?: number; target?: number; charsPerToken?: number; gateDelta?: number; autoCompact?: boolean; retryOnOverflow?: boolean; defaultEngine?: string; maxContextTokens?: number; minTailUserMessages?: number; maxSingleToolResultTokens?: number };
+  compaction?: { pressure?: number; target?: number; charsPerToken?: number; gateDelta?: number; autoCompact?: boolean; retryOnOverflow?: boolean; abortOnSummaryFailure?: boolean; defaultEngine?: string; maxContextTokens?: number; minTailUserMessages?: number; maxSingleToolResultTokens?: number };
   // biome-ignore format: Phase 3 silent memory-flush knobs (docs on LoopDeps.memoryConsolidation); one line keeps agent-loop.ts under the size guardrail.
   memoryConsolidation?: { enabled?: boolean; flushThreshold?: number; timeboxMs?: number; maxTokens?: number; maxDeltaChars?: number; minMessagesSinceFlush?: number };
   // biome-ignore format: §2/Phase 4 prompt-economy knobs (docs on LoopDeps.promptBudget); one line keeps agent-loop.ts under the size guardrail.
@@ -214,6 +214,8 @@ export interface AgentLoopConfig {
      * (e.g. tts loop reported as OpenClaw #67744). Defaults to 25.
      */
     maxIdenticalToolCalls?: number;
+    maxToolCallsWarnAt?: number; // Soft-warn tier under `maxToolCallsPerTurn`; unset = no warn.
+    maxIdenticalToolCallsWarnAt?: number; // Same, under `maxIdenticalToolCalls`.
     /**
      * True loop detection: hard cap on *consecutive* tool calls with the same
      * name AND identical arguments (JSON-stringified), uninterrupted by any
@@ -354,6 +356,7 @@ export class AgentLoop {
   private readonly maxToolCallsPerTurn: number;
   private readonly maxIdenticalToolCalls: number;
   private readonly maxConsecutiveIdenticalCalls: number;
+  private readonly toolLoopWarn: NonNullable<AgentLoopConfig['options']>;
   private readonly streamingTimeoutMs: number;
   private readonly smallWindow: boolean;
   private readonly modelRouting: Record<string, string>;
@@ -418,6 +421,7 @@ export class AgentLoop {
     this.maxToolCallsPerTurn = config.options?.maxToolCallsPerTurn ?? 1000;
     this.maxIdenticalToolCalls = config.options?.maxIdenticalToolCalls ?? 25;
     this.maxConsecutiveIdenticalCalls = config.options?.maxConsecutiveIdenticalCalls ?? 5;
+    this.toolLoopWarn = config.options ?? {};
     this.streamingTimeoutMs = config.options?.streamingTimeoutMs ?? 600_000;
     this.smallWindow = config.options?.smallWindow ?? false;
     this.modelRouting = config.modelRouting ?? {};
@@ -665,6 +669,7 @@ export class AgentLoop {
         this.maxConsecutiveIdenticalCalls,
         { spentUsd: this.sessionCosts.get(sessionKey) ?? 0, capUsd: personality.budgetCapUsd },
         denialStreak,
+        this.toolLoopWarn,
       );
 
     // tools-as-code-api Lane B — per-turn bridge for in-script tool calls.
@@ -745,15 +750,10 @@ export class AgentLoop {
         break;
       }
 
-      // Budget guard — tool-call / per-tool repeat / session cost / denial streak.
-      // Prior tool_results are in llmMessages, so breaking keeps the history valid.
-      const budgetResult = checkBudgets();
-      if (budgetResult.exceeded) {
-        const { rule, toolName, count, message } = budgetResult;
-        yield { type: 'tool_progress', toolName, message, audience: 'user' };
-        yield { type: 'halt', kind: 'budget', rule, toolName, count, message };
-        break;
-      }
+      // Budget guard — tool-call / per-tool repeat / session cost / denial streak,
+      // plus the soft-warn tier below them. Prior tool_results are in llmMessages,
+      // so breaking keeps the history valid.
+      if (yield* budgetGuardEvents(checkBudgets(), budgetCounters)) break;
 
       // Stage: Stream one LLM call
       const stepResult = yield* streamStep(
@@ -789,16 +789,16 @@ export class AgentLoop {
         const canRetry = !overflowRetried && this.compaction?.retryOnOverflow !== false;
         overflowRetried = true;
         const meta = { sessionId, sessionKey, turnNumber, lastCompactionTurn };
-        if (
-          canRetry &&
-          (await applyOverflowRetry(this.deps, llmMessages, systemPrompt ?? '', personality, meta))
-        ) {
+        const retry = canRetry
+          ? await applyOverflowRetry(this.deps, llmMessages, systemPrompt ?? '', personality, meta)
+          : { retried: false };
+        if (retry.retried) {
           cacheBreakpoints = undefined; // history reshaped — drop stale breakpoints
           iteration--; // retry this iteration with the shrunk history
           continue;
         }
         await flushTurnUsage(this.session, sessionId, turnUsage, this.observability);
-        yield { type: 'error', error: stepResult.error, code: 'context_overflow' };
+        yield { type: 'error', ...overflowErrorEvent(retry, stepResult.error, this.compaction) };
         if (traceId) {
           this.observability?.endTrace(traceId, 'error');
           this.observability?.flush();

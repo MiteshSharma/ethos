@@ -90,3 +90,73 @@ describe('ConsoleLogger', () => {
     expect(spies.error).toHaveBeenCalledWith('strange err=a string');
   });
 });
+
+describe('ConsoleLogger — logs.level gate', () => {
+  const spies = {
+    log: vi.spyOn(console, 'log'),
+    warn: vi.spyOn(console, 'warn'),
+    error: vi.spyOn(console, 'error'),
+    debug: vi.spyOn(console, 'debug'),
+  };
+
+  beforeEach(() => {
+    for (const spy of Object.values(spies)) {
+      spy.mockClear();
+      spy.mockImplementation(() => {});
+    }
+  });
+
+  afterEach(() => {
+    for (const spy of Object.values(spies)) {
+      spy.mockClear();
+    }
+  });
+
+  it("level 'warn' suppresses debug and info but still prints warn and error", () => {
+    const log = new ConsoleLogger({}, 'warn');
+    log.debug('d');
+    log.info('i');
+    log.warn('w');
+    log.error('e');
+
+    expect(spies.debug).not.toHaveBeenCalled();
+    expect(spies.log).not.toHaveBeenCalled();
+    expect(spies.warn).toHaveBeenCalledWith('w');
+    expect(spies.error).toHaveBeenCalledWith('e');
+  });
+
+  it("level 'error' suppresses everything below error", () => {
+    const log = new ConsoleLogger({}, 'error');
+    log.debug('d');
+    log.info('i');
+    log.warn('w');
+    log.error('e');
+
+    expect(spies.debug).not.toHaveBeenCalled();
+    expect(spies.log).not.toHaveBeenCalled();
+    expect(spies.warn).not.toHaveBeenCalled();
+    expect(spies.error).toHaveBeenCalledWith('e');
+  });
+
+  it('defaults to printing every level, exactly as before the gate existed', () => {
+    const log = new ConsoleLogger();
+    log.debug('d');
+    log.info('i');
+    log.warn('w');
+    log.error('e');
+
+    expect(spies.debug).toHaveBeenCalledWith('d');
+    expect(spies.log).toHaveBeenCalledWith('i');
+    expect(spies.warn).toHaveBeenCalledWith('w');
+    expect(spies.error).toHaveBeenCalledWith('e');
+  });
+
+  it('child() inherits the parent level', () => {
+    const child = new ConsoleLogger({ component: 'cron' }, 'warn').child({ jobId: 'sweep' });
+    child.info('quiet');
+    child.warn('loud');
+
+    expect(spies.log).not.toHaveBeenCalled();
+    expect(spies.warn).toHaveBeenCalledWith('[cron] loud jobId=sweep');
+  });
+});

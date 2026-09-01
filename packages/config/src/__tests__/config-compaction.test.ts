@@ -60,6 +60,15 @@ describe('compaction: global gate thresholds config parsing', () => {
     expect(cfg?.compaction).toEqual({ minTailUserMessages: 0 });
   });
 
+  it('parses compaction.abortOnSummaryFailure as a strict boolean', async () => {
+    const on = await load([...base, 'compaction.abortOnSummaryFailure: true'].join('\n'));
+    expect(on?.compaction).toEqual({ abortOnSummaryFailure: true });
+    const off = await load([...base, 'compaction.abortOnSummaryFailure: false'].join('\n'));
+    expect(off?.compaction).toEqual({ abortOnSummaryFailure: false });
+    const typo = await load([...base, 'compaction.abortOnSummaryFailure: yes'].join('\n'));
+    expect(typo?.compaction).toBeUndefined();
+  });
+
   it('round-trips through writeConfig', async () => {
     const storage = new InMemoryStorage();
     await storage.mkdir(ethosDir());
@@ -71,6 +80,7 @@ describe('compaction: global gate thresholds config parsing', () => {
       compaction: {
         pressure: 0.85,
         target: 0.6,
+        abortOnSummaryFailure: true,
         maxContextTokens: 400_000,
         minTailUserMessages: 4,
       },

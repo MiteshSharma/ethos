@@ -16,6 +16,8 @@ export interface RunOptions {
   env?: string[];
   networkMode?: 'none' | 'bridge';
   memoryMb?: number;
+  /** `--cpus` quota. Default 2, matching the previous hardcoded value. */
+  cpu?: number;
   signal?: AbortSignal;
 }
 
@@ -50,6 +52,7 @@ export class DockerSandbox {
       env = [],
       networkMode = 'none',
       memoryMb = 256,
+      cpu = 2,
       signal,
     } = opts;
 
@@ -61,7 +64,7 @@ export class DockerSandbox {
     args.push('--network', networkMode);
     args.push(`--memory=${memoryMb}m`);
     args.push('--memory-swap', `${memoryMb}m`); // disable swap
-    args.push('--cpus', '2');
+    args.push('--cpus', String(cpu));
     args.push('--pids-limit', '256');
     args.push('--cap-drop', 'ALL'); // drop all Linux capabilities
     args.push('--security-opt', 'no-new-privileges');

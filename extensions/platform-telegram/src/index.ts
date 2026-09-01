@@ -217,12 +217,13 @@ export async function downloadTelegramFile(
   botApi: { getFile: (fileId: string) => Promise<{ file_path?: string; file_size?: number }> },
   token: string,
   descriptor: MediaDescriptor,
+  maxBytes: number = MAX_FILE_SIZE,
 ): Promise<{ data: Buffer; fileSize: number } | null> {
   try {
     const fileInfo = await botApi.getFile(descriptor.fileId);
     const fileSize = fileInfo.file_size ?? descriptor.fileSize ?? 0;
 
-    if (fileSize > MAX_FILE_SIZE) return null;
+    if (fileSize > maxBytes) return null;
 
     if (!fileInfo.file_path) return null;
 
@@ -234,7 +235,7 @@ export async function downloadTelegramFile(
     // Post-download guard: the pre-check trusts the *declared* size, which is
     // `0` (and thus passes) when Telegram omits `file_size`. Re-check the
     // actual byte length so an undeclared-size file can't bypass the cap.
-    if (arrayBuf.byteLength > MAX_FILE_SIZE) return null;
+    if (arrayBuf.byteLength > maxBytes) return null;
     return { data: Buffer.from(arrayBuf), fileSize };
   } catch {
     return null;
@@ -322,6 +323,12 @@ export interface TelegramAdapterConfig {
    * validates it before processing updates. Required when `useWebhook` is true.
    */
   webhookSecretToken?: string;
+  /**
+   * Override for the largest inbound attachment this adapter will download
+   * (bytes). Absent = {@link MAX_FILE_SIZE}, Telegram's own Bot-API ceiling.
+   * Set from `gateway.maxInboundMediaBytes`.
+   */
+  maxInboundMediaBytes?: number;
 }
 
 /**
@@ -386,6 +393,8 @@ export class TelegramAdapter
   private readonly identity: TelegramAdapterConfig['identity'];
   private readonly receiptReaction: string;
   private readonly parseMode: 'html' | 'plain';
+  /** Resolved inbound-attachment ceiling, bytes. Defaults to MAX_FILE_SIZE. */
+  private readonly maxInboundMediaBytes: number;
   private messageHandler?: (message: InboundMessage) => void;
   /** Registered by the clarify surface to receive inline-keyboard taps. */
   private callbackQueryHandler?: (event: CallbackQueryEvent) => void;
@@ -416,6 +425,7 @@ export class TelegramAdapter
     this.receiptReaction = config.receiptReaction ?? '👀';
     this.editWindowMs = config.editWindowMs ?? 60_000;
     this.parseMode = config.parseMode ?? 'html';
+    this.maxInboundMediaBytes = config.maxInboundMediaBytes ?? MAX_FILE_SIZE;
     // Multi-bot logs disambiguate by including the botKey. Single-bot
     // deployments still pass a botKey (computed once in wiring) and see
     // `telegram:<key>` — the shape is identical, the value carries the
@@ -756,21 +766,28 @@ export class TelegramAdapter
     const attachments: Attachment[] = [];
     let textSuffix = '';
     const sessionKey = `telegram:${this.botKey}:${msg.chatId}`;
+    const limitMb = Math.round(this.maxInboundMediaBytes / (1024 * 1024));
+    const tooLargeNote = `\n(File too large — ${limitMb} MB limit)`;
 
     for (let i = 0; i < media.length; i++) {
       const m = media[i];
       // Early size check from the descriptor (before getFile round-trip)
-      if (m.fileSize !== undefined && m.fileSize > MAX_FILE_SIZE) {
-        textSuffix += '\n(File too large — 25 MB limit)';
+      if (m.fileSize !== undefined && m.fileSize > this.maxInboundMediaBytes) {
+        textSuffix += tooLargeNote;
         continue;
       }
 
-      const result = await downloadTelegramFile(this.bot.api, this.bot.token, m);
+      const result = await downloadTelegramFile(
+        this.bot.api,
+        this.bot.token,
+        m,
+        this.maxInboundMediaBytes,
+      );
 
       if (result === null) {
         // getFile told us it's too large, or network failure
-        if (m.fileSize !== undefined && m.fileSize > MAX_FILE_SIZE) {
-          textSuffix += '\n(File too large — 25 MB limit)';
+        if (m.fileSize !== undefined && m.fileSize > this.maxInboundMediaBytes) {
+          textSuffix += tooLargeNote;
         }
         continue;
       }

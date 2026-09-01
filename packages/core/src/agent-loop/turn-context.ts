@@ -66,6 +66,10 @@ export interface LoopDeps {
     gateDelta?: number;
     autoCompact?: boolean;
     retryOnOverflow?: boolean;
+    /** When the emergency summary THROWS, surface it as its own
+     *  `compaction_summary_failed` error instead of the generic
+     *  `context_overflow`. Default false (unchanged behavior). */
+    abortOnSummaryFailure?: boolean;
     defaultEngine?: string;
     /** Item 7 — absolute context-token ceiling; compaction fires above it even
      *  when the fractional gate has not been reached. Absent → fractional only. */
