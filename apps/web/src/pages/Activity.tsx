@@ -57,17 +57,12 @@ const PAGE_SIZE = 50;
  * `cron.fired`, `tool_progress`) durable `activity.history` cannot recover it,
  * because none of them are in the observability projection at all.
  *
- * If the server restarts its buffer seq goes backwards and the replay comes
- * back empty, which is harmless: the live handler on the server side is not
- * seq-filtered, and a mount always re-seeds from durable `activity.history`
- * anyway.
+ * Keyed on the `personalityId` itself, with `null` (the bare `/activity`) the
+ * global scope — the same sentinel the route, `subscribeToActivity` and the
+ * `activity.history` input already use. A string sentinel would collide with a
+ * personality whose directory is literally named that.
  */
-const lastActivitySeq = new Map<string, number>();
-
-/** Cursor key for a scope. `null` (the bare `/activity`) is its own scope. */
-function scopeKey(personalityId: string | null): string {
-  return personalityId ?? 'global';
-}
+const lastActivitySeq = new Map<string | null, number>();
 
 const TYPE_FILTERS: Array<{ value: ActivityTypeFilter; label: string }> = [
   { value: 'all', label: 'All' },
@@ -239,11 +234,18 @@ export function Activity() {
   }, [historyQuery.data]);
 
   useEffect(() => {
-    const key = scopeKey(personalityId);
     const sub = subscribeToActivity(personalityId, {
-      sinceSeq: lastActivitySeq.get(key) ?? 0,
+      sinceSeq: lastActivitySeq.get(personalityId) ?? 0,
       onEvent: (envelope, seq) => {
-        lastActivitySeq.set(key, Math.max(lastActivitySeq.get(key) ?? 0, seq));
+        // Deliberately not `Math.max`: within one scope the server hands out
+        // strictly increasing seqs over one ordered connection, so a seq BELOW
+        // the stored cursor has exactly one meaning — the server restarted and
+        // its buffer began again at 1. Adopt it. Keeping the old high-water
+        // mark would make every later remount ask the new buffer to replay
+        // from a seq it has not reached yet, so everything buffered while the
+        // page was unmounted is dropped — and the live-only event types are
+        // not in durable `activity.history` to recover from.
+        lastActivitySeq.set(personalityId, seq);
         const row = convertSseEvent(envelope.event, {
           sessionId: envelope.sessionId,
           personalityId: envelope.personalityId,

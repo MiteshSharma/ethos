@@ -238,7 +238,7 @@ export class SQLiteObservabilityStore implements ObservabilityStore {
     before?: number;
     beforeId?: string;
     limit: number;
-  }): ActivityHistoryRow[] {
+  }) {
     // Each branch takes the same optional predicates, in the same order, so the
     // bound values below line up branch by branch.
     const values: unknown[] = [];
@@ -955,34 +955,6 @@ function rowToEvent(r: EventRow): ObsEvent {
   };
 }
 
-/**
- * One row of the merged activity feed — a `tool_call`/`llm_call` span, a
- * completed turn trace, or a standalone event, flattened into one shape so the
- * Activity view can render them in a single timeline.
- *
- * `personalityId` is the owning trace's `subjectId`. An `events` row with no
- * `traceId` (or whose trace carries no subject) has none, and is therefore only
- * ever reachable from the unfiltered (global) view.
- *
- * It lives HERE, beside the only query that produces it, and not in
- * `@ethosagent/types`: it is a web-facing read projection over this store's own
- * SQLite tables with no interface behind it, so the lowest-level shared
- * contracts package has nothing to say about it. Same placement as
- * `ContextAnatomy` / `ToolUsageRow`, the other class-only projections this
- * package exports.
- */
-export interface ActivityHistoryRow {
-  id: string;
-  kind: 'tool_call' | 'llm_call' | 'turn' | 'event';
-  name: string;
-  sessionId: string | null;
-  personalityId: string | null;
-  startedAt: number;
-  endedAt: number | null;
-  status: string | null;
-  details: Record<string, unknown> | null;
-}
-
 /** One row of the `getRecentActivity` union — column names come from its first branch. */
 interface ActivityRow {
   id: string;
@@ -996,10 +968,25 @@ interface ActivityRow {
   details: string | null;
 }
 
-function rowToActivity(r: ActivityRow): ActivityHistoryRow {
+/**
+ * Flattens one merged-feed row — a `tool_call`/`llm_call` span, a completed
+ * turn trace, or a standalone event — into the shape the Activity view renders.
+ *
+ * `personalityId` is the owning trace's `subjectId`. An `events` row with no
+ * `traceId` (or whose trace carries no subject) has none, and is therefore only
+ * ever reachable from the unfiltered (global) view.
+ *
+ * The shape is deliberately UNNAMED here: it is exactly `ActivityHistoryItemWire`
+ * in `@ethosagent/web-contracts`, which the RPC handler passes these rows
+ * through as. A second declaration of it would be a copy to keep in sync, and
+ * this package cannot import the web contract without inverting the layering —
+ * so the return type is inferred and satisfies the wire shape structurally at
+ * the wiring site (`activityHistoryFn` in `apps/ethos/src/commands/serve.ts`).
+ */
+function rowToActivity(r: ActivityRow) {
   return {
     id: r.id,
-    kind: r.kind as ActivityHistoryRow['kind'],
+    kind: r.kind as 'tool_call' | 'llm_call' | 'turn' | 'event',
     name: r.name,
     sessionId: r.session_id,
     personalityId: r.personality_id,

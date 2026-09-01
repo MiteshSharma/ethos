@@ -151,13 +151,19 @@ export interface ServiceContainer {
  * Reads the merged activity feed out of the observability store. Boot code
  * closes over `SQLiteObservabilityStore.getRecentActivity`; deployments with no
  * observability store omit it entirely.
+ *
+ * Typed against the WIRE item, not the SQLite store's row type: the `activity`
+ * RPC hands these rows straight to the client as contract items, so the
+ * contract is what this seam owes — and typing it here against the concrete
+ * extension would make one store implementation the definition of a route's
+ * shape.
  */
 export type ActivityHistoryFn = (filter: {
   personalityId?: string;
   before?: number;
   beforeId?: string;
   limit: number;
-}) => import('@ethosagent/observability-sqlite').ActivityHistoryRow[];
+}) => import('@ethosagent/web-contracts').ActivityHistoryItemWire[];
 
 /**
  * WEB-002 CORS origin decision. Returns the origin to reflect (allowing

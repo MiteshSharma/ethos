@@ -1,9 +1,9 @@
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { ActivityHistoryRow } from '@ethosagent/observability-sqlite';
 import { SQLiteSessionStore } from '@ethosagent/session-sqlite';
 import { FsStorage } from '@ethosagent/storage-fs';
+import type { ActivityHistoryItemWire } from '@ethosagent/web-contracts';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createWebApi, WebTokenRepository } from '../../index';
 import type { ActivityHistoryFn } from '../../routes/index';
@@ -17,7 +17,7 @@ import {
 // that a deployment with no observability store degrades to an empty page
 // rather than erroring — the same posture `sessions.contextAnatomy` takes.
 
-function row(over: Partial<ActivityHistoryRow> = {}): ActivityHistoryRow {
+function row(over: Partial<ActivityHistoryItemWire> = {}): ActivityHistoryItemWire {
   return {
     id: 'span-1',
     kind: 'tool_call',
@@ -102,7 +102,7 @@ describe('activity RPC', () => {
       beforeId: 'span-9',
     });
     expect(res.status).toBe(200);
-    const body = (await res.json()) as { json: { items: ActivityHistoryRow[] } };
+    const body = (await res.json()) as { json: { items: ActivityHistoryItemWire[] } };
     expect(body.json.items).toEqual([row()]);
     // Both halves of the cursor reach the store — the timestamp alone cannot
     // resume inside a group of rows that share one millisecond.

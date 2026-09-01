@@ -32,7 +32,6 @@ export {
 } from './retention';
 export { ObservabilityService } from './service';
 export type {
-  ActivityHistoryRow,
   ClaimedTrace,
   SkillUsageRow,
   ToolUsageRow,

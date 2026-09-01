@@ -475,4 +475,64 @@ describe('Activity — live stream', () => {
     expect(subscribeToActivity.mock.calls[2]?.[0]).toBe('agent-a');
     expect(subscribeToActivity.mock.calls[2]?.[1]?.sinceSeq).toBe(9);
   });
+
+  it('does not share a cursor between the global view and a personality named "global"', async () => {
+    // Personality ids are directory names under `~/.ethos/personalities/`, so
+    // one can literally be `global`. A string sentinel for the bare `/activity`
+    // scope would collide with it and recreate the cross-scope skip.
+    routeParams = {};
+    await mount();
+
+    await act(async () => {
+      emit?.(
+        {
+          sessionId: 'sess-x',
+          personalityId: 'agent-a',
+          event: { type: 'notification', message: 'from the global view' },
+        },
+        13,
+      );
+    });
+
+    routeParams = { personalityId: 'global' };
+    await remount();
+    expect(subscribeToActivity.mock.calls[1]?.[0]).toBe('global');
+    expect(subscribeToActivity.mock.calls[1]?.[1]?.sinceSeq).toBe(0);
+
+    routeParams = {};
+    await remount();
+    expect(subscribeToActivity.mock.calls[2]?.[0]).toBeNull();
+    expect(subscribeToActivity.mock.calls[2]?.[1]?.sinceSeq).toBe(13);
+  });
+
+  it('adopts a lower seq — a server restart, not an out-of-order frame', async () => {
+    // Within one scope the server delivers strictly increasing seqs, so a seq
+    // below the cursor can only mean the buffer restarted at 1. Holding the old
+    // high-water mark would make every later remount ask the new buffer to
+    // replay from a seq it has not reached, dropping the gap.
+    routeParams = { personalityId: 'agent-a' };
+    await mount();
+
+    const notify = (message: string, seq: number) =>
+      act(async () => {
+        emit?.(
+          {
+            sessionId: 'sess-a',
+            personalityId: 'agent-a',
+            event: { type: 'notification', message },
+          },
+          seq,
+        );
+      });
+
+    await notify('one', 5);
+    await notify('two', 6);
+    await remount();
+    expect(subscribeToActivity.mock.calls[1]?.[1]?.sinceSeq).toBe(6);
+
+    // Server restarts; its buffer begins again at 1.
+    await notify('after restart', 1);
+    await remount();
+    expect(subscribeToActivity.mock.calls[2]?.[1]?.sinceSeq).toBe(1);
+  });
 });
